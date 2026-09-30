@@ -25,6 +25,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/quarantine"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // seedSession writes a real workspace + breadcrumb and returns the breadcrumb
@@ -743,5 +744,95 @@ func TestTeardown_KillWindowRunsUnderTheLifecycleLock(t *testing.T) {
 	var busy *lockBusyError
 	if !errors.As(probeErr, &busy) {
 		t.Errorf("a second client acquired the lock during the kill (err = %v); the kill has left the lock", probeErr)
+	}
+}
+
+// windowReadServer is reviewServer with list-windows replaced: it answers
+// with out and err, so a test can stage a window read that fails WITHOUT
+// timing out, or a clean listing that simply lacks the review's window.
+func windowReadServer(out string, err error) *exec.FakeRunner {
+	base := reviewServer()
+	inner := base.RunFunc
+	base.RunFunc = func(name string, args []string) (string, error) {
+		if name == "tmux" && len(args) > 0 && args[0] == "list-windows" {
+			return out, err
+		}
+		return inner(name, args)
+	}
+	return base
+}
+
+// TestTeardown_UnreadableWindowStateFailsClosed is forgectl#702. A window read
+// that fails for any reason other than a timeout — an unreadable server, rows
+// that do not parse — does not say the window is gone, so the teardown must
+// park the record and remove nothing, exactly as a timeout does.
+func TestTeardown_UnreadableWindowStateFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		out   string
+		err   error
+		cause error
+	}{
+		{"unreadable server", "", errors.New("tmux: permission denied"), tmux.ErrServerUnreadable},
+		{"unparseable rows", "not a window row", nil, tmux.ErrUnreadableFields},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ref := Ref{Owner: "o", Repo: "r", Number: 25}
+			fake := windowReadServer(tc.out, tc.err)
+			c := New(fake, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+				WithApprover(func(string) (bool, error) { return false, nil }),
+				WithTTYCheck(func() bool { return false }))
+			ws := fakeWorkspace(t)
+			path := seedPhaseRecord(t, c, ref, PhasePrepared, ws)
+
+			err := c.Teardown(context.Background(), path)
+			if !errors.Is(err, ErrWindowStateUnreadable) || !errors.Is(err, tc.cause) {
+				t.Fatalf("Teardown err = %v, want ErrWindowStateUnreadable wrapping %v", err, tc.cause)
+			}
+			if errors.Is(err, ErrRecordNotParked) {
+				t.Fatalf("a v2 record must be parked: %v", err)
+			}
+			if _, serr := os.Stat(ws); serr != nil {
+				t.Errorf("the workspace must be kept while the window state is unknown: %v", serr)
+			}
+			bc := readRecord(t, path)
+			if bc.Phase != PhaseNeedsRepair || !strings.HasPrefix(bc.RepairReason, windowUnreadableReason+"; review window pr-") {
+				t.Errorf("record = phase %q reason %q, want needs-repair with the unreadable reason naming the window",
+					bc.Phase, bc.RepairReason)
+			}
+			if _, ok := findCallVerb(fake.Calls, "tmux", "kill-window"); ok {
+				t.Error("nothing may be killed when the window state is unknown")
+			}
+		})
+	}
+}
+
+// TestTeardown_ConfirmedAbsentWindowStillTearsDown is the other half of #702:
+// the fix must not turn a genuine "no such window" into a refusal. A clean
+// listing without the review's window, and a server with no review session at
+// all, are answers, and the teardown proceeds.
+func TestTeardown_ConfirmedAbsentWindowStillTearsDown(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fake *exec.FakeRunner
+	}{
+		{"window not in the listing", windowReadServer("", nil)},
+		{"no review session", &exec.FakeRunner{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ref := Ref{Owner: "o", Repo: "r", Number: 26}
+			c := New(tc.fake, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+				WithApprover(func(string) (bool, error) { return false, nil }),
+				WithTTYCheck(func() bool { return false }))
+			ws := fakeWorkspace(t)
+			path := seedPhaseRecord(t, c, ref, PhasePrepared, ws)
+
+			if err := c.Teardown(context.Background(), path); err != nil {
+				t.Fatalf("Teardown with the window confirmed absent: %v", err)
+			}
+			if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+				t.Errorf("the record should be removed: %v", serr)
+			}
+		})
 	}
 }

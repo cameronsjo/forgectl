@@ -120,3 +120,31 @@ func TestCleanupFailureLine_AmbiguousWindowSaysWhetherTheRecordWasParked(t *test
 		})
 	}
 }
+
+// TestCleanupFailureLine_UnreadableWindowSaysNothingWasRemoved: a teardown
+// refused because tmux could not say whether the window exists (#702) gets its
+// own line — naming that nothing was removed and whether the record was parked
+// — rather than the generic "failed" line.
+func TestCleanupFailureLine_UnreadableWindowSaysNothingWasRemoved(t *testing.T) {
+	refused := fmt.Errorf("refusing to tear down o/r#1, nothing was removed: %w: %w",
+		pr.ErrWindowStateUnreadable, tmux.ErrServerUnreadable)
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"parked", refused, "the record is parked as needs-repair"},
+		{"not parked", fmt.Errorf("%w; %w", refused, pr.ErrRecordNotParked), "could not be parked"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			line := cleanupFailureLine(pr.CleanupFailure{Path: "/s/o-r-1-1.json", Err: tc.err})
+			if !strings.HasPrefix(line, "refused ") || !strings.Contains(line, "not treated as gone") ||
+				!strings.Contains(line, tc.want) {
+				t.Errorf("line = %q, want the unreadable-window wording and %q", line, tc.want)
+			}
+			if tc.name == "not parked" && strings.Contains(line, "is parked") {
+				t.Errorf("line = %q claims a park that never happened", line)
+			}
+		})
+	}
+}
