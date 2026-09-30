@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+# Deny by default; each job grants what it needs.
+permissions: {}
+
 jobs:
   goreleaser:
     # macOS, not ubuntu: the bless helper is a Swift package and needs an Apple
@@ -24,6 +27,14 @@ jobs:
     runs-on: macos-latest
     permissions:
       contents: write
+    # RELEASE_APP_PRIVATE_KEY (the tap-token mint below) belongs only in the
+    # `release` environment, with a deployment policy of branch `main` plus
+    # tag `v*` and no repo-level copy. With that in place, and the `v*` tag
+    # ruleset limiting who can create a tag, a copy of this workflow on
+    # another ref cannot read the key (cadence-ecosystem ADR-0044 (i)).
+    # This job holds the key, so its actions are SHA-pinned, GoReleaser is
+    # an exact version, and the Apple CA download is hash-checked.
+    environment: release
     env:
       # HAS_CERT selects Developer-ID signing over the ad-hoc fallback across the
       # job. It is derived from a secret (secrets aren't usable directly in a step
@@ -50,6 +61,11 @@ jobs:
           # standard-library security fixes arrive in patch releases, and the
           # Vulncheck workflow scans against the newest patch too.
           check-latest: true
+          # No restored module or build cache in a job that holds the App
+          # private key and signs the release. A cache entry is written by
+          # other runs, so restoring one would run their output here
+          # (zizmor cache-poisoning).
+          cache: false
 
       # Import the Developer-ID signing certificate into an ephemeral keychain so
       # the helper and the darwin binaries can be Developer-ID signed. Gated on the
@@ -217,7 +233,11 @@ jobs:
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
-          version: '~> v2'
+          # An exact version, not `~> v2`: the action downloads this binary at
+          # run time, in a job that holds the App private key. A range would
+          # run whatever GoReleaser publishes next without review
+          # (cadence-ecosystem release-rhythm security review I-1).
+          version: 'v2.18.2'
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Recorder is notified as each step completes so a run can be checkpointed for
@@ -130,7 +131,7 @@ func (e *Executor) Run(ctx context.Context, plan Plan, wctx *Context) error {
 		def, ok := e.registry[step.Uses]
 		if !ok {
 			slog.Error("Unknown step verb.", "stepIndex", i, "stepUse", step.Uses)
-			return fmt.Errorf("step %d: unknown step verb %q", i, step.Uses)
+			return fmt.Errorf("step %d: unknown step verb %s", i, termsafe.QuoteArgMax(step.Uses, 0))
 		}
 		// Re-interpolate the step's fields against the live Context: exports
 		// earlier steps produced (${workspace}, ${review}) resolve here, where

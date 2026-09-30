@@ -9,9 +9,10 @@ package workflow
 import (
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/cameronsjo/forgectl/internal/tomlerr"
 )
 
 // SupportedDSLVersions is the set of dsl_version values this executor
@@ -86,6 +87,7 @@ func Parse(data []byte) (Workflow, error) {
 		DSLVersion int `toml:"dsl_version"`
 	}
 	if _, err := toml.Decode(string(data), &versionProbe); err != nil {
+		err = tomlerr.Scrub(err)
 		slog.Error("Failed to parse workflow: invalid TOML.", "error", err)
 		return Workflow{}, fmt.Errorf("parse workflow: %w", err)
 	}
@@ -103,6 +105,7 @@ func Parse(data []byte) (Workflow, error) {
 	var wf Workflow
 	md, err := toml.Decode(string(data), &wf)
 	if err != nil {
+		err = tomlerr.Scrub(err)
 		slog.Error("Failed to parse workflow: malformed TOML.", "dslVersion", versionProbe.DSLVersion, "error", err)
 		return Workflow{}, fmt.Errorf("parse workflow: %w", err)
 	}
@@ -112,12 +115,9 @@ func Parse(data []byte) (Workflow, error) {
 	// in the one step that is a security control — and a newer grammar's
 	// fields must not be silently dropped under an older dsl_version.
 	if undecoded := md.Undecoded(); len(undecoded) > 0 {
-		keys := make([]string, len(undecoded))
-		for i, k := range undecoded {
-			keys[i] = k.String()
-		}
+		keys := tomlerr.Keys(undecoded)
 		slog.Warn("Rejecting workflow: unknown keys.", "keys", keys)
-		return Workflow{}, fmt.Errorf("parse workflow: unknown key(s) %s — a typo, or a field from a newer dsl_version?", strings.Join(keys, ", "))
+		return Workflow{}, fmt.Errorf("parse workflow: unknown key(s) %s — a typo, or a field from a newer dsl_version?", keys)
 	}
 	slog.Debug("Successfully parsed workflow.", "name", wf.Name, "version", wf.Version, "stepCount", len(wf.Steps))
 	return wf, nil

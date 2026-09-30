@@ -100,29 +100,107 @@ func IsClaudeHelpOrVersion(args []string) bool {
 	return false
 }
 
-// IsClaudePrintMode reports whether any argument before Claude's own `--`
-// selects print mode: `-p`, `--print`, or `--output-format` (which only works
-// with --print). Print mode is what scripts run, so it gets the print posture
-// (PrintArgs) rather than the full builder posture.
-func IsClaudePrintMode(args []string) bool {
-	return scanClaudeFlags(args, "-p", "--print", "--output-format")
+// claudeNoValueFlags are the top-level `claude` options that never consume a
+// following dash-prefixed token (`claude --help`, Claude Code 2.1.285). That
+// covers the boolean flags, and also the optional-value ones (`--resume
+// [value]`, `--debug [filter]`, `-w [name]`, …), because an optional value is
+// only taken when the next token does not start with "-": `claude --debug
+// --version` and `claude -r --version` print the version, while `claude
+// --append-system-prompt --version` consumes it as the prompt (2.1.285).
+// IsClaudePrintMode uses the list to tell a flag in flag position from one
+// that sits in a value slot.
+//
+// If the list drifts, the outcome is safe. An unknown flag is assumed to take
+// a value, so a print flag after it reads as a value and the run gets the
+// builder posture, which still carries the permission mode.
+var claudeNoValueFlags = map[string]bool{
+	"--allow-dangerously-skip-permissions": true,
+	"--ax-screen-reader":                   true,
+	"--bare":                               true,
+	"--bg":                                 true,
+	"--background":                         true,
+	"--brief":                              true,
+	"--chrome":                             true,
+	"--cloud":                              true,
+	"-c":                                   true,
+	"--continue":                           true,
+	"--dangerously-skip-permissions":       true,
+	"-d":                                   true,
+	"--debug":                              true,
+	"--desktop":                            true,
+	"--disable-slash-commands":             true,
+	"--exclude-dynamic-system-prompt-sections": true,
+	"--fork-session":             true,
+	"--forward-subagent-text":    true,
+	"--from-pr":                  true,
+	"-h":                         true,
+	"--help":                     true,
+	"--ide":                      true,
+	"--include-hook-events":      true,
+	"--include-partial-messages": true,
+	"--no-chrome":                true,
+	"--no-session-persistence":   true,
+	"-p":                         true,
+	"--print":                    true,
+	"--prompt-suggestions":       true,
+	"--remote-control":           true,
+	"--replay-user-messages":     true,
+	"--restricted":               true,
+	"-r":                         true,
+	"--resume":                   true,
+	"--safe-mode":                true,
+	"--strict-mcp-config":        true,
+	"--teleport":                 true,
+	"--tmux":                     true,
+	"--verbose":                  true,
+	"-v":                         true,
+	"--version":                  true,
+	"-w":                         true,
+	"--worktree":                 true,
 }
 
-// scanClaudeFlags reports whether any argument before Claude's own `--`
-// separator equals one of flags, or is `<flag>=<value>` for one of them.
-// Everything after that separator is prompt text.
-func scanClaudeFlags(args []string, flags ...string) bool {
-	for _, a := range args {
+// IsClaudePrintMode reports whether args selects print mode: `-p`, `--print`,
+// or `--output-format` (which only works with --print), before Claude's own
+// `--` and in flag position. Print mode is what scripts run, so it gets the
+// print posture (PrintArgs) rather than the full builder posture.
+//
+// A print flag in a value slot is that option's value, not print mode:
+// `--append-system-prompt -p "task"` is an interactive run whose system prompt
+// is "-p". Matching it would send that run to PrintArgs and drop the model,
+// effort, and add-dir the builder posture gives it.
+func IsClaudePrintMode(args []string) bool {
+	for i, a := range args {
 		if a == "--" {
 			return false
 		}
-		for _, f := range flags {
-			if a == f || strings.HasPrefix(a, f+"=") {
-				return true
-			}
+		if !isPrintFlag(a) {
+			continue
+		}
+		if i == 0 || inFlagPosition(args[i-1], claudeNoValueFlags) {
+			return true
 		}
 	}
 	return false
+}
+
+// isPrintFlag reports whether a is `-p`, `--print`, or `--output-format`, or
+// the `<flag>=<value>` form of one of them.
+func isPrintFlag(a string) bool {
+	for _, f := range []string{"-p", "--print", "--output-format"} {
+		if a == f || strings.HasPrefix(a, f+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+// inFlagPosition reports whether the token after prev is in flag position,
+// meaning prev cannot be waiting for it as a value. That is the case when prev
+// is a bare token (a positional, or a value some flag already took), a
+// `--flag=value`, or a flag in noValue. Any other dash-prefixed prev is
+// assumed to take a value.
+func inFlagPosition(prev string, noValue map[string]bool) bool {
+	return !strings.HasPrefix(prev, "-") || strings.Contains(prev, "=") || noValue[prev]
 }
 
 // ConsumeLeadingSeparator drops one leading "--" from args. `forgectl launch

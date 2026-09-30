@@ -17,11 +17,14 @@ package bless
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/cameronsjo/forgectl/internal/tomlerr"
 )
 
 // Domain is a signing-domain tag prepended to the pre-image before hashing.
@@ -119,32 +122,24 @@ func DecodeEnvelope(data []byte) (Envelope, error) {
 	var e Envelope
 	md, err := toml.Decode(string(data), &e)
 	if err != nil {
-		return Envelope{}, fmt.Errorf("decode envelope: %w", err)
+		return Envelope{}, fmt.Errorf("decode envelope: %w", tomlerr.Scrub(err))
 	}
 	if undecoded := md.Undecoded(); len(undecoded) > 0 {
-		return Envelope{}, fmt.Errorf("decode envelope: unknown key(s) %s", joinKeys(undecoded))
+		return Envelope{}, fmt.Errorf("decode envelope: unknown key(s) %s", tomlerr.Keys(undecoded))
 	}
 	if e.Schema != EnvelopeSchema {
 		return Envelope{}, fmt.Errorf("decode envelope: unsupported schema %d (want %d)", e.Schema, EnvelopeSchema)
 	}
+	// The sidecar is a file forgectl wrote, not the operator, and an
+	// attacker can plant one: its fields are named, never echoed (#738).
 	if e.Algo != AlgoECDSAP256SHA256 {
-		return Envelope{}, fmt.Errorf("decode envelope: unsupported algo %q (want %q)", e.Algo, AlgoECDSAP256SHA256)
+		return Envelope{}, fmt.Errorf("decode envelope: unsupported algo (want %q)", AlgoECDSAP256SHA256)
 	}
 	if !keyIDPattern.MatchString(e.KeyID) {
-		return Envelope{}, fmt.Errorf("decode envelope: malformed key_id %q", e.KeyID)
+		return Envelope{}, errors.New("decode envelope: malformed key_id")
 	}
 	if _, err := base64.StdEncoding.DecodeString(e.Signature); err != nil {
 		return Envelope{}, fmt.Errorf("decode envelope: signature is not valid base64: %w", err)
 	}
 	return e, nil
-}
-
-// joinKeys renders a []toml.Key list for an error message, mirroring the
-// workflow parser's unknown-key reporting.
-func joinKeys(keys []toml.Key) string {
-	parts := make([]string, len(keys))
-	for i, k := range keys {
-		parts[i] = k.String()
-	}
-	return strings.Join(parts, ", ")
 }

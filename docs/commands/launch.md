@@ -6,7 +6,7 @@
 forgectl launch                    # drop straight into the resolved profile (no prompt)
 forgectl launch <harness args…>    # apply the project profile, then exec the configured harness
 forgectl launch agents --json      # pure passthrough (byte-clean); posture injected only when interactive
-forgectl launch mcp list           # Claude subcommands, --help, --version: byte-clean, no posture
+forgectl launch mcp list           # Claude subcommands, -- --help, --version: byte-clean, no posture
 forgectl launch -p "<prompt>"      # print mode: only the profile's --permission-mode is injected
 forgectl launch -- <harness args…> # `--` ends launch verbs: `-- doctor` is claude's, not forgectl's
 forgectl launch which              # show the profile resolved for the current directory (alias: config)
@@ -79,16 +79,23 @@ An `effort` outside the five accepted levels is rejected before anything is laun
   first argument is a Claude subcommand (`mcp`, `doctor`, `update`, …; also
   right after a leading `--`, since claude dispatches it there too) or is
   `-h`/`--help`/`-v`/`--version`, claude runs with no injected flags and no
-  banner, as plain `claude` would. The profile environment still applies. Only
+  banner, as plain `claude` would, unless print mode is also selected
+  (`launch -v -p hi` gets the print posture). The profile environment still
+  applies. `forgectl launch --help` and `-h` are forgectl's own help; reach
+  claude's with `forgectl launch -- --help`. Only
   the first argument counts: later, a help flag can be another flag's value
   (`-p --append-system-prompt --help "<task>"` runs the task), so it keeps the
   print or builder posture. The subcommand list is pinned against the
   installed `claude --help` by a test.
-- **Print mode keeps only the permission mode** — when any argument before
-  Claude's own `--` is `-p`/`--print`/`--output-format`, forgectl injects the
-  profile's `--permission-mode` first and nothing else: no model, effort,
+- **Print mode keeps only the permission mode** — when an argument before
+  Claude's own `--` is `-p`/`--print`/`--output-format` in flag position,
+  forgectl injects the profile's `--permission-mode` first and nothing else: no model, effort,
   `--add-dir`, or `--allow-dangerously-skip-permissions`, and no banner. A
-  later `--permission-mode` of your own still wins.
+  later `--permission-mode` of your own still wins. A print flag that is
+  another option's value is not print mode: `--append-system-prompt -p
+  "<task>"` keeps the builder posture. A flag forgectl does not know is
+  assumed to take a value, which leaves the builder posture and its
+  permission mode in place.
 - **One leading `--` belongs to forgectl, for every harness** — `forgectl
   launch -- <args>` skips launch's own verbs (`which`, `doctor`, `edit`, …) and
   drops the separator, so Claude, Codex, and Pi never see it. A shell wrapper

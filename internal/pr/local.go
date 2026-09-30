@@ -3,6 +3,7 @@ package pr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -365,7 +366,27 @@ func cleanRoomError(absPath, workspace string) error {
 // own error should shadow it.
 func (c *Client) teardownLocalArtifacts(ctx context.Context, workspace, findingsDir string) {
 	_ = sandbox.Teardown(ctx, c.run, workspace)
-	_ = os.RemoveAll(findingsDir)
+	if err := c.removeOwnFindingsDir(findingsDir); err != nil {
+		slog.Warn("Could not remove the findings dir of a failed local review.", "findings", findingsDir, "error", err)
+	}
+}
+
+// removeOwnFindingsDir removes findingsDir, the dir PrepareLocal just made
+// under the store, through a handle on the store rather than by path
+// (forgectl#685, the #644 defect class). It refuses anything that is not a
+// findings dir directly under the store, so no spelling of findingsDir can
+// reach outside it, and os.Root unlinks a final-component symlink rather than
+// following it.
+func (c *Client) removeOwnFindingsDir(findingsDir string) error {
+	if !isFindingsStoreChild(c.findingsDir, findingsDir) {
+		return errors.New("not a findings dir directly under the findings store; left in place")
+	}
+	store, err := c.openFindingsStore()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = store.Close() }()
+	return store.RemoveAll(filepath.Base(filepath.Clean(findingsDir)))
 }
 
 // unparseableHexSentinel is the fallback Number for newLocalRef when hexPart
