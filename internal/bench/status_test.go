@@ -528,12 +528,14 @@ func equalStr(a, b []string) bool {
 }
 
 // TestLastSyncDetail: chronicle's last_sync is rendered from the parsed time,
-// never from its JSON text (#716).
+// never from its JSON text (#716), and an offset-less value renders with no
+// zone rather than a "Z" it never stated (#738).
 func TestLastSyncDetail(t *testing.T) {
 	for raw, want := range map[string]string{
 		"2026-07-08T10:00:00Z":                             "2026-07-08T10:00:00Z",
 		"2026-07-08T10:00:00.123456+02:00":                 "2026-07-08T10:00:00+02:00",
-		"2026-07-08T10:00:00.123456":                       "2026-07-08T10:00:00Z",
+		"2026-07-08T10:00:00.123456":                       "2026-07-08T10:00:00",
+		"2026-07-08T10:00:00":                              "2026-07-08T10:00:00",
 		"MARKER\x1b[2J":                                    "unrecognized timestamp",
 		"2026-07-08T10:00:00Z" + strings.Repeat("x", 5000): "unrecognized timestamp",
 	} {

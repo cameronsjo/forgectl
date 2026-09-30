@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Plan is the ordered, resolved step sequence a workflow run will execute.
@@ -96,7 +98,7 @@ func resolveParams(declared map[string]Param, cliParams map[string]string) (map[
 		slog.Debug("Rejecting undeclared params.", "params", unknown)
 		quoted := make([]string, len(unknown))
 		for i, name := range unknown {
-			quoted[i] = fmt.Sprintf("%q", name)
+			quoted[i] = termsafe.QuoteArgMax(name, 0)
 		}
 		return nil, fmt.Errorf("unknown param %s: not declared by this workflow", strings.Join(quoted, ", "))
 	}
@@ -109,7 +111,7 @@ func resolveParams(declared map[string]Param, cliParams map[string]string) (map[
 		}
 		if p.Required {
 			slog.Warn("Missing required param.", "param", name)
-			return nil, fmt.Errorf("missing required param %q", name)
+			return nil, fmt.Errorf("missing required param %s", termsafe.QuoteArgMax(name, 0))
 		}
 		out[name] = p.Default
 	}

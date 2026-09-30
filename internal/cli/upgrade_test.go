@@ -154,3 +154,41 @@ func TestUpgrade_Apply_UpdateFailure_NeverRunsUpgrade(t *testing.T) {
 		t.Errorf("got %d calls, want 1 — a failed update must never reach upgrade: %+v", len(fr.Calls), fr.Calls)
 	}
 }
+
+// TestUpgrade_Check_NeverEchoesBrew pins #738: `upgrade --check` words both
+// outcomes from fixed text and version tokens, never from brew's stdout or
+// its CommandError (argv plus stderr, which relays the tap's server).
+func TestUpgrade_Check_NeverEchoesBrew(t *testing.T) {
+	setMetaVersion(t, "1.0.0")
+	stubUpgradeLookPath(t, "brew")
+	const marker = "SERVERTEXT\x1b[2J"
+
+	fr := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
+		return marker + " cameronsjo/tap/forgectl (1.0.0_1) != 1.1.0 " + marker, nil
+	}}
+	stdout, err := execUpgrade(t, fr, "--check")
+	if err != nil {
+		t.Fatalf("Execute() = %v, want nil", err)
+	}
+	if want := "update available: forgectl 1.0.0_1 installed, 1.1.0 available\n"; stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+
+	fr = &exec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
+		return "", &exec.CommandError{Name: name, Stderr: marker}
+	}}
+	stdout, err = execUpgrade(t, fr, "--check")
+	if err == nil {
+		t.Fatal("Execute() = nil, want an error (brew outdated failed)")
+	}
+	if ExitCode(err) != 1 {
+		t.Errorf("ExitCode = %d, want 1", ExitCode(err))
+	}
+	if msg := err.Error() + stdout; bytes.Contains([]byte(msg), []byte("SERVERTEXT")) || bytes.Contains([]byte(msg), []byte("outdated --cask")) {
+		t.Errorf("output = %q, echoes brew's text or argv", msg)
+	}
+	var ce *exec.CommandError
+	if !errors.As(err, &ce) {
+		t.Errorf("the CommandError is no longer on the chain: %v", err)
+	}
+}
