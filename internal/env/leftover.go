@@ -11,7 +11,10 @@
 // power loss run no code, so whatever they interrupt stays behind. Both
 // directories carry a `*` .gitignore from creation (scratch.go,
 // cameronsjo/forgectl#698 and #737), so git neither stages nor lists them,
-// and this scan, which lists the directory itself, is what notices them.
+// and this scan, which lists the directory itself, is what notices them. It
+// also reads the untracked tree of every stash entry, because `git stash
+// --all` moves them out of the directory and into the object store
+// (stash.go, cameronsjo/forgectl#751).
 //
 // Before #737 the writeAtomic temp file sat directly beside the target, where
 // `git add -A` would commit it. A forgectl that old can still have left one,
@@ -167,7 +170,18 @@ func scanLeftovers(t Target) error {
 			rel(name))
 	}
 
-	if len(backups)+len(workDirs)+len(envDirs)+len(temps) == 0 {
+	scoped := func(name string) bool {
+		return name == backupName ||
+			strings.HasPrefix(name, workPrefix) ||
+			strings.HasPrefix(name, envDirPrefix) ||
+			(strings.HasPrefix(name, envPrefix) && strings.HasSuffix(name, ".tmp"))
+	}
+	stashed, err := stashedLeftovers(t, scoped)
+	if err != nil {
+		return fmt.Errorf("refusing to write %s: %w", termsafe.QuotePath(t.Rel()), err)
+	}
+
+	if len(backups)+len(workDirs)+len(envDirs)+len(temps)+len(stashed) == 0 {
 		return nil
 	}
 
@@ -195,6 +209,10 @@ func scanLeftovers(t Target) error {
 		lines = append(lines, fmt.Sprintf(
 			"%s: the temp file of an interrupted write to %s; it may hold the whole new file, secrets included. Inspect it, then delete it",
 			rel(name), termsafe.QuotePath(t.Rel())))
+	}
+
+	for _, s := range stashed {
+		lines = append(lines, stashedLeftoverLine(t, s))
 	}
 
 	if extra := len(lines) - maxNamedLeftovers; extra > 0 {

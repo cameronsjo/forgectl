@@ -237,6 +237,15 @@ type HookRun struct {
 	Trigger string `json:"trigger,omitempty"`
 }
 
+// Caps for the text the hook runner logs and returns (#934), in escaped
+// output runes: an installed version, a list of restart ids, and a free-text
+// error. They match internal/cli's label, title and text classes.
+const (
+	hookVersionMaxRunes = 64
+	hookListMaxRunes    = 256
+	hookTextMaxRunes    = 1280
+)
+
 // hookTailRunes caps how much of a failed command's stderr the audit trail
 // keeps.
 const hookTailRunes = 240
@@ -493,14 +502,14 @@ func (req HooksRequest) pass(ctx context.Context) (Decision, []HookSpec, []HookR
 		logf(req.Log, "%s: hook %s: %s (exit %d, %dms)%s", req.Harness, run.Hook, run.Outcome, run.Exit, run.DurationMS, detailSuffix(run.Detail))
 		if err := req.Store.Append(run); err != nil {
 			// The hook already ran; losing its record must not skip the rest.
-			logf(req.Log, "%s: could not record hook %s in the audit trail: %s", req.Harness, run.Hook, termsafe.SafeLine(err.Error()))
+			logf(req.Log, "%s: could not record hook %s in the audit trail: %s", req.Harness, run.Hook, termsafe.SafeLineMax(err.Error(), hookTextMaxRunes))
 		}
 	}
 	if err := ctx.Err(); err != nil {
 		// Hooks cut short by the cancel did not really run, so nothing is
 		// saved: the next run fires the whole set again.
-		logf(req.Log, "%s: %s left unrecorded so the next run fires again", req.Harness, termsafe.SafeLine(d.New))
-		return d, planned, runs, fmt.Errorf("%w: %s %s left unrecorded so the next run fires again: %w", ErrHooksInterrupted, req.Harness, termsafe.SafeLine(d.New), err)
+		logf(req.Log, "%s: %s left unrecorded so the next run fires again", req.Harness, termsafe.SafeLineMax(d.New, hookVersionMaxRunes))
+		return d, planned, runs, fmt.Errorf("%w: %s %s left unrecorded so the next run fires again: %w", ErrHooksInterrupted, req.Harness, termsafe.SafeLineMax(d.New, hookVersionMaxRunes), err)
 	}
 	next := NextState(d, runs, restartIDs)
 	if len(next.Pending) > 0 {
@@ -546,22 +555,22 @@ func describeDecision(d Decision, dryRun bool) string {
 	switch d.Kind {
 	case ChangeBaseline:
 		if dryRun {
-			return "no version recorded yet; a real run records " + termsafe.SafeLine(d.New) + " as the baseline and fires nothing"
+			return "no version recorded yet; a real run records " + termsafe.SafeLineMax(d.New, hookVersionMaxRunes) + " as the baseline and fires nothing"
 		}
-		return "no version recorded yet; recording " + termsafe.SafeLine(d.New) + " as the baseline, firing nothing"
+		return "no version recorded yet; recording " + termsafe.SafeLineMax(d.New, hookVersionMaxRunes) + " as the baseline, firing nothing"
 	case ChangeNone:
-		msg := "installed version " + termsafe.SafeLine(d.New) + " is unchanged"
+		msg := "installed version " + termsafe.SafeLineMax(d.New, hookVersionMaxRunes) + " is unchanged"
 		if len(d.GaveUp) > 0 {
-			msg += fmt.Sprintf("; restart %s gave up after %d attempt(s)", termsafe.SafeLine(strings.Join(d.GaveUp, ", ")), d.Attempts)
+			msg += fmt.Sprintf("; restart %s gave up after %d attempt(s)", termsafe.SafeLineMax(strings.Join(d.GaveUp, ", "), hookListMaxRunes), d.Attempts)
 		}
 		return msg
 	case ChangeUnsettled:
 		return "installed version is still changing; firing nothing until it settles"
 	case ChangeRetry:
 		return fmt.Sprintf("installed version %s is unchanged; retrying incomplete restart %s (attempt %d of %d)",
-			termsafe.SafeLine(d.New), termsafe.SafeLine(strings.Join(d.Retry, ", ")), d.Attempts+1, MaxRestartAttempts)
+			termsafe.SafeLineMax(d.New, hookVersionMaxRunes), termsafe.SafeLineMax(strings.Join(d.Retry, ", "), hookListMaxRunes), d.Attempts+1, MaxRestartAttempts)
 	default:
-		return "updated " + termsafe.SafeLine(d.Old) + " -> " + termsafe.SafeLine(d.New)
+		return "updated " + termsafe.SafeLineMax(d.Old, hookVersionMaxRunes) + " -> " + termsafe.SafeLineMax(d.New, hookVersionMaxRunes)
 	}
 }
 

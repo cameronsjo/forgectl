@@ -367,3 +367,34 @@ func TestMissingFromOrder(t *testing.T) {
 		t.Errorf("MissingFromOrder = %v, want %v", got, want)
 	}
 }
+
+// TestBuildPlan_ATabWithNoTerminalIDIsSkipped: a terminal id is a tab's
+// identity across moves, so two tabs without one would tie and merge. Each is
+// skipped with a warning, as a tab with no panes is (#945).
+func TestBuildPlan_ATabWithNoTerminalIDIsSkipped(t *testing.T) {
+	snap := mkSnapshot(
+		[]herdr.Workspace{ws("w1", "misc", 1)},
+		[]tabSpec{
+			{"w1", "t1", "", "/r/forge/a", "a"},
+			{"w1", "t2", "", "/r/forge/a", "a"},
+			{"w1", "t3", "term3", "/r/other/c", "c"},
+		})
+	plan := BuildPlan(testConfig(), snap, testRoot)
+	for _, a := range plan.Assignments {
+		if a.TerminalID == "" {
+			t.Errorf("assignment %+v has no terminal id", a)
+		}
+	}
+	if len(plan.Moves) != 0 {
+		t.Errorf("Moves = %+v, want none", plan.Moves)
+	}
+	n := 0
+	for _, w := range plan.Warnings {
+		if strings.Contains(w, "has no terminal id and was skipped") {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Errorf("Warnings = %q, want one skip warning per tab without a terminal id", plan.Warnings)
+	}
+}

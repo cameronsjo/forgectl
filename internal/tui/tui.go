@@ -23,23 +23,24 @@ import (
 
 // errStatus renders a footer error. Every error surfaced here can carry text
 // forgectl never composed — a tmux session or window name, a sesh candidate, an
-// exec diagnostic quoting one — so it goes through termsafe.SafeLine before any
-// styling. Escape sequences in a name would otherwise repaint the TUI's chrome.
+// exec diagnostic quoting one — so it goes through termsafe.SafeLineMax
+// (statusMaxRunes) before any styling. Escape sequences in a name would
+// otherwise repaint the TUI's chrome.
 func errStatus(prefix string, err error, s theme.Styles) string {
-	return s.Danger.Render(termsafe.SafeLine("✗ " + prefix + err.Error()))
+	return s.Danger.Render(termsafe.SafeLineMax("✗ "+prefix+err.Error(), statusMaxRunes))
 }
 
 // unreadableStatus is the footer note for a listing that could not read some
 // of tmux's rows (forgectl#815), or "" when it read them all — so a screen
 // with a silently missing session or window does not read as a smaller
-// server. The note is forgectl's own text, but it goes through SafeLine like
+// server. The note is forgectl's own text, but it goes through SafeLineMax like
 // every other footer.
 func unreadableStatus(u tmux.UnreadableRows, s theme.Styles) string {
 	note := u.Note()
 	if note == "" {
 		return ""
 	}
-	return s.Warn.Render(termsafe.SafeLine("! " + note))
+	return s.Warn.Render(termsafe.SafeLineMax("! "+note, statusMaxRunes))
 }
 
 // noteUnreadable adds unreadableStatus to the footer. It appends rather than
@@ -907,7 +908,7 @@ func (m *model) setStatus(err error, ok string) {
 		m.status = errStatus("", err, m.styles)
 		return
 	}
-	m.status = m.styles.OK.Render(termsafe.SafeLine("✓ " + ok))
+	m.status = m.styles.OK.Render(termsafe.SafeLineMax("✓ "+ok, statusMaxRunes))
 }
 
 func (m model) formWidth() int {
