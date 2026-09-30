@@ -8,7 +8,10 @@
 // `env set --sops` work directory (a plaintext value, a decrypted read-back,
 // the ciphertext backup). A signal handler covers the catchable signals.
 // SIGKILL, SIGSTOP, a fault and a power loss run no code, so whatever they
-// interrupt stays behind, where `git add -A` will commit it.
+// interrupt stays behind. A temp file stays where `git add -A` will commit it.
+// A work directory carries a `*` .gitignore from creation (internal/sops,
+// cameronsjo/forgectl#698), so git neither stages nor lists it, and this scan,
+// which lists the directory itself, is what notices it.
 //
 // The lock is per target (`<base>.lock`), and the scratch names used to carry
 // no target. So a scan for them could not tell a dead run's leftover from a
