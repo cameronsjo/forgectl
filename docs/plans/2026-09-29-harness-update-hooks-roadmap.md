@@ -1,7 +1,7 @@
 ---
 status: in-flight
 branch: plan/harness-update-hooks
-next: items 1 (#725, PR #874) and 2 (#726, PR #875) merged; item 3 (#727) is PR #876; then item 4 (#728) on [[on_update]] hooks, calling resume.RestartOutdated
+next: items 1-3 merged (PRs #874, #875, #876); item 4 (#728) done on branch feat/on-update-hooks ([[resume.on_update]] hooks + launchd watcher, `forgectl resume hooks`), awaiting review and PR
 ---
 
 # Harness update hooks — Roadmap (2026-09-29)
