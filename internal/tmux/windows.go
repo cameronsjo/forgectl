@@ -117,30 +117,43 @@ func parseWindowRows(out string) ([]Window, int, error) {
 
 // ListPanes returns every pane across all sessions (list-panes -a).
 func (c *Client) ListPanes(ctx context.Context) ([]Pane, error) {
+	panes, _, err := c.listPanes(ctx)
+	return panes, err
+}
+
+// listPanes is ListPanes plus the number of pane rows it could not read, for
+// DisplayPaneListing.
+func (c *Client) listPanes(ctx context.Context) ([]Pane, int, error) {
 	args := c.tmuxArgs("list-panes", "-a", "-F", paneFormat)
 	out, err := c.run.Run(ctx, c.tmuxBin, args...)
 	if err != nil {
 		if c.absentServer(ctx, args, err) {
-			return nil, nil
+			return nil, 0, nil
 		}
-		return nil, c.serverStateError(ctx, args, err)
+		return nil, 0, c.serverStateError(ctx, args, err)
 	}
-	return parsePanes(out)
+	return parsePaneRows(out)
 }
 
 func parsePanes(out string) ([]Pane, error) {
+	panes, _, err := parsePaneRows(out)
+	return panes, err
+}
+
+// parsePaneRows is parsePanes plus the number of non-empty rows it dropped
+// (forgectl#823), for the reason parseWindowRows counts them. A pane is the
+// easiest row to hide: any program running in it can set its title with an
+// escape sequence, and a title carrying FieldSep drops the pane from `tmux
+// tree`.
+func parsePaneRows(out string) ([]Pane, int, error) {
 	lines := splitLines(out)
-	panes := make([]Pane, 0, len(lines))
-	for _, line := range lines {
-		f := splitFields(line)
-		// Exact for the same reason parseWindows is: pane_title and
-		// pane_current_command are no more separator-free than a window name.
-		if len(f) != paneFieldCount {
-			continue
-		}
-		if ValidatePaneID(f[2]) != nil || ValidateWindowID(f[3]) != nil {
-			continue
-		}
+	// Exact for the same reason parseWindows is: pane_title and
+	// pane_current_command are no more separator-free than a window name.
+	rows, unreadable := readableRows(lines, paneFieldCount, func(f []string) bool {
+		return ValidatePaneID(f[2]) == nil && ValidateWindowID(f[3]) == nil
+	})
+	panes := make([]Pane, 0, len(rows))
+	for _, f := range rows {
 		panes = append(panes, Pane{
 			ServerPID:   f[0],
 			ServerStart: f[1],
@@ -152,7 +165,11 @@ func parsePanes(out string) ([]Pane, error) {
 			Active:      f[7] == "1",
 		})
 	}
-	return parsedRows(panes, lines, "list-panes", paneFieldCount)
+	panes, err := parsedRows(panes, lines, "list-panes", paneFieldCount)
+	if err != nil {
+		return nil, 0, err
+	}
+	return panes, unreadable, nil
 }
 
 // ResolveWindowExact finds the window whose name matches exactly AND whose
@@ -281,15 +298,21 @@ func (c *Client) NewWindowWithEnv(
 	// escapeFormat: tmux format-expands -n, so the name must be escaped to
 	// land as given (forgectl#806).
 	args := c.tmuxArgs("new-window", "-P", "-F", IdentityFormat, "-t", target, "-n", escapeFormat(name))
+	// escapeArgvSeparator on -c and on every command argument: tmux ends a
+	// command at any argv element ending in ';', which would move the window's
+	// directory or cut the command short (forgectl#823). The -e values are
+	// refused instead, by validateEnvAssignment.
 	if dir != "" {
-		args = append(args, "-c", dir)
+		args = append(args, "-c", escapeArgvSeparator(dir))
 	}
 	for _, e := range env {
 		args = append(args, "-e", e)
 	}
 	if len(command) != 0 {
 		args = append(args, "--")
-		args = append(args, command...)
+		for _, arg := range command {
+			args = append(args, escapeArgvSeparator(arg))
+		}
 	}
 	// The -e values that could carry a secret reach tmux's argv but never the
 	// debug log or the error text: a profile value the config renderer keeps
@@ -652,8 +675,8 @@ func (c *Client) Tree(ctx context.Context, icons bool) (string, error) {
 	return tree, err
 }
 
-// TreeListing is Tree plus how many session and window rows tmux returned
-// that could not be read (forgectl#815), so `tmux tree` and the TUI can say
+// TreeListing is Tree plus how many session, window and pane rows tmux
+// returned that could not be read (forgectl#815, forgectl#823), so `tmux tree` and the TUI can say
 // the tree is missing them rather than draw a smaller server.
 func (c *Client) TreeListing(ctx context.Context, icons bool) (string, UnreadableRows, error) {
 	sessions, unreadableSessions, err := c.DisplaySessionListing(ctx)
@@ -664,7 +687,7 @@ func (c *Client) TreeListing(ctx context.Context, icons bool) (string, Unreadabl
 	if err != nil {
 		return "", UnreadableRows{}, err
 	}
-	panes, err := c.DisplayPanes(ctx)
+	panes, unreadablePanes, err := c.DisplayPaneListing(ctx)
 	if err != nil {
 		return "", UnreadableRows{}, err
 	}
@@ -673,7 +696,7 @@ func (c *Client) TreeListing(ctx context.Context, icons bool) (string, Unreadabl
 		m = asciiTreeMarkers
 	}
 	return buildTree(sessions, windows, panes, m),
-		UnreadableRows{Sessions: unreadableSessions, Windows: unreadableWindows}, nil
+		UnreadableRows{Sessions: unreadableSessions, Windows: unreadableWindows, Panes: unreadablePanes}, nil
 }
 
 // buildTree is the pure assembly step — no exec, no I/O — so it's directly
