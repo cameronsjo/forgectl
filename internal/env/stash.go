@@ -42,8 +42,10 @@
 //     missing, triggers it. Measured on git 2.43: `stash list` and `ls-tree`
 //     both ran a canary.
 //
-//     The load-bearing control is GIT_ALLOW_PROTOCOL=none (git 2.6 and
-//     later), an allowlist that names no transport. When it is set, git
+//     The load-bearing control is GIT_ALLOW_PROTOCOL set and empty (git 2.6
+//     and later), an allowlist that names no transport. Not "none": that is
+//     an allowlist naming a transport called none, and a git-remote-none on
+//     PATH ran through it (measured on git 2.43). When it is set, git
 //     ignores every protocol.allow and protocol.<name>.allow setting, the
 //     repository's included, and refuses every transport before it starts.
 //     It goes last in the environment, so an inherited value cannot widen it.
@@ -154,7 +156,7 @@ func stashGitEnv(environ []string) []string {
 // key, so an inherited GIT_ALLOW_PROTOCOL cannot widen it. It is a variable
 // only so a test can drop GIT_NO_LAZY_FETCH and model a git older than 2.44,
 // which ignores it.
-var stashGitEnvPins = []string{"GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0", "GIT_ALLOW_PROTOCOL=none"}
+var stashGitEnvPins = []string{"GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0", "GIT_ALLOW_PROTOCOL="}
 
 // stashGit runs git with args in dir and returns its stdout. It is a variable
 // only so a test can make one call fail the way a corrupt repository would.

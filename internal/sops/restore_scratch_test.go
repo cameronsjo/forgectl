@@ -26,9 +26,18 @@ import (
 
 // restoreFixture sets up a target and a staged work directory under a guard
 // inside the mutation span, as SetValue has them when it restores.
+//
+// repo is reached through a symlink where the platform allows one, as macOS's
+// temp directory is (/var is a link to /private/var). ResolveTarget resolves
+// symlinks and pins the resolved directory, so every path derived from the
+// target is in the resolved spelling, and a comparison against repo as
+// spelled must resolve it first.
 func restoreFixture(t *testing.T) (repo string, target env.Target, g *plaintextGuard, work *workDir, death *fakeDeath) {
 	t.Helper()
 	repo = t.TempDir()
+	if link := filepath.Join(t.TempDir(), "link"); os.Symlink(repo, link) == nil {
+		repo = link
+	}
 	if err := os.Mkdir(filepath.Join(repo, ".git"), 0o750); err != nil {
 		t.Fatalf("Mkdir .git: %v", err)
 	}
@@ -102,8 +111,13 @@ func TestGuard_SignalDuringRestoreRemovesItsScratch(t *testing.T) {
 		t.Fatal("the restore was never interrupted: its scratch directory was never reported")
 	}()
 
-	if seen == "" || filepath.Dir(seen) != repo {
-		t.Fatalf("the restore reported scratch directory %q, want one beside the target in %s", seen, repo)
+	// The reported path is in the resolved spelling (see restoreFixture).
+	realRepo, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	if seen == "" || filepath.Dir(seen) != realRepo {
+		t.Fatalf("the restore reported scratch directory %q, want one beside the target in %s", seen, realRepo)
 	}
 	if got := death.snapshot(); len(got) != 1 {
 		t.Fatalf("die calls = %v, want exactly one", got)

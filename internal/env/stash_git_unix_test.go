@@ -10,7 +10,8 @@ package env
 //       repository's transport command (a canary) through a lazy fetch: not
 //       core.sshCommand, and not an ext:: URL the repository allows with
 //       protocol.ext.allow=always, which `-c protocol.allow=never` does not
-//       override. Modelled on a git without GIT_NO_LAZY_FETCH, and again
+//       override, and not a remote helper for a transport named "none".
+//       Modelled on a git without GIT_NO_LAZY_FETCH, and again
 //       with an inherited GIT_ALLOW_PROTOCOL that would allow ext
 //   [x] An inherited GIT_DIR/GIT_WORK_TREE pointing at another repository does
 //       not redirect the check: it still reads the target's own stashes
@@ -32,9 +33,9 @@ import (
 )
 
 // makePromisor turns repo into a partial clone whose promisor remote runs a
-// command that creates canary: over ssh through core.sshCommand, or through an
-// ext:: URL the repository itself allows with protocol.ext.allow=always. Any
-// lazy fetch runs it.
+// command that creates canary: over ssh through core.sshCommand, through an
+// ext:: URL the repository itself allows with protocol.ext.allow=always, or
+// through a git-remote-none helper on PATH. Any lazy fetch runs it.
 func makePromisor(t *testing.T, repo, canary, transport string) {
 	t.Helper()
 	// GIT_SSH_COMMAND and GIT_SSH override core.sshCommand, so an inherited
@@ -56,6 +57,16 @@ func makePromisor(t *testing.T, repo, canary, transport string) {
 		config = append(config,
 			[2]string{"remote.origin.url", "ssh://example.invalid/unreachable"},
 			[2]string{"core.sshCommand", "touch '" + canary + "'; false"})
+	case "none":
+		// A remote helper for a transport literally named "none", which an
+		// allowlist of "none" would admit.
+		bin := t.TempDir()
+		helper := "#!/bin/sh\ntouch '" + canary + "'\nexit 1\n"
+		if err := os.WriteFile(filepath.Join(bin, "git-remote-none"), []byte(helper), 0o700); err != nil { //nolint:gosec // G306: an executable stub
+			t.Fatalf("WriteFile git-remote-none: %v", err)
+		}
+		t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		config = append(config, [2]string{"remote.origin.url", "none::unreachable"})
 	case "ext":
 		// git's own `protocol.allow=never` on the command line loses to this
 		// repository-level setting.
@@ -125,7 +136,7 @@ func missingUntrackedTree(t *testing.T, repo string) {
 // against a modelled pre-2.44 git (no GIT_NO_LAZY_FETCH), so GIT_ALLOW_PROTOCOL
 // is the only thing standing between the repository and its canary.
 func TestStashCheckNeverLazyFetches(t *testing.T) {
-	for _, transport := range []string{"ssh", "ext"} {
+	for _, transport := range []string{"ssh", "ext", "none"} {
 		for _, path := range []struct {
 			name  string
 			setup func(*testing.T, string)
@@ -199,8 +210,8 @@ func TestStashGitEnvScrubsRepositoryVariables(t *testing.T) {
 			allow = append(allow, kv)
 		}
 	}
-	if !slices.Equal(allow, []string{"GIT_ALLOW_PROTOCOL=none"}) || got[len(got)-1] != "GIT_ALLOW_PROTOCOL=none" {
-		t.Errorf("GIT_ALLOW_PROTOCOL entries = %v with %q last; want only GIT_ALLOW_PROTOCOL=none, last", allow, got[len(got)-1])
+	if !slices.Equal(allow, []string{"GIT_ALLOW_PROTOCOL="}) || got[len(got)-1] != "GIT_ALLOW_PROTOCOL=" {
+		t.Errorf("GIT_ALLOW_PROTOCOL entries = %v with %q last; want only the empty GIT_ALLOW_PROTOCOL=, last", allow, got[len(got)-1])
 	}
 	for _, want := range []string{"PATH=/bin", "HOME=/h", "GIT_CEILING_DIRECTORIES=/c", "GIT_NO_LAZY_FETCH=1"} {
 		if !slices.Contains(got, want) {
