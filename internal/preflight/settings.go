@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // UserPath, ProjectPath, and LocalPath resolve the three on-disk settings
@@ -44,7 +46,7 @@ func ReadDocument(path string) (Document, error) {
 		if os.IsNotExist(err) {
 			return Document{}, nil
 		}
-		return Document{}, fmt.Errorf("read %s: %w", path, err)
+		return Document{}, fmt.Errorf("read %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -125,7 +127,7 @@ func TrustedMarketplaces(user, local Document) map[string]json.RawMessage {
 func WriteLocal(projectDir string, enabled map[string]bool, marketplaces map[string]json.RawMessage) (string, error) {
 	dir := filepath.Join(projectDir, ".claude")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("create %s: %w", dir, err)
+		return "", fmt.Errorf("create %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	path := LocalPath(projectDir)
 
@@ -135,7 +137,7 @@ func WriteLocal(projectDir string, enabled map[string]bool, marketplaces map[str
 			return "", fmt.Errorf("parse existing %s: %w", path, err)
 		}
 	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("read %s: %w", path, err)
+		return "", fmt.Errorf("read %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
 
 	if enabled == nil {
@@ -182,7 +184,7 @@ func writeLocalAtomic(path string, data []byte) error {
 
 	tmp, err := os.CreateTemp(dir, ".settings.local-*.tmp")
 	if err != nil {
-		return fmt.Errorf("create temp file in %s: %w", dir, err)
+		return fmt.Errorf("create temp file in %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	tmpPath := tmp.Name()
 	cleanup := func() {
@@ -192,20 +194,20 @@ func writeLocalAtomic(path string, data []byte) error {
 
 	if _, err := tmp.Write(data); err != nil {
 		cleanup()
-		return fmt.Errorf("write %s: %w", filepath.Base(path), err)
+		return fmt.Errorf("write %s: %w", termsafe.QuotePath(filepath.Base(path)), termsafe.Error(err))
 	}
 	if err := tmp.Sync(); err != nil {
 		cleanup()
-		return fmt.Errorf("sync %s: %w", filepath.Base(path), err)
+		return fmt.Errorf("sync %s: %w", termsafe.QuotePath(filepath.Base(path)), termsafe.Error(err))
 	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpPath)
-		return fmt.Errorf("close %s: %w", filepath.Base(path), err)
+		return fmt.Errorf("close %s: %w", termsafe.QuotePath(filepath.Base(path)), termsafe.Error(err))
 	}
 
 	if err := os.Rename(tmpPath, path); err != nil {
 		_ = os.Remove(tmpPath)
-		return fmt.Errorf("rename into place %s: %w", filepath.Base(path), err)
+		return fmt.Errorf("rename into place %s: %w", termsafe.QuotePath(filepath.Base(path)), termsafe.Error(err))
 	}
 	return nil
 }

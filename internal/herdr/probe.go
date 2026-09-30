@@ -86,10 +86,10 @@ func checkSession(lookupEnv func(string) (string, bool), stat func(string) (fs.F
 	}
 	info, err := stat(sock)
 	if err != nil {
-		return fmt.Errorf("%w: %s names %s, which cannot be read: %w", ErrNotInSession, envSocket, sock, err)
+		return fmt.Errorf("%w: %s names %s, which cannot be read: %w", ErrNotInSession, envSocket, termsafe.QuotePath(sock), termsafe.Error(err))
 	}
 	if info.Mode()&fs.ModeSocket == 0 {
-		return fmt.Errorf("%w: %s names %s, which is not a socket", ErrNotInSession, envSocket, sock)
+		return fmt.Errorf("%w: %s names %s, which is not a socket", ErrNotInSession, envSocket, termsafe.QuotePath(sock))
 	}
 	return nil
 }

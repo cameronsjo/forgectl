@@ -733,7 +733,7 @@ func (c *Client) CloneInto(ctx context.Context, r Repo, wing string) (string, er
 			"clone it elsewhere by hand", dest)
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return "", fmt.Errorf("creating canonical clone parent dirs for %s: %w", dest, err)
+		return "", fmt.Errorf("creating canonical clone parent dirs for %s: %w", termsafe.QuotePath(dest), termsafe.Error(err))
 	}
 	// The dispatch predicate is the HOSTNAME, not a token. Only the configured
 	// GitHub host clones through gh, which supplies its own URL under the

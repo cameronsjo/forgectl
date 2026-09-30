@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // The Syncthing-blobs-only guard, enforced on the steady-state path: Syncthing
@@ -56,7 +58,7 @@ func DefaultSyncthingConfigPath(home string) string {
 func CheckSyncthingFolders(configPath, home string) (violations []string, err error) {
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
-		return nil, fmt.Errorf("read syncthing config %s: %w", configPath, err)
+		return nil, fmt.Errorf("read syncthing config %s: %w", termsafe.QuotePath(configPath), termsafe.Error(err))
 	}
 	var cfg syncthingConfig
 	if err := xml.Unmarshal(raw, &cfg); err != nil {

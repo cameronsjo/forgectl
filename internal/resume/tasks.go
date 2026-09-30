@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Two directory dialects live under ~/.claude/tasks, and they are not old and
@@ -250,7 +252,7 @@ func Restore(dir string, tasks []Task) (RestoreResult, error) {
 		return res, nil
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return res, fmt.Errorf("create task directory %s: %w", dir, err)
+		return res, fmt.Errorf("create task directory %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	for _, t := range tasks {
 		if !validTaskID(t.ID) {
@@ -318,7 +320,7 @@ func raiseWatermark(dir string, tasks []Task) (int, error) {
 	}
 	// No trailing newline: Claude Code writes the bare decimal.
 	if err := os.WriteFile(path, []byte(strconv.Itoa(high)), 0o600); err != nil {
-		return 0, fmt.Errorf("write task watermark in %s: %w", dir, err)
+		return 0, fmt.Errorf("write task watermark in %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	return high, nil
 }
