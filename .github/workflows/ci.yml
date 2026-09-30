@@ -35,6 +35,10 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26'
+          # go.mod requires go1.26.8 and setup-go exports GOTOOLCHAIN=local, so
+          # a runner image with an older 1.26 cached would fail every job.
+          # Release and Vulncheck resolve the newest patch the same way.
+          check-latest: true
 
       - name: Install tmux
         # internal/tmux's *Isolated tests measure tmux's real -t target grammar
@@ -169,6 +173,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26'
+          check-latest: true
 
       - name: Lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
@@ -194,6 +199,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26'
+          check-latest: true
 
       - name: Install tmux
         # Same reason as the ubuntu job: the *Isolated tmux-grammar tests skip
