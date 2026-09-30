@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.22.0](https://github.com/cameronsjo/forgectl/compare/v0.21.0...v0.22.0) (2026-09-30)
+
+
+### Features
+
+* **resume:** `forgectl resume outdated` lists live Claude Code sessions running an older version than the installed claude, with status, busy flag and the process's herdr pane; `--json` for scripts ([91d6146](https://github.com/cameronsjo/forgectl/commit/91d61465c9229316b15de66dd57b67dfa7a4c002))
+* **resume:** `forgectl resume restart --outdated` stops outdated idle Claude Code sessions and resumes them in the same herdr pane on the installed version, only after re-checking process identity, idle status, the pane's session and an empty input line; `--dry-run`, `--session`, `--timeout` ([08074f0](https://github.com/cameronsjo/forgectl/commit/08074f05d19b2de84ca1cb30c4bef9a6a03a7388))
+
+
+### Bug Fixes
+
+* **clean:** cap subprocess and daemon text in --caches/--docker FAILED and skip rows at 512 runes, and escape docker's raw reported size ([d652ac0](https://github.com/cameronsjo/forgectl/commit/d652ac0f10bc0560a0a276a0df689f7e9e100762))
+* **cli:** report config-parse, environment and pre-dispatch failures as the verb's one --json error object instead of a plain stderr line ([baef20f](https://github.com/cameronsjo/forgectl/commit/baef20f33385aa1bac94cf8a73f71ad7b8d5c7b5))
+* **cli:** under --json, a non-zero exit no longer prints fang's error frame; a verb that already wrote its JSON verdict exits silently with its code, and one that failed before emitting writes one {"error","code","path"} object (code usage_error or failed) to stderr; exit codes unchanged ([e4869f2](https://github.com/cameronsjo/forgectl/commit/e4869f20b32535701946762d18930b67672157a8))
+* **resume:** escape task-restore and snapshot error lines ([d652ac0](https://github.com/cameronsjo/forgectl/commit/d652ac0f10bc0560a0a276a0df689f7e9e100762))
+* **resume:** escape task-restore, record save/delete, history-open, and path-resolution errors where they are built, not only where they print ([20dc4da](https://github.com/cameronsjo/forgectl/commit/20dc4da797661686d47649428d8eaeeadbe4c5b6))
+
 ## [0.21.0](https://github.com/cameronsjo/forgectl/compare/v0.20.0...v0.21.0) (2026-09-30)
 
 
