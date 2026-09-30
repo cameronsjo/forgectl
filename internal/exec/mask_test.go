@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // captureLogs routes the default slog logger into a buffer at debug level for
@@ -573,5 +574,95 @@ func TestMaskedTail_CutInsideAnEntryKeyHidesTheGluedValue(t *testing.T) {
 	}
 	if got != "cd tail" || dropped != int64(len("xxxxxxxxxxxxxxxxxxxxxxxx LONGKEYNAME=ab")) {
 		t.Errorf("got %q, dropped %d", got, dropped)
+	}
+}
+
+// straddleLenReference is straddleLen as it stood before #749: every suffix
+// length probed with HasPrefix, and no round cap.
+func straddleLenReference(m argMask, s string) int {
+	total := 0
+	for {
+		n := 0
+		for _, v := range m.values {
+			for l := min(len(v)-1, len(s)); l > n; l-- {
+				if strings.HasPrefix(s, v[len(v)-l:]) {
+					n = l
+					break
+				}
+			}
+		}
+		for _, e := range m.entries {
+			_, v, _ := strings.Cut(e, "=")
+			for l := min(len(e)-1, len(s)); l > max(n, len(v)-1); l-- {
+				if strings.HasPrefix(s, e[len(e)-l:]) {
+					n = l
+					break
+				}
+			}
+		}
+		for n < len(s) && !utf8.RuneStart(s[n]) {
+			n++
+		}
+		if n == 0 {
+			return total
+		}
+		s = s[n:]
+		total += n
+	}
+}
+
+// TestStraddleLen_MatchesTheSuffixProbe checks the KMP straddleLen against the
+// probe-every-suffix loop it replaced (#749), over small random masks and
+// tails where suffix/prefix overlaps are dense. Tails are short enough that
+// the round cap never engages.
+//
+// Mutation: in suffixPrefix, drop the "q == len(p)" reset (a full match of p
+// mid-v then indexes past p) or return q only when it equals len(p), and
+// this finds a disagreement.
+func TestStraddleLen_MatchesTheSuffixProbe(t *testing.T) {
+	rng := rand.New(rand.NewSource(749)) //nolint:gosec // G404: deterministic test fixture, not crypto
+	randStr := func(n int) string {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = "ab="[rng.Intn(3)]
+		}
+		return string(b)
+	}
+	for iter := 0; iter < 20000; iter++ {
+		var entries []string
+		for k := 0; k < 1+rng.Intn(3); k++ {
+			entries = append(entries, "K"+randStr(rng.Intn(3))+"="+randStr(1+rng.Intn(6)))
+		}
+		m := maskFrom(WithMaskedAssignments(context.Background(), entries))
+		s := randStr(rng.Intn(maxStraddleRounds / 2))
+		if got, want := m.straddleLen(s), straddleLenReference(m, s); got != want {
+			t.Fatalf("straddleLen(%q) with %q = %d, want %d", s, entries, got, want)
+		}
+	}
+}
+
+// TestStraddleLen_OneByteRoundsAreBounded pins #749 item 2. With A=cb masked,
+// a tail of "b" drops one byte per round, and every round also probes a
+// 128 KiB value (Linux's cap on one argv element) that almost prefixes the
+// tail ("b…bc"). Probing each suffix length with HasPrefix made a round
+// quadratic in that value's length, times one round per byte of the 64 KiB
+// tail: 24.8 s for a 4 KiB value before the fix.
+//
+// Mutation: delete the maxStraddleRounds cap and this takes about 90 s; keep
+// the cap but restore the HasPrefix probe loop in place of suffixPrefix and
+// it takes about 20 s (0.2 s as written).
+func TestStraddleLen_OneByteRoundsAreBounded(t *testing.T) {
+	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"A=cb", "K=" + strings.Repeat("b", 128<<10-2) + "c"}))
+	tb := &tailBuffer{limit: maxStderrTail}
+	_, _ = tb.Write([]byte("zz" + strings.Repeat("b", 2*maxStderrTail)))
+	start := time.Now()
+	got, dropped := maskedTail(tb, m)
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("maskedTail took %v; want well under a second", elapsed)
+	}
+	// Past the cap the rest of the tail is dropped: every byte is gone and
+	// counted.
+	if got != "" || dropped != int64(2+2*maxStderrTail) {
+		t.Errorf("got %.20q, dropped %d; want empty, %d", got, dropped, 2+2*maxStderrTail)
 	}
 }

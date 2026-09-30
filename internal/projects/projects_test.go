@@ -617,6 +617,50 @@ func TestLocalRepos_NonRepo_SpawnsNoRemoteLookup(t *testing.T) {
 	}
 }
 
+// TestLocalRepos_SSHURLNeverCarriesAPassword pins #749 item 4: a local
+// repo's SSHURL comes from `git remote get-url origin` and lands in the JSON
+// inventory, so an origin with a password in its userinfo must not be
+// recorded, while the working SSH forms still are.
+//
+// Mutation: record isSSHURL(url) origins verbatim again in localRepos and the
+// password-bearing origins reach SSHURL.
+func TestLocalRepos_SSHURLNeverCarriesAPassword(t *testing.T) {
+	const secret = "Pw5Hj2Ke8" //nolint:gosec // G101: a fake password the inventory must not record
+	for _, tc := range []struct{ origin, want string }{
+		{"ssh://user:" + secret + "@git.example.test/o/r.git", ""},
+		{"ssh://git:" + secret + "@git.example.test:222/o/r.git", ""},
+		{"ssh:///user:" + secret + "@git.example.test/o/r.git", ""},
+		{"ssh://a@" + secret + "@git.example.test/o/r.git", ""},
+		{"git@" + secret + "@git.example.test:o/r.git", ""},
+		// Controls: the SSH forms a clone needs.
+		{"ssh://git@git.example.test:222/o/r.git", "ssh://git@git.example.test:222/o/r.git"},
+		{"ssh://gitea@git.example.test:222/o/r.git", "ssh://gitea@git.example.test:222/o/r.git"},
+		{"ssh://git.example.test/o/r.git", "ssh://git.example.test/o/r.git"},
+		{"git@git.example.test:group/sub/r.git", "git@git.example.test:group/sub/r.git"},
+		{"https://git.example.test/o/r.git", ""},
+	} {
+		tmp := t.TempDir()
+		mkGitDir(t, tmp, "r")
+		fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+			if name == "git" && len(args) >= 5 && args[2] == "remote" && args[3] == "get-url" {
+				return tc.origin + "\n", nil
+			}
+			return "", nil
+		}}
+		c := &Client{Dir: tmp, run: fake, gitBin: "git"}
+		repos, err := c.localRepos(context.Background())
+		if err != nil {
+			t.Fatalf("localRepos: %v", err)
+		}
+		if len(repos) != 1 || repos[0].Name == "" {
+			t.Fatalf("origin %q: repos = %+v, want one parsed repo", tc.origin, repos)
+		}
+		if got := repos[0].SSHURL; got != tc.want || strings.Contains(got, secret) {
+			t.Errorf("origin %q: SSHURL = %q, want %q", tc.origin, got, tc.want)
+		}
+	}
+}
+
 // TestDiscover_CanonicalHostBucketMultipleOwnersAndRepos exercises the walk
 // beyond a single owner/repo pair — Inventory/pick/list all depend on every
 // canonical clone surfacing, not just the first found.
