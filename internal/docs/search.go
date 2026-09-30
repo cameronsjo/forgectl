@@ -193,7 +193,10 @@ func searchTitles(idx *Index) map[searchKey]string {
 // Every hit is gated through the Index (Search) and its snippet re-read
 // through Index.Open (hitFiles), so a wrong flag or a swap here can make
 // search miss a file but never return one from outside a root, or text rg
-// read from anywhere else.
+// read from anywhere else. rg still decides whether a hit exists, and at
+// which line. So a same-uid swap in the middle of rg's read is an existence
+// oracle: an indexed doc can be reported as a hit because outside bytes
+// matched the query, though no outside text is returned.
 func rgArgs(query, path string) []string {
 	return []string{
 		"--no-config",
