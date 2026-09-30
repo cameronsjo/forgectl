@@ -180,7 +180,7 @@ func TestRecordedWorkspaceFor_AFIFORecordIsSkippedFast(t *testing.T) {
 	ws := fakeWorkspace(t)
 	seedPhaseRecord(t, c, Ref{Owner: "o", Repo: "r", Number: 2}, PhasePrepared, ws)
 	fifoRecord(t, c.SessionsDir())
-	real, err := filepath.EvalSymlinks(ws)
+	wsReal, err := filepath.EvalSymlinks(ws)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,11 +188,11 @@ func TestRecordedWorkspaceFor_AFIFORecordIsSkippedFast(t *testing.T) {
 	var got string
 	var found bool
 	_ = mustFailFast(t, "recordedWorkspaceFor", func() error {
-		got, found = c.recordedWorkspaceFor(real)
+		got, found = c.recordedWorkspaceFor(wsReal)
 		return nil
 	})
-	if !found || got != real {
-		t.Errorf("recordedWorkspaceFor(%q) = %q, %v; want the real record's workspace", real, got, found)
+	if !found || got != wsReal {
+		t.Errorf("recordedWorkspaceFor(%q) = %q, %v; want the real record's workspace", wsReal, got, found)
 	}
 }
 
