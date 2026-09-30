@@ -392,16 +392,25 @@ func (s *ReviewedStore) SyncKeysScoped(openKeys []string, activeHosts []string) 
 //
 // The write is atomic (forgectl#791): the bytes go to a fresh temp file in the
 // destination's own directory (os.CreateTemp: O_EXCL, 0600), which is synced
-// and then renamed over the destination. A crash mid-write leaves the old
-// store whole instead of truncated. And the destination is Lstat'ed first: a
-// FIFO, or anything else that is not a regular file, is refused before any
-// write, where os.WriteFile would block in its open waiting for a reader.
+// and then renamed over the destination, and the directory is synced after the
+// rename. A crash mid-write leaves the old store whole instead of truncated.
+// And the destination is Lstat'ed first: a FIFO, or anything else that is not a
+// regular file, is refused before any write, where os.WriteFile would block in
+// its open waiting for a reader.
 //
-// A symlink at the store path is resolved first, and the rename replaces the
-// file the link names, never the link. The store lives under the user's config
-// dir, where dotfile managers link files in (readReviewedFile follows the link
-// for the same reason), and renaming over the link would silently turn it into
-// a plain file. A dangling link resolves to the file it would create.
+// A rename is a new file, not a rewrite, so it differs from the in-place
+// os.WriteFile it replaced in four ways. It replaces a read-only (0444) store,
+// which the old open for writing refused. It breaks a hardlink: the other name
+// keeps the old bytes. It resets the mode to 0600 and the owner to the writer,
+// where the old write kept both. And it needs the destination's directory to be
+// writable, where the old write needed only the file to be.
+//
+// A symlink at the store path is resolved first (resolveStoreTarget), and the
+// rename replaces the file the link names, never the link. The store lives
+// under the user's config dir, where dotfile managers link files in
+// (readReviewedFile follows the link for the same reason), and renaming over
+// the link would silently turn it into a plain file. A dangling link resolves
+// to the file it would create.
 func (s *ReviewedStore) persist() error {
 	if s.path == "" {
 		return errors.New("pr: reviewed store path unset")
@@ -425,23 +434,60 @@ func (s *ReviewedStore) persist() error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(dest, data)
+	if err := writeFileAtomic(dest, data); err != nil {
+		return err
+	}
+	return syncStoreDir(filepath.Dir(dest))
 }
 
-// maxStoreLinkHops bounds resolveStoreTarget, as the kernel bounds a lookup
-// (Linux's MAXSYMLINKS is 40).
+// syncStoreDir fsyncs the store's directory after the rename, so the new name
+// is durable, as writeRepairLogAtomic does for the audit log. It is a var only
+// so a test can see it run.
+var syncStoreDir = osRecordFS{}.SyncDir
+
+// maxStoreLinkHops bounds resolveStoreTarget's walk of a dangling chain, as
+// the kernel bounds a lookup (Linux's MAXSYMLINKS is 40).
 const maxStoreLinkHops = 40
 
-// errStoreLinkLoop is resolveStoreTarget's refusal of a link chain longer than
-// maxStoreLinkHops.
+// errStoreLinkLoop is resolveStoreTarget's refusal of a dangling link chain
+// longer than maxStoreLinkHops.
 var errStoreLinkLoop = errors.New("too many levels of symbolic links")
 
-// resolveStoreTarget follows symlinks at path's final component until it
-// reaches a name that is not a link, which may not exist yet. A relative link
-// target is taken relative to the link's own directory, as the kernel takes it.
+// resolveStoreTarget is the file a write through path would reach, resolved
+// PHYSICALLY, as the kernel resolves it for readReviewedFile's open. Resolving
+// lexically is wrong: filepath.Clean collapses "dir/.." to the dir's parent by
+// name, while the kernel goes to the parent of whatever dir links to. Under a
+// stow-folded ~/.config/forgectl -> ~/dotfiles/forgectl holding
+// pr-reviewed.json -> ../shared/pr-reviewed.json, a lexical resolve writes
+// ~/.config/shared/... while every load reads ~/dotfiles/shared/...
+//
+// A path whose target exists is filepath.EvalSymlinks, which resolves every
+// component through the filesystem. Only a dangling chain, whose last target
+// does not exist yet, is walked here, one link at a time: each hop's DIRECTORY
+// part is resolved with EvalSymlinks before the hop's base name is looked at,
+// and a relative link target is appended raw (never Cleaned), so the next
+// hop's EvalSymlinks applies its ".." to the physical directory.
 func resolveStoreTarget(path string) (string, error) {
-	cur := filepath.Clean(path)
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return resolved, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+	cur := path
 	for range maxStoreLinkHops {
+		rawDir, base := splitLastElem(cur)
+		if base == "" || base == "." || base == ".." {
+			// A link to a directory-shaped name; resolve the whole thing and
+			// let persist's Lstat refuse what it reaches.
+			return filepath.EvalSymlinks(cur)
+		}
+		dir, err := filepath.EvalSymlinks(rawDir)
+		if err != nil {
+			return "", err
+		}
+		cur = filepath.Join(dir, base)
 		info, err := os.Lstat(cur)
 		if errors.Is(err, fs.ErrNotExist) {
 			return cur, nil
@@ -457,11 +503,27 @@ func resolveStoreTarget(path string) (string, error) {
 			return "", err
 		}
 		if !filepath.IsAbs(next) {
-			next = filepath.Join(filepath.Dir(cur), next)
+			// Raw, not filepath.Join: Join Cleans, which would collapse a ".."
+			// in next against dir by name before EvalSymlinks could see it.
+			next = dir + string(filepath.Separator) + next
 		}
-		cur = filepath.Clean(next)
+		cur = next
 	}
 	return "", &os.PathError{Op: "resolve", Path: path, Err: errStoreLinkLoop}
+}
+
+// splitLastElem splits p at its last separator without cleaning either half
+// (filepath.Dir Cleans, which would collapse "link/.." by name). A trailing
+// separator yields an empty base.
+func splitLastElem(p string) (dir, base string) {
+	i := strings.LastIndexByte(p, filepath.Separator)
+	if i < 0 {
+		return ".", p
+	}
+	if i == 0 {
+		return string(filepath.Separator), p[1:]
+	}
+	return p[:i], p[i+1:]
 }
 
 // writeFileAtomic writes data to a new temp file beside dest and renames it

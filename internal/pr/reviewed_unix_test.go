@@ -216,3 +216,100 @@ func TestReviewedPersist_WritesThroughASymlinkedStore(t *testing.T) {
 		})
 	}
 }
+
+// A stow-folded config dir: ~/.config/forgectl is a link to
+// ~/dotfiles/forgectl, and the store in it is a relative link whose target
+// climbs with "..". The kernel applies that ".." to the PHYSICAL dir, so a
+// load reads under ~/dotfiles; persist must write the same file, not the one
+// a lexical Clean names under ~/.config. The "through a linked subdir" target
+// puts a ".." after a symlinked component inside the link target itself, which
+// only a resolver that never Cleans the raw target gets right.
+//
+// Mutations that turn it red: restore the lexical resolver (Join with
+// filepath.Dir(cur), then Clean) (every "parent" case writes the decoy); in
+// the dangling walk, skip the EvalSymlinks of the hop's directory (the
+// dangling "parent" case); or join the link target with filepath.Join instead
+// of appending it raw (the dangling "linked subdir" case).
+func TestReviewedPersist_ADotDotLinkUnderASymlinkedDirHitsTheLoadedFile(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		existing bool
+		// target is the store link's text; real and decoy are the physical
+		// and the lexical destinations, relative to the home dir.
+		target, real, decoy string
+	}{
+		{"parent, existing", true, "../shared/pr-reviewed.json",
+			"dotfiles/shared/pr-reviewed.json", ".config/shared/pr-reviewed.json"},
+		{"parent, dangling", false, "../shared/pr-reviewed.json",
+			"dotfiles/shared/pr-reviewed.json", ".config/shared/pr-reviewed.json"},
+		{"linked subdir, existing", true, "cfg/../shared/pr-reviewed.json",
+			"dotfiles/deep/shared/pr-reviewed.json", "dotfiles/forgectl/shared/pr-reviewed.json"},
+		{"linked subdir, dangling", false, "cfg/../shared/pr-reviewed.json",
+			"dotfiles/deep/shared/pr-reviewed.json", "dotfiles/forgectl/shared/pr-reviewed.json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			at := func(rel string) string { return filepath.Join(home, rel) }
+			for _, d := range []string{"dotfiles/forgectl", "dotfiles/shared", "dotfiles/forgectl/shared",
+				"dotfiles/deep/x", "dotfiles/deep/shared", ".config/shared"} {
+				if err := os.MkdirAll(at(d), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for link, target := range map[string]string{
+				".config/forgectl":                   at("dotfiles/forgectl"),
+				"dotfiles/forgectl/cfg":              at("dotfiles/deep/x"),
+				"dotfiles/forgectl/pr-reviewed.json": tc.target,
+			} {
+				if err := os.Symlink(target, at(link)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want := 1
+			if tc.existing {
+				writeReviewedStore(t, filepath.Dir(at(tc.real)), 2)
+				want = 3
+			}
+			store := at(".config/forgectl/pr-reviewed.json")
+
+			if err := LoadReviewed(store).Mark(testRef(7)); err != nil {
+				t.Fatalf("Mark: %v", err)
+			}
+			if got := len(LoadReviewed(store).at); got != want {
+				t.Errorf("a load through the store path sees %d marks after Mark, want %d", got, want)
+			}
+			if _, err := os.Lstat(at(tc.decoy)); !os.IsNotExist(err) {
+				t.Errorf("persist wrote the lexical destination %s (stat err %v)", tc.decoy, err)
+			}
+			if _, err := os.Stat(at(tc.real)); err != nil {
+				t.Errorf("the physical destination %s is missing: %v", tc.real, err)
+			}
+		})
+	}
+}
+
+// Mutation that turns it red: drop the syncStoreDir call from persist.
+func TestReviewedPersist_SyncsTheDirectoryAfterTheRename(t *testing.T) {
+	dir := t.TempDir()
+	path := writeReviewedStore(t, dir, 1)
+	original := syncStoreDir
+	t.Cleanup(func() { syncStoreDir = original })
+	var synced []string
+	syncStoreDir = func(d string) error {
+		synced = append(synced, d)
+		if _, err := os.Stat(filepath.Join(d, ".")); err != nil {
+			t.Errorf("synced dir %s: %v", d, err)
+		}
+		return original(d)
+	}
+	if err := LoadReviewed(path).Mark(testRef(7)); err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(synced) != 1 || synced[0] != want {
+		t.Errorf("synced %v, want exactly the store's dir %s", synced, want)
+	}
+}
