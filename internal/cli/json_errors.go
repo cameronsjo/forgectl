@@ -3,6 +3,8 @@
 package cli
 
 import (
+	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -78,10 +81,30 @@ func jsonFailure(cmd *cobra.Command, err error, asJSON bool, code string) error 
 	}
 	enc := termsafe.JSONEncoder(cmd.ErrOrStderr())
 	enc.SetIndent("", "  ")
-	if encErr := enc.Encode(jsonFailureObject{Error: err.Error(), Code: code, Path: path}); encErr != nil {
+	if encErr := enc.Encode(jsonFailureObject{Error: jsonErrorText(err), Code: code, Path: path}); encErr != nil {
 		return err
 	}
 	return newSilentCodedError(ExitCode(err))
+}
+
+// jsonErrTextUnavailable stands in for the text of an error whose Error
+// method panicked. It matches termsafe's wording for the same case.
+const jsonErrTextUnavailable = "error text unavailable: its Error method panicked"
+
+// jsonErrorText is err.Error(), or jsonErrTextUnavailable when that call
+// panics. A bare typed-nil error (a nil *os.PathError returned as error) is
+// non-nil, and its Error method dereferences the nil receiver; fmt recovers
+// such a panic but a direct call does not. Like termsafe's errorText, the
+// recovery logs the Go types only, never the panic value.
+func jsonErrorText(err error) (text string) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Debug("Error method panicked; its text is withheld.",
+				"error_type", fmt.Sprintf("%T", err), "panic_type", fmt.Sprintf("%T", r))
+			text = jsonErrTextUnavailable
+		}
+	}()
+	return err.Error()
 }
 
 // jsonVerdict is (a): the verb has already written its JSON verdict on stdout,
@@ -119,11 +142,16 @@ var jsonOSArgs = func() []string { return os.Args[1:] }
 // occurrence in the arguments the parsed flag value decides. A verb that does
 // not declare --json never wants it.
 func argvWantsJSON(cmd *cobra.Command) bool {
+	return argvWantsJSONIn(cmd, jsonOSArgs())
+}
+
+// argvWantsJSONIn is argvWantsJSON over an explicit argument list, for the
+// callers that hold the argv themselves (Execute, before fang starts).
+func argvWantsJSONIn(cmd *cobra.Command, args []string) bool {
 	if cmd.Flags().Lookup("json") == nil {
 		return false
 	}
 	seen, want := false, false
-	args := jsonOSArgs()
 scan:
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -149,24 +177,130 @@ scan:
 }
 
 // takesSeparateValue reports whether token a is a flag cmd knows that takes
-// its value from the following token: `--name` or `-n` with no inline value,
-// on a flag that has no NoOptDefVal (a bool's is "true"). An unknown flag is
-// assumed not to take one, since pflag stops at it anyway.
+// its value from the following token: `--name` with no inline value, on a
+// flag that has no NoOptDefVal (a bool's is "true"), or a shorthand group
+// whose value flag is its last letter. An unknown flag is assumed not to take
+// one, since pflag stops at it anyway.
 func takesSeparateValue(cmd *cobra.Command, a string) bool {
-	var f *pflag.Flag
 	switch {
-	case strings.HasPrefix(a, "--") && len(a) > 2 && !strings.Contains(a, "="):
-		name := a[2:]
-		if f = cmd.Flags().Lookup(name); f == nil {
-			f = cmd.InheritedFlags().Lookup(name)
+	case strings.HasPrefix(a, "--"):
+		if len(a) == 2 || strings.Contains(a, "=") {
+			return false
 		}
-	case len(a) == 2 && a[0] == '-' && a[1] != '-':
-		short := a[1:]
-		if f = cmd.Flags().ShorthandLookup(short); f == nil {
-			f = cmd.InheritedFlags().ShorthandLookup(short)
+		f := lookupFlag(cmd, a[2:])
+		return f != nil && f.NoOptDefVal == ""
+	case len(a) > 1 && a[0] == '-':
+		return shorthandGroupTakesNext(cmd, a[1:])
+	}
+	return false
+}
+
+// shorthandGroupTakesNext mirrors pflag's parseShortArg over a group of
+// shorthands (the token without its dash): each letter that names a flag with
+// a NoOptDefVal (a bool) is consumed on its own, and the first letter that
+// names a value flag takes the rest of the group as its value, or the next
+// token when it is the last letter. `-x=v` hands v to x inline. So in `-vH`
+// with a bool v and a value flag H, H takes the next token, and in `-Hv`, H
+// takes "v". An unknown letter stops pflag with an error, so it takes nothing.
+func shorthandGroupTakesNext(cmd *cobra.Command, group string) bool {
+	for i := 0; i < len(group); i++ {
+		if len(group)-i > 2 && group[i+1] == '=' {
+			return false // -x=v: the value is inline
+		}
+		f := lookupShorthand(cmd, group[i:i+1])
+		switch {
+		case f == nil:
+			return false
+		case f.NoOptDefVal != "":
+			continue
+		default:
+			return i == len(group)-1
 		}
 	}
-	return f != nil && f.NoOptDefVal == ""
+	return false
+}
+
+// lookupFlag finds a long flag cmd declares or inherits.
+func lookupFlag(cmd *cobra.Command, name string) *pflag.Flag {
+	if f := cmd.Flags().Lookup(name); f != nil {
+		return f
+	}
+	return cmd.InheritedFlags().Lookup(name)
+}
+
+// lookupShorthand finds a one-letter shorthand cmd declares or inherits.
+func lookupShorthand(cmd *cobra.Command, short string) *pflag.Flag {
+	if f := cmd.Flags().ShorthandLookup(short); f != nil {
+		return f
+	}
+	return cmd.InheritedFlags().ShorthandLookup(short)
+}
+
+// preFangFailure reports err, raised in Execute before fang starts (the
+// env-snapshot failure, the config-parse gate, a launch-intercept error). A
+// verb run with --json gets the one stderr object its family always writes
+// (jsonFamilyFailure), handed back as a silentCodedError with err's exit code;
+// anything else gets the plain `forgectl: <message>` line and err itself.
+//
+// root builds or returns the command tree. It is called only when args
+// mention --json at all, because the env-snapshot failure happens before
+// Execute builds the tree and must not build it for nothing.
+func preFangFailure(root func() *cobra.Command, args []string, err error) error {
+	if cmd := preFangJSONTarget(root, args); cmd != nil {
+		return jsonFamilyFailure(cmd, err)
+	}
+	_, _ = fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(jsonErrorText(err)))
+	return err
+}
+
+// preFangJSONTarget returns the command args would run when it declares
+// --json and args ask for it, or nil. Flags have not parsed yet, so args are
+// scanned the way argvWantsJSON scans the raw argv: `--json` after a "--", or
+// as another flag's value, does not count.
+func preFangJSONTarget(root func() *cobra.Command, args []string) *cobra.Command {
+	mentioned := false
+	for _, a := range args {
+		if a == "--" {
+			break
+		}
+		if a == "--json" || strings.HasPrefix(a, "--json=") {
+			mentioned = true
+			break
+		}
+	}
+	if !mentioned {
+		return nil
+	}
+	cmd, _, err := root().Find(args)
+	if err != nil || cmd == nil || !argvWantsJSONIn(cmd, args) {
+		return nil
+	}
+	return cmd
+}
+
+// jsonFamilyFailure writes err as the one --json failure object cmd's family
+// writes, and returns the silentCodedError carrying err's exit code. The docs
+// verbs keep docsErrorJSON's integer code, env check keeps check_failed, and
+// every other verb gets code "failed".
+func jsonFamilyFailure(cmd *cobra.Command, err error) error {
+	switch {
+	case isDocsVerb(cmd):
+		return docsFail(cmd, cmd.CommandPath(), "", err, ExitCode(err), true)
+	case cmd.Name() == "check" && cmd.HasParent() && cmd.Parent().Name() == "env":
+		return jsonFailure(cmd, err, true, "check_failed")
+	default:
+		return jsonFailure(cmd, err, true, jsonCodeFailed)
+	}
+}
+
+// isDocsVerb reports whether cmd sits under the top-level docs command.
+func isDocsVerb(cmd *cobra.Command) bool {
+	for c := cmd; c.HasParent(); c = c.Parent() {
+		if !c.Parent().HasParent() {
+			return c.Name() == "docs"
+		}
+	}
+	return false
 }
 
 // installJSONErrorContract walks root's tree and, on every command that
