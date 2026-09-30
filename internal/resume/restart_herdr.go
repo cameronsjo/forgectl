@@ -57,6 +57,9 @@ func (e SystemRestartEnv) herdrBin() string {
 	return "herdr"
 }
 
+// errHerdrBound is the private cause attached to a herdr call's own deadline.
+var errHerdrBound = errors.New("herdr call bound expired")
+
 // runHerdr runs one herdr call in a process group of its own, bounded by
 // HerdrCallTimeout. A restart run survives SIGHUP on purpose, so a closed
 // terminal cannot strand a session between its stop and its relaunch; in the
@@ -70,10 +73,13 @@ func (e SystemRestartEnv) runHerdr(ctx context.Context, args ...string) (string,
 	if limit <= 0 {
 		limit = HerdrCallTimeout
 	}
-	ctx, cancel := context.WithTimeout(ctx, limit)
+	// The private cause makes the label exact: context.Cause(ctx) carries it
+	// only when the bound itself fired, never when an ordinary error merely
+	// returns as the deadline passes, or the parent was cancelled.
+	ctx, cancel := context.WithTimeoutCause(ctx, limit, errHerdrBound)
 	defer cancel()
 	out, err := e.runner.Run(exec.WithProcessGroup(ctx), e.herdrBin(), args...)
-	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if err != nil && errors.Is(context.Cause(ctx), errHerdrBound) {
 		return out, fmt.Errorf("%w after %s: %w", ErrHerdrTimeout, limit, err)
 	}
 	return out, err

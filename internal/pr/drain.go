@@ -264,7 +264,7 @@ func (c *Client) claimQueuedPass(ctx context.Context, cfg config.Config, opts Dr
 		return nil
 	})
 	if err != nil {
-		report.Refusal = err.Error()
+		report.Refusal = recordText(err.Error())
 	}
 	return report, claimed
 }
@@ -334,7 +334,7 @@ func (c *Client) drainItem(ctx context.Context, cfg config.Config, s SessionSumm
 // are exhausted.
 func (c *Client) settleDrainFailure(ctx context.Context, ref Ref, path string, priorAttempts, maxAttempts int, cause error) (outcome, toPhase string) {
 	attempts := priorAttempts + 1
-	lastError := recordText(cause.Error())
+	lastError := breadcrumbText(cause.Error())
 
 	bc, _, rerr := loadBreadcrumbRecord(path, c.sessionsDir)
 	if rerr != nil {
@@ -358,7 +358,7 @@ func (c *Client) settleDrainFailure(ctx context.Context, ref Ref, path string, p
 			rec.Attempts = attempts
 			rec.LastError = lastError
 			rec.LastAttempt = time.Now().UTC()
-			rec.RepairReason = recordText(reason)
+			rec.RepairReason = breadcrumbText(reason)
 			return nil
 		}); terr != nil {
 			slog.Error("Failed to park a drained review whose window may be live.",
@@ -391,7 +391,7 @@ func (c *Client) settleDrainFailure(ctx context.Context, ref Ref, path string, p
 		rec.LastError = lastError
 		rec.LastAttempt = time.Now().UTC()
 		if exhausted {
-			rec.RepairReason = fmt.Sprintf("drain: %d attempts, last: %s", attempts, lastError)
+			rec.RepairReason = breadcrumbText(fmt.Sprintf("drain: %d attempts, last: %s", attempts, lastError))
 			// A retry that got as far as a workspace leaves it behind for
 			// `pr repair` to inspect; needs-repair does not require an empty
 			// workspace.

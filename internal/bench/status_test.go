@@ -562,3 +562,27 @@ func TestCheckChronicle_LastSyncIsNeverRawText(t *testing.T) {
 		}
 	}
 }
+
+// TestStatus_UnresolvableHome_IsUnavailableNotConfigured pins that a configured
+// ~ path whose home cannot be resolved reports unavailable with no probe, not
+// "not configured" and not a PATH fallback.
+func TestStatus_UnresolvableHome_IsUnavailableNotConfigured(t *testing.T) {
+	if runtime.GOOS == "windows" || runtime.GOOS == "plan9" {
+		t.Skip("home lookup does not read $HOME here")
+	}
+	t.Setenv("HOME", "")
+	t.Setenv("HEARTH_DIR", "")
+	t.Setenv("CHRONICLE_DIR", "")
+	cfg := config.Config{Bench: config.BenchConfig{HearthDir: "~/hearth", ChronicleDir: "~/chronicle"}}
+	runner := &exec.FakeRunner{}
+
+	rep := Status(context.Background(), cfg, runner, nil)
+	for _, c := range []Component{rep.Hearth, rep.Chronicle} {
+		if c.State != StateUnavailable {
+			t.Errorf("%s state = %q, want %q (reason %q)", c.Name, c.State, StateUnavailable, c.Reason)
+		}
+	}
+	if len(runner.Calls) != 0 {
+		t.Errorf("probed %+v; want no calls", runner.Calls)
+	}
+}

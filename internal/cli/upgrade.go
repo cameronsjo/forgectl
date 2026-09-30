@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/selfupdate"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -110,7 +111,7 @@ func runUpgradeApply(ctx context.Context, deps module.Deps, out io.Writer) error
 	_, _ = fmt.Fprintln(out, "Refreshing the Homebrew tap and upgrading "+selfupdate.CaskRef+"…")
 	upgradeOut, err := selfupdate.Upgrade(ctx, deps.Runner)
 	if upgradeOut != "" {
-		slog.Debug("brew output.", "output", upgradeOut)
+		slog.Debug("brew output.", "output", redact.Stdout(upgradeOut))
 	}
 	if err != nil {
 		slog.Warn("brew upgrade failed.", "error", err)

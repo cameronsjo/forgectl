@@ -292,9 +292,13 @@ func TestResolve_NeverSetsStrictMCP(t *testing.T) {
 		},
 		Projects: []config.LaunchProject{{Match: "/proj", Model: "haiku"}},
 	}
+	defaults, err := DefaultsProfile(lc)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, p := range map[string]Profile{
 		"resolved": resolve(lc, "/proj", "/home/u"),
-		"defaults": DefaultsProfile(lc),
+		"defaults": defaults,
 	} {
 		if p.StrictMCP {
 			t.Errorf("%s profile set StrictMCP; config must not be able to strip an operator's MCP servers", name)

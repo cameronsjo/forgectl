@@ -18,7 +18,9 @@
 // by the flag or key it follows instead (Args, #749), and withheld whole.
 //
 // Args and Text serve exec's rendering of argv and stderr; Arg renders one
-// element. LogRepo serves a caller logging one repository argument
+// element. Stdout serves a child's stdout that is itself the deliverable
+// (#952): it withholds only a line holding a credential shape, where Text
+// withholds any line with a word that is not Plain. LogRepo serves a caller logging one repository argument
 // (internal/sandbox), where a local path is also shown as is. All use Repo's
 // shapes, so there is one allowlist.
 package redact
@@ -110,10 +112,48 @@ func userArg(a string) string {
 // (GitHub, GitLab personal and pipeline-trigger, Slack, OpenAI/Stripe-style,
 // AWS access key ids, Google API keys, npm, PyPI, Hugging Face, Shopify),
 // written lower-case and matched case-insensitively. A token pasted where a
-// flag name goes (--ghp_…) is a value, not a name.
+// flag name goes (--ghp_…) is a value, not a name. stdoutTokens, below, are
+// the same formats at their issued case and length, for Stdout; a format
+// added to one belongs in the other.
 var tokenPrefixes = []string{
 	"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "glptt-", "xox", "sk-", "sk_", "akia", "asia",
 	"aiza", "npm_", "pypi-", "hf_", "shpat_",
+}
+
+// stdoutToken is one credential format Stdout withholds: its issued prefix
+// and how many token bytes (in charset) must follow it, the issuer's minimum.
+type stdoutToken struct {
+	prefix  string
+	min     int
+	charset func(byte) bool
+}
+
+// stdoutTokens are the credential formats Stdout withholds, each at its
+// issuer's minimum length after the prefix: GitHub classic (36) and
+// fine-grained (82, matched from 22), GitLab personal and pipeline-trigger
+// (20), OpenAI and Anthropic (sk-, sk-proj-, sk-ant-: 20 and up), Stripe
+// secret and restricted keys, Slack (xoxb- and its siblings), AWS access key
+// ids (16 after AKIA or ASIA), npm (36), Google API keys (35), Hugging Face
+// (34), PyPI (50 and up; issued tokens run past 150) and Shopify (32 hex).
+// They are the formats tokenPrefixes names for a flag name, which is
+// matched case-insensitively there; here the case is the issued one, so a
+// word such as Sk- or AKIAshort in a child's prose is kept. Each is matched
+// only at the start of a word (tokenAt), so task-… is not read as sk-…. The
+// length is checked in code, not as a counted repeat: [A-Za-z0-9]{36}
+// compiles to 36 copies of the class, and a regexp that size cost Stdout
+// about 400ns a byte on ordinary text.
+var stdoutTokens = []stdoutToken{
+	{"ghp_", 36, isAlnum}, {"gho_", 36, isAlnum}, {"ghu_", 36, isAlnum}, {"ghs_", 36, isAlnum}, {"ghr_", 36, isAlnum},
+	{"github_pat_", 22, isTokenByte},
+	{"glpat-", 20, isTokenByte}, {"glptt-", 20, isTokenByte},
+	{"sk-", 20, isTokenByte},
+	{"sk_live_", 16, isAlnum}, {"sk_test_", 16, isAlnum}, {"rk_live_", 16, isAlnum}, {"rk_test_", 16, isAlnum},
+	{"AKIA", 16, isUpperDigit}, {"ASIA", 16, isUpperDigit},
+	{"npm_", 36, isAlnum},
+	{"AIza", 35, isTokenByte},
+	{"hf_", 34, isAlnum},
+	{"pypi-", 50, isTokenByte},
+	{"shpat_", 32, isHex},
 }
 
 // tokenShaped reports whether name starts with a tokenPrefixes entry.
@@ -380,33 +420,16 @@ func credentialValue(s string) bool {
 // a URL holding a newline before it sends anything, and a header value
 // cannot hold one either. The cost is the diagnostic text sharing a line with
 // a withheld word.
+//
+// Text also withholds every line Stdout does (#952), a PEM private-key
+// block's lines included, so it is always the stronger of the two.
 func Text(s string) string {
-	var b strings.Builder
-	changed := false
-	for rest := s; ; {
-		line, next, more := strings.Cut(rest, "\n")
-		if lineWithheld(line) {
-			if !changed {
-				changed = true
-				b.Grow(len(s))
-				b.WriteString(s[:len(s)-len(rest)])
-			}
-			b.WriteString(Marker)
-		} else if changed {
-			b.WriteString(line)
-		}
-		if !more {
-			break
-		}
-		if changed {
-			b.WriteByte('\n')
-		}
-		rest = next
-	}
-	if !changed {
-		return s
-	}
-	return b.String()
+	var sc pemScan
+	return withholdLines(s, func(line string) bool {
+		// Both run on every line: the PEM state must see each one.
+		stdout := sc.stdoutWithheld(line)
+		return lineWithheld(line) || stdout
+	})
 }
 
 // lineWithheld reports whether any whitespace-separated word of line is one

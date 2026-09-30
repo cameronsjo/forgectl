@@ -110,7 +110,11 @@ func sortProjects(projects []Project) {
 // Client discovers and opens local project directories.
 type Client struct {
 	Dir string
-	run exec.Runner
+	// rootErr is why Dir is empty when New could not resolve the projects
+	// root, so discovery and name lookup can say why instead of reporting an
+	// empty directory missing.
+	rootErr error
+	run     exec.Runner
 
 	// gitBin is resolved once when New constructs the client. Every status
 	// probe and the pull it authorizes use this same value, so a later PATH
@@ -261,14 +265,19 @@ func resolveRoot(userHome func() (string, error)) (string, error) {
 // It also resolves git exactly once to an absolute path; a lookup failure is
 // retained as an empty pin so status probes fail closed as StatusUnknown.
 func New(run exec.Runner, opts ...Option) *Client {
-	// A failed root resolution leaves Dir empty: discovery then reports the
-	// directory missing and Placement refuses an empty root, so nothing
-	// resolves against the working directory.
-	root, rootErr := ResolveRoot()
+	return newWithRoot(run, ResolveRoot, opts...)
+}
+
+// newWithRoot is New with the root resolution injected.
+func newWithRoot(run exec.Runner, resolve func() (string, error), opts ...Option) *Client {
+	// A failed root resolution leaves Dir empty and keeps the cause: discovery
+	// and name lookup report it, and Placement refuses an empty root, so
+	// nothing resolves against the working directory.
+	root, rootErr := resolve()
 	if rootErr != nil {
 		slog.Warn("Failed to resolve projects root.", "error", rootErr)
 	}
-	c := &Client{Dir: root, run: run, lookPath: osexec.LookPath, gitHubHost: githubauth.DefaultHost}
+	c := &Client{Dir: root, rootErr: rootErr, run: run, lookPath: osexec.LookPath, gitHubHost: githubauth.DefaultHost}
 	for _, opt := range opts {
 		opt(c)
 	}
@@ -322,6 +331,9 @@ type discoverCandidate struct {
 // discoverConcurrency() workers. Splitting it this way keeps the cheap walk
 // serial and simple while parallelizing only the part that's actually slow.
 func (c *Client) discoverDir(ctx context.Context, dir string) ([]Project, error) {
+	if dir == "" && c.rootErr != nil {
+		return nil, termsafe.Error(c.rootErr)
+	}
 	candidates, err := discoverCandidates(dir)
 	if err != nil {
 		return nil, err

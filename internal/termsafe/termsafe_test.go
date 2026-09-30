@@ -26,26 +26,67 @@ func TestIsUnsafeTerminalRuneMatchesUnicodeProperties(t *testing.T) {
 	}
 }
 
-// TestIsInvisibleRune pins the validator classifier #916 added: every Cf, Zl
-// and Zp rune, named ones included, and nothing graphic.
+// TestIsInvisibleRune pins the validator classifier by named rune: #916's
+// format characters and separators, and #948's variation selectors, other
+// default-ignorables, Hangul fillers and braille blank. The visible side holds
+// the neighbors a wider rule would wrongly catch: combining marks outside
+// Variation_Selector (decomposed accents), spaces TrimSpace already handles,
+// and the braille dots next to U+2800.
 func TestIsInvisibleRune(t *testing.T) {
-	for _, r := range []rune{0x200b, 0xfeff, 0x2060, 0x00ad, 0x200d, 0xe0001, 0xe0041, 0xe007f, 0x2028, 0x2029} {
-		if !IsInvisibleRune(r) {
-			t.Errorf("IsInvisibleRune(%U) = false, want true", r)
+	invisible := []struct {
+		name string
+		r    rune
+	}{
+		{"ZERO WIDTH SPACE (Cf)", 0x200b},
+		{"ZERO WIDTH NO-BREAK SPACE (Cf)", 0xfeff},
+		{"WORD JOINER (Cf)", 0x2060},
+		{"SOFT HYPHEN (Cf)", 0x00ad},
+		{"ZERO WIDTH JOINER (Cf)", 0x200d},
+		{"LANGUAGE TAG (Cf)", 0xe0001},
+		{"TAG LATIN CAPITAL LETTER A (Cf)", 0xe0041},
+		{"CANCEL TAG (Cf)", 0xe007f},
+		{"LINE SEPARATOR (Zl)", 0x2028},
+		{"PARAGRAPH SEPARATOR (Zp)", 0x2029},
+		{"VARIATION SELECTOR-1 (Mn)", 0xfe00},
+		{"VARIATION SELECTOR-16 (Mn)", 0xfe0f},
+		{"VARIATION SELECTOR-17 (Mn)", 0xe0100},
+		{"VARIATION SELECTOR-256 (Mn)", 0xe01ef},
+		{"MONGOLIAN FREE VARIATION SELECTOR ONE (Mn)", 0x180b},
+		{"COMBINING GRAPHEME JOINER (Mn)", 0x034f},
+		{"KHMER VOWEL INHERENT AQ (Mn)", 0x17b4},
+		{"HANGUL CHOSEONG FILLER (Lo)", 0x115f},
+		{"HANGUL JUNGSEONG FILLER (Lo)", 0x1160},
+		{"HANGUL FILLER (Lo)", 0x3164},
+		{"HALFWIDTH HANGUL FILLER (Lo)", 0xffa0},
+		{"BRAILLE PATTERN BLANK (So)", 0x2800},
+	}
+	for _, tc := range invisible {
+		if !IsInvisibleRune(tc.r) {
+			t.Errorf("IsInvisibleRune(%U %s) = false, want true", tc.r, tc.name)
 		}
 	}
-	for r := rune(0); r <= unicode.MaxRune; r++ {
-		want := unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)
-		if got := IsInvisibleRune(r); got != want {
-			t.Fatalf("IsInvisibleRune(%U) = %t, want %t", r, got, want)
-		}
-		if want && unicode.IsGraphic(r) {
-			t.Fatalf("IsInvisibleRune(%U) is true for a graphic rune", r)
-		}
+	visible := []struct {
+		name string
+		r    rune
+	}{
+		{"LATIN SMALL LETTER A", 'a'},
+		{"SPACE", ' '},
+		{"NO-BREAK SPACE (Zs)", 0x00a0},
+		{"IDEOGRAPHIC SPACE (Zs)", 0x3000},
+		{"COMBINING ACUTE ACCENT (Mn)", 0x0301},
+		{"COMBINING DIAERESIS (Mn)", 0x0308},
+		{"DEVANAGARI SIGN VIRAMA (Mn)", 0x094d},
+		{"LATIN SMALL LETTER E WITH ACUTE", 0x00e9},
+		{"HANGUL SYLLABLE GA", 0xac00},
+		{"HANGUL CHOSEONG KIYEOK", 0x1100},
+		{"BRAILLE PATTERN DOTS-1", 0x2801},
+		{"CJK UNIFIED IDEOGRAPH-4E2D", 0x4e2d},
+		{"FIRE (emoji)", 0x1f525},
+		{"HEAVY BLACK HEART", 0x2764},
 	}
-	for _, r := range "aZ9 é/#-_.中😀" {
-		if IsInvisibleRune(r) {
-			t.Errorf("IsInvisibleRune(%U) = true, want false for a visible rune", r)
+	for _, tc := range visible {
+		if IsInvisibleRune(tc.r) {
+			t.Errorf("IsInvisibleRune(%U %s) = true, want false", tc.r, tc.name)
 		}
 	}
 }
@@ -107,10 +148,10 @@ func TestSafeLineQuotesTabAndTheInvisibleFormattingResidual(t *testing.T) {
 
 // TestSafeLinePreservesOrdinaryGraphicText is the other half of the boundary:
 // SafeLine must not turn legitimate non-ASCII text into escapes. RTL script and
-// emoji are graphic runes and survive verbatim. Joiners and variation selectors
-// are deliberately NOT in this set — they are Cf, and SafeLine quotes them by
-// its non-graphic rule, which
-// TestVisibleQuotingDoesNotBroadenSharedClassifier pins from the other side.
+// emoji are graphic runes and survive verbatim. Joiners are deliberately NOT
+// in this set — they are Cf, and SafeLine quotes them by its non-graphic rule,
+// which TestVisibleQuotingDoesNotBroadenSharedClassifier pins from the other
+// side. Variation selectors are Mn and graphic, so SafeLine keeps them.
 func TestSafeLinePreservesOrdinaryGraphicText(t *testing.T) {
 	tests := []struct {
 		name  string

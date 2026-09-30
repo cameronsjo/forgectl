@@ -27,6 +27,22 @@ func recordText(s string) string {
 	return termsafe.SafeLineMax(s, recordTextMaxRunes)
 }
 
+// breadcrumbTextMaxBytes caps the bytes one free-text field of a breadcrumb
+// record (LastError, RepairReason) takes in the encoded record (#963). A rune
+// cap alone overflowed maxBreadcrumbRecordBytes: '<' encodes as six bytes and
+// a 4-byte emoji as four, so two 1280-rune fields could reach 15 KiB. Two
+// fields at this cap are 3 KiB, which leaves the rest of the 8 KiB for the
+// structured fields, a workspace path up to PATH_MAX included
+// (TestBreadcrumbWorstCaseFitsTheRecordLimit).
+const breadcrumbTextMaxBytes = 1536
+
+// breadcrumbText is recordText further bounded by breadcrumbTextMaxBytes of
+// encoded JSON: every free-text field a breadcrumb record carries is written
+// through it, so no error text can push the record past its size limit.
+func breadcrumbText(s string) string {
+	return termsafe.SafeLineMaxJSON(s, recordTextMaxRunes, breadcrumbTextMaxBytes)
+}
+
 // safeErrString is err.Error() for an error whose Error method may panic.
 // Go 1.26's os.Root.RemoveAll can leak its internal errSymlink, wrapped in a
 // *fs.PathError, when a directory it is walking is swapped for a symlink
