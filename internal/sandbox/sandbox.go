@@ -11,10 +11,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -50,8 +50,8 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 		return "", err
 	}
 	// repo can be an https URL carrying a token; every log line names it
-	// through logRepo (#711).
-	shownRepo := logRepo(repo)
+	// through redact.LogRepo, an allowlist (#711, #734).
+	shownRepo := redact.LogRepo(repo)
 	slog.Debug("Preparing to create workspace sandbox.", "repo", shownRepo, "ref", ref, "alwaysClone", alwaysClone)
 
 	dir, err := os.MkdirTemp("", WorkspacePrefix+"*")
@@ -97,60 +97,6 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 	return dir, nil
 }
 
-// remoteRepoPlaceholder is what a log line shows for a non-local repo that
-// is not exactly one of logRepo's accepted shapes.
-const remoteRepoPlaceholder = "[remote repo]"
-
-// Positive parses for logRepo. repoHostPattern is a DNS-style hostname with
-// no '@', ':', '[' or '%'. repoPartPattern is one owner or repo path
-// segment.
-const (
-	repoHostPattern = `([A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?)`
-	repoPartPattern = `([A-Za-z0-9._-]{1,100})`
-)
-
-// logRepoShapes are the only non-local forms logRepo renders, each anchored
-// at both ends: https with no userinfo, ssh as the git user with an optional
-// port, and scp-like as the git user.
-var logRepoShapes = []*regexp.Regexp{
-	regexp.MustCompile(`^https://` + repoHostPattern + `/` + repoPartPattern + `/` + repoPartPattern + `$`),
-	regexp.MustCompile(`^ssh://git@` + repoHostPattern + `(?::[0-9]{1,5})?/` + repoPartPattern + `/` + repoPartPattern + `$`),
-	regexp.MustCompile(`^git@` + repoHostPattern + `:` + repoPartPattern + `/` + repoPartPattern + `$`),
-}
-
-// logRepo renders repo for a log line without any credential it carries
-// (#711). A clone URL can embed a token (https://x-access-token:TOKEN@host/…,
-// a bare-username TOKEN@host, or git's transport-helper form
-// http::http://U:TOKEN@host/r), and the log file keeps it. exec's argv
-// masking covers only KEY=VALUE elements a caller registers, not these
-// fields.
-//
-// It is an ALLOWLIST, not a redactor. Three review rounds each found a form
-// that a find-the-userinfo rule missed, so nothing from a non-local repo
-// reaches the log unless a strict positive parse accepted it:
-//
-//   - A local path (hasLocalPathPrefix) is logged as is.
-//   - A repo that is exactly one of logRepoShapes is logged as
-//     <host>/<owner>/<repo>, rebuilt from the captured fields only. A
-//     trailing ".git" is dropped.
-//   - Anything else is logged as remoteRepoPlaceholder. That covers
-//     userinfo, a query, a fragment, "::", percent-escapes, backslashes,
-//     whitespace, bracketed IPv6, odd slash counts, and every other scheme.
-//
-// It depends only on regexp, so it can be lifted unchanged into a shared
-// package.
-func logRepo(repo string) string {
-	if hasLocalPathPrefix(repo) {
-		return repo
-	}
-	for _, shape := range logRepoShapes {
-		if m := shape.FindStringSubmatch(repo); m != nil {
-			return m[1] + "/" + m[2] + "/" + strings.TrimSuffix(m[3], ".git")
-		}
-	}
-	return remoteRepoPlaceholder
-}
-
 // exitCode is what a checkout failure's log line keeps of err: the exit code
 // of a *exec.CommandError, else -1. err's own text is never logged here,
 // because a CommandError renders its whole argv, and the argv carries repo
@@ -173,17 +119,11 @@ func discardSandbox(ctx context.Context, run exec.Runner, dir string) {
 	}
 }
 
-// hasLocalPathPrefix reports whether repo is spelled as a filesystem path:
-// absolute, ./ or ../ relative, or ".". isLocalRepo and logRepo share it.
-func hasLocalPathPrefix(repo string) bool {
-	return strings.HasPrefix(repo, "/") || strings.HasPrefix(repo, "./") || strings.HasPrefix(repo, "../") || repo == "."
-}
-
 // isLocalRepo reports whether repo looks like a filesystem path (vs. an
 // owner/repo remote reference) — an absolute/relative path, or one that
 // exists on disk.
 func isLocalRepo(repo string) bool {
-	if hasLocalPathPrefix(repo) {
+	if redact.HasLocalPathPrefix(repo) {
 		return true
 	}
 	if _, err := os.Stat(repo); err == nil {

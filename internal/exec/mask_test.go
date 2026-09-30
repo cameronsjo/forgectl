@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/rand"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -237,8 +238,8 @@ func TestMaskText_ShortValueNextToAMaskedRunIsScrubbed(t *testing.T) {
 // replace consumed the shared byte with the long value first, so the short
 // one no longer matched and its first byte stayed visible.
 //
-// Mutation: skip short patterns in cover (continue on len < minScrubLen in the
-// second loop) and "a" stays visible.
+// Mutation: skip short patterns in cover (collect none into short) and "a"
+// stays visible.
 func TestMaskText_ShortValueOverlappingTheStartOfARunIsScrubbed(t *testing.T) {
 	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"S=ab", "L=bcdefghij"}))
 	if got := m.text("abcdefghij"); got != Redacted {
@@ -249,11 +250,11 @@ func TestMaskText_ShortValueOverlappingTheStartOfARunIsScrubbed(t *testing.T) {
 // TestMaskText_ShortValuesQualifyEachOtherToAFixpoint: "-ab" qualifies
 // because the byte after it is covered by the long value. "!-a" ends right
 // before its "b", so it qualifies only once "-ab" is covered, but it sorts
-// first ("!" < "-") and is checked before "-ab" in any one pass. Only a
-// rescan reaches it.
+// first ("!" < "-") and is checked before "-ab" in any one pass. Only the
+// re-check of "-ab"'s newly covered bytes reaches it.
 //
-// Mutation: run the short-pattern loop once (drop the changed fixpoint) and
-// "!" stays visible.
+// Mutation: drop the drain() call after a short mark in cover (so no match is
+// re-checked once its neighbour is covered) and "!" stays visible.
 func TestMaskText_ShortValuesQualifyEachOtherToAFixpoint(t *testing.T) {
 	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"L=LONGSECRET", "A=-ab", "B=!-a"}))
 	if got := m.text("!-abLONGSECRET"); got != Redacted {
@@ -465,5 +466,112 @@ func TestMaskText_DifferentialAgainstMain(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestMaskText_ShortCascadeIsLinear pins #708 item 1. With K=:ab:a, every
+// ":ab:a" in ":ab:ab…:ab:a" is glued to the "b" after it except the last, and
+// covering each one unglues the one before it: a cascade of 21000 links right
+// to left. The rescan-until-stable loop needed one full pass per link (26 s
+// for a 64 KiB tail on the issue's machine, 3.9 s here at 24 KiB); the
+// worklist re-checks only the matches beside newly covered bytes. The whole
+// stream must still end up covered.
+//
+// Mutation: make drain rescan every short pattern over the whole stream until
+// nothing changes (the old fixpoint) and this takes tens of seconds.
+func TestMaskText_ShortCascadeIsLinear(t *testing.T) {
+	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"K=:ab:a"}))
+	s := strings.Repeat(":ab", 21000) + ":a"
+	start := time.Now()
+	if got := m.text(s); got != Redacted {
+		t.Fatalf("the cascade did not cover the stream: %.40q…", got)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("text took %v on a %d-byte cascade; want milliseconds", elapsed, len(s))
+	}
+}
+
+// TestMaskText_SelfOverlappingLongValueIsLinear pins #708 item 2: a 16 KiB
+// "a…a" value against 16 MiB of "a" matches at every byte, and verifying
+// each match in full is 2.7e11 byte comparisons (about 10 s). eachMatch
+// carries the KMP state across overlapping matches instead (about 0.3 s).
+//
+// Mutation: in eachMatch, drop the KMP carry (q starts at 0) and resume the
+// Index scan at i+1, as the old loop did, and this takes several seconds.
+func TestMaskText_SelfOverlappingLongValueIsLinear(t *testing.T) {
+	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"K=" + strings.Repeat("a", 16<<10)}))
+	s := strings.Repeat("a", 16<<20)
+	start := time.Now()
+	if got := m.text(s); got != Redacted {
+		t.Fatalf("text left part of the stream: %.40q…", got)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("text took %v on 16 MiB matching at every byte; want well under a second", elapsed)
+	}
+}
+
+// TestEachMatch_FindsEveryOverlappingOccurrence checks eachMatch against a
+// byte-by-byte scan over small random strings, where borders and overlaps are
+// dense.
+//
+// Mutation: reset q to 0 instead of p's border after a match found inside the
+// KMP loop, and a run of overlapping matches loses all but its first two.
+func TestEachMatch_FindsEveryOverlappingOccurrence(t *testing.T) {
+	rng := rand.New(rand.NewSource(708)) //nolint:gosec // G404: deterministic test fixture, not crypto
+	randStr := func(n int) string {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = "ab"[rng.Intn(2)]
+		}
+		return string(b)
+	}
+	for iter := 0; iter < 20000; iter++ {
+		p := randStr(1 + rng.Intn(6))
+		s := randStr(rng.Intn(40))
+		var want, got []int
+		for i := 0; i+len(p) <= len(s); i++ {
+			if s[i:i+len(p)] == p {
+				want = append(want, i)
+			}
+		}
+		eachMatch(s, p, func(i int) { got = append(got, i) })
+		if !slices.Equal(got, want) {
+			t.Fatalf("eachMatch(%q, %q) = %v, want %v", s, p, got, want)
+		}
+	}
+}
+
+// Every cut position through a glued entry, including the one that lands
+// exactly after '=', must keep the short value out of the tail.
+func TestMaskedTail_NoCutPositionExposesTheGluedValue(t *testing.T) {
+	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"LONGKEYNAME=ab"}))
+	const stream = "xxxxxxxxxxxxxxxxxxxxxxxx LONGKEYNAME=abcd tail"
+	for limit := 1; limit <= len(stream); limit++ {
+		tb := &tailBuffer{limit: limit}
+		_, _ = tb.Write([]byte(stream))
+		if got, _ := maskedTail(tb, m); strings.Contains(got, "ab") {
+			t.Errorf("limit %d: the value survived the cut: %q", limit, got)
+		}
+	}
+}
+
+// TestMaskedTail_CutInsideAnEntryKeyHidesTheGluedValue pins #708 item 4.
+// LONGKEYNAME=ab is long enough to be masked anywhere, but a cut inside its
+// key leaves "EYNAME=ab" followed by "cd": the value is whole, yet glued to a
+// word byte, so the whole-word rule for a short value does not fire and "ab"
+// used to show. straddleLen now drops an entry suffix holding the whole value.
+//
+// Mutation: delete the entries loop from straddleLen and the tail keeps
+// "EYNAME=abcd".
+func TestMaskedTail_CutInsideAnEntryKeyHidesTheGluedValue(t *testing.T) {
+	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"LONGKEYNAME=ab"}))
+	tb := &tailBuffer{limit: 16}
+	_, _ = tb.Write([]byte("xxxxxxxxxxxxxxxxxxxxxxxx LONGKEYNAME=abcd tail"))
+	got, dropped := maskedTail(tb, m)
+	if strings.Contains(got, "ab") {
+		t.Errorf("the value survived the cut: %q", got)
+	}
+	if got != "cd tail" || dropped != int64(len("xxxxxxxxxxxxxxxxxxxxxxxx LONGKEYNAME=ab")) {
+		t.Errorf("got %q, dropped %d", got, dropped)
 	}
 }

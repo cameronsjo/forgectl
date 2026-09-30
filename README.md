@@ -1,6 +1,6 @@
 # forgectl
 
-Personal dev-experience CLI for a headless macOS workbench driven over SSH — from laptops, phones, and Termius. What began as a tmux helper (superseding the ad-hoc bash `s` script; smart session-naming stays with `sesh`) has grown into the **workbench forge**: 31 composable command-group modules (see the table below) with a declarative workflow DSL as the composition layer.
+Personal dev-experience CLI for a headless macOS workbench driven over SSH — from laptops, phones, and Termius. What began as a tmux helper (superseding the ad-hoc bash `s` script; smart session-naming stays with `sesh`) has grown into the **workbench forge**: 32 composable command-group modules (see the table below) with a declarative workflow DSL as the composition layer.
 
 Built for two hands and one thumb:
 
@@ -21,7 +21,7 @@ Reading a local clone's git state — `projects list`, `projects pick`, the proj
 
 ## Command groups
 
-29 command groups, at a glance. `forgectl --help` lists them from the binary
+30 command groups, at a glance. `forgectl --help` lists them from the binary
 itself; this table is the scannable index — full verbs and flags for every
 group are in the `## Usage` roster below, and the groups with a dedicated
 deep-dive get a link here.
@@ -36,6 +36,7 @@ deep-dive get a link here.
 | `launch` | Per-project Claude Code / Codex CLI / Pi launcher (alias: `cl`) | [launch](docs/commands/launch.md) |
 | `resume` | Get back into a Claude Code session after a terminal restart | [resume](docs/commands/resume.md) |
 | `surface` | Start a harness inside a terminal manager (tmux/cmux/herdr) without exposing its invocation | Usage below |
+| `herdr` | Helpers for the herdr terminal multiplexer: group tabs into workspaces by rule | [herdr](docs/commands/herdr.md) |
 | `recipe` | Run small built-in workbench recipes (alias: `r`) | [recipe](docs/commands/recipe.md) |
 | `workflow` | Run declarative workflows composing forgectl's other verbs (alias: `flow`) | Usage below |
 | `bench` | Discover, health-check, and wire the local dev bench (hearth, chronicle) | [bench](docs/commands/bench.md) |
@@ -266,6 +267,11 @@ forgectl k8s inspect pod/api-7f6c9 -n prod                # extra args forward t
 forgectl theme show                      # resolved hex per role, provenance, contrast
 forgectl theme show --json               # the same, machine-readable
 forgectl theme preview                   # render each role so you can see it
+
+# herdr — helpers for the herdr terminal multiplexer (run from a herdr pane)
+forgectl herdr organize                  # report how tabs would be grouped into workspaces and ordered
+forgectl herdr organize --explain        # also show which rule caught each tab
+forgectl herdr organize --apply          # make the moves; restores focus; needs the cameronsjo/herdr fork
 
 # tasks — read-only Vikunja task browser, local cache, no write verbs
 # one-time setup: store a READ-ONLY API token in the login keychain (prompts for the value)
