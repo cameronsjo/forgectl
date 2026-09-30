@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Snapshot is everything a cache holds: task, project, and label data plus
@@ -50,7 +52,7 @@ func LoadCache(path string) (Snapshot, error) {
 	}
 	var snap Snapshot
 	if err := json.Unmarshal(data, &snap); err != nil {
-		return Snapshot{}, fmt.Errorf("tasks: decode cache %s: %w", path, err)
+		return Snapshot{}, termsafe.Categorical("tasks: decode cache "+termsafe.QuotePath(path)+": the cache file is not valid JSON", err)
 	}
 	return snap, nil
 }

@@ -13,6 +13,16 @@
 (function () {
   "use strict";
 
+  // A doc can carry <div id="ForgectlMermaid">, and the sanitizer keeps ids,
+  // so until this script assigns the global, window.ForgectlMermaid is that
+  // element (forgectl#759). Assign an inert stub before the early return
+  // below; the real hooks replace it once the diagrams are set up.
+  window.ForgectlMermaid = {
+    refresh: function () { return null; },
+    focusKey: function () { return null; },
+    restoreFocus: function () {}
+  };
+
   if (typeof mermaid === "undefined") {
     // The bundle failed to load. Diagram sources stay visible as preformatted
     // text, which is a legible degradation, so this is a console note and not an

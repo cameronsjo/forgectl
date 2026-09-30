@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -185,5 +187,60 @@ func TestAssertVikunja_AcceptsARealInfoResponse(t *testing.T) {
 	}
 	if gotPath != "/info" {
 		t.Fatalf("AssertVikunja hit %s, want /info", gotPath)
+	}
+}
+
+// TestDecodeErrors_AreCategorical pins #761: a response that does not decode
+// is refused with fixed text. A *json.SyntaxError quotes a character of the
+// server's body, so the message must not carry it, while errors.Is still
+// reaches ErrUnexpectedStatus and errors.As still reaches the decode error.
+func TestDecodeErrors_AreCategorical(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("Zgarbage"))
+	}))
+	defer srv.Close()
+	c := NewClientForTesting(srv.URL, newToken(fakeToken))
+	ctx := context.Background()
+
+	calls := map[string]func() error{
+		"fetchAllPages": func() error { _, err := fetchAllPages[map[string]any](ctx, c, "/tasks"); return err },
+		"CreateTask":    func() error { _, err := c.CreateTask(ctx, 7, "hello", ""); return err },
+		"AddComment":    func() error { _, err := c.AddComment(ctx, 7, "hello"); return err },
+		"FetchTask":     func() error { _, err := c.FetchTask(ctx, 7); return err },
+		"FetchProject":  func() error { _, err := c.FetchProject(ctx, 7); return err },
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			err := call()
+			if err == nil {
+				t.Fatal("want a decode refusal")
+			}
+			if strings.Contains(err.Error(), "'Z'") || strings.Contains(err.Error(), "invalid character") {
+				t.Errorf("error %q renders the decoder's quote of server text", err)
+			}
+			if !strings.Contains(err.Error(), "malformed JSON") {
+				t.Errorf("error %q, want the categorical malformed-JSON wording", err)
+			}
+			if !errors.Is(err, ErrUnexpectedStatus) {
+				t.Errorf("error %v lost ErrUnexpectedStatus", err)
+			}
+			var syn *json.SyntaxError
+			if !errors.As(err, &syn) {
+				t.Errorf("error %v lost the decode cause", err)
+			}
+		})
+	}
+
+	path := filepath.Join(t.TempDir(), "cache.json")
+	if err := os.WriteFile(path, []byte("Zgarbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadCache(path)
+	if err == nil || strings.Contains(err.Error(), "'Z'") {
+		t.Errorf("LoadCache error %v, want a categorical refusal", err)
+	}
+	var syn *json.SyntaxError
+	if !errors.As(err, &syn) {
+		t.Errorf("LoadCache error %v lost the decode cause", err)
 	}
 }

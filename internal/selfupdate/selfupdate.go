@@ -13,6 +13,7 @@ package selfupdate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -51,6 +52,16 @@ var homebrewSafeEnv = map[string]string{
 	"HOMEBREW_CASK_OPTS":       "",
 	"HOMEBREW_BREW_GIT_REMOTE": "",
 }
+
+// ErrTapUpdate and ErrCaskUpgrade mark which step of Upgrade failed, so a
+// caller can word the failure from fixed text (#761) without parsing brew's
+// argv or stderr, which relay what the tap's server and git transport send.
+// Each wraps alongside the step's own error; errors.As still reaches the
+// underlying exec.CommandError.
+var (
+	ErrTapUpdate   = errors.New("brew update failed")
+	ErrCaskUpgrade = errors.New("brew upgrade --cask failed")
+)
 
 // IsSourceBuild reports whether the running binary lacks release metadata.
 // meta.Version stays "dev" only on a plain `go build`/`go run` — goreleaser's
@@ -91,7 +102,7 @@ func Upgrade(ctx context.Context, run exec.Runner) (string, error) {
 		parts = append(parts, updateOut)
 	}
 	if err != nil {
-		return strings.Join(parts, "\n\n"), fmt.Errorf("brew update: %w", err)
+		return strings.Join(parts, "\n\n"), fmt.Errorf("%w: %w", ErrTapUpdate, err)
 	}
 
 	upgradeOut, err := run.RunWithEnv(ctx, homebrewSafeEnv, "brew", "upgrade", "--cask", CaskRef)
@@ -99,7 +110,7 @@ func Upgrade(ctx context.Context, run exec.Runner) (string, error) {
 		parts = append(parts, upgradeOut)
 	}
 	if err != nil {
-		return strings.Join(parts, "\n\n"), fmt.Errorf("brew upgrade --cask %s: %w", CaskRef, err)
+		return strings.Join(parts, "\n\n"), fmt.Errorf("%w: %w", ErrCaskUpgrade, err)
 	}
 	return strings.Join(parts, "\n\n"), nil
 }
