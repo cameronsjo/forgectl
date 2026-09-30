@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/cameronsjo/forgectl/internal/perftest"
 	"github.com/yuin/goldmark/ast"
@@ -85,33 +84,41 @@ func TestMarkupGuard_TriggersAreRefused(t *testing.T) {
 	}
 }
 
-// TestMarkupGuard_RenderAndScanAreBounded is the wall-clock check: each
-// trigger at 256 KB renders and scans, in its slow root kind, in well
-// under the bound, where origin/main took from about 3 s to over a minute
-// per trigger. The guard itself runs in milliseconds, so 3 s is generous.
+// TestMarkupGuard_RenderAndScanAreBounded: each trigger at 256 KB renders
+// as the plain-text fallback and renders and scans, in its slow root kind, in
+// time linear in its size, where origin/main took from about 3 s to over a
+// minute per trigger. The check is a ratio (perftest.Linear, forgectl#879,
+// #919) against the same trigger an eighth the size, in process CPU time; a
+// 3 s wall-clock bound failed under host load.
+//
 // Mutation: skipping the guard in renderHidden or scanDocFrom turns this red.
 func TestMarkupGuard_RenderAndScanAreBounded(t *testing.T) {
+	const size, k = 256 << 10, 8
 	dir := t.TempDir()
 	for _, tc := range guardTriggers {
-		src := guardTrigger(tc.pre, tc.unit, 256<<10)
-		start := time.Now()
-		html, _, err := renderHidden(src, tc.kind, nil)
-		if err != nil {
-			t.Fatalf("%s: render: %v", tc.name, err)
-		}
-		if !strings.Contains(html, `data-forgectl-notice="plain-text"`) {
-			t.Errorf("%s: render is not the plain-text fallback", tc.name)
-		}
-		p := filepath.Join(dir, "trigger.md")
-		if err := os.WriteFile(p, src, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := scanDocFor(tc.kind, p, "trigger.md"); err != nil {
-			t.Fatalf("%s: scan: %v", tc.name, err)
-		}
-		if d := time.Since(start); d > 3*time.Second {
-			t.Errorf("%s: render and scan took %v, want well under 3s", tc.name, d)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			renderAndScan := func(src []byte, file string) func() {
+				p := filepath.Join(dir, file)
+				if err := os.WriteFile(p, src, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return func() {
+					html, _, err := renderHidden(src, tc.kind, nil)
+					if err != nil {
+						t.Fatalf("render: %v", err)
+					}
+					if !strings.Contains(html, `data-forgectl-notice="plain-text"`) {
+						t.Fatalf("render of %d bytes is not the plain-text fallback", len(src))
+					}
+					if _, err := scanDocFor(tc.kind, p, file); err != nil {
+						t.Fatalf("scan: %v", err)
+					}
+				}
+			}
+			perftest.Linear(t, "render and scan", k,
+				renderAndScan(guardTrigger(tc.pre, tc.unit, size/k), "small.md"),
+				renderAndScan(guardTrigger(tc.pre, tc.unit, size), "large.md"))
+		})
 	}
 }
 
@@ -466,12 +473,18 @@ func TestScanDoc_GuardedDocIsTitleOnly(t *testing.T) {
 		}
 	}
 	// firstH1 reads one line of any length: a vault title line that is
-	// itself a trigger is not parsed, and the filename stands in.
-	start := time.Now()
-	if got := vaultLineTitle(string(guardTrigger("", "[x](", 256<<10))); got != "" {
-		t.Errorf("vaultLineTitle of a trigger line = %.40q, want \"\"", got)
+	// itself a trigger is not parsed, and the filename stands in, in time
+	// linear in the line (perftest.Linear, #919; it was a 3 s wall-clock
+	// bound). Mutation: dropping the markupTooComplex check from
+	// vaultLineTitle turns this red: the line then parses as a title.
+	const k = 8
+	title := func(size int) func() {
+		line := string(guardTrigger("", "[x](", size))
+		return func() {
+			if got := vaultLineTitle(line); got != "" {
+				t.Fatalf("vaultLineTitle of a %d-byte trigger line = %.40q, want \"\"", len(line), got)
+			}
+		}
 	}
-	if d := time.Since(start); d > 3*time.Second {
-		t.Errorf("vaultLineTitle took %v, want well under 3s", d)
-	}
+	perftest.Linear(t, "vaultLineTitle", k, title(256<<10/k), title(256<<10))
 }

@@ -10,8 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/cameronsjo/forgectl/internal/perftest"
 	"golang.org/x/net/html"
 )
 
@@ -653,24 +653,30 @@ func TestBalanceDeep_OutputIsSanitizerFixedPoint(t *testing.T) {
 	}
 }
 
-// TestBalanceDeep_Linear bounds balanceDeep on about 1MB of adversarial
-// nesting: 170k open <b>, then 170k end tags naming nothing open. A stack
-// search per end tag is 170k squared steps (minutes); the count lookup is
-// linear (well under a second).
+// TestBalanceDeep_Linear bounds balanceDeep on adversarial nesting: 100k
+// open <b>, then 100k end tags naming nothing open. A stack search per end
+// tag is 100k squared steps (tens of seconds); the count lookup is linear.
+// The check is a ratio (perftest.Linear, #919) against the same shape an
+// eighth the size, in process CPU time; it was a 5 s wall-clock bound on
+// 170k, where one quadratic run takes minutes. Much smaller is not safe:
+// at 20k to 40k the linear ratio reached 30 against the limit of 32 under
+// load, where at 100k it stayed under 19.
 //
 // Mutation: in balanceDeep, drop the count[name] == 0 early continue and
 // search the stack for every end tag (guarding i >= 0) — this goes red on
-// the time bound.
+// the ratio (measured 74).
 func TestBalanceDeep_Linear(t *testing.T) {
-	src := strings.Repeat("<b>", 170_000) + "z" + strings.Repeat("</i>", 170_000)
-	start := time.Now()
-	out := balanceDeep(src)
-	if d := time.Since(start); d > 5*time.Second {
-		t.Fatalf("balanceDeep took %v on %d bytes", d, len(src))
+	const n, k = 100_000, 8
+	balance := func(n int) func() {
+		src := strings.Repeat("<b>", n) + "z" + strings.Repeat("</i>", n)
+		return func() {
+			out := balanceDeep(src)
+			if strings.Contains(out, "</i>") || strings.Count(out, "</b>") != n {
+				t.Fatalf("n = %d: stray </i> kept or <b> left open", n)
+			}
+		}
 	}
-	if strings.Contains(out, "</i>") || strings.Count(out, "</b>") != 170_000 {
-		t.Fatalf("stray </i> kept or <b> left open")
-	}
+	perftest.Linear(t, "balanceDeep", k, balance(n/k), balance(n))
 }
 
 // straySVGSpellings is every SVG-only name the policy allows, in the three
