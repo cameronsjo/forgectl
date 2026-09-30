@@ -149,6 +149,25 @@ func TestApply_DoesNotRestoreATabThatMovedAway(t *testing.T) {
 	}
 }
 
+func TestApply_ABackgroundWorkspacesActiveTabThatMovedAwayIsNotRefocused(t *testing.T) {
+	// forge's active tab tA belongs in misc and leaves; the caller is in misc.
+	// Restoring "forge's active tab" would focus tA's new tab, in misc, which
+	// is not forge's active tab any more.
+	w := newWorld(hws("w1", "misc", 1), hws("w2", "forge", 2)).
+		tab("w1", "t9", "term9", "/r/x/z", "caller").
+		tab("w2", "tA", "termA", "/r/x/a", "leaver").
+		tab("w2", "tB", "termB", "/r/forge/b", "stayer")
+	w.active = map[string]string{"w1": "t9", "w2": "tA"}
+	w.focusedTab = "t9"
+	a := runApply(t, inSession, w)
+	if a.err != nil {
+		t.Fatalf("err = %v", a.err)
+	}
+	if want := []string{"tab:t9"}; !reflect.DeepEqual(w.focusLog, want) {
+		t.Errorf("focusLog = %v, want only the caller's tab: forge's recorded active tab left forge", w.focusLog)
+	}
+}
+
 func TestApply_ResolvesEachTabByTerminalRightBeforeItsMove(t *testing.T) {
 	w := sessionWorld()
 	w.renumberAll = true // moving t1 out renumbers t2 and t3, so the planned ids go stale

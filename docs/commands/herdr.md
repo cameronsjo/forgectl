@@ -64,7 +64,7 @@ When moves are pending the report says `tab order will be rechecked after the mo
 
 Focus is restored to the tab, not the pane: herdr cannot focus a pane by id, so a focused pane inside a split tab is not put back to pane grain. A tab that left its workspace is not restored as that workspace's active tab.
 
-When herdr declines to create a workspace, the run goes on and the next tab for that label tries to create it. Any other failure stops the run, restores focus, and prints four lines:
+When herdr declines a move, the run goes on with the moves and stages that do not depend on it (the next tab for a label whose creation was declined tries to create it), then exits 1 naming each refused move. Any other herdr failure stops the run, restores focus, and prints four lines:
 
 ```text
 moving "title" [t7] to forge failed: <why>
