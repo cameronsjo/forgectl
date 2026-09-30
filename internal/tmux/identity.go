@@ -220,7 +220,7 @@ var (
 	// every caller that does not opt in keeps failing closed — which is what
 	// a kill-time or teardown "gone" verdict needs, because a refused connect
 	// proves no server listens NOW, not that a crashed server's panes died
-	// with it (#765). Listings shown to an operator (DisplaySessions,
+	// with it (#765). Listings shown to an operator (DisplaySessionListing,
 	// DisplayWindows), EnsureSession's create, and CheckGenerationCapability
 	// opt in and read it as "no server".
 	//

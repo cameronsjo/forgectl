@@ -146,8 +146,8 @@ func TestDeadSocketIsEmptyOnlyForOptedInCallers(t *testing.T) {
 	c, _ := deadSocketClient(fake, socket, syscall.ECONNREFUSED)
 	ctx := context.Background()
 
-	if sessions, err := c.DisplaySessions(ctx); err != nil || len(sessions) != 0 {
-		t.Fatalf("DisplaySessions = (%v, %v), want empty, nil", sessions, err)
+	if sessions, unreadable, err := c.DisplaySessionListing(ctx); err != nil || len(sessions) != 0 || unreadable != 0 {
+		t.Fatalf("DisplaySessionListing = (%v, %d, %v), want empty, 0, nil", sessions, unreadable, err)
 	}
 	if windows, err := c.DisplayWindows(ctx); err != nil || len(windows) != 0 {
 		t.Fatalf("DisplayWindows = (%v, %v), want empty, nil", windows, err)

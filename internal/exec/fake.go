@@ -2,6 +2,8 @@ package exec
 
 import (
 	"context"
+	"path/filepath"
+	"slices"
 	"sync"
 )
 
@@ -10,9 +12,13 @@ import (
 // was piped into stdin, and — for the environment modes — the overrides and
 // removals passed. Tests assert on these to check command construction (the
 // argv tmux/sesh actually receive).
+//
+// For a tmux call, Args is the argv with the client's leading `-u` removed and
+// TmuxUTF8 records whether it was there (see tmuxView).
 type Call struct {
 	Name        string
 	Args        []string
+	TmuxUTF8    bool
 	Interactive bool
 	Input       string
 	Env         map[string]string
@@ -39,57 +45,35 @@ type FakeRunner struct {
 // guarded because callers like projects.Inventory invoke Run from concurrent
 // goroutines.
 func (f *FakeRunner) Run(_ context.Context, name string, args ...string) (string, error) {
-	f.mu.Lock()
-	f.Calls = append(f.Calls, Call{Name: name, Args: args})
-	f.mu.Unlock()
-	if f.RunFunc != nil {
-		return f.RunFunc(name, args)
-	}
-	return "", nil
+	return f.answer(Call{Name: name}, args)
 }
 
 // RunWithInput records the call (with Input set to stdin) and delegates to
 // RunFunc, same as Run — RunFunc doesn't see stdin, only name/args, so a
 // test that needs to branch on the piped input reads it back off Calls.
 func (f *FakeRunner) RunWithInput(_ context.Context, stdin string, name string, args ...string) (string, error) {
-	f.mu.Lock()
-	f.Calls = append(f.Calls, Call{Name: name, Args: args, Input: stdin})
-	f.mu.Unlock()
-	if f.RunFunc != nil {
-		return f.RunFunc(name, args)
-	}
-	return "", nil
+	return f.answer(Call{Name: name, Input: stdin}, args)
 }
 
 // RunWithEnv records the call (with Env set) and delegates to RunFunc, same
 // as Run — RunFunc doesn't see env, only name/args, so a test that needs to
 // branch on the env reads it back off Calls.
 func (f *FakeRunner) RunWithEnv(_ context.Context, env map[string]string, name string, args ...string) (string, error) {
-	f.mu.Lock()
-	f.Calls = append(f.Calls, Call{Name: name, Args: args, Env: env})
-	f.mu.Unlock()
-	if f.RunFunc != nil {
-		return f.RunFunc(name, args)
-	}
-	return "", nil
+	return f.answer(Call{Name: name, Env: env}, args)
 }
 
 // RunWithEnvFiltered records both environment overrides and exact removals,
 // then delegates to RunFunc like the other captured-output modes.
 func (f *FakeRunner) RunWithEnvFiltered(_ context.Context, env map[string]string, unset []string, name string, args ...string) (string, error) {
-	f.mu.Lock()
-	f.Calls = append(f.Calls, Call{Name: name, Args: args, Env: env, UnsetEnv: unset})
-	f.mu.Unlock()
-	if f.RunFunc != nil {
-		return f.RunFunc(name, args)
-	}
-	return "", nil
+	return f.answer(Call{Name: name, Env: env, UnsetEnv: unset}, args)
 }
 
 // RunInteractive records the call (flagged interactive) and returns InteractiveErr.
 func (f *FakeRunner) RunInteractive(_ context.Context, name string, args ...string) error {
+	call := Call{Name: name, Interactive: true}
+	call.Args, call.TmuxUTF8 = tmuxView(name, args)
 	f.mu.Lock()
-	f.Calls = append(f.Calls, Call{Name: name, Args: args, Interactive: true})
+	f.Calls = append(f.Calls, call)
 	f.mu.Unlock()
 	return f.InteractiveErr
 }
@@ -102,4 +86,96 @@ func (f *FakeRunner) Last() Call {
 		return Call{}
 	}
 	return f.Calls[len(f.Calls)-1]
+}
+
+// answer records call with the argv tmuxView presents, then produces RunFunc's
+// reply for that same view.
+func (f *FakeRunner) answer(call Call, args []string) (string, error) {
+	call.Args, call.TmuxUTF8 = tmuxView(call.Name, args)
+	f.mu.Lock()
+	f.Calls = append(f.Calls, call)
+	f.mu.Unlock()
+	if f.RunFunc == nil {
+		return "", nil
+	}
+	out, err := f.RunFunc(call.Name, call.Args)
+	if call.TmuxUTF8 {
+		err = issuedArgvError(err, call, args)
+	}
+	return out, err
+}
+
+// issuedArgvError makes a CommandError a RunFunc built from the argv it was
+// shown name the argv the caller issued, because a real runner's does and
+// internal/tmux compares the two to classify a failure.
+//
+// Only a *CommandError returned directly, naming exactly this call's view, is
+// replaced, and it is replaced by a COPY: a RunFunc may return one error value
+// from every call, and rewriting it in place would change what that value says
+// to the test holding it and to every later call. The copy keeps Err, so
+// errors.Is and errors.As through it reach what the original reached; it is
+// not the same pointer, so errors.Is(err, original) no longer holds. A
+// CommandError wrapped inside another error is returned untouched, because
+// rebuilding an arbitrary wrapper chain around a copy is not possible.
+func issuedArgvError(err error, call Call, issued []string) error {
+	cmdErr, ok := err.(*CommandError) //nolint:errorlint // only a direct CommandError is replaced; see above
+	if !ok || cmdErr.Name != call.Name || !slices.Equal(cmdErr.Args, call.Args) {
+		return err
+	}
+	cp := *cmdErr
+	cp.Args = slices.Clone(issued)
+	return &cp
+}
+
+// tmuxView is the argv a tmux call presents to RunFunc and to Calls: the
+// caller's argv with internal/tmux's `-u` removed from the leading global
+// options, and whether it was there (forgectl#840).
+//
+// internal/tmux passes `-u` on every non-interactive command, after the
+// `-S <socket>` pin when there is one. Nearly every tmux fake in the tree
+// branches on args[0] and asserts exact argv, all written before that flag
+// existed, so presenting them the argv without it keeps each one reading the
+// command it was written for; a test that cares about the flag reads
+// Call.TmuxUTF8. Only the flag is removed. The other leading global options
+// (`-S <path>`, `-L <name>`, `-f <file>`) are skipped over while looking for
+// it and stay in the view, because the socket-pin tests assert them. Any
+// other binary's argv passes through untouched.
+func tmuxView(name string, args []string) ([]string, bool) {
+	if filepath.Base(name) != "tmux" {
+		return args, false
+	}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-u":
+			return append(slices.Clone(args[:i]), args[i+1:]...), true
+		case "-S", "-L", "-f":
+			i++ // skip the option's value
+		default:
+			return args, false
+		}
+	}
+	return args, false
+}
+
+// TmuxSubcommand is a tmux argv past its leading global options: `-u` (which
+// internal/tmux passes on every non-interactive call, forgectl#840) and the
+// value-taking `-S <path>`, `-L <name>` and `-f <file>`. It is the one
+// definition every hand-written test runner and verb helper uses to find the
+// command it keys on, rather than reading args[0], which is `-u` or `-S` on a
+// real argv. A global option missing its value leaves nothing.
+func TmuxSubcommand(args []string) []string {
+	for len(args) > 0 {
+		switch args[0] {
+		case "-u":
+			args = args[1:]
+		case "-S", "-L", "-f":
+			if len(args) < 2 {
+				return nil
+			}
+			args = args[2:]
+		default:
+			return args
+		}
+	}
+	return args
 }

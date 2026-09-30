@@ -94,6 +94,11 @@ func workspaceSet(tempRoot string) map[string]bool {
 }
 
 func (r *tmuxRoutingRunner) record(name string, args []string) {
+	// A tmux verb is the first argument past tmux's leading global options,
+	// which include the -u internal/tmux passes (forgectl#840).
+	if r.isTmux(name) {
+		args = internalexec.TmuxSubcommand(args)
+	}
 	verb := ""
 	if len(args) > 0 {
 		verb = args[0]

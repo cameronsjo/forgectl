@@ -59,12 +59,11 @@ func findCall(calls []exec.Call, name string) (exec.Call, bool) {
 // wrapped in a generation guard (forgectl#756): an if-shell whose then-branch
 // is the kill-window, so that argv reads as kill-window here. Keying on
 // args[0] alone would make every "no kill ran" assertion in this package pass
-// vacuously against the guarded form. A leading -S pin is skipped, as its
-// twin in internal/tmux does, so a pinned argv reads as its command too.
+// vacuously against the guarded form. Leading global options (the -S pin, -u)
+// are skipped, as its twin in internal/tmux does, so a pinned argv reads as
+// its command too.
 func tmuxVerb(args []string) string {
-	if len(args) >= 2 && args[0] == "-S" {
-		args = args[2:]
-	}
+	args = exec.TmuxSubcommand(args)
 	if len(args) == 0 {
 		return ""
 	}
@@ -77,10 +76,16 @@ func tmuxVerb(args []string) string {
 
 // TestTmuxVerbSeesThroughPinAndGuard pins the helper every "no kill ran"
 // assertion in this package rests on. Mutation that turns it red: drop the
-// -S skip, and a pinned guarded kill reads as "-S".
+// -S skip, and a pinned guarded kill reads as "-S"; drop the -u skip, and a
+// kill carrying internal/tmux's -u (forgectl#840) reads as "-u".
 func TestTmuxVerbSeesThroughPinAndGuard(t *testing.T) {
 	guarded := []string{"if-shell", "-F", "-t", "@1", "#{==:#{pid}/#{start_time},1/2}", "kill-window -t @1", "display-message -p x"}
-	for _, args := range [][]string{guarded, append([]string{"-S", "/tmp/s"}, guarded...)} {
+	for _, args := range [][]string{
+		guarded,
+		append([]string{"-S", "/tmp/s"}, guarded...),
+		append([]string{"-u"}, guarded...),
+		append([]string{"-S", "/tmp/s", "-u"}, guarded...),
+	} {
 		if got := tmuxVerb(args); got != "kill-window" {
 			t.Errorf("tmuxVerb(%v) = %q, want kill-window", args, got)
 		}

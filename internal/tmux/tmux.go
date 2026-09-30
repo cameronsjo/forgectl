@@ -172,9 +172,10 @@ func NewPinned(run exec.Runner, socket string, opts ...Option) (*Client, error) 
 	return c, nil
 }
 
-// tmuxArgs prefixes a tmux argv with the client's socket pin. It is the single
-// DEFINITION of the `-S` spelling — every call site in this package routes
-// through it. It is not an enforcement mechanism: a call site can still forget
+// tmuxArgs prefixes a tmux argv with the client's socket pin and `-u`. With
+// interactiveArgs it is the only way this package builds a tmux argv, and
+// pinArgs under both is the single DEFINITION of the `-S` spelling. It is not
+// an enforcement mechanism: a call site can still forget
 // to call it, and nothing here would notice. What catches that is
 // TestPinnedClientPinsEveryCommand, which drives each method far enough to
 // issue its command and asserts the recorded argv.
@@ -184,17 +185,43 @@ func NewPinned(run exec.Runner, socket string, opts ...Option) (*Client, error) 
 // these two leading elements, and one spelling on both sides is what keeps that
 // match a comparison instead of a parse of tmux's option grammar.
 //
-// Both branches return a slice the caller may append to without touching
-// anything else. The clone is not decorative: Go passes a named slice through a
-// variadic parameter WITHOUT copying, so returning `args` directly would hand
-// back the caller's own array — and CreateSession already appends to this
-// result. Without the clone the hazard would also be mode-dependent, present
-// unpinned and absent pinned, which is the worst shape for a latent bug.
+// It returns a fresh slice the caller may append to without touching anything
+// else. That is not decorative: Go passes a named slice through a variadic
+// parameter WITHOUT copying, so returning `args` itself would hand back the
+// caller's own array — and CreateSession already appends to this result.
+//
+// Every argv it builds also carries `-u` (forgectl#840), after the pin so the
+// `-S <path>` pair stays the two leading elements classifyServerFailure
+// matches. `-u` sets CLIENT_UTF8 on this command client, which is what keeps
+// tmux from running its output through utf8_sanitize: without it, under a
+// non-UTF-8 locale with $TMUX unset, tmux 3.4 renders a session named `café`
+// as `caf_` (measured), and tmux 3.7b turns the 0x1F field separator into `_`
+// as well (measured; 3.7c shares the code path), so every -F listing loses
+// its fields. On 3.4 the flag only changes how THIS client prints: a name
+// created without it is stored intact and lists intact with it. It is never
+// passed to an interactive client — see interactiveArgs.
 func (c *Client) tmuxArgs(args ...string) []string {
+	return append(c.pinArgs("-u"), args...)
+}
+
+// interactiveArgs is tmuxArgs without `-u`, for the attach path:
+// attach-session, and the switch-client that stands in for it inside tmux.
+// attach-session hands the operator's terminal to tmux, and `-u` there would
+// override tmux's own reading of what that terminal can render, painting UTF-8
+// at a terminal whose locale says it may not decode it. switch-client keeps the
+// same rule so the inside and outside halves of one jump stay symmetric. None of
+// these reads -F output, which is the only thing `-u` exists to protect.
+func (c *Client) interactiveArgs(args ...string) []string {
+	return append(c.pinArgs(), args...)
+}
+
+// pinArgs returns a fresh slice holding the socket pin, if any, followed by
+// extra. It is the one spelling of `-S` both argv builders share.
+func (c *Client) pinArgs(extra ...string) []string {
 	if c.socket == "" {
-		return slices.Clone(args)
+		return slices.Clone(extra)
 	}
-	return append([]string{"-S", c.socket}, args...)
+	return append([]string{"-S", c.socket}, extra...)
 }
 
 // escapeArgvSeparator is tmuxesc.ArgvSeparator, which documents the tmux

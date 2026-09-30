@@ -18,7 +18,7 @@ import (
 // anything gone.
 //
 // Mutation that turns it red: remove the serverDeadSocket arm from
-// classifyServerFailure. DisplaySessions then fails with ErrServerUnreadable,
+// classifyServerFailure. DisplaySessionListing then fails with ErrServerUnreadable,
 // and EnsureSession refuses to create.
 func TestDeadSocketAfterCleanExitIsolated(t *testing.T) {
 	c, runner, tmuxBin := isolatedTmux(t)
@@ -38,8 +38,8 @@ func TestDeadSocketAfterCleanExitIsolated(t *testing.T) {
 		t.Skipf("this tmux unlinked its socket on exit (lstat %v); the #786 state does not arise", err)
 	}
 
-	if sessions, err := c.DisplaySessions(ctx); err != nil || len(sessions) != 0 {
-		t.Fatalf("DisplaySessions = (%v, %v), want empty, nil", sessions, err)
+	if sessions, unreadable, err := c.DisplaySessionListing(ctx); err != nil || len(sessions) != 0 || unreadable != 0 {
+		t.Fatalf("DisplaySessionListing = (%v, %d, %v), want empty, 0, nil", sessions, unreadable, err)
 	}
 	if tree, err := c.Tree(ctx, false); err != nil {
 		t.Fatalf("Tree over an exited server: %v (%q)", err, tree)

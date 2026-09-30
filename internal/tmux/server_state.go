@@ -300,21 +300,17 @@ func hasExplicitSocketArg(args []string) bool {
 	return false
 }
 
-// DisplaySessions is ListSessions for a listing shown to an operator: a server
-// that has exited and left its socket behind (ErrServerExited) reads as no
-// sessions, exactly like a server that never ran (forgectl#786). It is for
+// DisplaySessionListing is ListSessions for a listing shown to an operator: a
+// server that has exited and left its socket behind (ErrServerExited) reads as
+// no sessions, exactly like a server that never ran (forgectl#786). It is for
 // display only. A "gone" verdict must come from ListSessions or a
 // revalidation, which keep failing closed on that state.
-func (c *Client) DisplaySessions(ctx context.Context) ([]Session, error) {
-	sessions, _, err := c.DisplaySessionListing(ctx)
-	return sessions, err
-}
-
-// DisplaySessionListing is DisplaySessions plus the number of session rows
-// tmux returned that could not be read, most likely because a name carries
-// the field separator (forgectl#806). Such a session is real but cannot be
-// resolved, renamed or killed through forgectl, so a listing should say it
-// exists rather than show one fewer session with no sign of it.
+//
+// It also returns the number of session rows tmux returned that could not be
+// read, most likely because a name carries the field separator (forgectl#806).
+// Such a session is real but cannot be resolved, renamed or killed through
+// forgectl, so a listing should say it exists rather than show one fewer
+// session with no sign of it.
 func (c *Client) DisplaySessionListing(ctx context.Context) (sessions []Session, unreadable int, err error) {
 	sessions, unreadable, err = c.listSessions(ctx)
 	if errors.Is(err, ErrServerExited) {
@@ -323,7 +319,7 @@ func (c *Client) DisplaySessionListing(ctx context.Context) (sessions []Session,
 	return sessions, unreadable, err
 }
 
-// DisplayWindows is ListWindows under DisplaySessions' rule.
+// DisplayWindows is ListWindows under DisplaySessionListing's rule.
 func (c *Client) DisplayWindows(ctx context.Context) ([]Window, error) {
 	windows, _, err := c.DisplayWindowListing(ctx)
 	return windows, err
@@ -381,7 +377,7 @@ func (u UnreadableRows) Note() string {
 	return joined + " could not be read and are not listed — " + cause
 }
 
-// DisplayPaneListing is ListPanes under DisplaySessions' rule, plus the
+// DisplayPaneListing is ListPanes under DisplaySessionListing's rule, plus the
 // number of pane rows tmux returned that could not be read (forgectl#823), for
 // DisplaySessionListing's reason.
 func (c *Client) DisplayPaneListing(ctx context.Context) (panes []Pane, unreadable int, err error) {
