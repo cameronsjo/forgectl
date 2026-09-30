@@ -31,13 +31,14 @@
 
   var STORAGE_KEY = "forgectl-docs-scroll";
 
-  // Chrome is found by data-fc, never by class or tag (forgectl#643). The
-  // sanitizer lets a doc carry any class and some of these tags (a raw
-  // <aside class="outline"> survives it), and a planted copy that comes first
-  // in document order would be the one a lookup returns. A data-fc cannot be
-  // planted: the sanitizer strips every data-* attribute from the doc, and
-  // mermaid-init.js scrubs data-fc from rendered diagrams, whose own
-  // sanitizer keeps data-*.
+  // Chrome is found by data-fc, never by class or tag (forgectl#643). A doc
+  // keeps some of these tags (a raw <aside> survives the sanitizer), and a
+  // planted copy that comes first in document order would be the one a tag
+  // lookup returns. Its chrome class names are stripped since forgectl#700
+  // (chromeclass.go), but every other class survives, so a class lookup is
+  // no safer. A data-fc cannot be planted: the sanitizer strips every data-*
+  // attribute from the doc, and mermaid-init.js scrubs data-fc from rendered
+  // diagrams, whose own sanitizer keeps data-*.
   var MAIN = '[data-fc="doc-main"]';
   var SIDENAV = '[data-fc="sidenav"]';
   var DOC_BODY = '[data-fc="doc-body"]';
@@ -128,6 +129,10 @@
   function focusKey() {
     var el = document.activeElement;
     if (!el || el === document.body) { return null; }
+    // Focus inside a diagram is mermaid-init.js's to key and restore: the
+    // diagram is re-rendered after the swap (forgectl#718).
+    var diagram = window.ForgectlMermaid ? window.ForgectlMermaid.focusKey(el) : null;
+    if (diagram) { return diagram; }
     var region = el.closest("[data-fc]");
     var key = { region: region ? region.getAttribute("data-fc") : null };
     if (el.id) { key.id = el.id; return key; }
@@ -149,7 +154,7 @@
   }
 
   function restoreFocus(key) {
-    if (!key) { return; }
+    if (!key || key.diagram !== undefined) { return; }
     // Outside every region (only the skip link) the page is the region.
     var root = key.region === null
       ? document.documentElement
@@ -216,10 +221,13 @@
     if (filter && filter.value.trim() !== "") {
       filter.dispatchEvent(new Event("input"));
     }
-    if (window.ForgectlMermaid) { window.ForgectlMermaid.refresh(); }
+    var rendered = window.ForgectlMermaid ? window.ForgectlMermaid.refresh() : null;
     if (window.ForgectlMath) { window.ForgectlMath.refresh(); }
     applyAnchor(anchor);
     restoreFocus(focus);
+    if (focus && focus.diagram !== undefined) {
+      Promise.resolve(rendered).then(function () { window.ForgectlMermaid.restoreFocus(focus); });
+    }
     return true;
   }
 
