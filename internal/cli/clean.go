@@ -301,7 +301,8 @@ func runCleanCaches(cmd *cobra.Command, client *cleanpkg.Client, apply bool, th 
 		case item.Skipped:
 			// Already printed in the preview pass above.
 		case item.Err != nil:
-			_, _ = fmt.Fprintf(out, "FAILED  %s: %v\n", cacheDisplayName(item.Kind), termsafe.Error(item.Err))
+			// termsafe.Error, not Categorical, on purpose: see cleanFailureText.
+			_, _ = fmt.Fprintf(out, "FAILED  %s: %s\n", cacheDisplayName(item.Kind), cleanFailureText(item.Err))
 			failed++
 		case item.Applied:
 			// Reclaimed is the ACTUAL measured delta (dirSize before vs
@@ -417,7 +418,8 @@ func runCleanDocker(cmd *cobra.Command, client *cleanpkg.Client, apply bool, th 
 		case item.Skipped:
 			// Already printed in the preview pass above.
 		case item.Err != nil:
-			_, _ = fmt.Fprintf(out, "FAILED  %s: %v\n", item.Kind, termsafe.Error(item.Err))
+			// termsafe.Error, not Categorical, on purpose: see cleanFailureText.
+			_, _ = fmt.Fprintf(out, "FAILED  %s: %s\n", item.Kind, cleanFailureText(item.Err))
 			failed++
 		case item.Applied && item.ReclaimedKnown:
 			// Reclaimed is parsed from docker's OWN prune-command output,
@@ -487,7 +489,7 @@ func countCacheDetected(items []cleanpkg.CacheItem) int {
 func printDockerItems(out io.Writer, items []cleanpkg.DockerItem) {
 	for _, item := range items {
 		if item.Skipped {
-			_, _ = fmt.Fprintf(out, "skip  %-11s — %s\n", item.Kind, termsafe.SafeLine(item.SkipReason))
+			_, _ = fmt.Fprintf(out, "skip  %-11s — %s\n", item.Kind, termsafe.SafeLineMax(item.SkipReason, cleanDiagnosticMaxRunes))
 			continue
 		}
 		size := formatBytes(item.Reclaimable)
@@ -503,8 +505,33 @@ func printDockerItems(out io.Writer, items []cleanpkg.DockerItem) {
 				size = "unknown"
 			}
 		}
-		_, _ = fmt.Fprintf(out, "%-11s %s\n", item.Kind, size)
+		// Reported is decoded from `docker system df` JSON, and the daemon
+		// can be remote, so it is escaped and capped like the skip reason
+		// above. It never reaches --json, which is dep/build-dir only.
+		_, _ = fmt.Fprintf(out, "%-11s %s\n", item.Kind, termsafe.SafeLineMax(size, cleanDiagnosticMaxRunes))
 	}
+}
+
+// cleanDiagnosticMaxRunes caps a subprocess or docker-daemon diagnostic in a
+// clean row. exec keeps up to a 64 KiB stderr tail, and each FAILED row or
+// docker skip line would otherwise print all of it as one escaped line
+// (forgectl#867). A head cap keeps the command name and the start of the
+// tool's own message. Keeping only the first raw line was the alternative,
+// and it was rejected: exec keeps the stderr TAIL, so that first line can
+// begin mid-line, and a one-line tool error loses nothing to a 512-rune cap.
+const cleanDiagnosticMaxRunes = 512
+
+// cleanFailureText renders a prune/clear failure for a FAILED row.
+//
+// It uses termsafe.Error, NOT termsafe.Categorical, although Categorical's own
+// doc names subprocess stderr as its use case. Two things make the tool's text
+// safe to keep here: exec's CommandError already runs stderr through
+// redact.Text, and that text is the only diagnostic the operator gets for why
+// brew/npm/docker refused — a fixed category string would leave them nothing
+// to act on. Escaping (termsafe.Error) and a length cap (SafeLineMax) bound
+// what it can do to the terminal. Do not "fix" this back to Categorical.
+func cleanFailureText(err error) string {
+	return termsafe.SafeLineMax(termsafe.Error(err).Error(), cleanDiagnosticMaxRunes)
 }
 
 // totalDockerReclaimable sums the parsed reclaimable bytes across items.

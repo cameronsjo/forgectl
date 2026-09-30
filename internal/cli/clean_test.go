@@ -47,9 +47,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	cleanpkg "github.com/cameronsjo/forgectl/internal/clean"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -831,4 +833,123 @@ func TestCleanCmd_CachesAndDockerRowsAreInert(t *testing.T) {
 		}, "--docker", "--apply")
 		assertInert(t, got, "FAILED  images: daemon said "+escaped)
 	})
+}
+
+// TestCleanCmd_DiagnosticRowsAreCapped is forgectl#867 items 1 and 3: the
+// --caches and --docker FAILED rows and the docker-unreachable skip row are
+// escaped (forgectl#864) AND bounded. exec keeps up to a 64 KiB stderr tail,
+// and without a cap each of those rows prints all of it as one line — the
+// skip row once per docker category.
+//
+// Mutations that turn it red, one per subtest: drop the SafeLineMax in
+// cleanFailureText (both FAILED rows), or render item.SkipReason with plain
+// SafeLine in printDockerItems.
+func TestCleanCmd_DiagnosticRowsAreCapped(t *testing.T) {
+	failure := errors.New("daemon said " + strings.Repeat("x", 64*1024))
+	dfOut := `{"Type":"Images","TotalCount":"1","Active":"0","Size":"1GB","Reclaimable":"500MB"}`
+	run := func(t *testing.T, runFunc func(string, []string) (string, error), args ...string) string {
+		t.Helper()
+		withConfirmFn(t, func(string) (bool, error) { return true, nil })
+		client := cleanpkg.New(&exec.FakeRunner{RunFunc: runFunc}, cleanpkg.WithRoot(t.TempDir()))
+		cmd := newCleanCmdForClient(client, theme.Theme{})
+		var stdout bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(new(bytes.Buffer))
+		cmd.SetArgs(args)
+		_ = cmd.ExecuteContext(context.Background())
+		return stdout.String()
+	}
+	// assertCapped checks every line starting with prefix: at least one must
+	// exist, each must end in the truncation marker, and none may exceed the
+	// cap plus the row's own fixed label.
+	assertCapped := func(t *testing.T, got, prefix string, wantRows int) {
+		t.Helper()
+		const labelSlack = 64
+		rows := 0
+		for _, line := range strings.Split(got, "\n") {
+			if !strings.HasPrefix(line, prefix) {
+				continue
+			}
+			rows++
+			if n := utf8.RuneCountInString(line); n > cleanDiagnosticMaxRunes+utf8.RuneCountInString(termsafe.TruncatedMarker)+labelSlack {
+				t.Errorf("row %q... is %d runes, over the %d-rune cap", line[:40], n, cleanDiagnosticMaxRunes)
+			}
+			if !strings.HasSuffix(line, termsafe.TruncatedMarker) {
+				t.Errorf("capped row does not end in the truncation marker: ...%q", line[len(line)-40:])
+			}
+		}
+		if rows != wantRows {
+			t.Errorf("found %d %q row(s), want %d; stdout starts %q", rows, prefix, wantRows, got[:min(len(got), 200)])
+		}
+	}
+
+	t.Run("caches FAILED row", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(cacheDir, "blob"), make([]byte, 1024), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		got := run(t, func(name string, args []string) (string, error) {
+			switch {
+			case name == "npm" && len(args) > 0 && args[0] == "cache":
+				return "", failure
+			case name == "npm":
+				return cacheDir, nil
+			}
+			return "", errors.New("not installed")
+		}, "--caches", "--apply")
+		assertCapped(t, got, "FAILED  npm: ", 1)
+	})
+
+	t.Run("docker skip row", func(t *testing.T) {
+		got := run(t, func(string, []string) (string, error) { return "", failure }, "--docker")
+		assertCapped(t, got, "skip  ", 4)
+	})
+
+	t.Run("docker FAILED row", func(t *testing.T) {
+		got := run(t, func(name string, args []string) (string, error) {
+			if name == "docker" && len(args) > 1 && args[0] == "system" && args[1] == "df" {
+				return dfOut, nil
+			}
+			return "", failure
+		}, "--docker", "--apply")
+		assertCapped(t, got, "FAILED  images: ", 1)
+	})
+}
+
+// TestCleanCmd_DockerReportedSizeIsInert is forgectl#867 item 7: when a
+// category's size does not parse, the docker preview shows docker's own raw
+// Reclaimable string. That string is decoded from `docker system df` JSON and
+// the daemon can be remote, so it reaches the terminal escaped and capped.
+//
+// Mutation that turns it red: print item.Reported (the size variable) raw in
+// printDockerItems.
+func TestCleanCmd_DockerReportedSizeIsInert(t *testing.T) {
+	const hostile = "1.2XB\u202e\u009b31m"
+	dfOut := strings.Join([]string{
+		`{"Type":"Images","TotalCount":"1","Active":"0","Size":"1GB","Reclaimable":"` + hostile + `"}`,
+		`{"Type":"Containers","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+		`{"Type":"Local Volumes","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+		`{"Type":"Build Cache","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+	}, "\n")
+	fake := &exec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
+		if name == "docker" {
+			return dfOut, nil
+		}
+		return "", nil
+	}}
+	cmd := newCleanCmdForClient(cleanpkg.New(fake, cleanpkg.WithRoot(t.TempDir())), theme.Theme{})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--docker"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("clean --docker: %v", err)
+	}
+	got := stdout.String()
+	if strings.ContainsAny(got, "\u202e\u009b") {
+		t.Errorf("stdout carries a raw bidi/control rune: %q", got)
+	}
+	if want := `images      1.2XB\u202e\u009b31m`; !strings.Contains(got, want) {
+		t.Errorf("stdout = %q, want it to contain %q", got, want)
+	}
 }

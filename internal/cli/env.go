@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -158,10 +159,18 @@ func newEnvCmd(deps module.Deps) *cobra.Command {
 	return newEnvCmdForClient(client, sopspkg.NewClient(deps.SensitiveRunner), clip, deps.Theme)
 }
 
+// sopsSetter is the one sops operation the --sops route calls.
+// *sopspkg.Client is the production implementation; the interface is the
+// seam that lets a test drive the route's success lines without a sops
+// binary on PATH (forgectl#867).
+type sopsSetter interface {
+	SetValue(ctx context.Context, target envpkg.Target, rawPath, rawValue string) (sopspkg.Outcome, error)
+}
+
 // newEnvCmdForClient builds the command over an already-constructed
 // client — split out so tests can inject a fake-wired *env.Client (mirrors
 // newYCmdForClient/newDockerCmdForClient) without going through newEnvCmd.
-func newEnvCmdForClient(client *envpkg.Client, sopsClient *sopspkg.Client, clip *clippkg.Client, th theme.Theme) *cobra.Command {
+func newEnvCmdForClient(client *envpkg.Client, sopsClient sopsSetter, clip *clippkg.Client, th theme.Theme) *cobra.Command {
 	var file string
 	var anyFile bool
 
@@ -303,7 +312,7 @@ func newEnvKeysCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command {
 }
 
 // newEnvSetCmd builds `env set`.
-func newEnvSetCmd(client *envpkg.Client, sopsClient *sopspkg.Client, clip *clippkg.Client, file *string, anyFile *bool, th theme.Theme) *cobra.Command {
+func newEnvSetCmd(client *envpkg.Client, sopsClient sopsSetter, clip *clippkg.Client, file *string, anyFile *bool, th theme.Theme) *cobra.Command {
 	var clipboard bool
 	var useSops bool
 
@@ -404,7 +413,7 @@ const sopsDefaultFile = "secrets.sops.yaml"
 // carried the time-of-check/time-of-use defect fixed in the commit this
 // branch sits on. Refusing costs a rename and takes a whole class of bug off
 // the table.
-func runEnvSetSops(cmd *cobra.Command, sopsClient *sopspkg.Client, clip *clippkg.Client, file, cwd, key string, clipboard bool) error {
+func runEnvSetSops(cmd *cobra.Command, sopsClient sopsSetter, clip *clippkg.Client, file, cwd, key string, clipboard bool) error {
 	// The .env default would aim at the wrong file, so substitute this
 	// route's own default when --file was not given. Changed() reads the
 	// parent's persistent flag correctly — pflag shares the *Flag pointer.

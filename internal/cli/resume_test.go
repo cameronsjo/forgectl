@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -816,5 +817,137 @@ func TestResumeSession_CapsTheSessionName(t *testing.T) {
 		if !strings.Contains(text, termsafe.TruncatedMarker) {
 			t.Errorf("%s = %.300q, want the truncation marker", sink, text)
 		}
+	}
+}
+
+// TestResumeSession_ResumingLineIsInert is forgectl#867 item 5: the
+// "resuming" line printed just before the exec carries the transcript-derived
+// session name and the session's cwd, and both reach the terminal escaped —
+// the name capped, the cwd quoted. The runes are \u escapes so no literal
+// format character sits in source.
+//
+// Mutations that turn it red: print displayName(s) in place of safeName(s),
+// or s.Cwd in place of termsafe.QuotePath(s.Cwd), on the resuming line.
+func TestResumeSession_ResumingLineIsInert(t *testing.T) {
+	fakeClaudeBin(t)
+	pinResumePaths(t)
+	pinCwd(t)
+	installUsageProbe(t)
+	cwd := filepath.Join(t.TempDir(), "ev\u202eil\u009b31m")
+	if err := os.Mkdir(cwd, 0o750); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	s := resume.Session{
+		ID:   "aaaaaaaa-0000-0000-0000-000000000011",
+		Name: "na\u202eme" + strings.Repeat("n", 5000),
+		Cwd:  cwd,
+	}
+	cmd, _, errOut := newTestCmd()
+	if err := resumeSession(cmd, usageResumeConfig(false), nil, s, false, false); err != nil {
+		t.Fatalf("resumeSession: %v", err)
+	}
+	var line string
+	for _, l := range strings.Split(errOut.String(), "\n") {
+		if strings.HasPrefix(l, "forgectl: resuming ") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("stderr = %q, want a resuming line", errOut.String())
+	}
+	assertInert(t, line)
+	if strings.ContainsRune(line, '\u202e') {
+		t.Errorf("resuming line carries a raw bidi override: %q", line)
+	}
+	if !strings.HasPrefix(line, `forgectl: resuming na\u202eme`) || !strings.Contains(line, termsafe.TruncatedMarker+" in ") {
+		t.Errorf("resuming line = %.200q, want the escaped name capped with the truncation marker", line)
+	}
+	if !strings.HasSuffix(line, `ev\u202eil\u009b31m"`) {
+		t.Errorf("resuming line = ...%q, want the cwd quoted and escaped", line[max(0, len(line)-80):])
+	}
+}
+
+// TestResumeSession_RestoreFailureIsInert is forgectl#867 item 8: a failed task
+// restore prints the error internal/resume returned, and that error can wrap a
+// raw *PathError (`restore task %s: %w`). The path is under ~/.claude, whose
+// location comes from the environment, so it can carry a bidi override or a C1
+// CSI. The render escapes it.
+//
+// It forces the raw path by making the task DIRECTORY fit under Linux's
+// PATH_MAX while the task FILE inside it does not: MkdirAll succeeds, and the
+// open fails ENAMETOOLONG with the whole raw path in its text.
+//
+// Mutation that turns it red: print err rather than termsafe.Error(err) on
+// the "could not restore tasks" line.
+func TestResumeSession_RestoreFailureIsInert(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("relies on Linux's 4096-byte PATH_MAX to fail the task-file open after the directory is made")
+	}
+	fakeClaudeBin(t)
+	pinCwd(t)
+	installUsageProbe(t)
+	const id = "aaaaaaaa-0000-0000-0000-000000000012"
+	const pathMax = 4096
+	root := t.TempDir()
+	home := filepath.Join(root, "ev\u202eil\u009b31m")
+	// The task directory is <home>/tasks/<id>; pad home with directory
+	// components until that directory is pathMax-4 bytes long, which leaves
+	// "/1.json" over the limit.
+	suffix := len(string(filepath.Separator)+"tasks"+string(filepath.Separator)) + len(id)
+	for want := pathMax - 4 - suffix; len(home) < want; {
+		n := min(200, want-len(home)-1)
+		home = filepath.Join(home, strings.Repeat("d", n))
+	}
+	p := resume.Paths{ClaudeHome: home, StoreDir: filepath.Join(root, "store")}
+	prev := resumePaths
+	resumePaths = func() (resume.Paths, error) { return p, nil }
+	t.Cleanup(func() { resumePaths = prev })
+	if err := resume.Save(p.StoreDir, &resume.Record{
+		ID:    id,
+		Tasks: []resume.Task{{ID: "1", Raw: json.RawMessage(`{"id":"1"}`)}},
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	cmd, _, errOut := newTestCmd()
+	s := resume.Session{ID: id, Name: "restore-probe", Cwd: t.TempDir()}
+	if err := resumeSession(cmd, usageResumeConfig(false), nil, s, false, false); err != nil {
+		t.Fatalf("resumeSession: %v", err)
+	}
+	got := errOut.String()
+	if !strings.Contains(got, "forgectl: could not restore tasks: ") {
+		t.Fatalf("stderr = %.300q, want the restore failure", got)
+	}
+	assertInert(t, got)
+	if strings.ContainsRune(got, '\u202e') {
+		t.Errorf("stderr carries a raw bidi override: %.300q", got)
+	}
+}
+
+// TestResumeSnapshot_ErrorsAreInert is forgectl#867 item 8: the snapshot
+// verb's "snapshot skipped" line prints the error from resolving its paths,
+// which the environment decides, and it reaches the terminal escaped.
+//
+// Mutation that turns it red: print err rather than termsafe.Error(err) on
+// the "snapshot skipped" line.
+func TestResumeSnapshot_ErrorsAreInert(t *testing.T) {
+	prev := resumePaths
+	resumePaths = func() (resume.Paths, error) {
+		return resume.Paths{}, errors.New("home is ev\u202eil\u009b31m")
+	}
+	t.Cleanup(func() { resumePaths = prev })
+
+	cmd := newResumeSnapshotCmd()
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--quiet"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("resume snapshot: %v", err)
+	}
+	got := errOut.String()
+	assertInert(t, got)
+	if want := `forgectl: snapshot skipped: home is ev\u202eil\u009b31m` + "\n"; got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
 	}
 }
