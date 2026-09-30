@@ -1,7 +1,7 @@
 ---
 status: planned
 branch: plan/harness-update-hooks
-next: item 1 — probe what `status: idle` in ~/.claude/sessions/<pid>.json guarantees before any restart code
+next: item 1 findings in docs/research/2026-09-29-idle-session-restart-safety.md (idle is blind to drafts; predicate adds a pane input-line check) — copy the predicate into #727, then item 2 (#726)
 ---
 
 # Harness update hooks — Roadmap (2026-09-29)
