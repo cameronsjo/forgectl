@@ -15,6 +15,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/digest"
+	"github.com/cameronsjo/forgectl/internal/tomlerr"
 )
 
 // StateSchema is the run-state sidecar's schema version. It is bumped only on an
@@ -160,7 +161,7 @@ func LoadState(name string) (RunState, bool, error) {
 	}
 	var st RunState
 	if _, err := toml.Decode(string(data), &st); err != nil {
-		return RunState{}, false, fmt.Errorf("parse workflow state %q: %w", name, err)
+		return RunState{}, false, fmt.Errorf("parse workflow state %q: %w", name, tomlerr.Scrub(err))
 	}
 	if st.Schema > StateSchema {
 		return RunState{}, false, fmt.Errorf("workflow state %q has schema %d, newer than this binary understands (%d)", name, st.Schema, StateSchema)
