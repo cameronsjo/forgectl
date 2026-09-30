@@ -323,9 +323,9 @@ func TestRunAction_ActionShowInvocationPrintsAndDoesNotRun(t *testing.T) {
 	}
 }
 
-// --- leadsWithPath / path-preserving error rendering (forgectl#481) ---
+// --- leadsWithLiteral / literal-preserving error rendering (forgectl#481, #858) ---
 
-func TestLeadsWithPath(t *testing.T) {
+func TestLeadsWithLiteral(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		msg  string
@@ -341,14 +341,16 @@ func TestLeadsWithPath(t *testing.T) {
 		{name: "leading quoted capped path", msg: `"/home/a"…"/b.env" not found`, want: true},
 		{name: "leading bare file name", msg: "secrets.yaml not found", want: true},
 		{name: "leading bare file name with a colon", msg: "secrets.yaml: unreadable", want: true},
+		{name: "dotted non-path word (version)", msg: "v1.2 is required", want: true},
+		{name: "dotted non-path word (abbreviation)", msg: "e.g. a key", want: true},
 		{name: "sentence ending in a dot", msg: "Failed.", want: false},
 		{name: "prose with a path later", msg: "example file .env.example not found", want: false},
 		{name: "ordinary prose", msg: "plain failure", want: false},
 		{name: "empty", msg: "", want: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := leadsWithPath(tt.msg); got != tt.want {
-				t.Errorf("leadsWithPath(%q) = %t, want %t", tt.msg, got, tt.want)
+			if got := leadsWithLiteral(tt.msg); got != tt.want {
+				t.Errorf("leadsWithLiteral(%q) = %t, want %t", tt.msg, got, tt.want)
 			}
 		})
 	}
