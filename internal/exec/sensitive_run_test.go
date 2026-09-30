@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -75,6 +76,18 @@ func helperMain(mode string) int {
 		}
 		time.Sleep(d)
 		_, _ = fmt.Fprint(os.Stdout, "-REST")
+		return 0
+	case "partialmark":
+		// Write a prefix, then leave durable evidence that it was written,
+		// then stall until killed. The marker lets a test kill the child
+		// once the bytes are in the pipe, without the parent reading them.
+		_, _ = fmt.Fprint(os.Stdout, "PARTIAL")
+		f, err := os.Create(arg)
+		if err != nil {
+			return 95
+		}
+		_ = f.Close()
+		time.Sleep(60 * time.Second)
 		return 0
 	case "selfkill":
 		// Write, then die to a signal this runner did not send — the OOM
@@ -815,4 +828,73 @@ func TestBuildEnv_RemovesEveryOccurrenceAndAppendsOnce(t *testing.T) {
 	if plain := runner.buildEnv(nil); len(plain) != 6 {
 		t.Errorf("captured environment was mutated: %q", plain)
 	}
+}
+
+// TestRunSensitive_KillDrainsPrefixStillInThePipe pins forgectl#794: a kill
+// must not drop bytes the child had already written but the parent's reader
+// had not yet taken. The child writes its prefix and a marker file, then
+// stalls; the test cancels once the marker exists, and the tap holds the
+// reader back until well after the kill and reap, so the prefix is still in
+// the pipe when retirement begins. The drain window is widened to seconds so
+// the reader's delay sits far inside it.
+//
+// Mutation that turns it red: make retire force-close at once when stopped
+// (closeAll before collecting; stdout comes back empty), or set drainBound's
+// result to a nanosecond.
+func TestRunSensitive_KillDrainsPrefixStillInThePipe(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "written")
+	runner, self := helperRunner(t, "partialmark:"+marker, defaultRetireBound)
+	runner.killDrainBound = 5 * time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	killed := make(chan struct{})
+	runner.stdoutTap = func(r io.Reader) io.Reader {
+		return &gatedReader{r: r, gate: killed}
+	}
+	go func() {
+		for {
+			if _, err := os.Stat(marker); err == nil {
+				cancel()
+				// Past the kill and reap, which is when the old code closed
+				// the read end.
+				time.Sleep(200 * time.Millisecond)
+				close(killed)
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	start := time.Now()
+	res, err := runner.RunSensitive(ctx, helperCommand(KindTmuxCreate, self, 4096))
+	if err == nil {
+		t.Fatal("expected the cancellation to be reported")
+	}
+	data, complete := res.Stdout.CopyBytesForParse()
+	if string(data) != "PARTIAL" {
+		t.Errorf("stdout = %q, want the prefix the child wrote before the kill", data)
+	}
+	if complete {
+		t.Error("a killed producer's prefix reported itself complete")
+	}
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
+		t.Errorf("RunSensitive took %v; the drain should end at EOF, not at its bound", elapsed)
+	}
+}
+
+// gatedReader blocks its first Read until gate closes, then passes reads
+// through. Only the one reader goroutine calls Read.
+type gatedReader struct {
+	r      io.Reader
+	gate   <-chan struct{}
+	opened bool
+}
+
+func (g *gatedReader) Read(p []byte) (int, error) {
+	if !g.opened {
+		<-g.gate
+		g.opened = true
+	}
+	return g.r.Read(p)
 }

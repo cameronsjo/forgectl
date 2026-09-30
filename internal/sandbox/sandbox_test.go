@@ -696,3 +696,27 @@ func TestSandbox_WorktreeAddFailure_IsCategorical(t *testing.T) {
 		t.Fatalf("error %v lost the CommandError from its chain", err)
 	}
 }
+
+// teardownError quotes the workspace and renders the cause through
+// termsafe.Error (forgectl#794): a path carrying an escape byte must not
+// reach the terminal raw, from the workspace or from the *PathError's own
+// path, and the cause must stay reachable.
+//
+// Mutation that turns it red: format the workspace with a bare %s (the ESC
+// shows in the text), or wrap err itself rather than termsafe.Error(err) (the
+// entry path's ESC shows).
+func TestTeardownError_QuotesWorkspaceAndCause(t *testing.T) {
+	ws := "/tmp/forgectl-workflow-\x1b[2Jx"
+	cause := &os.PathError{Op: "unlinkat", Path: ws + "/sub\x1b]0;t\x07", Err: os.ErrPermission}
+	err := teardownError(ws, cause)
+	if strings.ContainsAny(err.Error(), "\x1b\x07") {
+		t.Errorf("teardown error carries a raw control byte: %q", err.Error())
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		t.Errorf("errors.Is lost the cause: %v", err)
+	}
+	var pe *os.PathError
+	if !errors.As(err, &pe) || pe != cause {
+		t.Errorf("errors.As lost the *PathError: %v", err)
+	}
+}

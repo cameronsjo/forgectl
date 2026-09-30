@@ -191,10 +191,19 @@ func Teardown(_ context.Context, _ exec.Runner, workspace string) error {
 	// The UNRESOLVED string, per ACT UNRESOLVED above.
 	if err := os.RemoveAll(workspace); err != nil {
 		slog.Error("Failed to tear down workspace.", "workspace", workspace, "error", err)
-		return fmt.Errorf("teardown %s: %w", workspace, err)
+		return teardownError(workspace, err)
 	}
 	slog.Debug("Successfully tore down workspace.", "workspace", workspace)
 	return nil
+}
+
+// teardownError words a failed RemoveAll. The workspace is quoted
+// (termsafe.QuotePath) like the refusals beside it, and the cause goes
+// through termsafe.Error, whose *PathError form quotes the entry that
+// failed: a workspace path can hold a byte that would drive a terminal
+// (forgectl#794). errors.Is and errors.As still reach the cause.
+func teardownError(workspace string, err error) error {
+	return fmt.Errorf("teardown %s: %w", termsafe.QuotePath(workspace), termsafe.Error(err))
 }
 
 // errNothingToRemove is the "no work, no error" verdict — an empty workspace
