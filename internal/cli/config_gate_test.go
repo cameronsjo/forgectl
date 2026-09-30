@@ -186,3 +186,26 @@ func TestConfigParseGate_UnreadableConfig(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigParseGate_HookVerbsStillRun: `resume snapshot` runs from the Stop
+// hook of every session and is documented to always exit 0, so a malformed
+// or unreadable config.toml must not refuse it. Its siblings stay gated.
+func TestConfigParseGate_HookVerbsStillRun(t *testing.T) {
+	unreadable := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.Mkdir(unreadable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := gateRoot()
+	for name, cfg := range map[string]config.Config{"malformed": loadMalformedConfig(t), "unreadable": config.LoadPath(unreadable)} {
+		for _, args := range [][]string{{"resume", "snapshot", "--quiet"}, {"resume", "snapshot"}, {"--no-icons", "resume", "snapshot"}} {
+			if err := configParseGate(cfg, root, args); err != nil {
+				t.Errorf("%s config, args %q: hook verb was refused: %v", name, args, err)
+			}
+		}
+		for _, args := range [][]string{{"resume"}, {"resume", "--fork"}, {"resume", "abc123"}} {
+			if err := configParseGate(cfg, root, args); err == nil {
+				t.Errorf("%s config, args %q: gate passed a non-hook resume invocation", name, args)
+			}
+		}
+	}
+}

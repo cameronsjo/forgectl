@@ -11,7 +11,8 @@ import (
 )
 
 // configRecoveryVerbs are the top-level command names that still run on a
-// config.toml that does not parse. config and doctor report the parse error as
+// config.toml that does not parse. Hook-invoked subverbs are exempt through
+// hookVerbs. config and doctor report the parse error as
 // a finding; version, help, completion and man never read configuration.
 // init is absent on purpose: its writer strictly decodes the file under lock
 // and refuses an unparseable one, so it would fail anyway, less clearly.
@@ -63,9 +64,24 @@ func resolveVerb(root *cobra.Command, first string) string {
 	return ""
 }
 
+// hookVerbs are the `<verb> <subverb>` pairs Claude Code runs as hooks.
+// A hook that exits non-zero fails the turn it runs on, so a hook verb must
+// never be refused over config: `resume snapshot` is documented to always
+// exit 0 and is wired to the Stop hook of every session. It does not read
+// the config file's settings, and the loader has already warned on stderr.
+var hookVerbs = map[string]string{"resume": "snapshot"}
+
 func configGateExempt(root *cobra.Command, args []string) bool {
 	first, idx := firstNonFlag(args)
 	verb := resolveVerb(root, first)
+	if sub, ok := hookVerbs[verb]; ok && idx >= 0 && root != nil {
+		if parent := findChild(root, first); parent != nil {
+			next, _ := firstNonFlag(args[idx+1:])
+			if child := findChild(parent, next); child != nil && child.Name() == sub {
+				return true
+			}
+		}
+	}
 	if verb == "launch" {
 		// Everything after the verb belongs to claude, so a help flag there is
 		// not ours to honour.
