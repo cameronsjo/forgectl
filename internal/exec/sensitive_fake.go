@@ -20,13 +20,24 @@ type FakeSensitiveRunner struct {
 	// Kind or argument count; it cannot read an argument's payload.
 	//
 	// An exported func field that receives a SensitiveCommand is intended and
-	// widens nothing (forgectl#851): RunFunc is handed the very value the
-	// caller of RunSensitive already held, so it learns nothing that caller
-	// could not. Every payload inside stays sealed — Arg and SecretArg expose
-	// only redacting formatters, Secret, and Equal, which compares against a
-	// value the holder must already have built — so no string payload is
-	// reachable through it, and the exported-API golden pins that surface.
-	// Only buildCmd reveals a payload, and the fake never calls it.
+	// widens nothing (forgectl#851), for three reasons:
+	//
+	//   - It is handed the very value the caller of RunSensitive already
+	//     held, so it learns nothing that caller could not.
+	//   - Every payload inside stays sealed. Path is a SecretArg, each Args
+	//     entry an Arg, and each Env entry an EnvMutation whose key and
+	//     SecretArg value are unexported. All three expose only redacting
+	//     formatters, and Arg adds Secret; none has a method that returns a
+	//     payload. The exported-API golden pins that surface. Inside the
+	//     package, two functions reveal a payload: buildCmd (Path and Args)
+	//     and buildEnv (each EnvMutation's value), both on OSSensitiveRunner.
+	//     The fake calls neither.
+	//   - Equal on each of the three types is a comparison oracle: holding a
+	//     sealed value, a RunFunc can test a guess by building a candidate
+	//     with the same constructor and comparing. That is no wider than the
+	//     caller's own reach, since the caller holds the same value and the
+	//     same constructors. It stays safe only while no exported constructor
+	//     accepts a payload the caller has not already chosen.
 	RunFunc func(cmd SensitiveCommand) (SensitiveResult, error)
 
 	mu    sync.Mutex

@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -130,8 +131,9 @@ func issuedArgvError(err error, call Call, issued []string) error {
 	if !ok {
 		var wrapped *CommandError
 		if errors.As(err, &wrapped) && wrapped.Name == call.Name && slices.Equal(wrapped.Args, call.Args) {
-			panic("exec: FakeRunner.RunFunc returned a tmux CommandError built from the argv it was shown, wrapped inside another error; " +
-				"return the *CommandError directly so the fake can restore the issued argv, or build it with a different argv")
+			panic(fmt.Sprintf("exec: FakeRunner.RunFunc returned a tmux CommandError naming the argv it was shown (%q), "+
+				"wrapped inside another error, for a call that issued %q; return the *CommandError directly so the "+
+				"fake can restore the issued argv, or build it with a different argv", call.Args, issued))
 		}
 		return err
 	}
