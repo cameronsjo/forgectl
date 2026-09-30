@@ -173,10 +173,22 @@ func TestSandbox_RejectsOptionLikeRepoRef(t *testing.T) {
 	}
 }
 
-// TestRejectOptionLike covers the guard directly.
+// TestRejectOptionLike covers the guard directly. The rejection names the
+// field but never echoes the value, which can carry a secret the caller then
+// logs (forgectl#787).
 func TestRejectOptionLike(t *testing.T) {
-	if err := RejectOptionLike("repo", "-x"); err == nil {
-		t.Error("expected rejection of a leading '-' value")
+	const value = "-pSEKRIT"
+	err := RejectOptionLike("shell", value)
+	if err == nil {
+		t.Fatal("expected rejection of a leading '-' value")
+	}
+	if strings.Contains(err.Error(), "SEKRIT") {
+		t.Errorf("rejection %q echoes the rejected value", err.Error())
+	}
+	for _, want := range []string{"shell", "starts with '-'"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("rejection %q does not say %q", err.Error(), want)
+		}
 	}
 	if err := RejectOptionLike("repo", "cameronsjo/forgectl"); err != nil {
 		t.Errorf("expected no error for a normal value, got %v", err)
