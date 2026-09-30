@@ -156,7 +156,8 @@ func TestExecute_EnvFailureUnderJSON(t *testing.T) {
 // Mutations that turn it red: drop the "--" break in preFangJSONTarget's scan
 // (the terminator row then builds the tree for nothing); drop the
 // argvWantsJSONIn check (the --host, --json=false and --no-icons rows); break
-// at every "--" regardless of the token before it (the --host -- row).
+// at every "--" regardless of the token before it (the --host -- row); drop
+// mayTakeNextValue's "=" exclusion (the --host=x row builds the tree).
 func TestPreFangJSONTarget(t *testing.T) {
 	isolateJSONContractEnv(t)
 	for _, tt := range []struct {
@@ -176,6 +177,9 @@ func TestPreFangJSONTarget(t *testing.T) {
 		// A "--" after a flag that turns out to be a bool is the terminator:
 		// the tree is built to find out, and the --json after it is not counted.
 		{args: []string{"docs", "list", "--no-icons", "--", "--json"}, built: true},
+		// An inline value leaves nothing for the "--" to be, so it is the
+		// terminator and the tree is never built (#891).
+		{args: []string{"projects", "list", "--host=x", "--", "--json"}},
 	} {
 		built := false
 		root := func() *cobra.Command { built = true; return newRoot(module.Deps{Runner: &exec.FakeRunner{}}) }
@@ -225,6 +229,36 @@ func TestArgvWantsJSON_BundledShorthands(t *testing.T) {
 		if got := argvWantsJSONIn(newCmd(), args); got != want {
 			t.Errorf("argvWantsJSONIn(%q) = %v, pflag parsed --json as %v", args, got, want)
 		}
+	}
+}
+
+// TestPreFangJSONTarget_ShorthandValueBeforeTerminator pins the shorthand arm
+// of mayTakeNextValue (#891). No production verb declares a value-taking
+// shorthand, so this runs on a synthetic tree: in `x -H -- --json`, pflag
+// hands "--" to -H as its value and parses --json, so the pre-fang scan must
+// not stop at that "--". The expectation is read from pflag itself.
+//
+// Mutation that turns it red: narrow mayTakeNextValue to "--"-prefixed tokens.
+func TestPreFangJSONTarget_ShorthandValueBeforeTerminator(t *testing.T) {
+	buildTree := func() *cobra.Command {
+		root := &cobra.Command{Use: "root"}
+		c := &cobra.Command{Use: "x", RunE: func(*cobra.Command, []string) error { return nil }}
+		c.Flags().StringP("host", "H", "", "")
+		c.Flags().Bool("json", false, "")
+		root.AddCommand(c)
+		return root
+	}
+	args := []string{"x", "-H", "--", "--json"}
+	pc := buildTree().Commands()[0]
+	if err := pc.Flags().Parse(args[1:]); err != nil {
+		t.Fatalf("pflag rejected %q: %v", args, err)
+	}
+	if want, _ := pc.Flags().GetBool("json"); !want {
+		t.Fatalf("pflag did not parse --json in %q; the fixture no longer tests the value arm", args)
+	}
+	cmd := preFangJSONTarget(buildTree, args)
+	if cmd == nil || cmd.CommandPath() != "root x" {
+		t.Errorf("preFangJSONTarget(%q) = %v, want root x", args, cmd)
 	}
 }
 

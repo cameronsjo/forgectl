@@ -126,8 +126,9 @@ type CheckReport struct {
 // signals are a docs-tree convention. Links that leave their root are counted,
 // not reported: they work on GitHub.
 //
-// It resolves through resolveParts, never ResolveLink, so a path containing a
-// literal '#' (authored "%23") is not re-split — the same reason
+// It resolves through resolveWikilink, the reader's own wikilink resolution
+// (attachments included, forgectl#709), never ResolveLink, so a path
+// containing a literal '#' (authored "%23") is not re-split — the same reason
 // buildBacklinks calls resolveParts.
 func (idx *Index) Check() CheckReport {
 	return idx.CheckAt(trustNow())
@@ -173,10 +174,10 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 		budget := newFragmentBudget()
 		for _, l := range from.Links {
 			refusedBefore := budget.refused
-			target, miss := idx.resolveParts(from, l.Path, l.Fragment, budget)
+			target, _, miss := idx.resolveWikilink(from, l, budget)
 			var kind FindingKind
 			switch miss {
-			case MissNone:
+			case MissNone, MissAttachment:
 				continue
 			case MissOutsideRoot:
 				report.Summary.OutsideRootLinks++
@@ -189,11 +190,12 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 					kind = FindingUncheckedAnchor
 				case target != nil:
 					kind = FindingBrokenAnchor
-				// A vault wikilink has no existence fallback: the reader has no
-				// attachment or directory resolution, so a wikilink to a file
-				// or folder shows as a miss there and is broken here. A plain
-				// markdown link in a vault keeps the fallback, as the reader
-				// renders it as an ordinary link.
+				// A vault wikilink has no existence fallback: resolveWikilink
+				// already tried the attachments, and the reader has no
+				// directory resolution, so a wikilink to a folder or to
+				// anything the walk did not list shows as a miss there and is
+				// broken here. A plain markdown link in a vault keeps the
+				// fallback, as the reader renders it as an ordinary link.
 				case (!vault || l.Form == FormRelPath) && existsInRoot(root, from, l.Path):
 					// A directory or non-markdown file: real, just not a doc.
 					continue

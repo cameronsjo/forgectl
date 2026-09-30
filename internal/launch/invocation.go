@@ -106,6 +106,8 @@ type InvocationRequest struct {
 	// since launch execs it) is a terminal. It decides whether
 	// `--output-format` alone selects the print posture (IsClaudePrintMode,
 	// forgectl#795). The zero value, not a terminal, keeps it print mode.
+	// Off a terminal the session, agents, and builder postures also withhold
+	// --allow-dangerously-skip-permissions (forgectl#812, #899).
 	StdoutTerminal bool
 }
 
@@ -203,6 +205,19 @@ func selectPosture(p Profile, args []string, stdoutTerminal bool) (Posture, []st
 		return PostureCodexExec, CodexExecArgs(p, args), nil
 	}
 
+	// Off a terminal claude runs as if given --print, with no prompt argument
+	// too: a bare `claude < /dev/null | cat` exits "Input must be provided
+	// either through stdin or as a prompt argument when using --print"
+	// (Claude Code 2.1.285), and a piped stdin becomes the prompt. So every
+	// Claude posture forgectl injects into (session, agents, builder)
+	// withholds the one flag PrintArgs withholds for safety, and allow_danger
+	// never makes bypass reachable in an unattended run. The permission mode, model,
+	// effort, and add-dirs all stay (forgectl#812, #899). A flag the user types
+	// into args is theirs and still passes. p is a copy, so
+	// BuiltInvocation.Profile still reports the profile as resolved.
+	if !stdoutTerminal {
+		p.AllowDanger = false
+	}
 	switch {
 	case len(args) == 0:
 		return PostureClaudeSession, SessionArgs(p), nil
