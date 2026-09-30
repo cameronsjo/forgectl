@@ -27,6 +27,12 @@ const (
 	// FindingStale is a doc whose frontmatter stale_after instant has passed
 	// (OKF v0.2 §5.5). Date-only and offset-less values are ignored.
 	FindingStale FindingKind = "stale"
+	// FindingUncheckedAnchor is a vault link to a real doc whose #heading
+	// fragment matched by neither slug nor text as written, and which the
+	// source doc's fragment budget (fragmentBudget) left unparsed, so its
+	// rendered-text match was never tried. It is neither a pass nor a
+	// broken anchor.
+	FindingUncheckedAnchor FindingKind = "anchor_unchecked"
 )
 
 // Severity is the wire enum for how a Finding weighs on the check's exit code.
@@ -43,9 +49,9 @@ const (
 )
 
 // severityFor is the one place a kind gets its severity. Every kind is an
-// error except deprecated.
+// error except deprecated and anchor_unchecked.
 func severityFor(k FindingKind) Severity {
-	if k == FindingDeprecated {
+	if k == FindingDeprecated || k == FindingUncheckedAnchor {
 		return SeverityInfo
 	}
 	return SeverityError
@@ -93,6 +99,9 @@ type CheckSummary struct {
 	OutsideRootLinks int `json:"outside_root_links"`
 	Deprecated       int `json:"deprecated"`
 	Stale            int `json:"stale"`
+	// UncheckedAnchors counts anchor_unchecked findings. Additive (ADR-0008
+	// rule 2).
+	UncheckedAnchors int `json:"unchecked_anchors"`
 }
 
 // CheckReport is the wire shape of `forgectl docs check --json`.
@@ -158,8 +167,13 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 		from := &idx.docs[i]
 		root := rootByLabel[from.RootLabel]
 		vault := root.Kind == RootVault
+		// One fragment budget per source doc, as a render has one per page,
+		// so a doc of many markup-laden heading links cannot make the check
+		// parse without bound (#710).
+		budget := newFragmentBudget()
 		for _, l := range from.Links {
-			target, miss := idx.resolveParts(from, l.Path, l.Fragment, nil)
+			refusedBefore := budget.refused
+			target, miss := idx.resolveParts(from, l.Path, l.Fragment, budget)
 			var kind FindingKind
 			switch miss {
 			case MissNone:
@@ -171,6 +185,8 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 				kind = FindingAmbiguousLink
 			case MissNoTarget:
 				switch {
+				case target != nil && budget.refused > refusedBefore:
+					kind = FindingUncheckedAnchor
 				case target != nil:
 					kind = FindingBrokenAnchor
 				// A vault wikilink has no existence fallback: the reader has no
@@ -258,6 +274,8 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 			report.Summary.Deprecated++
 		case FindingStale:
 			report.Summary.Stale++
+		case FindingUncheckedAnchor:
+			report.Summary.UncheckedAnchors++
 		}
 	}
 	return report
@@ -266,7 +284,7 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 // isLinkFinding reports whether k is a link kind, the findings that carry a
 // Target and Line.
 func isLinkFinding(k FindingKind) bool {
-	return k == FindingBrokenLink || k == FindingAmbiguousLink || k == FindingBrokenAnchor
+	return k == FindingBrokenLink || k == FindingAmbiguousLink || k == FindingBrokenAnchor || k == FindingUncheckedAnchor
 }
 
 // existsInRoot reports whether the link path names something on disk inside
@@ -343,8 +361,10 @@ func (idx *Index) dirLinkInbound(rootByLabel map[string]Root) map[int]bool {
 				continue
 			}
 			// A path that resolves to a doc is a link to that doc, not to
-			// the directory.
-			if target, miss := idx.resolveParts(from, l.Path, l.Fragment, nil); target != nil || miss != MissNoTarget {
+			// the directory. The fragment is not passed: a doc resolves
+			// whether or not its anchor does, so matching the anchor here
+			// would only spend parse work on an answer that cannot change.
+			if target, miss := idx.resolveParts(from, l.Path, "", nil); target != nil || miss != MissNoTarget {
 				continue
 			}
 			for _, j := range hits {

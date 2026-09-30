@@ -141,7 +141,7 @@ func TestDocsCheckCmd_JSONSchemaFrozen(t *testing.T) {
 	}
 	assertKeys(t, "summary", got["summary"].(map[string]any),
 		"broken_links", "ambiguous_links", "broken_anchors", "orphans", "ignored_orphans", "outside_root_links",
-		"deprecated", "stale")
+		"deprecated", "stale", "unchecked_anchors")
 
 	byKind := map[string]map[string]any{}
 	for _, raw := range got["findings"].([]any) {
