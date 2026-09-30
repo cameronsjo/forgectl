@@ -374,3 +374,53 @@ func TestQuoteArgMax_BoundsAndEscapes(t *testing.T) {
 		t.Fatalf("one-over arg = %q, want the budget then the ellipsis", got)
 	}
 }
+
+// A typed-nil *os.PathError or *os.LinkError is a non-nil error whose fields
+// cannot be read; Error must not panic on it (forgectl#794).
+//
+// Mutation that turns it red: drop the `!= nil` guard from either branch of
+// Error (its row panics reading Op).
+func TestError_TypedNilFilesystemErrorDoesNotPanic(t *testing.T) {
+	for name, err := range map[string]error{
+		"path": (*os.PathError)(nil),
+		"link": (*os.LinkError)(nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var got error
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("Error panicked on a typed-nil %s error: %v", name, r)
+					}
+				}()
+				got = Error(err)
+			}()
+			if got.Error() != errTextUnavailable {
+				t.Errorf("Error(typed-nil %s) = %q, want %q", name, got.Error(), errTextUnavailable)
+			}
+		})
+	}
+}
+
+// errorText's recovery leaves a Debug trace naming the Go types involved and
+// never the panic value (forgectl#794).
+//
+// Mutation that turns it red: drop the slog.Debug call (no trace), or log
+// the panic value r itself (its text shows).
+func TestErrorText_LogsPanicTypeNotValue(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	if got := errorText(panickingError{}); got != errTextUnavailable {
+		t.Fatalf("errorText = %q", got)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "panic_type=string") || !strings.Contains(logged, "termsafe.panickingError") {
+		t.Errorf("no type trace in the log:\n%s", logged)
+	}
+	if strings.Contains(logged, "errSymlink is not user-visible") {
+		t.Errorf("the panic value reached the log:\n%s", logged)
+	}
+}

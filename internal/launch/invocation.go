@@ -102,6 +102,11 @@ type InvocationRequest struct {
 	// wins over a removal, because it is the operator naming a value explicitly.
 	UnsetEnv []string
 	Resolve  BinaryResolver
+	// StdoutTerminal reports whether the harness's stdout (forgectl's own,
+	// since launch execs it) is a terminal. It decides whether
+	// `--output-format` alone selects the print posture (IsClaudePrintMode,
+	// forgectl#795). The zero value, not a terminal, keeps it print mode.
+	StdoutTerminal bool
 }
 
 // BuiltInvocation is the invocation plus the two things the caller needs to
@@ -138,7 +143,7 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 	}
 
 	args := cloneStrings(req.Args)
-	posture, harnessArgs, err := selectPosture(profile, args)
+	posture, harnessArgs, err := selectPosture(profile, args, req.StdoutTerminal)
 	if err != nil {
 		return BuiltInvocation{}, err
 	}
@@ -173,8 +178,8 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 
 // selectPosture routes args to the builder that owns them and reports which one
 // ran. args is already a private copy, so the passthrough branch can return it
-// without aliasing the caller.
-func selectPosture(p Profile, args []string) (Posture, []string, error) {
+// without aliasing the caller. stdoutTerminal is InvocationRequest's.
+func selectPosture(p Profile, args []string, stdoutTerminal bool) (Posture, []string, error) {
 	if p.Harness == "pi" {
 		if len(args) > 0 && args[0] == "agents" {
 			return "", nil, fmt.Errorf(
@@ -214,7 +219,7 @@ func selectPosture(p Profile, args []string) (Posture, []string, error) {
 	// selects both, such as `-v -p hi`, gets the print posture.
 	case IsClaudeSubcommandCall(args):
 		return PostureClaudePassthrough, args, nil
-	case IsClaudePrintMode(args):
+	case IsClaudePrintMode(args, stdoutTerminal):
 		return PostureClaudePrint, PrintArgs(p, args), nil
 	case IsClaudeHelpOrVersion(args):
 		return PostureClaudePassthrough, args, nil

@@ -146,3 +146,32 @@ func TestRunnerErrorWithoutCommandErrorIsWrappedNotSwallowed(t *testing.T) {
 		t.Fatalf("err = %v, want it to wrap the runner error", err)
 	}
 }
+
+// herdr error text renders its argv through redact.Args and CheckFork's
+// stderr through redact.Text (#782): forgectl builds every herdr argv today,
+// so this pins the path a future user-supplied id or label would take.
+//
+// Mutation that turns it red: make argvText a raw strings.Join (the classify
+// and decode rows show the token), or drop redact.Text from CheckFork's exit
+// arm (the probe row shows it).
+func TestHerdrErrorTextRedactsArgvAndStderr(t *testing.T) {
+	const secret = "SEKRIT-herdr-782" //nolint:gosec // G101: a fake credential the test plants
+	args := []string{"tab", "move", "--token", secret}
+
+	if err := classify(args, errors.New("boom")); strings.Contains(err.Error(), secret) {
+		t.Errorf("classify: %q carries the credential", err)
+	}
+	if _, err := read[struct{}](context.Background(), New(runnerFor("not json", nil)), args...); err == nil || strings.Contains(err.Error(), secret) {
+		t.Errorf("read decode failure: %v (want an error without the credential)", err)
+	}
+	if _, err := read[struct{}](context.Background(), New(runnerFor(`{"id":1}`, nil)), args...); err == nil || strings.Contains(err.Error(), secret) {
+		t.Errorf("read missing result: %v (want an error without the credential)", err)
+	}
+
+	stderr := "error: Authorization: Bearer " + secret
+	probe := runnerFor("", &exec.CommandError{Name: Binary, ExitCode: 3, Stderr: stderr})
+	err := CheckFork(context.Background(), probe)
+	if err == nil || strings.Contains(err.Error(), secret) {
+		t.Errorf("CheckFork: %v (want an error without the credential)", err)
+	}
+}

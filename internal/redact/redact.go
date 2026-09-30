@@ -59,6 +59,31 @@ func UserArgs(args []string) []string {
 	return out
 }
 
+// UserArgValues returns the text UserArgs withholds from args: each element
+// it renders as UserArgMarker whole, and the VALUE of each --name=VALUE and
+// glued -xVALUE it renders as a kept prefix plus the marker. Flag names, "--"
+// and "-" are not in it, and neither is an empty value. It is what a Runner
+// scrubs from a user span's captured stderr, so a child that echoes its own
+// argument does not put back what the argv rendering withheld (#782).
+func UserArgValues(args []string) []string {
+	var out []string
+	for _, a := range args {
+		r := userArg(a)
+		if r == a {
+			continue
+		}
+		kept := strings.TrimSuffix(r, UserArgMarker)
+		if !strings.HasPrefix(a, kept) {
+			// Unreachable: userArg keeps only a prefix of a. Withhold whole.
+			kept = ""
+		}
+		if v := a[len(kept):]; v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 func userArg(a string) string {
 	switch {
 	case a == "--" || a == "-":
@@ -82,10 +107,14 @@ func userArg(a string) string {
 }
 
 // tokenPrefixes are the leading bytes of well-known credential formats
-// (GitHub, GitLab, Slack, OpenAI/Stripe-style, AWS access key ids), matched
-// case-insensitively. A token pasted where a flag name goes (--ghp_…) is a
-// value, not a name.
-var tokenPrefixes = []string{"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "xox", "sk-", "sk_", "akia", "asia"}
+// (GitHub, GitLab personal and pipeline-trigger, Slack, OpenAI/Stripe-style,
+// AWS access key ids, Google API keys, npm, PyPI, Hugging Face, Shopify),
+// written lower-case and matched case-insensitively. A token pasted where a
+// flag name goes (--ghp_…) is a value, not a name.
+var tokenPrefixes = []string{
+	"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "glptt-", "xox", "sk-", "sk_", "akia", "asia",
+	"aiza", "npm_", "pypi-", "hf_", "shpat_",
+}
 
 // tokenShaped reports whether name starts with a tokenPrefixes entry.
 func tokenShaped(name string) bool {

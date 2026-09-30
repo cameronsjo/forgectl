@@ -403,14 +403,61 @@ func TestArgs_StopsAtAUserArgsSpan(t *testing.T) {
 	}
 }
 
-// Mutation: drop tokenShaped from userArg and --ghp_… shows.
+// Mutation: drop tokenShaped from userArg and --ghp_… shows. Drop any of the
+// #782 prefixes (aiza, npm_, pypi-, hf_, glptt-, shpat_) from tokenPrefixes
+// and its row shows.
 func TestUserArgs_TokenShapedFlagName(t *testing.T) {
-	for _, in := range []string{"--ghp_abc123", "--github_pat_X", "--xoxb-1", "--sk-live=X", "--GLPAT-x"} {
+	for _, in := range []string{
+		"--ghp_abc123", "--github_pat_X", "--xoxb-1", "--sk-live=X", "--GLPAT-x",
+		"--AIzaSyA1b2", "--npm_abc123", "--pypi-AgEIcHlwaS5vcmc", "--hf_abc123", "--glptt-abc123", "--shpat_abc123=X",
+	} {
 		if got := UserArgs([]string{in})[0]; got != UserArgMarker {
 			t.Errorf("UserArgs(%q) = %q, want %q", in, got, UserArgMarker)
 		}
 	}
 	if got := UserArgs([]string{"--skip", "--target"}); got[0] != "--skip" || got[1] != "--target" {
 		t.Errorf("ordinary names withheld: %q", got)
+	}
+}
+
+// UserArgValues is exactly what UserArgs withholds (#782): the Runner scrubs
+// these from a user span's stderr, so a value missing here is a value an
+// echoing child puts back.
+//
+// Mutation that turns it red: return the whole element for a --name=VALUE or
+// a glued -xVALUE (the "--body=S" and "-pS" rows then carry their flag
+// name), skip elements UserArgs withholds whole (the positional rows go
+// missing), or keep an empty value (the "--x=" row adds "").
+func TestUserArgValues(t *testing.T) {
+	cases := []struct {
+		in, want []string
+	}{
+		{[]string{"--", "-", "--verbose", "-v"}, nil},
+		{[]string{"docker", "login", "-pS3KR1T"}, []string{"docker", "login", "S3KR1T"}},
+		{[]string{"--body=S3KR1T", "--x="}, []string{"S3KR1T"}},
+		{[]string{"--ghp_abc=v"}, []string{"--ghp_abc=v"}},
+		{[]string{"-u", "user:S3KR1T", "https://h/x"}, []string{"user:S3KR1T", "https://h/x"}},
+	}
+	for _, tc := range cases {
+		got := UserArgValues(tc.in)
+		if strings.Join(got, "\x00") != strings.Join(tc.want, "\x00") || len(got) != len(tc.want) {
+			t.Errorf("UserArgValues(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	// Every withheld element's value is in the list, and every listed value is
+	// text UserArgs withheld: the corpus's Secret is never missed.
+	for _, row := range redacttest.Corpus {
+		if !strings.Contains(strings.Join(row, " "), redacttest.Secret) {
+			continue
+		}
+		found := false
+		for _, v := range UserArgValues(row) {
+			if strings.Contains(v, redacttest.Secret) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("UserArgValues(%q) misses the secret", row)
+		}
 	}
 }

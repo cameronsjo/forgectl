@@ -3,6 +3,14 @@
 // no URL rule sees. Tests at every site that passes user argv to a Runner
 // (workflow run steps, docker build/run/shell) run it through the real Runner
 // and assert Secret reaches no rendering.
+//
+// The corpus is for that opaque-span render path (exec.WithOpaqueArgs, which
+// reduces a user span through redact.UserArgs before redact.Args runs), not
+// for redact.Args alone. Args judges one element at a time and cannot see
+// that a positional is a secret, so most rows (curl -u user:X, docker login
+// -p X, a --token X after an earlier [redacted]) pass through Args
+// untouched by design. A test that runs the corpus through Args directly
+// is asserting something Args never promised.
 package redacttest
 
 // Secret is the credential every Corpus row carries.

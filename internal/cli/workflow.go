@@ -82,7 +82,13 @@ toolset (git, claude, tmux) — orchestration as data, not one-off scripts.
 
 Workflow files live in <config-dir>/workflows/<name>.workflow.toml — the same
 base as config.toml (macOS: ~/Library/Application Support/forgectl, Linux:
-~/.config/forgectl) — or fall back to a shipped built-in of the same name.`,
+~/.config/forgectl) — or fall back to a shipped built-in of the same name.
+
+--dry-run prints every step's fields in full, a run step's args included: it
+is the review of a file you are about to trust, so it hides nothing the file
+would run. A real run's logs and errors show a run step's args as flag names
+only. Keep credentials out of a workflow's args, and out of a dry run's
+captured output.`,
 	}
 	cmd.AddCommand(
 		newWorkflowRunCmd(deps),
@@ -475,6 +481,13 @@ func parseParams(raw []string) (map[string]string, error) {
 
 // printPlan renders a resolved Plan for --dry-run: the step sequence a user
 // reviews before trusting a workflow, with zero side effects.
+//
+// A run step's args print in full, unlike every Runner rendering, which shows
+// them as flag names only (exec.WithOpaqueArgs, #749). That is deliberate
+// (#782): this is the review that decides whether to bless the file, so
+// withholding args here would let a hostile file hide exactly the argv it
+// is asking to be trusted with. The output goes to the invoking user's
+// stdout and to no log. The command help says so.
 //
 // Every field here comes from the workflow file, which ADR-0006/0007 treat as
 // attacker-writable — and this is the surface where that matters most, because

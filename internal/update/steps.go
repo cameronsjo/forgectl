@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
 // Step names — the vocabulary --only matches against and the roster.go
@@ -172,8 +173,8 @@ func npmStep() Step {
 }
 
 // SequenceError is runSequence's failure: which of its commands failed, and
-// why. Command is the argv this package built (brew update, say), never
-// subprocess text, so a renderer can name the failed command without
+// why. Command is the argv this package built (brew update, say), rendered
+// through redact.Args (#782), never subprocess text, so a renderer can name the failed command without
 // rendering Err, which carries the child's stderr (#778). Error() reads
 // "<command>: <err>", the text this failure has always had.
 type SequenceError struct {
@@ -207,7 +208,7 @@ func runSequence(ctx context.Context, run exec.Runner, env map[string]string, ar
 			if errors.As(err, &cmdErr) && cmdErr.Output != "" {
 				parts = append(parts, cmdErr.Output)
 			}
-			return strings.Join(parts, "\n\n"), &SequenceError{Command: strings.Join(argv, " "), Err: err}
+			return strings.Join(parts, "\n\n"), &SequenceError{Command: strings.Join(redact.Args(argv), " "), Err: err}
 		}
 	}
 	return strings.Join(parts, "\n\n"), nil

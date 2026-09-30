@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 )
 
 // Declined is returned when herdr answers a `tab move` with exit 0 and
@@ -119,25 +118,25 @@ func (c *Client) MoveTab(ctx context.Context, tabID string, to MoveTarget) (Move
 	if mr := r.MoveResult; mr != nil {
 		switch {
 		case mr.Changed == nil:
-			return MoveResult{}, fmt.Errorf("herdr %s: move_result has no \"changed\" field", strings.Join(args, " "))
+			return MoveResult{}, fmt.Errorf("herdr %s: move_result has no \"changed\" field", argvText(args))
 		case !*mr.Changed:
 			return MoveResult{}, &Declined{TabID: tabID, Reason: mr.Reason}
 		case mr.TabID == "" || mr.WorkspaceID == "":
-			return MoveResult{}, fmt.Errorf("herdr %s: move_result names no tab or workspace", strings.Join(args, " "))
+			return MoveResult{}, fmt.Errorf("herdr %s: move_result names no tab or workspace", argvText(args))
 		}
 		return MoveResult{TabID: mr.TabID, WorkspaceID: mr.WorkspaceID, Tabs: r.Tabs}, nil
 	}
 	// No move_result. Only an index move is measured to reply that way; for a
 	// move between workspaces the passed-in id would be stale, so fail closed.
 	if to.mode != modeIndex {
-		return MoveResult{}, fmt.Errorf("herdr %s: reply has no move_result", strings.Join(args, " "))
+		return MoveResult{}, fmt.Errorf("herdr %s: reply has no move_result", argvText(args))
 	}
 	for _, t := range r.Tabs {
 		if t.TabID == tabID {
 			return MoveResult{TabID: tabID, WorkspaceID: t.WorkspaceID, Tabs: r.Tabs}, nil
 		}
 	}
-	return MoveResult{}, fmt.Errorf("herdr %s: tab is not in the reply's tab list", strings.Join(args, " "))
+	return MoveResult{}, fmt.Errorf("herdr %s: tab is not in the reply's tab list", argvText(args))
 }
 
 // MoveWorkspace reorders a workspace to index. The reply (the workspace list)
