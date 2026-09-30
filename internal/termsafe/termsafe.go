@@ -44,12 +44,44 @@ func IsUnsafeTerminalRune(r rune) bool {
 // graphic quoting escapes C0/C1 controls, DEL, tabs/newlines, and Unicode
 // format characters (including bidi overrides) while retaining ordinary
 // printable Unicode. The surrounding quotes are removed for sentence values.
+//
+// Printable ASCII is its own rendering, so it is copied byte for byte without
+// decoding or classifying a rune; a string made only of it is returned as is
+// (#847). Every other byte takes the per-rune rule, decoded as range decodes
+// it, so an invalid byte still renders as U+FFFD.
 func SafeLine(s string) string {
+	i := 0
+	for i < len(s) && isPlainASCII(s[i]) {
+		i++
+	}
+	if i == len(s) {
+		return s
+	}
 	var safe strings.Builder
-	for _, r := range s {
-		safe.WriteString(safeRune(r))
+	safe.Grow(len(s))
+	safe.WriteString(s[:i])
+	for i < len(s) {
+		if c := s[i]; isPlainASCII(c) {
+			safe.WriteByte(c)
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if isSafeGraphic(r) {
+			safe.WriteRune(r)
+		} else {
+			safe.WriteString(safeRune(r))
+		}
+		i += size
 	}
 	return safe.String()
+}
+
+// isPlainASCII reports whether c is printable ASCII, space through tilde:
+// the bytes safeRune renders as themselves, since none is a control, a
+// Bidi_Control, or non-graphic.
+func isPlainASCII(c byte) bool {
+	return c >= ' ' && c <= '~'
 }
 
 // TruncatedMarker ends a SafeLineMax result that dropped text, so a reader
@@ -81,10 +113,15 @@ func SafeLineMax(s string, maxRunes int) string {
 	return safe.String()
 }
 
+// isSafeGraphic reports whether safeRune renders r as itself.
+func isSafeGraphic(r rune) bool {
+	return !IsUnsafeTerminalRune(r) && unicode.IsGraphic(r)
+}
+
 // safeRune is SafeLine's per-rune rule: a safe graphic rune as itself, any
 // other rune as its Go graphic escape without the surrounding quotes.
 func safeRune(r rune) string {
-	if !IsUnsafeTerminalRune(r) && unicode.IsGraphic(r) {
+	if isSafeGraphic(r) {
 		return string(r)
 	}
 	quoted := strconv.QuoteRuneToGraphic(r)
@@ -257,19 +294,40 @@ func Categorical(message string, cause error) error {
 // An Error method that panics gets errTextUnavailable in place of its text,
 // and the rest of the message still renders; see errorText.
 func Error(err error) error {
+	return errorAt(err, 0)
+}
+
+// maxRenderDepth bounds how deeply Error re-enters itself for the Err field
+// of a *PathError or *LinkError, and for a wrapped path error it caps. A
+// *PathError whose Err is itself, or a cycle of them, would otherwise recurse
+// until the stack overflows, which is fatal rather than a recoverable panic
+// (#847). The native Error method of such an error overflows the same way,
+// and that call is out of reach: an error whose own text needs it, such as a
+// wrapper that renders the cycle through fmt, still overflows inside it. The
+// bound only makes Error's reconstruction terminate.
+const maxRenderDepth = 100
+
+// errTextTooDeep stands in for an error Error reached past maxRenderDepth.
+const errTextTooDeep = "error text withheld: its chain is nested too deeply"
+
+// errorAt is Error at depth re-entries.
+func errorAt(err error, depth int) error {
 	if err == nil {
 		return nil
+	}
+	if depth > maxRenderDepth {
+		return safeError{message: errTextTooDeep, cause: err}
 	}
 	var message string
 	// A typed-nil *LinkError or *PathError is a non-nil error whose fields
 	// cannot be read (forgectl#794); it falls through to errorText, whose
 	// recover turns its panicking Error method into errTextUnavailable.
 	if linkErr, ok := err.(*os.LinkError); ok && linkErr != nil {
-		message = fmt.Sprintf("%s %s %s: %s", SafeLine(linkErr.Op), QuotePathMax(linkErr.Old, 0), QuotePathMax(linkErr.New, 0), causeText(linkErr.Err))
+		message = fmt.Sprintf("%s %s %s: %s", SafeLine(linkErr.Op), QuotePathMax(linkErr.Old, 0), QuotePathMax(linkErr.New, 0), causeText(linkErr.Err, depth))
 	} else if pathErr, ok := err.(*os.PathError); ok && pathErr != nil {
-		message = fmt.Sprintf("%s %s: %s", SafeLine(pathErr.Op), QuotePathMax(pathErr.Path, 0), causeText(pathErr.Err))
+		message = fmt.Sprintf("%s %s: %s", SafeLine(pathErr.Op), QuotePathMax(pathErr.Path, 0), causeText(pathErr.Err, depth))
 	} else {
-		message = capWrappedPaths(errorText(err), overlongPathErrors(err))
+		message = capWrappedPaths(errorText(err), overlongPathErrors(err), depth)
 	}
 	return safeError{message: message, cause: err}
 }
@@ -277,12 +335,13 @@ func Error(err error) error {
 // causeText renders the Err field of a *PathError or *LinkError as Error
 // renders any error, so a path error nested there is capped too rather than
 // echoed whole by its native Error method (#845). A nil Err keeps errorText's
-// fallback, since the native Error method would panic on it.
-func causeText(err error) string {
+// fallback, since the native Error method would panic on it. depth is the
+// depth of the error whose field err is.
+func causeText(err error, depth int) string {
 	if err == nil {
 		return SafeLine(errorText(err))
 	}
-	return Error(err).Error()
+	return errorAt(err, depth+1).Error()
 }
 
 // chainWalkBudget bounds how many errors overlongPathErrors visits in one
@@ -355,8 +414,12 @@ func pathOverCap(path string) bool {
 // The spans are found in the SafeLine form of message, matched against the
 // SafeLine form of each native text, so a raw copy that only escapes to a
 // native text is capped on the first pass too (#845). Every occurrence of
-// each native text is capped; where two overlap, the one earlier in chain
-// order wins. See findSpans for the cost.
+// each native text is capped. Where two overlap, the longer span wins, and
+// chain order breaks a tie: a container error's span holds the text of the
+// error it wraps, and its capped rendering caps that error too, so preferring
+// it leaves neither path uncapped, where preferring the inner error would
+// leave the container's own over-cap path escaped but whole (#847). See
+// findSpans for the cost. depth is the depth of the error message belongs to.
 //
 // A second pass over the result changes nothing: the output is already
 // SafeLine-inert, and every matched span was replaced by a cut, quoted form
@@ -364,7 +427,7 @@ func pathOverCap(path string) bool {
 // text contains another over-cap error's capped rendering, quotes and
 // ellipsis included, which a second pass may cap again. That output is still
 // safe to print; only the cap can differ.
-func capWrappedPaths(message string, pathErrs []error) string {
+func capWrappedPaths(message string, pathErrs []error, depth int) string {
 	escaped := SafeLine(message)
 	var needles []string
 	var owners []error
@@ -388,14 +451,19 @@ func capWrappedPaths(message string, pathErrs []error) string {
 	}
 	var spans []span // accepted, sorted by start, never overlapping
 	renders := make([]string, len(needles))
-	for _, m := range findSpans(escaped, needles) {
+	matches := findSpans(escaped, needles)
+	// Longest first; findSpans' chain order breaks a tie, as the sort is stable.
+	sort.SliceStable(matches, func(a, b int) bool {
+		return len(needles[matches[a].needle]) > len(needles[matches[b].needle])
+	})
+	for _, m := range matches {
 		start, end := m.start, m.start+len(needles[m.needle])
 		at := sort.Search(len(spans), func(k int) bool { return spans[k].start >= start })
 		if (at > 0 && spans[at-1].end > start) || (at < len(spans) && spans[at].start < end) {
 			continue
 		}
 		if renders[m.needle] == "" {
-			renders[m.needle] = Error(owners[m.needle]).Error()
+			renders[m.needle] = errorAt(owners[m.needle], depth+1).Error()
 		}
 		spans = append(spans, span{})
 		copy(spans[at+1:], spans[at:])
