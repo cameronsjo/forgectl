@@ -64,7 +64,8 @@ main.surface-document { max-width: 820px; }
 
 /* ── Properties frontmatter (render.go emits post-sanitizer, escaped fragments) ── */
 .props {
-  background: color-mix(in oklch, var(--bg-raised) 60%, transparent);
+  --props-tint: color-mix(in oklch, var(--bg-raised) 60%, transparent);
+  background: var(--props-tint);
   border: 1px solid var(--border); border-radius: var(--radius-md);
   margin: 0 0 24px; font-family: var(--font-mono); font-size: 13px; overflow: hidden;
 }
@@ -94,7 +95,7 @@ main.surface-document { max-width: 820px; }
 /* Artificer's global .note (a footnote-scale label rule) also matches the
    note-tier class; restore the size and colour the other tiers inherit. */
 .callout.note { font-size: inherit; color: inherit; border-left-color: var(--accent); background: color-mix(in oklch, var(--accent) 8%, transparent); }
-.callout.warning { border-left-color: var(--attention); background: color-mix(in oklch, var(--attention) 8%, transparent); }
+.callout.warning { --callout-tint: color-mix(in oklch, var(--attention) 8%, transparent); border-left-color: var(--attention); background: var(--callout-tint); }
 .callout.danger { border-left-color: var(--urgent); background: color-mix(in oklch, var(--urgent) 8%, transparent); }
 .callout.tip { border-left-color: var(--success); background: color-mix(in oklch, var(--success) 8%, transparent); }
 .callout-title { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-weight: 700; font-size: 13px; letter-spacing: 0.04em; color: var(--accent); }
@@ -234,6 +235,21 @@ main.surface-document { padding: var(--s-xl); overflow-y: auto; min-height: 0; }
    sideways today. Sticky table heads and the pan/zoom viewport are
    unchanged (measured). */
 main.surface-document { position: relative; contain: paint; }
+/* Four pieces of chrome live inside the doc pane, so that clip cannot keep a
+   doc off them (forgectl#759): the narrow-width outline, the skip-content
+   banner and the properties block (render.go puts both above the doc), and
+   the missing-doc banner (reload.js prepends it). A doc's .tooltip (z-index
+   var(--z-popover)) anchored to a positioned wrapper just below any of them
+   (.phase, .has-tooltip, .grain) painted over it. Each gets its own
+   stacking context one step above --z-popover, and an opaque base under its
+   tint so nothing shows through; the missing-doc banner's background is
+   already opaque (.banner--attention mixes into --bg-raised). The two
+   data attributes are the server's own, never a doc's: the sanitizer strips
+   every data-* attribute from a doc. */
+.outline-inline, [data-forgectl-notice], [data-forgectl-props], [data-fc="doc-missing"] { position: relative; z-index: calc(var(--z-popover) + 1); isolation: isolate; }
+.outline-inline { background: var(--bg); }
+[data-forgectl-notice].callout.warning { background: linear-gradient(var(--callout-tint), var(--callout-tint)), var(--bg); }
+.props[data-forgectl-props] { background: linear-gradient(var(--props-tint), var(--props-tint)), var(--bg); }
 /* The document pane scrolls, so with no link in view the browser makes the
    pane itself the keyboard stop. Give it the house ring, inset so the grid's
    edges don't clip it. */

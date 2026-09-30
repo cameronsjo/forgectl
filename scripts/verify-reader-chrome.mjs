@@ -35,7 +35,13 @@
 //     (A:::scrim) are scrubbed from its nodes;
 //   - a swap that adds text above a heading slugged "doc-filter" (a chrome
 //     id) keeps that heading where the reader had it;
-//   - deleting the doc puts the missing banner in the real doc body.
+//   - deleting the doc puts the missing banner in the real doc body;
+//   - at narrow width a tooltip on a .phase just below the skip-content
+//     banner, the inline outline, the properties block or the missing-doc
+//     banner paints over none of them;
+//   - with the mermaid and KaTeX bundles blocked, a doc carrying
+//     <div id="ForgectlMermaid"> and <div id="ForgectlMath"> still gets an
+//     in-place live-reload swap.
 //
 // Usage: node scripts/verify-reader-chrome.mjs [path/to/forgectl]
 //   Without a path it builds one with `go build` into a scratch dir.
@@ -149,6 +155,27 @@ mkdirSync(root, { recursive: true });
 writeFileSync(join(root, 'README.md'), '# Readme\n');
 const docPath = join(root, 'hostile.md');
 writeFileSync(docPath, hostile());
+
+// Docs for the in-pane chrome check (forgectl#759). Each opens with a
+// .phase wrapper, which is position: relative, holding a .tooltip--top that
+// reaches up out of it, right below one piece of chrome the reader puts in
+// the pane: the skip-content banner (the unclosed <noscript> at the end
+// raises it), the narrow-width outline (a doc with no banner), the
+// properties block with its trust badge (frontmatter), and the missing-doc
+// banner (reload.js prepends it once the file is deleted).
+const overlapTip = '<div class="phase"><div class="tooltip tooltip--top">OVERLAP-TIP</div>phase body</div>';
+writeFileSync(join(root, 'overlap-banner.md'), `${overlapTip}\n\n# Banner\n\n## One\n\n${filler}\n\n<noscript>\n\nhidden rest\n`);
+writeFileSync(join(root, 'overlap-inline.md'), `${overlapTip}\n\n# Inline\n\n## One\n\n${filler}\n\n## Two\n\n${filler}\n`);
+writeFileSync(join(root, 'overlap-props.md'), `---\nstatus: deprecated\n---\n\n${overlapTip}\n\n# Props\n\n${filler}\n`);
+const overlapMissing = join(root, 'overlap-missing.md');
+writeFileSync(overlapMissing, `${overlapTip}\n\n# Missing\n\n${filler}\n`);
+
+// A doc whose ids name the globals mermaid-init.js and math-init.js set, for
+// the clobbering check (forgectl#759).
+const clobberPath = join(root, 'clobber.md');
+const clobber = (marker) => `# Clobber\n\n<div id="ForgectlMermaid">m</div>\n\n<div id="ForgectlMath">k</div>\n\n` +
+  `\`\`\`mermaid\nflowchart LR\n  A --> B\n\`\`\`\n\n$x^2$\n\n${marker}\n`;
+writeFileSync(clobberPath, clobber('CLOBBER-FIRST'));
 
 const port = await freePort();
 const base = `http://127.0.0.1:${port}`;
@@ -470,6 +497,100 @@ try {
   }
 } catch (err) {
   problems.push(String(err).split('\n')[0]);
+}
+
+// In-pane chrome stays on top of the doc (forgectl#759). <main>'s paint
+// clip keeps a doc's tooltip inside the pane, but the skip-content banner
+// and the narrow-width outline are inside the pane too. Each region is
+// screenshotted with the tooltip in place and again with it hidden; the
+// region's rounded corners are left out, since a doc showing through a
+// corner's transparent pixels mimics nothing.
+try {
+  const narrow = await browser.newPage({ viewport: { width: 800, height: 900 } });
+  for (const [doc, sel, id] of [
+    ['overlap-banner.md', '[data-fc="doc-body"] [data-forgectl-notice]', 'skip-content banner'],
+    ['overlap-inline.md', '[data-fc="outline-inline"]', 'inline outline'],
+    ['overlap-props.md', '[data-fc="doc-body"] [data-forgectl-props]', 'properties block'],
+    ['overlap-missing.md', '[data-fc="doc-missing"]', 'missing-doc banner'],
+  ]) {
+    await narrow.goto(`${base}/doc/docs/${doc}`, { waitUntil: 'load', timeout: 30000 });
+    if (doc === 'overlap-missing.md') {
+      unlinkSync(overlapMissing);
+      await narrow.waitForSelector(sel, { timeout: 15000 });
+    }
+    const probe = await narrow.evaluate((s) => {
+      const el = document.querySelector(s);
+      const tip = [...document.querySelectorAll('[data-fc="doc-body"] .tooltip')].find((d) => d.textContent === 'OVERLAP-TIP');
+      if (!el || !tip) return { missing: !el ? 'region' : 'tooltip' };
+      const r = el.getBoundingClientRect();
+      const t = tip.getBoundingClientRect();
+      const cs = getComputedStyle(el);
+      const rad = Math.ceil(Math.max(...['TopLeft', 'TopRight', 'BottomLeft', 'BottomRight']
+        .map((c) => parseFloat(cs[`border${c}Radius`]) || 0)));
+      const clip = { x: r.left + rad, y: r.top, width: r.width - 2 * rad, height: r.height };
+      const overlaps = t.left < clip.x + clip.width && t.right > clip.x && t.top < clip.y + clip.height && t.bottom > clip.y;
+      return { clip, overlaps };
+    }, sel);
+    if (probe.missing) {
+      problems.push(`in-pane chrome: no ${probe.missing} on ${doc}; the check proves nothing`);
+      continue;
+    }
+    if (!probe.overlaps) {
+      problems.push(`in-pane chrome: the tooltip does not reach the ${id} on ${doc}; the check proves nothing`);
+      continue;
+    }
+    const setTip = (v) => narrow.evaluate((vis) => [...document.querySelectorAll('[data-fc="doc-body"] .tooltip')]
+      .filter((d) => d.textContent === 'OVERLAP-TIP').forEach((d) => { d.style.visibility = vis; }), v);
+    const withTip = await narrow.screenshot({ clip: probe.clip, animations: 'disabled' });
+    await setTip('hidden');
+    const withoutTip = await narrow.screenshot({ clip: probe.clip, animations: 'disabled' });
+    await setTip('');
+    if (!withTip.equals(withoutTip)) problems.push(`in-pane chrome: a doc tooltip paints over the ${id}`);
+  }
+  await narrow.close();
+} catch (err) {
+  problems.push(`in-pane chrome: ${String(err).split('\n')[0]}`);
+}
+
+// Live reload survives a doc that clobbers the init scripts' globals
+// (forgectl#759). With the mermaid and KaTeX bundles blocked, each init
+// script returns early, and a doc's <div id="ForgectlMermaid"> would be
+// window.ForgectlMermaid: calling its .focusKey or .refresh threw inside the
+// swap, and live reload fell back to a full page reload.
+try {
+  const blocked = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+  const errors = [];
+  blocked.on('pageerror', (e) => errors.push(String(e).split('\n')[0]));
+  await blocked.route(/\/assets\/(mermaid\.min\.js|katex\/katex\.min\.js)$/, (r) => r.abort());
+  await blocked.goto(`${base}/doc/docs/clobber.md`, { waitUntil: 'load', timeout: 30000 });
+  const setup = await blocked.evaluate(() => {
+    const body = document.querySelector('[data-fc="doc-body"]');
+    return {
+      bundlesBlocked: typeof mermaid === 'undefined' && typeof katex === 'undefined',
+      idsKept: !!body.querySelector('#ForgectlMermaid') && !!body.querySelector('#ForgectlMath'),
+    };
+  });
+  if (!setup.bundlesBlocked || !setup.idsKept) {
+    problems.push(`clobbering: fixture ${JSON.stringify(setup)}; the check proves nothing`);
+  } else {
+    await blocked.evaluate(() => { window.__noFullReload = true; });
+    writeFileSync(clobberPath, clobber('CLOBBER-SECOND'));
+    try {
+      await blocked.waitForFunction(
+        () => document.querySelector('[data-fc="doc-body"]').textContent.includes('CLOBBER-SECOND'),
+        null, { timeout: 15000 });
+      // A fallback reload lands a moment after the fetch; give it the time.
+      await blocked.waitForTimeout(500);
+      const inPlace = await blocked.evaluate(() => window.__noFullReload === true).catch(() => false);
+      if (!inPlace) problems.push('clobbering: live reload fell back to a full reload');
+    } catch {
+      problems.push('clobbering: the doc body never picked up the edit');
+    }
+  }
+  if (errors.length > 0) problems.push(`clobbering: page errors: ${errors.join('; ')}`);
+  await blocked.close();
+} catch (err) {
+  problems.push(`clobbering: ${String(err).split('\n')[0]}`);
 }
 
 await browser.close();
