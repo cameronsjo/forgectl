@@ -19,7 +19,7 @@ forgectl herdr organize --json      # the plan as one JSON object on stdout; the
 
 Each tab goes to the workspace of the first rule whose glob matches `"<cwd> :: <title>"` for one of its panes (first pane first). A tab no rule matches goes to `default`. A tab's identity is the terminal id of its first pane, which stays stable when herdr renumbers tab ids on a move.
 
-Within a workspace, tabs are ordered by wing, then repo, then cwd, then tab id. Wing and repo are the first two path parts under the projects root (`$PROJECTS_DIR`, else `~/Projects`). A worktree path (`.../.claude/worktrees/...`) sorts with its repo. A cwd outside the root sorts last. A repo filed as `<root>/<host>/<owner>/<name>` sorts by host and owner.
+Within a workspace, tabs are ordered by wing, then repo, then cwd, then the first pane's terminal id, so tabs with the same cwd keep one order across runs. Wing and repo are the first two path parts under the projects root (`$PROJECTS_DIR`, else `~/Projects`). A worktree path (`.../.claude/worktrees/...`) sorts with its repo. A cwd outside the root sorts last. A repo filed as `<root>/<host>/<owner>/<name>` sorts by host and owner.
 
 Nothing is closed or renamed.
 

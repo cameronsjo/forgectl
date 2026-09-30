@@ -158,7 +158,7 @@ func TestDocsListCmd_HumanOutput_EscapesTerminalControls(t *testing.T) {
 // docsListTextLineMaxRunes is the widest `docs list` text line
 // TestPrintDocsList_TextCapsTitle can produce: the root label padded to 16,
 // a space, the path padded to 48, a space, and the title's 256-rune cap plus
-// its " … [truncated]" marker (14). Literal, so raising docTitleMaxRunes
+// its " … [truncated]" marker (14). Literal, so raising titleMaxRunes
 // cannot raise its own bound.
 const docsListTextLineMaxRunes = 16 + 1 + 48 + 1 + 256 + 14
 
@@ -166,7 +166,7 @@ const docsListTextLineMaxRunes = 16 + 1 + 48 + 1 + 256 + 14
 // capped in text output, and --json carries it whole.
 //
 // Mutations that turn it red: print d.Title through termsafe.SafeLine in
-// printDocsList, or raise docTitleMaxRunes to 1000.
+// printDocsList, or raise titleMaxRunes to 1000.
 func TestPrintDocsList_TextCapsTitle(t *testing.T) {
 	long := strings.Repeat("\u03c4", 5000) // Greek tau: nothing else on the line uses it
 	docs := []docspkg.Doc{{RootLabel: "docs", RelPath: "a.md", AbsPath: "/r/a.md", Title: long}}

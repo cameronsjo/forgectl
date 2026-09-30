@@ -107,6 +107,11 @@ func (w *herdrWorld) mutate(t *testing.T, args []string) (string, bool) {
 		ws := w.workspaces[from]
 		w.workspaces = append(w.workspaces[:from], w.workspaces[from+1:]...)
 		w.workspaces = append(w.workspaces[:idx], append([]herdr.Workspace{ws}, w.workspaces[idx:]...)...)
+		// herdr's workspace number is its 1-based position (workspace_list.json
+		// numbers them 1..n in list order), so a reorder renumbers them.
+		for i := range w.workspaces {
+			w.workspaces[i].Number = i + 1
+		}
 		return reply(t, map[string]any{}), true
 	case len(args) == 3 && args[0] == "tab" && args[1] == "focus":
 		w.focusLog = append(w.focusLog, "tab:"+args[2])

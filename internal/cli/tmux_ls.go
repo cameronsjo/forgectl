@@ -85,7 +85,7 @@ func newTmuxLsCmd(client *tmux.Client) *cobra.Command {
 				// line. Deliberately not QuotePath: that wraps every value in
 				// quotes, rewriting rows nobody asked it to touch.
 				fmt.Fprintf(w, "%s\t%s\t%d %s\t%s\n",
-					marker, termsafe.SafeLine(s.Name), s.Windows, unit, termsafe.SafeLine(s.Path))
+					marker, safeTitle(s.Name), s.Windows, unit, safeColumnPath(s.Path))
 			}
 			return w.Flush()
 		},

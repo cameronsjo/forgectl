@@ -135,7 +135,7 @@ Names come from config.toml keys; no profile value is read or printed.`,
 			}
 			out := cmd.OutOrStdout()
 			for _, name := range names {
-				if _, err := fmt.Fprintln(out, termsafe.SafeLine(name)); err != nil {
+				if _, err := fmt.Fprintln(out, safeText(name)); err != nil {
 					return err
 				}
 			}
@@ -177,7 +177,7 @@ profile, which is the state this verb exists to make visible.`,
 				return err
 			}
 			out := cmd.OutOrStdout()
-			if _, err := fmt.Fprintf(out, "profile: %s\n", termsafe.SafeLine(name)); err != nil {
+			if _, err := fmt.Fprintf(out, "profile: %s\n", safeText(name)); err != nil {
 				return err
 			}
 			for _, v := range proxypkg.Environment(lookup) {
@@ -209,7 +209,7 @@ func newProxyUseCmd(deps module.Deps) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			profile, ok := deps.Cfg.Proxy.Profiles[args[0]]
 			if !ok {
-				return fmt.Errorf("proxy profile %s is not configured", termsafe.QuoteText(args[0]))
+				return fmt.Errorf("proxy profile %s is not configured", termsafe.QuoteArgMax(args[0], termsafe.ArgEchoMaxRunes))
 			}
 			script, err := proxypkg.Use(profile)
 			if err != nil {

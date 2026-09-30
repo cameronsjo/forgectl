@@ -26,7 +26,7 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 			}
 			effLaunch, notice, effFrom := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
 			if notice != "" && !asJSON {
-				fmt.Fprintln(cmd.ErrOrStderr(), "forgectl: "+termsafe.SafeLine(notice))
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "forgectl: "+safeText(notice))
 			}
 			cfg.Launch = effLaunch
 			lc, src := resolveLaunchConfig(boundary, cfg, effFrom)
@@ -189,7 +189,7 @@ func printLaunchProfile(w io.Writer, th theme.Theme, p launch.Profile, cwd, conf
 // renderSafe establishes the ordering invariant for styled terminal output:
 // untrusted text is escaped first, then the trusted renderer may add ANSI.
 func renderSafe(render func(...string) string, untrusted string) string {
-	return render(termsafe.SafeLine(untrusted))
+	return render(safeText(untrusted))
 }
 
 // launchGetwd is os.Getwd, a variable only so a test can make it fail.
