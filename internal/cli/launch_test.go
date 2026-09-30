@@ -855,7 +855,7 @@ func TestIntegration_ClaudeBinOverride(t *testing.T) {
 		env := stripFromPath(h.env, h.binDir)
 		env = append(env, "FORGECTL_CLAUDE_BIN="+filepath.Join(h.binDir, "claude"))
 
-		cmd := exec.Command(h.bin, "launch", "x")
+		cmd := exec.CommandContext(t.Context(), h.bin, "launch", "x") //nolint:gosec // G204: the test's own built binary with fixed args
 		cmd.Dir = h.cwd
 		cmd.Env = env
 		if err := cmd.Run(); err != nil {

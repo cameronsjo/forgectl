@@ -69,7 +69,7 @@ const (
 	PostureClaudeBuilder     Posture = "claude-builder"
 	PostureClaudeAgents      Posture = "claude-agents"
 	PostureAgentsPassthrough Posture = "agents-passthrough"
-	PostureClaudePassthrough Posture = "claude-passthrough"
+	PostureClaudePassthrough Posture = "claude-passthrough" //nolint:gosec // G101: a posture name ("passthrough"), not a credential
 	PostureClaudePrint       Posture = "claude-print"
 	PostureCodexSession      Posture = "codex-session"
 	PostureCodexExec         Posture = "codex-exec"
