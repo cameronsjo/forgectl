@@ -23,6 +23,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/tomlerr"
 )
 
 // logKeepDays is how many daily log files are retained before pruning.
@@ -1129,9 +1130,9 @@ func describeReadError(path string, err error) error {
 
 // describeDecodeError words a config parse failure for the operator: the file
 // and, when the decoder located the fault, its line and column (carried by
-// scrubTOMLError's text). The underlying error stays on the chain.
+// tomlerr.Scrub's text). The underlying error stays on the chain.
 func describeDecodeError(path string, err error) error {
-	return fmt.Errorf("config file %s does not parse: %w", termsafe.QuotePath(path), scrubTOMLError(err))
+	return fmt.Errorf("config file %s does not parse: %w", termsafe.QuotePath(path), tomlerr.Scrub(err))
 }
 
 // quoteConfigValue is how a validation error echoes a value from config.toml
@@ -1153,7 +1154,7 @@ func DecodeStrict(data []byte) (Config, error) {
 	}
 	meta, err := toml.Decode(string(data), &cfg)
 	cfg.launchSet = meta.IsDefined("launch")
-	return cfg, scrubTOMLError(err)
+	return cfg, tomlerr.Scrub(err)
 }
 
 // Validate decodes the config file and checks the sections that carry semantic
@@ -1629,7 +1630,7 @@ func LoadLegacyLaunch() (LaunchConfig, string, error) {
 		if os.IsNotExist(err) {
 			return LaunchConfig{}, path, fmt.Errorf("%w at %s", ErrNoLegacyLaunch, path)
 		}
-		return LaunchConfig{}, path, fmt.Errorf("read legacy claunch.conf at %s: %w", path, scrubTOMLError(err))
+		return LaunchConfig{}, path, fmt.Errorf("read legacy claunch.conf at %s: %w", path, tomlerr.Scrub(err))
 	}
 	return stripLegacyUsageOptIn(lc), path, nil
 }
