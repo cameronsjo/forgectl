@@ -195,7 +195,7 @@ func TestScrub_PassesThroughOtherErrors(t *testing.T) {
 }
 
 // TestKeys_QuotedCappedAndBounded: an unknown-key list is quoted per key,
-// capped per key, and cut after maxKeysShown keys.
+// capped per key, and cut after MaxKeysShown keys.
 func TestKeys_QuotedCappedAndBounded(t *testing.T) {
 	var body strings.Builder
 	for i := 0; i < 20; i++ {
@@ -210,8 +210,8 @@ func TestKeys_QuotedCappedAndBounded(t *testing.T) {
 	if strings.Contains(got, "\x1b") || strings.Contains(got, strings.Repeat("K", 81)) {
 		t.Errorf("Keys = %q, echoes a key uncapped or unescaped", got)
 	}
-	if n := strings.Count(got, `"…`); n != maxKeysShown {
-		t.Errorf("Keys shows %d keys, want %d: %q", n, maxKeysShown, got)
+	if n := strings.Count(got, `"…`); n != MaxKeysShown {
+		t.Errorf("Keys shows %d keys, want %d: %q", n, MaxKeysShown, got)
 	}
 	if !strings.HasSuffix(got, ", …") {
 		t.Errorf("Keys = %q, want a trailing ellipsis", got)
@@ -239,7 +239,7 @@ func TestKeyStrings_MatchesKeys(t *testing.T) {
 	if got := KeyStrings(dotted); strings.Contains(got, long[:81]) || !strings.HasSuffix(got, ", …") {
 		t.Errorf("KeyStrings = %q, want capped keys and a trailing ellipsis", got)
 	}
-	if got := KeyStrings(dotted[:maxKeysShown]); strings.HasSuffix(got, ", …") {
-		t.Errorf("KeyStrings(%d) = %q, want no ellipsis at exactly the cap", maxKeysShown, got)
+	if got := KeyStrings(dotted[:MaxKeysShown]); strings.HasSuffix(got, ", …") {
+		t.Errorf("KeyStrings(%d) = %q, want no ellipsis at exactly the cap", MaxKeysShown, got)
 	}
 }

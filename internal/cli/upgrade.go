@@ -114,14 +114,29 @@ func runUpgradeApply(ctx context.Context, deps module.Deps, out io.Writer) error
 	}
 	if err != nil {
 		slog.Warn("brew upgrade failed.", "error", err)
-		msg := "upgrade: brew upgrade --cask failed; the installed forgectl is unchanged"
-		if errors.Is(err, selfupdate.ErrTapUpdate) {
-			msg = "upgrade: brew update failed; check network access to the Homebrew tap"
-		}
-		return WithExitCode(termsafe.Categorical(msg, err), 1)
+		return WithExitCode(termsafe.Categorical(upgradeFailure(ctx, err), err), 1)
+	}
+	if from, to, ok := selfupdate.UpgradedVersions(upgradeOut); ok {
+		_, _ = fmt.Fprintf(out, "forgectl upgraded %s → %s — restart your shell (or open a new one) to pick up the new binary.\n", from, to)
+		return nil
 	}
 	_, _ = fmt.Fprintln(out, "forgectl upgraded — restart your shell (or open a new one) to pick up the new binary.")
 	return nil
+}
+
+// upgradeFailure words a failed apply from fixed text, by cause. An interrupt
+// comes first: os/exec reports a killed brew as a signal exit, not as
+// context.Canceled, so the context itself is consulted too, and a Ctrl-C must
+// not read as a network fault.
+func upgradeFailure(ctx context.Context, err error) string {
+	switch {
+	case ctx.Err() != nil || errors.Is(err, context.Canceled):
+		return "upgrade: interrupted before brew finished; run `forgectl --version` to see what is installed"
+	case errors.Is(err, selfupdate.ErrTapUpdate):
+		return "upgrade: brew update failed; check network access to the Homebrew tap"
+	default:
+		return "upgrade: brew upgrade --cask failed; the installed forgectl may be unchanged; run `forgectl --version`"
+	}
 }
 
 // runUpgradeCheck reports whether an upgrade is available, without applying

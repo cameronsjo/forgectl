@@ -517,7 +517,11 @@ func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, h
 		// Quoted, each capped, at most a handful shown (#761): the same
 		// rendering every other unknown-key error uses. The --json array
 		// keeps each key verbatim; it is the stable machine surface.
-		_, _ = fmt.Fprintf(out, "  %s\n", tomlerr.KeyStrings(rep.Unrecognized))
+		line := tomlerr.KeyStrings(rep.Unrecognized)
+		if more := len(rep.Unrecognized) - tomlerr.MaxKeysShown; more > 0 {
+			line += fmt.Sprintf(" (%d more; see --json)", more)
+		}
+		_, _ = fmt.Fprintf(out, "  %s\n", line)
 	}
 }
 

@@ -335,3 +335,25 @@ func TestRenderConfigText_UnrecognizedKeysCapped(t *testing.T) {
 		t.Errorf("rendering lost the first unrecognized key:\n%s", out)
 	}
 }
+
+// TestRenderConfigText_UnrecognizedKeysCountsTheRest pins #761 (d): a list cut
+// at the display cap says how many keys the ellipsis hides and where to see
+// them; a list within the cap says nothing extra.
+func TestRenderConfigText_UnrecognizedKeysCountsTheRest(t *testing.T) {
+	entries, hosts, resolved := hostileTextFixture()
+	render := func(n int) string {
+		var unrec []string
+		for i := 0; i < n; i++ {
+			unrec = append(unrec, "k"+string(rune('a'+i)))
+		}
+		var buf bytes.Buffer
+		renderConfigText(&buf, entries, config.Report{Path: "/cfg", Found: true, Unrecognized: unrec}, hosts, resolved)
+		return buf.String()
+	}
+	if out := render(7); !strings.Contains(out, "(2 more; see --json)") {
+		t.Errorf("7 keys: rendering does not count the hidden 2:\n%s", out)
+	}
+	if out := render(5); strings.Contains(out, "more; see --json") {
+		t.Errorf("5 keys: rendering claims hidden keys:\n%s", out)
+	}
+}

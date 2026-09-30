@@ -224,19 +224,20 @@ func wrongType(found, want string) string {
 	return "wrong value type"
 }
 
-// maxKeysShown bounds Keys: a file with hundreds of stray keys cannot flood
-// the error.
-const maxKeysShown = 5
+// MaxKeysShown bounds Keys and KeyStrings: a file with hundreds of stray keys
+// cannot flood the error. Exported so a caller with a fuller view elsewhere
+// (config's --json) can say how many the ellipsis stands for.
+const MaxKeysShown = 5
 
 // Keys renders a decoder's undecoded-key list for an "unknown key(s)" error:
-// each key quoted and capped through QuoteArgMax, at most maxKeysShown of
+// each key quoted and capped through QuoteArgMax, at most MaxKeysShown of
 // them, then an ellipsis (#706, #738). toml.Key.String escapes only C0
 // controls inside quoted pieces and leaves a bare piece of any length as is,
 // so its output is not a safe echo on its own.
 func Keys(keys []toml.Key) string {
-	dotted := make([]string, 0, min(len(keys), maxKeysShown))
+	dotted := make([]string, 0, min(len(keys), MaxKeysShown))
 	for i, k := range keys {
-		if i == maxKeysShown {
+		if i == MaxKeysShown {
 			// One past the cap is enough for KeyStrings to add the ellipsis.
 			dotted = append(dotted, "")
 			break
@@ -250,9 +251,9 @@ func Keys(keys []toml.Key) string {
 // as config.Report.Unrecognized: the same quoting, per-key cap, and count
 // cap, so every unknown-key rendering reads alike (#761).
 func KeyStrings(keys []string) string {
-	shown := make([]string, 0, maxKeysShown+1)
+	shown := make([]string, 0, MaxKeysShown+1)
 	for i, k := range keys {
-		if i == maxKeysShown {
+		if i == MaxKeysShown {
 			shown = append(shown, "…")
 			break
 		}
