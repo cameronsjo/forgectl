@@ -33,7 +33,19 @@ type SystemRestartEnv struct {
 	forgectl string
 	// herdr is the herdr binary; "" runs `herdr` from PATH.
 	herdr string
+	// callTimeout bounds each herdr call; zero means HerdrCallTimeout.
+	callTimeout time.Duration
 }
+
+// HerdrCallTimeout bounds every herdr call a restart run makes. Each call is
+// one request to the local herdr server, answered well inside it, while a
+// call still running at the bound is taken as wedged. The bound matters most
+// after the signal: from there the run ignores cancellation, and each herdr
+// call sits in a process group of its own, so neither Ctrl-C nor a hangup
+// reaches it. Without the bound, a wedged call would hang the run forever
+// with the session stopped; at the bound, the call's group is killed and the
+// session is reported failed, with the command to resume it by hand.
+const HerdrCallTimeout = 10 * time.Second
 
 // herdrBin is the herdr binary every call runs.
 func (e SystemRestartEnv) herdrBin() string {
@@ -43,13 +55,20 @@ func (e SystemRestartEnv) herdrBin() string {
 	return "herdr"
 }
 
-// runHerdr runs one herdr call in a process group of its own. A restart run
-// survives SIGHUP on purpose, so a closed terminal cannot strand a session
-// between its stop and its relaunch; in the terminal's group, the herdr call
-// in flight would still take the hangup and die (forgectl#877). herdr is
-// non-interactive, so it never needs the terminal's foreground group, and a
-// cancelled context still kills it.
+// runHerdr runs one herdr call in a process group of its own, bounded by
+// HerdrCallTimeout. A restart run survives SIGHUP on purpose, so a closed
+// terminal cannot strand a session between its stop and its relaunch; in the
+// terminal's group, the herdr call in flight would still take the hangup and
+// die (forgectl#877). herdr is non-interactive, so it never needs the
+// terminal's foreground group. At the bound, or when ctx is cancelled, the
+// call's whole group is killed.
 func (e SystemRestartEnv) runHerdr(ctx context.Context, args ...string) (string, error) {
+	limit := e.callTimeout
+	if limit <= 0 {
+		limit = HerdrCallTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
 	return e.runner.Run(exec.WithProcessGroup(ctx), e.herdrBin(), args...)
 }
 

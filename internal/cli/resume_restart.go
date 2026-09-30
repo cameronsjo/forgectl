@@ -87,9 +87,12 @@ Ctrl-C, SIGTERM, and SIGHUP (a closed terminal) stop the waiting, never a
 restart already signalled: that session is still relaunched and confirmed.
 SIGPIPE is ignored, so a broken output pipe cannot kill the run either. A
 failed stop or relaunch is reported with the command to run by hand. Each
-herdr call the run makes is in a process group of its own, so a closed
-terminal's hangup does not reach a call in flight either; only the progress
-lines are lost with the terminal.
+herdr call the run makes is in a process group of its own, so neither a
+closed terminal's hangup nor Ctrl-C reaches a call in flight; only the
+progress lines are lost with the terminal. Each call is bounded at 10
+seconds instead, and one that runs past it is killed, so a wedged herdr
+after the stop is reported as a failure with the command to resume it by
+hand.
 
 Output is one line per session per state change: waiting (with the reason),
 restarting, resumed, skipped, failed, and left (still waiting at the timeout

@@ -23,14 +23,23 @@ const (
 	sighupCallEnv   = "FORGECTL_TEST_SIGHUP_HELPER_CALL"
 )
 
-// fakeHerdrScript sleeps only on the subcommand named in $dir/slow, marking
-// its start and its finish, and answers pane get / process-info with the
-// minimal JSON their parsers accept.
+// fakeHerdrScript, on the subcommand named in $dir/slow only, records its pid
+// (its process group's id), marks its start, and cannot finish until the test
+// creates $dir/go, which it does only after sending the hangup: the call is in
+// flight when the signal lands by construction, never by timing. It gives up
+// after about 10s. It answers pane get / process-info with the minimal JSON
+// their parsers accept.
 const fakeHerdrScript = `#!/bin/sh
 dir=$(dirname "$0")
 if [ "$2" = "$(cat "$dir/slow")" ]; then
+	echo $$ > "$dir/herdr.pid"
 	: > "$dir/started"
-	sleep 1
+	i=0
+	until [ -e "$dir/go" ]; do
+		i=$((i+1))
+		[ "$i" -gt 200 ] && exit 3
+		sleep 0.05
+	done
 	: > "$dir/done"
 fi
 case "$2" in
@@ -69,6 +78,7 @@ func TestRestartHerdrCallSurvivesSIGHUP(t *testing.T) {
 			if err := os.Chmod(herdr, 0o700); err != nil { //nolint:gosec // G302: the fake herdr must be executable
 				t.Fatal(err)
 			}
+			t.Cleanup(func() { killRecordedGroup(filepath.Join(dir, "herdr.pid")) })
 			cmd := osexec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestRestartHerdrSIGHUPHelper$", "-test.count=1") //nolint:gosec // G204, G702: re-executes this test binary
 			cmd.Env = append(os.Environ(), sighupHelperEnv+"="+dir, sighupCallEnv+"="+sub)
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -79,11 +89,17 @@ func TestRestartHerdrCallSurvivesSIGHUP(t *testing.T) {
 				t.Fatal(err)
 			}
 			if !waitForFile(filepath.Join(dir, "started"), 10*time.Second) {
-				_ = cmd.Process.Kill()
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 				_ = cmd.Wait()
 				t.Fatalf("herdr %s never started; helper output:\n%s", sub, out.String())
 			}
 			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGHUP); err != nil {
+				t.Fatal(err)
+			}
+			// kill(2) has made the hangup pending on every member of the
+			// group by the time it returns, so a herdr in the run's group
+			// dies of it before it can see this file.
+			if err := os.WriteFile(filepath.Join(dir, "go"), nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if err := cmd.Wait(); err != nil {
