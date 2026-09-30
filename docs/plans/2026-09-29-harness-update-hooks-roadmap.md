@@ -1,7 +1,7 @@
 ---
 status: in-flight
 branch: plan/harness-update-hooks
-next: item 2 (#726) done on feat/resume-outdated (local, polished); item 3 (#727) building on feat/resume-restart stacked on it; ship both via PRs, then item 4 (#728)
+next: items 1 (#725, PR #874) and 2 (#726, PR #875) merged; item 3 (#727) is PR #876; then item 4 (#728) on [[on_update]] hooks, calling resume.RestartOutdated
 ---
 
 # Harness update hooks — Roadmap (2026-09-29)
