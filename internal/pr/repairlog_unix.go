@@ -21,13 +21,40 @@ import (
 // would hang before openRepairLogFile's regular-file check ever runs. It is
 // cleared before the descriptor is handed back, so a regular file reads and
 // writes exactly as it did through a plain open.
+//
+// Some refusals arrive as an errno from the open rather than as a file type
+// from the Fstat after it, and each is named for what it is (forgectl#621):
+//
+//   - ELOOP is a symlink as the log itself only when an Lstat of the path says
+//     so. The same errno comes back for a symlink loop in a directory ABOVE
+//     the log, and that error names the directory, not the log. (FreeBSD and
+//     NetBSD report O_NOFOLLOW on a symlink as EMLINK and EFTYPE; no shipped
+//     binary runs there, and they get the plain open error.)
+//   - ENXIO is a socket (and EISDIR a directory opened for writing): the
+//     kernel refuses the open before the Fstat can name the type, and
+//     "no such device or address" would not tell the operator what is wrong.
+//
+// The Lstat only names the refusal; nothing is opened on its word.
 func openRepairLogNoFollow(path string, flag int, perm os.FileMode) (*os.File, error) {
 	f, err := openNoFollowNonblock(path, flag, perm)
-	if errors.Is(err, unix.ELOOP) {
-		return nil, fmt.Errorf("%w: %s is a symlink; refusing to follow it",
-			errRepairLogNotRegular, termsafe.QuotePath(path))
+	if err == nil {
+		return f, nil
 	}
-	return f, err
+	switch {
+	case errors.Is(err, unix.ELOOP):
+		if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("%s is a symlink: %w; refusing to follow it",
+				termsafe.QuotePath(path), errRepairLogNotRegular)
+		}
+		return nil, fmt.Errorf("a directory above %s loops back through symlinks: %w",
+			termsafe.QuotePath(path), unix.ELOOP)
+	case errors.Is(err, unix.ENXIO), errors.Is(err, unix.EISDIR):
+		if info, lerr := os.Lstat(path); lerr == nil && !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("%s is a %s: %w; refusing it",
+				termsafe.QuotePath(path), fileKind(info.Mode()), errRepairLogNotRegular)
+		}
+	}
+	return nil, err
 }
 
 // openNoFollowNonblock is the open under openRepairLogNoFollow, shared with the

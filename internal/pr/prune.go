@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -284,7 +285,12 @@ type repairLogPlan struct {
 	groups map[string]*repairGroup
 	// size is the bytes pass one read. Pass two refuses unless it reads the
 	// same number, which catches an append between the passes.
-	size    int64
+	size int64
+	// sum is the SHA-256 of those bytes. Size and counts alone miss a
+	// same-length edit that keeps every count — a completion's timestamp moved
+	// from old to in-window at the same width, say — so pass two also refuses
+	// unless the bytes it read hash the same (forgectl#621).
+	sum     [sha256.Size]byte
 	kept    int
 	dropped int
 }
@@ -365,7 +371,8 @@ func walkRepairLog(r io.Reader, line func([]byte) error, long func(chunk []byte,
 func scanRepairLog(r io.Reader, cutoff time.Time) (*repairLogPlan, error) {
 	p := &repairLogPlan{groups: make(map[string]*repairGroup)}
 	lines := 0
-	size, err := walkRepairLog(r, func(line []byte) error {
+	h := sha256.New()
+	size, err := walkRepairLog(io.TeeReader(r, h), func(line []byte) error {
 		lines++
 		row, ok := decodeRepairLine(line)
 		if !ok {
@@ -403,6 +410,7 @@ func scanRepairLog(r io.Reader, cutoff time.Time) (*repairLogPlan, error) {
 		return nil, err
 	}
 	p.size = size
+	h.Sum(p.sum[:0])
 	for _, g := range p.groups {
 		if g.settled() {
 			p.dropped += g.rows
@@ -418,8 +426,8 @@ func scanRepairLog(r io.Reader, cutoff time.Time) (*repairLogPlan, error) {
 // lines are written byte for byte, an over-long one included.
 //
 // It refuses with errRepairLogChanged when r is not the log the plan was made
-// over, measured by bytes read and by the kept and dropped counts; w then
-// holds a partial copy the caller must discard.
+// over, measured by bytes read, by their SHA-256, and by the kept and dropped
+// counts; w then holds a partial copy the caller must discard.
 func (p *repairLogPlan) copyKept(r io.Reader, w io.Writer) error {
 	bw := bufio.NewWriterSize(w, maxRepairLogLineBytes)
 	kept, dropped := 0, 0
@@ -430,7 +438,8 @@ func (p *repairLogPlan) copyKept(r io.Reader, w io.Writer) error {
 		return nil
 	}
 	nl := []byte("\n")
-	size, err := walkRepairLog(r, func(line []byte) error {
+	h := sha256.New()
+	size, err := walkRepairLog(io.TeeReader(r, h), func(line []byte) error {
 		if p.drops(line) {
 			dropped++
 			return nil
@@ -453,9 +462,14 @@ func (p *repairLogPlan) copyKept(r io.Reader, w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	var sum [sha256.Size]byte
+	h.Sum(sum[:0])
 	if size != p.size || kept != p.kept || dropped != p.dropped {
 		return fmt.Errorf("%w (planned %d bytes, %d kept, %d dropped; read %d bytes, %d kept, %d dropped)",
 			errRepairLogChanged, p.size, p.kept, p.dropped, size, kept, dropped)
+	}
+	if sum != p.sum {
+		return fmt.Errorf("%w (the same %d bytes and counts, but different content)", errRepairLogChanged, size)
 	}
 	if err := bw.Flush(); err != nil {
 		return fmt.Errorf("write temp audit log: %w", err)

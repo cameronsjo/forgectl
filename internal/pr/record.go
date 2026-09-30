@@ -83,12 +83,31 @@ func (osRecordFS) SyncDir(path string) error {
 
 func (osRecordFS) Remove(path string) error { return os.Remove(path) }
 
+// errRecordNotRegular is osRecordFS.ReadFile's refusal of a record path that
+// is not a regular file.
+var errRecordNotRegular = errors.New("not a regular file")
+
+// ReadFile reads a session record without following a symlink and without
+// blocking in the open (forgectl#621). Its caller Lstats the path first, but
+// that is a check on the path, not on what the open reaches: a FIFO swapped in
+// between would block a plain open under the lifecycle lock, stalling every pr
+// verb. So the open is O_NOFOLLOW|O_NONBLOCK (openNoFollowNonblock, which
+// clears O_NONBLOCK before returning), and the descriptor is Fstat'ed and
+// refused unless it is a regular file. The read stays size-bounded by
+// readBreadcrumbBytes.
 func (osRecordFS) ReadFile(path string) ([]byte, error) {
-	f, err := os.Open(path) //nolint:gosec // a path inside the sessions dir
+	f, err := openNoFollowNonblock(filepath.Clean(path), os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, &os.PathError{Op: "read", Path: path, Err: errRecordNotRegular}
+	}
 	return readBreadcrumbBytes(f)
 }
 
