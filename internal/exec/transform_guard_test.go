@@ -2,13 +2,13 @@ package exec
 
 import (
 	"go/ast"
-	"go/build"
-	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
 	"io/fs"
+	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -34,7 +34,8 @@ var transformCallers = map[string]bool{
 // TestNoCallerCodeReceivesAnOpaquePayload keeps the sealed-payload promise
 // that buildCmd, FakeSensitiveRunner and backend.BootstrapCommand state: no
 // payload is handed to code outside this package. The in-package rules run
-// on the type-checked package (checkExecPackage); this one walks every Go
+// on the type-checked package (TestExportedAPI,
+// TestTransformIsMintedOnlyInTransformGo); this one walks every Go
 // file in the module, tests included, so a test elsewhere cannot use the
 // seam either. Outside internal/exec, only transformCallers may name
 // MapOpaque, Transform or TmuxDirOperand, and no file may dot-import this
@@ -73,7 +74,7 @@ func TestNoCallerCodeReceivesAnOpaquePayload(t *testing.T) {
 		}
 		rel = filepath.ToSlash(rel)
 		if filepath.ToSlash(filepath.Dir(rel)) == "internal/exec" {
-			return nil // checkExecPackage covers this package, typed
+			return nil // the typed per-GOOS guards cover this package
 		}
 		file, parseErr := parser.ParseFile(fset, path, nil, parser.ImportsOnly|parser.SkipObjectResolution)
 		if parseErr != nil {
@@ -142,113 +143,30 @@ func execAlias(file *ast.File, report func(token.Pos, string)) string {
 	return ""
 }
 
-// TestExecHandsNoPayloadToCallerCode type-checks internal/exec's production
-// files and applies the two in-package rules (checkExecPackage).
+// TestTransformIsMintedOnlyInTransformGo keeps the Transform set closed: no
+// production file of internal/exec but transform.go may write a Transform
+// literal with elements or assign Transform.apply, for any GOOS in
+// guardGOOS. The exported-API golden (TestExportedAPI) cannot see this,
+// because minting inside the package changes no exported signature.
 //
-// Mutations that turn it red, one per shape the rules must catch:
+// Mutations that turn it red, each written in sensitive.go:
 //
-//   - func A(a Arg, f func(string) string) Arg      (a plain func parameter)
-//   - type R func(string) string; func A(a Arg, r R) (a named func type)
-//   - func A[F ~func(string) string](a Arg, f F)     (a type parameter)
-//   - func A(a Arg, fs ...func(string) string)       (a variadic func)
-//   - type r struct{}; func (r) M(f func(string))    (a method on an unexported type)
 //   - var t Transform; t.apply = strings.ToUpper     (minting by assignment)
 //   - Transform{apply: strings.ToUpper}              (minting by literal)
-//
-// each written in sensitive.go.
-func TestExecHandsNoPayloadToCallerCode(t *testing.T) {
-	for _, f := range checkExecPackage(t) {
-		t.Error(f)
+func TestTransformIsMintedOnlyInTransformGo(t *testing.T) {
+	for _, goos := range guardGOOS {
+		c := checkExecFor(t, goos)
+		for _, f := range mintingFindings(t, c) {
+			t.Errorf("[GOOS=%s] %s", goos, f)
+		}
 	}
 }
 
-// checkExecPackage returns a finding for:
-//
-//   - any exported function, or exported method on ANY type (an unexported
-//     type's method is still callable through a value an importer holds),
-//     with a parameter whose type is or contains a func signature: a plain,
-//     named, variadic or pointer-to func, a func inside a slice, map, array,
-//     channel or exported struct field, or a type parameter whose constraint
-//     admits one. A callback is how a payload would reach caller code, as the
-//     first MapOpaque did with `f func(string) string`;
-//   - any composite literal of Transform with elements, or any assignment to
-//     Transform.apply, outside transform.go, so the closed set is minted in
-//     one reviewable file.
-func checkExecPackage(t *testing.T) []string {
+// mintingFindings returns a finding for any composite literal of Transform
+// with elements, or any assignment to Transform.apply, outside transform.go.
+func mintingFindings(t *testing.T, c *checkedPackage) []string {
 	t.Helper()
-	dir, err := filepath.Abs(".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	pkg, err := build.Default.ImportDir(dir, 0)
-	if err != nil {
-		t.Fatalf("list internal/exec: %v", err)
-	}
-	fset := token.NewFileSet()
-	var files []*ast.File
-	for _, name := range pkg.GoFiles {
-		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
-		if err != nil {
-			t.Fatal(err)
-		}
-		files = append(files, f)
-	}
-	if len(files) == 0 {
-		t.Fatal("parsed no production files of internal/exec")
-	}
-	info := &types.Info{
-		Types:      map[ast.Expr]types.TypeAndValue{},
-		Selections: map[*ast.SelectorExpr]*types.Selection{},
-	}
-	conf := types.Config{Importer: importer.ForCompiler(fset, "source", nil)}
-	tpkg, err := conf.Check(execImportPath, fset, files, info)
-	if err != nil {
-		t.Fatalf("type-check internal/exec: %v", err)
-	}
-
-	var findings []string
-	report := func(pos token.Pos, msg string) {
-		findings = append(findings, fset.Position(pos).String()+": "+msg)
-	}
-
-	checkSig := func(fn *types.Func) {
-		if !fn.Exported() {
-			return
-		}
-		sig, ok := fn.Type().(*types.Signature)
-		if !ok {
-			return
-		}
-		params := sig.Params()
-		for i := 0; i < params.Len(); i++ {
-			if containsSignature(params.At(i).Type(), map[types.Type]bool{}) {
-				report(fn.Pos(), fn.Name()+" takes a parameter that is or holds a func; a callback can receive an opaque payload, so the seam offers closed Transforms instead")
-			}
-		}
-	}
-	scope := tpkg.Scope()
-	functions, methods := 0, 0
-	for _, name := range scope.Names() {
-		switch obj := scope.Lookup(name).(type) {
-		case *types.Func:
-			functions++
-			checkSig(obj)
-		case *types.TypeName:
-			named, ok := obj.Type().(*types.Named)
-			if !ok {
-				continue
-			}
-			for i := 0; i < named.NumMethods(); i++ {
-				methods++
-				checkSig(named.Method(i))
-			}
-		}
-	}
-	if functions == 0 || methods == 0 {
-		t.Fatalf("type-checked internal/exec but saw %d functions and %d methods; the walk is broken", functions, methods)
-	}
-
-	transform, ok := scope.Lookup("Transform").(*types.TypeName)
+	transform, ok := c.pkg.Scope().Lookup("Transform").(*types.TypeName)
 	if !ok {
 		t.Fatal("internal/exec declares no Transform type")
 	}
@@ -263,14 +181,18 @@ func checkExecPackage(t *testing.T) []string {
 	if apply == nil {
 		t.Fatal("Transform has no apply field; the minting rule would check nothing")
 	}
-	for _, f := range files {
-		if filepath.Base(fset.Position(f.Pos()).Filename) == "transform.go" {
+	var findings []string
+	report := func(pos token.Pos, msg string) {
+		findings = append(findings, c.fset.Position(pos).String()+": "+msg)
+	}
+	for _, f := range c.files {
+		if filepath.Base(c.fset.Position(f.Pos()).Filename) == "transform.go" {
 			continue
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch node := n.(type) {
 			case *ast.CompositeLit:
-				if tv, ok := info.Types[node]; ok && types.Identical(tv.Type, transform.Type()) && len(node.Elts) > 0 {
+				if tv, ok := c.info.Types[node]; ok && types.Identical(tv.Type, transform.Type()) && len(node.Elts) > 0 {
 					report(node.Pos(), "a Transform is minted outside transform.go; keep the closed set in one file")
 				}
 			case *ast.AssignStmt:
@@ -279,7 +201,7 @@ func checkExecPackage(t *testing.T) []string {
 					if !ok {
 						continue
 					}
-					if s, ok := info.Selections[sel]; ok && s.Obj() == apply {
+					if s, ok := c.info.Selections[sel]; ok && s.Obj() == apply {
 						report(sel.Pos(), "Transform.apply is assigned outside transform.go; keep the closed set in one file")
 					}
 				}
@@ -290,89 +212,100 @@ func checkExecPackage(t *testing.T) []string {
 	return findings
 }
 
-// containsSignature reports whether t is, or holds, a func signature that a
-// caller could supply: through its underlying type, an element, an exported
-// struct field, or a type parameter's constraint. seen stops recursion.
-func containsSignature(t types.Type, seen map[types.Type]bool) bool {
-	if seen[t] {
-		return false
-	}
-	seen[t] = true
-	if tp, ok := t.(*types.TypeParam); ok {
-		return constraintAdmitsSignature(tp.Constraint(), seen)
-	}
-	switch u := t.Underlying().(type) {
-	case *types.Signature:
-		return true
-	case *types.Pointer:
-		return containsSignature(u.Elem(), seen)
-	case *types.Slice:
-		return containsSignature(u.Elem(), seen)
-	case *types.Array:
-		return containsSignature(u.Elem(), seen)
-	case *types.Chan:
-		return containsSignature(u.Elem(), seen)
-	case *types.Map:
-		return containsSignature(u.Key(), seen) || containsSignature(u.Elem(), seen)
-	case *types.Struct:
-		// An unexported field cannot be set by a caller, so a closure the
-		// package itself stores there (Arg.reveal) is not a callback.
-		for i := 0; i < u.NumFields(); i++ {
-			if f := u.Field(i); f.Exported() && containsSignature(f.Type(), seen) {
-				return true
-			}
-		}
-	case *types.Interface:
-		return constraintAdmitsSignature(u, seen)
-	}
-	return false
-}
-
-// constraintAdmitsSignature reports whether an interface used as a
-// constraint embeds, directly or through a union, a type holding a func.
-func constraintAdmitsSignature(c types.Type, seen map[types.Type]bool) bool {
-	iface, ok := c.Underlying().(*types.Interface)
-	if !ok {
-		return false
-	}
-	for i := 0; i < iface.NumEmbeddeds(); i++ {
-		switch e := iface.EmbeddedType(i).(type) {
-		case *types.Union:
-			for j := 0; j < e.Len(); j++ {
-				if containsSignature(e.Term(j).Type(), seen) {
-					return true
-				}
-			}
-		default:
-			if containsSignature(e, seen) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // TestTmuxescIsALeaf keeps internal/tmux/tmuxesc what transform.go relies on:
-// pure string escapes that import nothing but strings, so the payload
-// MapOpaque hands them can go nowhere else.
+// pure string escapes that hold no state and import nothing but strings, so
+// the payload MapOpaque hands them can go nowhere but the returned string.
+// It reads every non-test .go file in the directory, whatever its build
+// constraint, so a file tagged for another GOOS is held to the same rules:
 //
-// Mutation that turns it red: import "os" (or anything but strings) in
-// tmuxesc.go.
+//   - the only import is strings;
+//   - the only declarations are funcs: no package-level var (which could
+//     capture a payload), const, type or init;
+//   - every func is a plain, non-generic, non-method func whose parameters
+//     are all string and whose single result is string or bool.
+//
+// Mutations that turn it red: import "os" in tmuxesc.go; declare
+// `var last string` in tmuxesc.go; add `func Hook(f func(string)) string`.
 func TestTmuxescIsALeaf(t *testing.T) {
 	dir, err := filepath.Abs(filepath.Join("..", "tmux", "tmuxesc"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	pkg, err := build.Default.ImportDir(dir, 0)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("list tmuxesc: %v", err)
+		t.Fatal(err)
 	}
-	if len(pkg.GoFiles) == 0 {
-		t.Fatal("tmuxesc has no production files; the check is broken")
-	}
-	for _, imp := range pkg.Imports {
-		if imp != "strings" {
-			t.Errorf("tmuxesc imports %q; it must import only strings", imp)
+	fset := token.NewFileSet()
+	funcs := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range tmuxescFindings(fset, file, &funcs) {
+			t.Error(f)
 		}
 	}
+	if funcs == 0 {
+		t.Fatal("found no funcs in tmuxesc; the walk is broken, not the package clean")
+	}
+}
+
+// tmuxescFindings applies TestTmuxescIsALeaf's rules to one file, counting
+// the funcs it accepts into funcs.
+func tmuxescFindings(fset *token.FileSet, file *ast.File, funcs *int) []string {
+	var findings []string
+	report := func(pos token.Pos, msg string) {
+		findings = append(findings, fset.Position(pos).String()+": "+msg)
+	}
+	isIdent := func(e ast.Expr, names ...string) bool {
+		id, ok := e.(*ast.Ident)
+		return ok && slices.Contains(names, id.Name)
+	}
+	for _, imp := range file.Imports {
+		if p, _ := strconv.Unquote(imp.Path.Value); p != "strings" {
+			report(imp.Pos(), "tmuxesc imports "+strconv.Quote(p)+"; it must import only strings")
+		}
+	}
+	for _, decl := range file.Decls {
+		switch d := decl.(type) {
+		case *ast.GenDecl:
+			if d.Tok != token.IMPORT {
+				report(d.Pos(), "tmuxesc declares a package-level "+d.Tok.String()+"; it may declare only pure string funcs, so no state can capture a payload")
+			}
+		case *ast.FuncDecl:
+			name := d.Name.Name
+			switch {
+			case d.Recv != nil:
+				report(d.Pos(), name+" is a method; tmuxesc may declare only plain funcs")
+				continue
+			case name == "init":
+				report(d.Pos(), "tmuxesc declares init; it may declare only pure string funcs")
+				continue
+			case d.Type.TypeParams != nil:
+				report(d.Pos(), name+" is generic; tmuxesc funcs take only string parameters")
+				continue
+			}
+			ok := true
+			for _, p := range d.Type.Params.List {
+				if !isIdent(p.Type, "string") {
+					ok = false
+				}
+			}
+			res := d.Type.Results
+			if res == nil || len(res.List) != 1 || len(res.List[0].Names) > 1 || !isIdent(res.List[0].Type, "string", "bool") {
+				ok = false
+			}
+			if !ok {
+				report(d.Pos(), name+" is not a func of strings returning one string or bool; a payload could leave tmuxesc through it")
+				continue
+			}
+			*funcs++
+		}
+	}
+	return findings
 }

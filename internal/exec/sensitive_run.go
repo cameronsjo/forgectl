@@ -142,14 +142,31 @@ func envKeyOf(entry string) string {
 // buildCmd is the reveal boundary. It is the only place in the package where a
 // SecretArg or Arg payload leaves its wrapper, and everything it produces goes
 // straight into the *exec.Cmd. Elsewhere a payload is read only to be checked
-// (validate), compared (Equal), or re-spelled (MapOpaque). A re-spelling
-// passes the payload to one pure escape in the leaf package tmuxesc, which
-// imports only strings, and seals the result as a new Arg. No payload ever
-// reaches caller code: a Transform cannot be written outside transform.go,
-// and no exported function here takes a callback
-// (TestExecHandsNoPayloadToCallerCode, TestTmuxescIsALeaf). It is a separate function so internal/exec's own
-// tests can assert that the real values do reach exec.Cmd.Args — the mirror of
-// the redaction tests, without a production accessor that reveals.
+// (validate), compared (Equal), or re-spelled (MapOpaque). No test enforces
+// that in-package rule; review keeps it. A re-spelling passes the payload to
+// one pure escape in the leaf package tmuxesc and seals the result as a new
+// Arg. What the guard tests do enforce, for linux, darwin,
+// windows and freebsd builds alike:
+//
+//   - a Transform is minted only in transform.go
+//     (TestTransformIsMintedOnlyInTransformGo);
+//   - outside this package, only the files in transformCallers name
+//     MapOpaque, Transform or TmuxDirOperand
+//     (TestNoCallerCodeReceivesAnOpaquePayload);
+//   - tmuxesc imports only strings, holds no package-level state, and
+//     declares only funcs from strings to one string or bool
+//     (TestTmuxescIsALeaf);
+//   - the exported API, every exported func, var, const, type, field and
+//     method, matches testdata/exported_api.golden (TestExportedAPI).
+//
+// The last one pins the surface; it does not judge it. That no exported name
+// hands a payload to caller code (a callback parameter, an accessor, a func
+// var) is a property the reviewer of each golden update keeps, and the
+// golden makes sure no such change lands without that review.
+//
+// It is a separate function so internal/exec's own tests can assert that the
+// real values do reach exec.Cmd.Args — the mirror of the redaction tests,
+// without a production accessor that reveals.
 //
 // It builds with exec.Command rather than exec.CommandContext deliberately.
 // CommandContext kills on context completion but does not own what happens
