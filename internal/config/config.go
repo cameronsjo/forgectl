@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -125,9 +127,10 @@ type Config struct {
 	// Host-sensitive consumers (projects, review) must refuse loudly rather
 	// than run against a silently-defaulted github.com — see DecodeDegraded.
 	decodeDegraded bool
-	// decodeErr is the parse failure behind decodeDegraded, already worded for
-	// the operator (file, line and column). Nil unless the file existed and
-	// failed to parse — an absent file and an unreadable one never set it.
+	// decodeErr is the failure behind decodeDegraded, already worded for the
+	// operator: the file plus a line and column when it did not parse, or a
+	// fixed reason when it could not be read (forgectl#684). Nil when the file
+	// was absent or loaded cleanly.
 	decodeErr error
 }
 
@@ -141,10 +144,12 @@ func (c Config) DecodeDegraded() bool {
 	return c.decodeDegraded
 }
 
-// DecodeError returns why config.toml failed to parse, or nil when it parsed
-// or was absent. The error names the file and, for a syntax error, the line
-// and column. Execute refuses to run most commands on a non-nil value rather
-// than fall back to defaults the operator never chose (forgectl#653).
+// DecodeError returns why config.toml failed to load, or nil when it loaded or
+// was absent. The error names the file and either, for a syntax error, the
+// line and column, or, for a file that exists but cannot be read (permission
+// denied, a directory, a FIFO), the reason. Execute refuses to run most
+// commands on a non-nil value rather than fall back to defaults the operator
+// never chose (forgectl#653, forgectl#684).
 func (c Config) DecodeError() error {
 	return c.decodeErr
 }
@@ -1083,9 +1088,31 @@ func LoadPath(path string) Config {
 		cfg.decodeDegraded = true
 		if decodeErr != nil {
 			cfg.decodeErr = describeDecodeError(path, decodeErr)
+		} else {
+			cfg.decodeErr = describeReadError(path, err)
 		}
 	}
 	return cfg
+}
+
+// describeReadError words a config file that exists but cannot be read
+// (forgectl#684): the file and a fixed reason, never the raw error text. A
+// permission failure and a non-regular file (a directory, FIFO, socket or
+// device, which ReadPath refuses to read) are named; anything else carries
+// the operating system's own errno text. The underlying error stays on the
+// chain for errors.Is.
+func describeReadError(path string, err error) error {
+	reason := "read failed"
+	var errno syscall.Errno
+	switch {
+	case errors.Is(err, ErrConfigNonRegular):
+		reason = "not a regular file"
+	case errors.Is(err, fs.ErrPermission):
+		reason = "permission denied"
+	case errors.As(err, &errno):
+		reason = errno.Error()
+	}
+	return termsafe.Categorical(fmt.Sprintf("config file %s cannot be read: %s", termsafe.QuotePath(path), reason), err)
 }
 
 // describeDecodeError words a config parse failure for the operator: the file
@@ -1175,7 +1202,7 @@ func ValidatePath(path string) error {
 		return nil
 	}
 	if err != nil {
-		return err
+		return describeReadError(path, err)
 	}
 	cfg, err := DecodeStrict(data)
 	if err != nil {

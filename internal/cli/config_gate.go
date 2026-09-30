@@ -33,12 +33,13 @@ var launchRecoveryVerbs = map[string]bool{
 	"help": true, "--help": true, "-h": true,
 }
 
-// configParseGate turns a config.toml that exists but does not parse into a
-// hard error for every command that would otherwise run against silent
-// defaults (forgectl#653). The default log level is off, so the loader's WARN
-// was invisible and `docs list --json` exited 0 against the wrong roots. An
-// absent file is not an error, and neither is an unreadable one: only a parse
-// failure reaches here. Recovery verbs and help/version flags are exempt.
+// configParseGate turns a config.toml that exists but does not parse, or
+// cannot be read (permission denied, a directory, a FIFO), into a hard error
+// for every command that would otherwise run against silent defaults
+// (forgectl#653, forgectl#684). The default log level is off, so the loader's
+// WARN was invisible and `docs list --json` exited 0 against the wrong roots.
+// Only an absent file is not an error. Recovery verbs and help/version flags
+// are exempt.
 func configParseGate(cfg config.Config, root *cobra.Command, args []string) error {
 	parseErr := cfg.DecodeError()
 	if parseErr == nil || configGateExempt(root, args) {

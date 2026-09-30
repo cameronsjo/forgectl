@@ -32,7 +32,8 @@ type Report struct {
 	PathErr error
 	// Found reports whether a file exists at Path.
 	Found bool
-	// DecodeErr is the parse error from a file that exists but is malformed.
+	// DecodeErr is the parse error from a file that exists but is malformed,
+	// or the worded read error from one that exists but cannot be read.
 	// The Config returned alongside holds whatever decoded before the error —
 	// the same partial value Load returns after logging its warning.
 	DecodeErr error
@@ -77,15 +78,22 @@ func Describe() (Config, Report) {
 func describeFile(path string) (Config, Report) {
 	rep := Report{Path: path}
 	var cfg Config
-	meta, err := toml.DecodeFile(path, &cfg)
-	switch {
-	case err == nil:
+	// ReadPath, not toml.DecodeFile: `forgectl config` is a recovery verb the
+	// parse gate lets through, so it must report a file it cannot read rather
+	// than block on a FIFO or render the raw read error (forgectl#684).
+	data, err := ReadPath(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Absent file is the normal defaults-only posture, not an error.
+			return cfg, rep
+		}
 		rep.Found = true
-	case os.IsNotExist(err):
-		// Absent file is the normal defaults-only posture, not an error.
+		rep.DecodeErr = describeReadError(path, err)
 		return cfg, rep
-	default:
-		rep.Found = true
+	}
+	meta, err := toml.Decode(string(data), &cfg)
+	rep.Found = true
+	if err != nil {
 		rep.DecodeErr = scrubTOMLError(err)
 	}
 	rep.meta = meta

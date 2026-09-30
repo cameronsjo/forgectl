@@ -160,7 +160,7 @@ func checkClaude(d Deps) Check {
 func checkConfig(d Deps) Check {
 	path, pathErr := config.ConfigPath()
 	if err := config.Validate(); err != nil {
-		return Check{Name: "config", State: StateFail, Detail: err.Error(), Hint: "fix the malformed config.toml (see the parse error above)"}
+		return Check{Name: "config", State: StateFail, Detail: err.Error(), Hint: "fix config.toml so it can be read and parsed (see the error above)"}
 	}
 	if pathErr != nil {
 		return Check{Name: "config", State: StateWarn, Detail: pathErr.Error(), Hint: "config directory could not be resolved"}
