@@ -151,10 +151,10 @@ var destinationKinds = map[string]string{
 
 // scrubDecodeError rebuilds a toml decoder error from a fixed template. The
 // decoder writes `toml: [line N ](last key "<path>"): <message>` with the
-// full key path %q-quoted, so a 400-rune key in a user-keyed map (launch.env,
-// docs.root_kinds) echoes in full. The rendering keeps the line, the key
-// capped through QuoteArgMax, and a hint chosen from fixed text; the types
-// named are allowlisted words. A message that does not open with the
+// full key path %q-quoted, so a 400-rune key in a user-keyed map
+// (launch.defaults.env, docs.root_kinds) echoes in full. The rendering keeps
+// the line, the key capped through QuoteArgMax, and a hint chosen from fixed
+// text; the types named are allowlisted words. A message that does not open with the
 // decoder's prefix is not the decoder's and passes through unchanged.
 func scrubDecodeError(err error) error {
 	msg := err.Error()
