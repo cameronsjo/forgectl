@@ -43,6 +43,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -166,9 +167,9 @@ func TestCleanCmd_TypeConflictsWithCachesOrDocker(t *testing.T) {
 // root, and os.UserHomeDir() genuinely errors when $HOME is empty (Go's
 // os package treats an empty HOME identically to an unset one on Unix,
 // including macOS) — so ScanReport's "no root to scan" error is real, not
-// simulated. Scanning a merely-nonexistent PATH does NOT work for this:
-// Scan's walk is deliberately fail-safe and swallows a missing root
-// silently (see scan.go's WalkDir callback).
+// simulated. A missing --root fails the pass too since forgectl#915 (see
+// TestCleanCmd_UnscannableRootFailsInEveryMode); this test keeps the
+// unresolvable-home route.
 func TestCleanCmd_DirsPassFailureDoesNotBlockCachesPass(t *testing.T) {
 	t.Setenv("HOME", "")
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
@@ -1213,5 +1214,74 @@ func TestCleanFailureText_PanicThenWorkNeverSplitsAnEscape(t *testing.T) {
 	got = cleanFailureText(panicThenWorkErr{text: short, calls: &calls})
 	if want := `daemon said \u202e`; got != want {
 		t.Errorf("short rendering = %q, want %q", got, want)
+	}
+}
+
+// unscannableCleanRoots returns the roots forgectl#915 covers: one that does
+// not exist and, for a non-root user, one that cannot be read. Root reads a
+// mode-000 directory, so under euid 0 the unreadable root is left out here
+// and covered in internal/clean through its walker seam.
+func unscannableCleanRoots(t *testing.T) map[string]string {
+	t.Helper()
+	roots := map[string]string{"missing": filepath.Join(t.TempDir(), "absent")}
+	if os.Geteuid() != 0 {
+		locked := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(locked, "proj", "node_modules"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(locked, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o700) }) //nolint:gosec // G302: a directory needs 0700; 0600 makes it non-traversable
+		roots["unreadable"] = locked
+	}
+	return roots
+}
+
+// TestCleanCmd_UnscannableRootFailsInEveryMode pins forgectl#915 at the
+// command: a root the scan cannot read exits 1 in text and --json alike.
+// Under --json stdout stays empty and stderr carries the one `failed`
+// object; the text run never prints "nothing to reclaim".
+//
+// Mutation that turns it red: drop the `path == opts.Root` return in
+// internal/clean's Scan error branch.
+func TestCleanCmd_UnscannableRootFailsInEveryMode(t *testing.T) {
+	for name, root := range unscannableCleanRoots(t) {
+		for _, asJSON := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/json=%v", name, asJSON), func(t *testing.T) {
+				isolateJSONContractEnv(t)
+				client := cleanpkg.New(&exec.FakeRunner{}, cleanpkg.WithRoot(root))
+				argv := []string{"clean"}
+				if asJSON {
+					argv = append(argv, "--json")
+				}
+				stdout, stderr, err := runJSONThroughFang(t, wrapJSONRoot(newCleanCmdForClient(client, theme.Theme{})), argv...)
+				if err == nil {
+					t.Fatalf("exit 0 on an unscannable root; stdout=%q stderr=%q", stdout, stderr)
+				}
+				if got := ExitCode(err); got != 1 {
+					t.Errorf("exit code = %d, want 1", got)
+				}
+				if strings.Contains(stdout, "nothing to reclaim") {
+					t.Errorf("stdout reads as a clean success: %q", stdout)
+				}
+				if !asJSON {
+					if !strings.Contains(stderr, filepath.Base(root)) {
+						t.Errorf("stderr = %q, want it to name the root", stderr)
+					}
+					return
+				}
+				if stdout != "" {
+					t.Errorf("stdout = %q, want empty: the scan failed before any verdict", stdout)
+				}
+				obj := decodeOneStderrObject(t, stderr)
+				if obj["code"] != jsonCodeFailed {
+					t.Errorf("code = %v, want %q", obj["code"], jsonCodeFailed)
+				}
+				if msg, _ := obj["error"].(string); !strings.Contains(msg, filepath.Base(root)) {
+					t.Errorf("error = %q, want it to name the root", msg)
+				}
+			})
+		}
 	}
 }

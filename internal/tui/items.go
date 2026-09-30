@@ -164,15 +164,27 @@ func (i windowItem) render(index int, selected, narrow bool, g glyphSet, s theme
 	return row + s.Muted.Render(fmt.Sprintf("  %d %s", i.w.Panes, unit))
 }
 
-// --- hub (top-level module rows, and the flattened "all commands" screen) ---
+// --- hub (module rows, recent command rows, and section dividers) ---
 
 // hubItem renders one HubEntry row. Name/Short are program-authored (cobra
-// Short strings compiled into this binary), the same trust level as
-// menuItem's literals, so no termsafe boundary is needed here.
+// names and Short strings compiled into this binary — the "recent" rows are
+// command paths resolved against the registered tree, never shell-history
+// text), the same trust level as menuItem's literals, so no termsafe
+// boundary is needed here.
 type hubItem struct{ entry HubEntry }
 
-func (i hubItem) FilterValue() string { return i.entry.Name }
+// FilterValue is empty for a section divider, so a filter never matches one.
+func (i hubItem) FilterValue() string {
+	if i.entry.Heading {
+		return ""
+	}
+	return i.entry.Name
+}
+
 func (i hubItem) render(index int, selected, narrow bool, _ glyphSet, s theme.Styles) string {
+	if i.entry.Heading {
+		return "   " + s.Muted.Render("── "+i.entry.Name+" ──")
+	}
 	label := i.entry.Name
 	if selected {
 		return leader(index, true, s) + s.Selected.Render(label)

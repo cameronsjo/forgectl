@@ -98,11 +98,11 @@ func newProjectsConfigErrorCmd(err error) *cobra.Command {
 		RunE:               fail,
 	}
 	cmd.AddCommand(
-		&cobra.Command{Use: "pick", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
-		&cobra.Command{Use: "list [query]", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
-		&cobra.Command{Use: "clone <query>", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
-		&cobra.Command{Use: "worktree <query>", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
-		&cobra.Command{Use: "pull-all", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "pick", Short: "Open a project in tmux (interactive or by name; clones if needed)", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "list [query]", Short: "List projects across local, GitHub, and Gitea (cloned + uncloned)", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "clone <query>", Short: "Clone a project into its wing, or the {host}/{owner}/{repo} tree", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "worktree <query>", Short: "Initialize a bare-repo worktree layout for a project", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "pull-all", Short: "Pull every project (skips dirty checkouts)", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
 	)
 	applyAliases(cmd, projectAliases)
 	return cmd

@@ -128,7 +128,7 @@ const (
 // constructor for the type outside the runner, and it copies its input.
 func BoundedOutputForTest(data []byte, cause OutputCause) BoundedOutput {
 	return BoundedOutput{
-		buf:      &outputBuf{data: slices.Clone(data)},
+		buf:      newOutputBuf(slices.Clone(data)),
 		overflow: cause == OutputOverflowed,
 		forced:   cause == OutputRetired,
 	}

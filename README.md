@@ -1,11 +1,11 @@
 # forgectl
 
-Personal dev-experience CLI for a headless macOS workbench driven over SSH — from laptops, phones, and Termius. What began as a tmux helper (superseding the ad-hoc bash `s` script; smart session-naming stays with `sesh`) has grown into the **workbench forge**: 32 composable command-group modules (see the table below) with a declarative workflow DSL as the composition layer.
+Personal dev-experience CLI for a headless macOS workbench driven over SSH — from laptops, phones, and Termius. What began as a tmux helper (superseding the ad-hoc bash `s` script; smart session-naming stays with `sesh`) has grown into the **workbench forge**: composable command-group modules (see the table below) with a declarative workflow DSL as the composition layer.
 
 Built for two hands and one thumb:
 
 - **Power mode** — typed verbs (`forgectl tmux ls`, `forgectl tmux pick`). Full keyboard, full control.
-- **Thumb mode** — bare `forgectl` opens a hub over every command group: the six daily verbs plus a filterable "all commands" row over the rest, with the old tmux jumper preserved as one row. Number-key select. Narrow-screen. Forgiving input. Works fine in Termius over mosh.
+- **Thumb mode** — bare `forgectl` opens a hub over every command group: a status line (project and branch, tmux sessions, PR reviews), the five pinned daily verbs, your most-used recent commands, then every other command, with the old tmux jumper preserved as one row. A command that needs an argument asks for it in place, with a picker where one exists, and shows the exact `$ forgectl …` line before it runs. Number-key select. Narrow-screen. Forgiving input. Works fine in Termius over mosh.
 
 ## Install
 
@@ -21,7 +21,7 @@ Reading a local clone's git state — `projects list`, `projects pick`, the proj
 
 ## Command groups
 
-31 command groups, at a glance. `forgectl --help` lists them from the binary
+The command groups at a glance. `forgectl --help` lists them from the binary
 itself; this table is the scannable index — full verbs and flags for every
 group are in the `## Usage` roster below, and the groups with a dedicated
 deep-dive get a link here.
@@ -53,6 +53,7 @@ deep-dive get a link here.
 | `ghostty` | Theme + keybind reporting, parsed live from the ghostty CLI | Usage below |
 | `pip` | Comment- and whitespace-preserving `pip.conf` editor | Usage below |
 | `quarantine` | Reversibly hide AI-instruction files (`CLAUDE.md`, `AGENTS.md`, …) from a workspace | Usage below |
+| `audit` | Read-only posture scans: inventory every agent-instruction file under the projects root | [audit](docs/commands/audit.md) |
 | `review` | Cross-project work inventory: open issues and PRs across your repos; `review releases` is the release radar | [projects and review](docs/commands/projects-and-review.md) |
 | `preflight` | Align enabled plugins to the skill catalog's core-tier default set | Usage below |
 | `update` | Weekly package-manager + OS maintenance, independently-scoped steps | Usage below |
@@ -311,6 +312,10 @@ forgectl pip show                        # print the effective pip.conf
 forgectl quarantine                      # hide the default targets in cwd (same as `quarantine hide`)
 forgectl quarantine restore              # rename quarantined targets back
 forgectl quarantine status               # show which targets are hidden
+
+# audit — read-only posture scans across the projects root (see docs/commands/audit.md)
+forgectl audit injection                 # list every agent-instruction file, with anomaly flags
+forgectl audit injection --json          # the same, machine-readable
 
 # review — cross-project work inventory: open issues and PRs across your repos
 forgectl review                          # unified table (reviewed rows dimmed)

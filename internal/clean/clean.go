@@ -198,10 +198,11 @@ func (c *Client) ScanReport(opts CleanOptions) (resolvedRoot string, report Repo
 	// compares against the exact same real path.
 	resolvedRoot, err = filepath.EvalSymlinks(absRoot)
 	if err != nil {
-		// A root that doesn't exist yet (or a dangling symlink) isn't a
-		// reclaim-safety concern — Scan itself will fail below with a clear
-		// "no such file" error. Fall back to the unresolved absolute path
-		// rather than erroring here.
+		// A root that doesn't exist (or a dangling symlink) isn't a
+		// reclaim-safety concern here: Scan below fails on a root it cannot
+		// read or that is not a directory, so the caller still gets an
+		// error rather than an empty report. Fall back to the unresolved
+		// absolute path so that error names what the user asked for.
 		resolvedRoot = absRoot
 	}
 
