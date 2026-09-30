@@ -3,6 +3,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -29,6 +30,14 @@ import (
 // exported here because config.toml's writers live in internal/cli, a
 // different package from the lock.
 func WithFileLock(path string, fn func() error) error {
+	return WithFileLockNotify(path, nil, fn)
+}
+
+// WithFileLockNotify is WithFileLock that first tries the lock without
+// blocking. When another process holds it, onWait (if non-nil) runs once and
+// the call then blocks until the holder releases. A caller uses it to tell the
+// operator why nothing is happening yet.
+func WithFileLockNotify(path string, onWait func(), fn func() error) error {
 	lockPath := path + ".lock"
 	fd, err := unix.Open(lockPath, unix.O_CREAT|unix.O_RDWR|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0o600)
 	if err != nil {
@@ -44,7 +53,14 @@ func WithFileLock(path string, fn func() error) error {
 		return fmt.Errorf("lock file %s is not a regular file", lockPath)
 	}
 
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+	err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	if errors.Is(err, unix.EWOULDBLOCK) {
+		if onWait != nil {
+			onWait()
+		}
+		err = unix.Flock(int(f.Fd()), unix.LOCK_EX)
+	}
+	if err != nil {
 		return fmt.Errorf("lock %s: %w", lockPath, err)
 	}
 	defer func() { _ = unix.Flock(int(f.Fd()), unix.LOCK_UN) }()

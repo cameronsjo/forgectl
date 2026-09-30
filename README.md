@@ -271,6 +271,7 @@ forgectl theme preview                   # render each role so you can see it
 # herdr — helpers for the herdr terminal multiplexer (run from a herdr pane)
 forgectl herdr organize                  # report how tabs would be grouped into workspaces and ordered
 forgectl herdr organize --explain        # also show which rule caught each tab
+forgectl herdr organize --apply          # make the moves; restores focus; needs the cameronsjo/herdr fork
 
 # tasks — read-only Vikunja task browser, local cache, no write verbs
 # one-time setup: store a READ-ONLY API token in the login keychain (prompts for the value)

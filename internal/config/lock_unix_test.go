@@ -8,9 +8,69 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+func TestWithFileLockNotify_UncontendedNeverAnnouncesAWait(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x")
+	waited, ran := false, false
+	err := WithFileLockNotify(path, func() { waited = true }, func() error { ran = true; return nil })
+	if err != nil || !ran || waited {
+		t.Errorf("err=%v ran=%v waited=%v, want nil, true, false", err, ran, waited)
+	}
+}
+
+func TestWithFileLockNotify_ContendedAnnouncesThenBlocksUntilReleased(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x")
+	held, release := make(chan struct{}), make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- WithFileLock(path, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("holder never acquired the lock")
+	}
+
+	waiting, entered := make(chan struct{}), make(chan struct{})
+	waiterDone := make(chan error, 1)
+	go func() {
+		waiterDone <- WithFileLockNotify(path, func() { close(waiting) }, func() error {
+			close(entered)
+			return nil
+		})
+	}()
+	select {
+	case <-waiting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a contended lock never announced the wait")
+	}
+	select {
+	case <-entered:
+		t.Fatal("the waiter ran while the holder still held the lock")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiter never ran after the holder released")
+	}
+	if err := <-waiterDone; err != nil {
+		t.Errorf("waiter: %v", err)
+	}
+	if err := <-holderDone; err != nil {
+		t.Errorf("holder: %v", err)
+	}
+}
 
 func TestConfigWriteLock_NonregularLeafRefusesWithoutCallback(t *testing.T) {
 	tests := []struct {

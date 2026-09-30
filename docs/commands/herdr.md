@@ -5,6 +5,7 @@ forgectl's native helpers for the [herdr](https://github.com/cameronsjo/herdr) t
 ```bash
 forgectl herdr organize             # report how tabs would be grouped and ordered (changes nothing)
 forgectl herdr organize --explain   # also show which rule caught each tab, and why unmatched tabs matched nothing
+forgectl herdr organize --apply     # make the moves and reorder tabs and workspaces
 forgectl herdr organize --json      # the plan as one JSON object on stdout; the report goes to stderr
 ```
 
@@ -12,7 +13,7 @@ forgectl herdr organize --json      # the plan as one JSON object on stdout; the
 
 - **A herdr pane.** The command needs `HERDR_ENV=1` and a `HERDR_SOCKET_PATH` naming a live socket, which herdr sets in every pane it hosts.
 - **Rules in `config.toml`.** `forgectl herdr organize` refuses to run with none (exit 2) and says what it found. `forgectl init` adds a commented `[herdr.organize]` section.
-- **The `cameronsjo/herdr` fork, to move tabs.** Upstream herdr has no `tab move`. The report only lists, so it works on stock herdr.
+- **The `cameronsjo/herdr` fork, to move tabs.** Upstream herdr has no `tab move`, and `--apply` needs it. It checks before changing anything and refuses with exit 2 on stock herdr. The report only lists, so it works on stock herdr. Restart the herdr server after upgrading its binary: the check reads the CLI, not the running server.
 
 ## organize
 
@@ -49,6 +50,32 @@ workspace = "forge"
 | `organized: N tabs in M workspaces; nothing to do` | nothing is pending |
 
 When moves are pending the report says `tab order will be rechecked after the moves`: the order within a workspace can only be known once the moves have run.
+
+### Applying
+
+`--apply` asks no confirmation, because every move can be undone by hand. In order, it:
+
+1. checks that it runs in a herdr pane and that herdr has `tab move`, before any change;
+2. takes a lock (`<config dir>/herdr-organize.lock`, separate from `config.toml`'s), and prints `waiting for another forgectl herdr organize (Ctrl-C to cancel)` if another run holds it;
+3. reads the session and plans from that read, so a run that waited plans from what the other run left;
+4. moves each tab, finding it again by terminal id right before its move, because herdr renumbers a tab's id when it changes workspace;
+5. orders the workspaces, then the tabs inside each;
+6. puts your focus back: every workspace's active tab first, then the tab you were in, last.
+
+Focus is restored to the tab, not the pane: herdr cannot focus a pane by id, so a focused pane inside a split tab is not put back to pane grain. A tab that left its workspace is not restored as that workspace's active tab.
+
+When herdr declines to create a workspace, the run goes on and the next tab for that label tries to create it. Any other failure stops the run, restores focus, and prints four lines:
+
+```text
+moving "title" [t7] to forge failed: <why>
+applied: 2 of 5 moves; not run: "title" [t7], "other" [t9], workspace order, tab order
+focus restored to "shell" [t3]
+the plan is recomputed on every run; re-run forgectl herdr organize --apply to finish
+```
+
+Nothing is rolled back. The plan is recomputed from the live session on every run, so re-running finishes the job.
+
+With `--json`, `result` carries `applied`, `blocked`, `not_run`, and `error`, including on exit 1.
 
 ### Exit codes
 

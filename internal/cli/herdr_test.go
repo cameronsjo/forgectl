@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -22,6 +23,18 @@ type herdrWorld struct {
 	workspaces []herdr.Workspace
 	tabs       map[string][]herdr.Tab
 	panes      []herdr.Pane
+
+	// Mutation state, used by the apply tests (herdr_apply_test.go).
+	active     map[string]string // workspace id -> active tab id
+	focusedTab string            // tab holding the caller's focus
+	nextID     int
+	// renumberAll makes a move out of a workspace renumber every remaining tab
+	// in it, the worst case for a plan that holds tab ids.
+	renumberAll bool
+	// intercept, when set, sees every mutating call first. Returning handled
+	// short-circuits the world's own handling.
+	intercept func(args []string) (out string, err error, handled bool)
+	focusLog  []string // "tab:<id>" and "workspace:<id>" in call order
 }
 
 func newWorld(wss ...herdr.Workspace) *herdrWorld {
@@ -53,11 +66,19 @@ func (w *herdrWorld) runner(t *testing.T) *exec.FakeRunner {
 			t.Errorf("ran %q, want only herdr", name)
 			return "", errors.New("unexpected binary")
 		}
+		if w.intercept != nil {
+			if out, err, handled := w.intercept(args); handled {
+				return out, err
+			}
+		}
+		if out, ok := w.mutate(t, args); ok {
+			return out, nil
+		}
 		switch got := strings.Join(args, " "); {
 		case got == "workspace list":
-			return envelope(t, "workspaces", w.workspaces), nil
+			return envelope(t, "workspaces", w.workspaceRows()), nil
 		case got == "pane list":
-			return envelope(t, "panes", w.panes), nil
+			return envelope(t, "panes", w.paneRows()), nil
 		case strings.HasPrefix(got, "tab list --workspace "):
 			id := strings.TrimPrefix(got, "tab list --workspace ")
 			tabs := w.tabs[id]
@@ -79,17 +100,39 @@ func hws(id, label string, number int) herdr.Workspace {
 type herdrSeams struct {
 	env         map[string]string
 	sessionErr  error
+	forkErr     error
 	legacyRules bool
+	// lockContended makes the lock announce a wait before running fn.
+	lockContended bool
+	// events, when set, receives "gate", "fork" and "lock" as they happen, so a
+	// test can order them against the herdr calls the fake runner records.
+	events *[]string
 }
 
 func setHerdrSeams(t *testing.T, s herdrSeams) {
 	t.Helper()
 	oldEnv, oldCheck, oldRoot, oldHome, oldExists := lookupHerdrEnv, herdrCheckSession, herdrProjectsRoot, herdrUserHome, herdrFileExists
+	oldFork, oldLock, oldLockPath := herdrCheckFork, herdrWithLock, herdrLockPath
 	t.Cleanup(func() {
 		lookupHerdrEnv, herdrCheckSession, herdrProjectsRoot, herdrUserHome, herdrFileExists = oldEnv, oldCheck, oldRoot, oldHome, oldExists
+		herdrCheckFork, herdrWithLock, herdrLockPath = oldFork, oldLock, oldLockPath
 	})
+	note := func(e string) {
+		if s.events != nil {
+			*s.events = append(*s.events, e)
+		}
+	}
 	lookupHerdrEnv = func(k string) (string, bool) { v, ok := s.env[k]; return v, ok }
-	herdrCheckSession = func(func(string) (string, bool)) error { return s.sessionErr }
+	herdrCheckSession = func(func(string) (string, bool)) error { note("gate"); return s.sessionErr }
+	herdrCheckFork = func(context.Context, exec.Runner) error { note("fork"); return s.forkErr }
+	herdrLockPath = func() (string, error) { return "/lock/herdr-organize", nil }
+	herdrWithLock = func(_ string, onWait func(), fn func() error) error {
+		note("lock")
+		if s.lockContended && onWait != nil {
+			onWait()
+		}
+		return fn()
+	}
 	herdrProjectsRoot = func() string { return "/r" }
 	herdrUserHome = func() (string, error) { return "/home/u", nil }
 	herdrFileExists = func(p string) bool { return s.legacyRules && p == "/home/u/.config/herdr-organize/rules.toml" }
@@ -119,6 +162,9 @@ func runOrganize(t *testing.T, cfg config.Config, w *herdrWorld, args ...string)
 		fake = w.runner(t)
 	}
 	cmd := newHerdrCmd(module.Deps{Cfg: cfg, Runner: fake})
+	// The real root sets both (root.go); a standalone command would otherwise
+	// print usage into stdout on any error and corrupt a --json document.
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
 	var out, errb bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errb)

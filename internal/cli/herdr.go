@@ -65,17 +65,22 @@ from inside a herdr pane.
 }
 
 func newHerdrOrganizeCmd(deps module.Deps) *cobra.Command {
-	var explain, asJSON bool
+	var opts organizeOpts
 	cmd := &cobra.Command{
 		Use:   "organize",
 		Short: "Group herdr tabs into workspaces by rule, and order them",
 		Long: `organize reads your herdr session and reports how it would file each tab into
-a workspace and in what order. It changes nothing: no tab is closed or
-renamed.
+a workspace and in what order. Without --apply it changes nothing. It never
+closes or renames a tab.
 
   forgectl herdr organize             report the plan (changes nothing)
   forgectl herdr organize --explain   also show which rule caught each tab
+  forgectl herdr organize --apply     make the moves and reorder tabs
   forgectl herdr organize --json      the plan as one JSON object on stdout
+
+--apply asks no confirmation, because every move can be undone by hand. It
+restores your focus afterwards, to the tab: a focused pane inside a split tab is
+not put back to pane grain. Two runs at once take turns.
 
 A tab goes to the workspace of the first rule whose glob matches
 "<cwd> :: <title>" for any of its panes (first pane first); a tab no rule
@@ -101,17 +106,18 @@ Run it inside a herdr pane. Moving tabs needs the cameronsjo/herdr fork; the
 report does not.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runHerdrOrganize(cmd, deps, explain, asJSON)
+			return runHerdrOrganize(cmd, deps, opts)
 		},
 	}
-	cmd.Flags().BoolVar(&explain, "explain", false, "show which rule caught each tab, and why unmatched tabs matched nothing")
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the plan as one JSON object on stdout; the human report goes to stderr")
+	cmd.Flags().BoolVar(&opts.apply, "apply", false, "make the moves (needs the cameronsjo/herdr fork); focus is restored and nothing asks first")
+	cmd.Flags().BoolVar(&opts.explain, "explain", false, "show which rule caught each tab, and why unmatched tabs matched nothing")
+	cmd.Flags().BoolVar(&opts.asJSON, "json", false, "emit the plan (and, with --apply, the result) as one JSON object on stdout; the human report goes to stderr")
 	return cmd
 }
 
-func runHerdrOrganize(cmd *cobra.Command, deps module.Deps, explain, asJSON bool) error {
-	cfg := deps.Cfg.Herdr.Organize
+type organizeOpts struct{ explain, asJSON, apply bool }
 
+func runHerdrOrganize(cmd *cobra.Command, deps module.Deps, opts organizeOpts) error {
 	// Both preconditions are checked before any herdr call, and reported
 	// together, so a first-time user outside herdr with no config fixes both
 	// in one round.
@@ -126,26 +132,69 @@ func runHerdrOrganize(cmd *cobra.Command, deps module.Deps, explain, asJSON bool
 		return WithExitCode(termsafe.Error(errors.Join(problems...)), 2)
 	}
 
-	ctx := cmd.Context()
-	snap, err := takeSnapshot(ctx, herdr.New(deps.Runner))
+	if !opts.apply {
+		return organizeOnce(cmd, deps, opts)
+	}
+
+	// --apply gates twice, both before any change: the session (above), then
+	// the fork's `tab move`. Then it serializes against other organize runs.
+	if err := herdrCheckFork(cmd.Context(), deps.Runner); err != nil {
+		return WithExitCode(termsafe.Error(forkRefusal(err)), 2)
+	}
+	lockPath, err := herdrLockPath()
 	if err != nil {
 		return termsafe.Error(err)
 	}
-	root := herdrProjectsRoot()
-	plan := organize.BuildPlan(toOrganizeConfig(cfg), snap, root)
+	notice := func() { _, _ = fmt.Fprintln(cmd.ErrOrStderr(), lockWaitNotice) }
+	return herdrWithLock(lockPath, notice, func() error { return organizeOnce(cmd, deps, opts) })
+}
+
+// organizeOnce reads the session, plans, and either reports (dry run) or
+// applies. Under --apply it runs inside the lock, so the snapshot it plans from
+// already reflects any organize run that held the lock before it.
+func organizeOnce(cmd *cobra.Command, deps module.Deps, opts organizeOpts) error {
+	cfg := deps.Cfg.Herdr.Organize
+	ctx := cmd.Context()
+	client := herdr.New(deps.Runner)
+	snap, err := takeSnapshot(ctx, client)
+	if err != nil {
+		return termsafe.Error(err)
+	}
+	plan := organize.BuildPlan(toOrganizeConfig(cfg), snap, herdrProjectsRoot())
 
 	human := cmd.OutOrStdout()
-	if asJSON {
+	if opts.asJSON {
 		human = cmd.ErrOrStderr()
 	}
 	home, _ := herdrUserHome()
 	r := organizeReport{w: human, home: home}
-	r.dryRun(cfg, snap, plan, explain)
 
-	if asJSON {
-		return writeOrganizeJSON(cmd.OutOrStdout(), plan)
+	if !opts.apply {
+		r.dryRun(cfg, snap, plan, opts.explain)
+		if opts.asJSON {
+			return writeOrganizeJSON(cmd.OutOrStdout(), plan, nil, nil)
+		}
+		return nil
 	}
-	return nil
+
+	sum := summarize(snap, plan)
+	r.preamble(cfg, plan, opts.explain)
+	if sum.pending == 0 && sum.reorderCount == 0 {
+		r.closing(sum, snap, plan)
+		if opts.asJSON {
+			return writeOrganizeJSON(cmd.OutOrStdout(), plan, &applyResult{}, nil)
+		}
+		return nil
+	}
+
+	res := applyPlan(ctx, client, snap, plan)
+	runErr := r.applied(res, sum.pending)
+	if opts.asJSON {
+		if err := writeOrganizeJSON(cmd.OutOrStdout(), plan, &res, runErr); err != nil {
+			return err
+		}
+	}
+	return runErr // already terminal-safe, and possibly several lines
 }
 
 // organizeConfigProblem returns why organize cannot run from the config, or
@@ -237,66 +286,177 @@ func plural(n int, one, many string) string {
 	return fmt.Sprintf("%d %s", n, many)
 }
 
-func (r organizeReport) dryRun(cfg config.HerdrOrganizeConfig, snap organize.Snapshot, plan organize.Plan, explain bool) {
-	oc := toOrganizeConfig(cfg)
+// planSummary is what a plan asks for, counted the same way for the dry run and
+// for --apply.
+type planSummary struct {
+	pending      int // moves that can run
+	blocked      int // moves herdr will refuse
+	reorders     []organize.Reorder
+	reorderCount int // tab moves plus a workspace reorder
+	wsOrder      []string
+	wsChanged    bool
+}
+
+func summarize(snap organize.Snapshot, plan organize.Plan) planSummary {
+	var sum planSummary
+	for _, m := range plan.Moves {
+		if m.Blocked {
+			sum.blocked++
+		} else {
+			sum.pending++
+		}
+	}
+	// Tab order is only knowable once no move is pending.
+	if sum.pending == 0 {
+		sum.reorders = organize.Reorders(snap, plan)
+		for _, ro := range sum.reorders {
+			sum.reorderCount += len(ro.Steps)
+		}
+	}
+	if _, to, changed := organize.WorkspaceOrderChange(snap, plan); changed {
+		sum.wsOrder, sum.wsChanged = to, true
+		sum.reorderCount++
+	}
+	return sum
+}
+
+// preamble prints what both modes open with: the --explain block, warnings,
+// blocked moves, and the unmatched summary.
+func (r organizeReport) preamble(cfg config.HerdrOrganizeConfig, plan organize.Plan, explain bool) {
 	if explain {
-		r.explain(cfg, oc, plan)
+		r.explain(cfg, toOrganizeConfig(cfg), plan)
 	}
 	for _, warn := range plan.Warnings {
 		r.printf("warning: %s\n", r.safe(warn))
 	}
-
-	pending, blocked := 0, 0
 	for _, m := range plan.Moves {
 		if m.Blocked {
-			blocked++
-			r.printf("blocked  %s  %s -> %s: %s\n", r.tab(m.Title, m.TabID), r.safe(m.From), r.safe(m.To), m.BlockedReason)
-			r.printf("         fix: open another tab in %s, or move it by hand\n", r.safe(m.From))
-			continue
+			r.blocked(m)
 		}
-		pending++
-		r.printf("move     %s  %s -> %s  %s\n", r.tab(m.Title, m.TabID), r.safe(m.From), r.safe(m.To), r.path(m.CWD))
 	}
+	r.unmatched(cfg, plan)
+}
 
-	reorders := 0
-	if pending == 0 {
-		for _, ro := range organize.Reorders(snap, plan) {
-			for _, s := range ro.Steps {
-				reorders++
-				r.printf("order    %s: %s -> position %d\n", r.safe(ro.Workspace), r.tab(s.Title, s.TabID), s.Position+1)
-			}
+func (r organizeReport) blocked(m organize.Move) {
+	r.printf("blocked  %s  %s -> %s: %s\n", r.tab(m.Title, m.TabID), r.safe(m.From), r.safe(m.To), m.BlockedReason)
+	r.printf("         fix: open another tab in %s, or move it by hand\n", r.safe(m.From))
+}
+
+func (r organizeReport) unmatched(cfg config.HerdrOrganizeConfig, plan organize.Plan) {
+	n := len(plan.Unmatched)
+	if n == 0 {
+		return
+	}
+	listed := make([]string, 0, unmatchedListed+1)
+	for i, u := range plan.Unmatched {
+		if i == unmatchedListed {
+			listed = append(listed, fmt.Sprintf("and %d more", n-unmatchedListed))
+			break
 		}
-	} else {
-		r.printf("tab order will be rechecked after the moves\n")
+		listed = append(listed, r.tab(u.Title, u.TabID))
 	}
-	if _, to, changed := organize.WorkspaceOrderChange(snap, plan); changed {
-		reorders++
-		r.printf("order    workspaces: %s\n", r.safe(strings.Join(to, ", ")))
-	}
+	r.printf("unmatched: %s matched no rule and go to %q: %s  (--explain shows why)\n",
+		plural(n, "tab", "tabs"), r.safe(cfg.Default), strings.Join(listed, ", "))
+}
 
-	if n := len(plan.Unmatched); n > 0 {
-		listed := make([]string, 0, unmatchedListed+1)
-		for i, u := range plan.Unmatched {
-			if i == unmatchedListed {
-				listed = append(listed, fmt.Sprintf("and %d more", n-unmatchedListed))
-				break
-			}
-			listed = append(listed, r.tab(u.Title, u.TabID))
-		}
-		verb := "matched no rule and go to"
-		r.printf("unmatched: %s %s %q: %s  (--explain shows why)\n", plural(n, "tab", "tabs"), verb, r.safe(cfg.Default), strings.Join(listed, ", "))
-	}
-
+// closing ends a report with the line that matches what is pending. It never
+// says "organized" while anything is pending.
+func (r organizeReport) closing(sum planSummary, snap organize.Snapshot, plan organize.Plan) {
 	switch {
-	case pending > 0:
+	case sum.pending > 0:
 		r.printf("re-run with --apply to move them\n")
-	case reorders > 0:
+	case sum.reorderCount > 0:
 		r.printf("re-run with --apply to reorder them\n")
-	case blocked > 0:
-		r.printf("nothing to apply; %s blocked (see above)\n", plural(blocked, "move is", "moves are"))
+	case sum.blocked > 0:
+		r.printf("nothing to apply; %s blocked (see above)\n", plural(sum.blocked, "move is", "moves are"))
 	default:
 		r.printf("organized: %s in %s; nothing to do\n", plural(len(plan.Assignments), "tab", "tabs"), plural(len(snap.Workspaces), "workspace", "workspaces"))
 	}
+}
+
+func (r organizeReport) dryRun(cfg config.HerdrOrganizeConfig, snap organize.Snapshot, plan organize.Plan, explain bool) {
+	sum := summarize(snap, plan)
+	if explain {
+		r.explain(cfg, toOrganizeConfig(cfg), plan)
+	}
+	for _, warn := range plan.Warnings {
+		r.printf("warning: %s\n", r.safe(warn))
+	}
+	for _, m := range plan.Moves {
+		if m.Blocked {
+			r.blocked(m)
+			continue
+		}
+		r.printf("move     %s  %s -> %s  %s\n", r.tab(m.Title, m.TabID), r.safe(m.From), r.safe(m.To), r.path(m.CWD))
+	}
+	if sum.pending > 0 {
+		r.printf("tab order will be rechecked after the moves\n")
+	}
+	for _, ro := range sum.reorders {
+		for _, s := range ro.Steps {
+			r.printf("order    %s: %s -> position %d\n", r.safe(ro.Workspace), r.tab(s.Title, s.TabID), s.Position+1)
+		}
+	}
+	if sum.wsChanged {
+		r.printf("order    workspaces: %s\n", r.safe(strings.Join(sum.wsOrder, ", ")))
+	}
+	r.unmatched(cfg, plan)
+	r.closing(sum, snap, plan)
+}
+
+// applied reports what --apply did and returns the error the command exits
+// with: nil when the run finished cleanly. A failure prints as four lines, so
+// the operator can see what ran, what did not, where focus went, and how to
+// finish.
+func (r organizeReport) applied(res applyResult, planned int) error {
+	for _, w := range res.Warnings {
+		r.printf("warning: %s\n", r.safe(w))
+	}
+	for _, m := range res.Applied {
+		r.printf("moved    %s  %s -> %s\n", r.tab(m.Title, m.TabID), r.safe(m.From), r.safe(m.To))
+	}
+	for _, s := range res.Reordered {
+		r.printf("ordered  %s -> position %d\n", r.tab(s.Title, s.TabID), s.Position+1)
+	}
+
+	if res.Err == nil {
+		r.printf("applied: %s, %s\n", plural(len(res.Applied), "move", "moves"), plural(len(res.Reordered), "reorder", "reorders"))
+		switch {
+		case res.FocusErr != nil:
+			return errors.New("could not restore focus: " + r.safe(res.FocusErr.Error()))
+		case res.FocusTab != "":
+			r.printf("focus restored to %s\n", r.tab(res.FocusTitle, res.FocusTab))
+		}
+		return nil
+	}
+
+	notRun := make([]string, 0, len(res.NotRun)+len(res.Skipped))
+	for _, m := range res.NotRun {
+		notRun = append(notRun, r.tab(m.Title, m.TabID))
+	}
+	notRun = append(notRun, res.Skipped...)
+	if len(notRun) == 0 {
+		notRun = append(notRun, "none")
+	}
+	focus := "focus was not changed"
+	switch {
+	case res.FocusErr != nil:
+		focus = "could not restore focus: " + r.safe(res.FocusErr.Error())
+	case res.FocusTab != "":
+		focus = "focus restored to " + r.tab(res.FocusTitle, res.FocusTab)
+	}
+	first := r.safe(res.Err.Error())
+	if res.Stage != "" {
+		first = r.safe(res.Stage) + " failed: " + first
+	}
+	// The summary is several lines, so it is built from pieces that are each
+	// already safe: termsafe.Error would flatten the newlines.
+	return errors.New(strings.Join([]string{
+		first,
+		fmt.Sprintf("applied: %d of %d moves; not run: %s", len(res.Applied), planned, strings.Join(notRun, ", ")),
+		focus,
+		"the plan is recomputed on every run; re-run forgectl herdr organize --apply to finish",
+	}, "\n"))
 }
 
 // explain prints, for every tab, the rule that caught it and where it sits and
@@ -377,7 +537,9 @@ func moveJSON(m organize.Move) organizeMoveJSON {
 	}
 }
 
-func writeOrganizeJSON(out io.Writer, plan organize.Plan) error {
+// writeOrganizeJSON encodes the plan and the run's result. res is nil for a dry
+// run, which applies nothing; runErr is the error the run ended with, if any.
+func writeOrganizeJSON(out io.Writer, plan organize.Plan, res *applyResult, runErr error) error {
 	doc := organizeJSON{
 		Plan: organizePlanJSON{
 			Moves: []organizeMoveJSON{}, Layout: []organizeLayoutJSON{},
@@ -404,6 +566,17 @@ func writeOrganizeJSON(out io.Writer, plan organize.Plan) error {
 		})
 	}
 	doc.Plan.Warnings = append(doc.Plan.Warnings, plan.Warnings...)
+	if res != nil {
+		for _, m := range res.Applied {
+			doc.Result.Applied = append(doc.Result.Applied, moveJSON(m))
+		}
+		for _, m := range res.NotRun {
+			doc.Result.NotRun = append(doc.Result.NotRun, moveJSON(m))
+		}
+	}
+	if runErr != nil {
+		doc.Result.Error = runErr.Error()
+	}
 
 	enc := termsafe.JSONEncoder(out)
 	enc.SetIndent("", "  ")
