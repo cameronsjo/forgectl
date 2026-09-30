@@ -1,10 +1,10 @@
 ---
-status: planned
-next: "Approve -> Task 1 on feat/herdr-organize (pure planner), stacked on forgectl#723"
+status: in-flight
+next: "Task 1 on feat/herdr-organize (pure planner), stacked on forgectl#723 head -> Task 2 -> Task 3 -> Task 4"
 branch: plan/herdr-roadmap
 pr: cameronsjo/forgectl#721
 updated: 2026-09-29
-approved_session_id: "—"
+approved_session_id: a86d73e4-2c61-43bb-a377-9455a4c62f53
 date: 2026-09-29
 session_id: a86d73e4-2c61-43bb-a377-9455a4c62f53
 model: claude-sonnet-5-5
