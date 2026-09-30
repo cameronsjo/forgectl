@@ -62,6 +62,9 @@ func TestReadLedgerQuotesAndCapsThePath(t *testing.T) {
 // Mutation that turns it red: print path with a bare %s again in the
 // "scan ledger" error.
 func TestReadLedgerScanErrorQuotesAndCapsThePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the hostile path holds a bidi override and runs past MAX_PATH, and reading an opened directory is not a portable failure on Windows")
+	}
 	path := hostileLedgerDir(t)
 	_, _, err := ReadLedger(path)
 	if err == nil {

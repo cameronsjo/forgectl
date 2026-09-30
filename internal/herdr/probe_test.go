@@ -39,7 +39,7 @@ func forkRunner(t *testing.T) *exec.FakeRunner {
 	return runnerFor("", &exec.CommandError{Name: Binary, ExitCode: 2, Stderr: fixture(t, "probe_tab_move_stderr.txt")})
 }
 
-func TestProbeAcceptsTheForkExactlyAsMeasured(t *testing.T) {
+func TestGatesAcceptTheForkExactlyAsMeasured(t *testing.T) {
 	r := forkRunner(t)
 	if err := probe(context.Background(), r, envOf(inPane), statSocket); err != nil {
 		t.Fatalf("probe: %v", err)
@@ -49,7 +49,7 @@ func TestProbeAcceptsTheForkExactlyAsMeasured(t *testing.T) {
 	}
 }
 
-func TestProbeAcceptsClapStyleHelpOnStdout(t *testing.T) {
+func TestGatesAcceptClapStyleHelpOnStdout(t *testing.T) {
 	// Synthetic: a clap-style rewrite would exit 0 and print "Usage: ..." on stdout.
 	r := runnerFor("Move a tab\n\nUsage: herdr tab move [OPTIONS] <TAB_ID>\n", nil)
 	if err := probe(context.Background(), r, envOf(inPane), statSocket); err != nil {
@@ -57,7 +57,7 @@ func TestProbeAcceptsClapStyleHelpOnStdout(t *testing.T) {
 	}
 }
 
-func TestProbeRejectsAnyOtherExit2(t *testing.T) {
+func TestGatesRejectAnyOtherExit2(t *testing.T) {
 	for name, stderr := range map[string]string{
 		// Real: the fork's reply to an unknown subcommand lists the move lines but has no usage line.
 		"unknown subcommand listing the fork's verbs": fixture(t, "probe_unknown_stderr.txt"),
@@ -75,14 +75,14 @@ func TestProbeRejectsAnyOtherExit2(t *testing.T) {
 	}
 }
 
-func TestProbeRejectsExit0WithoutAUsageLine(t *testing.T) {
+func TestGatesRejectExit0WithoutAUsageLine(t *testing.T) {
 	r := runnerFor(fixture(t, "probe_tab_help_stdout.txt"), nil)
 	if err := probe(context.Background(), r, envOf(inPane), statSocket); !errors.Is(err, ErrForkRequired) {
 		t.Fatalf("err = %v, want ErrForkRequired", err)
 	}
 }
 
-func TestProbeOtherFailuresAreNotEvidenceAboutTheVerb(t *testing.T) {
+func TestGatesOtherFailuresAreNotEvidenceAboutTheVerb(t *testing.T) {
 	for name, err := range map[string]error{
 		"exit 1":           &exec.CommandError{Name: Binary, ExitCode: 1, Stderr: "boom"},
 		"binary not found": &exec.CommandError{Name: Binary, ExitCode: -1, Err: errors.New("executable file not found")},
@@ -97,7 +97,7 @@ func TestProbeOtherFailuresAreNotEvidenceAboutTheVerb(t *testing.T) {
 	}
 }
 
-func TestProbeGate(t *testing.T) {
+func TestSessionGate(t *testing.T) {
 	fork := forkRunner(t)
 	for name, tt := range map[string]struct {
 		env  map[string]string
@@ -119,7 +119,7 @@ func TestProbeGate(t *testing.T) {
 	}
 }
 
-func TestProbeFailureMessageCarriesNoControlCharacters(t *testing.T) {
+func TestGateFailureMessageCarriesNoControlCharacters(t *testing.T) {
 	// A herdr failure that is neither the usage exit nor a launch failure puts its
 	// stderr in the message; that text can echo pane-controlled values.
 	r := runnerFor("", &exec.CommandError{Name: Binary, ExitCode: 1, Stderr: "bad\x1b[31m red\x07"})
@@ -134,7 +134,7 @@ func TestProbeFailureMessageCarriesNoControlCharacters(t *testing.T) {
 	}
 }
 
-func TestProbeVerbMustEndAtTheVerb(t *testing.T) {
+func TestForkCheckVerbMustEndAtTheVerb(t *testing.T) {
 	for name, stderr := range map[string]string{
 		"a longer verb":     "usage: herdr tab move-all <tab_id>",
 		"a longer verb (2)": "Usage: herdr tab moves <tab_id>",
@@ -146,7 +146,7 @@ func TestProbeVerbMustEndAtTheVerb(t *testing.T) {
 	}
 }
 
-func TestProbeStatFailureKeepsItsCause(t *testing.T) {
+func TestSessionGateStatFailureKeepsItsCause(t *testing.T) {
 	stat := func(string) (fs.FileInfo, error) { return nil, os.ErrPermission }
 	err := probe(context.Background(), forkRunner(t), envOf(inPane), stat)
 	if !errors.Is(err, ErrNotInSession) || !errors.Is(err, os.ErrPermission) {
@@ -220,7 +220,7 @@ func TestCheckForkChecksOnlyTheCapability(t *testing.T) {
 	}
 }
 
-func TestProbeGateErrorWinsAndSkipsTheRunner(t *testing.T) {
+func TestSessionGateErrorWinsAndSkipsTheRunner(t *testing.T) {
 	// Both the gate and the capability check would fail; the gate is reported and herdr is never run.
 	stockish := runnerFor("", &exec.CommandError{Name: Binary, ExitCode: 2, Stderr: ""})
 	err := probe(context.Background(), stockish, envOf(map[string]string{}), statSocket)

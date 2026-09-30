@@ -624,8 +624,8 @@ Exit codes: 0 the file matches the example · 1 keys are missing or extra · 2 t
 // on stderr, stdout untouched — and returns a silentCodedError so fang
 // renders nothing on top of it; otherwise it returns the human wording
 // (wordingFmt, one of "env file %s not found" / "example file %s not
-// found") wrapped for exit 2. Both surfaces use the same repo-relative path
-// so they can't drift (security ruling, forgectl#481): the resolved
+// found") wrapped for exit 2, with the path quoted as QuotePath quotes it.
+// Both surfaces use the same repo-relative path so they can't drift (security ruling, forgectl#481): the resolved
 // absolute path can name a directory the caller never typed, and --json
 // output lands in agent transcripts verbatim.
 func notFoundCheckError(cmd *cobra.Command, target envpkg.Target, wordingFmt string, asJSON bool) error {
@@ -637,8 +637,10 @@ func notFoundCheckError(cmd *cobra.Command, target envpkg.Target, wordingFmt str
 		return newSilentCodedError(2)
 	}
 	// wordingFmt is always one of the two fixed local literals passed by
-	// the RunE closures above — never derived from input.
-	return WithExitCode(fmt.Errorf(wordingFmt, rel), 2)
+	// the RunE closures above — never derived from input. The human line
+	// quotes and caps the path, as every sibling not-found message does
+	// (#847); the --json path field above stays the raw value.
+	return WithExitCode(fmt.Errorf(wordingFmt, termsafe.QuotePath(rel)), 2)
 }
 
 // checkErrorJSON is env check --json's file-not-found wire shape

@@ -81,8 +81,9 @@ func (c *Client) CopyValue(ctx context.Context, target Target, key string) error
 		return err
 	}
 	if !target.Exists {
-		// "env file %s not found" (not "%s not found") and the repo-relative
-		// form mirror internal/cli/env.go's sibling not-found messages: the
+		// "env file %s not found" (not "%s not found"), the repo-relative
+		// form and QuotePath's quoting mirror internal/cli/env.go's sibling
+		// not-found messages, notFoundCheckError included: the
 		// absolute, symlink-resolved path can name a directory the caller
 		// never typed, and it must not lead the message either (fang's
 		// error style title-cases only the first word — forgectl#481).

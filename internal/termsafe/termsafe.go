@@ -372,7 +372,7 @@ func overlongPathErrors(err error) (found []error) {
 		// forever; the node budget stops a fan-out cycle through
 		// Unwrap() []error, which the depth bound alone lets grow
 		// exponentially. A chain past either keeps what was found so far.
-		if e == nil || depth > 100 || budget <= 0 {
+		if e == nil || depth > maxRenderDepth || budget <= 0 {
 			return
 		}
 		budget--
