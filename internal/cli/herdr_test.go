@@ -133,7 +133,7 @@ func setHerdrSeams(t *testing.T, s herdrSeams) {
 		}
 		return fn()
 	}
-	herdrProjectsRoot = func() string { return "/r" }
+	herdrProjectsRoot = func() (string, error) { return "/r", nil }
 	herdrUserHome = func() (string, error) { return "/home/u", nil }
 	herdrFileExists = func(p string) bool { return s.legacyRules && p == "/home/u/.config/herdr-organize/rules.toml" }
 }

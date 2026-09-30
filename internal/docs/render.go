@@ -2,12 +2,12 @@ package docs
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"html"
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 
 	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
 	"github.com/microcosm-cc/bluemonday"
@@ -532,13 +532,17 @@ func ChromaCSS() []byte {
 	return chromaArtificerCSS
 }
 
-// renderMu serializes goldmark.Convert calls. goldmark's Markdown value is
+// renderMu serializes renders. goldmark's Markdown value is
 // safe for concurrent Convert calls per its own docs in the common case, but
 // the highlighting extension's CSSWriter option (unused here) and some
 // third-party extensions are documented as not concurrency-safe; a mutex
 // costs nothing at docs-server request volumes and removes the question
-// entirely.
-var renderMu sync.Mutex
+// entirely. It is a one-slot semaphore rather than a sync.Mutex so that
+// acquiring it can give up at the render deadline or when the request goes
+// away. A request holds it only while goldmark runs, and never past
+// renderDeadline; a render that outlives that keeps goldmark to itself
+// through renderInFlight instead (renderdeadline.go).
+var renderMu = make(chan struct{}, 1)
 
 // Render converts markdown source to sanitized HTML: goldmark (GFM +
 // class-based chroma highlighting) then bluemonday (UGCPolicy + class
@@ -572,7 +576,8 @@ func render(source []byte, kind RootKind) (string, error) {
 
 // renderWith is render with a wikilink resolver for a vault page. A nil
 // resolve, or any other root kind, renders exactly as render does. resolve
-// runs under renderMu, so it must never render.
+// runs in the goldmark stage, one render at a time, so it must never
+// render.
 func renderWith(source []byte, kind RootKind, resolve wikilinkResolver) (string, error) {
 	rendered, _, err := renderHidden(source, kind, resolve)
 	return rendered, err
@@ -583,6 +588,19 @@ func renderWith(source []byte, kind RootKind, resolve wikilinkResolver) (string,
 // the same parse the page is rendered from, so countWords can leave comment
 // text out of the reading estimate.
 func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (string, []text.Segment, error) {
+	out := renderHiddenContext(context.Background(), source, kind, resolve)
+	return out.html, out.hidden, out.err
+}
+
+// renderHiddenContext is renderHidden for a request: the render gives up,
+// and starts no render, once ctx is done, and it reports which notice, if
+// any, the page shows instead of the formatted document.
+func renderHiddenContext(ctx context.Context, source []byte, kind RootKind, resolve wikilinkResolver) renderOutcome {
+	// A document over the render-CPU cap is shown as its source text,
+	// before any parse, the frontmatter decode included (renderdeadline.go).
+	if len(source) > maxRenderBytes {
+		return sourceOutcome(noticeRenderSize, source)
+	}
 	// Route through the frontmatter-aware parser only when a well-formed
 	// block actually opens the document. The extension's opener is greedy —
 	// any leading --- fence starts a block, and an unterminated one consumes
@@ -600,17 +618,22 @@ func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (strin
 	default:
 		md = markdownPlain
 	}
-	// A document goldmark would take superlinear time on is shown as plain
-	// text instead, before renderMu is taken. The guard measures the block
-	// structure md itself gives source (markupguard.go).
-	tooComplex, guardErr := markupTooComplex(md, source)
-	if guardErr != nil {
-		return "", nil, guardErr
-	}
-	if tooComplex {
-		return plainTextDoc(source), nil, nil
-	}
-	renderMu.Lock()
+	return renderBounded(ctx, md, source, kind, resolve)
+}
+
+// goldmarkOutput is what the goldmark stage hands the post-processing
+// stage.
+type goldmarkOutput struct {
+	html   []byte
+	pc     parser.Context
+	hidden []text.Segment
+}
+
+// renderGoldmark is the goldmark stage: parse and render. It runs only on a
+// render goroutine renderBounded starts, never two at a time, and may
+// outlive the request that started it, so it must not touch anything
+// request-scoped beyond its arguments.
+func renderGoldmark(md goldmark.Markdown, source []byte, kind RootKind, resolve wikilinkResolver) (goldmarkOutput, error) {
 	var buf bytes.Buffer
 	ctx := newParseContext()
 	if kind == RootVault && resolve != nil {
@@ -623,11 +646,18 @@ func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (strin
 	if err == nil && kind == RootVault {
 		hidden = hiddenComments(doc, ctx)
 	}
-	renderMu.Unlock()
 	if err != nil {
-		return "", nil, fmt.Errorf("render markdown: %w", err)
+		return goldmarkOutput{}, fmt.Errorf("render markdown: %w", err)
 	}
-	input := dropDuplicateSVGNamespaces(buf.Bytes())
+	return goldmarkOutput{html: buf.Bytes(), pc: ctx, hidden: hidden}, nil
+}
+
+// renderPost is the stage after goldmark: the sanitizer, the balancer and
+// the post-sanitizer additions. None of it shares state between renders
+// (the bluemonday policy is read-only once built, and every other step
+// works on its arguments), so it runs outside renderMu, as it always has.
+func renderPost(g goldmarkOutput, kind RootKind) string {
+	input := dropDuplicateSVGNamespaces(g.html)
 	body := stripChromeClasses(balanceFragment(string(sanitizer.SanitizeBytes(input))))
 	// An unclosed skip-content element makes the sanitizer drop the rest of
 	// the document (forgectl#622). The sanitizer is left exactly as it is,
@@ -637,7 +667,7 @@ func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (strin
 	if name, ok := unclosedSkipContent(input); ok {
 		notice = skipContentBanner(name)
 	}
-	return notice + frontmatterHTML(ctx) + transformCallouts(body, kind), hidden, nil
+	return notice + frontmatterHTML(g.pc) + transformCallouts(body, kind)
 }
 
 // hiddenComments returns the source range of every %% comment in a parsed
@@ -703,6 +733,10 @@ type RenderedDoc struct {
 	Outline []OutlineItem
 	Words   int
 	Minutes int
+	// Notice names the notice the page shows in place of the formatted
+	// document (its data-forgectl-notice value), or is empty when the
+	// document was formatted.
+	Notice string
 }
 
 // RenderDoc renders a docs-root document and derives its outline and
@@ -716,6 +750,12 @@ func RenderDoc(source []byte) (RenderedDoc, error) {
 // wikilinks into links; with either nil, every wikilink renders as an
 // unresolved miss instead.
 func RenderDocFor(kind RootKind, source []byte, idx *Index, from *Doc) (RenderedDoc, error) {
+	return RenderDocForContext(context.Background(), kind, source, idx, from)
+}
+
+// RenderDocForContext is RenderDocFor for a request: once ctx is done the
+// render gives up with ctx's error and starts no render.
+func RenderDocForContext(ctx context.Context, kind RootKind, source []byte, idx *Index, from *Doc) (RenderedDoc, error) {
 	var resolve wikilinkResolver
 	if idx != nil && from != nil {
 		budget := newFragmentBudget()
@@ -723,12 +763,13 @@ func RenderDocFor(kind RootKind, source []byte, idx *Index, from *Doc) (Rendered
 			return idx.wikilinkTarget(from, ref, budget)
 		})
 	}
-	rendered, hidden, err := renderHidden(source, kind, resolve)
-	if err != nil {
-		return RenderedDoc{}, err
+	out := renderHiddenContext(ctx, source, kind, resolve)
+	if out.err != nil {
+		return RenderedDoc{}, out.err
 	}
+	rendered := out.html
 	// A vault page's %% comments are not on the page, so they are not read.
-	words := countWords(cutSegments(source, hidden))
+	words := countWords(cutSegments(source, out.hidden))
 	minutes := (words + 199) / 200
 	if minutes < 1 {
 		minutes = 1
@@ -738,6 +779,7 @@ func RenderDocFor(kind RootKind, source []byte, idx *Index, from *Doc) (Rendered
 		Outline: extractOutline(rendered),
 		Words:   words,
 		Minutes: minutes,
+		Notice:  out.notice,
 	}, nil
 }
 

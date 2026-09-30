@@ -41,7 +41,7 @@ projects root ($PROJECTS_DIR, else ~/Projects). Every scan is read-only.
 	return cmd
 }
 
-func newAuditInjectionCmd(resolveRoot func() string, now func() time.Time) *cobra.Command {
+func newAuditInjectionCmd(resolveRoot func() (string, error), now func() time.Time) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "injection",
@@ -58,7 +58,11 @@ Each carrier carries anomaly flags:
   symlink    a symlinked directory a carrier would live behind (not followed)`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			report, err := audit.ScanInjection(audit.Options{Root: resolveRoot(), Now: now()})
+			root, err := resolveRoot()
+			if err != nil {
+				return termsafe.Error(err)
+			}
+			report, err := audit.ScanInjection(audit.Options{Root: root, Now: now()})
 			if err != nil {
 				return err
 			}

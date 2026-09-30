@@ -168,7 +168,11 @@ func organizeOnce(cmd *cobra.Command, deps module.Deps, opts organizeOpts) error
 	if err != nil {
 		return termsafe.Error(err)
 	}
-	plan := organize.BuildPlan(toOrganizeConfig(cfg), snap, herdrProjectsRoot())
+	root, err := herdrProjectsRoot()
+	if err != nil {
+		return termsafe.Error(err)
+	}
+	plan := organize.BuildPlan(toOrganizeConfig(cfg), snap, root)
 
 	human := cmd.OutOrStdout()
 	if opts.asJSON {

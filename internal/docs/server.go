@@ -478,13 +478,23 @@ func handleDoc(store *Store) http.HandlerFunc {
 		if found {
 			from = &doc
 		}
-		rendered, err := RenderDocFor(kind, source, idx, from)
+		rendered, err := RenderDocForContext(r.Context(), kind, source, idx, from)
+		if err != nil && r.Context().Err() != nil {
+			// The client went away before the page was ready: nothing to
+			// answer, and nothing went wrong.
+			slog.Debug("docs: request ended before its render.", "root", termsafe.SafeLine(root), "rest", termsafe.SafeLine(rest), "error", err)
+			return
+		}
 		if err != nil {
 			slog.Error("docs: markdown render failed.", "root", root, "rest", rest, "error", err)
 			http.Error(w, "render failed", http.StatusInternalServerError)
 			return
 		}
 
+		switch rendered.Notice {
+		case noticeRenderSize, noticeRenderDeadline, noticeRenderBusy:
+			slog.Warn("docs: served the document as source text instead of rendering it.", "path", termsafe.SafeLine(root+"/"+rest), "reason", rendered.Notice, "bytes", len(source))
+		}
 		renderShell(w, idx, pageContext{
 			CurrentRoot: root,
 			CurrentRel:  rest,
@@ -493,7 +503,7 @@ func handleDoc(store *Store) http.HandlerFunc {
 			Outline:     rendered.Outline,
 			Words:       rendered.Words,
 			Minutes:     rendered.Minutes,
-			Content:     template.HTML(rendered.HTML), //nolint:gosec // body is bluemonday-sanitized in render (vault highlight/tag nodes included; wikilink anchors are built from indexed Docs only); the frontmatter/callout additions are built there from html.EscapeString'd fragments and fixed markup only; a document past the markup guard is instead html.EscapeString'd source plus fixed markup (plainTextDoc)
+			Content:     template.HTML(rendered.HTML), //nolint:gosec // body is bluemonday-sanitized in render (vault highlight/tag nodes included; wikilink anchors are built from indexed Docs only); the frontmatter/callout additions are built there from html.EscapeString'd fragments and fixed markup only; a document past the markup guard, the render cap or the render deadline is instead html.EscapeString'd source plus fixed markup (sourceTextDoc)
 		})
 	}
 }
@@ -502,8 +512,9 @@ func handleDoc(store *Store) http.HandlerFunc {
 // scan's cap on purpose: an over-cap document is indexed by title only, so
 // rendering it in full would show links and anchors the index knows nothing
 // about. The cap bounds memory and the per-request read; it does NOT bound
-// render CPU, since the superlinear parse cases sit far below it; the
-// markup guard (markupguard.go) bounds those.
+// render CPU, since the superlinear parse cases sit far below it. The
+// markup guard (markupguard.go), the smaller render cap maxRenderBytes and
+// the render deadline (renderdeadline.go) bound that.
 const renderCapBytes = maxScanBytes
 
 // readDocCapped reads at most renderCapBytes of f, a doc Index.Open opened.

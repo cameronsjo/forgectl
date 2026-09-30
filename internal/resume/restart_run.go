@@ -316,7 +316,9 @@ func restartNow(ctx context.Context, env RestartEnv, s OutdatedSession, shellPID
 	}
 
 	// From the signal on, cancellation no longer applies: every wait below is
-	// bounded instead, so a Ctrl-C cannot strand a stopped session.
+	// bounded instead, so a Ctrl-C cannot strand a stopped session. The
+	// polling waits carry their own limits, and each herdr call the env makes
+	// is bounded by the env (HerdrCallTimeout for SystemRestartEnv).
 	ctx = context.WithoutCancel(ctx)
 
 	if err := env.Terminate(s.Pid); err != nil {

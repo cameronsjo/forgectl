@@ -40,6 +40,23 @@ func IsUnsafeTerminalRune(r rune) bool {
 	return unicode.IsControl(r) || unicode.In(r, unicode.Bidi_Control)
 }
 
+// IsInvisibleRune reports whether r is a Unicode format character (category
+// Cf) or a line or paragraph separator (Zl, Zp): a rune that renders as
+// nothing, or as a break, rather than as a glyph. U+200B, U+FEFF, U+2060, the
+// soft hyphen, and the tag characters in U+E0001..U+E007F are all Cf.
+//
+// It is for VALIDATORS of a value that becomes an identifier or an argv
+// element, where an invisible rune makes two values that look identical
+// compare unequal (#916). Pair it with IsUnsafeTerminalRune there. It is kept
+// out of IsUnsafeTerminalRune on purpose: that classifier also drives the
+// JSON filter and the text renderers, and broadening it would rewrite --json
+// output and every rendered value holding a ZWJ emoji sequence (see
+// TestVisibleQuotingDoesNotBroadenSharedClassifier). The renderers already
+// quote these runes visibly, because they are not graphic.
+func IsInvisibleRune(r rune) bool {
+	return unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)
+}
+
 // SafeLine turns arbitrary text into one inert physical terminal line. Go's
 // graphic quoting escapes C0/C1 controls, DEL, tabs/newlines, and Unicode
 // format characters (including bidi overrides) while retaining ordinary
