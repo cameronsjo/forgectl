@@ -7,6 +7,8 @@ package env
 import (
 	"fmt"
 	"os"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // secureMode is the permission bits a .env file should carry: owner
@@ -115,15 +117,15 @@ func writeAtomic(target Target, data []byte) (tightened bool, err error) {
 
 	if _, err := tmp.Write(data); err != nil {
 		cleanup()
-		return false, fmt.Errorf("write %s: %w", target.Rel(), err)
+		return false, fmt.Errorf("write %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(err))
 	}
 	if err := tmp.Sync(); err != nil {
 		cleanup()
-		return false, fmt.Errorf("sync %s: %w", target.Rel(), err)
+		return false, fmt.Errorf("sync %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(err))
 	}
 	if err := tmp.Close(); err != nil {
 		removeScratch()
-		return false, fmt.Errorf("close %s: %w", target.Rel(), err)
+		return false, fmt.Errorf("close %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(err))
 	}
 	scratchWritten(scratchName)
 

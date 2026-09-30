@@ -44,13 +44,13 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 	// multi-user-writable). This is the git-mutating analog of Clone's origin-match
 	// guard: Worktree creates, so it refuses if the leaf already exists.
 	if err := os.MkdirAll(filepath.Dir(base), 0o755); err != nil {
-		return "", fmt.Errorf("creating worktree parent dirs for %s: %w", base, err)
+		return "", fmt.Errorf("creating worktree parent dirs for %s: %w", termsafe.QuotePath(base), termsafe.Error(err))
 	}
 	if err := os.Mkdir(base, 0o755); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return "", fmt.Errorf("%s already exists; refusing to initialize a worktree layout over it", base)
 		}
-		return "", fmt.Errorf("creating worktree base dir %s: %w", base, err)
+		return "", fmt.Errorf("creating worktree base dir %s: %w", termsafe.QuotePath(base), termsafe.Error(err))
 	}
 
 	// Every failure from here on must remove base. The Mkdir above is an
@@ -97,7 +97,7 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 	// rename: base was created by our own os.Mkdir (never a followed symlink),
 	// so this write lands inside a dir we exclusively created.
 	if err := os.WriteFile(filepath.Join(base, ".git"), []byte("gitdir: ./.bare\n"), 0o644); err != nil {
-		return "", fmt.Errorf("writing .git pointer for %s: %w", base, err)
+		return "", fmt.Errorf("writing .git pointer for %s: %w", termsafe.QuotePath(base), termsafe.Error(err))
 	}
 
 	// A bare clone's default refspec fetches only the cloned branch; widen it so
