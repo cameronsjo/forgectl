@@ -88,9 +88,9 @@ const maxSymlinkHops = 40
 //  1. filepath.Clean("/"+rel) neutralizes ../ segments by forcing the path
 //     absolute-relative first — "../../etc/passwd" collapses to
 //     "/etc/passwd" before it ever touches the filesystem.
-//  2. The cleaned path is walked one component at a time through an os.Root
-//     opened on root (resolveIn). Every lstat and readlink goes through
-//     that Root, so the walk never touches anything outside the root, and a
+//  2. The cleaned path is walked one component at a time (resolveIn), each
+//     lookup a single name in a directory held open as an os.Root, so the
+//     walk never touches anything outside the root, and a
 //     symlink is followed only while its target stays inside it: a relative
 //     target whose ".." climbs above the root, or an absolute target that
 //     does not name a path under root, denies as ErrOutsideRoot before
@@ -120,98 +120,167 @@ func ResolveInRoot(root, rel string) (string, error) {
 		return "", ErrOutsideRoot
 	}
 	defer func() { _ = r.Close() }()
-	name, _, err := resolveIn(r, root, rel)
+	end, err := resolveIn(r, root, rel)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(root, name), nil
+	end.close()
+	return filepath.Join(root, end.name), nil
 }
 
-// resolveIn is ResolveInRoot's walk over an already-open Root for root. It
-// returns the symlink-free root-relative name ("." for the root itself) and
-// the Lstat of what it names, taken during the walk.
-func resolveIn(r *os.Root, root, rel string) (string, fs.FileInfo, error) {
+// walkLevel is one directory on resolveIn's path: an os.Root opened on it,
+// its root-relative name ("" for the root), and its Lstat.
+type walkLevel struct {
+	r    *os.Root
+	name string
+	info fs.FileInfo
+}
+
+// walkEnd is where resolveIn stopped. dir is the directory holding the
+// result, or the result itself when base is "". The caller calls close,
+// which closes every Root the walk opened below the one it was handed.
+type walkEnd struct {
+	name  string // root-relative, "." for the root itself
+	info  fs.FileInfo
+	dir   *os.Root
+	base  string
+	stack []walkLevel
+}
+
+func (e *walkEnd) close() { closeLevels(e.stack[1:]) }
+
+func closeLevels(levels []walkLevel) {
+	for _, l := range levels {
+		_ = l.r.Close()
+	}
+}
+
+// resolveIn is ResolveInRoot's walk over an already-open Root r for root.
+//
+// Every lookup is a single name in a directory the walk holds open: each
+// directory it descends into is opened as its own os.Root (openDirVerified)
+// and must be the directory its Lstat saw. So no lookup follows a symlink
+// the walk did not see and choose to follow, and a directory swapped for a
+// symlink between the Lstat and the descent is refused rather than
+// followed (forgectl#611 review). Only the walk follows symlinks, and only
+// while they stay inside the root.
+func resolveIn(r *os.Root, root, rel string) (*walkEnd, error) {
 	wantDir := strings.HasSuffix(rel, "/") || strings.HasSuffix(rel, string(filepath.Separator))
 	pending := splitPath(filepath.Clean(string(filepath.Separator) + rel))
 
-	cur := "" // symlink-free, relative to root; "" is the root itself
-	var info fs.FileInfo
-	isDir := true
+	rootInfo, err := r.Stat(".")
+	if err != nil {
+		return nil, ErrOutsideRoot
+	}
+	stack := []walkLevel{{r: r, info: rootInfo}}
+	fail := func(err error) (*walkEnd, error) {
+		closeLevels(stack[1:])
+		return nil, err
+	}
+	var fileBase string
+	var fileInfo fs.FileInfo
 	hops := 0
 	for len(pending) > 0 {
 		c := pending[0]
 		pending = pending[1:]
-		if !isDir {
+		if fileInfo != nil {
 			// A component after a regular file: the kernel's ENOTDIR,
 			// which is a miss, not an escape.
-			return "", nil, ErrNotFound
+			return fail(ErrNotFound)
 		}
 		if c == ".." {
 			// Only a symlink target puts ".." here; the request's own were
-			// cleaned away above. cur is symlink-free, so popping it
-			// lexically is the kernel's "..".
-			if cur == "" {
-				return "", nil, ErrOutsideRoot
+			// cleaned away above. Popping the held directory is the
+			// kernel's "..", since every level is a real directory.
+			if len(stack) == 1 {
+				return fail(ErrOutsideRoot)
 			}
-			cur = parentOf(cur)
-			info, isDir = nil, true
+			closeLevels(stack[len(stack)-1:])
+			stack = stack[:len(stack)-1]
 			continue
 		}
-		next := filepath.Join(cur, c)
-		fi, err := r.Lstat(next)
+		cur := stack[len(stack)-1]
+		fi, err := cur.r.Lstat(c)
 		if errors.Is(err, fs.ErrNotExist) {
-			return "", nil, ErrNotFound
+			return fail(ErrNotFound)
 		}
 		if err != nil {
-			return "", nil, ErrOutsideRoot
+			// Left as a denial on purpose. A single-name Lstat cannot
+			// leave the root, so these (EACCES, ENAMETOOLONG, a NUL's
+			// EINVAL) are misses in fact, but telling them apart needs
+			// per-OS errnos plus os.Root's unexported escape error, and a
+			// wrong guess would call an escape "not found". Every caller
+			// denies both the same way (a 404, a broken link).
+			return fail(ErrOutsideRoot)
 		}
 		if fi.Mode()&fs.ModeSymlink == 0 {
-			cur, info, isDir = next, fi, fi.IsDir()
+			if !fi.IsDir() {
+				fileBase, fileInfo = c, fi
+				continue
+			}
+			sub, err := openDirVerified(cur.r, c, fi)
+			if err != nil {
+				return fail(err)
+			}
+			stack = append(stack, walkLevel{r: sub, name: filepath.Join(cur.name, c), info: fi})
 			continue
 		}
 		hops++
 		if hops > maxSymlinkHops {
-			return "", nil, ErrOutsideRoot
+			return fail(ErrOutsideRoot)
 		}
-		target, err := r.Readlink(next)
+		target, err := cur.r.Readlink(c)
 		if err != nil || target == "" {
-			return "", nil, ErrOutsideRoot
+			return fail(ErrOutsideRoot)
 		}
 		// A target with a volume, or rooted at a separator without one
-		// (Windows' "\\x", rooted on the current drive, which filepath.IsAbs calls
-		// relative), is matched against the root as an absolute path.
+		// (Windows' "\\x", rooted on the current drive, which filepath.IsAbs
+		// calls relative), is matched against the root as an absolute path.
 		if filepath.IsAbs(target) || filepath.VolumeName(target) != "" ||
 			strings.HasPrefix(target, "/") || strings.HasPrefix(target, string(filepath.Separator)) {
 			rest, ok := underRoot(root, target)
 			if !ok {
-				return "", nil, ErrOutsideRoot
+				return fail(ErrOutsideRoot)
 			}
-			cur = ""
+			closeLevels(stack[1:])
+			stack = stack[:1]
 			pending = append(rest, pending...)
 		} else {
-			// A relative target resolves against the link's own directory,
-			// which is cur.
+			// A relative target resolves against the link's own
+			// directory, which is the level held on top.
 			pending = append(splitPath(target), pending...)
 		}
-		info, isDir = nil, true
 	}
-	if cur == "" {
-		cur = "."
-	}
-	if info == nil {
-		fi, err := r.Lstat(cur)
-		if errors.Is(err, fs.ErrNotExist) {
-			return "", nil, ErrNotFound
+	top := stack[len(stack)-1]
+	if fileInfo != nil {
+		if wantDir {
+			return fail(ErrNotFound)
 		}
-		if err != nil || fi.Mode()&fs.ModeSymlink != 0 {
-			return "", nil, ErrOutsideRoot
-		}
-		info = fi
+		return &walkEnd{name: filepath.Join(top.name, fileBase), info: fileInfo, dir: top.r, base: fileBase, stack: stack}, nil
 	}
-	if wantDir && !info.IsDir() {
-		return "", nil, ErrNotFound
+	name := top.name
+	if name == "" {
+		name = "."
 	}
-	return cur, info, nil
+	return &walkEnd{name: name, info: top.info, dir: top.r, stack: stack}, nil
+}
+
+// openDirVerified opens the directory name in parent as its own Root and
+// returns it only if it is the directory want describes. os.Root.OpenRoot
+// follows a symlink that stays inside parent, so without the identity check
+// a directory swapped for a symlink after its Lstat would redirect the
+// walk to another directory under parent.
+func openDirVerified(parent *os.Root, name string, want fs.FileInfo) (*os.Root, error) {
+	sub, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, ErrOutsideRoot
+	}
+	got, err := sub.Stat(".")
+	if err != nil || !got.IsDir() || !os.SameFile(want, got) {
+		_ = sub.Close()
+		return nil, ErrOutsideRoot
+	}
+	return sub, nil
 }
 
 // splitPath splits p on both "/" and the OS separator, dropping empty and
@@ -229,16 +298,6 @@ func splitPath(p string) []string {
 		}
 	}
 	return out
-}
-
-// parentOf is filepath.Dir for resolveIn's root-relative names, with the
-// root spelled "".
-func parentOf(name string) string {
-	d := filepath.Dir(name)
-	if d == "." {
-		return ""
-	}
-	return d
 }
 
 // underRoot reports whether the absolute symlink target names a path under

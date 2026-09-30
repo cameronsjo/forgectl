@@ -45,6 +45,10 @@ type Root struct {
 	// any resolved path other than OnlyFile: naming one file must not
 	// silently grant access to every other file in its directory.
 	OnlyFile string
+	// dirInfo is Path's Stat, taken when the root was indexed. Index.Open
+	// refuses to read through Path once it names a different directory
+	// (openPinnedRoot).
+	dirInfo fs.FileInfo
 	// Kind classifies this root's link syntax and anchor semantics —
 	// RootDocs (ordinary relative markdown links) or RootVault (Obsidian
 	// wikilinks). Detected by detectRootKind (vault.go) at index-build
@@ -431,7 +435,11 @@ func indexDirRoot(ctx context.Context, labels map[string]bool, dir string, overr
 	}
 	label := uniqueLabel(labels, filepath.Base(canonical))
 	kind, vaultPath := resolveRootKind(canonical, override, hasOverride)
-	root := Root{Label: label, Path: canonical, Kind: kind, VaultPath: vaultPath}
+	dirInfo, err := os.Stat(canonical)
+	if err != nil {
+		return Root{}, nil, nil, fmt.Errorf("docs root %q: %w", dir, err)
+	}
+	root := Root{Label: label, Path: canonical, Kind: kind, VaultPath: vaultPath, dirInfo: dirInfo}
 	docs, skipped, err := walkRoot(ctx, root)
 	if err != nil {
 		var deadline *WalkDeadlineError
@@ -469,7 +477,11 @@ func indexFileRoot(labels map[string]bool, file string, override RootKind, hasOv
 	base := filepath.Base(real)
 	label := uniqueLabel(labels, strings.TrimSuffix(base, filepath.Ext(base)))
 	kind, vaultPath := resolveRootKind(parent, override, hasOverride)
-	root := Root{Label: label, Path: parent, OnlyFile: real, Kind: kind, VaultPath: vaultPath}
+	dirInfo, err := os.Stat(parent)
+	if err != nil {
+		return Root{}, Doc{}, fmt.Errorf("docs root %q: %w", file, err)
+	}
+	root := Root{Label: label, Path: parent, OnlyFile: real, Kind: kind, VaultPath: vaultPath, dirInfo: dirInfo}
 
 	fi, err := os.Stat(real)
 	if err != nil {
@@ -851,40 +863,56 @@ var ErrNotIndexed = errors.New("file was not indexed")
 // Resolve is a check, not a read: the path it returns can be swapped before
 // anything opens it. A caller that reads the doc uses Open instead.
 func (idx *Index) Resolve(rootLabel, relPath string) (string, error) {
-	r, _, _, resolved, err := idx.resolveOpen(rootLabel, relPath)
+	rt, end, resolved, err := idx.resolveOpen(rootLabel, relPath)
 	if err != nil {
 		return "", err
 	}
-	_ = r.Close()
+	end.close()
+	_ = rt.Close()
 	return resolved, nil
 }
 
-// Open is Resolve followed by opening the doc through the same os.Root the
-// resolution walked (forgectl#611). The open cannot leave the root whatever
-// is swapped into the path after the walk, and the file it opens must be the
-// one the walk approved (os.SameFile against the walk's own Lstat) and a
-// regular file; anything else closes it and denies with ErrOutsideRoot. The
-// caller owns the returned file, which stays valid after the Root closes.
-// resolved is the path Resolve would have returned, for display and
-// membership only; reading it again by path would reopen the race Open
-// closes.
+// Open is Resolve followed by opening the doc (forgectl#611). Resolution
+// holds every directory on the path open as its own os.Root, each verified
+// to be the directory its Lstat saw, and the doc is opened by its single
+// name in the last of them. The file opened must then be a regular file
+// and the one the walk's own Lstat saw (os.SameFile), or Open closes it and
+// denies with ErrOutsideRoot. So a symlink or directory swapped in after
+// the check can neither leave the root nor redirect the read to another
+// file inside it. The root itself is pinned too: it must still be the
+// directory the index was built from (Root.dirInfo), so replacing the root
+// path with a symlink after indexing is refused. The caller owns the
+// returned file, which stays valid after the Roots close. resolved is the
+// path Resolve would have returned, for display and membership only;
+// reading it again by path would reopen the race Open closes.
 func (idx *Index) Open(rootLabel, relPath string) (f *os.File, resolved string, err error) {
-	r, name, info, resolved, err := idx.resolveOpen(rootLabel, relPath)
+	rt, end, resolved, err := idx.resolveOpen(rootLabel, relPath)
 	if err != nil {
 		return nil, "", err
 	}
-	defer func() { _ = r.Close() }()
-	f, err = openVerified(r, name, info)
+	defer func() {
+		end.close()
+		_ = rt.Close()
+	}()
+	if end.base == "" {
+		return nil, "", ErrOutsideRoot
+	}
+	f, err = openVerified(end.dir, end.base, end.info)
 	if err != nil {
 		return nil, "", err
 	}
 	return f, resolved, nil
 }
 
-// openVerified opens name through r and returns it only if it is still the
-// regular file want describes.
-func openVerified(r *os.Root, name string, want fs.FileInfo) (*os.File, error) {
-	f, err := r.Open(name)
+// openVerified opens name in dir and returns it only if it is still the
+// regular file want describes. A non-regular want is refused before any
+// open, and the open is nonblocking (openNonblock), so neither a FIFO found
+// by the walk nor one swapped in after it can hang the caller.
+func openVerified(dir *os.Root, name string, want fs.FileInfo) (*os.File, error) {
+	if !want.Mode().IsRegular() {
+		return nil, ErrOutsideRoot
+	}
+	f, err := dir.OpenFile(name, os.O_RDONLY|openNonblock, 0)
 	if err != nil {
 		return nil, ErrOutsideRoot
 	}
@@ -897,45 +925,69 @@ func openVerified(r *os.Root, name string, want fs.FileInfo) (*os.File, error) {
 }
 
 // resolveOpen is the shared body of Resolve and Open. On success it returns
-// the open Root the walk used, which the caller closes, the root-relative
-// name and Lstat the walk ended on, and the canonical absolute path.
-func (idx *Index) resolveOpen(rootLabel, relPath string) (*os.Root, string, fs.FileInfo, string, error) {
+// the open top-level Root, which the caller closes after end.close(), where
+// the walk ended, and the canonical absolute path.
+func (idx *Index) resolveOpen(rootLabel, relPath string) (*os.Root, *walkEnd, string, error) {
 	for _, r := range idx.roots {
 		if r.Label != rootLabel {
 			continue
 		}
-		rt, err := os.OpenRoot(r.Path)
+		rt, err := openPinnedRoot(r)
 		if err != nil {
-			return nil, "", nil, "", ErrOutsideRoot
+			return nil, nil, "", err
 		}
-		name, info, resolved, err := idx.checkInRoot(rt, r, relPath)
+		end, resolved, err := idx.checkInRoot(rt, r, relPath)
 		if err != nil {
 			_ = rt.Close()
-			return nil, "", nil, "", err
+			return nil, nil, "", err
 		}
-		return rt, name, info, resolved, nil
+		return rt, end, resolved, nil
 	}
-	return nil, "", nil, "", ErrRootNotFound
+	return nil, nil, "", ErrRootNotFound
+}
+
+// openPinnedRoot opens r's directory and returns it only if it is still the
+// directory the index was built from. os.OpenRoot follows a symlink at the
+// root path itself, so without this a root moved aside and replaced by a
+// symlink after indexing would serve whatever the symlink names.
+func openPinnedRoot(r Root) (*os.Root, error) {
+	if r.dirInfo == nil {
+		return nil, ErrOutsideRoot
+	}
+	rt, err := os.OpenRoot(r.Path)
+	if err != nil {
+		return nil, ErrOutsideRoot
+	}
+	got, err := rt.Stat(".")
+	if err != nil || !os.SameFile(r.dirInfo, got) {
+		_ = rt.Close()
+		return nil, ErrOutsideRoot
+	}
+	return rt, nil
 }
 
 // checkInRoot runs the resolution chain and the index's own gates for one
-// root over its open Root.
-func (idx *Index) checkInRoot(rt *os.Root, r Root, relPath string) (string, fs.FileInfo, string, error) {
-	name, info, err := resolveIn(rt, r.Path, relPath)
+// root over its open Root. On success the caller owns end.
+func (idx *Index) checkInRoot(rt *os.Root, r Root, relPath string) (*walkEnd, string, error) {
+	end, err := resolveIn(rt, r.Path, relPath)
 	if err != nil {
-		return "", nil, "", err
+		return nil, "", err
 	}
-	resolved := filepath.Join(r.Path, name)
+	resolved := filepath.Join(r.Path, end.name)
+	deny := func(err error) (*walkEnd, string, error) {
+		end.close()
+		return nil, "", err
+	}
 	if r.OnlyFile != "" && resolved != r.OnlyFile {
-		return "", nil, "", ErrOutsideRoot
+		return deny(ErrOutsideRoot)
 	}
 	if !AllowedExt(resolved) {
-		return "", nil, "", ErrDisallowedExt
+		return deny(ErrDisallowedExt)
 	}
 	// Keyed on r.Label, so a file indexed under a DIFFERENT (possibly
 	// overlapping) root does not satisfy membership for this one.
 	if !idx.pathIndex[docKey{rootLabel: r.Label, absPath: resolved}] {
-		return "", nil, "", ErrNotIndexed
+		return deny(ErrNotIndexed)
 	}
-	return name, info, resolved, nil
+	return end, resolved, nil
 }

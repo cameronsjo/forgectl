@@ -29,6 +29,10 @@ package docs
 //       one, is ErrNotFound, not ErrOutsideRoot (forgectl#611)
 //   [x] Index.Open reads the resolved doc, refuses escapes, and refuses a
 //       file swapped in between the walk and the open
+//   [x] a directory swapped for an in-root symlink between Lstat and descent
+//       is refused (openDirVerified); a root replaced after indexing is
+//       refused by Open and Resolve (openPinnedRoot); a FIFO never blocks
+//       openVerified (open_nonblock_unix_test.go)
 //   [x] Unhappy: root "/a/b" does not match a resolved path under sibling "/a/bc"
 //
 // AllowedExt (Classification: security gate — extension allowlist)
@@ -495,11 +499,13 @@ func TestOpenVerified_RefusesAFileSwappedInAfterTheWalk(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = r.Close() }()
-	name, info, err := resolveIn(r, root, "doc.md")
+	end, err := resolveIn(r, root, "doc.md")
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, err := openVerified(r, name, info)
+	defer end.close()
+	name, info := end.base, end.info
+	f, err := openVerified(end.dir, name, info)
 	if err != nil {
 		t.Fatalf("openVerified on the unswapped doc: %v", err)
 	}
@@ -508,7 +514,7 @@ func TestOpenVerified_RefusesAFileSwappedInAfterTheWalk(t *testing.T) {
 	if err := os.Rename(filepath.Join(root, "other"), doc); err != nil {
 		t.Fatal(err)
 	}
-	if f, err := openVerified(r, name, info); !errors.Is(err, ErrOutsideRoot) {
+	if f, err := openVerified(end.dir, name, info); !errors.Is(err, ErrOutsideRoot) {
 		if f != nil {
 			_ = f.Close()
 		}
@@ -556,5 +562,90 @@ func TestAllowedExt_DisallowedExtensions_Rejected(t *testing.T) {
 		if AllowedExt(name) {
 			t.Errorf("AllowedExt(%q) = true, want false", name)
 		}
+	}
+}
+
+// forgectl#611 review: a directory swapped for a symlink to another in-root
+// directory between the walk's Lstat and its descent is refused, not
+// followed. os.Root.OpenRoot alone would follow it, since the target stays
+// inside the parent; the identity check is what refuses it.
+func TestOpenDirVerified_RefusesADirectorySwappedForASymlink(t *testing.T) {
+	root := mustCanonicalRoot(t, t.TempDir())
+	for _, d := range []string{"sub", "node_modules"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	info, err := r.Lstat("sub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub, err := openDirVerified(r, "sub", info)
+	if err != nil {
+		t.Fatalf("openDirVerified on the unswapped directory: %v", err)
+	}
+	_ = sub.Close()
+
+	if err := os.Rename(filepath.Join(root, "sub"), filepath.Join(root, "sub.old")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("node_modules", filepath.Join(root, "sub")); err != nil {
+		t.Skipf("symlink not supported in this environment: %v", err)
+	}
+	if sub, err := openDirVerified(r, "sub", info); !errors.Is(err, ErrOutsideRoot) {
+		if sub != nil {
+			_ = sub.Close()
+		}
+		t.Errorf("openDirVerified after a swap: err = %v, want ErrOutsideRoot", err)
+	}
+}
+
+// forgectl#611 review: the root path itself is pinned. Moving an indexed
+// root aside and putting a symlink to another directory in its place must
+// not make Open or Resolve read through the symlink.
+func TestIndexOpen_RefusesARootReplacedAfterIndexing(t *testing.T) {
+	base := mustCanonicalRoot(t, t.TempDir())
+	root := filepath.Join(base, "root")
+	outside := filepath.Join(base, "outside")
+	for _, d := range []string{root, outside} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "page.md"), []byte("# page"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "page.md"), []byte("OUTSIDE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := NewIndex([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	label := idx.Roots()[0].Label
+	f, _, err := idx.Open(label, "page.md")
+	if err != nil {
+		t.Fatalf("Open before the swap: %v", err)
+	}
+	_ = f.Close()
+
+	if err := os.Rename(root, root+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, root); err != nil {
+		t.Skipf("symlink not supported in this environment: %v", err)
+	}
+	if f, _, err := idx.Open(label, "page.md"); err == nil {
+		b, _ := io.ReadAll(f)
+		_ = f.Close()
+		t.Errorf("Open through a replaced root read %q, want a denial", b)
+	}
+	if _, err := idx.Resolve(label, "page.md"); err == nil {
+		t.Error("Resolve through a replaced root succeeded, want a denial")
 	}
 }
