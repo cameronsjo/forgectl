@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -90,33 +89,26 @@ func isURLLike(dest string) bool {
 	return strings.HasPrefix(dest, "//") || urlSchemePrefix.MatchString(dest)
 }
 
-// scanDoc reads absPath once and returns everything Doc needs about it:
-// title (same rule titleFor used to apply — the first "# " heading in the
-// first 64 lines, else relPath's filename without extension), frontmatter
-// aliases, headings (with goldmark's auto-ID slug), Obsidian ^block-id
-// markers, and outbound links from both wikilinks and plain markdown links
-// whose destination carries no URL scheme.
+// scanDocFrom reads one document from r and returns everything Doc needs
+// about it: title (the first "# " heading the parse finds, else relPath's
+// filename without extension), frontmatter aliases, headings (with
+// goldmark's auto-ID slug), Obsidian ^block-id markers, and outbound links
+// from both wikilinks and plain markdown links whose destination carries
+// no URL scheme.
 //
-// scanDoc scans as a docs root; scanDocFor takes the root's kind.
-func scanDoc(absPath, relPath string) (docMeta, error) {
-	return scanDocFor(RootDocs, absPath, relPath)
-}
-
-// scanDocFor is scanDoc for a document in a root of the given kind. A vault
-// root parses with linkMarkdownVault, whose comment parsers and heading-id
-// transformer are the render's own, so %% comment text reaches none of the
-// title, headings, slugs, links or block ids. Both kinds take their title
-// from the parse (parsedTitle); only an over-cap document falls back to
-// firstH1's line scan.
-func scanDocFor(kind RootKind, absPath, relPath string) (docMeta, error) {
-	f, err := os.Open(absPath) //nolint:gosec // G304: absPath is a doc walkRoot/indexFileRoot already resolved under a canonicalized, operator-configured root
-	if err != nil {
-		return docMeta{}, err
-	}
-	defer func() { _ = f.Close() }()
+// It takes an open reader, never a path: the index walk opens each doc
+// through its held directory's os.Root and verifies it (walkRoot), so the
+// scan reads the file the walk approved (forgectl#743).
+//
+// A vault root parses with linkMarkdownVault, whose comment parsers and
+// heading-id transformer are the render's own, so %% comment text reaches
+// none of the title, headings, slugs, links or block ids. Both kinds take
+// their title from the parse (parsedTitle); only an over-cap document falls
+// back to firstH1's line scan.
+func scanDocFrom(kind RootKind, r io.Reader, relPath string) (docMeta, error) {
 	// Read one byte past the cap so an over-cap file is detected without
 	// reading the rest of it.
-	source, err := io.ReadAll(io.LimitReader(f, maxScanBytes+1))
+	source, err := io.ReadAll(io.LimitReader(r, maxScanBytes+1))
 	if err != nil {
 		return docMeta{}, err
 	}

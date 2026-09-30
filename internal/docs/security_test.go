@@ -34,6 +34,11 @@ package docs
 //       refused by Open and Resolve (openPinnedRoot); a FIFO never blocks
 //       openVerified (open_nonblock_unix_test.go)
 //   [x] Unhappy: root "/a/b" does not match a resolved path under sibling "/a/bc"
+//   [x] Unhappy: a doc maxHeldDirs directories deep resolves; one more level
+//       denies as ErrOutsideRoot, so one request holds at most maxHeldDirs
+//       directory fds (forgectl#743)
+//   [x] Unhappy: openRootDir refuses a root path that is a symlink, so the
+//       pin is the directory CanonicalizeRoot resolved (forgectl#743)
 //
 // AllowedExt (Classification: security gate — extension allowlist)
 //   [x] Happy: .md and .markdown (any case) are allowed
@@ -499,7 +504,7 @@ func TestOpenVerified_RefusesAFileSwappedInAfterTheWalk(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = r.Close() }()
-	end, err := resolveIn(r, root, "doc.md")
+	end, err := resolveIn(r, nil, root, "doc.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -647,5 +652,59 @@ func TestIndexOpen_RefusesARootReplacedAfterIndexing(t *testing.T) {
 	}
 	if _, err := idx.Resolve(label, "page.md"); err == nil {
 		t.Error("Resolve through a replaced root succeeded, want a denial")
+	}
+}
+
+// nestedDoc creates depth directories below root, each named "d", with a
+// doc.md in the deepest, and returns the doc's root-relative path.
+func nestedDoc(t *testing.T, root string, depth int) string {
+	t.Helper()
+	rel := ""
+	for range depth {
+		rel = filepath.Join(rel, "d")
+	}
+	if err := os.MkdirAll(filepath.Join(root, rel), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	rel = filepath.Join(rel, "doc.md")
+	if err := os.WriteFile(filepath.Join(root, rel), []byte("# deep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.ToSlash(rel)
+}
+
+func TestResolveInRoot_DepthCapBoundsHeldDirectories(t *testing.T) {
+	root := mustCanonicalRoot(t, t.TempDir())
+	atCap := nestedDoc(t, filepath.Join(root, "ok"), maxHeldDirs-1)
+	if _, err := ResolveInRoot(root, "ok/"+atCap); err != nil {
+		t.Errorf("a doc %d directories deep: err = %v, want it resolved", maxHeldDirs, err)
+	}
+	past := nestedDoc(t, filepath.Join(root, "deep"), maxHeldDirs)
+	if got, err := ResolveInRoot(root, "deep/"+past); !errors.Is(err, ErrOutsideRoot) {
+		t.Errorf("a doc %d directories deep resolved to %q, err = %v, want ErrOutsideRoot", maxHeldDirs+1, got, err)
+	}
+}
+
+func TestOpenRootDir_RefusesASymlinkAtTheRootPath(t *testing.T) {
+	base := mustCanonicalRoot(t, t.TempDir())
+	realDir := filepath.Join(base, "real")
+	if err := os.Mkdir(realDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	rt, info, err := openRootDir(realDir)
+	if err != nil {
+		t.Fatalf("openRootDir on a plain directory: %v", err)
+	}
+	_ = rt.Close()
+	if !info.IsDir() {
+		t.Errorf("pinned info is not a directory: %v", info.Mode())
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Skipf("symlink not supported in this environment: %v", err)
+	}
+	if rt, _, err := openRootDir(link); err == nil {
+		_ = rt.Close()
+		t.Error("openRootDir pinned a symlink, want a refusal")
 	}
 }

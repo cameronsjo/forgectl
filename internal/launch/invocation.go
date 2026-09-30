@@ -206,9 +206,12 @@ func selectPosture(p Profile, args []string) (Posture, []string, error) {
 			return PostureAgentsPassthrough, args, nil
 		}
 		return PostureClaudeAgents, AgentsArgs(p, args), nil
-	// Order matters. A subcommand in the first slot can never be a flag's
-	// value, so it goes first. Print mode goes before help/version, so no
-	// help token can take a print run out of its permission mode.
+	// A subcommand in the first slot can never be a flag's value, so it goes
+	// first. Print mode goes before help/version as defence in depth. Help and
+	// version only count at args[0], so a later help token cannot reach the
+	// passthrough on its own. The order still means that if that check ever
+	// widens to scan argv, `-p x --help` keeps its permission mode. A run that
+	// selects both, such as `-v -p hi`, gets the print posture.
 	case IsClaudeSubcommandCall(args):
 		return PostureClaudePassthrough, args, nil
 	case IsClaudePrintMode(args):

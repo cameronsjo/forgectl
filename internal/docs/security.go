@@ -82,6 +82,14 @@ func withinRoot(root, candidate string) bool {
 // so it does not move with os.Root's unexported one.
 const maxSymlinkHops = 40
 
+// maxHeldDirs caps how many directories one resolution holds open at once
+// below its root, one os.Root (one fd) per level. A path nested deeper
+// denies as ErrOutsideRoot, and the index walk skips a directory past the
+// same depth (walkRoot), so every indexed doc stays servable. Without it a
+// request's fd cost grew with the tree's depth, bounded only by
+// maxSymlinkHops and the kernel's PATH_MAX (forgectl#743).
+const maxHeldDirs = 64
+
 // ResolveInRoot safely maps a request-supplied relative path onto a single
 // canonical root, per forgectl#93's traversal chain:
 //
@@ -120,7 +128,7 @@ func ResolveInRoot(root, rel string) (string, error) {
 		return "", ErrOutsideRoot
 	}
 	defer func() { _ = r.Close() }()
-	end, err := resolveIn(r, root, rel)
+	end, err := resolveIn(r, nil, root, rel)
 	if err != nil {
 		return "", err
 	}
@@ -156,6 +164,8 @@ func closeLevels(levels []walkLevel) {
 }
 
 // resolveIn is ResolveInRoot's walk over an already-open Root r for root.
+// rootInfo is r's own Stat when the caller already holds it
+// (openPinnedRoot), or nil to take it here.
 //
 // Every lookup is a single name in a directory the walk holds open: each
 // directory it descends into is opened as its own os.Root (openDirVerified)
@@ -164,13 +174,15 @@ func closeLevels(levels []walkLevel) {
 // symlink between the Lstat and the descent is refused rather than
 // followed (forgectl#611 review). Only the walk follows symlinks, and only
 // while they stay inside the root.
-func resolveIn(r *os.Root, root, rel string) (*walkEnd, error) {
+func resolveIn(r *os.Root, rootInfo fs.FileInfo, root, rel string) (*walkEnd, error) {
 	wantDir := strings.HasSuffix(rel, "/") || strings.HasSuffix(rel, string(filepath.Separator))
 	pending := splitPath(filepath.Clean(string(filepath.Separator) + rel))
 
-	rootInfo, err := r.Stat(".")
-	if err != nil {
-		return nil, ErrOutsideRoot
+	if rootInfo == nil {
+		var err error
+		if rootInfo, err = r.Stat("."); err != nil {
+			return nil, ErrOutsideRoot
+		}
 	}
 	stack := []walkLevel{{r: r, info: rootInfo}}
 	fail := func(err error) (*walkEnd, error) {
@@ -217,6 +229,9 @@ func resolveIn(r *os.Root, root, rel string) (*walkEnd, error) {
 			if !fi.IsDir() {
 				fileBase, fileInfo = c, fi
 				continue
+			}
+			if len(stack) > maxHeldDirs {
+				return fail(ErrOutsideRoot)
 			}
 			sub, err := openDirVerified(cur.r, c, fi)
 			if err != nil {
