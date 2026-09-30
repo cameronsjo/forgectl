@@ -345,12 +345,19 @@ func TestJSONStderr_VerdictEmitted_SilentExit(t *testing.T) {
 			leaf := scratchUsageStore(t)
 			pinStatsClock(t)
 			seedUsageRow(t, "2026-08-13T10:00:00Z", "claude", "opus", "new", "default")
-			data := filepath.Join(leaf, "launch-usage.jsonl")
-			existing, err := os.ReadFile(filepath.Clean(data))
+			store, err := os.OpenRoot(leaf)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(data, append(existing, []byte("{not json}\n")...), 0o600); err != nil {
+			defer func() { _ = store.Close() }()
+			f, err := store.OpenFile("launch-usage.jsonl", os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.WriteString("{not json}\n"); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Close(); err != nil {
 				t.Fatal(err)
 			}
 			return newLaunchStatsCmd(), []string{"stats", "--json"}
