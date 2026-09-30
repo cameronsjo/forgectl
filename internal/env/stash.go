@@ -35,8 +35,9 @@
 // log.showSignature, replace refs) and scrubs the variables that would point
 // git at another repository; internal/gitenv's package doc is the whole
 // account, measurements included. With a lazy fetch refused, the read fails
-// and the scan refuses. None of the three commands runs a hook, reads the
-// index, or opens a pager (stdout is a pipe).
+// and the scan refuses. None of the commands it runs (rev-parse, stash list,
+// ls-tree, cat-file) runs a hook, reads the index, or opens a pager (stdout
+// is a pipe).
 //
 // Pathspecs are literal, so a directory whose name holds a glob character is
 // matched as itself.
