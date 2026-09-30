@@ -64,12 +64,19 @@ func TestAttach_Success(t *testing.T) {
 	if !ok {
 		t.Fatal("no select-window call")
 	}
-	want := []string{"select-window", "-t", "@5"}
+	// forgectl#805: the select is generation-guarded on the captured Run path,
+	// so a server replaced after the resolve answers with the mismatch marker
+	// rather than selecting its own @5. Mutation that turns it red: send
+	// SelectWindow's bare select-window through RunInteractive again.
+	want := []string{
+		"if-shell", "-F", "-t", "@5", "#{==:#{pid}/#{start_time},123/456}",
+		"select-window -t @5", `display-message -p "forgectl-generation-mismatch #{pid}/#{start_time}"`,
+	}
 	if !equalArgs(call.Args, want) {
 		t.Errorf("tmux args = %v, want %v", call.Args, want)
 	}
-	if !call.Interactive {
-		t.Error("Attach should dispatch through the interactive path")
+	if call.Interactive {
+		t.Error("the guarded select must run on the captured path, where its answer can be read")
 	}
 }
 

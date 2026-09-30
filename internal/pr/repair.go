@@ -337,11 +337,9 @@ func (c *Client) repairUndecodableLocked(ctx context.Context, opts RepairOpts, m
 	}
 	if refKnown {
 		item.Ref = ref.String()
-		live, tmuxOK := c.WindowLive(ctx, ref)
-		if !tmuxOK {
-			return item, fmt.Errorf("refusing to set %s aside: the tmux window list could not be read, "+
-				"and an unreadable list is not an absent window — check `tmux list-windows -a`, then retry",
-				member.displayPath)
+		live, err := c.windowLiveErr(ctx, ref)
+		if err != nil {
+			return item, fmt.Errorf("refusing to set %s aside: %s", member.displayPath, windowListUnreadable(err))
 		}
 		item.WindowLive = &live
 		if live {
@@ -639,11 +637,10 @@ func (c *Client) convertLegacyRecordLocked(path string, bc Breadcrumb, to Phase,
 // record is gone, the log line is the only pointer left to the clean room.
 func (c *Client) repairRollbackLocked(ctx context.Context, opts RepairOpts, member breadcrumbMember, ref Ref, item RepairItem, avail workspaceAvailability) (RepairItem, error) {
 	bc := member.breadcrumb
-	live, ok := c.WindowLive(ctx, ref)
-	if !ok {
+	live, err := c.windowLiveErr(ctx, ref)
+	if err != nil {
 		item.Outcome = repairOutcomeRefused
-		return item, fmt.Errorf("refusing to roll back %s: the tmux window list could not be read, "+
-			"and an unreadable list is not an absent window — check `tmux list-windows -a`, then retry", ref.String())
+		return item, fmt.Errorf("refusing to roll back %s: %s", ref.String(), windowListUnreadable(err))
 	}
 	item.WindowLive = &live
 	if live {
@@ -754,11 +751,10 @@ func confirmRemoval(prompt string, th theme.Theme) (bool, error) {
 // subject is already gone. Like rollback, every refusal precedes the intent row.
 func (c *Client) repairForgetLocked(ctx context.Context, opts RepairOpts, member breadcrumbMember, ref Ref, item RepairItem, avail workspaceAvailability) (RepairItem, error) {
 	bc := member.breadcrumb
-	live, ok := c.WindowLive(ctx, ref)
-	if !ok {
+	live, err := c.windowLiveErr(ctx, ref)
+	if err != nil {
 		item.Outcome = repairOutcomeRefused
-		return item, fmt.Errorf("refusing to forget %s: the tmux window list could not be read, "+
-			"and an unreadable list is not an absent window — check `tmux list-windows -a`, then retry", ref.String())
+		return item, fmt.Errorf("refusing to forget %s: %s", ref.String(), windowListUnreadable(err))
 	}
 	item.WindowLive = &live
 	if live {
@@ -867,4 +863,20 @@ func baseName(path string) string {
 		}
 	}
 	return path
+}
+
+// windowListUnreadable is the refusal reason repair gives when the strict
+// window read failed. An exited server's leftover socket
+// (tmux.ErrServerExited) gets its own remedy (forgectl#805): the generic
+// "check tmux list-windows" only prints "no server running", which is no next
+// step at all. It stays a refusal either way — a refused connect proves no
+// server listens now, not that a crashed server's panes died with it (#746,
+// #765), which is why the remedy is conditioned on the agent being gone.
+func windowListUnreadable(err error) string {
+	if errors.Is(err, tmux.ErrServerExited) {
+		return "the tmux server has exited and left its socket behind, and a refused connect is not an absent window — " +
+			"once no review agent is still running, start any tmux session to clear the socket, then retry"
+	}
+	return "the tmux window list could not be read, and an unreadable list is not an absent window — " +
+		"check `tmux list-windows -a`, then retry"
 }
