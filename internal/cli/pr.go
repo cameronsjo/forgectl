@@ -576,10 +576,15 @@ func windowKillTimeoutNote(target string, parked bool) string {
 		"Once tmux responds, run 'forgectl pr teardown' again, or see 'forgectl pr repair'", where, state)
 }
 
-// noteWindowKillTimeout prints windowKillTimeoutNote when err is that failure.
-func noteWindowKillTimeout(cmd *cobra.Command, err error, target string) {
-	if errors.Is(err, pr.ErrWindowKillTimedOut) {
-		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), windowKillTimeoutNote(target, !errors.Is(err, pr.ErrRecordNotParked)))
+// noteTeardownRefusal prints, for a single `pr teardown`, the same
+// per-session note `pr cleanup` prints when a teardown failed closed — a
+// timeout, an unreadable window state, or a duplicate window name — so the
+// operator learns whether the record is now needs-repair. Other failures get
+// no note; the returned error already says everything.
+func noteTeardownRefusal(cmd *cobra.Command, err error, target string) {
+	if errors.Is(err, pr.ErrWindowKillTimedOut) || errors.Is(err, pr.ErrWindowStateUnreadable) ||
+		errors.Is(err, tmux.ErrAmbiguousWindow) {
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), cleanupFailureLine(pr.CleanupFailure{Path: target, Err: err}))
 	}
 }
 
@@ -594,7 +599,7 @@ func newPrTeardownCmd(client *pr.Client) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := client.Teardown(cmd.Context(), args[0]); err != nil {
-				noteWindowKillTimeout(cmd, err, args[0])
+				noteTeardownRefusal(cmd, err, args[0])
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "torn down %s\n", args[0])

@@ -654,8 +654,10 @@ const windowAmbiguousReason = "more than one review window carries this review's
 // to kill: the pinned server answered cleanly and the review session or the
 // window was not in its listing (windowConfirmedAbsent). That is the ordinary
 // case after the reviewer exits; it must never widen into killing whatever
-// tmux would have matched. Kill failures other than a timeout stay
-// best-effort, as before.
+// tmux would have matched. The kill step is held to the same standard: its
+// revalidation re-reads the window list, and a failure there or in
+// kill-window itself is gone only when it is a confirmed absence or a server
+// restart (windowGoneAtKill); every other kill failure is unsettled too.
 //
 // Three outcomes are NOT "nothing to kill", and the caller fails closed on
 // each (forgectl#702):
@@ -667,7 +669,8 @@ const windowAmbiguousReason = "more than one review window carries this review's
 //     resolution refused to pick one and at least one of them is live.
 //   - unsettled wrapping ErrWindowStateUnreadable: tmux answered, but not with
 //     a listing that settles the question — an unreadable server, a pin
-//     mismatch, a parse failure. An unreadable server is not an absent window.
+//     mismatch, a parse failure, a reparented window, or a kill-window that
+//     failed. An unreadable server is not an absent window.
 //
 // Window names depend only on owner/repo/number, so discarding the record in
 // any of these cases would leave an orphan that a later same-ref review,
@@ -721,9 +724,25 @@ func (c *Client) killReviewWindow(ctx context.Context, ref Ref, budget *tmuxBudg
 				"window_id", resolved.ID, "budget", lockedTmuxBudget)
 			return true, unknownWindow(ref, resolved.ID), nil
 		}
-		slog.Debug("Review window could not be killed.", "window_id", resolved.ID, "error", err)
+		if windowGoneAtKill(err) {
+			slog.Debug("Review window was already gone at kill time.", "window_id", resolved.ID, "error", err)
+			return false, "", nil
+		}
+		slog.Warn("Could not kill the review window; refusing to treat it as gone.",
+			"window_id", resolved.ID, "error", err)
+		return false, unknownWindow(ref, resolved.ID), fmt.Errorf("%w: %w", ErrWindowStateUnreadable, err)
 	}
 	return false, "", nil
+}
+
+// windowGoneAtKill reports whether a KillWindow failure means the resolved
+// window no longer exists: a clean listing without it (windowConfirmedAbsent),
+// or a server restarted since resolution, which took every window of the old
+// generation with it. Anything else — an unreadable list, a pin mismatch, a
+// reparented window, kill-window itself failing — leaves the window possibly
+// live (forgectl#702).
+func windowGoneAtKill(err error) bool {
+	return windowConfirmedAbsent(err) || errors.Is(err, tmux.ErrGenerationChanged)
 }
 
 // windowConfirmedAbsent reports whether a resolve failure is a clean answer

@@ -347,7 +347,7 @@ func TestTeardown_TimedOutKillNamesTheWindow(t *testing.T) {
 }
 
 // TestAttach_DuplicateReviewWindowNamesSayWhatToDo: attach refuses a review
-// name two windows carry, and says which step settles it.
+// name more than one window carries, and says which step settles it.
 func TestAttach_DuplicateReviewWindowNamesSayWhatToDo(t *testing.T) {
 	ref := Ref{Owner: "o", Repo: "r", Number: 33}
 	name := mustWindowName(t, ref)
@@ -356,7 +356,7 @@ func TestAttach_DuplicateReviewWindowNamesSayWhatToDo(t *testing.T) {
 	path, _ := seedSession(t, c, ref, time.Now().UTC())
 
 	err := c.Attach(context.Background(), path)
-	if !errors.Is(err, tmux.ErrAmbiguousWindow) || !strings.Contains(err.Error(), "two windows carry this review's name") ||
+	if !errors.Is(err, tmux.ErrAmbiguousWindow) || !strings.Contains(err.Error(), "more than one window carries this review's name") ||
 		!strings.Contains(err.Error(), "forgectl pr repair") {
 		t.Fatalf("Attach err = %v, want the duplicate-name refusal pointing at pr repair", err)
 	}

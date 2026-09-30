@@ -145,7 +145,11 @@ func (c *Client) transitionOnce(path string, from, to Phase, mut func(*Breadcrum
 		return err
 	}
 	if bc.Version != breadcrumbVersion {
-		slog.Error("Refusing a phase transition on a record with no version.",
+		// Debug, not Error: the refusal is returned, and the caller decides
+		// whether it is a failure — a teardown park converts the legacy record
+		// instead (forgectl#696), and logging an ERROR first would misreport a
+		// park that succeeded.
+		slog.Debug("Refusing a phase transition on a record with no version.",
 			"path", path, "to", string(to))
 		return fmt.Errorf("%s: %w", termsafe.QuotePath(path), errLegacyRecordNoTransition)
 	}

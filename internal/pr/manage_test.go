@@ -159,6 +159,24 @@ func TestAttach_HungTmuxIsBounded(t *testing.T) {
 	}
 }
 
+// TestAttach_UnreadableWindowListIsNotAMissingWindow: an unreadable window
+// list must not be worded as a missing window (the "predate a forgectl
+// upgrade" hint), since the window may well be there.
+func TestAttach_UnreadableWindowListIsNotAMissingWindow(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "r", Number: 7}
+	fake := windowReadServer("", errors.New("tmux: permission denied"))
+	c := testClient(t, fake)
+	path, _ := seedSession(t, c, ref, time.Now().UTC())
+
+	err := c.Attach(context.Background(), path)
+	if err == nil || !strings.Contains(err.Error(), "could not say whether it exists") {
+		t.Fatalf("Attach err = %v, want the unreadable wording", err)
+	}
+	if strings.Contains(err.Error(), "predate a forgectl upgrade") {
+		t.Errorf("Attach err = %q reads as a missing window", err)
+	}
+}
+
 func TestOpen_TargetPins(t *testing.T) {
 	ref := Ref{Owner: "o", Repo: "r", Number: 7}
 	fake := reviewServer(mustWindowName(t, ref))

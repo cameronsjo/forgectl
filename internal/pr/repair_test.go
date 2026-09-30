@@ -1193,3 +1193,24 @@ func TestRepairAdoptWindow_TimeoutSaysTmuxDidNotAnswer(t *testing.T) {
 		t.Errorf("a refusal mutated the record: phase = %q", got)
 	}
 }
+
+// TestRepairAdoptWindow_UnreadableListIsNotAMissingWindow: an adopt whose
+// window lookup fails without a clean answer must not claim the window is
+// missing — an unreadable list is not an absent window.
+func TestRepairAdoptWindow_UnreadableListIsNotAMissingWindow(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "r", Number: 1}
+	fake := repairRunner(errors.New("tmux: permission denied"))
+	c := repairClient(t, fake)
+	path := seedPhaseRecord(t, c, ref, PhaseLaunching, fakeWorkspace(t))
+
+	_, err := c.Repair(context.Background(), RepairOpts{Record: path, Apply: true, AdoptWindow: true})
+	if err == nil {
+		t.Fatal("expected a refusal: the window list could not be read")
+	}
+	if !strings.Contains(err.Error(), "could not say whether") || strings.Contains(err.Error(), "no window named") {
+		t.Errorf("refusal = %q, want the unreadable wording, not the missing-window one", err)
+	}
+	if got := readRecord(t, path).Phase; got != PhaseLaunching {
+		t.Errorf("a refusal mutated the record: phase = %q", got)
+	}
+}

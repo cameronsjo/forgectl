@@ -530,6 +530,12 @@ func (c *Client) repairAdoptLocked(ctx context.Context, member breadcrumbMember,
 		return item, fmt.Errorf("refusing to adopt %s: %w — close the window that is not this review, then retry",
 			ref.String(), err)
 	}
+	if err != nil && !windowConfirmedAbsent(err) {
+		item.Outcome = repairOutcomeRefused
+		return item, fmt.Errorf("refusing to adopt %s: tmux could not say whether its review window exists "+
+			"(an unreadable window list is not an absent window) — check `tmux list-windows -a`, then retry: %w",
+			ref.String(), err)
+	}
 	if err != nil {
 		item.Outcome = repairOutcomeRefused
 		name, nameErr := ReviewWindowName(ref)

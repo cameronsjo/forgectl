@@ -162,3 +162,67 @@ func TestCleanupFailureLine_TimeoutNotParked(t *testing.T) {
 		t.Errorf("line = %q, want the not-parked wording and no parked claim", line)
 	}
 }
+
+// TestPrTeardown_NotesEveryFailClosedRefusalOnStderr: a single `pr teardown`
+// that fails closed because the window state is unreadable, or because more
+// than one window carries the review's name, says on stderr that nothing was
+// removed and that the record is now needs-repair — as `pr cleanup` does —
+// not only for a timeout.
+func TestPrTeardown_NotesEveryFailClosedRefusalOnStderr(t *testing.T) {
+	name, err := pr.ReviewWindowName(pr.Ref{Owner: "o", Repo: "r", Number: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionRow := strings.Join([]string{"123", "456", "$1", "forgectl", "1", "0", "1700000000", "/w"}, "\x1f")
+	winRow := func(id string) string {
+		return strings.Join([]string{"123", "456", id, "$1", "forgectl", "0", name, "0", "1"}, "\x1f")
+	}
+	for _, tc := range []struct {
+		label    string
+		windows  string
+		listErr  error
+		wantNote string
+	}{
+		{"unreadable", "", errors.New("tmux: permission denied"), "not treated as gone"},
+		{"ambiguous", winRow("@5") + "\n" + winRow("@6"), nil, "more than one tmux window"},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			dir := t.TempDir()
+			ws, err := os.MkdirTemp("", "forgectl-workflow-test-*")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(ws) })
+			path := seedRepairRecord(t, dir, "o/r#1", "prepared", ws)
+			fake := &exec.FakeRunner{RunFunc: func(bin string, args []string) (string, error) {
+				if bin != "tmux" || len(args) == 0 {
+					return "", nil
+				}
+				switch args[0] {
+				case "list-sessions":
+					return sessionRow, nil
+				case "list-windows":
+					return tc.windows, tc.listErr
+				}
+				return "", nil
+			}}
+			client := pr.New(fake, pr.WithSessionsDir(dir), pr.WithTmuxSession("forgectl"),
+				pr.WithTTYCheck(func() bool { return false }))
+			cmd := newPrTeardownCmd(client)
+			var out, errOut bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&errOut)
+			cmd.SetArgs([]string{path})
+			if err := cmd.ExecuteContext(context.Background()); err == nil {
+				t.Fatal("teardown should have failed closed")
+			}
+			note := errOut.String()
+			if !strings.Contains(note, tc.wantNote) || !strings.Contains(note, "the record is parked as needs-repair") {
+				t.Errorf("stderr = %q, want %q and the parked note", note, tc.wantNote)
+			}
+			if _, serr := os.Stat(ws); serr != nil {
+				t.Errorf("workspace was removed: %v", serr)
+			}
+		})
+	}
+}
