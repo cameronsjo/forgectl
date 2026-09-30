@@ -321,28 +321,28 @@ func TestLaunchPickedIsolatedTmux_FirstServer(t *testing.T) {
 }
 
 // TestLaunchPickedIsolatedTmux_RefusesAtAdmission is the negative-control pair.
-// Neither a stale default socket nor an explicit $TMUX may be read as a clean
-// absent default: both must fail admission's real list-windows, keep the
+// Neither an unprovable socket file nor an explicit $TMUX may be read as a
+// clean absent default: both must fail admission's real list-windows, keep the
 // existing unreadable-count message, and leave nothing behind.
+//
+// The first row used to be a bound-but-unserved socket. Since forgectl#786
+// that one is PROVEN dead (a socket, and a connect to it is refused), which is
+// the state tmux 3.4 leaves after every exit, so it now launches — see
+// TestLaunchPickedIsolatedTmux_ExitedServerSocketIsNoServer. A regular file at
+// the socket path proves nothing (connect() refuses it the same way, but it
+// is not a socket tmux left), so it stays the refusal.
 func TestLaunchPickedIsolatedTmux_RefusesAtAdmission(t *testing.T) {
 	tests := []struct {
 		name  string
 		setup func(t *testing.T, socketPath string)
 	}{
 		{
-			name: "stale default socket",
+			name: "non-socket file at the default socket path",
 			setup: func(t *testing.T, socketPath string) {
 				if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
 					t.Fatal(err)
 				}
-				// A real bound-but-unserved socket: present on disk, nothing
-				// listening. ensureSession must never be allowed to replace it.
-				listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
-				if err != nil {
-					t.Fatalf("bind stale socket: %v", err)
-				}
-				listener.SetUnlinkOnClose(false)
-				if err := listener.Close(); err != nil {
+				if err := os.WriteFile(socketPath, nil, 0o600); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -379,6 +379,40 @@ func TestLaunchPickedIsolatedTmux_RefusesAtAdmission(t *testing.T) {
 				t.Errorf("sessions = %+v, want none after a refusal", sessions)
 			}
 		})
+	}
+}
+
+// TestLaunchPickedIsolatedTmux_ExitedServerSocketIsNoServer is forgectl#786 on
+// the launch path. After the last review window closes, tmux 3.4's server
+// exits and leaves its socket: present on disk, nothing listening. Admission
+// must count that as zero live reviews, not refuse. The capability probe and
+// ensureSession must read it as no server, and tmux's own client then
+// replaces the dead socket with a live server.
+//
+// Mutation that turns it red: have pr's countableWindows return ListWindows'
+// error unchanged (admission refuses with the unreadable-count message).
+func TestLaunchPickedIsolatedTmux_ExitedServerSocketIsNoServer(t *testing.T) {
+	router, client, socketPath := isolatedPickBench(t)
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatalf("bind the leftover socket: %v", err)
+	}
+	listener.SetUnlinkOnClose(false)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pickOne(t, client, router, true); err != nil {
+		t.Fatalf("launchPicked over an exited server's socket: %v", err)
+	}
+	if sessions := mustListSessions(t, client); len(sessions) != 1 {
+		t.Fatalf("sessions = %+v, want the one launched review", sessions)
+	}
+	if _, err := router.real.Run(context.Background(), "tmux", "list-sessions"); err != nil {
+		t.Fatalf("no live server answers on the replaced socket: %v", err)
 	}
 }
 

@@ -20,7 +20,7 @@ func newTmuxWindowsCmd(client *tmux.Client) *cobra.Command {
 		Short: "List windows across all sessions",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			windows, err := client.ListWindows(cmd.Context())
+			windows, err := client.DisplayWindows(cmd.Context())
 			if err != nil {
 				return err
 			}

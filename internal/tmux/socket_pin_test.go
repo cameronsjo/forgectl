@@ -220,7 +220,11 @@ func TestPinnedKillOthersIsPinned(t *testing.T) {
 	}
 	var killAll []string
 	for _, call := range run.Calls {
-		if slices.Contains(call.Args, "-a") && slices.Contains(call.Args, "kill-session") {
+		// The kill is generation-guarded (forgectl#785), so it rides inside
+		// an if-shell command string rather than as bare argv elements.
+		if tmuxVerb(call.Args) == "kill-session" && slices.ContainsFunc(call.Args, func(a string) bool {
+			return strings.HasPrefix(a, "kill-session -a ")
+		}) {
 			killAll = call.Args
 		}
 	}

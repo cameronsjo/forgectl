@@ -18,6 +18,9 @@ var tmuxTextSources = map[string]tmuxTextKind{
 	"ListSessions":        {collection: &tmuxTextKind{fields: map[string]bool{"Name": true, "Path": true}}},
 	"ListWindows":         {collection: &tmuxTextKind{fields: map[string]bool{"Session": true, "Name": true}}},
 	"ListPanes":           {collection: &tmuxTextKind{fields: map[string]bool{"Title": true, "Command": true}}},
+	"DisplaySessions":     {collection: &tmuxTextKind{fields: map[string]bool{"Name": true, "Path": true}}},
+	"DisplayWindows":      {collection: &tmuxTextKind{fields: map[string]bool{"Session": true, "Name": true}}},
+	"DisplayPanes":        {collection: &tmuxTextKind{fields: map[string]bool{"Title": true, "Command": true}}},
 	"ResolveSessionExact": {fields: map[string]bool{"Name": true}},
 	"SeshList":            {collection: &tmuxTextKind{scalar: true}},
 	// Tree applies the text boundary inside internal/tmux while composing the
