@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,7 +49,10 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 	if err := RejectOptionLike("ref", ref); err != nil {
 		return "", err
 	}
-	slog.Debug("Preparing to create workspace sandbox.", "repo", repo, "ref", ref, "alwaysClone", alwaysClone)
+	// repo can be an https URL carrying a token; every log line names it
+	// through logRepo (#711).
+	shownRepo := logRepo(repo)
+	slog.Debug("Preparing to create workspace sandbox.", "repo", shownRepo, "ref", ref, "alwaysClone", alwaysClone)
 
 	dir, err := os.MkdirTemp("", WorkspacePrefix+"*")
 	if err != nil {
@@ -62,15 +66,16 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 		if useRef == "" {
 			useRef = "HEAD"
 		}
-		slog.Debug("Sandboxing local repo via git worktree.", "repo", repo, "ref", useRef)
+		slog.Debug("Sandboxing local repo via git worktree.", "repo", shownRepo, "ref", useRef)
 		// -- ends option parsing so a crafted dir/ref can't inject a flag.
 		if _, err := run.Run(ctx, "git", "-C", repo, "worktree", "add", "--", dir, useRef); err != nil {
-			slog.Error("Failed to create git worktree.", "repo", repo, "sandbox", dir, "ref", useRef, "error", err)
+			slog.Error("Failed to create git worktree.", "repo", shownRepo, "sandbox", dir, "ref", useRef, "exit_code", exitCode(err))
 			discardSandbox(ctx, run, dir)
-			return "", fmt.Errorf("git worktree add: %w", err)
+			// Categorical (#711), as the clone leg: git's stderr is not echoed.
+			return "", termsafe.Categorical("git worktree add failed", err)
 		}
 	} else {
-		slog.Debug("Sandboxing repo via git clone.", "repo", repo, "ref", ref)
+		slog.Debug("Sandboxing repo via git clone.", "repo", shownRepo, "ref", ref)
 		// Clone the default branch when no ref was given; git clone --branch
 		// wants a real branch/tag name, so "HEAD" can't stand in for it. The --
 		// separator ends option parsing before the repo/dir positionals.
@@ -79,7 +84,7 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 			args = []string{"clone", "--branch", ref, "--", repo, dir}
 		}
 		if _, err := run.Run(ctx, "git", args...); err != nil {
-			slog.Error("Failed to clone repo.", "repo", repo, "sandbox", dir, "error", err)
+			slog.Error("Failed to clone repo.", "repo", shownRepo, "sandbox", dir, "exit_code", exitCode(err))
 			discardSandbox(ctx, run, dir)
 			// Categorical (#658): the CommandError renders git's argv, whose
 			// repo URL can carry an https token, and git's stderr, which relays
@@ -88,8 +93,67 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 		}
 	}
 
-	slog.Debug("Successfully created workspace sandbox.", "repo", repo, "workspace", dir)
+	slog.Debug("Successfully created workspace sandbox.", "repo", shownRepo, "workspace", dir)
 	return dir, nil
+}
+
+// unloggableRepo stands in for a URL-shaped repo that does not parse: its
+// userinfo cannot be located, so none of it is logged.
+const unloggableRepo = "[unparseable repo URL withheld]"
+
+// logRepo renders repo for a log line without any credential it carries
+// (#711). A clone URL can embed a token (https://x-access-token:TOKEN@host/…,
+// or a bare-username TOKEN@host), and the log file keeps it. exec's argv
+// masking covers only KEY=VALUE elements a caller registers, not these
+// fields.
+//
+//   - A URL (a hierarchical "scheme://host" parse) has its WHOLE userinfo
+//     replaced, username included: url.URL.Redacted keeps the username, which
+//     is where a bare-username token sits. One that does not parse is
+//     withheld entirely.
+//   - A local path (the forms isLocalRepo accepts by prefix) is logged as is.
+//   - Anything else is treated as scp-like ([user@]host:path): everything up
+//     to the last '@' before the first '/' is replaced. That over-redacts an
+//     '@' in a relative path's first component, which is the safe direction.
+func logRepo(repo string) string {
+	if strings.Contains(repo, "://") {
+		u, err := url.Parse(repo)
+		switch {
+		case err != nil:
+			return unloggableRepo
+		case u.User != nil:
+			u.User = nil
+			return u.Scheme + "://" + exec.Redacted + "@" + strings.TrimPrefix(u.String(), u.Scheme+"://")
+		case u.Host != "":
+			return repo
+		}
+		// An opaque parse (scheme:rest with "://" only later, as in
+		// user:TOKEN@host:/p://x) has no userinfo field to clear; the
+		// scp-like rule below handles it.
+	}
+	if strings.HasPrefix(repo, "/") || strings.HasPrefix(repo, "./") || strings.HasPrefix(repo, "../") || repo == "." {
+		return repo
+	}
+	head := repo
+	if i := strings.IndexByte(repo, '/'); i >= 0 {
+		head = repo[:i]
+	}
+	if at := strings.LastIndexByte(head, '@'); at >= 0 {
+		return exec.Redacted + "@" + repo[at+1:]
+	}
+	return repo
+}
+
+// exitCode is what a checkout failure's log line keeps of err: the exit code
+// of a *exec.CommandError, else -1. err's own text is never logged here,
+// because a CommandError renders its whole argv, and the argv carries repo
+// with any token in it (#711).
+func exitCode(err error) int {
+	var cmdErr *exec.CommandError
+	if errors.As(err, &cmdErr) {
+		return cmdErr.ExitCode
+	}
+	return -1
 }
 
 // discardSandbox removes a workspace Sandbox created but could not populate,

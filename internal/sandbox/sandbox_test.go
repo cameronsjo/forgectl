@@ -6,6 +6,8 @@
 //     clone-without-ref omits --branch.
 //   - RejectOptionLike rejects a leading-'-' repo and ref before any Runner call.
 //   - A failed clone or worktree add removes its temp dir (#707).
+//   - No log line carries a repo credential, and the worktree leg's error is
+//     categorical (#711).
 //   - Teardown is idempotent: an empty workspace and an already-removed dir
 //     are both no-ops, and neither issues a Runner call.
 //   - Teardown refuses anything whose RESOLVED base name lacks
@@ -29,6 +31,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -613,5 +616,94 @@ func TestSandbox_FailedCheckout_RemovesItsTempDir(t *testing.T) {
 				t.Errorf("failed checkout left %s behind", e.Name())
 			}
 		})
+	}
+}
+
+// TestLogRepo is #711's redactor: no form of repo that can carry a
+// credential reaches a log line with it.
+func TestLogRepo(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"https://x-access-token:SECRETTOK@github.com/o/r.git", "https://[redacted]@github.com/o/r.git"},
+		{"https://SECRETTOK@github.com/o/r.git", "https://[redacted]@github.com/o/r.git"},
+		{"ssh://SECRETTOK@ghe.example.test:2222/o/r.git", "ssh://[redacted]@ghe.example.test:2222/o/r.git"},
+		{"https://x:SECRETTOK@host:notaport/o/r", unloggableRepo},
+		{"https://x:SECRET/TOK@host/o/r", unloggableRepo},
+		{"https://github.com/o/r.git", "https://github.com/o/r.git"},
+		{"user:SECRETTOK@github.com:/o/r://x", "[redacted]@github.com:/o/r://x"},
+		{"git@github.com:o/r.git", "[redacted]@github.com:o/r.git"},
+		{"SECRETTOK:pw@github.com:o/r.git", "[redacted]@github.com:o/r.git"},
+		{"a@SECRETTOK@github.com:o/r@x.git", "[redacted]@github.com:o/r@x.git"},
+		{"/home/u/src/r@2", "/home/u/src/r@2"},
+		{"./r", "./r"},
+		{"owner/repo", "owner/repo"},
+	} {
+		if got := logRepo(tc.in); got != tc.want {
+			t.Errorf("logRepo(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// captureLog routes the default slog logger into a buffer at Debug for the
+// test's duration.
+func captureLog(t *testing.T) *strings.Builder {
+	t.Helper()
+	var buf strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// TestSandbox_LogLinesCarryNoRepoCredential is #711: every sandbox log line,
+// success and failure, names the repo without its token, and a failure line
+// does not render the CommandError (whose text is the argv, token included).
+func TestSandbox_LogLinesCarryNoRepoCredential(t *testing.T) {
+	const repo = "https://x-access-token:SECRETTOK@git.example.test/o/r.git"
+	for _, tc := range []struct {
+		name string
+		fail bool
+	}{{"clone succeeds", false}, {"clone fails", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TMPDIR", t.TempDir())
+			buf := captureLog(t)
+			fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				if tc.fail {
+					return "", &exec.CommandError{Name: name, Args: args, ExitCode: 128, Err: errors.New("exit status 128")}
+				}
+				return "", nil
+			}}
+			dir, _ := Sandbox(context.Background(), fake, repo, "main", true)
+			if dir != "" {
+				t.Cleanup(func() { _ = os.RemoveAll(dir) })
+			}
+			out := buf.String()
+			if strings.Contains(out, "SECRETTOK") {
+				t.Fatalf("log carries the repo credential:\n%s", out)
+			}
+			if !strings.Contains(out, "[redacted]@git.example.test") {
+				t.Fatalf("log does not name the redacted repo (vacuity guard):\n%s", out)
+			}
+		})
+	}
+}
+
+// TestSandbox_WorktreeAddFailure_IsCategorical is #711 item 2: the worktree
+// leg reports categorically, as the clone leg does, keeping the
+// CommandError on the unwrap chain.
+func TestSandbox_WorktreeAddFailure_IsCategorical(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "", &exec.CommandError{Name: name, Args: args, Stderr: "fatal: STDERRMARKER\x1b[2J", ExitCode: 128, Err: errors.New("exit status 128")}
+	}}
+	_, err := Sandbox(context.Background(), fake, "/nonexistent/local/repo", "main", false)
+	if err == nil {
+		t.Fatal("want the worktree add failure")
+	}
+	if msg := err.Error(); msg != "git worktree add failed" {
+		t.Fatalf("error %q, want the categorical message", msg)
+	}
+	var cmdErr *exec.CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error %v lost the CommandError from its chain", err)
 	}
 }
