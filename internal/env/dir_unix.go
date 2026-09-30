@@ -400,32 +400,26 @@ func (d *dirPin) removeScratchDir(sub *dirPin, name string, own ...string) error
 	if err := sub.remove(ScratchIgnoreName); err != nil && !errors.Is(err, unix.ENOENT) {
 		return err
 	}
-	scratchIgnoreGone(func(n string) error { return createAt(sub.fd, n) })
-	err = unix.Unlinkat(d.fd, name, unix.AT_REMOVEDIR)
-	if errors.Is(err, unix.ENOTEMPTY) || errors.Is(err, unix.EEXIST) {
-		// Something arrived between the listing and the rmdir. Put the
-		// .gitignore back, exclusively, so it is not left unignored.
-		_ = restoreIgnore(func() (*os.File, error) {
-			ifd, oerr := openatCreate(sub.fd, ScratchIgnoreName, unix.O_EXCL|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
-			if oerr != nil {
-				return nil, oerr
-			}
-			return os.NewFile(uintptr(ifd), ScratchIgnoreName), nil
-		})
-		return errScratchNotEmpty
-	}
-	return err
+	scratchIgnoreGoneAt(sub)
+	return afterScratchRmdir(rmdirScratchAt(d, name), func() (*os.File, error) {
+		ifd, oerr := openatCreate(sub.fd, ScratchIgnoreName, unix.O_EXCL|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+		if oerr != nil {
+			return nil, oerr
+		}
+		return os.NewFile(uintptr(ifd), ScratchIgnoreName), nil
+	})
 }
 
-// createAt creates an empty file name in the directory dirfd names. It is
-// only what the scratchIgnoreGone test seam uses to plant a late entry.
-func createAt(dirfd int, name string) error {
-	fd, err := openatCreate(dirfd, name, unix.O_EXCL|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
-	if err != nil {
-		return err
-	}
-	return unix.Close(fd)
+// rmdirScratchAt removes the emptied scratch directory name inside d. It is a
+// variable only so a test can make the rmdir fail; see rmdirScratch.
+var rmdirScratchAt = func(d *dirPin, name string) error {
+	return unix.Unlinkat(d.fd, name, unix.AT_REMOVEDIR)
 }
+
+// scratchIgnoreGoneAt is the descriptor teardown's scratchIgnoreGone seam
+// (scratch.go): the .gitignore inside sub is unlinked and the directory is
+// about to be removed. A no-op in production.
+var scratchIgnoreGoneAt = func(sub *dirPin) {}
 
 // renameFrom moves from, inside the scratch directory sub pins, to to, inside
 // d. Both are descriptors on directories of the same parent filesystem, so
