@@ -1,0 +1,247 @@
+{
+  "id": "cli:agent:list",
+  "result": {
+    "agents": [
+      {
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "session-1"
+        },
+        "agent_status": "working",
+        "cwd": "/Users/example/Projects/repo-1",
+        "focused": false,
+        "foreground_cwd": "/Users/example/Projects/repo-1",
+        "pane_id": "w1:p1",
+        "revision": 5,
+        "state_change_seq": 5901,
+        "tab_id": "w1:t2",
+        "terminal_id": "term_1",
+        "terminal_title": "terminal_title-1",
+        "terminal_title_stripped": "terminal_title_stripped-1",
+        "workspace_id": "w1"
+      },
+      {
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "session-2"
+        },
+        "agent_status": "idle",
+        "cwd": "/Users/example/Projects/repo-4",
+        "focused": false,
+        "foreground_cwd": "/Users/example/Projects/repo-4",
+        "pane_id": "w1:p6",
+        "revision": 8,
+        "state_change_seq": 5461,
+        "tab_id": "w1:t4",
+        "terminal_id": "term_6",
+        "terminal_title": "terminal_title-6",
+        "terminal_title_stripped": "terminal_title_stripped-6",
+        "workspace_id": "w1"
+      },
+      {
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "session-3"
+        },
+        "agent_status": "idle",
+        "cwd": "/Users/example/Projects/repo-2",
+        "focused": true,
+        "foreground_cwd": "/Users/example/Projects/repo-2",
+        "pane_id": "w1:p8",
+        "revision": 20,
+        "state_change_seq": 5825,
+        "tab_id": "w1:t1",
+        "terminal_id": "term_8",
+        "terminal_title": "terminal_title-8",
+        "terminal_title_stripped": "terminal_title_stripped-8",
+        "workspace_id": "w1"
+      },
+      {
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "session-4"
+        },
+        "agent_status": "blocked",
+        "cwd": "/Users/example/Projects/repo-6",
+        "focused": false,
+        "foreground_cwd": "/Users/example/Projects/repo-6",
+        "pane_id": "w2:p1",
+        "revision": 7,
+        "state_change_seq": 5900,
+        "tab_id": "w2:t2",
+        "terminal_id": "term_9",
+        "terminal_title": "terminal_title-9",
+        "terminal_title_stripped": "terminal_title_stripped-9",
+        "tokens": {
+          "claude_account": "claude_account-1"
+        },
+        "workspace_id": "w2"
+      },
+      {
+        "agent": "pi",
+        "agent_session": {
+          "agent": "pi",
+          "kind": "path",
+          "source": "herdr:pi",
+          "value": "session-5"
+        },
+        "agent_status": "working",
+        "cwd": "/Users/example/Projects/repo-7",
+        "focused": false,
+        "foreground_cwd": "/Users/example/Projects/repo-7",
+        "pane_id": "w2:p3",
+        "revision": 428,
+        "screen_detection_skipped": true,
+        "state_change_seq": 5874,
+        "tab_id": "w2:t1",
+        "terminal_id": "term_11",
+        "terminal_title": "terminal_title-11",
+        "terminal_title_stripped": "terminal_title_stripped-11",
+        "workspace_id": "w2"
+      },
+      {
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "session-6"
+        },
+        "agent_status": "working",
+        "cwd": "/Users/example/Projects/repo-8",
+        "focused": false,
+        "foreground_cwd": "/Users/example/Projects/repo-8",
+        "pane_id": "w3:p1",
+        "revision": 10,
+        "state_change_seq": 5898,
+        "tab_id": "w3:t2",
+        "terminal_id": "term_13",
+        "terminal_title": "terminal_title-13",
+        "terminal_title_stripped": "terminal_title_stripped-13",
+        "workspace_id": "w3"
+      },
+      {
+        "agent": "pi",
+        "agent_session": {
+          "agent": "pi",
+          "kind": "path",
+          "source": "herdr:pi",
+          "value": "session-7"
+        },
+        "agent_status": "idle",
+        "cwd": "/Users/example/Projects/repo-8",
+        "focused": false,
+        "foreground_cwd": "/Users/example/Projects/repo-8",
+        "pane_id": "w3:p2",
+        "revision": 5,
+        "screen_detection_skipped": true,
+        "state_change_seq": 5892,
+        "tab_id": "w3:t2",
+        "terminal_id": "term_14",
+        "terminal_title": "terminal_title-14",
+        "terminal_title_stripped": "terminal_title_stripped-14",
+        "workspace_id": "w3"
+      },
+      {
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "session-8"
+        },
+        "agent_status": "idle",
+        "cwd": "/Users/example/Projects/repo-9",
+        "focused": false,
+        "foreground_cwd": "/Users/example/Projects/repo-9",
+        "pane_id": "w3:p3",
+        "revision": 15,
+        "state_change_seq": 5686,
+        "tab_id": "w3:t1",
+        "terminal_id": "term_15",
+        "terminal_title": "terminal_title-15",
+        "terminal_title_stripped": "terminal_title_stripped-15",
+        "tokens": {
+          "claude_account": "claude_account-1"
+        },
+        "workspace_id": "w3"
+      },
+      {
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "session-9"
+        },
+        "agent_status": "idle",
+        "cwd": "/Users/example/Projects/repo-4",
+        "focused": false,
+        "foreground_cwd": "/Users/example/Projects/repo-4",
+        "pane_id": "w4:p1",
+        "revision": 4,
+        "state_change_seq": 5738,
+        "tab_id": "w4:t2",
+        "terminal_id": "term_16",
+        "terminal_title": "terminal_title-16",
+        "terminal_title_stripped": "terminal_title_stripped-16",
+        "workspace_id": "w4"
+      },
+      {
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "session-10"
+        },
+        "agent_status": "working",
+        "cwd": "/Users/example/Projects/repo-4",
+        "focused": false,
+        "foreground_cwd": "/Users/example/Projects/repo-10",
+        "pane_id": "w4:p2",
+        "revision": 6,
+        "state_change_seq": 5896,
+        "tab_id": "w4:t1",
+        "terminal_id": "term_17",
+        "terminal_title": "terminal_title-17",
+        "terminal_title_stripped": "terminal_title_stripped-17",
+        "workspace_id": "w4"
+      },
+      {
+        "agent": "claude",
+        "agent_session": {
+          "agent": "claude",
+          "kind": "id",
+          "source": "herdr:claude",
+          "value": "session-11"
+        },
+        "agent_status": "working",
+        "cwd": "/Users/example/Projects/repo-7",
+        "focused": false,
+        "foreground_cwd": "/Users/example/Projects/repo-7",
+        "pane_id": "w4:p3",
+        "revision": 6,
+        "state_change_seq": 5895,
+        "tab_id": "w4:t1",
+        "terminal_id": "term_18",
+        "terminal_title": "terminal_title-18",
+        "terminal_title_stripped": "terminal_title_stripped-18",
+        "workspace_id": "w4"
+      }
+    ],
+    "type": "agent_list"
+  }
+}
