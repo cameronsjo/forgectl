@@ -487,8 +487,10 @@ func newWorkDir(target env.Target) (*workDir, error) {
 		return nil, fmt.Errorf("secure the work directory beside %s: %w", target.Rel(), err)
 	}
 	// Written before anything else goes in, so no plaintext ever sits in the
-	// directory without it. See workDirIgnore.
-	if err := os.WriteFile(filepath.Join(dir, workDirIgnoreName), []byte(workDirIgnore), 0o600); err != nil {
+	// directory without it. See workDirIgnore. O_EXCL makes that true by
+	// construction: the create fails on anything already at the path,
+	// including a planted symlink (O_CREAT|O_EXCL never follows one).
+	if err := writeWorkDirIgnore(filepath.Clean(filepath.Join(dir, workDirIgnoreName))); err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("write the work directory's .gitignore beside %s: %w", target.Rel(), err)
 	}
@@ -678,3 +680,17 @@ func (w *workDir) pruneToBackup() bool {
 }
 
 func (w *workDir) cleanup() { _ = os.RemoveAll(w.dir) }
+
+// writeWorkDirIgnore creates the work directory's .gitignore exclusively.
+// path is built from the MkdirTemp directory this process just created.
+func writeWorkDirIgnore(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304/G703: path is inside the 0700 MkdirTemp dir this process just created
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(workDirIgnore); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
