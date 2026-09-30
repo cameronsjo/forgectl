@@ -10,5 +10,6 @@ func readProcessEnv(pid int) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseProcArgs2(buf)
+	_, env, err := parseProcArgs2(buf)
+	return env, err
 }

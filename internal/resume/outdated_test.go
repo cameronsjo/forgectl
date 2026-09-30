@@ -276,9 +276,12 @@ func TestParseProcArgs2_KeepsArgvOutOfTheEnvironment(t *testing.T) {
 	buf := procArgs2("/usr/local/bin/claude",
 		[]string{"claude", "--append-system-prompt", "HERDR_PANE_ID=decoy"},
 		[]string{"HOME=/Users/u", "HERDR_PANE_ID=w7H:p6", "TERM=xterm"})
-	env, err := parseProcArgs2(buf)
+	execPath, env, err := parseProcArgs2(buf)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if execPath != "/usr/local/bin/claude" {
+		t.Errorf("exec path = %q, want the path before argv", execPath)
 	}
 	if got := strings.Join(env, ","); got != "HOME=/Users/u,HERDR_PANE_ID=w7H:p6,TERM=xterm" {
 		t.Fatalf("env = %q", got)
@@ -296,7 +299,7 @@ func TestParseProcArgs2_RefusesMalformedBuffers(t *testing.T) {
 		"unterminated path":      []byte{1, 0, 0, 0, '/', 'b'},
 		"argv shorter than argc": append(binary.NativeEndian.AppendUint32(nil, 5), "/bin/c\x00\x00a\x00"...),
 	} {
-		if env, err := parseProcArgs2(buf); err == nil {
+		if _, env, err := parseProcArgs2(buf); err == nil {
 			t.Errorf("%s: env = %q, want an error", name, env)
 		}
 	}
