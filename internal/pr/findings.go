@@ -113,17 +113,13 @@ var errFindingsChildMoved = errors.New("findings dir changed between the check a
 // FIFO swapped in for the child is refused instead of blocking (forgectl#798):
 // the cleanup preview reaches here outside the lifecycle lock.
 func openFindingsChild(store *os.Root, name string, checked fs.FileInfo) (*os.Root, error) {
-	child, err := openChildDirRoot(store, name)
+	child, got, err := openChildDirRoot(store, name)
 	if err != nil {
 		return nil, err
 	}
-	got, err := child.Stat(".")
-	if err == nil && !os.SameFile(checked, got) {
-		err = errFindingsChildMoved
-	}
-	if err != nil {
+	if !os.SameFile(checked, got) {
 		_ = child.Close()
-		return nil, err
+		return nil, errFindingsChildMoved
 	}
 	return child, nil
 }
@@ -508,7 +504,7 @@ func removeJudgedFindingsDir(store, child *os.Root, name string, judged fs.FileI
 // and so does one that is no longer a plain directory: openChildDirRoot
 // neither follows a symlink nor blocks on a FIFO (forgectl#798).
 func findingsChildSize(store *os.Root, name string) int64 {
-	child, err := openChildDirRoot(store, name)
+	child, _, err := openChildDirRoot(store, name)
 	if err != nil {
 		return 0
 	}
