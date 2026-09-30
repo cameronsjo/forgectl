@@ -664,6 +664,42 @@ func TestPrune_RemoteDeleteVerifyFailure_DoesNotEchoGhStderr(t *testing.T) {
 	assertNoSubprocessEcho(t, results[0].Err)
 }
 
+// TestPrune_VerifyFailureOnABranchNamed404IsNotADelete is #749 item 5. The
+// verification GET's argv carries the branch name, and CommandError.Error()
+// renders that argv, so matching "404" in the error text read a branch named
+// fix-404 as verified-deleted when gh failed for another reason (a 502 here).
+// Only gh's own "HTTP 404" in stderr confirms the ref is gone.
+//
+// Mutation: restore strings.Contains(err.Error(), "404") in
+// verifyRemoteDeleted and the 502 reads as a successful delete.
+func TestPrune_VerifyFailureOnABranchNamed404IsNotADelete(t *testing.T) {
+	for _, tc := range []struct {
+		stderr      string
+		wantDeleted bool
+	}{
+		{"gh: Server Error (HTTP 502)", false},
+		{"gh: Not Found (HTTP 404)", true},
+	} {
+		fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+			switch {
+			case isGetURL(name, args):
+				return githubRemoteURL, nil
+			case name == "gh" && len(args) > 0 && args[0] == "api":
+				return "", &exec.CommandError{Name: name, Args: args, Stderr: tc.stderr, ExitCode: 1, Err: errors.New("exit status 1")}
+			}
+			return "", nil
+		}}
+		item := Classification{
+			Info:  Info{Name: "fix-404", RemoteExists: true, MergedOnServer: true},
+			Group: SafeToDelete,
+		}
+		results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
+		if len(results) != 1 || results[0].Deleted != tc.wantDeleted || (results[0].Err == nil) != tc.wantDeleted {
+			t.Errorf("stderr %q: results = %+v, want deleted=%v", tc.stderr, results, tc.wantDeleted)
+		}
+	}
+}
+
 // TestPrune_ErrIsTerminalSafeByConstruction is #717: every PruneResult.Err is
 // safe to print as-is, whatever sink reads it. The branch name and worktree
 // path are hostile (a remote refname can carry ESC, C1 controls and U+202E),

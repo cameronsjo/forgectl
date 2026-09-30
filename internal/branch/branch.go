@@ -406,13 +406,24 @@ func (c *Client) verifyRemoteDeleted(ctx context.Context, origin originRepo, nam
 		// is rendered once, quoted; owner and repo are validated parts.
 		return fmt.Errorf("remote branch %s still exists on %s/%s after delete (its ref GET succeeded)", termsafe.QuoteText(name), origin.owner, origin.repo)
 	}
-	if !strings.Contains(err.Error(), "404") {
+	if !isGhNotFound(err) {
 		// Categorical cause (#658), as the git push leg: err is gh's stderr,
 		// text the host chooses.
 		slog.Error("Failed to verify remote branch deletion.", "branch", name, "error", err)
 		return fmt.Errorf("verify remote branch %s deletion: %w", termsafe.QuoteText(name), termsafe.Categorical("gh api failed", err))
 	}
 	return nil
+}
+
+// isGhNotFound reports whether a failed `gh api` call was an HTTP 404. It
+// reads gh's own stderr ("gh: Not Found (HTTP 404)"), not err.Error(): that
+// text also carries the argv, whose ref path holds the branch name, so a
+// branch named fix-404 whose verification failed for another reason read as
+// deleted (#749). gh exits 1 for every HTTP error, so the exit code cannot
+// tell a 404 apart. An error that is not a *exec.CommandError is not a 404.
+func isGhNotFound(err error) bool {
+	var cmdErr *exec.CommandError
+	return errors.As(err, &cmdErr) && strings.Contains(cmdErr.Stderr, "HTTP 404")
 }
 
 // localRow is one parsed `git for-each-ref refs/heads` row.
