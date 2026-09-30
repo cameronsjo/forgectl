@@ -53,7 +53,7 @@ func rereadPinnedMember(root *os.Root, name string, member breadcrumbMember) ([]
 	beforeTeardownReread(member.path)
 	file, info, err := openRegularInRoot(root, name)
 	if err != nil {
-		return nil, fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+		return nil, fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, safeTermError(err))
 	}
 	if !os.SameFile(info, member.info) {
 		_ = file.Close()
@@ -63,10 +63,10 @@ func rereadPinnedMember(root *os.Root, name string, member breadcrumbMember) ([]
 	data, readErr := readBreadcrumbBytes(file)
 	closeErr := file.Close()
 	if readErr != nil {
-		return nil, fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(readErr))
+		return nil, fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, safeTermError(readErr))
 	}
 	if closeErr != nil {
-		return nil, fmt.Errorf("close breadcrumb %s after re-read: %w", member.displayPath, termsafe.Error(closeErr))
+		return nil, fmt.Errorf("close breadcrumb %s after re-read: %w", member.displayPath, safeTermError(closeErr))
 	}
 	return data, nil
 }
@@ -374,7 +374,7 @@ func (c *Client) discardStale(member breadcrumbMember) error {
 	// replacement race.
 	info, err := root.Lstat(name)
 	if err != nil {
-		return fmt.Errorf("re-stat breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+		return fmt.Errorf("re-stat breadcrumb %s: %w", member.displayPath, safeTermError(err))
 	}
 	if !os.SameFile(info, member.info) {
 		return fmt.Errorf("breadcrumb %s changed identity during teardown; refusing to remove it", member.displayPath)
@@ -417,7 +417,7 @@ func (c *Client) discardStale(member breadcrumbMember) error {
 	}
 
 	if err := root.Remove(name); err != nil {
-		return fmt.Errorf("remove breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+		return fmt.Errorf("remove breadcrumb %s: %w", member.displayPath, safeTermError(err))
 	}
 	slog.Info("Successfully discarded a stale review breadcrumb.", "ref", bc.Ref)
 	return nil
@@ -461,7 +461,7 @@ func (c *Client) discardRecordOnly(member breadcrumbMember) error {
 	name := filepath.Base(member.path)
 	info, err := root.Lstat(name)
 	if err != nil {
-		return fmt.Errorf("re-stat breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+		return fmt.Errorf("re-stat breadcrumb %s: %w", member.displayPath, safeTermError(err))
 	}
 	if !os.SameFile(info, member.info) {
 		return fmt.Errorf("breadcrumb %s changed identity during teardown; refusing to remove it", member.displayPath)
@@ -490,7 +490,7 @@ func (c *Client) discardRecordOnly(member breadcrumbMember) error {
 	}
 
 	if err := root.Remove(name); err != nil {
-		return fmt.Errorf("remove breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+		return fmt.Errorf("remove breadcrumb %s: %w", member.displayPath, safeTermError(err))
 	}
 	slog.Info("Successfully discarded a session record that had no workspace.", "ref", bc.Ref)
 	return nil
@@ -548,7 +548,7 @@ func (c *Client) setAsideUndecodableRecord(member breadcrumbMember) (string, err
 	name := filepath.Base(member.path)
 	info, err := root.Lstat(name)
 	if err != nil {
-		return "", fmt.Errorf("re-stat breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+		return "", fmt.Errorf("re-stat breadcrumb %s: %w", member.displayPath, safeTermError(err))
 	}
 	if !os.SameFile(info, member.info) {
 		return "", fmt.Errorf("breadcrumb %s changed identity during repair; refusing to move it", member.displayPath)
@@ -577,7 +577,7 @@ func (c *Client) setAsideUndecodableRecord(member breadcrumbMember) (string, err
 		return "", err
 	}
 	if err := root.Rename(name, aside); err != nil {
-		return "", fmt.Errorf("set breadcrumb %s aside: %w", member.displayPath, termsafe.Error(err))
+		return "", fmt.Errorf("set breadcrumb %s aside: %w", member.displayPath, safeTermError(err))
 	}
 	slog.Info("Successfully set an unreadable session record aside; its bytes are preserved under a new name.",
 		"was", member.path, "now", filepath.Join(c.sessionsDir, aside))
@@ -890,7 +890,7 @@ func (c *Client) discard(ctx context.Context, sess Session, budget *tmuxBudget) 
 
 	if sess.Path != "" {
 		if err := os.Remove(sess.Path); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove breadcrumb %s: %w", termsafe.QuotePath(sess.Path), termsafe.Error(err))
+			return fmt.Errorf("remove breadcrumb %s: %w", termsafe.QuotePath(sess.Path), safeTermError(err))
 		}
 	}
 	slog.Info("Successfully tore down review session.", "ref", sess.Ref.String())
