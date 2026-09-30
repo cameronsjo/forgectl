@@ -513,17 +513,25 @@ func (c *Client) repairAdoptLocked(ctx context.Context, member breadcrumbMember,
 			"use 'forgectl pr repair %s --apply %s' instead",
 			ref.String(), termsafe.QuotePath(bc.Workspace), member.displayPath, RepairModeRollback)
 	}
-	// Under the lifecycle lock, so the resolve is bounded (forgectl#656).
+	// Under the lifecycle lock, so the resolve is bounded (forgectl#656). The
+	// bound's state is read BEFORE done(): done cancels the context, after
+	// which Err() is non-nil whether or not tmux ever timed out.
 	tctx, done := boundedTmux(ctx)
 	window, err := c.resolveReviewWindow(tctx, ref)
+	timedOut := err != nil && (tctx.Err() != nil || errors.Is(err, context.DeadlineExceeded))
 	done()
+	if timedOut {
+		item.Outcome = repairOutcomeRefused
+		return item, fmt.Errorf("refusing to adopt %s: tmux did not answer within %s, so whether its review window "+
+			"exists is unknown — retry once tmux responds: %w", ref.String(), lockedTmuxBudget, err)
+	}
 	if errors.Is(err, tmux.ErrAmbiguousWindow) {
 		item.Outcome = repairOutcomeRefused
 		return item, fmt.Errorf("refusing to adopt %s: %w — close the window that is not this review, then retry",
 			ref.String(), err)
 	}
 	if err != nil {
-		item.Outcome = "refused"
+		item.Outcome = repairOutcomeRefused
 		name, nameErr := ReviewWindowName(ref)
 		if nameErr != nil {
 			return item, nameErr

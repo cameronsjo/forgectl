@@ -160,7 +160,7 @@ func TestLockedTmuxReads_AreBoundedAndFailClosed(t *testing.T) {
 // half of forgectl#656: two windows in the review session carry the review's
 // name, so resolution refuses rather than returning the first. Teardown must
 // treat that refusal as "a window is live", not "nothing to kill": it kills
-// neither window, parks the record, and removes nothing.
+// none of the windows, parks the record, and removes nothing.
 func TestTeardown_DuplicateReviewWindowNamesParkAndKillNothing(t *testing.T) {
 	ref := Ref{Owner: "o", Repo: "r", Number: 32}
 	name := mustWindowName(t, ref)

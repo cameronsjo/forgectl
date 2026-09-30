@@ -114,6 +114,10 @@ func TestCleanupFailureLine_AmbiguousWindowSaysWhetherTheRecordWasParked(t *test
 			if !strings.Contains(line, "more than one tmux window") || !strings.Contains(line, tc.want) {
 				t.Errorf("line = %q, want the duplicate-name wording and %q", line, tc.want)
 			}
+			// More than one can mean more than two, so the line never says "neither" (#712).
+			if !strings.Contains(line, "so none was killed") || strings.Contains(line, "neither") {
+				t.Errorf("line = %q, want %q and no \"neither\"", line, "so none was killed")
+			}
 			if tc.name == "not parked" && strings.Contains(line, "is parked") {
 				t.Errorf("line = %q claims a park that never happened", line)
 			}

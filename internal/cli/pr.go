@@ -645,7 +645,7 @@ func cleanupFailureLine(f pr.CleanupFailure) string {
 		if errors.Is(f.Err, pr.ErrRecordNotParked) {
 			state = "the record could not be parked as needs-repair and was left as it was"
 		}
-		return fmt.Sprintf("refused %s: more than one tmux window carries its review's name, so neither was killed: "+
+		return fmt.Sprintf("refused %s: more than one tmux window carries its review's name, so none was killed: "+
 			"nothing was removed and %s. Close the window that is not the review, then run 'forgectl pr teardown' "+
 			"again, or see 'forgectl pr repair'", termsafe.QuotePathIfUnsafe(f.Path), state)
 	case errors.Is(f.Err, pr.ErrWindowStateUnreadable):

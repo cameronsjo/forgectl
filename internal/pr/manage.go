@@ -224,7 +224,18 @@ func (c *Client) Attach(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	window, err := c.resolveReviewWindow(ctx, sess.Ref)
+	// Attach runs outside the lifecycle lock, so a hung tmux risks no lock —
+	// but it would leave `pr attach` waiting until Ctrl-C. The resolve gets the
+	// same bound the locked reads use; the select below is the interactive
+	// jump itself and stays on the caller's ctx.
+	tctx, done := boundedTmux(ctx)
+	window, err := c.resolveReviewWindow(tctx, sess.Ref)
+	timedOut := err != nil && (tctx.Err() != nil || errors.Is(err, context.DeadlineExceeded))
+	done()
+	if timedOut {
+		return fmt.Errorf("select review window %q: tmux did not answer within %s; retry once tmux responds: %w",
+			name, lockedTmuxBudget, err)
+	}
 	if errors.Is(err, tmux.ErrAmbiguousWindow) {
 		return fmt.Errorf("select review window %q: %w — two windows carry this review's name; "+
 			"close the one that is not the review, then settle the record with 'forgectl pr repair'", name, err)
