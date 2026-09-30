@@ -275,7 +275,9 @@ func TestUpdateRun_JSONIncludesStepOutput(t *testing.T) {
 	fr := &exec.FakeRunner{
 		RunFunc: func(string, []string) (string, error) { return wantOutput, nil },
 	}
-	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("brew", false, nil)}))
+	// npm, not brew: brew's output has its own rendering (#778), pinned in
+	// update_echo_test.go; this test is about where a step's output goes.
+	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("npm", false, nil)}))
 	cfg := config.UpdateConfig{LogDir: t.TempDir()}
 
 	stdout, _, err := runUpdate(t, client, cfg, "check", "--json")
@@ -304,7 +306,9 @@ func TestUpdateCheck_StdoutSummaryOmitsStepOutput(t *testing.T) {
 	fr := &exec.FakeRunner{
 		RunFunc: func(string, []string) (string, error) { return wantOutput, nil },
 	}
-	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("brew", false, nil)}))
+	// npm, not brew: brew's output has its own rendering (#778), pinned in
+	// update_echo_test.go; this test is about where a step's output goes.
+	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("npm", false, nil)}))
 	cfg := config.UpdateConfig{LogDir: t.TempDir()}
 
 	stdout, stderr, err := runUpdate(t, client, cfg, "check")
@@ -426,7 +430,8 @@ func TestUpdateRun_WritesTimestampedLogFile(t *testing.T) {
 	fr := &exec.FakeRunner{
 		RunFunc: func(string, []string) (string, error) { return wantOutput, nil },
 	}
-	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("brew", false, nil)}))
+	// npm, not brew: brew's output goes to the debug log only (#778).
+	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("npm", false, nil)}))
 	logDir := t.TempDir()
 	cfg := config.UpdateConfig{LogDir: logDir}
 
@@ -445,7 +450,7 @@ func TestUpdateRun_WritesTimestampedLogFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	if !bytes.Contains(contents, []byte("brew")) {
+	if !bytes.Contains(contents, []byte("npm")) {
 		t.Errorf("log file missing the step's transcript line: %q", string(contents))
 	}
 	if !bytes.Contains(contents, []byte(wantOutput)) {

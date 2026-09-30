@@ -3,11 +3,15 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"os"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/launch"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -281,5 +285,37 @@ func TestPrintLaunchProfile_EscapesPiProvider(t *testing.T) {
 		if !strings.Contains(out, escaped) {
 			t.Errorf("Pi provider output missing escaped marker %q: %q", escaped, out)
 		}
+	}
+}
+
+// TestLaunchWorkingDirectory_CapsTheFailingPath is #832: `launch` and
+// `launch which` wrapped Getwd's *PathError in fmt.Errorf and only then
+// handed it to termsafe.Error, whose path cap applies to a *PathError that is
+// the error itself, so the path came through whole. The cap now applies, the
+// filename survives the cut, and errors.As still reaches the *PathError.
+//
+// Mutation: restore termsafe.Error(fmt.Errorf("...: %w", err)) in
+// launchWorkingDirectory and the whole directory run comes back.
+func TestLaunchWorkingDirectory_CapsTheFailingPath(t *testing.T) {
+	long := "/" + strings.Repeat("d", 4*termsafe.PathEchoMaxRunes) + "/gone"
+	orig := launchGetwd
+	t.Cleanup(func() { launchGetwd = orig })
+	launchGetwd = func() (string, error) {
+		return "", &os.PathError{Op: "getwd", Path: long, Err: syscall.ENOENT}
+	}
+	_, err := launchWorkingDirectory()
+	if err == nil {
+		t.Fatal("launchWorkingDirectory: nil error from a failing getwd")
+	}
+	got := err.Error()
+	if strings.Count(got, "d") > termsafe.PathEchoMaxRunes {
+		t.Errorf("error echoed the %d-rune path uncapped (%d bytes)", len(long), len(got))
+	}
+	if !strings.Contains(got, `/gone"`) {
+		t.Errorf("error = %q; want the final element kept", got)
+	}
+	var pe *os.PathError
+	if !errors.As(err, &pe) {
+		t.Errorf("errors.As lost the *os.PathError: %v", err)
 	}
 }

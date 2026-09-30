@@ -11,6 +11,7 @@ operated.
   usage summary.
 - **[`configuration.md`](configuration.md)** — every `config.toml` section,
   key by key, plus logging.
+- **[`herdr.md`](herdr.md)** — the `internal/herdr` client: session and fork requirements, failure shapes, and why ids move.
 - **[`artificer-adaptations.md`](artificer-adaptations.md)** — where this repo
   bends the vendored Artificer design system, and why; each entry names the
   upstream issue and the condition that retires it.

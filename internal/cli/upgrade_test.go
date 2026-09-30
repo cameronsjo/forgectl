@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
 
@@ -152,5 +153,165 @@ func TestUpgrade_Apply_UpdateFailure_NeverRunsUpgrade(t *testing.T) {
 	}
 	if len(fr.Calls) != 1 {
 		t.Errorf("got %d calls, want 1 — a failed update must never reach upgrade: %+v", len(fr.Calls), fr.Calls)
+	}
+}
+
+// TestUpgrade_Check_NeverEchoesBrew pins #738: `upgrade --check` words both
+// outcomes from fixed text and version tokens, never from brew's stdout or
+// its CommandError (argv plus stderr, which relays the tap's server).
+func TestUpgrade_Check_NeverEchoesBrew(t *testing.T) {
+	setMetaVersion(t, "1.0.0")
+	stubUpgradeLookPath(t, "brew")
+	const marker = "SERVERTEXT\x1b[2J"
+
+	fr := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
+		return marker + " cameronsjo/tap/forgectl (1.0.0_1) != 1.1.0 " + marker, nil
+	}}
+	stdout, err := execUpgrade(t, fr, "--check")
+	if err != nil {
+		t.Fatalf("Execute() = %v, want nil", err)
+	}
+	if want := "update available: forgectl 1.0.0_1 installed, 1.1.0 available\n"; stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+
+	fr = &exec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
+		return "", &exec.CommandError{Name: name, Stderr: marker}
+	}}
+	stdout, err = execUpgrade(t, fr, "--check")
+	if err == nil {
+		t.Fatal("Execute() = nil, want an error (brew outdated failed)")
+	}
+	if ExitCode(err) != 1 {
+		t.Errorf("ExitCode = %d, want 1", ExitCode(err))
+	}
+	if msg := err.Error() + stdout; bytes.Contains([]byte(msg), []byte("SERVERTEXT")) || bytes.Contains([]byte(msg), []byte("outdated --cask")) {
+		t.Errorf("output = %q, echoes brew's text or argv", msg)
+	}
+	var ce *exec.CommandError
+	if !errors.As(err, &ce) {
+		t.Errorf("the CommandError is no longer on the chain: %v", err)
+	}
+}
+
+// TestUpgrade_Apply_NeverEchoesBrew pins #761: the applying path renders its
+// progress and its outcome from fixed text, never from brew's stdout or its
+// CommandError (argv plus stderr, which relays the tap's server), and still
+// tells a failed tap refresh from a failed cask upgrade.
+func TestUpgrade_Apply_NeverEchoesBrew(t *testing.T) {
+	setMetaVersion(t, "1.0.0")
+	stubUpgradeLookPath(t, "brew")
+	const marker = "SERVERTEXT\x1b[2J"
+
+	fr := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) { return marker, nil }}
+	stdout, err := execUpgrade(t, fr)
+	if err != nil {
+		t.Fatalf("Execute() = %v, want nil", err)
+	}
+	if bytes.Contains([]byte(stdout), []byte("SERVERTEXT")) {
+		t.Errorf("stdout = %q, relays brew's output", stdout)
+	}
+	if !bytes.Contains([]byte(stdout), []byte("forgectl upgraded")) {
+		t.Errorf("stdout = %q, want the fixed success line", stdout)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		failArg  string
+		wantText string
+	}{
+		{"update fails", "update", "brew update failed"},
+		{"upgrade fails", "upgrade", "may be unchanged"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fr := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				if args[0] == tc.failArg {
+					return marker, &exec.CommandError{Name: name, Args: args, Stderr: marker}
+				}
+				return marker, nil
+			}}
+			stdout, err := execUpgrade(t, fr)
+			if err == nil {
+				t.Fatal("Execute() = nil, want an error")
+			}
+			if ExitCode(err) != 1 {
+				t.Errorf("ExitCode = %d, want 1", ExitCode(err))
+			}
+			msg := err.Error() + stdout
+			if bytes.Contains([]byte(msg), []byte("SERVERTEXT")) || bytes.Contains([]byte(msg), []byte("--cask "+selfupdate.CaskRef)) {
+				t.Errorf("output = %q, echoes brew's text or argv", msg)
+			}
+			if !bytes.Contains([]byte(err.Error()), []byte(tc.wantText)) {
+				t.Errorf("error = %q, want it to name the failed step (%q)", err, tc.wantText)
+			}
+			var ce *exec.CommandError
+			if !errors.As(err, &ce) {
+				t.Errorf("the CommandError is no longer on the chain: %v", err)
+			}
+		})
+	}
+}
+
+// TestUpgrade_Apply_SuccessNamesVersions pins #761 (a): the success line names
+// the from and to versions, rebuilt from version tokens in brew's upgrade
+// output, never its text; with no versions to read it keeps the plain line.
+func TestUpgrade_Apply_SuccessNamesVersions(t *testing.T) {
+	setMetaVersion(t, "1.0.0")
+	stubUpgradeLookPath(t, "brew")
+
+	fr := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		if args[0] == "upgrade" {
+			return "==> Upgrading 1 outdated package:\ncameronsjo/tap/forgectl 1.0.0 -> 1.1.0 SERVERTEXT\x1b[2J", nil
+		}
+		return "", nil
+	}}
+	stdout, err := execUpgrade(t, fr)
+	if err != nil {
+		t.Fatalf("Execute() = %v, want nil", err)
+	}
+	if !bytes.Contains([]byte(stdout), []byte("forgectl upgraded 1.0.0 → 1.1.0")) {
+		t.Errorf("stdout = %q, want the from and to versions", stdout)
+	}
+	if bytes.Contains([]byte(stdout), []byte("SERVERTEXT")) {
+		t.Errorf("stdout = %q, relays brew's text", stdout)
+	}
+}
+
+// TestUpgrade_Apply_InterruptIsNotNetwork pins #761 (c): a Ctrl-C reads as an
+// interrupt, whether the runner surfaces context.Canceled or, as os/exec does
+// for a killed child, a plain signal exit under a canceled context.
+func TestUpgrade_Apply_InterruptIsNotNetwork(t *testing.T) {
+	setMetaVersion(t, "1.0.0")
+	stubUpgradeLookPath(t, "brew")
+
+	for _, tc := range []struct {
+		name      string
+		cancelCtx bool
+		cause     error
+	}{
+		{"context.Canceled on the chain", false, context.Canceled},
+		{"signal exit under a canceled context", true, errors.New("signal: killed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fr := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				return "", &exec.CommandError{Name: name, Args: args, Err: tc.cause}
+			}}
+			ctx, cancel := context.WithCancel(context.Background())
+			if tc.cancelCtx {
+				cancel()
+			} else {
+				defer cancel()
+			}
+			cmd := newUpgradeCmd(module.Deps{Cfg: config.Config{}, Runner: fr})
+			cmd.SetOut(new(bytes.Buffer))
+			cmd.SetArgs(nil)
+			err := cmd.ExecuteContext(ctx)
+			if err == nil {
+				t.Fatal("Execute() = nil, want an error")
+			}
+			if !bytes.Contains([]byte(err.Error()), []byte("interrupted")) || bytes.Contains([]byte(err.Error()), []byte("network")) {
+				t.Errorf("error = %q, want the interrupt wording, not a network fault", err)
+			}
+		})
 	}
 }

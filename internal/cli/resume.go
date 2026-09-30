@@ -429,7 +429,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	if s.Live && !fork {
 		blocked = WithExitCode(fmt.Errorf(
 			"session %s (%s) is still running as pid %d — continuing it a second time would corrupt the transcript; switch to that terminal, or pass --fork to branch a new session off it",
-			safeTerm(displayName(s)), safeTerm(s.ID), s.Pid), 2)
+			safeName(s), safeTerm(s.ID), s.Pid), 2)
 	}
 	// Refuse immediately unless this is a dry-run. Deferring it would make the
 	// refusal depend on claude being installed and the cwd still existing,
@@ -488,13 +488,13 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	// `workflow run --dry-run`.
 	if dryRun {
 		out := cmd.OutOrStdout()
-		fmt.Fprintf(out, "session %s\n", safeTerm(s.ID))
-		fmt.Fprintf(out, "name    %s\n", safeTerm(displayName(s)))
-		fmt.Fprintf(out, "cwd     %s\n", safeTerm(s.Cwd))
-		fmt.Fprintf(out, "exec    %s %s\n", safeTerm(claudePath), safeTerm(strings.Join(args, " ")))
-		fmt.Fprintf(out, "tasks   %d held%s\n", len(s.Tasks), forkTaskNote(fork))
+		_, _ = fmt.Fprintf(out, "session %s\n", safeTerm(s.ID))
+		_, _ = fmt.Fprintf(out, "name    %s\n", safeName(s))
+		_, _ = fmt.Fprintf(out, "cwd     %s\n", safeTerm(s.Cwd))
+		_, _ = fmt.Fprintf(out, "exec    %s %s\n", safeTerm(claudePath), safeTerm(strings.Join(args, " ")))
+		_, _ = fmt.Fprintf(out, "tasks   %d held%s\n", len(s.Tasks), forkTaskNote(fork))
 		if blocked != nil {
-			fmt.Fprintf(out, "blocked live — pid %d; add --fork to branch instead\n", s.Pid)
+			_, _ = fmt.Fprintf(out, "blocked live — pid %d; add --fork to branch instead\n", s.Pid)
 		}
 		// Exits with the code the real run would, so a script can trust the
 		// dry-run's verdict and not just its text.
@@ -532,7 +532,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	}
 
 	if err := os.Chdir(s.Cwd); err != nil {
-		return WithExitCode(fmt.Errorf("enter %s: %s", safeTerm(s.Cwd), safeTerm(err.Error())), 1)
+		return WithExitCode(fmt.Errorf("enter %s: %w", termsafe.QuotePath(s.Cwd), termsafe.Error(err)), 1)
 	}
 
 	// Same layering BuildInvocation does: removals hit the inherited snapshot
@@ -541,7 +541,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 		launch.StripEnv(os.Environ(), unset),
 		launch.MergeMaps(injected, profile.Env),
 	)
-	fmt.Fprintf(errOut, "forgectl: resuming %s in %s\n", safeTerm(displayName(s)), safeTerm(s.Cwd))
+	_, _ = fmt.Fprintf(errOut, "forgectl: resuming %s in %s\n", safeName(s), termsafe.QuotePath(s.Cwd))
 	slog.Debug("Preparing to exec claude for a resume.", "session", s.ID, "cwd", s.Cwd, "fork", fork)
 
 	// After the chdir, so a failed chdir records nothing, and after the task
@@ -748,6 +748,16 @@ func runResumeSnapshot(cmd *cobra.Command, quiet bool) {
 		line += fmt.Sprintf(", %d orphan file(s) deleted", res.Swept)
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), line)
+}
+
+// sessionNameMaxRunes caps a session label rendered in a line of prose. The
+// label is transcript-derived, so nobody at the terminal chose its length
+// (forgectl#864); the picker clips its own column separately.
+const sessionNameMaxRunes = 256
+
+// safeName is displayName made terminal-safe and bounded for a prose line.
+func safeName(s resume.Session) string {
+	return termsafe.SafeLineMax(displayName(s), sessionNameMaxRunes)
 }
 
 // displayName is the session's best label, falling back to the id.

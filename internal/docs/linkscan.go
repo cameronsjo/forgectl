@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -63,15 +62,17 @@ var linkMarkdown = newLinkMarkdown()
 // index build never contends for renderMu.
 var linkMarkdownVault = newMarkdown(false, true)
 
-func newLinkMarkdown() goldmark.Markdown {
+// newLinkMarkdown builds the docs scan parser; extra goes first, as in
+// newMarkdown.
+func newLinkMarkdown(extra ...goldmark.Option) goldmark.Markdown {
 	// No wikilink extender: the docs-root page has none, so "[[w]]" renders
 	// as literal text and must not be indexed as a link (#655). The index
 	// holds what the page shows, as the vault parser below does.
-	return goldmark.New(
+	return goldmark.New(append(extra,
 		goldmark.WithParserOptions(headingParserOptions(false)...),
 		// Parse-only: a $$ block's lines are TeX, not headings or links.
 		goldmark.WithParserOptions(mathBlockParserOptions()...),
-	)
+	)...)
 }
 
 // blockIDPattern matches a trailing Obsidian block-id marker on a line:
@@ -90,58 +91,33 @@ func isURLLike(dest string) bool {
 	return strings.HasPrefix(dest, "//") || urlSchemePrefix.MatchString(dest)
 }
 
-// scanDoc reads absPath once and returns everything Doc needs about it:
-// title (same rule titleFor used to apply — the first "# " heading in the
-// first 64 lines, else relPath's filename without extension), frontmatter
-// aliases, headings (with goldmark's auto-ID slug), Obsidian ^block-id
-// markers, and outbound links from both wikilinks and plain markdown links
-// whose destination carries no URL scheme.
+// scanDocFrom reads one document from r and returns everything Doc needs
+// about it: title (the first "# " heading the parse finds, else relPath's
+// filename without extension), frontmatter aliases, headings (with
+// goldmark's auto-ID slug), Obsidian ^block-id markers, and outbound links
+// from both wikilinks and plain markdown links whose destination carries
+// no URL scheme.
 //
-// scanDoc scans as a docs root; scanDocFor takes the root's kind.
-func scanDoc(absPath, relPath string) (docMeta, error) {
-	return scanDocFor(RootDocs, absPath, relPath)
-}
-
-// scanDocFor is scanDoc for a document in a root of the given kind. A vault
-// root parses with linkMarkdownVault, whose comment parsers and heading-id
-// transformer are the render's own, so %% comment text reaches none of the
-// title, headings, slugs, links or block ids. Both kinds take their title
-// from the parse (parsedTitle); only an over-cap document falls back to
-// firstH1's line scan.
-func scanDocFor(kind RootKind, absPath, relPath string) (docMeta, error) {
-	f, err := os.Open(absPath) //nolint:gosec // G304: absPath is a doc walkRoot/indexFileRoot already resolved under a canonicalized, operator-configured root
-	if err != nil {
-		return docMeta{}, err
-	}
-	defer func() { _ = f.Close() }()
+// It takes an open reader, never a path: the index walk opens each doc
+// through its held directory's os.Root and verifies it (walkRoot), so the
+// scan reads the file the walk approved (forgectl#743).
+//
+// A vault root parses with linkMarkdownVault, whose comment parsers and
+// heading-id transformer are the render's own, so %% comment text reaches
+// none of the title, headings, slugs, links or block ids. Both kinds take
+// their title from the parse (parsedTitle); only an over-cap document falls
+// back to firstH1's line scan.
+func scanDocFrom(kind RootKind, r io.Reader, relPath string) (docMeta, error) {
 	// Read one byte past the cap so an over-cap file is detected without
 	// reading the rest of it.
-	source, err := io.ReadAll(io.LimitReader(f, maxScanBytes+1))
+	source, err := io.ReadAll(io.LimitReader(r, maxScanBytes+1))
 	if err != nil {
 		return docMeta{}, err
 	}
 
+	// Past the cap there is no whole-document parse.
 	if len(source) > maxScanBytes {
-		// Past the cap there is no whole-document parse, so the title is
-		// firstH1's line scan; a vault title is then parsed on its own to
-		// drop its comments. A "# " line inside a fence or a %% block of an
-		// over-cap document can still reach it.
-		// The scan runs on the body: a YAML "# comment" in the frontmatter
-		// is not a heading.
-		scanSrc := source
-		if fm, ok := splitFrontmatter(source); ok {
-			scanSrc = fm.body
-		}
-		title := firstH1(scanSrc)
-		if kind == RootVault && title != "" {
-			title = vaultLineTitle(title)
-		}
-		if title == "" {
-			title = titleFromFilename(relPath)
-		}
-		slog.Debug("docs: document exceeds scan cap; indexed by title only.",
-			"path", relPath, "limit", maxScanBytes)
-		return docMeta{Title: title}, nil
+		return titleOnlyMeta(kind, source, relPath), nil
 	}
 
 	body := source
@@ -156,6 +132,16 @@ func scanDocFor(kind RootKind, absPath, relPath string) (docMeta, error) {
 			status, staleAfter = trustFields(root)
 			orphanOK = orphanOKField(root)
 		}
+	}
+
+	// Nor past the markup guard, which measures the block structure the
+	// scan parser itself gives body (markupguard.go).
+	tooComplex, err := markupTooComplex(scanMarkdown(kind), body)
+	if err != nil {
+		return docMeta{}, fmt.Errorf("scan %s: %w", relPath, err)
+	}
+	if tooComplex {
+		return titleOnlyMeta(kind, source, relPath), nil
 	}
 
 	scan, err := scanBodyFor(kind, body)
@@ -284,7 +270,13 @@ func toStringList(v any) []string {
 // segment starts after its "> " prefix. A marker that itself sits inside a
 // hidden segment (an inline %% comment) is skipped too; only the marker is
 // tested there, since an inline comment can share its line with a real one.
+//
+// Each overlap test is a binary search over the segments sorted once
+// (segmentSet), so the pass costs O((lines + segments) log segments): a
+// document dense with comments or code lines no longer makes it quadratic
+// (#801).
 func scanBlockIDs(body []byte, code, hidden []text.Segment) []string {
+	codeSet, hiddenSet := newSegmentSet(code), newSegmentSet(hidden)
 	seen := map[string]bool{}
 	for start := 0; start < len(body); {
 		end := len(body)
@@ -293,9 +285,9 @@ func scanBlockIDs(body []byte, code, hidden []text.Segment) []string {
 			end = start + nl
 			next = end + 1
 		}
-		if !overlapsAny(code, start, next) {
+		if !codeSet.overlaps(start, next) {
 			if m := blockIDPattern.FindSubmatchIndex(body[start:end]); m != nil &&
-				!overlapsAny(hidden, start+m[0], start+m[1]) {
+				!hiddenSet.overlaps(start+m[0], start+m[1]) {
 				seen[string(body[start+m[2]:start+m[3]])] = true
 			}
 		}
@@ -309,13 +301,35 @@ func scanBlockIDs(body []byte, code, hidden []text.Segment) []string {
 	return ids
 }
 
-func overlapsAny(segs []text.Segment, start, end int) bool {
-	for _, seg := range segs {
-		if seg.Start < end && seg.Stop > start {
-			return true
+// segmentSet answers "does any segment overlap [start, end)?" in
+// O(log n). A segment overlaps when seg.Start < end && seg.Stop > start.
+// Sorted by Start, the segments with Start < end are a prefix, found by
+// binary search; one of them overlaps exactly when the largest Stop in that
+// prefix exceeds start, and maxStop holds that running maximum.
+type segmentSet struct {
+	starts  []int
+	maxStop []int
+}
+
+func newSegmentSet(segs []text.Segment) segmentSet {
+	sorted := make([]text.Segment, len(segs))
+	copy(sorted, segs)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Start < sorted[j].Start })
+	set := segmentSet{starts: make([]int, len(sorted)), maxStop: make([]int, len(sorted))}
+	running := 0
+	for i, seg := range sorted {
+		set.starts[i] = seg.Start
+		if i == 0 || seg.Stop > running {
+			running = seg.Stop
 		}
+		set.maxStop[i] = running
 	}
-	return false
+	return set
+}
+
+func (s segmentSet) overlaps(start, end int) bool {
+	k := sort.SearchInts(s.starts, end) // segments [0, k) have Start < end
+	return k > 0 && s.maxStop[k-1] > start
 }
 
 // scanBody walks body's goldmark AST once, collecting headings (text plus
@@ -353,12 +367,40 @@ type h1Candidate struct {
 	visible string
 }
 
+// titleOnlyMeta is the index entry of a document scanDocFrom does not
+// parse, over maxScanBytes or past the markup guard: its title only. The
+// title is firstH1's line scan; a vault title is then parsed on its own to
+// drop its comments. A "# " line inside a fence or a %% block of such a
+// document can still reach it. The line scan runs on the body: a YAML
+// "# comment" in the frontmatter is not a heading.
+func titleOnlyMeta(kind RootKind, source []byte, relPath string) docMeta {
+	scanSrc := source
+	if fm, ok := splitFrontmatter(source); ok {
+		scanSrc = fm.body
+	}
+	title := firstH1(scanSrc)
+	if kind == RootVault && title != "" {
+		title = vaultLineTitle(title)
+	}
+	if title == "" {
+		title = titleFromFilename(relPath)
+	}
+	slog.Debug("docs: document exceeds the scan cap or the markup guard; indexed by title only.",
+		"path", relPath, "limit", maxScanBytes, "bytes", len(source))
+	return docMeta{Title: title}
+}
+
+// scanMarkdown is the scan parser for a root kind.
+func scanMarkdown(kind RootKind) goldmark.Markdown {
+	if kind == RootVault {
+		return linkMarkdownVault
+	}
+	return linkMarkdown
+}
+
 func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
 	reader := text.NewReader(body)
-	md := linkMarkdown
-	if kind == RootVault {
-		md = linkMarkdownVault
-	}
+	md := scanMarkdown(kind)
 	ctx := newParseContext()
 	doc := md.Parser().Parse(reader, parser.WithContext(ctx))
 
@@ -566,9 +608,14 @@ func parsedTitle(source []byte, bodyOffset int, body []byte, h1s []h1Candidate) 
 // vaultLineTitle is the over-cap vault title: firstH1's text parsed on its
 // own as an H1, so its comments are cut the same way the full parse cuts
 // them. It falls back to "" (the filename) if the line no longer parses as
-// a heading with visible text.
+// a heading with visible text, or if the line is past the markup guard:
+// firstH1 reads one line of any length, so it can be the whole trigger.
 func vaultLineTitle(title string) string {
-	scan, err := scanBodyFor(RootVault, []byte("# "+title+"\n"))
+	src := []byte("# " + title + "\n")
+	if tooComplex, err := markupTooComplex(linkMarkdownVault, src); err != nil || tooComplex {
+		return ""
+	}
+	scan, err := scanBodyFor(RootVault, src)
 	if err != nil || len(scan.h1s) == 0 {
 		return ""
 	}

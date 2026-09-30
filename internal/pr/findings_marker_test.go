@@ -20,8 +20,9 @@ package pr
 //   [x] An oversized marker: stale, removed
 //   [x] PrepareLocal writes a marker naming its own record; cleanup keeps the
 //       dir while the record lives and removes it once the record is gone
-//   [x] A marker write that fails partway (injected through WithRecordFS)
-//       publishes nothing: no marker, no temp, and the dir is kept
+//   [x] A marker write that fails partway (injected through
+//       createFindingsMarkerTemp) publishes nothing: no marker, no temp, and
+//       the dir is kept
 //   [x] An empty, truncated, or newline-less marker next to a live record is
 //       incomplete, so unmarked, so kept
 //   [x] No session record is committed while any owner marker exists yet
@@ -32,6 +33,10 @@ package pr
 //       dir is kept (sync-before-publish, #659)
 //   [x] A marker write into a dir that already holds a marker fails and
 //       leaves the existing marker untouched (link, not rename, #659)
+//   [x] A marker write goes through a handle on the findings dir: a dir
+//       swapped for a symlink out of the store gets no marker, and neither
+//       does the link's target (#754)
+//   [x] The owner record is opened through a sessions-dir handle (#754)
 //   (findings_marker_unix_test.go)
 //   [x] A marker that is a symlink to a valid marker is not followed, and
 //       its ELOOP keeps the dir (#659)
@@ -308,14 +313,33 @@ func TestPrepareLocal_MarkerKeepsDirWhileRecordLives(t *testing.T) {
 	wantGone(t, sess.FindingsDir)
 }
 
-// markerFaultFS is a recordFS double that faults only the owner marker (its
-// temp or its final name) and passes every other call, including the session
-// record's writes, to the real filesystem. fault picks the failing step:
-// "" or "write" short-writes (as ENOSPC or EIO would cut it off), "sync"
-// fails the fsync, "close" fails the close.
-type markerFaultFS struct {
-	osRecordFS
-	fault string
+// faultMarkerTemp swaps createFindingsMarkerTemp for one that faults the
+// file it creates when that file is the owner marker (its temp or its final
+// name), restoring the seam when the test ends. fault picks the failing
+// step: "" or "write" short-writes (as ENOSPC or EIO would cut it off),
+// "sync" fails the fsync, "close" fails the close.
+func faultMarkerTemp(t *testing.T, fault string) {
+	t.Helper()
+	orig := createFindingsMarkerTemp
+	t.Cleanup(func() { createFindingsMarkerTemp = orig })
+	createFindingsMarkerTemp = func(dir *os.Root, name string) (recordFile, error) {
+		file, err := orig(dir, name)
+		if err != nil {
+			return file, err
+		}
+		// Both names, so an in-place writer (no temp) is faulted too.
+		if name != findingsMarkerTemp && name != findingsOwnerMarker {
+			return file, nil
+		}
+		switch fault {
+		case "sync":
+			return syncFaultFile{file}, nil
+		case "close":
+			return closeFaultFile{file}, nil
+		default:
+			return shortWriteFile{file}, nil
+		}
+	}
 }
 
 // syncFaultFile fails Sync; closeFaultFile closes the real file and then
@@ -341,30 +365,11 @@ func (f shortWriteFile) Write(p []byte) (int, error) {
 	return n, errInjected
 }
 
-func (m markerFaultFS) OpenExclusive(path string) (recordFile, error) {
-	file, err := m.osRecordFS.OpenExclusive(path)
-	if err != nil {
-		return file, err
-	}
-	// Both names, so an in-place writer (no temp) is faulted too.
-	if base := filepath.Base(path); base != findingsMarkerTemp && base != findingsOwnerMarker {
-		return file, nil
-	}
-	switch m.fault {
-	case "sync":
-		return syncFaultFile{file}, nil
-	case "close":
-		return closeFaultFile{file}, nil
-	default:
-		return shortWriteFile{file}, nil
-	}
-}
-
 // A marker write that fails partway must leave the dir unmarked (kept), never
 // holding a partial marker that reads as stale next to a live record.
 //
 // Mutations that turn it red:
-//   - publish in place: OpenExclusive the final marker name and write into it,
+//   - publish in place: create the final marker name and write into it,
 //     with no temp and no link (the partial marker is left under its real
 //     name, so the "no marker" assertion fails);
 //   - drop the werr check before the link (the half-written temp is
@@ -380,9 +385,9 @@ func TestPrepareLocal_FailedMarkerWriteLeavesDirUnmarkedAndKept(t *testing.T) {
 }
 
 func failedMarkerWriteKeepsDir(t *testing.T, fault string) {
+	faultMarkerTemp(t, fault)
 	c := New(localGitRunner(),
 		WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
-		WithRecordFS(markerFaultFS{fault: fault}),
 		WithApprover(func(string) (bool, error) { return false, nil }),
 		WithTTYCheck(func() bool { return false }))
 	sess, err := c.PrepareLocal(context.Background(), t.TempDir(), PrepareLocalOpts{Agent: "claude"})
@@ -514,8 +519,8 @@ func failMarkerOpenWith(t *testing.T, errno syscall.Errno) {
 	t.Helper()
 	orig := openFindingsMarker
 	t.Cleanup(func() { openFindingsMarker = orig })
-	openFindingsMarker = func(path string, _ int, _ os.FileMode) (*os.File, error) {
-		return nil, &os.PathError{Op: "open", Path: path, Err: errno}
+	openFindingsMarker = func(_ *os.Root, name string) (*os.File, error) {
+		return nil, &os.PathError{Op: "openat", Path: name, Err: errno}
 	}
 }
 

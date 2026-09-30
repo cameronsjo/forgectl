@@ -1,4 +1,9 @@
+//go:build unix
+
 package cmuxadapter
+
+// The fake FileInfo carries a *syscall.Stat_t, the socket identity the
+// adapter proves on unix; the adapter has no such proof elsewhere (#810).
 
 import (
 	"bytes"

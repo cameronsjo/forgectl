@@ -42,6 +42,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -658,4 +659,176 @@ func TestCleanCmd_JSONRefusedWithApplyCachesDocker(t *testing.T) {
 			t.Errorf("%s: error = %v, want a --json refusal", flag, err)
 		}
 	}
+}
+
+// TestCleanCmd_QuotesHostilePathOnTerminal pins forgectl#855 item 3: a
+// directory under the scanned root whose name carries a bidi override and a
+// C1 CSI reaches the terminal escaped and quoted, in both the dry-run row
+// and the apply pass's reclaimed row, while --json keeps the path raw. The
+// runes are \u escapes so no literal format character sits in source.
+//
+// Mutation that turns it red: print item.Path raw in printCleanItems (the
+// dry-run row) or in the reclaimed row of runCleanDirs.
+func TestCleanCmd_QuotesHostilePathOnTerminal(t *testing.T) {
+	const hostile = "ev\u202eil\u009b31m"
+	newRoot := func(t *testing.T) (string, string) {
+		t.Helper()
+		root := t.TempDir()
+		nm := filepath.Join(root, hostile, "node_modules")
+		if err := os.MkdirAll(nm, 0o750); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(nm, "leaf.js"), make([]byte, 64), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		return root, nm
+	}
+	run := func(t *testing.T, root string, args ...string) string {
+		t.Helper()
+		client := cleanpkg.New(&exec.FakeRunner{}, cleanpkg.WithRoot(root))
+		cmd := newCleanCmdForClient(client, theme.Theme{})
+		var stdout bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(new(bytes.Buffer))
+		cmd.SetArgs(args)
+		if err := cmd.ExecuteContext(context.Background()); err != nil {
+			t.Fatalf("clean %v: %v", args, err)
+		}
+		return stdout.String()
+	}
+	assertInert := func(t *testing.T, got string) {
+		t.Helper()
+		if strings.ContainsAny(got, "\u202e\u009b") {
+			t.Errorf("stdout carries a raw bidi/control rune: %q", got)
+		}
+		if !strings.Contains(got, `ev\u202eil\u009b31m`) {
+			t.Errorf("stdout = %q, want the escaped directory name", got)
+		}
+	}
+
+	t.Run("dry run", func(t *testing.T) {
+		root, _ := newRoot(t)
+		got := run(t, root)
+		assertInert(t, got)
+		if !strings.Contains(got, `node_modules" — `) {
+			t.Errorf("dry-run row = %q, want the path quoted", got)
+		}
+	})
+
+	t.Run("apply", func(t *testing.T) {
+		withConfirmFn(t, func(string) (bool, error) { return true, nil })
+		root, nm := newRoot(t)
+		got := run(t, root, "--apply")
+		if _, err := os.Stat(nm); !os.IsNotExist(err) {
+			t.Fatalf("node_modules must be reclaimed, stat error: %v", err)
+		}
+		_, applied, found := strings.Cut(got, "\nreclaimed ")
+		if !found {
+			t.Fatalf("stdout = %q, want a reclaimed row", got)
+		}
+		assertInert(t, applied)
+	})
+
+	t.Run("json keeps the raw path", func(t *testing.T) {
+		root, nm := newRoot(t)
+		got := run(t, root, "--json")
+		var report struct {
+			Items []struct {
+				Path string `json:"path"`
+			} `json:"items"`
+		}
+		if err := json.Unmarshal([]byte(got), &report); err != nil {
+			t.Fatalf("clean --json = %q: %v", got, err)
+		}
+		if len(report.Items) != 1 || !strings.HasSuffix(report.Items[0].Path, filepath.Join(hostile, "node_modules")) {
+			t.Errorf("clean --json items = %+v, want the raw path ending %q", report.Items, nm)
+		}
+	})
+}
+
+// TestCleanCmd_CachesAndDockerRowsAreInert is forgectl#864 item 2: the
+// --caches preview path, the --caches and --docker FAILED rows, and the
+// docker-unreachable skip row reach the terminal escaped. A located cache
+// directory is tool-reported, and a failure's text carries the tool's own
+// stderr, so either can hold a bidi override or a C1 CSI. The runes are \u
+// escapes so no literal format character sits in source.
+//
+// Mutations that turn it red, one per subtest: print item.Path raw in
+// printCacheItems, item.Err raw in the --caches or --docker FAILED row, or
+// item.SkipReason raw in printDockerItems.
+func TestCleanCmd_CachesAndDockerRowsAreInert(t *testing.T) {
+	const hostile = "ev\u202eil\u009b31m"
+	const escaped = `ev\u202eil\u009b31m`
+	failure := errors.New("daemon said " + hostile)
+	dfOut := `{"Type":"Images","TotalCount":"1","Active":"0","Size":"1GB","Reclaimable":"500MB"}`
+	// run returns clean's stdout; a failed prune also fails the command, so
+	// its error is not the test's concern here.
+	run := func(t *testing.T, runFunc func(string, []string) (string, error), args ...string) string {
+		t.Helper()
+		withConfirmFn(t, func(string) (bool, error) { return true, nil })
+		client := cleanpkg.New(&exec.FakeRunner{RunFunc: runFunc}, cleanpkg.WithRoot(t.TempDir()))
+		cmd := newCleanCmdForClient(client, theme.Theme{})
+		var stdout bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(new(bytes.Buffer))
+		cmd.SetArgs(args)
+		_ = cmd.ExecuteContext(context.Background())
+		return stdout.String()
+	}
+	assertInert := func(t *testing.T, got, want string) {
+		t.Helper()
+		if strings.ContainsAny(got, "\u202e\u009b") {
+			t.Errorf("stdout carries a raw bidi/control rune: %q", got)
+		}
+		if !strings.Contains(got, want) {
+			t.Errorf("stdout = %q, want it to contain %q", got, want)
+		}
+	}
+
+	t.Run("caches preview path", func(t *testing.T) {
+		cacheDir := filepath.Join(t.TempDir(), hostile)
+		if err := os.MkdirAll(cacheDir, 0o750); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		got := run(t, func(name string, _ []string) (string, error) {
+			if name == "npm" {
+				return cacheDir, nil
+			}
+			return "", errors.New("not installed")
+		}, "--caches")
+		assertInert(t, got, escaped+`" — `)
+	})
+
+	t.Run("caches FAILED row", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		// A non-empty cache, so the pass has something to reclaim and prunes.
+		if err := os.WriteFile(filepath.Join(cacheDir, "blob"), make([]byte, 1024), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		got := run(t, func(name string, args []string) (string, error) {
+			switch {
+			case name == "npm" && len(args) > 0 && args[0] == "cache":
+				return "", failure
+			case name == "npm":
+				return cacheDir, nil
+			}
+			return "", errors.New("not installed")
+		}, "--caches", "--apply")
+		assertInert(t, got, "FAILED  npm: daemon said "+escaped)
+	})
+
+	t.Run("docker skip row", func(t *testing.T) {
+		got := run(t, func(string, []string) (string, error) { return "", failure }, "--docker")
+		assertInert(t, got, "docker unreachable: daemon said "+escaped)
+	})
+
+	t.Run("docker FAILED row", func(t *testing.T) {
+		got := run(t, func(name string, args []string) (string, error) {
+			if name == "docker" && len(args) > 0 && args[0] == "system" && args[1] == "df" {
+				return dfOut, nil
+			}
+			return "", failure
+		}, "--docker", "--apply")
+		assertInert(t, got, "FAILED  images: daemon said "+escaped)
+	})
 }

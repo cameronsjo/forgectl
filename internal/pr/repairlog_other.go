@@ -19,3 +19,9 @@ func openRepairLogNoFollow(path string, flag int, perm os.FileMode) (*os.File, e
 func openNoFollowNonblock(path string, flag int, perm os.FileMode) (*os.File, error) {
 	return os.OpenFile(path, flag, perm) //nolint:gosec // callers pass a validated path
 }
+
+// openNonblock off Unix is the same plain open; see openRepairLogNoFollow
+// above for why that is acceptable here.
+func openNonblock(path string, flag int, perm os.FileMode) (*os.File, error) {
+	return os.OpenFile(path, flag, perm) //nolint:gosec // callers pass a validated path
+}

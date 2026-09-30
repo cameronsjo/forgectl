@@ -4,11 +4,18 @@
 // # Why the names carry the target
 //
 // Two things are created beside a target and can outlive their run: the
-// writeAtomic temp file (the whole new document, secrets included) and the
-// `env set --sops` work directory (a plaintext value, a decrypted read-back,
-// the ciphertext backup). A signal handler covers the catchable signals.
-// SIGKILL, SIGSTOP, a fault and a power loss run no code, so whatever they
-// interrupt stays behind, where `git add -A` will commit it.
+// writeAtomic scratch directory (its temp file holds the whole new document,
+// secrets included) and the `env set --sops` work directory (a plaintext
+// value, a decrypted read-back, the ciphertext backup). A signal handler
+// covers the catchable signals under --sops. SIGKILL, SIGSTOP, a fault and a
+// power loss run no code, so whatever they interrupt stays behind. Both
+// directories carry a `*` .gitignore from creation (scratch.go,
+// cameronsjo/forgectl#698 and #737), so git neither stages nor lists them,
+// and this scan, which lists the directory itself, is what notices them.
+//
+// Before #737 the writeAtomic temp file sat directly beside the target, where
+// `git add -A` would commit it. A forgectl that old can still have left one,
+// so the scan keeps refusing on that name too.
 //
 // The lock is per target (`<base>.lock`), and the scratch names used to carry
 // no target. So a scan for them could not tell a dead run's leftover from a
@@ -68,10 +75,18 @@ func scopeTag(base string) string {
 	return hex.EncodeToString(sum[:])[:scopeTagLen]
 }
 
-// envTempPrefix is writeAtomic's temp-file prefix for t: `.env-<tag>.`, then a
-// random part and `.tmp`. It still must not match IsEnvFileName, so a leftover
-// cannot be reached through --file without --any-file.
+// envTempPrefix is the prefix of the temp file writeAtomic created directly
+// beside t before cameronsjo/forgectl#737: `.env-<tag>.`, then a random part
+// and `.tmp`. Nothing creates it now; the scan still refuses on it. It must
+// not match IsEnvFileName, so a leftover cannot be reached through --file
+// without --any-file.
 func (t Target) envTempPrefix() string { return tempPrefix + scopeTag(t.base) + "." }
+
+// envScratchDirPrefix is writeAtomic's scratch-directory prefix for t:
+// `.forgectl-env-<tag>-`, then a random part.
+func (t Target) envScratchDirPrefix() string {
+	return envScratchPrefix + scopeTag(t.base) + "-"
+}
 
 // SopsWorkDirPattern is the os.MkdirTemp pattern for t's `--sops` work
 // directory: `.forgectl-sops-<tag>-` plus MkdirTemp's random suffix.
@@ -119,23 +134,26 @@ const maxNamedLeftovers = 8
 func scanLeftovers(t Target) error {
 	names, err := t.dir.names()
 	if err != nil {
-		return fmt.Errorf("refusing to write %s: its directory could not be listed to check for leftovers from an interrupted run: %w", t.Rel(), err)
+		return fmt.Errorf("refusing to write %s: its directory could not be listed to check for leftovers from an interrupted run: %w", termsafe.QuotePath(t.Rel()), termsafe.Error(err))
 	}
 	sort.Strings(names)
 
 	envPrefix := t.envTempPrefix()
+	envDirPrefix := t.envScratchDirPrefix()
 	workPrefix := t.SopsWorkDirPattern()
 	backupName := t.sopsBackupName()
 	relDir := filepath.Dir(t.Rel())
 	rel := func(name string) string { return termsafe.QuotePath(filepath.Join(relDir, name)) }
 
-	var backups, workDirs, temps, legacy []string
+	var backups, workDirs, envDirs, temps, legacy []string
 	for _, name := range names {
 		switch {
 		case name == backupName:
 			backups = append(backups, name)
 		case strings.HasPrefix(name, workPrefix):
 			workDirs = append(workDirs, name)
+		case strings.HasPrefix(name, envDirPrefix):
+			envDirs = append(envDirs, name)
 		case strings.HasPrefix(name, envPrefix) && strings.HasSuffix(name, ".tmp"):
 			temps = append(temps, name)
 		case legacyEnvTemp.MatchString(name), legacySopsWorkDir.MatchString(name):
@@ -149,7 +167,7 @@ func scanLeftovers(t Target) error {
 			rel(name))
 	}
 
-	if len(backups)+len(workDirs)+len(temps) == 0 {
+	if len(backups)+len(workDirs)+len(envDirs)+len(temps) == 0 {
 		return nil
 	}
 
@@ -167,6 +185,11 @@ func scanLeftovers(t Target) error {
 			line += fmt.Sprintf(". Its ciphertext backup of %s from before that run is %s", termsafe.QuotePath(t.Rel()), rel(name+"/backup"))
 		}
 		lines = append(lines, line)
+	}
+	for _, name := range envDirs {
+		lines = append(lines, fmt.Sprintf(
+			"%s: the scratch directory of an interrupted write to %s; it may hold the whole new file, secrets included. git does not list it, because it carries a .gitignore. Inspect it, then delete it",
+			rel(name), termsafe.QuotePath(t.Rel())))
 	}
 	for _, name := range temps {
 		lines = append(lines, fmt.Sprintf(

@@ -3,10 +3,11 @@ package docs
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	osexec "os/exec"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,11 @@ const (
 	maxRgRecordBytes = 2 << 20
 	// maxSnippetRunes caps a result's snippet, cut around the first match.
 	maxSnippetRunes = 240
+	// snippetWindowBytes is how far either side of a match a snippet re-read
+	// reaches (readSnippet): maxSnippetRunes runes of the widest UTF-8, plus
+	// one rune of slack for a window that starts mid-rune. It is enough for
+	// snippetAround to cut the same snippet it would from the whole line.
+	snippetWindowBytes = (maxSnippetRunes + 1) * utf8.UTFMax
 	// maxSearchStderrBytes caps the rg diagnostics kept for an error message.
 	maxSearchStderrBytes = 4 << 10
 	// maxSearchErrorRunes caps one SearchError.Message after escaping.
@@ -86,8 +92,9 @@ type SearchError struct {
 // a truncated answer is a stable prefix (the qmd backend instead keeps qmd's
 // ranking order). Truncated is set when at least one more indexed hit existed
 // past the limit, and under qmd also when qmd's result window came back full. Skipped counts hits that were
-// dropped rather than returned: hits outside the index, paths rg could only
-// report as raw bytes, and oversized records. A root that failed is never
+// dropped rather than returned: hits outside the index, hits whose doc no
+// longer opens at its own path, paths rg could only report as raw bytes,
+// and oversized records. A root that failed is never
 // counted in Skipped; it is listed in Errors. SkippedPaths lists the paths
 // the index walk could not read ({root, path, reason}, as in `docs check`'s
 // skipped array; both include skips under vault roots),
@@ -180,9 +187,16 @@ func searchTitles(idx *Index) map[searchKey]string {
 // query over the same tree returns the same hits in the same order and a
 // truncated answer is a stable prefix. It also bounds rg to one worker.
 //
-// Neither security flag is the containment boundary. Every hit is gated
-// through the Index (Search), so a wrong flag here can make search miss a
-// file but never return one from outside a root.
+// Neither security flag is the containment boundary, and neither is
+// --no-follow: rg opens each file by path itself, so a path swapped for a
+// symlink and back while rg reads it could still feed rg outside bytes.
+// Every hit is gated through the Index (Search) and its snippet re-read
+// through Index.Open (hitFiles), so a wrong flag or a swap here can make
+// search miss a file but never return one from outside a root, or text rg
+// read from anywhere else. rg still decides whether a hit exists, and at
+// which line. So a same-uid swap in the middle of rg's read is an existence
+// oracle: an indexed doc can be reported as a hit because outside bytes
+// matched the query, though no outside text is returned.
 func rgArgs(query, path string) []string {
 	return []string{
 		"--no-config",
@@ -207,10 +221,13 @@ func rgArgs(query, path string) []string {
 // Search runs q over every root of idx, one rg process per root, and returns
 // at most limit results.
 //
-// Each hit is kept only when its path is inside its root and names a doc the
-// Index holds at that exact (root, relative path), and Index.Resolve accepts
-// it. That is the same membership gate the reader serves through, so search
-// returns nothing the reader would refuse to serve, whatever rg reports.
+// Each hit is kept only when its path is inside its root, names a doc the
+// Index holds at that exact (root, relative path), and opens through
+// Index.Open at that same path, with no symlink on the way. That is the
+// same gate the reader serves through, so search returns nothing the reader
+// would refuse to serve, whatever rg reports. The snippet is re-read from
+// the file Index.Open returned, never taken from rg's output, so it is text
+// from that doc even if rg read something else (forgectl#743).
 //
 // A doc reachable through two overlapping roots (cwd and cwd/docs, say) is
 // returned once, under the first root in configuration order.
@@ -285,6 +302,8 @@ func (s Searcher) searchRoot(ctx context.Context, idx *Index, root Root, rgPath,
 	}
 
 	unparsed := 0
+	files := &hitFiles{idx: idx, root: root, titles: titles}
+	defer files.close()
 	stream := &rgStream{}
 	stream.handle = func(rec []byte) bool {
 		var m rgRecord
@@ -295,7 +314,7 @@ func (s Searcher) searchRoot(ctx context.Context, idx *Index, root Root, rgPath,
 		if m.Type != "match" {
 			return true
 		}
-		hit, abs, ok := gateHit(idx, root, titles, m)
+		hit, abs, snippet, ok := gateHit(files, m)
 		if !ok {
 			resp.Skipped++
 			return true
@@ -312,6 +331,7 @@ func (s Searcher) searchRoot(ctx context.Context, idx *Index, root Root, rgPath,
 			cancel()
 			return false
 		}
+		hit.Snippet = snippet()
 		resp.Results = append(resp.Results, hit)
 		return true
 	}
@@ -392,15 +412,17 @@ type searchKey struct {
 	root, rel string
 }
 
-// rgRecord is the part of one rg --json record Search reads. A path or line
-// rg cannot express as UTF-8 arrives as {"bytes": base64} instead of text.
+// rgRecord is the part of one rg --json record Search reads. A path rg
+// cannot express as UTF-8 arrives as {"bytes": base64} instead of text.
+// The matched line's own text is not read: the snippet is re-read from the
+// doc at AbsoluteOffset, the byte offset of the line's start (readSnippet).
 type rgRecord struct {
 	Type string `json:"type"`
 	Data struct {
-		Path       rgData `json:"path"`
-		Lines      rgData `json:"lines"`
-		LineNumber int    `json:"line_number"`
-		Submatches []struct {
+		Path           rgData `json:"path"`
+		LineNumber     int    `json:"line_number"`
+		AbsoluteOffset *int64 `json:"absolute_offset"`
+		Submatches     []struct {
 			Start int `json:"start"`
 		} `json:"submatches"`
 	} `json:"data"`
@@ -413,60 +435,207 @@ type rgData struct {
 
 // gateHit turns one rg match into a result plus the doc's canonical path,
 // or reports false when the hit must not be returned: a path only
-// expressible as bytes, a path outside the root, or a path the Index does
-// not hold at that exact (root, relPath).
-func gateHit(idx *Index, root Root, titles map[searchKey]string, m rgRecord) (SearchResult, string, bool) {
+// expressible as bytes, or one files refuses (hitFiles.open). The result's
+// Snippet is left empty; snippet reads it from the file files opened,
+// around the match rg reported, and is called only for a hit that is
+// returned, before the next hit reaches files.
+func gateHit(files *hitFiles, m rgRecord) (SearchResult, string, func() string, bool) {
 	if m.Data.Path.Text == nil {
-		return SearchResult{}, "", false
+		return SearchResult{}, "", nil, false
 	}
-	relSlash, title, abs, ok := gatePath(idx, root, titles, *m.Data.Path.Text)
+	h, ok := files.open(*m.Data.Path.Text)
 	if !ok {
-		return SearchResult{}, "", false
-	}
-	line := ""
-	if m.Data.Lines.Text != nil {
-		line = *m.Data.Lines.Text
-	} else if raw, err := base64.StdEncoding.DecodeString(m.Data.Lines.Bytes); err == nil {
-		line = strings.ToValidUTF8(string(raw), "\uFFFD")
+		return SearchResult{}, "", nil, false
 	}
 	start := 0
 	if len(m.Data.Submatches) > 0 {
 		start = m.Data.Submatches[0].Start
 	}
+	snippet := func() string {
+		if m.Data.AbsoluteOffset != nil {
+			return readSnippet(h.f, *m.Data.AbsoluteOffset, start)
+		}
+		if off, ok := lineOffset(h.f, m.Data.LineNumber); ok {
+			return readSnippet(h.f, off, start)
+		}
+		return ""
+	}
 	return SearchResult{
-		Root:    root.Label,
-		Path:    relSlash,
-		Title:   title,
-		Line:    m.Data.LineNumber,
-		Snippet: snippetAround(line, start, maxSnippetRunes),
-	}, abs, true
+		Root:  h.root.Label,
+		Path:  h.rel,
+		Title: h.title,
+		Line:  m.Data.LineNumber,
+	}, h.abs, snippet, true
+}
+
+// openHit is one doc a backend reported, opened through the Index.
+type openHit struct {
+	root            Root
+	rel, title, abs string
+	f               *os.File
+}
+
+// hitFiles opens the docs a backend's hits name, for one root, and keeps
+// the last one open: rg reports every hit in a file together, so a file
+// with several hits is resolved and opened once. close releases it.
+type hitFiles struct {
+	idx    *Index
+	root   Root
+	titles map[searchKey]string
+	path   string
+	cur    *openHit
+	ok     bool
+}
+
+// open returns the doc at path, or false unless gatePath accepts it. The
+// result stays valid until the next open or close.
+func (hf *hitFiles) open(path string) (*openHit, bool) {
+	if hf.path != "" && hf.path == path {
+		return hf.cur, hf.ok
+	}
+	hf.close()
+	hf.path = path
+	hf.cur, hf.ok = gatePath(hf.idx, hf.root, hf.titles, path)
+	return hf.cur, hf.ok
+}
+
+func (hf *hitFiles) close() {
+	if hf.cur != nil {
+		_ = hf.cur.f.Close()
+	}
+	hf.path, hf.cur, hf.ok = "", nil, false
 }
 
 // gatePath is the containment gate every backend's hit passes through. It
-// reports the slash-separated relative path, title, and canonical absolute
-// path of the doc at path under root, or false unless path is inside root,
-// names a doc the Index holds at exactly that (root, relative path), and
-// Index.Resolve accepts it. That is the reader's own membership rule, so no
-// backend can return a doc the reader would refuse to serve.
-func gatePath(idx *Index, root Root, titles map[searchKey]string, path string) (string, string, string, bool) {
+// opens the doc at path under root and returns it with its slash-separated
+// relative path, title, and canonical absolute path, or false unless path
+// is inside root, names a doc the Index holds at exactly that (root,
+// relative path), and Index.Open opens it at that same path. That is the
+// reader's own rule, so no backend can return a doc the reader would refuse
+// to serve.
+//
+// The last condition is what makes the hit's name and its file agree:
+// Index.Open follows an in-root symlink, so a doc swapped for a symlink to
+// another indexed doc would otherwise open that doc under this one's name
+// (forgectl#743). The caller closes the file.
+func gatePath(idx *Index, root Root, titles map[searchKey]string, path string) (*openHit, bool) {
 	rel, err := filepath.Rel(root.Path, path)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", "", "", false
+		return nil, false
 	}
 	relSlash := filepath.ToSlash(rel)
 	// Exact membership first: walkRoot never indexes a symlinked file, so a
 	// symlink a backend reported (rg under a config that re-enabled --follow,
-	// say) has no entry here even where Resolve would follow it to an
-	// indexed target.
+	// say) has no entry here even where Open would follow it to an indexed
+	// target.
 	title, ok := titles[searchKey{root: root.Label, rel: relSlash}]
 	if !ok {
-		return "", "", "", false
+		return nil, false
 	}
-	abs, err := idx.Resolve(root.Label, relSlash)
+	f, abs, err := idx.Open(root.Label, relSlash)
 	if err != nil {
-		return "", "", "", false
+		return nil, false
 	}
-	return relSlash, title, abs, true
+	if abs != filepath.Join(root.Path, rel) {
+		_ = f.Close()
+		return nil, false
+	}
+	return &openHit{root: root, rel: relSlash, title: title, abs: abs, f: f}, true
+}
+
+// readSnippet re-reads a snippet from f: the line starting at byte offset
+// lineStart, cut by snippetAround around byte start within it, exactly as
+// the snippet of the whole line would be. It reads at most
+// snippetWindowBytes either side of the match, never the whole line, which
+// may be up to rg's 1 MiB --max-filesize long. A line that no longer starts
+// at lineStart (the file changed after the backend read it) still yields
+// text from this file only. A read failure yields an empty snippet.
+func readSnippet(f io.ReaderAt, lineStart int64, start int) string {
+	if lineStart < 0 || start < 0 {
+		return ""
+	}
+	before := min(start, snippetWindowBytes)
+	buf := make([]byte, before+snippetWindowBytes)
+	n, err := f.ReadAt(buf, lineStart+int64(start-before))
+	if err != nil && !errors.Is(err, io.EOF) {
+		return ""
+	}
+	text := buf[:n]
+	pos := min(before, len(text))
+	// Keep only the line the match is on.
+	if i := bytes.LastIndexByte(text[:pos], '\n'); i >= 0 {
+		text, pos = text[i+1:], pos-(i+1)
+	}
+	if i := bytes.IndexByte(text[pos:], '\n'); i >= 0 {
+		text = text[:pos+i]
+	} else if n == len(buf) {
+		text = trimPartialRune(text)
+	}
+	// A window that starts mid-line may start mid-rune.
+	if start > before {
+		for pos > 0 && len(text) > 0 && !utf8.RuneStart(text[0]) {
+			text, pos = text[1:], pos-1
+		}
+	}
+	// Split at the start of the matched rune, as snippetAround would, so
+	// neither half holds a partial one.
+	pos = min(pos, len(text))
+	for pos > 0 && pos < len(text) && !utf8.RuneStart(text[pos]) {
+		pos--
+	}
+	head := strings.ToValidUTF8(string(text[:pos]), "\uFFFD")
+	tail := strings.ToValidUTF8(string(text[pos:]), "\uFFFD")
+	return snippetAround(head+tail, len(head), maxSnippetRunes)
+}
+
+// trimPartialRune drops an incomplete UTF-8 sequence a read cut off at the
+// end of b.
+func trimPartialRune(b []byte) []byte {
+	for i := len(b) - 1; i >= 0 && i >= len(b)-utf8.UTFMax; i-- {
+		if utf8.RuneStart(b[i]) {
+			if !utf8.FullRune(b[i:]) {
+				return b[:i]
+			}
+			return b
+		}
+	}
+	return b
+}
+
+// lineOffset returns the byte offset in f where 1-based line lineNo starts,
+// scanning at most maxScanBytes, the index's own per-doc read cap. It is
+// the fallback for a hit that names a line but no offset.
+func lineOffset(f io.ReaderAt, lineNo int) (int64, bool) {
+	if lineNo < 1 {
+		return 0, false
+	}
+	if lineNo == 1 {
+		return 0, true
+	}
+	r := io.NewSectionReader(f, 0, maxScanBytes)
+	buf := make([]byte, 32<<10)
+	var off int64
+	line := 1
+	for {
+		n, err := r.Read(buf)
+		chunk := buf[:n]
+		for {
+			i := bytes.IndexByte(chunk, '\n')
+			if i < 0 {
+				break
+			}
+			off += int64(i + 1)
+			chunk = chunk[i+1:]
+			line++
+			if line == lineNo {
+				return off, true
+			}
+		}
+		off += int64(len(chunk))
+		if err != nil {
+			return 0, false
+		}
+	}
 }
 
 // snippetAround returns at most maxRunes runes of line, centred on byte

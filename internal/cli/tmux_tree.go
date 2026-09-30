@@ -27,10 +27,11 @@ func newTmuxTreeCmd(client *tmux.Client) *cobra.Command {
 			}
 			noIcons, _ := cmd.Flags().GetBool("no-icons") // persistent root flag
 			icons := !noIcons && os.Getenv("NO_COLOR") == ""
-			out, err := client.Tree(cmd.Context(), icons)
+			out, unreadable, err := client.TreeListing(cmd.Context(), icons)
 			if err != nil {
 				return err
 			}
+			writeUnreadableNote(cmd, unreadable)
 			fmt.Fprintln(cmd.OutOrStdout(), out)
 			return nil
 		},
@@ -68,19 +69,29 @@ type tmuxTreePaneJSON struct {
 
 func writeTmuxTreeJSON(cmd *cobra.Command, client *tmux.Client) error {
 	ctx := cmd.Context()
-	sessions, err := client.ListSessions(ctx)
+	sessions, unreadableSessions, err := client.DisplaySessionListing(ctx)
 	if err != nil {
 		return err
 	}
-	windows, err := client.ListWindows(ctx)
+	windows, unreadableWindows, err := client.DisplayWindowListing(ctx)
 	if err != nil {
 		return err
 	}
-	panes, err := client.ListPanes(ctx)
+	panes, unreadablePanes, err := client.DisplayPaneListing(ctx)
 	if err != nil {
 		return err
 	}
+	writeUnreadableNote(cmd, tmux.UnreadableRows{Sessions: unreadableSessions, Windows: unreadableWindows, Panes: unreadablePanes})
 	return encodeTmuxTreeJSON(cmd.OutOrStdout(), sessions, windows, panes)
+}
+
+// writeUnreadableNote prints the unreadable-rows note on stderr, in both
+// modes, the way `tmux ls` does (forgectl#815): the JSON keeps its shape, and
+// a tree with a silently missing session or window reads as a smaller server.
+func writeUnreadableNote(cmd *cobra.Command, unreadable tmux.UnreadableRows) {
+	if note := unreadable.Note(); note != "" {
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), note)
+	}
 }
 
 // encodeTmuxTreeJSON is the pure assembly step, testable from a fixture. It

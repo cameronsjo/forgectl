@@ -13,6 +13,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 	"github.com/cameronsjo/forgectl/internal/step"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Steps is quarantine's workflow step contribution (ADR-0005): the `strip`
@@ -99,7 +100,7 @@ func newStripStep(defaultGlobs []string) step.Runner {
 			matches, err := globFold(workspace, g)
 			if err != nil {
 				slog.Warn("Bad strip pattern.", "glob", g, "error", err)
-				return fmt.Errorf("strip pattern %q: %w", g, err)
+				return fmt.Errorf("strip pattern %s: %w", termsafe.QuoteArgMax(g, 0), termsafe.Error(err))
 			}
 			for _, target := range matches {
 				// A pattern with no ".." can still reach outside via a symlink
@@ -107,12 +108,12 @@ func newStripStep(defaultGlobs []string) step.Runner {
 				// real path before deleting through it.
 				if !sandbox.WithinWorkspace(workspace, target) {
 					slog.Error("Strip match escapes workspace; refusing.", "glob", g, "target", target)
-					return fmt.Errorf("strip match %q escapes workspace", target)
+					return fmt.Errorf("strip match %s escapes workspace", stripMatchEcho(workspace, target))
 				}
 				slog.Debug("Removing path.", "glob", g, "target", target)
-				if err := os.RemoveAll(target); err != nil {
+				if err := removeStripTarget(target); err != nil {
 					slog.Error("Failed to remove path.", "glob", g, "target", target, "error", err)
-					return fmt.Errorf("strip %s: %w", g, err)
+					return fmt.Errorf("strip %s: %w", termsafe.QuoteArgMax(g, 0), termsafe.Error(err))
 				}
 			}
 		}
@@ -120,6 +121,24 @@ func newStripStep(defaultGlobs []string) step.Runner {
 		return nil
 	}
 }
+
+// stripMatchEcho names a strip match for an error, relative to the workspace
+// root (#821): the relative form is the part that identifies the offending
+// entry, and the absolute workspace path adds only the operator's local
+// layout. A match that is not lexically under the workspace (Rel fails or
+// climbs out) falls back to the absolute path. Either way it is quoted and
+// capped.
+func stripMatchEcho(workspace, target string) string {
+	rel, err := filepath.Rel(workspace, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return termsafe.QuotePathMax(target, 0)
+	}
+	return termsafe.QuotePathMax(rel, 0)
+}
+
+// removeStripTarget removes one strip match. It is a variable only so a test
+// can make the removal fail, which a root-run suite cannot otherwise reach.
+var removeStripTarget = os.RemoveAll
 
 // validateStripGlob rejects a glob that could escape ${workspace} — an
 // absolute path, or any ".." path-traversal segment — and a glob that
@@ -139,20 +158,20 @@ func validateStripGlob(g string) error {
 		return errors.New("strip glob must not be empty")
 	}
 	if filepath.IsAbs(g) {
-		return fmt.Errorf("strip glob %q must not be absolute", g)
+		return fmt.Errorf("strip glob %s must not be absolute", termsafe.QuoteArgMax(g, 0))
 	}
 	// The root check cleans AFTER separator normalization, with the slash-only
 	// path.Clean: filepath.Clean does not touch a backslash on Unix, so a
 	// cleaned-then-replaced ".\" arrives as "./" and slips the check.
 	if rooted := path.Clean(strings.ReplaceAll(g, "\\", "/")); rooted == "." || rooted == "/" {
-		return fmt.Errorf("strip glob %q must not resolve to the workspace root", g)
+		return fmt.Errorf("strip glob %s must not resolve to the workspace root", termsafe.QuoteArgMax(g, 0))
 	}
 	// Normalize Windows separators so a "..\" segment is caught on any OS, then
 	// reject any ".." path segment wherever it appears.
 	normalized := strings.ReplaceAll(filepath.Clean(g), "\\", "/")
 	for _, seg := range strings.Split(normalized, "/") {
 		if seg == ".." {
-			return fmt.Errorf("strip glob %q must not traverse outside the workspace", g)
+			return fmt.Errorf("strip glob %s must not traverse outside the workspace", termsafe.QuoteArgMax(g, 0))
 		}
 	}
 	return nil

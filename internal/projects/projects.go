@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	neturl "net/url"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
@@ -227,20 +229,28 @@ func withGitLookPath(fn func(string) (string, error)) Option {
 	return func(c *Client) { c.lookPath = fn }
 }
 
+// ResolveRoot returns the projects root: $PROJECTS_DIR (a leading ~/ is
+// expanded), else ~/Projects. It is what [New] uses, exported so a caller that
+// only needs the directory does not build a Client.
+func ResolveRoot() string {
+	dir := os.Getenv("PROJECTS_DIR")
+	home, _ := os.UserHomeDir()
+	switch {
+	case dir == "":
+		return filepath.Join(home, "Projects")
+	case strings.HasPrefix(dir, "~/"):
+		return filepath.Join(home, dir[2:])
+	default:
+		return dir
+	}
+}
+
 // New builds a Client. It reads $PROJECTS_DIR, falling back to ~/Projects.
 // A leading ~ is expanded so env vars stored as "~/Projects" work correctly.
 // It also resolves git exactly once to an absolute path; a lookup failure is
 // retained as an empty pin so status probes fail closed as StatusUnknown.
 func New(run exec.Runner, opts ...Option) *Client {
-	dir := os.Getenv("PROJECTS_DIR")
-	if dir == "" {
-		home, _ := os.UserHomeDir()
-		dir = filepath.Join(home, "Projects")
-	} else if strings.HasPrefix(dir, "~/") {
-		home, _ := os.UserHomeDir()
-		dir = filepath.Join(home, dir[2:])
-	}
-	c := &Client{Dir: dir, run: run, lookPath: osexec.LookPath, gitHubHost: githubauth.DefaultHost}
+	c := &Client{Dir: ResolveRoot(), run: run, lookPath: osexec.LookPath, gitHubHost: githubauth.DefaultHost}
 	for _, opt := range opts {
 		opt(c)
 	}
@@ -295,7 +305,7 @@ type discoverCandidate struct {
 // serial and simple while parallelizing only the part that's actually slow.
 func (c *Client) discoverDir(ctx context.Context, dir string) ([]Project, error) {
 	if _, err := os.Stat(dir); err != nil {
-		return nil, fmt.Errorf("projects directory not found: %s", dir)
+		return nil, fmt.Errorf("projects directory not found: %s", termsafe.QuotePath(dir))
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -463,6 +473,10 @@ func isGitRepo(dir string) bool {
 // called `forge` while a `forge-review` session existed found the sibling and
 // attached to it — the project never opened, and nothing reported a problem
 // (forgectl#237).
+//
+// tmux stores ':' and '.' in a session name as '_', so directories named
+// a.b, a:b and a_b share one session, the same way two directories with one
+// basename already do (forgectl#815).
 func (c *Client) Open(ctx context.Context, dir string) error {
 	name := filepath.Base(dir)
 	client := tmux.New(c.run)
@@ -499,10 +513,9 @@ func (c *Client) localRepos(ctx context.Context) ([]Repo, error) {
 				if host, owner, name := parseRemoteURL(url, c.effectiveGitHubHost()); name != "" {
 					r.Host, r.Owner, r.Name = host, owner, name
 					// SSHURL is contractually an SSH clone URL; an HTTPS origin would
-					// mislabel it in the JSON inventory, so only store SSH-form origins.
-					if isSSHURL(url) {
-						r.SSHURL = url
-					}
+					// mislabel it in the JSON inventory, so only store SSH-form origins,
+					// and none that carries a password (inventorySSHURL).
+					r.SSHURL = inventorySSHURL(url)
 				}
 			}
 		}
@@ -720,7 +733,7 @@ func (c *Client) CloneInto(ctx context.Context, r Repo, wing string) (string, er
 			"clone it elsewhere by hand", dest)
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return "", fmt.Errorf("creating canonical clone parent dirs for %s: %w", dest, err)
+		return "", fmt.Errorf("creating canonical clone parent dirs for %s: %w", termsafe.QuotePath(dest), termsafe.Error(err))
 	}
 	// The dispatch predicate is the HOSTNAME, not a token. Only the configured
 	// GitHub host clones through gh, which supplies its own URL under the
@@ -900,6 +913,39 @@ func (c *Client) originMatches(ctx context.Context, dir string, r Repo) bool {
 	}
 	host, owner, name := parseRemoteURL(strings.TrimSpace(url), c.effectiveGitHubHost())
 	return host == r.Host && owner == r.Owner && name == r.Name
+}
+
+// inventorySSHURL returns origin as the SSHURL a local repo records in the
+// JSON inventory, or "" (#749). The inventory is written down and printed,
+// so an origin such as ssh://user:PASS@host/o/r must not reach it. Only an
+// SSH-form origin is kept, and only when it is a redact.Repo shape or holds
+// at most one '@' and no "::" and is scp-like git@host:path or an ssh:// URL
+// with a host and no password.
+// Dropping a password-bearing origin loses no working clone URL: git hands
+// ssh the whole "user:PASS@host" as the destination, so ssh logs in as the
+// user "user:PASS" and the password is never used as one.
+func inventorySSHURL(origin string) string {
+	if !isSSHURL(origin) {
+		return ""
+	}
+	if _, ok := redact.Repo(origin); ok {
+		return origin
+	}
+	if strings.Count(origin, "@") > 1 || strings.Contains(origin, "::") {
+		return ""
+	}
+	if !strings.HasPrefix(origin, "ssh://") {
+		// scp-like git@host:path: the userinfo is exactly "git".
+		return origin
+	}
+	u, err := neturl.Parse(origin)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	if _, hasPassword := u.User.Password(); hasPassword {
+		return ""
+	}
+	return origin
 }
 
 // isSSHURL reports whether a git remote URL uses an SSH transport — the ssh://

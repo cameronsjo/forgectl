@@ -1,6 +1,6 @@
 # forgectl
 
-Personal dev-experience CLI for a headless macOS workbench driven over SSH — from laptops, phones, and Termius. What began as a tmux helper (superseding the ad-hoc bash `s` script; smart session-naming stays with `sesh`) has grown into the **workbench forge**: 31 composable command-group modules (see the table below) with a declarative workflow DSL as the composition layer.
+Personal dev-experience CLI for a headless macOS workbench driven over SSH — from laptops, phones, and Termius. What began as a tmux helper (superseding the ad-hoc bash `s` script; smart session-naming stays with `sesh`) has grown into the **workbench forge**: 32 composable command-group modules (see the table below) with a declarative workflow DSL as the composition layer.
 
 Built for two hands and one thumb:
 
@@ -21,7 +21,7 @@ Reading a local clone's git state — `projects list`, `projects pick`, the proj
 
 ## Command groups
 
-29 command groups, at a glance. `forgectl --help` lists them from the binary
+30 command groups, at a glance. `forgectl --help` lists them from the binary
 itself; this table is the scannable index — full verbs and flags for every
 group are in the `## Usage` roster below, and the groups with a dedicated
 deep-dive get a link here.
@@ -36,6 +36,7 @@ deep-dive get a link here.
 | `launch` | Per-project Claude Code / Codex CLI / Pi launcher (alias: `cl`) | [launch](docs/commands/launch.md) |
 | `resume` | Get back into a Claude Code session after a terminal restart | [resume](docs/commands/resume.md) |
 | `surface` | Start a harness inside a terminal manager (tmux/cmux/herdr) without exposing its invocation | Usage below |
+| `herdr` | Helpers for the herdr terminal multiplexer: group tabs into workspaces by rule | [herdr](docs/commands/herdr.md) |
 | `recipe` | Run small built-in workbench recipes (alias: `r`) | [recipe](docs/commands/recipe.md) |
 | `workflow` | Run declarative workflows composing forgectl's other verbs (alias: `flow`) | Usage below |
 | `bench` | Discover, health-check, and wire the local dev bench (hearth, chronicle) | [bench](docs/commands/bench.md) |
@@ -192,7 +193,9 @@ forgectl env keys [--file .env]                             # list KEY names onl
 forgectl env set KEY [--file .env] [--clipboard]             # value from piped stdin, no-echo prompt, or clipboard — never argv
 forgectl env get KEY --clipboard [--file .env]               # value to clipboard only; no print path exists
 forgectl env check [--file .env] [--example .env.example]    # missing/extra keys, names only (see docs/commands/env.md for exit codes)
-forgectl env redact [--file .env]                            # print file with values masked ****
+#   --json: verdict {"missing":[...],"extra":[...]} on stdout; any failure is one {"error","code","path"} object on stderr
+#   (code file_not_found → exit 2, check_failed → exit 1; see docs/commands/env.md)
+forgectl env redact [--file .env]                            # print file with values and comments masked ****
 #   --file must name an env file (.env, .env.*, *.env); --any-file overrides, TTY-confirmed only
 forgectl env set a.b.key --sops [--file secrets.sops.yaml]   # one key into a SOPS-encrypted YAML file
 #   --sops takes a dotted path, defaults to secrets.sops.yaml at the repo root, and
@@ -266,6 +269,11 @@ forgectl k8s inspect pod/api-7f6c9 -n prod                # extra args forward t
 forgectl theme show                      # resolved hex per role, provenance, contrast
 forgectl theme show --json               # the same, machine-readable
 forgectl theme preview                   # render each role so you can see it
+
+# herdr — helpers for the herdr terminal multiplexer (run from a herdr pane)
+forgectl herdr organize                  # report how tabs would be grouped into workspaces and ordered
+forgectl herdr organize --explain        # also show which rule caught each tab
+forgectl herdr organize --apply          # make the moves; restores focus; needs the cameronsjo/herdr fork
 
 # tasks — read-only Vikunja task browser, local cache, no write verbs
 # one-time setup: store a READ-ONLY API token in the login keychain (prompts for the value)
@@ -410,6 +418,8 @@ forgectl pr prs / dash / pick
 `sesh` handles the smarts — path discovery, named sessions, zoxide integration. `forgectl` provides the stable verbs and the thumb-friendly TUI on top.
 
 **Session names are matched exactly.** Every command that names a session — `tmux kill`, `tmux rename`, `projects open`, the TUI's actions — compares your argument to the session list with plain string equality, then acts on the session's native tmux id. tmux's own `-t` resolution does not run, so an abbreviation no longer finds a session: with only `forge-review` running, `forgectl tmux kill forge` reports `no such session: forge` instead of killing `forge-review`. Names containing spaces, punctuation, `*`, or a leading `=` work fine, because none of them are interpreted. If you relied on abbreviating, type the full name (`forgectl tmux ls` lists them). The one exception is `tmux pick`, which hands the name to `sesh connect` — matching there is sesh's smart naming, by design, and is unaffected by this.
+
+**Run forgectl under a UTF-8 locale.** tmux stores a non-ASCII session name correctly whatever the locale, but outside tmux under `LANG=C` it lists that name with `_` in place of each non-ASCII character (`café` lists as `caf_`). Exact matching then misses the session, so a second `projects open` on such a directory tries to create it again and fails with tmux's `duplicate session: caf_`. Set `LANG` or `LC_ALL` to a UTF-8 locale. Inside tmux this does not apply: any `TMUX` value, even an empty one, makes tmux list names in UTF-8. forgectl creates every session with `.` and `:` in its name mapped to `_`, and looks sessions up the same way. tmux 3.7a and later keep those characters as typed, so a session you created by hand as `my.proj` is not found by forgectl's `my_proj` lookup and is not reused.
 
 `projects` builds a unified inventory across local clones, GitHub, and whichever Gitea instance `tea` is logged into. A project that isn't checked out locally shows as `[uncloned]`; picking it clones from the right host before opening the tmux session. `list --json` emits structured records to stdout — degradation notes (e.g. a host that's unreachable) go to stderr so the pipe stays clean.
 

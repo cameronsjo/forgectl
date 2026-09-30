@@ -18,7 +18,7 @@ package env
 //   [x] Refused: an existing target that resolves to a directory, not a
 //       regular file
 //   [x] Refused: an existing target that resolves to a FIFO, not a regular
-//       file
+//       file (locate_unix_test.go: syscall.Mkfifo is unix-only)
 //   [x] Target.Rel is repo-relative, never the absolute resolved path
 //   [x] A containment refusal names what the caller typed, not the resolved
 //       path (which is by definition outside the repo)
@@ -26,9 +26,7 @@ package env
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
-	"syscall"
 	"testing"
 )
 
@@ -228,28 +226,6 @@ func TestLocate_ExistingDirectory_Refused(t *testing.T) {
 	_, err := locate(".env", root)
 	if err == nil {
 		t.Fatal("locate against a directory target returned nil error, want a refusal")
-	}
-	if !strings.Contains(err.Error(), "not a regular file") {
-		t.Errorf("error = %q, want it to name the regular-file rule", err.Error())
-	}
-}
-
-func TestLocate_ExistingFIFO_Refused(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("FIFOs are a unix concept; forgectl only ships linux/darwin builds")
-	}
-	root := t.TempDir()
-	initGitRepo(t, root)
-	fifoPath := filepath.Join(root, ".env")
-	if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
-		t.Skipf("Mkfifo unsupported in this environment: %v", err)
-	}
-
-	// A FIFO with no writer would block os.Open/parseFile forever — resolution
-	// must refuse it before any caller ever opens it.
-	_, err := locate(".env", root)
-	if err == nil {
-		t.Fatal("locate against a FIFO target returned nil error, want a refusal")
 	}
 	if !strings.Contains(err.Error(), "not a regular file") {
 		t.Errorf("error = %q, want it to name the regular-file rule", err.Error())

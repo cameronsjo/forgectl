@@ -87,7 +87,7 @@ only), 2 error.`,
 			}
 			projectDir, err := os.Getwd()
 			if err != nil {
-				return WithExitCode(fmt.Errorf("resolve project directory: %w", err), 2)
+				return WithExitCode(fmt.Errorf("resolve project directory: %w", termsafe.Error(err)), 2)
 			}
 
 			report, err := computePreflightReport(homeDir, projectDir, cfg)

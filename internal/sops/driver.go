@@ -8,6 +8,7 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -128,11 +129,11 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 	// by name between the check and the use is how the final path component
 	// gets swapped underneath a decision.
 	if !IsSOPSFile(before) {
-		return OutcomeUnspecified, fmt.Errorf("refusing %s: it has no top-level sops: block, so it is not a SOPS document", target.Rel())
+		return OutcomeUnspecified, fmt.Errorf("refusing %s: it has no top-level sops: block, so it is not a SOPS document", termsafe.QuotePath(target.Rel()))
 	}
 	rules, err := ReadPlaintextRules(before)
 	if err != nil {
-		return OutcomeUnspecified, fmt.Errorf("refusing %s: %w", target.Rel(), err)
+		return OutcomeUnspecified, fmt.Errorf("refusing %s: %w", termsafe.QuotePath(target.Rel()), err)
 	}
 	// The WHOLE path, not the leaf: sops applies these rules to a key and its
 	// entire subtree, so an ancestor decides the outcome. See
@@ -141,7 +142,7 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 		// Names the rule and the file, never the path — the sops grammar
 		// admits plenty of real credential shapes, so a token pasted into the
 		// key slot reaches here.
-		return OutcomeUnspecified, fmt.Errorf("refusing to write into %s: %s, so the value would be stored in the clear", target.Rel(), reason)
+		return OutcomeUnspecified, fmt.Errorf("refusing to write into %s: %s, so the value would be stored in the clear", termsafe.QuotePath(target.Rel()), reason)
 	}
 
 	// The guard is armed BEFORE the work directory exists and released AFTER
@@ -214,7 +215,7 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 		// forgectl and names a rule rather than an argument; sops' own output
 		// is still never surfaced.
 		if reason := work.readEditorError(); reason != "" {
-			return OutcomeUnspecified, fmt.Errorf("%s — %s is unchanged", reason, target.Rel())
+			return OutcomeUnspecified, fmt.Errorf("%s — %s is unchanged", reason, termsafe.QuotePath(target.Rel()))
 		}
 		return OutcomeUnspecified, sopsRefusalError(target)
 	}
@@ -259,7 +260,7 @@ const sopsUnchangedExit = 200
 // is sops failing on its own terms, usually a key it cannot use, and a
 // decrypt with stdout discarded reproduces that without writing anything.
 func sopsRefusalError(target env.Target) error {
-	return fmt.Errorf("sops refused the edit — %s is unchanged. Its output is withheld because it can quote the file's plaintext; running `sops decrypt` on the file with stdout discarded shows why it failed", target.Rel())
+	return fmt.Errorf("sops refused the edit — %s is unchanged. Its output is withheld because it can quote the file's plaintext; running `sops decrypt` on the file with stdout discarded shows why it failed", termsafe.QuotePath(target.Rel()))
 }
 
 // restoreFailed is the error for a failed run whose restore also failed. kept
@@ -268,14 +269,14 @@ func sopsRefusalError(target env.Target) error {
 // than git (cameronsjo/forgectl#652).
 func restoreFailed(cause, restoreErr error, target env.Target, kept string) error {
 	if kept == "" {
-		return fmt.Errorf("%w — and %s could NOT be restored: %v. Its backup could not be kept either; restore it from git", cause, target.Rel(), restoreErr)
+		return fmt.Errorf("%w — and %s could NOT be restored: %v. Its backup could not be kept either; restore it from git", cause, termsafe.QuotePath(target.Rel()), termsafe.Error(restoreErr))
 	}
 	shown := filepath.Base(kept)
 	if rel, err := filepath.Rel(filepath.Dir(target.Abs()), kept); err == nil {
 		shown = rel
 	}
 	shown = termsafe.QuotePath(filepath.Join(filepath.Dir(target.Rel()), shown))
-	return fmt.Errorf("%w — and %s could NOT be restored: %v. Its ciphertext from before this run is kept at %s; restore from it or from git, then delete it", cause, target.Rel(), restoreErr, shown)
+	return fmt.Errorf("%w — and %s could NOT be restored: %v. Its ciphertext from before this run is kept at %s; restore from it or from git, then delete it", cause, termsafe.QuotePath(target.Rel()), termsafe.Error(restoreErr), shown)
 }
 
 // verify proves the write landed, and landed ENCRYPTED.
@@ -436,7 +437,8 @@ func selfEditorCommand() (string, error) {
 }
 
 // workDir is the private 0700 directory holding the value, the nonce, the
-// backup, and the outcome for one run. It is also the edit call's TMPDIR, so
+// backup, and the outcome for one run, under a .gitignore that keeps git from
+// staging any of it. It is also the edit call's TMPDIR, so
 // sops' decrypted copy of the whole document lives here while the editor runs.
 type workDir struct {
 	dir    string
@@ -446,6 +448,11 @@ type workDir struct {
 	// scoped to it, so the next run's leftover scan finds it.
 	keep string
 }
+
+// readNonce fills the work directory's nonce. It is crypto/rand.Read, and a
+// variable only so a test can make it fail and prove newWorkDir removes the
+// directory it just made.
+var readNonce = rand.Read
 
 // newWorkDir creates the directory as a SIBLING of the target.
 //
@@ -458,20 +465,21 @@ func newWorkDir(target env.Target) (*workDir, error) {
 	parent := filepath.Dir(target.Abs())
 	// Scoped to the target, so the next run's leftover scan (internal/env,
 	// under this same lock) can attribute a directory a SIGKILL left behind.
-	dir, err := os.MkdirTemp(parent, target.SopsWorkDirPattern())
+	// MakeScratchDir writes the `*` .gitignore exclusively before returning,
+	// so no plaintext ever sits in the directory without it
+	// (cameronsjo/forgectl#698). It keeps the directory out of `git add`, not
+	// out of `git stash --all`, which copies ignored files into a stash
+	// commit, plaintext included. See internal/env/scratch.go.
+	dir, err := env.MakeScratchDir(parent, target.SopsWorkDirPattern())
 	if err != nil {
-		return nil, fmt.Errorf("create a work directory beside %s: %w", target.Rel(), err)
-	}
-	// 0700, not 0600: a directory needs its execute bit to be entered at all,
-	// which is what gosec's file-oriented rule does not model.
-	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // G302: 0700 on a DIRECTORY; the execute bit is required
-		_ = os.RemoveAll(dir)
-		return nil, fmt.Errorf("secure the work directory beside %s: %w", target.Rel(), err)
+		return nil, fmt.Errorf("prepare a work directory beside %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(err))
 	}
 
 	buf := make([]byte, nonceBytes)
-	if _, err := rand.Read(buf); err != nil {
-		_ = os.RemoveAll(dir)
+	if _, err := readNonce(buf); err != nil {
+		if rerr := env.RemoveScratchDir(dir); rerr != nil {
+			slog.Warn("Failed to remove the sops work directory.", "error", rerr)
+		}
 		return nil, errors.New("could not generate a nonce")
 	}
 
@@ -484,16 +492,22 @@ func newWorkDir(target env.Target) (*workDir, error) {
 }
 
 // stage writes the ciphertext backup, the value, and the nonce.
+//
+// Each is created exclusively (O_CREAT|O_EXCL), like the .gitignore before
+// them. The directory is fresh and 0700, so nothing should already be at
+// these names; if something is, it was put there by someone else, and
+// os.WriteFile would truncate it, or follow a planted symlink and write the
+// plaintext value wherever it points. An exclusive create fails instead.
 func (w *workDir) stage(before []byte, value string) error {
-	if err := os.WriteFile(w.backup, before, 0o600); err != nil {
+	if err := env.WriteFileExclusive(w.backup, before); err != nil {
 		return errors.New("could not write the backup")
 	}
 	// No added newline: the read-back comparison is byte-exact, and a
 	// terminator here would make every value fail it.
-	if err := os.WriteFile(filepath.Join(w.dir, "value"), []byte(value), 0o600); err != nil {
+	if err := env.WriteFileExclusive(filepath.Join(w.dir, "value"), []byte(value)); err != nil {
 		return errors.New("could not stage the value")
 	}
-	if err := os.WriteFile(filepath.Join(w.dir, "nonce"), []byte(w.nonce), 0o600); err != nil {
+	if err := env.WriteFileExclusive(filepath.Join(w.dir, "nonce"), []byte(w.nonce)); err != nil {
 		return errors.New("could not stage the nonce")
 	}
 	return nil
@@ -616,9 +630,14 @@ func (w *workDir) preserveBackup() bool {
 }
 
 // pruneToBackup removes every entry of the work directory except the
-// ciphertext backup, and reports whether the backup is now the ONLY thing
-// left. A false result means the caller must remove the whole directory: a
-// directory kept for its backup must never also keep a plaintext file.
+// ciphertext backup and the directory's .gitignore, and reports whether the
+// backup is now the only content left. A false result means the caller must
+// remove the whole directory: a directory kept for its backup must never also
+// keep a plaintext file.
+//
+// The .gitignore stays so the kept directory is as uncommittable as a live
+// one. It holds a fixed pattern this process wrote, never plaintext, and it is
+// kept only as a regular file.
 func (w *workDir) pruneToBackup() bool {
 	backupName := filepath.Base(w.backup)
 	entries, err := os.ReadDir(w.dir)
@@ -626,15 +645,54 @@ func (w *workDir) pruneToBackup() bool {
 		return false
 	}
 	for _, e := range entries {
-		if e.Name() != backupName {
-			_ = os.RemoveAll(filepath.Join(w.dir, e.Name()))
+		if e.Name() == backupName || (e.Name() == env.ScratchIgnoreName && e.Type().IsRegular()) {
+			continue
 		}
+		_ = os.RemoveAll(filepath.Join(w.dir, e.Name()))
 	}
 	entries, err = os.ReadDir(w.dir)
-	if err != nil || len(entries) != 1 || entries[0].Name() != backupName || !entries[0].Type().IsRegular() {
+	if err != nil {
 		return false
 	}
-	return true
+	sawBackup := false
+	for _, e := range entries {
+		switch {
+		case e.Name() == backupName && e.Type().IsRegular():
+			sawBackup = true
+		case e.Name() == env.ScratchIgnoreName && e.Type().IsRegular():
+		default:
+			return false
+		}
+	}
+	return sawBackup
 }
 
-func (w *workDir) cleanup() { _ = os.RemoveAll(w.dir) }
+// cleanup removes every entry of the work directory except its .gitignore,
+// then the .gitignore and the directory by the scratch teardown rule
+// (env.RemoveScratchDir): only when nothing else is left. A plaintext entry
+// that cannot be removed therefore stays under the .gitignore, still ignored
+// by git, and the next run's leftover scan refuses on it. os.RemoveAll on the
+// whole directory would delete the .gitignore and leave that entry
+// committable.
+func (w *workDir) cleanup() {
+	entries, err := os.ReadDir(w.dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.Name() == env.ScratchIgnoreName && e.Type().IsRegular() {
+			continue
+		}
+		_ = removeWorkDirEntry(filepath.Join(w.dir, e.Name()))
+	}
+	// A leftover is still ignored by git and refused by the next run's scan;
+	// the warning says why it is there (#768).
+	if err := env.RemoveScratchDir(w.dir); err != nil {
+		slog.Warn("Failed to remove the sops work directory.", "error", err)
+	}
+}
+
+// removeWorkDirEntry removes one entry of the work directory, recursively. It
+// is a variable only so a test can make one removal fail, the way EIO or a
+// read-only remount would, and prove the .gitignore outlives it.
+var removeWorkDirEntry = os.RemoveAll
