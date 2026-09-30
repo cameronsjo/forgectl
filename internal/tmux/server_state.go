@@ -368,12 +368,12 @@ func (u UnreadableRows) Note() string {
 	if len(parts) > 1 {
 		joined = strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
 	}
-	// A pane has no name forgectl lists, but its title is set by whatever runs
-	// in it, so the pane form says "title" rather than asking the operator to
-	// rename something that has no name.
+	// A pane row is hidden by its command, not a name (parsePaneRows), so the
+	// pane form names that too rather than sending the operator looking for a
+	// name to fix.
 	cause := "a name carrying the 0x1F field separator hides its row; rename or kill it with tmux itself"
 	if u.Panes > 0 {
-		cause = "a name or pane title carrying the 0x1F field separator hides its row; rename it, retitle the pane, or kill it with tmux itself"
+		cause = "a name or pane command carrying the 0x1F field separator hides its row; rename or kill it with tmux itself"
 	}
 	return joined + " could not be read and are not listed — " + cause
 }

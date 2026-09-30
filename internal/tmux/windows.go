@@ -142,10 +142,13 @@ func parsePanes(out string) ([]Pane, error) {
 }
 
 // parsePaneRows is parsePanes plus the number of non-empty rows it dropped
-// (forgectl#823), for the reason parseWindowRows counts them. A pane is the
-// easiest row to hide: any program running in it can set its title with an
-// escape sequence, and a title carrying FieldSep drops the pane from `tmux
-// tree`.
+// (forgectl#823), for the reason parseWindowRows counts them. A pane row is
+// easy to hide: #{pane_current_command} is whatever the pane's program calls
+// itself, which on Linux is its argv[0], so a program started under
+// `exec -a` with FieldSep in that name drops its pane from `tmux tree`. (A
+// pane title cannot carry the byte: tmux 3.4 and 3.7c both refuse a title
+// that is not printable ASCII or valid UTF-8, from select-pane -T and from
+// the title escape sequence alike.)
 func parsePaneRows(out string) ([]Pane, int, error) {
 	lines := splitLines(out)
 	// Exact for the same reason parseWindows is: pane_title and
