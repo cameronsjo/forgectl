@@ -49,9 +49,15 @@ func newTmuxLsCmd(client *tmux.Client) *cobra.Command {
 		Short: "List tmux sessions",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			sessions, err := client.DisplaySessions(cmd.Context())
+			sessions, unreadable, err := client.DisplaySessionListing(cmd.Context())
 			if err != nil {
 				return err
+			}
+			// Stderr in both modes, like `pr list`'s unreadable-records note:
+			// the JSON array keeps its shape, and a table with a silently
+			// missing session reads as a smaller server (forgectl#806).
+			if unreadable > 0 {
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), unreadableSessionsNote(unreadable))
 			}
 			out := cmd.OutOrStdout()
 			if asJSON {
@@ -86,4 +92,11 @@ func newTmuxLsCmd(client *tmux.Client) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"name":...,"windows":...,"attached":...,"path":...}] to stdout`)
 	return cmd
+}
+
+// unreadableSessionsNote is what `tmux ls` prints on stderr when tmux listed
+// sessions whose rows could not be read (forgectl#806).
+func unreadableSessionsNote(n int) string {
+	return fmt.Sprintf("%d session(s) could not be read and are not listed — a name carrying the 0x1F field separator hides its row; "+
+		"rename or kill it with tmux itself", n)
 }

@@ -336,14 +336,14 @@ const workspaceUnclassifiedStatus = "internal error: unclassified workspace stat
 // A record whose workspace is gone reports that and nothing else: its tmux
 // window is irrelevant, and it is never included in the liveness read at all.
 // For a live record the behavior is unchanged and still FAILS SOFT — when tmux
-// could not be read (tmuxOK false) every row reports "?", because an
+// could not be read (tmuxUnreadable) every row reports "?", because an
 // unreadable tmux says nothing about any individual window, and rendering
 // those rows as "window gone" would flag every healthy review as dead the
 // moment tmux hiccups.
 //
 // The final branch is unreachable through List; see workspaceUnclassifiedStatus
 // for why it is an internal error rather than a label.
-func sessionStatus(live map[pr.Ref]bool, s pr.SessionSummary, tmuxOK bool) string {
+func sessionStatus(live map[pr.Ref]bool, s pr.SessionSummary, tmuxState tmuxListState) string {
 	switch {
 	case s.IsWorkspaceNone():
 		// A queued, preparing, or needs-repair record may have no workspace; its phase
@@ -353,7 +353,7 @@ func sessionStatus(live map[pr.Ref]bool, s pr.SessionSummary, tmuxOK bool) strin
 	case s.IsWorkspaceMissing():
 		return workspaceMissingStatus
 	case s.IsWorkspaceLive():
-		return windowStatus(live, s.Ref(), tmuxOK)
+		return windowStatus(live, s.Ref(), tmuxState)
 	default:
 		return workspaceUnclassifiedStatus
 	}
@@ -378,12 +378,33 @@ func unreadableRecordsNote(n int) string {
 	return fmt.Sprintf("%d record(s) could not be read — they are not listed; an older forgectl cannot read records a newer one wrote", n)
 }
 
+// tmuxListState is how `pr list`'s one window read went.
+type tmuxListState uint8
+
+const (
+	// tmuxUnreadable: tmux could not be read; every live row renders "?".
+	tmuxUnreadable tmuxListState = iota
+	// tmuxReadable: the window list was read.
+	tmuxReadable
+	// tmuxNoServer: the server has exited and left its socket behind
+	// (tmux.ErrServerExited). No window is live, but the strict reads refuse to
+	// call any of them gone on that evidence (#746, #765), so the row says what
+	// was actually seen rather than "window gone", which sends an operator to
+	// teardown (forgectl#805).
+	tmuxNoServer
+)
+
+// noTmuxServerStatus is a live row's status when tmuxNoServer.
+const noTmuxServerStatus = "no tmux server"
+
 // windowStatus renders one live session's review-window liveness.
-func windowStatus(live map[pr.Ref]bool, ref pr.Ref, tmuxOK bool) string {
-	if !tmuxOK {
+func windowStatus(live map[pr.Ref]bool, ref pr.Ref, tmuxState tmuxListState) string {
+	switch {
+	case tmuxState == tmuxUnreadable:
 		return "?"
-	}
-	if live[ref] {
+	case tmuxState == tmuxNoServer:
+		return noTmuxServerStatus
+	case live[ref]:
 		return "live"
 	}
 	return "window gone"
@@ -448,9 +469,9 @@ repair, capped as 'forgectl pr dash' caps it, and empty on every other row.
 			// a question worth asking, so a list of nothing but stale records
 			// issues zero tmux calls — and in a mixed list, an unreadable tmux
 			// degrades only the live rows.
-			live, tmuxOK := prListLiveness(cmd.Context(), client, summaries)
+			live, tmuxState := prListLiveness(cmd.Context(), client, summaries)
 			if asJSON {
-				return writePrListJSON(out, summaries, live, tmuxOK)
+				return writePrListJSON(out, summaries, live, tmuxState)
 			}
 			if len(summaries) == 0 {
 				_, _ = fmt.Fprintln(out, "no active review sessions")
@@ -481,7 +502,7 @@ repair, capped as 'forgectl pr dash' caps it, and empty on every other row.
 				_, _ = fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\t%s\n",
 					s.Ref().String(), s.CreatedAt().Format(time.RFC3339),
 					termsafe.QuotePathIfUnsafe(s.Path()),
-					sessionStatus(live, s, tmuxOK),
+					sessionStatus(live, s, tmuxState),
 					phaseLabel(s), repairReasonLine(s.RepairReason()))
 			}
 			return nil
@@ -495,20 +516,27 @@ repair, capped as 'forgectl pr dash' caps it, and empty on every other row.
 // window list, exactly once, and returns the map both the human table and
 // the --json rows read `sessionStatus` against. A stale-only list issues
 // zero tmux calls, matching the human path's cost contract.
-func prListLiveness(ctx context.Context, client *pr.Client, summaries []pr.SessionSummary) (live map[pr.Ref]bool, tmuxOK bool) {
+func prListLiveness(ctx context.Context, client *pr.Client, summaries []pr.SessionSummary) (live map[pr.Ref]bool, tmuxState tmuxListState) {
 	refs := make([]pr.Ref, 0, len(summaries))
 	for _, s := range summaries {
 		if s.IsWorkspaceLive() {
 			refs = append(refs, s.Ref())
 		}
 	}
-	tmuxOK = true
-	if len(refs) > 0 {
-		// Display only: an exited tmux server's leftover socket reads as no
-		// live window here, not "?" (forgectl#786).
-		live, tmuxOK = client.WindowsLiveForListing(ctx, refs)
+	if len(refs) == 0 {
+		return nil, tmuxReadable
 	}
-	return live, tmuxOK
+	// Display only: an exited tmux server's leftover socket reads as no live
+	// window here, not "?" (forgectl#786), and is labeled as such (#805).
+	live, ok, serverExited := client.WindowsLiveForListing(ctx, refs)
+	switch {
+	case !ok:
+		return nil, tmuxUnreadable
+	case serverExited:
+		return live, tmuxNoServer
+	default:
+		return live, tmuxReadable
+	}
 }
 
 // writePrListJSON encodes the active review sessions as a JSON array through
@@ -516,14 +544,14 @@ func prListLiveness(ctx context.Context, client *pr.Client, summaries []pr.Sessi
 // path is the one field here that can carry attacker-controlled bytes (a
 // FILENAME chosen on disk), and the encoder's own escaping is what makes it
 // terminal-safe on the way out — no QuotePathIfUnsafe pass is needed here.
-func writePrListJSON(out io.Writer, summaries []pr.SessionSummary, live map[pr.Ref]bool, tmuxOK bool) error {
+func writePrListJSON(out io.Writer, summaries []pr.SessionSummary, live map[pr.Ref]bool, tmuxState tmuxListState) error {
 	rows := make([]prListRowJSON, 0, len(summaries))
 	for _, s := range summaries {
 		rows = append(rows, prListRowJSON{
 			Ref:       s.Ref().String(),
 			CreatedAt: s.CreatedAt().Format(time.RFC3339),
 			Path:      s.Path(),
-			Status:    sessionStatus(live, s, tmuxOK),
+			Status:    sessionStatus(live, s, tmuxState),
 			Phase:     string(s.Phase()),
 
 			RepairReason: repairReasonLine(s.RepairReason()),
