@@ -124,7 +124,7 @@ type renderOutcome struct {
 // Past the deadline, or while an abandoned goldmark stage still runs, the
 // page is the source as text; once ctx is done the answer is ctx's error.
 // renderMu is never held past either.
-func renderBounded(ctx context.Context, md goldmark.Markdown, source []byte, kind RootKind, resolve wikilinkResolver) renderOutcome {
+func renderBounded(ctx context.Context, md goldmark.Markdown, source []byte, front *frontmatterBlock, kind RootKind, resolve wikilinkResolver) renderOutcome {
 	if err := ctx.Err(); err != nil {
 		return renderOutcome{err: err}
 	}
@@ -166,7 +166,7 @@ func renderBounded(ctx context.Context, md goldmark.Markdown, source []byte, kin
 	// goroutine always exits.
 	done := make(chan renderOutcome, 1)
 	go func() {
-		done <- runRender(md, source, kind, resolve, parsed, abandoned, hooks)
+		done <- runRender(md, source, front, kind, resolve, parsed, abandoned, hooks)
 		hooks.run(hooks.exit)
 	}()
 	select {
@@ -192,7 +192,7 @@ func renderBounded(ctx context.Context, md goldmark.Markdown, source []byte, kin
 // next request after it, never see that stage as still in flight. A panic
 // becomes an error: a render goroutine is not under net/http's per-request
 // recover, so one would otherwise take the whole server down.
-func runRender(md goldmark.Markdown, source []byte, kind RootKind, resolve wikilinkResolver, parsed chan<- struct{}, abandoned <-chan struct{}, hooks renderHooks) (out renderOutcome) {
+func runRender(md goldmark.Markdown, source []byte, front *frontmatterBlock, kind RootKind, resolve wikilinkResolver, parsed chan<- struct{}, abandoned <-chan struct{}, hooks renderHooks) (out renderOutcome) {
 	goldmarkDone := false
 	endGoldmark := func() {
 		if !goldmarkDone {
@@ -221,7 +221,7 @@ func runRender(md goldmark.Markdown, source []byte, kind RootKind, resolve wikil
 	if tooComplex {
 		return renderOutcome{html: plainTextDoc(source), notice: noticePlainText}
 	}
-	g, err := renderGoldmark(md, source, kind, resolve)
+	g, err := renderGoldmark(md, source, front, kind, resolve)
 	endGoldmark()
 	if err != nil {
 		return renderOutcome{err: err}

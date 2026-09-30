@@ -22,9 +22,8 @@ import (
 // TOML is decoded only to show the page's properties block, once, but
 // BurntSushi/toml is quadratic in the segments of a dotted key (5.7 s of
 // CPU for a page whose 16 KiB block is `a.a.…b = 1`), in those of a table
-// header (1.9 s) and in the nesting of inline tables (1.4 s), so
-// tomlFrontmatterBounded refuses a block with a long dotted key or deep
-// inline tables before anything decodes it.
+// header (1.9 s) and in the nesting of inline tables (1.4 s), so a +++
+// block has a much smaller cap of its own, maxTOMLFrontmatterBytes.
 
 // yamlFrontmatterRoot decodes a --- block and returns its top-level
 // mapping (nil for an empty block, or one that is only `null`), and
@@ -142,83 +141,16 @@ func yamlKeysDecodable(m *yaml.Node) bool {
 	return true
 }
 
-// maxTOMLKeyDots and maxTOMLInlineDepth bound a +++ block's dotted keys
-// and inline-table nesting. BurntSushi/toml's cost grows with the square
-// of each; within these bounds the worst shapes measured (every line a
-// key of 8 dots, or 8 nested inline tables) render a page with a 16 KiB
-// block in under 50 ms of CPU, against 20 ms for plain keys. Written TOML frontmatter uses a dot
-// or two (`[params.author]`) and nests one or two tables.
-const (
-	maxTOMLKeyDots     = 8
-	maxTOMLInlineDepth = 8
-)
-
-// tomlFrontmatterBounded reports whether a +++ block stays within
-// maxTOMLKeyDots and maxTOMLInlineDepth. It is one pass over the bytes
-// that skips strings and comments and counts, outside them, the dots in
-// each run between TOML's separators (so a dotted key or table header,
-// with or without quoted segments and spaces around the dots; a float or
-// a date has one dot) and the depth of `{`. It does not validate TOML; a
-// block that is not TOML still fails its decode, as before.
-func tomlFrontmatterBounded(block []byte) bool {
-	dots, depth := 0, 0
-	for i := 0; i < len(block); i++ {
-		switch c := block[i]; c {
-		case '"', '\'':
-			i = skipTOMLString(block, i)
-		case '#':
-			for i < len(block) && block[i] != '\n' {
-				i++
-			}
-			dots = 0
-		case '.':
-			if dots++; dots > maxTOMLKeyDots {
-				return false
-			}
-		case '{':
-			if depth++; depth > maxTOMLInlineDepth {
-				return false
-			}
-			dots = 0
-		case '}':
-			depth = max(depth-1, 0)
-			dots = 0
-		case '=', ',', '[', ']', '\n':
-			dots = 0
-		}
-	}
-	return true
-}
-
-// skipTOMLString returns the index of the last byte of the string that
-// opens at block[i] (a " or '), or of the block's last byte if the string
-// never closes. It handles the four TOML string kinds: basic and literal,
-// single-line and multi-line ("""/”'), with backslash escapes in the
-// basic ones.
-func skipTOMLString(block []byte, i int) int {
-	q := block[i]
-	multi := i+2 < len(block) && block[i+1] == q && block[i+2] == q
-	if multi {
-		i += 2
-	}
-	for j := i + 1; j < len(block); j++ {
-		switch block[j] {
-		case '\\':
-			if q == '"' {
-				j++
-			}
-		case '\n':
-			if !multi {
-				return j - 1
-			}
-		case q:
-			if !multi {
-				return j
-			}
-			if j+2 < len(block) && block[j+1] == q && block[j+2] == q {
-				return j + 2
-			}
-		}
-	}
-	return len(block) - 1
-}
+// maxTOMLFrontmatterBytes is the largest +++ block splitFrontmatter
+// accepts; a larger one is treated as no frontmatter, like a block over
+// maxFrontmatterBytes. It bounds the one TOML decode (the properties block)
+// by size alone, whatever the block's shape: BurntSushi/toml exposes no
+// parse step to inspect first, and a hand-written pre-scan that tried to
+// bound the costly shapes missed one (a multi-line string closed by extra
+// quotes, `"""x""""`, which desynchronized it). The cost is quadratic in
+// the block at worst, so the cap is small: at 1 KiB the worst shapes
+// measured, a dotted key of about 500 segments at the top level, inside an
+// inline table or after such a string, render a page in about 50 ms of
+// CPU, against 3.5 ms for plain keys; at 2 KiB they took 100 to 150 ms.
+// TOML frontmatter (Hugo's) is a handful of keys, a few hundred bytes.
+const maxTOMLFrontmatterBytes = 1 << 10

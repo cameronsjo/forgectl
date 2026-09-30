@@ -36,18 +36,22 @@ func TestMaxFrontmatterBytes_Is16KiB(t *testing.T) {
 	}
 }
 
-// A block of exactly maxFrontmatterBytes is frontmatter and one byte more
-// is not, whichever fence opens it. Mutation: dropping the cap check in
-// splitFrontmatter turns the over-cap rows red; `>=` for `>` turns the
-// at-cap rows red.
+// A block of exactly its fence's cap is frontmatter and one byte more is
+// not: maxFrontmatterBytes for ---, maxTOMLFrontmatterBytes for +++.
+// Mutation: dropping either cap check in splitFrontmatter turns its
+// over-cap row red; `>=` for `>` turns its at-cap row red.
 func TestSplitFrontmatter_Cap(t *testing.T) {
-	for _, fence := range []string{"---", "+++"} {
+	for _, fc := range []struct {
+		fence string
+		limit int
+	}{{"---", maxFrontmatterBytes}, {"+++", maxTOMLFrontmatterBytes}} {
+		fence := fc.fence
 		for _, tc := range []struct {
 			n    int
 			want bool
 		}{
-			{maxFrontmatterBytes, true},
-			{maxFrontmatterBytes + 1, false},
+			{fc.limit, true},
+			{fc.limit + 1, false},
 		} {
 			block := fmBlock(tc.n)
 			if len(block) != tc.n {

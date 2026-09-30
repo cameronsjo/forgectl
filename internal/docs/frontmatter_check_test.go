@@ -8,10 +8,11 @@ package docs
 //   [x] Sad: a merge key is refused, since no consumer would apply it
 //   [x] Happy: aliases come off the node: a list, a bare string, an alias
 //   [x] Sad: a non-string alias value is dropped, as the map decode dropped it
-//   [x] Happy: TOML within the bounds is frontmatter and renders once, sorted
-//   [x] Sad: a dotted key, header or inline-table nest past the bounds is refused
-//   [x] Sad: dots and braces inside strings and comments do not count
-//   [x] Unhappy: each superlinear shape costs about what plain keys cost
+//   [x] Happy: TOML within its cap is frontmatter and renders once, sorted
+//   [x] Sad: a TOML block one byte over its cap is refused, whatever its shape
+//   [x] Unhappy: each superlinear YAML shape costs about what plain keys cost
+//   [x] Unhappy: each superlinear TOML shape past the TOML cap, the quote
+//       desync payloads included, costs about what plain keys at the cap cost
 
 import (
 	"fmt"
@@ -101,49 +102,58 @@ func TestAliasesFromNode(t *testing.T) {
 	}
 }
 
-// The TOML bounds count dots and braces outside strings and comments, per
-// run between separators. Mutations: not skipping strings turns the string
-// rows red; not skipping comments turns the comment row red; not resetting
-// at a comma turns the float-array row red; raising either bound turns its
-// refused row red.
-func TestTOMLFrontmatterBounded(t *testing.T) {
-	nine := strings.Repeat("a.", maxTOMLKeyDots+1) + "b"
-	eight := strings.Repeat("a.", maxTOMLKeyDots) + "b"
+// tomlRows are TOML blocks of every shape the pre-scan of an earlier
+// round tried to bound: long dotted keys and headers, quoted and spaced
+// segments, dots in every string kind and in comments, deep inline tables,
+// and the multi-line strings closed by extra quotes that desynchronized
+// it. Each is under maxTOMLFrontmatterBytes, so each is frontmatter, and
+// each is cheap to decode because the cap bounds the decode by size.
+func tomlRows() []string {
+	nine := strings.Repeat("a.", 9) + "b"
 	nest := func(d int) string { return "x = " + strings.Repeat("{b=", d) + "1" + strings.Repeat("}", d) + "\n" }
-	for _, tc := range []struct {
-		name, block string
-		want        bool
-	}{
-		{"table header", "[params.author]\nname = \"A\"\n", true},
-		{"key at the bound", eight + " = 1\n", true},
-		{"key past the bound", nine + " = 1\n", false},
-		{"header past the bound", "[" + nine + "]\n", false},
-		{"array header past the bound", "[[" + nine + "]]\n", false},
-		{"spaced key past the bound", strings.ReplaceAll(nine, ".", " . ") + " = 1\n", false},
-		{"quoted segments past the bound", strings.Repeat(`"a".`, maxTOMLKeyDots+1) + "b = 1\n", false},
-		{"inline-table key past the bound", "x = { " + nine + " = 1 }\n", false},
-		{"dots in a basic string", `v = "` + nine + `"` + "\n", true},
-		{"dots in a literal string", "v = '" + nine + "'\n", true},
-		{"dots in a multi-line string", `v = """` + "\n" + nine + "\n" + `"""` + "\n", true},
-		{"dots in a multi-line literal", "v = '''\n" + nine + "\n'''\n", true},
-		{"escaped quote in a string", `v = "\"` + nine + `"` + "\n", true},
-		{"dots in a comment", "# " + nine + "\nk = 1\n", true},
-		{"float array", "f = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5]\n", true},
-		{"braces in a string", `t = "{{{{{{{{{{{{"` + "\n", true},
-		{"inline tables at the bound", nest(maxTOMLInlineDepth), true},
-		{"inline tables past the bound", nest(maxTOMLInlineDepth + 1), false},
-		{"sibling inline tables", strings.Repeat("{a=1},", 20) + "\n", true},
-	} {
-		if got := tomlFrontmatterBounded([]byte(tc.block)); got != tc.want {
-			t.Errorf("%s: tomlFrontmatterBounded(%q) = %v, want %v", tc.name, tc.block, got, tc.want)
+	return []string{
+		"[params.author]\nname = \"A\"\n",
+		nine + " = 1\n",
+		"[" + nine + "]\n",
+		"[[" + nine + "]]\n",
+		strings.ReplaceAll(nine, ".", " . ") + " = 1\n",
+		strings.Repeat(`"a".`, 9) + "b = 1\n",
+		"x = { " + nine + " = 1 }\n",
+		`v = "` + nine + `"` + "\n",
+		`v = '` + nine + `'` + "\n",
+		`v = """` + "\n" + nine + "\n" + `"""` + "\n",
+		`v = '''` + "\n" + nine + "\n" + `'''` + "\n",
+		`v = "\"` + nine + `"` + "\n",
+		"# " + nine + "\nk = 1\n",
+		"f = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5]\n",
+		`t = "{{{{{{{{{{{{"` + "\n",
+		nest(9),
+		`k = {s = """x"""", ` + nine + " = 1}\n",
+		`k = {s = '''x''''', ` + nine + " = 1}\n",
+		`s = """x"""""` + "\n" + nine + " = 1\n",
+		`s = '''x''''` + "\n" + nine + " = 1\n",
+	}
+}
+
+// The TOML cap is the 1 KiB the docs promise, and every tomlRows block,
+// whatever its shape, is within it and so is frontmatter (the at-cap and
+// over-cap rows are TestSplitFrontmatter_Cap's). Mutation: any other
+// maxTOMLFrontmatterBytes turns the first check red.
+func TestSplitFrontmatter_TOMLCap(t *testing.T) {
+	if maxTOMLFrontmatterBytes != 1<<10 {
+		t.Fatalf("maxTOMLFrontmatterBytes = %d, want %d (1 KiB, as docs/commands/docs.md says)", maxTOMLFrontmatterBytes, 1<<10)
+	}
+	for _, block := range tomlRows() {
+		if _, ok := splitFrontmatter([]byte("+++\n" + block + "+++\n# T\n")); !ok {
+			t.Errorf("a %d-byte +++ block within the cap was refused: %q", len(block), block)
 		}
 	}
 }
 
 // A TOML block renders as a properties block with its keys sorted, and
-// one past the bounds renders as text. Mutation: frontmatterHTML returning
-// "" for a +++ block turns the first half red; tomlFrontmatterBounded
-// returning true turns the second half red.
+// one past the TOML cap renders as text. Mutation: frontmatterHTML
+// returning "" for a +++ block turns the first half red; dropping the TOML
+// cap turns the second half red.
 func TestRender_TOMLFrontmatter(t *testing.T) {
 	got, err := Render([]byte("+++\ntitle = \"Tee\"\nauthor = \"Ay\"\n+++\n\n# T\n"))
 	if err != nil {
@@ -153,12 +163,16 @@ func TestRender_TOMLFrontmatter(t *testing.T) {
 	if !strings.Contains(got, "data-forgectl-props") || ia < 0 || it < 0 || ia > it {
 		t.Errorf("TOML frontmatter is not a sorted properties block:\n%s", got)
 	}
-	got, err = Render([]byte("+++\n" + strings.Repeat("a.", maxTOMLKeyDots+1) + "b = 1\n+++\n\n# T\n"))
+	var b strings.Builder
+	for i := 0; b.Len() <= maxTOMLFrontmatterBytes; i++ {
+		fmt.Fprintf(&b, "k%d = %d\n", i, i)
+	}
+	got, err = Render([]byte("+++\n" + b.String() + "+++\n\n# T\n"))
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 	if strings.Contains(got, "data-forgectl-props") {
-		t.Errorf("a TOML block past the bounds rendered as a properties block:\n%s", got)
+		t.Errorf("a TOML block past its cap rendered as a properties block")
 	}
 }
 
@@ -177,13 +191,21 @@ func fmLines(n int, line func(i int) string) string {
 // frontmatterSink keeps the timed frontmatter work from being optimized away.
 var frontmatterSink int
 
+// fmPtr is splitFrontmatter's result as wellFormedFrontmatter returns it.
+func fmPtr(fm frontmatterBlock, ok bool) *frontmatterBlock {
+	if !ok {
+		return nil
+	}
+	return &fm
+}
+
 // frontmatterWork is everything a page and the index do with a document's
 // frontmatter: the split, the properties block and the aliases.
 func frontmatterWork(src []byte, reps int) func() {
 	return func() {
 		for range reps {
 			fm, ok := splitFrontmatter(src)
-			frontmatterSink += len(frontmatterHTML(fm, ok))
+			frontmatterSink += len(frontmatterHTML(fmPtr(fm, ok)))
 			if root := frontmatterRoot(fm); root != nil {
 				frontmatterSink += len(aliasesFromNode(root))
 			}
@@ -191,40 +213,65 @@ func frontmatterWork(src []byte, reps int) func() {
 	}
 }
 
-// Each shape that made a decode superlinear costs, at the cap, about what
-// plain keys of the same size cost (perftest.Within, process CPU time).
-// Measured with the fix: about 0.5 for the YAML shapes and under 0.01 for
-// the TOML ones, which are refused before any decode. Without it:
-// duplicate keys 48, merge keys 9, a dotted key 129, a table header 53,
-// nested inline tables 29.
+// Each YAML shape that made the decode superlinear costs, at the cap,
+// about what plain keys of the same size cost (perftest.Within, process
+// CPU time). Measured with the fix: about 0.5. Without it: duplicate keys
+// 48, merge keys 9.
 //
-// Mutations: yamlFrontmatterRoot decoding the block into a map first, as
-// splitFrontmatter used to, turns the YAML rows red; tomlFrontmatterBounded
-// returning true turns the TOML rows red.
-func TestFrontmatter_SuperlinearShapesCostLikePlainKeys(t *testing.T) {
+// Mutation: yamlFrontmatterRoot decoding the block into a map first, as
+// splitFrontmatter used to, turns both rows red.
+func TestFrontmatter_SuperlinearYAMLCostsLikePlainKeys(t *testing.T) {
 	const n, reps = maxFrontmatterBytes - 64, 3
-	yamlBase := fmLines(n, func(i int) string { return fmt.Sprintf("%x:\n", i) })
-	tomlBase := fmLines(n, func(i int) string { return fmt.Sprintf("k%x = 1\n", i) })
+	base := fmLines(n, func(i int) string { return fmt.Sprintf("%x:\n", i) })
 	var merge strings.Builder
 	merge.WriteString("b: &b {")
 	for i := 0; merge.Len() < n/2; i++ {
 		fmt.Fprintf(&merge, "k%x: 1, ", i)
 	}
 	merge.WriteString("z: 1}\nc:\n  <<: [" + strings.Repeat("*b,", (n/2-24)/3) + "*b]\n")
-	inline := (n - 10) / 8
-	for _, tc := range []struct {
-		name, fence, base, shape string
-	}{
-		{"duplicate keys", "---", yamlBase, strings.Repeat("a: 1\n", n/5)},
-		{"merge keys", "---", yamlBase, merge.String()},
-		{"dotted key", "+++", tomlBase, strings.Repeat("a.", (n-8)/2) + "b = 1\n"},
-		{"table header", "+++", tomlBase, "[" + strings.Repeat("a.", (n-8)/2) + "b]\n"},
-		{"inline tables", "+++", tomlBase, "a = " + strings.Repeat("{ b = ", inline) + "1" + strings.Repeat(" }", inline) + "\n"},
+	doc := func(block string) []byte { return []byte("---\n" + block + "---\n\n# T\n") }
+	for _, tc := range []struct{ name, shape string }{
+		{"duplicate keys", strings.Repeat("a: 1\n", n/5)},
+		{"merge keys", merge.String()},
 	} {
-		doc := func(block string) []byte { return []byte(tc.fence + "\n" + block + tc.fence + "\n\n# T\n") }
-		if len(tc.shape) > maxFrontmatterBytes || len(tc.base) > maxFrontmatterBytes {
-			t.Fatalf("%s: a block is over the cap (%d, %d bytes); the test would time the cap", tc.name, len(tc.shape), len(tc.base))
+		if len(tc.shape) > maxFrontmatterBytes || len(base) > maxFrontmatterBytes {
+			t.Fatalf("%s: a block is over the cap (%d, %d bytes); the test would time the cap", tc.name, len(tc.shape), len(base))
 		}
-		perftest.Within(t, "frontmatter with "+tc.name, 4, frontmatterWork(doc(tc.base), reps), frontmatterWork(doc(tc.shape), reps))
+		perftest.Within(t, "frontmatter with "+tc.name, 4, frontmatterWork(doc(base), reps), frontmatterWork(doc(tc.shape), reps))
+	}
+}
+
+// Each TOML shape BurntSushi/toml decodes superlinearly, the quote desync
+// payloads included, costs about what plain keys at the TOML cap cost once
+// it is past that cap (perftest.Within, process CPU time): the split
+// refuses it before any decode. Measured with the cap: under 0.02.
+// Without it, at 4 KiB: 30 to 37 for the inline-table shapes, 82 for the
+// table header, 160 to 208 for the dotted key and every desync payload.
+//
+// Mutation: dropping the TOML cap in splitFrontmatter turns every row red.
+func TestFrontmatter_SuperlinearTOMLPastItsCapIsNotDecoded(t *testing.T) {
+	// Four times the TOML cap: far enough past it that a decode would
+	// show, small enough that a red run takes seconds, not minutes.
+	const n, reps = 4 * maxTOMLFrontmatterBytes, 3
+	base := fmLines(maxTOMLFrontmatterBytes, func(i int) string { return fmt.Sprintf("k%x = 1\n", i) })
+	dots := func(m int) string { return strings.Repeat("a.", m/2) + "b" }
+	inline := (n - 10) / 8
+	doc := func(block string) []byte { return []byte("+++\n" + block + "+++\n\n# T\n") }
+	for _, tc := range []struct{ name, shape string }{
+		{"dotted key", dots(n-8) + " = 1\n"},
+		{"table header", "[" + dots(n-8) + "]\n"},
+		{"inline tables", "a = " + strings.Repeat("{ b = ", inline) + "1" + strings.Repeat(" }", inline) + "\n"},
+		{`inline """ desync, one extra quote`, `k = {s = """x"""", ` + dots(n-40) + " = 1}\n"},
+		{`inline """ desync, two extra quotes`, `k = {s = """x""""", ` + dots(n-40) + " = 1}\n"},
+		{`inline ''' desync, one extra quote`, `k = {s = '''x'''', ` + dots(n-40) + " = 1}\n"},
+		{`inline ''' desync, two extra quotes`, `k = {s = '''x''''', ` + dots(n-40) + " = 1}\n"},
+		{`top-level """ desync`, `s = """x"""""` + "\n" + dots(n-40) + " = 1\n"},
+		{`top-level ''' desync`, `s = '''x''''` + "\n" + dots(n-40) + " = 1\n"},
+		{"nested inline desync", `k = {s = """x"""", ` + strings.Repeat("a = { ", inline-8) + "b = 1" + strings.Repeat(" }", inline-8) + "}\n"},
+	} {
+		if len(tc.shape) <= maxTOMLFrontmatterBytes || len(tc.shape) > maxFrontmatterBytes {
+			t.Fatalf("%s: %d bytes is not between the TOML cap and the 16 KiB cap", tc.name, len(tc.shape))
+		}
+		perftest.Within(t, "frontmatter with "+tc.name, 4, frontmatterWork(doc(base), reps), frontmatterWork(doc(tc.shape), reps))
 	}
 }

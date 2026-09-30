@@ -45,7 +45,7 @@ const chromaStyle = "monokai"
 var markdown = newMarkdown(true, false)
 
 // markdownPlain is the same pipeline without the frontmatter extension. It
-// serves any document hasWellFormedFrontmatter rejects: the extension treats
+// serves any document wellFormedFrontmatter rejects: the extension treats
 // EVERY leading ---/+++ fence as an opener and, unterminated, consumes to end
 // of file — so a doc that merely opens with a thematic break would otherwise
 // render empty. Two instances beat one instance plus source rewriting; the
@@ -85,8 +85,9 @@ func newMarkdown(withFrontmatter, vault bool, extra ...goldmark.Option) goldmark
 	if withFrontmatter {
 		// Consumes a leading YAML/TOML frontmatter block at parse time, so the
 		// delimiters stop rendering as a thematic break + mangled heading. The
-		// parsed data is read back per-render (frontmatter.Get) and presented
-		// as a collapsed metadata disclosure — see frontmatterHTML.
+		// extension never decodes the block: frontmatterHTML presents the
+		// block splitFrontmatter already decoded, as a collapsed metadata
+		// disclosure.
 		extenders = append(extenders, &frontmatter.Extender{})
 	}
 	if vault {
@@ -607,7 +608,8 @@ func renderHiddenContext(ctx context.Context, source []byte, kind RootKind, reso
 	// any leading --- fence starts a block, and an unterminated one consumes
 	// the REST OF THE FILE — so without this gate a doc opening with a
 	// thematic break renders as an empty page.
-	withFrontmatter := hasWellFormedFrontmatter(source)
+	front := wellFormedFrontmatter(source)
+	withFrontmatter := front != nil
 	var md goldmark.Markdown
 	switch {
 	case kind == RootVault && withFrontmatter:
@@ -619,24 +621,23 @@ func renderHiddenContext(ctx context.Context, source []byte, kind RootKind, reso
 	default:
 		md = markdownPlain
 	}
-	return renderBounded(ctx, md, source, kind, resolve)
+	return renderBounded(ctx, md, source, front, kind, resolve)
 }
 
 // goldmarkOutput is what the goldmark stage hands the post-processing
 // stage.
 type goldmarkOutput struct {
-	html    []byte
-	pc      parser.Context
-	hidden  []text.Segment
-	front   frontmatterBlock
-	frontOK bool
+	html   []byte
+	pc     parser.Context
+	hidden []text.Segment
+	front  *frontmatterBlock
 }
 
 // renderGoldmark is the goldmark stage: parse and render. It runs only on a
 // render goroutine renderBounded starts, never two at a time, and may
 // outlive the request that started it, so it must not touch anything
 // request-scoped beyond its arguments.
-func renderGoldmark(md goldmark.Markdown, source []byte, kind RootKind, resolve wikilinkResolver) (goldmarkOutput, error) {
+func renderGoldmark(md goldmark.Markdown, source []byte, front *frontmatterBlock, kind RootKind, resolve wikilinkResolver) (goldmarkOutput, error) {
 	var buf bytes.Buffer
 	ctx := newParseContext()
 	if kind == RootVault && resolve != nil {
@@ -652,10 +653,9 @@ func renderGoldmark(md goldmark.Markdown, source []byte, kind RootKind, resolve 
 	if err != nil {
 		return goldmarkOutput{}, fmt.Errorf("render markdown: %w", err)
 	}
-	// The properties block reads the same split the parser choice did
-	// (hasWellFormedFrontmatter), not the extension's own decode.
-	front, frontOK := splitFrontmatter(source)
-	return goldmarkOutput{html: buf.Bytes(), pc: ctx, hidden: hidden, front: front, frontOK: frontOK}, nil
+	// The properties block reads the split that chose md
+	// (wellFormedFrontmatter), not a decode of its own.
+	return goldmarkOutput{html: buf.Bytes(), pc: ctx, hidden: hidden, front: front}, nil
 }
 
 // renderPost is the stage after goldmark: the sanitizer, the balancer and
@@ -673,7 +673,7 @@ func renderPost(g goldmarkOutput, kind RootKind) string {
 	if name, ok := unclosedSkipContent(input); ok {
 		notice = skipContentBanner(name)
 	}
-	return notice + frontmatterHTML(g.front, g.frontOK) + transformCallouts(body, kind)
+	return notice + frontmatterHTML(g.front) + transformCallouts(body, kind)
 }
 
 // hiddenComments returns the source range of every %% comment in a parsed
@@ -1017,17 +1017,22 @@ func calloutTitle(rest string) (string, int) {
 	return html.EscapeString(html.UnescapeString(raw)), end
 }
 
-// hasWellFormedFrontmatter reports whether source opens with a frontmatter
-// block safe to hand to the frontmatter extension. It mirrors the extension's
+// wellFormedFrontmatter returns the frontmatter block source opens with, or
+// nil when it opens with none safe to hand to the frontmatter extension. It mirrors the extension's
 // own delimiter rules (a first line of three-plus repeated - or +, closed by
 // an identical line) and then applies the judgment the extension skips: a ---
 // fence shares syntax with a thematic break, so an unterminated block, or one
 // whose body is not a YAML mapping, is markdown — not metadata — and must
 // reach the parser that treats it that way. A +++ TOML fence collides with no
-// markdown syntax, so termination alone qualifies it.
-func hasWellFormedFrontmatter(source []byte) bool {
-	_, ok := splitFrontmatter(source)
-	return ok
+// markdown syntax, so termination and the TOML size cap qualify it. The
+// render reads the one block it returns, so the page splits and decodes
+// the block once before the parse.
+func wellFormedFrontmatter(source []byte) *frontmatterBlock {
+	fm, ok := splitFrontmatter(source)
+	if !ok {
+		return nil
+	}
+	return &fm
 }
 
 // frontmatterBlock is splitFrontmatter's view of a document: the fence byte that
@@ -1045,12 +1050,12 @@ type frontmatterBlock struct {
 // first line of three-plus repeated - or +, closed by the first later line
 // that repeats the same byte at the same length. A --- block must also
 // decode as a YAML mapping (an empty mapping counts) — see
-// hasWellFormedFrontmatter for why — within the limits
-// yamlFrontmatterRoot checks; a +++ TOML block needs termination and the
-// bounds tomlFrontmatterBounded checks. Every consumer — the renderer's well-formedness gate,
-// countWords, and scanDoc's alias extraction — reads through this function
-// so they can never disagree about where a document's metadata ends and
-// its body begins. A block over maxFrontmatterBytes is not frontmatter
+// wellFormedFrontmatter for why — within the limits
+// yamlFrontmatterRoot checks; a +++ TOML block needs termination and must
+// fit maxTOMLFrontmatterBytes. Every consumer — the renderer's
+// well-formedness gate, countWords, and scanDoc's alias extraction — reads
+// through this function so they can never disagree about where a
+// document's metadata ends and its body begins. A block over maxFrontmatterBytes is not frontmatter
 // either, so no consumer ever decodes one (#910). The block is decoded
 // here, once; consumers read fm.root rather than decoding it again.
 func splitFrontmatter(source []byte) (frontmatterBlock, bool) {
@@ -1080,7 +1085,7 @@ func splitFrontmatter(source []byte) (frontmatterBlock, bool) {
 		}
 		// First matching fence closes the block, same as the extension.
 		if delim == '+' {
-			if !tomlFrontmatterBounded(fm.block) {
+			if len(fm.block) > maxTOMLFrontmatterBytes {
 				return frontmatterBlock{}, false
 			}
 			return fm, true
@@ -1107,8 +1112,8 @@ func splitFrontmatter(source []byte) (frontmatterBlock, bool) {
 // kept linear by what frontmatter_check.go refuses, and this cap bounds
 // the linear cost: at 16 KiB the worst shape measured, flow collections
 // nested as deep as the block allows (`k: [[[…]]]`, depth about 8000),
-// took 20 ms of CPU to split and 87 ms for the whole page render, and the
-// worst TOML shape within its bounds 47 ms for the render. Written
+// took 20 ms of CPU to split and 87 ms for the whole page render. A +++
+// block has a smaller cap of its own, maxTOMLFrontmatterBytes. Written
 // frontmatter is far smaller: the largest found across this estate's docs
 // and vaults was about 7 KiB.
 const maxFrontmatterBytes = 16 << 10
@@ -1141,8 +1146,8 @@ func frontmatterDelim(line []byte) (byte, int) {
 // in document key order, with a non-scalar value shown as its YAML flow
 // form rather than flattened; a TOML block is decoded here, once, and its
 // keys sorted.
-func frontmatterHTML(fm frontmatterBlock, ok bool) string {
-	if !ok {
+func frontmatterHTML(fm *frontmatterBlock) string {
+	if fm == nil {
 		return ""
 	}
 	if fm.delim == '+' {
