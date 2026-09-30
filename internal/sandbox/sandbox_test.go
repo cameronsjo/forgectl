@@ -5,6 +5,9 @@
 //   - Sandbox alwaysClone/remote issues `git clone --branch <ref> -- <repo> <dir>`;
 //     clone-without-ref omits --branch.
 //   - RejectOptionLike rejects a leading-'-' repo and ref before any Runner call.
+//   - A failed clone or worktree add removes its temp dir (#707).
+//   - No log line carries a repo credential, and the worktree leg's error is
+//     categorical (#711).
 //   - Teardown is idempotent: an empty workspace and an already-removed dir
 //     are both no-ops, and neither issues a Runner call.
 //   - Teardown refuses anything whose RESOLVED base name lacks
@@ -28,6 +31,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -564,7 +568,6 @@ func TestWithinWorkspace_RejectsSymlinkEscape(t *testing.T) {
 // URL carrying a token, and the CommandError renders it in its argv; git's
 // stderr relays the remote's sideband (#658).
 func TestSandbox_CloneFailure_DoesNotEchoURLOrStderr(t *testing.T) {
-	// Sandbox leaves its temp dir behind on a failed clone; keep it in ours.
 	t.Setenv("TMPDIR", t.TempDir())
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		return "", &exec.CommandError{Name: name, Args: args, Stderr: "remote: STDERRMARKER\x1b[2J", ExitCode: 128, Err: errors.New("exit status 128")}
@@ -577,6 +580,179 @@ func TestSandbox_CloneFailure_DoesNotEchoURLOrStderr(t *testing.T) {
 		if strings.Contains(err.Error(), s) {
 			t.Fatalf("error %q echoes %q", err, s)
 		}
+	}
+	var cmdErr *exec.CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error %v lost the CommandError from its chain", err)
+	}
+}
+
+// TestSandbox_FailedCheckout_RemovesItsTempDir is #707: a failed clone or
+// worktree add must not leave its os.MkdirTemp directory behind. TMPDIR is a
+// fresh dir per case, so any leftover entry is the leak.
+func TestSandbox_FailedCheckout_RemovesItsTempDir(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		repo        string
+		alwaysClone bool
+	}{
+		{"clone", "https://git.example.test/o/r.git", true},
+		{"worktree add", "/nonexistent/local/repo", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("TMPDIR", tmp)
+			fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				return "", &exec.CommandError{Name: name, Args: args, ExitCode: 128, Err: errors.New("exit status 128")}
+			}}
+			if _, err := Sandbox(context.Background(), fake, tc.repo, "main", tc.alwaysClone); err == nil {
+				t.Fatal("want the checkout failure")
+			}
+			entries, err := os.ReadDir(tmp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
+				t.Errorf("failed checkout left %s behind", e.Name())
+			}
+		})
+	}
+}
+
+// TestLogRepo is #711's allowlist. A non-local repo reaches the log only as
+// host/owner/repo, rebuilt from a strict positive parse, or as the
+// placeholder. Every row below is a form one of the three reviews found, or
+// a control around one.
+func TestLogRepo(t *testing.T) {
+	const ph = remoteRepoPlaceholder
+	for _, tc := range []struct{ in, want string }{
+		// Accepted shapes.
+		{"https://github.com/o/r.git", "github.com/o/r"},
+		{"https://ghe.example.test/Org-1/re.po_x", "ghe.example.test/Org-1/re.po_x"},
+		{"ssh://git@ghe.example.test/o/r.git", "ghe.example.test/o/r"},
+		{"ssh://git@ghe.example.test:2222/o/r.git", "ghe.example.test/o/r"},
+		{"git@github.com:o/r.git", "github.com/o/r"},
+		// Local paths.
+		{"/home/u/src/r@2", "/home/u/src/r@2"},
+		{"./r", "./r"},
+		{"../r", "../r"},
+		{".", "."},
+		// Userinfo in any position or spelling.
+		{"https://x-access-token:SECRETTOK@github.com/o/r.git", ph},
+		{"https://SECRETTOK@github.com/o/r.git", ph},
+		{"ssh://SECRETTOK@ghe.example.test:2222/o/r.git", ph},
+		{"git+ssh://SECRETTOK@h/o/r", ph},
+		{"git+ssh://git@h/o/r", ph},
+		{"SECRETTOK@github.com:o/r.git", ph},
+		{"SECRETTOK:pw@github.com:o/r.git", ph},
+		{"a@SECRETTOK@github.com:o/r@x.git", ph},
+		{"user:SECRETTOK@github.com:/o/r://x", ph},
+		{"https://SECRETTOK%40x@github.com/o/r", ph},
+		{"https://github.com%40SECRETTOK/o/r", ph},
+		{"https://x:SECRETTOK@host:notaport/o/r", ph},
+		{"https://x:SECRET/TOK@host/o/r", ph},
+		// Odd slash counts, 1 through 6.
+		{"https:/SECRETTOK@host/o/r", ph},
+		{"https:///SECRETTOK@host/o/r", ph},
+		{"https:////SECRETTOK@host/o/r", ph},
+		{"https://///SECRETTOK@host/o/r", ph},
+		{"https://////SECRETTOK@host/o/r", ph},
+		{"https:///////SECRETTOK@host/o/r", ph},
+		{"http:///USER:SECRETTOK@host:8080/r", ph},
+		{"https://github.com//o/r", ph},
+		{"https://github.com/o/r/", ph},
+		{"https://github.com/o/r/x", ph},
+		// Transport-helper forms (git sends U:TOK as Basic auth).
+		{"http::http://U:SECRETTOK@host/r", ph},
+		{"https::https://U:SECRETTOK@host/o/r", ph},
+		{"persistent-https::https://SECRETTOK@host/o/r", ph},
+		{"x+y::https://SECRETTOK@host/o/r", ph},
+		{"HTTP::http://U:SECRETTOK@host/r", ph},
+		{"http::http:///SECRETTOK@h/r", ph},
+		{"https::https://github.com/o/r", ph},
+		// Query, fragment, other schemes, IPv6, backslashes, whitespace.
+		{"https://github.com/o/r?access_token=SECRETTOK", ph},
+		{"https://github.com/o/r#SECRETTOK", ph},
+		{"http://github.com/o/r", ph},
+		{"git://github.com/o/r", ph},
+		{"HTTPS://github.com/o/r", ph},
+		{"https://[::1]/o/r", ph},
+		{"ssh://git@[::1]:22/o/r", ph},
+		{"git@[::1]:o/r", ph},
+		{"https:\\\\SECRETTOK@host\\o\\r", ph},
+		{"https://github.com\\o/r", ph},
+		{"https://github.com/o/r ", ph},
+		{" https://github.com/o/r", ph},
+		{"https://github.com/o/r\nSECRETTOK", ph},
+		{"https://git hub.com/o/r", ph},
+		// Other non-local forms.
+		{"owner/repo", ph},
+		{"", ph},
+	} {
+		if got := logRepo(tc.in); got != tc.want {
+			t.Errorf("logRepo(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// captureLog routes the default slog logger into a buffer at Debug for the
+// test's duration.
+func captureLog(t *testing.T) *strings.Builder {
+	t.Helper()
+	var buf strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// TestSandbox_LogLinesCarryNoRepoCredential is #711: every sandbox log line,
+// success and failure, names the repo without its token, and a failure line
+// does not render the CommandError (whose text is the argv, token included).
+func TestSandbox_LogLinesCarryNoRepoCredential(t *testing.T) {
+	const repo = "https://x-access-token:SECRETTOK@git.example.test/o/r.git" //nolint:gosec // G101: a fake credential the test asserts never reaches a log line
+	for _, tc := range []struct {
+		name string
+		fail bool
+	}{{"clone succeeds", false}, {"clone fails", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TMPDIR", t.TempDir())
+			buf := captureLog(t)
+			fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				if tc.fail {
+					return "", &exec.CommandError{Name: name, Args: args, ExitCode: 128, Err: errors.New("exit status 128")}
+				}
+				return "", nil
+			}}
+			dir, _ := Sandbox(context.Background(), fake, repo, "main", true)
+			if dir != "" {
+				t.Cleanup(func() { _ = os.RemoveAll(dir) })
+			}
+			out := buf.String()
+			if strings.Contains(out, "SECRETTOK") {
+				t.Fatalf("log carries the repo credential:\n%s", out)
+			}
+			if !strings.Contains(out, remoteRepoPlaceholder) {
+				t.Fatalf("log does not name the repo by its placeholder (vacuity guard):\n%s", out)
+			}
+		})
+	}
+}
+
+// TestSandbox_WorktreeAddFailure_IsCategorical is #711 item 2: the worktree
+// leg reports categorically, as the clone leg does, keeping the
+// CommandError on the unwrap chain.
+func TestSandbox_WorktreeAddFailure_IsCategorical(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "", &exec.CommandError{Name: name, Args: args, Stderr: "fatal: STDERRMARKER\x1b[2J", ExitCode: 128, Err: errors.New("exit status 128")}
+	}}
+	_, err := Sandbox(context.Background(), fake, "/nonexistent/local/repo", "main", false)
+	if err == nil {
+		t.Fatal("want the worktree add failure")
+	}
+	if msg := err.Error(); msg != "git worktree add failed" {
+		t.Fatalf("error %q, want the categorical message", msg)
 	}
 	var cmdErr *exec.CommandError
 	if !errors.As(err, &cmdErr) {
