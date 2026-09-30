@@ -87,10 +87,13 @@ jobs:
     # The ref check is hygiene only: a branch's copy of this file can drop it.
     if: needs.gate.outputs.go == 'true' && inputs.dry_run != true && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    # RELEASE_APP_PRIVATE_KEY lives only in the `release` environment, whose
-    # deployment policy allows `main` and `v*` tags (ADR-0044 (i)).
-    # GitHub enforces that server-side, so a workflow edited on another branch
-    # cannot read the key.
+    # ADR-0044 (i) puts RELEASE_APP_PRIVATE_KEY only in the `release`
+    # environment, with a deployment policy of `main`, plus a tag-type
+    # `v*` rule only where a tag-triggered job mints the token.
+    # Once the key is there and the repo-level copy is deleted, GitHub
+    # enforces the policy server-side and a workflow edited on another branch
+    # cannot read the key. While a repo-level copy exists, this line protects
+    # nothing: GitHub creates a missing environment with no policy.
     environment: release
     permissions: {}
     steps:
