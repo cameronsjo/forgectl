@@ -94,6 +94,14 @@ type prDashReviewJSON struct {
 // the same cap the human row applies, so a runaway reason cannot flood a
 // transcript through the machine path either.
 func writePrDashJSON(w io.Writer, dash pr.Dashboard, store *pr.ReviewedStore) error {
+	enc := termsafe.JSONEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(buildPrDashJSON(dash, store))
+}
+
+// buildPrDashJSON builds the `pr dash --json` document. `status --json`
+// embeds the same value as its prs section, so the two cannot drift.
+func buildPrDashJSON(dash pr.Dashboard, store *pr.ReviewedStore) prDashJSON {
 	reviews := make([]prDashReviewJSON, 0, len(dash.ActiveReviews))
 	for _, s := range dash.ActiveReviews {
 		reviews = append(reviews, prDashReviewJSON{
@@ -105,13 +113,11 @@ func writePrDashJSON(w io.Writer, dash pr.Dashboard, store *pr.ReviewedStore) er
 			RepairReason: repairReasonLine(s.RepairReason()),
 		})
 	}
-	enc := termsafe.JSONEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(prDashJSON{
+	return prDashJSON{
 		ActiveReviews: reviews,
 		AwaitingYou:   prRowsJSON(dash.AwaitingYou, store),
 		YourOpen:      prRowsJSON(dash.YourOpen, store),
-	})
+	}
 }
 
 // workspaceState names a summary's workspace availability for the JSON row,
