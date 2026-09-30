@@ -189,7 +189,7 @@ func runWorkflowBless(cmd *cobra.Command, deps module.Deps, name string) error {
 	}
 	sidecar := bless.SidecarPath(src.Path)
 	if err := os.WriteFile(sidecar, encoded, 0o644); err != nil {
-		return fmt.Errorf("write blessing sidecar %s: %w", sidecar, err)
+		return fmt.Errorf("write blessing sidecar %s: %w", termsafe.QuotePath(sidecar), termsafe.Error(err))
 	}
 	fmt.Fprintf(out, "Blessed %q — wrote %s\n", name, sidecar)
 	return nil
@@ -511,7 +511,7 @@ func runTrustRebuild(cmd *cobra.Command, deps module.Deps) error {
 // trust rebuild.
 func writeStoreAndSidecar(storePath string, storeBytes, sidecarBytes []byte) error {
 	if err := os.MkdirAll(filepath.Dir(storePath), 0o700); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
+		return fmt.Errorf("create config directory: %w", termsafe.Error(err))
 	}
 	storeTmp, err := stageTrustFile(storePath, storeBytes)
 	if err != nil {
@@ -525,10 +525,10 @@ func writeStoreAndSidecar(storePath string, storeBytes, sidecarBytes []byte) err
 	}
 	defer os.Remove(sidecarTmp)
 	if err := os.Rename(storeTmp, storePath); err != nil {
-		return fmt.Errorf("finalize trust store %s: %w", storePath, err)
+		return fmt.Errorf("finalize trust store %s: %w", termsafe.QuotePath(storePath), termsafe.Error(err))
 	}
 	if err := os.Rename(sidecarTmp, sidecarPath); err != nil {
-		return fmt.Errorf("finalize trust store sidecar: %w", err)
+		return fmt.Errorf("finalize trust store sidecar: %w", termsafe.Error(err))
 	}
 	return nil
 }
@@ -559,7 +559,7 @@ func stageTrustFile(target string, data []byte) (string, error) {
 	}
 	if err := os.Chmod(name, 0o644); err != nil {
 		_ = os.Remove(name)
-		return "", fmt.Errorf("chmod %s: %w", name, err)
+		return "", fmt.Errorf("chmod %s: %w", termsafe.QuotePath(name), termsafe.Error(err))
 	}
 	return name, nil
 }

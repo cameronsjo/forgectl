@@ -244,3 +244,31 @@ func TestCheckForkCapsFailingStderr(t *testing.T) {
 		t.Errorf("CheckFork error = %q; want the head kept and the truncation marked", got)
 	}
 }
+
+// TestCheckForkMarksDroppedStderrStart is #837: exec keeps only the last
+// 64 KiB of stderr, so when it dropped the start, the head CheckFork echoes
+// is not herdr's first line, and nothing said so. The echo now carries
+// exec's own "earlier bytes dropped" marker, and an untruncated stream does
+// not.
+//
+// Mutation: delete the StderrDropped branch in CheckFork and the first row
+// loses the marker.
+func TestCheckForkMarksDroppedStderrStart(t *testing.T) {
+	for _, tt := range []struct {
+		dropped int64
+		want    bool
+	}{{dropped: 4096, want: true}, {dropped: 0, want: false}} {
+		probe := runnerFor("", &exec.CommandError{Name: Binary, ExitCode: 3, Stderr: "mid-stream text", StderrDropped: tt.dropped})
+		err := CheckFork(context.Background(), probe)
+		if err == nil {
+			t.Fatal("CheckFork: nil error for a failing probe")
+		}
+		got := err.Error()
+		if marked := strings.Contains(got, "[stderr truncated, 4096 earlier bytes dropped] mid-stream text"); marked != tt.want {
+			t.Errorf("dropped=%d: CheckFork error = %q; want marker %v", tt.dropped, got, tt.want)
+		}
+		if !tt.want && strings.Contains(got, "truncated") {
+			t.Errorf("dropped=0: CheckFork error = %q marks a truncation that did not happen", got)
+		}
+	}
+}

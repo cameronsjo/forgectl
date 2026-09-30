@@ -31,8 +31,23 @@ type Error struct {
 // was handed, and a line holding a credential shape reads as [redacted].
 // redact.Text works per line, so it runs first, while the line breaks that
 // printable escapes still mark its boundaries.
+//
+// Message and Code are capped at herdrTextMaxRunes (#837): their only other
+// bound is exec's 64 KiB stderr tail, and a chatty or hostile herdr must not
+// flood the terminal through a refusal.
 func (e *Error) Error() string {
-	return "herdr: " + printable(e.Code) + ": " + printable(redact.Text(e.Message))
+	return "herdr: " + printableMax(e.Code) + ": " + printableMax(redact.Text(e.Message))
+}
+
+// herdrTextMaxRunes caps a herdr-supplied field in an error message: its
+// refusal message, code, or a declined move's reason. herdr's own text is one
+// short line; 512 escaped runes keeps any real one whole.
+const herdrTextMaxRunes = 512
+
+// printableMax is printable capped at herdrTextMaxRunes of output, ending in
+// termsafe.TruncatedMarker when it cut.
+func printableMax(s string) string {
+	return termsafe.SafeLineMax(s, herdrTextMaxRunes)
 }
 
 // printable renders herdr text as one inert terminal line through

@@ -172,11 +172,11 @@ func resolveDocsReadTarget(idx *docspkg.Index, target string) (docspkg.Doc, stri
 	if _, statErr := os.Stat(target); statErr == nil {
 		abs, err := filepath.Abs(target)
 		if err != nil {
-			return docspkg.Doc{}, "", fmt.Errorf("resolve %s: %w", termsafe.QuotePath(target), err)
+			return docspkg.Doc{}, "", fmt.Errorf("resolve %s: %w", termsafe.QuotePath(target), termsafe.Error(err))
 		}
 		canonical, err := filepath.EvalSymlinks(abs)
 		if err != nil {
-			return docspkg.Doc{}, "", fmt.Errorf("resolve %s: %w", termsafe.QuotePath(target), err)
+			return docspkg.Doc{}, "", fmt.Errorf("resolve %s: %w", termsafe.QuotePath(target), termsafe.Error(err))
 		}
 		doc, ok := idx.FindByAbsPath(filepath.Clean(canonical))
 		if !ok {

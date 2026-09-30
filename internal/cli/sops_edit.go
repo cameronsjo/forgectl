@@ -13,6 +13,7 @@ import (
 
 	execpkg "github.com/cameronsjo/forgectl/internal/exec"
 	sopspkg "github.com/cameronsjo/forgectl/internal/sops"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // The fixed file names inside the work directory. Only the directory's path
@@ -282,7 +283,7 @@ func claimSopsInvocation(workdir string) error {
 		if os.IsExist(err) {
 			return errors.New("the editor was invoked more than once in one run; refusing")
 		}
-		return fmt.Errorf("could not claim the invocation: %w", err)
+		return fmt.Errorf("could not claim the invocation: %w", termsafe.Error(err))
 	}
 	return f.Close()
 }

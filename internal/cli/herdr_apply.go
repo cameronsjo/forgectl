@@ -11,6 +11,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/herdr"
 	"github.com/cameronsjo/forgectl/internal/herdr/organize"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Seams for --apply: the fork check, the lock, and where the lock file lives.
@@ -32,7 +33,7 @@ func organizeLockPath() (string, error) {
 	}
 	dir := filepath.Dir(cfgPath)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("create config directory %s: %w", dir, err)
+		return "", fmt.Errorf("create config directory %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	return filepath.Join(dir, "herdr-organize"), nil
 }
