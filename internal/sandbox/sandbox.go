@@ -278,9 +278,14 @@ func WithinWorkspace(workspace, target string) bool {
 // field is the caller's own label for the value and carries the whole error
 // message — the callers span git argv (workflow, docker, branch, pr refs) and
 // the clean-room reviewer's claude argv, so it names no subsystem itself.
+//
+// The error names the field and never echoes value (forgectl#787). The value
+// is caller input that can carry a secret (`docker shell --shell -pSEKRIT`),
+// and callers log the error through slog, so repeating it here would put it in
+// the log.
 func RejectOptionLike(field, value string) error {
 	if strings.HasPrefix(value, "-") {
-		return fmt.Errorf("%s %q must not begin with '-'", field, value)
+		return fmt.Errorf("%s starts with '-', which would be read as an option", field)
 	}
 	return nil
 }
