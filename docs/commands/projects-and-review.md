@@ -163,3 +163,61 @@ otherwise be fetched from GitHub by the server's own owner/repo strings).
 If `forgectl init` already wrote an active `owners = ["…"]` into your
 config.toml, it stays exactly as written: init never rewrites a section that is
 already present. Delete or comment the line to move to the authenticated default.
+
+## Release radar: `forgectl review releases`
+
+`review releases` reads the release-rhythm registry (`docs/release-rhythm.yaml`
+in cadence-ecosystem, ADR-0044 there) and asks GitHub, read-only, where each
+`release-pr`, `testflight`, and `manual-cut` repo stands. `continuous` and
+`dormant` repos are listed in a one-line footer.
+
+```sh
+forgectl review releases                         # table
+forgectl review releases --json                  # machine-readable report
+forgectl review releases --json --fail-on-stall  # exit 1 on any stalled or unknown repo
+```
+
+| Column | Source |
+|---|---|
+| last release | newest non-draft, non-prerelease release whose tag has the registry's `tag_pattern`; for `testflight`, the newest `testflight-upload` record (or `tf-*` tag) |
+| unreleased | commits on the branch since that release (compare API) |
+| release PR | open same-repo PR whose title passes the ship gate's title check |
+| last ship | newest entrypoint run: age, conclusion, and the gate's `reason` from its `ship-gate <reason>:` annotation (testflight: `paused`, `uploaded`, `no-change`, `failed`) |
+| human gates | count, and for `manual-cut` how long a cut has been due: the oldest uncut commit or upstream commit, never earlier than the last cut. App Store release has no age visible from GitHub |
+| endpoints | the `version` in each tap formula or cask, or Scoop manifest, against the last release |
+| gate copy | sha256 of `.github/scripts/ship-gate.sh` on the branch against the canonical copy |
+
+A repo is **stalled** when:
+
+- its toggle (`SHIP_NIGHTLY` for `release-pr`, `TESTFLIGHT_NIGHTLY` for
+  `testflight`) is `on` and the entrypoint has not run in 26h;
+- its toggle is `on` and its last 2 scheduled runs report the same reason other
+  than `go`, `no-pr`, or `paused` (`uploaded` and `no-change` for testflight);
+- its last run reports `half-shipped`;
+- an endpoint still trails a release more than 24h old; or
+- its gate copy is missing or its hash differs from the canonical one.
+
+A repo whose toggle is not `on` is `paused`: shown, not judged on its beat. A
+repo with any failed read is `unknown`, and the failed read is named (for
+example `unknown forgectl: runs: HTTP 403`). Missing data counts as a failed
+read: no release matching the registry's `tag_pattern` (or, for `testflight`,
+no unexpired upload record or `tf-*` tag), or a finished ship run whose `Gate`
+job left no reason. `--fail-on-stall` exits 1 on any `stalled` or `unknown`
+row, so a read failure never passes as healthy.
+
+Inputs:
+
+- Registry: `--registry`, else `$FORGECTL_RELEASE_REGISTRY`, else
+  `~/Projects/cadence-ecosystem/docs/release-rhythm.yaml`.
+- Canonical gate hash: `--gate-sha256`, else `$FORGECTL_GATE_SHA256`, else the
+  sha256 of `../scripts/release/ship-gate.sh` beside the registry. With none of
+  those, every `release-pr` row reads `unknown`.
+- Auth: gh's own (`GH_TOKEN`, `GITHUB_TOKEN`, or its stored login), pinned to
+  `[github] host`. The token needs read access to contents, pull requests,
+  actions, and checks (the gate's annotations) on every tracked repo, and to
+  upstream repos. Actions variables read is optional: when the token cannot
+  list variables (a GitHub App token minted by `create-github-app-token`
+  cannot be granted it), the toggle is inferred from the newest scheduled
+  run, where the gate reports `paused` and a paused `testflight.yml` skips its
+  job; the JSON report's `toggle.source` says which (`variable` or `runs`).
+  With no scheduled run to read, the row is `unknown`.

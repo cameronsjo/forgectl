@@ -1,0 +1,146 @@
+# Recorded by TestRecordReleasesFixture from the release-rhythm registry.
+# Radar fields only; private repos renamed. Do not edit by hand.
+version: 1
+repos:
+    - repo: forgectl
+      branch: main
+      class: release-pr
+      entrypoint: .github/workflows/ship.yml
+      tag_pattern: v-semver
+      human_gates: []
+      endpoints:
+        - kind: homebrew-cask
+          repo: homebrew-tap
+          path: Casks/forgectl.rb
+      upstream: ""
+    - repo: cadence-hooks
+      branch: main
+      class: release-pr
+      entrypoint: .github/workflows/ship.yml
+      tag_pattern: v-semver
+      human_gates: []
+      endpoints:
+        - kind: homebrew-formula
+          repo: homebrew-tap
+          path: Formula/cadence-hooks.rb
+        - kind: scoop
+          repo: scoop-bucket
+          path: bucket/cadence-hooks.json
+      upstream: ""
+    - repo: obsidi-claude
+      branch: main
+      class: release-pr
+      entrypoint: .github/workflows/ship.yml
+      tag_pattern: bare-semver
+      human_gates: []
+      endpoints: []
+      upstream: ""
+    - repo: yaae
+      branch: main
+      class: release-pr
+      entrypoint: .github/workflows/ship.yml
+      tag_pattern: bare-semver
+      human_gates: []
+      endpoints: []
+      upstream: ""
+    - repo: private-testflight-1
+      branch: main
+      class: testflight
+      entrypoint: .github/workflows/testflight.yml
+      tag_pattern: none
+      human_gates:
+        - App Store release
+      endpoints:
+        - kind: testflight
+          repo: ""
+          path: ""
+      upstream: ""
+    - repo: private-testflight-2
+      branch: main
+      class: testflight
+      entrypoint: .github/workflows/testflight.yml
+      tag_pattern: tf-date
+      human_gates:
+        - App Store release
+      endpoints:
+        - kind: testflight
+          repo: ""
+          path: ""
+      upstream: ""
+    - repo: herdr
+      branch: master
+      class: manual-cut
+      entrypoint: ""
+      tag_pattern: fork-suffix
+      human_gates:
+        - upstream sync PR (sync-upstream.yml, conflicts by nature)
+        - fork cut (cut-fork-release.sh, admin-only tag ruleset)
+      endpoints:
+        - kind: homebrew-formula
+          repo: homebrew-tap
+          path: Formula/herdr.rb
+      upstream: herdrdev/herdr
+    - repo: artificer
+      branch: main
+      class: manual-cut
+      entrypoint: ""
+      tag_pattern: v-semver
+      human_gates:
+        - export render review from private-upstream-4
+        - hand tag (release-npm.yml)
+      endpoints: []
+      upstream: private-upstream-4
+    - repo: artificer-obsidian
+      branch: main
+      class: manual-cut
+      entrypoint: ""
+      tag_pattern: bare-semver
+      human_gates:
+        - export render review (scripts/export-obsidian.mjs --push in private-upstream-4)
+        - hand tag of bare X.Y.Z (release.yml)
+      endpoints: []
+      upstream: private-upstream-4
+    - repo: private-continuous-4
+      branch: main
+      class: continuous
+      entrypoint: ""
+      tag_pattern: v-semver
+      human_gates:
+        - milestone tag (ADR-0042 (c); no age counter, never calendar-pressured)
+      endpoints: []
+      upstream: ""
+    - repo: workbench
+      branch: main
+      class: continuous
+      entrypoint: ""
+      tag_pattern: none
+      human_gates: []
+      endpoints: []
+      upstream: ""
+    - repo: private-continuous-5
+      branch: main
+      class: continuous
+      entrypoint: ""
+      tag_pattern: none
+      human_gates: []
+      endpoints: []
+      upstream: ""
+    - repo: envctl
+      branch: main
+      class: dormant
+      entrypoint: ""
+      tag_pattern: component-semver
+      human_gates: []
+      endpoints:
+        - kind: homebrew-formula
+          repo: homebrew-tap
+          path: Formula/envctl.rb
+      upstream: ""
+    - repo: claunch
+      branch: main
+      class: dormant
+      entrypoint: ""
+      tag_pattern: v-semver
+      human_gates: []
+      endpoints: []
+      upstream: ""
