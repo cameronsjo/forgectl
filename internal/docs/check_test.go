@@ -427,8 +427,10 @@ func TestCheck_VaultParityWithReader(t *testing.T) {
 		{"[[T]]", false},
 		{"[[t.md]]", false},
 		{"[[Tee]]", false},
-		{"[[assets/my pic.png]]", true},
-		{"[[assets/doc.pdf]]", true},
+		{"[[assets/my pic.png]]", false},
+		{"[[assets/doc.pdf]]", false},
+		{"[[my pic.png]]", false},
+		{"[[nope.pdf]]", true},
 		{"[[sub]]", true},
 		{"[[missing]]", true},
 	}

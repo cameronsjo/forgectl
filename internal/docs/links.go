@@ -42,6 +42,13 @@ const (
 	// MissOutsideRoot means the target's reconstructed path escapes the
 	// calling doc's root (a leading ".." or "/" after path.Clean).
 	MissOutsideRoot
+	// MissAttachment means a vault wikilink matched no doc but did match an
+	// attachment, an existing non-markdown file in the root
+	// (resolveAttachment). There is no Doc and no href: no route serves the
+	// file yet, so the reader renders it as marked text, and docs check
+	// counts it as resolved (forgectl#709). Only resolveWikilink returns it;
+	// ResolveLink never does.
+	MissAttachment
 )
 
 // LinkForm classifies the syntax a LinkRef was written in — reporting and
@@ -136,6 +143,10 @@ type Heading struct {
 //   - byAlias: lowercased frontmatter alias -> indices into Index.docs.
 //     Built for every root; consulted for vault roots only, as the last
 //     fallback.
+//   - attRel / attByName: a vault root's attachments (walkRoot), keyed by
+//     relKey of the root-relative path and by nameKey of the basename; the
+//     byName values are the relKey'd paths. Consulted by resolveAttachment
+//     only, after every doc table has missed. Empty for a docs root.
 //
 // Case: a vault root folds every key (fold == true), matching Obsidian's
 // case-insensitive links. A docs root keeps exact case — a relative markdown
@@ -149,10 +160,12 @@ type Heading struct {
 // slice-of-structs storage; Task 3 dereferences through Index.docs[i].
 type rootIndex struct {
 	// fold is true when keys are case-folded (vault roots).
-	fold    bool
-	byRel   map[string][]int
-	byName  map[string][]int
-	byAlias map[string][]int
+	fold      bool
+	byRel     map[string][]int
+	byName    map[string][]int
+	byAlias   map[string][]int
+	attRel    map[string]bool
+	attByName map[string][]string
 }
 
 // relKey folds a slash-separated relative path to byRel's key shape for
@@ -182,17 +195,27 @@ func stripMarkdownExt(p string) string {
 	return p
 }
 
-// buildRootIndexes builds one rootIndex per root, scanning docs once. Called
-// from NewIndex (index.go) right after the pathIndex loop.
-func buildRootIndexes(roots []Root, docs []Doc) map[string]*rootIndex {
+// buildRootIndexes builds one rootIndex per root, scanning docs once, and
+// keys each root's attachments (walkRoot's list, by root label). Called from
+// NewIndex (index.go) right after the pathIndex loop.
+func buildRootIndexes(roots []Root, docs []Doc, attachments map[string][]string) map[string]*rootIndex {
 	out := make(map[string]*rootIndex, len(roots))
 	for _, r := range roots {
-		out[r.Label] = &rootIndex{
-			fold:    r.Kind == RootVault,
-			byRel:   map[string][]int{},
-			byName:  map[string][]int{},
-			byAlias: map[string][]int{},
+		ri := &rootIndex{
+			fold:      r.Kind == RootVault,
+			byRel:     map[string][]int{},
+			byName:    map[string][]int{},
+			byAlias:   map[string][]int{},
+			attRel:    map[string]bool{},
+			attByName: map[string][]string{},
 		}
+		for _, rel := range attachments[r.Label] {
+			key := ri.relKey(rel)
+			ri.attRel[key] = true
+			name := ri.nameKey(rel)
+			ri.attByName[name] = append(ri.attByName[name], key)
+		}
+		out[r.Label] = ri
 	}
 	for i, d := range docs {
 		ri, ok := out[d.RootLabel]
@@ -344,6 +367,83 @@ func (idx *Index) resolveVaultDoc(rootIdx *rootIndex, from *Doc, path0 string) (
 	}
 
 	return idx.pickCandidate(rootIdx.byAlias[strings.ToLower(clean)])
+}
+
+// resolveAttachment resolves a vault wikilink path that matched no doc
+// against the root's attachments, the way Obsidian resolves a link to a
+// non-note file (forgectl#709):
+//
+//   - A target written relative to the linking note ("./a.png", "../a.png")
+//     names exactly that path, joined against the note's directory.
+//   - Anything else is a basename match, narrowed by path suffix when the
+//     target holds a "/" ("[[assets/logo.png]]" matches "assets/logo.png"
+//     and "x/assets/logo.png", never "other/logo.png"). The match with the
+//     fewest path segments, the one closest to the root, wins. A
+//     root-relative path is always its own closest match, so this one rule
+//     is both Obsidian's shortest-path match and its root-relative lookup.
+//   - Two matches equally close to the root are MissAmbiguous. Obsidian
+//     picks one of them by its own internal file order, which the reader
+//     cannot reproduce, so it reports the tie rather than guessing.
+//
+// The extension is part of the name, as in Obsidian: "[[logo]]" never
+// reaches logo.png. A target written as a directory ("logo.png/") matches
+// nothing. Only the walk's own entries are ever matched, so a symlink, a
+// file under an excluded directory, and anything outside the root cannot
+// resolve; the caller has already refused a target that escapes the root.
+//
+// Known divergence: a note always wins over an attachment, because the doc
+// tables are consulted first, while Obsidian's exact-path lookup would pick
+// the attachment "x.png" over a note "x.png.md" for "[[x.png]]".
+func resolveAttachment(ri *rootIndex, from *Doc, path0 string) Miss {
+	if namesDirectory(path0) {
+		return MissNoTarget
+	}
+	if isExplicitlyRelative(path0) {
+		if ri.attRel[ri.relKey(path.Clean(path.Join(path.Dir(from.RelPath), path0)))] {
+			return MissAttachment
+		}
+		return MissNoTarget
+	}
+	clean := strings.TrimPrefix(path.Clean(path0), "/")
+	want := ri.relKey(clean)
+	best, ties := -1, 0
+	for _, key := range ri.attByName[ri.nameKey(clean)] {
+		if key != want && !strings.HasSuffix(key, "/"+want) {
+			continue
+		}
+		depth := strings.Count(key, "/")
+		switch {
+		case best < 0 || depth < best:
+			best, ties = depth, 1
+		case depth == best:
+			ties++
+		}
+	}
+	switch {
+	case best < 0:
+		return MissNoTarget
+	case ties > 1:
+		return MissAmbiguous
+	default:
+		return MissAttachment
+	}
+}
+
+// resolveWikilink is the one resolution the reader's wikilinks
+// (wikilinkTarget) and docs check share. It is resolveAnchor, and then, for
+// a vault wikilink or embed whose path matched no doc, resolveAttachment. A
+// plain markdown link (FormRelPath) never takes the attachment step: docs
+// check keeps its on-disk existence fallback for those.
+func (idx *Index) resolveWikilink(from *Doc, ref LinkRef, budget *fragmentBudget) (*Doc, string, Miss) {
+	doc, anchor, miss := idx.resolveAnchor(from, ref.Path, ref.Fragment, budget)
+	if from == nil || doc != nil || miss != MissNoTarget || ref.Path == "" || ref.Form == FormRelPath {
+		return doc, anchor, miss
+	}
+	root, ok := idx.rootByLabel(from.RootLabel)
+	if !ok || root.Kind != RootVault {
+		return doc, anchor, miss
+	}
+	return nil, "", resolveAttachment(idx.byRoot[from.RootLabel], from, ref.Path)
 }
 
 // matchFragment checks target's fragment against doc's anchors, once the
@@ -517,9 +617,9 @@ func (idx *Index) resolveAnchor(from *Doc, path0, fragment string, budget *fragm
 // in ref reaches it. A hit links to the doc and its heading or block. A doc
 // that resolved while its heading or block id did not still links to the
 // doc, without a fragment.
-// Every other miss has no href at all.
+// Every other miss has no href at all, a MissAttachment hit included.
 func (idx *Index) wikilinkTarget(from *Doc, ref LinkRef, budget *fragmentBudget) (href string, miss Miss) {
-	doc, anchor, miss := idx.resolveAnchor(from, ref.Path, ref.Fragment, budget)
+	doc, anchor, miss := idx.resolveWikilink(from, ref, budget)
 	if doc == nil {
 		if miss == MissNone {
 			miss = MissNoTarget

@@ -120,6 +120,10 @@ main.surface-document { max-width: 820px; }
    missing) keeps the pointer, since it still opens the note. */
 .doc-body .wikilink-miss { color: var(--urgent-text); text-decoration: underline dashed; }
 .doc-body span.wikilink-miss { cursor: help; }
+/* A [[wikilink]] to an attachment (an image, a PDF) that exists but that the
+   reader cannot show yet (forgectl#709): muted text, not a link and not a
+   broken one; the help cursor surfaces its hover title. */
+.doc-body .wikilink-attachment { color: var(--fg-secondary); text-decoration: underline dotted; cursor: help; }
 /* A11: Artificer's `.surface-document *` sets the prose face on every KaTeX
    span, so digits and operators, which KaTeX leaves to inherit KaTeX_Main from
    .katex, drew in the body font. `.katex *` ties that specificity and wins by

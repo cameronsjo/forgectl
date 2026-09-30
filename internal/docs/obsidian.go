@@ -762,6 +762,12 @@ const (
 	titleUnresolved   = "Broken link (unresolved)"
 )
 
+// titleAttachment is the title a wikilink to an attachment carries
+// (MissAttachment). The file exists, but no route serves it yet
+// (forgectl#709), so it renders as marked text, never as a link. Fixed and
+// colon-free for the same reasons as the miss titles above.
+const titleAttachment = "Attachment, not viewable in the reader yet"
+
 // missTitle is the title for a wikilink that missed. docResolved is whether
 // the note itself resolved, in which case only its heading or block id did
 // not.
@@ -786,11 +792,13 @@ func isDocHref(href string) bool {
 
 // resolvedWikilinkNode is a wikilink after resolution. Href is set only from
 // the resolver and only when it is a reader page path; Title is set only for
-// a miss, from missTitle. The children are the wikilink's label.
+// a miss, from missTitle. Attachment is set only for a MissAttachment
+// verdict with no href. The children are the wikilink's label.
 type resolvedWikilinkNode struct {
 	ast.BaseInline
-	Href  string
-	Title string
+	Href       string
+	Title      string
+	Attachment bool
 }
 
 func (n *resolvedWikilinkNode) Kind() ast.NodeKind { return kindWikilink }
@@ -854,7 +862,10 @@ func (wikilinkTransformer) Transform(doc *ast.Document, reader text.Reader, pc p
 		if isDocHref(href) {
 			node.Href = href
 		}
-		if miss != MissNone || node.Href == "" {
+		switch {
+		case miss == MissAttachment && node.Href == "":
+			node.Attachment = true
+		case miss != MissNone || node.Href == "":
 			node.Title = missTitle(miss, node.Href != "")
 		}
 		for c := wl.FirstChild(); c != nil; {
@@ -970,9 +981,9 @@ func hasLinkAncestor(n ast.Node) bool {
 // renderResolvedWikilink renders a wikilink wikilinkTransformer resolved. An
 // href, which only ever comes from an indexed doc, makes an anchor: a plain
 // one for a hit, a marked one for a doc whose heading or block id is missing.
-// Anything else is a miss span with no href. The href is checked for the
-// /doc/ prefix again here, so an href that did not come from docHref can
-// never reach the page. The label renders as the node's children, which
+// An attachment is an attachment span with no href. Anything else is a miss
+// span with no href. The href is checked for the /doc/ prefix again here, so
+// an href that did not come from docHref can never reach the page. The label renders as the node's children, which
 // goldmark escapes as text.
 func renderResolvedWikilink(w util.BufWriter, _ []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
 	rw, ok := n.(*resolvedWikilinkNode)
@@ -989,6 +1000,10 @@ func renderResolvedWikilink(w util.BufWriter, _ []byte, n ast.Node, entering boo
 		return ast.WalkContinue, nil
 	}
 	if !anchor {
+		if rw.Attachment {
+			_, _ = w.WriteString(`<span class="wikilink wikilink-attachment" title="` + titleAttachment + `">`)
+			return ast.WalkContinue, nil
+		}
 		title := rw.Title
 		if title == "" {
 			title = titleNoTarget
