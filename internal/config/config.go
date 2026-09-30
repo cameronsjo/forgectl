@@ -129,7 +129,12 @@ type Config struct {
 	Github    GithubConfig    `toml:"github"`
 	Theme     ThemeConfig     `toml:"theme"`
 	Herdr     HerdrConfig     `toml:"herdr"`
+	Resume    ResumeConfig    `toml:"resume"`
 	launchSet bool
+	// resumeUnknown lists the undecoded keys under [resume], so
+	// ResumeConfig.Validate can name a misspelled hook key instead of
+	// running a hook that silently lost it.
+	resumeUnknown []string
 	// herdrOrganizeSet records that [herdr.organize] is present in the file,
 	// even as an empty table (what `forgectl init` writes).
 	herdrOrganizeSet bool
@@ -1172,6 +1177,13 @@ func DecodeStrict(data []byte) (Config, error) {
 	meta, err := toml.Decode(string(data), &cfg)
 	cfg.launchSet = meta.IsDefined("launch")
 	cfg.herdrOrganizeSet = meta.IsDefined("herdr", "organize")
+	for _, k := range meta.Undecoded() {
+		// A top-level on_update table is collected too, so Validate can point
+		// at [[resume.on_update]] instead of the table being silently ignored.
+		if len(k) > 0 && (k[0] == "resume" || k[0] == "on_update") {
+			cfg.resumeUnknown = append(cfg.resumeUnknown, k.String())
+		}
+	}
 	return cfg, tomlerr.Scrub(err)
 }
 
@@ -1189,7 +1201,7 @@ func Validate() error {
 
 // ValidatePath strictly decodes the already-resolved config path, then asks
 // each section that owns a semantic rule to check itself — [docs], [proxy],
-// and [theme]. A missing file remains valid and selects built-in defaults.
+// [herdr.organize], [resume], and [theme]. A missing file remains valid and selects built-in defaults.
 //
 // The semantic half is the point for `launch doctor`: a config can decode
 // cleanly and still be one every launch path refuses, and a doctor that only
@@ -1213,6 +1225,9 @@ func ValidatePath(path string) error {
 		return err
 	}
 	if err := cfg.Herdr.Organize.Validate(); err != nil {
+		return err
+	}
+	if err := cfg.Resume.Validate(cfg.resumeUnknown); err != nil {
 		return err
 	}
 	return cfg.Theme.Validate()

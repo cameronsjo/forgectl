@@ -251,6 +251,7 @@ const pipeWaitDelay = 500 * time.Millisecond
 // what the failure path keeps of stderr and stdout, plus the stderr it logs,
 // and includes the values a user span withholds.
 func runAndWrap(ctx context.Context, cmd *exec.Cmd, ceiling int, preparingMsg, successMsg, failureMsg string, args []string, name string) (string, error) {
+	applyProcessGroup(ctx, cmd)
 	mask, shown, span := maskFor(ctx, args), shownArgs(ctx, args), spanFor(ctx, len(args))
 	slog.Debug(preparingMsg, "cmd", name, "args", renderArgs(shown, span))
 	start := time.Now()
