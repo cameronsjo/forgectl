@@ -121,7 +121,7 @@ func runUpgradeCheck(ctx context.Context, deps module.Deps, out io.Writer) error
 		return WithExitCode(termsafe.Categorical("check: brew outdated failed; check network access to the Homebrew tap", err), 1)
 	}
 	if outdated {
-		fmt.Fprintf(out, "update available: %s\n", selfupdate.OutdatedDetail(detail))
+		_, _ = fmt.Fprintf(out, "update available: %s\n", selfupdate.OutdatedDetail(detail))
 		return nil
 	}
 	fmt.Fprintln(out, "forgectl is up to date.")

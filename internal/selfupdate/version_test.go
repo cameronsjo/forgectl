@@ -37,7 +37,7 @@ func TestFindVersions(t *testing.T) {
 // TestOutdatedDetail: the detail is rebuilt from two version tokens, and any
 // other brew output reads as the fixed category.
 func TestOutdatedDetail(t *testing.T) {
-	for in, want := range map[string]string{
+	for in, want := range map[string]string{ //nolint:gosec // G101: version strings, not credentials
 		"cameronsjo/tap/forgectl (0.9.0) != 0.10.0":                 "forgectl 0.9.0 installed, 0.10.0 available",
 		"cameronsjo/tap/forgectl (0.9.0_1) < 0.10.0":                "forgectl 0.9.0_1 installed, 0.10.0 available",
 		"cameronsjo/tap/forgectl":                                   "a newer forgectl is available",

@@ -112,7 +112,7 @@ func TestScrub_AdversarialCorpus(t *testing.T) {
 		if !allowed[m[1]] {
 			t.Errorf("Scrub(%q) hint %q is not allowlisted", body, m[1])
 		}
-		for _, leak := range []string{marker, "98765", "999999", "\x1b", "‮"} {
+		for _, leak := range []string{marker, "98765", "999999", "\x1b", "\u202e"} {
 			if strings.Contains(msg, leak) {
 				t.Errorf("Scrub(%q) = %q carries %q", body, msg, leak)
 			}
