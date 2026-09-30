@@ -340,11 +340,7 @@ func (mathBlockParser) Open(parent ast.Node, reader text.Reader, pc parser.Conte
 // A fence line ends the search for the same keep-when-unsure reason as a
 // blank line: TeX never contains one, and a block that swallowed a fence's
 // opener would leave its closer outside to open a fence running to EOF
-// ("$$" then "```sh" / "kill -9 $$" / "```" is shell, not math). A line
-// that opens an HTML block (opensHTMLBlock) ends it the same way, as it
-// ends commentBlockParser's look-ahead: a block that swallowed "<script>"
-// or "<pre>" would hide an opener whose HTML block runs to its end tag in
-// every parser without the $$ extension (forgectl#767 review).
+// ("$$" then "```sh" / "kill -9 $$" / "```" is shell, not math).
 func hasDisplayCloserAhead(source []byte, from int) bool {
 	nl := bytes.IndexByte(source[from:], '\n')
 	if nl < 0 {
@@ -356,7 +352,7 @@ func hasDisplayCloserAhead(source []byte, from int) bool {
 			end = i + n
 		}
 		line := source[i:end]
-		if util.IsBlank(line) || isFenceLine(line) || opensHTMLBlock(line) {
+		if util.IsBlank(line) || isFenceLine(line) {
 			return false
 		}
 		if isDisplayCloserLine(line) {
@@ -365,21 +361,6 @@ func hasDisplayCloserAhead(source []byte, from int) bool {
 		i = end + 1
 	}
 	return false
-}
-
-// opensHTMLBlock reports whether line could open an HTML block: up to three
-// spaces of indent, then "<" and a letter, "/", "!" or "?". A TeX line that
-// merely starts with a less-than sign ("< b") does not.
-func opensHTMLBlock(line []byte) bool {
-	i := 0
-	for i < len(line) && i < 3 && line[i] == ' ' {
-		i++
-	}
-	if i+1 >= len(line) || line[i] != '<' {
-		return false
-	}
-	c := line[i+1]
-	return c == '/' || c == '!' || c == '?' || (c|0x20 >= 'a' && c|0x20 <= 'z')
 }
 
 // isFenceLine reports whether line could open or close a fenced code block:

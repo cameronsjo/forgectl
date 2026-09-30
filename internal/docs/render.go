@@ -603,7 +603,11 @@ func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (strin
 	// A document goldmark would take superlinear time on is shown as plain
 	// text instead, before renderMu is taken. The guard measures the block
 	// structure md itself gives source (markupguard.go).
-	if markupTooComplex(md, source) {
+	tooComplex, guardErr := markupTooComplex(md, source)
+	if guardErr != nil {
+		return "", nil, guardErr
+	}
+	if tooComplex {
 		return plainTextDoc(source), nil, nil
 	}
 	renderMu.Lock()

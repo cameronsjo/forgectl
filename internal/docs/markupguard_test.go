@@ -4,6 +4,7 @@ package docs
 
 import (
 	"bytes"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -14,22 +15,28 @@ import (
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 )
 
 // refused reports whether the guard refuses src for the docs render
 // pipeline, or for the vault one when vault is set. The container and
 // work bounds these tests pin do not depend on the pipeline.
 func refused(src []byte, vault bool) bool {
+	md := markdownPlain
 	if vault {
-		return markupTooComplex(markdownVaultPlain, src)
+		md = markdownVaultPlain
 	}
-	return markupTooComplex(markdownPlain, src)
+	tooComplex, err := markupTooComplex(md, src)
+	if err != nil {
+		panic(err)
+	}
+	return tooComplex
 }
 
 // refusedByAny reports whether any pipeline's guard refuses src.
 func refusedByAny(src []byte) bool {
 	for md := range guardTwins {
-		if markupTooComplex(md, src) {
+		if tooComplex, err := markupTooComplex(md, src); err != nil || tooComplex {
 			return true
 		}
 	}
@@ -238,6 +245,74 @@ func TestMarkupGuard_NeverFinerThanAPipeline(t *testing.T) {
 	}
 }
 
+// escapedPipeTables are GFM tables of cells holding "\|" after a backtick,
+// which goldmark's tableASTTransformer handles in quadratic time
+// (escapedPipeWork). The twin runs no AST transformer, so only
+// escapedPipeWork's charge sees them. On the guard without that charge,
+// the one-column table (420 KB) took 11.4 s to render and the eight-column
+// one (294 KB) 9.8 s to render and 9.3 s to scan.
+func escapedPipeTables() map[string]string {
+	eight := "|" + strings.Repeat("`\\|`|", 8) + "\n"
+	return map[string]string{
+		"escaped pipes, 1 column":  "| a |\n|-|\n" + strings.Repeat("|`\\|`|\n", 52500),
+		"escaped pipes, 8 columns": "| a | b | c | d | e | f | g | h |\n|-|-|-|-|-|-|-|-|\n" + strings.Repeat(eight, 6000),
+	}
+}
+
+// TestMarkupGuard_EscapedPipeCharge: the escaped-pipe tables are refused
+// for the render pipelines, which carry the table transformers, and a
+// table of a few such cells is not. Mutation: dropping escapedPipeWork
+// from markupTooComplex turns this red (and ReprosAreBounded slow).
+func TestMarkupGuard_EscapedPipeCharge(t *testing.T) {
+	for name, src := range escapedPipeTables() {
+		for _, vault := range []bool{false, true} {
+			if !refused([]byte(src), vault) {
+				t.Errorf("%s (vault %v) is not refused", name, vault)
+			}
+		}
+	}
+	small := "| a |\n|-|\n" + strings.Repeat("|`\\|`|\n", 20)
+	if refused([]byte(small), false) {
+		t.Error("a 20-row escaped-pipe table is refused")
+	}
+}
+
+// TestMarkupGuard_UnknownPipelineIsAnError: a pipeline with no twin is an
+// error on any input, the smallest included, so a miswired call site fails
+// in its first test. Mutation: looking the twin up after the fast path
+// turns this red.
+func TestMarkupGuard_UnknownPipelineIsAnError(t *testing.T) {
+	if _, err := markupTooComplex(fragmentMarkdown, []byte("x\n")); !errors.Is(err, errNoGuardTwin) {
+		t.Errorf("err = %v, want errNoGuardTwin", err)
+	}
+}
+
+// mixedOption adds an inline parser and sets a parser option map entry, so
+// blockOnlyParser can neither pass it on nor drop it.
+type mixedOption struct{}
+
+func (mixedOption) SetParserOption(c *parser.Config) {
+	c.InlineParsers = append(c.InlineParsers, util.Prioritized(parser.NewCodeSpanParser(), 100))
+	c.Options["forgectl-test"] = true
+}
+
+// TestBlockOnlyParser_RefusesMixedOptions: an option that mixes an inline
+// parser with any other Config field panics, and a purely inline one is
+// dropped. Mutation: dropping the reflect.DeepEqual check turns the panic
+// case red.
+func TestBlockOnlyParser_RefusesMixedOptions(t *testing.T) {
+	p := blockOnlyParser{parser.NewParser()}
+	p.AddOptions(parser.WithInlineParsers(util.Prioritized(parser.NewCodeSpanParser(), 100)))
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("a mixed inline-and-options parser option did not panic")
+			}
+		}()
+		p.AddOptions(mixedOption{})
+	}()
+}
+
 // TestMarkupGuard_ReprosAreBounded: each shape at 3,000 rows is refused
 // wherever the pipeline would inline-parse the rows, and renders and scans,
 // in both root kinds, well inside a generous wall-clock bound. On earlier
@@ -246,7 +321,11 @@ func TestMarkupGuard_NeverFinerThanAPipeline(t *testing.T) {
 // 53 s and 57 s at 3,000, under renderMu. Mutation: reverting the guard to
 // one default-block-parser parser turns this red (and slow).
 func TestMarkupGuard_ReprosAreBounded(t *testing.T) {
-	for name, src := range guardShapes(guardRows(3000)) {
+	shapes := guardShapes(guardRows(3000))
+	for name, src := range escapedPipeTables() {
+		shapes[name] = src
+	}
+	for name, src := range shapes {
 		b := []byte(src)
 		for _, kind := range []RootKind{RootDocs, RootVault} {
 			start := time.Now()

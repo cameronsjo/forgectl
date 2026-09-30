@@ -2,11 +2,14 @@ package docs
 
 import (
 	"bytes"
+	"errors"
 	"html"
+	"reflect"
 	"sync"
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
+	extast "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
 )
@@ -112,36 +115,91 @@ func (p blockOnlyParser) AddOptions(opts ...parser.Option) {
 			p.Parser.AddOptions(o)
 			continue
 		}
-		if len(c.BlockParsers) > 0 || len(c.ParagraphTransformers) > 0 || len(c.Options) > 0 || c.EscapedSpace {
+		// Whatever else the option set, compared field by field against an
+		// empty Config, so a field goldmark adds later is covered too.
+		empty := parser.NewConfig()
+		c.InlineParsers, c.ASTTransformers = empty.InlineParsers, empty.ASTTransformers
+		if !reflect.DeepEqual(c, empty) {
 			panic("docs: a parser option mixes inline parsers or AST transformers with block options; blockOnlyParser cannot split it")
 		}
 	}
 }
 
+// errNoGuardTwin is markupTooComplex's answer for a pipeline with no
+// block-only twin: a miswired call site, which fails rather than going
+// unguarded.
+var errNoGuardTwin = errors.New("docs: markup guard: pipeline has no block-only twin")
+
 // markupTooComplex reports whether source, as md parses it, is over
 // maxContainerWork or maxInlineWork, and so must not be handed to md. md is
 // one of the pipelines in guardTwins, and source exactly the bytes it will
-// parse.
-func markupTooComplex(md goldmark.Markdown, source []byte) bool {
+// parse; any other md is errNoGuardTwin, whatever the input.
+func markupTooComplex(md goldmark.Markdown, source []byte) (bool, error) {
+	twin, ok := guardTwins[md]
+	if !ok {
+		return false, errNoGuardTwin
+	}
 	// The container bound first: the twin's block pass is goldmark's, and
 	// costs what the pipeline's does.
 	if containerWorkOver(source) {
-		return true
+		return true, nil
 	}
-	// Every block's delimiters times its length is at most the document's
-	// delimiters times its length, so a document under the bound on those
-	// totals needs no block pass at all. Most documents stop here.
-	if countDelimiters(source)*len(source) <= maxInlineWork {
-		return false
-	}
-	twin, ok := guardTwins[md]
-	if !ok {
-		panic("docs: markupTooComplex called with a pipeline that has no block-only twin")
+	// inlineWork and escapedPipeWork are each at most the document's
+	// delimiters times its length, so a document at most half the bound on
+	// those totals needs no block pass at all. Most documents stop here.
+	if countDelimiters(source)*len(source) <= maxInlineWork/2 {
+		return false, nil
 	}
 	markupGuardMu.Lock()
 	doc := twin.Parser().Parse(text.NewReader(source), parser.WithContext(newParseContext()))
 	markupGuardMu.Unlock()
-	return inlineWork(doc, source, maxInlineWork) > maxInlineWork
+	work := inlineWork(doc, source, maxInlineWork)
+	if work <= maxInlineWork {
+		work += escapedPipeWork(doc, source)
+	}
+	return work > maxInlineWork, nil
+}
+
+// escapedPipeWork charges what goldmark's GFM tableASTTransformer
+// (goldmark v1.8.4 extension/table.go, Transform) will cost, which the
+// twin, having no AST transformers, never runs. The table paragraph
+// transformer records every cell holding a "\|" after a backtick, with the
+// position of each such "\|"; the AST transformer then walks each recorded
+// cell's code-span text nodes and, for each one, loops over every recorded
+// position in the document. That is (code-span text nodes in recorded
+// cells) × (recorded positions): quadratic, and across all tables at once.
+// A one-column table of "|`\|`|" rows took 11.4 s to render at 420 KB and
+// 48.7 s at 840 KB, holding renderMu. The charge counts each recorded cell
+// as its backticks (at least one) and each position once, which bounds the
+// text nodes from above, and is at most the document's delimiters times
+// its length.
+func escapedPipeWork(doc ast.Node, source []byte) int {
+	cells, positions := 0, 0
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering || n.Kind() != extast.KindTableCell {
+			return ast.WalkContinue, nil
+		}
+		lines := n.Lines()
+		for i := 0; i < lines.Len(); i++ {
+			seg := lines.At(i)
+			backticks, found := 0, 0
+			v := seg.Value(source)
+			for j, c := range v {
+				switch {
+				case c == '`':
+					backticks++
+				case c == '|' && j > 0 && v[j-1] == '\\' && backticks > 0:
+					found++
+				}
+			}
+			if found > 0 {
+				cells += backticks
+				positions += found
+			}
+		}
+		return ast.WalkSkipChildren, nil
+	})
+	return cells * positions
 }
 
 // inlineWork is the sum, over the blocks of doc that goldmark inline-parses

@@ -136,7 +136,11 @@ func scanDocFrom(kind RootKind, r io.Reader, relPath string) (docMeta, error) {
 
 	// Nor past the markup guard, which measures the block structure the
 	// scan parser itself gives body (markupguard.go).
-	if markupTooComplex(scanMarkdown(kind), body) {
+	tooComplex, err := markupTooComplex(scanMarkdown(kind), body)
+	if err != nil {
+		return docMeta{}, fmt.Errorf("scan %s: %w", relPath, err)
+	}
+	if tooComplex {
 		return titleOnlyMeta(kind, source, relPath), nil
 	}
 
@@ -368,10 +372,7 @@ func scanMarkdown(kind RootKind) goldmark.Markdown {
 
 func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
 	reader := text.NewReader(body)
-	md := linkMarkdown
-	if kind == RootVault {
-		md = linkMarkdownVault
-	}
+	md := scanMarkdown(kind)
 	ctx := newParseContext()
 	doc := md.Parser().Parse(reader, parser.WithContext(ctx))
 
@@ -583,7 +584,7 @@ func parsedTitle(source []byte, bodyOffset int, body []byte, h1s []h1Candidate) 
 // firstH1 reads one line of any length, so it can be the whole trigger.
 func vaultLineTitle(title string) string {
 	src := []byte("# " + title + "\n")
-	if markupTooComplex(linkMarkdownVault, src) {
+	if tooComplex, err := markupTooComplex(linkMarkdownVault, src); err != nil || tooComplex {
 		return ""
 	}
 	scan, err := scanBodyFor(RootVault, src)
