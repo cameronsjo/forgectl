@@ -30,7 +30,10 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 			}
 			cfg.Launch = effLaunch
 			lc, src := resolveLaunchConfig(boundary, cfg, effFrom)
-			profile := launch.Resolve(lc, cwd)
+			profile, err := launch.Resolve(lc, cwd)
+			if err != nil {
+				return WithExitCode(termsafe.Error(err), 2)
+			}
 			// The injected block is not part of the profile, so without this
 			// `which` reports a posture that omits variables the launch will
 			// carry — and a bad [proxy] launch_profile printed as a clean
