@@ -132,3 +132,28 @@ func TestFold_ASourceErrorAfterTheDeadlineReportsTheDeadline(t *testing.T) {
 		t.Errorf("error = %q, want the source error when the deadline had not passed", s.Error)
 	}
 }
+
+// TestCollect_DataReadAfterCancellationIsFailed pins the rule that a result
+// arriving after the deadline is not an answer: the shipped sources turn
+// cancellation into ordinary data (an "unknown" tree, "docker compose
+// unavailable"), so returning data with a nil error must still fail.
+func TestCollect_DataReadAfterCancellationIsFailed(t *testing.T) {
+	s := Collect(t.Context(), 20*time.Millisecond, func(ctx context.Context) (payload, []string, error) {
+		<-ctx.Done()
+		return payload{N: 1}, nil, nil
+	})
+	if s.State != StateFailed || s.Error != "timed out after 20ms" || s.Data != nil {
+		t.Fatalf("section = %+v, want failed on the deadline with no data", s)
+	}
+}
+
+func TestFold_DataAfterTheDeadlineIsFailed(t *testing.T) {
+	s := fold(outcome[payload]{data: payload{N: 1}}, context.DeadlineExceeded, time.Second)
+	if s.State != StateFailed || s.Data != nil || s.Error != "timed out after 1s" {
+		t.Fatalf("section = %+v, want failed on the deadline", s)
+	}
+	s = fold(outcome[payload]{data: payload{N: 1}}, context.Canceled, time.Second)
+	if s.State != StateFailed || s.Error != "context canceled" {
+		t.Errorf("section = %+v, want failed on the cancellation", s)
+	}
+}

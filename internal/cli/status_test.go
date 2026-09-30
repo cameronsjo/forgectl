@@ -419,3 +419,91 @@ func TestRenderStatus_ASectionWithNoDataPrintsAsFailed(t *testing.T) {
 		t.Errorf("printed %d failed sections, want 4:\n%s", got, buf.String())
 	}
 }
+
+// TestStatus_SectionsRunConcurrently gives two sources a rendezvous: each
+// signals its start and waits for the other's. Run one after the other, the
+// first would time out waiting and fail its section.
+func TestStatus_SectionsRunConcurrently(t *testing.T) {
+	gitStarted, prsStarted := make(chan struct{}), make(chan struct{})
+	meet := func(mine, theirs chan struct{}) error {
+		close(mine)
+		select {
+		case <-theirs:
+			return nil
+		case <-time.After(5 * time.Second):
+			return errors.New("the other section never started")
+		}
+	}
+	src := okStatusSources()
+	inGit, inPRs := src.Git, src.PRs
+	src.Git = func(ctx context.Context) (statusGitJSON, []string, error) {
+		if err := meet(gitStarted, prsStarted); err != nil {
+			return statusGitJSON{}, nil, err
+		}
+		return inGit(ctx)
+	}
+	src.PRs = func(ctx context.Context) (prDashJSON, []string, error) {
+		if err := meet(prsStarted, gitStarted); err != nil {
+			return prDashJSON{}, nil, err
+		}
+		return inPRs(ctx)
+	}
+	r := collectStatus(t.Context(), src, 30*time.Second)
+	if r.Git.State != status.StateOK || r.PRs.State != status.StateOK {
+		t.Fatalf("git = %+v, prs = %+v; want both ok when run concurrently", r.Git, r.PRs)
+	}
+}
+
+// TestStatus_DefaultCleanSourceNeverDeletes runs the shipped clean source
+// over a real temp tree and checks every file survives, while the section
+// still reports what an apply would reclaim.
+func TestStatus_DefaultCleanSourceNeverDeletes(t *testing.T) {
+	root := t.TempDir()
+	files := []string{
+		filepath.Join(root, "proj", "node_modules", "a.js"),
+		filepath.Join(root, "proj", "dist", "b.js"),
+		filepath.Join(root, "other", "target", "c.o"),
+	}
+	for _, f := range files {
+		if err := os.MkdirAll(filepath.Dir(f), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(f, []byte("0123456789"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deps := module.Deps{Runner: &exec.FakeRunner{}}
+	deps.Cfg.Clean.DefaultRoot = root
+	c, notes, err := defaultStatusSources(deps).Clean(t.Context())
+	if err != nil || len(notes) != 0 {
+		t.Fatalf("clean source: %v %v", err, notes)
+	}
+	if c.Reclaimable != 3 || c.TotalReclaimableBytes != 30 {
+		t.Errorf("clean = %+v, want 3 targets and 30 bytes reclaimable", c)
+	}
+	for _, f := range files {
+		if _, err := os.Stat(f); err != nil {
+			t.Errorf("status deleted %s: %v", f, err)
+		}
+	}
+}
+
+// TestStatus_DefaultPRsSourceReadsTheDashboard drives the shipped prs source
+// through a fake gh, so a source that stopped calling Dash (or dropped its
+// rows) goes red.
+func TestStatus_DefaultPRsSourceReadsTheDashboard(t *testing.T) {
+	cfgHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	t.Setenv("HOME", cfgHome)
+	search := "[" + prSearchRow("cameronsjo/forgectl", 42) + "]"
+	d, notes, err := defaultStatusSources(module.Deps{Runner: dashRunner(search)}).PRs(t.Context())
+	if err != nil || len(notes) != 0 {
+		t.Fatalf("prs source: %v %v", err, notes)
+	}
+	if len(d.AwaitingYou) != 1 || d.AwaitingYou[0].Ref != "cameronsjo/forgectl#42" {
+		t.Errorf("awaiting_you = %+v, want the searched PR", d.AwaitingYou)
+	}
+	if len(d.YourOpen) != 1 || d.ActiveReviews == nil {
+		t.Errorf("your_open = %+v, active_reviews = %v; want the dash document", d.YourOpen, d.ActiveReviews)
+	}
+}

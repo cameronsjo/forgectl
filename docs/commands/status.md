@@ -18,11 +18,11 @@ forgectl status --timeout 5s             # give each section five seconds (defau
 | `clean` | The dry-run reclaim total for dep/build directories under the `[clean]` root. | `clean --json`, totals only |
 | `bench` | The hearth and chronicle health card. | `bench status --json` |
 
-`status` itself makes no network calls. The only network traffic comes from the `prs` section's `gh` searches, and the `bench` section's loopback probes.
+`status` itself makes no network calls. The only network traffic comes from the sources it reuses: the `prs` section's `gh` searches, and the `bench` section's probes, which are the same checks `bench status` makes: HTTP to `hearth.localhost` and `grafana.localhost`, and a dial to the configured `[bench] otlp_endpoint` (loopback by default, but it can name any host).
 
 ## Failure containment
 
-The sections run concurrently, and each has its own deadline, set with `--timeout` (default 20s). A section fails when its source returns an error, panics, or misses the deadline. A failed section is reported as failed, and the other sections still report. A failed section never fails the command.
+The sections run concurrently, and each has its own deadline, set with `--timeout` (default 20s). A section fails when its source returns an error, panics on the goroutine that runs it, or misses the deadline. A result that arrives after the deadline counts as missing it, even when the source returned data, because sources read under a cancelled context can report ordinary-looking data such as an `unknown` tree. A failed section is reported as failed, and the other sections still report. A failed section never fails the command.
 
 `status` exits 0 whatever the sections report, like `bench status` and `pr dash`. With `--strict`, it writes the full report and then exits 1 when any section is not `ok`, like `projects list --strict`. Under `--json`, that exit adds nothing to stderr, because the report on stdout is the verdict ([json-contract.md](../json-contract.md)). A `--timeout` of zero or less is refused before any source runs (exit 1).
 

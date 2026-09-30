@@ -3,15 +3,17 @@
 // each section is a function the CLI layer wires to a read path that already
 // ships (projects discovery, the `pr dash` sections, the clean dry-run scan,
 // the bench health card). What this package adds is the containment rule:
-// every section runs under its own deadline, and a section that errors,
-// panics, or runs out of time degrades to a per-section failure instead of
-// failing the command.
+// every section runs under its own deadline, and a section that errors, runs
+// out of time, or panics on the source's own goroutine degrades to a
+// per-section failure instead of failing the command. (A goroutine the source
+// starts itself is outside that recover; its panic still ends the process.)
 package status
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -56,8 +58,9 @@ type Section[T any] struct {
 // produce no data at all.
 type Source[T any] func(ctx context.Context) (T, []string, error)
 
-// errPanicked is the categorical text for a source that panicked. The panic
-// value itself is never rendered: it can be any value from any depth.
+// errPanicked is the categorical text for a source that panicked on its own
+// goroutine. The panic value itself is never rendered or logged: it can be
+// any value from any depth. Only its Go type reaches the debug log.
 var errPanicked = errors.New("source panicked")
 
 // outcome carries a source's return values across the goroutine boundary.
@@ -68,7 +71,15 @@ type outcome[T any] struct {
 }
 
 // Collect runs src under a deadline of timeout and folds its outcome into a
-// Section. It never returns an error and never panics on the source's behalf.
+// Section. It never returns an error, and a panic on the source's own
+// goroutine becomes a failed section rather than a crash.
+//
+// A section whose context has ended by the time its result arrives is failed
+// with the deadline, whatever the source returned. The shipped sources turn
+// cancellation into ordinary-looking data (an "unknown" tree, a target
+// skipped as dirty, "docker compose unavailable"), so a result produced after
+// the deadline cannot be told apart from a real answer and is never reported
+// as one.
 //
 // The source runs on its own goroutine so a source that ignores its context
 // (the clean walk takes none) is abandoned at the deadline instead of holding
@@ -86,7 +97,8 @@ func Collect[T any](ctx context.Context, timeout time.Duration, src Source[T]) S
 	ch := make(chan outcome[T], 1)
 	go func() {
 		defer func() {
-			if recover() != nil {
+			if r := recover(); r != nil {
+				slog.Debug("Status section source panicked.", "type", fmt.Sprintf("%T", r))
 				ch <- outcome[T]{err: errPanicked}
 			}
 		}()
@@ -98,26 +110,19 @@ func Collect[T any](ctx context.Context, timeout time.Duration, src Source[T]) S
 	case o := <-ch:
 		return fold(o, ctx.Err(), timeout)
 	case <-ctx.Done():
-		// select picks at random when both are ready; a result that did
-		// arrive wins over the deadline it raced.
-		select {
-		case o := <-ch:
-			return fold(o, ctx.Err(), timeout)
-		default:
-		}
 		return failed[T](deadlineError(ctx.Err(), timeout))
 	}
 }
 
 // fold turns a returned outcome into a Section. ctxErr is the section
-// context's state at return: a source that gave up because its deadline
-// passed reports the deadline, which says more than the subprocess error the
-// cancellation produced.
+// context's state when the result arrived. Once it is set, the section failed
+// on its deadline whatever the source returned, error or data: data read
+// under a cancelled context is not an answer (see Collect).
 func fold[T any](o outcome[T], ctxErr error, timeout time.Duration) Section[T] {
+	if ctxErr != nil {
+		return failed[T](deadlineError(ctxErr, timeout))
+	}
 	if o.err != nil {
-		if ctxErr != nil {
-			return failed[T](deadlineError(ctxErr, timeout))
-		}
 		return failed[T](o.err)
 	}
 	notes := make([]string, 0, len(o.notes))

@@ -128,13 +128,10 @@ func defaultStatusSources(deps module.Deps) statusSources {
 		},
 		Clean: func(ctx context.Context) (statusCleanJSON, []string, error) {
 			client := cleanpkg.New(deps.Runner, cleanpkg.WithCleanConfig(deps.Cfg.Clean))
-			// The same scan-then-preview pair `clean --json` runs. Apply is
-			// false, so ApplyReport only classifies; it deletes nothing.
-			root, report, err := client.ScanReport(cleanpkg.CleanOptions{})
-			if err != nil {
-				return statusCleanJSON{}, nil, err
-			}
-			preview, err := client.ApplyReport(ctx, root, report, cleanpkg.CleanOptions{})
+			// Preview is the scan-and-classify pair `clean --json` runs, behind
+			// an API with no apply parameter: this section cannot delete by
+			// construction, not by a literal someone could flip.
+			root, preview, err := client.Preview(ctx)
 			if err != nil {
 				return statusCleanJSON{}, nil, err
 			}
