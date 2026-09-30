@@ -85,9 +85,11 @@ used instead.
 
 Ctrl-C, SIGTERM, and SIGHUP (a closed terminal) stop the waiting, never a
 restart already signalled: that session is still relaunched and confirmed.
-SIGPIPE is ignored, so a broken output pipe cannot kill the run either. No
-session is left stopped without a resume or a report naming the command to run
-by hand.
+SIGPIPE is ignored, so a broken output pipe cannot kill the run either. A
+failed stop or relaunch is reported with the command to run by hand. One gap
+remains: closing the terminal also hangs up the herdr calls the run makes, so
+a relaunch in flight at that moment can fail with its report going to the
+closed terminal. Run it from a terminal that stays open.
 
 Output is one line per session per state change: waiting (with the reason),
 restarting, resumed, skipped, failed, and left (still waiting at the timeout

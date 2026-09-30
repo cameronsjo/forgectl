@@ -71,13 +71,19 @@ func ReadEntry(p Paths, pid int) (RegistryEntry, bool) {
 }
 
 // LiveSession returns the live registry entry for a session id, if any
-// process currently holds it.
+// process currently holds it. The entry is re-read through ReadEntry, so a
+// body naming another pid than its <pid>.json file name is not believed: the
+// restart path decides "already running" and "resumed" from this answer.
 func LiveSession(p Paths, sessionID string) (RegistryEntry, bool) {
 	e, ok := readRegistry(p.registryDir())[sessionID]
 	if !ok || !e.Live {
 		return RegistryEntry{}, false
 	}
-	return e, true
+	fresh, ok := ReadEntry(p, e.Pid)
+	if !ok || !fresh.Live || fresh.SessionID != sessionID {
+		return RegistryEntry{}, false
+	}
+	return fresh, true
 }
 
 // readRegistry reads every live-session file, keyed by session id. A file that

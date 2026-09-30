@@ -403,6 +403,42 @@ func TestLockRestart_SecondRunIsRefused(t *testing.T) {
 	again()
 }
 
+func TestLockRestart_RefusesAPlantedSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("restart is unix-only")
+	}
+	dir := filepath.Join(t.TempDir(), "store")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.Symlink(target, filepath.Join(dir, "restart.lock")); err != nil {
+		t.Fatal(err)
+	}
+	if release, err := lockRestart(dir); err == nil {
+		release()
+		t.Fatal("lockRestart followed a planted restart.lock symlink")
+	}
+	if _, err := os.Lstat(target); !os.IsNotExist(err) {
+		t.Errorf("symlink target was created: %v", err)
+	}
+}
+
+func TestLiveEntries_RefusesABodyNamingAnotherPid(t *testing.T) {
+	f := newFixture(t)
+	f.write(filepath.Join(f.Paths.registryDir(), "301.json"),
+		`{"pid":301,"sessionId":"aaaa3333","cwd":"/w","version":"2.1.1","status":"idle"}`)
+	f.write(filepath.Join(f.Paths.registryDir(), "302.json"),
+		`{"pid":999,"sessionId":"bbbb4444","cwd":"/w","version":"2.1.1","status":"idle"}`)
+	pinPids(t, map[int]bool{301: true, 302: true, 999: true})
+	if _, ok := LiveSession(f.Paths, "bbbb4444"); ok {
+		t.Error("a body naming pid 999 inside 302.json was admitted")
+	}
+	if _, ok := LiveSession(f.Paths, "aaaa3333"); !ok {
+		t.Error("the matching entry was refused")
+	}
+}
+
 func TestPickRelaunchBinary(t *testing.T) {
 	look := func(string) (string, error) { return "/opt/homebrew/bin/forgectl", nil }
 	noLook := func(string) (string, error) { return "", errors.New("not found") }

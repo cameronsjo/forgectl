@@ -22,7 +22,8 @@ func lockRestart(storeDir string) (func(), error) {
 		return nil, fmt.Errorf("create the restart lock directory: %w", err)
 	}
 	path := filepath.Join(storeDir, restartLockName)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600) // #nosec G304 -- fixed name under forgectl's own state dir
+	// O_NOFOLLOW: a planted restart.lock symlink is refused rather than followed.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600) // #nosec G304 -- fixed name under forgectl's own state dir
 	if err != nil {
 		return nil, fmt.Errorf("open the restart lock: %w", err)
 	}
