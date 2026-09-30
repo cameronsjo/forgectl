@@ -34,6 +34,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // githubRemoteURL is `git remote get-url origin` output for a github.com
@@ -661,4 +662,89 @@ func TestPrune_RemoteDeleteVerifyFailure_DoesNotEchoGhStderr(t *testing.T) {
 		t.Fatalf("results = %+v, want one unverified failure", results)
 	}
 	assertNoSubprocessEcho(t, results[0].Err)
+}
+
+// TestPrune_ErrIsTerminalSafeByConstruction is #717: every PruneResult.Err is
+// safe to print as-is, whatever sink reads it. The branch name and worktree
+// path are hostile (a remote refname can carry ESC, C1 controls and U+202E),
+// and git's own stderr is never echoed. printPruneResults escapes again, but
+// the package must not rely on that one sink.
+func TestPrune_ErrIsTerminalSafeByConstruction(t *testing.T) {
+	const hostile = "feat/\x1b[2J‮gpj.exe\u0085x"
+	const wtPath = "/tmp/wt\x1b]0;pwned\x07"
+	isAPI := func(name string, args []string) bool { return name == "gh" && len(args) > 0 && args[0] == "api" }
+	for _, tc := range []struct {
+		name string
+		opts PruneOptions
+		info Info
+		run  func(name string, args []string) (string, error)
+	}{
+		{"worktree remove fails", PruneOptions{Local: true}, Info{Name: hostile, LocalExists: true, WorktreePath: wtPath},
+			func(name string, args []string) (string, error) {
+				if name == "git" && args[0] == "worktree" {
+					return "", subprocessFailure(name, args)
+				}
+				return "", nil
+			}},
+		{"branch -D fails", PruneOptions{Local: true}, Info{Name: hostile, LocalExists: true},
+			func(name string, args []string) (string, error) {
+				if name == "git" && args[0] == "branch" {
+					return "", subprocessFailure(name, args)
+				}
+				return "", nil
+			}},
+		{"push --delete fails", PruneOptions{RemoteName: "up\x1b[31m", Remote: true}, Info{Name: hostile, RemoteExists: true},
+			func(name string, args []string) (string, error) {
+				if name == "git" && args[0] == "push" {
+					return "", subprocessFailure(name, args)
+				}
+				return "", nil
+			}},
+		{"remote unresolvable", PruneOptions{RemoteName: "origin", Remote: true}, Info{Name: hostile, RemoteExists: true},
+			func(name string, args []string) (string, error) {
+				if isGetURL(name, args) {
+					return "", subprocessFailure(name, args)
+				}
+				return "", nil
+			}},
+		{"still exists", PruneOptions{RemoteName: "origin", Remote: true}, Info{Name: hostile, RemoteExists: true},
+			func(name string, args []string) (string, error) {
+				if isGetURL(name, args) {
+					return githubRemoteURL, nil
+				}
+				return "", nil
+			}},
+		{"verify fails", PruneOptions{RemoteName: "origin", Remote: true}, Info{Name: hostile, RemoteExists: true},
+			func(name string, args []string) (string, error) {
+				switch {
+				case isGetURL(name, args):
+					return githubRemoteURL, nil
+				case isAPI(name, args):
+					return "", subprocessFailure(name, args)
+				}
+				return "", nil
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.info.MergedOnServer = true
+			fake := &exec.FakeRunner{RunFunc: tc.run}
+			item := Classification{Info: tc.info, Group: SafeToDelete}
+			results := New(fake).Prune(context.Background(), []Classification{item}, tc.opts)
+			if len(results) != 1 || results[0].Err == nil || results[0].Deleted {
+				t.Fatalf("results = %+v, want one failure", results)
+			}
+			msg := results[0].Err.Error()
+			for _, r := range msg {
+				if termsafe.IsUnsafeTerminalRune(r) {
+					t.Fatalf("Err %q carries raw unsafe rune %U", msg, r)
+				}
+			}
+			if strings.Contains(msg, "MARKER") {
+				t.Fatalf("Err %q echoes git/gh stderr", msg)
+			}
+			if !strings.Contains(msg, `\x1b[2J`) {
+				t.Fatalf("Err %q does not name the branch in escaped form", msg)
+			}
+		})
+	}
 }
