@@ -88,13 +88,27 @@ func TestArg(t *testing.T) {
 	}
 }
 
+// TestText: the unit is the line (#749). A line holding any withheld word is
+// replaced whole; the line breaks and every other line survive.
+//
+// Mutation: in Text, write Marker for the withheld word only (the old
+// per-word rule) and the space-split credential keeps "TOKSP".
 func TestText(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"fatal: unable to access 'https://u:TOK@host/o/r/': 403", "fatal: unable to access " + Marker + " 403"},
-		{"remote https://host rejected me@x.org", "remote " + Marker + " rejected " + Marker},
-		{"line one TOK@host:o/r\nline  two\t", "line one " + Marker + "\nline  two\t"},
+		{"fatal: unable to access 'https://u:SEKRIT@host/o/r/': 403", Marker},
+		{"remote https://host rejected me@x.org", Marker},
+		{"line one SEKRIT@host:o/r\nline  two\t", Marker + "\nline  two\t"},
+		{"a\nfatal: unable to access 'http:///U: TOKSP @h/r/': URL rejected\nb\n", "a\n" + Marker + "\nb\n"},
+		{"error: git -c http.extraHeader=Authorization: Bearer SEKRIT fetch\nhint: x", Marker + "\nhint: x"},
+		{"curl -H X-Api-Key: SEKRIT", Marker},
+		{"usage: --token SEKRIT", Marker},
+		{"GET /repos?per_page=1&access_token=SEKRIT", Marker},
+		{"Authorization: token SEKRIT", Marker},
 		{"no credentials here", "no credentials here"},
 		{"try main@{u} instead", "try main@{u} instead"},
+		{"error: open token.txt: no such file", "error: open token.txt: no such file"},
+		{"HTTP 401: Bad credentials", "HTTP 401: Bad credentials"},
+		{"\n\n", "\n\n"},
 		{"", ""},
 	}
 	for _, c := range cases {
@@ -104,6 +118,89 @@ func TestText(t *testing.T) {
 		if got := Text(Text(c.in)); got != c.want {
 			t.Errorf("Text is not idempotent on %q: %q", c.in, got)
 		}
+	}
+}
+
+// credentialArgvs are argv credentials with no URL marker, each carrying SEKRIT
+// (#749). None may survive Args, in any element.
+var credentialArgvs = [][]string{
+	{"git", "-c", "http.extraHeader=Authorization: Bearer SEKRIT", "fetch"},
+	{"git", "-c", "http.https://host/.extraheader=AUTHORIZATION: basic SEKRIT", "fetch"},
+	{"git", "--config=http.extraHeader=Authorization: Bearer SEKRIT", "clone"},
+	{"git", "config", "--add", "http.extraHeader", "X-Custom: SEKRIT"},
+	{"curl", "--header", "X-Api-Key: SEKRIT"},
+	{"curl", "--header=Authorization: token SEKRIT"},
+	{"curl", "-H", "Private-Token: SEKRIT"},
+	{"curl", "-HPrivate-Token: SEKRIT"},
+	{"curl", "--proxy-header", "Proxy-Authorization: SEKRIT"},
+	{"tool", "Authorization: Bearer SEKRIT"},
+	{"tool", "bearer SEKRIT"},
+	{"gh", "auth", "login", "--with-token", "SEKRIT"},
+	{"tool", "--password", "SEKRIT"},
+	{"tool", "--PASSWORD=SEKRIT"},
+	{"tool", "--api-key", "SEKRIT"},
+	{"tool", "--api_key=SEKRIT"},
+	{"tool", "--client-secret", "SEKRIT"},
+	{"tool", "--auth", "SEKRIT"},
+	{"tool", "-e", "GITHUB_TOKEN=SEKRIT"},
+	{"tool", "access_token=SEKRIT"},
+	{"gh", "api", "repos/o/r?per_page=1&access_token=SEKRIT"},
+	{"tool", "--data=user=u&password=SEKRIT"},
+}
+
+// Mutation: make argWord return Arg(a), false for every element (the
+// URL-only rule of #734) and every row renders SEKRIT.
+func TestArgs_WithholdsCredentialsOutsideURLs(t *testing.T) {
+	for _, argv := range credentialArgvs {
+		got := Args(argv)
+		if strings.Contains(strings.Join(got, " "), "SEKRIT") {
+			t.Errorf("Args(%q) = %q, still carries the credential", argv, got)
+		}
+		if again := Args(got); strings.Join(again, "\x00") != strings.Join(got, "\x00") {
+			t.Errorf("Args is not idempotent on %q: %q then %q", argv, got, again)
+		}
+		if line := strings.Join(argv, " "); strings.Contains(Text(line), "SEKRIT") {
+			t.Errorf("Text(%q) = %q, still carries the credential", line, Text(line))
+		}
+	}
+}
+
+func TestArgs(t *testing.T) {
+	cases := []struct{ in, want []string }{
+		// What stays shown: the flag or key, never the value.
+		{[]string{"-c", "http.extraHeader=Authorization: Bearer X"}, []string{"-c", "http.extraHeader=" + ArgMarker}},
+		{[]string{"--header", "X-Api-Key: X", "https://github.com/o/r"}, []string{"--header", ArgMarker, "github.com/o/r"}},
+		{[]string{"--token=X", "next"}, []string{"--token=" + ArgMarker, "next"}},
+		{[]string{"-H", "X"}, []string{"-H", ArgMarker}},
+		{[]string{"--config=http.extraheader=X"}, []string{"--config=http.extraheader=" + ArgMarker}},
+		// exec's masked entries keep their marker.
+		{[]string{"-e", "GITHUB_TOKEN=" + Marker}, []string{"-e", "GITHUB_TOKEN=" + Marker}},
+		{[]string{"--token", Marker}, []string{"--token", Marker}},
+		// A URL marker in a withheld flag name or key withholds it whole.
+		{[]string{"--header@x=X"}, []string{ArgMarker}},
+		{[]string{"url.https://u:X@h/.token=Y"}, []string{ArgMarker}},
+		// Controls: nothing credential-shaped, nothing changes.
+		{[]string{"rev-list", "--count", "@{upstream}..HEAD", "main@{u}", "@8"}, []string{"rev-list", "--count", "@{upstream}..HEAD", "main@{u}", "@8"}},
+		{[]string{"auth", "token", "--hostname", "github.com"}, []string{"auth", "token", "--hostname", "github.com"}},
+		{[]string{"get", "pods", "--no-headers", "-o", "wide"}, []string{"get", "pods", "--no-headers", "-o", "wide"}},
+		{[]string{"-c", "user.name=Me", "commit", "-m", "fix token refresh"}, []string{"-c", "user.name=Me", "commit", "-m", "fix token refresh"}},
+		{[]string{"new-window", "-e", "PATH=/usr/bin"}, []string{"new-window", "-e", "PATH=/usr/bin"}},
+		{[]string{"--hostname=github.com", "repos/o/r?per_page=1"}, []string{"--hostname=github.com", "repos/o/r?per_page=1"}},
+	}
+	for _, c := range cases {
+		if got := Args(c.in); strings.Join(got, "\x00") != strings.Join(c.want, "\x00") {
+			t.Errorf("Args(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// Args copies only when an element changes, and never writes its input.
+	in := []string{"--token", "X"}
+	_ = Args(in)
+	if in[1] != "X" {
+		t.Error("Args wrote its input")
+	}
+	plain := []string{"status", "--short"}
+	if got := Args(plain); &got[0] != &plain[0] {
+		t.Error("Args copied an argv with nothing to withhold")
 	}
 }
 

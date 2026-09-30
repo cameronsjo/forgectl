@@ -39,8 +39,10 @@ func TestOSRunner_URLCredentialsNeverLogged(t *testing.T) {
 			if strings.Contains(logs.String(), token) {
 				t.Errorf("token in the log:\n%s", logs.String())
 			}
-			if !strings.Contains(err.Error(), "-- [redacted-arg]: fatal: cannot reach [redacted]") {
-				t.Errorf("the element and the echoed word should be withheld whole: %s", err.Error())
+			// The echoed line goes whole (#749): a credential can hold a
+			// space, so the word is not a safe unit.
+			if !strings.HasSuffix(err.Error(), "-- [redacted-arg]: "+Redacted) {
+				t.Errorf("the element and the echoed line should be withheld whole: %s", err.Error())
 			}
 			// The structured fields stay the data the command ran with:
 			// internal/tmux compares Args and Stderr for equality.
@@ -81,7 +83,7 @@ func TestCommandError_ErrorRedactsAHandBuiltError(t *testing.T) {
 	if strings.Contains(got, "s3cr3t") {
 		t.Fatalf("credential rendered: %s", got)
 	}
-	want := "git clone -- [redacted-arg]: remote: see " + Redacted
+	want := "git clone -- [redacted-arg]: " + Redacted
 	if got != want {
 		t.Errorf("got  %q\nwant %q", got, want)
 	}
@@ -103,5 +105,57 @@ func TestCommandError_ErrorKeepsPlainArgv(t *testing.T) {
 	e = &CommandError{Name: "git", Args: []string{"clone", "--", "https://github.com/o/r", "/tmp/x"}, Err: errors.New("exit status 128")}
 	if got, want := e.Error(), "git clone -- github.com/o/r /tmp/x: exit status 128"; got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestOSRunner_ArgvCredentialsOutsideURLsNeverLogged pins #749 item 1 against
+// the real Runner: a credential with no URL marker (a header after -c
+// http.extraHeader, --header, -H, a --token-style flag, a query-string token)
+// reaches neither the debug log's argv, the failure log line, nor the error
+// text. The child echoes its argv to stderr, as git's and curl's errors do.
+// Nothing is masked (no WithMaskedAssignments), so only the flag rule can
+// hide it.
+//
+// Mutation: make exec render argv through redact.Arg per element again (the
+// #734 rule) and every row leaks into the debug log and the error text.
+func TestOSRunner_ArgvCredentialsOutsideURLsNeverLogged(t *testing.T) {
+	const secret = "Sk7Qp2Wx9Lm4" //nolint:gosec // G101: a fake credential the redactor must hide
+	cases := [][]string{
+		{"-c", "http.extraHeader=Authorization: Bearer " + secret, "fetch"},
+		{"--config=http.extraheader=AUTHORIZATION: basic " + secret},
+		{"config", "http.extraHeader", "X-Custom: " + secret},
+		{"--header", "X-Api-Key: " + secret},
+		{"--header=Authorization: token " + secret},
+		{"-H", "Private-Token: " + secret},
+		{"--token", secret},
+		{"--password=" + secret},
+		{"api", "repos/o/r?per_page=1&access_token=" + secret},
+		{"Authorization: Bearer " + secret},
+	}
+	for _, argv := range cases {
+		t.Run(strings.Join(argv, " "), func(t *testing.T) {
+			logs := captureLogs(t)
+			args := append([]string{"-c", `echo "fatal: $*" >&2; exit 3`, "sh"}, argv...)
+			_, err := OSRunner{}.Run(context.Background(), "sh", args...)
+			if err == nil {
+				t.Fatal("expected the command to fail")
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("credential in the error text: %s", err.Error())
+			}
+			if !strings.Contains(logs.String(), "Preparing to run command") || !strings.Contains(logs.String(), "Failed to run command") {
+				t.Fatalf("the debug and failure lines were not logged:\n%s", logs.String())
+			}
+			if strings.Contains(logs.String(), secret) {
+				t.Errorf("credential in the log:\n%s", logs.String())
+			}
+			var cmdErr *CommandError
+			if !errors.As(err, &cmdErr) {
+				t.Fatalf("want a *CommandError, got %T", err)
+			}
+			if !strings.Contains(cmdErr.Stderr, secret) {
+				t.Errorf("the child did not echo its argv, so the test proves nothing: %q", cmdErr.Stderr)
+			}
+		})
 	}
 }

@@ -82,11 +82,14 @@ import (
 // its own path, not Runner.
 //
 // Independently of any mask, every rendering of argv and stderr (the debug
-// log, the failure log line, CommandError.Error()) goes through redact.Arg
-// and redact.Text (#734): an argv element or stderr word that could carry a
-// URL credential (it holds an '@', "://" or "::") is withheld whole, or shown
-// as host/owner/repo when it parses as a plain repository locator. The
-// CommandError fields themselves keep what the command ran with.
+// log, the failure log line, CommandError.Error()) goes through redact.Args
+// and redact.Text (#734): an argv element that could carry a URL credential
+// (it holds an '@', "://" or "::") is withheld whole, or shown as
+// host/owner/repo when it parses as a plain repository locator, and so is the
+// value after a credential-bearing flag or config key (-H, --token,
+// http.extraHeader=…) (#749); a stderr line holding any such word is
+// withheld whole. The CommandError fields themselves keep what the command
+// ran with.
 type Runner interface {
 	Run(ctx context.Context, name string, args ...string) (string, error)
 	RunInteractive(ctx context.Context, name string, args ...string) error
@@ -236,7 +239,7 @@ const pipeWaitDelay = 500 * time.Millisecond
 // built from the real args.
 func runAndWrap(cmd *exec.Cmd, ceiling int, preparingMsg, successMsg, failureMsg string, mask argMask, name string, args []string) (string, error) {
 	shown := mask.args(args)
-	slog.Debug(preparingMsg, "cmd", name, "args", redactArgs(shown))
+	slog.Debug(preparingMsg, "cmd", name, "args", redact.Args(shown))
 	start := time.Now()
 
 	// Unlike RunSensitive, runAndWrap has no Complete flag: it returns full
@@ -286,7 +289,7 @@ func runAndWrap(cmd *exec.Cmd, ceiling int, preparingMsg, successMsg, failureMsg
 
 // RunInteractive wires the child to the real stdio so it can drive the tty.
 func (OSRunner) RunInteractive(ctx context.Context, name string, args ...string) error {
-	slog.Debug("Preparing to run interactive command.", "cmd", name, "args", redactArgs(maskFrom(ctx).args(args)))
+	slog.Debug("Preparing to run interactive command.", "cmd", name, "args", redact.Args(maskFrom(ctx).args(args)))
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -335,18 +338,20 @@ type CommandError struct {
 	Err error
 }
 
-// Error renders the command, its argv (redact.Arg) and its stderr
+// Error renders the command, its argv (redact.Args) and its stderr
 // (redact.Text), so no URL credential reaches the text (#734): callers wrap
 // and log it ("error", err), and show it to the user, so it is a rendering
-// point like the debug log. The cost is that an argv element or stderr word
-// holding an '@', "://" or "::" reads as a placeholder or host/owner/repo.
+// point like the debug log. The cost is that an argv element holding an '@',
+// "://" or "::", or following a credential-bearing flag, reads as a
+// placeholder or host/owner/repo, and a stderr line holding such a word reads
+// as [redacted] whole.
 // It redacts rather than trusting its constructor, so a CommandError built
 // by a fake or another Runner renders safely too. Only the text changes; the
 // fields keep what the command ran with.
 func (e *CommandError) Error() string {
 	cmd := e.Name
 	if len(e.Args) > 0 {
-		cmd += " " + strings.Join(redactArgs(e.Args), " ")
+		cmd += " " + strings.Join(redact.Args(e.Args), " ")
 	}
 	if e.Stderr != "" {
 		if e.StderrDropped > 0 {
@@ -361,26 +366,6 @@ func (e *CommandError) Error() string {
 		return cmd + ": exit " + strconv.Itoa(e.ExitCode)
 	}
 	return cmd + ": " + redact.Text(e.Err.Error())
-}
-
-// redactArgs returns argv through redact.Arg, copying only
-// when an element changes.
-func redactArgs(args []string) []string {
-	var out []string
-	for i, a := range args {
-		r := redact.Arg(a)
-		if r == a && out == nil {
-			continue
-		}
-		if out == nil {
-			out = append(make([]string, 0, len(args)), args[:i]...)
-		}
-		out = append(out, r)
-	}
-	if out == nil {
-		return args
-	}
-	return out
 }
 
 func (e *CommandError) Unwrap() error { return e.Err }
