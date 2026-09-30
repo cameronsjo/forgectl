@@ -477,7 +477,11 @@ func (w *Watcher) settleIn(now time.Time) time.Duration {
 	if w.pendingSince.IsZero() {
 		w.pendingSince = now
 	}
-	limit := max(w.maxWait, d) - now.Sub(w.pendingSince)
+	maxWait := w.maxWait
+	if maxWait <= 0 {
+		maxWait = DefaultMaxWait // a struct-literal Watcher must not mean "never extend"
+	}
+	limit := max(maxWait, d) - now.Sub(w.pendingSince)
 	return max(min(d, limit), 0)
 }
 

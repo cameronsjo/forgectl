@@ -38,7 +38,7 @@ func TestOpenDirRoot_IsTheOnlyPathRootOpener(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		f, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
+		f, err := parser.ParseFile(fset, name, src, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
@@ -59,7 +59,7 @@ func TestOpenDirRoot_IsTheOnlyPathRootOpener(t *testing.T) {
 				case *ast.SelectorExpr:
 					// Only X can name the package; Sel is a field or method
 					// name (root.OpenRoot is an os.Root method, not os.OpenRoot).
-					if pkg, ok := n.X.(*ast.Ident); ok && pkg.Name == osName && n.Sel.Name == "OpenRoot" {
+					if pkg, ok := n.X.(*ast.Ident); ok && isPackageOS(pkg, osName) && n.Sel.Name == "OpenRoot" {
 						hit = true
 					} else {
 						ast.Inspect(n.X, visit)
@@ -97,7 +97,9 @@ func TestOpenDirRoot_IsTheOnlyPathRootOpener(t *testing.T) {
 // owns.
 //
 // Mutations that turn it red: revert openDirVerified or openHeldSubdir to
-// <parent>.OpenRoot(name).
+// <parent>.OpenRoot(name); or add a non-test file with `os := root` shadowing
+// the import and calling os.OpenRoot (the parse resolves objects, so the
+// shadowing local is not mistaken for the package).
 func TestOpenChildDirRoot_IsTheOnlyChildRootOpener(t *testing.T) {
 	fset := token.NewFileSet()
 	files, err := filepath.Glob("*.go")
@@ -113,7 +115,7 @@ func TestOpenChildDirRoot_IsTheOnlyChildRootOpener(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		f, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
+		f, err := parser.ParseFile(fset, name, src, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
@@ -129,7 +131,7 @@ func TestOpenChildDirRoot_IsTheOnlyChildRootOpener(t *testing.T) {
 				if !ok || sel.Sel.Name != "OpenRoot" {
 					return true
 				}
-				if pkg, ok := sel.X.(*ast.Ident); ok && osName != "" && pkg.Name == osName {
+				if pkg, ok := sel.X.(*ast.Ident); ok && osName != "" && isPackageOS(pkg, osName) {
 					return true
 				}
 				if isFunc && fd.Name.Name == "openChildDirRoot" && fd.Recv == nil {
@@ -145,6 +147,16 @@ func TestOpenChildDirRoot_IsTheOnlyChildRootOpener(t *testing.T) {
 	if inChild != 1 {
 		t.Fatalf("found %d Root.OpenRoot references in openChildDirRoot, want 1; the check cannot see the open it guards", inChild)
 	}
+}
+
+// isPackageOS reports whether id names the imported package "os" rather than
+// a local that shadows its name. The parse runs with object resolution, which
+// binds an identifier declared in a function or block scope to its declaration
+// (id.Obj != nil) and leaves a file-scope import unbound (id.Obj == nil).
+// Without it, `os := root; os.OpenRoot(...)` would be read as the package and
+// skip the Root.OpenRoot check.
+func isPackageOS(id *ast.Ident, osName string) bool {
+	return id.Name == osName && id.Obj == nil //nolint:staticcheck // SA1019: ast.Object is the only scope signal without go/types
 }
 
 // osImportName is the name file f refers to package "os" by: "os", an alias,
