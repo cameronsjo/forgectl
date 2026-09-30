@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/BurntSushi/toml"
 	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
 	"github.com/microcosm-cc/bluemonday"
 	"github.com/yuin/goldmark"
@@ -624,9 +625,11 @@ func renderHiddenContext(ctx context.Context, source []byte, kind RootKind, reso
 // goldmarkOutput is what the goldmark stage hands the post-processing
 // stage.
 type goldmarkOutput struct {
-	html   []byte
-	pc     parser.Context
-	hidden []text.Segment
+	html    []byte
+	pc      parser.Context
+	hidden  []text.Segment
+	front   frontmatterBlock
+	frontOK bool
 }
 
 // renderGoldmark is the goldmark stage: parse and render. It runs only on a
@@ -649,7 +652,10 @@ func renderGoldmark(md goldmark.Markdown, source []byte, kind RootKind, resolve 
 	if err != nil {
 		return goldmarkOutput{}, fmt.Errorf("render markdown: %w", err)
 	}
-	return goldmarkOutput{html: buf.Bytes(), pc: ctx, hidden: hidden}, nil
+	// The properties block reads the same split the parser choice did
+	// (hasWellFormedFrontmatter), not the extension's own decode.
+	front, frontOK := splitFrontmatter(source)
+	return goldmarkOutput{html: buf.Bytes(), pc: ctx, hidden: hidden, front: front, frontOK: frontOK}, nil
 }
 
 // renderPost is the stage after goldmark: the sanitizer, the balancer and
@@ -667,7 +673,7 @@ func renderPost(g goldmarkOutput, kind RootKind) string {
 	if name, ok := unclosedSkipContent(input); ok {
 		notice = skipContentBanner(name)
 	}
-	return notice + frontmatterHTML(g.pc) + transformCallouts(body, kind)
+	return notice + frontmatterHTML(g.front, g.frontOK) + transformCallouts(body, kind)
 }
 
 // hiddenComments returns the source range of every %% comment in a parsed
@@ -1025,24 +1031,28 @@ func hasWellFormedFrontmatter(source []byte) bool {
 }
 
 // frontmatterBlock is splitFrontmatter's view of a document: the fence byte that
-// opened the block, the block's raw bytes (fences excluded), and the body
-// that follows the closing fence.
+// opened the block, the block's raw bytes (fences excluded), the body
+// that follows the closing fence, and, for a --- block, the top-level
+// mapping of its one decode (nil for an empty block or a +++ one).
 type frontmatterBlock struct {
 	delim byte
 	block []byte
 	body  []byte
+	root  *yaml.Node
 }
 
 // splitFrontmatter is the ONE place the frontmatter fence rule lives: a
 // first line of three-plus repeated - or +, closed by the first later line
 // that repeats the same byte at the same length. A --- block must also
 // decode as a YAML mapping (an empty mapping counts) — see
-// hasWellFormedFrontmatter for why; a +++ TOML block needs only
-// termination. Every consumer — the renderer's well-formedness gate,
+// hasWellFormedFrontmatter for why — within the limits
+// yamlFrontmatterRoot checks; a +++ TOML block needs termination and the
+// bounds tomlFrontmatterBounded checks. Every consumer — the renderer's well-formedness gate,
 // countWords, and scanDoc's alias extraction — reads through this function
 // so they can never disagree about where a document's metadata ends and
 // its body begins. A block over maxFrontmatterBytes is not frontmatter
-// either, so no consumer ever decodes one (#910).
+// either, so no consumer ever decodes one (#910). The block is decoded
+// here, once; consumers read fm.root rather than decoding it again.
 func splitFrontmatter(source []byte) (frontmatterBlock, bool) {
 	lines := bytes.SplitAfter(source, []byte("\n"))
 	if len(lines) == 0 {
@@ -1056,8 +1066,8 @@ func splitFrontmatter(source []byte) (frontmatterBlock, bool) {
 	for i := 1; i < len(lines); i++ {
 		d, c := frontmatterDelim(bytes.TrimSuffix(lines[i], []byte("\n")))
 		if d != delim || c != count {
-			// Past the cap no closing fence can make this frontmatter,
-			// so stop looking for one.
+			// A closing fence past the cap would close an over-cap
+			// block, which is not frontmatter, so the search ends here.
 			if blockLen += len(lines[i]); blockLen > maxFrontmatterBytes {
 				return frontmatterBlock{}, false
 			}
@@ -1070,14 +1080,19 @@ func splitFrontmatter(source []byte) (frontmatterBlock, bool) {
 		}
 		// First matching fence closes the block, same as the extension.
 		if delim == '+' {
+			if !tomlFrontmatterBounded(fm.block) {
+				return frontmatterBlock{}, false
+			}
 			return fm, true
 		}
-		var m map[string]any
-		// A nil (empty) mapping still counts: `---` immediately closed by
-		// `---` is legal, empty frontmatter, not a pair of thematic breaks.
-		if yaml.Unmarshal(fm.block, &m) != nil {
+		// An empty block (nil root) still counts: `---` immediately
+		// closed by `---` is legal, empty frontmatter, not a pair of
+		// thematic breaks.
+		root, ok := yamlFrontmatterRoot(fm.block)
+		if !ok {
 			return frontmatterBlock{}, false
 		}
+		fm.root = root
 		return fm, true
 	}
 	return frontmatterBlock{}, false
@@ -1086,17 +1101,16 @@ func splitFrontmatter(source []byte) (frontmatterBlock, bool) {
 // maxFrontmatterBytes is the largest frontmatter block, fences excluded,
 // that splitFrontmatter accepts. A larger block is treated as no
 // frontmatter: the document renders and indexes as markdown, fences and
-// all, so its source stays readable. The cap exists because the YAML
-// decode runs before every other bound (the render deadline, the markup
-// guard, the render lock), in the index scan of every doc, and more than
-// once per page, and decoding into a map is quadratic in the number of
-// keys: a block of short keys took 34 ms of CPU at 16 KiB, 127 ms at
-// 32 KiB, and 1.6 s at 256 KiB (#910). At the cap the worst shapes
-// measured, dense keys and flow collections nested as deep as the block
-// allows (`k: [[[…]]]`), each decode in about 35 ms of CPU; yaml.v3
-// itself refuses nesting past 10000, so depth needs no bound of its own.
-// Written frontmatter is far smaller: the largest found across this
-// estate's docs and vaults was about 7 KiB.
+// all, so its source stays readable. The block is decoded before every
+// other bound on a request (the render deadline, the markup guard, the
+// render lock) and in the index scan of every doc (#910). The decode is
+// kept linear by what frontmatter_check.go refuses, and this cap bounds
+// the linear cost: at 16 KiB the worst shape measured, flow collections
+// nested as deep as the block allows (`k: [[[…]]]`, depth about 8000),
+// took 20 ms of CPU to split and 87 ms for the whole page render, and the
+// worst TOML shape within its bounds 47 ms for the render. Written
+// frontmatter is far smaller: the largest found across this estate's docs
+// and vaults was about 7 KiB.
 const maxFrontmatterBytes = 16 << 10
 
 // frontmatterDelim interprets one newline-stripped line as a frontmatter
@@ -1120,24 +1134,23 @@ func frontmatterDelim(line []byte) (byte, int) {
 	return d, len(line)
 }
 
-// frontmatterHTML renders a document's parsed frontmatter as a collapsed
+// frontmatterHTML renders a document's frontmatter as a collapsed
 // Artificer disclosure (accordion + kv grid), or "" when the document has
-// none. Key order follows the document; a non-scalar value is shown as its
-// YAML flow form rather than flattened.
-func frontmatterHTML(ctx parser.Context) string {
-	fm := frontmatter.Get(ctx)
-	if fm == nil {
+// none. It reads the block splitFrontmatter found, so the page decodes it
+// no more often than the gate did: a YAML block is its one node decode,
+// in document key order, with a non-scalar value shown as its YAML flow
+// form rather than flattened; a TOML block is decoded here, once, and its
+// keys sorted.
+func frontmatterHTML(fm frontmatterBlock, ok bool) string {
+	if !ok {
 		return ""
 	}
-	var node yaml.Node
-	if err := fm.Decode(&node); err != nil || len(node.Content) == 0 {
-		// TOML frontmatter (or unparseable YAML) has no yaml.Node form —
-		// fall back to the unordered map both formats can decode into.
-		return frontmatterHTMLUnordered(fm)
+	if fm.delim == '+' {
+		return frontmatterHTMLTOML(fm.block)
 	}
-	mapping := node.Content[0]
-	if mapping.Kind != yaml.MappingNode {
-		return frontmatterHTMLUnordered(fm)
+	mapping := fm.root
+	if mapping == nil {
+		return ""
 	}
 	status, staleAfter := trustFields(mapping)
 	tr := evalTrust(status, staleAfter, trustNow())
@@ -1151,9 +1164,12 @@ func frontmatterHTML(ctx parser.Context) string {
 	return wrapFrontmatter(b.String(), pairs)
 }
 
-func frontmatterHTMLUnordered(fm *frontmatter.Data) string {
+// frontmatterHTMLTOML renders a +++ block's keys in sorted order, each
+// value in its YAML form, or "" when the block does not decode or is
+// empty.
+func frontmatterHTMLTOML(block []byte) string {
 	var m map[string]any
-	if err := fm.Decode(&m); err != nil || len(m) == 0 {
+	if err := toml.Unmarshal(block, &m); err != nil || len(m) == 0 {
 		return ""
 	}
 	keys := make([]string, 0, len(m))
@@ -1168,8 +1184,7 @@ func frontmatterHTMLUnordered(fm *frontmatter.Data) string {
 		if err != nil {
 			continue // badge counts rendered pairs, so a skipped key is not counted
 		}
-		// No trust badges here: OKF frontmatter is YAML, and this fallback
-		// serves TOML and YAML the node decode could not read.
+		// No trust badges here: OKF frontmatter is YAML.
 		writeKV(&b, k, strings.TrimSpace(string(b2)), trustState{})
 		pairs++
 	}

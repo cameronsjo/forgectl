@@ -110,9 +110,9 @@ var splitSink int
 // A doc whose frontmatter runs far past the cap costs splitFrontmatter
 // about what the same bytes cost with no closing fence, which no version
 // ever decodes: the cap stops the scan before any YAML decode. The check
-// is a ratio in process CPU time (perftest.Within). Measured: about 1
-// with the cap; about 780 without it, where the decode of 128 KiB of
-// keys, quadratic in their number, dominates.
+// is a ratio in process CPU time (perftest.Within). Measured: about 0.5
+// with the cap; about 67 without it, where the node decode of 128 KiB
+// dominates.
 //
 // Mutation: dropping the cap check in splitFrontmatter turns this red on
 // the ratio.
