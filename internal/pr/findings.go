@@ -109,9 +109,11 @@ var errFindingsChildMoved = errors.New("findings dir changed between the check a
 // store.OpenRoot follows a symlink that stays inside the store, so a name
 // swapped for one after the caller's Lstat would open some other findings
 // dir. The SameFile check against checked refuses that: the handle is either
-// the checked directory or nothing.
+// the checked directory or nothing. The open itself is openChildDirRoot, so a
+// FIFO swapped in for the child is refused instead of blocking (forgectl#798):
+// the cleanup preview reaches here outside the lifecycle lock.
 func openFindingsChild(store *os.Root, name string, checked fs.FileInfo) (*os.Root, error) {
-	child, err := store.OpenRoot(name)
+	child, err := openChildDirRoot(store, name)
 	if err != nil {
 		return nil, err
 	}
@@ -502,9 +504,11 @@ func removeJudgedFindingsDir(store, child *os.Root, name string, judged fs.FileI
 }
 
 // findingsChildSize is findingsDirSize for the store child name, for the
-// `pr findings list` report; a child that cannot be opened counts as 0.
+// `pr findings list` report; a child that cannot be opened counts as 0,
+// and so does one that is no longer a plain directory: openChildDirRoot
+// neither follows a symlink nor blocks on a FIFO (forgectl#798).
 func findingsChildSize(store *os.Root, name string) int64 {
-	child, err := store.OpenRoot(name)
+	child, err := openChildDirRoot(store, name)
 	if err != nil {
 		return 0
 	}

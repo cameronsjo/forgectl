@@ -21,6 +21,15 @@ import (
 //   [x] A path that no longer names the checked directory is refused
 //   [x] os.OpenRoot has one caller in the package, pinDirRoot
 //       (dirroot_test.go)
+//
+// Test plan for openChildDirRoot (forgectl#798)
+//
+//   [x] A FIFO at a store child's name is refused at once, not waited on
+//   [x] openFindingsChild and findingsChildSize, the two store-child opens,
+//       fail fast on a FIFO child
+//   [x] A plain directory child still opens
+//   [x] Root.OpenRoot has one caller in the package, openChildDirRoot
+//       (dirroot_test.go)
 
 // fifoAt makes a FIFO at path and, at cleanup, opens it for writing without
 // blocking, which releases a reader a regressed open left stuck in the kernel
@@ -122,5 +131,98 @@ func TestPinDirRoot_RefusesADirectoryThatIsNotTheCheckedOne(t *testing.T) {
 	}
 	if !errors.Is(err, errDirRootMoved) {
 		t.Errorf("err = %v, want errDirRootMoved", err)
+	}
+}
+
+// fifoChild makes a store root holding a FIFO named "child", the state a
+// same-uid racer leaves by swapping a checked findings dir for a FIFO.
+func fifoChild(t *testing.T) *os.Root {
+	t.Helper()
+	dir := t.TempDir()
+	fifoAt(t, filepath.Join(dir, "child"))
+	store, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
+// Mutation that turns it red: open the child in openChildDirRoot with
+// parent.OpenRoot(name) alone (the pre-#798 form). The open blocks for a
+// writer that never comes, and mustFailFast times out.
+func TestOpenChildDirRoot_FIFOChildFailsFast(t *testing.T) {
+	store := fifoChild(t)
+	err := mustFailFast(t, "openChildDirRoot on a FIFO child", func() error {
+		child, err := openChildDirRoot(store, "child")
+		if err == nil {
+			_ = child.Close()
+		}
+		return err
+	})
+	if !errors.Is(err, errNotADirectory) {
+		t.Fatalf("openChildDirRoot err = %v, want errNotADirectory", err)
+	}
+}
+
+// The FIFO is swapped in after the caller's Lstat judged a plain directory,
+// so openFindingsChild is handed a directory's identity; the cleanup preview
+// makes this open outside the lifecycle lock. findingsChildSize is the list's
+// size read of the same child.
+//
+// Mutations that turn it red: open the child in openFindingsChild, or in
+// findingsChildSize, with store.OpenRoot(name) again. Either open blocks, and
+// mustFailFast times out.
+func TestFindingsChildOpens_FIFOChildFailsFast(t *testing.T) {
+	store := fifoChild(t)
+	checked, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = mustFailFast(t, "openFindingsChild on a FIFO child", func() error {
+		child, err := openFindingsChild(store, "child", checked)
+		if err == nil {
+			_ = child.Close()
+		}
+		return err
+	})
+	if err == nil {
+		t.Error("openFindingsChild opened a FIFO child")
+	}
+	var size int64
+	_ = mustFailFast(t, "findingsChildSize on a FIFO child", func() error {
+		size = findingsChildSize(store, "child")
+		return nil
+	})
+	if size != 0 {
+		t.Errorf("findingsChildSize = %d, want 0 for a child that is not a directory", size)
+	}
+}
+
+// Mutation that turns it red: invert openChildDirRoot's IsDir check, which
+// refuses every real directory.
+func TestOpenChildDirRoot_PlainDirOpens(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "child"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "child", "probe"), []byte("abc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	child, err := openChildDirRoot(store, "child")
+	if err != nil {
+		t.Fatalf("openChildDirRoot(plain dir): %v", err)
+	}
+	defer func() { _ = child.Close() }()
+	if _, err := child.Stat("probe"); err != nil {
+		t.Errorf("the child root does not reach the directory's contents: %v", err)
+	}
+	if got := findingsChildSize(store, "child"); got != 3 {
+		t.Errorf("findingsChildSize = %d, want 3", got)
 	}
 }
