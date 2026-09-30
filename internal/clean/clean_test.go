@@ -135,6 +135,43 @@ func TestClean_DryRun_ZeroDeletes(t *testing.T) {
 	}
 }
 
+// TestPreview_NeverDeletes pins the preview-only API `forgectl status` uses:
+// a real temp tree keeps every file, and the result reports what an apply
+// would reclaim without claiming anything was reclaimed.
+func TestPreview_NeverDeletes(t *testing.T) {
+	statusErrors = map[string]error{}
+	root := t.TempDir()
+	leaves := []string{
+		filepath.Join(root, "proj", "node_modules", "leaf.js"),
+		filepath.Join(root, "proj", "dist", "bundle.js"),
+	}
+	for _, leaf := range leaves {
+		mustWriteFile(t, leaf, 100)
+	}
+
+	run := fakeGitRunner(nil)
+	resolvedRoot, result, err := New(run, WithRoot(root)).Preview(context.Background())
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if resolvedRoot != resolvedPath(t, root) {
+		t.Errorf("root = %q, want %q", resolvedRoot, resolvedPath(t, root))
+	}
+	if result.TotalReclaimable != 200 || result.TotalReclaimed != 0 {
+		t.Errorf("reclaimable = %d, reclaimed = %d; want 200 and 0", result.TotalReclaimable, result.TotalReclaimed)
+	}
+	for _, leaf := range leaves {
+		if _, err := os.Stat(leaf); err != nil {
+			t.Errorf("Preview deleted %s: %v", leaf, err)
+		}
+	}
+	for _, item := range result.Items {
+		if item.Deleted {
+			t.Errorf("Preview reported %s deleted", item.Path)
+		}
+	}
+}
+
 func TestClean_Apply_DeletesAndReportsActualBytes(t *testing.T) {
 	statusErrors = map[string]error{}
 	root := t.TempDir()

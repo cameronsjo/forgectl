@@ -478,6 +478,7 @@ func NewIndexWithOptions(paths []string, opts IndexOptions) (*Index, error) {
 func NewIndexContext(ctx context.Context, paths []string, opts IndexOptions) (*Index, error) {
 	idx := &Index{paths: append([]string(nil), paths...), opts: opts}
 	labels := map[string]bool{}
+	attachmentsByRoot := map[string][]string{}
 
 	for _, p := range paths {
 		abs, err := filepath.Abs(p)
@@ -495,12 +496,13 @@ func NewIndexContext(ctx context.Context, paths []string, opts IndexOptions) (*I
 		}
 
 		if info.IsDir() {
-			root, docs, skipped, err := indexDirRoot(ctx, labels, p, override, hasOverride)
+			root, docs, attachments, skipped, err := indexDirRoot(ctx, labels, p, override, hasOverride)
 			if err != nil {
 				return nil, err
 			}
 			idx.roots = append(idx.roots, root)
 			idx.docs = append(idx.docs, docs...)
+			attachmentsByRoot[root.Label] = attachments
 			idx.skipped = append(idx.skipped, skipped...)
 			continue
 		}
@@ -520,7 +522,7 @@ func NewIndexContext(ctx context.Context, paths []string, opts IndexOptions) (*I
 		idx.pathIndex[docKey{rootLabel: d.RootLabel, absPath: d.AbsPath}] = true
 	}
 
-	idx.byRoot = buildRootIndexes(idx.roots, idx.docs)
+	idx.byRoot = buildRootIndexes(idx.roots, idx.docs, attachmentsByRoot)
 	idx.backlinks = idx.buildBacklinks()
 	return idx, nil
 }
@@ -584,28 +586,28 @@ func resolveRootKind(canonical string, override RootKind, hasOverride bool) (Roo
 // error whenever the two race, discarding its "docs root %q" wrap for no
 // reason. Every other walkRoot error (a real filesystem fault) keeps the
 // existing wrap.
-func indexDirRoot(ctx context.Context, labels map[string]bool, dir string, override RootKind, hasOverride bool) (Root, []Doc, []SkippedPath, error) {
+func indexDirRoot(ctx context.Context, labels map[string]bool, dir string, override RootKind, hasOverride bool) (Root, []Doc, []string, []SkippedPath, error) {
 	canonical, err := CanonicalizeRoot(dir)
 	if err != nil {
-		return Root{}, nil, nil, fmt.Errorf("docs root %q: %w", dir, err)
+		return Root{}, nil, nil, nil, fmt.Errorf("docs root %q: %w", dir, err)
 	}
 	label := uniqueLabel(labels, filepath.Base(canonical))
 	kind, vaultPath := resolveRootKind(canonical, override, hasOverride)
 	rt, dirInfo, err := openRootDir(canonical)
 	if err != nil {
-		return Root{}, nil, nil, fmt.Errorf("docs root %q: %w", dir, err)
+		return Root{}, nil, nil, nil, fmt.Errorf("docs root %q: %w", dir, err)
 	}
 	defer func() { _ = rt.Close() }()
 	root := Root{Label: label, Path: canonical, Kind: kind, VaultPath: vaultPath, dirInfo: dirInfo}
-	docs, skipped, err := walkRoot(ctx, root, rt)
+	docs, attachments, skipped, err := walkRoot(ctx, root, rt)
 	if err != nil {
 		var deadline *WalkDeadlineError
 		if errors.As(err, &deadline) {
-			return Root{}, nil, nil, err
+			return Root{}, nil, nil, nil, err
 		}
-		return Root{}, nil, nil, fmt.Errorf("docs root %q: %w", dir, err)
+		return Root{}, nil, nil, nil, fmt.Errorf("docs root %q: %w", dir, err)
 	}
-	return root, docs, skipped, nil
+	return root, docs, attachments, skipped, nil
 }
 
 // indexFileRoot canonicalizes a single markdown file and indexes it alone.
@@ -789,8 +791,16 @@ func (e *WalkDeadlineError) Unwrap() error { return e.Err }
 // nonblocking besides, so none can hang the build. (Defense in depth only:
 // the request-time resolution in security.go re-verifies every serve
 // regardless of what the index contains.)
-func walkRoot(ctx context.Context, root Root, rt *os.Root) ([]Doc, []SkippedPath, error) {
+//
+// In a vault root it also lists the attachments: every other regular file
+// the same walk visits, by slash-separated root-relative path, except a
+// dot-file, which Obsidian does not index either. They come from this walk
+// and nothing else, so an attachment is never a symlink, never under a
+// symlinked or excluded directory, and never outside the root. Nothing is
+// opened or read for them (forgectl#709).
+func walkRoot(ctx context.Context, root Root, rt *os.Root) ([]Doc, []string, []SkippedPath, error) {
 	var docs []Doc
+	var attachments []string
 	var skipped []SkippedPath
 	skip := func(path, reason string) {
 		rel, err := filepath.Rel(root.Path, path)
@@ -828,7 +838,17 @@ func walkRoot(ctx context.Context, root Root, rt *os.Root) ([]Doc, []SkippedPath
 		// Only a regular file is a doc: never a symlink (see the doc
 		// comment above), and never a FIFO, socket or device, whose open or
 		// read could block the build.
-		if !d.Type().IsRegular() || !AllowedExt(path) {
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		if !AllowedExt(path) {
+			if root.Kind == RootVault && !strings.HasPrefix(d.Name(), ".") {
+				rel, err := filepath.Rel(root.Path, path)
+				if err != nil {
+					return err
+				}
+				attachments = append(attachments, filepath.ToSlash(rel))
+			}
 			return nil
 		}
 
@@ -872,9 +892,9 @@ func walkRoot(ctx context.Context, root Root, rt *os.Root) ([]Doc, []SkippedPath
 		return nil
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return docs, skipped, nil
+	return docs, attachments, skipped, nil
 }
 
 // Rebuild re-walks this index's original root arguments and returns a fresh

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec/internal/sealed"
+	"github.com/cameronsjo/forgectl/internal/exec/internal/validated"
 )
 
 // helperModeEnv turns this test binary into the child process the runner
@@ -817,7 +818,11 @@ func TestBuildEnv_RemovesEveryOccurrenceAndAppendsOnce(t *testing.T) {
 		"BAREKEY",
 	}}
 
-	env, set := runner.buildEnv([]EnvMutation{ReplaceCmuxSocketPath("/resolved"), UnsetTmux(), SetCmuxQuiet()})
+	var muts []validated.Env
+	for _, m := range []EnvMutation{ReplaceCmuxSocketPath("/resolved"), UnsetTmux(), SetCmuxQuiet()} {
+		muts = append(muts, m.toValidated())
+	}
+	env, set := runner.buildEnv(muts)
 	if want := []string{"PATH=/usr/bin", "CMUX_AUTH_TOKEN=untouched", "BAREKEY"}; !slices.Equal(env, want) {
 		t.Errorf("inherited env = %q, want %q", env, want)
 	}

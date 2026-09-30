@@ -5,6 +5,7 @@ package docs
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cameronsjo/forgectl/internal/perftest"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
@@ -253,15 +255,19 @@ func TestMarkupGuard_NeverFinerThanAPipeline(t *testing.T) {
 // one (294 KB) 9.8 s to render and 9.3 s to scan. On a guard that took the
 // positions from the twin's table cells, the orphan header (1 MB) passed
 // and then took 11.6 s to render and 12.6 s to scan in a vault.
-func escapedPipeTables() map[string]string {
+func escapedPipeTables() map[string]string { return escapedPipeTablesOver(1) }
+
+// escapedPipeTablesOver is escapedPipeTables with every repeat count divided
+// by div, for the small side of a timing ratio.
+func escapedPipeTablesOver(div int) map[string]string {
 	eight := "|" + strings.Repeat("`\\|`|", 8) + "\n"
 	return map[string]string{
-		"escaped pipes, 1 column":  "| a |\n|-|\n" + strings.Repeat("|`\\|`|\n", 52500),
-		"escaped pipes, 8 columns": "| a | b | c | d | e | f | g | h |\n|-|-|-|-|-|-|-|-|\n" + strings.Repeat(eight, 6000),
+		"escaped pipes, 1 column":  "| a |\n|-|\n" + strings.Repeat("|`\\|`|\n", 52500/div),
+		"escaped pipes, 8 columns": "| a | b | c | d | e | f | g | h |\n|-|-|-|-|-|-|-|-|\n" + strings.Repeat(eight, 6000/div),
 		// A header whose cell count does not match its delimiter row is no
 		// table, but goldmark has already recorded its "\|" positions, and
 		// the small real table after it pays for every one of them.
-		"escaped pipes, orphan header": "`" + strings.Repeat("\\|", 490000) + " | b\n|-|\n\n" + "|a|\n|-|\n" + strings.Repeat("|`\\|`|\n", 8150),
+		"escaped pipes, orphan header": "`" + strings.Repeat("\\|", 490000/div) + " | b\n|-|\n\n" + "|a|\n|-|\n" + strings.Repeat("|`\\|`|\n", 8150/div),
 	}
 }
 
@@ -321,31 +327,46 @@ func TestBlockOnlyParser_RefusesMixedOptions(t *testing.T) {
 	}()
 }
 
-// TestMarkupGuard_ReprosAreBounded: each shape at 3,000 rows is refused
-// wherever the pipeline would inline-parse the rows, and renders and scans,
-// in both root kinds, well inside a generous wall-clock bound. On earlier
-// guards that modelled the block structure, the table shapes took 7 to 9 s
-// at 1,000 rows, and "math over <script>" and "frontmatter hiding a fence"
-// 53 s and 57 s at 3,000, under renderMu. Mutation: reverting the guard to
-// one default-block-parser parser turns this red (and slow).
+// TestMarkupGuard_ReprosAreBounded: each shape at 3,000 rows, and each
+// escaped-pipe table, renders and scans in both root kinds in time linear in
+// its size. On earlier guards that modelled the block structure, the table
+// shapes took 7 to 9 s at 1,000 rows, and "math over <script>" and
+// "frontmatter hiding a fence" 53 s and 57 s at 3,000, under renderMu. The
+// check is a ratio (perftest.Linear, forgectl#879): each input against the
+// same shape an eighth its size, in process CPU time; a wall-clock bound
+// flaked at 3.4 to 9 s under load. A shape the guard refuses at full size
+// but not at an eighth renders in full only on the small side, so its ratio
+// is below 1, which passes.
+//
+// Mutations: making markupTooComplex return false once it has found the twin
+// (no guard) turns the refused shapes red; dropping escapedPipeWork from it
+// turns the escaped-pipe tables red.
 func TestMarkupGuard_ReprosAreBounded(t *testing.T) {
-	shapes := guardShapes(guardRows(3000))
-	for name, src := range escapedPipeTables() {
-		shapes[name] = src
+	const rows, k = 3000, 8
+	shapes := func(rows, div int) map[string]string {
+		m := guardShapes(guardRows(rows))
+		for name, src := range escapedPipeTablesOver(div) {
+			m[name] = src
+		}
+		return m
 	}
-	for name, src := range shapes {
+	small, large := shapes(rows/k, k), shapes(rows, 1)
+	renderAndScan := func(t *testing.T, src string, kind RootKind) func() {
 		b := []byte(src)
-		for _, kind := range []RootKind{RootDocs, RootVault} {
-			start := time.Now()
+		return func() {
 			if _, _, err := renderHidden(b, kind, nil); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := scanDocFrom(kind, bytes.NewReader(b), "shape.md"); err != nil {
 				t.Fatal(err)
 			}
-			if d := time.Since(start); d > 3*time.Second {
-				t.Errorf("%s, kind %v: render and scan took %v, want well under 3s", name, kind, d)
-			}
+		}
+	}
+	for name, src := range large {
+		for _, kind := range []RootKind{RootDocs, RootVault} {
+			t.Run(fmt.Sprintf("%s/kind %v", name, kind), func(t *testing.T) {
+				perftest.Linear(t, "render and scan", k, renderAndScan(t, small[name], kind), renderAndScan(t, src, kind))
+			})
 		}
 	}
 }

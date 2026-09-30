@@ -298,6 +298,7 @@ func TestJSONStderr_FailedBeforeEmitting_OneObject(t *testing.T) {
 		{name: "pr drain: once with watch", args: []string{"pr", "drain", "--once", "--watch", "--json"}, wantCode: jsonCodeFailed, wantExit: 1, wantMsg: "cannot be combined"},
 		{name: "update check: unknown step", args: []string{"update", "check", "--only", "forgectl-bogus", "--json"}, wantCode: jsonCodeFailed, wantExit: 2, wantMsg: "forgectl-bogus"},
 		{name: "herdr organize: no config", args: []string{"herdr", "organize", "--json"}, wantCode: jsonCodeFailed, wantExit: 2},
+		{name: "status: non-positive timeout", args: []string{"status", "--json", "--timeout", "0s"}, wantCode: jsonCodeFailed, wantExit: 1, wantMsg: "--timeout"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			isolateJSONContractEnv(t)
@@ -421,6 +422,9 @@ func TestJSONStderr_VerdictEmitted_SilentExit(t *testing.T) {
 			client, dir := drainCmdClient(t, prDrainRunner(map[int]error{1: errors.New("boom: agent refused")}))
 			seedQueuedFixture(t, dir, pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 1}, time.Now().UTC())
 			return newPrDrainCmd(client, config.Config{}), []string{"drain", "--json"}
+		}},
+		{name: "status: strict with a failed section", stderrFree: true, build: func(t *testing.T) (*cobra.Command, []string) {
+			return newStatusCmdForSources(failingStatusSources(t), theme.Theme{}), []string{"status", "--json", "--strict", "--timeout", "50ms"}
 		}},
 		{name: "projects list: strict on a degraded host", build: func(t *testing.T) (*cobra.Command, []string) {
 			return newProjectsListCmd(listFixture(t, degradedGitHubRunFunc)), []string{"list", "--json", "--strict"}
