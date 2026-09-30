@@ -182,6 +182,31 @@ func TestProbeThroughTheRealStat(t *testing.T) {
 	}
 }
 
+func TestCheckSessionRunsNoHerdrAndSeesTheGate(t *testing.T) {
+	if err := checkSession(envOf(inPane), statSocket); err != nil {
+		t.Errorf("checkSession in a pane: %v", err)
+	}
+	if err := checkSession(envOf(map[string]string{}), statSocket); !errors.Is(err, ErrNotInSession) {
+		t.Errorf("checkSession outside a pane: err = %v, want ErrNotInSession", err)
+	}
+	// The exported form reads the real filesystem; a socket path that does not
+	// exist must fail as a missing session, not pass.
+	env := envOf(map[string]string{"HERDR_ENV": "1", "HERDR_SOCKET_PATH": "/nonexistent/herdr.sock"})
+	if err := CheckSession(env); !errors.Is(err, ErrNotInSession) {
+		t.Errorf("CheckSession with a dead socket: err = %v, want ErrNotInSession", err)
+	}
+}
+
+func TestCheckForkChecksOnlyTheCapability(t *testing.T) {
+	if err := CheckFork(context.Background(), forkRunner(t)); err != nil {
+		t.Errorf("CheckFork on the fork: %v", err)
+	}
+	stock := runnerFor("", &exec.CommandError{Name: Binary, ExitCode: 2, Stderr: "error: unknown subcommand"})
+	if err := CheckFork(context.Background(), stock); !errors.Is(err, ErrForkRequired) {
+		t.Errorf("CheckFork on stock herdr: err = %v, want ErrForkRequired", err)
+	}
+}
+
 func TestProbeGateErrorWinsAndSkipsTheRunner(t *testing.T) {
 	// Both the gate and the capability check would fail; the gate is reported and herdr is never run.
 	stockish := runnerFor("", &exec.CommandError{Name: Binary, ExitCode: 2, Stderr: ""})

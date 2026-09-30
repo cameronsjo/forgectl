@@ -1,6 +1,6 @@
 # herdr
 
-`internal/herdr` is forgectl's client for the herdr session the process runs in. It shells to the `herdr` CLI through `exec.Runner`. It is plumbing for the herdr commands tracked in cameronsjo/forgectl#721; no command uses it yet. Starting a harness on a pinned server stays in `internal/surface/herdradapter`.
+`internal/herdr` is forgectl's client for the herdr session the process runs in. It shells to the `herdr` CLI through `exec.Runner`. It is plumbing for the herdr commands tracked in cameronsjo/forgectl#721; the first command to use it is [`forgectl herdr organize`](commands/herdr.md). Starting a harness on a pinned server stays in `internal/surface/herdradapter`.
 
 ## Requirements
 

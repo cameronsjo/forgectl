@@ -58,6 +58,20 @@ func Probe(ctx context.Context, r exec.Runner, lookupEnv func(string) (string, b
 }
 
 func probe(ctx context.Context, r exec.Runner, lookupEnv func(string) (string, bool), stat func(string) (fs.FileInfo, error)) error {
+	if err := checkSession(lookupEnv, stat); err != nil {
+		return err
+	}
+	return CheckFork(ctx, r)
+}
+
+// CheckSession reports whether the process is inside a herdr pane whose socket
+// exists. It runs no herdr command, so a read-only caller can use it without
+// needing the fork. See [Probe] for what lookupEnv must read.
+func CheckSession(lookupEnv func(string) (string, bool)) error {
+	return checkSession(lookupEnv, os.Stat)
+}
+
+func checkSession(lookupEnv func(string) (string, bool), stat func(string) (fs.FileInfo, error)) error {
 	if v, ok := lookupEnv(envSession); !ok {
 		return fmt.Errorf("%w: %s is not set; run this from a herdr pane", ErrNotInSession, envSession)
 	} else if v != sessionOn {
@@ -74,7 +88,13 @@ func probe(ctx context.Context, r exec.Runner, lookupEnv func(string) (string, b
 	if info.Mode()&fs.ModeSocket == 0 {
 		return fmt.Errorf("%w: %s names %s, which is not a socket", ErrNotInSession, envSocket, sock)
 	}
+	return nil
+}
 
+// CheckFork reports whether the herdr CLI has `tab move`, which only the
+// cameronsjo/herdr fork provides. It spawns herdr once. Run [CheckSession]
+// first: this does not check that a session exists.
+func CheckFork(ctx context.Context, r exec.Runner) error {
 	// The text to search: stdout when herdr answers (exit 0; a herdr that put its
 	// usage on stderr and exited 0 would read as missing, which is not the
 	// measured fork behaviour), stderr and stdout when it exits with its usage
