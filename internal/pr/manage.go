@@ -73,6 +73,16 @@ func (c *Client) listLocked() ([]SessionSummary, []unreadableRecord, error) {
 			continue
 		}
 		path := filepath.Join(c.sessionsDir, e.Name())
+		// Only a regular file can be a record forgectl wrote (writeRecordAtomic
+		// renames a regular temp into place). A FIFO, socket, device or symlink
+		// named like one is skipped before any open, so it cannot stall the
+		// listing under the lifecycle lock (forgectl#621); the record reader
+		// refuses the same kinds on the descriptor if one is swapped in later.
+		if !e.Type().IsRegular() {
+			slog.Warn("Skipping a pr session entry that is not a regular file.",
+				"path", path, "type", e.Type().String())
+			continue
+		}
 		sum, err := c.loadSummary(path)
 		if err != nil {
 			slog.Warn("Skipping unreadable pr breadcrumb.", "path", path, "error", err)
