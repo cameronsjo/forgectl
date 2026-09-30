@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/token"
 	"go/types"
 	"io"
 	"os"
@@ -85,8 +86,9 @@ func TestSealedIsUnimportableOutsideExec(t *testing.T) {
 // every platform in guardPlatforms, the one path to a process: sealed.Start,
 // the one function that puts a payload into a process, is named only inside
 // the func startSealed, and startSealed, which skips validate, is named only
-// inside (*OSSensitiveRunner).RunSensitive, after validate. Test files are not
-// checked.
+// inside (*OSSensitiveRunner).RunSensitive. That the one call there comes
+// after validate, and that startSealed is never used as a value, is
+// TestValidateDominatesStartSealed's. Test files are not checked.
 //
 // This is not what keeps plaintext out of internal/exec: the compiler does
 // that, since sealed.Start returns only a *sealed.Proc (wait and kill, no
@@ -118,6 +120,251 @@ func TestSealedStartHasOneCaller(t *testing.T) {
 		for _, f := range namedOutside(c, startSealed, "*OSSensitiveRunner", "RunSensitive") {
 			t.Errorf("[%s] %s: startSealed is named outside (*OSSensitiveRunner).RunSensitive; it skips validate, so only RunSensitive may call it",
 				p, f)
+		}
+	}
+}
+
+// TestValidateDominatesStartSealed pins the ordering TestSealedStartHasOneCaller
+// cannot see (forgectl#888): inside (*OSSensitiveRunner).RunSensitive, on
+// every platform in guardPlatforms, validate runs, and refuses, before the
+// one startSealed call can be reached. The rule is deliberately simple
+// enough to read at a glance:
+//
+//   - startSealed is named exactly once, as the function of a direct call
+//     expression that sits outside every func literal, so it is never a
+//     func value, never captured by a closure and never stored;
+//   - a statement at the top level of RunSensitive's body is
+//     `if err := sc.validate(); err != nil { ...; return ... }`, with no
+//     else, whose sc is RunSensitive's own parameter, and the statement
+//     holding the startSealed call comes after it in that same block;
+//   - that call passes the same sc, and nothing in RunSensitive assigns to
+//     sc, takes its address, or reaches a field of it on the left of an
+//     assignment, so the command validated is the command started;
+//   - RunSensitive holds no goto and no label, so no jump skips validate.
+//
+// A mutation of sc through a helper that is handed sc.Args stays a review
+// property.
+//
+// Mutations that turn it red, each in RunSensitive: move the startSealed
+// call above the validate statement; add `zzEsc = func() (*sealed.Proc,
+// error) { return startSealed(r, sc, nil, nil) }` with a package var zzEsc;
+// add `zzEsc = startSealed`; add `sc.Path = Secret("/bin/sh")` after
+// validate.
+func TestValidateDominatesStartSealed(t *testing.T) {
+	for _, p := range guardPlatforms {
+		for _, f := range validateDominanceFindings(checkExecFor(t, p)) {
+			t.Errorf("[%s] %s", p, f)
+		}
+	}
+}
+
+// validateDominanceFindings returns every way c's RunSensitive breaks the
+// rule TestValidateDominatesStartSealed states.
+func validateDominanceFindings(c *checkedPackage) []string {
+	startSealed, ok := c.pkg.Scope().Lookup("startSealed").(*types.Func)
+	if !ok {
+		return []string{"internal/exec declares no startSealed func; the rule would check nothing"}
+	}
+	var fd *ast.FuncDecl
+	for _, f := range c.files {
+		for _, decl := range f.Decls {
+			d, ok := decl.(*ast.FuncDecl)
+			if ok && d.Name.Name == "RunSensitive" && d.Recv != nil && len(d.Recv.List) == 1 &&
+				types.ExprString(d.Recv.List[0].Type) == "*OSSensitiveRunner" && d.Body != nil {
+				fd = d
+			}
+		}
+	}
+	if fd == nil {
+		return []string{"no (*OSSensitiveRunner).RunSensitive with a body; the rule would check nothing"}
+	}
+	var findings []string
+	pos := func(n ast.Node) string { return c.fset.Position(n.Pos()).String() }
+
+	// sc is RunSensitive's SensitiveCommand parameter, found through its
+	// uses (checkExecFor records no Defs).
+	var sc types.Object
+	for _, field := range fd.Type.Params.List {
+		if types.ExprString(field.Type) != "SensitiveCommand" || len(field.Names) != 1 {
+			continue
+		}
+		name := field.Names[0]
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && sc == nil {
+				if obj := c.info.Uses[id]; obj != nil && obj.Pos() == name.Pos() {
+					sc = obj
+				}
+			}
+			return sc == nil
+		})
+	}
+	if sc == nil {
+		return []string{pos(fd) + ": RunSensitive has no single SensitiveCommand parameter used in its body; the rule would check nothing"}
+	}
+	isSC := func(e ast.Expr) bool {
+		id, ok := ast.Unparen(e).(*ast.Ident)
+		return ok && c.info.Uses[id] == sc
+	}
+
+	// Every use of startSealed must be the Fun of a call outside any func
+	// literal; record the call.
+	var calls []*ast.CallExpr
+	var walk func(n ast.Node, inLit bool)
+	walk = func(root ast.Node, inLit bool) {
+		ast.Inspect(root, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.FuncLit:
+				if n != root {
+					walk(n, true)
+					return false
+				}
+			case *ast.CallExpr:
+				if id, ok := ast.Unparen(n.Fun).(*ast.Ident); ok && c.info.Uses[id] == startSealed {
+					if inLit {
+						findings = append(findings, pos(n)+": startSealed is called inside a func literal; a closure can carry it past validate")
+					} else {
+						calls = append(calls, n)
+					}
+					for _, arg := range n.Args {
+						walk(arg, inLit)
+					}
+					return false
+				}
+			case *ast.Ident:
+				if c.info.Uses[n] == startSealed {
+					findings = append(findings, pos(n)+": startSealed is used as a value; only a direct call in RunSensitive may name it")
+				}
+			case *ast.BranchStmt:
+				if n.Tok == token.GOTO {
+					findings = append(findings, pos(n)+": goto in RunSensitive; a jump can skip validate")
+				}
+			case *ast.LabeledStmt:
+				findings = append(findings, pos(n)+": label in RunSensitive; a jump can skip validate")
+			case *ast.AssignStmt:
+				for _, lhs := range n.Lhs {
+					if isSC(rootOperand(lhs)) {
+						findings = append(findings, pos(lhs)+": RunSensitive writes sc after it is validated")
+					}
+				}
+			case *ast.IncDecStmt:
+				if isSC(rootOperand(n.X)) {
+					findings = append(findings, pos(n)+": RunSensitive writes sc after it is validated")
+				}
+			case *ast.RangeStmt:
+				for _, e := range []ast.Expr{n.Key, n.Value} {
+					if e != nil && n.Tok == token.ASSIGN && isSC(rootOperand(e)) {
+						findings = append(findings, pos(e)+": RunSensitive writes sc after it is validated")
+					}
+				}
+			case *ast.UnaryExpr:
+				if n.Op == token.AND && isSC(rootOperand(n.X)) {
+					findings = append(findings, pos(n)+": RunSensitive takes sc's address, so it can change after validate")
+				}
+			case *ast.SelectorExpr:
+				if sel := c.info.Selections[n]; sel != nil && sel.Kind() != types.FieldVal && isSC(rootOperand(n.X)) {
+					if sig, ok := sel.Obj().Type().(*types.Signature); ok && sig.Recv() != nil {
+						if _, ptr := sig.Recv().Type().(*types.Pointer); ptr {
+							findings = append(findings, pos(n)+": RunSensitive calls a pointer-receiver method on sc, so it can change after validate")
+						}
+					}
+				}
+			}
+			return true
+		})
+	}
+	walk(fd.Body, false)
+	if len(calls) != 1 {
+		findings = append(findings, fmt.Sprintf("%s: RunSensitive calls startSealed directly %d times, want exactly 1", pos(fd), len(calls)))
+		return findings
+	}
+	call := calls[0]
+	if len(call.Args) < 2 || !isSC(call.Args[1]) {
+		findings = append(findings, pos(call)+": startSealed is not passed RunSensitive's own sc, the command validate checked")
+	}
+
+	validateAt, callAt := -1, -1
+	for i, stmt := range fd.Body.List {
+		if validateAt < 0 && isValidateGate(c, stmt, isSC) {
+			validateAt = i
+		}
+		if stmt.Pos() <= call.Pos() && call.End() <= stmt.End() {
+			callAt = i
+		}
+	}
+	switch {
+	case validateAt < 0:
+		findings = append(findings, pos(fd)+": RunSensitive has no top-level `if err := sc.validate(); err != nil { ...; return ... }`")
+	case callAt <= validateAt:
+		findings = append(findings, pos(call)+": startSealed is called before the validate statement at "+pos(fd.Body.List[validateAt]))
+	}
+	return findings
+}
+
+// isValidateGate reports whether stmt is `if err := sc.validate(); err != nil
+// { ...; return ... }` with no else, sc matching isSC and validate being
+// SensitiveCommand's own method.
+func isValidateGate(c *checkedPackage, stmt ast.Stmt, isSC func(ast.Expr) bool) bool {
+	ifs, ok := stmt.(*ast.IfStmt)
+	if !ok || ifs.Else != nil || len(ifs.Body.List) == 0 {
+		return false
+	}
+	if _, ok := ifs.Body.List[len(ifs.Body.List)-1].(*ast.ReturnStmt); !ok {
+		return false
+	}
+	init, ok := ifs.Init.(*ast.AssignStmt)
+	if !ok || init.Tok != token.DEFINE || len(init.Lhs) != 1 || len(init.Rhs) != 1 {
+		return false
+	}
+	errID, ok := init.Lhs[0].(*ast.Ident)
+	if !ok {
+		return false
+	}
+	call, ok := init.Rhs[0].(*ast.CallExpr)
+	if !ok || len(call.Args) != 0 {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || !isSC(sel.X) {
+		return false
+	}
+	fn, ok := c.info.Uses[sel.Sel].(*types.Func)
+	if !ok || fn.Name() != "validate" || fn.Pkg() != c.pkg {
+		return false
+	}
+	if recv := fn.Signature().Recv(); recv == nil || types.TypeString(recv.Type(), nil) != execImportPath+".SensitiveCommand" {
+		return false
+	}
+	cond, ok := ifs.Cond.(*ast.BinaryExpr)
+	if !ok || cond.Op != token.NEQ {
+		return false
+	}
+	x, ok := cond.X.(*ast.Ident)
+	if !ok || c.info.Uses[x] == nil || c.info.Uses[x].Pos() != errID.Pos() {
+		return false
+	}
+	y, ok := cond.Y.(*ast.Ident)
+	return ok && y.Name == "nil" && c.info.Uses[y] == types.Universe.Lookup("nil")
+}
+
+// rootOperand strips selectors, indexes, slices, derefs and parens down to
+// the operand an lvalue is rooted at: sc for sc.Args[0].v.
+func rootOperand(e ast.Expr) ast.Expr {
+	for {
+		switch x := e.(type) {
+		case *ast.ParenExpr:
+			e = x.X
+		case *ast.SelectorExpr:
+			e = x.X
+		case *ast.IndexExpr:
+			e = x.X
+		case *ast.IndexListExpr:
+			e = x.X
+		case *ast.SliceExpr:
+			e = x.X
+		case *ast.StarExpr:
+			e = x.X
+		default:
+			return e
 		}
 	}
 }

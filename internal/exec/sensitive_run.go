@@ -157,11 +157,13 @@ func envKeyOf(entry string) string {
 //
 // Only RunSensitive may call this: it skips validate, so a direct call would
 // start a relative path or a dash-leading operand that validate refuses.
-// TestSealedStartHasOneCaller pins that, and sealed.Start refuses a
-// non-absolute path on its own as defense in depth. It is a plain func, not a
-// method, on purpose: a package-level func is reachable only by naming it, so
-// the test's Uses walk sees every route, where a method could be reached
-// through an interface value the walk would not attribute to it.
+// TestSealedStartHasOneCaller pins that, TestValidateDominatesStartSealed
+// pins that the one call comes after validate and is never a func value, and
+// sealed.Start refuses a non-absolute path on its own as defense in depth. It
+// is a plain func, not a method, on purpose: a package-level func is
+// reachable only by naming it, so the test's Uses walk sees every route,
+// where a method could be reached through an interface value the walk would
+// not attribute to it.
 //
 // What the compiler enforces, against ordinary Go (calls, method values,
 // interfaces, generic constraints, conversions):
@@ -178,7 +180,8 @@ func envKeyOf(entry string) string {
 // a closure's captured variables, without importing unsafe. Value.Addr on the
 // field, then Value.UnsafePointer, then a conversion of the pointer to *T
 // reads a sealed.Value's payload or the Cmd behind a Proc, from any package
-// holding one. No guard test refuses that today; it is a review property.
+// holding one. The guard tests below refuse it; they do not make it
+// impossible.
 //
 // What the guard tests enforce, as the backstop for what the compiler cannot
 // see:
@@ -203,6 +206,11 @@ func envKeyOf(entry string) string {
 //   - no package but this one (and sealed's own test binary) imports sealed,
 //     a subpackage of internal/exec included, which the internal-package
 //     rule would admit (TestOnlyExecImportsSealed);
+//   - the reflect route above: no production file in the module holds an
+//     unsafe.Pointer-typed value without importing "unsafe", or uses
+//     reflect.Value's Addr, UnsafeAddr, UnsafePointer or Pointer (or a
+//     method that reaches them by name), on every guard platform
+//     (TestNoFileReadsMemoryThroughReflect, forgectl#888);
 //   - in this package's production files, sealed.Start is named only here
 //     (TestSealedStartHasOneCaller). A package-level func can be reached only
 //     by naming it, so this check has no interface or method-value gap.

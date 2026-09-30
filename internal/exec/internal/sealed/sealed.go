@@ -14,8 +14,9 @@
 // conversion of that pointer to *T reads it, a closure's captured variables
 // included. So a sealed.Value's payload, and the *exec.Cmd behind a Proc,
 // are readable by any package that holds one and is willing to write that.
-// Keeping such code out is a review and backstop property, not something the
-// compiler enforces (forgectl#854).
+// The compiler does not keep such code out; internal/exec's
+// TestNoFileReadsMemoryThroughReflect refuses it in every production file of
+// the module (forgectl#854, forgectl#888).
 //
 // The one way a payload leaves is Start, which puts it into a child process's
 // path, argv and environment and hands back a *Proc that can only wait for or
@@ -144,8 +145,8 @@ var errNotStarted = errors.New("sealed: process did not start")
 // Interface is refused), and that would reach Path and Args in one line. A
 // captured variable raises that bar but does not remove it: Value.Addr,
 // Value.UnsafePointer and a pointer conversion still read the Cmd, with no
-// unsafe import. Keeping that out of the module is a review property, the
-// same as for Value's payload; see the package doc.
+// unsafe import. Keeping that out of the module is the same backstop as for
+// Value's payload; see the package doc.
 type Proc struct {
 	wait func() error
 	kill func() error
