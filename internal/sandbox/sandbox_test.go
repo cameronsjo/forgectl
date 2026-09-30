@@ -5,6 +5,7 @@
 //   - Sandbox alwaysClone/remote issues `git clone --branch <ref> -- <repo> <dir>`;
 //     clone-without-ref omits --branch.
 //   - RejectOptionLike rejects a leading-'-' repo and ref before any Runner call.
+//   - A failed clone or worktree add removes its temp dir (#707).
 //   - Teardown is idempotent: an empty workspace and an already-removed dir
 //     are both no-ops, and neither issues a Runner call.
 //   - Teardown refuses anything whose RESOLVED base name lacks
@@ -564,7 +565,6 @@ func TestWithinWorkspace_RejectsSymlinkEscape(t *testing.T) {
 // URL carrying a token, and the CommandError renders it in its argv; git's
 // stderr relays the remote's sideband (#658).
 func TestSandbox_CloneFailure_DoesNotEchoURLOrStderr(t *testing.T) {
-	// Sandbox leaves its temp dir behind on a failed clone; keep it in ours.
 	t.Setenv("TMPDIR", t.TempDir())
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		return "", &exec.CommandError{Name: name, Args: args, Stderr: "remote: STDERRMARKER\x1b[2J", ExitCode: 128, Err: errors.New("exit status 128")}
@@ -581,5 +581,37 @@ func TestSandbox_CloneFailure_DoesNotEchoURLOrStderr(t *testing.T) {
 	var cmdErr *exec.CommandError
 	if !errors.As(err, &cmdErr) {
 		t.Fatalf("error %v lost the CommandError from its chain", err)
+	}
+}
+
+// TestSandbox_FailedCheckout_RemovesItsTempDir is #707: a failed clone or
+// worktree add must not leave its os.MkdirTemp directory behind. TMPDIR is a
+// fresh dir per case, so any leftover entry is the leak.
+func TestSandbox_FailedCheckout_RemovesItsTempDir(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		repo        string
+		alwaysClone bool
+	}{
+		{"clone", "https://git.example.test/o/r.git", true},
+		{"worktree add", "/nonexistent/local/repo", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("TMPDIR", tmp)
+			fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				return "", &exec.CommandError{Name: name, Args: args, ExitCode: 128, Err: errors.New("exit status 128")}
+			}}
+			if _, err := Sandbox(context.Background(), fake, tc.repo, "main", tc.alwaysClone); err == nil {
+				t.Fatal("want the checkout failure")
+			}
+			entries, err := os.ReadDir(tmp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
+				t.Errorf("failed checkout left %s behind", e.Name())
+			}
+		})
 	}
 }

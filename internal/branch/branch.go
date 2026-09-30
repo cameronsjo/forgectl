@@ -339,12 +339,18 @@ type originRepo struct {
 	host, owner, repo string
 }
 
-// resolveRemote reads the URL of the remote the branch was just deleted from
-// (`git remote get-url <remoteName>`) and takes host, owner, and repo from it
-// with pr.ParseRemoteURL. The verification must ask about the repository the
-// delete went to: gh's own repo resolution picks a base repo (an upstream,
-// a set default) that need not be that remote, and its host need not be the
-// remote's either (#413).
+// resolveRemote reads the PUSH URL of the remote the branch was just deleted
+// from (`git remote get-url --push <remoteName>`) and takes host, owner, and
+// repo from it with pr.ParseRemoteURL. The verification must ask about the
+// repository the delete went to: gh's own repo resolution picks a base repo
+// (an upstream, a set default) that need not be that remote, and its host
+// need not be the remote's either (#413). Within the remote it is the push
+// URL, not the fetch URL, because `git push --delete` goes there: a remote
+// that fetches from upstream and pushes to a fork (remote.<name>.pushurl)
+// would otherwise have its delete verified against upstream, whose 404 for a
+// branch it never had reads as success (#707). A remote with several push
+// URLs prints one per line, which ParseRemoteURL refuses, so verification
+// reports "cannot verify" rather than checking one of them.
 //
 // The URL is hostile input and can carry a credential: the host must pass
 // the hostname predicate, owner and repo the owner/repo guard, and every
@@ -355,7 +361,7 @@ func (c *Client) resolveRemote(ctx context.Context, remoteName string) (originRe
 	if remoteName == "" || strings.HasPrefix(remoteName, "-") {
 		return originRepo{}, errors.New("remote name is not usable as a git argument")
 	}
-	out, err := c.run.Run(ctx, "git", "remote", "get-url", remoteName)
+	out, err := c.run.Run(ctx, "git", "remote", "get-url", "--push", remoteName)
 	if err != nil {
 		return originRepo{}, errors.New("could not read the remote's URL")
 	}

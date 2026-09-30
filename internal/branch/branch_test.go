@@ -260,8 +260,8 @@ func TestPrune_RemoteDelete_VerifiesOnTheOriginHost(t *testing.T) {
 			}
 			var gotRemote string
 			for _, call := range fake.Calls {
-				if isGetURL(call.Name, call.Args) && len(call.Args) == 3 {
-					gotRemote = call.Args[2]
+				if isGetURL(call.Name, call.Args) {
+					gotRemote = call.Args[len(call.Args)-1]
 				}
 			}
 			if gotRemote != "upstream" {
@@ -746,5 +746,43 @@ func TestPrune_ErrIsTerminalSafeByConstruction(t *testing.T) {
 				t.Fatalf("Err %q does not name the branch in escaped form", msg)
 			}
 		})
+	}
+}
+
+// TestPrune_RemoteDelete_VerifiesAgainstThePushURL is #707: `git push
+// --delete` goes to the remote's push URL, so verification must ask about
+// that repository. A triangular remote fetches from upstream and pushes to a
+// fork; checking the fetch URL asked upstream, whose 404 for a branch it
+// never had read as a confirmed delete while the branch survived on the fork.
+func TestPrune_RemoteDelete_VerifiesAgainstThePushURL(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			switch {
+			case name == "git" && len(args) > 0 && args[0] == "push":
+				return "", nil
+			case isGetURL(name, args) && contains(args, "--push"):
+				return "git@github.com:fork/tools.git", nil
+			case isGetURL(name, args):
+				return "https://github.com/upstream/tools.git", nil
+			case name == "gh" && len(args) > 0 && args[0] == "api":
+				if contains(args, "repos/fork/tools/git/ref/heads/feat/done") {
+					// The delete did not take on the fork: the ref is still there.
+					return `{"ref":"refs/heads/feat/done"}`, nil
+				}
+				return "", &exec.CommandError{Name: "gh", Args: args, Stderr: "HTTP 404: Not Found", Err: errors.New("exit status 1")}
+			}
+			return "", nil
+		},
+	}
+	item := Classification{
+		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Group: SafeToDelete,
+	}
+	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
+	if len(results) != 1 || results[0].Err == nil || results[0].Deleted {
+		t.Fatalf("expected the surviving fork branch to fail verification, got %+v", results)
+	}
+	if !strings.Contains(results[0].Err.Error(), "still exists") {
+		t.Fatalf("Err = %v, want the still-exists verdict from the fork", results[0].Err)
 	}
 }

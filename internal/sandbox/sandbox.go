@@ -66,6 +66,7 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 		// -- ends option parsing so a crafted dir/ref can't inject a flag.
 		if _, err := run.Run(ctx, "git", "-C", repo, "worktree", "add", "--", dir, useRef); err != nil {
 			slog.Error("Failed to create git worktree.", "repo", repo, "sandbox", dir, "ref", useRef, "error", err)
+			discardSandbox(ctx, run, dir)
 			return "", fmt.Errorf("git worktree add: %w", err)
 		}
 	} else {
@@ -79,6 +80,7 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 		}
 		if _, err := run.Run(ctx, "git", args...); err != nil {
 			slog.Error("Failed to clone repo.", "repo", repo, "sandbox", dir, "error", err)
+			discardSandbox(ctx, run, dir)
 			// Categorical (#658): the CommandError renders git's argv, whose
 			// repo URL can carry an https token, and git's stderr, which relays
 			// the remote's sideband text.
@@ -88,6 +90,16 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 
 	slog.Debug("Successfully created workspace sandbox.", "repo", repo, "workspace", dir)
 	return dir, nil
+}
+
+// discardSandbox removes a workspace Sandbox created but could not populate,
+// so a failed clone or worktree add does not leak its temp dir (#707). It goes
+// through Teardown, the one guarded delete sink. A failure here is logged and
+// never replaces the checkout error the caller is about to return.
+func discardSandbox(ctx context.Context, run exec.Runner, dir string) {
+	if err := Teardown(ctx, run, dir); err != nil {
+		slog.Warn("Failed to remove the sandbox directory after a failed checkout.", "sandbox", dir, "error", err)
+	}
 }
 
 // isLocalRepo reports whether repo looks like a filesystem path (vs. an
