@@ -3,22 +3,26 @@
 // carrier under the projects root, classified against the same target list
 // quarantine hides, so the map and the defense cannot drift apart.
 //
-// Nothing here writes, and nothing reads a file's contents. Below the root
-// itself (which is resolved once with filepath.EvalSymlinks and opened with
-// os.OpenRoot), every filesystem call goes through that *os.Root: directory
-// listings are root.Open + Readdirnames (names only, no per-entry stat), and
-// every entry's type and mtime come from root.Lstat. No listing or stat
-// therefore resolves outside the root, even under a racing symlink swap.
-// Symlinks are reported as what they are and never followed.
-// TestScanInjection_MetadataOnlyThroughRoot and
-// TestAuditSource_NoUnconfinedFilesystemCalls pin both halves.
+// Nothing here writes, and nothing reads a file's contents. The root is
+// opened once with os.OpenRoot, and every filesystem call below it goes
+// through that *os.Root (rootops.go): directory listings are an
+// O_DIRECTORY|O_NONBLOCK open plus Readdirnames (names only, no per-entry
+// stat), every entry's type and mtime come from root.Lstat, and the one
+// symlink-following check (is a symlinked carrier prefix a directory?) is
+// root.Stat, which refuses a target outside the root. Symlinks are reported
+// as what they are and never walked. TestScanInjection_MetadataOnlyThroughRoot
+// and TestAuditSource_NoUnconfinedFilesystemCalls pin both halves.
+//
+// Paths are reported in the caller's spelling of the root, made absolute but
+// never symlink-resolved, so Report.Root, every Finding.Path and Repo, and any
+// filepath.Rel a consumer takes against Root agree even when the root sits
+// under a symlinked parent (on macOS, anything under /var or /tmp).
 package audit
 
 import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -87,14 +91,10 @@ var dependencyDirs = map[string]bool{
 	"site-packages":    true,
 }
 
-// Worktrees under a repo's .claude/worktrees/ are not scanned: `.claude/` is
-// one carrier, reported as a unit and never descended, exactly as quarantine
-// hides it as a unit.
-
 // Options configures ScanInjection. Zero caps take the defaults.
 type Options struct {
-	// Root is the directory to scan. It is made absolute and symlink-resolved
-	// before the walk, so every reported path shares that one prefix.
+	// Root is the directory to scan. It is made absolute (not
+	// symlink-resolved), and every reported path shares that one prefix.
 	Root        string
 	Now         time.Time
 	MaxEntries  int
@@ -105,7 +105,7 @@ type Options struct {
 	Targets []string
 }
 
-// Finding is one carrier. Paths are absolute under the resolved root.
+// Finding is one carrier. Paths are absolute, under Report.Root.
 type Finding struct {
 	Path      string
 	Repo      string // nearest enclosing git working tree, "" when none
@@ -133,6 +133,8 @@ type Report struct {
 	CappedBy []string
 	// DepthSkipped counts directories left unwalked at the depth cap.
 	DepthSkipped int
+	// The caps this scan ran with, after defaults.
+	MaxEntries, MaxFindings, MaxDepth int
 }
 
 // Stopped reports whether a cap ended the scan early, as opposed to the
@@ -159,28 +161,6 @@ func (r *Report) capped(name string) {
 // errStop unwinds the walk once a cap is hit.
 var errStop = errors.New("audit: cap reached")
 
-// fsOps is the scanner's whole filesystem surface. ScanInjection binds both
-// to the *os.Root; a test binds a failing or counting double to prove no
-// metadata arrives any other way.
-type fsOps struct {
-	names func(dir string) ([]string, error)
-	lstat func(name string) (fs.FileInfo, error)
-}
-
-func rootOps(r *os.Root) fsOps {
-	return fsOps{
-		names: func(dir string) ([]string, error) {
-			f, err := r.Open(dir)
-			if err != nil {
-				return nil, err
-			}
-			defer func() { _ = f.Close() }()
-			return f.Readdirnames(-1)
-		},
-		lstat: r.Lstat,
-	}
-}
-
 type scanner struct {
 	ops     fsOps
 	root    string
@@ -197,21 +177,17 @@ func ScanInjection(opts Options) (Report, error) {
 	if err != nil {
 		return Report{}, fmt.Errorf("resolve audit root %s: %w", termsafe.QuotePath(opts.Root), termsafe.Error(err))
 	}
-	resolved, err := filepath.EvalSymlinks(abs)
+	ops, closeRoot, err := openRootOps(abs)
 	if err != nil {
-		return Report{}, fmt.Errorf("resolve audit root %s: %w", termsafe.QuotePath(abs), termsafe.Error(err))
+		return Report{}, err
 	}
-	r, err := os.OpenRoot(resolved)
-	if err != nil {
-		return Report{}, fmt.Errorf("open audit root %s: %w", termsafe.QuotePath(resolved), termsafe.Error(err))
-	}
-	defer func() { _ = r.Close() }()
-	return scanWith(resolved, rootOps(r), opts)
+	defer closeRoot()
+	return scanWith(abs, ops, opts)
 }
 
-// scanWith is ScanInjection's walk over an already-resolved root and an
-// explicit filesystem surface.
-func scanWith(resolved string, ops fsOps, opts Options) (Report, error) {
+// scanWith is ScanInjection's walk over an opened root, reported under the
+// display prefix root, through an explicit filesystem surface.
+func scanWith(root string, ops fsOps, opts Options) (Report, error) {
 	if opts.MaxEntries <= 0 {
 		opts.MaxEntries = DefaultMaxEntries
 	}
@@ -233,8 +209,11 @@ func scanWith(resolved string, ops fsOps, opts Options) (Report, error) {
 		return Report{}, err
 	}
 
-	report := Report{Root: resolved, Findings: []Finding{}, CappedBy: []string{}}
-	s := &scanner{ops: ops, root: resolved, matcher: matcher, opts: opts, report: &report}
+	report := Report{
+		Root: root, Findings: []Finding{}, CappedBy: []string{},
+		MaxEntries: opts.MaxEntries, MaxFindings: opts.MaxFindings, MaxDepth: opts.MaxDepth,
+	}
+	s := &scanner{ops: ops, root: root, matcher: matcher, opts: opts, report: &report}
 	if err := s.walk(".", nil, "", false, 0); err != nil && !errors.Is(err, errStop) {
 		return Report{}, err
 	}
@@ -277,14 +256,15 @@ func (s *scanner) walk(dir string, segs []string, repo string, vendored bool, de
 		rel := path.Join(dir, name)
 		info, err := s.ops.lstat(rel)
 		if err != nil {
-			continue // vanished or unreadable mid-walk: nothing to classify
+			s.report.Unreadable++ // vanished or unreadable mid-walk: counted, not classified
+			continue
 		}
 		mode := info.Mode()
 		childSegs := append(append(make([]string, 0, len(segs)+1), segs...), name)
 		carrier, anchor, ok := s.classify(childSegs, repo)
 		prefix := false
 		if !ok && mode&fs.ModeSymlink != 0 {
-			carrier, anchor, ok = s.classifyPrefix(childSegs, repo)
+			carrier, anchor, ok = s.classifyPrefix(rel, childSegs, repo)
 			prefix = ok
 		}
 		if ok {
@@ -294,7 +274,9 @@ func (s *scanner) walk(dir string, segs []string, repo string, vendored bool, de
 			}
 			s.report.Findings = append(s.report.Findings, s.finding(info, childSegs, carrier, anchor, repo, vendored, prefix))
 			// A matched directory is one carrier: it is reported as a unit and
-			// never descended, as quarantine hides it as a unit.
+			// never descended, as quarantine hides it as a unit. That includes
+			// a repo's .claude/worktrees/: worktrees parked there are part of
+			// the .claude carrier and are not scanned separately.
 			continue
 		}
 		if !mode.IsDir() { // Lstat: a symlink is never IsDir, so it is never followed
@@ -333,9 +315,28 @@ func (s *scanner) classify(segs []string, repo string) (quarantine.Carrier, stri
 }
 
 // classifyPrefix is classify for a symlink that is not itself a carrier but
-// whose path is a proper prefix of a multi-segment entry.
-func (s *scanner) classifyPrefix(segs []string, repo string) (quarantine.Carrier, string, bool) {
-	return s.pick(segs, repo, s.matcher.MatchPrefix)
+// whose path is a proper prefix of a multi-segment entry. It reports the link
+// only where quarantine would look behind it, and only when it can be a
+// directory:
+//   - the prefix must be anchored at the enclosing repo root, since every
+//     multi-segment entry is root-only (`pkg/.hidden` is not a position);
+//   - root.Stat must not show a non-directory or a missing target (`.env`,
+//     `.eslintrc`, a dangling link). A target outside the root cannot be
+//     stat'd without leaving it, so it stays reported: that is the escaping
+//     link ExpandTargets refuses.
+func (s *scanner) classifyPrefix(rel string, segs []string, repo string) (quarantine.Carrier, string, bool) {
+	c, anchor, ok := s.pick(segs, repo, s.matcher.MatchPrefix)
+	if !ok || repo == "" || anchor != repo {
+		return quarantine.Carrier{}, "", false
+	}
+	info, err := s.ops.stat(rel)
+	switch {
+	case err == nil && !info.IsDir():
+		return quarantine.Carrier{}, "", false
+	case err != nil && errors.Is(err, fs.ErrNotExist):
+		return quarantine.Carrier{}, "", false
+	}
+	return c, anchor, true
 }
 
 func (s *scanner) pick(segs []string, repo string, match func([]string) (quarantine.Carrier, bool)) (quarantine.Carrier, string, bool) {

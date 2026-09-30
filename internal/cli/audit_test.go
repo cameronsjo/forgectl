@@ -58,7 +58,7 @@ func TestAuditInjection_JSONShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(runAuditInjection(t, root, "--json")), &got); err != nil {
 		t.Fatalf("stdout is not one JSON object: %v", err)
 	}
-	if keys := auditSortedKeys(got); keys != "capped_by,carriers,entries_scanned,repos_scanned,root,truncated,unreadable_dirs" {
+	if keys := auditSortedKeys(got); keys != "capped_by,carriers,depth_skipped,entries_scanned,repos_scanned,root,truncated,unreadable_dirs" {
 		t.Errorf("report keys = %s", keys)
 	}
 	carriers, ok := got["carriers"].([]any)
@@ -69,13 +69,10 @@ func TestAuditInjection_JSONShape(t *testing.T) {
 	if keys := auditSortedKeys(row); keys != "anomalies,modified,path,repo,target,type" {
 		t.Errorf("carrier keys = %s", keys)
 	}
-	resolvedRepo, err := filepath.EvalSymlinks(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
+	wantRepo := repo // reported in the caller's spelling, never symlink-resolved
 	wantRow := map[string]any{
-		"path":     filepath.Join(resolvedRepo, "AGENTS.md"),
-		"repo":     resolvedRepo,
+		"path":     filepath.Join(wantRepo, "AGENTS.md"),
+		"repo":     wantRepo,
 		"target":   "AGENTS.md",
 		"type":     "file",
 		"modified": "2026-01-02T03:04:05Z",
@@ -143,11 +140,7 @@ func TestAuditInjection_TextGroupsEachRepoOnce(t *testing.T) {
 		}
 	}
 	out := runAuditInjection(t, root)
-	resolved, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parent := filepath.Join(resolved, "p")
+	parent := filepath.Join(root, "p")
 	headers := 0
 	for _, line := range strings.Split(out, "\n") {
 		if line == parent {
@@ -205,20 +198,37 @@ func TestAuditInjection_TextCapsLongPaths(t *testing.T) {
 // TestAuditInjection_TruncationNoteNamesTheCap: the note names the cap that
 // fired, and says "stopped" only for a cap that stopped the scan.
 func TestAuditInjection_TruncationNoteNamesTheCap(t *testing.T) {
+	// Non-default caps: the notes must print the caps the scan ran with.
+	caps := audit.Report{Truncated: true, MaxEntries: 7, MaxFindings: 8, MaxDepth: 9}
 	var depth bytes.Buffer
-	writeAuditInjectionText(&depth, audit.Report{Truncated: true, CappedBy: []string{audit.CapDepth}, DepthSkipped: 2})
-	if !strings.Contains(depth.String(), "2 directories below the 32-level depth cap were not scanned") || strings.Contains(depth.String(), "stopped") {
+	r := caps
+	r.CappedBy, r.DepthSkipped = []string{audit.CapDepth}, 2
+	writeAuditInjectionText(&depth, r)
+	if !strings.Contains(depth.String(), "2 directories below the 9-level depth cap were not scanned") || strings.Contains(depth.String(), "stopped") {
 		t.Errorf("depth-cap note:\n%s", depth.String())
 	}
 	var entries bytes.Buffer
-	writeAuditInjectionText(&entries, audit.Report{Truncated: true, CappedBy: []string{audit.CapEntries}})
-	if !strings.Contains(entries.String(), "stopped at the 1000000-entry cap") {
+	r = caps
+	r.CappedBy = []string{audit.CapEntries}
+	writeAuditInjectionText(&entries, r)
+	if !strings.Contains(entries.String(), "stopped at the 7-entry cap") {
 		t.Errorf("entries-cap note:\n%s", entries.String())
 	}
 	var findings bytes.Buffer
-	writeAuditInjectionText(&findings, audit.Report{Truncated: true, CappedBy: []string{audit.CapFindings}})
-	if !strings.Contains(findings.String(), "stopped at the 10000-carrier cap") {
+	r = caps
+	r.CappedBy = []string{audit.CapFindings}
+	writeAuditInjectionText(&findings, r)
+	if !strings.Contains(findings.String(), "stopped at the 8-carrier cap") {
 		t.Errorf("findings-cap note:\n%s", findings.String())
+	}
+	var js bytes.Buffer
+	r = caps
+	r.CappedBy, r.DepthSkipped = []string{audit.CapDepth}, 3
+	if err := writeAuditInjectionJSON(&js, r); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(js.String(), `"depth_skipped": 3`) {
+		t.Errorf("--json lacks depth_skipped:\n%s", js.String())
 	}
 }
 

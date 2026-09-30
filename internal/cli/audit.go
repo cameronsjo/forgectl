@@ -70,7 +70,7 @@ Each carrier carries anomaly flags:
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false,
-		`emit {"root","repos_scanned","entries_scanned","unreadable_dirs","truncated","capped_by","carriers":[{"path","repo","target","type","modified","anomalies"}]} to stdout`)
+		`emit {"root","repos_scanned","entries_scanned","unreadable_dirs","truncated","capped_by","depth_skipped","carriers":[{"path","repo","target","type","modified","anomalies"}]} to stdout`)
 	return cmd
 }
 
@@ -83,6 +83,7 @@ type auditInjectionJSON struct {
 	UnreadableDirs int                   `json:"unreadable_dirs"`
 	Truncated      bool                  `json:"truncated"`
 	CappedBy       []string              `json:"capped_by"`
+	DepthSkipped   int                   `json:"depth_skipped"`
 	Carriers       []auditCarrierRowJSON `json:"carriers"`
 }
 
@@ -103,6 +104,7 @@ func writeAuditInjectionJSON(w io.Writer, r audit.Report) error {
 		UnreadableDirs: r.Unreadable,
 		Truncated:      r.Truncated,
 		CappedBy:       r.CappedBy,
+		DepthSkipped:   r.DepthSkipped,
 		Carriers:       make([]auditCarrierRowJSON, 0, len(r.Findings)),
 	}
 	if out.CappedBy == nil {
@@ -170,11 +172,11 @@ func writeAuditInjectionText(w io.Writer, r audit.Report) {
 	for _, c := range r.CappedBy {
 		switch c {
 		case audit.CapEntries:
-			_, _ = fmt.Fprintf(w, "note: the scan stopped at the %d-entry cap, so this list is incomplete\n", audit.DefaultMaxEntries)
+			_, _ = fmt.Fprintf(w, "note: the scan stopped at the %d-entry cap, so this list is incomplete\n", r.MaxEntries)
 		case audit.CapFindings:
-			_, _ = fmt.Fprintf(w, "note: the scan stopped at the %d-carrier cap, so this list is incomplete\n", audit.DefaultMaxFindings)
+			_, _ = fmt.Fprintf(w, "note: the scan stopped at the %d-carrier cap, so this list is incomplete\n", r.MaxFindings)
 		case audit.CapDepth:
-			_, _ = fmt.Fprintf(w, "note: %d directories below the %d-level depth cap were not scanned\n", r.DepthSkipped, audit.DefaultMaxDepth)
+			_, _ = fmt.Fprintf(w, "note: %d directories below the %d-level depth cap were not scanned\n", r.DepthSkipped, r.MaxDepth)
 		}
 	}
 }

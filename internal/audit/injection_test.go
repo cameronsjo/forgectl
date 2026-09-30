@@ -2,13 +2,17 @@ package audit
 
 import (
 	"errors"
+	"fmt"
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -199,9 +203,10 @@ func TestScanInjection_NeverFollowsSymlinks(t *testing.T) {
 	}
 }
 
-// TestScanInjection_SymlinkedRootIsResolved: a projects root reached
-// through a symlink is walked, and findings carry the resolved prefix.
-func TestScanInjection_SymlinkedRootIsResolved(t *testing.T) {
+// TestScanInjection_SymlinkedRootKeepsCallerSpelling: a projects root that
+// is itself a symlink is walked (os.OpenRoot follows the root path), and the
+// report keeps the caller's spelling of it.
+func TestScanInjection_SymlinkedRootKeepsCallerSpelling(t *testing.T) {
 	base := t.TempDir()
 	realDir := filepath.Join(base, "real")
 	repo := mkrepo(t, realDir, "r")
@@ -211,12 +216,8 @@ func TestScanInjection_SymlinkedRootIsResolved(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := scan(t, Options{Root: link})
-	resolved, err := filepath.EvalSymlinks(realDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.Root != resolved || len(r.Findings) != 1 {
-		t.Fatalf("root=%q findings=%d, want root %q and 1 finding", r.Root, len(r.Findings), resolved)
+	if r.Root != link || len(r.Findings) != 1 || r.Findings[0].Path != filepath.Join(link, "r", "AGENTS.md") {
+		t.Fatalf("root=%q findings=%v, want root %q and one finding under it", r.Root, r.Findings, link)
 	}
 }
 
@@ -397,6 +398,11 @@ func TestScanInjection_MetadataOnlyThroughRoot(t *testing.T) {
 	if len(rep.Findings) != 0 || rep.Entries == 0 {
 		t.Errorf("with every lstat failing: findings=%d entries=%d, want 0 and >0 (metadata reached the scan another way)", len(rep.Findings), rep.Entries)
 	}
+	// Only the root is listed (r cannot be stat'd, so it is never walked):
+	// entries are just "r", and its failed lstat is counted.
+	if rep.Unreadable != rep.Entries {
+		t.Errorf("with every lstat failing: unreadable=%d entries=%d, want every failed lstat counted", rep.Unreadable, rep.Entries)
+	}
 
 	ops = rootOps(r)
 	calls := 0
@@ -455,19 +461,72 @@ func TestScanInjection_UnreadableCounted(t *testing.T) {
 	}
 }
 
+// unconfinedUses type-checks files and returns every use of a filesystem
+// function that could resolve outside the os.Root, outside the allowlisted
+// rootops files. It resolves identifiers through go/types (Info.Uses), so an
+// aliased import, a method value, or a syscall spelling is caught, not only
+// the naive `os.Lstat(` text:
+//   - any package-level function of os, syscall or io/fs;
+//   - path/filepath's EvalSymlinks, Glob, Walk and WalkDir;
+//   - any method of an os type (*os.File, *os.Root);
+//   - the io/fs interface methods that stat, list or open (DirEntry.Info,
+//     DirEntry.Type, FS.Open, ReadDir, ReadFile, Stat, Glob, Sub).
+//
+// It also returns how many allowlisted os uses it resolved, so a caller can
+// prove the check was not vacuous (an importer failure would resolve none).
+func unconfinedUses(t *testing.T, fset *token.FileSet, files []*ast.File) (bad []string, allowedOS int) {
+	t.Helper()
+	info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
+	conf := types.Config{Importer: importer.Default(), Error: func(error) {}}
+	_, _ = conf.Check("audit", fset, files, info) // internal imports may not resolve; stdlib uses still do
+	fsMethods := map[string]bool{"Info": true, "Type": true, "Open": true, "ReadDir": true, "ReadFile": true, "Stat": true, "Glob": true, "Sub": true}
+	filepathFuncs := map[string]bool{"EvalSymlinks": true, "Glob": true, "Walk": true, "WalkDir": true}
+	for id, obj := range info.Uses {
+		fn, ok := obj.(*types.Func)
+		if !ok || fn.Pkg() == nil {
+			continue
+		}
+		pkg := fn.Pkg().Path()
+		sig, _ := fn.Type().(*types.Signature)
+		method := sig != nil && sig.Recv() != nil
+		var banned bool
+		switch {
+		case !method && (pkg == "os" || pkg == "syscall" || pkg == "io/fs"):
+			banned = true
+		case !method && pkg == "path/filepath":
+			banned = filepathFuncs[fn.Name()]
+		case method && pkg == "os":
+			banned = true
+		case method && pkg == "io/fs":
+			banned = fsMethods[fn.Name()]
+		}
+		if !banned {
+			continue
+		}
+		pos := fset.Position(id.Pos())
+		base := filepath.Base(pos.Filename)
+		if strings.HasPrefix(base, "rootops") && !strings.HasSuffix(base, "_test.go") {
+			if pkg == "os" {
+				allowedOS++
+			}
+			continue
+		}
+		bad = append(bad, fmt.Sprintf("%s: %s.%s", pos, pkg, fn.Name()))
+	}
+	sort.Strings(bad)
+	return bad, allowedOS
+}
+
 // TestAuditSource_NoUnconfinedFilesystemCalls is the static half of the
-// confinement pin: the package's shipped source makes no filesystem call
-// that could resolve outside the os.Root. Only os.OpenRoot (on the resolved
-// root), the root's own methods, and a root-opened file's Readdirnames/Close
-// are allowed; any DirEntry.Info/Type, any os/fs stat or listing, and any
-// filepath walk is refused.
+// confinement pin: outside rootops*.go, the package's shipped source makes no
+// filesystem call that could resolve outside the os.Root.
 func TestAuditSource_NoUnconfinedFilesystemCalls(t *testing.T) {
 	fset := token.NewFileSet()
 	dirents, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatal(err)
 	}
-	files := map[string]*ast.File{}
+	var files []*ast.File
 	for _, d := range dirents {
 		if !strings.HasSuffix(d.Name(), ".go") || strings.HasSuffix(d.Name(), "_test.go") {
 			continue
@@ -476,42 +535,68 @@ func TestAuditSource_NoUnconfinedFilesystemCalls(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		files[d.Name()] = file
+		// Build constraints are not evaluated here, so only this platform's
+		// dirOpenFlags file may join the check or the two would collide.
+		if (strings.HasSuffix(d.Name(), "_unix.go") || strings.HasSuffix(d.Name(), "_other.go")) && d.Name() != dirOpenFlagsFile() {
+			continue
+		}
+		files = append(files, file)
 	}
-	banned := map[string]map[string]bool{
-		"os":       {"Lstat": true, "Stat": true, "Open": true, "OpenFile": true, "ReadDir": true, "ReadFile": true, "Readlink": true, "DirFS": true},
-		"fs":       {"ReadDir": true, "Stat": true, "ReadFile": true, "WalkDir": true, "Glob": true, "Sub": true, "Lstat": true},
-		"filepath": {"Walk": true, "WalkDir": true, "Glob": true},
+	bad, allowedOS := unconfinedUses(t, fset, files)
+	for _, b := range bad {
+		t.Errorf("unconfined filesystem call outside rootops: %s", b)
 	}
-	bannedMethods := map[string]bool{"Info": true, "Type": true, "ReadDir": true, "Readdir": true, "Stat": true}
-	checked := 0
-	for name, file := range files {
-		ast.Inspect(file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			checked++
-			if id, ok := sel.X.(*ast.Ident); ok {
-				if set, ok := banned[id.Name]; ok {
-					if set[sel.Sel.Name] {
-						t.Errorf("%s: %s.%s escapes the os.Root", fset.Position(call.Pos()), id.Name, sel.Sel.Name)
-					}
-					return true
-				}
-			}
-			if bannedMethods[sel.Sel.Name] {
-				t.Errorf("%s: .%s() reads metadata outside the os.Root seam (%s)", fset.Position(call.Pos()), sel.Sel.Name, name)
-			}
-			return true
-		})
+	if allowedOS == 0 {
+		t.Fatal("resolved no os use in rootops.go; the type check is vacuous")
 	}
-	if checked == 0 {
-		t.Fatal("no calls inspected; the check is vacuous")
+}
+
+func dirOpenFlagsFile() string {
+	if runtime.GOOS == "windows" || runtime.GOOS == "plan9" || runtime.GOOS == "js" || runtime.GOOS == "wasip1" {
+		return "rootops_other.go"
+	}
+	return "rootops_unix.go"
+}
+
+// TestAuditSource_ProbesGoRed proves the static pin sees through each evasion
+// the naive text check missed. Every probe must be refused, and the same
+// call in an allowlisted rootops file must not be.
+func TestAuditSource_ProbesGoRed(t *testing.T) {
+	probes := map[string]string{
+		"aliased import": `package audit
+import xos "os"
+func f() { _, _ = xos.Lstat("x") }`,
+		"method value": `package audit
+import "io/fs"
+func f(e fs.DirEntry) { g := e.Info; _ = g }`,
+		"EvalSymlinks": `package audit
+import "path/filepath"
+func f() { _, _ = filepath.EvalSymlinks("x") }`,
+		"os.Root method outside rootops": `package audit
+import "os"
+func f(r *os.Root) { _, _ = r.Lstat("x") }`,
+	}
+	if runtime.GOOS != "windows" {
+		probes["syscall.Lstat"] = `package audit
+import "syscall"
+func f() { var st syscall.Stat_t; _ = syscall.Lstat("x", &st) }`
+	}
+	check := func(filename, src string) []string {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, filename, src, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", filename, err)
+		}
+		bad, _ := unconfinedUses(t, fset, []*ast.File{file})
+		return bad
+	}
+	for name, src := range probes {
+		if bad := check("probe.go", src); len(bad) == 0 {
+			t.Errorf("probe %q was not refused", name)
+		}
+		if bad := check("rootops.go", src); len(bad) != 0 {
+			t.Errorf("probe %q refused even in the allowlisted rootops.go: %v", name, bad)
+		}
 	}
 }
 
@@ -579,5 +664,116 @@ func TestScanInjection_SymlinkedCarrierDirsMatchQuarantine(t *testing.T) {
 				t.Errorf("quarantine neither listed nor refused a carrier behind %s; the fixture is not exercising the case", c.link)
 			}
 		})
+	}
+}
+
+// TestScanInjection_RootUnderSymlinkedParent reproduces the darwin CI
+// failure on any platform: the projects root sits under a symlinked parent
+// (on macOS every t.TempDir does, since /var -> /private/var). The report
+// must use one spelling of the root throughout, the one the caller gave, so
+// Root, every finding's Path and Repo, and any Rel a consumer takes against
+// Root agree.
+func TestScanInjection_RootUnderSymlinkedParent(t *testing.T) {
+	base := t.TempDir()
+	realParent := filepath.Join(base, "real")
+	if err := os.MkdirAll(realParent, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	linkParent := filepath.Join(base, "link")
+	if err := os.Symlink(realParent, linkParent); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(linkParent, "projects")
+	repo := mkrepo(t, root, "r")
+	mkfile(t, repo, "CLAUDE.md")
+	mkfile(t, repo, "sub/AGENTS.md")
+
+	r := scan(t, Options{Root: root})
+	if r.Root != root {
+		t.Errorf("Root = %q, want the caller's spelling %q", r.Root, root)
+	}
+	got := byPath(r)
+	for _, want := range []string{filepath.Join(repo, "CLAUDE.md"), filepath.Join(repo, "sub", "AGENTS.md")} {
+		f, ok := got[want]
+		if !ok {
+			t.Errorf("missing %q; got %v", want, r.Findings)
+			continue
+		}
+		if f.Repo != repo {
+			t.Errorf("%q: Repo = %q, want %q", want, f.Repo, repo)
+		}
+		if rel, err := filepath.Rel(r.Root, f.Path); err != nil || strings.HasPrefix(rel, "..") {
+			t.Errorf("%q is not under Root %q (rel %q)", f.Path, r.Root, rel)
+		}
+	}
+}
+
+// TestScanInjection_SymlinkPrefixNeedsADirAtTheRoot pins the MatchPrefix
+// guards: a dot-named symlink is reported as a possible carrier directory only
+// when it sits at a repo root and root.Stat does not show a file or a missing
+// target. `.env` and `.eslintrc` (links to files), a dangling `.gemini`, and
+// `pkg/.hidden` (below the root) are not carriers; `.cursorx` to a directory
+// at the root is.
+func TestScanInjection_SymlinkPrefixNeedsADirAtTheRoot(t *testing.T) {
+	root := t.TempDir()
+	repo := mkrepo(t, root, "r")
+	mkfile(t, repo, "real.env")
+	mkfile(t, repo, "cfgdir/keep")
+	// Relative targets, as an in-repo link is written: os.Root refuses to
+	// resolve an absolute link target, so such a link stays reported as
+	// unverifiable, like an escaping one.
+	links := map[string]string{
+		".env":        "real.env",
+		".eslintrc":   "real.env",
+		".gemini":     "missing",
+		"pkg/.hidden": "../cfgdir",
+		".cursorx":    "cfgdir",
+	}
+	for name, target := range links {
+		p := filepath.Join(repo, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := byPath(scan(t, Options{Root: root}))
+	for _, name := range []string{".env", ".eslintrc", ".gemini", "pkg/.hidden"} {
+		if f, ok := got[filepath.Join(repo, filepath.FromSlash(name))]; ok {
+			t.Errorf("%s reported as %+v; it cannot hold a carrier", name, f)
+		}
+	}
+	if f, ok := got[filepath.Join(repo, ".cursorx")]; !ok || f.Target != ".*/mcp.json" {
+		t.Errorf(".cursorx -> directory at the repo root: got %+v, want a .*/mcp.json symlink finding", f)
+	}
+}
+
+// TestScanInjection_LstatFailureCounted: an entry whose lstat fails is
+// counted in Unreadable, not silently dropped.
+func TestScanInjection_LstatFailureCounted(t *testing.T) {
+	root := t.TempDir()
+	repo := mkrepo(t, root, "r")
+	mkfile(t, repo, "gone/AGENTS.md")
+	mkfile(t, repo, "here/AGENTS.md")
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	ops := rootOps(r)
+	lstat := ops.lstat
+	ops.lstat = func(name string) (fs.FileInfo, error) {
+		if name == "r/gone" {
+			return nil, fs.ErrNotExist
+		}
+		return lstat(name)
+	}
+	rep, err := scanWith(root, ops, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Unreadable != 1 || len(rep.Findings) != 1 {
+		t.Errorf("unreadable=%d findings=%d, want 1/1", rep.Unreadable, len(rep.Findings))
 	}
 }
