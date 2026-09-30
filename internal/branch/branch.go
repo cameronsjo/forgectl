@@ -416,14 +416,15 @@ func (c *Client) verifyRemoteDeleted(ctx context.Context, origin originRepo, nam
 }
 
 // isGhNotFound reports whether a failed `gh api` call was an HTTP 404. It
-// reads gh's own stderr ("gh: Not Found (HTTP 404)"), not err.Error(): that
-// text also carries the argv, whose ref path holds the branch name, so a
-// branch named fix-404 whose verification failed for another reason read as
-// deleted (#749). gh exits 1 for every HTTP error, so the exit code cannot
-// tell a 404 apart. An error that is not a *exec.CommandError is not a 404.
+// reads gh's own stderr for its "(HTTP 404)" status suffix ("gh: Not Found
+// (HTTP 404)"), not err.Error(): that text also carries the argv, whose ref
+// path holds the branch name, so a branch named fix-404 whose verification
+// failed for another reason read as deleted (#749). gh exits 1 for every
+// HTTP error, so the exit code cannot tell a 404 apart. An error that is not
+// a *exec.CommandError is not a 404.
 func isGhNotFound(err error) bool {
 	var cmdErr *exec.CommandError
-	return errors.As(err, &cmdErr) && strings.Contains(cmdErr.Stderr, "HTTP 404")
+	return errors.As(err, &cmdErr) && strings.Contains(cmdErr.Stderr, "(HTTP 404)")
 }
 
 // localRow is one parsed `git for-each-ref refs/heads` row.
