@@ -21,6 +21,13 @@ import (
 // up to 500 ms on top for that. It is a var only so a test can shrink it.
 var lockedTmuxBudget = 3 * time.Second
 
+// budgetTimeout derives one bounded unit's context. Production is exactly
+// context.WithTimeout on the wall clock. It is a var only so a test can drive
+// the deadline from a test clock, which makes "slow, but inside the bound"
+// exact instead of a race against a loaded machine (forgectl#757). Tests
+// overriding it must restore it and must not run in parallel.
+var budgetTimeout = context.WithTimeout
+
 // tmuxBudget hands every bounded unit of tmux work — one teardown's
 // resolve-and-kill, one liveness or occupancy read — its OWN full
 // lockedTmuxBudget deadline, and remembers whether any of them was cut off.
@@ -50,7 +57,7 @@ func newTmuxBudget() *tmuxBudget { return &tmuxBudget{} }
 // func must be called once the tmux work is over: it records whether the
 // deadline (or the caller) cut the work off, and releases the context.
 func (b *tmuxBudget) bound(ctx context.Context) (context.Context, func()) {
-	bctx, cancel := context.WithTimeout(ctx, lockedTmuxBudget)
+	bctx, cancel := budgetTimeout(ctx, lockedTmuxBudget)
 	return bctx, func() {
 		if bctx.Err() != nil {
 			b.cutOff = true

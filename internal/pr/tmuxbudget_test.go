@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -256,19 +257,89 @@ func TestCleanup_HungTmuxSharesOneBudgetAndSkipsTheRest(t *testing.T) {
 	}
 }
 
-// slowTmux answers every tmux call correctly, but only after delay — a
-// loaded machine, not a hung server. Everything else delegates.
+// testClock is a manual clock behind budgetTimeout. A bounded context expires
+// only when Advance moves the clock to or past its deadline, never on wall
+// time, and Advance cancels every context it expires before returning. So a
+// caller that checks ctx.Err() right after advancing sees an exact verdict,
+// however loaded the machine is (forgectl#757).
+type testClock struct {
+	mu      sync.Mutex
+	now     time.Duration
+	nextID  int
+	pending map[int]clockDeadline
+}
+
+type clockDeadline struct {
+	at     time.Duration
+	expire context.CancelCauseFunc
+}
+
+// useTestClock routes every tmux budget through a fresh testClock for the rest
+// of the test. Tests using it must not run in parallel.
+func useTestClock(t *testing.T) *testClock {
+	t.Helper()
+	clk := &testClock{pending: make(map[int]clockDeadline)}
+	old := budgetTimeout
+	budgetTimeout = clk.withTimeout
+	t.Cleanup(func() { budgetTimeout = old })
+	return clk
+}
+
+func (c *testClock) withTimeout(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancelCause(parent)
+	c.mu.Lock()
+	id := c.nextID
+	c.nextID++
+	c.pending[id] = clockDeadline{at: c.now + d, expire: cancel}
+	c.mu.Unlock()
+	return ctx, func() {
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+		cancel(context.Canceled)
+	}
+}
+
+// Advance moves the clock forward by d and expires every deadline it reaches.
+func (c *testClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.now += d
+	var due []context.CancelCauseFunc
+	for id, dl := range c.pending {
+		if dl.at <= c.now {
+			due = append(due, dl.expire)
+			delete(c.pending, id)
+		}
+	}
+	c.mu.Unlock()
+	for _, expire := range due {
+		expire(context.DeadlineExceeded)
+	}
+}
+
+// Now reports how far the clock has been advanced.
+func (c *testClock) Now() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+// slowTmux answers every tmux call correctly, but only after delay on the
+// test clock: a loaded machine, not a hung server. The delay is spent by
+// advancing the clock before the call answers, so a call that pushes its unit
+// past the bound sees its context expired, exactly as a real deadline would
+// cut it off. No wall time passes. Everything else delegates.
 type slowTmux struct {
 	*exec.FakeRunner
+	clock *testClock
 	delay time.Duration
 }
 
 func (s *slowTmux) Run(ctx context.Context, name string, args ...string) (string, error) {
 	if name == "tmux" {
-		select {
-		case <-time.After(s.delay):
-		case <-ctx.Done():
-			return "", ctx.Err()
+		s.clock.Advance(s.delay)
+		if err := ctx.Err(); err != nil {
+			return "", err
 		}
 	}
 	return s.FakeRunner.Run(ctx, name, args...)
@@ -279,14 +350,24 @@ func (s *slowTmux) Run(ctx context.Context, name string, args ...string) (string
 // time. Every call here answers well inside the bound, but the sweep's tmux
 // time adds up to several bounds, so a budget that accumulated would run dry
 // partway, park the next session as "unresponsive", and skip the rest.
+//
+// The delays run on a test clock, not the wall clock, so "slow but inside the
+// bound" is exact: before forgectl#757 this slept for real and a loaded runner
+// could stretch one unit past the bound.
+//
+// Mutations that turn it red: make tmuxBudget.bound derive ONE deadline for
+// the whole sweep and hand it to every unit (the accumulating budget), or set
+// cutOff whether or not the unit's context ended.
 func TestCleanup_ASlowButHealthyTmuxDiscardsEverySession(t *testing.T) {
-	shrinkLockedTmuxBudget(t, 300*time.Millisecond)
+	const bound = 300 * time.Millisecond
+	shrinkLockedTmuxBudget(t, bound)
+	clk := useTestClock(t)
 	const n = 8
 	names := make([]string, 0, n)
 	for i := 0; i < n; i++ {
 		names = append(names, mustWindowName(t, Ref{Owner: "o", Repo: "r", Number: 41 + i}))
 	}
-	s := &slowTmux{FakeRunner: reviewServer(names...), delay: 20 * time.Millisecond}
+	s := &slowTmux{FakeRunner: reviewServer(names...), clock: clk, delay: bound / 10}
 	c := New(s, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
 		WithApprover(func(string) (bool, error) { return false, nil }),
 		WithTTYCheck(func() bool { return false }))
@@ -304,6 +385,12 @@ func TestCleanup_ASlowButHealthyTmuxDiscardsEverySession(t *testing.T) {
 		if _, serr := os.Stat(path); !os.IsNotExist(serr) {
 			t.Errorf("%s survived a healthy sweep: %v", path, serr)
 		}
+	}
+	// The premise the test rests on: the sweep's tmux time adds up to several
+	// bounds, so an accumulating budget could not have passed it.
+	if spent := clk.Now(); spent <= 2*bound {
+		t.Errorf("the sweep spent %v of tmux time; want more than two bounds (%v) or the test cannot tell a per-unit budget from an accumulating one",
+			spent, 2*bound)
 	}
 }
 

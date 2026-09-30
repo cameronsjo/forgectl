@@ -66,7 +66,16 @@ func openRepairLogNoFollow(path string, flag int, perm os.FileMode) (*os.File, e
 // A symlink comes back as a *os.PathError wrapping ELOOP, and the caller still
 // owes an Fstat regular-file check on the returned handle.
 func openNoFollowNonblock(path string, flag int, perm os.FileMode) (*os.File, error) {
-	fd, err := unix.Open(path, flag|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, uint32(perm.Perm()))
+	return openNonblock(path, flag|unix.O_NOFOLLOW, perm)
+}
+
+// openNonblock is openNoFollowNonblock without O_NOFOLLOW: a symlink at the
+// final component is followed. It is for a file the user may legitimately
+// symlink, the pr reviewed-state store under the config dir (forgectl#765).
+// The open itself cannot block on a FIFO, and the caller still owes an Fstat
+// regular-file check on the returned handle.
+func openNonblock(path string, flag int, perm os.FileMode) (*os.File, error) {
+	fd, err := unix.Open(path, flag|unix.O_NONBLOCK|unix.O_CLOEXEC, uint32(perm.Perm()))
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
