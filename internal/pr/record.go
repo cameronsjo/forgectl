@@ -95,7 +95,13 @@ var errRecordNotRegular = errors.New("not a regular file")
 // clears O_NONBLOCK before returning), and the descriptor is Fstat'ed and
 // refused unless it is a regular file. The read stays size-bounded by
 // readBreadcrumbBytes.
-func (osRecordFS) ReadFile(path string) ([]byte, error) {
+func (osRecordFS) ReadFile(path string) ([]byte, error) { return readRecordFile(path) }
+
+// readRecordFile is the ONE way this package reads a session record's bytes:
+// the record loader (loadBreadcrumbRecord), the teardown member resolver, and
+// the compare-and-write re-read all come through it. See osRecordFS.ReadFile
+// for why the open is O_NOFOLLOW|O_NONBLOCK with a regular-file Fstat.
+func readRecordFile(path string) ([]byte, error) {
 	f, err := openNoFollowNonblock(filepath.Clean(path), os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err

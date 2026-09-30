@@ -199,20 +199,13 @@ func (c *Client) resolveBreadcrumbEntry(operand string) (breadcrumbMember, error
 		return breadcrumbMember{}, fmt.Errorf("breadcrumb %s is not inside the forgectl session-state dir",
 			termsafe.QuotePath(selected.lexical))
 	}
-	file, err := os.Open(selected.lexical) //nolint:gosec // location-validated directly above
+	// The Lstat above checks the path; readRecordFile checks what the open
+	// reaches (O_NOFOLLOW|O_NONBLOCK, then a regular-file Fstat), so a FIFO
+	// swapped in between cannot block this read (forgectl#621).
+	data, err := readRecordFile(selected.lexical)
 	if err != nil {
 		return breadcrumbMember{}, fmt.Errorf("read breadcrumb %s: %w",
 			termsafe.QuotePath(selected.lexical), termsafe.Error(err))
-	}
-	data, readErr := readBreadcrumbBytes(file)
-	closeErr := file.Close()
-	if readErr != nil {
-		return breadcrumbMember{}, fmt.Errorf("read breadcrumb %s: %w",
-			termsafe.QuotePath(selected.lexical), termsafe.Error(readErr))
-	}
-	if closeErr != nil {
-		return breadcrumbMember{}, fmt.Errorf("close breadcrumb %s: %w",
-			termsafe.QuotePath(selected.lexical), termsafe.Error(closeErr))
 	}
 	return breadcrumbMember{
 		path:        selected.lexical,

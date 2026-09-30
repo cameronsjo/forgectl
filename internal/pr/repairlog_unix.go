@@ -30,9 +30,10 @@ import (
 //     the log, and that error names the directory, not the log. (FreeBSD and
 //     NetBSD report O_NOFOLLOW on a symlink as EMLINK and EFTYPE; no shipped
 //     binary runs there, and they get the plain open error.)
-//   - ENXIO is a socket (and EISDIR a directory opened for writing): the
-//     kernel refuses the open before the Fstat can name the type, and
-//     "no such device or address" would not tell the operator what is wrong.
+//   - ENXIO (Linux) or EOPNOTSUPP (macOS) is a socket, and EISDIR a directory
+//     opened for writing: the kernel refuses the open before the Fstat can
+//     name the type, and "no such device or address" or "operation not
+//     supported" would not tell the operator what is wrong.
 //
 // The Lstat only names the refusal; nothing is opened on its word.
 func openRepairLogNoFollow(path string, flag int, perm os.FileMode) (*os.File, error) {
@@ -48,7 +49,7 @@ func openRepairLogNoFollow(path string, flag int, perm os.FileMode) (*os.File, e
 		}
 		return nil, fmt.Errorf("a directory above %s loops back through symlinks: %w",
 			termsafe.QuotePath(path), unix.ELOOP)
-	case errors.Is(err, unix.ENXIO), errors.Is(err, unix.EISDIR):
+	case errors.Is(err, unix.ENXIO), errors.Is(err, unix.EOPNOTSUPP), errors.Is(err, unix.EISDIR):
 		if info, lerr := os.Lstat(path); lerr == nil && !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("%s is a %s: %w; refusing it",
 				termsafe.QuotePath(path), fileKind(info.Mode()), errRepairLogNotRegular)

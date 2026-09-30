@@ -289,7 +289,10 @@ type repairLogPlan struct {
 	// sum is the SHA-256 of those bytes. Size and counts alone miss a
 	// same-length edit that keeps every count — a completion's timestamp moved
 	// from old to in-window at the same width, say — so pass two also refuses
-	// unless the bytes it read hash the same (forgectl#621).
+	// unless the bytes it read hash the same (forgectl#621). It covers the two
+	// passes only: an edit after pass two has read, before the temp copy is
+	// renamed over the log, is not seen. The lifecycle lock is what rules that
+	// window out for every forgectl writer, as it does for the passes.
 	sum     [sha256.Size]byte
 	kept    int
 	dropped int

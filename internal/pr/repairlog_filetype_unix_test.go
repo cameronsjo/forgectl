@@ -320,8 +320,21 @@ func TestRepairLog_ARegularLogIsUnchanged(t *testing.T) {
 	}
 }
 
+// shortSessionsDir is a sessions dir short enough for a unix socket address:
+// sun_path is 104 bytes on macOS, which a t.TempDir path there overruns, so a
+// socket test under t.TempDir would skip on the macOS runner and prove nothing.
+func shortSessionsDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "fsock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 // socketLog replaces the log with a listening unix socket, skipping when the
-// temp path is too long for a socket address.
+// path is still too long for a socket address.
 func socketLog(t *testing.T, c *Client) {
 	t.Helper()
 	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", c.repairLogPath())
@@ -339,20 +352,29 @@ func dirLog(t *testing.T, c *Client) {
 	}
 }
 
-// Mutation that turns it red: remove the ENXIO/EISDIR arm in
+// Mutation that turns it red: remove the ENXIO/EOPNOTSUPP/EISDIR arm in
 // openRepairLogNoFollow. A socket then fails every opener with a bare
-// "no such device or address", and the append's O_RDWR on a directory with a
-// bare "is a directory" — neither the typed refusal.
+// "no such device or address" (Linux) or "operation not supported" (macOS),
+// and the append's O_RDWR on a directory with a bare "is a directory" —
+// neither the typed refusal. The socket cases run in a short sessions dir so
+// the macOS runner binds rather than skips.
 func TestRepairLog_ASocketOrDirectoryIsTheTypedRefusal(t *testing.T) {
 	for _, tc := range []struct {
 		kind  string
 		place func(*testing.T, *Client)
+		short bool
 	}{
-		{"socket", socketLog},
-		{"directory", dirLog},
+		{"socket", socketLog, true},
+		{"directory", dirLog, false},
 	} {
+		sessionsDir := func(t *testing.T) string {
+			if tc.short {
+				return shortSessionsDir(t)
+			}
+			return t.TempDir()
+		}
 		t.Run(tc.kind+"/history", func(t *testing.T) {
-			c := testClient(t, nil)
+			c := testClientAt(t, nil, sessionsDir(t))
 			tc.place(t, c)
 			err := mustFailFast(t, "RepairHistory", func() error { return historyErr(c) })
 			wantNotRegular(t, "RepairHistory", err)
@@ -361,7 +383,7 @@ func TestRepairLog_ASocketOrDirectoryIsTheTypedRefusal(t *testing.T) {
 			}
 		})
 		t.Run(tc.kind+"/append", func(t *testing.T) {
-			c := testClient(t, nil)
+			c := testClientAt(t, nil, sessionsDir(t))
 			tc.place(t, c)
 			err := mustFailFast(t, "appendRepairRowLocked", func() error { return appendErr(c) })
 			wantNotRegular(t, "appendRepairRowLocked", err)
@@ -370,7 +392,7 @@ func TestRepairLog_ASocketOrDirectoryIsTheTypedRefusal(t *testing.T) {
 			}
 		})
 		t.Run(tc.kind+"/prune", func(t *testing.T) {
-			c := pruneClient(t, repairRunner(nil))
+			c := pruneClient(t, repairRunner(nil), WithSessionsDir(sessionsDir(t)))
 			tc.place(t, c)
 			var report PruneReport
 			err := mustFailFast(t, "Prune", func() error {
