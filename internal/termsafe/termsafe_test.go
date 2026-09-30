@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
@@ -451,6 +452,78 @@ func TestError_CapsFilesystemPaths(t *testing.T) {
 	got := Error(&os.PathError{Op: "open", Path: atBudget, Err: sentinel}).Error()
 	if want := "open " + QuotePath(atBudget) + ": denied"; got != want {
 		t.Errorf("a path at the budget was altered: got %d bytes, want %d", len(got), len(want))
+	}
+}
+
+// TestError_CapsWrappedFilesystemPaths is #837: a *PathError or *LinkError
+// wrapped by fmt.Errorf before it reached Error was escaped but never capped,
+// because only err itself was reconstructed. Error now finds each over-cap one
+// in the chain and renders its span of the message in the capped form, so
+// the root error handler caps a wrapped path too.
+//
+// Mutations: make Error's fallback branch SafeLine(errorText(err)) again and
+// every "capped" row echoes the path whole; drop the Unwrap() []error case in
+// overlongPathErrors and the join row does; recurse on the suffix with
+// pathErrs[1:] and the "twice" row caps only the first occurrence.
+func TestError_CapsWrappedFilesystemPaths(t *testing.T) {
+	long := "/" + strings.Repeat("a", PathEchoMaxRunes) + "TAIL"
+	long2 := "/" + strings.Repeat("a", PathEchoMaxRunes) + "OTHER"
+	sentinel := errors.New("denied")
+	pathErr := &os.PathError{Op: "open", Path: long, Err: sentinel}
+	pathErr2 := &os.PathError{Op: "stat", Path: long2, Err: sentinel}
+	linkErr := &os.LinkError{Op: "rename", Old: "/tmp/a", New: long, Err: sentinel}
+	capped := Error(pathErr).Error()
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"capped once wrapped", fmt.Errorf("resolve cwd: %w", pathErr), "resolve cwd: " + capped},
+		{"capped twice wrapped", fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", pathErr)), "outer: inner: " + capped},
+		{"capped link", fmt.Errorf("finalize: %w", linkErr), "finalize: " + Error(linkErr).Error()},
+		{"capped join", fmt.Errorf("both: %w", errors.Join(pathErr, pathErr2)), "both: " + capped + `\n` + Error(pathErr2).Error()},
+		{"capped twice in the text", fmt.Errorf("%w; again %v", pathErr, pathErr), capped + "; again " + capped},
+		{"capped with a hostile wrapper", fmt.Errorf("x\x1b[31m: %w", pathErr), `x\x1b[31m: ` + capped},
+		{"short path left as SafeLine renders it", fmt.Errorf("w: %w", &os.PathError{Op: "open", Path: "/tmp/x", Err: sentinel}), "w: open /tmp/x: denied"},
+		{"no verbatim span", opaqueWrap{pathErr}, "opaque failure"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Error(tt.err).Error()
+			if got != tt.want {
+				t.Fatalf("Error() =\n%q\nwant\n%q", got, tt.want)
+			}
+			if again := Error(Error(tt.err)).Error(); again != got {
+				t.Errorf("Error is not idempotent:\n%q\nthen\n%q", got, again)
+			}
+			if !errors.Is(Error(tt.err), sentinel) {
+				t.Errorf("Error lost the unwrap chain")
+			}
+		})
+	}
+}
+
+// opaqueWrap wraps an error without embedding its text, so there is no
+// verbatim span for Error to find.
+type opaqueWrap struct{ err error }
+
+func (o opaqueWrap) Error() string { return "opaque failure" }
+func (o opaqueWrap) Unwrap() error { return o.err }
+
+// TestQuotePathMax_ShortPathAllocatesNoMoreThanQuoteText is #837's fast path:
+// a path no longer in bytes than the budget skips the rune-offset slice, so it
+// costs exactly QuoteText's allocations.
+//
+// Mutation: delete the len(path) <= maxRunes fast path and QuotePathMax
+// allocates the starts slice on top of QuoteText's.
+func TestQuotePathMax_ShortPathAllocatesNoMoreThanQuoteText(t *testing.T) {
+	path := "/home/user/src/project/internal/cli/execute.go"
+	var sink string
+	quote := testing.AllocsPerRun(100, func() { sink = QuoteText(path) })
+	capped := testing.AllocsPerRun(100, func() { sink = QuotePathMax(path, 0) })
+	_ = sink
+	if capped > quote {
+		t.Errorf("QuotePathMax allocated %v times for a short path, QuoteText %v", capped, quote)
 	}
 }
 

@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // liveShapes are id shapes a live herdr session produces and a sanitized
@@ -242,6 +244,29 @@ func TestErrorTextEscapesFormatCharacters(t *testing.T) {
 		}
 		if !strings.Contains(s, `\u202e`) {
 			t.Errorf("%s: %q does not show the override as an escape", name, s)
+		}
+	}
+}
+
+// TestHerdrTextIsCapped is #837: Error.Message, Error.Code and
+// Declined.Reason were escaped but not capped, bounded only by exec's 64 KiB
+// stderr tail. Each now stops at herdrTextMaxRunes and says so; the head
+// survives.
+//
+// Mutation: make printableMax return printable(s) and every row renders the
+// whole 100k-rune field.
+func TestHerdrTextIsCapped(t *testing.T) {
+	long := "HEAD" + strings.Repeat("x\u202e", 50_000)
+	for name, got := range map[string]string{
+		"Message": (&Error{Code: "bad_request", Message: long}).Error(),
+		"Code":    (&Error{Code: long, Message: "m"}).Error(),
+		"Reason":  (&Declined{TabID: "w1:t1", Reason: long}).Error(),
+	} {
+		if n := utf8.RuneCountInString(got); n > 2*herdrTextMaxRunes+100 {
+			t.Errorf("%s: error text is %d runes; want at most about %d", name, n, herdrTextMaxRunes)
+		}
+		if !strings.Contains(got, "HEAD") || !strings.Contains(got, termsafe.TruncatedMarker) {
+			t.Errorf("%s: error text = %q; want the head kept and the truncation marked", name, got)
 		}
 	}
 }

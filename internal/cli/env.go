@@ -260,7 +260,7 @@ func newEnvKeysCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
-				return err
+				return termsafe.Error(err)
 			}
 			target, err := resolveEnvTarget(*anyFile, *file, cwd, th)
 			if err != nil {
@@ -338,7 +338,7 @@ func newEnvSetCmd(client *envpkg.Client, sopsClient *sopspkg.Client, clip *clipp
 
 			cwd, err := os.Getwd()
 			if err != nil {
-				return err
+				return termsafe.Error(err)
 			}
 
 			if useSops {
@@ -515,7 +515,7 @@ func newEnvGetCmd(client *envpkg.Client, file *string, anyFile *bool, th theme.T
 			key := args[0]
 			cwd, err := os.Getwd()
 			if err != nil {
-				return err
+				return termsafe.Error(err)
 			}
 			target, err := resolveEnvTarget(*anyFile, *file, cwd, th)
 			if err != nil {
@@ -554,7 +554,7 @@ Exit codes: 0 the file matches the example · 1 keys are missing or extra · 2 t
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
-				return err
+				return termsafe.Error(err)
 			}
 
 			fileTarget, err := resolveEnvTarget(*anyFile, *file, cwd, th)
@@ -700,7 +700,7 @@ func newEnvRedactCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cwd, err := os.Getwd()
 			if err != nil {
-				return err
+				return termsafe.Error(err)
 			}
 			target, err := resolveEnvTarget(*anyFile, *file, cwd, th)
 			if err != nil {

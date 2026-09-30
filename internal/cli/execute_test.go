@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 	"github.com/cameronsjo/forgectl/internal/tui"
@@ -476,5 +478,31 @@ func TestTermsafeErrorHandler_SilentCodedError_RendersNothing(t *testing.T) {
 	}
 	if got := ExitCode(err); got != 2 {
 		t.Errorf("ExitCode(silentCodedError) = %d, want 2", got)
+	}
+}
+
+// TestTermsafeErrorHandler_CapsAWrappedPathError is #837's backstop: a
+// *PathError wrapped by fmt.Errorf before it reached the root handler was
+// escaped but echoed at any length. The handler caps it now, and running it
+// over an error it already made safe renders the same text.
+//
+// Mutation: make termsafe.Error's fallback branch SafeLine(errorText(err))
+// again and the whole path reaches the output.
+func TestTermsafeErrorHandler_CapsAWrappedPathError(t *testing.T) {
+	long := "/" + strings.Repeat("a", 4*termsafe.PathEchoMaxRunes) + "TAIL"
+	wrapped := fmt.Errorf("resolve cwd: %w", &os.PathError{Op: "stat", Path: long, Err: errors.New("denied")})
+	var buf bytes.Buffer
+	termsafeErrorHandler(&buf, fang.Styles{}, wrapped)
+	got := buf.String()
+	if n := strings.Count(got, "a"); n > 2*termsafe.PathEchoMaxRunes {
+		t.Fatalf("root handler echoed %d path runes; want the path capped: %q", n, got)
+	}
+	if !strings.Contains(got, `TAIL"`) {
+		t.Errorf("root handler output %q lost the path's tail", got)
+	}
+	var again bytes.Buffer
+	termsafeErrorHandler(&again, fang.Styles{}, termsafe.Error(wrapped))
+	if again.String() != got {
+		t.Errorf("root handler is not idempotent:\n%q\nthen\n%q", got, again.String())
 	}
 }
