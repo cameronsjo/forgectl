@@ -1,9 +1,9 @@
 ---
 status: in-flight
-next: "Tasks 1-4 done on feat/herdr-organize (PR #729, stacked on #723); ready flip after a review at head, then a release, then the dotfiles retirement of forgectl-herdr"
+next: "Merged as cameronsjo/forgectl#729. After a forgectl release ships the command, retire forgectl-herdr and its rules file in ~/.dotfiles"
 branch: plan/herdr-roadmap
 pr: cameronsjo/forgectl#721
-updated: 2026-09-29
+updated: 2026-09-30
 approved_session_id: a86d73e4-2c61-43bb-a377-9455a4c62f53
 date: 2026-09-29
 session_id: a86d73e4-2c61-43bb-a377-9455a4c62f53

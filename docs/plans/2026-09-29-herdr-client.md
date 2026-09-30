@@ -1,9 +1,9 @@
 ---
-status: in-flight
-next: "Tasks 0-4 done; review and merge cameronsjo/forgectl#723, then roadmap item 2 (shared readiness checks with forgectl#536 T2) and item 3 (inbox)"
+status: done
+next: "Merged as cameronsjo/forgectl#723; roadmap items continue in the roadmap plan"
 branch: plan/herdr-roadmap
 pr: cameronsjo/forgectl#721
-updated: 2026-09-29
+updated: 2026-09-30
 approved_session_id: a86d73e4-2c61-43bb-a377-9455a4c62f53
 date: 2026-09-29
 session_id: a86d73e4-2c61-43bb-a377-9455a4c62f53
