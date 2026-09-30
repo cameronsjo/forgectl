@@ -9,9 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -97,80 +97,58 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 	return dir, nil
 }
 
-// unloggableRepo stands in for a URL-shaped repo that does not parse, so
-// none of it is logged.
-const unloggableRepo = "[unparseable repo URL withheld]"
+// remoteRepoPlaceholder is what a log line shows for a non-local repo that
+// is not exactly one of logRepo's accepted shapes.
+const remoteRepoPlaceholder = "[remote repo]"
+
+// Positive parses for logRepo. repoHostPattern is a DNS-style hostname with
+// no '@', ':', '[' or '%'. repoPartPattern is one owner or repo path
+// segment.
+const (
+	repoHostPattern = `([A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?)`
+	repoPartPattern = `([A-Za-z0-9._-]{1,100})`
+)
+
+// logRepoShapes are the only non-local forms logRepo renders, each anchored
+// at both ends: https with no userinfo, ssh as the git user with an optional
+// port, and scp-like as the git user.
+var logRepoShapes = []*regexp.Regexp{
+	regexp.MustCompile(`^https://` + repoHostPattern + `/` + repoPartPattern + `/` + repoPartPattern + `$`),
+	regexp.MustCompile(`^ssh://git@` + repoHostPattern + `(?::[0-9]{1,5})?/` + repoPartPattern + `/` + repoPartPattern + `$`),
+	regexp.MustCompile(`^git@` + repoHostPattern + `:` + repoPartPattern + `/` + repoPartPattern + `$`),
+}
 
 // logRepo renders repo for a log line without any credential it carries
 // (#711). A clone URL can embed a token (https://x-access-token:TOKEN@host/…,
-// or a bare-username TOKEN@host), and the log file keeps it. exec's argv
+// a bare-username TOKEN@host, or git's transport-helper form
+// http::http://U:TOKEN@host/r), and the log file keeps it. exec's argv
 // masking covers only KEY=VALUE elements a caller registers, not these
 // fields.
 //
-// A local path (hasLocalPathPrefix) is logged as is. A "://" form that
-// net/url cannot parse is withheld entirely. Everything else goes through
-// redactUserinfo, one structural rule with no per-form cases. A parse is NOT
-// trusted to have found the userinfo: Go reads http:///USER:PASS@host/r with
-// an empty Host and a nil User, while git sends USER:PASS as Basic auth.
+// It is an ALLOWLIST, not a redactor. Three review rounds each found a form
+// that a find-the-userinfo rule missed, so nothing from a non-local repo
+// reaches the log unless a strict positive parse accepted it:
+//
+//   - A local path (hasLocalPathPrefix) is logged as is.
+//   - A repo that is exactly one of logRepoShapes is logged as
+//     <host>/<owner>/<repo>, rebuilt from the captured fields only. A
+//     trailing ".git" is dropped.
+//   - Anything else is logged as remoteRepoPlaceholder. That covers
+//     userinfo, a query, a fragment, "::", percent-escapes, backslashes,
+//     whitespace, bracketed IPv6, odd slash counts, and every other scheme.
+//
+// It depends only on regexp, so it can be lifted unchanged into a shared
+// package.
 func logRepo(repo string) string {
 	if hasLocalPathPrefix(repo) {
 		return repo
 	}
-	if strings.Contains(repo, "://") {
-		if _, err := url.Parse(repo); err != nil {
-			return unloggableRepo
+	for _, shape := range logRepoShapes {
+		if m := shape.FindStringSubmatch(repo); m != nil {
+			return m[1] + "/" + m[2] + "/" + strings.TrimSuffix(m[3], ".git")
 		}
 	}
-	return redactUserinfo(repo)
-}
-
-// redactUserinfo replaces the userinfo of a URL or scp-like remote with
-// [redacted], username included. url.URL.Redacted keeps the username,
-// which is where a bare-username token sits.
-//
-// The rule is structural. Skip an optional "scheme:" and every '/' after it.
-// Then replace everything up to and including the last '@' that comes before
-// the first '/', '?' or '#' of what remains. The scheme and its slashes are
-// kept only when at least one slash follows: without one, the form is
-// scp-like (TOKEN:x@host:path) and the "scheme" may itself be the
-// credential, so it is replaced as well. Taking the LAST '@' over-redacts,
-// relative to git's first-'@' split, and that is the safe direction.
-//
-// It has no dependency beyond exec.Redacted's text, so it can be lifted
-// unchanged into a shared package.
-func redactUserinfo(s string) string {
-	keep, rest := "", s
-	if i := strings.IndexByte(s, ':'); i > 0 && isURLScheme(s[:i]) {
-		after := s[i+1:]
-		trimmed := strings.TrimLeft(after, "/")
-		if len(trimmed) < len(after) {
-			keep = s[:len(s)-len(trimmed)]
-		}
-		rest = trimmed
-	}
-	head := rest
-	if j := strings.IndexAny(rest, "/?#"); j >= 0 {
-		head = rest[:j]
-	}
-	at := strings.LastIndexByte(head, '@')
-	if at < 0 {
-		return s
-	}
-	return keep + exec.Redacted + "@" + rest[at+1:]
-}
-
-// isURLScheme reports whether s is an RFC 3986 scheme: ALPHA followed by
-// ALPHA, DIGIT, '+', '-' or '.'.
-func isURLScheme(s string) bool {
-	for i, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
-		case i > 0 && (r >= '0' && r <= '9' || r == '+' || r == '-' || r == '.'):
-		default:
-			return false
-		}
-	}
-	return s != ""
+	return remoteRepoPlaceholder
 }
 
 // exitCode is what a checkout failure's log line keeps of err: the exit code
