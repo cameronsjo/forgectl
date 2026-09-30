@@ -1,0 +1,2 @@
+synthetic pane output line one
+synthetic pane output line two

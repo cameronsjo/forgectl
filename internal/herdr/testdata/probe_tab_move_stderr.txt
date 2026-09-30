@@ -1,0 +1,3 @@
+usage: herdr tab move <tab_id> --index N
+       herdr tab move <tab_id> --workspace <workspace_id> [--index N]
+       herdr tab move <tab_id> --new-workspace [--label TEXT]

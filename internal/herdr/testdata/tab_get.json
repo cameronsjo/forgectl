@@ -1,0 +1,15 @@
+{
+  "id": "cli:tab:get",
+  "result": {
+    "tab": {
+      "agent_status": "working",
+      "focused": false,
+      "label": "label-5",
+      "number": 39,
+      "pane_count": 4,
+      "tab_id": "w1:t2",
+      "workspace_id": "w1"
+    },
+    "type": "tab_info"
+  }
+}
