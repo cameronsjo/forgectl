@@ -199,6 +199,53 @@ func TestError_PreservesIdentityAndEscapesFilesystemPaths(t *testing.T) {
 	}
 }
 
+// panickingError stands in for Go 1.26.0's os.errSymlink, whose Error method
+// is a panic. os.RemoveAll can leak it wrapped in a *PathError (forgectl#783).
+type panickingError struct{}
+
+func (panickingError) Error() string { panic("errSymlink is not user-visible") }
+
+func TestError_SurvivesAPanickingErrorMethod(t *testing.T) {
+	inner := panickingError{}
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "bare", err: inner, want: errTextUnavailable},
+		{
+			name: "path",
+			err:  &os.PathError{Op: "openfdat", Path: "/tmp/run\ndir", Err: inner},
+			want: "openfdat " + QuotePath("/tmp/run\ndir") + ": " + errTextUnavailable,
+		},
+		{
+			name: "link",
+			err:  &os.LinkError{Op: "rename", Old: "/tmp/a", New: "/tmp/b", Err: inner},
+			want: "rename " + QuotePath("/tmp/a") + " " + QuotePath("/tmp/b") + ": " + errTextUnavailable,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got error
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("Error panicked: %v", r)
+					}
+				}()
+				got = Error(tt.err)
+			}()
+			if got.Error() != tt.want {
+				t.Errorf("Error(%s).Error() = %q, want %q", tt.name, got.Error(), tt.want)
+			}
+			var p panickingError
+			if !errors.As(got, &p) {
+				t.Errorf("errors.As did not reach the panicking cause; the chain was not preserved")
+			}
+		})
+	}
+}
+
 func TestSafeLineAndQuotePath_EscapeLayoutControlsAndBidiOverride(t *testing.T) {
 	input := "a\tb\nc\rd\x1be\x7ff\u0085g\u202eh"
 	for name, got := range map[string]string{
