@@ -506,7 +506,7 @@ func dispatchAction(ctx context.Context, client *tmux.Client, act tui.Action) er
 		return client.AttachWindow(ctx, act.Window)
 	case tui.ActionPick:
 		slog.Debug("Dispatching pick action.", "candidate", act.Pick)
-		return client.Pick(ctx, act.Pick)
+		return seshPick(ctx, client, act.Pick)
 	case tui.ActionLast:
 		slog.Debug("Dispatching last session action.")
 		return client.LastSession(ctx)
