@@ -90,7 +90,6 @@ method (*OSSensitiveRunner) bound() time.Duration
 method (*OSSensitiveRunner) buildEnv(muts []EnvMutation) ([]string, []github.com/cameronsjo/forgectl/internal/exec/internal/sealed.EnvVar)
 method (*OSSensitiveRunner) drainBound() time.Duration
 method (*OSSensitiveRunner) retire(stopped bool, kind CommandKind, outR *os.File, errR *os.File, outCh <-chan BoundedOutput, errCh <-chan BoundedOutput) (BoundedOutput, BoundedOutput)
-method (*OSSensitiveRunner) startSealed(sc SensitiveCommand, stdout *os.File, stderr *os.File) (*github.com/cameronsjo/forgectl/internal/exec/internal/sealed.Proc, error)
 method (*SensitiveError) Error() string
 method (*SensitiveError) Format(f fmt.State, verb rune)
 method (*SensitiveError) GoString() string

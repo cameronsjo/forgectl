@@ -119,3 +119,20 @@ func TestStart_FailureNeverCarriesThePath(t *testing.T) {
 		t.Fatalf("Start's error renders a payload: %q", err)
 	}
 }
+
+// TestStart_RefusesARelativePath pins Start's own refusal of a path that is
+// not absolute, the defense in depth behind the runner's validate: nothing
+// starts, and the error is the fixed errNotStarted.
+//
+// Mutation that turns it red: drop the IsAbs check in Start (exec.LookPath
+// resolves "sh" and a shell starts).
+func TestStart_RefusesARelativePath(t *testing.T) {
+	proc, err := Start(New("sh"), []Value{New("-c"), New("exit 0")}, nil, nil, nil, nil)
+	if proc != nil {
+		_ = proc.Wait()
+		t.Fatal("Start ran a relative path; it must refuse before any lookup")
+	}
+	if !errors.Is(err, errNotStarted) {
+		t.Fatalf("Start of a relative path = %v, want errNotStarted", err)
+	}
+}

@@ -190,7 +190,7 @@ func redactedJSON() ([]byte, error) { return []byte(strconv.Quote(Redacted)), ni
 // type in an unexported field — the natural shape for an adapter client — and
 // slog's TextHandler, which production installs, renders a non-TextMarshaler
 // value with exactly fmt.Sprintf("%+v", v). A func value prints as an address
-// under every verb at every depth, so reflection has nothing to reach.
+// under every verb at every depth, so fmt's reflection has nothing to print.
 //
 // The cost is that this type is no longer comparable with ==; use Equal.
 //

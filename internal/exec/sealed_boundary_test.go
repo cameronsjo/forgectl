@@ -81,20 +81,25 @@ func TestSealedIsUnimportableOutsideExec(t *testing.T) {
 	}
 }
 
-// TestSealedStartHasOneCaller pins that sealed.Start, the one function that
-// puts a payload into a process, is named in internal/exec's production files
-// only inside (*OSSensitiveRunner).startSealed, on every platform in
-// guardPlatforms. Test files are not checked.
+// TestSealedStartHasOneCaller pins, in internal/exec's production files on
+// every platform in guardPlatforms, the one path to a process: sealed.Start,
+// the one function that puts a payload into a process, is named only inside
+// the func startSealed, and startSealed, which skips validate, is named only
+// inside (*OSSensitiveRunner).RunSensitive, after validate. Test files are not
+// checked.
 //
 // This is not what keeps plaintext out of internal/exec: the compiler does
 // that, since sealed.Start returns only a *sealed.Proc (wait and kill, no
 // accessor, pinned by the golden) and no exported name of sealed returns an
 // *exec.Cmd. It keeps process launches through the seam to the runner, so a
-// second launch path cannot appear without review. A package-level func can
-// be reached only by naming it (a call or a func value), so a Uses walk sees
-// every route; there is no interface or method-value shape that avoids it.
+// second launch path, or one that skips validate, cannot appear without
+// review. Both targets are package-level funcs, which can be reached only by
+// naming them (a call or a func value), so a Uses walk sees every route;
+// there is no interface or method-value shape that avoids it.
 //
-// Mutation that turns it red: `var _ = sealed.Start` in sensitive.go.
+// Mutations that turn it red, each in sensitive.go: `var _ = sealed.Start`;
+// `var _, _ = startSealed(&OSSensitiveRunner{}, SensitiveCommand{Path:
+// Secret("sh"), Args: []Arg{Opaque("-c")}}, nil, nil)`.
 func TestSealedStartHasOneCaller(t *testing.T) {
 	for _, p := range guardPlatforms {
 		c := checkExecFor(t, p)
@@ -102,25 +107,38 @@ func TestSealedStartHasOneCaller(t *testing.T) {
 		if !ok {
 			t.Fatalf("[%s] sealed declares no Start func; the rule would check nothing", p)
 		}
-		for _, f := range namedOutside(c, start, "startSealed") {
-			t.Errorf("[%s] %s: sealed.Start is named outside (*OSSensitiveRunner).startSealed; launch sealed processes through the runner",
+		for _, f := range namedOutside(c, start, "", "startSealed") {
+			t.Errorf("[%s] %s: sealed.Start is named outside startSealed; launch sealed processes through the runner",
+				p, f)
+		}
+		startSealed, ok := c.pkg.Scope().Lookup("startSealed").(*types.Func)
+		if !ok {
+			t.Fatalf("[%s] internal/exec declares no startSealed func; the rule would check nothing", p)
+		}
+		for _, f := range namedOutside(c, startSealed, "*OSSensitiveRunner", "RunSensitive") {
+			t.Errorf("[%s] %s: startSealed is named outside (*OSSensitiveRunner).RunSensitive; it skips validate, so only RunSensitive may call it",
 				p, f)
 		}
 	}
 }
 
 // namedOutside returns the position of every use of target in c's production
-// files that does not sit inside the method (*OSSensitiveRunner).within, plus
+// files that does not sit inside the func within (a method of recv when recv
+// is not empty, a plain func when it is), plus
 // one extra finding when there is no use inside within at all, since then the
 // matcher, not the package, is what is clean.
-func namedOutside(c *checkedPackage, target *types.Func, within string) []string {
+func namedOutside(c *checkedPackage, target *types.Func, recv, within string) []string {
 	var findings []string
 	inside := 0
 	for _, f := range c.files {
 		for _, decl := range f.Decls {
 			fd, isFunc := decl.(*ast.FuncDecl)
-			door := isFunc && fd.Name.Name == within && fd.Recv != nil && len(fd.Recv.List) == 1 &&
-				types.ExprString(fd.Recv.List[0].Type) == "*OSSensitiveRunner"
+			door := isFunc && fd.Name.Name == within
+			if door && recv == "" {
+				door = fd.Recv == nil
+			} else if door {
+				door = fd.Recv != nil && len(fd.Recv.List) == 1 && types.ExprString(fd.Recv.List[0].Type) == recv
+			}
 			ast.Inspect(decl, func(n ast.Node) bool {
 				id, ok := n.(*ast.Ident)
 				if !ok || c.info.Uses[id] != target {

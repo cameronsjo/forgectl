@@ -1,18 +1,28 @@
 // Package sealed holds internal/exec's opaque payloads and the only code that
 // reads them (forgectl#854).
 //
-// The containment is a compiler rule rather than a review rule. The payload
-// sits behind an unexported field of Value, so no package but this one can
-// read it: internal/exec included. Go's internal-package rule then limits who
-// can import this package at all to internal/exec and its subpackages. Nothing
-// exported here returns a payload as a string, and nothing takes a callback,
-// so a reveal written anywhere else does not compile.
+// The payload sits behind an unexported field of Value, and Go's
+// internal-package rule limits who can import this package at all to
+// internal/exec and its subpackages. Nothing exported here returns a payload
+// as a string, and nothing takes a callback, so an ordinary reveal (a call, a
+// method value, an interface, a conversion) written anywhere else does not
+// compile.
+//
+// That is a type-system rule, not a memory rule, and the compiler does not
+// close every route. reflect reaches an unexported field without importing
+// unsafe: Value.Addr on the field, then Value.UnsafePointer, then a
+// conversion of that pointer to *T reads it, a closure's captured variables
+// included. So a sealed.Value's payload, and the *exec.Cmd behind a Proc,
+// are readable by any package that holds one and is willing to write that.
+// Keeping such code out is a review and backstop property, not something the
+// compiler enforces (forgectl#854).
 //
 // The one way a payload leaves is Start, which puts it into a child process's
 // path, argv and environment and hands back a *Proc that can only wait for or
 // kill that process. The *exec.Cmd holding the plaintext is built and kept
 // inside this package; nothing exported returns it, and Proc holds only
-// closures over it, which reflection cannot read. Everything else is a fixed
+// closures over it, which no ordinary reflection accessor reads (the
+// UnsafePointer route above does). Everything else is a fixed
 // one-bit predicate (Set, Present, IsAbs, LeadsWithDash), a comparison
 // (Equal), or a re-spelling over the closed Transform set that yields another
 // sealed Value (Map).
@@ -44,8 +54,9 @@ import (
 // reached through an unexported field. So a plain string payload here would be
 // printed verbatim by %v, %+v, and %#v of any struct that holds a Value in an
 // unexported field, which is exactly how internal/exec holds it. A func value
-// prints as an address under every verb at every depth, so reflection has
-// nothing to reach.
+// prints as an address under every verb at every depth, so fmt's reflection
+// has nothing to print. (Deliberate reflection can still read it; see the
+// package doc.)
 //
 // Every constructor closes over an immutable string, so reveal is pure and
 // repeatable. That is load-bearing: validation reads the payload to check it,
@@ -128,11 +139,13 @@ var errNotStarted = errors.New("sealed: process did not start")
 // environment it was started with.
 //
 // Both fields are closures over the unexported *exec.Cmd rather than the Cmd
-// itself. A field holding the Cmd would be readable through reflection by
-// its string-kind accessors (reflect.Value.String works on an unexported
-// field; only Interface is refused), and that would reach Path and Args. A
-// captured variable is out of reflection's reach, the same containment Value
-// uses.
+// itself. A field holding the Cmd would be readable through reflection's
+// ordinary accessors (reflect.Value.String works on an unexported field; only
+// Interface is refused), and that would reach Path and Args in one line. A
+// captured variable raises that bar but does not remove it: Value.Addr,
+// Value.UnsafePointer and a pointer conversion still read the Cmd, with no
+// unsafe import. Keeping that out of the module is a review property, the
+// same as for Value's payload; see the package doc.
 type Proc struct {
 	wait func() error
 	kill func() error
@@ -156,9 +169,17 @@ func (p *Proc) Kill() error { return p.kill() }
 // It takes *os.File streams rather than io.Writer so exec.Cmd starts no
 // copying goroutine: the runner owns reading, capping and retiring both pipes.
 // It starts no context watcher either, because the runner owns killing and
-// reaping in a defined order (see OSSensitiveRunner.RunSensitive), and path
-// must already be absolute so no PATH lookup happens.
+// reaping in a defined order (see OSSensitiveRunner.RunSensitive).
+//
+// It refuses a path that is not absolute, returning errNotStarted and never
+// the path, before any lookup or fork. The runner's validate refuses one
+// first; this is defense in depth for a caller that skipped it, since a
+// relative path would otherwise be resolved through exec.LookPath against the
+// live process PATH rather than the runner's captured environment.
 func Start(path Value, args []Value, env []string, set []EnvVar, stdout, stderr *os.File) (*Proc, error) {
+	if !path.IsAbs() {
+		return nil, errNotStarted
+	}
 	cmd := command(path, args, env, set)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr

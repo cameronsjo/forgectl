@@ -152,18 +152,33 @@ func envKeyOf(entry string) string {
 // payload out of its wrapper, and it puts every payload into the child
 // process and nowhere else (forgectl#854). What comes back is a *sealed.Proc,
 // which can only wait for and kill the process. This package never holds an
-// *exec.Cmd, or anything else with a plaintext path, argv or environment.
+// *exec.Cmd, or anything else carrying a plaintext payload. (The inherited
+// environment r.env is plaintext by design; it holds no payload.)
 //
-// What the compiler enforces:
+// Only RunSensitive may call this: it skips validate, so a direct call would
+// start a relative path or a dash-leading operand that validate refuses.
+// TestSealedStartHasOneCaller pins that, and sealed.Start refuses a
+// non-absolute path on its own as defense in depth. It is a plain func, not a
+// method, on purpose: a package-level func is reachable only by naming it, so
+// the test's Uses walk sees every route, where a method could be reached
+// through an interface value the walk would not attribute to it.
+//
+// What the compiler enforces, against ordinary Go (calls, method values,
+// interfaces, generic constraints, conversions):
 //
 //   - a payload sits in a sealed.Value whose reveal is unexported inside
-//     internal/exec/internal/sealed, so no code outside sealed can read one,
-//     this package included, whatever the shape of the attempt (a call, a
-//     method value, an interface, a generic constraint);
-//   - the *exec.Cmd that sealed.Start builds never leaves sealed: no
-//     exported name returns it, and Proc's fields are closures over it;
+//     internal/exec/internal/sealed, so no code outside sealed can call it,
+//     this package included;
+//   - the *exec.Cmd that sealed.Start builds never leaves sealed through an
+//     exported name, and Proc's fields are closures over it;
 //   - Go's internal-package rule lets nothing outside internal/exec import
 //     sealed at all.
+//
+// What the compiler does NOT enforce: reflect reads an unexported field, and
+// a closure's captured variables, without importing unsafe. Value.Addr on the
+// field, then Value.UnsafePointer, then a conversion of the pointer to *T
+// reads a sealed.Value's payload or the Cmd behind a Proc, from any package
+// holding one. No guard test refuses that today; it is a review property.
 //
 // What the guard tests enforce, as the backstop for what the compiler cannot
 // see:
@@ -209,7 +224,7 @@ func envKeyOf(entry string) string {
 // validate has already required an absolute path, so no PATH lookup happens
 // — which matters, because LookPath reads the live process PATH rather than
 // this runner's captured environment.
-func (r *OSSensitiveRunner) startSealed(sc SensitiveCommand, stdout, stderr *os.File) (*sealed.Proc, error) {
+func startSealed(r *OSSensitiveRunner, sc SensitiveCommand, stdout, stderr *os.File) (*sealed.Proc, error) {
 	args := make([]sealed.Value, len(sc.Args))
 	for i := range sc.Args {
 		args[i] = sc.Args[i].v
@@ -283,7 +298,7 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 	slog.Debug("Preparing to run sensitive command.", "cmd", sc)
 	start := time.Now()
 
-	proc, err := r.startSealed(sc, outW, errW)
+	proc, err := startSealed(r, sc, outW, errW)
 	if err != nil {
 		closeAll(outR, outW, errR, errW)
 		slog.Error("Sensitive command failed to start.", "kind", sc.Kind.String())
