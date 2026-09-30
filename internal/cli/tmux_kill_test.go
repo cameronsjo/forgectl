@@ -35,8 +35,12 @@ func sessionsRunner(names ...string) *exec.FakeRunner {
 // through the generation guard (forgectl#785): the kill rides as the
 // then-branch command string of an if-shell. A bare kill-session argv is
 // matched too, so an assertion that nothing was killed can never pass just
-// because the kill moved inside the guard.
+// because the kill moved inside the guard. A leading -S pin is skipped, as
+// internal/tmux's and internal/pr's tmuxVerb do.
 func killSessionCommand(args []string) (string, bool) {
+	if len(args) >= 2 && args[0] == "-S" {
+		args = args[2:]
+	}
 	if len(args) >= 6 && args[0] == "if-shell" && strings.HasPrefix(args[5], "kill-session ") {
 		return args[5], true
 	}
@@ -44,6 +48,18 @@ func killSessionCommand(args []string) (string, bool) {
 		return strings.Join(args, " "), true
 	}
 	return "", false
+}
+
+// TestKillSessionCommandSeesThroughPinAndGuard pins the helper the "nothing
+// was killed" assertions below rest on. Mutation that turns it red: drop the
+// -S skip, and a pinned guarded kill is not recognized.
+func TestKillSessionCommandSeesThroughPinAndGuard(t *testing.T) {
+	guarded := []string{"if-shell", "-F", "-t", "$0", "#{==:#{pid}/#{start_time},1/2}", "kill-session -t '$0'", "display-message -p x"}
+	for _, args := range [][]string{guarded, append([]string{"-S", "/tmp/s"}, guarded...)} {
+		if command, ok := killSessionCommand(args); !ok || command != "kill-session -t '$0'" {
+			t.Errorf("killSessionCommand(%v) = (%q, %v), want the guarded kill", args, command, ok)
+		}
+	}
 }
 
 // existsRunner holds exactly the session the tests act on.

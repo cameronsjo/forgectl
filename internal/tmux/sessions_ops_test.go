@@ -231,14 +231,21 @@ func TestRenameSession_QuotesTheNewNameForTheGuard(t *testing.T) {
 	}
 }
 
-// TestRenameSession_RefusesAnUnquotableName covers the two bytes quoting cannot
-// carry. tmux 3.4's lexer reads 0xFF as end of input inside quotes, so a name
-// carrying it would escape the quoting. A NUL cannot reach an argv. Both are
-// refused before ANY command runs, including the read-only revalidation.
+// TestRenameSession_RefusesAnUnquotableName covers the bytes quoting cannot
+// carry unchanged. tmux 3.4's lexer reads 0xFF as end of input inside quotes,
+// so a name carrying it would escape the quoting. Inside the quotes, a newline
+// followed by blanks collapses them, and backslash-newline is a line
+// continuation. So every C0 control and DEL is refused too, and a NUL cannot
+// reach an argv at all. Each is refused before ANY command runs, including the
+// read-only revalidation.
 //
-// Mutation that turns it red: drop the 0xFF check from quoteCommandOperand.
+// Mutations that turn it red: drop the 0xFF check, or narrow the control
+// check to NUL, in quoteCommandOperand.
 func TestRenameSession_RefusesAnUnquotableName(t *testing.T) {
-	for _, newName := range []string{"x\xff' ; kill-server ; '", "a\x00b"} {
+	for _, newName := range []string{
+		"x\xff' ; kill-server ; '", "a\x00b",
+		"a\n b", "a\n\tb", "a\r\n b", "a\\\nb", "a\\\n b", "a\tb", "a\x1fb", "a\x7fb",
+	} {
 		fake, c, identity := opsFixture(t, false)
 		err := c.RenameSession(context.Background(), identity, newName)
 		if !errors.Is(err, ErrUnsafeOperand) {

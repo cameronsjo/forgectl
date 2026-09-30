@@ -111,25 +111,46 @@ func TestSessionVerbsGenerationGuardIsolated(t *testing.T) {
 	// Under the captured generation the rename acts, and the quoted name lands
 	// exactly as a bare `rename-session -- <name>` lands it. tmux renders
 	// some bytes (a '$' or '\') escaped in its own listing, so the reference
-	// is a bare rename of alpha to the same name plus a suffix. The name
-	// tries to close the quote and run kill-server. It also carries $VAR, ~
-	// and backslash, which tmux's parser expands outside single quotes.
-	const hostile = `'; kill-server; ' $HOME ~ \x "q"`
-	if _, err := runner.Run(ctx, tmuxBin, "rename-session", "-t", "alpha", "--", hostile+" bare"); err != nil {
-		t.Fatalf("bare reference rename: %v", err)
-	}
-	if err := c.RenameSession(ctx, bravo, hostile); err != nil {
-		t.Fatalf("RenameSession: %v", err)
-	}
-	got := sessionNames(t, c)
+	// is a bare rename of alpha ($0) to the same name plus a suffix. The first
+	// name tries to close the quote and run kill-server. It also carries
+	// $VAR, ~ and backslash, which tmux's parser expands outside single
+	// quotes.
 	var guardedName string
-	for _, name := range got {
-		if name != "charlie" && !strings.HasSuffix(name, " bare") {
-			guardedName = name
+	for _, hostile := range []string{
+		`'; kill-server; ' $HOME ~ \x "q"`,
+		// Multi-byte shapes with no control byte: backslash before a blank,
+		// a doubled backslash, an embedded close-escape-reopen, two blanks.
+		`a\ b`, `a\\ b`, `a'\''b`, "a  b",
+	} {
+		if _, err := runner.Run(ctx, tmuxBin, "rename-session", "-t", "$0", "--", hostile+" bare"); err != nil {
+			t.Fatalf("bare reference rename to %q: %v", hostile, err)
+		}
+		if err := c.RenameSession(ctx, bravo, hostile); err != nil {
+			t.Fatalf("RenameSession(%q): %v", hostile, err)
+		}
+		got := sessionNames(t, c)
+		guardedName = ""
+		for _, name := range got {
+			if name != "charlie" && !strings.HasSuffix(name, " bare") {
+				guardedName = name
+			}
+		}
+		if len(got) != 3 || !slices.Contains(got, guardedName+" bare") {
+			t.Fatalf("after renaming to %q sessions = %q; the guarded rename %q differs from the bare one", hostile, got, guardedName)
 		}
 	}
-	if len(got) != 3 || !slices.Contains(got, guardedName+" bare") {
-		t.Fatalf("after the hostile rename sessions = %q; the guarded rename %q differs from the bare one", got, guardedName)
+
+	// Inside single quotes tmux 3.4's lexer still folds a newline followed by
+	// blanks and reads backslash-newline as a continuation, so these would
+	// land as a different name. Each is refused, and nothing is renamed.
+	before := sessionNames(t, c)
+	for _, lossy := range []string{"a\n b", "a\n\tb", "a\r\n b", "a\\\nb", "a\\\n b"} {
+		if err := c.RenameSession(ctx, bravo, lossy); !errors.Is(err, ErrUnsafeOperand) {
+			t.Fatalf("RenameSession(%q) = %v, want ErrUnsafeOperand", lossy, err)
+		}
+		if got := sessionNames(t, c); !slices.Equal(got, before) {
+			t.Fatalf("a refused rename to %q changed the sessions to %q", lossy, got)
+		}
 	}
 	if err := c.KillOthers(ctx, bravo); err != nil {
 		t.Fatalf("KillOthers: %v", err)

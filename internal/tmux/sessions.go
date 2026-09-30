@@ -257,8 +257,9 @@ func (c *Client) EnsureSession(ctx context.Context, name, dir string) (SessionId
 //
 // The rename runs inside generationGuarded (forgectl#785), so newName reaches
 // tmux as a single-quoted token of a command string tmux parses again
-// (quoteCommandOperand); a name that cannot be quoted — one carrying a NUL or
-// a 0xFF byte — is refused before any command runs.
+// (quoteCommandOperand); a name that cannot be carried through that parser
+// unchanged — one with a control character (0x00-0x1F, 0x7F) or a 0xFF byte —
+// is refused before any command runs.
 //
 // The `--` is what keeps newName an operand. It is the only operator-controlled
 // POSITIONAL this package hands tmux, and the TUI's rename field (internal/tui)

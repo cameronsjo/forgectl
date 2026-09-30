@@ -470,15 +470,31 @@ func guardedAnswer(what string, gen ServerGeneration, out string) error {
 //	it's  ->  'it'\''s'
 //
 // Measured on tmux 3.4 against an isolated socket (forgectl#785): for every
-// byte 0x01-0xFE, and for names such as `'; kill-server; '`, `$HOME`,
-// `#{pid}`, `\` and a newline, a guarded rename-session left exactly the name
-// a bare `rename-session -- <name>` left. Byte 0xFF is the exception: tmux's
-// lexer reads it as end of input inside the quotes, so everything after it
-// is parsed as unquoted command text. A NUL cannot reach an argv at all. Both
-// are refused rather than quoted, before any command runs.
+// single byte 0x20-0xFE, for random multi-byte names over quotes, backslash,
+// $, #, {, }, ~, ;, 0x7F and high bytes, and for names such as
+// `'; kill-server; '`, `$HOME` and `#{pid}`, a guarded rename-session left
+// exactly the name a bare `rename-session -- <name>` left. (One difference
+// favours the guard: tmux's argv parser drops a trailing ';' from a bare
+// argv element, which the quoted form keeps.)
+//
+// Two classes of byte are refused rather than quoted, before any command
+// runs, with ErrUnsafeOperand:
+//
+//   - C0 controls (0x00-0x1F) and DEL (0x7F). tmux's lexer is not opaque
+//     inside single quotes: a newline followed by blanks collapses them
+//     ("a<LF> b" lands as "a<LF>b"), and backslash-newline is a line
+//     continuation even inside the quotes ("a\<LF>b" lands as "ab"). A NUL
+//     cannot reach an argv at all, and a 0x1F name is already invisible to
+//     ListSessions (it is FieldSep), so refusing it costs nothing a listing
+//     could show. DEL is refused with them as a control character.
+//   - 0xFF. The lexer reads it as end of input inside the quotes, so
+//     everything after it is parsed as unquoted command text.
 func quoteCommandOperand(s string) (string, error) {
-	if strings.IndexByte(s, 0x00) >= 0 || strings.IndexByte(s, 0xff) >= 0 {
-		return "", fmt.Errorf("%w: a NUL or 0xFF byte cannot be quoted for tmux's command parser", ErrUnsafeOperand)
+	for i := 0; i < len(s); i++ {
+		if b := s[i]; b < 0x20 || b == 0x7f || b == 0xff {
+			return "", fmt.Errorf("%w: byte 0x%02X at offset %d cannot be passed through tmux's command parser unchanged",
+				ErrUnsafeOperand, b, i)
+		}
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'", nil
 }
