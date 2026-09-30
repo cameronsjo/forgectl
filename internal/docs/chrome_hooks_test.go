@@ -397,7 +397,10 @@ func jsBlockEnd(src string, open int) int {
 			for j++; j < len(src) && src[j] != '\n'; j++ {
 				switch src[j] {
 				case '\\':
+					// Step over the escaped character, so an escaped
+					// slash (/^\/{/) does not end the literal.
 					j++
+					continue
 				case '[':
 					inClass = true
 				case ']':
@@ -421,7 +424,13 @@ func jsBlockEnd(src string, open int) int {
 
 // jsRegexCanStart reports whether a '/' after before opens a regex literal
 // rather than dividing: true after an operator, an opening bracket, or a
-// keyword like return, false after a value.
+// keyword that takes an expression (return, case, else, ...), false after a
+// value. A keyword counts only as a whole word, so admin / 2 divides.
+//
+// A '/' after ')' is always read as division. That is wrong for a regex
+// opening a statement after an if, for or while head (if (x) /re/.test(s)),
+// and telling the two apart needs the parser's paren tracking; the reader's
+// scripts never write one, and TestJSBlockEnd pins the division reading.
 func jsRegexCanStart(before string) bool {
 	t := strings.TrimRight(before, " \t\r\n")
 	if t == "" {
@@ -430,7 +439,26 @@ func jsRegexCanStart(before string) bool {
 	if strings.IndexByte("(,=:[!&|?{};+-*%<>~^", t[len(t)-1]) >= 0 {
 		return true
 	}
-	return strings.HasSuffix(t, "return") || strings.HasSuffix(t, "typeof")
+	for _, kw := range jsRegexKeywords {
+		if !strings.HasSuffix(t, kw) {
+			continue
+		}
+		rest := t[:len(t)-len(kw)]
+		if rest == "" || !isJSIdentByte(rest[len(rest)-1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// jsRegexKeywords are the keywords a regex literal can follow.
+var jsRegexKeywords = []string{
+	"await", "case", "delete", "do", "else", "in", "instanceof", "new",
+	"return", "throw", "typeof", "void", "yield",
+}
+
+func isJSIdentByte(c byte) bool {
+	return c == '_' || c == '$' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
 // wrapperBody is the source range of a selector wrapper's body and the name
@@ -650,6 +678,31 @@ func TestChrome_WrapperBodySkipsCommentsAndRegexes(t *testing.T) {
 		}
 		if !l.rooted && !l.passThrough {
 			t.Errorf("line %d: unrooted lookup %q", l.line, l.key)
+		}
+	}
+}
+
+// jsBlockEnd finds a block's closing brace past regex literals, including
+// ones with an escaped slash or after a keyword, and still reads a slash
+// after a value as division (forgectl#759).
+func TestJSBlockEnd(t *testing.T) {
+	for _, tc := range []struct {
+		name, src string
+		want      int // index of the closing brace, or -1
+	}{
+		{"escaped slash in a regex", `{ var r = /^\/{/; }`, 18},
+		{"escaped slash then a class", `{ r = /\/[{]/; }`, 15},
+		{"escape at the end of input", `{ r = /\`, -1},
+		{"regex after case", `{ switch (c) { case /{/.test(s): } }`, 35},
+		{"regex after else", `{ if (a) {} else /{/.test(s); }`, 30},
+		{"regex after void", `{ void /{/; }`, 12},
+		{"regex after in", `{ k in /{/; }`, 12},
+		{"regex after return", `{ return /{/; }`, 14},
+		{"division after an identifier ending in a keyword", `{ y = admin / 2; w = { a: 1 }; }`, 31},
+		{"division after a closing paren", `{ y = (a) / 2; w = { a: 1 }; }`, 29},
+	} {
+		if got := jsBlockEnd(tc.src, 0); got != tc.want {
+			t.Errorf("%s: jsBlockEnd(%q) = %d, want %d", tc.name, tc.src, got, tc.want)
 		}
 	}
 }

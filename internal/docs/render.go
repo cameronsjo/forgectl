@@ -1181,5 +1181,8 @@ func wrapFrontmatter(kvBody string, pairs int) string {
 	if pairs == 0 {
 		return ""
 	}
-	return `<div class="props">` + kvBody + `</div>`
+	// data-forgectl-props marks the reader's own block, which the shell lifts
+	// above a doc's tooltips (forgectl#759). A doc cannot forge it: the
+	// sanitizer strips every data-* attribute from author HTML.
+	return `<div class="props" data-forgectl-props>` + kvBody + `</div>`
 }
