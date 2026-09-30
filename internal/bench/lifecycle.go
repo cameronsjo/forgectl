@@ -20,7 +20,17 @@ import (
 func Up(ctx context.Context, cfg config.Config, runner exec.Runner, notes io.Writer) error {
 	brought := 0
 
-	if dir := cfg.Bench.ResolvedHearthDir(); dir != "" {
+	// Both resolve before either entrypoint runs, so an unresolvable home
+	// refuses the whole command rather than after hearth has started.
+	hearthDir, err := cfg.Bench.ResolveHearthDir()
+	if err != nil {
+		return fmt.Errorf("hearth: %w", err)
+	}
+	chronicleDir, err := cfg.Bench.ResolveChronicleDir()
+	if err != nil {
+		return fmt.Errorf("chronicle: %w", err)
+	}
+	if dir := hearthDir; dir != "" {
 		fmt.Fprintln(notes, "→ hearth: running scripts/start.sh")
 		if err := runner.RunInteractive(ctx, filepath.Join(dir, "scripts", "start.sh")); err != nil {
 			return fmt.Errorf("hearth start: %w", err)
@@ -30,7 +40,7 @@ func Up(ctx context.Context, cfg config.Config, runner exec.Runner, notes io.Wri
 		fmt.Fprintln(notes, "• hearth: skipped (set [bench].hearth_dir or $HEARTH_DIR)")
 	}
 
-	if dir := cfg.Bench.ResolvedChronicleDir(); dir != "" {
+	if dir := chronicleDir; dir != "" {
 		fmt.Fprintln(notes, "→ chronicle: running make sync")
 		if err := runner.RunInteractive(ctx, "make", "-C", dir, "sync"); err != nil {
 			return fmt.Errorf("chronicle sync: %w", err)

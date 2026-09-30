@@ -209,8 +209,11 @@ func TestBuildHub_NestedGroupsCarryTheirLeaves(t *testing.T) {
 	var check func(cmd *cobra.Command, leaves []tui.HubLeaf, path string)
 	check = func(cmd *cobra.Command, leaves []tui.HubLeaf, path string) {
 		for _, leaf := range leaves {
-			if leaf.Name == cmd.Name() {
-				continue // the synthetic self leaf
+			if leaf.Self {
+				if leaf.Name != cmd.Name() || !leaf.NeedsArgs || len(leaf.Leaves) > 0 {
+					t.Errorf("%s: self leaf = %+v, want %q, NeedsArgs, no leaves", path, leaf, cmd.Name())
+				}
+				continue
 			}
 			sub := findChild(cmd, leaf.Name)
 			if sub == nil {

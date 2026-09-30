@@ -137,11 +137,17 @@ type HubEntry struct {
 //
 // A leaf with Leaves is a nested group (pr findings): selecting it opens
 // those leaves as the next drill-down level rather than running it (#916).
+//
+// Self marks the synthetic bare-command leaf a NeedsArgs module or group
+// contributes for itself (pr's own "pr <ref>"): running it invokes the path
+// alone. It is a flag, not a name match, so a real subcommand that happens to
+// share its parent's name still runs as parent+child (#948).
 type HubLeaf struct {
 	Name      string
 	Short     string
 	Use       string
 	NeedsArgs bool
+	Self      bool
 	Leaves    []HubLeaf
 }
 
@@ -726,7 +732,7 @@ func (m *model) leaveGroup() {
 	m.leavesPath = m.leavesPath[:len(m.leavesPath)-1]
 	m.showLeaves(parent)
 	for i, l := range parent {
-		if l.Name == group {
+		if l.Name == group && !l.Self {
 			m.l.Select(i)
 			break
 		}
@@ -747,7 +753,7 @@ func (m *model) showLeaves(leaves []HubLeaf) {
 // (the module name, then any nested groups): the path, then the leaf name.
 func leafArgv(path []string, leaf HubLeaf) []string {
 	argv := append([]string(nil), path...)
-	if len(path) > 0 && leaf.Name == path[len(path)-1] {
+	if leaf.Self {
 		// The synthetic bare-command leaf a NeedsArgs module or group
 		// contributes (e.g. pr's own "pr <ref>") — running it means invoking
 		// the path alone, not module+module.

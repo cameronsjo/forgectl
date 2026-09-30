@@ -163,7 +163,7 @@ func hubOrder(cmd *cobra.Command) int {
 func buildLeaves(cmd *cobra.Command) []tui.HubLeaf {
 	var leaves []tui.HubLeaf
 	if parentTakesArg(cmd) {
-		leaves = append(leaves, tui.HubLeaf{Name: cmd.Name(), Short: cmd.Short, Use: cmd.Use, NeedsArgs: true})
+		leaves = append(leaves, tui.HubLeaf{Name: cmd.Name(), Short: cmd.Short, Use: cmd.Use, NeedsArgs: true, Self: true})
 	}
 	for _, sub := range cmd.Commands() {
 		if !sub.IsAvailableCommand() {

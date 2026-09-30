@@ -40,10 +40,17 @@ func IsUnsafeTerminalRune(r rune) bool {
 	return unicode.IsControl(r) || unicode.In(r, unicode.Bidi_Control)
 }
 
-// IsInvisibleRune reports whether r is a Unicode format character (category
-// Cf) or a line or paragraph separator (Zl, Zp): a rune that renders as
-// nothing, or as a break, rather than as a glyph. U+200B, U+FEFF, U+2060, the
-// soft hyphen, and the tag characters in U+E0001..U+E007F are all Cf.
+// IsInvisibleRune reports whether r renders as nothing or as a blank rather
+// than as a glyph: a Unicode format character (category Cf), a line or
+// paragraph separator (Zl, Zp), a variation selector, any other
+// Default_Ignorable_Code_Point, or U+2800 BRAILLE PATTERN BLANK. U+200B,
+// U+FEFF, U+2060, the soft hyphen, and the tag characters in U+E0001..U+E007F
+// are Cf. U+FE0F, U+E0100..U+E01EF and U+034F are Mn, and the Hangul fillers
+// U+115F, U+1160, U+3164 and U+FFA0 are Lo (#948). U+2800 is So and not
+// default-ignorable, but it displays as a space that strings.TrimSpace keeps,
+// so a value made of it passes a blank check. The Zs spaces stay out: they
+// render as the space they are, and TrimSpace trims them. Nothing else in Mn
+// is included, so decomposed accented text (e + U+0301) still passes.
 //
 // It is for VALIDATORS of a value that becomes an identifier or an argv
 // element, where an invisible rune makes two values that look identical
@@ -51,11 +58,17 @@ func IsUnsafeTerminalRune(r rune) bool {
 // out of IsUnsafeTerminalRune on purpose: that classifier also drives the
 // JSON filter and the text renderers, and broadening it would rewrite --json
 // output and every rendered value holding a ZWJ emoji sequence (see
-// TestVisibleQuotingDoesNotBroadenSharedClassifier). The renderers already
-// quote these runes visibly, because they are not graphic.
+// TestVisibleQuotingDoesNotBroadenSharedClassifier). The renderers quote the
+// Cf, Zl and Zp runes visibly, because they are not graphic; the variation
+// selectors, the other default-ignorables and U+2800 are graphic, so the
+// renderers show them as is.
 func IsInvisibleRune(r rune) bool {
-	return unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)
+	return r == brailleBlank ||
+		unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp, unicode.Variation_Selector, unicode.Other_Default_Ignorable_Code_Point)
 }
+
+// brailleBlank is U+2800 BRAILLE PATTERN BLANK (see IsInvisibleRune).
+const brailleBlank = '\u2800'
 
 // SafeLine turns arbitrary text into one inert physical terminal line. Go's
 // graphic quoting escapes C0/C1 controls, DEL, tabs/newlines, and Unicode
