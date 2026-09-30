@@ -496,9 +496,9 @@ var syncStoreDir = osRecordFS{}.SyncDir
 // resolver disagree with the kernel and see persist's post-write check refuse.
 var resolveStore = resolveStoreTarget
 
-// maxStoreLinkHops is the kernel's cap on symlinks followed in one lookup
-// (Linux's MAXSYMLINKS). resolveStoreTarget follows at most that many final
-// links. Directory links along the way count toward the kernel's cap but not
+// maxStoreLinkHops is Linux's cap on symlinks followed in one lookup
+// (MAXSYMLINKS; macOS's is lower, 32). resolveStoreTarget follows at most that
+// many final links. Directory links along the way count toward the kernel's cap but not
 // this one, which is why persist's kernel stats, not this cap, arbitrate.
 const maxStoreLinkHops = 40
 

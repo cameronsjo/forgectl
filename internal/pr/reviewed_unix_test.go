@@ -337,8 +337,8 @@ func linkChain(t *testing.T, dir string, n int) (store, final string) {
 	return filepath.Join(dir, "pr-reviewed.json"), filepath.Join(dir, "final.json")
 }
 
-// The kernel follows at most 40 symlinks in one lookup, so every load of a
-// 41-link chain reads ELOOP and loads empty. A Mark that wrote anyway would
+// The kernel follows at most 40 symlinks in one lookup (Linux; macOS 32), so
+// every load of a 41-link chain reads ELOOP and loads empty. A Mark that wrote anyway would
 // overwrite the store with one entry, and every later load would still read
 // nothing: silent loss. It must refuse, and leave the store's bytes alone.
 //
@@ -409,17 +409,23 @@ func TestReviewedPersist_ADanglingChainThroughDirLinksPastTheCapRefusesUnwritten
 	}
 }
 
-// A dangling chain of exactly 40 links is inside the kernel's cap: its lookup
+// A dangling chain of exactly the kernel's cap is inside it: its lookup
 // reaches the missing final name, so a write there is what every later load
-// reads. It must write, and load back.
+// reads. It must write, and load back. The cap is measured, not assumed:
+// Linux follows 40 links per lookup, macOS 32.
 //
-// Mutation that turns it red: cap resolveStoreTarget's walk at
-// maxStoreLinkHops iterations instead of maxStoreLinkHops+1 (the 40th link's
-// target is never looked up, and Mark refuses a store the kernel resolves).
+// Mutation that turns it red on Linux, where the kernel's cap equals
+// maxStoreLinkHops: cap resolveStoreTarget's walk at maxStoreLinkHops
+// iterations instead of maxStoreLinkHops+1 (the last link's target is never
+// looked up, and Mark refuses a store the kernel resolves).
 func TestReviewedPersist_ADanglingChainAtTheKernelCapWritesAndLoadsBack(t *testing.T) {
-	store, final := linkChain(t, t.TempDir(), 40)
+	n := kernelLinkCap(t)
+	if n > maxStoreLinkHops {
+		t.Skipf("this kernel follows %d links per lookup, more than the resolver's %d", n, maxStoreLinkHops)
+	}
+	store, final := linkChain(t, t.TempDir(), n)
 	if _, err := os.Stat(store); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("fixture: the kernel's stat of a dangling 40-link chain = %v, want ENOENT", err)
+		t.Fatalf("fixture: the kernel's stat of a dangling %d-link chain = %v, want ENOENT", n, err)
 	}
 	if err := LoadReviewed(store).Mark(testRef(7)); err != nil {
 		t.Fatalf("Mark: %v", err)
@@ -430,6 +436,24 @@ func TestReviewedPersist_ADanglingChainAtTheKernelCapWritesAndLoadsBack(t *testi
 	if _, err := os.Stat(final); err != nil {
 		t.Errorf("the chain's final target was not written: %v", err)
 	}
+}
+
+// kernelLinkCap measures how many symlinks this kernel follows in one lookup:
+// the longest dangling chain whose stat still reaches the missing final name.
+func kernelLinkCap(t *testing.T) int {
+	t.Helper()
+	longest := 0
+	for n := 1; n <= 64; n++ {
+		store, _ := linkChain(t, t.TempDir(), n)
+		if _, err := os.Stat(store); !errors.Is(err, fs.ErrNotExist) {
+			break
+		}
+		longest = n
+	}
+	if longest == 0 {
+		t.Fatal("the kernel resolves no symlink chain at all")
+	}
+	return longest
 }
 
 // A resolver that disagrees with the kernel, simulated through the
