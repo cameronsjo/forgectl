@@ -1589,3 +1589,37 @@ func TestDiscover_WingMembersOfACheckoutAreStillFound(t *testing.T) {
 		t.Errorf("a wing that is also a checkout must yield both itself and its members, got %v", got)
 	}
 }
+
+// TestLocalNames_MatchesDiscoverWithoutSpawning pins the hub picker's
+// projects source (forgectl#730): the same names Discover lists, sorted and
+// de-duplicated, from the filesystem walk alone — no git probe runs.
+func TestLocalNames_MatchesDiscoverWithoutSpawning(t *testing.T) {
+	tmp := t.TempDir()
+	mkCanonicalGitDir(t, tmp, "github.com", "cameronsjo", "forgectl")
+	mkCanonicalGitDir(t, tmp, "git.sjo.lol", "cameron", "forgectl") // same name, other host
+	mkGitDir(t, tmp, "homeclaw")
+	if err := os.Mkdir(filepath.Join(tmp, "notes"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	got := LocalNames(tmp)
+	if want := "forgectl,homeclaw,notes"; strings.Join(got, ",") != want {
+		t.Errorf("LocalNames = %v, want %s", got, want)
+	}
+
+	fake := &exec.FakeRunner{}
+	c := &Client{Dir: tmp, run: fake, gitBin: "git"}
+	projs, err := c.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projs) != 4 {
+		t.Errorf("Discover found %d projects after the walk was extracted, want 4: %+v", len(projs), projs)
+	}
+	if len(fake.Calls) == 0 {
+		t.Error("control: Discover spawned no git probe, so the fixture proves nothing about LocalNames")
+	}
+	if LocalNames(filepath.Join(tmp, "absent")) != nil {
+		t.Error("LocalNames of a missing root should be nil")
+	}
+}

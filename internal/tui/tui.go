@@ -94,9 +94,11 @@ const (
 // qualify.
 //
 // Argv is ActionRunVerb/ActionShowInvocation's payload: registry-derived
-// command/subcommand identifiers (ActionRunVerb) or a Use-line placeholder
-// text split on whitespace (ActionShowInvocation) — either way tokens this
-// program composed, never user input, so nothing here needs shell quoting.
+// command/subcommand identifiers, plus — for a picker choice — exactly one
+// operator-typed or candidate argument that PickerArgv validated (ActionRunVerb),
+// or a Use-line placeholder text split on whitespace (ActionShowInvocation).
+// It is dispatched as argv, never through a shell; echo it with DisplayArgv,
+// which quotes the operator's element rather than trusting it.
 type Action struct {
 	Kind    ActionKind
 	Pick    string
@@ -105,15 +107,26 @@ type Action struct {
 	Argv    []string
 }
 
-// HubEntry is one row of the hub's top screen, or one row of the flattened
-// "all commands" screen the hub's extension-tier aggregate row opens into.
-// Leaves is empty for a module with no runnable subverbs (e.g. doctor) —
-// selecting such a row runs it directly instead of drilling in.
+// HubEntry is one row of the hub's top screen. There are three shapes:
+//
+//   - a module row (Argv nil): Leaves is its drill-down list, empty for a
+//     module with no runnable subverbs (e.g. doctor), which runs directly. Use
+//     is the module's own Use line; when it names exactly one required
+//     argument (pr <ref>), enter opens the argument picker in place instead,
+//     and the picker's last row drills into Leaves;
+//   - a direct-command row (Argv set, the "recent" section): enter runs Argv,
+//     or opens the picker when NeedsArgs;
+//   - a Heading row: a section divider ("── recent ──") that the cursor skips
+//     and enter ignores.
 type HubEntry struct {
-	Name   string
-	Short  string
-	Core   bool
-	Leaves []HubLeaf
+	Name      string
+	Short     string
+	Core      bool
+	Leaves    []HubLeaf
+	Use       string
+	Argv      []string
+	NeedsArgs bool
+	Heading   bool
 }
 
 // HubLeaf is one runnable verb inside a HubEntry's drill-down list. NeedsArgs
@@ -127,24 +140,17 @@ type HubLeaf struct {
 	NeedsArgs bool
 }
 
-// hubAllCommandsPrefix identifies the synthetic aggregate HubEntry buildHub
-// appends for the extension tier. Its Leaves are flattened one level deeper
-// than a normal entry's — each Name is already a complete argv joined by
-// spaces ("docker prune", or "doctor" for a leafless module) — so leaf
-// selection there builds Argv by splitting the leaf's own Name instead of
-// pairing it with the enclosing entry's Name.
-const hubAllCommandsPrefix = "all commands"
-
-func isAllCommandsEntry(name string) bool {
-	return strings.HasPrefix(name, hubAllCommandsPrefix)
-}
-
 // RunOptions configures Run. Hub is the full ordered row set buildHub
 // produced (cli.buildHub); StartInTmux skips the hub and opens directly in
 // the tmux jumper (menuMode) — bare `forgectl tmux`'s behavior — with the hub
 // still one esc away.
+//
+// Header is the hub's status line and ArgSources feeds the argument picker,
+// keyed by the space-joined argv before the argument ("projects clone").
 type RunOptions struct {
 	Hub         []HubEntry
+	Header      HubHeader
+	ArgSources  map[string]ArgSource
 	StartInTmux bool
 	NoIcons     bool
 	Theme       theme.Theme
@@ -211,10 +217,16 @@ type model struct {
 	hub []HubEntry
 	// leaves is the drill-down list currently shown in leavesMode, and
 	// leavesParent is the enclosing HubEntry's Name — leafArgv/usageLine need
-	// it to build the right Argv (or detect the flattened "all commands"
-	// screen, where a leaf's own Name is already the full argv).
+	// it to build the right Argv.
 	leaves       []HubLeaf
 	leavesParent string
+
+	// header is the hub's status line; argSources feeds picker candidates.
+	header     HubHeader
+	argSources map[string]ArgSource
+	// picker is the open argument picker, or nil. While it is open it owns
+	// the keyboard (updatePicker).
+	picker *argPicker
 }
 
 // Run drives the TUI and returns the deferred Action (if any). The caller
@@ -258,6 +270,9 @@ func newModel(ctx context.Context, client *tmux.Client, opts RunOptions) model {
 		mode:    hubMode,
 		title:   "hub",
 		hub:     opts.Hub,
+
+		header:     opts.Header,
+		argSources: opts.ArgSources,
 	}
 	if opts.StartInTmux {
 		m.title = "menu"
@@ -358,6 +373,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if m.picker != nil {
+		return m.updatePicker(msg)
+	}
+
 	switch m.mode {
 	case formMode:
 		return m.updateForm(msg)
@@ -371,13 +390,53 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *model) applySize() {
 	narrow := m.width < 60
 	m.l.SetDelegate(itemDelegate{g: m.glyph, narrow: narrow, styles: m.styles})
-	body := m.height - 4
+	body := m.height - 4 - m.extraChromeLines()
 	if body < 3 {
 		body = 3
 	}
 	m.l.SetSize(m.width, body)
 	m.tree.SetWidth(m.width)
 	m.tree.SetHeight(body)
+}
+
+// extraChromeLines is what the hub screens draw below the list beyond the
+// shared header and footer: the "$ forgectl …" line, and the picker box
+// while one is open.
+func (m model) extraChromeLines() int {
+	if m.mode != hubMode && m.mode != leavesMode {
+		return 0
+	}
+	extra := 1
+	if m.picker != nil {
+		extra += pickerLines()
+	}
+	return extra
+}
+
+// skipHeading moves the hub cursor off a section divider, continuing in the
+// direction the last key moved it (up for an upward key), and back the other
+// way at the list's edge.
+func (m *model) skipHeading(up bool) {
+	isHeading := func() bool {
+		it, ok := m.l.SelectedItem().(hubItem)
+		return ok && it.entry.Heading
+	}
+	if !isHeading() {
+		return
+	}
+	move := func(up bool) {
+		if up {
+			m.l.CursorUp()
+		} else {
+			m.l.CursorDown()
+		}
+	}
+	before := m.l.Index()
+	move(up)
+	if isHeading() || m.l.Index() == before {
+		m.l.Select(before)
+		move(!up)
+	}
 }
 
 func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -440,6 +499,14 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.l, cmd = m.l.Update(msg)
+	if m.mode == hubMode {
+		switch key {
+		case "up", "k", "ctrl+p", "pgup", "left", "h", "home", "g":
+			m.skipHeading(true)
+		default:
+			m.skipHeading(false)
+		}
+	}
 	return m, cmd
 }
 
@@ -459,6 +526,21 @@ func (m model) activate() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		entry := it.entry
+		if entry.Heading {
+			return m, nil
+		}
+		if entry.Argv != nil {
+			if !entry.NeedsArgs {
+				m.action = Action{Kind: ActionRunVerb, Argv: append([]string(nil), entry.Argv...)}
+				return m, tea.Quit
+			}
+			if m.openPicker(entry.Argv, entry.Use, nil) {
+				return m, nil
+			}
+			usage := append(append([]string(nil), entry.Argv[:len(entry.Argv)-1]...), strings.Fields(entry.Use)...)
+			m.action = Action{Kind: ActionShowInvocation, Argv: usage}
+			return m, tea.Quit
+		}
 		if entry.Name == "tmux" {
 			// tmux's hub row opens today's unchanged tmux jumper rather than
 			// a drill-down list (Architecture: "opens today's menuMode
@@ -466,6 +548,13 @@ func (m model) activate() (tea.Model, tea.Cmd) {
 			m.title = "menu"
 			m.setList(m.menuItems())
 			m.mode = menuMode
+			return m, nil
+		}
+		if moduleNeedsArg(entry) {
+			// The module itself needs one argument (pr <ref>): ask for it
+			// here, with its subcommands one row away in the picker.
+			browse := entry
+			m.openPicker([]string{entry.Name}, entry.Use, &browse)
 			return m, nil
 		}
 		if len(entry.Leaves) == 0 {
@@ -481,6 +570,9 @@ func (m model) activate() (tea.Model, tea.Cmd) {
 		}
 		leaf := it.leaf
 		if leaf.NeedsArgs {
+			if m.openPicker(leafArgv(m.leavesParent, leaf), leaf.Use, nil) {
+				return m, nil
+			}
 			m.action = Action{Kind: ActionShowInvocation, Argv: strings.Fields(usageLine(m.leavesParent, leaf))}
 			return m, tea.Quit
 		}
@@ -575,6 +667,7 @@ func (m *model) toHub() {
 	m.title = "hub"
 	m.setList(hubItems(m.hub))
 	m.mode = hubMode
+	m.applySize()
 }
 
 // enterLeaves opens entry's drill-down list.
@@ -585,16 +678,12 @@ func (m *model) enterLeaves(entry HubEntry) {
 	m.leavesParent = entry.Name
 	m.setList(hubLeafItems(entry.Leaves))
 	m.mode = leavesMode
+	m.applySize()
 }
 
 // leafArgv builds the argv to run leaf, given the HubEntry.Name it was
-// listed under. Inside the "all commands" aggregate, a leaf's own Name is
-// already a complete argv joined by spaces (buildHub flattened it there);
-// everywhere else the module name and the leaf name are the two tokens.
+// listed under: the module name and the leaf name are the two tokens.
 func leafArgv(entryName string, leaf HubLeaf) []string {
-	if isAllCommandsEntry(entryName) {
-		return strings.Fields(leaf.Name)
-	}
 	if leaf.Name == entryName {
 		// The synthetic bare-module leaf a NeedsArgs module contributes
 		// (e.g. pr's own "pr <ref>") — running it means invoking the module
@@ -609,11 +698,6 @@ func leafArgv(entryName string, leaf HubLeaf) []string {
 // Use line (cobra convention) omits the parent's name.
 func usageLine(entryName string, leaf HubLeaf) string {
 	mod := entryName
-	if isAllCommandsEntry(entryName) {
-		if fields := strings.Fields(leaf.Name); len(fields) > 0 {
-			mod = fields[0]
-		}
-	}
 	if leaf.Use == mod || strings.HasPrefix(leaf.Use, mod+" ") {
 		return leaf.Use
 	}
@@ -791,14 +875,69 @@ func (m model) View() tea.View {
 	default:
 		body = m.l.View()
 	}
-	v := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, header, body, m.footerView()))
+	parts := []string{header, body}
+	if m.mode == hubMode || m.mode == leavesMode {
+		if m.picker != nil {
+			parts = append(parts, m.pickerView(), m.pickerDollar())
+		} else {
+			parts = append(parts, m.selectedDollar())
+		}
+	}
+	parts = append(parts, m.footerView())
+	v := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, parts...))
 	v.AltScreen = true
 	return v
 }
 
 func (m model) headerView() string {
 	brand := m.styles.Brand.Render(m.glyph.Forge) + "  " + m.styles.Header.Render(meta.AppName)
+	if m.mode == hubMode {
+		if line := m.header.Line(); line != "" {
+			return brand + m.styles.Muted.Render("  ·  "+line)
+		}
+	}
 	return brand + m.styles.Muted.Render("  ·  "+m.title)
+}
+
+// selectedDollar is the "$ forgectl …" line for the hub row under the
+// cursor (forgectl#730 item 3): the exact argv enter runs, or the Use-line
+// placeholder form when the row still needs an argument or drills into
+// subcommands. A divider row shows an empty line so the layout does not jump.
+func (m model) selectedDollar() string {
+	var argv []string
+	exact := false
+	switch it := m.l.SelectedItem().(type) {
+	case hubItem:
+		e := it.entry
+		switch {
+		case e.Heading:
+			return ""
+		case e.Argv != nil && !e.NeedsArgs:
+			argv, exact = e.Argv, true
+		case e.Argv != nil:
+			argv = append(append([]string(nil), e.Argv[:len(e.Argv)-1]...), strings.Fields(e.Use)...)
+		case e.Name == "tmux":
+			argv, exact = []string{e.Name}, true
+		case moduleNeedsArg(e):
+			argv = strings.Fields(e.Use)
+		case len(e.Leaves) == 0:
+			argv, exact = []string{e.Name}, true
+		default:
+			argv = []string{e.Name, "<subcommand>"}
+		}
+	case leafItem:
+		if it.leaf.NeedsArgs {
+			argv = strings.Fields(usageLine(m.leavesParent, it.leaf))
+		} else {
+			argv, exact = leafArgv(m.leavesParent, it.leaf), true
+		}
+	default:
+		return ""
+	}
+	if exact {
+		return m.styles.Fg.Render(dollarLine(argv))
+	}
+	return m.styles.Muted.Render("$ " + meta.AppName + " " + strings.Join(argv, " "))
 }
 
 func (m model) footerView() string {
@@ -806,10 +945,18 @@ func (m model) footerView() string {
 	var hint string
 	switch m.mode {
 	case hubMode:
+		if m.picker != nil {
+			hint = "enter run · tab edit · ↑↓ choose · esc back"
+			break
+		}
 		hint = "↑↓ move · 1-9 jump · enter select · / filter · q/esc quit · forgectl --help lists every command"
 	case menuMode:
 		hint = "1-6 / enter select · q/esc back"
 	case leavesMode:
+		if m.picker != nil {
+			hint = "enter run · tab edit · ↑↓ choose · esc back"
+			break
+		}
 		hint = "↑↓ · 1-9 · enter select · / filter · q/esc back"
 	case sessionsMode:
 		if narrow {

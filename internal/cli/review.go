@@ -96,10 +96,10 @@ func newReviewConfigErrorCmd(err error) *cobra.Command {
 		RunE:               fail,
 	}
 	cmd.AddCommand(
-		&cobra.Command{Use: "mark <ref>", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
-		&cobra.Command{Use: "unmark <ref>", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
-		&cobra.Command{Use: "sync", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
-		&cobra.Command{Use: "releases", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "mark <ref>", Short: "Mark a work item reviewed (dims it until it sees new activity)", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "unmark <ref>", Short: "Clear a work item's reviewed mark (un-dims it)", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "sync", Short: "Prune reviewed marks for work items that are no longer open", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "releases", Short: "Release radar: what each rhythm repo shipped, what waits, and what stalled", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
 	)
 	return cmd
 }
