@@ -17,6 +17,9 @@ import (
 //
 // For a tmux call, Args is the argv with the client's leading `-u` removed and
 // TmuxUTF8 records whether it was there (see tmuxView).
+//
+// Call and FakeRunner are compiled into the binary, but no production file
+// other than this one names them (TestNoProductionFileUsesTheFakeRunner).
 type Call struct {
 	Name        string
 	Args        []string

@@ -311,7 +311,7 @@ func (hr hookRunner) runHook(ctx context.Context, h HookSpec, d Decision) HookRu
 			rec.Outcome, rec.Exit, rec.Detail = OutcomeFailed, ce.ExitCode, outputTail(ce.Stderr)
 			if rec.Detail == "" && ce.ExitCode < 0 {
 				// It never ran (a missing program): the reason is on Err.
-				rec.Detail = termsafe.SafeLineMax(errors.Unwrap(ce).Error(), hookTailRunes)
+				rec.Detail = termsafe.SafeLineMax(redact.Text(errors.Unwrap(ce).Error()), hookTailRunes)
 			}
 		default:
 			rec.Outcome, rec.Detail = OutcomeFailed, termsafe.SafeLineMax(err.Error(), hookTailRunes)

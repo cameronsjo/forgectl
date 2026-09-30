@@ -375,7 +375,7 @@ func stepFailure(err error, ref string) string {
 	what := "failed"
 	var seqErr *updatepkg.SequenceError
 	if errors.As(err, &seqErr) {
-		what = termsafe.SafeLine(seqErr.Command) + " failed"
+		what = safeText(seqErr.Command) + " failed"
 	}
 	var cmdErr *exec.CommandError
 	if errors.As(err, &cmdErr) && cmdErr.ExitCode >= 0 {
@@ -454,7 +454,7 @@ func failedStepNames(results []updatepkg.Result) string {
 	var names []string
 	for _, res := range results {
 		if res.Failed() {
-			names = append(names, termsafe.SafeLine(res.Name))
+			names = append(names, safeLabel(res.Name))
 		}
 	}
 	return strings.Join(names, ", ")

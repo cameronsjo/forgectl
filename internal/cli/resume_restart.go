@@ -112,7 +112,7 @@ bad usage.`,
 			}
 			for _, id := range only {
 				if !resume.ValidSessionID(id) {
-					return WithExitCode(fmt.Errorf("--session %s is not a session id", safeTerm(id)), 2)
+					return WithExitCode(fmt.Errorf("--session %s is not a session id", safeLabel(id)), 2)
 				}
 			}
 			if timeout <= 0 {
@@ -169,7 +169,7 @@ func runResumeRestart(ctx context.Context, out io.Writer, deps module.Deps, only
 }
 
 // printRestartEvent renders one progress line. Every field can carry
-// registry- or herdr-derived text, so the whole line goes through safeTerm.
+// registry- or herdr-derived text, so the whole line goes through safeText.
 func printRestartEvent(out io.Writer, ev resume.RestartEvent) {
 	line := fmt.Sprintf("%-10s %s  %s", ev.State, ev.SessionID, ev.Detail)
 	if ev.Manual != "" {
@@ -178,7 +178,7 @@ func printRestartEvent(out io.Writer, ev resume.RestartEvent) {
 	// Dropped rather than returned: a closed terminal or broken pipe (SIGPIPE
 	// is ignored for the run) must not stop the run, and a run mid-restart is
 	// still bound to relaunch and confirm whether anyone reads the line.
-	_, _ = fmt.Fprintln(out, safeTerm(line))
+	_, _ = fmt.Fprintln(out, safeText(line))
 }
 
 // printRestartPreview renders --dry-run.
@@ -188,7 +188,7 @@ func printRestartPreview(out io.Writer, lines []resume.PreviewLine) error {
 		return err
 	}
 	for _, l := range lines {
-		if _, err := fmt.Fprintln(out, safeTerm(fmt.Sprintf("%-8s %s  %s", l.Action, l.SessionID, l.Detail))); err != nil {
+		if _, err := fmt.Fprintln(out, safeText(fmt.Sprintf("%-8s %s  %s", l.Action, l.SessionID, l.Detail))); err != nil {
 			return err
 		}
 	}

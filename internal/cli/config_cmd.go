@@ -447,14 +447,14 @@ func resolveLaunchView(cfg config.Config) launchResolvedView {
 func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, hosts hostResolvedView, resolved launchResolvedView) {
 	switch {
 	case rep.PathErr != nil:
-		fmt.Fprintf(out, "config file: (unavailable: %s)\n", termsafe.SafeLine(rep.PathErr.Error()))
+		_, _ = fmt.Fprintf(out, "config file: (unavailable: %s)\n", safeText(rep.PathErr.Error()))
 	case !rep.Found:
 		_, _ = fmt.Fprintf(out, "config file: %s (not found — using defaults; run forgectl init to create one)\n", termsafe.QuotePath(rep.Path))
 	default:
 		fmt.Fprintf(out, "config file: %s\n", termsafe.QuotePath(rep.Path))
 	}
 	if rep.DecodeErr != nil {
-		fmt.Fprintf(out, "  ! decode error: %s\n", termsafe.SafeLine(rep.DecodeErr.Error()))
+		_, _ = fmt.Fprintf(out, "  ! decode error: %s\n", safeText(rep.DecodeErr.Error()))
 		fmt.Fprintf(out, "  ! values below reflect only what parsed before the error\n")
 	}
 	fmt.Fprintln(out)
@@ -466,7 +466,7 @@ func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, h
 		writeEntry(out, entries[n])
 	}
 	fmt.Fprintf(out, "\nhost scalars resolved (built-in fallbacks applied)\n")
-	fmt.Fprintf(out, "  log_level  %s\n", termsafe.SafeLine(hosts.LogLevel))
+	_, _ = fmt.Fprintf(out, "  log_level  %s\n", safeTitle(hosts.LogLevel))
 	fmt.Fprintf(out, "  log_file   %s\n", termsafe.QuotePath(hosts.LogFile))
 
 	// lastTop tracks the top-level section so its header prints exactly once;
@@ -486,15 +486,15 @@ func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, h
 	}
 
 	fmt.Fprintf(out, "\n[launch] resolved (built-in fallbacks and binary precedence applied)\n")
-	fmt.Fprintf(out, "  launch.harness       %s\n", termsafe.SafeLine(resolved.Harness))
+	_, _ = fmt.Fprintf(out, "  launch.harness       %s\n", safeTitle(resolved.Harness))
 	if resolved.Harness == "pi" && resolved.Provider != "" {
-		_, _ = fmt.Fprintf(out, "  launch.provider      %s\n", termsafe.SafeLine(resolved.Provider))
+		_, _ = fmt.Fprintf(out, "  launch.provider      %s\n", safeTitle(resolved.Provider))
 	}
-	fmt.Fprintf(out, "  launch.model         %s\n", termsafe.SafeLine(resolved.Model))
+	_, _ = fmt.Fprintf(out, "  launch.model         %s\n", safeTitle(resolved.Model))
 	switch resolved.Harness {
 	case "codex":
-		fmt.Fprintf(out, "  launch.approval      %s\n", termsafe.SafeLine(resolved.ApprovalPolicy))
-		fmt.Fprintf(out, "  launch.sandbox       %s\n", termsafe.SafeLine(resolved.Sandbox))
+		_, _ = fmt.Fprintf(out, "  launch.approval      %s\n", safeTitle(resolved.ApprovalPolicy))
+		_, _ = fmt.Fprintf(out, "  launch.sandbox       %s\n", safeTitle(resolved.Sandbox))
 	case "claude":
 		// Spelled out rather than left blank: this block is a fixed field list,
 		// so an empty column would read as "unset" when the operative fact is
@@ -503,13 +503,14 @@ func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, h
 		if effort == "" {
 			effort = "(none — claude default)"
 		}
-		fmt.Fprintf(out, "  launch.effort        %s\n", termsafe.SafeLine(effort))
-		fmt.Fprintf(out, "  launch.permission    %s\n", termsafe.SafeLine(resolved.PermissionMode))
+		_, _ = fmt.Fprintf(out, "  launch.effort        %s\n", safeTitle(effort))
+		_, _ = fmt.Fprintf(out, "  launch.permission    %s\n", safeTitle(resolved.PermissionMode))
 		fmt.Fprintf(out, "  launch.allow_danger  %v\n", resolved.AllowDanger != nil && *resolved.AllowDanger)
 	}
-	// SafeLine, not QuotePath: resolveLaunchView overloads BinaryPath with
-	// "(unresolved: <error>)" when resolution fails, so it is not always a path.
-	fmt.Fprintf(out, "  %-20s %s\n", resolved.BinaryLabel, termsafe.SafeLine(resolved.BinaryPath))
+	// safeText, not a path helper: resolveLaunchView overloads BinaryPath with
+	// "(unresolved: <error>)" when resolution fails, so it is not always a
+	// path, and a middle cut would drop the error's own words.
+	_, _ = fmt.Fprintf(out, "  %-20s %s\n", resolved.BinaryLabel, safeText(resolved.BinaryPath))
 	fmt.Fprintf(out, "  launch.projects      %d configured\n", resolved.Projects)
 
 	if len(rep.Unrecognized) > 0 {
@@ -532,7 +533,7 @@ func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, h
 // Only display is escaped. The key is code-authored — it comes from the struct
 // tags walkStruct reads — so escaping it would be escaping our own text.
 func writeEntry(out io.Writer, e configEntry) {
-	fmt.Fprintf(out, "  %-34s %-28s %s\n", e.Key, termsafe.SafeLine(e.display), provenance(e.Set))
+	_, _ = fmt.Fprintf(out, "  %-34s %-28s %s\n", e.Key, safeText(e.display), provenance(e.Set))
 }
 
 // provenance renders the set/default marker that distinguishes "the file asked

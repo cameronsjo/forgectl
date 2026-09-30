@@ -148,7 +148,7 @@ func runDocsRead(cmd *cobra.Command, deps module.Deps, target string, timeout ti
 	// document is and leave the browsing to a command that says it serves.
 	if !rt.stdinIsTerminal(cmd.InOrStdin()) || !rt.stdoutIsTerminal(cmd.OutOrStdout()) {
 		_, _ = fmt.Fprintln(errOut, why+"; not starting the HTML reader without a terminal; run `forgectl docs serve --open` to browse")
-		_, _ = fmt.Fprintln(cmd.OutOrStdout(), termsafe.SafeLine(path))
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), safeColumnPath(path))
 		return nil
 	}
 	_, _ = fmt.Fprintf(errOut, "%s; opening %s in the HTML reader\n", why, termsafe.QuotePath(doc.RelPath))

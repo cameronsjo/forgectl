@@ -148,7 +148,7 @@ func printThemeShow(out io.Writer, th theme.Theme) error {
 		}
 	}
 	for _, w := range th.Warnings() {
-		if _, err := fmt.Fprintf(out, "\n%s %s\n", th.Marks().Warn, termsafe.SafeLine(w)); err != nil {
+		if _, err := fmt.Fprintf(out, "\n%s %s\n", th.Marks().Warn, safeText(w)); err != nil {
 			return err
 		}
 	}
@@ -217,7 +217,7 @@ func printThemePreview(out io.Writer, th theme.Theme) error {
 func resolveTheme(cfg config.Config) theme.Theme {
 	opts, err := theme.FromConfig(cfg.Theme)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "forgectl: "+termsafe.SafeLine("[theme] ignored: "+err.Error()))
+		fmt.Fprintln(os.Stderr, "forgectl: "+safeText("[theme] ignored: "+err.Error()))
 		return theme.Default()
 	}
 	return theme.New(opts, theme.Detect(opts.Mode, theme.Env{}, nil))

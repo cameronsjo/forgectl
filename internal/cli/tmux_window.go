@@ -52,8 +52,8 @@ func newTmuxWindowsCmd(client *tmux.Client) *cobra.Command {
 				// Both names are tmux's — chosen by whoever created the session
 				// and the window — so each is neutralized on its way to the
 				// terminal. SafeLine is a no-op on an ordinary name.
-				location := fmt.Sprintf("%s:%d", termsafe.SafeLine(win.Session), win.Index)
-				fmt.Fprintf(w, "%s\t%s\t%s\t%d %s\n", marker, location, termsafe.SafeLine(win.Name), win.Panes, unit)
+				location := fmt.Sprintf("%s:%d", safeTitle(win.Session), win.Index)
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d %s\n", marker, location, safeTitle(win.Name), win.Panes, unit)
 			}
 			return w.Flush()
 		},

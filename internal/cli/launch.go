@@ -168,7 +168,7 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 
 	effLaunch, notice, effFrom := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
 	if notice != "" {
-		fmt.Fprintln(os.Stderr, "forgectl: "+termsafe.SafeLine(notice))
+		fmt.Fprintln(os.Stderr, "forgectl: "+safeText(notice))
 	}
 	cfg.Launch = effLaunch
 	lc, _ := resolveLaunchConfig(boundary, cfg, effFrom)
@@ -201,7 +201,7 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	// the cheapest way to eyeball the resolved effort.
 	launch.EmitBanner(os.Stderr, built)
 
-	slog.Debug("Preparing to exec harness.", "harness", termsafe.SafeLine(profile.Harness), "path", termsafe.QuotePath(built.Invocation.Binary.Path), "argc", len(built.Invocation.Args), "match", termsafe.SafeLine(profile.Match))
+	slog.Debug("Preparing to exec harness.", "harness", safeLabel(profile.Harness), "path", termsafe.QuotePath(built.Invocation.Binary.Path), "argc", len(built.Invocation.Args), "match", safeText(profile.Match))
 
 	// One event, immediately before the exec that would replace this process.
 	// Everything that can refuse the launch — profile validation, the Codex
@@ -279,7 +279,7 @@ func resolveLaunchConfig(boundary *config.LegacyMigrationBoundary, cfg config.Co
 	case !errors.Is(err, config.ErrNoLegacyLaunch):
 		// A malformed or unreadable legacy file shouldn't block normal launch —
 		// warn and fall through to config.toml (an absent file is silent).
-		slog.Warn("Ignoring unreadable legacy claunch config.", "path", termsafe.QuotePath(legacyPath), "error", termsafe.SafeLine(err.Error()))
+		slog.Warn("Ignoring unreadable legacy claunch config.", "path", termsafe.QuotePath(legacyPath), "error", safeText(err.Error()))
 	}
 	switch _, err := os.Stat(path); {
 	case err == nil:
@@ -352,7 +352,7 @@ func autoMigrateOrWarnLegacyLaunch(boundary *config.LegacyMigrationBoundary, cfg
 					return ""
 				}
 				return termsafe.QuotePath(boundary.LegacyPath)
-			}(), "error", termsafe.SafeLine(result.Err.Error()))
+			}(), "error", safeText(result.Err.Error()))
 	case result.Err != nil:
 		slog.Warn("Automatic claunch.conf migration did not fully retire the source.",
 			"path", func() string {
@@ -360,7 +360,7 @@ func autoMigrateOrWarnLegacyLaunch(boundary *config.LegacyMigrationBoundary, cfg
 					return ""
 				}
 				return termsafe.QuotePath(boundary.LegacyPath)
-			}(), "error", termsafe.SafeLine(result.Err.Error()), "commit", result.Commit, "backup", result.Backup, "retirement", result.Retirement)
+			}(), "error", safeText(result.Err.Error()), "commit", result.Commit, "backup", result.Backup, "retirement", result.Retirement)
 	}
 	return result.Effective, result.Notice, result.EffectiveFrom
 }

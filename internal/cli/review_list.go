@@ -127,9 +127,9 @@ func renderReviewTable(out, errOut io.Writer, items []review.Item, store *pr.Rev
 	for _, it := range items {
 		if _, err := fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n",
 			it.Kind, it.Slug(), it.Number,
-			safeTerm(it.Title),
-			safeTerm(strings.Join(it.Labels, ",")),
-			safeTerm(reviewStateLabel(it))); err != nil {
+			safeTitle(it.Title),
+			safeText(strings.Join(it.Labels, ",")),
+			safeLabel(reviewStateLabel(it))); err != nil {
 			return err
 		}
 	}

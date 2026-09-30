@@ -33,8 +33,9 @@ var unsafePointerAllowed = map[string]string{}
 // names: "<file relative to the module root> <name>" for a use of one of
 // refusedReflectMethods or refusedMemoryFuncs, "<file> embed <type>" for an
 // embedding, and "<file> interface <Type>.<method>" for a declared
-// interface (<Type> is the declared name, or the literal's text for an
-// interface literal). It is empty: no production file does any of these
+// interface (<Type> is the declared name, qualified by its enclosing
+// declaration when it is function-local, as declaredInterfaces names it; or
+// the literal's text for an interface literal). It is empty: no production file does any of these
 // today (forgectl#888, forgectl#897), and a new entry must name why the file
 // needs it.
 var reflectMemoryAllowed = map[string]string{}
@@ -143,38 +144,8 @@ func TestNoFileReadsMemoryThroughReflect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := osexec.LookPath("go"); err != nil {
-		t.Fatalf("the go tool is not on PATH, and it is the only source of the package set: %v", err)
-	}
-	type result struct {
-		p        guardPlatform
-		findings []string
-		checked  []string
-		err      error
-	}
-	results := make([]*result, len(guardPlatforms))
-	var wg sync.WaitGroup
-	// Two platforms at a time: each holds the type-checked standard library
-	// and every dependency in memory.
-	sem := make(chan struct{}, 2)
-	for i, p := range guardPlatforms {
-		r := &result{p: p}
-		results[i] = r
-		wg.Go(func() {
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			r.findings, r.checked, r.err = typedGuardPlatform(t.Context(), root, p)
-		})
-	}
-	wg.Wait()
 	byFinding := map[string][]string{}
-	for _, r := range results {
-		if r.err != nil {
-			t.Fatalf("[%s] %v", r.p, r.err)
-		}
-		if !slices.Contains(r.checked, execImportPath) || !slices.Contains(r.checked, modulePath+"/internal/tmux") {
-			t.Fatalf("[%s] type-checked %d packages, internal/exec and internal/tmux not both among them; the package set is broken, not the module clean", r.p, len(r.checked))
-		}
+	for _, r := range typedGuardResults(t, root) {
 		for _, f := range r.findings {
 			byFinding[f] = append(byFinding[f], r.p.String())
 		}
@@ -187,6 +158,151 @@ func TestNoFileReadsMemoryThroughReflect(t *testing.T) {
 	for _, f := range keys {
 		t.Errorf("%s [%s]", f, strings.Join(slices.Compact(byFinding[f]), " "))
 	}
+}
+
+// typedResult is one platform's typed guard pass: the reflect findings
+// (TestNoFileReadsMemoryThroughReflect), the fake-runner findings
+// (TestNoProductionFileUsesTheFakeRunner), how many uses of the fake runner
+// its own file makes, and the import paths checked.
+type typedResult struct {
+	p        guardPlatform
+	findings []string
+	fake     []string
+	fakeOwn  int
+	checked  []string
+	err      error
+}
+
+var (
+	typedResultsMu sync.Mutex
+	typedResults   []*typedResult
+)
+
+// typedGuardResults runs typedGuardPlatform for every platform in
+// guardPlatforms once per test binary, so the two tests reading it share one
+// type-checking pass, and fails the test on a broken pass.
+func typedGuardResults(t *testing.T, root string) []*typedResult {
+	t.Helper()
+	if _, err := osexec.LookPath("go"); err != nil {
+		t.Fatalf("the go tool is not on PATH, and it is the only source of the package set: %v", err)
+	}
+	typedResultsMu.Lock()
+	defer typedResultsMu.Unlock()
+	if typedResults == nil {
+		results := make([]*typedResult, len(guardPlatforms))
+		var wg sync.WaitGroup
+		// Two platforms at a time: each holds the type-checked standard
+		// library and every dependency in memory.
+		sem := make(chan struct{}, 2)
+		for i, p := range guardPlatforms {
+			r := &typedResult{p: p}
+			results[i] = r
+			wg.Go(func() {
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				r.findings, r.fake, r.fakeOwn, r.checked, r.err = typedGuardPlatform(t.Context(), root, p)
+			})
+		}
+		wg.Wait()
+		typedResults = results
+	}
+	for _, r := range typedResults {
+		if r.err != nil {
+			t.Fatalf("[%s] %v", r.p, r.err)
+		}
+		if !slices.Contains(r.checked, execImportPath) || !slices.Contains(r.checked, modulePath+"/internal/tmux") {
+			t.Fatalf("[%s] type-checked %d packages, internal/exec and internal/tmux not both among them; the package set is broken, not the module clean", r.p, len(r.checked))
+		}
+	}
+	return typedResults
+}
+
+// fakeRunnerFile is the one production file that may name FakeRunner or Call.
+const fakeRunnerFile = "internal/exec/fake.go"
+
+// TestNoProductionFileUsesTheFakeRunner pins #926's option (b): FakeRunner
+// and Call are compiled into the binary (about 180 test files in 28 packages
+// import them, so moving them behind a build tag or into an exectest package
+// was not taken), and they record argv, stdin and env unmasked in exported
+// fields. So no production file but fake.go itself may name either type, one
+// of their fields or one of their methods, on any platform in guardPlatforms
+// and under either cgo setting. A value of either type exists only where
+// something names it, so a production file that never does can never hold
+// one. Test files are not production files and are not checked.
+//
+// Mutation that turns it red: a production file in internal/tmux declaring
+// `var _ = exec.FakeRunner{}`, or `func calls(r *exec.FakeRunner) int {
+// return len(r.Calls) }`.
+func TestNoProductionFileUsesTheFakeRunner(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	byFinding := map[string][]string{}
+	for _, r := range typedGuardResults(t, root) {
+		if r.fakeOwn == 0 {
+			t.Fatalf("[%s] %s names FakeRunner and Call nowhere the matcher saw: the matcher is broken, not the module clean", r.p, fakeRunnerFile)
+		}
+		for _, f := range r.fake {
+			byFinding[f] = append(byFinding[f], r.p.String())
+		}
+	}
+	keys := make([]string, 0, len(byFinding))
+	for f := range byFinding {
+		keys = append(keys, f)
+	}
+	slices.Sort(keys)
+	for _, f := range keys {
+		t.Errorf("%s [%s]", f, strings.Join(slices.Compact(byFinding[f]), " "))
+	}
+}
+
+// fakeRunnerObjects is every object a use of FakeRunner or Call resolves to:
+// the two type names, their fields, and their methods.
+func fakeRunnerObjects(execPkg *types.Package) (map[types.Object]bool, error) {
+	objs := map[types.Object]bool{}
+	for _, name := range []string{"FakeRunner", "Call"} {
+		tn, ok := execPkg.Scope().Lookup(name).(*types.TypeName)
+		if !ok {
+			return nil, fmt.Errorf("internal/exec declares no %s type; the fake-runner rule would check nothing", name)
+		}
+		objs[tn] = true
+		st, ok := tn.Type().Underlying().(*types.Struct)
+		if !ok {
+			return nil, fmt.Errorf("%s is not a struct", name)
+		}
+		for f := range st.Fields() {
+			objs[f] = true
+		}
+		ms := types.NewMethodSet(types.NewPointer(tn.Type()))
+		for sel := range ms.Methods() {
+			objs[sel.Obj()] = true
+		}
+	}
+	return objs, nil
+}
+
+// fakeRunnerFindings reports each use of objs in files outside
+// fakeRunnerFile, and counts the uses inside it.
+func fakeRunnerFindings(fset *token.FileSet, files []*ast.File, info *types.Info, objs map[types.Object]bool, rel func(string) string) (findings []string, own int) {
+	for _, file := range files {
+		name := rel(fset.Position(file.Pos()).Filename)
+		ast.Inspect(file, func(n ast.Node) bool {
+			id, ok := n.(*ast.Ident)
+			if !ok || !objs[info.Uses[id]] {
+				return true
+			}
+			if name == fakeRunnerFile {
+				own++
+				return true
+			}
+			pos := fset.Position(id.Pos())
+			findings = append(findings, name+":"+strconv.Itoa(pos.Line)+":"+strconv.Itoa(pos.Column)+": uses exec."+id.Name+
+				", the test double that records argv, stdin and env unmasked; production code runs commands through OSRunner (forgectl#926)")
+			return true
+		})
+	}
+	return findings, own
 }
 
 // typedListPackage is the part of `go list -deps -json` output the typed guard
@@ -234,14 +350,14 @@ func listTypedPackages(ctx context.Context, root string, p guardPlatform, cgo st
 // function bodies: under cgo on, the standard library's cgo files would need
 // the C toolchain, and no dependency's exported surface differs by cgo in a
 // way a module file could name.
-func typedGuardPlatform(ctx context.Context, root string, p guardPlatform) (findings, checked []string, err error) {
+func typedGuardPlatform(ctx context.Context, root string, p guardPlatform) (findings, fake []string, fakeOwn int, checked []string, err error) {
 	off, err := listTypedPackages(ctx, root, p, "0")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, nil, err
 	}
 	on, err := listTypedPackages(ctx, root, p, "1")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, nil, err
 	}
 	inTree := func(listing map[string]*typedListPackage) map[string]*typedListPackage {
 		mod := map[string]*typedListPackage{}
@@ -260,7 +376,7 @@ func typedGuardPlatform(ctx context.Context, root string, p guardPlatform) (find
 	}
 	fset := token.NewFileSet()
 	depPkgs := map[string]*types.Package{}
-	seen := map[string]bool{}
+	seen, seenFake := map[string]bool{}, map[string]bool{}
 	for _, mod := range passes {
 		l := &typedLoader{
 			root: root, fset: fset, sizes: types.SizesFor("gc", p.goarch),
@@ -274,16 +390,24 @@ func typedGuardPlatform(ctx context.Context, root string, p guardPlatform) (find
 		slices.Sort(paths)
 		for _, path := range paths {
 			if _, err := l.module(path); err != nil {
-				return nil, nil, err
+				return nil, nil, 0, nil, err
 			}
 		}
 		reflectPkg, err := l.dep("reflect")
 		if err != nil {
-			return nil, nil, fmt.Errorf("load reflect for %s: %w", p, err)
+			return nil, nil, 0, nil, fmt.Errorf("load reflect for %s: %w", p, err)
 		}
 		rule, err := newReflectRule(reflectPkg)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, nil, err
+		}
+		execPkg := l.modPkgs[execImportPath]
+		if execPkg == nil {
+			return nil, nil, 0, nil, fmt.Errorf("internal/exec was not type-checked for %s; the fake-runner rule would check nothing", p)
+		}
+		fakeObjs, err := fakeRunnerObjects(execPkg)
+		if err != nil {
+			return nil, nil, 0, nil, err
 		}
 		for _, c := range l.checked {
 			checked = append(checked, c.path)
@@ -293,9 +417,17 @@ func typedGuardPlatform(ctx context.Context, root string, p guardPlatform) (find
 					findings = append(findings, f)
 				}
 			}
+			ff, own := fakeRunnerFindings(fset, c.files, c.info, fakeObjs, l.rel)
+			fakeOwn += own
+			for _, f := range ff {
+				if !seenFake[f] {
+					seenFake[f] = true
+					fake = append(fake, f)
+				}
+			}
 		}
 	}
-	return findings, checked, nil
+	return findings, fake, fakeOwn, checked, nil
 }
 
 // sameFileSets reports whether a and b list the same packages with the same
@@ -493,15 +625,8 @@ func typedFindings(fset *token.FileSet, files []*ast.File, info *types.Info, rul
 			return p == "unsafe"
 		})
 		checkPointer := !importsUnsafe && unsafePointerAllowed[name] == ""
-		// declared names each interface type written as a type declaration's
-		// right-hand side; ast.Inspect visits the TypeSpec before its type.
-		declared := map[*ast.InterfaceType]string{}
+		declared := declaredInterfaces(file)
 		ast.Inspect(file, func(n ast.Node) bool {
-			if ts, ok := n.(*ast.TypeSpec); ok {
-				if it, ok := ts.Type.(*ast.InterfaceType); ok {
-					declared[it] = ts.Name.Name
-				}
-			}
 			if expr, ok := n.(ast.Expr); ok && checkPointer {
 				if tv, ok := info.Types[expr]; ok && holdsUnsafePointer(tv.Type, map[types.Type]bool{}) {
 					report(expr.Pos(), fmt.Sprintf("%s has type %s, which holds unsafe.Pointer, in a file that does not import \"unsafe\"; converted to *T it reads any memory, a sealed payload included; add the file to unsafePointerAllowed with a reason only after review",
@@ -555,6 +680,63 @@ func typedFindings(fset *token.FileSet, files []*ast.File, info *types.Info, rul
 		})
 	}
 	return findings
+}
+
+// declaredInterfaces names each interface type in file written as a type
+// declaration's right-hand side, for reflectMemoryAllowed's key. A
+// package-level declaration keeps its bare name. A function-local one is
+// qualified by the declaration it sits in, so two local interfaces with one
+// name in one file key apart (#926): "f.I" inside func f, "T.m.I" inside
+// method m of T, "v.I" inside package-level var v's initializer, and "f.I#2"
+// for a second I declared in f.
+func declaredInterfaces(file *ast.File) map[*ast.InterfaceType]string {
+	declared := map[*ast.InterfaceType]string{}
+	seen := map[string]int{}
+	name := func(scope string, ts *ast.TypeSpec) {
+		it, ok := ts.Type.(*ast.InterfaceType)
+		if !ok {
+			return
+		}
+		key := ts.Name.Name
+		if scope != "" {
+			key = scope + "." + key
+		}
+		if seen[key]++; seen[key] > 1 {
+			key += "#" + strconv.Itoa(seen[key])
+		}
+		declared[it] = key
+	}
+	local := func(scope string, n ast.Node) {
+		ast.Inspect(n, func(n ast.Node) bool {
+			if ts, ok := n.(*ast.TypeSpec); ok {
+				name(scope, ts)
+			}
+			return true
+		})
+	}
+	for _, d := range file.Decls {
+		switch d := d.(type) {
+		case *ast.FuncDecl:
+			scope := d.Name.Name
+			if d.Recv != nil && len(d.Recv.List) == 1 {
+				scope = recvBase(d.Recv.List[0].Type) + "." + scope
+			}
+			local(scope, d)
+		case *ast.GenDecl:
+			for _, spec := range d.Specs {
+				switch sp := spec.(type) {
+				case *ast.TypeSpec:
+					// A type expression holds no declaration of its own.
+					name("", sp)
+				case *ast.ValueSpec:
+					for _, v := range sp.Values {
+						local(sp.Names[0].Name, v)
+					}
+				}
+			}
+		}
+	}
+	return declared
 }
 
 // promotes returns a refused reflect method that embedding a field of type t
@@ -725,8 +907,8 @@ func holdsUnsafePointer(t types.Type, seen map[types.Type]bool) bool {
 // reflect.Value); drop the refusedMemoryFuncs check, or WriteHeapDump from
 // that list (the runtime/debug rows go quiet; a name the standard library no
 // longer declares fails newTypedProbe); key the interface allowlist on the
-// method alone, or on the literal text for a declared interface too (the
-// allowlist row fails).
+// method alone, or on the literal text for a declared interface too, or on
+// a local interface's bare name (the allowlist row fails).
 func TestTypedFindingsSeeEveryRoute(t *testing.T) {
 	const prelude = "package probe\n\nimport \"reflect\"\n\nvar _ reflect.Value\n\ntype sealedArg struct{ reveal func() string }\n\n"
 	rows := []struct {
@@ -872,6 +1054,23 @@ func g[T any](x J[T]) T { return x.Size() }`, false},
 		}
 		if !slices.ContainsFunc(got, func(f string) bool { return strings.Contains(f, "interface J with method Addr") }) {
 			t.Errorf("I's entry cleared J too; the key is not on the interface type:\n%s", strings.Join(got, "\n"))
+		}
+		// #926: a function-local interface keys on its enclosing
+		// declaration, so f's entry leaves g's I, and a second I in f,
+		// refused.
+		locals := "package probe\n\nimport \"net\"\n\n" +
+			"func f() { type I interface{ Addr() net.Addr }; { type I interface{ Addr() net.Addr } } }\n\n" +
+			"func g() { type I interface{ Addr() net.Addr } }\n"
+		reflectMemoryAllowed["probe.go interface f.I.Addr"] = "probe: a local interface's key"
+		defer delete(reflectMemoryAllowed, "probe.go interface f.I.Addr")
+		got = probe.findings(t, locals)
+		for _, want := range []string{"interface g.I with method Addr", "interface f.I#2 with method Addr"} {
+			if !slices.ContainsFunc(got, func(f string) bool { return strings.Contains(f, want) }) {
+				t.Errorf("no finding naming %q; f.I's entry cleared another local interface named I:\n%s", want, strings.Join(got, "\n"))
+			}
+		}
+		if slices.ContainsFunc(got, func(f string) bool { return strings.Contains(f, "interface f.I with") }) {
+			t.Errorf("an entry keyed \"probe.go interface f.I.Addr\" does not clear f's I:\n%s", strings.Join(got, "\n"))
 		}
 		lit := "package probe\n\nfunc f(x interface{ Pointer() int }) {}\n"
 		reflectMemoryAllowed["probe.go interface interface{Pointer() int}.Pointer"] = "probe: a literal's key"

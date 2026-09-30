@@ -152,7 +152,7 @@ func printTasksList(out io.Writer, snap tasks.Snapshot, includeDone bool) error 
 		return err
 	}
 	for _, r := range rows {
-		if _, err := fmt.Fprintf(out, "%6d  %s\n", r.ID, termsafe.SafeLine(r.Title)); err != nil {
+		if _, err := fmt.Fprintf(out, "%6d  %s\n", r.ID, safeTitle(r.Title)); err != nil {
 			return err
 		}
 	}
@@ -208,11 +208,11 @@ func printTaskDetail(out io.Writer, t tasks.Task) error {
 	if t.Done {
 		status = "done"
 	}
-	if _, err := fmt.Fprintf(out, "#%d  %s  [%s]\n", t.ID, termsafe.SafeLine(t.Title), status); err != nil {
+	if _, err := fmt.Fprintf(out, "#%d  %s  [%s]\n", t.ID, safeTitle(t.Title), status); err != nil {
 		return err
 	}
 	if t.Description != "" {
-		if _, err := fmt.Fprintf(out, "\n%s\n", termsafe.SafeLine(t.Description)); err != nil {
+		if _, err := fmt.Fprintf(out, "\n%s\n", safeText(t.Description)); err != nil {
 			return err
 		}
 	}
@@ -233,7 +233,7 @@ func printTaskDetail(out io.Writer, t tasks.Task) error {
 			if rel.Done {
 				relStatus = "done"
 			}
-			if _, err := fmt.Fprintf(out, "  %-12s #%d  %s  [%s]\n", kind, rel.ID, termsafe.SafeLine(rel.Title), relStatus); err != nil {
+			if _, err := fmt.Fprintf(out, "  %-12s #%d  %s  [%s]\n", kind, rel.ID, safeTitle(rel.Title), relStatus); err != nil {
 				return err
 			}
 		}
@@ -375,7 +375,7 @@ func reportCacheFallback(stderr io.Writer, host string, fromCache bool, snap tas
 	}
 	age := time.Since(snap.FetchedAt).Round(time.Second)
 	fmt.Fprintf(stderr, "forgectl: %s unreachable — serving cached data, %s old\n", //nolint:errcheck // best-effort stderr notice
-		termsafe.SafeLine(host), age)
+		safeTitle(host), age)
 }
 
 // tasksExitError maps a tasks package sentinel to its distinct exit code
