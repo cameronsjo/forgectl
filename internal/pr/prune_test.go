@@ -21,6 +21,8 @@ package pr
 //   [x] The intent row precedes the unlink and carries the record's bytes
 //   [x] A failed intent row removes nothing
 //   [x] A byte mismatch against the pinned re-read refuses
+//   [x] A same-bytes copy swapped in after the Lstat is refused on identity,
+//       at the pin read and at the removal re-read (#791)
 //   [x] A compaction rename failure leaves the old log intact and readable
 //   [x] Compaction's own intent row survives into the new file
 //   [x] An over-long line compacts and survives byte-identical, in place (#544)
@@ -34,6 +36,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -495,7 +498,10 @@ func TestPrune_AByteMismatchAgainstThePinnedRereadRefuses(t *testing.T) {
 	path := seedAside(t, c, "o-r-1-1.json", 60*24*time.Hour, []byte("{not json"))
 
 	original := readAsideBytes
-	readAsideBytes = func(*os.Root, string) ([]byte, error) { return []byte("{different"), nil }
+	readAsideBytes = func(root *os.Root, name string) ([]byte, fs.FileInfo, error) {
+		_, info, err := original(root, name)
+		return []byte("{different"), info, err
+	}
 	t.Cleanup(func() { readAsideBytes = original })
 
 	report, err := c.Prune(context.Background(), defaultPruneOpts())
@@ -507,6 +513,78 @@ func TestPrune_AByteMismatchAgainstThePinnedRereadRefuses(t *testing.T) {
 	}
 	if _, serr := os.Stat(path); serr != nil {
 		t.Errorf("a file that changed under the sweep was removed anyway: %v", serr)
+	}
+}
+
+// swapAsideForCopy installs beforeAsideRead so that its nth call replaces the
+// set-aside file with a same-bytes copy: a new inode, the same name and bytes.
+// Call 1 is pinAsideCandidate's read, call 2 removeAsideFile's re-read.
+func swapAsideForCopy(t *testing.T, c *Client, nth int) {
+	t.Helper()
+	calls := 0
+	original := beforeAsideRead
+	t.Cleanup(func() { beforeAsideRead = original })
+	beforeAsideRead = func(name string) {
+		calls++
+		if calls != nth {
+			return
+		}
+		path := filepath.Join(c.SessionsDir(), name)
+		data, err := os.ReadFile(filepath.Clean(path))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		// Written beside the original and renamed over it, so the copy's inode
+		// is allocated while the original's is still in use and cannot reuse
+		// its number.
+		copyPath := path + ".copy"
+		if err := os.WriteFile(copyPath, data, 0o600); err != nil { //nolint:gosec // G703: a name beside the test's own seeded set-aside file
+			t.Error(err)
+		}
+		if err := os.Rename(copyPath, path); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+// A same-bytes copy swapped in between a set-aside file's Lstat and its read
+// is refused before its bytes, which match, could approve it (#791). At the
+// pin the refusal is the item's (refused); at the removal it lands after the
+// intent row (failed). Either way the copy stays on disk.
+//
+// Mutations that turn it red: drop the os.SameFile(readInfo, info) check in
+// pinAsideCandidate (the pin case pins the copy, and the removal's own Lstat
+// then refuses it as failed, not refused); or drop the os.SameFile(readInfo,
+// cand.info) check in removeAsideFile (the removal case removes the copy).
+func TestPrune_ASameBytesCopySwappedInAfterTheLstatIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		nth  int
+		want string
+	}{
+		{"at the pin read", 1, pruneOutcomeRefused},
+		{"at the removal re-read", 2, pruneOutcomeFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := pruneClient(t, repairRunner(nil))
+			path := seedAside(t, c, "o-r-1-1.json", 60*24*time.Hour, []byte("{not json"))
+			swapAsideForCopy(t, c, tc.nth)
+
+			report, err := c.Prune(context.Background(), defaultPruneOpts())
+			if err != nil {
+				t.Fatalf("Prune: %v", err)
+			}
+			if len(report.Items) != 1 || report.Items[0].Outcome != tc.want {
+				t.Fatalf("items = %+v, want one %q item", report.Items, tc.want)
+			}
+			if !strings.Contains(report.Items[0].Error, "changed identity") {
+				t.Errorf("error = %q, want the identity refusal", report.Items[0].Error)
+			}
+			if _, serr := os.Stat(path); serr != nil {
+				t.Errorf("the swapped-in copy was removed: %v", serr)
+			}
+		})
 	}
 }
 

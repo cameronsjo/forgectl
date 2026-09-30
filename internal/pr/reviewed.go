@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -387,8 +388,20 @@ func (s *ReviewedStore) SyncKeysScoped(openKeys []string, activeHosts []string) 
 	return nil
 }
 
-// persist writes the store to disk, creating the parent dir as needed — the
-// exact write shape internal/net uses (MkdirAll 0o700 → WriteFile 0o600).
+// persist writes the store to disk, creating the parent dir as needed.
+//
+// The write is atomic (forgectl#791): the bytes go to a fresh temp file in the
+// destination's own directory (os.CreateTemp: O_EXCL, 0600), which is synced
+// and then renamed over the destination. A crash mid-write leaves the old
+// store whole instead of truncated. And the destination is Lstat'ed first: a
+// FIFO, or anything else that is not a regular file, is refused before any
+// write, where os.WriteFile would block in its open waiting for a reader.
+//
+// A symlink at the store path is resolved first, and the rename replaces the
+// file the link names, never the link. The store lives under the user's config
+// dir, where dotfile managers link files in (readReviewedFile follows the link
+// for the same reason), and renaming over the link would silently turn it into
+// a plain file. A dangling link resolves to the file it would create.
 func (s *ReviewedStore) persist() error {
 	if s.path == "" {
 		return errors.New("pr: reviewed store path unset")
@@ -396,10 +409,84 @@ func (s *ReviewedStore) persist() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
 	}
+	dest, err := resolveStoreTarget(s.path)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(dest)
+	switch {
+	case err == nil && !info.Mode().IsRegular():
+		return &os.PathError{Op: "write", Path: dest, Err: errRecordNotRegular}
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return err
+	}
 	// termsafe:allow-raw-json persisted review timestamp, never command output
 	data, err := json.Marshal(s.at)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, data, 0o600)
+	return writeFileAtomic(dest, data)
+}
+
+// maxStoreLinkHops bounds resolveStoreTarget, as the kernel bounds a lookup
+// (Linux's MAXSYMLINKS is 40).
+const maxStoreLinkHops = 40
+
+// errStoreLinkLoop is resolveStoreTarget's refusal of a link chain longer than
+// maxStoreLinkHops.
+var errStoreLinkLoop = errors.New("too many levels of symbolic links")
+
+// resolveStoreTarget follows symlinks at path's final component until it
+// reaches a name that is not a link, which may not exist yet. A relative link
+// target is taken relative to the link's own directory, as the kernel takes it.
+func resolveStoreTarget(path string) (string, error) {
+	cur := filepath.Clean(path)
+	for range maxStoreLinkHops {
+		info, err := os.Lstat(cur)
+		if errors.Is(err, fs.ErrNotExist) {
+			return cur, nil
+		}
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			return cur, nil
+		}
+		next, err := os.Readlink(cur)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(next) {
+			next = filepath.Join(filepath.Dir(cur), next)
+		}
+		cur = filepath.Clean(next)
+	}
+	return "", &os.PathError{Op: "resolve", Path: path, Err: errStoreLinkLoop}
+}
+
+// writeFileAtomic writes data to a new temp file beside dest and renames it
+// over dest. The temp file is removed on any failure before the rename.
+func writeFileAtomic(dest string, data []byte) (err error) {
+	tmp, err := os.CreateTemp(filepath.Dir(dest), "."+filepath.Base(dest)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, werr := tmp.Write(data); werr != nil {
+		_ = tmp.Close()
+		return werr
+	}
+	if serr := tmp.Sync(); serr != nil {
+		_ = tmp.Close()
+		return serr
+	}
+	if cerr := tmp.Close(); cerr != nil {
+		return cerr
+	}
+	return os.Rename(tmpName, dest)
 }

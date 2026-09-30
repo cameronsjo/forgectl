@@ -4,6 +4,7 @@ package pr
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,15 @@ import (
 //       blocking the open
 //   [x] A store symlinked in (a dotfile manager's layout) still loads
 //   [x] A store over the 8 KiB record bound still loads in full
+//
+// Test plan for persist's write (forgectl#791)
+//
+//   [x] A FIFO at the store path refuses Mark fast instead of blocking the
+//       open, and leaves the FIFO in place
+//   [x] The write replaces the store by rename (a new inode, 0600), leaving
+//       no temp file behind
+//   [x] A symlinked store is written through: the link stays a link and its
+//       target gets the marks, including a dangling link's target
 
 // writeReviewedStore writes a store holding n marks and returns the path.
 func writeReviewedStore(t *testing.T, dir string, n int) string {
@@ -99,5 +109,110 @@ func TestLoadReviewed_AStoreOverTheRecordBoundLoadsInFull(t *testing.T) {
 	}
 	if got := len(LoadReviewed(path).at); got != n {
 		t.Errorf("a %d-byte store loaded %d marks, want %d", info.Size(), got, n)
+	}
+}
+
+// Nobody ever reads the FIFO, so an open for writing would wait forever.
+//
+// Mutations that turn it red: drop persist's non-regular Lstat refusal (the
+// rename replaces the FIFO and Mark succeeds); or restore the pre-#791 form,
+// os.WriteFile(s.path, data, 0o600) with no Lstat, whose open blocks for a
+// reader until mustFailFast times out.
+func TestReviewedPersist_AFIFORefusesFast(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pr-reviewed.json")
+	fifoAt(t, path)
+	s := LoadReviewed(path)
+
+	err := mustFailFast(t, "Mark on a FIFO store", func() error { return s.Mark(testRef(7)) })
+	if !errors.Is(err, errRecordNotRegular) {
+		t.Fatalf("Mark err = %v, want errRecordNotRegular", err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("the FIFO is gone: %v", err)
+	}
+	if info.Mode()&os.ModeNamedPipe == 0 {
+		t.Errorf("the FIFO was replaced by a %v", info.Mode())
+	}
+}
+
+// Mutation that turns it red: write in place with os.WriteFile(dest, data,
+// 0o600) instead of writeFileAtomic (the inode survives the write).
+func TestReviewedPersist_ReplacesTheStoreByRename(t *testing.T) {
+	dir := t.TempDir()
+	path := writeReviewedStore(t, dir, 2)
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := LoadReviewed(path).Mark(testRef(7)); err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, after) {
+		t.Error("the store was rewritten in place; want a new file renamed over it")
+	}
+	if perm := after.Mode().Perm(); perm != 0o600 {
+		t.Errorf("store mode = %v, want 0600", perm)
+	}
+	if got := len(LoadReviewed(path).at); got != 3 {
+		t.Errorf("store holds %d marks after Mark, want 3", got)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("dir holds %v, want only the store (no temp file left behind)", names)
+	}
+}
+
+// Mutation that turns it red: in persist, use s.path as the destination
+// instead of resolveStoreTarget(s.path). The Lstat then sees a symlink, which
+// is not a regular file, and Mark refuses; renaming over it instead would
+// replace the link with a plain file.
+func TestReviewedPersist_WritesThroughASymlinkedStore(t *testing.T) {
+	cases := map[string]bool{"existing target": true, "dangling link": false}
+	for name, existing := range cases {
+		t.Run(name, func(t *testing.T) {
+			targetDir := t.TempDir()
+			target := filepath.Join(targetDir, "pr-reviewed.json")
+			if existing {
+				target = writeReviewedStore(t, targetDir, 2)
+			}
+			link := filepath.Join(t.TempDir(), "pr-reviewed.json")
+			// A relative target, resolved against the link's dir as the kernel does.
+			rel, err := filepath.Rel(filepath.Dir(link), target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(rel, link); err != nil {
+				t.Fatal(err)
+			}
+			if err := LoadReviewed(link).Mark(testRef(7)); err != nil {
+				t.Fatalf("Mark through a symlinked store: %v", err)
+			}
+			info, err := os.Lstat(link)
+			if err != nil {
+				t.Fatalf("the store link is gone: %v", err)
+			}
+			if info.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("the store link was replaced by a %v", info.Mode())
+			}
+			want := 1
+			if existing {
+				want = 3
+			}
+			if got := len(LoadReviewed(target).at); got != want {
+				t.Errorf("the link's target holds %d marks, want %d", got, want)
+			}
+		})
 	}
 }

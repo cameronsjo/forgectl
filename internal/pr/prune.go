@@ -707,9 +707,14 @@ func pinAsideCandidate(root *os.Root, cand *asideCandidate) error {
 		return fmt.Errorf("set-aside record %s is not a regular file; refusing to remove it",
 			termsafe.QuotePath(cand.path))
 	}
-	data, err := readFileInRoot(root, cand.name)
+	beforeAsideRead(cand.name)
+	data, readInfo, err := readFileInRoot(root, cand.name)
 	if err != nil {
 		return err
+	}
+	if !os.SameFile(readInfo, info) {
+		return fmt.Errorf("set-aside record %s changed identity before it could be read; refusing to remove it",
+			termsafe.QuotePath(cand.path))
 	}
 	cand.info = info
 	cand.bytes = data
@@ -835,9 +840,14 @@ func (c *Client) removeAsideFile(cand *asideCandidate, dirInfo fs.FileInfo) erro
 		return fmt.Errorf("set-aside record %s is no longer a regular file; refusing to remove it",
 			termsafe.QuotePath(cand.path))
 	}
-	data, err := readAsideBytes(root, cand.name)
+	beforeAsideRead(cand.name)
+	data, readInfo, err := readAsideBytes(root, cand.name)
 	if err != nil {
 		return err
+	}
+	if !os.SameFile(readInfo, cand.info) {
+		return fmt.Errorf("set-aside record %s changed identity before its re-read; refusing to remove it",
+			termsafe.QuotePath(cand.path))
 	}
 	if !bytes.Equal(data, cand.bytes) {
 		return fmt.Errorf("set-aside record %s changed on disk during prune; refusing to remove it — "+
@@ -858,24 +868,35 @@ func (c *Client) removeAsideFile(cand *asideCandidate, dirInfo fs.FileInfo) erro
 // read, so staging a real writer there would be a race a test cannot win.
 var readAsideBytes = readFileInRoot
 
+// beforeAsideRead runs between a set-aside file's root.Lstat and its read,
+// in both pinAsideCandidate and removeAsideFile. It is a no-op in production;
+// a test sets it to swap the entry in exactly the window the Lstat cannot
+// cover (forgectl#791). Tests must restore it and must not run in parallel
+// while overriding it.
+var beforeAsideRead = func(string) {}
+
 // readFileInRoot reads one bounded file through a pinned directory handle. It
 // is the shared body behind the pin read and the re-read, so the two cannot
 // drift into reading the file differently — which would make their byte
 // comparison meaningless.
-func readFileInRoot(root *os.Root, name string) ([]byte, error) {
-	file, _, err := openRegularInRoot(root, name)
+//
+// It returns the descriptor's own Fstat alongside the bytes, so each caller
+// can prove the file it read is the one its Lstat checked (os.SameFile), as
+// the teardown re-reads do (forgectl#791).
+func readFileInRoot(root *os.Root, name string) ([]byte, fs.FileInfo, error) {
+	file, info, err := openRegularInRoot(root, name)
 	if err != nil {
-		return nil, fmt.Errorf("read set-aside record %s: %w", termsafe.QuotePath(name), termsafe.Error(err))
+		return nil, nil, fmt.Errorf("read set-aside record %s: %w", termsafe.QuotePath(name), termsafe.Error(err))
 	}
 	data, readErr := readBreadcrumbBytes(file)
 	closeErr := file.Close()
 	if readErr != nil {
-		return nil, fmt.Errorf("read set-aside record %s: %w", termsafe.QuotePath(name), termsafe.Error(readErr))
+		return nil, nil, fmt.Errorf("read set-aside record %s: %w", termsafe.QuotePath(name), termsafe.Error(readErr))
 	}
 	if closeErr != nil {
-		return nil, fmt.Errorf("close set-aside record %s after reading: %w", termsafe.QuotePath(name), termsafe.Error(closeErr))
+		return nil, nil, fmt.Errorf("close set-aside record %s after reading: %w", termsafe.QuotePath(name), termsafe.Error(closeErr))
 	}
-	return data, nil
+	return data, info, nil
 }
 
 // compactRepairLog rewrites the audit log without its settled, expired rows.
