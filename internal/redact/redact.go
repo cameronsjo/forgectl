@@ -12,6 +12,11 @@
 // that could be a credential-bearing locator (it holds an '@', "://" or "::")
 // is shown only when it parses positively as a plain host/owner/repo, and
 // then as exactly that; otherwise it is replaced whole.
+//
+// Arg and Text serve exec's rendering of argv and stderr. LogRepo serves a
+// caller logging one repository argument (internal/sandbox), where a local
+// path is also shown as is. Both use Repo's shapes, so there is one
+// allowlist.
 package redact
 
 import (
@@ -29,8 +34,7 @@ const ArgMarker = "[redacted-arg]"
 // written down:
 //
 //   - verbatim when it is Plain;
-//   - as "host/owner/repo" when it is a plain remote repository locator
-//     (Repo);
+//   - as "host/owner/repo" when it is exactly one of Repo's shapes;
 //   - otherwise ArgMarker, whole.
 func Arg(s string) string {
 	if Plain(s) {
@@ -71,60 +75,83 @@ func Text(s string) string {
 	return b.String()
 }
 
-// tmuxID is a tmux window id such as "@8": digits only, so it cannot hold a
-// credential, and tmux argv carries it constantly.
-var tmuxID = regexp.MustCompile(`^@[0-9]+$`)
-
 // Plain reports whether s can be written down as is: it holds no "://" and
 // no "::" (a URL, or git's transport-helper form http::…), and no '@' other
-// than in a shape that cannot carry userinfo: a tmux window id (@8), or git's
-// reflog syntax (@{upstream}, main@{u}), where every '@' is followed by '{'
-// and there is no ':' for an scp-like host:path.
+// than in a shape that cannot carry userinfo. With no ':' in s (so no
+// scp-like host:path), an '@' that starts s has no userinfo before it (a tmux
+// window id @8, gh's @me), and one followed by '{' is git's reflog syntax
+// (@{upstream}, main@{u}), whose "{…}" is no host.
 func Plain(s string) bool {
 	if strings.Contains(s, "://") || strings.Contains(s, "::") {
 		return false
 	}
-	if !strings.Contains(s, "@") || tmuxID.MatchString(s) {
+	if !strings.Contains(s, "@") {
 		return true
 	}
 	if strings.Contains(s, ":") {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
-		if s[i] == '@' && (i+1 == len(s) || s[i+1] != '{') {
+		if s[i] == '@' && i > 0 && (i+1 == len(s) || s[i+1] != '{') {
 			return false
 		}
 	}
 	return true
 }
 
+// RemoteRepoPlaceholder is what LogRepo shows for a non-local repository
+// that is not exactly one of the accepted shapes.
+const RemoteRepoPlaceholder = "[remote repo]"
+
+// Positive parses for Repo. repoHostPattern is a DNS-style hostname with no
+// '@', ':', '[' or '%'. repoPartPattern is one owner or repo path segment.
 const (
-	hostPattern = `[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?`
-	segPattern  = `[A-Za-z0-9._-]{1,100}`
+	repoHostPattern = `([A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?)`
+	repoPartPattern = `([A-Za-z0-9._-]{1,100})`
 )
 
-// repoLocator is the strict positive parse behind Repo. It admits only a
-// scheme from a fixed set, an optional literal "git@" user (the standard ssh
-// user, never a credential), a host of letters, digits, '.' and '-', an
-// optional numeric port, and exactly two path segments. Any other userinfo,
-// a third segment, a query, or a stray byte fails the whole match.
-var repoLocator = regexp.MustCompile(
-	`^(?:(?:https?|ssh|git)://(?:git@)?(` + hostPattern + `)(?::[0-9]{1,5})?/|git@(` + hostPattern + `):)(` + segPattern + `)/(` + segPattern + `)/?$`)
+// repoShapes are the only forms Repo renders, each anchored at both ends:
+// https with no userinfo, ssh as the git user with an optional port, and
+// scp-like as the git user.
+var repoShapes = []*regexp.Regexp{
+	regexp.MustCompile(`^https://` + repoHostPattern + `/` + repoPartPattern + `/` + repoPartPattern + `$`),
+	regexp.MustCompile(`^ssh://git@` + repoHostPattern + `(?::[0-9]{1,5})?/` + repoPartPattern + `/` + repoPartPattern + `$`),
+	regexp.MustCompile(`^git@` + repoHostPattern + `:` + repoPartPattern + `/` + repoPartPattern + `$`),
+}
 
 // Repo renders a remote repository locator as "host/owner/repo" when it is
-// exactly one of scheme://[git@]host[:port]/owner/repo[/] (scheme http,
-// https, ssh or git) or git@host:owner/repo. The rendering is built only from
-// the matched host and segments, so nothing else the string held is shown.
+// exactly one of https://host/owner/repo, ssh://git@host[:port]/owner/repo or
+// git@host:owner/repo, rebuilt from the captured fields only, with a
+// trailing ".git" dropped. Anything else (userinfo, a query, a fragment,
+// "::", percent-escapes, backslashes, whitespace, bracketed IPv6, odd slash
+// counts, a third segment, every other scheme) is not a match.
 func Repo(s string) (string, bool) {
-	m := repoLocator.FindStringSubmatch(s)
-	if m == nil {
-		return "", false
+	for _, shape := range repoShapes {
+		if m := shape.FindStringSubmatch(s); m != nil {
+			return m[1] + "/" + m[2] + "/" + strings.TrimSuffix(m[3], ".git"), true
+		}
 	}
-	h := m[1]
-	if h == "" {
-		h = m[2]
+	return "", false
+}
+
+// LogRepo renders a repository argument (a clone URL or a local path) for a
+// log line without any credential it carries (#711, #734). A local path
+// (HasLocalPathPrefix) is shown as is; a Repo shape as host/owner/repo;
+// anything else as RemoteRepoPlaceholder.
+func LogRepo(repo string) string {
+	if HasLocalPathPrefix(repo) {
+		return repo
 	}
-	return h + "/" + m[3] + "/" + m[4], true
+	if r, ok := Repo(repo); ok {
+		return r
+	}
+	return RemoteRepoPlaceholder
+}
+
+// HasLocalPathPrefix reports whether repo is spelled as a filesystem path:
+// absolute, ./ or ../ relative, or ".".
+func HasLocalPathPrefix(repo string) bool {
+	return strings.HasPrefix(repo, "/") || strings.HasPrefix(repo, "./") || strings.HasPrefix(repo, "../") || repo == "."
 }
 
 func isSpace(c byte) bool {
