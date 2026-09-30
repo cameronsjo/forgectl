@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -91,5 +94,81 @@ func TestSeshPick_PassesOrdinaryNameToSesh(t *testing.T) {
 		if last.Args[i] != want[i] {
 			t.Fatalf("args = %q, want %q", last.Args, want)
 		}
+	}
+}
+
+// symlinkOrSkip creates link -> target, skipping where the platform refuses
+// symlinks (unprivileged Windows).
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable here: %v", err)
+	}
+}
+
+// A '#'-free candidate that is a symlink to a '#' directory: sesh's namer
+// resolves it with EvalSymlinks and names the session after the target, so
+// the '#' reaches tmux although the candidate has none.
+func TestSeshPick_RefusesSymlinkToHashDir(t *testing.T) {
+	root := t.TempDir()
+	hostile := filepath.Join(root, "x#(id)")
+	if err := os.Mkdir(hostile, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "innocent")
+	symlinkOrSkip(t, hostile, link)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	symlinkOrSkip(t, hostile, filepath.Join(home, "proj"))
+
+	for _, name := range []string{link, "~/proj"} {
+		t.Run(name, func(t *testing.T) {
+			fake := liveServer()
+			err := seshPick(context.Background(), seshPickClient(fake), name)
+			if !errors.Is(err, errSeshUnsafeCandidate) {
+				t.Fatalf("err = %v, want errSeshUnsafeCandidate", err)
+			}
+			if n := seshCalls(fake); n != 0 {
+				t.Fatalf("sesh was invoked %d time(s); the gate must refuse before sesh runs", n)
+			}
+		})
+	}
+}
+
+// The resolution must not over-refuse: a symlink to a clean directory still
+// reaches sesh, under the name the user picked.
+func TestSeshPick_PassesSymlinkToCleanDir(t *testing.T) {
+	root := t.TempDir()
+	clean := filepath.Join(root, "project")
+	if err := os.Mkdir(clean, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "alias")
+	symlinkOrSkip(t, clean, link)
+
+	fake := liveServer()
+	if err := seshPick(context.Background(), seshPickClient(fake), link); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n := seshCalls(fake); n != 1 {
+		t.Fatalf("sesh calls = %d, want 1", n)
+	}
+	if got := fake.Last().Args; got[len(got)-1] != link {
+		t.Fatalf("sesh got %q, want the picked name %q", got, link)
+	}
+}
+
+// The refusal echoes a name nobody at the terminal chose, so its length is
+// capped rather than printed whole.
+func TestSeshPick_RefusalEchoIsCapped(t *testing.T) {
+	name := "/tmp/x#(" + strings.Repeat("a", 20000) + ")"
+	err := seshPick(context.Background(), seshPickClient(liveServer()), name)
+	if !errors.Is(err, errSeshUnsafeCandidate) {
+		t.Fatalf("err = %v, want errSeshUnsafeCandidate", err)
+	}
+	if n := len(err.Error()); n > 4096 {
+		t.Fatalf("refusal message is %d bytes; the echoed name must be capped", n)
 	}
 }
