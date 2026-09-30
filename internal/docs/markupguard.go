@@ -176,14 +176,14 @@ func containerWorkOver(source []byte) bool {
 		quotes, lists, cols, i := 0, 0, 0, 0
 	prefix:
 		for i < len(line) {
-			switch c := line[i]; {
-			case c == ' ':
+			switch line[i] {
+			case ' ':
 				cols++
 				i++
-			case c == '\t':
+			case '\t':
 				cols += 4 - cols%4
 				i++
-			case c == '>':
+			case '>':
 				quotes++
 				i++
 			default:
