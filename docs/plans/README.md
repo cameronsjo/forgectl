@@ -18,7 +18,6 @@ Being built now.
 - [forgectl docs fix-up — Artificer 0.25 upgrade + full docs slate](2026-08-31-docs-fix-up-artificer-025-and-full-slate.md)
 - [forgectl TUI — one lipgloss, an Artificer theme for the whole binary, and a hub menu](2026-09-05-tui-theme-and-hub.md)
 - [Review-autonomy spine — design](2026-09-11-review-autonomy-spine-design.md)
-- [Harness update hooks — Roadmap (2026-09-29)](2026-09-29-harness-update-hooks-roadmap.md)
 
 ## Proposed
 
@@ -52,6 +51,7 @@ Built. Read as history, not as a spec: the shipped behavior and its ADR are the 
 - [forgectl: the hub menu and the experience-fix batch](2026-09-09-forgectl-the-hub-menu-and-the-experience-fix-batch.md)
 - [Review-autonomy spine: #299 → #472 → #473](2026-09-11-review-autonomy-spine.md)
 - [`env set --sops` — write one key into a SOPS file without exposing the value](2026-09-12-env-set-sops.md)
+- [Harness update hooks — Roadmap (2026-09-29)](2026-09-29-harness-update-hooks-roadmap.md)
 
 ## Superseded
 
