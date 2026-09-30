@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/sandbox"
@@ -46,7 +47,8 @@ func (c *Client) FindingsList() ([]FindingsEntry, error) {
 			continue
 		}
 		full := filepath.Join(c.findingsDir, e.Name())
-		info, err := e.Info()
+		// Through the store handle: DirEntry.Info is an lstat by path.
+		info, err := store.Lstat(e.Name())
 		if err != nil {
 			slog.Warn("Skipping findings entry with unreadable info.", "path", full, "error", err)
 			continue
@@ -93,7 +95,10 @@ var errFindingsChildMoved = errors.New("findings dir changed between the check a
 // and proves it is the same directory as checked, the Lstat result the
 // caller already judged a plain directory (forgectl#685). Everything cleanup
 // then reads about the dir, its marker and its size, goes through that
-// handle, so the dir that is judged is the dir the store handle removes.
+// handle, and so does the emptying of its contents at removal
+// (removeJudgedFindingsDir). Only the final rmdir goes by name, and rmdir
+// cannot take a directory that still holds anything, so the handle is what
+// binds the removal to the dir that was judged.
 //
 // store.OpenRoot follows a symlink that stays inside the store, so a name
 // swapped for one after the caller's Lstat would open some other findings
@@ -221,7 +226,8 @@ func (c *Client) FindingsCleanup(ctx context.Context, olderThan time.Duration, a
 	var unmarked int
 	for _, e := range entries {
 		full := filepath.Join(c.findingsDir, e.Name())
-		info, err := e.Info()
+		// Through the store handle: DirEntry.Info is an lstat by path.
+		info, err := store.Lstat(e.Name())
 		if err != nil {
 			slog.Warn("Skipping findings entry with unreadable info.", "path", full, "error", err)
 			continue
@@ -348,16 +354,21 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, store *os.Root, f
 		// plain directory, defeating the symlink check that follows.
 		full = filepath.Clean(full)
 		// The store is opened ONCE, by the caller, and the plain-dir check,
-		// the marker read, the size, and the removal below all go through that
-		// handle or the child handle opened from it (forgectl#644,
-		// forgectl#685). A path-based RemoveAll after an Lstat re-resolved
-		// every component at removal time, so a store (or ancestor) swapped
-		// for a symlink between the check and the removal redirected it
-		// outside the store. The handle pins the directory that was checked,
-		// and os.Root refuses any name that would climb out of it, which is
-		// also why no path-based containment check (sandbox.WithinWorkspace)
-		// runs here any more: it would resolve the path at a different moment
-		// from the one the handle was opened at.
+		// the marker read, the size, and the emptying of the dir below all go
+		// through that handle or the child handle opened from it
+		// (forgectl#644, forgectl#685). A path-based RemoveAll after an Lstat
+		// re-resolved every component at removal time, so a store (or
+		// ancestor) swapped for a symlink between the check and the removal
+		// redirected it outside the store. The handle pins the directory that
+		// was checked, and os.Root refuses any name that would climb out of
+		// it, which is also why no path-based containment check
+		// (sandbox.WithinWorkspace) runs here any more: it would resolve the
+		// path at a different moment from the one the handle was opened at.
+		//
+		// The name inside the store is not pinned: another dir can be renamed
+		// onto it at any moment. So the removal never deletes BY NAME what it
+		// has not emptied through the child handle; see
+		// removeJudgedFindingsDir.
 		name := filepath.Base(full)
 		info, err := store.Lstat(name)
 		if err != nil {
@@ -382,14 +393,11 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, store *os.Root, f
 		// reverse flip, a live record deleted mid-check, only keeps a dir
 		// that could have gone, and teardown deletes records under this same
 		// lock, so it cannot land inside this hold anyway.
-		skip := c.skipLiveFindingsDir(child, full, unmarked)
-		size := findingsDirSize(child)
-		// Closed before the removal: an open handle on a directory blocks
-		// its deletion on Windows.
-		_ = child.Close()
-		if skip {
+		defer func() { _ = child.Close() }()
+		if c.skipLiveFindingsDir(child, full, unmarked) {
 			return nil
 		}
+		size := findingsDirSize(child)
 		row := RepairRow{
 			Verb:       auditVerbFindingsCleanup,
 			RecordPath: full,
@@ -399,7 +407,7 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, store *os.Root, f
 		if err != nil {
 			return fmt.Errorf("remove findings dir %s: %w", full, err)
 		}
-		rerr := findingsRemoveAll(store, name)
+		rerr := findingsRemoveAll(store, child, name, info)
 		c.completeRepairRow(rowID, row, rerr)
 		if rerr != nil {
 			slog.Error("Failed to remove findings dir.", "path", full, "error", rerr)
@@ -415,16 +423,64 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, store *os.Root, f
 	return removed, nil
 }
 
-// findingsRemoveAll removes name, a direct child of the store, through the
-// store handle root: it never follows a symlink out of the store, and a
-// final-component symlink is unlinked rather than followed.
+// findingsRemoveAll is the removal of a judged findings dir,
+// removeJudgedFindingsDir.
 //
 // It is a seam so a test can make one removal fail and prove the completion
 // row records it as failed — a chmod-based failure is ignored by root, which
-// is how this suite runs in some containers — or swap the store between the
-// checks and the removal (forgectl#644). Tests that swap it must not call
-// t.Parallel.
-var findingsRemoveAll = (*os.Root).RemoveAll
+// is how this suite runs in some containers — or swap the store, or the dir
+// at name, between the checks and the removal (forgectl#644, forgectl#685).
+// Tests that swap it must not call t.Parallel.
+var findingsRemoveAll = removeJudgedFindingsDir
+
+// errFindingsDirSwapped is the removal's refusal of a name that no longer
+// holds the dir that was judged, or of a judged dir that gained an entry
+// after it was emptied.
+var errFindingsDirSwapped = errors.New("findings dir changed after it was judged; left in place")
+
+// removeJudgedFindingsDir removes the findings dir that was judged: child is
+// the handle on it, name its entry in store, and judged the Lstat the caller
+// checked it against.
+//
+// A removal by name alone (store.RemoveAll(name)) deletes whatever sits at
+// name when it runs, and another dir, a live review's included, can be
+// renamed onto name after the verdict. So the contents are removed through
+// child, which reaches only the judged dir wherever it now sits. Only then
+// is name removed, with rmdir semantics, and only while it still names the
+// judged dir: a dir swapped onto name holds at least its own owner marker,
+// so rmdir refuses it (ENOTEMPTY), and the SameFile check refuses a swapped
+// empty dir or symlink before that. What a swap in the final gap can cost is
+// one empty directory. Both refusals are errFindingsDirSwapped.
+//
+// os.Root never follows a symlink out of child, and removes a symlink inside
+// it rather than following it. child is closed before the rmdir, because an
+// open handle on a directory blocks its deletion on Windows.
+func removeJudgedFindingsDir(store, child *os.Root, name string, judged fs.FileInfo) error {
+	entries, err := fs.ReadDir(child.FS(), ".")
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := child.RemoveAll(e.Name()); err != nil {
+			return err
+		}
+	}
+	_ = child.Close()
+	got, err := store.Lstat(name)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(judged, got) {
+		return errFindingsDirSwapped
+	}
+	if err := store.Remove(name); err != nil {
+		if errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, syscall.EEXIST) {
+			return errFindingsDirSwapped
+		}
+		return err
+	}
+	return nil
+}
 
 // findingsChildSize is findingsDirSize for the store child name, for the
 // `pr findings list` report; a child that cannot be opened counts as 0.
