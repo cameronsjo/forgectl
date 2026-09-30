@@ -11,22 +11,24 @@ const outsideRoot = "~"
 
 const worktreesMarker = "/.claude/worktrees"
 
-// sortKey orders tabs within a workspace: wing, repo, cwd, then tab id.
+// sortKey orders tabs within a workspace: wing, repo, cwd, then terminal id.
 type sortKey struct {
-	wing string
-	repo string
-	cwd  string
-	tab  string
+	wing     string
+	repo     string
+	cwd      string
+	terminal string
 }
 
 // sortKeyFor builds the key for a tab whose sort pane has the given cwd. The
 // cwd part drops a `/.claude/worktrees/...` suffix so a worktree files with
-// its repo. The tab id is compared as a string, as the script did, so "t10"
-// sorts before "t9".
-func sortKeyFor(root, cwd, tabID string) sortKey {
+// its repo. Ties break on the tab's terminal id, compared as a string. The
+// script broke them on the tab id, but herdr renumbers a tab that changes
+// workspace, so equal-cwd tabs could swap on the next run instead of
+// converging; a terminal id survives every move.
+func sortKeyFor(root, cwd, terminalID string) sortKey {
 	stripped := stripWorktree(cwd)
 	wing, repo := wingAndRepo(root, stripped)
-	return sortKey{wing: wing, repo: repo, cwd: stripped, tab: tabID}
+	return sortKey{wing: wing, repo: repo, cwd: stripped, terminal: terminalID}
 }
 
 func stripWorktree(cwd string) string {
@@ -65,5 +67,5 @@ func (k sortKey) less(o sortKey) bool {
 	if k.cwd != o.cwd {
 		return k.cwd < o.cwd
 	}
-	return k.tab < o.tab
+	return k.terminal < o.terminal
 }

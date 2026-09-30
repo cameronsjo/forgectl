@@ -43,8 +43,8 @@ func TestSortKey_Less(t *testing.T) {
 		{"wing first", sortKeyFor(root, "/r/a/z", "t9"), sortKeyFor(root, "/r/b/a", "t1"), true},
 		{"then repo", sortKeyFor(root, "/r/a/x", "t9"), sortKeyFor(root, "/r/a/y", "t1"), true},
 		{"then cwd", sortKeyFor(root, "/r/a/x/1", "t9"), sortKeyFor(root, "/r/a/x/2", "t1"), true},
-		{"tab id compares as a string: t10 before t9", sortKeyFor(root, "/r/a/x", "t10"), sortKeyFor(root, "/r/a/x", "t9"), true},
-		{"tab id string order is not reversed", sortKeyFor(root, "/r/a/x", "t9"), sortKeyFor(root, "/r/a/x", "t10"), false},
+		{"terminal id compares as a string: term10 before term9", sortKeyFor(root, "/r/a/x", "term10"), sortKeyFor(root, "/r/a/x", "term9"), true},
+		{"terminal id string order is not reversed", sortKeyFor(root, "/r/a/x", "term9"), sortKeyFor(root, "/r/a/x", "term10"), false},
 		{"outside root sorts under tilde, after letters", sortKeyFor(root, "/r/zed/x", "t1"), sortKeyFor(root, "/elsewhere", "t1"), true},
 	}
 	for _, tt := range tests {
