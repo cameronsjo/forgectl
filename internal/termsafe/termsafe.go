@@ -143,6 +143,22 @@ func QuotePath(path string) string {
 	return QuoteText(path)
 }
 
+// PathEchoMaxRunes is the input budget for a path Error renders (#821). It is
+// larger than ArgEchoMaxRunes because an ordinary worktree or clone path runs
+// past 80 runes and the part that names the file is at its end; 512 shows any
+// realistic path in full and still bounds a hostile PATH_MAX-long one.
+const PathEchoMaxRunes = 512
+
+// QuotePathMax is QuotePath over at most maxRunes runes of path, followed by
+// an ellipsis outside the closing quote when path was longer — the
+// QuoteArgMax cut, for a path sink. maxRunes < 1 means PathEchoMaxRunes.
+func QuotePathMax(path string, maxRunes int) string {
+	if maxRunes < 1 {
+		maxRunes = PathEchoMaxRunes
+	}
+	return QuoteArgMax(path, maxRunes)
+}
+
 // QuotePathIfUnsafe returns path verbatim when quoting would have changed
 // nothing but the surrounding quotes, and the full QuotePath escaping
 // otherwise.
@@ -186,7 +202,9 @@ func Categorical(message string, cause error) error {
 // Error converts a nested filesystem/config error into terminal-safe text
 // while preserving its unwrap chain for errors.Is/errors.As disposition.
 // Known filesystem errors are reconstructed from individually escaped fields
-// so a raw path can never be reinserted by their native Error method.
+// so a raw path can never be reinserted by their native Error method. Each
+// path is also capped at PathEchoMaxRunes (QuotePathMax), since the path is
+// often clone- or config-derived and nobody at the terminal chose its length.
 //
 // An Error method that panics gets errTextUnavailable in place of its text,
 // and the rest of the message still renders; see errorText.
@@ -199,9 +217,9 @@ func Error(err error) error {
 	// cannot be read (forgectl#794); it falls through to errorText, whose
 	// recover turns its panicking Error method into errTextUnavailable.
 	if linkErr, ok := err.(*os.LinkError); ok && linkErr != nil {
-		message = fmt.Sprintf("%s %s %s: %s", SafeLine(linkErr.Op), QuotePath(linkErr.Old), QuotePath(linkErr.New), SafeLine(errorText(linkErr.Err)))
+		message = fmt.Sprintf("%s %s %s: %s", SafeLine(linkErr.Op), QuotePathMax(linkErr.Old, 0), QuotePathMax(linkErr.New, 0), SafeLine(errorText(linkErr.Err)))
 	} else if pathErr, ok := err.(*os.PathError); ok && pathErr != nil {
-		message = fmt.Sprintf("%s %s: %s", SafeLine(pathErr.Op), QuotePath(pathErr.Path), SafeLine(errorText(pathErr.Err)))
+		message = fmt.Sprintf("%s %s: %s", SafeLine(pathErr.Op), QuotePathMax(pathErr.Path, 0), SafeLine(errorText(pathErr.Err)))
 	} else {
 		message = SafeLine(errorText(err))
 	}

@@ -424,3 +424,31 @@ func TestErrorText_LogsPanicTypeNotValue(t *testing.T) {
 		t.Errorf("the panic value reached the log:\n%s", logged)
 	}
 }
+
+// TestError_CapsFilesystemPaths is #821: Error escaped each path but echoed
+// it at any length. A path over PathEchoMaxRunes is cut, with the ellipsis
+// outside the quote; one exactly at the budget is shown whole.
+func TestError_CapsFilesystemPaths(t *testing.T) {
+	long := "/" + strings.Repeat("a", PathEchoMaxRunes) + "TAIL"
+	atBudget := "/" + strings.Repeat("b", PathEchoMaxRunes-1)
+	sentinel := errors.New("denied")
+	for name, err := range map[string]error{
+		"path":     &os.PathError{Op: "open", Path: long, Err: sentinel},
+		"link old": &os.LinkError{Op: "rename", Old: long, New: "/tmp/b", Err: sentinel},
+		"link new": &os.LinkError{Op: "rename", Old: "/tmp/a", New: long, Err: sentinel},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := Error(err).Error()
+			if strings.Contains(got, "TAIL") {
+				t.Fatalf("Error echoed a %d-rune path uncapped: %d bytes", len(long), len(got))
+			}
+			if !strings.Contains(got, `"`+argEchoEllipsis) {
+				t.Errorf("Error(%s) = %q, want the cut marked by an ellipsis after the quote", name, got)
+			}
+		})
+	}
+	got := Error(&os.PathError{Op: "open", Path: atBudget, Err: sentinel}).Error()
+	if want := "open " + QuotePath(atBudget) + ": denied"; got != want {
+		t.Errorf("a path at the budget was altered: got %d bytes, want %d", len(got), len(want))
+	}
+}
