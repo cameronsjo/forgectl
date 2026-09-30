@@ -124,12 +124,22 @@ var ErrUnreadableFields = errors.New("tmux field separator did not survive the -
 // result is an empty listing, and the caller's unreadable count carries the
 // news, rather than an error blaming the operator's locale. A lossy rendering
 // such as 3.7b's `_` leaves every line a single field, so it stays loud.
+//
+// The proving line must also open with a decimal field, because a lossy line
+// can be FORGED into splitting (forgectl#836): under 3.7b's `_` rendering a
+// name holding the literal text `\037` enough times splits into want fields,
+// and without this check one such name would turn a live, unreadable listing
+// into a confident empty one (killReviewWindow would then read a live review
+// window as already gone). Every format here opens with a decimal field
+// (#{pid}, or #{session_last_attached}), and a lossy line cannot supply one:
+// its first field runs from that number through the `_` substitutes and into
+// the next field, up to the forger's first `\037`.
 func parsedRows[T any](rows []T, lines []string, command string, want int) ([]T, error) {
 	if len(rows) > 0 || len(lines) == 0 {
 		return rows, nil
 	}
 	for _, line := range lines {
-		if len(splitFields(line)) >= want {
+		if f := splitFields(line); len(f) >= want && isDecimal(f[0]) {
 			return rows, nil
 		}
 	}

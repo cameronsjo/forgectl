@@ -122,9 +122,9 @@ func TestValidateEnvAssignment(t *testing.T) {
 		// anything that reads tmux's argv back; NUL cannot cross exec at all.
 		{"newline in the value", "HTTPS_PROXY=http://a\nkill-server", false},
 		{"carriage return in the value", "HTTPS_PROXY=http://a\rx", false},
-		// tmux ends a command at an argument ending in ";", so a value ending
-		// in one splits the new-window argv. A ";" inside a value is harmless.
-		{"trailing semicolon in the value", "NO_PROXY=localhost;", false},
+		// NewWindowWithEnv escapes a trailing ";" (forgectl#836 item 4), so
+		// the value is accepted rather than refused.
+		{"trailing semicolon in the value", "NO_PROXY=localhost;", true},
 		{"NUL in the value", "HTTPS_PROXY=http://a\x00x", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -196,5 +196,55 @@ func TestNewWindowWithEnv_MasksOnlyURLValues(t *testing.T) {
 		if !strings.Contains(msg, keep) {
 			t.Errorf("error lost %q, which is not secret: %v", keep, msg)
 		}
+	}
+}
+
+// TestNewWindowWithEnv_EscapesATrailingSemicolon is forgectl#836 item 4: an
+// -e value ending in ';' reaches tmux as `\;`, which tmux's argv splitter
+// turns back into the ';' instead of ending the command there. Values without
+// one are byte-identical.
+//
+// Mutation that turns it red: append e rather than escapeArgvSeparator(e).
+func TestNewWindowWithEnv_EscapesATrailingSemicolon(t *testing.T) {
+	fake, c, session := envFixture(t)
+
+	env := []string{"NO_PROXY=localhost;", "A=b;c"}
+	if _, err := c.NewWindowWithEnv(context.Background(), session, "review", "/repo", env, "claude"); err != nil {
+		t.Fatalf("NewWindowWithEnv: %v", err)
+	}
+	argsEqual(t, fake.Calls[1].Args, []string{
+		"new-window", "-P", "-F", IdentityFormat,
+		"-t", "$1:", "-n", "review", "-c", "/repo",
+		"-e", `NO_PROXY=localhost\;`,
+		"-e", "A=b;c",
+		"--", "claude",
+	})
+}
+
+// TestNewWindowWithEnv_MasksAnEscapedValue keeps #529 whole for a value the
+// escape re-spells. The mask matches argv elements exactly, so the escaped
+// spelling must be in the masked set for the element to render as
+// KEY=[redacted]. Without it the value still does not leak (a fallback
+// redaction hides the whole element), but the error loses the variable name
+// that says which entry tmux choked on.
+//
+// Mutation that turns it red: drop the escaped spelling from secretBearing.
+func TestNewWindowWithEnv_MasksAnEscapedValue(t *testing.T) {
+	fake, _, session := envFixture(t)
+	c := New(failingNewWindowRunner{fake})
+	identityEnv(c, "", "/tmp")
+
+	const secret = "https://ingest.example/v1/token-abcdef123456;" //nolint:gosec // G101: a fake token the mask must hide
+	_, err := c.NewWindowWithEnv(context.Background(), session, "review", "/repo",
+		[]string{"OTEL_EXPORTER_OTLP_ENDPOINT=" + secret}, "claude")
+	if err == nil {
+		t.Fatal("expected new-window to fail")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "token-abcdef123456") {
+		t.Fatalf("error renders the -e value: %v", msg)
+	}
+	if !strings.Contains(msg, "OTEL_EXPORTER_OTLP_ENDPOINT="+exec.Redacted) {
+		t.Errorf("error should still name the variable: %v", msg)
 	}
 }

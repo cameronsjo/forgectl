@@ -31,8 +31,9 @@ func TestEscapeArgvSeparator(t *testing.T) {
 }
 
 // TestNewWindowWithEnvEscapesTrailingSeparators: the -c directory and every
-// command argument after `--` reach tmux escaped, while the name and the -e
-// values (refused instead) and an ordinary argument are untouched.
+// command argument after `--` reach tmux escaped, while the name, an -e
+// value with no trailing ';' and an ordinary argument are untouched. (An -e
+// value ending in ';' is escaped too: TestNewWindowWithEnv_EscapesATrailingSemicolon.)
 //
 // Mutation that turns it red: append dir or command unescaped in
 // NewWindowWithEnv.

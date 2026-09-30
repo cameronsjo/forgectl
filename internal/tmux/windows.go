@@ -145,10 +145,13 @@ func parsePanes(out string) ([]Pane, error) {
 // (forgectl#823), for the reason parseWindowRows counts them. A pane row is
 // easy to hide: #{pane_current_command} is whatever the pane's program calls
 // itself, which on Linux is its argv[0], so a program started under
-// `exec -a` with FieldSep in that name drops its pane from `tmux tree`. (A
-// pane title cannot carry the byte: tmux 3.4 and 3.7c both refuse a title
+// `exec -a` with FieldSep in that name drops its pane from `tmux tree`. A
+// pane title cannot carry the byte (tmux 3.4 and 3.7c both refuse a title
 // that is not printable ASCII or valid UTF-8, from select-pane -T and from
-// the title escape sequence alike.)
+// the title escape sequence alike), but on a tmux that escapes the separator
+// (3.5a and older) it can carry the literal text \037, which renders exactly
+// as the escaped separator does (see SplitFields). A title is set by whatever
+// runs in the pane, so untrusted output shown there can hide its own row.
 func parsePaneRows(out string) ([]Pane, int, error) {
 	lines := splitLines(out)
 	// Exact for the same reason parseWindows is: pane_title and
@@ -235,9 +238,11 @@ var ErrBadEnvAssignment = errors.New("tmux: environment entry is not a KEY=VALUE
 // and VALUE carries no NUL and no newline. The value bans are about the sink,
 // not the shell: a NUL cannot cross exec at all, and a newline in a tmux
 // command-line argument is what a crafted value would use to forge a second
-// command in output a human or a parser reads back. A trailing ";" is refused
-// because tmux ends a command at any argument ending in one, which would split
-// the new-window argv. A ";" inside the value is harmless.
+// command in output a human or a parser reads back. A ";" anywhere in the
+// value is accepted: NewWindowWithEnv escapes a trailing one the way it does
+// every other operand (escapeArgvSeparator), so the value lands as given
+// (forgectl#836 item 4). -e values are not format-expanded, so a '#' needs
+// no escape.
 func validateEnvAssignment(entry string) error {
 	key, value, found := strings.Cut(entry, "=")
 	if !found || key == "" {
@@ -251,7 +256,7 @@ func validateEnvAssignment(entry string) error {
 			return fmt.Errorf("%w", ErrBadEnvAssignment)
 		}
 	}
-	if strings.ContainsAny(value, "\x00\n\r") || strings.HasSuffix(value, ";") {
+	if strings.ContainsAny(value, "\x00\n\r") {
 		return fmt.Errorf("%w", ErrBadEnvAssignment)
 	}
 	return nil
@@ -304,15 +309,16 @@ func (c *Client) NewWindowWithEnv(
 	args := c.tmuxArgs("new-window", "-P", "-F", IdentityFormat, "-t", target, "-n", escapeFormat(name))
 	// escapeArgvSeparator on -c and on every command argument: tmux ends a
 	// command at any argv element ending in ';', which would move the window's
-	// directory or cut the command short (forgectl#823). The -e values are
-	// refused instead, by validateEnvAssignment. The -c operand is also
-	// format-expanded, so it takes EscapeDirOperand, which adds escapeFormat
-	// (forgectl#839); the command arguments are not expanded.
+	// directory or cut the command short (forgectl#823), and on every -e
+	// entry, which would otherwise lose its trailing ';' and end the command
+	// (forgectl#836). The -c operand is also format-expanded, so it takes
+	// EscapeDirOperand, which adds escapeFormat (forgectl#839); the -e entries
+	// and the command arguments are not expanded.
 	if dir != "" {
 		args = append(args, "-c", EscapeDirOperand(dir))
 	}
 	for _, e := range env {
-		args = append(args, "-e", e)
+		args = append(args, "-e", escapeArgvSeparator(e))
 	}
 	if len(command) != 0 {
 		args = append(args, "--")
@@ -348,11 +354,19 @@ func (c *Client) NewWindowWithEnv(
 // ("1", "true", "grpc") are left out on purpose: masking them also scrubs
 // tmux's own error text, turning "can't find window: @1" into "@[redacted]",
 // and the window target is what `pr repair` needs.
+//
+// An entry ending in ';' reaches the argv escaped (escapeArgvSeparator), and
+// the mask matches argv elements exactly, so both spellings are returned: the
+// escaped one is what the argv and the debug log carry, and the plain one is
+// what tmux may echo back on stderr.
 func secretBearing(env []string) []string {
 	var out []string
 	for _, e := range env {
 		if _, value, ok := strings.Cut(e, "="); ok && strings.ContainsAny(value, ":/?@") {
 			out = append(out, e)
+			if escaped := escapeArgvSeparator(e); escaped != e {
+				out = append(out, escaped)
+			}
 		}
 	}
 	return out

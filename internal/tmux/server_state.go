@@ -368,37 +368,28 @@ func (u UnreadableRows) Note() string {
 	if len(parts) > 1 {
 		joined = strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
 	}
-	// A pane row is hidden by its command, not a name (parsePaneRows), so the
-	// pane form names that too rather than sending the operator looking for a
-	// name to fix.
+	// A pane row is hidden by its title or command, not only a name
+	// (parsePaneRows), so the pane form names both rather than sending the
+	// operator looking for a name to fix. The title can hide a row only on a
+	// tmux that escapes the separator (3.5a and older), where the literal text
+	// \037 renders as it does (forgectl#836), so the pane form names that text.
 	cause := "a name carrying the 0x1F field separator hides its row; rename or kill it with tmux itself"
 	if u.Panes > 0 {
-		cause = "a name or pane command carrying the 0x1F field separator hides its row; rename or kill it with tmux itself"
+		cause = `a name, pane title or pane command carrying the 0x1F field separator (or the text \037) hides its row; ` +
+			"rename or kill it with tmux itself"
 	}
 	return joined + " could not be read and are not listed — " + cause
 }
 
-// DisplayPanes is ListPanes under DisplaySessions' rule.
-func (c *Client) DisplayPanes(ctx context.Context) ([]Pane, error) {
-	return exitedIsEmpty(c.ListPanes(ctx))
-}
-
-// DisplayPaneListing is DisplayPanes plus the number of pane rows tmux
-// returned that could not be read (forgectl#823), for DisplaySessionListing's
-// reason.
+// DisplayPaneListing is ListPanes under DisplaySessions' rule, plus the
+// number of pane rows tmux returned that could not be read (forgectl#823), for
+// DisplaySessionListing's reason.
 func (c *Client) DisplayPaneListing(ctx context.Context) (panes []Pane, unreadable int, err error) {
 	panes, unreadable, err = c.listPanes(ctx)
 	if errors.Is(err, ErrServerExited) {
 		return nil, 0, nil
 	}
 	return panes, unreadable, err
-}
-
-func exitedIsEmpty[T any](rows []T, err error) ([]T, error) {
-	if errors.Is(err, ErrServerExited) {
-		return nil, nil
-	}
-	return rows, err
 }
 
 // absentServer reports whether a failed command proves no server is running

@@ -195,9 +195,11 @@ func (c *Client) mostRecentSession(ctx context.Context) (SessionIdentity, int, e
 			}
 		}
 	}
-	// Non-empty output that yielded no parsed row at all means the separator did
-	// not survive — refuse rather than report "no session to attach to", which
-	// reads as an empty server.
+	// Non-empty output that yielded no parsed row goes through parsedRows: if
+	// no line proves the separator survived, that is the locale error, refused
+	// rather than reported as "no session to attach to", which reads as an
+	// empty server. If a line does prove it, every session is unreadable
+	// (forgectl#826), and the empty result carries the unreadable count.
 	if _, err := parsedRows(rows, lines, "list-sessions", lastAttachedFieldCount); err != nil {
 		return SessionIdentity{}, 0, err
 	}
