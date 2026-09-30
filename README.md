@@ -38,6 +38,7 @@ deep-dive get a link here.
 | `resume` | Get back into a Claude Code session after a terminal restart | [resume](docs/commands/resume.md) |
 | `surface` | Start a harness inside a terminal manager (tmux/cmux/herdr) without exposing its invocation | Usage below |
 | `herdr` | Helpers for the herdr terminal multiplexer: group tabs into workspaces by rule | [herdr](docs/commands/herdr.md) |
+| `tasks` | Browse a Vikunja task board, or serve it as an MCP server | Usage below |
 | `recipe` | Run small built-in workbench recipes (alias: `r`) | [recipe](docs/commands/recipe.md) |
 | `workflow` | Run declarative workflows composing forgectl's other verbs (alias: `flow`) | Usage below |
 | `bench` | Discover, health-check, and wire the local dev bench (hearth, chronicle) | [bench](docs/commands/bench.md) |
@@ -50,6 +51,7 @@ deep-dive get a link here.
 | `net` | Check cached reachability of the configured probe endpoint | Usage below |
 | `proxy` | Apply a named proxy profile to the current shell, or to every launched harness | [proxy](docs/commands/proxy.md) |
 | `k8s` | Safely stream ordinary kubectl logs, plus bounded namespace/exec/inspect helpers | [k8s](docs/commands/k8s.md) |
+| `theme` | Inspect the resolved colour theme | Usage below |
 | `ghostty` | Theme + keybind reporting, parsed live from the ghostty CLI | Usage below |
 | `pip` | Comment- and whitespace-preserving `pip.conf` editor | Usage below |
 | `quarantine` | Reversibly hide AI-instruction files (`CLAUDE.md`, `AGENTS.md`, …) from a workspace | Usage below |

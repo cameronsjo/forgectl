@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // TestDeadSocketAfterCleanExitIsolated reproduces forgectl#786 on tmux 3.4.
@@ -20,6 +22,9 @@ import (
 // Mutation that turns it red: remove the serverDeadSocket arm from
 // classifyServerFailure. DisplaySessionListing then fails with ErrServerUnreadable,
 // and EnsureSession refuses to create.
+//
+// The server exits after kill-session returns, not before, so the test waits
+// for it to stop listening (waitForServerExit) before it reads anything.
 func TestDeadSocketAfterCleanExitIsolated(t *testing.T) {
 	c, runner, tmuxBin := isolatedTmux(t)
 	ctx := context.Background()
@@ -34,6 +39,7 @@ func TestDeadSocketAfterCleanExitIsolated(t *testing.T) {
 		t.Fatalf("KillSession: %v", err)
 	}
 	socketPath := filepath.Join(os.Getenv("TMUX_TMPDIR"), "tmux-"+strconv.Itoa(os.Getuid()), "default")
+	waitForServerExit(t, socketPath)
 	if info, err := os.Lstat(filepath.Clean(socketPath)); err != nil || info.Mode().Type() != os.ModeSocket {
 		t.Skipf("this tmux unlinked its socket on exit (lstat %v); the #786 state does not arise", err)
 	}
@@ -57,5 +63,30 @@ func TestDeadSocketAfterCleanExitIsolated(t *testing.T) {
 	}
 	if _, err := c.RevalidateSession(ctx, created); err != nil {
 		t.Fatalf("the created session does not revalidate: %v", err)
+	}
+}
+
+// waitForServerExit blocks until the tmux server listening on socketPath has
+// stopped listening: a connect is refused, or the socket is gone. kill-session
+// returns once the server has destroyed the session, but the server leaves
+// its event loop and closes its listener only afterwards, and under host load
+// that can take a while. A command sent in that window reaches a live server
+// with no sessions: Tree's list-windows -a fails with "no current target"
+// over a socket that still accepts, which the classifier rightly reads as
+// unreadable rather than exited. Under twelve CPU burners that failed 7 of
+// 900 runs, and none with this wait (forgectl#919). The deadline only
+// backstops a server that never exits.
+func waitForServerExit(t *testing.T, socketPath string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		err := dialUnixSocket(context.Background(), socketPath)
+		if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the tmux server on %s still accepts connections 30s after its last session was killed (last dial: %v)", socketPath, err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
