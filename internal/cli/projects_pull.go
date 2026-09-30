@@ -6,7 +6,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/projects"
-	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // newProjectsPullAllCmd builds `forgectl projects pull-all [dir]` — sequential
@@ -45,7 +44,7 @@ func newProjectsPullAllCmd(client *projects.Client) *cobra.Command {
 				// directory under the projects root can carry ANSI or bidi controls
 				// into it. This site is a direct Fprintf, so it bypasses the central
 				// termsafe error seam that covers returned errors.
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s %s (%s)\n", pullGlyph(r.Status), termsafe.SafeLine(r.Name), r.Status)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s %s (%s)\n", pullGlyph(r.Status), safeTitle(r.Name), r.Status)
 			}
 			if asJSON {
 				if err := writeJSON(cmd.OutOrStdout(), rows); err != nil {

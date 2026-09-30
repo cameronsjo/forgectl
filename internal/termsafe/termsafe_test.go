@@ -530,6 +530,77 @@ func TestQuotePathMax_ShortPathAllocatesNoMoreThanQuoteText(t *testing.T) {
 	}
 }
 
+// TestPathCut_ExactBoundaries pins pathCut's three comparisons at their
+// exact boundaries, for both renderings that share it (#913 review).
+//
+// Mutations that turn it red: `len(path) <= maxRunes` to `<` in pathCut (a
+// path exactly the budget in bytes allocates the rune-offset slice);
+// `total <= maxRunes` to `<` (a multibyte path exactly the budget in runes is
+// cut); `elem <= maxRunes-maxRunes/4` to `<` (a final element exactly three
+// quarters of the budget loses its separator).
+func TestPathCut_ExactBoundaries(t *testing.T) {
+	// 4 runes, 7 bytes: past the byte fast path, exactly the rune budget.
+	multi := "/\u00e9\u00e9\u00e9"
+	if got, want := QuotePathMax(multi, 4), QuoteText(multi); got != want {
+		t.Errorf("QuotePathMax(exact rune budget) = %q, want %q uncut", got, want)
+	}
+	if got, want := SafePathMax(multi, 4), SafeLine(multi); got != want {
+		t.Errorf("SafePathMax(exact rune budget) = %q, want %q uncut", got, want)
+	}
+
+	// Budget 8: the final element "/nm.go" is 6 runes, exactly 8-8/4, so it
+	// is kept whole rather than cut to the last half of the budget.
+	path := "/abcdefghij/nm.go"
+	if got, want := QuotePathMax(path, 8), `"/a"…"/nm.go"`; got != want {
+		t.Errorf("QuotePathMax(element at 3/4 budget) = %q, want %q", got, want)
+	}
+	if got, want := SafePathMax(path, 8), "/a…/nm.go"; got != want {
+		t.Errorf("SafePathMax(element at 3/4 budget) = %q, want %q", got, want)
+	}
+
+	// Exactly the budget in bytes takes the fast path: no rune-offset slice.
+	exact := "/" + strings.Repeat("p", 15)
+	var sink string
+	quote := testing.AllocsPerRun(100, func() { sink = QuoteText(exact) })
+	capped := testing.AllocsPerRun(100, func() { sink = QuotePathMax(exact, len(exact)) })
+	line := testing.AllocsPerRun(100, func() { sink = SafeLine(exact) })
+	bare := testing.AllocsPerRun(100, func() { sink = SafePathMax(exact, len(exact)) })
+	_ = sink
+	if capped > quote {
+		t.Errorf("QuotePathMax at the exact byte budget allocated %v times, QuoteText %v", capped, quote)
+	}
+	if bare > line {
+		t.Errorf("SafePathMax at the exact byte budget allocated %v times, SafeLine %v", bare, line)
+	}
+}
+
+// TestQuoteTextMax_BoundsAndEscapes pins #928's capped QuoteText: at most
+// maxRunes input runes, the ellipsis outside the quote, every rune escaped,
+// and no cap for maxRunes < 1.
+//
+// Mutations that turn it red: return QuoteText(text) unconditionally; cut at
+// n > maxRunes instead of n == maxRunes; put the ellipsis inside the quote.
+func TestQuoteTextMax_BoundsAndEscapes(t *testing.T) {
+	tests := []struct {
+		name, in string
+		max      int
+		want     string
+	}{
+		{"short unchanged", "a b", 5, `"a b"`},
+		{"exact budget unchanged", "abcde", 5, `"abcde"`},
+		{"one over is cut", "abcdef", 5, `"abcde"…`},
+		{"escapes count as one input rune", "\u202e\u202e\u202exyz", 2, `"\u202e\u202e"…`},
+		{"no cap below one", "abcdef", 0, `"abcdef"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := QuoteTextMax(tt.in, tt.max); got != tt.want {
+				t.Errorf("QuoteTextMax(%q, %d) = %q, want %q", tt.in, tt.max, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestQuotePath_CapsKeepingTheFinalElement is #832 items 1 and 2: QuotePath
 // echoed a path at any length, and the cap it lacked kept only the head, so a
 // long path lost the filename that identifies it. QuotePath now cuts in the
@@ -567,6 +638,38 @@ func TestQuotePath_CapsKeepingTheFinalElement(t *testing.T) {
 				got = QuotePathMax(tt.path, tt.max)
 			}
 			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSafePathMax_CutsLikeQuotePathMaxWithoutQuotes pins #913's column form:
+// the same middle cut as QuotePathMax, the kept halves escaped with SafeLine
+// and unquoted, so an ordinary path renders exactly as SafeLine renders it.
+//
+// Mutations that turn it red: return SafeLine(path) whenever cut is true in
+// SafePathMax (the long rows come back whole); render the halves with
+// QuoteText (every cut row gains quotes); drop the tail (the file name is lost).
+func TestSafePathMax_CutsLikeQuotePathMaxWithoutQuotes(t *testing.T) {
+	dir := "/" + strings.Repeat("d", PathEchoMaxRunes)
+	tests := []struct {
+		name, path string
+		max        int
+		want       string
+	}{
+		{"short path is SafeLine", "/tmp/a b", 0, "/tmp/a b"},
+		{"short path still escapes", "/tmp/a\x1bb", 0, `/tmp/a\x1bb`},
+		{"at the budget unchanged", "/abcd", 5, "/abcd"},
+		{"final element kept whole", "/abcdefghij/name.go", 12, "/abc…/name.go"},
+		{"no separator keeps half the budget", strings.Repeat("y", 20) + "END", 8, "yyyy…yEND"},
+		{"one-rune budget keeps the head only", "/abc", 1, "/…"},
+		{"escapes are never split", "/\u202e\u202e\u202e/f", 4, `/\u202e…/f`},
+		{"deep", dir + "/name.go", 0, dir[:PathEchoMaxRunes-len("/name.go")] + "…/name.go"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SafePathMax(tt.path, tt.max); got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})

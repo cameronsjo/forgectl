@@ -105,7 +105,7 @@ func newGhosttyThemesCmd(client *ghosttypkg.Client) *cobra.Command {
 				// Theme names are genuinely third-party once a theme pack is
 				// installed under ~/.config/ghostty/themes/. SafeLine keeps
 				// their ordinary spelling and visibly escapes controls.
-				if _, err := fmt.Fprintf(w, "%s\t%s\n", marker, termsafe.SafeLine(th.Name)); err != nil {
+				if _, err := fmt.Fprintf(w, "%s\t%s\n", marker, safeTitle(th.Name)); err != nil {
 					return err
 				}
 			}

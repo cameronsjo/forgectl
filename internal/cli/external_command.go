@@ -12,7 +12,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/meta"
-	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // topLevelCandidate is an unknown, extension-eligible top-level verb and the
@@ -110,7 +109,7 @@ func (runtime externalCommandRuntime) runExternalCommand(candidate topLevelCandi
 		// SafeLine, so the diagnostic is one inert physical line: the text comes
 		// from a third-party extension binary, which is exactly the source with
 		// no reason to be trusted with the operator's cursor.
-		_, _ = fmt.Fprintln(runtime.stderr, termsafe.SafeLine(meta.AppName+": "+err.Error()))
+		_, _ = fmt.Fprintln(runtime.stderr, safeText(meta.AppName+": "+err.Error()))
 	}
 	return true, err
 }

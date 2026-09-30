@@ -314,6 +314,11 @@ func tmuxTextIsUnsafe(expr ast.Expr, state tmuxTextState, termsafeName string) b
 }
 
 func isApprovedTextRenderer(call *ast.CallExpr, termsafeName string) bool {
+	// The package's capped helpers (termcap.go, #913) wrap termsafe and bound
+	// the value too; TestTextPrintersUseCappedHelpers pins what they call.
+	if ident, ok := call.Fun.(*ast.Ident); ok && cappedTextHelpers[ident.Name] {
+		return true
+	}
 	if termsafeName == "." {
 		ident, ok := call.Fun.(*ast.Ident)
 		return ok && approvedTextRendererName(ident.Name)
@@ -327,6 +332,12 @@ func isApprovedTextRenderer(call *ast.CallExpr, termsafeName string) bool {
 		return false
 	}
 	return approvedTextRendererName(sel.Sel.Name)
+}
+
+// cappedTextHelpers are termcap.go's capped helpers.
+var cappedTextHelpers = map[string]bool{
+	"safeLabel": true, "safeTitle": true, "safeSnippet": true, "safeText": true,
+	"safePath": true, "safeColumnPath": true,
 }
 
 func approvedTextRendererName(name string) bool {

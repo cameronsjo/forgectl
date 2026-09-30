@@ -14,6 +14,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
 func TestDecide(t *testing.T) {
@@ -304,6 +305,28 @@ func TestRunHooksFailingHookDoesNotStopOthers(t *testing.T) {
 	}
 	if f.recorded(t) != "2.1.285" {
 		t.Fatal("a run whose hooks all ran must record the version even when some failed")
+	}
+}
+
+// TestRunHooksNeverRanDetailIsRedacted pins #926: a hook that never ran
+// records CommandError.Err's text as its detail, and that text goes through
+// redact.Text as CommandError.Error() does, so a credential in it (a hook
+// command path holding a URL) does not reach the audit trail.
+//
+// Mutation: drop the redact.Text around errors.Unwrap(ce).Error() in runHook.
+func TestRunHooksNeverRanDetailIsRedacted(t *testing.T) {
+	const token = "ghp_fakeHookToken0123456789" //nolint:gosec // G101: a fake token the redactor must hide
+	f := newHookFixture(t, []config.OnUpdateHook{{Harness: "claude", Command: []string{"/bin/missing"}}}, "2.1.285")
+	f.record(t, "2.1.284")
+	f.runner.RunFunc = func(name string, _ []string) (string, error) {
+		return "", &exec.CommandError{Name: name, ExitCode: -1, Err: errors.New(`exec: "https://u:` + token + `@example.invalid/x": executable file not found in $PATH`)}
+	}
+	res, err := RunHooks(context.Background(), f.req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := res.Runs[0]; r.Outcome != OutcomeFailed || strings.Contains(r.Detail, token) || r.Detail != redact.Marker {
+		t.Fatalf("record %+v, want a failed run whose detail is withheld whole", r)
 	}
 }
 

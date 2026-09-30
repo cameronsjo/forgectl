@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	forgexec "github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -185,7 +186,7 @@ func qmdFailure(runErr error, stderr string) error {
 	switch {
 	case msg != "":
 	case isCmdErr && cmdErr.Err != nil:
-		msg = cmdErr.Err.Error()
+		msg = redact.Text(cmdErr.Err.Error())
 	case isCmdErr:
 		msg = fmt.Sprintf("exit %d", cmdErr.ExitCode)
 	default:

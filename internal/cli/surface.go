@@ -172,7 +172,7 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	// One line, to stdout, naming only what the manager already knows. The ref
 	// renders as its backend and recovery tag; it has no accessor that would
 	// print an invocation, an environment, or a server fingerprint.
-	_, err = fmt.Fprintln(cmd.OutOrStdout(), termsafe.SafeLine(result.Ref().String()))
+	_, err = fmt.Fprintln(cmd.OutOrStdout(), safeTitle(result.Ref().String()))
 	return err
 }
 

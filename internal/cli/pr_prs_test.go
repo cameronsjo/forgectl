@@ -246,7 +246,7 @@ func TestRenderPRTable_OrdinaryTitleIsByteStable(t *testing.T) {
 	if err := renderPRTable(&stdout, &stderr, prs, store, theme.Theme{}.Styles().Muted); err != nil {
 		t.Fatal(err)
 	}
-	if got := safeTerm(title); got != title {
+	if got := termsafe.SafeLine(title); got != title {
 		t.Fatalf("ordinary TITLE boundary = %q, want byte-identical %q", got, title)
 	}
 	if got := strings.Count(stdout.String(), title); got != 1 {

@@ -37,7 +37,7 @@ func collectUsageStats(enabled bool, emit func(doctor.State, string)) bool {
 
 	status, err := launch.InspectUsage()
 	if err != nil {
-		emit(doctor.StateFail, "usage statistics: state path unusable: "+termsafe.SafeLine(err.Error()))
+		emit(doctor.StateFail, "usage statistics: state path unusable: "+safeText(err.Error()))
 		return false
 	}
 	// Emitted before the verdict lines, and before any refusal return, because
@@ -45,7 +45,7 @@ func collectUsageStats(enabled bool, emit func(doctor.State, string)) bool {
 	reportUsageNarrowing(status.Narrowed, emit)
 	if status.Refusal != nil {
 		emit(doctor.StateFail, fmt.Sprintf("usage statistics: on, but the store at %s was refused: %s",
-			termsafe.QuotePath(status.Paths.Leaf), termsafe.SafeLine(status.Refusal.Error())))
+			termsafe.QuotePath(status.Paths.Leaf), safeText(status.Refusal.Error())))
 		return false
 	}
 	if !status.DataPresent {

@@ -168,7 +168,7 @@ func printDocsSearch(cmd *cobra.Command, resp docspkg.SearchResponse, asJSON boo
 	for _, e := range resp.Errors {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "docs search: root %s: %s\n",
 			termsafe.SafeLineMax(e.Root, docsSearchRootRunes),
-			termsafe.SafeLine(e.Message))
+			safeText(e.Message))
 	}
 	return newSilentCodedError(1)
 }
