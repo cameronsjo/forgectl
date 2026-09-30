@@ -113,6 +113,9 @@ func IsClaudeHelpOrVersion(args []string) bool {
 // If the list drifts, the outcome is safe. An unknown flag is assumed to take
 // a value, so a print flag after it reads as a value and the run gets the
 // builder posture, which still carries the permission mode.
+// TestClaudeFlagLists_MatchInstalledHelp pins the list to the installed
+// `claude --help`, so a listed flag that starts taking a value fails a test
+// rather than silently routing interactive runs to print mode.
 var claudeNoValueFlags = map[string]bool{
 	"--allow-dangerously-skip-permissions": true,
 	"--ax-screen-reader":                   true,
@@ -159,6 +162,56 @@ var claudeNoValueFlags = map[string]bool{
 	"--worktree":                 true,
 }
 
+// claudeValueFlags are the top-level `claude` options that take a required
+// value (`<value>` in `claude --help`, Claude Code 2.1.285). A required value
+// is taken whatever it looks like, `--` included: `claude
+// --append-system-prompt -- -p hi` runs in print mode with "--" as the
+// system prompt (2.1.285). IsClaudePrintMode reads a `--` as a value only
+// after one of these.
+//
+// If the list drifts, the outcome is safe. A `--` after an unknown flag is
+// taken as claude's end of options, so no print flag after it counts, and the
+// run gets the builder posture, which still carries the permission mode.
+// TestClaudeFlagLists_MatchInstalledHelp pins this list and
+// claudeNoValueFlags to the installed `claude --help`.
+var claudeValueFlags = map[string]bool{
+	"--add-dir":                            true,
+	"--agent":                              true,
+	"--agents":                             true,
+	"--allowedTools":                       true,
+	"--allowed-tools":                      true,
+	"--append-system-prompt":               true,
+	"--autocompact":                        true,
+	"--betas":                              true,
+	"--client-data-url":                    true,
+	"--debug-file":                         true,
+	"--disallowedTools":                    true,
+	"--disallowed-tools":                   true,
+	"--effort":                             true,
+	"--environment":                        true,
+	"--fallback-model":                     true,
+	"--file":                               true,
+	"--input-format":                       true,
+	"--json-schema":                        true,
+	"--max-budget-usd":                     true,
+	"--mcp-config":                         true,
+	"--model":                              true,
+	"-n":                                   true,
+	"--name":                               true,
+	"--output-format":                      true,
+	"--permission-mode":                    true,
+	"--permission-prompts":                 true,
+	"--plugin-dir":                         true,
+	"--plugin-url":                         true,
+	"--remote-control-session-name-prefix": true,
+	"--session-id":                         true,
+	"--setting-sources":                    true,
+	"--settings":                           true,
+	"--system-prompt":                      true,
+	"--system-prompt-snapshot":             true,
+	"--tools":                              true,
+}
+
 // IsClaudePrintMode reports whether args selects print mode: `-p`, `--print`,
 // or `--output-format` (which only works with --print), before Claude's own
 // `--` and in flag position. Print mode is what scripts run, so it gets the
@@ -168,23 +221,76 @@ var claudeNoValueFlags = map[string]bool{
 // `--append-system-prompt -p "task"` is an interactive run whose system prompt
 // is "-p". Matching it would send that run to PrintArgs and drop the model,
 // effort, and add-dir the builder posture gives it.
+//
+// A `--` is claude's end of options only in flag position. After a known
+// required-value flag (claudeValueFlags) it is that flag's value, and the scan
+// goes on past it (forgectl#766).
+//
+// The scan tracks what kind of slot each token sits in, not just the token
+// before it. A known value flag that is itself taken as a value takes
+// nothing: in `--model --model -- -p x` the second `--model` is the first
+// one's value, so the `--` ends the options and the run is interactive.
+//
+// Glued short flags (`-cp`, `-pc`) are deliberately not print mode. Claude
+// Code 2.1.285 does not treat them as print mode either: under a terminal,
+// `claude -c -p` takes the print path and fails fast for want of a prompt,
+// while `claude -cp` and `claude -pc` open the interactive session. So the
+// builder posture is the one that fits them.
 func IsClaudePrintMode(args []string) bool {
-	for i, a := range args {
-		if a == "--" {
+	slot := slotFlag
+	for _, a := range args {
+		cur := slot
+		switch {
+		case a == "--" && cur == slotKnownValue:
+			// The option's value, not the end of options.
+		case a == "--":
 			return false
-		}
-		if !isPrintFlag(a) {
-			continue
-		}
-		if i == 0 || inFlagPosition(args[i-1], claudeNoValueFlags) {
+		case cur == slotFlag && isPrintFlag(a):
 			return true
 		}
+		slot = nextSlot(a, cur)
 	}
 	return false
 }
 
+// argSlot is what IsClaudePrintMode knows about the position a token sits in.
+type argSlot int
+
+const (
+	// slotFlag: nothing is waiting for a value, so the token is a flag or a
+	// positional.
+	slotFlag argSlot = iota
+	// slotKnownValue: a flag in claudeValueFlags, itself in flag position,
+	// is waiting for this token as its value.
+	slotKnownValue
+	// slotMaybeValue: the token may be some option's value. It follows a
+	// dash-prefixed token that is not known to take nothing. That token is
+	// an unknown flag, or one that may itself have been a value.
+	slotMaybeValue
+)
+
+// nextSlot is the slot of the token after a, which sat in cur. A value a
+// known flag took leaves the next token in flag position. Otherwise the
+// token after a is in flag position when inFlagPosition says so, a known
+// value slot when a is a known value flag in flag position, and a maybe
+// value slot in every other case. So an unknown flag still hides a print
+// flag after it, and the run keeps the builder posture.
+func nextSlot(a string, cur argSlot) argSlot {
+	switch {
+	case cur == slotKnownValue:
+		return slotFlag
+	case inFlagPosition(a, claudeNoValueFlags):
+		return slotFlag
+	case cur == slotFlag && claudeValueFlags[a]:
+		return slotKnownValue
+	default:
+		return slotMaybeValue
+	}
+}
+
 // isPrintFlag reports whether a is `-p`, `--print`, or `--output-format`, or
-// the `<flag>=<value>` form of one of them.
+// the `<flag>=<value>` form of one of them. A glued short cluster such as
+// `-cp` is not one (see IsClaudePrintMode).
 func isPrintFlag(a string) bool {
 	for _, f := range []string{"-p", "--print", "--output-format"} {
 		if a == f || strings.HasPrefix(a, f+"=") {
@@ -199,8 +305,11 @@ func isPrintFlag(a string) bool {
 // is a bare token (a positional, or a value some flag already took), a
 // `--flag=value`, or a flag in noValue. Any other dash-prefixed prev is
 // assumed to take a value.
+//
+// A prev of `--` is in flag position too. Both scans stop at a `--` that ends
+// the options, so a `--` they scanned past was some option's value.
 func inFlagPosition(prev string, noValue map[string]bool) bool {
-	return !strings.HasPrefix(prev, "-") || strings.Contains(prev, "=") || noValue[prev]
+	return prev == "--" || !strings.HasPrefix(prev, "-") || strings.Contains(prev, "=") || noValue[prev]
 }
 
 // ConsumeLeadingSeparator drops one leading "--" from args. `forgectl launch

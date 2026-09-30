@@ -263,6 +263,13 @@ func mdrollArgs(path string) []string {
 // mdroll's exit status becomes forgectl's, and a signal that killed it becomes
 // 128+signo, the shell's convention.
 func runMdroll(cmd *cobra.Command, mdroll, path string) error {
+	// mdroll reads the doc by path, and re-reads it by path under --watch, so
+	// a check-then-open window remains between Index.Resolve and each of
+	// mdroll's opens. Only anyone who can write to a directory on the doc's
+	// path inside the root (including a group-writable shared root) can race
+	// it, and that writer could change the doc directly. It is accepted
+	// rather than closed: handing mdroll content instead of a path would drop
+	// --watch and relative image resolution (forgectl#773).
 	child := osexec.CommandContext(cmd.Context(), mdroll, mdrollArgs(path)...) //nolint:gosec // G204: absolute LookPath result, fixed flags, "--" before an index-resolved path
 	child.Stdin = cmd.InOrStdin()
 	child.Stdout = cmd.OutOrStdout()

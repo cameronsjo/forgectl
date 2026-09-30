@@ -296,8 +296,12 @@ func openHeldSubdir(dir *os.Root, name string, depth int) (*os.Root, error) {
 }
 
 // readHeldDir lists the directory dir holds, sorted by name. Each entry's
-// type is the directory entry's own (no stat), and its Info is an Lstat
-// through dir, never a lookup by path.
+// type is the directory entry's own, and its Info is an Lstat through dir,
+// never a lookup by path. On a filesystem that reports DT_UNKNOWN, Go fills
+// Type() from an lstat by path instead. That type only steers the walk. A
+// directory is descended only after openHeldSubdir re-checks it through
+// dir, and a file is read only after its Info and openRegularIn re-check it,
+// so a wrong type can skip an entry but never read through a symlink.
 func readHeldDir(dir *os.Root) ([]heldEntry, error) {
 	f, err := dir.Open(".")
 	if err != nil {
