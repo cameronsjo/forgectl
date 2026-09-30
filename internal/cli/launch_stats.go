@@ -99,10 +99,10 @@ func writeUsageHumanReport(out io.Writer, aggregate launch.UsageAggregateV1) err
 		counts map[string]int
 		render func(string) string
 	}{
-		{"harness", aggregate.Counts.Harness, termsafe.SafeLine},
-		{"model", aggregate.Counts.Model, func(key string) string { return termsafe.SafeLine(launch.UsageModelLabel(key)) }},
-		{"session", aggregate.Counts.SessionMode, termsafe.SafeLine},
-		{"posture", aggregate.Counts.Posture, termsafe.SafeLine},
+		{"harness", aggregate.Counts.Harness, safeLabel},
+		{"model", aggregate.Counts.Model, func(key string) string { return safeLabel(launch.UsageModelLabel(key)) }},
+		{"session", aggregate.Counts.SessionMode, safeLabel},
+		{"posture", aggregate.Counts.Posture, safeLabel},
 	} {
 		if len(section.counts) == 0 {
 			continue
@@ -119,5 +119,5 @@ func orNone(value *string) string {
 	if value == nil {
 		return "—"
 	}
-	return termsafe.SafeLine(*value)
+	return safeLabel(*value)
 }

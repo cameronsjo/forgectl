@@ -294,7 +294,13 @@ func readSmallFile(path string) (string, error) {
 // makes no network calls — so it takes free text (forgectl#730).
 func hubArgSources() map[string]tui.ArgSource {
 	projectNames := func(context.Context) []string {
-		return projects.LocalNames(projects.ResolveRoot())
+		root, err := projects.ResolveRoot()
+		if err != nil {
+			// Like the header's own fields, an unavailable picker source is
+			// omitted, not reported: the hub opens with free text (forgectl#730).
+			return nil
+		}
+		return projects.LocalNames(root)
 	}
 	return map[string]tui.ArgSource{
 		"projects pick":     projectNames,

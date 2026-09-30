@@ -162,7 +162,11 @@ func organizeOnce(cmd *cobra.Command, deps module.Deps, opts organizeOpts) error
 	if err != nil {
 		return termsafe.Error(err)
 	}
-	plan := organize.BuildPlan(toOrganizeConfig(cfg), snap, herdrProjectsRoot())
+	root, err := herdrProjectsRoot()
+	if err != nil {
+		return termsafe.Error(err)
+	}
+	plan := organize.BuildPlan(toOrganizeConfig(cfg), snap, root)
 
 	human := cmd.OutOrStdout()
 	if opts.asJSON {
@@ -281,7 +285,7 @@ func (r organizeReport) printf(format string, a ...any) { _, _ = fmt.Fprintf(r.w
 
 // safe clips and neutralizes text herdr reports (titles and cwds are chosen by
 // whatever runs in a pane, so they are untrusted).
-func (r organizeReport) safe(s string) string { return termsafe.SafeLine(s) }
+func (r organizeReport) safe(s string) string { return safeText(s) }
 
 func (r organizeReport) tab(title, id string) string {
 	return `"` + truncate(r.safe(title), titleCols) + `" [` + r.safe(id) + `]`

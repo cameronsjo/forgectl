@@ -273,7 +273,7 @@ type searchHitJSON struct {
 
 // writeSearchHitsJSON encodes hits as a JSON array. Indexed content is
 // untrusted, and — as for printWhyHits — the JSON path carries it unaltered
-// and lets termsafe.JSONEncoder escape it; safeTerm quoting would corrupt the
+// and lets termsafe.JSONEncoder escape it; SafeLine quoting would corrupt the
 // machine contract. No hits encodes [], never null.
 func writeSearchHitsJSON(out io.Writer, hits []sessions.SearchHit) error {
 	rows := make([]searchHitJSON, 0, len(hits))
@@ -528,65 +528,4 @@ func humanTs(t *time.Time) string {
 		return s
 	}
 	return "unknown"
-}
-
-// safeTerm is this package's local alias for termsafe.SafeLine: every unsafe or
-// non-graphic rune is visibly quoted, so an untrusted value renders as one inert
-// physical line. The alias keeps this package's call sites reading at their own
-// altitude; internal/termsafe owns the behavior and its fuzz coverage.
-//
-// It is for HUMAN sinks only. A --json surface encodes through
-// termsafe.JSONEncoder, which escapes without rewriting — quoting a value there
-// would corrupt the machine contract.
-func safeTerm(s string) string {
-	return termsafe.SafeLine(s)
-}
-
-// runbookTitleMaxRunes caps a runbook title in a line of `sessions` text
-// output. The indexer stores a title as the document gave it (a frontmatter
-// `title:` or the first heading, uncut), so nobody at the terminal chose its
-// length (forgectl#891). --json carries it whole.
-const runbookTitleMaxRunes = 256
-
-// safeTitle is a runbook title made terminal-safe and bounded for a line of
-// text output.
-func safeTitle(s string) string {
-	return termsafe.SafeLineMax(s, runbookTitleMaxRunes)
-}
-
-// runbookSnippetMaxRunes caps a match snippet in a line of `sessions` text
-// output. The snippet is Postgres ts_headline with MaxWords=20, which bounds
-// words, not characters: one long word, or a run of punctuation or control
-// characters between words, passes through whole, so one headline can be
-// tens of thousands of characters (forgectl#891). 320 is
-// docs search's snippet cap (docsSearchSnippetRunes) and holds 20 ordinary
-// words plus the <<>> match markers several times over. --json carries it
-// whole.
-const runbookSnippetMaxRunes = 320
-
-// safeSnippet is a match snippet made terminal-safe and bounded for a line of
-// text output.
-func safeSnippet(s string) string {
-	return termsafe.SafeLineMax(s, runbookSnippetMaxRunes)
-}
-
-// sessionsLabelMaxRunes caps every short label the `sessions` text printers
-// write: session ids, project, model, machine, branch, a runbook's type. Each
-// is disk- or concordance-sourced (ParseRunbook reads frontmatter `type:` and
-// `project:` with no length limit), so none has a length anyone at the
-// terminal chose. 64 holds a UUID, a repo slug or a model id whole.
-const sessionsLabelMaxRunes = 64
-
-// safeLabel is a short label made terminal-safe and bounded for a line of
-// text output.
-func safeLabel(s string) string {
-	return termsafe.SafeLineMax(s, sessionsLabelMaxRunes)
-}
-
-// safePath renders a runbook path for `sessions` text output: quoted, escaped,
-// and capped at termsafe.PathEchoMaxRunes input runes (forgectl#894). A longer
-// path is cut in the middle so its file name survives, the same rule every
-// other path echo in forgectl follows. --json carries the path whole.
-func safePath(s string) string {
-	return termsafe.QuotePathMax(s, termsafe.PathEchoMaxRunes)
 }

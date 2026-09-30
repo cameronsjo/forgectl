@@ -248,7 +248,7 @@ func preFangFailure(root func() *cobra.Command, args []string, err error) error 
 	if cmd := preFangJSONTarget(root, args); cmd != nil {
 		return jsonFamilyFailure(cmd, err)
 	}
-	_, _ = fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(jsonErrorText(err)))
+	_, _ = fmt.Fprintln(os.Stderr, meta.AppName+": "+safeText(jsonErrorText(err)))
 	return err
 }
 

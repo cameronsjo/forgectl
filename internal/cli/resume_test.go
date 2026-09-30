@@ -50,7 +50,7 @@ func TestPrintSessions_SanitizesText(t *testing.T) {
 // line in the text path is bounded, while --json still carries the prompt
 // whole, because it is a machine contract.
 //
-// Mutation that turns it red: print safeTerm(s.LastPrompt) instead of
+// Mutation that turns it red: print termsafe.SafeLine(s.LastPrompt) instead of
 // safePrompt(s) in printSessions.
 func TestPrintSessions_CapsLastPrompt(t *testing.T) {
 	s := hostileSession()
@@ -831,7 +831,7 @@ func TestWriterWidth_NonTerminalIsZero(t *testing.T) {
 // session name is capped where resume prints it in a line of prose, in the
 // live refusal and on the --dry-run name line alike.
 //
-// Mutation that turns it red: have safeName return safeTerm(displayName(s)).
+// Mutation that turns it red: have safeName return termsafe.SafeLine(displayName(s)).
 func TestResumeSession_CapsTheSessionName(t *testing.T) {
 	fakeClaudeBin(t)
 	s := resume.Session{
