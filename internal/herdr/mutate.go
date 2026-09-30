@@ -21,7 +21,8 @@ type Declined struct {
 // Error renders Reason through redact.Text before printable, as
 // (*Error).Error renders Message (#832): Reason is herdr's text, a reason
 // code today, and nothing stops a future herdr from echoing a value there.
-// Reason is capped as Message is (#837).
+// Reason is capped as Message is (#837), and stored redacted as Message is
+// (#941), so the exported field never holds herdr's raw text.
 func (d *Declined) Error() string {
 	return "herdr declined to move tab " + printable(d.TabID) + ": " + printableMax(redact.Text(d.Reason))
 }
@@ -126,7 +127,7 @@ func (c *Client) MoveTab(ctx context.Context, tabID string, to MoveTarget) (Move
 		case mr.Changed == nil:
 			return MoveResult{}, fmt.Errorf("herdr %s: move_result has no \"changed\" field", argvText(args))
 		case !*mr.Changed:
-			return MoveResult{}, &Declined{TabID: tabID, Reason: mr.Reason}
+			return MoveResult{}, &Declined{TabID: tabID, Reason: redact.Text(mr.Reason)}
 		case mr.TabID == "" || mr.WorkspaceID == "":
 			return MoveResult{}, fmt.Errorf("herdr %s: move_result names no tab or workspace", argvText(args))
 		}

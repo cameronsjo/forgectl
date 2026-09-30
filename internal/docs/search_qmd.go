@@ -178,9 +178,10 @@ func (s Searcher) searchQMD(ctx context.Context, idx *Index, q string, limit int
 
 // qmdFailure describes a failed qmd run: its stderr when it wrote any, else
 // why it never ran or its exit status. It never includes the command line,
-// which carries the query.
+// which carries the query. Its stderr is redacted (redact.Text) before it is
+// escaped, as the Err arm is (#941).
 func qmdFailure(runErr error, stderr string) error {
-	msg := strings.TrimSpace(stderr)
+	msg := strings.TrimSpace(redact.Text(stderr))
 	var cmdErr *forgexec.CommandError
 	isCmdErr := errors.As(runErr, &cmdErr)
 	switch {
