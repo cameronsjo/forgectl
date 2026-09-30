@@ -135,18 +135,31 @@ func Execute(ctx context.Context) error {
 	// they are not reachable from a call site.
 	normalizeColorEnv()
 
+	// Both steps below return before fang exists and before the config gate,
+	// so a failure here prints its own line. CaptureEnvSnapshot fails on an
+	// environment the operator controls — $HOME unset, or a relative
+	// $XDG_CONFIG_HOME (os.UserConfigDir refuses one) — and a hook verb must
+	// not fail the turn over it, the same exemption the config gate makes
+	// (#738). The hook then runs on built-in defaults with no legacy boundary;
+	// every other verb stops here, as before.
+	var legacyBoundary *config.LegacyMigrationBoundary
 	env, err := captureEnvSnapshot()
 	if err != nil {
-		return err
+		if !invokesHookVerb(normalizeArgs(processArgs())) {
+			fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(err.Error()))
+			return err
+		}
+	} else {
+		legacyBoundary, err = prepareLegacyBoundary(env, config.NativeMigrationFS())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(err.Error()))
+			return err
+		}
+		defer legacyBoundary.Close() //nolint:errcheck
 	}
-	legacyBoundary, err := prepareLegacyBoundary(env, config.NativeMigrationFS())
-	if err != nil {
-		return err
-	}
-	defer legacyBoundary.Close() //nolint:errcheck
 
 	var cfg config.Config
-	if !errors.Is(legacyBoundary.Refusal, config.ErrLegacyPathControl) {
+	if legacyBoundary != nil && !errors.Is(legacyBoundary.Refusal, config.ErrLegacyPathControl) {
 		cfg = config.LoadPath(legacyBoundary.ConfigPath)
 	}
 	closer := setupLogger(cfg)
