@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -158,7 +159,7 @@ func checkChronicle(ctx context.Context, cfg config.Config, runner exec.Runner) 
 	}
 	c.Details = append(c.Details, fmt.Sprintf("sessions: %d, events: %d, files: %d", st.Sessions, st.Events, st.Files))
 	if st.LastSync != nil {
-		c.Details = append(c.Details, "last sync: "+*st.LastSync)
+		c.Details = append(c.Details, "last sync: "+lastSyncDetail(*st.LastSync))
 	} else {
 		c.Details = append(c.Details, "last sync: never")
 	}
@@ -362,4 +363,21 @@ func hearthDiskPercent(ctx context.Context, runner exec.Runner) (int, bool) {
 		return 0, false
 	}
 	return pct, true
+}
+
+// lastSyncLayouts are the ISO-8601 shapes chronicle's `status --json` writes
+// last_sync in: RFC 3339 with an offset, or Python's isoformat without one.
+var lastSyncLayouts = []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999"}
+
+// lastSyncDetail renders chronicle's last_sync from the parsed time, never
+// from the JSON text (#716): chronicle's output is another program's text,
+// and `bench status` and doctor print this detail. A value that is not a
+// timestamp reads as a fixed category.
+func lastSyncDetail(raw string) string {
+	for _, layout := range lastSyncLayouts {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t.Format(time.RFC3339)
+		}
+	}
+	return "unrecognized timestamp"
 }

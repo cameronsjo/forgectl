@@ -292,18 +292,29 @@ func checkSops(ctx context.Context, d Deps) Check {
 	// the line itself: sops can append an update notice, and whatever else it
 	// prints is the tool's text, not ours (#716).
 	line, _, _ := strings.Cut(out, "\n")
-	if v := versionPattern.FindString(line); v != "" {
-		return Check{Name: "sops", State: StateOK, Detail: "sops " + v}
+	if vs := findVersions(line); len(vs) > 0 {
+		return Check{Name: "sops", State: StateOK, Detail: "sops " + vs[0]}
 	}
 	slog.Warn("sops --version printed no recognizable version.", "output", termsafe.SafeLineMax(line, 200))
 	return Check{Name: "sops", State: StateOK, Detail: "sops present; version not recognized"}
 }
 
-// versionPattern matches a dotted release number with an optional pre-release
-// or build suffix — the one part of a tool's version output doctor renders.
-// The charset and lengths are fixed here, so a match can carry nothing the
-// tool chose beyond a version-shaped token.
-var versionPattern = regexp.MustCompile(`[0-9]{1,6}(?:\.[0-9]{1,6}){1,3}(?:[-+][0-9A-Za-z.]{1,32})?`)
+// versionPattern matches a whole dotted release number, optionally after a
+// "v" and with a short pre-release suffix — the one part of a tool's version
+// output doctor renders. It is anchored at word boundaries on both sides, so it
+// never picks a version-shaped piece out of a longer token, and the charset
+// and lengths are fixed, so a match can carry nothing the tool chose beyond a
+// version-shaped token.
+var versionPattern = regexp.MustCompile(`\bv?([0-9]{1,6}(?:\.[0-9]{1,6}){1,3}(?:-[0-9A-Za-z]{1,12}(?:\.[0-9A-Za-z]{1,12})?)?)\b`)
+
+// findVersions returns every version number in s, without any "v" prefix.
+func findVersions(s string) []string {
+	var out []string
+	for _, m := range versionPattern.FindAllStringSubmatch(s, -1) {
+		out = append(out, m[1])
+	}
+	return out
+}
 
 // benchChecks folds bench.Status's hearth and chronicle components into doctor
 // Checks, translating bench's own State vocabulary rather than re-probing
@@ -487,7 +498,7 @@ func checkForgectlVersion(ctx context.Context, d Deps) Check {
 // cask-name-only form, reads as a plain "newer version available".
 func outdatedDetail(out string) string {
 	line, _, _ := strings.Cut(out, "\n")
-	if vs := versionPattern.FindAllString(line, -1); len(vs) == 2 {
+	if vs := findVersions(line); len(vs) == 2 {
 		return fmt.Sprintf("forgectl %s installed, %s available", vs[0], vs[1])
 	}
 	return "a newer forgectl is available"

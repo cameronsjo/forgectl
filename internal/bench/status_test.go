@@ -526,3 +526,37 @@ func equalStr(a, b []string) bool {
 	}
 	return true
 }
+
+// TestLastSyncDetail: chronicle's last_sync is rendered from the parsed time,
+// never from its JSON text (#716).
+func TestLastSyncDetail(t *testing.T) {
+	for raw, want := range map[string]string{
+		"2026-07-08T10:00:00Z":                             "2026-07-08T10:00:00Z",
+		"2026-07-08T10:00:00.123456+02:00":                 "2026-07-08T10:00:00+02:00",
+		"2026-07-08T10:00:00.123456":                       "2026-07-08T10:00:00Z",
+		"MARKER\x1b[2J":                                    "unrecognized timestamp",
+		"2026-07-08T10:00:00Z" + strings.Repeat("x", 5000): "unrecognized timestamp",
+	} {
+		if got := lastSyncDetail(raw); got != want {
+			t.Errorf("lastSyncDetail(%.40q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestCheckChronicle_LastSyncIsNeverRawText(t *testing.T) {
+	t.Setenv("CHRONICLE_DIR", "")
+	cfg := config.Config{Bench: config.BenchConfig{ChronicleDir: "/x/chronicle"}}
+	body := strings.Replace(chronicleJSON, `"last_sync":"2026-07-08T10:00:00Z"`, `"last_sync":"MARKER\u001b[2J"`, 1)
+	runner := &exec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
+		if name == "uv" {
+			return body, nil
+		}
+		return "", nil
+	}}
+	c := checkChronicle(context.Background(), cfg, runner)
+	for _, d := range c.Details {
+		if strings.Contains(d, "MARKER") {
+			t.Fatalf("detail %q renders chronicle's last_sync text", d)
+		}
+	}
+}
