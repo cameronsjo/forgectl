@@ -23,6 +23,10 @@ type RestartRequest struct {
 	Only   []string
 	DryRun bool
 	Runner exec.Runner
+	// HerdrBin, when set, is the absolute herdr binary every herdr call
+	// runs, instead of `herdr` from PATH — for a caller like the launchd
+	// watcher whose PATH is not the operator's.
+	HerdrBin string
 	// Progress receives one event per session per state change.
 	Progress func(RestartEvent)
 	// Options bounds the run; zero fields take the Default* values.
@@ -77,6 +81,9 @@ const restartLockName = "restart.lock"
 // agent's shell tool runs the command) is never stopped: stopping it would
 // kill this run before it could relaunch.
 func RestartOutdated(ctx context.Context, req RestartRequest) (RestartResult, error) {
+	if req.HerdrBin != "" && !filepath.IsAbs(req.HerdrBin) {
+		return RestartResult{}, errors.New("the herdr binary must be an absolute path")
+	}
 	req.fill()
 	list, err := Outdated(req.Paths, req.Installed, req.Lookup())
 	if err != nil {
@@ -141,13 +148,15 @@ func (r *RestartRequest) fill() {
 		r.Binary = RelaunchBinary
 	}
 	if r.Env == nil {
-		paths, runner, dry := r.Paths, r.Runner, r.DryRun
+		paths, runner, dry, herdr := r.Paths, r.Runner, r.DryRun, r.HerdrBin
 		r.Env = func(forgectl string) (RestartEnv, error) {
 			if dry {
 				// A dry run only reads, and has no binary to relaunch with.
-				return SystemRestartEnv{paths: paths, runner: runner}, nil
+				return SystemRestartEnv{paths: paths, runner: runner, herdr: herdr}, nil
 			}
-			return NewSystemRestartEnv(paths, runner, forgectl)
+			e, err := NewSystemRestartEnv(paths, runner, forgectl)
+			e.herdr = herdr
+			return e, err
 		}
 	}
 	if r.Ancestors == nil {
