@@ -20,10 +20,13 @@ func newTmuxWindowsCmd(client *tmux.Client) *cobra.Command {
 		Short: "List windows across all sessions",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			windows, err := client.DisplayWindows(cmd.Context())
+			windows, unreadable, err := client.DisplayWindowListing(cmd.Context())
 			if err != nil {
 				return err
 			}
+			// Said on stderr in both modes, as `tmux tree` does (forgectl#857):
+			// a window whose row cannot be read must not just vanish.
+			writeUnreadableNote(cmd, tmux.UnreadableRows{Windows: unreadable})
 			out := cmd.OutOrStdout()
 			if asJSON {
 				return writeTmuxWindowsJSON(out, windows)
