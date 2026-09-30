@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,8 +22,16 @@ import (
 // renders a heavy document never meets the production 5 s deadline on a
 // slow or -race run and reads the too-slow notice as a wrong page. The
 // deadline tests set their own through trackRenders, and the Default tests
-// below put the production value back.
+// below put the production value back. First it checks the variable
+// starts as the production constant: the Default tests pin only the
+// constant, so an initializer edited to a different literal would ship a
+// deadline no test sees. Mutation: `var renderDeadline = time.Hour` turns
+// every run red.
 func TestMain(m *testing.M) {
+	if renderDeadline != defaultRenderDeadline {
+		_, _ = fmt.Fprintf(os.Stderr, "renderDeadline starts as %v, want defaultRenderDeadline (%v)\n", renderDeadline, defaultRenderDeadline)
+		os.Exit(1)
+	}
 	renderDeadline = time.Hour
 	os.Exit(m.Run())
 }
