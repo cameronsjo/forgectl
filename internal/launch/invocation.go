@@ -69,6 +69,8 @@ const (
 	PostureClaudeBuilder     Posture = "claude-builder"
 	PostureClaudeAgents      Posture = "claude-agents"
 	PostureAgentsPassthrough Posture = "agents-passthrough"
+	PostureClaudePassthrough Posture = "claude-passthrough" //nolint:gosec // G101: a posture name ("passthrough"), not a credential
+	PostureClaudePrint       Posture = "claude-print"
 	PostureCodexSession      Posture = "codex-session"
 	PostureCodexExec         Posture = "codex-exec"
 	PosturePiSession         Posture = "pi-session"
@@ -204,6 +206,15 @@ func selectPosture(p Profile, args []string) (Posture, []string, error) {
 			return PostureAgentsPassthrough, args, nil
 		}
 		return PostureClaudeAgents, AgentsArgs(p, args), nil
+	// Order matters. A subcommand in the first slot can never be a flag's
+	// value, so it goes first. Print mode goes before help/version, so no
+	// help token can take a print run out of its permission mode.
+	case IsClaudeSubcommandCall(args):
+		return PostureClaudePassthrough, args, nil
+	case IsClaudePrintMode(args):
+		return PostureClaudePrint, PrintArgs(p, args), nil
+	case IsClaudeHelpOrVersion(args):
+		return PostureClaudePassthrough, args, nil
 	default:
 		return PostureClaudeBuilder, BuilderArgs(p, args), nil
 	}
@@ -218,9 +229,10 @@ func selectPosture(p Profile, args []string) (Posture, []string, error) {
 // Codex launch would leave no record of the argv it ran with — including the
 // approval and sandbox posture, which is the part worth auditing.
 //
-// Two postures stay silent. The builder path is what an operator scripts
-// against, and the agents scripting passthrough must reach claude byte-clean
-// with no injection and no banner.
+// Four postures stay silent. The builder and print paths are what an operator
+// scripts against, and the agents scripting passthrough and the Claude
+// passthrough (subcommands, help, version) must reach claude byte-clean with no
+// injection and no banner.
 // An unrecognised posture banners rather than falling through silently. A
 // posture added to selectPosture but forgotten here would otherwise suppress
 // the only pre-session record of the argv — including
@@ -230,7 +242,7 @@ func selectPosture(p Profile, args []string) (Posture, []string, error) {
 // stdout. allPostures pins the known set, so the default should stay dead.
 func EmitBanner(w io.Writer, b BuiltInvocation) {
 	switch b.Posture {
-	case PostureClaudeBuilder, PostureAgentsPassthrough:
+	case PostureClaudeBuilder, PostureAgentsPassthrough, PostureClaudePassthrough, PostureClaudePrint:
 	case PostureClaudeSession, PostureClaudeAgents:
 		Banner(w, b.Invocation.Args)
 	case PostureCodexSession, PostureCodexExec, PosturePiSession, PosturePiArgs:
@@ -249,6 +261,8 @@ var allPostures = []Posture{
 	PostureClaudeBuilder,
 	PostureClaudeAgents,
 	PostureAgentsPassthrough,
+	PostureClaudePassthrough,
+	PostureClaudePrint,
 	PostureCodexSession,
 	PostureCodexExec,
 	PosturePiSession,

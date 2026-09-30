@@ -77,8 +77,9 @@ func isOwnLaunchVerb(tok string) bool {
 
 // newLaunchCmd builds the `launch` parent command (alias `cl`). Own-verbs are
 // attached as subcommands for styled help; the bare/builder/agents passthrough
-// is intercepted in Execute before Cobra ever parses, so
-// `forgectl launch --model sonnet -p hi` stays byte-clean.
+// is intercepted in Execute before Cobra ever parses, so Cobra never rewrites
+// `forgectl launch --model sonnet -p hi`: it reaches claude verbatim after the
+// print posture's `--permission-mode`.
 func newLaunchCmd(deps module.Deps) *cobra.Command {
 	cfg := deps.Cfg
 	boundary := deps.LegacyBoundary
@@ -93,6 +94,9 @@ then execs the configured harness with that posture — no prompts.
   forgectl launch                 drop straight into the resolved profile
   forgectl launch <args…>          apply the profile and pass args through
   forgectl launch agents …         Claude-only agent-management passthrough
+  forgectl launch mcp …            Claude subcommands run with no posture
+  forgectl launch -p …             print mode: only the permission mode
+  forgectl launch -- <args…>       skip launch's own verbs; "--" is dropped
 
 To resume or fork an earlier session, use "forgectl resume" — it discovers
 sessions across repos, flags the live ones, and restores their tasks.
@@ -140,6 +144,12 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	// reading it here too means collection stays off even if a future
 	// migration path forgets.
 	usageEnabled := cfg.Launch.UsageStats
+
+	// Verb dispatch has already happened (runLaunch), so a leading `--` has
+	// done its job: it kept a prompt such as "doctor" or "which" from reaching
+	// a forgectl verb. The harness never sees it. Everything below, usage
+	// classification included, reads the consumed args.
+	args = launch.ConsumeLeadingSeparator(args)
 
 	// Before the automatic legacy migration below, which renames claunch.conf
 	// and rewrites config.toml: this refusal is a pure function of the config,

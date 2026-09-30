@@ -41,6 +41,12 @@ jobs:
     permissions:
       contents: read # clone the repo and resolve existing tags
       pull-requests: write # flip the merged release PR's autorelease label
+    # RELEASE_APP_PRIVATE_KEY belongs only in the `release` environment, with
+    # a deployment policy of branch `main` plus tag `v*` and no repo-level
+    # copy. With that in place, and the `v*` tag ruleset limiting who can
+    # create a tag, a copy of this workflow on another ref cannot read the
+    # key (cadence-ecosystem ADR-0044 (i)).
+    environment: release
     steps:
       # An App token, not GITHUB_TOKEN: a tag pushed with GITHUB_TOKEN does
       # NOT trigger `on: push: tags`, so release.yml would never fire and the
@@ -127,12 +133,14 @@ jobs:
       # stays `autorelease: pending` and wedges every subsequent run.
       #
       # GITHUB_TOKEN, not the App token, and that is a security boundary
-      # rather than a convenience: the estate-main ruleset binds approvals
-      # from the Actions actor but does not bind GitHub Apps, so an App token
-      # carrying `pull-requests: write` would be an unattended
-      # open-and-merge primitive. GITHUB_TOKEN has no such reach, and the
-      # tag-push constraint that forced the App token upward does not apply
-      # to labels.
+      # rather than a convenience. The estate-main ruleset requires zero
+      # approvals, so it binds no actor: an App token carrying both
+      # `contents: write` and `pull-requests: write` could open and merge a
+      # PR unattended. The App token here gets `contents: write` alone.
+      # GITHUB_TOKEN keeps `contents: read`, and the repository setting
+      # `can_approve_pull_request_reviews: false` stops it from creating or
+      # approving PRs (cadence-ecosystem ADR-0044 (i)). The tag-push
+      # constraint that forced the App token upward does not apply to labels.
       # No `if:` on purpose — the flip is idempotent and must stay re-runnable.
       # If the tag push succeeds and this step then fails, gating on
       # `exists == 'false'` would make a re-run skip both steps and exit green
