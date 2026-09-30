@@ -54,12 +54,20 @@ const (
 var pinnedDirs = []struct{ dir, shown string }{
 	{".", "internal/exec"},
 	{filepath.Join("internal", "sealed"), "internal/exec/internal/sealed"},
+	{filepath.Join("internal", "validated"), "internal/exec/internal/validated"},
 	{filepath.Join("..", "tmux", "tmuxesc"), "internal/tmux/tmuxesc"},
 }
 
 // sealedImportPath is the package that holds every payload and the only code
 // that reads one (forgectl#854).
 const sealedImportPath = execImportPath + "/internal/sealed"
+
+// validatedImportPath is the package that builds the only command shape
+// startSealed accepts (forgectl#888).
+const validatedImportPath = execImportPath + "/internal/validated"
+
+// validatedAPIPrefix starts each golden line that spells validated's surface.
+const validatedAPIPrefix = "validated: "
 
 // sealedAPIPrefix starts each golden line that spells sealed's surface, so its
 // names cannot collide with internal/exec's in the sorted line set.
@@ -76,8 +84,8 @@ const sealedAPIPrefix = "sealed: "
 // allows: a new export of sealed that hands a payload out (an accessor, a
 // callback parameter), and a new export of internal/exec that forwards one.
 //
-//   - every non-test file in internal/exec, internal/exec/internal/sealed and
-//     internal/tmux/tmuxesc,
+//   - every non-test file in internal/exec, internal/exec/internal/sealed,
+//     internal/exec/internal/validated and internal/tmux/tmuxesc,
 //     whatever its build constraint, with that constraint and a cgo mark, so
 //     a new or retagged file fails until reviewed. A .go file that no
 //     platform in guardPlatforms compiles with cgo off (one for a platform
@@ -86,8 +94,9 @@ const sealedAPIPrefix = "sealed: "
 //     and once pinned its contents could change unseen (forgectl#854);
 //     assembly and object files are refused module-wide by
 //     TestNoFileReachesPastTheTypeSystem;
-//   - every exported func, var and const of internal/exec and of sealed
-//     (sealed's lines prefixed "sealed: "), with its full type;
+//   - every exported func, var and const of internal/exec, of sealed and of
+//     validated (their lines prefixed "sealed: " and "validated: "), with its
+//     full type;
 //   - every named type declared at package level, exported or not, with its
 //     full underlying type (every field, embed and tag) and its method set on
 //     both T and *T: every method declared in this package, and every
@@ -124,7 +133,8 @@ func TestExportedAPI(t *testing.T) {
 	got := map[guardPlatform]string{}
 	for _, p := range guardPlatforms {
 		c := checkExecFor(t, p)
-		got[p] = files + renderAPI(c.pkg) + prefixLines(sealedAPIPrefix, renderAPI(c.sealed))
+		got[p] = files + renderAPI(c.pkg) + prefixLines(sealedAPIPrefix, renderAPI(c.sealed)) +
+			prefixLines(validatedAPIPrefix, renderAPI(c.validated))
 	}
 	if *updateAPI {
 		writeAPIGoldens(t, got)
@@ -628,14 +638,15 @@ func TestReleaseTargetFindingsReadsGoreleaserAsGoreleaserDoes(t *testing.T) {
 }
 
 // checkedPackage is internal/exec's production files type-checked for one
-// platform, with sealed as the importer resolved it (from source, function
-// bodies skipped, which is all its surface needs).
+// platform, with sealed and validated as the importer resolved them (from
+// source, function bodies skipped, which is all their surface needs).
 type checkedPackage struct {
-	fset   *token.FileSet
-	files  []*ast.File
-	info   *types.Info
-	pkg    *types.Package
-	sealed *types.Package
+	fset      *token.FileSet
+	files     []*ast.File
+	info      *types.Info
+	pkg       *types.Package
+	sealed    *types.Package
+	validated *types.Package
 }
 
 var checkedByPlatform = map[guardPlatform]*checkedPackage{}
@@ -687,7 +698,11 @@ func checkExecFor(t *testing.T, p guardPlatform) *checkedPackage {
 	if sealed == nil {
 		t.Fatalf("internal/exec for %s does not import %s; the payload is not sealed", p, sealedImportPath)
 	}
-	c := &checkedPackage{fset: fset, files: files, info: info, pkg: pkg, sealed: sealed}
+	validated := imp.pkgs[validatedImportPath]
+	if validated == nil {
+		t.Fatalf("internal/exec for %s does not import %s; startSealed is not fed a validated command", p, validatedImportPath)
+	}
+	c := &checkedPackage{fset: fset, files: files, info: info, pkg: pkg, sealed: sealed, validated: validated}
 	checkedByPlatform[p] = c
 	return c
 }

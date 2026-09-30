@@ -21,7 +21,7 @@ Reading a local clone's git state — `projects list`, `projects pick`, the proj
 
 ## Command groups
 
-30 command groups, at a glance. `forgectl --help` lists them from the binary
+31 command groups, at a glance. `forgectl --help` lists them from the binary
 itself; this table is the scannable index — full verbs and flags for every
 group are in the `## Usage` roster below, and the groups with a dedicated
 deep-dive get a link here.
@@ -31,6 +31,7 @@ deep-dive get a link here.
 | `tmux` | List/pick/kill/rename tmux sessions, delegating smart naming to `sesh` | Usage below |
 | `config` | Show every config section, per-key set/default (alias: `cfg`) | Usage below |
 | `init` | Scaffold every `config.toml` section with commented, sensibly-defaulted templates | Usage below |
+| `status` | Read-only overview: local git state, PRs, reclaimable space, bench health | [status](docs/commands/status.md) |
 | `projects` | Cross-host project inventory: local clones + GitHub + Gitea (alias: `proj`) | [projects and review](docs/commands/projects-and-review.md) |
 | `pr` | Clean-room pull-request review, the flagship review family | [pr](docs/commands/pr.md) |
 | `launch` | Per-project Claude Code / Codex CLI / Pi launcher (alias: `cl`) | [launch](docs/commands/launch.md) |
@@ -80,6 +81,12 @@ forgectl config --json     # the same, machine-readable (stable surface)
 forgectl init               # append (or, for the host-scalar preamble, prepend) each
                              #   section's template iff that section is absent —
                              #   never overwrites or reflows what's already there
+
+# status — read-only overview across the workbench: local git state, the pr dash
+#   sections, the clean dry-run total, and bench health (see docs/commands/status.md)
+forgectl status                          # one glyph-led line per section, a few detail rows
+forgectl status --json                   # every section and row; a failed source is a per-section error
+forgectl status --json --strict          # same, but exit 1 when any section degraded or failed
 
 # projects — cross-host project inventory (alias: proj)
 forgectl projects list [query]           # list all projects: local clones + your GitHub repos + your Gitea repos
