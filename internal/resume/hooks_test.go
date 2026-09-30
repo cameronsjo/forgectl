@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -455,5 +456,48 @@ func TestHookRunsRotate(t *testing.T) {
 	runs, err := s.RecentRuns(5)
 	if err != nil || len(runs) != 1 || runs[0].Hook != "new" {
 		t.Fatalf("after rotation: %+v %v", runs, err)
+	}
+}
+
+// TestRunHooksCancelledLeavesUnrecorded: a run cancelled during its hooks
+// must not record the version, or the hooks it could not run are lost.
+func TestRunHooksCancelledLeavesUnrecorded(t *testing.T) {
+	f := newHookFixture(t, []config.OnUpdateHook{restartHook, notifyHook}, "2.1.285")
+	f.record(t, "2.1.284")
+	ctx, cancel := context.WithCancel(context.Background())
+	f.req.Restart = func(context.Context, time.Duration) (RestartResult, error) {
+		cancel()
+		return RestartResult{}, nil
+	}
+	if _, err := RunHooks(ctx, f.req); err == nil || !strings.Contains(err.Error(), "left unrecorded") {
+		t.Fatalf("err = %v", err)
+	}
+	if f.recorded(t) != "2.1.284" {
+		t.Fatalf("recorded %q after a cancelled run", f.recorded(t))
+	}
+}
+
+// TestRunHooksCommandArgsScrubbed runs a real child that echoes one of its
+// own arguments to stderr and fails: the argument is the operator's (a token,
+// say), so it must not reach the audit trail's stderr tail.
+func TestRunHooksCommandArgsScrubbed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs /bin/sh")
+	}
+	const secret = "hook-secret-value-0123456789"
+	hook := config.OnUpdateHook{Harness: "claude", Command: []string{"/bin/sh", "-c", `echo "failed with $0" >&2; exit 3`, secret}}
+	f := newHookFixture(t, []config.OnUpdateHook{hook}, "2.1.285")
+	f.record(t, "2.1.284")
+	f.req.Runner = exec.OSRunner{}
+	res, err := RunHooks(context.Background(), f.req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := res.Runs[0]
+	if r.Outcome != OutcomeFailed || r.Exit != 3 || !strings.Contains(r.Detail, "failed with") {
+		t.Fatalf("record %+v", r)
+	}
+	if strings.Contains(r.Detail, secret) {
+		t.Fatalf("an argument value reached the audit tail: %q", r.Detail)
 	}
 }

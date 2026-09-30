@@ -231,6 +231,10 @@ func (hr hookRunner) runHook(ctx context.Context, h HookSpec, d Decision) HookRu
 	} else {
 		hctx, cancel := context.WithTimeout(ctx, h.Timeout)
 		defer cancel()
+		// The arguments are the operator's own and may carry a token, so the
+		// Runner's logs and errors show them as flag names only, and scrub
+		// their values from the stderr kept for the audit tail.
+		hctx = exec.WithOpaqueArgs(hctx, 0, len(h.Command)-1)
 		// RunWithEnv: argv goes to the program unchanged, with no shell, and
 		// the versions only through the environment.
 		_, err := hr.runner.RunWithEnv(hctx, HookEnv(h.Harness, d.Old, d.New), h.Command[0], h.Command[1:]...)
@@ -374,6 +378,11 @@ func RunHooks(ctx context.Context, req HooksRequest) (HooksResult, error) {
 			// The hook already ran; losing its record must not skip the rest.
 			logf(req.Log, "%s: could not record hook %s in the audit trail: %s", req.Harness, run.Hook, termsafe.SafeLine(err.Error()))
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		// Cancelled partway: the later hooks failed without really running,
+		// so the update is left unrecorded for the next run to fire again.
+		return res, fmt.Errorf("run interrupted; %s %s left unrecorded so the next run fires again: %w", req.Harness, termsafe.SafeLine(d.New), err)
 	}
 	if err := req.Store.Record(req.Harness, d.New); err != nil {
 		return res, err
