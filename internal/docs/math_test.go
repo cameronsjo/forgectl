@@ -64,7 +64,9 @@ import (
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/parser"
 	goldmarkhtml "github.com/yuin/goldmark/renderer/html"
+	"github.com/yuin/goldmark/text"
 )
 
 // renderVaultOrFail renders src as a vault-root page, the only root kind where
@@ -574,13 +576,22 @@ func TestScanBody_LinkInsideMathBlockNotIndexed(t *testing.T) {
 }
 
 func TestRender_Math_BlockMarkupEscaped(t *testing.T) {
-	out := renderOrFail(t, "$$\n</div><script>alert(1)</script>\n$$\n")
+	out := renderOrFail(t, "$$\na </div><script>alert(1)</script>\n$$\n")
 
 	if strings.Contains(out, "<script") {
 		t.Errorf("a script tag survived a display block: %s", out)
 	}
-	if !strings.Contains(out, mathDivOpen+"$$\n&lt;/div&gt;") {
+	if !strings.Contains(out, mathDivOpen+"$$\na &lt;/div&gt;") {
 		t.Errorf("markup was not escaped inside the display block: %s", out)
+	}
+	// A line that opens an HTML block does not go into a $$ block at all
+	// (hasDisplayCloserAhead); the sanitizer still drops its script.
+	if out := renderOrFail(t, "$$\n</div><script>alert(1)</script>\n$$\n"); strings.Contains(out, "<script") || strings.Contains(out, mathDivOpen) {
+		t.Errorf("an HTML-block opener went into a display block, or its script survived: %s", out)
+	}
+	// A TeX line that only starts with a less-than sign is still math.
+	if out := renderOrFail(t, "$$\na\n< b\n$$\n"); !strings.Contains(out, mathDivOpen) {
+		t.Errorf("a TeX line starting with \"< \" stopped a display block: %s", out)
 	}
 }
 
@@ -725,5 +736,23 @@ func TestRender_Math_DocsRootDoubleDollarMustBeBlockShaped(t *testing.T) {
 		if out := renderVaultOrFail(t, src); !strings.Contains(out, mathDisplayOpenSpan) {
 			t.Errorf("vault root lost inline $$…$$ %q: %s", src, out)
 		}
+	}
+}
+
+// TestMathBlock_RefusesToSwallowAnHTMLOpener: a $$ block does not open over
+// a line that starts an HTML block, as it does not over a fence, so
+// "$$" / "<script>" / "$$" is no math block (the %% comment block refuses
+// the same line through opensFenceOrHTML). Mutation: dropping
+// opensHTMLBlock from hasDisplayCloserAhead turns this red.
+func TestMathBlock_RefusesToSwallowAnHTMLOpener(t *testing.T) {
+	for _, src := range []string{"$$\n<script>\n$$\n", "$$\n<pre>\n$$\n", "$$\n  <div>\n$$\n"} {
+		b := []byte(src)
+		doc := markdownPlain.Parser().Parse(text.NewReader(b), parser.WithContext(newParseContext()))
+		_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+			if _, ok := n.(*mathBlock); ok && entering {
+				t.Errorf("%q opened a $$ block over an HTML opener", src)
+			}
+			return ast.WalkContinue, nil
+		})
 	}
 }

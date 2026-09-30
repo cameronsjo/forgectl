@@ -5,6 +5,7 @@ import (
 	"html"
 	"sync"
 
+	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
@@ -26,7 +27,7 @@ import (
 // time, so one such document stalls every other page.
 //
 // markupTooComplex bounds that work from the input side, in linear time,
-// before goldmark runs. A document over either bound below is not parsed:
+// before the pipeline's own parse runs. A document over either bound below is not parsed:
 // the reader shows it as plain text under a notice (plainTextDoc), and the
 // index lists it by title only, as it does a document over maxScanBytes.
 
@@ -44,9 +45,11 @@ const maxContainerWork = 1 << 24
 // times its length in bytes. Measured at the bound, the worst trigger for
 // each delimiter renders in at most about 1 s ("[x](" through one long
 // word, "<a" through one long paragraph), and most in under 0.3 s. A
-// written document is far under it: the largest of 2,166 markdown files
-// sampled, a 338 KB changelog of long, backtick-heavy list items, came to
-// 12M. A table counts as one block, as a paragraph of its rows.
+// written document is far under it: none of the 1,753 to 2,183 local
+// markdown files swept across review rounds is refused, and the heaviest,
+// a 338 KB changelog of long, backtick-heavy list items, came to 12M. The
+// blocks are the pipeline's own (guardTwins), so a table counts cell by
+// cell where the pipeline splits it and as one paragraph where it does not.
 const maxInlineWork = 1 << 27
 
 // markupDelimiters are the bytes whose count drives goldmark's superlinear
@@ -64,37 +67,64 @@ var isMarkupDelimiter = func() (t [256]bool) {
 	return t
 }()
 
-// markupGuardParser is goldmark's block pass with its default block
-// parsers and nothing else: no inline parsers, which keeps it linear once
-// the containers are bounded, and no paragraph transformers. Its blocks are
-// therefore never finer than any pipeline's, so it never counts less:
-//
-//   - A paragraph transformer only removes lines from a paragraph (link
-//     reference definitions) or splits it (a GFM table into cells). Which
-//     one applies differs by pipeline: the docs index parser has no table
-//     transformer, so it inline-parses a table as one paragraph, and in
-//     the others a link reference definition stripped from a paragraph's
-//     head can leave a delimiter row with no header, which is then no
-//     table. With neither, a table here is always one paragraph of its
-//     rows.
-//   - Every block parser the pipelines add ($$ math, %% comments,
-//     frontmatter) opens a raw block that is not inline-parsed, and none
-//     can interrupt a paragraph, so each only takes lines out of the
-//     paragraphs counted here.
-//
-// TestMarkupGuard_NeverFinerThanAPipeline checks that against every
-// pipeline's own parser. It is used under its own lock, as
-// fragmentMarkdown is.
+// The guard measures, not models, the block structure it bounds: for each
+// pipeline it parses with a block-only twin (blockOnlyTwin) built by the
+// pipeline's own constructor, so the twin has exactly the pipeline's block
+// parsers and paragraph transformers and splits the same bytes into the
+// same blocks. Only the inline parsers and AST transformers are left out;
+// with no inline parser the inline pass only walks each block's bytes, so
+// the twin's parse is linear once the containers are bounded.
 var (
-	markupGuardMu     sync.Mutex
-	markupGuardParser = parser.NewParser(parser.WithBlockParsers(parser.DefaultBlockParsers()...))
+	markupGuardMu sync.Mutex
+	// guardTwins maps each whole-document pipeline to its block-only twin.
+	guardTwins = map[goldmark.Markdown]goldmark.Markdown{
+		markdown:           newMarkdown(true, false, blockOnlyTwin()),
+		markdownPlain:      newMarkdown(false, false, blockOnlyTwin()),
+		markdownVault:      newMarkdown(true, true, blockOnlyTwin()),
+		markdownVaultPlain: newMarkdown(false, true, blockOnlyTwin()),
+		linkMarkdown:       newLinkMarkdown(blockOnlyTwin()),
+		linkMarkdownVault:  newMarkdown(false, true, blockOnlyTwin()),
+	}
 )
 
-// markupTooComplex reports whether source is over maxContainerWork or
-// maxInlineWork, and so must not be handed to goldmark.
-func markupTooComplex(source []byte) bool {
-	// The container bound first: the guard's own block pass is goldmark's,
-	// and costs what the render's does.
+// blockOnlyTwin is the goldmark option that makes a pipeline constructor
+// build a block-only twin: it installs a blockOnlyParser, which must come
+// before every extension so it receives all of their parser options.
+func blockOnlyTwin() goldmark.Option {
+	return goldmark.WithParser(blockOnlyParser{parser.NewParser(
+		parser.WithBlockParsers(parser.DefaultBlockParsers()...),
+		parser.WithParagraphTransformers(parser.DefaultParagraphTransformers()...),
+	)})
+}
+
+// blockOnlyParser starts as goldmark's default parser without its inline
+// parsers and passes on every parser option but those that add an inline
+// parser or an AST transformer. An option that adds one of those along with
+// anything else cannot be split, so it panics at startup rather than
+// silently changing the block structure.
+type blockOnlyParser struct{ parser.Parser }
+
+func (p blockOnlyParser) AddOptions(opts ...parser.Option) {
+	for _, o := range opts {
+		c := parser.NewConfig()
+		o.SetParserOption(c)
+		if len(c.InlineParsers) == 0 && len(c.ASTTransformers) == 0 {
+			p.Parser.AddOptions(o)
+			continue
+		}
+		if len(c.BlockParsers) > 0 || len(c.ParagraphTransformers) > 0 || len(c.Options) > 0 || c.EscapedSpace {
+			panic("docs: a parser option mixes inline parsers or AST transformers with block options; blockOnlyParser cannot split it")
+		}
+	}
+}
+
+// markupTooComplex reports whether source, as md parses it, is over
+// maxContainerWork or maxInlineWork, and so must not be handed to md. md is
+// one of the pipelines in guardTwins, and source exactly the bytes it will
+// parse.
+func markupTooComplex(md goldmark.Markdown, source []byte) bool {
+	// The container bound first: the twin's block pass is goldmark's, and
+	// costs what the pipeline's does.
 	if containerWorkOver(source) {
 		return true
 	}
@@ -104,8 +134,12 @@ func markupTooComplex(source []byte) bool {
 	if countDelimiters(source)*len(source) <= maxInlineWork {
 		return false
 	}
+	twin, ok := guardTwins[md]
+	if !ok {
+		panic("docs: markupTooComplex called with a pipeline that has no block-only twin")
+	}
 	markupGuardMu.Lock()
-	doc := markupGuardParser.Parse(text.NewReader(source))
+	doc := twin.Parser().Parse(text.NewReader(source), parser.WithContext(newParseContext()))
 	markupGuardMu.Unlock()
 	return inlineWork(doc, source, maxInlineWork) > maxInlineWork
 }

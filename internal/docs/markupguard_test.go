@@ -3,16 +3,38 @@ package docs
 // Tests for the markup guard (markupguard.go, forgectl#628, forgectl#596).
 
 import (
-	"github.com/yuin/goldmark"
-	"github.com/yuin/goldmark/parser"
-	"github.com/yuin/goldmark/text"
+	"bytes"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/text"
 )
+
+// refused reports whether the guard refuses src for the docs render
+// pipeline, or for the vault one when vault is set. The container and
+// work bounds these tests pin do not depend on the pipeline.
+func refused(src []byte, vault bool) bool {
+	if vault {
+		return markupTooComplex(markdownVaultPlain, src)
+	}
+	return markupTooComplex(markdownPlain, src)
+}
+
+// refusedByAny reports whether any pipeline's guard refuses src.
+func refusedByAny(src []byte) bool {
+	for md := range guardTwins {
+		if markupTooComplex(md, src) {
+			return true
+		}
+	}
+	return false
+}
 
 // guardTriggers are the superlinear goldmark inputs measured on
 // origin/main, each as a unit repeated through one paragraph (with an
@@ -48,7 +70,7 @@ func guardTrigger(pre, unit string, size int) []byte {
 // turns its rows red.
 func TestMarkupGuard_TriggersAreRefused(t *testing.T) {
 	for _, tc := range guardTriggers {
-		if src := guardTrigger(tc.pre, tc.unit, 256<<10); !markupTooComplex(src) {
+		if src := guardTrigger(tc.pre, tc.unit, 256<<10); !refused(src, tc.kind == RootVault) {
 			t.Errorf("%s: 256 KB of %q is not refused", tc.name, tc.unit)
 		}
 	}
@@ -58,7 +80,7 @@ func TestMarkupGuard_TriggersAreRefused(t *testing.T) {
 // trigger at 256 KB renders and scans, in its slow root kind, in well
 // under the bound, where origin/main took from about 3 s to over a minute
 // per trigger. The guard itself runs in milliseconds, so 3 s is generous.
-// Mutation: skipping the guard in renderHidden or scanDocFor turns this red.
+// Mutation: skipping the guard in renderHidden or scanDocFrom turns this red.
 func TestMarkupGuard_RenderAndScanAreBounded(t *testing.T) {
 	dir := t.TempDir()
 	for _, tc := range guardTriggers {
@@ -98,10 +120,10 @@ func TestMarkupGuard_WorkBoundIsExact(t *testing.T) {
 	if k*size != maxInlineWork {
 		t.Fatalf("fixture is %d, want maxInlineWork %d", k*size, maxInlineWork)
 	}
-	if markupTooComplex(line(k)) {
+	if refused(line(k), false) {
 		t.Error("a paragraph exactly at maxInlineWork is refused")
 	}
-	if !markupTooComplex(line(k + 1)) {
+	if !refused(line(k+1), false) {
 		t.Error("a paragraph one delimiter over maxInlineWork is not refused")
 	}
 }
@@ -115,128 +137,127 @@ func TestMarkupGuard_WorkBoundIsExact(t *testing.T) {
 // turns the mixed or indented case red; never resetting open turns the
 // closed-lists case red.
 func TestMarkupGuard_ContainerWork(t *testing.T) {
-	if markupTooComplex([]byte(strings.Repeat(">", 4096) + " x\n")) {
+	if refused([]byte(strings.Repeat(">", 4096)+" x\n"), false) {
 		t.Error("one line of 4096 quotes (exactly maxContainerWork) is refused")
 	}
-	if !markupTooComplex([]byte(strings.Repeat(">", 4097) + " x\n")) {
+	if !refused([]byte(strings.Repeat(">", 4097)+" x\n"), false) {
 		t.Error("one line of 4097 quotes is not refused")
 	}
 	// List markers count as quotes do: one line opening 4,097 list items.
-	if !markupTooComplex([]byte(strings.Repeat("- ", 4097) + "x\n")) {
+	if !refused([]byte(strings.Repeat("- ", 4097)+"x\n"), false) {
 		t.Error("one line of 4097 list markers is not refused")
 	}
 	// 128 lines of 400 mixed quote and list markers: 128 * 400^2 > 1 << 24.
 	mixed := strings.Repeat(strings.Repeat("> - ", 200)+"x\n", 128)
-	if !markupTooComplex([]byte(mixed)) {
+	if !refused([]byte(mixed), false) {
 		t.Error("128 lines of 400 mixed markers are not refused")
 	}
 	// 2,000 nested list items, then lines indented under all of them: each
 	// line reaches 2,000 containers. On origin/main 1 MiB of this took 11 s.
 	indented := strings.Repeat("- ", 2000) + "x\n" + strings.Repeat(strings.Repeat(" ", 4000)+"x\n", 8)
-	if !markupTooComplex([]byte(indented)) {
+	if !refused([]byte(indented), false) {
 		t.Error("lines indented under 2,000 open list items are not refused")
 	}
 	// The same indentation with every list closed by a paragraph at
 	// column 0 after a blank line reaches no container: a deep code block.
 	closed := strings.Repeat("- ", 2000) + "x\n\nclosed\n\n" + strings.Repeat(strings.Repeat(" ", 4000)+"x\n", 8)
-	if markupTooComplex([]byte(closed)) {
+	if refused([]byte(closed), false) {
 		t.Error("indentation after every list is closed is refused")
 	}
 	// Markers need a following space: "-x" and "1.x" open nothing.
-	if markupTooComplex([]byte(strings.Repeat("-x1.x", 1000) + "\n")) {
+	if refused([]byte(strings.Repeat("-x1.x", 1000)+"\n"), false) {
 		t.Error("text that only looks like markers is refused")
 	}
 }
 
-// pipelineParsers are every goldmark instance that parses a whole
-// document or a fragment of one: render (docs and vault, with and without
-// frontmatter), the index scan (docs and vault) and the heading-fragment
-// parser.
-func pipelineParsers() map[string]goldmark.Markdown {
-	return map[string]goldmark.Markdown{
-		"render docs":                  markdown,
-		"render docs, no frontmatter":  markdownPlain,
-		"render vault":                 markdownVault,
-		"render vault, no frontmatter": markdownVaultPlain,
-		"scan docs":                    linkMarkdown,
-		"scan vault":                   linkMarkdownVault,
-		"heading fragment":             fragmentMarkdown,
+// TestMarkupGuard_TwinsAreBlockOnly: every twin's parse leaves inline
+// markup as plain text, so the guard never runs the superlinear inline
+// parsers it exists to avoid. Mutation: letting blockOnlyParser pass on
+// inline parser options turns this red (strikethrough, math, linkify, the
+// vault parsers).
+func TestMarkupGuard_TwinsAreBlockOnly(t *testing.T) {
+	src := []byte("para *a* [b](c) ~~d~~ `e` $f$ $$g$$ [[h]] ==i== %%j%% #tag https://x.io <b>k</b>\n")
+	for md, twin := range guardTwins {
+		doc := twin.Parser().Parse(text.NewReader(src), parser.WithContext(newParseContext()))
+		_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+			if entering && n.Type() == ast.TypeInline && n.Kind() != ast.KindText {
+				t.Errorf("twin of %p produced an inline %s node", md, n.Kind())
+			}
+			return ast.WalkContinue, nil
+		})
 	}
 }
 
-// TestMarkupGuard_NeverFinerThanAPipeline: for block shapes whose
-// segmentation differs between pipelines (tables, a link reference
-// definition over a delimiter row, frontmatter, $$ and %% blocks, tables in
-// lists and quotes), the guard's inline work is never less than the work
-// any pipeline's own block structure implies, because its blocks are never
-// finer. Mutation: giving markupGuardParser the GFM table transformer
-// counts a table cell by cell and turns the scan-docs rows red, with or
-// without goldmark's default paragraph transformers alongside it.
-func TestMarkupGuard_NeverFinerThanAPipeline(t *testing.T) {
-	row := "|" + strings.Repeat("_a a* ", 4) + "|\n"
-	rows := strings.Repeat(row, 6)
-	inputs := map[string]string{
+// guardShapes are block shapes on which a pipeline's own block parsers or
+// paragraph transformers segment a document differently from goldmark's
+// defaults: tables (the docs scan has no table transformer), a link
+// reference definition over a delimiter row, frontmatter hiding a fence or
+// an HTML opener, $$ and %% blocks over a fence or an HTML opener, and
+// tables in lists and quotes. Each is followed by rows of unmatched
+// emphasis delimiters, the costly part.
+func guardShapes(rows string) map[string]string {
+	return map[string]string{
 		"table":                      "h\n|-|\n" + rows,
-		"table with header":          "| x | y |\n|---|---|\n" + strings.Repeat("| `a` *b* | [c](d) _e_ |\n", 6),
+		"table with header":          "| x | y |\n|---|---|\n" + rows,
 		"ref def over delimiter row": "[a]: /u\n|-|\n" + rows,
-		"frontmatter then table":     "---\ntitle: t\n---\nh\n|-|\n" + rows,
-		"math and comment blocks":    "$$\nx_1\n$$\n%%\nc *d*\n%%\nh\n|-|\n" + rows,
+		"frontmatter hiding a fence": "---\na: |\n  ```\n---\n" + rows,
+		"frontmatter hiding <pre>":   "---\na: |\n  <pre>\n---\n" + rows,
+		"math over <script>":         "$$\n<script>\n$$\n" + rows,
+		"math over <pre>":            "$$\n<pre>\n$$\n" + rows,
+		"math over a fence":          "$$\n```\n$$\n" + rows,
+		"comment over <script>":      "%%\n<script>\n%%\n" + rows,
+		"comment over a fence":       "%%\n```\n%%\n" + rows,
+		"math and comment blocks":    "$$\nx_1\n$$\n%%\nc *d*\n%%\n" + rows,
 		"table in a list":            "- h\n  |-|\n" + strings.ReplaceAll(rows, "|_", "  |_"),
 		"table in a quote":           "> h\n> |-|\n" + strings.ReplaceAll(rows, "|_", "> |_"),
-		"paragraphs":                 strings.Repeat("a *b* [c](d) _e_\n\n", 4),
 	}
+}
+
+func guardRows(n int) string {
+	return strings.Repeat("|"+strings.Repeat("_a a* ", 20)+"|\n", n)
+}
+
+// TestMarkupGuard_NeverFinerThanAPipeline: on every adversarial shape, the
+// work the guard measures for a pipeline is at least the work that
+// pipeline's own full parse, inline pass included, gives the same bytes.
+// Mutation: reverting the guard to one parser of goldmark's default block
+// parsers (no pipeline's own) turns the frontmatter rows red for the
+// frontmatter render pipelines; giving it the GFM table transformer on
+// top turns the table rows red for the docs scan.
+func TestMarkupGuard_NeverFinerThanAPipeline(t *testing.T) {
 	const unlimited = int(^uint(0) >> 1)
-	for name, src := range inputs {
+	for name, src := range guardShapes(guardRows(6)) {
 		b := []byte(src)
-		markupGuardMu.Lock()
-		guard := inlineWork(markupGuardParser.Parse(text.NewReader(b)), b, unlimited)
-		markupGuardMu.Unlock()
-		for pname, md := range pipelineParsers() {
-			doc := md.Parser().Parse(text.NewReader(b), parser.WithContext(newParseContext()))
-			if got := inlineWork(doc, b, unlimited); got > guard {
-				t.Errorf("%s under %s: pipeline work %d > guard work %d, so the guard's blocks are finer", name, pname, got, guard)
+		for md, twin := range guardTwins {
+			pipe := inlineWork(md.Parser().Parse(text.NewReader(b), parser.WithContext(newParseContext())), b, unlimited)
+			guard := inlineWork(twin.Parser().Parse(text.NewReader(b), parser.WithContext(newParseContext())), b, unlimited)
+			if pipe > guard {
+				t.Errorf("%s: pipeline work %d > guard work %d; the guard misses blocks this pipeline inline-parses", name, pipe, guard)
 			}
 		}
 	}
 }
 
-// reviewTableRepro is a GFM-table-shaped document of n rows of unmatched
-// emphasis delimiters, after prefix. Two pipelines inline-parse its rows as
-// one paragraph: the docs index scan, which has no table transformer, and,
-// with prefix "[a]: /u\n", render and the vault scan, where the stripped
-// reference definition leaves a header-less delimiter row that is no
-// table. On a guard that counted cells, 1,000 rows (123 KB) took 7.1 s to
-// scan and 8.9 s to render, the latter under renderMu, and 3,000 took over
-// 60 s.
-func reviewTableRepro(prefix string, n int) []byte {
-	return []byte(prefix + "h\n|-|\n" + strings.Repeat("|"+strings.Repeat("_a a* ", 20)+"|\n", n))
-}
-
-// TestMarkupGuard_TableReprosAreBounded: both review repros are refused and
-// render and scan, in both root kinds, well inside a generous wall-clock
-// bound. Mutation: giving markupGuardParser the GFM table transformer turns
-// this red (and slow).
-func TestMarkupGuard_TableReprosAreBounded(t *testing.T) {
-	dir := t.TempDir()
-	for _, prefix := range []string{"", "[a]: /u\n"} {
-		src := reviewTableRepro(prefix, 3000)
-		if !markupTooComplex(src) {
-			t.Errorf("prefix %q: a %d-byte table repro is not refused", prefix, len(src))
-		}
-		p := filepath.Join(dir, "table.md")
-		if err := os.WriteFile(p, src, 0o600); err != nil {
-			t.Fatal(err)
-		}
+// TestMarkupGuard_ReprosAreBounded: each shape at 3,000 rows is refused
+// wherever the pipeline would inline-parse the rows, and renders and scans,
+// in both root kinds, well inside a generous wall-clock bound. On earlier
+// guards that modelled the block structure, the table shapes took 7 to 9 s
+// at 1,000 rows, and "math over <script>" and "frontmatter hiding a fence"
+// 53 s and 57 s at 3,000, under renderMu. Mutation: reverting the guard to
+// one default-block-parser parser turns this red (and slow).
+func TestMarkupGuard_ReprosAreBounded(t *testing.T) {
+	for name, src := range guardShapes(guardRows(3000)) {
+		b := []byte(src)
 		for _, kind := range []RootKind{RootDocs, RootVault} {
 			start := time.Now()
-			if _, _, err := renderHidden(src, kind, nil); err != nil {
+			if _, _, err := renderHidden(b, kind, nil); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := scanDocFor(kind, p, "table.md"); err != nil {
+			if _, err := scanDocFrom(kind, bytes.NewReader(b), "shape.md"); err != nil {
 				t.Fatal(err)
 			}
 			if d := time.Since(start); d > 3*time.Second {
-				t.Errorf("prefix %q, kind %v: render and scan took %v, want well under 3s", prefix, kind, d)
+				t.Errorf("%s, kind %v: render and scan took %v, want well under 3s", name, kind, d)
 			}
 		}
 	}
@@ -250,7 +271,7 @@ func TestMarkupGuard_WrittenDocsPass(t *testing.T) {
 	for prose.Len() < maxScanBytes-1024 {
 		prose.WriteString("Run `forgectl docs serve` with **care**, see [the guide](guide.md) and <https://example.com>; the _flag_ is ~~old~~ new.\n\n")
 	}
-	if markupTooComplex([]byte(prose.String())) {
+	if refusedByAny([]byte(prose.String())) {
 		t.Error("a 1 MiB document of ordinary prose is refused")
 	}
 	root, err := os.OpenRoot(filepath.Join("..", ".."))
@@ -275,7 +296,7 @@ func TestMarkupGuard_WrittenDocsPass(t *testing.T) {
 			return err
 		}
 		n++
-		if len(b) <= maxScanBytes && markupTooComplex(b) {
+		if len(b) <= maxScanBytes && refusedByAny(b) {
 			t.Errorf("%s is refused by the markup guard", p)
 		}
 		return nil
@@ -318,7 +339,7 @@ func TestRenderDocFor_GuardedDocIsPlainText(t *testing.T) {
 // TestScanDoc_GuardedDocIsTitleOnly: a refused document is indexed by its
 // H1 title only, as an over-cap one is, with no headings or links, in
 // both root kinds; a refused title line falls back to the filename.
-// Mutation: dropping the guard from scanDocFor turns the links check red
+// Mutation: dropping the guard from scanDocFrom turns the links check red
 // (and the scan slow).
 func TestScanDoc_GuardedDocIsTitleOnly(t *testing.T) {
 	dir := t.TempDir()

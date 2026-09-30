@@ -62,7 +62,10 @@ var (
 	markdownVaultPlain = newMarkdown(false, true)
 )
 
-func newMarkdown(withFrontmatter, vault bool) goldmark.Markdown {
+// newMarkdown builds a render pipeline. extra goes first, ahead of every
+// extension, so a goldmark.WithParser in it (blockOnlyTwin) receives every
+// parser option the pipeline registers.
+func newMarkdown(withFrontmatter, vault bool, extra ...goldmark.Option) goldmark.Markdown {
 	extenders := []goldmark.Extender{
 		extension.GFM,
 		highlighting.NewHighlighting(
@@ -88,11 +91,11 @@ func newMarkdown(withFrontmatter, vault bool) goldmark.Markdown {
 	if vault {
 		extenders = append(extenders, obsidianFlavor{})
 	}
-	return goldmark.New(
+	return goldmark.New(append(extra,
 		goldmark.WithExtensions(extenders...),
 		goldmark.WithParserOptions(headingParserOptions(vault)...),
 		goldmark.WithRendererOptions(goldmarkhtml.WithUnsafe()),
-	)
+	)...)
 }
 
 // headingParserOptions is the ONE place the heading-id rule is configured.
@@ -580,11 +583,6 @@ func renderWith(source []byte, kind RootKind, resolve wikilinkResolver) (string,
 // the same parse the page is rendered from, so countWords can leave comment
 // text out of the reading estimate.
 func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (string, []text.Segment, error) {
-	// A document goldmark would take superlinear time on is shown as plain
-	// text instead, before renderMu is taken (markupguard.go).
-	if markupTooComplex(source) {
-		return plainTextDoc(source), nil, nil
-	}
 	// Route through the frontmatter-aware parser only when a well-formed
 	// block actually opens the document. The extension's opener is greedy —
 	// any leading --- fence starts a block, and an unterminated one consumes
@@ -601,6 +599,12 @@ func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (strin
 		md = markdown
 	default:
 		md = markdownPlain
+	}
+	// A document goldmark would take superlinear time on is shown as plain
+	// text instead, before renderMu is taken. The guard measures the block
+	// structure md itself gives source (markupguard.go).
+	if markupTooComplex(md, source) {
+		return plainTextDoc(source), nil, nil
 	}
 	renderMu.Lock()
 	var buf bytes.Buffer

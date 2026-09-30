@@ -62,15 +62,17 @@ var linkMarkdown = newLinkMarkdown()
 // index build never contends for renderMu.
 var linkMarkdownVault = newMarkdown(false, true)
 
-func newLinkMarkdown() goldmark.Markdown {
+// newLinkMarkdown builds the docs scan parser; extra goes first, as in
+// newMarkdown.
+func newLinkMarkdown(extra ...goldmark.Option) goldmark.Markdown {
 	// No wikilink extender: the docs-root page has none, so "[[w]]" renders
 	// as literal text and must not be indexed as a link (#655). The index
 	// holds what the page shows, as the vault parser below does.
-	return goldmark.New(
+	return goldmark.New(append(extra,
 		goldmark.WithParserOptions(headingParserOptions(false)...),
 		// Parse-only: a $$ block's lines are TeX, not headings or links.
 		goldmark.WithParserOptions(mathBlockParserOptions()...),
-	)
+	)...)
 }
 
 // blockIDPattern matches a trailing Obsidian block-id marker on a line:
@@ -113,28 +115,9 @@ func scanDocFrom(kind RootKind, r io.Reader, relPath string) (docMeta, error) {
 		return docMeta{}, err
 	}
 
-	// Past the cap, or past the markup guard (markupguard.go), there is no
-	// whole-document parse.
-	if len(source) > maxScanBytes || markupTooComplex(source) {
-		// The title is firstH1's line scan; a vault title is then
-		// parsed on its own to drop its comments. A "# " line inside a
-		// fence or a %% block of such a document can still reach it.
-		// The scan runs on the body: a YAML "# comment" in the frontmatter
-		// is not a heading.
-		scanSrc := source
-		if fm, ok := splitFrontmatter(source); ok {
-			scanSrc = fm.body
-		}
-		title := firstH1(scanSrc)
-		if kind == RootVault && title != "" {
-			title = vaultLineTitle(title)
-		}
-		if title == "" {
-			title = titleFromFilename(relPath)
-		}
-		slog.Debug("docs: document exceeds the scan cap or the markup guard; indexed by title only.",
-			"path", relPath, "limit", maxScanBytes, "bytes", len(source))
-		return docMeta{Title: title}, nil
+	// Past the cap there is no whole-document parse.
+	if len(source) > maxScanBytes {
+		return titleOnlyMeta(kind, source, relPath), nil
 	}
 
 	body := source
@@ -149,6 +132,12 @@ func scanDocFrom(kind RootKind, r io.Reader, relPath string) (docMeta, error) {
 			status, staleAfter = trustFields(root)
 			orphanOK = orphanOKField(root)
 		}
+	}
+
+	// Nor past the markup guard, which measures the block structure the
+	// scan parser itself gives body (markupguard.go).
+	if markupTooComplex(scanMarkdown(kind), body) {
+		return titleOnlyMeta(kind, source, relPath), nil
 	}
 
 	scan, err := scanBodyFor(kind, body)
@@ -344,6 +333,37 @@ type bodyScan struct {
 type h1Candidate struct {
 	at      int
 	visible string
+}
+
+// titleOnlyMeta is the index entry of a document scanDocFrom does not
+// parse, over maxScanBytes or past the markup guard: its title only. The
+// title is firstH1's line scan; a vault title is then parsed on its own to
+// drop its comments. A "# " line inside a fence or a %% block of such a
+// document can still reach it. The line scan runs on the body: a YAML
+// "# comment" in the frontmatter is not a heading.
+func titleOnlyMeta(kind RootKind, source []byte, relPath string) docMeta {
+	scanSrc := source
+	if fm, ok := splitFrontmatter(source); ok {
+		scanSrc = fm.body
+	}
+	title := firstH1(scanSrc)
+	if kind == RootVault && title != "" {
+		title = vaultLineTitle(title)
+	}
+	if title == "" {
+		title = titleFromFilename(relPath)
+	}
+	slog.Debug("docs: document exceeds the scan cap or the markup guard; indexed by title only.",
+		"path", relPath, "limit", maxScanBytes, "bytes", len(source))
+	return docMeta{Title: title}
+}
+
+// scanMarkdown is the scan parser for a root kind.
+func scanMarkdown(kind RootKind) goldmark.Markdown {
+	if kind == RootVault {
+		return linkMarkdownVault
+	}
+	return linkMarkdown
 }
 
 func scanBodyFor(kind RootKind, body []byte) (bodyScan, error) {
@@ -563,7 +583,7 @@ func parsedTitle(source []byte, bodyOffset int, body []byte, h1s []h1Candidate) 
 // firstH1 reads one line of any length, so it can be the whole trigger.
 func vaultLineTitle(title string) string {
 	src := []byte("# " + title + "\n")
-	if markupTooComplex(src) {
+	if markupTooComplex(linkMarkdownVault, src) {
 		return ""
 	}
 	scan, err := scanBodyFor(RootVault, src)
