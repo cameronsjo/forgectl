@@ -682,3 +682,121 @@ func TestStraddleLen_OneByteRoundsAreBounded(t *testing.T) {
 		t.Errorf("got %.20q, dropped %d; want empty, %d", got, dropped, 2+2*maxStderrTail)
 	}
 }
+
+// TestStraddleLen_ValueLongerThanEveryEntry pins #925. withValues adds bare
+// values (maskFor adds every value a user span withholds) that can be longer
+// than any entry, or arrive with no entry at all. straddleLen sized its KMP
+// failure table from the entries alone, so a value longer than all of them
+// indexed past the table and panicked.
+//
+// Mutation: size longest from m.entries only (the pre-#925 loop) and every
+// row panics with index out of range.
+func TestStraddleLen_ValueLongerThanEveryEntry(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		entries []string
+		s       string
+		want    int
+	}{
+		{"no entries, no fragment", nil, "abcX tail text", 0},
+		{"no entries, a fragment", nil, "cdefX tail text", len("cdef")},
+		{"a shorter entry, a fragment", []string{"K=z"}, "bcdefX tail", len("bcdef")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := maskFrom(WithMaskedAssignments(context.Background(), tc.entries)).withValues([]string{"abcdef"})
+			if got := m.straddleLen(tc.s); got != tc.want {
+				t.Errorf("straddleLen(%q) = %d, want %d", tc.s, got, tc.want)
+			}
+		})
+	}
+}
+
+// fuzzAlphabet is what FuzzStraddleLen builds entries, values and streams
+// from: few enough bytes that suffix/prefix overlaps are dense, and none of
+// them in "[redacted]", so a replacement can never spell a value.
+const fuzzAlphabet = "bgkz=_ \xc3\xa9"
+
+func fuzzString(raw []byte) string {
+	b := make([]byte, len(raw))
+	for i, c := range raw {
+		b[i] = fuzzAlphabet[int(c)%len(fuzzAlphabet)]
+	}
+	return string(b)
+}
+
+// FuzzStraddleLen drives straddleLen and maskedTail over random masks built
+// from both sources (#925): WithMaskedAssignments entries and withValues
+// values, of any relative length. For every cut of the stream it asserts:
+//
+//   - nothing panics;
+//   - straddleLen never drops more than the tail it was given;
+//   - unless the round cap dropped the tail whole, what remains starts with
+//     no proper suffix of any value or entry that straddleLen scans, and
+//     matches the probe-every-suffix reference;
+//   - the masked tail never contains a whole value of minScrubLen or more,
+//     unless an entry's shown key spells it (the key is rendered by design).
+//
+// Mutation: size straddleLen's longest from m.entries only and the seed
+// corpus panics; make straddleLen skip m.values and the reference disagrees.
+func FuzzStraddleLen(f *testing.F) {
+	f.Add([]byte("k=b"), []byte("bgkzbgkz_bgkz"), []byte("gkz_bgkz tail bgkzbgkz_bgkz"), uint8(20))
+	f.Add([]byte(""), []byte("bbbbbbbbbbbbbbbbg"), []byte("bbbbbbbbg zz"), uint8(5))
+	f.Add([]byte("kb=gg"), []byte("zzzzzzzzzzzz"), []byte("zzzzzzzzzzzzzzzzzzzzzzz"), uint8(7))
+	f.Add([]byte("\x05\x06=\x07"), []byte("\x07\x08\x07\x08\x07\x08\x07\x08\x07"), []byte("\x08\x07\x08\x07\x08"), uint8(3))
+	f.Fuzz(func(t *testing.T, rawEntries, rawValues, rawStream []byte, limit uint8) {
+		// '\x00' separates list items before the alphabet mapping.
+		var entries, values []string
+		for _, r := range bytes.Split(rawEntries, []byte{0}) {
+			entries = append(entries, "K"+fuzzString(r))
+		}
+		for _, r := range bytes.Split(rawValues, []byte{0}) {
+			values = append(values, fuzzString(r))
+		}
+		stream := fuzzString(rawStream)
+		m := maskFrom(WithMaskedAssignments(context.Background(), entries)).withValues(values)
+		d := m.data()
+		var shownKeys []string
+		for _, e := range d.entries {
+			shownKeys = append(shownKeys, d.shown[e])
+		}
+
+		for lim := 1; lim <= len(stream); lim++ {
+			if limit != 0 && lim != int(limit) && lim != len(stream) {
+				continue
+			}
+			tail := stream[len(stream)-lim:]
+			n := m.straddleLen(tail)
+			if n < 0 || n > len(tail) {
+				t.Fatalf("straddleLen(%q) = %d, outside [0, %d]", tail, n, len(tail))
+			}
+			if len(tail) < maxStraddleRounds {
+				if want := straddleLenReference(m, tail); n != want {
+					t.Fatalf("straddleLen(%q) = %d, reference %d (values %q, entries %q)", tail, n, want, d.values, d.entries)
+				}
+			}
+			if n < len(tail) {
+				rest := tail[n:]
+				for _, v := range d.values {
+					for l := 1; l < len(v) && l <= len(rest); l++ {
+						if strings.HasPrefix(rest, v[len(v)-l:]) {
+							t.Fatalf("after dropping %d of %q, the rest starts with %q, a suffix of value %q", n, tail, v[len(v)-l:], v)
+						}
+					}
+				}
+			}
+
+			tb := &tailBuffer{limit: lim}
+			_, _ = tb.Write([]byte("~" + stream)) // the "~" forces a cut
+			got, _ := maskedTail(tb, m)
+			for _, v := range d.values {
+				if len(v) < minScrubLen || !strings.Contains(got, v) {
+					continue
+				}
+				if slices.ContainsFunc(shownKeys, func(k string) bool { return strings.Contains(k, v) }) {
+					continue
+				}
+				t.Fatalf("maskedTail kept value %q whole: %q (stream %q, limit %d)", v, got, stream, lim)
+			}
+		}
+	})
+}

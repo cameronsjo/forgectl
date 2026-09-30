@@ -469,9 +469,14 @@ const maxStraddleRounds = 64
 // drops is dropped whole, which, like any extra drop, only loses more of a
 // tail that was already cut.
 func (m maskData) straddleLen(s string) int {
+	// The longest suffix any pattern below can match, which sizes the shared
+	// failure table. Values count as well as entries: withValues adds bare
+	// values that can be longer than every entry, or come with none (#925).
 	longest := 0
-	for _, e := range m.entries {
-		longest = max(longest, len(e)-1)
+	for _, p := range [][]string{m.values, m.entries} {
+		for _, x := range p {
+			longest = max(longest, len(x)-1)
+		}
 	}
 	total := 0
 	for round := 0; ; round++ {
