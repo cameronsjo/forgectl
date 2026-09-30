@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/redact/redacttest"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
@@ -185,6 +186,42 @@ func TestExecutor_RunStep_DebugLogWithholdsArgvCredentials(t *testing.T) {
 	}
 	if len(fake.Calls) != 1 || strings.Join(fake.Calls[0].Args, " ") != strings.Join(args, " ") {
 		t.Errorf("the step must receive the real argv, got %+v", fake.Calls)
+	}
+}
+
+// TestExecutor_RunStep_CorpusNeverRendered runs every row of the #749 review
+// corpus as a run step's args on the real exec Runner, failing, and checks
+// the debug log, the failure log and the returned error: no row's secret
+// renders, whatever the tool's flag grammar.
+//
+// Mutation: drop the exec.WithOpaqueArgs line from runStep and rows leak
+// through the Runner's debug log and CommandError.Error().
+func TestExecutor_RunStep_CorpusNeverRendered(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	for _, argv := range redacttest.Corpus {
+		logs.Reset()
+		wf := Workflow{
+			DSLVersion: 1,
+			Name:       "run-corpus",
+			Steps:      []Step{{Uses: "run", Cmd: "sh", Args: append([]string{"-c", "exit 3", "sh"}, argv...)}},
+		}
+		plan, err := BuildPlan(wf, nil, testRegistry(t))
+		if err != nil {
+			t.Fatalf("BuildPlan: %v", err)
+		}
+		err = NewExecutor(exec.OSRunner{}, testRegistry(t)).Run(context.Background(), plan, NewContext(nil))
+		if err == nil {
+			t.Fatalf("%q: expected the step to fail", argv)
+		}
+		if !strings.Contains(logs.String(), "Preparing to run command") {
+			t.Fatalf("%q: the Runner logged no argv, so the case proves nothing:\n%s", argv, logs.String())
+		}
+		if strings.Contains(logs.String(), redacttest.Secret) || strings.Contains(err.Error(), redacttest.Secret) {
+			t.Errorf("%q: credential rendered:\nerror: %v\nlog:\n%s", argv, err, logs.String())
+		}
 	}
 }
 

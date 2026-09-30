@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
 // TestOSRunner_URLCredentialsNeverLogged pins #734: a token in a clone URL's
@@ -157,5 +159,51 @@ func TestOSRunner_ArgvCredentialsOutsideURLsNeverLogged(t *testing.T) {
 				t.Errorf("the child did not echo its argv, so the test proves nothing: %q", cmdErr.Stderr)
 			}
 		})
+	}
+}
+
+// TestOSRunner_OpaqueArgsRenderFlagNamesOnly pins #749's allowlist: under
+// WithOpaqueArgs the user span renders as flag names and [user-arg] in the
+// debug log, the failure log, CommandError.Args and Error(), on Run and
+// RunInteractive, while forgectl's own elements on either side still show
+// and the child receives the real argv.
+//
+// Mutation: make shownArgs ignore the opaque span and every rendering
+// carries the secret.
+func TestOSRunner_OpaqueArgsRenderFlagNamesOnly(t *testing.T) {
+	const secret = "Op4Qe9Vx2" //nolint:gosec // G101: a fake credential the Runner must not render
+	args := []string{"-c", `[ "$3" = "--body=$2" ] && [ ${#2} -eq 9 ] && exit 3; exit 4`, "sh", "-p", secret, "--body=" + secret, "--", "/ctx"}
+	ctx := WithOpaqueArgs(context.Background(), 3, 3)
+	want := []string{"-c", args[1], "sh", "-p", redact.UserArgMarker, "--body=" + redact.UserArgMarker, "--", "/ctx"}
+
+	logs := captureLogs(t)
+	_, err := OSRunner{}.Run(ctx, "sh", args...)
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) || cmdErr.ExitCode != 3 {
+		t.Fatalf("want exit 3 (the child saw the real value), got %v", err)
+	}
+	if strings.Join(cmdErr.Args, "\x00") != strings.Join(want, "\x00") {
+		t.Errorf("Args = %q, want %q", cmdErr.Args, want)
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(logs.String(), secret) {
+		t.Errorf("secret rendered:\nerror: %v\nlog:\n%s", err, logs.String())
+	}
+	if !strings.Contains(err.Error(), "-p [user-arg] --body=[user-arg] -- /ctx") {
+		t.Errorf("the flag names and forgectl's elements should show: %v", err)
+	}
+
+	logs.Reset()
+	if err := (OSRunner{}).RunInteractive(ctx, "sh", args...); err == nil {
+		t.Fatal("RunInteractive: expected exit 3")
+	}
+	if !strings.Contains(logs.String(), "Preparing to run interactive command") || strings.Contains(logs.String(), secret) {
+		t.Errorf("interactive debug log:\n%s", logs.String())
+	}
+
+	// A span past the end of argv, or empty, changes nothing.
+	for _, c := range []context.Context{WithOpaqueArgs(context.Background(), 9, 2), WithOpaqueArgs(context.Background(), 0, 0)} {
+		if got := shownArgs(c, []string{"a", "b"}); strings.Join(got, " ") != "a b" {
+			t.Errorf("shownArgs = %q", got)
+		}
 	}
 }

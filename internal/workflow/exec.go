@@ -211,10 +211,13 @@ func runStep(ctx context.Context, run exec.Runner, _ *Context, step PlanStep) er
 		slog.Warn("Run step missing required cmd field.")
 		return errors.New("run step requires cmd")
 	}
-	// Rendered as the Runner renders it (#749): a token in a clone URL or
-	// after a --token flag would otherwise reach the log one line before
-	// the Runner withholds it.
-	slog.Debug("Running command.", "cmd", redact.Arg(step.Cmd), "args", redact.Args(step.Args))
+	// The args are the workflow author's, so the Runner renders them as flag
+	// names only (#749), and so does this line: a token in any shape (a
+	// clone URL, docker login -p X, curl -u u:X) would otherwise reach the
+	// log. --dry-run's plan printout is deliberate review output and still
+	// shows them.
+	ctx = exec.WithOpaqueArgs(ctx, 0, len(step.Args))
+	slog.Debug("Running command.", "cmd", redact.Arg(step.Cmd), "args", redact.UserArgs(step.Args))
 	if d, ok := run.(exec.DiscardingRunner); ok {
 		return d.RunDiscardingStdout(ctx, step.Cmd, step.Args...)
 	}
