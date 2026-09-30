@@ -35,11 +35,10 @@ func TestFindingsCleanup_WritableStoreIsRefused(t *testing.T) {
 			c := findingsClient(t, store)
 			d := filepath.Join(store, findingsDirPrefix+"old")
 			mustMkdir(t, d)
-			//nolint:gosec // G302: a directory needs its x bits; the broad mode is the case under test
-			if err := os.Chmod(store, mode); err != nil {
+			if err := os.Chmod(store, mode); err != nil { //nolint:gosec // G302: a directory needs its x bits; the broad mode is the case under test
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { _ = os.Chmod(store, 0o700) })
+			t.Cleanup(func() { _ = os.Chmod(store, 0o700) }) //nolint:gosec // G302: a directory needs 0700; 0600 makes it non-traversable
 
 			removed, err := c.FindingsCleanup(t.Context(), 0, true)
 			wantStoreRefused(t, err, store)
@@ -87,11 +86,10 @@ func TestFindingsCleanup_SymlinkedStoreIsCheckedAtItsTarget(t *testing.T) {
 	c := findingsClient(t, store)
 	target := filepath.Join(realDir, findingsDirPrefix+"old")
 	mustMkdir(t, target)
-	//nolint:gosec // G302: a directory needs its x bits; the broad mode is the case under test
-	if err := os.Chmod(realDir, 0o775); err != nil {
+	if err := os.Chmod(realDir, 0o775); err != nil { //nolint:gosec // G302: a directory needs its x bits; the broad mode is the case under test
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(realDir, 0o700) })
+	t.Cleanup(func() { _ = os.Chmod(realDir, 0o700) }) //nolint:gosec // G302: a directory needs 0700; 0600 makes it non-traversable
 
 	_, err := c.FindingsCleanup(t.Context(), 0, true)
 	wantStoreRefused(t, err, store)
