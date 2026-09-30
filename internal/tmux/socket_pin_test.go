@@ -174,6 +174,11 @@ func TestPinnedClientPinsEveryCommand(t *testing.T) {
 			t.Errorf("argv %v does not lead with the socket pin -S %s", call.Args, testSocket)
 			continue
 		}
+		// Every command a pinned client can issue is non-interactive, so each
+		// one carries -u (forgectl#840). FakeRunner strips it from Args.
+		if !call.TmuxUTF8 {
+			t.Errorf("argv %v was issued without -u", call.Args)
+		}
 		seen[tmuxVerb(call.Args)] = true
 	}
 

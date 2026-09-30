@@ -145,7 +145,7 @@ func TestValidateEnvAssignment(t *testing.T) {
 type failingNewWindowRunner struct{ *exec.FakeRunner }
 
 func (r failingNewWindowRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
-	if len(args) > 0 && args[0] == "new-window" {
+	if sub := tmuxSubcommand(args); len(sub) > 0 && sub[0] == "new-window" {
 		return exec.OSRunner{}.Run(ctx, "sh", append([]string{"-c", `echo "no server: $*" >&2; exit 1`, "sh"}, args...)...)
 	}
 	return r.FakeRunner.Run(ctx, name, args...)

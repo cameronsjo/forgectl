@@ -125,7 +125,8 @@ type scriptedRunner struct {
 }
 
 func (s *scriptedRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
-	if len(args) > 0 && args[0] == "list-sessions" {
+	sub := tmuxSubcommand(args)
+	if len(sub) > 0 && sub[0] == "list-sessions" {
 		i := s.lists
 		s.lists++
 		var out string
@@ -139,7 +140,7 @@ func (s *scriptedRunner) Run(ctx context.Context, name string, args ...string) (
 		_, _ = s.FakeRunner.Run(ctx, name, args...)
 		return out, err
 	}
-	if len(args) > 0 && args[0] == "new-session" {
+	if len(sub) > 0 && sub[0] == "new-session" {
 		s.creates++
 		_, _ = s.FakeRunner.Run(ctx, name, args...)
 		return s.createFn(args)
@@ -151,7 +152,10 @@ func TestEnsureSessionStateMachine(t *testing.T) {
 	const name = "forge"
 	present := sessionListRow("123", "456", "$1", name)
 	sibling := sessionListRow("123", "456", "$2", "forge-review")
-	dupErr := commandFailure("tmux", createArgs(name, "/repo"), "duplicate session: "+name+"\n")
+	// scriptedRunner answers the create itself, not through FakeRunner, so this
+	// error must carry the argv as issued, `-u` included (forgectl#840): that
+	// is what a real runner reports and what the duplicate check compares.
+	dupErr := commandFailure("tmux", append([]string{"-u"}, createArgs(name, "/repo")...), "duplicate session: "+name+"\n")
 
 	tests := []struct {
 		label       string
