@@ -14,12 +14,13 @@ import "github.com/cameronsjo/forgectl/internal/tmux/tmuxesc"
 // the promise that only buildCmd lets a payload leave its wrapper still
 // holds. An open `func(string) string` parameter would break it, because any
 // importer could pass a closure that captures the nonce or the socket path.
-// TestNoCallerCodeReceivesAnOpaquePayload keeps it closed, and keeps MapOpaque
-// to its sanctioned callers.
+// TestExecHandsNoPayloadToCallerCode keeps it closed, and
+// TestNoCallerCodeReceivesAnOpaquePayload keeps MapOpaque to its sanctioned
+// callers.
 //
 // Adding a Transform means adding a constructor here over a pure function
-// that returns nothing but its result, and adding its caller to that test's
-// allowlist.
+// that returns nothing but its result, and adding its caller to
+// transformCallers in the guard test.
 type Transform struct {
 	apply func(string) string
 }
