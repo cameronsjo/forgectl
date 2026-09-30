@@ -448,23 +448,6 @@ type workDir struct {
 	keep string
 }
 
-// workDirIgnoreName and workDirIgnore are the .gitignore every work directory
-// carries from the moment it exists (cameronsjo/forgectl#698).
-//
-// The directory sits beside the target, inside the repository. SIGKILL, an
-// OOM kill, a crash or a power loss runs no handler, so it can be left holding
-// a plaintext value, a decrypted read-back, or sops' decrypted copy of the
-// whole document. The next write's leftover scan refuses on it, but nothing
-// stopped `git add -A` from committing it first. A `*` pattern ignores every
-// entry, this file included, so git never lists the directory as untracked
-// and no pathspec short of `git add -f` stages it. The cost is that the
-// leftover no longer shows in `git status`; the scan, which lists the parent
-// directory rather than asking git, still finds it and refuses.
-const (
-	workDirIgnoreName = ".gitignore"
-	workDirIgnore     = "*\n"
-)
-
 // newWorkDir creates the directory as a SIBLING of the target.
 //
 // Not $TMPDIR, and that is not a preference: os.Rename across filesystems
@@ -476,28 +459,19 @@ func newWorkDir(target env.Target) (*workDir, error) {
 	parent := filepath.Dir(target.Abs())
 	// Scoped to the target, so the next run's leftover scan (internal/env,
 	// under this same lock) can attribute a directory a SIGKILL left behind.
-	dir, err := os.MkdirTemp(parent, target.SopsWorkDirPattern())
+	// MakeScratchDir writes the `*` .gitignore exclusively before returning,
+	// so no plaintext ever sits in the directory without it
+	// (cameronsjo/forgectl#698). It keeps the directory out of `git add`, not
+	// out of `git stash --all`, which copies ignored files into a stash
+	// commit, plaintext included. See internal/env/scratch.go.
+	dir, err := env.MakeScratchDir(parent, target.SopsWorkDirPattern())
 	if err != nil {
-		return nil, fmt.Errorf("create a work directory beside %s: %w", target.Rel(), err)
-	}
-	// 0700, not 0600: a directory needs its execute bit to be entered at all,
-	// which is what gosec's file-oriented rule does not model.
-	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // G302: 0700 on a DIRECTORY; the execute bit is required
-		_ = os.RemoveAll(dir)
-		return nil, fmt.Errorf("secure the work directory beside %s: %w", target.Rel(), err)
-	}
-	// Written before anything else goes in, so no plaintext ever sits in the
-	// directory without it. See workDirIgnore. O_EXCL makes that true by
-	// construction: the create fails on anything already at the path,
-	// including a planted symlink (O_CREAT|O_EXCL never follows one).
-	if err := writeWorkDirIgnore(filepath.Clean(filepath.Join(dir, workDirIgnoreName))); err != nil {
-		_ = os.RemoveAll(dir) //nolint:gosec // G703: dir is the MkdirTemp directory this process just created
-		return nil, fmt.Errorf("write the work directory's .gitignore beside %s: %w", target.Rel(), err)
+		return nil, fmt.Errorf("prepare a work directory beside %s: %w", target.Rel(), err)
 	}
 
 	buf := make([]byte, nonceBytes)
 	if _, err := rand.Read(buf); err != nil {
-		_ = os.RemoveAll(dir)
+		_ = env.RemoveScratchDir(dir)
 		return nil, errors.New("could not generate a nonce")
 	}
 
@@ -510,16 +484,22 @@ func newWorkDir(target env.Target) (*workDir, error) {
 }
 
 // stage writes the ciphertext backup, the value, and the nonce.
+//
+// Each is created exclusively (O_CREAT|O_EXCL), like the .gitignore before
+// them. The directory is fresh and 0700, so nothing should already be at
+// these names; if something is, it was put there by someone else, and
+// os.WriteFile would truncate it, or follow a planted symlink and write the
+// plaintext value wherever it points. An exclusive create fails instead.
 func (w *workDir) stage(before []byte, value string) error {
-	if err := os.WriteFile(w.backup, before, 0o600); err != nil {
+	if err := env.WriteFileExclusive(w.backup, before); err != nil {
 		return errors.New("could not write the backup")
 	}
 	// No added newline: the read-back comparison is byte-exact, and a
 	// terminator here would make every value fail it.
-	if err := os.WriteFile(filepath.Join(w.dir, "value"), []byte(value), 0o600); err != nil {
+	if err := env.WriteFileExclusive(filepath.Join(w.dir, "value"), []byte(value)); err != nil {
 		return errors.New("could not stage the value")
 	}
-	if err := os.WriteFile(filepath.Join(w.dir, "nonce"), []byte(w.nonce), 0o600); err != nil {
+	if err := env.WriteFileExclusive(filepath.Join(w.dir, "nonce"), []byte(w.nonce)); err != nil {
 		return errors.New("could not stage the nonce")
 	}
 	return nil
@@ -657,7 +637,7 @@ func (w *workDir) pruneToBackup() bool {
 		return false
 	}
 	for _, e := range entries {
-		if e.Name() == backupName || (e.Name() == workDirIgnoreName && e.Type().IsRegular()) {
+		if e.Name() == backupName || (e.Name() == env.ScratchIgnoreName && e.Type().IsRegular()) {
 			continue
 		}
 		_ = os.RemoveAll(filepath.Join(w.dir, e.Name()))
@@ -671,7 +651,7 @@ func (w *workDir) pruneToBackup() bool {
 		switch {
 		case e.Name() == backupName && e.Type().IsRegular():
 			sawBackup = true
-		case e.Name() == workDirIgnoreName && e.Type().IsRegular():
+		case e.Name() == env.ScratchIgnoreName && e.Type().IsRegular():
 		default:
 			return false
 		}
@@ -679,18 +659,28 @@ func (w *workDir) pruneToBackup() bool {
 	return sawBackup
 }
 
-func (w *workDir) cleanup() { _ = os.RemoveAll(w.dir) }
-
-// writeWorkDirIgnore creates the work directory's .gitignore exclusively.
-// path is built from the MkdirTemp directory this process just created.
-func writeWorkDirIgnore(path string) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304/G703: path is inside the 0700 MkdirTemp dir this process just created
+// cleanup removes every entry of the work directory except its .gitignore,
+// then the .gitignore and the directory by the scratch teardown rule
+// (env.RemoveScratchDir): only when nothing else is left. A plaintext entry
+// that cannot be removed therefore stays under the .gitignore, still ignored
+// by git, and the next run's leftover scan refuses on it. os.RemoveAll on the
+// whole directory would delete the .gitignore and leave that entry
+// committable.
+func (w *workDir) cleanup() {
+	entries, err := os.ReadDir(w.dir)
 	if err != nil {
-		return err
+		return
 	}
-	if _, err := f.WriteString(workDirIgnore); err != nil {
-		_ = f.Close()
-		return err
+	for _, e := range entries {
+		if e.Name() == env.ScratchIgnoreName && e.Type().IsRegular() {
+			continue
+		}
+		_ = removeWorkDirEntry(filepath.Join(w.dir, e.Name()))
 	}
-	return f.Close()
+	_ = env.RemoveScratchDir(w.dir)
 }
+
+// removeWorkDirEntry removes one entry of the work directory, recursively. It
+// is a variable only so a test can make one removal fail, the way EIO or a
+// read-only remount would, and prove the .gitignore outlives it.
+var removeWorkDirEntry = os.RemoveAll
