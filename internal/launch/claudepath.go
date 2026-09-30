@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // layered is one harness's resolution ladder: the env override, the config key,
@@ -90,8 +91,8 @@ func homeless(path, home string, homeErr error, source string) error {
 		return nil
 	}
 	return fmt.Errorf(
-		"cannot expand %q from %s: no home directory (%w); use an absolute path instead",
-		path, source, homeErr,
+		"cannot expand %s from %s: no home directory (%w); use an absolute path instead",
+		termsafe.QuoteArgMax(path, 0), source, homeErr,
 	)
 }
 

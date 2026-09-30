@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -48,7 +49,7 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 	if err := RejectOptionLike("ref", ref); err != nil {
 		return "", err
 	}
-	slog.Debug("Preparing to create workspace sandbox.", "repo", repo, "ref", ref, "alwaysClone", alwaysClone)
+	slog.Debug("Preparing to create workspace sandbox.", "repo", logRepo(repo), "ref", ref, "alwaysClone", alwaysClone)
 
 	dir, err := os.MkdirTemp("", WorkspacePrefix+"*")
 	if err != nil {
@@ -62,14 +63,14 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 		if useRef == "" {
 			useRef = "HEAD"
 		}
-		slog.Debug("Sandboxing local repo via git worktree.", "repo", repo, "ref", useRef)
+		slog.Debug("Sandboxing local repo via git worktree.", "repo", logRepo(repo), "ref", useRef)
 		// -- ends option parsing so a crafted dir/ref can't inject a flag.
 		if _, err := run.Run(ctx, "git", "-C", repo, "worktree", "add", "--", dir, useRef); err != nil {
-			slog.Error("Failed to create git worktree.", "repo", repo, "sandbox", dir, "ref", useRef, "error", err)
+			slog.Error("Failed to create git worktree.", "repo", logRepo(repo), "sandbox", dir, "ref", useRef, "error", logRepo(err.Error()))
 			return "", fmt.Errorf("git worktree add: %w", err)
 		}
 	} else {
-		slog.Debug("Sandboxing repo via git clone.", "repo", repo, "ref", ref)
+		slog.Debug("Sandboxing repo via git clone.", "repo", logRepo(repo), "ref", ref)
 		// Clone the default branch when no ref was given; git clone --branch
 		// wants a real branch/tag name, so "HEAD" can't stand in for it. The --
 		// separator ends option parsing before the repo/dir positionals.
@@ -78,7 +79,7 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 			args = []string{"clone", "--branch", ref, "--", repo, dir}
 		}
 		if _, err := run.Run(ctx, "git", args...); err != nil {
-			slog.Error("Failed to clone repo.", "repo", repo, "sandbox", dir, "error", err)
+			slog.Error("Failed to clone repo.", "repo", logRepo(repo), "sandbox", dir, "error", logRepo(err.Error()))
 			// Categorical (#658): the CommandError renders git's argv, whose
 			// repo URL can carry an https token, and git's stderr, which relays
 			// the remote's sideband text.
@@ -86,8 +87,23 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 		}
 	}
 
-	slog.Debug("Successfully created workspace sandbox.", "repo", repo, "workspace", dir)
+	slog.Debug("Successfully created workspace sandbox.", "repo", logRepo(repo), "workspace", dir)
 	return dir, nil
+}
+
+// urlUserinfo matches the userinfo of every scheme://user[:secret]@ URL in a
+// string. A clone URL can carry an https token there
+// (https://x-access-token:TOKEN@github.com/o/r, or the token alone as the
+// user), and both the repo value and git's argv and stderr in a CommandError
+// repeat it.
+var urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/\s]*@`)
+
+// logRepo is the log form of a repo value, or of an error text that repeats
+// it: every URL's userinfo is replaced, so a token-bearing clone URL never
+// reaches a log file (#706). Logging is off by default, but a debug log is
+// what an operator attaches to a bug report.
+func logRepo(s string) string {
+	return urlUserinfo.ReplaceAllString(s, "${1}[userinfo hidden]@")
 }
 
 // isLocalRepo reports whether repo looks like a filesystem path (vs. an
