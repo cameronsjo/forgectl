@@ -444,13 +444,16 @@ func runTrustRebuild(cmd *cobra.Command, deps module.Deps) error {
 	case serr == nil:
 		for _, k := range store.Keys {
 			if k.KeyID != keyID {
-				return fmt.Errorf("the current trust store also enrolls %s (%s); rebuilding would silently drop it — remove that peer deliberately before rebuilding, or re-establish trust (issue #86)", k.KeyID, k.Machine)
+				// Capped (#778): the store is anchor-signed, but its key_id and
+				// machine are still file text DecodeStore never validates.
+				return fmt.Errorf("the current trust store also enrolls %s (%s); rebuilding would silently drop it — remove that peer deliberately before rebuilding, or re-establish trust (issue #86)",
+					termsafe.QuoteArgMax(k.KeyID, 0), termsafe.QuoteArgMax(k.Machine, 0))
 			}
 		}
 	case errors.Is(serr, bless.ErrTrustStoreMissing):
 		// Genuinely absent — nothing to preserve, the normal recovery case.
 	default:
-		fmt.Fprintf(out, "NOTE: the existing trust store could not be verified (%v);\n      if it enrolled another machine, that enrollment will be dropped by this rebuild.\n", serr)
+		_, _ = fmt.Fprintf(out, "NOTE: the existing trust store could not be verified (%s);\n      if it enrolled another machine, that enrollment will be dropped by this rebuild.\n", termsafe.SafeLineMax(serr.Error(), trustStoreErrMaxRunes))
 	}
 
 	fmt.Fprintln(out, "WARNING: rebuild OVERWRITES the trust store, enrolling ONLY this machine.")
@@ -585,8 +588,10 @@ func newWorkflowTrustListCmd() *cobra.Command {
 			}
 			fmt.Fprintln(out, "enrolled keys:")
 			for _, k := range store.Keys {
-				if _, err := fmt.Fprintf(out, "  %s  %s  %s\n", k.KeyID,
-					termsafe.SafeLine(k.Machine), termsafe.SafeLine(k.AddedAt)); err != nil {
+				// Capped (#778): anchor-signed, but file text DecodeStore
+				// never validates, so no field is trusted to be short.
+				if _, err := fmt.Fprintf(out, "  %s  %s  %s\n", termsafe.SafeLineMax(k.KeyID, termsafe.ArgEchoMaxRunes),
+					termsafe.SafeLineMax(k.Machine, termsafe.ArgEchoMaxRunes), termsafe.SafeLineMax(k.AddedAt, termsafe.ArgEchoMaxRunes)); err != nil {
 					return err
 				}
 			}
@@ -623,6 +628,11 @@ func writeTrustListJSON(w io.Writer, store bless.Store) error {
 	enc.SetIndent("", "  ")
 	return enc.Encode(trustListJSON{AnchorKeyID: store.AnchorKeyID, Keys: keys})
 }
+
+// trustStoreErrMaxRunes caps the trust-store error `trust rebuild` notes: it
+// is built from paths and scrubbed decode text, which are escaped but not
+// otherwise bounded.
+const trustStoreErrMaxRunes = 300
 
 // trustChainError decorates a TrustedStore failure with the actionable fix. A
 // missing anchor or store both mean "run trust init"; anything else passes

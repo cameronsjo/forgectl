@@ -77,18 +77,45 @@ func RemoveScratchDir(dir string) error {
 	if err := os.Remove(ignore); err != nil && !errors.Is(err, fs.ErrNotExist) { //nolint:gosec // G703: inside a scratch directory this process created
 		return err
 	}
-	scratchIgnoreGone(func(n string) error { return WriteFileExclusive(filepath.Join(dir, n), nil) })
-	err = os.Remove(filepath.Clean(dir)) //nolint:gosec // G703: a scratch directory this process created
-	if err != nil && isNotEmpty(err) {
-		// Something arrived between the listing and the rmdir, such as a
-		// write from a sops child that outlived the run. Put the .gitignore
-		// back, exclusively, so it is not left unignored.
-		_ = restoreIgnore(func() (*os.File, error) {
-			return os.OpenFile(filepath.Clean(ignore), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304/G703: inside a scratch directory this process created
-		})
-		return errScratchNotEmpty
+	scratchIgnoreGone(dir)
+	return afterScratchRmdir(rmdirScratch(filepath.Clean(dir)), func() (*os.File, error) {
+		return os.OpenFile(filepath.Clean(ignore), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304/G703: inside a scratch directory this process created
+	})
+}
+
+// rmdirScratch removes an emptied scratch directory by path. It is a variable
+// only so a test can make the rmdir fail the way EIO, ESTALE or an EACCES
+// after a parent permission change would.
+var rmdirScratch = func(dir string) error {
+	return os.Remove(dir) //nolint:gosec // G703: a scratch directory this process created
+}
+
+// afterScratchRmdir is the last step of both teardowns (RemoveScratchDir and
+// the unix dirPin.removeScratchDir), given the rmdir's result and the
+// exclusive create of the directory's .gitignore. The .gitignore is already
+// unlinked by then, so any failure other than "already gone" can leave the
+// directory in place without it, and something that outlives the run (a sops
+// child's late write) would then land un-ignored. So it puts the .gitignore
+// back on every such failure, not only ENOTEMPTY/EEXIST: the create is O_EXCL,
+// which makes it harmless when nothing needed it. The returned error says
+// whether that restore worked, so no message claims a .gitignore that is not
+// there.
+func afterScratchRmdir(rmErr error, createIgnore func() (*os.File, error)) error {
+	if rmErr == nil || errors.Is(rmErr, fs.ErrNotExist) {
+		return rmErr
 	}
-	return err
+	restoreErr := restoreIgnore(createIgnore)
+	switch {
+	case isNotEmpty(rmErr) && restoreErr == nil:
+		// Something arrived between the listing and the rmdir.
+		return errScratchNotEmpty
+	case isNotEmpty(rmErr):
+		return fmt.Errorf("the scratch directory still holds something besides its .gitignore, so it was left in place, and putting its .gitignore back failed: %w", restoreErr)
+	case restoreErr == nil:
+		return fmt.Errorf("remove the scratch directory (its .gitignore was put back): %w", rmErr)
+	default:
+		return fmt.Errorf("remove the scratch directory: %w; putting its .gitignore back also failed: %w", rmErr, restoreErr)
+	}
 }
 
 // isNotEmpty reports an rmdir refused because the directory is not empty.
@@ -115,12 +142,13 @@ func restoreIgnore(open func() (*os.File, error)) error {
 //   - scratchDirMade: the directory exists and is not yet opened or checked.
 //   - scratchIgnoreCreating: the directory is checked and about to get its
 //     .gitignore.
-//   - scratchIgnoreGone: the teardown has unlinked the .gitignore and is about
-//     to remove the directory; plant creates a file inside it.
+//   - scratchIgnoreGone: RemoveScratchDir has unlinked the .gitignore of dir
+//     and is about to remove the directory. (The unix descriptor teardown has
+//     its own, scratchIgnoreGoneAt, in dir_unix.go.)
 var (
 	scratchDirMade        = func(name string) {}
 	scratchIgnoreCreating = func(name string) {}
-	scratchIgnoreGone     = func(plant func(name string) error) {}
+	scratchIgnoreGone     = func(dir string) {}
 )
 
 // ScratchIgnoreName and ScratchIgnore are the .gitignore every scratch
