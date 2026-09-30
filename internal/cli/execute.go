@@ -352,29 +352,35 @@ func termsafeErrorHandler(w io.Writer, styles fang.Styles, err error) {
 		return
 	}
 	safe := termsafe.Error(err)
-	if leadsWithPath(safe.Error()) {
+	if leadsWithLiteral(safe.Error()) {
 		renderPathLeadingError(w, styles, safe)
 		return
 	}
 	fang.DefaultErrorHandler(w, styles, safe)
 }
 
-// leadsWithPath reports whether msg's first word looks like a filesystem
-// path or a flag token ("--limit", "-n") — one fang's ErrorText style would title-case via its
-// titleFirstWord transform, corrupting exactly the byte-identical spelling
-// a caller typed or compares against (env_test.go's --json path field,
-// this file's own path-preserving tests). Both error surfaces
-// (termsafeErrorHandler and renderStructuredTerminalError) route a
-// path-leading message through UnsetTransform() instead of fang's default.
-// A flag token needs the same treatment: title-casing "--limit must be at
-// least 1" yields "--Limit", a flag that does not exist (forgectl#670).
+// leadsWithLiteral reports whether msg's first word is a literal token that
+// fang's ErrorText style would corrupt by title-casing it (its
+// titleFirstWord transform) — a spelling a caller typed or compares against
+// byte-for-byte (env_test.go's --json path field, this file's own
+// path-preserving tests). Both error surfaces (termsafeErrorHandler and
+// renderStructuredTerminalError) route such a message through
+// UnsetTransform() instead of fang's default.
 //
-// A first word that opens with a double quote is a quoted literal, which is
-// how termsafe.QuotePath and QuoteText render a path (#847): `".sops.yaml"
-// not found` must not become `".Sops.yaml" not found`. A bare file name with
-// an interior dot ("secrets.yaml not found") is a path too, so it is not
-// title-cased to "Secrets.yaml"; a word that only ends in a dot is not.
-func leadsWithPath(msg string) bool {
+// It is deliberately broader than "is a path" (forgectl#858), and matches a
+// first word that:
+//   - opens with a double quote — a quoted literal, which is how
+//     termsafe.QuotePath and QuoteText render a path (#847): `".sops.yaml"
+//     not found` must not become `".Sops.yaml" not found`;
+//   - contains "/" or starts with "." — a path or dotfile;
+//   - starts with "-" — a flag token: title-casing "--limit must be at least
+//     1" yields "--Limit", a flag that does not exist (forgectl#670);
+//   - has an interior dot, after trimming a trailing ":", "," or ";" — a bare
+//     file name ("secrets.yaml not found"), but equally any dotted word such
+//     as a version ("v1.2") or "e.g.". Leaving those uncapitalized is neutral
+//     or better, since title-casing a dotted token rarely produces a real
+//     spelling. A word that only ends in a dot ("Failed.") is not matched.
+func leadsWithLiteral(msg string) bool {
 	first, _, _ := strings.Cut(msg, " ")
 	if first == "" {
 		return false
@@ -397,7 +403,7 @@ func leadsWithPath(msg string) bool {
 //
 // This deliberately omits DefaultErrorHandler's trailing "Try --help for
 // usage" block (its isUsageError check): today no message can satisfy both
-// leadsWithPath and isUsageError, because isUsageError only matches one of
+// leadsWithLiteral and isUsageError, because isUsageError only matches one of
 // five fixed cobra/pflag prefixes ("unknown flag:", "flag needs an
 // argument:", …), none of which is a path. That's an invariant of the
 // CURRENT set of prefixes and this hand-copy, not something the compiler
@@ -425,7 +431,7 @@ func renderPathLeadingError(w io.Writer, styles fang.Styles, err error) {
 func renderStructuredTerminalError(w io.Writer, styles fang.Styles, err *structuredTerminalError) {
 	_, _ = fmt.Fprintln(w, styles.ErrorHeader.String())
 	headline := styles.ErrorText
-	if leadsWithPath(err.headline) {
+	if leadsWithLiteral(err.headline) {
 		headline = headline.UnsetTransform()
 	}
 	_, _ = fmt.Fprintln(w, headline.Render(err.headline+"."))
