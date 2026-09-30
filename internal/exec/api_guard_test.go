@@ -216,8 +216,9 @@ func renderPinnedFiles(t *testing.T) string {
 			if strings.HasSuffix(name, ".go") {
 				if !compiledByAGuardPlatform(t, d.dir, name) {
 					t.Errorf("%s/%s is compiled by no platform in guardPlatforms (cgo off), so no guard type-checks it "+
-						"and pinning it would let its contents change unseen; delete it, retag it for a guarded platform, "+
-						"or add the platform to guardPlatforms and to .goreleaser.yaml", d.shown, name)
+						"and pinning it would let its contents change unseen; delete it, or retag it so a platform in "+
+						"guardPlatforms compiles it, or add its platform to guardPlatforms (every platform .goreleaser.yaml "+
+						"ships must be there, but a guarded platform need not ship)", d.shown, name)
 				}
 				constraint, cgo := fileConstraint(t, filepath.Join(d.dir, name))
 				line += " build=" + constraint
@@ -235,6 +236,36 @@ func renderPinnedFiles(t *testing.T) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+// archBaselineTags is the architecture-feature build tags the go tool sets
+// for each guarded GOARCH at its default level (GOAMD64=v1, GOARM64=v8.0),
+// which is what every release build uses since .goreleaser.yaml sets neither.
+var archBaselineTags = map[string][]string{
+	"amd64": {"amd64.v1"},
+	"arm64": {"arm64.v8.0"},
+}
+
+// guardContext is the build.Context the guards read p through: cgo off as
+// every release build has it, and tool tags built for p rather than copied
+// from the host. build.Default.ToolTags carries the host's architecture
+// level (amd64.v3 on a host built with GOAMD64=v3, or none of arm64's on an
+// amd64 host), which would make a file tagged for a feature level match or
+// miss by where the test runs. The toolchain's goexperiment tags are kept:
+// they belong to the compiler, not the host. Use it for file selection
+// (MatchFile, ImportDir on a local directory) only: go/build resolves an
+// import path in module mode only for a context with the default ToolTags.
+func guardContext(p guardPlatform) build.Context {
+	ctx := build.Default
+	ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled = p.goos, p.goarch, false
+	var tags []string
+	for _, tag := range build.Default.ToolTags {
+		if strings.HasPrefix(tag, "goexperiment.") {
+			tags = append(tags, tag)
+		}
+	}
+	ctx.ToolTags = append(tags, archBaselineTags[p.goarch]...)
+	return ctx
+}
+
 // compiledByAGuardPlatform reports whether some platform in guardPlatforms,
 // with cgo off as every release build has it, compiles dir/name, reading both
 // its GOOS/GOARCH file-name suffix and its //go:build line. A file none of
@@ -242,8 +273,7 @@ func renderPinnedFiles(t *testing.T) string {
 func compiledByAGuardPlatform(t *testing.T, dir, name string) bool {
 	t.Helper()
 	for _, p := range guardPlatforms {
-		ctx := build.Default
-		ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled = p.goos, p.goarch, false
+		ctx := guardContext(p)
 		ok, err := ctx.MatchFile(dir, name)
 		if err != nil {
 			t.Fatalf("match %s for %s: %v", filepath.Join(dir, name), p, err)
@@ -519,9 +549,12 @@ func checkExecFor(t *testing.T, p guardPlatform) *checkedPackage {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := build.Default
-	ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled = p.goos, p.goarch, false
-	bp, err := ctx.ImportDir(dir, 0)
+	// internal/exec's own files are selected with p's tool tags, not the
+	// host's. Its imports resolve through a context that keeps the default
+	// tool tags, because go/build hands module-mode resolution to the go
+	// command only for a context whose ToolTags are the default ones.
+	own := guardContext(p)
+	bp, err := own.ImportDir(dir, 0)
 	if err != nil {
 		t.Fatalf("list internal/exec for %s: %v", p, err)
 	}
@@ -537,6 +570,8 @@ func checkExecFor(t *testing.T, p guardPlatform) *checkedPackage {
 		Types:      map[ast.Expr]types.TypeAndValue{},
 		Selections: map[*ast.SelectorExpr]*types.Selection{},
 	}
+	ctx := build.Default
+	ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled = p.goos, p.goarch, false
 	imp := &sourceImporter{ctx: &ctx, fset: fset, pkgs: map[string]*types.Package{}, errs: map[string]error{}}
 	conf := types.Config{Importer: imp, Sizes: types.SizesFor("gc", ctx.GOARCH)}
 	pkg, err := conf.Check(execImportPath, fset, files, info)
@@ -614,4 +649,29 @@ func parseGoFiles(fset *token.FileSet, dir string, names []string) ([]*ast.File,
 		files = append(files, f)
 	}
 	return files, nil
+}
+
+// TestGuardContextIsHostIndependent pins that each guard platform's tool tags
+// name that platform's own architecture level, and no other, whatever the
+// host is.
+//
+// Mutation that turns it red: copy build.Default.ToolTags wholesale (on an
+// amd64 host, the arm64 contexts carry amd64.v1 and lack arm64.v8.0).
+func TestGuardContextIsHostIndependent(t *testing.T) {
+	for _, p := range guardPlatforms {
+		want, ok := archBaselineTags[p.goarch]
+		if !ok {
+			t.Errorf("%s: archBaselineTags has no entry for %s; add its default feature-level tag", p, p.goarch)
+			continue
+		}
+		var arch []string
+		for _, tag := range guardContext(p).ToolTags {
+			if !strings.HasPrefix(tag, "goexperiment.") {
+				arch = append(arch, tag)
+			}
+		}
+		if !slices.Equal(arch, want) {
+			t.Errorf("%s: architecture tool tags = %q, want %q", p, arch, want)
+		}
+	}
 }

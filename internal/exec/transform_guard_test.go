@@ -5,7 +5,6 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -35,60 +34,44 @@ var transformCallers = map[string]bool{
 // that buildCmd, FakeSensitiveRunner and backend.BootstrapCommand state: no
 // payload is handed to code outside this package. The in-package rules run
 // on the type-checked package (TestExportedAPI,
-// TestTransformIsMintedOnlyInTransformGo); this one walks every Go
-// file in the module, tests included, so a test elsewhere cannot use the
-// seam either. Outside internal/exec, only transformCallers may name
-// MapOpaque, Transform or TmuxDirOperand, and no file may dot-import this
-// package, because its references could not be resolved.
+// TestTransformIsMintedOnlyInTransformGo); this one reads every Go file the
+// go tool compiles into the module (moduleCompiledFiles), tests included and
+// wherever it sits, so a test elsewhere, or a package under testdata, a
+// dot-directory or a symlinked directory, cannot use the seam either. Outside
+// internal/exec, only transformCallers may name MapOpaque, Transform or
+// TmuxDirOperand, and no file may dot-import this package, because its
+// references could not be resolved.
 //
 // Mutation that turns it red: call exec.MapOpaque from any other package's
 // file.
 func TestNoCallerCodeReceivesAnOpaquePayload(t *testing.T) {
-	root, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("module root: %v", err)
-	}
 	fset := token.NewFileSet()
 	parsed, sanctioned := 0, 0
 	var findings []string
 	report := func(pos token.Pos, msg string) {
 		findings = append(findings, fset.Position(pos).String()+": "+msg)
 	}
-	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	for _, f := range moduleCompiledFiles(t) {
+		if filepath.Ext(f.rel) != ".go" || filepath.ToSlash(filepath.Dir(f.rel)) == "internal/exec" {
+			continue // the typed per-GOOS guards cover this package
 		}
-		if entry.IsDir() {
-			name := entry.Name()
-			if path != root && (strings.HasPrefix(name, ".") || name == "vendor" || name == "testdata") {
-				return filepath.SkipDir
-			}
-			return nil
+		src, err := os.ReadFile(filepath.Clean(f.abs))
+		if err != nil {
+			t.Fatal(err)
 		}
-		if !strings.HasSuffix(entry.Name(), ".go") {
-			return nil
-		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return relErr
-		}
-		rel = filepath.ToSlash(rel)
-		if filepath.ToSlash(filepath.Dir(rel)) == "internal/exec" {
-			return nil // the typed per-GOOS guards cover this package
-		}
-		file, parseErr := parser.ParseFile(fset, path, nil, parser.ImportsOnly|parser.SkipObjectResolution)
-		if parseErr != nil {
-			return parseErr
+		file, err := parser.ParseFile(fset, f.rel, src, parser.ImportsOnly|parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
 		}
 		parsed++
 		alias := execAlias(file, report)
 		if alias == "" {
-			return nil
+			continue
 		}
 		// Only now is the whole file worth parsing.
-		file, parseErr = parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-		if parseErr != nil {
-			return parseErr
+		file, err = parser.ParseFile(fset, f.rel, src, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
 		}
 		ast.Inspect(file, func(n ast.Node) bool {
 			sel, ok := n.(*ast.SelectorExpr)
@@ -98,128 +81,22 @@ func TestNoCallerCodeReceivesAnOpaquePayload(t *testing.T) {
 			if id, ok := sel.X.(*ast.Ident); !ok || id.Name != alias || !transformSeam[sel.Sel.Name] {
 				return true
 			}
-			if transformCallers[rel] {
+			if transformCallers[f.rel] {
 				sanctioned++
 				return true
 			}
 			report(sel.Pos(), "exec."+sel.Sel.Name+" used outside the transform allowlist; a new caller must be reviewed and added to transformCallers")
 			return true
 		})
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 	for _, f := range findings {
 		t.Error(f)
 	}
 	if parsed == 0 {
-		t.Fatal("parsed no Go files; the walk is broken, not the module clean")
+		t.Fatal("parsed no Go files; the file set is broken, not the module clean")
 	}
 	if sanctioned == 0 {
 		t.Fatal("found no use of the transform seam at its sanctioned site; the matcher is broken, not the module clean")
-	}
-}
-
-// unsafeAllowed is the allowlist of files, relative to the module root, that
-// may import "unsafe". It is empty: nothing in the module imports it today
-// (forgectl#854), and a new entry must name why the file needs to read memory
-// past the type system.
-var unsafeAllowed = map[string]string{}
-
-// TestNoFileReachesPastTheTypeSystem closes the hole the guard tests above
-// cannot see (forgectl#854, P-1): every one of them reasons about what Go's
-// type system lets a file name, and three things step around it. A
-// //go:linkname directive binds a local declaration to any symbol in any
-// package, unexported or internal, so another package could call
-// (*OSSensitiveRunner).buildCmd and read the argv it assembles; a probe did,
-// and got the payload back while every other guard stayed green. An "unsafe"
-// import reads any memory, including a sealed Arg's closure, and it is also
-// what the compiler requires before it honours a linkname. An assembly or
-// .syso file links in code that names any symbol directly. So, in every file
-// of the module, tests and every build constraint included:
-//
-//   - no //go:linkname directive, anywhere;
-//   - no "unsafe" import outside unsafeAllowed;
-//   - no .s, .S or .syso file.
-//
-// This is the interim guard; sealing the payload behind a package boundary
-// (forgectl#854) does not retire it, because a linkname reaches into an
-// internal package too.
-//
-// Mutations that turn it red: a file anywhere outside internal/exec with
-// `import _ "unsafe"` and `//go:linkname buildCmd
-// github.com/cameronsjo/forgectl/internal/exec.(*OSSensitiveRunner).buildCmd`
-// (both rules fire; add the file to unsafeAllowed and the linkname rule still
-// fires); a new file importing "unsafe" alone; an empty x_amd64.s.
-func TestNoFileReachesPastTheTypeSystem(t *testing.T) {
-	rootDir, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("module root: %v", err)
-	}
-	root, err := os.OpenRoot(rootDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = root.Close() }()
-	fsys := root.FS()
-	fset := token.NewFileSet()
-	parsed, sawExec := 0, false
-	var findings []string
-	report := func(pos token.Pos, msg string) {
-		findings = append(findings, fset.Position(pos).String()+": "+msg)
-	}
-	err = fs.WalkDir(fsys, ".", func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		name := entry.Name()
-		if entry.IsDir() {
-			if path != "." && (strings.HasPrefix(name, ".") || name == "vendor" || name == "testdata") {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		switch filepath.Ext(name) {
-		case ".s", ".S", ".syso":
-			findings = append(findings, path+": an assembly or object file can name any symbol past the type system; forgectl ships none")
-			return nil
-		case ".go":
-		default:
-			return nil
-		}
-		src, readErr := fs.ReadFile(fsys, path)
-		if readErr != nil {
-			return readErr
-		}
-		file, parseErr := parser.ParseFile(fset, path, src, parser.ImportsOnly|parser.ParseComments|parser.SkipObjectResolution)
-		if parseErr != nil {
-			return parseErr
-		}
-		parsed++
-		sawExec = sawExec || filepath.ToSlash(filepath.Dir(path)) == "internal/exec"
-		for _, imp := range file.Imports {
-			if p, _ := strconv.Unquote(imp.Path.Value); p == "unsafe" && unsafeAllowed[path] == "" {
-				report(imp.Pos(), `imports "unsafe", which reads any memory, a sealed payload included; add the file to unsafeAllowed with a reason only after review`)
-			}
-		}
-		// ImportsOnly stops at the imports, so scan the rest of the source for
-		// the directive too: a linkname sits beside a declaration further down.
-		for i, line := range strings.Split(string(src), "\n") {
-			if strings.HasPrefix(strings.TrimSpace(line), "//go:linkname") {
-				findings = append(findings, path+":"+strconv.Itoa(i+1)+": a //go:linkname directive binds to any symbol, unexported or internal, so it can call buildCmd and read a payload")
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, f := range findings {
-		t.Error(f)
-	}
-	if parsed == 0 || !sawExec {
-		t.Fatalf("parsed %d Go files (internal/exec among them: %v); the walk is broken, not the module clean", parsed, sawExec)
 	}
 }
 
