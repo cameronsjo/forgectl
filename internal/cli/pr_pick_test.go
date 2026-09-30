@@ -255,8 +255,8 @@ func writeFakeClaude(t *testing.T, path, body string) {
 
 // fakeClaudeScript is a stub claude that passes the reviewer's dispatch-time
 // checks (pr.claudeAcceptsReviewSettings): it prints a current version for
-// --version, and for doctor a report that flags only the checks' negative
-// control, whose document holds "not-a-boolean". Any other invocation runs
+// --version, and for doctor a whole report (header and footer) that flags
+// only the checks' negative control, whose document holds "not-a-boolean". Any other invocation runs
 // body, the stub's stand-in for the review itself.
 func fakeClaudeScript(body string) string {
 	return `#!/bin/sh
@@ -265,6 +265,7 @@ for a in "$@"; do
 	if [ "$a" = doctor ]; then
 		echo 'Claude Code doctor'
 		case "$*" in *not-a-boolean*) printf '\nInvalid settings\n- sandbox.enabled: Expected boolean, but received string\n';; esac
+		printf '\nFor a full setup checkup that can also fix issues, run /doctor in a Claude Code session.\n'
 		exit 0
 	fi
 done

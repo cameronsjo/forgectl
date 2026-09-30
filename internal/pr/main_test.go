@@ -23,7 +23,7 @@ func TestMain(m *testing.M) {
 
 // healthyClaudeProbe answers the dispatch-time checks as a current claude
 // that accepts every document but the negative control would.
-func healthyClaudeProbe(_ context.Context, _, _ string, args ...string) (string, error) {
+func healthyClaudeProbe(_ context.Context, _, _ string, _ []string, args ...string) (string, error) {
 	return fakeClaudeAnswer("2.1.285 (Claude Code)", false, args), nil
 }
 
@@ -44,5 +44,5 @@ func fakeClaudeAnswer(version string, rejectAll bool, args []string) string {
 	if doc == doctorNegativeControl || (rejectAll && doc != "") {
 		report += "Invalid settings\n- /tmp/claude-settings-x.json \u203a sandbox.enabled: Expected boolean, but received string\n\n"
 	}
-	return report + "For a full setup checkup, run /doctor in a Claude Code session.\n"
+	return report + doctorFooter + "\n"
 }

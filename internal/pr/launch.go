@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 
 	"charm.land/huh/v2"
@@ -488,6 +489,17 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("resolve claude binary: %w", err)
 	}
+	// Pin the binary to its physical path, once, and use that one path for
+	// both the settings-acceptance check below and the review window's argv.
+	// A native install's claude is a symlink into versions/<X> that an
+	// auto-update re-points; checking through the link and then running it
+	// would let the update land between the check and the run, so the check
+	// would vouch for a binary the review never runs. argv[0] is the
+	// resolved path: claude is the file the link names, not a launcher that
+	// reads its own name.
+	if claudePath, err = filepath.EvalSymlinks(claudePath); err != nil {
+		return Dispatch{}, fmt.Errorf("resolve claude binary: %w", err)
+	}
 	// Clean-room review runs under a HARDENED posture regardless of the user's
 	// ambient launch profile: never --allow-dangerously-skip-permissions, always
 	// plan mode. Inheriting a permissive config (AllowDanger, a bypass permission
@@ -634,7 +646,21 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// then runs with no sandbox, no permission rules, and hooks on — the
 	// failure failIfUnavailable cannot see, because the block asking for it
 	// was never loaded. See claudeAcceptsReviewSettings.
-	if err := claudeAcceptsReviewSettings(ctx, claudePath, settingsJSON); err != nil {
+	//
+	// The check runs under the environment the review window will carry.
+	// With windowEnv the review inherits the environment forgectl resolved
+	// rather than the tmux server's, which was fixed when the server started.
+	// On a proxy-only network the server's copy is what made a review die at
+	// its first request, and this file's own comment above names that failure
+	// mode: an empty pane and no error anywhere. Resolving here rather than at
+	// construction keeps a bad [proxy] launch_profile from failing `pr list`.
+	// It also empties the gh token variables the review cannot need, and on a
+	// host other than github.com pins GH_HOST (reviewWindowEnv, forgectl#673).
+	windowEnv, err := c.reviewWindowEnv(sess)
+	if err != nil {
+		return Dispatch{}, err
+	}
+	if err := claudeAcceptsReviewSettings(ctx, claudePath, settingsJSON, windowEnv); err != nil {
 		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
 	}
 	claudeArgs := launch.BuilderArgs(profile, []string{
@@ -657,18 +683,6 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	slog.Debug("Preparing to dispatch review into tmux window.",
 		"session_id", session.ID, "window", name, "workspace", sess.Workspace)
 	command := append([]string{claudePath}, claudeArgs...)
-	// With windowEnv the review inherits the environment forgectl resolved
-	// rather than the tmux server's, which was fixed when the server started.
-	// On a proxy-only network the server's copy is what made a review die at
-	// its first request, and this file's own comment above names that failure
-	// mode: an empty pane and no error anywhere. Resolving here rather than at
-	// construction keeps a bad [proxy] launch_profile from failing `pr list`.
-	// It also empties the gh token variables the review cannot need, and on a
-	// host other than github.com pins GH_HOST (reviewWindowEnv, forgectl#673).
-	windowEnv, err := c.reviewWindowEnv(sess)
-	if err != nil {
-		return Dispatch{}, err
-	}
 	window, err := c.tmuxClient.NewWindowWithEnv(ctx, session, name, sess.Workspace, windowEnv, command...)
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("open review window: %w", err)
