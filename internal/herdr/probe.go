@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -116,7 +117,14 @@ func CheckFork(ctx context.Context, r exec.Runner) error {
 			return fmt.Errorf("cannot run %s: %w", Binary, err)
 		}
 		if ce.ExitCode != exitUsage {
-			return fmt.Errorf("`%s tab move --help` failed with exit %d: %s", Binary, ce.ExitCode, termsafe.SafeLineMax(redact.Text(strings.TrimSpace(ce.Stderr)), forkProbeStderrMaxRunes))
+			detail := termsafe.SafeLineMax(redact.Text(strings.TrimSpace(ce.Stderr)), forkProbeStderrMaxRunes)
+			// exec keeps only stderr's tail, so when it dropped the start the
+			// kept head is not herdr's first line; say so, as CommandError's
+			// own text does (#837).
+			if ce.StderrDropped > 0 {
+				detail = "[stderr truncated, " + strconv.FormatInt(ce.StderrDropped, 10) + " earlier bytes dropped] " + detail
+			}
+			return fmt.Errorf("`%s tab move --help` failed with exit %d: %s", Binary, ce.ExitCode, detail)
 		}
 		text, code = ce.Stderr+"\n"+ce.Output, ce.ExitCode
 	}

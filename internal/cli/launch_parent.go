@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 type configParentOps struct {
@@ -34,7 +36,7 @@ func ensureConfigParentDurable(configPath string, ops configParentOps) (created 
 			break
 		}
 		if !errors.Is(statErr, fs.ErrNotExist) {
-			return created, fmt.Errorf("inspect config ancestor %s: %w", current, statErr)
+			return created, fmt.Errorf("inspect config ancestor %s: %w", termsafe.QuotePath(current), termsafe.Error(statErr))
 		}
 		missing = append(missing, current)
 		next := filepath.Dir(current)

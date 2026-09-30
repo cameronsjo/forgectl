@@ -170,6 +170,11 @@ func QuotePathMax(path string, maxRunes int) string {
 	if maxRunes < 1 {
 		maxRunes = PathEchoMaxRunes
 	}
+	// A path holds at least one byte per rune, so one no longer in bytes than
+	// the budget fits it, and skips the rune-offset slice below.
+	if len(path) <= maxRunes {
+		return QuoteText(path)
+	}
 	// starts[i] is the byte offset of input rune i, as range yields them.
 	starts := make([]int, 0, len(path))
 	for i := range path {
@@ -243,10 +248,11 @@ func Categorical(message string, cause error) error {
 // while preserving its unwrap chain for errors.Is/errors.As disposition.
 // Known filesystem errors are reconstructed from individually escaped fields
 // so a raw path can never be reinserted by their native Error method, and each
-// path is capped as QuotePath caps it. Only a *PathError or *LinkError that is
-// err itself gets that treatment: one wrapped inside another error (a
-// fmt.Errorf %w) renders through its native text, escaped but uncapped, so
-// convert it with Error before wrapping it (#832).
+// path is capped as QuotePath caps it. A *PathError or *LinkError wrapped
+// inside another error (a fmt.Errorf %w) is found in the chain and its span of
+// the message is rendered the same way when its path is over the cap (#837);
+// that relies on the wrapper embedding the native text verbatim, as %w does.
+// Converting it with Error before wrapping it (#832) remains the reliable form.
 //
 // An Error method that panics gets errTextUnavailable in place of its text,
 // and the rest of the message still renders; see errorText.
@@ -263,9 +269,79 @@ func Error(err error) error {
 	} else if pathErr, ok := err.(*os.PathError); ok && pathErr != nil {
 		message = fmt.Sprintf("%s %s: %s", SafeLine(pathErr.Op), QuotePathMax(pathErr.Path, 0), SafeLine(errorText(pathErr.Err)))
 	} else {
-		message = SafeLine(errorText(err))
+		message = capWrappedPaths(errorText(err), overlongPathErrors(err))
 	}
 	return safeError{message: message, cause: err}
+}
+
+// overlongPathErrors returns every *PathError and *LinkError in err's chain,
+// err itself excluded, whose path QuotePath would cut, in chain order. It
+// follows both Unwrap forms, so an errors.Join branch is searched too.
+//
+// An Unwrap method can panic as an Error method can: a typed-nil *PathError
+// dereferences its receiver (forgectl#794). The walk then stops and keeps
+// what it found, and the message renders as errorText gives it.
+func overlongPathErrors(err error) (found []error) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Debug("Unwrap method panicked; the path-cap walk stopped.",
+				"error_type", fmt.Sprintf("%T", err), "panic_type", fmt.Sprintf("%T", r))
+		}
+	}()
+	var walk func(e error, depth int)
+	walk = func(e error, depth int) {
+		// The depth bound only stops a cyclic Unwrap from recursing forever.
+		if e == nil || depth > 100 {
+			return
+		}
+		if depth > 0 {
+			if linkErr, ok := e.(*os.LinkError); ok && linkErr != nil {
+				if pathOverCap(linkErr.Old) || pathOverCap(linkErr.New) {
+					found = append(found, e)
+				}
+			} else if pathErr, ok := e.(*os.PathError); ok && pathErr != nil && pathOverCap(pathErr.Path) {
+				found = append(found, e)
+			}
+		}
+		switch u := e.(type) {
+		case interface{ Unwrap() error }:
+			walk(u.Unwrap(), depth+1)
+		case interface{ Unwrap() []error }:
+			for _, inner := range u.Unwrap() {
+				walk(inner, depth+1)
+			}
+		}
+	}
+	walk(err, 0)
+	return found
+}
+
+// pathOverCap reports whether QuotePath would cut path. The byte length is a
+// cheap upper bound on the rune count, so most paths never count runes.
+func pathOverCap(path string) bool {
+	return len(path) > PathEchoMaxRunes && utf8.RuneCountInString(path) > PathEchoMaxRunes
+}
+
+// capWrappedPaths is SafeLine(message), except that each span of message that
+// is the native text of one of pathErrs renders as that error's capped
+// Error form instead (#837). fmt.Errorf's %w writes the wrapped error's
+// Error() text verbatim, so a wrapper that composed its message that way
+// still holds the span to find; a wrapper that did not leaves no span, and
+// its text renders as SafeLine renders it. The replacement text is capped
+// and quoted, so it never matches a native span again, and a second pass
+// over the result changes nothing.
+func capWrappedPaths(message string, pathErrs []error) string {
+	if len(pathErrs) == 0 {
+		return SafeLine(message)
+	}
+	native := errorText(pathErrs[0])
+	i := strings.Index(message, native)
+	if native == errTextUnavailable || native == "" || i < 0 {
+		return capWrappedPaths(message, pathErrs[1:])
+	}
+	return capWrappedPaths(message[:i], pathErrs[1:]) +
+		Error(pathErrs[0]).Error() +
+		capWrappedPaths(message[i+len(native):], pathErrs)
 }
 
 // errTextUnavailable is the text Error gives an error whose Error method
