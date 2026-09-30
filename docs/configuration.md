@@ -49,6 +49,7 @@ Several command groups own their own config section, documented alongside that c
 - [`k8s`](commands/k8s.md) — bounded, terminal-safe log streaming
 - [`docs`](commands/docs.md) — `[docs]`, local markdown reader
 - [`theme`](commands/theme.md) — `[theme]`, `[theme.colors]`, the palette every styled surface draws from
+- [`herdr`](commands/herdr.md) — `[herdr.organize]`, the rules that group herdr tabs into workspaces
 
 ## Theme
 

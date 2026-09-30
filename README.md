@@ -36,6 +36,7 @@ deep-dive get a link here.
 | `launch` | Per-project Claude Code / Codex CLI / Pi launcher (alias: `cl`) | [launch](docs/commands/launch.md) |
 | `resume` | Get back into a Claude Code session after a terminal restart | [resume](docs/commands/resume.md) |
 | `surface` | Start a harness inside a terminal manager (tmux/cmux/herdr) without exposing its invocation | Usage below |
+| `herdr` | Helpers for the herdr terminal multiplexer: group tabs into workspaces by rule | [herdr](docs/commands/herdr.md) |
 | `recipe` | Run small built-in workbench recipes (alias: `r`) | [recipe](docs/commands/recipe.md) |
 | `workflow` | Run declarative workflows composing forgectl's other verbs (alias: `flow`) | Usage below |
 | `bench` | Discover, health-check, and wire the local dev bench (hearth, chronicle) | [bench](docs/commands/bench.md) |
@@ -266,6 +267,10 @@ forgectl k8s inspect pod/api-7f6c9 -n prod                # extra args forward t
 forgectl theme show                      # resolved hex per role, provenance, contrast
 forgectl theme show --json               # the same, machine-readable
 forgectl theme preview                   # render each role so you can see it
+
+# herdr — helpers for the herdr terminal multiplexer (run from a herdr pane)
+forgectl herdr organize                  # report how tabs would be grouped into workspaces and ordered
+forgectl herdr organize --explain        # also show which rule caught each tab
 
 # tasks — read-only Vikunja task browser, local cache, no write verbs
 # one-time setup: store a READ-ONLY API token in the login keychain (prompts for the value)
