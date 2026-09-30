@@ -343,3 +343,28 @@ func TestResolveTarget_DoesNotDescendIntoAWingMember(t *testing.T) {
 		t.Errorf("resolving a wing member's subdirectory = %v; want ErrTargetNotFound", err)
 	}
 }
+
+func TestExpandHome_ReportsAFailedLookup(t *testing.T) {
+	lookupErr := errors.New("no home")
+	failing := func() (string, error) { return "", lookupErr }
+	for _, p := range []string{"~", "~/x"} {
+		got, err := expandHomeWith(p, failing)
+		if !errors.Is(err, ErrTargetUnusable) || got != "" {
+			t.Errorf("expandHomeWith(%q) = %q, %v; want ErrTargetUnusable and no path", p, got, err)
+		}
+		if err != nil && !strings.Contains(err.Error(), "no home") {
+			t.Errorf("expandHomeWith(%q) error %q lost the cause", p, err)
+		}
+	}
+	// A path with no leading ~ never consults home.
+	for _, p := range []string{"/abs/x", "rel/x", "~user/x"} {
+		got, err := expandHomeWith(p, failing)
+		if err != nil || got != p {
+			t.Errorf("expandHomeWith(%q) = %q, %v; want unchanged, nil", p, got, err)
+		}
+	}
+	ok, err := expandHomeWith("~/x", func() (string, error) { return "/h", nil })
+	if err != nil || ok != filepath.Join("/h", "x") {
+		t.Errorf("expandHomeWith(~/x) = %q, %v", ok, err)
+	}
+}

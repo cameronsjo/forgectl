@@ -514,3 +514,27 @@ func TestHerdrOrganize_JSON_Golden(t *testing.T) {
 		t.Errorf("human text leaked into the JSON stdout:\n%s", r.stdout)
 	}
 }
+
+// A projects root that cannot be resolved stops organize before it plans:
+// planning against an empty root would match rules against the wrong paths.
+func TestHerdrOrganize_UnresolvedProjectsRootFailsBeforePlanning(t *testing.T) {
+	setHerdrSeams(t, inSession)
+	rootErr := errors.New("resolving projects root: no home")
+	herdrProjectsRoot = func() (string, error) { return "", rootErr }
+	for _, args := range [][]string{nil, {"--apply"}} {
+		w := newWorld(hws("w2", "misc", 1)).
+			tab("w2", "t1", "term1", "/r/forge/a", "alpha")
+		r := runOrganize(t, organizeCfg(), w, args...)
+		if r.err == nil || !strings.Contains(r.err.Error(), "resolving projects root") {
+			t.Errorf("args %v: err = %v, want the root resolution error", args, r.err)
+		}
+		if r.stdout != "" {
+			t.Errorf("args %v: stdout = %q, want nothing planned or reported", args, r.stdout)
+		}
+		for _, c := range r.runner.Calls {
+			if strings.Contains(strings.Join(c.Args, " "), "move") {
+				t.Errorf("args %v: a move was issued despite the error: %v", args, c)
+			}
+		}
+	}
+}

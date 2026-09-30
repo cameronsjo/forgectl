@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -18,7 +20,67 @@ import (
 // directory then re-sends that one Create and nothing for the entries
 // sorting after it. These tests stand in for kqueue by injecting that
 // repeated Create through the event seam (injectEvent), over a doc that
-// reached the tree with no event of its own.
+// reached the tree with no event of its own. The workaround runs only on
+// kqueue (forgectl#936), so each test turns on createArmsSettle, the field
+// NewWatcher sets from kqueueListing, to run it on any platform.
+
+// kqueueListing is true exactly where fsnotify v1.10.1 builds its kqueue
+// backend (backend_kqueue.go's tags), and NewWatcher turns the #895
+// workaround on from it.
+//
+// Mutations that turn it red: flip either build-tagged constant, drop a
+// GOOS from watcher_kqueue.go's tag line (that platform builds neither file
+// and the package fails to compile), or set createArmsSettle to a literal
+// in NewWatcher.
+func TestKqueueListing_MatchesFsnotifyKqueueBackend(t *testing.T) {
+	// ios is listed because GOOS=ios also satisfies the darwin build tag,
+	// so it builds watcher_kqueue.go and fsnotify's kqueue backend both.
+	want := slices.Contains([]string{"darwin", "dragonfly", "freebsd", "netbsd", "openbsd", "ios"}, runtime.GOOS)
+	if kqueueListing != want {
+		t.Errorf("kqueueListing = %v on %s, want %v", kqueueListing, runtime.GOOS, want)
+	}
+	w := newUnstartedWatcher(t, t.TempDir())
+	if w.createArmsSettle != kqueueListing {
+		t.Errorf("NewWatcher set createArmsSettle = %v, want kqueueListing (%v)", w.createArmsSettle, kqueueListing)
+	}
+}
+
+// Off kqueue, an in-tree Create of a non-doc arms nothing: the index is
+// not rebuilt, so build output landing in a served tree costs no reload
+// (forgectl#936). With the workaround on, the same Create rebuilds the
+// index. Neither publishes, since the index does not change; the control
+// doc write proves the watcher is live.
+//
+// A directory's Create arms a settle either way; see
+// TestWatcherRun_PopulatedDirMovedIn_IndexesItsDocs.
+//
+// Mutations that turn it red: drop the createArmsSettle check from Run's
+// createEvent (the gate-off case rebuilds); drop createEvent from Run's
+// arming (the gate-on case does not); make refreshWatch report true for a
+// file's Create (the gate-off case rebuilds).
+func TestWatcherRun_InTreeCreate_ArmsSettleOnlyWithTheKqueueGate(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprintf("createArmsSettle=%v", on), func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, "top.md"), "# Top\n")
+			writeFile(t, filepath.Join(dir, "build.log"), "built\n")
+			w := newUnstartedWatcher(t, dir)
+			w.createArmsSettle = on
+			root := w.store.Current().Roots()[0].Path
+			before := w.store.Current()
+			sub := startWatcher(t, w)
+
+			injectEvent(t, w, fsnotify.Event{Name: filepath.Join(root, "build.log"), Op: fsnotify.Create})
+			requireNoReload(t, sub, "a non-doc Create that changes nothing the index holds")
+			if rebuilt := w.store.Current() != before; rebuilt != on {
+				t.Fatalf("index rebuilt = %v after an in-tree non-doc Create with createArmsSettle = %v, want %v", rebuilt, on, on)
+			}
+
+			injectEvent(t, w, fsnotify.Event{Name: filepath.Join(root, "top.md"), Op: fsnotify.Write})
+			awaitReload(t, sub, "control: a write to top.md")
+		})
+	}
+}
 
 // A Create for an unopenable non-markdown entry in a docs root (no vault,
 // so it is no attachment) settles, and the rebuild's walk finds the doc
@@ -51,6 +113,7 @@ func TestWatcherRun_InTreeCreate_IndexesDocWithNoEventOfItsOwn(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = w.Close() })
+	w.createArmsSettle = true
 	sub := startWatcher(t, w)
 
 	injectEvent(t, w, fsnotify.Event{Name: filepath.Join(filepath.Dir(root.Path), "outside.bin"), Op: fsnotify.Create})
@@ -77,6 +140,7 @@ func TestWatcherRun_InTreeCreateWithUnchangedIndex_PublishesNothing(t *testing.T
 	writeFile(t, filepath.Join(dir, "top.md"), "# Top\n")
 	writeFile(t, filepath.Join(dir, "notes.txt"), "notes\n")
 	w := newUnstartedWatcher(t, dir)
+	w.createArmsSettle = true
 	root := w.store.Current().Roots()[0].Path
 	before := w.store.Current()
 	sub := startWatcher(t, w)
@@ -122,6 +186,7 @@ func TestWatcherRun_StrayCreateChurn_DoesNotPostponeReset(t *testing.T) {
 	if !w.strayEvent(dangling) || !w.inTree(dangling) || w.attachmentRelevant(fsnotify.Event{Name: dangling, Op: fsnotify.Create}) {
 		t.Fatal("the fixture needs a stray, in-tree Create that is no attachment event")
 	}
+	w.createArmsSettle = true
 	w.debounce = 200 * time.Millisecond
 	w.maxWait = time.Minute
 	w.resetPending = true
@@ -172,6 +237,7 @@ func TestWatcherRun_CreateChurn_RebuildsWithinMaxWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = w.Close() })
+	w.createArmsSettle = true
 	w.debounce = 200 * time.Millisecond
 	w.maxWait = 300 * time.Millisecond
 	w.resetPending = true
@@ -198,5 +264,69 @@ func TestWatcherRun_CreateChurn_RebuildsWithinMaxWait(t *testing.T) {
 		case <-stop:
 			t.Fatal("no rebuild during 2s of in-tree Creates; each one postponed the pending rebuild past maxWait")
 		}
+	}
+}
+
+// awaitIndexed waits up to recvTimeout for rel to be indexed under the
+// watcher's first root.
+func awaitIndexed(t *testing.T, w *Watcher, rel, what string) {
+	t.Helper()
+	deadline := time.Now().Add(recvTimeout)
+	for {
+		idx := w.store.Current()
+		if _, ok := idx.Find(idx.Roots()[0].Label, rel); ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s is not indexed within %s after %s", rel, recvTimeout, what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A directory's Create arms a settle on every backend, whatever the kqueue
+// gate says (forgectl#936 review): a populated tree renamed into the root
+// arrives as that one Create, with no event for the docs inside it. These
+// are real filesystem events, and the watcher keeps NewWatcher's gate, so
+// off kqueue only the directory arm can index the doc.
+//
+// Mutation that turns it red: drop createdDir from Run's createEvent (the
+// moved-in doc is never indexed off kqueue).
+func TestWatcherRun_PopulatedDirMovedIn_IndexesItsDocs(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(base, "docs")
+	writeFile(t, filepath.Join(root, "top.md"), "# Top\n")
+	writeFile(t, filepath.Join(base, "staging", "pkg", "new.md"), "# New\n")
+	w := newUnstartedWatcher(t, root)
+	sub := startWatcher(t, w)
+
+	if err := os.Rename(filepath.Join(base, "staging", "pkg"), filepath.Join(root, "pkg")); err != nil {
+		t.Fatal(err)
+	}
+	awaitReload(t, sub, "a populated directory renamed into the root")
+	awaitIndexed(t, w, "pkg/new.md", "a populated directory renamed into the root")
+}
+
+// A doc written straight after mkdir -p, before the watcher has walked the
+// new directories, sends no event of its own: only the directory Create's
+// settle finds it. Each iteration is a fresh tree, so a miss in any one is
+// the race, not a stale index.
+//
+// Mutation that turns it red: drop createdDir from Run's createEvent (off
+// kqueue, most iterations never index x.md).
+func TestWatcherRun_DocWrittenIntoFreshDirs_Indexed(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "top.md"), "# Top\n")
+	w := newUnstartedWatcher(t, root)
+	sub := startWatcher(t, w)
+
+	for i := range 20 {
+		rel := filepath.Join(fmt.Sprintf("d%d", i), "a", "b", "x.md")
+		writeFile(t, filepath.Join(root, rel), "# X\n") // MkdirAll, then the write
+		awaitIndexed(t, w, filepath.ToSlash(rel), "mkdir -p and an immediate write")
+		drainReloads(sub)
 	}
 }

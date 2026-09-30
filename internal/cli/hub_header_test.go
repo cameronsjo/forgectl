@@ -229,3 +229,23 @@ func TestHubRunLine_QuotesThePickerArgument(t *testing.T) {
 	}
 	termsafetest.AssertInert(t, "hubRunLine", hubRunLine(th, []string{"pr", termsafetest.Hostile("x")}))
 }
+
+// With no resolvable home the picker offers nothing rather than listing the
+// working directory: the hub then opens with free text (forgectl#730).
+func TestHubArgSources_UnresolvedRootOffersNoNames(t *testing.T) {
+	cwd := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cwd, "proj", ".git"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwd)
+	t.Setenv("PROJECTS_DIR", "")
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	if _, err := os.UserHomeDir(); err == nil {
+		t.Skip("this platform resolves a home without HOME")
+	}
+	names := hubArgSources()["projects pick"](context.Background())
+	if len(names) != 0 {
+		t.Errorf("picker names = %v, want none when the root cannot be resolved", names)
+	}
+}

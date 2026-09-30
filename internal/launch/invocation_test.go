@@ -2,6 +2,7 @@ package launch
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1139,5 +1140,23 @@ func TestEmitBanner_ByPosture(t *testing.T) {
 				t.Errorf("EmitBanner wrote %q, want %q", buf.String(), tc.want)
 			}
 		})
+	}
+}
+
+// An unresolvable home is a refusal for a config that needs it, not a launch
+// under the wrong profile.
+func TestBuildInvocation_RefusesWhenTheConfigNeedsAnUnresolvableHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	if _, err := os.UserHomeDir(); err == nil {
+		t.Skip("this platform resolves a home without HOME")
+	}
+	_, err := BuildInvocation(InvocationRequest{
+		Config:  config.LaunchConfig{Projects: []config.LaunchProject{{Match: "~/work", AllowDanger: new(false)}}},
+		CWD:     t.TempDir(),
+		Resolve: func(string, config.LaunchDefaults) (ResolvedBinary, error) { return ResolvedBinary{}, nil },
+	})
+	if !errors.Is(err, ErrHomeUnresolved) {
+		t.Errorf("BuildInvocation err = %v, want ErrHomeUnresolved", err)
 	}
 }

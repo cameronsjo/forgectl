@@ -50,6 +50,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -871,15 +872,74 @@ func startWatcher(t *testing.T, w *Watcher) <-chan string {
 // outside file's write under an in-root path after a directory swap
 // (forgectl#865), so the delivery-time filter is exercised on every
 // platform.
+//
+// A watch rebuild closes the channel it replaces, and a stray event
+// schedules one, so an injection can race a rebuild. A blocking send on a
+// channel read before the swap then panics "send on closed channel"
+// (forgectl#919). So each attempt reads the current channel and offers the
+// event without blocking, both under w.mu: replaceWatcher swaps fsw under
+// that lock and closes the old watcher only after releasing it, so the
+// channel an attempt sends on is never closed during the send. An attempt
+// Run is not waiting for delivers nothing, and the next one retries.
 func injectEvent(t *testing.T, w *Watcher, ev fsnotify.Event) {
 	t.Helper()
+	deadline := time.Now().Add(recvTimeout)
+	for !tryInjectEvent(w, ev) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the watcher did not take the injected event %v within %s", ev, recvTimeout)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// tryInjectEvent offers ev on the current fsnotify watcher's Events
+// channel without blocking, and reports whether Run took it. A closed
+// Watcher takes nothing: Close may already have closed that channel.
+func tryInjectEvent(w *Watcher, ev fsnotify.Event) bool {
 	w.mu.Lock()
-	events := w.fsw.Events
-	w.mu.Unlock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return false
+	}
 	select {
-	case events <- ev:
-	case <-time.After(recvTimeout):
-		t.Fatalf("the watcher did not take the injected event %v within %s", ev, recvTimeout)
+	case w.fsw.Events <- ev:
+		return true
+	default:
+		return false
+	}
+}
+
+// Injections that keep arriving while stray events rebuild the watches
+// must reach Run and never send on a replaced watcher's closed channel.
+// Each stray Write schedules a rebuild, and the loop keeps injecting
+// through it, so a send is outstanding whenever Run swaps the watcher.
+//
+// Mutation that turns it red: read the channel under w.mu in injectEvent
+// but send on it, blocking, after the unlock (the helper before #919's
+// fix): the rebuild closes that channel under the blocked send and the
+// test binary panics "send on closed channel".
+func TestInjectEvent_SurvivesWatchRebuilds(t *testing.T) {
+	root, outside := swapFixture(t)
+	dangling := filepath.Join(root, "dangling")
+	if err := os.Symlink(filepath.Join(outside, "gone"), dangling); err != nil {
+		t.Skipf("symlinks unavailable here: %v", err)
+	}
+	w := newUnstartedWatcher(t, root)
+	stray := fsnotify.Event{Name: filepath.Join(dangling, "doc.md"), Op: fsnotify.Write}
+	if !w.strayEvent(stray.Name) {
+		t.Fatal("the fixture needs a stray event, which schedules a rebuild")
+	}
+	_ = startWatcher(t, w)
+
+	for range 5 {
+		before := currentFSW(w)
+		deadline := time.Now().Add(recvTimeout)
+		for currentFSW(w) == before {
+			if time.Now().After(deadline) {
+				t.Fatalf("no watch rebuild within %s of stray events", recvTimeout)
+			}
+			injectEvent(t, w, stray)
+		}
 	}
 }
 
@@ -987,6 +1047,9 @@ func TestWatcherRun_EventThroughSwappedDir_DoesNotReload(t *testing.T) {
 func TestWatcher_MovedOutThenRelinked_DropsDescendantWatches(t *testing.T) {
 	for _, name := range []string{"a", "dir.md"} {
 		t.Run(name, func(t *testing.T) {
+			if runtime.GOOS == "windows" {
+				t.Skip("the relink renames a symlink over a directory symlink, which Windows refuses")
+			}
 			root, outside := swapFixture(t)
 			dir := filepath.Join(root, name)
 			if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o750); err != nil {
@@ -1019,12 +1082,19 @@ func TestWatcher_MovedOutThenRelinked_DropsDescendantWatches(t *testing.T) {
 			}
 
 			// Retarget the link into the tree, where the moved-out subtree's
-			// names would now resolve.
-			if err := os.Remove(dir); err != nil {
-				t.Fatalf("Remove: %v", err)
-			}
-			if err := os.Symlink(filepath.Join(root, "b"), dir); err != nil {
+			// names would now resolve. The new link is made under a temporary
+			// name and renamed over the old one, so the name never goes
+			// missing. A Remove then a Symlink could deliver the Remove of
+			// root/dir.md while nothing held the name: it would resolve to
+			// itself, count as a doc event, and publish on a settle the
+			// rebuild's backoff could push past the drain below
+			// (forgectl#936).
+			relink := dir + ".relink"
+			if err := os.Symlink(filepath.Join(root, "b"), relink); err != nil {
 				t.Fatalf("Symlink: %v", err)
+			}
+			if err := os.Rename(relink, dir); err != nil {
+				t.Fatalf("Rename: %v", err)
 			}
 			drainReloads(reloads)
 

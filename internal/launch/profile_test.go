@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -443,7 +444,11 @@ func TestDefaultsProfile_DerivesEffortFromDefaultsModel(t *testing.T) {
 		// A project block must not influence DefaultsProfile at all.
 		Projects: []config.LaunchProject{{Match: "~/", Model: "haiku"}},
 	}
-	if got := DefaultsProfile(lc); got.Effort != "high" {
+	got, err := DefaultsProfile(lc)
+	if err != nil {
+		t.Fatalf("DefaultsProfile: %v", err)
+	}
+	if got.Effort != "high" {
 		t.Errorf("Effort = %q, want %q", got.Effort, "high")
 	}
 }
@@ -555,6 +560,57 @@ func TestProfileValidate_EchoIsCapped(t *testing.T) {
 		msg := err.Error()
 		if strings.Contains(msg, "\x1b") || strings.Contains(msg, strings.Repeat("A", 81)) || !strings.Contains(msg, "…") {
 			t.Errorf("%s: error = %q, want the escaped, capped value", name, msg)
+		}
+	}
+}
+
+func TestResolveWithHome_FailedLookup(t *testing.T) {
+	lookupErr := errors.New("no home")
+	failing := func() (string, error) { return "", lookupErr }
+	cwd := t.TempDir()
+
+	tilde := config.LaunchConfig{Projects: []config.LaunchProject{{Match: "~/work", Harness: "codex"}}}
+	if _, err := resolveWithHome(tilde, cwd, failing); !errors.Is(err, ErrHomeUnresolved) || !errors.Is(err, lookupErr) {
+		t.Errorf("tilde match: err = %v, want ErrHomeUnresolved wrapping the lookup cause", err)
+	}
+	tildeAddDir := config.LaunchConfig{Defaults: config.LaunchDefaults{AddDir: []string{"~/notes"}}}
+	if _, err := resolveWithHome(tildeAddDir, cwd, failing); !errors.Is(err, ErrHomeUnresolved) {
+		t.Errorf("tilde defaults add_dir: err = %v, want ErrHomeUnresolved", err)
+	}
+	if _, err := defaultsProfileWithHome(tildeAddDir, failing); !errors.Is(err, ErrHomeUnresolved) {
+		t.Errorf("DefaultsProfile with tilde add_dir: err = %v, want ErrHomeUnresolved", err)
+	}
+
+	// A config that needs no home launches whether or not one exists.
+	plain := config.LaunchConfig{Projects: []config.LaunchProject{{Match: "/srv/app", AddDir: []string{"/srv/shared"}}}}
+	if _, err := resolveWithHome(plain, cwd, failing); err != nil {
+		t.Errorf("config without ~ paths: err = %v, want nil", err)
+	}
+	if _, err := defaultsProfileWithHome(plain, failing); err != nil {
+		t.Errorf("DefaultsProfile without ~ paths: err = %v, want nil", err)
+	}
+	// A project-only tilde does not break DefaultsProfile, which ignores projects.
+	if _, err := defaultsProfileWithHome(tilde, failing); err != nil {
+		t.Errorf("DefaultsProfile with a tilde project match: err = %v, want nil", err)
+	}
+}
+
+// The fail-closed predicate must see every spelling of a home-relative path.
+// Each case would, with an empty home, expand to a relative path and silently
+// drop the project block (falling back to the looser defaults) or pass a
+// cwd-relative add_dir.
+func TestResolveWithHome_FailClosedOnEveryHomeRelativeSpelling(t *testing.T) {
+	failing := func() (string, error) { return "", errors.New("no home") }
+	cwd := t.TempDir()
+	cases := map[string]config.LaunchConfig{
+		"bare ~ match":            {Projects: []config.LaunchProject{{Match: "~", AllowDanger: new(false)}}},
+		"~/ match":                {Projects: []config.LaunchProject{{Match: "~/w"}}},
+		"project add_dir ~/x":     {Projects: []config.LaunchProject{{Match: "/srv", AddDir: []string{"~/x"}}}},
+		"defaults add_dir bare ~": {Defaults: config.LaunchDefaults{AddDir: []string{"~"}}},
+	}
+	for name, lc := range cases {
+		if _, err := resolveWithHome(lc, cwd, failing); !errors.Is(err, ErrHomeUnresolved) {
+			t.Errorf("%s: err = %v, want ErrHomeUnresolved", name, err)
 		}
 	}
 }

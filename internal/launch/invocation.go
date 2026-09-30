@@ -139,7 +139,10 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		return BuiltInvocation{}, ErrNoBinaryResolver
 	}
 
-	profile := Resolve(req.Config, req.CWD)
+	profile, err := Resolve(req.Config, req.CWD)
+	if err != nil {
+		return BuiltInvocation{}, err
+	}
 	if err := profile.Validate(); err != nil {
 		return BuiltInvocation{}, err
 	}

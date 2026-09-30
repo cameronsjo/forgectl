@@ -464,7 +464,10 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	// Resolve is a pure function of the config and an arbitrary cwd, so
 	// resuming into another repo gets that repo's profile for free — no
 	// per-project config loading.
-	profile := launch.Resolve(lc, s.Cwd)
+	profile, err := launch.Resolve(lc, s.Cwd)
+	if err != nil {
+		return termsafe.Error(err)
+	}
 	claudePath, err := launch.ClaudePath(lc.Defaults)
 	if err != nil {
 		return err
