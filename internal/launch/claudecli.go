@@ -226,27 +226,66 @@ var claudeValueFlags = map[string]bool{
 // required-value flag (claudeValueFlags) it is that flag's value, and the scan
 // goes on past it (forgectl#766).
 //
+// The scan tracks what kind of slot each token sits in, not just the token
+// before it. A known value flag that is itself taken as a value takes
+// nothing: in `--model --model -- -p x` the second `--model` is the first
+// one's value, so the `--` ends the options and the run is interactive.
+//
 // Glued short flags (`-cp`, `-pc`) are deliberately not print mode. Claude
 // Code 2.1.285 does not treat them as print mode either: under a terminal,
 // `claude -c -p` takes the print path and fails fast for want of a prompt,
 // while `claude -cp` and `claude -pc` open the interactive session. So the
 // builder posture is the one that fits them.
 func IsClaudePrintMode(args []string) bool {
-	for i, a := range args {
-		if a == "--" {
-			if i > 0 && claudeValueFlags[args[i-1]] {
-				continue // the option's value, not the end of options
-			}
+	slot := slotFlag
+	for _, a := range args {
+		cur := slot
+		switch {
+		case a == "--" && cur == slotKnownValue:
+			// The option's value, not the end of options.
+		case a == "--":
 			return false
-		}
-		if !isPrintFlag(a) {
-			continue
-		}
-		if i == 0 || inFlagPosition(args[i-1], claudeNoValueFlags) {
+		case cur == slotFlag && isPrintFlag(a):
 			return true
 		}
+		slot = nextSlot(a, cur)
 	}
 	return false
+}
+
+// argSlot is what IsClaudePrintMode knows about the position a token sits in.
+type argSlot int
+
+const (
+	// slotFlag: nothing is waiting for a value, so the token is a flag or a
+	// positional.
+	slotFlag argSlot = iota
+	// slotKnownValue: a flag in claudeValueFlags, itself in flag position,
+	// is waiting for this token as its value.
+	slotKnownValue
+	// slotMaybeValue: the token may be some option's value. It follows a
+	// dash-prefixed token that is not known to take nothing. That token is
+	// an unknown flag, or one that may itself have been a value.
+	slotMaybeValue
+)
+
+// nextSlot is the slot of the token after a, which sat in cur. A value a
+// known flag took leaves the next token in flag position. Otherwise the
+// token after a is in flag position when inFlagPosition says so, a known
+// value slot when a is a known value flag in flag position, and a maybe
+// value slot in every other case. So an unknown flag still hides a print
+// flag after it, and the run keeps the builder posture.
+func nextSlot(a string, cur argSlot) argSlot {
+	switch {
+	case cur == slotKnownValue:
+		return slotFlag
+	case inFlagPosition(a, claudeNoValueFlags):
+		return slotFlag
+	case cur == slotFlag && claudeValueFlags[a]:
+		return slotKnownValue
+	default:
+		return slotMaybeValue
+	}
 }
 
 // isPrintFlag reports whether a is `-p`, `--print`, or `--output-format`, or

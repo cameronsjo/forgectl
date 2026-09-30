@@ -87,6 +87,8 @@ func TestIsClaudeHelpOrVersion(t *testing.T) {
 // (the "--some-future-flag --" row flips to true), drop the `prev == "--"`
 // case from inFlagPosition (the value-`--` rows flip to false), or split
 // glued short clusters into their flags (the "-cp" and "-pc" rows flip).
+// Judge a `--` by the previous token alone again, ignoring its slot (the
+// "--model --model -- -p x" row flips to true).
 func TestIsClaudePrintMode(t *testing.T) {
 	cases := []struct {
 		args []string
@@ -126,6 +128,14 @@ func TestIsClaudePrintMode(t *testing.T) {
 		{[]string{"--verbose", "--", "-p", "hi"}, false},
 		{[]string{"--model=opus", "--", "-p", "hi"}, false},
 		{[]string{"--model", "--", "--", "-p", "hi"}, false},
+		// Slot state, not just the previous token: a value flag taken as a
+		// value takes nothing, so this `--` ends the options.
+		{[]string{"--model", "--model", "--", "-p", "x"}, false},
+		// A known value flag's dash-prefixed value leaves the next token in
+		// flag position: claude takes "-x" as the model, then -p.
+		{[]string{"--model", "-x", "-p", "hi"}, true},
+		// A maybe-value (after an unknown flag) keeps hiding what follows.
+		{[]string{"--some-future-flag", "--model", "--", "-p", "hi"}, false},
 		// Glued short flags are not print mode: claude 2.1.285 opens the
 		// interactive session for `-cp` and `-pc` under a terminal.
 		{[]string{"-cp", "hi"}, false},
