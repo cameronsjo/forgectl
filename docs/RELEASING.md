@@ -54,7 +54,9 @@ release PR that never gets tagged through the normal path stays
 with "There are untagged, merged release PRs outstanding" — inside an otherwise
 green job — and no new release PR is ever opened again. Recovering from a
 hand-pushed tag means manually reconciling the manifest and the PR label; avoid
-creating the wedge in the first place by always releasing through the release PR.
+creating the wedge in the first place by always releasing through the ship
+gate's merge of the release PR. Merging the release PR by hand wedges it too;
+see "An ungated bump" below.
 
 The `v*` tag ruleset now enforces this: only the Forge Bellows App can create,
 update, or delete a `v*` tag, so a hand-pushed tag is refused.
