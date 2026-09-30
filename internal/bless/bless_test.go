@@ -650,3 +650,34 @@ func TestCheckGuardedParamRefs_ErrorNamesFieldAndRef(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckGuardedParamRefs_NeverEchoesValueAndCapsText pins #761: an
+// unterminated ${ names the step and field but never the guarded value (a run
+// step's whole cmd), and the verb and the offending ref are capped.
+func TestCheckGuardedParamRefs_NeverEchoesValueAndCapsText(t *testing.T) {
+	long := strings.Repeat("u", 300)
+
+	err := CheckGuardedParamRefs([]StepCheck{runStep("curl SECRETVALUE ${oops")}, nil, nil)
+	if err == nil {
+		t.Fatal("expected an unterminated-ref refusal")
+	}
+	if strings.Contains(err.Error(), "SECRETVALUE") {
+		t.Errorf("error %q echoes the guarded value", err)
+	}
+	for _, want := range []string{"step 0", "Cmd", "unterminated"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
+	}
+
+	err = CheckGuardedParamRefs([]StepCheck{{Uses: long, Guarded: map[string][]string{"Cmd": {"${" + long + "}"}}}}, nil, nil)
+	if err == nil {
+		t.Fatal("expected a param-ref refusal")
+	}
+	if strings.Contains(err.Error(), long[:81]) {
+		t.Errorf("error %q echoes the verb or ref uncapped", err)
+	}
+	if !strings.Contains(err.Error(), "…") {
+		t.Errorf("error %q should mark the capped echo", err)
+	}
+}
