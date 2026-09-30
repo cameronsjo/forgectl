@@ -14,6 +14,9 @@
 //   - the mermaid labels render as inert SVG text (forgectl#713), and no
 //     data-fc hook survives inside the doc body once mermaid has rendered,
 //     on first load and again after a live-reload swap re-renders it;
+//   - the sanitizer strips the planted chrome classes (forgectl#700), so a
+//     planted Artificer overlay (.scrim, .toast-region) stays in the doc's
+//     flow instead of pinning itself over the reader;
 //   - the sidebar filter folds and hides only the sidenav, never the doc's
 //     planted <div class="sidenav"> with its <details> and group heading;
 //   - a live-reload swap updates the real outline pane and status bar, not
@@ -85,6 +88,8 @@ const planted = [
   '<div class="sidenav"><div class="sidenav__group">PLANTED-GROUP</div>' +
     '<details open><summary>PLANTED-DETAILS</summary>inside</details></div>',
   '<div class="doc-body"><p>PLANTED-BODY copy me</p></div>',
+  '<div class="scrim">PLANTED-SCRIM</div>',
+  '<div class="toast-region">PLANTED-TOAST</div>',
 ].join('\n\n');
 
 // Rendered by mermaid, whose DOMPurify keeps data-* in HTML labels. The
@@ -154,11 +159,31 @@ const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 try {
   // Never 'networkidle': the live-reload SSE stream never goes idle.
   await page.goto(`${base}/doc/docs/hostile.md`, { waitUntil: 'load', timeout: 30000 });
-  // Fixture sanity: every planted element made it through the sanitizer.
-  const plantedCount = await page.evaluate(() => [
-    'aside.outline', 'details.outline-inline', '.sidenav .sidenav__group', '.doc-body .doc-body',
-  ].filter((s) => document.querySelector('[data-fc="doc-body"]').querySelector(s)).length);
-  if (plantedCount !== 4) problems.push(`fixture: ${plantedCount}/4 planted elements survived; the checks below prove nothing`);
+  // Fixture sanity: every planted element made it through the sanitizer,
+  // as content. Its chrome classes are stripped (forgectl#700), so find each
+  // by tag and text.
+  const plantedCount = await page.evaluate(() => {
+    const body = document.querySelector('[data-fc="doc-body"]');
+    const has = (sel, text) => [...body.querySelectorAll(sel)].some((el) => el.textContent.includes(text));
+    return [['aside', 'PLANTED-OUTLINE'], ['details', 'PLANTED-INLINE'], ['div', 'PLANTED-GROUP'],
+      ['div', 'PLANTED-BODY'], ['div', 'PLANTED-SCRIM'], ['div', 'PLANTED-TOAST']]
+      .filter(([sel, text]) => has(sel, text)).length;
+  });
+  if (plantedCount !== 6) problems.push(`fixture: ${plantedCount}/6 planted elements survived; the checks below prove nothing`);
+
+  // A planted overlay class must not pin anything over the reader.
+  const overlays = await page.evaluate(() => {
+    const body = document.querySelector('[data-fc="doc-body"]');
+    return ['PLANTED-SCRIM', 'PLANTED-TOAST'].map((text) => {
+      const el = [...body.querySelectorAll('div')].find((d) => d.textContent === text);
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { text, position: getComputedStyle(el).position, width: Math.round(r.width), height: Math.round(r.height) };
+    }).filter(Boolean);
+  });
+  for (const o of overlays) {
+    if (o.position === 'fixed' || o.position === 'sticky') problems.push(`overlay: the doc's ${o.text} is position:${o.position} (${o.width}x${o.height}); a chrome class reached it`);
+  }
 
   await mermaidRendered(page);
   // The labels rendered, and as SVG text rather than live markup.
@@ -179,7 +204,7 @@ try {
   const filter = await page.evaluate(() => {
     const body = document.querySelector('[data-fc="doc-body"]');
     const det = [...body.querySelectorAll('details')].find((d) => d.textContent.includes('PLANTED-DETAILS'));
-    const grp = [...body.querySelectorAll('.sidenav__group')].find((g) => g.textContent.includes('PLANTED-GROUP'));
+    const grp = [...body.querySelectorAll('div')].find((g) => g.textContent === 'PLANTED-GROUP');
     return {
       detOpen: det.open,
       detShown: getComputedStyle(det).display !== 'none',
@@ -189,7 +214,7 @@ try {
     };
   });
   if (!filter.detOpen || !filter.detShown || filter.detMarked) problems.push(`filter: reached the doc's planted <details> ${JSON.stringify(filter)}`);
-  if (!filter.grpShown) problems.push('filter: hid the doc\'s planted .sidenav__group');
+  if (!filter.grpShown) problems.push('filter: hid the doc\'s planted sidenav group');
   if (!filter.empty) problems.push('filter: the real "no docs match" note did not show');
   await page.fill('[data-fc="doc-filter"]', '');
 
@@ -236,7 +261,7 @@ try {
   const swapped = await page.evaluate(() => ({
     inPlace: window.__noFullReload === true,
     outline: document.querySelector('[data-fc="outline"]').textContent.includes('Added Heading'),
-    plantedIntact: [...document.querySelectorAll('[data-fc="doc-body"] aside.outline')]
+    plantedIntact: [...document.querySelectorAll('[data-fc="doc-body"] aside')]
       .some((a) => a.textContent.includes('PLANTED-OUTLINE') && !a.textContent.includes('Added Heading')),
     status: document.querySelector('[data-fc="statusbar"]').textContent,
   }));

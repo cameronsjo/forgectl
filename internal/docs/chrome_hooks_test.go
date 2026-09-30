@@ -445,12 +445,12 @@ func TestChrome_ShellHasNoInlineScript(t *testing.T) {
 	}
 }
 
-// Pins the premise of the guard above: a doc can plant each chrome class the
-// scripts once looked up (on a tag the sanitizer keeps, or on a div where it
-// drops the tag), and no planted element carries a data-fc hook. If the
-// sanitizer starts stripping class, this test fails and the guard is merely
-// belt and braces; if it starts keeping data-*, the guard's whole premise is
-// gone.
+// Pins what a doc's planted chrome turns into. The tags the sanitizer keeps
+// survive as content (so a tag-based lookup would still find them), their
+// chrome classes are stripped (forgectl#700, chromeclass.go), and no planted
+// element carries a data-fc hook. The class strip makes the data-fc guard
+// above a second wall for class lookups rather than the only one; if the
+// sanitizer starts keeping data-*, the guard's whole premise is gone.
 func TestChrome_PlantedChromeSurvivesOnlyAsContent(t *testing.T) {
 	planted := []string{
 		`<aside class="outline" data-fc="outline">p1</aside>`,
@@ -469,14 +469,21 @@ func TestChrome_PlantedChromeSurvivesOnlyAsContent(t *testing.T) {
 		t.Fatalf("no doc-body in the page")
 	}
 	doc := body[start+len(`data-fc="doc-body">`) : end]
-	for _, want := range []string{`<aside class="outline">`, `<details class="outline-inline">`, `<div class="sidenav">`, `<div class="doc-body">`} {
+	for _, want := range []string{`<aside>p1</aside>`, `<details><summary>p2</summary>`, `<div><div>p3</div></div>`, `<div>p4</div>`} {
 		if !strings.Contains(doc, want) {
-			t.Errorf("doc content lost %q; the fixture no longer plants it, so the guard's premise is unpinned", want)
+			t.Errorf("doc content lost %q, or kept a chrome class on it", want)
 		}
 	}
-	// The planted outline precedes the shell's in document order, so a
-	// class-based querySelector returns the doc's copy.
-	if strings.Index(body, `<aside class="outline">`) > strings.Index(body, `<aside class="outline" data-fc=`) {
+	for _, m := range classAttr.FindAllStringSubmatch(doc, -1) {
+		for _, tok := range strings.Fields(m[1]) {
+			if isChromeClass(tok) {
+				t.Errorf("planted chrome class %q survived in the doc body", tok)
+			}
+		}
+	}
+	// The planted aside precedes the shell's outline in document order, so a
+	// tag-based querySelector would return the doc's copy.
+	if strings.Index(body, `<aside>p1</aside>`) > strings.Index(body, `<aside class="outline" data-fc=`) {
 		t.Errorf("the planted aside no longer precedes the shell's outline")
 	}
 	if strings.Contains(doc, "data-fc") {
