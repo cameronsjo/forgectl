@@ -65,7 +65,7 @@ func Arg(s string) string {
 //   - a dotted config key on its own whose last segment reads as one (git
 //     config http.extraHeader VALUE), or the word Bearer: the next element;
 //   - an element that carries an HTTP credential header or scheme
-//     (Authorization:, Bearer …): the element, whole.
+//     (Authorization:, Private-Token:, Bearer …): the element, whole.
 //
 // It is a withhold list, not a parser of any one tool's flags, so it errs
 // toward withholding: a boolean flag with a credential-looking name costs the
@@ -169,8 +169,15 @@ func withheldValue(key, value string) string {
 // http.extraHeader, --proxy-header), so kubectl's boolean --no-headers does
 // not swallow the next element.
 var credentialFragments = []string{
-	"password", "passwd", "passphrase", "token", "secret", "apikey",
-	"accesskey", "privatekey", "credential", "authorization", "bearer", "cookie",
+	"password", "passwd", "passphrase", "token", "secret", "apikey", "accesskey",
+	"privatekey", "credential", "authorization", "bearer", "cookie", "signature",
+}
+
+// credentialSegments are the short words that make a name credential-bearing
+// only as a whole segment between '-', '_' or '.': --auth, NPM_AUTH, GH_PAT,
+// SSH_KEY, but not --author or --keymap.
+var credentialSegments = map[string]bool{
+	"auth": true, "pass": true, "pw": true, "pwd": true, "pat": true, "key": true, "sig": true,
 }
 
 var nameSeparators = strings.NewReplacer("-", "", "_", "")
@@ -178,9 +185,14 @@ var nameSeparators = strings.NewReplacer("-", "", "_", "")
 // credentialName reports whether a flag or config key name reads as one that
 // carries a credential value.
 func credentialName(name string) bool {
-	n := strings.ToLower(strings.TrimLeft(name, "-"))
-	n = nameSeparators.Replace(n)
-	if n == "auth" || n == "pass" || strings.HasSuffix(n, "header") {
+	l := strings.ToLower(strings.TrimLeft(name, "-"))
+	for _, seg := range strings.FieldsFunc(l, func(r rune) bool { return r == '-' || r == '_' || r == '.' }) {
+		if credentialSegments[seg] {
+			return true
+		}
+	}
+	n := nameSeparators.Replace(l)
+	if strings.HasSuffix(n, "header") {
 		return true
 	}
 	for _, f := range credentialFragments {
@@ -215,11 +227,23 @@ func isNameByte(c byte) bool {
 }
 
 // credentialValue reports whether s itself is an HTTP credential: it carries
-// an Authorization (or Proxy-Authorization) header, or starts with the Bearer
-// or Basic scheme.
+// an Authorization (or Proxy-Authorization) header, starts with the Bearer or
+// Basic scheme, or is a header ("Name: value", or the bare "Name:" of a
+// split one) whose hyphenated name reads as a credential (Private-Token:,
+// X-Api-Key:), or Cookie.
 func credentialValue(s string) bool {
 	l := strings.ToLower(strings.TrimSpace(s))
-	return strings.Contains(l, "authorization:") || strings.HasPrefix(l, "bearer ") || strings.HasPrefix(l, "basic ")
+	if strings.Contains(l, "authorization:") || strings.HasPrefix(l, "bearer ") || strings.HasPrefix(l, "basic ") {
+		return true
+	}
+	// A header name is letters, digits and '-'. It must hold a '-' or be
+	// Cookie, so that prose such as "invalid token: expired" in a child's
+	// stderr is not read as a header.
+	name, _, ok := strings.Cut(l, ":")
+	if !ok || name == "" || strings.Trim(name, "abcdefghijklmnopqrstuvwxyz0123456789-") != "" {
+		return false
+	}
+	return (strings.Contains(name, "-") || name == "cookie") && credentialName(name)
 }
 
 // Text returns free text (a child's stderr, an error message) with every

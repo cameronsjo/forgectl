@@ -108,6 +108,8 @@ func TestText(t *testing.T) {
 		{"try main@{u} instead", "try main@{u} instead"},
 		{"error: open token.txt: no such file", "error: open token.txt: no such file"},
 		{"HTTP 401: Bad credentials", "HTTP 401: Bad credentials"},
+		{"error validating token: expired", "error validating token: expired"},
+		{"remote: Private-Token: SEKRIT", Marker},
 		{"\n\n", "\n\n"},
 		{"", ""},
 	}
@@ -146,6 +148,14 @@ var credentialArgvs = [][]string{
 	{"tool", "access_token=SEKRIT"},
 	{"gh", "api", "repos/o/r?per_page=1&access_token=SEKRIT"},
 	{"tool", "--data=user=u&password=SEKRIT"},
+	{"git", "-c", "HTTP.EXTRAHEADER=X-Tok: SEKRIT", "fetch"},
+	{"tool", "-e", "GH_PAT=SEKRIT"},
+	{"tool", "-e", "NPM_AUTH=SEKRIT"},
+	{"tool", "--ssh-key", "SEKRIT"},
+	{"tool", "Private-Token: SEKRIT"},
+	{"tool", "Cookie: session=SEKRIT"},
+	{"az", "blob?sv=2020&sig=SEKRIT"},
+	{"aws", "https-less?X-Amz-Signature=SEKRIT"},
 }
 
 // Mutation: make argWord return Arg(a), false for every element (the
@@ -184,6 +194,8 @@ func TestArgs(t *testing.T) {
 		{[]string{"auth", "token", "--hostname", "github.com"}, []string{"auth", "token", "--hostname", "github.com"}},
 		{[]string{"get", "pods", "--no-headers", "-o", "wide"}, []string{"get", "pods", "--no-headers", "-o", "wide"}},
 		{[]string{"-c", "user.name=Me", "commit", "-m", "fix token refresh"}, []string{"-c", "user.name=Me", "commit", "-m", "fix token refresh"}},
+		{[]string{"commit", "--author", "Me", "--keymap", "vi", "--depth", "1"}, []string{"commit", "--author", "Me", "--keymap", "vi", "--depth", "1"}},
+		{[]string{"list", "--format", "%(refname:short)\t%(upstream:short)"}, []string{"list", "--format", "%(refname:short)\t%(upstream:short)"}},
 		{[]string{"new-window", "-e", "PATH=/usr/bin"}, []string{"new-window", "-e", "PATH=/usr/bin"}},
 		{[]string{"--hostname=github.com", "repos/o/r?per_page=1"}, []string{"--hostname=github.com", "repos/o/r?per_page=1"}},
 	}
