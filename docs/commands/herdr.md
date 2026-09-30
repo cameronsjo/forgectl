@@ -17,7 +17,7 @@ forgectl herdr organize --json      # the plan as one JSON object on stdout; the
 
 ## organize
 
-Each tab goes to the workspace of the first rule whose glob matches `"<cwd> :: <title>"` for one of its panes (first pane first). A tab no rule matches goes to `default`. A tab's identity is the terminal id of its first pane, which stays stable when herdr renumbers tab ids on a move.
+Each tab goes to the workspace of the first rule whose glob matches `"<cwd> :: <title>"` for one of its panes (first pane first). A tab no rule matches goes to `default`. A tab's identity is the terminal id of its first pane, which stays stable when herdr renumbers tab ids on a move. A tab whose first pane has no terminal id is skipped with a warning and stays where it is.
 
 Within a workspace, tabs are ordered by wing, then repo, then cwd, then the first pane's terminal id, so tabs with the same cwd keep one order across runs. Wing and repo are the first two path parts under the projects root (`$PROJECTS_DIR`, else `~/Projects`). A worktree path (`.../.claude/worktrees/...`) sorts with its repo. A cwd outside the root sorts last. A repo filed as `<root>/<host>/<owner>/<name>` sorts by host and owner.
 
@@ -45,7 +45,7 @@ workspace = "forge"
 |---|---|
 | `move` | this tab would move to another workspace |
 | `blocked` | the move would leave its workspace with no tabs, and herdr refuses that; open another tab there or move it by hand |
-| `order` | this tab would change position, or the workspaces would reorder |
+| `order` | this tab would change position, or the workspaces would reorder; a label that more than one workspace carries is followed by the workspace's number (`forge #3`) |
 | `unmatched` | tabs no rule matched, filed under `default` (`--explain` shows each one's match key) |
 | `organized: N tabs in M workspaces; nothing to do` | nothing is pending |
 
