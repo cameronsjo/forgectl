@@ -96,18 +96,18 @@ var scratchWritten = func(string) {}
 func writeAtomic(target Target, data []byte) (tightened bool, err error) {
 	priorMode, _, hadPrior, statErr := target.dir.lstat(target.base)
 	if statErr != nil {
-		return false, fmt.Errorf("stat %s: %w", target.Rel(), statErr)
+		return false, fmt.Errorf("stat %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(statErr))
 	}
 
 	scratch, scratchName, err := target.dir.mkScratchDir(target.envScratchDirPrefix())
 	if err != nil {
-		return false, fmt.Errorf("create a scratch directory beside %s: %w", target.Rel(), err)
+		return false, fmt.Errorf("create a scratch directory beside %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(err))
 	}
 
 	tmp, tmpName, err := scratch.createTemp(scratchTempPrefix)
 	if err != nil {
 		_ = target.dir.removeScratchDir(scratch, scratchName)
-		return false, fmt.Errorf("create a temp file in the scratch directory beside %s: %w", target.Rel(), err)
+		return false, fmt.Errorf("create a temp file in the scratch directory beside %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(err))
 	}
 	removeScratch := func() { _ = target.dir.removeScratchDir(scratch, scratchName, tmpName) }
 	cleanup := func() {
@@ -131,7 +131,7 @@ func writeAtomic(target Target, data []byte) (tightened bool, err error) {
 
 	if err := target.dir.renameFrom(scratch, tmpName, target.base); err != nil {
 		removeScratch()
-		return false, fmt.Errorf("rename into place %s: %w", target.Rel(), err)
+		return false, fmt.Errorf("rename into place %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(err))
 	}
 	// The temp file is renamed out, so there is nothing of this process's
 	// left to unlink but the .gitignore.

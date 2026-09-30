@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/clip"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // validKeyPattern documents ValidKey's regex for error messages — kept as
@@ -48,7 +49,7 @@ func errInvalidKey() error {
 // argument is least likely to be a key name, so it is the branch that must
 // stay quietest.
 func errKeyNotFound(relPath string) error {
-	return fmt.Errorf("no such key in %s (run `forgectl env keys` to list them)", relPath)
+	return fmt.Errorf("no such key in %s (run `forgectl env keys` to list them)", termsafe.QuotePath(relPath))
 }
 
 // Client is the domain entry point for forgectl env's clipboard-touching
@@ -85,7 +86,7 @@ func (c *Client) CopyValue(ctx context.Context, target Target, key string) error
 		// absolute, symlink-resolved path can name a directory the caller
 		// never typed, and it must not lead the message either (fang's
 		// error style title-cases only the first word — forgectl#481).
-		return fmt.Errorf("env file %s not found", target.Rel())
+		return fmt.Errorf("env file %s not found", termsafe.QuotePath(target.Rel()))
 	}
 	doc, err := parseFile(target)
 	if err != nil {
@@ -235,7 +236,7 @@ func loadOrEmpty(target Target) (*Document, error) {
 	defer func() { _ = f.Close() }()
 	doc, err := Parse(f)
 	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", target.Rel(), err)
+		return nil, fmt.Errorf("parse %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(err))
 	}
 	return doc, nil
 }
@@ -246,9 +247,9 @@ func loadOrEmpty(target Target) (*Document, error) {
 func openRefusal(target Target, err error) error {
 	switch {
 	case errors.Is(err, errIsSymlink), errors.Is(err, errNotRegular):
-		return fmt.Errorf("refusing %s: %w", target.Rel(), err)
+		return fmt.Errorf("refusing %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(err))
 	default:
-		return fmt.Errorf("open %s: %w", target.Rel(), err)
+		return fmt.Errorf("open %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(err))
 	}
 }
 
@@ -283,7 +284,7 @@ func ReadTarget(target Target) ([]byte, error) {
 	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", target.Rel(), err)
+		return nil, fmt.Errorf("read %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(err))
 	}
 	return data, nil
 }
@@ -334,7 +335,7 @@ func parseFile(target Target) (*Document, error) {
 	defer func() { _ = f.Close() }()
 	doc, err := Parse(f)
 	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", target.Rel(), err)
+		return nil, fmt.Errorf("parse %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(err))
 	}
 	return doc, nil
 }

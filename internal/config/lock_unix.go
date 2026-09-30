@@ -43,7 +43,7 @@ func WithFileLockNotify(path string, onWait func(), fn func() error) error {
 	lockPath := path + ".lock"
 	fd, err := unix.Open(lockPath, unix.O_CREAT|unix.O_RDWR|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0o600)
 	if err != nil {
-		return fmt.Errorf("open lock file %s: %w", lockPath, err)
+		return fmt.Errorf("open lock file %s: %w", termsafe.QuotePath(lockPath), termsafe.Error(err))
 	}
 	f := os.NewFile(uintptr(fd), lockPath)
 	defer func() { _ = f.Close() }()
@@ -52,7 +52,7 @@ func WithFileLockNotify(path string, onWait func(), fn func() error) error {
 		return fmt.Errorf("stat lock file %s: %w", termsafe.QuotePath(lockPath), termsafe.Error(err))
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("lock file %s is not a regular file", lockPath)
+		return fmt.Errorf("lock file %s is not a regular file", termsafe.QuotePath(lockPath))
 	}
 
 	err = flockRetry(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
@@ -63,7 +63,7 @@ func WithFileLockNotify(path string, onWait func(), fn func() error) error {
 		err = flockRetry(int(f.Fd()), unix.LOCK_EX)
 	}
 	if err != nil {
-		return fmt.Errorf("lock %s: %w", lockPath, err)
+		return fmt.Errorf("lock %s: %w", termsafe.QuotePath(lockPath), termsafe.Error(err))
 	}
 	defer func() { _ = unix.Flock(int(f.Fd()), unix.LOCK_UN) }()
 

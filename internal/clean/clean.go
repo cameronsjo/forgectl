@@ -220,7 +220,7 @@ func (c *Client) ScanReport(opts CleanOptions) (resolvedRoot string, report Repo
 	})
 	if err != nil {
 		slog.Error("Failed to scan for reclaimable directories.", "root", resolvedRoot, "error", err)
-		return "", Report{}, fmt.Errorf("scan %s: %w", resolvedRoot, err)
+		return "", Report{}, fmt.Errorf("scan %s: %w", termsafe.QuotePath(resolvedRoot), termsafe.Error(err))
 	}
 	return resolvedRoot, report, nil
 }
@@ -322,7 +322,7 @@ func (c *Client) delete(root, target string) error {
 		// reaching the target-name match), but this is the last line of
 		// defense before a real deletion, so the invariant is asserted here
 		// too rather than trusted from upstream.
-		return fmt.Errorf("refusing to delete %s: .git is never a reclaim target", target)
+		return fmt.Errorf("refusing to delete %s: .git is never a reclaim target", termsafe.QuotePath(target))
 	}
 	// Scan never yields a symlink as a Target — it fs.SkipDirs every
 	// symlinked directory during the walk. So if target IS a symlink right
@@ -338,7 +338,7 @@ func (c *Client) delete(root, target string) error {
 	// contents). Refusing on Lstat here closes both directions without
 	// following anything.
 	if fi, err := os.Lstat(target); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refusing to delete %s: became a symlink after scanning (possible race)", target)
+		return fmt.Errorf("refusing to delete %s: became a symlink after scanning (possible race)", termsafe.QuotePath(target))
 	}
 	// Resolve once and use the SAME resolved path for both the containment
 	// check and the removal itself. WithinWorkspace resolves symlinks
@@ -353,7 +353,7 @@ func (c *Client) delete(root, target string) error {
 		resolved = r
 	}
 	if !sandbox.WithinWorkspace(root, resolved) {
-		return fmt.Errorf("refusing to delete %s: resolves outside root %s", target, root)
+		return fmt.Errorf("refusing to delete %s: resolves outside root %s", termsafe.QuotePath(target), termsafe.QuotePath(root))
 	}
 
 	slog.Debug("Preparing to reclaim directory.", "path", resolved)
@@ -387,7 +387,7 @@ func containsGitComponent(target string) bool {
 func gitDirty(ctx context.Context, run exec.Runner, dir string) (bool, error) {
 	out, err := run.Run(ctx, "git", "-C", dir, "status", "--porcelain")
 	if err != nil {
-		return false, fmt.Errorf("git status --porcelain in %s: %w", dir, err)
+		return false, fmt.Errorf("git status --porcelain in %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	return strings.TrimSpace(out) != "", nil
 }
