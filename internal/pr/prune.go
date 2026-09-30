@@ -745,16 +745,17 @@ func (c *Client) screenLiveWindows(ctx context.Context, candidates []*asideCandi
 	if len(refs) == 0 {
 		return eligible
 	}
-	live, tmuxOK := c.WindowsLive(ctx, refs)
+	// The same strict read as WindowsLive, with the error kept so the refusal
+	// can name its remedy (forgectl#805).
+	live, listErr := c.windowsLive(ctx, refs, c.tmuxClient.ListWindows)
 	var out []*asideCandidate
 	for _, cand := range eligible {
 		switch {
 		case !cand.hasRef:
 			out = append(out, cand)
-		case !tmuxOK:
+		case listErr != nil:
 			cand.item.Outcome = pruneOutcomeRefused
-			cand.item.Reason = "the tmux window list could not be read, and an unreadable list is not an absent window — " +
-				"check `tmux list-windows -a`, then retry"
+			cand.item.Reason = windowListUnreadable(listErr)
 		case live[cand.ref]:
 			cand.item.Outcome = pruneOutcomeRefused
 			cand.item.Reason = fmt.Sprintf("it names %s, whose review window is still live — "+
