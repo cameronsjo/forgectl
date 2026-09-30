@@ -629,6 +629,14 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	if err != nil {
 		return Dispatch{}, err
 	}
+	// Refuse unless the installed claude will actually load that document.
+	// One it rejects is dropped without a word in -p mode, and the reviewer
+	// then runs with no sandbox, no permission rules, and hooks on — the
+	// failure failIfUnavailable cannot see, because the block asking for it
+	// was never loaded. See claudeAcceptsReviewSettings.
+	if err := claudeAcceptsReviewSettings(ctx, claudePath, settingsJSON); err != nil {
+		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
+	}
 	claudeArgs := launch.BuilderArgs(profile, []string{
 		"--setting-sources", reviewSettingSources,
 		"--settings", settingsJSON,

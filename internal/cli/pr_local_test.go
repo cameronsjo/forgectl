@@ -171,9 +171,7 @@ func TestPrLocalCmd_AgentFlagOverridesEnvAndDropsDefaultLabel(t *testing.T) {
 
 func TestPrLocalCmd_RealRun_PrintsWorkspaceFindingsBreadcrumb(t *testing.T) {
 	claudeBin := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatalf("write fake claude: %v", err)
-	}
+	writeFakeClaude(t, claudeBin, "")
 	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
 
 	fake := prLocalFakeRunner()

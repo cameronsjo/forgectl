@@ -111,7 +111,9 @@ type sandboxFilesystem struct {
 // `false` voided the document. It is left out (absent means no extra
 // lookups). TestReviewSettingsJSON_ValidatesAgainstTheSettingsSchema checks
 // every emitted key against the vendored schema, and
-// TestReviewSettingsJSON_ClaudeDoctorAcceptsIt against the installed claude.
+// TestReviewSettingsJSON_ClaudeDoctorAcceptsIt against the installed claude;
+// at every dispatch, claudeAcceptsReviewSettings refuses a document the
+// operator's installed claude rejects.
 type sandboxNetwork struct {
 	AllowedDomains      []string `json:"allowedDomains"`
 	StrictAllowlist     bool     `json:"strictAllowlist"`
@@ -148,7 +150,8 @@ func reviewSandbox(workspace, ghHost string) (sandboxSettings, error) {
 //
 // A value of the wrong type anywhere in it voids the whole document (see
 // sandboxNetwork); the schema test is what stands between an edit here and
-// an unconfined reviewer.
+// an unconfined reviewer, and claudeAcceptsReviewSettings is what stands
+// between an auto-updated claude and one.
 func reviewSettingsJSON(workspace, ghHost string, perms permissions) (string, error) {
 	sb, err := reviewSandbox(workspace, ghHost)
 	if err != nil {
