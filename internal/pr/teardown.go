@@ -617,7 +617,8 @@ var ErrWindowKillTimedOut = errors.New("review window kill timed out (tmux unres
 
 // ErrRecordNotParked is wrapped alongside ErrWindowKillTimedOut when the
 // timeout left the record exactly as it was because it could not be parked in
-// needs-repair (a legacy record with no version, or a failed write). Callers
+// needs-repair (no record on disk, or a failed write; a legacy record is
+// converted and parked, forgectl#696). Callers
 // must not tell the operator the record was parked when this is present.
 var ErrRecordNotParked = errors.New("the record could not be parked in needs-repair")
 
@@ -756,17 +757,43 @@ func unknownWindow(ref Ref, nativeID string) string {
 
 // parkForUnknownWindow fails a live teardown closed: it parks the record in
 // needs-repair with reason and returns cause, or — when the record cannot be
-// parked (none on disk, a legacy record, a failed write) — cause wrapped with
+// parked (none on disk, a failed write) — cause wrapped with
 // ErrRecordNotParked so no caller claims a park that never happened. Nothing is
 // removed either way. The lock is held, so the *Locked park is the right form.
+//
+// A legacy (versionless) record accepts no phase transition, so it is
+// converted in place to a v2 needs-repair record instead (forgectl#696):
+// without that, a legacy record whose window could not be settled had no
+// repair path at all — only an error naming the window.
 func (c *Client) parkForUnknownWindow(sess Session, reason string, cause error) error {
 	if sess.Path == "" {
 		return fmt.Errorf("%w; %w", cause, ErrRecordNotParked)
 	}
-	if err := c.markNeedsRepairLocked(sess.Path, reason); err != nil {
+	err := c.markNeedsRepairLocked(sess.Path, reason)
+	if errors.Is(err, errLegacyRecordNoTransition) {
+		err = c.parkLegacyRecordLocked(sess.Path, reason)
+	}
+	if err != nil {
 		return fmt.Errorf("%w; %w: %w", cause, ErrRecordNotParked, err)
 	}
 	return cause
+}
+
+// parkLegacyRecordLocked re-reads the legacy record at path under the lock and
+// converts it to a v2 needs-repair record carrying reason. The re-read is what
+// the conversion builds on, and the legacy write expectation refuses it if the
+// record stopped being legacy in between.
+func (c *Client) parkLegacyRecordLocked(path, reason string) error {
+	bc, _, err := loadBreadcrumbRecord(path, c.sessionsDir)
+	if err != nil {
+		return err
+	}
+	if bc.Version != 0 {
+		return fmt.Errorf("session record %s is no longer a legacy record; nothing was changed", termsafe.QuotePath(path))
+	}
+	return c.convertLegacyRecordLocked(path, bc, PhaseNeedsRepair, func(rec *Breadcrumb) {
+		rec.RepairReason = termsafe.SafeLine(reason)
+	})
 }
 
 // discard performs the actual teardown for an already-validated session: undo
@@ -784,7 +811,7 @@ func (c *Client) discard(ctx context.Context, sess Session, budget *tmuxBudget) 
 	timedOut, window, unsettled := c.killReviewWindow(ctx, sess.Ref, budget)
 	if timedOut {
 		// The window is named in both the parked reason and the error, so it is
-		// recorded even when the park itself fails (a legacy record): the
+		// recorded even when the park itself fails (a failed write): the
 		// operator reads it on stderr instead.
 		return c.parkForUnknownWindow(sess, windowKillTimeoutReason+"; "+window+" may still be running",
 			fmt.Errorf("%w: %s may still be running", ErrWindowKillTimedOut, window))

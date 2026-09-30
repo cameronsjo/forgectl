@@ -560,8 +560,8 @@ func newPrOpenCmd(client *pr.Client) *cobra.Command {
 // fires lands in a handler a default install discards, and the command's exit
 // would otherwise read as an ordinary failure with nothing removed and nothing
 // explained. parked says whether the record really was parked in needs-repair;
-// a legacy record cannot be, and claiming otherwise would send the operator
-// looking for a state that was never written.
+// a failed park write leaves it as it was, and claiming otherwise would send
+// the operator looking for a state that was never written.
 func windowKillTimeoutNote(target string, parked bool) string {
 	where := "a session"
 	if target != "" {

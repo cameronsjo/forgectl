@@ -13,7 +13,6 @@ package pr
 //   [x] Discards only sessions matching the given date
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io/fs"
@@ -643,11 +642,12 @@ func TestTeardown_HungTmuxParksTheRecordAndReleasesTheLock(t *testing.T) {
 	}
 }
 
-// TestTeardown_HungTmuxOnALegacyRecordSaysItWasNotParked: a record with no
-// version cannot be moved to needs-repair, so the timeout leaves it exactly as
-// it was, and the error must say so (ErrRecordNotParked) rather than let a
-// caller report a parked record that was never written.
-func TestTeardown_HungTmuxOnALegacyRecordSaysItWasNotParked(t *testing.T) {
+// TestTeardown_HungTmuxOnALegacyRecordConvertsAndParksIt is forgectl#696. A
+// record with no version accepts no phase transition, so before the fix a
+// timeout left it exactly as it was, with no repair path — only an error
+// naming the window. The park now converts it in place to a v2 needs-repair
+// record, keeping every field it carried, so `pr repair` can settle it.
+func TestTeardown_HungTmuxOnALegacyRecordConvertsAndParksIt(t *testing.T) {
 	old := lockedTmuxBudget
 	lockedTmuxBudget = 100 * time.Millisecond
 	t.Cleanup(func() { lockedTmuxBudget = old })
@@ -656,23 +656,27 @@ func TestTeardown_HungTmuxOnALegacyRecordSaysItWasNotParked(t *testing.T) {
 	c := New(h, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
 		WithApprover(func(string) (bool, error) { return false, nil }),
 		WithTTYCheck(func() bool { return false }))
-	path, ws := seedSession(t, c, ref, time.Now().UTC()) // legacy: no version
-	before, err := os.ReadFile(path)                     //nolint:gosec // test-owned temp dir
-	if err != nil {
-		t.Fatal(err)
+	path, _ := seedSession(t, c, ref, time.Now().UTC()) // legacy: no version
+	before := readRecord(t, path)
+	if before.Version != 0 {
+		t.Fatalf("seeded record has version %d, want a legacy record", before.Version)
 	}
 
-	err = c.Teardown(context.Background(), path)
-	if !errors.Is(err, ErrWindowKillTimedOut) || !errors.Is(err, ErrRecordNotParked) {
-		t.Fatalf("err = %v, want ErrWindowKillTimedOut wrapping ErrRecordNotParked", err)
+	err := c.Teardown(context.Background(), path)
+	if errors.Is(err, ErrRecordNotParked) {
+		t.Fatalf("err = %v: the legacy record should have been converted and parked", err)
 	}
-	after, rerr := os.ReadFile(path) //nolint:gosec // test-owned temp dir
-	if rerr != nil || !bytes.Equal(before, after) {
-		t.Errorf("the legacy record must be left byte-identical: %v", rerr)
+	after := readRecord(t, path)
+	if after.Version != breadcrumbVersion || after.Revision != 1 {
+		t.Errorf("record = version %d revision %d, want version %d revision 1",
+			after.Version, after.Revision, breadcrumbVersion)
 	}
-	if _, serr := os.Stat(ws); serr != nil {
-		t.Errorf("workspace must be kept: %v", serr)
+	if after.Ref != before.Ref || after.Workspace != before.Workspace || !after.CreatedAt.Equal(before.CreatedAt) {
+		t.Errorf("conversion changed the record's identity: before %+v, after %+v", before, after)
 	}
+	// The shared assertion: ErrWindowKillTimedOut, needs-repair with the
+	// timeout reason, workspace kept, lock free.
+	assertParkedNotDiscarded(t, c, path, before.Workspace, err)
 }
 
 // TestTeardown_RealTmuxGrandchildHoldingThePipesIsBounded reproduces the

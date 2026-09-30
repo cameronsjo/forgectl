@@ -87,8 +87,9 @@ const anyPhase Phase = ""
 
 // errLegacyRecordNoTransition refuses to move a record that predates phases.
 // A legacy record carries no revision, so there is nothing to compare and
-// write against; the two ways out are `pr teardown` and
-// `pr repair --adopt-window`, which converts it.
+// write against; the ways out are `pr teardown` (which converts it to a v2
+// needs-repair record when it has to park it, forgectl#696) and
+// `pr repair --adopt-window`, which converts it to active.
 var errLegacyRecordNoTransition = errors.New(
 	"this is a legacy session record with no phase; it accepts no transition — " +
 		"settle it with 'forgectl pr repair <breadcrumb> --apply --adopt-window' or discard it with 'forgectl pr teardown <breadcrumb>'")

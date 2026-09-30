@@ -148,3 +148,13 @@ func TestCleanupFailureLine_UnreadableWindowSaysNothingWasRemoved(t *testing.T) 
 		})
 	}
 }
+
+// TestCleanupFailureLine_TimeoutNotParked: a timed-out teardown whose record
+// could not be parked must say so, never that it was parked.
+func TestCleanupFailureLine_TimeoutNotParked(t *testing.T) {
+	err := fmt.Errorf("%w: review window pr-x may still be running; %w", pr.ErrWindowKillTimedOut, pr.ErrRecordNotParked)
+	line := cleanupFailureLine(pr.CleanupFailure{Path: "/s/o-r-1-1.json", Err: err})
+	if !strings.Contains(line, "could not be parked") || strings.Contains(line, "is parked") {
+		t.Errorf("line = %q, want the not-parked wording and no parked claim", line)
+	}
+}
