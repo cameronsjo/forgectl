@@ -172,7 +172,7 @@ func runResume(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMig
 		// to --allow-dangerously-skip-permissions, at which point claude
 		// loads that directory's own .claude/settings.json — hooks
 		// included. The operator should see the target first.
-		fmt.Fprintf(cmd.ErrOrStderr(), "forgectl: one match — %s\n", sessionRow(picked))
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "forgectl: one match — %s\n", sessionRow(picked))
 	case dryRun || !isInteractiveTTY():
 		// Nobody can answer the picker, or nobody should be asked: --dry-run
 		// declares non-interactive intent, and isInteractiveTTY requires BOTH
@@ -209,7 +209,7 @@ func ambiguousMatch(cmd *cobra.Command, sessions []resume.Session, filter string
 	// to the question the caller asked, so it must survive a pipe.
 	l := layoutFor(sessions, writerWidth(out))
 	for _, s := range sessions {
-		fmt.Fprintln(out, sessionRowWidth(s, l))
+		_, _ = fmt.Fprintln(out, sessionRowWidth(s, l))
 	}
 
 	matched := "recent sessions to choose from"
@@ -519,16 +519,16 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	// quiet exactly where the operator was least protected.
 	switch {
 	case fork:
-		fmt.Fprintf(errOut, "forgectl: forking — %d snapshotted task(s) not restored; a fork starts a new session, which reads its own task list\n", len(s.Tasks))
+		_, _ = fmt.Fprintf(errOut, "forgectl: forking — %d snapshotted task(s) not restored; a fork starts a new session, which reads its own task list\n", len(s.Tasks))
 	default:
 		if paths, err := resumePaths(); err == nil {
 			switch res, err := resume.RestoreFor(paths, s.ID); {
 			case err != nil:
 				// A failed rescue must not block the resume — the
 				// session itself is the thing being recovered.
-				fmt.Fprintf(errOut, "forgectl: could not restore tasks: %v\n", err)
+				_, _ = fmt.Fprintf(errOut, "forgectl: could not restore tasks: %v\n", termsafe.Error(err))
 			case res.Written > 0:
-				fmt.Fprintf(errOut, "forgectl: restored %d task(s)\n", res.Written)
+				_, _ = fmt.Fprintf(errOut, "forgectl: restored %d task(s)\n", res.Written)
 			}
 		}
 	}
@@ -663,7 +663,7 @@ func printSessions(out, errOut io.Writer, sessions []resume.Session, asJSON bool
 		return writeJSON(out, dto)
 	}
 	if len(sessions) == 0 {
-		fmt.Fprintln(out, "no recent sessions")
+		_, _ = fmt.Fprintln(out, "no recent sessions")
 		return nil
 	}
 	// Same layout rule as the picker, but measured against the writer we are
@@ -671,13 +671,13 @@ func printSessions(out, errOut io.Writer, sessions []resume.Session, asJSON bool
 	// when the output is piped so a consumer sees stable columns.
 	l := layoutFor(sessions, writerWidth(out))
 	for _, s := range sessions {
-		fmt.Fprintln(out, sessionRowWidth(s, l))
-		fmt.Fprintf(out, "\t%s\n", safeTerm(s.Cwd))
+		_, _ = fmt.Fprintln(out, sessionRowWidth(s, l))
+		_, _ = fmt.Fprintf(out, "\t%s\n", safeTerm(s.Cwd))
 		if s.LastPrompt != "" {
-			fmt.Fprintf(out, "\t%s\n", safeTerm(s.LastPrompt))
+			_, _ = fmt.Fprintf(out, "\t%s\n", safeTerm(s.LastPrompt))
 		}
 	}
-	fmt.Fprintf(errOut, "%d session(s)\n", len(sessions))
+	_, _ = fmt.Fprintf(errOut, "%d session(s)\n", len(sessions))
 	return nil
 }
 
@@ -729,12 +729,12 @@ func runResumeSnapshot(cmd *cobra.Command, quiet bool) {
 	errOut := cmd.ErrOrStderr()
 	paths, err := resumePaths()
 	if err != nil {
-		fmt.Fprintf(errOut, "forgectl: snapshot skipped: %v\n", err)
+		_, _ = fmt.Fprintf(errOut, "forgectl: snapshot skipped: %v\n", termsafe.Error(err))
 		return
 	}
 	res := resume.Snapshot(paths, time.Now())
 	for _, e := range res.Errs {
-		fmt.Fprintf(errOut, "forgectl: snapshot: %v\n", e)
+		_, _ = fmt.Fprintf(errOut, "forgectl: snapshot: %v\n", termsafe.Error(e))
 	}
 	slog.Debug("Successfully completed resume snapshot.",
 		"sessions", res.Sessions, "tasks", res.Tasks, "learned", res.Learned,
@@ -749,7 +749,7 @@ func runResumeSnapshot(cmd *cobra.Command, quiet bool) {
 	if res.Swept > 0 {
 		line += fmt.Sprintf(", %d orphan file(s) deleted", res.Swept)
 	}
-	fmt.Fprintln(cmd.OutOrStdout(), line)
+	_, _ = fmt.Fprintln(cmd.OutOrStdout(), line)
 }
 
 // sessionNameMaxRunes caps a session label rendered in a line of prose. The
