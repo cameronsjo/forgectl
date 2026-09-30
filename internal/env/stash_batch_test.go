@@ -82,8 +82,8 @@ func TestStashCheckSpawnsDoNotGrowWithStashCount(t *testing.T) {
 	if counts[0] != counts[1] || counts[1] != counts[2] {
 		t.Fatalf("git spawns by stash count 1/4/16 = %v; want one constant", counts)
 	}
-	if counts[0] > 3 {
-		t.Fatalf("the stash check spawned %d git processes; want at most 3 (rev-parse, stash list, one cat-file)", counts[0])
+	if counts[0] > 4 {
+		t.Fatalf("the stash check spawned %d git processes; want at most 4 (rev-parse, stash list, cat-file --batch-check, cat-file --batch)", counts[0])
 	}
 }
 
@@ -103,7 +103,7 @@ func TestStashCheckWithManyStashes(t *testing.T) {
 		t.Fatalf("set = %v; want the refusal naming the oldest stash, stash@{%d}", err, n)
 	}
 	checkSpawns := spawned()
-	if checkSpawns > 3 {
+	if checkSpawns > 4 {
 		t.Fatalf("%d stashes cost %d git spawns; want a constant", n, checkSpawns)
 	}
 
@@ -143,7 +143,10 @@ func TestStashBatchListsWhatLsTreeLists(t *testing.T) {
 	if err := os.MkdirAll(sub, 0o750); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	for _, p := range []string{"sub/a.txt", "sub/deep/b.txt", "sub/deep/c.txt"} {
+	for _, p := range []string{"sub/a.txt", "sub/deep/b.txt", "sub/deep/c.txt", "a b/k.txt", "sub/a b/k.txt", "t\tab/k.txt"} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(repo, p)), 0o750); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
 		if err := os.WriteFile(filepath.Join(repo, p), []byte("x\n"), 0o600); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
@@ -152,7 +155,7 @@ func TestStashBatchListsWhatLsTreeLists(t *testing.T) {
 		t.Fatalf("git stash -u: %v\n%s", err, out)
 	}
 	commits := stashThirdParents(t, repo)
-	for _, prefix := range []string{"", "sub/", "sub/deep/", "nosuch/", "sub/nosuch/", "control.txt/"} {
+	for _, prefix := range []string{"", "sub/", "sub/deep/", "nosuch/", "sub/nosuch/", "control.txt/", "a b/", "no such/", "sub/a b/", "t\tab/"} {
 		want, err := stashListingsPerEntry(repo, prefix, commits)
 		if err != nil {
 			t.Fatalf("per-entry %q: %v", prefix, err)
@@ -236,5 +239,106 @@ func TestStashTreeParsesBothObjectFormats(t *testing.T) {
 		if err != nil || !slices.Equal(got, want) {
 			t.Errorf("%d-hex ids: parseStashTree = %v, %v; want %v", len(commitID), got, err, want)
 		}
+	}
+}
+
+// A target directory whose name holds whitespace: cat-file echoes the object
+// name on a missing line, so the parser must match it whole, not by fields.
+func TestStashCheckInADirectoryWithASpaceInItsName(t *testing.T) {
+	captureWarnings(t)
+	repo := envGitRepo(t)
+	spaced := filepath.Join(repo, "a b")
+	if err := os.Mkdir(spaced, 0o750); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(spaced, "keep.txt"), []byte("keep\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if out, err := runEnvGit(t, repo, "add", "a b/keep.txt"); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+	commitControl(t, repo)
+	pushPlainStashes(t, repo, 1) // an unrelated -u stash that lacks "a b/"
+
+	if err := setOn(t, spaced, ".env"); err != nil {
+		t.Fatalf("an unrelated stash refused a set in a directory with a space in its name: %v", err)
+	}
+	if err := os.Remove(filepath.Join(spaced, ".env")); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	// And a real capture in that directory still refuses.
+	scratch := killedMidWrite(t, spaced)
+	stashAll(t, repo, filepath.Join(spaced, scratch))
+	err := setOn(t, spaced, ".env")
+	if err == nil || !strings.Contains(err.Error(), "stash@{0}") || !strings.Contains(err.Error(), scratch) {
+		t.Fatalf("set = %v; want the refusal naming stash@{0} and %s", err, scratch)
+	}
+}
+
+func TestStashBatchOutputParsersRefuseExtraOrMalformedOutput(t *testing.T) {
+	oid := strings.Repeat("a", 40)
+	specs := []string{oid + ":", oid + ":a b"}
+	good := oid + " tree 0\n" + oid + ":a b missing\n"
+	if kinds, err := stashBatchCheck([]byte(good), specs); err != nil || !slices.Equal(kinds, []string{"tree", "missing"}) {
+		t.Fatalf("good batch-check output = %v, %v", kinds, err)
+	}
+	for name, out := range map[string]string{
+		"an extra record":       good + oid + " tree 0\n",
+		"a truncated output":    oid + " tree 0\n",
+		"a missing for another": oid + " tree 0\n" + oid + ":x missing\n",
+		"a non-numeric size":    oid + " tree x\n" + oid + ":a b missing\n",
+	} {
+		if _, err := stashBatchCheck([]byte(out), specs); err == nil {
+			t.Errorf("stashBatchCheck accepted %s", name)
+		}
+	}
+	rec := oid + " tree 0\n\n"
+	if c, err := stashBatchTrees([]byte(rec), 1); err != nil || len(c) != 1 {
+		t.Fatalf("good batch output = %v, %v", c, err)
+	}
+	for name, out := range map[string]string{
+		"an extra record": rec + rec,
+		"a short content": oid + " tree 5\nab\n",
+		"a blob":          oid + " blob 0\n\n",
+		"no terminator":   oid + " tree 0\nX",
+	} {
+		if _, err := stashBatchTrees([]byte(out), 1); err == nil {
+			t.Errorf("stashBatchTrees accepted %s", name)
+		}
+	}
+}
+
+// A prefix level that is a file in a stash is named to batch-check only: its
+// content is never asked of `cat-file --batch`, so it cannot be read into
+// memory.
+func TestStashBatchNeverReadsANonTreeLevel(t *testing.T) {
+	captureWarnings(t)
+	repo := envGitRepo(t)
+	commitControl(t, repo)
+	big := filepath.Join(repo, "zz")
+	if err := os.WriteFile(big, []byte(strings.Repeat("x", 1<<20)), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if out, err := runEnvGit(t, repo, append(testIdentityArgs, "stash", "-u", "-q")...); err != nil {
+		t.Fatalf("git stash -u: %v\n%s", err, out)
+	}
+	if err := os.Mkdir(big, 0o750); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	var batchInputs []string
+	prev := stashGitStdin
+	stashGitStdin = func(dir string, stdin []byte, args ...string) ([]byte, error) {
+		if slices.Contains(args, "--batch") {
+			batchInputs = append(batchInputs, string(stdin))
+		}
+		return prev(dir, stdin, args...)
+	}
+	t.Cleanup(func() { stashGitStdin = prev })
+
+	if err := setOn(t, big, ".env"); err != nil {
+		t.Fatalf("a stash holding a file named zz refused a set in zz/: %v", err)
+	}
+	if len(batchInputs) != 1 || strings.Contains(batchInputs[0], "zz") {
+		t.Fatalf("cat-file --batch was asked for %q; want only the root tree, never the file zz", batchInputs)
 	}
 }

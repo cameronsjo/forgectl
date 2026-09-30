@@ -275,41 +275,63 @@ func stashListingsPerEntry(dir, prefix string, commits []string) ([][]string, er
 }
 
 // stashListingsBatch reads every commit's tree, and each directory on the way
-// to prefix, through one `git cat-file --batch`, and returns each commit's
-// entry paths in the prefix directory, joined to the prefix as
-// `ls-tree --full-tree` prints them. One object name per level, because
-// cat-file reports a missing object and an absent path alike as "missing":
-// only the parent's entries say which. A root tree or a listed directory
-// that cannot be read is an error, as it is for ls-tree; a prefix directory
-// the commit lacks is an empty listing. Anything malformed is an error.
+// to prefix, in two git processes, and returns each commit's entry paths in
+// the prefix directory, joined to the prefix as `ls-tree --full-tree` prints
+// them. The first, `cat-file --batch-check`, names each object's type and
+// size only, so a level that is a file in some stash is never read into
+// memory; the second, `cat-file --batch`, reads the trees. One object name per
+// level, because cat-file reports a missing object and an absent path alike
+// as "missing": only the parent's entries say which. A root tree or a listed
+// directory that cannot be read is an error, as it is for ls-tree; a prefix
+// directory the commit lacks is an empty listing. Anything malformed is an
+// error.
 func stashListingsBatch(dir, prefix string, commits []string) ([][]string, error) {
 	var parts []string
 	if prefix != "" {
 		parts = strings.Split(strings.TrimSuffix(prefix, "/"), "/")
 	}
-	var in strings.Builder
+	var specs []string
 	for _, commit := range commits {
-		in.WriteString(commit + ":\n")
+		specs = append(specs, commit+":")
 		for i := range parts {
-			in.WriteString(commit + ":" + strings.Join(parts[:i+1], "/") + "\n")
+			specs = append(specs, commit+":"+strings.Join(parts[:i+1], "/"))
 		}
 	}
-	out, err := stashGitStdin(dir, []byte(in.String()), "cat-file", "--batch")
+	in := []byte(strings.Join(specs, "\n") + "\n")
+	checked, err := stashGitStdin(dir, in, "cat-file", "--batch-check")
 	if err != nil {
 		return nil, err
 	}
+	kinds, err := stashBatchCheck(checked, specs)
+	if err != nil {
+		return nil, err
+	}
+	var treeSpecs []string
+	for i, kind := range kinds {
+		if kind == "tree" {
+			treeSpecs = append(treeSpecs, specs[i])
+		}
+	}
+	var contents [][]byte
+	if len(treeSpecs) > 0 {
+		out, err := stashGitStdin(dir, []byte(strings.Join(treeSpecs, "\n")+"\n"), "cat-file", "--batch")
+		if err != nil {
+			return nil, err
+		}
+		if contents, err = stashBatchTrees(out, len(treeSpecs)); err != nil {
+			return nil, err
+		}
+	}
 	listings := make([][]string, 0, len(commits))
+	next := 0 // the next spec, and the next tree content
+	treeNo := 0
 	for _, commit := range commits {
 		hashLen := stashHashLen(commit)
 		var entries []stashTreeEntry
 		alive := true // every level so far was a tree
 		for level := 0; level <= len(parts); level++ {
-			var kind string
-			var content []byte
-			kind, content, out, err = stashBatchRecord(out)
-			if err != nil {
-				return nil, err
-			}
+			kind := kinds[next]
+			next++
 			if level == 0 {
 				if kind != "tree" {
 					return nil, errStashUnreadable
@@ -325,9 +347,13 @@ func stashListingsBatch(dir, prefix string, commits []string) ([][]string, error
 					alive = false // absent, or not a directory
 				}
 			}
-			if alive && kind == "tree" {
-				if entries, err = parseStashTree(content, hashLen); err != nil {
-					return nil, err
+			if kind == "tree" {
+				content := contents[treeNo]
+				treeNo++
+				if alive {
+					if entries, err = parseStashTree(content, hashLen); err != nil {
+						return nil, err
+					}
 				}
 			}
 		}
@@ -338,9 +364,6 @@ func stashListingsBatch(dir, prefix string, commits []string) ([][]string, error
 			}
 		}
 		listings = append(listings, paths)
-	}
-	if len(out) != 0 {
-		return nil, errStashUnreadable
 	}
 	return listings, nil
 }
@@ -366,26 +389,65 @@ func stashEntryNamed(entries []stashTreeEntry, name string) (found, isDir bool) 
 	return false, false
 }
 
-// stashBatchRecord splits one `cat-file --batch` record off out: its kind
-// ("missing", or the object type) and content.
-func stashBatchRecord(out []byte) (kind string, content, rest []byte, err error) {
-	nl := bytes.IndexByte(out, '\n')
-	if nl < 0 {
-		return "", nil, nil, errStashUnreadable
+// stashBatchCheck reads `cat-file --batch-check` output for specs, one line
+// each, and returns each object's type, or "missing". It matches the missing
+// line as exactly `<spec> missing`: cat-file echoes the name it was given,
+// which may hold spaces. A found line is `<oid> <type> <size>` and never
+// echoes the input.
+func stashBatchCheck(out []byte, specs []string) ([]string, error) {
+	kinds := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		nl := bytes.IndexByte(out, '\n')
+		if nl < 0 {
+			return nil, errStashUnreadable
+		}
+		line := string(out[:nl])
+		out = out[nl+1:]
+		if line == spec+" missing" {
+			kinds = append(kinds, "missing")
+			continue
+		}
+		header := strings.Split(line, " ")
+		if len(header) != 3 || header[1] == "missing" {
+			return nil, errStashUnreadable
+		}
+		if _, err := strconv.Atoi(header[2]); err != nil {
+			return nil, errStashUnreadable
+		}
+		kinds = append(kinds, header[1])
 	}
-	header := strings.Fields(string(out[:nl]))
-	out = out[nl+1:]
-	if len(header) == 2 && header[1] == "missing" {
-		return "missing", nil, out, nil
+	if len(out) != 0 {
+		return nil, errStashUnreadable
 	}
-	if len(header) != 3 {
-		return "", nil, nil, errStashUnreadable
+	return kinds, nil
+}
+
+// stashBatchTrees splits `cat-file --batch` output for count objects already
+// known to be trees into their contents. A record is `<oid> tree <size>`,
+// the content, and a newline; anything else, or output left over, is an error.
+func stashBatchTrees(out []byte, count int) ([][]byte, error) {
+	contents := make([][]byte, 0, count)
+	for range count {
+		nl := bytes.IndexByte(out, '\n')
+		if nl < 0 {
+			return nil, errStashUnreadable
+		}
+		header := strings.Split(string(out[:nl]), " ")
+		out = out[nl+1:]
+		if len(header) != 3 || header[1] != "tree" {
+			return nil, errStashUnreadable
+		}
+		size, err := strconv.Atoi(header[2])
+		if err != nil || size < 0 || size+1 > len(out) || out[size] != '\n' {
+			return nil, errStashUnreadable
+		}
+		contents = append(contents, out[:size])
+		out = out[size+1:]
 	}
-	size, err := strconv.Atoi(header[2])
-	if err != nil || size < 0 || size+1 > len(out) || out[size] != '\n' {
-		return "", nil, nil, errStashUnreadable
+	if len(out) != 0 {
+		return nil, errStashUnreadable
 	}
-	return header[1], out[:size], out[size+1:], nil
+	return contents, nil
 }
 
 // parseStashTree decodes a raw tree object: `<mode> <name>\0<hash>` entries.
