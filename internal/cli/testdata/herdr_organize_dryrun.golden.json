@@ -1,0 +1,41 @@
+{
+  "plan": {
+    "moves": [
+      {
+        "terminal_id": "term1",
+        "tab_id": "t1",
+        "title": "a",
+        "cwd": "/r/forge/a",
+        "from": "misc",
+        "to": "forge",
+        "blocked": false
+      }
+    ],
+    "layout": [
+      {
+        "workspace": "forge",
+        "tabs": [{ "terminal_id": "term1", "title": "a" }]
+      },
+      {
+        "workspace": "misc",
+        "tabs": [{ "terminal_id": "term2", "title": "b" }]
+      }
+    ],
+    "unmatched": [
+      {
+        "terminal_id": "term2",
+        "tab_id": "t2",
+        "title": "b",
+        "cwd": "/r/x/b",
+        "key": "/r/x/b :: b"
+      }
+    ],
+    "warnings": []
+  },
+  "result": {
+    "applied": [],
+    "blocked": [],
+    "not_run": [],
+    "error": ""
+  }
+}
