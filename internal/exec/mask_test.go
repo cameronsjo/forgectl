@@ -442,7 +442,7 @@ func TestMaskText_DifferentialAgainstMain(t *testing.T) {
 				}
 			}
 			m := maskFrom(WithMaskedAssignments(context.Background(), entries))
-			covered := m.cover(text)
+			covered := m.data().cover(text)
 			for i, hid := range mainMaskedBytes(entries, text) {
 				if hid && !covered.has(i) {
 					t.Fatalf("alphabet %q case %d: entries %q\ntext %q\nmain hid byte %d, the new cover shows it: %q", alphabet, c, entries, text, i, m.text(text))
@@ -579,7 +579,8 @@ func TestMaskedTail_CutInsideAnEntryKeyHidesTheGluedValue(t *testing.T) {
 
 // straddleLenReference is straddleLen as it stood before #749: every suffix
 // length probed with HasPrefix, and no round cap.
-func straddleLenReference(m argMask, s string) int {
+func straddleLenReference(mask argMask, s string) int {
+	m := mask.data()
 	total := 0
 	for {
 		n := 0
