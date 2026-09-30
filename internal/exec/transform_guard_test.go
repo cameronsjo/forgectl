@@ -121,6 +121,108 @@ func TestNoCallerCodeReceivesAnOpaquePayload(t *testing.T) {
 	}
 }
 
+// unsafeAllowed is the allowlist of files, relative to the module root, that
+// may import "unsafe". It is empty: nothing in the module imports it today
+// (forgectl#854), and a new entry must name why the file needs to read memory
+// past the type system.
+var unsafeAllowed = map[string]string{}
+
+// TestNoFileReachesPastTheTypeSystem closes the hole the guard tests above
+// cannot see (forgectl#854, P-1): every one of them reasons about what Go's
+// type system lets a file name, and three things step around it. A
+// //go:linkname directive binds a local declaration to any symbol in any
+// package, unexported or internal, so another package could call
+// (*OSSensitiveRunner).buildCmd and read the argv it assembles; a probe did,
+// and got the payload back while every other guard stayed green. An "unsafe"
+// import reads any memory, including a sealed Arg's closure, and it is also
+// what the compiler requires before it honours a linkname. An assembly or
+// .syso file links in code that names any symbol directly. So, in every file
+// of the module, tests and every build constraint included:
+//
+//   - no //go:linkname directive, anywhere;
+//   - no "unsafe" import outside unsafeAllowed;
+//   - no .s, .S or .syso file.
+//
+// This is the interim guard; sealing the payload behind a package boundary
+// (forgectl#854) does not retire it, because a linkname reaches into an
+// internal package too.
+//
+// Mutations that turn it red: a file anywhere outside internal/exec with
+// `import _ "unsafe"` and `//go:linkname buildCmd
+// github.com/cameronsjo/forgectl/internal/exec.(*OSSensitiveRunner).buildCmd`
+// (both rules fire; add the file to unsafeAllowed and the linkname rule still
+// fires); a new file importing "unsafe" alone; an empty x_amd64.s.
+func TestNoFileReachesPastTheTypeSystem(t *testing.T) {
+	rootDir, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("module root: %v", err)
+	}
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	fsys := root.FS()
+	fset := token.NewFileSet()
+	parsed, sawExec := 0, false
+	var findings []string
+	report := func(pos token.Pos, msg string) {
+		findings = append(findings, fset.Position(pos).String()+": "+msg)
+	}
+	err = fs.WalkDir(fsys, ".", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		name := entry.Name()
+		if entry.IsDir() {
+			if path != "." && (strings.HasPrefix(name, ".") || name == "vendor" || name == "testdata") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		switch filepath.Ext(name) {
+		case ".s", ".S", ".syso":
+			findings = append(findings, path+": an assembly or object file can name any symbol past the type system; forgectl ships none")
+			return nil
+		case ".go":
+		default:
+			return nil
+		}
+		src, readErr := fs.ReadFile(fsys, path)
+		if readErr != nil {
+			return readErr
+		}
+		file, parseErr := parser.ParseFile(fset, path, src, parser.ImportsOnly|parser.ParseComments|parser.SkipObjectResolution)
+		if parseErr != nil {
+			return parseErr
+		}
+		parsed++
+		sawExec = sawExec || filepath.ToSlash(filepath.Dir(path)) == "internal/exec"
+		for _, imp := range file.Imports {
+			if p, _ := strconv.Unquote(imp.Path.Value); p == "unsafe" && unsafeAllowed[path] == "" {
+				report(imp.Pos(), `imports "unsafe", which reads any memory, a sealed payload included; add the file to unsafeAllowed with a reason only after review`)
+			}
+		}
+		// ImportsOnly stops at the imports, so scan the rest of the source for
+		// the directive too: a linkname sits beside a declaration further down.
+		for i, line := range strings.Split(string(src), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//go:linkname") {
+				findings = append(findings, path+":"+strconv.Itoa(i+1)+": a //go:linkname directive binds to any symbol, unexported or internal, so it can call buildCmd and read a payload")
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range findings {
+		t.Error(f)
+	}
+	if parsed == 0 || !sawExec {
+		t.Fatalf("parsed %d Go files (internal/exec among them: %v); the walk is broken, not the module clean", parsed, sawExec)
+	}
+}
+
 // execAlias returns the name file uses for this package, or "" when it does
 // not import it (or imports it blank). A dot-import is reported.
 func execAlias(file *ast.File, report func(token.Pos, string)) string {
@@ -248,9 +350,10 @@ func mintingFindings(t *testing.T, c *checkedPackage) []string {
 //   - every func is a plain, non-generic, non-method func with a body (no
 //     assembly), whose parameters are all string and whose single result is
 //     string or bool;
-//   - a body starts no goroutine and calls only a strings func, a method on
-//     a value (whose type can only come from strings), the builtin len, a
-//     string conversion, or another func of this package. print, println and
+//   - a body starts no goroutine and calls only through a selector (a
+//     strings func, a method of a strings type, or a func-typed field of a
+//     local value; see the waiver below), the builtin len, a string
+//     conversion, or another func of this package. print, println and
 //     every other builtin are refused, so nothing is written anywhere.
 //
 // Mutations that turn it red: import "os" in tmuxesc.go; declare
@@ -356,7 +459,14 @@ func tmuxescFindings(fset *token.FileSet, file *ast.File, own map[string]bool, f
 				case *ast.CallExpr:
 					switch fun := node.Fun.(type) {
 					case *ast.SelectorExpr:
-						return true // strings.X, or a method on a value whose type only strings can supply
+						// Any selector call passes, unchecked by type: a strings.X
+						// call (strings is the only import), a method of a value
+						// whose type comes from strings, or a call through a field
+						// of a local struct. The last is not "a type only strings
+						// can supply", but whatever func it holds was built here
+						// from strings funcs, this package's funcs or func
+						// literals, and Inspect walks every one of those bodies.
+						return true
 					case *ast.Ident:
 						if fun.Name == "len" || fun.Name == "string" || own[fun.Name] {
 							return true

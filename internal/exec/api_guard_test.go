@@ -61,8 +61,13 @@ var pinnedDirs = []struct{ dir, shown string }{
 //
 //   - every non-test file in internal/exec and internal/tmux/tmuxesc,
 //     whatever its build constraint, with that constraint and a cgo mark, so
-//     a new or retagged file (one for a platform guardPlatforms lacks, a cgo
-//     file, an assembly file) fails until reviewed;
+//     a new or retagged file fails until reviewed. A .go file that no
+//     platform in guardPlatforms compiles with cgo off (one for a platform
+//     guardPlatforms lacks, a cgo file, a `//go:build ignore` file) is
+//     refused outright rather than pinned, because no guard type-checks it
+//     and once pinned its contents could change unseen (forgectl#854);
+//     assembly and object files are refused module-wide by
+//     TestNoFileReachesPastTheTypeSystem;
 //   - every exported func, var and const, with its full type;
 //   - every named type declared at package level, exported or not, with its
 //     full underlying type (every field, embed and tag) and its method set on
@@ -91,6 +96,8 @@ var pinnedDirs = []struct{ dir, shown string }{
 //   - func WinOnly() {} in a new x_windows.go            (a windows-only export)
 //   - func ArmOnly() {} in a new x_arm64.go              (an arm64-only export)
 //   - a new file that imports "C"                       (a cgo-only file)
+//   - func Only386() {} in a new x_386.go, even after -update pins it
+//     (a file no guard platform compiles)
 func TestExportedAPI(t *testing.T) {
 	files := renderPinnedFiles(t)
 	got := map[guardPlatform]string{}
@@ -207,6 +214,11 @@ func renderPinnedFiles(t *testing.T) string {
 			}
 			line := "file " + d.shown + "/" + name
 			if strings.HasSuffix(name, ".go") {
+				if !compiledByAGuardPlatform(t, d.dir, name) {
+					t.Errorf("%s/%s is compiled by no platform in guardPlatforms (cgo off), so no guard type-checks it "+
+						"and pinning it would let its contents change unseen; delete it, retag it for a guarded platform, "+
+						"or add the platform to guardPlatforms and to .goreleaser.yaml", d.shown, name)
+				}
 				constraint, cgo := fileConstraint(t, filepath.Join(d.dir, name))
 				line += " build=" + constraint
 				if cgo {
@@ -221,6 +233,26 @@ func renderPinnedFiles(t *testing.T) string {
 	}
 	sort.Strings(lines)
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// compiledByAGuardPlatform reports whether some platform in guardPlatforms,
+// with cgo off as every release build has it, compiles dir/name, reading both
+// its GOOS/GOARCH file-name suffix and its //go:build line. A file none of
+// them compiles is one no guard type-checks (forgectl#854, D-N1).
+func compiledByAGuardPlatform(t *testing.T, dir, name string) bool {
+	t.Helper()
+	for _, p := range guardPlatforms {
+		ctx := build.Default
+		ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled = p.goos, p.goarch, false
+		ok, err := ctx.MatchFile(dir, name)
+		if err != nil {
+			t.Fatalf("match %s for %s: %v", filepath.Join(dir, name), p, err)
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
 }
 
 // fileConstraint returns path's //go:build expression ("any" without one)
@@ -332,36 +364,134 @@ func TestGuardPlatformsCoverReleaseTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cfg struct {
-		Builds []struct {
-			ID     string   `yaml:"id"`
-			Env    []string `yaml:"env"`
-			GOOS   []string `yaml:"goos"`
-			GOARCH []string `yaml:"goarch"`
-		} `yaml:"builds"`
-	}
-	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+	findings, pairs, err := releaseTargetFindings(raw)
+	if err != nil {
 		t.Fatal(err)
 	}
-	pairs := 0
-	for _, b := range cfg.Builds {
-		if !slices.Contains(b.Env, "CGO_ENABLED=0") {
-			t.Errorf("goreleaser build %q does not set CGO_ENABLED=0; the guards type-check with cgo off", b.ID)
-		}
-		if len(b.GOOS) == 0 || len(b.GOARCH) == 0 {
-			t.Errorf("goreleaser build %q names no goos or goarch; list them so the guard can check coverage", b.ID)
-		}
-		for _, goos := range b.GOOS {
-			for _, goarch := range b.GOARCH {
-				pairs++
-				if !slices.Contains(guardPlatforms, guardPlatform{goos, goarch}) {
-					t.Errorf("goreleaser ships %s/%s, which guardPlatforms does not type-check", goos, goarch)
-				}
-			}
-		}
+	for _, f := range findings {
+		t.Error(f)
 	}
 	if pairs == 0 {
 		t.Fatal("found no goreleaser build targets; the parse is broken")
+	}
+}
+
+// releaseTargetFindings reads a goreleaser config the way goreleaser does
+// (forgectl#854, D-N2) and returns a finding for each build that ships a
+// platform guardPlatforms does not type-check or builds with cgo on, plus the
+// number of GOOS/GOARCH pairs it checked.
+//
+//   - A build's targets list, when present, is what it builds, and its goos
+//     and goarch lists are ignored, so the targets are what is checked. A
+//     target is GOOS_GOARCH with an optional variant suffix (linux_amd64_v1,
+//     linux_arm_7); a target it cannot split that way, such as the
+//     go_first_class shorthand, is a finding rather than a guess.
+//   - env is applied in order, so the LAST CGO_ENABLED entry is the one the
+//     build gets, and it must be 0.
+func releaseTargetFindings(raw []byte) ([]string, int, error) {
+	var cfg struct {
+		Builds []struct {
+			ID      string   `yaml:"id"`
+			Env     []string `yaml:"env"`
+			GOOS    []string `yaml:"goos"`
+			GOARCH  []string `yaml:"goarch"`
+			Targets []string `yaml:"targets"`
+		} `yaml:"builds"`
+	}
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		return nil, 0, err
+	}
+	var findings []string
+	pairs := 0
+	check := func(id, goos, goarch string) {
+		pairs++
+		if !slices.Contains(guardPlatforms, guardPlatform{goos, goarch}) {
+			findings = append(findings, fmt.Sprintf("goreleaser build %q ships %s/%s, which guardPlatforms does not type-check", id, goos, goarch))
+		}
+	}
+	for _, b := range cfg.Builds {
+		cgo := ""
+		for _, kv := range b.Env {
+			if v, ok := strings.CutPrefix(kv, "CGO_ENABLED="); ok {
+				cgo = v
+			}
+		}
+		if cgo != "0" {
+			findings = append(findings, fmt.Sprintf("goreleaser build %q does not end with CGO_ENABLED=0 in env (the last entry wins); the guards type-check with cgo off", b.ID))
+		}
+		if len(b.Targets) > 0 {
+			for _, target := range b.Targets {
+				parts := strings.Split(target, "_")
+				if len(parts) < 2 || parts[0] == "go" {
+					findings = append(findings, fmt.Sprintf("goreleaser build %q names target %q, which is not GOOS_GOARCH; list the targets explicitly so the guard can check coverage", b.ID, target))
+					continue
+				}
+				check(b.ID, parts[0], parts[1])
+			}
+			continue
+		}
+		if len(b.GOOS) == 0 || len(b.GOARCH) == 0 {
+			findings = append(findings, fmt.Sprintf("goreleaser build %q names no goos or goarch; list them so the guard can check coverage", b.ID))
+		}
+		for _, goos := range b.GOOS {
+			for _, goarch := range b.GOARCH {
+				check(b.ID, goos, goarch)
+			}
+		}
+	}
+	return findings, pairs, nil
+}
+
+// TestReleaseTargetFindingsReadsGoreleaserAsGoreleaserDoes pins the two ways
+// the tie-in used to under-read a config (forgectl#854, D-N2): a targets list
+// beside goos/goarch takes precedence, so its platforms are what ship; and of
+// two CGO_ENABLED entries the last one wins.
+//
+// Mutations that turn it red: check goos x goarch even when targets is set
+// (windows/arm64 goes unseen, and linux/386 is reported); accept the build
+// when any env entry is CGO_ENABLED=0 (the cgo row passes).
+func TestReleaseTargetFindingsReadsGoreleaserAsGoreleaserDoes(t *testing.T) {
+	tests := []struct {
+		name  string
+		yaml  string
+		want  []string
+		pairs int
+	}{
+		{
+			name: "targets win over goos and goarch",
+			yaml: "builds:\n  - id: t\n    env: [CGO_ENABLED=0]\n    goos: [linux]\n    goarch: [\"386\"]\n" +
+				"    targets: [linux_amd64_v1, windows_arm64]\n",
+			want:  []string{`goreleaser build "t" ships windows/arm64, which guardPlatforms does not type-check`},
+			pairs: 2,
+		},
+		{
+			name:  "the last CGO_ENABLED wins",
+			yaml:  "builds:\n  - id: c\n    env: [CGO_ENABLED=0, CGO_ENABLED=1]\n    goos: [linux]\n    goarch: [amd64]\n",
+			want:  []string{`goreleaser build "c" does not end with CGO_ENABLED=0 in env (the last entry wins); the guards type-check with cgo off`},
+			pairs: 1,
+		},
+		{
+			name:  "a later CGO_ENABLED=0 turns cgo back off",
+			yaml:  "builds:\n  - id: ok\n    env: [CGO_ENABLED=1, CGO_ENABLED=0]\n    goos: [darwin]\n    goarch: [arm64]\n",
+			pairs: 1,
+		},
+		{
+			name:  "a shorthand target is not guessed at",
+			yaml:  "builds:\n  - id: s\n    env: [CGO_ENABLED=0]\n    targets: [go_first_class]\n",
+			want:  []string{`goreleaser build "s" names target "go_first_class", which is not GOOS_GOARCH; list the targets explicitly so the guard can check coverage`},
+			pairs: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, pairs, err := releaseTargetFindings([]byte(tt.yaml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got, tt.want) || pairs != tt.pairs {
+				t.Errorf("findings = %q (%d pairs), want %q (%d pairs)", got, pairs, tt.want, tt.pairs)
+			}
+		})
 	}
 }
 
