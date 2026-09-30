@@ -8,7 +8,8 @@ package quarantine
 //   [x] a bad pattern is quoted and capped, including globFold's own echo
 //   [x] a failed removal quotes the glob and the PathError's path, and keeps
 //       the PathError on the chain
-//   [x] a match escaping the workspace is named quoted
+//   [x] a match escaping the workspace is named quoted, relative to the
+//       workspace root (#821)
 
 import (
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // hostile is a terminal control plus a marker; longTail proves a cap.
@@ -95,5 +97,24 @@ func TestStrip_EscapingMatchIsQuoted(t *testing.T) {
 	}
 	if strings.ContainsAny(err.Error(), "\x1b\x07") {
 		t.Errorf("the error carries a raw control: %q", err)
+	}
+	// #821: the match is named relative to the workspace root, not by the
+	// operator's absolute workspace path.
+	if strings.Contains(err.Error(), workspace) {
+		t.Errorf("the error discloses the absolute workspace path: %q", err)
+	}
+	if want := termsafe.QuotePath("evil" + hostile); !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not name the match as %s", err, want)
+	}
+}
+
+func TestStripMatchEcho_FallsBackOutsideTheWorkspace(t *testing.T) {
+	ws := filepath.Join(string(filepath.Separator), "ws")
+	if got, want := stripMatchEcho(ws, filepath.Join(ws, "a", "b")), termsafe.QuotePath(filepath.Join("a", "b")); got != want {
+		t.Errorf("inside: got %s, want %s", got, want)
+	}
+	outside := filepath.Join(string(filepath.Separator), "elsewhere", "x")
+	if got, want := stripMatchEcho(ws, outside), termsafe.QuotePath(outside); got != want {
+		t.Errorf("outside: got %s, want %s", got, want)
 	}
 }

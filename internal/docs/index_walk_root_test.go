@@ -241,3 +241,25 @@ func TestWalkHeld_VisitsInLexicalOrder(t *testing.T) {
 		t.Errorf("walkHeld order:\n%s\nfilepath.WalkDir order:\n%s", strings.Join(fromRoot, "\n"), strings.Join(fromWalkDir, "\n"))
 	}
 }
+
+// openHeldSubdir maps openChildDirRoot's two "the child changed" refusals to
+// errDirChanged and passes any other error through as the skip reason. The
+// changes themselves need a swap inside the Lstat-to-open window, so the
+// mapping is tested where it lives, in heldOpenErr.
+//
+// Mutation that turns it red: drop the errors.Is line for either sentinel
+// from heldOpenErr (each row fails on its own).
+func TestHeldOpenErr_MapsChangedChildToDirChanged(t *testing.T) {
+	other := &os.PathError{Op: "open", Path: "sub", Err: os.ErrPermission}
+	for name, tc := range map[string]struct{ in, want error }{
+		"not a directory": {&os.PathError{Op: "open", Path: "sub", Err: errNotADirectory}, errDirChanged},
+		"root moved":      {&os.PathError{Op: "open", Path: "sub", Err: errDirRootMoved}, errDirChanged},
+		"other error":     {other, other},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := heldOpenErr(tc.in); got != tc.want {
+				t.Errorf("heldOpenErr(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}

@@ -44,6 +44,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -401,8 +402,15 @@ func (c *Client) resolveRemote(ctx context.Context, remoteName string) (originRe
 //
 // The query passes -i so gh prints the response's status line first on
 // stdout, and isGhNotFound reads the verdict from that line (#812).
+//
+// The branch name reaches the path escaped, one `/` segment at a time
+// (escapeRefPath, #828): gh concatenates the path onto its API prefix, so a
+// raw `#` or `?` would cut the ref short, a `%XX` would be decoded, and a
+// literal `{branch}` would be filled by gh's placeholder expansion. Each of
+// those asks about a different ref, whose 404 would read as a confirmed
+// delete of this one.
 func (c *Client) verifyRemoteDeleted(ctx context.Context, origin originRepo, name string) error {
-	path := fmt.Sprintf("repos/%s/%s/git/ref/heads/%s", origin.owner, origin.repo, name)
+	path := fmt.Sprintf("repos/%s/%s/git/ref/heads/%s", origin.owner, origin.repo, escapeRefPath(name))
 	_, err := c.run.Run(ctx, "gh", "api", "-i", "--hostname="+origin.host, path)
 	if err == nil {
 		// The response body is gh output and is not echoed (#562). The name
@@ -416,6 +424,17 @@ func (c *Client) verifyRemoteDeleted(ctx context.Context, origin originRepo, nam
 		return fmt.Errorf("verify remote branch %s deletion: %w", termsafe.QuoteText(name), termsafe.Categorical("gh api failed", err))
 	}
 	return nil
+}
+
+// escapeRefPath path-escapes each `/`-separated segment of a ref name and
+// rejoins them with `/`, so the name's hierarchy stays the endpoint's path
+// and nothing else in it can be read as URL syntax (#828).
+func escapeRefPath(name string) string {
+	segments := strings.Split(name, "/")
+	for i, seg := range segments {
+		segments[i] = url.PathEscape(seg)
+	}
+	return strings.Join(segments, "/")
 }
 
 // isGhNotFound reports whether a failed `gh api -i` call got an HTTP 404. It

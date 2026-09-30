@@ -108,7 +108,7 @@ func newStripStep(defaultGlobs []string) step.Runner {
 				// real path before deleting through it.
 				if !sandbox.WithinWorkspace(workspace, target) {
 					slog.Error("Strip match escapes workspace; refusing.", "glob", g, "target", target)
-					return fmt.Errorf("strip match %s escapes workspace", termsafe.QuotePath(target))
+					return fmt.Errorf("strip match %s escapes workspace", stripMatchEcho(workspace, target))
 				}
 				slog.Debug("Removing path.", "glob", g, "target", target)
 				if err := removeStripTarget(target); err != nil {
@@ -120,6 +120,20 @@ func newStripStep(defaultGlobs []string) step.Runner {
 		slog.Debug("Successfully stripped paths from workspace.", "workspace", workspace, "globCount", len(globs))
 		return nil
 	}
+}
+
+// stripMatchEcho names a strip match for an error, relative to the workspace
+// root (#821): the relative form is the part that identifies the offending
+// entry, and the absolute workspace path adds only the operator's local
+// layout. A match that is not lexically under the workspace (Rel fails or
+// climbs out) falls back to the absolute path. Either way it is quoted and
+// capped.
+func stripMatchEcho(workspace, target string) string {
+	rel, err := filepath.Rel(workspace, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return termsafe.QuotePathMax(target, 0)
+	}
+	return termsafe.QuotePathMax(rel, 0)
 }
 
 // removeStripTarget removes one strip match. It is a variable only so a test

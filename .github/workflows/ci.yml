@@ -118,6 +118,13 @@ jobs:
           GOOS: windows
         run: go vet ./...
 
+      - name: Vet (GOOS=freebsd)
+        # FreeBSD is the unix that is neither linux nor darwin, so it catches
+        # a test that leans on a platform-specific fixture (#825).
+        env:
+          GOOS: freebsd
+        run: go vet ./...
+
       - name: Test
         # Each FORGECTL_REQUIRE_* turns a tool-absent skip into a failure: on a
         # runner where these tests are meant to run, a skip and a pass must not

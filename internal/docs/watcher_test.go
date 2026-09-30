@@ -416,3 +416,27 @@ func TestWatcherRun_RelevantChurn_ReloadsWithinMaxWait(t *testing.T) {
 		}
 	}
 }
+
+// A Watcher built as a struct literal has a zero maxWait; it must bound a
+// burst by DefaultMaxWait, not read as "never extend".
+//
+// Mutation that turns it red: use w.maxWait directly in settleIn (a zero
+// maxWait then cuts the wait to the debounce, so the 1s row returns 0).
+func TestWatcherSettleIn_ZeroMaxWaitUsesDefault(t *testing.T) {
+	const debounce = 150 * time.Millisecond
+	w := &Watcher{debounce: debounce}
+	t0 := time.Now()
+	for _, tc := range []struct {
+		after time.Duration
+		want  time.Duration
+	}{
+		{0, debounce},
+		{time.Second, debounce},
+		{DefaultMaxWait - 50*time.Millisecond, 50 * time.Millisecond},
+		{DefaultMaxWait + time.Second, 0},
+	} {
+		if got := w.settleIn(t0.Add(tc.after)); got != tc.want {
+			t.Errorf("settleIn %v into a burst = %v, want %v", tc.after, got, tc.want)
+		}
+	}
+}

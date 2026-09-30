@@ -45,6 +45,8 @@ func openDirRoot(path string) (*os.Root, error) {
 // through parent.OpenFile, which adds O_NOFOLLOW itself, and returns what
 // the open reached. A FIFO or other non-directory fails ENOTDIR at once,
 // without waiting for a writer, and comes back wrapping errNotADirectory.
+// ELOOP (the symlink limit exceeded, or O_NOFOLLOW meeting a symlink) is
+// reported the same way, as "not a directory", so it fails closed.
 // A symlink at name is resolved only within parent, as parent.OpenRoot
 // resolves it; the callers' Lstat comparison refuses one swapped in.
 func probeChildDir(parent *os.Root, name string) (fs.FileInfo, error) {

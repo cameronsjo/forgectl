@@ -196,3 +196,38 @@ func TestErrorMessageIsRedacted(t *testing.T) {
 		t.Errorf("Error() = %q; want the credential line withheld and the other kept", got)
 	}
 }
+
+// TestErrorTextEscapesFormatCharacters is #825 item 2: printable dropped only
+// Cc controls, so a bidi override (U+202E) and other Cf format characters in
+// herdr's text reached the terminal and could reorder what the operator read.
+// Every sink printable feeds must show them as escapes instead.
+//
+// Mutation that turns it red: restore the Cc-only strings.Map filter in
+// printable.
+func TestErrorTextEscapesFormatCharacters(t *testing.T) {
+	const planted = "a\u202eb\u2066c\u200bd\u2060e\ufeff"
+	ce := &exec.CommandError{Name: Binary, ExitCode: 1, Stderr: `{"error":{"code":"x\u202ey","message":"` + planted + `"}}`}
+	_, err := New(runnerFor("", ce)).Workspaces(context.Background())
+	var he *Error
+	if !errors.As(err, &he) {
+		t.Fatalf("err = %v, want *Error", err)
+	}
+	probeErr := probe(context.Background(), runnerFor("", &exec.CommandError{Name: Binary, ExitCode: 1, Stderr: planted}), envOf(inPane), statSocket)
+	if probeErr == nil {
+		t.Fatal("probe: exit 1 accepted")
+	}
+	for name, s := range map[string]string{
+		"Error":    he.Error(),
+		"Declined": (&Declined{TabID: "w1:\u202et1", Reason: planted}).Error(),
+		"probe":    probeErr.Error(),
+	} {
+		for _, r := range s {
+			if unicode.Is(unicode.Cf, r) || unicode.IsControl(r) {
+				t.Errorf("%s: %q carries %U raw", name, s, r)
+			}
+		}
+		if !strings.Contains(s, `\u202e`) {
+			t.Errorf("%s: %q does not show the override as an escape", name, s)
+		}
+	}
+}
