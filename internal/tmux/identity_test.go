@@ -188,6 +188,27 @@ func TestRevalidateWindowProvesParentage(t *testing.T) {
 			// never selected.
 			"reparented since capture", windowRow("9", "100", "@3", "$2", "other", 0, "pr-o-r-1"), ErrWrongParent,
 		},
+		// forgectl#762: `link-window` lists one @id once per session. The
+		// captured parent sorting second is still the captured parent.
+		// Mutation that turns it red: restore the first-foreign-row refusal
+		// (return ErrWrongParent inside the loop) — the second-row case fails.
+		{
+			"linked, captured parent listed second",
+			windowRow("9", "100", "@3", "$2", "aaa", 0, "pr-o-r-1") + "\n" + windowRow("9", "100", "@3", "$1", "forge", 0, "pr-o-r-1"),
+			nil,
+		},
+		{
+			"linked, captured parent listed first",
+			windowRow("9", "100", "@3", "$1", "forge", 0, "pr-o-r-1") + "\n" + windowRow("9", "100", "@3", "$2", "zzz", 0, "pr-o-r-1"),
+			nil,
+		},
+		{
+			// Every row foreign is still a reparent. Mutation that turns it red:
+			// accept any row with the id regardless of session.
+			"linked, no row under captured parent",
+			windowRow("9", "100", "@3", "$2", "aaa", 0, "pr-o-r-1") + "\n" + windowRow("9", "100", "@3", "$4", "zzz", 0, "pr-o-r-1"),
+			ErrWrongParent,
+		},
 		{"gone", windowRow("9", "100", "@9", "$1", "forge", 0, "other"), ErrObjectGone},
 		{"server restarted", windowRow("11", "900", "@3", "$1", "forge", 0, "pr-o-r-1"), ErrGenerationChanged},
 		{"empty server", "", ErrObjectGone},
