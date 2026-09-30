@@ -538,7 +538,8 @@ func newEnvGetCmd(client *envpkg.Client, file *string, anyFile *bool, th theme.T
 // compare), 1 means the file and example were compared and differ (missing
 // and/or extra keys — either counts as drift), 0 means clean. --json
 // (forgectl#105) emits the same verdict as {"missing":[...],"extra":[...]}
-// on stdout instead of the human sections, under the identical exit codes.
+// on stdout instead of the human sections, under the identical exit codes,
+// and keeps stderr to at most one JSON object (checkJSONFailure).
 func newEnvCheckCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command {
 	var example string
 	var asJSON bool
@@ -605,6 +606,12 @@ Exit codes: 0 the file matches the example · 1 keys are missing or extra · 2 t
 			}
 
 			if drift {
+				if asJSON {
+					// The verdict is already on stdout; under --json stderr
+					// stays empty (forgectl#481, #858), so fang must render
+					// no error frame for the drift exit.
+					return newSilentCodedError(1)
+				}
 				return WithExitCode(
 					fmt.Errorf("%d missing, %d extra key(s) between %s and %s", len(missing), len(extra), termsafe.QuotePath(*file), termsafe.QuotePath(example)),
 					1,
@@ -612,6 +619,10 @@ Exit codes: 0 the file matches the example · 1 keys are missing or extra · 2 t
 			}
 			return nil
 		},
+	}
+	run := cmd.RunE
+	cmd.RunE = func(c *cobra.Command, args []string) error {
+		return checkJSONFailure(c, run(c, args), asJSON)
 	}
 	cmd.Flags().StringVar(&example, "example", ".env.example", "path to the example file to check against")
 	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"missing":[...],"extra":[...]} to stdout instead of the human sections`)
@@ -643,9 +654,32 @@ func notFoundCheckError(cmd *cobra.Command, target envpkg.Target, wordingFmt str
 	return WithExitCode(fmt.Errorf(wordingFmt, termsafe.QuotePath(rel)), 2)
 }
 
-// checkErrorJSON is env check --json's file-not-found wire shape
-// (forgectl#481) — distinct from checkJSON, which reports a completed
-// comparison's missing/extra keys.
+// checkJSONFailure keeps env check's --json stderr free of fang's human error
+// frame (forgectl#858). Any failure the command has not already rendered
+// itself (notFoundCheckError's object, the drift exit) is written as one
+// checkErrorJSON object with code "check_failed" and an empty path — a
+// refused --file/--example name, a file outside the repository, a parse
+// failure — and handed back as a silentCodedError carrying the exit code the
+// error already had, so --json never changes an exit code. Without --json,
+// err passes through untouched to the human renderer.
+func checkJSONFailure(cmd *cobra.Command, err error, asJSON bool) error {
+	if err == nil || !asJSON {
+		return err
+	}
+	if _, ok := err.(*silentCodedError); ok {
+		return err
+	}
+	enc := termsafe.JSONEncoder(cmd.ErrOrStderr())
+	enc.SetIndent("", "  ")
+	if encErr := enc.Encode(checkErrorJSON{Error: err.Error(), Code: "check_failed", Path: ""}); encErr != nil {
+		return err
+	}
+	return newSilentCodedError(ExitCode(err))
+}
+
+// checkErrorJSON is env check --json's failure wire shape: file_not_found
+// (forgectl#481) and check_failed (forgectl#858) — distinct from checkJSON,
+// which reports a completed comparison's missing/extra keys.
 type checkErrorJSON struct {
 	Error string `json:"error"`
 	Code  string `json:"code"`
