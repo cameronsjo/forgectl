@@ -102,7 +102,7 @@ var errFindingsChildMoved = errors.New("findings dir changed between the check a
 // caller already judged a plain directory (forgectl#685). Everything cleanup
 // then reads about the dir, its marker and its size, goes through that
 // handle, and so does the emptying of its contents at removal
-// (removeJudgedFindingsDir). Only the final rmdir goes by name, and rmdir
+// (removeJudgedFindingsDir). Only the final Root.Remove goes by name, and it
 // cannot take a directory that still holds anything, so the handle is what
 // binds the removal to the dir that was judged.
 //
@@ -444,8 +444,11 @@ var findingsRemoveAll = removeJudgedFindingsDir
 
 // errFindingsDirSwapped is the removal's refusal of a name that no longer
 // holds the dir that was judged, or of a judged dir that gained an entry
-// after it was emptied.
-var errFindingsDirSwapped = errors.New("findings dir changed after it was judged; judged dir emptied, the entry now at its name was kept")
+// after it was emptied. Either way what was judged has been emptied, and
+// whatever is at its name now, the judged dir with its new entry or a
+// different dir, was kept.
+var errFindingsDirSwapped = errors.New("findings dir changed after it was judged; " +
+	"its judged contents were removed, and what is at its name now was kept")
 
 // removeJudgedFindingsDir removes the findings dir that was judged: child is
 // the handle on it, name its entry in store, and judged the Lstat the caller
@@ -455,15 +458,21 @@ var errFindingsDirSwapped = errors.New("findings dir changed after it was judged
 // name when it runs, and another dir, a live review's included, can be
 // renamed onto name after the verdict. So the contents are removed through
 // child, which reaches only the judged dir wherever it now sits. Only then
-// is name removed, with rmdir semantics, and only while it still names the
-// judged dir: a dir swapped onto name holds at least its own owner marker,
-// so rmdir refuses it, and the SameFile check refuses a swapped empty dir or
-// symlink before that. The refusal is matched as fs.ErrExist, which covers
-// ENOTEMPTY and EEXIST on Unix and ERROR_DIR_NOT_EMPTY on Windows. What a swap in the final gap can cost is
-// one empty directory. Both refusals are errFindingsDirSwapped.
+// is name removed, and only while the SameFile check says it still names the
+// judged dir; that check refuses a swapped dir or symlink up to that point.
+// store.Remove is not rmdir: on Unix it tries unlinkat(name, 0) first and
+// only then unlinkat(name, AT_REMOVEDIR). The first cannot remove a
+// directory, and the second refuses a non-empty one, so a dir swapped onto
+// name in the final gap, which holds at least its own owner marker, is kept.
+// That refusal is matched as fs.ErrExist, which covers ENOTEMPTY and EEXIST on
+// Unix and ERROR_DIR_NOT_EMPTY on Windows. A file or symlink swapped onto
+// name in that gap is unlinked by the first call: the entry itself, inside
+// the store, never a symlink's target. So what a swap in the final gap can
+// cost is one empty directory or one non-directory store entry. Both
+// refusals are errFindingsDirSwapped.
 //
 // os.Root never follows a symlink out of child, and removes a symlink inside
-// it rather than following it. child is closed before the rmdir, because an
+// it rather than following it. child is closed before the Remove, because an
 // open handle on a directory blocks its deletion on Windows.
 func removeJudgedFindingsDir(store, child *os.Root, name string, judged fs.FileInfo) error {
 	entries, err := fs.ReadDir(child.FS(), ".")

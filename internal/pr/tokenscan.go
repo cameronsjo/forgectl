@@ -54,10 +54,9 @@ func scanReviewForTokens(review string) error {
 // normalizeReviewText undoes the spellings that hide a token from a plain
 // match but not from someone reading the rendered review:
 //
-//   - characters that render as nothing (invisibleInToken): Unicode format
-//     characters (category Cf: zero-width space U+200B, word joiner U+2060,
-//     BOM U+FEFF, soft hyphen U+00AD, and the rest), the combining grapheme
-//     joiner U+034F, variation selectors, and the Hangul fillers;
+//   - the default-ignorable code points, which browsers render as nothing
+//     (invisibleInToken strips category Cf, Other_Default_Ignorable_Code_Point,
+//     and Variation_Selector, the sets Unicode derives the property from);
 //   - HTML character references, named, decimal, and hex (&lowbar;, &#112;,
 //     &#x70;), which GitHub's markdown renders as the character. GitHub
 //     decodes one level; this decodes up to maxUnescapeRounds, so a doubly
@@ -67,8 +66,8 @@ func scanReviewForTokens(review string) error {
 //     as the bare punctuation.
 //
 // Invisible characters are stripped after decoding, since a reference can
-// spell one (&#8203;). One inside a reference breaks the reference when it renders,
-// so there is nothing to strip before decoding.
+// spell one (&#8203;). One inside a reference breaks the reference when it
+// renders, so there is nothing to strip before decoding.
 func normalizeReviewText(s string) string {
 	for range maxUnescapeRounds {
 		u := html.UnescapeString(s)
@@ -89,25 +88,25 @@ func stripFormatChars(s string) string {
 	}, s)
 }
 
-// invisibleInToken reports whether r renders as nothing, so that one placed
-// inside a token splits it for a plain match but not for a reader. The token
-// alphabet is ASCII, so a visible character between two token characters
-// already breaks the token for a reader too, and only these need stripping:
+// invisibleInToken reports whether r is stripped before the second match:
+// exactly the runes in category Cf, Other_Default_Ignorable_Code_Point, or
+// Variation_Selector. Unicode derives Default_Ignorable_Code_Point from those
+// three sets (less White_Space and a few Cf prepended-concatenation and
+// Egyptian format marks, which this keeps stripping), and browsers render a
+// default-ignorable code point as nothing, so one placed inside a token
+// splits it for a plain match but not for a reader (forgectl#764). That
+// covers the format characters, U+034F, the Hangul fillers, the Khmer
+// inherent vowels U+17B4/U+17B5, U+2065, U+FFF0-U+FFF8, the variation
+// selectors, and the assigned and unassigned tag-plane ranges.
 //
-//   - category Cf, the format characters;
-//   - U+034F COMBINING GRAPHEME JOINER, a nonspacing mark (Mn) that renders
-//     as nothing, unlike the accents in Mn;
-//   - the variation selectors (U+FE00-U+FE0F, U+E0100-U+E01EF, and the
-//     Mongolian free variation selectors), also Mn, which select a glyph
-//     variant of the character before them and are otherwise invisible;
-//   - the Hangul fillers U+115F, U+1160, U+3164, and U+FFA0, letters (Lo)
-//     that render as blank space of zero or near-zero width.
+// Property tables, not a hand list, so a code point Unicode adds to the set
+// is stripped when the Go toolchain's tables pick it up. Stripping more than
+// the derived property can only over-match, and scanReviewForTokens matches
+// the raw text first, so a strip can never hide a token the raw text shows.
+// The token alphabet is ASCII, so a visible character between two token
+// characters already breaks the token for a reader too.
 func invisibleInToken(r rune) bool {
-	switch r {
-	case '\u034f', '\u115f', '\u1160', '\u3164', '\uffa0':
-		return true
-	}
-	return unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Variation_Selector, r)
+	return unicode.In(r, unicode.Cf, unicode.Other_Default_Ignorable_Code_Point, unicode.Variation_Selector)
 }
 
 // unescapeMarkdownPunct drops a backslash that escapes ASCII punctuation, the

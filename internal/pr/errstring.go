@@ -14,7 +14,10 @@ const errTextUnavailable = "error text unavailable: its Error method panicked " 
 // safeErrString is err.Error() for an error whose Error method may panic.
 // Go 1.26's os.Root.RemoveAll can leak its internal errSymlink, wrapped in a
 // *fs.PathError, when a directory it is walking is swapped for a symlink
-// (forgectl#764), and errSymlink's Error method is a panic. fmt and slog
+// (forgectl#764), and errSymlink's Error method is a panic. Plain
+// os.RemoveAll shares the walk (removeall_at.go: openDirAt reaches
+// rootOpenDir, whose checkSymlink returns errSymlink, which is wrapped as an
+// "openfdat" *PathError), so its errors can carry the same value. fmt and slog
 // recover such a panic, but a direct err.Error() does not, so a same-uid
 // racer could crash `pr findings cleanup --apply` between its intent row and
 // its completion row.

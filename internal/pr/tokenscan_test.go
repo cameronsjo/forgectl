@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // fakeTokenBody is 36 characters of token-alphabet filler. Test tokens are
@@ -19,8 +20,9 @@ var fakeTokenBody = strings.Repeat("a1B2", 9)
 // PostReview (every case posts); narrow gh[pousr]_ to ghp_ in
 // githubTokenShape (the gho_/ghu_/ghs_/ghr_ cases post); drop
 // stripFormatChars (the Cf cases, and the ref-spelled zwsp case, post); drop
-// the switch in invisibleInToken (the joiner and Hangul filler cases post),
-// or its unicode.Variation_Selector test (the selector cases post); drop
+// unicode.Other_Default_Ignorable_Code_Point from invisibleInToken (the joiner
+// and Hangul filler cases post), or unicode.Variation_Selector (the selector
+// cases post); drop
 // the html.UnescapeString loop (the reference cases post), or cap it at one
 // round (the double-encoded case posts); drop
 // unescapeMarkdownPunct (the markdown case posts).
@@ -116,5 +118,47 @@ func TestPostReview_HeadlessTokenShapedReviewIsRefused(t *testing.T) {
 	}
 	if posted || len(fake.Calls) != 0 {
 		t.Errorf("posted=%v calls=%+v, want refused with zero Runner calls", posted, fake.Calls)
+	}
+}
+
+// Every rune in Other_Default_Ignorable_Code_Point and Variation_Selector,
+// and every Cf rune, placed inside a token is stripped and the token refused
+// (forgectl#764). It walks the whole code space against the tables rather
+// than a list of its own, so it cannot drift from what the scan strips, and
+// it also covers the ranges a hand list missed (U+17B4, U+2065,
+// U+FFF0-U+FFF8, the unassigned tag-plane ranges). Each case first proves the
+// raw text does not match, so the refusal comes from the strip.
+//
+// Mutations that turn it red: drop any one of the three tables from
+// invisibleInToken (that table's runes post); replace invisibleInToken with
+// the earlier hand list (U+17B4, U+2065, U+FFF0, and the unassigned tag-plane
+// runes post).
+func TestScanReviewForTokens_EveryDefaultIgnorableIsStripped(t *testing.T) {
+	tables := map[string]*unicode.RangeTable{
+		"Cf":                                 unicode.Cf,
+		"Other_Default_Ignorable_Code_Point": unicode.Other_Default_Ignorable_Code_Point,
+		"Variation_Selector":                 unicode.Variation_Selector,
+	}
+	half := len(fakeTokenBody) / 2
+	for name, table := range tables {
+		t.Run(name, func(t *testing.T) {
+			n := 0
+			for r := rune(0); r <= unicode.MaxRune; r++ {
+				if !unicode.Is(table, r) {
+					continue
+				}
+				n++
+				review := "gh" + "p_" + fakeTokenBody[:half] + string(r) + fakeTokenBody[half:]
+				if githubTokenShape.MatchString(review) {
+					t.Fatalf("U+%04X: the raw text already matches, so the case does not test the strip", r)
+				}
+				if !errors.Is(scanReviewForTokens(review), errReviewHasTokenShape) {
+					t.Errorf("U+%04X splits a token and the review is not refused", r)
+				}
+			}
+			if n == 0 {
+				t.Fatal("the table yielded no runes; nothing was checked")
+			}
+		})
 	}
 }
