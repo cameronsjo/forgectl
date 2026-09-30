@@ -88,8 +88,8 @@ func indexWorkspaces(wss []herdr.Workspace) (labelOf, canonical map[string]strin
 	return labelOf, canonical, warnings
 }
 
-// classifyTabs classifies every tab that has a pane, in workspace then tab
-// order.
+// classifyTabs classifies every tab that has a pane with a terminal id, in
+// workspace then tab order.
 func classifyTabs(cfg Config, snap Snapshot, root string, labelOf, canonical map[string]string) ([]entry, []string) {
 	panesByTab := make(map[string][]herdr.Pane)
 	for _, p := range snap.Panes {
@@ -102,6 +102,13 @@ func classifyTabs(cfg Config, snap Snapshot, root string, labelOf, canonical map
 			panes := panesByTab[tab.TabID]
 			if len(panes) == 0 {
 				warnings = append(warnings, fmt.Sprintf("tab %q [%s] has no panes and was skipped", tab.Label, tab.TabID))
+				continue
+			}
+			// The first pane's terminal id is the tab's identity across moves.
+			// Without one, two such tabs would share an identity, so the tab is
+			// left where it is, as a tab with no panes is.
+			if panes[0].TerminalID == "" {
+				warnings = append(warnings, fmt.Sprintf("tab %q [%s] has no terminal id and was skipped", tab.Label, tab.TabID))
 				continue
 			}
 			rule, target, sp := Classify(cfg, panes)

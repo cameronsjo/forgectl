@@ -91,6 +91,10 @@ func argvText(args []string) string {
 // parseEnvelope returns the *Error in a stderr stream that is exactly one
 // herdr error object, or nil. Log lines before the JSON, a second object, or
 // an envelope without a code all return nil.
+//
+// Message is stored redacted (redact.Text, #941), not only rendered so: the
+// field is exported, and %#v or a future reader would otherwise show herdr's
+// raw text. Error() still redacts it, which is a no-op on redacted text.
 func parseEnvelope(stderr string) *Error {
 	var env struct {
 		Error *struct {
@@ -104,5 +108,5 @@ func parseEnvelope(stderr string) *Error {
 	if env.Error == nil || env.Error.Code == "" {
 		return nil
 	}
-	return &Error{Code: env.Error.Code, Message: env.Error.Message}
+	return &Error{Code: env.Error.Code, Message: redact.Text(env.Error.Message)}
 }

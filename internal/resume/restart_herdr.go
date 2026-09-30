@@ -44,7 +44,9 @@ type SystemRestartEnv struct {
 // call sits in a process group of its own, so neither Ctrl-C nor a hangup
 // reaches it. Without the bound, a wedged call would hang the run forever
 // with the session stopped; at the bound, the call's group is killed and the
-// session is reported failed, with the command to resume it by hand.
+// session is reported failed, with the command to resume it by hand; a
+// relaunch killed there may have landed, so the run first waits for the
+// session to register (forgectl#951).
 const HerdrCallTimeout = 10 * time.Second
 
 // herdrBin is the herdr binary every call runs.
@@ -61,7 +63,8 @@ func (e SystemRestartEnv) herdrBin() string {
 // terminal's group, the herdr call in flight would still take the hangup and
 // die (forgectl#877). herdr is non-interactive, so it never needs the
 // terminal's foreground group. At the bound, or when ctx is cancelled, the
-// call's whole group is killed.
+// call's whole group is killed; a call killed at the bound returns an error
+// wrapping ErrHerdrTimeout.
 func (e SystemRestartEnv) runHerdr(ctx context.Context, args ...string) (string, error) {
 	limit := e.callTimeout
 	if limit <= 0 {
@@ -69,7 +72,11 @@ func (e SystemRestartEnv) runHerdr(ctx context.Context, args ...string) (string,
 	}
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
-	return e.runner.Run(exec.WithProcessGroup(ctx), e.herdrBin(), args...)
+	out, err := e.runner.Run(exec.WithProcessGroup(ctx), e.herdrBin(), args...)
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return out, fmt.Errorf("%w after %s: %w", ErrHerdrTimeout, limit, err)
+	}
+	return out, err
 }
 
 var _ RestartEnv = SystemRestartEnv{}

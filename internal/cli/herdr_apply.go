@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -185,10 +186,14 @@ func canonicalWorkspace(wss []herdr.Workspace, label string, created map[string]
 	return "", false
 }
 
-// paneByTerminal indexes panes by terminal id.
+// paneByTerminal indexes panes by terminal id. A pane with no terminal id is
+// left out: it identifies nothing, and several of them would collide.
 func paneByTerminal(panes []herdr.Pane) map[string]herdr.Pane {
 	out := make(map[string]herdr.Pane, len(panes))
 	for _, p := range panes {
+		if p.TerminalID == "" {
+			continue
+		}
 		out[p.TerminalID] = p
 	}
 	return out
@@ -259,8 +264,9 @@ func failStage(res *applyResult, notRun []organize.Move, stage string, err error
 }
 
 func runWorkspaceOrder(ctx context.Context, c *herdr.Client, plan organize.Plan, res *applyResult) error {
-	// One step per pass, re-reading between passes as the tab order does, so a
-	// renumbering after a move cannot leave later steps acting on stale ids.
+	// One step per pass, re-reading the workspace list between passes: a
+	// workspace move renumbers workspaces and its reply is not decoded, so a
+	// later step must not act on the numbering from before it.
 	for pass := 0; ; pass++ {
 		wss, err := c.Workspaces(ctx)
 		if err != nil {
@@ -291,7 +297,8 @@ func runWorkspaceOrder(ctx context.Context, c *herdr.Client, plan organize.Plan,
 }
 
 // tabsInOrder returns the terminal ids of a workspace's tabs, in tab order. A
-// tab with no pane gets a stand-in id so the positions stay right.
+// tab with no pane, or whose first pane has no terminal id, gets a stand-in id
+// so the positions stay right, as the plan gives it one.
 func tabsInOrder(tabs []herdr.Tab, panes []herdr.Pane) (terminals []string, tabOf map[string]string) {
 	firstOfTab := map[string]string{}
 	for _, p := range panes {
@@ -302,7 +309,7 @@ func tabsInOrder(tabs []herdr.Tab, panes []herdr.Pane) (terminals []string, tabO
 	tabOf = make(map[string]string, len(tabs))
 	for _, t := range tabs {
 		term, ok := firstOfTab[t.TabID]
-		if !ok {
+		if !ok || term == "" {
 			term = organize.StandInID(t.TabID)
 		}
 		terminals = append(terminals, term)
@@ -315,7 +322,8 @@ func tabsInOrder(tabs []herdr.Tab, panes []herdr.Pane) (terminals []string, tabO
 // pass. It reads the workspace list, the workspace's tabs, and the panes once
 // per workspace: an index move keeps every tab id (measured), and its reply
 // carries the workspace's tab list in the new order, which the next pass uses
-// instead of listing again.
+// instead of listing again. A reply whose list is empty or lacks the moved tab
+// is not trusted, and the tabs are listed again.
 func runTabOrder(ctx context.Context, c *herdr.Client, plan organize.Plan, res *applyResult) error {
 	for _, lw := range plan.Layout.Workspaces {
 		stage := "ordering tabs in " + lw.Label
@@ -356,6 +364,15 @@ func runTabOrder(ctx context.Context, c *herdr.Client, plan organize.Plan, res *
 				return err
 			}
 			tabs = moved.Tabs
+			if !slices.ContainsFunc(tabs, func(t herdr.Tab) bool { return t.TabID == tabOf[s.TerminalID] }) {
+				// The reply's list is the only read between passes, so one that
+				// is empty or lacks the tab just moved cannot be trusted: an
+				// empty list would read as a settled workspace. List again.
+				if tabs, err = c.Tabs(ctx, wsID); err != nil {
+					res.Stage = stage
+					return err
+				}
+			}
 			s.TabID = tabOf[s.TerminalID]
 			s.Title = titleOf(lw, s.TerminalID)
 			res.Reordered = append(res.Reordered, s)

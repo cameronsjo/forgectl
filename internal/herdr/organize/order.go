@@ -1,6 +1,7 @@
 package organize
 
 import (
+	"fmt"
 	"slices"
 
 	"github.com/cameronsjo/forgectl/internal/herdr"
@@ -61,6 +62,17 @@ func Reorders(snap Snapshot, plan Plan) []Reorder {
 		terminalOf[a.TabID] = a.TerminalID
 		tabOf[a.TerminalID] = a.TabID
 	}
+	// A blocked tab is laid out under the label it has now, so when it sits in
+	// a non-canonical duplicate it is in that label's layout without being in
+	// the canonical workspace, and never will be. Only the layout tabs that are
+	// or will be in the workspace count toward its members, as ArrangeTarget
+	// counts them at apply time.
+	stays := make(map[string]bool)
+	for _, m := range plan.Moves {
+		if m.Blocked {
+			stays[m.TerminalID] = true
+		}
+	}
 	var out []Reorder
 	for _, lw := range plan.Layout.Workspaces {
 		id, ok := canonical[lw.Label]
@@ -83,6 +95,9 @@ func Reorders(snap Snapshot, plan Plan) []Reorder {
 		layoutTerms := make([]string, 0, len(lw.Tabs))
 		titles := make(map[string]string, len(lw.Tabs))
 		for _, t := range lw.Tabs {
+			if stays[t.TerminalID] && !slices.Contains(withPanes, t.TerminalID) {
+				continue
+			}
 			layoutTerms = append(layoutTerms, t.TerminalID)
 			titles[t.TerminalID] = t.Title
 		}
@@ -133,12 +148,21 @@ func WorkspaceOrderTarget(wss []herdr.Workspace, layout Layout) (current, target
 // WorkspaceOrderChange compares the workspaces' current left-to-right order
 // with the order plan.Layout wants, as labels, using [WorkspaceOrderTarget]. A
 // workspace the plan creates is not counted: its position is only known once
-// it exists. A repeated label appears once per workspace that carries it.
+// it exists. A repeated label appears once per workspace that carries it,
+// followed by that workspace's current number ("forge #3"), so the lists say
+// which of them moves.
 func WorkspaceOrderChange(snap Snapshot, plan Plan) (from, to []string, changed bool) {
 	current, target := WorkspaceOrderTarget(snap.Workspaces, plan.Layout)
+	uses := make(map[string]int, len(snap.Workspaces))
+	for _, w := range snap.Workspaces {
+		uses[w.Label]++
+	}
 	labelOf := make(map[string]string, len(snap.Workspaces))
 	for _, w := range snap.Workspaces {
 		labelOf[w.WorkspaceID] = w.Label
+		if uses[w.Label] > 1 {
+			labelOf[w.WorkspaceID] = fmt.Sprintf("%s #%d", w.Label, w.Number)
+		}
 	}
 	for _, id := range current {
 		from = append(from, labelOf[id])
