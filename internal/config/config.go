@@ -101,6 +101,12 @@ const logKeepDays = 7
 //	[theme.colors]
 //	accent = "#dbbb6f"                              # scalar: both modes
 //	danger = { dark = "#e6a8a2", light = "#8a2418" } # table: per mode
+//	[herdr.organize]     # forgectl herdr organize — group herdr tabs into workspaces
+//	default = "misc"                 # workspace for tabs no rule matches
+//	workspace_order = ["forge", "misc"]
+//	[[herdr.organize.rule]]
+//	glob      = "*/Projects/forge/* :: *"  # matched against "<cwd> :: <title>"
+//	workspace = "forge"
 type Config struct {
 	NoIcons   bool            `toml:"no_icons"`
 	LogLevel  string          `toml:"log_level"`
@@ -121,7 +127,11 @@ type Config struct {
 	Pr        PrConfig        `toml:"pr"`
 	Github    GithubConfig    `toml:"github"`
 	Theme     ThemeConfig     `toml:"theme"`
+	Herdr     HerdrConfig     `toml:"herdr"`
 	launchSet bool
+	// herdrOrganizeSet records that [herdr.organize] is present in the file,
+	// even as an empty table (what `forgectl init` writes).
+	herdrOrganizeSet bool
 	// decodeDegraded records that the config file existed but failed to
 	// decode, so this Config may be missing sections the operator wrote.
 	// Host-sensitive consumers (projects, review) must refuse loudly rather
@@ -159,6 +169,13 @@ func (c Config) DecodeError() error {
 // migration: even an empty table shadows the compatibility source.
 func (c Config) HasLaunchSection() bool {
 	return c.launchSet || !c.Launch.IsZero()
+}
+
+// HasHerdrOrganizeSection reports whether the file defines [herdr.organize],
+// even empty. `forgectl init` writes an empty one, and `herdr organize` words
+// its no-rules guidance differently once the section exists.
+func (c Config) HasHerdrOrganizeSection() bool {
+	return c.herdrOrganizeSet || !c.Herdr.Organize.IsZero()
 }
 
 // LaunchConfig is the [launch] section: base defaults plus directory-keyed
@@ -1153,6 +1170,7 @@ func DecodeStrict(data []byte) (Config, error) {
 	}
 	meta, err := toml.Decode(string(data), &cfg)
 	cfg.launchSet = meta.IsDefined("launch")
+	cfg.herdrOrganizeSet = meta.IsDefined("herdr", "organize")
 	return cfg, scrubTOMLError(err)
 }
 
@@ -1191,6 +1209,9 @@ func ValidatePath(path string) error {
 		return err
 	}
 	if err := cfg.Proxy.Validate(); err != nil {
+		return err
+	}
+	if err := cfg.Herdr.Organize.Validate(); err != nil {
 		return err
 	}
 	return cfg.Theme.Validate()
