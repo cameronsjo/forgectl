@@ -93,6 +93,7 @@ A path under a root, whether a reader URL, a `docs read` or `docs search` target
 - **A missing file is a miss, not an escape.** So is a path that continues through a regular file (`guide.md/x`), or one that names a regular file with a trailing slash (`guide.md/`).
 - **A chain of more than 40 symlinks is refused.**
 - **The reader opens what it checked.** `docs serve` opens a doc through the root and serves it only if the file it opened is the one resolution approved, so a symlink swapped in after the check cannot redirect the read. `docs read` does not have this yet: it hands mdroll the resolved path, which mdroll opens later by itself (#593).
+- **Hard links are not refused.** A hard link inside a root to a file outside it is served like any other doc in the root, by `docs serve`, `docs read` and `docs search`. A hard link is the file itself, with nothing on it that points outside, so no resolution rule can tell it from a file created in the root, and refusing every file with more than one link would also refuse legitimately hard-linked trees, such as some package-manager and backup layouts. It crosses no boundary either: making one needs write access inside the root and the same filesystem, and the reader serves only your own local files to you, so it can show you only a file you can already read.
 
 ## Checking links
 
