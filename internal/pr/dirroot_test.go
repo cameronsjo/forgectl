@@ -100,7 +100,8 @@ func TestOpenDirRoot_IsTheOnlyPathRootOpener(t *testing.T) {
 // Mutations that turn it red: revert openFindingsChild or findingsChildSize
 // to store.OpenRoot(name); or add a non-test file with `os := store`
 // shadowing the import and calling os.OpenRoot(name) (the parse resolves
-// objects, so the shadowing local is not mistaken for the package).
+// objects, so the shadowing local is flagged here, as the Root.OpenRoot it
+// is, rather than by the path-opener test as os.OpenRoot).
 func TestOpenChildDirRoot_IsTheOnlyChildRootOpener(t *testing.T) {
 	fset := token.NewFileSet()
 	files, err := filepath.Glob("*.go")
@@ -159,8 +160,9 @@ var pathRootOpeners = map[string]bool{"OpenRoot": true, "OpenInRoot": true}
 // a local that shadows its name. The parse runs with object resolution, which
 // binds an identifier declared in a function or block scope to its declaration
 // (id.Obj != nil) and leaves a file-scope import unbound (id.Obj == nil).
-// Without it, `os := store; os.OpenRoot(name)` would be read as the package
-// and skip the Root.OpenRoot check.
+// Without it, `os := store; os.OpenRoot(name)` would still be caught, but by
+// TestOpenDirRoot_IsTheOnlyPathRootOpener as a package os.OpenRoot call, the
+// wrong guard; resolution attributes it to the Root.OpenRoot check.
 func isPackageOS(id *ast.Ident, osNames map[string]bool) bool {
 	return osNames[id.Name] && id.Obj == nil //nolint:staticcheck // SA1019: ast.Object is the only scope signal without go/types
 }

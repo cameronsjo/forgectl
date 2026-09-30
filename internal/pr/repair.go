@@ -359,7 +359,7 @@ func (c *Client) repairUndecodableLocked(ctx context.Context, opts RepairOpts, m
 		if !c.isTTY() {
 			return item, fmt.Errorf("refusing to set %s aside without confirmation: this build cannot read the record, "+
 				"so it cannot say what the record described, and there is no terminal to confirm on — pass --yes to proceed",
-				member.displayPath)
+				termsafe.QuoteText(member.path))
 		}
 		approved, err := c.confirmRemoval(setAsidePrompt(member, decodeErr, refKnown))
 		if err != nil {
@@ -477,12 +477,15 @@ func refFromRawRecord(data []byte) (Ref, bool) {
 // refKnown is what changes the prompt. When false, the one guard that reads the
 // record could not run at all, and the human approving the move deserves that
 // sentence rather than a prompt that reads identically to the checked case.
+//
+// The record path is quoted whole (QuoteText), not through the capped
+// displayPath: a path the operator approves acting on is never cut.
 func setAsidePrompt(member breadcrumbMember, decodeErr error, refKnown bool) string {
 	prompt := fmt.Sprintf("Set aside a session record this build cannot read?\n"+
 		"  record: %s\n"+
 		"  reason: %s\n"+
 		"  the file is renamed, not deleted — but whether it named a clean room cannot be checked",
-		member.displayPath, termsafe.SafeLine(decodeErr.Error()))
+		termsafe.QuoteText(member.path), termsafe.SafeLine(decodeErr.Error()))
 	if !refKnown {
 		prompt += "\n  no ref could be read, so whether its review window is live was not checked"
 	}
@@ -656,7 +659,7 @@ func (c *Client) repairRollbackLocked(ctx context.Context, opts RepairOpts, memb
 		item.Outcome = repairOutcomeRefused
 		return item, fmt.Errorf("refusing to roll back %s: its recorded workspace %s is neither a live clean room "+
 			"nor cleanly absent, so teardown cannot act on it — inspect that path by hand before settling this record",
-			ref.String(), termsafe.QuotePath(bc.Workspace))
+			ref.String(), termsafe.QuoteText(bc.Workspace))
 	}
 	item.ToPhase = "removed"
 	// The preview comes BEFORE the confirmation gate: --dry-run mutates nothing,
@@ -671,7 +674,7 @@ func (c *Client) repairRollbackLocked(ctx context.Context, opts RepairOpts, memb
 			item.Outcome = repairOutcomeRefused
 			return item, fmt.Errorf("refusing to roll back %s without confirmation: this removes its clean room %s "+
 				"and its record, and there is no terminal to confirm on — pass --yes to proceed",
-				ref.String(), termsafe.QuotePath(bc.Workspace))
+				ref.String(), termsafe.QuoteText(bc.Workspace))
 		}
 		approved, err := c.confirmRemoval(rollbackPrompt(ref, bc))
 		if err != nil {
@@ -715,10 +718,13 @@ func (c *Client) repairRollbackLocked(ctx context.Context, opts RepairOpts, memb
 // absolute path to validate, so it can carry control or bidi bytes — and this
 // is the single surface where a human is asked to approve a deletion, which is
 // the exact place those bytes must not be able to hide what is being removed.
+// For the same reason the workspace is quoted whole (QuoteText), never through
+// the capped QuotePath: a path the operator approves deleting cannot have its
+// middle cut out.
 func rollbackPrompt(ref Ref, bc Breadcrumb) string {
 	workspace := "(no clean room was ever created)"
 	if bc.Workspace != "" {
-		workspace = termsafe.QuotePath(bc.Workspace)
+		workspace = termsafe.QuoteText(bc.Workspace)
 	}
 	return fmt.Sprintf("Roll back the unfinished review of %s?\n  clean room: %s\n  record:     %s",
 		termsafe.SafeLine(ref.String()), workspace, termsafe.SafeLine(bc.Ref))

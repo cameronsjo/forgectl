@@ -426,8 +426,9 @@ func TestErrorText_LogsPanicTypeNotValue(t *testing.T) {
 }
 
 // TestError_CapsFilesystemPaths is #821: Error escaped each path but echoed
-// it at any length. A path over PathEchoMaxRunes is cut, with the ellipsis
-// outside the quote; one exactly at the budget is shown whole.
+// it at any length. A path over PathEchoMaxRunes is cut in the middle, with
+// the ellipsis between the quoted head and tail (#832); one exactly at the
+// budget is shown whole.
 func TestError_CapsFilesystemPaths(t *testing.T) {
 	long := "/" + strings.Repeat("a", PathEchoMaxRunes) + "TAIL"
 	atBudget := "/" + strings.Repeat("b", PathEchoMaxRunes-1)
@@ -439,16 +440,72 @@ func TestError_CapsFilesystemPaths(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := Error(err).Error()
-			if strings.Contains(got, "TAIL") {
+			if strings.Count(got, "a") > PathEchoMaxRunes {
 				t.Fatalf("Error echoed a %d-rune path uncapped: %d bytes", len(long), len(got))
 			}
-			if !strings.Contains(got, `"`+argEchoEllipsis) {
-				t.Errorf("Error(%s) = %q, want the cut marked by an ellipsis after the quote", name, got)
+			if !strings.Contains(got, `"`+argEchoEllipsis+`"`) || !strings.Contains(got, `TAIL"`) {
+				t.Errorf("Error(%s) = %q, want a middle cut marked by an ellipsis between quotes, the tail kept", name, got)
 			}
 		})
 	}
 	got := Error(&os.PathError{Op: "open", Path: atBudget, Err: sentinel}).Error()
 	if want := "open " + QuotePath(atBudget) + ": denied"; got != want {
 		t.Errorf("a path at the budget was altered: got %d bytes, want %d", len(got), len(want))
+	}
+}
+
+// TestQuotePath_CapsKeepingTheFinalElement is #832 items 1 and 2: QuotePath
+// echoed a path at any length, and the cap it lacked kept only the head, so a
+// long path lost the filename that identifies it. QuotePath now cuts in the
+// middle and keeps the final element whole when it fits.
+//
+// Mutations: make QuotePath return QuoteText(path) and the "deep" row comes
+// back uncapped; make QuotePathMax keep only the head (tail = 0) and every
+// cut row loses its tail; drop the final-element branch and the "deep" row
+// keeps half a budget of directory instead of exactly the filename.
+func TestQuotePath_CapsKeepingTheFinalElement(t *testing.T) {
+	dir := "/" + strings.Repeat("d", PathEchoMaxRunes)
+	tests := []struct {
+		name, path string
+		max        int
+		want       string
+	}{
+		{"short path unchanged", "/tmp/a b", 0, `"/tmp/a b"`},
+		{"at the budget unchanged", "/abcd", 5, `"/abcd"`},
+		{"final element kept whole", "/abcdefghij/name.go", 12, `"/abc"…"/name.go"`},
+		{"long final element keeps half the budget", "/" + strings.Repeat("x", 20) + "END", 8, `"/xxx"…"xEND"`},
+		{"no separator keeps half the budget", strings.Repeat("y", 20) + "END", 8, `"yyyy"…"yEND"`},
+		{"one-rune budget keeps the head only", "/abc", 1, `"/"…`},
+		{"trailing separator keeps the directory name", "/abcdefghij/name/", 12, `"/abcde"…"/name/"`},
+		{"only separators keeps half the budget", strings.Repeat("/", 20), 8, `"////"…"////"`},
+		{"escapes are never split", "/\u202e\u202e\u202e/f", 4, `"/\u202e"…"/f"`},
+		{"invalid UTF-8 counts per byte", "/\xff\xfe\xfd\xfc/f", 4, `"/\xff"…"/f"`},
+		{"deep", dir + "/name.go", 0, QuoteText(dir[:PathEchoMaxRunes-len("/name.go")]) + "…" + `"/name.go"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got string
+			if tt.max == 0 {
+				got = QuotePath(tt.path)
+			} else {
+				got = QuotePathMax(tt.path, tt.max)
+			}
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestQuotePathIfUnsafe_KeepsALongOrdinaryPathWhole pins the uncapped form
+// (#832): QuotePathIfUnsafe's callers print machine-parseable fields, so a
+// long but ordinary path has to come back byte-identical.
+//
+// Mutation: quote through QuotePath in QuotePathIfUnsafe and the long path
+// comes back cut and quoted.
+func TestQuotePathIfUnsafe_KeepsALongOrdinaryPathWhole(t *testing.T) {
+	long := "/" + strings.Repeat("p", 2*PathEchoMaxRunes) + "/name.go"
+	if got := QuotePathIfUnsafe(long); got != long {
+		t.Errorf("QuotePathIfUnsafe altered a %d-rune ordinary path: %d bytes back", len(long), len(got))
 	}
 }

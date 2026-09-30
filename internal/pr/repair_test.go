@@ -35,6 +35,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // repairRunner fakes tmux list-windows plus the session identity probes an
@@ -540,6 +541,28 @@ func TestRollbackPrompt_ClampsControlBytes(t *testing.T) {
 	got := rollbackPrompt(Ref{Owner: "o", Repo: "r", Number: 1}, bc)
 	if strings.Contains(got, "\x1b") {
 		t.Errorf("prompt carries a raw escape byte: %q", got)
+	}
+}
+
+// TestApprovalPromptsShowPathsWhole pins the #838 review nit: QuotePath caps
+// a long path with a middle cut, and a path the operator is asked to approve
+// deleting or moving must never have its middle cut out. Each prompt must carry
+// the whole quoted path.
+//
+// Mutation: switch any of rollbackPrompt, setAsidePrompt, or prunePrompt back
+// to termsafe.QuotePath (or member.displayPath) and its row fails.
+func TestApprovalPromptsShowPathsWhole(t *testing.T) {
+	long := "/" + strings.Repeat("w", 2*termsafe.PathEchoMaxRunes) + "/forgectl-workflow-x"
+	whole := termsafe.QuoteText(long)
+	for name, got := range map[string]string{
+		"rollback": rollbackPrompt(Ref{Owner: "o", Repo: "r", Number: 1}, Breadcrumb{Workspace: long, Ref: "o/r#1"}),
+		"set-aside": setAsidePrompt(breadcrumbMember{path: long, displayPath: termsafe.QuotePath(long)},
+			errors.New("bad"), true),
+		"prune": prunePrompt(1, 1, long),
+	} {
+		if !strings.Contains(got, whole) {
+			t.Errorf("%s prompt cut the %d-rune path it asks approval for (%d bytes shown)", name, len(long), len(got))
+		}
 	}
 }
 

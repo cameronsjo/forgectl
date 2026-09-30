@@ -11,6 +11,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/redact"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Environment variables herdr exports into every pane it hosts (measured).
@@ -92,6 +93,11 @@ func checkSession(lookupEnv func(string) (string, bool), stat func(string) (fs.F
 	return nil
 }
 
+// forkProbeStderrMaxRunes caps the herdr stderr CheckFork echoes when the
+// probe fails outright (#831). herdr's diagnostic is its first line; a chatty
+// or hostile child must not be able to flood the terminal through it.
+const forkProbeStderrMaxRunes = 300
+
 // CheckFork reports whether the herdr CLI has `tab move`, which only the
 // cameronsjo/herdr fork provides. It spawns herdr once. Run [CheckSession]
 // first: this does not check that a session exists.
@@ -110,7 +116,7 @@ func CheckFork(ctx context.Context, r exec.Runner) error {
 			return fmt.Errorf("cannot run %s: %w", Binary, err)
 		}
 		if ce.ExitCode != exitUsage {
-			return fmt.Errorf("`%s tab move --help` failed with exit %d: %s", Binary, ce.ExitCode, printable(redact.Text(strings.TrimSpace(ce.Stderr))))
+			return fmt.Errorf("`%s tab move --help` failed with exit %d: %s", Binary, ce.ExitCode, termsafe.SafeLineMax(redact.Text(strings.TrimSpace(ce.Stderr)), forkProbeStderrMaxRunes))
 		}
 		text, code = ce.Stderr+"\n"+ce.Output, ce.ExitCode
 	}
