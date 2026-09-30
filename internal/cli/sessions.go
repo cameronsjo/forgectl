@@ -287,9 +287,9 @@ func writeSearchHitsJSON(out io.Writer, hits []sessions.SearchHit) error {
 }
 
 // printSearchHits owns the terminal boundary for concordance search results.
-// Indexed content is untrusted at print time, so every field is quoted and
-// capped (safeLabel, safeTitle, safeSnippet; safePath escapes only, #894)
-// before it reaches the operator's shell.
+// Indexed content is untrusted at print time, so every field is escaped and
+// capped (safeLabel, safeTitle, safeSnippet, safePath) before it reaches the
+// operator's shell.
 func printSearchHits(out io.Writer, hits []sessions.SearchHit) error {
 	if len(hits) == 0 {
 		_, err := fmt.Fprintln(out, "no runbooks matched")
@@ -489,7 +489,7 @@ func printLastSession(cmd *cobra.Command, repo string, s *sessions.SessionSummar
 		})
 	}
 	if s == nil {
-		_, _ = fmt.Fprintf(out, "no sessions recorded for %q\n", safeLabel(repo))
+		_, _ = fmt.Fprintf(out, "no sessions recorded for \"%s\"\n", safeLabel(repo))
 		return nil
 	}
 	committed := "no commits"
@@ -583,11 +583,10 @@ func safeLabel(s string) string {
 	return termsafe.SafeLineMax(s, sessionsLabelMaxRunes)
 }
 
-// safePath renders a runbook path for `sessions` text output. It is escaped
-// but NOT capped yet: capping a path so it still points somewhere useful is
-// forgectl#894. It exists so every text field in this file goes through a
-// named helper, and TestSessionsText_EveryFieldCapped allowlists only the
-// Path fields for that reason.
+// safePath renders a runbook path for `sessions` text output: quoted, escaped,
+// and capped at termsafe.PathEchoMaxRunes input runes (forgectl#894). A longer
+// path is cut in the middle so its file name survives, the same rule every
+// other path echo in forgectl follows. --json carries the path whole.
 func safePath(s string) string {
-	return safeTerm(s)
+	return termsafe.QuotePathMax(s, termsafe.PathEchoMaxRunes)
 }
