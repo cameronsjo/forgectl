@@ -167,8 +167,9 @@ func TestNativeMigrationFS_LoadReadOnly_MalformedIsAnError(t *testing.T) {
 }
 
 // TestLoadLegacyLaunch_QuotesPath pins #761: the legacy claunch.conf path is
-// rendered through QuotePath on both the absent and the malformed arm, so a
-// directory name carrying a terminal control cannot reach the terminal raw.
+// rendered through QuotePath on the absent, malformed, and unreadable arms
+// (EISDIR, ELOOP: an *os.PathError that Scrub passes through), so a directory
+// name carrying a terminal control cannot reach the terminal raw.
 func TestLoadLegacyLaunch_QuotesPath(t *testing.T) {
 	xdg := filepath.Join(t.TempDir(), "x\x1b[2Jy")
 	t.Setenv("XDG_CONFIG_HOME", xdg)
@@ -194,5 +195,32 @@ func TestLoadLegacyLaunch_QuotesPath(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "\x1b") || !strings.Contains(err.Error(), `x\x1b[2Jy`) {
 		t.Errorf("malformed: error = %q, want the path quoted", err)
+	}
+
+	conf := filepath.Join(dir, "claunch.conf")
+	for _, tc := range []struct {
+		name  string
+		plant func() error
+	}{
+		{"EISDIR", func() error { return os.Mkdir(conf, 0o700) }},
+		{"ELOOP", func() error { return os.Symlink(conf, conf) }},
+	} {
+		if err := os.RemoveAll(conf); err != nil {
+			t.Fatal(err)
+		}
+		if err := tc.plant(); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = LoadLegacyLaunch()
+		if err == nil {
+			t.Fatalf("%s: want a read error", tc.name)
+		}
+		if strings.Contains(err.Error(), "\x1b") || !strings.Contains(err.Error(), `x\x1b[2Jy`) {
+			t.Errorf("%s: error = %q, want every path quoted", tc.name, err)
+		}
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) {
+			t.Errorf("%s: error = %v, lost the *os.PathError", tc.name, err)
+		}
 	}
 }

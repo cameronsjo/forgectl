@@ -1638,9 +1638,9 @@ var (
 // LegacyLaunchPath(). The error distinguishes the three outcomes callers care
 // about: nil on success; ErrNoLegacyLaunch (wrapped with the path) when the file
 // is simply absent; and a wrapped path-resolution or decode error otherwise.
-// Callers decide leniency — resolveLaunchConfig ignores any error and falls
-// through to config.toml; runClaunchImport surfaces absent vs unreadable
-// distinctly.
+// Its one caller, resolveLaunchConfig (cli/launch.go), is lenient: an absent
+// file is silent, and any other error is logged as a warning before it falls
+// through to config.toml.
 func LoadLegacyLaunch() (LaunchConfig, string, error) {
 	path, err := LegacyLaunchPath()
 	if err != nil {
@@ -1651,7 +1651,15 @@ func LoadLegacyLaunch() (LaunchConfig, string, error) {
 		if os.IsNotExist(err) {
 			return LaunchConfig{}, path, fmt.Errorf("%w at %s", ErrNoLegacyLaunch, termsafe.QuotePath(path))
 		}
-		return LaunchConfig{}, path, fmt.Errorf("read legacy claunch.conf at %s: %w", termsafe.QuotePath(path), tomlerr.Scrub(err))
+		// A file that exists but cannot be read (EISDIR, EACCES, ELOOP) is an
+		// *os.PathError, which Scrub passes through with its path raw;
+		// termsafe.Error rebuilds it with the path quoted (#761).
+		cause := tomlerr.Scrub(err)
+		var pathErr *os.PathError
+		if errors.As(err, &pathErr) {
+			cause = termsafe.Error(err)
+		}
+		return LaunchConfig{}, path, fmt.Errorf("read legacy claunch.conf at %s: %w", termsafe.QuotePath(path), cause)
 	}
 	return stripLegacyUsageOptIn(lc), path, nil
 }
