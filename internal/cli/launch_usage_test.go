@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -306,5 +308,63 @@ func TestLaunchExec_DisabledRecordsNothingAndStillExecs(t *testing.T) {
 	}
 	if probe.execs != 1 {
 		t.Fatalf("execed %d times, want exactly 1", probe.execs)
+	}
+}
+
+// pinLaunchStdoutTerminal answers the TTY probe `forgectl launch` and
+// `forgectl resume` share, and captures the argv each hands to the exec seam.
+// The subprocess harness always pipes stdout, so without this seam no test
+// would notice the probe's answer being ignored or inverted.
+func pinLaunchStdoutTerminal(t *testing.T, terminal bool) *[]string {
+	t.Helper()
+	var got []string
+	prevTTY, prevExec := launchStdoutIsTerminal, execHarness
+	launchStdoutIsTerminal = func() bool { return terminal }
+	execHarness = func(_ string, args []string, _ []string) error {
+		got = append([]string(nil), args...)
+		return nil
+	}
+	t.Cleanup(func() { launchStdoutIsTerminal, execHarness = prevTTY, prevExec })
+	return &got
+}
+
+// TestLaunchExec_StdoutTerminalDecidesAllowDanger pins the wiring from the TTY
+// probe to BuildInvocation for every Claude posture that injects the profile:
+// on a terminal allow_danger (the built-in default, true) reaches claude as
+// --allow-dangerously-skip-permissions, and off one it is withheld while the
+// rest of the posture stays (forgectl#812, #899).
+//
+// Mutations that turn it red: pass a constant false (or true) as
+// InvocationRequest.StdoutTerminal in launchExec instead of the probe's
+// answer, or drop the `!stdoutTerminal` clear in selectPosture.
+func TestLaunchExec_StdoutTerminalDecidesAllowDanger(t *testing.T) {
+	const danger = "--allow-dangerously-skip-permissions"
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"builder", []string{"task"}},
+		{"bare session", nil},
+		{"agents", []string{"agents", "list"}},
+	} {
+		for _, terminal := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/terminal=%t", tc.name, terminal), func(t *testing.T) {
+				got := pinLaunchStdoutTerminal(t, terminal)
+				if err := launchExec(nil, usageConfig(t, "claude", false), tc.args); err != nil {
+					t.Fatalf("launchExec: %v", err)
+				}
+				if len(*got) == 0 {
+					t.Fatal("launchExec never reached the exec seam")
+				}
+				if has := slices.Contains(*got, danger); has != terminal {
+					t.Errorf("argv %q: contains %s = %t, want %t", *got, danger, has, terminal)
+				}
+				for _, keep := range []string{"--permission-mode", "--model"} {
+					if !slices.Contains(*got, keep) {
+						t.Errorf("argv %q lost %s; only the danger flag may be withheld", *got, keep)
+					}
+				}
+			})
+		}
 	}
 }
