@@ -23,23 +23,24 @@ import (
 
 // errStatus renders a footer error. Every error surfaced here can carry text
 // forgectl never composed — a tmux session or window name, a sesh candidate, an
-// exec diagnostic quoting one — so it goes through termsafe.SafeLine before any
-// styling. Escape sequences in a name would otherwise repaint the TUI's chrome.
+// exec diagnostic quoting one — so it goes through termsafe.SafeLineMax
+// (statusMaxRunes) before any styling. Escape sequences in a name would
+// otherwise repaint the TUI's chrome.
 func errStatus(prefix string, err error, s theme.Styles) string {
-	return s.Danger.Render(termsafe.SafeLine("✗ " + prefix + err.Error()))
+	return s.Danger.Render(termsafe.SafeLineMax("✗ "+prefix+err.Error(), statusMaxRunes))
 }
 
 // unreadableStatus is the footer note for a listing that could not read some
 // of tmux's rows (forgectl#815), or "" when it read them all — so a screen
 // with a silently missing session or window does not read as a smaller
-// server. The note is forgectl's own text, but it goes through SafeLine like
+// server. The note is forgectl's own text, but it goes through SafeLineMax like
 // every other footer.
 func unreadableStatus(u tmux.UnreadableRows, s theme.Styles) string {
 	note := u.Note()
 	if note == "" {
 		return ""
 	}
-	return s.Warn.Render(termsafe.SafeLine("! " + note))
+	return s.Warn.Render(termsafe.SafeLineMax("! "+note, statusMaxRunes))
 }
 
 // noteUnreadable adds unreadableStatus to the footer. It appends rather than
@@ -133,11 +134,15 @@ type HubEntry struct {
 // mirrors internal/cli's parentTakesArg predicate: true when Use carries a
 // placeholder ("pr <ref>") the hub cannot fill in, in which case selecting
 // the leaf shows the invocation rather than running it.
+//
+// A leaf with Leaves is a nested group (pr findings): selecting it opens
+// those leaves as the next drill-down level rather than running it (#916).
 type HubLeaf struct {
 	Name      string
 	Short     string
 	Use       string
 	NeedsArgs bool
+	Leaves    []HubLeaf
 }
 
 // RunOptions configures Run. Hub is the full ordered row set buildHub
@@ -219,10 +224,13 @@ type model struct {
 	// hub is the full ordered row set from RunOptions.Hub — hubMode's list.
 	hub []HubEntry
 	// leaves is the drill-down list currently shown in leavesMode, and
-	// leavesParent is the enclosing HubEntry's Name — leafArgv/usageLine need
-	// it to build the right Argv.
-	leaves       []HubLeaf
-	leavesParent string
+	// leavesPath is the argv that reaches it: the enclosing HubEntry's Name,
+	// then each nested group opened below it (pr, findings) — leafArgv and
+	// usageLine need it to build the right Argv. leavesUp holds the list each
+	// opened group was chosen from, so esc climbs one level at a time.
+	leaves     []HubLeaf
+	leavesPath []string
+	leavesUp   [][]HubLeaf
 
 	// header is the hub's status line; argSources feeds picker candidates.
 	header     HubHeader
@@ -465,7 +473,15 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.mode {
 		case hubMode:
 			return m, tea.Quit
-		case menuMode, leavesMode:
+		case leavesMode:
+			if len(m.leavesUp) > 0 {
+				// Inside a nested group: back to the list it was opened from.
+				m.leaveGroup()
+				return m, nil
+			}
+			m.toHub()
+			return m, nil
+		case menuMode:
 			// The hub is the quit level: a bare invoke's tmux jumper and any
 			// module's leaf list both back out to the hub, not straight to
 			// the shell (Architecture: "q/esc in hubMode quits; in menuMode
@@ -581,14 +597,18 @@ func (m model) activate() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		leaf := it.leaf
+		if len(leaf.Leaves) > 0 {
+			m.enterGroup(leaf)
+			return m, nil
+		}
 		if leaf.NeedsArgs {
-			if m.openPicker(leafArgv(m.leavesParent, leaf), leaf.Use, nil) {
+			if m.openPicker(leafArgv(m.leavesPath, leaf), leaf.Use, nil) {
 				return m, nil
 			}
-			m.action = Action{Kind: ActionShowInvocation, Argv: strings.Fields(usageLine(m.leavesParent, leaf))}
+			m.action = Action{Kind: ActionShowInvocation, Argv: strings.Fields(usageLine(m.leavesPath, leaf))}
 			return m, tea.Quit
 		}
-		m.action = Action{Kind: ActionRunVerb, Argv: leafArgv(m.leavesParent, leaf)}
+		m.action = Action{Kind: ActionRunVerb, Argv: leafArgv(m.leavesPath, leaf)}
 		return m, tea.Quit
 	case menuMode:
 		// Same filter-aware SelectedItem() as hubMode above (#496).
@@ -684,36 +704,64 @@ func (m *model) toHub() {
 
 // enterLeaves opens entry's drill-down list.
 func (m *model) enterLeaves(entry HubEntry) {
+	m.leavesPath = []string{entry.Name}
+	m.leavesUp = nil
+	m.showLeaves(entry.Leaves)
+}
+
+// enterGroup opens a nested group's leaves one level below the current list.
+func (m *model) enterGroup(group HubLeaf) {
+	m.leavesUp = append(m.leavesUp[:len(m.leavesUp):len(m.leavesUp)], m.leaves)
+	m.leavesPath = append(append([]string(nil), m.leavesPath...), group.Name)
+	m.showLeaves(group.Leaves)
+}
+
+// leaveGroup returns from a nested group to the list it was opened from,
+// with the cursor back on the group's row.
+func (m *model) leaveGroup() {
+	last := len(m.leavesUp) - 1
+	parent := m.leavesUp[last]
+	group := m.leavesPath[len(m.leavesPath)-1]
+	m.leavesUp = m.leavesUp[:last]
+	m.leavesPath = m.leavesPath[:len(m.leavesPath)-1]
+	m.showLeaves(parent)
+	for i, l := range parent {
+		if l.Name == group {
+			m.l.Select(i)
+			break
+		}
+	}
+}
+
+// showLeaves shows leaves as the drill-down list at m.leavesPath.
+func (m *model) showLeaves(leaves []HubLeaf) {
 	m.status = ""
-	m.title = entry.Name
-	m.leaves = entry.Leaves
-	m.leavesParent = entry.Name
-	m.setList(hubLeafItems(entry.Leaves))
+	m.title = strings.Join(m.leavesPath, " ")
+	m.leaves = leaves
+	m.setList(hubLeafItems(leaves))
 	m.mode = leavesMode
 	m.applySize()
 }
 
-// leafArgv builds the argv to run leaf, given the HubEntry.Name it was
-// listed under: the module name and the leaf name are the two tokens.
-func leafArgv(entryName string, leaf HubLeaf) []string {
-	if leaf.Name == entryName {
-		// The synthetic bare-module leaf a NeedsArgs module contributes
-		// (e.g. pr's own "pr <ref>") — running it means invoking the module
-		// alone, not module+module.
-		return []string{entryName}
+// leafArgv builds the argv to run leaf, given the path it was listed under
+// (the module name, then any nested groups): the path, then the leaf name.
+func leafArgv(path []string, leaf HubLeaf) []string {
+	argv := append([]string(nil), path...)
+	if len(path) > 0 && leaf.Name == path[len(path)-1] {
+		// The synthetic bare-command leaf a NeedsArgs module or group
+		// contributes (e.g. pr's own "pr <ref>") — running it means invoking
+		// the path alone, not module+module.
+		return argv
 	}
-	return []string{entryName, leaf.Name}
+	return append(argv, leaf.Name)
 }
 
 // usageLine returns the placeholder-carrying invocation text for a NeedsArgs
 // leaf — "pr <ref>", or "projects clone <query>" for a subcommand whose own
-// Use line (cobra convention) omits the parent's name.
-func usageLine(entryName string, leaf HubLeaf) string {
-	mod := entryName
-	if leaf.Use == mod || strings.HasPrefix(leaf.Use, mod+" ") {
-		return leaf.Use
-	}
-	return mod + " " + leaf.Use
+// Use line (cobra convention) begins with its own name, not its parents'.
+func usageLine(path []string, leaf HubLeaf) string {
+	argv := leafArgv(path, leaf)
+	return strings.Join(append(argv[:len(argv)-1], leaf.Use), " ")
 }
 
 func (m *model) enterPick() {
@@ -860,7 +908,7 @@ func (m *model) setStatus(err error, ok string) {
 		m.status = errStatus("", err, m.styles)
 		return
 	}
-	m.status = m.styles.OK.Render(termsafe.SafeLine("✓ " + ok))
+	m.status = m.styles.OK.Render(termsafe.SafeLineMax("✓ "+ok, statusMaxRunes))
 }
 
 func (m model) formWidth() int {
@@ -938,10 +986,13 @@ func (m model) selectedDollar() string {
 			argv = []string{e.Name, "<subcommand>"}
 		}
 	case leafItem:
-		if it.leaf.NeedsArgs {
-			argv = strings.Fields(usageLine(m.leavesParent, it.leaf))
-		} else {
-			argv, exact = leafArgv(m.leavesParent, it.leaf), true
+		switch {
+		case len(it.leaf.Leaves) > 0:
+			argv = append(leafArgv(m.leavesPath, it.leaf), "<subcommand>")
+		case it.leaf.NeedsArgs:
+			argv = strings.Fields(usageLine(m.leavesPath, it.leaf))
+		default:
+			argv, exact = leafArgv(m.leavesPath, it.leaf), true
 		}
 	default:
 		return ""

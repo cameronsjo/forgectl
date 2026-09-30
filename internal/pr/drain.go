@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
-	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // DefaultDrainMaxAttempts is the number of failed launch attempts a queued
@@ -128,7 +127,7 @@ func (c *Client) Drain(ctx context.Context, cfg config.Config, opts DrainOpts) (
 	// means N clones and N teardowns before N records park in needs-repair.
 	if err := c.CheckDispatchCapability(ctx); err != nil {
 		slog.Error("Refusing a drain pass: this host cannot dispatch a review window.", "error", err)
-		return DrainReport{Items: []DrainItem{}, Refusal: termsafe.SafeLine(err.Error())}, nil
+		return DrainReport{Items: []DrainItem{}, Refusal: recordText(err.Error())}, nil
 	}
 	report, claimed := c.claimQueuedPass(ctx, cfg, opts)
 	if report.Refusal != "" {
@@ -281,7 +280,7 @@ func (c *Client) drainItem(ctx context.Context, cfg config.Config, s SessionSumm
 	bc, _, err := loadBreadcrumbRecord(path, c.sessionsDir)
 	if err != nil {
 		item.Outcome = drainOutcomeClaimFailure
-		item.Error = termsafe.SafeLine(err.Error())
+		item.Error = recordText(err.Error())
 		return item
 	}
 
@@ -306,7 +305,7 @@ func (c *Client) drainItem(ctx context.Context, cfg config.Config, s SessionSumm
 		return item
 	}
 
-	item.Error = termsafe.SafeLine(err.Error())
+	item.Error = recordText(err.Error())
 	outcome, toPhase := c.settleDrainFailure(ctx, ref, path, bc.Attempts, maxAttempts, err)
 	item.Outcome = outcome
 	item.ToPhase = toPhase
@@ -335,7 +334,7 @@ func (c *Client) drainItem(ctx context.Context, cfg config.Config, s SessionSumm
 // are exhausted.
 func (c *Client) settleDrainFailure(ctx context.Context, ref Ref, path string, priorAttempts, maxAttempts int, cause error) (outcome, toPhase string) {
 	attempts := priorAttempts + 1
-	lastError := termsafe.SafeLine(cause.Error())
+	lastError := recordText(cause.Error())
 
 	bc, _, rerr := loadBreadcrumbRecord(path, c.sessionsDir)
 	if rerr != nil {
@@ -359,7 +358,7 @@ func (c *Client) settleDrainFailure(ctx context.Context, ref Ref, path string, p
 			rec.Attempts = attempts
 			rec.LastError = lastError
 			rec.LastAttempt = time.Now().UTC()
-			rec.RepairReason = termsafe.SafeLine(reason)
+			rec.RepairReason = recordText(reason)
 			return nil
 		}); terr != nil {
 			slog.Error("Failed to park a drained review whose window may be live.",

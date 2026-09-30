@@ -168,7 +168,7 @@ func printPruneResults(out io.Writer, results []branchpkg.PruneResult) {
 		name := safeTitle(r.Name)
 		switch {
 		case r.Err != nil:
-			_, _ = fmt.Fprintf(out, "FAILED  %s: %v\n", name, termsafe.Error(r.Err))
+			_, _ = fmt.Fprintf(out, "FAILED  %s: %s\n", name, safeText(termsafe.Error(r.Err).Error()))
 		case r.Skipped:
 			_, _ = fmt.Fprintf(out, "skipped %s: %s\n", name, safeText(r.Reason))
 		case r.Deleted:

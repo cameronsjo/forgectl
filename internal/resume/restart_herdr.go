@@ -33,7 +33,21 @@ type SystemRestartEnv struct {
 	forgectl string
 	// herdr is the herdr binary; "" runs `herdr` from PATH.
 	herdr string
+	// callTimeout bounds each herdr call; zero means HerdrCallTimeout.
+	callTimeout time.Duration
 }
+
+// HerdrCallTimeout bounds every herdr call a restart run makes. Each call is
+// one request to the local herdr server, answered well inside it, while a
+// call still running at the bound is taken as wedged. The bound matters most
+// after the signal: from there the run ignores cancellation, and each herdr
+// call sits in a process group of its own, so neither Ctrl-C nor a hangup
+// reaches it. Without the bound, a wedged call would hang the run forever
+// with the session stopped; at the bound, the call's group is killed and the
+// session is reported failed, with the command to resume it by hand; a
+// relaunch killed there may have landed, so the run first waits for the
+// session to register (forgectl#951).
+const HerdrCallTimeout = 10 * time.Second
 
 // herdrBin is the herdr binary every call runs.
 func (e SystemRestartEnv) herdrBin() string {
@@ -41,6 +55,28 @@ func (e SystemRestartEnv) herdrBin() string {
 		return e.herdr
 	}
 	return "herdr"
+}
+
+// runHerdr runs one herdr call in a process group of its own, bounded by
+// HerdrCallTimeout. A restart run survives SIGHUP on purpose, so a closed
+// terminal cannot strand a session between its stop and its relaunch; in the
+// terminal's group, the herdr call in flight would still take the hangup and
+// die (forgectl#877). herdr is non-interactive, so it never needs the
+// terminal's foreground group. At the bound, or when ctx is cancelled, the
+// call's whole group is killed; a call killed at the bound returns an error
+// wrapping ErrHerdrTimeout.
+func (e SystemRestartEnv) runHerdr(ctx context.Context, args ...string) (string, error) {
+	limit := e.callTimeout
+	if limit <= 0 {
+		limit = HerdrCallTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	out, err := e.runner.Run(exec.WithProcessGroup(ctx), e.herdrBin(), args...)
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return out, fmt.Errorf("%w after %s: %w", ErrHerdrTimeout, limit, err)
+	}
+	return out, err
 }
 
 var _ RestartEnv = SystemRestartEnv{}
@@ -125,7 +161,7 @@ func (e SystemRestartEnv) Pane(ctx context.Context, pane string) (PaneState, err
 	if err := checkPaneArg(pane); err != nil {
 		return PaneState{}, err
 	}
-	out, err := e.runner.Run(ctx, e.herdrBin(), "pane", "get", pane)
+	out, err := e.runHerdr(ctx, "pane", "get", pane)
 	if err != nil {
 		if paneNotFound(err) {
 			return PaneState{}, fmt.Errorf("pane %s: %w", pane, ErrPaneGone)
@@ -136,7 +172,7 @@ func (e SystemRestartEnv) Pane(ctx context.Context, pane string) (PaneState, err
 	if err != nil {
 		return PaneState{}, err
 	}
-	out, err = e.runner.Run(ctx, e.herdrBin(), "pane", "process-info", "--pane", pane)
+	out, err = e.runHerdr(ctx, "pane", "process-info", "--pane", pane)
 	if err != nil {
 		if paneNotFound(err) {
 			return PaneState{}, fmt.Errorf("pane %s: %w", pane, ErrPaneGone)
@@ -155,7 +191,7 @@ func (e SystemRestartEnv) Screen(ctx context.Context, pane string) (string, erro
 	if err := checkPaneArg(pane); err != nil {
 		return "", err
 	}
-	out, err := e.runner.Run(ctx, e.herdrBin(), "pane", "read", pane, "--source", "visible")
+	out, err := e.runHerdr(ctx, "pane", "read", pane, "--source", "visible")
 	if err != nil {
 		// Dropped whole rather than wrapped: a *CommandError keeps stdout on
 		// its Output field, and stdout here is screen text.
@@ -173,7 +209,7 @@ func (e SystemRestartEnv) ClearInput(ctx context.Context, pane string) error {
 	if err := checkPaneArg(pane); err != nil {
 		return err
 	}
-	if _, err := e.runner.Run(ctx, e.herdrBin(), "pane", "send-keys", pane, "ctrl+u"); err != nil {
+	if _, err := e.runHerdr(ctx, "pane", "send-keys", pane, "ctrl+u"); err != nil {
 		return fmt.Errorf("herdr pane send-keys: %w", err)
 	}
 	return nil
@@ -188,7 +224,7 @@ func (e SystemRestartEnv) Relaunch(ctx context.Context, pane, sessionID string) 
 	if err != nil {
 		return err
 	}
-	if _, err := e.runner.Run(ctx, e.herdrBin(), "pane", "run", pane, line); err != nil {
+	if _, err := e.runHerdr(ctx, "pane", "run", pane, line); err != nil {
 		return fmt.Errorf("herdr pane run: %w", err)
 	}
 	return nil

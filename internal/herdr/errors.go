@@ -44,21 +44,16 @@ func (e *Error) Error() string {
 // short line; 512 escaped runes keeps any real one whole.
 const herdrTextMaxRunes = 512
 
-// printableMax is printable capped at herdrTextMaxRunes of output, ending in
-// termsafe.TruncatedMarker when it cut.
+// printableMax renders herdr text as one inert terminal line through
+// termsafe.SafeLineMax, as forgectl's other child-stderr echoes are, capped at
+// herdrTextMaxRunes of output and ending in termsafe.TruncatedMarker when it
+// cut. herdr's text can echo pane-controlled values (labels, titles): a
+// decoded \u001b would drive a terminal that prints the error, and a bidi
+// override or other format character (Cf, e.g. U+202E) would reorder what the
+// operator reads (#825). The escape shows each such rune as itself escaped
+// rather than dropping it, so the operator can see something was there.
 func printableMax(s string) string {
 	return termsafe.SafeLineMax(s, herdrTextMaxRunes)
-}
-
-// printable renders herdr text as one inert terminal line through
-// termsafe.SafeLine, as forgectl's other child-stderr echoes are. herdr's
-// text can echo pane-controlled values (labels, titles): a decoded \u001b
-// would drive a terminal that prints the error, and a bidi override or other
-// format character (Cf, e.g. U+202E) would reorder what the operator reads
-// (#825). SafeLine shows each such rune as its escape rather than dropping
-// it, so the operator can see something was there.
-func printable(s string) string {
-	return termsafe.SafeLine(s)
 }
 
 // Unwrap returns the *[exec.CommandError] behind the refusal.
@@ -91,6 +86,10 @@ func argvText(args []string) string {
 // parseEnvelope returns the *Error in a stderr stream that is exactly one
 // herdr error object, or nil. Log lines before the JSON, a second object, or
 // an envelope without a code all return nil.
+//
+// Message is stored redacted (redact.Text, #941), not only rendered so: the
+// field is exported, and %#v or a future reader would otherwise show herdr's
+// raw text. Error() still redacts it, which is a no-op on redacted text.
 func parseEnvelope(stderr string) *Error {
 	var env struct {
 		Error *struct {
@@ -104,5 +103,5 @@ func parseEnvelope(stderr string) *Error {
 	if env.Error == nil || env.Error.Code == "" {
 		return nil
 	}
-	return &Error{Code: env.Error.Code, Message: env.Error.Message}
+	return &Error{Code: env.Error.Code, Message: redact.Text(env.Error.Message)}
 }

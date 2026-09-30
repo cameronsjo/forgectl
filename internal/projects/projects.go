@@ -231,18 +231,28 @@ func withGitLookPath(fn func(string) (string, error)) Option {
 
 // ResolveRoot returns the projects root: $PROJECTS_DIR (a leading ~/ is
 // expanded), else ~/Projects. It is what [New] uses, exported so a caller that
-// only needs the directory does not build a Client.
-func ResolveRoot() string {
+// only needs the directory does not build a Client. The home directory is
+// looked up only when the answer needs it, so an absolute $PROJECTS_DIR
+// resolves even where no home exists; when the lookup is needed and fails it
+// returns an error rather than a root relative to the working directory.
+func ResolveRoot() (string, error) {
+	return resolveRoot(os.UserHomeDir)
+}
+
+// resolveRoot is ResolveRoot with the home lookup injected.
+func resolveRoot(userHome func() (string, error)) (string, error) {
 	dir := os.Getenv("PROJECTS_DIR")
-	home, _ := os.UserHomeDir()
-	switch {
-	case dir == "":
-		return filepath.Join(home, "Projects")
-	case strings.HasPrefix(dir, "~/"):
-		return filepath.Join(home, dir[2:])
-	default:
-		return dir
+	if dir != "" && !strings.HasPrefix(dir, "~/") {
+		return dir, nil
 	}
+	home, err := userHome()
+	if err != nil {
+		return "", fmt.Errorf("resolving projects root: %w", err)
+	}
+	if dir == "" {
+		return filepath.Join(home, "Projects"), nil
+	}
+	return filepath.Join(home, dir[2:]), nil
 }
 
 // New builds a Client. It reads $PROJECTS_DIR, falling back to ~/Projects.
@@ -250,7 +260,14 @@ func ResolveRoot() string {
 // It also resolves git exactly once to an absolute path; a lookup failure is
 // retained as an empty pin so status probes fail closed as StatusUnknown.
 func New(run exec.Runner, opts ...Option) *Client {
-	c := &Client{Dir: ResolveRoot(), run: run, lookPath: osexec.LookPath, gitHubHost: githubauth.DefaultHost}
+	// A failed root resolution leaves Dir empty: discovery then reports the
+	// directory missing and Placement refuses an empty root, so nothing
+	// resolves against the working directory.
+	root, rootErr := ResolveRoot()
+	if rootErr != nil {
+		slog.Warn("Failed to resolve projects root.", "error", rootErr)
+	}
+	c := &Client{Dir: root, run: run, lookPath: osexec.LookPath, gitHubHost: githubauth.DefaultHost}
 	for _, opt := range opts {
 		opt(c)
 	}
@@ -838,6 +855,9 @@ func Placement(root string, r Repo, wing string) (string, error) {
 	// would still reach that argv on the wing path, where a leading '-' is
 	// flag injection. Re-homing only the segments the path happens to use is
 	// the classic "removal keeps the consumer, drops the control" downgrade.
+	if root == "" {
+		return "", fmt.Errorf("refusing to place a repo: no projects root")
+	}
 	name := strings.ToLower(r.Name)
 	if !validRepoSegment(name) {
 		return "", fmt.Errorf("refusing to place a repo: unsafe name segment")

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
 // argvOf renders a FakeRunner Call's name+args as a single string for
@@ -264,5 +265,25 @@ func TestRunSequence_CommandRedactsArgv(t *testing.T) {
 	}
 	if !strings.HasPrefix(seqErr.Command, "tool --token ") {
 		t.Errorf("Command = %q, want the command and flag name kept", seqErr.Command)
+	}
+}
+
+// #941: runSequence put the failing command's stdout (CommandError.Output)
+// into the step's output raw, and every renderer of Result.Output shows it.
+// A line holding a credential shape now reads as redact.Marker, and a line
+// without one survives.
+//
+// Mutation that turns it red: append cmdErr.Output unredacted in runSequence.
+func TestRunSequence_FailedOutputIsRedacted(t *testing.T) {
+	const secret = "SEKRIT-update-941" //nolint:gosec // G101: a fake credential the test plants
+	fr := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "", &exec.CommandError{Name: name, Args: args, ExitCode: 1, Output: "kept line\nhttps://u:" + secret + "@example.test/x"}
+	}}
+	out, err := runSequence(context.Background(), fr, nil, []string{"tool", "run"})
+	if err == nil {
+		t.Fatal("runSequence succeeded; want the planted failure")
+	}
+	if strings.Contains(out, secret) || !strings.Contains(out, "kept line") || !strings.Contains(out, redact.Marker) {
+		t.Errorf("output = %q; want the credential line withheld as %s and the other kept", out, redact.Marker)
 	}
 }

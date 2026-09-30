@@ -2,6 +2,7 @@ package resume
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -30,6 +31,8 @@ type RestartEnv interface {
 	// queue — so they cannot merge into the relaunch line.
 	ClearInput(ctx context.Context, pane string) error
 	// Relaunch types `forgectl resume <id>` into a pane and presses Enter.
+	// An error wrapping ErrHerdrTimeout means the line may or may not have
+	// been delivered; any other error means it was not.
 	Relaunch(ctx context.Context, pane, sessionID string) error
 	// LiveSession returns the live registry entry holding a session id.
 	LiveSession(sessionID string) (RegistryEntry, bool)
@@ -316,7 +319,9 @@ func restartNow(ctx context.Context, env RestartEnv, s OutdatedSession, shellPID
 	}
 
 	// From the signal on, cancellation no longer applies: every wait below is
-	// bounded instead, so a Ctrl-C cannot strand a stopped session.
+	// bounded instead, so a Ctrl-C cannot strand a stopped session. The
+	// polling waits carry their own limits, and each herdr call the env makes
+	// is bounded by the env (HerdrCallTimeout for SystemRestartEnv).
 	ctx = context.WithoutCancel(ctx)
 
 	if err := env.Terminate(s.Pid); err != nil {
@@ -374,8 +379,15 @@ func restartNow(ctx context.Context, env RestartEnv, s OutdatedSession, shellPID
 	if !paneReady() {
 		return fail("stopped, but pane %s's shell lost the foreground just before the relaunch (someone started a command?); not relaunched", s.Pane)
 	}
+	// A send killed at its bound may already have typed the line, so it
+	// waits for the session like a send that returned; only the report
+	// differs if nothing registers. Any other send failure is final.
+	var sendErr error
 	if err := env.Relaunch(ctx, s.Pane, s.SessionID); err != nil {
-		return fail("stopped, but sending `%s` to pane %s failed (%v)", manual, s.Pane, err)
+		if !errors.Is(err, ErrHerdrTimeout) {
+			return fail("stopped, but sending `%s` to pane %s failed (%v)", manual, s.Pane, err)
+		}
+		sendErr = err
 	}
 
 	var resumed RegistryEntry
@@ -387,6 +399,9 @@ func restartNow(ctx context.Context, env RestartEnv, s OutdatedSession, shellPID
 		}
 		return false
 	})
+	if !confirmed && sendErr != nil {
+		return fail("stopped, but sending `%s` to pane %s timed out and may or may not have arrived (%v); no live session registered within %s — check the pane before running it by hand", manual, s.Pane, sendErr, opts.ConfirmWait)
+	}
 	if !confirmed {
 		return fail("stopped, and `%s` was sent to pane %s, but no live session registered within %s — check the pane", manual, s.Pane, opts.ConfirmWait)
 	}

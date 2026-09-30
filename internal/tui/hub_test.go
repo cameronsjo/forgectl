@@ -149,6 +149,14 @@ func TestPickerArgv_HostileFreeText(t *testing.T) {
 		"a\x1b[2Jb",
 		"\u202eevil",
 		"a\x00b",
+		// Invisible format characters (#916): each makes the argument differ
+		// from the ref it reads as.
+		"o/r\u200b#1",
+		"\ufeffo/r#1",
+		"o/r#1\u2060",
+		"o/r\u00ad#1",
+		"o/r#1\U000E0041\U000E007F",
+		"o/r\u2028#1",
 		"\xff\xfe",
 		strings.Repeat("a", pickerArgMaxRunes+1),
 	} {
@@ -282,8 +290,8 @@ func TestPicker_BrowseRowDrillsIntoSubcommands(t *testing.T) {
 	m, _ = press(m, tea.KeyEnter)
 	m, _ = press(m, tea.KeyDown) // empty input: the browse row is the only row
 	m, _ = press(m, tea.KeyEnter)
-	if m.picker != nil || m.mode != leavesMode || m.leavesParent != "pr" {
-		t.Fatalf("browse row did not open pr's leaves: mode=%v parent=%q picker=%v", m.mode, m.leavesParent, m.picker != nil)
+	if m.picker != nil || m.mode != leavesMode || strings.Join(m.leavesPath, " ") != "pr" {
+		t.Fatalf("browse row did not open pr's leaves: mode=%v path=%q picker=%v", m.mode, m.leavesPath, m.picker != nil)
 	}
 }
 
@@ -299,7 +307,7 @@ func TestPicker_EscClosesWithoutRunning(t *testing.T) {
 func TestPicker_CandidatesFromSourceFilterAndTabEdits(t *testing.T) {
 	sources := map[string]ArgSource{
 		"projects clone": func(context.Context) []string {
-			return []string{"forgectl", "cadence", "-rf", termsafetest.Hostile("evil"), "forge-docs"}
+			return []string{"forgectl", "cadence", "-rf", termsafetest.Hostile("evil"), "forge\u200bctl", "forge-docs"}
 		},
 	}
 	m := pickerHubModel(sources)

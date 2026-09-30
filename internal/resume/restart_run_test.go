@@ -22,6 +22,7 @@ type fakeEnv struct {
 	noShellReturn  bool   // the pane's shell never takes the foreground back
 	shellAlwaysFG  bool   // the pane claims its shell holds the foreground even while claude runs
 	relaunchErr    error  // herdr pane run fails
+	relaunchLanded bool   // the line reached the pane although pane run returned relaunchErr
 	noRegister     bool   // the relaunched session never registers
 	prepareErr     error  // snapshot cannot record the session
 	onTerminate    func() // runs inside Terminate (e.g. a Ctrl-C landing there)
@@ -136,7 +137,7 @@ func (f *fakeEnv) LiveSession(string) (RegistryEntry, bool) {
 	if f.liveElsewhere && f.stopped {
 		return RegistryEntry{Pid: 777, SessionID: testSID, Live: true}, true
 	}
-	if f.relaunched == 0 || f.noRegister || f.relaunchErr != nil {
+	if f.relaunched == 0 || f.noRegister || (f.relaunchErr != nil && !f.relaunchLanded) {
 		return RegistryEntry{}, false
 	}
 	return RegistryEntry{Pid: 95294, SessionID: testSID, Version: "2.1.285", Live: true}, true
@@ -274,6 +275,42 @@ func TestRunRestart_RelaunchFailures(t *testing.T) {
 	env.noRegister = true
 	if final, _ := runOne(t, context.Background(), env, nil); final.State != StateFailed || !strings.Contains(final.Detail, "no live session registered") {
 		t.Errorf("unconfirmed relaunch: final = %+v", final)
+	}
+}
+
+// errTimedOutSend is a pane run killed at its bound, as SystemRestartEnv
+// reports it.
+var errTimedOutSend = fmt.Errorf("herdr pane run: %w after 10s: signal: killed", ErrHerdrTimeout)
+
+// A pane run killed at its bound may have typed the line before it died, so
+// the run waits for the session instead of reporting a failed send
+// (forgectl#951).
+func TestRunRestart_TimedOutSendWaitsForTheSession(t *testing.T) {
+	env := newFakeEnv()
+	env.relaunchErr, env.relaunchLanded = errTimedOutSend, true
+	final, _ := runOne(t, context.Background(), env, nil)
+	if final.State != StateResumed || !strings.Contains(final.Detail, "pid 95294") {
+		t.Fatalf("final = %+v; a timed-out send whose line landed is a resume", final)
+	}
+
+	env = newFakeEnv()
+	env.relaunchErr = errTimedOutSend
+	final, _ = runOne(t, context.Background(), env, nil)
+	if final.State != StateFailed || final.Manual != ManualResume(testSID) ||
+		!strings.Contains(final.Detail, "may or may not have arrived") || !strings.Contains(final.Detail, "check the pane") {
+		t.Fatalf("final = %+v; want failed, delivery unknown, with the by-hand command", final)
+	}
+}
+
+// Any send failure other than the bound is final: the run does not wait, even
+// when a session would register.
+func TestRunRestart_OrdinarySendFailureIsFinal(t *testing.T) {
+	env := newFakeEnv()
+	env.relaunchErr, env.relaunchLanded = errors.New("herdr down"), true
+	final, _ := runOne(t, context.Background(), env, nil)
+	if final.State != StateFailed || final.Manual != ManualResume(testSID) ||
+		!strings.Contains(final.Detail, "failed (herdr down)") {
+		t.Fatalf("final = %+v; want the send failure reported as before", final)
 	}
 }
 
