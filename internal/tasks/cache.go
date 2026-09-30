@@ -34,10 +34,10 @@ func SaveCache(path string, snap Snapshot) error {
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("tasks: create cache directory %s: %w", dir, err)
+		return fmt.Errorf("tasks: create cache directory %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("tasks: write cache %s: %w", path, err)
+		return fmt.Errorf("tasks: write cache %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	return nil
 }

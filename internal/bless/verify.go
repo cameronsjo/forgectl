@@ -86,17 +86,17 @@ func (v *Verifier) Anchor() (*ecdsa.PublicKey, string, error) {
 	if err := v.anchorCheck(v.anchorPath); err != nil {
 		// %w on the cause, so a caller can tell an anchor that was never
 		// installed (fs.ErrNotExist) from one that is present but unsafe.
-		return nil, "", fmt.Errorf("%w: %w", ErrNoAnchor, err)
+		return nil, "", fmt.Errorf("%w: %w", ErrNoAnchor, termsafe.Error(err))
 	}
 
 	// (2) Parse the anchor and fingerprint its canonical PKIX DER.
 	anchorBytes, err := os.ReadFile(v.anchorPath)
 	if err != nil {
-		return nil, "", fmt.Errorf("%w: read anchor %s: %w", ErrNoAnchor, v.anchorPath, err)
+		return nil, "", fmt.Errorf("%w: read anchor %s: %w", ErrNoAnchor, termsafe.QuotePath(v.anchorPath), termsafe.Error(err))
 	}
 	anchorPub, err := ParseAnchorFile(anchorBytes)
 	if err != nil {
-		return nil, "", fmt.Errorf("%w: parse anchor %s: %v", ErrNoAnchor, v.anchorPath, err)
+		return nil, "", fmt.Errorf("%w: parse anchor %s: %v", ErrNoAnchor, termsafe.QuotePath(v.anchorPath), err)
 	}
 	anchorDER, err := EncodePublicKey(anchorPub)
 	if err != nil {
@@ -128,20 +128,20 @@ func (v *Verifier) TrustedStore() (Store, error) {
 	// (3) Authenticate-before-parse the trust store.
 	storePath, err := v.trustStorePath()
 	if err != nil {
-		return Store{}, fmt.Errorf("%w: resolve trust store path: %v", ErrTrustStoreInvalid, err)
+		return Store{}, fmt.Errorf("%w: resolve trust store path: %v", ErrTrustStoreInvalid, termsafe.Error(err))
 	}
 	storeBytes, err := os.ReadFile(storePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Genuine absence — distinct from a present-but-unreadable store, so a
 			// caller can tell "nothing here" from "here but I can't read it".
-			return Store{}, fmt.Errorf("%w: %s", ErrTrustStoreMissing, storePath)
+			return Store{}, fmt.Errorf("%w: %s", ErrTrustStoreMissing, termsafe.QuotePath(storePath))
 		}
-		return Store{}, fmt.Errorf("%w: read trust store %s: %v", ErrTrustStoreInvalid, storePath, err)
+		return Store{}, fmt.Errorf("%w: read trust store %s: %v", ErrTrustStoreInvalid, termsafe.QuotePath(storePath), termsafe.Error(err))
 	}
 	storeSidecar, err := os.ReadFile(SidecarPath(storePath))
 	if err != nil {
-		return Store{}, fmt.Errorf("%w: read trust store sidecar: %v", ErrTrustStoreInvalid, err)
+		return Store{}, fmt.Errorf("%w: read trust store sidecar: %v", ErrTrustStoreInvalid, termsafe.Error(err))
 	}
 	storeEnv, err := DecodeEnvelope(storeSidecar)
 	if err != nil {
@@ -195,7 +195,7 @@ func (v *Verifier) Verify(path string, data []byte) error {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("%w: run 'forgectl workflow bless <name>' to approve this file", ErrUnblessed)
 		}
-		return fmt.Errorf("read blessing sidecar %s: %w", SidecarPath(path), err)
+		return fmt.Errorf("read blessing sidecar %s: %w", termsafe.QuotePath(SidecarPath(path)), termsafe.Error(err))
 	}
 	wfEnv, err := DecodeEnvelope(wfSidecar)
 	if err != nil {

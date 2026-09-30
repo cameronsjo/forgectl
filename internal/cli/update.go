@@ -1,16 +1,22 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
@@ -58,11 +64,15 @@ prevents the others from running.
 Every run writes a transcript to stderr and to a timestamped log file
 (default: ` + "`forgectl config`" + `'s config dir, update-logs/; override with
 [update] log_dir): a status line per step as it finishes, plus that step's
-own captured output underneath it — for ` + "`check`" + `, the output IS the point
-(brew's outdated list, softwareupdate's available updates, npm's outdated
-table). Each step's line appears only once that step completes, not as its
-command runs — a slow step (a ten-minute ` + "`brew upgrade`" + `) prints nothing
-until it finishes, so the transcript streams step-by-step, not byte-by-byte.
+own captured output underneath it, escaped — for ` + "`check`" + `, the output IS the
+point (brew's outdated list, softwareupdate's available updates, npm's
+outdated table). brew's text is relayed from its taps, so it goes to the
+forgectl debug log instead; ` + "`check`" + ` shows its outdated list rebuilt from
+formula names and versions only. A failed step's line names the failed
+command and its exit status; its stderr is in the forgectl log. Each step's
+line appears only once that step completes, not as its command runs — a
+slow step (a ten-minute ` + "`brew upgrade`" + `) prints nothing until it finishes,
+so the transcript streams step-by-step, not byte-by-byte.
 stdout carries ONLY the summary — the per-step recap in human mode, or the
 ` + "`--json`" + ` machine-readable report (which repeats each step's captured
 output in its own field) — never the transcript, so
@@ -227,9 +237,10 @@ func runUpdatePass(cmd *cobra.Command, client *updatepkg.Client, cfg config.Upda
 		fmt.Fprintf(transcript, "logging transcript to %s\n", logPath)
 	}
 
+	checkOnly := opts.CheckOnly
 	opts.OnStep = func(res updatepkg.Result) {
 		writeStepLine(transcript, res)
-		writeStepOutput(transcript, res)
+		writeStepOutput(transcript, res, checkOnly)
 	}
 	report := client.Run(ctx, opts)
 
@@ -243,7 +254,10 @@ func runUpdatePass(cmd *cobra.Command, client *updatepkg.Client, cfg config.Upda
 	}
 
 	if report.Failed() {
-		return WithExitCode(fmt.Errorf("update: %w", report.Err()), 1)
+		// Categorical (#778): report.Err() carries each failed command's
+		// stderr. The step names are this package's own constants; the
+		// transcript's FAIL lines and the forgectl log hold the rest.
+		return WithExitCode(termsafe.Categorical("update: "+failedStepNames(report.Results)+" failed; see the transcript above and the forgectl log", report.Err()), 1)
 	}
 	return nil
 }
@@ -288,11 +302,56 @@ func writeStepLine(w io.Writer, res updatepkg.Result) {
 	case res.Skipped:
 		fmt.Fprintf(w, "skip  %-15s %s\n", res.Name, res.SkipReason)
 	case res.Failed():
-		fmt.Fprintf(w, "FAIL  %-15s (%s) %v\n", res.Name, dur, res.Err)
+		_, _ = fmt.Fprintf(w, "FAIL  %-15s (%s) %s\n", res.Name, dur, stepFailure(res.Err))
 	default:
 		fmt.Fprintf(w, "ok    %-15s (%s)\n", res.Name, dur)
 	}
 }
+
+// stepFailure words a failed step from fixed text, by cause (#778): res.Err
+// carries the child's stderr (a CommandError) and, for brew, text the tap's
+// server and git transport send, so it is never rendered here. The failed
+// command's name comes from the argv this binary built (SequenceError), the
+// exit status is an integer, and the detail stays in the forgectl log, where
+// update's runPhase records the error through the text handler's quoting.
+func stepFailure(err error) string {
+	what := "failed"
+	var seqErr *updatepkg.SequenceError
+	if errors.As(err, &seqErr) {
+		what = termsafe.SafeLine(seqErr.Command) + " failed"
+	}
+	var cmdErr *exec.CommandError
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return "interrupted before it finished"
+	case errors.As(err, &cmdErr) && cmdErr.ExitCode >= 0:
+		what += " (exit " + strconv.Itoa(cmdErr.ExitCode) + ")"
+	}
+	return what + "; see the forgectl log for its output"
+}
+
+// failedStepNames lists the failed steps by name, comma-separated.
+func failedStepNames(results []updatepkg.Result) string {
+	var names []string
+	for _, res := range results {
+		if res.Failed() {
+			names = append(names, termsafe.SafeLine(res.Name))
+		}
+	}
+	return strings.Join(names, ", ")
+}
+
+// stepOutputLineMaxRunes caps one rendered line of a step's captured output.
+const stepOutputLineMaxRunes = 500
+
+// brewTokenPattern is one field of a line `brew outdated` prints: a formula
+// name (tap-qualified or not) or, in its verbose form, a version, a
+// parenthesized version, or a comparison sign. Nothing it matches can drive a
+// terminal.
+var brewTokenPattern = regexp.MustCompile(`^[A-Za-z0-9@._+/(),<>=!-]{1,128}$`)
+
+// brewLineMaxTokens bounds a rebuilt brew line: "name (1.0) < 2.0" is four.
+const brewLineMaxTokens = 8
 
 // writeStepOutput writes a step's captured output to the transcript,
 // indented under its status line — the ONLY place this appears for a human
@@ -301,13 +360,58 @@ func writeStepLine(w io.Writer, res updatepkg.Result) {
 // + the log file) that carries the actual deliverable, especially for
 // `check`, where a step's output IS the point. Omitted entirely when Output
 // is empty (a step that produced no stdout).
-func writeStepOutput(w io.Writer, res updatepkg.Result) {
+//
+// Output is subprocess text, so it is never written raw (#778). brew's goes
+// to the debug log only, as `forgectl upgrade`'s does (#777): brew relays
+// what the tap's server and git transport send. The one exception is
+// `update check`, whose deliverable is brew's outdated list, so that list is
+// rebuilt from formula-name and version tokens, with a count of any line
+// that is not one. Every other step's lines are escaped and capped.
+func writeStepOutput(w io.Writer, res updatepkg.Result, checkOnly bool) {
 	if res.Output == "" {
 		return
 	}
-	for _, line := range strings.Split(res.Output, "\n") {
-		fmt.Fprintf(w, "      %s\n", line)
+	if res.Name != updatepkg.StepBrew {
+		for _, line := range strings.Split(res.Output, "\n") {
+			line = strings.TrimSuffix(line, "\r")
+			_, _ = fmt.Fprintf(w, "      %s\n", termsafe.SafeLineMax(line, stepOutputLineMaxRunes))
+		}
+		return
 	}
+	slog.Debug("brew output.", "step", res.Name, "output", res.Output)
+	if !checkOnly {
+		_, _ = fmt.Fprintln(w, "      (brew's output is in the forgectl debug log)")
+		return
+	}
+	hidden := 0
+	for _, line := range strings.Split(res.Output, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if rebuilt, ok := brewTokens(line); ok {
+			_, _ = fmt.Fprintf(w, "      %s\n", rebuilt)
+			continue
+		}
+		hidden++
+	}
+	if hidden > 0 {
+		_, _ = fmt.Fprintf(w, "      (%d line(s) of brew output not shown: not a formula line; see the forgectl debug log)\n", hidden)
+	}
+}
+
+// brewTokens rebuilds one line of `brew outdated` from its fields, when every
+// field is a brewTokenPattern token and there are at most brewLineMaxTokens.
+func brewTokens(line string) (string, bool) {
+	fields := strings.Fields(line)
+	if len(fields) == 0 || len(fields) > brewLineMaxTokens {
+		return "", false
+	}
+	for _, f := range fields {
+		if !brewTokenPattern.MatchString(f) {
+			return "", false
+		}
+	}
+	return strings.Join(fields, " "), true
 }
 
 // tallyResults counts ok/skipped/failed across results — shared by
