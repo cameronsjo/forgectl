@@ -565,3 +565,22 @@ func TestPaneNotFound(t *testing.T) {
 		}
 	}
 }
+
+// TestRestartHerdrBin pins that a set HerdrBin is the binary every herdr call
+// runs, so the watcher never resolves herdr through its own PATH.
+func TestRestartHerdrBin(t *testing.T) {
+	run := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return "", errors.New("stop") }}
+	req := RestartRequest{Runner: run, DryRun: true, HerdrBin: "/opt/tools/herdr"}
+	req.fill()
+	env, err := req.Env("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = env.Pane(context.Background(), "w1:p1")
+	if len(run.Calls) == 0 || run.Calls[0].Name != "/opt/tools/herdr" {
+		t.Fatalf("calls %+v", run.Calls)
+	}
+	if _, err := RestartOutdated(context.Background(), RestartRequest{HerdrBin: "herdr"}); err == nil {
+		t.Fatal("a relative herdr path was accepted")
+	}
+}
