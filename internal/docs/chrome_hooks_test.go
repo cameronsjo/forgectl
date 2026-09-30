@@ -198,10 +198,13 @@ var contentLookups = map[string]map[string]string{
 		".math .katex-error": "content: parse errors in the formulas it rendered, recolored on a theme change; a doc-forged one only changes color",
 	},
 	"mermaid-init.js": {
-		`pre.mermaid [data-fc], [id^="dmermaid-"] [data-fc]`: "scrubs hooks forged inside rendered diagrams",
-		"pre.mermaid":   "content: the diagrams it renders",
-		".embed":        "content: the frame it wraps around a diagram",
-		".dia-viewport": "scoped to an .embed this script created",
+		"pre.mermaid [data-fc]": "scrubs hooks forged inside rendered diagrams",
+		"pre.mermaid":           "content: the diagrams it renders; diagram focus: the diagrams under the doc-body hook, or the one inside an .embed",
+		"pre.mermaid [class]":   "scrubs chrome class names off rendered diagram elements",
+		".embed":                "content: the frame it wraps around a diagram; diagram focus: up from the focused control, kept only inside the doc-body hook",
+		".dia-viewport":         "scoped to an .embed this script created",
+		".embed-reset":          "diagram focus: inside a doc-body diagram's .embed",
+		"a":                     "diagram focus: links inside one doc-body diagram",
 	},
 	"reload.js": {
 		":is(h1,h2,h3,h4,h5,h6)[id]":  "content: headings, on the doc-main root",
@@ -216,10 +219,8 @@ var contentLookups = map[string]map[string]string{
 		"summary":                                      "focus restore: inside the recorded region",
 		".live-dot":                                    "under the live-status data-fc hook",
 		".live-status__text":                           "under the live-status data-fc hook",
-		"sel":                                          "replace()'s and within()'s parameter; their call sites are checked instead",
 	},
 	"sidenav-filter.js": {
-		"sel":                 "all()'s parameter; its call sites are checked instead",
 		"li":                  "up from a link or folder under the sidenav data-fc hook",
 		"a[data-filter-text]": "under a sidenav node; data-filter-text is server-set and the sanitizer strips data-*",
 	},
@@ -232,7 +233,11 @@ var contentLookups = map[string]map[string]string{
 
 // selectorWrappers names each script's helpers that take a selector and
 // query the document with it, and which argument (0-based) the selector is.
-// Their call sites are scanned like the query methods themselves.
+// Their call sites are scanned like the query methods themselves, and a
+// lookup inside the named function's own body that passes that parameter
+// straight through is not flagged. The exemption is keyed by function name,
+// so a lookup on a parameter of the same name in any other function is
+// still flagged (forgectl#718).
 var selectorWrappers = map[string]map[string]int{
 	"reload.js":         {"replace": 0, "within": 1},
 	"sidenav-filter.js": {"all": 0},
@@ -356,6 +361,102 @@ type chromeLookup struct {
 	key    string // the resolved selector, or the raw expression
 	rooted bool
 	line   int
+	// passThrough: the lookup is inside a selectorWrappers function and
+	// queries with that function's selector parameter, which the wrapper's
+	// call sites supply and the scan checks there.
+	passThrough bool
+}
+
+// jsBlockEnd returns the index of the brace closing the block that opens at
+// src[open], or -1 when it never closes. It skips string literals, // and
+// /* */ comments, and regex literals, so a brace in any of them does not
+// count: a comment reading "returns {}" inside a wrapper would otherwise end
+// its body early and hand the exemption to code after it.
+func jsBlockEnd(src string, open int) int {
+	depth := 0
+	for j := open; j < len(src); j++ {
+		switch c := src[j]; {
+		case c == '"' || c == '\'' || c == '`':
+			for j++; j < len(src) && src[j] != c; j++ {
+				if src[j] == '\\' {
+					j++
+				}
+			}
+		case c == '/' && j+1 < len(src) && src[j+1] == '/':
+			for j < len(src) && src[j] != '\n' {
+				j++
+			}
+		case c == '/' && j+1 < len(src) && src[j+1] == '*':
+			end := strings.Index(src[j+2:], "*/")
+			if end < 0 {
+				return -1
+			}
+			j += end + 3
+		case c == '/' && jsRegexCanStart(src[:j]):
+			inClass := false
+			for j++; j < len(src) && src[j] != '\n'; j++ {
+				switch src[j] {
+				case '\\':
+					j++
+				case '[':
+					inClass = true
+				case ']':
+					inClass = false
+				}
+				if src[j] == '/' && !inClass {
+					break
+				}
+			}
+		case c == '{':
+			depth++
+		case c == '}':
+			depth--
+			if depth == 0 {
+				return j
+			}
+		}
+	}
+	return -1
+}
+
+// jsRegexCanStart reports whether a '/' after before opens a regex literal
+// rather than dividing: true after an operator, an opening bracket, or a
+// keyword like return, false after a value.
+func jsRegexCanStart(before string) bool {
+	t := strings.TrimRight(before, " \t\r\n")
+	if t == "" {
+		return true
+	}
+	if strings.IndexByte("(,=:[!&|?{};+-*%<>~^", t[len(t)-1]) >= 0 {
+		return true
+	}
+	return strings.HasSuffix(t, "return") || strings.HasSuffix(t, "typeof")
+}
+
+// wrapperBody is the source range of a selector wrapper's body and the name
+// of its selector parameter.
+type wrapperBody struct {
+	start, end int
+	param      string
+}
+
+// wrapperBodies finds each wrapper's `function name(params) {` declaration.
+func wrapperBodies(src string, wrappers map[string]int) []wrapperBody {
+	var out []wrapperBody
+	for wrapper, n := range wrappers {
+		decl := regexp.MustCompile(`function ` + wrapper + `\(([^)]*)\)\s*\{`)
+		for _, m := range decl.FindAllStringSubmatchIndex(src, -1) {
+			params := strings.Split(src[m[2]:m[3]], ",")
+			if n >= len(params) {
+				continue
+			}
+			open := m[1] - 1
+			if end := jsBlockEnd(src, open); end > 0 {
+				out = append(out, wrapperBody{start: open, end: end, param: strings.TrimSpace(params[n])})
+			}
+		}
+	}
+	return out
 }
 
 // scanChromeLookups returns every DOM query call in src, and every call to the
@@ -366,11 +467,17 @@ func scanChromeLookups(src string, wrappers map[string]int) (out []chromeLookup,
 	for _, m := range jsStringVar.FindAllStringSubmatch(src, -1) {
 		consts[m[1]] = m[2] + m[3]
 	}
+	bodies := wrapperBodies(src, wrappers)
 	add := func(argStart, n int) {
 		expr := jsArg(src, argStart, n)
 		l := chromeLookup{key: expr, line: strings.Count(src[:argStart], "\n") + 1}
 		if sel, ok := jsResolve(expr, consts); ok {
 			l.key, l.rooted = sel, dataFcRooted(sel)
+		}
+		for _, b := range bodies {
+			if argStart > b.start && argStart < b.end && expr == b.param {
+				l.passThrough = true
+			}
 		}
 		out = append(out, l)
 	}
@@ -405,7 +512,7 @@ func TestChrome_ScriptsFindChromeOnlyByDataFc(t *testing.T) {
 		}
 		seen := map[string]bool{}
 		for _, l := range lookups {
-			if l.rooted {
+			if l.rooted || l.passThrough {
 				continue
 			}
 			seen[l.key] = true
@@ -446,12 +553,12 @@ func TestChrome_ShellHasNoInlineScript(t *testing.T) {
 	}
 }
 
-// Pins the premise of the guard above: a doc can plant each chrome class the
-// scripts once looked up (on a tag the sanitizer keeps, or on a div where it
-// drops the tag), and no planted element carries a data-fc hook. If the
-// sanitizer starts stripping class, this test fails and the guard is merely
-// belt and braces; if it starts keeping data-*, the guard's whole premise is
-// gone.
+// Pins what a doc's planted chrome turns into. The tags the sanitizer keeps
+// survive as content (so a tag-based lookup would still find them), their
+// chrome classes are stripped (forgectl#700, chromeclass.go), and no planted
+// element carries a data-fc hook. The class strip makes the data-fc guard
+// above a second wall for class lookups rather than the only one; if the
+// sanitizer starts keeping data-*, the guard's whole premise is gone.
 func TestChrome_PlantedChromeSurvivesOnlyAsContent(t *testing.T) {
 	planted := []string{
 		`<aside class="outline" data-fc="outline">p1</aside>`,
@@ -470,14 +577,21 @@ func TestChrome_PlantedChromeSurvivesOnlyAsContent(t *testing.T) {
 		t.Fatalf("no doc-body in the page")
 	}
 	doc := body[start+len(`data-fc="doc-body">`) : end]
-	for _, want := range []string{`<aside class="outline">`, `<details class="outline-inline">`, `<div class="sidenav">`, `<div class="doc-body">`} {
+	for _, want := range []string{`<aside>p1</aside>`, `<details><summary>p2</summary>`, `<div><div>p3</div></div>`, `<div>p4</div>`} {
 		if !strings.Contains(doc, want) {
-			t.Errorf("doc content lost %q; the fixture no longer plants it, so the guard's premise is unpinned", want)
+			t.Errorf("doc content lost %q, or kept a chrome class on it", want)
 		}
 	}
-	// The planted outline precedes the shell's in document order, so a
-	// class-based querySelector returns the doc's copy.
-	if strings.Index(body, `<aside class="outline">`) > strings.Index(body, `<aside class="outline" data-fc=`) {
+	for _, m := range classAttr.FindAllStringSubmatch(doc, -1) {
+		for _, tok := range strings.Fields(m[1]) {
+			if isChromeClass(tok) {
+				t.Errorf("planted chrome class %q survived in the doc body", tok)
+			}
+		}
+	}
+	// The planted aside precedes the shell's outline in document order, so a
+	// tag-based querySelector would return the doc's copy.
+	if strings.Index(body, `<aside>p1</aside>`) > strings.Index(body, `<aside class="outline" data-fc=`) {
 		t.Errorf("the planted aside no longer precedes the shell's outline")
 	}
 	if strings.Contains(doc, "data-fc") {
@@ -486,6 +600,56 @@ func TestChrome_PlantedChromeSurvivesOnlyAsContent(t *testing.T) {
 	for _, hook := range []string{"doc-main", "sidenav", "doc-body", "outline", "outline-inline", "statusbar"} {
 		if got := strings.Count(body, `data-fc="`+hook+`"`); got != 1 {
 			t.Errorf(`data-fc=%q appears %d times, want the shell's one`, hook, got)
+		}
+	}
+}
+
+// A helper that is not a registered wrapper gets no pass for naming its
+// parameter like one (forgectl#718): find(".outline") below reaches chrome
+// by class, and its querySelector(sel) must be flagged.
+func TestChrome_WrapperPassThroughIsKeyedByFunction(t *testing.T) {
+	src := "function find(sel) { return document.querySelector(sel); }\n" +
+		"find(\".outline\");\n" +
+		"function all(sel) { return document.querySelectorAll(sel); }\n" +
+		"all('[data-fc=\"sidenav\"] a');\n"
+	lookups, calls := scanChromeLookups(src, map[string]int{"all": 0})
+	if calls["all"] != 1 {
+		t.Fatalf("all() call sites = %d, want 1", calls["all"])
+	}
+	var flagged, passed []int
+	for _, l := range lookups {
+		switch {
+		case l.passThrough:
+			passed = append(passed, l.line)
+		case !l.rooted:
+			flagged = append(flagged, l.line)
+		}
+	}
+	if !slices.Equal(flagged, []int{1}) {
+		t.Errorf("unrooted lookups on lines %v, want [1] (find's querySelector(sel))", flagged)
+	}
+	if !slices.Equal(passed, []int{3}) {
+		t.Errorf("pass-through lookups on lines %v, want [3] (all's querySelectorAll(sel))", passed)
+	}
+}
+
+// A brace inside a comment or a regex literal in a wrapper's body must not
+// end the body early and cost the wrapper its own pass-through lookup.
+func TestChrome_WrapperBodySkipsCommentsAndRegexes(t *testing.T) {
+	src := "function all(sel) {\n" +
+		"  // a stray } in a comment\n" +
+		"  /* and { another } here */\n" +
+		"  var re = /[}]\\}/;\n" +
+		"  return document.querySelectorAll(sel);\n" +
+		"}\n" +
+		"all('[data-fc=\"sidenav\"] a');\n"
+	lookups, _ := scanChromeLookups(src, map[string]int{"all": 0})
+	for _, l := range lookups {
+		if l.line == 5 && !l.passThrough {
+			t.Errorf("querySelectorAll(sel) on line 5 lost its pass-through: the body scan ended early")
+		}
+		if !l.rooted && !l.passThrough {
+			t.Errorf("line %d: unrooted lookup %q", l.line, l.key)
 		}
 	}
 }

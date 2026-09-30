@@ -626,3 +626,114 @@ func writeLiveRegistry(t *testing.T, p resume.Paths, pid int) {
 		t.Fatalf("write registry: %v", err)
 	}
 }
+
+// TestDetailsNeverRenderToolOrDiskText is the #716 sweep: every Detail built
+// from a subprocess, a server or a file on disk is a fixed categorical string
+// (plus, for the two version lines, a version-shaped token parsed out of the
+// output), never the raw text. MARKER stands for anything the tool, the tap's
+// server or a planted file could choose.
+func TestDetailsNeverRenderToolOrDiskText(t *testing.T) {
+	const marker = "MARKER\x1b[2J"
+	failing := func(name string) *exec.FakeRunner {
+		return &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
+			return "", &exec.CommandError{Name: name, Args: []string{"https://tok@evil.test/" + marker}, Stderr: marker, Err: errors.New("exit status 1")}
+		}}
+	}
+	printing := func(out string) *exec.FakeRunner {
+		return &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) { return out, nil }}
+	}
+	orig := meta.Version
+	t.Cleanup(func() { meta.Version = orig })
+	meta.Version = "1.0.0"
+
+	cases := []struct {
+		name  string
+		check func() Check
+		want  string
+	}{
+		{"sops unrunnable", func() Check {
+			return checkSops(context.Background(), Deps{LookPath: fakeLookPath("sops"), Runner: failing("sops")})
+		}, "sops --version failed"},
+		{"sops version line with trailing tool text", func() Check {
+			return checkSops(context.Background(), Deps{LookPath: fakeLookPath("sops"), Runner: printing("sops 3.13.3 (latest) " + marker)})
+		}, "sops 3.13.3"},
+		{"sops output with no version", func() Check {
+			return checkSops(context.Background(), Deps{LookPath: fakeLookPath("sops"), Runner: printing(marker)})
+		}, "sops present; version not recognized"},
+		{"brew outdated failed", func() Check {
+			return checkForgectlVersion(context.Background(), Deps{LookPath: fakeLookPath("brew"), Runner: failing("brew")})
+		}, "brew outdated failed"},
+		{"brew outdated verbose line", func() Check {
+			return checkForgectlVersion(context.Background(), Deps{LookPath: fakeLookPath("brew"), Runner: printing("cameronsjo/tap/forgectl (0.9.0) != 0.10.0 " + marker)})
+		}, "forgectl 0.9.0 installed, 0.10.0 available"},
+		{"brew outdated terse line", func() Check {
+			return checkForgectlVersion(context.Background(), Deps{LookPath: fakeLookPath("brew"), Runner: printing("forgectl" + marker)})
+		}, "a newer forgectl is available"},
+		{"trust store fails to verify", func() Check {
+			err := fmt.Errorf("%w: trust store signed by %s, not the anchor", bless.ErrTrustStoreInvalid, marker)
+			return checkTrustStore(Deps{TrustedStore: func() (bless.Store, error) { return bless.Store{}, err }})
+		}, "trust store failed to verify under the anchor"},
+		{"trust anchor unsafe", func() Check {
+			err := fmt.Errorf("%w: parse anchor /etc/%s: bad", bless.ErrNoAnchor, marker)
+			return checkTrustStore(Deps{TrustedStore: func() (bless.Store, error) { return bless.Store{}, err }})
+		}, "trust anchor is missing or not root-owned"},
+		{"trust store unreadable", func() Check {
+			err := errors.New("read " + marker)
+			return checkTrustStore(Deps{TrustedStore: func() (bless.Store, error) { return bless.Store{}, err }})
+		}, "trust store could not be read or verified"},
+		{"trust store missing", func() Check {
+			err := fmt.Errorf("%w: /home/%s/trust.toml", bless.ErrTrustStoreMissing, marker)
+			return checkTrustStore(Deps{TrustedStore: func() (bless.Store, error) { return bless.Store{}, err }})
+		}, "trust store not found"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := c.check()
+			if got.Detail != c.want {
+				t.Errorf("detail = %q, want %q", got.Detail, c.want)
+			}
+			if strings.Contains(got.Detail+got.Hint, "MARKER") || strings.Contains(got.Detail+got.Hint, "tok@") {
+				t.Errorf("check renders tool or disk text: %+v", got)
+			}
+		})
+	}
+}
+
+// TestCheckClaude_DetailOmitsConfiguredPath: the resolution error renders the
+// configured path and a wrapped filesystem error; the Detail says only that
+// claude is not usable (#716).
+func TestCheckClaude_DetailOmitsConfiguredPath(t *testing.T) {
+	redirectConfigDir(t)
+	t.Setenv("FORGECTL_CLAUDE_BIN", "")
+	d := Deps{Cfg: config.Config{Launch: config.LaunchConfig{Defaults: config.LaunchDefaults{BinaryPath: t.TempDir() + "/MARKER-claude"}}}}
+	check := checkClaude(d)
+	if check.State != StateFail {
+		t.Fatalf("state = %q, want fail", check.State)
+	}
+	if check.Detail != "claude binary not found or not usable" {
+		t.Errorf("detail = %q, want the categorical message", check.Detail)
+	}
+}
+
+// TestCheckResumeTasks_DirNameIsBounded: the drifted task directory name is
+// disk text; it is quoted and capped, never rendered whole (#716).
+func TestCheckResumeTasks_DirNameIsBounded(t *testing.T) {
+	home := t.TempDir()
+	long := "team-" + strings.Repeat("x", 200)
+	if err := os.MkdirAll(filepath.Join(home, "tasks", long), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	d := Deps{ResumePaths: func() (resume.Paths, error) {
+		return resume.Paths{ClaudeHome: home, StoreDir: filepath.Join(home, "store")}, nil
+	}}
+	check := checkResumeTasks(d)
+	if check.State != StateWarn {
+		t.Fatalf("state = %q (detail %q), want warn for a drifted dialect", check.State, check.Detail)
+	}
+	if strings.Contains(check.Detail, strings.Repeat("x", 81)) {
+		t.Errorf("detail renders the whole %d-rune directory name: %q", len(long), check.Detail)
+	}
+	if !strings.Contains(check.Detail, "…") {
+		t.Errorf("detail = %q, want the capped name's ellipsis", check.Detail)
+	}
+}

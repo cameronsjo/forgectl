@@ -288,7 +288,9 @@ func (c *Client) deleteLocal(ctx context.Context, info Info) error {
 		slog.Debug("Preparing to remove worktree before deleting branch.", "branch", info.Name, "worktree", info.WorktreePath)
 		if _, err := c.run.Run(ctx, "git", "worktree", "remove", "--", info.WorktreePath); err != nil {
 			slog.Error("Failed to remove worktree.", "branch", info.Name, "worktree", info.WorktreePath, "error", err)
-			return fmt.Errorf("remove worktree %s before deleting branch %s: %w", info.WorktreePath, info.Name, err)
+			// Categorical cause (#717): git's stderr is not echoed; the path
+			// and name are quoted so a control or bidi rune stays inert.
+			return fmt.Errorf("remove worktree %s before deleting branch %s: %w", termsafe.QuotePath(info.WorktreePath), termsafe.QuoteText(info.Name), termsafe.Categorical("git worktree remove failed", err))
 		}
 		slog.Debug("Successfully removed worktree.", "branch", info.Name, "worktree", info.WorktreePath)
 	}
@@ -302,7 +304,7 @@ func (c *Client) deleteLocal(ctx context.Context, info Info) error {
 	slog.Debug("Preparing to delete local branch.", "branch", info.Name)
 	if _, err := c.run.Run(ctx, "git", "branch", "-D", "--", info.Name); err != nil {
 		slog.Error("Failed to delete local branch.", "branch", info.Name, "error", err)
-		return fmt.Errorf("delete local branch %s: %w", info.Name, err)
+		return fmt.Errorf("delete local branch %s: %w", termsafe.QuoteText(info.Name), termsafe.Categorical("git branch -D failed", err))
 	}
 	slog.Info("Successfully deleted local branch.", "branch", info.Name)
 	return nil
@@ -316,12 +318,12 @@ func (c *Client) deleteRemote(ctx context.Context, remoteName string, info Info)
 		slog.Error("Failed to delete remote branch.", "remote", remoteName, "branch", info.Name, "error", err)
 		// Categorical cause (#658): git relays the remote's sideband
 		// ("remote: …") on stderr, which is server-chosen text.
-		return fmt.Errorf("delete remote branch %s/%s: %w", remoteName, info.Name, termsafe.Categorical("git push --delete failed", err))
+		return fmt.Errorf("delete remote branch %s on remote %s: %w", termsafe.QuoteText(info.Name), termsafe.QuoteText(remoteName), termsafe.Categorical("git push --delete failed", err))
 	}
 
 	origin, err := c.resolveRemote(ctx, remoteName)
 	if err != nil {
-		return fmt.Errorf("resolve owner/repo to verify remote delete of %s: %w", info.Name, err)
+		return fmt.Errorf("resolve owner/repo to verify remote delete of %s: %w", termsafe.QuoteText(info.Name), err)
 	}
 	if err := c.verifyRemoteDeleted(ctx, origin, info.Name); err != nil {
 		slog.Error("Failed to verify remote branch deletion.", "remote", remoteName, "branch", info.Name, "error", err)
@@ -337,12 +339,23 @@ type originRepo struct {
 	host, owner, repo string
 }
 
-// resolveRemote reads the URL of the remote the branch was just deleted from
-// (`git remote get-url <remoteName>`) and takes host, owner, and repo from it
-// with pr.ParseRemoteURL. The verification must ask about the repository the
-// delete went to: gh's own repo resolution picks a base repo (an upstream,
-// a set default) that need not be that remote, and its host need not be the
-// remote's either (#413).
+// resolveRemote reads the PUSH URL of the remote the branch was just deleted
+// from (`git remote get-url --push --all <remoteName>`) and takes host,
+// owner, and repo from it with pr.ParseRemoteURL. The verification must ask about the
+// repository the delete went to: gh's own repo resolution picks a base repo
+// (an upstream, a set default) that need not be that remote, and its host
+// need not be the remote's either (#413). Within the remote it is the push
+// URL, not the fetch URL, because `git push --delete` goes there: a remote
+// that fetches from upstream and pushes to a fork (remote.<name>.pushurl)
+// would otherwise have its delete verified against upstream, whose 404 for a
+// branch it never had reads as success (#707).
+//
+// A remote can carry several push URLs, and `git push --delete` pushes to
+// every one. Without --all, get-url prints only the FIRST and exits 0, which
+// would leave the rest unverified. So resolveRemote reads them all and
+// refuses more than one as "cannot verify": it does not verify each. That
+// fails closed and keeps one repository per verification. A multi-target
+// push remote is rare, and the operator can check it by hand.
 //
 // The URL is hostile input and can carry a credential: the host must pass
 // the hostname predicate, owner and repo the owner/repo guard, and every
@@ -353,9 +366,12 @@ func (c *Client) resolveRemote(ctx context.Context, remoteName string) (originRe
 	if remoteName == "" || strings.HasPrefix(remoteName, "-") {
 		return originRepo{}, errors.New("remote name is not usable as a git argument")
 	}
-	out, err := c.run.Run(ctx, "git", "remote", "get-url", remoteName)
+	out, err := c.run.Run(ctx, "git", "remote", "get-url", "--push", "--all", remoteName)
 	if err != nil {
 		return originRepo{}, errors.New("could not read the remote's URL")
+	}
+	if nonEmptyLines(out) > 1 {
+		return originRepo{}, errors.New("remote has more than one push URL; cannot verify the delete against a single repository")
 	}
 	host, owner, repo, ok := pr.ParseRemoteURL(out)
 	if !ok {
@@ -386,15 +402,15 @@ func (c *Client) verifyRemoteDeleted(ctx context.Context, origin originRepo, nam
 	path := fmt.Sprintf("repos/%s/%s/git/ref/heads/%s", origin.owner, origin.repo, name)
 	_, err := c.run.Run(ctx, "gh", "api", "--hostname="+origin.host, path)
 	if err == nil {
-		// The response body is gh output and is not echoed (#562); the path
-		// is built from validated parts.
-		return fmt.Errorf("remote branch %q still exists after delete (GET %s succeeded)", name, path)
+		// The response body is gh output and is not echoed (#562). The name
+		// is rendered once, quoted; owner and repo are validated parts.
+		return fmt.Errorf("remote branch %s still exists on %s/%s after delete (its ref GET succeeded)", termsafe.QuoteText(name), origin.owner, origin.repo)
 	}
 	if !strings.Contains(err.Error(), "404") {
 		// Categorical cause (#658), as the git push leg: err is gh's stderr,
 		// text the host chooses.
 		slog.Error("Failed to verify remote branch deletion.", "branch", name, "error", err)
-		return fmt.Errorf("verify remote branch %q deletion: %w", name, termsafe.Categorical("gh api failed", err))
+		return fmt.Errorf("verify remote branch %s deletion: %w", termsafe.QuoteText(name), termsafe.Categorical("gh api failed", err))
 	}
 	return nil
 }
@@ -555,6 +571,17 @@ func (c *Client) prHeadsByState(ctx context.Context, state string) (map[string]i
 		byHead[r.HeadRefName] = r.Number
 	}
 	return byHead, nil
+}
+
+// nonEmptyLines counts the lines of s that are not blank.
+func nonEmptyLines(s string) int {
+	n := 0
+	for _, line := range strings.Split(s, "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // firstNonEmpty returns override if it's non-empty, else fallback.

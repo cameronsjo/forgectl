@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
@@ -15,12 +16,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/tomlerr"
 )
 
 // logKeepDays is how many daily log files are retained before pruning.
@@ -99,6 +102,12 @@ const logKeepDays = 7
 //	[theme.colors]
 //	accent = "#dbbb6f"                              # scalar: both modes
 //	danger = { dark = "#e6a8a2", light = "#8a2418" } # table: per mode
+//	[herdr.organize]     # forgectl herdr organize — group herdr tabs into workspaces
+//	default = "misc"                 # workspace for tabs no rule matches
+//	workspace_order = ["forge", "misc"]
+//	[[herdr.organize.rule]]
+//	glob      = "*/Projects/forge/* :: *"  # matched against "<cwd> :: <title>"
+//	workspace = "forge"
 type Config struct {
 	NoIcons   bool            `toml:"no_icons"`
 	LogLevel  string          `toml:"log_level"`
@@ -119,15 +128,20 @@ type Config struct {
 	Pr        PrConfig        `toml:"pr"`
 	Github    GithubConfig    `toml:"github"`
 	Theme     ThemeConfig     `toml:"theme"`
+	Herdr     HerdrConfig     `toml:"herdr"`
 	launchSet bool
+	// herdrOrganizeSet records that [herdr.organize] is present in the file,
+	// even as an empty table (what `forgectl init` writes).
+	herdrOrganizeSet bool
 	// decodeDegraded records that the config file existed but failed to
 	// decode, so this Config may be missing sections the operator wrote.
 	// Host-sensitive consumers (projects, review) must refuse loudly rather
 	// than run against a silently-defaulted github.com — see DecodeDegraded.
 	decodeDegraded bool
-	// decodeErr is the parse failure behind decodeDegraded, already worded for
-	// the operator (file, line and column). Nil unless the file existed and
-	// failed to parse — an absent file and an unreadable one never set it.
+	// decodeErr is the failure behind decodeDegraded, already worded for the
+	// operator: the file plus a line and column when it did not parse, or a
+	// fixed reason when it could not be read (forgectl#684). Nil when the file
+	// was absent or loaded cleanly.
 	decodeErr error
 }
 
@@ -141,10 +155,12 @@ func (c Config) DecodeDegraded() bool {
 	return c.decodeDegraded
 }
 
-// DecodeError returns why config.toml failed to parse, or nil when it parsed
-// or was absent. The error names the file and, for a syntax error, the line
-// and column. Execute refuses to run most commands on a non-nil value rather
-// than fall back to defaults the operator never chose (forgectl#653).
+// DecodeError returns why config.toml failed to load, or nil when it loaded or
+// was absent. The error names the file and either, for a syntax error, the
+// line and column, or, for a file that exists but cannot be read (permission
+// denied, a directory, a FIFO), the reason. Execute refuses to run most
+// commands on a non-nil value rather than fall back to defaults the operator
+// never chose (forgectl#653, forgectl#684).
 func (c Config) DecodeError() error {
 	return c.decodeErr
 }
@@ -154,6 +170,13 @@ func (c Config) DecodeError() error {
 // migration: even an empty table shadows the compatibility source.
 func (c Config) HasLaunchSection() bool {
 	return c.launchSet || !c.Launch.IsZero()
+}
+
+// HasHerdrOrganizeSection reports whether the file defines [herdr.organize],
+// even empty. `forgectl init` writes an empty one, and `herdr organize` words
+// its no-rules guidance differently once the section exists.
+func (c Config) HasHerdrOrganizeSection() bool {
+	return c.herdrOrganizeSet || !c.Herdr.Organize.IsZero()
 }
 
 // LaunchConfig is the [launch] section: base defaults plus directory-keyed
@@ -320,16 +343,16 @@ func (pc ProxyConfig) ResolveLaunchProfile() (profile ProxyProfile, ok bool, err
 	}
 	profile, found := pc.Profiles[pc.LaunchProfile]
 	if !found {
-		return ProxyProfile{}, false, fmt.Errorf("%w: %q", ErrUnknownLaunchProfile, pc.LaunchProfile)
+		return ProxyProfile{}, false, fmt.Errorf("%w: %s", ErrUnknownLaunchProfile, quoteConfigValue(pc.LaunchProfile))
 	}
 	if profile.IsZero() {
-		return ProxyProfile{}, false, fmt.Errorf("%w: %q", ErrEmptyLaunchProfile, pc.LaunchProfile)
+		return ProxyProfile{}, false, fmt.Errorf("%w: %s", ErrEmptyLaunchProfile, quoteConfigValue(pc.LaunchProfile))
 	}
 	if profile.RoutesTraffic() && profile.NoProxy == "" {
-		return ProxyProfile{}, false, fmt.Errorf("%w: %q", ErrLaunchProfileNoBypass, pc.LaunchProfile)
+		return ProxyProfile{}, false, fmt.Errorf("%w: %s", ErrLaunchProfileNoBypass, quoteConfigValue(pc.LaunchProfile))
 	}
 	if field, found := profile.credentialField(); found {
-		return ProxyProfile{}, false, fmt.Errorf("%w: %q sets %s", ErrLaunchProfileCredentials, pc.LaunchProfile, field)
+		return ProxyProfile{}, false, fmt.Errorf("%w: %s sets %s", ErrLaunchProfileCredentials, quoteConfigValue(pc.LaunchProfile), field)
 	}
 	return profile, true, nil
 }
@@ -702,12 +725,12 @@ func (tc ThemeConfig) Validate() error {
 	switch tc.Preset {
 	case "", "artificer", "legacy":
 	default:
-		return fmt.Errorf("[theme].preset = %q: must be \"artificer\" or \"legacy\"", tc.Preset)
+		return fmt.Errorf("[theme].preset = %s: must be \"artificer\" or \"legacy\"", quoteConfigValue(tc.Preset))
 	}
 	switch tc.Mode {
 	case "", "auto", "dark", "light":
 	default:
-		return fmt.Errorf("[theme].mode = %q: must be \"auto\", \"dark\", or \"light\"", tc.Mode)
+		return fmt.Errorf("[theme].mode = %s: must be \"auto\", \"dark\", or \"light\"", quoteConfigValue(tc.Mode))
 	}
 
 	keys := make([]string, 0, len(tc.Colors))
@@ -726,21 +749,21 @@ func (tc ThemeConfig) Validate() error {
 	for _, key := range keys {
 		canonical := strings.ToLower(key)
 		if !themeRoleSet[canonical] {
-			return fmt.Errorf("[theme].colors[%q]: unknown role; roles are %s", key, strings.Join(ThemeRoleNames, ", "))
+			return fmt.Errorf("[theme].colors[%s]: unknown role; roles are %s", quoteConfigValue(key), strings.Join(ThemeRoleNames, ", "))
 		}
 		if prev, dup := claimed[canonical]; dup {
-			return fmt.Errorf("[theme].colors: role %q set twice, as %q and %q; keep one", canonical, prev, key)
+			return fmt.Errorf("[theme].colors: role %q set twice, as %s and %s; keep one", canonical, quoteConfigValue(prev), quoteConfigValue(key))
 		}
 		claimed[canonical] = key
 		c := tc.Colors[key]
 		if c.Dark == "" && c.Light == "" {
-			return fmt.Errorf("[theme].colors[%q]: no colour given", key)
+			return fmt.Errorf("[theme].colors[%s]: no colour given", quoteConfigValue(key))
 		}
 		if c.Dark != "" && !hexColorRe.MatchString(c.Dark) {
-			return fmt.Errorf("[theme].colors[%q].dark = %q: must be a #rrggbb hex colour", key, c.Dark)
+			return fmt.Errorf("[theme].colors[%s].dark = %s: must be a #rrggbb hex colour", quoteConfigValue(key), quoteConfigValue(c.Dark))
 		}
 		if c.Light != "" && !hexColorRe.MatchString(c.Light) {
-			return fmt.Errorf("[theme].colors[%q].light = %q: must be a #rrggbb hex colour", key, c.Light)
+			return fmt.Errorf("[theme].colors[%s].light = %s: must be a #rrggbb hex colour", quoteConfigValue(key), quoteConfigValue(c.Light))
 		}
 	}
 	return nil
@@ -804,8 +827,20 @@ func (co *ColorOverride) UnmarshalTOML(data any) error {
 		}
 		if len(unknown) > 0 {
 			sort.Strings(unknown)
+			// Keys are the operator's own text: quoted and capped (#706),
+			// and at most a few of them, so a pasted table cannot flood
+			// the error.
+			const maxShown = 5
+			shown := make([]string, 0, maxShown)
+			for i, k := range unknown {
+				if i == maxShown {
+					shown = append(shown, "…")
+					break
+				}
+				shown = append(shown, quoteConfigValue(k))
+			}
 			return fmt.Errorf("[theme.colors]: unknown key(s) %s; a colour table takes only dark and light",
-				strings.Join(unknown, ", "))
+				strings.Join(shown, ", "))
 		}
 		return nil
 	default:
@@ -858,7 +893,7 @@ func (dc DocsConfig) Validate() error {
 	switch dc.SearchBackend {
 	case "", SearchBackendRipgrep, SearchBackendQMD:
 	default:
-		return fmt.Errorf("[docs].search_backend = %q: must be %q or %q", dc.SearchBackend, SearchBackendRipgrep, SearchBackendQMD)
+		return fmt.Errorf("[docs].search_backend = %s: must be %q or %q", quoteConfigValue(dc.SearchBackend), SearchBackendRipgrep, SearchBackendQMD)
 	}
 	keys := make([]string, 0, len(dc.RootKinds))
 	for key := range dc.RootKinds {
@@ -869,7 +904,7 @@ func (dc DocsConfig) Validate() error {
 		switch value := dc.RootKinds[key]; value {
 		case RootKindDocs, RootKindVault:
 		default:
-			return fmt.Errorf("[docs].root_kinds[%q] = %q: must be %q or %q", key, value, RootKindDocs, RootKindVault)
+			return fmt.Errorf("[docs].root_kinds[%s] = %s: must be %q or %q", quoteConfigValue(key), quoteConfigValue(value), RootKindDocs, RootKindVault)
 		}
 	}
 	return nil
@@ -907,7 +942,7 @@ func (dc DocsConfig) ExpandHome(home string) (DocsConfig, error) {
 		expanded := expandTilde(key, home)
 		value := dc.RootKinds[key]
 		if prev, ok := origin[expanded]; ok && out.RootKinds[expanded] != value {
-			return DocsConfig{}, fmt.Errorf("[docs].root_kinds: %q and %q name the same root with different kinds", prev, key)
+			return DocsConfig{}, fmt.Errorf("[docs].root_kinds: %s and %s name the same root with different kinds", quoteConfigValue(prev), quoteConfigValue(key))
 		}
 		if _, ok := origin[expanded]; !ok {
 			origin[expanded] = key
@@ -1083,25 +1118,52 @@ func LoadPath(path string) Config {
 		cfg.decodeDegraded = true
 		if decodeErr != nil {
 			cfg.decodeErr = describeDecodeError(path, decodeErr)
+		} else {
+			cfg.decodeErr = describeReadError(path, err)
 		}
 	}
 	return cfg
 }
 
-// describeDecodeError words a config parse failure for the operator: the file
-// and, when the decoder located the fault, its line and column. The underlying
-// error stays on the chain.
-func describeDecodeError(path string, err error) error {
-	var pe toml.ParseError
-	if errors.As(err, &pe) && pe.Position.Line > 0 {
-		return fmt.Errorf("config file %s does not parse (line %d, column %d): %w",
-			termsafe.QuotePath(path), pe.Position.Line, pe.Position.Col, err)
+// describeReadError words a config file that exists but cannot be read
+// (forgectl#684): the file and a fixed reason, never the raw error text. A
+// permission failure and a non-regular file (a directory, FIFO, socket or
+// device, which ReadPath refuses to read) are named; anything else carries
+// the operating system's own errno text. The underlying error stays on the
+// chain for errors.Is.
+func describeReadError(path string, err error) error {
+	reason := "read failed"
+	var errno syscall.Errno
+	switch {
+	case errors.Is(err, ErrConfigNonRegular):
+		reason = "not a regular file"
+	case errors.Is(err, fs.ErrPermission):
+		reason = "permission denied"
+	case errors.As(err, &errno):
+		reason = errno.Error()
 	}
-	return fmt.Errorf("config file %s does not parse: %w", termsafe.QuotePath(path), err)
+	return termsafe.Categorical(fmt.Sprintf("config file %s cannot be read: %s", termsafe.QuotePath(path), reason), err)
+}
+
+// describeDecodeError words a config parse failure for the operator: the file
+// and, when the decoder located the fault, its line and column (carried by
+// tomlerr.Scrub's text). The underlying error stays on the chain.
+func describeDecodeError(path string, err error) error {
+	return fmt.Errorf("config file %s does not parse: %w", termsafe.QuotePath(path), tomlerr.Scrub(err))
+}
+
+// quoteConfigValue is how a validation error echoes a value from config.toml
+// (forgectl#706): visibly quoted with control characters escaped, and capped
+// at termsafe.ArgEchoMaxRunes so a pasted blob cannot flood the terminal or
+// the log. It is echoed rather than made categorical because the file is the
+// operator's own and the rejected value is the useful half of the diagnostic.
+func quoteConfigValue(v string) string {
+	return termsafe.QuoteArgMax(v, 0)
 }
 
 // DecodeStrict decodes an immutable config snapshot and retains table
 // presence metadata. Migration uses it only after acquiring the writer lock.
+// A parse error comes back scrubbed of the value text it quotes (#687).
 func DecodeStrict(data []byte) (Config, error) {
 	var cfg Config
 	if len(data) == 0 {
@@ -1109,7 +1171,8 @@ func DecodeStrict(data []byte) (Config, error) {
 	}
 	meta, err := toml.Decode(string(data), &cfg)
 	cfg.launchSet = meta.IsDefined("launch")
-	return cfg, err
+	cfg.herdrOrganizeSet = meta.IsDefined("herdr", "organize")
+	return cfg, tomlerr.Scrub(err)
 }
 
 // Validate decodes the config file and checks the sections that carry semantic
@@ -1137,7 +1200,7 @@ func ValidatePath(path string) error {
 		return nil
 	}
 	if err != nil {
-		return err
+		return describeReadError(path, err)
 	}
 	cfg, err := DecodeStrict(data)
 	if err != nil {
@@ -1147,6 +1210,9 @@ func ValidatePath(path string) error {
 		return err
 	}
 	if err := cfg.Proxy.Validate(); err != nil {
+		return err
+	}
+	if err := cfg.Herdr.Organize.Validate(); err != nil {
 		return err
 	}
 	return cfg.Theme.Validate()
@@ -1585,7 +1651,7 @@ func LoadLegacyLaunch() (LaunchConfig, string, error) {
 		if os.IsNotExist(err) {
 			return LaunchConfig{}, path, fmt.Errorf("%w at %s", ErrNoLegacyLaunch, path)
 		}
-		return LaunchConfig{}, path, fmt.Errorf("read legacy claunch.conf at %s: %w", path, err)
+		return LaunchConfig{}, path, fmt.Errorf("read legacy claunch.conf at %s: %w", path, tomlerr.Scrub(err))
 	}
 	return stripLegacyUsageOptIn(lc), path, nil
 }

@@ -513,17 +513,31 @@ func (c *Client) repairAdoptLocked(ctx context.Context, member breadcrumbMember,
 			"use 'forgectl pr repair %s --apply %s' instead",
 			ref.String(), termsafe.QuotePath(bc.Workspace), member.displayPath, RepairModeRollback)
 	}
-	// Under the lifecycle lock, so the resolve is bounded (forgectl#656).
+	// Under the lifecycle lock, so the resolve is bounded (forgectl#656). The
+	// bound's state is read BEFORE done(): done cancels the context, after
+	// which Err() is non-nil whether or not tmux ever timed out.
 	tctx, done := boundedTmux(ctx)
 	window, err := c.resolveReviewWindow(tctx, ref)
+	timedOut := err != nil && (tctx.Err() != nil || errors.Is(err, context.DeadlineExceeded))
 	done()
+	if timedOut {
+		item.Outcome = repairOutcomeRefused
+		return item, fmt.Errorf("refusing to adopt %s: tmux did not answer within %s, so whether its review window "+
+			"exists is unknown — retry once tmux responds: %w", ref.String(), lockedTmuxBudget, err)
+	}
 	if errors.Is(err, tmux.ErrAmbiguousWindow) {
 		item.Outcome = repairOutcomeRefused
 		return item, fmt.Errorf("refusing to adopt %s: %w — close the window that is not this review, then retry",
 			ref.String(), err)
 	}
+	if err != nil && !windowConfirmedAbsent(err) {
+		item.Outcome = repairOutcomeRefused
+		return item, fmt.Errorf("refusing to adopt %s: tmux could not say whether its review window exists "+
+			"(an unreadable window list is not an absent window) — check `tmux list-windows -a`, then retry: %w",
+			ref.String(), err)
+	}
 	if err != nil {
-		item.Outcome = "refused"
+		item.Outcome = repairOutcomeRefused
 		name, nameErr := ReviewWindowName(ref)
 		if nameErr != nil {
 			return item, nameErr
@@ -565,8 +579,8 @@ func (c *Client) repairAdoptLocked(ctx context.Context, member breadcrumbMember,
 
 // writeAdoptedRecord lands the `active` record. A v2 record goes through the
 // ordinary compare-and-write transition; a LEGACY record has no revision to
-// compare, so it is written with the legacy expectation — the one conversion
-// that exists, and the only transition a legacy record accepts.
+// compare, so it is converted with the legacy expectation (see
+// convertLegacyRecordLocked).
 func (c *Client) writeAdoptedRecord(path string, bc Breadcrumb, windowID string) error {
 	if bc.Version == breadcrumbVersion {
 		return c.transitionLocked(path, anyPhase, PhaseActive, func(rec *Breadcrumb) error {
@@ -575,18 +589,31 @@ func (c *Client) writeAdoptedRecord(path string, bc Breadcrumb, windowID string)
 			return nil
 		})
 	}
-	// The legacy branch bypasses transitionOnce, so it does not inherit that
-	// function's read-and-write-name-the-same-file guard. Its one caller passes
-	// an already-resolved member path; this is the backstop a second caller
-	// would otherwise be missing.
+	return c.convertLegacyRecordLocked(path, bc, PhaseActive, func(rec *Breadcrumb) {
+		rec.WindowID = windowID
+	})
+}
+
+// convertLegacyRecordLocked rewrites the legacy (versionless) record bc, read
+// from path, as a v2 record at revision 1 in phase to, with mut applied. It is
+// written with the legacy expectation, so a record that changed underneath —
+// already converted, or gone — refuses instead of being overwritten. This is
+// the one conversion that exists and the only transition a legacy record
+// accepts; its two uses are adopting a live window (`active`) and parking a
+// teardown that could not settle the window (`needs-repair`, forgectl#696).
+func (c *Client) convertLegacyRecordLocked(path string, bc Breadcrumb, to Phase, mut func(*Breadcrumb)) error {
+	// The conversion bypasses transitionOnce, so it does not inherit that
+	// function's read-and-write-name-the-same-file guard. Its callers pass an
+	// already-resolved member path; this is the backstop a new caller would
+	// otherwise be missing.
 	if err := c.assertDirectSessionsDirEntry(path); err != nil {
 		return err
 	}
 	next := bc
 	next.Version = breadcrumbVersion
-	next.Phase = PhaseActive
+	next.Phase = to
 	next.Revision = 1
-	next.WindowID = windowID
+	mut(&next)
 	if err := validateBreadcrumbRecord(next); err != nil {
 		return fmt.Errorf("refusing to write the converted record: %w", err)
 	}

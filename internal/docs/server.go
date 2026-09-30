@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -427,14 +426,18 @@ func handleDoc(store *Store) http.HandlerFunc {
 		// another.
 		idx := store.Current()
 
-		absPath, err := idx.Resolve(root, rest)
+		// Open, not Resolve then open by path: the file is opened through
+		// the root's os.Root and must be the file resolution approved, so a
+		// symlink swapped in after the check cannot redirect the read.
+		f, _, err := idx.Open(root, rest)
 		if err != nil {
 			slog.Debug("docs: request did not resolve to a servable file.", "root", root, "rest", rest, "error", err)
 			http.NotFound(w, r)
 			return
 		}
 
-		source, tooLarge, err := readDocCapped(absPath)
+		source, tooLarge, err := readDocCapped(f)
+		_ = f.Close()
 		if err != nil {
 			slog.Warn("docs: resolved path could not be read.", "error", err)
 			http.NotFound(w, r)
@@ -501,14 +504,10 @@ func handleDoc(store *Store) http.HandlerFunc {
 // markup guard (markupguard.go) bounds those.
 const renderCapBytes = maxScanBytes
 
-// readDocCapped reads at most renderCapBytes of path. tooLarge reports that
-// the file holds more than that, in which case source is nil.
-func readDocCapped(path string) (source []byte, tooLarge bool, err error) {
-	f, err := os.Open(path) //nolint:gosec // G304: path came from Index.Resolve, which re-verifies containment
-	if err != nil {
-		return nil, false, err
-	}
-	defer func() { _ = f.Close() }()
+// readDocCapped reads at most renderCapBytes of f, a doc Index.Open opened.
+// tooLarge reports that the file holds more than that, in which case source
+// is nil.
+func readDocCapped(f io.Reader) (source []byte, tooLarge bool, err error) {
 	// One byte past the cap detects an over-cap file without reading the rest.
 	source, err = io.ReadAll(io.LimitReader(f, renderCapBytes+1))
 	if err != nil {

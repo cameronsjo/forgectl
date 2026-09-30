@@ -12,3 +12,8 @@ package config
 func WithFileLock(_ string, fn func() error) error {
 	return fn()
 }
+
+// WithFileLockNotify has no waiting to announce off Unix; it runs fn.
+func WithFileLockNotify(_ string, _ func(), fn func() error) error {
+	return fn()
+}

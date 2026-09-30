@@ -218,6 +218,26 @@ func TestCheck_SymlinkEscapeIsBroken(t *testing.T) {
 	}
 }
 
+// forgectl#611 item 3: a link written as a directory must name one. A
+// trailing slash on a regular file, a doc or not, is a broken link; on a
+// real directory it passes as before.
+func TestCheck_TrailingSlashOnAFileIsBroken(t *testing.T) {
+	dir := t.TempDir()
+	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[g](guide.md/) [l](LICENSE/) [s](sub/) [ok](guide.md)\n")
+	checkWrite(t, filepath.Join(dir, "guide.md"), "# G\n")
+	checkWrite(t, filepath.Join(dir, "LICENSE"), "MIT\n")
+	checkWrite(t, filepath.Join(dir, "sub", "notes.txt"), "n\n")
+
+	r := checkIndex(t, dir).Check()
+	var targets []string
+	for _, f := range findingsOf(r, FindingBrokenLink) {
+		targets = append(targets, f.Target)
+	}
+	if len(targets) != 2 || targets[0] != "LICENSE/" || targets[1] != "guide.md/" {
+		t.Fatalf("broken_link targets = %q, want [LICENSE/ guide.md/]; findings %+v", targets, r.Findings)
+	}
+}
+
 func TestCheck_Orphan(t *testing.T) {
 	dir := t.TempDir()
 	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[a](a.md)\n")

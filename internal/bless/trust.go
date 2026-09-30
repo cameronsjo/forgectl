@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/cameronsjo/forgectl/internal/tomlerr"
 )
 
 // Store is the parsed trust store: the set of enrolled machine public keys plus
@@ -59,10 +61,10 @@ func DecodeStore(data []byte) (Store, error) {
 	var s Store
 	md, err := toml.Decode(string(data), &s)
 	if err != nil {
-		return Store{}, fmt.Errorf("decode trust store: %w", err)
+		return Store{}, fmt.Errorf("decode trust store: %w", tomlerr.Scrub(err))
 	}
 	if undecoded := md.Undecoded(); len(undecoded) > 0 {
-		return Store{}, fmt.Errorf("decode trust store: unknown key(s) %s", joinKeys(undecoded))
+		return Store{}, fmt.Errorf("decode trust store: unknown key(s) %s", tomlerr.Keys(undecoded))
 	}
 	if s.Schema != StoreSchema {
 		return Store{}, fmt.Errorf("decode trust store: unsupported schema %d (want %d)", s.Schema, StoreSchema)

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -215,6 +216,7 @@ func TestBalanceFragment_RandomTagSoup(t *testing.T) {
 		if !wellNested(t, out) {
 			t.Fatalf("doc %d: output is not well nested\nsrc: %q\n in: %q\nout: %q", doc, b.String(), in, out)
 		}
+		requireNoStraySVG(t, fmt.Sprintf("doc %d %q", doc, b.String()), out)
 		if again := balanceFragment(out); again != out {
 			t.Fatalf("doc %d: balanceFragment is not idempotent\n out: %q\nagain: %q", doc, out, again)
 		}
@@ -668,5 +670,234 @@ func TestBalanceDeep_Linear(t *testing.T) {
 	}
 	if strings.Contains(out, "</i>") || strings.Count(out, "</b>") != 170_000 {
 		t.Fatalf("stray </i> kept or <b> left open")
+	}
+}
+
+// straySVGSpellings is every SVG-only name the policy allows, in the three
+// spellings a document can use: as listed, lowercased and uppercased.
+func straySVGSpellings() []string {
+	var names []string
+	for _, name := range svgElements {
+		if name != "svg" {
+			names = append(names, name, strings.ToLower(name), strings.ToUpper(name))
+		}
+	}
+	return names
+}
+
+// svgOnlyNames is the test's own copy of the SVG-only names, lowercased, so
+// requireNoStraySVG does not grade the balancer with the balancer's own set.
+var svgOnlyNames = map[string]bool{
+	"g": true, "defs": true, "symbol": true, "path": true, "rect": true,
+	"circle": true, "ellipse": true, "line": true, "polyline": true,
+	"polygon": true, "text": true, "tspan": true, "marker": true,
+	"clippath": true, "mask": true, "lineargradient": true,
+	"radialgradient": true, "stop": true,
+}
+
+// TestSVGOnlyNames_MatchPolicy keeps svgOnlyNames in step with the policy's
+// list, so a new SVG element in the allowlist is covered by these tests.
+func TestSVGOnlyNames_MatchPolicy(t *testing.T) {
+	if len(svgElements) != len(svgOnlyNames)+1 {
+		t.Fatalf("svgElements has %d names, svgOnlyNames %d (+ svg)", len(svgElements), len(svgOnlyNames))
+	}
+	for _, name := range svgElements {
+		if name != "svg" && !svgOnlyNames[strings.ToLower(name)] {
+			t.Errorf("svgElements name %q missing from svgOnlyNames", name)
+		}
+	}
+}
+
+// findStraySVG returns the first element under n that the tree builder put
+// in HTML content under an SVG-only name.
+func findStraySVG(n *html.Node) *html.Node {
+	if n.Type == html.ElementNode && n.Namespace == "" && svgOnlyNames[strings.ToLower(n.Data)] {
+		return n
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if f := findStraySVG(c); f != nil {
+			return f
+		}
+	}
+	return nil
+}
+
+// requireNoStraySVG fails when out, parsed as the shell parses it, holds an
+// SVG-only element in HTML content, or is not well nested.
+func requireNoStraySVG(t *testing.T, label, out string) {
+	t.Helper()
+	nodes, err := parseBody(out)
+	if err != nil {
+		t.Fatalf("%s: parseBody: %v", label, err)
+	}
+	for _, n := range nodes {
+		if f := findStraySVG(n); f != nil {
+			t.Errorf("%s: <%s> left in HTML content:\n%s", label, f.Data, out)
+			break
+		}
+	}
+	if !fragmentWellNested(out, nodes) {
+		t.Errorf("%s: output not well nested:\n%s", label, out)
+	}
+}
+
+// TestRender_StraySVGNames_Unwrapped pins cameronsjo/forgectl#619: an
+// SVG-only element name outside SVG content loses its tag and keeps its
+// text, in every spelling, whether it was written in prose or left behind
+// after an HTML tag broke out of an <svg>.
+//
+// Mutations: make strayForeignElements return false — every case comes back
+// with its tag and this goes red. Drop the strings.ToLower in svgOnlyElements
+// — the camelCase names (clipPath, linearGradient, radialGradient) survive
+// and this goes red.
+func TestRender_StraySVGNames_Unwrapped(t *testing.T) {
+	cases := map[string]string{
+		"issue prose":           "cat <path>: No such file\n\nMARKER",
+		"after svg breakout":    "<svg viewBox=\"0 0 1 1\"><p>x</p><rect width=\"1\"/></svg>\n\nMARKER",
+		"open g swallows prose": "a <g> b\n\nMARKER",
+	}
+	for _, name := range straySVGSpellings() {
+		// Closed, the stray leaves the body well nested, so only the
+		// namespace check sends it to the rebuild; left open, it does not.
+		cases["closed "+name] = "a <" + name + " fill=\"red\" transform=\"scale(2)\">in</" + name + "> b\n\nMARKER"
+		cases["open "+name] = "a <" + name + ">in\n\nMARKER"
+	}
+	for label, src := range cases {
+		for _, kind := range []RootKind{RootDocs, RootVault} {
+			out, err := render([]byte(src), kind)
+			if err != nil {
+				t.Fatalf("%s: render: %v", label, err)
+			}
+			requireNoStraySVG(t, label, out)
+			if !strings.Contains(out, "MARKER") {
+				t.Errorf("%s: marker lost:\n%s", label, out)
+			}
+		}
+	}
+	out, err := Render([]byte(cases["issue prose"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "<p>cat : No such file</p>"; !strings.Contains(out, want) {
+		t.Errorf("issue prose: render = %q, want %q", out, want)
+	}
+}
+
+// TestRender_InlineSVGKeepsItsElements requires the unwrap to leave SVG
+// content alone: every allowed SVG element inside an <svg> comes back byte
+// for byte.
+//
+// Mutation: in isStrayForeign, drop the n.Namespace == "" test — every
+// element inside the <svg> is unwrapped and this goes red.
+func TestRender_InlineSVGKeepsItsElements(t *testing.T) {
+	var b strings.Builder
+	_, _ = b.WriteString(`<svg viewBox="0 0 2 2">`)
+	for _, name := range svgElements {
+		if name != "svg" {
+			_, _ = b.WriteString("<" + name + ` fill="red">t</` + name + ">")
+		}
+	}
+	_, _ = b.WriteString("</svg>")
+	in := sanitizer.Sanitize(b.String())
+	if got, passes := balancePasses(in); got != in || passes != 0 {
+		t.Fatalf("balancePasses changed inline SVG (passes %d):\n in: %s\nout: %s", passes, in, got)
+	}
+}
+
+// TestStrayForeign_ByNamespaceNotAncestor pins the test the balancer uses:
+// the namespace the tree builder gave the element, not whether an <svg>
+// encloses it. The sanitizer drops foreignObject and desc with their content,
+// so these HTML islands never reach the balancer from a document; the test
+// drives the balancer's own functions on them directly.
+//
+// Mutation: make isStrayForeign test for an <svg> ancestor instead of the
+// namespace — the island's <path> reads as contained and this goes red.
+func TestStrayForeign_ByNamespaceNotAncestor(t *testing.T) {
+	for _, tc := range []struct {
+		src   string
+		stray bool
+		want  string
+	}{
+		{`<svg><foreignObject><p>a<path>x</path></p></foreignObject></svg>`, true,
+			`<svg><foreignObject><p>ax</p></foreignObject></svg>`},
+		{`<svg><desc><PATH>x</PATH></desc></svg>`, true,
+			`<svg><desc>x</desc></svg>`},
+		{`<svg><foreignObject><div><svg><path d="M0"></path></svg></div></foreignObject></svg>`, false, ""},
+		{`<svg><g><clipPath><rect></rect></clipPath></g></svg>`, false, ""},
+	} {
+		nodes, err := parseBody(tc.src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strayForeignElements(nodes); got != tc.stray {
+			t.Errorf("%s: strayForeignElements = %v, want %v", tc.src, got, tc.stray)
+			continue
+		}
+		if !tc.stray {
+			continue
+		}
+		root := fragmentContext()
+		for _, n := range nodes {
+			root.AppendChild(n)
+		}
+		unwrapStrayForeign(root)
+		var buf strings.Builder
+		for n := root.FirstChild; n != nil; n = n.NextSibling {
+			if err := html.Render(&buf, n); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if buf.String() != tc.want {
+			t.Errorf("%s: unwrapped = %s, want %s", tc.src, buf.String(), tc.want)
+		}
+	}
+}
+
+// TestRender_DeepStraySVGNames_Unwrapped carries #619 into balanceDeep: a
+// body too deep for the tree builder drops SVG-only names in HTML content
+// too, and keeps them inside an <svg>.
+//
+// Mutation: in balanceDeep, remove the svgOnlyElements continue — the
+// prose <path> and <rect> are written out and this goes red.
+func TestRender_DeepStraySVGNames_Unwrapped(t *testing.T) {
+	src := strings.Repeat("<b>", 600) + "cat <path>: x <svg><p>y</p><rect width=\"1\"/></svg> " +
+		`<svg viewBox="0 0 1 1"><g><path d="M0 0"/></g></svg>` + "\n\n</div></main>ESC\n"
+	out, err := Render([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(out, "<path") != 1 || strings.Contains(out, "<rect") || !strings.Contains(out, `<g><path d="M0 0"/></g>`) {
+		t.Errorf("deep render kept a stray SVG name or lost the inline one:\n%.400s", out[strings.LastIndex(out, "<b>"):])
+	}
+}
+
+// htmlElementNames is every element name the HTML Living Standard defines,
+// plus the obsolete ones browsers still parse as HTML, lowercased.
+var htmlElementNames = strings.Fields(`
+a abbr address area article aside audio b base bdi bdo blockquote body br
+button canvas caption cite code col colgroup data datalist dd del details
+dfn dialog div dl dt em embed fieldset figcaption figure footer form h1 h2
+h3 h4 h5 h6 head header hgroup hr html i iframe img input ins kbd label
+legend li link main map mark menu meta meter nav noscript object ol
+optgroup option output p picture pre progress q rp rt ruby s samp script
+search section select slot small source span strong style sub summary sup
+table tbody td template textarea tfoot th thead time title tr track u ul
+var video wbr
+acronym applet basefont bgsound big blink center dir font frame frameset
+image isindex keygen listing marquee menuitem multicol nextid nobr noembed
+noframes plaintext rb rtc spacer strike tt xmp`)
+
+// Every svgElements name but svg is unwrapped wherever it appears in HTML
+// content (strayForeignElements, balanceDeep). A name that is also an HTML
+// element (a, title, style, image) would silently unwrap every legitimate
+// use of that element, so none may be one (cameronsjo/forgectl#745).
+func TestSVGElements_NoneIsAnHTMLElementName(t *testing.T) {
+	if len(htmlElementNames) < 130 {
+		t.Fatalf("htmlElementNames has %d names; the list is truncated", len(htmlElementNames))
+	}
+	for _, name := range svgElements {
+		if slices.Contains(htmlElementNames, strings.ToLower(name)) {
+			t.Errorf("svgElements lists %q, which is also an HTML element: every HTML <%s> would be unwrapped as a stray SVG element", name, name)
+		}
 	}
 }

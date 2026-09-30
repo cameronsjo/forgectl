@@ -484,10 +484,11 @@ func TestBuildInvocation_TargetCWDSelectsProfile(t *testing.T) {
 // exist, because most inputs launder it away by accident and would make this
 // test pass over an aliasing builder:
 //
-//   - argv: every posture but one rebuilds the slice inside its argv builder.
-//     The agents scripting passthrough is the single path that returns the
-//     caller's args as the harness argv, so it is the only one where the clone
-//     is load-bearing.
+//   - argv: every posture but the two passthroughs rebuilds the slice inside
+//     its argv builder. The agents scripting passthrough and the Claude
+//     passthrough return the caller's args as the harness argv, so they are
+//     where the clone is load-bearing; both share the one clone at the top of
+//     BuildInvocation, and the agents case exercises it.
 //   - env: MergeEnv rebuilds whenever it has an overlay to apply, so a profile
 //     with any env at all hides the alias. The exposed case is an empty
 //     overlay, where MergeEnv returns its base untouched.
@@ -664,9 +665,62 @@ func TestBuildInvocation_Postures(t *testing.T) {
 		{
 			name:        "claude with passthrough args",
 			cfg:         claudeCfg,
-			args:        []string{"-p", "hello"},
+			args:        []string{"hello"},
 			wantPosture: PostureClaudeBuilder,
-			wantArgs:    func(p Profile) []string { return BuilderArgs(p, []string{"-p", "hello"}) },
+			wantArgs:    func(p Profile) []string { return BuilderArgs(p, []string{"hello"}) },
+		},
+		{
+			name:        "claude print mode keeps only the permission mode",
+			cfg:         claudeCfg,
+			args:        []string{"-p", "hello"},
+			wantPosture: PostureClaudePrint,
+			wantArgs:    func(p Profile) []string { return PrintArgs(p, []string{"-p", "hello"}) },
+		},
+		{
+			name:        "help in a value slot cannot take print mode out of its permission mode",
+			cfg:         claudeCfg,
+			args:        []string{"-p", "--append-system-prompt", "--help", "hi"},
+			wantPosture: PostureClaudePrint,
+			wantArgs: func(p Profile) []string {
+				return PrintArgs(p, []string{"-p", "--append-system-prompt", "--help", "hi"})
+			},
+		},
+		{
+			name:        "help in a value slot keeps the builder posture",
+			cfg:         claudeCfg,
+			args:        []string{"--append-system-prompt", "--help", "hi"},
+			wantPosture: PostureClaudeBuilder,
+			wantArgs: func(p Profile) []string {
+				return BuilderArgs(p, []string{"--append-system-prompt", "--help", "hi"})
+			},
+		},
+		{
+			name:        "leading help passes through byte-clean",
+			cfg:         claudeCfg,
+			args:        []string{"--help"},
+			wantPosture: PostureClaudePassthrough,
+			wantArgs:    func(Profile) []string { return []string{"--help"} },
+		},
+		{
+			name:        "claude subcommand after claude's own separator passes through",
+			cfg:         claudeCfg,
+			args:        []string{"--", "mcp", "list"},
+			wantPosture: PostureClaudePassthrough,
+			wantArgs:    func(Profile) []string { return []string{"--", "mcp", "list"} },
+		},
+		{
+			name:        "claude subcommand passes through byte-clean",
+			cfg:         claudeCfg,
+			args:        []string{"mcp", "list"},
+			wantPosture: PostureClaudePassthrough,
+			wantArgs:    func(Profile) []string { return []string{"mcp", "list"} },
+		},
+		{
+			name:        "print flag after claude's own separator is prompt text",
+			cfg:         claudeCfg,
+			args:        []string{"--", "-p"},
+			wantPosture: PostureClaudeBuilder,
+			wantArgs:    func(p Profile) []string { return BuilderArgs(p, []string{"--", "-p"}) },
 		},
 		{
 			name:        "claude agents with posture injection",
@@ -820,7 +874,7 @@ func TestEmitBanner_ClassifiesEveryPosture(t *testing.T) {
 		t.Fatal("allPostures is empty; the loop below would pass vacuously")
 	}
 
-	silent := map[Posture]bool{PostureClaudeBuilder: true, PostureAgentsPassthrough: true}
+	silent := map[Posture]bool{PostureClaudeBuilder: true, PostureAgentsPassthrough: true, PostureClaudePassthrough: true, PostureClaudePrint: true}
 	seen := map[Posture]bool{}
 
 	for _, p := range allPostures {
@@ -842,7 +896,7 @@ func TestEmitBanner_ClassifiesEveryPosture(t *testing.T) {
 	// The other direction: selectPosture must not be able to return a posture
 	// absent from allPostures, or the loop above would skip it entirely.
 	target := projectDir(t)
-	for _, args := range [][]string{nil, {"-p", "x"}, {"agents", "list"}, {"agents", "--json"}} {
+	for _, args := range [][]string{nil, {"x"}, {"-p", "x"}, {"mcp", "list"}, {"agents", "list"}, {"agents", "--json"}} {
 		built, err := BuildInvocation(InvocationRequest{
 			Config:  parityConfig(target),
 			CWD:     target,
@@ -877,6 +931,8 @@ func TestEmitBanner_ByPosture(t *testing.T) {
 		{PosturePiArgs, "→ pi --model sonnet\n"},
 		{PostureClaudeBuilder, ""},
 		{PostureAgentsPassthrough, ""},
+		{PostureClaudePassthrough, ""},
+		{PostureClaudePrint, ""},
 	}
 
 	for _, tc := range tests {

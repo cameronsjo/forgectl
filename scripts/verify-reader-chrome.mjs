@@ -5,14 +5,19 @@
 //
 // A doc can carry any class, and the sanitizer keeps some chrome tags
 // (<aside>, <details>). Mermaid renders in the browser after the sanitizer,
-// and its own DOMPurify keeps data-*, so a diagram label can carry a data-fc
-// hook until mermaid-init.js scrubs it. This serves one hostile doc that
-// plants a copy of every chrome class the scripts once looked up, plus
-// data-fc hooks in a classDiagram label and in an htmlLabels flowchart, and
-// checks that the real chrome still does its job:
+// and its own DOMPurify keeps data-*, so with HTML labels on a diagram label
+// could carry a data-fc hook. This serves one hostile doc that plants a copy
+// of every chrome class the scripts once looked up, plus data-fc hooks in a
+// classDiagram label and in a flowchart whose directive asks for
+// htmlLabels, and checks that the real chrome still does its job:
 //
-//   - no data-fc hook survives inside the doc body once mermaid has rendered,
-//     on first load and again after a live-reload swap re-renders it;
+//   - the mermaid labels render as inert SVG text (forgectl#713), and no
+//     data-fc hook survives inside the doc body once mermaid has rendered,
+//     on first load and again after a live-reload swap re-renders it, and a
+//     hook forged inside a diagram is gone by the next task boundary;
+//   - the sanitizer strips the planted chrome classes (forgectl#700), so a
+//     planted Artificer overlay (.scrim, .toast-region) stays in the doc's
+//     flow instead of pinning itself over the reader;
 //   - the sidebar filter folds and hides only the sidenav, never the doc's
 //     planted <div class="sidenav"> with its <details> and group heading;
 //   - a live-reload swap updates the real outline pane and status bar, not
@@ -23,6 +28,11 @@
 //     <div class="doc-body">;
 //   - a live-reload swap keeps focus on a doc link that mimics a sidenav
 //     link's href and class, rather than moving it to the sidenav;
+//   - a live-reload swap puts focus back on a diagram's pan/zoom viewport or
+//     reset button once the diagram has re-rendered, and so does a theme flip;
+//   - a planted .tooltip paints nothing outside the doc pane and never makes
+//     the page itself scroll, and a diagram's own chrome class names
+//     (A:::scrim) are scrubbed from its nodes;
 //   - a swap that adds text above a heading slugged "doc-filter" (a chrome
 //     id) keeps that heading where the reader had it;
 //   - deleting the doc puts the missing banner in the real doc body.
@@ -84,17 +94,22 @@ const planted = [
   '<div class="sidenav"><div class="sidenav__group">PLANTED-GROUP</div>' +
     '<details open><summary>PLANTED-DETAILS</summary>inside</details></div>',
   '<div class="doc-body"><p>PLANTED-BODY copy me</p></div>',
+  '<div class="scrim">PLANTED-SCRIM</div>',
+  '<div class="toast-region">PLANTED-TOAST</div>',
+  '<div class="tooltip tooltip--bottom">PLANTED-TIP-BOTTOM</div>',
+  `<div class="tooltip">PLANTED-TIP-LONG ${'wide '.repeat(600)}</div>`,
 ].join('\n\n');
 
-// Rendered by mermaid, which keeps data-* in labels. The flowchart turns on
-// htmlLabels with a doc-level init directive, which the reader's own config
-// sets false.
+// Rendered by mermaid, whose DOMPurify keeps data-* in HTML labels. The
+// flowchart asks for htmlLabels with a doc-level init directive, which the
+// reader's config pins off (forgectl#713).
 const mermaidPlants = [
   '```mermaid\nclassDiagram\nclass Foo["<i data-fc=\'outline\'>MER-CLASS</i>"]\n```',
   '```mermaid\n%%{init: {"flowchart": {"htmlLabels": true}}}%%\nflowchart LR\n' +
     '  A["<details open data-fc=\'sidenav\'><summary>MER-DETAILS</summary>x</details>' +
     '<span data-fc=\'outline\'>MER-OUTLINE</span><span data-fc=\'statusbar\'>s</span>' +
-    '<span data-fc=\'live-status\'>l</span><span data-fc=\'doc-missing\'>m</span>"]\n```',
+    '<span data-fc=\'live-status\'>l</span><span data-fc=\'doc-missing\'>m</span>"]\n' +
+    '  A --> B:::scrim\n  class A statusbar\n```',
 ].join('\n\n');
 
 // Enough prose that the doc pane scrolls, with a heading whose slug is the
@@ -153,33 +168,127 @@ const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 try {
   // Never 'networkidle': the live-reload SSE stream never goes idle.
   await page.goto(`${base}/doc/docs/hostile.md`, { waitUntil: 'load', timeout: 30000 });
-  // Fixture sanity: every planted element made it through the sanitizer.
-  const plantedCount = await page.evaluate(() => [
-    'aside.outline', 'details.outline-inline', '.sidenav .sidenav__group', '.doc-body .doc-body',
-  ].filter((s) => document.querySelector('[data-fc="doc-body"]').querySelector(s)).length);
-  if (plantedCount !== 4) problems.push(`fixture: ${plantedCount}/4 planted elements survived; the checks below prove nothing`);
+  // Fixture sanity: every planted element made it through the sanitizer,
+  // as content. Its chrome classes are stripped (forgectl#700), so find each
+  // by tag and text.
+  const plantedCount = await page.evaluate(() => {
+    const body = document.querySelector('[data-fc="doc-body"]');
+    const has = (sel, text) => [...body.querySelectorAll(sel)].some((el) => el.textContent.includes(text));
+    return [['aside', 'PLANTED-OUTLINE'], ['details', 'PLANTED-INLINE'], ['div', 'PLANTED-GROUP'],
+      ['div', 'PLANTED-BODY'], ['div', 'PLANTED-SCRIM'], ['div', 'PLANTED-TOAST']]
+      .filter(([sel, text]) => has(sel, text)).length;
+  });
+  if (plantedCount !== 6) problems.push(`fixture: ${plantedCount}/6 planted elements survived; the checks below prove nothing`);
+
+  // A planted overlay class must not pin anything over the reader.
+  const overlays = await page.evaluate(() => {
+    const body = document.querySelector('[data-fc="doc-body"]');
+    return ['PLANTED-SCRIM', 'PLANTED-TOAST'].map((text) => {
+      const el = [...body.querySelectorAll('div')].find((d) => d.textContent === text);
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { text, position: getComputedStyle(el).position, width: Math.round(r.width), height: Math.round(r.height) };
+    }).filter(Boolean);
+  });
+  for (const o of overlays) {
+    if (o.position === 'fixed' || o.position === 'sticky') problems.push(`overlay: the doc's ${o.text} is position:${o.position} (${o.width}x${o.height}); a chrome class reached it`);
+  }
 
   await mermaidRendered(page);
-  // Fixture sanity: the labels rendered as markup, not as escaped text.
+
+  // A doc's absolute-positioned Artificer classes stay inside the doc pane
+  // (forgectl#745). .tooltip is position:absolute, z-index 1000 and
+  // white-space:nowrap; with no positioned ancestor a .tooltip--bottom sat
+  // under the status bar and made the page itself scroll, and the long one
+  // ran across the outline column. The pane clips what overflows it, so the
+  // check is what paints outside it: each chrome region is screenshotted
+  // with the tooltips in place and again with them removed.
+  const tipsFound = await page.evaluate(() => [...document.querySelectorAll('[data-fc="doc-body"] div')]
+    .filter((d) => d.textContent.startsWith('PLANTED-TIP-')).length);
+  if (tipsFound !== 2) {
+    problems.push(`fixture: ${tipsFound}/2 planted tooltips survived; the containment check proves nothing`);
+  } else {
+    const pageScroll = await page.evaluate(() => {
+      const se = document.scrollingElement;
+      return { h: se.scrollHeight - window.innerHeight, w: se.scrollWidth - window.innerWidth };
+    });
+    if (pageScroll.h > 0 || pageScroll.w > 0) problems.push(`containment: the page itself scrolls by ${JSON.stringify(pageScroll)}; a planted tooltip escaped the doc pane`);
+    const regions = await page.evaluate(() => ['outline', 'statusbar', 'appbar', 'sidenav'].map((id) => {
+      const el = document.querySelector(`[data-fc="${id}"]`);
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { id, clip: { x: r.left, y: r.top, width: Math.min(r.width, window.innerWidth - r.left), height: Math.min(r.height, window.innerHeight - r.top) } };
+    }).filter((r) => r && r.clip.width > 0 && r.clip.height > 0));
+    const shots = async () => Promise.all(regions.map((r) => page.screenshot({ clip: r.clip })));
+    const withTips = await shots();
+    await page.evaluate(() => [...document.querySelectorAll('[data-fc="doc-body"] div')]
+      .filter((d) => d.textContent.startsWith('PLANTED-TIP-')).forEach((d) => { d.hidden = true; }));
+    const without = await shots();
+    await page.evaluate(() => [...document.querySelectorAll('[data-fc="doc-body"] div')]
+      .filter((d) => d.textContent.startsWith('PLANTED-TIP-')).forEach((d) => { d.hidden = false; }));
+    regions.forEach((r, i) => {
+      if (!withTips[i].equals(without[i])) problems.push(`containment: a planted tooltip paints over the ${r.id} chrome`);
+    });
+  }
+
+  // Chrome class names a diagram gives its own nodes (A:::scrim, class A
+  // statusbar) are scrubbed like forged hooks (forgectl#745).
+  const merChrome = await page.evaluate(() => [...document.querySelectorAll('[data-fc="doc-body"] pre.mermaid [class]')]
+    .flatMap((el) => [...el.classList]).filter((c) => /^(scrim|statusbar)([-_]|$)/.test(c)));
+  if (merChrome.length > 0) problems.push(`mermaid: chrome classes survived on diagram nodes: ${merChrome.join(', ')}`);
+
+  // The labels rendered, and as SVG text rather than live markup.
   const labels = await page.evaluate(() => {
     const body = document.querySelector('[data-fc="doc-body"]');
+    const text = [...body.querySelectorAll('pre.mermaid svg')].map((s) => s.textContent).join(' ');
     return {
-      cls: [...body.querySelectorAll('pre.mermaid i')].some((i) => i.textContent === 'MER-CLASS'),
-      det: [...body.querySelectorAll('pre.mermaid details')].some((d) => d.textContent.includes('MER-DETAILS')),
+      rendered: text.includes('MER-CLASS') && text.includes('MER-DETAILS'),
+      markup: body.querySelectorAll('pre.mermaid i, pre.mermaid details, pre.mermaid span[data-fc]').length,
     };
   });
-  if (!labels.cls || !labels.det) problems.push(`fixture: mermaid labels did not render as markup ${JSON.stringify(labels)}; the hook checks prove nothing`);
+  if (!labels.rendered) problems.push('fixture: the mermaid label text did not render; the hook checks prove nothing');
+  if (labels.markup > 0) problems.push(`mermaid: ${labels.markup} label element(s) rendered as live HTML (htmlLabels is on)`);
   await noForgedHooks(page, 'first render');
+
+  // The scrub's timing (forgectl#718). With htmlLabels pinned off, mermaid
+  // 11.12.3 emits no hook to watch for, so the probe forges two itself: an
+  // element inserted with data-fc, and data-fc set on an element already in
+  // the diagram. A MessageChannel message is a task, so its handler samples
+  // at the first task boundary after the forgery, which is the earliest
+  // point an event or network callback could see it. A scrub that ran only
+  // when mermaid.run resolved would leave both up here.
+  const timing = await page.evaluate(() => new Promise((resolve) => {
+    const pre = document.querySelector('[data-fc="doc-body"] pre.mermaid');
+    const g = pre && pre.querySelector('svg g');
+    if (!g) { resolve(null); return; }
+    const span = document.createElement('span');
+    span.setAttribute('data-fc', 'outline');
+    pre.appendChild(span);
+    g.setAttribute('data-fc', 'statusbar');
+    const sync = span.hasAttribute('data-fc') && g.hasAttribute('data-fc');
+    const ch = new MessageChannel();
+    ch.port1.onmessage = () => {
+      const out = { sync, inserted: span.hasAttribute('data-fc'), attribute: g.hasAttribute('data-fc') };
+      span.remove();
+      g.removeAttribute('data-fc');
+      resolve(out);
+    };
+    ch.port2.postMessage(0);
+  }));
+  if (timing === null) {
+    problems.push('scrub timing: no rendered diagram to forge a hook in; the check proves nothing');
+  } else {
+    if (!timing.sync) problems.push('scrub timing: the forged hooks were gone synchronously; the probe cannot tell a task-boundary scrub from none');
+    if (timing.inserted || timing.attribute) problems.push(`scrub timing: a forged hook survived to the next task ${JSON.stringify(timing)}`);
+  }
 
   // Sidebar filter: a query that matches no doc.
   await page.fill('[data-fc="doc-filter"]', 'zzz-no-such-doc');
   const filter = await page.evaluate(() => {
     const body = document.querySelector('[data-fc="doc-body"]');
     const det = [...body.querySelectorAll('details')].find((d) => d.textContent.includes('PLANTED-DETAILS'));
-    const grp = [...body.querySelectorAll('.sidenav__group')].find((g) => g.textContent.includes('PLANTED-GROUP'));
-    const mer = [...body.querySelectorAll('pre.mermaid details')].find((d) => d.textContent.includes('MER-DETAILS'));
+    const grp = [...body.querySelectorAll('div')].find((g) => g.textContent === 'PLANTED-GROUP');
     return {
-      merOpen: mer ? mer.open : null,
       detOpen: det.open,
       detShown: getComputedStyle(det).display !== 'none',
       detMarked: det.dataset.openAtRest !== undefined,
@@ -188,8 +297,7 @@ try {
     };
   });
   if (!filter.detOpen || !filter.detShown || filter.detMarked) problems.push(`filter: reached the doc's planted <details> ${JSON.stringify(filter)}`);
-  if (filter.merOpen === false) problems.push('filter: folded a <details> inside a mermaid label');
-  if (!filter.grpShown) problems.push('filter: hid the doc\'s planted .sidenav__group');
+  if (!filter.grpShown) problems.push('filter: hid the doc\'s planted sidenav group');
   if (!filter.empty) problems.push('filter: the real "no docs match" note did not show');
   await page.fill('[data-fc="doc-filter"]', '');
 
@@ -236,7 +344,7 @@ try {
   const swapped = await page.evaluate(() => ({
     inPlace: window.__noFullReload === true,
     outline: document.querySelector('[data-fc="outline"]').textContent.includes('Added Heading'),
-    plantedIntact: [...document.querySelectorAll('[data-fc="doc-body"] aside.outline')]
+    plantedIntact: [...document.querySelectorAll('[data-fc="doc-body"] aside')]
       .some((a) => a.textContent.includes('PLANTED-OUTLINE') && !a.textContent.includes('Added Heading')),
     status: document.querySelector('[data-fc="statusbar"]').textContent,
   }));
@@ -286,6 +394,68 @@ try {
     });
     if (!after2.focusInDoc || after2.focusText !== 'MIMIC-LINK') problems.push(`focus: a swap moved focus off the doc link to ${JSON.stringify(after2.focusText)}`);
     if (Math.abs(after2.delta - pos.delta) > 2) problems.push(`scroll: the "Doc filter" heading moved ${after2.delta - pos.delta}px across a swap (anchor restore used the chrome id)`);
+  }
+
+  // Focus inside a diagram survives a swap (forgectl#718): the swap brings
+  // each diagram back as source, so the viewport and reset button are put
+  // back only once mermaid has rendered it again.
+  await mermaidRendered(page);
+  for (const [n, part] of [[1, '.dia-viewport'], [2, '.embed-reset']]) {
+    const focused = await page.evaluate((sel) => {
+      const embeds = document.querySelectorAll('[data-fc="doc-body"] .embed');
+      const el = embeds[1] && embeds[1].querySelector(sel);
+      if (!el) return false;
+      el.focus({ preventScroll: true });
+      return document.activeElement === el;
+    }, part);
+    if (!focused) {
+      problems.push(`diagram focus: could not focus the second diagram's ${part}; the check proves nothing`);
+      continue;
+    }
+    const marker = `Diagram focus edit ${n}.`;
+    writeFileSync(docPath, hostile({ extra: `${added}\n${marker}\n`, mimic }));
+    try {
+      await page.waitForFunction((m) => document.querySelector('[data-fc="doc-body"]').textContent.includes(m),
+        marker, { timeout: 15000 });
+      await mermaidRendered(page);
+      await page.waitForFunction((sel) => {
+        const embeds = document.querySelectorAll('[data-fc="doc-body"] .embed');
+        return embeds[1] && document.activeElement === embeds[1].querySelector(sel);
+      }, part, { timeout: 3000 });
+    } catch {
+      const now = await page.evaluate(() => {
+        const f = document.activeElement;
+        return f ? `${f.localName}.${f.className}` : null;
+      });
+      problems.push(`diagram focus: after a swap focus is on ${now}, not the second diagram's ${part}`);
+    }
+  }
+
+  // A theme flip re-renders every diagram too, and puts focus back the
+  // same way (forgectl#745).
+  // The flip's observer runs as a microtask, so the drop is sampled after
+  // one: the old viewport must have left the document by then.
+  const themeFocus = await page.evaluate(async () => {
+    const vp = document.querySelectorAll('[data-fc="doc-body"] .embed')[1]?.querySelector('.dia-viewport');
+    if (!vp) return false;
+    vp.focus({ preventScroll: true });
+    const root = document.documentElement;
+    root.setAttribute('data-theme', root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+    await Promise.resolve();
+    return !vp.isConnected && document.activeElement !== vp;
+  });
+  if (!themeFocus) {
+    problems.push('theme focus: the flip did not drop focus from the viewport; the check proves nothing');
+  } else {
+    try {
+      await page.waitForFunction(() => {
+        const embed = document.querySelectorAll('[data-fc="doc-body"] .embed')[1];
+        return embed && document.activeElement === embed.querySelector('.dia-viewport');
+      }, null, { timeout: 10000 });
+    } catch {
+      const now = await page.evaluate(() => document.activeElement && document.activeElement.localName);
+      problems.push(`theme focus: after a theme flip focus is on ${now}, not the second diagram's .dia-viewport`);
+    }
   }
 
   // Deleting the doc puts the banner in the real doc body.

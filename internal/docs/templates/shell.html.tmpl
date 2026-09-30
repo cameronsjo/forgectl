@@ -226,6 +226,17 @@ main.surface-document { max-width: 820px; }
 .home .table .num { white-space: nowrap; }
 .docs-nav .sidenav { border-radius: 0; border: 0; flex: 1; overflow-y: auto; }
 main.surface-document { padding: var(--s-xl); overflow-y: auto; min-height: 0; }
+/* The doc pane is the containing block, and the paint clip, for everything a
+   doc renders (forgectl#745). A doc can wear Artificer's position:absolute
+   classes (.tooltip is z-index 1000, white-space: nowrap), and with no
+   positioned ancestor they anchored to the page: a .tooltip--bottom sat under
+   the status bar and made the whole page scroll, a long .tooltip ran across
+   the outline column. contain: paint also contains position:fixed. It sits
+   on <main>, the pane's scroll container, not on .doc-body: clipping
+   .doc-body cut off wide tables and display math that scroll <main>
+   sideways today. Sticky table heads and the pan/zoom viewport are
+   unchanged (measured). */
+main.surface-document { position: relative; contain: paint; }
 /* The document pane scrolls, so with no link in view the browser makes the
    pane itself the keyboard stop. Give it the house ring, inset so the grid's
    edges don't clip it. */

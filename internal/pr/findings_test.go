@@ -79,6 +79,7 @@ package pr
 // appends to the real ~/.config/forgectl/pr-sessions audit log.
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -499,11 +500,11 @@ func failRemovalOf(t *testing.T, path string) {
 	t.Helper()
 	orig := findingsRemoveAll
 	t.Cleanup(func() { findingsRemoveAll = orig })
-	findingsRemoveAll = func(root *os.Root, name string) error {
+	findingsRemoveAll = func(root, child *os.Root, name string, judged fs.FileInfo) error {
 		if filepath.Join(root.Name(), name) == path {
 			return &os.PathError{Op: "unlinkat", Path: path, Err: syscall.EBUSY}
 		}
-		return orig(root, name)
+		return orig(root, child, name, judged)
 	}
 }
 

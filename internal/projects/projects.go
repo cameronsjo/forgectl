@@ -227,20 +227,28 @@ func withGitLookPath(fn func(string) (string, error)) Option {
 	return func(c *Client) { c.lookPath = fn }
 }
 
+// ResolveRoot returns the projects root: $PROJECTS_DIR (a leading ~/ is
+// expanded), else ~/Projects. It is what [New] uses, exported so a caller that
+// only needs the directory does not build a Client.
+func ResolveRoot() string {
+	dir := os.Getenv("PROJECTS_DIR")
+	home, _ := os.UserHomeDir()
+	switch {
+	case dir == "":
+		return filepath.Join(home, "Projects")
+	case strings.HasPrefix(dir, "~/"):
+		return filepath.Join(home, dir[2:])
+	default:
+		return dir
+	}
+}
+
 // New builds a Client. It reads $PROJECTS_DIR, falling back to ~/Projects.
 // A leading ~ is expanded so env vars stored as "~/Projects" work correctly.
 // It also resolves git exactly once to an absolute path; a lookup failure is
 // retained as an empty pin so status probes fail closed as StatusUnknown.
 func New(run exec.Runner, opts ...Option) *Client {
-	dir := os.Getenv("PROJECTS_DIR")
-	if dir == "" {
-		home, _ := os.UserHomeDir()
-		dir = filepath.Join(home, "Projects")
-	} else if strings.HasPrefix(dir, "~/") {
-		home, _ := os.UserHomeDir()
-		dir = filepath.Join(home, dir[2:])
-	}
-	c := &Client{Dir: dir, run: run, lookPath: osexec.LookPath, gitHubHost: githubauth.DefaultHost}
+	c := &Client{Dir: ResolveRoot(), run: run, lookPath: osexec.LookPath, gitHubHost: githubauth.DefaultHost}
 	for _, opt := range opts {
 		opt(c)
 	}

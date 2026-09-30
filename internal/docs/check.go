@@ -290,11 +290,18 @@ func isLinkFinding(k FindingKind) bool {
 // existsInRoot reports whether the link path names something on disk inside
 // root, for targets that resolve to no indexed doc (a directory, a LICENSE, an
 // image). The clean path is built the way resolveDocsDoc builds it. It reads
-// nothing; ResolveInRoot refuses a symlink that escapes the root.
+// nothing; ResolveInRoot refuses a symlink that escapes the root. A link
+// written as a directory ("guide.md/", "sub/.") must name a directory:
+// path.Clean drops that trailing "/", so it is put back for ResolveInRoot,
+// which answers ErrNotFound for a regular file, and the link is broken
+// rather than passing on the strength of a file of the same name.
 func existsInRoot(root Root, from *Doc, linkPath string) bool {
 	clean, ok := linkTargetPath(from, linkPath)
 	if !ok {
 		return false
+	}
+	if namesDirectory(linkPath) {
+		clean += "/"
 	}
 	_, err := ResolveInRoot(root.Path, clean)
 	return err == nil
