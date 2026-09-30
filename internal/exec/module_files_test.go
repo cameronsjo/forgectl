@@ -173,7 +173,10 @@ func listCompiledFiles(ctx context.Context) ([]moduleFile, error) {
 			} else if err != nil {
 				return nil, fmt.Errorf("decode go list for %s cgo=%s: %w", r.p, r.cgo, err)
 			}
-			if !pkg.Module.inTree(root) {
+			// A package whose own directory is in the tree is in scope whatever
+			// its module fields say: in vendor mode a vendored package reports
+			// its Dir under vendor/ and no Module.Dir at all.
+			if !pkg.Module.inTree(root) && (pkg.Dir == "" || !underRoot(root, pkg.Dir)) {
 				continue
 			}
 			for _, name := range pkg.files() {
@@ -249,7 +252,9 @@ var hiddenSourceAllowed = map[string]bool{}
 // behind a symlinked directory (add it to unsafeAllowed and the linkname rule
 // still fires); the same file tagged //go:build !zztag, run under an ambient
 // GOFLAGS=-tags=zztag; the same file in a nested module .zzmod pulled in by a
-// local replace; a new file importing "unsafe" alone; a file importing "C".
+// local replace; the same file as vendor/github.com/spf13/cobra/zz_probe.go
+// after go mod vendor; a new file importing "unsafe" alone; a file importing
+// "C".
 func TestNoFileReachesPastTheTypeSystem(t *testing.T) {
 	fset := token.NewFileSet()
 	parsed, sawExec := 0, false
@@ -338,7 +343,9 @@ func TestLinknameLinesSeesPastAByteOrderMark(t *testing.T) {
 //   - a symlink to a directory (or a symlink that does not resolve inside the
 //     module), anywhere;
 //   - a .go, .s or .S file under a directory whose name starts with "." or is
-//     testdata, unless hiddenSourceAllowed names it.
+//     testdata, unless hiddenSourceAllowed names it;
+//   - a vendor directory at the root, and a vendor/modules.txt anywhere,
+//     either of which turns on vendor mode (vendorAllowed is false).
 //
 // A directory holding its own go.mod is another module (a nested worktree,
 // say) and is not descended into. That skip is safe only because nothing can
@@ -379,11 +386,18 @@ func TestModuleTreeHidesNoGoSource(t *testing.T) {
 			return nil
 		}
 		if entry.IsDir() {
+			if path == "vendor" && !vendorAllowed {
+				findings = append(findings, "vendor: a vendor directory puts the go tool in vendor mode, compiling third-party source from inside the tree; forgectl vendors nothing")
+			}
 			if path != "." {
 				if _, statErr := fs.Stat(fsys, path+"/go.mod"); statErr == nil {
 					return fs.SkipDir // another module
 				}
 			}
+			return nil
+		}
+		if entry.Name() == "modules.txt" && filepath.Base(filepath.Dir(path)) == "vendor" && !vendorAllowed {
+			findings = append(findings, path+": a vendor/modules.txt turns on vendor mode for its module; forgectl vendors nothing")
 			return nil
 		}
 		if entry.Name() == "go.work" {
@@ -413,6 +427,11 @@ func TestModuleTreeHidesNoGoSource(t *testing.T) {
 		t.Fatal("walked nothing; the walk is broken, not the module clean")
 	}
 }
+
+// vendorAllowed says whether the module may vendor its dependencies. It is
+// false: forgectl vendors nothing, and a vendor directory would put source
+// the module does not own inside the tree and into the build.
+const vendorAllowed = false
 
 // localReplaceAllowed is the allowlist of module paths go.mod may replace with
 // a local directory. It is empty: go.mod has no replace directive today.
