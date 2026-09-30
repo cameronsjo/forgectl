@@ -34,6 +34,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // defaultRootSubdir is appended to the user's home directory for New's
@@ -190,7 +191,7 @@ func (c *Client) ScanReport(opts CleanOptions) (resolvedRoot string, report Repo
 
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
-		return "", Report{}, fmt.Errorf("resolve root %s: %w", root, err)
+		return "", Report{}, fmt.Errorf("resolve root %s: %w", termsafe.QuotePath(root), termsafe.Error(err))
 	}
 	// Resolve symlinks in root itself up front, once, so every containment
 	// check downstream (Scan's walk, delete's WithinWorkspace re-check)
@@ -357,7 +358,7 @@ func (c *Client) delete(root, target string) error {
 
 	slog.Debug("Preparing to reclaim directory.", "path", resolved)
 	if err := os.RemoveAll(resolved); err != nil {
-		return fmt.Errorf("remove %s: %w", resolved, err)
+		return fmt.Errorf("remove %s: %w", termsafe.QuotePath(resolved), termsafe.Error(err))
 	}
 	return nil
 }

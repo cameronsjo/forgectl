@@ -265,14 +265,32 @@ func Error(err error) error {
 	// cannot be read (forgectl#794); it falls through to errorText, whose
 	// recover turns its panicking Error method into errTextUnavailable.
 	if linkErr, ok := err.(*os.LinkError); ok && linkErr != nil {
-		message = fmt.Sprintf("%s %s %s: %s", SafeLine(linkErr.Op), QuotePathMax(linkErr.Old, 0), QuotePathMax(linkErr.New, 0), SafeLine(errorText(linkErr.Err)))
+		message = fmt.Sprintf("%s %s %s: %s", SafeLine(linkErr.Op), QuotePathMax(linkErr.Old, 0), QuotePathMax(linkErr.New, 0), causeText(linkErr.Err))
 	} else if pathErr, ok := err.(*os.PathError); ok && pathErr != nil {
-		message = fmt.Sprintf("%s %s: %s", SafeLine(pathErr.Op), QuotePathMax(pathErr.Path, 0), SafeLine(errorText(pathErr.Err)))
+		message = fmt.Sprintf("%s %s: %s", SafeLine(pathErr.Op), QuotePathMax(pathErr.Path, 0), causeText(pathErr.Err))
 	} else {
 		message = capWrappedPaths(errorText(err), overlongPathErrors(err))
 	}
 	return safeError{message: message, cause: err}
 }
+
+// causeText renders the Err field of a *PathError or *LinkError as Error
+// renders any error, so a path error nested there is capped too rather than
+// echoed whole by its native Error method (#845). A nil Err keeps errorText's
+// fallback, since the native Error method would panic on it.
+func causeText(err error) string {
+	if err == nil {
+		return SafeLine(errorText(err))
+	}
+	return Error(err).Error()
+}
+
+// chainWalkBudget bounds how many errors overlongPathErrors visits in one
+// chain. The depth bound alone stops a cycle through Unwrap() error, but a
+// cycle through Unwrap() []error fans out, and a fan-out-2 cycle 100 deep is
+// 2^100 visits (#845). It is far above any chain forgectl builds: an
+// errors.Join of thousands of path errors still fits.
+const chainWalkBudget = 10000
 
 // overlongPathErrors returns every *PathError and *LinkError in err's chain,
 // err itself excluded, whose path QuotePath would cut, in chain order. It
@@ -288,12 +306,17 @@ func overlongPathErrors(err error) (found []error) {
 				"error_type", fmt.Sprintf("%T", err), "panic_type", fmt.Sprintf("%T", r))
 		}
 	}()
+	budget := chainWalkBudget
 	var walk func(e error, depth int)
 	walk = func(e error, depth int) {
-		// The depth bound only stops a cyclic Unwrap from recursing forever.
-		if e == nil || depth > 100 {
+		// The depth bound stops a cyclic Unwrap() error from recursing
+		// forever; the node budget stops a fan-out cycle through
+		// Unwrap() []error, which the depth bound alone lets grow
+		// exponentially. A chain past either keeps what was found so far.
+		if e == nil || depth > 100 || budget <= 0 {
 			return
 		}
+		budget--
 		if depth > 0 {
 			if linkErr, ok := e.(*os.LinkError); ok && linkErr != nil {
 				if pathOverCap(linkErr.Old) || pathOverCap(linkErr.New) {
@@ -322,26 +345,137 @@ func pathOverCap(path string) bool {
 	return len(path) > PathEchoMaxRunes && utf8.RuneCountInString(path) > PathEchoMaxRunes
 }
 
-// capWrappedPaths is SafeLine(message), except that each span of message that
-// is the native text of one of pathErrs renders as that error's capped
+// capWrappedPaths is SafeLine(message), except that each span of it that
+// renders the native text of one of pathErrs becomes that error's capped
 // Error form instead (#837). fmt.Errorf's %w writes the wrapped error's
 // Error() text verbatim, so a wrapper that composed its message that way
 // still holds the span to find; a wrapper that did not leaves no span, and
-// its text renders as SafeLine renders it. The replacement text is capped
-// and quoted, so it never matches a native span again, and a second pass
-// over the result changes nothing.
+// its text renders as SafeLine renders it.
+//
+// The spans are found in the SafeLine form of message, matched against the
+// SafeLine form of each native text, so a raw copy that only escapes to a
+// native text is capped on the first pass too (#845). Every occurrence of
+// each native text is capped; where two overlap, the one earlier in chain
+// order wins. See findSpans for the cost.
+//
+// A second pass over the result changes nothing: the output is already
+// SafeLine-inert, and every matched span was replaced by a cut, quoted form
+// that no longer holds the whole path. The one exception is a path whose own
+// text contains another over-cap error's capped rendering, quotes and
+// ellipsis included, which a second pass may cap again. That output is still
+// safe to print; only the cap can differ.
 func capWrappedPaths(message string, pathErrs []error) string {
-	if len(pathErrs) == 0 {
-		return SafeLine(message)
+	escaped := SafeLine(message)
+	var needles []string
+	var owners []error
+	searched := make(map[string]bool, len(pathErrs))
+	for _, pathErr := range pathErrs {
+		native := errorText(pathErr)
+		if native == errTextUnavailable || native == "" {
+			continue
+		}
+		// A cyclic chain can list one error thousands of times; dedupe on
+		// its native text before paying for SafeLine.
+		if !searched[native] {
+			searched[native] = true
+			needles = append(needles, SafeLine(native))
+			owners = append(owners, pathErr)
+		}
 	}
-	native := errorText(pathErrs[0])
-	i := strings.Index(message, native)
-	if native == errTextUnavailable || native == "" || i < 0 {
-		return capWrappedPaths(message, pathErrs[1:])
+	type span struct {
+		start, end int
+		with       string
 	}
-	return capWrappedPaths(message[:i], pathErrs[1:]) +
-		Error(pathErrs[0]).Error() +
-		capWrappedPaths(message[i+len(native):], pathErrs)
+	var spans []span // accepted, sorted by start, never overlapping
+	renders := make([]string, len(needles))
+	for _, m := range findSpans(escaped, needles) {
+		start, end := m.start, m.start+len(needles[m.needle])
+		at := sort.Search(len(spans), func(k int) bool { return spans[k].start >= start })
+		if (at > 0 && spans[at-1].end > start) || (at < len(spans) && spans[at].start < end) {
+			continue
+		}
+		if renders[m.needle] == "" {
+			renders[m.needle] = Error(owners[m.needle]).Error()
+		}
+		spans = append(spans, span{})
+		copy(spans[at+1:], spans[at:])
+		spans[at] = span{start: start, end: end, with: renders[m.needle]}
+	}
+	if len(spans) == 0 {
+		return escaped
+	}
+	var out strings.Builder
+	out.Grow(len(escaped))
+	pos := 0
+	for _, s := range spans {
+		out.WriteString(escaped[pos:s.start])
+		out.WriteString(s.with)
+		pos = s.end
+	}
+	out.WriteString(escaped[pos:])
+	return out.String()
+}
+
+// spanMatch is one occurrence of needles[needle] in a text, at byte start.
+type spanMatch struct{ needle, start int }
+
+// findSpans returns the occurrences of each needle in text, ordered by needle
+// index and then by start. A needle's own occurrences never overlap: a match
+// resumes the search for that needle after its end, as a strings.Index loop
+// would.
+//
+// It is one Rabin-Karp scan of text over a window as long as the shortest
+// needle, so the cost is linear in len(text) rather than a scan per needle
+// (#845): an errors.Join of 2000 over-cap path errors shares a long
+// "open /…" prefix, which made per-needle strings.Index re-compare it at
+// every candidate. A window hit is confirmed by comparing the whole needle,
+// so a hash collision costs time, never a wrong match; needles sharing their
+// entire first window are the case that degrades toward a scan per needle.
+func findSpans(text string, needles []string) []spanMatch {
+	if len(needles) == 0 {
+		return nil
+	}
+	window := len(needles[0])
+	for _, n := range needles[1:] {
+		window = min(window, len(n))
+	}
+	if window == 0 || window > len(text) {
+		return nil
+	}
+	const prime = 16777619 // the multiplier Go's strings package uses for Rabin-Karp
+	var pow uint32 = 1     // prime^window, to drop the byte leaving the window
+	for range window {
+		pow *= prime
+	}
+	hashOf := func(s string) uint32 {
+		var h uint32
+		for i := range len(s) {
+			h = h*prime + uint32(s[i])
+		}
+		return h
+	}
+	byHash := make(map[uint32][]int, len(needles))
+	for i, n := range needles {
+		h := hashOf(n[:window])
+		byHash[h] = append(byHash[h], i)
+	}
+	nextFree := make([]int, len(needles)) // where needle i may next match
+	var matches []spanMatch
+	h := hashOf(text[:window])
+	for pos := 0; ; pos++ {
+		for _, i := range byHash[h] {
+			if pos >= nextFree[i] && strings.HasPrefix(text[pos:], needles[i]) {
+				matches = append(matches, spanMatch{needle: i, start: pos})
+				nextFree[i] = pos + len(needles[i])
+			}
+		}
+		if pos+window >= len(text) {
+			break
+		}
+		h = h*prime + uint32(text[pos+window]) - pow*uint32(text[pos])
+	}
+	sort.SliceStable(matches, func(a, b int) bool { return matches[a].needle < matches[b].needle })
+	return matches
 }
 
 // errTextUnavailable is the text Error gives an error whose Error method

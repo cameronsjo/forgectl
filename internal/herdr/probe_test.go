@@ -272,3 +272,34 @@ func TestCheckForkMarksDroppedStderrStart(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckSessionQuotesAndCapsTheSocketPath is forgectl#844: both failure
+// messages printed HERDR_SOCKET_PATH raw with %s, so a planted value reached
+// the terminal escaped only by the root backstop and never capped.
+//
+// Mutation that turns it red: print sock with a bare %s again on either
+// line (the stat-failure or the not-a-socket message).
+func TestCheckSessionQuotesAndCapsTheSocketPath(t *testing.T) {
+	sock := "/run/" + strings.Repeat("a", 2*termsafe.PathEchoMaxRunes) + "\x1b[31m/herdr.sock"
+	env := envOf(map[string]string{"HERDR_ENV": "1", "HERDR_SOCKET_PATH": sock})
+	for name, stat := range map[string]func(string) (fs.FileInfo, error){
+		"unreadable": func(p string) (fs.FileInfo, error) {
+			return nil, &fs.PathError{Op: "stat", Path: p, Err: fs.ErrPermission}
+		},
+		"not a socket": func(string) (fs.FileInfo, error) { return fakeInfo{}, nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := checkSession(env, stat)
+			if !errors.Is(err, ErrNotInSession) {
+				t.Fatalf("err = %v, want ErrNotInSession", err)
+			}
+			msg := err.Error()
+			if strings.Contains(msg, sock) || strings.Contains(msg, "\x1b") {
+				t.Errorf("the socket path reached the message raw: %q", msg)
+			}
+			if !strings.Contains(msg, termsafe.QuotePath(sock)) {
+				t.Errorf("message %q does not carry the capped, quoted socket path", msg)
+			}
+		})
+	}
+}

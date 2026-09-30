@@ -8,6 +8,8 @@ import (
 	"os"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // WithFileLock runs fn while holding a blocking exclusive advisory lock on
@@ -47,7 +49,7 @@ func WithFileLockNotify(path string, onWait func(), fn func() error) error {
 	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
 	if err != nil {
-		return fmt.Errorf("stat lock file %s: %w", lockPath, err)
+		return fmt.Errorf("stat lock file %s: %w", termsafe.QuotePath(lockPath), termsafe.Error(err))
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("lock file %s is not a regular file", lockPath)

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // RunbookRow is one derived full-text index row bound for the concordance's
@@ -35,10 +37,10 @@ func ScanRunbooks(root, machine string) ([]RunbookRow, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("stat runbooks root %s: %w", root, err)
+		return nil, fmt.Errorf("stat runbooks root %s: %w", termsafe.QuotePath(root), termsafe.Error(err))
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("runbooks root %s is not a directory", root)
+		return nil, fmt.Errorf("runbooks root %s is not a directory", termsafe.QuotePath(root))
 	}
 
 	var rows []RunbookRow
@@ -58,7 +60,7 @@ func ScanRunbooks(root, machine string) ([]RunbookRow, error) {
 		}
 		raw, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return fmt.Errorf("read runbook %s: %w", path, readErr)
+			return fmt.Errorf("read runbook %s: %w", termsafe.QuotePath(path), termsafe.Error(readErr))
 		}
 		rel, relErr := filepath.Rel(root, path)
 		if relErr != nil {
@@ -68,7 +70,7 @@ func ScanRunbooks(root, machine string) ([]RunbookRow, error) {
 		return nil
 	})
 	if walkErr != nil {
-		return nil, fmt.Errorf("walk runbooks root %s: %w", root, walkErr)
+		return nil, fmt.Errorf("walk runbooks root %s: %w", termsafe.QuotePath(root), termsafe.Error(walkErr))
 	}
 	slog.Debug("Successfully scanned runbook corpus.", "root", root, "files", len(rows))
 	return rows, nil
