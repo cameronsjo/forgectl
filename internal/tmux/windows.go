@@ -106,8 +106,9 @@ func parseWindowRows(out string) ([]Window, int, error) {
 			Panes:       atoi(f[8]),
 		})
 	}
-	// Every row failing at once is the separator being gone, not eight forged
-	// names — see parsedRows for why that must be loud.
+	// Every row failing at once with no line keeping the separator is the
+	// separator being gone, not eight forged names — see parsedRows for why
+	// that must be loud.
 	windows, err := parsedRows(windows, lines, "list-windows", windowFieldCount)
 	if err != nil {
 		return nil, 0, err
