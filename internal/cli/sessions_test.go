@@ -3,15 +3,19 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/sessions"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // ptrTime is a test helper for the concordance's nullable timestamps.
@@ -473,6 +477,122 @@ func TestSessionsText_CapsSnippets(t *testing.T) {
 		asJSON, _ := renderCmd(t, tt.json)
 		if !strings.Contains(asJSON, long) {
 			t.Errorf("%s --json did not carry the snippet whole", tt.sink)
+		}
+	}
+}
+
+// sessionsTextLineMaxRunes bounds one line of `sessions` text output when
+// every field is at its cap: the widest line, search's first, holds a title
+// (256), three labels (64 each) and their truncation markers, well under this.
+const sessionsTextLineMaxRunes = 1024
+
+// fillEveryString sets every exported string field of the struct v points at
+// to long, recursing into slices of structs (one element) and filling string
+// slices with one long element. Fields named Path get a short value instead:
+// runbook paths are escaped but not capped yet (forgectl#894), and this is the
+// only allowlist. It returns how many fields it filled with long.
+func fillEveryString(t *testing.T, v reflect.Value, long string) int {
+	t.Helper()
+	filled := 0
+	for i := range v.NumField() {
+		f, sf := v.Field(i), v.Type().Field(i)
+		if !sf.IsExported() {
+			continue
+		}
+		switch {
+		case f.Kind() == reflect.String && sf.Name == "Path": // forgectl#894
+			f.SetString("p/x.md")
+		case f.Kind() == reflect.String:
+			f.SetString(long)
+			filled++
+		case f.Kind() == reflect.Slice && f.Type().Elem().Kind() == reflect.String:
+			f.Set(reflect.ValueOf([]string{long}))
+			filled++
+		case f.Kind() == reflect.Slice && f.Type().Elem().Kind() == reflect.Struct:
+			elem := reflect.New(f.Type().Elem()).Elem()
+			filled += fillEveryString(t, elem, long)
+			f.Set(reflect.Append(reflect.MakeSlice(f.Type(), 0, 1), elem))
+		}
+	}
+	return filled
+}
+
+// TestSessionsText_EveryFieldCapped pins the structure the #891 review asked
+// for: every string field of every struct a `sessions` text printer renders
+// goes through a capped helper. Each struct gets a 5000-rune value in EVERY
+// string field by reflection, so a field added later without a cap turns this
+// red without anyone remembering to add a row. Path fields are the one
+// allowlist (forgectl#894). --json carries every value whole.
+//
+// Mutations that turn it red: print h.Type through safeTerm in
+// printSearchHits, h.Project through safeTerm in printSearchHits, or
+// s.GitBranch through safeTerm in printLastSession.
+func TestSessionsText_EveryFieldCapped(t *testing.T) {
+	long := strings.Repeat("x", 5000)
+	var hit sessions.SearchHit
+	var why sessions.WhyHit
+	var last sessions.SessionSummary
+	var receipt sessions.Receipt
+	filled := map[string]int{}
+	for name, v := range map[string]any{"SearchHit": &hit, "WhyHit": &why, "SessionSummary": &last, "Receipt": &receipt} {
+		if filled[name] = fillEveryString(t, reflect.ValueOf(v).Elem(), long); filled[name] == 0 {
+			t.Fatalf("%s: no string field filled; the fixture tests nothing", name)
+		}
+	}
+	for _, tt := range []struct {
+		sink       string
+		text, json func(cmd *cobra.Command) error
+		whole      int // long values --json must carry whole
+	}{
+		{
+			sink: "search",
+			text: func(cmd *cobra.Command) error {
+				return printSearchHits(cmd.OutOrStdout(), []sessions.SearchHit{hit})
+			},
+			json: func(cmd *cobra.Command) error {
+				return writeSearchHitsJSON(cmd.OutOrStdout(), []sessions.SearchHit{hit})
+			},
+			whole: filled["SearchHit"],
+		},
+		{
+			sink:  "why",
+			text:  func(cmd *cobra.Command) error { return printWhyHits(cmd, []sessions.WhyHit{why}, false) },
+			json:  func(cmd *cobra.Command) error { return printWhyHits(cmd, []sessions.WhyHit{why}, true) },
+			whole: filled["WhyHit"],
+		},
+		{
+			sink:  "last",
+			text:  func(cmd *cobra.Command) error { return printLastSession(cmd, long, &last, false) },
+			json:  func(cmd *cobra.Command) error { return printLastSession(cmd, long, &last, true) },
+			whole: filled["SessionSummary"],
+		},
+		{
+			sink: "last (no session)",
+			text: func(cmd *cobra.Command) error { return printLastSession(cmd, long, nil, false) },
+		},
+		{
+			sink: "sync receipt",
+			text: func(cmd *cobra.Command) error {
+				_ = printReceipt(cmd.OutOrStdout(), &receipt) // MISSING rows fail the receipt by design
+				return nil
+			},
+		},
+	} {
+		text, _ := renderCmd(t, tt.text)
+		if !strings.Contains(text, strings.TrimSpace(termsafe.TruncatedMarker)) {
+			t.Errorf("%s text shows no truncation marker, so no cap engaged: %q", tt.sink, text)
+		}
+		for _, line := range strings.Split(text, "\n") {
+			if n := utf8.RuneCountInString(line); n > sessionsTextLineMaxRunes {
+				t.Errorf("%s text line is %d runes, over %d: an uncapped field, head %q", tt.sink, n, sessionsTextLineMaxRunes, line[:80])
+			}
+		}
+		if tt.json == nil {
+			continue
+		}
+		asJSON, _ := renderCmd(t, tt.json)
+		if got := strings.Count(asJSON, long); got != tt.whole {
+			t.Errorf("%s --json carried %d fields whole, want all %d", tt.sink, got, tt.whole)
 		}
 	}
 }
