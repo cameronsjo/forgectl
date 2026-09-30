@@ -204,8 +204,8 @@ func TestParseWindowRowsCountsDroppedRows(t *testing.T) {
 // mostRecentSession.
 func TestMostRecentSessionCountsDroppedRows(t *testing.T) {
 	out := strings.Join([]string{
-		strings.Join([]string{"100", "1", "2", "$1", "older"}, FieldSep),
-		strings.Join([]string{"200", "1", "2", "$2", "newer" + FieldSep + "pad"}, FieldSep),
+		lastAttachedRow("100", "1", "2", "$1", "older"),
+		lastAttachedRow("200", "1", "2", "$2", "newer"+FieldSep+"pad"),
 	}, "\n")
 	fake := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return out, nil }}
 	got, unreadable, err := New(fake).mostRecentSession(context.Background())

@@ -96,6 +96,27 @@ func TestForgedLossyRowKeepsTheLocaleError(t *testing.T) {
 	}
 }
 
+// TestNeverAttachedUnreadableRowIsEmpty is the parse-level half of
+// TestNeverAttachedUnreadableSessionIsEmptyIsolated, which skips on tmux 3.7c
+// (it refuses a 0x1F session name). tmux renders a never-attached session's
+// #{session_last_attached} as "", so a format led by it has no decimal first
+// field. The lone unreadable row must still read as no session plus one
+// unreadable row, not the locale error.
+//
+// Mutation that turns it red: move #{session_last_attached} back to the front
+// of lastAttachedFormat, and lastAttachedRow's ts with it.
+func TestNeverAttachedUnreadableRowIsEmpty(t *testing.T) {
+	out := lastAttachedRow("", "91", "1700000000", "$0", "a"+FieldSep+"b")
+	fake := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return out, nil }}
+	got, unreadable, err := New(fake).mostRecentSession(context.Background())
+	if err != nil {
+		t.Fatalf("mostRecentSession: %v; want no session and one unreadable row", err)
+	}
+	if got.ID != "" || unreadable != 1 {
+		t.Fatalf("mostRecentSession = %+v, %d unreadable; want none and 1", got, unreadable)
+	}
+}
+
 // TestTreeListingWithOnlyUnreadableRows: `tmux tree` and the TUI get an empty
 // tree plus the counts, so they print the unreadable-rows note instead of an
 // error blaming the locale (forgectl#826).

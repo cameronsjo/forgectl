@@ -59,6 +59,12 @@ func TestNeverAttachedUnreadableSessionIsEmptyIsolated(t *testing.T) {
 	c, runner, tmuxBin := isolatedTmux(t)
 	ctx := context.Background()
 	if _, err := runner.Run(ctx, tmuxBin, "new-session", "-d", "-s", "a"+FieldSep+"b", "sleep 60"); err != nil {
+		var cmdErr *internalexec.CommandError
+		if errors.As(err, &cmdErr) && strings.HasPrefix(cmdErr.Stderr, "invalid session name: ") {
+			version, _ := runner.Run(ctx, tmuxBin, "-V")
+			t.Skipf("%s refuses a session name carrying 0x1F, so there is no such session "+
+				"(TestNeverAttachedUnreadableRowIsEmpty covers the parse): %v", strings.TrimSpace(version), err)
+		}
 		t.Fatalf("seed: %v", err)
 	}
 	got, unreadable, err := c.mostRecentSession(ctx)
