@@ -229,7 +229,7 @@ func WriteState(st RunState) error {
 	// The final name is the base of the StatePath already computed above — deriving
 	// it from path keeps the ".state.toml" convention defined only in StatePath.
 	if err := d.rename(tmpName, filepath.Base(path)); err != nil {
-		return fmt.Errorf("commit state file %s: %w", path, err)
+		return fmt.Errorf("commit state file %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	// The rename is atomic, but the parent directory entry stays in the page
 	// cache until the directory itself is fsynced — so a crash right after the

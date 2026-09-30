@@ -92,7 +92,7 @@ func ReadCatalog(path string) (map[string]PluginInfo, error) {
 	defer f.Close()
 	plugins, err := ParseHeaders(f)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	return plugins, nil
 }

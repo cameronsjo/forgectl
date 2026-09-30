@@ -62,7 +62,7 @@ func CheckSyncthingFolders(configPath, home string) (violations []string, err er
 	}
 	var cfg syncthingConfig
 	if err := xml.Unmarshal(raw, &cfg); err != nil {
-		return nil, fmt.Errorf("parse syncthing config %s: %w", configPath, err)
+		return nil, fmt.Errorf("parse syncthing config %s: %w", termsafe.QuotePath(configPath), termsafe.Error(err))
 	}
 	forbidden := []string{
 		filepath.Join(home, ".claude", "metrics"),

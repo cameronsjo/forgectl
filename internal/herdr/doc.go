@@ -8,7 +8,8 @@
 // HERDR_SOCKET_PATH (measured: a nonexistent path yields a server_not_running
 // error naming that path). A caller that needs a different server passes a
 // Runner whose calls set that variable; the client has no pin option and
-// [New] performs no session check. Running [Probe] first is the caller's duty.
+// [New] performs no session check. Running [CheckSession] and, before a
+// mutation, [CheckFork] first is the caller's duty.
 //
 // # Failure shapes
 //

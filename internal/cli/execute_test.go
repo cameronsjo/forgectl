@@ -336,6 +336,12 @@ func TestLeadsWithPath(t *testing.T) {
 		{name: "leading relative path", msg: "config/local.toml not found", want: true},
 		{name: "leading long flag", msg: "--limit must be at least 1, not 0", want: true},
 		{name: "leading short flag", msg: "-n must be positive", want: true},
+		{name: "leading quoted dotfile", msg: `".sops.yaml" not found`, want: true},
+		{name: "leading quoted bare name", msg: `"envrc" not found`, want: true},
+		{name: "leading quoted capped path", msg: `"/home/a"…"/b.env" not found`, want: true},
+		{name: "leading bare file name", msg: "secrets.yaml not found", want: true},
+		{name: "leading bare file name with a colon", msg: "secrets.yaml: unreadable", want: true},
+		{name: "sentence ending in a dot", msg: "Failed.", want: false},
 		{name: "prose with a path later", msg: "example file .env.example not found", want: false},
 		{name: "ordinary prose", msg: "plain failure", want: false},
 		{name: "empty", msg: "", want: false},
@@ -387,6 +393,9 @@ func TestFangErrorSinkKeepsFlagCaseForLeadingFlagErrors(t *testing.T) {
 		msg, want, notWant string
 	}{
 		{"--limit must be at least 1, not 0", "--limit must be at least 1, not 0.", "--Limit"},
+		{`".sops.yaml" not found`, `".sops.yaml" not found.`, ".Sops"},
+		{`"envrc" not found`, `"envrc" not found.`, `"Envrc"`},
+		{"secrets.yaml not found", "secrets.yaml not found.", "Secrets"},
 		{"plain failure", "Plain failure.", ""},
 	} {
 		root := &cobra.Command{

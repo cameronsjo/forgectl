@@ -121,7 +121,7 @@ func resolveEnvTarget(anyFile bool, file, cwd string, th theme.Theme) (envpkg.Ta
 		return refuse(err)
 	}
 	if !ok {
-		return refuse(fmt.Errorf("refusing %s: --any-file confirmation declined", target.Rel()))
+		return refuse(fmt.Errorf("refusing %s: --any-file confirmation declined", termsafe.QuotePath(target.Rel())))
 	}
 	return target, nil
 }
@@ -224,7 +224,7 @@ func readDocument(target envpkg.Target) (*envpkg.Document, error) {
 	defer f.Close()
 	doc, err := envpkg.Parse(f)
 	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", target.Rel(), err)
+		return nil, fmt.Errorf("parse %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(err))
 	}
 	return doc, nil
 }
@@ -268,7 +268,7 @@ func newEnvKeysCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command {
 			}
 			defer target.Close()
 			if !target.Exists {
-				return fmt.Errorf("env file %s not found", target.Rel())
+				return fmt.Errorf("env file %s not found", termsafe.QuotePath(target.Rel()))
 			}
 			doc, err := readDocument(target)
 			if err != nil {
@@ -428,12 +428,12 @@ func runEnvSetSops(cmd *cobra.Command, sopsClient *sopspkg.Client, clip *clippkg
 	// existence first turns a refused path into an existence oracle, which is
 	// a disclosure a refusal has no business making.
 	if !sopspkg.IsSOPSFileName(filepath.Base(target.Abs())) {
-		return fmt.Errorf("refusing %s: --sops requires a target named one of %s", target.Rel(), sopspkg.NameShapes())
+		return fmt.Errorf("refusing %s: --sops requires a target named one of %s", termsafe.QuotePath(target.Rel()), sopspkg.NameShapes())
 	}
 	if !target.Exists {
 		// Creating a file is out of scope, and a rule-named refusal beats a
 		// raw os.Open error that reads as an internal fault.
-		return fmt.Errorf("%s not found; --sops edits an existing SOPS file and does not create one", target.Rel())
+		return fmt.Errorf("%s not found; --sops edits an existing SOPS file and does not create one", termsafe.QuotePath(target.Rel()))
 	}
 
 	// Sourced after the target is gated, so a refusable target never consumes
@@ -600,13 +600,13 @@ Exit codes: 0 the file matches the example · 1 keys are missing or extra · 2 t
 				if !drift {
 					// Clean: stdout stays empty so a caller can treat any
 					// output as drift, and the reassurance goes to stderr.
-					fmt.Fprintf(cmd.ErrOrStderr(), "%s matches %s\n", *file, example)
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%s matches %s\n", termsafe.QuotePath(*file), termsafe.QuotePath(example))
 				}
 			}
 
 			if drift {
 				return WithExitCode(
-					fmt.Errorf("%d missing, %d extra key(s) between %s and %s", len(missing), len(extra), *file, example),
+					fmt.Errorf("%d missing, %d extra key(s) between %s and %s", len(missing), len(extra), termsafe.QuotePath(*file), termsafe.QuotePath(example)),
 					1,
 				)
 			}
@@ -624,8 +624,8 @@ Exit codes: 0 the file matches the example · 1 keys are missing or extra · 2 t
 // on stderr, stdout untouched — and returns a silentCodedError so fang
 // renders nothing on top of it; otherwise it returns the human wording
 // (wordingFmt, one of "env file %s not found" / "example file %s not
-// found") wrapped for exit 2. Both surfaces use the same repo-relative path
-// so they can't drift (security ruling, forgectl#481): the resolved
+// found") wrapped for exit 2, with the path quoted as QuotePath quotes it.
+// Both surfaces use the same repo-relative path so they can't drift (security ruling, forgectl#481): the resolved
 // absolute path can name a directory the caller never typed, and --json
 // output lands in agent transcripts verbatim.
 func notFoundCheckError(cmd *cobra.Command, target envpkg.Target, wordingFmt string, asJSON bool) error {
@@ -637,8 +637,10 @@ func notFoundCheckError(cmd *cobra.Command, target envpkg.Target, wordingFmt str
 		return newSilentCodedError(2)
 	}
 	// wordingFmt is always one of the two fixed local literals passed by
-	// the RunE closures above — never derived from input.
-	return WithExitCode(fmt.Errorf(wordingFmt, rel), 2)
+	// the RunE closures above — never derived from input. The human line
+	// quotes and caps the path, as every sibling not-found message does
+	// (#847); the --json path field above stays the raw value.
+	return WithExitCode(fmt.Errorf(wordingFmt, termsafe.QuotePath(rel)), 2)
 }
 
 // checkErrorJSON is env check --json's file-not-found wire shape
@@ -708,7 +710,7 @@ func newEnvRedactCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command
 			}
 			defer target.Close()
 			if !target.Exists {
-				return fmt.Errorf("env file %s not found", target.Rel())
+				return fmt.Errorf("env file %s not found", termsafe.QuotePath(target.Rel()))
 			}
 			doc, err := readDocument(target)
 			if err != nil {

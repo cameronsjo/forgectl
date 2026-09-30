@@ -125,7 +125,7 @@ func (t Target) Clear() error {
 	if t.isEnvFile() {
 		return nil
 	}
-	return fmt.Errorf("refusing %s: not an env file (want .env, .env.*, or *.env)", t.Rel())
+	return fmt.Errorf("refusing %s: not an env file (want .env, .env.*, or *.env)", termsafe.QuotePath(t.Rel()))
 }
 
 // Rel renders the target relative to the repository root — the form every
@@ -234,7 +234,7 @@ func ResolveTarget(fileFlag, cwd string) (Target, error) {
 		// it is the one path that must not be echoed, and the argument is
 		// what the operator can act on. filepath.Base alone would render
 		// `--file ../outside/.env` as ".env", which names nothing.
-		return Target{}, fmt.Errorf("refusing %s: outside the repository", filepath.Clean(fileFlag))
+		return Target{}, fmt.Errorf("refusing %s: outside the repository", termsafe.QuotePath(filepath.Clean(fileFlag)))
 	}
 
 	t := Target{
@@ -251,9 +251,9 @@ func ResolveTarget(fileFlag, cwd string) (Target, error) {
 	dir, derr := pinDir(filepath.Dir(resolved))
 	if derr != nil {
 		if errors.Is(derr, errIsSymlink) {
-			return Target{}, fmt.Errorf("refusing %s: its directory is not the one that was resolved", t.Rel())
+			return Target{}, fmt.Errorf("refusing %s: its directory is not the one that was resolved", termsafe.QuotePath(t.Rel()))
 		}
-		return Target{}, fmt.Errorf("open directory of %s: %w", t.Rel(), derr)
+		return Target{}, fmt.Errorf("open directory of %s: %w", termsafe.QuotePath(t.Rel()), termsafe.Error(derr))
 	}
 	t.dir = dir
 
@@ -261,7 +261,7 @@ func ResolveTarget(fileFlag, cwd string) (Target, error) {
 		_, regular, present, serr := dir.lstat(t.base)
 		if serr != nil {
 			dir.close()
-			return Target{}, fmt.Errorf("stat %s: %w", t.Rel(), serr)
+			return Target{}, fmt.Errorf("stat %s: %w", termsafe.QuotePath(t.Rel()), termsafe.Error(serr))
 		}
 		// A regular-file check here is a resolution-time snapshot; the opens
 		// downstream re-assert it against the descriptor, because a FIFO or a
@@ -273,7 +273,7 @@ func ResolveTarget(fileFlag, cwd string) (Target, error) {
 		// file would refuse with the wrong reason.
 		if present && !regular {
 			dir.close()
-			return Target{}, fmt.Errorf("refusing %s: not a regular file", t.Rel())
+			return Target{}, fmt.Errorf("refusing %s: not a regular file", termsafe.QuotePath(t.Rel()))
 		}
 	}
 

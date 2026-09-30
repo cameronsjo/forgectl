@@ -80,7 +80,7 @@ func TestCopyValue_MissingKey_Errors(t *testing.T) {
 	if strings.Contains(err.Error(), repo) {
 		t.Errorf("error %q leaked the absolute repo path %q", err.Error(), repo)
 	}
-	if !strings.Contains(err.Error(), ".env ") {
+	if !strings.Contains(err.Error(), `".env" `) {
 		t.Errorf("error %q, want the repo-relative name %q", err.Error(), ".env")
 	}
 }
@@ -99,8 +99,8 @@ func TestCopyValue_MissingFile_ErrorsWithRepoRelativePath(t *testing.T) {
 	if strings.Contains(err.Error(), repo) {
 		t.Errorf("error %q leaked the absolute repo path %q", err.Error(), repo)
 	}
-	if !strings.Contains(err.Error(), "env file .env not found") {
-		t.Errorf("error = %q, want %q", err.Error(), "env file .env not found")
+	if !strings.Contains(err.Error(), `env file ".env" not found`) {
+		t.Errorf("error = %q, want %q", err.Error(), `env file ".env" not found`)
 	}
 }
 
