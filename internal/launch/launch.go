@@ -91,6 +91,10 @@ func ResumeArgs(p Profile, sessionID string, fork bool) []string {
 // --strict-mcp-config is GATED on Profile.StrictMCP, never unconditional: this
 // function also serves the operator's ordinary `forgectl launch`, which must
 // keep its discovered MCP servers.
+//
+// --allow-dangerously-skip-permissions follows p.AllowDanger as given. When
+// `forgectl launch` routes a run here with stdout off a terminal, selectPosture
+// clears AllowDanger first (forgectl#812).
 func BuilderArgs(p Profile, userArgs []string) []string {
 	args := []string{"--permission-mode", p.PermissionMode}
 	if p.AllowDanger {

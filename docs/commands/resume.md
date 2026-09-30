@@ -14,11 +14,14 @@ forgectl resume snapshot --quiet   # same, silent — the form a Stop hook uses
 forgectl resume outdated           # list live sessions running an older claude than the one installed (read-only)
 forgectl resume outdated --json    # stable JSON array for scripts; see `resume outdated --help` for the field table
 forgectl resume restart --outdated # stop + resume those sessions in their herdr panes once each is idle (--dry-run: plan only)
+forgectl resume hooks run          # fire the [[resume.on_update]] hooks if claude changed version (--dry-run: show what would fire)
+forgectl resume hooks install      # install the launchd watcher that runs the hooks when claude updates (macOS)
+forgectl resume hooks status       # watcher installed/loaded, recorded versions, last hook runs (--json)
 ```
 
 A terminal restart costs three steps otherwise: find the folder, run `claude --resume`, then recognize the session in a picker that shows neither repo nor branch. `forgectl resume` collapses that to one command from a cold terminal — it lists recent sessions across *every* repo with name, repo, branch, and last activity, and lands you back inside the one you pick, in the right directory, with its task list restored.
 
-Like `launch`, it **execs `claude` in place** (via `syscall.Exec`) and never returns; the resumed session is interactive, so there is no `-p`/`--print` form. From a script or an agent tool call, reach for `resume --dry-run` (prints the resolved cwd and argv, execs nothing) or `resume ls --json`. Every subcommand (`ls`, `snapshot`, `outdated`, `restart`) returns; only bare `resume` execs.
+Like `launch`, it **execs `claude` in place** (via `syscall.Exec`) and never returns; the resumed session is interactive, so there is no `-p`/`--print` form. From a script or an agent tool call, reach for `resume --dry-run` (prints the resolved cwd and argv, execs nothing) or `resume ls --json`. Every subcommand (`ls`, `snapshot`, `outdated`, `restart`, `hooks`) returns; only bare `resume` execs.
 
 Against `launch`: `launch` starts or resumes a session in the *current* directory. `resume` is the cross-repo one — it finds a session anywhere on the machine and moves you to it.
 
@@ -57,3 +60,47 @@ Snapshots live one JSON file per session in forgectl's config directory — `~/L
 - **Restore never overwrites.** A task file the live session owns always wins, and `.highwatermark` is raised but never lowered, so a resumed session is never handed an id already on disk. Running it repeatedly is a no-op.
 - **The resumed session gets its own project's posture.** `[launch]` profile resolution is a pure function of the config and a directory, so resuming into another repo picks up that repo's model, effort, permission mode, and `--add-dir` set for free.
 - `forgectl doctor` carries a `resume tasks` check. Task rescue depends on Claude Code naming per-session task directories after the session id — verified behavior, not a guarantee — and the check warns if that ever stops being true, so rescue cannot silently degrade to writing where nothing reads.
+
+## Update hooks: `resume hooks`
+
+`resume hooks` runs the `[[resume.on_update]]` entries in `config.toml` when the installed `claude` changes version, so an update can restart outdated sessions (or run any command) with nothing typed. `forgectl init` adds a commented example.
+
+```toml
+[[resume.on_update]]
+harness = "claude"
+action  = "restart"          # built-in: the same run as `resume restart --outdated`
+
+[[resume.on_update]]
+harness = "claude"
+command = ["/usr/bin/say", "claude updated"]   # an argv array, run with no shell
+timeout_seconds = 60                            # optional; default 300 (restart: 1800)
+```
+
+Each entry names a harness and exactly one of `action = "restart"` or `command`. Only `harness = "claude"` is supported; `codex` and `pi` are refused with "not supported yet". An unknown key (a misspelled `comand`, say) is a config error naming the key, and so is a top-level `[[on_update]]` or `[on_update]` table (the spelling in the original design), which names `[[resume.on_update]]` instead of being silently ignored. `launch doctor`'s config check reports both. The timeout key is `timeout_seconds`, in the same style as `[net] ttl_seconds`. For a command it bounds the whole run: at the deadline the hook's process group is killed, helpers it forked included. For the restart action it bounds only the waiting for sessions to go idle; a session already stopped is still relaunched and confirmed after it passes.
+
+**Detection.** `resume hooks run` reads the installed version the way `resume outdated` does and compares it with the state it recorded (`resume-hooks/state.json` in forgectl's config directory). The first run records a baseline and fires nothing — an install is not an update. A change fires only once the version has settled: two reads a few seconds apart must agree (up to five re-reads), so a symlink that moves twice, or reverts, during one update fires nothing for the transient value. After acting, a run reads the version again, and an update that landed while its hooks ran (a restart can wait up to 30 minutes) is handled in the same run, up to three passes. Runs take a lock and wait for each other; a manual run behind the watcher's prints that it is waiting. A restart also takes `resume restart`'s own lock, so a manual restart and the watcher's never act on the same session.
+
+**When the version is recorded.** Only after every hook for it has run. A run stopped by SIGTERM (launchd sends it when the agent is unloaded, including by a re-install), SIGINT, or SIGHUP ends the restart's waiting, starts no further hook, records nothing, and exits 1, so the next run fires the whole set again. A run killed outright (SIGKILL, power loss) also records nothing. So a hook can run twice for one update; write hooks that are safe to repeat (restart is: a session already restarted is no longer outdated).
+
+**Retrying an incomplete restart.** A restart hook that ends incomplete (a session still busy at the timeout, a failed relaunch, another restart holding the lock) is recorded as pending for that version. Later runs while the version is unchanged — the next watch event, the next login, or the watcher's 30-minute interval — re-run only that restart, up to 3 attempts in all; then it gives up until the next version, and `status` and `launch doctor` say so. Command hooks fire once per version and are never retried.
+
+**Command hooks** receive `FORGECTL_HARNESS`, `FORGECTL_OLD_VERSION`, and `FORGECTL_NEW_VERSION` in their environment. They are never put in the argv, which runs exactly as written, with no shell. Hooks run in config order, and one failing (or timing out) does not stop the next.
+
+**Audit trail.** Each hook run appends one JSON line to `resume-hooks/runs.jsonl`: time (UTC), harness, old and new version, which hook (its position and kind, and for a command only the program's base name — never its arguments, which can carry a token or a webhook URL), outcome (`ok`, `failed`, `timeout`, or `incomplete` for a restart that left sessions failed or waiting), exit status, duration, and trigger (`launchd` for the watcher, `manual` otherwise). Installing and removing the watcher append a line too. Of a command's output, only a failed command's stderr tail is kept: 240 characters, with the hook's own argument values scrubbed, lines that could hold a URL credential or auth header withheld, and control characters escaped. That redaction works line by line, so a bare token a failing program prints on stderr can still survive in the tail and in the watcher log; both files are owner-only (`0600` in a `0700` directory). Stdout and a successful command's output are never stored. The file rotates to `runs.jsonl.1` at 1 MiB. `resume hooks status` shows the last five records and any pending restart (`--json` for scripts).
+
+**The watcher** is a launchd agent, `local.forgectl.resume-hooks`, which `resume hooks install` writes to `~/Library/LaunchAgents/` and loads (macOS only; elsewhere, run `resume hooks run` from your own scheduler). launchd runs `forgectl resume hooks run` when the claude binary's path or its directory changes, once at load, and every 30 minutes (`StartInterval`). The load-time run records the baseline right away and catches an update that landed while the agent was not loaded; the interval retries a pending restart and covers a missed watch event, and costs a symlink read when there is nothing to do. It watches the directory as well as the link because launchd watches a path through the file it opens, and opening a symlink opens its target, so an update that replaces the link may never touch it. Install warns loudly when the claude it would watch is not a symlink into a `versions` directory (a wrapper script, say): an update never touches such a file, so only the load-time and interval runs would notice.
+
+launchd starts the job with no shell environment and a minimal `PATH`, so install bakes absolute paths into the plist:
+
+- this `forgectl` as the program, refusing a `go run` build (it is deleted when it exits);
+- `FORGECTL_CLAUDE_BIN` set to the claude it watches, so the watcher reads the version of the same file whatever else is on `PATH`;
+- `FORGECTL_HERDR_BIN` set to the absolute `herdr`, which the restart action runs instead of looking `herdr` up;
+- `PATH` set to the directories of `claude`, `herdr`, and `forgectl` ahead of `/usr/bin:/bin:/usr/sbin:/sbin`, for a command hook's bare program name (prefer absolute paths in `command`);
+- `HERDR_SOCKET_PATH` copied when set, so the restart talks to the same herdr server as the terminal install ran in;
+- the working directory and the log (`resume-hooks/watcher.log`, moved to `watcher.log.1` once it passes 1 MiB) under forgectl's config directory.
+
+Install warns when another user could change any baked binary or directory (it is group- or other-writable, as Homebrew's admin-group `/opt/homebrew/bin` is, or someone else owns it), since the watcher runs what is there unattended. Re-run install after moving any of those binaries or changing herdr servers. `install` and `uninstall` are safe to repeat; `install --dry-run` prints the plist without writing or loading it. When the job is loaded, install unloads it before writing the new plist, so a failed unload leaves the old file and the next install tries again rather than reporting "already installed"; a refused load right after the unload is retried a few times.
+
+`forgectl launch doctor` carries an `update_hooks` row. It warns when hooks are configured and the watcher is not installed or loaded; when the newest audit record for the recorded version did not end `ok`; when a restart is pending or gave up; and when launchd says the job is running and its run has held the hooks lock longer than the longest hook timeout plus 10 minutes (stuck on a permission prompt or a hung call). It does not rely on launchd's last exit code, which the next run with nothing to do resets to 0.
+
+A restart run by the watcher has no terminal: its progress lines go to the log and its outcome to the audit trail. Every safety check of `resume restart --outdated` still applies — a busy session waits up to the hook's timeout, a session the run is inside is never stopped — and a restart that left sessions failed or waiting records `incomplete` and exits 1.

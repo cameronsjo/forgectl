@@ -106,6 +106,8 @@ type InvocationRequest struct {
 	// since launch execs it) is a terminal. It decides whether
 	// `--output-format` alone selects the print posture (IsClaudePrintMode,
 	// forgectl#795). The zero value, not a terminal, keeps it print mode.
+	// Off a terminal the builder posture also withholds
+	// --allow-dangerously-skip-permissions (forgectl#812).
 	StdoutTerminal bool
 }
 
@@ -224,6 +226,15 @@ func selectPosture(p Profile, args []string, stdoutTerminal bool) (Posture, []st
 	case IsClaudeHelpOrVersion(args):
 		return PostureClaudePassthrough, args, nil
 	default:
+		// Off a terminal claude runs the prompt non-interactively, as it does
+		// for -p, so the builder withholds the one flag PrintArgs withholds for
+		// safety: allow_danger never makes bypass reachable in an unattended
+		// run. The model, effort, add-dirs, and permission mode all stay
+		// (forgectl#812). p is a copy, so BuiltInvocation.Profile still
+		// reports the profile as resolved.
+		if !stdoutTerminal {
+			p.AllowDanger = false
+		}
 		return PostureClaudeBuilder, BuilderArgs(p, args), nil
 	}
 }
