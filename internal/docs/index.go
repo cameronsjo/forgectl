@@ -268,6 +268,16 @@ func walkHeldDir(dir *os.Root, path string, parent *os.Root, self fs.DirEntry, d
 	return nil
 }
 
+// heldOpenErr is the walk's reading of an openChildDirRoot failure: a child
+// that is no longer a directory, or moved under the open, is errDirChanged;
+// anything else (a permission denial, say) is kept as the skip reason.
+func heldOpenErr(err error) error {
+	if errors.Is(err, errNotADirectory) || errors.Is(err, errDirRootMoved) {
+		return errDirChanged
+	}
+	return err
+}
+
 // openHeldSubdir opens the directory name in dir as its own Root, refusing
 // one past maxHeldDirs or one that is no longer the directory its Lstat
 // sees. Unlike openDirVerified it keeps the open's own error (a permission
@@ -286,11 +296,8 @@ func openHeldSubdir(dir *os.Root, name string, depth int) (*os.Root, error) {
 		return nil, errDirChanged
 	}
 	sub, err := openChildDirRoot(dir, name)
-	if errors.Is(err, errNotADirectory) || errors.Is(err, errDirRootMoved) {
-		return nil, errDirChanged
-	}
 	if err != nil {
-		return nil, err
+		return nil, heldOpenErr(err)
 	}
 	got, err := sub.Stat(".")
 	if err != nil || !got.IsDir() || !os.SameFile(want, got) {
