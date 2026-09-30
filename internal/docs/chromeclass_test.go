@@ -218,6 +218,8 @@ func TestDocPaneContainment_CatchesEveryOverride(t *testing.T) {
 		{"bare class", ".surface-document { position: sticky; }"},
 		{"all reset", "main.surface-document { all: unset; }"},
 		{"important", "main.surface-document { contain: size !important; }"},
+		{"by id", "#doc-main { contain: none; }"},
+		{"by data-fc", `main[data-fc="doc-main"] { position: static; }`},
 	} {
 		if _, _, problems := docPaneContainment(base + tc.css); len(problems) == 0 {
 			t.Errorf("%s: no problem reported for %q", tc.name, tc.css)
@@ -228,6 +230,7 @@ func TestDocPaneContainment_CatchesEveryOverride(t *testing.T) {
 		base + "@media (max-width: 900px) { main.surface-document { padding: 0; } }",
 		base + ".surface-document * { position: static; } .surface-document::before { position: absolute; }",
 		base + "main.surface-document { contain: strict !important; }",
+		base + ".surface-document-x { position: static; } #doc-main-x { contain: none; } [data-fc=\"doc-main-x\"] { contain: none; }",
 	} {
 		if _, _, problems := docPaneContainment(css); len(problems) > 0 {
 			t.Errorf("%q: unexpected problems %v", css, problems)
@@ -243,10 +246,15 @@ var (
 	// cssRule matches an innermost rule, so a rule inside @media or
 	// @supports matches on its own and the at-rule's prelude never does.
 	cssRule = regexp.MustCompile(`([^{}]*)\{([^{}]*)\}`)
-	// docPaneSelector is a compound selector naming the pane element itself
-	// (no combinator, no pseudo-element).
-	docPaneSelector = regexp.MustCompile(`^(main)?\.surface-document([.:#\[][^\s>+~]*)?$`)
-	paintContain    = regexp.MustCompile(`\b(paint|content|strict)\b`)
+	// docPaneHook is a simple selector the pane element answers to in the
+	// shell template: <main id="doc-main" class="surface-document ..."
+	// data-fc="doc-main">. The pane's other classes (container,
+	// container--lg) and the bare main type selector are not read: Artificer
+	// uses them for other elements too, so a rule on them does not target
+	// the pane alone. Nor is a hook inside a functional pseudo-class told
+	// apart (:not(.surface-document) reads as on the pane).
+	docPaneHook  = regexp.MustCompile(`(\.surface-document|#doc-main)([^\w-]|$)|\[data-fc=["']?doc-main["']?\]`)
+	paintContain = regexp.MustCompile(`\b(paint|content|strict)\b`)
 )
 
 // docPaneContainment reads every rule on the doc pane in css, at any at-rule
@@ -261,7 +269,9 @@ func docPaneContainment(css string) (rules, nested int, problems []string) {
 		onPane := false
 		for _, sel := range strings.Split(css[m[2]:m[3]], ",") {
 			sel = strings.TrimSpace(sel)
-			if docPaneSelector.MatchString(sel) && !strings.Contains(sel, "::") {
+			// A compound selector on the pane itself: no combinator, no
+			// pseudo-element.
+			if docPaneHook.MatchString(sel) && !strings.ContainsAny(sel, " \t\n>+~") && !strings.Contains(sel, "::") {
 				onPane = true
 			}
 		}

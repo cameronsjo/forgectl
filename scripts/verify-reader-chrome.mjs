@@ -37,7 +37,8 @@
 //     id) keeps that heading where the reader had it;
 //   - deleting the doc puts the missing banner in the real doc body;
 //   - at narrow width a tooltip on a .phase just below the skip-content
-//     banner, or just below the inline outline, paints over neither;
+//     banner, the inline outline, the properties block or the missing-doc
+//     banner paints over none of them;
 //   - with the mermaid and KaTeX bundles blocked, a doc carrying
 //     <div id="ForgectlMermaid"> and <div id="ForgectlMath"> still gets an
 //     in-place live-reload swap.
@@ -155,14 +156,19 @@ writeFileSync(join(root, 'README.md'), '# Readme\n');
 const docPath = join(root, 'hostile.md');
 writeFileSync(docPath, hostile());
 
-// Two docs for the in-pane chrome check (forgectl#759). Each opens with a
+// Docs for the in-pane chrome check (forgectl#759). Each opens with a
 // .phase wrapper, which is position: relative, holding a .tooltip--top that
-// reaches up out of it. In the first the skip-content banner sits right
-// above the wrapper (the unclosed <noscript> at the end raises it); in the
-// second, with no banner, the narrow-width outline does.
+// reaches up out of it, right below one piece of chrome the reader puts in
+// the pane: the skip-content banner (the unclosed <noscript> at the end
+// raises it), the narrow-width outline (a doc with no banner), the
+// properties block with its trust badge (frontmatter), and the missing-doc
+// banner (reload.js prepends it once the file is deleted).
 const overlapTip = '<div class="phase"><div class="tooltip tooltip--top">OVERLAP-TIP</div>phase body</div>';
 writeFileSync(join(root, 'overlap-banner.md'), `${overlapTip}\n\n# Banner\n\n## One\n\n${filler}\n\n<noscript>\n\nhidden rest\n`);
 writeFileSync(join(root, 'overlap-inline.md'), `${overlapTip}\n\n# Inline\n\n## One\n\n${filler}\n\n## Two\n\n${filler}\n`);
+writeFileSync(join(root, 'overlap-props.md'), `---\nstatus: deprecated\n---\n\n${overlapTip}\n\n# Props\n\n${filler}\n`);
+const overlapMissing = join(root, 'overlap-missing.md');
+writeFileSync(overlapMissing, `${overlapTip}\n\n# Missing\n\n${filler}\n`);
 
 // A doc whose ids name the globals mermaid-init.js and math-init.js set, for
 // the clobbering check (forgectl#759).
@@ -504,8 +510,14 @@ try {
   for (const [doc, sel, id] of [
     ['overlap-banner.md', '[data-fc="doc-body"] [data-forgectl-notice]', 'skip-content banner'],
     ['overlap-inline.md', '[data-fc="outline-inline"]', 'inline outline'],
+    ['overlap-props.md', '[data-fc="doc-body"] [data-forgectl-props]', 'properties block'],
+    ['overlap-missing.md', '[data-fc="doc-missing"]', 'missing-doc banner'],
   ]) {
     await narrow.goto(`${base}/doc/docs/${doc}`, { waitUntil: 'load', timeout: 30000 });
+    if (doc === 'overlap-missing.md') {
+      unlinkSync(overlapMissing);
+      await narrow.waitForSelector(sel, { timeout: 15000 });
+    }
     const probe = await narrow.evaluate((s) => {
       const el = document.querySelector(s);
       const tip = [...document.querySelectorAll('[data-fc="doc-body"] .tooltip')].find((d) => d.textContent === 'OVERLAP-TIP');
