@@ -491,7 +491,7 @@ func newWorkDir(target env.Target) (*workDir, error) {
 	// construction: the create fails on anything already at the path,
 	// including a planted symlink (O_CREAT|O_EXCL never follows one).
 	if err := writeWorkDirIgnore(filepath.Clean(filepath.Join(dir, workDirIgnoreName))); err != nil {
-		_ = os.RemoveAll(dir)
+		_ = os.RemoveAll(dir) //nolint:gosec // G703: dir is the MkdirTemp directory this process just created
 		return nil, fmt.Errorf("write the work directory's .gitignore beside %s: %w", target.Rel(), err)
 	}
 
