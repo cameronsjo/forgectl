@@ -33,6 +33,8 @@ package pr
 // writeBreadcrumb round-trips through loadBreadcrumb
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -397,5 +399,40 @@ func TestLoadBreadcrumb_WorkspaceBadPrefix(t *testing.T) {
 	path := writeRaw(t, dir, "bc.json", body)
 	if _, err := loadBreadcrumb(path, dir); err == nil {
 		t.Error("expected rejection for a workspace lacking the forgectl-workflow- sandbox prefix")
+	}
+}
+
+// TestValidateWorkspace_EchoIsBounded is #706: the workspace path comes from a
+// breadcrumb on disk, so an error echoes it quoted, escaped and capped, and a
+// Stat failure contributes only its cause, not a second raw copy of the path.
+func TestValidateWorkspace_EchoIsBounded(t *testing.T) {
+	long := "rel/\x1b[2J" + strings.Repeat("A", 600)
+	err := validateWorkspace(long)
+	if err == nil {
+		t.Fatal("validateWorkspace accepted a relative path")
+	}
+	if msg := err.Error(); strings.Contains(msg, "\x1b") || strings.Contains(msg, strings.Repeat("A", workspaceEchoMaxRunes+1)) || !strings.Contains(msg, "…") {
+		t.Errorf("error = %q, want the escaped, capped path", msg)
+	}
+
+	absent := filepath.Join(t.TempDir(), sandboxPrefix+"MARKER")
+	err = validateWorkspace(absent)
+	if err == nil {
+		t.Fatal("validateWorkspace accepted an absent workspace")
+	}
+	if n := strings.Count(err.Error(), "MARKER"); n != 1 {
+		t.Errorf("error = %q names the path %d times, want once", err, n)
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("error = %v, want fs.ErrNotExist kept on the chain", err)
+	}
+
+	// classifyWorkspace, validateWorkspace's caller on the stale-record path,
+	// echoes the same way.
+	if _, err := classifyWorkspace("/" + long); err == nil || strings.Contains(err.Error(), strings.Repeat("A", workspaceEchoMaxRunes+1)) || strings.Contains(err.Error(), "\x1b") {
+		t.Errorf("classifyWorkspace error = %v, want the escaped, capped path", err)
+	}
+	if _, err := classifyWorkspace(absent); err == nil || strings.Count(err.Error(), "MARKER") != 1 {
+		t.Errorf("classifyWorkspace error = %v, want the path named once", err)
 	}
 }
