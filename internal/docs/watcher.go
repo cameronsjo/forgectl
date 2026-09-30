@@ -36,6 +36,18 @@ const maxResetBackoff = 5 * time.Second
 // maxResetBackoff, so rebuilds arriving at the capped rate stay capped.
 const resetQuiet = 2 * maxResetBackoff
 
+// maxResetStreak caps resetStreak. settleDelay reaches maxResetBackoff
+// within a few doublings of any debounce, so a longer streak changes
+// nothing but the size of the counter.
+const maxResetStreak = 16
+
+// DefaultMaxWait bounds how long events arriving inside the debounce can
+// keep postponing a reload: a burst reloads no later than this after its
+// first pending event, or after settleDelay if a watch rebuild's backoff is
+// longer. Without it, a writer touching a doc more often than once per
+// debounce would hold every reload off for as long as it kept writing.
+const DefaultMaxWait = 2 * time.Second
+
 // Watcher watches every indexed root for markdown changes, rebuilds the Index
 // when one lands, installs it in a Store, and notifies connected browsers
 // through a Broker.
@@ -63,6 +75,7 @@ type Watcher struct {
 	store    *Store
 	broker   *Broker
 	debounce time.Duration
+	maxWait  time.Duration
 
 	// resetPending records that a watch was added through a path that
 	// stopped naming its directory, or that a watched directory moved.
@@ -77,6 +90,11 @@ type Watcher struct {
 	// ran. settleDelay backs off on them. Touched only by Run.
 	resetStreak int
 	lastReset   time.Time
+
+	// pendingSince is when the first event of the burst Run is waiting to
+	// settle armed the timer, and zero while no reload is armed. settleIn
+	// measures maxWait from it. Touched only by Run.
+	pendingSince time.Time
 
 	// dirs is every directory path addVerified watched since the last
 	// replaceWatcher. A Rename naming one of them means a watched directory
@@ -94,7 +112,7 @@ func NewWatcher(store *Store, broker *Broker) (*Watcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	w := &Watcher{fsw: fsw, store: store, broker: broker, debounce: DefaultDebounce}
+	w := &Watcher{fsw: fsw, store: store, broker: broker, debounce: DefaultDebounce, maxWait: DefaultMaxWait}
 	w.register(store.Current())
 	return w, nil
 }
@@ -356,9 +374,9 @@ func (w *Watcher) watchCreatedDir(path string) {
 }
 
 // Run processes filesystem events until ctx is canceled or the underlying
-// watcher closes. It coalesces bursts through w.debounce and, for each settled
-// burst, rebuilds the index, swaps it into the Store, and publishes one reload
-// notification.
+// watcher closes. It coalesces bursts through w.debounce, bounded by
+// w.maxWait (settleIn), and, for each settled burst, rebuilds the index,
+// swaps it into the Store, and publishes one reload notification.
 func (w *Watcher) Run(ctx context.Context) {
 	var (
 		timer    *time.Timer
@@ -372,7 +390,7 @@ func (w *Watcher) Run(ctx context.Context) {
 	// A registration in NewWatcher that met a changing directory has a
 	// watch rebuild waiting. Run the reload that performs it.
 	if w.resetPending {
-		timer = time.NewTimer(w.debounce)
+		timer = time.NewTimer(w.settleIn(time.Now()))
 		settledC = timer.C
 	}
 
@@ -407,9 +425,9 @@ func (w *Watcher) Run(ctx context.Context) {
 				continue
 			}
 			if timer == nil {
-				timer = time.NewTimer(w.settleDelay())
+				timer = time.NewTimer(w.settleIn(time.Now()))
 			} else {
-				timer.Reset(w.settleDelay())
+				timer.Reset(w.settleIn(time.Now()))
 			}
 			settledC = timer.C
 
@@ -421,24 +439,46 @@ func (w *Watcher) Run(ctx context.Context) {
 
 		case <-settledC:
 			settledC = nil
+			w.pendingSince = time.Time{}
 			if w.resetPending {
-				now := time.Now()
-				if !w.lastReset.IsZero() && now.Sub(w.lastReset) < resetQuiet {
-					w.resetStreak++
-				} else {
-					w.resetStreak = 0
-				}
-				w.lastReset = now
+				w.noteReset(time.Now())
 			}
 			w.reload()
 			// A rebuild that itself met a changing directory waits again
 			// rather than looping, backed off by settleDelay.
 			if w.resetPending {
-				timer.Reset(w.settleDelay())
+				timer.Reset(w.settleIn(time.Now()))
 				settledC = timer.C
 			}
 		}
 	}
+}
+
+// noteReset records a watch rebuild starting at now for settleDelay's
+// backoff: one within resetQuiet of the last extends the streak, up to
+// maxResetStreak, and any other starts it over.
+func (w *Watcher) noteReset(now time.Time) {
+	if !w.lastReset.IsZero() && now.Sub(w.lastReset) < resetQuiet {
+		w.resetStreak = min(w.resetStreak+1, maxResetStreak)
+	} else {
+		w.resetStreak = 0
+	}
+	w.lastReset = now
+}
+
+// settleIn is how long from now Run arms its timer for, on an event or a
+// rebuild waiting to run. It is settleDelay, cut short so the reload lands
+// no later than maxWait after the burst's first pending event, or
+// settleDelay after it when a rebuild's backoff is the longer: a watch
+// rebuild's backoff is never shortened, and events inside it cannot extend
+// it. The first call of a burst starts that clock; Run clears it on reload.
+func (w *Watcher) settleIn(now time.Time) time.Duration {
+	d := w.settleDelay()
+	if w.pendingSince.IsZero() {
+		w.pendingSince = now
+	}
+	limit := max(w.maxWait, d) - now.Sub(w.pendingSince)
+	return max(min(d, limit), 0)
 }
 
 // settleDelay is how long Run waits for quiet before a reload. With no

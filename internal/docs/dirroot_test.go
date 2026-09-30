@@ -88,6 +88,65 @@ func TestOpenDirRoot_IsTheOnlyPathRootOpener(t *testing.T) {
 	}
 }
 
+// Every directory this package opens as an os.Root below another goes
+// through openChildDirRoot, whose first open cannot block on a FIFO
+// (forgectl#798). It fails the moment a Root.OpenRoot method is referenced
+// anywhere but openChildDirRoot, and requires openChildDirRoot's own call,
+// so a scan that finds nothing cannot pass. A selector whose X names
+// package "os" is os.OpenRoot, which TestOpenDirRoot_IsTheOnlyPathRootOpener
+// owns.
+//
+// Mutations that turn it red: revert openDirVerified or openHeldSubdir to
+// <parent>.OpenRoot(name).
+func TestOpenChildDirRoot_IsTheOnlyChildRootOpener(t *testing.T) {
+	fset := token.NewFileSet()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inChild := 0
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(filepath.Clean(name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		osName := osImportName(f)
+		for _, d := range f.Decls {
+			where := "package scope"
+			fd, isFunc := d.(*ast.FuncDecl)
+			if isFunc {
+				where = fd.Name.Name
+			}
+			ast.Inspect(d, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "OpenRoot" {
+					return true
+				}
+				if pkg, ok := sel.X.(*ast.Ident); ok && osName != "" && pkg.Name == osName {
+					return true
+				}
+				if isFunc && fd.Name.Name == "openChildDirRoot" && fd.Recv == nil {
+					inChild++
+					return true
+				}
+				t.Errorf("%s: Root.OpenRoot referenced in %s; open the child with openChildDirRoot so a FIFO at the name cannot block it",
+					fset.Position(sel.Pos()), where)
+				return true
+			})
+		}
+	}
+	if inChild != 1 {
+		t.Fatalf("found %d Root.OpenRoot references in openChildDirRoot, want 1; the check cannot see the open it guards", inChild)
+	}
+}
+
 // osImportName is the name file f refers to package "os" by: "os", an alias,
 // "." for a dot import, or "" when f does not import it (or imports it only
 // for side effects).
