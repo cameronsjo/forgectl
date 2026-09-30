@@ -193,10 +193,18 @@ func tailSafe(input []rune, maxRunes int) string {
 // the picker lets the operator leave empty.
 //
 // It is deliberately conservative. Two or more required positionals, a
-// required variadic one, or any bare word outside a <> or [] group means the
-// picker cannot build a correct argv, and the row keeps the older behavior of
-// printing the invocation to finish by hand. A group whose text starts with
-// "-" is a flag placeholder, not a positional, and is skipped.
+// variadic one (required or optional), or any bare word outside a <> or []
+// group means the picker cannot build a correct argv, and the row keeps the
+// older behavior of printing the invocation to finish by hand. A group whose
+// text starts with "-" is a flag placeholder, not a positional, and is
+// skipped.
+//
+// The variadic rule is what keeps the picker off `launch [harness args…]`
+// (forgectl#730 review): a launch argument is a harness argv, and the
+// launcher classifies its first word — `update` becomes `claude update`,
+// `agents` opens the agents posture — so no single typed value is a safe
+// "plain argument" there. The picker is for one positional; a list of them
+// is finished by hand.
 func pickerSpec(use string) (placeholder string, optional bool, ok bool) {
 	_, rest, _ := strings.Cut(use, " ")
 	groups, clean := useGroups(rest)
@@ -215,11 +223,11 @@ func pickerSpec(use string) (placeholder string, optional bool, ok bool) {
 	}
 	required := 0
 	for _, g := range positional {
+		if isVariadic(g) {
+			return "", false, false
+		}
 		if g[0] == '<' {
 			required++
-			if isVariadic(g) {
-				return "", false, false
-			}
 		}
 	}
 	switch {

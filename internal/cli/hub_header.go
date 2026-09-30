@@ -133,20 +133,28 @@ const gitMetaMaxBytes = 4096
 // .git marker, and reads its branch from HEAD — file reads only, no git
 // subprocess, so it works in a repo with no commits (where `git rev-parse
 // --abbrev-ref HEAD` fails) and costs nothing outside one. The project is the
-// checkout's directory name. A detached HEAD shows as "(detached)"; a HEAD it
-// cannot read leaves the branch out but keeps the project. ok is false only
-// when dir is inside no checkout.
+// checkout's directory name; ok is false only when dir is inside no checkout.
+//
+// The branch is best-effort and fails toward omission. It is left out when:
+//   - the .git marker or the git dir it names is not owned by this user —
+//     git's own safe.directory default, since HEAD is then someone else's text;
+//   - a file on the way is not a regular file (a FIFO would block the read, a
+//     device would stream): each is Lstat'd first and opened O_NOFOLLOW|
+//     O_NONBLOCK, then re-checked on the handle;
+//   - .git is a symlink — even one to a git dir inside the repo. Following it
+//     would let the header read HEAD wherever the link points; dropping the
+//     branch there is the cheaper, rarer cost;
+//   - HEAD is over gitMetaMaxBytes, or names something that is not a
+//     plausible branch (validRefName).
+//
+// A detached HEAD shows as "(detached)".
 func gitProjectBranch(dir string) (project, branch string, ok bool) {
 	dir = filepath.Clean(dir)
 	for {
 		marker := filepath.Join(dir, ".git")
 		info, err := os.Lstat(marker)
 		if err == nil {
-			gitDir := marker
-			if !info.IsDir() {
-				gitDir = gitDirFromPointer(marker, dir)
-			}
-			return filepath.Base(dir), branchFromHead(gitDir), true
+			return filepath.Base(dir), branchForMarker(marker, info, dir), true
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -154,6 +162,30 @@ func gitProjectBranch(dir string) (project, branch string, ok bool) {
 		}
 		dir = parent
 	}
+}
+
+// branchForMarker resolves the git dir the .git marker names and reads its
+// branch, or "" under any of gitProjectBranch's omission rules.
+func branchForMarker(marker string, info os.FileInfo, checkout string) string {
+	if !ownedByMe(info) {
+		return ""
+	}
+	gitDir := marker
+	switch {
+	case info.IsDir():
+	case info.Mode().IsRegular():
+		gitDir = gitDirFromPointer(marker, checkout)
+		if gitDir == "" {
+			return ""
+		}
+		dirInfo, err := os.Lstat(gitDir)
+		if err != nil || !dirInfo.IsDir() || !ownedByMe(dirInfo) {
+			return ""
+		}
+	default:
+		return "" // a symlink, FIFO, or device named .git
+	}
+	return branchFromHead(gitDir)
 }
 
 // gitDirFromPointer resolves a .git FILE (a linked worktree or submodule) to
@@ -168,18 +200,18 @@ func gitDirFromPointer(marker, checkout string) string {
 		return ""
 	}
 	target = strings.TrimSpace(target)
+	if target == "" {
+		return ""
+	}
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(checkout, target)
 	}
-	return target
+	return filepath.Clean(target)
 }
 
 // branchFromHead reads gitDir/HEAD: a symbolic ref to refs/heads/<name> is
-// that branch, a bare object id is a detached HEAD.
+// that branch, a bare object id is a detached HEAD, anything else is "".
 func branchFromHead(gitDir string) string {
-	if gitDir == "" {
-		return ""
-	}
 	data, err := readSmallFile(filepath.Join(gitDir, "HEAD"))
 	if err != nil {
 		return ""
@@ -187,20 +219,54 @@ func branchFromHead(gitDir string) string {
 	head := strings.TrimSpace(data)
 	if ref, found := strings.CutPrefix(head, "ref:"); found {
 		name, isBranch := strings.CutPrefix(strings.TrimSpace(ref), "refs/heads/")
-		if !isBranch || name == "" || name == ".invalid" {
+		if !isBranch || !validRefName(name) {
 			return ""
 		}
 		return name
 	}
-	if len(head) >= 40 && strings.Trim(head, "0123456789abcdef") == "" {
+	if (len(head) == 40 || len(head) == 64) && strings.Trim(head, "0123456789abcdef") == "" {
 		return "(detached)"
 	}
 	return ""
 }
 
-// readSmallFile reads a regular file of at most gitMetaMaxBytes.
+// validRefName is a conservative subset of git's check-ref-format rules for
+// a branch name: printable ASCII only, no space or the characters git
+// forbids, no "..", "@{", "//", and no leading "-" or "/", nor a trailing
+// "/", "." or ".lock". A name it refuses is omitted, never shown.
+func validRefName(name string) bool {
+	if name == "" || len(name) > 255 || name == "@" || name == ".invalid" {
+		return false
+	}
+	for _, r := range name {
+		if r <= ' ' || r > '~' || strings.ContainsRune("~^:?*[\\", r) {
+			return false
+		}
+	}
+	switch {
+	case strings.Contains(name, ".."), strings.Contains(name, "@{"), strings.Contains(name, "//"),
+		strings.HasPrefix(name, "-"), strings.HasPrefix(name, "/"), strings.HasPrefix(name, "."),
+		strings.HasSuffix(name, "/"), strings.HasSuffix(name, "."), strings.HasSuffix(name, ".lock"),
+		strings.Contains(name, "/."):
+		return false
+	}
+	return true
+}
+
+// readSmallFile reads a regular file of at most gitMetaMaxBytes without
+// following a symlink or blocking: Lstat first and require a regular file,
+// open O_NOFOLLOW|O_NONBLOCK (openGitMeta), then re-check the open handle is
+// the same regular file, so a FIFO or device swapped in between is refused.
 func readSmallFile(path string) (string, error) {
-	f, err := os.Open(filepath.Clean(path))
+	path = filepath.Clean(path)
+	before, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !before.Mode().IsRegular() {
+		return "", errors.New("not a regular file")
+	}
+	f, err := openGitMeta(path)
 	if err != nil {
 		return "", err
 	}
@@ -209,8 +275,8 @@ func readSmallFile(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !info.Mode().IsRegular() {
-		return "", errors.New("not a regular file")
+	if !info.Mode().IsRegular() || !os.SameFile(before, info) {
+		return "", errors.New("the file changed while it was opened")
 	}
 	data, err := io.ReadAll(io.LimitReader(f, gitMetaMaxBytes+1))
 	if err != nil {

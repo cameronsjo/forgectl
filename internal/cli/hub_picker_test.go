@@ -159,3 +159,32 @@ func TestHubRunOptions_WiresTheTreeAwareBuilder(t *testing.T) {
 		t.Errorf("the wired builder accepted `pr drain` (err %v)", err)
 	}
 }
+
+// TestHubPicker_NoPickerRowFeedsTheHarness pins the review's I3 by shape, not
+// by name: no command the picker can open on is dispatched through the launch
+// intercept to the harness launcher, where the launcher — not forgectl's tree —
+// decides what a first word means (`update` → `claude update`). Today that is
+// `launch [harness args…]`, kept off the picker by the variadic rule; a new
+// harness-bound row would fail here.
+func TestHubPicker_NoPickerRowFeedsTheHarness(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	launchCmd := findChild(root, "launch")
+	if launchCmd == nil {
+		t.Fatal("no launch command; the check proves nothing")
+	}
+	if _, _, ok := tui.PickerSpec(launchCmd.Use); ok {
+		t.Errorf("launch (%q) opens the picker; its argument is a harness argv", launchCmd.Use)
+	}
+	for _, cmd := range pickerCommands(root) {
+		if hubDispatchRoute(root, commandArgv(cmd)).launcher {
+			t.Errorf("picker row %q is dispatched to the harness launcher", strings.Join(commandArgv(cmd), " "))
+		}
+	}
+	for _, e := range buildHub(root, true, []*cobra.Command{launchCmd}) {
+		if e.Name == "launch" && e.Argv != nil && e.NeedsArgs {
+			if _, _, ok := tui.PickerSpec(e.Use); ok {
+				t.Errorf("recent launch row would open the picker: %+v", e)
+			}
+		}
+	}
+}
