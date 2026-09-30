@@ -210,7 +210,7 @@ func printReceipt(out io.Writer, r *sessions.Receipt) error {
 	}
 	if !r.Complete() {
 		for _, id := range r.Missing {
-			fmt.Fprintf(out, "MISSING %s\n", safeLabel(id))
+			_, _ = fmt.Fprintf(out, "MISSING %s\n", safeLabel(id))
 		}
 		return receiptError(r)
 	}
@@ -489,24 +489,24 @@ func printLastSession(cmd *cobra.Command, repo string, s *sessions.SessionSummar
 		})
 	}
 	if s == nil {
-		fmt.Fprintf(out, "no sessions recorded for %q\n", safeLabel(repo))
+		_, _ = fmt.Fprintf(out, "no sessions recorded for %q\n", safeLabel(repo))
 		return nil
 	}
 	committed := "no commits"
 	if s.Committed {
 		committed = "committed"
 	}
-	fmt.Fprintf(out, "%s\t%s\t[%s]\t%s\t%s\n",
+	_, _ = fmt.Fprintf(out, "%s\t%s\t[%s]\t%s\t%s\n",
 		safeLabel(s.SessionID), humanTs(s.LastTs), safeLabel(s.Project), safeLabel(s.GitBranch), committed)
 	if s.Model != "" || s.Machine != "" {
-		fmt.Fprintf(out, "\t%s on %s\n", safeLabel(s.Model), safeLabel(s.Machine))
+		_, _ = fmt.Fprintf(out, "\t%s on %s\n", safeLabel(s.Model), safeLabel(s.Machine))
 	}
 	if len(s.Artifacts) == 0 {
-		fmt.Fprintln(out, "\tno field report or handoff recorded")
+		_, _ = fmt.Fprintln(out, "\tno field report or handoff recorded")
 		return nil
 	}
 	for _, a := range s.Artifacts {
-		fmt.Fprintf(out, "\t%s · %s\n\t  %s\n",
+		_, _ = fmt.Fprintf(out, "\t%s · %s\n\t  %s\n",
 			safeLabel(a.Type), safeTitle(a.Title), safePath(a.Path))
 	}
 	return nil
