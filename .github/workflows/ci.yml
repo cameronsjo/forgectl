@@ -7,8 +7,13 @@ on:
   pull_request:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A push run gets a group of its own commit, so no later push can cancel it
+  # (not even as a queued run). release.yml's verify job waits for the main
+  # push run of the tagged commit to succeed; a cancelled run would block the
+  # release until someone re-ran CI by hand. PR runs still supersede each
+  # other.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Least privilege for every job: they only check out, build and test. A job
 # that needs more declares its own block (lint already does).
