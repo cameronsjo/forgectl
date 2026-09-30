@@ -29,6 +29,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/launch"
+	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/resume"
 	"github.com/cameronsjo/forgectl/internal/selfupdate"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -294,7 +295,7 @@ func checkSops(ctx context.Context, d Deps) Check {
 	if vs := selfupdate.FindVersions(line); len(vs) > 0 {
 		return Check{Name: "sops", State: StateOK, Detail: "sops " + vs[0]}
 	}
-	slog.Warn("sops --version printed no recognizable version.", "output", termsafe.SafeLineMax(line, 200))
+	slog.Warn("sops --version printed no recognizable version.", "output", termsafe.SafeLineMax(redact.Stdout(line), 200))
 	return Check{Name: "sops", State: StateOK, Detail: "sops present; version not recognized"}
 }
 

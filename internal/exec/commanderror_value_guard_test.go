@@ -29,20 +29,37 @@ import (
 // The alternative, moving the formatters to value receivers, was not taken:
 // it changes how a nil *CommandError renders under %#v.
 //
-// Mutation that turns it red: a production file in internal/tmux declaring
+// It does not see two routes that make a value with no expression of that
+// type in a production file (#952). A generic function body instantiated
+// at CommandError (`func dump[T any](p *T) string { return
+// fmt.Sprintf("%+v", *p) }` called as dump(ce)): *p has type T, and the rule
+// does not enter type arguments (holdsCommandErrorValue). And
+// reflect.ValueOf(ce).Elem(), whose Interface() is an any: refusing
+// reflect.Value.Elem in TestNoFileReadsMemoryThroughReflect was weighed and
+// not taken, because internal/cli/config_cmd.go dereferences config pointers
+// through it. No production site does either today.
+//
+// An allowlist entry that names no function in any checked file fails the
+// test (#952): a renamed or deleted function would otherwise leave an entry
+// that clears whatever takes the name next.
+//
+// Mutations that turn it red: a production file in internal/tmux declaring
 // `func f(ce *exec.CommandError) string { return fmt.Sprintf("%+v", *ce) }`,
-// or `var zero exec.CommandError`.
+// or `var zero exec.CommandError`; an entry
+// "internal/exec/exec.go NoSuchFunc" in commandErrorValueAllowed.
 func TestNoProductionExpressionIsACommandErrorValue(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}
 	byFinding := map[string][]string{}
-	for _, r := range typedGuardResults(t, root) {
+	results := typedGuardResults(t, root)
+	for _, r := range results {
 		for _, f := range r.cmdErrValues {
 			byFinding[f] = append(byFinding[f], r.p.String())
 		}
 	}
+	unmatchedAllowlistKeys(t, "commandErrorValueAllowed", commandErrorValueAllowed, results)
 	keys := make([]string, 0, len(byFinding))
 	for f := range byFinding {
 		keys = append(keys, f)
@@ -72,7 +89,10 @@ var commandErrorValueAllowed = map[string]string{
 // or not) is the one exception: it never exists as a value anyone can
 // format. A literal written as an element of a []*CommandError, with its type
 // elided, is recorded as the pointer type already, so it needs no exception.
-func commandErrorValueFindings(fset *token.FileSet, files []*ast.File, info *types.Info, target types.Type, rel func(string) string) []string {
+//
+// Every allowlist key that names a function in files is recorded in
+// allowSeen, when it is not nil, for unmatchedAllowlistKeys.
+func commandErrorValueFindings(fset *token.FileSet, files []*ast.File, info *types.Info, target types.Type, rel func(string) string, allowSeen map[string]bool) []string {
 	var findings []string
 	seen := map[string]bool{}
 	report := func(pos token.Pos, what string, t types.Type) {
@@ -112,6 +132,9 @@ func commandErrorValueFindings(fset *token.FileSet, files []*ast.File, info *typ
 		})
 		for _, decl := range file.Decls {
 			if fn, ok := decl.(*ast.FuncDecl); ok && commandErrorValueAllowed[name+" "+funcDeclName(fn)] != "" {
+				if allowSeen != nil {
+					allowSeen[name+" "+funcDeclName(fn)] = true
+				}
 				continue
 			}
 			ast.Inspect(decl, func(n ast.Node) bool {
@@ -301,5 +324,22 @@ func (p *typedProbe) commandErrorValueFindings(t *testing.T, src string) []strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	return commandErrorValueFindings(p.fset, []*ast.File{file}, info, target, func(s string) string { return s })
+	return commandErrorValueFindings(p.fset, []*ast.File{file}, info, target, func(s string) string { return s }, nil)
+}
+
+// unmatchedAllowlistKeys fails t for each key of allowed that no platform's
+// typed pass recorded in allowSeen: an entry naming a function that no
+// longer exists (#952).
+func unmatchedAllowlistKeys(t *testing.T, what string, allowed map[string]string, results []*typedResult) {
+	t.Helper()
+	keys := make([]string, 0, len(allowed))
+	for k := range allowed {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		if !slices.ContainsFunc(results, func(r *typedResult) bool { return r.allowSeen[k] }) {
+			t.Errorf("%s entry %q names no function in any checked production file on any platform; remove it", what, k)
+		}
+	}
 }
