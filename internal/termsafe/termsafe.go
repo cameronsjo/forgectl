@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -138,30 +139,63 @@ func QuoteArgMax(s string, maxRunes int) string {
 }
 
 // QuotePath is QuoteText named for filesystem sinks, where the surrounding
-// quotes also keep spaces and path boundaries legible.
+// quotes also keep spaces and path boundaries legible. It is capped at
+// PathEchoMaxRunes input runes (QuotePathMax), because a path is often clone-,
+// config-, or server-derived and nobody at the terminal chose its length
+// (#832). A caller that must render the whole path, such as a
+// machine-parseable field, quotes with QuoteText instead.
 func QuotePath(path string) string {
-	return QuoteText(path)
+	return QuotePathMax(path, 0)
 }
 
-// PathEchoMaxRunes is the input budget for a path Error renders (#821). It is
-// larger than ArgEchoMaxRunes because an ordinary worktree or clone path runs
-// past 80 runes and the part that names the file is at its end; 512 shows any
-// realistic path in full and still bounds a hostile PATH_MAX-long one.
+// PathEchoMaxRunes is the input budget for a path QuotePath renders (#821,
+// #832). It is larger than ArgEchoMaxRunes because an ordinary worktree or
+// clone path runs past 80 runes; 512 shows any realistic path in full and
+// still bounds a hostile PATH_MAX-long one.
 const PathEchoMaxRunes = 512
 
-// QuotePathMax is QuotePath over at most maxRunes runes of path, followed by
-// an ellipsis outside the closing quote when path was longer — the
-// QuoteArgMax cut, for a path sink. maxRunes < 1 means PathEchoMaxRunes.
+// QuotePathMax quotes path like QuoteText, keeping at most maxRunes of its
+// input runes. A longer path is cut in the MIDDLE, because the part that
+// identifies a file is its name at the end (#832): the result is the quoted
+// head, an ellipsis, and the quoted tail, the ellipsis sitting between the
+// two quotes so it cannot be read as path text. The tail is the final path
+// element (from its separator on) when that fits in three quarters of the
+// budget, and the last half of the budget otherwise; the head gets the rest.
+//
+// The cut counts INPUT runes, before escaping, so it never splits an escape.
+// Invalid UTF-8 counts one rune per bad byte, as range does. maxRunes < 1
+// means PathEchoMaxRunes.
 func QuotePathMax(path string, maxRunes int) string {
 	if maxRunes < 1 {
 		maxRunes = PathEchoMaxRunes
 	}
-	return QuoteArgMax(path, maxRunes)
+	// starts[i] is the byte offset of input rune i, as range yields them.
+	starts := make([]int, 0, len(path))
+	for i := range path {
+		starts = append(starts, i)
+	}
+	total := len(starts)
+	if total <= maxRunes {
+		return QuoteText(path)
+	}
+	tail := maxRunes / 2
+	if sep := strings.LastIndexAny(path, `/\`); sep >= 0 {
+		// The separator is ASCII, so it starts a rune; count the runes from it.
+		elem := total - sort.SearchInts(starts, sep)
+		if elem <= maxRunes-maxRunes/4 {
+			tail = elem
+		}
+	}
+	head := maxRunes - tail
+	if tail == 0 {
+		return QuoteText(path[:starts[head]]) + argEchoEllipsis
+	}
+	return QuoteText(path[:starts[head]]) + argEchoEllipsis + QuoteText(path[starts[total-tail]:])
 }
 
 // QuotePathIfUnsafe returns path verbatim when quoting would have changed
-// nothing but the surrounding quotes, and the full QuotePath escaping
-// otherwise.
+// nothing but the surrounding quotes, and the full, uncapped QuoteText
+// escaping otherwise.
 //
 // It exists for a sink whose output is BOTH rendered to a terminal and a
 // documented machine-parseable field — `forgectl pr list` field 3, which
@@ -173,7 +207,9 @@ func QuotePathMax(path string, maxRunes int) string {
 //
 // Prefer plain QuotePath on any sink that is human-only.
 func QuotePathIfUnsafe(path string) string {
-	if quoted := QuotePath(path); quoted != `"`+path+`"` {
+	// QuoteText, not the capped QuotePath: this is a machine-parseable field,
+	// and a cut would rewrite a long but ordinary path in it (#832).
+	if quoted := QuoteText(path); quoted != `"`+path+`"` {
 		return quoted
 	}
 	return path
@@ -202,9 +238,11 @@ func Categorical(message string, cause error) error {
 // Error converts a nested filesystem/config error into terminal-safe text
 // while preserving its unwrap chain for errors.Is/errors.As disposition.
 // Known filesystem errors are reconstructed from individually escaped fields
-// so a raw path can never be reinserted by their native Error method. Each
-// path is also capped at PathEchoMaxRunes (QuotePathMax), since the path is
-// often clone- or config-derived and nobody at the terminal chose its length.
+// so a raw path can never be reinserted by their native Error method, and each
+// path is capped as QuotePath caps it. Only a *PathError or *LinkError that is
+// err itself gets that treatment: one wrapped inside another error (a
+// fmt.Errorf %w) renders through its native text, escaped but uncapped, so
+// convert it with Error before wrapping it (#832).
 //
 // An Error method that panics gets errTextUnavailable in place of its text,
 // and the rest of the message still renders; see errorText.

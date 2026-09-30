@@ -20,9 +20,9 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 		Short: "Print the resolved launch profile for the current directory",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cwd, err := os.Getwd()
+			cwd, err := launchWorkingDirectory()
 			if err != nil {
-				return termsafe.Error(fmt.Errorf("determine working directory: %w", err))
+				return err
 			}
 			effLaunch, notice, effFrom := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
 			if notice != "" && !asJSON {
@@ -190,4 +190,20 @@ func printLaunchProfile(w io.Writer, th theme.Theme, p launch.Profile, cwd, conf
 // untrusted text is escaped first, then the trusted renderer may add ANSI.
 func renderSafe(render func(...string) string, untrusted string) string {
 	return render(termsafe.SafeLine(untrusted))
+}
+
+// launchGetwd is os.Getwd, a variable only so a test can make it fail.
+var launchGetwd = os.Getwd
+
+// launchWorkingDirectory is the working directory `launch` and `launch which`
+// resolve a profile for. Its *PathError goes through termsafe.Error BEFORE the
+// wrap (#832): termsafe.Error reconstructs and caps the path only for a
+// *PathError that is the error itself, so wrapping first let a hostile-length
+// path through whole.
+func launchWorkingDirectory() (string, error) {
+	cwd, err := launchGetwd()
+	if err != nil {
+		return "", fmt.Errorf("determine working directory: %w", termsafe.Error(err))
+	}
+	return cwd, nil
 }
