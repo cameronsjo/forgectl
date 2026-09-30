@@ -70,8 +70,11 @@ func BuildPlan(wf Workflow, cliParams map[string]string, registry StepRegistry) 
 	for i, s := range wf.Steps {
 		ps, err := planStep(ctx, s)
 		if err != nil {
-			slog.Error("Failed to plan step.", "workflowName", wf.Name, "stepIndex", i, "stepUse", s.Uses, "error", err)
-			return Plan{}, fmt.Errorf("step %d (%s): %w", i, s.Uses, err)
+			// Capped (#761): this fires before exec.go's registry check, so
+			// s.Uses is still unvetted workflow-file text of any length.
+			uses := termsafe.QuoteArgMax(s.Uses, 0)
+			slog.Error("Failed to plan step.", "workflowName", wf.Name, "stepIndex", i, "stepUse", uses, "error", err)
+			return Plan{}, fmt.Errorf("step %d (%s): %w", i, uses, err)
 		}
 		steps = append(steps, ps)
 	}

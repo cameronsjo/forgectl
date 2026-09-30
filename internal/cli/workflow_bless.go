@@ -126,7 +126,7 @@ func runWorkflowBless(cmd *cobra.Command, deps module.Deps, name string) error {
 	for i, s := range wf.Steps {
 		def, ok := registry[s.Uses]
 		if !ok {
-			return fmt.Errorf("workflow %q: step %d uses unknown verb %q — this binary cannot execute it, so it will not be blessed", name, i, s.Uses)
+			return fmt.Errorf("workflow %q: step %d uses unknown verb %s — this binary cannot execute it, so it will not be blessed", name, i, termsafe.QuoteArgMax(s.Uses, 0))
 		}
 		guarded, err := workflow.GuardedValues(s, def.GuardedFields)
 		if err != nil {
