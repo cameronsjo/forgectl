@@ -215,11 +215,8 @@ func Execute(ctx context.Context) error {
 	switch decideRoute(root, args, isInteractiveTTY()) {
 	case routeTUI:
 		slog.Debug("Launching TUI.", "no_icons", noIcons)
-		opts := tui.RunOptions{
-			Hub:     buildHub(root, configFilePresent()),
-			NoIcons: noIcons,
-			Theme:   deps.Theme,
-		}
+		opts := hubRunOptions(ctx, deps, root, tmuxClient)
+		opts.NoIcons = noIcons
 		return runAction(ctx, deps, root, tmuxClient, opts)
 	case routeHeadlessMenu:
 		// Route through Cobra/fang instead of the TUI: an unrecognized
@@ -497,16 +494,26 @@ func runAction(ctx context.Context, deps module.Deps, root *cobra.Command, clien
 
 // hubDollarLine renders a hub-selected invocation's echo line — the "$ "
 // prefix is always present (the signal under NO_COLOR); the rest is muted
-// when the theme is styled.
+// when the theme is styled. It is the placeholder form ActionShowInvocation
+// prints ("pr <ref>"): Use-line text this binary compiled in, joined plainly
+// so a placeholder reads as a placeholder rather than as a quoted argument.
 func hubDollarLine(th theme.Theme, argv []string) string {
-	return th.Styles().Muted.Render("$ " + meta.AppName + " " + strings.Join(argv, " "))
+	return th.Styles().Muted.Render(termsafe.SafeLine("$ " + meta.AppName + " " + strings.Join(argv, " ")))
+}
+
+// hubRunLine is the echo line for an argv the hub is about to run. That argv
+// can carry one operator-typed picker argument, so it renders through
+// tui.DisplayArgv, which quotes that element and escapes anything
+// terminal-unsafe — the line shows exactly the elements that run.
+func hubRunLine(th theme.Theme, argv []string) string {
+	return th.Styles().Muted.Render("$ " + meta.AppName + " " + tui.DisplayArgv(argv))
 }
 
 // runHubVerb re-enters the same argv dispatch pipeline a typed command
 // takes: launchIntercept and the extension rungs both apply to a
 // hub-selected `launch` exactly as they do to a typed one.
 func runHubVerb(ctx context.Context, deps module.Deps, root *cobra.Command, argv []string, th theme.Theme) error {
-	fmt.Fprintln(os.Stderr, hubDollarLine(th, argv))
+	fmt.Fprintln(os.Stderr, hubRunLine(th, argv))
 	if rest, ok := launchIntercept(argv); ok {
 		if handled, err := runLaunch(deps, rest); handled {
 			if err != nil {

@@ -265,10 +265,10 @@ func TestHub_LeaflessEntryRunsDirectly(t *testing.T) {
 	}
 }
 
-// TestHub_NeedsArgsLeafShowsInvocationWithoutRunning pins the pr <ref>
-// contract: selecting it quits with ActionShowInvocation and the
-// placeholder still in the Argv, never ActionRunVerb.
-func TestHub_NeedsArgsLeafShowsInvocationWithoutRunning(t *testing.T) {
+// TestHub_NeedsArgsLeafOpensPickerWithoutRunning pins the pr <ref> contract
+// (forgectl#730 item 4): selecting a leaf that needs one argument opens the
+// picker in place and runs nothing until a value is chosen.
+func TestHub_NeedsArgsLeafOpensPickerWithoutRunning(t *testing.T) {
 	m := hubTestModel()
 	out, _ := m.Update(key("3")) // pr row -> leavesMode
 	m = out.(model)
@@ -277,14 +277,14 @@ func TestHub_NeedsArgsLeafShowsInvocationWithoutRunning(t *testing.T) {
 	}
 	out, cmd := m.Update(key("1")) // pr's own NeedsArgs leaf
 	m = out.(model)
-	if m.action.Kind != ActionShowInvocation {
-		t.Fatalf("expected ActionShowInvocation, got %+v", m.action)
+	if m.picker == nil {
+		t.Fatal("expected the argument picker to open")
 	}
-	if got := strings.Join(m.action.Argv, " "); got != "pr <ref>" {
-		t.Errorf("Argv joined = %q, want %q", got, "pr <ref>")
+	if m.action.Kind != ActionNone || cmd != nil {
+		t.Errorf("opening the picker ran something: %+v", m.action)
 	}
-	if cmd == nil {
-		t.Error("a NeedsArgs leaf should still quit (back to the shell)")
+	if got := strings.Join(m.picker.prefix, " "); got != "pr" || m.picker.placeholder != "<ref>" {
+		t.Errorf("picker prefix/placeholder = %q/%q, want pr/<ref>", got, m.picker.placeholder)
 	}
 }
 
