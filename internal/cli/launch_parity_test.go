@@ -312,7 +312,8 @@ func TestParity_ClaudeBuilderLaunch(t *testing.T) {
 
 	assertArgv(t, gotArgv, []string{
 		"--permission-mode", "plan",
-		"--allow-dangerously-skip-permissions",
+		// no --allow-dangerously-skip-permissions: the harness's stdout is a
+		// pipe, and a piped builder run withholds it (forgectl#812)
 		"--add-dir", "/tmp/parity-shared",
 		"--model", "sonnet",
 		"--effort", "high",
