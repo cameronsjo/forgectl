@@ -107,6 +107,9 @@ type launchResolvedView struct {
 	BinaryLabel    string `json:"binary_label"`
 	BinaryPath     string `json:"binary_path"`
 	Projects       int    `json:"projects"`
+	// HomeNote is set when [launch] holds home-relative ("~") paths that cannot
+	// be expanded because the home directory is unresolved.
+	HomeNote string `json:"home_note,omitempty"`
 }
 
 // configReport is the --json document. It is the stable surface: the human
@@ -397,12 +400,15 @@ func resolveHostView(cfg config.Config) hostResolvedView {
 // resolved defaults profile plus the exec target chosen by launch's own
 // precedence. Kept verbatim in content — only its home moved.
 func resolveLaunchView(cfg config.Config) launchResolvedView {
-	ld := launch.DefaultsProfile(cfg.Launch)
+	ld, homeErr := launch.DefaultsProfile(cfg.Launch)
 	view := launchResolvedView{
 		Harness:     ld.Harness,
 		Model:       ld.Model,
 		BinaryLabel: "launch.claude_bin",
 		Projects:    len(cfg.Launch.Projects),
+	}
+	if homeErr != nil {
+		view.HomeNote = homeErr.Error()
 	}
 
 	var bin string
@@ -512,6 +518,9 @@ func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, h
 	// path, and a middle cut would drop the error's own words.
 	_, _ = fmt.Fprintf(out, "  %-20s %s\n", resolved.BinaryLabel, safeText(resolved.BinaryPath))
 	fmt.Fprintf(out, "  launch.projects      %d configured\n", resolved.Projects)
+	if resolved.HomeNote != "" {
+		_, _ = fmt.Fprintf(out, "  launch.home          (unresolved: %s; ~ paths in [launch] are not expanded)\n", safeText(resolved.HomeNote))
+	}
 
 	if len(rep.Unrecognized) > 0 {
 		fmt.Fprintf(out, "\nunrecognized keys (present in the file, bound to nothing — check spelling and section):\n")

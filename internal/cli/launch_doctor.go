@@ -42,11 +42,14 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 
 			lc, src := resolveLaunchConfig(boundary, cfg, effFrom)
 
-			profile := launch.DefaultsProfile(lc)
+			profile, homeErr := launch.DefaultsProfile(lc)
 			if cwd, err := os.Getwd(); err == nil {
-				profile = launch.Resolve(lc, cwd)
+				profile, homeErr = launch.Resolve(lc, cwd)
 			}
-			if err := profile.Validate(); err != nil {
+			if homeErr != nil {
+				healthy = false
+				rec.add("profile", doctor.StateFail, "launch profile cannot be resolved: "+safeText(homeErr.Error()))
+			} else if err := profile.Validate(); err != nil {
 				healthy = false
 				rec.add("profile", doctor.StateFail, "launch profile invalid: "+safeText(err.Error()))
 			}
