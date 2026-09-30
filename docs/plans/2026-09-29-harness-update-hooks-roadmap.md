@@ -26,7 +26,7 @@ Decisions made at planning:
 - The manual command ships first; the watcher follows once restart is proven.
 - Update hooks are configurable (`[[on_update]]`, harness + command); restart is one built-in action.
 
-Tracker: —
+Tracker: cameronsjo/forgectl#724 (item 1 = #725, item 2 = #726, item 3 = #727, item 4 = #728)
 
 ## Critical path
 
