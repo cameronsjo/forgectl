@@ -20,7 +20,6 @@ var tmuxTextSources = map[string]tmuxTextKind{
 	"ListPanes":    {collection: &tmuxTextKind{fields: map[string]bool{"Title": true, "Command": true}}},
 	// Its second result is a count, not tmux text.
 	"DisplaySessionListing": {collection: &tmuxTextKind{fields: map[string]bool{"Name": true, "Path": true}}},
-	"DisplayWindows":        {collection: &tmuxTextKind{fields: map[string]bool{"Session": true, "Name": true}}},
 	// Its second result is a count, not tmux text.
 	"DisplayWindowListing": {collection: &tmuxTextKind{fields: map[string]bool{"Session": true, "Name": true}}},
 	// Its second result is a count, not tmux text.

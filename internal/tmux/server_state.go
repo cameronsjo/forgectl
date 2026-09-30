@@ -319,15 +319,9 @@ func (c *Client) DisplaySessionListing(ctx context.Context) (sessions []Session,
 	return sessions, unreadable, err
 }
 
-// DisplayWindows is ListWindows under DisplaySessionListing's rule.
-func (c *Client) DisplayWindows(ctx context.Context) ([]Window, error) {
-	windows, _, err := c.DisplayWindowListing(ctx)
-	return windows, err
-}
-
-// DisplayWindowListing is DisplayWindows plus the number of window rows tmux
-// returned that could not be read (forgectl#815), for DisplaySessionListing's
-// reason.
+// DisplayWindowListing is ListWindows under DisplaySessionListing's rule,
+// plus the number of window rows tmux returned that could not be read
+// (forgectl#815), for DisplaySessionListing's reason.
 func (c *Client) DisplayWindowListing(ctx context.Context) (windows []Window, unreadable int, err error) {
 	windows, unreadable, err = c.listWindows(ctx)
 	if errors.Is(err, ErrServerExited) {

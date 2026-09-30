@@ -221,7 +221,7 @@ var (
 	// a kill-time or teardown "gone" verdict needs, because a refused connect
 	// proves no server listens NOW, not that a crashed server's panes died
 	// with it (#765). Listings shown to an operator (DisplaySessionListing,
-	// DisplayWindows), EnsureSession's create, and CheckGenerationCapability
+	// DisplayWindowListing), EnsureSession's create, and CheckGenerationCapability
 	// opt in and read it as "no server".
 	//
 	// Its text carries the remediation (forgectl#805), because the refusals
