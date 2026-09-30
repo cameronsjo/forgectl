@@ -4,7 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -489,7 +492,7 @@ func countCacheDetected(items []cleanpkg.CacheItem) int {
 func printDockerItems(out io.Writer, items []cleanpkg.DockerItem) {
 	for _, item := range items {
 		if item.Skipped {
-			_, _ = fmt.Fprintf(out, "skip  %-11s — %s\n", item.Kind, termsafe.SafeLineMax(item.SkipReason, cleanDiagnosticMaxRunes))
+			_, _ = fmt.Fprintf(out, "skip  %-11s — %s\n", item.Kind, cleanDiagnostic(item.SkipReason))
 			continue
 		}
 		size := formatBytes(item.Reclaimable)
@@ -515,11 +518,27 @@ func printDockerItems(out io.Writer, items []cleanpkg.DockerItem) {
 // cleanDiagnosticMaxRunes caps a subprocess or docker-daemon diagnostic in a
 // clean row. exec keeps up to a 64 KiB stderr tail, and each FAILED row or
 // docker skip line would otherwise print all of it as one escaped line
-// (forgectl#867). A head cap keeps the command name and the start of the
-// tool's own message. Keeping only the first raw line was the alternative,
-// and it was rejected: exec keeps the stderr TAIL, so that first line can
-// begin mid-line, and a one-line tool error loses nothing to a 512-rune cap.
-const cleanDiagnosticMaxRunes = 512
+// (forgectl#867).
+//
+// The cap keeps both ends, not just the head. exec keeps the stderr TAIL on
+// purpose: brew, npm and docker print their fatal line ("Error: ...") LAST,
+// after any warnings. A head-only cut would drop exactly that line, and a
+// few escaped newlines are enough to push it past the cap. The head is
+// shorter than the tail because it only has to name the command.
+const (
+	cleanDiagnosticMaxRunes  = 512
+	cleanDiagnosticHeadRunes = 128
+	cleanDiagnosticTailRunes = cleanDiagnosticMaxRunes - cleanDiagnosticHeadRunes
+)
+
+// cleanElision joins the kept head and tail of a capped diagnostic.
+const cleanElision = " … [truncated] … "
+
+// stderrDroppedMarker matches the note exec's CommandError.Error puts ahead
+// of a stderr tail it cut ("[stderr truncated, N earlier bytes dropped]").
+// A capped diagnostic keeps it whole, because it is how the reader knows
+// the text they see is already partial.
+var stderrDroppedMarker = regexp.MustCompile(`\[stderr truncated, [0-9]+ earlier bytes dropped\]`)
 
 // cleanFailureText renders a prune/clear failure for a FAILED row.
 //
@@ -528,10 +547,108 @@ const cleanDiagnosticMaxRunes = 512
 // safe to keep here: exec's CommandError already runs stderr through
 // redact.Text, and that text is the only diagnostic the operator gets for why
 // brew/npm/docker refused — a fixed category string would leave them nothing
-// to act on. Escaping (termsafe.Error) and a length cap (SafeLineMax) bound
-// what it can do to the terminal. Do not "fix" this back to Categorical.
+// to act on. Escaping bounds what it can do to the terminal, and
+// cleanDiagnostic bounds its length. Do not "fix" this back to Categorical.
+//
+// Text that fits is termsafe.Error's rendering unchanged. Longer text is cut
+// from the error's RAW text and only then escaped, so the cut can never
+// split an escape sequence or a quoted path.
 func cleanFailureText(err error) string {
-	return termsafe.SafeLineMax(termsafe.Error(err).Error(), cleanDiagnosticMaxRunes)
+	full := termsafe.Error(err).Error()
+	if utf8.RuneCountInString(full) <= cleanDiagnosticMaxRunes {
+		return full
+	}
+	raw, ok := rawErrorText(err)
+	if !ok {
+		return termsafe.SafeLineMax(full, cleanDiagnosticMaxRunes)
+	}
+	return cleanDiagnostic(raw)
+}
+
+// rawErrorText is err.Error(), or ok=false when that method panics — the
+// case termsafe.Error withholds the text for.
+func rawErrorText(err error) (text string, ok bool) {
+	defer func() {
+		if recover() != nil {
+			text, ok = "", false
+		}
+	}()
+	return err.Error(), true
+}
+
+// cleanDiagnostic escapes raw for a clean row and, when the escaped text is
+// over cleanDiagnosticMaxRunes, keeps its first cleanDiagnosticHeadRunes and
+// last cleanDiagnosticTailRunes runes of OUTPUT around cleanElision. The
+// budget counts escaped runes, and the cut falls only between whole escapes.
+// exec's dropped-bytes marker, when present, is kept whole after the head.
+func cleanDiagnostic(raw string) string {
+	escaped := termsafe.SafeLine(raw)
+	if utf8.RuneCountInString(escaped) <= cleanDiagnosticMaxRunes {
+		return escaped
+	}
+	before, marker, after := raw, "", raw
+	if loc := stderrDroppedMarker.FindStringIndex(raw); loc != nil {
+		before, marker, after = raw[:loc[0]], raw[loc[0]:loc[1]], raw[loc[1]:]
+	}
+	if marker == "" {
+		pieces := escapedPieces(raw)
+		head, headN := takeHead(pieces, cleanDiagnosticHeadRunes)
+		tail, _ := takeTail(pieces[headN:], cleanDiagnosticTailRunes)
+		return head + cleanElision + tail
+	}
+	headPieces := escapedPieces(before)
+	head, headN := takeHead(headPieces, cleanDiagnosticHeadRunes)
+	if headN < len(headPieces) {
+		head += cleanElision
+	}
+	tailPieces := escapedPieces(after)
+	tail, tailN := takeTail(tailPieces, cleanDiagnosticTailRunes)
+	if tailN < len(tailPieces) {
+		tail = cleanElision + tail
+	}
+	return head + marker + tail
+}
+
+// escapedPieces is s split into one SafeLine rendering per rune, so a cut
+// between pieces never splits an escape.
+func escapedPieces(s string) []string {
+	pieces := make([]string, 0, len(s))
+	for _, r := range s {
+		pieces = append(pieces, termsafe.SafeLine(string(r)))
+	}
+	return pieces
+}
+
+// takeHead joins the leading pieces that fit in budget runes and reports how
+// many it took.
+func takeHead(pieces []string, budget int) (string, int) {
+	var b strings.Builder
+	used, n := 0, 0
+	for _, p := range pieces {
+		w := utf8.RuneCountInString(p)
+		if used+w > budget {
+			break
+		}
+		b.WriteString(p)
+		used += w
+		n++
+	}
+	return b.String(), n
+}
+
+// takeTail joins the trailing pieces that fit in budget runes and reports
+// how many it took.
+func takeTail(pieces []string, budget int) (string, int) {
+	used, i := 0, len(pieces)
+	for i > 0 {
+		w := utf8.RuneCountInString(pieces[i-1])
+		if used+w > budget {
+			break
+		}
+		used += w
+		i--
+	}
+	return strings.Join(pieces[i:], ""), len(pieces) - i
 }
 
 // totalDockerReclaimable sums the parsed reclaimable bytes across items.

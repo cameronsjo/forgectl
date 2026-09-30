@@ -891,12 +891,13 @@ func TestResumeSession_RestoreFailureIsInert(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "ev\u202eil\u009b31m")
 	// The task directory is <home>/tasks/<id>; pad home with directory
-	// components until that directory is pathMax-4 bytes long, which leaves
-	// "/1.json" over the limit.
+	// components until that directory is pathMax-4 or pathMax-5 bytes long.
+	// Either fits under the limit, and either leaves "/1.json" over it. The
+	// loop stops with one byte short rather than add an empty component,
+	// which would not grow home at all.
 	suffix := len(string(filepath.Separator)+"tasks"+string(filepath.Separator)) + len(id)
-	for want := pathMax - 4 - suffix; len(home) < want; {
-		n := min(200, want-len(home)-1)
-		home = filepath.Join(home, strings.Repeat("d", n))
+	for want := pathMax - 4 - suffix; want-len(home) >= 2; {
+		home = filepath.Join(home, strings.Repeat("d", min(200, want-len(home)-1)))
 	}
 	p := resume.Paths{ClaudeHome: home, StoreDir: filepath.Join(root, "store")}
 	prev := resumePaths
