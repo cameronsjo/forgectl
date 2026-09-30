@@ -39,6 +39,10 @@ import (
 // browser builds an HTML <table> after the <svg> that stays open, takes the
 // shell's closers for itself, and pulls the status bar into .doc-body.
 //
+// A well-nested body is rebuilt all the same when the tree holds an SVG-only
+// element in HTML content, which the rebuild unwraps (cameronsjo/forgectl#619,
+// strayForeignElements).
+//
 // Anything else is replaced by that tree re-serialized, which is balanced by
 // construction, and re-sanitized: re-serializing is a parse-and-render round
 // trip, the classic mutation-XSS shape, so the bytes served are once again
@@ -91,7 +95,7 @@ func balancePasses(sanitized string) (string, int) {
 			// so the bytes served are the sanitizer's output.
 			return sanitizer.Sanitize(balanceDeep(sanitized)), passesDeep
 		}
-		if fragmentWellNested(s, nodes) {
+		if fragmentWellNested(s, nodes) && !strayForeignElements(nodes) {
 			return s, pass
 		}
 		if pass == maxBalancePasses {
@@ -101,6 +105,7 @@ func balancePasses(sanitized string) (string, int) {
 		for _, n := range nodes {
 			root.AppendChild(n)
 		}
+		unwrapStrayForeign(root)
 		hoistVoidChildren(root)
 		var buf bytes.Buffer
 		for n := root.FirstChild; n != nil; n = n.NextSibling {
@@ -169,6 +174,68 @@ func bodyWrapper(doc *html.Node) *html.Node {
 		}
 	}
 	return nil
+}
+
+// svgOnlyElements are the policy's SVG element names other than <svg> itself,
+// lowercased as the tree builder leaves them in HTML content. An <svg> start
+// tag always opens SVG content, so only these can land in HTML.
+var svgOnlyElements = func() map[string]bool {
+	m := map[string]bool{}
+	for _, name := range svgElements {
+		if name != "svg" {
+			m[strings.ToLower(name)] = true
+		}
+	}
+	return m
+}()
+
+// strayForeignElements reports whether the tree holds an SVG-only element in
+// HTML content (cameronsjo/forgectl#619). bluemonday allows the SVG names
+// anywhere, so prose like "cat <path>: No such file" reaches the tree builder
+// as an HTML <path> that is well nested and would otherwise be served as is.
+// The test is the element's namespace, not an <svg> ancestor: it is what the
+// browser decided, so a <path> after an HTML tag broke out of the <svg>, or
+// in an HTML island under an integration point, counts as stray even with an
+// <svg> above it, and one in an <svg> nested in that island does not.
+func strayForeignElements(nodes []*html.Node) bool {
+	return slices.ContainsFunc(nodes, hasStrayForeign)
+}
+
+// hasStrayForeign reports whether n or a descendant is a stray SVG-only
+// element.
+func hasStrayForeign(n *html.Node) bool {
+	if isStrayForeign(n) {
+		return true
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if hasStrayForeign(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// isStrayForeign reports whether n is an SVG-only element in HTML content.
+func isStrayForeign(n *html.Node) bool {
+	return n.Type == html.ElementNode && n.Namespace == "" && svgOnlyElements[n.Data]
+}
+
+// unwrapStrayForeign replaces every SVG-only element in HTML content under n
+// with its children, as bluemonday treats an element it does not allow: the
+// tag goes, the content stays.
+func unwrapStrayForeign(n *html.Node) {
+	for c := n.FirstChild; c != nil; {
+		next := c.NextSibling
+		unwrapStrayForeign(c)
+		if isStrayForeign(c) {
+			for gc := c.FirstChild; gc != nil; gc = c.FirstChild {
+				c.RemoveChild(gc)
+				n.InsertBefore(gc, c)
+			}
+			n.RemoveChild(c)
+		}
+		c = next
+	}
 }
 
 // hoistVoidChildren moves the children of any element bearing a void
@@ -394,6 +461,12 @@ func balanceDeep(src string) string {
 				el.ns = stack[len(stack)-1].ns
 			case name == "svg" || name == "math":
 				el.ns = name
+			}
+			if el.ns == "" && svgOnlyElements[name] {
+				// An SVG-only name in HTML content is dropped, content kept,
+				// as balancePasses unwraps it (cameronsjo/forgectl#619). Never
+				// pushed, so its end tag finds no element and is dropped too.
+				continue
 			}
 			el.integration = el.ns == "svg" && (name == "foreignobject" || name == "desc") ||
 				el.ns == "math" && name == "annotation-xml" && htmlAnnotation(tok)

@@ -228,17 +228,17 @@ func ReadToken(ctx context.Context, runner exec.Runner, service string) (Token, 
 		// put it where any code that holds the returned error, directly or
 		// through errors.As, can read or dump it, so the error is dropped
 		// whole and never wrapped, logged or rendered. Do not add %w here.
-		return Token{}, fmt.Errorf("%w: service %q", ErrTokenNotFound, service)
+		return Token{}, fmt.Errorf("%w: service %s", ErrTokenNotFound, termsafe.QuoteArgMax(service, 0))
 	}
 	value := strings.TrimSpace(out)
 	if value == "" {
-		return Token{}, fmt.Errorf("%w: service %q", ErrTokenNotFound, service)
+		return Token{}, fmt.Errorf("%w: service %s", ErrTokenNotFound, termsafe.QuoteArgMax(service, 0))
 	}
 	if !tokenShape.MatchString(value) {
 		// Names the service but never the value — an operator running two
 		// instances needs to know WHICH entry is bad, and the malformed
 		// value itself is still a credential.
-		return Token{}, fmt.Errorf("%w: service %q", ErrTokenMalformed, service)
+		return Token{}, fmt.Errorf("%w: service %s", ErrTokenMalformed, termsafe.QuoteArgMax(service, 0))
 	}
 	return newToken(value), nil
 }

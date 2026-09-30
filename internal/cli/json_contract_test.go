@@ -31,7 +31,7 @@ var jsonContractExempt = map[string]string{
 	"docs read":              "the doc body is the payload, rendered by mdroll or the HTML reader; wrapping it in JSON would break its consumers",
 	"docs serve":             "a long-running loopback HTTP server; it serves rather than reports",
 	"env get":                "copies the value to the clipboard and prints nothing by design; there is no print path to wrap",
-	"env redact":             "prints the file with values masked; the redacted text is the payload (`env keys --json` reports key names)",
+	"env redact":             "prints the file with values and comments masked; the redacted text is the payload (`env keys --json` reports key names)",
 	"env set":                "writes a value read from stdin, a prompt or the clipboard; the exit code is the outcome and no value is ever echoed",
 	"ghostty cheat":          "a static keybind cheatsheet parsed from ghostty; it reports no forgectl state",
 	"init":                   "scaffolds config.toml templates; the exit code is the outcome (`config --json` prints the effective configuration)",

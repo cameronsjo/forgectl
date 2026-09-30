@@ -436,7 +436,8 @@ func selfEditorCommand() (string, error) {
 }
 
 // workDir is the private 0700 directory holding the value, the nonce, the
-// backup, and the outcome for one run. It is also the edit call's TMPDIR, so
+// backup, and the outcome for one run, under a .gitignore that keeps git from
+// staging any of it. It is also the edit call's TMPDIR, so
 // sops' decrypted copy of the whole document lives here while the editor runs.
 type workDir struct {
 	dir    string
@@ -446,6 +447,23 @@ type workDir struct {
 	// scoped to it, so the next run's leftover scan finds it.
 	keep string
 }
+
+// workDirIgnoreName and workDirIgnore are the .gitignore every work directory
+// carries from the moment it exists (cameronsjo/forgectl#698).
+//
+// The directory sits beside the target, inside the repository. SIGKILL, an
+// OOM kill, a crash or a power loss runs no handler, so it can be left holding
+// a plaintext value, a decrypted read-back, or sops' decrypted copy of the
+// whole document. The next write's leftover scan refuses on it, but nothing
+// stopped `git add -A` from committing it first. A `*` pattern ignores every
+// entry, this file included, so git never lists the directory as untracked
+// and no pathspec short of `git add -f` stages it. The cost is that the
+// leftover no longer shows in `git status`; the scan, which lists the parent
+// directory rather than asking git, still finds it and refuses.
+const (
+	workDirIgnoreName = ".gitignore"
+	workDirIgnore     = "*\n"
+)
 
 // newWorkDir creates the directory as a SIBLING of the target.
 //
@@ -467,6 +485,14 @@ func newWorkDir(target env.Target) (*workDir, error) {
 	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // G302: 0700 on a DIRECTORY; the execute bit is required
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("secure the work directory beside %s: %w", target.Rel(), err)
+	}
+	// Written before anything else goes in, so no plaintext ever sits in the
+	// directory without it. See workDirIgnore. O_EXCL makes that true by
+	// construction: the create fails on anything already at the path,
+	// including a planted symlink (O_CREAT|O_EXCL never follows one).
+	if err := writeWorkDirIgnore(filepath.Clean(filepath.Join(dir, workDirIgnoreName))); err != nil {
+		_ = os.RemoveAll(dir) //nolint:gosec // G703: dir is the MkdirTemp directory this process just created
+		return nil, fmt.Errorf("write the work directory's .gitignore beside %s: %w", target.Rel(), err)
 	}
 
 	buf := make([]byte, nonceBytes)
@@ -616,9 +642,14 @@ func (w *workDir) preserveBackup() bool {
 }
 
 // pruneToBackup removes every entry of the work directory except the
-// ciphertext backup, and reports whether the backup is now the ONLY thing
-// left. A false result means the caller must remove the whole directory: a
-// directory kept for its backup must never also keep a plaintext file.
+// ciphertext backup and the directory's .gitignore, and reports whether the
+// backup is now the only content left. A false result means the caller must
+// remove the whole directory: a directory kept for its backup must never also
+// keep a plaintext file.
+//
+// The .gitignore stays so the kept directory is as uncommittable as a live
+// one. It holds a fixed pattern this process wrote, never plaintext, and it is
+// kept only as a regular file.
 func (w *workDir) pruneToBackup() bool {
 	backupName := filepath.Base(w.backup)
 	entries, err := os.ReadDir(w.dir)
@@ -626,15 +657,40 @@ func (w *workDir) pruneToBackup() bool {
 		return false
 	}
 	for _, e := range entries {
-		if e.Name() != backupName {
-			_ = os.RemoveAll(filepath.Join(w.dir, e.Name()))
+		if e.Name() == backupName || (e.Name() == workDirIgnoreName && e.Type().IsRegular()) {
+			continue
 		}
+		_ = os.RemoveAll(filepath.Join(w.dir, e.Name()))
 	}
 	entries, err = os.ReadDir(w.dir)
-	if err != nil || len(entries) != 1 || entries[0].Name() != backupName || !entries[0].Type().IsRegular() {
+	if err != nil {
 		return false
 	}
-	return true
+	sawBackup := false
+	for _, e := range entries {
+		switch {
+		case e.Name() == backupName && e.Type().IsRegular():
+			sawBackup = true
+		case e.Name() == workDirIgnoreName && e.Type().IsRegular():
+		default:
+			return false
+		}
+	}
+	return sawBackup
 }
 
 func (w *workDir) cleanup() { _ = os.RemoveAll(w.dir) }
+
+// writeWorkDirIgnore creates the work directory's .gitignore exclusively.
+// path is built from the MkdirTemp directory this process just created.
+func writeWorkDirIgnore(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304/G703: path is inside the 0700 MkdirTemp dir this process just created
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(workDirIgnore); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}

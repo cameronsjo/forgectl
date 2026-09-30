@@ -193,7 +193,7 @@ forgectl env keys [--file .env]                             # list KEY names onl
 forgectl env set KEY [--file .env] [--clipboard]             # value from piped stdin, no-echo prompt, or clipboard — never argv
 forgectl env get KEY --clipboard [--file .env]               # value to clipboard only; no print path exists
 forgectl env check [--file .env] [--example .env.example]    # missing/extra keys, names only (see docs/commands/env.md for exit codes)
-forgectl env redact [--file .env]                            # print file with values masked ****
+forgectl env redact [--file .env]                            # print file with values and comments masked ****
 #   --file must name an env file (.env, .env.*, *.env); --any-file overrides, TTY-confirmed only
 forgectl env set a.b.key --sops [--file secrets.sops.yaml]   # one key into a SOPS-encrypted YAML file
 #   --sops takes a dotted path, defaults to secrets.sops.yaml at the repo root, and
