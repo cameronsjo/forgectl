@@ -20,6 +20,12 @@ import (
 //   [x] A symlinked directory still opens its target
 //   [x] os.OpenRoot on a path has one caller in the package, pinDirRoot
 //       (dirroot_test.go)
+//   [x] A FIFO swapped in for a child directory fails openChildDirRoot and
+//       openDirVerified fast, the opens the index walk and request
+//       resolution make below a root
+//   [x] A plain child directory still opens
+//   [x] Root.OpenRoot has one caller in the package, openChildDirRoot
+//       (dirroot_test.go)
 
 // fifoInPlaceOf makes a FIFO at path and, at cleanup, opens it for writing
 // without blocking, which releases a reader a regressed open left stuck in
@@ -144,5 +150,88 @@ func TestOpenDirRoot_SymlinkedDirOpensTarget(t *testing.T) {
 	}
 	if !os.SameFile(got, want) {
 		t.Error("openDirRoot(symlink) opened something other than its target")
+	}
+}
+
+// fifoChild returns a root holding a FIFO named "child".
+func fifoChild(t *testing.T) *os.Root {
+	t.Helper()
+	dir := mustCanonicalRoot(t, t.TempDir())
+	fifoInPlaceOf(t, filepath.Join(dir, "child"))
+	parent, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = parent.Close() })
+	return parent
+}
+
+// Mutation that turns it red: open the child in openChildDirRoot with
+// parent.OpenRoot(name) alone, skipping probeChildDir (the pre-#798 form).
+// The open blocks for a writer that never comes, and failsFast times out.
+func TestOpenChildDirRoot_FIFOChildFailsFast(t *testing.T) {
+	parent := fifoChild(t)
+	err := failsFast(t, "openChildDirRoot on a FIFO child", func() error {
+		child, err := openChildDirRoot(parent, "child")
+		if err == nil {
+			_ = child.Close()
+		}
+		return err
+	})
+	if !errors.Is(err, errNotADirectory) {
+		t.Errorf("openChildDirRoot = %v, want errNotADirectory", err)
+	}
+}
+
+// The FIFO is swapped in after the resolver's Lstat judged a directory, so
+// openDirVerified is handed a directory's identity and reaches the open.
+//
+// Mutation that turns it red: open the child in openDirVerified with
+// parent.OpenRoot(name) again. The open blocks, and failsFast times out.
+func TestOpenDirVerified_FIFOChildFailsFast(t *testing.T) {
+	parent := fifoChild(t)
+	checked, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = failsFast(t, "openDirVerified on a FIFO child", func() error {
+		sub, err := openDirVerified(parent, "child", checked)
+		if err == nil {
+			_ = sub.Close()
+		}
+		return err
+	})
+	if !errors.Is(err, ErrOutsideRoot) {
+		t.Errorf("openDirVerified = %v, want ErrOutsideRoot", err)
+	}
+}
+
+// Mutation that turns it red: invert openChildDirRoot's IsDir check, which
+// refuses every real directory.
+func TestOpenChildDirRoot_PlainDirOpens(t *testing.T) {
+	dir := mustCanonicalRoot(t, t.TempDir())
+	if err := os.Mkdir(filepath.Join(dir, "child"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = parent.Close() }()
+	want, err := parent.Lstat("child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := openChildDirRoot(parent, "child")
+	if err != nil {
+		t.Fatalf("openChildDirRoot(plain dir): %v", err)
+	}
+	defer func() { _ = child.Close() }()
+	got, err := child.Stat(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(want, got) {
+		t.Error("openChildDirRoot opened a directory other than the child")
 	}
 }

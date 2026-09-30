@@ -3,6 +3,8 @@
 package docs
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 
 	"golang.org/x/sys/unix"
@@ -37,4 +39,22 @@ func openDirRoot(path string) (*os.Root, error) {
 		return nil, err
 	}
 	return pinDirRoot(path, want)
+}
+
+// probeChildDir opens name inside parent with O_DIRECTORY and O_NONBLOCK
+// through parent.OpenFile, which adds O_NOFOLLOW itself, and returns what
+// the open reached. A FIFO or other non-directory fails ENOTDIR at once,
+// without waiting for a writer, and comes back wrapping errNotADirectory.
+// A symlink at name is resolved only within parent, as parent.OpenRoot
+// resolves it; the callers' Lstat comparison refuses one swapped in.
+func probeChildDir(parent *os.Root, name string) (fs.FileInfo, error) {
+	f, err := parent.OpenFile(name, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NONBLOCK, 0)
+	if errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP) {
+		return nil, &os.PathError{Op: "open", Path: name, Err: errNotADirectory}
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return f.Stat()
 }
