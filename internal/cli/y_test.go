@@ -10,6 +10,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -76,5 +77,27 @@ func TestYCmd_AliasesResolveToCanonicalVerb(t *testing.T) {
 		if found.Name() != canonical {
 			t.Errorf("alias %q resolved to %q, want %q", alias, found.Name(), canonical)
 		}
+	}
+}
+
+// TestResolveYPath_QuotesTheMissingPath pins forgectl#855 item 2: the
+// operator's path is echoed quoted and capped (QuotePath), not merely
+// escaped, so a hostile name is both inert and legible as one path.
+//
+// Mutation that turns it red: return to termsafe.SafeLine(path) in the stat
+// error.
+func TestResolveYPath_QuotesTheMissingPath(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "ev\u202eil\u009b31m.png")
+	_, err := resolveYPath(missing)
+	if err == nil {
+		t.Fatal("resolveYPath(missing) = nil, want an error")
+	}
+	if strings.ContainsAny(err.Error(), "\u202e\u009b") {
+		t.Errorf("error carries a raw bidi/control rune: %q", err)
+	}
+	// The leading echo, not the wrapped stat error's own copy of the path,
+	// is the one under test.
+	if !strings.HasPrefix(err.Error(), `"`) || !strings.Contains(err.Error(), `ev\u202eil\u009b31m.png": `) {
+		t.Errorf("error = %q, want it to open with the quoted path", err)
 	}
 }

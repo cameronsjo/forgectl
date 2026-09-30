@@ -10,6 +10,7 @@ import (
 
 	cleanpkg "github.com/cameronsjo/forgectl/internal/clean"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -230,14 +231,14 @@ func runCleanDirs(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.Cle
 	for _, item := range result.Items {
 		switch {
 		case item.Err != nil:
-			fmt.Fprintf(out, "FAILED  %s: %v\n", item.Path, item.Err)
+			_, _ = fmt.Fprintf(out, "FAILED  %s: %v\n", termsafe.QuotePath(item.Path), termsafe.Error(item.Err))
 			failed++
 		case item.Skipped:
 			// Already printed in the preview pass above; apply-phase output
 			// only needs to report what actually happened to a delete
 			// attempt.
 		case item.Deleted:
-			fmt.Fprintf(out, "reclaimed %s (%s)\n", item.Path, formatBytes(item.Size))
+			_, _ = fmt.Fprintf(out, "reclaimed %s (%s)\n", termsafe.QuotePath(item.Path), formatBytes(item.Size))
 		}
 	}
 	fmt.Fprintf(out, "\nreclaimed %s\n", formatBytes(result.TotalReclaimed))
@@ -541,7 +542,9 @@ func anyDockerReclaimableUnknown(items []cleanpkg.DockerItem) bool {
 }
 
 // printCleanItems prints the dry-run report: one line per matched target,
-// grouped by whether it would be reclaimed or was skipped.
+// grouped by whether it would be reclaimed or was skipped. A target's path is
+// named by whatever directories sit under the scanned root, so it is quoted
+// on its way to the terminal (forgectl#855); --json keeps it raw.
 func printCleanItems(out io.Writer, items []cleanpkg.Item) {
 	if len(items) == 0 {
 		fmt.Fprintln(out, "no reclaimable directories found")
@@ -549,10 +552,10 @@ func printCleanItems(out io.Writer, items []cleanpkg.Item) {
 	}
 	for _, item := range items {
 		if item.Skipped {
-			fmt.Fprintf(out, "skip  %s — %s\n", item.Path, item.SkipReason)
+			_, _ = fmt.Fprintf(out, "skip  %s — %s\n", termsafe.QuotePath(item.Path), item.SkipReason)
 			continue
 		}
-		fmt.Fprintf(out, "%-8s %s — %s\n", item.Kind, item.Path, formatBytes(item.Size))
+		_, _ = fmt.Fprintf(out, "%-8s %s — %s\n", item.Kind, termsafe.QuotePath(item.Path), formatBytes(item.Size))
 	}
 }
 

@@ -659,3 +659,88 @@ func TestCleanCmd_JSONRefusedWithApplyCachesDocker(t *testing.T) {
 		}
 	}
 }
+
+// TestCleanCmd_QuotesHostilePathOnTerminal pins forgectl#855 item 3: a
+// directory under the scanned root whose name carries a bidi override and a
+// C1 CSI reaches the terminal escaped and quoted, in both the dry-run row
+// and the apply pass's reclaimed row, while --json keeps the path raw. The
+// runes are \u escapes so no literal format character sits in source.
+//
+// Mutation that turns it red: print item.Path raw in printCleanItems (the
+// dry-run row) or in the reclaimed row of runCleanDirs.
+func TestCleanCmd_QuotesHostilePathOnTerminal(t *testing.T) {
+	const hostile = "ev\u202eil\u009b31m"
+	newRoot := func(t *testing.T) (string, string) {
+		t.Helper()
+		root := t.TempDir()
+		nm := filepath.Join(root, hostile, "node_modules")
+		if err := os.MkdirAll(nm, 0o750); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(nm, "leaf.js"), make([]byte, 64), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		return root, nm
+	}
+	run := func(t *testing.T, root string, args ...string) string {
+		t.Helper()
+		client := cleanpkg.New(&exec.FakeRunner{}, cleanpkg.WithRoot(root))
+		cmd := newCleanCmdForClient(client, theme.Theme{})
+		var stdout bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(new(bytes.Buffer))
+		cmd.SetArgs(args)
+		if err := cmd.ExecuteContext(context.Background()); err != nil {
+			t.Fatalf("clean %v: %v", args, err)
+		}
+		return stdout.String()
+	}
+	assertInert := func(t *testing.T, got string) {
+		t.Helper()
+		if strings.ContainsAny(got, "\u202e\u009b") {
+			t.Errorf("stdout carries a raw bidi/control rune: %q", got)
+		}
+		if !strings.Contains(got, `ev\u202eil\u009b31m`) {
+			t.Errorf("stdout = %q, want the escaped directory name", got)
+		}
+	}
+
+	t.Run("dry run", func(t *testing.T) {
+		root, _ := newRoot(t)
+		got := run(t, root)
+		assertInert(t, got)
+		if !strings.Contains(got, `node_modules" — `) {
+			t.Errorf("dry-run row = %q, want the path quoted", got)
+		}
+	})
+
+	t.Run("apply", func(t *testing.T) {
+		withConfirmFn(t, func(string) (bool, error) { return true, nil })
+		root, nm := newRoot(t)
+		got := run(t, root, "--apply")
+		if _, err := os.Stat(nm); !os.IsNotExist(err) {
+			t.Fatalf("node_modules must be reclaimed, stat error: %v", err)
+		}
+		_, applied, found := strings.Cut(got, "\nreclaimed ")
+		if !found {
+			t.Fatalf("stdout = %q, want a reclaimed row", got)
+		}
+		assertInert(t, applied)
+	})
+
+	t.Run("json keeps the raw path", func(t *testing.T) {
+		root, nm := newRoot(t)
+		got := run(t, root, "--json")
+		var report struct {
+			Items []struct {
+				Path string `json:"path"`
+			} `json:"items"`
+		}
+		if err := json.Unmarshal([]byte(got), &report); err != nil {
+			t.Fatalf("clean --json = %q: %v", got, err)
+		}
+		if len(report.Items) != 1 || !strings.HasSuffix(report.Items[0].Path, filepath.Join(hostile, "node_modules")) {
+			t.Errorf("clean --json items = %+v, want the raw path ending %q", report.Items, nm)
+		}
+	})
+}

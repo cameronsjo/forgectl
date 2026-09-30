@@ -129,11 +129,11 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 	// by name between the check and the use is how the final path component
 	// gets swapped underneath a decision.
 	if !IsSOPSFile(before) {
-		return OutcomeUnspecified, fmt.Errorf("refusing %s: it has no top-level sops: block, so it is not a SOPS document", target.Rel())
+		return OutcomeUnspecified, fmt.Errorf("refusing %s: it has no top-level sops: block, so it is not a SOPS document", termsafe.QuotePath(target.Rel()))
 	}
 	rules, err := ReadPlaintextRules(before)
 	if err != nil {
-		return OutcomeUnspecified, fmt.Errorf("refusing %s: %w", target.Rel(), err)
+		return OutcomeUnspecified, fmt.Errorf("refusing %s: %w", termsafe.QuotePath(target.Rel()), err)
 	}
 	// The WHOLE path, not the leaf: sops applies these rules to a key and its
 	// entire subtree, so an ancestor decides the outcome. See
@@ -142,7 +142,7 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 		// Names the rule and the file, never the path — the sops grammar
 		// admits plenty of real credential shapes, so a token pasted into the
 		// key slot reaches here.
-		return OutcomeUnspecified, fmt.Errorf("refusing to write into %s: %s, so the value would be stored in the clear", target.Rel(), reason)
+		return OutcomeUnspecified, fmt.Errorf("refusing to write into %s: %s, so the value would be stored in the clear", termsafe.QuotePath(target.Rel()), reason)
 	}
 
 	// The guard is armed BEFORE the work directory exists and released AFTER
@@ -215,7 +215,7 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 		// forgectl and names a rule rather than an argument; sops' own output
 		// is still never surfaced.
 		if reason := work.readEditorError(); reason != "" {
-			return OutcomeUnspecified, fmt.Errorf("%s — %s is unchanged", reason, target.Rel())
+			return OutcomeUnspecified, fmt.Errorf("%s — %s is unchanged", reason, termsafe.QuotePath(target.Rel()))
 		}
 		return OutcomeUnspecified, sopsRefusalError(target)
 	}
@@ -260,7 +260,7 @@ const sopsUnchangedExit = 200
 // is sops failing on its own terms, usually a key it cannot use, and a
 // decrypt with stdout discarded reproduces that without writing anything.
 func sopsRefusalError(target env.Target) error {
-	return fmt.Errorf("sops refused the edit — %s is unchanged. Its output is withheld because it can quote the file's plaintext; running `sops decrypt` on the file with stdout discarded shows why it failed", target.Rel())
+	return fmt.Errorf("sops refused the edit — %s is unchanged. Its output is withheld because it can quote the file's plaintext; running `sops decrypt` on the file with stdout discarded shows why it failed", termsafe.QuotePath(target.Rel()))
 }
 
 // restoreFailed is the error for a failed run whose restore also failed. kept
@@ -269,14 +269,14 @@ func sopsRefusalError(target env.Target) error {
 // than git (cameronsjo/forgectl#652).
 func restoreFailed(cause, restoreErr error, target env.Target, kept string) error {
 	if kept == "" {
-		return fmt.Errorf("%w — and %s could NOT be restored: %v. Its backup could not be kept either; restore it from git", cause, target.Rel(), restoreErr)
+		return fmt.Errorf("%w — and %s could NOT be restored: %v. Its backup could not be kept either; restore it from git", cause, termsafe.QuotePath(target.Rel()), termsafe.Error(restoreErr))
 	}
 	shown := filepath.Base(kept)
 	if rel, err := filepath.Rel(filepath.Dir(target.Abs()), kept); err == nil {
 		shown = rel
 	}
 	shown = termsafe.QuotePath(filepath.Join(filepath.Dir(target.Rel()), shown))
-	return fmt.Errorf("%w — and %s could NOT be restored: %v. Its ciphertext from before this run is kept at %s; restore from it or from git, then delete it", cause, target.Rel(), restoreErr, shown)
+	return fmt.Errorf("%w — and %s could NOT be restored: %v. Its ciphertext from before this run is kept at %s; restore from it or from git, then delete it", cause, termsafe.QuotePath(target.Rel()), termsafe.Error(restoreErr), shown)
 }
 
 // verify proves the write landed, and landed ENCRYPTED.
@@ -472,7 +472,7 @@ func newWorkDir(target env.Target) (*workDir, error) {
 	// commit, plaintext included. See internal/env/scratch.go.
 	dir, err := env.MakeScratchDir(parent, target.SopsWorkDirPattern())
 	if err != nil {
-		return nil, fmt.Errorf("prepare a work directory beside %s: %w", target.Rel(), err)
+		return nil, fmt.Errorf("prepare a work directory beside %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(err))
 	}
 
 	buf := make([]byte, nonceBytes)
