@@ -207,3 +207,14 @@ func TestOSRunner_OpaqueArgsRenderFlagNamesOnly(t *testing.T) {
 		}
 	}
 }
+
+// A span whose length would overflow from+n still clamps to argv's end.
+//
+// Mutation: compute end as min(len(shown), from+n) and from+n wraps
+// negative, so shownArgs panics slicing.
+func TestShownArgs_HugeSpanClamps(t *testing.T) {
+	ctx := WithOpaqueArgs(context.Background(), 1, int(^uint(0)>>1))
+	if got := shownArgs(ctx, []string{"run", "-pX", "img"}); strings.Join(got, " ") != "run -p"+redact.UserArgMarker+" "+redact.UserArgMarker {
+		t.Errorf("shownArgs = %q", got)
+	}
+}

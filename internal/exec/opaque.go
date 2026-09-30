@@ -38,7 +38,10 @@ func shownArgs(ctx context.Context, args []string) []string {
 	if !ok || span.from >= len(shown) {
 		return shown
 	}
-	end := min(len(shown), span.from+span.n)
+	end := len(shown)
+	if span.n < len(shown)-span.from {
+		end = span.from + span.n
+	}
 	out := make([]string, 0, len(shown))
 	out = append(out, shown[:span.from]...)
 	out = append(out, redact.UserArgs(shown[span.from:end])...)
