@@ -522,6 +522,33 @@ func TestWatcherSettleDelay_BacksOffAndCaps(t *testing.T) {
 	}
 }
 
+// noteReset extends the streak for a rebuild within resetQuiet of the last,
+// up to maxResetStreak, and starts it over after a quiet spell.
+//
+// Mutation that turns it red: drop the min against maxResetStreak (the
+// streak grows past the cap).
+func TestWatcherNoteReset_ClampsStreak(t *testing.T) {
+	w := &Watcher{}
+	t0 := time.Now()
+	w.noteReset(t0)
+	if w.resetStreak != 0 {
+		t.Errorf("first rebuild's streak = %d, want 0", w.resetStreak)
+	}
+	w.noteReset(t0.Add(time.Second))
+	if w.resetStreak != 1 {
+		t.Errorf("streak after a rebuild within resetQuiet = %d, want 1", w.resetStreak)
+	}
+	w.resetStreak = maxResetStreak
+	w.noteReset(t0.Add(2 * time.Second))
+	if w.resetStreak != maxResetStreak {
+		t.Errorf("streak past the cap = %d, want %d", w.resetStreak, maxResetStreak)
+	}
+	w.noteReset(t0.Add(2*time.Second + resetQuiet))
+	if w.resetStreak != 0 {
+		t.Errorf("streak after resetQuiet = %d, want 0", w.resetStreak)
+	}
+}
+
 // A directory swap that wins the race against every registration pass
 // leaves a watch rebuild pending after every reload. Run backs off instead
 // of reloading at the debounce rate for as long as that lasts.
