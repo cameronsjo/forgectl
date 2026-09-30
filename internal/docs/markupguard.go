@@ -309,7 +309,7 @@ func listMarkerEnd(line []byte, i int) int {
 // a fixed notice, then the whole source HTML-escaped in a <pre>, so the
 // reader still shows every byte of it, as text.
 func plainTextDoc(source []byte) string {
-	return sourceTextDoc("plain-text", "Shown as plain text",
+	return sourceTextDoc(noticePlainText, "Shown as plain text",
 		"This document has more nested or unclosed markup than the reader formats in reasonable time, so it is shown as its source text. "+
 			"Its links and headings are not indexed.",
 		source)

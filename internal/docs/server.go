@@ -478,13 +478,23 @@ func handleDoc(store *Store) http.HandlerFunc {
 		if found {
 			from = &doc
 		}
-		rendered, err := RenderDocFor(kind, source, idx, from)
+		rendered, err := RenderDocForContext(r.Context(), kind, source, idx, from)
+		if err != nil && r.Context().Err() != nil {
+			// The client went away before the page was ready: nothing to
+			// answer, and nothing went wrong.
+			slog.Debug("docs: request ended before its render.", "root", termsafe.SafeLine(root), "rest", termsafe.SafeLine(rest), "error", err)
+			return
+		}
 		if err != nil {
 			slog.Error("docs: markdown render failed.", "root", root, "rest", rest, "error", err)
 			http.Error(w, "render failed", http.StatusInternalServerError)
 			return
 		}
 
+		switch rendered.Notice {
+		case noticeRenderSize, noticeRenderDeadline, noticeRenderBusy:
+			slog.Warn("docs: served the document as source text instead of rendering it.", "path", termsafe.SafeLine(root+"/"+rest), "reason", rendered.Notice, "bytes", len(source))
+		}
 		renderShell(w, idx, pageContext{
 			CurrentRoot: root,
 			CurrentRel:  rest,
