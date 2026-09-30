@@ -51,6 +51,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -115,9 +116,30 @@ func newUnstartedWatcher(t *testing.T, root string, more ...string) *Watcher {
 	return w
 }
 
+// currentFSW reads the watcher's fsnotify watcher under its lock, as Run's
+// replaceWatcher writes it.
+func currentFSW(w *Watcher) *fsnotify.Watcher {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.fsw
+}
+
+// awaitReplaced waits up to recvTimeout for Run to replace the fsnotify
+// watcher that was current as before, the sign of a watch rebuild.
+func awaitReplaced(t *testing.T, w *Watcher, before *fsnotify.Watcher, what string) {
+	t.Helper()
+	deadline := time.Now().Add(recvTimeout)
+	for currentFSW(w) == before {
+		if time.Now().After(deadline) {
+			t.Fatalf("the fsnotify watcher was not replaced within %s after %s", recvTimeout, what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func requireWatched(t *testing.T, w *Watcher, paths ...string) {
 	t.Helper()
-	list := w.fsw.WatchList()
+	list := currentFSW(w).WatchList()
 	for _, p := range paths {
 		if !slices.Contains(list, p) {
 			t.Errorf("%s is not watched, want it watched; watch list %q", p, list)
@@ -246,7 +268,7 @@ func syncWithWatch(t *testing.T, w *Watcher) {
 
 func requireNotWatched(t *testing.T, w *Watcher, paths ...string) {
 	t.Helper()
-	list := w.fsw.WatchList()
+	list := currentFSW(w).WatchList()
 	for _, p := range paths {
 		if slices.Contains(list, p) {
 			t.Errorf("%s is watched, want no watch there; watch list %q", p, list)
@@ -298,7 +320,7 @@ func TestWatcherRegister_DirSwappedBeforeAdd_RebuildsWatches(t *testing.T) {
 	if !w.resetPending {
 		t.Fatal("resetPending is not set after the watched path changed during its Add")
 	}
-	w.reload() // what Run does once the debounce settles
+	w.reload(false) // what Run does once the debounce settles
 
 	if w.resetPending {
 		t.Error("resetPending still set after the reload's rebuild")
@@ -488,9 +510,11 @@ func TestWatcherRefresh_RootSelfEvent_DoesNotWatchParent(t *testing.T) {
 
 // A rebuild scheduled while NewWatcher registered (before Run started) is
 // carried out by Run itself, with no filesystem event needed to wake it.
+// The rebuild is observed as the fsnotify watcher being replaced; it
+// publishes nothing, since the index it rebuilds is unchanged.
 //
-// Mutation that turns it red: drop Run's start-up check of resetPending (no
-// reload ever comes).
+// Mutation that turns it red: drop Run's start-up check of resetPending (the
+// watcher is never replaced).
 func TestWatcherRun_PendingResetFromNewWatcher_Reloads(t *testing.T) {
 	root, _ := swapFixture(t)
 	idx, err := NewIndex([]string{root})
@@ -507,17 +531,21 @@ func TestWatcherRun_PendingResetFromNewWatcher_Reloads(t *testing.T) {
 	// NewWatcher's registration; set directly so no filesystem event exists
 	// to wake Run some other way.
 	w.resetPending = true
-	sub, unsubscribe := broker.Subscribe()
+	before := currentFSW(w)
 	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
 	t.Cleanup(func() {
 		cancel()
-		unsubscribe()
+		<-runDone
 		broker.Close()
 		_ = w.Close()
 	})
-	go w.Run(ctx)
+	go func() {
+		defer close(runDone)
+		w.Run(ctx)
+	}()
 
-	awaitReload(t, sub, "a registration that left a watch rebuild pending")
+	awaitReplaced(t, w, before, "a registration that left a watch rebuild pending")
 }
 
 // A renamed directory given a compat symlink under its old name keeps its
@@ -650,11 +678,13 @@ func TestWatcherNoteReset_ClampsStreak(t *testing.T) {
 
 // A directory swap that wins the race against every registration pass
 // leaves a watch rebuild pending after every reload. Run backs off instead
-// of reloading at the debounce rate for as long as that lasts.
+// of rebuilding at the debounce rate for as long as that lasts. Rebuilds
+// are counted as walks of the root, since a rebuild that leaves the index
+// unchanged publishes nothing.
 //
 // Mutation that turns it red: drop Run's resetStreak increment, or reset
-// the streak on any reload that ends clean (a reload every debounce or two,
-// dozens in the window).
+// the streak on any reload that ends clean (a rebuild every debounce or
+// two, dozens in the window).
 func TestWatcherRun_RepeatedReset_BacksOff(t *testing.T) {
 	root, outside := swapFixture(t)
 	a := filepath.Join(root, "a")
@@ -662,8 +692,11 @@ func TestWatcherRun_RepeatedReset_BacksOff(t *testing.T) {
 	// Every registration pass swaps root/a for a symlink during its Add,
 	// which marks a rebuild pending, then puts it back when the walk
 	// reaches root/b, so the next pass meets it again.
+	var walks atomic.Int32
 	setWatchHook(t, func(path string, stage watchStage) {
 		switch {
+		case path == root && stage == stageBeforeCheck:
+			walks.Add(1)
 		case path == a && stage == stageBeforeAdd:
 			_ = os.Rename(a, moved)
 			_ = os.Symlink(outside, a)
@@ -687,7 +720,7 @@ func TestWatcherRun_RepeatedReset_BacksOff(t *testing.T) {
 		t.Fatal("the swapping hook did not leave a rebuild pending; the fixture exercises nothing")
 	}
 	w.debounce = testDebounce
-	sub, unsubscribe := broker.Subscribe()
+	walks.Store(0) // NewWatcher's own registration walk is not a rebuild
 	ctx, cancel := context.WithCancel(context.Background())
 	// Run must have returned before setWatchHook's cleanup restores the
 	// hook: cancel alone does not wait, and a reload still walking would
@@ -696,7 +729,6 @@ func TestWatcherRun_RepeatedReset_BacksOff(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		<-runDone
-		unsubscribe()
 		broker.Close()
 		_ = w.Close()
 	})
@@ -705,25 +737,17 @@ func TestWatcherRun_RepeatedReset_BacksOff(t *testing.T) {
 		w.Run(ctx)
 	}()
 
-	// 20 ms doubling from 40 ms: a reload at about 20, 60, 140, 300, 620 and
-	// 1260 ms, so about six in the window, plus any the swap's own events
-	// arm. Without backoff it is one per debounce or two.
-	window := time.After(1500 * time.Millisecond)
-	reloads := 0
-	for done := false; !done; {
-		select {
-		case <-sub:
-			reloads++
-		case <-window:
-			done = true
-		}
+	// 20 ms doubling from 40 ms: a rebuild at about 20, 60, 140, 300, 620
+	// and 1260 ms, so about six in the window, plus any the swap's own
+	// events arm. Without backoff it is one per debounce or two.
+	time.Sleep(1500 * time.Millisecond)
+	rebuilds := walks.Load()
+	t.Logf("%d rebuilds in the window", rebuilds)
+	if rebuilds < 2 {
+		t.Fatalf("%d rebuilds in the window; the pending rebuild never repeated, so nothing was measured", rebuilds)
 	}
-	t.Logf("%d reloads in the window", reloads)
-	if reloads < 2 {
-		t.Fatalf("%d reloads in the window; the pending rebuild never repeated, so nothing was measured", reloads)
-	}
-	if reloads > 12 {
-		t.Errorf("%d reloads in 1.5s under a rebuild that stays pending; want backoff (at most about 7)", reloads)
+	if rebuilds > 12 {
+		t.Errorf("%d rebuilds in 1.5s under a rebuild that stays pending; want backoff (at most about 7)", rebuilds)
 	}
 }
 
@@ -742,7 +766,7 @@ func TestWatcherReload_PendingReset_RegistersOnce(t *testing.T) {
 		}
 	})
 	w.resetPending = true
-	w.reload()
+	w.reload(false)
 	if walks != 1 {
 		t.Errorf("a reload with a watch rebuild pending walked the root %d times, want 1", walks)
 	}
@@ -767,7 +791,7 @@ func TestWatcherReload_PendingReset_RegistersReplacedRoot(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(root, "doc.md"), "# Doc\n")
 	w.resetPending = true
-	w.reload()
+	w.reload(false)
 	requireWatched(t, w, root, filepath.Join(root, "fresh"))
 }
 
@@ -776,7 +800,7 @@ func TestWatcherReload_PendingReset_RegistersReplacedRoot(t *testing.T) {
 // cannot keep postponing the rebuild.
 //
 // Mutation that turns it red: re-arm on every event while resetPending is
-// set (the reload waits for the churn to stop).
+// set (the rebuild waits for the churn to stop).
 func TestWatcherRun_IrrelevantChurn_DoesNotPostponeReset(t *testing.T) {
 	root, _ := swapFixture(t)
 	idx, err := NewIndex([]string{root})
@@ -790,28 +814,33 @@ func TestWatcherRun_IrrelevantChurn_DoesNotPostponeReset(t *testing.T) {
 	}
 	w.debounce = 200 * time.Millisecond
 	w.resetPending = true
-	sub, unsubscribe := broker.Subscribe()
+	before := currentFSW(w)
 	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
 	t.Cleanup(func() {
 		cancel()
-		unsubscribe()
+		<-runDone
 		broker.Close()
 		_ = w.Close()
 	})
-	go w.Run(ctx)
+	go func() {
+		defer close(runDone)
+		w.Run(ctx)
+	}()
 
 	churn := filepath.Join(root, "notes.txt")
 	stop := time.After(2 * time.Second)
 	tick := time.NewTicker(30 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		select {
-		case <-sub:
+		if currentFSW(w) != before {
 			return // the rebuild ran while the churn went on
+		}
+		select {
 		case <-tick.C:
 			writeFile(t, churn, time.Now().String())
 		case <-stop:
-			t.Fatal("no reload during 2s of churn on a non-markdown file; each event postponed the pending rebuild")
+			t.Fatal("no rebuild during 2s of churn on a non-markdown file; each event postponed the pending rebuild")
 		}
 	}
 }
@@ -912,6 +941,7 @@ func TestWatcherRun_EventThroughSwappedDir_DoesNotReload(t *testing.T) {
 	writeFile(t, filepath.Join(root, "c", "doc.md"), "# Doc\n")
 	writeFile(t, filepath.Join(root, "node_modules", "pkg", "doc.md"), "# Doc\n")
 	syncWithWatch(t, w)
+	w.reload(false) // index the fixture and sync writes before Run starts
 	sub := startWatcher(t, w)
 	drainReloads(sub)
 
@@ -950,9 +980,10 @@ func TestWatcherRun_EventThroughSwappedDir_DoesNotReload(t *testing.T) {
 // (forgectl#796, reopened by coupling move detection to stray in PR #868).
 // A real directory named dir.md is a directory all the same.
 //
-// Mutation that turns it red: compute moved as !stray && w.dirMoved(ev)
-// in Run (the stray Rename then gets only the silent watch rebuild, so no
-// reload comes and the index keeps the moved-out doc).
+// A stray event schedules the same rebuild a move does, so each of the
+// two alone covers this case. Mutation that turns it red: compute moved
+// as !stray && w.dirMoved(ev) AND drop the stray event's resetPending
+// assignment in Run (no rebuild, so no reload comes for the move).
 func TestWatcher_MovedOutThenRelinked_DropsDescendantWatches(t *testing.T) {
 	for _, name := range []string{"a", "dir.md"} {
 		t.Run(name, func(t *testing.T) {
@@ -1008,10 +1039,12 @@ func TestWatcher_MovedOutThenRelinked_DropsDescendantWatches(t *testing.T) {
 }
 
 // A doc replaced by a symlink to an outside file delivers stray events
-// only, but the index still lists it: the watcher reloads once to drop it.
+// only, but the index still lists it. The stray event's settle rebuilds
+// the index, which drops the doc, and the changed index publishes.
 //
-// Mutation that turns it red: drop the FindByAbsPath branch in Run (no
-// reload comes, and the index keeps listing top.md).
+// Mutation that turns it red: never publish from reload, skip its index
+// rebuild, or drop the stray event's resetPending assignment in Run (no
+// settle is armed).
 func TestWatcherRun_DocReplacedBySymlink_Reloads(t *testing.T) {
 	root, outside := swapFixture(t)
 	writeFile(t, filepath.Join(outside, "secret.md"), "# Secret\n")
@@ -1035,39 +1068,85 @@ func TestWatcherRun_DocReplacedBySymlink_Reloads(t *testing.T) {
 // not lead. On kqueue, a doc swapped for a symlink to an outside file and
 // swapped back keeps a watch on the outside file under the doc's own name,
 // which a re-Add reuses and nothing else drops. So any stray event
-// schedules a rebuild of the watches in a fresh fsnotify watcher, and the
-// rebuild is silent: it neither rebuilds the index nor publishes a reload.
+// schedules a rebuild of the watches in a fresh fsnotify watcher. Its
+// settle rebuilds the index as every settle does, and with nothing in the
+// roots changed it publishes nothing.
 //
-// Mutation that turns it red: drop the resetPending assignment in Run's
-// stray branch (the fsnotify watcher is never replaced), or publish that
-// rebuild (a reload follows the stray event).
-func TestWatcherRun_StrayEvent_RebuildsWatchesSilently(t *testing.T) {
+// Mutation that turns it red: drop the resetPending assignment for a stray
+// event in Run (the fsnotify watcher is never replaced), or publish on
+// every settle (a reload follows the stray event).
+func TestWatcherRun_StrayOnlySettle_RebuildsWatchesAndPublishesNothing(t *testing.T) {
 	root, outside := swapFixture(t)
 	w := newUnstartedWatcher(t, root)
 	a := filepath.Join(root, "a")
 	swapForSymlink(t, a, outside)
-	// Consume the swap's own events, so Run meets no real move.
+	// Consume the swap's own events, so Run meets no real move, and index
+	// the sync write, so the index is current when Run starts.
 	syncWithWatch(t, w)
-	w.mu.Lock()
-	before := w.fsw
-	w.mu.Unlock()
+	w.reload(false)
+	before := currentFSW(w)
 	reloads := startWatcher(t, w)
 	drainReloads(reloads)
 
 	injectEvent(t, w, fsnotify.Event{Name: filepath.Join(a, "secret.md"), Op: fsnotify.Write})
-	deadline := time.Now().Add(recvTimeout)
-	for {
-		w.mu.Lock()
-		replaced := w.fsw != before
-		w.mu.Unlock()
-		if replaced {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the fsnotify watcher was not replaced within %s of a stray event", recvTimeout)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	awaitReplaced(t, w, before, "a stray event")
 	requireNoReload(t, reloads, "the watch rebuild a stray event scheduled")
 	requireWatched(t, w, root, filepath.Join(root, "b"))
+}
+
+// A doc edited while a stray event's watch rebuild is re-registering the
+// roots, in a directory the rebuild has not reached yet, raises no event:
+// the old watcher is closed and the new one is not watching there yet. The
+// settle's index rebuild still sees the edit, and because the index
+// changed, it publishes (PR #868 review, round 4).
+//
+// Mutation that turns it red: never publish from reload, skip reload's
+// index rebuild (the index keeps the old title), or rebuild only the
+// watches on a stray-only settle, as the silent reset did.
+func TestWatcherRun_EditDuringStrayRebuild_Publishes(t *testing.T) {
+	root, outside := swapFixture(t)
+	doc := filepath.Clean(filepath.Join(root, "b", "doc.md"))
+	writeFile(t, doc, "# Old\n")
+	w := newUnstartedWatcher(t, root)
+	var armed atomic.Bool
+	var edited atomic.Bool
+	setWatchHook(t, func(path string, stage watchStage) {
+		if armed.Load() && path == filepath.Join(root, "a") && stage == stageBeforeCheck && edited.CompareAndSwap(false, true) {
+			// Run's goroutine: no t.Fatal here; the title check below
+			// catches a write that failed.
+			_ = os.WriteFile(doc, []byte("# New\n"), 0o600)
+		}
+	})
+	reloads := startWatcher(t, w)
+	drainReloads(reloads)
+	armed.Store(true)
+
+	// A dangling symlink in the root: its Create is a stray event.
+	if err := os.Symlink(filepath.Join(outside, "gone"), filepath.Join(root, "dangling")); err != nil {
+		t.Skipf("symlinks unavailable here: %v", err)
+	}
+	awaitReload(t, reloads, "a doc edited while the watches were being rebuilt")
+	if !edited.Load() {
+		t.Fatal("the rebuild never reached root/a; the fixture exercises nothing")
+	}
+	got, ok := w.store.Current().FindByAbsPath(doc)
+	if !ok || got.Title != "New" {
+		t.Errorf("indexed title = %q (found %v), want %q", got.Title, ok, "New")
+	}
+}
+
+// A settled burst that held an in-root doc event publishes even when the
+// rebuilt index equals the old one: the index cannot see a body edit that
+// kept the doc's metadata and its mtime tick.
+//
+// Mutation that turns it red: publish only when the index changed
+// (ignore the burst's doc event).
+func TestWatcherRun_DocEventWithUnchangedIndex_Publishes(t *testing.T) {
+	root, _ := swapFixture(t)
+	w := newUnstartedWatcher(t, root)
+	reloads := startWatcher(t, w)
+	drainReloads(reloads)
+
+	injectEvent(t, w, fsnotify.Event{Name: filepath.Join(root, "top.md"), Op: fsnotify.Write})
+	awaitReload(t, reloads, "a doc event whose rebuilt index is unchanged")
 }

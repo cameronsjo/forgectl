@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -376,17 +378,19 @@ func (w *Watcher) watchCreatedDir(path string) {
 
 // Run processes filesystem events until ctx is canceled or the underlying
 // watcher closes. It coalesces bursts through w.debounce, bounded by
-// w.maxWait (settleIn), and, for each settled burst, rebuilds the index,
-// swaps it into the Store, and publishes one reload notification.
+// w.maxWait (settleIn), and, for each settled burst, rebuilds the watches
+// if a rebuild is pending, rebuilds the index, swaps it into the Store, and
+// publishes one reload notification when the burst held a doc event or the
+// index changed (reload).
 func (w *Watcher) Run(ctx context.Context) {
 	var (
 		timer    *time.Timer
 		settledC <-chan time.Time
-		// publish records that the armed timer is for a reload browsers
-		// must hear about. A timer armed only for a stray event's watch
-		// rebuild leaves it false, and its settle rebuilds the watches
-		// without rebuilding the index or publishing (resetWatches).
-		publish bool
+		// sawDocEvent records that the burst being settled held an event
+		// on an in-root doc name (relevant and not stray). Such a burst
+		// publishes even when the rebuilt index is equal: the index cannot
+		// see a body edit that kept the doc's metadata and its mtime tick.
+		sawDocEvent bool
 	)
 	arm := func() {
 		if timer == nil {
@@ -404,7 +408,6 @@ func (w *Watcher) Run(ctx context.Context) {
 	// A registration in NewWatcher that met a changing directory has a
 	// watch rebuild waiting. Run the reload that performs it.
 	if w.resetPending {
-		publish = true
 		arm()
 	}
 
@@ -426,54 +429,39 @@ func (w *Watcher) Run(ctx context.Context) {
 			// but never the filesystem the event came through.
 			stray := w.strayEvent(ev.Name)
 			w.refreshWatch(ev)
-			// Move detection never consults stray. A watched directory
-			// renamed away and replaced by a symlink has a stray Rename,
-			// and skipping its rebuild would keep its descendants'
-			// watches wherever it went (forgectl#796 again, PR #868
-			// review). A rebuild re-registers only through verified
-			// paths, so an extra one costs a reload and never widens the
-			// watch set.
+			// A Rename of a watched directory rebuilds the watches: the
+			// moved tree's descendants keep theirs wherever it went,
+			// outside the root or into an excluded directory, and only a
+			// fresh watcher drops them (forgectl#796). Move detection
+			// never consults stray, since a directory renamed away and
+			// replaced by a symlink has a stray Rename (PR #868 review).
 			moved := w.dirMoved(ev)
-			if moved {
-				// The moved tree's descendants keep their watches wherever
-				// it went, outside the root or into an excluded directory;
-				// only a fresh watcher drops them (forgectl#796).
+			// A stray event rebuilds the watches too: fsnotify holds a
+			// watch bound somewhere its name does not lead, and on kqueue a
+			// watch opened through a symlink keeps that binding even after
+			// the name is a real file or directory again, since a re-Add
+			// of a watched path reuses the watch (forgectl#865). Only a
+			// fresh fsnotify watcher drops it.
+			if moved || stray {
 				w.resetPending = true
+			}
+			// stray gates only the doc-event decision. A stray event can
+			// still publish, but only through the index its settle rebuilds
+			// changing (a doc replaced by a symlink drops out of it), and
+			// the index holds only root-confined state.
+			docEvent := !stray && w.relevant(ev.Name)
+			if docEvent {
+				sawDocEvent = true
 			}
 
 			// A reset already pending with its reload armed is not re-armed
 			// by an event that is not otherwise relevant, so churn on other
 			// files cannot keep postponing it.
 			resetNeedsArming := w.resetPending && (!wasPending || settledC == nil)
-			// stray gates only this relevance decision: a stray event
-			// reloads only for a name the index still lists, which means
-			// that doc was replaced (by a symlink, say) and the reload
-			// drops it. The name is in-tree and indexed, so the reload says
-			// nothing about outside. FindByAbsPath scans every doc, but
-			// only stray events pay for it, and those are rare.
-			reloads := w.relevant(ev.Name)
-			if stray {
-				_, reloads = w.store.Current().FindByAbsPath(ev.Name)
-			}
-			if reloads || moved || resetNeedsArming {
-				publish = true
-				arm()
+			if !docEvent && !moved && !resetNeedsArming {
 				continue
 			}
-			// A stray event means fsnotify holds a watch bound somewhere
-			// its name does not lead: on kqueue a watch opened through a
-			// symlink keeps that binding even after the name is a real
-			// file or directory again, since a re-Add of a watched path
-			// reuses the watch (forgectl#865). Only a fresh fsnotify
-			// watcher drops it, so the watches are rebuilt, silently: the
-			// index is untouched and nothing is published, so the rebuild
-			// says nothing about the outside change that caused it.
-			if stray && !w.resetPending {
-				w.resetPending = true
-				if settledC == nil {
-					arm()
-				}
-			}
+			arm()
 
 		case err, ok := <-w.fsw.Errors:
 			if !ok {
@@ -487,31 +475,14 @@ func (w *Watcher) Run(ctx context.Context) {
 			if w.resetPending {
 				w.noteReset(time.Now())
 			}
-			if publish {
-				w.reload()
-			} else if w.resetPending {
-				w.resetWatches()
-			}
-			publish = false
+			w.reload(sawDocEvent)
+			sawDocEvent = false
 			// A rebuild that itself met a changing directory waits again
-			// rather than looping, backed off by settleDelay; that rebuild
-			// reloads, as one met during any registration does.
+			// rather than looping, backed off by settleDelay.
 			if w.resetPending {
-				publish = true
 				arm()
 			}
 		}
-	}
-}
-
-// resetWatches rebuilds every watch in a fresh fsnotify watcher against the
-// current index, as a pending reset in reload does, without rebuilding the
-// index or publishing. Run uses it for a rebuild only stray events asked
-// for.
-func (w *Watcher) resetWatches() {
-	if w.replaceWatcher() {
-		w.dirs = nil
-		w.registerRoots(w.store.Current().Roots())
 	}
 }
 
@@ -627,13 +598,12 @@ func (w *Watcher) dirMoved(ev fsnotify.Event) bool {
 // must pass the same predicate the name did: relevant() for a doc name,
 // which keeps an OnlyFile root to its one file and refuses excluded
 // directories, or inTree() for any other name (a directory's own Rename).
-// An event whose resolved path fails is stray: Run does not reload for its
-// relevance, though a stray Rename of a watched directory still counts as
-// a move (Run never lets stray suppress a watch rebuild), a stray event on
-// a doc the index lists still reloads to drop it, and any other stray
-// event rebuilds the watches without a reload. A compat symlink that leads
-// to a doc elsewhere inside the root is not stray, and a name with no
-// symlink on its path is decided exactly as before. The check fails closed: a path
+// An event whose resolved path fails is stray: it is never a doc event,
+// so it publishes only if the index its settle rebuilds changed, and it
+// schedules a rebuild of the watches (Run). A stray Rename of a watched
+// directory still counts as a move. A compat symlink that leads to a doc
+// elsewhere inside the root is not stray, and a name with no symlink on
+// its path is decided exactly as before. The check fails closed: a path
 // that cannot be resolved for any reason but its own absence (a dangling
 // symlink, a loop) is stray. A deleted path resolves through its deepest
 // existing ancestor, so its events still reload.
@@ -729,16 +699,26 @@ func (w *Watcher) inTree(path string) bool {
 	return false // outside every configured root
 }
 
-// reload rebuilds the index and, on success, installs it and notifies
-// subscribers. A failed rebuild keeps the previous index in service: a root
-// that is temporarily gone should degrade live reload, not blank the reader.
+// reload rebuilds the index and, on success, installs it. It notifies
+// subscribers when docEvent is set (the settled burst held an in-root doc
+// event) or the fresh index differs from the one it replaces (sameIndex),
+// and otherwise stays silent. A failed rebuild keeps the previous index in
+// service: a root that is temporarily gone should degrade live reload, not
+// blank the reader.
+//
+// Every settle takes this one path, a watch rebuild included, so a change
+// the rebuild could not see as an event (a doc edited before its directory
+// was watched again) still reaches the index and, by changing it,
+// publishes. A settle only a stray event armed cannot publish on that
+// event's account: the index is built by a walk confined to the roots, so
+// nothing outside them can change it.
 //
 // A pending watch rebuild registers every root once. The fresh watcher is
 // registered against the current index before the rebuild, so a change
 // during the rebuild still wakes Run, and after it only the roots that pass
 // could not open are registered from the fresh index (a root replaced since
 // the last index, whose new directory only the fresh index pins).
-func (w *Watcher) reload() {
+func (w *Watcher) reload(docEvent bool) {
 	current := w.store.Current()
 	var reset map[string]bool
 	if w.resetPending && w.replaceWatcher() {
@@ -766,6 +746,38 @@ func (w *Watcher) reload() {
 		w.registerRoots(rest)
 	}
 
+	if !docEvent && sameIndex(current, fresh) {
+		slog.Debug("docs: index rebuilt for live reload; nothing changed.", "docCount", len(fresh.List()))
+		return
+	}
 	slog.Debug("docs: index rebuilt for live reload.", "docCount", len(fresh.List()))
 	w.broker.Publish(reloadMessage)
+}
+
+// sameIndex reports whether b holds what a does as far as a reader can
+// tell: the same roots (by label, path, single file, kind and vault), the
+// same docs in the same order with every scanned field equal, and the same
+// skipped paths. A root's pinned directory identity is not compared: a
+// root replaced by an identical tree serves the same pages.
+func sameIndex(a, b *Index) bool {
+	if len(a.roots) != len(b.roots) || len(a.docs) != len(b.docs) || !slices.Equal(a.skipped, b.skipped) {
+		return false
+	}
+	for i := range a.roots {
+		x, y := a.roots[i], b.roots[i]
+		if x.Label != y.Label || x.Path != y.Path || x.OnlyFile != y.OnlyFile || x.Kind != y.Kind || x.VaultPath != y.VaultPath {
+			return false
+		}
+	}
+	for i := range a.docs {
+		x, y := a.docs[i], b.docs[i]
+		if !x.ModTime.Equal(y.ModTime) {
+			return false
+		}
+		x.ModTime, y.ModTime = time.Time{}, time.Time{}
+		if !reflect.DeepEqual(x, y) {
+			return false
+		}
+	}
+	return true
 }
