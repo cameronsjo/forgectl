@@ -3,13 +3,17 @@ package cli
 // `forgectl update` never renders subprocess text raw (#778 item 5), the
 // way `forgectl upgrade` does not (#777).
 //
-//   [x] update run: brew's stdout never reaches the transcript; a fixed line
-//       points at the debug log, which gets the text
+//   [x] update run: brew's stdout never reaches the terminal; a fixed line
+//       points at the transcript file, which holds it escaped
 //   [x] update run: a failed brew sub-command is named from the argv this
 //       binary built, with its exit status, never with brew's stderr, on the
-//       transcript, the stdout summary, and the returned error
+//       terminal, the stdout summary, and the returned error; the cause is
+//       in the transcript file, escaped, and all three point at that file
+//   [x] with no transcript file, nothing points at one: the pointer falls
+//       back to --json and log_level
 //   [x] update check: brew's outdated list is rebuilt from name and version
-//       tokens; a line that is not one is counted, never shown
+//       tokens, a pinned note included; a line that is not one is counted,
+//       never shown
 //   [x] any other step's output is escaped line by line
 //   [x] --json keeps each step's raw output and error text (value-preserving,
 //       escaped by JSONEncoder)
@@ -18,6 +22,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -57,53 +63,118 @@ func assertNoBrewText(t *testing.T, where, text string) {
 	}
 }
 
-func TestUpdateRun_BrewOutputGoesToTheDebugLogOnly(t *testing.T) {
+// transcriptFile returns the one update-*.log in dir and its contents.
+func transcriptFile(t *testing.T, dir string) (path, contents string) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, "update-*.log"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("want one transcript file in %s, got %v (%v)", dir, matches, err)
+	}
+	b, err := os.ReadFile(filepath.Clean(matches[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return matches[0], string(b)
+}
+
+// escapedBrewText is brewText as termsafe.SafeLine writes it.
+const escapedBrewText = `==> \x1b]0;pwned\a BREWTEXT`
+
+func TestUpdateRun_BrewOutputGoesToTheTranscriptFileOnly(t *testing.T) {
 	logBuf := captureDebugLog(t)
 	fr := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return brewText, nil }}
 	client := updatepkg.New(fr, updatepkg.WithSteps(realBrewStep(t)))
+	logDir := t.TempDir()
 
-	stdout, stderr, err := runUpdate(t, client, config.UpdateConfig{LogDir: t.TempDir()}, "run", "--yes")
+	stdout, stderr, err := runUpdate(t, client, config.UpdateConfig{LogDir: logDir}, "run", "--yes")
 	if err != nil {
 		t.Fatalf("update run = %v", err)
 	}
-	assertNoBrewText(t, "the transcript", stderr)
+	path, file := transcriptFile(t, logDir)
+	assertNoBrewText(t, "the terminal transcript", stderr)
 	assertNoBrewText(t, "the summary", stdout)
-	if !strings.Contains(stderr, "debug log") {
-		t.Errorf("the transcript should point at the debug log: %q", stderr)
+	if !strings.Contains(stderr, "not shown here; see the transcript "+path) {
+		t.Errorf("the terminal should point at the transcript file: %q", stderr)
+	}
+	if !strings.Contains(file, escapedBrewText) || strings.ContainsAny(file, "\x1b\x07") {
+		t.Errorf("the transcript file should hold brew's output, escaped: %q", file)
 	}
 	if !strings.Contains(logBuf.String(), "BREWTEXT") {
-		t.Errorf("the debug log should get brew's output: %q", logBuf.String())
+		t.Errorf("the debug log should get brew's output too: %q", logBuf.String())
 	}
 }
 
-func TestUpdateRun_BrewFailureIsCategorical(t *testing.T) {
+// The #802 review's case: a failed brew step's cause must stay recoverable
+// from the transcript file, while the terminal gets only the fixed wording
+// and a pointer to that file.
+func TestUpdateRun_BrewFailureCauseIsInTheTranscriptFile(t *testing.T) {
 	captureDebugLog(t)
 	fr := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
 		if len(args) > 0 && args[0] == "upgrade" {
-			return "", &exec.CommandError{Name: "brew", Args: args, Stderr: brewText, Output: brewText, ExitCode: 1}
+			return "", &exec.CommandError{Name: "brew", Args: args, Stderr: "fatal: " + brewText, Output: brewText, ExitCode: 1}
+		}
+		return "", nil
+	}}
+	client := updatepkg.New(fr, updatepkg.WithSteps(realBrewStep(t)))
+	logDir := t.TempDir()
+
+	stdout, stderr, err := runUpdate(t, client, config.UpdateConfig{LogDir: logDir}, "run", "--yes")
+	if ExitCode(err) != 1 {
+		t.Fatalf("ExitCode = %d, want 1 (err %v)", ExitCode(err), err)
+	}
+	path, file := transcriptFile(t, logDir)
+	assertNoBrewText(t, "the terminal transcript", stderr)
+	assertNoBrewText(t, "the summary", stdout)
+	assertNoBrewText(t, "the returned error", err.Error())
+	wantFail := "brew upgrade --formula failed (exit 1); see the transcript " + path
+	if !strings.Contains(stdout, wantFail) || !strings.Contains(stderr, wantFail) {
+		t.Errorf("the FAIL line should name the command, its exit and the transcript:\nstdout %q\nstderr %q", stdout, stderr)
+	}
+	if want := "update: brew failed; see the transcript " + path; err.Error() != want {
+		t.Errorf("err = %q, want %q", err, want)
+	}
+	if !strings.Contains(file, "error: brew upgrade --formula: brew upgrade --formula: fatal: "+escapedBrewText) {
+		t.Errorf("the transcript file should hold the failure's cause, escaped: %q", file)
+	}
+	if strings.ContainsAny(file, "\x1b\x07") {
+		t.Errorf("the transcript file carries a raw control: %q", file)
+	}
+}
+
+// When no transcript file can be opened, nothing may point at one: the
+// pointer falls back to --json and log_level.
+func TestUpdateRun_NoTranscriptFilePointsAtJSON(t *testing.T) {
+	captureDebugLog(t)
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fr := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		if len(args) > 0 && args[0] == "upgrade" {
+			return "", &exec.CommandError{Name: "brew", Args: args, Stderr: brewText, ExitCode: 1}
 		}
 		return "", nil
 	}}
 	client := updatepkg.New(fr, updatepkg.WithSteps(realBrewStep(t)))
 
-	stdout, stderr, err := runUpdate(t, client, config.UpdateConfig{LogDir: t.TempDir()}, "run", "--yes")
+	stdout, stderr, err := runUpdate(t, client, config.UpdateConfig{LogDir: blocker}, "run", "--yes")
 	if ExitCode(err) != 1 {
 		t.Fatalf("ExitCode = %d, want 1 (err %v)", ExitCode(err), err)
 	}
-	assertNoBrewText(t, "the transcript", stderr)
-	assertNoBrewText(t, "the summary", stdout)
-	assertNoBrewText(t, "the returned error", err.Error())
-	if !strings.Contains(stdout, "brew upgrade --formula failed (exit 1)") {
-		t.Errorf("the FAIL line should name the failed command and its exit: %q", stdout)
+	for where, text := range map[string]string{"stdout": stdout, "stderr": stderr, "error": err.Error()} {
+		if strings.Contains(text, "see the transcript") {
+			t.Errorf("%s points at a transcript that was never opened: %q", where, text)
+		}
+		assertNoBrewText(t, where, text)
 	}
-	if !strings.Contains(err.Error(), "update: brew failed") {
-		t.Errorf("the returned error should name the failed step: %q", err)
+	if !strings.Contains(err.Error(), "rerun with --json") {
+		t.Errorf("err = %q, want the --json fallback", err)
 	}
 }
 
 func TestUpdateCheck_BrewListIsRebuiltFromTokens(t *testing.T) {
 	logBuf := captureDebugLog(t)
-	out := "node\nhomebrew/core/python@3.12  (3.12.1) < 3.12.2\n" + brewText + "\n"
+	out := "node\nhomebrew/core/python@3.12  (3.12.1) < 3.12.2\ngo (1.22) < 1.23 [pinned at 1.22]\n" + brewText + "\n"
 	fr := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return out, nil }}
 	client := updatepkg.New(fr, updatepkg.WithSteps(realBrewStep(t)))
 
@@ -111,7 +182,7 @@ func TestUpdateCheck_BrewListIsRebuiltFromTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("update check = %v", err)
 	}
-	for _, want := range []string{"      node\n", "      homebrew/core/python@3.12 (3.12.1) < 3.12.2\n", "1 line(s) of brew output not shown"} {
+	for _, want := range []string{"      node\n", "      homebrew/core/python@3.12 (3.12.1) < 3.12.2\n", "      go (1.22) < 1.23 [pinned at 1.22]\n", "1 line(s) of brew output not shown"} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("the transcript is missing %q: %q", want, stderr)
 		}
