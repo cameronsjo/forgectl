@@ -37,7 +37,9 @@ func calledCommand(fake *exec.FakeRunner, sub string) bool {
 // Mutation that turns it red: drop the refuseRewrittenName call in
 // NewWindowWithEnv (every refused name reaches new-window).
 func TestNewWindowRefusesNamesTmuxRewrites(t *testing.T) {
-	for _, name := range []string{"pr\x1fpad", "a$b", "a${x}", "a$_x", "$HOME", "x;"} {
+	// The backslash, control-byte and invalid-UTF-8 rows are tmux 3.7c's: it
+	// vis-encodes a window's backslash and refuses the rest (check_name).
+	for _, name := range []string{"pr\x1fpad", "a$b", "a${x}", "a$_x", "$HOME", "x;", `a\b`, "a\tb", "a\x7fb", "a\xffb"} {
 		t.Run(name, func(t *testing.T) {
 			fake, c, identity := opsFixture(t, false)
 			_, err := c.NewWindow(context.Background(), identity, name, "")
@@ -49,7 +51,7 @@ func TestNewWindowRefusesNamesTmuxRewrites(t *testing.T) {
 			}
 		})
 	}
-	for _, name := range []string{"my.proj", "a:b", `a\b`, "a$1", "a$}", "a;b", "a$"} {
+	for _, name := range []string{"my.proj", "a:b", "a$1", "a$}", "a;b", "a$"} {
 		t.Run("allows "+name, func(t *testing.T) {
 			fake, c, identity := opsFixture(t, false)
 			_, err := c.NewWindow(context.Background(), identity, name, "")
@@ -257,5 +259,23 @@ func TestTreeListingCountsSessionsAndWindows(t *testing.T) {
 	}
 	if !slices.Contains(strings.Split(tree, "\n"), "- work") {
 		t.Fatalf("tree = %q, want the readable session drawn", tree)
+	}
+}
+
+// TestSessionRefusalNamesTheAskedName: a refused session name is reported as
+// the operator typed it, with the mapped spelling added only when the ':'/'.'
+// mapping changed it.
+//
+// Mutation that turns it red: report only the mapped name in
+// normalizeSessionName's error.
+func TestSessionRefusalNamesTheAskedName(t *testing.T) {
+	c := New(&exec.FakeRunner{})
+	_, err := c.CreateSession(context.Background(), "a$.b", "")
+	if err == nil || !strings.Contains(err.Error(), `"a$.b"`) || !strings.Contains(err.Error(), `sent to tmux as "a$_b"`) {
+		t.Fatalf("CreateSession(a$.b) = %v, want both the asked and the mapped name", err)
+	}
+	_, err = c.CreateSession(context.Background(), "a$b", "")
+	if err == nil || !strings.Contains(err.Error(), `session name "a$b"`) || strings.Contains(err.Error(), "sent to tmux as") {
+		t.Fatalf("CreateSession(a$b) = %v, want only the asked name", err)
 	}
 }

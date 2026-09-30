@@ -5,6 +5,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -70,7 +71,9 @@ func TestNameRulesMatchTmuxIsolated(t *testing.T) {
 			t.Fatalf("EnsureSession(%q) made %+v, but %q resolves to (%+v, %v)", asked, created, stored, got, err)
 		}
 	}
-	for _, name := range []string{"w.x:y", `w\z`, "w$1", "w;v"} {
+	// No backslash: tmux 3.7c vis-encodes one in a window name, so NewWindow
+	// refuses it (checked below).
+	for _, name := range []string{"w.x:y", "w$1", "w;v"} {
 		window, err := c.NewWindow(ctx, base, name, "", "sleep", "60")
 		if err != nil {
 			t.Fatalf("NewWindow(%q): %v", name, err)
@@ -81,6 +84,9 @@ func TestNameRulesMatchTmuxIsolated(t *testing.T) {
 		}
 	}
 
+	if _, err := c.NewWindow(ctx, base, `w\z`, "", "sleep", "60"); !errors.Is(err, ErrUnsafeOperand) {
+		t.Fatalf("NewWindow(w\\z) = %v, want ErrUnsafeOperand", err)
+	}
 	for _, name := range []string{"r$b", "r${x}", `r\b`, "r;", "r$.b", "r$:c"} {
 		if _, err := c.CreateSession(ctx, name, ""); !errors.Is(err, ErrUnsafeOperand) {
 			t.Fatalf("CreateSession(%q) = %v, want ErrUnsafeOperand", name, err)
@@ -118,6 +124,14 @@ func TestWindowWithFieldSepIsCountedIsolated(t *testing.T) {
 		t.Fatalf("second window: %v", err)
 	}
 	if _, err := runner.Run(ctx, tmuxBin, "rename-window", "-t", "base:1", "--", "hid"+FieldSep+"den"); err != nil {
+		// tmux 3.7 and later refuse the name ("invalid window name": check_name
+		// accepts only printable ASCII and valid UTF-8), so such a window
+		// cannot exist there. TestParseWindowRowsCountsDroppedRows still
+		// covers the counting on every version.
+		if strings.Contains(err.Error(), "invalid window name") {
+			version, _ := runner.Run(ctx, tmuxBin, "-V")
+			t.Skipf("%s refuses a window name carrying 0x1F, so there is no such row to count: %v", strings.TrimSpace(version), err)
+		}
 		t.Fatalf("rename-window: %v", err)
 	}
 	windows, unreadable, err := c.DisplayWindowListing(ctx)

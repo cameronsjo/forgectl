@@ -258,12 +258,11 @@ func (c *Client) NewWindowWithEnv(
 	if name == "" {
 		return WindowIdentity{}, fmt.Errorf("cannot create a tmux window with an empty name")
 	}
-	// A name tmux would store as something else could never be resolved by
-	// ResolveWindowExact again (forgectl#815): 0x1F hides the window's row
-	// from every listing, '$' plus a letter gains a backslash, and a trailing
-	// ';' is dropped as a command separator. Window names are not vis-encoded,
-	// so a backslash, a '.' or a ':' lands as given.
-	if err := refuseRewrittenName(name, false, true); err != nil {
+	// A name tmux would store as something else, or reject, could never be
+	// resolved by ResolveWindowExact again (forgectl#815): see
+	// refuseRewrittenName. A '.' or ':' lands as given on 3.4 and 3.7a+; only
+	// tmux 3.7 itself refuses one, loudly, so it is left to tmux.
+	if err := refuseRewrittenName(name, true); err != nil {
 		return WindowIdentity{}, fmt.Errorf("create window %q: %w", name, err)
 	}
 	for _, e := range env {
