@@ -57,6 +57,11 @@ var (
 // Validate refuses a spec launchd would misread or refuse: a relative path
 // (launchd resolves nothing against a cwd), a control character (XML 1.0
 // cannot carry most of them), or an odd label or env key.
+// agentExitTimeout is the plist's ExitTimeOut, in seconds: longer than a
+// restart's stop (15s), shell-ready (10s) and confirm (30s) waits together,
+// so a bootout's SIGKILL cannot land between a session's stop and relaunch.
+const agentExitTimeout = 90
+
 func (s AgentSpec) Validate() error {
 	if !agentLabelRe.MatchString(s.Label) {
 		return fmt.Errorf("agent label %s is not a reverse-DNS name", termsafe.QuoteArgMax(s.Label, 0))
@@ -154,6 +159,10 @@ func RenderAgentPlist(s AgentSpec) ([]byte, error) {
 		key("StartInterval")
 		b.WriteString("  <integer>" + strconv.Itoa(s.Interval) + "</integer>\n")
 	}
+	// launchd's default 20s between SIGTERM and SIGKILL is shorter than a
+	// restart's stop-and-relaunch window; a kill inside it strands a session.
+	key("ExitTimeOut")
+	b.WriteString("  <integer>" + strconv.Itoa(agentExitTimeout) + "</integer>\n")
 	key("ProcessType")
 	str("  ", "Background")
 	b.WriteString("</dict>\n</plist>\n")

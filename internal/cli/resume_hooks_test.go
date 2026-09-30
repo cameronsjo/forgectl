@@ -388,17 +388,39 @@ func TestResumeHooksInstallWarnings(t *testing.T) {
 	}
 }
 
+func TestHooksTrigger(t *testing.T) {
+	f := newHooksFixture(t)
+	for _, tc := range []struct {
+		env  map[string]string
+		want string
+	}{
+		{map[string]string{}, "manual"},
+		{map[string]string{"XPC_SERVICE_NAME": "local.forgectl.resume-hooks"}, "launchd"},
+		{map[string]string{"XPC_SERVICE_NAME": "com.other"}, "manual"},
+		{map[string]string{"CLAUDECODE": "1"}, "agent"},
+		{map[string]string{"CLAUDE_CODE_SESSION_ID": "abc"}, "agent"},
+		{map[string]string{"CLAUDECODE": ""}, "manual"},
+	} {
+		f.env = tc.env
+		if got := hooksTrigger(); got != tc.want {
+			t.Errorf("env %v: trigger %q, want %q", tc.env, got, tc.want)
+		}
+	}
+}
+
 func TestWritableByOthers(t *testing.T) {
 	cases := []struct {
 		mode        fs.FileMode
 		owner, uid  int
 		known, want bool
 	}{
-		{0o755, 0, 501, true, false},
-		{0o775, 501, 501, true, false}, // group-writable but ours (Homebrew's layout)
+		{0o755, 0, 501, true, false},   // root's, not writable by others
+		{0o755, 501, 501, true, false}, // ours, not writable by others
+		{0o775, 501, 501, true, true},  // group-writable though ours (Homebrew's admin-group layout)
 		{0o775, 0, 501, true, true},
 		{0o757, 0, 501, true, true},
-		{0o775, 0, 501, false, true},
+		{0o755, 502, 501, true, true},  // another user's: they can replace it
+		{0o755, 501, 501, false, true}, // owner unreadable: warn rather than assume
 	}
 	for _, tc := range cases {
 		if got := writableByOthers(tc.mode, tc.owner, tc.uid, tc.known); got != tc.want {

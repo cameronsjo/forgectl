@@ -415,6 +415,20 @@ func TestFileHookStore(t *testing.T) {
 	if _, _, err := s.Load("claude"); err == nil {
 		t.Fatal("an unparseable recorded version was accepted")
 	}
+	for _, attempts := range []string{"-1000000", "-1", "4"} {
+		if err := os.WriteFile(filepath.Join(dir, hookStateName), []byte(`{"harnesses":{"claude":{"version":"2.1.1","attempts":`+attempts+`}}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.Load("claude"); err == nil || !strings.Contains(err.Error(), "attempts") {
+			t.Fatalf("attempts %s accepted: %v", attempts, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, hookStateName), []byte(`{"harnesses":{"claude":{"version":"2.1.1","attempts":3}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Load("claude"); err != nil {
+		t.Fatalf("attempts at the cap refused: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, hookStateName), []byte(`{`), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -92,6 +92,11 @@ func (s FileHookStore) Load(harness string) (HarnessState, bool, error) {
 	if _, err := ParseVersion(h.Version); err != nil {
 		return HarnessState{}, false, fmt.Errorf("recorded %s version in %s: %w (delete the file to record a fresh baseline)", harness, hookStateName, err)
 	}
+	// An attempts count outside the retry budget can only come from an edited
+	// file; refusing it keeps the retry bound real.
+	if h.Attempts < 0 || h.Attempts > MaxRestartAttempts {
+		return HarnessState{}, false, fmt.Errorf("recorded %s restart attempts in %s is %d, outside 0..%d (delete the file to record a fresh baseline)", harness, hookStateName, h.Attempts, MaxRestartAttempts)
+	}
 	return h, true, nil
 }
 

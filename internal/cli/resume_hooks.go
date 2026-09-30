@@ -201,6 +201,12 @@ func hooksTrigger() string {
 	if v, ok := hooksLookupEnv(envXPCService); ok && v == resume.HooksAgentLabel {
 		return "launchd"
 	}
+	// A Claude Code session exports these into every command it runs.
+	for _, k := range []string{"CLAUDECODE", "CLAUDE_CODE_SESSION_ID"} {
+		if v, ok := hooksLookupEnv(k); ok && v != "" {
+			return "agent"
+		}
+	}
 	return "manual"
 }
 
@@ -408,10 +414,15 @@ func newResumeHooksInstallCmd(deps module.Deps) *cobra.Command {
 }
 
 // writableByOthers reports a file or directory another user could replace:
-// group- or other-writable and not owned by this user. It is the check the
-// baked paths get, since the watcher runs them unattended.
+// group- or other-writable (group members can write it even when this user
+// owns it, as with Homebrew's admin-group bin), owned by a user other than
+// this one or root, or with an owner that could not be read. It is the check
+// the baked paths get, since the watcher runs them unattended.
 func writableByOthers(mode fs.FileMode, owner, uid int, ownerKnown bool) bool {
-	return mode.Perm()&0o022 != 0 && (!ownerKnown || owner != uid)
+	if mode.Perm()&0o022 != 0 || !ownerKnown {
+		return true
+	}
+	return owner != uid && owner != 0
 }
 
 // hooksAgentSpec resolves everything the plist needs, now, from this
@@ -835,7 +846,7 @@ func hooksDoctorRow(configured int, longest time.Duration, cfgErr error, f hooks
 	case f.HaveState && len(f.State.Pending) > 0:
 		return doctor.StateWarn, prefix + fmt.Sprintf("restart for %s incomplete (%d of %d attempts) — see `forgectl resume hooks status`", termsafe.SafeLine(f.State.Version), f.State.Attempts, resume.MaxRestartAttempts)
 	case f.HaveLastRun && f.LastRun.Outcome != resume.OutcomeOK:
-		return doctor.StateWarn, prefix + fmt.Sprintf("hook %s for %s ended %s — see `forgectl resume hooks status`", termsafe.SafeLine(f.LastRun.Hook), termsafe.SafeLine(f.LastRun.New), f.LastRun.Outcome)
+		return doctor.StateWarn, prefix + fmt.Sprintf("hook %s for %s ended %s — see `forgectl resume hooks status`", termsafe.SafeLine(f.LastRun.Hook), termsafe.SafeLine(f.LastRun.New), termsafe.SafeLine(f.LastRun.Outcome))
 	}
 	return doctor.StateOK, prefix + describeAgent(st)
 }

@@ -4,7 +4,9 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -39,5 +41,18 @@ func TestWithProcessGroupKillsDescendants(t *testing.T) {
 			t.Fatalf("helper pid %d survived the group kill", pid)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A deadline that fires after the group has already exited must not read as
+// a cancellation: Cancel reports os.ErrProcessDone, which os/exec ignores.
+func TestProcessGroupCancelAfterExitIsProcessDone(t *testing.T) {
+	cmd := exec.CommandContext(context.Background(), "/bin/sh", "-c", "exit 0")
+	setProcessGroup(cmd)
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Cancel(); !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("Cancel after exit = %v, want os.ErrProcessDone", err)
 	}
 }

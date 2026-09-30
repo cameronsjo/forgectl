@@ -3,6 +3,8 @@
 package exec
 
 import (
+	"errors"
+	"os"
 	"os/exec"
 	"syscall"
 )
@@ -16,6 +18,15 @@ func setProcessGroup(cmd *exec.Cmd) {
 	}
 	cmd.SysProcAttr.Setpgid = true
 	cmd.Cancel = func() error {
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		// ESRCH means the group already exited (the deadline raced a normal
+		// exit); report it the way os/exec expects, so the run is not
+		// recorded as a cancellation it never was.
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+		return nil
 	}
 }

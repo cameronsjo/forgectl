@@ -286,6 +286,13 @@ func TestInstallAgentRetriesBootstrap(t *testing.T) {
 	}
 }
 
+func TestRenderAgentPlistExitTimeout(t *testing.T) {
+	data, err := RenderAgentPlist(testAgentSpec(t.TempDir()))
+	if err != nil || !strings.Contains(string(data), "<key>ExitTimeOut</key>\n  <integer>90</integer>") {
+		t.Fatalf("%v\n%s", err, data)
+	}
+}
+
 func TestRenderAgentPlistInterval(t *testing.T) {
 	s := testAgentSpec(t.TempDir())
 	s.Interval = 1800
