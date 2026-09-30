@@ -643,6 +643,8 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 // textually the sole reachable post path, and it is unreachable unless approve
 // returns true. In headless / non-interactive mode the gate is not shown at
 // all: the review is staged (returned as not-posted), never auto-posted.
+// A review that carries a GitHub token shape is refused before the gate is
+// shown (scanReviewForTokens, forgectl#681).
 //
 // A local (offline) review session is refused outright: there is no PR to
 // post to, and sess.Ref.Slug() for a local session resolves to the synthetic
@@ -682,6 +684,12 @@ func (c *Client) PostReview(ctx context.Context, sess Session, review string, he
 	if headless || !c.isTTY() {
 		slog.Info("Non-interactive/headless: staging review, not posting.", "ref", sess.Ref.String())
 		return false, nil
+	}
+	// Before the gate, so a human is never asked to approve a post that
+	// carries a token shape (forgectl#681). The refusal never echoes it.
+	if err := scanReviewForTokens(review); err != nil {
+		slog.Warn("Refusing to post a review that carries a GitHub token shape.", "ref", sess.Ref.String())
+		return false, err
 	}
 
 	approved, err := c.approve(review)
