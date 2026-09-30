@@ -433,7 +433,7 @@ func TestGoModPullsInNoLocalModule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := osexec.CommandContext(t.Context(), "go", "mod", "edit", "-json")
+	cmd := osexec.CommandContext(t.Context(), "go", "mod", "edit", "-json") //nolint:gosec // G204: a fixed go command with literal arguments; nothing is tainted
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), pinnedGoEnv...)
 	out, err := cmd.Output()
