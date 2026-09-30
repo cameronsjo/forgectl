@@ -7,6 +7,7 @@ import (
 	"log/slog"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
@@ -209,7 +210,10 @@ func runStep(ctx context.Context, run exec.Runner, _ *Context, step PlanStep) er
 		slog.Warn("Run step missing required cmd field.")
 		return errors.New("run step requires cmd")
 	}
-	slog.Debug("Running command.", "cmd", step.Cmd, "args", step.Args)
+	// Rendered as the Runner renders it (#749): a token in a clone URL or
+	// after a --token flag would otherwise reach the log one line before
+	// the Runner withholds it.
+	slog.Debug("Running command.", "cmd", redact.Arg(step.Cmd), "args", redact.Args(step.Args))
 	if d, ok := run.(exec.DiscardingRunner); ok {
 		return d.RunDiscardingStdout(ctx, step.Cmd, step.Args...)
 	}

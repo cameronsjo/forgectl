@@ -1,9 +1,12 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -144,6 +147,44 @@ func TestExecutor_RunStep_DiscardsStdoutWhenTheRunnerCan(t *testing.T) {
 	}
 	if len(fake.Calls) != 0 || len(fake.discarded) != 1 || fake.discarded[0].Name != "echo" {
 		t.Fatalf("Run calls %+v, discarding calls %+v; want only one discarding call to echo", fake.Calls, fake.discarded)
+	}
+}
+
+// TestExecutor_RunStep_DebugLogWithholdsArgvCredentials pins #749 item 3: a
+// run step's argv is logged at Debug before the Runner runs it, so it must be
+// rendered through redact as the Runner renders it. The step still receives
+// the real argv.
+//
+// Mutation: log step.Args raw in runStep and both tokens reach the log.
+func TestExecutor_RunStep_DebugLogWithholdsArgvCredentials(t *testing.T) {
+	const secret = "Rk3Vt8Nq1Zb6" //nolint:gosec // G101: a fake credential the log must not carry
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	fake := &exec.FakeRunner{}
+	args := []string{"clone", "https://x-access-token:" + secret + "@github.com/o/r", "--token", secret}
+	wf := Workflow{
+		DSLVersion: 1,
+		Name:       "run-redact",
+		Steps:      []Step{{Uses: "run", Cmd: "git", Args: args}},
+	}
+	plan, err := BuildPlan(wf, nil, testRegistry(t))
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if err := NewExecutor(fake, testRegistry(t)).Run(context.Background(), plan, NewContext(nil)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(logs.String(), "Running command.") {
+		t.Fatalf("the run step logged nothing, so the test proves nothing:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), secret) {
+		t.Errorf("credential in the debug log:\n%s", logs.String())
+	}
+	if len(fake.Calls) != 1 || strings.Join(fake.Calls[0].Args, " ") != strings.Join(args, " ") {
+		t.Errorf("the step must receive the real argv, got %+v", fake.Calls)
 	}
 }
 
