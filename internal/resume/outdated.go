@@ -97,7 +97,8 @@ type PaneLookup func(pid int) string
 
 // FindOutdated filters live registry entries to those older than installed,
 // sorted by session id. An entry whose version does not parse is included with
-// VersionUnparseable set. lookup may be nil.
+// VersionUnparseable set. lookup may be nil. It fails only when installed
+// itself does not parse.
 func FindOutdated(entries []RegistryEntry, installed string, lookup PaneLookup) ([]OutdatedSession, error) {
 	iv, err := ParseVersion(installed)
 	if err != nil {

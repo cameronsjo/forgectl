@@ -141,7 +141,7 @@ forgectl resume                    # pick from recent sessions across every repo
 forgectl resume forgectl           # filter by repo, name, cwd, or id; one hit resumes it, several list the candidates
 forgectl resume --fork             # branch a new session off the transcript — the only way into a still-running one
 forgectl resume --dry-run forge    # resolve and print the cwd + claude argv, exec nothing (never prompts)
-forgectl resume ls                 # list without acting (the only subcommand that returns)
+forgectl resume ls                 # list without acting (every subcommand returns; only bare `resume` execs)
 forgectl resume ls --json          # machine-readable JSON (safe to pipe; counts go to stderr; see `resume ls --help` for the field table)
 forgectl resume snapshot           # capture what a live session's exit would destroy
 forgectl resume snapshot --quiet   # same, silent — the form a Stop hook uses
