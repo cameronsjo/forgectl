@@ -13,7 +13,6 @@ type entry struct {
 	assign   Assignment
 	fromWS   string // current workspace id
 	toKey    string // destination key: a workspace id, or newKey(label)
-	toWSID   string // existing destination workspace id, empty when it must be created
 	needMove bool
 	key      sortKey
 }
@@ -116,10 +115,10 @@ func classifyTabs(cfg Config, snap Snapshot, root string, labelOf, canonical map
 					Key: matchKey(sp), Rule: rule, From: labelOf[w.WorkspaceID], To: target,
 				},
 				fromWS: w.WorkspaceID,
-				key:    sortKeyFor(root, sp.CWD, tab.TabID),
+				key:    sortKeyFor(root, sp.CWD, panes[0].TerminalID),
 			}
 			if id, ok := canonical[target]; ok {
-				e.toWSID, e.toKey = id, id
+				e.toKey = id
 			} else {
 				e.toKey = newKey(target)
 			}
@@ -168,7 +167,7 @@ func orderMoves(entries []entry, snap Snapshot) (moved, blocked []int) {
 func moveFor(e entry, labelOf map[string]string, blocked bool) Move {
 	m := Move{
 		TerminalID: e.assign.TerminalID, TabID: e.assign.TabID, Title: e.assign.Title, CWD: e.assign.CWD,
-		From: e.assign.From, To: e.assign.To, FromWorkspaceID: e.fromWS, ToWorkspaceID: e.toWSID,
+		From: e.assign.From, To: e.assign.To,
 	}
 	if blocked {
 		m.Blocked = true

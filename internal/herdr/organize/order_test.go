@@ -98,6 +98,28 @@ func TestWorkspaceOrderChange(t *testing.T) {
 	}
 }
 
+// TestWorkspaceOrderChange_ADuplicateLabelMovesBehindTheLayout: apply puts a
+// non-canonical duplicate behind the layout's workspaces, so the dry run must
+// count that as a change rather than dedupe the label away (#732).
+func TestWorkspaceOrderChange_ADuplicateLabelMovesBehindTheLayout(t *testing.T) {
+	snap := mkSnapshot(
+		[]herdr.Workspace{ws("w1", "forge", 1), ws("w2", "forge", 2), ws("w3", "misc", 3)},
+		[]tabSpec{
+			{"w1", "t1", "term1", "/r/forge/a", "a"},
+			{"w2", "t2", "term2", "/r/forge/b", "b"},
+			{"w3", "t3", "term3", "/r/other/c", "c"},
+		})
+	plan := BuildPlan(testConfig(), snap, testRoot)
+	from, to, changed := WorkspaceOrderChange(snap, plan)
+	if !changed || !reflect.DeepEqual(from, []string{"forge", "forge", "misc"}) || !reflect.DeepEqual(to, []string{"forge", "misc", "forge"}) {
+		t.Errorf("WorkspaceOrderChange = (%v, %v, %v), want forge,forge,misc -> forge,misc,forge", from, to, changed)
+	}
+	current, target := WorkspaceOrderTarget(snap.Workspaces, plan.Layout)
+	if !reflect.DeepEqual(current, []string{"w1", "w2", "w3"}) || !reflect.DeepEqual(target, []string{"w1", "w3", "w2"}) {
+		t.Errorf("WorkspaceOrderTarget = (%v, %v), want w1,w2,w3 -> w1,w3,w2 (the canonical forge is the lowest Number)", current, target)
+	}
+}
+
 func TestReorders_CountsAPanelessTabAsHoldingAPosition(t *testing.T) {
 	// [b, X (no panes), a] wants [a, b]; apply sees X as a stand-in that keeps
 	// its place at the end, so the dry run must plan the same single move.
