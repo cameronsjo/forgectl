@@ -84,8 +84,9 @@ func SplitFields(line string) []string {
 var ErrUnreadableFields = errors.New("tmux field separator did not survive the -F round trip")
 
 // parsedRows enforces the fail-CLOSED contract every -F parser in this package
-// shares: a non-empty tmux output that yields ZERO usable rows is an error, not
-// an empty result.
+// shares: a non-empty tmux output in which the field separator did not survive
+// is an error, not an empty result. The tell is that it yields ZERO usable rows
+// AND no line splits into as many fields as the format emits.
 //
 // This is the general defence, and it is the load-bearing one. SplitFields
 // knows two renderings of FieldSep (see escapedFieldSep) and there is at least
@@ -100,14 +101,29 @@ var ErrUnreadableFields = errors.New("tmux field separator did not survive the -
 // converts that whole class — including renderings nobody has found yet — from
 // a fail-open into a fail-closed.
 //
-// PARTIAL loss stays a silent drop, deliberately. A single row can legitimately
+// PARTIAL loss is not an error, deliberately. A single row can legitimately
 // fail its count because a name carries the separator (see parseWindows), and
 // erroring on that would let anyone who can name a window take down `pr list`
-// for the whole server. Total loss cannot be caused that way: every row failing
-// at once means the separator itself is gone.
+// for the whole server. The caller counts such rows (readableRows) and a
+// listing shown to an operator says so.
+//
+// TOTAL loss is only a locale failure when no line kept the separator. A line
+// that still splits into at least want fields proves the separator survived
+// the round trip, so its drop was that row's own doing (a name or command
+// carrying FieldSep pushes the count above want; a malformed id keeps it at
+// want). Then every row being dropped means every object is unreadable, which
+// a server whose only window carries FieldSep produces (forgectl#826): the
+// result is an empty listing, and the caller's unreadable count carries the
+// news, rather than an error blaming the operator's locale. A lossy rendering
+// such as 3.7b's `_` leaves every line a single field, so it stays loud.
 func parsedRows[T any](rows []T, lines []string, command string, want int) ([]T, error) {
 	if len(rows) > 0 || len(lines) == 0 {
 		return rows, nil
+	}
+	for _, line := range lines {
+		if len(splitFields(line)) >= want {
+			return rows, nil
+		}
 	}
 	return nil, fmt.Errorf(
 		"%w: %s returned %d line(s), none of which split into %d fields (first line %q); "+

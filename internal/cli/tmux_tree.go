@@ -77,11 +77,11 @@ func writeTmuxTreeJSON(cmd *cobra.Command, client *tmux.Client) error {
 	if err != nil {
 		return err
 	}
-	panes, err := client.DisplayPanes(ctx)
+	panes, unreadablePanes, err := client.DisplayPaneListing(ctx)
 	if err != nil {
 		return err
 	}
-	writeUnreadableNote(cmd, tmux.UnreadableRows{Sessions: unreadableSessions, Windows: unreadableWindows})
+	writeUnreadableNote(cmd, tmux.UnreadableRows{Sessions: unreadableSessions, Windows: unreadableWindows, Panes: unreadablePanes})
 	return encodeTmuxTreeJSON(cmd.OutOrStdout(), sessions, windows, panes)
 }
 

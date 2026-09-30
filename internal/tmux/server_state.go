@@ -341,9 +341,9 @@ func (c *Client) DisplayWindowListing(ctx context.Context) (windows []Window, un
 }
 
 // UnreadableRows counts the rows an operator-facing listing could not read,
-// per kind (forgectl#806, forgectl#815).
+// per kind (forgectl#806, forgectl#815, forgectl#823).
 type UnreadableRows struct {
-	Sessions, Windows int
+	Sessions, Windows, Panes int
 }
 
 // Note is the one-line notice a listing prints when any row was unreadable,
@@ -358,16 +358,40 @@ func (u UnreadableRows) Note() string {
 	if u.Windows > 0 {
 		parts = append(parts, fmt.Sprintf("%d window(s)", u.Windows))
 	}
+	if u.Panes > 0 {
+		parts = append(parts, fmt.Sprintf("%d pane(s)", u.Panes))
+	}
 	if len(parts) == 0 {
 		return ""
 	}
-	return strings.Join(parts, " and ") + " could not be read and are not listed — " +
-		"a name carrying the 0x1F field separator hides its row; rename or kill it with tmux itself"
+	joined := parts[0]
+	if len(parts) > 1 {
+		joined = strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
+	}
+	// A pane row is hidden by its command, not a name (parsePaneRows), so the
+	// pane form names that too rather than sending the operator looking for a
+	// name to fix.
+	cause := "a name carrying the 0x1F field separator hides its row; rename or kill it with tmux itself"
+	if u.Panes > 0 {
+		cause = "a name or pane command carrying the 0x1F field separator hides its row; rename or kill it with tmux itself"
+	}
+	return joined + " could not be read and are not listed — " + cause
 }
 
 // DisplayPanes is ListPanes under DisplaySessions' rule.
 func (c *Client) DisplayPanes(ctx context.Context) ([]Pane, error) {
 	return exitedIsEmpty(c.ListPanes(ctx))
+}
+
+// DisplayPaneListing is DisplayPanes plus the number of pane rows tmux
+// returned that could not be read (forgectl#823), for DisplaySessionListing's
+// reason.
+func (c *Client) DisplayPaneListing(ctx context.Context) (panes []Pane, unreadable int, err error) {
+	panes, unreadable, err = c.listPanes(ctx)
+	if errors.Is(err, ErrServerExited) {
+		return nil, 0, nil
+	}
+	return panes, unreadable, err
 }
 
 func exitedIsEmpty[T any](rows []T, err error) ([]T, error) {

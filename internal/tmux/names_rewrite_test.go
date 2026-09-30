@@ -218,16 +218,22 @@ func TestMostRecentSessionCountsDroppedRows(t *testing.T) {
 }
 
 // TestUnreadableRowsNote pins the note's wording: the sessions-only form is
-// byte-identical to what `tmux ls` printed before forgectl#815, and a zero
-// count says nothing.
+// byte-identical to what `tmux ls` printed before forgectl#815, a zero count
+// says nothing, and a pane count (forgectl#823) names the pane command too.
+//
+// Mutation that turns it red: drop the Panes part from Note.
 func TestUnreadableRowsNote(t *testing.T) {
 	const tail = " could not be read and are not listed — a name carrying the 0x1F field separator hides its row; " +
 		"rename or kill it with tmux itself"
+	const paneTail = " could not be read and are not listed — a name or pane command carrying the 0x1F field separator " +
+		"hides its row; rename or kill it with tmux itself"
 	for u, want := range map[UnreadableRows]string{
-		{}:                        "",
-		{Sessions: 2}:             "2 session(s)" + tail,
-		{Windows: 1}:              "1 window(s)" + tail,
-		{Sessions: 1, Windows: 3}: "1 session(s) and 3 window(s)" + tail,
+		{}:                                  "",
+		{Sessions: 2}:                       "2 session(s)" + tail,
+		{Windows: 1}:                        "1 window(s)" + tail,
+		{Sessions: 1, Windows: 3}:           "1 session(s) and 3 window(s)" + tail,
+		{Panes: 1}:                          "1 pane(s)" + paneTail,
+		{Sessions: 1, Windows: 2, Panes: 3}: "1 session(s), 2 window(s) and 3 pane(s)" + paneTail,
 	} {
 		if got := u.Note(); got != want {
 			t.Errorf("%+v.Note() = %q, want %q", u, got, want)
@@ -235,10 +241,12 @@ func TestUnreadableRowsNote(t *testing.T) {
 	}
 }
 
-// TestTreeListingCountsSessionsAndWindows: TreeListing reports both counts
-// from one render, so `tmux tree` and the TUI can print the note.
+// TestTreeListingCountsSessionsAndWindows: TreeListing reports the session,
+// window and pane counts from one render, so `tmux tree` and the TUI can print
+// the note.
 //
-// Mutation that turns it red: return UnreadableRows{} from TreeListing.
+// Mutation that turns it red: return UnreadableRows{} from TreeListing, or
+// leave Panes out of it (forgectl#823).
 func TestTreeListingCountsSessionsAndWindows(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
 		switch args[0] {
@@ -247,6 +255,8 @@ func TestTreeListingCountsSessionsAndWindows(t *testing.T) {
 		case "list-windows":
 			return windowRow("1", "2", "@1", "$1", "work", 0, "ok") + "\n" +
 				windowRow("1", "2", "@2", "$1", "work", 1, "a"+FieldSep+"b"), nil
+		case "list-panes":
+			return paneRow("%1", "@1", "t", "zsh") + "\n" + paneRow("%2", "@1", "t", "a"+FieldSep+"b"), nil
 		}
 		return "", nil
 	}}
@@ -254,8 +264,8 @@ func TestTreeListingCountsSessionsAndWindows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TreeListing: %v", err)
 	}
-	if unreadable != (UnreadableRows{Sessions: 1, Windows: 1}) {
-		t.Fatalf("unreadable = %+v, want 1 session and 1 window", unreadable)
+	if unreadable != (UnreadableRows{Sessions: 1, Windows: 1, Panes: 1}) {
+		t.Fatalf("unreadable = %+v, want 1 session, 1 window and 1 pane", unreadable)
 	}
 	if !slices.Contains(strings.Split(tree, "\n"), "- work") {
 		t.Fatalf("tree = %q, want the readable session drawn", tree)

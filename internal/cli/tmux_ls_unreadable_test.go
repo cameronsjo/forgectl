@@ -52,11 +52,13 @@ func TestTmuxLsNotesUnreadableSessions(t *testing.T) {
 }
 
 // TestTmuxTreeNotesUnreadableRows is forgectl#815 item 2 at the CLI: `tmux
-// tree` says on stderr, in both modes, that a session and a window could not
-// be read, as `tmux ls` does, instead of drawing a smaller server.
+// tree` says on stderr, in both modes, that a session, a window and a pane
+// (forgectl#823) could not be read, as `tmux ls` does, instead of drawing a
+// smaller server.
 //
 // Mutation that turns it red: drop either writeUnreadableNote call in
-// tmux_tree.go (that mode's stderr is empty).
+// tmux_tree.go (that mode's stderr is empty), or leave the pane count out of
+// the --json mode's note.
 func TestTmuxTreeNotesUnreadableRows(t *testing.T) {
 	session := func(id, name string) string {
 		return strings.Join([]string{"123", "456", id, name, "1", "0", "1700000000", "/w"}, "\x1f")
@@ -64,12 +66,17 @@ func TestTmuxTreeNotesUnreadableRows(t *testing.T) {
 	window := func(id, name string) string {
 		return strings.Join([]string{"123", "456", id, "$0", "work", "0", name, "1", "1"}, "\x1f")
 	}
+	pane := func(id, command string) string {
+		return strings.Join([]string{"123", "456", id, "@0", "0", "title", command, "1"}, "\x1f")
+	}
 	fake := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
 		switch args[0] {
 		case "list-sessions":
 			return session("$0", "work") + "\n" + session("$1", "hid\x1fden"), nil
 		case "list-windows":
 			return window("@0", "ok") + "\n" + window("@1", "a\x1fb"), nil
+		case "list-panes":
+			return pane("%0", "zsh") + "\n" + pane("%1", "a\x1fb"), nil
 		}
 		return "", nil
 	}}
@@ -82,7 +89,7 @@ func TestTmuxTreeNotesUnreadableRows(t *testing.T) {
 		if err := cmd.ExecuteContext(context.Background()); err != nil {
 			t.Fatalf("tmux tree %v: %v", args, err)
 		}
-		if !strings.Contains(stderr.String(), "1 session(s) and 1 window(s) could not be read") {
+		if !strings.Contains(stderr.String(), "1 session(s), 1 window(s) and 1 pane(s) could not be read") {
 			t.Errorf("tmux tree %v stderr = %q, want the unreadable-rows note", args, stderr.String())
 		}
 		if !strings.Contains(stdout.String(), "work") {

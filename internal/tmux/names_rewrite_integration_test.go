@@ -7,6 +7,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	internalexec "github.com/cameronsjo/forgectl/internal/exec"
 )
 
 // TestEnsureSessionDottedNameOnceIsolated is forgectl#815 end to end on a real
@@ -127,8 +129,11 @@ func TestWindowWithFieldSepIsCountedIsolated(t *testing.T) {
 		// tmux 3.7 and later refuse the name ("invalid window name": check_name
 		// accepts only printable ASCII and valid UTF-8), so such a window
 		// cannot exist there. TestParseWindowRowsCountsDroppedRows still
-		// covers the counting on every version.
-		if strings.Contains(err.Error(), "invalid window name") {
+		// covers the counting on every version. The skip matches tmux's own
+		// stderr prefix, not a substring of the whole error, so an unrelated
+		// failure that happens to mention the phrase still fails the test.
+		var cmdErr *internalexec.CommandError
+		if errors.As(err, &cmdErr) && strings.HasPrefix(cmdErr.Stderr, "invalid window name: ") {
 			version, _ := runner.Run(ctx, tmuxBin, "-V")
 			t.Skipf("%s refuses a window name carrying 0x1F, so there is no such row to count: %v", strings.TrimSpace(version), err)
 		}
