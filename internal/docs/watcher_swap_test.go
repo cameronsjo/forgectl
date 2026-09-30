@@ -1019,12 +1019,19 @@ func TestWatcher_MovedOutThenRelinked_DropsDescendantWatches(t *testing.T) {
 			}
 
 			// Retarget the link into the tree, where the moved-out subtree's
-			// names would now resolve.
-			if err := os.Remove(dir); err != nil {
-				t.Fatalf("Remove: %v", err)
-			}
-			if err := os.Symlink(filepath.Join(root, "b"), dir); err != nil {
+			// names would now resolve. The new link is made under a temporary
+			// name and renamed over the old one, so the name never goes
+			// missing. A Remove then a Symlink could deliver the Remove of
+			// root/dir.md while nothing held the name: it would resolve to
+			// itself, count as a doc event, and publish on a settle the
+			// rebuild's backoff could push past the drain below
+			// (forgectl#936).
+			relink := dir + ".relink"
+			if err := os.Symlink(filepath.Join(root, "b"), relink); err != nil {
 				t.Fatalf("Symlink: %v", err)
+			}
+			if err := os.Rename(relink, dir); err != nil {
+				t.Fatalf("Rename: %v", err)
 			}
 			drainReloads(reloads)
 
