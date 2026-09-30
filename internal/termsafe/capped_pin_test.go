@@ -11,6 +11,7 @@ import (
 	"go/token"
 	"go/types"
 	"io/fs"
+	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -30,6 +31,13 @@ const (
 // (privdir's reasonMaxRunes, a filesystem-refusal reason carrying a path) and
 // about fifty 80-column lines; a sink that needs more is printing something
 // whole, which is an allowlist entry with its reason, not a cap.
+//
+// The bound is on the constant, not on what reaches the terminal.
+// SafeLineMax counts escaped runes of output, and SafeLineMaxJSON's last
+// argument is a byte cap on its escaped output. QuoteTextMax, QuoteArgMax,
+// QuotePathMax and SafePathMax count runes of INPUT, and one input rune can
+// escape to as many as ten (\U0010ffff), so a cap near this bound on one of
+// those can print about ten times its value.
 const maxConstantCap = 4096
 
 // skippedPackages are production directories the pin does not scan, each with
@@ -130,7 +138,10 @@ var uncappedAllowlist = map[string]struct {
 // termsafe primitives, so a raw %v of an error is the helper-level tests'
 // concern (TestErrorLinesAreCapped in internal/cli), not this one's.
 //
-// The files are checked as they build for linux, darwin and windows.
+// The files are checked as they build for linux, darwin and windows, cgo
+// files included; a file no such build includes that imports termsafe (one
+// built only for freebsd, or behind a build tag) fails the pin rather than
+// passing unread.
 //
 // Mutations that turn it red: print p.Title through termsafe.SafeLine in
 // internal/cli renderPRTable; bind `f := termsafe.SafeLine` in
@@ -154,22 +165,30 @@ func TestTextPrintersUseCappedHelpers(t *testing.T) {
 	scanned := map[string]bool{}
 	for _, rel := range dirs {
 		dir := filepath.Join(root, filepath.FromSlash(rel))
-		for _, goos := range []string{"linux", "darwin", "windows"} {
-			ctx := build.Default
-			ctx.GOOS = goos
-			bp, err := ctx.ImportDir(dir, 0)
+		built := map[string]bool{}
+		var ignored []string
+		for _, goos := range pinGOOS {
+			bp, err := pinContext(goos).ImportDir(dir, 0)
 			var noGo *build.NoGoError
 			if errors.As(err, &noGo) {
+				if bp != nil {
+					ignored = append(ignored, bp.IgnoredGoFiles...)
+				}
 				continue
 			}
 			if err != nil {
 				t.Fatalf("list %s for %s: %v", rel, goos, err)
 			}
+			ignored = append(ignored, bp.IgnoredGoFiles...)
+			files := pinFiles(bp)
+			for _, name := range files {
+				built[name] = true
+			}
 			if !importsTermsafe(bp.Imports) {
 				continue
 			}
 			scanned[rel] = true
-			uses, err := uncappedUses(fset, termsafePkg, dir, rel, bp.GoFiles)
+			uses, err := uncappedUses(fset, termsafePkg, dir, rel, files)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -180,6 +199,13 @@ func TestTextPrintersUseCappedHelpers(t *testing.T) {
 				seen[u.pos] = true
 				counts[u.fn]++
 			}
+		}
+		unseen, err := unscannedTermsafeFiles(dir, ignored, built)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range unseen {
+			t.Errorf("%s/%s imports termsafe but builds for none of %v (another GOOS, or a build tag), so the pin never reads it; add its GOOS to pinGOOS or drop the constraint", rel, name, pinGOOS)
 		}
 	}
 	for _, want := range []string{"internal/cli", "internal/tui", "internal/pr", "internal/tmux"} {
@@ -212,6 +238,119 @@ func TestTextPrintersUseCappedHelpers(t *testing.T) {
 		if counts[fn] == 0 {
 			t.Errorf("allowlist entry %s matches no use; delete it", fn)
 		}
+	}
+}
+
+// pinGOOS are the targets the pin reads each package as.
+var pinGOOS = []string{"linux", "darwin", "windows"}
+
+// pinContext is the build context for one pinGOOS target. cgo is on
+// regardless of the host's CGO_ENABLED, so a cgo file lands in CgoFiles
+// every time rather than in IgnoredGoFiles on a host without cgo.
+func pinContext(goos string) *build.Context {
+	ctx := build.Default
+	ctx.GOOS = goos
+	ctx.CgoEnabled = true
+	return &ctx
+}
+
+// pinFiles are the files a build of bp compiles. cgo files are part of the
+// build but sit in CgoFiles, not GoFiles, so a pin reading only GoFiles
+// would never see them.
+func pinFiles(bp *build.Package) []string {
+	return append(append([]string{}, bp.GoFiles...), bp.CgoFiles...)
+}
+
+// unscannedTermsafeFiles returns the non-test files among ignored that no
+// pinGOOS build includes (built holds those that some build does) and that
+// import termsafe: a file the pin would otherwise pass without reading.
+func unscannedTermsafeFiles(dir string, ignored []string, built map[string]bool) ([]string, error) {
+	var found []string
+	seen := map[string]bool{}
+	for _, name := range ignored {
+		if built[name] || seen[name] || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		seen[name] = true
+		f, err := parser.ParseFile(token.NewFileSet(), filepath.Join(dir, name), nil, parser.ImportsOnly)
+		if err != nil {
+			return nil, err
+		}
+		for _, imp := range f.Imports {
+			if strings.Trim(imp.Path.Value, "`\"") == termsafeImportPath {
+				found = append(found, name)
+				break
+			}
+		}
+	}
+	sort.Strings(found)
+	return found, nil
+}
+
+// TestSkippedPackagesExist keeps skippedPackages honest: an entry naming a
+// directory that is gone (renamed or deleted) skips nothing and hides the
+// rename, so the new directory's reason is never written.
+//
+// Mutation that turns it red: add an entry for internal/nosuchpkg.
+func TestSkippedPackagesExist(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rel, reason := range skippedPackages {
+		info, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil || !info.IsDir() {
+			t.Errorf("skippedPackages entry %s (%s) names no directory; delete or rename it", rel, reason)
+		}
+	}
+}
+
+// TestUnscannedTermsafeFilesFindsConstrainedImports is the reach check's own
+// control: a file built only for freebsd, or only under a build tag, that
+// imports termsafe is reported, and one that builds for a pinned GOOS, a test
+// file, or a file with no termsafe import is not.
+//
+// Mutations that turn it red: make unscannedTermsafeFiles return nil; drop
+// its built[name] skip, and the linux file is reported; make pinFiles return
+// only GoFiles, and the cgo file is neither read nor reported.
+func TestUnscannedTermsafeFilesFindsConstrainedImports(t *testing.T) {
+	dir := t.TempDir()
+	imp := "import _ \"" + termsafeImportPath + "\"\n"
+	files := map[string]string{
+		"plain.go":        "package p\n" + imp,
+		"only_freebsd.go": "//go:build freebsd\n\npackage p\n" + imp,
+		"tagged.go":       "//go:build integration\n\npackage p\n" + imp,
+		"only_linux.go":   "//go:build linux\n\npackage p\n" + imp,
+		"other_aix.go":    "//go:build aix\n\npackage p\n",
+		"tagged_test.go":  "//go:build integration\n\npackage p\n" + imp,
+		"cgo.go":          "package p\n\nimport \"C\"\n" + imp,
+	}
+	for name, src := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	built := map[string]bool{}
+	var ignored []string
+	for _, goos := range pinGOOS {
+		bp, err := pinContext(goos).ImportDir(dir, 0)
+		if err != nil {
+			t.Fatalf("list for %s: %v", goos, err)
+		}
+		for _, name := range pinFiles(bp) {
+			built[name] = true
+		}
+		ignored = append(ignored, bp.IgnoredGoFiles...)
+	}
+	got, err := unscannedTermsafeFiles(dir, ignored, built)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "only_freebsd.go,tagged.go"; strings.Join(got, ",") != want {
+		t.Errorf("unscanned = %q, want %s", got, want)
+	}
+	if !built["cgo.go"] {
+		t.Error("cgo.go is in no pinned build's file list; the pin would never read a cgo file")
 	}
 }
 
@@ -471,7 +610,8 @@ func termsafeKind(obj types.Object) primitiveKind {
 }
 
 // declName names a top-level declaration for the allowlist: a function by
-// its name, a method as Recv.Method, anything else (a var block) as "var".
+// its name, a method as Recv.Method (a generic receiver by its type name,
+// without the type parameters), anything else (a var block) as "var".
 func declName(decl ast.Decl) string {
 	fd, ok := decl.(*ast.FuncDecl)
 	if !ok {
@@ -483,6 +623,14 @@ func declName(decl ast.Decl) string {
 	recv := fd.Recv.List[0].Type
 	if star, ok := recv.(*ast.StarExpr); ok {
 		recv = star.X
+	}
+	// A generic receiver (T[K], T[K, V]) is keyed by its type name too, so a
+	// method cannot share a key with a top-level function of the same name.
+	switch g := recv.(type) {
+	case *ast.IndexExpr:
+		recv = g.X
+	case *ast.IndexListExpr:
+		recv = g.X
 	}
 	if id, ok := recv.(*ast.Ident); ok {
 		return id.Name + "." + fd.Name.Name
@@ -537,7 +685,9 @@ func (p *pinImporter) ImportFrom(importPath, dir string, mode types.ImportMode) 
 // always true, and the zero, variable and unbounded caps pass; drop its
 // maxConstantCap bound, and hugeCap and hugeArgCap pass; drop defaultCapped,
 // and argDefault and pathDefault are flagged; classify QuotePath as
-// uncapped, and pathQuoted is flagged; make isFmtPrint always false, and
+// uncapped, and pathQuoted is flagged; key a generic receiver's method by its
+// bare name in declName, and box.gen and pair.gen2 read as gen and gen2; make
+// isFmtPrint always false, and
 // errPrinted and errTextPrinted pass; let it accept Errorf, and errWrapped is
 // flagged.
 func TestUncappedUsesResolvesAliasesAndMethodValues(t *testing.T) {
@@ -559,6 +709,14 @@ func viaAlias(s string) { f := ts.SafeLine; fmt.Println(f(s)) }
 func asValue(xs []string) { apply(xs, ts.SafeLine) }
 
 func (row) method(s string) string { return ts.SafeLine(s) }
+
+type box[K any] struct{}
+
+type pair[K, V any] struct{}
+
+func (box[K]) gen(s string) string { return ts.SafeLine(s) }
+
+func (*pair[K, V]) gen2(s string) string { return ts.SafeLine(s) }
 
 func capped(s string) { fmt.Println(ts.SafeLineMax(s, 10)) }
 
@@ -621,12 +779,14 @@ func apply(xs []string, f func(string) string) {}
 	sort.Strings(got)
 	want := []string{
 		"synthetic.go:asValue",
+		"synthetic.go:box.gen",
 		"synthetic.go:direct",
 		"synthetic.go:errPrinted",
 		"synthetic.go:errTextPrinted",
 		"synthetic.go:hugeArgCap",
 		"synthetic.go:hugeCap",
 		"synthetic.go:maxAsValue",
+		"synthetic.go:pair.gen2",
 		"synthetic.go:quoted",
 		"synthetic.go:row.method",
 		"synthetic.go:var",

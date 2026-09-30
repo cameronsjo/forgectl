@@ -128,19 +128,81 @@ func SafeLineMax(s string, maxRunes int) string {
 	if maxRunes < 1 {
 		return SafeLine(s)
 	}
+	return safeLineCapped(s, maxRunes, 0)
+}
+
+// SafeLineMaxJSON is SafeLineMax whose result also takes at most
+// maxJSONBytes bytes once encoding/json writes it as a string value (between
+// the quotes, with json.Marshal's default HTML escaping), TruncatedMarker
+// included. It is for a field of a JSON document with a byte limit (#963): a
+// rune cap alone lets '<', which encoding/json writes as the six bytes
+// \u003c, or a 4-byte emoji multiply a field several times over. Like
+// SafeLineMax it cuts only between whole escapes. maxRunes < 1 means no rune
+// cap and maxJSONBytes < 1 no byte cap; a byte cap smaller than the marker's
+// own size keeps nothing of a value it has to cut.
+func SafeLineMaxJSON(s string, maxRunes, maxJSONBytes int) string {
+	return safeLineCapped(s, maxRunes, maxJSONBytes)
+}
+
+// safeLineCapped is SafeLine cut at maxRunes runes of output (the marker not
+// counted) or at maxBytes JSON-encoded bytes (the marker counted), whichever
+// comes first; a limit below 1 is no limit.
+func safeLineCapped(s string, maxRunes, maxBytes int) string {
+	markerBytes := 0
+	if maxBytes > 0 {
+		markerBytes = jsonStringBytes(TruncatedMarker)
+	}
 	var safe strings.Builder
-	used := 0
+	runes, size := 0, 0
+	// fit is the output length at the last escape boundary where the text
+	// plus the marker still fits the byte cap.
+	fit := 0
 	for _, r := range s {
 		piece := safeRune(r)
 		n := utf8.RuneCountInString(piece)
-		if used+n > maxRunes {
-			safe.WriteString(TruncatedMarker)
-			return safe.String()
+		b := 0
+		if maxBytes > 0 {
+			b = jsonStringBytes(piece)
+		}
+		if (maxRunes > 0 && runes+n > maxRunes) || (maxBytes > 0 && size+b > maxBytes) {
+			if maxBytes > 0 && markerBytes > maxBytes {
+				return ""
+			}
+			return safe.String()[:fit] + TruncatedMarker
 		}
 		safe.WriteString(piece)
-		used += n
+		runes += n
+		size += b
+		if maxBytes < 1 || size+markerBytes <= maxBytes {
+			fit = safe.Len()
+		}
 	}
 	return safe.String()
+}
+
+// jsonStringBytes is how many bytes encoding/json's default (HTML-escaping)
+// string encoder writes for s between the quotes.
+func jsonStringBytes(s string) int {
+	n := 0
+	for i := 0; i < len(s); {
+		r, width := utf8.DecodeRuneInString(s[i:])
+		i += width
+		switch {
+		case r == '"' || r == '\\':
+			n += 2
+		case r == '\n' || r == '\r' || r == '\t':
+			n += 2
+		case r < 0x20 || r == '<' || r == '>' || r == '&' || r == '\u2028' || r == '\u2029':
+			n += 6
+		case r == utf8.RuneError && width == 1:
+			// An invalid byte is written as \ufffd; a valid U+FFFD as
+			// its three bytes, which the default arm counts.
+			n += 6
+		default:
+			n += utf8.RuneLen(r)
+		}
+	}
+	return n
 }
 
 // isSafeGraphic reports whether safeRune renders r as itself.
