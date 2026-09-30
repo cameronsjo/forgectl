@@ -2,6 +2,7 @@ file internal/exec/capture.go build=any
 file internal/exec/exec.go build=any
 file internal/exec/fake.go build=any
 file internal/exec/internal/sealed/sealed.go build=any
+file internal/exec/internal/validated/validated.go build=any
 file internal/exec/mask.go build=any
 file internal/exec/opaque.go build=any
 file internal/exec/pgroup.go build=any
@@ -91,7 +92,7 @@ method (*OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 method (*OSSensitiveRunner) StartedCount() int64
 method (*OSSensitiveRunner) awaitOutcome(ctx context.Context, waitCh chan error, overflow chan struct{}, kill func()) (Outcome, error)
 method (*OSSensitiveRunner) bound() time.Duration
-method (*OSSensitiveRunner) buildEnv(muts []EnvMutation) ([]string, []github.com/cameronsjo/forgectl/internal/exec/internal/sealed.EnvVar)
+method (*OSSensitiveRunner) buildEnv(muts []github.com/cameronsjo/forgectl/internal/exec/internal/validated.Env) ([]string, []github.com/cameronsjo/forgectl/internal/exec/internal/sealed.EnvVar)
 method (*OSSensitiveRunner) drainBound() time.Duration
 method (*OSSensitiveRunner) retire(stopped bool, kind CommandKind, outR *os.File, errR *os.File, outCh <-chan BoundedOutput, errCh <-chan BoundedOutput) (BoundedOutput, BoundedOutput)
 method (*SensitiveError) Error() string
@@ -140,7 +141,7 @@ method (EnvMutation) LogValue() log/slog.Value
 method (EnvMutation) MarshalJSON() ([]byte, error)
 method (EnvMutation) MarshalText() ([]byte, error)
 method (EnvMutation) String() string
-method (EnvMutation) valid() bool
+method (EnvMutation) toValidated() github.com/cameronsjo/forgectl/internal/exec/internal/validated.Env
 method (OSRunner) Run(ctx context.Context, name string, args ...string) (string, error)
 method (OSRunner) RunDiscardingStdout(ctx context.Context, name string, args ...string) error
 method (OSRunner) RunInteractive(ctx context.Context, name string, args ...string) error
@@ -157,8 +158,6 @@ method (SecretArg) LogValue() log/slog.Value
 method (SecretArg) MarshalJSON() ([]byte, error)
 method (SecretArg) MarshalText() ([]byte, error)
 method (SecretArg) String() string
-method (SecretArg) present() bool
-method (SecretArg) set() bool
 method (SensitiveCommand) Equal(other SensitiveCommand) bool
 method (SensitiveCommand) Format(f fmt.State, verb rune)
 method (SensitiveCommand) GoString() string
@@ -167,6 +166,7 @@ method (SensitiveCommand) MarshalJSON() ([]byte, error)
 method (SensitiveCommand) MarshalText() ([]byte, error)
 method (SensitiveCommand) String() string
 method (SensitiveCommand) validate() error
+method (SensitiveCommand) validated() (github.com/cameronsjo/forgectl/internal/exec/internal/validated.Command, error)
 method (SensitiveResult) Format(f fmt.State, verb rune)
 method (SensitiveResult) GoString() string
 method (SensitiveResult) LogValue() log/slog.Value
@@ -228,14 +228,14 @@ type SensitiveResult struct{Stdout BoundedOutput; Stderr BoundedOutput; ExitCode
 type SensitiveRunner interface{RunSensitive(ctx context.Context, cmd SensitiveCommand) (SensitiveResult, error)}
 type StreamingRunner interface{RunStreaming(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, name string, args ...string) error}
 type Transform struct{t github.com/cameronsjo/forgectl/internal/exec/internal/sealed.Transform}
-type argKind uint8
+type argKind = github.com/cameronsjo/forgectl/internal/exec/internal/validated.ArgKind
 type argMask struct{shown map[string]string; pats []maskPat; values []string; entries []string}
 type bitset []uint64
 type ceilingWriter struct{limit int; discard bool; buf []byte; over bool; proc func() *os.Process}
 type constantArg string
 type copyJob struct{dst io.Writer; src *onceCloser}
 type copyResult struct{stdin bool; err error}
-type envOp uint8
+type envOp = github.com/cameronsjo/forgectl/internal/exec/internal/validated.EnvOp
 type maskKey struct{}
 type maskPat struct{text string; shown string}
 type onceCloser struct{*os.File; once sync.Once}
@@ -268,3 +268,21 @@ sealed: type EnvVar struct{Key string; Value Value}
 sealed: type Proc struct{wait func() error; kill func() error}
 sealed: type Transform struct{apply func(string) string}
 sealed: type Value struct{reveal func() string}
+validated: const ArgEndOfOptions ArgKind
+validated: const ArgFixed ArgKind
+validated: const ArgOpaque ArgKind
+validated: const ArgUnset ArgKind
+validated: const EnvOpReplace EnvOp
+validated: const EnvOpUnset EnvOp
+validated: const EnvOpUnspecified EnvOp
+validated: const KeySopsTmpdir untyped string
+validated: func New(path github.com/cameronsjo/forgectl/internal/exec/internal/sealed.Value, args []Arg, env []Env, sopsEdit bool) (Command, error)
+validated: method (Command) Args() []github.com/cameronsjo/forgectl/internal/exec/internal/sealed.Value
+validated: method (Command) Env() []Env
+validated: method (Command) Path() github.com/cameronsjo/forgectl/internal/exec/internal/sealed.Value
+validated: method (Env) valid() bool
+validated: type Arg struct{Value github.com/cameronsjo/forgectl/internal/exec/internal/sealed.Value; Kind ArgKind}
+validated: type ArgKind uint8
+validated: type Command struct{path github.com/cameronsjo/forgectl/internal/exec/internal/sealed.Value; args []github.com/cameronsjo/forgectl/internal/exec/internal/sealed.Value; env []Env}
+validated: type Env struct{Key string; Value github.com/cameronsjo/forgectl/internal/exec/internal/sealed.Value; Op EnvOp}
+validated: type EnvOp uint8

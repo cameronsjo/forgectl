@@ -245,6 +245,24 @@ func (c *Client) Clean(ctx context.Context, opts CleanOptions) (Result, error) {
 	return c.ApplyReport(ctx, resolvedRoot, report, opts)
 }
 
+// Preview is the dry-run-only entry point: it scans the Client's configured
+// root and --type filter once and classifies every target, and it has no way
+// to request a delete. It takes no options on purpose, so a caller that must
+// never delete (`forgectl status`) cannot be switched to apply by editing a
+// literal at its call site; the one apply decision lives here, pinned by
+// TestPreview_NeverDeletes.
+func (c *Client) Preview(ctx context.Context) (resolvedRoot string, result Result, err error) {
+	resolvedRoot, report, err := c.ScanReport(CleanOptions{})
+	if err != nil {
+		return "", Result{}, err
+	}
+	result, err = c.ApplyReport(ctx, resolvedRoot, report, CleanOptions{Apply: false})
+	if err != nil {
+		return "", Result{}, err
+	}
+	return resolvedRoot, result, nil
+}
+
 // ApplyReport classifies and — only when opts.Apply — deletes every target
 // in an already-scanned report, against resolvedRoot (as returned by
 // ScanReport). Splitting this out of Clean is what lets the CLI scan once,
