@@ -165,14 +165,29 @@ func QuoteArgMax(s string, maxRunes int) string {
 	if maxRunes < 1 {
 		maxRunes = ArgEchoMaxRunes
 	}
+	return QuoteTextMax(s, maxRunes)
+}
+
+// QuoteTextMax is QuoteText over at most maxRunes runes of text, followed by
+// an ellipsis outside the closing quote when text was longer (#928). It is
+// the capped form of QuoteText for a quoted value in a line of text output;
+// QuoteArgMax is it with the argv-echo default.
+//
+// The cut counts INPUT runes, before escaping, so it never splits an escape.
+// Invalid UTF-8 counts one rune per bad byte, as range does. maxRunes < 1
+// means no cap.
+func QuoteTextMax(text string, maxRunes int) string {
+	if maxRunes < 1 {
+		return QuoteText(text)
+	}
 	n := 0
-	for i := range s {
+	for i := range text {
 		if n == maxRunes {
-			return QuoteText(s[:i]) + argEchoEllipsis
+			return QuoteText(text[:i]) + argEchoEllipsis
 		}
 		n++
 	}
-	return QuoteText(s)
+	return QuoteText(text)
 }
 
 // QuotePath is QuoteText named for filesystem sinks, where the surrounding
@@ -204,13 +219,47 @@ const PathEchoMaxRunes = 512
 // Invalid UTF-8 counts one rune per bad byte, as range does. maxRunes < 1
 // means PathEchoMaxRunes.
 func QuotePathMax(path string, maxRunes int) string {
+	head, tail, cut := pathCut(path, maxRunes)
+	if !cut {
+		return QuoteText(path)
+	}
+	if tail == "" {
+		return QuoteText(head) + argEchoEllipsis
+	}
+	return QuoteText(head) + argEchoEllipsis + QuoteText(tail)
+}
+
+// SafePathMax is QuotePathMax's cut without the quotes: SafeLine over the
+// kept head and tail, with the ellipsis between them. It is for a path in a
+// fixed-width text column (`docs list`), where quoting every row would shift
+// the column and a cut must still keep the file name (#913). The ellipsis is
+// not distinguishable from a path that contains one; a caller that must be
+// unambiguous quotes with QuotePathMax instead.
+//
+// The cut counts INPUT runes, before escaping, so it never splits an escape.
+// maxRunes < 1 means PathEchoMaxRunes.
+func SafePathMax(path string, maxRunes int) string {
+	head, tail, cut := pathCut(path, maxRunes)
+	if !cut {
+		return SafeLine(path)
+	}
+	return SafeLine(head) + argEchoEllipsis + SafeLine(tail)
+}
+
+// pathCut is the middle cut QuotePathMax and SafePathMax share. cut is false
+// when path fits in maxRunes input runes, and head and tail are then unset.
+// Otherwise head is the kept prefix and tail the kept suffix, which is the
+// final path element (from its separator on, trailing separators included)
+// when that fits in three quarters of the budget, and the last half of the
+// budget otherwise. maxRunes < 1 means PathEchoMaxRunes.
+func pathCut(path string, maxRunes int) (head, tail string, cut bool) {
 	if maxRunes < 1 {
 		maxRunes = PathEchoMaxRunes
 	}
 	// A path holds at least one byte per rune, so one no longer in bytes than
 	// the budget fits it, and skips the rune-offset slice below.
 	if len(path) <= maxRunes {
-		return QuoteText(path)
+		return "", "", false
 	}
 	// starts[i] is the byte offset of input rune i, as range yields them.
 	starts := make([]int, 0, len(path))
@@ -219,23 +268,23 @@ func QuotePathMax(path string, maxRunes int) string {
 	}
 	total := len(starts)
 	if total <= maxRunes {
-		return QuoteText(path)
+		return "", "", false
 	}
-	tail := maxRunes / 2
+	tailRunes := maxRunes / 2
 	// Trailing separators belong to the final element, so a directory path
 	// ending in `/` keeps its name rather than a bare "/".
 	if sep := strings.LastIndexAny(strings.TrimRight(path, `/\`), `/\`); sep >= 0 {
 		// The separator is ASCII, so it starts a rune; count the runes from it.
 		elem := total - sort.SearchInts(starts, sep)
 		if elem <= maxRunes-maxRunes/4 {
-			tail = elem
+			tailRunes = elem
 		}
 	}
-	head := maxRunes - tail
-	if tail == 0 {
-		return QuoteText(path[:starts[head]]) + argEchoEllipsis
+	headRunes := maxRunes - tailRunes
+	if tailRunes == 0 {
+		return path[:starts[headRunes]], "", true
 	}
-	return QuoteText(path[:starts[head]]) + argEchoEllipsis + QuoteText(path[starts[total-tail]:])
+	return path[:starts[headRunes]], path[starts[total-tailRunes]:], true
 }
 
 // QuotePathIfUnsafe returns path verbatim when quoting would have changed

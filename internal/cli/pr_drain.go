@@ -127,7 +127,7 @@ func runDrainWatch(cmd *cobra.Command, client *pr.Client, cfg config.Config, opt
 			consecutiveRefusals++
 			if consecutiveRefusals >= drainWatchRefusalLimit {
 				return jsonVerdict(WithExitCode(fmt.Errorf(
-					"drain refused %d consecutive passes, last: %s", consecutiveRefusals, safeTerm(report.Refusal)), 1), asJSON)
+					"drain refused %d consecutive passes, last: %s", consecutiveRefusals, safeText(report.Refusal)), 1), asJSON)
 			}
 		} else {
 			consecutiveRefusals = 0
@@ -163,7 +163,7 @@ func writeDrainJSON(out io.Writer, report pr.DrainReport) error {
 // zero on a single pass, where there is no next one.
 func writeDrainHuman(out io.Writer, report pr.DrainReport, dryRun bool, next time.Duration) {
 	if report.Refusal != "" {
-		_, _ = fmt.Fprintf(out, "pass=%d refused: %s\n", report.Pass, safeTerm(report.Refusal))
+		_, _ = fmt.Fprintf(out, "pass=%d refused: %s\n", report.Pass, safeText(report.Refusal))
 		return
 	}
 	if dryRun {
@@ -178,7 +178,7 @@ func writeDrainHuman(out io.Writer, report pr.DrainReport, dryRun bool, next tim
 			if it.Outcome == "refused" {
 				continue
 			}
-			refs = append(refs, it.Ref)
+			refs = append(refs, safeTitle(it.Ref))
 		}
 		if len(refs) == 0 {
 			_, _ = fmt.Fprintf(out, "%d queued, %d free — would launch nothing\n", report.Queued, report.Free)
@@ -203,7 +203,7 @@ func writeDrainHuman(out io.Writer, report pr.DrainReport, dryRun bool, next tim
 		if it.Outcome == "launched" {
 			continue
 		}
-		_, _ = fmt.Fprintf(out, "  %s: %s -> %s: %s\n", it.Ref, it.FromPhase, it.ToPhase, safeTerm(it.Error))
+		_, _ = fmt.Fprintf(out, "  %s: %s -> %s: %s\n", safeTitle(it.Ref), safeLabel(it.FromPhase), safeLabel(it.ToPhase), safeText(it.Error))
 	}
 }
 
@@ -215,7 +215,7 @@ func writeDrainRefusedItems(out io.Writer, report pr.DrainReport) {
 		if it.Outcome != "refused" {
 			continue
 		}
-		_, _ = fmt.Fprintf(out, "  %s: refused: %s\n", it.Ref, safeTerm(it.Error))
+		_, _ = fmt.Fprintf(out, "  %s: refused: %s\n", safeTitle(it.Ref), safeText(it.Error))
 	}
 }
 
@@ -224,7 +224,7 @@ func writeDrainRefusedItems(out io.Writer, report pr.DrainReport) {
 // this" contract `pr repair`'s inspect exit code follows.
 func drainExitCode(report pr.DrainReport) error {
 	if report.Refusal != "" {
-		return WithExitCode(fmt.Errorf("drain pass refused: %s", safeTerm(report.Refusal)), 1)
+		return WithExitCode(fmt.Errorf("drain pass refused: %s", safeText(report.Refusal)), 1)
 	}
 	if report.Failed > 0 {
 		return WithExitCode(fmt.Errorf("%d review(s) failed to launch this pass", report.Failed), 1)
