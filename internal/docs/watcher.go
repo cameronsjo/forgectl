@@ -459,12 +459,24 @@ func (w *Watcher) Run(ctx context.Context) {
 			// the rebuilt index compares (sameIndex), so a name that did not
 			// change what resolves stays silent (forgectl#904).
 			attachmentEvent := !stray && w.attachmentRelevant(ev)
+			// Any in-tree Create arms a settle too, and publishes only if
+			// the rebuilt index changed (forgectl#895). On kqueue a new
+			// entry reaches us only as the Create fsnotify's dirChange sends
+			// while listing the directory, and that listing stops at the
+			// first entry it cannot open (EACCES, EPERM, ENOENT), which it
+			// never marks seen: every later change to the directory sends
+			// that entry's Create again and nothing for the docs sorting
+			// after it. A dangling link's repeat Create is stray and
+			// rebuilds already; an unopenable plain file's lands here, and
+			// the rebuild's walk finds the docs the listing missed. It can
+			// postpone a pending rebuild no further than settleIn allows.
+			createEvent := !stray && ev.Has(fsnotify.Create) && w.inTree(ev.Name)
 
 			// A reset already pending with its reload armed is not re-armed
 			// by an event that is not otherwise relevant, so churn on other
 			// files cannot keep postponing it.
 			resetNeedsArming := w.resetPending && (!wasPending || settledC == nil)
-			if !docEvent && !attachmentEvent && !moved && !resetNeedsArming {
+			if !docEvent && !attachmentEvent && !createEvent && !moved && !resetNeedsArming {
 				continue
 			}
 			arm()
