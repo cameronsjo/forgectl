@@ -36,7 +36,7 @@ func docsFail(cmd *cobra.Command, verb, root string, err error, code int, asJSON
 	if !asJSON {
 		return WithExitCode(err, code)
 	}
-	obj := docsErrorJSON{Error: err.Error(), Code: code, Root: root}
+	obj := docsErrorJSON{Error: jsonErrorText(err), Code: code, Root: root}
 	if encErr := termsafe.JSONEncoder(cmd.ErrOrStderr()).Encode(obj); encErr != nil {
 		return WithExitCode(fmt.Errorf("%s: encode error: %w", verb, encErr), code)
 	}

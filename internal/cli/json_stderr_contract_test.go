@@ -222,12 +222,14 @@ func TestJSONStderr_BadFlag_EveryVerb(t *testing.T) {
 // TestJSONStderr_NoUnwrappedErrorSites pins the assumption
 // installJSONErrorContract rests on: cobra's required-flag and flag-group
 // checks, and the legacy unknown-subcommand check on a parent with a nil Args,
-// all raise errors outside the three sites the contract wraps, and so do
-// PreRun and PersistentPreRun hooks. No --json verb may use them until the
-// contract covers them too.
+// all raise errors outside the three sites the contract wraps, and so do the
+// run hooks on either side of RunE: PreRun, PostRun, PersistentPreRun and
+// PersistentPostRun, in both their plain and E forms. No --json verb may use
+// them until the contract covers them too.
 //
 // Mutations that turn it red: MarkFlagRequired on any --json verb's flag; a
-// PreRunE on any --json verb, or a PersistentPreRunE on the root.
+// PreRunE or PostRunE on any --json verb, or a PersistentPreRunE or
+// PersistentPostRunE on the root.
 func TestJSONStderr_NoUnwrappedErrorSites(t *testing.T) {
 	isolateJSONContractEnv(t)
 	root := productionJSONRoot(&exec.FakeRunner{})
@@ -254,9 +256,15 @@ func TestJSONStderr_NoUnwrappedErrorSites(t *testing.T) {
 			if c.PersistentPreRunE != nil || c.PersistentPreRun != nil {
 				t.Errorf("%s: %s has a PersistentPreRun hook, whose error bypasses the --json contract", cmd.CommandPath(), c.CommandPath())
 			}
+			if c.PersistentPostRunE != nil || c.PersistentPostRun != nil {
+				t.Errorf("%s: %s has a PersistentPostRun hook, whose error bypasses the --json contract", cmd.CommandPath(), c.CommandPath())
+			}
 		}
 		if cmd.PreRunE != nil || cmd.PreRun != nil {
 			t.Errorf("%s has a PreRun hook, whose error bypasses the --json contract", cmd.CommandPath())
+		}
+		if cmd.PostRunE != nil || cmd.PostRun != nil {
+			t.Errorf("%s has a PostRun hook, whose error bypasses the --json contract", cmd.CommandPath())
 		}
 		if cmd.HasSubCommands() && cmd.Args == nil {
 			t.Errorf("%s has subcommands and a nil Args: cobra's legacy unknown-subcommand error bypasses the --json contract", cmd.CommandPath())

@@ -11,6 +11,8 @@ A verb that streams several verdicts can hit both forms in one run. `pr drain --
 
 `--json` never changes an exit code. The same failure exits with the same code with or without it.
 
+Some failures happen before any verb starts: a `config.toml` that does not parse or cannot be read (exit 2), and an environment forgectl cannot resolve its directories from, such as an unset `$HOME` or a relative `$XDG_CONFIG_HOME` (exit 1). These follow the same rule. When the verb you ran declares `--json` and you passed it, stderr gets that verb's one failure object in place of the plain `forgectl: …` line: code `failed` for most verbs, and the family shapes below for `env check` and the docs verbs. `launch` declares no `--json`, because everything after `launch` goes to the harness, so a `launch` failure stays a plain line.
+
 Some verbs also write documented progress or notes to stderr under `--json`: the `update` transcript, `herdr organize`'s human report, `projects list`'s per-host degradation notes, and `sessions why`'s match count. Those lines are part of the verb's normal output. The contract only rules out the human error frame on top of them.
 
 ## The failure object
@@ -30,7 +32,7 @@ All three keys are always present.
 
 `path` is the one resolved file the failure is about, relative to the repository root, when there is one. Today only env-file refusals set it. Everywhere else it is `""`.
 
-A flag error is reported as JSON even when `--json` comes after the bad flag (`--bogus --json`), because forgectl stopped parsing at `--bogus` and never reached `--json`. That scan skips a token that is the value of a flag it knows takes one. In `projects list --host --json --bogus`, `--json` is the value of `--host`, so the error comes out as the human message. Once flags have parsed, `--json` counts only if it parsed as the `--json` flag. In `projects list --host --json a b`, `--json` is the value of `--host`, so the argument error comes out as the human message.
+A flag error is reported as JSON even when `--json` comes after the bad flag (`--bogus --json`), because forgectl stopped parsing at `--bogus` and never reached `--json`. That scan skips a token that is the value of a flag it knows takes one, including after a bundled shorthand group such as `-vH`, where the last letter takes the next token when it names a flag that takes a value. In `projects list --host --json --bogus`, `--json` is the value of `--host`, so the error comes out as the human message. Once flags have parsed, `--json` counts only if it parsed as the `--json` flag. In `projects list --host --json a b`, `--json` is the value of `--host`, so the argument error comes out as the human message.
 
 ## Verbs with their own codes
 
@@ -43,4 +45,4 @@ Two verb families shipped their own shapes before this contract existed. Callers
 
 `newRoot` installs the contract on every command that declares `--json` (`installJSONErrorContract` in `internal/cli/json_errors.go`), so a new verb inherits it without extra wiring. A verb that writes a verdict and then exits non-zero calls `jsonVerdict` to exit silently.
 
-`TestJSONStderr_BadFlag_EveryVerb` walks the whole command tree and sends each `--json` verb through fang with a bad flag. `TestJSONStderr_NoUnwrappedErrorSites` fails when a `--json` verb uses a cobra hook or check the contract cannot wrap: a required flag, a flag group, a `PreRun` or `PersistentPreRun` hook, or a parent command with no argument validator.
+`TestJSONStderr_BadFlag_EveryVerb` walks the whole command tree and sends each `--json` verb through fang with a bad flag. `TestJSONStderr_NoUnwrappedErrorSites` fails when a `--json` verb uses a cobra hook or check the contract cannot wrap: a required flag, a flag group, a `PreRun`, `PostRun`, `PersistentPreRun` or `PersistentPostRun` hook, or a parent command with no argument validator.
