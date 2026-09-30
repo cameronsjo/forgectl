@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -33,7 +34,7 @@ func TestDecide(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			d := Decide(tc.recorded, tc.have, tc.settled, tc.settledOK)
+			d := Decide(HarnessState{Version: tc.recorded}, tc.have, tc.settled, tc.settledOK)
 			if d.Kind != tc.want || d.Old != tc.wantOld || d.New != tc.wantNewer {
 				t.Fatalf("Decide = %+v, want {%s %q %q}", d, tc.want, tc.wantOld, tc.wantNewer)
 			}
@@ -106,18 +107,23 @@ func newHookFixture(t *testing.T, hooks []config.OnUpdateHook, versionReads ...s
 
 func (f *hookFixture) record(t *testing.T, v string) {
 	t.Helper()
-	if err := (FileHookStore{Dir: f.dir}).Record("claude", v); err != nil {
+	if err := (FileHookStore{Dir: f.dir}).Save("claude", HarnessState{Version: v}); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func (f *hookFixture) recorded(t *testing.T) string {
+func (f *hookFixture) state(t *testing.T) HarnessState {
 	t.Helper()
-	v, _, err := FileHookStore{Dir: f.dir}.Recorded("claude")
+	st, _, err := FileHookStore{Dir: f.dir}.Load("claude")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return v
+	return st
+}
+
+func (f *hookFixture) recorded(t *testing.T) string {
+	t.Helper()
+	return f.state(t).Version
 }
 
 var (
@@ -205,7 +211,13 @@ func TestRunHooksRevertInsideSettleFiresNothing(t *testing.T) {
 }
 
 func TestRunHooksUnsettledFiresNothing(t *testing.T) {
-	f := newHookFixture(t, []config.OnUpdateHook{notifyHook}, "2.1.285", "2.1.286", "2.1.287", "2.1.288", "2.1.289", "2.1.290", "2.1.291")
+	// A version that never stops moving: every pass exhausts its settle
+	// rounds, and the run gives up after maxHookPasses without firing.
+	var vs []string
+	for i := range 40 {
+		vs = append(vs, "2.1."+strconv.Itoa(300+i))
+	}
+	f := newHookFixture(t, []config.OnUpdateHook{notifyHook}, vs...)
 	f.record(t, "2.1.284")
 	res, err := RunHooks(context.Background(), f.req)
 	if err != nil {
@@ -223,12 +235,12 @@ type crashStore struct {
 	crashed bool
 }
 
-func (s *crashStore) Record(harness, version string) error {
+func (s *crashStore) Save(harness string, st HarnessState) error {
 	if !s.crashed {
 		s.crashed = true
 		return errors.New("killed")
 	}
-	return s.FileHookStore.Record(harness, version)
+	return s.FileHookStore.Save(harness, st)
 }
 
 func TestRunHooksCrashBeforeRecordRefires(t *testing.T) {
@@ -394,25 +406,25 @@ func TestOutputTail(t *testing.T) {
 func TestFileHookStore(t *testing.T) {
 	dir := t.TempDir()
 	s := FileHookStore{Dir: dir}
-	if _, ok, err := s.Recorded("claude"); ok || err != nil {
+	if _, ok, err := s.Load("claude"); ok || err != nil {
 		t.Fatalf("empty store: ok %v err %v", ok, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, hookStateName), []byte(`{"versions":{"claude":"2.1.x; rm"}}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, hookStateName), []byte(`{"harnesses":{"claude":{"version":"2.1.x; rm"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.Recorded("claude"); err == nil {
+	if _, _, err := s.Load("claude"); err == nil {
 		t.Fatal("an unparseable recorded version was accepted")
 	}
 	if err := os.WriteFile(filepath.Join(dir, hookStateName), []byte(`{`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.Recorded("claude"); err == nil || !strings.Contains(err.Error(), "delete it") {
+	if _, _, err := s.Load("claude"); err == nil || !strings.Contains(err.Error(), "delete it") {
 		t.Fatalf("corrupt state: %v", err)
 	}
 	if err := os.Remove(filepath.Join(dir, hookStateName)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Record("claude", "2.1.1"); err != nil {
+	if err := s.Save("claude", HarnessState{Version: "2.1.1"}); err != nil {
 		t.Fatal(err)
 	}
 	fi, err := os.Stat(filepath.Join(dir, hookStateName))
@@ -459,21 +471,27 @@ func TestHookRunsRotate(t *testing.T) {
 	}
 }
 
-// TestRunHooksCancelledLeavesUnrecorded: a run cancelled during its hooks
-// must not record the version, or the hooks it could not run are lost.
+// TestRunHooksCancelledLeavesUnrecorded: the run's context is cancelled
+// while the restart waits (in production, the run's signal context on
+// SIGTERM, which the restart shares). The restart returns normally with a
+// session left; RunHooks must start no further hook and record nothing.
 func TestRunHooksCancelledLeavesUnrecorded(t *testing.T) {
 	f := newHookFixture(t, []config.OnUpdateHook{restartHook, notifyHook}, "2.1.285")
 	f.record(t, "2.1.284")
 	ctx, cancel := context.WithCancel(context.Background())
 	f.req.Restart = func(context.Context, time.Duration) (RestartResult, error) {
 		cancel()
-		return RestartResult{}, nil
+		return RestartResult{Finals: []RestartEvent{{State: StateLeft}}, Left: 1}, nil
 	}
-	if _, err := RunHooks(ctx, f.req); err == nil || !strings.Contains(err.Error(), "left unrecorded") {
-		t.Fatalf("err = %v", err)
+	_, err := RunHooks(ctx, f.req)
+	if !errors.Is(err, ErrHooksInterrupted) {
+		t.Fatalf("err = %v, want ErrHooksInterrupted", err)
 	}
-	if f.recorded(t) != "2.1.284" {
-		t.Fatalf("recorded %q after a cancelled run", f.recorded(t))
+	if len(f.runner.Calls) != 0 {
+		t.Fatal("a command hook started after the cancel")
+	}
+	if st := f.state(t); st.Version != "2.1.284" || len(st.Pending) != 0 {
+		t.Fatalf("state %+v after a cancelled run", st)
 	}
 }
 
@@ -499,5 +517,194 @@ func TestRunHooksCommandArgsScrubbed(t *testing.T) {
 	}
 	if strings.Contains(r.Detail, secret) {
 		t.Fatalf("an argument value reached the audit tail: %q", r.Detail)
+	}
+}
+
+func TestDecideRetry(t *testing.T) {
+	pending := HarnessState{Version: "2.1.285", Pending: []string{"#1 action=restart"}, Attempts: 1}
+	if d := Decide(pending, true, "2.1.285", true); d.Kind != ChangeRetry || len(d.Retry) != 1 || d.Attempts != 1 {
+		t.Fatalf("pending unchanged version: %+v", d)
+	}
+	pending.Attempts = MaxRestartAttempts
+	if d := Decide(pending, true, "2.1.285", true); d.Kind != ChangeNone || len(d.GaveUp) != 1 {
+		t.Fatalf("pending past the cap: %+v", d)
+	}
+	if d := Decide(pending, true, "2.1.286", true); d.Kind != ChangeUpdated {
+		t.Fatalf("a new version must fire everything whatever is pending: %+v", d)
+	}
+}
+
+func TestNextState(t *testing.T) {
+	ids := map[string]bool{"#1 action=restart": true}
+	ok := HookRun{Hook: "#1 action=restart", Outcome: OutcomeOK}
+	bad := HookRun{Hook: "#1 action=restart", Outcome: OutcomeIncomplete}
+	cmdBad := HookRun{Hook: "#2 command=x", Outcome: OutcomeFailed}
+	cases := []struct {
+		name string
+		d    Decision
+		runs []HookRun
+		want HarnessState
+	}{
+		{"update, all ok", Decision{Kind: ChangeUpdated, New: "v2"}, []HookRun{ok}, HarnessState{Version: "v2"}},
+		{"update, restart incomplete", Decision{Kind: ChangeUpdated, New: "v2"}, []HookRun{bad}, HarnessState{Version: "v2", Pending: []string{"#1 action=restart"}, Attempts: 1}},
+		{"failed command never pends", Decision{Kind: ChangeUpdated, New: "v2"}, []HookRun{ok, cmdBad}, HarnessState{Version: "v2"}},
+		{"retry still incomplete", Decision{Kind: ChangeRetry, New: "v2", Attempts: 1}, []HookRun{bad}, HarnessState{Version: "v2", Pending: []string{"#1 action=restart"}, Attempts: 2}},
+		{"retry completes", Decision{Kind: ChangeRetry, New: "v2", Attempts: 2}, []HookRun{ok}, HarnessState{Version: "v2"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NextState(tc.d, tc.runs, ids)
+			if got.Version != tc.want.Version || got.Attempts != tc.want.Attempts || !slices.Equal(got.Pending, tc.want.Pending) {
+				t.Fatalf("NextState = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunHooksRetriesIncompleteRestart: an incomplete restart is retried on
+// later runs of the same version, the command hook is not, and a complete
+// retry clears the pending entry.
+func TestRunHooksRetriesIncompleteRestart(t *testing.T) {
+	f := newHookFixture(t, []config.OnUpdateHook{restartHook, notifyHook}, "2.1.285")
+	f.record(t, "2.1.284")
+	incomplete := true
+	f.req.Restart = func(context.Context, time.Duration) (RestartResult, error) {
+		f.restarts++
+		if incomplete {
+			return RestartResult{Finals: []RestartEvent{{State: StateLeft}}, Left: 1}, nil
+		}
+		return RestartResult{Finals: []RestartEvent{{State: StateResumed}}}, nil
+	}
+	if _, err := RunHooks(context.Background(), f.req); err != nil {
+		t.Fatal(err)
+	}
+	if st := f.state(t); st.Version != "2.1.285" || len(st.Pending) != 1 || st.Attempts != 1 {
+		t.Fatalf("after the update: %+v", st)
+	}
+	res, err := RunHooks(context.Background(), f.req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Decision.Kind != ChangeRetry || f.restarts != 2 || len(f.runner.Calls) != 1 {
+		t.Fatalf("retry: %+v, restarts %d, command calls %d (the command must not re-fire)", res.Decision, f.restarts, len(f.runner.Calls))
+	}
+	if st := f.state(t); st.Attempts != 2 {
+		t.Fatalf("after one retry: %+v", st)
+	}
+	incomplete = false
+	if _, err := RunHooks(context.Background(), f.req); err != nil {
+		t.Fatal(err)
+	}
+	if st := f.state(t); len(st.Pending) != 0 || st.Attempts != 0 || f.restarts != 3 {
+		t.Fatalf("after a complete retry: %+v, restarts %d", st, f.restarts)
+	}
+	if res, _ := RunHooks(context.Background(), f.req); res.Decision.Kind != ChangeNone || f.restarts != 3 {
+		t.Fatalf("a cleared state retried again: %+v", res.Decision)
+	}
+}
+
+func TestRunHooksRetryGivesUp(t *testing.T) {
+	f := newHookFixture(t, []config.OnUpdateHook{restartHook}, "2.1.285")
+	f.record(t, "2.1.284")
+	f.req.Restart = func(context.Context, time.Duration) (RestartResult, error) {
+		f.restarts++
+		return RestartResult{}, ErrRestartBusy
+	}
+	for range MaxRestartAttempts + 2 {
+		if _, err := RunHooks(context.Background(), f.req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if f.restarts != MaxRestartAttempts {
+		t.Fatalf("restarts = %d, want the cap %d", f.restarts, MaxRestartAttempts)
+	}
+}
+
+// TestRunHooksRereadsAfterActing: an update that lands while the hooks run
+// is handled in the same run, not left for a trigger that may never come.
+func TestRunHooksRereadsAfterActing(t *testing.T) {
+	f := newHookFixture(t, []config.OnUpdateHook{notifyHook}, "2.1.285", "2.1.285", "2.1.286")
+	f.record(t, "2.1.284")
+	res, err := RunHooks(context.Background(), f.req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.runner.Calls) != 2 || f.recorded(t) != "2.1.286" || len(res.Decisions) != 2 {
+		t.Fatalf("calls %d, recorded %q, passes %d", len(f.runner.Calls), f.recorded(t), len(res.Decisions))
+	}
+	if got := f.runner.Calls[1].Env[HookEnvOldVersion]; got != "2.1.285" {
+		t.Fatalf("second pass old version = %q", got)
+	}
+}
+
+func TestRunHooksPassesBounded(t *testing.T) {
+	var vs []string
+	for i := range 40 {
+		vs = append(vs, "2.1."+strconv.Itoa(300+i/2))
+	}
+	f := newHookFixture(t, []config.OnUpdateHook{notifyHook}, vs...)
+	f.record(t, "2.1.284")
+	res, err := RunHooks(context.Background(), f.req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Decisions) != maxHookPasses {
+		t.Fatalf("passes = %d, want the bound %d", len(res.Decisions), maxHookPasses)
+	}
+}
+
+func TestHookLockWaitsAndMarks(t *testing.T) {
+	s := FileHookStore{Dir: t.TempDir()}
+	release, err := s.Lock(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pid, since, ok := s.InFlight(); !ok || pid != os.Getpid() || time.Since(since) > time.Minute {
+		t.Fatalf("InFlight = %d %v %v", pid, since, ok)
+	}
+	waited := 0
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+	if _, err := s.Lock(ctx, func() { waited++ }); err == nil {
+		t.Fatal("a second lock was taken while the first was held")
+	}
+	if waited != 1 {
+		t.Fatalf("onWait called %d times, want 1", waited)
+	}
+	release()
+	if _, _, ok := s.InFlight(); ok {
+		t.Fatal("marker left after release")
+	}
+}
+
+// TestRunHooksTimeoutKillsHelpers: a command hook that times out takes the
+// helpers it forked with it (its own process group is killed).
+func TestRunHooksTimeoutKillsHelpers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs /bin/sh and process groups")
+	}
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	hook := config.OnUpdateHook{Harness: "claude", TimeoutSeconds: 1,
+		Command: []string{"/bin/sh", "-c", `sleep 30 >/dev/null 2>&1 & echo $! > "$0"; wait`, pidFile}}
+	f := newHookFixture(t, []config.OnUpdateHook{hook}, "2.1.285")
+	f.record(t, "2.1.284")
+	f.req.Runner = exec.OSRunner{}
+	res, err := RunHooks(context.Background(), f.req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Runs[0].Outcome != OutcomeTimeout {
+		t.Fatalf("record %+v", res.Runs[0])
+	}
+	data, err := os.ReadFile(pidFile) // #nosec G304 -- test temp dir
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !processGone(pid, 2*time.Second) {
+		t.Fatalf("helper pid %d outlived the hook's timeout", pid)
 	}
 }

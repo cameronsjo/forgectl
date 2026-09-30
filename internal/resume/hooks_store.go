@@ -18,10 +18,11 @@ import (
 // harness, and the audit trail. FileHookStore is production; tests supply
 // their own to inject a crash between the hooks and the record.
 type HookStore interface {
-	// Lock serializes runs; release is always non-nil on success.
-	Lock(ctx context.Context) (release func(), err error)
-	Recorded(harness string) (version string, ok bool, err error)
-	Record(harness, version string) error
+	// Lock serializes runs; onWait is called once if another run holds the
+	// lock. release is always non-nil on success.
+	Lock(ctx context.Context, onWait func()) (release func(), err error)
+	Load(harness string) (st HarnessState, ok bool, err error)
+	Save(harness string, st HarnessState) error
 	Append(run HookRun) error
 }
 
@@ -48,7 +49,7 @@ var _ HookStore = FileHookStore{}
 
 // hookState is state.json.
 type hookState struct {
-	Versions map[string]string `json:"versions"`
+	Harnesses map[string]HarnessState `json:"harnesses"`
 }
 
 func (s FileHookStore) path(name string) (string, error) {
@@ -77,65 +78,44 @@ func (s FileHookStore) readState() (hookState, error) {
 	return st, nil
 }
 
-// Recorded implements HookStore. A recorded value that is not a version is
+// Load implements HookStore. A recorded value that is not a version is
 // refused rather than passed on: it reaches a hook's environment and the log.
-func (s FileHookStore) Recorded(harness string) (string, bool, error) {
+func (s FileHookStore) Load(harness string) (HarnessState, bool, error) {
 	st, err := s.readState()
 	if err != nil {
-		return "", false, err
+		return HarnessState{}, false, err
 	}
-	v, ok := st.Versions[harness]
+	h, ok := st.Harnesses[harness]
 	if !ok {
-		return "", false, nil
+		return HarnessState{}, false, nil
 	}
-	if _, err := ParseVersion(v); err != nil {
-		return "", false, fmt.Errorf("recorded %s version in %s: %w (delete the file to record a fresh baseline)", harness, hookStateName, err)
+	if _, err := ParseVersion(h.Version); err != nil {
+		return HarnessState{}, false, fmt.Errorf("recorded %s version in %s: %w (delete the file to record a fresh baseline)", harness, hookStateName, err)
 	}
-	return v, true, nil
+	return h, true, nil
 }
 
-// Record implements HookStore. The write is atomic (temp file, then rename):
-// a run killed mid-write must leave the previous record, never a truncated
-// one that reads as corrupt.
-func (s FileHookStore) Record(harness, version string) error {
+// Save implements HookStore. The write is atomic (temp file, fsync, then
+// rename): a run killed mid-write must leave the previous state, never a
+// truncated one that reads as corrupt.
+func (s FileHookStore) Save(harness string, h HarnessState) error {
 	st, err := s.readState()
 	if err != nil {
 		return err
 	}
-	if st.Versions == nil {
-		st.Versions = map[string]string{}
+	if st.Harnesses == nil {
+		st.Harnesses = map[string]HarnessState{}
 	}
-	st.Versions[harness] = version
+	st.Harnesses[harness] = h
 	// termsafe:allow-raw-json persisted hook state, never command output
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
 	}
-	final, err := s.path(hookStateName)
-	if err != nil {
+	if _, err := s.path(hookStateName); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
-		return fmt.Errorf("create %s: %w", termsafe.QuotePath(s.Dir), termsafe.Error(err))
-	}
-	tmp, err := os.CreateTemp(s.Dir, hookStateName+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("create a temp state file in %s: %w", termsafe.QuotePath(s.Dir), termsafe.Error(err))
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }() // gone after a successful rename; this only cleans up a failure
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		_ = tmp.Close() // the write error is the one worth reporting
-		return termsafe.Error(err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close() // the sync error is the one worth reporting
-		return termsafe.Error(err)
-	}
-	if err := tmp.Close(); err != nil {
-		return termsafe.Error(err)
-	}
-	return termsafe.Error(os.Rename(tmpName, final))
+	return writeFileAtomic(s.Dir, hookStateName, append(data, '\n'), 0o600, 0o700)
 }
 
 // Append implements HookStore: one JSON line per hook run, in a 0600 file.
@@ -195,8 +175,22 @@ func (s FileHookStore) RecentRuns(n int) ([]HookRun, error) {
 	return runs, nil
 }
 
-// RecordedVersions returns every recorded version, keyed by harness.
-func (s FileHookStore) RecordedVersions() (map[string]string, error) {
+// States returns every recorded harness state.
+func (s FileHookStore) States() (map[string]HarnessState, error) {
 	st, err := s.readState()
-	return st.Versions, err
+	return st.Harnesses, err
+}
+
+// LastRunFor returns the newest audit record for harness at version, if any.
+func (s FileHookStore) LastRunFor(harness, version string) (HookRun, bool, error) {
+	runs, err := s.RecentRuns(200)
+	if err != nil {
+		return HookRun{}, false, err
+	}
+	for i := len(runs) - 1; i >= 0; i-- {
+		if runs[i].Harness == harness && runs[i].New == version {
+			return runs[i], true, nil
+		}
+	}
+	return HookRun{}, false, nil
 }

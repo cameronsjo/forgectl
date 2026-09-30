@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -24,8 +25,8 @@ import (
 // doctor tests build `launch doctor`, whose update-hooks row would otherwise
 // run `launchctl print` against the real gui domain.
 func init() {
-	hooksDoctorProbe = func(context.Context) (resume.AgentStatus, error) {
-		return resume.AgentStatus{AgentState: resume.AgentState{Runs: -1}}, nil
+	hooksDoctorProbe = func(context.Context) (hooksDoctorFacts, error) {
+		return hooksDoctorFacts{Agent: resume.AgentStatus{AgentState: resume.AgentState{Runs: -1}}}, nil
 	}
 }
 
@@ -35,6 +36,7 @@ type hooksFixture struct {
 	version             string
 	runner              *exec.FakeRunner
 	launchdLoaded       bool
+	env                 map[string]string
 }
 
 func newHooksFixture(t *testing.T) *hooksFixture {
@@ -77,24 +79,25 @@ func newHooksFixture(t *testing.T) *hooksFixture {
 		goos        string
 		settle      time.Duration
 		installed   func(context.Context, module.Deps) (string, error)
-	}{hooksDir, hooksAgentsDir, hooksExecutable, hooksLookPath, hooksLookupEnv, hooksUID, hooksGOOS, hooksSettle, installedVersionFn}
+		signals     bool
+	}{hooksDir, hooksAgentsDir, hooksExecutable, hooksLookPath, hooksLookupEnv, hooksUID, hooksGOOS, hooksSettle, installedVersionFn, hooksHandleSignals}
 	hooksDir = func() (string, error) { return f.state, nil }
 	hooksAgentsDir = func() (string, error) { return f.agents, nil }
 	hooksExecutable = func() (string, error) { return "/opt/homebrew/bin/forgectl", nil }
 	hooksLookPath = func(string) (string, error) { return "/opt/tools/bin/herdr", nil }
+	f.env = map[string]string{}
 	hooksLookupEnv = func(k string) (string, bool) {
-		if k == "FORGECTL_CLAUDE_BIN" {
-			return claude, true
-		}
-		return "", false
+		v, ok := f.env[k]
+		return v, ok
 	}
+	hooksHandleSignals = false
 	hooksUID = func() int { return 501 }
 	hooksGOOS = "darwin"
 	hooksSettle = time.Millisecond
 	installedVersionFn = func(context.Context, module.Deps) (string, error) { return f.version, nil }
 	t.Cleanup(func() {
 		hooksDir, hooksAgentsDir, hooksExecutable, hooksLookPath, hooksLookupEnv = prev.dir, prev.agents, prev.exe, prev.look, prev.env
-		hooksUID, hooksGOOS, hooksSettle, installedVersionFn = prev.uid, prev.goos, prev.settle, prev.installed
+		hooksUID, hooksGOOS, hooksSettle, installedVersionFn, hooksHandleSignals = prev.uid, prev.goos, prev.settle, prev.installed, prev.signals
 	})
 	return f
 }
@@ -153,7 +156,7 @@ func TestResumeHooksRunBaselineThenChange(t *testing.T) {
 	if err := json.Unmarshal([]byte(status), &st); err != nil {
 		t.Fatalf("status --json: %v\n%s", err, status)
 	}
-	if st.Hooks != 1 || st.Recorded["claude"] != "2.1.286" || len(st.Runs) != 1 || st.Runs[0].Hook != "#1 command=notify" {
+	if st.Hooks != 1 || st.Recorded["claude"].Version != "2.1.286" || len(st.Runs) != 1 || st.Runs[0].Hook != "#1 command=notify" || st.Runs[0].Trigger != "manual" {
 		t.Fatalf("status %+v", st)
 	}
 }
@@ -235,8 +238,10 @@ func TestResumeHooksInstall(t *testing.T) {
 	for _, want := range []string{
 		"<string>/opt/homebrew/bin/forgectl</string>",
 		"<string>" + filepath.Join(f.root, "bin", "claude") + "</string>",
-		"/opt/tools/bin:" + filepath.Join(f.root, "bin") + ":/opt/homebrew/bin:/usr/bin",
-		"<key>FORGECTL_CLAUDE_BIN</key>",
+		filepath.Join(f.root, "bin") + ":/opt/tools/bin:/opt/homebrew/bin:/usr/bin",
+		"<key>FORGECTL_CLAUDE_BIN</key>\n    <string>" + filepath.Join(f.root, "bin", "claude") + "</string>",
+		"<key>FORGECTL_HERDR_BIN</key>\n    <string>/opt/tools/bin/herdr</string>",
+		"<key>StartInterval</key>",
 		"<string>" + f.state + "</string>",
 	} {
 		if !strings.Contains(s, want) {
@@ -309,35 +314,137 @@ func TestResumeHooksInstallDryRun(t *testing.T) {
 }
 
 func TestHooksDoctorRow(t *testing.T) {
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 	loaded := resume.AgentStatus{Installed: true, AgentState: resume.AgentState{Loaded: true, State: "not running", Runs: 2, LastExit: "0"}}
-	failing := loaded
-	failing.LastExit = "1"
-	never := loaded
-	never.LastExit = "(never exited)"
+	running := loaded
+	running.State = "running"
+	ok := hooksDoctorFacts{Agent: loaded, Now: now, HaveState: true, State: resume.HarnessState{Version: "2.1.285"}}
+	withLast := func(outcome string) hooksDoctorFacts {
+		f := ok
+		f.LastRun, f.HaveLastRun = resume.HookRun{Hook: "#2 command=x", New: "2.1.285", Outcome: outcome}, true
+		return f
+	}
+	pending := ok
+	pending.State.Pending, pending.State.Attempts = []string{"#1 action=restart"}, 1
+	stuck := ok
+	stuck.Agent, stuck.InFlight, stuck.InFlightSince = running, true, now.Add(-2*time.Hour)
+	busyNotStuck := stuck
+	busyNotStuck.InFlightSince = now.Add(-5 * time.Minute)
+	staleMarker := stuck
+	staleMarker.Agent = loaded // not running: a SIGKILLed run's leftover marker
 	cases := []struct {
 		name       string
 		configured int
 		cfgErr     error
-		st         resume.AgentStatus
+		f          hooksDoctorFacts
 		probeErr   error
 		want       doctor.State
 		detail     string
 	}{
-		{"nothing configured or installed", 0, nil, resume.AgentStatus{}, nil, doctor.StateOK, "no [[resume.on_update]] hooks configured"},
-		{"hooks but no watcher", 1, nil, resume.AgentStatus{}, nil, doctor.StateWarn, "not installed"},
-		{"installed not loaded", 1, nil, resume.AgentStatus{Installed: true}, nil, doctor.StateWarn, "not loaded"},
-		{"healthy", 1, nil, loaded, nil, doctor.StateOK, "installed and loaded"},
-		{"never exited", 1, nil, never, nil, doctor.StateOK, "installed and loaded"},
-		{"last run failed", 1, nil, failing, nil, doctor.StateWarn, "last exit 1"},
-		{"bad config", 0, errors.New("[[resume.on_update]] #1: bad"), loaded, nil, doctor.StateWarn, "invalid"},
-		{"probe failed", 1, nil, resume.AgentStatus{}, errors.New("no home"), doctor.StateWarn, "could not check"},
+		{"nothing configured or installed", 0, nil, hooksDoctorFacts{}, nil, doctor.StateOK, "no [[resume.on_update]] hooks configured"},
+		{"hooks but no watcher", 1, nil, hooksDoctorFacts{}, nil, doctor.StateWarn, "not installed"},
+		{"installed not loaded", 1, nil, hooksDoctorFacts{Agent: resume.AgentStatus{Installed: true}}, nil, doctor.StateWarn, "not loaded"},
+		{"healthy", 1, nil, ok, nil, doctor.StateOK, "installed and loaded"},
+		{"last hook ok", 1, nil, withLast(resume.OutcomeOK), nil, doctor.StateOK, "installed and loaded"},
+		{"last hook failed", 1, nil, withLast(resume.OutcomeFailed), nil, doctor.StateWarn, "ended failed"},
+		{"restart pending", 1, nil, pending, nil, doctor.StateWarn, "incomplete (1 of 3"},
+		{"stuck run", 1, nil, stuck, nil, doctor.StateWarn, "may be stuck"},
+		{"long but inside the timeout", 1, nil, busyNotStuck, nil, doctor.StateOK, "running"},
+		{"stale marker, not running", 1, nil, staleMarker, nil, doctor.StateOK, "installed and loaded"},
+		{"bad config", 0, errors.New("[[resume.on_update]] #1: bad"), ok, nil, doctor.StateWarn, "invalid"},
+		{"probe failed", 1, nil, hooksDoctorFacts{}, errors.New("no home"), doctor.StateWarn, "could not check"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			state, detail := hooksDoctorRow(tc.configured, tc.cfgErr, tc.st, tc.probeErr)
+			state, detail := hooksDoctorRow(tc.configured, 30*time.Minute, tc.cfgErr, tc.f, tc.probeErr)
 			if state != tc.want || !strings.Contains(detail, tc.detail) {
 				t.Fatalf("= %s %q, want %s containing %q", state, detail, tc.want, tc.detail)
 			}
 		})
+	}
+}
+
+func TestResumeHooksInstallWarnings(t *testing.T) {
+	f := newHooksFixture(t)
+	hooksStat = func(p string) (fs.FileInfo, error) {
+		if p == "/opt/tools/bin" {
+			return fakeFileInfo{mode: fs.ModeDir | 0o777}, nil
+		}
+		return nil, fs.ErrNotExist
+	}
+	t.Cleanup(func() { hooksStat = os.Stat })
+	out, err := f.run(t, commandHookTOML, "install", "--dry-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "not a symlink into a versions directory") {
+		t.Errorf("no warning for a claude that is not a versions link:\n%s", out)
+	}
+	if !strings.Contains(out, "/opt/tools/bin is writable by other users") {
+		t.Errorf("no warning for a world-writable baked dir:\n%s", out)
+	}
+	if !strings.Contains(out, "watching claude at") {
+		t.Errorf("install did not say which claude it watches:\n%s", out)
+	}
+}
+
+func TestWritableByOthers(t *testing.T) {
+	cases := []struct {
+		mode        fs.FileMode
+		owner, uid  int
+		known, want bool
+	}{
+		{0o755, 0, 501, true, false},
+		{0o775, 501, 501, true, false}, // group-writable but ours (Homebrew's layout)
+		{0o775, 0, 501, true, true},
+		{0o757, 0, 501, true, true},
+		{0o775, 0, 501, false, true},
+	}
+	for _, tc := range cases {
+		if got := writableByOthers(tc.mode, tc.owner, tc.uid, tc.known); got != tc.want {
+			t.Errorf("writableByOthers(%v, owner %d, uid %d, known %v) = %v", tc.mode, tc.owner, tc.uid, tc.known, got)
+		}
+	}
+}
+
+type fakeFileInfo struct{ mode fs.FileMode }
+
+func (f fakeFileInfo) Name() string       { return "x" }
+func (f fakeFileInfo) Size() int64        { return 0 }
+func (f fakeFileInfo) Mode() fs.FileMode  { return f.mode }
+func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeFileInfo) IsDir() bool        { return f.mode.IsDir() }
+func (f fakeFileInfo) Sys() any           { return nil }
+
+func TestResumeHooksAuditsInstallAndTrigger(t *testing.T) {
+	f := newHooksFixture(t)
+	if _, err := f.run(t, commandHookTOML, "install"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.run(t, commandHookTOML, "uninstall"); err != nil {
+		t.Fatal(err)
+	}
+	f.env["XPC_SERVICE_NAME"] = resume.HooksAgentLabel
+	if _, err := f.run(t, commandHookTOML, "run"); err != nil {
+		t.Fatal(err)
+	}
+	f.version = "2.1.286"
+	if _, err := f.run(t, commandHookTOML, "run"); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := resume.FileHookStore{Dir: f.state}.RecentRuns(10)
+	if err != nil || len(runs) != 3 {
+		t.Fatalf("runs %+v %v", runs, err)
+	}
+	if runs[0].Hook != "watcher install" || runs[1].Hook != "watcher uninstall" || runs[2].Trigger != "launchd" {
+		t.Fatalf("audit %+v", runs)
+	}
+}
+
+func TestResumeHooksRejectsTopLevelOnUpdate(t *testing.T) {
+	f := newHooksFixture(t)
+	_, err := f.run(t, "[[on_update]]\nharness = \"claude\"\naction = \"restart\"\n", "run")
+	if err == nil || !strings.Contains(err.Error(), "[[resume.on_update]]") {
+		t.Fatalf("err = %v", err)
 	}
 }

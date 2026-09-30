@@ -138,16 +138,16 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 			}
 
 			// The update-hooks watcher is optional, so this row warns and
-			// never fails the doctor. It reads only: a plist stat and
-			// `launchctl print`.
+			// never fails the doctor. It reads only: a plist stat,
+			// `launchctl print`, and forgectl's own hook state files.
 			if hooksGOOS == "darwin" {
 				ctx := cmd.Context()
 				if ctx == nil {
 					ctx = context.Background()
 				}
 				cfgHooks, cfgErr := cfg.ResumeHooks()
-				st, probeErr := hooksDoctorProbe(ctx)
-				state, detail := hooksDoctorRow(len(cfgHooks), cfgErr, st, probeErr)
+				facts, probeErr := hooksDoctorProbe(ctx)
+				state, detail := hooksDoctorRow(len(cfgHooks), hooksLongestTimeout(cfgHooks), cfgErr, facts, probeErr)
 				rec.add("update_hooks", state, detail)
 			}
 

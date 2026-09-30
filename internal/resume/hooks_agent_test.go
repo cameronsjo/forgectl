@@ -1,6 +1,7 @@
 package resume
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -159,7 +161,7 @@ func TestInstallAgentIdempotent(t *testing.T) {
 	agents := filepath.Join(dir, "LaunchAgents")
 	spec := testAgentSpec(dir)
 	r, loaded := fakeLaunchd(false)
-	lc := Launchctl{Runner: r, UID: 501}
+	lc := Launchctl{Runner: r, UID: 501, Sleep: noSleep}
 
 	got, err := InstallAgent(context.Background(), agents, spec, lc)
 	if err != nil || got != InstallCreated || !*loaded {
@@ -212,5 +214,105 @@ func TestReadAgentStatus(t *testing.T) {
 	st := ReadAgentStatus(context.Background(), dir, HooksAgentLabel, Launchctl{Runner: r, UID: 501})
 	if st.Installed || st.Loaded {
 		t.Fatalf("empty dir status %+v", st)
+	}
+}
+
+// TestInstallAgentBootoutFailureLeavesOldPlist: a failed bootout must not
+// leave the new plist behind, or the next install would report "already
+// installed" over the stale job.
+func TestInstallAgentBootoutFailureLeavesOldPlist(t *testing.T) {
+	dir := t.TempDir()
+	agents := filepath.Join(dir, "LaunchAgents")
+	spec := testAgentSpec(dir)
+	r, _ := fakeLaunchd(false)
+	lc := Launchctl{Runner: r, UID: 501, Sleep: noSleep}
+	if _, err := InstallAgent(context.Background(), agents, spec, lc); err != nil {
+		t.Fatal(err)
+	}
+	old, err := os.ReadFile(AgentPlistPath(agents, HooksAgentLabel)) // #nosec G304 -- test temp dir
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := r.RunFunc
+	r.RunFunc = func(name string, args []string) (string, error) {
+		if args[0] == "bootout" {
+			return "", &exec.CommandError{Name: name, ExitCode: 5, Err: errors.New("exit status 5")}
+		}
+		return inner(name, args)
+	}
+	spec.Program = "/usr/local/bin/forgectl"
+	if _, err := InstallAgent(context.Background(), agents, spec, lc); err == nil {
+		t.Fatal("want the bootout failure")
+	}
+	now, err := os.ReadFile(AgentPlistPath(agents, HooksAgentLabel)) // #nosec G304 -- test temp dir
+	if err != nil || !bytes.Equal(now, old) {
+		t.Fatal("the new plist was written although the old job could not be unloaded")
+	}
+	r.RunFunc = inner
+	got, err := InstallAgent(context.Background(), agents, spec, lc)
+	if err != nil || got != InstallUpdated {
+		t.Fatalf("install after the failure = %q, %v; want it to update, not report unchanged", got, err)
+	}
+}
+
+func TestInstallAgentRetriesBootstrap(t *testing.T) {
+	dir := t.TempDir()
+	r, loaded := fakeLaunchd(false)
+	inner := r.RunFunc
+	failures := 2
+	r.RunFunc = func(name string, args []string) (string, error) {
+		if args[0] == "bootstrap" && failures > 0 {
+			failures--
+			return "", &exec.CommandError{Name: name, ExitCode: 5, Stderr: "Bootstrap failed: 5: Input/output error", Err: errors.New("exit status 5")}
+		}
+		return inner(name, args)
+	}
+	slept := 0
+	lc := Launchctl{Runner: r, UID: 501, Sleep: func(context.Context, time.Duration) error { slept++; return nil }}
+	if _, err := InstallAgent(context.Background(), filepath.Join(dir, "LaunchAgents"), testAgentSpec(dir), lc); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if !*loaded || slept != 2 {
+		t.Fatalf("loaded %v, slept %d", *loaded, slept)
+	}
+	failures = 99
+	r.Calls = nil
+	*loaded = false
+	if err := lc.Bootstrap(context.Background(), "/x.plist"); err == nil {
+		t.Fatal("a bootstrap that always fails reported success")
+	}
+	if n := len(r.Calls); n != bootstrapAttempts {
+		t.Fatalf("attempts = %d, want %d", n, bootstrapAttempts)
+	}
+}
+
+func TestRenderAgentPlistInterval(t *testing.T) {
+	s := testAgentSpec(t.TempDir())
+	s.Interval = 1800
+	data, err := RenderAgentPlist(s)
+	if err != nil || !strings.Contains(string(data), "<key>StartInterval</key>\n  <integer>1800</integer>") {
+		t.Fatalf("%v\n%s", err, data)
+	}
+}
+
+func TestCheckVersionsLink(t *testing.T) {
+	dir := t.TempDir()
+	versions := filepath.Join(dir, "versions")
+	if err := os.MkdirAll(versions, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(versions, "2.1.285")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "claude")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckVersionsLink(link); err != nil {
+		t.Fatalf("versions link refused: %v", err)
+	}
+	if err := CheckVersionsLink(target); err == nil {
+		t.Fatal("a plain file was accepted as a versions link")
 	}
 }

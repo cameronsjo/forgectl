@@ -66,3 +66,8 @@ Restart (item 3) is the outcome; outdated detection (item 2) is what it targets,
 - `status` is written by Claude Code and undocumented; a harness update can change its values. Item 2 must treat unknown values as busy.
 - The registry file can outlive its process; liveness comes from the pid probe, never from `status`.
 - Pid reuse: a stale registry file whose pid now belongs to another process. Restart must confirm the pid is a `claude` process before signalling it.
+
+## Deviations
+
+- item 4 (#728): the spec and this plan name a top-level `[[on_update]]`; it shipped as `[[resume.on_update]]`, because `resumeModule` owns config section `resume` (`ConfigKey: "resume"`) and every section has exactly one owning module. A top-level `[[on_update]]` or `[on_update]` is a config error that names `[[resume.on_update]]`, so the spelling from the spec fails loudly instead of being ignored.
+- item 4 (#728): the timeout key is `timeout_seconds`, following `[net] ttl_seconds` / `timeout_ms`.

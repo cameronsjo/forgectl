@@ -23,8 +23,11 @@ type OnUpdateHook struct {
 	Harness string   `toml:"harness"`
 	Action  string   `toml:"action"`
 	Command []string `toml:"command"`
-	// TimeoutSeconds bounds one run of the hook; 0 takes the built-in
-	// default for its kind. Named in seconds like [net] ttl_seconds.
+	// TimeoutSeconds bounds one run of a command hook (its process group is
+	// killed at the deadline). For action = "restart" it bounds only the
+	// waiting for sessions to go idle: a restart already signalled is still
+	// relaunched and confirmed after it passes. 0 takes the built-in default
+	// for the kind. Named in seconds like [net] ttl_seconds.
 	TimeoutSeconds int `toml:"timeout_seconds"`
 }
 
@@ -43,6 +46,11 @@ const onUpdateMaxTimeoutSeconds = 24 * 60 * 60
 // `comand` would otherwise decode to a hook with nothing to run, or silently
 // drop a timeout.
 func (rc ResumeConfig) Validate(unknown []string) error {
+	for _, k := range unknown {
+		if k == "on_update" || strings.HasPrefix(k, "on_update.") {
+			return errors.New("a top-level [[on_update]] table is not read: update hooks live under [[resume.on_update]]; rename the table header")
+		}
+	}
 	if len(unknown) > 0 {
 		return fmt.Errorf("[resume]: unknown key %s", quoteConfigValue(unknown[0]))
 	}

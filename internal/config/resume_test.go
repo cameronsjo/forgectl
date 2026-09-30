@@ -33,7 +33,10 @@ func TestResumeOnUpdateValidate(t *testing.T) {
 			"timeout_seconds 90000 is out of range"},
 		"misspelled key": {`[[resume.on_update]]` + "\nharness = \"claude\"\naction = \"restart\"\ntimeout = 5",
 			`unknown key "resume.on_update.timeout"`},
-		"unknown resume key": {"[resume]\nwatch = true", `unknown key "resume.watch"`},
+		"unknown resume key":    {"[resume]\nwatch = true", `unknown key "resume.watch"`},
+		"top-level array table": {"[[on_update]]\nharness = \"claude\"\naction = \"restart\"", "update hooks live under [[resume.on_update]]"},
+		"top-level table":       {"[on_update]\nharness = \"claude\"", "update hooks live under [[resume.on_update]]"},
+		"top-level empty table": {"[on_update]", "update hooks live under [[resume.on_update]]"},
 		"second entry bad": {"[[resume.on_update]]\nharness = \"claude\"\naction = \"restart\"\n[[resume.on_update]]\nharness = \"pi\"\naction = \"restart\"",
 			"#2: harness \"pi\""},
 	}

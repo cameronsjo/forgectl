@@ -268,7 +268,7 @@ const resumeScaffold = `
 # harness = "claude"   # only "claude" is supported so far
 # action  = "restart"  # built-in: forgectl resume restart --outdated; or instead:
 # command = ["/usr/bin/say", "claude updated"]  # argv, no shell; gets FORGECTL_HARNESS/_OLD_VERSION/_NEW_VERSION
-# timeout_seconds = 0  # 0 = default (restart 1800, command 300)
+# timeout_seconds = 0  # 0 = default: command 300 (then its process group is killed); restart 1800 (bounds only the wait for idle)
 `
 
 // initSection is one scaffoldable block: a config.toml section (or, for the

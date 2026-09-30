@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -42,6 +43,10 @@ type AgentSpec struct {
 	WorkingDir string
 	// LogPath receives stdout and stderr.
 	LogPath string
+	// Interval, when positive, also runs the job every Interval seconds
+	// (StartInterval): a safety net for a missed watch event, and what
+	// retries an incomplete restart when nothing else changes.
+	Interval int
 }
 
 var (
@@ -145,6 +150,10 @@ func RenderAgentPlist(s AgentSpec) ([]byte, error) {
 	str("  ", s.LogPath)
 	key("RunAtLoad")
 	b.WriteString("  <true/>\n")
+	if s.Interval > 0 {
+		key("StartInterval")
+		b.WriteString("  <integer>" + strconv.Itoa(s.Interval) + "</integer>\n")
+	}
 	key("ProcessType")
 	str("  ", "Background")
 	b.WriteString("</dict>\n</plist>\n")
@@ -191,6 +200,15 @@ func CheckAgentBinary(exe string) error {
 	return nil
 }
 
+// CheckVersionsLink reports why path is not a symlink into a versions
+// directory, or nil when it is. The watcher watches that link: a wrapper
+// script or a plain binary never changes on update, so the watch would fire
+// only at load and on the interval.
+func CheckVersionsLink(path string) error {
+	_, err := versionFromLink(path)
+	return err
+}
+
 // AgentState is what `launchctl print` says about a loaded job.
 type AgentState struct {
 	Loaded   bool
@@ -234,6 +252,8 @@ func parseLaunchctlPrint(out string) AgentState {
 type Launchctl struct {
 	Runner exec.Runner
 	UID    int
+	// Sleep waits between bootstrap attempts; nil means SleepContext.
+	Sleep func(context.Context, time.Duration) error
 }
 
 func (l Launchctl) domain() string { return "gui/" + strconv.Itoa(l.UID) }
@@ -247,12 +267,30 @@ func (l Launchctl) Print(ctx context.Context, label string) AgentState {
 	return parseLaunchctlPrint(out)
 }
 
-// Bootstrap loads a plist into the gui domain.
+// bootstrapAttempts bounds Bootstrap's retries. Right after a bootout,
+// launchd often refuses a bootstrap ("5: Input/output error") while the old
+// instance is still tearing down; a short wait clears it.
+const bootstrapAttempts = 4
+
+// Bootstrap loads a plist into the gui domain, retrying a refusal a few
+// times with a growing wait.
 func (l Launchctl) Bootstrap(ctx context.Context, plist string) error {
-	if _, err := l.Runner.Run(ctx, "launchctl", "bootstrap", l.domain(), plist); err != nil {
-		return fmt.Errorf("launchctl bootstrap: %w", err)
+	sleep := l.Sleep
+	if sleep == nil {
+		sleep = SleepContext
 	}
-	return nil
+	var err error
+	for attempt := 1; attempt <= bootstrapAttempts; attempt++ {
+		if _, err = l.Runner.Run(ctx, "launchctl", "bootstrap", l.domain(), plist); err == nil {
+			return nil
+		}
+		if attempt < bootstrapAttempts {
+			if serr := sleep(ctx, time.Duration(attempt)*500*time.Millisecond); serr != nil {
+				break
+			}
+		}
+	}
+	return fmt.Errorf("launchctl bootstrap: %w", err)
 }
 
 // Bootout unloads a job from the gui domain.
@@ -277,9 +315,15 @@ const (
 	InstallUnchanged InstallOutcome = "already installed"
 )
 
-// InstallAgent writes the plist into agentsDir and loads it. It is
-// idempotent: the same spec, already loaded, changes nothing; a changed spec
-// is rewritten and reloaded.
+// InstallAgent loads the watcher from a plist in agentsDir. It is
+// idempotent: the same spec, already loaded, changes nothing.
+//
+// A loaded job is booted out BEFORE the new plist is written. The other
+// order can strand a stale job: the new bytes land, the bootout fails, and
+// the next install finds the file matching and the job loaded, and reports
+// "already installed" over a job still running the old arguments. Here a
+// failed bootout leaves the old file, so the next install sees a difference
+// and tries again.
 func InstallAgent(ctx context.Context, agentsDir string, spec AgentSpec, lc Launchctl) (InstallOutcome, error) {
 	data, err := RenderAgentPlist(spec)
 	if err != nil {
@@ -300,13 +344,13 @@ func InstallAgent(ctx context.Context, agentsDir string, spec AgentSpec, lc Laun
 	if err := os.MkdirAll(spec.WorkingDir, 0o700); err != nil {
 		return "", fmt.Errorf("create %s: %w", termsafe.QuotePath(spec.WorkingDir), termsafe.Error(err))
 	}
-	if err := writeFileAtomic(agentsDir, filepath.Base(path), data, 0o644); err != nil {
-		return "", err
-	}
 	if loaded {
 		if err := lc.Bootout(ctx, spec.Label); err != nil {
 			return "", err
 		}
+	}
+	if err := writeFileAtomic(agentsDir, filepath.Base(path), data, 0o644, 0o755); err != nil { // #nosec G301 -- ~/Library/LaunchAgents is conventionally 0755
+		return "", err
 	}
 	if err := lc.Bootstrap(ctx, path); err != nil {
 		return "", err
@@ -348,10 +392,11 @@ func ReadAgentStatus(ctx context.Context, agentsDir, label string, lc Launchctl)
 	return AgentStatus{PlistPath: path, Installed: err == nil, AgentState: lc.Print(ctx, label)}
 }
 
-// writeFileAtomic writes dir/name through a temp file and a rename, so a
-// crash leaves the old file or the new one, never half of either.
-func writeFileAtomic(dir, name string, data []byte, perm os.FileMode) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil { // #nosec G301 -- ~/Library/LaunchAgents is conventionally 0755
+// writeFileAtomic writes dir/name through a temp file, an fsync, and a
+// rename, so a crash or power loss leaves the old file or the new one, never
+// a truncated one (launchd refuses an empty plist at login).
+func writeFileAtomic(dir, name string, data []byte, perm, dirPerm os.FileMode) error {
+	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return fmt.Errorf("create %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	tmp, err := os.CreateTemp(dir, name+".*.tmp")
@@ -364,10 +409,15 @@ func writeFileAtomic(dir, name string, data []byte, perm os.FileMode) error {
 		_ = tmp.Close() // the write error is the one worth reporting
 		return termsafe.Error(err)
 	}
-	if err := tmp.Close(); err != nil {
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close() // the chmod error is the one worth reporting
 		return termsafe.Error(err)
 	}
-	if err := os.Chmod(tmpName, perm); err != nil {
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close() // the sync error is the one worth reporting
+		return termsafe.Error(err)
+	}
+	if err := tmp.Close(); err != nil {
 		return termsafe.Error(err)
 	}
 	return termsafe.Error(os.Rename(tmpName, filepath.Join(dir, name)))

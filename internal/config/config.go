@@ -1178,7 +1178,9 @@ func DecodeStrict(data []byte) (Config, error) {
 	cfg.launchSet = meta.IsDefined("launch")
 	cfg.herdrOrganizeSet = meta.IsDefined("herdr", "organize")
 	for _, k := range meta.Undecoded() {
-		if len(k) > 0 && k[0] == "resume" {
+		// A top-level on_update table is collected too, so Validate can point
+		// at [[resume.on_update]] instead of the table being silently ignored.
+		if len(k) > 0 && (k[0] == "resume" || k[0] == "on_update") {
 			cfg.resumeUnknown = append(cfg.resumeUnknown, k.String())
 		}
 	}
