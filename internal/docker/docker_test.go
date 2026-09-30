@@ -52,6 +52,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 )
 
 type gitProbe struct {
@@ -62,6 +63,7 @@ type gitProbe struct {
 func fakeGitProbeRunner(top, branch, sha gitProbe) *exec.FakeRunner {
 	return &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			if name != "git" || len(args) < 4 {
 				return "", nil
 			}

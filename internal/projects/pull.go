@@ -3,6 +3,8 @@ package projects
 import (
 	"context"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 )
 
 // PullStatus classifies the outcome of pulling one project.
@@ -81,7 +83,7 @@ func (c *Client) PullAll(ctx context.Context, dir string) ([]PullResult, error) 
 			results = append(results, PullResult{Name: p.Name, Dir: p.Dir, Status: PullSkippedDirty})
 			continue
 		}
-		out, err := c.run.Run(ctx, c.gitBinary(), "-C", p.Dir, "pull", "--rebase")
+		out, err := gitenv.RunBin(ctx, c.run, c.gitBinary(), gitenv.Transport, "-C", p.Dir, "pull", "--rebase")
 		results = append(results, PullResult{Name: p.Name, Dir: p.Dir, Status: classifyPull(out, err), Err: err})
 	}
 	return results, nil

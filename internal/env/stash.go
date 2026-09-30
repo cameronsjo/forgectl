@@ -29,56 +29,14 @@
 // # How git is run
 //
 // The stash check runs git inside a repository, whose .git/config the check
-// does not control and cannot drop: repository extensions such as
-// objectFormat and partialClone live there. So the invocation pins off each
-// way a read of refs and trees can be made to run a program or reach the
-// network, rather than trusting the repository not to ask (stashGitArgs,
-// stashGitEnv):
-//
-//   - lazy fetch. In a partial clone (a promisor remote), reading a missing
-//     object fetches it, which runs the transport, and with it
-//     core.sshCommand, a remote's uploadpack, or an `ext::` URL's command. A
-//     refs/stash naming a missing commit, or a stash whose untracked tree is
-//     missing, triggers it. Measured on git 2.43: `stash list` and `ls-tree`
-//     both ran a canary.
-//
-//     The load-bearing control is GIT_ALLOW_PROTOCOL set and empty (git 2.6
-//     and later), an allowlist that names no transport. Not "none": that is
-//     an allowlist naming a transport called none, and a git-remote-none on
-//     PATH ran through it (measured on git 2.43). When it is set, git
-//     ignores every protocol.allow and protocol.<name>.allow setting, the
-//     repository's included, and refuses every transport before it starts.
-//     It goes last in the environment, so an inherited value cannot widen it.
-//     `-c protocol.allow=never` is NOT enough on its own: git lets a
-//     repository's protocol.<name>.allow take precedence over it, so a
-//     repository with protocol.ext.allow=always and an ext:: remote ran its
-//     canary through it. GIT_NO_LAZY_FETCH=1 (git 2.44 and later, and some
-//     backports) stops the fetch before a transport is chosen; an older git
-//     ignores it. Both stay as defence in depth. With the fetch refused, the
-//     read fails and the scan refuses.
-//
-//   - core.fsmonitor, which names a hook git launches to query the working
-//     tree.
-//
-//   - log.showSignature, which runs gpg.program on a signed commit that
-//     `stash list` walks.
-//
-//   - replace refs, which could substitute another object for a stash commit
-//     or its tree (--no-replace-objects).
-//
-// None of the three commands runs a hook, reads the index, or opens a pager
-// (stdout is a pipe). User-level config, global and system, is kept: it is the
-// operator's own, and dropping it would drop safe.directory, which turns a
-// repository the operator marked safe into a skipped check.
-//
-// The environment is scrubbed of the variables git itself clears before it
-// works in another repository (`git rev-parse --local-env-vars`): GIT_DIR,
-// GIT_WORK_TREE, GIT_INDEX_FILE, GIT_COMMON_DIR, the object-directory
-// variables, and the config injected by a parent git's -c. Inside a git hook,
-// or under a caller that exported GIT_DIR, they would point every call at a
-// repository other than the target's, and the check would read the wrong
-// stashes. GIT_CEILING_DIRECTORIES and GIT_DISCOVERY_ACROSS_FILESYSTEM stay:
-// they only narrow discovery, and they are the operator's to set.
+// does not control and cannot drop. It runs every call under gitenv's Local
+// profile, which pins off each way a read of refs and trees can be made to
+// run a program or reach the network (lazy fetch, core.fsmonitor,
+// log.showSignature, replace refs) and scrubs the variables that would point
+// git at another repository; internal/gitenv's package doc is the whole
+// account, measurements included. With a lazy fetch refused, the read fails
+// and the scan refuses. None of the three commands runs a hook, reads the
+// index, or opens a pager (stdout is a pipe).
 //
 // Pathspecs are literal, so a directory whose name holds a glob character is
 // matched as itself.
@@ -88,12 +46,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -106,57 +63,9 @@ var stashGitTimeout = 10 * time.Second
 // transport, a hook) would otherwise hold Output past the deadline.
 const stashGitWaitDelay = 2 * time.Second
 
-// stashGitArgs precede every git call the stash check makes. See "How git is
-// run" above.
-var stashGitArgs = []string{
-	"-c", "protocol.allow=never",
-	"-c", "core.fsmonitor=false",
-	"-c", "log.showSignature=false",
-	"--no-replace-objects",
-	"--literal-pathspecs",
-}
-
-// stashGitScrubbed is the output of `git rev-parse --local-env-vars` on git
-// 2.43: what git clears before it works in another repository.
-var stashGitScrubbed = map[string]bool{
-	"GIT_ALTERNATE_OBJECT_DIRECTORIES": true,
-	"GIT_CONFIG":                       true,
-	"GIT_CONFIG_PARAMETERS":            true,
-	"GIT_CONFIG_COUNT":                 true,
-	"GIT_OBJECT_DIRECTORY":             true,
-	"GIT_DIR":                          true,
-	"GIT_WORK_TREE":                    true,
-	"GIT_IMPLICIT_WORK_TREE":           true,
-	"GIT_GRAFT_FILE":                   true,
-	"GIT_INDEX_FILE":                   true,
-	"GIT_NO_REPLACE_OBJECTS":           true,
-	"GIT_REPLACE_REF_BASE":             true,
-	"GIT_PREFIX":                       true,
-	"GIT_SHALLOW_FILE":                 true,
-	"GIT_COMMON_DIR":                   true,
-}
-
-// stashGitEnv is environ without the scrubbed variables, the numbered
-// GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n pairs GIT_CONFIG_COUNT indexes, and any
-// inherited GIT_ALLOW_PROTOCOL, followed by stashGitEnvPins.
-func stashGitEnv(environ []string) []string {
-	out := make([]string, 0, len(environ)+2)
-	for _, kv := range environ {
-		key, _, _ := strings.Cut(kv, "=")
-		if stashGitScrubbed[key] || key == "GIT_ALLOW_PROTOCOL" || strings.HasPrefix(key, "GIT_CONFIG_KEY_") || strings.HasPrefix(key, "GIT_CONFIG_VALUE_") {
-			continue
-		}
-		out = append(out, kv)
-	}
-	return append(out, stashGitEnvPins...)
-}
-
-// stashGitEnvPins are appended to the environment, in this order.
-// GIT_ALLOW_PROTOCOL must stay last: exec keeps the last value of a duplicate
-// key, so an inherited GIT_ALLOW_PROTOCOL cannot widen it. It is a variable
-// only so a test can drop GIT_NO_LAZY_FETCH and model a git older than 2.44,
-// which ignores it.
-var stashGitEnvPins = []string{"GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0", "GIT_ALLOW_PROTOCOL="}
+// stashGitArgs precede every git call the stash check makes, after
+// gitenv's Local options.
+var stashGitArgs = []string{"--literal-pathspecs"}
 
 // stashGit runs git with args in dir and returns its stdout. It is a variable
 // only so a test can make one call fail the way a corrupt repository would.
@@ -164,9 +73,8 @@ var stashGit = func(dir string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), stashGitTimeout)
 	defer cancel()
 	full := append(append([]string{}, stashGitArgs...), args...)
-	cmd := exec.CommandContext(ctx, "git", full...) //nolint:gosec // G204: git with read-only arguments this package builds; the only variable parts are a commit id git printed and a path prefix after "--"
+	cmd := gitenv.Command(ctx, gitenv.Local, full...)
 	cmd.Dir = dir
-	cmd.Env = stashGitEnv(os.Environ())
 	cmd.WaitDelay = stashGitWaitDelay
 	return cmd.Output()
 }

@@ -49,6 +49,7 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -292,7 +293,7 @@ func (c *Client) Prune(ctx context.Context, items []Classification, opts PruneOp
 func (c *Client) deleteLocal(ctx context.Context, info Info) error {
 	if info.WorktreePath != "" {
 		slog.Debug("Preparing to remove worktree before deleting branch.", "branch", info.Name, "worktree", info.WorktreePath)
-		if _, err := c.run.Run(ctx, "git", "worktree", "remove", "--", info.WorktreePath); err != nil {
+		if _, err := gitenv.Run(ctx, c.run, gitenv.Local, "worktree", "remove", "--", info.WorktreePath); err != nil {
 			slog.Error("Failed to remove worktree.", "branch", info.Name, "worktree", info.WorktreePath, "error", err)
 			// Categorical cause (#717): git's stderr is not echoed; the path
 			// and name are quoted so a control or bidi rune stays inert.
@@ -308,7 +309,7 @@ func (c *Client) deleteLocal(ctx context.Context, info Info) error {
 	// reason gotcha #1 exists — using `-D` here is deliberate, not a shortcut
 	// around a safety check we've already performed correctly, server-side.
 	slog.Debug("Preparing to delete local branch.", "branch", info.Name)
-	if _, err := c.run.Run(ctx, "git", "branch", "-D", "--", info.Name); err != nil {
+	if _, err := gitenv.Run(ctx, c.run, gitenv.Local, "branch", "-D", "--", info.Name); err != nil {
 		slog.Error("Failed to delete local branch.", "branch", info.Name, "error", err)
 		return fmt.Errorf("delete local branch %s: %w", termsafe.QuoteTextMax(info.Name, branchEchoMaxRunes), termsafe.Categorical("git branch -D failed", err))
 	}
@@ -320,7 +321,7 @@ func (c *Client) deleteLocal(ctx context.Context, info Info) error {
 // server-side via the SINGULAR ref endpoint — gotcha #4.
 func (c *Client) deleteRemote(ctx context.Context, remoteName string, info Info) error {
 	slog.Debug("Preparing to delete remote branch.", "remote", remoteName, "branch", info.Name)
-	if _, err := c.run.Run(ctx, "git", "push", remoteName, "--delete", "--", info.Name); err != nil {
+	if _, err := gitenv.Run(ctx, c.run, gitenv.Transport, "push", remoteName, "--delete", "--", info.Name); err != nil {
 		slog.Error("Failed to delete remote branch.", "remote", remoteName, "branch", info.Name, "error", err)
 		// Categorical cause (#658): git relays the remote's sideband
 		// ("remote: …") on stderr, which is server-chosen text.
@@ -372,7 +373,7 @@ func (c *Client) resolveRemote(ctx context.Context, remoteName string) (originRe
 	if remoteName == "" || strings.HasPrefix(remoteName, "-") {
 		return originRepo{}, errors.New("remote name is not usable as a git argument")
 	}
-	out, err := c.run.Run(ctx, "git", "remote", "get-url", "--push", "--all", remoteName)
+	out, err := gitenv.Run(ctx, c.run, gitenv.Local, "remote", "get-url", "--push", "--all", remoteName)
 	if err != nil {
 		return originRepo{}, errors.New("could not read the remote's URL")
 	}
@@ -486,7 +487,7 @@ type localRow struct {
 
 // localBranches lists every local branch and its upstream tracking state.
 func (c *Client) localBranches(ctx context.Context) ([]localRow, error) {
-	out, err := c.run.Run(ctx, "git", "for-each-ref",
+	out, err := gitenv.Run(ctx, c.run, gitenv.Local, "for-each-ref",
 		"--format=%(refname:short)\t%(upstream:short)\t%(upstream:track)",
 		"--", "refs/heads")
 	if err != nil {
@@ -522,7 +523,7 @@ func (c *Client) localBranches(ctx context.Context) ([]localRow, error) {
 // prefix to strip. Caught via a manual dry-run against this repo's own
 // origin remote.
 func (c *Client) remoteBranches(ctx context.Context, remoteName string) ([]string, error) {
-	out, err := c.run.Run(ctx, "git", "for-each-ref",
+	out, err := gitenv.Run(ctx, c.run, gitenv.Local, "for-each-ref",
 		"--format=%(refname)%09%(refname:short)",
 		"--", "refs/remotes/"+remoteName)
 	if err != nil {
@@ -553,7 +554,7 @@ func (c *Client) remoteBranches(ctx context.Context, remoteName string) ([]strin
 // worktrees maps each worktree-checked-out branch name to its worktree path,
 // parsed from `git worktree list --porcelain`.
 func (c *Client) worktrees(ctx context.Context) (map[string]string, error) {
-	out, err := c.run.Run(ctx, "git", "worktree", "list", "--porcelain")
+	out, err := gitenv.Run(ctx, c.run, gitenv.Local, "worktree", "list", "--porcelain")
 	if err != nil {
 		return nil, fmt.Errorf("list worktrees: %w", err)
 	}
@@ -585,7 +586,7 @@ func (c *Client) worktrees(ctx context.Context) (map[string]string, error) {
 // defaultBranch is still guarded by sandbox.RejectOptionLike in Enumerate
 // before this is ever called.
 func (c *Client) mergedLocally(ctx context.Context, defaultBranch string) (map[string]bool, error) {
-	out, err := c.run.Run(ctx, "git", "branch", "--merged", defaultBranch, "--format=%(refname:short)")
+	out, err := gitenv.Run(ctx, c.run, gitenv.Local, "branch", "--merged", defaultBranch, "--format=%(refname:short)")
 	if err != nil {
 		return nil, fmt.Errorf("list locally-merged branches: %w", err)
 	}

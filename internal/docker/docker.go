@@ -17,6 +17,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
@@ -364,7 +365,7 @@ func (c *Client) resolveTag(explicit string) (string, error) {
 // returned for callers to use. Build uses a partial repo for stable naming,
 // but requires all three fields before emitting immutable tags or git labels.
 func (c *Client) gitInfo(ctx context.Context, dir string) (repo, branch, sha string, err error) {
-	top, topErr := c.run.Run(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel")
+	top, topErr := gitenv.Run(ctx, c.run, gitenv.Local, "-C", dir, "rev-parse", "--show-toplevel")
 	if topErr != nil {
 		err = fmt.Errorf("resolve git repo root: %w", topErr)
 	} else {
@@ -376,7 +377,7 @@ func (c *Client) gitInfo(ctx context.Context, dir string) (repo, branch, sha str
 		}
 	}
 
-	branchOut, branchErr := c.run.Run(ctx, "git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD")
+	branchOut, branchErr := gitenv.Run(ctx, c.run, gitenv.Local, "-C", dir, "rev-parse", "--abbrev-ref", "HEAD")
 	if branchErr != nil {
 		if err == nil {
 			err = fmt.Errorf("resolve git branch: %w", branchErr)
@@ -392,7 +393,7 @@ func (c *Client) gitInfo(ctx context.Context, dir string) (repo, branch, sha str
 		}
 	}
 
-	shaOut, shaErr := c.run.Run(ctx, "git", "-C", dir, "rev-parse", "--short", "HEAD")
+	shaOut, shaErr := gitenv.Run(ctx, c.run, gitenv.Local, "-C", dir, "rev-parse", "--short", "HEAD")
 	if shaErr != nil {
 		if err == nil {
 			err = fmt.Errorf("resolve git sha: %w", shaErr)

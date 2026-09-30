@@ -38,6 +38,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
@@ -63,7 +64,7 @@ func TestSandbox_LocalRepo_WorktreeAdd(t *testing.T) {
 	if call.Name != "git" {
 		t.Errorf("call.Name = %q, want git", call.Name)
 	}
-	want := []string{"-C", repoDir, "worktree", "add", "--", dir, "main"}
+	want := append(gitenv.Args(gitenv.Transport), "-C", repoDir, "worktree", "add", "--", dir, "main")
 	if len(call.Args) != len(want) {
 		t.Fatalf("args = %v, want %v", call.Args, want)
 	}
@@ -111,7 +112,7 @@ func TestSandbox_AlwaysClone_RemoteRepo(t *testing.T) {
 		t.Fatalf("expected 1 Runner call, got %d: %+v", len(fake.Calls), fake.Calls)
 	}
 	call := fake.Calls[0]
-	want := []string{"clone", "--branch", "main", "--", "cameronsjo/forgectl", dir}
+	want := append(gitenv.Args(gitenv.Transport), "clone", "--branch", "main", "--", "cameronsjo/forgectl", dir)
 	if len(call.Args) != len(want) {
 		t.Fatalf("args = %v, want %v", call.Args, want)
 	}
@@ -137,7 +138,7 @@ func TestSandbox_Clone_NoRef_OmitsBranchFlag(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	call := fake.Last()
-	want := []string{"clone", "--", "cameronsjo/forgectl", dir}
+	want := append(gitenv.Args(gitenv.Transport), "clone", "--", "cameronsjo/forgectl", dir)
 	if len(call.Args) != len(want) {
 		t.Fatalf("args = %v, want %v (branch flag should be omitted)", call.Args, want)
 	}

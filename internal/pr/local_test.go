@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
@@ -36,6 +37,7 @@ const localHeadOid = "deadbeefcafe1234567890abcdef1234567890"
 func localGitRunner() *exec.FakeRunner {
 	return &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			if name == "git" && len(args) >= 3 && args[2] == "rev-parse" {
 				if contains(args, "--abbrev-ref") {
 					return "main", nil

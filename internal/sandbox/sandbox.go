@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -68,7 +69,7 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 		}
 		slog.Debug("Sandboxing local repo via git worktree.", "repo", shownRepo, "ref", useRef)
 		// -- ends option parsing so a crafted dir/ref can't inject a flag.
-		if _, err := run.Run(ctx, "git", "-C", repo, "worktree", "add", "--", dir, useRef); err != nil {
+		if _, err := gitenv.Run(ctx, run, gitenv.Transport, "-C", repo, "worktree", "add", "--", dir, useRef); err != nil {
 			slog.Error("Failed to create git worktree.", "repo", shownRepo, "sandbox", dir, "ref", useRef, "exit_code", exitCode(err))
 			discardSandbox(ctx, run, dir)
 			// Categorical (#711), as the clone leg: git's stderr is not echoed.
@@ -83,7 +84,7 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 		if ref != "" {
 			args = []string{"clone", "--branch", ref, "--", repo, dir}
 		}
-		if _, err := run.Run(ctx, "git", args...); err != nil {
+		if _, err := gitenv.Run(ctx, run, gitenv.Transport, args...); err != nil {
 			slog.Error("Failed to clone repo.", "repo", shownRepo, "sandbox", dir, "exit_code", exitCode(err))
 			discardSandbox(ctx, run, dir)
 			// Categorical (#658): the CommandError renders git's argv, whose

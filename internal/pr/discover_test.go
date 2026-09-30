@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 )
 
 // searchRow renders one gh-search-prs JSON object for the given slug/number.
@@ -435,6 +436,7 @@ func TestPrepareMany_SameRepoSerialized(t *testing.T) {
 	var maxSeen int
 
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		switch {
 		case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
 			// Return a valid head so Prepare proceeds to the clone step.
@@ -497,6 +499,7 @@ func cloneSlug(args []string) string {
 // staggered per-repo sleep scrambles completion order.
 func TestPrepareMany_InputOrder(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		switch {
 		case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
 			return `{"headRefName":"feature","headRefOid":"abc123",` +

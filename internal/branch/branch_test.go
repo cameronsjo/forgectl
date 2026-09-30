@@ -34,6 +34,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -43,6 +44,7 @@ const githubRemoteURL = "git@github.com:cameronsjo/forgectl.git"
 
 // isGetURL matches `git remote get-url <name>`.
 func isGetURL(name string, args []string) bool {
+	args = gitenvtest.Strip(args)
 	return name == "git" && len(args) >= 2 && args[0] == "remote" && args[1] == "get-url"
 }
 
@@ -123,6 +125,7 @@ func TestClassify_NoSignal_BlockedAsActive(t *testing.T) {
 func TestPrune_RemoteDelete_VerifiesViaSingularEndpoint_NeverPlural(t *testing.T) {
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			switch {
 			case name == "git" && len(args) > 0 && args[0] == "push":
 				return "", nil
@@ -172,6 +175,7 @@ func TestPrune_RemoteDelete_VerifiesViaSingularEndpoint_NeverPlural(t *testing.T
 func TestPrune_RemoteDelete_StillExists_IsAFailure(t *testing.T) {
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			switch {
 			case name == "git" && len(args) > 0 && args[0] == "push":
 				return "", nil
@@ -218,6 +222,7 @@ func TestPrune_RemoteDelete_VerifiesOnTheOriginHost(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &exec.FakeRunner{
 				RunFunc: func(name string, args []string) (string, error) {
+					args = gitenvtest.Strip(args)
 					switch {
 					case name == "git" && len(args) > 0 && args[0] == "push":
 						return "", nil
@@ -370,6 +375,7 @@ func TestPrune_WorktreeRemovedBeforeLocalBranchDelete(t *testing.T) {
 		t.Fatalf("expected exactly 2 Runner calls (worktree remove, branch -D), got %d: %+v", len(fake.Calls), fake.Calls)
 	}
 	first, second := fake.Calls[0], fake.Calls[1]
+	first.Args, second.Args = gitenvtest.Strip(first.Args), gitenvtest.Strip(second.Args)
 	if first.Name != "git" || first.Args[0] != "worktree" || first.Args[1] != "remove" {
 		t.Errorf("call[0] = %+v, want `git worktree remove`", first)
 	}
@@ -393,6 +399,7 @@ func TestPrune_WorktreeRemovedBeforeLocalBranchDelete(t *testing.T) {
 func TestPrune_WorktreeRemoveFails_BranchDeleteNeverAttempted(t *testing.T) {
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			if name == "git" && len(args) > 0 && args[0] == "worktree" {
 				return "", errors.New("fatal: '/tmp/wt' contains modified or untracked files, use --force")
 			}
@@ -410,7 +417,7 @@ func TestPrune_WorktreeRemoveFails_BranchDeleteNeverAttempted(t *testing.T) {
 		t.Fatalf("expected a reported failure, got %+v", results)
 	}
 	for _, c := range fake.Calls {
-		if c.Name == "git" && len(c.Args) > 0 && c.Args[0] == "branch" {
+		if args := gitenvtest.Strip(c.Args); c.Name == "git" && len(args) > 0 && args[0] == "branch" {
 			t.Errorf("git branch must never run after a failed worktree remove, got call %+v", c)
 		}
 	}
@@ -445,6 +452,7 @@ func TestPrune_OpenPRBranch_NeverDeleted_ZeroRunnerCalls(t *testing.T) {
 func TestEnumerate_SquashMergedBranch_SafeToDelete(t *testing.T) {
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			switch {
 			case name == "git" && len(args) > 0 && args[0] == "for-each-ref" && contains(args, "refs/heads"):
 				return "main\t\t\nfeat/squashed\t\t\n", nil
@@ -522,6 +530,7 @@ func TestEnumerate_SquashMergedBranch_SafeToDelete(t *testing.T) {
 func TestRemoteBranches_ExcludesHeadSymref(t *testing.T) {
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			if name == "git" && len(args) > 0 && args[0] == "for-each-ref" {
 				return "refs/remotes/origin/HEAD\torigin\n" +
 					"refs/remotes/origin/main\torigin/main\n" +
@@ -551,6 +560,7 @@ func TestRemoteBranches_ExcludesHeadSymref(t *testing.T) {
 func TestEnumerate_GoneBranch_OmittedByDefault_SurfacedWithIncludeGone(t *testing.T) {
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			switch {
 			case name == "git" && len(args) > 0 && args[0] == "for-each-ref" && contains(args, "refs/heads"):
 				return "main\t\t\nfeat/deleted-upstream\torigin/feat/deleted-upstream\t[gone]\n", nil
@@ -626,6 +636,7 @@ func assertNoSubprocessEcho(t *testing.T, err error) {
 
 func TestPrune_RemoteDeleteFailure_DoesNotEchoGitStderr(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if name == "git" && len(args) > 0 && args[0] == "push" {
 			return "", subprocessFailure(name, args)
 		}
@@ -753,6 +764,7 @@ func TestPrune_ErrIsTerminalSafeByConstruction(t *testing.T) {
 	}{
 		{"worktree remove fails", PruneOptions{Local: true}, Info{Name: hostile, LocalExists: true, WorktreePath: wtPath},
 			func(name string, args []string) (string, error) {
+				args = gitenvtest.Strip(args)
 				if name == "git" && args[0] == "worktree" {
 					return "", subprocessFailure(name, args)
 				}
@@ -760,6 +772,7 @@ func TestPrune_ErrIsTerminalSafeByConstruction(t *testing.T) {
 			}},
 		{"branch -D fails", PruneOptions{Local: true}, Info{Name: hostile, LocalExists: true},
 			func(name string, args []string) (string, error) {
+				args = gitenvtest.Strip(args)
 				if name == "git" && args[0] == "branch" {
 					return "", subprocessFailure(name, args)
 				}
@@ -767,6 +780,7 @@ func TestPrune_ErrIsTerminalSafeByConstruction(t *testing.T) {
 			}},
 		{"push --delete fails", PruneOptions{RemoteName: "up\x1b[31m", Remote: true}, Info{Name: hostile, RemoteExists: true},
 			func(name string, args []string) (string, error) {
+				args = gitenvtest.Strip(args)
 				if name == "git" && args[0] == "push" {
 					return "", subprocessFailure(name, args)
 				}
@@ -829,6 +843,7 @@ func TestPrune_ErrIsTerminalSafeByConstruction(t *testing.T) {
 func TestPrune_RemoteDelete_VerifiesAgainstThePushURL(t *testing.T) {
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			switch {
 			case name == "git" && len(args) > 0 && args[0] == "push":
 				return "", nil
@@ -866,6 +881,7 @@ func TestPrune_RemoteDelete_VerifiesAgainstThePushURL(t *testing.T) {
 func TestPrune_RemoteDelete_SeveralPushURLsCannotVerify(t *testing.T) {
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			switch {
 			case isGetURL(name, args) && contains(args, "--all"):
 				return "git@github.com:a/tools.git\ngit@github.com:b/tools.git\n", nil

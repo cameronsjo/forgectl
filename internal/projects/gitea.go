@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -89,9 +90,7 @@ func giteaList(ctx context.Context, run interface {
 // cloneFromGitea clones a Gitea repo into dest over SSH (port 222 is baked into
 // the URL tea reports). HTTPS create/clone is irrelevant here — push and clone
 // both ride Apple's ssh transport.
-func cloneFromGitea(ctx context.Context, run interface {
-	Run(context.Context, string, ...string) (string, error)
-}, sshURL, dest string) error {
+func cloneFromGitea(ctx context.Context, run gitenv.Runner, sshURL, dest string) error {
 	if sshURL == "" {
 		slog.Error("Cannot clone over SSH: empty URL.")
 		return fmt.Errorf("cannot clone over SSH: empty URL")
@@ -102,7 +101,7 @@ func cloneFromGitea(ctx context.Context, run interface {
 	// MITM'd list source could smuggle `ext::sh -c …` into a clone. Disable those
 	// transports, and end options with `--` so a "-"-leading URL can't be read as
 	// a flag.
-	if _, err := run.Run(ctx, "git",
+	if _, err := gitenv.Run(ctx, run, gitenv.Transport,
 		"-c", "protocol.ext.allow=never",
 		"-c", "protocol.fd.allow=never",
 		"clone", "--", sshURL, dest); err != nil {
@@ -120,15 +119,13 @@ func cloneFromGitea(ctx context.Context, run interface {
 // transport guard and `--` hardening as cloneFromGitea: the URL is server-
 // controlled (it comes from the repo-list output), so it must not be able to
 // smuggle an `ext::sh -c …` command or a flag-leading value into the git argv.
-func cloneBareFromURL(ctx context.Context, run interface {
-	Run(context.Context, string, ...string) (string, error)
-}, sshURL, dest string) error {
+func cloneBareFromURL(ctx context.Context, run gitenv.Runner, sshURL, dest string) error {
 	if sshURL == "" {
 		slog.Error("Cannot bare-clone over SSH: empty URL.")
 		return fmt.Errorf("cannot bare-clone over SSH: empty URL")
 	}
 	slog.Debug("Preparing to bare-clone over SSH.", "dest", dest)
-	if _, err := run.Run(ctx, "git",
+	if _, err := gitenv.Run(ctx, run, gitenv.Transport,
 		"-c", "protocol.ext.allow=never",
 		"-c", "protocol.fd.allow=never",
 		"clone", "--bare", "--", sshURL, dest); err != nil {

@@ -33,6 +33,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -404,7 +405,7 @@ func containsGitComponent(target string) bool {
 // (Modified/Untracked/Ahead counts) this package doesn't need — clean only
 // ever needs a clean/dirty boolean.
 func gitDirty(ctx context.Context, run exec.Runner, dir string) (bool, error) {
-	out, err := run.Run(ctx, "git", "-C", dir, "status", "--porcelain")
+	out, err := gitenv.Run(ctx, run, gitenv.Local, "-C", dir, "status", "--porcelain")
 	if err != nil {
 		return false, fmt.Errorf("git status --porcelain in %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
