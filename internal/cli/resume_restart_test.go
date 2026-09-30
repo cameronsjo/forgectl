@@ -25,6 +25,8 @@ const (
 // whose actions are counted.
 type cliRestartEnv struct {
 	pid                              int
+	pane                             string
+	ancestors                        map[int]bool
 	relaunchErr                      error
 	stopped                          bool
 	terminated, relaunched, prepared int
@@ -52,8 +54,9 @@ func (f *cliRestartEnv) Screen(context.Context, string) (string, error) {
 	rule := strings.Repeat("─", 40)
 	return "out\n" + rule + "\n❯\n" + rule + "\nstatus", nil
 }
-func (f *cliRestartEnv) Prepare(string) error { f.prepared++; return nil }
-func (f *cliRestartEnv) Terminate(int) error  { f.terminated++; f.stopped = true; return nil }
+func (f *cliRestartEnv) Prepare(string) error                     { f.prepared++; return nil }
+func (f *cliRestartEnv) ClearInput(context.Context, string) error { return nil }
+func (f *cliRestartEnv) Terminate(int) error                      { f.terminated++; f.stopped = true; return nil }
 func (f *cliRestartEnv) Relaunch(context.Context, string, string) error {
 	f.relaunched++
 	return f.relaunchErr
@@ -67,7 +70,7 @@ func (f *cliRestartEnv) LiveSession(string) (resume.RegistryEntry, bool) {
 
 // restartFixture writes one idle outdated session (our own pid, so it is live)
 // and stubs every seam the verb reaches.
-func restartFixture(t *testing.T, env *cliRestartEnv) {
+func restartFixture(t *testing.T, env *cliRestartEnv) (storeDir string) {
 	t.Helper()
 	root := t.TempDir()
 	sessions := filepath.Join(root, ".claude", "sessions")
@@ -76,21 +79,32 @@ func restartFixture(t *testing.T, env *cliRestartEnv) {
 	}
 	self := os.Getpid()
 	env.pid = self
+	if env.pane == "" {
+		env.pane = restartPane
+	}
 	body := `{"pid":` + itoaCLI(self) + `,"sessionId":"` + restartSID + `","cwd":"/w/a","version":"2.1.99","status":"idle","procStart":"` + restartProcStart + `"}`
 	if err := os.WriteFile(filepath.Join(sessions, itoaCLI(self)+".json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	prevPaths, prevInstalled, prevEnv, prevBin, prevPane := resumePaths, installedVersionFn, restartEnvFn, relaunchBinaryFn, restartPaneLookup
+	prevPaths, prevInstalled, prevOverride := resumePaths, installedVersionFn, restartOverride
+	storeDir = filepath.Join(root, "store")
 	resumePaths = func() (resume.Paths, error) {
-		return resume.Paths{ClaudeHome: filepath.Join(root, ".claude"), StoreDir: filepath.Join(root, "store")}, nil
+		return resume.Paths{ClaudeHome: filepath.Join(root, ".claude"), StoreDir: storeDir}, nil
 	}
 	installedVersionFn = func(context.Context, module.Deps) (string, error) { return "2.1.100", nil }
-	restartEnvFn = func(resume.Paths, module.Deps, string) resume.RestartEnv { return env }
-	relaunchBinaryFn = func() (string, error) { return "/x/forgectl", nil }
-	restartPaneLookup = func() resume.PaneLookup { return func(int) string { return restartPane } }
+	restartOverride = func(r *resume.RestartRequest) {
+		r.Env = func(string) (resume.RestartEnv, error) { return env, nil }
+		r.Binary = func() (string, error) { return "/x/forgectl", nil }
+		r.Lookup = func() resume.PaneLookup { return func(int) string { return env.pane } }
+		r.Ancestors = func() map[int]bool { return env.ancestors }
+		// The fixture pid is this test process; the real signal handling
+		// would install process-wide handlers under `go test`.
+		r.HandleSignals = false
+	}
 	t.Cleanup(func() {
-		resumePaths, installedVersionFn, restartEnvFn, relaunchBinaryFn, restartPaneLookup = prevPaths, prevInstalled, prevEnv, prevBin, prevPane
+		resumePaths, installedVersionFn, restartOverride = prevPaths, prevInstalled, prevOverride
 	})
+	return storeDir
 }
 
 func runRestartCmd(t *testing.T, args ...string) (string, error) {
@@ -164,7 +178,7 @@ func TestResumeRestart_FailedRelaunchExitsOne(t *testing.T) {
 func TestResumeRestart_SkipsAreNotErrors(t *testing.T) {
 	env := &cliRestartEnv{}
 	restartFixture(t, env)
-	restartPaneLookup = func() resume.PaneLookup { return func(int) string { return "" } }
+	env.pane = ""
 	out, err := runRestartCmd(t, "--outdated", "--timeout", time.Minute.String())
 	if err != nil {
 		t.Fatalf("a pane-less session is a skip, not a failure: %v", err)
@@ -174,21 +188,18 @@ func TestResumeRestart_SkipsAreNotErrors(t *testing.T) {
 	}
 }
 
-func TestPickRelaunchBinary(t *testing.T) {
-	look := func(string) (string, error) { return "/opt/homebrew/bin/forgectl", nil }
-	noLook := func(string) (string, error) { return "", errors.New("not found") }
-
-	if got, err := pickRelaunchBinary("/usr/local/bin/forgectl", nil, noLook); err != nil || got != "/usr/local/bin/forgectl" {
-		t.Errorf("installed binary: %q, %v", got, err)
+// I-3: a run inside the session it would restart skips it — in the plan and
+// in a real run.
+func TestResumeRestart_NeverStopsItsOwnAncestor(t *testing.T) {
+	env := &cliRestartEnv{}
+	restartFixture(t, env)
+	env.ancestors = map[int]bool{env.pid: true}
+	out, err := runRestartCmd(t, "--outdated", "--dry-run")
+	if err != nil || !strings.HasPrefix(out, "skip ") || !strings.Contains(out, "this run is inside it") {
+		t.Fatalf("dry-run: err=%v out=%q", err, out)
 	}
-	goRun := "/var/folders/x/T/go-build123/b001/exe/forgectl"
-	if got, err := pickRelaunchBinary(goRun, nil, look); err != nil || got != "/opt/homebrew/bin/forgectl" {
-		t.Errorf("go run build: %q, %v; want the PATH forgectl, since the temp binary is deleted on exit", got, err)
-	}
-	if _, err := pickRelaunchBinary(goRun, nil, noLook); err == nil {
-		t.Error("go run build with nothing on PATH: accepted")
-	}
-	if got, err := pickRelaunchBinary("", errors.New("unsupported"), look); err != nil || got != "/opt/homebrew/bin/forgectl" {
-		t.Errorf("os.Executable failure: %q, %v", got, err)
+	out, err = runRestartCmd(t, "--outdated")
+	if err != nil || env.terminated != 0 || !strings.Contains(out, "this run is inside it") {
+		t.Fatalf("run: err=%v terminated=%d out=%q", err, env.terminated, out)
 	}
 }

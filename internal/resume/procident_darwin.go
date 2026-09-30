@@ -28,3 +28,12 @@ func readProcessIdentity(pid int) (ProcIdentity, error) {
 	tv := kp.Proc.P_starttime
 	return ProcIdentity{ExecPath: execPath, Start: time.Unix(tv.Sec, int64(tv.Usec)*1000).UTC()}, nil
 }
+
+// parentPid reads a process's parent from kern.proc.pid.
+func parentPid(pid int) (int, error) {
+	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil {
+		return 0, err
+	}
+	return int(kp.Eproc.Ppid), nil
+}

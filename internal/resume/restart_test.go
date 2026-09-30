@@ -2,8 +2,10 @@ package resume
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -182,7 +184,8 @@ func TestEvaluate(t *testing.T) {
 		{"permission prompt", func(_ *OutdatedSession, o *Observation) { o.Entry.Status = "waiting" }, NotYet, `"waiting"`},
 
 		// Check 3: the pane. Every failure refuses.
-		{"pane vanished", func(_ *OutdatedSession, o *Observation) { o.PaneErr = errors.New("pane_not_found") }, Refused, "cannot show pane"},
+		{"pane vanished", func(_ *OutdatedSession, o *Observation) { o.PaneErr = fmt.Errorf("pane w7P:p1: %w", ErrPaneGone) }, Refused, "no longer exists"},
+		{"herdr not answering", func(_ *OutdatedSession, o *Observation) { o.PaneErr = errors.New("connection refused") }, NotYet, "retrying"},
 		{"pane labelled with another session", func(_ *OutdatedSession, o *Observation) { o.Pane.AgentSession = "ffff0000" }, Refused, "different session"},
 		{"pane runs another agent", func(_ *OutdatedSession, o *Observation) { o.Pane.Agent = "codex" }, Refused, "different session"},
 		{"pid not the pane's foreground (nested)", func(_ *OutdatedSession, o *Observation) { o.Pane.ForegroundPIDs = []int{12345} }, Refused, "not pane"},
@@ -305,6 +308,7 @@ func TestReadEntryAndLiveSession(t *testing.T) {
 	}
 	write("100.json", `{"pid":100,"sessionId":"abcd","status":"idle","procStart":"`+testProcStart+`"}`)
 	write("200.json", `{"pid":200,"sessionId":"-c","status":"idle"}`)
+	write("400.json", `{"pid":100,"sessionId":"abcd","status":"idle"}`) // body names another pid
 	prev := pidAlive
 	pidAlive = func(pid int) bool { return pid == 100 }
 	t.Cleanup(func() { pidAlive = prev })
@@ -313,7 +317,7 @@ func TestReadEntryAndLiveSession(t *testing.T) {
 	if !ok || e.SessionID != "abcd" || e.ProcStart != testProcStart || !e.Live {
 		t.Fatalf("ReadEntry(100) = %+v, %v", e, ok)
 	}
-	for _, pid := range []int{200, 300, 0, -1} {
+	for _, pid := range []int{200, 300, 400, 0, -1} {
 		if _, ok := ReadEntry(p, pid); ok {
 			t.Errorf("ReadEntry(%d) found an entry (invalid id, missing file, or bad pid)", pid)
 		}
@@ -332,12 +336,88 @@ func TestReadEntryAndLiveSession(t *testing.T) {
 func TestReadProcessIdentity_ReadsThisProcess(t *testing.T) {
 	id, err := readProcessIdentity(os.Getpid())
 	if err != nil {
-		t.Skipf("platform cannot read process identity here: %v", err)
+		// Only a platform with no reader may skip; on the two that have one, a
+		// failure is a regression, not an environment quirk.
+		if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+			t.Skipf("no process identity reader on %s: %v", runtime.GOOS, err)
+		}
+		t.Fatalf("readProcessIdentity(self): %v", err)
 	}
 	if !filepath.IsAbs(id.ExecPath) || !strings.HasSuffix(id.ExecPath, filepath.Base(os.Args[0])) {
 		t.Errorf("exec path = %q, want this test binary (%s)", id.ExecPath, os.Args[0])
 	}
 	if age := time.Since(id.Start); age < 0 || age > time.Hour {
 		t.Errorf("start time %v is %v ago; want within this test run", id.Start, age)
+	}
+}
+
+func TestSkipAncestors(t *testing.T) {
+	inside := testSession()
+	other := testSession()
+	other.SessionID, other.Pid = "bbbb", 4242
+	plan := SkipAncestors(PlanRestart([]OutdatedSession{inside, other}, nil), map[int]bool{testPid: true, 1: true})
+	if plan[0].Action != ActionSkip || !strings.Contains(plan[0].Reason, "this run is inside it") || !strings.Contains(plan[0].Reason, ManualResume(testSID)) {
+		t.Errorf("ancestor session = %+v; want a skip naming the by-hand command", plan[0])
+	}
+	if plan[1].Action != ActionRestart {
+		t.Errorf("unrelated session = %+v; want it still planned", plan[1])
+	}
+}
+
+func TestAncestorsOf(t *testing.T) {
+	parents := map[int]int{500: 400, 400: 300, 300: 1}
+	got := ancestorsOf(500, func(pid int) (int, error) { return parents[pid], nil })
+	if len(got) != 3 || !got[500] || !got[400] || !got[300] || got[1] {
+		t.Errorf("chain = %v; want 500, 400, 300 and not init", got)
+	}
+	cycle := ancestorsOf(10, func(pid int) (int, error) { return map[int]int{10: 11, 11: 10}[pid], nil })
+	if len(cycle) != 2 {
+		t.Errorf("cycle = %v; the walk must stop on a repeat", cycle)
+	}
+	partial := ancestorsOf(10, func(int) (int, error) { return 0, errors.New("EPERM") })
+	if len(partial) != 1 || !partial[10] {
+		t.Errorf("read failure = %v; want the pids found so far", partial)
+	}
+	if live := AncestorPids(); !live[os.Getppid()] {
+		t.Errorf("AncestorPids() = %v; want it to hold our parent %d", live, os.Getppid())
+	}
+}
+
+func TestLockRestart_SecondRunIsRefused(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("restart is unix-only")
+	}
+	dir := filepath.Join(t.TempDir(), "store")
+	release, err := lockRestart(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockRestart(dir); !errors.Is(err, ErrRestartBusy) {
+		t.Fatalf("second lock = %v; want ErrRestartBusy", err)
+	}
+	release()
+	again, err := lockRestart(dir)
+	if err != nil {
+		t.Fatalf("lock after release: %v", err)
+	}
+	again()
+}
+
+func TestPickRelaunchBinary(t *testing.T) {
+	look := func(string) (string, error) { return "/opt/homebrew/bin/forgectl", nil }
+	noLook := func(string) (string, error) { return "", errors.New("not found") }
+
+	if got, err := pickRelaunchBinary("/usr/local/bin/forgectl", nil, noLook); err != nil || got != "/usr/local/bin/forgectl" {
+		t.Errorf("installed binary: %q, %v", got, err)
+	}
+	goRun := "/var/folders/x/T/go-build123/b001/exe/forgectl"
+	if got, err := pickRelaunchBinary(goRun, nil, look); err != nil || got != "/opt/homebrew/bin/forgectl" {
+		t.Errorf("go run build: %q, %v; want the PATH forgectl, since the temp binary is deleted on exit", got, err)
+	}
+	if _, err := pickRelaunchBinary(goRun, nil, noLook); err == nil {
+		t.Error("go run build with nothing on PATH: accepted")
+	}
+	if got, err := pickRelaunchBinary("", errors.New("unsupported"), look); err != nil || got != "/opt/homebrew/bin/forgectl" {
+		t.Errorf("os.Executable failure: %q, %v", got, err)
 	}
 }

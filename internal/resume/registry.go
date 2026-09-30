@@ -62,7 +62,8 @@ func ReadEntry(p Paths, pid int) (RegistryEntry, bool) {
 		return RegistryEntry{}, false
 	}
 	var e RegistryEntry
-	if json.Unmarshal(data, &e) != nil || !validSessionID(e.SessionID) {
+	// A body naming another pid than its file name is not this pid's entry.
+	if json.Unmarshal(data, &e) != nil || !validSessionID(e.SessionID) || e.Pid != pid {
 		return RegistryEntry{}, false
 	}
 	e.Live = pidAlive(e.Pid)

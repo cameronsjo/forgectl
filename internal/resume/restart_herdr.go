@@ -5,17 +5,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/surface"
 )
 
 // processIdentity is the platform seam for ProcIdentity (procident_*.go).
 var processIdentity = readProcessIdentity
 
 // SystemRestartEnv is the production RestartEnv: the real registry, the
-// kernel, SIGTERM, and herdr over its CLI.
+// kernel, SIGTERM, and herdr over its CLI. Build it with NewSystemRestartEnv;
+// the zero value has no relaunch command and refuses in Prepare, before any
+// signal.
 //
 // It drives herdr directly rather than through internal/surface's herdr
 // adapter, and it types `forgectl resume <id>`, not a harness command line.
@@ -23,19 +27,50 @@ var processIdentity = readProcessIdentity
 // here herdr sees only forgectl's own resume verb, which resolves the launch
 // profile and argv itself, in the pane.
 type SystemRestartEnv struct {
-	Paths  Paths
-	Runner exec.Runner
-	// RelaunchLine renders the shell line typed into the pane for a session id
-	// that has already passed validSessionID. `herdr pane run` joins its
-	// arguments with spaces and types them into the pane's shell (measured on
-	// herdr 0.9.1), so the line must arrive fully shell-quoted.
-	RelaunchLine func(sessionID string) (string, error)
+	paths  Paths
+	runner exec.Runner
+	// forgectl is the absolute path typed into each pane.
+	forgectl string
 }
 
 var _ RestartEnv = SystemRestartEnv{}
 
+// NewSystemRestartEnv builds the production env. It refuses a forgectl path
+// that is not absolute or cannot be shell-quoted identically in every shell a
+// pane might run, so a bad path fails here, never after a session is stopped.
+func NewSystemRestartEnv(paths Paths, runner exec.Runner, forgectl string) (SystemRestartEnv, error) {
+	if runner == nil {
+		return SystemRestartEnv{}, errors.New("no command runner")
+	}
+	e := SystemRestartEnv{paths: paths, runner: runner, forgectl: forgectl}
+	// A syntactically valid placeholder id: the id itself is hex, so only the
+	// path can make the line unrenderable.
+	if _, err := e.relaunchLine("0"); err != nil {
+		return SystemRestartEnv{}, err
+	}
+	return e, nil
+}
+
+// relaunchLine renders the shell line typed into a pane. `herdr pane run`
+// joins its arguments with spaces and types them into the pane's shell
+// (measured on herdr 0.9.1), so the line must arrive fully quoted — and the id
+// is disk-sourced, so it is validated here, before it reaches any line.
+func (e SystemRestartEnv) relaunchLine(sessionID string) (string, error) {
+	if !validSessionID(sessionID) {
+		return "", errors.New("refusing an invalid session id")
+	}
+	if e.forgectl == "" || !filepath.IsAbs(e.forgectl) {
+		return "", errors.New("no absolute forgectl path to relaunch with")
+	}
+	line, err := surface.QuoteCommand([]string{e.forgectl, "resume", sessionID})
+	if err != nil {
+		return "", fmt.Errorf("render the relaunch line: %w", err)
+	}
+	return line, nil
+}
+
 // ReadEntry implements RestartEnv.
-func (e SystemRestartEnv) ReadEntry(pid int) (RegistryEntry, bool) { return ReadEntry(e.Paths, pid) }
+func (e SystemRestartEnv) ReadEntry(pid int) (RegistryEntry, bool) { return ReadEntry(e.paths, pid) }
 
 // Alive implements RestartEnv.
 func (e SystemRestartEnv) Alive(pid int) bool { return pidAlive(pid) }
@@ -48,18 +83,25 @@ func (e SystemRestartEnv) Terminate(pid int) error { return terminateProcess(pid
 
 // LiveSession implements RestartEnv.
 func (e SystemRestartEnv) LiveSession(sessionID string) (RegistryEntry, bool) {
-	return LiveSession(e.Paths, sessionID)
+	return LiveSession(e.paths, sessionID)
 }
 
-// Prepare implements RestartEnv. It runs the same capture the Stop hook runs
-// at every turn end, so the resumed session gets its /rename name and task
-// bodies back, then confirms the store now holds the session: a session that
-// arrived through /clear can be absent from history.jsonl, and once its
-// registry file is gone the store is the only place `forgectl resume` could
-// find it.
+// Prepare implements RestartEnv. It is the last step allowed to refuse, so
+// everything the relaunch needs is settled here, before the signal: the
+// relaunch line renders, and the session is findable by `forgectl resume`
+// once its registry file is gone.
+//
+// It runs the same capture the Stop hook runs at every turn end, so the
+// resumed session gets its /rename name and task bodies back, then confirms
+// the store holds the session: a session that arrived through /clear can be
+// absent from history.jsonl, and once its registry file is gone the store is
+// the only place `forgectl resume` could find it.
 func (e SystemRestartEnv) Prepare(sessionID string) error {
-	res := Snapshot(e.Paths, time.Now())
-	if _, ok := Load(e.Paths.StoreDir, sessionID); !ok {
+	if _, err := e.relaunchLine(sessionID); err != nil {
+		return err
+	}
+	res := Snapshot(e.paths, time.Now())
+	if _, ok := Load(e.paths.StoreDir, sessionID); !ok {
 		if len(res.Errs) > 0 {
 			return fmt.Errorf("snapshot store has no record for it: %w", errors.Join(res.Errs...))
 		}
@@ -73,16 +115,22 @@ func (e SystemRestartEnv) Pane(ctx context.Context, pane string) (PaneState, err
 	if err := checkPaneArg(pane); err != nil {
 		return PaneState{}, err
 	}
-	out, err := e.Runner.Run(ctx, "herdr", "pane", "get", pane)
+	out, err := e.runner.Run(ctx, "herdr", "pane", "get", pane)
 	if err != nil {
+		if paneNotFound(err) {
+			return PaneState{}, fmt.Errorf("pane %s: %w", pane, ErrPaneGone)
+		}
 		return PaneState{}, fmt.Errorf("herdr pane get: %w", err)
 	}
 	st, err := parsePaneGet(out)
 	if err != nil {
 		return PaneState{}, err
 	}
-	out, err = e.Runner.Run(ctx, "herdr", "pane", "process-info", "--pane", pane)
+	out, err = e.runner.Run(ctx, "herdr", "pane", "process-info", "--pane", pane)
 	if err != nil {
+		if paneNotFound(err) {
+			return PaneState{}, fmt.Errorf("pane %s: %w", pane, ErrPaneGone)
+		}
 		return PaneState{}, fmt.Errorf("herdr pane process-info: %w", err)
 	}
 	if err := parseProcessInfo(out, &st); err != nil {
@@ -97,7 +145,7 @@ func (e SystemRestartEnv) Screen(ctx context.Context, pane string) (string, erro
 	if err := checkPaneArg(pane); err != nil {
 		return "", err
 	}
-	out, err := e.Runner.Run(ctx, "herdr", "pane", "read", pane, "--source", "visible")
+	out, err := e.runner.Run(ctx, "herdr", "pane", "read", pane, "--source", "visible")
 	if err != nil {
 		// Dropped whole rather than wrapped: a *CommandError keeps stdout on
 		// its Output field, and stdout here is screen text.
@@ -106,26 +154,50 @@ func (e SystemRestartEnv) Screen(ctx context.Context, pane string) (string, erro
 	return out, nil
 }
 
+// ClearInput implements RestartEnv. Ctrl-U kills the whole line in zsh's
+// line editor and is the tty's line-kill character in cooked mode, so it also
+// discards typeahead the shell has not read yet (both measured on herdr 0.9.1
+// with zsh). bash and fish bind it to kill-to-start, which is the whole line
+// with the cursor at its end.
+func (e SystemRestartEnv) ClearInput(ctx context.Context, pane string) error {
+	if err := checkPaneArg(pane); err != nil {
+		return err
+	}
+	if _, err := e.runner.Run(ctx, "herdr", "pane", "send-keys", pane, "ctrl+u"); err != nil {
+		return fmt.Errorf("herdr pane send-keys: %w", err)
+	}
+	return nil
+}
+
 // Relaunch implements RestartEnv.
 func (e SystemRestartEnv) Relaunch(ctx context.Context, pane, sessionID string) error {
 	if err := checkPaneArg(pane); err != nil {
 		return err
 	}
-	// The id is disk-sourced; it reaches a shell line only after this.
-	if !validSessionID(sessionID) {
-		return errors.New("refusing an invalid session id")
-	}
-	if e.RelaunchLine == nil {
-		return errors.New("no relaunch command configured")
-	}
-	line, err := e.RelaunchLine(sessionID)
+	line, err := e.relaunchLine(sessionID)
 	if err != nil {
 		return err
 	}
-	if _, err := e.Runner.Run(ctx, "herdr", "pane", "run", pane, line); err != nil {
+	if _, err := e.runner.Run(ctx, "herdr", "pane", "run", pane, line); err != nil {
 		return fmt.Errorf("herdr pane run: %w", err)
 	}
 	return nil
+}
+
+// paneNotFound matches herdr's structured refusal code — the code, never the
+// prose — in a failed command's stderr:
+// {"error":{"code":"pane_not_found",...}} (measured on herdr 0.9.1).
+func paneNotFound(err error) bool {
+	var ce *exec.CommandError
+	if !errors.As(err, &ce) {
+		return false
+	}
+	var reply struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	return json.Unmarshal([]byte(strings.TrimSpace(ce.Stderr)), &reply) == nil && reply.Error.Code == "pane_not_found"
 }
 
 // checkPaneArg refuses a pane id that is not a single, non-flag operand. The

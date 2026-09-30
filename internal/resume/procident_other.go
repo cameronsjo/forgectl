@@ -50,21 +50,43 @@ func readProcessIdentity(pid int) (ProcIdentity, error) {
 	return ProcIdentity{ExecPath: execPath, Start: start.UTC()}, nil
 }
 
-// statStartTicks returns field 22 (starttime) of a /proc/<pid>/stat line. The
+// parentPid reads field 4 (ppid) of /proc/<pid>/stat.
+func parentPid(pid int) (int, error) {
+	stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat") // #nosec G304 -- fixed /proc path, pid is an int
+	if err != nil {
+		return 0, err
+	}
+	f, err := statField(string(stat), 4)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(f)
+}
+
+// statStartTicks returns field 22 (starttime) of a /proc/<pid>/stat line.
+func statStartTicks(stat string) (int64, error) {
+	f, err := statField(stat, 22)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseInt(f, 10, 64)
+}
+
+// statField returns 1-based field n (n >= 3) of a /proc/<pid>/stat line. The
 // comm field is parenthesised and may itself hold spaces or parentheses, so
 // fields are counted from after the LAST ')'.
-func statStartTicks(stat string) (int64, error) {
+func statField(stat string, n int) (string, error) {
 	i := strings.LastIndexByte(stat, ')')
 	if i < 0 {
-		return 0, errors.New("proc stat: no comm field")
+		return "", errors.New("proc stat: no comm field")
 	}
 	fields := strings.Fields(stat[i+1:])
-	// fields[0] is field 3 (state), so field 22 is fields[19].
-	const startIdx = 22 - 3
-	if len(fields) <= startIdx {
-		return 0, fmt.Errorf("proc stat: %d fields after comm, want more than %d", len(fields), startIdx)
+	// fields[0] is field 3 (state).
+	idx := n - 3
+	if idx < 0 || len(fields) <= idx {
+		return "", fmt.Errorf("proc stat: %d fields after comm, want field %d", len(fields), n)
 	}
-	return strconv.ParseInt(fields[startIdx], 10, 64)
+	return fields[idx], nil
 }
 
 // bootTime returns the btime line of /proc/stat.

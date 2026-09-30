@@ -25,6 +25,10 @@ type RestartEnv interface {
 	Prepare(sessionID string) error
 	// Terminate sends SIGTERM.
 	Terminate(pid int) error
+	// ClearInput kills whatever is on the pane's shell input line — keys the
+	// operator typed after the stop, or bytes claude left unread in the tty
+	// queue — so they cannot merge into the relaunch line.
+	ClearInput(ctx context.Context, pane string) error
 	// Relaunch types `forgectl resume <id>` into a pane and presses Enter.
 	Relaunch(ctx context.Context, pane, sessionID string) error
 	// LiveSession returns the live registry entry holding a session id.
@@ -166,6 +170,7 @@ func RunRestart(ctx context.Context, env RestartEnv, plan []RestartPlanItem, opt
 	}
 
 	waiting := map[string]string{} // session id -> last reported wait reason
+	prepared := map[string]bool{}  // session id -> Prepare already succeeded
 	deadline := opts.Now().Add(opts.Timeout)
 	for len(pending) > 0 {
 		var still []RestartPlanItem
@@ -174,7 +179,7 @@ func RunRestart(ctx context.Context, env RestartEnv, plan []RestartPlanItem, opt
 				still = append(still, item)
 				continue
 			}
-			ev, done := attemptRestart(ctx, env, item.Session, opts)
+			ev, done := attemptRestart(ctx, env, item.Session, opts, prepared)
 			if done {
 				finish(ev)
 				continue
@@ -251,38 +256,59 @@ func Preview(ctx context.Context, env RestartEnv, s OutdatedSession) Check {
 	return Evaluate(s, observe(ctx, env, s))
 }
 
+// reasonCancelled is the wait reason when a cancel lands during a check. The
+// check is abandoned rather than judged: a herdr call cut short by the cancel
+// fails, and reading that failure as "pane closed" would report a false skip.
+const reasonCancelled = "cancelled during a check"
+
 // attemptRestart evaluates a session and, when it is ready, restarts it. It
 // reports done=false only for a session that should be checked again.
-func attemptRestart(ctx context.Context, env RestartEnv, s OutdatedSession, opts RestartOptions) (RestartEvent, bool) {
+func attemptRestart(ctx context.Context, env RestartEnv, s OutdatedSession, opts RestartOptions, prepared map[string]bool) (RestartEvent, bool) {
+	waitFor := func(reason string) (RestartEvent, bool) {
+		return RestartEvent{SessionID: s.SessionID, State: StateWaiting, Detail: reason}, false
+	}
 	verdict := func(c Check) (RestartEvent, bool) {
 		if c.Readiness == Refused {
 			return RestartEvent{SessionID: s.SessionID, State: StateSkipped, Detail: c.Reason, Manual: ManualResume(s.SessionID)}, true
 		}
-		return RestartEvent{SessionID: s.SessionID, State: StateWaiting, Detail: c.Reason}, false
+		return waitFor(c.Reason)
 	}
-	if c := Evaluate(s, observe(ctx, env, s)); c.Readiness != Ready {
+	obs := observe(ctx, env, s)
+	if ctx.Err() != nil {
+		return waitFor(reasonCancelled)
+	}
+	if c := Evaluate(s, obs); c.Readiness != Ready {
 		return verdict(c)
 	}
-	// Prepared only once the session first reads ready, so a long wait does not
-	// snapshot every poll; then checked again, so the last check is the one
-	// immediately before the signal.
-	if err := env.Prepare(s.SessionID); err != nil {
-		return RestartEvent{
-			SessionID: s.SessionID, State: StateSkipped,
-			Detail: fmt.Sprintf("could not record it for `forgectl resume` to find after it exits (%v)", err),
-			Manual: ManualResume(s.SessionID),
-		}, true
+	// Prepared once per session, when it first reads ready, so a long wait
+	// does not snapshot every poll; then checked again, so the last check is
+	// the one immediately before the signal.
+	if !prepared[s.SessionID] {
+		if err := env.Prepare(s.SessionID); err != nil {
+			return RestartEvent{
+				SessionID: s.SessionID, State: StateSkipped,
+				Detail: fmt.Sprintf("not stopped: could not prepare its relaunch (%v)", err),
+				Manual: ManualResume(s.SessionID),
+			}, true
+		}
+		prepared[s.SessionID] = true
 	}
-	if c := Evaluate(s, observe(ctx, env, s)); c.Readiness != Ready {
+	obs = observe(ctx, env, s)
+	if ctx.Err() != nil {
+		return waitFor(reasonCancelled)
+	}
+	if c := Evaluate(s, obs); c.Readiness != Ready {
 		return verdict(c)
 	}
-	return restartNow(ctx, env, s, opts), true
+	return restartNow(ctx, env, s, obs.Pane.ShellPID, opts), true
 }
 
 // restartNow stops a session that just passed the predicate and resumes it in
-// its pane. It never relaunches unless the old process is confirmed gone: two
-// processes on one transcript corrupt it.
-func restartNow(ctx context.Context, env RestartEnv, s OutdatedSession, opts RestartOptions) RestartEvent {
+// its pane. It never relaunches unless the old process is confirmed gone and
+// no other process has taken the session: two processes on one transcript
+// corrupt it. shellPID is the pane's shell as the last pre-stop check saw it;
+// the relaunch goes only to a pane still owned by that shell.
+func restartNow(ctx context.Context, env RestartEnv, s OutdatedSession, shellPID int, opts RestartOptions) RestartEvent {
 	opts.Progress(RestartEvent{SessionID: s.SessionID, State: StateRestarting, Detail: fmt.Sprintf("stopping pid %d in pane %s", s.Pid, s.Pane)})
 	manual := ManualResume(s.SessionID)
 	fail := func(format string, a ...any) RestartEvent {
@@ -296,30 +322,58 @@ func restartNow(ctx context.Context, env RestartEnv, s OutdatedSession, opts Res
 	if err := env.Terminate(s.Pid); err != nil {
 		return fail("could not signal pid %d (%v); not relaunched", s.Pid, err)
 	}
+	var exited bool
 	stopped := waitUntil(opts, opts.StopWait, func() bool {
 		if env.Alive(s.Pid) {
 			return false
 		}
+		exited = true
 		e, ok := env.ReadEntry(s.Pid)
 		return !ok || e.SessionID != s.SessionID
 	})
 	if !stopped {
-		return fail("sent SIGTERM, but pid %d did not exit and clear its registry file within %s; not relaunched — check pane %s, and once it has exited resume it by hand", s.Pid, opts.StopWait, s.Pane)
+		if exited {
+			// Claude Code removes its registry file on a clean exit; one that
+			// lingers means the exit was not the one measured, so the state is
+			// not known well enough to relaunch into.
+			return fail("pid %d exited but left its registry file; not relaunched — check pane %s, then resume it by hand", s.Pid, s.Pane)
+		}
+		return fail("sent SIGTERM, but pid %d did not exit within %s; not relaunched — check pane %s, and once it has exited resume it by hand", s.Pid, opts.StopWait, s.Pane)
 	}
 
+	// paneReady: the pane still exists, is owned by the same shell as before
+	// the stop (a closed pane's id could be reused by another), and that shell
+	// holds the foreground.
 	var paneErr error
-	ready := waitUntil(opts, opts.ReadyWait, func() bool {
+	paneReady := func() bool {
 		st, err := env.Pane(ctx, s.Pane)
 		paneErr = err
-		return err == nil && st.ShellForeground()
-	})
-	if !ready {
+		return err == nil && st.ShellPID == shellPID && st.ShellForeground()
+	}
+	if !waitUntil(opts, opts.ReadyWait, paneReady) {
 		if paneErr != nil {
 			return fail("stopped, but herdr can no longer show pane %s; not relaunched", s.Pane)
 		}
-		return fail("stopped, but pane %s's shell did not take the foreground back within %s; not relaunched", s.Pane, opts.ReadyWait)
+		return fail("stopped, but pane %s's own shell did not take the foreground back within %s; not relaunched", s.Pane, opts.ReadyWait)
 	}
 
+	// Someone else may have resumed it in the gap — another run, or the
+	// operator in another pane. A second process would corrupt the transcript.
+	if e, ok := env.LiveSession(s.SessionID); ok {
+		return RestartEvent{
+			SessionID: s.SessionID, State: StateFailed,
+			Detail: fmt.Sprintf("stopped, but it is already running again as pid %d (resumed elsewhere during the gap); not relaunched in pane %s", e.Pid, s.Pane),
+		}
+	}
+
+	if err := env.ClearInput(ctx, s.Pane); err != nil {
+		return fail("stopped, but clearing pane %s's input line failed (%v); not relaunched", s.Pane, err)
+	}
+	// The line-kill itself cannot start a command, but the operator can press
+	// Enter at any moment; check the shell still holds the foreground last.
+	if !paneReady() {
+		return fail("stopped, but pane %s's shell lost the foreground just before the relaunch (someone started a command?); not relaunched", s.Pane)
+	}
 	if err := env.Relaunch(ctx, s.Pane, s.SessionID); err != nil {
 		return fail("stopped, but sending `%s` to pane %s failed (%v)", manual, s.Pane, err)
 	}

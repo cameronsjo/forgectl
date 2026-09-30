@@ -1,6 +1,7 @@
 package resume
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -31,6 +32,11 @@ import (
 // Failing 2 or 4 is temporary, so the session waits. Failing 1 or 3 means the
 // thing this run would signal is not the thing it selected, so it is refused
 // and reported with the command to run by hand.
+
+// ErrPaneGone reports that herdr has no pane by the id the session claims
+// (herdr's pane_not_found). It is the one pane error that refuses a session;
+// every other herdr failure waits.
+var ErrPaneGone = errors.New("herdr pane not found")
 
 // ProcIdentity is what the kernel says about a pid, as opposed to what a
 // registry file says about it.
@@ -259,8 +265,12 @@ func checkIdentity(want OutdatedSession, obs Observation) (Check, bool) {
 // parent's pane.
 func checkPane(want OutdatedSession, obs Observation) (Check, bool) {
 	switch {
+	case errors.Is(obs.PaneErr, ErrPaneGone):
+		return Check{Refused, fmt.Sprintf("pane %s no longer exists", want.Pane)}, false
 	case obs.PaneErr != nil:
-		return Check{Refused, fmt.Sprintf("herdr cannot show pane %s (closed?)", want.Pane)}, false
+		// Any other failure (herdr not answering, a timeout) is not evidence
+		// about the pane, so it waits rather than refusing for good.
+		return Check{NotYet, fmt.Sprintf("herdr could not show pane %s; retrying", want.Pane)}, false
 	case obs.Pane.Agent != "claude" || obs.Pane.AgentSession != want.SessionID:
 		return Check{Refused, fmt.Sprintf("pane %s's herdr label names a different session (nested session?)", want.Pane)}, false
 	case !slices.Contains(obs.Pane.ForegroundPIDs, want.Pid):

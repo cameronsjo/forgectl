@@ -27,3 +27,14 @@ func TestBootTime(t *testing.T) {
 		t.Error("no btime line: accepted")
 	}
 }
+
+func TestStatField_Ppid(t *testing.T) {
+	stat := "4242 (my (odd) proc) S 17 4242 4242 0 -1"
+	got, err := statField(stat, 4)
+	if err != nil || got != "17" {
+		t.Fatalf("statField(4) = %q, %v; want the ppid 17", got, err)
+	}
+	if _, err := statField(stat, 2); err == nil {
+		t.Error("a field before state: accepted")
+	}
+}
