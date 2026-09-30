@@ -280,15 +280,15 @@ func Restore(dir string, tasks []Task) (RestoreResult, error) {
 			continue
 		}
 		if err != nil {
-			return res, fmt.Errorf("restore task %s: %w", t.ID, err)
+			return res, fmt.Errorf("restore task %s: %w", t.ID, termsafe.Error(err))
 		}
 		_, werr := f.Write(body)
 		cerr := f.Close()
 		if werr != nil {
-			return res, fmt.Errorf("restore task %s: %w", t.ID, werr)
+			return res, fmt.Errorf("restore task %s: %w", t.ID, termsafe.Error(werr))
 		}
 		if cerr != nil {
-			return res, fmt.Errorf("restore task %s: %w", t.ID, cerr)
+			return res, fmt.Errorf("restore task %s: %w", t.ID, termsafe.Error(cerr))
 		}
 		res.Written++
 	}
