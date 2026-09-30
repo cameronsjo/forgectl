@@ -73,6 +73,8 @@ Before the scratch directory, the atomic write put its temp file directly beside
 
 A caller tells drift from a `check_failed` at exit `1` by where the output went: drift puts its verdict on stdout, and a failure leaves stdout empty and puts its object on stderr. This is the repo-wide `--json` stderr contract ([json-contract.md](../json-contract.md)) with `env check`'s own `code` strings.
 
+One `check_failed` exits `2`: a `config.toml` that does not parse or cannot be read stops `env check` before it starts, as it stops every verb that reads config, and that refusal keeps its exit `2` under `--json`.
+
 **Blessed value producers** for `env set`, non-inline patterns first:
 
 ```sh
