@@ -33,10 +33,10 @@ func runEnvCheckThroughFang(t *testing.T, args ...string) (stdout, stderr string
 	argv := append([]string{"env"}, args...)
 	root.SetArgs(argv)
 	// A flag-parse failure leaves --json unparsed, so env check reads the
-	// raw process arguments through the docsOSArgs seam; point it at argv.
-	prev := docsOSArgs
-	docsOSArgs = func() []string { return argv }
-	t.Cleanup(func() { docsOSArgs = prev })
+	// raw process arguments through the jsonOSArgs seam; point it at argv.
+	prev := jsonOSArgs
+	jsonOSArgs = func() []string { return argv }
+	t.Cleanup(func() { jsonOSArgs = prev })
 	err = fang.Execute(context.Background(), root, fangOptions("0.0.0", "deadbeef", theme.Default())...)
 	return out.String(), errOut.String(), err
 }

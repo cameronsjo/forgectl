@@ -43,15 +43,29 @@ func WithExitCode(err error, code int) error {
 // gets. main calls this once, on whatever Execute returns.
 func ExitCode(err error) int {
 	var coded *codedError
-	if errors.As(err, &coded) {
+	if chainAs(err, &coded) {
 		return coded.ExitCode()
 	}
 	// silentCodedError (execute.go) opts in to a typed exit code the same
 	// way, but is a distinct concrete type so termsafeErrorHandler can
 	// pattern-match it separately to render nothing.
 	var silent *silentCodedError
-	if errors.As(err, &silent) {
+	if chainAs(err, &silent) {
 		return silent.ExitCode()
 	}
 	return 1
+}
+
+// chainAs is errors.As that treats a panic during the walk as "not found".
+// A chain can hold a typed-nil error whose Unwrap dereferences its receiver —
+// fmt.Errorf("…: %w", (*os.PathError)(nil)) formats fine (fmt recovers inside
+// Error) but errors.As then calls (*os.PathError)(nil).Unwrap and panics.
+// Resolving an exit code must never crash the process on its way out.
+func chainAs[T any](err error, target *T) (found bool) {
+	defer func() {
+		if recover() != nil {
+			found = false
+		}
+	}()
+	return errors.As(err, target)
 }

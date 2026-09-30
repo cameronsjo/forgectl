@@ -597,6 +597,11 @@ func TestApply_JSONResultOnFailure(t *testing.T) {
 	if ExitCode(a.err) != 1 {
 		t.Fatalf("exit = %d, want 1", ExitCode(a.err))
 	}
+	// The object's result.error carries the failure, so the exit is silent
+	// (forgectl#862): fang renders nothing on top of stdout.
+	if _, ok := a.err.(*silentCodedError); !ok {
+		t.Errorf("err = %T %v, want a silentCodedError under --json", a.err, a.err)
+	}
 	var doc struct {
 		Result struct {
 			Applied []map[string]any `json:"applied"`
