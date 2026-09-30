@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 
 	"charm.land/huh/v2"
@@ -60,8 +61,9 @@ func newDispatch(ref Ref, window tmux.WindowIdentity) Dispatch {
 // approval gate.
 //
 // writesEnforced says whether the harness actually confines writes to
-// findingsDir. Under agent A it does: the workspace allowlist grants exactly
-// one Write(findingsDir/**) rule, and --add-dir is what makes that grant
+// findingsDir. Under agent A it does: the reviewer's allowlist (passed with
+// --settings) grants exactly one Write(findingsDir/**) rule, the sandbox
+// denies Bash writes to the workspace, and --add-dir is what makes that grant
 // reachable at all — so the prompt may state the restriction as fact. Under
 // Codex it does not: --add-dir adds a writable root ALONGSIDE an
 // already-writable workspace, and approval_policy="never" removes the prompt
@@ -487,11 +489,23 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("resolve claude binary: %w", err)
 	}
+	// Pin the binary to its physical path, once, and use that one path for
+	// both the settings-acceptance check below and the review window's argv.
+	// A native install's claude is a symlink into versions/<X> that an
+	// auto-update re-points; checking through the link and then running it
+	// would let the update land between the check and the run, so the check
+	// would vouch for a binary the review never runs. argv[0] is the
+	// resolved path: claude is the file the link names, not a launcher that
+	// reads its own name.
+	if claudePath, err = filepath.EvalSymlinks(claudePath); err != nil {
+		return Dispatch{}, fmt.Errorf("resolve claude binary: %w", err)
+	}
 	// Clean-room review runs under a HARDENED posture regardless of the user's
 	// ambient launch profile: never --allow-dangerously-skip-permissions, always
 	// plan mode. Inheriting a permissive config (AllowDanger, a bypass permission
-	// mode) would let the review agent ignore the deny-by-default workspace
-	// allowlist — the whole clean-room control. Force the safe posture here.
+	// mode) would let the review agent ignore the deny-by-default allowlist
+	// passed with --settings — the whole clean-room control. Force the safe
+	// posture here.
 	profile := launch.Resolve(cfg.Launch, sess.Workspace)
 	profile.AllowDanger = false
 	profile.PermissionMode = "plan"
@@ -587,21 +601,73 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 		return Dispatch{}, fmt.Errorf("clean-room review profile invalid: %w", err)
 	}
 
-	var prompt string
+	// Refuse before anything is dispatched when Claude Code's sandbox cannot
+	// run here. The allow-list alone does not confine the reviewer: an
+	// allowed read-only git command can write and then execute (forgectl#694),
+	// and the sandbox is what denies that write. There is deliberately no
+	// opt-out.
+	if err := c.sandboxSupported(); err != nil {
+		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
+	}
+
+	var prompt, ghHost string
+	var perms permissions
 	if sess.Ref.IsLocal() {
 		// Grant --add-dir for the escape-hatch findings dir. Without this, the
 		// permission-scoped Write(<dir>/**) allowlist rule is moot — Claude Code
-		// won't expose a path outside the launch cwd at all.
+		// won't expose a path outside the launch cwd at all. It is also what
+		// makes the dir writable inside the sandbox, where it is the only
+		// writable root besides the per-user temp directory.
 		profile.AddDir = append(profile.AddDir, sess.FindingsDir)
 		prompt = localReviewPrompt(sess.FindingsDir, true)
+		perms = localProfile(sess.FindingsDir)
 	} else {
 		host, _, err := c.prHost(sess.Ref)
 		if err != nil {
 			return Dispatch{}, err
 		}
+		ghHost = host
 		prompt = remoteReviewPrompt(host, sess.Ref)
+		if perms, err = remoteProfile(host, sess.Ref); err != nil {
+			return Dispatch{}, err
+		}
 	}
-	claudeArgs := launch.BuilderArgs(profile, []string{"-p", prompt})
+	// The reviewer's whole configuration travels on the command line, and it
+	// loads no settings file at all (--setting-sources ""): the workspace is
+	// the PR head, so any settings file in it is PR-authored, and Claude Code
+	// merges settings arrays and runs hooks from every source it loads. See
+	// reviewSettingSources.
+	settingsJSON, err := reviewSettingsJSON(sess.Workspace, ghHost, perms)
+	if err != nil {
+		return Dispatch{}, err
+	}
+	// Refuse unless the installed claude will actually load that document.
+	// One it rejects is dropped without a word in -p mode, and the reviewer
+	// then runs with no sandbox, no permission rules, and hooks on — the
+	// failure failIfUnavailable cannot see, because the block asking for it
+	// was never loaded. See claudeAcceptsReviewSettings.
+	//
+	// The check runs under the environment the review window will carry.
+	// With windowEnv the review inherits the environment forgectl resolved
+	// rather than the tmux server's, which was fixed when the server started.
+	// On a proxy-only network the server's copy is what made a review die at
+	// its first request, and this file's own comment above names that failure
+	// mode: an empty pane and no error anywhere. Resolving here rather than at
+	// construction keeps a bad [proxy] launch_profile from failing `pr list`.
+	// It also empties the gh token variables the review cannot need, and on a
+	// host other than github.com pins GH_HOST (reviewWindowEnv, forgectl#673).
+	windowEnv, err := c.reviewWindowEnv(sess)
+	if err != nil {
+		return Dispatch{}, err
+	}
+	if err := claudeAcceptsReviewSettings(ctx, claudePath, settingsJSON, windowEnv); err != nil {
+		return Dispatch{}, fmt.Errorf("refusing to dispatch the Claude reviewer: %w", err)
+	}
+	claudeArgs := launch.BuilderArgs(profile, []string{
+		"--setting-sources", reviewSettingSources,
+		"--settings", settingsJSON,
+		"-p", prompt,
+	})
 
 	if err := c.CheckDispatchCapability(ctx); err != nil {
 		return Dispatch{}, err
@@ -617,18 +683,6 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	slog.Debug("Preparing to dispatch review into tmux window.",
 		"session_id", session.ID, "window", name, "workspace", sess.Workspace)
 	command := append([]string{claudePath}, claudeArgs...)
-	// With windowEnv the review inherits the environment forgectl resolved
-	// rather than the tmux server's, which was fixed when the server started.
-	// On a proxy-only network the server's copy is what made a review die at
-	// its first request, and this file's own comment above names that failure
-	// mode: an empty pane and no error anywhere. Resolving here rather than at
-	// construction keeps a bad [proxy] launch_profile from failing `pr list`.
-	// It also empties the gh token variables the review cannot need, and on a
-	// host other than github.com pins GH_HOST (reviewWindowEnv, forgectl#673).
-	windowEnv, err := c.reviewWindowEnv(sess)
-	if err != nil {
-		return Dispatch{}, err
-	}
 	window, err := c.tmuxClient.NewWindowWithEnv(ctx, session, name, sess.Workspace, windowEnv, command...)
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("open review window: %w", err)

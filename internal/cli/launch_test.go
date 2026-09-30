@@ -36,9 +36,41 @@ func TestMain(m *testing.M) {
 		panic("build forgectl: " + err.Error())
 	}
 
+	// The Claude reviewer refuses to dispatch where Claude Code's sandbox
+	// cannot run (pr.claudeSandboxSupported, forgectl#694), which on Linux
+	// means bubblewrap and socat on PATH. Stub both so a test about something
+	// else does not depend on what the machine running it has installed.
+	// macOS needs nothing: Seatbelt ships with the OS.
+	if runtime.GOOS == "linux" {
+		if err := stubSandboxDeps(dir); err != nil {
+			_ = os.RemoveAll(dir)
+			panic("stub sandbox dependencies: " + err.Error())
+		}
+	}
+
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+// stubSandboxDeps writes no-op bwrap and socat executables into a directory
+// under parent and prepends it to PATH. Only their presence is probed.
+func stubSandboxDeps(parent string) error {
+	bin := filepath.Join(parent, "sandbox-deps")
+	if err := os.Mkdir(filepath.Clean(bin), 0o700); err != nil { //nolint:gosec // G703: bin is under the test's own MkdirTemp dir
+		return err
+	}
+	for _, name := range []string{"bwrap", "socat"} {
+		path := filepath.Join(bin, name)
+		if err := os.WriteFile(filepath.Clean(path), []byte("#!/bin/sh\nexit 0\n"), 0o600); err != nil { //nolint:gosec // G703: path is under the test's own MkdirTemp dir
+			return err
+		}
+		// G302: an executable stub needs its execute bit; 0700 is owner-only.
+		if err := os.Chmod(path, 0o700); err != nil { //nolint:gosec // see above
+			return err
+		}
+	}
+	return os.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 // --- harness -----------------------------------------------------------

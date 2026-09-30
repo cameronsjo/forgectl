@@ -17,7 +17,6 @@ package pr
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -156,13 +155,11 @@ func TestPrepareLocal_AssertionPermitsCodex(t *testing.T) {
 				t.Errorf("Session.Provenance = %v, want operator-authored", sess.Provenance)
 			}
 			// The intended Codex posture is still in place: findings dir exists,
-			// and no Claude allowlist was written for a harness that ignores it.
+			// and nothing was written into the workspace for any reviewer.
 			if sess.FindingsDir == "" {
 				t.Error("asserted Codex local review has no findings dir")
 			}
-			if _, err := os.Stat(filepath.Join(sess.Workspace, ".claude", "settings.local.json")); err == nil {
-				t.Error("a Codex session must not get a Claude allowlist")
-			}
+			assertNoWorkspaceClaudeDir(t, sess.Workspace)
 		})
 	}
 }

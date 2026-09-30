@@ -152,7 +152,11 @@ func (c *Client) Prepare(ctx context.Context, ref Ref, opts PrepareOpts) (Sessio
 	}
 	sess.Workspace = workspace
 
-	if _, err := writeAllowlist(workspace, host, ref); err != nil {
+	// The reviewer's permission profile is built at dispatch and passed on
+	// the command line (reviewSettingsJSON); nothing is written into the
+	// workspace. Validating it here still refuses a bad host or ref before a
+	// breadcrumb exists.
+	if _, err := remoteProfile(host, ref); err != nil {
 		_ = sandbox.Teardown(ctx, c.run, workspace)
 		return Session{}, err
 	}

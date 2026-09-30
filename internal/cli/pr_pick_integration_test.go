@@ -211,9 +211,7 @@ func isolatedPickBench(t *testing.T) (*tmuxRoutingRunner, *pr.Client, string) {
 
 	// The review agent must outlive the dispatch long enough to be listed.
 	claudeBin := filepath.Join(root, "claude-helper")
-	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeClaude(t, claudeBin, "sleep 30")
 	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
 
 	sessionsDir := filepath.Join(root, "sessions")
