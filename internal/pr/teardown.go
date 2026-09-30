@@ -617,7 +617,8 @@ var ErrWindowKillTimedOut = errors.New("review window kill timed out (tmux unres
 
 // ErrRecordNotParked is wrapped alongside ErrWindowKillTimedOut when the
 // timeout left the record exactly as it was because it could not be parked in
-// needs-repair (a legacy record with no version, or a failed write). Callers
+// needs-repair (no record on disk, or a failed write; a legacy record is
+// converted and parked, forgectl#696). Callers
 // must not tell the operator the record was parked when this is present.
 var ErrRecordNotParked = errors.New("the record could not be parked in needs-repair")
 
@@ -630,6 +631,17 @@ var ErrTmuxBudgetSpent = errors.New("skipped: tmux stopped answering earlier in 
 // followed by the window it could not account for (see unknownWindow).
 const windowKillTimeoutReason = "window kill timed out (tmux unresponsive)"
 
+// ErrWindowStateUnreadable is wrapped into a live teardown's error when tmux
+// answered the review-window resolve with something other than a clean
+// listing, so whether the window still exists is unknown (forgectl#702). The
+// record is parked in needs-repair (unless ErrRecordNotParked is also present)
+// and nothing is removed.
+var ErrWindowStateUnreadable = errors.New("the review window's state could not be read from tmux")
+
+// windowUnreadableReason is the needs-repair reason such a record carries,
+// followed by the window it could not account for (see unknownWindow).
+const windowUnreadableReason = "review window state could not be read from tmux"
+
 // windowAmbiguousReason is the needs-repair reason a teardown parks with when
 // more than one window in the review session carries the review's name.
 const windowAmbiguousReason = "more than one review window carries this review's name; close the one that is not this review, then tear it down again"
@@ -638,22 +650,35 @@ const windowAmbiguousReason = "more than one review window carries this review's
 // lockedTmuxBudget, and reports whether the window's state is still UNKNOWN
 // afterwards. Resolution is exact — the window must carry this review's name
 // AND sit under the review session's native id — and the kill revalidates
-// that before issuing. A failure to resolve means there is nothing of ours to
-// kill, which is the ordinary case after the reviewer exits; it must never
-// widen into killing whatever tmux would have matched. Other kill failures stay
-// best-effort, as before.
+// that before issuing. Only a CONFIRMED absence means there is nothing of ours
+// to kill: the pinned server answered cleanly and the review session or the
+// window was not in its listing (windowConfirmedAbsent). That is the ordinary
+// case after the reviewer exits; it must never widen into killing whatever
+// tmux would have matched. The kill step is held to the same standard: its
+// revalidation re-reads the window list, and a failure there or in
+// kill-window itself is gone only when it is a confirmed absence or a server
+// restart (windowGoneAtKill); every other kill failure is unsettled too.
 //
-// Two outcomes are NOT "nothing to kill", and the caller fails closed on both:
+// Three outcomes are NOT "nothing to kill", and the caller fails closed on
+// each (forgectl#702):
 //
 //   - timedOut: tmux did not answer within the budget (or the caller
 //     cancelled), so the window may be live.
-//   - ambiguous: more than one window in the review session carries this
-//     review's name (tmux allows that), so resolution refused to pick one and
-//     at least one of them is live.
+//   - unsettled wrapping tmux.ErrAmbiguousWindow: more than one window in the
+//     review session carries this review's name (tmux allows that), so
+//     resolution refused to pick one and at least one of them is live.
+//   - unsettled wrapping ErrWindowStateUnreadable: tmux answered, but not with
+//     a listing that settles the question — an unreadable server, a pin
+//     mismatch, a parse failure, a reparented window, or a kill-window that
+//     failed. An unreadable server is not an absent window.
 //
 // Window names depend only on owner/repo/number, so discarding the record in
-// either case would leave an orphan that a later same-ref review, teardown or
-// repair could collide with.
+// any of these cases would leave an orphan that a later same-ref review,
+// teardown or repair could collide with.
+//
+// A ref whose window name cannot be derived at all is the one non-tmux
+// failure, and it still reads as nothing to kill: launch derives the same
+// name, so no window of ours can carry it.
 //
 // The kill stays under the lock on purpose. The window is found by the
 // review's NAME under the shared review session, so once the lock is released
@@ -666,7 +691,12 @@ const windowAmbiguousReason = "more than one review window carries this review's
 // that far before tmux stopped answering (see unknownWindow).
 //
 // The bounded context is used ONLY here; the caller's own ctx continues on.
-func (c *Client) killReviewWindow(ctx context.Context, ref Ref, budget *tmuxBudget) (timedOut bool, window string, ambiguous error) {
+func (c *Client) killReviewWindow(ctx context.Context, ref Ref, budget *tmuxBudget) (timedOut bool, window string, unsettled error) {
+	name, err := ReviewWindowName(ref)
+	if err != nil {
+		slog.Debug("No review window to kill (no derivable window name).", "ref", ref.String(), "error", err)
+		return false, "", nil
+	}
 	tctx, done := budget.bound(ctx)
 	defer done()
 	resolved, err := c.resolveReviewWindow(tctx, ref)
@@ -680,14 +710,13 @@ func (c *Client) killReviewWindow(ctx context.Context, ref Ref, budget *tmuxBudg
 				"ref", ref.String(), "error", err)
 			return false, "", err
 		}
-		// The name is diagnostic only here; a ref that cannot even be keyed logs
-		// as such rather than shadowing the resolve failure being reported.
-		name, nameErr := ReviewWindowName(ref)
-		if nameErr != nil {
-			name = "<no derivable identity>"
+		if windowConfirmedAbsent(err) {
+			slog.Debug("No review window to kill (already gone).", "window", name, "error", err)
+			return false, "", nil
 		}
-		slog.Debug("No review window to kill (already gone).", "window", name, "error", err)
-		return false, "", nil
+		slog.Warn("Could not read the review window's state from tmux; refusing to treat it as gone.",
+			"window", name, "error", err)
+		return false, unknownWindow(ref, ""), fmt.Errorf("%w: %w", ErrWindowStateUnreadable, err)
 	}
 	if err := c.tmuxClient.KillWindow(tctx, resolved); err != nil {
 		if tctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
@@ -695,9 +724,37 @@ func (c *Client) killReviewWindow(ctx context.Context, ref Ref, budget *tmuxBudg
 				"window_id", resolved.ID, "budget", lockedTmuxBudget)
 			return true, unknownWindow(ref, resolved.ID), nil
 		}
-		slog.Debug("Review window could not be killed.", "window_id", resolved.ID, "error", err)
+		if windowGoneAtKill(err) {
+			slog.Debug("Review window was already gone at kill time.", "window_id", resolved.ID, "error", err)
+			return false, "", nil
+		}
+		slog.Warn("Could not kill the review window; refusing to treat it as gone.",
+			"window_id", resolved.ID, "error", err)
+		return false, unknownWindow(ref, resolved.ID), fmt.Errorf("%w: %w", ErrWindowStateUnreadable, err)
 	}
 	return false, "", nil
+}
+
+// windowGoneAtKill reports whether a KillWindow failure means the resolved
+// window no longer exists: a clean listing without it (windowConfirmedAbsent),
+// or a server restarted since resolution, which took every window of the old
+// generation with it. Anything else — an unreadable list, a pin mismatch, a
+// reparented window, kill-window itself failing — leaves the window possibly
+// live (forgectl#702).
+func windowGoneAtKill(err error) bool {
+	return windowConfirmedAbsent(err) || errors.Is(err, tmux.ErrGenerationChanged)
+}
+
+// windowConfirmedAbsent reports whether a resolve failure is a clean answer
+// that the review window does not exist, as opposed to a failure to find out.
+// Only two verdicts qualify, and both come from a listing the selected server
+// returned without error (an absent server lists as empty, which surfaces as
+// ErrSessionNotFound): no session carries the review session's exact name, or
+// that session holds no window with the review's exact name. Everything else —
+// ErrServerUnreadable, ErrUnpinnedCommand, ErrNoServer, a parse failure, a
+// malformed id — is not an answer, so it must never read as "already gone".
+func windowConfirmedAbsent(err error) bool {
+	return errors.Is(err, tmux.ErrSessionNotFound) || errors.Is(err, tmux.ErrObjectGone)
 }
 
 // unknownWindow names a review window whose state a teardown could not settle,
@@ -719,17 +776,43 @@ func unknownWindow(ref Ref, nativeID string) string {
 
 // parkForUnknownWindow fails a live teardown closed: it parks the record in
 // needs-repair with reason and returns cause, or — when the record cannot be
-// parked (none on disk, a legacy record, a failed write) — cause wrapped with
+// parked (none on disk, a failed write) — cause wrapped with
 // ErrRecordNotParked so no caller claims a park that never happened. Nothing is
 // removed either way. The lock is held, so the *Locked park is the right form.
+//
+// A legacy (versionless) record accepts no phase transition, so it is
+// converted in place to a v2 needs-repair record instead (forgectl#696):
+// without that, a legacy record whose window could not be settled had no
+// repair path at all — only an error naming the window.
 func (c *Client) parkForUnknownWindow(sess Session, reason string, cause error) error {
 	if sess.Path == "" {
 		return fmt.Errorf("%w; %w", cause, ErrRecordNotParked)
 	}
-	if err := c.markNeedsRepairLocked(sess.Path, reason); err != nil {
+	err := c.markNeedsRepairLocked(sess.Path, reason)
+	if errors.Is(err, errLegacyRecordNoTransition) {
+		err = c.parkLegacyRecordLocked(sess.Path, reason)
+	}
+	if err != nil {
 		return fmt.Errorf("%w; %w: %w", cause, ErrRecordNotParked, err)
 	}
 	return cause
+}
+
+// parkLegacyRecordLocked re-reads the legacy record at path under the lock and
+// converts it to a v2 needs-repair record carrying reason. The re-read is what
+// the conversion builds on, and the legacy write expectation refuses it if the
+// record stopped being legacy in between.
+func (c *Client) parkLegacyRecordLocked(path, reason string) error {
+	bc, _, err := loadBreadcrumbRecord(path, c.sessionsDir)
+	if err != nil {
+		return err
+	}
+	if bc.Version != 0 {
+		return fmt.Errorf("session record %s is no longer a legacy record; nothing was changed", termsafe.QuotePath(path))
+	}
+	return c.convertLegacyRecordLocked(path, bc, PhaseNeedsRepair, func(rec *Breadcrumb) {
+		rec.RepairReason = termsafe.SafeLine(reason)
+	})
 }
 
 // discard performs the actual teardown for an already-validated session: undo
@@ -739,22 +822,26 @@ func (c *Client) parkForUnknownWindow(sess Session, reason string, cause error) 
 func (c *Client) discard(ctx context.Context, sess Session, budget *tmuxBudget) error {
 	slog.Debug("Preparing to tear down review session.", "ref", sess.Ref.String(), "workspace", sess.Workspace)
 
-	// The window goes first, so a tmux that cannot answer — or a window name
-	// that resolves to more than one window — stops the teardown BEFORE
-	// anything is removed. Failing closed here means parking the record in
+	// The window goes first, so a tmux that cannot answer, a window list that
+	// cannot be read, or a window name that resolves to more than one window
+	// stops the teardown BEFORE anything is removed. Failing closed here means parking the record in
 	// needs-repair with the workspace intact: the record and the clean room are
 	// what let the operator find and finish this later.
-	timedOut, window, ambiguous := c.killReviewWindow(ctx, sess.Ref, budget)
+	timedOut, window, unsettled := c.killReviewWindow(ctx, sess.Ref, budget)
 	if timedOut {
 		// The window is named in both the parked reason and the error, so it is
-		// recorded even when the park itself fails (a legacy record): the
+		// recorded even when the park itself fails (a failed write): the
 		// operator reads it on stderr instead.
 		return c.parkForUnknownWindow(sess, windowKillTimeoutReason+"; "+window+" may still be running",
 			fmt.Errorf("%w: %s may still be running", ErrWindowKillTimedOut, window))
 	}
-	if ambiguous != nil {
+	if errors.Is(unsettled, tmux.ErrAmbiguousWindow) {
 		return c.parkForUnknownWindow(sess, windowAmbiguousReason,
-			fmt.Errorf("refusing to tear down %s, nothing was removed: %w", sess.Ref.String(), ambiguous))
+			fmt.Errorf("refusing to tear down %s, nothing was removed: %w", sess.Ref.String(), unsettled))
+	}
+	if unsettled != nil {
+		return c.parkForUnknownWindow(sess, windowUnreadableReason+"; "+window+" may still be running",
+			fmt.Errorf("refusing to tear down %s, nothing was removed: %w", sess.Ref.String(), unsettled))
 	}
 
 	// Restore quarantined files, while the workspace still exists.
@@ -864,8 +951,9 @@ type CleanupReport struct {
 
 // CleanupFailure is one session a sweep did not discard. Err is that session's
 // own error: ErrWindowKillTimedOut (with or without ErrRecordNotParked) for a
-// kill tmux never answered, ErrTmuxBudgetSpent for a live session skipped
-// after that, or whatever refused or failed the teardown.
+// kill tmux never answered, ErrWindowStateUnreadable (likewise) for a window
+// tmux could not say was gone, ErrTmuxBudgetSpent for a live session skipped
+// after a timeout, or whatever refused or failed the teardown.
 type CleanupFailure struct {
 	Path string
 	Ref  string

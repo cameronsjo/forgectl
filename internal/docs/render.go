@@ -422,16 +422,15 @@ func equalASCIIFold(value []byte, literal string) bool {
 // after sanitization, so its generated SVG never passes through this policy —
 // which is why this list can stay narrow instead of having to accommodate
 // everything mermaid emits.
+//
+// bluemonday has no context rules, so it allows these names anywhere, not only
+// inside an <svg>: prose like "cat <path>: No such file" would otherwise reach
+// the page as an open HTML <path>. balancePasses removes them outside SVG
+// content (cameronsjo/forgectl#619) — see strayForeignElements.
 func allowInlineSVG(p *bluemonday.Policy) {
 	// Structural and shape elements. No scripting, no animation, no external
 	// references — see the doc comment.
-	p.AllowElements(
-		"svg", "g", "defs", "symbol",
-		"path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
-		"text", "tspan",
-		"marker", "clipPath", "mask",
-		"linearGradient", "radialGradient", "stop",
-	)
+	p.AllowElements(svgElements...)
 
 	// Discard these elements' CONTENTS along with their tags. Without this,
 	// bluemonday hoists a denied container's children into the surviving SVG —
@@ -504,6 +503,18 @@ func allowInlineSVG(p *bluemonday.Policy) {
 		OnElements("marker")
 	p.AllowAttrs("clipPathUnits").OnElements("clipPath")
 	p.AllowAttrs("maskUnits", "maskContentUnits").OnElements("mask")
+}
+
+// svgElements are the SVG elements allowInlineSVG allows. Every name is
+// SVG-only — none is also an HTML element — which is what lets the balancer
+// drop any of them it finds in HTML content (svgOnlyElements). Keep it so: an
+// HTML name added here would be unwrapped wherever the document uses it.
+var svgElements = []string{
+	"svg", "g", "defs", "symbol",
+	"path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
+	"text", "tspan",
+	"marker", "clipPath", "mask",
+	"linearGradient", "radialGradient", "stop",
 }
 
 // ChromaCSS returns the syntax-highlighting stylesheet served at

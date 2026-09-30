@@ -510,8 +510,10 @@ func (b blockingTmux) Run(ctx context.Context, name string, args ...string) (str
 
 // TestPrTeardown_NotesAnUnresponsiveTmuxOnStderr: when tmux never answers, the
 // window's state is unknown, so teardown removes nothing and says so on stderr
-// — the slog warning alone is discarded by default. The note claims the record
-// was parked only when it really was: a legacy record (no version) cannot be.
+// — the slog warning alone is discarded by default. The note says the record
+// was parked, and it really was: a legacy record (no version) is converted to
+// a v2 needs-repair record rather than left with no repair path (#696). The
+// not-parked wording is pinned by TestCleanupFailureLine_TimeoutNotParked.
 func TestPrTeardown_NotesAnUnresponsiveTmuxOnStderr(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -519,7 +521,7 @@ func TestPrTeardown_NotesAnUnresponsiveTmuxOnStderr(t *testing.T) {
 		wantParked bool
 	}{
 		{"v2 record is parked", false, true},
-		{"legacy record cannot be parked", true, false},
+		{"legacy record is converted and parked", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
