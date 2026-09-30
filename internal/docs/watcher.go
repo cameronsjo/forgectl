@@ -413,7 +413,13 @@ func (w *Watcher) Run(ctx context.Context) {
 			// but never the filesystem the event came through.
 			stray := w.strayEvent(ev.Name)
 			w.refreshWatch(ev)
-			moved := !stray && w.dirMoved(ev)
+			// Move detection never consults stray. A watched directory
+			// renamed away and replaced by a symlink reads as stray, and
+			// skipping its rebuild would keep its descendants' watches
+			// wherever it went (forgectl#796 again, PR #868 review). A
+			// rebuild re-registers only through verified paths, so an
+			// extra one costs a reload and never widens the watch set.
+			moved := w.dirMoved(ev)
 			if moved {
 				// The moved tree's descendants keep their watches wherever
 				// it went, outside the root or into an excluded directory;
@@ -425,7 +431,16 @@ func (w *Watcher) Run(ctx context.Context) {
 			// by an event that is not otherwise relevant, so churn on other
 			// files cannot keep postponing it.
 			resetNeedsArming := w.resetPending && (!wasPending || settledC == nil)
-			if (stray || !w.relevant(ev.Name)) && !moved && !resetNeedsArming {
+			// stray gates only this relevance decision: a stray event
+			// reloads only for a name the index still lists, which means
+			// that doc was replaced (by a symlink, say) and the reload
+			// drops it. The name is in-tree and indexed, so the reload says
+			// nothing about outside.
+			reloads := w.relevant(ev.Name)
+			if stray {
+				_, reloads = w.store.Current().FindByAbsPath(ev.Name)
+			}
+			if !reloads && !moved && !resetNeedsArming {
 				continue
 			}
 			if timer == nil {
@@ -570,8 +585,10 @@ func (w *Watcher) dirMoved(ev fsnotify.Event) bool {
 // must pass the same predicate the name did: relevant() for a doc name,
 // which keeps an OnlyFile root to its one file and refuses excluded
 // directories, or inTree() for any other name (a directory's own Rename).
-// An event whose resolved path fails is stray: it neither reloads nor
-// counts as a watched directory moving. A compat symlink that leads to a
+// An event whose resolved path fails is stray: Run does not reload for its
+// relevance, though a stray Rename of a watched directory still counts as
+// a move (Run never lets stray suppress a watch rebuild), and a stray event
+// on a doc the index lists still reloads to drop it. A compat symlink that leads to a
 // doc elsewhere inside the root is not stray, and a name with no symlink on
 // its path is decided exactly as before. The check fails closed: a path
 // that cannot be resolved for any reason but its own absence (a dangling

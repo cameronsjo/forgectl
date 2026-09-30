@@ -33,9 +33,15 @@ package docs
 //              resolves, through a symlink anywhere on its path, to a path
 //              relevance refuses (kqueue's own entry watches after a swap,
 //              forgectl#865: outside, excluded, an OnlyFile root's sibling,
-//              a leaf symlink, a *.md directory link) does not reload, nor
-//              count as a watched directory moving; fails closed on a
-//              dangling symlink
+//              a leaf symlink, a *.md directory link) does not reload for
+//              relevance; fails closed on a dangling symlink
+//   [x] Regression: a watched directory moved out and replaced by a symlink
+//              still rebuilds the watches though its Rename is stray, so a
+//              later retarget into the tree cannot revive the moved-out
+//              subtree's watches (PR #868 review); a directory named dir.md
+//              counts as a directory
+//   [x] A stray event on a doc the index lists (the doc replaced by a
+//              symlink) reloads to drop it
 //   [x] Happy: an event through an in-root compat or leaf symlink, to an
 //              OnlyFile root's own file, or under a directory deleted
 //              since, still reloads
@@ -822,8 +828,8 @@ func requireNoReload(t *testing.T, sub <-chan string, what string) {
 // symlink to a doc inside the root, to an OnlyFile root's own file, and
 // one under a directory deleted since, still reload.
 //
-// Mutation that turns it red: drop the stray term from Run's relevance
-// gate (the outside rows reload); make strayEvent true for any symlinked
+// Mutation that turns it red: skip Run's stray branch of the relevance
+// decision (the outside rows reload); make strayEvent true for any symlinked
 // path (the compat, alias and only-file controls go silent); make
 // resolveNow fail on a missing path (the deleted control goes silent);
 // make strayEvent return false on a resolution error (the dangling row
@@ -889,26 +895,85 @@ func TestWatcherRun_EventThroughSwappedDir_DoesNotReload(t *testing.T) {
 	awaitReload(t, sub, "a remove under a directory deleted since")
 }
 
-// A Rename naming a directory the watcher watched, delivered through a
-// directory that now resolves outside the root, is not a watched directory
-// moving: it must not drive the reload a move does.
+// A watched directory moved out of the root and replaced at once by a
+// symlink to an outside decoy delivers its Rename as a stray event (its
+// name now resolves outside). It is still a watched directory moving, and
+// must rebuild the watches: otherwise its descendants' watches survive,
+// still named inside the root, and once the link is retargeted into the
+// tree a write under the moved-out subtree resolves in-tree and reloads
+// (forgectl#796, reopened by coupling move detection to stray in PR #868).
+// A real directory named dir.md is a directory all the same.
 //
-// Mutation that turns it red: compute moved without the stray gate in Run.
-func TestWatcherRun_StrayRename_IsNotAMove(t *testing.T) {
-	root, outside := swapFixture(t)
-	if err := os.MkdirAll(filepath.Join(root, "a", "sub"), 0o750); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
+// Mutation that turns it red: compute moved as !stray && w.dirMoved(ev)
+// in Run (both rows reload on the write under the moved-out subtree).
+func TestWatcher_MovedOutThenRelinked_DropsDescendantWatches(t *testing.T) {
+	for _, name := range []string{"a", "dir.md"} {
+		t.Run(name, func(t *testing.T) {
+			root, outside := swapFixture(t)
+			dir := filepath.Join(root, name)
+			if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o750); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			writeFile(t, filepath.Join(dir, "sub", "doc.md"), "# Doc\n")
+			decoy := filepath.Join(outside, "decoy")
+			if err := os.MkdirAll(decoy, 0o750); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			w := newUnstartedWatcher(t, root)
+			requireWatched(t, w, dir, filepath.Join(dir, "sub"))
+
+			// Move out and link to the decoy before Run sees the Rename, so
+			// the Rename is judged against the symlink.
+			moved := filepath.Join(outside, "moved")
+			if err := os.Rename(dir, moved); err != nil {
+				t.Fatalf("Rename: %v", err)
+			}
+			if err := os.Symlink(decoy, dir); err != nil {
+				t.Skipf("symlinks unavailable here: %v", err)
+			}
+			reloads := startWatcher(t, w)
+			drainReloads(reloads) // the move's rebuild, if any
+
+			// Retarget the link into the tree, where the moved-out subtree's
+			// names would now resolve.
+			if err := os.Remove(dir); err != nil {
+				t.Fatalf("Remove: %v", err)
+			}
+			if err := os.Symlink(filepath.Join(root, "b"), dir); err != nil {
+				t.Fatalf("Symlink: %v", err)
+			}
+			drainReloads(reloads)
+
+			writeFile(t, filepath.Join(moved, "sub", "secret.md"), "# Secret\n")
+			requireNoReload(t, reloads, "a write under a subtree moved out of the root")
+
+			// CONTROL: the watcher is still live for the root.
+			writeFile(t, filepath.Join(root, "top.md"), "# Top\n\nedited\n")
+			awaitReload(t, reloads, "a write to root/top.md")
+		})
 	}
+}
+
+// A doc replaced by a symlink to an outside file delivers stray events
+// only, but the index still lists it: the watcher reloads once to drop it.
+//
+// Mutation that turns it red: drop the FindByAbsPath branch in Run (no
+// reload comes, and the index keeps listing top.md).
+func TestWatcherRun_DocReplacedBySymlink_Reloads(t *testing.T) {
+	root, outside := swapFixture(t)
+	writeFile(t, filepath.Join(outside, "secret.md"), "# Secret\n")
 	w := newUnstartedWatcher(t, root)
-	sub := filepath.Join(root, "a", "sub")
-	requireWatched(t, w, sub)
-	swapForSymlink(t, filepath.Join(root, "a"), outside)
-	// Consume the swap's own events before Run starts: root/a's Rename is a
-	// real move and would rebuild the watches, and the dirs entry for
-	// root/a/sub with them.
-	syncWithWatch(t, w, "sync")
+	top := filepath.Join(root, "top.md")
+	if _, ok := w.store.Current().FindByAbsPath(top); !ok {
+		t.Fatal("top.md is not indexed; the fixture exercises nothing")
+	}
+	if err := os.Remove(top); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret.md"), top); err != nil {
+		t.Skipf("symlinks unavailable here: %v", err)
+	}
 	reloads := startWatcher(t, w)
 
-	injectEvent(t, w, fsnotify.Event{Name: sub, Op: fsnotify.Rename})
-	requireNoReload(t, reloads, "a Rename delivered through a swapped directory")
+	awaitReload(t, reloads, "an indexed doc replaced by a symlink")
 }
