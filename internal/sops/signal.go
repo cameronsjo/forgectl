@@ -235,8 +235,12 @@ const (
 	// keepCiphertext removes the plaintext, then moves the backup out beside the
 	// target and removes the directory. When the backup cannot be moved out,
 	// because something already sits at that name, the directory stays with
-	// the backup and its .gitignore as its only entries. Losing the backup is
-	// never the answer, on a signal or on a normal return.
+	// the backup and its .gitignore as its only entries, on a signal or on a
+	// normal return. Two edge cases still lose it, because a kept directory
+	// must never also keep plaintext: a directory that will not prune down to
+	// the backup is removed whole, and one holding an entry that cannot be
+	// deleted loses everything else, the backup included, and stays behind
+	// (docs/commands/env.md).
 	//
 	// On a normal return the runner has waited for every sops child, so
 	// nothing writes into a kept directory afterwards; a panic inside the
@@ -284,12 +288,17 @@ func (g *plaintextGuard) finish(mode finishMode) string {
 // directory must never also keep plaintext.
 func (g *plaintextGuard) pruneToBackup() bool {
 	for range cleanupAttempts {
-		if g.work.pruneToBackup() {
+		if pruneWorkDir(g.work) {
 			return true
 		}
 	}
 	return false
 }
+
+// pruneWorkDir is one prune attempt. It is a variable only so a test can make
+// the first attempts lose the race a sops child would cause, which nothing
+// else can do deterministically, and so prove the retry above is there.
+var pruneWorkDir = (*workDir).pruneToBackup
 
 // cleanupAttempts bounds the retry in cleanup. Each attempt that fails lost a
 // race with a single concurrent create, so a handful is ample; the bound only

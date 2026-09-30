@@ -461,7 +461,9 @@ func newWorkDir(target env.Target) (*workDir, error) {
 	// under this same lock) can attribute a directory a SIGKILL left behind.
 	// MakeScratchDir writes the `*` .gitignore exclusively before returning,
 	// so no plaintext ever sits in the directory without it
-	// (cameronsjo/forgectl#698). See internal/env/scratch.go.
+	// (cameronsjo/forgectl#698). It keeps the directory out of `git add`, not
+	// out of `git stash --all`, which copies ignored files into a stash
+	// commit, plaintext included. See internal/env/scratch.go.
 	dir, err := env.MakeScratchDir(parent, target.SopsWorkDirPattern())
 	if err != nil {
 		return nil, fmt.Errorf("prepare a work directory beside %s: %w", target.Rel(), err)
@@ -482,16 +484,22 @@ func newWorkDir(target env.Target) (*workDir, error) {
 }
 
 // stage writes the ciphertext backup, the value, and the nonce.
+//
+// Each is created exclusively (O_CREAT|O_EXCL), like the .gitignore before
+// them. The directory is fresh and 0700, so nothing should already be at
+// these names; if something is, it was put there by someone else, and
+// os.WriteFile would truncate it, or follow a planted symlink and write the
+// plaintext value wherever it points. An exclusive create fails instead.
 func (w *workDir) stage(before []byte, value string) error {
-	if err := os.WriteFile(w.backup, before, 0o600); err != nil {
+	if err := env.WriteFileExclusive(w.backup, before); err != nil {
 		return errors.New("could not write the backup")
 	}
 	// No added newline: the read-back comparison is byte-exact, and a
 	// terminator here would make every value fail it.
-	if err := os.WriteFile(filepath.Join(w.dir, "value"), []byte(value), 0o600); err != nil {
+	if err := env.WriteFileExclusive(filepath.Join(w.dir, "value"), []byte(value)); err != nil {
 		return errors.New("could not stage the value")
 	}
-	if err := os.WriteFile(filepath.Join(w.dir, "nonce"), []byte(w.nonce), 0o600); err != nil {
+	if err := env.WriteFileExclusive(filepath.Join(w.dir, "nonce"), []byte(w.nonce)); err != nil {
 		return errors.New("could not stage the nonce")
 	}
 	return nil

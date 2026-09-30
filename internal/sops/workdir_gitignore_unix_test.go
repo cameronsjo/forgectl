@@ -14,6 +14,8 @@ package sops
 //       nothing either
 //   [x] The leftover scan still finds the directory and refuses, naming it,
 //       and removes nothing
+//   [x] stage fails, writing nothing through it, on anything already at the
+//       backup, value or nonce name (not git: the #736 review's O_EXCL nit)
 
 import (
 	"os"
@@ -117,5 +119,36 @@ func TestWorkDirLeftoverIsNeverStagedButStillRefused(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(work.dir, "value")); err != nil {
 		t.Errorf("the refusal removed the leftover: %v", err)
+	}
+}
+
+// stage creates the backup, the value and the nonce exclusively (the #736
+// review). Something already at one of those names inside the work directory
+// was put there by someone else: a planted symlink must not carry the value
+// or the ciphertext to wherever it points, and stage must fail rather than
+// write through it.
+func TestStageRefusesAnythingAlreadyAtItsNames(t *testing.T) {
+	for _, name := range []string{"backup", "value", "nonce"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			outside := filepath.Join(t.TempDir(), "outside")
+			if err := os.WriteFile(outside, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+			w := &workDir{dir: dir, nonce: "NONCE", backup: filepath.Join(dir, "backup")}
+			if err := w.stage([]byte(signalFixture), "s3cr3t-value"); err == nil {
+				t.Errorf("stage succeeded with a symlink planted at %s", name)
+			}
+			got, err := os.ReadFile(filepath.Clean(outside))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 0 {
+				t.Errorf("stage wrote %d bytes through the symlink planted at %s", len(got), name)
+			}
+		})
 	}
 }

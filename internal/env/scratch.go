@@ -20,6 +20,12 @@
 // the directory without it, and it is written exclusively: O_CREAT|O_EXCL
 // fails on anything already at the name, including a planted symlink, which
 // it never follows.
+//
+// What it does not cover: `git stash --all` (or `-a`) stashes ignored files
+// too. It copies a live or leftover scratch directory, plaintext included,
+// into a stash commit in the object store, and removes it from the working
+// tree, where the leftover scan can no longer see it. Measured on git 2.43:
+// `git show 'stash@{0}^3:<dir>/<file>'` prints the plaintext afterwards.
 package env
 
 import (
