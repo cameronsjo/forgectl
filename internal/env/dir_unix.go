@@ -299,9 +299,17 @@ func (d *dirPin) remove(name string) error {
 // against the new directory's own descriptor. MakeScratchDir, which takes
 // paths, is the --sops work directory's version of the same steps.
 //
-// Between mkdirat and openat the name could be replaced by another directory
-// of the same user. So the opened directory must be owned by this process's
-// user and empty, or it is not the one just made, and it is left alone.
+// Between mkdirat and openat the name could be replaced by another directory.
+// So the opened directory must be empty, or it is not safely the one just
+// made, and it is left alone. There is deliberately no owner check. Comparing
+// the owner to this process's uid refuses every write on filesystems that
+// report another owner for new entries (sshfs or FUSE without idmap, NFS with
+// root_squash or all_squash, vfat or exFAT mounted with uid=), and comparing
+// it to the parent directory's owner has the same failure on a squashing
+// NFS export. What either would add is small: only a process that can write
+// the target's directory can swap the entry, and it can already replace the
+// target itself. What matters is that nothing sits in the directory before
+// the .gitignore, which the empty check and the O_EXCL create establish.
 func (d *dirPin) mkScratchDir(prefix string) (*dirPin, string, error) {
 	buf := make([]byte, tempNameBytes)
 	name := ""
@@ -322,6 +330,7 @@ func (d *dirPin) mkScratchDir(prefix string) (*dirPin, string, error) {
 	if name == "" {
 		return nil, "", errors.New("could not create a uniquely named scratch directory")
 	}
+	scratchDirMade(name)
 	fd, err := unix.Openat(d.fd, name, dirFlags, 0)
 	if err != nil {
 		// rmdir, which fails on anything that is not an empty directory, so
@@ -337,14 +346,11 @@ func (d *dirPin) mkScratchDir(prefix string) (*dirPin, string, error) {
 		_ = unix.Unlinkat(d.fd, name, unix.AT_REMOVEDIR)
 		return nil, "", err
 	}
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		return abandon(err)
+	names, err := sub.names()
+	if err != nil {
+		return abandon(fmt.Errorf("list the new scratch directory: %w", err))
 	}
-	if int(st.Uid) != unix.Geteuid() {
-		return abandon(errors.New("the new scratch directory is not owned by this user"))
-	}
-	if names, err := sub.names(); err != nil || len(names) != 0 {
+	if len(names) != 0 {
 		return abandon(errors.New("the new scratch directory is not empty"))
 	}
 	// mkdirat's mode passes through umask, which can only narrow 0700, but an
@@ -354,6 +360,7 @@ func (d *dirPin) mkScratchDir(prefix string) (*dirPin, string, error) {
 	}
 	// O_EXCL: an EEXIST here is a file this process did not create, and it is
 	// never unlinked.
+	scratchIgnoreCreating(name)
 	ignoreFd, err := openatCreate(fd, ScratchIgnoreName, unix.O_EXCL|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
 		return abandon(err)
@@ -393,7 +400,31 @@ func (d *dirPin) removeScratchDir(sub *dirPin, name string, own ...string) error
 	if err := sub.remove(ScratchIgnoreName); err != nil && !errors.Is(err, unix.ENOENT) {
 		return err
 	}
-	return unix.Unlinkat(d.fd, name, unix.AT_REMOVEDIR)
+	scratchIgnoreGone(func(n string) error { return createAt(sub.fd, n) })
+	err = unix.Unlinkat(d.fd, name, unix.AT_REMOVEDIR)
+	if errors.Is(err, unix.ENOTEMPTY) || errors.Is(err, unix.EEXIST) {
+		// Something arrived between the listing and the rmdir. Put the
+		// .gitignore back, exclusively, so it is not left unignored.
+		_ = restoreIgnore(func() (*os.File, error) {
+			ifd, oerr := openatCreate(sub.fd, ScratchIgnoreName, unix.O_EXCL|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+			if oerr != nil {
+				return nil, oerr
+			}
+			return os.NewFile(uintptr(ifd), ScratchIgnoreName), nil
+		})
+		return errScratchNotEmpty
+	}
+	return err
+}
+
+// createAt creates an empty file name in the directory dirfd names. It is
+// only what the scratchIgnoreGone test seam uses to plant a late entry.
+func createAt(dirfd int, name string) error {
+	fd, err := openatCreate(dirfd, name, unix.O_EXCL|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return err
+	}
+	return unix.Close(fd)
 }
 
 // renameFrom moves from, inside the scratch directory sub pins, to to, inside

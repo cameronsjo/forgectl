@@ -194,11 +194,15 @@ func (g *plaintextGuard) settle() {
 // cannot terminate the process while a deferred removal is half done.
 //
 // It retries until the directory is confirmed gone. On the signal path the
-// main goroutine (or the sops child) is still running, and os.RemoveAll lists
-// the entries, unlinks them, then removes the directory: a file created after
-// the last listing fails that final rmdir with ENOTEMPTY and the directory
-// survives. Once the directory itself is gone, every later write into it fails
-// with ENOENT — nothing but track creates it — so a bounded retry converges.
+// main goroutine (or the sops child) is still running. workDir.cleanup lists
+// the entries, removes all but the .gitignore, then removes the .gitignore and
+// the directory only if nothing else is left (env.RemoveScratchDir): a file
+// created after that listing fails the final rmdir with ENOTEMPTY, the
+// .gitignore is put back, and the directory survives, still ignored by git.
+// Once the directory itself is gone, every later write into it fails with
+// ENOENT — nothing but track creates it — so a bounded retry converges. An
+// entry that cannot be removed at all never converges: the retries run out
+// and the directory stays under its .gitignore.
 //
 // This is the path a normal return takes. It keeps the ciphertext backup when
 // the return came from inside the mutation span, meaning the target was never

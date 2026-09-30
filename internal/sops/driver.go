@@ -471,7 +471,7 @@ func newWorkDir(target env.Target) (*workDir, error) {
 
 	buf := make([]byte, nonceBytes)
 	if _, err := rand.Read(buf); err != nil {
-		_ = os.RemoveAll(dir)
+		_ = env.RemoveScratchDir(dir)
 		return nil, errors.New("could not generate a nonce")
 	}
 
