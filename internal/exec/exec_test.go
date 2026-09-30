@@ -370,3 +370,19 @@ func TestWithoutOutput_LeavesADirectlyNestedOriginalAlone(t *testing.T) {
 		t.Error("the copy must still reach the sentinel")
 	}
 }
+
+// TestHomebrewNoAutoUpdateReturnsAFreshMap: each call hands back its own map,
+// so a caller that mutates what it got (or merges onto it) cannot change what
+// any other brew caller sends (forgectl#851).
+//
+// Mutation that turns it red: return one package-level map from every call
+// (the second call sees the first call's rewrite).
+func TestHomebrewNoAutoUpdateReturnsAFreshMap(t *testing.T) {
+	first := HomebrewNoAutoUpdate()
+	first["HOMEBREW_NO_AUTO_UPDATE"] = "0"
+	first["EXTRA"] = "x"
+	second := HomebrewNoAutoUpdate()
+	if len(second) != 1 || second["HOMEBREW_NO_AUTO_UPDATE"] != "1" {
+		t.Errorf("HomebrewNoAutoUpdate() = %v after a caller mutated an earlier result, want only HOMEBREW_NO_AUTO_UPDATE=1", second)
+	}
+}
