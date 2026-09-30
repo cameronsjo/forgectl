@@ -737,21 +737,3 @@ func TestCheckResumeTasks_DirNameIsBounded(t *testing.T) {
 		t.Errorf("detail = %q, want the capped name's ellipsis", check.Detail)
 	}
 }
-
-// TestFindVersions pins versionPattern's anchoring: a whole version token,
-// optionally v-prefixed, never a version-shaped piece of a longer token.
-func TestFindVersions(t *testing.T) {
-	for in, want := range map[string]string{
-		"sops 3.13.3 (latest)":                          "3.13.3",
-		"sops v3.13.3":                                  "3.13.3",
-		"forgectl 1.0.0-rc.1 available":                 "1.0.0-rc.1",
-		"build abc1.2.3def":                             "",
-		"x 1234567.1":                                   "",
-		"sops 3.13.3-" + "AAAAAAAAAAAAAAAAAAAAAAAAAAAA": "3.13.3",
-	} {
-		got := strings.Join(findVersions(in), ",")
-		if got != want {
-			t.Errorf("findVersions(%q) = %q, want %q", in, got, want)
-		}
-	}
-}

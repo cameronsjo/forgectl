@@ -514,8 +514,8 @@ func failMarkerOpenWith(t *testing.T, errno syscall.Errno) {
 	t.Helper()
 	orig := openFindingsMarker
 	t.Cleanup(func() { openFindingsMarker = orig })
-	openFindingsMarker = func(path string, _ int, _ os.FileMode) (*os.File, error) {
-		return nil, &os.PathError{Op: "open", Path: path, Err: errno}
+	openFindingsMarker = func(_ *os.Root, name string) (*os.File, error) {
+		return nil, &os.PathError{Op: "openat", Path: name, Err: errno}
 	}
 }
 

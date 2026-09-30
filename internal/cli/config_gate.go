@@ -71,6 +71,20 @@ func resolveVerb(root *cobra.Command, first string) string {
 // the config file's settings, and the loader has already warned on stderr.
 var hookVerbs = map[string]string{"resume": "snapshot"}
 
+// invokesHookVerb reports whether args name a hookVerbs pair by its literal
+// names. Execute asks this before the command tree exists (see its startup
+// failure path), so an alias does not count; the hook wiring resume.go
+// documents uses the literal names.
+func invokesHookVerb(args []string) bool {
+	first, idx := firstNonFlag(args)
+	sub, ok := hookVerbs[first]
+	if !ok || idx < 0 {
+		return false
+	}
+	next, _ := firstNonFlag(args[idx+1:])
+	return next == sub
+}
+
 func configGateExempt(root *cobra.Command, args []string) bool {
 	first, idx := firstNonFlag(args)
 	verb := resolveVerb(root, first)

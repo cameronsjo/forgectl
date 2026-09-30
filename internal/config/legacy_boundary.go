@@ -12,6 +12,8 @@ import (
 	"unicode"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/cameronsjo/forgectl/internal/tomlerr"
 )
 
 // EnvSnapshot is the process environment used to resolve one legacy
@@ -119,7 +121,7 @@ func decodeLegacyLaunch(data []byte) (LaunchConfig, []string, error) {
 	var lc LaunchConfig
 	md, err := toml.Decode(string(data), &lc)
 	if err != nil {
-		return LaunchConfig{}, nil, fmt.Errorf("%w: %v", ErrLegacyMalformed, scrubTOMLError(err))
+		return LaunchConfig{}, nil, fmt.Errorf("%w: %v", ErrLegacyMalformed, tomlerr.Scrub(err))
 	}
 	undecoded := md.Undecoded()
 	keys := make([]string, 0, len(undecoded))

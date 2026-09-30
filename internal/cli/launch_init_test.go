@@ -143,7 +143,7 @@ func TestIntegration_LaunchInit_FromClaunch_ImportedProfileDrivesLaunch(t *testi
 	h := newLegacyHarness(t)
 	h.run(t, "init", "--from-claunch")
 
-	h.run(t, "-p", "hi")
+	h.run(t, "hi")
 
 	got := h.recordedArgs(t)
 	want := []string{
@@ -151,7 +151,7 @@ func TestIntegration_LaunchInit_FromClaunch_ImportedProfileDrivesLaunch(t *testi
 		"--allow-dangerously-skip-permissions",
 		"--model", "sonnet",
 		"--effort", "high", // derived; the legacy file predates the effort key entirely
-		"-p", "hi",
+		"hi",
 	}
 	if !equalArgs(got, want) {
 		t.Errorf("recorded args after import = %v, want %v (imported profile should drive launch identically to the legacy file it replaced)", got, want)

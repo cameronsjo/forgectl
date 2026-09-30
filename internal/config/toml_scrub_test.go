@@ -70,14 +70,6 @@ func TestScrubTOMLError_AllowlistOverRealDecoder(t *testing.T) {
 	}
 }
 
-// TestScrubTOMLError_UnknownMessageIsGeneric: a message family no entry
-// names renders the generic hint, never the message.
-func TestScrubTOMLError_UnknownMessageIsGeneric(t *testing.T) {
-	if got := tomlHintFor("some future message quoting \"ghp_SECRET\" and 98765432"); got != "syntax error" {
-		t.Errorf("tomlHintFor(unknown) = %q, want the generic hint", got)
-	}
-}
-
 // TestScrubTOMLError_EverySurface pins #687 across every surface a parse
 // error reaches: DecodeStrict (the loader's WARN, the parse gate via
 // DecodeError, doctor via ValidatePath), Describe (`forgectl config`), and
@@ -134,27 +126,24 @@ func TestScrubTOMLError_EverySurface(t *testing.T) {
 	}
 }
 
-// TestScrubTOMLError_PassesThroughTypeMismatch: a real decoder type mismatch
-// is not a ParseError; it names the key and the two types, never the value,
-// and is left as the decoder wrote it.
-func TestScrubTOMLError_PassesThroughTypeMismatch(t *testing.T) {
-	var cfg Config
-	_, raw := toml.Decode("log_level = 98765\n", &cfg)
-	if raw == nil {
-		t.Fatal("decoder accepted an int for a string field")
+// TestScrubTOMLError_TypeMismatchKeyIsCapped: a decoder type mismatch names
+// the full key path. In a user-keyed map a 400-rune key echoed twice before
+// #738; DecodeStrict now renders it from the fixed template, capped.
+func TestScrubTOMLError_TypeMismatchKeyIsCapped(t *testing.T) {
+	key := strings.Repeat("K", 400)
+	_, err := DecodeStrict([]byte("[launch.defaults.env]\n" + key + " = 98765\n"))
+	if err == nil {
+		t.Fatal("DecodeStrict accepted an int for a string env value")
 	}
-	var pe toml.ParseError
-	if errors.As(raw, &pe) {
-		t.Fatalf("fixture is a ParseError, want a type mismatch: %v", raw)
+	msg := err.Error()
+	if strings.Contains(msg, strings.Repeat("K", 81)) || !strings.Contains(msg, "…") {
+		t.Errorf("error = %q, want the key capped", msg)
 	}
-	if got := scrubTOMLError(raw); got != raw {
-		t.Errorf("scrubTOMLError rewrote a type mismatch: %v", got)
+	if !strings.HasSuffix(msg, ": wrong value type: found integer, want string") {
+		t.Errorf("error = %q, want the fixed type-mismatch hint", msg)
 	}
-	if strings.Contains(raw.Error(), "98765") {
-		t.Errorf("premise broken: the decoder's type mismatch echoes the value: %v", raw)
-	}
-	if scrubTOMLError(nil) != nil {
-		t.Error("scrubTOMLError(nil) != nil")
+	if strings.Contains(msg, "98765") {
+		t.Errorf("error echoes the value: %q", msg)
 	}
 }
 

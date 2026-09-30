@@ -615,7 +615,7 @@ func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (strin
 		return "", nil, fmt.Errorf("render markdown: %w", err)
 	}
 	input := dropDuplicateSVGNamespaces(buf.Bytes())
-	body := balanceFragment(string(sanitizer.SanitizeBytes(input)))
+	body := stripChromeClasses(balanceFragment(string(sanitizer.SanitizeBytes(input))))
 	// An unclosed skip-content element makes the sanitizer drop the rest of
 	// the document (forgectl#622). The sanitizer is left exactly as it is,
 	// because that skip set is what keeps denied SVG containers' children
