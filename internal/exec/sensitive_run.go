@@ -605,10 +605,10 @@ func readCapped(r io.Reader, limit int64, out chan<- BoundedOutput, overflow cha
 		case overflow <- struct{}{}:
 		default:
 		}
-		out <- BoundedOutput{buf: &outputBuf{data: buf[:limit]}, overflow: true}
+		out <- BoundedOutput{buf: newOutputBuf(buf[:limit]), overflow: true}
 		return
 	}
-	out <- BoundedOutput{buf: &outputBuf{data: buf[:n]}, forced: cut}
+	out <- BoundedOutput{buf: newOutputBuf(buf[:n]), forced: cut}
 }
 
 func readCappedMode(r io.Reader, limit int64, mode CaptureMode, out chan<- BoundedOutput, overflow chan<- struct{}) {
@@ -622,7 +622,7 @@ func readCappedMode(r io.Reader, limit int64, mode CaptureMode, out chan<- Bound
 		// a full pipe while RunSensitive waits for it. Empty complete output is
 		// deliberately invalid JSON, so the adapter reports an unreadable reply.
 		_, drainErr := io.Copy(io.Discard, r)
-		out <- BoundedOutput{buf: &outputBuf{}, forced: drainErr != nil}
+		out <- BoundedOutput{buf: newOutputBuf(nil), forced: drainErr != nil}
 		return
 	}
 	if int64(len(data)) > limit {
@@ -630,10 +630,10 @@ func readCappedMode(r io.Reader, limit int64, mode CaptureMode, out chan<- Bound
 		case overflow <- struct{}{}:
 		default:
 		}
-		out <- BoundedOutput{buf: &outputBuf{data: data[:limit]}, overflow: true}
+		out <- BoundedOutput{buf: newOutputBuf(data[:limit]), overflow: true}
 		return
 	}
-	out <- BoundedOutput{buf: &outputBuf{data: data}}
+	out <- BoundedOutput{buf: newOutputBuf(data)}
 }
 
 type projectedCmuxWorkspace struct {
