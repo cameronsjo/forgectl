@@ -334,6 +334,12 @@ func (b bitset) set(from, to int) {
 	}
 }
 
+// maxStraddleRounds bounds straddleLen's loop. Each round costs a scan of
+// every masked value and entry, and a stream built to drop one byte per round
+// (a tail of "b" with a masked value ending in "b") would otherwise run one
+// round per byte of the 64 KiB tail (#749).
+const maxStraddleRounds = 64
+
 // straddleLen returns how many leading bytes of s to drop so that no masked
 // value is split at the start of what remains. s is the tail of a longer
 // stream, so a value that began before the cut shows up here only as its end:
@@ -352,17 +358,31 @@ func (b bitset) set(from, to int) {
 // happens to start with the last byte of some value, or with a whole value)
 // only drops more of a tail that is already cut, which is harmless; a leading
 // run of a repeated short value is dropped whole, because the loop repeats.
+//
+// Cost (#749): the longest suffix of each value or entry that starts s is
+// found with one KMP pass over it, so a round is linear in the mask's size.
+// Probing every suffix length with HasPrefix, as this once did, was quadratic
+// in each value's length per round (24.8 s for a 4 KiB value against a 64 KiB
+// tail that drops one byte per round). Rounds are capped at
+// maxStraddleRounds: a tail that still starts with a fragment after that many
+// drops is dropped whole, which, like any extra drop, only loses more of a
+// tail that was already cut.
 func (m argMask) straddleLen(s string) int {
+	longest := 0
+	for _, e := range m.entries {
+		longest = max(longest, len(e)-1)
+	}
 	total := 0
-	for {
+	for round := 0; ; round++ {
+		if round == maxStraddleRounds {
+			return total + len(s)
+		}
+		// One failure table for the longest prefix of s any pattern can
+		// match; a shorter pattern prefix reuses its leading part.
+		fail := kmpFailure(s[:min(longest, len(s))])
 		n := 0
 		for _, v := range m.values {
-			for l := min(len(v)-1, len(s)); l > n; l-- {
-				if strings.HasPrefix(s, v[len(v)-l:]) {
-					n = l
-					break
-				}
-			}
+			n = max(n, suffixPrefix(v, s, len(v)-1, fail))
 		}
 		for _, e := range m.entries {
 			_, v, _ := strings.Cut(e, "=")
@@ -370,11 +390,8 @@ func (m argMask) straddleLen(s string) int {
 			// is the cut landing right after '=', where the bare value then
 			// starts the tail glued to whatever followed it. Dropping a tail
 			// that merely starts with the value is harmless.
-			for l := min(len(e)-1, len(s)); l > max(n, len(v)-1); l-- {
-				if strings.HasPrefix(s, e[len(e)-l:]) {
-					n = l
-					break
-				}
+			if l := suffixPrefix(e, s, len(e)-1, fail); l > len(v)-1 {
+				n = max(n, l)
 			}
 		}
 		// Neither the cut nor a drop respects rune boundaries; do not start
@@ -388,6 +405,30 @@ func (m argMask) straddleLen(s string) int {
 		s = s[n:]
 		total += n
 	}
+}
+
+// suffixPrefix returns the largest l <= limit such that the last l bytes of v
+// are the first l bytes of s. fail is kmpFailure of a prefix of s at least
+// min(limit, len(s)) long. It runs the KMP automaton for p = s[:limit] over v:
+// the state after v's last byte is the longest prefix of p that ends v.
+func suffixPrefix(v, s string, limit int, fail []int) int {
+	p := s[:max(0, min(limit, len(s)))]
+	if len(p) == 0 {
+		return 0
+	}
+	q := 0
+	for i := 0; i < len(v); i++ {
+		if q == len(p) {
+			q = fail[q-1]
+		}
+		for q > 0 && v[i] != p[q] {
+			q = fail[q-1]
+		}
+		if v[i] == p[q] {
+			q++
+		}
+	}
+	return q
 }
 
 // longestFirst sorts in place by descending length, ties in lexical order so

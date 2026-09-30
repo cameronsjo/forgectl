@@ -119,6 +119,35 @@ func readRecordFile(path string) ([]byte, error) {
 
 func (osRecordFS) Lstat(path string) (fs.FileInfo, error) { return os.Lstat(path) }
 
+// openRegularInRoot opens name, a single component, through root's pinned
+// descriptor and keeps it only if it is a regular file. It is the root-relative
+// counterpart of readRecordFile (forgectl#621), and it goes through the
+// package's one root-relative opener, openInRootNoFollowNonblock: an openat
+// against root's own descriptor with O_NOFOLLOW, and O_NONBLOCK for the open
+// only. So a symlink is refused even when it stays inside the root, which
+// root.Open would follow, and a FIFO swapped in after a caller's Lstat cannot
+// block the open under the lifecycle lock (forgectl#776).
+//
+// It returns the descriptor's own Fstat, so a caller can prove that the file
+// it reads is the one its Lstat checked (os.SameFile), not whatever the name
+// reached by the time of the open.
+func openRegularInRoot(root *os.Root, name string) (*os.File, fs.FileInfo, error) {
+	f, err := openInRootNoFollowNonblock(root, name)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, nil, &os.PathError{Op: "open", Path: name, Err: errRecordNotRegular}
+	}
+	return f, info, nil
+}
+
 // encodeBreadcrumb is the ONE encoder, paired with decodeBreadcrumb: indented
 // JSON, newline-terminated, bounded by maxBreadcrumbRecordBytes.
 func encodeBreadcrumb(bc Breadcrumb) ([]byte, error) {

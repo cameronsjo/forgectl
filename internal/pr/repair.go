@@ -391,7 +391,7 @@ func (c *Client) repairUndecodableLocked(ctx context.Context, opts RepairOpts, m
 	aside, err := c.setAsideUndecodableRecord(member)
 	if err != nil {
 		item.Outcome = repairOutcomeFailed
-		item.Error = err.Error()
+		item.Error = safeErrString(err)
 		c.completeRepairRow(rowID, row, err)
 		return item, err
 	}
@@ -566,7 +566,7 @@ func (c *Client) repairAdoptLocked(ctx context.Context, member breadcrumbMember,
 	}
 	if err := c.writeAdoptedRecord(member.path, bc, adopted.WindowID); err != nil {
 		item.Outcome = repairOutcomeFailed
-		item.Error = err.Error()
+		item.Error = safeErrString(err)
 		c.completeRepairRow(rowID, row, err)
 		return item, err
 	}
@@ -697,7 +697,7 @@ func (c *Client) repairRollbackLocked(ctx context.Context, opts RepairOpts, memb
 	// inside it.
 	if err := c.teardownLocked(ctx, member.path); err != nil {
 		item.Outcome = repairOutcomeFailed
-		item.Error = err.Error()
+		item.Error = safeErrString(err)
 		c.completeRepairRow(rowID, row, err)
 		slog.Error("A repair rollback failed partway; the clean room is recoverable from the repair audit log.",
 			"ref", ref.String(), "workspace", bc.Workspace, "log", c.repairLogPath(), "error", err)
@@ -790,7 +790,7 @@ func (c *Client) repairForgetLocked(ctx context.Context, opts RepairOpts, member
 	// gives: the pair opened just above is this mutation's only row.
 	if err := c.teardownLocked(ctx, member.path); err != nil {
 		item.Outcome = repairOutcomeFailed
-		item.Error = err.Error()
+		item.Error = safeErrString(err)
 		c.completeRepairRow(rowID, row, err)
 		return item, fmt.Errorf("forget %s: %w", ref.String(), err)
 	}
@@ -835,7 +835,7 @@ func (c *Client) completeRepairRow(id string, row RepairRow, cause error) {
 	row.Error = ""
 	if cause != nil {
 		row.Outcome = repairOutcomeFailed
-		row.Error = termsafe.SafeLine(cause.Error())
+		row.Error = termsafe.SafeLine(safeErrString(cause))
 	}
 	if err := c.appendRepairRowLocked(row); err != nil {
 		slog.Error("Failed to complete a repair audit row; the intent row is left dangling, which is the honest record.",
