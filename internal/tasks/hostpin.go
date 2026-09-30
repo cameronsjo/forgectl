@@ -326,7 +326,10 @@ func pinnedDialerWithClassifier(
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		_, port, err := net.SplitHostPort(addr)
 		if err != nil {
-			return nil, fmt.Errorf("%w: cannot parse dial address %q: %v", ErrHostRefused, addr, err)
+			// net's parse error names the address again, so both are
+			// escaped and capped (#810).
+			return nil, fmt.Errorf("%w: cannot parse dial address %s: %s", ErrHostRefused,
+				termsafe.QuoteArgMax(addr, 0), termsafe.SafeLineMax(err.Error(), resolveErrMaxRunes))
 		}
 		var lastErr error
 		for _, ip := range pinned {

@@ -26,8 +26,13 @@ type Error struct {
 	cause   error
 }
 
+// Error renders Message through redact.Text before printable (#816), like
+// every other child-stderr text forgectl renders: herdr can echo a value it
+// was handed, and a line holding a credential shape reads as [redacted].
+// redact.Text works per line, so it runs first, while the line breaks that
+// printable drops still mark its boundaries.
 func (e *Error) Error() string {
-	return "herdr: " + printable(e.Code) + ": " + printable(e.Message)
+	return "herdr: " + printable(e.Code) + ": " + printable(redact.Text(e.Message))
 }
 
 // printable drops control characters. herdr's text can echo pane-controlled

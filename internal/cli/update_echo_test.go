@@ -19,11 +19,15 @@ package cli
 //       escaped by JSONEncoder)
 //   [x] the transcript path is quoted with QuotePath, so a path holding a
 //       space copy-pastes whole (#808)
-//   [x] the path is printed once on each stream: the run's first line on
-//       stderr, the summary's last line on stdout, and the returned error;
-//       FAIL lines and brew's note only say "see the transcript" (#808)
+//   [x] the path is named once by each of the run's own writes: its first
+//       line on stderr, the summary's last line on stdout, and the returned
+//       error (which the root handler also prints to stderr, so a human sees
+//       it twice there); FAIL lines and brew's note only say "see the
+//       transcript" (#808)
 //   [x] a failed single-command step's stdout (CommandError.Output) is in the
 //       transcript file, escaped, and a sequence's is not written twice (#808)
+//   [x] --json carries that stdout too, in the step's output field, raw
+//       (#810)
 //   [x] the transcript file names a failed sequence command once, not
 //       "brew update: brew update: …", while --json keeps that text (#808)
 
@@ -304,5 +308,36 @@ func TestUpdateRun_TranscriptPointerQuotesAPathWithASpace(t *testing.T) {
 		if !strings.Contains(text, quoted) {
 			t.Errorf("%s should name the transcript as %s: %q", where, quoted, text)
 		}
+	}
+}
+
+// #810: the no-transcript pointer says "rerun with --json … for the details",
+// so --json must carry a failed single-command step's stdout, which only its
+// CommandError holds. It is value-preserving, as the rest of --json is.
+//
+// Mutation: drop the failedCommandOutput append from writeUpdateJSON and
+// output is empty.
+func TestUpdateRun_JSONCarriesAFailedSingleCommandStepsOutput(t *testing.T) {
+	captureDebugLog(t)
+	fr := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "", &exec.CommandError{Name: name, Args: args, Stderr: "GOERR", Output: "GOOUT \x1b[2J", ExitCode: 1}
+	}}
+	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("go", true, nil)}))
+
+	stdout, _, _ := runUpdate(t, client, config.UpdateConfig{LogDir: t.TempDir()}, "run", "--yes", "--json")
+	var report struct {
+		Steps []struct {
+			Failed bool   `json:"failed"`
+			Output string `json:"output"`
+		} `json:"steps"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil || len(report.Steps) != 1 {
+		t.Fatalf("stdout is not the one-step JSON report: %v %q", err, stdout)
+	}
+	if !report.Steps[0].Failed || report.Steps[0].Output != "GOOUT \x1b[2J" {
+		t.Errorf("json step = %+v, want failed with the command's stdout", report.Steps[0])
+	}
+	if strings.ContainsRune(stdout, 0x1b) {
+		t.Errorf("the JSON stream carries a raw control: %q", stdout)
 	}
 }

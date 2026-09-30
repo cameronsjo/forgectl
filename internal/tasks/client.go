@@ -219,7 +219,8 @@ func (c *Client) do(
 		return nil, fmt.Errorf("%w: %s -> %d", ErrUnexpectedStatus, path, resp.StatusCode)
 	}
 	if readErr != nil {
-		return nil, fmt.Errorf("%w: read body: %v", ErrUnreachable, readErr)
+		// Transport text, the same class as the dial error above (#810).
+		return nil, fmt.Errorf("%w: read body: %s", ErrUnreachable, termsafe.SafeLineMax(readErr.Error(), transportErrMaxRunes))
 	}
 	return body, nil
 }

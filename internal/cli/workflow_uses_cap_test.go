@@ -47,3 +47,39 @@ func TestWorkflowStatus_CapsUses(t *testing.T) {
 		t.Errorf("status echoes uses uncapped: %q", out.String())
 	}
 }
+
+// TestPrintPlan_ArgsKeepElementBoundaries is #816: the review joined a run
+// step's args with spaces, so ["a b"] and ["a","b"] printed the same line and
+// a hostile file could show the reviewer an argv split it does not run. The
+// args also print in full, uncapped (#782).
+//
+// Mutation: restore strings.Join(s.Args, " ") and the two plans render
+// identically; wrap each element in QuoteArgMax and the long arg's tail is cut.
+// The globs line gets the same treatment: restore its raw ", " join and
+// ["a, b"] and ["a","b"] render identically.
+func TestPrintPlan_ArgsKeepElementBoundaries(t *testing.T) {
+	render := func(args ...string) string {
+		var out bytes.Buffer
+		printPlan(&out, workflow.Plan{Name: "n", Version: "1", Steps: []workflow.PlanStep{{Cmd: "tool", Args: args}}})
+		return out.String()
+	}
+	one, two := render("a b"), render("a", "b")
+	if one == two {
+		t.Fatalf("[\"a b\"] and [\"a\",\"b\"] render identically: %q", one)
+	}
+	if !strings.Contains(one, `args: "a b"`) || !strings.Contains(two, `args: "a" "b"`) {
+		t.Errorf("args not quoted per element:\n%s\n%s", one, two)
+	}
+	globs := func(g ...string) string {
+		var out bytes.Buffer
+		printPlan(&out, workflow.Plan{Name: "n", Version: "1", Steps: []workflow.PlanStep{{Uses: "strip", Globs: g}}})
+		return out.String()
+	}
+	if g1, g2 := globs("a, b"), globs("a", "b"); g1 == g2 || !strings.Contains(g2, `globs: "a", "b"`) {
+		t.Errorf("globs not quoted per element:\n%s\n%s", g1, g2)
+	}
+	long := strings.Repeat("x", 300) + "TAIL"
+	if got := render(long); !strings.Contains(got, long) {
+		t.Errorf("dry-run review cut an arg; it must print args in full: %q", got)
+	}
+}

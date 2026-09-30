@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/projects"
@@ -153,15 +154,7 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 		return WithExitCode(termsafe.Error(err), 2)
 	}
 
-	built, err := launch.BuildInvocation(launch.InvocationRequest{
-		Config:      deps.Cfg.Launch,
-		CWD:         target,
-		Args:        nil,
-		BaseEnv:     surfaceLaunchEnvironment(os.Environ()),
-		InjectedEnv: injected,
-		UnsetEnv:    unset,
-		Resolve:     launch.ResolveBinary,
-	})
+	built, err := launch.BuildInvocation(surfaceInvocationRequest(deps.Cfg.Launch, target, injected, unset))
 	if err != nil {
 		return err
 	}
@@ -209,4 +202,23 @@ func displayNameFor(explicit, target string) string {
 		return explicit
 	}
 	return filepath.Base(target)
+}
+
+// surfaceInvocationRequest is the harness request `forgectl surface launch`
+// builds. The harness runs in a fresh terminal pane, so its stdout IS a
+// terminal, and StdoutTerminal says so explicitly (#816): the zero value
+// means "not a terminal", which lets `--output-format` alone select the print
+// posture (forgectl#795). With no args that choice never arises today, but a
+// later args field must not inherit a non-TTY default for a TTY pane.
+func surfaceInvocationRequest(cfg config.LaunchConfig, target string, injected map[string]string, unset []string) launch.InvocationRequest {
+	return launch.InvocationRequest{
+		Config:         cfg,
+		CWD:            target,
+		Args:           nil,
+		BaseEnv:        surfaceLaunchEnvironment(os.Environ()),
+		InjectedEnv:    injected,
+		UnsetEnv:       unset,
+		Resolve:        launch.ResolveBinary,
+		StdoutTerminal: true,
+	}
 }
