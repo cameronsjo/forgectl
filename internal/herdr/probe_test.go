@@ -237,8 +237,9 @@ func TestSessionGateErrorWinsAndSkipsTheRunner(t *testing.T) {
 // the terminal through the error. The echo now stops at
 // forkProbeStderrMaxRunes and says so, and the head survives.
 //
-// Mutation: swap termsafe.SafeLineMax back to printable in CheckFork's exit
-// arm and the length check fails with the whole 100k-rune stderr in the text.
+// Mutation: swap termsafe.SafeLineMax back to termsafe.SafeLine in
+// CheckFork's exit arm and the length check fails with the whole 100k-rune
+// stderr in the text.
 func TestCheckForkCapsFailingStderr(t *testing.T) {
 	stderr := "error: herdr exploded\n" + strings.Repeat("x\u202e", 50_000)
 	probe := runnerFor("", &exec.CommandError{Name: Binary, ExitCode: 3, Stderr: stderr})

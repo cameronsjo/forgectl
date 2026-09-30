@@ -134,11 +134,11 @@ func cloneOrg(ctx context.Context, client *projects.Client, cmd *cobra.Command, 
 	for _, r := range repos {
 		if err := cloneOnly(ctx, client, cmd, r, "", dryRun); err != nil {
 			// Best-effort diagnostic write, same as every stderr note here.
-			// err goes through termsafe too: this line bypasses the root
+			// err goes through termsafe and safeText too: this line bypasses the root
 			// error handler, so nothing else would escape a path or cause
 			// that carries a control (#658).
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "error: %s/%s: %v\n",
-				safeTitle(r.Owner), safeTitle(r.Name), termsafe.Error(err))
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "error: %s/%s: %s\n",
+				safeTitle(r.Owner), safeTitle(r.Name), safeText(termsafe.Error(err).Error()))
 			failed++
 		}
 	}

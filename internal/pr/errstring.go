@@ -13,6 +13,20 @@ import (
 const errTextUnavailable = "error text unavailable: its Error method panicked " +
 	"(an os.Root operation racing a symlink swap is the known cause)"
 
+// recordTextMaxRunes caps a line of free text a record or report field keeps:
+// an error, a refusal, a repair reason (#934). The field is escaped at the
+// source, so --json, the breadcrumb and the repair log all carry the escaped
+// form; the cap keeps a multi-megabyte stderr out of all three. It equals
+// internal/cli's textMaxRunes, so the text printer never cuts it a second
+// time.
+const recordTextMaxRunes = 1280
+
+// recordText is s made one inert terminal line and bounded for a record or
+// report field.
+func recordText(s string) string {
+	return termsafe.SafeLineMax(s, recordTextMaxRunes)
+}
+
 // safeErrString is err.Error() for an error whose Error method may panic.
 // Go 1.26's os.Root.RemoveAll can leak its internal errSymlink, wrapped in a
 // *fs.PathError, when a directory it is walking is swapped for a symlink

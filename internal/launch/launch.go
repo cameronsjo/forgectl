@@ -325,21 +325,27 @@ func MergeMaps(base, over map[string]string) map[string]string {
 	return out
 }
 
+// bannerMaxRunes caps the launch banner line (#934). The banner is an
+// informational record printed as the exec happens, not a review gate, so it
+// is bounded like any other line; 4096 runes still shows a profile carrying
+// several add_dir paths at termsafe.PathEchoMaxRunes each whole.
+const bannerMaxRunes = 4096
+
 // Banner writes the informational "→ claude …" line. It always goes to stderr so
 // it never corrupts piped stdout (e.g. `forgectl launch agents --json | jq`).
 //
 // The argv is config-derived and only partly allowlisted — Profile.Validate
 // constrains effort and the Codex fields, but model, permission_mode, and
 // add_dir reach the banner verbatim — so the whole line goes through
-// termsafe.SafeLine before it reaches a terminal. Otherwise an escape sequence in
-// config.toml could clear the line and forge a different posture than the one
-// about to exec.
+// termsafe.SafeLineMax (bannerMaxRunes) before it reaches a terminal.
+// Otherwise an escape sequence in config.toml could clear the line and forge
+// a different posture than the one about to exec.
 //
 // The line is an informational record, not a copy-pasteable command:
 // strings.Join does no shell quoting, so an add_dir containing spaces renders
 // as two ambiguous tokens.
 func Banner(w io.Writer, args []string) {
-	_, _ = fmt.Fprintln(w, termsafe.SafeLine("→ claude "+strings.Join(args, " ")))
+	_, _ = fmt.Fprintln(w, termsafe.SafeLineMax("→ claude "+strings.Join(args, " "), bannerMaxRunes))
 }
 
 // HarnessBanner writes an informational launch line for any supported CLI. Sanitized
@@ -349,7 +355,7 @@ func HarnessBanner(w io.Writer, harness string, args []string) {
 	if len(args) > 0 {
 		line += " " + strings.Join(args, " ")
 	}
-	_, _ = fmt.Fprintln(w, termsafe.SafeLine(line))
+	_, _ = fmt.Fprintln(w, termsafe.SafeLineMax(line, bannerMaxRunes))
 }
 
 // Exec replaces the current process with the selected harness. On success it never returns, so
