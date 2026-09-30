@@ -82,7 +82,7 @@ func helperMain(mode string) int {
 		// then stall until killed. The marker lets a test kill the child
 		// once the bytes are in the pipe, without the parent reading them.
 		_, _ = fmt.Fprint(os.Stdout, "PARTIAL")
-		f, err := os.Create(arg)
+		f, err := os.Create(filepath.Clean(arg)) //nolint:gosec // G703: a test fixture path the test itself passes
 		if err != nil {
 			return 95
 		}
