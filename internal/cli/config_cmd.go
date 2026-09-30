@@ -507,9 +507,10 @@ func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, h
 		_, _ = fmt.Fprintf(out, "  launch.permission    %s\n", safeTitle(resolved.PermissionMode))
 		fmt.Fprintf(out, "  launch.allow_danger  %v\n", resolved.AllowDanger != nil && *resolved.AllowDanger)
 	}
-	// SafeLine, not QuotePath: resolveLaunchView overloads BinaryPath with
-	// "(unresolved: <error>)" when resolution fails, so it is not always a path.
-	_, _ = fmt.Fprintf(out, "  %-20s %s\n", resolved.BinaryLabel, safeColumnPath(resolved.BinaryPath))
+	// safeText, not a path helper: resolveLaunchView overloads BinaryPath with
+	// "(unresolved: <error>)" when resolution fails, so it is not always a
+	// path, and a middle cut would drop the error's own words.
+	_, _ = fmt.Fprintf(out, "  %-20s %s\n", resolved.BinaryLabel, safeText(resolved.BinaryPath))
 	fmt.Fprintf(out, "  launch.projects      %d configured\n", resolved.Projects)
 
 	if len(rep.Unrecognized) > 0 {

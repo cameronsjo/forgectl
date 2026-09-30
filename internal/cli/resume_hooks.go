@@ -339,7 +339,9 @@ func printHooksPreview(ctx context.Context, out io.Writer, deps module.Deps, har
 		if firing[h.Identity()] {
 			verb = "would fire"
 		}
-		if _, err := fmt.Fprintln(out, safeText(fmt.Sprintf("%s: %s hook %s (timeout %s)", harness, verb, h.Identity(), h.Timeout))); err != nil {
+		// Escaped and NOT capped: the preview says which hook commands would
+		// run, and a cut would hide the tail of one (#782's rule).
+		if _, err := fmt.Fprintln(out, termsafe.SafeLine(fmt.Sprintf("%s: %s hook %s (timeout %s)", harness, verb, h.Identity(), h.Timeout))); err != nil {
 			return err
 		}
 	}

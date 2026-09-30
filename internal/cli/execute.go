@@ -126,7 +126,7 @@ func Execute(ctx context.Context) error {
 		// second line beneath them is noise on every failed claude run. Its
 		// exit code still propagates; only the message is dropped.
 		if err != nil && !errors.Is(err, errHarnessExit) {
-			fmt.Fprintln(os.Stderr, termsafe.SafeLine(err.Error()))
+			fmt.Fprintln(os.Stderr, safeText(err.Error()))
 		}
 		return err
 	}
@@ -498,7 +498,7 @@ func runAction(ctx context.Context, deps module.Deps, root *cobra.Command, clien
 // prints ("pr <ref>"): Use-line text this binary compiled in, joined plainly
 // so a placeholder reads as a placeholder rather than as a quoted argument.
 func hubDollarLine(th theme.Theme, argv []string) string {
-	return th.Styles().Muted.Render(termsafe.SafeLine("$ " + meta.AppName + " " + strings.Join(argv, " ")))
+	return th.Styles().Muted.Render(safeText("$ " + meta.AppName + " " + strings.Join(argv, " ")))
 }
 
 // hubRunLine is the echo line for an argv the hub is about to run. That argv
@@ -517,7 +517,7 @@ func runHubVerb(ctx context.Context, deps module.Deps, root *cobra.Command, argv
 	if rest, ok := launchIntercept(argv); ok {
 		if handled, err := runLaunch(deps, rest); handled {
 			if err != nil {
-				fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(err.Error()))
+				fmt.Fprintln(os.Stderr, meta.AppName+": "+safeText(err.Error()))
 			}
 			return err
 		}

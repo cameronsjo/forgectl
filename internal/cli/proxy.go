@@ -209,7 +209,7 @@ func newProxyUseCmd(deps module.Deps) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			profile, ok := deps.Cfg.Proxy.Profiles[args[0]]
 			if !ok {
-				return fmt.Errorf("proxy profile %s is not configured", termsafe.QuoteText(args[0]))
+				return fmt.Errorf("proxy profile %s is not configured", termsafe.QuoteArgMax(args[0], termsafe.ArgEchoMaxRunes))
 			}
 			script, err := proxypkg.Use(profile)
 			if err != nil {

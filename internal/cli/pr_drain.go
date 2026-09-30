@@ -178,7 +178,7 @@ func writeDrainHuman(out io.Writer, report pr.DrainReport, dryRun bool, next tim
 			if it.Outcome == "refused" {
 				continue
 			}
-			refs = append(refs, it.Ref)
+			refs = append(refs, safeTitle(it.Ref))
 		}
 		if len(refs) == 0 {
 			_, _ = fmt.Fprintf(out, "%d queued, %d free — would launch nothing\n", report.Queued, report.Free)
@@ -203,7 +203,7 @@ func writeDrainHuman(out io.Writer, report pr.DrainReport, dryRun bool, next tim
 		if it.Outcome == "launched" {
 			continue
 		}
-		_, _ = fmt.Fprintf(out, "  %s: %s -> %s: %s\n", it.Ref, it.FromPhase, it.ToPhase, safeText(it.Error))
+		_, _ = fmt.Fprintf(out, "  %s: %s -> %s: %s\n", safeTitle(it.Ref), safeLabel(it.FromPhase), safeLabel(it.ToPhase), safeText(it.Error))
 	}
 }
 
@@ -215,7 +215,7 @@ func writeDrainRefusedItems(out io.Writer, report pr.DrainReport) {
 		if it.Outcome != "refused" {
 			continue
 		}
-		_, _ = fmt.Fprintf(out, "  %s: refused: %s\n", it.Ref, safeText(it.Error))
+		_, _ = fmt.Fprintf(out, "  %s: refused: %s\n", safeTitle(it.Ref), safeText(it.Error))
 	}
 }
 

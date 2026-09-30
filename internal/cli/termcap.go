@@ -8,8 +8,9 @@ import "github.com/cameronsjo/forgectl/internal/termsafe"
 // disk-, server- or subprocess-sourced value has a length nobody at the
 // terminal chose (#891, #894). Text printers reach termsafe through the
 // helpers below, one per field class; TestTextPrintersUseCappedHelpers pins
-// that no other function in the package calls an uncapped termsafe.Safe*
-// primitive, except its allowlisted entries, each with its reason.
+// that no other function in the package uses an uncapped termsafe primitive
+// (SafeLine, QuoteText, QuotePathIfUnsafe, or a *Max call without a positive
+// constant cap), except its allowlisted entries, each with its reason.
 //
 // Each cap counts escaped OUTPUT runes (SafeLineMax) or, for paths, input
 // runes (QuotePathMax), and a cut value says it was cut. --json surfaces carry

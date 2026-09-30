@@ -84,7 +84,7 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 				if asJSON {
 					return
 				}
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "indexing %s …\n", safeLabel(progressRoot))
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "indexing %s …\n", safeColumnPath(progressRoot))
 			})
 			defer timer.Stop()
 

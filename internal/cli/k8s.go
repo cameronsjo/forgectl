@@ -141,7 +141,7 @@ var k8sWorkloadPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`)
 // token) to an attacker-chosen server. Rejecting a leading '-' outright, and
 // constraining both halves to kubectl's own charset, closes that off.
 func validateK8sWorkload(workload string) (name string, err error) {
-	invalid := fmt.Errorf("workload reference %s must be kind/name (e.g. deployment/api)", termsafe.QuoteText(workload))
+	invalid := fmt.Errorf("workload reference %s must be kind/name (e.g. deployment/api)", termsafe.QuoteArgMax(workload, termsafe.ArgEchoMaxRunes))
 	if strings.HasPrefix(workload, "-") {
 		return "", invalid
 	}
@@ -393,9 +393,9 @@ func setK8sLogsHelperFlag(invocation *k8sLogsInvocation, name, value string) err
 			invocation.color = value
 			return nil
 		default:
-			return fmt.Errorf("unknown color mode %s (want auto, always, or never)", termsafe.QuoteText(value))
+			return fmt.Errorf("unknown color mode %s (want auto, always, or never)", termsafe.QuoteArgMax(value, termsafe.ArgEchoMaxRunes))
 		}
 	default:
-		return fmt.Errorf("unknown forgectl k8s logs flag %s", termsafe.QuoteText(name))
+		return fmt.Errorf("unknown forgectl k8s logs flag %s", termsafe.QuoteArgMax(name, termsafe.ArgEchoMaxRunes))
 	}
 }

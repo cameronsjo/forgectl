@@ -165,14 +165,29 @@ func QuoteArgMax(s string, maxRunes int) string {
 	if maxRunes < 1 {
 		maxRunes = ArgEchoMaxRunes
 	}
+	return QuoteTextMax(s, maxRunes)
+}
+
+// QuoteTextMax is QuoteText over at most maxRunes runes of text, followed by
+// an ellipsis outside the closing quote when text was longer (#928). It is
+// the capped form of QuoteText for a quoted value in a line of text output;
+// QuoteArgMax is it with the argv-echo default.
+//
+// The cut counts INPUT runes, before escaping, so it never splits an escape.
+// Invalid UTF-8 counts one rune per bad byte, as range does. maxRunes < 1
+// means no cap.
+func QuoteTextMax(text string, maxRunes int) string {
+	if maxRunes < 1 {
+		return QuoteText(text)
+	}
 	n := 0
-	for i := range s {
+	for i := range text {
 		if n == maxRunes {
-			return QuoteText(s[:i]) + argEchoEllipsis
+			return QuoteText(text[:i]) + argEchoEllipsis
 		}
 		n++
 	}
-	return QuoteText(s)
+	return QuoteText(text)
 }
 
 // QuotePath is QuoteText named for filesystem sinks, where the surrounding

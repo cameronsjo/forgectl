@@ -497,7 +497,7 @@ func parseParams(raw []string) (map[string]string, error) {
 // definition could otherwise rewrite the very lines describing it.
 func printPlan(out io.Writer, plan workflow.Plan) {
 	fmt.Fprintf(out, "workflow %s@%s — %d step(s):\n",
-		safeLabel(plan.Name), safeLabel(plan.Version), len(plan.Steps))
+		termsafe.SafeLine(plan.Name), termsafe.SafeLine(plan.Version), len(plan.Steps))
 	for i, s := range plan.Steps {
 		// Capped (#778): --dry-run skips the registry check, so uses is
 		// unvetted file text of any length; a verb name never needs more.
@@ -537,10 +537,13 @@ func quoteEach(items []string) []string {
 
 // printField writes one non-empty plan-step field as an indented line. The
 // escaping lives here rather than at each call site so a field added to
-// printPlan's list cannot be the one that ships raw.
+// printPlan's list cannot be the one that ships raw. It is escaped and NOT
+// capped (#782, #927 review): the dry run is the review of a file about to
+// be trusted, and a cut would let a hostile file push the tail of a cmd,
+// repo or ref behind the truncation marker.
 func printField(out io.Writer, name, value string) {
 	if value == "" {
 		return
 	}
-	_, _ = fmt.Fprintf(out, "     %s: %s\n", name, safeText(value))
+	_, _ = fmt.Fprintf(out, "     %s: %s\n", name, termsafe.SafeLine(value))
 }

@@ -126,7 +126,7 @@ func runWorkflowBless(cmd *cobra.Command, deps module.Deps, name string) error {
 	for i, s := range wf.Steps {
 		def, ok := registry[s.Uses]
 		if !ok {
-			return fmt.Errorf("workflow %q: step %d uses unknown verb %s — this binary cannot execute it, so it will not be blessed", name, i, termsafe.QuoteArgMax(s.Uses, 0))
+			return fmt.Errorf("workflow %q: step %d uses unknown verb %s — this binary cannot execute it, so it will not be blessed", name, i, termsafe.QuoteArgMax(s.Uses, termsafe.ArgEchoMaxRunes))
 		}
 		guarded, err := workflow.GuardedValues(s, def.GuardedFields)
 		if err != nil {
@@ -447,7 +447,7 @@ func runTrustRebuild(cmd *cobra.Command, deps module.Deps) error {
 				// Capped (#778): the store is anchor-signed, but its key_id and
 				// machine are still file text DecodeStore never validates.
 				return fmt.Errorf("the current trust store also enrolls %s (%s); rebuilding would silently drop it — remove that peer deliberately before rebuilding, or re-establish trust (issue #86)",
-					termsafe.QuoteArgMax(k.KeyID, 0), termsafe.QuoteArgMax(k.Machine, 0))
+					termsafe.QuoteArgMax(k.KeyID, termsafe.ArgEchoMaxRunes), termsafe.QuoteArgMax(k.Machine, termsafe.ArgEchoMaxRunes))
 			}
 		}
 	case errors.Is(serr, bless.ErrTrustStoreMissing):

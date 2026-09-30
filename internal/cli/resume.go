@@ -505,7 +505,9 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 		_, _ = fmt.Fprintf(out, "session %s\n", safeLabel(s.ID))
 		_, _ = fmt.Fprintf(out, "name    %s\n", safeName(s))
 		_, _ = fmt.Fprintf(out, "cwd     %s\n", safeColumnPath(s.Cwd))
-		_, _ = fmt.Fprintf(out, "exec    %s %s\n", safeColumnPath(claudePath), safeText(strings.Join(args, " ")))
+		// Escaped and NOT capped: this line is the review of what resume would
+		// exec, and a cut would hide the tail of the argv (#782's rule).
+		_, _ = fmt.Fprintf(out, "exec    %s %s\n", termsafe.SafeLine(claudePath), termsafe.SafeLine(strings.Join(args, " ")))
 		_, _ = fmt.Fprintf(out, "tasks   %d held%s\n", len(s.Tasks), forkTaskNote(fork))
 		if blocked != nil {
 			_, _ = fmt.Fprintf(out, "blocked live — pid %d; add --fork to branch instead\n", s.Pid)

@@ -146,7 +146,7 @@ func printOutdated(out io.Writer, list []resume.OutdatedSession, asJSON, tty boo
 	for _, s := range list {
 		version := safeLabel(s.Version)
 		if s.VersionUnparseable {
-			version = termsafe.QuoteText(s.Version) + " (unparseable)"
+			version = termsafe.QuoteTextMax(s.Version, labelMaxRunes) + " (unparseable)"
 		}
 		pane := safeLabel(s.Pane)
 		if pane == "" {
