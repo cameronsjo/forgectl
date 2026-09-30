@@ -655,9 +655,12 @@ func maskComment(s string) string {
 // over-masking only costs legibility — and KindMalformed is exactly where
 // hand-mangled input lands, which is redact's primary audience. A blank
 // line never reaches here (Parse classifies it KindBlank), but the check is
-// kept explicit rather than assumed.
+// kept explicit rather than assumed — and it uses Parse's own blank rule
+// (spaces and tabs only). strings.TrimSpace would also treat VT, FF, NBSP
+// and NEL as blank and echo them verbatim, the one place a source byte other
+// than a space or tab could reach redact's output.
 func redactMalformed(l Line) string {
-	if strings.TrimSpace(l.Raw[0]) == "" {
+	if strings.TrimLeft(l.Raw[0], " \t") == "" {
 		return l.Raw[0]
 	}
 	return "****"

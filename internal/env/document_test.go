@@ -808,6 +808,22 @@ func TestDocument_Redacted_MalformedMasked(t *testing.T) {
 	assertNoSecretInOutput(t, "1BAD", "", redacted)
 }
 
+// A line of only non-space/tab whitespace (VT, FF, NBSP, NEL) is not blank
+// to Parse, so it lands as KindMalformed. redactMalformed must mask it rather
+// than echo it: redact's output carries no source byte other than a space or
+// a tab.
+func TestDocument_Redacted_ExoticWhitespaceLineMasked(t *testing.T) {
+	for _, ws := range []string{"\v", "\f", "\u00a0", " \u0085\t"} {
+		doc, err := Parse(strings.NewReader("A=1\n" + ws + "\nB=2\n"))
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", ws, err)
+		}
+		if got, want := string(doc.Redacted()), "A=****\n****\nB=****\n"; got != want {
+			t.Errorf("Redacted() with a %q line = %q, want %q", ws, got, want)
+		}
+	}
+}
+
 func TestRedacted_TruncatedPEM_MasksAllBodyLines(t *testing.T) {
 	// An unterminated double-quoted multiline value: the opening line's
 	// quote never closes before EOF. Both body lines below are PURE
