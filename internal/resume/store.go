@@ -145,7 +145,7 @@ func Delete(dir, id string) error {
 		return fmt.Errorf("refusing to delete record with invalid session id %q", id)
 	}
 	if err := os.Remove(filepath.Join(dir, id+".json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("delete record %s: %w", id, err)
+		return fmt.Errorf("delete record %s: %w", id, termsafe.Error(err))
 	}
 	return nil
 }
