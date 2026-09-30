@@ -25,7 +25,8 @@ var fakeTokenBody = strings.Repeat("a1B2", 9)
 // cases post); drop
 // the html.UnescapeString loop (the reference cases post), or cap it at one
 // round (the double-encoded case posts); drop
-// unescapeMarkdownPunct (the markdown case posts).
+// unescapeMarkdownPunct (the markdown case posts); drop the raw-text match
+// from scanReviewForTokens (the legacy-entity cases post).
 func TestPostReview_TokenShapedReviewIsRefused(t *testing.T) {
 	tokens := map[string]string{
 		"personal":     "gh" + "p_" + fakeTokenBody,
@@ -57,6 +58,10 @@ func TestPostReview_TokenShapedReviewIsRefused(t *testing.T) {
 		"ref-spelled zwsp":   "gh" + "p_" + fakeTokenBody[:10] + "&#8203;" + fakeTokenBody[10:],
 		// A markdown backslash escape renders as the bare punctuation.
 		"markdown escape": "gh" + "p\\_" + fakeTokenBody,
+		// A legacy entity needs no semicolon, so decoding eats the token's
+		// leading "g": only the raw-text match sees these.
+		"legacy entity reg":   "&re" + "gh" + "p_" + fakeTokenBody,
+		"legacy entity szlig": "&szli" + "github" + "_pat_" + fakeTokenBody + "_" + fakeTokenBody,
 	}
 	for name, token := range tokens {
 		t.Run(name, func(t *testing.T) {

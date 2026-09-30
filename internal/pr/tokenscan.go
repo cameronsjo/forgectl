@@ -91,8 +91,9 @@ func stripFormatChars(s string) string {
 // invisibleInToken reports whether r is stripped before the second match:
 // exactly the runes in category Cf, Other_Default_Ignorable_Code_Point, or
 // Variation_Selector. Unicode derives Default_Ignorable_Code_Point from those
-// three sets (less White_Space and a few Cf prepended-concatenation and
-// Egyptian format marks, which this keeps stripping), and browsers render a
+// three sets (less White_Space and a few Cf prepended-concatenation,
+// Egyptian format and interlinear annotation marks, U+FFF9-U+FFFB among
+// them, which this keeps stripping), and browsers render a
 // default-ignorable code point as nothing, so one placed inside a token
 // splits it for a plain match but not for a reader (forgectl#764). That
 // covers the format characters, U+034F, the Hangul fillers, the Khmer
@@ -101,10 +102,17 @@ func stripFormatChars(s string) string {
 //
 // Property tables, not a hand list, so a code point Unicode adds to the set
 // is stripped when the Go toolchain's tables pick it up. Stripping more than
-// the derived property can only over-match, and scanReviewForTokens matches
-// the raw text first, so a strip can never hide a token the raw text shows.
-// The token alphabet is ASCII, so a visible character between two token
-// characters already breaks the token for a reader too.
+// the derived property can only over-match, and the strip removes only
+// non-ASCII, so it can never hide a token. The token alphabet is ASCII, so a
+// visible character between two token characters already breaks the token
+// for a reader too.
+//
+// Normalization can hide one another way: html.UnescapeString decodes the
+// legacy entities that need no semicolon, and &reg, &szlig, &AElig and
+// &aelig end in "g", so "&re" before a token eats its leading "g". The
+// rendered page then shows no token, but the raw markdown still carries it
+// through the API, the edit view and notification email. That is why
+// scanReviewForTokens also matches the raw text; it is not redundant.
 func invisibleInToken(r rune) bool {
 	return unicode.In(r, unicode.Cf, unicode.Other_Default_Ignorable_Code_Point, unicode.Variation_Selector)
 }
