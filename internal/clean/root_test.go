@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/cameronsjo/forgectl/internal/config"
 )
 
 // failReadDir swaps Scan's walker for filepath.WalkDir with dir's ReadDir
@@ -207,7 +209,8 @@ func TestScanReport_TildeRootWithoutHomeFails(t *testing.T) {
 	}{
 		{"flag root", nil, "~/Projects"},
 		{"bare tilde", nil, "~"},
-		{"config default_root", []Option{WithRoot("~/src")}, ""},
+		{"WithRoot", []Option{WithRoot("~/src")}, ""},
+		{"config default_root", []Option{WithCleanConfig(config.CleanConfig{DefaultRoot: "~/src"})}, ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()

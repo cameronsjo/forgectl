@@ -32,6 +32,9 @@ func homeDiscards(fset *token.FileSet, file *ast.File) []string {
 		if !ok {
 			return false
 		}
+		if id, ok := call.Fun.(*ast.Ident); ok {
+			return osNames["."] && id.Name == "UserHomeDir" // dot-import of os
+		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
 		if !ok || sel.Sel.Name != "UserHomeDir" {
 			return false
@@ -47,6 +50,10 @@ func homeDiscards(fset *token.FileSet, file *ast.File) []string {
 				if id, ok := v.Lhs[1].(*ast.Ident); ok && id.Name == "_" {
 					out = append(out, fset.Position(v.Pos()).String())
 				}
+			}
+		case *ast.ValueSpec:
+			if len(v.Values) == 1 && len(v.Names) == 2 && isHomeCall(v.Values[0]) && v.Names[1].Name == "_" {
+				out = append(out, fset.Position(v.Pos()).String())
 			}
 		case *ast.ExprStmt:
 			if isHomeCall(v.X) {
@@ -109,6 +116,9 @@ func TestHomeDiscardsMatcher(t *testing.T) {
 		{"blank error", `package p; import "os"; func f() { h, _ := os.UserHomeDir(); _ = h }`, 1},
 		{"aliased os", `package p; import o "os"; func f() { h, _ := o.UserHomeDir(); _ = h }`, 1},
 		{"bare statement", `package p; import "os"; func f() { os.UserHomeDir() }`, 1},
+		{"var spec blank error", `package p; import "os"; var h, _ = os.UserHomeDir()`, 1},
+		{"dot import", `package p; import . "os"; func f() { h, _ := UserHomeDir(); _ = h }`, 1},
+		{"dot import kept", `package p; import . "os"; func f() { h, err := UserHomeDir(); _, _ = h, err }`, 0},
 		{"error kept", `package p; import "os"; func f() { h, err := os.UserHomeDir(); _, _ = h, err }`, 0},
 		{"function value", `package p; import "os"; var g = os.UserHomeDir`, 0},
 		{"other package", `package p; import "x"; func f() { h, _ := x.UserHomeDir(); _ = h }`, 0},

@@ -117,7 +117,9 @@ func seshPick(ctx context.Context, client *tmux.Client, name string) error {
 // looked up only for a candidate whose expansion starts with "~", and a failed
 // lookup there is an error the caller refuses on, never a silently skipped
 // check: a candidate that needs a home directory cannot be proven '#'-free
-// without one, and a candidate that does not need one is still resolved.
+// without one, and a candidate that does not need one is still resolved. When
+// the working directory is gone (filepath.Abs fails) the env- and tilde-expanded
+// path is returned as written, so the '#' check still runs on it.
 func seshResolvedPaths(name string, userHomeDir func() (string, error)) ([]string, error) {
 	path := os.ExpandEnv(name)
 	if strings.HasPrefix(path, "~") {
@@ -129,7 +131,11 @@ func seshResolvedPaths(name string, userHomeDir func() (string, error)) ([]strin
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return nil, nil
+		// No working directory to anchor a relative path (a deleted cwd). The
+		// env- and tilde-expanded path is still checked as written, so a '#'
+		// that only appears after expansion is refused; a plain name stays
+		// allowed.
+		return []string{path}, nil
 	}
 	paths := []string{abs}
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
