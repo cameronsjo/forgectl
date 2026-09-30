@@ -534,3 +534,27 @@ func TestResolve_HarnessOnlyOverride_NoExplicitEffort_ClearsDerived(t *testing.T
 		t.Errorf("Effort = %q, want \"\" — a cleared model must clear its derived level", got.Effort)
 	}
 }
+
+// TestProfileValidate_EchoIsCapped is #706: a rejected config value is echoed
+// quoted, escaped and capped, never whole.
+func TestProfileValidate_EchoIsCapped(t *testing.T) {
+	long := "\x1b[2J" + strings.Repeat("A", 500)
+	cases := map[string]error{
+		"harness":         Profile{Harness: long}.Validate(),
+		"effort":          Profile{Harness: "claude", Effort: long}.Validate(),
+		"codex approval":  Profile{Harness: "codex", ApprovalPolicy: long, Sandbox: "read-only"}.Validate(),
+		"codex sandbox":   Profile{Harness: "codex", ApprovalPolicy: "never", Sandbox: long}.Validate(),
+		"codex model":     Profile{Harness: "codex", Model: "claude-" + long, ApprovalPolicy: "never", Sandbox: "read-only"}.Validate(),
+		"resolve harness": func() error { _, err := ResolveBinary(long, config.LaunchDefaults{}); return err }(),
+	}
+	for name, err := range cases {
+		if err == nil {
+			t.Errorf("%s: validation passed a %d-rune value", name, len(long))
+			continue
+		}
+		msg := err.Error()
+		if strings.Contains(msg, "\x1b") || strings.Contains(msg, strings.Repeat("A", 81)) || !strings.Contains(msg, "…") {
+			t.Errorf("%s: error = %q, want the escaped, capped value", name, msg)
+		}
+	}
+}
