@@ -338,6 +338,15 @@ func (c *Client) KillWindow(ctx context.Context, want WindowIdentity) error {
 //     spoke, so the kill error is returned unclassified and the caller fails
 //     closed. That includes a review window that was the server's last, whose
 //     server exited with it — a park, not a guess.
+//
+// Why the empty arm is not ErrObjectGone like the other two: both of those
+// rest on a server that answered the re-read, which is positive evidence
+// about who gave the "can't find window" answer. An empty or failed re-read
+// is the absence of evidence — the answer may have come from a replacement
+// that has since exited too, while the captured server lives on behind an
+// unlinked socket. The costs are also unequal: a spurious park is settled by
+// `pr repair`, while a wrong "gone" lets teardown remove the workspace of a
+// window that may still be running.
 func (c *Client) confirmGoneAtKill(ctx context.Context, want WindowIdentity, killErr error) error {
 	sessions, err := c.ListSessions(ctx)
 	if err != nil {
