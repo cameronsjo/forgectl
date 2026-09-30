@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -193,16 +194,116 @@ func TestShell_DocPaneContainsPositionedContent(t *testing.T) {
 		t.Fatal(`the doc pane is no longer <main class="surface-document ..." data-fc="doc-main">; the rule below targets it`)
 	}
 	style := regexp.MustCompile(`(?s)<style>(.*?)</style>`).FindStringSubmatch(tmpl)[1]
-	style = regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(style, "")
-	var decls []string
-	for _, r := range regexp.MustCompile(`(?m)^main\.surface-document\s*\{([^}]*)\}`).FindAllStringSubmatch(style, -1) {
-		decls = append(decls, r[1])
+	rules, nested, problems := docPaneContainment(style)
+	for _, p := range problems {
+		t.Error(p)
 	}
-	all := strings.Join(decls, ";")
-	if !regexp.MustCompile(`position\s*:\s*relative`).MatchString(all) {
-		t.Errorf("main.surface-document is not position: relative; a doc's absolute-positioned classes anchor to the page")
+	// The template has four rules on the pane itself, one of them inside an
+	// @media block; fewer means the scan is broken, not the CSS fixed.
+	if rules < 4 || nested < 1 {
+		t.Fatalf("found %d rules on the doc pane, %d inside an at-rule; the scan is broken", rules, nested)
 	}
-	if !regexp.MustCompile(`contain\s*:\s*[^;]*\b(paint|content|strict)\b`).MatchString(all) {
-		t.Errorf("main.surface-document has no paint containment; a doc's positioned content can paint over the chrome")
+}
+
+// Every rule on the doc pane counts, an at-rule's included, since a later
+// or narrower rule overrides the base one (forgectl#759).
+func TestDocPaneContainment_CatchesEveryOverride(t *testing.T) {
+	base := "main.surface-document { position: relative; contain: paint; }\n"
+	for _, tc := range []struct{ name, css string }{
+		{"media contain none", "@media (max-width: 900px) {\n  main.surface-document { padding: 0; contain: none; }\n}"},
+		{"media position static", "@media print { main.surface-document { position: static; } }"},
+		{"nested at-rules", "@supports (contain: paint) { @media (min-width: 1px) { main.surface-document { contain: layout; } } }"},
+		{"pseudo-class", "main.surface-document:hover { position: static; }"},
+		{"selector list", "h1, main.surface-document { contain: none; }"},
+		{"bare class", ".surface-document { position: sticky; }"},
+		{"all reset", "main.surface-document { all: unset; }"},
+		{"important", "main.surface-document { contain: size !important; }"},
+	} {
+		if _, _, problems := docPaneContainment(base + tc.css); len(problems) == 0 {
+			t.Errorf("%s: no problem reported for %q", tc.name, tc.css)
+		}
 	}
+	for _, css := range []string{
+		base,
+		base + "@media (max-width: 900px) { main.surface-document { padding: 0; } }",
+		base + ".surface-document * { position: static; } .surface-document::before { position: absolute; }",
+		base + "main.surface-document { contain: strict !important; }",
+	} {
+		if _, _, problems := docPaneContainment(css); len(problems) > 0 {
+			t.Errorf("%q: unexpected problems %v", css, problems)
+		}
+	}
+	if _, _, problems := docPaneContainment("main.surface-document { padding: 0; }"); len(problems) != 2 {
+		t.Errorf("a pane with neither declaration: problems = %v, want both missing", problems)
+	}
+}
+
+var (
+	cssComment = regexp.MustCompile(`(?s)/\*.*?\*/`)
+	// cssRule matches an innermost rule, so a rule inside @media or
+	// @supports matches on its own and the at-rule's prelude never does.
+	cssRule = regexp.MustCompile(`([^{}]*)\{([^{}]*)\}`)
+	// docPaneSelector is a compound selector naming the pane element itself
+	// (no combinator, no pseudo-element).
+	docPaneSelector = regexp.MustCompile(`^(main)?\.surface-document([.:#\[][^\s>+~]*)?$`)
+	paintContain    = regexp.MustCompile(`\b(paint|content|strict)\b`)
+)
+
+// docPaneContainment reads every rule on the doc pane in css, at any at-rule
+// depth, and reports each declaration that would undo its containment:
+// position other than relative, contain without paint, or an all reset. It
+// also reports when no rule sets either one. rules counts the pane's rules,
+// nested those inside an at-rule.
+func docPaneContainment(css string) (rules, nested int, problems []string) {
+	css = cssComment.ReplaceAllString(css, "")
+	var relative, contained bool
+	for _, m := range cssRule.FindAllStringSubmatchIndex(css, -1) {
+		onPane := false
+		for _, sel := range strings.Split(css[m[2]:m[3]], ",") {
+			sel = strings.TrimSpace(sel)
+			if docPaneSelector.MatchString(sel) && !strings.Contains(sel, "::") {
+				onPane = true
+			}
+		}
+		if !onPane {
+			continue
+		}
+		rules++
+		prefix := css[:m[0]]
+		if strings.Count(prefix, "{") > strings.Count(prefix, "}") {
+			nested++
+		}
+		selector := strings.TrimSpace(css[m[2]:m[3]])
+		for _, decl := range strings.Split(css[m[4]:m[5]], ";") {
+			prop, value, ok := strings.Cut(decl, ":")
+			if !ok {
+				continue
+			}
+			prop = strings.ToLower(strings.TrimSpace(prop))
+			value = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(value), "!important"))
+			switch prop {
+			case "position":
+				if value == "relative" {
+					relative = true
+				} else {
+					problems = append(problems, fmt.Sprintf("%s sets position: %s; a doc's absolute-positioned classes anchor to the page", selector, value))
+				}
+			case "contain":
+				if paintContain.MatchString(value) {
+					contained = true
+				} else {
+					problems = append(problems, fmt.Sprintf("%s sets contain: %s, which has no paint containment; a doc's positioned content can paint over the chrome", selector, value))
+				}
+			case "all":
+				problems = append(problems, fmt.Sprintf("%s sets all: %s, which resets the pane's position and containment", selector, value))
+			}
+		}
+	}
+	if !relative {
+		problems = append(problems, "no rule makes main.surface-document position: relative; a doc's absolute-positioned classes anchor to the page")
+	}
+	if !contained {
+		problems = append(problems, "no rule gives main.surface-document paint containment; a doc's positioned content can paint over the chrome")
+	}
+	return rules, nested, problems
 }
