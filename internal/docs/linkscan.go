@@ -270,7 +270,13 @@ func toStringList(v any) []string {
 // segment starts after its "> " prefix. A marker that itself sits inside a
 // hidden segment (an inline %% comment) is skipped too; only the marker is
 // tested there, since an inline comment can share its line with a real one.
+//
+// Each overlap test is a binary search over the segments sorted once
+// (segmentSet), so the pass costs O((lines + segments) log segments): a
+// document dense with comments or code lines no longer makes it quadratic
+// (#801).
 func scanBlockIDs(body []byte, code, hidden []text.Segment) []string {
+	codeSet, hiddenSet := newSegmentSet(code), newSegmentSet(hidden)
 	seen := map[string]bool{}
 	for start := 0; start < len(body); {
 		end := len(body)
@@ -279,9 +285,9 @@ func scanBlockIDs(body []byte, code, hidden []text.Segment) []string {
 			end = start + nl
 			next = end + 1
 		}
-		if !overlapsAny(code, start, next) {
+		if !codeSet.overlaps(start, next) {
 			if m := blockIDPattern.FindSubmatchIndex(body[start:end]); m != nil &&
-				!overlapsAny(hidden, start+m[0], start+m[1]) {
+				!hiddenSet.overlaps(start+m[0], start+m[1]) {
 				seen[string(body[start+m[2]:start+m[3]])] = true
 			}
 		}
@@ -295,13 +301,35 @@ func scanBlockIDs(body []byte, code, hidden []text.Segment) []string {
 	return ids
 }
 
-func overlapsAny(segs []text.Segment, start, end int) bool {
-	for _, seg := range segs {
-		if seg.Start < end && seg.Stop > start {
-			return true
+// segmentSet answers "does any segment overlap [start, end)?" in
+// O(log n). A segment overlaps when seg.Start < end && seg.Stop > start.
+// Sorted by Start, the segments with Start < end are a prefix, found by
+// binary search; one of them overlaps exactly when the largest Stop in that
+// prefix exceeds start, and maxStop holds that running maximum.
+type segmentSet struct {
+	starts  []int
+	maxStop []int
+}
+
+func newSegmentSet(segs []text.Segment) segmentSet {
+	sorted := make([]text.Segment, len(segs))
+	copy(sorted, segs)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Start < sorted[j].Start })
+	set := segmentSet{starts: make([]int, len(sorted)), maxStop: make([]int, len(sorted))}
+	running := 0
+	for i, seg := range sorted {
+		set.starts[i] = seg.Start
+		if i == 0 || seg.Stop > running {
+			running = seg.Stop
 		}
+		set.maxStop[i] = running
 	}
-	return false
+	return set
+}
+
+func (s segmentSet) overlaps(start, end int) bool {
+	k := sort.SearchInts(s.starts, end) // segments [0, k) have Start < end
+	return k > 0 && s.maxStop[k-1] > start
 }
 
 // scanBody walks body's goldmark AST once, collecting headings (text plus

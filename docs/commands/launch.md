@@ -88,10 +88,13 @@ An `effort` outside the five accepted levels is rejected before anything is laun
   print or builder posture. The subcommand list is pinned against the
   installed `claude --help` by a test.
 - **Print mode keeps only the permission mode** — when an argument before
-  Claude's own `--` is `-p`/`--print`/`--output-format` in flag position,
-  forgectl injects the profile's `--permission-mode` first and nothing else: no model, effort,
+  Claude's own `--` is `-p`/`--print` in flag position, or `--output-format`
+  with stdout not a terminal (piped or redirected), forgectl injects the
+  profile's `--permission-mode` first and nothing else: no model, effort,
   `--add-dir`, or `--allow-dangerously-skip-permissions`, and no banner. A
-  later `--permission-mode` of your own still wins. A print flag that is
+  later `--permission-mode` of your own still wins. On a terminal,
+  `--output-format` without `-p` opens Claude's interactive session, so it
+  keeps the builder posture, which also carries the permission mode. A print flag that is
   another option's value is not print mode: `--append-system-prompt -p
   "<task>"` keeps the builder posture. A flag forgectl does not know is
   assumed to take a value, which leaves the builder posture and its

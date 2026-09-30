@@ -23,7 +23,10 @@
     restoreFocus: function () {}
   };
 
-  if (typeof mermaid === "undefined") {
+  // The gate tests the entry point, not the global: a doc heading "# Mermaid"
+  // gets id="mermaid", which makes window.mermaid that heading element when
+  // the bundle is blocked, and typeof it is "object" (forgectl#772).
+  if (typeof mermaid === "undefined" || typeof mermaid.initialize !== "function") {
     // The bundle failed to load. Diagram sources stay visible as preformatted
     // text, which is a legible degradation, so this is a console note and not an
     // on-page error.
@@ -171,8 +174,12 @@
   // future mermaid that puts author markup in the SVG some other way. It
   // covers every diagram. mermaid.run renders into a temporary #dmermaid-N
   // container, but creates it inside the target pre.mermaid (measured on
-  // 11.12.3), so this selector covers that too.
-  var FORGED_HOOKS = "pre.mermaid [data-fc]";
+  // 11.12.3), so this selector covers that too. The server's other two
+  // chrome markers, data-forgectl-notice and data-forgectl-props, lift an
+  // element above the doc's tooltips (shell.html.tmpl), so they are scrubbed
+  // the same way (forgectl#772).
+  var HOOK_ATTRS = ["data-fc", "data-forgectl-notice", "data-forgectl-props"];
+  var FORGED_HOOKS = "pre.mermaid [data-fc], pre.mermaid [data-forgectl-notice], pre.mermaid [data-forgectl-props]";
 
   // The same pass strips the reader's chrome class families (forgectl#745).
   // A diagram's `A:::scrim` or `class A statusbar` puts the author's class on
@@ -201,7 +208,7 @@
 
   function scrubHooks() {
     document.querySelectorAll(FORGED_HOOKS).forEach(function (el) {
-      el.removeAttribute("data-fc");
+      HOOK_ATTRS.forEach(function (a) { el.removeAttribute(a); });
     });
     document.querySelectorAll("pre.mermaid [class]").forEach(function (el) {
       var chrome = Array.prototype.filter.call(el.classList, isChromeClass);
@@ -219,7 +226,7 @@
   // inside a diagram must be gone at the next task boundary.
   function watchForForgedHooks() {
     new MutationObserver(scrubHooks).observe(document.body, {
-      childList: true, subtree: true, attributes: true, attributeFilter: ["data-fc"]
+      childList: true, subtree: true, attributes: true, attributeFilter: HOOK_ATTRS
     });
   }
 

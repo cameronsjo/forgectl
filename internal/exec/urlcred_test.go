@@ -218,3 +218,85 @@ func TestShownArgs_HugeSpanClamps(t *testing.T) {
 		t.Errorf("shownArgs = %q", got)
 	}
 }
+
+// TestOSRunner_OpaqueSpanValuesScrubbedFromStderr pins #782: a child that
+// echoes its own user-span argument must not put back into
+// CommandError.Stderr, Output, Error() or the failure log what the argv
+// rendering withheld. The values are Plain words redact.Text would pass, so
+// only the span scrub stands between them and the text. A short value is
+// scrubbed as a whole word, and a punctuation-only one is not scrubbed at
+// all, so "." does not eat every period.
+//
+// Mutation that turns it red: have maskFor return maskFrom(ctx) (every
+// secret row shows), or drop the hasWordByte condition from withValues (the
+// "a.b" row reads "a[redacted]b").
+func TestOSRunner_OpaqueSpanValuesScrubbedFromStderr(t *testing.T) {
+	const long = "Op4Qe9Vx2long" //nolint:gosec // G101: a fake credential the Runner must not render
+	const glued = "Gl7uedV4lue"  //nolint:gosec // G101: a fake credential the Runner must not render
+	const short = "k3y"
+	script := `echo "usage: bad $1 and --body=$2 near $3 at a.b" >&2; echo "stdout $1" ; exit 3`
+	args := []string{"-c", script, "sh", "-p" + long, glued, short, "."}
+	ctx := WithOpaqueArgs(context.Background(), 3, 4)
+
+	logs := captureLogs(t)
+	_, err := OSRunner{}.Run(ctx, "sh", args...)
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) || cmdErr.ExitCode != 3 {
+		t.Fatalf("want exit 3, got %v", err)
+	}
+	if !strings.Contains(cmdErr.Stderr, "usage: bad ") {
+		t.Fatalf("the child's stderr did not arrive, so the test proves nothing: %q", cmdErr.Stderr)
+	}
+	for _, s := range []string{long, glued, short} {
+		for where, text := range map[string]string{"Stderr": cmdErr.Stderr, "Output": cmdErr.Output, "Error()": err.Error(), "log": logs.String()} {
+			if strings.Contains(text, s) {
+				t.Errorf("%s carries span value %q: %q", where, s, text)
+			}
+		}
+	}
+	if !strings.Contains(cmdErr.Stderr, "at a.b") {
+		t.Errorf("a punctuation-only span value scrubbed ordinary text: %q", cmdErr.Stderr)
+	}
+
+	// Without a span the same run keeps its stderr as written: the scrub is
+	// the span's, not a general one.
+	_, err = OSRunner{}.Run(context.Background(), "sh", args...)
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("control: want a *CommandError, got %v", err)
+	}
+	for _, s := range []string{long, glued, short} {
+		if !strings.Contains(cmdErr.Stderr, s) {
+			t.Errorf("control run's stderr lacks %q, so the scrub above proves nothing: %q", s, cmdErr.Stderr)
+		}
+	}
+}
+
+// TestCommandError_SpanTrailingTriggerKeepsSuffix pins #782's over-withhold
+// fix: a user span that ends in a credential-bearing flag name (docker build
+// … --secret) no longer withholds forgectl's own elements after it, because
+// Error() runs redact.Args over the prefix, the span and the suffix apart.
+// The span's values stay withheld.
+//
+// Mutation that turns it red: have renderArgs return redact.Args(shown)
+// whole (the suffix reads [redacted-arg]).
+func TestCommandError_SpanTrailingTriggerKeepsSuffix(t *testing.T) {
+	args := []string{"-c", "exit 3", "sh", "--build-arg", "X=1", "--secret", "--", "/ctx"}
+	ctx := WithOpaqueArgs(context.Background(), 3, 3)
+	logs := captureLogs(t)
+	_, err := OSRunner{}.Run(ctx, "sh", args...)
+	if err == nil {
+		t.Fatal("want exit 3")
+	}
+	want := "--build-arg [user-arg] --secret -- /ctx"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("Error() = %q, want it to contain %q", err, want)
+	}
+	if !strings.Contains(logs.String(), `/ctx`) {
+		t.Errorf("the debug log should keep forgectl's suffix:\n%s", logs.String())
+	}
+	// The same trigger in forgectl's own elements still withholds its value.
+	_, err = OSRunner{}.Run(context.Background(), "sh", "-c", "exit 3", "sh", "--secret", "v4lue")
+	if err == nil || strings.Contains(err.Error(), "v4lue") {
+		t.Errorf("a forgectl-built trigger's value rendered: %v", err)
+	}
+}

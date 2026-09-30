@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
 // exitFailure is the status herdr exits with when it refuses a request
@@ -57,7 +58,15 @@ func classify(args []string, err error) error {
 			return e
 		}
 	}
-	return fmt.Errorf("herdr %s: %w", strings.Join(args, " "), err)
+	return fmt.Errorf("herdr %s: %w", argvText(args), err)
+}
+
+// argvText renders a herdr argv for error text through redact.Args (#782).
+// forgectl builds every herdr argv itself today, so this closes a latent
+// path: an id or label a user supplies later cannot carry a credential into
+// an error message verbatim.
+func argvText(args []string) string {
+	return strings.Join(redact.Args(args), " ")
 }
 
 // parseEnvelope returns the *Error in a stderr stream that is exactly one

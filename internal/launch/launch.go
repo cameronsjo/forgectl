@@ -107,7 +107,8 @@ func BuilderArgs(p Profile, userArgs []string) []string {
 	return append(args, userArgs...)
 }
 
-// PrintArgs is the print-mode posture (`-p`, `--print`, `--output-format`):
+// PrintArgs is the print-mode posture (`-p`, `--print`, or `--output-format`
+// off a terminal; see IsClaudePrintMode):
 // the profile's permission mode, and nothing else, ahead of the user's args.
 //
 // The permission mode stays because it keeps launch's invariant that it always

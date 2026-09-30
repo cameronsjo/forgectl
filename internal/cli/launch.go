@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/launch"
@@ -20,6 +21,10 @@ import (
 // behavior (legacyShadowWarning). Not a CLI flag — an operator who wants to
 // keep hand-managing the legacy file sets this once in their shell profile.
 const skipLegacyMigrateEnv = "FORGECTL_SKIP_LEGACY_MIGRATE"
+
+// launchStdoutIsTerminal reports whether forgectl's stdout, which the exec'd
+// harness inherits, is a terminal.
+var launchStdoutIsTerminal = func() bool { return term.IsTerminal(int(os.Stdout.Fd())) }
 
 // launchAliases maps each canonical launch subcommand to its accepted
 // aliases — migrated here from forgive.LaunchAliases at conversion. The `cl`
@@ -180,6 +185,9 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 		InjectedEnv: injected,
 		UnsetEnv:    unset,
 		Resolve:     launch.ResolveBinary,
+		// The harness inherits this stdout through the exec, so whether it
+		// is a terminal is what claude itself will see (forgectl#795).
+		StdoutTerminal: launchStdoutIsTerminal(),
 	})
 	if err != nil {
 		return err

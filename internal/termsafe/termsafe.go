@@ -24,6 +24,7 @@ package termsafe
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -194,9 +195,12 @@ func Error(err error) error {
 		return nil
 	}
 	var message string
-	if linkErr, ok := err.(*os.LinkError); ok {
+	// A typed-nil *LinkError or *PathError is a non-nil error whose fields
+	// cannot be read (forgectl#794); it falls through to errorText, whose
+	// recover turns its panicking Error method into errTextUnavailable.
+	if linkErr, ok := err.(*os.LinkError); ok && linkErr != nil {
 		message = fmt.Sprintf("%s %s %s: %s", SafeLine(linkErr.Op), QuotePath(linkErr.Old), QuotePath(linkErr.New), SafeLine(errorText(linkErr.Err)))
-	} else if pathErr, ok := err.(*os.PathError); ok {
+	} else if pathErr, ok := err.(*os.PathError); ok && pathErr != nil {
 		message = fmt.Sprintf("%s %s: %s", SafeLine(pathErr.Op), QuotePath(pathErr.Path), SafeLine(errorText(pathErr.Err)))
 	} else {
 		message = SafeLine(errorText(err))
@@ -221,9 +225,15 @@ const errTextUnavailable = "error text unavailable: its Error method panicked"
 // The cause stays in the chain Error returns, so errors.Is and errors.As keep
 // working. A caller that unwraps to it and calls its Error method directly
 // reintroduces the panic.
+//
+// The recovery leaves a Debug trace naming the error's and the panic value's
+// Go types, never the panic value itself, which may carry the text the
+// fallback exists to withhold (forgectl#794).
 func errorText(err error) (text string) {
 	defer func() {
-		if recover() != nil {
+		if r := recover(); r != nil {
+			slog.Debug("Error method panicked; its text is withheld.",
+				"error_type", fmt.Sprintf("%T", err), "panic_type", fmt.Sprintf("%T", r))
 			text = errTextUnavailable
 		}
 	}()

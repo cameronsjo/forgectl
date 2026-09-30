@@ -65,6 +65,12 @@ func WithMaskedAssignments(ctx context.Context, entries []string) context.Contex
 		m.values = append(m.values, value)
 		m.entries = append(m.entries, e)
 	}
+	return context.WithValue(ctx, maskKey{}, m.sorted())
+}
+
+// sorted orders pats and values the way text and straddleLen need them, in
+// place, and returns m.
+func (m argMask) sorted() argMask {
 	sort.Slice(m.pats, func(i, j int) bool {
 		a, b := m.pats[i], m.pats[j]
 		if len(a.text) != len(b.text) {
@@ -78,7 +84,48 @@ func WithMaskedAssignments(ctx context.Context, entries []string) context.Contex
 		return a.shown != Redacted && b.shown == Redacted
 	})
 	longestFirst(m.values)
-	return context.WithValue(ctx, maskKey{}, m)
+	return m
+}
+
+// withValues returns a copy of m that also scrubs each of values as a bare
+// value, the way it scrubs a masked assignment's VALUE. m itself, which may
+// be shared through a context, is not modified. An empty value is skipped,
+// and so is a short one with no word byte in it: the whole-word rule cannot
+// bound such a value, so "." or ":" would be scrubbed at every occurrence and
+// leave nothing of the text readable.
+func (m argMask) withValues(values []string) argMask {
+	seen := make(map[string]bool, len(values))
+	var add []string
+	for _, v := range values {
+		if v == "" || seen[v] || (len(v) < minScrubLen && !hasWordByte(v)) {
+			continue
+		}
+		seen[v] = true
+		add = append(add, v)
+	}
+	if len(add) == 0 {
+		return m
+	}
+	out := argMask{
+		shown:   m.shown,
+		pats:    append(make([]maskPat, 0, len(m.pats)+len(add)), m.pats...),
+		values:  append(make([]string, 0, len(m.values)+len(add)), m.values...),
+		entries: m.entries,
+	}
+	for _, v := range add {
+		out.pats = append(out.pats, maskPat{text: v, shown: Redacted})
+		out.values = append(out.values, v)
+	}
+	return out.sorted()
+}
+
+func hasWordByte(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if isWordByte(s[i]) {
+			return true
+		}
+	}
+	return false
 }
 
 func maskFrom(ctx context.Context) argMask {

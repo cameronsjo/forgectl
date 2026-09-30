@@ -212,10 +212,16 @@ var claudeValueFlags = map[string]bool{
 	"--tools":                              true,
 }
 
-// IsClaudePrintMode reports whether args selects print mode: `-p`, `--print`,
-// or `--output-format` (which only works with --print), before Claude's own
-// `--` and in flag position. Print mode is what scripts run, so it gets the
-// print posture (PrintArgs) rather than the full builder posture.
+// IsClaudePrintMode reports whether args selects print mode: `-p` or
+// `--print`, before Claude's own `--` and in flag position. `--output-format`
+// counts too, but only when stdoutTerminal is false (forgectl#795). Claude
+// Code 2.1.285 opens its interactive session for `claude --output-format=json`
+// on a terminal and runs non-interactively only when stdout is piped or
+// redirected ("non-interactive mode (via -p, or when stdout is not a TTY)",
+// `claude --help`). forgectl execs claude on its own stdout, so this is the
+// same check claude makes. Print mode is what scripts run, so it gets the
+// print posture (PrintArgs) rather than the full builder posture; both keep
+// --permission-mode.
 //
 // A print flag in a value slot is that option's value, not print mode:
 // `--append-system-prompt -p "task"` is an interactive run whose system prompt
@@ -236,7 +242,7 @@ var claudeValueFlags = map[string]bool{
 // `claude -c -p` takes the print path and fails fast for want of a prompt,
 // while `claude -cp` and `claude -pc` open the interactive session. So the
 // builder posture is the one that fits them.
-func IsClaudePrintMode(args []string) bool {
+func IsClaudePrintMode(args []string, stdoutTerminal bool) bool {
 	slot := slotFlag
 	for _, a := range args {
 		cur := slot
@@ -245,7 +251,7 @@ func IsClaudePrintMode(args []string) bool {
 			// The option's value, not the end of options.
 		case a == "--":
 			return false
-		case cur == slotFlag && isPrintFlag(a):
+		case cur == slotFlag && isPrintFlag(a, stdoutTerminal):
 			return true
 		}
 		slot = nextSlot(a, cur)
@@ -288,11 +294,15 @@ func nextSlot(a string, cur argSlot) argSlot {
 	}
 }
 
-// isPrintFlag reports whether a is `-p`, `--print`, or `--output-format`, or
-// the `<flag>=<value>` form of one of them. A glued short cluster such as
-// `-cp` is not one (see IsClaudePrintMode).
-func isPrintFlag(a string) bool {
-	for _, f := range []string{"-p", "--print", "--output-format"} {
+// isPrintFlag reports whether a is `-p`, `--print`, or (off a terminal)
+// `--output-format`, or the `<flag>=<value>` form of one of them. A glued
+// short cluster such as `-cp` is not one (see IsClaudePrintMode).
+func isPrintFlag(a string, stdoutTerminal bool) bool {
+	flags := []string{"-p", "--print", "--output-format"}
+	if stdoutTerminal {
+		flags = flags[:2]
+	}
+	for _, f := range flags {
 		if a == f || strings.HasPrefix(a, f+"=") {
 			return true
 		}
