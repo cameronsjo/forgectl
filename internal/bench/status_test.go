@@ -196,13 +196,18 @@ func TestCheckHearth_UnavailableWhenDockerFails(t *testing.T) {
 	t.Setenv("HEARTH_DIR", "")
 	cfg := config.Config{Bench: config.BenchConfig{HearthDir: "/x/hearth"}}
 	runner := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
-		return "", errors.New("docker: command not found")
+		return "", errors.New("docker: STDERRMARKER\x1b[2J")
 	}}
 
 	c := checkHearth(context.Background(), cfg, runner, &fakeProber{code: 200})
 
 	if c.State != StateUnavailable {
 		t.Fatalf("state = %q; want unavailable", c.State)
+	}
+	// docker's stderr is the daemon's and plugins' text: the Reason names
+	// the failure without it (#716).
+	if c.Reason != "docker compose unavailable" {
+		t.Errorf("reason = %q, want the categorical failure without docker's stderr", c.Reason)
 	}
 }
 
@@ -278,13 +283,16 @@ func TestCheckChronicle_UnavailableWhenStatusFails(t *testing.T) {
 	t.Setenv("CHRONICLE_DIR", "")
 	cfg := config.Config{Bench: config.BenchConfig{ChronicleDir: "/x/chronicle"}}
 	runner := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
-		return "", errors.New("uv: no such directory")
+		return "", errors.New("uv: STDERRMARKER\x1b[2J")
 	}}
 
 	c := checkChronicle(context.Background(), cfg, runner)
 
 	if c.State != StateUnavailable {
 		t.Fatalf("state = %q; want unavailable", c.State)
+	}
+	if c.Reason != "chronicle status failed" {
+		t.Errorf("reason = %q, want the categorical failure without chronicle's stderr (#716)", c.Reason)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/url"
 	osexec "os/exec"
 	"runtime"
@@ -79,8 +80,12 @@ func checkHearth(ctx context.Context, cfg config.Config, runner exec.Runner, pro
 
 	out, err := runner.Run(ctx, "docker", "compose", "-p", hearthProject, "ps", "--all", "--format", "json")
 	if err != nil {
+		// Categorical (#716): err is docker's argv and stderr, text the
+		// daemon and any compose plugin choose. It reaches `bench status`
+		// and doctor's report, so it goes to the log instead.
+		slog.Warn("docker compose ps failed.", "project", hearthProject, "error", err)
 		c.State = StateUnavailable
-		c.Reason = "docker compose unavailable: " + firstLine(err.Error())
+		c.Reason = "docker compose unavailable"
 		return c
 	}
 	total, running, unhealthy, restarting, perr := parseComposePS(out)
@@ -139,8 +144,10 @@ func checkChronicle(ctx context.Context, cfg config.Config, runner exec.Runner) 
 
 	out, err := runner.Run(ctx, name, args...)
 	if err != nil {
+		// Categorical (#716): err carries chronicle's stderr.
+		slog.Warn("chronicle status failed.", "error", err)
 		c.State = StateUnavailable
-		c.Reason = "chronicle status failed: " + firstLine(err.Error())
+		c.Reason = "chronicle status failed"
 		return c
 	}
 	var st ChronicleStatus
@@ -320,15 +327,6 @@ func recordTCP(ctx context.Context, probe Prober, label, target string, c *Compo
 	}
 	c.Details = append(c.Details, label+": reachable")
 	return true
-}
-
-// firstLine trims a possibly multi-line error string to its first line so a
-// component reason stays a single tidy line.
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	return strings.TrimSpace(s)
 }
 
 // dockerDataDir is where colima's Lima VM mounts the Docker data volume —
