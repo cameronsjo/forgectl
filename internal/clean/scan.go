@@ -42,8 +42,13 @@ package clean
 //       descent into every matched name regardless of type
 //   [x] Edge: findProjectRoot finds the nearest ancestor .git for a target,
 //       and returns "" when none exists within root
+//   [x] Unhappy: a root that is missing, unreadable, a regular file or a
+//       dangling symlink fails the scan rather than reporting an empty tree
+//       (forgectl#915; root_test.go), while an unreadable directory BELOW
+//       the root stays a best-effort skip
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -154,6 +159,11 @@ type Report struct {
 	TotalSize int64
 }
 
+// walkDir is Scan's directory walker. It is a variable only so a test run
+// as root, which reads a mode-000 directory, can still drive the
+// unreadable-root path.
+var walkDir = filepath.WalkDir
+
 // Scan walks opts.Root ONCE, collecting every directory whose basename
 // matches a known reclaimable dep/build dir. It never descends into a match
 // (fs.SkipDir) — the same "prune on match" shape issue #4 cites from the
@@ -185,8 +195,15 @@ type Report struct {
 func Scan(opts ScanOptions) (Report, error) {
 	var report Report
 
-	walkErr := filepath.WalkDir(opts.Root, func(path string, d fs.DirEntry, err error) error {
+	walkErr := walkDir(opts.Root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// The root itself failing (missing, or unreadable) fails the
+			// whole scan: swallowing it reported an empty tree as a clean
+			// success (forgectl#915). WalkDir hands the root's Lstat error
+			// over with a nil d, and its ReadDir error with the root's d.
+			if path == opts.Root {
+				return err
+			}
 			// A permission-denied or vanished entry mid-walk doesn't abort
 			// the whole scan — best-effort, skip it and keep going.
 			if d != nil && d.IsDir() {
@@ -195,6 +212,11 @@ func Scan(opts ScanOptions) (Report, error) {
 			return nil
 		}
 		if path == opts.Root {
+			if !d.IsDir() {
+				// A regular file or a dangling symlink has nothing to walk;
+				// WalkDir would visit it once and report an empty tree.
+				return errors.New("not a directory")
+			}
 			return nil
 		}
 		if !d.IsDir() {
