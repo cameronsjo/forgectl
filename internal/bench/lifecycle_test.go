@@ -122,3 +122,24 @@ func TestOpenCommand_MatchesGOOS(t *testing.T) {
 		t.Errorf("openCommand() = %q, want %q on %s", got, want, runtime.GOOS)
 	}
 }
+
+// TestUp_UnresolvableHome_RefusesBeforeRunning pins that a ~ checkout path with
+// no resolvable home refuses the whole command up front instead of skipping
+// the service as "not configured" or running against the literal ~/... path.
+func TestUp_UnresolvableHome_RefusesBeforeRunning(t *testing.T) {
+	if runtime.GOOS == "windows" || runtime.GOOS == "plan9" {
+		t.Skip("home lookup does not read $HOME here")
+	}
+	t.Setenv("HOME", "")
+	t.Setenv("HEARTH_DIR", "")
+	t.Setenv("CHRONICLE_DIR", "")
+	cfg := config.Config{Bench: config.BenchConfig{HearthDir: "/x/hearth", ChronicleDir: "~/chronicle"}}
+	runner := &exec.FakeRunner{}
+
+	if err := Up(context.Background(), cfg, runner, io.Discard); err == nil {
+		t.Fatal("Up with an unresolvable home: want an error")
+	}
+	if len(runner.Calls) != 0 {
+		t.Errorf("ran %+v before refusing; want no calls", runner.Calls)
+	}
+}
