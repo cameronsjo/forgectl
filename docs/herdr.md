@@ -29,7 +29,7 @@
 
 ## Ids move
 
-Moving a tab between workspaces renumbers the tab and its panes. `MoveResult.TabID` is the id after the move; the id you passed in is stale. It is not known whether herdr reuses a freed id, so re-list after every mutation and resolve a target by `terminal_id` immediately before acting on it. `terminal_id` is stable across moves. Only `Panes()` and `Agents()` carry it (with the pane's `tab_id`); `Tabs()` and `TabGet()` do not, so join through `Panes()`.
+Moving a tab between workspaces renumbers the tab and its panes. `MoveResult.TabID` is the id after the move; the id you passed in is stale. It is not known whether herdr reuses a freed id, so re-list after every mutation and resolve a target by `terminal_id` immediately before acting on it. The one measured exception is an index move (`tab move --index`): it keeps every tab id, and its reply carries the workspace's tab list in the new order, so that list can stand in for a re-list as long as it holds the moved tab (`testdata/move_index.json`). `terminal_id` is stable across moves. Only `Panes()` and `Agents()` carry it (with the pane's `tab_id`); `Tabs()` and `TabGet()` do not, so join through `Panes()`.
 
 There is no `FocusPane`. herdr's `pane focus` is directional only, so `FocusTab` is the finest focus grain available by id.
 

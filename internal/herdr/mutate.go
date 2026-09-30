@@ -101,7 +101,11 @@ type MoveResult struct {
 }
 
 // MoveTab moves a tab. A move herdr declines returns a zero MoveResult and a
-// *[Declined]. Callers re-list afterwards, since ids of other tabs may shift.
+// *[Declined]. After a move between workspaces, callers re-list, since ids of
+// other tabs may shift. An index move is the measured exception: it keeps every
+// tab id, and its reply carries the workspace's tab list in the new order, so a
+// caller may use Tabs instead of listing again when that list holds the moved
+// tab.
 func (c *Client) MoveTab(ctx context.Context, tabID string, to MoveTarget) (MoveResult, error) {
 	if err := checkID("tab id", tabID); err != nil {
 		return MoveResult{}, err
