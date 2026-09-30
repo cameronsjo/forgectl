@@ -97,3 +97,19 @@ func TestToken_RedactsUnderEveryRenderingPath(t *testing.T) {
 		t.Fatalf("Header() = %q, want %q", tok.Header(), want)
 	}
 }
+
+// TestReadToken_ServiceEchoIsCapped is #706: the service name comes from the
+// operator's flag or config, so an error echoes it quoted, escaped and capped.
+func TestReadToken_ServiceEchoIsCapped(t *testing.T) {
+	long := "\x1b[2J" + strings.Repeat("A", 500)
+	for name, out := range map[string]string{"not found": "", "malformed": "not-a-real-token"} {
+		runner := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return out, nil }}
+		_, err := ReadToken(context.Background(), runner, long)
+		if err == nil {
+			t.Fatalf("%s: ReadToken succeeded", name)
+		}
+		if msg := err.Error(); strings.Contains(msg, "\x1b") || strings.Contains(msg, strings.Repeat("A", 81)) || !strings.Contains(msg, "…") {
+			t.Errorf("%s: error = %q, want the escaped, capped service name", name, msg)
+		}
+	}
+}

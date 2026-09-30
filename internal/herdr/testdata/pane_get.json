@@ -1,0 +1,31 @@
+{
+  "id": "cli:pane:get",
+  "result": {
+    "pane": {
+      "agent": "claude",
+      "agent_session": {
+        "agent": "claude",
+        "kind": "id",
+        "source": "herdr:claude",
+        "value": "session-1"
+      },
+      "agent_status": "working",
+      "cwd": "/Users/example/Projects/repo-1",
+      "focused": false,
+      "foreground_cwd": "/Users/example/Projects/repo-1",
+      "pane_id": "w1:p1",
+      "revision": 5,
+      "scroll": {
+        "max_offset_from_bottom": 0,
+        "offset_from_bottom": 0,
+        "viewport_rows": 57
+      },
+      "tab_id": "w1:t2",
+      "terminal_id": "term_1",
+      "terminal_title": "terminal_title-1",
+      "terminal_title_stripped": "terminal_title_stripped-1",
+      "workspace_id": "w1"
+    },
+    "type": "pane_info"
+  }
+}
