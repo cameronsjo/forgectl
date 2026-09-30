@@ -144,7 +144,7 @@ func requireWatched(t *testing.T, w *Watcher, paths ...string) {
 // tolerating the event.
 func requireNoEventFrom(t *testing.T, w *Watcher, quiet, control string) {
 	t.Helper()
-	syncWithWatch(t, w, "sync-"+filepath.Base(control))
+	syncWithWatch(t, w)
 	writeFile(t, quiet, "# Quiet\n")
 	writeFile(t, control, "# Control\n")
 	var sawControl bool
@@ -171,29 +171,58 @@ func requireNoEventFrom(t *testing.T, w *Watcher, quiet, control string) {
 	}
 }
 
-// syncWithWatch writes name into every root and reads the watcher's raw
-// event channel until an event names it in each, failing after recvTimeout.
+// syncWithWatch rewrites, in place, one doc each root indexed directly in
+// it, and reads the watcher's raw event channel until a write event names
+// each, failing after recvTimeout. The watcher must not be running.
+//
+// It syncs on a file that existed when the watches were registered, never
+// on a new one: on kqueue a new file shows up only as its directory's
+// NOTE_WRITE, which fsnotify turns into a Create by listing the directory,
+// and that listing stops at the first entry it cannot open. A dangling
+// symlink sorting before the new name is enough, so the Create never comes
+// (forgectl#865, the macOS CI failure). A file present at registration has
+// a watch of its own on kqueue (and is covered by its directory's watch on
+// inotify), so rewriting it always raises a write named for it.
+//
 // Every swap in these tests changes an entry of a root, which fsnotify
-// handles on the root's own watch: its events from before the sync write
-// are delivered first, or are coalesced with it and handled in the same
-// pass (kqueue lists the directory once for both). So once the sync file's
-// event arrives, fsnotify has finished reacting to the swap. The watcher
-// must not be running.
-func syncWithWatch(t *testing.T, w *Watcher, name string) {
+// handles on the root's own watch. That watch's event was raised before
+// the sync write, and both inotify's queue and kqueue's active list hand
+// events back in the order they were raised, so once the sync event
+// arrives fsnotify has finished reacting to the swap.
+func syncWithWatch(t *testing.T, w *Watcher) {
 	t.Helper()
+	idx := w.store.Current()
 	pending := map[string]bool{}
-	for _, root := range w.store.Current().Roots() {
-		p := filepath.Join(root.Path, name)
-		writeFile(t, p, "sync\n")
-		pending[p] = true
+	for _, root := range idx.Roots() {
+		doc := root.OnlyFile
+		// Prefer a doc directly in the root: a doc below it could sit in a
+		// directory the test swapped.
+		for _, d := range idx.List() {
+			if doc == "" && d.RootLabel == root.Label && filepath.Dir(d.AbsPath) == root.Path {
+				doc = d.AbsPath
+			}
+		}
+		if doc == "" {
+			t.Fatalf("root %s indexed no doc to sync on", root.Path)
+		}
+		body, err := os.ReadFile(filepath.Clean(doc))
+		if err != nil {
+			t.Fatalf("ReadFile %s: %v", doc, err)
+		}
+		if err := os.WriteFile(doc, body, 0o600); err != nil {
+			t.Fatalf("WriteFile %s: %v", doc, err)
+		}
+		pending[doc] = true
 	}
 	deadline := time.After(recvTimeout)
 	for len(pending) > 0 {
 		select {
 		case ev := <-w.fsw.Events:
-			delete(pending, ev.Name)
+			if ev.Has(fsnotify.Write) {
+				delete(pending, ev.Name)
+			}
 		case <-deadline:
-			t.Fatalf("no event for the sync write %s within %s", name, recvTimeout)
+			t.Fatalf("no write event for the sync rewrite of %v within %s", pending, recvTimeout)
 		}
 	}
 }
@@ -865,7 +894,7 @@ func TestWatcherRun_EventThroughSwappedDir_DoesNotReload(t *testing.T) {
 	writeFile(t, filepath.Join(outside, "secret.md"), "# Secret\n")
 	writeFile(t, filepath.Join(root, "c", "doc.md"), "# Doc\n")
 	writeFile(t, filepath.Join(root, "node_modules", "pkg", "doc.md"), "# Doc\n")
-	syncWithWatch(t, w, "sync")
+	syncWithWatch(t, w)
 	sub := startWatcher(t, w)
 	drainReloads(sub)
 
@@ -905,7 +934,8 @@ func TestWatcherRun_EventThroughSwappedDir_DoesNotReload(t *testing.T) {
 // A real directory named dir.md is a directory all the same.
 //
 // Mutation that turns it red: compute moved as !stray && w.dirMoved(ev)
-// in Run (both rows reload on the write under the moved-out subtree).
+// in Run (the stray Rename then gets only the silent watch rebuild, so no
+// reload comes and the index keeps the moved-out doc).
 func TestWatcher_MovedOutThenRelinked_DropsDescendantWatches(t *testing.T) {
 	for _, name := range []string{"a", "dir.md"} {
 		t.Run(name, func(t *testing.T) {
@@ -932,7 +962,13 @@ func TestWatcher_MovedOutThenRelinked_DropsDescendantWatches(t *testing.T) {
 				t.Skipf("symlinks unavailable here: %v", err)
 			}
 			reloads := startWatcher(t, w)
-			drainReloads(reloads) // the move's rebuild, if any
+			// The move is a move though its Rename is stray: it reloads, and
+			// the reload drops the moved-out doc from the index.
+			awaitReload(t, reloads, "a watched directory moved out and replaced by a symlink")
+			drainReloads(reloads)
+			if _, ok := w.store.Current().FindByAbsPath(filepath.Join(dir, "sub", "doc.md")); ok {
+				t.Error("the index still lists a doc moved out of the root")
+			}
 
 			// Retarget the link into the tree, where the moved-out subtree's
 			// names would now resolve.
@@ -976,4 +1012,44 @@ func TestWatcherRun_DocReplacedBySymlink_Reloads(t *testing.T) {
 	reloads := startWatcher(t, w)
 
 	awaitReload(t, reloads, "an indexed doc replaced by a symlink")
+}
+
+// A stray event means fsnotify holds a watch bound somewhere its name does
+// not lead. On kqueue, a doc swapped for a symlink to an outside file and
+// swapped back keeps a watch on the outside file under the doc's own name,
+// which a re-Add reuses and nothing else drops. So any stray event
+// schedules a rebuild of the watches in a fresh fsnotify watcher, and the
+// rebuild is silent: it neither rebuilds the index nor publishes a reload.
+//
+// Mutation that turns it red: drop the resetPending assignment in Run's
+// stray branch (the fsnotify watcher is never replaced), or publish that
+// rebuild (a reload follows the stray event).
+func TestWatcherRun_StrayEvent_RebuildsWatchesSilently(t *testing.T) {
+	root, outside := swapFixture(t)
+	w := newUnstartedWatcher(t, root)
+	a := filepath.Join(root, "a")
+	swapForSymlink(t, a, outside)
+	// Consume the swap's own events, so Run meets no real move.
+	syncWithWatch(t, w)
+	w.mu.Lock()
+	before := w.fsw
+	w.mu.Unlock()
+	reloads := startWatcher(t, w)
+
+	injectEvent(t, w, fsnotify.Event{Name: filepath.Join(a, "secret.md"), Op: fsnotify.Write})
+	deadline := time.Now().Add(recvTimeout)
+	for {
+		w.mu.Lock()
+		replaced := w.fsw != before
+		w.mu.Unlock()
+		if replaced {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the fsnotify watcher was not replaced within %s of a stray event", recvTimeout)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	requireNoReload(t, reloads, "the watch rebuild a stray event scheduled")
+	requireWatched(t, w, root, filepath.Join(root, "b"))
 }

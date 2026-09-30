@@ -382,7 +382,20 @@ func (w *Watcher) Run(ctx context.Context) {
 	var (
 		timer    *time.Timer
 		settledC <-chan time.Time
+		// publish records that the armed timer is for a reload browsers
+		// must hear about. A timer armed only for a stray event's watch
+		// rebuild leaves it false, and its settle rebuilds the watches
+		// without rebuilding the index or publishing (resetWatches).
+		publish bool
 	)
+	arm := func() {
+		if timer == nil {
+			timer = time.NewTimer(w.settleIn(time.Now()))
+		} else {
+			timer.Reset(w.settleIn(time.Now()))
+		}
+		settledC = timer.C
+	}
 	defer func() {
 		if timer != nil {
 			timer.Stop()
@@ -391,8 +404,8 @@ func (w *Watcher) Run(ctx context.Context) {
 	// A registration in NewWatcher that met a changing directory has a
 	// watch rebuild waiting. Run the reload that performs it.
 	if w.resetPending {
-		timer = time.NewTimer(w.settleIn(time.Now()))
-		settledC = timer.C
+		publish = true
+		arm()
 	}
 
 	for {
@@ -414,11 +427,12 @@ func (w *Watcher) Run(ctx context.Context) {
 			stray := w.strayEvent(ev.Name)
 			w.refreshWatch(ev)
 			// Move detection never consults stray. A watched directory
-			// renamed away and replaced by a symlink reads as stray, and
-			// skipping its rebuild would keep its descendants' watches
-			// wherever it went (forgectl#796 again, PR #868 review). A
-			// rebuild re-registers only through verified paths, so an
-			// extra one costs a reload and never widens the watch set.
+			// renamed away and replaced by a symlink has a stray Rename,
+			// and skipping its rebuild would keep its descendants'
+			// watches wherever it went (forgectl#796 again, PR #868
+			// review). A rebuild re-registers only through verified
+			// paths, so an extra one costs a reload and never widens the
+			// watch set.
 			moved := w.dirMoved(ev)
 			if moved {
 				// The moved tree's descendants keep their watches wherever
@@ -435,20 +449,31 @@ func (w *Watcher) Run(ctx context.Context) {
 			// reloads only for a name the index still lists, which means
 			// that doc was replaced (by a symlink, say) and the reload
 			// drops it. The name is in-tree and indexed, so the reload says
-			// nothing about outside.
+			// nothing about outside. FindByAbsPath scans every doc, but
+			// only stray events pay for it, and those are rare.
 			reloads := w.relevant(ev.Name)
 			if stray {
 				_, reloads = w.store.Current().FindByAbsPath(ev.Name)
 			}
-			if !reloads && !moved && !resetNeedsArming {
+			if reloads || moved || resetNeedsArming {
+				publish = true
+				arm()
 				continue
 			}
-			if timer == nil {
-				timer = time.NewTimer(w.settleIn(time.Now()))
-			} else {
-				timer.Reset(w.settleIn(time.Now()))
+			// A stray event means fsnotify holds a watch bound somewhere
+			// its name does not lead: on kqueue a watch opened through a
+			// symlink keeps that binding even after the name is a real
+			// file or directory again, since a re-Add of a watched path
+			// reuses the watch (forgectl#865). Only a fresh fsnotify
+			// watcher drops it, so the watches are rebuilt, silently: the
+			// index is untouched and nothing is published, so the rebuild
+			// says nothing about the outside change that caused it.
+			if stray && !w.resetPending {
+				w.resetPending = true
+				if settledC == nil {
+					arm()
+				}
 			}
-			settledC = timer.C
 
 		case err, ok := <-w.fsw.Errors:
 			if !ok {
@@ -462,14 +487,31 @@ func (w *Watcher) Run(ctx context.Context) {
 			if w.resetPending {
 				w.noteReset(time.Now())
 			}
-			w.reload()
+			if publish {
+				w.reload()
+			} else if w.resetPending {
+				w.resetWatches()
+			}
+			publish = false
 			// A rebuild that itself met a changing directory waits again
-			// rather than looping, backed off by settleDelay.
+			// rather than looping, backed off by settleDelay; that rebuild
+			// reloads, as one met during any registration does.
 			if w.resetPending {
-				timer.Reset(w.settleIn(time.Now()))
-				settledC = timer.C
+				publish = true
+				arm()
 			}
 		}
+	}
+}
+
+// resetWatches rebuilds every watch in a fresh fsnotify watcher against the
+// current index, as a pending reset in reload does, without rebuilding the
+// index or publishing. Run uses it for a rebuild only stray events asked
+// for.
+func (w *Watcher) resetWatches() {
+	if w.replaceWatcher() {
+		w.dirs = nil
+		w.registerRoots(w.store.Current().Roots())
 	}
 }
 
@@ -587,10 +629,11 @@ func (w *Watcher) dirMoved(ev fsnotify.Event) bool {
 // directories, or inTree() for any other name (a directory's own Rename).
 // An event whose resolved path fails is stray: Run does not reload for its
 // relevance, though a stray Rename of a watched directory still counts as
-// a move (Run never lets stray suppress a watch rebuild), and a stray event
-// on a doc the index lists still reloads to drop it. A compat symlink that leads to a
-// doc elsewhere inside the root is not stray, and a name with no symlink on
-// its path is decided exactly as before. The check fails closed: a path
+// a move (Run never lets stray suppress a watch rebuild), a stray event on
+// a doc the index lists still reloads to drop it, and any other stray
+// event rebuilds the watches without a reload. A compat symlink that leads
+// to a doc elsewhere inside the root is not stray, and a name with no
+// symlink on its path is decided exactly as before. The check fails closed: a path
 // that cannot be resolved for any reason but its own absence (a dangling
 // symlink, a loop) is stray. A deleted path resolves through its deepest
 // existing ancestor, so its events still reload.
