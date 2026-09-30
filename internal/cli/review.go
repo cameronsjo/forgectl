@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -63,7 +64,10 @@ func newReviewCmd(deps module.Deps) *cobra.Command {
 	// err discarded: "" degrades to an empty store on read (LoadReviewed), and
 	// the write verbs fail loudly via persist()'s path=="" guard.
 	reviewedPath, _ := config.ReviewReviewedPath()
-	return newReviewCmdForSources(srcs, reviewedPath, effectiveHost, deps.Theme)
+	cmd := newReviewCmdForSources(srcs, reviewedPath, effectiveHost, deps.Theme)
+	// The radar reads through the same host pin as the inventory.
+	cmd.AddCommand(newReviewReleasesCmd(review.GhAPI{Run: githubauth.Runner(deps.Runner, effectiveHost)}, time.Now))
+	return cmd
 }
 
 // newReviewConfigErrorCmd builds a `review` command tree whose every leaf —
@@ -95,6 +99,7 @@ func newReviewConfigErrorCmd(err error) *cobra.Command {
 		&cobra.Command{Use: "mark <ref>", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
 		&cobra.Command{Use: "unmark <ref>", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
 		&cobra.Command{Use: "sync", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "releases", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
 	)
 	return cmd
 }
