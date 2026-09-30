@@ -282,8 +282,8 @@ func Restore(dir string, tasks []Task) (RestoreResult, error) {
 		if err != nil {
 			return res, fmt.Errorf("restore task %s: %w", t.ID, termsafe.Error(err))
 		}
-		_, werr := f.Write(body)
-		cerr := f.Close()
+		_, werr := restoreWrite(f, body)
+		cerr := restoreClose(f)
 		if werr != nil {
 			return res, fmt.Errorf("restore task %s: %w", t.ID, termsafe.Error(werr))
 		}
@@ -418,3 +418,12 @@ func isDir(path string) bool {
 	fi, err := os.Stat(path)
 	return err == nil && fi.IsDir()
 }
+
+// restoreWrite and restoreClose are Restore's per-task file operations,
+// seamed for the same reason as Save's: neither fails on demand against a
+// real file, and each failure's *PathError carries the task path Restore must
+// escape before returning it.
+var (
+	restoreWrite = (*os.File).Write
+	restoreClose = (*os.File).Close
+)

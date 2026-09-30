@@ -552,13 +552,22 @@ const cleanElision = " … [truncated] … "
 // split an escape sequence or a quoted path. A *exec.CommandError is cut
 // from its fields (cleanCommandFailure); anything else gets the plain
 // head+tail cut.
+//
+// The raw text is read BEFORE termsafe.Error runs. An Error method that works
+// once and then panics gives its one good call to the raw text, and
+// termsafe.Error then withholds its own rendering behind a short stand-in,
+// which fits. Read in the other order, the good call went to the escaped
+// rendering and the cut had only escaped text to work on, where it could
+// split an escape in half (forgectl#871).
 func cleanFailureText(err error) string {
+	raw, ok := rawErrorText(err)
 	full := termsafe.Error(err).Error()
 	if utf8.RuneCountInString(full) <= cleanDiagnosticMaxRunes {
 		return full
 	}
-	raw, ok := rawErrorText(err)
 	if !ok {
+		// The raw call panicked but the later one rendered: only the
+		// escaped text exists, so it is cut as it stands.
 		return termsafe.SafeLineMax(full, cleanDiagnosticMaxRunes-utf8.RuneCountInString(termsafe.TruncatedMarker))
 	}
 	if text, ok := cleanCommandFailure(err, raw); ok {

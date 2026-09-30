@@ -1,6 +1,7 @@
 file internal/exec/capture.go build=any
 file internal/exec/exec.go build=any
 file internal/exec/fake.go build=any
+file internal/exec/internal/sealed/sealed.go build=any
 file internal/exec/mask.go build=any
 file internal/exec/opaque.go build=any
 file internal/exec/pgroup.go build=any
@@ -90,8 +91,7 @@ method (*OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 method (*OSSensitiveRunner) StartedCount() int64
 method (*OSSensitiveRunner) awaitOutcome(ctx context.Context, waitCh chan error, overflow chan struct{}, kill func()) (Outcome, error)
 method (*OSSensitiveRunner) bound() time.Duration
-method (*OSSensitiveRunner) buildCmd(sc SensitiveCommand) *os/exec.Cmd
-method (*OSSensitiveRunner) buildEnv(muts []EnvMutation) []string
+method (*OSSensitiveRunner) buildEnv(muts []EnvMutation) ([]string, []github.com/cameronsjo/forgectl/internal/exec/internal/sealed.EnvVar)
 method (*OSSensitiveRunner) drainBound() time.Duration
 method (*OSSensitiveRunner) retire(stopped bool, kind CommandKind, outR *os.File, errR *os.File, outCh <-chan BoundedOutput, errCh <-chan BoundedOutput) (BoundedOutput, BoundedOutput)
 method (*SensitiveError) Error() string
@@ -206,7 +206,7 @@ method (onceCloser) Write(b []byte) (n int, err error)
 method (onceCloser) WriteAt(b []byte, off int64) (n int, err error)
 method (onceCloser) WriteString(s string) (n int, err error)
 method (onceCloser) WriteTo(w io.Writer) (n int64, err error)
-type Arg struct{reveal func() string; kind argKind}
+type Arg struct{v github.com/cameronsjo/forgectl/internal/exec/internal/sealed.Value; kind argKind}
 type BoundedOutput struct{buf *outputBuf; overflow bool; forced bool}
 type Call struct{Name string; Args []string; TmuxUTF8 bool; Interactive bool; Input string; Env map[string]string; UnsetEnv []string}
 type CaptureMode uint8
@@ -221,13 +221,13 @@ type OSSensitiveRunner struct{env []string; retireBound time.Duration; killDrain
 type Outcome uint8
 type OutputCause uint8
 type Runner interface{Run(ctx context.Context, name string, args ...string) (string, error); RunInteractive(ctx context.Context, name string, args ...string) error; RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (string, error); RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error); RunWithInput(ctx context.Context, stdin string, name string, args ...string) (string, error)}
-type SecretArg struct{reveal func() string}
+type SecretArg struct{v github.com/cameronsjo/forgectl/internal/exec/internal/sealed.Value}
 type SensitiveCommand struct{Kind CommandKind; Path SecretArg; Args []Arg; Env []EnvMutation; StdoutMode CaptureMode; StdoutCap int64; StderrCap int64}
 type SensitiveError struct{Kind CommandKind; Outcome Outcome; ExitCode int; StdoutBytes int; StderrBytes int; reason string}
 type SensitiveResult struct{Stdout BoundedOutput; Stderr BoundedOutput; ExitCode int}
 type SensitiveRunner interface{RunSensitive(ctx context.Context, cmd SensitiveCommand) (SensitiveResult, error)}
 type StreamingRunner interface{RunStreaming(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, name string, args ...string) error}
-type Transform struct{apply func(string) string}
+type Transform struct{t github.com/cameronsjo/forgectl/internal/exec/internal/sealed.Transform}
 type argKind uint8
 type argMask struct{shown map[string]string; pats []maskPat; values []string; entries []string}
 type bitset []uint64
@@ -253,3 +253,18 @@ var ErrOutputLimit error
 var ErrOutputTooLarge error
 var ErrStartFailed error
 var ErrTimeout error
+sealed: func New(v string) Value
+sealed: func Start(path Value, args []Value, env []string, set []EnvVar, stdout *os.File, stderr *os.File) (*Proc, error)
+sealed: func TmuxDirOperand() Transform
+sealed: method (*Proc) Kill() error
+sealed: method (*Proc) Wait() error
+sealed: method (Value) Equal(other Value) bool
+sealed: method (Value) IsAbs() bool
+sealed: method (Value) LeadsWithDash() bool
+sealed: method (Value) Map(t Transform) Value
+sealed: method (Value) Present() bool
+sealed: method (Value) Set() bool
+sealed: type EnvVar struct{Key string; Value Value}
+sealed: type Proc struct{wait func() error; kill func() error}
+sealed: type Transform struct{apply func(string) string}
+sealed: type Value struct{reveal func() string}

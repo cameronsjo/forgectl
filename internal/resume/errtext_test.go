@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/termsafe/termsafetest"
@@ -252,4 +253,90 @@ func TestProjectIndex_ReadErrorIsTerminalSafeAtTheSource(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Restore's write and close fail through their seams, like Save's, with the
+// *PathError the real operation would return for the hostile task path.
+func TestRestore_WriteAndCloseErrorsAreTerminalSafeAtTheSource(t *testing.T) {
+	injected := func(op, path string) error {
+		return &fs.PathError{Op: op, Path: path, Err: fs.ErrInvalid}
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func()
+	}{
+		{name: "write", setup: func() {
+			restoreWrite = func(f *os.File, _ []byte) (int, error) { return 0, injected("write", f.Name()) }
+		}},
+		{name: "close", setup: func() {
+			restoreClose = func(f *os.File) error {
+				_ = f.Close()
+				return injected("close", f.Name())
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, c := restoreWrite, restoreClose
+			t.Cleanup(func() { restoreWrite, restoreClose = w, c })
+			tc.setup()
+			_, err := Restore(hostileDir(t, "tasks"), []Task{{ID: "1", Raw: []byte(`{"id":"1"}`)}})
+			if err == nil || !strings.HasPrefix(err.Error(), "restore task 1: ") {
+				t.Fatalf("want the per-task %s failure, got %v", tc.name, err)
+			}
+			assertSourceSafe(t, err, fs.ErrInvalid)
+		})
+	}
+}
+
+// The prune path's three filesystem errors (the orphan sweep's ReadDir and
+// per-file remove, and the marker write) land in Result.Errs, which the resume
+// CLI prints; each is escaped where it is built.
+func TestSweepOrphans_ReadDirErrorIsTerminalSafeAtTheSource(t *testing.T) {
+	// The store "directory" is a regular file: ReadDir fails on it on every
+	// platform, and not with ErrNotExist, so the error is returned.
+	store := filepath.Join(hostileDir(t, "claude"), termsafetest.Hostile("store"))
+	if err := os.WriteFile(store, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, errs := sweepOrphans(store, nil, nil, time.Now())
+	if len(errs) != 1 {
+		t.Fatalf("want one ReadDir error, got %v", errs)
+	}
+	var pathErr *fs.PathError
+	if !errors.As(errs[0], &pathErr) {
+		t.Fatalf("want the ReadDir *fs.PathError, got %T %v", errs[0], errs[0])
+	}
+	assertSourceSafe(t, errs[0], pathErr.Err)
+}
+
+func TestSweepOrphans_RemoveErrorIsTerminalSafeAtTheSource(t *testing.T) {
+	dir := hostileDir(t, "store")
+	if err := os.WriteFile(filepath.Join(dir, "abc123.json.tmp"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prev := sweepRemove
+	t.Cleanup(func() { sweepRemove = prev })
+	sweepRemove = func(name string) error {
+		return &fs.PathError{Op: "remove", Path: name, Err: fs.ErrPermission}
+	}
+	swept, errs := sweepOrphans(dir, nil, nil, time.Now().Add(2*orphanGrace))
+	if swept != 0 || len(errs) != 1 {
+		t.Fatalf("want one remove error and nothing swept, got %d swept, %v", swept, errs)
+	}
+	assertSourceSafe(t, errs[0], fs.ErrPermission)
+}
+
+func TestMarkPruned_WriteErrorIsTerminalSafeAtTheSource(t *testing.T) {
+	// The marker path is a directory, which WriteFile refuses on every
+	// platform, root included.
+	dir := hostileDir(t, "store")
+	if err := os.Mkdir(filepath.Join(dir, pruneMarker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := markPruned(dir, time.Now())
+	var pathErr *fs.PathError
+	if !errors.As(err, &pathErr) {
+		t.Fatalf("want the marker write's *fs.PathError, got %T %v", err, err)
+	}
+	assertSourceSafe(t, err, pathErr.Err)
 }

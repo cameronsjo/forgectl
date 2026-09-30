@@ -136,24 +136,26 @@ func Execute(ctx context.Context) error {
 	normalizeColorEnv()
 
 	// Both steps below return before fang exists and before the config gate,
-	// so a failure here prints its own line. CaptureEnvSnapshot fails on an
+	// so a failure here reports itself through preFangFailure: its own line,
+	// or under --json the verb's one failure object. The tree does not exist
+	// yet, so preFangFailure builds one over default config only when argv
+	// mentions --json and it must find the verb. CaptureEnvSnapshot fails on an
 	// environment the operator controls — $HOME unset, or a relative
 	// $XDG_CONFIG_HOME (os.UserConfigDir refuses one) — and a hook verb must
 	// not fail the turn over it, the same exemption the config gate makes
 	// (#738). The hook then runs on built-in defaults with no legacy boundary;
 	// every other verb stops here, as before.
 	var legacyBoundary *config.LegacyMigrationBoundary
+	defaultRoot := func() *cobra.Command { return buildRoot(productionDeps(config.Config{}, nil)) }
 	env, err := captureEnvSnapshot()
 	if err != nil {
-		if !invokesHookVerb(normalizeArgs(processArgs())) {
-			fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(err.Error()))
-			return err
+		if args := normalizeArgs(processArgs()); !invokesHookVerb(args) {
+			return preFangFailure(defaultRoot, args, err)
 		}
 	} else {
 		legacyBoundary, err = prepareLegacyBoundary(env, config.NativeMigrationFS())
 		if err != nil {
-			fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(err.Error()))
-			return err
+			return preFangFailure(defaultRoot, normalizeArgs(processArgs()), err)
 		}
 		defer legacyBoundary.Close() //nolint:errcheck
 	}
@@ -174,10 +176,14 @@ func Execute(ctx context.Context) error {
 	tmuxClient := tmux.New(exec.OSRunner{})
 	root := buildRoot(deps)
 	args := normalizeArgs(processArgs())
+	// The gate's exempt-verb lookup gets the built root. Only
+	// preFangFailure's --json lookup uses the default-config tree: a module
+	// built over a config that failed to decode can stand in a stub without
+	// its flags (projects does), which would hide the verb's --json.
 	if err := configParseGate(cfg, root, args); err != nil {
-		fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(err.Error()))
-		return WithExitCode(err, 2)
+		return preFangFailure(defaultRoot, args, WithExitCode(err, 2))
 	}
+	builtRoot := func() *cobra.Command { return root }
 
 	// The launcher intercept runs before TUI/fang routing: `forgectl launch …`
 	// (and its `cl` alias) must reach claude byte-clean for builder/agents
@@ -190,11 +196,13 @@ func Execute(ctx context.Context) error {
 			// This path bypasses fang, which is what prints styled errors for
 			// the normal command tree. Print here so an intercept error (e.g. a
 			// bad FORGECTL_CLAUDE_BIN from ClaudePath) doesn't exit non-zero with
-			// empty stderr — mirrors claunch's original main().
+			// empty stderr — mirrors claunch's original main(). The launch
+			// command declares no --json (everything after it is the
+			// harness's), so this line stays plain even with --json in argv.
 			if err != nil {
-				fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(err.Error()))
+				return preFangFailure(builtRoot, args, err)
 			}
-			return err
+			return nil
 		}
 	}
 
