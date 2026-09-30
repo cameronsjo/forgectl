@@ -38,6 +38,11 @@ import (
 // every other herdr failure waits.
 var ErrPaneGone = errors.New("herdr pane not found")
 
+// ErrHerdrTimeout reports a herdr call killed at its bound rather than one
+// herdr answered with a failure. The call may have done its work before it
+// was killed: a `pane run` may already have typed the relaunch line.
+var ErrHerdrTimeout = errors.New("herdr call timed out")
+
 // ProcIdentity is what the kernel says about a pid, as opposed to what a
 // registry file says about it.
 type ProcIdentity struct {

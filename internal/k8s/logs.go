@@ -49,7 +49,7 @@ func ParseLevel(value string) (Level, error) {
 	case "fatal", "panic":
 		return LevelFatal, nil
 	default:
-		return 0, fmt.Errorf("unknown log level %s (want trace, debug, info, warn, error, or fatal)", termsafe.QuoteText(value))
+		return 0, fmt.Errorf("unknown log level %s (want trace, debug, info, warn, error, or fatal)", termsafe.QuoteArgMax(value, 0))
 	}
 }
 
