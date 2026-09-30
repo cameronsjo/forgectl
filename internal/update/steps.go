@@ -159,7 +159,10 @@ func npmStep() Step {
 			}
 			var cmdErr *exec.CommandError
 			if errors.As(err, &cmdErr) && cmdErr.ExitCode == 1 && strings.TrimSpace(cmdErr.Output) != "" {
-				return cmdErr.Output, nil
+				// The finding is the deliverable, so it is redacted narrowly
+				// (redact.Stdout, #952), not by redact.Text, which withholds
+				// every node_modules/@scope row.
+				return redact.Stdout(cmdErr.Output), nil
 			}
 			return out, err
 		},

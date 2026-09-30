@@ -172,6 +172,8 @@ type typedResult struct {
 	fake         []string
 	fakeOwn      map[string]int
 	cmdErrValues []string
+	outputReads  []string
+	allowSeen    map[string]bool
 	checked      []string
 	err          error
 }
@@ -220,20 +222,29 @@ func typedGuardResults(t *testing.T, root string) []*typedResult {
 	return typedResults
 }
 
-// fakeRunnerOwners maps each test-double type to the one production file
-// that may name it, its fields or its methods: the file that declares it.
+// fakeRunnerOwners maps each test double internal/exec declares to the one
+// production file that may name it, its fields or its methods: the file that
+// declares it. Every type declared in a *fake*.go file is a test double, and
+// so is every Fake* type wherever it is declared (fakeRunnerObjects); the
+// ForTest constructors are listed by name (#952).
 var fakeRunnerOwners = map[string]string{
-	"FakeRunner":          "internal/exec/fake.go",
-	"Call":                "internal/exec/fake.go",
-	"FakeSensitiveRunner": "internal/exec/sensitive_fake.go",
+	"FakeRunner":            "internal/exec/fake.go",
+	"Call":                  "internal/exec/fake.go",
+	"FakeSensitiveRunner":   "internal/exec/sensitive_fake.go",
+	"OutputCause":           "internal/exec/sensitive_fake.go",
+	"BoundedOutputForTest":  "internal/exec/sensitive_fake.go",
+	"SensitiveErrorForTest": "internal/exec/sensitive_fake.go",
 }
 
 // fakeRunnerWhy is what a finding says each test double does that production
 // code must not, by type name.
 var fakeRunnerWhy = map[string]string{
-	"FakeRunner":          "the test double that records argv, stdin and env unmasked; production code runs commands through OSRunner (forgectl#926)",
-	"Call":                "the test double that records argv, stdin and env unmasked; production code runs commands through OSRunner (forgectl#926)",
-	"FakeSensitiveRunner": "the SensitiveRunner test double, which starts no process and keeps every command it is handed; production code runs them through OSSensitiveRunner (forgectl#941)",
+	"FakeRunner":            "the test double that records argv, stdin and env unmasked; production code runs commands through OSRunner (forgectl#926)",
+	"Call":                  "the test double that records argv, stdin and env unmasked; production code runs commands through OSRunner (forgectl#926)",
+	"FakeSensitiveRunner":   "the SensitiveRunner test double, which starts no process and keeps every command it is handed; production code runs them through OSSensitiveRunner (forgectl#941)",
+	"OutputCause":           "the FakeSensitiveRunner's output-cause knob, which only a test's BoundedOutput needs; production output gets its cause from the runner (forgectl#952)",
+	"BoundedOutputForTest":  "a test-only BoundedOutput constructor; production output comes only from the runner (forgectl#952)",
+	"SensitiveErrorForTest": "a test-only SensitiveError constructor; production errors come only from the runner (forgectl#952)",
 }
 
 // TestNoProductionFileUsesTheFakeRunner pins #926's option (b): FakeRunner
@@ -257,7 +268,10 @@ var fakeRunnerWhy = map[string]string{
 // `var _ = exec.FakeRunner{}`, `func calls(r *exec.FakeRunner) int {
 // return len(r.Calls) }`, or `var _ exec.SensitiveRunner =
 // &exec.FakeSensitiveRunner{}`; or dropping FakeSensitiveRunner from
-// fakeRunnerOwners (every Fake* type internal/exec declares must be named).
+// fakeRunnerOwners (every Fake* type internal/exec declares must be named),
+// or dropping OutputCause (every type a *fake*.go file declares must be
+// named); or a production file in internal/tmux calling
+// exec.SensitiveErrorForTest.
 func TestNoProductionFileUsesTheFakeRunner(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -284,34 +298,49 @@ func TestNoProductionFileUsesTheFakeRunner(t *testing.T) {
 	}
 }
 
-// fakeRunnerObjects is every object a use of a type in fakeRunnerOwners
-// resolves to (the type names, their fields, and their methods), mapped to
-// the type it belongs to. It fails when internal/exec declares a Fake* type
-// fakeRunnerOwners does not name: a test double left off the map would be
-// pinned nowhere.
-func fakeRunnerObjects(execPkg *types.Package) (map[types.Object]string, error) {
+// fakeRunnerObjects is every object a use of a name in fakeRunnerOwners
+// resolves to (a type name, its fields and its methods, or a function),
+// mapped to that name. declFile names the file an object is declared in.
+// It fails when internal/exec declares a type fakeRunnerOwners does not
+// name that is a test double by its name (Fake*) or by its file (a
+// production file whose name holds "fake"), and when an entry names the
+// wrong file: a test double left off the map would be pinned nowhere
+// (forgectl#952).
+func fakeRunnerObjects(execPkg *types.Package, declFile func(token.Pos) string) (map[types.Object]string, error) {
 	for _, name := range execPkg.Scope().Names() {
-		if _, ok := execPkg.Scope().Lookup(name).(*types.TypeName); ok && strings.HasPrefix(name, "Fake") && fakeRunnerOwners[name] == "" {
-			return nil, fmt.Errorf("internal/exec declares test double %s, which fakeRunnerOwners does not name; add it with the file that declares it", name)
+		tn, ok := execPkg.Scope().Lookup(name).(*types.TypeName)
+		if !ok || fakeRunnerOwners[name] != "" {
+			continue
+		}
+		file := declFile(tn.Pos())
+		if strings.HasPrefix(name, "Fake") || strings.Contains(filepath.Base(file), "fake") {
+			return nil, fmt.Errorf("internal/exec declares test double %s in %s, which fakeRunnerOwners does not name; add it with the file that declares it", name, file)
 		}
 	}
 	objs := map[types.Object]string{}
-	for name := range fakeRunnerOwners {
-		tn, ok := execPkg.Scope().Lookup(name).(*types.TypeName)
-		if !ok {
-			return nil, fmt.Errorf("internal/exec declares no %s type; the fake-runner rule would check nothing", name)
+	for name, owner := range fakeRunnerOwners {
+		obj := execPkg.Scope().Lookup(name)
+		if obj == nil {
+			return nil, fmt.Errorf("internal/exec declares no %s; the fake-runner rule would check nothing", name)
 		}
-		objs[tn] = name
-		st, ok := tn.Type().Underlying().(*types.Struct)
-		if !ok {
-			return nil, fmt.Errorf("%s is not a struct", name)
+		if file := declFile(obj.Pos()); file != owner {
+			return nil, fmt.Errorf("fakeRunnerOwners says %s is declared in %s, but it is declared in %s", name, owner, file)
 		}
-		for f := range st.Fields() {
-			objs[f] = name
-		}
-		ms := types.NewMethodSet(types.NewPointer(tn.Type()))
-		for sel := range ms.Methods() {
-			objs[sel.Obj()] = name
+		objs[obj] = name
+		switch obj := obj.(type) {
+		case *types.Func:
+		case *types.TypeName:
+			if st, ok := obj.Type().Underlying().(*types.Struct); ok {
+				for f := range st.Fields() {
+					objs[f] = name
+				}
+			}
+			ms := types.NewMethodSet(types.NewPointer(obj.Type()))
+			for sel := range ms.Methods() {
+				objs[sel.Obj()] = name
+			}
+		default:
+			return nil, fmt.Errorf("%s is neither a type nor a function", name)
 		}
 	}
 	return objs, nil
@@ -402,6 +431,7 @@ func typedGuardPlatform(ctx context.Context, root string, p guardPlatform, r *ty
 		return err
 	}
 	r.fakeOwn = map[string]int{}
+	r.allowSeen = map[string]bool{}
 	inTree := func(listing map[string]*typedListPackage) map[string]*typedListPackage {
 		mod := map[string]*typedListPackage{}
 		for path, lp := range listing {
@@ -419,7 +449,7 @@ func typedGuardPlatform(ctx context.Context, root string, p guardPlatform, r *ty
 	}
 	fset := token.NewFileSet()
 	depPkgs := map[string]*types.Package{}
-	seen, seenFake, seenValue := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	seen, seenFake, seenValue, seenRead := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, mod := range passes {
 		l := &typedLoader{
 			root: root, fset: fset, sizes: types.SizesFor("gc", p.goarch),
@@ -448,11 +478,15 @@ func typedGuardPlatform(ctx context.Context, root string, p guardPlatform, r *ty
 		if execPkg == nil {
 			return fmt.Errorf("internal/exec was not type-checked for %s; the fake-runner rule would check nothing", p)
 		}
-		fakeObjs, err := fakeRunnerObjects(execPkg)
+		fakeObjs, err := fakeRunnerObjects(execPkg, func(pos token.Pos) string { return l.rel(fset.Position(pos).Filename) })
 		if err != nil {
 			return err
 		}
 		cmdErr, err := commandErrorType(execPkg)
+		if err != nil {
+			return err
+		}
+		outputField, err := commandErrorOutputField(cmdErr)
 		if err != nil {
 			return err
 		}
@@ -474,10 +508,16 @@ func typedGuardPlatform(ctx context.Context, root string, p guardPlatform, r *ty
 					r.fake = append(r.fake, f)
 				}
 			}
-			for _, f := range commandErrorValueFindings(fset, c.files, c.info, cmdErr, l.rel) {
+			for _, f := range commandErrorValueFindings(fset, c.files, c.info, cmdErr, l.rel, r.allowSeen) {
 				if !seenValue[f] {
 					seenValue[f] = true
 					r.cmdErrValues = append(r.cmdErrValues, f)
+				}
+			}
+			for _, f := range commandErrorOutputFindings(fset, c.files, c.info, outputField, l.rel, r.allowSeen) {
+				if !seenRead[f] {
+					seenRead[f] = true
+					r.outputReads = append(r.outputReads, f)
 				}
 			}
 		}
