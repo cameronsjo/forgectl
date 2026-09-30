@@ -398,9 +398,12 @@ func (c *Client) resolveRemote(ctx context.Context, remoteName string) (originRe
 // verified (#413). The single `--hostname=<host>` token cannot be read as a
 // separate flag whatever the host spells, and resolveRemote has already
 // validated it.
+//
+// The query passes -i so gh prints the response's status line first on
+// stdout, and isGhNotFound reads the verdict from that line (#812).
 func (c *Client) verifyRemoteDeleted(ctx context.Context, origin originRepo, name string) error {
 	path := fmt.Sprintf("repos/%s/%s/git/ref/heads/%s", origin.owner, origin.repo, name)
-	_, err := c.run.Run(ctx, "gh", "api", "--hostname="+origin.host, path)
+	_, err := c.run.Run(ctx, "gh", "api", "-i", "--hostname="+origin.host, path)
 	if err == nil {
 		// The response body is gh output and is not echoed (#562). The name
 		// is rendered once, quoted; owner and repo are validated parts.
@@ -415,53 +418,36 @@ func (c *Client) verifyRemoteDeleted(ctx context.Context, origin originRepo, nam
 	return nil
 }
 
-// isGhNotFound reports whether a failed `gh api` call was an HTTP 404. gh
-// prints its status as one "gh: " line whose text ends with the status:
-// "gh: Not Found (HTTP 404)" when the body carries a message, "gh: HTTP 404"
-// when it does not. The status suffix is appended after the server's message,
-// so it is always the end of that text, and only gh's final status line is
-// read: the last non-empty stderr line must start with "gh: " and either end
-// with "(HTTP 404)" or be exactly "gh: HTTP 404".
+// isGhNotFound reports whether a failed `gh api -i` call got an HTTP 404. It
+// reads only the first line of the failed command's stdout, which `-i` makes
+// the response's status line: gh prints resp.Proto and resp.Status there
+// before anything else, for an error status too, and then exits 1
+// (cli/cli pkg/cmd/api/api.go, processResponse). That line is
+// "<proto> <code> <reason>", and the code token is authentic: Go's HTTP/1.x
+// client parses StatusCode from exactly those three digits, and its HTTP/2
+// client builds Status from the parsed code. The reason phrase can be server
+// text, so only the code is compared, as a whole token.
 //
-// Reading only the last line matters because gh's Message can hold newlines.
-// A hostile server whose message ends one of its own lines with "(HTTP 404)"
-// read as a 404 while every line was scanned (#812), turning a failed delete
-// verification into "deleted". It is the last non-empty line, not the last
-// line that starts with "gh: ": a message that ends in a newline puts gh's
-// real status suffix on a line of its own (" (HTTP 502)"), so the
-// injected "gh: … (HTTP 404)" line above it would otherwise be the last
-// "gh: " line. A server message that contains "(HTTP 404)" ahead of the real
-// status on the same line does not count either.
-//
-// gh can also follow the status with an SSO line ("Authorize in your web
-// browser:  <url>") whose URL the server supplies; the "gh: " prefix check
-// refuses it. It can follow it with a scope hint ("gh: This API operation needs
-// the … scope …") that names a server-supplied scope. Neither line is a 404
-// status, so both fail safe: the delete reads as "verify failed". So do the
-// two gh 404 forms that carry no status (an errors string plus a message, and
-// an errors array).
-// It reads gh's stderr, not err.Error(): that text also carries the argv,
-// whose ref path holds the branch name, so a branch named fix-404 whose
-// verification failed for another reason read as deleted (#749). gh exits 1
-// for every HTTP error, so the exit code cannot tell a 404 apart. An error
-// that is not a *exec.CommandError is not a 404.
+// It no longer reads stderr (#812). gh's "gh: <message> (HTTP <code>)" line
+// is built from the response body, and a body can forge it outright: an
+// "errors" string, or an errors array whose message is "Not Found
+// (HTTP 404)", prints a 404-shaped line on a 502 or a 403. Every other
+// shape fails safe as "verify failed", never as deleted: no stdout (gh never
+// reached a response, or the output ceiling dropped it), a first line that is
+// not a status line, or any code but 404. So does a status line that the
+// Runner's argv scrub rewrote, since the code token is then no longer "404".
+// An error that is not a *exec.CommandError is not a 404.
 func isGhNotFound(err error) bool {
 	var cmdErr *exec.CommandError
 	if !errors.As(err, &cmdErr) {
 		return false
 	}
-	lines := strings.Split(cmdErr.Stderr, "\n")
-	last := ""
-	for i := len(lines) - 1; i >= 0; i-- {
-		if line := strings.TrimSpace(lines[i]); line != "" {
-			last = line
-			break
-		}
-	}
-	if !strings.HasPrefix(last, "gh: ") || strings.HasPrefix(last, "gh: This API operation needs") {
+	line, _, _ := strings.Cut(cmdErr.Output, "\n")
+	if !strings.HasPrefix(line, "HTTP/") {
 		return false
 	}
-	return strings.HasSuffix(last, "(HTTP 404)") || last == "gh: HTTP 404"
+	fields := strings.Fields(line)
+	return len(fields) >= 2 && fields[1] == "404"
 }
 
 // localRow is one parsed `git for-each-ref refs/heads` row.

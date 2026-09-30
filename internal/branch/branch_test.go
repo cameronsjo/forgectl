@@ -131,7 +131,7 @@ func TestPrune_RemoteDelete_VerifiesViaSingularEndpoint_NeverPlural(t *testing.T
 			case name == "gh" && len(args) > 0 && args[0] == "api":
 				// A real 404 from gh surfaces as a non-nil error whose message
 				// carries the HTTP status — that's the "confirmed gone" signal.
-				return "", &exec.CommandError{Name: "gh", Args: args, Stderr: "gh: Not Found (HTTP 404)", Err: errors.New("exit status 1")}
+				return "", ghNotFound(args)
 			}
 			return "", nil
 		},
@@ -226,14 +226,14 @@ func TestPrune_RemoteDelete_VerifiesOnTheOriginHost(t *testing.T) {
 					case name == "gh" && len(args) > 0 && args[0] == "api":
 						if contains(args, "--hostname="+tc.wantHost) {
 							// The ref is gone on the host that owns the repo.
-							return "", &exec.CommandError{Name: "gh", Args: args, Stderr: "gh: Not Found (HTTP 404)", Err: errors.New("exit status 1")}
+							return "", ghNotFound(args)
 						}
 						if tc.wantHost == "github.com" {
 							return "", errors.New("verification did not name its host")
 						}
 						// Any other host: github.com answering for a repo it
 						// does not have. A 404 here is the false confirmation.
-						return "", &exec.CommandError{Name: "gh", Args: args, Stderr: "gh: Not Found (HTTP 404)", Err: errors.New("exit status 1")}
+						return "", ghNotFound(args)
 					}
 					return "", nil
 				},
@@ -293,7 +293,7 @@ func TestPrune_RemoteDelete_UnverifiableOriginIsAFailure(t *testing.T) {
 						return tc.view, nil
 					}
 					if name == "gh" && len(args) > 0 && args[0] == "api" {
-						return "", &exec.CommandError{Name: "gh", Args: args, Stderr: "gh: Not Found (HTTP 404)", Err: errors.New("exit status 1")}
+						return "", ghNotFound(args)
 					}
 					return "", nil
 				},
@@ -596,6 +596,16 @@ func TestEnumerate_GoneBranch_OmittedByDefault_SurfacedWithIncludeGone(t *testin
 // subprocessFailure is a failed call as the real runner reports it: its text
 // is the subprocess's stderr, which for `git push` relays the remote's
 // sideband and for gh is host-chosen text (#658).
+// ghNotFound is what `gh api -i` returns for a ref that is gone: exit 1, the
+// status line and headers on stdout, and gh's error line on stderr.
+func ghNotFound(args []string) error {
+	return &exec.CommandError{
+		Name: "gh", Args: args, ExitCode: 1, Err: errors.New("exit status 1"),
+		Output: "HTTP/2.0 404 Not Found\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{\"message\":\"Not Found\",\"status\":\"404\"}",
+		Stderr: "gh: Not Found (HTTP 404)",
+	}
+}
+
 func subprocessFailure(name string, args []string) error {
 	return &exec.CommandError{Name: name, Args: args, Stderr: "remote: MARKER\x1b[2J", ExitCode: 1, Err: errors.New("exit status 1")}
 }
@@ -664,47 +674,54 @@ func TestPrune_RemoteDeleteVerifyFailure_DoesNotEchoGhStderr(t *testing.T) {
 	assertNoSubprocessEcho(t, results[0].Err)
 }
 
-// TestPrune_VerifyFailureOnABranchNamed404IsNotADelete is #749 item 5. The
-// verification GET's argv carries the branch name, and CommandError.Error()
-// renders that argv, so matching "404" in the error text read a branch named
-// fix-404 as verified-deleted when gh failed for another reason (a 502 here).
-// Only gh's own "HTTP 404" in stderr confirms the ref is gone.
+// TestPrune_VerifyFailureOnABranchNamed404IsNotADelete is #749 item 5 and
+// #812. The verification GET's argv carries the branch name, and
+// CommandError.Error() renders that argv, so matching "404" in the error text
+// read a branch named fix-404 as verified-deleted when gh failed for another
+// reason. gh's stderr is no better: its "gh: … (HTTP N)" line is built from
+// the response body, which the server writes. Only the status line that
+// `gh api -i` prints first on stdout confirms the ref is gone.
 //
-// Mutation: restore strings.Contains(err.Error(), "404") in
-// verifyRemoteDeleted and the 502 reads as a successful delete; match a bare
-// "HTTP 404" in stderr and the 502 that mentions one does; match
-// "(HTTP 404)" anywhere and the "(HTTP 404) (HTTP 502)" row does; drop the
-// "gh: HTTP 404" arm and gh's no-message 404 reads as a failure; scan every
-// stderr line again (or take the last "gh: " line rather than the last
-// non-empty one, drop the "gh: " prefix check, or drop the scope-hint
-// refusal) and a #812 non-404 row reads as deleted.
+// Mutations, each turning a row red: restore strings.Contains(err.Error(),
+// "404"), or any stderr match for "(HTTP 404)" or "gh: HTTP 404", and the
+// forged-body rows read as deleted; drop "-i" from the argv and the real 404
+// rows fail the argv check; match "404" anywhere in the first line and the
+// reason-phrase row reads as deleted; read another line of stdout (the last)
+// and the body row reads as deleted while the real 404s do not; drop the
+// "HTTP/" prefix check and the bare "x 404" row reads as deleted.
 func TestPrune_VerifyFailureOnABranchNamed404IsNotADelete(t *testing.T) {
+	const real404 = "HTTP/2.0 404 Not Found\r\nContent-Type: application/json\r\n\r\n{\"message\":\"Not Found\"}"
 	for _, tc := range []struct {
+		name        string
+		stdout      string
 		stderr      string
 		wantDeleted bool
 	}{
-		{"gh: Server Error (HTTP 502)", false},
-		{"gh: Bad Gateway (HTTP 502): upstream said HTTP 404", false},
-		{"gh: upstream (HTTP 404) (HTTP 502)", false},
-		{"gh: HTTP 404", true},
-		{"{\"message\":\"x\"}\ngh: Not Found (HTTP 404)\n", true},
-		{"gh: Not Found (HTTP 404)", true},
-		// #812: a server message whose own inner line ends in "(HTTP 404)"
-		// while gh's final status is a 502.
-		{"gh: upstream said\nNot Found (HTTP 404)\nretry later (HTTP 502)\n", false},
-		{"gh: upstream said\ngh: Not Found (HTTP 404)\n (HTTP 502)\n", false},
-		{"gh: Forbidden (HTTP 403)\ngh: This API operation needs the \"x (HTTP 404)\" scope. To request it, run:  gh auth refresh -h github.com -s x (HTTP 404)\n", false},
-		{"gh: Forbidden (HTTP 403)\nAuthorize in your web browser:  https://example.com/sso(HTTP 404)\n", false},
-		// Both real gh 404 forms, with trailing blank lines.
-		{"gh: Not Found (HTTP 404)\n\n", true},
-		{"gh: HTTP 404\n", true},
+		{"real 404", real404, "gh: Not Found (HTTP 404)", true},
+		{"real 404, HTTP/1.1, no message", "HTTP/1.1 404 Not Found\r\n\r\n", "gh: HTTP 404", true},
+		{"real 404 with a scope hint", real404, "gh: Not Found (HTTP 404)\ngh: This API operation needs the \"repo\" scope. To request it, run:  gh auth refresh -h github.com -s repo", true},
+		// #812 review: bodies that make gh's stderr line read as a 404 on
+		// another status.
+		{"502, errors string + message", "HTTP/2.0 502 Bad Gateway\r\n\r\n{\"errors\":\"x\",\"message\":\"HTTP 404\"}", "gh: x (HTTP 404)", false},
+		{"502, errors string only", "HTTP/2.0 502 Bad Gateway\r\n\r\n{\"errors\":\"HTTP 404\"}", "gh: HTTP 404", false},
+		{"403, errors array", "HTTP/2.0 403 Forbidden\r\n\r\n{\"errors\":[{\"message\":\"Not Found (HTTP 404)\"}]}", "gh: Not Found (HTTP 404)", false},
+		// Server text on the status line (the HTTP/1.1 reason phrase) and in
+		// the body cannot make a 404.
+		{"502 with a 404 reason phrase", "HTTP/1.1 502 404 Not Found\r\n\r\n", "gh: HTTP 502", false},
+		{"502 with a 404 status line in its body", "HTTP/2.0 502 Bad Gateway\r\n\r\nHTTP/2.0 404 Not Found", "gh: HTTP 502", false},
+		{"not a status line", "x 404 Not Found", "gh: HTTP 404", false},
+		{"no stdout (gh never got a response)", "", "gh: Not Found (HTTP 404)", false},
+		{"earlier stderr shapes", "HTTP/2.0 502 Bad Gateway\r\n\r\n", "gh: upstream said\ngh: Not Found (HTTP 404)\n (HTTP 502)\n", false},
 	} {
 		fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 			switch {
 			case isGetURL(name, args):
 				return githubRemoteURL, nil
 			case name == "gh" && len(args) > 0 && args[0] == "api":
-				return "", &exec.CommandError{Name: name, Args: args, Stderr: tc.stderr, ExitCode: 1, Err: errors.New("exit status 1")}
+				if !contains(args, "-i") {
+					return "", subprocessFailure(name, args)
+				}
+				return "", &exec.CommandError{Name: name, Args: args, Output: tc.stdout, Stderr: tc.stderr, ExitCode: 1, Err: errors.New("exit status 1")}
 			}
 			return "", nil
 		}}
@@ -714,7 +731,7 @@ func TestPrune_VerifyFailureOnABranchNamed404IsNotADelete(t *testing.T) {
 		}
 		results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
 		if len(results) != 1 || results[0].Deleted != tc.wantDeleted || (results[0].Err == nil) != tc.wantDeleted {
-			t.Errorf("stderr %q: results = %+v, want deleted=%v", tc.stderr, results, tc.wantDeleted)
+			t.Errorf("%s: results = %+v, want deleted=%v", tc.name, results, tc.wantDeleted)
 		}
 	}
 }
@@ -824,7 +841,7 @@ func TestPrune_RemoteDelete_VerifiesAgainstThePushURL(t *testing.T) {
 					// The delete did not take on the fork: the ref is still there.
 					return `{"ref":"refs/heads/feat/done"}`, nil
 				}
-				return "", &exec.CommandError{Name: "gh", Args: args, Stderr: "gh: Not Found (HTTP 404)", Err: errors.New("exit status 1")}
+				return "", ghNotFound(args)
 			}
 			return "", nil
 		},
@@ -856,7 +873,7 @@ func TestPrune_RemoteDelete_SeveralPushURLsCannotVerify(t *testing.T) {
 				// get-url --push without --all: the first URL only, exit 0.
 				return "git@github.com:a/tools.git", nil
 			case name == "gh" && len(args) > 0 && args[0] == "api":
-				return "", &exec.CommandError{Name: "gh", Args: args, Stderr: "gh: Not Found (HTTP 404)", Err: errors.New("exit status 1")}
+				return "", ghNotFound(args)
 			}
 			return "", nil
 		},
