@@ -1015,15 +1015,31 @@ type BenchConfig struct {
 
 // ResolvedHearthDir resolves the hearth checkout: the configured value, else
 // $HEARTH_DIR, else empty (the signal to degrade to not-configured). A leading
-// ~/ is expanded.
+// ~/ is expanded. A ~ path whose home cannot be resolved also yields empty
+// (fail closed); use ResolveHearthDir to learn why.
 func (bc BenchConfig) ResolvedHearthDir() string {
-	return resolveDir(bc.HearthDir, "HEARTH_DIR")
+	dir, _ := bc.ResolveHearthDir()
+	return dir
+}
+
+// ResolveHearthDir is ResolvedHearthDir with the failure reason: a configured
+// ~ path whose home directory cannot be resolved returns ("", err) rather than
+// the literal ~/... path, which would resolve against the working directory.
+func (bc BenchConfig) ResolveHearthDir() (string, error) {
+	return resolveDir(bc.HearthDir, "HEARTH_DIR", os.UserHomeDir)
 }
 
 // ResolvedChronicleDir resolves the chronicle checkout: the configured value,
-// else $CHRONICLE_DIR, else empty. A leading ~/ is expanded.
+// else $CHRONICLE_DIR, else empty. A leading ~/ is expanded; an unresolvable
+// home yields empty (fail closed), as for ResolvedHearthDir.
 func (bc BenchConfig) ResolvedChronicleDir() string {
-	return resolveDir(bc.ChronicleDir, "CHRONICLE_DIR")
+	dir, _ := bc.ResolveChronicleDir()
+	return dir
+}
+
+// ResolveChronicleDir is ResolvedChronicleDir with the failure reason.
+func (bc BenchConfig) ResolveChronicleDir() (string, error) {
+	return resolveDir(bc.ChronicleDir, "CHRONICLE_DIR", os.UserHomeDir)
 }
 
 // ResolvedOTLPEndpoint returns the configured OTLP endpoint or the baked
@@ -1045,21 +1061,26 @@ func (bc BenchConfig) ResolvedOTLPProtocol() string {
 }
 
 // resolveDir picks the configured value, falls back to an environment variable,
-// and expands a leading ~/. An empty result means "unconfigured" — callers
-// degrade rather than error.
-func resolveDir(configured, envVar string) string {
+// and expands a leading ~/. An empty result with a nil error means
+// "unconfigured" — callers degrade rather than error. A ~ path whose home
+// lookup fails returns ("", err): the literal ~/... would resolve against the
+// working directory. The home is looked up only for a ~ path.
+func resolveDir(configured, envVar string, userHome func() (string, error)) (string, error) {
 	dir := configured
 	if dir == "" {
 		dir = os.Getenv(envVar)
 	}
 	if dir == "" {
-		return ""
+		return "", nil
 	}
-	home, err := os.UserHomeDir()
+	if dir != "~" && !strings.HasPrefix(dir, "~/") {
+		return dir, nil
+	}
+	home, err := userHome()
 	if err != nil {
-		return dir
+		return "", fmt.Errorf("resolve %s: home directory: %w", dir, err)
 	}
-	return expandTilde(dir, home)
+	return expandTilde(dir, home), nil
 }
 
 // expandTilde expands a leading ~ or ~/ to the home directory. Mirrors the
