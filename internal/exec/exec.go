@@ -26,6 +26,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
 // Runner abstracts running an external command. Five modes:
@@ -78,6 +80,13 @@ import (
 // SensitiveRunner logs metadata only and caps both streams, but it serves only
 // its closed CommandKind set. A command whose output may carry a secret needs
 // its own path, not Runner.
+//
+// Independently of any mask, every rendering of argv and stderr (the debug
+// log, the failure log line, CommandError.Error()) goes through redact.Arg
+// and redact.Text (#734): an argv element or stderr word that could carry a
+// URL credential (it holds an '@', "://" or "::") is withheld whole, or shown
+// as host/owner/repo when it parses as a plain repository locator. The
+// CommandError fields themselves keep what the command ran with.
 type Runner interface {
 	Run(ctx context.Context, name string, args ...string) (string, error)
 	RunInteractive(ctx context.Context, name string, args ...string) error
@@ -227,7 +236,7 @@ const pipeWaitDelay = 500 * time.Millisecond
 // built from the real args.
 func runAndWrap(cmd *exec.Cmd, ceiling int, preparingMsg, successMsg, failureMsg string, mask argMask, name string, args []string) (string, error) {
 	shown := mask.args(args)
-	slog.Debug(preparingMsg, "cmd", name, "args", shown)
+	slog.Debug(preparingMsg, "cmd", name, "args", redactArgs(shown))
 	start := time.Now()
 
 	// Unlike RunSensitive, runAndWrap has no Complete flag: it returns full
@@ -259,11 +268,13 @@ func runAndWrap(cmd *exec.Cmd, ceiling int, preparingMsg, successMsg, failureMsg
 		trimmed := mask.text(strings.TrimRight(string(stdout.buf), "\n"))
 		tail, dropped := maskedTail(stderr, mask)
 		cmdErr := &CommandError{Name: name, Args: shown, Stderr: strings.TrimSpace(tail), StderrDropped: dropped, Output: trimmed, ExitCode: exitCodeOf(err), Err: err}
+		// The logged stderr is masked (maskedTail), then redact.Text; the
+		// field on cmdErr stays masked-only, because callers compare it.
 		switch {
 		case cmdErr.Stderr != "" && dropped > 0:
-			slog.Error(failureMsg, "cmd", name, "stderr", cmdErr.Stderr, "stderr_dropped", dropped, "error", err)
+			slog.Error(failureMsg, "cmd", name, "stderr", redact.Text(cmdErr.Stderr), "stderr_dropped", dropped, "error", err)
 		case cmdErr.Stderr != "":
-			slog.Error(failureMsg, "cmd", name, "stderr", cmdErr.Stderr, "error", err)
+			slog.Error(failureMsg, "cmd", name, "stderr", redact.Text(cmdErr.Stderr), "error", err)
 		default:
 			slog.Error(failureMsg, "cmd", name, "error", err)
 		}
@@ -275,7 +286,7 @@ func runAndWrap(cmd *exec.Cmd, ceiling int, preparingMsg, successMsg, failureMsg
 
 // RunInteractive wires the child to the real stdio so it can drive the tty.
 func (OSRunner) RunInteractive(ctx context.Context, name string, args ...string) error {
-	slog.Debug("Preparing to run interactive command.", "cmd", name, "args", maskFrom(ctx).args(args))
+	slog.Debug("Preparing to run interactive command.", "cmd", name, "args", redactArgs(maskFrom(ctx).args(args)))
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -289,10 +300,16 @@ func (OSRunner) RunInteractive(ctx context.Context, name string, args ...string)
 // leaking the whole environment.
 type CommandError struct {
 	Name string
+
+	// Args is argv as WithMaskedAssignments allows it to be rendered, with
+	// any URL credential still in it: callers compare it with the argv they
+	// passed (internal/tmux). Error() redacts it (#734).
 	Args []string
 
 	// Stderr is the child's stderr, masked and trimmed. It is a tail, not
-	// the whole stream, whenever StderrDropped is nonzero.
+	// the whole stream, whenever StderrDropped is nonzero. Like Args it keeps
+	// any URL credential, for callers that compare it; Error() and the
+	// failure log line redact it.
 	Stderr string
 
 	// StderrDropped counts the bytes cut from the front of stderr before
@@ -318,16 +335,24 @@ type CommandError struct {
 	Err error
 }
 
+// Error renders the command, its argv (redact.Arg) and its stderr
+// (redact.Text), so no URL credential reaches the text (#734): callers wrap
+// and log it ("error", err), and show it to the user, so it is a rendering
+// point like the debug log. The cost is that an argv element or stderr word
+// holding an '@', "://" or "::" reads as a placeholder or host/owner/repo.
+// It redacts rather than trusting its constructor, so a CommandError built
+// by a fake or another Runner renders safely too. Only the text changes; the
+// fields keep what the command ran with.
 func (e *CommandError) Error() string {
 	cmd := e.Name
 	if len(e.Args) > 0 {
-		cmd += " " + strings.Join(e.Args, " ")
+		cmd += " " + strings.Join(redactArgs(e.Args), " ")
 	}
 	if e.Stderr != "" {
 		if e.StderrDropped > 0 {
-			return cmd + ": [stderr truncated, " + strconv.FormatInt(e.StderrDropped, 10) + " earlier bytes dropped] " + e.Stderr
+			return cmd + ": [stderr truncated, " + strconv.FormatInt(e.StderrDropped, 10) + " earlier bytes dropped] " + redact.Text(e.Stderr)
 		}
-		return cmd + ": " + e.Stderr
+		return cmd + ": " + redact.Text(e.Stderr)
 	}
 	if e.Err == nil {
 		// Production constructors always set Err; a hand-built CommandError
@@ -335,7 +360,27 @@ func (e *CommandError) Error() string {
 		// panic.
 		return cmd + ": exit " + strconv.Itoa(e.ExitCode)
 	}
-	return cmd + ": " + e.Err.Error()
+	return cmd + ": " + redact.Text(e.Err.Error())
+}
+
+// redactArgs returns argv through redact.Arg, copying only
+// when an element changes.
+func redactArgs(args []string) []string {
+	var out []string
+	for i, a := range args {
+		r := redact.Arg(a)
+		if r == a && out == nil {
+			continue
+		}
+		if out == nil {
+			out = append(make([]string, 0, len(args)), args[:i]...)
+		}
+		out = append(out, r)
+	}
+	if out == nil {
+		return args
+	}
+	return out
 }
 
 func (e *CommandError) Unwrap() error { return e.Err }
@@ -346,18 +391,23 @@ func (e *CommandError) Unwrap() error { return e.Err }
 // was empty, and Output is readable by anything that holds the error. Stderr,
 // ExitCode and Err are kept, so errors.As and errors.Is behave as before.
 //
-// When err is itself a *CommandError, a copy is returned and err is left
-// alone. Every *CommandError deeper in the tree, through Unwrap() error and
-// through the Unwrap() []error of errors.Join or a multi-%w fmt.Errorf, is
-// cleared in place: a chain cannot be rebuilt around a copy, and the caller
-// that just received the error from the Runner is its only holder.
+// When err is itself a *CommandError, a new copy is returned (always a new
+// pointer) and err is left alone, and so is every *CommandError reached from
+// it through a chain of *CommandError.Err links alone: each one is copied in
+// turn. Any other wrapper cannot be rebuilt around a copy, so every
+// *CommandError beneath one (through Unwrap() error, or the Unwrap() []error
+// of errors.Join or a multi-%w fmt.Errorf) is cleared in place, and that
+// clearing is visible through err too, since the copy shares that part of
+// the chain (#708). The caller that just received the error from the Runner
+// is normally its only holder. A custom As method is not followed: a
+// *CommandError reachable only through one keeps its Output.
 func WithoutOutput(err error) error {
-	// A direct assertion, not errors.As: only the top-level case can be
+	// A direct assertion, not errors.As: only a *CommandError itself can be
 	// replaced by a copy.
 	if top, ok := err.(*CommandError); ok {
 		cp := *top
 		cp.Output = ""
-		clearOutputs(cp.Err)
+		cp.Err = WithoutOutput(cp.Err)
 		return &cp
 	}
 	clearOutputs(err)
