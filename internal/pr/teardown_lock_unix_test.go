@@ -30,7 +30,7 @@ func TestTeardown_KillWindowRunsUnderTheLifecycleLock(t *testing.T) {
 	probed := false
 	fake := &exec.FakeRunner{}
 	fake.RunFunc = func(name string, args []string) (string, error) {
-		if name == "tmux" && len(args) > 0 && args[0] == "kill-window" {
+		if name == "tmux" && tmuxVerb(args) == "kill-window" {
 			probed = true
 			probeErr = other.withLifecycleLock(context.Background(), "probe", func() error { return nil })
 		}

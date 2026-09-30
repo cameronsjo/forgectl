@@ -307,6 +307,11 @@ func secretBearing(env []string) []string {
 // parentage first. A window that moved to another session since capture is
 // refused rather than killed — its @id would still resolve.
 //
+// The kill itself re-proves the generation inside the one tmux command that
+// performs it (killWindowGuarded), so a server replaced between the
+// revalidation and the kill refuses instead of killing its own @N
+// (forgectl#756).
+//
 // A window that dies between the revalidation and the kill is ErrObjectGone,
 // but only on tmux's exact answer for that id (windowGoneAtKillStderr) AND a
 // re-read showing the same server generation answered it (confirmGoneAtKill);
@@ -316,11 +321,109 @@ func (c *Client) KillWindow(ctx context.Context, want WindowIdentity) error {
 	if err != nil {
 		return fmt.Errorf("kill window %q: %w", want.Name, err)
 	}
-	_, err = c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("kill-window", "-t", current.ID)...)
+	return c.killWindowGuarded(ctx, want, current)
+}
+
+// generationMismatchMarker opens what a generation-guarded command prints
+// when the server that received it is not the captured incarnation: the
+// marker, a space, and that server's own "#{pid}/#{start_time}". It is a fixed
+// literal the guarded commands never emit themselves (kill-window prints
+// nothing), so the output cannot be confused with the command having run.
+const generationMismatchMarker = "forgectl-generation-mismatch"
+
+// generationGuarded wraps ONE tmux command so the server receiving it runs the
+// command only if that server is the captured incarnation:
+//
+//	if-shell -F -t <target> '#{==:#{pid}/#{start_time},<PID>/<START>}' \
+//	    '<command>' 'display-message -p "<marker> #{pid}/#{start_time}"'
+//
+// Revalidating and then acting in a second tmux invocation leaves a gap in
+// which the socket can come to reach a replaced server, and native ids are
+// per-server counters, so the new server's @N is a stranger's window. One
+// invocation is one client connection to one server, so the comparison and the
+// command cannot straddle a replacement. Measured on tmux 3.4 against an
+// isolated socket: a wrong start time printed the marker with the answering
+// server's pid and start time, exited 0 and left the window alive; the
+// captured generation killed the window and printed nothing; a target id that
+// no longer exists printed "can't find window: @N" and exited 1,
+// byte-identical to a bare kill-window, which keeps the #746 classification
+// (windowGoneAtKillStderr) exact. The else-branch format must stay inside
+// double quotes: unquoted, tmux's parser reads the '#' as a comment and the
+// whole command fails with "syntax error".
+//
+// The else-branch reports WHICH server answered rather than a bare marker
+// because a tmux that cannot evaluate the comparison would otherwise be
+// indistinguishable from a replaced server: an unsupported operator can
+// expand to an empty (false) string, and reading that as "a different server
+// answered" would turn every kill into a phantom ErrGenerationChanged, which
+// teardown reads as gone. killWindowGuarded compares the reported generation
+// itself instead.
+//
+// The pid and start time are interpolated into a format and a command string
+// tmux parses again, so both must be plain decimal (what tmux itself renders
+// for #{pid} and #{start_time}). Anything else is refused before any command
+// runs: WindowIdentity is exported, and a hand-built generation must not be
+// able to smuggle format or command syntax into the server.
+func generationGuarded(gen ServerGeneration, target, command string) ([]string, error) {
+	if !isDecimal(gen.PID) || !isDecimal(gen.StartTime) {
+		return nil, fmt.Errorf("%w: server pid %q / start time %q are not decimal",
+			ErrUnqualifiedIdentity, gen.PID, gen.StartTime)
+	}
+	condition := "#{==:#{pid}/#{start_time}," + gen.PID + "/" + gen.StartTime + "}"
+	return []string{"if-shell", "-F", "-t", target, condition, command,
+		`display-message -p "` + generationMismatchMarker + ` #{pid}/#{start_time}"`}, nil
+}
+
+func isDecimal(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// killWindowGuarded runs the generation-guarded kill of an already
+// revalidated window and reads its answer:
+//
+//   - nothing: the captured server ran the kill;
+//   - the marker naming ANOTHER generation: a different server received the
+//     kill and ran nothing. That is the verdict RevalidateWindow gives for the
+//     same state (ErrGenerationChanged);
+//   - the marker naming the CAPTURED generation: the server is the right one
+//     and still took the else-branch, so tmux did not evaluate the guard. The
+//     window was not killed and nothing about it is known, so the error is
+//     left unclassified and the caller fails closed;
+//   - anything else: output this package did not expect, refused rather than
+//     read as a kill.
+func (c *Client) killWindowGuarded(ctx context.Context, want, current WindowIdentity) error {
+	guarded, err := generationGuarded(current.Generation, current.ID, "kill-window -t "+current.ID)
+	if err != nil {
+		return fmt.Errorf("kill window %q: %w", want.Name, err)
+	}
+	out, err := c.run.Run(ctx, c.tmuxBin, c.tmuxArgs(guarded...)...)
 	if windowGoneAtKillStderr(err, current.ID) {
 		return c.confirmGoneAtKill(ctx, want, err)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if out == "" {
+		return nil
+	}
+	answered, isMarker := strings.CutPrefix(out, generationMismatchMarker+" ")
+	pid, start, isPair := strings.Cut(answered, "/")
+	if !isMarker || !isPair || !isDecimal(pid) || !isDecimal(start) {
+		return fmt.Errorf("kill window %q: unexpected tmux output %q; refusing to treat the window as killed", want.Name, out)
+	}
+	if current.Generation.matches(pid, start) {
+		return fmt.Errorf("kill window %q: tmux did not evaluate the generation guard (the captured server pid %s started %s answered but skipped the kill); the window was not killed",
+			want.Name, pid, start)
+	}
+	return fmt.Errorf("kill window %q: %w; nothing was killed", want.Name, generationDrift(current.Generation, pid, start))
 }
 
 // confirmGoneAtKill settles what kill-window's exact "can't find window"

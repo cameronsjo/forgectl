@@ -166,6 +166,24 @@ func TestRevalidateSession(t *testing.T) {
 	}
 }
 
+// tmuxVerb names the tmux command an argv runs, seeing through the generation
+// guard (forgectl#756): a guarded command is an if-shell whose then-branch is
+// the real command, so it reads as that command's verb. A leading -S pin is
+// skipped.
+func tmuxVerb(args []string) string {
+	if len(args) >= 2 && args[0] == "-S" {
+		args = args[2:]
+	}
+	if len(args) == 0 {
+		return ""
+	}
+	if args[0] == "if-shell" && len(args) >= 6 {
+		verb, _, _ := strings.Cut(args[5], " ")
+		return verb
+	}
+	return args[0]
+}
+
 func windowRow(pid, start, id, sessionID, sessionName string, index int, winName string) string {
 	return strings.Join([]string{
 		pid, start, id, sessionID, sessionName, strconv.Itoa(index), winName, "1", "1",
@@ -271,7 +289,7 @@ func TestKillWindowClassifiesOnlyTheExactGoneAnswer(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			run := &internalexec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
-				if len(args) > 0 && args[0] == "kill-window" {
+				if tmuxVerb(args) == "kill-window" {
 					return "", tc.killErr
 				}
 				if len(args) > 0 && args[0] == "list-sessions" {
@@ -325,7 +343,7 @@ func TestKillWindowConfirmsTheServerBehindTheGoneAnswer(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			run := &internalexec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
 				switch {
-				case len(args) > 0 && args[0] == "kill-window":
+				case tmuxVerb(args) == "kill-window":
 					return "", killErr
 				case len(args) > 0 && args[0] == "list-sessions":
 					return tc.sessions, tc.sessionsErr
@@ -345,6 +363,90 @@ func TestKillWindowConfirmsTheServerBehindTheGoneAnswer(t *testing.T) {
 				t.Errorf("errors.Is(%v, ErrGenerationChanged) = %v, want %v", err, got, tc.wantGen)
 			}
 		})
+	}
+}
+
+// TestKillWindowReadsTheGenerationGuard covers what the one guarded kill
+// command can answer (forgectl#756). The marker naming another generation
+// means a different server received the kill and ran nothing, so it is
+// ErrGenerationChanged. The marker naming the captured generation means tmux
+// skipped the comparison, and any other output is unexpected; both stay
+// unclassified rather than read as a kill.
+//
+// Mutations that turn it red: treat any exit-0 answer as a kill (the marker
+// and stray-output rows read as nil); map every marker to
+// ErrGenerationChanged without comparing the reported generation (the
+// guard-not-evaluated row gains it); map the marker to ErrObjectGone (the
+// another-server row loses ErrGenerationChanged).
+func TestKillWindowReadsTheGenerationGuard(t *testing.T) {
+	gen := ServerGeneration{Selector: ServerSelector{TmpDir: "/tmp"}, PID: "9", StartTime: "100"}
+	want := WindowIdentity{Generation: gen, ID: "@3", SessionID: "$1", Name: "pr-o-r-1"}
+	row := windowRow("9", "100", "@3", "$1", "forge", 0, "pr-o-r-1")
+	for _, tc := range []struct {
+		name    string
+		out     string
+		killErr error
+		wantNil bool
+		wantGen bool
+	}{
+		{"captured server killed it", "", nil, true, false},
+		{"another server answered", generationMismatchMarker + " 77/500", nil, false, true},
+		// The captured server answering from the else-branch means tmux did
+		// not evaluate the comparison; that is not a replaced server.
+		{"guard not evaluated", generationMismatchMarker + " 9/100", nil, false, false},
+		{"marker without a generation", generationMismatchMarker, nil, false, false},
+		{"marker with a non-decimal generation", generationMismatchMarker + " 77/5x0", nil, false, false},
+		{"stray output", "something else", nil, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := &internalexec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+				switch tmuxVerb(args) {
+				case "kill-window":
+					return tc.out, tc.killErr
+				case "list-sessions":
+					return sessionRow("9", "100", "$1", "forge", "/w"), nil
+				}
+				return row, nil
+			}}
+			c := New(run)
+			identityEnv(c, "", "/tmp")
+			err := c.KillWindow(context.Background(), want)
+			if (err == nil) != tc.wantNil {
+				t.Fatalf("KillWindow = %v, want nil %v", err, tc.wantNil)
+			}
+			if got := errors.Is(err, ErrGenerationChanged); got != tc.wantGen {
+				t.Errorf("errors.Is(%v, ErrGenerationChanged) = %v, want %v", err, got, tc.wantGen)
+			}
+			if errors.Is(err, ErrObjectGone) {
+				t.Errorf("err = %v reads as gone; none of these answers proves the window is gone", err)
+			}
+		})
+	}
+}
+
+// TestGenerationGuardRefusesNonDecimalGeneration: the pid and start time are
+// spliced into a format and a command string tmux parses again, so a
+// hand-built generation carrying anything but digits is refused before any
+// command runs. Mutation that turns it red: drop the isDecimal checks.
+func TestGenerationGuardRefusesNonDecimalGeneration(t *testing.T) {
+	for _, gen := range []ServerGeneration{
+		{PID: "9}", StartTime: "100"},
+		{PID: "9", StartTime: "100' ; kill-server ; '"},
+		{PID: "9", StartTime: "1,0"},
+		{PID: "-9", StartTime: "100"},
+	} {
+		gen.Selector = ServerSelector{TmpDir: "/tmp"}
+		run := &internalexec.FakeRunner{}
+		c := New(run)
+		identityEnv(c, "", "/tmp")
+		current := WindowIdentity{Generation: gen, ID: "@3", SessionID: "$1", Name: "w"}
+		err := c.killWindowGuarded(context.Background(), current, current)
+		if !errors.Is(err, ErrUnqualifiedIdentity) {
+			t.Errorf("generation %+v: err = %v, want ErrUnqualifiedIdentity", gen, err)
+		}
+		if len(run.Calls) != 0 {
+			t.Errorf("generation %+v: ran %v, want no tmux command", gen, run.Calls)
+		}
 	}
 }
 

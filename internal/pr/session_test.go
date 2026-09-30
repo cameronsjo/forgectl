@@ -59,9 +59,25 @@ func findCall(calls []exec.Call, name string) (exec.Call, bool) {
 // subcommand) equals verb — for asserting on one specific call among
 // several to the same binary, e.g. new-window after ensureSession's own
 // has-session check.
+// tmuxVerb names the tmux command an argv runs. tmux.KillWindow sends its kill
+// wrapped in a generation guard (forgectl#756): an if-shell whose then-branch
+// is the kill-window, so that argv reads as kill-window here. Keying on
+// args[0] alone would make every "no kill ran" assertion in this package pass
+// vacuously against the guarded form.
+func tmuxVerb(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	if args[0] == "if-shell" && len(args) >= 6 {
+		verb, _, _ := strings.Cut(args[5], " ")
+		return verb
+	}
+	return args[0]
+}
+
 func findCallVerb(calls []exec.Call, name, verb string) (exec.Call, bool) {
 	for _, c := range calls {
-		if c.Name == name && len(c.Args) > 0 && c.Args[0] == verb {
+		if c.Name == name && tmuxVerb(c.Args) == verb {
 			return c, true
 		}
 	}

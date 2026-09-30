@@ -286,8 +286,14 @@ func TestWindowVerbs_TargetNativeID(t *testing.T) {
 		interactive bool
 	}{
 		"KillWindow": {
-			run:  func(c *Client, id WindowIdentity) error { return c.KillWindow(context.Background(), id) },
-			want: []string{"kill-window", "-t", "@3"},
+			run: func(c *Client, id WindowIdentity) error { return c.KillWindow(context.Background(), id) },
+			// forgectl#756: the kill re-proves the captured generation in the
+			// same tmux command. Mutation that turns it red: issue the bare
+			// kill-window -t @3 again.
+			want: []string{
+				"if-shell", "-F", "-t", "@3", "#{==:#{pid}/#{start_time},123/456}",
+				"kill-window -t @3", `display-message -p "forgectl-generation-mismatch #{pid}/#{start_time}"`,
+			},
 		},
 		"SelectWindow": {
 			run:         func(c *Client, id WindowIdentity) error { return c.SelectWindow(context.Background(), id) },
