@@ -647,7 +647,9 @@ type sessionDTO struct {
 //
 // Every field is disk-sourced and untrusted — a session name is whatever was
 // typed at /rename, and an ai-title is model-generated — so each path applies
-// the control built for its own sink. The text path quotes through safeTerm.
+// the control built for its own sink. The text path quotes the row cells and
+// the cwd through safeTerm, and the prompt line through safePrompt, which also
+// caps its length.
 // The JSON path passes the stored value through and lets writeJSON's
 // termsafe.JSONEncoder escape it, because a `resume ls --json | jq -r .cwd`
 // must return a path that still resolves.
