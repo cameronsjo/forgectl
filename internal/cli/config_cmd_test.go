@@ -555,12 +555,11 @@ func TestConfig_NestedSectionRendered(t *testing.T) {
 // in both the text and --json renderings.
 func TestConfig_HomeNoteWhenHomeIsUnresolved(t *testing.T) {
 	const body = "[[launch.project]]\nmatch = \"~/work\"\n"
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	base := t.TempDir()
-	if err := os.MkdirAll(filepath.Dir(childConfigPath(base)), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(childConfigPath(base)), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(childConfigPath(base), []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(childConfigPath(base), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("XDG_CONFIG_HOME", base)
