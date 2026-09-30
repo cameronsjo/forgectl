@@ -16,12 +16,18 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // DefaultHost is tasks.sjo.lol's own hostname — the one instance this client
 // is written against (Vikunja v2.5.0). Configurable so a caller can point at
 // a different instance without a code change.
 const DefaultHost = "tasks.sjo.lol"
+
+// transportErrMaxRunes caps a failed request's transport error text in an
+// ErrUnreachable: it names the URL, built from operator config of any length,
+// and the dial or DNS error text after it.
+const transportErrMaxRunes = 300
 
 // pageSize is this instance's measured max_items_per_page. A caller cannot
 // ask for more; asking for less just means more pages.
@@ -198,7 +204,9 @@ func (c *Client) do(
 		// Everything else — dial failure, DNS failure, or the context
 		// deadline above — surfaces as a *url.Error wrapping the real
 		// cause. None is an auth verdict: the server was never reached.
-		return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
+		// url.Error quotes the URL, but the dial or DNS text it carries is
+		// uncapped, so the whole text is escaped and capped (#807).
+		return nil, fmt.Errorf("%w: %s", ErrUnreachable, termsafe.SafeLineMax(err.Error(), transportErrMaxRunes))
 	}
 	defer func() { _ = resp.Body.Close() }()
 

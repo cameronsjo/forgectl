@@ -8,6 +8,8 @@ package tasks
 //       own error, which names the host again
 //   [x] SaveCache quotes the path and the PathError it wraps, and keeps the
 //       PathError on the chain
+//   [x] A failed request's transport error (a *url.Error, whose dial or DNS
+//       text is uncapped) is escaped and capped (#807)
 
 import (
 	"context"
@@ -76,5 +78,25 @@ func TestSaveCache_QuotesThePath(t *testing.T) {
 	var pathErr *os.PathError
 	if !errors.As(err, &pathErr) || !errors.Is(err, syscall.ENOTDIR) {
 		t.Errorf("the PathError fell off the chain: %v", err)
+	}
+}
+
+type failingTransport struct{ err error }
+
+func (f failingTransport) RoundTrip(*http.Request) (*http.Response, error) { return nil, f.err }
+
+func TestDo_CapsTheTransportError(t *testing.T) {
+	long := strings.Repeat("d", 1000)
+	client := NewClientForTesting("http://tasks.invalid", newToken(fakeToken))
+	client.httpClient = &http.Client{Transport: failingTransport{err: errors.New("dial: \x1b]0;pwned\x07" + long)}}
+	_, err := client.FetchTasks(context.Background())
+	if !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("FetchTasks = %v, want ErrUnreachable", err)
+	}
+	if strings.ContainsAny(err.Error(), "\x1b\x07") {
+		t.Errorf("the error carries a raw control: %q", err)
+	}
+	if strings.Contains(err.Error(), long[:400]) || !strings.HasSuffix(err.Error(), "[truncated]") {
+		t.Errorf("the error echoes the transport error uncapped: %q", err)
 	}
 }

@@ -55,6 +55,10 @@ func scratchIgnoreRemovable(names []string) bool {
 	return len(names) == 0 || (len(names) == 1 && names[0] == ScratchIgnoreName)
 }
 
+// errScratchDirSwapped is RemoveScratchDir's refusal to put the .gitignore
+// back through a path that is no longer a real directory.
+var errScratchDirSwapped = errors.New("the scratch directory's path is no longer a directory, so no .gitignore was written through it")
+
 // RemoveScratchDir removes the scratch directory dir by the teardown rule
 // (scratchIgnoreRemovable): its .gitignore and then the directory, only when
 // nothing else is left in it. It removes no other entry; a caller empties the
@@ -79,6 +83,18 @@ func RemoveScratchDir(dir string) error {
 	}
 	scratchIgnoreGone(dir)
 	return afterScratchRmdir(rmdirScratch(filepath.Clean(dir)), func() (*os.File, error) {
+		// This teardown works by path, so a same-uid racer who swapped dir for
+		// a symlink would have the create below follow it and plant an
+		// ignore-all .gitignore in the link's target (#807). Lstat first and
+		// write nothing unless dir is still a real directory. (The unix
+		// descriptor teardown creates through the pinned fd, immune to this.)
+		// A swap landing between this Lstat and the create is still possible;
+		// the O_EXCL create never overwrites an existing file either way.
+		if info, err := os.Lstat(filepath.Clean(dir)); err != nil {
+			return nil, err
+		} else if info.Mode().Type() != fs.ModeDir {
+			return nil, errScratchDirSwapped
+		}
 		return os.OpenFile(filepath.Clean(ignore), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304/G703: inside a scratch directory this process created
 	})
 }

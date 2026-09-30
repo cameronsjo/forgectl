@@ -17,6 +17,15 @@ package cli
 //   [x] any other step's output is escaped line by line
 //   [x] --json keeps each step's raw output and error text (value-preserving,
 //       escaped by JSONEncoder)
+//   [x] the transcript path is quoted with QuotePath, so a path holding a
+//       space copy-pastes whole (#808)
+//   [x] the path is printed once on each stream: the run's first line on
+//       stderr, the summary's last line on stdout, and the returned error;
+//       FAIL lines and brew's note only say "see the transcript" (#808)
+//   [x] a failed single-command step's stdout (CommandError.Output) is in the
+//       transcript file, escaped, and a sequence's is not written twice (#808)
+//   [x] the transcript file names a failed sequence command once, not
+//       "brew update: brew update: …", while --json keeps that text (#808)
 
 import (
 	"bytes"
@@ -29,6 +38,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	updatepkg "github.com/cameronsjo/forgectl/internal/update"
 )
 
@@ -93,8 +103,11 @@ func TestUpdateRun_BrewOutputGoesToTheTranscriptFileOnly(t *testing.T) {
 	path, file := transcriptFile(t, logDir)
 	assertNoBrewText(t, "the terminal transcript", stderr)
 	assertNoBrewText(t, "the summary", stdout)
-	if !strings.Contains(stderr, "not shown here; see the transcript "+path) {
+	if !strings.Contains(stderr, "not shown here; see the transcript)") {
 		t.Errorf("the terminal should point at the transcript file: %q", stderr)
+	}
+	if !strings.Contains(stderr, "logging transcript to "+termsafe.QuotePath(path)+"\n") || strings.Count(stderr, path) != 1 {
+		t.Errorf("stderr should name the quoted transcript path once, in its first line: %q", stderr)
 	}
 	if !strings.Contains(file, escapedBrewText) || strings.ContainsAny(file, "\x1b\x07") {
 		t.Errorf("the transcript file should hold brew's output, escaped: %q", file)
@@ -126,15 +139,28 @@ func TestUpdateRun_BrewFailureCauseIsInTheTranscriptFile(t *testing.T) {
 	assertNoBrewText(t, "the terminal transcript", stderr)
 	assertNoBrewText(t, "the summary", stdout)
 	assertNoBrewText(t, "the returned error", err.Error())
-	wantFail := "brew upgrade --formula failed (exit 1); see the transcript " + path
+	wantFail := "brew upgrade --formula failed (exit 1); see the transcript\n"
 	if !strings.Contains(stdout, wantFail) || !strings.Contains(stderr, wantFail) {
 		t.Errorf("the FAIL line should name the command, its exit and the transcript:\nstdout %q\nstderr %q", stdout, stderr)
 	}
-	if want := "update: brew failed; see the transcript " + path; err.Error() != want {
+	quoted := termsafe.QuotePath(path)
+	if !strings.HasSuffix(stdout, "\ntranscript: "+quoted+"\n") || strings.Count(stdout, path) != 1 {
+		t.Errorf("the summary should end with the quoted transcript path, and name it only there: %q", stdout)
+	}
+	if strings.Count(stderr, path) != 1 {
+		t.Errorf("stderr should name the transcript path once, in its first line: %q", stderr)
+	}
+	if want := "update: brew failed; see the transcript " + quoted; err.Error() != want {
 		t.Errorf("err = %q, want %q", err, want)
 	}
-	if !strings.Contains(file, "error: brew upgrade --formula: brew upgrade --formula: fatal: "+escapedBrewText) {
-		t.Errorf("the transcript file should hold the failure's cause, escaped: %q", file)
+	if !strings.Contains(file, "      error: brew upgrade --formula: fatal: "+escapedBrewText+"\n") ||
+		strings.Contains(file, "brew upgrade --formula: brew upgrade --formula:") {
+		t.Errorf("the transcript file should hold the failure's cause, escaped, naming the command once: %q", file)
+	}
+	// runSequence already put the failed command's stdout in Output; the
+	// CommandError's copy of it must not be written a second time.
+	if n := strings.Count(file, escapedBrewText+"\n"); n != 2 {
+		t.Errorf("want brew's stdout once and its stderr once in the file, got %d: %q", n, file)
 	}
 	if strings.ContainsAny(file, "\x1b\x07") {
 		t.Errorf("the transcript file carries a raw control: %q", file)
@@ -231,5 +257,52 @@ func TestUpdateRun_JSONKeepsRawOutputAndError(t *testing.T) {
 	}
 	if report.Steps[0].Output != "BREWOUT" {
 		t.Errorf("json output = %q, want brew's stdout unchanged", report.Steps[0].Output)
+	}
+}
+
+// #808: a step that runs one command (go clean, npm update -g) returns that
+// command's stdout only in the CommandError, and the transcript file must
+// still hold it, escaped.
+func TestUpdateRun_SingleCommandFailureOutputIsInTheTranscriptFile(t *testing.T) {
+	captureDebugLog(t)
+	fr := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "", &exec.CommandError{Name: name, Args: args, Stderr: "GOERR", Output: "GOOUT \x1b[2J", ExitCode: 1}
+	}}
+	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("go", true, nil)}))
+	logDir := t.TempDir()
+
+	_, _, err := runUpdate(t, client, config.UpdateConfig{LogDir: logDir}, "run", "--yes")
+	if ExitCode(err) != 1 {
+		t.Fatalf("ExitCode = %d, want 1 (err %v)", ExitCode(err), err)
+	}
+	_, file := transcriptFile(t, logDir)
+	if !strings.Contains(file, "      | GOOUT \\x1b[2J\n") || strings.ContainsRune(file, 0x1b) {
+		t.Errorf("the transcript file should hold the failed command's stdout, escaped: %q", file)
+	}
+	if !strings.Contains(file, "      error: go apply: GOERR\n") {
+		t.Errorf("the transcript file should hold the error text: %q", file)
+	}
+}
+
+// #808: the macOS default log dir sits under "Application Support". The
+// pointer quotes the path, so a copy-pasted `cat <path>` gets it whole.
+func TestUpdateRun_TranscriptPointerQuotesAPathWithASpace(t *testing.T) {
+	captureDebugLog(t)
+	fr := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "", &exec.CommandError{Name: name, Args: args, ExitCode: 1}
+	}}
+	client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("go", true, nil)}))
+	logDir := filepath.Join(t.TempDir(), "Application Support", "update-logs")
+
+	stdout, stderr, err := runUpdate(t, client, config.UpdateConfig{LogDir: logDir}, "run", "--yes")
+	if ExitCode(err) != 1 {
+		t.Fatalf("ExitCode = %d, want 1 (err %v)", ExitCode(err), err)
+	}
+	path, _ := transcriptFile(t, logDir)
+	quoted := `"` + path + `"`
+	for where, text := range map[string]string{"stdout": stdout, "stderr": stderr, "error": err.Error()} {
+		if !strings.Contains(text, quoted) {
+			t.Errorf("%s should name the transcript as %s: %q", where, quoted, text)
+		}
 	}
 }

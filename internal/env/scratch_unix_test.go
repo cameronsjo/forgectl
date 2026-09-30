@@ -16,6 +16,8 @@ package env
 //       .gitignore put back, by both teardowns, and the error says so (#768)
 //   [x] A restore that fails is reported as failed, never as a .gitignore
 //       left in place (#768)
+//   [x] The path-based teardown writes no .gitignore through a scratch path
+//       swapped for a symlink before its restore, and says so (#807)
 
 import (
 	"errors"
@@ -274,4 +276,33 @@ func TestRemoveScratchDirAtReportsAFailedRestoreAfterALateEntry(t *testing.T) {
 		t.Errorf("err = %q, want it to say the restore failed", err)
 	}
 	assertPlantedIgnoreKept(t, filepath.Join(dir, name, ScratchIgnoreName))
+}
+
+// #807: RemoveScratchDir restores by path. If dir was swapped for a symlink
+// before the restore, the create would follow it and plant a .gitignore in
+// the link's target; it must write nothing and report the restore failed.
+func TestRemoveScratchDirWritesNoIgnoreThroughASwappedSymlink(t *testing.T) {
+	dir, err := MakeScratchDir(t.TempDir(), "scratch-")
+	if err != nil {
+		t.Fatalf("MakeScratchDir: %v", err)
+	}
+	target := t.TempDir()
+	failRmdir(t, func(string) {
+		if err := os.Rename(dir, dir+".moved"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, dir); err != nil {
+			t.Fatal(err)
+		}
+	})
+	err = RemoveScratchDir(dir)
+	if _, serr := os.Lstat(filepath.Join(target, ScratchIgnoreName)); !os.IsNotExist(serr) {
+		t.Errorf("a .gitignore was planted in the symlink's target: %v", serr)
+	}
+	if !errors.Is(err, unix.EIO) || !errors.Is(err, errScratchDirSwapped) {
+		t.Fatalf("err = %v, want the rmdir's EIO and errScratchDirSwapped on the chain", err)
+	}
+	if !strings.Contains(err.Error(), "putting its .gitignore back also failed") {
+		t.Errorf("err = %q, want it to say the restore failed", err)
+	}
 }

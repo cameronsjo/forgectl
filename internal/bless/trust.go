@@ -7,6 +7,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/tomlerr"
 )
 
@@ -102,17 +103,17 @@ func checkAnchorOwnership(path string) error {
 		return err
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("anchor %s is not a regular file", path)
+		return fmt.Errorf("anchor %s is not a regular file", termsafe.QuotePath(path))
 	}
 	if perm := info.Mode().Perm(); perm&0o022 != 0 {
-		return fmt.Errorf("anchor %s is group- or world-writable (mode %#o)", path, perm)
+		return fmt.Errorf("anchor %s is group- or world-writable (mode %#o)", termsafe.QuotePath(path), perm)
 	}
 	uid, err := statOwnerUID(info)
 	if err != nil {
 		return err
 	}
 	if uid != 0 {
-		return fmt.Errorf("anchor %s is owned by uid %d, want 0 (root)", path, uid)
+		return fmt.Errorf("anchor %s is owned by uid %d, want 0 (root)", termsafe.QuotePath(path), uid)
 	}
 	return nil
 }
