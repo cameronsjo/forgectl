@@ -36,17 +36,31 @@
 // stashGitEnv):
 //
 //   - lazy fetch. In a partial clone (a promisor remote), reading a missing
-//     object fetches it, which runs the transport and with it core.sshCommand
-//     or a remote's uploadpack. A refs/stash naming a missing commit, or a
-//     stash whose untracked tree is missing, triggers it. Measured on git
-//     2.43: `stash list` and `ls-tree` both ran a canary core.sshCommand.
-//     protocol.allow=never refuses every transport before it starts, on every
-//     git version; GIT_NO_LAZY_FETCH=1 (git 2.44 and later) stops the fetch
-//     before a transport is chosen. The read then fails, and the scan refuses.
+//     object fetches it, which runs the transport, and with it
+//     core.sshCommand, a remote's uploadpack, or an `ext::` URL's command. A
+//     refs/stash naming a missing commit, or a stash whose untracked tree is
+//     missing, triggers it. Measured on git 2.43: `stash list` and `ls-tree`
+//     both ran a canary.
+//
+//     The load-bearing control is GIT_ALLOW_PROTOCOL=none (git 2.6 and
+//     later), an allowlist that names no transport. When it is set, git
+//     ignores every protocol.allow and protocol.<name>.allow setting, the
+//     repository's included, and refuses every transport before it starts.
+//     It goes last in the environment, so an inherited value cannot widen it.
+//     `-c protocol.allow=never` is NOT enough on its own: git lets a
+//     repository's protocol.<name>.allow take precedence over it, so a
+//     repository with protocol.ext.allow=always and an ext:: remote ran its
+//     canary through it. GIT_NO_LAZY_FETCH=1 (git 2.44 and later, and some
+//     backports) stops the fetch before a transport is chosen; an older git
+//     ignores it. Both stay as defence in depth. With the fetch refused, the
+//     read fails and the scan refuses.
+//
 //   - core.fsmonitor, which names a hook git launches to query the working
 //     tree.
+//
 //   - log.showSignature, which runs gpg.program on a signed commit that
 //     `stash list` walks.
+//
 //   - replace refs, which could substitute another object for a stash commit
 //     or its tree (--no-replace-objects).
 //
@@ -120,20 +134,27 @@ var stashGitScrubbed = map[string]bool{
 	"GIT_COMMON_DIR":                   true,
 }
 
-// stashGitEnv is environ without the scrubbed variables (and the numbered
-// GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n pairs GIT_CONFIG_COUNT indexes), plus
-// the pins that need the environment.
+// stashGitEnv is environ without the scrubbed variables, the numbered
+// GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n pairs GIT_CONFIG_COUNT indexes, and any
+// inherited GIT_ALLOW_PROTOCOL, followed by stashGitEnvPins.
 func stashGitEnv(environ []string) []string {
 	out := make([]string, 0, len(environ)+2)
 	for _, kv := range environ {
 		key, _, _ := strings.Cut(kv, "=")
-		if stashGitScrubbed[key] || strings.HasPrefix(key, "GIT_CONFIG_KEY_") || strings.HasPrefix(key, "GIT_CONFIG_VALUE_") {
+		if stashGitScrubbed[key] || key == "GIT_ALLOW_PROTOCOL" || strings.HasPrefix(key, "GIT_CONFIG_KEY_") || strings.HasPrefix(key, "GIT_CONFIG_VALUE_") {
 			continue
 		}
 		out = append(out, kv)
 	}
-	return append(out, "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0")
+	return append(out, stashGitEnvPins...)
 }
+
+// stashGitEnvPins are appended to the environment, in this order.
+// GIT_ALLOW_PROTOCOL must stay last: exec keeps the last value of a duplicate
+// key, so an inherited GIT_ALLOW_PROTOCOL cannot widen it. It is a variable
+// only so a test can drop GIT_NO_LAZY_FETCH and model a git older than 2.44,
+// which ignores it.
+var stashGitEnvPins = []string{"GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0", "GIT_ALLOW_PROTOCOL=none"}
 
 // stashGit runs git with args in dir and returns its stdout. It is a variable
 // only so a test can make one call fail the way a corrupt repository would.

@@ -100,12 +100,15 @@ func writeAtomic(target Target, data []byte) (tightened bool, err error) {
 }
 
 // ScratchTracker wraps the creation of a write's scratch directory. It must
-// either call mkdir exactly once, recording the absolute path mkdir returns so
+// either call mkdir exactly once (a second call fails and makes nothing), recording the absolute path mkdir returns so
 // it can remove that directory later, or return an error without calling it.
 // Calling mkdir inside its own critical section leaves no instant at which
 // the directory exists and the tracker does not know it. An error abandons
 // the write, and a directory mkdir made is removed.
 type ScratchTracker func(mkdir func() (string, error)) error
+
+// errScratchMadeTwice is mkdir's refusal of a second call from one tracker.
+var errScratchMadeTwice = errors.New("the scratch directory's mkdir was called twice")
 
 // errScratchNotMade is writeAtomicTracked's refusal of a tracker that returned
 // no error without calling mkdir.
@@ -122,7 +125,14 @@ func writeAtomicTracked(target Target, data []byte, track ScratchTracker) (tight
 	var scratch *dirPin
 	var scratchName string
 	var mkErr error
+	made := false
 	mkdir := func() (string, error) {
+		// A second call would make a second directory and orphan the first,
+		// with its descriptor; the contract is one call.
+		if made {
+			return "", errScratchMadeTwice
+		}
+		made = true
 		scratch, scratchName, mkErr = target.dir.mkScratchDir(target.envScratchDirPrefix())
 		if mkErr != nil {
 			return "", mkErr

@@ -7,6 +7,8 @@ package env
 //       completes and removes it
 //   [x] A tracker error abandons the write and removes a directory mkdir made
 //   [x] A tracker that returns no error without calling mkdir fails the write
+//   [x] A second mkdir call fails and makes no second directory; the write
+//       goes on with the first and removes it
 
 import (
 	"errors"
@@ -82,5 +84,33 @@ func TestWriteTargetTrackedAbandonsOnTrackerError(t *testing.T) {
 	err = WriteTargetTracked(tg, []byte("K=v\n"), func(func() (string, error)) error { return nil })
 	if !errors.Is(err, errScratchNotMade) {
 		t.Fatalf("a tracker that never called mkdir: WriteTargetTracked = %v, want errScratchNotMade", err)
+	}
+}
+
+func TestWriteTargetTrackedRefusesASecondMkdir(t *testing.T) {
+	dir := t.TempDir()
+	tg := pinnedTarget(t, dir, ".env")
+
+	var second error
+	var during []string
+	err := WriteTargetTracked(tg, []byte("K=v\n"), func(mkdir func() (string, error)) error {
+		if _, err := mkdir(); err != nil {
+			return err
+		}
+		_, second = mkdir()
+		during = envScratchNames(t, dir)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WriteTargetTracked: %v", err)
+	}
+	if !errors.Is(second, errScratchMadeTwice) {
+		t.Errorf("the second mkdir = %v, want errScratchMadeTwice", second)
+	}
+	if len(during) != 1 {
+		t.Errorf("after two mkdir calls the directory holds %v; want exactly one scratch directory", during)
+	}
+	if left := envScratchNames(t, dir); len(left) != 0 {
+		t.Errorf("the write left %v", left)
 	}
 }
