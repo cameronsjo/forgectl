@@ -250,19 +250,27 @@ func TestMarkupGuard_NeverFinerThanAPipeline(t *testing.T) {
 // (escapedPipeWork). The twin runs no AST transformer, so only
 // escapedPipeWork's charge sees them. On the guard without that charge,
 // the one-column table (420 KB) took 11.4 s to render and the eight-column
-// one (294 KB) 9.8 s to render and 9.3 s to scan.
+// one (294 KB) 9.8 s to render and 9.3 s to scan. On a guard that took the
+// positions from the twin's table cells, the orphan header (1 MB) passed
+// and then took 11.6 s to render and 12.6 s to scan in a vault.
 func escapedPipeTables() map[string]string {
 	eight := "|" + strings.Repeat("`\\|`|", 8) + "\n"
 	return map[string]string{
 		"escaped pipes, 1 column":  "| a |\n|-|\n" + strings.Repeat("|`\\|`|\n", 52500),
 		"escaped pipes, 8 columns": "| a | b | c | d | e | f | g | h |\n|-|-|-|-|-|-|-|-|\n" + strings.Repeat(eight, 6000),
+		// A header whose cell count does not match its delimiter row is no
+		// table, but goldmark has already recorded its "\|" positions, and
+		// the small real table after it pays for every one of them.
+		"escaped pipes, orphan header": "`" + strings.Repeat("\\|", 490000) + " | b\n|-|\n\n" + "|a|\n|-|\n" + strings.Repeat("|`\\|`|\n", 8150),
 	}
 }
 
 // TestMarkupGuard_EscapedPipeCharge: the escaped-pipe tables are refused
 // for the render pipelines, which carry the table transformers, and a
-// table of a few such cells is not. Mutation: dropping escapedPipeWork
-// from markupTooComplex turns this red (and ReprosAreBounded slow).
+// table of a few such cells is not. Mutations: dropping escapedPipeWork
+// from markupTooComplex turns this red (and ReprosAreBounded slow), and so
+// does counting positions from the twin's table cells, for the orphan
+// header.
 func TestMarkupGuard_EscapedPipeCharge(t *testing.T) {
 	for name, src := range escapedPipeTables() {
 		for _, vault := range []bool{false, true} {

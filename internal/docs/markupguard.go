@@ -9,7 +9,6 @@ import (
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
-	extast "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
 )
@@ -155,51 +154,27 @@ func markupTooComplex(md goldmark.Markdown, source []byte) (bool, error) {
 	markupGuardMu.Unlock()
 	work := inlineWork(doc, source, maxInlineWork)
 	if work <= maxInlineWork {
-		work += escapedPipeWork(doc, source)
+		work += escapedPipeWork(source)
 	}
 	return work > maxInlineWork, nil
 }
 
 // escapedPipeWork charges what goldmark's GFM tableASTTransformer
-// (goldmark v1.8.4 extension/table.go, Transform) will cost, which the
+// (goldmark v1.8.4 extension/table.go, Transform) can cost, which the
 // twin, having no AST transformers, never runs. The table paragraph
-// transformer records every cell holding a "\|" after a backtick, with the
-// position of each such "\|"; the AST transformer then walks each recorded
-// cell's code-span text nodes and, for each one, loops over every recorded
-// position in the document. That is (code-span text nodes in recorded
-// cells) × (recorded positions): quadratic, and across all tables at once.
-// A one-column table of "|`\|`|" rows took 11.4 s to render at 420 KB and
-// 48.7 s at 840 KB, holding renderMu. The charge counts each recorded cell
-// as its backticks (at least one) and each position once, which bounds the
-// text nodes from above, and is at most the document's delimiters times
-// its length.
-func escapedPipeWork(doc ast.Node, source []byte) int {
-	cells, positions := 0, 0
-	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
-		if !entering || n.Kind() != extast.KindTableCell {
-			return ast.WalkContinue, nil
-		}
-		lines := n.Lines()
-		for i := 0; i < lines.Len(); i++ {
-			seg := lines.At(i)
-			backticks, found := 0, 0
-			v := seg.Value(source)
-			for j, c := range v {
-				switch {
-				case c == '`':
-					backticks++
-				case c == '|' && j > 0 && v[j-1] == '\\' && backticks > 0:
-					found++
-				}
-			}
-			if found > 0 {
-				cells += backticks
-				positions += found
-			}
-		}
-		return ast.WalkSkipChildren, nil
-	})
-	return cells * positions
+// transformer records the position of each "\|" after a backtick in every
+// row it parses, the header of a table it then abandons included; the AST
+// transformer walks each recorded cell's code-span text nodes and, for each
+// one, loops over every position recorded in the document. That is
+// quadratic, across all tables at once: a one-column table of "|`\|`|" rows
+// took 11.4 s to render at 420 KB, and a table-shaped header of 490,000
+// "\|" that goldmark abandoned, followed by a small table of such cells,
+// 11.6 s. The charge reads the source alone, (backticks) × (occurrences of
+// "\|"), which bounds both the text nodes and the recorded positions from
+// above whichever rows goldmark keeps, records or discards. Both factors
+// are at most the document's delimiters and length.
+func escapedPipeWork(source []byte) int {
+	return bytes.Count(source, []byte("`")) * bytes.Count(source, []byte("\\|"))
 }
 
 // inlineWork is the sum, over the blocks of doc that goldmark inline-parses
