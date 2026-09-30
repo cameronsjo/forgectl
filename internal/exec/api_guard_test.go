@@ -53,13 +53,31 @@ const (
 // relative to this package, with the module-relative name each is shown as.
 var pinnedDirs = []struct{ dir, shown string }{
 	{".", "internal/exec"},
+	{filepath.Join("internal", "sealed"), "internal/exec/internal/sealed"},
 	{filepath.Join("..", "tmux", "tmuxesc"), "internal/tmux/tmuxesc"},
 }
 
+// sealedImportPath is the package that holds every payload and the only code
+// that reads one (forgectl#854).
+const sealedImportPath = execImportPath + "/internal/sealed"
+
+// sealedAPIPrefix starts each golden line that spells sealed's surface, so its
+// names cannot collide with internal/exec's in the sorted line set.
+const sealedAPIPrefix = "sealed: "
+
 // TestExportedAPI pins, in testdata/exported_api.golden, the surface through
-// which a sealed payload could reach code outside internal/exec:
+// which a sealed payload could reach code outside internal/exec, and the
+// surface of internal/exec/internal/sealed, the package that holds every
+// payload (forgectl#854).
 //
-//   - every non-test file in internal/exec and internal/tmux/tmuxesc,
+// Sealing is the primary control: a payload's reveal is unexported inside
+// sealed, which only internal/exec can import, so a reveal written anywhere
+// else does not compile. This golden is the backstop for what the compiler
+// allows: a new export of sealed that hands a payload out (an accessor, a
+// callback parameter), and a new export of internal/exec that forwards one.
+//
+//   - every non-test file in internal/exec, internal/exec/internal/sealed and
+//     internal/tmux/tmuxesc,
 //     whatever its build constraint, with that constraint and a cgo mark, so
 //     a new or retagged file fails until reviewed. A .go file that no
 //     platform in guardPlatforms compiles with cgo off (one for a platform
@@ -68,7 +86,8 @@ var pinnedDirs = []struct{ dir, shown string }{
 //     and once pinned its contents could change unseen (forgectl#854);
 //     assembly and object files are refused module-wide by
 //     TestNoFileReachesPastTheTypeSystem;
-//   - every exported func, var and const, with its full type;
+//   - every exported func, var and const of internal/exec and of sealed
+//     (sealed's lines prefixed "sealed: "), with its full type;
 //   - every named type declared at package level, exported or not, with its
 //     full underlying type (every field, embed and tag) and its method set on
 //     both T and *T: every method declared in this package, and every
@@ -87,7 +106,9 @@ var pinnedDirs = []struct{ dir, shown string }{
 //
 // Mutations that turn it red, each written in a production file:
 //
-//   - func (a Arg) Peek() string { return a.reveal() }  (an accessor)
+//   - func (v Value) Reveal() string { return v.reveal() } in sealed, and
+//     func (a Arg) Peek() string { return a.v.Reveal() } in internal/exec
+//     (an accessor; each changes its own package's lines)
 //   - var Hook func(string) string                     (an exported func var)
 //   - func Inspect(a Arg, v any)                        (an any parameter)
 //   - type hook func() becoming func(string), used by an exported func
@@ -102,7 +123,8 @@ func TestExportedAPI(t *testing.T) {
 	files := renderPinnedFiles(t)
 	got := map[guardPlatform]string{}
 	for _, p := range guardPlatforms {
-		got[p] = files + renderAPI(checkExecFor(t, p).pkg)
+		c := checkExecFor(t, p)
+		got[p] = files + renderAPI(c.pkg) + prefixLines(sealedAPIPrefix, renderAPI(c.sealed))
 	}
 	if *updateAPI {
 		writeAPIGoldens(t, got)
@@ -126,6 +148,15 @@ func TestExportedAPI(t *testing.T) {
 				p, name, diff, apiRegenerate)
 		}
 	}
+}
+
+// prefixLines prefixes every line of s.
+func prefixLines(prefix, s string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i := range lines {
+		lines[i] = prefix + lines[i]
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 func apiGoldenName(p guardPlatform) string {
@@ -416,16 +447,26 @@ func TestGuardPlatformsCoverReleaseTargets(t *testing.T) {
 //     target is GOOS_GOARCH with an optional variant suffix (linux_amd64_v1,
 //     linux_arm_7); a target it cannot split that way, such as the
 //     go_first_class shorthand, is a finding rather than a guess.
-//   - env is applied in order, so the LAST CGO_ENABLED entry is the one the
-//     build gets, and it must be 0.
+//   - A build's ignore list drops a goos/goarch pair from that matrix. An
+//     entry drops the pair only when its goos and goarch match (an empty one
+//     matches any) and it names no other field: an entry that also names a
+//     variant (goarm, goamd64, ...) drops only that variant, so the pair may
+//     still ship and stays checked. Reading ignore only narrows what is
+//     checked, and never past what goreleaser builds.
+//   - env is applied in order, the top-level env first and the build's own
+//     after it, so the LAST CGO_ENABLED entry across the two is the one the
+//     build gets, and it must be 0. A top-level CGO_ENABLED=1 that no build
+//     overrides is a finding for every build.
 func releaseTargetFindings(raw []byte) ([]string, int, error) {
 	var cfg struct {
+		Env    []string `yaml:"env"`
 		Builds []struct {
-			ID      string   `yaml:"id"`
-			Env     []string `yaml:"env"`
-			GOOS    []string `yaml:"goos"`
-			GOARCH  []string `yaml:"goarch"`
-			Targets []string `yaml:"targets"`
+			ID      string           `yaml:"id"`
+			Env     []string         `yaml:"env"`
+			GOOS    []string         `yaml:"goos"`
+			GOARCH  []string         `yaml:"goarch"`
+			Targets []string         `yaml:"targets"`
+			Ignore  []map[string]any `yaml:"ignore"`
 		} `yaml:"builds"`
 	}
 	if err := yaml.Unmarshal(raw, &cfg); err != nil {
@@ -441,7 +482,7 @@ func releaseTargetFindings(raw []byte) ([]string, int, error) {
 	}
 	for _, b := range cfg.Builds {
 		cgo := ""
-		for _, kv := range b.Env {
+		for _, kv := range slices.Concat(cfg.Env, b.Env) {
 			if v, ok := strings.CutPrefix(kv, "CGO_ENABLED="); ok {
 				cgo = v
 			}
@@ -465,21 +506,53 @@ func releaseTargetFindings(raw []byte) ([]string, int, error) {
 		}
 		for _, goos := range b.GOOS {
 			for _, goarch := range b.GOARCH {
-				check(b.ID, goos, goarch)
+				if !ignoresPair(b.Ignore, goos, goarch) {
+					check(b.ID, goos, goarch)
+				}
 			}
 		}
 	}
 	return findings, pairs, nil
 }
 
-// TestReleaseTargetFindingsReadsGoreleaserAsGoreleaserDoes pins the two ways
-// the tie-in used to under-read a config (forgectl#854, D-N2): a targets list
-// beside goos/goarch takes precedence, so its platforms are what ship; and of
-// two CGO_ENABLED entries the last one wins.
+// ignoresPair reports whether a goreleaser build's ignore list drops the whole
+// goos/goarch pair: some entry matches both (an absent or empty field matches
+// any) and names no other field, since a variant-scoped entry drops only that
+// variant.
+func ignoresPair(ignore []map[string]any, goos, goarch string) bool {
+	for _, entry := range ignore {
+		whole := true
+		for k, v := range entry {
+			val := fmt.Sprint(v)
+			switch k {
+			case "goos":
+				whole = whole && (val == "" || val == goos)
+			case "goarch":
+				whole = whole && (val == "" || val == goarch)
+			default:
+				whole = false
+			}
+		}
+		if whole {
+			return true
+		}
+	}
+	return false
+}
+
+// TestReleaseTargetFindingsReadsGoreleaserAsGoreleaserDoes pins the ways the
+// tie-in used to under-read a config (forgectl#854, D-N2): a targets list
+// beside goos/goarch takes precedence, so its platforms are what ship; of two
+// CGO_ENABLED entries the last one wins; a top-level env applies to every
+// build under its own env; and an ignore entry drops a pair only when it
+// names nothing narrower.
 //
 // Mutations that turn it red: check goos x goarch even when targets is set
 // (windows/arm64 goes unseen, and linux/386 is reported); accept the build
-// when any env entry is CGO_ENABLED=0 (the cgo row passes).
+// when any env entry is CGO_ENABLED=0 (the cgo row passes); read only the
+// build's env (the top-level CGO_ENABLED=0 row reports a finding); skip every pair an ignore entry
+// names, variant or not (the goarm row loses its finding); read no ignore at
+// all (the ignored-pair row reports windows/arm64).
 func TestReleaseTargetFindingsReadsGoreleaserAsGoreleaserDoes(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -506,6 +579,35 @@ func TestReleaseTargetFindingsReadsGoreleaserAsGoreleaserDoes(t *testing.T) {
 			pairs: 1,
 		},
 		{
+			name:  "a top-level CGO_ENABLED=1 reaches a build that sets none",
+			yaml:  "env: [CGO_ENABLED=1]\nbuilds:\n  - id: g\n    goos: [linux]\n    goarch: [amd64]\n",
+			want:  []string{`goreleaser build "g" does not end with CGO_ENABLED=0 in env (the last entry wins); the guards type-check with cgo off`},
+			pairs: 1,
+		},
+		{
+			name:  "a top-level CGO_ENABLED=0 covers a build that sets none",
+			yaml:  "env: [CGO_ENABLED=0]\nbuilds:\n  - id: n\n    goos: [linux]\n    goarch: [amd64]\n",
+			pairs: 1,
+		},
+		{
+			name:  "a build's own env overrides the top-level one",
+			yaml:  "env: [CGO_ENABLED=1]\nbuilds:\n  - id: o\n    env: [CGO_ENABLED=0]\n    goos: [linux]\n    goarch: [amd64]\n",
+			pairs: 1,
+		},
+		{
+			name: "an ignored pair is not shipped",
+			yaml: "builds:\n  - id: i\n    env: [CGO_ENABLED=0]\n    goos: [linux, windows]\n    goarch: [amd64, arm64]\n" +
+				"    ignore:\n      - goos: windows\n        goarch: arm64\n",
+			pairs: 3,
+		},
+		{
+			name: "a variant-scoped ignore leaves the pair checked",
+			yaml: "builds:\n  - id: v\n    env: [CGO_ENABLED=0]\n    goos: [linux]\n    goarch: [amd64, arm]\n" +
+				"    ignore:\n      - goos: linux\n        goarch: arm\n        goarm: 6\n",
+			want:  []string{`goreleaser build "v" ships linux/arm, which guardPlatforms does not type-check`},
+			pairs: 2,
+		},
+		{
 			name:  "a shorthand target is not guessed at",
 			yaml:  "builds:\n  - id: s\n    env: [CGO_ENABLED=0]\n    targets: [go_first_class]\n",
 			want:  []string{`goreleaser build "s" names target "go_first_class", which is not GOOS_GOARCH; list the targets explicitly so the guard can check coverage`},
@@ -526,12 +628,14 @@ func TestReleaseTargetFindingsReadsGoreleaserAsGoreleaserDoes(t *testing.T) {
 }
 
 // checkedPackage is internal/exec's production files type-checked for one
-// platform.
+// platform, with sealed as the importer resolved it (from source, function
+// bodies skipped, which is all its surface needs).
 type checkedPackage struct {
-	fset  *token.FileSet
-	files []*ast.File
-	info  *types.Info
-	pkg   *types.Package
+	fset   *token.FileSet
+	files  []*ast.File
+	info   *types.Info
+	pkg    *types.Package
+	sealed *types.Package
 }
 
 var checkedByPlatform = map[guardPlatform]*checkedPackage{}
@@ -569,6 +673,7 @@ func checkExecFor(t *testing.T, p guardPlatform) *checkedPackage {
 	info := &types.Info{
 		Types:      map[ast.Expr]types.TypeAndValue{},
 		Selections: map[*ast.SelectorExpr]*types.Selection{},
+		Uses:       map[*ast.Ident]types.Object{},
 	}
 	ctx := build.Default
 	ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled = p.goos, p.goarch, false
@@ -578,7 +683,11 @@ func checkExecFor(t *testing.T, p guardPlatform) *checkedPackage {
 	if err != nil {
 		t.Fatalf("type-check internal/exec for %s: %v", p, err)
 	}
-	c := &checkedPackage{fset: fset, files: files, info: info, pkg: pkg}
+	sealed := imp.pkgs[sealedImportPath]
+	if sealed == nil {
+		t.Fatalf("internal/exec for %s does not import %s; the payload is not sealed", p, sealedImportPath)
+	}
+	c := &checkedPackage{fset: fset, files: files, info: info, pkg: pkg, sealed: sealed}
 	checkedByPlatform[p] = c
 	return c
 }
