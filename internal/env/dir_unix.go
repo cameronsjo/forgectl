@@ -293,3 +293,77 @@ func (d *dirPin) names() ([]string, error) {
 func (d *dirPin) remove(name string) error {
 	return unix.Unlinkat(d.fd, name, 0)
 }
+
+// mkScratchDir creates a uniquely named 0700 directory inside the pinned
+// directory, writes its `*` .gitignore exclusively, and returns a pin on the
+// new directory with its name. On any failure it removes what it created.
+// See scratch.go for why the .gitignore comes first.
+//
+// Everything is relative to a descriptor, for the reason dirPin exists: the
+// directory is created with mkdirat against d, opened with openat against d
+// (O_NOFOLLOW, O_DIRECTORY, so a name swapped for a symlink or a file between
+// the two calls is refused), and the .gitignore is created with openat
+// against the new directory's own descriptor. MakeScratchDir, which takes
+// paths, is the --sops work directory's version of the same steps.
+func (d *dirPin) mkScratchDir(prefix string) (*dirPin, string, error) {
+	buf := make([]byte, tempNameBytes)
+	name := ""
+	for attempt := 0; attempt < 10 && name == ""; attempt++ {
+		if _, err := rand.Read(buf); err != nil {
+			return nil, "", fmt.Errorf("generate a scratch directory name: %w", err)
+		}
+		candidate := prefix + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(buf)
+		err := unix.Mkdirat(d.fd, candidate, scratchDirMode)
+		if errors.Is(err, unix.EEXIST) {
+			continue
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		name = candidate
+	}
+	if name == "" {
+		return nil, "", errors.New("could not create a uniquely named scratch directory")
+	}
+	fd, err := unix.Openat(d.fd, name, dirFlags, 0)
+	if err != nil {
+		_ = unix.Unlinkat(d.fd, name, unix.AT_REMOVEDIR)
+		return nil, "", err
+	}
+	sub := &dirPin{fd: fd}
+	fail := func(err error) (*dirPin, string, error) {
+		_ = d.removeScratchDir(sub, name)
+		return nil, "", err
+	}
+	// mkdirat's mode passes through umask, which can only narrow 0700, but an
+	// unusual umask can narrow it past what forgectl itself needs to write.
+	if err := unix.Fchmod(fd, scratchDirMode); err != nil {
+		return fail(err)
+	}
+	ignoreFd, err := openatCreate(fd, ScratchIgnoreName, unix.O_EXCL|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return fail(err)
+	}
+	if err := writeAndClose(os.NewFile(uintptr(ignoreFd), ScratchIgnoreName), []byte(ScratchIgnore)); err != nil {
+		return fail(err)
+	}
+	return sub, name, nil
+}
+
+// removeScratchDir removes the scratch directory name, which sub pins, once
+// the file written in it has been renamed out. It unlinks the .gitignore,
+// releases sub, then removes the directory itself; the last step fails if
+// anything else is still inside, which is the point: nothing here recurses
+// into a directory that might hold plaintext it did not expect.
+func (d *dirPin) removeScratchDir(sub *dirPin, name string) error {
+	_ = unix.Unlinkat(sub.fd, ScratchIgnoreName, 0)
+	sub.close()
+	return unix.Unlinkat(d.fd, name, unix.AT_REMOVEDIR)
+}
+
+// renameFrom moves from, inside the scratch directory sub pins, to to, inside
+// d. Both are descriptors on directories of the same parent filesystem, so
+// renameat(2) is atomic here exactly as rename is.
+func (d *dirPin) renameFrom(sub *dirPin, from, to string) error {
+	return unix.Renameat(sub.fd, from, d.fd, to)
+}

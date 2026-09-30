@@ -448,23 +448,6 @@ type workDir struct {
 	keep string
 }
 
-// workDirIgnoreName and workDirIgnore are the .gitignore every work directory
-// carries from the moment it exists (cameronsjo/forgectl#698).
-//
-// The directory sits beside the target, inside the repository. SIGKILL, an
-// OOM kill, a crash or a power loss runs no handler, so it can be left holding
-// a plaintext value, a decrypted read-back, or sops' decrypted copy of the
-// whole document. The next write's leftover scan refuses on it, but nothing
-// stopped `git add -A` from committing it first. A `*` pattern ignores every
-// entry, this file included, so git never lists the directory as untracked
-// and no pathspec short of `git add -f` stages it. The cost is that the
-// leftover no longer shows in `git status`; the scan, which lists the parent
-// directory rather than asking git, still finds it and refuses.
-const (
-	workDirIgnoreName = ".gitignore"
-	workDirIgnore     = "*\n"
-)
-
 // newWorkDir creates the directory as a SIBLING of the target.
 //
 // Not $TMPDIR, and that is not a preference: os.Rename across filesystems
@@ -476,23 +459,12 @@ func newWorkDir(target env.Target) (*workDir, error) {
 	parent := filepath.Dir(target.Abs())
 	// Scoped to the target, so the next run's leftover scan (internal/env,
 	// under this same lock) can attribute a directory a SIGKILL left behind.
-	dir, err := os.MkdirTemp(parent, target.SopsWorkDirPattern())
+	// MakeScratchDir writes the `*` .gitignore exclusively before returning,
+	// so no plaintext ever sits in the directory without it
+	// (cameronsjo/forgectl#698). See internal/env/scratch.go.
+	dir, err := env.MakeScratchDir(parent, target.SopsWorkDirPattern())
 	if err != nil {
-		return nil, fmt.Errorf("create a work directory beside %s: %w", target.Rel(), err)
-	}
-	// 0700, not 0600: a directory needs its execute bit to be entered at all,
-	// which is what gosec's file-oriented rule does not model.
-	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // G302: 0700 on a DIRECTORY; the execute bit is required
-		_ = os.RemoveAll(dir)
-		return nil, fmt.Errorf("secure the work directory beside %s: %w", target.Rel(), err)
-	}
-	// Written before anything else goes in, so no plaintext ever sits in the
-	// directory without it. See workDirIgnore. O_EXCL makes that true by
-	// construction: the create fails on anything already at the path,
-	// including a planted symlink (O_CREAT|O_EXCL never follows one).
-	if err := writeWorkDirIgnore(filepath.Clean(filepath.Join(dir, workDirIgnoreName))); err != nil {
-		_ = os.RemoveAll(dir) //nolint:gosec // G703: dir is the MkdirTemp directory this process just created
-		return nil, fmt.Errorf("write the work directory's .gitignore beside %s: %w", target.Rel(), err)
+		return nil, fmt.Errorf("prepare a work directory beside %s: %w", target.Rel(), err)
 	}
 
 	buf := make([]byte, nonceBytes)
@@ -657,7 +629,7 @@ func (w *workDir) pruneToBackup() bool {
 		return false
 	}
 	for _, e := range entries {
-		if e.Name() == backupName || (e.Name() == workDirIgnoreName && e.Type().IsRegular()) {
+		if e.Name() == backupName || (e.Name() == env.ScratchIgnoreName && e.Type().IsRegular()) {
 			continue
 		}
 		_ = os.RemoveAll(filepath.Join(w.dir, e.Name()))
@@ -671,7 +643,7 @@ func (w *workDir) pruneToBackup() bool {
 		switch {
 		case e.Name() == backupName && e.Type().IsRegular():
 			sawBackup = true
-		case e.Name() == workDirIgnoreName && e.Type().IsRegular():
+		case e.Name() == env.ScratchIgnoreName && e.Type().IsRegular():
 		default:
 			return false
 		}
@@ -680,17 +652,3 @@ func (w *workDir) pruneToBackup() bool {
 }
 
 func (w *workDir) cleanup() { _ = os.RemoveAll(w.dir) }
-
-// writeWorkDirIgnore creates the work directory's .gitignore exclusively.
-// path is built from the MkdirTemp directory this process just created.
-func writeWorkDirIgnore(path string) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304/G703: path is inside the 0700 MkdirTemp dir this process just created
-	if err != nil {
-		return err
-	}
-	if _, err := f.WriteString(workDirIgnore); err != nil {
-		_ = f.Close()
-		return err
-	}
-	return f.Close()
-}

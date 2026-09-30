@@ -6,8 +6,11 @@ package env
 //       sibling targets
 //   [x] No scoped scratch name matches IsEnvFileName, and none overflows
 //       NAME_MAX even for a 255-byte base
-//   [x] writeAtomic's REAL temp name is the scoped one: a run that dies with
-//       it on disk is refused by the next set
+//   [x] writeAtomic's REAL scratch directory is the scoped one: a run that
+//       dies with it on disk is refused by the next set, and real git stages
+//       nothing from it (write_scratch_test.go, cameronsjo/forgectl#737)
+//   [x] A planted scoped scratch directory refuses; so does a pre-#737
+//       scoped temp file beside the target
 //   [x] A planted scoped temp file refuses `set`; the file is untouched and
 //       NOT deleted; the message names its path
 //   [x] A planted scoped sops work directory refuses, naming the directory
@@ -94,6 +97,7 @@ func TestScratchNamesAreNotEnvFilesAndFitNameMax(t *testing.T) {
 		tg := Target{base: base, path: "/r/" + base}
 		for _, name := range []string{
 			tg.envTempPrefix() + strings.Repeat("A", 16) + ".tmp",
+			tg.envScratchDirPrefix() + strings.Repeat("A", 16),
 			tg.SopsWorkDirPattern() + "4294967295",
 			tg.sopsBackupName(),
 		} {
@@ -107,35 +111,6 @@ func TestScratchNamesAreNotEnvFilesAndFitNameMax(t *testing.T) {
 	}
 }
 
-// The name writeAtomic really uses, observed at the moment it exists, is one
-// the scan attributes to this target. A run killed right there would leave
-// exactly this name behind.
-func TestWriteAtomicTempNameIsScopedAndRefused(t *testing.T) {
-	dir := t.TempDir()
-	var seen string
-	prev := tempCreated
-	tempCreated = func(name string) { seen = name }
-	t.Cleanup(func() { tempCreated = prev })
-
-	if err := setOn(t, dir, ".env"); err != nil {
-		t.Fatalf("first set: %v", err)
-	}
-	if seen == "" {
-		t.Fatal("writeAtomic never reported its temp name")
-	}
-
-	// Leave that exact name behind, as SIGKILL would have.
-	plant(t, filepath.Join(dir, seen))
-	err := setOn(t, dir, ".env")
-	if err == nil {
-		t.Fatalf("a set over the leftover %s succeeded", seen)
-	}
-	if !strings.Contains(err.Error(), seen) {
-		t.Errorf("refusal %q does not name the leftover %s", err, seen)
-	}
-	assertStillThere(t, filepath.Join(dir, seen))
-}
-
 func TestScanRefusesScopedLeftovers(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -143,7 +118,19 @@ func TestScanRefusesScopedLeftovers(t *testing.T) {
 		want  string
 	}{
 		{
-			name: "env temp file",
+			name: "env scratch directory",
+			plant: func(t *testing.T, dir string, tg Target) []string {
+				n := tg.envScratchDirPrefix() + "ABCDEFGHIJKLMNOP"
+				if err := os.Mkdir(filepath.Join(dir, n), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				plant(t, filepath.Join(dir, n, scratchTempPrefix+"QRSTUVWXYZ234567.tmp"))
+				return []string{n}
+			},
+			want: "the scratch directory of an interrupted write",
+		},
+		{
+			name: "pre-#737 env temp file beside the target",
 			plant: func(t *testing.T, dir string, tg Target) []string {
 				n := tg.envTempPrefix() + "ABCDEFGHIJKLMNOP.tmp"
 				plant(t, filepath.Join(dir, n))
@@ -199,7 +186,7 @@ func TestScanRefusesScopedLeftovers(t *testing.T) {
 				}
 			}
 			for _, n := range named {
-				if info, err := os.Lstat(filepath.Join(dir, n)); err == nil && info.IsDir() {
+				if info, err := os.Lstat(filepath.Join(dir, n)); err == nil && info.IsDir() && strings.HasPrefix(n, sopsScratchPrefix) {
 					assertStillThere(t, filepath.Join(dir, n, "value"))
 				}
 			}
@@ -273,8 +260,10 @@ func TestScanIgnoresSiblingTargetsLeftover(t *testing.T) {
 	for _, n := range leftovers {
 		plant(t, filepath.Join(dir, n))
 	}
-	if err := os.Mkdir(filepath.Join(dir, sibling.SopsWorkDirPattern()+"42"), 0o700); err != nil {
-		t.Fatal(err)
+	for _, d := range []string{sibling.SopsWorkDirPattern() + "42", sibling.envScratchDirPrefix() + "ABCDEFGHIJKLMNOP"} {
+		if err := os.Mkdir(filepath.Join(dir, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	if err := setOn(t, dir, ".env"); err != nil {
@@ -288,8 +277,8 @@ func TestScanIgnoresSiblingTargetsLeftover(t *testing.T) {
 	}
 }
 
-// A set on .env.local is mid-write: it holds its lock and its temp file is on
-// disk. A set on .env must neither refuse on that file nor touch it.
+// A set on .env.local is mid-write: it holds its lock and its scratch
+// directory is on disk. A set on .env must neither refuse on it nor touch it.
 func TestScanUnaffectedByConcurrentSiblingWrite(t *testing.T) {
 	dir := t.TempDir()
 	local := pinnedTarget(t, dir, ".env.local")
@@ -297,11 +286,11 @@ func TestScanUnaffectedByConcurrentSiblingWrite(t *testing.T) {
 
 	var live string
 	err := withFileLock(local, func() error {
-		f, name, err := local.dir.createTemp(local.envTempPrefix())
+		sub, name, err := local.dir.mkScratchDir(local.envScratchDirPrefix())
 		if err != nil {
 			return err
 		}
-		_ = f.Close()
+		sub.close()
 		live = name
 
 		done := make(chan error, 1)
@@ -312,13 +301,13 @@ func TestScanUnaffectedByConcurrentSiblingWrite(t *testing.T) {
 		t.Fatalf("set on .env during a live .env.local write: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, live)); err != nil {
-		t.Errorf("the live temp file of the concurrent write was disturbed: %v", err)
+		t.Errorf("the live scratch directory of the concurrent write was disturbed: %v", err)
 	}
 }
 
-// Many writers on two targets in one directory. Each set's own temp file is
-// live only under its own lock, and a sibling's is out of scope, so no set may
-// ever be refused.
+// Many writers on two targets in one directory. Each set's own scratch
+// directory is live only under its own lock, and a sibling's is out of scope,
+// so no set may ever be refused.
 func TestConcurrentSetsNeverRefuseEachOther(t *testing.T) {
 	dir := t.TempDir()
 	var wg sync.WaitGroup

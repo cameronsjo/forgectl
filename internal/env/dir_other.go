@@ -103,3 +103,21 @@ func (d *dirPin) names() ([]string, error) {
 func (d *dirPin) remove(name string) error {
 	return os.Remove(filepath.Join(d.path, name))
 }
+
+// mkScratchDir creates the scratch directory by path; see the unix version.
+func (d *dirPin) mkScratchDir(prefix string) (*dirPin, string, error) {
+	dir, err := MakeScratchDir(d.path, prefix)
+	if err != nil {
+		return nil, "", err
+	}
+	return &dirPin{path: dir}, filepath.Base(dir), nil
+}
+
+func (d *dirPin) removeScratchDir(sub *dirPin, name string) error {
+	_ = os.Remove(filepath.Join(sub.path, ScratchIgnoreName))
+	return os.Remove(filepath.Join(d.path, name))
+}
+
+func (d *dirPin) renameFrom(sub *dirPin, from, to string) error {
+	return os.Rename(filepath.Join(sub.path, from), filepath.Join(d.path, to))
+}

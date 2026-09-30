@@ -1,6 +1,7 @@
 // write.go is the atomic write path every env command that mutates a file
 // goes through: a temp file created 0600 from the start (there is no chmod
-// window to close), written, synced, then renamed into place.
+// window to close) inside a gitignored scratch directory beside the target,
+// written, synced, then renamed into place.
 package env
 
 import (
@@ -14,27 +15,56 @@ import (
 // so writeAtomic never needs an explicit chmod.
 const secureMode = 0o600
 
-// tempPrefix begins the transient file's name. It deliberately does NOT match
-// IsEnvFileName, so a leftover cannot later be reached through --file without
-// --any-file, and it is covered by the usual `.env*` gitignore shape. The full
-// name also carries the target's scope tag (Target.envTempPrefix), so a
-// leftover can be attributed to the target whose lock covers it. See
-// leftover.go.
+// tempPrefix begins the name of the temp file writeAtomic wrote directly
+// beside the target, before it wrote into a scratch directory
+// (cameronsjo/forgectl#737). Nothing creates that name any more. The leftover
+// scan still refuses on its scoped form (Target.envTempPrefix) and warns on
+// its unscoped one, because a run of an older forgectl can have left one.
 const tempPrefix = ".env-"
 
-// tempCreated observes the temp file's name the moment it exists. It is a
-// no-op in production. Tests replace it to see the name a run that died at
-// this point would leave behind, which nothing else exposes.
-var tempCreated = func(string) {}
+// envScratchPrefix begins the name of writeAtomic's scratch directory. It
+// deliberately does NOT match IsEnvFileName, so a leftover cannot later be
+// reached through --file without --any-file, and it shares no prefix with
+// sopsScratchPrefix, which internal/cli's __sops-edit checks on its own. The
+// full name also carries the target's scope tag (Target.envScratchDirPrefix),
+// so a leftover can be attributed to the target whose lock covers it. See
+// leftover.go.
+const envScratchPrefix = ".forgectl-env-"
 
-// writeAtomic writes data to the target by creating a temp file in the SAME
-// PINNED DIRECTORY, writing, syncing, closing, then renaming over the target's
-// name. The temp file is removed on any error before that final rename.
+// scratchTempPrefix begins the temp file's name inside the scratch directory.
+// The directory is fresh and private to one run, so the name only has to be
+// unique within it.
+const scratchTempPrefix = "new."
+
+// scratchWritten observes the scratch directory's name once the whole new
+// document is written, synced and closed inside it, just before the rename.
+// It is a no-op in production. Tests replace it to see, and to leave behind by
+// panicking, exactly what a run killed at that point leaves: writeAtomic
+// deliberately defers no cleanup, so a panic here strands the directory as
+// SIGKILL would.
+var scratchWritten = func(string) {}
+
+// writeAtomic writes data to the target by creating a scratch directory in the
+// SAME PINNED DIRECTORY, creating a temp file inside it, writing, syncing,
+// closing, then renaming the temp file over the target's name and removing
+// the directory. Everything it created is removed on any error before that
+// final rename.
 //
-// Every filesystem call goes through target.dir rather than through a path.
-// That is not stylistic: os.CreateTemp and os.Rename take paths and re-walk
-// every component, so an intermediate directory replaced after resolution
-// would redirect both the temp creation and the rename out of the repository.
+// # Why a directory, not a bare temp file
+//
+// The temp file holds the whole new document, secrets included, and SIGKILL,
+// a crash or a power loss runs no cleanup. A bare temp file beside the target
+// is then an untracked file that `git add -A` commits. The scratch directory
+// carries a `*` .gitignore written before the temp file exists, so git neither
+// lists nor stages what a killed run leaves (cameronsjo/forgectl#737, the same
+// mechanism as the --sops work directory's, #698). The rename stays atomic:
+// the directory is a child of the target's directory, on the same filesystem.
+//
+// Every filesystem call goes through target.dir, or through the scratch
+// directory's own descriptor, rather than through a path. That is not
+// stylistic: os.CreateTemp and os.Rename take paths and re-walk every
+// component, so an intermediate directory replaced after resolution would
+// redirect both the temp creation and the rename out of the repository.
 // Relative to a descriptor there is nothing to redirect. See dirPin.
 //
 // A hardlink pointed at the target is neutralized by the rename — it swaps
@@ -49,6 +79,10 @@ var tempCreated = func(string) {}
 // below replaces the LINK, so following one would report on an inode forgectl
 // never writes.
 //
+// A scratch directory that will not come down after a successful rename holds
+// only its .gitignore, never the document, so it is not reported as a failed
+// write; the next write's leftover scan names it.
+//
 // Every error here carries paths only — data is never interpolated into any
 // error string.
 func writeAtomic(target Target, data []byte) (tightened bool, err error) {
@@ -57,14 +91,21 @@ func writeAtomic(target Target, data []byte) (tightened bool, err error) {
 		return false, fmt.Errorf("stat %s: %w", target.Rel(), statErr)
 	}
 
-	tmp, tmpName, err := target.dir.createTemp(target.envTempPrefix())
+	scratch, scratchName, err := target.dir.mkScratchDir(target.envScratchDirPrefix())
 	if err != nil {
+		return false, fmt.Errorf("create a scratch directory beside %s: %w", target.Rel(), err)
+	}
+	removeScratch := func() { _ = target.dir.removeScratchDir(scratch, scratchName) }
+
+	tmp, tmpName, err := scratch.createTemp(scratchTempPrefix)
+	if err != nil {
+		removeScratch()
 		return false, fmt.Errorf("create a temp file beside %s: %w", target.Rel(), err)
 	}
-	tempCreated(tmpName)
 	cleanup := func() {
 		_ = tmp.Close()
-		_ = target.dir.remove(tmpName)
+		_ = scratch.remove(tmpName)
+		removeScratch()
 	}
 
 	if _, err := tmp.Write(data); err != nil {
@@ -76,14 +117,18 @@ func writeAtomic(target Target, data []byte) (tightened bool, err error) {
 		return false, fmt.Errorf("sync %s: %w", target.Rel(), err)
 	}
 	if err := tmp.Close(); err != nil {
-		_ = target.dir.remove(tmpName)
+		_ = scratch.remove(tmpName)
+		removeScratch()
 		return false, fmt.Errorf("close %s: %w", target.Rel(), err)
 	}
+	scratchWritten(scratchName)
 
-	if err := target.dir.rename(tmpName, target.base); err != nil {
-		_ = target.dir.remove(tmpName)
+	if err := target.dir.renameFrom(scratch, tmpName, target.base); err != nil {
+		_ = scratch.remove(tmpName)
+		removeScratch()
 		return false, fmt.Errorf("rename into place %s: %w", target.Rel(), err)
 	}
+	removeScratch()
 
 	tightened = hadPrior && priorMode&^os.FileMode(secureMode) != 0
 	return tightened, nil

@@ -30,6 +30,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/env"
 )
 
 // fakeDeath records what die was called with. In production die never
@@ -206,7 +208,7 @@ func backedWorkDir(t *testing.T) (create func() (*workDir, error), keep string) 
 			return nil, err
 		}
 		w := &workDir{dir: dir, backup: filepath.Join(dir, "backup"), keep: keep}
-		for name, body := range map[string]string{workDirIgnoreName: workDirIgnore, "backup": backupCiphertext, "value": "s3cr3t", "landed": "s3cr3t"} {
+		for name, body := range map[string]string{env.ScratchIgnoreName: env.ScratchIgnore, "backup": backupCiphertext, "value": "s3cr3t", "landed": "s3cr3t"} {
 			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
 				return nil, err
 			}
@@ -455,7 +457,7 @@ func assertHoldsOnlyTheBackup(t *testing.T, dir string) {
 	for _, e := range entries {
 		names = append(names, e.Name())
 	}
-	if len(names) != 2 || names[0] != workDirIgnoreName || names[1] != "backup" {
-		t.Errorf("the kept work directory holds %v, want only [%s backup]", names, workDirIgnoreName)
+	if len(names) != 2 || names[0] != env.ScratchIgnoreName || names[1] != "backup" {
+		t.Errorf("the kept work directory holds %v, want only [%s backup]", names, env.ScratchIgnoreName)
 	}
 }
