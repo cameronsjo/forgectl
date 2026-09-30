@@ -284,9 +284,10 @@ func resolveIn(r *os.Root, rootInfo fs.FileInfo, root, rel string) (*walkEnd, er
 // returns it only if it is the directory want describes. os.Root.OpenRoot
 // follows a symlink that stays inside parent, so without the identity check
 // a directory swapped for a symlink after its Lstat would redirect the
-// walk to another directory under parent.
+// walk to another directory under parent. The open is openChildDirRoot, so
+// a FIFO swapped in after the Lstat is refused rather than waited on.
 func openDirVerified(parent *os.Root, name string, want fs.FileInfo) (*os.Root, error) {
-	sub, err := parent.OpenRoot(name)
+	sub, err := openChildDirRoot(parent, name)
 	if err != nil {
 		return nil, ErrOutsideRoot
 	}
