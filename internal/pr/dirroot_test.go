@@ -44,8 +44,8 @@ func TestOpenDirRoot_IsTheOnlyPathRootOpener(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
-		osName := osImportName(f)
-		if osName == "" {
+		osNames := osImportNames(f)
+		if len(osNames) == 0 {
 			continue
 		}
 		for _, d := range f.Decls {
@@ -61,7 +61,7 @@ func TestOpenDirRoot_IsTheOnlyPathRootOpener(t *testing.T) {
 				case *ast.SelectorExpr:
 					// Only X can name the package; Sel is a field or method
 					// name (root.OpenRoot is an os.Root method, not os.OpenRoot).
-					if pkg, ok := n.X.(*ast.Ident); ok && pkg.Name == osName && n.Sel.Name == "OpenRoot" {
+					if pkg, ok := n.X.(*ast.Ident); ok && osNames[pkg.Name] && pathRootOpeners[n.Sel.Name] {
 						hit = true
 					} else {
 						ast.Inspect(n.X, visit)
@@ -69,7 +69,7 @@ func TestOpenDirRoot_IsTheOnlyPathRootOpener(t *testing.T) {
 					}
 				case *ast.Ident:
 					// A dot import puts OpenRoot in file scope unqualified.
-					hit = osName == "." && n.Name == "OpenRoot"
+					hit = osNames["."] && pathRootOpeners[n.Name]
 				}
 				if !hit {
 					return true
@@ -90,21 +90,26 @@ func TestOpenDirRoot_IsTheOnlyPathRootOpener(t *testing.T) {
 	}
 }
 
-// osImportName is the name file f refers to package "os" by: "os", an alias,
-// "." for a dot import, or "" when f does not import it (or imports it only
-// for side effects).
-func osImportName(f *ast.File) string {
+// pathRootOpeners are the os functions that open a directory by path as an
+// os.Root: OpenInRoot calls OpenRoot on its dir argument, so it blocks on a
+// FIFO the same way.
+var pathRootOpeners = map[string]bool{"OpenRoot": true, "OpenInRoot": true}
+
+// osImportNames is every name file f refers to package "os" by: "os", an
+// alias, or "." for a dot import. A file may import "os" more than once under
+// different names, so all of them count. A blank import names nothing.
+func osImportNames(f *ast.File) map[string]bool {
+	names := map[string]bool{}
 	for _, imp := range f.Imports {
 		if imp.Path.Value != `"os"` {
 			continue
 		}
-		if imp.Name == nil {
-			return "os"
+		switch {
+		case imp.Name == nil:
+			names["os"] = true
+		case imp.Name.Name != "_":
+			names[imp.Name.Name] = true
 		}
-		if imp.Name.Name == "_" {
-			return ""
-		}
-		return imp.Name.Name
 	}
-	return ""
+	return names
 }

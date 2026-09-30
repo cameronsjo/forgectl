@@ -482,3 +482,27 @@ func TestReviewedPersist_AFailedDirSyncStillMarksWithAWarning(t *testing.T) {
 		t.Errorf("the mark was logged as failed; logs:\n%s", out)
 	}
 }
+
+// TestReviewedPersist_AnUncleanStorePathLoadsWhatItWrote pins that persist and
+// the load name the same file when a caller passes a path with ".." after a
+// symlinked component: the load cleans it, so persist must too, or the mark
+// lands on the physical target while every load reads the lexical one.
+//
+// Mutation that turns it red: drop the filepath.Clean in LoadReviewed.
+func TestReviewedPersist_AnUncleanStorePathLoadsWhatItWrote(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "real", "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "real", "sub"), filepath.Join(home, "cfglink")); err != nil {
+		t.Fatal(err)
+	}
+	store := home + "/cfglink/../pr-reviewed.json"
+
+	if err := LoadReviewed(store).Mark(testRef(7)); err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+	if got := len(LoadReviewed(store).at); got != 1 {
+		t.Errorf("a load through the same path sees %d marks after Mark, want 1", got)
+	}
+}

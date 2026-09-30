@@ -118,6 +118,12 @@ func (s *ReviewedStore) lookup(ref Ref) (time.Time, bool) {
 // corrupt-tolerant model internal/net uses for its cache, so a hand-mangled
 // file degrades to "nothing reviewed yet" instead of blinding the dashboards.
 func LoadReviewed(path string, opts ...ReviewedOption) *ReviewedStore {
+	// Clean once, here, so persist's kernel stats, its resolver and this
+	// load all name the same file: readReviewedFile cleans, and an uncleaned
+	// "cfglink/../x" would otherwise be written physically but read lexically.
+	if path != "" {
+		path = filepath.Clean(path)
+	}
 	s := &ReviewedStore{
 		path: path,
 		at:   make(map[string]time.Time),
@@ -427,9 +433,11 @@ func (s *ReviewedStore) SyncKeysScoped(openKeys []string, activeHosts []string) 
 // therefore cost a loud refusal, never a silently lost mark.
 //
 // The rename is the commit point. A directory fsync that fails after it is
-// logged as a durability warning and the mark reports success, as the record
-// and audit-log writers do: the bytes are written, and a caller must not
-// print "failed to mark" for a mark that is on disk.
+// logged as a durability warning and the mark reports success: the bytes are
+// written, and a caller must not print "failed to mark" for a mark that is on
+// disk. This deliberately differs from writeRecordAtomic and
+// writeRepairLogAtomic, which return that error (worded as written but not
+// confirmed durable) because their callers act on it.
 func (s *ReviewedStore) persist() error {
 	if s.path == "" {
 		return errors.New("pr: reviewed store path unset")
@@ -469,8 +477,8 @@ func (s *ReviewedStore) persist() error {
 		if err == nil {
 			err = errStoreNotWritten
 		}
-		return fmt.Errorf("pr: reviewed store path does not resolve to the file just written (%s); "+
-			"the mark may not be visible: %w", termsafe.QuotePath(dest), err)
+		return fmt.Errorf("pr: reviewed store path does not resolve to the file just written; "+
+			"%s now holds the store and the mark may not be visible: %w", termsafe.QuotePath(dest), err)
 	}
 	return nil
 }
