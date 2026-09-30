@@ -75,8 +75,10 @@ func qmdWindow(limit int) int {
 }
 
 // qmdHit is the part of one `qmd search --json` row forgectl reads. Every
-// field is untrusted: file is only a candidate path for the gate, and title
-// is never used (the Index's own title is).
+// field is untrusted: file is only a candidate path for the gate, title is
+// never used (the Index's own title is), and the snippet's text is never
+// used either: only its "@@ -start,count @@" header, which names the lines
+// forgectl re-reads from the doc itself (qmdSnippet).
 type qmdHit struct {
 	File    string `json:"file"`
 	Line    int    `json:"line"`
@@ -88,9 +90,11 @@ type qmdHit struct {
 //
 // Each hit's file must name a doc the Index holds at an exact (root,
 // relative path) in some root, the first such root in configuration order,
-// and Index.Resolve must accept it: the same gate the rg backend and the
-// reader use. A path merely under a root is not enough, because qmd's index
-// can be stale. A qmd:// URI, a relative path not starting with "./", and
+// and Index.Open must open it at that path: the same gate the rg backend
+// and the reader use. A path merely under a root is not enough, because
+// qmd's index can be stale. For the same reason the snippet is re-read from
+// the opened doc, so it is the doc's own text even when qmd's index holds
+// other content under this path (forgectl#743). A qmd:// URI, a relative path not starting with "./", and
 // anything the gate refuses are counted in Skipped.
 //
 // qmd's stdout must be exactly one JSON array. Anything else, including a
@@ -144,20 +148,25 @@ func (s Searcher) searchQMD(ctx context.Context, idx *Index, q string, limit int
 	roots := idx.Roots()
 	seen := make(map[hitKey]bool)
 	for _, h := range hits {
-		hit, abs, ok := gateQMDHit(idx, roots, titles, cwd, h)
+		hit, doc, ok := gateQMDHit(idx, roots, titles, cwd, h)
 		if !ok {
 			resp.Skipped++
 			continue
 		}
-		key := hitKey{absPath: abs, line: hit.Line}
+		key := hitKey{absPath: doc.abs, line: hit.Line}
 		if seen[key] {
+			_ = doc.f.Close()
 			continue
 		}
 		seen[key] = true
 		if len(resp.Results) >= limit {
+			_ = doc.f.Close()
 			resp.Truncated = true
 			break
 		}
+		// Only a returned hit's snippet is read (qmdSnippet).
+		hit.Snippet = qmdSnippet(doc.f, h)
+		_ = doc.f.Close()
 		resp.Results = append(resp.Results, hit)
 	}
 	if len(hits) >= window {
@@ -205,11 +214,12 @@ func decodeQMDHits(out []byte) ([]qmdHit, error) {
 	return hits, nil
 }
 
-// gateQMDHit maps one qmd row to a result plus the doc's canonical path, or
-// reports false. file must be absolute, or "./"-relative to cwd (qmd's own
-// realpath rendering); the joined path is then offered to gatePath under
-// each root in configuration order, and the first root that holds it wins.
-func gateQMDHit(idx *Index, roots []Root, titles map[searchKey]string, cwd string, h qmdHit) (SearchResult, string, bool) {
+// gateQMDHit maps one qmd row to a result, without its Snippet, plus the
+// doc gatePath opened, which the caller closes; or it reports false. file
+// must be absolute, or "./"-relative to cwd (qmd's own realpath
+// rendering); the joined path is then offered to gatePath under each root
+// in configuration order, and the first root that holds it wins.
+func gateQMDHit(idx *Index, roots []Root, titles map[searchKey]string, cwd string, h qmdHit) (SearchResult, *openHit, bool) {
 	var path string
 	switch {
 	case filepath.IsAbs(h.File):
@@ -219,34 +229,84 @@ func gateQMDHit(idx *Index, roots []Root, titles map[searchKey]string, cwd strin
 	default:
 		// A qmd:// URI (the file is gone from disk), or a shape qmd does not
 		// print under --full-path.
-		return SearchResult{}, "", false
+		return SearchResult{}, nil, false
 	}
 	for _, root := range roots {
-		relSlash, title, abs, ok := gatePath(idx, root, titles, path)
+		hit, ok := gatePath(idx, root, titles, path)
 		if !ok {
 			continue
 		}
 		return SearchResult{
-			Root:    root.Label,
-			Path:    relSlash,
-			Title:   title,
-			Line:    max(h.Line, 0),
-			Snippet: snippetAround(qmdSnippetText(h.Snippet), 0, maxSnippetRunes),
-		}, abs, true
+			Root:  root.Label,
+			Path:  hit.rel,
+			Title: hit.title,
+			Line:  max(h.Line, 0),
+		}, hit, true
 	}
-	return SearchResult{}, "", false
+	return SearchResult{}, nil, false
 }
 
-// qmdSnippetText drops the diff-style "@@ -start,count @@ (…)" header qmd
-// puts on the first line of every snippet, leaving the document text with
-// surrounding whitespace trimmed (qmd 2.8.3 was seen to lead with a space).
-func qmdSnippetText(s string) string {
-	if strings.HasPrefix(s, "@@ ") {
-		i := strings.IndexByte(s, '\n')
-		if i < 0 {
-			return ""
-		}
-		s = s[i+1:]
+// maxQMDSnippetLines caps how many lines of a qmd snippet's header window
+// are re-read. qmd 2.8.3 names at most four (extractSnippet).
+const maxQMDSnippetLines = 8
+
+// qmdSnippet re-reads the lines a qmd hit's snippet covers from f, the doc
+// gatePath opened, and returns them joined and cut as qmd's own snippet
+// text was. qmd 2.8.3's snippet opens with "@@ -start,count @@", start
+// being the 1-based line of the file the snippet begins on; without that
+// header the hit's own line is read alone. Only a bounded window is read.
+func qmdSnippet(f io.ReaderAt, h qmdHit) string {
+	first, count, ok := qmdSnippetLines(h.Snippet)
+	if !ok {
+		first, count = h.Line, 1
 	}
-	return strings.TrimSpace(s)
+	off, ok := lineOffset(f, first)
+	if !ok {
+		return ""
+	}
+	buf := make([]byte, 4*snippetWindowBytes)
+	n, err := f.ReadAt(buf, off)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return ""
+	}
+	text := buf[:n]
+	end := 0
+	for range min(count, maxQMDSnippetLines) {
+		i := bytes.IndexByte(text[end:], '\n')
+		if i < 0 {
+			end = len(text)
+			break
+		}
+		end += i + 1
+	}
+	text = text[:end]
+	if end == n && n == len(buf) {
+		text = trimPartialRune(text)
+	}
+	body := strings.TrimSpace(strings.ToValidUTF8(string(text), "\uFFFD"))
+	return snippetAround(body, 0, maxSnippetRunes)
+}
+
+// qmdSnippetLines parses the "@@ -start,count @@" header on the first line
+// of a qmd snippet.
+func qmdSnippetLines(s string) (first, count int, ok bool) {
+	header, _, _ := strings.Cut(s, "\n")
+	rest, found := strings.CutPrefix(header, "@@ -")
+	if !found {
+		return 0, 0, false
+	}
+	span, _, found := strings.Cut(rest, " ")
+	if !found {
+		return 0, 0, false
+	}
+	a, b, found := strings.Cut(span, ",")
+	if !found {
+		return 0, 0, false
+	}
+	first, err1 := strconv.Atoi(a)
+	count, err2 := strconv.Atoi(b)
+	if err1 != nil || err2 != nil || first < 1 || count < 1 {
+		return 0, 0, false
+	}
+	return first, count, true
 }

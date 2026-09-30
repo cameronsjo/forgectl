@@ -45,9 +45,9 @@ type Root struct {
 	// any resolved path other than OnlyFile: naming one file must not
 	// silently grant access to every other file in its directory.
 	OnlyFile string
-	// dirInfo is Path's Stat, taken when the root was indexed. Index.Open
-	// refuses to read through Path once it names a different directory
-	// (openPinnedRoot).
+	// dirInfo is the Stat of the os.Root the index opened on Path when the
+	// root was indexed (openRootDir). Index.Open refuses to read through Path
+	// once it names a different directory (openPinnedRoot).
 	dirInfo fs.FileInfo
 	// Kind classifies this root's link syntax and anchor semantics —
 	// RootDocs (ordinary relative markdown links) or RootVault (Obsidian
@@ -184,9 +184,149 @@ func skipReason(err error) string {
 	return err.Error()
 }
 
+// walkFunc is the callback walkDir calls for each entry. path is the
+// entry's absolute path, root.Path joined with its root-relative name. dir
+// is the held os.Root of the directory the entry was listed in, nil for the
+// root itself. A non-nil err is a failure to read that entry, as in
+// fs.WalkDirFunc, and returning filepath.SkipDir from a directory's call
+// skips it.
+type walkFunc func(path string, dir *os.Root, d fs.DirEntry, err error) error
+
 // walkDir is the directory walk walkRoot runs. It is a seam so tests can
 // inject a walk error without relying on file modes, which root ignores.
-var walkDir = filepath.WalkDir
+var walkDir = walkHeld
+
+// walkHeld walks the directory rt holds, whose path is rootPath, in lexical
+// order, the order filepath.WalkDir visits. Every directory is opened as its
+// own os.Root in the one above it and must be the directory its Lstat saw,
+// as in resolveIn, and each entry is handed to fn with the Root it was
+// listed in. So the walk never follows a symlink, and a directory swapped
+// for one mid-walk is skipped rather than descended (forgectl#743). It holds
+// at most maxHeldDirs directories below rt at once; a deeper directory is
+// reported to fn as an error rather than descended, which keeps every
+// indexed doc within what resolveIn will serve.
+func walkHeld(rt *os.Root, rootPath string, fn walkFunc) error {
+	info, err := rt.Stat(".")
+	if err != nil {
+		return fn(rootPath, nil, nil, err)
+	}
+	self := fs.FileInfoToDirEntry(info)
+	if err := fn(rootPath, nil, self, nil); err != nil {
+		if errors.Is(err, filepath.SkipDir) {
+			return nil
+		}
+		return err
+	}
+	return walkHeldDir(rt, rootPath, nil, self, 0, fn)
+}
+
+// errTooDeep is the reason walkHeld reports for a directory it does not
+// descend because it lies more than maxHeldDirs levels below the root.
+var errTooDeep = fmt.Errorf("directory is nested more than %d levels below the root", maxHeldDirs)
+
+// errDirChanged is the reason walkHeld reports for a directory that was not
+// the directory its Lstat saw by the time the walk opened it.
+var errDirChanged = errors.New("directory changed while it was being walked")
+
+// walkHeldDir lists dir, which holds path and was listed as self in parent,
+// and walks its entries. depth counts the directories held below the root.
+func walkHeldDir(dir *os.Root, path string, parent *os.Root, self fs.DirEntry, depth int, fn walkFunc) error {
+	entries, err := readHeldDir(dir)
+	if err != nil {
+		if err := fn(path, parent, self, err); err != nil && !errors.Is(err, filepath.SkipDir) {
+			return err
+		}
+		return nil
+	}
+	for _, e := range entries {
+		p := filepath.Join(path, e.name)
+		if err := fn(p, dir, e, nil); err != nil {
+			if !errors.Is(err, filepath.SkipDir) {
+				return err
+			}
+			if !e.IsDir() {
+				return nil // filepath.WalkDir's rule: SkipDir on a file skips the rest of its directory
+			}
+			continue
+		}
+		if !e.IsDir() {
+			continue
+		}
+		sub, err := openHeldSubdir(dir, e.name, depth)
+		if err != nil {
+			if err := fn(p, dir, e, err); err != nil && !errors.Is(err, filepath.SkipDir) {
+				return err
+			}
+			continue
+		}
+		err = walkHeldDir(sub, p, dir, e, depth+1, fn)
+		_ = sub.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// openHeldSubdir opens the directory name in dir as its own Root, refusing
+// one past maxHeldDirs or one that is no longer the directory its Lstat
+// sees. Unlike openDirVerified it keeps the open's own error (a permission
+// denial, say), which the walk records as the skip reason.
+func openHeldSubdir(dir *os.Root, name string, depth int) (*os.Root, error) {
+	if depth >= maxHeldDirs {
+		return nil, errTooDeep
+	}
+	want, err := dir.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !want.IsDir() {
+		return nil, errDirChanged
+	}
+	sub, err := dir.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	got, err := sub.Stat(".")
+	if err != nil || !got.IsDir() || !os.SameFile(want, got) {
+		_ = sub.Close()
+		return nil, errDirChanged
+	}
+	return sub, nil
+}
+
+// readHeldDir lists the directory dir holds, sorted by name. Each entry's
+// type is the directory entry's own (no stat), and its Info is an Lstat
+// through dir, never a lookup by path.
+func readHeldDir(dir *os.Root) ([]heldEntry, error) {
+	f, err := dir.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	list, err := f.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]heldEntry, 0, len(list))
+	for _, e := range list {
+		out = append(out, heldEntry{dir: dir, name: e.Name(), typ: e.Type()})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out, nil
+}
+
+// heldEntry is one fs.DirEntry of a directory walkHeld holds open.
+type heldEntry struct {
+	dir  *os.Root
+	name string
+	typ  fs.FileMode
+}
+
+func (e heldEntry) Name() string               { return e.name }
+func (e heldEntry) IsDir() bool                { return e.typ.IsDir() }
+func (e heldEntry) Type() fs.FileMode          { return e.typ }
+func (e heldEntry) Info() (fs.FileInfo, error) { return e.dir.Lstat(e.name) }
 
 // faultEntry is the synthetic fs.DirEntry InjectWalkFaultForTest reports.
 type faultEntry struct {
@@ -214,16 +354,16 @@ func (e faultEntry) Info() (fs.FileInfo, error) {
 // real walk. Not safe for parallel tests.
 func InjectWalkFaultForTest() (restore func()) {
 	prev := walkDir
-	walkDir = func(root string, fn fs.WalkDirFunc) error {
-		if err := prev(root, fn); err != nil {
+	walkDir = func(rt *os.Root, root string, fn walkFunc) error {
+		if err := prev(rt, root, fn); err != nil {
 			return err
 		}
 		// The errors carry the absolute path, as the real walk's do, so a test
 		// can prove the recorded reason drops it.
 		locked := filepath.Join(root, "locked")
-		_ = fn(locked, faultEntry{dir: true, path: locked}, &fs.PathError{Op: "open", Path: locked, Err: fs.ErrPermission})
+		_ = fn(locked, rt, faultEntry{dir: true, path: locked}, &fs.PathError{Op: "open", Path: locked, Err: fs.ErrPermission})
 		gone := filepath.Join(root, "gone.md")
-		_ = fn(gone, faultEntry{path: gone}, nil)
+		_ = fn(gone, rt, faultEntry{path: gone}, nil)
 		return nil
 	}
 	return func() { walkDir = prev }
@@ -435,12 +575,13 @@ func indexDirRoot(ctx context.Context, labels map[string]bool, dir string, overr
 	}
 	label := uniqueLabel(labels, filepath.Base(canonical))
 	kind, vaultPath := resolveRootKind(canonical, override, hasOverride)
-	dirInfo, err := os.Stat(canonical)
+	rt, dirInfo, err := openRootDir(canonical)
 	if err != nil {
 		return Root{}, nil, nil, fmt.Errorf("docs root %q: %w", dir, err)
 	}
+	defer func() { _ = rt.Close() }()
 	root := Root{Label: label, Path: canonical, Kind: kind, VaultPath: vaultPath, dirInfo: dirInfo}
-	docs, skipped, err := walkRoot(ctx, root)
+	docs, skipped, err := walkRoot(ctx, root, rt)
 	if err != nil {
 		var deadline *WalkDeadlineError
 		if errors.As(err, &deadline) {
@@ -477,24 +618,67 @@ func indexFileRoot(labels map[string]bool, file string, override RootKind, hasOv
 	base := filepath.Base(real)
 	label := uniqueLabel(labels, strings.TrimSuffix(base, filepath.Ext(base)))
 	kind, vaultPath := resolveRootKind(parent, override, hasOverride)
-	dirInfo, err := os.Stat(parent)
+	rt, dirInfo, err := openRootDir(parent)
 	if err != nil {
 		return Root{}, Doc{}, fmt.Errorf("docs root %q: %w", file, err)
 	}
+	defer func() { _ = rt.Close() }()
 	root := Root{Label: label, Path: parent, OnlyFile: real, Kind: kind, VaultPath: vaultPath, dirInfo: dirInfo}
 
-	fi, err := os.Stat(real)
+	// The file is opened by its name in the pinned parent, as Index.Open
+	// will serve it, and must be a regular file: a FIFO would block the
+	// read forever (forgectl#743), and a symlink swapped in after
+	// EvalSymlinks is not the file that was named.
+	fi, err := rt.Lstat(base)
 	if err != nil {
 		return Root{}, Doc{}, fmt.Errorf("docs root %q: %w", file, err)
 	}
+	if !fi.Mode().IsRegular() {
+		return Root{}, Doc{}, fmt.Errorf("docs root %q: not a regular file", file)
+	}
+	f, err := openRegularIn(rt, base, fi)
+	if err != nil {
+		return Root{}, Doc{}, fmt.Errorf("docs root %q: %w", file, err)
+	}
+	defer func() { _ = f.Close() }()
 	// Unlike walkRoot's per-file skip below, a scan failure on a single-file
 	// root IS a hard error: there is no "rest of the index" to fall back to
 	// serving without it.
-	meta, err := scanDocFor(kind, real, base)
+	meta, err := scanDocFrom(kind, f, base)
 	if err != nil {
 		return Root{}, Doc{}, fmt.Errorf("docs root %q: %w", file, err)
 	}
 	return root, newDoc(label, base, real, fi.ModTime(), meta), nil
+}
+
+// errRootMoved reports that a root's canonical path no longer named the
+// directory CanonicalizeRoot resolved by the time the index opened it.
+var errRootMoved = errors.New("root directory changed while it was being opened")
+
+// openRootDir opens the canonical root directory as an os.Root and returns
+// it with its Stat, which becomes Root.dirInfo, the pin openPinnedRoot
+// checks every later open against. The Stat is the open Root's own rather
+// than a second lookup by path: on Windows os.Stat leaves the file ID to be
+// filled by path at the first os.SameFile, which would pin whatever the path
+// named at the first request instead of at index time (forgectl#743). The
+// path must still name a directory, not a symlink swapped in after
+// CanonicalizeRoot, since os.OpenRoot follows one.
+func openRootDir(canonical string) (*os.Root, fs.FileInfo, error) {
+	rt, err := os.OpenRoot(canonical)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := rt.Stat(".")
+	if err != nil {
+		_ = rt.Close()
+		return nil, nil, err
+	}
+	li, err := os.Lstat(canonical)
+	if err != nil || li.Mode()&fs.ModeSymlink != 0 || !os.SameFile(li, info) {
+		_ = rt.Close()
+		return nil, nil, errRootMoved
+	}
+	return rt, info, nil
 }
 
 // newDoc is the one place a Doc is assembled from its scan result, so the
@@ -578,14 +762,17 @@ func (e *WalkDeadlineError) Error() string {
 
 func (e *WalkDeadlineError) Unwrap() error { return e.Err }
 
-// walkRoot discovers markdown files under root. It does not follow symlinks
-// for either directories or files during the walk — fs.WalkDir already
-// doesn't descend into a symlinked directory, and a symlinked file is
-// skipped outright here — so indexing can never itself be tricked into
-// walking outside root. (Defense in depth only: the request-time
-// ResolveInRoot chain in security.go re-verifies every serve regardless of
-// what the index contains.)
-func walkRoot(ctx context.Context, root Root) ([]Doc, []SkippedPath, error) {
+// walkRoot discovers markdown files under root, walking and reading through
+// rt, the os.Root openRootDir pinned for it (walkHeld). The walk never
+// follows a symlink, for directories or files, and opens each doc by its
+// single name in its held directory, verified to be the regular file the
+// walk's Lstat saw (openRegularIn), so indexing can never read outside the
+// root or read a file other than the one it lists (forgectl#743). A FIFO,
+// socket or device named like a doc is never indexed, and the open is
+// nonblocking besides, so none can hang the build. (Defense in depth only:
+// the request-time resolution in security.go re-verifies every serve
+// regardless of what the index contains.)
+func walkRoot(ctx context.Context, root Root, rt *os.Root) ([]Doc, []SkippedPath, error) {
 	var docs []Doc
 	var skipped []SkippedPath
 	skip := func(path, reason string) {
@@ -595,7 +782,7 @@ func walkRoot(ctx context.Context, root Root) ([]Doc, []SkippedPath, error) {
 		}
 		skipped = append(skipped, SkippedPath{Root: root.Label, Rel: filepath.ToSlash(rel), Reason: reason})
 	}
-	err := walkDir(root.Path, func(path string, d fs.DirEntry, err error) error {
+	err := walkDir(rt, root.Path, func(path string, dir *os.Root, d fs.DirEntry, err error) error {
 		if err != nil {
 			// The root's own error stays fatal. Anything below it (an
 			// unreadable subdirectory, or an entry that vanished mid-walk)
@@ -621,27 +808,12 @@ func walkRoot(ctx context.Context, root Root) ([]Doc, []SkippedPath, error) {
 			}
 			return nil
 		}
-		if d.Type()&fs.ModeSymlink != 0 {
-			return nil // never index a symlinked file; see doc comment above
-		}
-		if !AllowedExt(path) {
+		// Only a regular file is a doc: never a symlink (see the doc
+		// comment above), and never a FIFO, socket or device, whose open or
+		// read could block the build.
+		if !d.Type().IsRegular() || !AllowedExt(path) {
 			return nil
 		}
-
-		// Resolve through EvalSymlinks (rather than trusting that a
-		// symlink-free walk under an already-canonical root produces an
-		// already-canonical path) so Doc.AbsPath is byte-identical to
-		// whatever ResolveInRoot computes for the same file at request
-		// time — that identity is what lets Resolve's pathIndex membership
-		// check work at all. A file that vanishes or becomes unreadable
-		// between WalkDir's stat and this call is skipped, not a hard
-		// index-build failure.
-		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			skip(path, skipReason(err))
-			return nil
-		}
-		resolved = filepath.Clean(resolved)
 
 		rel, err := filepath.Rel(root.Path, path)
 		if err != nil {
@@ -656,19 +828,30 @@ func walkRoot(ctx context.Context, root Root) ([]Doc, []SkippedPath, error) {
 			skip(path, skipReason(err))
 			return nil
 		}
-
-		// A scan failure here (the file became unreadable between
-		// WalkDir's stat and this read) keeps the doc in the index with
-		// its filename as the title and no link metadata — the posture
-		// the title-only scan always had. Dropping it would make a
-		// transient read error unlist a file that Resolve's request-time
-		// read may well succeed on a moment later.
-		meta, err := scanDocFor(root.Kind, path, relSlash)
-		if err != nil {
-			meta = docMeta{Title: titleFromFilename(relSlash)}
+		if !info.Mode().IsRegular() {
+			return nil // replaced by a non-regular file since the readdir
 		}
 
-		docs = append(docs, newDoc(root.Label, relSlash, resolved, info.ModTime(), meta))
+		// An open or scan failure here (the file became unreadable, or was
+		// swapped, between the Lstat and this read) keeps the doc in the
+		// index with its filename as the title and no link metadata — the
+		// posture the title-only scan always had. Dropping it would make a
+		// transient read error unlist a file that Index.Open's
+		// request-time read may well succeed on a moment later.
+		meta := docMeta{Title: titleFromFilename(relSlash)}
+		if f, err := openRegularIn(dir, d.Name(), info); err == nil {
+			if scanned, err := scanDocFrom(root.Kind, f, relSlash); err == nil {
+				meta = scanned
+			}
+			_ = f.Close()
+		}
+
+		// path is canonical as it stands: the root is, and every directory
+		// below it was entered by a real, verified name, never a symlink.
+		// So Doc.AbsPath is byte-identical to what resolveIn computes for
+		// the same file at request time, which Resolve's pathIndex
+		// membership check depends on.
+		docs = append(docs, newDoc(root.Label, relSlash, path, info.ModTime(), meta))
 		return nil
 	})
 	if err != nil {
@@ -909,17 +1092,35 @@ func (idx *Index) Open(rootLabel, relPath string) (f *os.File, resolved string, 
 // open, and the open is nonblocking (openNonblock), so neither a FIFO found
 // by the walk nor one swapped in after it can hang the caller.
 func openVerified(dir *os.Root, name string, want fs.FileInfo) (*os.File, error) {
-	if !want.Mode().IsRegular() {
-		return nil, ErrOutsideRoot
-	}
-	f, err := dir.OpenFile(name, os.O_RDONLY|openNonblock, 0)
+	f, err := openRegularIn(dir, name, want)
 	if err != nil {
 		return nil, ErrOutsideRoot
 	}
+	return f, nil
+}
+
+// errFileChanged reports that the file opened was not the regular file the
+// caller's Lstat described.
+var errFileChanged = errors.New("file changed between its stat and its open")
+
+// openRegularIn is openVerified keeping the underlying error, for the index
+// walk, which records it as a skip reason or a root's error.
+func openRegularIn(dir *os.Root, name string, want fs.FileInfo) (*os.File, error) {
+	if dir == nil || !want.Mode().IsRegular() {
+		return nil, errFileChanged
+	}
+	f, err := dir.OpenFile(name, os.O_RDONLY|openNonblock, 0)
+	if err != nil {
+		return nil, err
+	}
 	got, err := f.Stat()
-	if err != nil || !got.Mode().IsRegular() || !os.SameFile(want, got) {
+	if err != nil {
 		_ = f.Close()
-		return nil, ErrOutsideRoot
+		return nil, err
+	}
+	if !got.Mode().IsRegular() || !os.SameFile(want, got) {
+		_ = f.Close()
+		return nil, errFileChanged
 	}
 	return f, nil
 }
@@ -936,6 +1137,8 @@ func (idx *Index) resolveOpen(rootLabel, relPath string) (*os.Root, *walkEnd, st
 		if err != nil {
 			return nil, nil, "", err
 		}
+		// r.dirInfo stands in for the root's own Stat: openPinnedRoot just
+		// proved rt is that directory, so resolveIn need not stat it again.
 		end, resolved, err := idx.checkInRoot(rt, r, relPath)
 		if err != nil {
 			_ = rt.Close()
@@ -969,7 +1172,7 @@ func openPinnedRoot(r Root) (*os.Root, error) {
 // checkInRoot runs the resolution chain and the index's own gates for one
 // root over its open Root. On success the caller owns end.
 func (idx *Index) checkInRoot(rt *os.Root, r Root, relPath string) (*walkEnd, string, error) {
-	end, err := resolveIn(rt, r.Path, relPath)
+	end, err := resolveIn(rt, r.dirInfo, r.Path, relPath)
 	if err != nil {
 		return nil, "", err
 	}
