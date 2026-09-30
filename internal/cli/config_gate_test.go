@@ -158,3 +158,54 @@ func TestExecute_MalformedConfigExitsTwo(t *testing.T) {
 		t.Errorf("stderr must name the file and position, got %q", out)
 	}
 }
+
+// TestConfigParseGate_UnreadableConfig is forgectl#684: a config.toml that
+// exists but cannot be read (here, a directory in its place) gets the same
+// gate as one that does not parse — refused for ordinary commands, let
+// through for the recovery verbs — instead of silently running on defaults.
+func TestConfigParseGate_UnreadableConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.LoadPath(path)
+	root := gateRoot()
+	for _, args := range [][]string{{"docs", "list", "--json"}, {"tmux", "ls"}, {}} {
+		err := configParseGate(cfg, root, args)
+		if err == nil {
+			t.Errorf("args %q: gate passed an unreadable config", args)
+			continue
+		}
+		if !strings.Contains(err.Error(), "config.toml") || !strings.Contains(err.Error(), "cannot be read: not a regular file") {
+			t.Errorf("args %q: error must name the file and the reason, got %q", args, err)
+		}
+	}
+	for _, args := range [][]string{{"config"}, {"doctor", "--json"}, {"launch", "edit"}, {"version"}} {
+		if err := configParseGate(cfg, root, args); err != nil {
+			t.Errorf("args %q: recovery path was refused: %v", args, err)
+		}
+	}
+}
+
+// TestConfigParseGate_HookVerbsStillRun: `resume snapshot` runs from the Stop
+// hook of every session and is documented to always exit 0, so a malformed
+// or unreadable config.toml must not refuse it. Its siblings stay gated.
+func TestConfigParseGate_HookVerbsStillRun(t *testing.T) {
+	unreadable := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.Mkdir(unreadable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := gateRoot()
+	for name, cfg := range map[string]config.Config{"malformed": loadMalformedConfig(t), "unreadable": config.LoadPath(unreadable)} {
+		for _, args := range [][]string{{"resume", "snapshot", "--quiet"}, {"resume", "snapshot"}, {"--no-icons", "resume", "snapshot"}} {
+			if err := configParseGate(cfg, root, args); err != nil {
+				t.Errorf("%s config, args %q: hook verb was refused: %v", name, args, err)
+			}
+		}
+		for _, args := range [][]string{{"resume"}, {"resume", "--fork"}, {"resume", "abc123"}} {
+			if err := configParseGate(cfg, root, args); err == nil {
+				t.Errorf("%s config, args %q: gate passed a non-hook resume invocation", name, args)
+			}
+		}
+	}
+}

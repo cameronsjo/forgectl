@@ -38,6 +38,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
 // TestSandbox_LocalRepo_WorktreeAdd covers the cheap-path default: a local
@@ -619,82 +620,6 @@ func TestSandbox_FailedCheckout_RemovesItsTempDir(t *testing.T) {
 	}
 }
 
-// TestLogRepo is #711's allowlist. A non-local repo reaches the log only as
-// host/owner/repo, rebuilt from a strict positive parse, or as the
-// placeholder. Every row below is a form one of the three reviews found, or
-// a control around one.
-func TestLogRepo(t *testing.T) {
-	const ph = remoteRepoPlaceholder
-	for _, tc := range []struct{ in, want string }{
-		// Accepted shapes.
-		{"https://github.com/o/r.git", "github.com/o/r"},
-		{"https://ghe.example.test/Org-1/re.po_x", "ghe.example.test/Org-1/re.po_x"},
-		{"ssh://git@ghe.example.test/o/r.git", "ghe.example.test/o/r"},
-		{"ssh://git@ghe.example.test:2222/o/r.git", "ghe.example.test/o/r"},
-		{"git@github.com:o/r.git", "github.com/o/r"},
-		// Local paths.
-		{"/home/u/src/r@2", "/home/u/src/r@2"},
-		{"./r", "./r"},
-		{"../r", "../r"},
-		{".", "."},
-		// Userinfo in any position or spelling.
-		{"https://x-access-token:SECRETTOK@github.com/o/r.git", ph},
-		{"https://SECRETTOK@github.com/o/r.git", ph},
-		{"ssh://SECRETTOK@ghe.example.test:2222/o/r.git", ph},
-		{"git+ssh://SECRETTOK@h/o/r", ph},
-		{"git+ssh://git@h/o/r", ph},
-		{"SECRETTOK@github.com:o/r.git", ph},
-		{"SECRETTOK:pw@github.com:o/r.git", ph},
-		{"a@SECRETTOK@github.com:o/r@x.git", ph},
-		{"user:SECRETTOK@github.com:/o/r://x", ph},
-		{"https://SECRETTOK%40x@github.com/o/r", ph},
-		{"https://github.com%40SECRETTOK/o/r", ph},
-		{"https://x:SECRETTOK@host:notaport/o/r", ph},
-		{"https://x:SECRET/TOK@host/o/r", ph},
-		// Odd slash counts, 1 through 6.
-		{"https:/SECRETTOK@host/o/r", ph},
-		{"https:///SECRETTOK@host/o/r", ph},
-		{"https:////SECRETTOK@host/o/r", ph},
-		{"https://///SECRETTOK@host/o/r", ph},
-		{"https://////SECRETTOK@host/o/r", ph},
-		{"https:///////SECRETTOK@host/o/r", ph},
-		{"http:///USER:SECRETTOK@host:8080/r", ph},
-		{"https://github.com//o/r", ph},
-		{"https://github.com/o/r/", ph},
-		{"https://github.com/o/r/x", ph},
-		// Transport-helper forms (git sends U:TOK as Basic auth).
-		{"http::http://U:SECRETTOK@host/r", ph},
-		{"https::https://U:SECRETTOK@host/o/r", ph},
-		{"persistent-https::https://SECRETTOK@host/o/r", ph},
-		{"x+y::https://SECRETTOK@host/o/r", ph},
-		{"HTTP::http://U:SECRETTOK@host/r", ph},
-		{"http::http:///SECRETTOK@h/r", ph},
-		{"https::https://github.com/o/r", ph},
-		// Query, fragment, other schemes, IPv6, backslashes, whitespace.
-		{"https://github.com/o/r?access_token=SECRETTOK", ph},
-		{"https://github.com/o/r#SECRETTOK", ph},
-		{"http://github.com/o/r", ph},
-		{"git://github.com/o/r", ph},
-		{"HTTPS://github.com/o/r", ph},
-		{"https://[::1]/o/r", ph},
-		{"ssh://git@[::1]:22/o/r", ph},
-		{"git@[::1]:o/r", ph},
-		{"https:\\\\SECRETTOK@host\\o\\r", ph},
-		{"https://github.com\\o/r", ph},
-		{"https://github.com/o/r ", ph},
-		{" https://github.com/o/r", ph},
-		{"https://github.com/o/r\nSECRETTOK", ph},
-		{"https://git hub.com/o/r", ph},
-		// Other non-local forms.
-		{"owner/repo", ph},
-		{"", ph},
-	} {
-		if got := logRepo(tc.in); got != tc.want {
-			t.Errorf("logRepo(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
 // captureLog routes the default slog logger into a buffer at Debug for the
 // test's duration.
 func captureLog(t *testing.T) *strings.Builder {
@@ -732,7 +657,7 @@ func TestSandbox_LogLinesCarryNoRepoCredential(t *testing.T) {
 			if strings.Contains(out, "SECRETTOK") {
 				t.Fatalf("log carries the repo credential:\n%s", out)
 			}
-			if !strings.Contains(out, remoteRepoPlaceholder) {
+			if !strings.Contains(out, redact.RemoteRepoPlaceholder) {
 				t.Fatalf("log does not name the repo by its placeholder (vacuity guard):\n%s", out)
 			}
 		})

@@ -342,3 +342,31 @@ func TestWithoutOutput_ClearsOutputKeepsTheRest(t *testing.T) {
 		t.Errorf("an error with no *CommandError must pass through unchanged")
 	}
 }
+
+// TestWithoutOutput_LeavesADirectlyNestedOriginalAlone pins #708 item 3: a
+// *CommandError wrapped directly in another's Err is copied too, so the
+// original chain keeps its Output.
+//
+// Mutation: clear cp.Err in place (clearOutputs(cp.Err)) instead of copying
+// it, and inner.Output is emptied in the caller's original.
+func TestWithoutOutput_LeavesADirectlyNestedOriginalAlone(t *testing.T) {
+	sentinel := errors.New("exit status 3")
+	inner := &CommandError{Name: "in", Output: "secret-in", Err: sentinel}
+	outer := &CommandError{Name: "out", Output: "secret-out", Err: inner}
+	got := WithoutOutput(outer)
+	if outer.Output != "secret-out" || inner.Output != "secret-in" {
+		t.Errorf("original modified: outer %q, inner %q", outer.Output, inner.Output)
+	}
+	var cleared []string
+	for e := got; e != nil; e = errors.Unwrap(e) {
+		if ce, ok := e.(*CommandError); ok {
+			cleared = append(cleared, ce.Name+"="+ce.Output)
+		}
+	}
+	if len(cleared) != 2 || cleared[0] != "out=" || cleared[1] != "in=" {
+		t.Errorf("copy chain: %v, want both Outputs cleared", cleared)
+	}
+	if !errors.Is(got, sentinel) {
+		t.Error("the copy must still reach the sentinel")
+	}
+}
