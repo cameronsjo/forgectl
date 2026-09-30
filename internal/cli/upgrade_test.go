@@ -192,3 +192,61 @@ func TestUpgrade_Check_NeverEchoesBrew(t *testing.T) {
 		t.Errorf("the CommandError is no longer on the chain: %v", err)
 	}
 }
+
+// TestUpgrade_Apply_NeverEchoesBrew pins #761: the applying path renders its
+// progress and its outcome from fixed text, never from brew's stdout or its
+// CommandError (argv plus stderr, which relays the tap's server), and still
+// tells a failed tap refresh from a failed cask upgrade.
+func TestUpgrade_Apply_NeverEchoesBrew(t *testing.T) {
+	setMetaVersion(t, "1.0.0")
+	stubUpgradeLookPath(t, "brew")
+	const marker = "SERVERTEXT\x1b[2J"
+
+	fr := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) { return marker, nil }}
+	stdout, err := execUpgrade(t, fr)
+	if err != nil {
+		t.Fatalf("Execute() = %v, want nil", err)
+	}
+	if bytes.Contains([]byte(stdout), []byte("SERVERTEXT")) {
+		t.Errorf("stdout = %q, relays brew's output", stdout)
+	}
+	if !bytes.Contains([]byte(stdout), []byte("forgectl upgraded")) {
+		t.Errorf("stdout = %q, want the fixed success line", stdout)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		failArg  string
+		wantText string
+	}{
+		{"update fails", "update", "brew update failed"},
+		{"upgrade fails", "upgrade", "brew upgrade --cask failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fr := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				if args[0] == tc.failArg {
+					return marker, &exec.CommandError{Name: name, Args: args, Stderr: marker}
+				}
+				return marker, nil
+			}}
+			stdout, err := execUpgrade(t, fr)
+			if err == nil {
+				t.Fatal("Execute() = nil, want an error")
+			}
+			if ExitCode(err) != 1 {
+				t.Errorf("ExitCode = %d, want 1", ExitCode(err))
+			}
+			msg := err.Error() + stdout
+			if bytes.Contains([]byte(msg), []byte("SERVERTEXT")) || bytes.Contains([]byte(msg), []byte("--cask "+selfupdate.CaskRef)) {
+				t.Errorf("output = %q, echoes brew's text or argv", msg)
+			}
+			if !bytes.Contains([]byte(err.Error()), []byte(tc.wantText)) {
+				t.Errorf("error = %q, want it to name the failed step (%q)", err, tc.wantText)
+			}
+			var ce *exec.CommandError
+			if !errors.As(err, &ce) {
+				t.Errorf("the CommandError is no longer on the chain: %v", err)
+			}
+		})
+	}
+}

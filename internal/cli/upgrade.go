@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -96,14 +97,30 @@ func runUpgrade(cmd *cobra.Command, deps module.Deps, checkOnly bool) error {
 		return runUpgradeCheck(ctx, deps, out)
 	}
 
+	return runUpgradeApply(ctx, deps, out)
+}
+
+// runUpgradeApply is the applying path. Like --check (#738), it never renders
+// brew's text (#761): brew's stdout relays what the tap's server and git
+// transport send, and the CommandError carries brew's argv and stderr. The
+// progress and the outcome are fixed text; brew's output goes to the debug
+// log, whose text handler quotes it, and the CommandError stays on the chain
+// for errors.As.
+func runUpgradeApply(ctx context.Context, deps module.Deps, out io.Writer) error {
+	_, _ = fmt.Fprintln(out, "Refreshing the Homebrew tap and upgrading "+selfupdate.CaskRef+"…")
 	upgradeOut, err := selfupdate.Upgrade(ctx, deps.Runner)
 	if upgradeOut != "" {
-		fmt.Fprintln(out, upgradeOut)
+		slog.Debug("brew output.", "output", upgradeOut)
 	}
 	if err != nil {
-		return WithExitCode(fmt.Errorf("upgrade: %w", err), 1)
+		slog.Warn("brew upgrade failed.", "error", err)
+		msg := "upgrade: brew upgrade --cask failed; the installed forgectl is unchanged"
+		if errors.Is(err, selfupdate.ErrTapUpdate) {
+			msg = "upgrade: brew update failed; check network access to the Homebrew tap"
+		}
+		return WithExitCode(termsafe.Categorical(msg, err), 1)
 	}
-	fmt.Fprintln(out, "forgectl upgraded — restart your shell (or open a new one) to pick up the new binary.")
+	_, _ = fmt.Fprintln(out, "forgectl upgraded — restart your shell (or open a new one) to pick up the new binary.")
 	return nil
 }
 
