@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,11 +21,6 @@ import (
 // needs no external binary and still exercises fork/exec, pipes, and signals
 // for real.
 const helperModeEnv = "FORGECTL_SENSITIVE_HELPER_MODE"
-
-// partialMarkerEnv names a file the "partial" helper creates once its prefix
-// is written, so a test can stop it on that event rather than on a guess at
-// how long the child takes to start.
-const partialMarkerEnv = "FORGECTL_SENSITIVE_HELPER_PARTIAL_MARKER"
 
 func TestMain(m *testing.M) {
 	if mode := os.Getenv(helperModeEnv); mode != "" {
@@ -75,13 +69,6 @@ func helperMain(mode string) int {
 		// stall gets a prefix — and gets it after a clean io.EOF, because the
 		// kill closes this process's write ends too.
 		_, _ = fmt.Fprint(os.Stdout, "PARTIAL")
-		// Tell the test the prefix is in the pipe, so it can stop this
-		// process knowing there is a prefix to see.
-		if marker := os.Getenv(partialMarkerEnv); marker != "" {
-			if err := os.WriteFile(filepath.Clean(marker), nil, 0o600); err != nil { //nolint:gosec // G703: test-helper child writes the marker path its own test set
-				return 97
-			}
-		}
 		d, err := time.ParseDuration(arg)
 		if err != nil {
 			return 98
@@ -446,10 +433,14 @@ func TestRunSensitive_ReturnsWithinBoundWhenDescendantHoldsThePipe(t *testing.T)
 // the bytes has to be told, because the seam's contract sends them to the
 // completeness flag rather than to the error.
 func TestRunSensitive_KilledProducerLeavesAnIncompletePrefix(t *testing.T) {
-	// Each context fires once the child has written its prefix, not after a
-	// fixed delay. A fixed 200 ms raced the child's startup: under -race this
-	// re-executed test binary can take longer than that to write anything, so
-	// the kill landed first and stdout was empty (#661). A context whose
+	// Each context fires once the PARENT has read the child's prefix, not
+	// after a fixed delay and not when the child reports writing it. A fixed
+	// 200 ms raced the child's startup (#661). A marker file the child wrote
+	// after its prefix still raced, one step later: the kill force-closes the
+	// read ends at once, so a prefix still sitting in the pipe, not yet taken
+	// by a reader the scheduler had not run, was dropped and stdout came back
+	// empty under load (#787). The tap on the runner's stdout reader closes
+	// fired only after those bytes are in the reader's hands. A context whose
 	// deadline is set when it is made cannot wait for an event, so the
 	// deadline case uses a context that reports DeadlineExceeded once fired,
 	// which is all the runner reads of it.
@@ -468,17 +459,11 @@ func TestRunSensitive_KilledProducerLeavesAnIncompletePrefix(t *testing.T) {
 	}
 
 	for name, mkCtx := range cases {
-		marker := filepath.Join(t.TempDir(), "prefix-written")
-		runner, self := helperRunner(t, "partial:60s", defaultRetireBound, partialMarkerEnv+"="+marker)
+		runner, self := helperRunner(t, "partial:60s", defaultRetireBound)
 		fired := make(chan struct{})
-		go func() {
-			defer close(fired)
-			for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-				if _, err := os.Stat(marker); err == nil {
-					return
-				}
-			}
-		}()
+		runner.stdoutTap = func(r io.Reader) io.Reader {
+			return &firstBytesTap{r: r, want: len("PARTIAL"), fired: fired}
+		}
 
 		res, err := runner.RunSensitive(mkCtx(fired), helperCommand(KindTmuxCreate, self, 4096))
 
@@ -533,6 +518,27 @@ func (c firedContext) Err() error {
 	default:
 		return nil
 	}
+}
+
+// firstBytesTap passes reads through and closes fired once want bytes have
+// been returned to the reader, so a test can kill the child at the moment its
+// prefix is in the parent's hands rather than merely in the pipe. Only the one
+// reader goroutine calls Read, so it needs no lock.
+type firstBytesTap struct {
+	r     io.Reader
+	want  int
+	got   int
+	fired chan<- struct{}
+}
+
+func (t *firstBytesTap) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if t.got < t.want {
+		if t.got += n; t.got >= t.want {
+			close(t.fired)
+		}
+	}
+	return n, err
 }
 
 // diedUnderSignal must answer from the process state, not from the exit code.
