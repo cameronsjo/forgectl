@@ -211,6 +211,19 @@ func TestHerdrOrganize_InvalidConfig_ExitsTwoBeforeHerdr(t *testing.T) {
 	}
 }
 
+func TestHerdrOrganize_UncompilableGlobIsRefused(t *testing.T) {
+	setHerdrSeams(t, inSession)
+	cfg := organizeCfg()
+	cfg.Herdr.Organize.Rules[0].Glob = "/r/[z-a]/* :: *"
+	r := runOrganize(t, cfg, nil)
+	if ExitCode(r.err) != 2 || r.err == nil || !strings.Contains(r.err.Error(), `#1 (glob "/r/[z-a]/* :: *"): invalid glob`) {
+		t.Errorf("err = %v (exit %d), want exit 2 naming the rule and the invalid glob", r.err, ExitCode(r.err))
+	}
+	if len(r.runner.Calls) != 0 {
+		t.Errorf("herdr was called: %v", r.runner.Calls)
+	}
+}
+
 func TestHerdrOrganize_NoRules_Variants(t *testing.T) {
 	sectionPresent, err := config.DecodeStrict([]byte("[herdr.organize]\n"))
 	if err != nil {

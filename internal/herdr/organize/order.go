@@ -63,19 +63,29 @@ func Reorders(snap Snapshot, plan Plan) []Reorder {
 		if !ok {
 			continue
 		}
-		var current []string
+		// A tab with no panes has no terminal id and is not in the layout, but
+		// it holds a position, so it gets a stand-in exactly as apply gives it.
+		var current, withPanes []string
 		for _, tab := range snap.Tabs[id] {
-			if term, ok := terminalOf[tab.TabID]; ok {
-				current = append(current, term)
+			term, ok := terminalOf[tab.TabID]
+			if !ok {
+				term = StandInID(tab.TabID)
+				tabOf[term] = tab.TabID
+			} else {
+				withPanes = append(withPanes, term)
 			}
+			current = append(current, term)
 		}
-		target := make([]string, 0, len(lw.Tabs))
+		layoutTerms := make([]string, 0, len(lw.Tabs))
 		titles := make(map[string]string, len(lw.Tabs))
 		for _, t := range lw.Tabs {
-			target = append(target, t.TerminalID)
+			layoutTerms = append(layoutTerms, t.TerminalID)
 			titles[t.TerminalID] = t.Title
 		}
-		steps, ok := OrderSteps(current, target)
+		if !sameMembers(withPanes, layoutTerms) {
+			continue
+		}
+		steps, ok := OrderSteps(current, ArrangeTarget(layoutTerms, current))
 		if !ok || len(steps) == 0 {
 			continue
 		}
@@ -106,4 +116,48 @@ func WorkspaceOrderChange(snap Snapshot, plan Plan) (from, to []string, changed 
 		}
 	}
 	return from, to, !slices.Equal(from, to)
+}
+
+// StandInID names a tab that has no pane, so it can take a position in an
+// ordered list of terminal ids.
+func StandInID(tabID string) string { return "tab:" + tabID }
+
+// ArrangeTarget is the order a workspace should reach: the layout tabs that
+// are in it now, in layout order, then every other tab in the order it already
+// has.
+func ArrangeTarget(layout, current []string) []string {
+	present := make(map[string]bool, len(current))
+	for _, t := range current {
+		present[t] = true
+	}
+	out := make([]string, 0, len(current))
+	listed := make(map[string]bool, len(layout))
+	for _, t := range layout {
+		if present[t] {
+			out = append(out, t)
+			listed[t] = true
+		}
+	}
+	for _, t := range current {
+		if !listed[t] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func sameMembers(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]bool, len(a))
+	for _, x := range a {
+		set[x] = true
+	}
+	for _, x := range b {
+		if !set[x] {
+			return false
+		}
+	}
+	return true
 }

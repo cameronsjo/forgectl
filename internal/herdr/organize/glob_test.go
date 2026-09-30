@@ -2,6 +2,17 @@ package organize
 
 import "testing"
 
+func TestCheckGlob(t *testing.T) {
+	for _, g := range []string{"*/forge/* :: *", "[a-c]x", "a[b", "", "[!x]"} {
+		if err := CheckGlob(g); err != nil {
+			t.Errorf("CheckGlob(%q) = %v, want nil", g, err)
+		}
+	}
+	if err := CheckGlob("*/[z-a]*"); err == nil {
+		t.Error("CheckGlob accepted a reversed range that can never match")
+	}
+}
+
 func TestMatch(t *testing.T) {
 	tests := []struct {
 		name string

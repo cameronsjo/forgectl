@@ -143,7 +143,9 @@ func runHerdrOrganize(cmd *cobra.Command, deps module.Deps, opts organizeOpts) e
 	}
 	lockPath, err := herdrLockPath()
 	if err != nil {
-		return termsafe.Error(err)
+		// Nothing has changed yet: the same class as the other pre-apply setup
+		// failures, exit 2.
+		return WithExitCode(termsafe.Error(err), 2)
 	}
 	notice := func() { _, _ = fmt.Fprintln(cmd.ErrOrStderr(), lockWaitNotice) }
 	return herdrWithLock(lockPath, notice, func() error { return organizeOnce(cmd, deps, opts) })
@@ -166,7 +168,11 @@ func organizeOnce(cmd *cobra.Command, deps module.Deps, opts organizeOpts) error
 	if opts.asJSON {
 		human = cmd.ErrOrStderr()
 	}
-	home, _ := herdrUserHome()
+	// With no resolvable home, paths print in full instead of shortened to ~.
+	home, homeErr := herdrUserHome()
+	if homeErr != nil {
+		home = ""
+	}
 	r := organizeReport{w: human, home: home}
 
 	if !opts.apply {
@@ -203,6 +209,13 @@ func organizeConfigProblem(c config.Config) error {
 	o := c.Herdr.Organize
 	if err := o.Validate(); err != nil {
 		return err
+	}
+	// A glob the matcher cannot compile matches nothing, so its tabs would all
+	// fall to the default with no sign of why. Refuse it here.
+	for i, r := range o.Rules {
+		if err := organize.CheckGlob(r.Glob); err != nil {
+			return fmt.Errorf("[[herdr.organize.rule]] #%d (glob %q): %w", i+1, r.Glob, err)
+		}
 	}
 	if len(o.Rules) > 0 {
 		return nil
@@ -415,7 +428,14 @@ func (r organizeReport) applied(res applyResult, planned int) error {
 	for _, m := range res.Applied {
 		r.printf("moved    %s  %s -> %s\n", r.tab(m.Title, m.TabID), r.safe(m.From), r.safe(m.To))
 	}
+	for _, m := range res.AlreadyPlaced {
+		r.printf("in place %s  already in %s\n", r.tab(m.Title, m.TabID), r.safe(m.To))
+	}
 	for _, s := range res.Reordered {
+		if s.TabID == "" { // a workspace step: Title is its label
+			r.printf("ordered  workspace %q -> position %d\n", r.safe(s.Title), s.Position+1)
+			continue
+		}
 		r.printf("ordered  %s -> position %d\n", r.tab(s.Title, s.TabID), s.Position+1)
 	}
 

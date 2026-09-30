@@ -98,6 +98,23 @@ func TestWorkspaceOrderChange(t *testing.T) {
 	}
 }
 
+func TestReorders_CountsAPanelessTabAsHoldingAPosition(t *testing.T) {
+	// [b, X (no panes), a] wants [a, b]; apply sees X as a stand-in that keeps
+	// its place at the end, so the dry run must plan the same single move.
+	snap := mkSnapshot(
+		[]herdr.Workspace{ws("w1", "forge", 1)},
+		[]tabSpec{
+			{"w1", "t1", "term1", "/r/forge/b", "b"},
+			{"w1", "t3", "term3", "/r/forge/a", "a"},
+		})
+	snap.Tabs["w1"] = []herdr.Tab{snap.Tabs["w1"][0], {TabID: "tX", WorkspaceID: "w1", Label: "ghost"}, snap.Tabs["w1"][1]}
+	cfg := Config{Default: "forge", Rules: []Rule{{Glob: "*", Workspace: "forge"}}}
+	got := Reorders(snap, BuildPlan(cfg, snap, testRoot))
+	if len(got) != 1 || len(got[0].Steps) != 1 || got[0].Steps[0].TerminalID != "term3" || got[0].Steps[0].Position != 0 {
+		t.Errorf("Reorders = %+v, want one step moving term3 to position 0", got)
+	}
+}
+
 func TestReorders_SkipsAWorkspaceWhoseMembersWillChange(t *testing.T) {
 	snap := mkSnapshot(
 		[]herdr.Workspace{ws("w1", "misc", 1)},

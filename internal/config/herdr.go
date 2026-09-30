@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 // HerdrConfig is the [herdr] section: settings for the `forgectl herdr`
@@ -44,12 +45,18 @@ func (hc HerdrOrganizeConfig) Validate() error {
 	if len(hc.Rules) > 0 && strings.TrimSpace(hc.Default) == "" {
 		return fmt.Errorf("[herdr.organize] default is empty: name the workspace that tabs matching no rule go to")
 	}
+	if err := checkLabel(hc.Default); err != nil {
+		return fmt.Errorf("[herdr.organize] default %q: %w", hc.Default, err)
+	}
 	for i, r := range hc.Rules {
 		switch {
 		case strings.TrimSpace(r.Glob) == "":
 			return fmt.Errorf("[[herdr.organize.rule]] #%d (glob %q): glob is empty", i+1, r.Glob)
 		case strings.TrimSpace(r.Workspace) == "":
 			return fmt.Errorf("[[herdr.organize.rule]] #%d (glob %q): workspace is empty", i+1, r.Glob)
+		}
+		if err := checkLabel(r.Workspace); err != nil {
+			return fmt.Errorf("[[herdr.organize.rule]] #%d (glob %q): workspace %q: %w", i+1, r.Glob, r.Workspace, err)
 		}
 	}
 	seen := make(map[string]bool, len(hc.WorkspaceOrder))
@@ -60,7 +67,24 @@ func (hc HerdrOrganizeConfig) Validate() error {
 		case seen[label]:
 			return fmt.Errorf("[herdr.organize] workspace_order lists %q more than once", label)
 		}
+		if err := checkLabel(label); err != nil {
+			return fmt.Errorf("[herdr.organize] workspace_order entry #%d %q: %w", i+1, label, err)
+		}
 		seen[label] = true
+	}
+	return nil
+}
+
+// checkLabel refuses a workspace label herdr's client would refuse at apply
+// time: one that starts with '-' (read as a flag) or holds a control
+// character. Catching it here means the dry run cannot promise a move that
+// --apply then fails halfway through.
+func checkLabel(label string) error {
+	if strings.HasPrefix(label, "-") {
+		return fmt.Errorf("a label must not start with '-'")
+	}
+	if strings.IndexFunc(label, unicode.IsControl) >= 0 {
+		return fmt.Errorf("a label must not contain control characters")
 	}
 	return nil
 }

@@ -53,12 +53,12 @@ func WithFileLockNotify(path string, onWait func(), fn func() error) error {
 		return fmt.Errorf("lock file %s is not a regular file", lockPath)
 	}
 
-	err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	err = flockRetry(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 	if errors.Is(err, unix.EWOULDBLOCK) {
 		if onWait != nil {
 			onWait()
 		}
-		err = unix.Flock(int(f.Fd()), unix.LOCK_EX)
+		err = flockRetry(int(f.Fd()), unix.LOCK_EX)
 	}
 	if err != nil {
 		return fmt.Errorf("lock %s: %w", lockPath, err)
@@ -66,4 +66,16 @@ func WithFileLockNotify(path string, onWait func(), fn func() error) error {
 	defer func() { _ = unix.Flock(int(f.Fd()), unix.LOCK_UN) }()
 
 	return fn()
+}
+
+// flockRetry is unix.Flock that retries when a signal interrupts the call, so
+// a signal (a window resize, a child exiting) during a long wait for the lock
+// does not fail a run that would otherwise have got it.
+func flockRetry(fd, how int) error {
+	for {
+		err := unix.Flock(fd, how)
+		if !errors.Is(err, unix.EINTR) {
+			return err
+		}
+	}
 }

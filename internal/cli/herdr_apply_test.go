@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -181,6 +182,20 @@ func TestApply_ForkMissing_RefusesBeforeAnyChange(t *testing.T) {
 	}
 }
 
+func TestApply_ALockDirectoryThatCannotBeMadeExitsTwoBeforeAnyChange(t *testing.T) {
+	w := sessionWorld()
+	var events []string
+	setHerdrSeams(t, herdrSeams{env: inSession.env, events: &events})
+	herdrLockPath = func() (string, error) { return "", errors.New("read-only config dir") }
+	r := runOrganize(t, organizeCfg(), w, "--apply")
+	if ExitCode(r.err) != 2 || r.err == nil || !strings.Contains(r.err.Error(), "read-only config dir") {
+		t.Errorf("err = %v (exit %d), want exit 2: nothing was changed", r.err, ExitCode(r.err))
+	}
+	if len(r.runner.Calls) != 0 {
+		t.Errorf("herdr was called: %v", r.runner.Calls)
+	}
+}
+
 func TestApply_SessionGateFailsBeforeTheForkCheck(t *testing.T) {
 	w := sessionWorld()
 	a := runApply(t, herdrSeams{sessionErr: herdr.ErrNotInSession}, w)
@@ -272,6 +287,99 @@ func TestApply_UnexpectedDeclinedExitsOneAndRestoresFocus(t *testing.T) {
 	}
 	if n := len(w.focusLog); n == 0 || w.focusLog[n-1] != "tab:t9" {
 		t.Errorf("focusLog = %v, want focus restored after the decline", w.focusLog)
+	}
+}
+
+func TestApply_ADeclinedMoveIntoAnExistingWorkspaceDoesNotAbandonTheRest(t *testing.T) {
+	w := threeMoveWorld()
+	w.intercept = func(args []string) (string, error, bool) {
+		if len(args) >= 3 && args[0] == "tab" && args[1] == "move" && args[2] == "t1" && len(args) > 3 && args[3] == "--workspace" {
+			return `{"id":"x","result":{"move_result":{"changed":false,"reason":"last_tab_in_workspace"}}}`, nil, true
+		}
+		return "", nil, false
+	}
+	a := runApply(t, inSession, w)
+	if a.err == nil || ExitCode(a.err) != 1 || !strings.Contains(a.err.Error(), "last_tab_in_workspace") {
+		t.Fatalf("err = %v (exit %d), want exit 1 reporting the decline", a.err, ExitCode(a.err))
+	}
+	if got := w.order("w2"); len(got) != 3 { // resident + t2 + t3
+		t.Errorf("forge holds %v, want the resident and the two tabs that could move", got)
+	}
+	if n := len(w.focusLog); n == 0 || w.focusLog[n-1] != "tab:t9" {
+		t.Errorf("focusLog = %v, want focus restored", w.focusLog)
+	}
+}
+
+func TestApply_AMoveThatAPeerAlreadyMadeIsNotCountedAsApplied(t *testing.T) {
+	w := threeMoveWorld()
+	done := false
+	w.intercept = func(args []string) (string, error, bool) {
+		if !done && len(args) >= 4 && args[0] == "tab" && args[1] == "move" && args[3] == "--workspace" {
+			done = true
+			// While the first move is issued, a peer puts t3 into forge itself.
+			w.moveTab(t, []string{"tab", "move", "t3", "--workspace", "w2"})
+		}
+		return "", nil, false
+	}
+	a := runApply(t, inSession, w)
+	if a.err != nil {
+		t.Fatalf("err = %v", a.err)
+	}
+	if !strings.Contains(a.stdout, "applied: 2 moves") || !strings.Contains(a.stdout, "in place") {
+		t.Errorf("stdout = %q, want 2 applied moves and the peer's move reported as already in place", a.stdout)
+	}
+}
+
+func TestApply_WorkspaceReordersAreReported(t *testing.T) {
+	w := sessionWorld()
+	a := runApply(t, inSession, w)
+	if !strings.Contains(a.stdout, `ordered  workspace "forge" -> position 1`) || !strings.Contains(a.stdout, "1 reorder") && !strings.Contains(a.stdout, "reorders") {
+		t.Errorf("stdout = %q, want the workspace move listed and counted", a.stdout)
+	}
+}
+
+func TestApply_CallerTabGoneLeavesTheUIInItsWorkspace(t *testing.T) {
+	w := sessionWorld()
+	done := false
+	w.intercept = func(args []string) (string, error, bool) {
+		if !done && len(args) >= 2 && args[0] == "tab" && args[1] == "move" {
+			done = true
+			// The caller's tab is closed mid-run.
+			w.tabs["w1"] = w.tabs["w1"][:2]
+			w.panes = append(w.panes[:2], w.panes[3:]...)
+			w.focusedTab = ""
+		}
+		return "", nil, false
+	}
+	_ = runApply(t, inSession, w)
+	if n := len(w.focusLog); n == 0 || w.focusLog[n-1] != "workspace:w1" {
+		t.Errorf("focusLog = %v, want the caller's workspace focused last", w.focusLog)
+	}
+}
+
+func TestApply_IndexMovesThatNeverTakeEffectFailInsteadOfLooping(t *testing.T) {
+	w := newWorld(hws("w1", "forge", 1)).
+		tab("w1", "t1", "term1", "/r/forge/b", "b").
+		tab("w1", "t2", "term2", "/r/forge/a", "a")
+	w.active = map[string]string{"w1": "t1"}
+	w.focusedTab = "t1"
+	// herdr acknowledges every index move and changes nothing.
+	w.intercept = func(args []string) (string, error, bool) {
+		if len(args) >= 4 && args[0] == "tab" && args[1] == "move" && args[3] == "--index" {
+			return reply(t, map[string]any{"tabs": w.tabs["w1"]}), nil, true
+		}
+		return "", nil, false
+	}
+	cfg := organizeCfg()
+	cfg.Herdr.Organize.WorkspaceOrder = []string{"forge"}
+	cfg.Herdr.Organize.Default = "forge"
+	setHerdrSeams(t, inSession)
+	r := runOrganize(t, cfg, w, "--apply")
+	if r.err == nil || !strings.Contains(r.err.Error(), "did not settle") {
+		t.Fatalf("err = %v, want the tab order reported as not settling", r.err)
+	}
+	if n := len(w.focusLog); n == 0 || w.focusLog[n-1] != "tab:t1" {
+		t.Errorf("focusLog = %v, want focus restored after the failure", w.focusLog)
 	}
 }
 

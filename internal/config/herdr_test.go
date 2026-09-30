@@ -101,6 +101,21 @@ func TestHerdrOrganize_Validate(t *testing.T) {
 			want: `workspace_order lists "a" more than once`,
 		},
 		{
+			name: "rule workspace that herdr would read as a flag",
+			cfg:  HerdrOrganizeConfig{Default: "d", Rules: []HerdrOrganizeRule{{Glob: "a", Workspace: "-scratch"}}},
+			want: `#1 (glob "a"): workspace "-scratch": a label must not start with '-'`,
+		},
+		{
+			name: "default with a control character",
+			cfg:  HerdrOrganizeConfig{Default: "d\x1b", Rules: []HerdrOrganizeRule{{Glob: "a", Workspace: "w"}}},
+			want: "a label must not contain control characters",
+		},
+		{
+			name: "order label starting with a dash",
+			cfg:  HerdrOrganizeConfig{WorkspaceOrder: []string{"ok", "-x"}},
+			want: `workspace_order entry #2 "-x": a label must not start with '-'`,
+		},
+		{
 			name: "empty order label",
 			cfg:  HerdrOrganizeConfig{WorkspaceOrder: []string{"a", " "}},
 			want: "workspace_order entry #2 is empty",

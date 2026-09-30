@@ -49,11 +49,15 @@ func forkRefusal(err error) error {
 // applyResult is what --apply did. Applied and Refused are moves; Stopped names
 // the stage that failed, when one did.
 type applyResult struct {
-	Applied   []organize.Move
-	NotRun    []organize.Move
-	Refused   []refusedMove
-	Reordered []organize.OrderStep
-	Warnings  []string
+	Applied []organize.Move
+	NotRun  []organize.Move
+	// AlreadyPlaced are planned moves whose tab was already in its workspace
+	// when its turn came (a peer or an earlier run got there first). Nothing
+	// was called for them, so they are not Applied.
+	AlreadyPlaced []organize.Move
+	Refused       []refusedMove
+	Reordered     []organize.OrderStep
+	Warnings      []string
 
 	// Stage is what was running when the run stopped, in words for the first
 	// line of the failure summary; empty when the run finished.
@@ -70,8 +74,10 @@ type applyResult struct {
 	FocusErr   error
 }
 
-// refusedMove is a move herdr declined where a decline is not a surprise: the
-// creation of a workspace. The run continues past it.
+// refusedMove is a move herdr declined. The plan predicts the refusals it can
+// (a workspace's last tab), so a decline here means the session changed after
+// the snapshot. The run carries on with the moves that do not depend on it,
+// and the run ends in error.
 type refusedMove struct {
 	Move organize.Move
 	Err  error
@@ -81,7 +87,10 @@ type refusedMove struct {
 // was focused on, and each workspace's active tab as its first pane's terminal.
 type focusState struct {
 	caller string
-	active []activeTab
+	// focusedWS is the workspace the caller was looking at. When the caller's
+	// own tab is gone at restore time, its active tab is focused last instead.
+	focusedWS string
+	active    []activeTab
 }
 
 type activeTab struct {
@@ -98,9 +107,13 @@ func snapshotFocus(snap organize.Snapshot) focusState {
 		}
 		if p.Focused && fs.caller == "" {
 			fs.caller = p.TerminalID
+			fs.focusedWS = p.WorkspaceID
 		}
 	}
 	for _, w := range snap.Workspaces {
+		if fs.focusedWS == "" && w.Focused {
+			fs.focusedWS = w.WorkspaceID
+		}
 		if p, ok := firstPaneOf[w.ActiveTabID]; ok {
 			fs.active = append(fs.active, activeTab{workspaceID: w.WorkspaceID, terminalID: p.TerminalID})
 		}
@@ -136,7 +149,7 @@ func applyPlan(ctx context.Context, c *herdr.Client, snap organize.Snapshot, pla
 	}
 	if len(res.Refused) > 0 {
 		res.Err = refusedError(res.Refused)
-		res.Stage = "creating workspaces"
+		res.Stage = "moving tabs"
 	}
 	return res
 }
@@ -171,7 +184,8 @@ func canonicalWorkspace(wss []herdr.Workspace, label string, created map[string]
 	return "", false
 }
 
-func firstPaneByTerminal(panes []herdr.Pane) map[string]herdr.Pane {
+// paneByTerminal indexes panes by terminal id.
+func paneByTerminal(panes []herdr.Pane) map[string]herdr.Pane {
 	out := make(map[string]herdr.Pane, len(panes))
 	for _, p := range panes {
 		out[p.TerminalID] = p
@@ -190,14 +204,14 @@ func runMoves(ctx context.Context, c *herdr.Client, moves []organize.Move, res *
 		if err != nil {
 			return failStage(res, moves[i:], `reading workspaces before moving "`+m.Title+`"`, err)
 		}
-		cur, ok := firstPaneByTerminal(panes)[m.TerminalID]
+		cur, ok := paneByTerminal(panes)[m.TerminalID]
 		if !ok {
 			res.Warnings = append(res.Warnings, fmt.Sprintf("tab %q [%s] is gone; skipped", m.Title, m.TabID))
 			continue
 		}
 		dest, exists := canonicalWorkspace(wss, m.To, created)
 		if exists && dest == cur.WorkspaceID {
-			res.Applied = append(res.Applied, m) // already where it belongs
+			res.AlreadyPlaced = append(res.AlreadyPlaced, m)
 			continue
 		}
 		target := herdr.ToNewWorkspace(m.To)
@@ -212,7 +226,7 @@ func runMoves(ctx context.Context, c *herdr.Client, moves []organize.Move, res *
 				created[m.To] = result.WorkspaceID
 			}
 			res.Applied = append(res.Applied, m)
-		case errors.As(err, &declined) && !exists:
+		case errors.As(err, &declined):
 			res.Refused = append(res.Refused, refusedMove{Move: m, Err: err})
 			res.NotRun = append(res.NotRun, m)
 		default:
@@ -229,39 +243,49 @@ func failStage(res *applyResult, notRun []organize.Move, stage string, err error
 }
 
 func runWorkspaceOrder(ctx context.Context, c *herdr.Client, plan organize.Plan, res *applyResult) error {
-	wss, err := c.Workspaces(ctx)
-	if err != nil {
-		res.Stage = "reading workspaces to order them"
-		return err
-	}
-	current := make([]string, 0, len(wss))
-	for _, w := range wss {
-		current = append(current, w.WorkspaceID)
-	}
-	target := make([]string, 0, len(wss))
-	placed := map[string]bool{}
-	for _, lw := range plan.Layout.Workspaces {
-		if id, ok := canonicalWorkspace(wss, lw.Label, nil); ok && !placed[id] {
-			placed[id] = true
-			target = append(target, id)
+	// One step per pass, re-reading between passes as the tab order does, so a
+	// renumbering after a move cannot leave later steps acting on stale ids.
+	for pass := 0; ; pass++ {
+		wss, err := c.Workspaces(ctx)
+		if err != nil {
+			res.Stage = "reading workspaces to order them"
+			return err
 		}
-	}
-	for _, id := range current {
-		if !placed[id] {
-			target = append(target, id)
+		current := make([]string, 0, len(wss))
+		label := make(map[string]string, len(wss))
+		for _, w := range wss {
+			current = append(current, w.WorkspaceID)
+			label[w.WorkspaceID] = w.Label
 		}
-	}
-	steps, ok := organize.OrderSteps(current, target)
-	if !ok {
-		return nil
-	}
-	for _, s := range steps {
+		target := make([]string, 0, len(wss))
+		placed := map[string]bool{}
+		for _, lw := range plan.Layout.Workspaces {
+			if id, ok := canonicalWorkspace(wss, lw.Label, nil); ok && !placed[id] {
+				placed[id] = true
+				target = append(target, id)
+			}
+		}
+		for _, id := range current {
+			if !placed[id] {
+				target = append(target, id)
+			}
+		}
+		steps, ok := organize.OrderSteps(current, target)
+		if !ok || len(steps) == 0 {
+			return nil
+		}
+		if pass > len(wss) {
+			res.Stage = "ordering workspaces"
+			return fmt.Errorf("the workspace order did not settle after %d moves", pass)
+		}
+		s := steps[0]
 		if err := c.MoveWorkspace(ctx, s.TerminalID, s.Position); err != nil {
 			res.Stage = "ordering workspaces"
 			return err
 		}
+		// A workspace step has no tab id; Title carries the workspace label.
+		res.Reordered = append(res.Reordered, organize.OrderStep{TerminalID: s.TerminalID, Title: label[s.TerminalID], Position: s.Position})
 	}
-	return nil
 }
 
 // tabsInOrder returns the terminal ids of a workspace's tabs, in tab order. A
@@ -277,7 +301,7 @@ func tabsInOrder(tabs []herdr.Tab, panes []herdr.Pane) (terminals []string, tabO
 	for _, t := range tabs {
 		term, ok := firstOfTab[t.TabID]
 		if !ok {
-			term = "tab:" + t.TabID
+			term = organize.StandInID(t.TabID)
 		}
 		terminals = append(terminals, term)
 		tabOf[term] = t.TabID
@@ -311,7 +335,7 @@ func runTabOrder(ctx context.Context, c *herdr.Client, plan organize.Plan, res *
 				return err
 			}
 			current, tabOf := tabsInOrder(tabs, panes)
-			steps, _ := organize.OrderSteps(current, wantedOrder(lw, current))
+			steps, _ := organize.OrderSteps(current, organize.ArrangeTarget(layoutTerminals(lw), current))
 			if len(steps) == 0 {
 				break
 			}
@@ -332,25 +356,10 @@ func runTabOrder(ctx context.Context, c *herdr.Client, plan organize.Plan, res *
 	return nil
 }
 
-// wantedOrder is the layout's tabs that are in the workspace now, in layout
-// order, then any other tabs in the order they already have.
-func wantedOrder(lw organize.LayoutWorkspace, current []string) []string {
-	present := make(map[string]bool, len(current))
-	for _, t := range current {
-		present[t] = true
-	}
-	out := make([]string, 0, len(current))
-	listed := map[string]bool{}
+func layoutTerminals(lw organize.LayoutWorkspace) []string {
+	out := make([]string, 0, len(lw.Tabs))
 	for _, t := range lw.Tabs {
-		if present[t.TerminalID] {
-			out = append(out, t.TerminalID)
-			listed[t.TerminalID] = true
-		}
-	}
-	for _, t := range current {
-		if !listed[t] {
-			out = append(out, t)
-		}
+		out = append(out, t.TerminalID)
 	}
 	return out
 }
@@ -377,11 +386,11 @@ func restoreFocus(ctx context.Context, c *herdr.Client, fs focusState) (title, t
 	if err != nil {
 		return "", "", err
 	}
-	byTerminal := firstPaneByTerminal(panes)
+	byTerminal := paneByTerminal(panes)
 	var errs []error
 	for _, a := range fs.active {
 		p, ok := byTerminal[a.terminalID]
-		if !ok || p.WorkspaceID != a.workspaceID || a.terminalID == fs.caller {
+		if !ok || p.WorkspaceID != a.workspaceID || a.workspaceID == fs.focusedWS {
 			continue
 		}
 		if err := c.FocusTab(ctx, p.TabID); err != nil {
@@ -393,6 +402,14 @@ func restoreFocus(ctx context.Context, c *herdr.Client, fs focusState) (title, t
 			errs = append(errs, err)
 		} else {
 			title, tabID = p.TerminalTitleStripped, p.TabID
+		}
+	} else {
+		// The caller's own tab is gone: leave the UI in the workspace it was
+		// looking at rather than on whichever workspace was restored last.
+		if fs.focusedWS != "" {
+			if err := c.FocusWorkspace(ctx, fs.focusedWS); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 	return title, tabID, errors.Join(errs...)

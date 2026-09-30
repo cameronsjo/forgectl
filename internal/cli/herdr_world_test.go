@@ -137,6 +137,10 @@ func (w *herdrWorld) moveTab(t *testing.T, args []string) string {
 	case len(rest) == 2 && rest[0] == "--index":
 		idx, _ := strconv.Atoi(rest[1])
 		tabs := w.tabs[srcWS]
+		if idx < 0 || idx >= len(tabs) {
+			t.Errorf("index move of %q to %d, outside 0..%d", tabID, idx, len(tabs)-1)
+			idx = max(0, min(idx, len(tabs)-1))
+		}
 		tab := tabs[srcIdx]
 		tabs = append(tabs[:srcIdx], tabs[srcIdx+1:]...)
 		tabs = append(tabs[:idx], append([]herdr.Tab{tab}, tabs[idx:]...)...)
@@ -165,7 +169,14 @@ func (w *herdrWorld) moveTab(t *testing.T, args []string) string {
 		w.tabs[srcWS] = append(w.tabs[srcWS][:srcIdx], w.tabs[srcWS][srcIdx+1:]...)
 		w.nextID++
 		newID := fmt.Sprintf("n%d", w.nextID)
+		wasActive := w.active[srcWS] == tabID
 		w.retag(tabID, newID, dst)
+		if wasActive { // the source workspace activates a tab that is still in it
+			delete(w.active, srcWS)
+			if len(w.tabs[srcWS]) > 0 {
+				w.active[srcWS] = w.tabs[srcWS][0].TabID
+			}
+		}
 		tab.TabID, tab.WorkspaceID = newID, dst
 		w.tabs[dst] = append(w.tabs[dst], tab)
 		if w.renumberAll {

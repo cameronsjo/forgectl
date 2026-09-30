@@ -1,6 +1,7 @@
 package organize
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -19,6 +20,16 @@ func Match(glob, s string) bool {
 		return false
 	}
 	return re.MatchString(s)
+}
+
+// CheckGlob reports why a glob can never match anything, or nil. Match treats
+// such a glob as matching nothing; a config check calls this so the operator
+// hears about it instead of watching every tab fall through to the default.
+func CheckGlob(glob string) error {
+	if _, err := regexp.Compile(translate(glob)); err != nil {
+		return fmt.Errorf("invalid glob: %w", err)
+	}
+	return nil
 }
 
 // translate converts a glob to an anchored regexp source.
