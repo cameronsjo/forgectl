@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -42,10 +43,28 @@ const DefaultDebounce = 150 * time.Millisecond
 // watching is here because it is the correct shape for rename-based writes, not
 // as a workaround for a defect.
 type Watcher struct {
+	// mu guards fsw and closed between Close and resetWatches. Only the Run
+	// goroutine (or NewWatcher, before Run starts) replaces fsw, so Run reads
+	// it without the lock.
+	mu       sync.Mutex
 	fsw      *fsnotify.Watcher
+	closed   bool
 	store    *Store
 	broker   *Broker
 	debounce time.Duration
+
+	// resetPending records that a watch was added through a path that
+	// stopped naming its directory. fsnotify's bookkeeping for such a watch
+	// cannot be trusted, so the next reload rebuilds every watch in a fresh
+	// fsnotify watcher (resetWatches). Touched only by the goroutine that
+	// registers watches.
+	resetPending bool
+
+	// dirs is every directory path addVerified watched since the last
+	// resetWatches. A Rename naming one of them means a watched directory
+	// moved, which a reload must pick up (dirMoved). Touched only by the
+	// goroutine that registers watches.
+	dirs map[string]struct{}
 }
 
 // NewWatcher creates a watcher over the roots of store's current index and
@@ -64,7 +83,40 @@ func NewWatcher(store *Store, broker *Broker) (*Watcher, error) {
 
 // Close releases the watcher's OS resources.
 func (w *Watcher) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.closed = true
 	return w.fsw.Close()
+}
+
+// resetWatches replaces the fsnotify watcher with a fresh one and registers
+// every root in it again through the held walk. It is the recovery for a
+// watch whose path stopped naming the directory it was added for. Removing
+// that one watch is not safe: when a path comes to resolve to a directory
+// already watched under another path, inotify hands back the other path's
+// watch descriptor, and fsnotify v1.10.1 then records the two paths
+// inconsistently. A later Remove of either path can remove the other
+// path's only watch, or dereference a watch fsnotify already deleted and
+// panic (forgectl#769 review). Closing the whole watcher releases every
+// descriptor at once and needs none of that bookkeeping to be right.
+func (w *Watcher) resetWatches() {
+	w.resetPending = false
+	fresh, err := fsnotify.NewWatcher()
+	if err != nil {
+		slog.Warn("docs: could not rebuild the live-reload watcher; keeping the current one.", "error", err)
+		return
+	}
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		_ = fresh.Close()
+		return
+	}
+	old := w.fsw
+	w.fsw = fresh
+	w.mu.Unlock()
+	_ = old.Close()
+	w.register(w.store.Current())
 }
 
 // register walks every root in idx and adds a watch for each directory the
@@ -76,6 +128,7 @@ func (w *Watcher) Close() error {
 // watches on deleted directories are dropped by the kernel — so this doubles
 // as the re-registration pass after a rebuild picks up new directories.
 func (w *Watcher) register(idx *Index) {
+	w.dirs = nil // this pass re-adds every directory still watched
 	for _, root := range idx.Roots() {
 		rt, err := openPinnedRoot(root)
 		if err != nil {
@@ -116,75 +169,110 @@ func (w *Watcher) watchTree(dir *os.Root, top string) error {
 	})
 }
 
-// testHookWatch, when set, runs around each watch addVerified adds: before
-// the Add (added false) and after the watch passed its identity check (added
-// true). Tests use it to swap a directory at exactly those points.
-var testHookWatch func(path string, added bool)
+// watchStage names the points in addVerified that testHookWatch runs at.
+type watchStage int
 
-// addVerified adds a watch on path and keeps it only if path still names
-// want, the directory the held walk listed. fsnotify.Add resolves path
-// itself and follows a symlink, so a directory swapped for a symlink to an
-// outside directory between the walk and the Add would otherwise leave a
-// watch outside the root, and changes there would drive rebuilds.
+const (
+	stageBeforeCheck watchStage = iota // before the pre-Add identity check
+	stageBeforeAdd                     // after that check, before the Add
+	stageAdded                         // after the watch passed the post-Add check
+)
+
+// testHookWatch, when set, runs at each watchStage of addVerified. Tests use
+// it to swap a directory at exactly those points.
+var testHookWatch func(path string, stage watchStage)
+
+// addVerified adds a watch on path only if path names want, the directory
+// the held walk listed, and reports whether it did. fsnotify.Add resolves
+// path itself and follows a symlink, so a directory swapped for a symlink
+// to an outside directory between the walk and the Add would otherwise
+// leave a watch outside the root, and changes there would drive rebuilds.
 //
-// The check follows the Add, so it tests what the path named when the watch
-// was bound, give or take a swap and swap back between the two calls. That
-// window stays open because fsnotify has no by-handle Add, but a watch can
-// only ever cause a rebuild, never a read: the rebuild walks through the
-// pinned roots, and every serve re-verifies the path.
+// The identity is checked before the Add, which skips the swapped case
+// outright, and again after it. A mismatch after the Add means the path
+// changed in between. The watch is then left alone rather than removed
+// (see resetWatches for why a Remove is unsafe), and the next reload
+// rebuilds every watch from scratch. A swap and swap back between the
+// checks and the Add can still bind one watch outside the root until then.
+// fsnotify has no by-handle Add, but a watch can only ever cause a rebuild,
+// never a read: the rebuild walks through the pinned roots, and every
+// serve re-verifies the path.
 func (w *Watcher) addVerified(path string, want fs.FileInfo) bool {
 	if testHookWatch != nil {
-		testHookWatch(path, false)
+		testHookWatch(path, stageBeforeCheck)
+	}
+	if !namesDir(path, want) {
+		return false
+	}
+	if testHookWatch != nil {
+		testHookWatch(path, stageBeforeAdd)
 	}
 	if err := w.fsw.Add(path); err != nil {
 		slog.Debug("docs: could not watch directory for live reload.", "path", path, "error", err)
 		return false
 	}
-	got, err := os.Stat(path)
-	if err != nil || !os.SameFile(want, got) {
-		w.dropWatch(path)
-		slog.Debug("docs: dropped a live-reload watch whose directory changed during registration.", "path", path)
+	if !namesDir(path, want) {
+		w.resetPending = true
+		slog.Debug("docs: a directory changed while its live-reload watch was added; rebuilding the watches on the next reload.", "path", path)
 		return false
 	}
 	if testHookWatch != nil {
-		testHookWatch(path, true)
+		testHookWatch(path, stageAdded)
 	}
+	if w.dirs == nil {
+		w.dirs = map[string]struct{}{}
+	}
+	w.dirs[path] = struct{}{}
 	return true
 }
 
+// namesDir reports whether path, looked up now, is want itself and not a
+// symlink to it. The Lstat resolves every component but the last, so an
+// ancestor swapped for a symlink that leads anywhere else fails the
+// SameFile check too.
+func namesDir(path string, want fs.FileInfo) bool {
+	got, err := os.Lstat(path)
+	return err == nil && got.IsDir() && os.SameFile(want, got)
+}
+
 // readdVerified re-adds a watch on dir, an event's containing directory,
-// and keeps it only if dir still resolves to itself. The root paths are
-// canonical and every watched directory was reached by real names below
+// when dir lies inside a root and still resolves to itself. The root paths
+// are canonical and every watched directory was reached by real names below
 // one, so a watched path that no longer resolves to itself has had a
-// component swapped for a symlink, and the re-Add may have bound a
-// directory outside the root.
+// component swapped for a symlink, and an Add would follow it. The root
+// gate keeps an event on a root itself (a root moved or replaced) from
+// watching the root's parent, which lies outside every root.
+//
+// Like addVerified, it never removes a watch. A path that stops resolving
+// to itself between the check and the Add is left for the next reload's
+// full rebuild.
 func (w *Watcher) readdVerified(dir string) {
+	if !w.insideSomeRoot(dir) || !resolvesToItself(dir) {
+		return
+	}
 	if err := w.fsw.Add(dir); err != nil {
 		return // best-effort; a removed dir legitimately fails here
 	}
-	if resolved, err := filepath.EvalSymlinks(dir); err != nil || resolved != dir {
-		w.dropWatch(dir)
+	if !resolvesToItself(dir) {
+		w.resetPending = true
 	}
 }
 
-// dropWatch removes the watch Add bound for path. The inotify backend
-// (Linux) keys that watch by path. The kqueue backend (macOS) keys a watch
-// added through a symlink by the link's target instead, so the target is
-// removed too when it lies outside every root. A target inside a root is a
-// directory the walk watches in its own right, and removing it would cost
-// that directory its live reload.
-func (w *Watcher) dropWatch(path string) {
-	_ = w.fsw.Remove(path) //nolint:errcheck // best-effort; kqueue may not know the watch by this name
-	target, err := filepath.EvalSymlinks(path)
-	if err != nil || target == path {
-		return
-	}
+// resolvesToItself reports whether dir has no symlink on its path.
+func resolvesToItself(dir string) bool {
+	resolved, err := filepath.EvalSymlinks(dir)
+	return err == nil && resolved == dir
+}
+
+// insideSomeRoot reports whether path is a root of the current index or
+// lies below one, lexically.
+func (w *Watcher) insideSomeRoot(path string) bool {
 	for _, root := range w.store.Current().Roots() {
-		if withinRoot(root.Path, target) {
-			return
+		if withinRoot(root.Path, path) {
+			return true
 		}
 	}
-	_ = w.fsw.Remove(target) //nolint:errcheck // best-effort; inotify keyed the watch by path and it is gone already
+	return false
 }
 
 // watchCreatedDir watches a directory created at path, and its subtree,
@@ -248,6 +336,12 @@ func (w *Watcher) Run(ctx context.Context) {
 			timer.Stop()
 		}
 	}()
+	// A registration in NewWatcher that met a changing directory has a
+	// watch rebuild waiting. Run the reload that performs it.
+	if w.resetPending {
+		timer = time.NewTimer(w.debounce)
+		settledC = timer.C
+	}
 
 	for {
 		select {
@@ -264,7 +358,7 @@ func (w *Watcher) Run(ctx context.Context) {
 			// directory may itself have just been replaced.
 			w.refreshWatch(ev)
 
-			if !w.relevant(ev.Name) {
+			if !w.relevant(ev.Name) && !w.resetPending && !w.dirMoved(ev) {
 				continue
 			}
 			if timer == nil {
@@ -283,6 +377,12 @@ func (w *Watcher) Run(ctx context.Context) {
 		case <-settledC:
 			settledC = nil
 			w.reload()
+			// A rebuild that itself met a changing directory waits one more
+			// debounce rather than looping.
+			if w.resetPending {
+				timer.Reset(w.debounce)
+				settledC = timer.C
+			}
 		}
 	}
 }
@@ -310,6 +410,23 @@ func (w *Watcher) refreshWatch(ev fsnotify.Event) {
 	// A directory arriving whole (an mv of a populated tree) can surface as a
 	// single Create with no per-file events, so walk and watch it now.
 	w.watchCreatedDir(ev.Name)
+}
+
+// dirMoved reports whether ev is a Rename of a directory addVerified
+// watched. Moving a watched directory changes the doc set under it, and it
+// can cost the moved tree its watch: inotify reports IN_MOVE_SELF on the
+// moved directory's own watch, and fsnotify then removes that watch, even
+// when a Create for the directory's new name has already re-added the same
+// descriptor. The reload rebuilds the index and re-registers every watch,
+// which puts the moved tree back under watch. The directory was watched,
+// so the indexer descends into it, and a reload leaks nothing relevant
+// would withhold.
+func (w *Watcher) dirMoved(ev fsnotify.Event) bool {
+	if !ev.Has(fsnotify.Rename) {
+		return false
+	}
+	_, ok := w.dirs[ev.Name]
+	return ok
 }
 
 // relevant reports whether an event path should trigger a reload.
@@ -363,6 +480,9 @@ func (w *Watcher) relevant(path string) bool {
 // subscribers. A failed rebuild keeps the previous index in service: a root
 // that is temporarily gone should degrade live reload, not blank the reader.
 func (w *Watcher) reload() {
+	if w.resetPending {
+		w.resetWatches()
+	}
 	current := w.store.Current()
 	fresh, err := current.Rebuild()
 	if err != nil {
