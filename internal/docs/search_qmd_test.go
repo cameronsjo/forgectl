@@ -20,7 +20,9 @@ package docs
 //       even when fewer than limit hits survive the gate
 //   [x] Happy: qmdWindow is limit*10, capped at 1000, never below limit+1,
 //       and never past maxQMDRows (no overflow at math.MaxInt)
-//   [x] Happy: the snippet's "@@ … @@" header is dropped and the text trimmed
+//   [x] Security: the snippet is re-read from the doc at the lines the
+//       "@@ -start,count @@" header names (or the hit's line), never qmd's
+//       own snippet text (forgectl#743)
 //   [x] Happy: overlapping roots return a shared doc once, first root wins
 //   [x] Unhappy: an unknown backend is refused before anything runs
 //   [x] Unhappy: output past maxQMDOutputBytes fails closed
@@ -255,27 +257,55 @@ func TestQMDWindow(t *testing.T) {
 	}
 }
 
-func TestQMDSnippetDropsHeader(t *testing.T) {
+// forgectl#743: the snippet is the doc's own lines, re-read through the
+// Index at the lines qmd's "@@ -start,count @@" header names, never qmd's
+// snippet text, which comes from qmd's index and can be stale or another
+// file's.
+func TestQMDSnippetIsReReadFromTheDoc(t *testing.T) {
 	idx, root := searchRoot(t, "a.md")
-	resp, err := qmdSearcher(&fakeQMD{stdout: qmdJSON(t, qmdRow(filepath.Join(root, "a.md"), 2))}, root).Search(context.Background(), idx, "q", 5)
+	writeFile(t, filepath.Join(root, "a.md"), "# a\n  needle here\nmore\nnot this\n")
+	idx, err := idx.Rebuild()
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := qmdRow(filepath.Join(root, "a.md"), 2)
+	row["snippet"] = "@@ -2,2 @@ (1 before, 1 after)\nOUTSIDE TEXT\nFROM QMD"
+	resp, err := qmdSearcher(&fakeQMD{stdout: qmdJSON(t, row)}, root).Search(context.Background(), idx, "q", 5)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := resp.Results[0].Snippet; got != "needle here more" {
-		t.Errorf("Snippet = %q, want the text without the @@ header, newlines folded", got)
+		t.Errorf("Snippet = %q, want lines 2-3 of the doc, trimmed and folded", got)
+	}
+
+	// Without a header, the hit's own line is read alone.
+	row["snippet"] = "OUTSIDE TEXT"
+	row["line"] = 4
+	resp, err = qmdSearcher(&fakeQMD{stdout: qmdJSON(t, row)}, root).Search(context.Background(), idx, "q", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := resp.Results[0].Snippet; got != "not this" {
+		t.Errorf("headerless Snippet = %q, want line 4 of the doc", got)
 	}
 }
 
-// Live qmd 2.8.3 output led the snippet body with a space; it is trimmed,
-// with or without the @@ header.
-func TestQMDSnippetTextTrims(t *testing.T) {
-	for in, want := range map[string]string{
-		"@@ -3,1 @@ (2 before, 0 after)\n  needle here \n": "needle here",
-		"  needle here\t":        "needle here",
-		"@@ -1,1 @@ header only": "",
+func TestQMDSnippetLines(t *testing.T) {
+	for in, want := range map[string][3]int{
+		"@@ -3,1 @@ (2 before, 0 after)\n  needle here \n": {3, 1, 1},
+		"@@ -12,4 @@ (11 before, 9 after)":                 {12, 4, 1},
+		"  needle here\t":                                  {0, 0, 0},
+		"@@ -0,1 @@ (0 before, 0 after)\nx":                {0, 0, 0},
+		"@@ -2 @@\nx":                                      {0, 0, 0},
+		"@@ -a,b @@\nx":                                    {0, 0, 0},
 	} {
-		if got := qmdSnippetText(in); got != want {
-			t.Errorf("qmdSnippetText(%q) = %q, want %q", in, got, want)
+		first, count, ok := qmdSnippetLines(in)
+		got := [3]int{first, count, 0}
+		if ok {
+			got[2] = 1
+		}
+		if got != want {
+			t.Errorf("qmdSnippetLines(%q) = %v, want %v", in, got, want)
 		}
 	}
 }

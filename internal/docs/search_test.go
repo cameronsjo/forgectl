@@ -114,6 +114,21 @@ func searchRoot(t *testing.T, files ...string) (*Index, string) {
 	return idx, idx.Roots()[0].Path
 }
 
+// searchRootWith builds a one-root index holding the given files and
+// contents.
+func searchRootWith(t *testing.T, files map[string]string) *Index {
+	t.Helper()
+	dir := t.TempDir()
+	for f, body := range files {
+		writeFile(t, filepath.Join(dir, filepath.FromSlash(f)), body)
+	}
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return idx
+}
+
 // matchRecord renders one rg --json match record for path.
 func matchRecord(t *testing.T, path, line string, start int) string {
 	t.Helper()
@@ -248,10 +263,12 @@ func TestSearchDropsOversizedRecord(t *testing.T) {
 }
 
 func TestSearchSnippetBoundedAndRuneSafe(t *testing.T) {
-	idx, root := searchRoot(t, "a.md")
 	// A three-byte rune repeated: every cut lands next to a multibyte rune,
-	// and the match offset (5001) points into the middle of one.
+	// and the match offset (5001) points into the middle of one. The line is
+	// the doc's own line 2, which the snippet is re-read from.
 	line := strings.Repeat("€", 3400) + "\n"
+	idx := searchRootWith(t, map[string]string{"a.md": "# a\n" + line})
+	root := idx.Roots()[0].Path
 	rg := &fakeRg{write: writeAll(matchRecord(t, filepath.Join(root, "a.md"), line, 5001))}
 	resp, err := (Searcher{Runner: rg, LookPath: fakeLookPath}).Search(t.Context(), idx, "x", 10)
 	if err != nil {

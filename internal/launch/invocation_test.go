@@ -686,6 +686,36 @@ func TestBuildInvocation_Postures(t *testing.T) {
 			},
 		},
 		{
+			name:        "a later help flag cannot take print mode out of its permission mode",
+			cfg:         claudeCfg,
+			args:        []string{"-p", "x", "--help"},
+			wantPosture: PostureClaudePrint,
+			wantArgs:    func(p Profile) []string { return PrintArgs(p, []string{"-p", "x", "--help"}) },
+		},
+		{
+			name:        "version with print mode gets the print posture",
+			cfg:         claudeCfg,
+			args:        []string{"-v", "-p", "hi"},
+			wantPosture: PostureClaudePrint,
+			wantArgs:    func(p Profile) []string { return PrintArgs(p, []string{"-v", "-p", "hi"}) },
+		},
+		{
+			name:        "print flag in a value slot keeps the builder posture",
+			cfg:         claudeCfg,
+			args:        []string{"--append-system-prompt", "-p", "task"},
+			wantPosture: PostureClaudeBuilder,
+			wantArgs: func(p Profile) []string {
+				return BuilderArgs(p, []string{"--append-system-prompt", "-p", "task"})
+			},
+		},
+		{
+			name:        "agents args after claude's own separator keep the posture",
+			cfg:         claudeCfg,
+			args:        []string{"agents", "--", "x", "--json"},
+			wantPosture: PostureClaudeAgents,
+			wantArgs:    func(p Profile) []string { return AgentsArgs(p, []string{"agents", "--", "x", "--json"}) },
+		},
+		{
 			name:        "help in a value slot keeps the builder posture",
 			cfg:         claudeCfg,
 			args:        []string{"--append-system-prompt", "--help", "hi"},
