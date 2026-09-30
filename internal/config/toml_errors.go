@@ -99,13 +99,12 @@ func scrubTOMLError(err error) error {
 	if err == nil || !errors.As(err, &pe) {
 		return err
 	}
-	line := pe.Position.Line
-	if line == 0 {
-		line = pe.Line
-	}
+	// Position is set by every ParseError constructor in toml v1.6.0; the
+	// deprecated ParseError.Line is not a fallback worth keeping (parse.go
+	// fills it with the token length on some paths).
 	var b strings.Builder
 	b.WriteString("toml: line ")
-	b.WriteString(strconv.Itoa(line))
+	b.WriteString(strconv.Itoa(pe.Position.Line))
 	if pe.Position.Col > 0 {
 		b.WriteString(", column ")
 		b.WriteString(strconv.Itoa(pe.Position.Col))

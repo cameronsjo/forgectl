@@ -14,7 +14,7 @@ import (
 // secretish is the leading bare word BurntSushi/toml quotes back when an
 // unquoted value fails to lex: `found "ghp"` for a GitHub token, up to twelve
 // characters for an AWS-style key (#687).
-const secretish = "AKIAIOSFODNN7EXAMPLE"
+const secretish = "AKIAIOSFODNN7EXAMPLE" //nolint:gosec // G101: AWS's documented example key, a fixture the test asserts never echoes
 
 // digitRun finds five or more digits in a row: an out-of-range number is
 // printed bare in toml's own message, and line/column numbers stay short.
