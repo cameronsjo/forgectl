@@ -154,6 +154,12 @@ func hubOrder(cmd *cobra.Command) int {
 // cmd's OWN invocation needs a positional argument (parentTakesArg) — one
 // synthetic leaf naming cmd itself, so a NeedsArgs module like pr (bare
 // `forgectl pr <ref>`) still surfaces something to select from its hub row.
+//
+// A subverb that is itself a group (pr findings, pr reviewed) gets its own
+// subverbs as Leaves, built by the same rule, so selecting it opens them
+// instead of running the group bare (#916). Such a row's own positional, if
+// it has one, is the synthetic leaf inside it, so the row itself never needs
+// an argument.
 func buildLeaves(cmd *cobra.Command) []tui.HubLeaf {
 	var leaves []tui.HubLeaf
 	if parentTakesArg(cmd) {
@@ -163,11 +169,16 @@ func buildLeaves(cmd *cobra.Command) []tui.HubLeaf {
 		if !sub.IsAvailableCommand() {
 			continue
 		}
+		var nested []tui.HubLeaf
+		if sub.HasAvailableSubCommands() {
+			nested = buildLeaves(sub)
+		}
 		leaves = append(leaves, tui.HubLeaf{
 			Name:      sub.Name(),
 			Short:     sub.Short,
 			Use:       sub.Use,
-			NeedsArgs: parentTakesArg(sub),
+			NeedsArgs: len(nested) == 0 && parentTakesArg(sub),
+			Leaves:    nested,
 		})
 	}
 	return leaves
