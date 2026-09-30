@@ -142,8 +142,35 @@ func TestIsClaudePrintMode(t *testing.T) {
 		{[]string{"-pc", "hi"}, false},
 	}
 	for _, tc := range cases {
-		if got := IsClaudePrintMode(tc.args); got != tc.want {
-			t.Errorf("IsClaudePrintMode(%q) = %v, want %v", tc.args, got, tc.want)
+		if got := IsClaudePrintMode(tc.args, false); got != tc.want {
+			t.Errorf("IsClaudePrintMode(%q, piped) = %v, want %v", tc.args, got, tc.want)
+		}
+	}
+}
+
+// TestIsClaudePrintMode_OnATerminal pins forgectl#795: on a terminal only -p
+// and --print select print mode, because claude 2.1.285 opens its TUI for a
+// bare --output-format there ("non-interactive mode (via -p, or when stdout
+// is not a TTY)", claude --help). The piped table above keeps it print mode.
+//
+// Mutation that turns it red: ignore stdoutTerminal in isPrintFlag (the
+// --output-format rows flip to true), or drop -p/--print on a terminal (the
+// -p and --print rows flip to false).
+func TestIsClaudePrintMode_OnATerminal(t *testing.T) {
+	cases := []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"--output-format", "json", "hi"}, false},
+		{[]string{"--output-format=stream-json"}, false},
+		{[]string{"-c", "--output-format=json"}, false},
+		{[]string{"-p", "hi"}, true},
+		{[]string{"--output-format", "json", "--print", "hi"}, true},
+		{[]string{"--append-system-prompt", "-p", "task"}, false},
+	}
+	for _, tc := range cases {
+		if got := IsClaudePrintMode(tc.args, true); got != tc.want {
+			t.Errorf("IsClaudePrintMode(%q, terminal) = %v, want %v", tc.args, got, tc.want)
 		}
 	}
 }

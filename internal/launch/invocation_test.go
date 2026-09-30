@@ -653,6 +653,7 @@ func TestBuildInvocation_Postures(t *testing.T) {
 		name        string
 		cfg         config.LaunchConfig
 		args        []string
+		tty         bool // InvocationRequest.StdoutTerminal
 		wantPosture Posture
 		wantArgs    func(Profile) []string
 	}{
@@ -675,6 +676,35 @@ func TestBuildInvocation_Postures(t *testing.T) {
 			args:        []string{"-p", "hello"},
 			wantPosture: PostureClaudePrint,
 			wantArgs:    func(p Profile) []string { return PrintArgs(p, []string{"-p", "hello"}) },
+		},
+		// --output-format is print mode only off a terminal: claude 2.1.285
+		// opens its TUI for it on one (forgectl#795). Mutation that turns
+		// these red: ignore stdoutTerminal in isPrintFlag (the tty row takes
+		// the print posture), or drop --output-format outright (the piped
+		// row takes the builder posture), or drop -p/--print on a terminal
+		// (the "-p on a terminal" row flips).
+		{
+			name:        "output-format off a terminal gets the print posture",
+			cfg:         claudeCfg,
+			args:        []string{"--output-format", "json", "hi"},
+			wantPosture: PostureClaudePrint,
+			wantArgs:    func(p Profile) []string { return PrintArgs(p, []string{"--output-format", "json", "hi"}) },
+		},
+		{
+			name:        "output-format on a terminal is interactive and gets the builder posture",
+			cfg:         claudeCfg,
+			args:        []string{"--output-format=json", "hi"},
+			tty:         true,
+			wantPosture: PostureClaudeBuilder,
+			wantArgs:    func(p Profile) []string { return BuilderArgs(p, []string{"--output-format=json", "hi"}) },
+		},
+		{
+			name:        "-p on a terminal still gets the print posture",
+			cfg:         claudeCfg,
+			args:        []string{"--output-format", "json", "-p", "hi"},
+			tty:         true,
+			wantPosture: PostureClaudePrint,
+			wantArgs:    func(p Profile) []string { return PrintArgs(p, []string{"--output-format", "json", "-p", "hi"}) },
 		},
 		{
 			name:        "help in a value slot cannot take print mode out of its permission mode",
@@ -797,16 +827,23 @@ func TestBuildInvocation_Postures(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			built, err := BuildInvocation(InvocationRequest{
-				Config:  tc.cfg,
-				CWD:     target,
-				Args:    tc.args,
-				Resolve: fixedResolver(ResolvedBinary{Path: "/stub/harness", Source: BinaryPATH}),
+				Config:         tc.cfg,
+				CWD:            target,
+				Args:           tc.args,
+				Resolve:        fixedResolver(ResolvedBinary{Path: "/stub/harness", Source: BinaryPATH}),
+				StdoutTerminal: tc.tty,
 			})
 			if err != nil {
 				t.Fatalf("BuildInvocation: %v", err)
 			}
 			if built.Posture != tc.wantPosture {
 				t.Errorf("Posture = %q, want %q", built.Posture, tc.wantPosture)
+			}
+			// Every Claude prompt run keeps its permission mode, whichever
+			// posture it lands in (forgectl#795's invariant).
+			if (built.Posture == PostureClaudePrint || built.Posture == PostureClaudeBuilder) &&
+				(len(built.Invocation.Args) < 2 || built.Invocation.Args[0] != "--permission-mode") {
+				t.Errorf("%s run lost --permission-mode: %q", built.Posture, built.Invocation.Args)
 			}
 			want := tc.wantArgs(built.Profile)
 			if strings.Join(built.Invocation.Args, "\x00") != strings.Join(want, "\x00") {
