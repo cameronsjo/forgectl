@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.21.0](https://github.com/cameronsjo/forgectl/compare/v0.20.0...v0.21.0) (2026-09-30)
+
+
+### Features
+
+* **review:** add `review releases`, the release radar ([#789](https://github.com/cameronsjo/forgectl/issues/789)) ([4e85514](https://github.com/cameronsjo/forgectl/commit/4e85514e245edd71f01516b674f2c53beab54e0b))
+
+
+### Bug Fixes
+
+* **clean:** quote scanned directory paths and delete errors in `clean` output so control or bidi characters in a directory name cannot reach the terminal ([74eaf8a](https://github.com/cameronsjo/forgectl/commit/74eaf8aaf7107804b858677ee2564345c011a041))
+* **env:** `env check --json` no longer prints fang's human error frame to stderr; drift (exit 1) leaves stderr empty, and a refused `--file`/`--example` (or other failure) writes one `{"error","code":"check_failed","path"}` object to stderr, exit codes unchanged ([f6fc7dd](https://github.com/cameronsjo/forgectl/commit/f6fc7dd7cc37c1a54ada6598f861b8ea5cc1ab78))
+* **exec:** fresh HomebrewNoAutoUpdate map, stricter exec fakes, and linkname/unsafe/target guards ([#860](https://github.com/cameronsjo/forgectl/issues/860)) ([6d6ed23](https://github.com/cameronsjo/forgectl/commit/6d6ed239978dffc3881097ccadd949b464c6558e)), closes [#851](https://github.com/cameronsjo/forgectl/issues/851) [#854](https://github.com/cameronsjo/forgectl/issues/854)
+* quote paths in `env set --sops`, config-directory creation, blessing-helper, `y` and `resume` errors ([74eaf8a](https://github.com/cameronsjo/forgectl/commit/74eaf8aaf7107804b858677ee2564345c011a041))
+* quote the file path in `env set` success and tightened lines, escape `clean --caches`/`--docker` failure, skip and cache-path rows, and cap long session names and private-directory refusals so control or bidi characters and oversized text cannot reach the terminal ([86479c5](https://github.com/cameronsjo/forgectl/commit/86479c51de893bf0aeb86bc7eddde80a849359d4))
+* **tmux:** `tmux windows` now says on stderr, in text and --json modes, when a window row could not be read ([74eaf8a](https://github.com/cameronsjo/forgectl/commit/74eaf8aaf7107804b858677ee2564345c011a041))
+
 ## [0.20.0](https://github.com/cameronsjo/forgectl/compare/v0.19.0...v0.20.0) (2026-09-30)
 
 
