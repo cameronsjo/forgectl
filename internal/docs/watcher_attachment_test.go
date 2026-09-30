@@ -255,24 +255,47 @@ func TestWatcherInTree_OverlappingRoots_AnyAcceptingRootCounts(t *testing.T) {
 	}
 }
 
-// End to end under `docs serve vault/n.md vault`: a new doc and a new
-// attachment in the vault both publish.
+// End to end under overlapping roots: `docs serve vault/n.md vault`, where
+// a single-file root comes first, and `docs serve base vault`, where a docs
+// root holding the vault comes first. In both, a new doc publishes, and so
+// does removing an attachment. The remove is the row that isolates
+// attachmentRelevant: any in-tree Create arms a settle on its own
+// (forgectl#895), so an add would publish whatever kind the watcher took.
 //
 // Mutations that turn it red: stop inTree at the first containing root (the
-// doc add goes silent), or take attachmentRelevant's kind from the first
-// containing root (the attachment add goes silent).
+// single-file row's doc add goes silent), or take attachmentRelevant's kind
+// from the first containing root (the docs-root row's remove goes silent;
+// the single-file row's first root is itself a vault root, so it cannot
+// catch that one).
 func TestWatcher_OverlappingRoots_VaultEventsPublish(t *testing.T) {
-	_, vault := attachmentWatchVault(t)
-	store, sub, _ := newTestWatcher(t, filepath.Join(vault, "n.md"), vault)
-	label := store.Current().Roots()[1].Label
+	for _, c := range []struct {
+		name  string
+		roots func(base, vault string) []string
+	}{
+		{"single-file root first", func(_, vault string) []string { return []string{filepath.Join(vault, "n.md"), vault} }},
+		{"docs root first", func(base, vault string) []string { return []string{base, vault} }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			base, vault := attachmentWatchVault(t)
+			img := filepath.Join(vault, "img.png")
+			writeFile(t, img, "png")
+			store, sub, _ := newTestWatcher(t, c.roots(base, vault)...)
+			label := store.Current().Roots()[1].Label
+			if got := imgVerdict(t, store, label); got != MissAttachment {
+				t.Fatalf("[[img.png]] before the remove = %v, want MissAttachment", got)
+			}
 
-	writeFile(t, filepath.Join(vault, "other.md"), "# Other\n")
-	wantReload(t, sub, "adding vault/other.md")
+			writeFile(t, filepath.Join(vault, "other.md"), "# Other\n")
+			wantReload(t, sub, "adding vault/other.md")
 
-	writeFile(t, filepath.Join(vault, "img.png"), "png")
-	wantReload(t, sub, "adding vault/img.png")
-	if got := imgVerdict(t, store, label); got != MissAttachment {
-		t.Errorf("[[img.png]] after the add = %v, want MissAttachment", got)
+			if err := os.Remove(img); err != nil {
+				t.Fatal(err)
+			}
+			wantReload(t, sub, "removing vault/img.png")
+			if got := imgVerdict(t, store, label); got != MissNoTarget {
+				t.Errorf("[[img.png]] after the remove = %v, want MissNoTarget", got)
+			}
+		})
 	}
 }
 
@@ -377,5 +400,35 @@ func TestSameIndex_CaseVariantAttachmentRemoved_Differs(t *testing.T) {
 	}
 	if sameIndex(before, after) {
 		t.Error("sameIndex = true across removing one of two case-variant attachments, want false")
+	}
+}
+
+// Renaming a vault directory Z to z moves its attachments in walk order
+// (Z sorts before a, z after it) but resolves every link the same, so
+// sameIndex must call the two indexes equal (forgectl#923).
+//
+// Mutation that turns it red: drop buildRootIndexes' sort of the per-name
+// attachment slices.
+func TestSameIndex_AttachmentWalkOrderOnly_Equal(t *testing.T) {
+	_, vault := attachmentWatchVault(t)
+	writeFile(t, filepath.Join(vault, "Z", "img.png"), "png")
+	writeFile(t, filepath.Join(vault, "a", "img.png"), "png")
+	before, err := NewIndex([]string{vault})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(vault, "Z"), filepath.Join(vault, "z")); err != nil {
+		t.Fatal(err)
+	}
+	after, err := NewIndex([]string{vault})
+	if err != nil {
+		t.Fatal(err)
+	}
+	label := before.Roots()[0].Label
+	if b, a := imgVerdict(t, NewStore(before), label), imgVerdict(t, NewStore(after), label); b != a {
+		t.Fatalf("[[img.png]] = %v then %v; the rename changed resolution, so the fixture exercises nothing", b, a)
+	}
+	if !sameIndex(before, after) {
+		t.Error("sameIndex = false across a rename that changed only walk order, want true")
 	}
 }
