@@ -169,10 +169,10 @@ func resolveYPath(path string) (string, error) {
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", termsafe.SafeLine(path), termsafe.Error(err))
+		return "", fmt.Errorf("%s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	if info.IsDir() {
-		return "", fmt.Errorf("%s: is a directory, not a file", termsafe.SafeLine(path))
+		return "", fmt.Errorf("%s: is a directory, not a file", termsafe.QuotePath(path))
 	}
 	return abs, nil
 }
