@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
 // Environment variables herdr exports into every pane it hosts (measured).
@@ -109,7 +110,7 @@ func CheckFork(ctx context.Context, r exec.Runner) error {
 			return fmt.Errorf("cannot run %s: %w", Binary, err)
 		}
 		if ce.ExitCode != exitUsage {
-			return fmt.Errorf("`%s tab move --help` failed with exit %d: %s", Binary, ce.ExitCode, printable(strings.TrimSpace(ce.Stderr)))
+			return fmt.Errorf("`%s tab move --help` failed with exit %d: %s", Binary, ce.ExitCode, printable(redact.Text(strings.TrimSpace(ce.Stderr))))
 		}
 		text, code = ce.Stderr+"\n"+ce.Output, ce.ExitCode
 	}

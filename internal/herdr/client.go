@@ -166,10 +166,10 @@ func read[T any](ctx context.Context, c *Client, args ...string) (T, error) {
 		Result *T `json:"result"`
 	}
 	if err := json.Unmarshal([]byte(out), &env); err != nil {
-		return zero, fmt.Errorf("herdr %s: decode response: %w", strings.Join(args, " "), err)
+		return zero, fmt.Errorf("herdr %s: decode response: %w", argvText(args), err)
 	}
 	if env.Result == nil {
-		return zero, fmt.Errorf("herdr %s: response has no result", strings.Join(args, " "))
+		return zero, fmt.Errorf("herdr %s: response has no result", argvText(args))
 	}
 	return *env.Result, nil
 }
@@ -180,7 +180,7 @@ func read[T any](ctx context.Context, c *Client, args ...string) (T, error) {
 func need[P any](p *P, key string, args []string) (P, error) {
 	if p == nil {
 		var zero P
-		return zero, fmt.Errorf("herdr %s: response has no %q", strings.Join(args, " "), key)
+		return zero, fmt.Errorf("herdr %s: response has no %q", argvText(args), key)
 	}
 	return *p, nil
 }
