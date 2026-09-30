@@ -163,7 +163,7 @@ func repairActor() string {
 // input, not a hypothetical.
 func composeRepairActor(name, sessionID string) string {
 	if sessionID != "" {
-		name += " session=" + termsafe.SafeLine(sessionID)
+		name += " session=" + termsafe.SafeLineMax(sessionID, maxActorBytes)
 	}
 	return truncateString(name, maxActorBytes)
 }

@@ -543,7 +543,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 			case err != nil:
 				// A failed rescue must not block the resume — the
 				// session itself is the thing being recovered.
-				_, _ = fmt.Fprintf(errOut, "forgectl: could not restore tasks: %v\n", termsafe.Error(err))
+				_, _ = fmt.Fprintf(errOut, "forgectl: could not restore tasks: %s\n", safeText(termsafe.Error(err).Error()))
 			case res.Written > 0:
 				_, _ = fmt.Fprintf(errOut, "forgectl: restored %d task(s)\n", res.Written)
 			}
@@ -748,12 +748,12 @@ func runResumeSnapshot(cmd *cobra.Command, quiet bool) {
 	errOut := cmd.ErrOrStderr()
 	paths, err := resumePaths()
 	if err != nil {
-		_, _ = fmt.Fprintf(errOut, "forgectl: snapshot skipped: %v\n", termsafe.Error(err))
+		_, _ = fmt.Fprintf(errOut, "forgectl: snapshot skipped: %s\n", safeText(termsafe.Error(err).Error()))
 		return
 	}
 	res := resume.Snapshot(paths, time.Now())
 	for _, e := range res.Errs {
-		_, _ = fmt.Fprintf(errOut, "forgectl: snapshot: %v\n", termsafe.Error(e))
+		_, _ = fmt.Fprintf(errOut, "forgectl: snapshot: %s\n", safeText(termsafe.Error(e).Error()))
 	}
 	slog.Debug("Successfully completed resume snapshot.",
 		"sessions", res.Sessions, "tasks", res.Tasks, "learned", res.Learned,

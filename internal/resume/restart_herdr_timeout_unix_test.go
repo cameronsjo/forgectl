@@ -48,13 +48,18 @@ func TestHerdrCallTimeoutPinned(t *testing.T) {
 }
 
 // hungHerdrScript answers pane get and process-info with a pane whose shell
-// (pid 42) holds the foreground, and hangs on the subcommand named in
-// $dir/hang, recording its pid (its process group's id) first.
+// (pid 42) holds the foreground. It hangs on the subcommand named in
+// $dir/hang, recording its pid (its process group's id) first, and fails at
+// once, as herdr refusing a call does, on the one named in $dir/fail.
 const hungHerdrScript = `#!/bin/sh
 dir=$(dirname "$0")
-if [ "$2" = "$(cat "$dir/hang")" ]; then
+if [ "$2" = "$(cat "$dir/hang" 2>/dev/null)" ]; then
 	echo $$ > "$dir/hung.pid"
 	exec sleep 30
+fi
+if [ "$2" = "$(cat "$dir/fail" 2>/dev/null)" ]; then
+	echo '{"error":{"code":"internal"}}' >&2
+	exit 1
 fi
 case "$2" in
 get) echo '{"result":{"pane":{}}}' ;;
@@ -76,17 +81,23 @@ func (stoppedSessionEnv) LiveSession(string) (RegistryEntry, bool) { return Regi
 // ignores cancellation, and each herdr call is in a group of its own, so
 // only the per-call bound stands between a wedged herdr and a run that hangs
 // forever with the session stopped. At the bound the session is reported
-// failed with the command to resume it by hand.
+// failed with the command to resume it by hand; a pane run killed there is
+// reported as a delivery nobody can vouch for, not as a failed send
+// (forgectl#951), and one herdr refused stays a failed send.
+//
+// The bound is 2s so the fake's instant answers to the other calls clear it
+// by seconds even on a loaded host; only the wedged call reaches it.
 func TestRestartWedgedHerdrAfterStopIsBounded(t *testing.T) {
-	cases := map[string]string{
-		"send-keys": "clearing pane p1's input line failed",
-		"run":       "sending `",
+	cases := map[string]struct{ file, sub, want string }{
+		"send-keys hangs": {"hang", "send-keys", "clearing pane p1's input line failed"},
+		"run hangs":       {"hang", "run", "timed out and may or may not have arrived"},
+		"run refused":     {"fail", "run", "sending `"},
 	}
-	for sub, want := range cases {
-		t.Run(sub, func(t *testing.T) {
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			if err := os.WriteFile(filepath.Join(dir, "hang"), []byte(sub), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, tc.file), []byte(tc.sub), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			herdr := filepath.Join(dir, "herdr")
@@ -98,13 +109,13 @@ func TestRestartWedgedHerdrAfterStopIsBounded(t *testing.T) {
 			}
 			t.Cleanup(func() { killRecordedGroup(filepath.Join(dir, "hung.pid")) })
 
-			const bound = 300 * time.Millisecond
+			const bound = 2 * time.Second
 			env := stoppedSessionEnv{SystemRestartEnv{
 				runner: exec.OSRunner{}, forgectl: "/usr/local/bin/forgectl",
 				herdr: herdr, callTimeout: bound,
 			}}
 			s := OutdatedSession{SessionID: "0", Pid: 4242, Pane: "p1"}
-			opts := RestartOptions{Tick: 10 * time.Millisecond}
+			opts := RestartOptions{Tick: 10 * time.Millisecond, ConfirmWait: 100 * time.Millisecond}
 			opts.fill()
 
 			done := make(chan RestartEvent, 1)
@@ -113,14 +124,21 @@ func TestRestartWedgedHerdrAfterStopIsBounded(t *testing.T) {
 			var ev RestartEvent
 			select {
 			case ev = <-done:
-			case <-time.After(5 * time.Second):
-				t.Fatalf("a wedged herdr %s hung the run past 5s (bound %s)", sub, bound)
+			case <-time.After(10 * time.Second):
+				t.Fatalf("herdr %s: the run hung past 10s (bound %s)", tc.sub, bound)
 			}
-			if took := time.Since(start); took < bound {
-				t.Fatalf("returned in %s, before the %s bound: herdr %s did not hang", took, bound, sub)
+			took := time.Since(start)
+			if tc.file == "hang" && took < bound {
+				t.Fatalf("returned in %s, before the %s bound: herdr %s did not hang", took, bound, tc.sub)
 			}
-			if ev.State != StateFailed || !strings.Contains(ev.Detail, want) {
-				t.Fatalf("event %+v; want failed with %q", ev, want)
+			if tc.file == "fail" && took >= bound {
+				t.Fatalf("returned in %s: a refused call must not wait out the %s bound", took, bound)
+			}
+			if ev.State != StateFailed || !strings.Contains(ev.Detail, tc.want) {
+				t.Fatalf("event %+v; want failed with %q", ev, tc.want)
+			}
+			if tc.file == "fail" && strings.Contains(ev.Detail, "may or may not") {
+				t.Fatalf("event %+v; a refused send is not a delivery in doubt", ev)
 			}
 			if ev.Manual != ManualResume("0") {
 				t.Fatalf("manual = %q, want %q", ev.Manual, ManualResume("0"))

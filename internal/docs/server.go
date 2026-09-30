@@ -482,7 +482,7 @@ func handleDoc(store *Store) http.HandlerFunc {
 		if err != nil && r.Context().Err() != nil {
 			// The client went away before the page was ready: nothing to
 			// answer, and nothing went wrong.
-			slog.Debug("docs: request ended before its render.", "root", termsafe.SafeLine(root), "rest", termsafe.SafeLine(rest), "error", err)
+			slog.Debug("docs: request ended before its render.", "root", termsafe.SafePathMax(root, 0), "rest", termsafe.SafePathMax(rest, 0), "error", err)
 			return
 		}
 		if err != nil {
@@ -493,7 +493,7 @@ func handleDoc(store *Store) http.HandlerFunc {
 
 		switch rendered.Notice {
 		case noticeRenderSize, noticeRenderDeadline, noticeRenderBusy:
-			slog.Warn("docs: served the document as source text instead of rendering it.", "path", termsafe.SafeLine(root+"/"+rest), "reason", rendered.Notice, "bytes", len(source))
+			slog.Warn("docs: served the document as source text instead of rendering it.", "path", termsafe.SafePathMax(root+"/"+rest, 0), "reason", rendered.Notice, "bytes", len(source))
 		}
 		renderShell(w, idx, pageContext{
 			CurrentRoot: root,

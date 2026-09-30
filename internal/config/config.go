@@ -1119,7 +1119,7 @@ func LoadPath(path string) Config {
 	}
 	if err != nil && !os.IsNotExist(err) {
 		slog.Warn("Failed to decode config file; using built-in defaults for unreadable sections.",
-			"path", termsafe.QuotePath(path), "error", termsafe.SafeLine(err.Error()))
+			"path", termsafe.QuotePath(path), "error", termsafe.SafeLineMax(err.Error(), logErrMaxRunes))
 		cfg.decodeDegraded = true
 		if decodeErr != nil {
 			cfg.decodeErr = describeDecodeError(path, decodeErr)
@@ -1156,6 +1156,10 @@ func describeReadError(path string, err error) error {
 func describeDecodeError(path string, err error) error {
 	return fmt.Errorf("config file %s does not parse: %w", termsafe.QuotePath(path), tomlerr.Scrub(err))
 }
+
+// logErrMaxRunes caps an error text config logs (#934): internal/cli's
+// textMaxRunes, room for a decode error naming a path and a key.
+const logErrMaxRunes = 1280
 
 // quoteConfigValue is how a validation error echoes a value from config.toml
 // (forgectl#706): visibly quoted with control characters escaped, and capped

@@ -227,7 +227,7 @@ func (c *Client) markNeedsRepair(ctx context.Context, path, reason string) error
 // markNeedsRepairLocked is markNeedsRepair's core for a lock holder.
 func (c *Client) markNeedsRepairLocked(path, reason string) error {
 	return c.transitionLocked(path, anyPhase, PhaseNeedsRepair, func(bc *Breadcrumb) error {
-		bc.RepairReason = termsafe.SafeLine(reason)
+		bc.RepairReason = recordText(reason)
 		bc.WindowID = ""
 		return nil
 	})

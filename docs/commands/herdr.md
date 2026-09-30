@@ -13,11 +13,12 @@ forgectl herdr organize --json      # the plan as one JSON object on stdout; the
 
 - **A herdr pane.** The command needs `HERDR_ENV=1` and a `HERDR_SOCKET_PATH` naming a live socket, which herdr sets in every pane it hosts.
 - **Rules in `config.toml`.** `forgectl herdr organize` refuses to run with none (exit 2) and says what it found. `forgectl init` adds a commented `[herdr.organize]` section.
+- **A Unix build, to move tabs.** `--apply` serializes runs with a file lock that forgectl has only on Unix; elsewhere it refuses with exit 2 before any change. The report works everywhere.
 - **The `cameronsjo/herdr` fork, to move tabs.** Upstream herdr has no `tab move`, and `--apply` needs it. It checks before changing anything and refuses with exit 2 on stock herdr. The report only lists, so it works on stock herdr. Restart the herdr server after upgrading its binary: the check reads the CLI, not the running server.
 
 ## organize
 
-Each tab goes to the workspace of the first rule whose glob matches `"<cwd> :: <title>"` for one of its panes (first pane first). A tab no rule matches goes to `default`. A tab's identity is the terminal id of its first pane, which stays stable when herdr renumbers tab ids on a move.
+Each tab goes to the workspace of the first rule whose glob matches `"<cwd> :: <title>"` for one of its panes (first pane first). A tab no rule matches goes to `default`. A tab's identity is the terminal id of its first pane, which stays stable when herdr renumbers tab ids on a move. A tab whose first pane has no terminal id is skipped with a warning and stays where it is.
 
 Within a workspace, tabs are ordered by wing, then repo, then cwd, then the first pane's terminal id, so tabs with the same cwd keep one order across runs. Wing and repo are the first two path parts under the projects root (`$PROJECTS_DIR`, else `~/Projects`). A worktree path (`.../.claude/worktrees/...`) sorts with its repo. A cwd outside the root sorts last. A repo filed as `<root>/<host>/<owner>/<name>` sorts by host and owner.
 
@@ -45,7 +46,7 @@ workspace = "forge"
 |---|---|
 | `move` | this tab would move to another workspace |
 | `blocked` | the move would leave its workspace with no tabs, and herdr refuses that; open another tab there or move it by hand |
-| `order` | this tab would change position, or the workspaces would reorder |
+| `order` | this tab would change position, or the workspaces would reorder; a label that more than one workspace carries is followed by the workspace's number (`forge #3`) |
 | `unmatched` | tabs no rule matched, filed under `default` (`--explain` shows each one's match key) |
 | `organized: N tabs in M workspaces; nothing to do` | nothing is pending |
 
@@ -83,7 +84,7 @@ With `--json`, `result` carries `applied`, `blocked`, `not_run`, and `error`, in
 |---|---|
 | 0 | done, or a report, including moves it predicts herdr will block |
 | 1 | herdr failed or declined a call |
-| 2 | not in a herdr pane, no rules configured, an invalid config, or a usage error |
+| 2 | not in a herdr pane, no rules configured, an invalid config, `--apply` on stock herdr or off Unix, or a usage error |
 
 ### Moving from the `forgectl-herdr` script
 

@@ -331,7 +331,7 @@ func openTranscript(cfg config.UpdateConfig, stderr io.Writer) (updateTranscript
 	if dir == "" {
 		d, err := config.UpdateLogDir()
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "warning: could not determine update log directory: %v (continuing with stderr only)\n", termsafe.Error(err))
+			_, _ = fmt.Fprintf(stderr, "warning: could not determine update log directory: %s (continuing with stderr only)\n", safeText(termsafe.Error(err).Error()))
 			return noFile, func() {}
 		}
 		dir = d
@@ -341,7 +341,7 @@ func openTranscript(cfg config.UpdateConfig, stderr io.Writer) (updateTranscript
 	logPath := filepath.Join(dir, name)
 	f, err := config.OpenAppendFile(logPath)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "warning: could not open update log file %s: %v (continuing with stderr only)\n", termsafe.QuotePath(logPath), termsafe.Error(err))
+		_, _ = fmt.Fprintf(stderr, "warning: could not open update log file %s: %s (continuing with stderr only)\n", termsafe.QuotePath(logPath), safeText(termsafe.Error(err).Error()))
 		return noFile, func() {}
 	}
 	config.PruneUpdateLogs(dir)
