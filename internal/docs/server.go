@@ -491,7 +491,7 @@ func handleDoc(store *Store) http.HandlerFunc {
 			Outline:     rendered.Outline,
 			Words:       rendered.Words,
 			Minutes:     rendered.Minutes,
-			Content:     template.HTML(rendered.HTML), //nolint:gosec // body is bluemonday-sanitized in render (vault highlight/tag nodes included; wikilink anchors are built from indexed Docs only); the frontmatter/callout additions are built there from html.EscapeString'd fragments and fixed markup only
+			Content:     template.HTML(rendered.HTML), //nolint:gosec // body is bluemonday-sanitized in render (vault highlight/tag nodes included; wikilink anchors are built from indexed Docs only); the frontmatter/callout additions are built there from html.EscapeString'd fragments and fixed markup only; a document past the markup guard is instead html.EscapeString'd source plus fixed markup (plainTextDoc)
 		})
 	}
 }

@@ -6,10 +6,8 @@ import (
 	"sync"
 
 	"github.com/yuin/goldmark/ast"
-	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
-	"github.com/yuin/goldmark/util"
 )
 
 // The markup guard (forgectl#628, forgectl#596). goldmark's inline pass
@@ -46,9 +44,9 @@ const maxContainerWork = 1 << 24
 // times its length in bytes. Measured at the bound, the worst trigger for
 // each delimiter renders in at most about 1 s ("[x](" through one long
 // word, "<a" through one long paragraph), and most in under 0.3 s. A
-// written document is far under it: the largest of 2,251 markdown files
+// written document is far under it: the largest of 2,166 markdown files
 // sampled, a 338 KB changelog of long, backtick-heavy list items, came to
-// 12M, and a table is counted cell by cell, as goldmark parses it.
+// 12M. A table counts as one block, as a paragraph of its rows.
 const maxInlineWork = 1 << 27
 
 // markupDelimiters are the bytes whose count drives goldmark's superlinear
@@ -66,21 +64,30 @@ var isMarkupDelimiter = func() (t [256]bool) {
 	return t
 }()
 
-// markupGuardParser is goldmark's block pass with no inline parsers, which
-// is linear in the input once the containers are bounded. It carries the
-// default block parsers and the GFM table transformer, so each paragraph,
-// heading and table cell is a block here exactly when it is one in the
-// real pipeline, and the delimiters are counted per block the inline pass
-// will parse. Every block parser the real pipelines add ($$ math, %%
-// comments, frontmatter) takes lines out of inline parsing; without them
-// those lines count here as paragraph text, which only counts more. It is
-// used under its own lock, as fragmentMarkdown is.
+// markupGuardParser is goldmark's block pass with its default block
+// parsers and nothing else: no inline parsers, which keeps it linear once
+// the containers are bounded, and no paragraph transformers. Its blocks are
+// therefore never finer than any pipeline's, so it never counts less:
+//
+//   - A paragraph transformer only removes lines from a paragraph (link
+//     reference definitions) or splits it (a GFM table into cells). Which
+//     one applies differs by pipeline: the docs index parser has no table
+//     transformer, so it inline-parses a table as one paragraph, and in
+//     the others a link reference definition stripped from a paragraph's
+//     head can leave a delimiter row with no header, which is then no
+//     table. With neither, a table here is always one paragraph of its
+//     rows.
+//   - Every block parser the pipelines add ($$ math, %% comments,
+//     frontmatter) opens a raw block that is not inline-parsed, and none
+//     can interrupt a paragraph, so each only takes lines out of the
+//     paragraphs counted here.
+//
+// TestMarkupGuard_NeverFinerThanAPipeline checks that against every
+// pipeline's own parser. It is used under its own lock, as
+// fragmentMarkdown is.
 var (
 	markupGuardMu     sync.Mutex
-	markupGuardParser = parser.NewParser(
-		parser.WithBlockParsers(parser.DefaultBlockParsers()...),
-		parser.WithParagraphTransformers(util.Prioritized(extension.NewTableParagraphTransformer(), 200)),
-	)
+	markupGuardParser = parser.NewParser(parser.WithBlockParsers(parser.DefaultBlockParsers()...))
 )
 
 // markupTooComplex reports whether source is over maxContainerWork or
@@ -100,8 +107,14 @@ func markupTooComplex(source []byte) bool {
 	markupGuardMu.Lock()
 	doc := markupGuardParser.Parse(text.NewReader(source))
 	markupGuardMu.Unlock()
+	return inlineWork(doc, source, maxInlineWork) > maxInlineWork
+}
+
+// inlineWork is the sum, over the blocks of doc that goldmark inline-parses
+// (every non-raw block with lines), of the delimiter bytes in the block
+// times its length. It stops counting once the sum passes limit.
+func inlineWork(doc ast.Node, source []byte, limit int) int {
 	work := 0
-	over := false
 	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering || n.Type() != ast.TypeBlock || n.IsRaw() {
 			return ast.WalkContinue, nil
@@ -115,13 +128,12 @@ func markupTooComplex(source []byte) bool {
 			size += len(v)
 		}
 		work += k * size
-		if work > maxInlineWork {
-			over = true
+		if work > limit {
 			return ast.WalkStop, nil
 		}
 		return ast.WalkContinue, nil
 	})
-	return over
+	return work
 }
 
 // countDelimiters counts the markupDelimiters bytes in b.

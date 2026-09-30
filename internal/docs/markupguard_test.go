@@ -3,6 +3,9 @@ package docs
 // Tests for the markup guard (markupguard.go, forgectl#628, forgectl#596).
 
 import (
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/text"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -145,18 +148,97 @@ func TestMarkupGuard_ContainerWork(t *testing.T) {
 	}
 }
 
-// TestMarkupGuard_TablesCountByCell: a long table of backtick-heavy cells
-// is counted cell by cell, as goldmark parses it, and passes. Mutation:
-// dropping the table transformer from markupGuardParser counts the whole
-// table as one paragraph and turns this red.
-func TestMarkupGuard_TablesCountByCell(t *testing.T) {
-	var sb strings.Builder
-	sb.WriteString("| name | value |\n|---|---|\n")
-	for i := 0; i < 4000; i++ {
-		sb.WriteString("| `CADENCE_SOME_FLAG` | `on` or `off`, see [docs](a.md) |\n")
+// pipelineParsers are every goldmark instance that parses a whole
+// document or a fragment of one: render (docs and vault, with and without
+// frontmatter), the index scan (docs and vault) and the heading-fragment
+// parser.
+func pipelineParsers() map[string]goldmark.Markdown {
+	return map[string]goldmark.Markdown{
+		"render docs":                  markdown,
+		"render docs, no frontmatter":  markdownPlain,
+		"render vault":                 markdownVault,
+		"render vault, no frontmatter": markdownVaultPlain,
+		"scan docs":                    linkMarkdown,
+		"scan vault":                   linkMarkdownVault,
+		"heading fragment":             fragmentMarkdown,
 	}
-	if markupTooComplex([]byte(sb.String())) {
-		t.Errorf("a %d-byte table of ordinary cells is refused", sb.Len())
+}
+
+// TestMarkupGuard_NeverFinerThanAPipeline: for block shapes whose
+// segmentation differs between pipelines (tables, a link reference
+// definition over a delimiter row, frontmatter, $$ and %% blocks, tables in
+// lists and quotes), the guard's inline work is never less than the work
+// any pipeline's own block structure implies, because its blocks are never
+// finer. Mutation: giving markupGuardParser the GFM table transformer
+// counts a table cell by cell and turns the scan-docs rows red, with or
+// without goldmark's default paragraph transformers alongside it.
+func TestMarkupGuard_NeverFinerThanAPipeline(t *testing.T) {
+	row := "|" + strings.Repeat("_a a* ", 4) + "|\n"
+	rows := strings.Repeat(row, 6)
+	inputs := map[string]string{
+		"table":                      "h\n|-|\n" + rows,
+		"table with header":          "| x | y |\n|---|---|\n" + strings.Repeat("| `a` *b* | [c](d) _e_ |\n", 6),
+		"ref def over delimiter row": "[a]: /u\n|-|\n" + rows,
+		"frontmatter then table":     "---\ntitle: t\n---\nh\n|-|\n" + rows,
+		"math and comment blocks":    "$$\nx_1\n$$\n%%\nc *d*\n%%\nh\n|-|\n" + rows,
+		"table in a list":            "- h\n  |-|\n" + strings.ReplaceAll(rows, "|_", "  |_"),
+		"table in a quote":           "> h\n> |-|\n" + strings.ReplaceAll(rows, "|_", "> |_"),
+		"paragraphs":                 strings.Repeat("a *b* [c](d) _e_\n\n", 4),
+	}
+	const unlimited = int(^uint(0) >> 1)
+	for name, src := range inputs {
+		b := []byte(src)
+		markupGuardMu.Lock()
+		guard := inlineWork(markupGuardParser.Parse(text.NewReader(b)), b, unlimited)
+		markupGuardMu.Unlock()
+		for pname, md := range pipelineParsers() {
+			doc := md.Parser().Parse(text.NewReader(b), parser.WithContext(newParseContext()))
+			if got := inlineWork(doc, b, unlimited); got > guard {
+				t.Errorf("%s under %s: pipeline work %d > guard work %d, so the guard's blocks are finer", name, pname, got, guard)
+			}
+		}
+	}
+}
+
+// reviewTableRepro is a GFM-table-shaped document of n rows of unmatched
+// emphasis delimiters, after prefix. Two pipelines inline-parse its rows as
+// one paragraph: the docs index scan, which has no table transformer, and,
+// with prefix "[a]: /u\n", render and the vault scan, where the stripped
+// reference definition leaves a header-less delimiter row that is no
+// table. On a guard that counted cells, 1,000 rows (123 KB) took 7.1 s to
+// scan and 8.9 s to render, the latter under renderMu, and 3,000 took over
+// 60 s.
+func reviewTableRepro(prefix string, n int) []byte {
+	return []byte(prefix + "h\n|-|\n" + strings.Repeat("|"+strings.Repeat("_a a* ", 20)+"|\n", n))
+}
+
+// TestMarkupGuard_TableReprosAreBounded: both review repros are refused and
+// render and scan, in both root kinds, well inside a generous wall-clock
+// bound. Mutation: giving markupGuardParser the GFM table transformer turns
+// this red (and slow).
+func TestMarkupGuard_TableReprosAreBounded(t *testing.T) {
+	dir := t.TempDir()
+	for _, prefix := range []string{"", "[a]: /u\n"} {
+		src := reviewTableRepro(prefix, 3000)
+		if !markupTooComplex(src) {
+			t.Errorf("prefix %q: a %d-byte table repro is not refused", prefix, len(src))
+		}
+		p := filepath.Join(dir, "table.md")
+		if err := os.WriteFile(p, src, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, kind := range []RootKind{RootDocs, RootVault} {
+			start := time.Now()
+			if _, _, err := renderHidden(src, kind, nil); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := scanDocFor(kind, p, "table.md"); err != nil {
+				t.Fatal(err)
+			}
+			if d := time.Since(start); d > 3*time.Second {
+				t.Errorf("prefix %q, kind %v: render and scan took %v, want well under 3s", prefix, kind, d)
+			}
+		}
 	}
 }
 
