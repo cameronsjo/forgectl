@@ -46,6 +46,40 @@ func TestPrintSessions_SanitizesText(t *testing.T) {
 	assertInert(t, out.String())
 }
 
+// TestPrintSessions_CapsLastPrompt pins forgectl#871 item 1: the last-prompt
+// line in the text path is bounded, while --json still carries the prompt
+// whole, because it is a machine contract.
+//
+// Mutation that turns it red: print safeTerm(s.LastPrompt) instead of
+// safePrompt(s) in printSessions.
+func TestPrintSessions_CapsLastPrompt(t *testing.T) {
+	s := hostileSession()
+	s.LastPrompt = strings.Repeat("p", sessionPromptMaxRunes*4)
+	var out, errOut bytes.Buffer
+	if err := printSessions(&out, &errOut, []resume.Session{s}, false); err != nil {
+		t.Fatalf("printSessions: %v", err)
+	}
+	text := out.String()
+	if strings.Contains(text, strings.Repeat("p", sessionPromptMaxRunes+1)) {
+		t.Errorf("text printed more than %d runes of the prompt", sessionPromptMaxRunes)
+	}
+	if !strings.Contains(text, strings.Repeat("p", sessionPromptMaxRunes)+termsafe.TruncatedMarker) {
+		t.Errorf("text = %q, want the capped prompt followed by the truncation marker", text)
+	}
+
+	out.Reset()
+	if err := printSessions(&out, &errOut, []resume.Session{s}, true); err != nil {
+		t.Fatalf("printSessions --json: %v", err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil || len(rows) != 1 {
+		t.Fatalf("json = %q (%v), want one row", out.String(), err)
+	}
+	if rows[0]["last_prompt"] != s.LastPrompt {
+		t.Errorf("json last_prompt was altered; want the stored prompt whole")
+	}
+}
+
 // TestPrintSessions_SanitizesJSON checks the real selected-session DTO path.
 // The raw stream is inert — no unsafe rune survives literally, so `resume ls
 // --json` is safe to look at in a terminal — while every DECODED value is the

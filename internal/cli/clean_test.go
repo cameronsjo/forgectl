@@ -1134,3 +1134,45 @@ func TestCleanFailureText_LongCommandKeepsTheDroppedNote(t *testing.T) {
 		t.Errorf("rendering is %d runes, over the %d-rune cap", n, cleanDiagnosticMaxRunes)
 	}
 }
+
+// onceThenPanicErr is an error whose Error method works on its first call
+// and panics on every later one.
+type onceThenPanicErr struct {
+	text  string
+	calls *int
+}
+
+func (e onceThenPanicErr) Error() string {
+	*e.calls++
+	if *e.calls > 1 {
+		panic("Error called twice")
+	}
+	return e.text
+}
+
+// TestCleanFailureText_OnceThenPanicNeverSplitsAnEscape pins the forgectl#871
+// nit: an Error method that works once and then panics must not leave the cut
+// only escaped text to work on, where it lands inside an escape (a dangling
+// `\u` ahead of the marker). The fixture puts the cut among escaped U+202E
+// runes, 6 output runes each, at an offset that is not a multiple of 6.
+//
+// Mutation that turns it red: call termsafe.Error before rawErrorText in
+// cleanFailureText, as it was.
+func TestCleanFailureText_OnceThenPanicNeverSplitsAnEscape(t *testing.T) {
+	calls := 0
+	text := strings.Repeat("x", 490) + strings.Repeat(string(rune(0x202e)), 100)
+	got := cleanFailureText(onceThenPanicErr{text: text, calls: &calls})
+	if n := utf8.RuneCountInString(got); n > cleanDiagnosticMaxRunes {
+		t.Errorf("rendering is %d runes, over the %d-rune cap", n, cleanDiagnosticMaxRunes)
+	}
+	if strings.ContainsRune(got, rune(0x202e)) {
+		t.Errorf("rendering carries a raw U+202E: %q", got)
+	}
+	// The only backslashes are the ones escaping U+202E, so each must be a
+	// whole `\u202e`.
+	for i, piece := range strings.Split(got, `\`)[1:] {
+		if !strings.HasPrefix(piece, "u202e") {
+			t.Fatalf("rendering splits escape %d: %q", i, got)
+		}
+	}
+}
