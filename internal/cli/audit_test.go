@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,7 +18,7 @@ import (
 func runAuditInjection(t *testing.T, root string, args ...string) string {
 	t.Helper()
 	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
-	cmd := newAuditInjectionCmd(func() string { return root }, func() time.Time { return now })
+	cmd := newAuditInjectionCmd(func() (string, error) { return root, nil }, func() time.Time { return now })
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(new(bytes.Buffer))
@@ -243,5 +244,15 @@ func TestAuditInjection_JSONZeroReportArrays(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("missing %s in:\n%s", want, out.String())
 		}
+	}
+}
+
+func TestAuditInjection_ReportsRootResolutionFailure(t *testing.T) {
+	cmd := newAuditInjectionCmd(func() (string, error) { return "", errors.New("no home") }, time.Now)
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs(nil)
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("audit injection must report a failed root resolution, not scan a relative root")
 	}
 }
