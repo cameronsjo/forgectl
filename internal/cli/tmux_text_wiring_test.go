@@ -15,14 +15,16 @@ type tmuxTextKind struct {
 }
 
 var tmuxTextSources = map[string]tmuxTextKind{
-	"ListSessions":        {collection: &tmuxTextKind{fields: map[string]bool{"Name": true, "Path": true}}},
-	"ListWindows":         {collection: &tmuxTextKind{fields: map[string]bool{"Session": true, "Name": true}}},
-	"ListPanes":           {collection: &tmuxTextKind{fields: map[string]bool{"Title": true, "Command": true}}},
-	"DisplaySessions":     {collection: &tmuxTextKind{fields: map[string]bool{"Name": true, "Path": true}}},
-	"DisplayWindows":      {collection: &tmuxTextKind{fields: map[string]bool{"Session": true, "Name": true}}},
-	"DisplayPanes":        {collection: &tmuxTextKind{fields: map[string]bool{"Title": true, "Command": true}}},
-	"ResolveSessionExact": {fields: map[string]bool{"Name": true}},
-	"SeshList":            {collection: &tmuxTextKind{scalar: true}},
+	"ListSessions":    {collection: &tmuxTextKind{fields: map[string]bool{"Name": true, "Path": true}}},
+	"ListWindows":     {collection: &tmuxTextKind{fields: map[string]bool{"Session": true, "Name": true}}},
+	"ListPanes":       {collection: &tmuxTextKind{fields: map[string]bool{"Title": true, "Command": true}}},
+	"DisplaySessions": {collection: &tmuxTextKind{fields: map[string]bool{"Name": true, "Path": true}}},
+	// Its second result is a count, not tmux text.
+	"DisplaySessionListing": {collection: &tmuxTextKind{fields: map[string]bool{"Name": true, "Path": true}}},
+	"DisplayWindows":        {collection: &tmuxTextKind{fields: map[string]bool{"Session": true, "Name": true}}},
+	"DisplayPanes":          {collection: &tmuxTextKind{fields: map[string]bool{"Title": true, "Command": true}}},
+	"ResolveSessionExact":   {fields: map[string]bool{"Name": true}},
+	"SeshList":              {collection: &tmuxTextKind{scalar: true}},
 	// Tree applies the text boundary inside internal/tmux while composing the
 	// whole rendering. Classifying it here keeps that producer-level exception
 	// explicit rather than teaching the audit that arbitrary returned strings

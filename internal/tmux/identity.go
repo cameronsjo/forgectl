@@ -223,7 +223,15 @@ var (
 	// with it (#765). Listings shown to an operator (DisplaySessions,
 	// DisplayWindows), EnsureSession's create, and CheckGenerationCapability
 	// opt in and read it as "no server".
-	ErrServerExited = errors.New("the tmux server has exited (its socket file remains, and nothing listens on it)")
+	//
+	// Its text carries the remediation (forgectl#805), because the refusals
+	// that wrap it otherwise leave the operator with no next step: a new
+	// session on the leftover socket replaces it with a live server (tmux
+	// 3.4's client unlinks a refused socket before starting one). The
+	// "nothing that ran under it" clause is the #765 caveat — only the
+	// operator can know that no pane process outlived the server.
+	ErrServerExited = errors.New("the tmux server has exited (its socket file remains, and nothing listens on it); " +
+		"once nothing that ran under it is still running, start any tmux session to clear the socket, then retry")
 	// ErrUnsafeOperand reports an operator-supplied value that cannot be
 	// passed through tmux's command parser byte for byte, so it is refused
 	// before any command runs (quoteCommandOperand).
@@ -293,8 +301,10 @@ func (c *Client) serverStateError(ctx context.Context, args []string, err error)
 		// BOTH sentinels: ErrServerUnreadable keeps every existing caller
 		// failing closed, and ErrServerExited is what an opted-in listing or
 		// create reads as "no server".
-		return fmt.Errorf("%w: %w (socket %s): %w",
-			ErrServerUnreadable, ErrServerExited, termsafe.QuotePath(failure.SocketPath), err)
+		// The socket leads so the remediation ErrServerExited ends on is not
+		// separated from the state it describes.
+		return fmt.Errorf("%w (socket %s): %w: %w",
+			ErrServerUnreadable, termsafe.QuotePath(failure.SocketPath), ErrServerExited, err)
 	default:
 		cause := failure.Cause
 		if cause == nil {

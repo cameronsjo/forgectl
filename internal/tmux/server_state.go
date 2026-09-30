@@ -124,13 +124,34 @@ func (c *Client) classifyServerFailure(ctx context.Context, expectedArgs []strin
 // (a live server that failed the command for some other reason), a
 // permission error, a timeout, a canceled context — is not proof, and the
 // caller keeps the fail-closed serverStaleSocket.
+//
+// The refusal must be seen TWICE, deadSocketRecheck apart (forgectl#806). On
+// Darwin and the BSDs a unix socket whose listen backlog is full also answers
+// ECONNREFUSED, so one refused connect to a live but saturated server would
+// read as dead, and EnsureSession would start a second server over it,
+// orphaning the live one. A second refusal after a pause narrows that to a
+// backlog that stays full for the whole pause; it is a cheap hardening, not
+// a proof, and the pause is paid only on the path that already saw a refusal.
+// (Linux answers a full backlog with EAGAIN, which was never proof.)
 func (c *Client) socketRefusesConnect(ctx context.Context, path string, info os.FileInfo) bool {
 	if info == nil || info.Mode().Type() != os.ModeSocket {
 		return false
 	}
-	err := c.dialSocket(ctx, path)
-	return errors.Is(err, syscall.ECONNREFUSED)
+	if !errors.Is(c.dialSocket(ctx, path), syscall.ECONNREFUSED) {
+		return false
+	}
+	pause := time.NewTimer(deadSocketRecheck)
+	defer pause.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-pause.C:
+	}
+	return errors.Is(c.dialSocket(ctx, path), syscall.ECONNREFUSED)
 }
+
+// deadSocketRecheck is the pause between socketRefusesConnect's two probes.
+const deadSocketRecheck = 50 * time.Millisecond
 
 // dialUnixSocket is the production dialSocket: one bounded unix connect,
 // closed at once. A live tmux server sees a client that connects and leaves,
@@ -284,7 +305,21 @@ func hasExplicitSocketArg(args []string) bool {
 // display only. A "gone" verdict must come from ListSessions or a
 // revalidation, which keep failing closed on that state.
 func (c *Client) DisplaySessions(ctx context.Context) ([]Session, error) {
-	return exitedIsEmpty(c.ListSessions(ctx))
+	sessions, _, err := c.DisplaySessionListing(ctx)
+	return sessions, err
+}
+
+// DisplaySessionListing is DisplaySessions plus the number of session rows
+// tmux returned that could not be read, most likely because a name carries
+// the field separator (forgectl#806). Such a session is real but cannot be
+// resolved, renamed or killed through forgectl, so a listing should say it
+// exists rather than show one fewer session with no sign of it.
+func (c *Client) DisplaySessionListing(ctx context.Context) (sessions []Session, unreadable int, err error) {
+	sessions, unreadable, err = c.listSessions(ctx)
+	if errors.Is(err, ErrServerExited) {
+		return nil, 0, nil
+	}
+	return sessions, unreadable, err
 }
 
 // DisplayWindows is ListWindows under DisplaySessions' rule.

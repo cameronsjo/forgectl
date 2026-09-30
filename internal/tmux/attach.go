@@ -65,14 +65,23 @@ func (c *Client) AttachWindow(ctx context.Context, want WindowIdentity) error {
 
 // SelectWindow makes a window current within its own session without attaching
 // or switching clients — the "I am already looking at this session, just change
-// the view" path. It goes through the interactive runner because tmux redraws
-// the attached client as a side effect.
+// the view" path.
+//
+// The select runs inside generationGuarded on the captured Run path, exactly
+// as AttachWindow's does (forgectl#805): a server replaced after the
+// revalidation answers with the mismatch marker instead of selecting its own
+// @N, and that answer can only be read back from captured output. tmux
+// redraws any attached client itself, so nothing here needs the tty.
 func (c *Client) SelectWindow(ctx context.Context, want WindowIdentity) error {
 	current, err := c.RevalidateWindow(ctx, want)
 	if err != nil {
 		return fmt.Errorf("select window %q: %w", want.Name, err)
 	}
-	return c.run.RunInteractive(ctx, c.tmuxBin, c.tmuxArgs("select-window", "-t", current.ID)...)
+	if err := ValidateWindowID(current.ID); err != nil {
+		return fmt.Errorf("select window %q: %w", want.Name, err)
+	}
+	return c.runGuarded(ctx, "select window "+current.ID, current.Generation, current.ID,
+		"select-window -t "+current.ID)
 }
 
 // attachOrSwitch is the single inside/outside branch, taking an already

@@ -21,7 +21,10 @@
   // <div id="ForgectlMath"> is the global until this script assigns it.
   window.ForgectlMath = { refresh: function () {} };
 
-  if (typeof katex === "undefined") {
+  // The entry point, not the global: a doc heading "## Katex" gets
+  // id="katex", which makes window.katex that heading element when the
+  // bundle is blocked (forgectl#772).
+  if (typeof katex === "undefined" || typeof katex.render !== "function") {
     // The bundle failed to load. The TeX stays visible as text with its
     // delimiters, which is a legible degradation.
     console.warn("[forgectl docs] KaTeX bundle unavailable; math will render as TeX source");
