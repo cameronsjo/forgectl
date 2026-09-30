@@ -197,10 +197,10 @@ var contentLookups = map[string]map[string]string{
 		".math": "content: the formulas it renders",
 	},
 	"mermaid-init.js": {
-		`pre.mermaid [data-fc], [id^="dmermaid-"] [data-fc]`: "scrubs hooks forged inside rendered diagrams",
-		"pre.mermaid":   "content: the diagrams it renders",
-		".embed":        "content: the frame it wraps around a diagram",
-		".dia-viewport": "scoped to an .embed this script created",
+		"pre.mermaid [data-fc]": "scrubs hooks forged inside rendered diagrams",
+		"pre.mermaid":           "content: the diagrams it renders",
+		".embed":                "content: the frame it wraps around a diagram",
+		".dia-viewport":         "scoped to an .embed this script created",
 	},
 	"reload.js": {
 		":is(h1,h2,h3,h4,h5,h6)[id]":  "content: headings, on the doc-main root",
@@ -215,10 +215,13 @@ var contentLookups = map[string]map[string]string{
 		"summary":                                      "focus restore: inside the recorded region",
 		".live-dot":                                    "under the live-status data-fc hook",
 		".live-status__text":                           "under the live-status data-fc hook",
-		"sel":                                          "replace()'s and within()'s parameter; their call sites are checked instead",
+		".embed":                                       "diagram focus: up from the focused control, kept only inside the doc-body hook; or up from a doc-body diagram",
+		"pre.mermaid":                                  "diagram focus: the diagrams under the doc-body hook, or the one inside an .embed found there",
+		".embed-reset":                                 "diagram focus: inside a doc-body diagram's .embed",
+		".dia-viewport":                                "diagram focus: inside a doc-body diagram's .embed",
+		"a":                                            "diagram focus: links inside one doc-body diagram",
 	},
 	"sidenav-filter.js": {
-		"sel":                 "all()'s parameter; its call sites are checked instead",
 		"li":                  "up from a link or folder under the sidenav data-fc hook",
 		"a[data-filter-text]": "under a sidenav node; data-filter-text is server-set and the sanitizer strips data-*",
 	},
@@ -231,7 +234,11 @@ var contentLookups = map[string]map[string]string{
 
 // selectorWrappers names each script's helpers that take a selector and
 // query the document with it, and which argument (0-based) the selector is.
-// Their call sites are scanned like the query methods themselves.
+// Their call sites are scanned like the query methods themselves, and a
+// lookup inside the named function's own body that passes that parameter
+// straight through is not flagged. The exemption is keyed by function name,
+// so a lookup on a parameter of the same name in any other function is
+// still flagged (forgectl#718).
 var selectorWrappers = map[string]map[string]int{
 	"reload.js":         {"replace": 0, "within": 1},
 	"sidenav-filter.js": {"all": 0},
@@ -355,6 +362,60 @@ type chromeLookup struct {
 	key    string // the resolved selector, or the raw expression
 	rooted bool
 	line   int
+	// passThrough: the lookup is inside a selectorWrappers function and
+	// queries with that function's selector parameter, which the wrapper's
+	// call sites supply and the scan checks there.
+	passThrough bool
+}
+
+// jsBlockEnd returns the index of the brace closing the block that opens at
+// src[open], skipping string literals, or -1 when it never closes.
+func jsBlockEnd(src string, open int) int {
+	depth := 0
+	for j := open; j < len(src); j++ {
+		switch c := src[j]; c {
+		case '"', '\'', '`':
+			for j++; j < len(src) && src[j] != c; j++ {
+				if src[j] == '\\' {
+					j++
+				}
+			}
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return j
+			}
+		}
+	}
+	return -1
+}
+
+// wrapperBody is the source range of a selector wrapper's body and the name
+// of its selector parameter.
+type wrapperBody struct {
+	start, end int
+	param      string
+}
+
+// wrapperBodies finds each wrapper's `function name(params) {` declaration.
+func wrapperBodies(src string, wrappers map[string]int) []wrapperBody {
+	var out []wrapperBody
+	for wrapper, n := range wrappers {
+		decl := regexp.MustCompile(`function ` + wrapper + `\(([^)]*)\)\s*\{`)
+		for _, m := range decl.FindAllStringSubmatchIndex(src, -1) {
+			params := strings.Split(src[m[2]:m[3]], ",")
+			if n >= len(params) {
+				continue
+			}
+			open := m[1] - 1
+			if end := jsBlockEnd(src, open); end > 0 {
+				out = append(out, wrapperBody{start: open, end: end, param: strings.TrimSpace(params[n])})
+			}
+		}
+	}
+	return out
 }
 
 // scanChromeLookups returns every DOM query call in src, and every call to the
@@ -365,11 +426,17 @@ func scanChromeLookups(src string, wrappers map[string]int) (out []chromeLookup,
 	for _, m := range jsStringVar.FindAllStringSubmatch(src, -1) {
 		consts[m[1]] = m[2] + m[3]
 	}
+	bodies := wrapperBodies(src, wrappers)
 	add := func(argStart, n int) {
 		expr := jsArg(src, argStart, n)
 		l := chromeLookup{key: expr, line: strings.Count(src[:argStart], "\n") + 1}
 		if sel, ok := jsResolve(expr, consts); ok {
 			l.key, l.rooted = sel, dataFcRooted(sel)
+		}
+		for _, b := range bodies {
+			if argStart > b.start && argStart < b.end && expr == b.param {
+				l.passThrough = true
+			}
 		}
 		out = append(out, l)
 	}
@@ -404,7 +471,7 @@ func TestChrome_ScriptsFindChromeOnlyByDataFc(t *testing.T) {
 		}
 		seen := map[string]bool{}
 		for _, l := range lookups {
-			if l.rooted {
+			if l.rooted || l.passThrough {
 				continue
 			}
 			seen[l.key] = true
@@ -493,5 +560,34 @@ func TestChrome_PlantedChromeSurvivesOnlyAsContent(t *testing.T) {
 		if got := strings.Count(body, `data-fc="`+hook+`"`); got != 1 {
 			t.Errorf(`data-fc=%q appears %d times, want the shell's one`, hook, got)
 		}
+	}
+}
+
+// A helper that is not a registered wrapper gets no pass for naming its
+// parameter like one (forgectl#718): find(".outline") below reaches chrome
+// by class, and its querySelector(sel) must be flagged.
+func TestChrome_WrapperPassThroughIsKeyedByFunction(t *testing.T) {
+	src := "function find(sel) { return document.querySelector(sel); }\n" +
+		"find(\".outline\");\n" +
+		"function all(sel) { return document.querySelectorAll(sel); }\n" +
+		"all('[data-fc=\"sidenav\"] a');\n"
+	lookups, calls := scanChromeLookups(src, map[string]int{"all": 0})
+	if calls["all"] != 1 {
+		t.Fatalf("all() call sites = %d, want 1", calls["all"])
+	}
+	var flagged, passed []int
+	for _, l := range lookups {
+		switch {
+		case l.passThrough:
+			passed = append(passed, l.line)
+		case !l.rooted:
+			flagged = append(flagged, l.line)
+		}
+	}
+	if !slices.Equal(flagged, []int{1}) {
+		t.Errorf("unrooted lookups on lines %v, want [1] (find's querySelector(sel))", flagged)
+	}
+	if !slices.Equal(passed, []int{3}) {
+		t.Errorf("pass-through lookups on lines %v, want [3] (all's querySelectorAll(sel))", passed)
 	}
 }

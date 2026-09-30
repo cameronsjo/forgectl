@@ -128,6 +128,8 @@
   function focusKey() {
     var el = document.activeElement;
     if (!el || el === document.body) { return null; }
+    var diagram = diagramFocusKey(el);
+    if (diagram) { return diagram; }
     var region = el.closest("[data-fc]");
     var key = { region: region ? region.getAttribute("data-fc") : null };
     if (el.id) { key.id = el.id; return key; }
@@ -140,6 +142,51 @@
     return null;
   }
 
+  // Focus inside a diagram (its reset button, its pan/zoom viewport, or a
+  // link in the SVG) cannot go back when the rest does: the swap brings each
+  // diagram back as unrendered source, and the viewport and links exist only
+  // once mermaid has rendered it again (forgectl#718). So the key names the
+  // diagram by its index among the doc's diagrams, plus the part of it that
+  // held focus, and restoreDiagramFocus runs when the re-render settles.
+  function diagramFocusKey(el) {
+    var embed = el.closest(".embed");
+    var body = document.querySelector(DOC_BODY);
+    if (!embed || !body || !body.contains(embed)) { return null; }
+    var diagrams = Array.prototype.slice.call(body.querySelectorAll("pre.mermaid"));
+    var index = diagrams.indexOf(embed.querySelector("pre.mermaid"));
+    if (index < 0) { return null; }
+    var key = { region: "doc-body", diagram: index };
+    var href = el.getAttribute("href") || el.getAttribute("xlink:href");
+    if (el.classList.contains("embed-reset")) { key.part = "reset"; }
+    else if (el.classList.contains("dia-viewport")) { key.part = "viewport"; }
+    else if (href) { key.part = "link"; key.link = href; }
+    else { return null; }
+    return key;
+  }
+
+  // Best effort: if the reader has put focus somewhere else while the
+  // diagram re-rendered, that choice stands.
+  function restoreDiagramFocus(key) {
+    var active = document.activeElement;
+    if (active && active !== document.body) { return; }
+    var body = document.querySelector(DOC_BODY);
+    var pre = body ? body.querySelectorAll("pre.mermaid")[key.diagram] : null;
+    var embed = pre ? pre.closest(".embed") : null;
+    if (!embed) { return; }
+    var el = null;
+    if (key.part === "reset") {
+      el = embed.querySelector(".embed-reset");
+    } else if (key.part === "viewport") {
+      el = embed.querySelector(".dia-viewport");
+    } else {
+      within(pre, "a").some(function (a) {
+        if ((a.getAttribute("href") || a.getAttribute("xlink:href")) === key.link) { el = a; return true; }
+        return false;
+      });
+    }
+    if (el) { el.focus({ preventScroll: true }); }
+  }
+
   // Every element matching sel in root's subtree, root itself first when it
   // matches (a focused control can be its own region, like the filter box).
   function within(root, sel) {
@@ -149,7 +196,7 @@
   }
 
   function restoreFocus(key) {
-    if (!key) { return; }
+    if (!key || key.diagram !== undefined) { return; }
     // Outside every region (only the skip link) the page is the region.
     var root = key.region === null
       ? document.documentElement
@@ -216,10 +263,13 @@
     if (filter && filter.value.trim() !== "") {
       filter.dispatchEvent(new Event("input"));
     }
-    if (window.ForgectlMermaid) { window.ForgectlMermaid.refresh(); }
+    var rendered = window.ForgectlMermaid ? window.ForgectlMermaid.refresh() : null;
     if (window.ForgectlMath) { window.ForgectlMath.refresh(); }
     applyAnchor(anchor);
     restoreFocus(focus);
+    if (focus && focus.diagram !== undefined) {
+      Promise.resolve(rendered).then(function () { restoreDiagramFocus(focus); });
+    }
     return true;
   }
 

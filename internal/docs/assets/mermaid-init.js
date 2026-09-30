@@ -148,9 +148,10 @@
   // <i data-fc="outline">. The htmlLabels:false pin above closes that on
   // 11.12.3; this scrub stays as the second wall, for a diagram type or a
   // future mermaid that puts author markup in the SVG some other way. It
-  // covers every diagram, and the temporary container mermaid renders into
-  // (#dmermaid-N, appended to <body>).
-  var FORGED_HOOKS = 'pre.mermaid [data-fc], [id^="dmermaid-"] [data-fc]';
+  // covers every diagram. mermaid.run renders into a temporary #dmermaid-N
+  // container, but creates it inside the target pre.mermaid (measured on
+  // 11.12.3), so this selector covers that too.
+  var FORGED_HOOKS = "pre.mermaid [data-fc]";
 
   function scrubHooks() {
     document.querySelectorAll(FORGED_HOOKS).forEach(function (el) {
@@ -162,8 +163,10 @@
   // for the whole async render, and a filter keystroke or live-reload swap in
   // that window would find them. A MutationObserver callback runs as a
   // microtask straight after the insertion, before any event or network task
-  // can reach the reader's scripts. It watches <body> because the temporary
-  // container is outside the doc pane.
+  // can reach the reader's scripts. It watches <body>, not the doc pane, so
+  // the diagrams a live-reload swap brings in are covered without re-arming
+  // it. scripts/verify-reader-chrome.mjs pins the timing: a hook planted
+  // inside a diagram must be gone at the next task boundary.
   function watchForForgedHooks() {
     new MutationObserver(scrubHooks).observe(document.body, {
       childList: true, subtree: true, attributes: true, attributeFilter: ["data-fc"]
@@ -173,11 +176,12 @@
   function render() {
     mermaid.initialize(config());
     var blocks = document.querySelectorAll("pre.mermaid");
-    if (!blocks.length) { return; }
+    if (!blocks.length) { return Promise.resolve(); }
     // mermaid.run replaces each element's content with rendered SVG. Passing the
     // node list explicitly (rather than letting it scan) keeps it off anything
-    // else on the page.
-    mermaid.run({ nodes: blocks }).then(scrubHooks, function (err) {
+    // else on the page. The promise settles once the scrub has run, which is
+    // when reload.js puts focus back into a re-rendered diagram.
+    return mermaid.run({ nodes: blocks }).then(scrubHooks, function (err) {
       scrubHooks();
       console.warn("[forgectl docs] mermaid render failed", err);
     });
@@ -261,11 +265,12 @@
   // it brings in are new, unrendered pre.mermaid blocks. refresh runs the same
   // first-render path over them; already-rendered diagrams elsewhere are gone
   // with the old body. svg-panzoom.js needs no hook: it watches <main>.
+  // refresh returns a promise that settles when the render has.
   window.ForgectlMermaid = {
     refresh: function () {
       stashSources();
       wrapEmbeds();
-      render();
+      return render();
     }
   };
 })();

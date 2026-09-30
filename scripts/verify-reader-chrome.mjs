@@ -13,7 +13,8 @@
 //
 //   - the mermaid labels render as inert SVG text (forgectl#713), and no
 //     data-fc hook survives inside the doc body once mermaid has rendered,
-//     on first load and again after a live-reload swap re-renders it;
+//     on first load and again after a live-reload swap re-renders it, and a
+//     hook forged inside a diagram is gone by the next task boundary;
 //   - the sanitizer strips the planted chrome classes (forgectl#700), so a
 //     planted Artificer overlay (.scrim, .toast-region) stays in the doc's
 //     flow instead of pinning itself over the reader;
@@ -27,6 +28,8 @@
 //     <div class="doc-body">;
 //   - a live-reload swap keeps focus on a doc link that mimics a sidenav
 //     link's href and class, rather than moving it to the sidenav;
+//   - a live-reload swap puts focus back on a diagram's pan/zoom viewport or
+//     reset button once the diagram has re-rendered;
 //   - a swap that adds text above a heading slugged "doc-filter" (a chrome
 //     id) keeps that heading where the reader had it;
 //   - deleting the doc puts the missing banner in the real doc body.
@@ -199,6 +202,38 @@ try {
   if (labels.markup > 0) problems.push(`mermaid: ${labels.markup} label element(s) rendered as live HTML (htmlLabels is on)`);
   await noForgedHooks(page, 'first render');
 
+  // The scrub's timing (forgectl#718). With htmlLabels pinned off, mermaid
+  // 11.12.3 emits no hook to watch for, so the probe forges two itself: an
+  // element inserted with data-fc, and data-fc set on an element already in
+  // the diagram. A MessageChannel message is a task, so its handler samples
+  // at the first task boundary after the forgery, which is the earliest
+  // point an event or network callback could see it. A scrub that ran only
+  // when mermaid.run resolved would leave both up here.
+  const timing = await page.evaluate(() => new Promise((resolve) => {
+    const pre = document.querySelector('[data-fc="doc-body"] pre.mermaid');
+    const g = pre && pre.querySelector('svg g');
+    if (!g) { resolve(null); return; }
+    const span = document.createElement('span');
+    span.setAttribute('data-fc', 'outline');
+    pre.appendChild(span);
+    g.setAttribute('data-fc', 'statusbar');
+    const sync = span.hasAttribute('data-fc') && g.hasAttribute('data-fc');
+    const ch = new MessageChannel();
+    ch.port1.onmessage = () => {
+      const out = { sync, inserted: span.hasAttribute('data-fc'), attribute: g.hasAttribute('data-fc') };
+      span.remove();
+      g.removeAttribute('data-fc');
+      resolve(out);
+    };
+    ch.port2.postMessage(0);
+  }));
+  if (timing === null) {
+    problems.push('scrub timing: no rendered diagram to forge a hook in; the check proves nothing');
+  } else {
+    if (!timing.sync) problems.push('scrub timing: the forged hooks were gone synchronously; the probe cannot tell a task-boundary scrub from none');
+    if (timing.inserted || timing.attribute) problems.push(`scrub timing: a forged hook survived to the next task ${JSON.stringify(timing)}`);
+  }
+
   // Sidebar filter: a query that matches no doc.
   await page.fill('[data-fc="doc-filter"]', 'zzz-no-such-doc');
   const filter = await page.evaluate(() => {
@@ -311,6 +346,41 @@ try {
     });
     if (!after2.focusInDoc || after2.focusText !== 'MIMIC-LINK') problems.push(`focus: a swap moved focus off the doc link to ${JSON.stringify(after2.focusText)}`);
     if (Math.abs(after2.delta - pos.delta) > 2) problems.push(`scroll: the "Doc filter" heading moved ${after2.delta - pos.delta}px across a swap (anchor restore used the chrome id)`);
+  }
+
+  // Focus inside a diagram survives a swap (forgectl#718): the swap brings
+  // each diagram back as source, so the viewport and reset button are put
+  // back only once mermaid has rendered it again.
+  await mermaidRendered(page);
+  for (const [n, part] of [[1, '.dia-viewport'], [2, '.embed-reset']]) {
+    const focused = await page.evaluate((sel) => {
+      const embeds = document.querySelectorAll('[data-fc="doc-body"] .embed');
+      const el = embeds[1] && embeds[1].querySelector(sel);
+      if (!el) return false;
+      el.focus({ preventScroll: true });
+      return document.activeElement === el;
+    }, part);
+    if (!focused) {
+      problems.push(`diagram focus: could not focus the second diagram's ${part}; the check proves nothing`);
+      continue;
+    }
+    const marker = `Diagram focus edit ${n}.`;
+    writeFileSync(docPath, hostile({ extra: `${added}\n${marker}\n`, mimic }));
+    try {
+      await page.waitForFunction((m) => document.querySelector('[data-fc="doc-body"]').textContent.includes(m),
+        marker, { timeout: 15000 });
+      await mermaidRendered(page);
+      await page.waitForFunction((sel) => {
+        const embeds = document.querySelectorAll('[data-fc="doc-body"] .embed');
+        return embeds[1] && document.activeElement === embeds[1].querySelector(sel);
+      }, part, { timeout: 3000 });
+    } catch {
+      const now = await page.evaluate(() => {
+        const f = document.activeElement;
+        return f ? `${f.localName}.${f.className}` : null;
+      });
+      problems.push(`diagram focus: after a swap focus is on ${now}, not the second diagram's ${part}`);
+    }
   }
 
   // Deleting the doc puts the banner in the real doc body.
