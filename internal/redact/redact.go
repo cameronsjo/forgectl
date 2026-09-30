@@ -46,7 +46,8 @@ const UserArgMarker = "[user-arg]"
 //
 //   - "--" and "-" as they are;
 //   - --name as it is, and --name=VALUE as --name=[user-arg], when the name
-//     is ASCII letters, digits, '-', '_' and '.';
+//     is ASCII letters, digits, '-', '_' and '.' and does not start like a
+//     known token (tokenShaped);
 //   - -x as it is, and a glued -xVALUE as -x[user-arg], when x is an ASCII
 //     letter or digit;
 //   - everything else, every value and positional, as UserArgMarker.
@@ -64,7 +65,7 @@ func userArg(a string) string {
 		return a
 	case strings.HasPrefix(a, "--"):
 		name, _, joined := strings.Cut(a, "=")
-		if len(name) == 2 || !isFlagName(name[2:]) {
+		if len(name) == 2 || !isFlagName(name[2:]) || tokenShaped(name[2:]) {
 			return UserArgMarker
 		}
 		if joined {
@@ -78,6 +79,23 @@ func userArg(a string) string {
 		return a[:2] + UserArgMarker
 	}
 	return UserArgMarker
+}
+
+// tokenPrefixes are the leading bytes of well-known credential formats
+// (GitHub, GitLab, Slack, OpenAI/Stripe-style, AWS access key ids), matched
+// case-insensitively. A token pasted where a flag name goes (--ghp_…) is a
+// value, not a name.
+var tokenPrefixes = []string{"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "xox", "sk-", "sk_", "akia", "asia"}
+
+// tokenShaped reports whether name starts with a tokenPrefixes entry.
+func tokenShaped(name string) bool {
+	l := strings.ToLower(name)
+	for _, p := range tokenPrefixes {
+		if strings.HasPrefix(l, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // isFlagName reports whether s is a non-empty run of ASCII letters, digits,
@@ -131,7 +149,7 @@ func Arg(s string) string {
 // It is a withhold list, not a parser of any one tool's flags, so it errs
 // toward withholding: a boolean flag with a credential-looking name costs the
 // element after it. A withheld element that would itself withhold the next
-// one, "--", or a marker keeps withholding armed. A value already rendered as
+// one, or "--", keeps withholding armed. A value already rendered as
 // a marker (Marker, ArgMarker, UserArgMarker) is left as it is. Args copies
 // only when an element changes.
 func Args(args []string) []string {
@@ -142,14 +160,16 @@ func Args(args []string) []string {
 		if withhold {
 			// The withheld element is the value, whatever it looks like. If
 			// it would itself withhold the next one (-H -H X, --token
-			// --password X), or is "--" or an already-rendered marker, where
-			// the value may be the element after it (--token -- X), stay
-			// armed.
+			// --password X), or is "--", after which the value may follow
+			// (--token -- X), stay armed. A marker does not re-arm: it is a
+			// value already withheld, and re-arming on one would carry
+			// withholding past a UserArgs span into forgectl's own elements
+			// and make Args withhold more on a second pass.
 			if !isMarker(a) {
 				r = ArgMarker
 			}
 			_, next := argWord(a)
-			withhold = next || a == "--" || isMarker(a)
+			withhold = next || a == "--"
 		} else {
 			r, withhold = argWord(a)
 		}

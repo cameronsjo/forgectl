@@ -332,8 +332,8 @@ func TestUserArgs_ShowsNoUserValue(t *testing.T) {
 }
 
 // TestArgs_WithheldTriggerStaysArmed: a withheld element that would itself
-// withhold the next one, "--", or a marker keeps Args withholding, so the
-// value after it does not show.
+// withhold the next one, or "--", keeps Args withholding, so the value after
+// it does not show.
 //
 // Mutation: disarm after every withheld element (withhold = false) and all
 // three rows show X.
@@ -342,7 +342,6 @@ func TestArgs_WithheldTriggerStaysArmed(t *testing.T) {
 		{"tool", "-H", "-H", "X"},
 		{"tool", "--token", "--password", "X"},
 		{"tool", "--token", "--", "X"},
-		{"tool", "--token", Marker, "X"},
 	} {
 		if got := Args(argv); got[len(got)-1] != ArgMarker {
 			t.Errorf("Args(%q) = %q, the last element shows", argv, got)
@@ -367,5 +366,51 @@ func TestText_KeepsALineWhoseOnlyURLIsARepo(t *testing.T) {
 		if got := Text(c.in); got != c.want {
 			t.Errorf("Text(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// TestArgs_StopsAtAUserArgsSpan: Args runs over forgectl's argv with a
+// UserArgs span already rendered in it (exec.WithOpaqueArgs). A span that
+// ends in a trigger flag and its value must not carry withholding into
+// forgectl's own "-- <ctx>", and a flag name after such a pair inside the
+// span still shows. Args is idempotent over that rendering.
+//
+// Mutation: re-arm on a marker (withhold = next || a == "--" ||
+// isMarker(a)) and the "--" and context dir read [redacted-arg].
+func TestArgs_StopsAtAUserArgsSpan(t *testing.T) {
+	for _, user := range [][]string{
+		{"--secret", "id=npm,src=/x"},
+		{"-H", "X-Api-Key: X"},
+		{"--secret", "id=npm", "--target", "builder"},
+		{"-H", "X", "-p", "--name=X"},
+	} {
+		argv := append(append([]string{"build", "-t", "img:dev"}, UserArgs(user)...), "--", "/home/me/proj")
+		got := Args(argv)
+		if n := len(got); got[n-2] != "--" || got[n-1] != "/home/me/proj" {
+			t.Errorf("Args(%q) = %q: forgectl's -- <ctx> was withheld", argv, got)
+		}
+		for _, name := range []string{"--target", "-p", "--name=" + UserArgMarker} {
+			if strings.Contains(strings.Join(argv, " "), name) && !strings.Contains(strings.Join(got, " "), name) {
+				t.Errorf("Args(%q) = %q: the flag name %s was withheld", argv, got, name)
+			}
+		}
+	}
+	for _, argv := range redacttest.Corpus {
+		once := Args(UserArgs(argv))
+		if twice := Args(once); strings.Join(twice, "\x00") != strings.Join(once, "\x00") {
+			t.Errorf("Args is not idempotent over UserArgs(%q): %q then %q", argv, once, twice)
+		}
+	}
+}
+
+// Mutation: drop tokenShaped from userArg and --ghp_… shows.
+func TestUserArgs_TokenShapedFlagName(t *testing.T) {
+	for _, in := range []string{"--ghp_abc123", "--github_pat_X", "--xoxb-1", "--sk-live=X", "--GLPAT-x"} {
+		if got := UserArgs([]string{in})[0]; got != UserArgMarker {
+			t.Errorf("UserArgs(%q) = %q, want %q", in, got, UserArgMarker)
+		}
+	}
+	if got := UserArgs([]string{"--skip", "--target"}); got[0] != "--skip" || got[1] != "--target" {
+		t.Errorf("ordinary names withheld: %q", got)
 	}
 }
