@@ -47,8 +47,8 @@ func TestParseVersion_RefusesWhatItCannotRank(t *testing.T) {
 
 func TestIsBusy_UnknownStatusIsBusy(t *testing.T) {
 	for status, want := range map[string]bool{
-		"idle": false, "busy": true, "shell": true,
-		"": true, "waiting": true, "IDLE": true,
+		"idle": false, "busy": true, "shell": true, "waiting": true,
+		"": true, "compacting": true, "IDLE": true,
 	} {
 		if got := IsBusy(status); got != want {
 			t.Errorf("IsBusy(%q) = %v, want %v", status, got, want)

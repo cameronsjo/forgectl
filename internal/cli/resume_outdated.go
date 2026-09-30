@@ -59,9 +59,11 @@ listed and marked, since nothing proves it current.
   version              the session's version, verbatim
   installed_version    the installed claude version
   version_unparseable  bool; true when version could not be compared
-  pane                 HERDR_PANE_ID of the process; "" when unknown
+  pane                 the process's own HERDR_PANE_ID; "" when unknown
 
-The pane is read from the process environment (ps eww on macOS,
+The pane is what the process's environment CLAIMS, not a verified pane: a
+claude launched from inside another session inherits its parent's id, so two
+processes can name the same pane. It is read from the process environment (ps eww on macOS,
 /proc/<pid>/environ on Linux), same-user only; failing to read it leaves it
 empty and never fails the command.
 
@@ -134,7 +136,7 @@ func printOutdated(out io.Writer, list []resume.OutdatedSession, asJSON, tty boo
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	// tabwriter buffers, so a write error surfaces from Flush.
-	_, _ = fmt.Fprintln(tw, "SESSION\tSTATUS\tVERSION\tINSTALLED\tPANE\tCWD")
+	_, _ = fmt.Fprintln(tw, "SESSION\tSTATUS\tVERSION\tINSTALLED\tHERDR_PANE_ID\tCWD")
 	for _, s := range list {
 		version := safeTerm(s.Version)
 		if s.VersionUnparseable {

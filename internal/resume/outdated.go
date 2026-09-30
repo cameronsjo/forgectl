@@ -66,8 +66,8 @@ func (v Version) Compare(o Version) int {
 }
 
 // IsBusy reports whether a restart could destroy in-flight work. Only "idle"
-// is known safe: "busy" and "shell" (a shell command is running) are busy, and
-// so is any status Claude Code adds later — the safe reading of a value this
+// is known safe: "busy", "waiting" (a permission prompt is open), and "shell" (a shell
+// command is running) are busy, and so is any status Claude Code adds later — the safe reading of a value this
 // code has never seen is that work is happening.
 func IsBusy(status string) bool { return status != "idle" }
 
@@ -84,7 +84,9 @@ type OutdatedSession struct {
 	// VersionUnparseable marks a session whose recorded version could not be
 	// compared. It is listed, not dropped: nothing proves it current.
 	VersionUnparseable bool
-	// Pane is the HERDR_PANE_ID of the session's process, empty when unknown.
+	// Pane is the HERDR_PANE_ID the session's process carries in its environment,
+	// empty when unknown. It is a claim, not a verified pane: a nested claude
+	// inherits its parent's id.
 	Pane string
 }
 
