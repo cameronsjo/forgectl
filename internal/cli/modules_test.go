@@ -221,6 +221,14 @@ func TestModules_DocumentedInREADME(t *testing.T) {
 		if !pattern.MatchString(readme) {
 			t.Errorf("module %q has no command-group home in README.md (no `forgectl %s ...` usage line and no heading/roster comment) — document it (forgectl#397, forgectl#101)", m.Name, m.Name)
 		}
+
+		// The Usage roster alone is not enough: the "Command groups" table is
+		// the scannable index, so every module also needs a row there
+		// (forgectl#930: tasks and theme had usage lines but no row).
+		row := regexp.MustCompile("(?m)^\\|\\s*`" + name + "`\\s*\\|")
+		if !row.MatchString(readme) {
+			t.Errorf("module %q has no row in the README \"Command groups\" table — add `| `%s` | <one-liner> | <docs> |` (forgectl#930)", m.Name, m.Name)
+		}
 	}
 }
 
