@@ -368,10 +368,23 @@ func termsafeErrorHandler(w io.Writer, styles fang.Styles, err error) {
 // path-leading message through UnsetTransform() instead of fang's default.
 // A flag token needs the same treatment: title-casing "--limit must be at
 // least 1" yields "--Limit", a flag that does not exist (forgectl#670).
+//
+// A first word that opens with a double quote is a quoted literal, which is
+// how termsafe.QuotePath and QuoteText render a path (#847): `".sops.yaml"
+// not found` must not become `".Sops.yaml" not found`. A bare file name with
+// an interior dot ("secrets.yaml not found") is a path too, so it is not
+// title-cased to "Secrets.yaml"; a word that only ends in a dot is not.
 func leadsWithPath(msg string) bool {
 	first, _, _ := strings.Cut(msg, " ")
 	if first == "" {
 		return false
+	}
+	if strings.HasPrefix(first, `"`) {
+		return true
+	}
+	first = strings.TrimRight(first, ":,;")
+	if dot := strings.Index(first, "."); dot > 0 && dot < len(first)-1 {
+		return true
 	}
 	return strings.Contains(first, "/") || strings.HasPrefix(first, ".") || strings.HasPrefix(first, "-")
 }

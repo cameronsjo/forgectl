@@ -305,7 +305,7 @@ type discoverCandidate struct {
 // serial and simple while parallelizing only the part that's actually slow.
 func (c *Client) discoverDir(ctx context.Context, dir string) ([]Project, error) {
 	if _, err := os.Stat(dir); err != nil {
-		return nil, fmt.Errorf("projects directory not found: %s", dir)
+		return nil, fmt.Errorf("projects directory not found: %s", termsafe.QuotePath(dir))
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {

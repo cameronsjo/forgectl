@@ -97,7 +97,7 @@ func ReadLedger(path string) (rows []LedgerRow, skipped int, err error) {
 		rows = append(rows, row)
 	}
 	if scanErr := sc.Err(); scanErr != nil {
-		return nil, skipped, fmt.Errorf("scan ledger %s: %w", path, scanErr)
+		return nil, skipped, fmt.Errorf("scan ledger %s: %w", termsafe.QuotePath(path), termsafe.Error(scanErr))
 	}
 	if skipped > 0 {
 		slog.Warn("Ledger contained unparseable lines, skipped them.", "path", path, "skipped", skipped, "parsed", len(rows))

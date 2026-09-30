@@ -548,14 +548,14 @@ func stageTrustFile(target string, data []byte) (string, error) {
 		return "", cause
 	}
 	if _, err := tmp.Write(data); err != nil {
-		return cleanup(fmt.Errorf("write %s: %w", name, err))
+		return cleanup(fmt.Errorf("write %s: %w", termsafe.QuotePath(name), termsafe.Error(err)))
 	}
 	if err := tmp.Sync(); err != nil {
-		return cleanup(fmt.Errorf("sync %s: %w", name, err))
+		return cleanup(fmt.Errorf("sync %s: %w", termsafe.QuotePath(name), termsafe.Error(err)))
 	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(name)
-		return "", fmt.Errorf("close %s: %w", name, err)
+		return "", fmt.Errorf("close %s: %w", termsafe.QuotePath(name), termsafe.Error(err))
 	}
 	if err := os.Chmod(name, 0o644); err != nil {
 		_ = os.Remove(name)

@@ -24,7 +24,8 @@ type Client struct {
 	runner exec.Runner
 }
 
-// New returns a Client over r. It performs no session check; see [Probe].
+// New returns a Client over r. It performs no session check; see [CheckSession]
+// and [CheckFork].
 func New(r exec.Runner) *Client {
 	return &Client{runner: r}
 }

@@ -734,3 +734,154 @@ func TestError_CapsAPathErrorNestedInErr(t *testing.T) {
 		})
 	}
 }
+
+// safeLineReference is SafeLine as it was before the #847 ASCII fast path:
+// one safeRune per rune range yields. The fast path must match it exactly.
+func safeLineReference(s string) string {
+	var safe strings.Builder
+	for _, r := range s {
+		safe.WriteString(safeRune(r))
+	}
+	return safe.String()
+}
+
+// safeLineEquivalenceSeeds covers each branch of the fast path: all plain
+// ASCII, a plain prefix before the first special byte, each ASCII boundary
+// (space, tilde, DEL, the C0 controls), multi-byte runes, a valid U+FFFD, and
+// invalid and truncated UTF-8.
+var safeLineEquivalenceSeeds = []string{
+	"",
+	"plain text ~ !",
+	" ",
+	"~",
+	"\x7f",
+	"\x00\x01\x1f",
+	"tab\ttab",
+	"prefix\x1b[31mred\x1b[0m",
+	"emoji 🔥 test",
+	"咖啡 workflow",
+	"hidden\u202espoof\u202c",
+	"zero\u200bwidth",
+	"soft\u00adhyphen",
+	"\ufffd valid replacement",
+	"bad \xff byte",
+	"truncated \xe2\x82",
+	"\xc0\xaf overlong",
+	"\xed\xa0\x80 surrogate",
+	"\u0085 NEL",
+	"\U0010ffff max",
+}
+
+// TestSafeLineMatchesTheSlowPath is #847 item 3: the ASCII fast path is
+// performance only, so it must render every input exactly as the per-rune
+// loop did.
+//
+// Mutation that turns it red: widen isPlainASCII to c <= 0x7f, so DEL is
+// copied raw instead of escaped.
+func TestSafeLineMatchesTheSlowPath(t *testing.T) {
+	for _, s := range safeLineEquivalenceSeeds {
+		if got, want := SafeLine(s), safeLineReference(s); got != want {
+			t.Errorf("SafeLine(%q) = %q, want %q", s, got, want)
+		}
+	}
+	// All 256 single bytes, and each after a plain prefix.
+	for b := range 256 {
+		for _, s := range []string{string([]byte{byte(b)}), "ab" + string([]byte{byte(b)}) + "cd"} {
+			if got, want := SafeLine(s), safeLineReference(s); got != want {
+				t.Errorf("SafeLine(%q) = %q, want %q", s, got, want)
+			}
+		}
+	}
+}
+
+// FuzzSafeLineMatchesTheSlowPath fuzzes the #847 equivalence.
+func FuzzSafeLineMatchesTheSlowPath(f *testing.F) {
+	for _, s := range safeLineEquivalenceSeeds {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		if got, want := SafeLine(s), safeLineReference(s); got != want {
+			t.Fatalf("SafeLine(%q) = %q, want %q", s, got, want)
+		}
+	})
+}
+
+// BenchmarkSafeLine compares SafeLine with the per-rune reference on a 1 MB
+// message, the size #847 measured at about 90 ms, in plain ASCII and in text
+// that is mostly ASCII with a non-ASCII rune every 64 bytes.
+func BenchmarkSafeLine(b *testing.B) {
+	ascii := strings.Repeat("open /home/user/src/project/file.go: denied ", 1<<20/44)
+	mixed := strings.Repeat(strings.Repeat("a", 61)+"é", 1<<20/63)
+	for _, in := range []struct{ name, s string }{{"ascii", ascii}, {"mixed", mixed}} {
+		b.Run(in.name+"/fast", func(b *testing.B) {
+			b.SetBytes(int64(len(in.s)))
+			for b.Loop() {
+				_ = SafeLine(in.s)
+			}
+		})
+		b.Run(in.name+"/reference", func(b *testing.B) {
+			b.SetBytes(int64(len(in.s)))
+			for b.Loop() {
+				_ = safeLineReference(in.s)
+			}
+		})
+	}
+}
+
+// TestError_LongerContainingSpanWins is #847 item 5: where two path errors'
+// spans overlap, the one earlier in chain order used to win, so a container
+// wrapping an error that comes first in the chain kept its own over-cap path
+// escaped but whole.
+//
+// Mutation that turns it red: drop the longest-first sort in
+// capWrappedPaths, so chain order alone decides an overlap again.
+func TestError_LongerContainingSpanWins(t *testing.T) {
+	long := "/" + strings.Repeat("a", 4*PathEchoMaxRunes) + "TAIL"
+	old := "/" + strings.Repeat("o", 4*PathEchoMaxRunes) + "OLD"
+	pe := &os.PathError{Op: "open", Path: long, Err: errors.New("denied")}
+	le := &os.LinkError{Op: "link", Old: old, New: "/n", Err: pe}
+	for name, err := range map[string]error{
+		"join":  errors.Join(pe, le),
+		"wrapw": fmt.Errorf("%w; %w", pe, le),
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := Error(err).Error()
+			if strings.Contains(got, strings.Repeat("o", PathEchoMaxRunes+1)) {
+				t.Fatalf("the container's %d-rune Old path escaped the cap: %d bytes", len(old), len(got))
+			}
+			if strings.Contains(got, strings.Repeat("a", PathEchoMaxRunes+1)) {
+				t.Fatalf("the wrapped %d-rune path escaped the cap: %d bytes", len(long), len(got))
+			}
+			if !strings.Contains(got, Error(le).Error()) {
+				t.Errorf("Error = %q, want the container in its capped form", got)
+			}
+			if !errors.Is(Error(err), pe) {
+				t.Error("Error lost the unwrap chain")
+			}
+		})
+	}
+}
+
+// TestError_SelfCyclicPathErrorTerminates is #847 item 8: a *PathError whose
+// Err is itself made causeText re-enter Error until the stack overflowed,
+// which is fatal. The depth bound stops it at a fixed marker.
+//
+// Mutation that turns it red (a fatal stack overflow, not a clean failure):
+// drop the depth > maxRenderDepth check in errorAt.
+func TestError_SelfCyclicPathErrorTerminates(t *testing.T) {
+	pe := &os.PathError{Op: "open", Path: "/p", Err: nil}
+	pe.Err = pe
+	le := &os.LinkError{Op: "rename", Old: "/a", New: "/b", Err: nil}
+	le.Err = &os.PathError{Op: "lstat", Path: "/c", Err: le}
+	for name, err := range map[string]error{"path": pe, "link": le} {
+		t.Run(name, func(t *testing.T) {
+			got := Error(err).Error()
+			if !strings.HasSuffix(got, errTextTooDeep) {
+				t.Fatalf("Error of a self-cycle does not end at the depth marker: %.200q…", got)
+			}
+			if n := strings.Count(got, `"/`); n < maxRenderDepth || n > 3*maxRenderDepth {
+				t.Errorf("Error rendered %d levels, want about maxRenderDepth (%d)", n, maxRenderDepth)
+			}
+		})
+	}
+}
