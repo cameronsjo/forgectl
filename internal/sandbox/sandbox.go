@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -48,7 +49,10 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 	if err := RejectOptionLike("ref", ref); err != nil {
 		return "", err
 	}
-	slog.Debug("Preparing to create workspace sandbox.", "repo", repo, "ref", ref, "alwaysClone", alwaysClone)
+	// repo can be an https URL carrying a token; every log line names it
+	// through logRepo (#711).
+	shownRepo := logRepo(repo)
+	slog.Debug("Preparing to create workspace sandbox.", "repo", shownRepo, "ref", ref, "alwaysClone", alwaysClone)
 
 	dir, err := os.MkdirTemp("", WorkspacePrefix+"*")
 	if err != nil {
@@ -62,14 +66,16 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 		if useRef == "" {
 			useRef = "HEAD"
 		}
-		slog.Debug("Sandboxing local repo via git worktree.", "repo", repo, "ref", useRef)
+		slog.Debug("Sandboxing local repo via git worktree.", "repo", shownRepo, "ref", useRef)
 		// -- ends option parsing so a crafted dir/ref can't inject a flag.
 		if _, err := run.Run(ctx, "git", "-C", repo, "worktree", "add", "--", dir, useRef); err != nil {
-			slog.Error("Failed to create git worktree.", "repo", repo, "sandbox", dir, "ref", useRef, "error", err)
-			return "", fmt.Errorf("git worktree add: %w", err)
+			slog.Error("Failed to create git worktree.", "repo", shownRepo, "sandbox", dir, "ref", useRef, "exit_code", exitCode(err))
+			discardSandbox(ctx, run, dir)
+			// Categorical (#711), as the clone leg: git's stderr is not echoed.
+			return "", termsafe.Categorical("git worktree add failed", err)
 		}
 	} else {
-		slog.Debug("Sandboxing repo via git clone.", "repo", repo, "ref", ref)
+		slog.Debug("Sandboxing repo via git clone.", "repo", shownRepo, "ref", ref)
 		// Clone the default branch when no ref was given; git clone --branch
 		// wants a real branch/tag name, so "HEAD" can't stand in for it. The --
 		// separator ends option parsing before the repo/dir positionals.
@@ -78,7 +84,8 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 			args = []string{"clone", "--branch", ref, "--", repo, dir}
 		}
 		if _, err := run.Run(ctx, "git", args...); err != nil {
-			slog.Error("Failed to clone repo.", "repo", repo, "sandbox", dir, "error", err)
+			slog.Error("Failed to clone repo.", "repo", shownRepo, "sandbox", dir, "exit_code", exitCode(err))
+			discardSandbox(ctx, run, dir)
 			// Categorical (#658): the CommandError renders git's argv, whose
 			// repo URL can carry an https token, and git's stderr, which relays
 			// the remote's sideband text.
@@ -86,15 +93,97 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 		}
 	}
 
-	slog.Debug("Successfully created workspace sandbox.", "repo", repo, "workspace", dir)
+	slog.Debug("Successfully created workspace sandbox.", "repo", shownRepo, "workspace", dir)
 	return dir, nil
+}
+
+// remoteRepoPlaceholder is what a log line shows for a non-local repo that
+// is not exactly one of logRepo's accepted shapes.
+const remoteRepoPlaceholder = "[remote repo]"
+
+// Positive parses for logRepo. repoHostPattern is a DNS-style hostname with
+// no '@', ':', '[' or '%'. repoPartPattern is one owner or repo path
+// segment.
+const (
+	repoHostPattern = `([A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?)`
+	repoPartPattern = `([A-Za-z0-9._-]{1,100})`
+)
+
+// logRepoShapes are the only non-local forms logRepo renders, each anchored
+// at both ends: https with no userinfo, ssh as the git user with an optional
+// port, and scp-like as the git user.
+var logRepoShapes = []*regexp.Regexp{
+	regexp.MustCompile(`^https://` + repoHostPattern + `/` + repoPartPattern + `/` + repoPartPattern + `$`),
+	regexp.MustCompile(`^ssh://git@` + repoHostPattern + `(?::[0-9]{1,5})?/` + repoPartPattern + `/` + repoPartPattern + `$`),
+	regexp.MustCompile(`^git@` + repoHostPattern + `:` + repoPartPattern + `/` + repoPartPattern + `$`),
+}
+
+// logRepo renders repo for a log line without any credential it carries
+// (#711). A clone URL can embed a token (https://x-access-token:TOKEN@host/…,
+// a bare-username TOKEN@host, or git's transport-helper form
+// http::http://U:TOKEN@host/r), and the log file keeps it. exec's argv
+// masking covers only KEY=VALUE elements a caller registers, not these
+// fields.
+//
+// It is an ALLOWLIST, not a redactor. Three review rounds each found a form
+// that a find-the-userinfo rule missed, so nothing from a non-local repo
+// reaches the log unless a strict positive parse accepted it:
+//
+//   - A local path (hasLocalPathPrefix) is logged as is.
+//   - A repo that is exactly one of logRepoShapes is logged as
+//     <host>/<owner>/<repo>, rebuilt from the captured fields only. A
+//     trailing ".git" is dropped.
+//   - Anything else is logged as remoteRepoPlaceholder. That covers
+//     userinfo, a query, a fragment, "::", percent-escapes, backslashes,
+//     whitespace, bracketed IPv6, odd slash counts, and every other scheme.
+//
+// It depends only on regexp, so it can be lifted unchanged into a shared
+// package.
+func logRepo(repo string) string {
+	if hasLocalPathPrefix(repo) {
+		return repo
+	}
+	for _, shape := range logRepoShapes {
+		if m := shape.FindStringSubmatch(repo); m != nil {
+			return m[1] + "/" + m[2] + "/" + strings.TrimSuffix(m[3], ".git")
+		}
+	}
+	return remoteRepoPlaceholder
+}
+
+// exitCode is what a checkout failure's log line keeps of err: the exit code
+// of a *exec.CommandError, else -1. err's own text is never logged here,
+// because a CommandError renders its whole argv, and the argv carries repo
+// with any token in it (#711).
+func exitCode(err error) int {
+	var cmdErr *exec.CommandError
+	if errors.As(err, &cmdErr) {
+		return cmdErr.ExitCode
+	}
+	return -1
+}
+
+// discardSandbox removes a workspace Sandbox created but could not populate,
+// so a failed clone or worktree add does not leak its temp dir (#707). It goes
+// through Teardown, the one guarded delete sink. A failure here is logged and
+// never replaces the checkout error the caller is about to return.
+func discardSandbox(ctx context.Context, run exec.Runner, dir string) {
+	if err := Teardown(ctx, run, dir); err != nil {
+		slog.Warn("Failed to remove the sandbox directory after a failed checkout.", "sandbox", dir, "error", err)
+	}
+}
+
+// hasLocalPathPrefix reports whether repo is spelled as a filesystem path:
+// absolute, ./ or ../ relative, or ".". isLocalRepo and logRepo share it.
+func hasLocalPathPrefix(repo string) bool {
+	return strings.HasPrefix(repo, "/") || strings.HasPrefix(repo, "./") || strings.HasPrefix(repo, "../") || repo == "."
 }
 
 // isLocalRepo reports whether repo looks like a filesystem path (vs. an
 // owner/repo remote reference) — an absolute/relative path, or one that
 // exists on disk.
 func isLocalRepo(repo string) bool {
-	if strings.HasPrefix(repo, "/") || strings.HasPrefix(repo, "./") || strings.HasPrefix(repo, "../") || repo == "." {
+	if hasLocalPathPrefix(repo) {
 		return true
 	}
 	if _, err := os.Stat(repo); err == nil {
