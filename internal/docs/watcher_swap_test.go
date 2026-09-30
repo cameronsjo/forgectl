@@ -50,6 +50,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -1046,6 +1047,9 @@ func TestWatcherRun_EventThroughSwappedDir_DoesNotReload(t *testing.T) {
 func TestWatcher_MovedOutThenRelinked_DropsDescendantWatches(t *testing.T) {
 	for _, name := range []string{"a", "dir.md"} {
 		t.Run(name, func(t *testing.T) {
+			if runtime.GOOS == "windows" {
+				t.Skip("the relink renames a symlink over a directory symlink, which Windows refuses")
+			}
 			root, outside := swapFixture(t)
 			dir := filepath.Join(root, name)
 			if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o750); err != nil {
