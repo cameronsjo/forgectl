@@ -198,8 +198,8 @@ var launchGetwd = os.Getwd
 // launchWorkingDirectory is the working directory `launch` and `launch which`
 // resolve a profile for. Its *PathError goes through termsafe.Error BEFORE the
 // wrap (#832): termsafe.Error reconstructs and caps the path only for a
-// *PathError that is the error itself, so wrapping first let a hostile-length
-// path through whole.
+// *PathError that is the error itself, so wrapping first rendered the path
+// escaped but at full length.
 func launchWorkingDirectory() (string, error) {
 	cwd, err := launchGetwd()
 	if err != nil {

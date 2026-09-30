@@ -476,6 +476,8 @@ func TestQuotePath_CapsKeepingTheFinalElement(t *testing.T) {
 		{"long final element keeps half the budget", "/" + strings.Repeat("x", 20) + "END", 8, `"/xxx"…"xEND"`},
 		{"no separator keeps half the budget", strings.Repeat("y", 20) + "END", 8, `"yyyy"…"yEND"`},
 		{"one-rune budget keeps the head only", "/abc", 1, `"/"…`},
+		{"trailing separator keeps the directory name", "/abcdefghij/name/", 12, `"/abcde"…"/name/"`},
+		{"only separators keeps half the budget", strings.Repeat("/", 20), 8, `"////"…"////"`},
 		{"escapes are never split", "/\u202e\u202e\u202e/f", 4, `"/\u202e"…"/f"`},
 		{"invalid UTF-8 counts per byte", "/\xff\xfe\xfd\xfc/f", 4, `"/\xff"…"/f"`},
 		{"deep", dir + "/name.go", 0, QuoteText(dir[:PathEchoMaxRunes-len("/name.go")]) + "…" + `"/name.go"`},
@@ -495,9 +497,9 @@ func TestQuotePath_CapsKeepingTheFinalElement(t *testing.T) {
 	}
 }
 
-// TestQuotePathIfUnsafe_KeepsALongOrdinaryPathWhole pins the one caller that
-// must not cap (#832): its output is a machine-parseable field, so a long
-// but ordinary path has to come back byte-identical.
+// TestQuotePathIfUnsafe_KeepsALongOrdinaryPathWhole pins the uncapped form
+// (#832): QuotePathIfUnsafe's callers print machine-parseable fields, so a
+// long but ordinary path has to come back byte-identical.
 //
 // Mutation: quote through QuotePath in QuotePathIfUnsafe and the long path
 // comes back cut and quoted.

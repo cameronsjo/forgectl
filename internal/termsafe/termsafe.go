@@ -159,8 +159,9 @@ const PathEchoMaxRunes = 512
 // identifies a file is its name at the end (#832): the result is the quoted
 // head, an ellipsis, and the quoted tail, the ellipsis sitting between the
 // two quotes so it cannot be read as path text. The tail is the final path
-// element (from its separator on) when that fits in three quarters of the
-// budget, and the last half of the budget otherwise; the head gets the rest.
+// element (from its separator on, trailing separators included) when that
+// fits in three quarters of the budget, and the last half of the budget
+// otherwise; the head gets the rest.
 //
 // The cut counts INPUT runes, before escaping, so it never splits an escape.
 // Invalid UTF-8 counts one rune per bad byte, as range does. maxRunes < 1
@@ -179,7 +180,9 @@ func QuotePathMax(path string, maxRunes int) string {
 		return QuoteText(path)
 	}
 	tail := maxRunes / 2
-	if sep := strings.LastIndexAny(path, `/\`); sep >= 0 {
+	// Trailing separators belong to the final element, so a directory path
+	// ending in `/` keeps its name rather than a bare "/".
+	if sep := strings.LastIndexAny(strings.TrimRight(path, `/\`), `/\`); sep >= 0 {
 		// The separator is ASCII, so it starts a rune; count the runes from it.
 		elem := total - sort.SearchInts(starts, sep)
 		if elem <= maxRunes-maxRunes/4 {
@@ -197,8 +200,9 @@ func QuotePathMax(path string, maxRunes int) string {
 // nothing but the surrounding quotes, and the full, uncapped QuoteText
 // escaping otherwise.
 //
-// It exists for a sink whose output is BOTH rendered to a terminal and a
-// documented machine-parseable field — `forgectl pr list` field 3, which
+// It exists for sinks whose output is BOTH rendered to a terminal and a
+// machine-parseable field, used at the `pr` listing, findings, queue, and
+// repair rows. The documented one is `forgectl pr list` field 3, which
 // `pr teardown` is fed. Unconditional quoting there would rewrite every
 // ordinary row and break callers parsing it; printing raw would let a planted
 // breadcrumb filename drive the reader's terminal. Quoting only the paths that
@@ -207,8 +211,8 @@ func QuotePathMax(path string, maxRunes int) string {
 //
 // Prefer plain QuotePath on any sink that is human-only.
 func QuotePathIfUnsafe(path string) string {
-	// QuoteText, not the capped QuotePath: this is a machine-parseable field,
-	// and a cut would rewrite a long but ordinary path in it (#832).
+	// QuoteText, not the capped QuotePath: its callers print machine-parseable
+	// fields, and a cut would rewrite a long but ordinary path in them (#832).
 	if quoted := QuoteText(path); quoted != `"`+path+`"` {
 		return quoted
 	}

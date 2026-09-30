@@ -590,7 +590,7 @@ func (c *Client) pruneLocked(ctx context.Context, opts PruneOpts) (PruneReport, 
 			return report, fmt.Errorf("refusing to prune without confirmation: this UNLINKS %d set-aside record(s) "+
 				"and rewrites %s, and there is no terminal to confirm on — pass --yes to proceed, "+
 				"or --dry-run to see what it would do",
-				len(removable), termsafe.QuotePath(c.repairLogPath()))
+				len(removable), termsafe.QuoteText(c.repairLogPath()))
 		}
 		approved, cerr := c.confirmRemoval(prunePrompt(len(removable), dropped, c.repairLogPath()))
 		if cerr != nil {
@@ -1072,12 +1072,13 @@ func (c *Client) writeRepairLogAtomic(plan *repairLogPlan, src io.Reader) error 
 
 // prunePrompt is what the confirmation gate shows. It names the UNLINK
 // explicitly, because this is the one repair arm that does not rename, and a
-// confirmation that does not say what is destroyed is not one.
+// confirmation that does not say what is destroyed is not one. The log path
+// is quoted whole (QuoteText), never cut by the capped QuotePath.
 func prunePrompt(files, dropped int, logPath string) string {
 	return fmt.Sprintf("Remove set-aside session records and compact the repair audit log?\n"+
 		"  records: %d file(s) past the retention window — these are UNLINKED, and the audit row is the only trace left\n"+
 		"  log:     %s, dropping %d settled row(s)",
-		files, termsafe.QuotePath(logPath), dropped)
+		files, termsafe.QuoteText(logPath), dropped)
 }
 
 // pruneItems flattens the candidate set into the report, in enumeration order.

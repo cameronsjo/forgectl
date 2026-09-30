@@ -20,6 +20,11 @@ import (
 // git/ref/heads/ that the server resolves. Reading the decoded req.URL.Path
 // instead would let a whole-name escape pass: `a%2Fb` and `a/b` decode alike
 // but are routed differently (#832).
+//
+// Each segment is decoded form-style (url.QueryUnescape), so a literal `+`
+// reads as a space. How GitHub's router treats `+` in a path is unverified;
+// this is the pessimistic model, under which an unescaped `+` asks about
+// another ref and only %2B names `a+b`.
 func ghServedRef(t *testing.T, path string) []string {
 	t.Helper()
 	path = strings.ReplaceAll(path, "{branch}", "main")
@@ -35,7 +40,7 @@ func ghServedRef(t *testing.T, path string) []string {
 	}
 	segments := strings.Split(sent[i+len(marker):], "/")
 	for j, seg := range segments {
-		if segments[j], err = url.PathUnescape(seg); err != nil {
+		if segments[j], err = url.QueryUnescape(seg); err != nil {
 			t.Fatalf("request path %q has a malformed escape: %v", sent, err)
 		}
 	}
