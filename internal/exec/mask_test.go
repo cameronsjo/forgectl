@@ -731,28 +731,58 @@ func fuzzString(raw []byte) string {
 //   - nothing panics;
 //   - straddleLen never drops more than the tail it was given;
 //   - unless the round cap dropped the tail whole, what remains starts with
-//     no proper suffix of any value or entry that straddleLen scans, and
+//     no proper suffix of any value, and no suffix of any entry at least as
+//     long as that entry's value, each checked on its own (#926), and it
 //     matches the probe-every-suffix reference;
 //   - the masked tail never contains a whole value of minScrubLen or more,
 //     unless an entry's shown key spells it (the key is rendered by design).
 //
-// Mutation: size straddleLen's longest from m.entries only and the seed
-// corpus panics; make straddleLen skip m.values and the reference disagrees.
+// With raw unset, entries, values and the stream are mapped onto
+// fuzzAlphabet and every entry gets a "K" key, which keeps overlaps dense.
+// With raw set (#926), they are the fuzzer's bytes as given: the full byte
+// range, invalid UTF-8, and an entry with an empty key ("=value"). A value
+// holding a byte of Redacted is then exempt from the whole-value assertion,
+// since a replacement can spell it.
+//
+// Mutations: size straddleLen's longest from m.entries only and the seed
+// corpus panics; make straddleLen skip m.values and the reference disagrees;
+// make straddleLen and the reference both skip m.entries and the entry
+// check fails; make suffixPrefix compare bytes under a 0x7f mask and the
+// full-byte-range seed disagrees with the reference; make straddleLen skip
+// an entry with an empty key and the empty-key seed fails.
 func FuzzStraddleLen(f *testing.F) {
-	f.Add([]byte("k=b"), []byte("bgkzbgkz_bgkz"), []byte("gkz_bgkz tail bgkzbgkz_bgkz"), uint8(20))
-	f.Add([]byte(""), []byte("bbbbbbbbbbbbbbbbg"), []byte("bbbbbbbbg zz"), uint8(5))
-	f.Add([]byte("kb=gg"), []byte("zzzzzzzzzzzz"), []byte("zzzzzzzzzzzzzzzzzzzzzzz"), uint8(7))
-	f.Add([]byte("\x05\x06=\x07"), []byte("\x07\x08\x07\x08\x07\x08\x07\x08\x07"), []byte("\x08\x07\x08\x07\x08"), uint8(3))
-	f.Fuzz(func(t *testing.T, rawEntries, rawValues, rawStream []byte, limit uint8) {
+	f.Add([]byte("k=b"), []byte("bgkzbgkz_bgkz"), []byte("gkz_bgkz tail bgkzbgkz_bgkz"), uint8(20), false)
+	f.Add([]byte(""), []byte("bbbbbbbbbbbbbbbbg"), []byte("bbbbbbbbg zz"), uint8(5), false)
+	f.Add([]byte("kb=gg"), []byte("zzzzzzzzzzzz"), []byte("zzzzzzzzzzzzzzzzzzzzzzz"), uint8(7), false)
+	f.Add([]byte("\x05\x06=\x07"), []byte("\x07\x08\x07\x08\x07\x08\x07\x08\x07"), []byte("\x08\x07\x08\x07\x08"), uint8(3), false)
+	// An empty key: the entry is "=zzqqyyww", and a cut after its '=' leaves
+	// the bare value starting the tail.
+	f.Add([]byte("=zzqqyyww"), []byte(""), []byte("xx=zzqqyyww tail"), uint8(0), true)
+	// The full byte range: a value holding every nonzero byte, and a stream
+	// starting with 'C' then the value's last 60 bytes, which only a
+	// comparison that ignores the high bit matches.
+	allBytes := make([]byte, 0, 255)
+	for c := 1; c <= 255; c++ {
+		allBytes = append(allBytes, byte(c))
+	}
+	f.Add([]byte("k=\x01\x7f\x80\xff"), allBytes, append([]byte("C"), allBytes[0xc4-1:]...), uint8(0), true)
+	// Invalid UTF-8: lone continuation bytes and bytes no encoding uses,
+	// in the value, the entry and the cut.
+	f.Add([]byte("\xff=\x80\x80zqyw\xfe"), []byte("\xff\xfe\x80\x80zqywzqyw1"), []byte("\x80zqywzqyw1 tail \xfe\x80"), uint8(0), true)
+	f.Fuzz(func(t *testing.T, rawEntries, rawValues, rawStream []byte, limit uint8, raw bool) {
 		// '\x00' separates list items before the alphabet mapping.
+		conv, key := fuzzString, "K"
+		if raw {
+			conv, key = func(b []byte) string { return string(b) }, ""
+		}
 		var entries, values []string
 		for _, r := range bytes.Split(rawEntries, []byte{0}) {
-			entries = append(entries, "K"+fuzzString(r))
+			entries = append(entries, key+conv(r))
 		}
 		for _, r := range bytes.Split(rawValues, []byte{0}) {
-			values = append(values, fuzzString(r))
+			values = append(values, conv(r))
 		}
-		stream := fuzzString(rawStream)
+		stream := conv(rawStream)
 		m := maskFrom(WithMaskedAssignments(context.Background(), entries)).withValues(values)
 		d := m.data()
 		var shownKeys []string
@@ -783,13 +813,23 @@ func FuzzStraddleLen(f *testing.F) {
 						}
 					}
 				}
+				// An entry's suffix at least as long as its value: the
+				// cut fell inside the key or right after '=' (#926).
+				for _, e := range d.entries {
+					_, v, _ := strings.Cut(e, "=")
+					for l := len(v); l < len(e) && l <= len(rest); l++ {
+						if strings.HasPrefix(rest, e[len(e)-l:]) {
+							t.Fatalf("after dropping %d of %q, the rest starts with %q, a suffix of entry %q reaching into its key", n, tail, e[len(e)-l:], e)
+						}
+					}
+				}
 			}
 
 			tb := &tailBuffer{limit: lim}
 			_, _ = tb.Write([]byte("~" + stream)) // the "~" forces a cut
 			got, _ := maskedTail(tb, m)
 			for _, v := range d.values {
-				if len(v) < minScrubLen || !strings.Contains(got, v) {
+				if len(v) < minScrubLen || !strings.Contains(got, v) || raw && strings.ContainsAny(v, Redacted) {
 					continue
 				}
 				if slices.ContainsFunc(shownKeys, func(k string) bool { return strings.Contains(k, v) }) {

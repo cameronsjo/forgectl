@@ -11,7 +11,6 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/projects"
-	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -138,13 +137,14 @@ func projectCandidateStatus(repo projects.Repo) string {
 	return status
 }
 
-// safeCandidate renders one fixed-column candidate field. It is safeTerm
+// safeCandidate renders one fixed-column candidate field. It is safeText
 // alone: the sink used to need a second pass to neutralize the tab the old
 // sanitizer deliberately preserved, and SafeLine escapes tab like every other
 // non-graphic rune, so the layout rule this sink needs now falls out of the
-// shared boundary rather than being maintained beside it.
+// shared boundary rather than being maintained beside it. The free-text cap
+// bounds a candidate without cutting any realistic one (#913).
 func safeCandidate(s string) string {
-	return safeTerm(s)
+	return safeText(s)
 }
 
 // repoPickerLabel renders one interactive picker row. It exists as its own
@@ -157,7 +157,7 @@ func safeCandidate(s string) string {
 // chooses those bytes. The headless rendering of this same data goes through
 // the boundary, and the interactive path is the more common one.
 func repoPickerLabel(r projects.Repo) string {
-	return safeTerm(r.DisplayLine())
+	return safeText(r.DisplayLine())
 }
 
 func projectAmbiguityError(mode projectSelectionMode, count int) error {
@@ -177,7 +177,7 @@ func openOrClone(ctx context.Context, client *projects.Client, cmd *cobra.Comman
 	dir := r.LocalPath
 	if !r.Cloned {
 		// Best-effort diagnostic write, same as every stderr note here.
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s/%s from %s…\n", termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), termsafe.SafeLine(r.Host))
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s/%s from %s…\n", safeTitle(r.Owner), safeTitle(r.Name), safeTitle(r.Host))
 		d, err := client.Clone(ctx, r)
 		if err != nil {
 			return err

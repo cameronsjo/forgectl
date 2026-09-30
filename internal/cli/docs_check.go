@@ -76,22 +76,22 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 			} else {
 				out := cmd.OutOrStdout()
 				for _, f := range report.Findings {
-					line := termsafe.SafeLine(f.Root) + "/" + termsafe.SafeLine(f.Path)
+					line := safeLabel(f.Root) + "/" + safeColumnPath(f.Path)
 					if f.Line > 0 {
 						line += ":" + strconv.Itoa(f.Line)
 					}
 					line += ": " + string(f.Kind)
 					if f.Target != "" {
-						line += " " + termsafe.SafeLine(f.Target)
+						line += " " + safeText(f.Target)
 					}
 					if f.StaleAfter != "" {
-						line += " " + termsafe.SafeLine(f.StaleAfter)
+						line += " " + safeLabel(f.StaleAfter)
 					}
 					_, _ = fmt.Fprintln(out, line)
 				}
 				for _, sp := range report.Skipped {
 					_, _ = fmt.Fprintf(out, "%s/%s: skipped (%s)\n",
-						termsafe.SafeLine(sp.Root), termsafe.SafeLine(sp.Rel), termsafe.SafeLine(sp.Reason))
+						safeLabel(sp.Root), safeColumnPath(sp.Rel), safeText(sp.Reason))
 				}
 			}
 
@@ -153,6 +153,6 @@ func noteSkippedPaths(w io.Writer, idx *docspkg.Index) {
 	}
 	for _, root := range order {
 		_, _ = fmt.Fprintf(w, "skipped %d unreadable path(s) under %s (see docs check)\n",
-			counts[root], termsafe.SafeLine(root))
+			counts[root], safeLabel(root))
 	}
 }
