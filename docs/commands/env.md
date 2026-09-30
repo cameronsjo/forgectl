@@ -9,7 +9,7 @@ forgectl env keys [--file .env]                             # list KEY names onl
 forgectl env set KEY [--file .env] [--clipboard]             # value from piped stdin, no-echo prompt, or clipboard — never argv
 forgectl env get KEY --clipboard [--file .env]               # value to clipboard only; no print path exists
 forgectl env check [--file .env] [--example .env.example]    # missing/extra keys, names only
-forgectl env redact [--file .env]                            # print file with values masked ****
+forgectl env redact [--file .env]                            # print file with values and comments masked ****
 #   --file must name an env file (.env, .env.*, *.env); --any-file overrides, TTY-confirmed only
 
 forgectl env set a.b.key --sops [--file secrets.sops.yaml]   # one key into a SOPS-encrypted YAML file
@@ -112,3 +112,4 @@ Workarounds. For bash, do not `source` the file when a value is multi-line or th
   **What that gate does and does not bound.** It stops a caller with no pty, which covers the common agent case. It does **not** stop an agent running inside a terminal multiplexer pane: stdin there is a real pty and the prompt is answerable. An earlier version of this note claimed the TTY gate was *the* bound on an agent; that was wrong, and it is corrected here rather than quietly dropped. Read it as raising the cost and covering the ptyless case. The bound that does not depend on a pty is the env-file-name allowlist above — `--any-file` is the deliberate, human-facing way around it, and granting a session that flag is granting real authority.
 - `--clipboard` is macOS-only (shells out to `pbcopy`/`pbpaste`); it errors clearly on other platforms rather than silently no-op'ing.
 - Secret **lengths** stay out of the logs too: `env` builds its clipboard client with `clip.WithSensitive()`, which drops the byte-count the clipboard layer otherwise logs at `info`. A length is signal — it distinguishes key types and tracks rotations — which is the same reason `redact` masks to a fixed `****` rather than revealing length.
+- **`redact` masks comments as well as values.** A dotenv comment is where a commented-out old key or a `# prod token: …` note lives, so every `#` line, and every trailing comment after a quoted value, prints as its leading whitespace plus a fixed `# ****`. Masking rather than dropping keeps the output line-for-line with the file (a multi-line quoted value still collapses to one `KEY=****` line). A `#` inside a quoted value is part of the value, and after an unquoted value `# …` is part of the value too; either way it is masked with the value.

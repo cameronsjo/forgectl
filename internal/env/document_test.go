@@ -34,7 +34,12 @@ package env
 //
 // Redacted (Classification: pure render, value-blind)
 //   [x] Constant 4-char mask, no length hint regardless of value length
-//   [x] A quoted value's inline trailing comment is kept
+//   [x] A quoted value's inline trailing comment keeps its position and
+//       leading whitespace, but its text is replaced by the fixed mask
+//   [x] Every "#" comment line is masked to its leading whitespace plus
+//       the fixed "# ****" marker — content-free and length-free — while
+//       blanks, export lines, and line count stay aligned with the source
+//   [x] A '#' inside a quoted value is value data, masked with the value
 //   [x] An unquoted value's trailing "#…" is masked WITH the value (no
 //       comment boundary exists for a bare assignment)
 //   [x] A malformed line is masked in its ENTIRETY, not just after its
@@ -352,7 +357,7 @@ func TestDocument_QuotedRealTrailingComment_StillRoundTripsAndRedacts(t *testing
 	// The non-ambiguous case must be unaffected: a genuine trailing comment
 	// after a quoted value (first non-space byte of the trailer is '#')
 	// still parses as KindPair, round-trips byte-for-byte, and redact keeps
-	// the comment while masking the value.
+	// the comment's position while masking both the value and its text.
 	const sentinel = "s3ntinel-VALUE-77x"
 	src := "export BAZ=\"" + sentinel + "\"   # trailing comment\n"
 
@@ -368,7 +373,7 @@ func TestDocument_QuotedRealTrailingComment_StillRoundTripsAndRedacts(t *testing
 	}
 
 	redacted := string(doc.Redacted())
-	want := "export BAZ=****   # trailing comment\n"
+	want := "export BAZ=****   # ****\n"
 	if redacted != want {
 		t.Errorf("Redacted() = %q, want %q", redacted, want)
 	}
@@ -626,7 +631,7 @@ func TestDocument_Redacted_ConstantMaskNoLengthHint(t *testing.T) {
 	assertNoSecretInOutput(t, sentinel, "", redacted)
 }
 
-func TestDocument_Redacted_QuotedInlineCommentKept(t *testing.T) {
+func TestDocument_Redacted_QuotedInlineCommentMasked(t *testing.T) {
 	const sentinel = "s3ntinel-VALUE-77x"
 	src := "export BAZ=\"" + sentinel + "\"   # trailing comment\n"
 
@@ -636,11 +641,129 @@ func TestDocument_Redacted_QuotedInlineCommentKept(t *testing.T) {
 	}
 
 	redacted := string(doc.Redacted())
-	want := "export BAZ=****   # trailing comment\n"
+	want := "export BAZ=****   # ****\n"
 	if redacted != want {
 		t.Errorf("Redacted() = %q, want %q", redacted, want)
 	}
 	assertNoSecretInOutput(t, sentinel, "", redacted)
+}
+
+func TestDocument_Redacted_QuotedInlineCommentSecretMasked(t *testing.T) {
+	// The leak the inline-comment mask closes: a quoted value followed by a
+	// note that carries a secret. Before the fix redactPair emitted the
+	// trailer verbatim.
+	const sentinel = "sk_live_INLINE_S3NTINEL"
+	src := "API_KEY=\"new\" # old: " + sentinel + "\n"
+
+	doc, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	redacted := string(doc.Redacted())
+	if want := "API_KEY=**** # ****\n"; redacted != want {
+		t.Errorf("Redacted() = %q, want %q", redacted, want)
+	}
+	assertNoSecretInOutput(t, sentinel, "", redacted)
+}
+
+func TestDocument_Redacted_CommentLinesMasked(t *testing.T) {
+	// Full-line comments are where a dotenv file keeps a commented-out old
+	// key or a "# prod token: …" note. Each must keep its leading
+	// whitespace and '#', so the output lines up with the source, and lose
+	// everything else to a fixed marker — no text, no length.
+	const (
+		s1 = "sk_live_COMMENT_S3NTINEL_1"
+		s2 = "sk_live_COMMENT_S3NTINEL_2"
+		s3 = "sk_live_COMMENT_S3NTINEL_3"
+		s4 = "sk_live_COMMENT_S3NTINEL_4"
+	)
+	src := "# prod token: " + s1 + "\n" +
+		"#" + s2 + "\n" +
+		"   # indented " + s3 + "\n" +
+		"\t#\t" + s4 + "\r\n" +
+		"#\n" +
+		"FOO=bar\n"
+
+	doc, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	redacted := string(doc.Redacted())
+	want := "# ****\n" +
+		"# ****\n" +
+		"   # ****\n" +
+		"\t# ****\r\n" +
+		"# ****\n" +
+		"FOO=****\n"
+	if redacted != want {
+		t.Errorf("Redacted() = %q, want %q", redacted, want)
+	}
+	for _, leak := range []string{s1, s2, s3, s4, "prod token", "indented"} {
+		assertNoSecretInOutput(t, leak, "", redacted)
+	}
+}
+
+func TestDocument_Redacted_ShapesAroundComments(t *testing.T) {
+	// The neighbours of the comment mask, each pinned so the mask neither
+	// under- nor over-reaches: export keeps its keyword, a blank line stays
+	// blank, a bare value's "# …" is value text masked with it, a '#'
+	// inside a quoted value is value data (not a comment), and a quoted
+	// value's whitespace-only trailer has no comment to mask.
+	cases := []struct {
+		name, src, want, leak string
+	}{
+		{"export_pair", "export TOKEN=sk_live_EXP\n", "export TOKEN=****\n", "sk_live_EXP"},
+		{"export_quoted_inline", "export TOKEN='sk_live_EXQ' # note sk_live_EXN\n", "export TOKEN=**** # ****\n", "sk_live_EX"},
+		{"blank_lines", "\n   \n\t\n", "\n   \n\t\n", ""},
+		{"bare_trailer", "KEY=v # sk_live_BARE\n", "KEY=****\n", "sk_live_BARE"},
+		{"hash_in_double_quotes", "KEY=\"a # sk_live_DQ\"\n", "KEY=****\n", "sk_live_DQ"},
+		{"hash_in_single_quotes", "KEY='a # sk_live_SQ'\n", "KEY=****\n", "sk_live_SQ"},
+		{"quoted_ws_only_trailer", "KEY=\"v\"   \n", "KEY=****   \n", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc, err := Parse(strings.NewReader(tc.src))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			redacted := string(doc.Redacted())
+			if redacted != tc.want {
+				t.Errorf("Redacted() = %q, want %q", redacted, tc.want)
+			}
+			if tc.leak != "" {
+				assertNoSecretInOutput(t, tc.leak, "", redacted)
+			}
+		})
+	}
+}
+
+func TestDocument_Redacted_LineAlignedWithSource(t *testing.T) {
+	// redact's output is read side by side with the source, so every
+	// single-line entry — comments included — must keep its line.
+	src := "# header\n" +
+		"\n" +
+		"export A=1\n" +
+		"  # note\n" +
+		"B=\"2\" # tail\n" +
+		"not an assignment\n" +
+		"C=3\n"
+
+	doc, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	srcLines := strings.Split(src, "\n")
+	outLines := strings.Split(string(doc.Redacted()), "\n")
+	if len(outLines) != len(srcLines) {
+		t.Fatalf("Redacted() has %d lines, source has %d", len(outLines), len(srcLines))
+	}
+	for i, want := range []string{"# ****", "", "export A=****", "  # ****", "B=**** # ****", "****", "C=****"} {
+		if outLines[i] != want {
+			t.Errorf("line %d = %q, want %q", i+1, outLines[i], want)
+		}
+	}
 }
 
 func TestDocument_Redacted_UnquotedTrailerMasked(t *testing.T) {
