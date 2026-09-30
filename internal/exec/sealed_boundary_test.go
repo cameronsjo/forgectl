@@ -130,10 +130,13 @@ func TestSealedStartHasOneCaller(t *testing.T) {
 // checks, but the kind, capture-mode and cap checks run in validated around
 // it, so a second caller could build a Command those checks never saw.
 // validated.New is a package-level func, reachable only by naming it, so a
-// Uses walk sees every route. Test files are not checked.
+// Uses walk sees every route; inside validated it must also be one direct
+// call, never a func value (callShapeFindings, the rule startSealed has in
+// RunSensitive). Test files are not checked.
 //
-// Mutation that turns it red: in sensitive.go, `var _, _ =
-// validated.New(sealed.New("/bin/sh"), nil, nil, false)`.
+// Mutations that turn it red: in sensitive.go, `var _, _ =
+// validated.New(sealed.New("/bin/sh"), nil, nil, false)`; inside validated,
+// `zzNew = validated.New` with a package var zzNew of its type.
 func TestValidatedNewHasOneCaller(t *testing.T) {
 	for _, p := range guardPlatforms {
 		c := checkExecFor(t, p)
@@ -144,6 +147,9 @@ func TestValidatedNewHasOneCaller(t *testing.T) {
 		for _, f := range namedOutside(c, newFn, "SensitiveCommand", "validated") {
 			t.Errorf("[%s] %s: validated.New is named outside (SensitiveCommand).validated; build a Command through validated so every check runs",
 				p, f)
+		}
+		for _, f := range callShapeFindings(c, newFn, "SensitiveCommand", "validated") {
+			t.Errorf("[%s] %s", p, f)
 		}
 	}
 }
@@ -180,21 +186,43 @@ func startSealedCallFindings(c *checkedPackage) []string {
 	if !ok {
 		return []string{"internal/exec declares no startSealed func; the rule would check nothing"}
 	}
+	return callShapeFindings(c, startSealed, "*OSSensitiveRunner", "RunSensitive")
+}
+
+// callShapeFindings returns every way the func within (a method of recv when
+// recv is not empty) breaks the call-shape rule for target: target is named
+// there exactly once, as the function of a direct call (plain or package-
+// qualified) outside every func literal, and never as a value. Uses outside
+// within are namedOutside's to report.
+func callShapeFindings(c *checkedPackage, target *types.Func, recv, within string) []string {
 	var fd *ast.FuncDecl
 	for _, f := range c.files {
 		for _, decl := range f.Decls {
 			d, ok := decl.(*ast.FuncDecl)
-			if ok && d.Name.Name == "RunSensitive" && d.Recv != nil && len(d.Recv.List) == 1 &&
-				types.ExprString(d.Recv.List[0].Type) == "*OSSensitiveRunner" && d.Body != nil {
+			if !ok || d.Name.Name != within || d.Body == nil {
+				continue
+			}
+			if recv == "" && d.Recv == nil ||
+				recv != "" && d.Recv != nil && len(d.Recv.List) == 1 && types.ExprString(d.Recv.List[0].Type) == recv {
 				fd = d
 			}
 		}
 	}
 	if fd == nil {
-		return []string{"no (*OSSensitiveRunner).RunSensitive with a body; the rule would check nothing"}
+		return []string{"no " + within + " with a body; the rule would check nothing"}
 	}
+	name := target.Name()
 	var findings []string
 	pos := func(n ast.Node) string { return c.fset.Position(n.Pos()).String() }
+	callee := func(fun ast.Expr) *ast.Ident {
+		switch f := ast.Unparen(fun).(type) {
+		case *ast.Ident:
+			return f
+		case *ast.SelectorExpr:
+			return f.Sel
+		}
+		return nil
+	}
 	calls := 0
 	var walk func(root ast.Node, inLit bool)
 	walk = func(root ast.Node, inLit bool) {
@@ -206,9 +234,9 @@ func startSealedCallFindings(c *checkedPackage) []string {
 					return false
 				}
 			case *ast.CallExpr:
-				if id, ok := ast.Unparen(n.Fun).(*ast.Ident); ok && c.info.Uses[id] == startSealed {
+				if id := callee(n.Fun); id != nil && c.info.Uses[id] == target {
 					if inLit {
-						findings = append(findings, pos(n)+": startSealed is called inside a func literal, which can be stored and run outside the runner")
+						findings = append(findings, pos(n)+": "+name+" is called inside a func literal, which can be stored and run elsewhere")
 					} else {
 						calls++
 					}
@@ -218,8 +246,8 @@ func startSealedCallFindings(c *checkedPackage) []string {
 					return false
 				}
 			case *ast.Ident:
-				if c.info.Uses[n] == startSealed {
-					findings = append(findings, pos(n)+": startSealed is used as a value; only a direct call in RunSensitive may name it")
+				if c.info.Uses[n] == target {
+					findings = append(findings, pos(n)+": "+name+" is used as a value; only a direct call in "+within+" may name it")
 				}
 			}
 			return true
@@ -227,7 +255,7 @@ func startSealedCallFindings(c *checkedPackage) []string {
 	}
 	walk(fd.Body, false)
 	if calls != 1 {
-		findings = append(findings, fmt.Sprintf("%s: RunSensitive calls startSealed directly %d times, want exactly 1", pos(fd), calls))
+		findings = append(findings, fmt.Sprintf("%s: %s calls %s directly %d times, want exactly 1", pos(fd), within, name, calls))
 	}
 	return findings
 }

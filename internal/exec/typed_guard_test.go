@@ -73,6 +73,11 @@ var refusedReflectMethods = map[string][]string{
 //     (reflectRule.promotes). An adapter embedding reflect.Value plus a
 //     method of its own satisfies an interface no reflect type does, and
 //     promotion is the only way a refused method reaches a use unnamed;
+//   - any interface type declared in the file (a named or generic interface,
+//     or an interface literal in any type position) with a method whose name
+//     is one of refusedReflectMethods, whatever its signature. Every
+//     look-alike needs such an interface, and stdlib interfaces such as
+//     net.Listener are not declared in the module, so they are unaffected;
 //   - any use (a call, a method value or a method expression, promoted or
 //     not) of a method in refusedReflectMethods, and of any method of the
 //     same name, whatever its signature, on an interface a reflect.Value or
@@ -386,6 +391,7 @@ func (l *typedLoader) check(lp *typedListPackage, bodies bool) (*types.Package, 
 // *reflect.Value, whose method set holds Value's too, and a reflect.Type).
 type reflectRule struct {
 	refused []*types.Func
+	names   map[string]bool // the refused methods' names
 	holders []map[string]bool
 }
 
@@ -393,7 +399,7 @@ type reflectRule struct {
 // one is missing: a renamed method would otherwise drop out of the rule
 // unseen.
 func newReflectRule(reflectPkg *types.Package) (*reflectRule, error) {
-	rule := &reflectRule{}
+	rule := &reflectRule{names: map[string]bool{}}
 	for _, recv := range []string{"Value", "Type"} {
 		obj, ok := reflectPkg.Scope().Lookup(recv).(*types.TypeName)
 		if !ok {
@@ -418,6 +424,7 @@ func newReflectRule(reflectPkg *types.Package) (*reflectRule, error) {
 				return nil, fmt.Errorf("reflect.%s has no method %s", recv, name)
 			}
 			rule.refused = append(rule.refused, fn)
+			rule.names[name] = true
 		}
 	}
 	return rule, nil
@@ -457,9 +464,21 @@ func typedFindings(fset *token.FileSet, files []*ast.File, info *types.Info, rul
 					if len(field.Names) != 0 {
 						continue
 					}
-					if via := rule.promotes(info.Types[field.Type].Type); via != nil && reflectMemoryAllowed[name+" embed"] == "" {
+					key := name + " embed " + types.ExprString(field.Type)
+					if via := rule.promotes(info.Types[field.Type].Type); via != nil && reflectMemoryAllowed[key] == "" {
 						report(field.Pos(), fmt.Sprintf("embeds %s, which promotes %s: an adapter type can then satisfy an interface no reflect type does and reach it without naming it; add %q to reflectMemoryAllowed with a reason only after review",
-							types.ExprString(field.Type), via.FullName(), name+" embed"))
+							types.ExprString(field.Type), via.FullName(), key))
+					}
+				}
+			}
+			if it, ok := n.(*ast.InterfaceType); ok {
+				if iface, ok := info.Types[it].Type.(*types.Interface); ok {
+					for m := range iface.Methods() {
+						key := name + " interface " + m.Name()
+						if rule.names[m.Name()] && reflectMemoryAllowed[key] == "" {
+							report(it.Pos(), fmt.Sprintf("declares an interface with method %s, a name reflect.Value or reflect.Type uses to hand out an address; any such interface, whatever the signature, can carry a reflect value (or an adapter around one) to a call site that never names reflect; add %q to reflectMemoryAllowed with a reason only after review",
+								m.Name(), key))
+						}
 					}
 				}
 			}
@@ -484,19 +503,23 @@ func typedFindings(fset *token.FileSet, files []*ast.File, info *types.Info, rul
 // promotes returns a refused reflect method that embedding a field of type t
 // promotes into the embedding struct, or nil. That covers reflect.Value,
 // *reflect.Value and reflect.Type themselves, and any type that embeds one of
-// them in turn. Promotion is the only way a refused method reaches a call
-// site without being named: a hand-written forwarder names it and is caught
-// at that use, but a struct embedding reflect.Value plus a method of its own
-// satisfies an interface no reflect type does, which the holder filter in
-// use lets through. So the embedding itself is refused.
+// them in turn, and an embedded interface whose promoted method use would
+// refuse (interface{ UnsafeAddr() uintptr }). Promotion is the only way a
+// refused method reaches a call site without being named: a hand-written
+// forwarder names it and is caught at that use, but a struct embedding
+// reflect.Value plus a method of its own satisfies an interface no reflect
+// type does, which the holder filter in use lets through. So the embedding
+// itself is refused.
 func (r *reflectRule) promotes(t types.Type) *types.Func {
 	if t == nil {
 		return nil
 	}
 	for _, refused := range r.refused {
 		obj, _, _ := types.LookupFieldOrMethod(t, true, nil, refused.Name())
-		if fn, ok := obj.(*types.Func); ok && slices.Contains(r.refused, fn.Origin()) {
-			return fn.Origin()
+		if fn, ok := obj.(*types.Func); ok {
+			if match := r.use(fn); match != nil {
+				return match
+			}
 		}
 	}
 	return nil
@@ -627,14 +650,22 @@ func holdsUnsafePointer(t types.Type, seen map[types.Type]bool) bool {
 // unsafe-importing file (TestNoFileReachesPastTheTypeSystem's to refuse) are
 // left alone.
 //
+// The declaration-site rule and use's interface arm overlap on purpose: any
+// look-alike declared in the module is refused where it is declared, and
+// use's arm still covers an interface declared elsewhere. So the arm's
+// mutations show only with the declaration rule off.
+//
 // Mutations that turn it red: drop the Types walk (the NewAt and SetPointer
-// rows go quiet), drop the interface arm of reflectRule.use (the look-alike
-// and constraint rows go quiet), match the interface arm on an identical
-// signature as well as the name (the three parametric rows go quiet), drop
-// the reflect-holder filter in reflectRule.use (the net.Listener-shaped row
-// reports Addr), drop the embedding check (the five adapter rows go quiet),
-// or enter a named struct in holdsUnsafePointer (the clean reflect row
-// reports reflect.Value).
+// rows go quiet); drop the declaration-site rule (the interface-literal row
+// goes quiet); with it off, drop use's interface arm (the look-alike and
+// constraint rows go quiet), match that arm on an identical signature as
+// well as the name (the three parametric rows go quiet), or check promotes
+// by identity instead of through use (the three embedded-interface rows go
+// quiet); drop the reflect-holder filter in use (net.Listener's Addr is
+// reported); drop the embedding check (the embedded reflect.Type row goes
+// quiet, and with the declaration rule off the other four adapter rows); or
+// enter a named struct in holdsUnsafePointer (the clean reflect row reports
+// reflect.Value).
 func TestTypedFindingsSeeEveryRoute(t *testing.T) {
 	const prelude = "package probe\n\nimport \"reflect\"\n\nvar _ reflect.Value\n\ntype sealedArg struct{ reveal func() string }\n\n"
 	rows := []struct {
@@ -694,7 +725,22 @@ func f(v *reflect.Value) uintptr {
 		{"adapter embedding reflect.Type", `type ad struct{ reflect.Type }
 func (ad) Extra() {}
 var _ = ad{}`, true},
-		{"Addr on a net.Listener-shaped interface", `func f(l interface{ Addr() string; Accept() error }) string { return l.Addr() }`, false},
+		{"embedded module interface carrying UnsafeAddr", `type U interface{ UnsafeAddr() uintptr }
+type ad struct{ U }
+func (ad) Extra() {}
+type J interface{ UnsafeAddr() uintptr; Extra() }
+func f(v reflect.Value) uintptr { return J(ad{v}).UnsafeAddr() }`, true},
+		{"embedded generic interface carrying UnsafeAddr", `type U[T any] interface{ UnsafeAddr() T }
+type ad struct{ U[uintptr] }
+func (ad) Extra() {}
+type J interface{ UnsafeAddr() uintptr; Extra() }
+func f(v reflect.Value) uintptr { return J(ad{v}).UnsafeAddr() }`, true},
+		{"embedded interface carrying MethodByName", `type U interface{ MethodByName(string) reflect.Value }
+type ad struct{ U }
+func (ad) Extra() {}
+type J interface{ MethodByName(string) reflect.Value; Extra() }
+func f(v reflect.Value) reflect.Value { return J(ad{v}).MethodByName("Addr") }`, true},
+		{"interface literal in a parameter type", `func f(x interface{ Pointer() int; Extra() }) {}`, true},
 		{"unrelated method on a generic interface", `type J[T any] interface{ Size() T }
 func g[T any](x J[T]) T { return x.Size() }`, false},
 		{"clean reflect use", `func f(a *sealedArg) (reflect.Kind, string, bool) {
@@ -714,6 +760,15 @@ func g[T any](x J[T]) T { return x.Size() }`, false},
 			}
 		})
 	}
+	t.Run("net.Listener's Addr stays clean", func(t *testing.T) {
+		// A stdlib interface is not declared in the module, so the
+		// declaration-site rule leaves it alone, and no reflect type has
+		// Accept or Close, so use does too.
+		src := "package probe\n\nimport \"net\"\n\nfunc f(l net.Listener) string { return l.Addr().String() }\n"
+		if got := probe.findings(t, src); len(got) != 0 {
+			t.Errorf("findings on net.Listener's Addr:\n%s", strings.Join(got, "\n"))
+		}
+	})
 	t.Run("a file importing unsafe is the import guard's", func(t *testing.T) {
 		src := "package probe\n\nimport \"unsafe\"\n\nfunc f(p unsafe.Pointer) *int { return (*int)(p) }\n"
 		if got := probe.findings(t, src); len(got) != 0 {
