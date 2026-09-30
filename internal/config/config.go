@@ -1089,19 +1089,57 @@ func LoadPath(path string) Config {
 }
 
 // describeDecodeError words a config parse failure for the operator: the file
-// and, when the decoder located the fault, its line and column. The underlying
-// error stays on the chain.
+// and, when the decoder located the fault, its line and column (carried by
+// scrubTOMLError's text). The underlying error stays on the chain.
 func describeDecodeError(path string, err error) error {
+	return fmt.Errorf("config file %s does not parse: %w", termsafe.QuotePath(path), scrubTOMLError(err))
+}
+
+// tomlQuotedFragment matches one Go-quoted string, the form BurntSushi/toml's
+// lexer renders the text it choked on in (`found "ghp" instead`).
+var tomlQuotedFragment = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+
+// scrubTOMLError rewords a toml.ParseError without the value text it quotes.
+//
+// The lexer's messages quote the leading bare word of an invalid unquoted
+// value, so `token = ghp_…` fails with `found "ghp"` and an AWS-style key
+// with up to twelve of its characters (#687). That text reaches stderr through
+// the loader's warning, the parse gate, `forgectl config` and `doctor`. The
+// rewording keeps what locates the fault — the line, the column and the last
+// key, capped — and replaces every double-quoted fragment of the message with
+// "…". A single-quoted rune ('[' or '\n') is one character of syntax and
+// stays. Anything that is not a ParseError (a type mismatch names the key
+// and the two types, never the value) passes through unchanged, and the
+// original error stays on the chain for errors.As.
+func scrubTOMLError(err error) error {
 	var pe toml.ParseError
-	if errors.As(err, &pe) && pe.Position.Line > 0 {
-		return fmt.Errorf("config file %s does not parse (line %d, column %d): %w",
-			termsafe.QuotePath(path), pe.Position.Line, pe.Position.Col, err)
+	if err == nil || !errors.As(err, &pe) {
+		return err
 	}
-	return fmt.Errorf("config file %s does not parse: %w", termsafe.QuotePath(path), err)
+	line := pe.Position.Line
+	if line == 0 {
+		line = pe.Line
+	}
+	var b strings.Builder
+	b.WriteString("toml: line ")
+	b.WriteString(strconv.Itoa(line))
+	if pe.Position.Col > 0 {
+		b.WriteString(", column ")
+		b.WriteString(strconv.Itoa(pe.Position.Col))
+	}
+	if pe.LastKey != "" {
+		b.WriteString(" (last key ")
+		b.WriteString(termsafe.QuoteArgMax(pe.LastKey, 0))
+		b.WriteString(")")
+	}
+	b.WriteString(": ")
+	b.WriteString(termsafe.SafeLine(tomlQuotedFragment.ReplaceAllString(pe.Message, `"…"`)))
+	return termsafe.Categorical(b.String(), err)
 }
 
 // DecodeStrict decodes an immutable config snapshot and retains table
 // presence metadata. Migration uses it only after acquiring the writer lock.
+// A parse error comes back scrubbed of the value text it quotes (#687).
 func DecodeStrict(data []byte) (Config, error) {
 	var cfg Config
 	if len(data) == 0 {
@@ -1109,7 +1147,7 @@ func DecodeStrict(data []byte) (Config, error) {
 	}
 	meta, err := toml.Decode(string(data), &cfg)
 	cfg.launchSet = meta.IsDefined("launch")
-	return cfg, err
+	return cfg, scrubTOMLError(err)
 }
 
 // Validate decodes the config file and checks the sections that carry semantic
@@ -1585,7 +1623,7 @@ func LoadLegacyLaunch() (LaunchConfig, string, error) {
 		if os.IsNotExist(err) {
 			return LaunchConfig{}, path, fmt.Errorf("%w at %s", ErrNoLegacyLaunch, path)
 		}
-		return LaunchConfig{}, path, fmt.Errorf("read legacy claunch.conf at %s: %w", path, err)
+		return LaunchConfig{}, path, fmt.Errorf("read legacy claunch.conf at %s: %w", path, scrubTOMLError(err))
 	}
 	return stripLegacyUsageOptIn(lc), path, nil
 }

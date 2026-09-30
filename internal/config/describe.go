@@ -86,7 +86,7 @@ func describeFile(path string) (Config, Report) {
 		return cfg, rep
 	default:
 		rep.Found = true
-		rep.DecodeErr = err
+		rep.DecodeErr = scrubTOMLError(err)
 	}
 	rep.meta = meta
 	if rep.DecodeErr == nil {
