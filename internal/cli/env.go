@@ -185,7 +185,8 @@ print. --file defaults to .env (relative to the current directory).
                                         path exists
   forgectl env check                   report missing/extra keys vs
                                         --example (default .env.example)
-  forgectl env redact                  print the file with values masked
+  forgectl env redact                  print the file with values and
+                                        comments masked
 
 set's blessed value sources, non-inline producers first:
 
@@ -694,7 +695,7 @@ func writeCheckJSON(out io.Writer, missing, extra []string) error {
 func newEnvRedactCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command {
 	return &cobra.Command{
 		Use:   "redact",
-		Short: "Print --file with every value masked (****)",
+		Short: "Print --file with every value and comment masked (****)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cwd, err := os.Getwd()
