@@ -469,6 +469,16 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	if err != nil {
 		return err
 	}
+	// claude inherits this stdout through the exec. Off a terminal it runs as
+	// if given --print, so `echo task | forgectl resume <filter> | tee log`
+	// resumes unattended. The resume therefore withholds the one flag print
+	// mode withholds for safety, as `forgectl launch` does: allow_danger never
+	// makes bypass reachable in an unattended run (forgectl#899). Everything
+	// else ResumeArgs sets stays. --dry-run reports the argv a run with the
+	// same stdout would get.
+	if !launchStdoutIsTerminal() {
+		profile.AllowDanger = false
+	}
 	args := launch.ResumeArgs(profile, s.ID, fork)
 
 	// Before the dry-run branch and before any task is restored: a refusal here
@@ -647,7 +657,9 @@ type sessionDTO struct {
 //
 // Every field is disk-sourced and untrusted — a session name is whatever was
 // typed at /rename, and an ai-title is model-generated — so each path applies
-// the control built for its own sink. The text path quotes through safeTerm.
+// the control built for its own sink. The text path quotes the row cells and
+// the cwd through safeTerm, and the prompt line through safePrompt, which also
+// caps its length.
 // The JSON path passes the stored value through and lets writeJSON's
 // termsafe.JSONEncoder escape it, because a `resume ls --json | jq -r .cwd`
 // must return a path that still resolves.
