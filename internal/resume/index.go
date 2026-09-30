@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Paths are the roots this package reads and writes. ClaudeHome is the
@@ -56,11 +57,11 @@ type Paths struct {
 func DefaultPaths() (Paths, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return Paths{}, err
+		return Paths{}, termsafe.Error(err)
 	}
 	store, err := config.ResumeStoreDir()
 	if err != nil {
-		return Paths{}, err
+		return Paths{}, termsafe.Error(err)
 	}
 	return Paths{
 		ClaudeHome: filepath.Join(home, ".claude"),
@@ -331,7 +332,7 @@ func scanHistory(path string) (map[string]*Session, error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			return map[string]*Session{}, nil
 		}
-		return nil, err
+		return nil, termsafe.Error(err)
 	}
 	defer func() { _ = f.Close() }()
 

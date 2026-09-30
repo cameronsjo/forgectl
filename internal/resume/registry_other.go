@@ -2,7 +2,10 @@
 
 package resume
 
-import "os"
+import (
+	"errors"
+	"os"
+)
 
 // processAlive reports whether pid names a running process. Off unix there is
 // no signal-0 probe, and os.FindProcess never fails, so this degrades to a
@@ -14,4 +17,11 @@ func processAlive(pid int) bool {
 	}
 	_, err := os.FindProcess(pid)
 	return err == nil
+}
+
+// terminateProcess refuses off unix: there is no SIGTERM to send, and
+// os.Process.Kill is an uncatchable stop that would skip Claude Code's own
+// shutdown.
+func terminateProcess(int) error {
+	return errors.New("stopping a session is supported only on unix")
 }

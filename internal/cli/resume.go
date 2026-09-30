@@ -54,6 +54,8 @@ neither repo nor branch.
   forgectl resume --dry-run f  resolve and print, exec nothing
   forgectl resume ls --json    list without acting
   forgectl resume snapshot     capture what a session's exit would destroy
+  forgectl resume outdated     list live sessions older than the installed claude
+  forgectl resume restart --outdated  restart those sessions in their herdr panes
 
 THIS COMMAND REPLACES THE PROCESS. On success it execs claude in place (via
 syscall.Exec, the same path forgectl launch uses) and never returns — the
@@ -115,7 +117,7 @@ guard; test the ls output instead.`,
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the resolved session, cwd, and claude argv without resuming")
 	cmd.Flags().IntVar(&limit, "limit", resume.DefaultLimit, "how many recent sessions to consider (0 or negative means the default)")
 
-	cmd.AddCommand(newResumeLsCmd(), newResumeSnapshotCmd())
+	cmd.AddCommand(newResumeLsCmd(), newResumeSnapshotCmd(), newResumeOutdatedCmd(deps), newResumeRestartCmd(deps))
 	return cmd
 }
 

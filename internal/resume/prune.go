@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // The snapshot store had no deleter at all: every session ever observed left a
@@ -317,6 +319,9 @@ func (i *projectIndex) list(p Paths) ([]string, error) {
 			dirs = append(dirs, e.Name())
 		}
 	}
+	// Escaped here, where the error is built, although today's callers only
+	// test it against nil: a future caller that prints it gets safe text.
+	err = termsafe.Error(err)
 	if i != nil {
 		i.loaded, i.dirs, i.err = true, dirs, err
 	}
