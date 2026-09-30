@@ -25,7 +25,15 @@ func TestOnlyWindowWithFieldSepIsAnEmptyListingIsolated(t *testing.T) {
 	if _, err := runner.Run(ctx, tmuxBin, "new-session", "-d", "-s", "base", "sleep 60"); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if _, err := runner.Run(ctx, tmuxBin, "rename-window", "-t", "base:0", "--", "hid"+FieldSep+"den"); err != nil {
+	// Target the window by its id, not "base:0": the isolated server still
+	// reads the user's tmux config, and a base-index of 1 there makes the
+	// only window base:1 (forgectl#882).
+	idOut, err := runner.Run(ctx, tmuxBin, "display-message", "-p", "-t", "base", "#{window_id}")
+	if err != nil {
+		t.Fatalf("window id: %v", err)
+	}
+	windowID := strings.TrimSpace(idOut)
+	if _, err := runner.Run(ctx, tmuxBin, "rename-window", "-t", windowID, "--", "hid"+FieldSep+"den"); err != nil {
 		var cmdErr *internalexec.CommandError
 		if errors.As(err, &cmdErr) && strings.HasPrefix(cmdErr.Stderr, "invalid window name: ") {
 			version, _ := runner.Run(ctx, tmuxBin, "-V")
