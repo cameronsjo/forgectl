@@ -24,8 +24,10 @@
 // What it does not cover: `git stash --all` (or `-a`) stashes ignored files
 // too. It copies a live or leftover scratch directory, plaintext included,
 // into a stash commit in the object store, and removes it from the working
-// tree, where the leftover scan can no longer see it. Measured on git 2.43:
-// `git show 'stash@{0}^3:<dir>/<file>'` prints the plaintext afterwards.
+// tree. Measured on git 2.43: `git show 'stash@{0}^3:<dir>/<file>'` prints
+// the plaintext afterwards. The leftover scan reads every stash entry's
+// untracked tree for that reason and refuses on a stashed scratch name
+// (stash.go, cameronsjo/forgectl#751); it cannot un-stash the copy.
 package env
 
 import (
