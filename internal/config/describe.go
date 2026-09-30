@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/cameronsjo/forgectl/internal/tomlerr"
 )
 
 // Report carries the provenance of one config-file read: where the file was,
@@ -94,7 +96,7 @@ func describeFile(path string) (Config, Report) {
 	meta, err := toml.Decode(string(data), &cfg)
 	rep.Found = true
 	if err != nil {
-		rep.DecodeErr = scrubTOMLError(err)
+		rep.DecodeErr = tomlerr.Scrub(err)
 	}
 	rep.meta = meta
 	if rep.DecodeErr == nil {

@@ -58,8 +58,10 @@ func openRepairLogNoFollow(path string, flag int, perm os.FileMode) (*os.File, e
 	return nil, err
 }
 
-// openNoFollowNonblock is the open under openRepairLogNoFollow, shared with the
-// findings owner-marker reader (forgectl#558): O_NOFOLLOW on the final
+// openNoFollowNonblock is the open under openRepairLogNoFollow, shared with
+// ownerRecordLive's session-record read (forgectl#558); the findings marker
+// itself is read with its openat twin, openInRootNoFollowNonblock
+// (forgectl#685): O_NOFOLLOW on the final
 // component, O_NONBLOCK for the open only (cleared before return), O_CLOEXEC.
 // A symlink comes back as a *os.PathError wrapping ELOOP, and the caller still
 // owes an Fstat regular-file check on the returned handle.

@@ -15,8 +15,8 @@ import (
 // followed, the open fails with ELOOP, which cannot classify the dir, so it is
 // kept (forgectl#659).
 //
-// Mutations that turn it red: drop O_NOFOLLOW from openNoFollowNonblock in
-// repairlog_unix.go (the link is followed to a stale marker); or map
+// Mutations that turn it red: drop O_NOFOLLOW from openInRootNoFollowNonblock
+// in findings_open_unix.go (the link is followed to a stale marker); or map
 // errFindingsMarkerUnreadable to findingsStale in findingsDirLiveness.
 func TestFindingsCleanup_SymlinkMarkerIsNotFollowedAndIsKept(t *testing.T) {
 	store := t.TempDir()
@@ -40,8 +40,8 @@ func TestFindingsCleanup_SymlinkMarkerIsNotFollowedAndIsKept(t *testing.T) {
 	}
 }
 
-// Mutation that turns it red: drop O_NONBLOCK from openNoFollowNonblock in
-// repairlog_unix.go. Opening the FIFO for reading then blocks for a writer
+// Mutation that turns it red: drop O_NONBLOCK from openInRootNoFollowNonblock
+// in findings_open_unix.go. Opening the FIFO for reading then blocks for a writer
 // that never comes, and mustFailFast times out.
 func TestFindingsCleanup_FIFOMarkerFailsFastAndIsStale(t *testing.T) {
 	store := t.TempDir()
