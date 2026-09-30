@@ -8,10 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 type fakeInfo struct{ mode fs.FileMode }
@@ -216,5 +219,28 @@ func TestProbeGateErrorWinsAndSkipsTheRunner(t *testing.T) {
 	}
 	if len(stockish.Calls) != 0 {
 		t.Errorf("herdr ran %d time(s) despite a failed gate", len(stockish.Calls))
+	}
+}
+
+// TestCheckForkCapsFailingStderr is #831: the exit arm echoed herdr's whole
+// stderr, escaped but never capped, so a chatty or hostile child could flood
+// the terminal through the error. The echo now stops at
+// forkProbeStderrMaxRunes and says so, and the head survives.
+//
+// Mutation: swap termsafe.SafeLineMax back to printable in CheckFork's exit
+// arm and the length check fails with the whole 100k-rune stderr in the text.
+func TestCheckForkCapsFailingStderr(t *testing.T) {
+	stderr := "error: herdr exploded\n" + strings.Repeat("x\u202e", 50_000)
+	probe := runnerFor("", &exec.CommandError{Name: Binary, ExitCode: 3, Stderr: stderr})
+	err := CheckFork(context.Background(), probe)
+	if err == nil {
+		t.Fatal("CheckFork: nil error for a failing probe")
+	}
+	got := err.Error()
+	if n := utf8.RuneCountInString(got); n > forkProbeStderrMaxRunes+200 {
+		t.Errorf("CheckFork error is %d runes; want at most about %d", n, forkProbeStderrMaxRunes)
+	}
+	if !strings.Contains(got, "error: herdr exploded") || !strings.HasSuffix(got, termsafe.TruncatedMarker) {
+		t.Errorf("CheckFork error = %q; want the head kept and the truncation marked", got)
 	}
 }
