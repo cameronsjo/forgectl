@@ -1,7 +1,13 @@
 package audit
 
 import (
+	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -291,15 +297,15 @@ func TestScanInjection_Caps(t *testing.T) {
 	if r := scan(t, Options{Root: root}); r.Truncated || len(r.Findings) != 3 {
 		t.Fatalf("uncapped: truncated=%v findings=%d, want false/3", r.Truncated, len(r.Findings))
 	}
-	if r := scan(t, Options{Root: root, MaxFindings: 1}); !r.Truncated || len(r.Findings) != 1 {
-		t.Errorf("MaxFindings=1: truncated=%v findings=%d, want true/1", r.Truncated, len(r.Findings))
+	if r := scan(t, Options{Root: root, MaxFindings: 1}); !r.Truncated || len(r.Findings) != 1 || !r.Stopped() || strings.Join(r.CappedBy, ",") != CapFindings {
+		t.Errorf("MaxFindings=1: truncated=%v findings=%d stopped=%v cappedBy=%v, want true/1/true/[findings]", r.Truncated, len(r.Findings), r.Stopped(), r.CappedBy)
 	}
-	if r := scan(t, Options{Root: root, MaxEntries: 3}); !r.Truncated || r.Entries > 4 {
-		t.Errorf("MaxEntries=3: truncated=%v entries=%d, want true and at most one over", r.Truncated, r.Entries)
+	if r := scan(t, Options{Root: root, MaxEntries: 3}); !r.Truncated || r.Entries > 4 || !r.Stopped() || strings.Join(r.CappedBy, ",") != CapEntries {
+		t.Errorf("MaxEntries=3: truncated=%v entries=%d cappedBy=%v, want true, at most one over, [entries]", r.Truncated, r.Entries, r.CappedBy)
 	}
 	r := scan(t, Options{Root: root, MaxDepth: 4})
-	if !r.Truncated {
-		t.Error("MaxDepth=4: want truncated")
+	if !r.Truncated || r.Stopped() || strings.Join(r.CappedBy, ",") != CapDepth || r.DepthSkipped != 1 {
+		t.Errorf("MaxDepth=4: truncated=%v stopped=%v cappedBy=%v depthSkipped=%d, want true/false/[depth]/1", r.Truncated, r.Stopped(), r.CappedBy, r.DepthSkipped)
 	}
 	if _, ok := byPath(r)[filepath.Join(repo, "c", "d", "e", "f", "AGENTS.md")]; ok {
 		t.Error("MaxDepth=4 still reported a carrier six levels down")
@@ -309,5 +315,269 @@ func TestScanInjection_Caps(t *testing.T) {
 func TestScanInjection_MissingRootErrors(t *testing.T) {
 	if _, err := ScanInjection(Options{Root: filepath.Join(t.TempDir(), "nope")}); err == nil {
 		t.Fatal("want an error for a missing root")
+	}
+}
+
+// TestScanInjection_DepthCapBoundary pins the off-by-one: with MaxDepth N the
+// walk lists directories at depths 0..N-1 (the root is 0), so a carrier inside
+// a depth-(N-1) directory is found and one a level lower is not.
+func TestScanInjection_DepthCapBoundary(t *testing.T) {
+	root := t.TempDir()
+	repo := mkrepo(t, root, "r")       // depth 1
+	mkfile(t, repo, "c/d/AGENTS.md")   // inside depth 3
+	mkfile(t, repo, "c/d/e/AGENTS.md") // inside depth 4
+	got := byPath(scan(t, Options{Root: root, MaxDepth: 4}))
+	if _, ok := got[filepath.Join(repo, "c", "d", "AGENTS.md")]; !ok {
+		t.Error("MaxDepth=4 missed a carrier inside a depth-3 directory")
+	}
+	if _, ok := got[filepath.Join(repo, "c", "d", "e", "AGENTS.md")]; ok {
+		t.Error("MaxDepth=4 walked a depth-4 directory")
+	}
+}
+
+// TestScanInjection_SkipsGitAndSorts pins that .git is never walked or
+// classified, and that findings come back in path order, which differs from
+// walk order ("a-c/..." sorts before "a/..." but is walked after it).
+func TestScanInjection_SkipsGitAndSorts(t *testing.T) {
+	root := t.TempDir()
+	repo := mkrepo(t, root, "r")
+	mkfile(t, repo, ".git/CLAUDE.md")
+	mkfile(t, repo, ".git/hooks/AGENTS.md")
+	mkfile(t, repo, "a/CLAUDE.md")
+	mkfile(t, repo, "a-c/CLAUDE.md")
+	r := scan(t, Options{Root: root})
+	var paths []string
+	for _, f := range r.Findings {
+		if strings.Contains(f.Path, string(filepath.Separator)+".git"+string(filepath.Separator)) {
+			t.Errorf("reported a carrier inside .git: %s", f.Path)
+		}
+		paths = append(paths, f.Path)
+	}
+	if len(paths) != 2 || !sort.StringsAreSorted(paths) {
+		t.Errorf("findings = %v, want the two non-.git carriers in path order", paths)
+	}
+}
+
+// fixedInfo is an fs.FileInfo double for the metadata seam tests.
+type fixedInfo struct {
+	name string
+	mode fs.FileMode
+}
+
+func (i fixedInfo) Name() string       { return i.name }
+func (i fixedInfo) Size() int64        { return 0 }
+func (i fixedInfo) Mode() fs.FileMode  { return i.mode }
+func (i fixedInfo) ModTime() time.Time { return time.Time{} }
+func (i fixedInfo) IsDir() bool        { return i.mode.IsDir() }
+func (i fixedInfo) Sys() any           { return nil }
+
+// TestScanInjection_MetadataOnlyThroughRoot pins Important-1 of the #901
+// review: every entry's type comes from the fsOps lstat (bound to
+// os.Root.Lstat in production), never from a DirEntry or an absolute-path
+// stat. With a lstat that fails for everything, a tree full of carriers must
+// yield no findings; with a counting lstat, every non-.git entry is stat'd
+// exactly once through it.
+func TestScanInjection_MetadataOnlyThroughRoot(t *testing.T) {
+	root := t.TempDir()
+	repo := mkrepo(t, root, "r")
+	mkfile(t, repo, "CLAUDE.md")
+	mkfile(t, repo, "sub/AGENTS.md")
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+
+	ops := rootOps(r)
+	ops.lstat = func(string) (fs.FileInfo, error) { return nil, errors.New("denied") }
+	rep, err := scanWith(root, ops, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Findings) != 0 || rep.Entries == 0 {
+		t.Errorf("with every lstat failing: findings=%d entries=%d, want 0 and >0 (metadata reached the scan another way)", len(rep.Findings), rep.Entries)
+	}
+
+	ops = rootOps(r)
+	calls := 0
+	inner := ops.lstat
+	ops.lstat = func(name string) (fs.FileInfo, error) { calls++; return inner(name) }
+	rep, err = scanWith(root, ops, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Entries: r, r/.git, r/CLAUDE.md, r/sub, r/sub/AGENTS.md; .git is skipped before the stat.
+	if len(rep.Findings) != 2 || calls != rep.Entries-1 {
+		t.Errorf("counting lstat: findings=%d calls=%d entries=%d, want 2 and calls == entries-1", len(rep.Findings), calls, rep.Entries)
+	}
+
+	// A seam that reports a directory named like a carrier as a plain dir must
+	// be believed over the disk: the type is the seam's.
+	ops = rootOps(r)
+	ops.lstat = func(name string) (fs.FileInfo, error) { return fixedInfo{name: path.Base(name), mode: fs.ModeDir}, nil }
+	rep, err = scanWith(root, ops, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range rep.Findings {
+		if f.Type != TypeDir {
+			t.Errorf("%s: type %q did not come from the lstat seam", f.Path, f.Type)
+		}
+	}
+}
+
+// TestScanInjection_UnreadableCounted: a directory that cannot be listed is
+// counted and skipped; the rest of the tree is still scanned.
+func TestScanInjection_UnreadableCounted(t *testing.T) {
+	root := t.TempDir()
+	repo := mkrepo(t, root, "r")
+	mkfile(t, repo, "locked/AGENTS.md")
+	mkfile(t, repo, "open/AGENTS.md")
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	ops := rootOps(r)
+	names := ops.names
+	ops.names = func(dir string) ([]string, error) {
+		if dir == "r/locked" {
+			return nil, fs.ErrPermission
+		}
+		return names(dir)
+	}
+	rep, err := scanWith(root, ops, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Unreadable != 1 || len(rep.Findings) != 1 {
+		t.Errorf("unreadable=%d findings=%d, want 1/1", rep.Unreadable, len(rep.Findings))
+	}
+}
+
+// TestAuditSource_NoUnconfinedFilesystemCalls is the static half of the
+// confinement pin: the package's shipped source makes no filesystem call
+// that could resolve outside the os.Root. Only os.OpenRoot (on the resolved
+// root), the root's own methods, and a root-opened file's Readdirnames/Close
+// are allowed; any DirEntry.Info/Type, any os/fs stat or listing, and any
+// filepath walk is refused.
+func TestAuditSource_NoUnconfinedFilesystemCalls(t *testing.T) {
+	fset := token.NewFileSet()
+	dirents, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]*ast.File{}
+	for _, d := range dirents {
+		if !strings.HasSuffix(d.Name(), ".go") || strings.HasSuffix(d.Name(), "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Clean(d.Name()), nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[d.Name()] = file
+	}
+	banned := map[string]map[string]bool{
+		"os":       {"Lstat": true, "Stat": true, "Open": true, "OpenFile": true, "ReadDir": true, "ReadFile": true, "Readlink": true, "DirFS": true},
+		"fs":       {"ReadDir": true, "Stat": true, "ReadFile": true, "WalkDir": true, "Glob": true, "Sub": true, "Lstat": true},
+		"filepath": {"Walk": true, "WalkDir": true, "Glob": true},
+	}
+	bannedMethods := map[string]bool{"Info": true, "Type": true, "ReadDir": true, "Readdir": true, "Stat": true}
+	checked := 0
+	for name, file := range files {
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			checked++
+			if id, ok := sel.X.(*ast.Ident); ok {
+				if set, ok := banned[id.Name]; ok {
+					if set[sel.Sel.Name] {
+						t.Errorf("%s: %s.%s escapes the os.Root", fset.Position(call.Pos()), id.Name, sel.Sel.Name)
+					}
+					return true
+				}
+			}
+			if bannedMethods[sel.Sel.Name] {
+				t.Errorf("%s: .%s() reads metadata outside the os.Root seam (%s)", fset.Position(call.Pos()), sel.Sel.Name, name)
+			}
+			return true
+		})
+	}
+	if checked == 0 {
+		t.Fatal("no calls inspected; the check is vacuous")
+	}
+}
+
+// symlinkCase builds repo/<link> -> dest, with file created under dest.
+type symlinkCase struct {
+	name, link, dest, file, target string
+	outside                        bool
+}
+
+// TestScanInjection_SymlinkedCarrierDirsMatchQuarantine extends the drift pin
+// to trees where a multi-segment carrier sits behind a symlinked directory
+// (Important-2 of the #901 review). ExpandTargets lists such a carrier through
+// an in-root link and refuses an escaping one; either way the inventory must
+// report the link itself, unfollowed, with the entry it prefixes and the
+// symlink anomaly. The last case is the stated limit: with no carrier behind
+// the link, ExpandTargets reports nothing and the inventory still reports the
+// link, because it cannot look behind it without following.
+func TestScanInjection_SymlinkedCarrierDirsMatchQuarantine(t *testing.T) {
+	cases := []symlinkCase{
+		{name: "in-root pattern", link: ".gemini", dest: "cfg", file: "mcp.json", target: ".*/mcp.json"},
+		{name: "in-root literal", link: ".github", dest: "shared", file: "instructions/x.md", target: ".github/instructions/"},
+		{name: "escaping pattern", link: ".windsurf", file: "mcp.json", target: ".*/mcp.json", outside: true},
+		{name: "escaping literal", link: ".github", file: "instructions/x.md", target: ".github/instructions/", outside: true},
+		{name: "nothing behind (limit)", link: ".gemini", dest: "cfg", file: "other.txt", target: ".*/mcp.json"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			base := t.TempDir()
+			root := filepath.Join(base, "projects")
+			repo := mkrepo(t, root, "repo")
+			dest := filepath.Join(repo, c.dest)
+			if c.outside {
+				dest = filepath.Join(base, "outside")
+			}
+			mkfile(t, dest, c.file)
+			if err := os.Symlink(dest, filepath.Join(repo, c.link)); err != nil {
+				t.Fatal(err)
+			}
+
+			expanded, expandErr := quarantine.ExpandTargets(repo, quarantine.PrefixUnderscore, quarantine.DefaultTargets)
+			var listed []string
+			for _, e := range expanded {
+				if _, err := os.Lstat(filepath.Join(repo, e)); err == nil && strings.HasPrefix(filepath.ToSlash(e), c.link+"/") {
+					listed = append(listed, e)
+				}
+			}
+
+			got := byPath(scan(t, Options{Root: root}))
+			link := filepath.Join(repo, c.link)
+			f, ok := got[link]
+			if !ok {
+				t.Fatalf("no finding for the symlinked %s (quarantine listed %v, err %v)", c.link, listed, expandErr)
+			}
+			if f.Target != c.target || f.Type != TypeSymlink || !strings.Contains(strings.Join(f.Anomalies, ","), AnomalySymlink) {
+				t.Errorf("finding = %+v, want target %q, type symlink, anomaly symlink", f, c.target)
+			}
+			for p := range got {
+				if strings.HasPrefix(p, link+string(filepath.Separator)) {
+					t.Errorf("reported %s behind the link: the link was followed", p)
+				}
+			}
+			// Every carrier quarantine lists or refuses behind the link is
+			// covered by the link finding.
+			if len(listed) == 0 && expandErr == nil && c.file != "other.txt" {
+				t.Errorf("quarantine neither listed nor refused a carrier behind %s; the fixture is not exercising the case", c.link)
+			}
+		})
 	}
 }

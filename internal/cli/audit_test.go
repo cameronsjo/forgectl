@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"github.com/cameronsjo/forgectl/internal/audit"
 )
 
 func runAuditInjection(t *testing.T, root string, args ...string) string {
@@ -55,7 +58,7 @@ func TestAuditInjection_JSONShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(runAuditInjection(t, root, "--json")), &got); err != nil {
 		t.Fatalf("stdout is not one JSON object: %v", err)
 	}
-	if keys := auditSortedKeys(got); keys != "carriers,entries_scanned,repos_scanned,root,truncated,unreadable_dirs" {
+	if keys := auditSortedKeys(got); keys != "capped_by,carriers,entries_scanned,repos_scanned,root,truncated,unreadable_dirs" {
 		t.Errorf("report keys = %s", keys)
 	}
 	carriers, ok := got["carriers"].([]any)
@@ -84,6 +87,9 @@ func TestAuditInjection_JSONShape(t *testing.T) {
 	}
 	if a, ok := row["anomalies"].([]any); !ok || len(a) != 0 {
 		t.Errorf("anomalies = %#v, want []", row["anomalies"])
+	}
+	if c, ok := got["capped_by"].([]any); !ok || len(c) != 0 {
+		t.Errorf("capped_by = %#v, want []", got["capped_by"])
 	}
 	if got["repos_scanned"] != float64(1) || got["truncated"] != false {
 		t.Errorf("repos_scanned=%v truncated=%v, want 1/false", got["repos_scanned"], got["truncated"])
@@ -118,5 +124,114 @@ func TestAuditInjection_TextEscapesHostilePaths(t *testing.T) {
 	jsonOut := runAuditInjection(t, root, "--json")
 	if strings.ContainsRune(jsonOut, '\x1b') {
 		t.Errorf("--json output carries a raw ESC:\n%q", jsonOut)
+	}
+}
+
+// TestAuditInjection_TextGroupsEachRepoOnce: a nested repo's carriers sort
+// between its parent's (parent/CLAUDE.md, parent/m/CLAUDE.md,
+// parent/zz/AGENTS.md), and the parent's header must still print once.
+func TestAuditInjection_TextGroupsEachRepoOnce(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"p/.git", "p/m/.git", "p/zz"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{"p/CLAUDE.md", "p/m/CLAUDE.md", "p/zz/AGENTS.md"} {
+		if err := os.WriteFile(filepath.Join(root, f), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := runAuditInjection(t, root)
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(resolved, "p")
+	headers := 0
+	for _, line := range strings.Split(out, "\n") {
+		if line == parent {
+			headers++
+		}
+	}
+	if headers != 1 {
+		t.Errorf("parent repo header printed %d times, want 1:\n%s", headers, out)
+	}
+}
+
+// TestAuditInjection_JSONEscapesC1AndBidi pins the termsafe encoder: a
+// directory name carrying a C1 control (U+0085) and a bidi override (U+202E),
+// both of which encoding/json passes through raw, reaches stdout escaped.
+func TestAuditInjection_JSONEscapesC1AndBidi(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "x\u0085\u202ey")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := runAuditInjection(t, root, "--json")
+	if strings.ContainsRune(out, '\u0085') || strings.ContainsRune(out, '\u202e') {
+		t.Errorf("--json output carries a raw C1 or bidi rune:\n%q", out)
+	}
+	if !strings.Contains(out, `\u202e`) {
+		t.Errorf("--json output lost the escaped bidi rune:\n%s", out)
+	}
+}
+
+// TestAuditInjection_TextCapsLongPaths pins the echo cap: an ordinary but
+// over-long path is cut (with the ellipsis) rather than printed whole.
+func TestAuditInjection_TextCapsLongPaths(t *testing.T) {
+	root := t.TempDir()
+	long := filepath.Join(root, strings.Repeat("a", 200), strings.Repeat("b", 200), strings.Repeat("c", 200))
+	if err := os.MkdirAll(long, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(long, "CLAUDE.md"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := runAuditInjection(t, root)
+	if !strings.Contains(out, "…") {
+		t.Errorf("a 600-rune path was not cut:\n%s", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if utf8.RuneCountInString(line) > 700 {
+			t.Errorf("line of %d runes exceeds the path echo cap", utf8.RuneCountInString(line))
+		}
+	}
+}
+
+// TestAuditInjection_TruncationNoteNamesTheCap: the note names the cap that
+// fired, and says "stopped" only for a cap that stopped the scan.
+func TestAuditInjection_TruncationNoteNamesTheCap(t *testing.T) {
+	var depth bytes.Buffer
+	writeAuditInjectionText(&depth, audit.Report{Truncated: true, CappedBy: []string{audit.CapDepth}, DepthSkipped: 2})
+	if !strings.Contains(depth.String(), "2 directories below the 32-level depth cap were not scanned") || strings.Contains(depth.String(), "stopped") {
+		t.Errorf("depth-cap note:\n%s", depth.String())
+	}
+	var entries bytes.Buffer
+	writeAuditInjectionText(&entries, audit.Report{Truncated: true, CappedBy: []string{audit.CapEntries}})
+	if !strings.Contains(entries.String(), "stopped at the 1000000-entry cap") {
+		t.Errorf("entries-cap note:\n%s", entries.String())
+	}
+	var findings bytes.Buffer
+	writeAuditInjectionText(&findings, audit.Report{Truncated: true, CappedBy: []string{audit.CapFindings}})
+	if !strings.Contains(findings.String(), "stopped at the 10000-carrier cap") {
+		t.Errorf("findings-cap note:\n%s", findings.String())
+	}
+}
+
+// TestAuditInjection_JSONZeroReportArrays: the wire arrays are never null,
+// even for a Report built without the scanner's own initialization.
+func TestAuditInjection_JSONZeroReportArrays(t *testing.T) {
+	var out bytes.Buffer
+	if err := writeAuditInjectionJSON(&out, audit.Report{Findings: []audit.Finding{{Path: "/p"}}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"capped_by": []`, `"anomalies": []`} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing %s in:\n%s", want, out.String())
+		}
 	}
 }

@@ -31,6 +31,20 @@ type Carrier struct {
 //     globFold does;
 //   - a nestable basename matches at any depth, as walkNestable does.
 //
+// What the matcher agrees with quarantine on, and where it stops, is pinned by
+// internal/audit's TestScanInjection_MatchesQuarantineList (and its symlink
+// variant) against ExpandTargets on real trees. The pin's limits:
+//   - it compares carriers anchored at a repo root; nested non-nestable
+//     carriers (`sub/.claude/`) have no ExpandTargets counterpart;
+//   - behind a symlinked directory the inventory reports the link (via
+//     MatchPrefix) whether or not a carrier exists behind it, while
+//     ExpandTargets reports only an existing carrier; the pin therefore
+//     checks that every path ExpandTargets lists or refuses is covered, not
+//     that the two sets are equal for those trees;
+//   - quarantine's renamed (`_CLAUDE.md`) forms are not carriers here;
+//   - it builds one concrete instance per entry, so a pattern's full
+//     language is exercised only as far as that instance reaches.
+//
 // Match classifies; it does not decide where a match is expected. A caller
 // anchoring a match somewhere other than a workspace root reads Nestable to
 // tell an ordinary nested AGENTS.md from a root-only carrier found out of
@@ -95,6 +109,27 @@ func (m *CarrierMatcher) Match(segs []string) (Carrier, bool) {
 	return Carrier{}, false
 }
 
+// MatchPrefix reports the first multi-segment entry whose leading segments
+// segs names as a proper prefix: `.gemini` against `.*/mcp.json`, `.github`
+// against `.github/instructions/`. An inventory that does not follow symlinks
+// uses it on a symlinked directory, because the carrier such an entry names
+// lives behind the link, where ExpandTargets would find (in-root link) or
+// refuse (escaping link) it. A prefix is not a carrier: the caller decides
+// what it means.
+func (m *CarrierMatcher) MatchPrefix(segs []string) (Carrier, bool) {
+	for _, rule := range m.rules {
+		if len(rule.segments) <= len(segs) {
+			continue
+		}
+		if rule.matches(segs) {
+			return Carrier{Target: rule.target, Nestable: rule.nestable}, true
+		}
+	}
+	return Carrier{}, false
+}
+
+// matches compares segs against the rule's leading len(segs) segments; Match
+// guarantees equal length, MatchPrefix a strictly shorter segs.
 func (r carrierRule) matches(segs []string) bool {
 	for i, seg := range segs {
 		if r.pattern {

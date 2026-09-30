@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -53,7 +54,8 @@ paths, never contents, and follows no symlink.
 Each carrier carries anomaly flags:
   vendored   inside a dependency directory (node_modules, vendor, …)
   off-root   a root-only carrier somewhere other than a git working-tree root
-  recent     modified in the last 7 days`,
+  recent     modified in the last 7 days
+  symlink    a symlinked directory a carrier would live behind (not followed)`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			report, err := audit.ScanInjection(audit.Options{Root: resolveRoot(), Now: now()})
@@ -68,7 +70,7 @@ Each carrier carries anomaly flags:
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false,
-		`emit {"root","repos_scanned","entries_scanned","unreadable_dirs","truncated","carriers":[{"path","repo","target","type","modified","anomalies"}]} to stdout`)
+		`emit {"root","repos_scanned","entries_scanned","unreadable_dirs","truncated","capped_by","carriers":[{"path","repo","target","type","modified","anomalies"}]} to stdout`)
 	return cmd
 }
 
@@ -80,6 +82,7 @@ type auditInjectionJSON struct {
 	EntriesScanned int                   `json:"entries_scanned"`
 	UnreadableDirs int                   `json:"unreadable_dirs"`
 	Truncated      bool                  `json:"truncated"`
+	CappedBy       []string              `json:"capped_by"`
 	Carriers       []auditCarrierRowJSON `json:"carriers"`
 }
 
@@ -99,7 +102,11 @@ func writeAuditInjectionJSON(w io.Writer, r audit.Report) error {
 		EntriesScanned: r.Entries,
 		UnreadableDirs: r.Unreadable,
 		Truncated:      r.Truncated,
+		CappedBy:       r.CappedBy,
 		Carriers:       make([]auditCarrierRowJSON, 0, len(r.Findings)),
+	}
+	if out.CappedBy == nil {
+		out.CappedBy = []string{}
 	}
 	for _, f := range r.Findings {
 		row := auditCarrierRowJSON{
@@ -122,44 +129,53 @@ func writeAuditInjectionJSON(w io.Writer, r audit.Report) error {
 	return enc.Encode(out)
 }
 
-// writeAuditInjectionText groups carriers by repo. Every path is clone-
-// derived, so each one goes through auditShowPath.
+// writeAuditInjectionText groups carriers by repo, each repo printed once
+// even when a nested repo's carriers sort between its parent's. Every path is
+// clone-derived, so each one goes through auditShowPath.
 func writeAuditInjectionText(w io.Writer, r audit.Report) {
-	repos := map[string]bool{}
+	groups := map[string][]audit.Finding{}
+	var order []string
 	for _, f := range r.Findings {
-		repos[f.Repo] = true
+		if _, seen := groups[f.Repo]; !seen {
+			order = append(order, f.Repo)
+		}
+		groups[f.Repo] = append(groups[f.Repo], f)
 	}
+	sort.Strings(order) // "" (outside any repo) sorts first
 	_, _ = fmt.Fprintf(w, "%d agent-instruction carriers in %d locations under %s (%d repos, %d entries scanned)\n",
-		len(r.Findings), len(repos), auditShowPath(r.Root), r.Repos, r.Entries)
-	current := "\x00" // no real repo path holds NUL, so the first finding always opens a group
-	for _, f := range r.Findings {
-		if f.Repo != current {
-			current = f.Repo
-			if current == "" {
-				_, _ = fmt.Fprintln(w, "(outside any git repo)")
-			} else {
-				_, _ = fmt.Fprintln(w, auditShowPath(current))
-			}
-		}
-		base := current
-		if base == "" {
+		len(r.Findings), len(order), auditShowPath(r.Root), r.Repos, r.Entries)
+	for _, repo := range order {
+		base := repo
+		if repo == "" {
 			base = r.Root
+			_, _ = fmt.Fprintln(w, "(outside any git repo)")
+		} else {
+			_, _ = fmt.Fprintln(w, auditShowPath(repo))
 		}
-		rel, err := filepath.Rel(base, f.Path)
-		if err != nil {
-			rel = f.Path
+		for _, f := range groups[repo] {
+			rel, err := filepath.Rel(base, f.Path)
+			if err != nil {
+				rel = f.Path
+			}
+			line := fmt.Sprintf("  %s  %s", auditShowPath(rel), f.Type)
+			if len(f.Anomalies) > 0 {
+				line += "  " + strings.Join(f.Anomalies, ",")
+			}
+			_, _ = fmt.Fprintln(w, line)
 		}
-		line := fmt.Sprintf("  %s  %s", auditShowPath(rel), f.Type)
-		if len(f.Anomalies) > 0 {
-			line += "  " + strings.Join(f.Anomalies, ",")
-		}
-		_, _ = fmt.Fprintln(w, line)
 	}
 	if r.Unreadable > 0 {
 		_, _ = fmt.Fprintf(w, "note: %d directories could not be read and were skipped\n", r.Unreadable)
 	}
-	if r.Truncated {
-		_, _ = fmt.Fprintln(w, "note: the scan stopped at a cap, so this list is incomplete")
+	for _, c := range r.CappedBy {
+		switch c {
+		case audit.CapEntries:
+			_, _ = fmt.Fprintf(w, "note: the scan stopped at the %d-entry cap, so this list is incomplete\n", audit.DefaultMaxEntries)
+		case audit.CapFindings:
+			_, _ = fmt.Fprintf(w, "note: the scan stopped at the %d-carrier cap, so this list is incomplete\n", audit.DefaultMaxFindings)
+		case audit.CapDepth:
+			_, _ = fmt.Fprintf(w, "note: %d directories below the %d-level depth cap were not scanned\n", r.DepthSkipped, audit.DefaultMaxDepth)
+		}
 	}
 }
 

@@ -27,7 +27,9 @@ Matching ignores ASCII case, as quarantine's does.
 
 It reports paths, types, and modification times. It never reads a file's
 contents. A matched directory (`.claude/`, `.cursor/`) is reported as one
-carrier and not descended into. The scan skips `.git`.
+carrier and not descended into. That includes a repo's `.claude/worktrees/`:
+worktrees parked there are part of the `.claude` carrier and are not scanned
+separately. The scan skips `.git`.
 
 ### Anomaly flags
 
@@ -35,20 +37,34 @@ carrier and not descended into. The scan skips `.git`.
 | --- | --- |
 | `vendored` | The carrier sits inside a dependency directory (`node_modules`, `bower_components`, `vendor`, `third_party`, `.venv`, `venv`, `site-packages`), so a package author wrote it: the supply-chain vector. |
 | `off-root` | A carrier that belongs at a repo root (anything but the three nestable basenames) sits somewhere else: under a subdirectory, or outside any git working tree. |
-| `recent` | The carrier's own mtime is within the last 7 days. A directory's mtime changes only when entries are added or removed directly inside it. |
+| `recent` | The carrier's own mtime is within the last 7 days. A directory's mtime changes only when entries are added or removed directly inside it, and a fresh clone or checkout sets every file's mtime to that moment. |
+| `symlink` | The entry is a symlinked directory whose name starts a multi-segment carrier (`.gemini` for `.*/mcp.json`, `.github` for `.github/instructions/`). The carrier, if any, lives behind the link. The scan never follows a link, so it reports the link itself, whether or not a carrier exists behind it. `quarantine` lists a carrier behind an in-root link and refuses one behind an escaping link. |
 
 ### Confinement and caps
 
-The walk runs through an `os.Root` opened on the resolved projects root. A
-symlink is reported as type `symlink` when its name matches a class, and it is
-never followed, so the scan cannot leave the root. The walk stops at 1,000,000
-directory entries, 10,000 carriers, or 32 directory levels, and sets
-`truncated`. The text form then ends with a note that the list is incomplete. A
-directory the walk cannot list is counted in `unreadable_dirs` and skipped.
+The projects root itself is resolved once (`filepath.EvalSymlinks`) and opened
+with `os.OpenRoot`. Below it, every filesystem call goes through that root:
+each directory is listed with the root's `Open` plus `Readdirnames` (names
+only), and each entry's type and mtime come from the root's `Lstat`. No
+listing or stat can resolve outside the root, even if a symlink is swapped in
+mid-scan. A symlink is reported as type `symlink` when its name matches a
+class (or starts one, see the `symlink` flag). It is never followed.
 
-Every path the text form prints is shown bare when it is ordinary, and
-escaped and capped when it holds a control or format character. `--json`
-escapes through forgectl's terminal-safe encoder.
+The scan has three caps:
+
+- **Entries (1,000,000) and carriers (10,000).** Hitting either stops the scan.
+- **Depth (32 levels, the root being level 0).** Directories below the cap are
+  skipped and the scan carries on.
+
+Any cap sets `truncated` and adds its name (`entries`, `findings`, `depth`) to
+`capped_by`. The text form ends with one note per cap that names it and says
+whether the scan stopped. A directory the walk cannot list is counted in
+`unreadable_dirs` and skipped.
+
+Every path the text form prints is shown bare when it is ordinary. It is
+escaped when it holds a control or format character, and cut in the middle
+when it runs past 512 runes. `--json` escapes through forgectl's terminal-safe
+encoder, which also escapes C1 controls and bidi overrides.
 
 ### JSON
 
@@ -59,6 +75,7 @@ escapes through forgectl's terminal-safe encoder.
   "entries_scanned": 183021,
   "unreadable_dirs": 0,
   "truncated": false,
+  "capped_by": [],
   "carriers": [
     {
       "path": "/Users/me/Projects/github.com/me/app/CLAUDE.md",
@@ -77,7 +94,8 @@ escapes through forgectl's terminal-safe encoder.
 - `type` is `file`, `dir`, `symlink`, or `other`.
 - `repo` is the nearest enclosing git working tree, or `""` outside one.
 - `modified` is RFC 3339 UTC, or `""` when the entry could not be stat'd.
-- `carriers` and `anomalies` are always arrays, never `null`.
+- `capped_by` lists the caps hit (`entries`, `findings`, `depth`).
+- `carriers`, `anomalies`, and `capped_by` are always arrays, never `null`.
 
 ### Exit codes
 
