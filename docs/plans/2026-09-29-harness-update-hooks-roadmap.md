@@ -1,5 +1,5 @@
 ---
-status: planned
+status: in-flight
 branch: plan/harness-update-hooks
 next: item 2 (#726) done on feat/resume-outdated (local, polished); item 3 (#727) building on feat/resume-restart stacked on it; ship both via PRs, then item 4 (#728)
 ---
