@@ -2,6 +2,7 @@ package docs
 
 import (
 	"path"
+	"slices"
 	"strings"
 	"sync"
 
@@ -226,6 +227,12 @@ func buildRootIndexes(roots []Root, docs []Doc, attachments map[string][]string)
 			ri.attRel[key] = true
 			name := ri.attKey(path.Base(rel))
 			ri.attByName[name] = append(ri.attByName[name], key)
+		}
+		// Sorted so the table does not depend on walk order: renaming a
+		// directory Z to z reorders the walk but resolves every link the
+		// same, and sameIndex compares these slices (forgectl#923).
+		for _, keys := range ri.attByName {
+			slices.Sort(keys)
 		}
 		out[r.Label] = ri
 	}
