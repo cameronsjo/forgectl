@@ -84,7 +84,7 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 				if asJSON {
 					return
 				}
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "indexing %s …\n", termsafe.SafeLine(progressRoot))
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "indexing %s …\n", safeLabel(progressRoot))
 			})
 			defer timer.Stop()
 
@@ -166,22 +166,12 @@ func printDocsList(cmd *cobra.Command, docs []docspkg.Doc, asJSON bool) error {
 	}
 	// Every field is escaped: RelPath is a filename and Title is the doc's own
 	// H1, so either can carry a terminal escape sequence (forgectl#598). The
-	// title is also capped (forgectl#894); --json above carries it whole.
+	// title is also capped (forgectl#894), and so are the root label and the
+	// path (#913): the path unquoted and cut in the middle, so an ordinary row
+	// keeps the %-48s column. --json above carries every field whole.
 	for _, d := range docs {
 		_, _ = fmt.Fprintf(out, "%-16s %-48s %s\n",
-			termsafe.SafeLine(d.RootLabel), termsafe.SafeLine(d.RelPath), safeDocTitle(d.Title))
+			safeLabel(d.RootLabel), safeColumnPath(d.RelPath), safeTitle(d.Title))
 	}
 	return nil
-}
-
-// docTitleMaxRunes caps a doc's title in a line of `docs list` text output.
-// The title is the doc's own H1, whose length nobody at the terminal chose;
-// 256 shows any realistic heading whole, as runbookTitleMaxRunes does for
-// `sessions`.
-const docTitleMaxRunes = 256
-
-// safeDocTitle is a doc title made terminal-safe and bounded for a line of
-// `docs list` text output.
-func safeDocTitle(s string) string {
-	return termsafe.SafeLineMax(s, docTitleMaxRunes)
 }

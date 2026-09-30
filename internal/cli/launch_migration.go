@@ -266,10 +266,10 @@ func unsupportedFieldsRefusal(boundary *config.LegacyMigrationBoundary, cfg conf
 func summarizeKeys(keys []string) string {
 	const maxNamed = 5
 	if len(keys) <= maxNamed {
-		return termsafe.SafeLine(strings.Join(keys, ", "))
+		return safeText(strings.Join(keys, ", "))
 	}
 	return fmt.Sprintf("%s (+%d more)",
-		termsafe.SafeLine(strings.Join(keys[:maxNamed], ", ")), len(keys)-maxNamed)
+		safeText(strings.Join(keys[:maxNamed], ", ")), len(keys)-maxNamed)
 }
 
 func authoritativePeerWinner(raw []byte, locked config.Config, source config.LaunchConfig) bool {

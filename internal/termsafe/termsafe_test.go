@@ -571,6 +571,38 @@ func TestQuotePath_CapsKeepingTheFinalElement(t *testing.T) {
 	}
 }
 
+// TestSafePathMax_CutsLikeQuotePathMaxWithoutQuotes pins #913's column form:
+// the same middle cut as QuotePathMax, the kept halves escaped with SafeLine
+// and unquoted, so an ordinary path renders exactly as SafeLine renders it.
+//
+// Mutations that turn it red: return SafeLine(path) whenever cut is true in
+// SafePathMax (the long rows come back whole); render the halves with
+// QuoteText (every cut row gains quotes); drop the tail (the file name is lost).
+func TestSafePathMax_CutsLikeQuotePathMaxWithoutQuotes(t *testing.T) {
+	dir := "/" + strings.Repeat("d", PathEchoMaxRunes)
+	tests := []struct {
+		name, path string
+		max        int
+		want       string
+	}{
+		{"short path is SafeLine", "/tmp/a b", 0, "/tmp/a b"},
+		{"short path still escapes", "/tmp/a\x1bb", 0, `/tmp/a\x1bb`},
+		{"at the budget unchanged", "/abcd", 5, "/abcd"},
+		{"final element kept whole", "/abcdefghij/name.go", 12, "/abc…/name.go"},
+		{"no separator keeps half the budget", strings.Repeat("y", 20) + "END", 8, "yyyy…yEND"},
+		{"one-rune budget keeps the head only", "/abc", 1, "/…"},
+		{"escapes are never split", "/\u202e\u202e\u202e/f", 4, `/\u202e…/f`},
+		{"deep", dir + "/name.go", 0, dir[:PathEchoMaxRunes-len("/name.go")] + "…/name.go"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SafePathMax(tt.path, tt.max); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestQuotePathIfUnsafe_KeepsALongOrdinaryPathWhole pins the uncapped form
 // (#832): QuotePathIfUnsafe's callers print machine-parseable fields, so a
 // long but ordinary path has to come back byte-identical.

@@ -255,16 +255,16 @@ func writePruneHuman(out io.Writer, report pr.PruneReport) error {
 		}
 		_, _ = fmt.Fprintf(out, "%s\t%s\t%s\n", age, it.Outcome, termsafe.QuotePathIfUnsafe(it.Path))
 		if it.Reason != "" {
-			_, _ = fmt.Fprintf(out, "  reason: %s\n", safeTerm(it.Reason))
+			_, _ = fmt.Fprintf(out, "  reason: %s\n", safeText(it.Reason))
 		}
 		if it.Error != "" {
-			_, _ = fmt.Fprintf(out, "  error: %s\n", safeTerm(it.Error))
+			_, _ = fmt.Fprintf(out, "  error: %s\n", safeText(it.Error))
 		}
 	}
 	_, _ = fmt.Fprintf(out, "log\t%s\t%s (dropped %d, kept %d)\n",
 		report.Log.Outcome, termsafe.QuotePathIfUnsafe(report.Log.Path), report.Log.Dropped, report.Log.Kept)
 	if report.Log.Error != "" {
-		_, _ = fmt.Fprintf(out, "  error: %s\n", safeTerm(report.Log.Error))
+		_, _ = fmt.Fprintf(out, "  error: %s\n", safeText(report.Log.Error))
 	}
 	return nil
 }
@@ -320,20 +320,20 @@ func runRepairHistory(cmd *cobra.Command, client *pr.Client, asJSON bool) error 
 		// hand-editable and was written before teardown and cleanup recorded
 		// themselves, so silence there is unknown, never "this was a repair".
 		_, _ = fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			r.TS.Format("2006-01-02T15:04:05Z07:00"), safeTerm(dashIfEmpty(r.Verb)), safeTerm(dashIfEmpty(r.Mode)), safeTerm(r.Outcome),
-			safeTerm(r.Ref), termsafe.QuotePathIfUnsafe(r.RecordPath))
+			r.TS.Format("2006-01-02T15:04:05Z07:00"), safeLabel(dashIfEmpty(r.Verb)), safeLabel(dashIfEmpty(r.Mode)), safeLabel(r.Outcome),
+			safeTitle(r.Ref), termsafe.QuotePathIfUnsafe(r.RecordPath))
 		// The note is not optional detail. A shrunken ref or workspace stays
 		// well-formed, so without this line the default reader sees a truncated
 		// value as a complete one — the exact mistake the note exists to
 		// prevent, in the one view that was dropping it.
 		if r.RecordNote != "" {
-			_, _ = fmt.Fprintf(out, "  note: %s\n", safeTerm(r.RecordNote))
+			_, _ = fmt.Fprintf(out, "  note: %s\n", safeText(r.RecordNote))
 		}
 		// A compaction row's record_path names the log itself, so without its
 		// detail the row says only "prune touched this file" — the count of
 		// what it dropped lives nowhere else in this view.
 		if r.Detail != "" {
-			_, _ = fmt.Fprintf(out, "  detail: %s\n", safeTerm(r.Detail))
+			_, _ = fmt.Fprintf(out, "  detail: %s\n", safeText(r.Detail))
 		}
 	}
 	return nil
@@ -369,7 +369,7 @@ func writeRepairHuman(cmd *cobra.Command, report pr.RepairReport, apply bool) er
 		return nil
 	}
 	for _, it := range report.Items {
-		ref := safeTerm(it.Ref)
+		ref := safeTitle(it.Ref)
 		if ref == "" {
 			// An unreadable record has no ref to print, and a blank first
 			// column would read as a row that simply lost its name.
@@ -382,7 +382,7 @@ func writeRepairHuman(cmd *cobra.Command, report pr.RepairReport, apply bool) er
 			_, _ = fmt.Fprintf(out, "  reason: %s\n", repairReasonLine(it.Reason))
 		}
 		if it.Error != "" {
-			_, _ = fmt.Fprintf(out, "  error: %s\n", safeTerm(it.Error))
+			_, _ = fmt.Fprintf(out, "  error: %s\n", safeText(it.Error))
 		}
 		if it.Outcome != "" && it.Outcome != "inspect" {
 			_, _ = fmt.Fprintf(out, "  %s\n", it.Outcome)

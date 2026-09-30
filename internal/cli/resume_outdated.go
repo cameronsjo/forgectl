@@ -117,7 +117,7 @@ type outdatedDTO struct {
 
 // printOutdated renders the list. Every string is registry-derived and
 // untrusted (another process wrote it): the JSON path leaves escaping to
-// writeJSON's encoder, and each table cell is escaped exactly once — safeTerm,
+// writeJSON's encoder, and each table cell is escaped exactly once — a capped helper (termcap.go),
 // or termsafe.QuoteText for the quoted unparseable version.
 func printOutdated(out io.Writer, list []resume.OutdatedSession, asJSON, tty bool) error {
 	if asJSON {
@@ -144,17 +144,17 @@ func printOutdated(out io.Writer, list []resume.OutdatedSession, asJSON, tty boo
 	// tabwriter buffers, so a write error surfaces from Flush.
 	_, _ = fmt.Fprintln(tw, "SESSION\tSTATUS\tVERSION\tINSTALLED\tHERDR_PANE_ID\tCWD")
 	for _, s := range list {
-		version := safeTerm(s.Version)
+		version := safeLabel(s.Version)
 		if s.VersionUnparseable {
 			version = termsafe.QuoteText(s.Version) + " (unparseable)"
 		}
-		pane := safeTerm(s.Pane)
+		pane := safeLabel(s.Pane)
 		if pane == "" {
 			pane = "-"
 		}
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			safeTerm(s.SessionID), safeTerm(s.Status), version,
-			safeTerm(s.InstalledVersion), pane, safeTerm(s.Cwd))
+			safeLabel(s.SessionID), safeLabel(s.Status), version,
+			safeLabel(s.InstalledVersion), pane, safeColumnPath(s.Cwd))
 	}
 	return tw.Flush()
 }

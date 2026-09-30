@@ -254,7 +254,7 @@ func TestFmtTs(t *testing.T) {
 
 // TestWriteSearchHitsJSON pins `sessions search --json` (#482): valid JSON,
 // the documented field set, and the stored value carried unaltered (no
-// safeTerm quoting on the machine path).
+// termsafe.SafeLine quoting on the machine path).
 func TestWriteSearchHitsJSON(t *testing.T) {
 	hits := []sessions.SearchHit{{
 		Path: "hearth/colima.md", Title: "Colima split brain", Project: "hearth",
@@ -385,13 +385,13 @@ func TestFinishSync_CompleteAndDryRunSucceed(t *testing.T) {
 
 // TestSessionsText_CapsRunbookTitles pins forgectl#891 item 5: the indexer
 // stores a runbook title uncut, so every `sessions` text line that prints one
-// caps it at runbookTitleMaxRunes, while --json carries it whole.
+// caps it at titleMaxRunes, while --json carries it whole.
 //
-// Mutations that turn it red, one per row: print h.Title through safeTerm in
+// Mutations that turn it red, one per row: print h.Title through termsafe.SafeLine in
 // printSearchHits (search), h.Title in printWhyHits (why), or a.Title in
 // printLastSession (last).
 func TestSessionsText_CapsRunbookTitles(t *testing.T) {
-	long := strings.Repeat("t", runbookTitleMaxRunes*4)
+	long := strings.Repeat("t", titleMaxRunes*4)
 	ts := ptrTime("2026-07-09T11:00:00Z")
 	for _, tt := range []struct {
 		sink       string
@@ -428,10 +428,10 @@ func TestSessionsText_CapsRunbookTitles(t *testing.T) {
 		},
 	} {
 		text, _ := renderCmd(t, tt.text)
-		if strings.Contains(text, strings.Repeat("t", runbookTitleMaxRunes+1)) {
-			t.Errorf("%s text printed more than %d runes of the title", tt.sink, runbookTitleMaxRunes)
+		if strings.Contains(text, strings.Repeat("t", titleMaxRunes+1)) {
+			t.Errorf("%s text printed more than %d runes of the title", tt.sink, titleMaxRunes)
 		}
-		if !strings.Contains(text, strings.Repeat("t", runbookTitleMaxRunes/2)) {
+		if !strings.Contains(text, strings.Repeat("t", titleMaxRunes/2)) {
 			t.Errorf("%s text lost the title's head: %q", tt.sink, text)
 		}
 		asJSON, _ := renderCmd(t, tt.json)
@@ -443,13 +443,13 @@ func TestSessionsText_CapsRunbookTitles(t *testing.T) {
 
 // TestSessionsText_CapsSnippets pins the #891 review finding: ts_headline's
 // MaxWords bounds words, not characters, so a match snippet can be tens of
-// thousands of characters. search and why cap it at runbookSnippetMaxRunes
+// thousands of characters. search and why cap it at snippetMaxRunes
 // in text output, while --json carries it whole.
 //
-// Mutations that turn it red, one per row: print h.Snippet through safeTerm
+// Mutations that turn it red, one per row: print h.Snippet through termsafe.SafeLine
 // in printSearchHits (search) or in printWhyHits (why).
 func TestSessionsText_CapsSnippets(t *testing.T) {
-	long := strings.Repeat("s", runbookSnippetMaxRunes*4)
+	long := strings.Repeat("s", snippetMaxRunes*4)
 	ts := ptrTime("2026-07-09T11:00:00Z")
 	search := []sessions.SearchHit{{Path: "p/x.md", Title: "T", Snippet: long}}
 	why := []sessions.WhyHit{{SessionID: "s1", LastTs: ts, Title: "T", Path: "p/x.md", Snippet: long}}
@@ -469,10 +469,10 @@ func TestSessionsText_CapsSnippets(t *testing.T) {
 		},
 	} {
 		text, _ := renderCmd(t, tt.text)
-		if strings.Contains(text, strings.Repeat("s", runbookSnippetMaxRunes+1)) {
-			t.Errorf("%s text printed more than %d runes of the snippet", tt.sink, runbookSnippetMaxRunes)
+		if strings.Contains(text, strings.Repeat("s", snippetMaxRunes+1)) {
+			t.Errorf("%s text printed more than %d runes of the snippet", tt.sink, snippetMaxRunes)
 		}
-		if !strings.Contains(text, strings.Repeat("s", runbookSnippetMaxRunes/2)) {
+		if !strings.Contains(text, strings.Repeat("s", snippetMaxRunes/2)) {
 			t.Errorf("%s text lost the snippet's head: %q", tt.sink, text)
 		}
 		asJSON, _ := renderCmd(t, tt.json)
@@ -484,7 +484,7 @@ func TestSessionsText_CapsSnippets(t *testing.T) {
 
 // sessionsTextFieldMaxRunes is how many runes of one field's value a
 // `sessions` text sink may print, by field name. The numbers are literal on
-// purpose: deriving them from sessionsLabelMaxRunes and its siblings would let
+// purpose: deriving them from labelMaxRunes and its siblings would let
 // a raised cap raise its own bound. Labels are 64, titles 256, snippets 320;
 // Path is 512 input runes (QuotePathMax, which a plain fill escapes to
 // itself); "repo" is the argument printLastSession echoes on a miss.
@@ -589,11 +589,11 @@ func TestFillEveryString_RejectsKindsItCannotFill(t *testing.T) {
 // literal budget in sessionsTextFieldMaxRunes; --json carries every value
 // whole. Path has no allowlist since forgectl#894.
 //
-// Mutations that turn it red: print h.Type through safeTerm in
-// printSearchHits, h.Project through safeTerm in printSearchHits, or
-// s.GitBranch through safeTerm in printLastSession; raise
-// sessionsLabelMaxRunes to 200; print h.Type through safeTitle in
-// printSearchHits; make safePath return safeTerm(s).
+// Mutations that turn it red: print h.Type through termsafe.SafeLine in
+// printSearchHits, h.Project through termsafe.SafeLine in printSearchHits, or
+// s.GitBranch through termsafe.SafeLine in printLastSession; raise
+// labelMaxRunes to 200; print h.Type through safeTitle in
+// printSearchHits; make safePath return termsafe.SafeLine(s).
 func TestSessionsText_EveryFieldCapped(t *testing.T) {
 	letter := 'α' // Greek alpha: no fixed text in these printers uses Greek
 	next := func() string {

@@ -290,7 +290,7 @@ func hookHerdrBin() (string, error) {
 func hookRestart(deps module.Deps, out io.Writer, harness string) resume.RestartFunc {
 	return func(ctx context.Context, timeout time.Duration) (resume.RestartResult, error) {
 		if harness != "claude" {
-			return resume.RestartResult{}, fmt.Errorf("the restart action supports claude only, not %s", termsafe.SafeLine(harness))
+			return resume.RestartResult{}, fmt.Errorf("the restart action supports claude only, not %s", safeLabel(harness))
 		}
 		herdr, err := hookHerdrBin()
 		if err != nil {
@@ -339,7 +339,7 @@ func printHooksPreview(ctx context.Context, out io.Writer, deps module.Deps, har
 		if firing[h.Identity()] {
 			verb = "would fire"
 		}
-		if _, err := fmt.Fprintln(out, safeTerm(fmt.Sprintf("%s: %s hook %s (timeout %s)", harness, verb, h.Identity(), h.Timeout))); err != nil {
+		if _, err := fmt.Fprintln(out, safeText(fmt.Sprintf("%s: %s hook %s (timeout %s)", harness, verb, h.Identity(), h.Timeout))); err != nil {
 			return err
 		}
 	}
@@ -349,7 +349,7 @@ func printHooksPreview(ctx context.Context, out io.Writer, deps module.Deps, har
 		}
 		preview, err := restartPreview(ctx, deps)
 		if err != nil {
-			_, werr := fmt.Fprintln(out, safeTerm("restart preview failed: "+err.Error()))
+			_, werr := fmt.Fprintln(out, safeText("restart preview failed: "+err.Error()))
 			return werr
 		}
 		if err := printRestartPreview(out, preview); err != nil {
@@ -441,9 +441,9 @@ func hooksAgentSpec(deps module.Deps, warn io.Writer) (resume.AgentSpec, error) 
 		return resume.AgentSpec{}, fmt.Errorf("locate the claude binary to watch: %w", err)
 	}
 	claudePath := claude.Path
-	_, _ = fmt.Fprintln(warn, safeTerm(fmt.Sprintf("forgectl: watching claude at %s (chosen by %s; launch config from %s)", termsafe.QuotePath(claudePath), claude.Source, lcSource)))
+	_, _ = fmt.Fprintln(warn, safeText(fmt.Sprintf("forgectl: watching claude at %s (chosen by %s; launch config from %s)", termsafe.QuotePath(claudePath), claude.Source, lcSource)))
 	if err := resume.CheckVersionsLink(claudePath); err != nil {
-		_, _ = fmt.Fprintln(warn, safeTerm("forgectl: WARNING: "+claudePath+" is not a symlink into a versions directory ("+err.Error()+"); an update will not touch it, so the watcher will notice updates only at load and every 30 minutes"))
+		_, _ = fmt.Fprintln(warn, safeText("forgectl: WARNING: "+claudePath+" is not a symlink into a versions directory ("+err.Error()+"); an update will not touch it, so the watcher will notice updates only at load and every 30 minutes"))
 	}
 	dir, err := hooksDir()
 	if err != nil {
@@ -499,7 +499,7 @@ func warnWritable(warn io.Writer, paths []string) {
 		}
 		owner, known := fileOwner(fi)
 		if writableByOthers(fi.Mode(), owner, hooksUID(), known) {
-			_, _ = fmt.Fprintln(warn, safeTerm("forgectl: WARNING: "+p+" can be changed by another user (group- or other-writable, or owned by someone else); the watcher runs what is there unattended"))
+			_, _ = fmt.Fprintln(warn, safeText("forgectl: WARNING: "+p+" can be changed by another user (group- or other-writable, or owned by someone else); the watcher runs what is there unattended"))
 		}
 	}
 }
@@ -522,7 +522,7 @@ func runResumeHooksInstall(ctx context.Context, out, warn io.Writer, deps module
 			return err
 		}
 		for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
-			if _, err := fmt.Fprintln(out, safeTerm(line)); err != nil {
+			if _, err := fmt.Fprintln(out, safeText(line)); err != nil {
 				return err
 			}
 		}
@@ -555,7 +555,7 @@ func auditAgentEvent(event, plist, outcome string, err error) {
 	if derr != nil {
 		return
 	}
-	rec := resume.HookRun{Time: time.Now().UTC(), Hook: event, Outcome: resume.OutcomeOK, Exit: 0, Trigger: hooksTrigger(), Detail: termsafe.SafeLine(outcome + " " + plist)}
+	rec := resume.HookRun{Time: time.Now().UTC(), Hook: event, Outcome: resume.OutcomeOK, Exit: 0, Trigger: hooksTrigger(), Detail: safeText(outcome + " " + plist)}
 	if err != nil {
 		rec.Outcome, rec.Exit, rec.Detail = resume.OutcomeFailed, 1, termsafe.SafeLineMax(err.Error(), 240)
 	}
@@ -697,7 +697,7 @@ func readHooksStatus(ctx context.Context, deps module.Deps) (hooksStatusDTO, err
 	return st, nil
 }
 
-// printHooksStatus renders the text form. Every line goes through safeTerm:
+// printHooksStatus renders the text form. Every line goes through safeText:
 // the recorded state and audit records are read back from disk.
 func printHooksStatus(out io.Writer, st hooksStatusDTO) error {
 	lines := []string{fmt.Sprintf("config:     %d [[resume.on_update]] hook(s)", st.Hooks)}
@@ -739,7 +739,7 @@ func printHooksStatus(out io.Writer, st hooksStatusDTO) error {
 		}
 	}
 	for _, l := range lines {
-		if _, err := fmt.Fprintln(out, safeTerm(l)); err != nil {
+		if _, err := fmt.Fprintln(out, safeText(l)); err != nil {
 			return err
 		}
 	}
@@ -834,9 +834,9 @@ func hooksDoctorRow(configured int, longest time.Duration, cfgErr error, f hooks
 	st := f.Agent
 	switch {
 	case cfgErr != nil:
-		return doctor.StateWarn, prefix + "[[resume.on_update]] is invalid: " + termsafe.SafeLine(cfgErr.Error())
+		return doctor.StateWarn, prefix + "[[resume.on_update]] is invalid: " + safeText(cfgErr.Error())
 	case probeErr != nil:
-		return doctor.StateWarn, prefix + "could not check: " + termsafe.SafeLine(probeErr.Error())
+		return doctor.StateWarn, prefix + "could not check: " + safeText(probeErr.Error())
 	case !st.Installed && !st.Loaded && configured == 0:
 		return doctor.StateOK, prefix + "not installed (no [[resume.on_update]] hooks configured)"
 	case !st.Installed || !st.Loaded:
@@ -844,9 +844,9 @@ func hooksDoctorRow(configured int, longest time.Duration, cfgErr error, f hooks
 	case f.InFlight && st.State == "running" && f.Now.Sub(f.InFlightSince) > longest+hookStuckMargin:
 		return doctor.StateWarn, prefix + fmt.Sprintf("a run has been going since %s, past the longest hook timeout; it may be stuck (a permission prompt, a hung call) — see the watcher log", f.InFlightSince.UTC().Format(time.RFC3339))
 	case f.HaveState && len(f.State.Pending) > 0:
-		return doctor.StateWarn, prefix + fmt.Sprintf("restart for %s incomplete (%d of %d attempts) — see `forgectl resume hooks status`", termsafe.SafeLine(f.State.Version), f.State.Attempts, resume.MaxRestartAttempts)
+		return doctor.StateWarn, prefix + fmt.Sprintf("restart for %s incomplete (%d of %d attempts) — see `forgectl resume hooks status`", safeLabel(f.State.Version), f.State.Attempts, resume.MaxRestartAttempts)
 	case f.HaveLastRun && f.LastRun.Outcome != resume.OutcomeOK:
-		return doctor.StateWarn, prefix + fmt.Sprintf("hook %s for %s ended %s — see `forgectl resume hooks status`", termsafe.SafeLine(f.LastRun.Hook), termsafe.SafeLine(f.LastRun.New), termsafe.SafeLine(f.LastRun.Outcome))
+		return doctor.StateWarn, prefix + fmt.Sprintf("hook %s for %s ended %s — see `forgectl resume hooks status`", safeLabel(f.LastRun.Hook), safeLabel(f.LastRun.New), safeLabel(f.LastRun.Outcome))
 	}
 	return doctor.StateOK, prefix + describeAgent(st)
 }

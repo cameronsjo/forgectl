@@ -135,7 +135,7 @@ Names come from config.toml keys; no profile value is read or printed.`,
 			}
 			out := cmd.OutOrStdout()
 			for _, name := range names {
-				if _, err := fmt.Fprintln(out, termsafe.SafeLine(name)); err != nil {
+				if _, err := fmt.Fprintln(out, safeText(name)); err != nil {
 					return err
 				}
 			}
@@ -177,7 +177,7 @@ profile, which is the state this verb exists to make visible.`,
 				return err
 			}
 			out := cmd.OutOrStdout()
-			if _, err := fmt.Fprintf(out, "profile: %s\n", termsafe.SafeLine(name)); err != nil {
+			if _, err := fmt.Fprintf(out, "profile: %s\n", safeText(name)); err != nil {
 				return err
 			}
 			for _, v := range proxypkg.Environment(lookup) {

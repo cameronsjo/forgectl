@@ -92,7 +92,7 @@ func newK8sNsCmd(runner forgexec.Runner) *cobra.Command {
 			if asJSON {
 				return termsafe.JSONEncoder(cmd.OutOrStdout()).Encode(k8sNsJSON{Namespace: namespace})
 			}
-			_, err = fmt.Fprintln(cmd.OutOrStdout(), termsafe.SafeLine(namespace))
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), safeLabel(namespace))
 			return err
 		},
 	}
@@ -354,7 +354,7 @@ func parseK8sLogsArgs(args []string) (k8sLogsInvocation, error) {
 		}
 		if recognizeHelperFlags && (arg == "--log-level" || arg == "--color") {
 			if i+1 >= len(args) {
-				return invocation, fmt.Errorf("%s requires a value", termsafe.SafeLine(arg))
+				return invocation, fmt.Errorf("%s requires a value", safeLabel(arg))
 			}
 			i++
 			if err := setK8sLogsHelperFlag(&invocation, arg, args[i]); err != nil {

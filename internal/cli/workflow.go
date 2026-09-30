@@ -372,7 +372,7 @@ func newWorkflowStatusCmd() *cobra.Command {
 			// what keeps the next field added here from being the exception.
 			// Under --json the termsafe seam is termsafe.JSONEncoder instead, so
 			// the raw (unescaped) strings go straight into the payload built below.
-			name := termsafe.SafeLine(args[0])
+			name := safeLabel(args[0])
 			out := cmd.OutOrStdout()
 
 			state, ok, err := workflow.LoadState(args[0])
@@ -409,15 +409,15 @@ func newWorkflowStatusCmd() *cobra.Command {
 				})
 			}
 
-			fmt.Fprintf(out, "%s — run %s\n", termsafe.SafeLine(state.Workflow), termsafe.SafeLine(state.RunID))
-			fmt.Fprintf(out, "  started: %s\n", termsafe.SafeLine(state.StartedAt))
-			fmt.Fprintf(out, "  updated: %s\n", termsafe.SafeLine(state.UpdatedAt))
+			_, _ = fmt.Fprintf(out, "%s — run %s\n", safeLabel(state.Workflow), safeLabel(state.RunID))
+			_, _ = fmt.Fprintf(out, "  started: %s\n", safeLabel(state.StartedAt))
+			_, _ = fmt.Fprintf(out, "  updated: %s\n", safeLabel(state.UpdatedAt))
 			if len(state.Steps) == 0 {
 				fmt.Fprintln(out, "  no steps checkpointed complete")
 			} else {
 				fmt.Fprintf(out, "  %d step(s) complete:\n", len(state.Steps))
 				for _, s := range state.Steps {
-					_, _ = fmt.Fprintf(out, "    %d. %-10s done %s\n", s.Index+1, termsafe.SafeLineMax(s.Uses, termsafe.ArgEchoMaxRunes), termsafe.SafeLine(s.CompletedAt))
+					_, _ = fmt.Fprintf(out, "    %d. %-10s done %s\n", s.Index+1, termsafe.SafeLineMax(s.Uses, termsafe.ArgEchoMaxRunes), safeLabel(s.CompletedAt))
 				}
 			}
 
@@ -428,7 +428,7 @@ func newWorkflowStatusCmd() *cobra.Command {
 			// stdout with the rest of it. What it must share with the shared
 			// sink is the termsafe boundary, and it does.
 			if note != "" {
-				_, _ = fmt.Fprintf(out, "  note: %s\n", termsafe.SafeLine(note))
+				_, _ = fmt.Fprintf(out, "  note: %s\n", safeText(note))
 			}
 			return nil
 		},
@@ -497,7 +497,7 @@ func parseParams(raw []string) (map[string]string, error) {
 // definition could otherwise rewrite the very lines describing it.
 func printPlan(out io.Writer, plan workflow.Plan) {
 	fmt.Fprintf(out, "workflow %s@%s — %d step(s):\n",
-		termsafe.SafeLine(plan.Name), termsafe.SafeLine(plan.Version), len(plan.Steps))
+		safeLabel(plan.Name), safeLabel(plan.Version), len(plan.Steps))
 	for i, s := range plan.Steps {
 		// Capped (#778): --dry-run skips the registry check, so uses is
 		// unvetted file text of any length; a verb name never needs more.
@@ -542,5 +542,5 @@ func printField(out io.Writer, name, value string) {
 	if value == "" {
 		return
 	}
-	fmt.Fprintf(out, "     %s: %s\n", name, termsafe.SafeLine(value))
+	_, _ = fmt.Fprintf(out, "     %s: %s\n", name, safeText(value))
 }

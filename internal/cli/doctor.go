@@ -117,11 +117,11 @@ func doctorMark(s doctor.State, marks theme.Marks) string {
 // treatment: encoding/json already escapes control bytes.
 func printDoctorReport(out io.Writer, report doctor.Report, marks theme.Marks) error {
 	for _, c := range report.Checks {
-		if _, err := fmt.Fprintf(out, "%s %-18s %s\n", doctorMark(c.State, marks), c.Name, termsafe.SafeLine(c.Detail)); err != nil {
+		if _, err := fmt.Fprintf(out, "%s %-18s %s\n", doctorMark(c.State, marks), c.Name, safeText(c.Detail)); err != nil {
 			return err
 		}
 		if c.Hint != "" {
-			if _, err := fmt.Fprintf(out, "  %s\n", termsafe.SafeLine(c.Hint)); err != nil {
+			if _, err := fmt.Fprintf(out, "  %s\n", safeText(c.Hint)); err != nil {
 				return err
 			}
 		}

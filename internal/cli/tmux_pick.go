@@ -39,7 +39,7 @@ func newTmuxPickCmd(client *tmux.Client) *cobra.Command {
 			// discovered — neither composed by forgectl, both printable to a
 			// terminal only after neutralizing.
 			for _, n := range names {
-				fmt.Fprintln(out, termsafe.SafeLine(n))
+				_, _ = fmt.Fprintln(out, safeText(n))
 			}
 			return nil
 		},

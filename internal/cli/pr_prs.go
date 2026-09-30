@@ -120,7 +120,7 @@ func renderPRTable(out, errOut io.Writer, prs []pr.PR, store *pr.ReviewedStore, 
 	}
 	for _, p := range prs {
 		if _, err := fmt.Fprintf(tw, "%s\t%d\t%s\t%s\n",
-			p.Ref.Slug(), p.Ref.Number, safeTerm(p.Title), prStateLabel(p)); err != nil {
+			p.Ref.Slug(), p.Ref.Number, safeTitle(p.Title), prStateLabel(p)); err != nil {
 			return err
 		}
 	}

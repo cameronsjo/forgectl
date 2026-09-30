@@ -702,13 +702,13 @@ func refusalLine(f pr.CleanupFailure, withCause bool) string {
 		}
 		cause := ""
 		if withCause {
-			cause = " (" + termsafe.SafeLine(f.Err.Error()) + ")"
+			cause = " (" + safeText(f.Err.Error()) + ")"
 		}
 		return fmt.Sprintf("refused %s: tmux could not say whether its review window still exists, so it was not "+
 			"treated as gone: nothing was removed and %s%s. Once tmux reads cleanly, run 'forgectl pr teardown' "+
 			"again, or see 'forgectl pr repair'", termsafe.QuotePathIfUnsafe(f.Path), state, cause)
 	default:
-		return fmt.Sprintf("failed %s: %s", termsafe.QuotePathIfUnsafe(f.Path), termsafe.SafeLine(f.Err.Error()))
+		return fmt.Sprintf("failed %s: %s", termsafe.QuotePathIfUnsafe(f.Path), safeText(f.Err.Error()))
 	}
 }
 
