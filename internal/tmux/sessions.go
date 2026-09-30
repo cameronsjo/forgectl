@@ -249,6 +249,11 @@ func (c *Client) EnsureSession(ctx context.Context, name, dir string) (SessionId
 // mistake (forgectl#237 reproduced exactly that with `rename-session -t forge`
 // renaming `forge-review`).
 //
+// The rename runs inside generationGuarded (forgectl#785), so newName reaches
+// tmux as a single-quoted token of a command string tmux parses again
+// (quoteCommandOperand); a name that cannot be quoted — one carrying a NUL or
+// a 0xFF byte — is refused before any command runs.
+//
 // The `--` is what keeps newName an operand. It is the only operator-controlled
 // POSITIONAL this package hands tmux, and the TUI's rename field (internal/tui)
 // is free text — so a name like `-t$9` would otherwise reach tmux's own flag
@@ -259,22 +264,49 @@ func (c *Client) RenameSession(ctx context.Context, want SessionIdentity, newNam
 	if newName == "" {
 		return errors.New("cannot rename a tmux session to an empty name")
 	}
+	quotedName, err := quoteCommandOperand(newName)
+	if err != nil {
+		return fmt.Errorf("rename session %q: %w", want.Name, err)
+	}
 	current, err := c.RevalidateSession(ctx, want)
 	if err != nil {
 		return fmt.Errorf("rename session %q: %w", want.Name, err)
 	}
-	_, err = c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("rename-session", "-t", current.ID, "--", newName)...)
-	return err
+	return c.sessionGuarded(ctx, fmt.Sprintf("rename session %q", want.Name), current,
+		"rename-session -t "+quoteSessionID(current.ID)+" -- "+quotedName)
 }
 
 // KillSession kills the session the identity names, revalidating it first.
+// The kill re-proves the server generation inside the one tmux command that
+// performs it (forgectl#785), so a server replaced after the revalidation
+// refuses rather than killing its own $N.
 func (c *Client) KillSession(ctx context.Context, want SessionIdentity) error {
 	current, err := c.RevalidateSession(ctx, want)
 	if err != nil {
 		return fmt.Errorf("kill session %q: %w", want.Name, err)
 	}
-	_, err = c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("kill-session", "-t", current.ID)...)
-	return err
+	return c.sessionGuarded(ctx, fmt.Sprintf("kill session %q", want.Name), current,
+		"kill-session -t "+quoteSessionID(current.ID))
+}
+
+// sessionGuarded runs command, which acts on the revalidated session current,
+// through runGuarded. The id is validated here as well as by the
+// revalidation, because it is interpolated into a command string tmux parses
+// again (forgectl#785).
+func (c *Client) sessionGuarded(ctx context.Context, what string, current SessionIdentity, command string) error {
+	if err := ValidateSessionID(current.ID); err != nil {
+		return fmt.Errorf("%s: %w", what, err)
+	}
+	return c.runGuarded(ctx, what, current.Generation, current.ID, command)
+}
+
+// quoteSessionID single-quotes a validated "$N" for a guarded command string.
+// Unquoted, "$1" survives tmux 3.4's parser (a variable name cannot start with
+// a digit), but that is a fact about one parser's variable grammar; inside
+// single quotes tmux expands nothing, so the id reaches the command as
+// written whatever the environment holds.
+func quoteSessionID(id string) string {
+	return "'" + id + "'"
 }
 
 // KillOthers kills every session except the one the identity names.
@@ -290,15 +322,20 @@ func (c *Client) KillSession(ctx context.Context, want SessionIdentity) error {
 // an error — it silently succeeds at maximum blast radius, which is the one
 // failure mode this function must not have.
 //
-// Two independent layers keep current.ID non-empty: preflight validates before
-// any command runs, and parseSessions drops rows failing ValidateSessionID, so
-// a listing cannot produce an empty id to revalidate against. Relaxing either
+// Three independent layers keep current.ID non-empty: preflight validates
+// before any command runs, parseSessions drops rows failing
+// ValidateSessionID, so a listing cannot produce an empty id to revalidate
+// against, and sessionGuarded validates the id it interpolates. Relaxing any
 // one "because ids are always well-formed" re-arms the sentence above.
+//
+// The kill runs inside generationGuarded (forgectl#785): a server replaced
+// between the revalidation and the kill would otherwise read "$N" as one of
+// ITS sessions and kill every other session it holds.
 func (c *Client) KillOthers(ctx context.Context, keep SessionIdentity) error {
 	current, err := c.RevalidateSession(ctx, keep)
 	if err != nil {
 		return fmt.Errorf("kill other sessions (keeping %q): %w", keep.Name, err)
 	}
-	_, err = c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("kill-session", "-a", "-t", current.ID)...)
-	return err
+	return c.sessionGuarded(ctx, fmt.Sprintf("kill other sessions (keeping %q)", keep.Name), current,
+		"kill-session -a -t "+quoteSessionID(current.ID))
 }

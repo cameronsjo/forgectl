@@ -387,22 +387,22 @@ func isDecimal(s string) bool {
 }
 
 // killWindowGuarded runs the generation-guarded kill of an already
-// revalidated window and reads its answer:
+// revalidated window and reads its answer through guardedAnswer. The one
+// answer it reads first is tmux's exact "can't find window" line, which
+// confirmGoneAtKill settles (#746).
 //
-//   - nothing: the captured server ran the kill;
-//   - the marker naming ANOTHER generation: a different server received the
-//     kill and ran nothing. That is the verdict RevalidateWindow gives for the
-//     same state (ErrGenerationChanged);
-//   - the marker naming the CAPTURED generation: the server is the right one
-//     and still took the else-branch, so tmux did not evaluate the guard. The
-//     window was not killed and nothing about it is known, so the error is
-//     left unclassified and the caller fails closed;
-//   - anything else: output this package did not expect, refused rather than
-//     read as a kill.
+// The id is validated HERE, not only by the caller's revalidation: it is
+// interpolated into a command string tmux parses again, so "nothing
+// unvalidated reaches tmux's parser" must be a property of this function, not
+// of whoever called it (forgectl#785).
 func (c *Client) killWindowGuarded(ctx context.Context, want, current WindowIdentity) error {
+	what := fmt.Sprintf("kill window %q", want.Name)
+	if err := ValidateWindowID(current.ID); err != nil {
+		return fmt.Errorf("%s: %w", what, err)
+	}
 	guarded, err := generationGuarded(current.Generation, current.ID, "kill-window -t "+current.ID)
 	if err != nil {
-		return fmt.Errorf("kill window %q: %w", want.Name, err)
+		return fmt.Errorf("%s: %w", what, err)
 	}
 	out, err := c.run.Run(ctx, c.tmuxBin, c.tmuxArgs(guarded...)...)
 	if windowGoneAtKillStderr(err, current.ID) {
@@ -411,19 +411,76 @@ func (c *Client) killWindowGuarded(ctx context.Context, want, current WindowIden
 	if err != nil {
 		return err
 	}
+	return guardedAnswer(what, current.Generation, out)
+}
+
+// runGuarded runs command through generationGuarded against target and reads
+// the answer with guardedAnswer. A tmux failure is wrapped, never
+// classified: none of the callers reads one as "gone" or "done", so every
+// failure fails closed.
+func (c *Client) runGuarded(ctx context.Context, what string, gen ServerGeneration, target, command string) error {
+	guarded, err := generationGuarded(gen, target, command)
+	if err != nil {
+		return fmt.Errorf("%s: %w", what, err)
+	}
+	out, err := c.run.Run(ctx, c.tmuxBin, c.tmuxArgs(guarded...)...)
+	if err != nil {
+		return fmt.Errorf("%s: %w", what, err)
+	}
+	return guardedAnswer(what, gen, out)
+}
+
+// guardedAnswer reads what a generation-guarded command printed. The guarded
+// commands (kill-window, kill-session, rename-session, select-window) print
+// nothing when they run, so:
+//
+//   - nothing: the captured server ran the command;
+//   - the marker naming ANOTHER generation: a different server received the
+//     command and ran nothing. That is the verdict revalidation gives for the
+//     same state (ErrGenerationChanged);
+//   - the marker naming the CAPTURED generation: the server is the right one
+//     and still took the else-branch, so tmux did not evaluate the guard. The
+//     command did not run and nothing about the target is known, so the error
+//     is left unclassified and the caller fails closed;
+//   - anything else: output this package did not expect, refused rather than
+//     read as the command having run.
+func guardedAnswer(what string, gen ServerGeneration, out string) error {
 	if out == "" {
 		return nil
 	}
 	answered, isMarker := strings.CutPrefix(out, generationMismatchMarker+" ")
 	pid, start, isPair := strings.Cut(answered, "/")
 	if !isMarker || !isPair || !isDecimal(pid) || !isDecimal(start) {
-		return fmt.Errorf("kill window %q: unexpected tmux output %q; refusing to treat the window as killed", want.Name, out)
+		return fmt.Errorf("%s: unexpected tmux output %q; refusing to treat the command as run", what, out)
 	}
-	if current.Generation.matches(pid, start) {
-		return fmt.Errorf("kill window %q: tmux did not evaluate the generation guard (the captured server pid %s started %s answered but skipped the kill); the window was not killed",
-			want.Name, pid, start)
+	if gen.matches(pid, start) {
+		return fmt.Errorf("%s: tmux did not evaluate the generation guard (the captured server pid %s started %s answered but skipped the command); nothing was done",
+			what, pid, start)
 	}
-	return fmt.Errorf("kill window %q: %w; nothing was killed", want.Name, generationDrift(current.Generation, pid, start))
+	return fmt.Errorf("%s: %w; nothing was done", what, generationDrift(gen, pid, start))
+}
+
+// quoteCommandOperand renders s as ONE single-quoted token for tmux's command
+// parser, for an operand that must reach a command inside generationGuarded's
+// command string byte for byte. Inside single quotes tmux expands nothing — no
+// $VAR, no ~, no escapes — and a quote inside s is closed, escaped, and
+// reopened, which tmux's lexer concatenates into the same token the way sh
+// does:
+//
+//	it's  ->  'it'\''s'
+//
+// Measured on tmux 3.4 against an isolated socket (forgectl#785): for every
+// byte 0x01-0xFE, and for names such as `'; kill-server; '`, `$HOME`,
+// `#{pid}`, `\` and a newline, a guarded rename-session left exactly the name
+// a bare `rename-session -- <name>` left. Byte 0xFF is the exception: tmux's
+// lexer reads it as end of input inside the quotes, so everything after it
+// is parsed as unquoted command text. A NUL cannot reach an argv at all. Both
+// are refused rather than quoted, before any command runs.
+func quoteCommandOperand(s string) (string, error) {
+	if strings.IndexByte(s, 0x00) >= 0 || strings.IndexByte(s, 0xff) >= 0 {
+		return "", fmt.Errorf("%w: a NUL or 0xFF byte cannot be quoted for tmux's command parser", ErrUnsafeOperand)
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'", nil
 }
 
 // confirmGoneAtKill settles what kill-window's exact "can't find window"

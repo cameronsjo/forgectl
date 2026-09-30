@@ -202,8 +202,8 @@ func tmuxMutations(calls []exec.Call) []string {
 	}
 	var out []string
 	for _, call := range calls {
-		if call.Name == "tmux" && len(call.Args) > 0 && mutating[tmuxVerb(call.Args)] {
-			out = append(out, call.Args[0])
+		if verb := tmuxVerb(call.Args); call.Name == "tmux" && mutating[verb] {
+			out = append(out, verb)
 		}
 	}
 	return out

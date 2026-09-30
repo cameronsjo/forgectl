@@ -106,12 +106,25 @@ func TestAttachSession_Outside(t *testing.T) {
 	argsEqual(t, call.Args, []string{"attach-session", "-t", "$1"})
 }
 
+// guardedArgv is the argv generationGuarded builds for command against
+// target on the opsFixture server (123/456), spelled out literally so a change
+// to the guard's shape shows up here rather than being mirrored.
+func guardedArgv(target, command string) []string {
+	return []string{
+		"if-shell", "-F", "-t", target, "#{==:#{pid}/#{start_time},123/456}",
+		command, `display-message -p "forgectl-generation-mismatch #{pid}/#{start_time}"`,
+	}
+}
+
+// Mutation that turns the session argv tests below red: issue the bare
+// `kill-session -t $1` (or -a, or rename-session) again, outside the guard
+// (forgectl#785).
 func TestKillSession_TargetsNativeID(t *testing.T) {
 	fake, c, identity := opsFixture(t, false)
 	if err := c.KillSession(context.Background(), identity); err != nil {
 		t.Fatalf("KillSession: %v", err)
 	}
-	argsEqual(t, fake.Last().Args, []string{"kill-session", "-t", "$1"})
+	argsEqual(t, fake.Last().Args, guardedArgv("$1", "kill-session -t '$1'"))
 }
 
 func TestKillOthers_TargetsNativeID(t *testing.T) {
@@ -119,7 +132,67 @@ func TestKillOthers_TargetsNativeID(t *testing.T) {
 	if err := c.KillOthers(context.Background(), identity); err != nil {
 		t.Fatalf("KillOthers: %v", err)
 	}
-	argsEqual(t, fake.Last().Args, []string{"kill-session", "-a", "-t", "$1"})
+	argsEqual(t, fake.Last().Args, guardedArgv("$1", "kill-session -a -t '$1'"))
+}
+
+// TestSessionVerbs_ReadTheGuardsAnswer applies killWindowGuarded's
+// classification to every generation-guarded session verb and to
+// AttachWindow's select-window (forgectl#785). The marker naming another
+// server is ErrGenerationChanged. The marker naming the captured server is an
+// unclassified refusal, and so is any other output. None of them may read as
+// success.
+//
+// Mutation that turns it red: make guardedAnswer return nil for any output.
+func TestSessionVerbs_ReadTheGuardsAnswer(t *testing.T) {
+	answers := map[string]struct {
+		out       string
+		wantDrift bool
+	}{
+		"another server answered": {"forgectl-generation-mismatch 999/777", true},
+		"guard not evaluated":     {"forgectl-generation-mismatch 123/456", false},
+		"unexpected output":       {"renamed", false},
+		"marker with a non-pair":  {"forgectl-generation-mismatch 999", false},
+	}
+	verbs := map[string]func(*Client, SessionIdentity) error{
+		"KillSession":   func(c *Client, id SessionIdentity) error { return c.KillSession(context.Background(), id) },
+		"KillOthers":    func(c *Client, id SessionIdentity) error { return c.KillOthers(context.Background(), id) },
+		"RenameSession": func(c *Client, id SessionIdentity) error { return c.RenameSession(context.Background(), id, "fresh") },
+		"AttachWindow": func(c *Client, id SessionIdentity) error {
+			return c.AttachWindow(context.Background(), WindowIdentity{Generation: id.Generation, ID: "@3", SessionID: "$1", Name: "shell"})
+		},
+	}
+	for answer, tc := range answers {
+		for verb, run := range verbs {
+			t.Run(answer+"/"+verb, func(t *testing.T) {
+				fake := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+					switch {
+					case len(args) > 0 && args[0] == "list-sessions":
+						return strings.Join([]string{"123", "456", "$1", "alpha", "2", "1", "1700000000", "/w"}, FieldSep), nil
+					case len(args) > 0 && args[0] == "list-windows":
+						return strings.Join([]string{"123", "456", "@3", "$1", "alpha", "2", "shell", "1", "1"}, FieldSep), nil
+					case len(args) > 0 && args[0] == "if-shell":
+						return tc.out, nil
+					}
+					return "", nil
+				}}
+				c := New(fake, WithInsideTmux(func() bool { return true }))
+				identityEnv(c, "", "/tmp")
+				gen := ServerGeneration{Selector: ServerSelector{TmpDir: "/tmp"}, PID: "123", StartTime: "456"}
+				err := run(c, SessionIdentity{Generation: gen, ID: "$1", Name: "alpha"})
+				if err == nil {
+					t.Fatalf("%s read %q as success", verb, tc.out)
+				}
+				if got := errors.Is(err, ErrGenerationChanged); got != tc.wantDrift {
+					t.Fatalf("%s on %q: errors.Is(ErrGenerationChanged) = %v, want %v (err %v)", verb, tc.out, got, tc.wantDrift, err)
+				}
+				// AttachWindow must not go on to switch or attach once the
+				// select was refused.
+				if last := fake.Last(); len(last.Args) > 0 && last.Args[0] != "if-shell" {
+					t.Fatalf("%s ran %v after the guard refused", verb, last.Args)
+				}
+			})
+		}
+	}
 }
 
 // TestRenameSession_NewNameIsAnOperand pins the argv split that makes rename
@@ -132,7 +205,49 @@ func TestRenameSession_NewNameIsAnOperand(t *testing.T) {
 	if err := c.RenameSession(context.Background(), identity, newName); err != nil {
 		t.Fatalf("RenameSession: %v", err)
 	}
-	argsEqual(t, fake.Last().Args, []string{"rename-session", "-t", "$1", "--", newName})
+	argsEqual(t, fake.Last().Args, guardedArgv("$1", "rename-session -t '$1' -- '=fresh:'"))
+}
+
+// TestRenameSession_QuotesTheNewNameForTheGuard pins quoteCommandOperand. The
+// new name reaches the guarded command string as ONE single-quoted token, and
+// each quote inside it is closed, escaped and reopened. A name built to end
+// the quote and append a command therefore stays part of the name. The
+// real-tmux half of this is TestSessionVerbsGenerationGuardIsolated.
+//
+// Mutation that turns it red: interpolate newName into the command unquoted.
+func TestRenameSession_QuotesTheNewNameForTheGuard(t *testing.T) {
+	for newName, wantCommand := range map[string]string{
+		"it's":              `rename-session -t '$1' -- 'it'\''s'`,
+		"'; kill-server; '": `rename-session -t '$1' -- ''\''; kill-server; '\'''`,
+		"$HOME ~ #{pid}":    `rename-session -t '$1' -- '$HOME ~ #{pid}'`,
+	} {
+		t.Run(newName, func(t *testing.T) {
+			fake, c, identity := opsFixture(t, false)
+			if err := c.RenameSession(context.Background(), identity, newName); err != nil {
+				t.Fatalf("RenameSession: %v", err)
+			}
+			argsEqual(t, fake.Last().Args, guardedArgv("$1", wantCommand))
+		})
+	}
+}
+
+// TestRenameSession_RefusesAnUnquotableName covers the two bytes quoting cannot
+// carry. tmux 3.4's lexer reads 0xFF as end of input inside quotes, so a name
+// carrying it would escape the quoting. A NUL cannot reach an argv. Both are
+// refused before ANY command runs, including the read-only revalidation.
+//
+// Mutation that turns it red: drop the 0xFF check from quoteCommandOperand.
+func TestRenameSession_RefusesAnUnquotableName(t *testing.T) {
+	for _, newName := range []string{"x\xff' ; kill-server ; '", "a\x00b"} {
+		fake, c, identity := opsFixture(t, false)
+		err := c.RenameSession(context.Background(), identity, newName)
+		if !errors.Is(err, ErrUnsafeOperand) {
+			t.Fatalf("RenameSession(%q) = %v, want ErrUnsafeOperand", newName, err)
+		}
+		if len(fake.Calls) != 0 {
+			t.Fatalf("RenameSession(%q) ran %v; a refused name must issue no command", newName, fake.Calls)
+		}
+	}
 }
 
 // TestRenameSession_DashNameStaysAnOperand is the flag-injection half. The new
@@ -146,13 +261,9 @@ func TestRenameSession_DashNameStaysAnOperand(t *testing.T) {
 			if err := c.RenameSession(context.Background(), identity, newName); err != nil {
 				t.Fatalf("RenameSession: %v", err)
 			}
-			args := fake.Last().Args
-			argsEqual(t, args, []string{"rename-session", "-t", "$1", "--", newName})
-			// The terminator must sit BEFORE the name; a `--` appended after it
-			// would satisfy a set comparison while leaving the name parseable.
-			if args[len(args)-2] != "--" {
-				t.Fatalf("args = %v; the terminator must immediately precede the new name", args)
-			}
+			// The terminator must sit immediately BEFORE the quoted name; a
+			// `--` appended after it would leave the name parseable as a flag.
+			argsEqual(t, fake.Last().Args, guardedArgv("$1", "rename-session -t '$1' -- '"+newName+"'"))
 		})
 	}
 }
@@ -221,7 +332,8 @@ func TestAttachWindow_SelectsThenAttachesByID(t *testing.T) {
 	if len(mutating) != 2 {
 		t.Fatalf("calls = %v, want select-window then switch-client", mutating)
 	}
-	argsEqual(t, mutating[0], []string{"select-window", "-t", "@3"})
+	// forgectl#785: the select re-proves the generation in the same command.
+	argsEqual(t, mutating[0], guardedArgv("@3", "select-window -t @3"))
 	argsEqual(t, mutating[1], []string{"switch-client", "-t", "$1"})
 }
 
@@ -403,5 +515,32 @@ func TestPick_SeshNotFound(t *testing.T) {
 	}
 	if last := fake.Last(); last.Name != "" {
 		t.Errorf("expected no exec call when the sesh guard fails, got %+v", last)
+	}
+}
+
+// TestGuardedActionsValidateTheirOwnIDs makes "nothing unvalidated reaches
+// tmux's parser" a local property of the guarded helpers (forgectl#785). The id
+// is interpolated into a command string tmux parses again, so a malformed id
+// handed straight to the helper must be refused with no command issued, even
+// though every production caller revalidates first.
+//
+// Mutation that turns it red: drop the ValidateWindowID call from
+// killWindowGuarded, or the ValidateSessionID call from sessionGuarded.
+func TestGuardedActionsValidateTheirOwnIDs(t *testing.T) {
+	gen := ServerGeneration{Selector: ServerSelector{TmpDir: "/tmp"}, PID: "123", StartTime: "456"}
+	fake := &exec.FakeRunner{}
+	c := New(fake)
+	identityEnv(c, "", "/tmp")
+
+	window := WindowIdentity{Generation: gen, ID: "@1 ; kill-server", SessionID: "$1", Name: "w"}
+	if err := c.killWindowGuarded(context.Background(), window, window); err == nil {
+		t.Error("killWindowGuarded accepted a malformed window id")
+	}
+	session := SessionIdentity{Generation: gen, ID: "$1' ; kill-server ; '", Name: "s"}
+	if err := c.sessionGuarded(context.Background(), "kill session", session, "kill-session -t "+quoteSessionID(session.ID)); err == nil {
+		t.Error("sessionGuarded accepted a malformed session id")
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("a malformed id reached tmux: %v", fake.Calls)
 	}
 }

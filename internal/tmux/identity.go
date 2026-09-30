@@ -213,6 +213,10 @@ var (
 	// an unrecognized tmux error. Callers must refuse rather than fall back to
 	// the default server.
 	ErrServerUnreadable = errors.New("tmux server state could not be read")
+	// ErrUnsafeOperand reports an operator-supplied value that cannot be
+	// passed through tmux's command parser byte for byte, so it is refused
+	// before any command runs (quoteCommandOperand).
+	ErrUnsafeOperand = errors.New("value cannot be passed to tmux safely")
 )
 
 // currentSelector reads the live server selection. Compared against a captured
