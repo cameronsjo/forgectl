@@ -42,10 +42,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	cleanpkg "github.com/cameronsjo/forgectl/internal/clean"
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -656,6 +658,521 @@ func TestCleanCmd_JSONRefusedWithApplyCachesDocker(t *testing.T) {
 		err := cmd.ExecuteContext(context.Background())
 		if err == nil || !strings.Contains(err.Error(), "--json") {
 			t.Errorf("%s: error = %v, want a --json refusal", flag, err)
+		}
+	}
+}
+
+// TestCleanCmd_QuotesHostilePathOnTerminal pins forgectl#855 item 3: a
+// directory under the scanned root whose name carries a bidi override and a
+// C1 CSI reaches the terminal escaped and quoted, in both the dry-run row
+// and the apply pass's reclaimed row, while --json keeps the path raw. The
+// runes are \u escapes so no literal format character sits in source.
+//
+// Mutation that turns it red: print item.Path raw in printCleanItems (the
+// dry-run row) or in the reclaimed row of runCleanDirs.
+func TestCleanCmd_QuotesHostilePathOnTerminal(t *testing.T) {
+	const hostile = "ev\u202eil\u009b31m"
+	newRoot := func(t *testing.T) (string, string) {
+		t.Helper()
+		root := t.TempDir()
+		nm := filepath.Join(root, hostile, "node_modules")
+		if err := os.MkdirAll(nm, 0o750); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(nm, "leaf.js"), make([]byte, 64), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		return root, nm
+	}
+	run := func(t *testing.T, root string, args ...string) string {
+		t.Helper()
+		client := cleanpkg.New(&exec.FakeRunner{}, cleanpkg.WithRoot(root))
+		cmd := newCleanCmdForClient(client, theme.Theme{})
+		var stdout bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(new(bytes.Buffer))
+		cmd.SetArgs(args)
+		if err := cmd.ExecuteContext(context.Background()); err != nil {
+			t.Fatalf("clean %v: %v", args, err)
+		}
+		return stdout.String()
+	}
+	assertInert := func(t *testing.T, got string) {
+		t.Helper()
+		if strings.ContainsAny(got, "\u202e\u009b") {
+			t.Errorf("stdout carries a raw bidi/control rune: %q", got)
+		}
+		if !strings.Contains(got, `ev\u202eil\u009b31m`) {
+			t.Errorf("stdout = %q, want the escaped directory name", got)
+		}
+	}
+
+	t.Run("dry run", func(t *testing.T) {
+		root, _ := newRoot(t)
+		got := run(t, root)
+		assertInert(t, got)
+		if !strings.Contains(got, `node_modules" — `) {
+			t.Errorf("dry-run row = %q, want the path quoted", got)
+		}
+	})
+
+	t.Run("apply", func(t *testing.T) {
+		withConfirmFn(t, func(string) (bool, error) { return true, nil })
+		root, nm := newRoot(t)
+		got := run(t, root, "--apply")
+		if _, err := os.Stat(nm); !os.IsNotExist(err) {
+			t.Fatalf("node_modules must be reclaimed, stat error: %v", err)
+		}
+		_, applied, found := strings.Cut(got, "\nreclaimed ")
+		if !found {
+			t.Fatalf("stdout = %q, want a reclaimed row", got)
+		}
+		assertInert(t, applied)
+	})
+
+	t.Run("json keeps the raw path", func(t *testing.T) {
+		root, nm := newRoot(t)
+		got := run(t, root, "--json")
+		var report struct {
+			Items []struct {
+				Path string `json:"path"`
+			} `json:"items"`
+		}
+		if err := json.Unmarshal([]byte(got), &report); err != nil {
+			t.Fatalf("clean --json = %q: %v", got, err)
+		}
+		if len(report.Items) != 1 || !strings.HasSuffix(report.Items[0].Path, filepath.Join(hostile, "node_modules")) {
+			t.Errorf("clean --json items = %+v, want the raw path ending %q", report.Items, nm)
+		}
+	})
+}
+
+// TestCleanCmd_CachesAndDockerRowsAreInert is forgectl#864 item 2: the
+// --caches preview path, the --caches and --docker FAILED rows, and the
+// docker-unreachable skip row reach the terminal escaped. A located cache
+// directory is tool-reported, and a failure's text carries the tool's own
+// stderr, so either can hold a bidi override or a C1 CSI. The runes are \u
+// escapes so no literal format character sits in source.
+//
+// Mutations that turn it red, one per subtest: print item.Path raw in
+// printCacheItems, item.Err raw in the --caches or --docker FAILED row, or
+// item.SkipReason raw in printDockerItems.
+func TestCleanCmd_CachesAndDockerRowsAreInert(t *testing.T) {
+	const hostile = "ev\u202eil\u009b31m"
+	const escaped = `ev\u202eil\u009b31m`
+	failure := errors.New("daemon said " + hostile)
+	dfOut := `{"Type":"Images","TotalCount":"1","Active":"0","Size":"1GB","Reclaimable":"500MB"}`
+	// run returns clean's stdout; a failed prune also fails the command, so
+	// its error is not the test's concern here.
+	run := func(t *testing.T, runFunc func(string, []string) (string, error), args ...string) string {
+		t.Helper()
+		withConfirmFn(t, func(string) (bool, error) { return true, nil })
+		client := cleanpkg.New(&exec.FakeRunner{RunFunc: runFunc}, cleanpkg.WithRoot(t.TempDir()))
+		cmd := newCleanCmdForClient(client, theme.Theme{})
+		var stdout bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(new(bytes.Buffer))
+		cmd.SetArgs(args)
+		_ = cmd.ExecuteContext(context.Background())
+		return stdout.String()
+	}
+	assertInert := func(t *testing.T, got, want string) {
+		t.Helper()
+		if strings.ContainsAny(got, "\u202e\u009b") {
+			t.Errorf("stdout carries a raw bidi/control rune: %q", got)
+		}
+		if !strings.Contains(got, want) {
+			t.Errorf("stdout = %q, want it to contain %q", got, want)
+		}
+	}
+
+	t.Run("caches preview path", func(t *testing.T) {
+		cacheDir := filepath.Join(t.TempDir(), hostile)
+		if err := os.MkdirAll(cacheDir, 0o750); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		got := run(t, func(name string, _ []string) (string, error) {
+			if name == "npm" {
+				return cacheDir, nil
+			}
+			return "", errors.New("not installed")
+		}, "--caches")
+		assertInert(t, got, escaped+`" — `)
+	})
+
+	t.Run("caches FAILED row", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		// A non-empty cache, so the pass has something to reclaim and prunes.
+		if err := os.WriteFile(filepath.Join(cacheDir, "blob"), make([]byte, 1024), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		got := run(t, func(name string, args []string) (string, error) {
+			switch {
+			case name == "npm" && len(args) > 0 && args[0] == "cache":
+				return "", failure
+			case name == "npm":
+				return cacheDir, nil
+			}
+			return "", errors.New("not installed")
+		}, "--caches", "--apply")
+		assertInert(t, got, "FAILED  npm: daemon said "+escaped)
+	})
+
+	t.Run("docker skip row", func(t *testing.T) {
+		got := run(t, func(string, []string) (string, error) { return "", failure }, "--docker")
+		assertInert(t, got, "docker unreachable: daemon said "+escaped)
+	})
+
+	t.Run("docker FAILED row", func(t *testing.T) {
+		got := run(t, func(name string, args []string) (string, error) {
+			if name == "docker" && len(args) > 0 && args[0] == "system" && args[1] == "df" {
+				return dfOut, nil
+			}
+			return "", failure
+		}, "--docker", "--apply")
+		assertInert(t, got, "FAILED  images: daemon said "+escaped)
+	})
+}
+
+// TestCleanCmd_DiagnosticRowsAreCapped is forgectl#867 items 1 and 3: the
+// --caches and --docker FAILED rows and the docker-unreachable skip row are
+// escaped (forgectl#864) AND bounded. exec keeps up to a 64 KiB stderr tail,
+// and without a cap each of those rows prints all of it as one line — the
+// skip row once per docker category. The cap keeps both ends, so the text's
+// LAST words (where a tool prints its fatal line) survive it.
+//
+// Mutations that turn it red, one per subtest: drop the cap in
+// cleanFailureText (both FAILED rows), render item.SkipReason with plain
+// SafeLine in printDockerItems, or make cleanDiagnostic a head-only cut
+// (termsafe.SafeLineMax) — all three rows.
+func TestCleanCmd_DiagnosticRowsAreCapped(t *testing.T) {
+	failure := errors.New("daemon said " + strings.Repeat("x", 64*1024) + " Error: fatal-end")
+	dfOut := `{"Type":"Images","TotalCount":"1","Active":"0","Size":"1GB","Reclaimable":"500MB"}`
+	run := func(t *testing.T, runFunc func(string, []string) (string, error), args ...string) string {
+		t.Helper()
+		withConfirmFn(t, func(string) (bool, error) { return true, nil })
+		client := cleanpkg.New(&exec.FakeRunner{RunFunc: runFunc}, cleanpkg.WithRoot(t.TempDir()))
+		cmd := newCleanCmdForClient(client, theme.Theme{})
+		var stdout bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(new(bytes.Buffer))
+		cmd.SetArgs(args)
+		_ = cmd.ExecuteContext(context.Background())
+		return stdout.String()
+	}
+	// assertCapped checks every line starting with prefix: at least one must
+	// exist, each must end in the truncation marker, and none may exceed the
+	// cap plus the row's own fixed label.
+	assertCapped := func(t *testing.T, got, prefix string, wantRows int) {
+		t.Helper()
+		const labelSlack = 64
+		rows := 0
+		for _, line := range strings.Split(got, "\n") {
+			if !strings.HasPrefix(line, prefix) {
+				continue
+			}
+			rows++
+			if n := utf8.RuneCountInString(line); n > cleanDiagnosticMaxRunes+utf8.RuneCountInString(cleanElision)+labelSlack {
+				t.Errorf("row %q... is %d runes, over the %d-rune cap", line[:40], n, cleanDiagnosticMaxRunes)
+			}
+			if !strings.Contains(line, cleanElision) {
+				t.Errorf("capped row carries no elision marker: %.120q", line)
+			}
+			if !strings.HasSuffix(line, " Error: fatal-end") {
+				t.Errorf("capped row lost the text's last words: ...%q", line[max(0, len(line)-60):])
+			}
+		}
+		if rows != wantRows {
+			t.Errorf("found %d %q row(s), want %d; stdout starts %q", rows, prefix, wantRows, got[:min(len(got), 200)])
+		}
+	}
+
+	t.Run("caches FAILED row", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(cacheDir, "blob"), make([]byte, 1024), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		got := run(t, func(name string, args []string) (string, error) {
+			switch {
+			case name == "npm" && len(args) > 0 && args[0] == "cache":
+				return "", failure
+			case name == "npm":
+				return cacheDir, nil
+			}
+			return "", errors.New("not installed")
+		}, "--caches", "--apply")
+		assertCapped(t, got, "FAILED  npm: ", 1)
+	})
+
+	t.Run("docker skip row", func(t *testing.T) {
+		got := run(t, func(string, []string) (string, error) { return "", failure }, "--docker")
+		assertCapped(t, got, "skip  ", 4)
+	})
+
+	t.Run("docker FAILED row", func(t *testing.T) {
+		got := run(t, func(name string, args []string) (string, error) {
+			if name == "docker" && len(args) > 1 && args[0] == "system" && args[1] == "df" {
+				return dfOut, nil
+			}
+			return "", failure
+		}, "--docker", "--apply")
+		assertCapped(t, got, "FAILED  images: ", 1)
+	})
+}
+
+// TestCleanCmd_DockerReportedSizeIsInert is forgectl#867 item 7: when a
+// category's size does not parse, the docker preview shows docker's own raw
+// Reclaimable string. That string is decoded from `docker system df` JSON and
+// the daemon can be remote, so it reaches the terminal escaped and capped.
+//
+// Mutation that turns it red: print item.Reported (the size variable) raw in
+// printDockerItems.
+func TestCleanCmd_DockerReportedSizeIsInert(t *testing.T) {
+	const hostile = "1.2XB\u202e\u009b31m"
+	dfOut := strings.Join([]string{
+		`{"Type":"Images","TotalCount":"1","Active":"0","Size":"1GB","Reclaimable":"` + hostile + `"}`,
+		`{"Type":"Containers","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+		`{"Type":"Local Volumes","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+		`{"Type":"Build Cache","TotalCount":"0","Active":"0","Size":"0B","Reclaimable":"0B"}`,
+	}, "\n")
+	fake := &exec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
+		if name == "docker" {
+			return dfOut, nil
+		}
+		return "", nil
+	}}
+	cmd := newCleanCmdForClient(cleanpkg.New(fake, cleanpkg.WithRoot(t.TempDir())), theme.Theme{})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--docker"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("clean --docker: %v", err)
+	}
+	got := stdout.String()
+	if strings.ContainsAny(got, "\u202e\u009b") {
+		t.Errorf("stdout carries a raw bidi/control rune: %q", got)
+	}
+	if want := `images      1.2XB\u202e\u009b31m`; !strings.Contains(got, want) {
+		t.Errorf("stdout = %q, want it to contain %q", got, want)
+	}
+}
+
+// TestCleanCmd_FailureKeepsTheFatalLastLine is the forgectl#867 review catch:
+// exec keeps the stderr TAIL because brew, npm and docker print their fatal
+// line last, after any warnings. A capped FAILED row must keep that line and
+// exec's dropped-bytes note, however many warnings come first.
+//
+// Mutation that turns it red: make cleanDiagnostic a head-only cut
+// (termsafe.SafeLineMax(raw, cleanDiagnosticMaxRunes)).
+func TestCleanCmd_FailureKeepsTheFatalLastLine(t *testing.T) {
+	const fatal = "npm error EACCES: permission denied, rmdir '/cache/_cacache'"
+	failure := &exec.CommandError{
+		Name:          "npm",
+		Args:          []string{"cache", "clean", "--force"},
+		Stderr:        strings.Repeat("npm warn using --force Recommended protections disabled.\n", 40) + fatal,
+		StderrDropped: 4096,
+		ExitCode:      1,
+		Err:           errors.New("exit status 1"),
+	}
+	cacheDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cacheDir, "blob"), make([]byte, 1024), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	withConfirmFn(t, func(string) (bool, error) { return true, nil })
+	client := cleanpkg.New(&exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		switch {
+		case name == "npm" && len(args) > 0 && args[0] == "cache":
+			return "", failure
+		case name == "npm":
+			return cacheDir, nil
+		}
+		return "", errors.New("not installed")
+	}}, cleanpkg.WithRoot(t.TempDir()))
+	cmd := newCleanCmdForClient(client, theme.Theme{})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--caches", "--apply"})
+	_ = cmd.ExecuteContext(context.Background())
+
+	var row string
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		if strings.HasPrefix(line, "FAILED  npm: ") {
+			row = line
+		}
+	}
+	if row == "" {
+		t.Fatalf("stdout = %q, want a FAILED npm row", stdout.String())
+	}
+	for _, want := range []string{"npm cache clean --force", "[stderr truncated, 4096 earlier bytes dropped]", cleanElision} {
+		if !strings.Contains(row, want) {
+			t.Errorf("row = %q, want it to contain %q", row, want)
+		}
+	}
+	if !strings.HasSuffix(row, fatal) {
+		t.Errorf("row lost the fatal last line: ...%q", row[max(0, len(row)-100):])
+	}
+	if n := utf8.RuneCountInString(row); n > cleanDiagnosticMaxRunes+2*utf8.RuneCountInString(cleanElision)+100 {
+		t.Errorf("row is %d runes, want it bounded near the %d-rune cap", n, cleanDiagnosticMaxRunes)
+	}
+}
+
+// TestCleanDiagnostic_NeverSplitsAnEscape pins the order of operations: the
+// raw text is cut and THEN escaped, one whole escape per rune, so a cut can
+// never leave half of an escape such as \u202e reading as other text. The
+// padding walks the cut point across every offset inside an escape.
+//
+// Mutation that turns it red: split the ESCAPED text per rune in
+// escapedPieces (range over termsafe.SafeLine(s)) instead of escaping each raw
+// rune.
+func TestCleanDiagnostic_NeverSplitsAnEscape(t *testing.T) {
+	for pad := range 8 {
+		raw := strings.Repeat("a", pad) + strings.Repeat("\u202e", 300) + "Error: fatal"
+		got := cleanDiagnostic(raw)
+		if !strings.Contains(got, cleanElision) {
+			t.Fatalf("pad %d: output was not cut: %.80q", pad, got)
+		}
+		if !strings.HasSuffix(got, "Error: fatal") {
+			t.Errorf("pad %d: lost the last words: ...%q", pad, got[max(0, len(got)-40):])
+		}
+		rest := strings.TrimSuffix(got, "Error: fatal")
+		rest = strings.Replace(rest, cleanElision, "", 1)
+		rest = strings.ReplaceAll(rest, `\u202e`, "")
+		rest = strings.TrimLeft(rest, "a")
+		if rest != "" {
+			t.Errorf("pad %d: output carries a split escape fragment %q in %q", pad, rest, got)
+		}
+	}
+}
+
+// TestCleanDiagnostic_LookAlikeDroppedNoteStaysCapped is the forgectl#867
+// delta-review catch: exec's dropped-bytes note is rebuilt from
+// CommandError.StderrDropped, never found by searching the text. A
+// look-alike note with 20,000 digits, planted in stderr or in a remote
+// daemon's skip reason, is cut like any other text, so the rendering stays
+// at or under the cap.
+//
+// Mutation that turns it red: search the raw text for the note with an
+// unanchored `\[stderr truncated, [0-9]+ earlier bytes dropped\]` regex and
+// print the match whole outside the budget (the pre-fix cleanDiagnostic).
+func TestCleanDiagnostic_LookAlikeDroppedNoteStaysCapped(t *testing.T) {
+	fake := "[stderr truncated, " + strings.Repeat("9", 20000) + " earlier bytes dropped] Error: fatal"
+	for name, got := range map[string]string{
+		"skip reason": cleanDiagnostic("docker unreachable: " + fake),
+		"plain error": cleanFailureText(errors.New("daemon said " + fake)),
+		"command error": cleanFailureText(&exec.CommandError{
+			Name: "docker", Args: []string{"image", "prune", "-f"},
+			Stderr: fake, ExitCode: 1, Err: errors.New("exit status 1"),
+		}),
+		"command error with a real drop": cleanFailureText(&exec.CommandError{
+			Name: "docker", Args: []string{"image", "prune", "-f"},
+			Stderr: fake, StderrDropped: 7, ExitCode: 1, Err: errors.New("exit status 1"),
+		}),
+	} {
+		if n := utf8.RuneCountInString(got); n > cleanDiagnosticMaxRunes {
+			t.Errorf("%s: rendering is %d runes, over the %d-rune cap: %.120q", name, n, cleanDiagnosticMaxRunes, got)
+		}
+		if !strings.HasSuffix(got, "Error: fatal") {
+			t.Errorf("%s: lost the last words: ...%q", name, got[max(0, len(got)-40):])
+		}
+	}
+}
+
+// TestCleanDiagnostic_JustOverTheCapStaysUnderIt pins that the elision counts
+// against the cap: text one rune over it must not come out longer than it
+// went in. Each shape is checked at 513 runes and at a size where a cut is
+// certain.
+//
+// Mutation that turns it red: leave cleanElision out of the tail budget in
+// cleanDiagnostic.
+func TestCleanDiagnostic_JustOverTheCapStaysUnderIt(t *testing.T) {
+	for _, size := range []int{cleanDiagnosticMaxRunes + 1, 4 * cleanDiagnosticMaxRunes} {
+		text := strings.Repeat("a", size)
+		for name, got := range map[string]string{
+			"skip reason":   cleanDiagnostic(text),
+			"plain error":   cleanFailureText(errors.New(text)),
+			"command error": cleanFailureText(&exec.CommandError{Name: "npm", Stderr: text, StderrDropped: 12, ExitCode: 1, Err: errors.New("exit status 1")}),
+		} {
+			if n := utf8.RuneCountInString(got); n > cleanDiagnosticMaxRunes {
+				t.Errorf("%s at %d runes: rendering is %d runes, over the %d-rune cap", name, size, n, cleanDiagnosticMaxRunes)
+			}
+			if !strings.Contains(got, cleanElision) {
+				t.Errorf("%s at %d runes: rendering was not cut: %.80q", name, size, got)
+			}
+		}
+	}
+}
+
+// TestCleanFailureText_LongCommandKeepsTheDroppedNote pins the struct-driven
+// cut: a command line longer than the head budget is cut on its own, and
+// exec's dropped-bytes note (rebuilt from StderrDropped) still follows it
+// whole, ahead of the stderr tail. A plain text cut would spend the whole
+// head on the command and lose the note.
+//
+// Mutation that turns it red: have cleanCommandFailure always report
+// ok=false, so every CommandError takes the plain cut.
+func TestCleanFailureText_LongCommandKeepsTheDroppedNote(t *testing.T) {
+	got := cleanFailureText(&exec.CommandError{
+		Name:          "npm",
+		Args:          []string{"cache", "clean", "--cache", "/" + strings.Repeat("p", 300)},
+		Stderr:        strings.Repeat("npm warn noise\n", 80) + "Error: fatal",
+		StderrDropped: 99,
+		ExitCode:      1,
+		Err:           errors.New("exit status 1"),
+	})
+	if !strings.HasPrefix(got, "npm cache clean --cache /ppp") {
+		t.Errorf("rendering lost the command head: %.80q", got)
+	}
+	if !strings.Contains(got, cleanElision+"[stderr truncated, 99 earlier bytes dropped] ") {
+		t.Errorf("rendering lost the dropped-bytes note after the cut command: %.300q", got)
+	}
+	if !strings.HasSuffix(got, "Error: fatal") {
+		t.Errorf("rendering lost the last words: ...%q", got[max(0, len(got)-40):])
+	}
+	if n := utf8.RuneCountInString(got); n > cleanDiagnosticMaxRunes {
+		t.Errorf("rendering is %d runes, over the %d-rune cap", n, cleanDiagnosticMaxRunes)
+	}
+}
+
+// onceThenPanicErr is an error whose Error method works on its first call
+// and panics on every later one.
+type onceThenPanicErr struct {
+	text  string
+	calls *int
+}
+
+func (e onceThenPanicErr) Error() string {
+	*e.calls++
+	if *e.calls > 1 {
+		panic("Error called twice")
+	}
+	return e.text
+}
+
+// TestCleanFailureText_OnceThenPanicNeverSplitsAnEscape pins the forgectl#871
+// nit: an Error method that works once and then panics must not leave the cut
+// only escaped text to work on, where it lands inside an escape (a dangling
+// `\u` ahead of the marker). The fixture puts the cut among escaped U+202E
+// runes, 6 output runes each, at an offset that is not a multiple of 6.
+//
+// Mutation that turns it red: call termsafe.Error before rawErrorText in
+// cleanFailureText, as it was.
+func TestCleanFailureText_OnceThenPanicNeverSplitsAnEscape(t *testing.T) {
+	calls := 0
+	text := strings.Repeat("x", 490) + strings.Repeat(string(rune(0x202e)), 100)
+	got := cleanFailureText(onceThenPanicErr{text: text, calls: &calls})
+	if n := utf8.RuneCountInString(got); n > cleanDiagnosticMaxRunes {
+		t.Errorf("rendering is %d runes, over the %d-rune cap", n, cleanDiagnosticMaxRunes)
+	}
+	if strings.ContainsRune(got, rune(0x202e)) {
+		t.Errorf("rendering carries a raw U+202E: %q", got)
+	}
+	// The only backslashes are the ones escaping U+202E, so each must be a
+	// whole `\u202e`.
+	for i, piece := range strings.Split(got, `\`)[1:] {
+		if !strings.HasPrefix(piece, "u202e") {
+			t.Fatalf("rendering splits escape %d: %q", i, got)
 		}
 	}
 }

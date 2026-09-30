@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Two directory dialects live under ~/.claude/tasks, and they are not old and
@@ -250,7 +252,7 @@ func Restore(dir string, tasks []Task) (RestoreResult, error) {
 		return res, nil
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return res, fmt.Errorf("create task directory %s: %w", dir, err)
+		return res, fmt.Errorf("create task directory %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	for _, t := range tasks {
 		if !validTaskID(t.ID) {
@@ -278,15 +280,15 @@ func Restore(dir string, tasks []Task) (RestoreResult, error) {
 			continue
 		}
 		if err != nil {
-			return res, fmt.Errorf("restore task %s: %w", t.ID, err)
+			return res, fmt.Errorf("restore task %s: %w", t.ID, termsafe.Error(err))
 		}
-		_, werr := f.Write(body)
-		cerr := f.Close()
+		_, werr := restoreWrite(f, body)
+		cerr := restoreClose(f)
 		if werr != nil {
-			return res, fmt.Errorf("restore task %s: %w", t.ID, werr)
+			return res, fmt.Errorf("restore task %s: %w", t.ID, termsafe.Error(werr))
 		}
 		if cerr != nil {
-			return res, fmt.Errorf("restore task %s: %w", t.ID, cerr)
+			return res, fmt.Errorf("restore task %s: %w", t.ID, termsafe.Error(cerr))
 		}
 		res.Written++
 	}
@@ -318,7 +320,7 @@ func raiseWatermark(dir string, tasks []Task) (int, error) {
 	}
 	// No trailing newline: Claude Code writes the bare decimal.
 	if err := os.WriteFile(path, []byte(strconv.Itoa(high)), 0o600); err != nil {
-		return 0, fmt.Errorf("write task watermark in %s: %w", dir, err)
+		return 0, fmt.Errorf("write task watermark in %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	return high, nil
 }
@@ -416,3 +418,12 @@ func isDir(path string) bool {
 	fi, err := os.Stat(path)
 	return err == nil && fi.IsDir()
 }
+
+// restoreWrite and restoreClose are Restore's per-task file operations,
+// seamed for the same reason as Save's: neither fails on demand against a
+// real file, and each failure's *PathError carries the task path Restore must
+// escape before returning it.
+var (
+	restoreWrite = (*os.File).Write
+	restoreClose = (*os.File).Close
+)

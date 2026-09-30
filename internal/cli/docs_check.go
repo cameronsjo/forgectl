@@ -121,7 +121,9 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 				if info > 0 {
 					msg += fmt.Sprintf(", %d informational", info)
 				}
-				return WithExitCode(errors.New(msg), 1)
+				// Under --json the report on stdout is the verdict: no
+				// second object on stderr (forgectl#862).
+				return jsonVerdict(WithExitCode(errors.New(msg), 1), asJSON)
 			}
 			if info > 0 && !asJSON {
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "docs check: %d informational finding(s), no errors\n", info)

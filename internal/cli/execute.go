@@ -135,18 +135,33 @@ func Execute(ctx context.Context) error {
 	// they are not reachable from a call site.
 	normalizeColorEnv()
 
+	// Both steps below return before fang exists and before the config gate,
+	// so a failure here reports itself through preFangFailure: its own line,
+	// or under --json the verb's one failure object. The tree does not exist
+	// yet, so preFangFailure builds one over default config only when argv
+	// mentions --json and it must find the verb. CaptureEnvSnapshot fails on an
+	// environment the operator controls — $HOME unset, or a relative
+	// $XDG_CONFIG_HOME (os.UserConfigDir refuses one) — and a hook verb must
+	// not fail the turn over it, the same exemption the config gate makes
+	// (#738). The hook then runs on built-in defaults with no legacy boundary;
+	// every other verb stops here, as before.
+	var legacyBoundary *config.LegacyMigrationBoundary
+	defaultRoot := func() *cobra.Command { return buildRoot(productionDeps(config.Config{}, nil)) }
 	env, err := captureEnvSnapshot()
 	if err != nil {
-		return err
+		if args := normalizeArgs(processArgs()); !invokesHookVerb(args) {
+			return preFangFailure(defaultRoot, args, err)
+		}
+	} else {
+		legacyBoundary, err = prepareLegacyBoundary(env, config.NativeMigrationFS())
+		if err != nil {
+			return preFangFailure(defaultRoot, normalizeArgs(processArgs()), err)
+		}
+		defer legacyBoundary.Close() //nolint:errcheck
 	}
-	legacyBoundary, err := prepareLegacyBoundary(env, config.NativeMigrationFS())
-	if err != nil {
-		return err
-	}
-	defer legacyBoundary.Close() //nolint:errcheck
 
 	var cfg config.Config
-	if !errors.Is(legacyBoundary.Refusal, config.ErrLegacyPathControl) {
+	if legacyBoundary != nil && !errors.Is(legacyBoundary.Refusal, config.ErrLegacyPathControl) {
 		cfg = config.LoadPath(legacyBoundary.ConfigPath)
 	}
 	closer := setupLogger(cfg)
@@ -161,10 +176,14 @@ func Execute(ctx context.Context) error {
 	tmuxClient := tmux.New(exec.OSRunner{})
 	root := buildRoot(deps)
 	args := normalizeArgs(processArgs())
+	// The gate's exempt-verb lookup gets the built root. Only
+	// preFangFailure's --json lookup uses the default-config tree: a module
+	// built over a config that failed to decode can stand in a stub without
+	// its flags (projects does), which would hide the verb's --json.
 	if err := configParseGate(cfg, root, args); err != nil {
-		fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(err.Error()))
-		return WithExitCode(err, 2)
+		return preFangFailure(defaultRoot, args, WithExitCode(err, 2))
 	}
+	builtRoot := func() *cobra.Command { return root }
 
 	// The launcher intercept runs before TUI/fang routing: `forgectl launch …`
 	// (and its `cl` alias) must reach claude byte-clean for builder/agents
@@ -177,11 +196,13 @@ func Execute(ctx context.Context) error {
 			// This path bypasses fang, which is what prints styled errors for
 			// the normal command tree. Print here so an intercept error (e.g. a
 			// bad FORGECTL_CLAUDE_BIN from ClaudePath) doesn't exit non-zero with
-			// empty stderr — mirrors claunch's original main().
+			// empty stderr — mirrors claunch's original main(). The launch
+			// command declares no --json (everything after it is the
+			// harness's), so this line stays plain even with --json in argv.
 			if err != nil {
-				fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(err.Error()))
+				return preFangFailure(builtRoot, args, err)
 			}
-			return err
+			return nil
 		}
 	}
 
@@ -331,34 +352,53 @@ func termsafeErrorHandler(w io.Writer, styles fang.Styles, err error) {
 		renderStructuredTerminalError(w, styles, structured)
 		return
 	}
-	// env check --json (forgectl#481) has already written its one JSON
-	// object to stderr by the time it returns this — fang's error frame
-	// must render nothing on top of it, or the agent-facing "exactly one
-	// object" contract breaks.
+	// A --json verb has already written its verdict to stdout, or its one
+	// failure object to stderr, by the time it returns this (forgectl#481,
+	// #862; json_errors.go) — fang's error frame must render nothing on top
+	// of it, or the agent-facing contract breaks.
 	if _, ok := err.(*silentCodedError); ok {
 		return
 	}
 	safe := termsafe.Error(err)
-	if leadsWithPath(safe.Error()) {
+	if leadsWithLiteral(safe.Error()) {
 		renderPathLeadingError(w, styles, safe)
 		return
 	}
 	fang.DefaultErrorHandler(w, styles, safe)
 }
 
-// leadsWithPath reports whether msg's first word looks like a filesystem
-// path or a flag token ("--limit", "-n") — one fang's ErrorText style would title-case via its
-// titleFirstWord transform, corrupting exactly the byte-identical spelling
-// a caller typed or compares against (env_test.go's --json path field,
-// this file's own path-preserving tests). Both error surfaces
-// (termsafeErrorHandler and renderStructuredTerminalError) route a
-// path-leading message through UnsetTransform() instead of fang's default.
-// A flag token needs the same treatment: title-casing "--limit must be at
-// least 1" yields "--Limit", a flag that does not exist (forgectl#670).
-func leadsWithPath(msg string) bool {
+// leadsWithLiteral reports whether msg's first word is a literal token that
+// fang's ErrorText style would corrupt by title-casing it (its
+// titleFirstWord transform) — a spelling a caller typed or compares against
+// byte-for-byte (env_test.go's --json path field, this file's own
+// path-preserving tests). Both error surfaces (termsafeErrorHandler and
+// renderStructuredTerminalError) route such a message through
+// UnsetTransform() instead of fang's default.
+//
+// It is deliberately broader than "is a path" (forgectl#858), and matches a
+// first word that:
+//   - opens with a double quote — a quoted literal, which is how
+//     termsafe.QuotePath and QuoteText render a path (#847): `".sops.yaml"
+//     not found` must not become `".Sops.yaml" not found`;
+//   - contains "/" or starts with "." — a path or dotfile;
+//   - starts with "-" — a flag token: title-casing "--limit must be at least
+//     1" yields "--Limit", a flag that does not exist (forgectl#670);
+//   - has an interior dot, after trimming a trailing ":", "," or ";" — a bare
+//     file name ("secrets.yaml not found"), but equally any dotted word such
+//     as a version ("v1.2") or "e.g.". Leaving those uncapitalized is neutral
+//     or better, since title-casing a dotted token rarely produces a real
+//     spelling. A word that only ends in a dot ("Failed.") is not matched.
+func leadsWithLiteral(msg string) bool {
 	first, _, _ := strings.Cut(msg, " ")
 	if first == "" {
 		return false
+	}
+	if strings.HasPrefix(first, `"`) {
+		return true
+	}
+	first = strings.TrimRight(first, ":,;")
+	if dot := strings.Index(first, "."); dot > 0 && dot < len(first)-1 {
+		return true
 	}
 	return strings.Contains(first, "/") || strings.HasPrefix(first, ".") || strings.HasPrefix(first, "-")
 }
@@ -371,7 +411,7 @@ func leadsWithPath(msg string) bool {
 //
 // This deliberately omits DefaultErrorHandler's trailing "Try --help for
 // usage" block (its isUsageError check): today no message can satisfy both
-// leadsWithPath and isUsageError, because isUsageError only matches one of
+// leadsWithLiteral and isUsageError, because isUsageError only matches one of
 // five fixed cobra/pflag prefixes ("unknown flag:", "flag needs an
 // argument:", …), none of which is a path. That's an invariant of the
 // CURRENT set of prefixes and this hand-copy, not something the compiler
@@ -399,7 +439,7 @@ func renderPathLeadingError(w io.Writer, styles fang.Styles, err error) {
 func renderStructuredTerminalError(w io.Writer, styles fang.Styles, err *structuredTerminalError) {
 	_, _ = fmt.Fprintln(w, styles.ErrorHeader.String())
 	headline := styles.ErrorText
-	if leadsWithPath(err.headline) {
+	if leadsWithLiteral(err.headline) {
 		headline = headline.UnsetTransform()
 	}
 	_, _ = fmt.Fprintln(w, headline.Render(err.headline+"."))
@@ -493,7 +533,7 @@ func dispatchAction(ctx context.Context, client *tmux.Client, act tui.Action) er
 		return client.AttachWindow(ctx, act.Window)
 	case tui.ActionPick:
 		slog.Debug("Dispatching pick action.", "candidate", act.Pick)
-		return client.Pick(ctx, act.Pick)
+		return seshPick(ctx, client, act.Pick)
 	case tui.ActionLast:
 		slog.Debug("Dispatching last session action.")
 		return client.LastSession(ctx)

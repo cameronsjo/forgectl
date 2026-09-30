@@ -14,12 +14,14 @@ package sops
 //       the target, intact, and removes the plaintext and the directory
 //   [x] A signal before the span (target untouched) keeps nothing
 //   [x] A signal after settle (target proven) keeps nothing
-//   [x] An existing file at the keep path is never replaced
+//   [x] An existing file at the keep path is never replaced or removed, and
+//       a signal then leaves the work directory holding only this run's
+//       backup rather than deleting it
 //   [x] A normal return inside the span (a failed restore, a panic) keeps the
 //       backup; one outside it keeps nothing
 //   [x] keepBackup reports where the backup went
 //   [x] With the keep path taken, a normal return leaves the work directory
-//       holding the backup and nothing else
+//       holding the backup and its .gitignore, and nothing else
 
 import (
 	"os"
@@ -28,6 +30,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/env"
 )
 
 // fakeDeath records what die was called with. In production die never
@@ -191,9 +195,9 @@ func TestExitStatusFor(t *testing.T) {
 
 const backupCiphertext = "a: ENC[AES256_GCM,data:x,type:str]\nsops:\n    mac: m\n"
 
-// backedWorkDir makes a work directory the way stage leaves it: the ciphertext
-// backup, the plaintext value, and a decrypted read-back. keep is beside it,
-// where the target would be.
+// backedWorkDir makes a work directory the way newWorkDir and stage leave it:
+// the .gitignore, the ciphertext backup, the plaintext value, and a decrypted
+// read-back. keep is beside it, where the target would be.
 func backedWorkDir(t *testing.T) (create func() (*workDir, error), keep string) {
 	t.Helper()
 	parent := t.TempDir()
@@ -204,7 +208,7 @@ func backedWorkDir(t *testing.T) (create func() (*workDir, error), keep string) 
 			return nil, err
 		}
 		w := &workDir{dir: dir, backup: filepath.Join(dir, "backup"), keep: keep}
-		for name, body := range map[string]string{"backup": backupCiphertext, "value": "s3cr3t", "landed": "s3cr3t"} {
+		for name, body := range map[string]string{env.ScratchIgnoreName: env.ScratchIgnore, "backup": backupCiphertext, "value": "s3cr3t", "landed": "s3cr3t"} {
 			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
 				return nil, err
 			}
@@ -277,6 +281,11 @@ func TestGuard_SignalOutsideMutationKeepsNothing(t *testing.T) {
 	}
 }
 
+// A file already at the keep path, planted outside the lock, is never
+// replaced and never removed, and the signal does not delete this run's
+// backup either: the work directory stays holding only the backup and its
+// .gitignore, as on the no-child path (cameronsjo/forgectl#692). It used to
+// remove the directory whole, backup included.
 func TestGuard_KeepNeverReplacesAnExistingFile(t *testing.T) {
 	ch := make(chan os.Signal, 1)
 	death := newFakeDeath()
@@ -290,16 +299,29 @@ func TestGuard_KeepNeverReplacesAnExistingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("track: %v", err)
 	}
+	// sops' decrypted copy of the whole document, in its own subdirectory
+	// of the work directory, as TMPDIR puts it there.
+	if err := os.Mkdir(filepath.Join(work.dir, "1234"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work.dir, "1234", "doc.yaml"), []byte("a: s3cr3t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	g.beginMutation()
 	fireAndWait(t, ch, death)
 
-	assertGone(t, work.dir)
 	got, err := os.ReadFile(filepath.Clean(keep))
 	if err != nil || string(got) != earlier {
-		t.Errorf("the existing file at the keep path was replaced: %q, %v", got, err)
+		t.Errorf("the existing file at the keep path was replaced or removed: %q, %v", got, err)
+	}
+	assertHoldsOnlyTheBackup(t, work.dir)
+	got, err = os.ReadFile(filepath.Clean(work.backup))
+	if err != nil || string(got) != backupCiphertext {
+		t.Errorf("this run's backup = %q, %v; want the ciphertext unchanged", got, err)
 	}
 	g.cleanup()
 	g.release()
+	assertHoldsOnlyTheBackup(t, work.dir)
 }
 
 // A normal return from inside the span means the target was never verified
@@ -411,22 +433,71 @@ func TestGuard_KeepPathTakenLeavesOnlyTheBackup(t *testing.T) {
 	g.cleanup()
 	g.release()
 
-	entries, err := os.ReadDir(work.dir)
-	if err != nil {
-		t.Fatalf("the work directory holding the only backup was removed: %v", err)
-	}
-	if len(entries) != 1 || entries[0].Name() != "backup" {
-		var names []string
-		for _, e := range entries {
-			names = append(names, e.Name())
-		}
-		t.Errorf("the kept work directory holds %v, want only the backup", names)
-	}
+	assertHoldsOnlyTheBackup(t, work.dir)
 	got, err := os.ReadFile(filepath.Clean(work.backup))
 	if err != nil || string(got) != backupCiphertext {
 		t.Errorf("the backup = %q, %v; want the ciphertext unchanged", got, err)
 	}
 	if got, err := os.ReadFile(filepath.Clean(keep)); err != nil || string(got) != earlier {
 		t.Errorf("the existing file at the keep path was replaced: %q, %v", got, err)
+	}
+}
+
+// On the signal path a sops child can create an entry between a prune's
+// removal and its check, so one prune attempt can fail and the next succeed.
+// The guard retries rather than giving up on the first failure, which would
+// remove the only backup along with the directory (the #736 review).
+func TestGuard_PruneRetriesALostRace(t *testing.T) {
+	var attempts int
+	prev := pruneWorkDir
+	pruneWorkDir = func(w *workDir) bool {
+		attempts++
+		if attempts == 1 {
+			// What a sops child racing the prune leaves: a fresh entry.
+			_ = os.WriteFile(filepath.Join(w.dir, "late"), []byte("s3cr3t"), 0o600)
+			return false
+		}
+		return prev(w)
+	}
+	t.Cleanup(func() { pruneWorkDir = prev })
+
+	g := startPlaintextGuard(make(chan os.Signal, 1), noStop, newFakeDeath().die)
+	create, keep := backedWorkDir(t)
+	if err := os.WriteFile(keep, []byte("an earlier run's evidence"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	work, err := g.track(create)
+	if err != nil {
+		t.Fatalf("track: %v", err)
+	}
+	g.beginMutation()
+	if got := g.keepBackup(); got != work.backup {
+		t.Errorf("keepBackup() = %q after one lost prune race, want the backup kept at %q", got, work.backup)
+	}
+	g.cleanup()
+	g.release()
+
+	if attempts < 2 {
+		t.Errorf("the prune ran %d time(s); a lost race was not retried", attempts)
+	}
+	assertHoldsOnlyTheBackup(t, work.dir)
+}
+
+// assertHoldsOnlyTheBackup requires a kept work directory to hold the
+// ciphertext backup and its .gitignore, and nothing else: no plaintext stays
+// with the backup, and the directory stays as uncommittable as a live one
+// (cameronsjo/forgectl#698).
+func assertHoldsOnlyTheBackup(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("the work directory holding the only backup was removed: %v", err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) != 2 || names[0] != env.ScratchIgnoreName || names[1] != "backup" {
+		t.Errorf("the kept work directory holds %v, want only [%s backup]", names, env.ScratchIgnoreName)
 	}
 }

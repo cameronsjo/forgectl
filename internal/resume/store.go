@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Record is one file in forgectl's snapshot store: everything about a session
@@ -143,7 +145,7 @@ func Delete(dir, id string) error {
 		return fmt.Errorf("refusing to delete record with invalid session id %q", id)
 	}
 	if err := os.Remove(filepath.Join(dir, id+".json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("delete record %s: %w", id, err)
+		return fmt.Errorf("delete record %s: %w", id, termsafe.Error(err))
 	}
 	return nil
 }
@@ -158,7 +160,7 @@ func Save(dir string, r *Record) error {
 		return fmt.Errorf("refusing to store record with invalid session id %q", r.ID)
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create resume store %s: %w", dir, err)
+		return fmt.Errorf("create resume store %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	// termsafe:allow-raw-json persisted resume record, never command output
 	data, err := json.MarshalIndent(r, "", "  ")
@@ -168,22 +170,32 @@ func Save(dir string, r *Record) error {
 	final := filepath.Join(dir, r.ID+".json")
 	tmp, err := os.CreateTemp(dir, r.ID+".*.tmp")
 	if err != nil {
-		return fmt.Errorf("create temp record in %s: %w", dir, err)
+		return fmt.Errorf("create temp record in %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(data); err != nil {
+	if _, err := saveWrite(tmp, data); err != nil {
 		_ = tmp.Close()
-		return err
+		return termsafe.Error(err)
 	}
-	if err := tmp.Close(); err != nil {
-		return err
+	if err := saveClose(tmp); err != nil {
+		return termsafe.Error(err)
 	}
-	if err := os.Chmod(tmpName, 0o600); err != nil {
-		return err
+	if err := saveChmod(tmpName, 0o600); err != nil {
+		return termsafe.Error(err)
 	}
-	return os.Rename(tmpName, final)
+	return termsafe.Error(os.Rename(tmpName, final))
 }
+
+// saveWrite, saveClose, and saveChmod are Save's temp-file operations, seamed
+// so a test can fail each one: none fails on demand against a real file, even
+// as root, and each failure's *PathError carries the store path Save must
+// escape before returning it.
+var (
+	saveWrite = (*os.File).Write
+	saveClose = (*os.File).Close
+	saveChmod = os.Chmod
+)
 
 // mergeTasks folds live task bodies over previously snapshotted ones, keyed by
 // task id.

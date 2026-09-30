@@ -121,7 +121,9 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 			// the default stays exit 0 on a partial result, matching `review`;
 			// ADR-0008 rule 3 argues for flipping both defaults together.
 			if strict && len(notes) > 0 {
-				return WithExitCode(fmt.Errorf("inventory is partial: %d degradation note(s) on stderr (--strict)", len(notes)), 1)
+				// Under --json the rows on stdout are the verdict and the
+				// notes already explain it (forgectl#862).
+				return jsonVerdict(WithExitCode(fmt.Errorf("inventory is partial: %d degradation note(s) on stderr (--strict)", len(notes)), 1), asJSON)
 			}
 			return nil
 		},

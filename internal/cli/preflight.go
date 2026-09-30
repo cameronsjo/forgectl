@@ -87,7 +87,7 @@ only), 2 error.`,
 			}
 			projectDir, err := os.Getwd()
 			if err != nil {
-				return WithExitCode(fmt.Errorf("resolve project directory: %w", err), 2)
+				return WithExitCode(fmt.Errorf("resolve project directory: %w", termsafe.Error(err)), 2)
 			}
 
 			report, err := computePreflightReport(homeDir, projectDir, cfg)
@@ -113,10 +113,12 @@ only), 2 error.`,
 			}
 
 			if !apply && !report.ChangeSet.Aligned() {
-				return WithExitCode(
+				// Under --json the report on stdout is the verdict
+				// (forgectl#862).
+				return jsonVerdict(WithExitCode(
 					fmt.Errorf("misaligned: %d to enable, %d to disable", len(report.ChangeSet.Enable), len(report.ChangeSet.Disable)),
 					1,
-				)
+				), asJSON)
 			}
 			return nil
 		},

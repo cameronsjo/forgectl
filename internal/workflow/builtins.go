@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // ErrInvalidWorkflowName is returned for a name that is not a single, clean path
@@ -70,7 +71,7 @@ func Load(name string) (Source, error) {
 	if err != nil {
 		userDir := userWorkflowDir()
 		slog.Warn("Workflow not found in user directory or built-ins.", "workflowName", name, "userDir", userDir)
-		return Source{}, fmt.Errorf("workflow %q not found (checked %s and built-ins): %w", name, userDir, err)
+		return Source{}, fmt.Errorf("workflow %q not found (checked %s and built-ins): %w", name, termsafe.QuotePath(userDir), termsafe.Error(err))
 	}
 	slog.Debug("Loaded workflow from built-ins.", "workflowName", name)
 	return Source{Name: name, Path: "", Data: data, Builtin: true}, nil

@@ -336,14 +336,14 @@ const workspaceUnclassifiedStatus = "internal error: unclassified workspace stat
 // A record whose workspace is gone reports that and nothing else: its tmux
 // window is irrelevant, and it is never included in the liveness read at all.
 // For a live record the behavior is unchanged and still FAILS SOFT — when tmux
-// could not be read (tmuxOK false) every row reports "?", because an
+// could not be read (tmuxUnreadable) every row reports "?", because an
 // unreadable tmux says nothing about any individual window, and rendering
 // those rows as "window gone" would flag every healthy review as dead the
 // moment tmux hiccups.
 //
 // The final branch is unreachable through List; see workspaceUnclassifiedStatus
 // for why it is an internal error rather than a label.
-func sessionStatus(live map[pr.Ref]bool, s pr.SessionSummary, tmuxOK bool) string {
+func sessionStatus(live map[pr.Ref]bool, s pr.SessionSummary, tmuxState tmuxListState) string {
 	switch {
 	case s.IsWorkspaceNone():
 		// A queued, preparing, or needs-repair record may have no workspace; its phase
@@ -353,7 +353,7 @@ func sessionStatus(live map[pr.Ref]bool, s pr.SessionSummary, tmuxOK bool) strin
 	case s.IsWorkspaceMissing():
 		return workspaceMissingStatus
 	case s.IsWorkspaceLive():
-		return windowStatus(live, s.Ref(), tmuxOK)
+		return windowStatus(live, s.Ref(), tmuxState)
 	default:
 		return workspaceUnclassifiedStatus
 	}
@@ -378,12 +378,33 @@ func unreadableRecordsNote(n int) string {
 	return fmt.Sprintf("%d record(s) could not be read — they are not listed; an older forgectl cannot read records a newer one wrote", n)
 }
 
+// tmuxListState is how `pr list`'s one window read went.
+type tmuxListState uint8
+
+const (
+	// tmuxUnreadable: tmux could not be read; every live row renders "?".
+	tmuxUnreadable tmuxListState = iota
+	// tmuxReadable: the window list was read.
+	tmuxReadable
+	// tmuxNoServer: the server has exited and left its socket behind
+	// (tmux.ErrServerExited). No window is live, but the strict reads refuse to
+	// call any of them gone on that evidence (#746, #765), so the row says what
+	// was actually seen rather than "window gone", which sends an operator to
+	// teardown (forgectl#805).
+	tmuxNoServer
+)
+
+// noTmuxServerStatus is a live row's status when tmuxNoServer.
+const noTmuxServerStatus = "no tmux server"
+
 // windowStatus renders one live session's review-window liveness.
-func windowStatus(live map[pr.Ref]bool, ref pr.Ref, tmuxOK bool) string {
-	if !tmuxOK {
+func windowStatus(live map[pr.Ref]bool, ref pr.Ref, tmuxState tmuxListState) string {
+	switch {
+	case tmuxState == tmuxUnreadable:
 		return "?"
-	}
-	if live[ref] {
+	case tmuxState == tmuxNoServer:
+		return noTmuxServerStatus
+	case live[ref]:
 		return "live"
 	}
 	return "window gone"
@@ -415,12 +436,12 @@ func newPrListCmd(client *pr.Client) *cobra.Command {
 
   REF   CREATED   PATH   WINDOW   PHASE   REASON
 
-WINDOW is what tmux reports RIGHT NOW — live, window gone, or ? when tmux
-could not be read at all. PHASE is what the record SAYS about how far the
-session got. The two are separate on purpose: a record reading 'launching'
-beside 'no window' is a session that died between the two, and
-'forgectl pr repair' is what settles that disagreement. PHASE is '-' on a
-record written before phases existed.
+WINDOW is what tmux reports RIGHT NOW — live, window gone, no tmux server
+when no server is running, or ? when tmux could not be read at all. PHASE
+is what the record SAYS about how far the session got. The two are separate
+on purpose: a record reading 'launching' beside 'no window' is a session that
+died between the two, and 'forgectl pr repair' is what settles that
+disagreement. PHASE is '-' on a record written before phases existed.
 
 Fields are append-only: PATH is field 3 and stays there, because it is the
 operand 'forgectl pr teardown' takes.
@@ -448,9 +469,9 @@ repair, capped as 'forgectl pr dash' caps it, and empty on every other row.
 			// a question worth asking, so a list of nothing but stale records
 			// issues zero tmux calls — and in a mixed list, an unreadable tmux
 			// degrades only the live rows.
-			live, tmuxOK := prListLiveness(cmd.Context(), client, summaries)
+			live, tmuxState := prListLiveness(cmd.Context(), client, summaries)
 			if asJSON {
-				return writePrListJSON(out, summaries, live, tmuxOK)
+				return writePrListJSON(out, summaries, live, tmuxState)
 			}
 			if len(summaries) == 0 {
 				_, _ = fmt.Fprintln(out, "no active review sessions")
@@ -481,7 +502,7 @@ repair, capped as 'forgectl pr dash' caps it, and empty on every other row.
 				_, _ = fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\t%s\n",
 					s.Ref().String(), s.CreatedAt().Format(time.RFC3339),
 					termsafe.QuotePathIfUnsafe(s.Path()),
-					sessionStatus(live, s, tmuxOK),
+					sessionStatus(live, s, tmuxState),
 					phaseLabel(s), repairReasonLine(s.RepairReason()))
 			}
 			return nil
@@ -495,18 +516,27 @@ repair, capped as 'forgectl pr dash' caps it, and empty on every other row.
 // window list, exactly once, and returns the map both the human table and
 // the --json rows read `sessionStatus` against. A stale-only list issues
 // zero tmux calls, matching the human path's cost contract.
-func prListLiveness(ctx context.Context, client *pr.Client, summaries []pr.SessionSummary) (live map[pr.Ref]bool, tmuxOK bool) {
+func prListLiveness(ctx context.Context, client *pr.Client, summaries []pr.SessionSummary) (live map[pr.Ref]bool, tmuxState tmuxListState) {
 	refs := make([]pr.Ref, 0, len(summaries))
 	for _, s := range summaries {
 		if s.IsWorkspaceLive() {
 			refs = append(refs, s.Ref())
 		}
 	}
-	tmuxOK = true
-	if len(refs) > 0 {
-		live, tmuxOK = client.WindowsLive(ctx, refs)
+	if len(refs) == 0 {
+		return nil, tmuxReadable
 	}
-	return live, tmuxOK
+	// Display only: an exited tmux server's leftover socket reads as no live
+	// window here, not "?" (forgectl#786), and is labeled as such (#805).
+	live, ok, serverExited := client.WindowsLiveForListing(ctx, refs)
+	switch {
+	case !ok:
+		return nil, tmuxUnreadable
+	case serverExited:
+		return live, tmuxNoServer
+	default:
+		return live, tmuxReadable
+	}
 }
 
 // writePrListJSON encodes the active review sessions as a JSON array through
@@ -514,14 +544,14 @@ func prListLiveness(ctx context.Context, client *pr.Client, summaries []pr.Sessi
 // path is the one field here that can carry attacker-controlled bytes (a
 // FILENAME chosen on disk), and the encoder's own escaping is what makes it
 // terminal-safe on the way out — no QuotePathIfUnsafe pass is needed here.
-func writePrListJSON(out io.Writer, summaries []pr.SessionSummary, live map[pr.Ref]bool, tmuxOK bool) error {
+func writePrListJSON(out io.Writer, summaries []pr.SessionSummary, live map[pr.Ref]bool, tmuxState tmuxListState) error {
 	rows := make([]prListRowJSON, 0, len(summaries))
 	for _, s := range summaries {
 		rows = append(rows, prListRowJSON{
 			Ref:       s.Ref().String(),
 			CreatedAt: s.CreatedAt().Format(time.RFC3339),
 			Path:      s.Path(),
-			Status:    sessionStatus(live, s, tmuxOK),
+			Status:    sessionStatus(live, s, tmuxState),
 			Phase:     string(s.Phase()),
 
 			RepairReason: repairReasonLine(s.RepairReason()),
@@ -560,8 +590,8 @@ func newPrOpenCmd(client *pr.Client) *cobra.Command {
 // fires lands in a handler a default install discards, and the command's exit
 // would otherwise read as an ordinary failure with nothing removed and nothing
 // explained. parked says whether the record really was parked in needs-repair;
-// a legacy record cannot be, and claiming otherwise would send the operator
-// looking for a state that was never written.
+// a failed park write leaves it as it was, and claiming otherwise would send
+// the operator looking for a state that was never written.
 func windowKillTimeoutNote(target string, parked bool) string {
 	where := "a session"
 	if target != "" {
@@ -576,10 +606,20 @@ func windowKillTimeoutNote(target string, parked bool) string {
 		"Once tmux responds, run 'forgectl pr teardown' again, or see 'forgectl pr repair'", where, state)
 }
 
-// noteWindowKillTimeout prints windowKillTimeoutNote when err is that failure.
-func noteWindowKillTimeout(cmd *cobra.Command, err error, target string) {
-	if errors.Is(err, pr.ErrWindowKillTimedOut) {
-		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), windowKillTimeoutNote(target, !errors.Is(err, pr.ErrRecordNotParked)))
+// noteTeardownRefusal prints, for a single `pr teardown`, the same
+// per-session note `pr cleanup` prints when a teardown failed closed — a
+// timeout, an unreadable window state, or a duplicate window name — so the
+// operator learns whether the record is now needs-repair. Other failures get
+// no note; the returned error already says everything.
+//
+// The note leaves the cause out: the command returns err, and execute.go
+// prints it on the next line, so embedding it here printed it twice
+// (forgectl#746). `pr cleanup` keeps it, because its returned error is a tally
+// that names no single failure.
+func noteTeardownRefusal(cmd *cobra.Command, err error, target string) {
+	if errors.Is(err, pr.ErrWindowKillTimedOut) || errors.Is(err, pr.ErrWindowStateUnreadable) ||
+		errors.Is(err, tmux.ErrAmbiguousWindow) {
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), refusalLine(pr.CleanupFailure{Path: target, Err: err}, false))
 	}
 }
 
@@ -594,7 +634,7 @@ func newPrTeardownCmd(client *pr.Client) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := client.Teardown(cmd.Context(), args[0]); err != nil {
-				noteWindowKillTimeout(cmd, err, args[0])
+				noteTeardownRefusal(cmd, err, args[0])
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "torn down %s\n", args[0])
@@ -633,6 +673,13 @@ func newPrCleanupCmd(client *pr.Client) *cobra.Command {
 // past a failure, so a single note describing only the first — and claiming
 // "nothing was removed" for a sweep that removed plenty — misled.
 func cleanupFailureLine(f pr.CleanupFailure) string {
+	return refusalLine(f, true)
+}
+
+// refusalLine is cleanupFailureLine's body. withCause embeds f.Err's text
+// where a line would otherwise not say what tmux answered; a caller whose
+// returned error prints that text anyway passes false.
+func refusalLine(f pr.CleanupFailure, withCause bool) string {
 	switch {
 	case errors.Is(f.Err, pr.ErrTmuxBudgetSpent):
 		return fmt.Sprintf("skipped %s: tmux stopped answering earlier in this sweep, so it was not attempted and "+
@@ -645,9 +692,21 @@ func cleanupFailureLine(f pr.CleanupFailure) string {
 		if errors.Is(f.Err, pr.ErrRecordNotParked) {
 			state = "the record could not be parked as needs-repair and was left as it was"
 		}
-		return fmt.Sprintf("refused %s: more than one tmux window carries its review's name, so neither was killed: "+
-			"nothing was removed and %s. Close the window that is not the review, then run 'forgectl pr teardown' "+
+		return fmt.Sprintf("refused %s: more than one tmux window carries its review's name, so none was killed: "+
+			"nothing was removed and %s. Close the ones that are not the review, then run 'forgectl pr teardown' "+
 			"again, or see 'forgectl pr repair'", termsafe.QuotePathIfUnsafe(f.Path), state)
+	case errors.Is(f.Err, pr.ErrWindowStateUnreadable):
+		state := "the record is parked as needs-repair"
+		if errors.Is(f.Err, pr.ErrRecordNotParked) {
+			state = "the record could not be parked as needs-repair and was left as it was"
+		}
+		cause := ""
+		if withCause {
+			cause = " (" + termsafe.SafeLine(f.Err.Error()) + ")"
+		}
+		return fmt.Sprintf("refused %s: tmux could not say whether its review window still exists, so it was not "+
+			"treated as gone: nothing was removed and %s%s. Once tmux reads cleanly, run 'forgectl pr teardown' "+
+			"again, or see 'forgectl pr repair'", termsafe.QuotePathIfUnsafe(f.Path), state, cause)
 	default:
 		return fmt.Sprintf("failed %s: %s", termsafe.QuotePathIfUnsafe(f.Path), termsafe.SafeLine(f.Err.Error()))
 	}

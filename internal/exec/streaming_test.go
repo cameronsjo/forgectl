@@ -1,4 +1,9 @@
+//go:build unix
+
 package exec
+
+// The whole file is unix-only (#810): the fixtures are sh scripts, and the
+// cleanup signals a grandchild with syscall.Kill.
 
 // Test plan for streaming.go (#602)
 //

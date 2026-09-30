@@ -28,8 +28,19 @@
 //   - the DOM bound: output at most 250 levels deep renders (for \frac,
 //     pmatrix, \boxed and subscripts nested to just under it), and output
 //     past it is left as TeX source;
-//   - the node bound: a macro-free empty matrix row that builds more than
-//     100,000 nodes is left as TeX source;
+//   - the node bound: a macro-free formula that builds more than 40,000
+//     nodes is left as TeX source (forgectl#697);
+//   - the cell bound: more than 2,000 & or \\ is left as TeX source before
+//     KaTeX runs (forgectl#690);
+//   - \verb<d>…<d> is opaque to the source scan, so \verb|%| cannot hide
+//     the openers after it, and braces inside \verb are not nesting
+//     (forgectl#690);
+//   - the page budget: one render pass spends about 3 s of KaTeX build time
+//     plus estimated layout, and the formulas after that are left as TeX
+//     source (forgectl#697), with the CPU throttled to test the build-time
+//     half;
+//   - a theme toggle and ForgectlMath.refresh() run KaTeX on nothing already
+//     rendered, and a theme toggle recolors a parse error (forgectl#697);
 //   - maxExpand is 500 (250 \dots render, 251 do not), and maxSize caps
 //     \rule{100000em}{…} at 500em.
 //
@@ -84,13 +95,21 @@ const rep = (s, n) => s.repeat(n);
 
 // The tooltips math-init.js gives a skipped formula.
 const TOO_COMPLEX = 'Not rendered: this formula is too long, too large or too deeply nested to render safely.';
+const OVER_BUDGET = "Not rendered: the math before this formula used up the page's rendering budget.";
 const DEFINES_MACRO = 'Not rendered: this formula defines a macro (\\def, \\newcommand, \\let, …), which could make it too slow to render safely.';
 
 // Each fixture is one document. `want` is 'rendered', 'skipped' (left as
 // TeX source, .math-skipped), 'error' (a KaTeX parse error whose message
-// includes the fixture's `error`) or 'none' (no .math element at all). A skipped
+// includes the fixture's `error`), 'none' (no .math element at all) or
+// 'budget' (the first formulas render and the rest are left as source with
+// the OVER_BUDGET tooltip). A skipped
 // fixture's `title` is the tooltip it must carry, and `maxMs` bounds the
-// time from navigation to the render finishing. Fixtures
+// time from navigation to the render finishing. `builds` is the exact
+// number of katex.render calls the page load makes, counted by wrapping
+// katex.render before the bundle runs: 0 means the pre-scan rejected every
+// formula without building it. For 'budget', `maxRendered` caps how many
+// render, and `throttle` slows the CPU by that factor so the time bound,
+// not the node bound, is what stops the pass. Fixtures
 // live in a vault root, because single-dollar inline math is recognized
 // only there (forgectl#600); `root: 'docs'` puts one in a plain docs root.
 const fixtures = {
@@ -202,12 +221,92 @@ const fixtures = {
     want: 'rendered',
     minDepth: 240,
   },
-  // The node bound without macros: an empty matrix row of 6,500 & builds
-  // about 110,000 nodes from 6,526 characters.
+  // The node bound without macros or cells (forgectl#697): x' is about 18
+  // nodes a pair, so 2,000 pairs build about 36,000 nodes and render, and
+  // 2,800 build about 50,000 and are left as source, after one build.
+  'nodes-under-cap.md': {
+    body: '$$' + rep("x'", 2000) + '$$\n',
+    want: 'rendered',
+    builds: 1,
+  },
   'nodes-over-cap.md': {
-    body: '$$\\begin{matrix}' + rep('&', 6500) + '\\end{matrix}$$\n',
+    body: '$$' + rep("x'", 2800) + '$$\n',
     want: 'skipped',
     title: TOO_COMPLEX,
+    builds: 1,
+  },
+  // The cell bound (forgectl#690): 2,000 & or \\ render, one more is left
+  // as source before KaTeX builds anything. On origin/main, 9,900 & built
+  // about 170,000 nodes, for about 2 s, before the node bound rejected it.
+  'cells-at-cap.md': {
+    body: '$$\\begin{matrix}' + rep('&', 2000) + '\\end{matrix}$$\n',
+    want: 'rendered',
+    builds: 1,
+  },
+  'cells-over-cap.md': {
+    body: '$$\\begin{matrix}' + rep('&', 2001) + '\\end{matrix}$$\n',
+    want: 'skipped',
+    title: TOO_COMPLEX,
+    builds: 0,
+  },
+  'rows-over-cap.md': {
+    body: '$$\\begin{matrix}' + rep('x\\\\', 2001) + '\\end{matrix}$$\n',
+    want: 'skipped',
+    title: TOO_COMPLEX,
+    builds: 0,
+  },
+  // An escaped \& is a literal, not a cell.
+  'escaped-amp.md': {
+    body: '$' + rep('\\&', 2500) + '$\n',
+    want: 'rendered',
+    builds: 1,
+  },
+  // \verb|%| is one token to KaTeX, so the % is not a comment and the
+  // openers after it are live (forgectl#690). A scan that read the % as a
+  // comment saw no nesting and let KaTeX build and lay out 240 levels.
+  'verb-hides-openers.md': {
+    body: '$$\\verb|%|' + rep('{', 240) + 'x' + rep('}', 240) + '$$\n',
+    want: 'skipped',
+    title: TOO_COMPLEX,
+    builds: 0,
+  },
+  'verb-star-hides-openers.md': {
+    body: '$$\\verb*|%|' + rep('{', 240) + 'x' + rep('}', 240) + '$$\n',
+    want: 'skipped',
+    title: TOO_COMPLEX,
+    builds: 0,
+  },
+  // \verb* takes any delimiter, a letter included.
+  'verb-star-letter.md': {
+    body: '$$\\verb*a%a' + rep('{', 240) + 'x' + rep('}', 240) + '$$\n',
+    want: 'skipped',
+    title: TOO_COMPLEX,
+    builds: 0,
+  },
+  // Braces inside \verb are literal text, so they are not nesting.
+  'verb-braces.md': {
+    body: '$\\verb|' + rep('{', 150) + '|$\n',
+    want: 'rendered',
+    builds: 1,
+  },
+  // The page layout budget (forgectl#697): each formula of about 36,000
+  // nodes is estimated at about 0.6 s of layout, so however fast KaTeX
+  // builds them, at most five of ten fit in 3 s and the rest are left as
+  // source. On origin/main, ten 70,000-node formulas took 51 s.
+  'page-layout-budget.md': {
+    body: rep('$$' + rep("x'", 2000) + '$$\n\n', 10),
+    want: 'budget',
+    maxRendered: 5,
+  },
+  // The page time budget (forgectl#697): sixty formulas of about 5,400
+  // nodes each are estimated at about 1.3 s of layout in all, so with the
+  // CPU slowed tenfold only the timed build, about 6 s for all sixty, can
+  // use up the 3 s.
+  'page-time-budget.md': {
+    body: rep('$$' + rep("x'", 300) + '$$\n\n', 60),
+    want: 'budget',
+    maxRendered: 59,
+    throttle: 10,
   },
   // A formula that defines a macro is skipped before KaTeX runs
   // (forgectl#675). The multiplier: 445 expansions, under maxExpand, and
@@ -305,13 +404,35 @@ for (const [name, f] of Object.entries(fixtures)) {
   const page = await browser.newPage();
   let crashed = false;
   page.on('crash', () => { crashed = true; });
+  // Count katex.render calls: wrap it as the bundle assigns window.katex.
+  await page.addInitScript(() => {
+    window.__katexBuilds = 0;
+    let k;
+    Object.defineProperty(window, 'katex', {
+      configurable: true,
+      get() { return k; },
+      set(v) {
+        const render = v.render;
+        v.render = function () { window.__katexBuilds++; return render.apply(this, arguments); };
+        k = v;
+      },
+    });
+  });
+  if (f.throttle) {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: f.throttle });
+  }
   try {
     const start = Date.now();
     // Never 'networkidle': the live-reload SSE stream never goes idle.
-    await page.goto(`${base}/doc/${f.root || 'vault'}/${name}`, { waitUntil: 'load', timeout: 30000 });
-    await page.waitForFunction(() => window.ForgectlMath !== undefined, null, { timeout: 10000 });
+    await page.goto(`${base}/doc/${f.root || 'vault'}/${name}`, { waitUntil: 'load', timeout: f.throttle ? 90000 : 30000 });
+    // A CPU-throttled page loads slowly for reasons that have nothing to do
+    // with math, so it gets longer to finish.
+    await page.waitForFunction(() => window.ForgectlMath !== undefined, null, { timeout: f.throttle ? 90000 : 10000 });
     const elapsed = Date.now() - start;
     if (f.maxMs && elapsed > f.maxMs) problems.push(`${name}: took ${elapsed} ms, want at most ${f.maxMs}`);
+    const builds = await page.evaluate(() => window.__katexBuilds);
+    if (f.builds !== undefined && builds !== f.builds) problems.push(`${name}: KaTeX built ${builds} time(s), want ${f.builds}`);
     const r = await page.evaluate(() => [...document.querySelectorAll('.math')].map((el) => {
       const katexEl = el.querySelector('.katex');
       const errorEl = el.querySelector('.katex-error');
@@ -342,7 +463,17 @@ for (const [name, f] of Object.entries(fixtures)) {
     } else if (r.length === 0) {
       problems.push(`${name}: no .math element on the page`);
     }
-    for (const m of r) {
+    if (f.want === 'budget') {
+      const rendered = r.filter((m) => m.katex && !m.skipped).length;
+      if (rendered < 1 || rendered > f.maxRendered) problems.push(`${name}: ${rendered} of ${r.length} rendered, want 1 to ${f.maxRendered}`);
+      // Rendering stops at the first formula over the budget: every one
+      // after the rendered prefix is left as source with OVER_BUDGET.
+      r.forEach((m, i) => {
+        if (i < rendered && (m.skipped || !m.katex)) problems.push(`${name}: formula ${i} is not rendered, but a later one is`);
+        if (i >= rendered && (!m.skipped || m.title !== OVER_BUDGET || m.text !== m.source)) problems.push(`${name}: formula ${i} is not left as source with the budget tooltip: skipped=${m.skipped} title=${JSON.stringify(m.title)}`);
+      });
+    }
+    for (const m of f.want === 'budget' ? [] : r) {
       if (f.want === 'error') {
         if (m.skipped || !m.error || !m.error.includes(f.error)) problems.push(`${name}: want a parse error with "${f.error}", got skipped=${m.skipped} error=${m.error}`);
       } else if (f.want === 'skipped') {
@@ -359,10 +490,38 @@ for (const [name, f] of Object.entries(fixtures)) {
       if (!inline || inline.source !== '$a^2$' || inline.text.includes('$')) problems.push(`plain.md: inline delimiters not stripped or source not stashed: ${JSON.stringify(inline)}`);
       if (!display || !display.display) problems.push('plain.md: display math has no .katex-display');
       const again = await page.evaluate(() => {
+        const before = window.__katexBuilds;
         window.ForgectlMath.refresh();
-        return [...document.querySelectorAll('.math')].every((el) => el.querySelector('.katex') !== null);
+        const d = document.documentElement;
+        d.setAttribute('data-theme', d.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+        return new Promise((resolve) => setTimeout(() => resolve({
+          kept: [...document.querySelectorAll('.math')].every((el) => el.querySelector('.katex') !== null),
+          rebuilt: window.__katexBuilds - before,
+        }), 50));
       });
-      if (!again) problems.push('plain.md: ForgectlMath.refresh() lost a rendered formula');
+      if (!again.kept) problems.push('plain.md: ForgectlMath.refresh() or a theme toggle lost a rendered formula');
+      if (again.rebuilt !== 0) problems.push(`plain.md: refresh() and a theme toggle ran KaTeX ${again.rebuilt} time(s), want 0 (forgectl#697)`);
+    }
+    if (name === 'max-expand.md') {
+      // A theme toggle recolors a parse error in place, to the new theme's
+      // --urgent, without running KaTeX again.
+      const t = await page.evaluate(() => {
+        const before = window.__katexBuilds;
+        const d = document.documentElement;
+        const next = d.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+        d.setAttribute('data-theme', next);
+        return new Promise((resolve) => setTimeout(() => {
+          const probe = document.createElement('span');
+          probe.style.color = getComputedStyle(d).getPropertyValue('--urgent').trim();
+          document.body.appendChild(probe);
+          const want = getComputedStyle(probe).color;
+          probe.remove();
+          const e = document.querySelector('.math .katex-error');
+          resolve({ got: e ? getComputedStyle(e).color : null, want, rebuilt: window.__katexBuilds - before });
+        }, 50));
+      });
+      if (t.got !== t.want) problems.push(`max-expand.md: after a theme toggle the error is ${t.got}, want ${t.want}`);
+      if (t.rebuilt !== 0) problems.push(`max-expand.md: a theme toggle ran KaTeX ${t.rebuilt} time(s), want 0`);
     }
     if (name === 'huge-rule.md') {
       const w = r[0] && r[0].ruleWidthEm;

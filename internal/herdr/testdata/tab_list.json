@@ -1,0 +1,44 @@
+{
+  "id": "cli:tab:list",
+  "result": {
+    "tabs": [
+      {
+        "agent_status": "working",
+        "focused": false,
+        "label": "label-5",
+        "number": 39,
+        "pane_count": 4,
+        "tab_id": "w1:t2",
+        "workspace_id": "w1"
+      },
+      {
+        "agent_status": "unknown",
+        "focused": false,
+        "label": "label-6",
+        "number": 40,
+        "pane_count": 1,
+        "tab_id": "w1:t3",
+        "workspace_id": "w1"
+      },
+      {
+        "agent_status": "idle",
+        "focused": false,
+        "label": "label-7",
+        "number": 38,
+        "pane_count": 2,
+        "tab_id": "w1:t4",
+        "workspace_id": "w1"
+      },
+      {
+        "agent_status": "idle",
+        "focused": true,
+        "label": "label-8",
+        "number": 28,
+        "pane_count": 1,
+        "tab_id": "w1:t1",
+        "workspace_id": "w1"
+      }
+    ],
+    "type": "tab_list"
+  }
+}

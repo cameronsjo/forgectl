@@ -26,6 +26,13 @@ package docs
 //              reload event — paired with a control write to a non-excluded doc
 //              in the same fixture, so the silence is evidence rather than the
 //              symptom of a watcher that never started
+//   [x] Unhappy: a doc rewritten faster than the debounce still reloads
+//              within the max-wait, rather than once the writes stop
+//
+// Watcher.settleIn (Classification: timing arithmetic — deterministic)
+//   [x] Happy: the debounce, until maxWait after the burst's first event
+//   [x] Edge: a watch rebuild's longer backoff is kept whole, not cut to
+//              maxWait, and events inside it cannot extend it
 //
 // excludedDir (Classification: shared predicate)
 //   [x] Happy/Unhappy: the indexer and the watcher agree, by construction —
@@ -313,6 +320,123 @@ func TestWatcher_WriteUnderExcludedDir_PublishesNoReload(t *testing.T) {
 	for _, rel := range []string{".trash/deleted.md", "node_modules/dep.md"} {
 		if _, err := store.Current().Resolve(label, rel); err == nil {
 			t.Errorf("Resolve(%q, %q) succeeded, want an error", label, rel)
+		}
+	}
+}
+
+// settleIn arms the debounce until the burst has been pending for maxWait,
+// then only what is left of maxWait; a rebuild's longer backoff is kept
+// whole, and the clock restarts once Run clears pendingSince on reload.
+//
+// Mutation that turns it red: return w.settleDelay() alone (no max-wait),
+// or measure the deadline from maxWait alone (the backoff row is cut to 2s).
+func TestWatcherSettleIn_BoundsPostponement(t *testing.T) {
+	const debounce, maxWait = 150 * time.Millisecond, 2 * time.Second
+	w := &Watcher{debounce: debounce, maxWait: maxWait}
+	t0 := time.Now()
+	for _, tc := range []struct {
+		after time.Duration
+		want  time.Duration
+	}{
+		{0, debounce},
+		{time.Second, debounce},
+		{1900 * time.Millisecond, 100 * time.Millisecond},
+		{2500 * time.Millisecond, 0},
+	} {
+		if got := w.settleIn(t0.Add(tc.after)); got != tc.want {
+			t.Errorf("settleIn %v into a burst = %v, want %v", tc.after, got, tc.want)
+		}
+	}
+
+	w.pendingSince = time.Time{} // what Run does on reload
+	if got := w.settleIn(t0.Add(3 * time.Second)); got != debounce {
+		t.Errorf("settleIn at the start of the next burst = %v, want the debounce", got)
+	}
+
+	// A pending rebuild backed off to the cap keeps its whole wait.
+	w.pendingSince = time.Time{}
+	w.resetPending = true
+	w.lastReset = time.Now()
+	w.resetStreak = maxResetStreak
+	for _, tc := range []struct {
+		after time.Duration
+		want  time.Duration
+	}{
+		{0, maxResetBackoff},
+		{3 * time.Second, maxResetBackoff - 3*time.Second},
+		{6 * time.Second, 0},
+	} {
+		if got := w.settleIn(t0.Add(tc.after)); got != tc.want {
+			t.Errorf("settleIn %v into a backed-off rebuild = %v, want %v", tc.after, got, tc.want)
+		}
+	}
+}
+
+// A doc rewritten more often than once per debounce still reloads: the
+// max-wait fires while the writes go on (forgectl#817).
+//
+// Mutation that turns it red: arm Run's timer with w.settleDelay() instead
+// of w.settleIn (every write postpones the reload until the writes stop).
+func TestWatcherRun_RelevantChurn_ReloadsWithinMaxWait(t *testing.T) {
+	dir := t.TempDir()
+	doc := filepath.Join(dir, "busy.md")
+	writeFile(t, doc, "# Busy\n")
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	broker := NewBroker()
+	w, err := NewWatcher(NewStore(idx), broker)
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	w.debounce = 200 * time.Millisecond
+	w.maxWait = 400 * time.Millisecond
+	sub, unsubscribe := broker.Subscribe()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		unsubscribe()
+		broker.Close()
+		_ = w.Close()
+	})
+	go w.Run(ctx)
+
+	stop := time.After(3 * time.Second)
+	tick := time.NewTicker(30 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-sub:
+			return // the reload ran while the writes went on
+		case <-tick.C:
+			writeFile(t, doc, "# Busy\n\n"+time.Now().String()+"\n")
+		case <-stop:
+			t.Fatal("no reload during 3s of writes 30ms apart to a doc; each write postponed the reload past the max-wait")
+		}
+	}
+}
+
+// A Watcher built as a struct literal has a zero maxWait; it must bound a
+// burst by DefaultMaxWait, not read as "never extend".
+//
+// Mutation that turns it red: use w.maxWait directly in settleIn (a zero
+// maxWait then cuts the wait to the debounce, so the 1s row returns 0).
+func TestWatcherSettleIn_ZeroMaxWaitUsesDefault(t *testing.T) {
+	const debounce = 150 * time.Millisecond
+	w := &Watcher{debounce: debounce}
+	t0 := time.Now()
+	for _, tc := range []struct {
+		after time.Duration
+		want  time.Duration
+	}{
+		{0, debounce},
+		{time.Second, debounce},
+		{DefaultMaxWait - 50*time.Millisecond, 50 * time.Millisecond},
+		{DefaultMaxWait + time.Second, 0},
+	} {
+		if got := w.settleIn(t0.Add(tc.after)); got != tc.want {
+			t.Errorf("settleIn %v into a burst = %v, want %v", tc.after, got, tc.want)
 		}
 	}
 }

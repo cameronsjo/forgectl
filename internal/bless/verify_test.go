@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -425,4 +426,100 @@ func TestNewVerifier_AnchorPathCompiledIn(t *testing.T) {
 	if got := NewVerifier().anchorPath; got != want {
 		t.Errorf("NewVerifier().anchorPath = %q, want %q", got, want)
 	}
+}
+
+// TestTrustedStore_CapsAnchorKeyIDEcho pins #761: a signed store whose
+// anchor_key_id disagrees with the anchor is refused with that id capped, not
+// echoed whole.
+func TestTrustedStore_CapsAnchorKeyIDEcho(t *testing.T) {
+	env := newTestEnv(t)
+	long := strings.Repeat("A", 300)
+	storeBytes := mustEncodeStore(t, Store{Schema: StoreSchema, AnchorKeyID: long})
+	writeFile(t, env.storePath, storeBytes)
+	writeFile(t, SidecarPath(env.storePath), mustEncodeEnvelope(t, Envelope{
+		Schema:    EnvelopeSchema,
+		Algo:      AlgoECDSAP256SHA256,
+		KeyID:     env.anchorFP,
+		Signature: signB64(t, env.anchorKey, DomainTrust, storeBytes),
+		SignedAt:  fixedTime.Format(time.RFC3339),
+	}))
+
+	_, err := env.verifier().TrustedStore()
+	if !errors.Is(err, ErrTrustStoreInvalid) {
+		t.Fatalf("TrustedStore = %v, want ErrTrustStoreInvalid", err)
+	}
+	if strings.Contains(err.Error(), long[:81]) {
+		t.Errorf("error %q echoes anchor_key_id uncapped", err)
+	}
+	if !strings.Contains(err.Error(), "anchor_key_id") || !strings.Contains(err.Error(), "…") {
+		t.Errorf("error %q should name anchor_key_id and mark the cap", err)
+	}
+}
+
+// TestVerifier_QuotesPathsInErrors pins #778 item 2: every path a verify
+// error names (the anchor, the trust store, the blessing sidecar) is quoted,
+// and so is the PathError it wraps, so a path carrying a terminal control
+// reaches the error escaped, never raw.
+func TestVerifier_QuotesPathsInErrors(t *testing.T) {
+	const evil = "evil\x1b]0;pwned\x07"
+	assertQuoted := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("want an error")
+		}
+		if strings.ContainsAny(err.Error(), "\x1b\x07") {
+			t.Errorf("error %q carries a raw control from the path", err)
+		}
+		if !strings.Contains(err.Error(), `evil\x1b]0;pwned\a`) {
+			t.Errorf("error %q does not show the path escaped", err)
+		}
+	}
+
+	t.Run("missing trust store", func(t *testing.T) {
+		env := newTestEnv(t)
+		v := env.verifier()
+		v.trustStorePath = func() (string, error) { return filepath.Join(env.dir, evil, "trust.toml"), nil }
+		_, err := v.TrustedStore()
+		if !errors.Is(err, ErrTrustStoreMissing) {
+			t.Fatalf("TrustedStore = %v, want ErrTrustStoreMissing", err)
+		}
+		assertQuoted(t, err)
+	})
+	t.Run("unreadable trust store", func(t *testing.T) {
+		env := newTestEnv(t)
+		dir := filepath.Join(env.dir, evil)
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		v := env.verifier()
+		v.trustStorePath = func() (string, error) { return dir, nil } // a directory: EISDIR
+		_, err := v.TrustedStore()
+		if !errors.Is(err, ErrTrustStoreInvalid) {
+			t.Fatalf("TrustedStore = %v, want ErrTrustStoreInvalid", err)
+		}
+		assertQuoted(t, err)
+	})
+	t.Run("unreadable anchor", func(t *testing.T) {
+		env := newTestEnv(t)
+		dir := filepath.Join(env.dir, evil)
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		v := env.verifier()
+		v.anchorPath = dir
+		_, _, err := v.Anchor()
+		if !errors.Is(err, ErrNoAnchor) {
+			t.Fatalf("Anchor = %v, want ErrNoAnchor", err)
+		}
+		assertQuoted(t, err)
+	})
+	t.Run("unreadable blessing sidecar", func(t *testing.T) {
+		env := newTestEnv(t)
+		wfPath := filepath.Join(env.dir, evil+".toml")
+		if err := os.Mkdir(SidecarPath(wfPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		err := env.verifier().Verify(wfPath, []byte("x"))
+		assertQuoted(t, err)
+	})
 }

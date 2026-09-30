@@ -49,6 +49,17 @@ import (
 // itself does not. Outside that span the target is untouched, or is proven,
 // so keeping a backup would only cause a false refusal.
 //
+// Something may already sit at that name. The leftover scan refuses on one
+// under the lock, so it was put there during this run, outside the lock. The
+// guard never moves the backup over it and never deletes it. It keeps the
+// work directory instead, with the backup and its .gitignore as the only
+// entries, rather than deleting the one copy of the pre-run ciphertext
+// (cameronsjo/forgectl#692). The cost is a directory that a sops child
+// outliving forgectl can still write into: a read-back still running can
+// leave the decrypted value there. The directory is gitignored, and the next
+// write's leftover scan refuses on it, names the backup inside, and warns
+// that it may hold plaintext.
+//
 // # What it cannot cover
 //
 // SIGKILL and SIGSTOP cannot be caught, a power loss runs no code, and a
@@ -183,11 +194,15 @@ func (g *plaintextGuard) settle() {
 // cannot terminate the process while a deferred removal is half done.
 //
 // It retries until the directory is confirmed gone. On the signal path the
-// main goroutine (or the sops child) is still running, and os.RemoveAll lists
-// the entries, unlinks them, then removes the directory: a file created after
-// the last listing fails that final rmdir with ENOTEMPTY and the directory
-// survives. Once the directory itself is gone, every later write into it fails
-// with ENOENT — nothing but track creates it — so a bounded retry converges.
+// main goroutine (or the sops child) is still running. workDir.cleanup lists
+// the entries, removes all but the .gitignore, then removes the .gitignore and
+// the directory only if nothing else is left (env.RemoveScratchDir): a file
+// created after that listing fails the final rmdir with ENOTEMPTY, the
+// .gitignore is put back, and the directory survives, still ignored by git.
+// Once the directory itself is gone, every later write into it fails with
+// ENOENT — nothing but track creates it — so a bounded retry converges. An
+// entry that cannot be removed at all never converges: the retries run out
+// and the directory stays under its .gitignore.
 //
 // This is the path a normal return takes. It keeps the ciphertext backup when
 // the return came from inside the mutation span, meaning the target was never
@@ -198,7 +213,7 @@ func (g *plaintextGuard) cleanup() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.mutating {
-		g.finish(keepBackupNoChild)
+		g.finish(keepCiphertext)
 		return
 	}
 	g.finish(discardAll)
@@ -211,7 +226,7 @@ func (g *plaintextGuard) cleanup() {
 func (g *plaintextGuard) keepBackup() string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.finish(keepBackupNoChild)
+	return g.finish(keepCiphertext)
 }
 
 // finishMode is what finish does with the ciphertext backup.
@@ -221,19 +236,24 @@ const (
 	// discardAll removes the whole work directory: the target is untouched,
 	// or it is proven.
 	discardAll finishMode = iota
-	// keepBackupSignal moves the backup out beside the target, then removes
-	// the directory whatever happens. A sops child may still be running, and
-	// a sops read-back that outlives forgectl writes plaintext into the
-	// directory, so the directory never stays.
-	keepBackupSignal
-	// keepBackupNoChild is the same, except that when the backup cannot be
-	// moved out, the directory stays with the backup as its only entry. The
-	// runner has waited for every sops child by the time a normal return
-	// runs, so nothing writes into it afterwards. A panic inside the runner is
-	// the one exception, and the next run's leftover scan refuses on the
-	// directory either way, naming the backup inside and warning that it may
-	// hold plaintext.
-	keepBackupNoChild
+	// keepCiphertext removes the plaintext, then moves the backup out beside the
+	// target and removes the directory. When the backup cannot be moved out,
+	// because something already sits at that name, the directory stays with
+	// the backup and its .gitignore as its only entries, on a signal or on a
+	// normal return. Two edge cases still lose it, because a kept directory
+	// must never also keep plaintext: a directory that will not prune down to
+	// the backup is removed whole, and one holding an entry that cannot be
+	// deleted loses everything else, the backup included, and stays behind
+	// under its .gitignore (docs/commands/env.md).
+	//
+	// On a normal return the runner has waited for every sops child, so
+	// nothing writes into a kept directory afterwards; a panic inside the
+	// runner is the exception. On a signal a sops child may still be running,
+	// and a read-back that outlives forgectl can write the decrypted value
+	// into it. Either way the directory is gitignored and the next run's
+	// leftover scan refuses on it, naming the backup inside and warning that
+	// it may hold plaintext (cameronsjo/forgectl#692).
+	keepCiphertext
 )
 
 // finish is cleanup, with the choice of keeping the ciphertext backup. The
@@ -245,12 +265,12 @@ func (g *plaintextGuard) finish(mode finishMode) string {
 		if g.work == nil {
 			return
 		}
-		if mode != discardAll {
+		if mode == keepCiphertext {
 			g.work.discardStagedValue()
 			g.work.discardLandedValue()
 			if g.work.preserveBackup() {
 				g.kept = g.work.keep
-			} else if mode == keepBackupNoChild && g.work.pruneToBackup() {
+			} else if g.pruneToBackup() {
 				g.kept = g.work.backup
 				return
 			}
@@ -264,6 +284,25 @@ func (g *plaintextGuard) finish(mode finishMode) string {
 	})
 	return g.kept
 }
+
+// pruneToBackup prunes the work directory down to its backup, retrying on the
+// same bound as the removal: on the signal path a sops child may create an
+// entry between the prune's removal and its check. A directory that will not
+// come down to the backup is removed whole, backup included, because a kept
+// directory must never also keep plaintext.
+func (g *plaintextGuard) pruneToBackup() bool {
+	for range cleanupAttempts {
+		if pruneWorkDir(g.work) {
+			return true
+		}
+	}
+	return false
+}
+
+// pruneWorkDir is one prune attempt. It is a variable only so a test can make
+// the first attempts lose the race a sops child would cause, which nothing
+// else can do deterministically, and so prove the retry above is there.
+var pruneWorkDir = (*workDir).pruneToBackup
 
 // cleanupAttempts bounds the retry in cleanup. Each attempt that fails lost a
 // race with a single concurrent create, so a handful is ample; the bound only
@@ -279,7 +318,7 @@ func (g *plaintextGuard) fire(sig os.Signal) {
 	g.fired = true
 	mode := discardAll
 	if g.mutating {
-		mode = keepBackupSignal
+		mode = keepCiphertext
 	}
 	g.finish(mode)
 	g.die(sig)

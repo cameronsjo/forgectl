@@ -10,10 +10,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/exec/internal/sealed"
 )
 
 // helperModeEnv turns this test binary into the child process the runner
@@ -22,11 +25,6 @@ import (
 // needs no external binary and still exercises fork/exec, pipes, and signals
 // for real.
 const helperModeEnv = "FORGECTL_SENSITIVE_HELPER_MODE"
-
-// partialMarkerEnv names a file the "partial" helper creates once its prefix
-// is written, so a test can stop it on that event rather than on a guess at
-// how long the child takes to start.
-const partialMarkerEnv = "FORGECTL_SENSITIVE_HELPER_PARTIAL_MARKER"
 
 func TestMain(m *testing.M) {
 	if mode := os.Getenv(helperModeEnv); mode != "" {
@@ -75,19 +73,24 @@ func helperMain(mode string) int {
 		// stall gets a prefix — and gets it after a clean io.EOF, because the
 		// kill closes this process's write ends too.
 		_, _ = fmt.Fprint(os.Stdout, "PARTIAL")
-		// Tell the test the prefix is in the pipe, so it can stop this
-		// process knowing there is a prefix to see.
-		if marker := os.Getenv(partialMarkerEnv); marker != "" {
-			if err := os.WriteFile(filepath.Clean(marker), nil, 0o600); err != nil { //nolint:gosec // G703: test-helper child writes the marker path its own test set
-				return 97
-			}
-		}
 		d, err := time.ParseDuration(arg)
 		if err != nil {
 			return 98
 		}
 		time.Sleep(d)
 		_, _ = fmt.Fprint(os.Stdout, "-REST")
+		return 0
+	case "partialmark":
+		// Write a prefix, then leave durable evidence that it was written,
+		// then stall until killed. The marker lets a test kill the child
+		// once the bytes are in the pipe, without the parent reading them.
+		_, _ = fmt.Fprint(os.Stdout, "PARTIAL")
+		f, err := os.Create(filepath.Clean(arg)) //nolint:gosec // G703: a test fixture path the test itself passes
+		if err != nil {
+			return 95
+		}
+		_ = f.Close()
+		time.Sleep(60 * time.Second)
 		return 0
 	case "selfkill":
 		// Write, then die to a signal this runner did not send — the OOM
@@ -111,6 +114,9 @@ func helperMain(mode string) int {
 			return 95
 		}
 		_ = f.Close()
+		return 0
+	case "argv":
+		_, _ = fmt.Fprint(os.Stdout, strings.Join(os.Args, "\x00"))
 		return 0
 	case "env":
 		for _, key := range strings.Split(arg, ",") {
@@ -446,10 +452,14 @@ func TestRunSensitive_ReturnsWithinBoundWhenDescendantHoldsThePipe(t *testing.T)
 // the bytes has to be told, because the seam's contract sends them to the
 // completeness flag rather than to the error.
 func TestRunSensitive_KilledProducerLeavesAnIncompletePrefix(t *testing.T) {
-	// Each context fires once the child has written its prefix, not after a
-	// fixed delay. A fixed 200 ms raced the child's startup: under -race this
-	// re-executed test binary can take longer than that to write anything, so
-	// the kill landed first and stdout was empty (#661). A context whose
+	// Each context fires once the PARENT has read the child's prefix, not
+	// after a fixed delay and not when the child reports writing it. A fixed
+	// 200 ms raced the child's startup (#661). A marker file the child wrote
+	// after its prefix still raced, one step later: the kill force-closes the
+	// read ends at once, so a prefix still sitting in the pipe, not yet taken
+	// by a reader the scheduler had not run, was dropped and stdout came back
+	// empty under load (#787). The tap on the runner's stdout reader closes
+	// fired only after those bytes are in the reader's hands. A context whose
 	// deadline is set when it is made cannot wait for an event, so the
 	// deadline case uses a context that reports DeadlineExceeded once fired,
 	// which is all the runner reads of it.
@@ -468,17 +478,11 @@ func TestRunSensitive_KilledProducerLeavesAnIncompletePrefix(t *testing.T) {
 	}
 
 	for name, mkCtx := range cases {
-		marker := filepath.Join(t.TempDir(), "prefix-written")
-		runner, self := helperRunner(t, "partial:60s", defaultRetireBound, partialMarkerEnv+"="+marker)
+		runner, self := helperRunner(t, "partial:60s", defaultRetireBound)
 		fired := make(chan struct{})
-		go func() {
-			defer close(fired)
-			for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-				if _, err := os.Stat(marker); err == nil {
-					return
-				}
-			}
-		}()
+		runner.stdoutTap = func(r io.Reader) io.Reader {
+			return &firstBytesTap{r: r, want: len("PARTIAL"), fired: fired}
+		}
 
 		res, err := runner.RunSensitive(mkCtx(fired), helperCommand(KindTmuxCreate, self, 4096))
 
@@ -533,6 +537,27 @@ func (c firedContext) Err() error {
 	default:
 		return nil
 	}
+}
+
+// firstBytesTap passes reads through and closes fired once want bytes have
+// been returned to the reader, so a test can kill the child at the moment its
+// prefix is in the parent's hands rather than merely in the pipe. Only the one
+// reader goroutine calls Read, so it needs no lock.
+type firstBytesTap struct {
+	r     io.Reader
+	want  int
+	got   int
+	fired chan<- struct{}
+}
+
+func (t *firstBytesTap) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if t.got < t.want {
+		if t.got += n; t.got >= t.want {
+			close(t.fired)
+		}
+	}
+	return n, err
 }
 
 // diedUnderSignal must answer from the process state, not from the exit code.
@@ -774,7 +799,14 @@ func TestReadCapped_MarksANonEOFStopAsIncomplete(t *testing.T) {
 
 // TestBuildEnv_RemovesEveryOccurrenceAndAppendsOnce pins the pure mutation
 // logic, so a failure in the end-to-end test above is attributable to either
-// the policy or the process plumbing rather than to both at once.
+// the policy or the process plumbing rather than to both at once. It pins
+// both halves buildEnv hands sealed.Start in their exact order: the
+// surviving inherited entries byte-exact, and each replacement in mutation
+// order, its value compared sealed. sealed's own command test pins that the
+// replacements land after the inherited entries.
+//
+// Mutations that turn it red: drop only the first occurrence of a mutated
+// key; collect replacements in reverse.
 func TestBuildEnv_RemovesEveryOccurrenceAndAppendsOnce(t *testing.T) {
 	runner := &OSSensitiveRunner{env: []string{
 		"PATH=/usr/bin",
@@ -785,28 +817,100 @@ func TestBuildEnv_RemovesEveryOccurrenceAndAppendsOnce(t *testing.T) {
 		"BAREKEY",
 	}}
 
-	got := runner.buildEnv([]EnvMutation{ReplaceCmuxSocketPath("/resolved"), UnsetTmux()})
-
-	counts := map[string]int{}
-	for _, entry := range got {
-		counts[envKeyOf(entry)]++
+	env, set := runner.buildEnv([]EnvMutation{ReplaceCmuxSocketPath("/resolved"), UnsetTmux(), SetCmuxQuiet()})
+	if want := []string{"PATH=/usr/bin", "CMUX_AUTH_TOKEN=untouched", "BAREKEY"}; !slices.Equal(env, want) {
+		t.Errorf("inherited env = %q, want %q", env, want)
 	}
-	if counts["CMUX_SOCKET_PATH"] != 1 {
-		t.Errorf("CMUX_SOCKET_PATH appears %d times, want exactly 1: %q", counts["CMUX_SOCKET_PATH"], got)
+	wantSet := []sealed.EnvVar{
+		{Key: "CMUX_SOCKET_PATH", Value: sealed.New("/resolved")},
+		{Key: "CMUX_QUIET", Value: sealed.New("1")},
 	}
-	if counts["TMUX"] != 0 {
-		t.Errorf("TMUX survived the unset: %q", got)
+	if len(set) != len(wantSet) {
+		t.Fatalf("buildEnv returned %d replacements, want %d", len(set), len(wantSet))
 	}
-	joined := strings.Join(got, "\n")
-	for _, keep := range []string{"PATH=/usr/bin", "CMUX_AUTH_TOKEN=untouched", "BAREKEY", "CMUX_SOCKET_PATH=/resolved"} {
-		if !strings.Contains(joined, keep) {
-			t.Errorf("missing %q in %q", keep, got)
+	for i := range wantSet {
+		if set[i].Key != wantSet[i].Key || !set[i].Value.Equal(wantSet[i].Value) {
+			t.Errorf("replacement %d has key %q, want %q (or its sealed value differs)", i, set[i].Key, wantSet[i].Key)
 		}
 	}
 
 	// The captured environment must not be mutated in place — a second call
 	// with no mutations still sees the original entries.
-	if plain := runner.buildEnv(nil); len(plain) != 6 {
+	if plain, none := runner.buildEnv(nil); len(plain) != 6 || none != nil {
 		t.Errorf("captured environment was mutated: %q", plain)
 	}
+	// An empty captured environment still yields a non-nil env, or the child
+	// would inherit the live process environment.
+	if empty, _ := (&OSSensitiveRunner{}).buildEnv(nil); empty == nil {
+		t.Error("an empty captured environment built a nil env; the child would inherit the live environment")
+	}
+}
+
+// TestRunSensitive_KillDrainsPrefixStillInThePipe pins forgectl#794: a kill
+// must not drop bytes the child had already written but the parent's reader
+// had not yet taken. The child writes its prefix and a marker file, then
+// stalls; the test cancels once the marker exists, and the tap holds the
+// reader back until well after the kill and reap, so the prefix is still in
+// the pipe when retirement begins. The drain window is widened to seconds so
+// the reader's delay sits far inside it.
+//
+// Mutation that turns it red: make retire force-close at once when stopped
+// (closeAll before collecting; stdout comes back empty), or set drainBound's
+// result to a nanosecond.
+func TestRunSensitive_KillDrainsPrefixStillInThePipe(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "written")
+	runner, self := helperRunner(t, "partialmark:"+marker, defaultRetireBound)
+	runner.killDrainBound = 5 * time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	killed := make(chan struct{})
+	runner.stdoutTap = func(r io.Reader) io.Reader {
+		return &gatedReader{r: r, gate: killed}
+	}
+	go func() {
+		for {
+			if _, err := os.Stat(marker); err == nil {
+				cancel()
+				// Past the kill and reap, which is when the old code closed
+				// the read end.
+				time.Sleep(200 * time.Millisecond)
+				close(killed)
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	start := time.Now()
+	res, err := runner.RunSensitive(ctx, helperCommand(KindTmuxCreate, self, 4096))
+	if err == nil {
+		t.Fatal("expected the cancellation to be reported")
+	}
+	data, complete := res.Stdout.CopyBytesForParse()
+	if string(data) != "PARTIAL" {
+		t.Errorf("stdout = %q, want the prefix the child wrote before the kill", data)
+	}
+	if complete {
+		t.Error("a killed producer's prefix reported itself complete")
+	}
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
+		t.Errorf("RunSensitive took %v; the drain should end at EOF, not at its bound", elapsed)
+	}
+}
+
+// gatedReader blocks its first Read until gate closes, then passes reads
+// through. Only the one reader goroutine calls Read.
+type gatedReader struct {
+	r      io.Reader
+	gate   <-chan struct{}
+	opened bool
+}
+
+func (g *gatedReader) Read(p []byte) (int, error) {
+	if !g.opened {
+		<-g.gate
+		g.opened = true
+	}
+	return g.r.Read(p)
 }

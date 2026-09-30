@@ -76,7 +76,9 @@ Exit codes: 0 every check ok, warn, or skipped; 1 at least one check failed.`,
 				}
 			}
 			if !report.Healthy() {
-				return WithExitCode(fmt.Errorf("doctor found problems"), 1)
+				// Under --json the report on stdout is the verdict
+				// (forgectl#862).
+				return jsonVerdict(WithExitCode(fmt.Errorf("doctor found problems"), 1), asJSON)
 			}
 			return nil
 		},

@@ -85,7 +85,8 @@ logged and never changes the exit code.`,
 				if err := writeDrainReport(cmd.OutOrStdout(), report, asJSON, dryRun, 0); err != nil {
 					return err
 				}
-				return drainExitCode(report)
+				// Under --json the pass report is the verdict (forgectl#862).
+				return jsonVerdict(drainExitCode(report), asJSON)
 			}
 			return runDrainWatch(cmd, client, cfg, opts, interval, asJSON, dryRun)
 		},
@@ -125,8 +126,8 @@ func runDrainWatch(cmd *cobra.Command, client *pr.Client, cfg config.Config, opt
 		if report.Refusal != "" {
 			consecutiveRefusals++
 			if consecutiveRefusals >= drainWatchRefusalLimit {
-				return WithExitCode(fmt.Errorf(
-					"drain refused %d consecutive passes, last: %s", consecutiveRefusals, safeTerm(report.Refusal)), 1)
+				return jsonVerdict(WithExitCode(fmt.Errorf(
+					"drain refused %d consecutive passes, last: %s", consecutiveRefusals, safeTerm(report.Refusal)), 1), asJSON)
 			}
 		} else {
 			consecutiveRefusals = 0

@@ -126,7 +126,7 @@ func runWorkflowBless(cmd *cobra.Command, deps module.Deps, name string) error {
 	for i, s := range wf.Steps {
 		def, ok := registry[s.Uses]
 		if !ok {
-			return fmt.Errorf("workflow %q: step %d uses unknown verb %q — this binary cannot execute it, so it will not be blessed", name, i, s.Uses)
+			return fmt.Errorf("workflow %q: step %d uses unknown verb %s — this binary cannot execute it, so it will not be blessed", name, i, termsafe.QuoteArgMax(s.Uses, 0))
 		}
 		guarded, err := workflow.GuardedValues(s, def.GuardedFields)
 		if err != nil {
@@ -189,7 +189,7 @@ func runWorkflowBless(cmd *cobra.Command, deps module.Deps, name string) error {
 	}
 	sidecar := bless.SidecarPath(src.Path)
 	if err := os.WriteFile(sidecar, encoded, 0o644); err != nil {
-		return fmt.Errorf("write blessing sidecar %s: %w", sidecar, err)
+		return fmt.Errorf("write blessing sidecar %s: %w", termsafe.QuotePath(sidecar), termsafe.Error(err))
 	}
 	fmt.Fprintf(out, "Blessed %q — wrote %s\n", name, sidecar)
 	return nil
@@ -444,13 +444,16 @@ func runTrustRebuild(cmd *cobra.Command, deps module.Deps) error {
 	case serr == nil:
 		for _, k := range store.Keys {
 			if k.KeyID != keyID {
-				return fmt.Errorf("the current trust store also enrolls %s (%s); rebuilding would silently drop it — remove that peer deliberately before rebuilding, or re-establish trust (issue #86)", k.KeyID, k.Machine)
+				// Capped (#778): the store is anchor-signed, but its key_id and
+				// machine are still file text DecodeStore never validates.
+				return fmt.Errorf("the current trust store also enrolls %s (%s); rebuilding would silently drop it — remove that peer deliberately before rebuilding, or re-establish trust (issue #86)",
+					termsafe.QuoteArgMax(k.KeyID, 0), termsafe.QuoteArgMax(k.Machine, 0))
 			}
 		}
 	case errors.Is(serr, bless.ErrTrustStoreMissing):
 		// Genuinely absent — nothing to preserve, the normal recovery case.
 	default:
-		fmt.Fprintf(out, "NOTE: the existing trust store could not be verified (%v);\n      if it enrolled another machine, that enrollment will be dropped by this rebuild.\n", serr)
+		_, _ = fmt.Fprintf(out, "NOTE: the existing trust store could not be verified (%s);\n      if it enrolled another machine, that enrollment will be dropped by this rebuild.\n", termsafe.SafeLineMax(serr.Error(), trustStoreErrMaxRunes))
 	}
 
 	fmt.Fprintln(out, "WARNING: rebuild OVERWRITES the trust store, enrolling ONLY this machine.")
@@ -508,7 +511,7 @@ func runTrustRebuild(cmd *cobra.Command, deps module.Deps) error {
 // trust rebuild.
 func writeStoreAndSidecar(storePath string, storeBytes, sidecarBytes []byte) error {
 	if err := os.MkdirAll(filepath.Dir(storePath), 0o700); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
+		return fmt.Errorf("create config directory: %w", termsafe.Error(err))
 	}
 	storeTmp, err := stageTrustFile(storePath, storeBytes)
 	if err != nil {
@@ -522,10 +525,10 @@ func writeStoreAndSidecar(storePath string, storeBytes, sidecarBytes []byte) err
 	}
 	defer os.Remove(sidecarTmp)
 	if err := os.Rename(storeTmp, storePath); err != nil {
-		return fmt.Errorf("finalize trust store %s: %w", storePath, err)
+		return fmt.Errorf("finalize trust store %s: %w", termsafe.QuotePath(storePath), termsafe.Error(err))
 	}
 	if err := os.Rename(sidecarTmp, sidecarPath); err != nil {
-		return fmt.Errorf("finalize trust store sidecar: %w", err)
+		return fmt.Errorf("finalize trust store sidecar: %w", termsafe.Error(err))
 	}
 	return nil
 }
@@ -545,18 +548,18 @@ func stageTrustFile(target string, data []byte) (string, error) {
 		return "", cause
 	}
 	if _, err := tmp.Write(data); err != nil {
-		return cleanup(fmt.Errorf("write %s: %w", name, err))
+		return cleanup(fmt.Errorf("write %s: %w", termsafe.QuotePath(name), termsafe.Error(err)))
 	}
 	if err := tmp.Sync(); err != nil {
-		return cleanup(fmt.Errorf("sync %s: %w", name, err))
+		return cleanup(fmt.Errorf("sync %s: %w", termsafe.QuotePath(name), termsafe.Error(err)))
 	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(name)
-		return "", fmt.Errorf("close %s: %w", name, err)
+		return "", fmt.Errorf("close %s: %w", termsafe.QuotePath(name), termsafe.Error(err))
 	}
 	if err := os.Chmod(name, 0o644); err != nil {
 		_ = os.Remove(name)
-		return "", fmt.Errorf("chmod %s: %w", name, err)
+		return "", fmt.Errorf("chmod %s: %w", termsafe.QuotePath(name), termsafe.Error(err))
 	}
 	return name, nil
 }
@@ -585,8 +588,10 @@ func newWorkflowTrustListCmd() *cobra.Command {
 			}
 			fmt.Fprintln(out, "enrolled keys:")
 			for _, k := range store.Keys {
-				if _, err := fmt.Fprintf(out, "  %s  %s  %s\n", k.KeyID,
-					termsafe.SafeLine(k.Machine), termsafe.SafeLine(k.AddedAt)); err != nil {
+				// Capped (#778): anchor-signed, but file text DecodeStore
+				// never validates, so no field is trusted to be short.
+				if _, err := fmt.Fprintf(out, "  %s  %s  %s\n", termsafe.SafeLineMax(k.KeyID, termsafe.ArgEchoMaxRunes),
+					termsafe.SafeLineMax(k.Machine, termsafe.ArgEchoMaxRunes), termsafe.SafeLineMax(k.AddedAt, termsafe.ArgEchoMaxRunes)); err != nil {
 					return err
 				}
 			}
@@ -623,6 +628,11 @@ func writeTrustListJSON(w io.Writer, store bless.Store) error {
 	enc.SetIndent("", "  ")
 	return enc.Encode(trustListJSON{AnchorKeyID: store.AnchorKeyID, Keys: keys})
 }
+
+// trustStoreErrMaxRunes caps the trust-store error `trust rebuild` notes: it
+// is built from paths and scrubbed decode text, which are escaped but not
+// otherwise bounded.
+const trustStoreErrMaxRunes = 300
 
 // trustChainError decorates a TrustedStore failure with the actionable fix. A
 // missing anchor or store both mean "run trust init"; anything else passes

@@ -1,7 +1,9 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -279,5 +281,32 @@ func TestBuildPlan_LoneTeardownWorkspaceParamStopsBeforeSink(t *testing.T) {
 	}
 	if planErr == nil {
 		t.Fatal("lone teardown with workspace param unexpectedly planned")
+	}
+}
+
+// TestBuildPlan_CapsUnvettedUses pins #761: a step that fails to plan fires
+// before the registry check, so its uses is unvetted file text; the error and
+// the log line cap it.
+func TestBuildPlan_CapsUnvettedUses(t *testing.T) {
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	long := strings.Repeat("u", 300)
+	wf := Workflow{
+		DSLVersion: 1,
+		Name:       "long-uses",
+		Steps:      []Step{{Uses: long, Cmd: "${nope}"}},
+	}
+	_, err := BuildPlan(wf, nil, testRegistry(t))
+	if err == nil {
+		t.Fatal("expected an error for an unresolved ${nope} reference")
+	}
+	if strings.Contains(err.Error(), long[:81]) || !strings.Contains(err.Error(), "…") {
+		t.Errorf("error %q echoes uses uncapped", err)
+	}
+	if strings.Contains(logBuf.String(), long[:81]) {
+		t.Errorf("log %q records uses uncapped", logBuf.String())
 	}
 }

@@ -53,7 +53,9 @@ func newProjectsPullAllCmd(client *projects.Client) *cobra.Command {
 				}
 			}
 			if failed > 0 {
-				return fmt.Errorf("%d of %d repos failed to pull", failed, len(results))
+				// Under --json each row's status is the verdict
+				// (forgectl#862).
+				return jsonVerdict(fmt.Errorf("%d of %d repos failed to pull", failed, len(results)), asJSON)
 			}
 			return nil
 		},

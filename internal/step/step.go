@@ -3,12 +3,14 @@
 // registry shape. It lives below both the workflow engine and the domain
 // modules that contribute verbs, so a module can register a step without
 // importing internal/workflow and the engine never imports modules. Imports
-// are deliberately limited to internal/exec + stdlib.
+// are deliberately limited to internal/exec, the leaf internal/termsafe, and
+// stdlib.
 package step
 
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -88,6 +90,16 @@ func (s *PlanStep) scalarFieldPtrs() []*string {
 	return []*string{&s.Repo, &s.Ref, &s.Skill, &s.Posture, &s.Mode, &s.From, &s.To, &s.Cmd}
 }
 
+// scalarFieldNames and sliceFieldNames name the fields scalarFieldPtrs and
+// sliceFieldPtrs return, index for index, by their Go field name (the name
+// GuardedFields and bless's refusals use). Interpolate's errors name a field
+// by these rather than echo its value (#778). TestFieldNamesMatchFieldPtrs
+// pins each list to its enumeration.
+var (
+	scalarFieldNames = []string{"Repo", "Ref", "Skill", "Posture", "Mode", "From", "To", "Cmd"}
+	sliceFieldNames  = []string{"Globs", "Args"}
+)
+
 // sliceFieldPtrs returns pointers to every interpolable SLICE field, in a fixed
 // order — the slice counterpart of scalarFieldPtrs.
 func (s *PlanStep) sliceFieldPtrs() []*[]string {
@@ -120,15 +132,18 @@ func (s PlanStep) SliceFields() [][]string {
 // interp (a per-field string transform, e.g. Context.Interpolate). Uses is left
 // untouched. It walks the shared field enumeration, so interpolation, hashing,
 // and the export scan can never disagree on which fields carry ${} references.
+//
+// An error names the field (field Cmd: …) and wraps interp's error, which
+// must not carry the value itself: the field is unvetted workflow text.
 func (s *PlanStep) Interpolate(interp func(string) (string, error)) error {
-	for _, p := range s.scalarFieldPtrs() {
+	for i, p := range s.scalarFieldPtrs() {
 		v, err := interp(*p)
 		if err != nil {
-			return err
+			return fmt.Errorf("field %s: %w", scalarFieldNames[i], err)
 		}
 		*p = v
 	}
-	for _, p := range s.sliceFieldPtrs() {
+	for fi, p := range s.sliceFieldPtrs() {
 		in := *p
 		if len(in) == 0 {
 			continue
@@ -137,7 +152,7 @@ func (s *PlanStep) Interpolate(interp func(string) (string, error)) error {
 		for i, v := range in {
 			r, err := interp(v)
 			if err != nil {
-				return err
+				return fmt.Errorf("field %s: %w", sliceFieldNames[fi], err)
 			}
 			out[i] = r
 		}

@@ -5,8 +5,84 @@ on:
     tags:
       - 'v*'
 
+# Deny by default; each job grants what it needs.
+permissions: {}
+
 jobs:
+  # A `v*` tag names a release. The tag ruleset lets only the Forge Bellows App
+  # create one, and auto-tag.yml does that only after a gated merge. This job
+  # is the second check (forgectl security review F-I1, ported from
+  # cadence-hooks): the tagged commit must be on main, and CI's push run for
+  # it must have succeeded. Nothing builds, signs, or publishes until it
+  # passes, and every failure mode below fails closed.
+  verify:
+    name: Verify tagged commit
+    runs-on: ubuntu-latest
+    # Must exceed POLL_SECONDS x POLL_LIMIT (45 min) plus the API calls, or
+    # the timeout ends the job before it prints why it refused.
+    timeout-minutes: 50
+    permissions:
+      contents: read # compare the tagged commit with main
+      actions: read # read CI's workflow runs
+    steps:
+      - name: Tagged commit is on main with green CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          TAG: ${{ github.ref_name }}
+          # CI is identified by its workflow file, not by "any green check":
+          # another app or workflow's success must not stand in for it.
+          CI_WORKFLOW: ci.yml
+          # 90 polls of 30 s: 45 minutes, room for CI's macOS jobs plus a queue.
+          POLL_SECONDS: 30
+          POLL_LIMIT: 90
+        run: |
+          set -euo pipefail
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::github.sha is not 40-hex"; exit 1; }
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || { echo "::error::tag ${TAG} is not v<semver>"; exit 1; }
+
+          # The tag must name the version the tagged commit itself declares.
+          # An older main commit tagged as a new version would otherwise ship
+          # old code under a new number.
+          manifest_version="$(gh api "repos/${REPO}/contents/.release-please-manifest.json?ref=${SHA}" \
+            -H 'Accept: application/vnd.github.raw' | jq -r '.["."] // ""')"
+          [[ "v${manifest_version}" == "$TAG" ]] || { echo "::error::tag ${TAG} does not match the manifest version '${manifest_version}' at ${SHA}"; exit 1; }
+
+          # Resolve the branch by its full ref first, so a tag named `main`
+          # cannot stand in for it. `<main>...SHA` is `behind` or `identical`
+          # exactly when SHA is an ancestor of main (or main itself).
+          main_sha="$(gh api "repos/${REPO}/git/ref/heads/main" --jq .object.sha)"
+          [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::could not resolve refs/heads/main"; exit 1; }
+          status="$(gh api "repos/${REPO}/compare/${main_sha}...${SHA}" --jq .status)"
+          case "$status" in
+            behind | identical) echo "${SHA} is on main (${status})." ;;
+            *) echo "::error::${SHA} is not an ancestor of main (compare status: ${status})"; exit 1 ;;
+          esac
+
+          for ((i = 1; i <= POLL_LIMIT; i++)); do
+            # The newest push-event run of CI on main for exactly this commit.
+            run="$(gh api "repos/${REPO}/actions/workflows/${CI_WORKFLOW}/runs?head_sha=${SHA}&event=push&branch=main&per_page=100" \
+              | jq -c '.workflow_runs | if type == "array" then (sort_by(.created_at) | last // {}) else error("not an array") end')"
+            state="$(jq -r '"\(.status // "none")/\(.conclusion // "none")"' <<< "$run")"
+            case "$state" in
+              completed/success)
+                echo "CI run $(jq -r .html_url <<< "$run") succeeded for ${SHA}."
+                exit 0 ;;
+              completed/*)
+                # A cancelled run lands here too. Re-run that CI run to
+                # success, then re-run this workflow.
+                echo "::error::CI ($(jq -r .html_url <<< "$run")) concluded ${state#completed/} for ${SHA}; not releasing."
+                exit 1 ;;
+            esac
+            echo "CI for ${SHA} is ${state} (poll ${i}/${POLL_LIMIT})."
+            sleep "$POLL_SECONDS"
+          done
+          echo "::error::CI never completed for ${SHA} within the poll limit; not releasing."
+          exit 1
+
   goreleaser:
+    needs: verify
     # macOS, not ubuntu: the bless helper is a Swift package and needs an Apple
     # toolchain. The Go cross-build for linux/{amd64,arm64} still works from
     # here — every target is CGO_ENABLED=0.
@@ -24,6 +100,14 @@ jobs:
     runs-on: macos-latest
     permissions:
       contents: write
+    # RELEASE_APP_PRIVATE_KEY (the tap-token mint below) belongs only in the
+    # `release` environment, with a deployment policy of branch `main` plus
+    # tag `v*` and no repo-level copy. With that in place, and the `v*` tag
+    # ruleset limiting who can create a tag, a copy of this workflow on
+    # another ref cannot read the key (cadence-ecosystem ADR-0044 (i)).
+    # This job holds the key, so its actions are SHA-pinned, GoReleaser is
+    # an exact version, and the Apple CA download is hash-checked.
+    environment: release
     env:
       # HAS_CERT selects Developer-ID signing over the ad-hoc fallback across the
       # job. It is derived from a secret (secrets aren't usable directly in a step
@@ -50,6 +134,11 @@ jobs:
           # standard-library security fixes arrive in patch releases, and the
           # Vulncheck workflow scans against the newest patch too.
           check-latest: true
+          # No restored module or build cache in a job that holds the App
+          # private key and signs the release. A cache entry is written by
+          # other runs, so restoring one would run their output here
+          # (zizmor cache-poisoning).
+          cache: false
 
       # Import the Developer-ID signing certificate into an ephemeral keychain so
       # the helper and the darwin binaries can be Developer-ID signed. Gated on the
@@ -217,7 +306,11 @@ jobs:
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
-          version: '~> v2'
+          # An exact version, not `~> v2`: the action downloads this binary at
+          # run time, in a job that holds the App private key. A range would
+          # run whatever GoReleaser publishes next without review
+          # (cadence-ecosystem release-rhythm security review I-1).
+          version: 'v2.18.2'
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -248,6 +341,7 @@ jobs:
     # DIGEST in compose precisely so cutting a CLI release cannot move that
     # container on its own.
     name: Publish container image
+    needs: verify
     runs-on: ubuntu-latest
     permissions:
       # packages:write is the whole point of this job; contents:read is the

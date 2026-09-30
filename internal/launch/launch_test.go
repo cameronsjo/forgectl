@@ -190,9 +190,58 @@ func TestResumeArgs_ForkAppendsForkSession(t *testing.T) {
 func TestBuilderArgs_ProfileFirst_UserArgsLast(t *testing.T) {
 	p := Profile{PermissionMode: "plan", AllowDanger: true, Model: "sonnet", AddDir: []string{"/s"}}
 	got := BuilderArgs(p, []string{"-p", "hi"})
-	want := []string{"--permission-mode", "plan", "--allow-dangerously-skip-permissions", "--model", "sonnet", "--add-dir", "/s", "-p", "hi"}
+	want := []string{"--permission-mode", "plan", "--allow-dangerously-skip-permissions", "--add-dir", "/s", "--model", "sonnet", "-p", "hi"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("BuilderArgs =\n  %v\nwant\n  %v", got, want)
+	}
+}
+
+// TestBuilderArgs_AddDirNeverPrecedesUserArgs pins the variadic-swallow fix.
+// `--add-dir <directories...>` takes every following positional, so an
+// add-dir directly ahead of a bare prompt hands the prompt to claude as a
+// directory: `claude -p --add-dir /tmp hi` fails "Input must be provided"
+// (Claude Code 2.1.285). The token right before the user's args must be a
+// flag's own value, never an add-dir path.
+//
+// Mutation that turns it red: move the --add-dir loop in BuilderArgs back
+// after appendEffort.
+func TestBuilderArgs_AddDirNeverPrecedesUserArgs(t *testing.T) {
+	for _, effort := range []string{"", "high"} {
+		p := Profile{PermissionMode: "plan", Model: "sonnet", Effort: effort, AddDir: []string{"/a", "/b"}}
+		got := BuilderArgs(p, []string{"hi"})
+		last := -1
+		for i, a := range got {
+			if a == "--add-dir" {
+				last = i
+			}
+		}
+		if last < 0 {
+			t.Fatalf("BuilderArgs dropped --add-dir: %v", got)
+		}
+		// After the last add-dir's value, a flag must close the list before
+		// the prompt.
+		if next := got[last+2]; !strings.HasPrefix(next, "--") {
+			t.Errorf("effort=%q: token after the last --add-dir value is %q, want a flag closing the variadic list: %v", effort, next, got)
+		}
+		if got[len(got)-1] != "hi" {
+			t.Errorf("effort=%q: user args not last: %v", effort, got)
+		}
+	}
+}
+
+// TestPrintArgs_PermissionModeOnly pins the print-mode posture: the profile's
+// permission mode first and nothing else injected, so an unattended -p run
+// still starts in a posture that cannot write, and a later user
+// --permission-mode still wins.
+//
+// Mutation that turns it red: return userArgs unchanged (no permission mode),
+// or build it with BuilderArgs (model, add-dir, allow-danger reappear).
+func TestPrintArgs_PermissionModeOnly(t *testing.T) {
+	p := Profile{PermissionMode: "plan", AllowDanger: true, StrictMCP: true, Model: "sonnet", Effort: "high", AddDir: []string{"/s"}}
+	got := PrintArgs(p, []string{"-p", "hi", "--permission-mode", "acceptEdits"})
+	want := []string{"--permission-mode", "plan", "-p", "hi", "--permission-mode", "acceptEdits"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("PrintArgs =\n  %v\nwant\n  %v", got, want)
 	}
 }
 
@@ -270,6 +319,15 @@ func TestAgentsArgs_AllowDangerOff_OmitsFlag(t *testing.T) {
 	}
 }
 
+// TestIsAgentsPassthrough pins which agents argv is byte-clean.
+//
+// Mutation that turns it red: match the tokens anywhere again, ignoring the
+// preceding token (the value-slot rows flip to true), or drop "--all" from
+// agentsBooleanFlags (the --all --json row flips to false), or drop the `--`
+// stop (the rows after claude's separator flip to true). Stop at every `--`
+// again, value slot or not (the "--settings -- --json" rows flip to false),
+// or drop the `prev == "--"` case from inFlagPosition (the "--settings --
+// --json" row flips to false: the token after a value `--` reads as a value).
 func TestIsAgentsPassthrough(t *testing.T) {
 	cases := []struct {
 		args []string
@@ -281,6 +339,26 @@ func TestIsAgentsPassthrough(t *testing.T) {
 		{[]string{"agents", "--all", "--json"}, true},
 		{[]string{"agents"}, false},
 		{[]string{"agents", "--cwd", "/x"}, false},
+		{[]string{"agents", "--cwd", "/x", "--json"}, true},
+		{[]string{"agents", "--cwd=/x", "--json"}, true},
+		{[]string{"agents", "--restricted", "-h"}, true},
+		// A value slot: the flag's argument, not a request for help or JSON.
+		{[]string{"agents", "--settings", "--help"}, false},
+		{[]string{"agents", "--model", "--json"}, false},
+		{[]string{"agents", "--permission-mode", "-h"}, false},
+		// After claude's own `--`, everything is an operand.
+		{[]string{"agents", "--", "x", "--json"}, false},
+		{[]string{"agents", "--", "--help"}, false},
+		{[]string{"agents", "--json", "--", "x"}, true},
+		// A `--` in a value slot is that option's value (forgectl#766):
+		// `claude agents --settings -- --json` reads "--" as the settings
+		// file (2.1.285). A `--` in flag position still ends the options,
+		// including one right after a `--` taken as a value.
+		{[]string{"agents", "--settings", "--", "--json"}, true},
+		{[]string{"agents", "--settings", "--", "--settings", "--", "-h"}, true},
+		{[]string{"agents", "--settings", "--", "--", "--json"}, false},
+		{[]string{"agents", "--all", "--", "--json"}, false},
+		{[]string{"agents", "--cwd=/x", "--", "--json"}, false},
 	}
 	for _, tc := range cases {
 		got := IsAgentsPassthrough(tc.args)

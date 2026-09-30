@@ -277,11 +277,17 @@ func checkSocketPath(socket string) error {
 // Kind reports the backend this adapter drives.
 func (a *Adapter) Kind() backend.Kind { return backend.KindTmux }
 
-// pinned prefixes an argv with this adapter's socket pin. Every command in this
-// package goes through it, so there is one spelling of `-S` and no call site
-// can issue an unpinned command by forgetting it.
+// pinned prefixes an argv with this adapter's socket pin and `-u`. Every
+// command in this package goes through it, so there is one spelling of `-S`
+// and no call site can issue an unpinned command by forgetting it.
+//
+// `-u` follows the pin for internal/tmux's reason (forgectl#840): it sets
+// CLIENT_UTF8 on the command client, so a non-UTF-8 locale cannot make tmux
+// run the -F replies this package parses through utf8_sanitize, which on tmux
+// 3.7b turns the 0x1F field separator into `_` and fails every reply closed.
+// Every command here is non-interactive, so every one carries it.
 func (a *Adapter) pinned(args ...exec.Arg) []exec.Arg {
-	return append([]exec.Arg{exec.MustFixed("-S"), exec.Opaque(a.socket)}, args...)
+	return append([]exec.Arg{exec.MustFixed("-S"), exec.Opaque(a.socket), exec.MustFixed("-u")}, args...)
 }
 
 func (a *Adapter) command(kind exec.CommandKind, args ...exec.Arg) exec.SensitiveCommand {

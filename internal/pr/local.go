@@ -3,6 +3,7 @@ package pr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -315,14 +316,18 @@ func (c *Client) recordedWorkspaceFor(real string) (string, bool) {
 		return "", false
 	}
 	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+		// Only a regular file can be a record forgectl wrote; a FIFO named like
+		// one would block a plain read forever (forgectl#621), so it is skipped
+		// before any open, as listLocked does, and the read itself goes
+		// through the one FIFO-safe record reader.
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" || !e.Type().IsRegular() {
 			continue
 		}
 		path := filepath.Join(c.sessionsDir, e.Name())
 		if !sandbox.WithinWorkspace(c.sessionsDir, path) {
 			continue // same location guard loadBreadcrumb applies first
 		}
-		data, err := os.ReadFile(path) //nolint:gosec // location-validated above
+		data, err := readRecordFile(path)
 		if err != nil {
 			continue
 		}
@@ -355,7 +360,27 @@ func cleanRoomError(absPath, workspace string) error {
 // own error should shadow it.
 func (c *Client) teardownLocalArtifacts(ctx context.Context, workspace, findingsDir string) {
 	_ = sandbox.Teardown(ctx, c.run, workspace)
-	_ = os.RemoveAll(findingsDir)
+	if err := c.removeOwnFindingsDir(findingsDir); err != nil {
+		slog.Warn("Could not remove the findings dir of a failed local review.", "findings", findingsDir, "error", safeErrString(err))
+	}
+}
+
+// removeOwnFindingsDir removes findingsDir, the dir PrepareLocal just made
+// under the store, through a handle on the store rather than by path
+// (forgectl#685, the #644 defect class). It refuses anything that is not a
+// findings dir directly under the store, so no spelling of findingsDir can
+// reach outside it, and os.Root unlinks a final-component symlink rather than
+// following it.
+func (c *Client) removeOwnFindingsDir(findingsDir string) error {
+	if !isFindingsStoreChild(c.findingsDir, findingsDir) {
+		return errors.New("not a findings dir directly under the findings store; left in place")
+	}
+	store, err := c.openFindingsStore()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = store.Close() }()
+	return store.RemoveAll(filepath.Base(filepath.Clean(findingsDir)))
 }
 
 // unparseableHexSentinel is the fallback Number for newLocalRef when hexPart

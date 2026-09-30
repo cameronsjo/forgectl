@@ -62,7 +62,10 @@ var (
 	markdownVaultPlain = newMarkdown(false, true)
 )
 
-func newMarkdown(withFrontmatter, vault bool) goldmark.Markdown {
+// newMarkdown builds a render pipeline. extra goes first, ahead of every
+// extension, so a goldmark.WithParser in it (blockOnlyTwin) receives every
+// parser option the pipeline registers.
+func newMarkdown(withFrontmatter, vault bool, extra ...goldmark.Option) goldmark.Markdown {
 	extenders := []goldmark.Extender{
 		extension.GFM,
 		highlighting.NewHighlighting(
@@ -88,11 +91,11 @@ func newMarkdown(withFrontmatter, vault bool) goldmark.Markdown {
 	if vault {
 		extenders = append(extenders, obsidianFlavor{})
 	}
-	return goldmark.New(
+	return goldmark.New(append(extra,
 		goldmark.WithExtensions(extenders...),
 		goldmark.WithParserOptions(headingParserOptions(vault)...),
 		goldmark.WithRendererOptions(goldmarkhtml.WithUnsafe()),
-	)
+	)...)
 }
 
 // headingParserOptions is the ONE place the heading-id rule is configured.
@@ -422,16 +425,15 @@ func equalASCIIFold(value []byte, literal string) bool {
 // after sanitization, so its generated SVG never passes through this policy —
 // which is why this list can stay narrow instead of having to accommodate
 // everything mermaid emits.
+//
+// bluemonday has no context rules, so it allows these names anywhere, not only
+// inside an <svg>: prose like "cat <path>: No such file" would otherwise reach
+// the page as an open HTML <path>. balancePasses removes them outside SVG
+// content (cameronsjo/forgectl#619) — see strayForeignElements.
 func allowInlineSVG(p *bluemonday.Policy) {
 	// Structural and shape elements. No scripting, no animation, no external
 	// references — see the doc comment.
-	p.AllowElements(
-		"svg", "g", "defs", "symbol",
-		"path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
-		"text", "tspan",
-		"marker", "clipPath", "mask",
-		"linearGradient", "radialGradient", "stop",
-	)
+	p.AllowElements(svgElements...)
 
 	// Discard these elements' CONTENTS along with their tags. Without this,
 	// bluemonday hoists a denied container's children into the surviving SVG —
@@ -504,6 +506,18 @@ func allowInlineSVG(p *bluemonday.Policy) {
 		OnElements("marker")
 	p.AllowAttrs("clipPathUnits").OnElements("clipPath")
 	p.AllowAttrs("maskUnits", "maskContentUnits").OnElements("mask")
+}
+
+// svgElements are the SVG elements allowInlineSVG allows. Every name is
+// SVG-only — none is also an HTML element — which is what lets the balancer
+// drop any of them it finds in HTML content (svgOnlyElements). Keep it so: an
+// HTML name added here would be unwrapped wherever the document uses it.
+var svgElements = []string{
+	"svg", "g", "defs", "symbol",
+	"path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
+	"text", "tspan",
+	"marker", "clipPath", "mask",
+	"linearGradient", "radialGradient", "stop",
 }
 
 // ChromaCSS returns the syntax-highlighting stylesheet served at
@@ -586,6 +600,16 @@ func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (strin
 	default:
 		md = markdownPlain
 	}
+	// A document goldmark would take superlinear time on is shown as plain
+	// text instead, before renderMu is taken. The guard measures the block
+	// structure md itself gives source (markupguard.go).
+	tooComplex, guardErr := markupTooComplex(md, source)
+	if guardErr != nil {
+		return "", nil, guardErr
+	}
+	if tooComplex {
+		return plainTextDoc(source), nil, nil
+	}
 	renderMu.Lock()
 	var buf bytes.Buffer
 	ctx := newParseContext()
@@ -604,7 +628,7 @@ func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (strin
 		return "", nil, fmt.Errorf("render markdown: %w", err)
 	}
 	input := dropDuplicateSVGNamespaces(buf.Bytes())
-	body := balanceFragment(string(sanitizer.SanitizeBytes(input)))
+	body := stripChromeClasses(balanceFragment(string(sanitizer.SanitizeBytes(input))))
 	// An unclosed skip-content element makes the sanitizer drop the rest of
 	// the document (forgectl#622). The sanitizer is left exactly as it is,
 	// because that skip set is what keeps denied SVG containers' children
@@ -1165,5 +1189,8 @@ func wrapFrontmatter(kvBody string, pairs int) string {
 	if pairs == 0 {
 		return ""
 	}
-	return `<div class="props">` + kvBody + `</div>`
+	// data-forgectl-props marks the reader's own block, which the shell lifts
+	// above a doc's tooltips (forgectl#759). A doc cannot forge it: the
+	// sanitizer strips every data-* attribute from author HTML.
+	return `<div class="props" data-forgectl-props>` + kvBody + `</div>`
 }

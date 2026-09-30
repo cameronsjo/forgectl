@@ -10,9 +10,11 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: write
-  pull-requests: write
+# Deny by default. Every write goes through the App token below, so
+# GITHUB_TOKEN needs nothing. Granting it `contents: write` plus
+# `pull-requests: write` would leave an unused merge-capable token in the job
+# (cadence-ecosystem ADR-0044, security review N-3).
+permissions: {}
 
 # Serialize. Two runs racing would fight over the same release PR branch.
 concurrency:
@@ -23,12 +25,17 @@ jobs:
   release-please:
     name: Maintain release PR
     runs-on: ubuntu-latest
+    # RELEASE_APP_PRIVATE_KEY belongs only in the `release` environment, with
+    # a deployment policy of branch `main` plus tag `v*` and no repo-level
+    # copy. With that in place, and the `v*` tag ruleset limiting who can
+    # create a tag, a copy of this workflow on another ref cannot read the
+    # key (cadence-ecosystem ADR-0044 (i)).
+    environment: release
     steps:
-      # An App token, not GITHUB_TOKEN. This is NOT about token scope — the
-      # job already declares `pull-requests: write`. It is the repository
-      # policy "Allow GitHub Actions to create and approve pull requests"
-      # (`can_approve_pull_request_reviews`), which is off here and blocks the
-      # GITHUB_TOKEN actor from opening a PR at all:
+      # An App token, not GITHUB_TOKEN. This is NOT about token scope. It is
+      # the repository policy "Allow GitHub Actions to create and approve pull
+      # requests" (`can_approve_pull_request_reviews`), which is off here and
+      # blocks the GITHUB_TOKEN actor from opening a PR at all:
       #
       #   release-please failed: GitHub Actions is not permitted to create or
       #   approve pull requests.

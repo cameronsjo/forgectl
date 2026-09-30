@@ -110,7 +110,13 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 			if limit > 0 && limit < len(docs) {
 				docs = docs[:limit]
 			}
-			return printDocsList(cmd, docs, asJSON)
+			if err := printDocsList(cmd, docs, asJSON); err != nil {
+				// stdout refused the list: under --json stderr gets the docs
+				// integer-code object, keeping the exit code 1 this has always
+				// had, not the generic contract's string-code shape.
+				return docsFail(cmd, "docs list", "", err, 1, asJSON)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")

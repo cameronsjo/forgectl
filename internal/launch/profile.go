@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // EffortLevels are the values Claude Code's `--effort` accepts, in ascending
@@ -24,26 +25,26 @@ var EffortLevels = []string{"low", "medium", "high", "xhigh", "max"}
 // enough that no existing config can regress.
 func (p Profile) Validate() error {
 	if p.Harness != "claude" && p.Harness != "codex" && p.Harness != "pi" {
-		return fmt.Errorf("unsupported launch harness %q: want claude, codex, or pi", p.Harness)
+		return fmt.Errorf("unsupported launch harness %s: want claude, codex, or pi", termsafe.QuoteArgMax(p.Harness, 0))
 	}
 	if p.Effort != "" && !oneOf(p.Effort, EffortLevels...) {
 		return fmt.Errorf(
-			"unsupported effort %q: want one of %s",
-			p.Effort, strings.Join(EffortLevels, ", "),
+			"unsupported effort %s: want one of %s",
+			termsafe.QuoteArgMax(p.Effort, 0), strings.Join(EffortLevels, ", "),
 		)
 	}
 	if p.Harness == "codex" {
 		if oneOf(p.Model, "opus", "sonnet", "haiku") || strings.HasPrefix(p.Model, "claude-") {
 			return fmt.Errorf(
-				"Claude model %q cannot be used with Codex; remove model to use the Codex default or set a Codex model id",
-				p.Model,
+				"Claude model %s cannot be used with Codex; remove model to use the Codex default or set a Codex model id",
+				termsafe.QuoteArgMax(p.Model, 0),
 			)
 		}
 		if !oneOf(p.ApprovalPolicy, "untrusted", "on-request", "never") {
-			return fmt.Errorf("unsupported Codex approval_policy %q", p.ApprovalPolicy)
+			return fmt.Errorf("unsupported Codex approval_policy %s", termsafe.QuoteArgMax(p.ApprovalPolicy, 0))
 		}
 		if !oneOf(p.Sandbox, "read-only", "workspace-write", "danger-full-access") {
-			return fmt.Errorf("unsupported Codex sandbox %q", p.Sandbox)
+			return fmt.Errorf("unsupported Codex sandbox %s", termsafe.QuoteArgMax(p.Sandbox, 0))
 		}
 	}
 	return nil
