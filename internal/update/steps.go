@@ -174,9 +174,10 @@ func npmStep() Step {
 
 // SequenceError is runSequence's failure: which of its commands failed, and
 // why. Command is the argv this package built (brew update, say), rendered
-// through redact.Args (#782), never subprocess text, so a renderer can name the failed command without
-// rendering Err, which carries the child's stderr (#778). Error() reads
-// "<command>: <err>", the text this failure has always had.
+// through redact.Args (#782), never subprocess text, so a renderer can name
+// the failed command without rendering Err, which carries the child's stderr
+// (#778). Error() reads "<command>: <err>", the text this failure has always
+// had.
 type SequenceError struct {
 	Command string
 	Err     error

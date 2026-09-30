@@ -225,6 +225,15 @@ func (m argMask) runShown(run string) string {
 //     after it: the only ones whose qualification it can change. The
 //     rescan-until-nothing-changes loop this replaced needed one full pass per
 //     link of a cascade, which is quadratic.
+//
+// Linear per pattern still means the whole pass is O(patterns × len(s)), and
+// maskFor adds one short pattern for every withheld argv value under
+// minScrubLen (#816). Measured on 64 KiB of stderr: 1000 short values take
+// about 0.8 s, and 5000 take about 4.5 s. The count is deliberately not
+// capped: a value past a cap would go back into the error text unscrubbed,
+// and the scrub's correctness is the point. The cost is paid only on the
+// failure path (stderr and failure stdout are captured and bounded before
+// this runs), and an argv that long is already near the OS's ARG_MAX.
 func (m argMask) cover(s string) bitset {
 	var covered bitset
 	ensure := func() {

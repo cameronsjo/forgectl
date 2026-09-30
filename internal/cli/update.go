@@ -291,9 +291,12 @@ func (t updateTranscript) both() io.Writer {
 // the transcript file when there is one, and otherwise the two ways to get
 // them back (--json carries them, and log_level = "debug" logs them). It
 // names the file's path, quoted with QuotePath so a path holding a space
-// (macOS's Application Support) copy-pastes whole (#808), and is printed
-// once per run: in the returned error. The human summary ends with the path
-// too (printUpdateSummary), and every other line says ref instead.
+// (macOS's Application Support) copy-pastes whole (#808). pointer is used
+// once per run, in the returned error. The path is also the run's first
+// stderr line ("logging transcript to") and the human summary's last stdout
+// line (printUpdateSummary), and the root handler prints the returned error to
+// stderr, so in human mode stderr carries the path twice. Every other line
+// says ref instead.
 func (t updateTranscript) pointer() string {
 	if t.path != "" {
 		return "see the transcript " + termsafe.QuotePath(t.path)
@@ -393,13 +396,28 @@ func writeStepDetail(w io.Writer, res updatepkg.Result) {
 	if !res.Failed() {
 		return
 	}
-	var cmdErr *exec.CommandError
-	if errors.As(res.Err, &cmdErr) && cmdErr.Output != "" && !strings.Contains(res.Output, cmdErr.Output) {
-		writeOutputLines(w, cmdErr.Output)
+	if extra := failedCommandOutput(res); extra != "" {
+		writeOutputLines(w, extra)
 	}
 	for _, line := range strings.Split(transcriptErrorText(res.Err), "\n") {
 		_, _ = fmt.Fprintf(w, "      error: %s\n", termsafe.SafeLine(line))
 	}
+}
+
+// failedCommandOutput is a failed step's stdout that Result.Output does not
+// already hold: a step that ran one command (go clean, npm update -g) keeps
+// that command's stdout only in its CommandError (#808). The transcript file
+// and --json both carry it, so the no-transcript pointer's "rerun with
+// --json" is true for it too (#810). It is "" for a step that did not fail.
+func failedCommandOutput(res updatepkg.Result) string {
+	if !res.Failed() {
+		return ""
+	}
+	var cmdErr *exec.CommandError
+	if errors.As(res.Err, &cmdErr) && cmdErr.Output != "" && !strings.Contains(res.Output, cmdErr.Output) {
+		return cmdErr.Output
+	}
+	return ""
 }
 
 // writeOutputLines writes captured output to the transcript file, one
@@ -557,7 +575,9 @@ type updateStepJSON struct {
 	// Output is the step's captured stdout — for `check`, this IS the
 	// deliverable (brew's outdated list, npm's outdated table, …), so a
 	// `--json` consumer must not have to go scrape the stderr transcript
-	// to get it.
+	// to get it. A failed single-command step's stdout, which only its
+	// CommandError holds, is included too (#810): the no-transcript pointer
+	// sends the reader here for it.
 	Output     string `json:"output,omitempty"`
 	DurationMs int64  `json:"durationMs"`
 }
@@ -584,6 +604,12 @@ func writeUpdateJSON(out io.Writer, report updatepkg.Report) error {
 			Failed:      res.Failed(),
 			Output:      res.Output,
 			DurationMs:  res.Duration.Milliseconds(),
+		}
+		if extra := failedCommandOutput(res); extra != "" {
+			if step.Output != "" && !strings.HasSuffix(step.Output, "\n") {
+				step.Output += "\n"
+			}
+			step.Output += extra
 		}
 		if res.Err != nil {
 			step.Error = res.Err.Error()

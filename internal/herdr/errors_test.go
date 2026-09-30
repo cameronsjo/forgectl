@@ -175,3 +175,24 @@ func TestHerdrErrorTextRedactsArgvAndStderr(t *testing.T) {
 		t.Errorf("CheckFork: %v (want an error without the credential)", err)
 	}
 }
+
+// TestErrorMessageIsRedacted is #816: an envelope's Message rendered through
+// printable only, so a credential herdr echoed in it reached the error text.
+// The line without a credential shape survives.
+//
+// Mutation: drop redact.Text from (*Error).Error and the secret shows; apply
+// it after printable and the whole message collapses to one withheld line,
+// so "kept line" disappears.
+func TestErrorMessageIsRedacted(t *testing.T) {
+	const secret = "SEKRIT-herdr-816" //nolint:gosec // G101: a fake credential the test plants
+	env := `{"error":{"code":"bad_request","message":"kept line\nAuthorization: Bearer ` + secret + `"}}`
+	ce := &exec.CommandError{Name: Binary, ExitCode: 1, Stderr: env}
+	_, err := New(runnerFor("", ce)).Workspaces(context.Background())
+	var he *Error
+	if !errors.As(err, &he) {
+		t.Fatalf("err = %v, want *Error", err)
+	}
+	if got := he.Error(); strings.Contains(got, secret) || !strings.Contains(got, "kept line") {
+		t.Errorf("Error() = %q; want the credential line withheld and the other kept", got)
+	}
+}
