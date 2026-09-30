@@ -19,6 +19,8 @@ var fakeTokenBody = strings.Repeat("a1B2", 9)
 // PostReview (every case posts); narrow gh[pousr]_ to ghp_ in
 // githubTokenShape (the gho_/ghu_/ghs_/ghr_ cases post); drop
 // stripFormatChars (the Cf cases, and the ref-spelled zwsp case, post); drop
+// the switch in invisibleInToken (the joiner and Hangul filler cases post),
+// or its unicode.Variation_Selector test (the selector cases post); drop
 // the html.UnescapeString loop (the reference cases post), or cap it at one
 // round (the double-encoded case posts); drop
 // unescapeMarkdownPunct (the markdown case posts).
@@ -36,6 +38,15 @@ func TestPostReview_TokenShapedReviewIsRefused(t *testing.T) {
 		"word joiner":      "gh" + "\u2060" + "p_" + fakeTokenBody,
 		"bom":              "gh" + "p\ufeff_" + fakeTokenBody,
 		"soft hyphen":      "github" + "_pat_" + fakeTokenBody[:5] + "\u00ad" + fakeTokenBody[5:],
+		// Invisible characters outside Cf split it too (forgectl#764).
+		"combining grapheme joiner": "gh" + "p_" + fakeTokenBody[:10] + "\u034f" + fakeTokenBody[10:],
+		"variation selector":        "gh" + "p\ufe0f_" + fakeTokenBody,
+		"supplementary selector":    "gh" + "p_" + fakeTokenBody[:10] + "\U000e0100" + fakeTokenBody[10:],
+		"mongolian selector":        "gh" + "p_" + fakeTokenBody[:10] + "\u180b" + fakeTokenBody[10:],
+		"hangul choseong filler":    "gh" + "p_" + fakeTokenBody[:10] + "\u115f" + fakeTokenBody[10:],
+		"hangul jungseong filler":   "gh" + "p_" + fakeTokenBody[:10] + "\u1160" + fakeTokenBody[10:],
+		"hangul filler":             "gh" + "\u3164" + "p_" + fakeTokenBody,
+		"halfwidth hangul filler":   "github" + "_pat_" + fakeTokenBody[:5] + "\uffa0" + fakeTokenBody[5:],
 		// HTML character references render as the character.
 		"decimal ref":        "gh&#112;_" + fakeTokenBody,
 		"hex ref":            "gh&#x70;_" + fakeTokenBody,

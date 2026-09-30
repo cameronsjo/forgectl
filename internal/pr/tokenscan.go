@@ -28,8 +28,12 @@ var githubTokenShape = regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{30,}|github_pat
 var errReviewHasTokenShape = errors.New("refusing to post the review: it contains text shaped like a GitHub token; " +
 	"remove it from the review before posting")
 
-// maxUnescapeRounds bounds the HTML-reference decoding: enough for a
-// reference encoded inside another (&amp;#112;) a few times over.
+// maxUnescapeRounds bounds the HTML-reference decoding. GitHub's markdown
+// decodes references once, so one round is what a reader sees; the extra
+// rounds also catch a reference encoded inside another (&amp;#112;), which
+// renders as the literal text "&#112;". That over-matches, which is the safe
+// direction for a tripwire: the cost is a refused review with a visible
+// "&#112;" in it, never a token posted.
 const maxUnescapeRounds = 4
 
 // scanReviewForTokens refuses a review whose text carries a GitHub token
@@ -50,17 +54,20 @@ func scanReviewForTokens(review string) error {
 // normalizeReviewText undoes the spellings that hide a token from a plain
 // match but not from someone reading the rendered review:
 //
-//   - Unicode format characters (category Cf: zero-width space U+200B, word
-//     joiner U+2060, BOM U+FEFF, soft hyphen U+00AD, and the rest), which
-//     render as nothing;
+//   - characters that render as nothing (invisibleInToken): Unicode format
+//     characters (category Cf: zero-width space U+200B, word joiner U+2060,
+//     BOM U+FEFF, soft hyphen U+00AD, and the rest), the combining grapheme
+//     joiner U+034F, variation selectors, and the Hangul fillers;
 //   - HTML character references, named, decimal, and hex (&lowbar;, &#112;,
-//     &#x70;), which GitHub's markdown renders as the character, decoded
-//     repeatedly so a reference inside another (&amp;#112;) is caught;
+//     &#x70;), which GitHub's markdown renders as the character. GitHub
+//     decodes one level; this decodes up to maxUnescapeRounds, so a doubly
+//     encoded reference (&amp;#112;) matches too, although it renders as
+//     "&#112;" (an over-match, see maxUnescapeRounds);
 //   - markdown backslash escapes of ASCII punctuation (ghp\_…), which render
 //     as the bare punctuation.
 //
-// Format characters are stripped after decoding, since a reference can spell
-// one (&#8203;). One inside a reference breaks the reference when it renders,
+// Invisible characters are stripped after decoding, since a reference can
+// spell one (&#8203;). One inside a reference breaks the reference when it renders,
 // so there is nothing to strip before decoding.
 func normalizeReviewText(s string) string {
 	for range maxUnescapeRounds {
@@ -75,11 +82,32 @@ func normalizeReviewText(s string) string {
 
 func stripFormatChars(s string) string {
 	return strings.Map(func(r rune) rune {
-		if unicode.Is(unicode.Cf, r) {
+		if invisibleInToken(r) {
 			return -1
 		}
 		return r
 	}, s)
+}
+
+// invisibleInToken reports whether r renders as nothing, so that one placed
+// inside a token splits it for a plain match but not for a reader. The token
+// alphabet is ASCII, so a visible character between two token characters
+// already breaks the token for a reader too, and only these need stripping:
+//
+//   - category Cf, the format characters;
+//   - U+034F COMBINING GRAPHEME JOINER, a nonspacing mark (Mn) that renders
+//     as nothing, unlike the accents in Mn;
+//   - the variation selectors (U+FE00-U+FE0F, U+E0100-U+E01EF, and the
+//     Mongolian free variation selectors), also Mn, which select a glyph
+//     variant of the character before them and are otherwise invisible;
+//   - the Hangul fillers U+115F, U+1160, U+3164, and U+FFA0, letters (Lo)
+//     that render as blank space of zero or near-zero width.
+func invisibleInToken(r rune) bool {
+	switch r {
+	case '\u034f', '\u115f', '\u1160', '\u3164', '\uffa0':
+		return true
+	}
+	return unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Variation_Selector, r)
 }
 
 // unescapeMarkdownPunct drops a backslash that escapes ASCII punctuation, the

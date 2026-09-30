@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/sandbox"
@@ -256,7 +255,7 @@ func (c *Client) FindingsCleanup(ctx context.Context, olderThan time.Duration, a
 func (c *Client) skipFindingsChild(store *os.Root, name string, info fs.FileInfo, full string, unmarked *int) bool {
 	child, err := openFindingsChild(store, name, info)
 	if err != nil {
-		slog.Warn("Skipping findings dir that cannot be opened through the store.", "path", full, "error", err)
+		slog.Warn("Skipping findings dir that cannot be opened through the store.", "path", full, "error", safeErrString(err))
 		return true
 	}
 	defer func() { _ = child.Close() }()
@@ -372,7 +371,7 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, store *os.Root, f
 		name := filepath.Base(full)
 		info, err := store.Lstat(name)
 		if err != nil {
-			slog.Warn("Skipping findings removal target that no longer exists.", "path", full, "error", err)
+			slog.Warn("Skipping findings removal target that no longer exists.", "path", full, "error", safeErrString(err))
 			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
@@ -381,7 +380,7 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, store *os.Root, f
 		}
 		child, err := openFindingsChild(store, name, info)
 		if err != nil {
-			slog.Warn("Skipping findings removal target that cannot be opened through the store.", "path", full, "error", err)
+			slog.Warn("Skipping findings removal target that cannot be opened through the store.", "path", full, "error", safeErrString(err))
 			return nil
 		}
 		// LIVENESS (forgectl#558), asked in the same lock hold as the removal,
@@ -407,10 +406,13 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, store *os.Root, f
 		if err != nil {
 			return fmt.Errorf("remove findings dir %s: %w", full, err)
 		}
-		rerr := findingsRemoveAll(store, child, name, info)
+		// renderableErr: a Root.RemoveAll error can carry a value whose Error
+		// method panics (forgectl#764); the row, the log line, and the returned
+		// error all render it below.
+		rerr := renderableErr(findingsRemoveAll(store, child, name, info))
 		c.completeRepairRow(rowID, row, rerr)
 		if rerr != nil {
-			slog.Error("Failed to remove findings dir.", "path", full, "error", rerr)
+			slog.Error("Failed to remove findings dir.", "path", full, "error", safeErrString(rerr))
 			return fmt.Errorf("remove findings dir %s: %w", full, rerr)
 		}
 		slog.Info("Reclaimed findings dir.", "path", full)
@@ -436,7 +438,7 @@ var findingsRemoveAll = removeJudgedFindingsDir
 // errFindingsDirSwapped is the removal's refusal of a name that no longer
 // holds the dir that was judged, or of a judged dir that gained an entry
 // after it was emptied.
-var errFindingsDirSwapped = errors.New("findings dir changed after it was judged; left in place")
+var errFindingsDirSwapped = errors.New("findings dir changed after it was judged; judged dir emptied, the entry now at its name was kept")
 
 // removeJudgedFindingsDir removes the findings dir that was judged: child is
 // the handle on it, name its entry in store, and judged the Lstat the caller
@@ -448,8 +450,9 @@ var errFindingsDirSwapped = errors.New("findings dir changed after it was judged
 // child, which reaches only the judged dir wherever it now sits. Only then
 // is name removed, with rmdir semantics, and only while it still names the
 // judged dir: a dir swapped onto name holds at least its own owner marker,
-// so rmdir refuses it (ENOTEMPTY), and the SameFile check refuses a swapped
-// empty dir or symlink before that. What a swap in the final gap can cost is
+// so rmdir refuses it, and the SameFile check refuses a swapped empty dir or
+// symlink before that. The refusal is matched as fs.ErrExist, which covers
+// ENOTEMPTY and EEXIST on Unix and ERROR_DIR_NOT_EMPTY on Windows. What a swap in the final gap can cost is
 // one empty directory. Both refusals are errFindingsDirSwapped.
 //
 // os.Root never follows a symlink out of child, and removes a symlink inside
@@ -474,7 +477,7 @@ func removeJudgedFindingsDir(store, child *os.Root, name string, judged fs.FileI
 		return errFindingsDirSwapped
 	}
 	if err := store.Remove(name); err != nil {
-		if errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, syscall.EEXIST) {
+		if errors.Is(err, fs.ErrExist) {
 			return errFindingsDirSwapped
 		}
 		return err
