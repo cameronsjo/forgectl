@@ -234,13 +234,29 @@ const maxKeysShown = 5
 // controls inside quoted pieces and leaves a bare piece of any length as is,
 // so its output is not a safe echo on its own.
 func Keys(keys []toml.Key) string {
+	dotted := make([]string, 0, min(len(keys), maxKeysShown))
+	for i, k := range keys {
+		if i == maxKeysShown {
+			// One past the cap is enough for KeyStrings to add the ellipsis.
+			dotted = append(dotted, "")
+			break
+		}
+		dotted = append(dotted, k.String())
+	}
+	return KeyStrings(dotted)
+}
+
+// KeyStrings is Keys over keys a caller already holds as dotted strings, such
+// as config.Report.Unrecognized: the same quoting, per-key cap, and count
+// cap, so every unknown-key rendering reads alike (#761).
+func KeyStrings(keys []string) string {
 	shown := make([]string, 0, maxKeysShown+1)
 	for i, k := range keys {
 		if i == maxKeysShown {
 			shown = append(shown, "…")
 			break
 		}
-		shown = append(shown, termsafe.QuoteArgMax(k.String(), 0))
+		shown = append(shown, termsafe.QuoteArgMax(k, 0))
 	}
 	return strings.Join(shown, ", ")
 }

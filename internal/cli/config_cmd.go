@@ -14,6 +14,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/tomlerr"
 )
 
 // configModule declares the config display core module (ADR-0005).
@@ -513,9 +514,10 @@ func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, h
 
 	if len(rep.Unrecognized) > 0 {
 		fmt.Fprintf(out, "\nunrecognized keys (present in the file, bound to nothing — check spelling and section):\n")
-		for _, k := range rep.Unrecognized {
-			fmt.Fprintf(out, "  %s\n", termsafe.SafeLine(k))
-		}
+		// Quoted, each capped, at most a handful shown (#761): the same
+		// rendering every other unknown-key error uses. The --json array
+		// keeps each key verbatim; it is the stable machine surface.
+		_, _ = fmt.Fprintf(out, "  %s\n", tomlerr.KeyStrings(rep.Unrecognized))
 	}
 }
 

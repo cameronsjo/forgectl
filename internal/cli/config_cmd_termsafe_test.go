@@ -309,3 +309,29 @@ model = "opus\u202E-tail\u2066\u2069\u200F\u061C"
 		t.Errorf("launch_resolved.model = %q, want the exact stored value %q", doc.LaunchResolved.Model, rawModel)
 	}
 }
+
+// TestRenderConfigText_UnrecognizedKeysCapped pins #761: the human list of
+// unrecognized keys goes through tomlerr's rendering, each key capped and at
+// most a handful shown, while --json keeps the full list.
+func TestRenderConfigText_UnrecognizedKeysCapped(t *testing.T) {
+	entries, hosts, resolved := hostileTextFixture()
+	long := strings.Repeat("k", 300)
+	var unrec []string
+	for i := 0; i < 7; i++ {
+		unrec = append(unrec, string(rune('a'+i))+long)
+	}
+	rep := config.Report{Path: "/cfg", Found: true, Unrecognized: unrec}
+
+	var buf bytes.Buffer
+	renderConfigText(&buf, entries, rep, hosts, resolved)
+	out := buf.String()
+	if strings.Contains(out, long[:81]) {
+		t.Errorf("rendering echoes an unrecognized key uncapped:\n%s", out)
+	}
+	if strings.Contains(out, "g"+long[:10]) {
+		t.Errorf("rendering lists keys past the display cap:\n%s", out)
+	}
+	if !strings.Contains(out, `"a`+long[:10]) {
+		t.Errorf("rendering lost the first unrecognized key:\n%s", out)
+	}
+}

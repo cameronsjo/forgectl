@@ -1649,9 +1649,9 @@ func LoadLegacyLaunch() (LaunchConfig, string, error) {
 	var lc LaunchConfig
 	if _, err := toml.DecodeFile(path, &lc); err != nil {
 		if os.IsNotExist(err) {
-			return LaunchConfig{}, path, fmt.Errorf("%w at %s", ErrNoLegacyLaunch, path)
+			return LaunchConfig{}, path, fmt.Errorf("%w at %s", ErrNoLegacyLaunch, termsafe.QuotePath(path))
 		}
-		return LaunchConfig{}, path, fmt.Errorf("read legacy claunch.conf at %s: %w", path, tomlerr.Scrub(err))
+		return LaunchConfig{}, path, fmt.Errorf("read legacy claunch.conf at %s: %w", termsafe.QuotePath(path), tomlerr.Scrub(err))
 	}
 	return stripLegacyUsageOptIn(lc), path, nil
 }

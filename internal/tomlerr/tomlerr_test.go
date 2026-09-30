@@ -220,3 +220,26 @@ func TestKeys_QuotedCappedAndBounded(t *testing.T) {
 		t.Errorf("Keys(one) = %q", got)
 	}
 }
+
+// TestKeyStrings_MatchesKeys pins #761: the string form renders exactly as
+// Keys does, so config's unrecognized-key list reads like every other
+// unknown-key error.
+func TestKeyStrings_MatchesKeys(t *testing.T) {
+	long := strings.Repeat("K", 200)
+	var keys []toml.Key
+	var dotted []string
+	for i := 0; i < 7; i++ {
+		k := toml.Key{"s", string(rune('a'+i)) + long}
+		keys = append(keys, k)
+		dotted = append(dotted, k.String())
+	}
+	if got, want := KeyStrings(dotted), Keys(keys); got != want {
+		t.Errorf("KeyStrings = %q, want Keys' %q", got, want)
+	}
+	if got := KeyStrings(dotted); strings.Contains(got, long[:81]) || !strings.HasSuffix(got, ", …") {
+		t.Errorf("KeyStrings = %q, want capped keys and a trailing ellipsis", got)
+	}
+	if got := KeyStrings(dotted[:maxKeysShown]); strings.HasSuffix(got, ", …") {
+		t.Errorf("KeyStrings(%d) = %q, want no ellipsis at exactly the cap", maxKeysShown, got)
+	}
+}

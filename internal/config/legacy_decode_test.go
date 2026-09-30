@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -162,5 +163,36 @@ func TestNativeMigrationFS_LoadReadOnly_MalformedIsAnError(t *testing.T) {
 	_, err := fs.loadReadOnly(path)
 	if !errors.Is(err, ErrLegacyMalformed) {
 		t.Fatalf("error = %v, want it to wrap ErrLegacyMalformed", err)
+	}
+}
+
+// TestLoadLegacyLaunch_QuotesPath pins #761: the legacy claunch.conf path is
+// rendered through QuotePath on both the absent and the malformed arm, so a
+// directory name carrying a terminal control cannot reach the terminal raw.
+func TestLoadLegacyLaunch_QuotesPath(t *testing.T) {
+	xdg := filepath.Join(t.TempDir(), "x\x1b[2Jy")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	_, _, err := LoadLegacyLaunch()
+	if !errors.Is(err, ErrNoLegacyLaunch) {
+		t.Fatalf("absent: error = %v, want ErrNoLegacyLaunch", err)
+	}
+	if strings.Contains(err.Error(), "\x1b") || !strings.Contains(err.Error(), `x\x1b[2Jy`) {
+		t.Errorf("absent: error = %q, want the path quoted", err)
+	}
+
+	dir := filepath.Join(xdg, "claunch")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "claunch.conf"), []byte("not = [valid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = LoadLegacyLaunch()
+	if err == nil {
+		t.Fatal("malformed: want a decode error")
+	}
+	if strings.Contains(err.Error(), "\x1b") || !strings.Contains(err.Error(), `x\x1b[2Jy`) {
+		t.Errorf("malformed: error = %q, want the path quoted", err)
 	}
 }
