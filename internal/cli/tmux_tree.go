@@ -68,15 +68,15 @@ type tmuxTreePaneJSON struct {
 
 func writeTmuxTreeJSON(cmd *cobra.Command, client *tmux.Client) error {
 	ctx := cmd.Context()
-	sessions, err := client.ListSessions(ctx)
+	sessions, err := client.DisplaySessions(ctx)
 	if err != nil {
 		return err
 	}
-	windows, err := client.ListWindows(ctx)
+	windows, err := client.DisplayWindows(ctx)
 	if err != nil {
 		return err
 	}
-	panes, err := client.ListPanes(ctx)
+	panes, err := client.DisplayPanes(ctx)
 	if err != nil {
 		return err
 	}

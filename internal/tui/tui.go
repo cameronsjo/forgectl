@@ -609,7 +609,7 @@ func (m *model) enterPick() {
 }
 
 func (m *model) enterSessions() {
-	sessions, err := m.client.ListSessions(m.ctx)
+	sessions, err := m.client.DisplaySessions(m.ctx)
 	if err != nil {
 		slog.Error("Failed to load sessions.", "error", err)
 		m.status = errStatus("tmux: ", err, m.styles)
@@ -624,7 +624,7 @@ func (m *model) enterSessions() {
 }
 
 func (m *model) enterWindows() {
-	windows, err := m.client.ListWindows(m.ctx)
+	windows, err := m.client.DisplayWindows(m.ctx)
 	if err != nil {
 		slog.Error("Failed to load windows.", "error", err)
 		m.status = errStatus("tmux: ", err, m.styles)

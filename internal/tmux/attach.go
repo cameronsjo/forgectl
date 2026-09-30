@@ -148,7 +148,14 @@ func (c *Client) mostRecentSession(ctx context.Context) (SessionIdentity, error)
 		if c.absentServer(ctx, args, err) {
 			return SessionIdentity{}, nil
 		}
-		return SessionIdentity{}, c.serverStateError(ctx, args, err)
+		// An exited server's leftover socket also means no session to jump
+		// to (forgectl#786). The zero identity is only ever reported, never
+		// acted on.
+		stateErr := c.serverStateError(ctx, args, err)
+		if errors.Is(stateErr, ErrServerExited) {
+			return SessionIdentity{}, nil
+		}
+		return SessionIdentity{}, stateErr
 	}
 	lines := splitLines(out)
 	// parsed holds the rows that split cleanly. Only its emptiness is read

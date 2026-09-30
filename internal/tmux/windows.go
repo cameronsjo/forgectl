@@ -567,15 +567,15 @@ var (
 // panes by index; the attached session and active window/pane are marked. Pass
 // icons=false for ASCII markers (NO_COLOR / --no-icons / misconfigured term).
 func (c *Client) Tree(ctx context.Context, icons bool) (string, error) {
-	sessions, err := c.ListSessions(ctx)
+	sessions, err := c.DisplaySessions(ctx)
 	if err != nil {
 		return "", err
 	}
-	windows, err := c.ListWindows(ctx)
+	windows, err := c.DisplayWindows(ctx)
 	if err != nil {
 		return "", err
 	}
-	panes, err := c.ListPanes(ctx)
+	panes, err := c.DisplayPanes(ctx)
 	if err != nil {
 		return "", err
 	}

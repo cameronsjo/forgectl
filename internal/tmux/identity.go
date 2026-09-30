@@ -213,6 +213,17 @@ var (
 	// an unrecognized tmux error. Callers must refuse rather than fall back to
 	// the default server.
 	ErrServerUnreadable = errors.New("tmux server state could not be read")
+	// ErrServerExited reports a socket file whose server is proven gone: the
+	// file is a socket and a connect to it was refused, so nothing listens
+	// there (forgectl#786). tmux 3.4 leaves its socket behind on every clean
+	// exit. It always arrives wrapped together with ErrServerUnreadable, so
+	// every caller that does not opt in keeps failing closed — which is what
+	// a kill-time or teardown "gone" verdict needs, because a refused connect
+	// proves no server listens NOW, not that a crashed server's panes died
+	// with it (#765). Listings shown to an operator (DisplaySessions,
+	// DisplayWindows), EnsureSession's create, and CheckGenerationCapability
+	// opt in and read it as "no server".
+	ErrServerExited = errors.New("the tmux server has exited (its socket file remains, and nothing listens on it)")
 	// ErrUnsafeOperand reports an operator-supplied value that cannot be
 	// passed through tmux's command parser byte for byte, so it is refused
 	// before any command runs (quoteCommandOperand).
@@ -278,6 +289,12 @@ func (c *Client) serverStateError(ctx context.Context, args []string, err error)
 		return fmt.Errorf("%w (socket %s)", ErrUnpinnedCommand, termsafe.QuotePath(c.socket))
 	case serverSocketDirMissing:
 		return fmt.Errorf("%w: %s", ErrSocketDirMissing, termsafe.QuotePath(filepath.Dir(failure.SocketPath)))
+	case serverDeadSocket:
+		// BOTH sentinels: ErrServerUnreadable keeps every existing caller
+		// failing closed, and ErrServerExited is what an opted-in listing or
+		// create reads as "no server".
+		return fmt.Errorf("%w: %w (socket %s): %w",
+			ErrServerUnreadable, ErrServerExited, termsafe.QuotePath(failure.SocketPath), err)
 	default:
 		cause := failure.Cause
 		if cause == nil {

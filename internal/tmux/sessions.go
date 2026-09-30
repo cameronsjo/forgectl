@@ -214,6 +214,12 @@ func (c *Client) EnsureSession(ctx context.Context, name, dir string) (SessionId
 	switch {
 	case err == nil:
 		return identity, nil
+	case errors.Is(err, ErrServerExited):
+		// A server that exited and left its socket behind holds no session,
+		// and creating is safe there: tmux's own client finds the refused
+		// socket, unlinks it and starts a fresh server (forgectl#786). A
+		// server that comes up in between is connected to instead, and the
+		// duplicate-session handling below covers the name being taken.
 	case !errors.Is(err, ErrSessionNotFound):
 		return SessionIdentity{}, err
 	}
