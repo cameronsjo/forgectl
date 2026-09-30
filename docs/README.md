@@ -7,7 +7,7 @@ decisions were made, what was explored, and how the running system is
 operated.
 
 - **[`commands/`](commands/)** — per-command deep dives (env, launch, k8s,
-  docs, [recipe](commands/recipe.md), …) split out of the README; the README keeps the full roster and
+  docs, [recipe](commands/recipe.md), [audit](commands/audit.md), …) split out of the README; the README keeps the full roster and
   usage summary.
 - **[`json-contract.md`](json-contract.md)** — what a `--json` verb writes to
   stderr when it exits non-zero, and the failure object's `code` strings.

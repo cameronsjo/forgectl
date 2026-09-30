@@ -28,12 +28,38 @@ import (
 // a new entry must name why the file needs a raw pointer it did not spell.
 var unsafePointerAllowed = map[string]string{}
 
-// reflectMemoryAllowed is the allowlist of reflect-memory method uses, keyed
-// "<file relative to the module root> <method name>", that
-// TestNoFileReadsMemoryThroughReflect admits. It is empty: no production
-// file calls any of refusedReflectMethods today (forgectl#888), and a new
-// entry must name why the file needs a field's address.
+// reflectMemoryAllowed is the allowlist of findings
+// TestNoFileReadsMemoryThroughReflect admits, keyed by the key its message
+// names: "<file relative to the module root> <name>" for a use of one of
+// refusedReflectMethods or refusedMemoryFuncs, "<file> embed <type>" for an
+// embedding, and "<file> interface <Type>.<method>" for a declared
+// interface (<Type> is the declared name, or the literal's text for an
+// interface literal). It is empty: no production file does any of these
+// today (forgectl#888, forgectl#897), and a new entry must name why the file
+// needs it.
 var reflectMemoryAllowed = map[string]string{}
+
+// refusedMemoryFuncs names, by package path, the standard-library functions
+// that copy process memory out wholesale (forgectl#897). WriteHeapDump
+// writes every heap object, closure captures included, to a file
+// descriptor, so every sealed payload with it. SetTraceback("crash") makes
+// the next fatal error raise a core dump of the whole address space; the
+// other levels are harmless, but the level is a runtime string, so the call
+// is refused by name. The GOTRACEBACK environment variable and a debugger
+// reach the same dumps with no call at all, which is the operating-system
+// residual in startSealed's doc.
+var refusedMemoryFuncs = map[string][]string{
+	"runtime/debug": {"WriteHeapDump", "SetTraceback"},
+}
+
+// refusedMemoryFunc reports whether fn is one of refusedMemoryFuncs: a
+// package-level function, matched by package path and name. A function can be
+// reached only by naming it, so a Uses walk sees every route (a call, a func
+// value, a renamed import).
+func refusedMemoryFunc(fn *types.Func) bool {
+	return fn.Pkg() != nil && fn.Signature().Recv() == nil &&
+		slices.Contains(refusedMemoryFuncs[fn.Pkg().Path()], fn.Name())
+}
 
 // refusedReflectMethods names the methods that hand out an address, or
 // dispatch dynamically to one that does, keyed by receiver ("Value" is
@@ -77,12 +103,22 @@ var refusedReflectMethods = map[string][]string{
 //     or an interface literal in any type position) with a method whose name
 //     is one of refusedReflectMethods, whatever its signature. Every
 //     look-alike needs such an interface, and stdlib interfaces such as
-//     net.Listener are not declared in the module, so they are unaffected;
+//     net.Listener are not declared in the module, so they are unaffected.
+//     The rule matches the method name only, so it also refuses two shapes
+//     that carry no reflect value: an interface that embeds a stdlib one
+//     with such a method (interface{ net.Listener; Extra() } gains Addr),
+//     and a narrowed fake of one (interface{ Addr() net.Addr }). Both are
+//     known false positives, cleared per interface with a
+//     "<file> interface <Type>.<method>" entry in reflectMemoryAllowed;
 //   - any use (a call, a method value or a method expression, promoted or
 //     not) of a method in refusedReflectMethods, and of any method of the
 //     same name, whatever its signature, on an interface a reflect.Value or
-//     reflect.Type could satisfy by name. reflectMemoryAllowed is the
-//     allowlist.
+//     reflect.Type could satisfy by name;
+//   - any use (a call or a func value) of a function in refusedMemoryFuncs,
+//     which copies the heap out wholesale, closure captures included
+//     (forgectl#897).
+//
+// reflectMemoryAllowed is the allowlist for every rule but the first.
 //
 // The rule is an allowlist over what go/types resolves, not a scan of the
 // text, so a renamed import, an embedded reflect.Value or a type-parameter
@@ -91,12 +127,17 @@ var refusedReflectMethods = map[string][]string{
 //
 // What it does not close is the residual risk in startSealed's doc
 // (sensitive_run.go): memory read through the operating system needs no
-// reflect and no unsafe.
+// reflect and no unsafe. Nor does it see reflect's plain-data readers
+// (Value.String, Bytes, Index and the rest), which read an unexported
+// string, slice or map field without the read-only check; that is why a
+// payload lives in a closure rather than such a field
+// (TestMaskAndOutputHoldNoPlainData, forgectl#897).
 //
 // Mutations that turn it red: a production file in internal/tmux that does
 // `p := reflect.ValueOf(&a).Elem().Field(0).Addr().UnsafePointer()` and
 // `(**struct{ fn uintptr; s string })(p)` without importing unsafe; a
-// production file calling `reflect.ValueOf(&x).Elem().UnsafeAddr()`.
+// production file calling `reflect.ValueOf(&x).Elem().UnsafeAddr()`; a
+// production file calling `debug.WriteHeapDump(f.Fd())`.
 func TestNoFileReadsMemoryThroughReflect(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -452,7 +493,15 @@ func typedFindings(fset *token.FileSet, files []*ast.File, info *types.Info, rul
 			return p == "unsafe"
 		})
 		checkPointer := !importsUnsafe && unsafePointerAllowed[name] == ""
+		// declared names each interface type written as a type declaration's
+		// right-hand side; ast.Inspect visits the TypeSpec before its type.
+		declared := map[*ast.InterfaceType]string{}
 		ast.Inspect(file, func(n ast.Node) bool {
+			if ts, ok := n.(*ast.TypeSpec); ok {
+				if it, ok := ts.Type.(*ast.InterfaceType); ok {
+					declared[it] = ts.Name.Name
+				}
+			}
 			if expr, ok := n.(ast.Expr); ok && checkPointer {
 				if tv, ok := info.Types[expr]; ok && holdsUnsafePointer(tv.Type, map[types.Type]bool{}) {
 					report(expr.Pos(), fmt.Sprintf("%s has type %s, which holds unsafe.Pointer, in a file that does not import \"unsafe\"; converted to *T it reads any memory, a sealed payload included; add the file to unsafePointerAllowed with a reason only after review",
@@ -473,11 +522,15 @@ func typedFindings(fset *token.FileSet, files []*ast.File, info *types.Info, rul
 			}
 			if it, ok := n.(*ast.InterfaceType); ok {
 				if iface, ok := info.Types[it].Type.(*types.Interface); ok {
+					typeName, ok := declared[it]
+					if !ok {
+						typeName = types.ExprString(it)
+					}
 					for m := range iface.Methods() {
-						key := name + " interface " + m.Name()
+						key := name + " interface " + typeName + "." + m.Name()
 						if rule.names[m.Name()] && reflectMemoryAllowed[key] == "" {
-							report(it.Pos(), fmt.Sprintf("declares an interface with method %s, a name reflect.Value or reflect.Type uses to hand out an address; any such interface, whatever the signature, can carry a reflect value (or an adapter around one) to a call site that never names reflect; add %q to reflectMemoryAllowed with a reason only after review",
-								m.Name(), key))
+							report(it.Pos(), fmt.Sprintf("declares interface %s with method %s, a name reflect.Value or reflect.Type uses to hand out an address; any such interface, whatever the signature, can carry a reflect value (or an adapter around one) to a call site that never names reflect; add %q to reflectMemoryAllowed with a reason only after review",
+								typeName, m.Name(), key))
 						}
 					}
 				}
@@ -489,6 +542,10 @@ func typedFindings(fset *token.FileSet, files []*ast.File, info *types.Info, rul
 			fn, ok := info.Uses[id].(*types.Func)
 			if !ok {
 				return true
+			}
+			if refusedMemoryFunc(fn) && reflectMemoryAllowed[name+" "+fn.Name()] == "" {
+				report(id.Pos(), fmt.Sprintf("uses %s, which copies process memory out wholesale, every closure-sealed payload included; add %q to reflectMemoryAllowed with a reason only after review",
+					fn.FullName(), name+" "+fn.Name()))
 			}
 			if match := rule.use(fn); match != nil && reflectMemoryAllowed[name+" "+fn.Name()] == "" {
 				report(id.Pos(), fmt.Sprintf("uses %s, as %s: it hands out a field's address past the read-only check (or reaches such a method by name), which reads a sealed payload without importing \"unsafe\"; add %q to reflectMemoryAllowed with a reason only after review",
@@ -665,7 +722,11 @@ func holdsUnsafePointer(t types.Type, seen map[types.Type]bool) bool {
 // reported); drop the embedding check (the embedded reflect.Type row goes
 // quiet, and with the declaration rule off the other four adapter rows); or
 // enter a named struct in holdsUnsafePointer (the clean reflect row reports
-// reflect.Value).
+// reflect.Value); drop the refusedMemoryFuncs check, or WriteHeapDump from
+// that list (the runtime/debug rows go quiet; a name the standard library no
+// longer declares fails newTypedProbe); key the interface allowlist on the
+// method alone, or on the literal text for a declared interface too (the
+// allowlist row fails).
 func TestTypedFindingsSeeEveryRoute(t *testing.T) {
 	const prelude = "package probe\n\nimport \"reflect\"\n\nvar _ reflect.Value\n\ntype sealedArg struct{ reveal func() string }\n\n"
 	rows := []struct {
@@ -769,6 +830,56 @@ func g[T any](x J[T]) T { return x.Size() }`, false},
 			t.Errorf("findings on net.Listener's Addr:\n%s", strings.Join(got, "\n"))
 		}
 	})
+	t.Run("runtime/debug's memory dumps", func(t *testing.T) {
+		const head = "package probe\n\nimport \"runtime/debug\"\n\nvar _ = debug.ReadBuildInfo\n\n"
+		for _, row := range []struct{ name, src string }{
+			{"WriteHeapDump call", "func f(fd uintptr) { debug.WriteHeapDump(fd) }"},
+			{"WriteHeapDump func value", "var g = debug.WriteHeapDump"},
+			{"SetTraceback call", `func f() { debug.SetTraceback("crash") }`},
+		} {
+			if got := probe.findings(t, head+row.src+"\n"); len(got) == 0 {
+				t.Errorf("%s: no finding; the matcher misses this route", row.name)
+			}
+		}
+		renamed := "package probe\n\nimport d \"runtime/debug\"\n\nfunc f(fd uintptr) { d.WriteHeapDump(fd) }\n"
+		if got := probe.findings(t, renamed); len(got) == 0 {
+			t.Error("WriteHeapDump through a renamed import: no finding; the matcher misses this route")
+		}
+		clean := head + "func f() (string, bool) { bi, ok := debug.ReadBuildInfo(); return bi.GoVersion, ok }\n"
+		if got := probe.findings(t, clean); len(got) != 0 {
+			t.Errorf("findings on runtime/debug.ReadBuildInfo:\n%s", strings.Join(got, "\n"))
+		}
+	})
+	t.Run("the interface allowlist is keyed on the interface type", func(t *testing.T) {
+		// The two known false-positive shapes of the declaration-site rule
+		// (typedFindings' doc) are refused, and one entry clears one
+		// interface: I's entry leaves J, in the same file with the same
+		// method, refused.
+		src := "package probe\n\nimport \"net\"\n\n" +
+			"type I interface{ net.Listener; Extra() }\n\n" +
+			"type J interface{ Addr() net.Addr }\n"
+		got := probe.findings(t, src)
+		for _, want := range []string{"interface I with method Addr", "interface J with method Addr"} {
+			if !slices.ContainsFunc(got, func(f string) bool { return strings.Contains(f, want) }) {
+				t.Errorf("no finding naming %q; the declaration-site rule misses a documented shape:\n%s", want, strings.Join(got, "\n"))
+			}
+		}
+		reflectMemoryAllowed["probe.go interface I.Addr"] = "probe: the allowlist key's shape"
+		defer delete(reflectMemoryAllowed, "probe.go interface I.Addr")
+		got = probe.findings(t, src)
+		if slices.ContainsFunc(got, func(f string) bool { return strings.Contains(f, "interface I with") }) {
+			t.Errorf("an entry keyed \"probe.go interface I.Addr\" does not clear I:\n%s", strings.Join(got, "\n"))
+		}
+		if !slices.ContainsFunc(got, func(f string) bool { return strings.Contains(f, "interface J with method Addr") }) {
+			t.Errorf("I's entry cleared J too; the key is not on the interface type:\n%s", strings.Join(got, "\n"))
+		}
+		lit := "package probe\n\nfunc f(x interface{ Pointer() int }) {}\n"
+		reflectMemoryAllowed["probe.go interface interface{Pointer() int}.Pointer"] = "probe: a literal's key"
+		defer delete(reflectMemoryAllowed, "probe.go interface interface{Pointer() int}.Pointer")
+		if got := probe.findings(t, lit); len(got) != 0 {
+			t.Errorf("an interface literal's entry, keyed on its text, does not clear it:\n%s", strings.Join(got, "\n"))
+		}
+	})
 	t.Run("a file importing unsafe is the import guard's", func(t *testing.T) {
 		src := "package probe\n\nimport \"unsafe\"\n\nfunc f(p unsafe.Pointer) *int { return (*int)(p) }\n"
 		if got := probe.findings(t, src); len(got) != 0 {
@@ -796,6 +907,19 @@ func newTypedProbe(t *testing.T) *typedProbe {
 	rule, err := newReflectRule(reflectPkg)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// A renamed or removed memory-dump function would drop out of the rule
+	// unseen, the way newReflectRule refuses a missing reflect method.
+	for path, names := range refusedMemoryFuncs {
+		pkg, err := imp.Import(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range names {
+			if fn, ok := pkg.Scope().Lookup(name).(*types.Func); !ok || !refusedMemoryFunc(fn) {
+				t.Fatalf("%s declares no func %s; refusedMemoryFuncs would refuse nothing", path, name)
+			}
+		}
 	}
 	return &typedProbe{fset: fset, imp: imp, rule: rule}
 }

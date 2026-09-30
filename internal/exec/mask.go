@@ -15,10 +15,55 @@ const minScrubLen = 8
 
 type maskKey struct{}
 
-// argMask is what WithMaskedAssignments stores: each marked KEY=VALUE argv
-// element mapped to its display form, plus the bare values to scrub from
-// stderr.
+// argMask is what WithMaskedAssignments stores. Its data is held in a
+// closure, not in fields, and that is the containment mechanism, the same one
+// sealed.Value uses (forgectl#897): an argMask sits in a context's value
+// chain, and reflect's plain-data readers (Value.String, MapKeys, Index,
+// Uint and the rest) read an unexported string, slice or map field without
+// the read-only check, so a caller holding the context could walk it to the
+// masked values. A func value's captures are no field reflect can walk into;
+// the routes that do reach them (Pointer, UnsafePointer) are refused module
+// wide by TestNoFileReadsMemoryThroughReflect. TestMaskAndOutputHoldNoPlainData
+// pins that no field of it holds a string, a byte or an interface.
+//
+// The zero argMask masks nothing.
 type argMask struct {
+	get func() maskData
+}
+
+// newArgMask seals d. d must not be modified afterwards: every read of the
+// mask shares its maps and slices.
+func newArgMask(d maskData) argMask { return argMask{get: func() maskData { return d }} }
+
+// data returns what m masks, empty for the zero argMask.
+func (m argMask) data() maskData {
+	if m.get == nil {
+		return maskData{}
+	}
+	return m.get()
+}
+
+// args returns argv as it may be rendered; see maskData.args.
+func (m argMask) args(args []string) []string { return m.data().args(args) }
+
+// text scrubs every marked entry and value from s; see maskData.text.
+func (m argMask) text(s string) string { return m.data().text(s) }
+
+// straddleLen is maskData.straddleLen.
+func (m argMask) straddleLen(s string) int { return m.data().straddleLen(s) }
+
+// withValues returns a mask that also scrubs values; see maskData.withValues.
+func (m argMask) withValues(values []string) argMask {
+	if out, changed := m.data().withValues(values); changed {
+		return newArgMask(out)
+	}
+	return m
+}
+
+// maskData is an argMask's data: each marked KEY=VALUE argv element mapped to
+// its display form, plus the bare values to scrub from stderr. Only an
+// argMask's closure holds one; never store it in a field of anything else.
+type maskData struct {
 	shown map[string]string
 	// pats is every string text scrubs, whole entries and bare values
 	// together, sorted longest first (entries before values at equal length),
@@ -54,7 +99,7 @@ func WithMaskedAssignments(ctx context.Context, entries []string) context.Contex
 	if len(entries) == 0 {
 		return ctx
 	}
-	m := argMask{shown: make(map[string]string, len(entries))}
+	m := maskData{shown: make(map[string]string, len(entries))}
 	for _, e := range entries {
 		key, value, ok := strings.Cut(e, "=")
 		if !ok || value == "" {
@@ -65,12 +110,12 @@ func WithMaskedAssignments(ctx context.Context, entries []string) context.Contex
 		m.values = append(m.values, value)
 		m.entries = append(m.entries, e)
 	}
-	return context.WithValue(ctx, maskKey{}, m.sorted())
+	return context.WithValue(ctx, maskKey{}, newArgMask(m.sorted()))
 }
 
 // sorted orders pats and values the way text and straddleLen need them, in
 // place, and returns m.
-func (m argMask) sorted() argMask {
+func (m maskData) sorted() maskData {
 	sort.Slice(m.pats, func(i, j int) bool {
 		a, b := m.pats[i], m.pats[j]
 		if len(a.text) != len(b.text) {
@@ -88,12 +133,12 @@ func (m argMask) sorted() argMask {
 }
 
 // withValues returns a copy of m that also scrubs each of values as a bare
-// value, the way it scrubs a masked assignment's VALUE. m itself, which may
-// be shared through a context, is not modified. An empty value is skipped,
-// and so is a short one with no word byte in it: the whole-word rule cannot
-// bound such a value, so "." or ":" would be scrubbed at every occurrence and
-// leave nothing of the text readable.
-func (m argMask) withValues(values []string) argMask {
+// value, the way it scrubs a masked assignment's VALUE, and whether it added
+// any. m itself, which may be shared through a context, is not modified. An
+// empty value is skipped, and so is a short one with no word byte in it: the
+// whole-word rule cannot bound such a value, so "." or ":" would be scrubbed
+// at every occurrence and leave nothing of the text readable.
+func (m maskData) withValues(values []string) (maskData, bool) {
 	seen := make(map[string]bool, len(values))
 	var add []string
 	for _, v := range values {
@@ -104,9 +149,9 @@ func (m argMask) withValues(values []string) argMask {
 		add = append(add, v)
 	}
 	if len(add) == 0 {
-		return m
+		return m, false
 	}
-	out := argMask{
+	out := maskData{
 		shown:   m.shown,
 		pats:    append(make([]maskPat, 0, len(m.pats)+len(add)), m.pats...),
 		values:  append(make([]string, 0, len(m.values)+len(add)), m.values...),
@@ -116,7 +161,7 @@ func (m argMask) withValues(values []string) argMask {
 		out.pats = append(out.pats, maskPat{text: v, shown: Redacted})
 		out.values = append(out.values, v)
 	}
-	return out.sorted()
+	return out.sorted(), true
 }
 
 func hasWordByte(s string) bool {
@@ -135,7 +180,7 @@ func maskFrom(ctx context.Context) argMask {
 
 // args returns argv as it may be rendered. It copies only when something is
 // masked, so the unmasked path renders exactly as before.
-func (m argMask) args(args []string) []string {
+func (m maskData) args(args []string) []string {
 	if len(m.shown) == 0 {
 		return args
 	}
@@ -160,7 +205,7 @@ func (m argMask) args(args []string) []string {
 // covered bytes once. A run that starts with a whole entry renders as
 // KEY=[redacted], so an echoed entry keeps its key; any other run renders as
 // [redacted].
-func (m argMask) text(s string) string {
+func (m maskData) text(s string) string {
 	if len(m.pats) == 0 {
 		return s
 	}
@@ -191,7 +236,7 @@ func (m argMask) text(s string) string {
 // entry starts the run and lies inside it (the longest such entry), else
 // [redacted]. The key is the only text shown, and the argv rendering already
 // shows it.
-func (m argMask) runShown(run string) string {
+func (m maskData) runShown(run string) string {
 	for _, p := range m.pats {
 		if p.shown != Redacted && strings.HasPrefix(run, p.text) {
 			return p.shown
@@ -234,7 +279,7 @@ func (m argMask) runShown(run string) string {
 // and the scrub's correctness is the point. The cost is paid only on the
 // failure path (stderr and failure stdout are captured and bounded before
 // this runs), and an argv that long is already near the OS's ARG_MAX.
-func (m argMask) cover(s string) bitset {
+func (m maskData) cover(s string) bitset {
 	var covered bitset
 	ensure := func() {
 		if covered == nil {
@@ -423,10 +468,15 @@ const maxStraddleRounds = 64
 // maxStraddleRounds: a tail that still starts with a fragment after that many
 // drops is dropped whole, which, like any extra drop, only loses more of a
 // tail that was already cut.
-func (m argMask) straddleLen(s string) int {
+func (m maskData) straddleLen(s string) int {
+	// The longest suffix any pattern below can match, which sizes the shared
+	// failure table. Values count as well as entries: withValues adds bare
+	// values that can be longer than every entry, or come with none (#925).
 	longest := 0
-	for _, e := range m.entries {
-		longest = max(longest, len(e)-1)
+	for _, p := range [][]string{m.values, m.entries} {
+		for _, x := range p {
+			longest = max(longest, len(x)-1)
+		}
 	}
 	total := 0
 	for round := 0; ; round++ {

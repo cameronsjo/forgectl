@@ -675,58 +675,68 @@ func (w *Watcher) relevant(path string) bool {
 
 // attachmentRelevant reports whether ev can change a vault root's attachment
 // set (walkRoot): a Create, Remove or Rename of a non-markdown name that is
-// not a dot-file, in the tree inTree accepts, under a vault root. A write to
-// an attachment's contents is not relevant, since resolution reads names
-// only. Like relevant() it is lexical, because a removed or renamed-away
-// path cannot be stat'ed; a Create of a directory or a symlink with such a
-// name arms a settle too, and the rebuilt index, which lists neither,
-// leaves it unpublished.
+// not a dot-file, which some vault root accepts (rootAccepts). A write to an
+// attachment's contents is not relevant, since resolution reads names only.
+// Like relevant() it is lexical, because a removed or renamed-away path
+// cannot be stat'ed; a Create of a directory or a symlink with such a name
+// arms a settle too, and the rebuilt index, which lists neither, leaves it
+// unpublished.
 func (w *Watcher) attachmentRelevant(ev fsnotify.Event) bool {
 	if !ev.Has(fsnotify.Create) && !ev.Has(fsnotify.Remove) && !ev.Has(fsnotify.Rename) {
 		return false
 	}
-	if AllowedExt(ev.Name) || strings.HasPrefix(filepath.Base(ev.Name), ".") || !w.inTree(ev.Name) {
+	if AllowedExt(ev.Name) || strings.HasPrefix(filepath.Base(ev.Name), ".") {
 		return false
 	}
-	// inTree accepted the first root holding the path; its kind decides.
+	// The kind comes from a root that accepts the path, not merely the
+	// first that holds it: roots can overlap (forgectl#917).
 	for _, root := range w.store.Current().Roots() {
-		if withinRoot(root.Path, ev.Name) {
-			return root.Kind == RootVault
+		if root.Kind == RootVault && rootAccepts(root, ev.Name) {
+			return true
 		}
 	}
 	return false
 }
 
-// inTree is relevant() without the extension rule: whether path lies in a
-// root, is that root's one file when it is an OnlyFile root, and has no
-// excluded directory component.
+// inTree is relevant() without the extension rule: whether some root
+// accepts path (rootAccepts). Every containing root is consulted, not just
+// the first: with overlapping roots (docs serve ~/v/n.md ~/v) the first may
+// be a single-file root that refuses what the enclosing root accepts
+// (forgectl#917).
 func (w *Watcher) inTree(path string) bool {
-	idx := w.store.Current()
-	for _, root := range idx.Roots() {
-		if !withinRoot(root.Path, path) {
-			continue
+	for _, root := range w.store.Current().Roots() {
+		if rootAccepts(root, path) {
+			return true
 		}
-		// Naming a single file must not make its siblings live-reloadable any
-		// more than it makes them servable.
-		if root.OnlyFile != "" {
-			return path == root.OnlyFile
-		}
-		rel, err := filepath.Rel(root.Path, path)
-		if err != nil {
+	}
+	return false // no configured root accepts it
+}
+
+// rootAccepts reports whether path lies in root, is root's one file when it
+// is an OnlyFile root, and has no excluded directory component below it.
+func rootAccepts(root Root, path string) bool {
+	if !withinRoot(root.Path, path) {
+		return false
+	}
+	// Naming a single file must not make its siblings live-reloadable any
+	// more than it makes them servable.
+	if root.OnlyFile != "" {
+		return path == root.OnlyFile
+	}
+	rel, err := filepath.Rel(root.Path, path)
+	if err != nil {
+		return false
+	}
+	// Directory components only — walkRoot excludes hidden DIRECTORIES,
+	// not a file that merely happens to start with a dot, so the final
+	// segment (the filename) is not subject to the rule.
+	segments := strings.Split(filepath.ToSlash(rel), "/")
+	for _, dir := range segments[:len(segments)-1] {
+		if excludedDir(dir) {
 			return false
 		}
-		// Directory components only — walkRoot excludes hidden DIRECTORIES,
-		// not a file that merely happens to start with a dot, so the final
-		// segment (the filename) is not subject to the rule.
-		segments := strings.Split(filepath.ToSlash(rel), "/")
-		for _, dir := range segments[:len(segments)-1] {
-			if excludedDir(dir) {
-				return false
-			}
-		}
-		return true
 	}
-	return false // outside every configured root
+	return true
 }
 
 // reload rebuilds the index and, on success, installs it. It notifies
@@ -791,9 +801,15 @@ func (w *Watcher) reload(docEvent bool) {
 // sameIndex reports whether b holds what a does as far as a reader can
 // tell: the same roots (by label, path, single file, kind and vault), the
 // same docs in the same order with every scanned field equal, the same
-// attachment set per root (what a vault wikilink can resolve to,
-// forgectl#904), and the same skipped paths. A root's pinned directory identity is not compared: a
-// root replaced by an identical tree serves the same pages.
+// attachments per root (what a vault wikilink can resolve to,
+// forgectl#904), and the same skipped paths. A root's pinned directory
+// identity is not compared: a root replaced by an identical tree serves
+// the same pages.
+//
+// Attachments compare by basename table, one entry per file, rather than by
+// the case-folded path set: removing a/Dup.png beside a/dup.png leaves the
+// folded set unchanged but turns an ambiguous [[dup.png]] into a hit
+// (forgectl#917).
 func sameIndex(a, b *Index) bool {
 	if len(a.roots) != len(b.roots) || len(a.docs) != len(b.docs) || !slices.Equal(a.skipped, b.skipped) {
 		return false
@@ -803,7 +819,7 @@ func sameIndex(a, b *Index) bool {
 		if x.Label != y.Label || x.Path != y.Path || x.OnlyFile != y.OnlyFile || x.Kind != y.Kind || x.VaultPath != y.VaultPath {
 			return false
 		}
-		if !maps.Equal(a.attachmentSet(x.Label), b.attachmentSet(y.Label)) {
+		if !maps.EqualFunc(a.attachmentsByName(x.Label), b.attachmentsByName(y.Label), slices.Equal[[]string]) {
 			return false
 		}
 	}

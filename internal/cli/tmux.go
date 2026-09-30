@@ -5,7 +5,6 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/tmux"
-	"github.com/cameronsjo/forgectl/internal/tui"
 )
 
 // tmuxAliases maps each canonical tmux verb to its aliases — the single
@@ -61,12 +60,10 @@ func newTmuxCmd(deps module.Deps, client *tmux.Client) *cobra.Command {
 		// threaded through construction.
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			noIcons, _ := cmd.Flags().GetBool("no-icons")
-			opts := tui.RunOptions{
-				Hub:         buildHub(cmd.Root(), configFilePresent()),
-				StartInTmux: true,
-				NoIcons:     noIcons,
-				Theme:       th,
-			}
+			opts := hubRunOptions(cmd.Context(), deps, cmd.Root(), client)
+			opts.StartInTmux = true
+			opts.NoIcons = noIcons
+			opts.Theme = th
 			return runAction(cmd.Context(), deps, cmd.Root(), client, opts)
 		},
 	}
