@@ -3,6 +3,7 @@ package pr
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // ReviewedStore is the local, offline reviewed-state authority for `forgectl
@@ -411,6 +414,22 @@ func (s *ReviewedStore) SyncKeysScoped(openKeys []string, activeHosts []string) 
 // (readReviewedFile follows the link for the same reason), and renaming over
 // the link would silently turn it into a plain file. A dangling link resolves
 // to the file it would create.
+//
+// THE KERNEL IS THE ARBITER, not the resolver. A load reads s.path through the
+// kernel, and any shape where a hand resolver disagrees with it (its
+// 40-symlinks-per-lookup cap counts directory links too, for one) would write
+// one file while every load read another, or read ELOOP and load empty, and
+// the next Mark would then overwrite the store: silent loss. So s.path is
+// stat'ed through the kernel before anything is written, and anything but
+// success or "does not exist yet" refuses. After the rename it is stat'ed
+// again, and must now be the very file just written (os.SameFile); if it is
+// not, persist says so rather than claiming the mark. A divergence can
+// therefore cost a loud refusal, never a silently lost mark.
+//
+// The rename is the commit point. A directory fsync that fails after it is
+// logged as a durability warning and the mark reports success, as the record
+// and audit-log writers do: the bytes are written, and a caller must not
+// print "failed to mark" for a mark that is on disk.
 func (s *ReviewedStore) persist() error {
 	if s.path == "" {
 		return errors.New("pr: reviewed store path unset")
@@ -418,7 +437,10 @@ func (s *ReviewedStore) persist() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
 	}
-	dest, err := resolveStoreTarget(s.path)
+	if _, err := os.Stat(s.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("pr: reviewed store path does not resolve; refusing to write it: %w", err)
+	}
+	dest, err := resolveStore(s.path)
 	if err != nil {
 		return err
 	}
@@ -434,23 +456,46 @@ func (s *ReviewedStore) persist() error {
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(dest, data); err != nil {
+	written, err := writeFileAtomic(dest, data)
+	if err != nil {
 		return err
 	}
-	return syncStoreDir(filepath.Dir(dest))
+	if serr := syncStoreDir(filepath.Dir(dest)); serr != nil {
+		slog.Warn("The pr-reviewed store is written; its durability could not be confirmed.",
+			"path", dest, "error", serr)
+	}
+	got, err := os.Stat(s.path)
+	if err != nil || !os.SameFile(got, written) {
+		if err == nil {
+			err = errStoreNotWritten
+		}
+		return fmt.Errorf("pr: reviewed store path does not resolve to the file just written (%s); "+
+			"the mark may not be visible: %w", termsafe.QuotePath(dest), err)
+	}
+	return nil
 }
+
+// errStoreNotWritten is persist's post-write refusal of a store path that
+// resolves, but to some file other than the one it wrote.
+var errStoreNotWritten = errors.New("it names a different file")
 
 // syncStoreDir fsyncs the store's directory after the rename, so the new name
 // is durable, as writeRepairLogAtomic does for the audit log. It is a var only
-// so a test can see it run.
+// so a test can see it run and make it fail.
 var syncStoreDir = osRecordFS{}.SyncDir
 
-// maxStoreLinkHops bounds resolveStoreTarget's walk of a dangling chain, as
-// the kernel bounds a lookup (Linux's MAXSYMLINKS is 40).
+// resolveStore is resolveStoreTarget, a var only so a test can make the
+// resolver disagree with the kernel and see persist's post-write check refuse.
+var resolveStore = resolveStoreTarget
+
+// maxStoreLinkHops is the kernel's cap on symlinks followed in one lookup
+// (Linux's MAXSYMLINKS). resolveStoreTarget follows at most that many final
+// links. Directory links along the way count toward the kernel's cap but not
+// this one, which is why persist's kernel stats, not this cap, arbitrate.
 const maxStoreLinkHops = 40
 
-// errStoreLinkLoop is resolveStoreTarget's refusal of a dangling link chain
-// longer than maxStoreLinkHops.
+// errStoreLinkLoop is resolveStoreTarget's refusal of a link chain longer than
+// maxStoreLinkHops.
 var errStoreLinkLoop = errors.New("too many levels of symbolic links")
 
 // resolveStoreTarget is the file a write through path would reach, resolved
@@ -461,22 +506,16 @@ var errStoreLinkLoop = errors.New("too many levels of symbolic links")
 // pr-reviewed.json -> ../shared/pr-reviewed.json, a lexical resolve writes
 // ~/.config/shared/... while every load reads ~/dotfiles/shared/...
 //
-// A path whose target exists is filepath.EvalSymlinks, which resolves every
-// component through the filesystem. Only a dangling chain, whose last target
-// does not exist yet, is walked here, one link at a time: each hop's DIRECTORY
-// part is resolved with EvalSymlinks before the hop's base name is looked at,
-// and a relative link target is appended raw (never Cleaned), so the next
-// hop's EvalSymlinks applies its ".." to the physical directory.
+// It walks the chain one final link at a time, existing target or dangling
+// alike: each hop's DIRECTORY part is resolved with filepath.EvalSymlinks
+// before the hop's base name is looked at, and a relative link target is
+// appended raw (never Cleaned), so the next hop's EvalSymlinks applies its
+// ".." to the physical directory. persist checks the result against the
+// kernel on both sides of the write.
 func resolveStoreTarget(path string) (string, error) {
-	resolved, err := filepath.EvalSymlinks(path)
-	if err == nil {
-		return resolved, nil
-	}
-	if !errors.Is(err, fs.ErrNotExist) {
-		return "", err
-	}
 	cur := path
-	for range maxStoreLinkHops {
+	// maxStoreLinkHops links, plus the lookup of the name the last one reaches.
+	for range maxStoreLinkHops + 1 {
 		rawDir, base := splitLastElem(cur)
 		if base == "" || base == "." || base == ".." {
 			// A link to a directory-shaped name; resolve the whole thing and
@@ -513,25 +552,35 @@ func resolveStoreTarget(path string) (string, error) {
 }
 
 // splitLastElem splits p at its last separator without cleaning either half
-// (filepath.Dir Cleans, which would collapse "link/.." by name). A trailing
-// separator yields an empty base.
+// (filepath.Dir Cleans, which would collapse "link/.." by name). A volume name
+// (Windows "C:" or a UNC share) stays with the directory half, and a separator
+// directly after it keeps the directory rooted. A trailing separator yields an
+// empty base.
 func splitLastElem(p string) (dir, base string) {
-	i := strings.LastIndexByte(p, filepath.Separator)
-	if i < 0 {
-		return ".", p
+	vol := filepath.VolumeName(p)
+	rest := p[len(vol):]
+	i := len(rest) - 1
+	for i >= 0 && !os.IsPathSeparator(rest[i]) {
+		i--
 	}
-	if i == 0 {
-		return string(filepath.Separator), p[1:]
+	switch {
+	case i < 0 && vol == "":
+		return ".", rest
+	case i < 0:
+		return vol, rest
+	case i == 0:
+		return vol + rest[:1], rest[1:]
 	}
-	return p[:i], p[i+1:]
+	return vol + rest[:i], rest[i+1:]
 }
 
 // writeFileAtomic writes data to a new temp file beside dest and renames it
-// over dest. The temp file is removed on any failure before the rename.
-func writeFileAtomic(dest string, data []byte) (err error) {
+// over dest, returning the written file's own Fstat for persist's post-write
+// identity check. The temp file is removed on any failure before the rename.
+func writeFileAtomic(dest string, data []byte) (written fs.FileInfo, err error) {
 	tmp, err := os.CreateTemp(filepath.Dir(dest), "."+filepath.Base(dest)+".tmp-*")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	tmpName := tmp.Name()
 	defer func() {
@@ -539,16 +588,23 @@ func writeFileAtomic(dest string, data []byte) (err error) {
 			_ = os.Remove(tmpName)
 		}
 	}()
-	if _, werr := tmp.Write(data); werr != nil {
+	if _, err = tmp.Write(data); err != nil {
 		_ = tmp.Close()
-		return werr
+		return nil, err
 	}
-	if serr := tmp.Sync(); serr != nil {
+	if err = tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		return serr
+		return nil, err
 	}
-	if cerr := tmp.Close(); cerr != nil {
-		return cerr
+	if written, err = tmp.Stat(); err != nil {
+		_ = tmp.Close()
+		return nil, err
 	}
-	return os.Rename(tmpName, dest)
+	if err = tmp.Close(); err != nil {
+		return nil, err
+	}
+	if err = os.Rename(tmpName, dest); err != nil {
+		return nil, err
+	}
+	return written, nil
 }

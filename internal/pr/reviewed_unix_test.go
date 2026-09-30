@@ -3,11 +3,15 @@
 package pr
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -311,5 +315,170 @@ func TestReviewedPersist_SyncsTheDirectoryAfterTheRename(t *testing.T) {
 	}
 	if len(synced) != 1 || synced[0] != want {
 		t.Errorf("synced %v, want exactly the store's dir %s", synced, want)
+	}
+}
+
+// linkChain builds, in dir, the store link plus n-1 more: pr-reviewed.json ->
+// l1 -> ... -> l(n-1) -> final.json, n symlinks in all (the review harness's
+// "plain chain"). It returns the store path and final.json's path.
+func linkChain(t *testing.T, dir string, n int) (store, final string) {
+	t.Helper()
+	prev := filepath.Join(dir, "pr-reviewed.json")
+	for i := 1; i < n; i++ {
+		name := fmt.Sprintf("l%d", i)
+		if err := os.Symlink(name, prev); err != nil {
+			t.Fatal(err)
+		}
+		prev = filepath.Join(dir, name)
+	}
+	if err := os.Symlink("final.json", prev); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(dir, "pr-reviewed.json"), filepath.Join(dir, "final.json")
+}
+
+// The kernel follows at most 40 symlinks in one lookup, so every load of a
+// 41-link chain reads ELOOP and loads empty. A Mark that wrote anyway would
+// overwrite the store with one entry, and every later load would still read
+// nothing: silent loss. It must refuse, and leave the store's bytes alone.
+//
+// Mutation that turns it red: none alone. The kernel pre-stat and the
+// resolver's own 40-link cap both refuse this shape; it pins that the loud
+// refusal holds as the resolver changes.
+func TestReviewedPersist_AnExistingChainPastTheKernelCapRefuses(t *testing.T) {
+	dir := t.TempDir()
+	store, final := linkChain(t, dir, 41)
+	body := []byte(`{"github.com/owner/repo#1":"2026-09-01T00:00:00Z"}`)
+	if err := os.WriteFile(final, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(store); !errors.Is(err, syscall.ELOOP) {
+		t.Fatalf("fixture: the kernel's stat of a 41-link chain = %v, want ELOOP", err)
+	}
+	if err := LoadReviewed(store).Mark(testRef(7)); err == nil {
+		t.Fatal("Mark through a 41-link chain succeeded; every load of it reads ELOOP")
+	}
+	got, err := os.ReadFile(filepath.Clean(final))
+	if err != nil || !bytes.Equal(got, body) {
+		t.Errorf("the store behind the chain changed: %q, %v", got, err)
+	}
+}
+
+// Each of 21 hops goes through a directory link back to r itself, so the
+// kernel counts 42 links and a load reads ELOOP, while the resolver's
+// final-link count is only 21. The kernel pre-stat refuses before anything
+// is written.
+//
+// Mutation that turns it red: drop persist's kernel pre-stat. The resolver
+// then writes r/m21, and although the post-write stat still refuses, the
+// write already happened.
+func TestReviewedPersist_ADanglingChainThroughDirLinksPastTheCapRefusesUnwritten(t *testing.T) {
+	r := t.TempDir()
+	const n = 21
+	for i := 1; i <= n; i++ {
+		if err := os.Symlink(r, filepath.Join(r, fmt.Sprintf("d%d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := filepath.Join(r, "pr-reviewed.json")
+	if err := os.Symlink("d1/m1", store); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i < n; i++ {
+		if err := os.Symlink(fmt.Sprintf("d%d/m%d", i+1, i+1), filepath.Join(r, fmt.Sprintf("m%d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := os.Stat(store); !errors.Is(err, syscall.ELOOP) {
+		t.Fatalf("fixture: the kernel's stat of a %d-link lookup = %v, want ELOOP", 2*n, err)
+	}
+	before, err := os.ReadDir(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := LoadReviewed(store).Mark(testRef(7)); err == nil {
+		t.Fatal("Mark through a chain the kernel cannot resolve succeeded")
+	}
+	after, err := os.ReadDir(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("the refused Mark wrote into the store's dir: %d entries before, %d after", len(before), len(after))
+	}
+}
+
+// A dangling chain of exactly 40 links is inside the kernel's cap: its lookup
+// reaches the missing final name, so a write there is what every later load
+// reads. It must write, and load back.
+//
+// Mutation that turns it red: cap resolveStoreTarget's walk at
+// maxStoreLinkHops iterations instead of maxStoreLinkHops+1 (the 40th link's
+// target is never looked up, and Mark refuses a store the kernel resolves).
+func TestReviewedPersist_ADanglingChainAtTheKernelCapWritesAndLoadsBack(t *testing.T) {
+	store, final := linkChain(t, t.TempDir(), 40)
+	if _, err := os.Stat(store); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("fixture: the kernel's stat of a dangling 40-link chain = %v, want ENOENT", err)
+	}
+	if err := LoadReviewed(store).Mark(testRef(7)); err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+	if got := len(LoadReviewed(store).at); got != 1 {
+		t.Errorf("a load through the chain sees %d marks, want 1", got)
+	}
+	if _, err := os.Stat(final); err != nil {
+		t.Errorf("the chain's final target was not written: %v", err)
+	}
+}
+
+// A resolver that disagrees with the kernel, simulated through the
+// resolveStore seam, writes a file the store path does not name. The
+// post-write kernel stat must catch it and refuse, rather than report a mark
+// no load will see.
+//
+// Mutation that turns it red: drop persist's post-write os.Stat/SameFile
+// check.
+func TestReviewedPersist_AResolverDivergenceIsReportedNotClaimed(t *testing.T) {
+	dir := t.TempDir()
+	store := writeReviewedStore(t, dir, 1)
+	original := resolveStore
+	t.Cleanup(func() { resolveStore = original })
+	resolveStore = func(string) (string, error) { return filepath.Join(dir, "elsewhere.json"), nil }
+
+	err := LoadReviewed(store).Mark(testRef(7))
+	if !errors.Is(err, errStoreNotWritten) {
+		t.Fatalf("Mark err = %v, want errStoreNotWritten", err)
+	}
+}
+
+// The rename is the commit point: a directory fsync that fails after it must
+// not turn a mark that is on disk into a reported failure.
+//
+// Mutation that turns it red: return the syncStoreDir error from persist
+// again (Mark fails although the mark is written).
+func TestReviewedPersist_AFailedDirSyncStillMarksWithAWarning(t *testing.T) {
+	dir := t.TempDir()
+	store := writeReviewedStore(t, dir, 1)
+	original := syncStoreDir
+	t.Cleanup(func() { syncStoreDir = original })
+	syncStoreDir = func(string) error { return errors.New("injected dir fsync failure") }
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	if err := LoadReviewed(store).Mark(testRef(7)); err != nil {
+		t.Fatalf("Mark = %v, want success: the mark is on disk", err)
+	}
+	if got := len(LoadReviewed(store).at); got != 2 {
+		t.Errorf("store holds %d marks, want 2", got)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "durability could not be confirmed") || !strings.Contains(out, "injected dir fsync failure") {
+		t.Errorf("no durability warning logged; logs:\n%s", out)
+	}
+	if strings.Contains(out, "Failed to mark reviewed") {
+		t.Errorf("the mark was logged as failed; logs:\n%s", out)
 	}
 }
