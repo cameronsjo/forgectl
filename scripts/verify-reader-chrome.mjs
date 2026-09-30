@@ -41,7 +41,14 @@
 //     banner paints over none of them;
 //   - with the mermaid and KaTeX bundles blocked, a doc carrying
 //     <div id="ForgectlMermaid"> and <div id="ForgectlMath"> still gets an
-//     in-place live-reload swap.
+//     in-place live-reload swap;
+//   - with both bundles blocked, a doc whose headings take the ids "mermaid"
+//     and "katex" (so those globals are the heading elements) still makes
+//     each init script stop at its bundle gate, with no page error; with
+//     the bundles loaded, the same doc renders its diagram and formula
+//     (forgectl#772);
+//   - data-forgectl-notice and data-forgectl-props forged inside a diagram
+//     are scrubbed by the next task boundary, like data-fc (forgectl#772).
 //
 // Usage: node scripts/verify-reader-chrome.mjs [path/to/forgectl]
 //   Without a path it builds one with `go build` into a scratch dir.
@@ -177,6 +184,11 @@ const clobber = (marker) => `# Clobber\n\n<div id="ForgectlMermaid">m</div>\n\n<
   `\`\`\`mermaid\nflowchart LR\n  A --> B\n\`\`\`\n\n$x^2$\n\n${marker}\n`;
 writeFileSync(clobberPath, clobber('CLOBBER-FIRST'));
 
+// Headings slugged "mermaid" and "katex" name the bundles' globals, so with
+// a bundle blocked the global is the heading element (forgectl#772).
+writeFileSync(join(root, 'heading-ids.md'), '# Mermaid\n\n## Katex\n\n' +
+  '```mermaid\nflowchart LR\n  A --> B\n```\n\n$$\nx^2\n$$\n');
+
 const port = await freePort();
 const base = `http://127.0.0.1:${port}`;
 server = spawn(bin, ['docs', 'serve', '--addr', `127.0.0.1:${port}`, root], { stdio: 'ignore' });
@@ -283,22 +295,28 @@ try {
   // the diagram. A MessageChannel message is a task, so its handler samples
   // at the first task boundary after the forgery, which is the earliest
   // point an event or network callback could see it. A scrub that ran only
-  // when mermaid.run resolved would leave both up here.
+  // when mermaid.run resolved would leave both up here. The server's other
+  // two chrome markers are forged the same way (forgectl#772).
   const timing = await page.evaluate(() => new Promise((resolve) => {
+    const attrs = ['data-fc', 'data-forgectl-notice', 'data-forgectl-props'];
     const pre = document.querySelector('[data-fc="doc-body"] pre.mermaid');
     const g = pre && pre.querySelector('svg g');
     if (!g) { resolve(null); return; }
-    const span = document.createElement('span');
-    span.setAttribute('data-fc', 'outline');
-    pre.appendChild(span);
-    g.setAttribute('data-fc', 'statusbar');
-    const sync = span.hasAttribute('data-fc') && g.hasAttribute('data-fc');
+    const spans = attrs.map((a) => {
+      const span = document.createElement('span');
+      span.setAttribute(a, a === 'data-fc' ? 'outline' : 'forged');
+      pre.appendChild(span);
+      return span;
+    });
+    attrs.forEach((a) => g.setAttribute(a, a === 'data-fc' ? 'statusbar' : 'forged'));
+    const sync = attrs.every((a, i) => spans[i].hasAttribute(a) && g.hasAttribute(a));
     const ch = new MessageChannel();
     ch.port1.onmessage = () => {
-      const out = { sync, inserted: span.hasAttribute('data-fc'), attribute: g.hasAttribute('data-fc') };
-      span.remove();
-      g.removeAttribute('data-fc');
-      resolve(out);
+      const inserted = attrs.filter((a, i) => spans[i].hasAttribute(a));
+      const attribute = attrs.filter((a) => g.hasAttribute(a));
+      spans.forEach((span) => span.remove());
+      attrs.forEach((a) => g.removeAttribute(a));
+      resolve({ sync, inserted: inserted.length ? inserted : null, attribute: attribute.length ? attribute : null });
     };
     ch.port2.postMessage(0);
   }));
@@ -591,6 +609,49 @@ try {
   await blocked.close();
 } catch (err) {
   problems.push(`clobbering: ${String(err).split('\n')[0]}`);
+}
+
+// The bundle gates test each bundle's entry point, not its global
+// (forgectl#772). A heading slugged "mermaid" or "katex" is that global when
+// the bundle is blocked, and typeof it is "object", so a typeof-undefined
+// gate let each init script run against a heading and throw.
+try {
+  const gated = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+  const errors = [];
+  const warnings = [];
+  gated.on('pageerror', (e) => errors.push(String(e).split('\n')[0]));
+  gated.on('console', (m) => { if (m.type() === 'warning') warnings.push(m.text()); });
+  await gated.route(/\/assets\/(mermaid\.min\.js|katex\/katex\.min\.js)$/, (r) => r.abort());
+  await gated.goto(`${base}/doc/docs/heading-ids.md`, { waitUntil: 'load', timeout: 30000 });
+  await gated.waitForTimeout(500);
+  const setup = await gated.evaluate(() => ({
+    mermaidIsHeading: window.mermaid instanceof HTMLHeadingElement,
+    katexIsHeading: window.katex instanceof HTMLHeadingElement,
+  }));
+  if (!setup.mermaidIsHeading || !setup.katexIsHeading) {
+    problems.push(`bundle gate: fixture ${JSON.stringify(setup)}; the headings do not clobber the globals, so the check proves nothing`);
+  } else {
+    if (!warnings.some((w) => w.includes('mermaid bundle unavailable'))) problems.push('bundle gate: mermaid-init.js ran past its gate with the bundle blocked and a heading id="mermaid"');
+    if (!warnings.some((w) => w.includes('KaTeX bundle unavailable'))) problems.push('bundle gate: math-init.js ran past its gate with the bundle blocked and a heading id="katex"');
+    if (errors.length > 0) problems.push(`bundle gate: page errors: ${errors.join('; ')}`);
+  }
+  await gated.close();
+
+  // CONTROL: the entry-point gates still pass a real bundle, and the same
+  // doc renders its diagram and its formula.
+  const loaded = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+  await loaded.goto(`${base}/doc/docs/heading-ids.md`, { waitUntil: 'load', timeout: 30000 });
+  try {
+    await loaded.waitForFunction(() => {
+      const body = document.querySelector('[data-fc="doc-body"]');
+      return !!(body.querySelector('pre.mermaid svg') && body.querySelector('.math .katex'));
+    }, null, { timeout: 20000 });
+  } catch {
+    problems.push('bundle gate control: with the bundles loaded, the doc never rendered its diagram and formula');
+  }
+  await loaded.close();
+} catch (err) {
+  problems.push(`bundle gate: ${String(err).split('\n')[0]}`);
 }
 
 await browser.close();

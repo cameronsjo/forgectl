@@ -123,7 +123,7 @@ const maxHeldDirs = 64
 // Index.Open, which opens through the same Root and verifies the file it
 // opened is the one this walk approved.
 func ResolveInRoot(root, rel string) (string, error) {
-	r, err := os.OpenRoot(root)
+	r, err := openDirRoot(root)
 	if err != nil {
 		return "", ErrOutsideRoot
 	}
