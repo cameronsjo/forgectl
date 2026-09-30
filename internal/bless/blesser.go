@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // KeyLabel is the compiled-in label for this machine's blessing key — the one
@@ -140,7 +141,7 @@ func NewHelperBlesser(ctx context.Context, run exec.Runner) (*HelperBlesser, err
 	}
 	path := filepath.Join(filepath.Dir(self), helperName)
 	if _, err := os.Stat(path); err != nil {
-		return nil, fmt.Errorf("%w: %s: %v", ErrNoBlesser, path, err)
+		return nil, fmt.Errorf("%w: %s: %v", ErrNoBlesser, termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	h := &HelperBlesser{run: run, path: path}
 	// Fail fast if the helper is already untrusted at construction. The same check
@@ -170,7 +171,7 @@ func (h *HelperBlesser) verifyTrust(ctx context.Context) error {
 	// escaping surprises for this input class.
 	req := fmt.Sprintf("anchor apple generic and certificate leaf[subject.OU] = %q", ExpectedTeamID)
 	if _, err := h.run.Run(ctx, "/usr/bin/codesign", "--verify", "--strict", "-R", req, h.path); err != nil {
-		return fmt.Errorf("%w: %s: %v", ErrHelperUntrusted, h.path, err)
+		return fmt.Errorf("%w: %s: %v", ErrHelperUntrusted, termsafe.QuotePath(h.path), termsafe.Error(err))
 	}
 	return nil
 }

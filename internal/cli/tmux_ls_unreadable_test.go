@@ -97,3 +97,43 @@ func TestTmuxTreeNotesUnreadableRows(t *testing.T) {
 		}
 	}
 }
+
+// TestTmuxWindowsNotesUnreadableRows is forgectl#857: `tmux windows` says on
+// stderr, in both modes, that a window row could not be read, as `tmux tree`
+// does, instead of listing one window fewer with no sign of it. The --json
+// array keeps its shape.
+//
+// Mutation that turns it red: call DisplayWindows (dropping the count) or
+// drop the writeUnreadableNote call in tmux_window.go.
+func TestTmuxWindowsNotesUnreadableRows(t *testing.T) {
+	window := func(id, name string) string {
+		return strings.Join([]string{"123", "456", id, "$0", "work", "0", name, "1", "1"}, "\x1f")
+	}
+	fake := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		if len(args) > 0 && args[0] == "list-windows" {
+			return window("@0", "ok") + "\n" + window("@1", "a\x1fb"), nil
+		}
+		return "", nil
+	}}
+	for _, args := range [][]string{nil, {"--json"}} {
+		cmd := newTmuxWindowsCmd(tmux.New(fake))
+		var stdout, stderr bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs(args)
+		if err := cmd.ExecuteContext(context.Background()); err != nil {
+			t.Fatalf("tmux windows %v: %v", args, err)
+		}
+		if !strings.Contains(stderr.String(), "1 window(s) could not be read") {
+			t.Errorf("tmux windows %v stderr = %q, want the unreadable-window note", args, stderr.String())
+		}
+		if len(args) > 0 {
+			var rows []map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil || len(rows) != 1 {
+				t.Errorf("tmux windows --json = %q (%v), want a one-row array", stdout.String(), err)
+			}
+		} else if !strings.Contains(stdout.String(), "ok") {
+			t.Errorf("tmux windows = %q, want the readable window", stdout.String())
+		}
+	}
+}

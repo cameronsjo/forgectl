@@ -532,7 +532,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	}
 
 	if err := os.Chdir(s.Cwd); err != nil {
-		return WithExitCode(fmt.Errorf("enter %s: %s", safeTerm(s.Cwd), safeTerm(err.Error())), 1)
+		return WithExitCode(fmt.Errorf("enter %s: %w", termsafe.QuotePath(s.Cwd), termsafe.Error(err)), 1)
 	}
 
 	// Same layering BuildInvocation does: removals hit the inherited snapshot
@@ -541,7 +541,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 		launch.StripEnv(os.Environ(), unset),
 		launch.MergeMaps(injected, profile.Env),
 	)
-	fmt.Fprintf(errOut, "forgectl: resuming %s in %s\n", safeTerm(displayName(s)), safeTerm(s.Cwd))
+	_, _ = fmt.Fprintf(errOut, "forgectl: resuming %s in %s\n", safeTerm(displayName(s)), termsafe.QuotePath(s.Cwd))
 	slog.Debug("Preparing to exec claude for a resume.", "session", s.ID, "cwd", s.Cwd, "fork", fork)
 
 	// After the chdir, so a failed chdir records nothing, and after the task
