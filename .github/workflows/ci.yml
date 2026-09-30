@@ -109,6 +109,15 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Vet (GOOS=windows)
+        # Windows is not a release target, but the tree is kept compiling
+        # there (#803, #810), and a unix-only syscall in an untagged test file
+        # breaks that with no other job noticing. Vet type-checks test files
+        # too, which `go build` does not.
+        env:
+          GOOS: windows
+        run: go vet ./...
+
       - name: Test
         # Each FORGECTL_REQUIRE_* turns a tool-absent skip into a failure: on a
         # runner where these tests are meant to run, a skip and a pass must not

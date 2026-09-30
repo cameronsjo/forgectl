@@ -505,7 +505,7 @@ func printPlan(out io.Writer, plan workflow.Plan) {
 		printField(out, "repo", s.Repo)
 		printField(out, "ref", s.Ref)
 		if len(s.Globs) > 0 {
-			fmt.Fprintf(out, "     globs: %s\n", termsafe.SafeLine(strings.Join(s.Globs, ", ")))
+			_, _ = fmt.Fprintf(out, "     globs: %s\n", strings.Join(quoteEach(s.Globs), ", "))
 		}
 		printField(out, "skill", s.Skill)
 		printField(out, "posture", s.Posture)
@@ -514,9 +514,25 @@ func printPlan(out io.Writer, plan workflow.Plan) {
 		printField(out, "to", s.To)
 		printField(out, "cmd", s.Cmd)
 		if len(s.Args) > 0 {
-			fmt.Fprintf(out, "     args: %s\n", termsafe.SafeLine(strings.Join(s.Args, " ")))
+			_, _ = fmt.Fprintf(out, "     args: %s\n", strings.Join(quoteEach(s.Args), " "))
 		}
 	}
+}
+
+// quoteEach quotes every element of a list field for the --dry-run review
+// (#816): args, joined with spaces, and globs, joined with ", ". Joining the
+// raw elements made ["a b"] and ["a","b"] print identically (and ["a, b"]
+// and ["a","b"] for globs), so a hostile file could show the reviewer a
+// different split from the one it runs. Each element is quoted with
+// QuoteText, which also escapes every control and format rune, and is NOT
+// capped: the review prints the file in full (#782), and a cut would hide
+// exactly the tail of what the file asks to be trusted with.
+func quoteEach(items []string) []string {
+	quoted := make([]string, len(items))
+	for i, item := range items {
+		quoted[i] = termsafe.QuoteText(item)
+	}
+	return quoted
 }
 
 // printField writes one non-empty plan-step field as an indented line. The

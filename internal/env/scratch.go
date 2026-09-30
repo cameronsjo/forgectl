@@ -92,11 +92,24 @@ func RemoveScratchDir(dir string) error {
 		// the O_EXCL create never overwrites an existing file either way.
 		if info, err := os.Lstat(filepath.Clean(dir)); err != nil {
 			return nil, err
-		} else if info.Mode().Type() != fs.ModeDir {
+		} else if !scratchDirIntact(info) {
 			return nil, errScratchDirSwapped
 		}
 		return os.OpenFile(filepath.Clean(ignore), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304/G703: inside a scratch directory this process created
 	})
+}
+
+// scratchDirIntact reports whether an Lstat of the scratch directory's path
+// still shows a real directory. It asks IsDir, not whether the type is
+// exactly ModeDir (#810): on Windows, Go 1.23+ reports a directory that is a
+// non-surrogate reparse point (a OneDrive or cloud-filter placeholder) as
+// ModeDir|ModeIrregular, and an exact match refused it, leaving it without its
+// .gitignore. The swap protection is unchanged, because Lstat never sets
+// ModeDir on a name surrogate: a symlink reads as ModeSymlink, and a junction
+// or mount point as ModeIrregular alone (os/types_windows.go), so both still
+// fail IsDir, as a unix symlink does.
+func scratchDirIntact(info fs.FileInfo) bool {
+	return info.IsDir()
 }
 
 // rmdirScratch removes an emptied scratch directory by path. It is a variable
