@@ -305,6 +305,21 @@ func WriteTarget(target Target, data []byte) error {
 	return err
 }
 
+// WriteTargetTracked is WriteTarget, reporting the absolute path of the
+// scratch directory the write creates beside the target to track as soon as
+// it exists, before anything is written into it. internal/sops registers that
+// directory with its signal guard, so a signal during a restore removes it
+// rather than stranding it (cameronsjo/forgectl#751). An error from track
+// abandons the write and removes the directory; track must not block on the
+// write itself.
+func WriteTargetTracked(target Target, data []byte, track func(scratchDir string) error) error {
+	if err := target.validate(); err != nil {
+		return err
+	}
+	_, err := writeAtomicTracked(target, data, track)
+	return err
+}
+
 // WithFileLock runs fn while holding the target's exclusive lock.
 //
 // Exported for internal/sops, which holds it across an entire sops subprocess

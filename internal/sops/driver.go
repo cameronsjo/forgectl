@@ -205,7 +205,7 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 		// still verified below. Reporting it as an error would fail every
 		// idempotent re-run.
 	default:
-		if restoreErr := work.restore(target); restoreErr != nil {
+		if restoreErr := work.restore(target, guard.trackScratch); restoreErr != nil {
 			return OutcomeUnspecified, restoreFailed(errors.New("sops refused the edit"), restoreErr, target, guard.keepBackup())
 		}
 		guard.settle()
@@ -234,7 +234,7 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 
 	outcome, err := c.verify(ctx, sopsBin, target, segments, value, work)
 	if err != nil {
-		if restoreErr := work.restore(target); restoreErr != nil {
+		if restoreErr := work.restore(target, guard.trackScratch); restoreErr != nil {
 			return OutcomeUnspecified, restoreFailed(err, restoreErr, target, guard.keepBackup())
 		}
 		guard.settle()
@@ -562,12 +562,17 @@ func (w *workDir) readEditorError() string {
 // restore puts the backup back and PROVES it, by digest, before returning
 // success. A restore that reports success without checking is the one thing
 // worse than no restore at all.
-func (w *workDir) restore(target env.Target) error {
+//
+// The write's own scratch directory beside the target goes to track as soon
+// as it exists, so the signal guard removes it if a signal lands mid-restore
+// (cameronsjo/forgectl#751). Untracked, the handler terminated the process
+// with it on disk, and the next write refused on it.
+func (w *workDir) restore(target env.Target, track func(scratchDir string) error) error {
 	backup, err := os.ReadFile(w.backup)
 	if err != nil {
 		return errors.New("the backup is unreadable")
 	}
-	if err := env.WriteTarget(target, backup); err != nil {
+	if err := env.WriteTargetTracked(target, backup, track); err != nil {
 		return err
 	}
 	after, err := env.ReadTarget(target)

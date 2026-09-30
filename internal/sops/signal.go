@@ -4,8 +4,11 @@ import (
 	"errors"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
+
+	"github.com/cameronsjo/forgectl/internal/env"
 )
 
 // # Why a scoped handler, and not a cancelled context
@@ -89,6 +92,10 @@ type plaintextGuard struct {
 	mu    sync.Mutex
 	work  *workDir
 	fired bool
+	// scratch holds the scratch directories a restore's atomic write created
+	// beside the target (trackScratch). finish removes whatever of them is
+	// still there.
+	scratch []string
 	// mutating is true while the target may differ from the backup: from just
 	// before the sops edit is launched until settle. A signal inside that span
 	// keeps the ciphertext backup.
@@ -168,6 +175,20 @@ func (g *plaintextGuard) track(create func() (*workDir, error)) (*workDir, error
 	}
 	g.work = w
 	return w, nil
+}
+
+// trackScratch records a scratch directory that a restore's atomic write has
+// just created, under the guard's lock, so a signal from then on removes it.
+// A signal that already fired refuses it, and the write abandons itself and
+// removes the directory. It is the track callback of env.WriteTargetTracked.
+func (g *plaintextGuard) trackScratch(dir string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.fired {
+		return errInterrupted
+	}
+	g.scratch = append(g.scratch, dir)
+	return nil
 }
 
 // beginMutation opens the span in which the target may differ from the
@@ -262,6 +283,9 @@ const (
 // expose them. It returns where the backup was kept, or "".
 func (g *plaintextGuard) finish(mode finishMode) string {
 	g.once.Do(func() {
+		// Last, on every path out of this function: the restore's scratch
+		// holds ciphertext at most, so it waits behind the plaintext.
+		defer g.removeRestoreScratch()
 		if g.work == nil {
 			return
 		}
@@ -283,6 +307,34 @@ func (g *plaintextGuard) finish(mode finishMode) string {
 		}
 	})
 	return g.kept
+}
+
+// removeRestoreScratch removes every tracked restore scratch directory still
+// on disk: its entries, then the .gitignore and the directory by the scratch
+// teardown rule (env.RemoveScratchDir). On the signal path the restore's write
+// is still running, so it retries on the same bound as the work directory's
+// removal. Once the directory is gone, the write, which works through the
+// directory's descriptor, can no longer create anything in it. A normal
+// return finds the directory already removed by the write itself.
+func (g *plaintextGuard) removeRestoreScratch() {
+	for _, dir := range g.scratch {
+		for range cleanupAttempts {
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				break
+			}
+			for _, e := range entries {
+				if e.Name() == env.ScratchIgnoreName && e.Type().IsRegular() {
+					continue
+				}
+				_ = os.RemoveAll(filepath.Join(dir, e.Name()))
+			}
+			_ = env.RemoveScratchDir(dir)
+			if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+				break
+			}
+		}
+	}
 }
 
 // pruneToBackup prunes the work directory down to its backup, retrying on the

@@ -7,6 +7,7 @@ package env
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -94,6 +95,14 @@ var scratchWritten = func(string) {}
 // Every error here carries paths only — data is never interpolated into any
 // error string.
 func writeAtomic(target Target, data []byte) (tightened bool, err error) {
+	return writeAtomicTracked(target, data, nil)
+}
+
+// writeAtomicTracked is writeAtomic, reporting the scratch directory's
+// absolute path to track (when non-nil) as soon as the directory exists and
+// before anything is written into it. An error from track abandons the write:
+// the directory is removed and the error returned, wrapped.
+func writeAtomicTracked(target Target, data []byte, track func(scratchDir string) error) (tightened bool, err error) {
 	priorMode, _, hadPrior, statErr := target.dir.lstat(target.base)
 	if statErr != nil {
 		return false, fmt.Errorf("stat %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(statErr))
@@ -102,6 +111,12 @@ func writeAtomic(target Target, data []byte) (tightened bool, err error) {
 	scratch, scratchName, err := target.dir.mkScratchDir(target.envScratchDirPrefix())
 	if err != nil {
 		return false, fmt.Errorf("create a scratch directory beside %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(err))
+	}
+	if track != nil {
+		if err := track(filepath.Join(filepath.Dir(target.Abs()), scratchName)); err != nil {
+			_ = target.dir.removeScratchDir(scratch, scratchName)
+			return false, fmt.Errorf("write %s: %w", termsafe.QuotePath(target.Rel()), err)
+		}
 	}
 
 	tmp, tmpName, err := scratch.createTemp(scratchTempPrefix)
