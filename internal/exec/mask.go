@@ -349,8 +349,9 @@ func (b bitset) set(from, to int) {
 // whole value is dropped too. It works on the raw bytes, before masking,
 // so no replacement text can shift where a fragment ends. Every drop removes
 // at least one byte, so the loop ends. A coincidental match (the stream
-// happens to start with the last byte of some value) only drops a few more
-// bytes of a tail that is already cut, which is harmless.
+// happens to start with the last byte of some value, or with a whole value)
+// only drops more of a tail that is already cut, which is harmless; a leading
+// run of a repeated short value is dropped whole, because the loop repeats.
 func (m argMask) straddleLen(s string) int {
 	total := 0
 	for {

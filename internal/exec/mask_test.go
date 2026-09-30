@@ -541,14 +541,6 @@ func TestEachMatch_FindsEveryOverlappingOccurrence(t *testing.T) {
 	}
 }
 
-// TestMaskedTail_CutInsideAnEntryKeyHidesTheGluedValue pins #708 item 4.
-// LONGKEYNAME=ab is long enough to be masked anywhere, but a cut inside its
-// key leaves "EYNAME=ab" followed by "cd": the value is whole, yet glued to a
-// word byte, so the whole-word rule for a short value does not fire and "ab"
-// used to show. straddleLen now drops an entry suffix holding the whole value.
-//
-// Mutation: delete the entries loop from straddleLen and the tail keeps
-// "EYNAME=abcd".
 // Every cut position through a glued entry, including the one that lands
 // exactly after '=', must keep the short value out of the tail.
 func TestMaskedTail_NoCutPositionExposesTheGluedValue(t *testing.T) {
@@ -563,6 +555,14 @@ func TestMaskedTail_NoCutPositionExposesTheGluedValue(t *testing.T) {
 	}
 }
 
+// TestMaskedTail_CutInsideAnEntryKeyHidesTheGluedValue pins #708 item 4.
+// LONGKEYNAME=ab is long enough to be masked anywhere, but a cut inside its
+// key leaves "EYNAME=ab" followed by "cd": the value is whole, yet glued to a
+// word byte, so the whole-word rule for a short value does not fire and "ab"
+// used to show. straddleLen now drops an entry suffix holding the whole value.
+//
+// Mutation: delete the entries loop from straddleLen and the tail keeps
+// "EYNAME=abcd".
 func TestMaskedTail_CutInsideAnEntryKeyHidesTheGluedValue(t *testing.T) {
 	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"LONGKEYNAME=ab"}))
 	tb := &tailBuffer{limit: 16}
