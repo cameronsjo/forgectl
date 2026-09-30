@@ -380,7 +380,7 @@ func TestResumeHooksInstallWarnings(t *testing.T) {
 	if !strings.Contains(out, "not a symlink into a versions directory") {
 		t.Errorf("no warning for a claude that is not a versions link:\n%s", out)
 	}
-	if !strings.Contains(out, "/opt/tools/bin is writable by other users") {
+	if !strings.Contains(out, "/opt/tools/bin can be changed by another user") {
 		t.Errorf("no warning for a world-writable baked dir:\n%s", out)
 	}
 	if !strings.Contains(out, "watching claude at") {

@@ -499,7 +499,7 @@ func warnWritable(warn io.Writer, paths []string) {
 		}
 		owner, known := fileOwner(fi)
 		if writableByOthers(fi.Mode(), owner, hooksUID(), known) {
-			_, _ = fmt.Fprintln(warn, safeTerm("forgectl: WARNING: "+p+" is writable by other users and not owned by you; the watcher runs what is there unattended"))
+			_, _ = fmt.Fprintln(warn, safeTerm("forgectl: WARNING: "+p+" can be changed by another user (group- or other-writable, or owned by someone else); the watcher runs what is there unattended"))
 		}
 	}
 }
