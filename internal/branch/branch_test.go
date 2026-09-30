@@ -786,3 +786,40 @@ func TestPrune_RemoteDelete_VerifiesAgainstThePushURL(t *testing.T) {
 		t.Fatalf("Err = %v, want the still-exists verdict from the fork", results[0].Err)
 	}
 }
+
+// TestPrune_RemoteDelete_SeveralPushURLsCannotVerify: `git push --delete`
+// pushes to every push URL, and get-url without --all prints only the first.
+// Verification reads all of them (--all) and refuses more than one rather
+// than checking one repository and leaving the rest unverified.
+func TestPrune_RemoteDelete_SeveralPushURLsCannotVerify(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			switch {
+			case isGetURL(name, args) && contains(args, "--all"):
+				return "git@github.com:a/tools.git\ngit@github.com:b/tools.git\n", nil
+			case isGetURL(name, args):
+				// get-url --push without --all: the first URL only, exit 0.
+				return "git@github.com:a/tools.git", nil
+			case name == "gh" && len(args) > 0 && args[0] == "api":
+				return "", &exec.CommandError{Name: "gh", Args: args, Stderr: "HTTP 404: Not Found", Err: errors.New("exit status 1")}
+			}
+			return "", nil
+		},
+	}
+	item := Classification{
+		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Group: SafeToDelete,
+	}
+	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
+	if len(results) != 1 || results[0].Err == nil || results[0].Deleted {
+		t.Fatalf("expected an unverifiable delete to be a failure, got %+v", results)
+	}
+	if !strings.Contains(results[0].Err.Error(), "more than one push URL") {
+		t.Fatalf("Err = %v, want the several-push-URLs refusal", results[0].Err)
+	}
+	for _, call := range fake.Calls {
+		if call.Name == "gh" {
+			t.Fatalf("gh ran (%q) though the remote has two push URLs", call.Args)
+		}
+	}
+}

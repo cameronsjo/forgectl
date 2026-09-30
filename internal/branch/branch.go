@@ -340,17 +340,22 @@ type originRepo struct {
 }
 
 // resolveRemote reads the PUSH URL of the remote the branch was just deleted
-// from (`git remote get-url --push <remoteName>`) and takes host, owner, and
-// repo from it with pr.ParseRemoteURL. The verification must ask about the
+// from (`git remote get-url --push --all <remoteName>`) and takes host,
+// owner, and repo from it with pr.ParseRemoteURL. The verification must ask about the
 // repository the delete went to: gh's own repo resolution picks a base repo
 // (an upstream, a set default) that need not be that remote, and its host
 // need not be the remote's either (#413). Within the remote it is the push
 // URL, not the fetch URL, because `git push --delete` goes there: a remote
 // that fetches from upstream and pushes to a fork (remote.<name>.pushurl)
 // would otherwise have its delete verified against upstream, whose 404 for a
-// branch it never had reads as success (#707). A remote with several push
-// URLs prints one per line, which ParseRemoteURL refuses, so verification
-// reports "cannot verify" rather than checking one of them.
+// branch it never had reads as success (#707).
+//
+// A remote can carry several push URLs, and `git push --delete` pushes to
+// every one. Without --all, get-url prints only the FIRST and exits 0, which
+// would leave the rest unverified. So resolveRemote reads them all and
+// refuses more than one as "cannot verify": it does not verify each. That
+// fails closed and keeps one repository per verification. A multi-target
+// push remote is rare, and the operator can check it by hand.
 //
 // The URL is hostile input and can carry a credential: the host must pass
 // the hostname predicate, owner and repo the owner/repo guard, and every
@@ -361,9 +366,12 @@ func (c *Client) resolveRemote(ctx context.Context, remoteName string) (originRe
 	if remoteName == "" || strings.HasPrefix(remoteName, "-") {
 		return originRepo{}, errors.New("remote name is not usable as a git argument")
 	}
-	out, err := c.run.Run(ctx, "git", "remote", "get-url", "--push", remoteName)
+	out, err := c.run.Run(ctx, "git", "remote", "get-url", "--push", "--all", remoteName)
 	if err != nil {
 		return originRepo{}, errors.New("could not read the remote's URL")
+	}
+	if nonEmptyLines(out) > 1 {
+		return originRepo{}, errors.New("remote has more than one push URL; cannot verify the delete against a single repository")
 	}
 	host, owner, repo, ok := pr.ParseRemoteURL(out)
 	if !ok {
@@ -394,9 +402,9 @@ func (c *Client) verifyRemoteDeleted(ctx context.Context, origin originRepo, nam
 	path := fmt.Sprintf("repos/%s/%s/git/ref/heads/%s", origin.owner, origin.repo, name)
 	_, err := c.run.Run(ctx, "gh", "api", "--hostname="+origin.host, path)
 	if err == nil {
-		// The response body is gh output and is not echoed (#562); the path
-		// is built from validated parts.
-		return fmt.Errorf("remote branch %s still exists after delete (GET %s succeeded)", termsafe.QuoteText(name), termsafe.SafeLine(path))
+		// The response body is gh output and is not echoed (#562). The name
+		// is rendered once, quoted; owner and repo are validated parts.
+		return fmt.Errorf("remote branch %s still exists on %s/%s after delete (its ref GET succeeded)", termsafe.QuoteText(name), origin.owner, origin.repo)
 	}
 	if !strings.Contains(err.Error(), "404") {
 		// Categorical cause (#658), as the git push leg: err is gh's stderr,
@@ -563,6 +571,17 @@ func (c *Client) prHeadsByState(ctx context.Context, state string) (map[string]i
 		byHead[r.HeadRefName] = r.Number
 	}
 	return byHead, nil
+}
+
+// nonEmptyLines counts the lines of s that are not blank.
+func nonEmptyLines(s string) int {
+	n := 0
+	for _, line := range strings.Split(s, "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // firstNonEmpty returns override if it's non-empty, else fallback.
