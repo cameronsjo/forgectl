@@ -99,6 +99,13 @@ An `effort` outside the five accepted levels is rejected before anything is laun
   "<task>"` keeps the builder posture. A flag forgectl does not know is
   assumed to take a value, which leaves the builder posture and its
   permission mode in place.
+- **A piped builder run withholds `--allow-dangerously-skip-permissions`** —
+  with stdout not a terminal, claude runs a prompt non-interactively even
+  without `-p`, so `forgectl launch -- "<task>" | tee log` keeps the builder
+  posture (permission mode, `--add-dir`, `--model`, `--effort`) but drops
+  the one flag print mode drops for safety. `allow_danger` never makes bypass
+  reachable in an unattended run. A bare `forgectl launch` with no arguments
+  keeps the session posture either way.
 - **One leading `--` belongs to forgectl, for every harness** — `forgectl
   launch -- <args>` skips launch's own verbs (`which`, `doctor`, `edit`, …) and
   drops the separator, so Claude, Codex, and Pi never see it. A shell wrapper

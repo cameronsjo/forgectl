@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -136,6 +137,20 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 				healthy = false
 			}
 
+			// The update-hooks watcher is optional, so this row warns and
+			// never fails the doctor. It reads only: a plist stat,
+			// `launchctl print`, and forgectl's own hook state files.
+			if hooksGOOS == "darwin" {
+				ctx := cmd.Context()
+				if ctx == nil {
+					ctx = context.Background()
+				}
+				cfgHooks, cfgErr := cfg.ResumeHooks()
+				facts, probeErr := hooksDoctorProbe(ctx)
+				state, detail := hooksDoctorRow(len(cfgHooks), hooksLongestTimeout(cfgHooks), cfgErr, facts, probeErr)
+				rec.add("update_hooks", state, detail)
+			}
+
 			if asJSON {
 				if err := writeLaunchDoctorJSON(cmd.OutOrStdout(), rec.checks, healthy); err != nil {
 					return err
@@ -161,7 +176,7 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 // endpoint's hidden query and userinfo via endpointForDisplay, key names never
 // values — applies here by construction; there is no second rendering to
 // drift. Name is one of profile, pr_config, harness, legacy_migration, config,
-// usage_stats, telemetry, review_window_env, and may repeat.
+// usage_stats, telemetry, review_window_env, update_hooks, and may repeat.
 type launchDoctorCheckJSON struct {
 	Name   string `json:"name"`
 	State  string `json:"state"`

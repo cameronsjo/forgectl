@@ -625,6 +625,15 @@ func countKey(env []string, key string) int {
 	return n
 }
 
+// pipedBuilderArgs is the builder posture launch sends when stdout is not a
+// terminal: BuilderArgs with allow_danger withheld (forgectl#812).
+// TestBuildInvocation_PipedBuilderWithholdsOnlyAllowDanger pins the literal
+// argv; this helper only keeps the routing table readable.
+func pipedBuilderArgs(p Profile, args []string) []string {
+	p.AllowDanger = false
+	return BuilderArgs(p, args)
+}
+
 // TestBuildInvocation_Postures pins the argv shape and posture label for every
 // branch launchExec used to switch on inline. The argv is compared against the
 // package's own builders rather than a literal, so this stays a test of
@@ -668,7 +677,7 @@ func TestBuildInvocation_Postures(t *testing.T) {
 			cfg:         claudeCfg,
 			args:        []string{"hello"},
 			wantPosture: PostureClaudeBuilder,
-			wantArgs:    func(p Profile) []string { return BuilderArgs(p, []string{"hello"}) },
+			wantArgs:    func(p Profile) []string { return pipedBuilderArgs(p, []string{"hello"}) },
 		},
 		{
 			name:        "claude print mode keeps only the permission mode",
@@ -735,7 +744,7 @@ func TestBuildInvocation_Postures(t *testing.T) {
 			args:        []string{"--append-system-prompt", "-p", "task"},
 			wantPosture: PostureClaudeBuilder,
 			wantArgs: func(p Profile) []string {
-				return BuilderArgs(p, []string{"--append-system-prompt", "-p", "task"})
+				return pipedBuilderArgs(p, []string{"--append-system-prompt", "-p", "task"})
 			},
 		},
 		{
@@ -751,7 +760,7 @@ func TestBuildInvocation_Postures(t *testing.T) {
 			args:        []string{"--append-system-prompt", "--help", "hi"},
 			wantPosture: PostureClaudeBuilder,
 			wantArgs: func(p Profile) []string {
-				return BuilderArgs(p, []string{"--append-system-prompt", "--help", "hi"})
+				return pipedBuilderArgs(p, []string{"--append-system-prompt", "--help", "hi"})
 			},
 		},
 		{
@@ -780,7 +789,7 @@ func TestBuildInvocation_Postures(t *testing.T) {
 			cfg:         claudeCfg,
 			args:        []string{"--", "-p"},
 			wantPosture: PostureClaudeBuilder,
-			wantArgs:    func(p Profile) []string { return BuilderArgs(p, []string{"--", "-p"}) },
+			wantArgs:    func(p Profile) []string { return pipedBuilderArgs(p, []string{"--", "-p"}) },
 		},
 		{
 			name:        "claude agents with posture injection",
@@ -848,6 +857,73 @@ func TestBuildInvocation_Postures(t *testing.T) {
 			want := tc.wantArgs(built.Profile)
 			if strings.Join(built.Invocation.Args, "\x00") != strings.Join(want, "\x00") {
 				t.Errorf("Args = %q, want %q", built.Invocation.Args, want)
+			}
+		})
+	}
+}
+
+// TestBuildInvocation_PipedBuilderWithholdsOnlyAllowDanger pins forgectl#812
+// (owner option b) as literal argv. Off a terminal claude runs a prompt
+// non-interactively, so a builder launch drops
+// --allow-dangerously-skip-permissions and keeps everything else the profile
+// gives it: permission mode, add-dir, model, and effort. On a terminal the
+// same profile still gets the flag. BuiltInvocation.Profile keeps reporting
+// the resolved allow_danger either way.
+//
+// Mutations that turn it red: drop the `!stdoutTerminal` clear in
+// selectPosture (the piped row regains the flag), clear AllowDanger
+// unconditionally (the terminal row loses it), or route the piped run to
+// PrintArgs (model, effort, and add-dir disappear).
+func TestBuildInvocation_PipedBuilderWithholdsOnlyAllowDanger(t *testing.T) {
+	target := projectDir(t)
+	allow := true
+	cfg := config.LaunchConfig{Defaults: config.LaunchDefaults{
+		Model:          "opus",
+		Effort:         "low",
+		PermissionMode: "plan",
+		AllowDanger:    &allow,
+		AddDir:         []string{"/shared"},
+	}}
+	for _, tc := range []struct {
+		name string
+		tty  bool
+		want []string
+	}{
+		{"piped", false, []string{
+			"--permission-mode", "plan",
+			"--add-dir", "/shared",
+			"--model", "opus",
+			"--effort", "low",
+			"task",
+		}},
+		{"terminal", true, []string{
+			"--permission-mode", "plan",
+			"--allow-dangerously-skip-permissions",
+			"--add-dir", "/shared",
+			"--model", "opus",
+			"--effort", "low",
+			"task",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			built, err := BuildInvocation(InvocationRequest{
+				Config:         cfg,
+				CWD:            target,
+				Args:           []string{"task"},
+				Resolve:        fixedResolver(ResolvedBinary{Path: "/stub/claude", Source: BinaryPATH}),
+				StdoutTerminal: tc.tty,
+			})
+			if err != nil {
+				t.Fatalf("BuildInvocation: %v", err)
+			}
+			if built.Posture != PostureClaudeBuilder {
+				t.Errorf("Posture = %q, want %q", built.Posture, PostureClaudeBuilder)
+			}
+			if strings.Join(built.Invocation.Args, "\x00") != strings.Join(tc.want, "\x00") {
+				t.Errorf("Args = %q, want %q", built.Invocation.Args, tc.want)
+			}
+			if !built.Profile.AllowDanger {
+				t.Error("Profile.AllowDanger = false, want the resolved true: only the argv withholds it")
 			}
 		})
 	}
