@@ -625,15 +625,27 @@ func validCap(stream string, limit int64) error {
 	return nil
 }
 
-// outputBuf holds captured bytes behind a pointer so that a BoundedOutput
-// reached through an unexported field renders as an address rather than as the
-// decimal byte dump reflection would otherwise produce. Same containment
-// reasoning as SecretArg's closure.
+// outputBuf holds captured bytes behind a pointer, and the bytes themselves
+// behind a closure, so that a BoundedOutput reached through an unexported
+// field renders as an address rather than as the decimal byte dump
+// reflection would otherwise produce. Same containment reasoning as
+// SecretArg's closure.
 //
-// Both the type and the field are unexported, so no importer can reach them.
-// Inside this package they can: %#v on a bare *outputBuf dumps the bytes, so
-// never hand one to slog or fmt directly — log the BoundedOutput.
-type outputBuf struct{ data []byte }
+// The closure is also what keeps the bytes from reflect's plain-data readers
+// (forgectl#897): Value.Bytes, Index and Uint read an unexported []byte field
+// without the read-only check, so a field would hand the bytes to any code
+// holding a BoundedOutput, past CopyBytesForParse. A func value's captures are
+// no field reflect can walk into. read is called only by CopyBytesForParse
+// (TestOnlyCopyBytesForParseReadsOutput); Len reads n.
+type outputBuf struct {
+	n    int
+	read func() []byte
+}
+
+// newOutputBuf seals data, which must not be modified afterwards.
+func newOutputBuf(data []byte) *outputBuf {
+	return &outputBuf{n: len(data), read: func() []byte { return data }}
+}
 
 // BoundedOutput owns at most one stream's cap worth of bytes. It renders as
 // byte-count metadata everywhere, and hands out its bytes only through
@@ -657,7 +669,7 @@ func (b BoundedOutput) Len() int {
 	if b.buf == nil {
 		return 0
 	}
-	return len(b.buf.data)
+	return b.buf.n
 }
 
 // Complete reports whether the stream was read to EOF within its cap. False
@@ -679,7 +691,7 @@ func (b BoundedOutput) Complete() bool { return !b.overflow && !b.forced }
 func (b BoundedOutput) CopyBytesForParse() (data []byte, complete bool) {
 	out := make([]byte, b.Len())
 	if b.buf != nil {
-		copy(out, b.buf.data)
+		copy(out, b.buf.read())
 	}
 	return out, b.Complete()
 }

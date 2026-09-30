@@ -174,14 +174,19 @@ method (SensitiveResult) MarshalJSON() ([]byte, error)
 method (SensitiveResult) MarshalText() ([]byte, error)
 method (SensitiveResult) String() string
 method (argMask) args(args []string) []string
-method (argMask) cover(s string) bitset
-method (argMask) runShown(run string) string
-method (argMask) sorted() argMask
+method (argMask) data() maskData
 method (argMask) straddleLen(s string) int
 method (argMask) text(s string) string
 method (argMask) withValues(values []string) argMask
 method (bitset) has(i int) bool
 method (bitset) set(from int, to int)
+method (maskData) args(args []string) []string
+method (maskData) cover(s string) bitset
+method (maskData) runShown(run string) string
+method (maskData) sorted() maskData
+method (maskData) straddleLen(s string) int
+method (maskData) text(s string) string
+method (maskData) withValues(values []string) (maskData, bool)
 method (onceCloser) Chdir() error
 method (onceCloser) Chmod(mode os.FileMode) error
 method (onceCloser) Chown(uid int, gid int) error
@@ -229,19 +234,20 @@ type SensitiveRunner interface{RunSensitive(ctx context.Context, cmd SensitiveCo
 type StreamingRunner interface{RunStreaming(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, name string, args ...string) error}
 type Transform struct{t github.com/cameronsjo/forgectl/internal/exec/internal/sealed.Transform}
 type argKind = github.com/cameronsjo/forgectl/internal/exec/internal/validated.ArgKind
-type argMask struct{shown map[string]string; pats []maskPat; values []string; entries []string}
+type argMask struct{get func() maskData}
 type bitset []uint64
 type ceilingWriter struct{limit int; discard bool; buf []byte; over bool; proc func() *os.Process}
 type constantArg string
 type copyJob struct{dst io.Writer; src *onceCloser}
 type copyResult struct{stdin bool; err error}
 type envOp = github.com/cameronsjo/forgectl/internal/exec/internal/validated.EnvOp
+type maskData struct{shown map[string]string; pats []maskPat; values []string; entries []string}
 type maskKey struct{}
 type maskPat struct{text string; shown string}
 type onceCloser struct{*os.File; once sync.Once}
 type opaqueKey struct{}
 type opaqueSpan struct{from int; n int}
-type outputBuf struct{data []byte}
+type outputBuf struct{n int; read func() []byte}
 type processGroupKey struct{}
 type projectedCmuxWorkspace struct{ID string "json:\"id\""; Description string "json:\"description\""}
 type streamPipes struct{childEnds []*os.File; readEnds []*onceCloser; stdinW *onceCloser; outputs []copyJob; stdin io.Reader; results chan copyResult; nOut int; nIn int}

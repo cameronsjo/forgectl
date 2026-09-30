@@ -38,7 +38,7 @@ separately. The scan skips `.git`.
 | `vendored` | The carrier sits inside a dependency directory (`node_modules`, `bower_components`, `vendor`, `third_party`, `.venv`, `venv`, `site-packages`), so a package author wrote it: the supply-chain vector. |
 | `off-root` | A carrier that belongs at a repo root (anything but the three nestable basenames) sits somewhere else: under a subdirectory, or outside any git working tree. |
 | `recent` | The carrier's own mtime is within the last 7 days. A directory's mtime changes only when entries are added or removed directly inside it, and a fresh clone or checkout sets every file's mtime to that moment. |
-| `symlink` | The entry is a symlink at a repo root whose name starts a multi-segment carrier (`.gemini` for `.*/mcp.json`, `.github` for `.github/instructions/`). The carrier, if any, lives behind the link. The scan never walks a link, so it reports the link itself, whether or not a carrier exists behind it. It checks the link's target only with a stat confined to the projects root: a link to a file or to nothing (`.env`, `.eslintrc`, a dangling link) is skipped. A link it cannot check stays reported: one that leaves the projects root, or one with an absolute target, which the confined stat refuses to resolve. `quarantine` lists a carrier behind an in-root link and refuses one behind an escaping link. |
+| `symlink` | The entry is a symlink at a repo root whose name starts a multi-segment carrier (`.gemini` for `.*/mcp.json`, `.github` for `.github/instructions/`). The carrier, if any, lives behind the link. The scan never walks a link, so it reports the link itself, whether or not a carrier exists behind it. It checks the link's target only with a stat confined to the projects root: a link to a file or to nothing (`.env`, `.eslintrc`, a dangling link) is skipped. A link it cannot check stays reported: one that leaves the projects root, or one with an absolute target, which the confined stat refuses to resolve. `quarantine` lists a carrier behind an in-root link and refuses one behind an escaping link. The check runs only at a repo root: a symlinked `.gemini` below a repo root, or outside any git working tree, is neither reported nor walked, while a real `.gemini/mcp.json` in the same place is reported with `off-root`. |
 
 ### Confinement and caps
 
@@ -59,7 +59,10 @@ class (or starts one, see the `symlink` flag). It is never walked.
 Paths are reported in your spelling of the root: `$PROJECTS_DIR` or
 `~/Projects`, made absolute but not symlink-resolved. `root`, every `path`,
 and every `repo` share that one prefix, even when the root sits under a
-symlinked directory (on macOS, anything under `/var` or `/tmp`).
+symlinked directory (on macOS, anything under `/var` or `/tmp`). The root is
+opened once, so if it is a symlink repointed mid-scan, the scan finishes in the
+directory it opened, but every reported path uses your spelling, which by then
+names the new target.
 
 The scan has three caps:
 
