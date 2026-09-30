@@ -9,6 +9,8 @@ package cli
 //   [x] Unhappy: a nonexistent root argument surfaces NewIndex's error, exit 2
 //   [x] Security: human output escapes terminal controls in a filename and in
 //       a doc's H1 (forgectl#598)
+//   [x] Security: human output caps a doc's H1 at 256 runes; --json carries it
+//       whole (forgectl#894)
 //   [x] Happy: --limit 3 prints three rows in both the human and --json shapes
 //   [x] Unhappy: a --timeout deadline under --json leaves stdout empty and
 //       writes exactly one JSON error object to stderr, exit code 2
@@ -32,9 +34,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"github.com/spf13/cobra"
 
 	docspkg "github.com/cameronsjo/forgectl/internal/docs"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 func TestDocsListCmd_JSONFlag_EmitsArray(t *testing.T) {
@@ -146,6 +152,43 @@ func TestDocsListCmd_HumanOutput_EscapesTerminalControls(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout = %q, want the escaped form %q", out, want)
 		}
+	}
+}
+
+// docsListTextLineMaxRunes is the widest `docs list` text line
+// TestPrintDocsList_TextCapsTitle can produce: the root label padded to 16,
+// a space, the path padded to 48, a space, and the title's 256-rune cap plus
+// its " … [truncated]" marker (14). Literal, so raising docTitleMaxRunes
+// cannot raise its own bound.
+const docsListTextLineMaxRunes = 16 + 1 + 48 + 1 + 256 + 14
+
+// TestPrintDocsList_TextCapsTitle pins forgectl#894 item 1: a doc's H1 is
+// capped in text output, and --json carries it whole.
+//
+// Mutations that turn it red: print d.Title through termsafe.SafeLine in
+// printDocsList, or raise docTitleMaxRunes to 1000.
+func TestPrintDocsList_TextCapsTitle(t *testing.T) {
+	long := strings.Repeat("\u03c4", 5000) // Greek tau: nothing else on the line uses it
+	docs := []docspkg.Doc{{RootLabel: "docs", RelPath: "a.md", AbsPath: "/r/a.md", Title: long}}
+
+	text, _ := renderCmd(t, func(cmd *cobra.Command) error { return printDocsList(cmd, docs, false) })
+	line := strings.TrimSuffix(text, "\n")
+	if strings.Contains(line, "\n") {
+		t.Fatalf("one doc printed more than one line: %q", text)
+	}
+	if n := utf8.RuneCountInString(line); n > docsListTextLineMaxRunes {
+		t.Errorf("docs list line is %d runes, over %d: the title is not capped", n, docsListTextLineMaxRunes)
+	}
+	if !strings.HasSuffix(line, termsafe.TruncatedMarker) {
+		t.Errorf("docs list line does not end in the truncation marker: head %q", line[:80])
+	}
+	if !strings.Contains(line, strings.Repeat("\u03c4", 128)) {
+		t.Errorf("docs list line lost the title's head")
+	}
+
+	asJSON, _ := renderCmd(t, func(cmd *cobra.Command) error { return printDocsList(cmd, docs, true) })
+	if !strings.Contains(asJSON, long) {
+		t.Errorf("docs list --json did not carry the title whole")
 	}
 }
 
