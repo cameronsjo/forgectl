@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // SyncOptions parameterizes one ETL run. Zero-valued fields fall back to the
@@ -310,13 +311,13 @@ func runbooksDirWithLegacy(opts SyncOptions) (string, error) {
 	if _, err := os.Stat(opts.RunbooksDir); err == nil {
 		return opts.RunbooksDir, nil
 	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("stat runbooks root %s: %w", opts.RunbooksDir, err)
+		return "", fmt.Errorf("stat runbooks root %s: %w", termsafe.QuotePath(opts.RunbooksDir), termsafe.Error(err))
 	}
 	if opts.LegacyRunbooksDir != "" && opts.LegacyRunbooksDir != opts.RunbooksDir {
 		if _, err := os.Stat(opts.LegacyRunbooksDir); err == nil {
 			return opts.LegacyRunbooksDir, nil
 		} else if !os.IsNotExist(err) {
-			return "", fmt.Errorf("stat legacy runbooks root %s: %w", opts.LegacyRunbooksDir, err)
+			return "", fmt.Errorf("stat legacy runbooks root %s: %w", termsafe.QuotePath(opts.LegacyRunbooksDir), termsafe.Error(err))
 		}
 	}
 	return opts.RunbooksDir, nil

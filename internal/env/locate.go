@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/sandbox"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // errNotInRepo is returned when no .git entry is found walking up from cwd.
@@ -222,7 +223,7 @@ func ResolveTarget(fileFlag, cwd string) (Target, error) {
 		parent := filepath.Dir(abs)
 		realParent, perr := filepath.EvalSymlinks(parent)
 		if perr != nil {
-			return Target{}, fmt.Errorf("resolve parent directory of %s: %w", filepath.Base(abs), perr)
+			return Target{}, fmt.Errorf("resolve parent directory of %s: %w", termsafe.QuotePath(filepath.Base(abs)), termsafe.Error(perr))
 		}
 		resolved = filepath.Join(realParent, filepath.Base(abs))
 	}

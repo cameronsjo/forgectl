@@ -1314,11 +1314,11 @@ func openLogWriter(logFile string) (io.Writer, io.Closer) {
 func OpenAppendFile(path string) (*os.File, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create log directory %s: %w", dir, err)
+		return nil, fmt.Errorf("create log directory %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("open log file %s: %w", path, err)
+		return nil, fmt.Errorf("open log file %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	return f, nil
 }

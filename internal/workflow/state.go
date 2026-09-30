@@ -15,6 +15,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/digest"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/tomlerr"
 )
 
@@ -132,13 +133,13 @@ func StatePath(name string) (string, error) {
 func guardAndMakeStateDir(dir string) error {
 	if info, err := os.Lstat(dir); err == nil {
 		if !info.IsDir() {
-			return fmt.Errorf("workflow state path %s is not a real directory (a symlink or file is planted there) — refusing to use it", dir)
+			return fmt.Errorf("workflow state path %s is not a real directory (a symlink or file is planted there) — refusing to use it", termsafe.QuotePath(dir))
 		}
 	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("stat workflow state dir %s: %w", dir, err)
+		return fmt.Errorf("stat workflow state dir %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create workflow state dir %s: %w", dir, err)
+		return fmt.Errorf("create workflow state dir %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	return nil
 }

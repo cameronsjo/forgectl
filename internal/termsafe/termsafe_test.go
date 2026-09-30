@@ -463,8 +463,9 @@ func TestError_CapsFilesystemPaths(t *testing.T) {
 //
 // Mutations: make Error's fallback branch SafeLine(errorText(err)) again and
 // every "capped" row echoes the path whole; drop the Unwrap() []error case in
-// overlongPathErrors and the join row does; recurse on the suffix with
-// pathErrs[1:] and the "twice" row caps only the first occurrence.
+// overlongPathErrors and the join row does; set nextFree[i] to len(text)
+// after a match in findSpans and the "twice" row caps only the first
+// occurrence.
 func TestError_CapsWrappedFilesystemPaths(t *testing.T) {
 	long := "/" + strings.Repeat("a", PathEchoMaxRunes) + "TAIL"
 	long2 := "/" + strings.Repeat("a", PathEchoMaxRunes) + "OTHER"
@@ -580,5 +581,156 @@ func TestQuotePathIfUnsafe_KeepsALongOrdinaryPathWhole(t *testing.T) {
 	long := "/" + strings.Repeat("p", 2*PathEchoMaxRunes) + "/name.go"
 	if got := QuotePathIfUnsafe(long); got != long {
 		t.Errorf("QuotePathIfUnsafe altered a %d-rune ordinary path: %d bytes back", len(long), len(got))
+	}
+}
+
+// fanOutCycle is an error whose Unwrap() []error returns itself twice beside
+// a path error, a fan-out-2 cycle: a depth-only bound walks 2^100 nodes.
+type fanOutCycle struct{ pathErr error }
+
+func (f *fanOutCycle) Error() string   { return "cycle: " + f.pathErr.Error() }
+func (f *fanOutCycle) Unwrap() []error { return []error{f, f, f.pathErr} }
+
+// TestError_FanOutUnwrapCycleTerminates is #845 item 1: the chain walk has a
+// node budget, so a cycle through Unwrap() []error ends, and the path error
+// it keeps revisiting is still capped once per span.
+//
+// Mutation that turns it red: drop `|| budget <= 0` from overlongPathErrors's
+// guard, and the walk never returns within the deadline.
+func TestError_FanOutUnwrapCycleTerminates(t *testing.T) {
+	pathErr := &os.PathError{Op: "open", Path: "/" + strings.Repeat("a", PathEchoMaxRunes) + "TAIL", Err: errors.New("denied")}
+	cyclic := &fanOutCycle{pathErr: pathErr}
+	done := make(chan string, 1)
+	start := time.Now()
+	go func() { done <- Error(cyclic).Error() }()
+	select {
+	case got := <-done:
+		if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+			t.Errorf("Error took %v on a fan-out cycle, want well under 100ms", elapsed)
+		}
+		if want := "cycle: " + Error(pathErr).Error(); got != want {
+			t.Errorf("Error() =\n%q\nwant\n%q", got, want)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Error did not return within 100ms on a fan-out-2 Unwrap cycle")
+	}
+}
+
+// TestError_JoinOfManyOverlongPathsIsLinear is #845 item 2: an errors.Join of
+// 2000 over-cap path errors (a ~1 MB message) took 3.2s when every match
+// re-scanned and re-concatenated the rest of the message. One scan and one
+// build bring it to ~150ms; the bound leaves room for a slow runner.
+//
+// Mutation that turns it red: restore the recursive capWrappedPaths from
+// before #845 (strings.Index per error, recursing on both sides of each
+// match), and this takes ~3s.
+func TestError_JoinOfManyOverlongPathsIsLinear(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing test")
+	}
+	errs, err := joinOfOverlongPaths(2000)
+	start := time.Now()
+	got := Error(err).Error()
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("Error of a Join of %d over-cap path errors took %v, want linear time", len(errs), elapsed)
+	}
+	for _, i := range []int{0, 999, 1999} {
+		if !strings.Contains(got, Error(errs[i]).Error()) {
+			t.Errorf("error %d was not capped in the joined message", i)
+		}
+	}
+	if strings.Contains(got, errs[1999].(*os.PathError).Path) {
+		t.Error("a whole over-cap path survived in the joined message")
+	}
+}
+
+func BenchmarkError_JoinOfOverlongPaths(b *testing.B) {
+	_, err := joinOfOverlongPaths(2000)
+	for b.Loop() {
+		_ = Error(err).Error()
+	}
+}
+
+func joinOfOverlongPaths(n int) (errs []error, joined error) {
+	errs = make([]error, n)
+	for i := range errs {
+		errs[i] = &os.PathError{Op: "open", Path: "/" + strings.Repeat("a", PathEchoMaxRunes) + strconv.Itoa(i), Err: errors.New("denied")}
+	}
+	return errs, errors.Join(errs...)
+}
+
+// rawCopyWrap renders text but unwraps to err, standing in for a wrapper that
+// holds a raw copy of a path rather than its path error's native text.
+type rawCopyWrap struct {
+	text string
+	err  error
+}
+
+func (r rawCopyWrap) Error() string { return r.text }
+func (r rawCopyWrap) Unwrap() error { return r.err }
+
+// TestError_RawLookAlikeIsCappedOnTheFirstPass is #845 item 3. The path holds
+// the literal text `\x1b` and the wrapper a raw ESC in its place. SafeLine
+// leaves `\` alone, so the wrapper's escaped text equals the native text. A
+// search of the raw message missed it on the first pass and found it on the
+// second, so Error(Error(e)) != Error(e) and the first pass left the path
+// whole. Matching in escaped space caps it on the first pass.
+//
+// Mutation that turns it red: restore the pre-#845 capWrappedPaths, which
+// searched the raw message.
+func TestError_RawLookAlikeIsCappedOnTheFirstPass(t *testing.T) {
+	long := "/" + strings.Repeat("a", PathEchoMaxRunes) + `\x1b` + "TAIL"
+	pathErr := &os.PathError{Op: "open", Path: long, Err: errors.New("denied")}
+	raw := strings.Replace(pathErr.Error(), `\x1b`, "\x1b", 1)
+	err := rawCopyWrap{text: "w: " + raw, err: pathErr}
+
+	got := Error(err).Error()
+	if want := "w: " + Error(pathErr).Error(); got != want {
+		t.Errorf("Error() =\n%q\nwant\n%q", got, want)
+	}
+	if again := Error(Error(err)).Error(); again != got {
+		t.Errorf("Error is not idempotent:\n%q\nthen\n%q", got, again)
+	}
+}
+
+// TestError_CapsAWrappedPathHoldingAControl pins the other half of matching
+// in escaped space: a %w-wrapped path error whose path holds a newline is
+// found by its escaped native text, since the message it is searched in is
+// escaped too.
+//
+// Mutation that turns it red: search for the raw native text rather than
+// SafeLine(native) in capWrappedPaths.
+func TestError_CapsAWrappedPathHoldingAControl(t *testing.T) {
+	pathErr := &os.PathError{Op: "open", Path: "/" + strings.Repeat("a", PathEchoMaxRunes) + "\nTAIL", Err: errors.New("denied")}
+	if got, want := Error(fmt.Errorf("w: %w", pathErr)).Error(), "w: "+Error(pathErr).Error(); got != want {
+		t.Errorf("Error() =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestError_CapsAPathErrorNestedInErr is #845 item 4: the *PathError and
+// *LinkError arms printed .Err through its native Error method, so an
+// over-cap path error nested there was echoed whole.
+//
+// Mutation that turns it red: render .Err as SafeLine(errorText(x.Err))
+// again in either arm (causeText's non-nil branch).
+func TestError_CapsAPathErrorNestedInErr(t *testing.T) {
+	long := "/" + strings.Repeat("a", 4*PathEchoMaxRunes) + "TAIL"
+	inner := &os.PathError{Op: "lstat", Path: long, Err: errors.New("denied")}
+	for name, err := range map[string]error{
+		"path": &os.PathError{Op: "open", Path: "/tmp/x", Err: inner},
+		"link": &os.LinkError{Op: "rename", Old: "/tmp/a", New: "/tmp/b", Err: inner},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := Error(err).Error()
+			if strings.Contains(got, long) || strings.Count(got, "a") > PathEchoMaxRunes+8 {
+				t.Fatalf("Error echoed the nested %d-rune path uncapped: %d bytes", len(long), len(got))
+			}
+			if !strings.HasSuffix(got, ": "+Error(inner).Error()) {
+				t.Errorf("Error(%s) = %q, want the nested error in its capped form", name, got)
+			}
+			if !errors.Is(Error(err), inner) {
+				t.Error("Error lost the unwrap chain")
+			}
+		})
 	}
 }

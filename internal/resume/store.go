@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Record is one file in forgectl's snapshot store: everything about a session
@@ -158,7 +160,7 @@ func Save(dir string, r *Record) error {
 		return fmt.Errorf("refusing to store record with invalid session id %q", r.ID)
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create resume store %s: %w", dir, err)
+		return fmt.Errorf("create resume store %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	// termsafe:allow-raw-json persisted resume record, never command output
 	data, err := json.MarshalIndent(r, "", "  ")
@@ -168,7 +170,7 @@ func Save(dir string, r *Record) error {
 	final := filepath.Join(dir, r.ID+".json")
 	tmp, err := os.CreateTemp(dir, r.ID+".*.tmp")
 	if err != nil {
-		return fmt.Errorf("create temp record in %s: %w", dir, err)
+		return fmt.Errorf("create temp record in %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
