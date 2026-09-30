@@ -113,7 +113,7 @@ Workarounds. For bash, do not `source` the file when a value is multi-line or th
 **Safety notes:**
 
 - Values never appear in argv, stdout, or log output — every value-bearing operation lives inside the domain package, not the CLI layer.
-- Every write lands at `0600`; a looser pre-existing mode is tightened and reported (`tightened <file> to 0600`) rather than silently left alone.
+- Every write lands at `0600`; a looser pre-existing mode is tightened and reported (`tightened "<file>" to 0600`, the path quoted and escaped) rather than silently left alone.
 - `--file` is refused unless it resolves inside the current git repository (walk-up `.git` detection, symlink-escape checked) — no editing a `.env` outside the repo you're working in.
 - **`--file` must also name an env file** — `.env`, `.env.*` (`.env.local`, `.env.prod`, `.env.staging`, `.env.example`), or `*.env`. Repo-containment alone is not a bound worth having: `.git/config` is inside the repo, and `KEY=value` is valid git-config syntax, so an unconstrained `--file` turns `env set` into `core.sshCommand` — arbitrary code execution on the next `git fetch`. `.envrc` (direnv executes it) and `Makefile` (`KEY=value` is valid make) are the same shape. A blocklist would be whack-a-mole against every future execute-on-read format, so the allowlist is the bound. The point of this tool is to be the thing you hand an agent *instead of* raw shell; it must not be a shell in a trench coat.
 - **`--any-file` overrides that rule behind an interactive confirmation**, and the confirmation names the *resolved* path, so it cannot be used to approve a file you were not shown. With no TTY — a piped invocation, a CI job, a harness tool call — it refuses outright.
