@@ -112,6 +112,9 @@ func TestTmuxTextUsesApprovedRenderers(t *testing.T) {
 	// elsewhere. A new source must be classified above and deliberately added
 	// here after its renderer wiring is reviewed.
 	want := map[string]int{
+		// The hub header's session count: only len() of ListSessions is
+		// read; no session text reaches any renderer (forgectl#730).
+		"hub_header.go":  1,
 		"tmux_kill.go":   1,
 		"tmux_ls.go":     1,
 		"tmux_pick.go":   1,

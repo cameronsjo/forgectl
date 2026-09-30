@@ -304,6 +304,45 @@ type discoverCandidate struct {
 // discoverConcurrency() workers. Splitting it this way keeps the cheap walk
 // serial and simple while parallelizing only the part that's actually slow.
 func (c *Client) discoverDir(ctx context.Context, dir string) ([]Project, error) {
+	candidates, err := discoverCandidates(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	projects := fanOut(candidates, func(cand discoverCandidate) Project {
+		return c.discoverProject(ctx, cand.name, cand.dir)
+	})
+
+	sortProjects(projects)
+	return projects, nil
+}
+
+// LocalNames returns the name of every project Discover would list under dir,
+// sorted and de-duplicated, from discovery's filesystem walk alone: no git
+// status probe, no subprocess, no network. It is the hub's argument-picker
+// source (forgectl#730), which must open instantly and stay local. A missing
+// or unreadable dir yields nil.
+func LocalNames(dir string) []string {
+	candidates, err := discoverCandidates(dir)
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]bool, len(candidates))
+	names := make([]string, 0, len(candidates))
+	for _, cand := range candidates {
+		if seen[cand.name] {
+			continue
+		}
+		seen[cand.name] = true
+		names = append(names, cand.name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// discoverCandidates is discovery's phase 1: the serial filesystem walk that
+// resolves every project's (name, dir) without spawning anything.
+func discoverCandidates(dir string) ([]discoverCandidate, error) {
 	if _, err := os.Stat(dir); err != nil {
 		return nil, fmt.Errorf("projects directory not found: %s", termsafe.QuotePath(dir))
 	}
@@ -356,13 +395,7 @@ func (c *Client) discoverDir(ctx context.Context, dir string) ([]Project, error)
 		// which is what keeps a scratch notes folder listed.
 		candidates = append(candidates, discoverCandidate{e.Name(), top})
 	}
-
-	projects := fanOut(candidates, func(cand discoverCandidate) Project {
-		return c.discoverProject(ctx, cand.name, cand.dir)
-	})
-
-	sortProjects(projects)
-	return projects, nil
+	return candidates, nil
 }
 
 // isWingMember is THE definition of a wing member, and it is deliberately a
