@@ -677,6 +677,31 @@ func TestBuildInvocation_Postures(t *testing.T) {
 			wantArgs:    func(p Profile) []string { return PrintArgs(p, []string{"-p", "hello"}) },
 		},
 		{
+			name:        "help in a value slot cannot take print mode out of its permission mode",
+			cfg:         claudeCfg,
+			args:        []string{"-p", "--append-system-prompt", "--help", "hi"},
+			wantPosture: PostureClaudePrint,
+			wantArgs: func(p Profile) []string {
+				return PrintArgs(p, []string{"-p", "--append-system-prompt", "--help", "hi"})
+			},
+		},
+		{
+			name:        "help in a value slot keeps the builder posture",
+			cfg:         claudeCfg,
+			args:        []string{"--append-system-prompt", "--help", "hi"},
+			wantPosture: PostureClaudeBuilder,
+			wantArgs: func(p Profile) []string {
+				return BuilderArgs(p, []string{"--append-system-prompt", "--help", "hi"})
+			},
+		},
+		{
+			name:        "leading help passes through byte-clean",
+			cfg:         claudeCfg,
+			args:        []string{"--help"},
+			wantPosture: PostureClaudePassthrough,
+			wantArgs:    func(Profile) []string { return []string{"--help"} },
+		},
+		{
 			name:        "claude subcommand after claude's own separator passes through",
 			cfg:         claudeCfg,
 			args:        []string{"--", "mcp", "list"},

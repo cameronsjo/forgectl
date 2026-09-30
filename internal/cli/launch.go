@@ -77,8 +77,9 @@ func isOwnLaunchVerb(tok string) bool {
 
 // newLaunchCmd builds the `launch` parent command (alias `cl`). Own-verbs are
 // attached as subcommands for styled help; the bare/builder/agents passthrough
-// is intercepted in Execute before Cobra ever parses, so
-// `forgectl launch --model sonnet -p hi` stays byte-clean.
+// is intercepted in Execute before Cobra ever parses, so Cobra never rewrites
+// `forgectl launch --model sonnet -p hi`: it reaches claude verbatim after the
+// print posture's `--permission-mode`.
 func newLaunchCmd(deps module.Deps) *cobra.Command {
 	cfg := deps.Cfg
 	boundary := deps.LegacyBoundary

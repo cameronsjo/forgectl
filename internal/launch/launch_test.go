@@ -319,6 +319,11 @@ func TestAgentsArgs_AllowDangerOff_OmitsFlag(t *testing.T) {
 	}
 }
 
+// TestIsAgentsPassthrough pins which agents argv is byte-clean.
+//
+// Mutation that turns it red: match the tokens anywhere again, ignoring the
+// preceding token (the value-slot rows flip to true), or drop "--all" from
+// agentsBooleanFlags (the --all --json row flips to false).
 func TestIsAgentsPassthrough(t *testing.T) {
 	cases := []struct {
 		args []string
@@ -330,6 +335,13 @@ func TestIsAgentsPassthrough(t *testing.T) {
 		{[]string{"agents", "--all", "--json"}, true},
 		{[]string{"agents"}, false},
 		{[]string{"agents", "--cwd", "/x"}, false},
+		{[]string{"agents", "--cwd", "/x", "--json"}, true},
+		{[]string{"agents", "--cwd=/x", "--json"}, true},
+		{[]string{"agents", "--restricted", "-h"}, true},
+		// A value slot: the flag's argument, not a request for help or JSON.
+		{[]string{"agents", "--settings", "--help"}, false},
+		{[]string{"agents", "--model", "--json"}, false},
+		{[]string{"agents", "--permission-mode", "-h"}, false},
 	}
 	for _, tc := range cases {
 		got := IsAgentsPassthrough(tc.args)

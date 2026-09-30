@@ -597,7 +597,7 @@ func TestIntegration_Builder_AppliesProfileAndPassesThrough(t *testing.T) {
 // an injected `--add-dir X mcp list` hands claude "mcp" and "list" as
 // directories and it opens a session instead.
 //
-// Mutation that turns it red: drop the IsClaudePassthrough case from
+// Mutation that turns it red: drop the IsClaudeSubcommandCall case from
 // selectPosture (argv gains the profile flags), or move
 // PostureClaudePassthrough into EmitBanner's banner case (stderr is non-empty).
 func TestIntegration_ClaudePassthrough_NoPostureNoBanner(t *testing.T) {

@@ -191,12 +191,40 @@ func PiArgs(p Profile, userArgs []string) []string {
 	return append(args, userArgs...)
 }
 
+// agentsBooleanFlags are the `claude agents` options that take no value
+// (`claude agents --help`, Claude Code 2.1.285). IsAgentsPassthrough uses them
+// to tell a flag in flag position from one sitting in a value slot. If this
+// list drifts, the result is the safe one: an unknown flag is assumed to take
+// a value, and the posture is injected.
+var agentsBooleanFlags = map[string]bool{
+	"--all":                                true,
+	"--allow-dangerously-skip-permissions": true,
+	"--dangerously-skip-permissions":       true,
+	"--restricted":                         true,
+	"--strict-mcp-config":                  true,
+	"--json":                               true,
+	"--help":                               true,
+	"-h":                                   true,
+}
+
 // IsAgentsPassthrough reports whether `claude agents …` is a scripting/help
 // invocation that must reach claude byte-clean: no posture injection, no banner.
+//
+// `--json`, `--help`, or `-h` counts only in flag position, never as the
+// value of a preceding option. `agents --settings --help` hands `--help` to
+// --settings, and a match there would strip the posture from a session-
+// dispatching agents run. A token is in flag position when it follows
+// `agents` itself, a `--flag=value`, a known boolean flag, or a bare value
+// (agents takes no positionals, so a bare token is always some flag's value).
 func IsAgentsPassthrough(agentArgs []string) bool {
-	for _, a := range agentArgs[1:] {
-		switch a {
+	for i := 1; i < len(agentArgs); i++ {
+		switch agentArgs[i] {
 		case "--json", "--help", "-h":
+		default:
+			continue
+		}
+		prev := agentArgs[i-1]
+		if i == 1 || !strings.HasPrefix(prev, "-") || strings.Contains(prev, "=") || agentsBooleanFlags[prev] {
 			return true
 		}
 	}

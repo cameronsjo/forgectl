@@ -8,14 +8,13 @@ import (
 	"testing"
 )
 
-// TestIsClaudePassthrough pins which Claude argv reaches claude byte-clean.
+// TestIsClaudeSubcommandCall pins which Claude argv is a byte-clean
+// subcommand run.
 //
-// Mutation that turns it red: drop the args[0] subcommand check (the "mcp"
-// and "update" rows flip to false), drop the args[1]-after-"--" check (the
-// "-- mcp list" row flips), drop the agents exclusion (the agents rows flip
-// to true), or drop the `--` stop in scanClaudeFlags (the "after claude's
-// separator" rows flip to true).
-func TestIsClaudePassthrough(t *testing.T) {
+// Mutation that turns it red: drop the args[1]-after-"--" check (the
+// "-- mcp list" row flips), or drop the agents exclusion (the agents rows
+// flip to true).
+func TestIsClaudeSubcommandCall(t *testing.T) {
 	cases := []struct {
 		args []string
 		want bool
@@ -23,22 +22,15 @@ func TestIsClaudePassthrough(t *testing.T) {
 		{nil, false},
 		{[]string{"hello"}, false},
 		{[]string{"--resume", "abc"}, false},
-		{[]string{"--model", "opus", "fix the bug"}, false},
 		{[]string{"mcp", "list"}, true},
 		{[]string{"update"}, true},
 		{[]string{"plugins"}, true},
 		{[]string{"doctor"}, true},
-		{[]string{"--help"}, true},
-		{[]string{"-p", "hi", "-v"}, true},
-		{[]string{"--version"}, true},
-		// Print mode is its own posture, not a byte-clean passthrough.
 		{[]string{"-p", "hi"}, false},
 		// claude dispatches a subcommand after its own `--` too.
 		{[]string{"--", "mcp", "list"}, true},
 		{[]string{"--", "hello"}, false},
 		{[]string{"--"}, false},
-		// Claude's own separator makes what follows prompt text.
-		{[]string{"--model", "opus", "--", "--help"}, false},
 		// A subcommand name is only a subcommand in first position; later it
 		// is a prompt word or a flag value.
 		{[]string{"--model", "opus", "mcp"}, false},
@@ -48,8 +40,36 @@ func TestIsClaudePassthrough(t *testing.T) {
 		{[]string{"--", "agents"}, false},
 	}
 	for _, tc := range cases {
-		if got := IsClaudePassthrough(tc.args); got != tc.want {
-			t.Errorf("IsClaudePassthrough(%q) = %v, want %v", tc.args, got, tc.want)
+		if got := IsClaudeSubcommandCall(tc.args); got != tc.want {
+			t.Errorf("IsClaudeSubcommandCall(%q) = %v, want %v", tc.args, got, tc.want)
+		}
+	}
+}
+
+// TestIsClaudeHelpOrVersion pins "first argument only". Later, a help token
+// can be a flag's value: `-p --append-system-prompt --help "<task>"` runs the
+// task in claude 2.1.285.
+//
+// Mutation that turns it red: scan every argument instead of args[0] (the
+// value-slot rows flip to true).
+func TestIsClaudeHelpOrVersion(t *testing.T) {
+	cases := []struct {
+		args []string
+		want bool
+	}{
+		{nil, false},
+		{[]string{"--help"}, true},
+		{[]string{"-h"}, true},
+		{[]string{"--version"}, true},
+		{[]string{"-v"}, true},
+		{[]string{"-p", "--append-system-prompt", "--help", "hi"}, false},
+		{[]string{"--append-system-prompt", "--help", "hi"}, false},
+		{[]string{"--model", "opus", "-v"}, false},
+		{[]string{"--", "--help"}, false},
+	}
+	for _, tc := range cases {
+		if got := IsClaudeHelpOrVersion(tc.args); got != tc.want {
+			t.Errorf("IsClaudeHelpOrVersion(%q) = %v, want %v", tc.args, got, tc.want)
 		}
 	}
 }

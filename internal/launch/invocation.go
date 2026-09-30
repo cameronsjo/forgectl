@@ -206,10 +206,15 @@ func selectPosture(p Profile, args []string) (Posture, []string, error) {
 			return PostureAgentsPassthrough, args, nil
 		}
 		return PostureClaudeAgents, AgentsArgs(p, args), nil
-	case IsClaudePassthrough(args):
+	// Order matters. A subcommand in the first slot can never be a flag's
+	// value, so it goes first. Print mode goes before help/version, so no
+	// help token can take a print run out of its permission mode.
+	case IsClaudeSubcommandCall(args):
 		return PostureClaudePassthrough, args, nil
 	case IsClaudePrintMode(args):
 		return PostureClaudePrint, PrintArgs(p, args), nil
+	case IsClaudeHelpOrVersion(args):
+		return PostureClaudePassthrough, args, nil
 	default:
 		return PostureClaudeBuilder, BuilderArgs(p, args), nil
 	}

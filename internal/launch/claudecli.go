@@ -43,26 +43,31 @@ func isClaudeSubcommand(tok string) bool {
 	return false
 }
 
-// IsClaudePassthrough reports whether a Claude argv must reach claude
-// byte-clean, with no injected posture and no banner. That is the case when
-// args[0] is a non-session Claude subcommand (`mcp`, `doctor`, `update`, …),
-// or when any argument before Claude's own `--` asks only for help or the
-// version. Neither starts a session, so there is no posture for the profile to
-// set, and the injected flags can break a subcommand outright: the variadic
-// `--add-dir <directories...>` swallows `mcp list` as two more directories,
-// and claude then starts a session instead (Claude Code 2.1.285).
+// IsClaudeSubcommandCall reports whether args runs a non-session Claude
+// subcommand (`mcp`, `doctor`, `update`, …), which must reach claude
+// byte-clean with no injected posture and no banner. It starts no session, so
+// there is no posture for the profile to set, and the injected flags can break
+// it outright: the variadic `--add-dir <directories...>` swallows `mcp list` as
+// two more directories, and claude then starts a session instead (Claude Code
+// 2.1.285).
 //
 // A subcommand after a leading `--` counts too, because claude dispatches it
 // anyway: `claude -- mcp list` runs `mcp list` (2.1.285). That is the argv
 // `forgectl launch -- -- mcp list` leaves once forgectl consumes its own `--`.
 //
-// Only that first positional slot is checked. Finding the first positional
-// past arbitrary flags would mean knowing which Claude flags take a value, and
-// a hand-kept table of that would drift silently.
+// Only that first positional slot is checked, because it is the one slot that
+// can never be a flag's value. Finding the first positional past arbitrary
+// flags would mean knowing which Claude flags take a value, and a hand-kept
+// table of that would drift silently.
 //
-// "agents" is never a passthrough here, in either slot: it starts sessions,
-// so it keeps the posture-injecting branch selectPosture gives it.
-func IsClaudePassthrough(args []string) bool {
+// "agents" is never counted here, in either slot: it starts sessions. A
+// leading `agents` gets its own posture branch in selectPosture. `-- agents …`
+// falls through to BuilderArgs, which still injects the profile posture ahead
+// of claude's `--`. It is not rerouted to AgentsArgs because claude reads
+// everything after its `--` as operands: `claude -- agents --json` fails "too
+// many arguments for 'agents'" (2.1.285), so it is not the same command as
+// `claude agents --json`.
+func IsClaudeSubcommandCall(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
@@ -70,10 +75,29 @@ func IsClaudePassthrough(args []string) bool {
 	if sub == "--" && len(args) > 1 {
 		sub = args[1]
 	}
-	if sub != "agents" && isClaudeSubcommand(sub) {
+	return sub != "agents" && isClaudeSubcommand(sub)
+}
+
+// IsClaudeHelpOrVersion reports whether args[0] is `-h`, `--help`, `-v`, or
+// `--version`. That run prints and exits without starting a session, so it
+// reaches claude byte-clean.
+//
+// Only args[0] counts, because anywhere later the token can be a flag's value.
+// `claude -p --append-system-prompt --help "<task>"` consumes `--help` as the
+// system prompt and RUNS the task (2.1.285). If a scan anywhere in argv
+// matched it, that run would reach claude with no permission mode at all. A
+// later help flag falls through to the print or builder posture instead, and
+// claude still just prints help: `claude --permission-mode plan -p x --help`
+// prints help.
+func IsClaudeHelpOrVersion(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "-h", "--help", "-v", "--version":
 		return true
 	}
-	return scanClaudeFlags(args, "-h", "--help", "-v", "--version")
+	return false
 }
 
 // IsClaudePrintMode reports whether any argument before Claude's own `--`
