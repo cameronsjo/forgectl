@@ -210,7 +210,7 @@ func printReceipt(out io.Writer, r *sessions.Receipt) error {
 	}
 	if !r.Complete() {
 		for _, id := range r.Missing {
-			fmt.Fprintf(out, "MISSING %s\n", id)
+			_, _ = fmt.Fprintf(out, "MISSING %s\n", safeLabel(id))
 		}
 		return receiptError(r)
 	}
@@ -287,8 +287,9 @@ func writeSearchHitsJSON(out io.Writer, hits []sessions.SearchHit) error {
 }
 
 // printSearchHits owns the terminal boundary for concordance search results.
-// Indexed content is untrusted at print time, so every field is quoted before
-// it reaches the operator's shell.
+// Indexed content is untrusted at print time, so every field is quoted and
+// capped (safeLabel, safeTitle, safeSnippet; safePath escapes only, #894)
+// before it reaches the operator's shell.
 func printSearchHits(out io.Writer, hits []sessions.SearchHit) error {
 	if len(hits) == 0 {
 		_, err := fmt.Fprintln(out, "no runbooks matched")
@@ -296,8 +297,8 @@ func printSearchHits(out io.Writer, hits []sessions.SearchHit) error {
 	}
 	for _, h := range hits {
 		if _, err := fmt.Fprintf(out, "%s\t%s\t[%s]\t(%s, indexed by %s)\n\t%s\n",
-			safeTerm(h.Path), safeTerm(h.Title), safeTerm(h.Type),
-			safeTerm(h.Project), safeTerm(h.Machine), safeTerm(h.Snippet)); err != nil {
+			safePath(h.Path), safeTitle(h.Title), safeLabel(h.Type),
+			safeLabel(h.Project), safeLabel(h.Machine), safeSnippet(h.Snippet)); err != nil {
 			return err
 		}
 	}
@@ -414,9 +415,9 @@ type whyDTO struct {
 
 // printWhyHits renders `sessions why` results. Concordance-sourced fields are
 // untrusted on both paths, and each path uses the control built for its own
-// sink: the text path quotes through safeTerm, the JSON path carries the stored
-// value unaltered and lets writeJSON's termsafe.JSONEncoder escape it on the way
-// out. Escaping there rather than rewriting is what keeps `--json | jq` handing
+// sink: the text path quotes and caps through the safeLabel family, the JSON
+// path carries the stored value unaltered and lets writeJSON's
+// termsafe.JSONEncoder escape it on the way out. Escaping there rather than rewriting is what keeps `--json | jq` handing
 // back the operator's exact bytes.
 func printWhyHits(cmd *cobra.Command, hits []sessions.WhyHit, asJSON bool) error {
 	out := cmd.OutOrStdout()
@@ -439,11 +440,11 @@ func printWhyHits(cmd *cobra.Command, hits []sessions.WhyHit, asJSON bool) error
 		return nil
 	}
 	for _, h := range hits {
-		fmt.Fprintf(out, "%s\t%s\t[%s]\t%s\n",
-			safeTerm(h.SessionID), humanTs(h.LastTs), safeTerm(h.Project), safeTerm(h.Model))
-		fmt.Fprintf(out, "\t%s · %s\n", safeTerm(h.Type), safeTerm(h.Title))
-		fmt.Fprintf(out, "\t%s\n", safeTerm(h.Path))
-		fmt.Fprintf(out, "\t%s\n", safeTerm(h.Snippet))
+		_, _ = fmt.Fprintf(out, "%s\t%s\t[%s]\t%s\n",
+			safeLabel(h.SessionID), humanTs(h.LastTs), safeLabel(h.Project), safeLabel(h.Model))
+		_, _ = fmt.Fprintf(out, "\t%s · %s\n", safeLabel(h.Type), safeTitle(h.Title))
+		_, _ = fmt.Fprintf(out, "\t%s\n", safePath(h.Path))
+		_, _ = fmt.Fprintf(out, "\t%s\n", safeSnippet(h.Snippet))
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "Found %d sessions\n", len(hits))
 	return nil
@@ -488,25 +489,25 @@ func printLastSession(cmd *cobra.Command, repo string, s *sessions.SessionSummar
 		})
 	}
 	if s == nil {
-		fmt.Fprintf(out, "no sessions recorded for %q\n", safeTerm(repo))
+		_, _ = fmt.Fprintf(out, "no sessions recorded for %q\n", safeLabel(repo))
 		return nil
 	}
 	committed := "no commits"
 	if s.Committed {
 		committed = "committed"
 	}
-	fmt.Fprintf(out, "%s\t%s\t[%s]\t%s\t%s\n",
-		safeTerm(s.SessionID), humanTs(s.LastTs), safeTerm(s.Project), safeTerm(s.GitBranch), committed)
+	_, _ = fmt.Fprintf(out, "%s\t%s\t[%s]\t%s\t%s\n",
+		safeLabel(s.SessionID), humanTs(s.LastTs), safeLabel(s.Project), safeLabel(s.GitBranch), committed)
 	if s.Model != "" || s.Machine != "" {
-		fmt.Fprintf(out, "\t%s on %s\n", safeTerm(s.Model), safeTerm(s.Machine))
+		_, _ = fmt.Fprintf(out, "\t%s on %s\n", safeLabel(s.Model), safeLabel(s.Machine))
 	}
 	if len(s.Artifacts) == 0 {
-		fmt.Fprintln(out, "\tno field report or handoff recorded")
+		_, _ = fmt.Fprintln(out, "\tno field report or handoff recorded")
 		return nil
 	}
 	for _, a := range s.Artifacts {
-		fmt.Fprintf(out, "\t%s · %s\n\t  %s\n",
-			safeTerm(a.Type), safeTerm(a.Title), safeTerm(a.Path))
+		_, _ = fmt.Fprintf(out, "\t%s · %s\n\t  %s\n",
+			safeLabel(a.Type), safeTitle(a.Title), safePath(a.Path))
 	}
 	return nil
 }
@@ -539,4 +540,54 @@ func humanTs(t *time.Time) string {
 // would corrupt the machine contract.
 func safeTerm(s string) string {
 	return termsafe.SafeLine(s)
+}
+
+// runbookTitleMaxRunes caps a runbook title in a line of `sessions` text
+// output. The indexer stores a title as the document gave it (a frontmatter
+// `title:` or the first heading, uncut), so nobody at the terminal chose its
+// length (forgectl#891). --json carries it whole.
+const runbookTitleMaxRunes = 256
+
+// safeTitle is a runbook title made terminal-safe and bounded for a line of
+// text output.
+func safeTitle(s string) string {
+	return termsafe.SafeLineMax(s, runbookTitleMaxRunes)
+}
+
+// runbookSnippetMaxRunes caps a match snippet in a line of `sessions` text
+// output. The snippet is Postgres ts_headline with MaxWords=20, which bounds
+// words, not characters: one long word, or a run of punctuation or control
+// characters between words, passes through whole, so one headline can be
+// tens of thousands of characters (forgectl#891). 320 is
+// docs search's snippet cap (docsSearchSnippetRunes) and holds 20 ordinary
+// words plus the <<>> match markers several times over. --json carries it
+// whole.
+const runbookSnippetMaxRunes = 320
+
+// safeSnippet is a match snippet made terminal-safe and bounded for a line of
+// text output.
+func safeSnippet(s string) string {
+	return termsafe.SafeLineMax(s, runbookSnippetMaxRunes)
+}
+
+// sessionsLabelMaxRunes caps every short label the `sessions` text printers
+// write: session ids, project, model, machine, branch, a runbook's type. Each
+// is disk- or concordance-sourced (ParseRunbook reads frontmatter `type:` and
+// `project:` with no length limit), so none has a length anyone at the
+// terminal chose. 64 holds a UUID, a repo slug or a model id whole.
+const sessionsLabelMaxRunes = 64
+
+// safeLabel is a short label made terminal-safe and bounded for a line of
+// text output.
+func safeLabel(s string) string {
+	return termsafe.SafeLineMax(s, sessionsLabelMaxRunes)
+}
+
+// safePath renders a runbook path for `sessions` text output. It is escaped
+// but NOT capped yet: capping a path so it still points somewhere useful is
+// forgectl#894. It exists so every text field in this file goes through a
+// named helper, and TestSessionsText_EveryFieldCapped allowlists only the
+// Path fields for that reason.
+func safePath(s string) string {
+	return safeTerm(s)
 }

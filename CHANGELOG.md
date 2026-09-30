@@ -13,6 +13,11 @@
 * **cli:** report a docs list stdout write failure as the docs integer-code --json object, and honor --json after a "--" that is another flag's value when a failure happens before startup ([8866a3b](https://github.com/cameronsjo/forgectl/commit/8866a3b6262b5eec54f338484686624cd38f211b))
 * **resume:** cap the last-prompt line in resume ls at 256 runes ([8866a3b](https://github.com/cameronsjo/forgectl/commit/8866a3b6262b5eec54f338484686624cd38f211b))
 
+
+### Reverts
+
+* undo the ungated 0.23.0 release bump ([#900](https://github.com/cameronsjo/forgectl/issues/900)) ([4dc2384](https://github.com/cameronsjo/forgectl/commit/4dc238400e814095f84e1f64fef4b42ae937d9c5))
+
 ## [0.22.0](https://github.com/cameronsjo/forgectl/compare/v0.21.0...v0.22.0) (2026-09-30)
 
 

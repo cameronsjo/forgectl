@@ -577,7 +577,8 @@ func TestIntegration_Builder_AppliesProfileAndPassesThrough(t *testing.T) {
 	got := h.recordedArgs(t)
 	want := []string{
 		"--permission-mode", "plan",
-		"--allow-dangerously-skip-permissions",
+		// no --allow-dangerously-skip-permissions: the harness's stdout is a
+		// pipe, and a piped builder run withholds it (forgectl#812)
 		"--add-dir", h.cwd + "/shared",
 		"--model", "sonnet",
 		"--effort", "high", // derived from sonnet; the fixture sets no effort
@@ -669,7 +670,8 @@ func TestIntegration_LeadingSeparatorIsConsumed(t *testing.T) {
 	profile := func(h *harness) []string {
 		return []string{
 			"--permission-mode", "plan",
-			"--allow-dangerously-skip-permissions",
+			// Piped stdout: the builder withholds
+			// --allow-dangerously-skip-permissions (forgectl#812).
 			"--add-dir", h.cwd + "/shared",
 			"--model", "sonnet",
 			"--effort", "high",
@@ -983,7 +985,8 @@ func TestIntegration_LaunchShadow_ExecAutoMigrates(t *testing.T) {
 	got := h.recordedArgs(t)
 	want := []string{
 		"--permission-mode", "plan",
-		"--allow-dangerously-skip-permissions",
+		// no --allow-dangerously-skip-permissions: the harness's stdout is a
+		// pipe, and a piped builder run withholds it (forgectl#812)
 		"--model", "sonnet",
 		"--effort", "high", // derived from sonnet — the merged-in project now applies
 		"hi",
@@ -1036,7 +1039,8 @@ func TestIntegration_LaunchShadow_DuplicateProjectMatch_NoOverwrite(t *testing.T
 	got := h.recordedArgs(t)
 	want := []string{
 		"--permission-mode", "plan",
-		"--allow-dangerously-skip-permissions",
+		// no --allow-dangerously-skip-permissions: the harness's stdout is a
+		// pipe, and a piped builder run withholds it (forgectl#812)
 		"--model", "opus",
 		"--effort", "medium", // derived from opus, not the legacy sonnet entry
 		"hi",
