@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/cameronsjo/forgectl/internal/perftest"
 )
 
 // captureLogs routes the default slog logger into a buffer at debug level for
@@ -263,22 +265,28 @@ func TestMaskText_ShortValuesQualifyEachOtherToAFixpoint(t *testing.T) {
 	}
 }
 
-// TestMaskText_LongValueWithNoMatchIsNearLinear: a 4 KiB value that almost
-// matches everywhere ("aaa…ab") against 8 MiB of "a". Comparing it at every
-// byte is 32 G byte-comparisons; one strings.Index scan is linear.
+// TestMaskText_LongValueWithNoMatchIsNearLinear: a value that almost
+// matches everywhere ("aaa…ab") against a stream of "a". Comparing it at every
+// byte costs the value's length times the stream's; one strings.Index scan
+// is linear. The check is a ratio in CPU time (perftest.Linear,
+// forgectl#879): a 4 KiB value over 256 KiB, then both eight times longer.
+// The value is long enough that comparing it,
+// not the per-byte call, dominates a HasPrefix at every byte.
 //
 // Mutation: replace the long-pattern Index scan with a HasPrefix test at every
-// byte and this takes about 2.5 s (0.04 s as written, 0.19 s under -race).
+// byte, and the eight-times input costs over a hundred times as much.
 func TestMaskText_LongValueWithNoMatchIsNearLinear(t *testing.T) {
-	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"K=" + strings.Repeat("a", 4095) + "b"}))
-	s := strings.Repeat("a", 8<<20)
-	start := time.Now()
-	if got := m.text(s); got != s {
-		t.Fatal("text changed a stream with no match")
+	const k = 8
+	run := func(scale int) func() {
+		m := maskFrom(WithMaskedAssignments(context.Background(), []string{"K=" + strings.Repeat("a", 4096*scale-1) + "b"}))
+		s := strings.Repeat("a", scale<<18)
+		return func() {
+			if got := m.text(s); got != s {
+				t.Fatal("text changed a stream with no match")
+			}
+		}
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Errorf("text took %v on 8 MiB with no match; want well under a second", elapsed)
-	}
+	perftest.Linear(t, "text with no match", k, run(1), run(k))
 }
 
 // TestOSRunner_MaskedAssignments_FailureStdoutMaskedInOutput pins #664: a
@@ -442,7 +450,7 @@ func TestMaskText_DifferentialAgainstMain(t *testing.T) {
 				}
 			}
 			m := maskFrom(WithMaskedAssignments(context.Background(), entries))
-			covered := m.cover(text)
+			covered := m.data().cover(text)
 			for i, hid := range mainMaskedBytes(entries, text) {
 				if hid && !covered.has(i) {
 					t.Fatalf("alphabet %q case %d: entries %q\ntext %q\nmain hid byte %d, the new cover shows it: %q", alphabet, c, entries, text, i, m.text(text))
@@ -492,23 +500,30 @@ func TestMaskText_ShortCascadeIsLinear(t *testing.T) {
 	}
 }
 
-// TestMaskText_SelfOverlappingLongValueIsLinear pins #708 item 2: a 16 KiB
-// "a…a" value against 16 MiB of "a" matches at every byte, and verifying
-// each match in full is 2.7e11 byte comparisons (about 10 s). eachMatch
-// carries the KMP state across overlapping matches instead (about 0.3 s).
+// TestMaskText_SelfOverlappingLongValueIsLinear pins #708 item 2: an "a…a"
+// value against a stream of "a" matches at every byte, and verifying each
+// match in full costs the value's length times the stream's (16 KiB over
+// 16 MiB was 2.7e11 byte comparisons, about 10 s). eachMatch carries the KMP
+// state across overlapping matches instead, which is linear. The check is a
+// ratio in CPU time (perftest.Linear, forgectl#879): a 4 KiB value over
+// 128 KiB, then both eight times longer. The value is long enough that
+// comparing it, not the per-match call, dominates re-verifying every match.
 //
 // Mutation: in eachMatch, drop the KMP carry (q starts at 0) and resume the
-// Index scan at i+1, as the old loop did, and this takes several seconds.
+// Index scan at i+1, as the old loop did, and the eight-times input costs
+// over a hundred times as much.
 func TestMaskText_SelfOverlappingLongValueIsLinear(t *testing.T) {
-	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"K=" + strings.Repeat("a", 16<<10)}))
-	s := strings.Repeat("a", 16<<20)
-	start := time.Now()
-	if got := m.text(s); got != Redacted {
-		t.Fatalf("text left part of the stream: %.40q…", got)
+	const k = 8
+	run := func(scale int) func() {
+		m := maskFrom(WithMaskedAssignments(context.Background(), []string{"K=" + strings.Repeat("a", 4096*scale)}))
+		s := strings.Repeat("a", scale<<17)
+		return func() {
+			if got := m.text(s); got != Redacted {
+				t.Fatalf("text left part of the stream: %.40q…", got)
+			}
+		}
 	}
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
-		t.Errorf("text took %v on 16 MiB matching at every byte; want well under a second", elapsed)
-	}
+	perftest.Linear(t, "text matching at every byte", k, run(1), run(k))
 }
 
 // TestEachMatch_FindsEveryOverlappingOccurrence checks eachMatch against a
@@ -579,7 +594,8 @@ func TestMaskedTail_CutInsideAnEntryKeyHidesTheGluedValue(t *testing.T) {
 
 // straddleLenReference is straddleLen as it stood before #749: every suffix
 // length probed with HasPrefix, and no round cap.
-func straddleLenReference(m argMask, s string) int {
+func straddleLenReference(mask argMask, s string) int {
+	m := mask.data()
 	total := 0
 	for {
 		n := 0

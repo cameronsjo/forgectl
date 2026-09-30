@@ -255,11 +255,13 @@ func buildRootIndexes(roots []Root, docs []Doc, attachments map[string][]string)
 	return out
 }
 
-// attachmentSet is the root's attachment set, keyed as attRel keys it; nil
-// for a root with no tables.
-func (idx *Index) attachmentSet(label string) map[string]bool {
+// attachmentsByName is the root's attByName table: every attachment, keyed
+// by folded basename, one attKey'd path per file, so two files whose names
+// differ only in case appear twice. It determines attRel, so it is all of
+// what resolveAttachment reads. nil for a root with no tables.
+func (idx *Index) attachmentsByName(label string) map[string][]string {
 	if ri := idx.byRoot[label]; ri != nil {
-		return ri.attRel
+		return ri.attByName
 	}
 	return nil
 }
