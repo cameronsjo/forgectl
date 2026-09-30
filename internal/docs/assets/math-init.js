@@ -57,39 +57,86 @@
   // \left…\right and the \begingroup/\bgroup forms together: each nests the
   // output a level deeper (nested matrices crash with no brace nesting at
   // all), and they can be mixed to dodge a per-kind count.
+  //
+  // MAX_CELLS bounds the alignment separators, & and \\, a formula may hold
+  // (forgectl#690). Each one opens a cell, a macro-free source can hold
+  // thousands of them, and a cell costs a dozen or more nodes even when it
+  // is empty: an empty matrix row of 9,900 & builds about 170,000 nodes, in
+  // about 2 s, before tooBig can reject it. 2,000 cells is a 40 × 50
+  // matrix, far past any written by hand, and builds at most about 35,000
+  // nodes, under MAX_NODES.
   var MAX_SOURCE = 10000;
   var MAX_DEPTH = 100;
+  var MAX_CELLS = 2000;
 
-  // tooComplex reports whether src is over MAX_SOURCE characters or nests
-  // deeper than MAX_DEPTH. An escaped brace (\{, \}) is a literal, a
-  // control symbol (\\, \$, …) consumes the one character after it, and a
-  // % comment runs to the end of its line, as KaTeX reads them. A closer
-  // never takes the depth below zero, so surplus closers cannot bank credit
-  // for later openers.
+  // LINE_END matches the characters that end a line for KaTeX's lexer, whose
+  // \verb match uses ".", which stops at each of them.
+  var LINE_END = /[\n\r\u2028\u2029]/;
+
+  // verbEnd returns the index of the delimiter that closes a \verb whose
+  // delimiter is at src[k], or -1 when KaTeX would not lex it as \verb. It
+  // follows KaTeX's lexer: \verb*<d>…<d> takes any <d>; plain \verb<d>…<d>
+  // takes any <d> but * and an ASCII letter (@ included); the body is the
+  // shortest run to the next <d> that does not cross a line end.
+  function verbEnd(src, k, star) {
+    if (k >= src.length) { return -1; }
+    var d = src.charAt(k);
+    if (!star && (d === "*" || /[A-Za-z]/.test(d))) { return -1; }
+    for (var m = k + 1; m < src.length; m++) {
+      var ch = src.charAt(m);
+      if (ch === d) { return m; }
+      if (LINE_END.test(ch)) { return -1; }
+    }
+    return -1;
+  }
+
+  // tooComplex reports whether src is over MAX_SOURCE characters, nests
+  // deeper than MAX_DEPTH, or holds more than MAX_CELLS & and \\. An escaped
+  // brace (\{, \}) is a literal, a control symbol (\\, \$, …) consumes the
+  // one character after it, a % comment runs to the end of its line, and
+  // \verb<d>…<d> is one opaque token, as KaTeX reads them. The \verb rule
+  // is what keeps a % inside it (\verb|%|) from reading as a comment that
+  // hides the openers after it (forgectl#690). A \verb KaTeX would not lex
+  // (no closing delimiter on its line) is scanned as ordinary text, which can
+  // only count more. A closer never takes the depth below zero, so surplus
+  // closers cannot bank credit for later openers.
   function tooComplex(src) {
     if (src.length > MAX_SOURCE) { return true; }
     var depth = 0;
+    var cells = 0;
     for (var i = 0; i < src.length; i++) {
       var c = src.charAt(i);
       if (c === "{") {
         depth++;
       } else if (c === "}") {
         depth = Math.max(0, depth - 1);
+      } else if (c === "&") {
+        cells++;
       } else if (c === "%") {
         while (i + 1 < src.length && src.charAt(i + 1) !== "\n") { i++; }
       } else if (c === "\\") {
         var j = i + 1;
         while (j < src.length && /[A-Za-z]/.test(src.charAt(j))) { j++; }
         var name = src.slice(i + 1, j);
+        if (name === "verb") {
+          var star = src.charAt(j) === "*";
+          var end = verbEnd(src, star ? j + 1 : j, star);
+          if (end >= 0) {
+            i = end;
+            continue;
+          }
+        }
         if (name === "begin" || name === "left" || name === "begingroup" || name === "bgroup") {
           depth++;
         } else if (name === "end" || name === "right" || name === "endgroup" || name === "egroup") {
           depth = Math.max(0, depth - 1);
+        } else if (name === "" && src.charAt(j) === "\\") {
+          cells++;
         }
         // A command name ends before j; a control symbol is one character.
         i = name === "" ? i + 1 : j - 1;
       }
-      if (depth > MAX_DEPTH) { return true; }
+      if (depth > MAX_DEPTH || cells > MAX_CELLS) { return true; }
     }
     return false;
   }
@@ -121,21 +168,45 @@
   // MAX_DOM_DEPTH levels deep and MAX_NODES nodes in all. Measured in
   // Chromium, a tab crashes at about 960 levels of \frac output, and
   // layout time grows about with the cube of depth: nested \mathinner
-  // takes 2 to 3 s to lay out at 250 levels and 19 s at 491, and the cost
-  // is paid again on every theme toggle (forgectl#675). Each \frac level is
-  // 7 DOM levels, so 34 nested fractions render and 35 do not. MAX_NODES
-  // bounds how much output a formula can build. A macro-free source under
-  // MAX_SOURCE can still pass it: an empty matrix row of 9,900 & builds
-  // about 170,000 nodes, in about 2 s.
+  // takes 2 to 3 s to lay out at 250 levels and 19 s at 491 (forgectl#675).
+  // Each \frac level is 7 DOM levels, so 34 nested fractions render and 35
+  // do not. MAX_NODES bounds how much output one formula can build, and
+  // layout time grows faster than its node count: a macro-free row of
+  // x'x'x'… lays out 36,000 nodes in about 0.2 s and 72,000 in about 1.4 s
+  // (forgectl#697). 40,000 nodes is far past a hand-written formula; a
+  // dense 50-line align is about 25,000.
   var MAX_DOM_DEPTH = 250;
-  var MAX_NODES = 100000;
+  var MAX_NODES = 40000;
 
-  // tooBig reports whether the tree under root is deeper than MAX_DOM_DEPTH
-  // or has more than MAX_NODES nodes, counting root's children as depth 1.
-  // It walks with an explicit stack, because a recursive walk of an
-  // over-deep tree is the stack overflow this guards against, and it stops
-  // at the first node over either bound.
-  function tooBig(root) {
+  // The page budget (forgectl#697). Every cap above is per formula, so a
+  // page of many formulas each under them still adds up: ten 70,000-node
+  // formulas froze the tab for 51 s. One render pass (the first render, or
+  // a refresh after live reload) spends at most about PAGE_MS milliseconds
+  // of main-thread time on math: KaTeX's build, timed as it runs, plus the
+  // layout of what the pass attached, estimated by layoutMs. The formula
+  // that would cross it, and every formula after it in the pass, is left as
+  // TeX source. The build time is checked between formulas, so a pass can
+  // run over by one formula's build, which MAX_NODES keeps short. Layout
+  // is estimated rather than timed because timing it means forcing a
+  // layout after every formula, which on a page of 400 small inline
+  // formulas cost 0.7 to 1 s by itself. That page spends about 0.4 s.
+  var PAGE_MS = 3000;
+
+  // layoutMs estimates, in milliseconds, what laying out a formula of n
+  // nodes costs: about 3 µs a node, plus a term that grows with the square
+  // of n. Measured in Chromium on macro-free rows of x' and empty matrix
+  // cells: 36,000 nodes take 0.2 to 0.45 s to lay out and 70,000 take 1.4
+  // to 2.2 s. It overestimates, so the pass stops early rather than late.
+  function layoutMs(n) {
+    return n * 0.003 + n * n * 4e-7;
+  }
+
+  // outputNodes returns the number of nodes under root, or -1 when the tree
+  // is deeper than MAX_DOM_DEPTH or has more than MAX_NODES nodes, counting
+  // root's children as depth 1. It walks with an explicit stack, because a
+  // recursive walk of an over-deep tree is the stack overflow this guards
+  // against, and it stops at the first node over either bound.
+  function outputNodes(root) {
     var stack = [root, 0];
     var nodes = 0;
     while (stack.length > 0) {
@@ -143,17 +214,18 @@
       var node = stack.pop();
       for (var c = node.firstChild; c !== null; c = c.nextSibling) {
         nodes++;
-        if (depth + 1 > MAX_DOM_DEPTH || nodes > MAX_NODES) { return true; }
+        if (depth + 1 > MAX_DOM_DEPTH || nodes > MAX_NODES) { return -1; }
         stack.push(c, depth + 1);
       }
     }
-    return false;
+    return nodes;
   }
 
   // The reasons skip gives, as the skipped formula's tooltip.
   var TOO_COMPLEX = "Not rendered: this formula is too long, too large or too deeply nested to render safely.";
   var DEFINES_MACRO = "Not rendered: this formula defines a macro (\\def, \\newcommand, \\let, …), which could make it too slow to render safely.";
   var RENDER_FAILED = "Not rendered: the math renderer failed on this formula.";
+  var OVER_BUDGET = "Not rendered: the math before this formula used up the page's rendering budget.";
 
   // skip leaves the formula as its TeX source, marked .math-skipped, with
   // reason as its tooltip.
@@ -163,17 +235,30 @@
     el.title = reason;
   }
 
-  // The TeX is stashed on first render, because a render replaces the
-  // element's content and a re-render (theme change, refresh) needs the
-  // source back. A formula already skipped stays skipped: its source has
-  // not changed, and re-rendering it would only redo the work to reject it.
-  function renderOne(el, color) {
-    var src = el.dataset.mathSource;
-    if (src === undefined) {
-      src = el.textContent;
-      el.dataset.mathSource = src;
+  // newBudget is the allowance of one render pass: the time it started,
+  // the layout it has charged so far, and whether it has run out.
+  function newBudget() {
+    return { start: performance.now(), layout: 0, spent: false };
+  }
+
+  // budgetLeft is the milliseconds budget has left, after its elapsed time
+  // and the layout it has charged.
+  function budgetLeft(budget) {
+    return PAGE_MS - (performance.now() - budget.start) - budget.layout;
+  }
+
+  // renderOne renders one formula that has not been rendered yet, charging
+  // budget. The TeX is stashed in data-math-source, which also marks the
+  // formula as done: nothing renders it again, because its source cannot
+  // change and a theme change only recolors errors (recolorErrors).
+  function renderOne(el, color, budget) {
+    var src = el.textContent;
+    el.dataset.mathSource = src;
+    if (budget.spent || budgetLeft(budget) <= 0) {
+      budget.spent = true;
+      skip(el, src, OVER_BUDGET);
+      return;
     }
-    if (el.classList.contains("math-skipped")) { return; }
     var display = el.classList.contains("math-display");
     if (DEFINER.test(src)) {
       skip(el, src, DEFINES_MACRO);
@@ -184,7 +269,7 @@
       return;
     }
     // Detached: KaTeX builds into holder, which is in no document, so no
-    // layout runs until the output passes tooBig and moves into el.
+    // layout runs until the output passes outputNodes and moves into el.
     var holder = document.createElement("span");
     try {
       katex.render(strip(src, display), holder, {
@@ -217,28 +302,50 @@
       console.warn("[forgectl docs] math render failed", err);
       return;
     }
-    if (tooBig(holder)) {
+    var nodes = outputNodes(holder);
+    if (nodes < 0) {
       skip(el, src, TOO_COMPLEX);
       return;
     }
+    var layout = layoutMs(nodes);
+    if (layout > budgetLeft(budget)) {
+      budget.spent = true;
+      skip(el, src, OVER_BUDGET);
+      return;
+    }
+    budget.layout += layout;
     el.textContent = "";
     while (holder.firstChild !== null) { el.appendChild(holder.firstChild); }
   }
 
+  // renderAll renders every formula not rendered yet, in one budgeted pass.
   function renderAll() {
     var color = errorColor();
-    document.querySelectorAll(".math").forEach(function (el) { renderOne(el, color); });
+    var budget = newBudget();
+    document.querySelectorAll(".math").forEach(function (el) {
+      if (el.dataset.mathSource === undefined) { renderOne(el, color, budget); }
+    });
   }
 
-  // Re-render on theme change so an error's inline color follows the theme.
-  // KaTeX's own output uses currentColor and needs nothing.
+  // recolorErrors gives every parse error the current theme's error color.
+  // KaTeX's own output uses currentColor and follows the theme by itself;
+  // only an error carries an inline color. Recoloring in place, rather than
+  // re-rendering every formula as an earlier version did, makes a theme
+  // toggle cost nothing in KaTeX (forgectl#697).
+  function recolorErrors() {
+    var color = errorColor();
+    document.querySelectorAll(".math .katex-error").forEach(function (e) {
+      e.style.color = color;
+    });
+  }
+
   function watchTheme() {
     var last = document.documentElement.getAttribute("data-theme");
     new MutationObserver(function () {
       var now = document.documentElement.getAttribute("data-theme");
       if (now === last) { return; }
       last = now;
-      renderAll();
+      recolorErrors();
     }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
   }
 
@@ -246,6 +353,6 @@
   watchTheme();
 
   // Live reload (reload.js) swaps the document body in place, bringing in new,
-  // unrendered .math elements; refresh renders them.
+  // unrendered .math elements; refresh renders them, with a fresh budget.
   window.ForgectlMath = { refresh: renderAll };
 })();

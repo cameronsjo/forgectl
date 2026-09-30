@@ -194,7 +194,8 @@ var contentLookups = map[string]map[string]string{
 		"span":                             "runs on the detached clone of the selection",
 	},
 	"math-init.js": {
-		".math": "content: the formulas it renders",
+		".math":              "content: the formulas it renders",
+		".math .katex-error": "content: parse errors in the formulas it rendered, recolored on a theme change; a doc-forged one only changes color",
 	},
 	"mermaid-init.js": {
 		"pre.mermaid [data-fc]": "scrubs hooks forged inside rendered diagrams",
