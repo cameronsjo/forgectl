@@ -415,9 +415,15 @@ func TestWindowVerbs_TargetNativeID(t *testing.T) {
 			},
 		},
 		"SelectWindow": {
-			run:         func(c *Client, id WindowIdentity) error { return c.SelectWindow(context.Background(), id) },
-			want:        []string{"select-window", "-t", "@3"},
-			interactive: true,
+			run: func(c *Client, id WindowIdentity) error { return c.SelectWindow(context.Background(), id) },
+			// forgectl#805: the select re-proves the captured generation on the
+			// captured Run path, where the guard's answer can be read back.
+			// Mutation that turns it red: issue the bare select-window through
+			// RunInteractive again.
+			want: []string{
+				"if-shell", "-F", "-t", "@3", "#{==:#{pid}/#{start_time},123/456}",
+				"select-window -t @3", `display-message -p "forgectl-generation-mismatch #{pid}/#{start_time}"`,
+			},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

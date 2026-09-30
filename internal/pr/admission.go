@@ -116,11 +116,21 @@ func (c *Client) LiveReviews(ctx context.Context) (n int, ok bool) {
 // `pr list` — which reads breadcrumbs only — reports the session as active
 // forever. This is the read that tells the truth.
 func (c *Client) WindowLive(ctx context.Context, ref Ref) (live bool, ok bool) {
-	m, ok := c.WindowsLive(ctx, []Ref{ref})
-	if !ok {
-		return false, false
+	live, err := c.windowLiveErr(ctx, ref)
+	return live, err == nil
+}
+
+// windowLiveErr is WindowLive with the reason kept, for a refusal that must
+// tell the operator what to do next: an exited server's leftover socket
+// (tmux.ErrServerExited) has a remedy an unreadable tmux in general does not
+// (forgectl#805). It reads the same strict list, so it is exactly as
+// fail-closed as WindowLive.
+func (c *Client) windowLiveErr(ctx context.Context, ref Ref) (bool, error) {
+	m, err := c.windowsLive(ctx, []Ref{ref}, c.tmuxClient.ListWindows)
+	if err != nil {
+		return false, err
 	}
-	return m[ref], true
+	return m[ref], nil
 }
 
 // WindowsLive answers WindowLive for a whole set of refs from ONE ListWindows
@@ -149,22 +159,43 @@ func (c *Client) WindowLive(ctx context.Context, ref Ref) (live bool, ok bool) {
 // the lifecycle lock, and a timeout reads as ok=false — "unknown", which every
 // caller already treats as a window that may exist.
 func (c *Client) WindowsLive(ctx context.Context, refs []Ref) (map[Ref]bool, bool) {
-	return c.windowsLive(ctx, refs, c.tmuxClient.ListWindows)
+	m, err := c.windowsLive(ctx, refs, c.tmuxClient.ListWindows)
+	if err != nil {
+		return nil, false
+	}
+	return m, true
 }
 
 // WindowsLiveForListing is WindowsLive for `pr list`'s display: an exited
-// server's leftover socket reads as no live window (countableWindows), not as
-// an unreadable tmux (forgectl#786). It must never gate an action.
-func (c *Client) WindowsLiveForListing(ctx context.Context, refs []Ref) (map[Ref]bool, bool) {
-	return c.windowsLive(ctx, refs, c.countableWindows)
+// server's leftover socket reads as no live window, the way countableWindows
+// counts it, not as an unreadable tmux (forgectl#786). It must never gate an
+// action.
+//
+// serverExited reports that the listing read exactly that state, so the
+// display can say "no tmux server" rather than "window gone" (forgectl#805):
+// the strict reads refuse to reach "gone" on the same evidence, and the
+// harsher label sends an operator to teardown.
+func (c *Client) WindowsLiveForListing(ctx context.Context, refs []Ref) (live map[Ref]bool, ok bool, serverExited bool) {
+	m, err := c.windowsLive(ctx, refs, c.tmuxClient.ListWindows)
+	if errors.Is(err, tmux.ErrServerExited) {
+		none := make(map[Ref]bool, len(refs))
+		for _, ref := range refs {
+			none[ref] = false
+		}
+		return none, true, true
+	}
+	if err != nil {
+		return nil, false, false
+	}
+	return m, true, false
 }
 
-func (c *Client) windowsLive(ctx context.Context, refs []Ref, list func(context.Context) ([]tmux.Window, error)) (map[Ref]bool, bool) {
+func (c *Client) windowsLive(ctx context.Context, refs []Ref, list func(context.Context) ([]tmux.Window, error)) (map[Ref]bool, error) {
 	tctx, done := boundedTmux(ctx)
 	wins, err := list(tctx)
 	done()
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
 	inSession := make(map[string]bool, len(wins))
 	for _, w := range wins {
@@ -187,7 +218,7 @@ func (c *Client) windowsLive(ctx context.Context, refs []Ref, list func(context.
 		}
 		out[ref] = inSession[name]
 	}
-	return out, true
+	return out, nil
 }
 
 // VerifyDispatched performs one delayed window snapshot for a whole launch

@@ -115,6 +115,12 @@ func TestDeadSocketIsEmptyOnlyForOptedInCallers(t *testing.T) {
 	if errors.Is(err, ErrNoServer) {
 		t.Fatalf("ListSessions = %v; a dead socket must not read as the create-permitting ErrNoServer", err)
 	}
+	// forgectl#805: every refusal that wraps this carries the remedy, since the
+	// strict callers (repair, teardown, prune) otherwise print no next step.
+	// Mutation that turns it red: drop the remedy from ErrServerExited's text.
+	if !strings.Contains(err.Error(), "start any tmux session to clear the socket, then retry") {
+		t.Errorf("ListSessions = %q, want the exited-server remedy in the message", err)
+	}
 
 	gen := ServerGeneration{Selector: ServerSelector{TmpDir: "/tmp"}, PID: "123", StartTime: "456"}
 	_, err = c.RevalidateSession(ctx, SessionIdentity{Generation: gen, ID: "$1", Name: "alpha"})

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -57,10 +58,12 @@ func deadSocketServer(t *testing.T) *exec.FakeRunner {
 // TestOccupancyCountsAnExitedServerAsZero covers #786's admission half. After
 // the last review window closes, the server exits and leaves its socket. The
 // live-window count must read that as zero rather than refuse every admission.
-// So must `pr list`'s display read.
+// So must `pr list`'s display read, which also reports that it saw an exited
+// server so the row can say so (forgectl#805).
 //
-// Mutation that turns it red: have countableWindows return ListWindows'
-// error unchanged.
+// Mutations that turn it red: have countableWindows return ListWindows'
+// error unchanged; drop WindowsLiveForListing's ErrServerExited arm (the
+// listing reads as unreadable and serverExited stays false).
 func TestOccupancyCountsAnExitedServerAsZero(t *testing.T) {
 	c := testClient(t, deadSocketServer(t))
 	ctx := context.Background()
@@ -72,8 +75,44 @@ func TestOccupancyCountsAnExitedServerAsZero(t *testing.T) {
 		t.Fatalf("occupancyFrom = (%d, %v), want (0, nil)", n, err)
 	}
 	ref := Ref{Owner: "o", Repo: "r", Number: 1}
-	if live, ok := c.WindowsLiveForListing(ctx, []Ref{ref}); !ok || live[ref] {
-		t.Fatalf("WindowsLiveForListing = (%v, %v), want not live and readable", live, ok)
+	if live, ok, exited := c.WindowsLiveForListing(ctx, []Ref{ref}); !ok || !exited || live[ref] {
+		t.Fatalf("WindowsLiveForListing = (%v, %v, %v), want not live, readable, server exited", live, ok, exited)
+	}
+}
+
+// TestRepairRefusalOnAnExitedServerNamesTheRemedy is forgectl#805 item 4 on
+// repair: rollback and forget still refuse on an exited server's leftover
+// socket, but say how to clear it rather than "check tmux list-windows", which
+// only prints "no server running". Nothing is removed either way.
+//
+// Mutations that turn it red: have windowListUnreadable return the generic
+// reason for every error; put back either verb's fixed "could not be read"
+// refusal.
+func TestRepairRefusalOnAnExitedServerNamesTheRemedy(t *testing.T) {
+	const remedy = "start any tmux session to clear the socket"
+	for name, opts := range map[string]RepairOpts{
+		"rollback": {Apply: true, Rollback: true, Yes: true},
+		"forget":   {Apply: true, ForgetIfAbsent: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := repairClient(t, deadSocketServer(t))
+			ws := fakeWorkspace(t)
+			path := seedPhaseRecord(t, c, Ref{Owner: "o", Repo: "r", Number: 3}, PhaseLaunching, ws)
+			opts.Record = path
+			_, err := c.Repair(context.Background(), opts)
+			if err == nil || !strings.Contains(err.Error(), remedy) {
+				t.Fatalf("Repair(%s) over an exited server = %v, want a refusal naming the remedy", name, err)
+			}
+			if _, serr := os.Stat(ws); serr != nil {
+				t.Errorf("a refusal removed the workspace: %v", serr)
+			}
+			if _, serr := os.Stat(path); serr != nil {
+				t.Errorf("a refusal removed the record: %v", serr)
+			}
+		})
+	}
+	if got := windowListUnreadable(errors.New("boom")); strings.Contains(got, remedy) {
+		t.Errorf("repair refusal on an unreadable tmux = %q; the exited-server remedy does not apply there", got)
 	}
 }
 

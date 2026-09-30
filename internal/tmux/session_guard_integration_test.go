@@ -59,7 +59,8 @@ func sessionNames(t *testing.T, c *Client) []string {
 //
 // Mutation that turns it red: have KillOthers (or KillSession, or
 // RenameSession) issue its bare command again; the replaced-server case then
-// kills or renames.
+// kills or renames. Likewise SelectWindow (forgectl#805): sent bare through
+// RunInteractive again, it selects and returns nil on the replaced server.
 func TestSessionVerbsGenerationGuardIsolated(t *testing.T) {
 	c, runner, tmuxBin := isolatedTmux(t)
 	ctx := context.Background()
@@ -99,6 +100,7 @@ func TestSessionVerbsGenerationGuardIsolated(t *testing.T) {
 		"KillSession":   func() error { return replaced.KillSession(ctx, stranger) },
 		"RenameSession": func() error { return replaced.RenameSession(ctx, stranger, "renamed") },
 		"AttachWindow":  func() error { return replaced.AttachWindow(ctx, strangerWindow) },
+		"SelectWindow":  func() error { return replaced.SelectWindow(ctx, strangerWindow) },
 	} {
 		if err := run(); !errors.Is(err, ErrGenerationChanged) {
 			t.Fatalf("%s against a replaced server: err = %v, want ErrGenerationChanged", verb, err)
