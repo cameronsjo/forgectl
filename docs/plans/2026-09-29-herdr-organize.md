@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "Task 1 on feat/herdr-organize (pure planner), stacked on forgectl#723 head -> Task 2 -> Task 3 -> Task 4"
+next: "Tasks 1-4 done on feat/herdr-organize (PR #729, stacked on #723); ready flip after a review at head, then a release, then the dotfiles retirement of forgectl-herdr"
 branch: plan/herdr-roadmap
 pr: cameronsjo/forgectl#721
 updated: 2026-09-29
@@ -121,10 +121,10 @@ The dry run works on stock herdr; blocked moves are predicted instead of attempt
 **Report:** —
 
 **Steps:**
-- [ ] Failing tests: glob table (every case in Behavior 2); classify (first matching pane wins in pane order, default, null cwd matches on `" :: title"`, the raw worktree cwd is what a glob sees); sort (wing, repo, cwd, string tie-break where `t10` precedes `t9`, `~Projects2` is outside the root, host-tree repos, a tab with no cwd sorts under `~`); BuildPlan (already organized is empty; two tabs into one missing workspace; duplicate labels pick the lowest `Number` with a warning; a `workspace_order` label absent from the session is skipped; a sole-tab move is `Blocked`; a tab with no panes is skipped with a warning; `Layout` is independent of ids, and building it from a snapshot after renumbering gives the same order)
-- [ ] Run `go test ./internal/herdr/organize/` — expect RED; implement; run — expect GREEN
-- [ ] Mutation sweep: force `Match` true, drop the worktree strip in the sort key, compare tab ids numerically, drop the `Blocked` prediction, ignore `Number` for duplicates; each turns a named test red
-- [ ] Commit: `feat(herdr): organize planner`
+- [x] Failing tests: glob table (every case in Behavior 2); classify (first matching pane wins in pane order, default, null cwd matches on `" :: title"`, the raw worktree cwd is what a glob sees); sort (wing, repo, cwd, string tie-break where `t10` precedes `t9`, `~Projects2` is outside the root, host-tree repos, a tab with no cwd sorts under `~`); BuildPlan (already organized is empty; two tabs into one missing workspace; duplicate labels pick the lowest `Number` with a warning; a `workspace_order` label absent from the session is skipped; a sole-tab move is `Blocked`; a tab with no panes is skipped with a warning; `Layout` is independent of ids, and building it from a snapshot after renumbering gives the same order)
+- [x] Run `go test ./internal/herdr/organize/` — expect RED; implement; run — expect GREEN
+- [x] Mutation sweep: force `Match` true, drop the worktree strip in the sort key, compare tab ids numerically, drop the `Blocked` prediction, ignore `Number` for duplicates; each turns a named test red
+- [x] Commit: `feat(herdr): organize planner`
 
 ### Task 2 — config, module, dry run
 
@@ -142,10 +142,10 @@ The dry run works on stock herdr; blocked moves are predicted instead of attempt
 **Report:** —
 
 **Steps:**
-- [ ] Read how `[theme]` and `[[launch.project]]` are declared, validated, scaffolded, and shown; list every touch point in the commit message
-- [ ] Failing tests: decode a rules block; each validation error message (position, glob); rules with no default; the three no-rules message variants; a `[herdr.organize]` from `init` with no rules points at editing, never at `init`; not in a herdr pane → exit 2; a dry run makes ZERO mutating herdr calls and NO `tab move --help` call; `--explain` output including the rule summary and the missing-`workspace_order` warning; each output state; `--json` matches a golden file (a `{}` would fail); the config check comes before any herdr call
-- [ ] Run — expect RED; implement; register the module with its pins; run `go test ./...` and `golangci-lint run ./...` — expect GREEN
-- [ ] Commit: `feat(herdr): forgectl herdr organize (dry run)`
+- [x] Read how `[theme]` and `[[launch.project]]` are declared, validated, scaffolded, and shown; list every touch point in the commit message
+- [x] Failing tests: decode a rules block; each validation error message (position, glob); rules with no default; the three no-rules message variants; a `[herdr.organize]` from `init` with no rules points at editing, never at `init`; not in a herdr pane → exit 2; a dry run makes ZERO mutating herdr calls and NO `tab move --help` call; `--explain` output including the rule summary and the missing-`workspace_order` warning; each output state; `--json` matches a golden file (a `{}` would fail); the config check comes before any herdr call
+- [x] Run — expect RED; implement; register the module with its pins; run `go test ./...` and `golangci-lint run ./...` — expect GREEN
+- [x] Commit: `feat(herdr): forgectl herdr organize (dry run)`
 
 ### Task 3 — apply
 
@@ -162,10 +162,10 @@ The dry run works on stock herdr; blocked moves are predicted instead of attempt
 **Report:** —
 
 **Steps:**
-- [ ] Failing tests using a `FakeRunner` whose `RunFunc` closes over a small state machine (a call counter and a mutable layout, since `RunFunc` is stateless by design) that returns POST-move ids on later lists: call order is gate → lock → focus snapshot → moves → workspace order → tab order → focus restore; a target is re-resolved by `terminal_id` right before its move; an unexpected `*Declined` exits 1 and still restores focus; a herdr error on the second of three moves stops, restores focus, and prints the four-line summary; a declined create makes the next tab the creator; focus restore order is background workspaces first and the caller's terminal last; a restore failure is reported without masking the run's error; the lock: a goroutine holds it and a second run prints the wait notice and blocks until a deadline (unix-only)
-- [ ] Run — expect RED; implement; run — expect GREEN
-- [ ] Mutation sweep: delete the focus restore, skip the re-resolve, ignore `*Declined`, restore the caller's terminal before the workspaces; each turns a named test red
-- [ ] Commit: `feat(herdr): organize --apply`
+- [x] Failing tests using a `FakeRunner` whose `RunFunc` closes over a small state machine (a call counter and a mutable layout, since `RunFunc` is stateless by design) that returns POST-move ids on later lists: call order is gate → lock → focus snapshot → moves → workspace order → tab order → focus restore; a target is re-resolved by `terminal_id` right before its move; an unexpected `*Declined` exits 1 and still restores focus; a herdr error on the second of three moves stops, restores focus, and prints the four-line summary; a declined create makes the next tab the creator; focus restore order is background workspaces first and the caller's terminal last; a restore failure is reported without masking the run's error; the lock: a goroutine holds it and a second run prints the wait notice and blocks until a deadline (unix-only)
+- [x] Run — expect RED; implement; run — expect GREEN
+- [x] Mutation sweep: delete the focus restore, skip the re-resolve, ignore `*Declined`, restore the caller's terminal before the workspaces; each turns a named test red
+- [x] Commit: `feat(herdr): organize --apply`
 
 ### Task 4 — parity, live check, retirement
 
@@ -180,13 +180,27 @@ The dry run works on stock herdr; blocked moves are predicted instead of attempt
 **Report:** —
 
 **Steps:**
-- [ ] Parity, read-only: run `forgectl-herdr organize --explain` DIRECTLY (a registered native command wins over the external one, so `forgectl herdr organize` would reach the new code) with the operator's real `HOME` and rules, then the dev build with `HOME` pointed at a temp dir that holds a forgectl `config.toml` built from the same rules and `PROJECTS_DIR` pinned to the real projects root. Compare, per workspace, the ordered list of `terminal_id`s. Record the measured result in `## Learnings`
-- [ ] Live `--apply`: first make the plan provably small. Create a throwaway workspace with two tabs, misplace one tab by giving it a cwd a rule sends elsewhere, run the dry run, and confirm the plan lists ONLY that tab's move (the rest of the session is already organized by the script); then `--apply`, verify layout and focus, and close only what was created
+- [x] Parity, read-only: run `forgectl-herdr organize --explain` DIRECTLY (a registered native command wins over the external one, so `forgectl herdr organize` would reach the new code) with the operator's real `HOME` and rules, then the dev build with `HOME` pointed at a temp dir that holds a forgectl `config.toml` built from the same rules and `PROJECTS_DIR` pinned to the real projects root. Compare, per workspace, the ordered list of `terminal_id`s. Record the measured result in `## Learnings`
+- [x] Live `--apply`: first make the plan provably small. Create a throwaway workspace with two tabs, misplace one tab by giving it a cwd a rule sends elsewhere, run the dry run, and confirm the plan lists ONLY that tab's move (the rest of the session is already organized by the script); then `--apply`, verify layout and focus, and close only what was created
 - [ ] After a forgectl release ships the command: a separate `~/.dotfiles` change removes `forgectl-herdr` and its rules file. Not part of this PR
-- [ ] run a pre-PR polish pass over the diff; fold findings
+- [x] run a pre-PR polish pass over the diff; fold findings
 
 ---
 
 ## Deviations
 
+- **Prep commit for the projects root.** `internal/projects` gained an exported `ResolveRoot` (its own commit, with a test), as the plan allowed. `New` now calls it; behavior is unchanged.
+- **The planner grew an order half.** `OrderSteps`, `Reorders`, `WorkspaceOrderChange`, `ArrangeTarget`, and `CheckGlob` live in `internal/herdr/organize`, because the dry run must count tab and workspace reorders exactly and apply must plan them the same way. `Move` carries `FromWorkspaceID` and `ToWorkspaceID`, and `Plan` carries `Assignments` for `--explain`.
+- **Apply re-reads before every step** rather than trusting the tab list `MoveResult` returns: each cross-workspace move, each workspace move, and each tab-order step is preceded by a fresh list. Slower on a large session (tracked in cameronsjo/forgectl#732), but no step acts on a stale id.
+- **Any declined move continues the run.** The plan sent an unexpected `*Declined` to exit 1. It still exits 1, but the run now finishes the moves and stages that do not depend on the refused one, because a decline after the snapshot means the session changed, not that the rest is unsafe.
+- **Config checks beyond the plan.** An uncompilable glob, and a workspace label that starts with `-` or holds a control character, are config errors (exit 2), because otherwise the dry run promises a move that apply then fails halfway through.
+- **Live check needed pinned rules.** The plan assumed the session was already organized. It was not (four tabs out of place), so the throwaway check used a config that pins every real tab to its current workspace, plus rules for the throwaway workspaces. The plan then still held three tab reorders of real tabs, which Cameron approved.
+- **Review triage.** The eight-angle review's candidates were triaged by reading the code rather than by the per-candidate verifier stage, because many were duplicates across angles. Each fix has a test that fails without it; the rest went to cameronsjo/forgectl#732.
+
 ## Learnings
+
+- **Parity (read-only).** `forgectl-herdr organize --explain` and the dev build's `--json` agree, per target workspace, on the ordered terminal ids (cadence 5 tabs, homelab 4, misc 2, tooling 2), and both plan the same four moves.
+- **Live apply.** In two throwaway workspaces, `--apply` made exactly one cross-workspace move (creating the second workspace), applied four reorders (three real tabs, one throwaway), left the focused terminal, every real tab's workspace, the workspace order, and every workspace's active tab unchanged, and a second dry run then planned nothing. Both throwaway workspaces were closed afterward.
+- **`--no-focus` works.** `herdr workspace create` and `tab create` with `--no-focus` did not move the caller's focus.
+- **A fake that renumbers is worth its size.** The stateful fake herdr in `internal/cli/herdr_world_test.go` (renumbering ids, `renumberAll`, an interceptor for declines and errors) is what let the stale-id, decline, and focus tests fail for the right reason.
+- **A workspace label reached the terminal unescaped through planner-built text.** The security pass found the label in `BlockedReason`; the fix escapes at the sink. Text the planner builds from herdr values is untrusted at the renderer.
