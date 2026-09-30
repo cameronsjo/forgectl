@@ -124,10 +124,14 @@ func runUpgradeApply(ctx context.Context, deps module.Deps, out io.Writer) error
 	return nil
 }
 
-// upgradeFailure words a failed apply from fixed text, by cause. An interrupt
-// comes first: os/exec reports a killed brew as a signal exit, not as
-// context.Canceled, so the context itself is consulted too, and a Ctrl-C must
-// not read as a network fault.
+// upgradeFailure words a failed apply from fixed text, by cause. The
+// interrupt arm is defensive. The binary installs no signal context
+// (main.go, forgectl#788), so a terminal Ctrl-C ends forgectl under Go's
+// default disposition before this runs. The arm is reached only when ctx was
+// cancelled some other way, a caller's deadline or a test. It comes first
+// because os/exec reports a brew killed by that cancellation as a signal
+// exit, not as context.Canceled, so the context itself is consulted too, and
+// a cancellation must not read as a network fault.
 func upgradeFailure(ctx context.Context, err error) string {
 	switch {
 	case ctx.Err() != nil || errors.Is(err, context.Canceled):
