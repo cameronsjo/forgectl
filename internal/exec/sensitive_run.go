@@ -141,7 +141,11 @@ func envKeyOf(entry string) string {
 
 // buildCmd is the reveal boundary. It is the only place in the package where a
 // SecretArg or Arg payload leaves its wrapper, and everything it produces goes
-// straight into the *exec.Cmd. It is a separate function so internal/exec's own
+// straight into the *exec.Cmd. Elsewhere in the package a payload is read
+// only in place: validate checks it, Equal compares two, and MapOpaque
+// re-spells one through a closed Transform into a new sealed Arg. None of
+// them hands a payload to code outside this package
+// (TestNoCallerCodeReceivesAnOpaquePayload). It is a separate function so internal/exec's own
 // tests can assert that the real values do reach exec.Cmd.Args — the mirror of
 // the redaction tests, without a production accessor that reveals.
 //

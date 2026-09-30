@@ -9,6 +9,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/tmux/tmuxesc"
 )
 
 // windowFormat is the -F spec for list-windows -a. Fields:
@@ -312,10 +313,10 @@ func (c *Client) NewWindowWithEnv(
 	// directory or cut the command short (forgectl#823), and on every -e
 	// entry, which would otherwise lose its trailing ';' and end the command
 	// (forgectl#836). The -c operand is also format-expanded, so it takes
-	// EscapeDirOperand, which adds escapeFormat (forgectl#839); the -e entries
+	// escapeDirOperand, which adds escapeFormat (forgectl#839); the -e entries
 	// and the command arguments are not expanded.
 	if dir != "" {
-		args = append(args, "-c", EscapeDirOperand(dir))
+		args = append(args, "-c", escapeDirOperand(dir))
 	}
 	for _, e := range env {
 		args = append(args, "-e", escapeArgvSeparator(e))
@@ -568,44 +569,9 @@ func quoteCommandOperand(s string) (string, error) {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'", nil
 }
 
-// escapeFormat escapes s so that tmux's format expansion hands back exactly s
-// (forgectl#806). tmux 3.4 format-expands a new-session -s name, a new-window
-// -n name, and a rename-session name, bare or guarded alike, so an
-// operator-typed `#(cmd)` starts a shell job and `#{pid}` lands as a number.
-// That is not a privilege boundary for a typed name, but `forgectl open`
-// names its session after a directory, and a name that silently lands as
-// something else breaks every later exact-name resolve.
-//
-// The rule is NOT a plain '#' -> '##': tmux keeps a run of '#' that is
-// directly followed by '[' verbatim (a style escape), so "#[x" lands as "#[x"
-// and "##[x" as "##[x" — doubling those would add bytes. Every other '#' is
-// doubled, and "##" expands back to one. Measured on tmux 3.4 against an
-// isolated socket: 2,100 random names over "#[]{}(),?=aHS '", each through a
-// guarded rename and an argv create, landed byte for byte.
-func escapeFormat(s string) string {
-	if !strings.Contains(s, "#") {
-		return s
-	}
-	var b strings.Builder
-	b.Grow(len(s) * 2)
-	for i := 0; i < len(s); {
-		if s[i] != '#' {
-			b.WriteByte(s[i])
-			i++
-			continue
-		}
-		j := i
-		for j < len(s) && s[j] == '#' {
-			j++
-		}
-		b.WriteString(s[i:j])
-		if j == len(s) || s[j] != '[' {
-			b.WriteString(s[i:j])
-		}
-		i = j
-	}
-	return b.String()
-}
+// escapeFormat is tmuxesc.Format, which documents the tmux format-expansion
+// rule it answers (forgectl#806).
+func escapeFormat(s string) string { return tmuxesc.Format(s) }
 
 // confirmGoneAtKill settles what kill-window's exact "can't find window"
 // answer means. The answer came from whatever server the socket reached at

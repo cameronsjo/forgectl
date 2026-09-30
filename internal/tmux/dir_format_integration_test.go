@@ -25,7 +25,7 @@ import (
 // The root is resolved through EvalSymlinks first, because macOS's /tmp is a
 // link to /private/tmp and a pane reports its resolved cwd.
 //
-// Mutations that turn it red: pass dir without EscapeDirOperand at
+// Mutations that turn it red: pass dir without escapeDirOperand at
 // CreateSession's -c (the session path and pane cwd differ, and the marker
 // appears), or at NewWindowWithEnv's -c (the window's pane cwd differs, and
 // the marker appears).

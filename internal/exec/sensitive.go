@@ -314,27 +314,6 @@ func MustFixed(v constantArg) Arg {
 // own redaction is what would make the resulting argv hard to diagnose.
 func Opaque(v string) Arg { return Arg{reveal: func() string { return v }, kind: argOpaque} }
 
-// MapOpaque returns a new opaque argument holding f applied to a's payload,
-// for an adapter that must re-spell a sealed value in its backend's syntax
-// (tmux format-expands a -c directory, so the adapter escapes it:
-// forgectl#839). The payload is never handed back to the caller, only to f.
-//
-// f runs ONCE, here, and the result is closed over as an immutable string, so
-// the new argument's reveal stays pure and repeatable. That keeps the rule
-// SecretArg states: a caller-supplied func is never the reveal itself, which
-// would give validate and buildCmd two chances to see different values.
-//
-// Anything but an opaque argument (a fixed constant, the separator, the zero
-// value) maps to the zero Arg, which validate refuses as never constructed:
-// re-spelling a constant is a defect, and it fails loudly rather than passing
-// the constant through unchanged.
-func MapOpaque(a Arg, f func(string) string) Arg {
-	if a.kind != argOpaque || a.reveal == nil {
-		return Arg{}
-	}
-	return Opaque(f(a.reveal()))
-}
-
 // EndOfOptions is the literal "--" separator. Its scope is everything after
 // it: once present, no later opaque argument is checked for a leading dash, so
 // emit it immediately before the operands rather than early. That the backend

@@ -287,11 +287,11 @@ func (c *Client) CreateSession(ctx context.Context, name, dir string) (SessionId
 	// comparison against name still holds.
 	args := c.tmuxArgs("new-session", "-d", "-P", "-F", sessionIdentityFormat, "-s", escapeFormat(name))
 	if dir != "" {
-		// EscapeDirOperand: a dir ending in ';' would otherwise end the
+		// escapeDirOperand: a dir ending in ';' would otherwise end the
 		// command there, and tmux format-expands -c, so a dir holding `#(cmd)`
 		// would run cmd in the server (forgectl#839). Either way the session
 		// would start somewhere else.
-		args = append(args, "-c", EscapeDirOperand(dir))
+		args = append(args, "-c", escapeDirOperand(dir))
 	}
 	out, err := c.run.Run(ctx, c.tmuxBin, args...)
 	if err != nil {
