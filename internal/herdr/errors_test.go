@@ -216,10 +216,10 @@ func TestDeclinedReasonIsRedacted(t *testing.T) {
 // TestErrorTextEscapesFormatCharacters is #825 item 2: printable dropped only
 // Cc controls, so a bidi override (U+202E) and other Cf format characters in
 // herdr's text reached the terminal and could reorder what the operator read.
-// Every sink printable feeds must show them as escapes instead.
+// Every sink printableMax feeds must show them as escapes instead.
 //
 // Mutation that turns it red: restore the Cc-only strings.Map filter in
-// printable.
+// printableMax.
 func TestErrorTextEscapesFormatCharacters(t *testing.T) {
 	const planted = "a\u202eb\u2066c\u200bd\u2060e\ufeff"
 	ce := &exec.CommandError{Name: Binary, ExitCode: 1, Stderr: `{"error":{"code":"x\u202ey","message":"` + planted + `"}}`}
@@ -253,8 +253,8 @@ func TestErrorTextEscapesFormatCharacters(t *testing.T) {
 // stderr tail. Each now stops at herdrTextMaxRunes and says so; the head
 // survives.
 //
-// Mutation: make printableMax return printable(s) and every row renders the
-// whole 100k-rune field.
+// Mutation: make printableMax return termsafe.SafeLine(s) and every row
+// renders the whole 100k-rune field.
 func TestHerdrTextIsCapped(t *testing.T) {
 	long := "HEAD" + strings.Repeat("x\u202e", 50_000)
 	for name, got := range map[string]string{

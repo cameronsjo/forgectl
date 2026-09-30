@@ -92,10 +92,10 @@ func (i menuItem) render(index int, selected, narrow bool, g glyphSet, s theme.S
 // the object, which is any same-uid process. The TUI redraws the whole screen
 // on every keystroke, so an escape sequence in one name repaints the chrome
 // around it and a bidi override reorders the row — which is why each reaches
-// the styler through termsafe.SafeLine, the same boundary errStatus and
-// setStatus use. TestScreensDrawNothingUnsafe asserts over the whole drawn
-// screen, so a row type that skips it fails without the test needing to know
-// it exists. (menuItem above is exempt: its labels are literals in this file.)
+// the styler through termsafe.SafeLineMax (termcap.go), the same boundary
+// errStatus and setStatus use, and a path through SafePathMax's middle cut.
+// TestScreensDrawNothingUnsafe asserts over the whole drawn screen, so a row
+// type that skips it fails without the test needing to know it exists. (menuItem above is exempt: its labels are literals in this file.)
 
 // --- pick (sesh candidate) ---
 
@@ -103,7 +103,7 @@ type pickItem string
 
 func (i pickItem) FilterValue() string { return string(i) }
 func (i pickItem) render(index int, selected, narrow bool, g glyphSet, s theme.Styles) string {
-	label := g.Session + "  " + termsafe.SafeLine(string(i))
+	label := g.Session + "  " + termsafe.SafeLineMax(string(i), nameMaxRunes)
 	if selected {
 		return leader(index, true, s) + s.Selected.Render(label)
 	}
@@ -120,7 +120,7 @@ func (i sessionItem) render(index int, selected, narrow bool, g glyphSet, s them
 	if i.s.Attached {
 		marker = s.OK.Render(g.Attached)
 	}
-	name := termsafe.SafeLine(i.s.Name)
+	name := termsafe.SafeLineMax(i.s.Name, nameMaxRunes)
 	if selected {
 		name = s.Selected.Render(name)
 	} else {
@@ -134,7 +134,7 @@ func (i sessionItem) render(index int, selected, narrow bool, g glyphSet, s them
 	if i.s.Windows == 1 {
 		unit = "window"
 	}
-	meta := fmt.Sprintf("  %d %s · %s", i.s.Windows, unit, termsafe.SafeLine(i.s.Path))
+	meta := fmt.Sprintf("  %d %s · %s", i.s.Windows, unit, termsafe.SafePathMax(i.s.Path, termsafe.PathEchoMaxRunes))
 	return row + s.Muted.Render(meta)
 }
 
@@ -144,8 +144,8 @@ type windowItem struct{ w tmux.Window }
 
 func (i windowItem) FilterValue() string { return i.w.Session + " " + i.w.Name }
 func (i windowItem) render(index int, selected, narrow bool, g glyphSet, s theme.Styles) string {
-	sess := s.Steel.Render(termsafe.SafeLine(i.w.Session))
-	name := termsafe.SafeLine(i.w.Name)
+	sess := s.Steel.Render(termsafe.SafeLineMax(i.w.Session, nameMaxRunes))
+	name := termsafe.SafeLineMax(i.w.Name, nameMaxRunes)
 	if i.w.Active {
 		name = s.Active.Render(name)
 	} else if selected {

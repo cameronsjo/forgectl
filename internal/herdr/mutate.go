@@ -23,7 +23,7 @@ type Declined struct {
 // code today, and nothing stops a future herdr from echoing a value there.
 // Reason is capped as Message is (#837).
 func (d *Declined) Error() string {
-	return "herdr declined to move tab " + printable(d.TabID) + ": " + printableMax(redact.Text(d.Reason))
+	return "herdr declined to move tab " + printableMax(d.TabID) + ": " + printableMax(redact.Text(d.Reason))
 }
 
 // MoveTarget says where a tab goes. Build one with [ToWorkspace],
