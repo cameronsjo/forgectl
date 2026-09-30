@@ -68,6 +68,11 @@ var refusedReflectMethods = map[string][]string{
 //     This includes a conversion of such a value to *T, a func value like
 //     reflect.NewAt, and a type reached through an alias. A file that does
 //     import it is TestNoFileReachesPastTheTypeSystem's to refuse;
+//   - any struct field that embeds reflect.Value, *reflect.Value,
+//     reflect.Type, or a type that promotes one of refusedReflectMethods
+//     (reflectRule.promotes). An adapter embedding reflect.Value plus a
+//     method of its own satisfies an interface no reflect type does, and
+//     promotion is the only way a refused method reaches a use unnamed;
 //   - any use (a call, a method value or a method expression, promoted or
 //     not) of a method in refusedReflectMethods, and of any method of the
 //     same name, whatever its signature, on an interface a reflect.Value or
@@ -447,6 +452,17 @@ func typedFindings(fset *token.FileSet, files []*ast.File, info *types.Info, rul
 						types.ExprString(expr), tv.Type))
 				}
 			}
+			if st, ok := n.(*ast.StructType); ok {
+				for _, field := range st.Fields.List {
+					if len(field.Names) != 0 {
+						continue
+					}
+					if via := rule.promotes(info.Types[field.Type].Type); via != nil && reflectMemoryAllowed[name+" embed"] == "" {
+						report(field.Pos(), fmt.Sprintf("embeds %s, which promotes %s: an adapter type can then satisfy an interface no reflect type does and reach it without naming it; add %q to reflectMemoryAllowed with a reason only after review",
+							types.ExprString(field.Type), via.FullName(), name+" embed"))
+					}
+				}
+			}
 			id, ok := n.(*ast.Ident)
 			if !ok {
 				return true
@@ -463,6 +479,27 @@ func typedFindings(fset *token.FileSet, files []*ast.File, info *types.Info, rul
 		})
 	}
 	return findings
+}
+
+// promotes returns a refused reflect method that embedding a field of type t
+// promotes into the embedding struct, or nil. That covers reflect.Value,
+// *reflect.Value and reflect.Type themselves, and any type that embeds one of
+// them in turn. Promotion is the only way a refused method reaches a call
+// site without being named: a hand-written forwarder names it and is caught
+// at that use, but a struct embedding reflect.Value plus a method of its own
+// satisfies an interface no reflect type does, which the holder filter in
+// use lets through. So the embedding itself is refused.
+func (r *reflectRule) promotes(t types.Type) *types.Func {
+	if t == nil {
+		return nil
+	}
+	for _, refused := range r.refused {
+		obj, _, _ := types.LookupFieldOrMethod(t, true, nil, refused.Name())
+		if fn, ok := obj.(*types.Func); ok && slices.Contains(r.refused, fn.Origin()) {
+			return fn.Origin()
+		}
+	}
+	return nil
 }
 
 // use returns the refused reflect method fn stands for: fn
@@ -595,8 +632,9 @@ func holdsUnsafePointer(t types.Type, seen map[types.Type]bool) bool {
 // and constraint rows go quiet), match the interface arm on an identical
 // signature as well as the name (the three parametric rows go quiet), drop
 // the reflect-holder filter in reflectRule.use (the net.Listener-shaped row
-// reports Addr), or enter a named struct in
-// holdsUnsafePointer (the clean reflect row reports reflect.Value).
+// reports Addr), drop the embedding check (the five adapter rows go quiet),
+// or enter a named struct in holdsUnsafePointer (the clean reflect row
+// reports reflect.Value).
 func TestTypedFindingsSeeEveryRoute(t *testing.T) {
 	const prelude = "package probe\n\nimport \"reflect\"\n\nvar _ reflect.Value\n\ntype sealedArg struct{ reveal func() string }\n\n"
 	rows := []struct {
@@ -633,6 +671,29 @@ func g[T any](x I[T]) func() T { return x.UnsafeAddr }`, true},
 		{"reflect.Type MethodByName", `func f(v reflect.Value) (reflect.Method, bool) { return reflect.TypeOf(v).MethodByName("Addr") }`, true},
 		{"reflect.NewAt as a value", `var g = reflect.NewAt`, true},
 		{"SetPointer method expression", `var g = reflect.Value.SetPointer`, true},
+		{"adapter embedding reflect.Value", `type ad struct{ reflect.Value }
+func (ad) Extra() {}
+func f(v reflect.Value) uintptr {
+	return any(ad{v}).(interface{ UnsafeAddr() uintptr; Extra() }).UnsafeAddr()
+}`, true},
+		{"adapter behind a parametric interface", `type ad struct{ reflect.Value }
+func (ad) Extra() {}
+type I[T any] interface{ UnsafeAddr() T; Extra() }
+func g[T any](x I[T]) T { return x.UnsafeAddr() }
+var _ = g[uintptr](ad{})`, true},
+		{"adapter reaching MethodByName", `type ad struct{ reflect.Value }
+func (ad) Extra() {}
+func f(v reflect.Value) reflect.Value {
+	return any(ad{v}).(interface{ MethodByName(string) reflect.Value; Extra() }).MethodByName("Addr")
+}`, true},
+		{"adapter embedding *reflect.Value", `type ad struct{ *reflect.Value }
+func (ad) Extra() {}
+func f(v *reflect.Value) uintptr {
+	return any(ad{v}).(interface{ Pointer() uintptr; Extra() }).Pointer()
+}`, true},
+		{"adapter embedding reflect.Type", `type ad struct{ reflect.Type }
+func (ad) Extra() {}
+var _ = ad{}`, true},
 		{"Addr on a net.Listener-shaped interface", `func f(l interface{ Addr() string; Accept() error }) string { return l.Addr() }`, false},
 		{"unrelated method on a generic interface", `type J[T any] interface{ Size() T }
 func g[T any](x J[T]) T { return x.Size() }`, false},

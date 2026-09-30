@@ -124,6 +124,30 @@ func TestSealedStartHasOneCaller(t *testing.T) {
 	}
 }
 
+// TestValidatedNewHasOneCaller pins, in internal/exec's production files on
+// every platform in guardPlatforms, that validated.New is named only inside
+// (SensitiveCommand).validated. New runs the path, argv and environment
+// checks, but the kind, capture-mode and cap checks run in validated around
+// it, so a second caller could build a Command those checks never saw.
+// validated.New is a package-level func, reachable only by naming it, so a
+// Uses walk sees every route. Test files are not checked.
+//
+// Mutation that turns it red: in sensitive.go, `var _, _ =
+// validated.New(sealed.New("/bin/sh"), nil, nil, false)`.
+func TestValidatedNewHasOneCaller(t *testing.T) {
+	for _, p := range guardPlatforms {
+		c := checkExecFor(t, p)
+		newFn, ok := c.validated.Scope().Lookup("New").(*types.Func)
+		if !ok {
+			t.Fatalf("[%s] validated declares no New func; the rule would check nothing", p)
+		}
+		for _, f := range namedOutside(c, newFn, "SensitiveCommand", "validated") {
+			t.Errorf("[%s] %s: validated.New is named outside (SensitiveCommand).validated; build a Command through validated so every check runs",
+				p, f)
+		}
+	}
+}
+
 // TestValidateDominatesStartSealed pins, on every platform in
 // guardPlatforms, that validation cannot be skipped or outrun on the way to a
 // process (forgectl#888). Most of that is the compiler's: startSealed
