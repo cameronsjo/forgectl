@@ -1,7 +1,7 @@
 ---
-status: in-flight
+status: done
 branch: plan/harness-update-hooks
-next: items 1-3 merged (PRs #874, #875, #876); item 4 (#728) done on branch feat/on-update-hooks ([[resume.on_update]] hooks + launchd watcher, `forgectl resume hooks`), awaiting review and PR
+next: complete when #892 merges (items 1-3 shipped in #874, #875, #876; item 4 is #892). Remaining check is live: install the watcher on a released build and confirm `forgectl resume hooks status` after the next Claude Code update.
 ---
 
 # Harness update hooks — Roadmap (2026-09-29)
