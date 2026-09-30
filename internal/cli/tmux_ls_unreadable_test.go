@@ -103,7 +103,7 @@ func TestTmuxTreeNotesUnreadableRows(t *testing.T) {
 // does, instead of listing one window fewer with no sign of it. The --json
 // array keeps its shape.
 //
-// Mutation that turns it red: call DisplayWindows (dropping the count) or
+// Mutation that turns it red: discard DisplayWindowListing's count or
 // drop the writeUnreadableNote call in tmux_window.go.
 func TestTmuxWindowsNotesUnreadableRows(t *testing.T) {
 	window := func(id, name string) string {
