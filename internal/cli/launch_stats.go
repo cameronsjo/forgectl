@@ -60,10 +60,11 @@ func newLaunchStatsCmd() *cobra.Command {
 			if aggregate.SkippedRows > 0 {
 				// The complete report is already on stdout; this is the only
 				// diagnostic, rendered once by the root error handler. The
-				// command deliberately prints no warning of its own, so a
-				// caller sees exactly one JSON object and one message.
-				return WithExitCode(fmt.Errorf(
-					"usage statistics skipped %d unreadable or unsupported row(s)", aggregate.SkippedRows), 1)
+				// command deliberately prints no warning of its own. Under
+				// --json the exit is silent instead: skipped_rows on stdout
+				// already carries it (forgectl#862).
+				return jsonVerdict(WithExitCode(fmt.Errorf(
+					"usage statistics skipped %d unreadable or unsupported row(s)", aggregate.SkippedRows), 1), asJSON)
 			}
 			return nil
 		},

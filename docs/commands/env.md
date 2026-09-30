@@ -69,9 +69,9 @@ Before the scratch directory, the atomic write put its temp file directly beside
 | `code` | Exit | When | `path` |
 | --- | --- | --- | --- |
 | `file_not_found` | `2` | the env file or the `--example` file is absent (`error` is always `"env file not found"`) | the missing file, relative to the repository root |
-| `check_failed` | `1` | anything else: a refused `--file`/`--example` name, a file outside the repository, a file that won't parse, an unknown flag, a flag missing its value, or a stray argument (`error` is the message) | for a refused `--file`/`--example` name, that file, relative to the repository root; otherwise `""` (outside the repository, a parse failure, a bad flag or argument) |
+| `check_failed` | `1` | anything else: a refused `--file`/`--example` name, a file outside the repository, a file that won't parse, an unknown flag, a flag missing its value, or a stray argument (`error` is the message) | for a refused `--file`/`--example` name, or an `--any-file` refusal (no interactive terminal, or the confirmation declined or failed), that file, relative to the repository root; otherwise `""` (outside the repository, a parse failure, a bad flag or argument) |
 
-A caller tells drift from a `check_failed` at exit `1` by where the output went: drift puts its verdict on stdout, and a failure leaves stdout empty and puts its object on stderr.
+A caller tells drift from a `check_failed` at exit `1` by where the output went: drift puts its verdict on stdout, and a failure leaves stdout empty and puts its object on stderr. This is the repo-wide `--json` stderr contract ([json-contract.md](../json-contract.md)) with `env check`'s own `code` strings.
 
 **Blessed value producers** for `env set`, non-inline patterns first:
 
@@ -111,7 +111,7 @@ Workarounds. For bash, do not `source` the file when a value is multi-line or th
 **Safety notes:**
 
 - Values never appear in argv, stdout, or log output — every value-bearing operation lives inside the domain package, not the CLI layer.
-- Every write lands at `0600`; a looser pre-existing mode is tightened and reported (`tightened <file> to 0600`) rather than silently left alone.
+- Every write lands at `0600`; a looser pre-existing mode is tightened and reported (`tightened "<file>" to 0600`, the path quoted and escaped) rather than silently left alone.
 - `--file` is refused unless it resolves inside the current git repository (walk-up `.git` detection, symlink-escape checked) — no editing a `.env` outside the repo you're working in.
 - **`--file` must also name an env file** — `.env`, `.env.*` (`.env.local`, `.env.prod`, `.env.staging`, `.env.example`), or `*.env`. Repo-containment alone is not a bound worth having: `.git/config` is inside the repo, and `KEY=value` is valid git-config syntax, so an unconstrained `--file` turns `env set` into `core.sshCommand` — arbitrary code execution on the next `git fetch`. `.envrc` (direnv executes it) and `Makefile` (`KEY=value` is valid make) are the same shape. A blocklist would be whack-a-mole against every future execute-on-read format, so the allowlist is the bound. The point of this tool is to be the thing you hand an agent *instead of* raw shell; it must not be a shell in a trench coat.
 - **`--any-file` overrides that rule behind an interactive confirmation**, and the confirmation names the *resolved* path, so it cannot be used to approve a file you were not shown. With no TTY — a piped invocation, a CI job, a harness tool call — it refuses outright.

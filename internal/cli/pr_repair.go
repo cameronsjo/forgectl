@@ -112,7 +112,7 @@ changed underfoot stops that file and nothing else.`,
 			// that found unsettled records exits 1 — that is the question a
 			// script asks `pr repair`, and answering it only in the human text
 			// would make `--json` the one caller that cannot hear the answer.
-			return repairExitCode(report, apply)
+			return jsonVerdict(repairExitCode(report, apply), asJSON)
 		},
 	}
 	cmd.Flags().BoolVar(&apply, "apply", false, "act on the named breadcrumb (requires exactly one mode below)")

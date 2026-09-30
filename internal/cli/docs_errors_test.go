@@ -117,9 +117,9 @@ func assertCouldNotRun(t *testing.T, l docsLeaf, asJSON bool, stdout, stderr str
 
 func setDocsOSArgs(t *testing.T, args ...string) {
 	t.Helper()
-	prev := docsOSArgs
-	docsOSArgs = func() []string { return args }
-	t.Cleanup(func() { docsOSArgs = prev })
+	prev := jsonOSArgs
+	jsonOSArgs = func() []string { return args }
+	t.Cleanup(func() { jsonOSArgs = prev })
 }
 
 // Mutation: make docsFlagError return the bare err (or drop a leaf's
@@ -144,8 +144,8 @@ func TestDocsLeaves_BadFlag_CouldNotRun(t *testing.T) {
 }
 
 // pflag stops at the bad flag, so a --json written after it is never parsed
-// and the flag value is still false. Mutation: delete the docsOSArgs scan in
-// docsWantsJSON and this leaves stderr empty under --json.
+// and the flag value is still false. Mutation: delete the jsonOSArgs scan in
+// argvWantsJSON and this leaves stderr empty under --json.
 func TestDocsLeaves_BadFlagBeforeJSON_StillJSON(t *testing.T) {
 	setDocsOSArgs(t, "docs", "x", "--bogus", "--json")
 	for _, l := range docsLeaves(t) {
@@ -164,7 +164,7 @@ func TestDocsLeaves_BadFlagBeforeJSON_StillJSON(t *testing.T) {
 // the "--" case and the terminator row goes red; treat any --json= prefix as
 // true and the =false/=0 rows go red; make the first occurrence win and the
 // double-flag rows go red.
-func TestDocsWantsJSON_ParsesArgs(t *testing.T) {
+func TestArgvWantsJSON_ParsesArgs(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
@@ -181,18 +181,20 @@ func TestDocsWantsJSON_ParsesArgs(t *testing.T) {
 		{"double bare", []string{"--json", "--json"}, true},
 		{"true then false", []string{"--json", "--json=false"}, false},
 		{"false then true", []string{"--json=false", "--json"}, true},
+		{"value of a value-taking flag", []string{"list", "--limit", "--json"}, false},
+		{"after a flag's value", []string{"list", "--limit", "5", "--json"}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			setDocsOSArgs(t, c.args...)
-			if got := docsWantsJSON(newDocsListCmd(module.Deps{})); got != c.want {
-				t.Errorf("docsWantsJSON(%v) = %v, want %v", c.args, got, c.want)
+			if got := argvWantsJSON(newDocsListCmd(module.Deps{})); got != c.want {
+				t.Errorf("argvWantsJSON(%v) = %v, want %v", c.args, got, c.want)
 			}
 		})
 	}
 	setDocsOSArgs(t, "serve", "--json")
-	if docsWantsJSON(newDocsServeCmd(module.Deps{})) {
-		t.Error("docsWantsJSON = true on serve, which declares no --json")
+	if argvWantsJSON(newDocsServeCmd(module.Deps{})) {
+		t.Error("argvWantsJSON = true on serve, which declares no --json")
 	}
 }
 

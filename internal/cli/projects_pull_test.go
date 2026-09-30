@@ -148,8 +148,10 @@ func TestPullAllCmd_JSON_RowsAndExitCodeUnchanged(t *testing.T) {
 	cmd.SilenceUsage = true // cobra prints usage to OutOrStderr, which SetOut redirects
 
 	err := cmd.ExecuteContext(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "1 of 2 repos failed to pull") {
-		t.Fatalf("error = %v; --json must keep the aggregate failure exit", err)
+	// Under --json the rows are the verdict, so the exit is silent
+	// (forgectl#862) but still 1.
+	if _, ok := err.(*silentCodedError); !ok || ExitCode(err) != 1 {
+		t.Fatalf("error = %T %v; --json must keep the aggregate failure exit, silently", err, err)
 	}
 	var rows []map[string]string
 	if jerr := json.Unmarshal(stdout.Bytes(), &rows); jerr != nil {
