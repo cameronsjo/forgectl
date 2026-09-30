@@ -149,8 +149,8 @@ func TestDeadSocketIsEmptyOnlyForOptedInCallers(t *testing.T) {
 	if sessions, unreadable, err := c.DisplaySessionListing(ctx); err != nil || len(sessions) != 0 || unreadable != 0 {
 		t.Fatalf("DisplaySessionListing = (%v, %d, %v), want empty, 0, nil", sessions, unreadable, err)
 	}
-	if windows, err := c.DisplayWindows(ctx); err != nil || len(windows) != 0 {
-		t.Fatalf("DisplayWindows = (%v, %v), want empty, nil", windows, err)
+	if windows, unreadable, err := c.DisplayWindowListing(ctx); err != nil || len(windows) != 0 || unreadable != 0 {
+		t.Fatalf("DisplayWindowListing = (%v, %d, %v), want empty, 0, nil", windows, unreadable, err)
 	}
 	if panes, unreadable, err := c.DisplayPaneListing(ctx); err != nil || len(panes) != 0 || unreadable != 0 {
 		t.Fatalf("DisplayPaneListing = (%v, %d, %v), want empty, 0, nil", panes, unreadable, err)
