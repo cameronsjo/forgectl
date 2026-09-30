@@ -52,7 +52,7 @@ deep-dive get a link here.
 | `ghostty` | Theme + keybind reporting, parsed live from the ghostty CLI | Usage below |
 | `pip` | Comment- and whitespace-preserving `pip.conf` editor | Usage below |
 | `quarantine` | Reversibly hide AI-instruction files (`CLAUDE.md`, `AGENTS.md`, …) from a workspace | Usage below |
-| `review` | Cross-project work inventory: open issues and PRs across your repos | [projects and review](docs/commands/projects-and-review.md) |
+| `review` | Cross-project work inventory: open issues and PRs across your repos; `review releases` is the release radar | [projects and review](docs/commands/projects-and-review.md) |
 | `preflight` | Align enabled plugins to the skill catalog's core-tier default set | Usage below |
 | `update` | Weekly package-manager + OS maintenance, independently-scoped steps | Usage below |
 | `doctor` | Ecosystem health check: claude, tmux/ghostty/cmux, gh auth, config, the bench, the trust store | Usage below |
@@ -142,10 +142,13 @@ forgectl resume                    # pick from recent sessions across every repo
 forgectl resume forgectl           # filter by repo, name, cwd, or id; one hit resumes it, several list the candidates
 forgectl resume --fork             # branch a new session off the transcript — the only way into a still-running one
 forgectl resume --dry-run forge    # resolve and print the cwd + claude argv, exec nothing (never prompts)
-forgectl resume ls                 # list without acting (the only subcommand that returns)
+forgectl resume ls                 # list without acting (every subcommand returns; only bare `resume` execs)
 forgectl resume ls --json          # machine-readable JSON (safe to pipe; counts go to stderr; see `resume ls --help` for the field table)
 forgectl resume snapshot           # capture what a live session's exit would destroy
 forgectl resume snapshot --quiet   # same, silent — the form a Stop hook uses
+forgectl resume outdated           # list live sessions running an older claude than the one installed (read-only)
+forgectl resume outdated --json    # stable JSON array for scripts; see `resume outdated --help` for the field table
+forgectl resume restart --outdated # stop + resume those sessions in their herdr panes once each is idle (--dry-run: plan only)
 
 # surface — start a harness inside a terminal manager without exposing its invocation
 forgectl surface launch <target> --surface tmux           # tmux, cmux, or herdr — always explicit, never a default
@@ -303,6 +306,8 @@ forgectl quarantine status               # show which targets are hidden
 forgectl review                          # unified table (reviewed rows dimmed)
 forgectl review --kind issue             # issues only (or: pr)
 forgectl review mark owner/repo#42       # mark an item reviewed
+forgectl review releases                 # release radar: last release, waiting release PR, ship-gate reason, stalls
+forgectl review releases --json --fail-on-stall  # the nightly check: exit 1 on any stalled or unknown repo
 
 # update — weekly package-manager + OS maintenance, independently-scoped steps
 forgectl update check                    # report-only for every step (brew/softwareupdate/go/npm), no mutation —

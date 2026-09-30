@@ -1,0 +1,283 @@
+{
+  "captured_at": "2026-09-30T04:19:35Z",
+  "canonical_gate_sha256": "d0c096465e86259f8b429668f90cdf3bc3c71a49a02c286ceea49341697266e0",
+  "facts": {
+    "artificer": {
+      "repo": "artificer",
+      "last_release": {
+        "tag": "v0.27.0",
+        "at": "2026-09-27T16:09:57Z"
+      },
+      "unreleased": 0,
+      "upstream_due_since": "2026-09-27T16:13:08Z"
+    },
+    "artificer-obsidian": {
+      "repo": "artificer-obsidian",
+      "last_release": {
+        "tag": "0.27.0",
+        "at": "2026-09-27T16:13:37Z"
+      },
+      "unreleased": 0,
+      "upstream_due_since": "2026-09-27T16:16:47Z"
+    },
+    "cadence-hooks": {
+      "repo": "cadence-hooks",
+      "last_release": {
+        "tag": "v0.118.0",
+        "at": "2026-09-30T02:44:52Z"
+      },
+      "unreleased": 23,
+      "oldest_unreleased_at": "2026-09-30T01:13:01Z",
+      "toggle": {
+        "name": "SHIP_NIGHTLY",
+        "value": "on",
+        "set": true,
+        "source": "variable"
+      },
+      "runs": [
+        {
+          "id": 36667632595,
+          "event": "workflow_dispatch",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-09-30T04:10:27Z",
+          "reason": "go"
+        },
+        {
+          "id": 36665160612,
+          "event": "workflow_dispatch",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-09-30T03:36:27Z"
+        },
+        {
+          "id": 36664503870,
+          "event": "workflow_dispatch",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-09-30T03:27:50Z"
+        },
+        {
+          "id": 36664220075,
+          "event": "workflow_dispatch",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-09-30T03:24:03Z"
+        },
+        {
+          "id": 36663277493,
+          "event": "workflow_dispatch",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-09-30T03:11:26Z"
+        }
+      ],
+      "endpoints": [
+        {
+          "kind": "homebrew-formula",
+          "repo": "homebrew-tap",
+          "path": "Formula/cadence-hooks.rb",
+          "version": "0.118.0"
+        },
+        {
+          "kind": "scoop",
+          "repo": "scoop-bucket",
+          "path": "bucket/cadence-hooks.json",
+          "version": "0.117.0"
+        }
+      ],
+      "gate_copy_sha256": "d0c096465e86259f8b429668f90cdf3bc3c71a49a02c286ceea49341697266e0"
+    },
+    "forgectl": {
+      "repo": "forgectl",
+      "last_release": {
+        "tag": "v0.19.0",
+        "at": "2026-09-30T02:48:28Z"
+      },
+      "unreleased": 23,
+      "oldest_unreleased_at": "2026-09-30T01:13:39Z",
+      "release_prs": [
+        {
+          "number": 752,
+          "created_at": "2026-09-30T02:46:45Z"
+        }
+      ],
+      "toggle": {
+        "name": "SHIP_NIGHTLY",
+        "value": "on",
+        "set": true,
+        "source": "variable"
+      },
+      "runs": [
+        {
+          "id": 36666633665,
+          "event": "workflow_dispatch",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-09-30T03:56:19Z",
+          "reason": "ci-red"
+        },
+        {
+          "id": 36663274731,
+          "event": "workflow_dispatch",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-09-30T03:11:24Z"
+        }
+      ],
+      "endpoints": [
+        {
+          "kind": "homebrew-cask",
+          "repo": "homebrew-tap",
+          "path": "Casks/forgectl.rb",
+          "version": "0.19.0"
+        }
+      ],
+      "gate_copy_sha256": "d0c096465e86259f8b429668f90cdf3bc3c71a49a02c286ceea49341697266e0"
+    },
+    "herdr": {
+      "repo": "herdr",
+      "last_release": {
+        "tag": "v0.9.1-palette.1",
+        "at": "2026-09-18T11:14:46Z"
+      },
+      "unreleased": 138,
+      "oldest_unreleased_at": "2026-09-17T20:43:35Z",
+      "endpoints": [
+        {
+          "kind": "homebrew-formula",
+          "repo": "homebrew-tap",
+          "path": "Formula/herdr.rb",
+          "version": "0.9.1-palette.1"
+        }
+      ],
+      "upstream_due_since": "2026-09-18T13:18:23Z"
+    },
+    "obsidi-claude": {
+      "repo": "obsidi-claude",
+      "last_release": {
+        "tag": "1.2.0",
+        "at": "2026-02-09T15:32:00Z"
+      },
+      "unreleased": 14,
+      "oldest_unreleased_at": "2026-02-09T15:32:08Z",
+      "toggle": {
+        "name": "SHIP_NIGHTLY",
+        "value": "",
+        "set": false,
+        "source": "variable"
+      },
+      "runs": [
+        {
+          "id": 36663280104,
+          "event": "workflow_dispatch",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-09-30T03:11:29Z",
+          "reason": "no-pr"
+        }
+      ],
+      "gate_copy_sha256": "d0c096465e86259f8b429668f90cdf3bc3c71a49a02c286ceea49341697266e0"
+    },
+    "private-testflight-1": {
+      "repo": "private-testflight-1",
+      "last_release": {
+        "tag": "upload@0000000",
+        "at": "2026-09-29T11:12:26Z",
+        "sha": "0000000000000000000000000000000000000001"
+      },
+      "unreleased": 1,
+      "oldest_unreleased_at": "2026-09-30T02:04:14Z",
+      "toggle": {
+        "name": "TESTFLIGHT_NIGHTLY",
+        "value": "on",
+        "set": true,
+        "source": "variable"
+      },
+      "runs": [
+        {
+          "id": 1,
+          "event": "workflow_dispatch",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-09-29T21:34:48Z",
+          "reason": "no-change"
+        },
+        {
+          "id": 2,
+          "event": "schedule",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-09-29T11:04:15Z",
+          "reason": "uploaded"
+        },
+        {
+          "id": 3,
+          "event": "workflow_dispatch",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-09-28T20:24:11Z"
+        },
+        {
+          "id": 4,
+          "event": "workflow_dispatch",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-09-28T20:16:00Z"
+        }
+      ],
+      "endpoints": [
+        {
+          "kind": "testflight"
+        }
+      ]
+    },
+    "private-testflight-2": {
+      "repo": "private-testflight-2",
+      "last_release": {
+        "tag": "tf-20260928-1445",
+        "at": "2026-09-28T14:43:11Z",
+        "sha": "0000000000000000000000000000000000000002"
+      },
+      "unreleased": 24,
+      "oldest_unreleased_at": "2026-09-28T14:46:37Z",
+      "toggle": {
+        "name": "TESTFLIGHT_NIGHTLY",
+        "value": "",
+        "set": false,
+        "source": "variable"
+      },
+      "endpoints": [
+        {
+          "kind": "testflight"
+        }
+      ]
+    },
+    "yaae": {
+      "repo": "yaae",
+      "last_release": {
+        "tag": "0.1.1",
+        "at": "2026-09-19T00:48:24Z"
+      },
+      "unreleased": 2,
+      "oldest_unreleased_at": "2026-09-19T00:48:31Z",
+      "toggle": {
+        "name": "SHIP_NIGHTLY",
+        "value": "",
+        "set": false,
+        "source": "variable"
+      },
+      "runs": [
+        {
+          "id": 36663282285,
+          "event": "workflow_dispatch",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-09-30T03:11:31Z",
+          "reason": "no-pr"
+        }
+      ],
+      "gate_copy_sha256": "d0c096465e86259f8b429668f90cdf3bc3c71a49a02c286ceea49341697266e0"
+    }
+  }
+}

@@ -22,3 +22,13 @@ func processAlive(pid int) bool {
 	}
 	return errors.Is(err, syscall.EPERM)
 }
+
+// terminateProcess sends SIGTERM. SIGTERM, not SIGINT: the two were measured
+// equivalent on Claude Code 2.1.285 (both exit at once, remove the registry
+// file, and keep the transcript), and SIGTERM is the conventional "stop now".
+func terminateProcess(pid int) error {
+	if pid <= 0 {
+		return errors.New("refusing to signal a non-positive pid")
+	}
+	return syscall.Kill(pid, syscall.SIGTERM)
+}
