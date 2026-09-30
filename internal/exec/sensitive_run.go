@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec/internal/sealed"
+	"github.com/cameronsjo/forgectl/internal/exec/internal/validated"
 )
 
 // defaultRetireBound is how long the runner waits for a stream's reader to
@@ -110,7 +111,7 @@ func (r *OSSensitiveRunner) drainBound() time.Duration {
 // It reads keys only. A replacement's value stays sealed until sealed.Start
 // appends it as KEY=value, after every inherited entry, so the order of the
 // final environment is exactly what it was when this function built it whole.
-func (r *OSSensitiveRunner) buildEnv(muts []EnvMutation) ([]string, []sealed.EnvVar) {
+func (r *OSSensitiveRunner) buildEnv(muts []validated.Env) ([]string, []sealed.EnvVar) {
 	if len(muts) == 0 {
 		out := make([]string, len(r.env))
 		copy(out, r.env)
@@ -118,7 +119,7 @@ func (r *OSSensitiveRunner) buildEnv(muts []EnvMutation) ([]string, []sealed.Env
 	}
 	drop := make(map[string]struct{}, len(muts))
 	for _, m := range muts {
-		drop[m.key] = struct{}{}
+		drop[m.Key] = struct{}{}
 	}
 	out := make([]string, 0, len(r.env)+len(muts))
 	for _, entry := range r.env {
@@ -129,8 +130,8 @@ func (r *OSSensitiveRunner) buildEnv(muts []EnvMutation) ([]string, []sealed.Env
 	}
 	var set []sealed.EnvVar
 	for _, m := range muts {
-		if m.op == envOpReplace {
-			set = append(set, sealed.EnvVar{Key: m.key, Value: m.value.v})
+		if m.Op == validated.EnvOpReplace {
+			set = append(set, sealed.EnvVar{Key: m.Key, Value: m.Value})
 		}
 	}
 	return out, set
@@ -155,9 +156,10 @@ func envKeyOf(entry string) string {
 // *exec.Cmd, or anything else carrying a plaintext payload. (The inherited
 // environment r.env is plaintext by design; it holds no payload.)
 //
-// It accepts only a validatedCommand, which only SensitiveCommand.validated
-// builds, so what it starts has passed validate, and a later write to the
-// caller's SensitiveCommand cannot reach it (forgectl#888). Only RunSensitive
+// It accepts only a validated.Command, which only validated.New builds, from
+// a copy it checked, so what it starts passed validation, and a later write
+// to the caller's SensitiveCommand cannot reach it. The validated package's
+// boundary makes that the compiler's property (forgectl#888). Only RunSensitive
 // may call it, once, as a direct call and never as a func value, so every
 // launch goes through the runner's pipes and bounds
 // (TestSealedStartHasOneCaller, TestValidateDominatesStartSealed).
@@ -241,13 +243,9 @@ func envKeyOf(entry string) string {
 // validate has already required an absolute path, so no PATH lookup happens
 // — which matters, because LookPath reads the live process PATH rather than
 // this runner's captured environment.
-func startSealed(r *OSSensitiveRunner, vc validatedCommand, stdout, stderr *os.File) (*sealed.Proc, error) {
-	args := make([]sealed.Value, len(vc.args))
-	for i := range vc.args {
-		args[i] = vc.args[i].v
-	}
-	env, set := r.buildEnv(vc.env)
-	return sealed.Start(vc.path.v, args, env, set, stdout, stderr)
+func startSealed(r *OSSensitiveRunner, vc validated.Command, stdout, stderr *os.File) (*sealed.Proc, error) {
+	env, set := r.buildEnv(vc.Env())
+	return sealed.Start(vc.Path(), vc.Args(), env, set, stdout, stderr)
 }
 
 // failedResult is what every never-ran path returns. ExitCode is -1, never 0:

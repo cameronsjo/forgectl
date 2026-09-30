@@ -69,9 +69,10 @@ var refusedReflectMethods = map[string][]string{
 //     reflect.NewAt, and a type reached through an alias. A file that does
 //     import it is TestNoFileReachesPastTheTypeSystem's to refuse;
 //   - any use (a call, a method value or a method expression, promoted or
-//     not) of a method in refusedReflectMethods, and of any interface method
-//     with the same name and signature, since an interface can hold a
-//     reflect.Value. reflectMemoryAllowed is the allowlist.
+//     not) of a method in refusedReflectMethods, and of any method of the
+//     same name, whatever its signature, on an interface a reflect.Value or
+//     reflect.Type could satisfy by name. reflectMemoryAllowed is the
+//     allowlist.
 //
 // The rule is an allowlist over what go/types resolves, not a scan of the
 // text, so a renamed import, an embedded reflect.Value or a type-parameter
@@ -176,11 +177,12 @@ func listTypedPackages(ctx context.Context, root string, p guardPlatform, cgo st
 }
 
 // typedGuardPlatform type-checks every in-tree package for p with cgo off,
-// and again with cgo on when that changes an in-tree file list, and returns typedFindings over them plus the import paths it
-// checked. Out-of-tree packages always come from the cgo-off listing and are
-// checked without function bodies: under cgo on, the standard library's cgo
-// files would need the C toolchain, and no dependency's exported surface
-// differs by cgo in a way a module file could name.
+// and again with cgo on when that changes an in-tree file list, and returns
+// typedFindings over them plus the import paths it checked. Out-of-tree
+// packages always come from the cgo-off listing and are checked without
+// function bodies: under cgo on, the standard library's cgo files would need
+// the C toolchain, and no dependency's exported surface differs by cgo in a
+// way a module file could name.
 func typedGuardPlatform(ctx context.Context, root string, p guardPlatform) (findings, checked []string, err error) {
 	off, err := listTypedPackages(ctx, root, p, "0")
 	if err != nil {
@@ -228,13 +230,13 @@ func typedGuardPlatform(ctx context.Context, root string, p guardPlatform) (find
 		if err != nil {
 			return nil, nil, fmt.Errorf("load reflect for %s: %w", p, err)
 		}
-		refused, err := refusedReflectFuncs(reflectPkg)
+		rule, err := newReflectRule(reflectPkg)
 		if err != nil {
 			return nil, nil, err
 		}
 		for _, c := range l.checked {
 			checked = append(checked, c.path)
-			for _, f := range typedFindings(fset, c.files, c.info, refused, l.rel) {
+			for _, f := range typedFindings(fset, c.files, c.info, rule, l.rel) {
 				if !seen[f] {
 					seen[f] = true
 					findings = append(findings, f)
@@ -373,38 +375,54 @@ func (l *typedLoader) check(lp *typedListPackage, bodies bool) (*types.Package, 
 	return p, typedCheckedPackage{path: lp.ImportPath, files: files, info: info}, nil
 }
 
-// refusedReflectFuncs returns the method objects refusedReflectMethods names,
-// looked up in reflectPkg. It fails when one is missing: a renamed method
-// would otherwise drop out of the rule unseen.
-func refusedReflectFuncs(reflectPkg *types.Package) ([]*types.Func, error) {
-	var funcs []*types.Func
+// reflectRule is Rule B's data, looked up in the reflect package the checked
+// code resolves: the refused method objects, and the exported method names
+// of each type that could sit behind an interface and hand one out (a
+// *reflect.Value, whose method set holds Value's too, and a reflect.Type).
+type reflectRule struct {
+	refused []*types.Func
+	holders []map[string]bool
+}
+
+// newReflectRule looks up refusedReflectMethods in reflectPkg. It fails when
+// one is missing: a renamed method would otherwise drop out of the rule
+// unseen.
+func newReflectRule(reflectPkg *types.Package) (*reflectRule, error) {
+	rule := &reflectRule{}
 	for _, recv := range []string{"Value", "Type"} {
 		obj, ok := reflectPkg.Scope().Lookup(recv).(*types.TypeName)
 		if !ok {
 			return nil, fmt.Errorf("reflect declares no type %s", recv)
 		}
-		for _, name := range refusedReflectMethods[recv] {
-			// A *T method set holds T's methods too; an interface's pointer has none.
-			T := obj.Type()
-			if !types.IsInterface(T) {
-				T = types.NewPointer(T)
+		// A *T method set holds T's methods too; an interface's pointer has none.
+		T := obj.Type()
+		if !types.IsInterface(T) {
+			T = types.NewPointer(T)
+		}
+		names := map[string]bool{}
+		for sel := range types.NewMethodSet(T).Methods() {
+			if sel.Obj().Exported() {
+				names[sel.Obj().Name()] = true
 			}
+		}
+		rule.holders = append(rule.holders, names)
+		for _, name := range refusedReflectMethods[recv] {
 			m, _, _ := types.LookupFieldOrMethod(T, true, reflectPkg, name)
 			fn, ok := m.(*types.Func)
 			if !ok {
 				return nil, fmt.Errorf("reflect.%s has no method %s", recv, name)
 			}
-			funcs = append(funcs, fn)
+			rule.refused = append(rule.refused, fn)
 		}
 	}
-	return funcs, nil
+	return rule, nil
 }
 
 // typedFindings is the rule TestNoFileReadsMemoryThroughReflect applies to one
 // type-checked package: its files, their types.Info (Types and Uses),
-// the refused reflect methods, and rel, which names a file for the
+// Rule B's reflect data, and rel, which names a file for the
 // allowlists and the report.
-func typedFindings(fset *token.FileSet, files []*ast.File, info *types.Info, refused []*types.Func, rel func(string) string) []string {
+func typedFindings(fset *token.FileSet, files []*ast.File, info *types.Info, rule *reflectRule, rel func(string) string) []string {
 	var findings []string
 	seen := map[string]bool{}
 	report := func(pos token.Pos, msg string) {
@@ -437,7 +455,7 @@ func typedFindings(fset *token.FileSet, files []*ast.File, info *types.Info, ref
 			if !ok {
 				return true
 			}
-			if match := refusedReflectUse(fn, refused); match != nil && reflectMemoryAllowed[name+" "+fn.Name()] == "" {
+			if match := rule.use(fn); match != nil && reflectMemoryAllowed[name+" "+fn.Name()] == "" {
 				report(id.Pos(), fmt.Sprintf("uses %s, as %s: it hands out a field's address past the read-only check (or reaches such a method by name), which reads a sealed payload without importing \"unsafe\"; add %q to reflectMemoryAllowed with a reason only after review",
 					fn.FullName(), match.FullName(), name+" "+fn.Name()))
 			}
@@ -447,24 +465,38 @@ func typedFindings(fset *token.FileSet, files []*ast.File, info *types.Info, ref
 	return findings
 }
 
-// refusedReflectUse returns the refused reflect method fn stands for: fn
-// itself, or, when fn is an interface method (which a reflect.Value or
-// reflect.Type can satisfy), the refused method of the same name and an
-// identical signature. It returns nil for anything else.
-func refusedReflectUse(fn *types.Func, refused []*types.Func) *types.Func {
-	// Identity is decided on the origin, but the signature compared below is
-	// fn's own: the method of an instantiated generic interface such as
-	// I[uintptr] has signature () uintptr, while its origin's is () T.
-	if slices.Contains(refused, fn.Origin()) {
+// use returns the refused reflect method fn stands for: fn
+// itself (its origin, for an instantiated method), or, when fn is a method
+// of an interface a reflect.Value or reflect.Type could satisfy, a refused
+// method of the same name, whatever the signature. Inside a generic body a
+// look-alike's signature can stay parametric (interface{ UnsafeAddr() T }),
+// so matching signatures would miss it. Whether a reflect type could satisfy
+// the interface is decided by name alone: every method of the interface must
+// be an exported method of *reflect.Value, or every one of reflect.Type.
+// net.Listener's Addr is left alone because no reflect type has Accept or
+// Close. It returns nil for anything else.
+func (r *reflectRule) use(fn *types.Func) *types.Func {
+	if slices.Contains(r.refused, fn.Origin()) {
 		return fn.Origin()
 	}
 	recv := fn.Signature().Recv()
-	if recv == nil || !types.IsInterface(recv.Type()) {
+	if recv == nil {
 		return nil
 	}
-	for _, r := range refused {
-		if r.Name() == fn.Name() && types.Identical(r.Signature(), fn.Signature()) {
-			return r
+	iface, ok := recv.Type().Underlying().(*types.Interface)
+	if !ok || !slices.ContainsFunc(r.holders, func(names map[string]bool) bool {
+		for m := range iface.Methods() {
+			if !names[m.Name()] {
+				return false
+			}
+		}
+		return true
+	}) {
+		return nil
+	}
+	for _, refused := range r.refused {
+		if refused.Name() == fn.Name() {
+			return refused
 		}
 	}
 	return nil
@@ -559,9 +591,11 @@ func holdsUnsafePointer(t types.Type, seen map[types.Type]bool) bool {
 // left alone.
 //
 // Mutations that turn it red: drop the Types walk (the NewAt and SetPointer
-// rows go quiet), drop the interface arm of refusedReflectUse (the look-alike
-// and constraint rows go quiet), compare fn.Origin()'s signature instead of
-// fn's (the two generic-interface rows go quiet), or enter a named struct in
+// rows go quiet), drop the interface arm of reflectRule.use (the look-alike
+// and constraint rows go quiet), match the interface arm on an identical
+// signature as well as the name (the three parametric rows go quiet), drop
+// the reflect-holder filter in reflectRule.use (the net.Listener-shaped row
+// reports Addr), or enter a named struct in
 // holdsUnsafePointer (the clean reflect row reports reflect.Value).
 func TestTypedFindingsSeeEveryRoute(t *testing.T) {
 	const prelude = "package probe\n\nimport \"reflect\"\n\nvar _ reflect.Value\n\ntype sealedArg struct{ reveal func() string }\n\n"
@@ -588,11 +622,20 @@ func f(x w) reflect.Value { return x.Addr() }`, true},
 func f(v reflect.Value) uintptr { return any(v).(I[uintptr]).UnsafeAddr() }`, true},
 		{"generic interface as a constraint", `type I[T any] interface{ UnsafeAddr() T }
 func f[V I[uintptr]](v V) uintptr { return v.UnsafeAddr() }`, true},
+		{"parametric look-alike in a generic body", `type I[T any] interface{ UnsafeAddr() T }
+func g[T any](x I[T]) T { return x.UnsafeAddr() }`, true},
+		{"parametric look-alike as a constraint", `type I[T any] interface{ UnsafeAddr() T }
+func g[T any, V I[T]](v V) T { return v.UnsafeAddr() }`, true},
+		{"parametric look-alike method value", `type I[T any] interface{ UnsafeAddr() T }
+func g[T any](x I[T]) func() T { return x.UnsafeAddr }`, true},
 		{"InterfaceData call", `func f(v reflect.Value) [2]uintptr { return v.InterfaceData() }`, true},
 		{"dynamic MethodByName", `func f(v reflect.Value) reflect.Value { return reflect.ValueOf(v).MethodByName("Addr") }`, true},
 		{"reflect.Type MethodByName", `func f(v reflect.Value) (reflect.Method, bool) { return reflect.TypeOf(v).MethodByName("Addr") }`, true},
 		{"reflect.NewAt as a value", `var g = reflect.NewAt`, true},
 		{"SetPointer method expression", `var g = reflect.Value.SetPointer`, true},
+		{"Addr on a net.Listener-shaped interface", `func f(l interface{ Addr() string; Accept() error }) string { return l.Addr() }`, false},
+		{"unrelated method on a generic interface", `type J[T any] interface{ Size() T }
+func g[T any](x J[T]) T { return x.Size() }`, false},
 		{"clean reflect use", `func f(a *sealedArg) (reflect.Kind, string, bool) {
 	v := reflect.ValueOf(a).Elem().Field(0)
 	return v.Kind(), v.Type().String(), reflect.DeepEqual(a, a)
@@ -621,9 +664,9 @@ func f[V I[uintptr]](v V) uintptr { return v.UnsafeAddr() }`, true},
 // typedProbe type-checks probe sources against the host's standard library,
 // through one source importer so reflect is loaded once for every row.
 type typedProbe struct {
-	fset    *token.FileSet
-	imp     types.Importer
-	refused []*types.Func
+	fset *token.FileSet
+	imp  types.Importer
+	rule *reflectRule
 }
 
 func newTypedProbe(t *testing.T) *typedProbe {
@@ -634,11 +677,11 @@ func newTypedProbe(t *testing.T) *typedProbe {
 	if err != nil {
 		t.Fatal(err)
 	}
-	refused, err := refusedReflectFuncs(reflectPkg)
+	rule, err := newReflectRule(reflectPkg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &typedProbe{fset: fset, imp: imp, refused: refused}
+	return &typedProbe{fset: fset, imp: imp, rule: rule}
 }
 
 // findings type-checks src as one file and returns typedFindings over it.
@@ -656,5 +699,5 @@ func (p *typedProbe) findings(t *testing.T, src string) []string {
 	if _, err := conf.Check("probe", p.fset, []*ast.File{file}, info); err != nil {
 		t.Fatalf("type-check probe: %v\n%s", err, src)
 	}
-	return typedFindings(p.fset, []*ast.File{file}, info, p.refused, func(s string) string { return s })
+	return typedFindings(p.fset, []*ast.File{file}, info, p.rule, func(s string) string { return s })
 }

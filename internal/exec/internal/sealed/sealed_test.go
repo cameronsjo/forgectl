@@ -121,18 +121,26 @@ func TestStart_FailureNeverCarriesThePath(t *testing.T) {
 }
 
 // TestStart_RefusesARelativePath pins Start's own refusal of a path that is
-// not absolute, the defense in depth behind the runner's validate: nothing
-// starts, and the error is the fixed errNotStarted.
+// not absolute, the defense in depth behind the runner's validate, for a
+// relative path and for the zero Value: nothing starts, and the error is the
+// fixed errNotStarted.
 //
 // Mutation that turns it red: drop the IsAbs check in Start (exec.LookPath
 // resolves "sh" and a shell starts).
 func TestStart_RefusesARelativePath(t *testing.T) {
-	proc, err := Start(New("sh"), []Value{New("-c"), New("exit 0")}, nil, nil, nil, nil)
-	if proc != nil {
-		_ = proc.Wait()
-		t.Fatal("Start ran a relative path; it must refuse before any lookup")
-	}
-	if !errors.Is(err, errNotStarted) {
-		t.Fatalf("Start of a relative path = %v, want errNotStarted", err)
+	for name, path := range map[string]Value{
+		"relative path": New("sh"),
+		// The zero Value is the path of the zero validated.Command, which
+		// validated.New returns on every refusal (forgectl#888).
+		"zero Value": {},
+	} {
+		proc, err := Start(path, []Value{New("-c"), New("exit 0")}, nil, nil, nil, nil)
+		if proc != nil {
+			_ = proc.Wait()
+			t.Fatalf("%s: Start ran it; it must refuse before any lookup", name)
+		}
+		if !errors.Is(err, errNotStarted) {
+			t.Fatalf("%s: Start = %v, want errNotStarted", name, err)
+		}
 	}
 }

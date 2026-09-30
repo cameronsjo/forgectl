@@ -85,21 +85,22 @@ func TestSealedIsUnimportableOutsideExec(t *testing.T) {
 // every platform in guardPlatforms, the one path to a process: sealed.Start,
 // the one function that puts a payload into a process, is named only inside
 // the func startSealed, and startSealed is named only inside
-// (*OSSensitiveRunner).RunSensitive. That what it starts was validated is
-// the validatedCommand type state's (TestOnlyValidatedBuildsAValidatedCommand),
-// and that it is never used as a value is TestValidateDominatesStartSealed's.
-// Test files are not checked.
+// (*OSSensitiveRunner).RunSensitive. That what it starts was validated is the
+// compiler's: startSealed accepts only a validated.Command, which only
+// validated.New builds. That it is never used as a value is
+// TestValidateDominatesStartSealed's. Test files are not checked.
 //
 // This is not what keeps plaintext out of internal/exec: the compiler does
 // that, since sealed.Start returns only a *sealed.Proc (wait and kill, no
 // accessor, pinned by the golden) and no exported name of sealed returns an
 // *exec.Cmd. It keeps process launches through the seam to the runner, so a
-// second launch path cannot appear without review. Both targets are package-level funcs, which can be reached only by
-// naming them (a call or a func value), so a Uses walk sees every route;
-// there is no interface or method-value shape that avoids it.
+// second launch path cannot appear without review. Both targets are
+// package-level funcs, which can be reached only by naming them (a call or a
+// func value), so a Uses walk sees every route; there is no interface or
+// method-value shape that avoids it.
 //
 // Mutations that turn it red, each in sensitive.go: `var _ = sealed.Start`;
-// `var _, _ = startSealed(&OSSensitiveRunner{}, validatedCommand{}, nil,
+// `var _, _ = startSealed(&OSSensitiveRunner{}, validated.Command{}, nil,
 // nil)`.
 func TestSealedStartHasOneCaller(t *testing.T) {
 	for _, p := range guardPlatforms {
@@ -125,11 +126,12 @@ func TestSealedStartHasOneCaller(t *testing.T) {
 
 // TestValidateDominatesStartSealed pins, on every platform in
 // guardPlatforms, that validation cannot be skipped or outrun on the way to a
-// process (forgectl#888). Most of that is now the compiler's: startSealed
-// accepts only a validatedCommand, and TestOnlyValidatedBuildsAValidatedCommand
-// pins that only SensitiveCommand.validated builds one, so moving the call
-// above validation does not compile, and a write to sc after it cannot reach
-// the copy that is started. What is left for this test is the shape of the
+// process (forgectl#888). Most of that is the compiler's: startSealed
+// accepts only a validated.Command, and the validated package's boundary lets
+// only validated.New build a non-zero one, so moving the call above
+// validation does not compile, a Command cannot be forged from a struct
+// literal, and a write to sc after validation cannot reach the copy that is
+// started. What is left for this test is the shape of the
 // one call: inside (*OSSensitiveRunner).RunSensitive, startSealed is named
 // exactly once, as the function of a direct call outside every func literal,
 // so it is never a func value, never captured by a closure and never stored
@@ -206,95 +208,19 @@ func startSealedCallFindings(c *checkedPackage) []string {
 	return findings
 }
 
-// TestOnlyValidatedBuildsAValidatedCommand pins the constructor half of the
-// type state startSealed relies on (forgectl#888), in internal/exec's
-// production files on every platform in guardPlatforms: the type
-// validatedCommand, and each of its fields, is named only inside
-// (SensitiveCommand).validated, which builds it from a validated copy, and
-// startSealed, which reads it. So no other code can build one (a composite
-// literal, a var declaration, new, a conversion) or rewrite one it was
-// handed, and whatever startSealed starts came out of validated.
-//
-// Mutations that turn it red, each in sensitive_run.go: in RunSensitive,
-// `vc = validatedCommand{path: sc.Path}` after validation; `vc.args =
-// sc.Args` after validation.
-func TestOnlyValidatedBuildsAValidatedCommand(t *testing.T) {
-	doors := []funcRef{{recv: "SensitiveCommand", name: "validated"}, {name: "startSealed"}}
-	for _, p := range guardPlatforms {
-		c := checkExecFor(t, p)
-		tn, ok := c.pkg.Scope().Lookup("validatedCommand").(*types.TypeName)
-		if !ok {
-			t.Fatalf("[%s] internal/exec declares no validatedCommand type; the rule would check nothing", p)
-		}
-		st, ok := tn.Type().Underlying().(*types.Struct)
-		if !ok || st.NumFields() == 0 {
-			t.Fatalf("[%s] validatedCommand is not a struct with fields; the rule would check nothing", p)
-		}
-		targets := []types.Object{tn}
-		for f := range st.Fields() {
-			targets = append(targets, f)
-		}
-		for _, target := range targets {
-			for _, f := range usedOutside(c, target, doors) {
-				t.Errorf("[%s] %s: %s is named outside validated and startSealed; only validated may build a validatedCommand",
-					p, f, target.Name())
-			}
-		}
-	}
-}
-
-// funcRef names a func declaration: a method of recv (its receiver type
-// expression, pointer star included) or, when recv is empty, a plain func.
-type funcRef struct{ recv, name string }
-
-func (r funcRef) matches(fd *ast.FuncDecl) bool {
-	if fd.Name.Name != r.name {
-		return false
-	}
-	if r.recv == "" {
-		return fd.Recv == nil
-	}
-	return fd.Recv != nil && len(fd.Recv.List) == 1 && types.ExprString(fd.Recv.List[0].Type) == r.recv
-}
-
-// usedOutside returns the position of every use of target in c's production
-// files outside the funcs doors names, plus one extra finding when no door
-// uses it at all, since then the matcher, not the package, is what is clean.
-func usedOutside(c *checkedPackage, target types.Object, doors []funcRef) []string {
-	var findings []string
-	inside := 0
-	for _, f := range c.files {
-		for _, decl := range f.Decls {
-			fd, isFunc := decl.(*ast.FuncDecl)
-			door := isFunc && slices.ContainsFunc(doors, func(r funcRef) bool { return r.matches(fd) })
-			ast.Inspect(decl, func(n ast.Node) bool {
-				id, ok := n.(*ast.Ident)
-				if !ok || c.info.Uses[id] != target {
-					return true
-				}
-				if door {
-					inside++
-				} else {
-					findings = append(findings, c.fset.Position(id.Pos()).String())
-				}
-				return true
-			})
-		}
-	}
-	if inside == 0 {
-		findings = append(findings, "(no use inside the allowed funcs at all: the matcher is broken, not the package clean)")
-	}
-	return findings
-}
-
-// TestValidatedCommandIsACopy pins that validated copies before it checks:
-// a write to the caller's Args or Env backing array after validation
-// reaches neither the validatedCommand nor the argv of the process
-// startSealed starts from it (forgectl#888). It starts this test binary in
+// TestValidatedCommandIsACopy pins that the validated.Command is a copy: a
+// write to the caller's Args or Env backing array after validation reaches
+// neither the Command nor the argv of the process startSealed starts from it
+// (forgectl#888). It starts this test binary in
 // its argv helper mode through startSealed and reads the argv back.
 //
-// Mutation that turns it red: in validated, drop the two slices.Clone lines
-// (a shallow copy shares the caller's backing arrays).
+// A shallow copy is no longer expressible: SensitiveCommand.validated
+// converts each element into a new []validated.Arg, and validated.New keeps
+// only slices of its own (TestCommandKeepsOnlyWhatNewChecked mutation-tests
+// that half). This end-to-end run pins that the process gets the Command's
+// argv.
+//
+// Mutation that turns it red: startSealed passing vc.Args()[:0] as argv.
 func TestValidatedCommandIsACopy(t *testing.T) {
 	runner, self := helperRunner(t, "argv", defaultRetireBound)
 	sc := helperCommand(KindCmuxProbe, self, 4096, ReplaceCmuxSocketPath("/validated/socket"))
@@ -305,7 +231,7 @@ func TestValidatedCommandIsACopy(t *testing.T) {
 	}
 	sc.Args[0] = Opaque("mutated-arg")
 	sc.Env[0] = UnsetTmux()
-	if len(vc.env) != 1 || vc.env[0].key != ReplaceCmuxSocketPath("x").key {
+	if env := vc.Env(); len(env) != 1 || env[0].Key != ReplaceCmuxSocketPath("x").key {
 		t.Errorf("a write to sc.Env after validation reached the validated command's env")
 	}
 
@@ -376,11 +302,22 @@ func namedOutside(c *checkedPackage, target *types.Func, recv, within string) []
 
 // sealedImporterAllowed is every package, by import path with any test-variant
 // suffix removed, that may import internal/exec/internal/sealed: internal/exec
-// itself, and the test binaries go test builds for sealed's own tests.
+// itself, validated (which checks sealed values), and the test binaries go
+// test builds for sealed's own tests.
 var sealedImporterAllowed = map[string]bool{
 	execImportPath:             true,
+	validatedImportPath:        true,
 	sealedImportPath + ".test": true,
 	sealedImportPath + "_test": true,
+}
+
+// validatedImporterAllowed is every package that may import
+// internal/exec/internal/validated: internal/exec itself, and validated's own
+// test binaries.
+var validatedImporterAllowed = map[string]bool{
+	execImportPath:                true,
+	validatedImportPath + ".test": true,
+	validatedImportPath + "_test": true,
 }
 
 // TestOnlyExecImportsSealed closes what the internal-package rule leaves open:
@@ -391,49 +328,119 @@ var sealedImporterAllowed = map[string]bool{
 // sealedImporterAllowed names it.
 //
 // The same scan is then run over an -overlay probe subpackage,
-// internal/exec/zzsub, that imports sealed, and it must be reported there, so
-// a clean result is shown to come from the module and not from a matcher
-// that sees nothing.
+// internal/exec/zzsub, that imports sealed and validated, and it must be
+// reported there, so a clean result is shown to come from the module and not
+// from a matcher that sees nothing.
 //
 // Mutation that turns it red: a real internal/exec/zzsub/probe.go importing
 // sealed (the overlay probe is that file without touching the tree).
 func TestOnlyExecImportsSealed(t *testing.T) {
-	root, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, imp := range sealedImporters(t, root, "") {
-		t.Errorf("%s imports %s; only internal/exec may hold a sealed payload, so fold the code into internal/exec or add it to sealedImporterAllowed after review",
-			imp, sealedImportPath)
-	}
+	checkOnlyExecImports(t, sealedImportPath, sealedImporterAllowed,
+		"only internal/exec may hold a sealed payload, so fold the code into internal/exec or add it to sealedImporterAllowed after review")
+}
 
-	backing := filepath.Join(t.TempDir(), "probe.go")
-	src := "package zzsub\n\nimport \"" + sealedImportPath + "\"\n\nvar _ = sealed.New\n"
-	if err := os.WriteFile(backing, []byte(src), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	overlay, err := json.Marshal(map[string]map[string]string{
-		"Replace": {filepath.Join(root, "internal", "exec", "zzsub", "probe.go"): backing},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	overlayPath := filepath.Join(t.TempDir(), "overlay.json")
-	if err := os.WriteFile(overlayPath, overlay, 0o600); err != nil {
-		t.Fatal(err)
+// TestOnlyExecImportsValidated is TestOnlyExecImportsSealed for
+// internal/exec/internal/validated (forgectl#888): only internal/exec may
+// build the command startSealed starts, so a subpackage cannot become a
+// second place that feeds one.
+//
+// Mutation that turns it red: a real internal/exec/zzsub/probe.go importing
+// validated.
+func TestOnlyExecImportsValidated(t *testing.T) {
+	checkOnlyExecImports(t, validatedImportPath, validatedImporterAllowed,
+		"only internal/exec may build a validated command, so fold the code into internal/exec or add it to validatedImporterAllowed after review")
+}
+
+// checkOnlyExecImports reports every importer of target outside allowed, from
+// the shared module scan, and fails when the shared overlay probe that imports
+// target is not reported.
+func checkOnlyExecImports(t *testing.T, target string, allowed map[string]bool, why string) {
+	t.Helper()
+	scan := scanImports(t)
+	for _, imp := range importersOf(scan.module, target, allowed) {
+		t.Errorf("%s imports %s; %s", imp, target, why)
 	}
 	probe := execImportPath + "/zzsub"
-	if got := sealedImporters(t, root, overlayPath); !slices.Contains(got, probe) {
-		t.Fatalf("the scan did not report the probe %s importing sealed (got %q); the matcher is broken, not the module clean", probe, got)
+	if got := importersOf(scan.probed, target, allowed); !slices.Contains(got, probe) {
+		t.Fatalf("the scan did not report the probe %s importing %s (got %q); the matcher is broken, not the module clean", probe, target, got)
 	}
 }
 
-// sealedImporters returns, sorted and deduplicated, every package outside
-// sealedImporterAllowed that imports sealed, across every guard platform
-// with cgo off and on, reading the go tool under pinnedGoEnv and, when
-// overlay is non-empty, with -overlay.
-func sealedImporters(t *testing.T, root, overlay string) []string {
+// importScan is the import graph `go list -deps -test ./...` reports, once
+// for the module as it is and once with the overlay probe added: package
+// import path (test-variant suffix removed) to the paths it imports.
+type importScan struct{ module, probed map[string][]string }
+
+var (
+	importScanOnce   sync.Once
+	importScanResult importScan
+	importScanErr    error
+)
+
+// scanImports runs the two import-graph listings once per test binary; both
+// importer guards read them.
+func scanImports(t *testing.T) importScan {
 	t.Helper()
+	importScanOnce.Do(func() {
+		root, err := filepath.Abs(filepath.Join("..", ".."))
+		if err != nil {
+			importScanErr = err
+			return
+		}
+		dir, err := os.MkdirTemp("", "zzsub-probe")
+		if err != nil {
+			importScanErr = err
+			return
+		}
+		defer func() { _ = os.RemoveAll(dir) }()
+		backing := filepath.Join(dir, "probe.go")
+		src := "package zzsub\n\nimport (\n\t\"" + sealedImportPath + "\"\n\t\"" + validatedImportPath +
+			"\"\n)\n\nvar _ = sealed.New\n\nvar _ = validated.New\n"
+		if err := os.WriteFile(backing, []byte(src), 0o600); err != nil {
+			importScanErr = err
+			return
+		}
+		overlay, err := json.Marshal(map[string]map[string]string{
+			"Replace": {filepath.Join(root, "internal", "exec", "zzsub", "probe.go"): backing},
+		})
+		if err != nil {
+			importScanErr = err
+			return
+		}
+		overlayPath := filepath.Join(dir, "overlay.json")
+		if err := os.WriteFile(overlayPath, overlay, 0o600); err != nil {
+			importScanErr = err
+			return
+		}
+		if importScanResult.module, err = importGraph(root, ""); err != nil {
+			importScanErr = err
+			return
+		}
+		importScanResult.probed, importScanErr = importGraph(root, overlayPath)
+	})
+	if importScanErr != nil {
+		t.Fatal(importScanErr)
+	}
+	return importScanResult
+}
+
+// importersOf returns, sorted, every package in graph outside allowed that
+// imports target.
+func importersOf(graph map[string][]string, target string, allowed map[string]bool) []string {
+	var out []string
+	for pkg, imports := range graph {
+		if !allowed[pkg] && slices.Contains(imports, target) {
+			out = append(out, pkg)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// importGraph lists every package across every guard platform with cgo off
+// and on, under pinnedGoEnv and, when overlay is non-empty, with -overlay,
+// and returns each package's imports, test-variant suffixes removed.
+func importGraph(root, overlay string) (map[string][]string, error) {
 	strip := func(path string) string {
 		base, _, _ := strings.Cut(path, " ")
 		return base
@@ -453,7 +460,7 @@ func sealedImporters(t *testing.T, root, overlay string) []string {
 				if overlay != "" {
 					args = append(args, "-overlay", overlay)
 				}
-				cmd := osexec.CommandContext(t.Context(), "go", append(args, "./...")...) //nolint:gosec // G204: the go tool with fixed arguments and an overlay path this test wrote
+				cmd := osexec.Command("go", append(args, "./...")...) //nolint:gosec,noctx // G204: the go tool with fixed arguments and an overlay path this test wrote; run once per test binary, outside any one test's context
 				cmd.Dir = root
 				cmd.Env = append(append(os.Environ(), pinnedGoEnv...), "GOOS="+p.goos, "GOARCH="+p.goarch, "CGO_ENABLED="+cgo)
 				var stderr bytes.Buffer
@@ -466,11 +473,10 @@ func sealedImporters(t *testing.T, root, overlay string) []string {
 		}
 	}
 	wg.Wait()
-	found := map[string]bool{}
-	listed := 0
+	graph := map[string][]string{}
 	for _, r := range runs {
 		if r.err != nil {
-			t.Fatal(r.err)
+			return nil, r.err
 		}
 		dec := json.NewDecoder(bytes.NewReader(r.out))
 		for {
@@ -481,24 +487,21 @@ func sealedImporters(t *testing.T, root, overlay string) []string {
 			if err := dec.Decode(&pkg); errors.Is(err, io.EOF) {
 				break
 			} else if err != nil {
-				t.Fatal(err)
+				return nil, err
 			}
-			listed++
-			if sealedImporterAllowed[strip(pkg.ImportPath)] {
-				continue
+			path := strip(pkg.ImportPath)
+			for _, imp := range pkg.Imports {
+				if imp = strip(imp); !slices.Contains(graph[path], imp) {
+					graph[path] = append(graph[path], imp)
+				}
 			}
-			if slices.ContainsFunc(pkg.Imports, func(imp string) bool { return strip(imp) == sealedImportPath }) {
-				found[strip(pkg.ImportPath)] = true
+			if _, ok := graph[path]; !ok {
+				graph[path] = nil
 			}
 		}
 	}
-	if listed == 0 {
-		t.Fatal("go list reported no packages; the scan is broken, not the module clean")
+	if len(graph) == 0 {
+		return nil, errors.New("go list reported no packages; the scan is broken, not the module clean")
 	}
-	out := make([]string, 0, len(found))
-	for imp := range found {
-		out = append(out, imp)
-	}
-	slices.Sort(out)
-	return out
+	return graph, nil
 }

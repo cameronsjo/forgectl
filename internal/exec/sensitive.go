@@ -25,12 +25,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/exec/internal/sealed"
+	"github.com/cameronsjo/forgectl/internal/exec/internal/validated"
 	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
@@ -222,22 +222,15 @@ func (SecretArg) MarshalText() ([]byte, error)  { return []byte(Redacted), nil }
 // is the same trade == offered and is what makes adapter fakes assertable.
 func (s SecretArg) Equal(other SecretArg) bool { return s.v.Equal(other.v) }
 
-func (s SecretArg) set() bool { return s.v.Set() }
-
-func (s SecretArg) present() bool { return s.v.Present() }
-
-// argKind separates the three argv element classes the seam recognizes.
-type argKind uint8
+// argKind separates the three argv element classes the seam recognizes. It is
+// validated.ArgKind, which New checks, so the two cannot drift.
+type argKind = validated.ArgKind
 
 const (
-	argUnset argKind = iota
-	// argFixed is a backend constant, validated at construction.
-	argFixed
-	// argOpaque is a dynamic value, accepted as-is because a real path or
-	// prompt may contain anything.
-	argOpaque
-	// argEndOfOptions is the literal "--" separator.
-	argEndOfOptions
+	argUnset        = validated.ArgUnset
+	argFixed        = validated.ArgFixed
+	argOpaque       = validated.ArgOpaque
+	argEndOfOptions = validated.ArgEndOfOptions
 )
 
 // Arg is one argv element. Its payload is a sealed.Value for the same reason
@@ -364,7 +357,7 @@ const (
 	// document that its editor edits. It is not part of the editor protocol:
 	// it confines that copy to forgectl's work directory. See
 	// ReplaceSopsTmpdir.
-	envKeySopsTmpdir = "TMPDIR"
+	envKeySopsTmpdir = validated.KeySopsTmpdir
 )
 
 // The sops editor protocol's variable names, EXPORTED so the reading side
@@ -382,12 +375,12 @@ const (
 	EnvSopsNonce   = "FORGECTL_SOPS_NONCE"
 )
 
-type envOp uint8
+// envOp is validated.EnvOp, which New checks, so the two cannot drift.
+type envOp = validated.EnvOp
 
 const (
-	envOpUnspecified envOp = iota
-	envOpReplace
-	envOpUnset
+	envOpReplace = validated.EnvOpReplace
+	envOpUnset   = validated.EnvOpUnset
 )
 
 // EnvMutation is one permitted change to the inherited environment. The
@@ -497,23 +490,6 @@ func (m EnvMutation) Equal(other EnvMutation) bool {
 	return m.key == other.key && m.op == other.op && m.value.Equal(other.value)
 }
 
-// valid requires a replacement value to be non-empty, not merely present. Most
-// CLIs treat an empty environment value as unset, so an empty pin would
-// silently reopen the auto-discovery window the mutation exists to close —
-// while looking like a successful pin in logs that record only the count.
-func (m EnvMutation) valid() bool {
-	switch m.op {
-	case envOpReplace:
-		return m.key != "" && m.value.present()
-	case envOpUnset:
-		return m.key != "" && !m.value.set()
-	case envOpUnspecified:
-		return false
-	default:
-		return false
-	}
-}
-
 // SensitiveCommand is one bounded, redacting invocation. Path and every Args
 // element are opaque; Env is drawn from the closed vocabulary above; the caps
 // may only narrow the runner-owned ceiling. There is no working-directory
@@ -589,98 +565,54 @@ func (c SensitiveCommand) Equal(other SensitiveCommand) bool {
 	return true
 }
 
-// validatedCommand is the part of a SensitiveCommand that reaches a process
-// (its path, argv and environment mutations), as validated returned it. It
-// is the only thing startSealed accepts, and only validated builds one
-// (TestOnlyValidatedBuildsAValidatedCommand), so the command started is the
-// command validated, by construction (forgectl#888). A write to the caller's
-// SensitiveCommand after validation, including one through its Args or Env
-// backing array, cannot reach it: validated copied both slices before
-// checking them. Its zero value, which validated returns on refusal, has no
-// path, and sealed.Start refuses that on its own.
-type validatedCommand struct {
-	path SecretArg
-	args []Arg
-	env  []EnvMutation
+// toValidated is m as validated.New checks it.
+func (m EnvMutation) toValidated() validated.Env {
+	return validated.Env{Key: m.key, Value: m.value.v, Op: m.op}
 }
 
-// validated copies c's Args and Env, validates the copy, and returns it as a
-// validatedCommand. The checks run on the copy, not on c, so no write between
-// the check and the copy can slip past them: the slices validate reads are
-// the slices startSealed starts. Arg, SecretArg and EnvMutation hold only
-// immutable sealed values and scalars, so an element copy is a deep copy.
-func (c SensitiveCommand) validated() (validatedCommand, error) {
-	c.Args = slices.Clone(c.Args)
-	c.Env = slices.Clone(c.Env)
-	if err := c.validate(); err != nil {
-		return validatedCommand{}, err
-	}
-	return validatedCommand{path: c.Path, args: c.Args, env: c.Env}, nil
-}
-
-// validate refuses before process start. Every message here is static text: a
-// validation failure must not become the rendering path that reveals what was
-// wrong with the value. It never reveals a payload: sealed answers the two
-// questions it asks, whether the path (and a TMPDIR value) is absolute and
-// whether a dynamic argument leads with a dash, as one bit each.
+// validate refuses before process start; see validated.
 func (c SensitiveCommand) validate() error {
+	_, err := c.validated()
+	return err
+}
+
+// validated checks c and returns the part that reaches a process (its path,
+// argv and environment mutations) as a validated.Command, the only thing
+// startSealed accepts. The checks on that part run in validated.New, over a
+// copy it takes first, so the command started is the command checked, by
+// construction: a write to c's Args or Env backing arrays afterwards cannot
+// reach it, and no code here can build a Command any other way
+// (forgectl#888). The kind, capture mode and caps, which shape how the runner
+// reads the process rather than what the process gets, are checked here.
+//
+// Every message is static text: a validation failure must not become the
+// rendering path that reveals what was wrong with the value.
+func (c SensitiveCommand) validated() (validated.Command, error) {
 	if !c.Kind.Valid() {
-		return errors.New("command kind is not a known operation")
-	}
-	if !c.Path.present() {
-		return errors.New("command path is empty")
+		return validated.Command{}, errors.New("command kind is not a known operation")
 	}
 	if !c.StdoutMode.valid() {
-		return errors.New("stdout capture mode is not supported")
+		return validated.Command{}, errors.New("stdout capture mode is not supported")
 	}
-	// An absolute path is required so the binary is chosen by the caller and
-	// not by exec.LookPath, which reads the live process PATH rather than the
-	// runner's captured environment — the one decision where the snapshot
-	// would otherwise not apply.
-	if !c.Path.v.IsAbs() {
-		return errors.New("command path is not absolute")
+	args := make([]validated.Arg, len(c.Args))
+	for i, a := range c.Args {
+		args[i] = validated.Arg{Value: a.v, Kind: a.kind}
 	}
-	seenEndOfOptions := false
-	for i := range c.Args {
-		a := c.Args[i]
-		if !a.set() {
-			return fmt.Errorf("argument %d was never constructed", i)
-		}
-		if a.kind == argEndOfOptions {
-			seenEndOfOptions = true
-			continue
-		}
-		if a.kind == argOpaque && !seenEndOfOptions && a.v.LeadsWithDash() {
-			return fmt.Errorf("dynamic argument %d begins with a dash and no end-of-options separator precedes it", i)
-		}
+	env := make([]validated.Env, len(c.Env))
+	for i, m := range c.Env {
+		env[i] = m.toValidated()
 	}
-	seen := make(map[string]struct{}, len(c.Env))
-	for i := range c.Env {
-		m := c.Env[i]
-		if !m.valid() {
-			return fmt.Errorf("environment mutation %d is not a permitted operation", i)
-		}
-		if _, dup := seen[m.key]; dup {
-			return fmt.Errorf("environment mutation %d duplicates an earlier key", i)
-		}
-		// TMPDIR moves where sops writes its decrypted copy of a whole
-		// document, so it is bound to the one call it exists for and to an
-		// absolute path: a relative one would resolve against the child's
-		// working directory, which is not the work directory it names.
-		if m.key == envKeySopsTmpdir {
-			if c.Kind != KindSopsEdit {
-				return fmt.Errorf("environment mutation %d is not permitted for this command kind", i)
-			}
-			if !m.value.v.IsAbs() {
-				return fmt.Errorf("environment mutation %d needs an absolute path", i)
-			}
-		}
-		seen[m.key] = struct{}{}
+	cmd, err := validated.New(c.Path.v, args, env, c.Kind == KindSopsEdit)
+	if err != nil {
+		return validated.Command{}, err
 	}
 	if err := validCap("stdout", c.StdoutCap); err != nil {
-		return err
+		return validated.Command{}, err
 	}
-	return validCap("stderr", c.StderrCap)
+	if err := validCap("stderr", c.StderrCap); err != nil {
+		return validated.Command{}, err
+	}
+	return cmd, nil
 }
 
 func validCap(stream string, limit int64) error {
