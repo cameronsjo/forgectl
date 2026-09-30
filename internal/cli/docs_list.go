@@ -165,10 +165,23 @@ func printDocsList(cmd *cobra.Command, docs []docspkg.Doc, asJSON bool) error {
 		return nil
 	}
 	// Every field is escaped: RelPath is a filename and Title is the doc's own
-	// H1, so either can carry a terminal escape sequence (forgectl#598).
+	// H1, so either can carry a terminal escape sequence (forgectl#598). The
+	// title is also capped (forgectl#894); --json above carries it whole.
 	for _, d := range docs {
 		_, _ = fmt.Fprintf(out, "%-16s %-48s %s\n",
-			termsafe.SafeLine(d.RootLabel), termsafe.SafeLine(d.RelPath), termsafe.SafeLine(d.Title))
+			termsafe.SafeLine(d.RootLabel), termsafe.SafeLine(d.RelPath), safeDocTitle(d.Title))
 	}
 	return nil
+}
+
+// docTitleMaxRunes caps a doc's title in a line of `docs list` text output.
+// The title is the doc's own H1, whose length nobody at the terminal chose;
+// 256 shows any realistic heading whole, as runbookTitleMaxRunes does for
+// `sessions`.
+const docTitleMaxRunes = 256
+
+// safeDocTitle is a doc title made terminal-safe and bounded for a line of
+// `docs list` text output.
+func safeDocTitle(s string) string {
+	return termsafe.SafeLineMax(s, docTitleMaxRunes)
 }
