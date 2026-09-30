@@ -26,6 +26,30 @@ func TestIsUnsafeTerminalRuneMatchesUnicodeProperties(t *testing.T) {
 	}
 }
 
+// TestIsInvisibleRune pins the validator classifier #916 added: every Cf, Zl
+// and Zp rune, named ones included, and nothing graphic.
+func TestIsInvisibleRune(t *testing.T) {
+	for _, r := range []rune{0x200b, 0xfeff, 0x2060, 0x00ad, 0x200d, 0xe0001, 0xe0041, 0xe007f, 0x2028, 0x2029} {
+		if !IsInvisibleRune(r) {
+			t.Errorf("IsInvisibleRune(%U) = false, want true", r)
+		}
+	}
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		want := unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)
+		if got := IsInvisibleRune(r); got != want {
+			t.Fatalf("IsInvisibleRune(%U) = %t, want %t", r, got, want)
+		}
+		if want && unicode.IsGraphic(r) {
+			t.Fatalf("IsInvisibleRune(%U) is true for a graphic rune", r)
+		}
+	}
+	for _, r := range "aZ9 é/#-_.中😀" {
+		if IsInvisibleRune(r) {
+			t.Errorf("IsInvisibleRune(%U) = true, want false for a visible rune", r)
+		}
+	}
+}
+
 func TestSafeLineQuotesEveryBidiControl(t *testing.T) {
 	tests := []struct {
 		name string

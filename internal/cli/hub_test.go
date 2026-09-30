@@ -196,3 +196,76 @@ func TestBuildHub_LeaflessExtensionRunsDirectly(t *testing.T) {
 		t.Errorf("doctor row = %+v, want a leafless module row (it runs directly)", doctor)
 	}
 }
+
+// TestBuildHub_NestedGroupsCarryTheirLeaves pins #916: a subverb that is
+// itself a group (pr findings, pr reviewed) carries its own subverbs as
+// Leaves, at every depth, so the hub opens it rather than running it bare.
+// Every leaf is checked against the live command it names: Leaves is present
+// exactly when that command has available subcommands.
+func TestBuildHub_NestedGroupsCarryTheirLeaves(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	entries := buildHub(root, true, nil)
+
+	var check func(cmd *cobra.Command, leaves []tui.HubLeaf, path string)
+	check = func(cmd *cobra.Command, leaves []tui.HubLeaf, path string) {
+		for _, leaf := range leaves {
+			if leaf.Name == cmd.Name() {
+				continue // the synthetic self leaf
+			}
+			sub := findChild(cmd, leaf.Name)
+			if sub == nil {
+				t.Errorf("%s: leaf %q names no subcommand", path, leaf.Name)
+				continue
+			}
+			isGroup := sub.HasAvailableSubCommands()
+			if isGroup != (len(leaf.Leaves) > 0) {
+				t.Errorf("%s %s: group=%t but leaf has %d leaves", path, leaf.Name, isGroup, len(leaf.Leaves))
+			}
+			if isGroup && leaf.NeedsArgs {
+				t.Errorf("%s %s: a group row must open its leaves, not ask for an argument", path, leaf.Name)
+			}
+			check(sub, leaf.Leaves, path+" "+leaf.Name)
+		}
+	}
+	checked := 0
+	for _, e := range entries {
+		if e.Heading || e.Argv != nil {
+			continue
+		}
+		if cmd := findChild(root, e.Name); cmd != nil {
+			check(cmd, e.Leaves, e.Name)
+			checked++
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no module rows were checked")
+	}
+
+	var pr *tui.HubEntry
+	for i := range entries {
+		if entries[i].Name == "pr" && entries[i].Argv == nil {
+			pr = &entries[i]
+		}
+	}
+	if pr == nil {
+		t.Fatal("no \"pr\" entry in the hub")
+	}
+	want := map[string][]string{"findings": {"cleanup", "list"}, "reviewed": {"mark", "sync", "unmark"}}
+	for _, leaf := range pr.Leaves {
+		names, ok := want[leaf.Name]
+		if !ok {
+			continue
+		}
+		delete(want, leaf.Name)
+		var got []string
+		for _, l := range leaf.Leaves {
+			got = append(got, l.Name)
+		}
+		if strings.Join(got, ",") != strings.Join(names, ",") {
+			t.Errorf("pr %s leaves = %v, want %v", leaf.Name, got, names)
+		}
+	}
+	if len(want) != 0 {
+		t.Errorf("pr is missing group leaves %v", want)
+	}
+}
