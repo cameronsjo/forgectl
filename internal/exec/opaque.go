@@ -67,6 +67,24 @@ func shownArgs(ctx context.Context, args []string) []string {
 // withheld (#782). The cost is diagnostic: a word of the user's argv that
 // the child's stderr also uses reads as [redacted] there, under the same
 // whole-word rule as a masked value.
+//
+// The scrub is a byte-exact match of each withheld value, so it is a best
+// effort against a child that echoes its argv, not a guarantee (#816). It
+// does not catch:
+//
+//   - a value shorter than minScrubLen (8 bytes) glued to a word character,
+//     since a short value is scrubbed only as a whole word ("tok" inside
+//     "xtok" stays);
+//   - an echo in another case ("Secret" for "secret");
+//   - a value split across lines, or across any bytes the child inserts;
+//   - a partial echo (a prefix, a suffix, or a middle of the value);
+//   - an encoded echo: URL-encoded, quoted with escapes, base64, and so on.
+//
+// So it is not a secret boundary. A real secret does not belong on argv at
+// all: the process table shows argv for the life of the child
+// (WithMaskedAssignments states the same limit), and the sensitive seam,
+// which never renders a child's output, exists for backends that do handle
+// one.
 func maskFor(ctx context.Context, args []string) argMask {
 	m := maskFrom(ctx)
 	span := spanFor(ctx, len(args))

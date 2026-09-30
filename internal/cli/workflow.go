@@ -514,9 +514,24 @@ func printPlan(out io.Writer, plan workflow.Plan) {
 		printField(out, "to", s.To)
 		printField(out, "cmd", s.Cmd)
 		if len(s.Args) > 0 {
-			fmt.Fprintf(out, "     args: %s\n", termsafe.SafeLine(strings.Join(s.Args, " ")))
+			_, _ = fmt.Fprintf(out, "     args: %s\n", planArgs(s.Args))
 		}
 	}
+}
+
+// planArgs renders a run step's argv for the --dry-run review, one quoted
+// element per arg (#816). Joining the raw elements with spaces made ["a b"]
+// and ["a","b"] print identically, so a hostile file could show the reviewer a
+// different argument split from the argv it runs. Each element is quoted with
+// QuoteText, which also escapes every control and format rune, and is NOT
+// capped: the review prints the args in full (#782), and a cut would hide
+// exactly the tail of the argv the file asks to be trusted with.
+func planArgs(args []string) string {
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = termsafe.QuoteText(a)
+	}
+	return strings.Join(quoted, " ")
 }
 
 // printField writes one non-empty plan-step field as an indented line. The
