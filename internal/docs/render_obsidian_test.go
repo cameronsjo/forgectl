@@ -7,9 +7,10 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/cameronsjo/forgectl/internal/perftest"
 	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
 	"go.abhg.dev/goldmark/wikilink"
 )
@@ -277,20 +278,38 @@ func TestRenderVault_CommentAroundBlockStaysVisible(t *testing.T) {
 	}
 }
 
-// TestRenderVault_LongEqualsRunIsLinear guards the highlight parser's cost
-// on a long '=' run: re-scanning the run from every '=' is quadratic, which
-// at this length takes seconds rather than milliseconds.
+// TestRenderVault_LongEqualsRunIsLinear guards the highlight and comment
+// parsers' cost on a long '=' or '%' run: re-scanning the run from every
+// character in it is quadratic. It was a 1 s wall-clock bound on rendering
+// an 80000-byte run, but that run is over the markup guard
+// (markupTooComplex), so it rendered as plain text and never reached either
+// parser. Now the vault parser itself is timed, with no guard in front of
+// it, as a ratio (perftest.Linear, #919) against a run an eighth the length,
+// in process CPU time; and a run the guard lets through is rendered once to
+// check it stays literal.
+//
+// Mutation: drop the "before == '='" early return from highlightParser.Parse,
+// or the '%' one from commentInlineParser.Parse — its row goes red on the
+// ratio.
 func TestRenderVault_LongEqualsRunIsLinear(t *testing.T) {
+	const n, k, rendered = 80000, 8, 11000
 	for _, c := range []string{"=", "%"} {
-		src := "x " + strings.Repeat(c, 80000)
-		start := time.Now()
-		out := renderKind(t, src, RootVault)
-		if d := time.Since(start); d > time.Second {
-			t.Errorf("rendering an 80000-byte %q run took %v", c, d)
-		}
-		if strings.Contains(out, "<mark>") || !strings.Contains(out, strings.Repeat(c, 100)) {
-			t.Errorf("a %q run did not stay literal", c)
-		}
+		t.Run(c, func(t *testing.T) {
+			short := "x " + strings.Repeat(c, rendered)
+			if refused([]byte(short), true) {
+				t.Fatalf("a %d-byte %q run is refused by the markup guard; shorten it", rendered, c)
+			}
+			if out := renderKind(t, short, RootVault); strings.Contains(out, "<mark>") || !strings.Contains(out, strings.Repeat(c, 100)) {
+				t.Errorf("a %d-byte %q run did not stay literal", rendered, c)
+			}
+			parse := func(n int) func() {
+				src := []byte("x " + strings.Repeat(c, n))
+				return func() {
+					_ = markdownVaultPlain.Parser().Parse(text.NewReader(src), parser.WithContext(newParseContext()))
+				}
+			}
+			perftest.Linear(t, "parsing a "+c+" run", k, parse(n/k), parse(n))
+		})
 	}
 }
 

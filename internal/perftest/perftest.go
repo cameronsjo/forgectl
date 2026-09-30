@@ -12,6 +12,16 @@
 // runs are timed in process CPU time, which waiting on a runqueue does not
 // add to, and fall back to the wall clock only where CPU time cannot be read.
 // Only tests import this package.
+//
+// Linear reads the whole test process's CPU time, not the calling
+// goroutine's, so anything else running in the test binary during a
+// measurement counts on both sides of the ratio. Never call it from a test
+// that calls t.Parallel, or from a subtest of one: that test then runs
+// alongside every other parallel test in its package, and their CPU time
+// lands on its clock. A test that stays sequential is safe from t.Parallel
+// elsewhere in its package, since Go runs parallel tests only with other
+// parallel tests, but not from a goroutine an earlier test left running.
+// Packages run in separate processes, so go test -p does not reach it.
 package perftest
 
 import (
@@ -39,9 +49,9 @@ func Linear(t testing.TB, what string, k int, small, large func()) {
 		t.Fatalf("perftest.Linear: k = %d, want at least 4 so linear and quadratic are apart", k)
 	}
 	limit := float64(k*k) / 2
-	s, l := fastest(Runs, limit, Ceiling, small, large)
+	s, l, clock := fastest(Runs, limit, Ceiling, timed, small, large)
 	ratio := float64(l) / float64(max(s, 1))
-	t.Logf("%s: %v at n, %v at %d·n, ratio %.1f (limit %.0f)", what, s, l, k, ratio, limit)
+	t.Logf("%s: %v at n, %v at %d·n in %s, ratio %.1f (limit %.0f)", what, s, l, k, clock, ratio, limit)
 	if l > Ceiling {
 		t.Errorf("%s: one run at %d·n cost %v, over the %v backstop", what, k, l, Ceiling)
 	} else if ratio > limit {
@@ -54,32 +64,53 @@ func Linear(t testing.TB, what string, k int, small, large func()) {
 // the fastest run of each. It stops early once the fastest large run is at
 // most limit times the fastest small one, so an idle machine pays for one
 // pair and a loaded one gets more chances at a quiet sample; the minimum
-// discards runs that cache contention from other processes inflated. It also stops once one large run
-// exceeds ceiling, so a regressed operation fails after one slow pair. A GC
-// before each run keeps one side's garbage off the other side's clock.
-func fastest(runs int, limit float64, ceiling time.Duration, small, large func()) (fastSmall, fastLarge time.Duration) {
+// discards runs that cache contention from other processes inflated. It also
+// stops once one large run exceeds ceiling, so a regressed operation fails
+// after one slow pair. measure times one run; Linear passes timed. clock names
+// what the runs were timed in: "CPU time", "wall time", or, if reading CPU
+// time failed for some runs and not others, "mixed CPU and wall time", whose
+// ratio means nothing.
+func fastest(runs int, limit float64, ceiling time.Duration, measure func(func()) (time.Duration, bool), small, large func()) (fastSmall, fastLarge time.Duration, clock string) {
 	fastSmall, fastLarge = time.Duration(math.MaxInt64), time.Duration(math.MaxInt64)
+	cpuRuns, allRuns := 0, 0
+	sample := func(f func()) time.Duration {
+		d, cpu := measure(f)
+		allRuns++
+		if cpu {
+			cpuRuns++
+		}
+		return d
+	}
 	for range runs {
-		fastSmall = min(fastSmall, timed(small))
-		last := timed(large)
+		fastSmall = min(fastSmall, sample(small))
+		last := sample(large)
 		fastLarge = min(fastLarge, last)
 		if float64(fastLarge) <= limit*float64(fastSmall) || last > ceiling {
 			break
 		}
 	}
-	return fastSmall, fastLarge
+	switch cpuRuns {
+	case allRuns:
+		clock = "CPU time"
+	case 0:
+		clock = "wall time"
+	default:
+		clock = "mixed CPU and wall time"
+	}
+	return fastSmall, fastLarge, clock
 }
 
 // timed is f's cost in process CPU time, or in wall time where CPU time
-// cannot be read.
-func timed(f func()) time.Duration {
+// cannot be read, and whether it is CPU time. A GC before the run keeps one
+// side's garbage off the other side's clock.
+func timed(f func()) (time.Duration, bool) {
 	runtime.GC()
 	cpuStart, cpuOK := cpuTime()
 	start := time.Now()
 	f()
 	wall := time.Since(start)
 	if cpuEnd, ok := cpuTime(); cpuOK && ok {
-		return cpuEnd - cpuStart
+		return cpuEnd - cpuStart, true
 	}
-	return wall
+	return wall, false
 }
