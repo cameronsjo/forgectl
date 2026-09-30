@@ -391,18 +391,23 @@ func (e *CommandError) Unwrap() error { return e.Err }
 // was empty, and Output is readable by anything that holds the error. Stderr,
 // ExitCode and Err are kept, so errors.As and errors.Is behave as before.
 //
-// When err is itself a *CommandError, a copy is returned and err is left
-// alone. Every *CommandError deeper in the tree, through Unwrap() error and
-// through the Unwrap() []error of errors.Join or a multi-%w fmt.Errorf, is
-// cleared in place: a chain cannot be rebuilt around a copy, and the caller
-// that just received the error from the Runner is its only holder.
+// When err is itself a *CommandError, a new copy is returned (always a new
+// pointer) and err is left alone, and so is every *CommandError reached from
+// it through a chain of *CommandError.Err links alone: each one is copied in
+// turn. Any other wrapper cannot be rebuilt around a copy, so every
+// *CommandError beneath one (through Unwrap() error, or the Unwrap() []error
+// of errors.Join or a multi-%w fmt.Errorf) is cleared in place, and that
+// clearing is visible through err too, since the copy shares that part of
+// the chain (#708). The caller that just received the error from the Runner
+// is normally its only holder. A custom As method is not followed: a
+// *CommandError reachable only through one keeps its Output.
 func WithoutOutput(err error) error {
-	// A direct assertion, not errors.As: only the top-level case can be
+	// A direct assertion, not errors.As: only a *CommandError itself can be
 	// replaced by a copy.
 	if top, ok := err.(*CommandError); ok {
 		cp := *top
 		cp.Output = ""
-		clearOutputs(cp.Err)
+		cp.Err = WithoutOutput(cp.Err)
 		return &cp
 	}
 	clearOutputs(err)

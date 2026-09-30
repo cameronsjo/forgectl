@@ -24,8 +24,10 @@ type argMask struct {
 	// together, sorted longest first (entries before values at equal length),
 	// so runShown finds the longest entry that starts a run first.
 	pats []maskPat
-	// values is the bare values, for straddleLen.
-	values []string
+	// values is the bare values, and entries the whole KEY=VALUE entries,
+	// for straddleLen.
+	values  []string
+	entries []string
 }
 
 // maskPat is one string text scrubs and what a run starting with it renders
@@ -61,6 +63,7 @@ func WithMaskedAssignments(ctx context.Context, entries []string) context.Contex
 		m.shown[e] = key + "=" + Redacted
 		m.pats = append(m.pats, maskPat{text: e, shown: m.shown[e]}, maskPat{text: value, shown: Redacted})
 		m.values = append(m.values, value)
+		m.entries = append(m.entries, e)
 	}
 	sort.Slice(m.pats, func(i, j int) bool {
 		a, b := m.pats[i], m.pats[j]
@@ -154,72 +157,166 @@ func (m argMask) runShown(run string) string {
 // pattern, and returns nil when nothing matched.
 //
 // Every occurrence counts, including ones that overlap each other or
-// themselves: each search restarts one byte past the last match. A pattern of
-// minScrubLen or more always qualifies. A shorter one qualifies only where it
-// stands as a whole word: not glued to a word character on either side. The
-// check applies only at an edge where the pattern itself starts or ends with
-// a word character, so a value like "a:b" is still found next to a letter,
-// and a neighboring byte that is already covered is not a word character,
-// since it is about to become [redacted]. Covering a short match can
-// therefore qualify another one beside it, on either side, so the short
-// patterns are rescanned until a pass covers nothing new.
+// themselves. A pattern of minScrubLen or more always qualifies. A shorter one
+// qualifies only where it stands as a whole word: not glued to a word
+// character on either side. The check applies only at an edge where the
+// pattern itself starts or ends with a word character, so a value like "a:b"
+// is still found next to a letter, and a neighboring byte that is already
+// covered is not a word character, since it is about to become [redacted].
+// Covering a short match can therefore qualify another one beside it, on
+// either side, and that one can qualify the next: the result is the fixpoint.
 //
-// Cost: each pattern is one strings.Index scan per match plus one, so a
-// stream with few matches costs near-linear time whatever the values'
-// lengths. The short patterns are rescanned after every pass that covered
-// something new, and the loop ends on the first pass that covers nothing. Every match is verified in full, so a stream that repeats a long
-// value overlapping itself byte for byte costs that value's length per byte;
-// stdout is capped at maxStdoutBytes and stderr at maxStderrTail, and the
-// stream is the failing child's own output.
+// Cost is linear in len(s) for each pattern (#708):
+//
+//   - A long pattern is found with strings.Index, which skips a stretch with
+//     no match quickly; after a match, a KMP automaton carries on until the
+//     partial match dies, so a stream that repeats a value overlapping itself
+//     never re-verifies the shared bytes. That was O(len(s)·len(value)).
+//   - The short patterns get one full scan each. After that, each byte that
+//     becomes covered is pushed on a worklist exactly once, and popping it
+//     re-checks only the short matches that end right before it or start right
+//     after it: the only ones whose qualification it can change. The
+//     rescan-until-nothing-changes loop this replaced needed one full pass per
+//     link of a cascade, which is quadratic.
 func (m argMask) cover(s string) bitset {
 	var covered bitset
-	mark := func(from, to int) bool {
+	ensure := func() {
 		if covered == nil {
 			covered = newBitset(len(s))
 		}
-		return covered.set(from, to)
 	}
 	for _, p := range m.pats {
 		if len(p.text) < minScrubLen {
 			continue
 		}
 		done := 0 // bytes of this pattern's earlier matches already marked
-		for from := 0; ; {
-			rel := strings.Index(s[from:], p.text)
-			if rel < 0 {
-				break
-			}
-			i := from + rel
+		eachMatch(s, p.text, func(i int) {
+			ensure()
 			end := i + len(p.text)
-			mark(max(i, done), end)
+			covered.set(max(i, done), end)
 			done = end
-			from = i + 1
+		})
+	}
+
+	var short []string
+	for _, p := range m.pats {
+		if len(p.text) < minScrubLen {
+			short = append(short, p.text)
 		}
+	}
+	if len(short) == 0 {
+		return covered
 	}
 	isWord := func(i int) bool { return isWordByte(s[i]) && !covered.has(i) }
-	for changed := true; changed; {
-		changed = false
-		for _, p := range m.pats {
-			if len(p.text) >= minScrubLen {
+	qualifies := func(p string, i int) bool {
+		end := i + len(p)
+		gluedBefore := i > 0 && isWordByte(p[0]) && isWord(i-1)
+		gluedAfter := end < len(s) && isWordByte(p[len(p)-1]) && isWord(end)
+		return !gluedBefore && !gluedAfter
+	}
+	// work holds spans of bytes newly covered by a short match and not yet
+	// examined. It is drained after every short mark, so it stays as deep as
+	// the current cascade, not as long as the stream.
+	type span struct{ from, to int }
+	var work []span
+	mark := func(from, to int) {
+		ensure()
+		for i := from; i < to; {
+			if covered.has(i) {
+				i++
 				continue
 			}
-			for from := 0; ; {
-				rel := strings.Index(s[from:], p.text)
-				if rel < 0 {
-					break
-				}
-				i := from + rel
-				end := i + len(p.text)
-				from = i + 1
-				gluedBefore := i > 0 && isWordByte(p.text[0]) && isWord(i-1)
-				gluedAfter := end < len(s) && isWordByte(p.text[len(p.text)-1]) && isWord(end)
-				if !gluedBefore && !gluedAfter && mark(i, end) {
-					changed = true
+			j := i
+			for j < to && !covered.has(j) {
+				j++
+			}
+			covered.set(i, j)
+			work = append(work, span{i, j})
+			i = j
+		}
+	}
+	// try marks p at i when it occurs there and qualifies.
+	try := func(p string, i int) {
+		if i < 0 || i+len(p) > len(s) || s[i:i+len(p)] != p || !qualifies(p, i) {
+			return
+		}
+		mark(i, i+len(p))
+	}
+	drain := func() {
+		for len(work) > 0 {
+			sp := work[len(work)-1]
+			work = work[:len(work)-1]
+			for k := sp.from; k < sp.to; k++ {
+				for _, p := range short {
+					try(p, k-len(p)) // ends right before k: k was its after byte
+					try(p, k+1)      // starts right after k: k was its before byte
 				}
 			}
 		}
 	}
+	for _, p := range short {
+		eachMatch(s, p, func(i int) {
+			if qualifies(p, i) {
+				mark(i, i+len(p))
+				drain()
+			}
+		})
+	}
 	return covered
+}
+
+// eachMatch calls fn with the start of every occurrence of p in s, overlapping
+// ones included, in increasing order. strings.Index finds each first match,
+// skipping a gap with no match quickly; from there a KMP automaton carries the
+// partial match forward until it dies, so overlapping matches cost O(1)
+// amortized each instead of a full re-verification of p.
+func eachMatch(s, p string, fn func(i int)) {
+	var fail []int // KMP failure function, built on the first match
+	for from := 0; from+len(p) <= len(s); {
+		rel := strings.Index(s[from:], p)
+		if rel < 0 {
+			return
+		}
+		i := from + rel
+		fn(i)
+		if fail == nil {
+			fail = kmpFailure(p)
+		}
+		q := fail[len(p)-1] // p's longest proper border: the partial match carried on
+		j := i + len(p)
+		for q > 0 && j < len(s) {
+			for q > 0 && s[j] != p[q] {
+				q = fail[q-1]
+			}
+			if s[j] == p[q] {
+				q++
+			}
+			j++
+			if q == len(p) {
+				fn(j - len(p))
+				q = fail[q-1]
+			}
+		}
+		// The loop ended with q == 0 (no partial match straddles j) or at
+		// the end of s, so the next match starts at j or later.
+		from = j
+	}
+}
+
+// kmpFailure returns, for each prefix p[:k+1], the length of its longest
+// proper prefix that is also a suffix.
+func kmpFailure(p string) []int {
+	fail := make([]int, len(p))
+	for k, q := 1, 0; k < len(p); k++ {
+		for q > 0 && p[k] != p[q] {
+			q = fail[q-1]
+		}
+		if p[k] == p[q] {
+			q++
+		}
+		fail[k] = q
+	}
+	return fail
 }
 
 // bitset is one bit per byte of the text cover scans. A nil bitset has no
@@ -230,17 +327,11 @@ func newBitset(n int) bitset { return make(bitset, (n+63)/64) }
 
 func (b bitset) has(i int) bool { return b != nil && b[i/64]&(uint64(1)<<(i%64)) != 0 }
 
-// set sets the bits in [from, to) and reports whether any was clear.
-func (b bitset) set(from, to int) bool {
-	changed := false
+// set sets the bits in [from, to).
+func (b bitset) set(from, to int) {
 	for i := from; i < to; i++ {
-		w, bit := i/64, uint64(1)<<(i%64)
-		if b[w]&bit == 0 {
-			b[w] |= bit
-			changed = true
-		}
+		b[i/64] |= uint64(1) << (i % 64)
 	}
-	return changed
 }
 
 // straddleLen returns how many leading bytes of s to drop so that no masked
@@ -249,7 +340,13 @@ func (b bitset) set(from, to int) bool {
 // a proper suffix of the value, which text can no longer match. straddleLen
 // drops the longest such suffix s starts with, then checks the new start
 // again, because values can overlap in the stream and removing one fragment
-// can expose the end of another. It works on the raw bytes, before masking,
+// can expose the end of another.
+//
+// A cut inside an entry's KEY leaves the value whole, but it can still
+// escape: a long entry is masked wherever it appears, while its short value
+// alone qualifies only as a whole word, so "…EY=ab" followed by "cd" would
+// show "ab" (#708). So a proper suffix of an entry that contains the entry's
+// whole value is dropped too. It works on the raw bytes, before masking,
 // so no replacement text can shift where a fragment ends. Every drop removes
 // at least one byte, so the loop ends. A coincidental match (the stream
 // happens to start with the last byte of some value) only drops a few more
@@ -261,6 +358,17 @@ func (m argMask) straddleLen(s string) int {
 		for _, v := range m.values {
 			for l := min(len(v)-1, len(s)); l > n; l-- {
 				if strings.HasPrefix(s, v[len(v)-l:]) {
+					n = l
+					break
+				}
+			}
+		}
+		for _, e := range m.entries {
+			_, v, _ := strings.Cut(e, "=")
+			// Longer than the value: "=VALUE" at the least, so the whole
+			// value is inside it.
+			for l := min(len(e)-1, len(s)); l > max(n, len(v)); l-- {
+				if strings.HasPrefix(s, e[len(e)-l:]) {
 					n = l
 					break
 				}
