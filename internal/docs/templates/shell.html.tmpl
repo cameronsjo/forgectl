@@ -234,6 +234,16 @@ main.surface-document { padding: var(--s-xl); overflow-y: auto; min-height: 0; }
    sideways today. Sticky table heads and the pan/zoom viewport are
    unchanged (measured). */
 main.surface-document { position: relative; contain: paint; }
+/* Two pieces of chrome live inside the doc pane, so that clip cannot keep a
+   doc off them (forgectl#759): the narrow-width outline and the skip-content
+   banner. A doc's .tooltip (z-index var(--z-popover)) anchored to a
+   positioned wrapper just below either one (.phase, .has-tooltip, .grain)
+   painted over it. Each gets its own stacking context one step above
+   --z-popover, and an opaque base under its tint so nothing shows through.
+   The banner's tint repeats .callout.warning's. */
+.outline-inline, [data-forgectl-notice] { position: relative; z-index: calc(var(--z-popover) + 1); isolation: isolate; }
+.outline-inline { background: var(--bg); }
+[data-forgectl-notice].callout.warning { background: linear-gradient(color-mix(in oklch, var(--attention) 8%, transparent), color-mix(in oklch, var(--attention) 8%, transparent)), var(--bg); }
 /* The document pane scrolls, so with no link in view the browser makes the
    pane itself the keyboard stop. Give it the house ring, inset so the grid's
    edges don't clip it. */

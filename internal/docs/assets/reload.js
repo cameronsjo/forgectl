@@ -117,6 +117,15 @@
     });
   }
 
+  // hook returns the named function of a global set by mermaid-init.js or
+  // math-init.js, or null. A doc element with that id is the global when the
+  // init script never ran (forgectl#759), so only a function is called.
+  function hook(global, name) {
+    var obj = window[global];
+    var fn = obj ? obj[name] : null;
+    return typeof fn === "function" ? fn.bind(obj) : null;
+  }
+
   // The swap replaces the nodes that hold keyboard focus, which would drop it
   // to <body>. Remember the focused control by something the fresh page
   // shares (an href, an id, a folder's label) and put focus back on it.
@@ -131,7 +140,8 @@
     if (!el || el === document.body) { return null; }
     // Focus inside a diagram is mermaid-init.js's to key and restore: the
     // diagram is re-rendered after the swap (forgectl#718).
-    var diagram = window.ForgectlMermaid ? window.ForgectlMermaid.focusKey(el) : null;
+    var diagramKey = hook("ForgectlMermaid", "focusKey");
+    var diagram = diagramKey ? diagramKey(el) : null;
     if (diagram) { return diagram; }
     var region = el.closest("[data-fc]");
     var key = { region: region ? region.getAttribute("data-fc") : null };
@@ -221,12 +231,15 @@
     if (filter && filter.value.trim() !== "") {
       filter.dispatchEvent(new Event("input"));
     }
-    var rendered = window.ForgectlMermaid ? window.ForgectlMermaid.refresh() : null;
-    if (window.ForgectlMath) { window.ForgectlMath.refresh(); }
+    var mermaidRefresh = hook("ForgectlMermaid", "refresh");
+    var rendered = mermaidRefresh ? mermaidRefresh() : null;
+    var mathRefresh = hook("ForgectlMath", "refresh");
+    if (mathRefresh) { mathRefresh(); }
     applyAnchor(anchor);
     restoreFocus(focus);
-    if (focus && focus.diagram !== undefined) {
-      Promise.resolve(rendered).then(function () { window.ForgectlMermaid.restoreFocus(focus); });
+    var diagramRestore = hook("ForgectlMermaid", "restoreFocus");
+    if (focus && focus.diagram !== undefined && diagramRestore) {
+      Promise.resolve(rendered).then(function () { diagramRestore(focus); });
     }
     return true;
   }
