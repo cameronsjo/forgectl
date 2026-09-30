@@ -3,6 +3,7 @@ package pr
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -121,9 +122,12 @@ func LoadReviewed(path string, opts ...ReviewedOption) *ReviewedStore {
 	for _, opt := range opts {
 		opt(s)
 	}
-	data, err := os.ReadFile(path)
+	data, err := readReviewedFile(path)
 	if err != nil {
-		return s // missing / unreadable → empty
+		if errors.Is(err, errRecordNotRegular) {
+			slog.Warn("Ignoring a pr-reviewed store that is not a regular file; starting empty.", "path", path)
+		}
+		return s // missing / unreadable / not a regular file → empty
 	}
 	var at map[string]time.Time
 	if err := json.Unmarshal(data, &at); err != nil {
@@ -135,6 +139,33 @@ func LoadReviewed(path string, opts ...ReviewedOption) *ReviewedStore {
 	}
 	slog.Debug("Successfully loaded reviewed store.", "path", path, "count", len(s.at))
 	return s
+}
+
+// readReviewedFile reads the store without blocking in the open: a FIFO
+// planted at path would block a plain os.ReadFile forever (forgectl#765). The
+// open is O_NONBLOCK (openNonblock, which clears it before returning), and the
+// descriptor is Fstat'ed and read only if it is a regular file.
+//
+// It is deliberately not readRecordFile, in two ways. A symlink is followed:
+// the store lives under the user's config dir, where dotfile managers link
+// files in, and persist writes through the link. And the read is not capped at
+// the 8 KiB record bound: the store grows by one entry per reviewed PR. Either
+// refusal would read a real store as empty, and the next Mark would overwrite
+// it with one entry.
+func readReviewedFile(path string) ([]byte, error) {
+	f, err := openNonblock(filepath.Clean(path), os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, &os.PathError{Op: "read", Path: path, Err: errRecordNotRegular}
+	}
+	return io.ReadAll(f)
 }
 
 // Mark stamps ref as reviewed at the current clock and persists the store.
