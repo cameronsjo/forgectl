@@ -594,3 +594,23 @@ func TestResolveWithHome_FailedLookup(t *testing.T) {
 		t.Errorf("DefaultsProfile with a tilde project match: err = %v, want nil", err)
 	}
 }
+
+// The fail-closed predicate must see every spelling of a home-relative path.
+// Each case would, with an empty home, expand to a relative path and silently
+// drop the project block (falling back to the looser defaults) or pass a
+// cwd-relative add_dir.
+func TestResolveWithHome_FailClosedOnEveryHomeRelativeSpelling(t *testing.T) {
+	failing := func() (string, error) { return "", errors.New("no home") }
+	cwd := t.TempDir()
+	cases := map[string]config.LaunchConfig{
+		"bare ~ match":            {Projects: []config.LaunchProject{{Match: "~", AllowDanger: new(false)}}},
+		"~/ match":                {Projects: []config.LaunchProject{{Match: "~/w"}}},
+		"project add_dir ~/x":     {Projects: []config.LaunchProject{{Match: "/srv", AddDir: []string{"~/x"}}}},
+		"defaults add_dir bare ~": {Defaults: config.LaunchDefaults{AddDir: []string{"~"}}},
+	}
+	for name, lc := range cases {
+		if _, err := resolveWithHome(lc, cwd, failing); !errors.Is(err, ErrHomeUnresolved) {
+			t.Errorf("%s: err = %v, want ErrHomeUnresolved", name, err)
+		}
+	}
+}

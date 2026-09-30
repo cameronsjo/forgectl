@@ -162,6 +162,14 @@ func defaultsProfileWithHome(lc config.LaunchConfig, userHome func() (string, er
 	return defaultsProfile(lc.Defaults, home), err
 }
 
+// CheckHome reports ErrHomeUnresolved when any home-relative path in lc (a
+// defaults or project add_dir, or a project match) cannot be expanded. It is
+// for display surfaces that show a profile without resolving one.
+func CheckHome(lc config.LaunchConfig) error {
+	_, err := homeIfNeeded(os.UserHomeDir, usesHome(lc.Defaults.AddDir) || projectsUseHome(lc.Projects))
+	return err
+}
+
 // homeIfNeeded looks the home directory up only when needed, so a config
 // without home-relative paths never depends on it.
 func homeIfNeeded(userHome func() (string, error), needed bool) (string, error) {

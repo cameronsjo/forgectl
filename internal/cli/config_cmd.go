@@ -107,8 +107,9 @@ type launchResolvedView struct {
 	BinaryLabel    string `json:"binary_label"`
 	BinaryPath     string `json:"binary_path"`
 	Projects       int    `json:"projects"`
-	// HomeNote is set when [launch] holds home-relative ("~") paths that cannot
-	// be expanded because the home directory is unresolved.
+	// HomeNote is set when any home-relative ("~") path in [launch] (a
+	// defaults or project add_dir, or a project match) cannot be expanded
+	// because the home directory is unresolved.
 	HomeNote string `json:"home_note,omitempty"`
 }
 
@@ -400,7 +401,10 @@ func resolveHostView(cfg config.Config) hostResolvedView {
 // resolved defaults profile plus the exec target chosen by launch's own
 // precedence. Kept verbatim in content — only its home moved.
 func resolveLaunchView(cfg config.Config) launchResolvedView {
-	ld, homeErr := launch.DefaultsProfile(cfg.Launch)
+	// The profile fields shown here never depend on home; CheckHome below is
+	// the error that matters, and it covers the defaults' own lookup too.
+	ld, _ := launch.DefaultsProfile(cfg.Launch)
+	homeErr := launch.CheckHome(cfg.Launch)
 	view := launchResolvedView{
 		Harness:     ld.Harness,
 		Model:       ld.Model,

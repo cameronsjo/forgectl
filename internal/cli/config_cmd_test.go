@@ -550,3 +550,48 @@ func TestConfig_NestedSectionRendered(t *testing.T) {
 		t.Error("review.gitea.host set = false, want true")
 	}
 }
+
+// HomeNote reflects a home-relative project match, not only defaults add_dir,
+// in both the text and --json renderings.
+func TestConfig_HomeNoteWhenHomeIsUnresolved(t *testing.T) {
+	const body = "[[launch.project]]\nmatch = \"~/work\"\n"
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	base := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(childConfigPath(base)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(childConfigPath(base), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", base)
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	if _, err := os.UserHomeDir(); err == nil {
+		t.Skip("this platform resolves a home without HOME")
+	}
+	run := func(args ...string) string {
+		cmd := newConfigCmd(module.Deps{})
+		var buf bytes.Buffer
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("config %v: %v", args, err)
+		}
+		return buf.String()
+	}
+	if txt := run(); !strings.Contains(txt, "launch.home") || !strings.Contains(txt, "unresolved") {
+		t.Errorf("text output missing the home note:\n%s", txt)
+	}
+	var doc struct {
+		LaunchResolved struct {
+			HomeNote string `json:"home_note"`
+		} `json:"launch_resolved"`
+	}
+	if err := json.Unmarshal([]byte(run("--json")), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.LaunchResolved.HomeNote == "" {
+		t.Error("--json launch_resolved.home_note is empty")
+	}
+}

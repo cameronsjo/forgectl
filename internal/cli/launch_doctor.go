@@ -42,14 +42,22 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 
 			lc, src := resolveLaunchConfig(boundary, cfg, effFrom)
 
+			// On a home failure DefaultsProfile still returns the usable
+			// defaults, so the harness check below validates those rather
+			// than a zero Profile that would add a misleading second failure.
 			profile, homeErr := launch.DefaultsProfile(lc)
 			if cwd, err := os.Getwd(); err == nil {
-				profile, homeErr = launch.Resolve(lc, cwd)
+				if resolved, err := launch.Resolve(lc, cwd); err == nil {
+					profile = resolved
+				} else if homeErr == nil {
+					homeErr = err
+				}
 			}
 			if homeErr != nil {
 				healthy = false
 				rec.add("profile", doctor.StateFail, "launch profile cannot be resolved: "+safeText(homeErr.Error()))
-			} else if err := profile.Validate(); err != nil {
+			}
+			if err := profile.Validate(); err != nil {
 				healthy = false
 				rec.add("profile", doctor.StateFail, "launch profile invalid: "+safeText(err.Error()))
 			}
