@@ -45,10 +45,14 @@ import (
 // the markup guard's sweeps, a 338 KB changelog, is under it.
 const maxRenderBytes = 512 << 10
 
-// renderDeadline is how long a request waits for its render, from asking
-// for renderMu to the finished page, before it abandons the render and
-// shows the source as text. It is a variable only so tests can change it.
-var renderDeadline = 5 * time.Second
+// defaultRenderDeadline is how long a request waits for its render, from
+// asking for renderMu to the finished page, before it abandons the render
+// and shows the source as text.
+const defaultRenderDeadline = 5 * time.Second
+
+// renderDeadline is defaultRenderDeadline as a variable, only so tests can
+// change it.
+var renderDeadline = defaultRenderDeadline
 
 // renderPostSlots bounds the post-processing stages (renderPost) that run
 // at once, abandoned ones included: half the CPUs, and at least two, so
@@ -70,9 +74,9 @@ var renderInFlight atomic.Bool
 // renderGoldmarkEndHook between clearing renderInFlight and closing
 // parsed, renderPostHook before the post-processing, and renderExitHook as
 // the goroutine exits, after it has handed back its result. The request
-// reads them into renderHooks before it starts the goroutine, which uses
-// only that copy: it can outlive its request and its test, and must never
-// read a global the next test is setting.
+// reads them into renderHooks first thing, before renderAcquireHook runs,
+// and the goroutine uses only that copy: it can outlive its request and its
+// test, and must never read a global the next test is setting.
 var (
 	renderAcquireHook     func()
 	renderStallHook       func()
@@ -124,6 +128,7 @@ func renderBounded(ctx context.Context, md goldmark.Markdown, source []byte, kin
 	if err := ctx.Err(); err != nil {
 		return renderOutcome{err: err}
 	}
+	hooks := renderHooks{stall: renderStallHook, goldmarkEnd: renderGoldmarkEndHook, post: renderPostHook, exit: renderExitHook}
 	timer := time.NewTimer(renderDeadline)
 	defer timer.Stop()
 	if hook := renderAcquireHook; hook != nil {
@@ -160,7 +165,6 @@ func renderBounded(ctx context.Context, md goldmark.Markdown, source []byte, kin
 	// Buffered, so an abandoned goroutine's send never blocks and the
 	// goroutine always exits.
 	done := make(chan renderOutcome, 1)
-	hooks := renderHooks{stall: renderStallHook, goldmarkEnd: renderGoldmarkEndHook, post: renderPostHook, exit: renderExitHook}
 	go func() {
 		done <- runRender(md, source, kind, resolve, parsed, abandoned, hooks)
 		hooks.run(hooks.exit)

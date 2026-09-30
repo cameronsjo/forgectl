@@ -20,7 +20,8 @@ import (
 // TestMain lifts the render deadline for the whole package, so a test that
 // renders a heavy document never meets the production 5 s deadline on a
 // slow or -race run and reads the too-slow notice as a wrong page. The
-// deadline tests set their own through trackRenders.
+// deadline tests set their own through trackRenders, and the Default tests
+// below put the production value back.
 func TestMain(m *testing.M) {
 	renderDeadline = time.Hour
 	os.Exit(m.Run())
@@ -582,5 +583,39 @@ func TestRenderDeadline_GoroutineUsesCapturedHooks(t *testing.T) {
 	}
 	if captured.Load() != 1 || rt.exits.Load() != 1 {
 		t.Fatalf("captured post hook ran %d time(s), exit hook %d, want 1 each", captured.Load(), rt.exits.Load())
+	}
+}
+
+// The production deadline is 5 s: long enough that an ordinary page always
+// renders, short enough that one slow document holds nobody up for long.
+// Mutation: any other defaultRenderDeadline fails it.
+func TestRenderDeadline_DefaultIsFiveSeconds(t *testing.T) {
+	if defaultRenderDeadline != 5*time.Second {
+		t.Fatalf("defaultRenderDeadline = %v, want 5s", defaultRenderDeadline)
+	}
+}
+
+// An ordinary small page renders in full under the production deadline,
+// which TestMain otherwise lifts. Mutation: a 1ns defaultRenderDeadline
+// turns this page into the too-slow notice.
+func TestRenderDeadline_DefaultRendersAnOrdinaryPage(t *testing.T) {
+	trackRenders(t, defaultRenderDeadline, false)
+	assertFormatted(t, mustRender(t, "# Ordinary\n\nA *small* page with [a link](other.md).\n"), "<em>small</em>")
+}
+
+// The stall hook is captured with the others, before renderAcquireHook
+// runs: swapping the global from that hook must not reach the render
+// goroutine. Mutation: reading renderStallHook on the goroutine calls the
+// swapped-in hook.
+func TestRenderDeadline_StallHookIsCaptured(t *testing.T) {
+	rt := trackRenders(t, time.Hour, false)
+	var swapped atomic.Int32
+	renderAcquireHook = func() { renderStallHook = func() { swapped.Add(1) } }
+	assertFormatted(t, mustRender(t, "stall *hook*\n"), "<em>hook</em>")
+	if n := swapped.Load(); n != 0 {
+		t.Fatalf("the render goroutine called a stall hook set after its request captured the seams (%d)", n)
+	}
+	if n := rt.starts.Load(); n != 1 {
+		t.Fatalf("captured stall hook ran %d time(s), want 1", n)
 	}
 }
