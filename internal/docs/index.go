@@ -847,27 +847,95 @@ var ErrNotIndexed = errors.New("file was not indexed")
 // access to its siblings. Any failure returns a wrapped error; the HTTP
 // layer maps all of them to 404 without distinguishing the cause to the
 // client.
+//
+// Resolve is a check, not a read: the path it returns can be swapped before
+// anything opens it. A caller that reads the doc uses Open instead.
 func (idx *Index) Resolve(rootLabel, relPath string) (string, error) {
+	r, _, _, resolved, err := idx.resolveOpen(rootLabel, relPath)
+	if err != nil {
+		return "", err
+	}
+	_ = r.Close()
+	return resolved, nil
+}
+
+// Open is Resolve followed by opening the doc through the same os.Root the
+// resolution walked (forgectl#611). The open cannot leave the root whatever
+// is swapped into the path after the walk, and the file it opens must be the
+// one the walk approved (os.SameFile against the walk's own Lstat) and a
+// regular file; anything else closes it and denies with ErrOutsideRoot. The
+// caller owns the returned file, which stays valid after the Root closes.
+// resolved is the path Resolve would have returned, for display and
+// membership only; reading it again by path would reopen the race Open
+// closes.
+func (idx *Index) Open(rootLabel, relPath string) (f *os.File, resolved string, err error) {
+	r, name, info, resolved, err := idx.resolveOpen(rootLabel, relPath)
+	if err != nil {
+		return nil, "", err
+	}
+	defer func() { _ = r.Close() }()
+	f, err = openVerified(r, name, info)
+	if err != nil {
+		return nil, "", err
+	}
+	return f, resolved, nil
+}
+
+// openVerified opens name through r and returns it only if it is still the
+// regular file want describes.
+func openVerified(r *os.Root, name string, want fs.FileInfo) (*os.File, error) {
+	f, err := r.Open(name)
+	if err != nil {
+		return nil, ErrOutsideRoot
+	}
+	got, err := f.Stat()
+	if err != nil || !got.Mode().IsRegular() || !os.SameFile(want, got) {
+		_ = f.Close()
+		return nil, ErrOutsideRoot
+	}
+	return f, nil
+}
+
+// resolveOpen is the shared body of Resolve and Open. On success it returns
+// the open Root the walk used, which the caller closes, the root-relative
+// name and Lstat the walk ended on, and the canonical absolute path.
+func (idx *Index) resolveOpen(rootLabel, relPath string) (*os.Root, string, fs.FileInfo, string, error) {
 	for _, r := range idx.roots {
 		if r.Label != rootLabel {
 			continue
 		}
-		resolved, err := ResolveInRoot(r.Path, relPath)
+		rt, err := os.OpenRoot(r.Path)
 		if err != nil {
-			return "", err
+			return nil, "", nil, "", ErrOutsideRoot
 		}
-		if r.OnlyFile != "" && resolved != r.OnlyFile {
-			return "", ErrOutsideRoot
+		name, info, resolved, err := idx.checkInRoot(rt, r, relPath)
+		if err != nil {
+			_ = rt.Close()
+			return nil, "", nil, "", err
 		}
-		if !AllowedExt(resolved) {
-			return "", ErrDisallowedExt
-		}
-		// Keyed on r.Label, so a file indexed under a DIFFERENT (possibly
-		// overlapping) root does not satisfy membership for this one.
-		if !idx.pathIndex[docKey{rootLabel: r.Label, absPath: resolved}] {
-			return "", ErrNotIndexed
-		}
-		return resolved, nil
+		return rt, name, info, resolved, nil
 	}
-	return "", ErrRootNotFound
+	return nil, "", nil, "", ErrRootNotFound
+}
+
+// checkInRoot runs the resolution chain and the index's own gates for one
+// root over its open Root.
+func (idx *Index) checkInRoot(rt *os.Root, r Root, relPath string) (string, fs.FileInfo, string, error) {
+	name, info, err := resolveIn(rt, r.Path, relPath)
+	if err != nil {
+		return "", nil, "", err
+	}
+	resolved := filepath.Join(r.Path, name)
+	if r.OnlyFile != "" && resolved != r.OnlyFile {
+		return "", nil, "", ErrOutsideRoot
+	}
+	if !AllowedExt(resolved) {
+		return "", nil, "", ErrDisallowedExt
+	}
+	// Keyed on r.Label, so a file indexed under a DIFFERENT (possibly
+	// overlapping) root does not satisfy membership for this one.
+	if !idx.pathIndex[docKey{rootLabel: r.Label, absPath: resolved}] {
+		return "", nil, "", ErrNotIndexed
+	}
+	return name, info, resolved, nil
 }

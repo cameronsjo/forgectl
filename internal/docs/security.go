@@ -77,70 +77,191 @@ func withinRoot(root, candidate string) bool {
 	return strings.HasPrefix(candidate, root+string(filepath.Separator))
 }
 
+// maxSymlinkHops bounds how many symlinks one resolution follows before it
+// denies as ErrOutsideRoot. It is forgectl's own limit, Linux's MAXSYMLINKS,
+// so it does not move with os.Root's unexported one.
+const maxSymlinkHops = 40
+
 // ResolveInRoot safely maps a request-supplied relative path onto a single
 // canonical root, per forgectl#93's traversal chain:
 //
 //  1. filepath.Clean("/"+rel) neutralizes ../ segments by forcing the path
 //     absolute-relative first — "../../etc/passwd" collapses to
 //     "/etc/passwd" before it ever touches the filesystem.
-//  2. filepath.Join(root, cleaned) anchors the cleaned path under root.
-//  3. filepath.EvalSymlinks resolves any symlink IN the joined path — a
-//     symlink living inside root but pointing outside it. Every EvalSymlinks
-//     error denies; it never falls through to serving a not-yet-resolved
-//     path. A missing path (fs.ErrNotExist) is re-resolved through os.Root
-//     (classifyMissing) and denies with ErrNotFound only when the miss lies
-//     inside the root; every other failure denies with ErrOutsideRoot.
-//  4. The resolved path is re-checked against the canonical root with
-//     withinRoot's trailing-separator guard — step 2's Join alone doesn't
-//     catch a symlink hop discovered in step 3.
+//  2. The cleaned path is walked one component at a time through an os.Root
+//     opened on root (resolveIn). Every lstat and readlink goes through
+//     that Root, so the walk never touches anything outside the root, and a
+//     symlink is followed only while its target stays inside it: a relative
+//     target whose ".." climbs above the root, or an absolute target that
+//     does not name a path under root, denies as ErrOutsideRoot before
+//     anything outside is looked at. A chain that leaves the root and comes
+//     back is refused at the point it leaves (forgectl#611), and the answer
+//     never depends on whether an outside path exists.
+//  3. A missing component reached without leaving the root is ErrNotFound,
+//     and so is a path that walks through a regular file ("f.md/x") or
+//     names a regular file with a trailing slash ("f.md/"), as the kernel
+//     would answer ENOTDIR. Any other failure denies as ErrOutsideRoot.
+//
+// The returned path is root joined with the symlink-free relative path the
+// walk ended on, the same canonical path filepath.EvalSymlinks would give
+// for any in-root chain. An absolute symlink naming a path inside the root
+// keeps resolving, as it did under EvalSymlinks, but only when it spells
+// the canonical root: an alias such as /tmp for /private/tmp is refused.
 //
 // root MUST already be canonical (CanonicalizeRoot). The extension allowlist
 // is a separate check the caller applies to this function's result via
 // AllowedExt — resolution and extension policy are independent gates.
+// Resolving is still a check: a caller that reads the file opens it with
+// Index.Open, which opens through the same Root and verifies the file it
+// opened is the one this walk approved.
 func ResolveInRoot(root, rel string) (string, error) {
-	cleaned := filepath.Clean(string(filepath.Separator) + rel)
-	joined := filepath.Join(root, cleaned)
-
-	resolved, err := filepath.EvalSymlinks(joined)
-	if errors.Is(err, fs.ErrNotExist) {
-		return "", classifyMissing(root, cleaned)
-	}
-	if err != nil {
-		return "", ErrOutsideRoot
-	}
-	resolved = filepath.Clean(resolved)
-
-	if !withinRoot(root, resolved) {
-		return "", ErrOutsideRoot
-	}
-	return resolved, nil
-}
-
-// classifyMissing picks the denial for a path EvalSymlinks reported missing,
-// so the answer never depends on anything outside root. It re-resolves rel
-// (cleaned and rooted at root) through os.Root, which follows symlinks
-// component by component with openat and refuses, before touching the
-// target, any symlink or ".." that would leave the root. An absolute symlink
-// target counts as leaving, even one naming a path inside the root.
-//
-// Only a miss os.Root reaches without leaving the root is ErrNotFound. In
-// go1.26 os.Root reports an escape as a *PathError wrapping the unexported
-// errPathEscapes ("path escapes from parent"), which does not match
-// fs.ErrNotExist, so errors.Is(err, fs.ErrNotExist) is exactly "missing
-// inside the root". Every other result, including os.Root's own 8-symlink
-// limit (ELOOP) and a Stat that now succeeds, is ErrOutsideRoot.
-func classifyMissing(root, rel string) error {
 	r, err := os.OpenRoot(root)
 	if err != nil {
-		return ErrOutsideRoot
+		return "", ErrOutsideRoot
 	}
 	defer func() { _ = r.Close() }()
-	name := strings.TrimPrefix(rel, string(filepath.Separator))
-	if name == "" {
-		name = "."
+	name, _, err := resolveIn(r, root, rel)
+	if err != nil {
+		return "", err
 	}
-	if _, err = r.Stat(name); errors.Is(err, fs.ErrNotExist) {
-		return ErrNotFound
+	return filepath.Join(root, name), nil
+}
+
+// resolveIn is ResolveInRoot's walk over an already-open Root for root. It
+// returns the symlink-free root-relative name ("." for the root itself) and
+// the Lstat of what it names, taken during the walk.
+func resolveIn(r *os.Root, root, rel string) (string, fs.FileInfo, error) {
+	wantDir := strings.HasSuffix(rel, "/") || strings.HasSuffix(rel, string(filepath.Separator))
+	pending := splitPath(filepath.Clean(string(filepath.Separator) + rel))
+
+	cur := "" // symlink-free, relative to root; "" is the root itself
+	var info fs.FileInfo
+	isDir := true
+	hops := 0
+	for len(pending) > 0 {
+		c := pending[0]
+		pending = pending[1:]
+		if !isDir {
+			// A component after a regular file: the kernel's ENOTDIR,
+			// which is a miss, not an escape.
+			return "", nil, ErrNotFound
+		}
+		if c == ".." {
+			// Only a symlink target puts ".." here; the request's own were
+			// cleaned away above. cur is symlink-free, so popping it
+			// lexically is the kernel's "..".
+			if cur == "" {
+				return "", nil, ErrOutsideRoot
+			}
+			cur = parentOf(cur)
+			info, isDir = nil, true
+			continue
+		}
+		next := filepath.Join(cur, c)
+		fi, err := r.Lstat(next)
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil, ErrNotFound
+		}
+		if err != nil {
+			return "", nil, ErrOutsideRoot
+		}
+		if fi.Mode()&fs.ModeSymlink == 0 {
+			cur, info, isDir = next, fi, fi.IsDir()
+			continue
+		}
+		hops++
+		if hops > maxSymlinkHops {
+			return "", nil, ErrOutsideRoot
+		}
+		target, err := r.Readlink(next)
+		if err != nil || target == "" {
+			return "", nil, ErrOutsideRoot
+		}
+		// A target with a volume, or rooted at a separator without one
+		// (Windows' "\\x", rooted on the current drive, which filepath.IsAbs calls
+		// relative), is matched against the root as an absolute path.
+		if filepath.IsAbs(target) || filepath.VolumeName(target) != "" ||
+			strings.HasPrefix(target, "/") || strings.HasPrefix(target, string(filepath.Separator)) {
+			rest, ok := underRoot(root, target)
+			if !ok {
+				return "", nil, ErrOutsideRoot
+			}
+			cur = ""
+			pending = append(rest, pending...)
+		} else {
+			// A relative target resolves against the link's own directory,
+			// which is cur.
+			pending = append(splitPath(target), pending...)
+		}
+		info, isDir = nil, true
 	}
-	return ErrOutsideRoot
+	if cur == "" {
+		cur = "."
+	}
+	if info == nil {
+		fi, err := r.Lstat(cur)
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil, ErrNotFound
+		}
+		if err != nil || fi.Mode()&fs.ModeSymlink != 0 {
+			return "", nil, ErrOutsideRoot
+		}
+		info = fi
+	}
+	if wantDir && !info.IsDir() {
+		return "", nil, ErrNotFound
+	}
+	return cur, info, nil
+}
+
+// splitPath splits p on both "/" and the OS separator, dropping empty and
+// "." components. ".." is kept: in a symlink target it means the kernel's
+// "..", which resolveIn applies to the walked path, never lexically to the
+// target string.
+func splitPath(p string) []string {
+	parts := strings.FieldsFunc(p, func(r rune) bool {
+		return r == '/' || r == filepath.Separator
+	})
+	out := parts[:0]
+	for _, c := range parts {
+		if c != "." {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// parentOf is filepath.Dir for resolveIn's root-relative names, with the
+// root spelled "".
+func parentOf(name string) string {
+	d := filepath.Dir(name)
+	if d == "." {
+		return ""
+	}
+	return d
+}
+
+// underRoot reports whether the absolute symlink target names a path under
+// root, and returns the components below it. It matches root's own
+// components one for one, before any ".." is applied: target
+// "<root>/s/../x" yields [s .. x], so the walk resolves s first and the
+// ".." climbs from wherever s really is. Cleaning the target first would
+// collapse it to "<root>/x" and hide an s that points outside. Any ".."
+// within the root prefix fails the match, so it denies.
+func underRoot(root, target string) ([]string, bool) {
+	vol := filepath.VolumeName(root)
+	if filepath.VolumeName(target) != vol {
+		return nil, false
+	}
+	want := splitPath(root[len(vol):])
+	got := splitPath(target[len(vol):])
+	if len(got) < len(want) {
+		return nil, false
+	}
+	for i, c := range want {
+		if got[i] != c {
+			return nil, false
+		}
+	}
+	return got[len(want):], true
 }
