@@ -148,16 +148,22 @@ func envKeyOf(entry string) string {
 }
 
 // buildCmd assembles the *exec.Cmd through sealed.Command, which is the
-// reveal boundary: the only place a SecretArg, Arg or EnvMutation payload
-// leaves its wrapper, and everything it produces goes straight into the
-// *exec.Cmd. This package cannot read a payload any other way (forgectl#854).
-// A payload sits in a sealed.Value whose reveal is unexported inside
-// internal/exec/internal/sealed, and Go's internal-package rule lets nothing
-// outside internal/exec import that package. So a reveal written in this
-// package, or anywhere else, does not compile. validate asks sealed one-bit
-// questions (IsAbs, LeadsWithDash), Equal compares inside sealed, and
-// MapOpaque re-spells through sealed's closed Transform set, which only
-// sealed can mint.
+// reveal boundary: the only function that takes a SecretArg, Arg or
+// EnvMutation payload out of its wrapper, and it puts every payload into the
+// *exec.Cmd it returns (forgectl#854). A payload sits in a sealed.Value whose
+// reveal is unexported inside internal/exec/internal/sealed, and Go's
+// internal-package rule lets nothing outside internal/exec import that
+// package, so no other reveal compiles, in this package or anywhere else.
+// validate asks sealed one-bit questions (IsAbs, LeadsWithDash), Equal
+// compares inside sealed, and MapOpaque re-spells through sealed's closed
+// Transform set, which only sealed can mint.
+//
+// The returned *exec.Cmd holds the plaintext in Path, Args and Env, so
+// holding one is holding every payload. The compiler cannot restrict who
+// calls this method inside the package; TestTheRevealHasOneDoor does, for
+// production files: sealed.Command is named only here, and this method only
+// in RunSensitive. Tests may call it. What RunSensitive does with the Cmd
+// (start, wait and pipe wiring, never a log) is kept by review.
 //
 // That is the primary control. The guard tests are the backstop for what the
 // compiler cannot see:
@@ -179,9 +185,11 @@ func envKeyOf(entry string) string {
 //   - a package outside internal/exec that imports sealed fails to build
 //     (TestSealedIsUnimportableOutsideExec), which proves the rule the rest
 //     relies on;
-//   - inside this package, sealed.Command is named only here
-//     (TestOnlyBuildCmdReachesSealedCommand), so the one reveal cannot spread
-//     past the runner.
+//   - no package but this one (and sealed's own test binary) imports sealed,
+//     a subpackage of internal/exec included, which the internal-package
+//     rule would admit (TestOnlyExecImportsSealed);
+//   - in this package's production files, sealed.Command is named only here
+//     and this method only in RunSensitive (TestTheRevealHasOneDoor).
 //
 // It is a separate function so internal/exec's own tests can assert that the
 // real values do reach exec.Cmd.Args — the mirror of the redaction tests,
