@@ -23,10 +23,23 @@ import (
 // needed, since every write below goes through a descriptor-relative call.
 const dirOpenFlags = unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_RDONLY
 
-// unsafe wraps a refusal reason under ErrUnsafe, terminal-safe because callers
-// print it.
+// reasonMaxRunes caps a refusal reason's rendered text. An error argument is
+// rendered through termsafe.Error first, which already cuts an over-long path
+// in the middle and keeps the errno after it; this cap is the backstop for
+// whatever else an OS error carries. It holds a capped path whose every rune
+// escapes to a six-rune \uXXXX, with room for the text around it.
+const reasonMaxRunes = 4096
+
+// unsafe wraps a refusal reason under ErrUnsafe, terminal-safe and bounded
+// because callers print it (forgectl#864). An error argument can carry a
+// path, such as a base directory whose name is too long to create.
 func unsafe(format string, args ...any) error {
-	return fmt.Errorf("%w: %s", ErrUnsafe, termsafe.SafeLine(fmt.Sprintf(format, args...)))
+	for i, arg := range args {
+		if err, ok := arg.(error); ok {
+			args[i] = termsafe.Error(err)
+		}
+	}
+	return fmt.Errorf("%w: %s", ErrUnsafe, termsafe.SafeLineMax(fmt.Sprintf(format, args...), reasonMaxRunes))
 }
 
 // Pin returns a descriptor on the spec's leaf directory.

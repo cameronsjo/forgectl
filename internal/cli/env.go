@@ -367,9 +367,9 @@ func newEnvSetCmd(client *envpkg.Client, sopsClient *sopspkg.Client, clip *clipp
 				return err
 			}
 
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "set %s in %s\n", key, target.Rel())
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "set %s in %s\n", key, termsafe.QuotePath(target.Rel()))
 			if tightened {
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "tightened %s to 0600\n", target.Rel())
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "tightened %s to 0600\n", termsafe.QuotePath(target.Rel()))
 			}
 			return nil
 		},
@@ -462,9 +462,9 @@ func runEnvSetSops(cmd *cobra.Command, sopsClient *sopspkg.Client, clip *clippkg
 	// wants to know which happened.
 	switch outcome {
 	case sopspkg.OutcomeAdded:
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "added %s to %s\n", key, target.Rel())
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "added %s to %s\n", key, termsafe.QuotePath(target.Rel()))
 	default:
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "replaced %s in %s\n", key, target.Rel())
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "replaced %s in %s\n", key, termsafe.QuotePath(target.Rel()))
 	}
 	return nil
 }
