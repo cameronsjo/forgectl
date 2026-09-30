@@ -132,7 +132,13 @@ type DiscardingRunner interface {
 // deterministic regardless of how stale the ambient Homebrew auto-update
 // timestamp happens to be — a single definition so the two callers can
 // never drift apart on the exact env shape.
-var HomebrewNoAutoUpdate = map[string]string{"HOMEBREW_NO_AUTO_UPDATE": "1"}
+//
+// It returns a fresh map on every call rather than exposing a package-level
+// map: an exported map is shared mutable state any importer could rewrite
+// (or have a RunWithEnv caller mutate) for every other caller (forgectl#851).
+func HomebrewNoAutoUpdate() map[string]string {
+	return map[string]string{"HOMEBREW_NO_AUTO_UPDATE": "1"}
+}
 
 // OSRunner is the production Runner: it actually spawns processes. Its zero
 // value is the production configuration.

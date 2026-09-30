@@ -5,7 +5,6 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -35,60 +34,44 @@ var transformCallers = map[string]bool{
 // that buildCmd, FakeSensitiveRunner and backend.BootstrapCommand state: no
 // payload is handed to code outside this package. The in-package rules run
 // on the type-checked package (TestExportedAPI,
-// TestTransformIsMintedOnlyInTransformGo); this one walks every Go
-// file in the module, tests included, so a test elsewhere cannot use the
-// seam either. Outside internal/exec, only transformCallers may name
-// MapOpaque, Transform or TmuxDirOperand, and no file may dot-import this
-// package, because its references could not be resolved.
+// TestTransformIsMintedOnlyInTransformGo); this one reads every Go file the
+// go tool compiles into the module (moduleCompiledFiles), tests included and
+// wherever it sits, so a test elsewhere, or a package under testdata, a
+// dot-directory or a symlinked directory, cannot use the seam either. Outside
+// internal/exec, only transformCallers may name MapOpaque, Transform or
+// TmuxDirOperand, and no file may dot-import this package, because its
+// references could not be resolved.
 //
 // Mutation that turns it red: call exec.MapOpaque from any other package's
 // file.
 func TestNoCallerCodeReceivesAnOpaquePayload(t *testing.T) {
-	root, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("module root: %v", err)
-	}
 	fset := token.NewFileSet()
 	parsed, sanctioned := 0, 0
 	var findings []string
 	report := func(pos token.Pos, msg string) {
 		findings = append(findings, fset.Position(pos).String()+": "+msg)
 	}
-	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	for _, f := range moduleCompiledFiles(t) {
+		if filepath.Ext(f.rel) != ".go" || filepath.ToSlash(filepath.Dir(f.rel)) == "internal/exec" {
+			continue // the typed per-GOOS guards cover this package
 		}
-		if entry.IsDir() {
-			name := entry.Name()
-			if path != root && (strings.HasPrefix(name, ".") || name == "vendor" || name == "testdata") {
-				return filepath.SkipDir
-			}
-			return nil
+		src, err := os.ReadFile(filepath.Clean(f.abs))
+		if err != nil {
+			t.Fatal(err)
 		}
-		if !strings.HasSuffix(entry.Name(), ".go") {
-			return nil
-		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return relErr
-		}
-		rel = filepath.ToSlash(rel)
-		if filepath.ToSlash(filepath.Dir(rel)) == "internal/exec" {
-			return nil // the typed per-GOOS guards cover this package
-		}
-		file, parseErr := parser.ParseFile(fset, path, nil, parser.ImportsOnly|parser.SkipObjectResolution)
-		if parseErr != nil {
-			return parseErr
+		file, err := parser.ParseFile(fset, f.rel, src, parser.ImportsOnly|parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
 		}
 		parsed++
 		alias := execAlias(file, report)
 		if alias == "" {
-			return nil
+			continue
 		}
 		// Only now is the whole file worth parsing.
-		file, parseErr = parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-		if parseErr != nil {
-			return parseErr
+		file, err = parser.ParseFile(fset, f.rel, src, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
 		}
 		ast.Inspect(file, func(n ast.Node) bool {
 			sel, ok := n.(*ast.SelectorExpr)
@@ -98,23 +81,19 @@ func TestNoCallerCodeReceivesAnOpaquePayload(t *testing.T) {
 			if id, ok := sel.X.(*ast.Ident); !ok || id.Name != alias || !transformSeam[sel.Sel.Name] {
 				return true
 			}
-			if transformCallers[rel] {
+			if transformCallers[f.rel] {
 				sanctioned++
 				return true
 			}
 			report(sel.Pos(), "exec."+sel.Sel.Name+" used outside the transform allowlist; a new caller must be reviewed and added to transformCallers")
 			return true
 		})
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 	for _, f := range findings {
 		t.Error(f)
 	}
 	if parsed == 0 {
-		t.Fatal("parsed no Go files; the walk is broken, not the module clean")
+		t.Fatal("parsed no Go files; the file set is broken, not the module clean")
 	}
 	if sanctioned == 0 {
 		t.Fatal("found no use of the transform seam at its sanctioned site; the matcher is broken, not the module clean")
@@ -248,9 +227,10 @@ func mintingFindings(t *testing.T, c *checkedPackage) []string {
 //   - every func is a plain, non-generic, non-method func with a body (no
 //     assembly), whose parameters are all string and whose single result is
 //     string or bool;
-//   - a body starts no goroutine and calls only a strings func, a method on
-//     a value (whose type can only come from strings), the builtin len, a
-//     string conversion, or another func of this package. print, println and
+//   - a body starts no goroutine and calls only through a selector (a
+//     strings func, a method of a strings type, or a func-typed field of a
+//     local value; see the waiver below), the builtin len, a string
+//     conversion, or another func of this package. print, println and
 //     every other builtin are refused, so nothing is written anywhere.
 //
 // Mutations that turn it red: import "os" in tmuxesc.go; declare
@@ -356,7 +336,14 @@ func tmuxescFindings(fset *token.FileSet, file *ast.File, own map[string]bool, f
 				case *ast.CallExpr:
 					switch fun := node.Fun.(type) {
 					case *ast.SelectorExpr:
-						return true // strings.X, or a method on a value whose type only strings can supply
+						// Any selector call passes, unchecked by type: a strings.X
+						// call (strings is the only import), a method of a value
+						// whose type comes from strings, or a call through a field
+						// of a local struct. The last is not "a type only strings
+						// can supply", but whatever func it holds was built here
+						// from strings funcs, this package's funcs or func
+						// literals, and Inspect walks every one of those bodies.
+						return true
 					case *ast.Ident:
 						if fun.Name == "len" || fun.Name == "string" || own[fun.Name] {
 							return true

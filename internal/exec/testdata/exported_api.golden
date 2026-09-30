@@ -49,6 +49,7 @@ const OutputRetired OutputCause
 const Redacted untyped string
 func BoundedOutputForTest(data []byte, cause OutputCause) BoundedOutput
 func EndOfOptions() Arg
+func HomebrewNoAutoUpdate() map[string]string
 func MapOpaque(a Arg, t Transform) Arg
 func MustFixed(v constantArg) Arg
 func NewOSSensitiveRunner() *OSSensitiveRunner
@@ -247,4 +248,3 @@ var ErrOutputLimit error
 var ErrOutputTooLarge error
 var ErrStartFailed error
 var ErrTimeout error
-var HomebrewNoAutoUpdate map[string]string

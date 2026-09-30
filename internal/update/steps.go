@@ -36,23 +36,12 @@ func DefaultSteps() []Step {
 	}
 }
 
-// homebrewNoAutoUpdate is exec.HomebrewNoAutoUpdate (the shared definition —
-// internal/selfupdate's own brew calls merge the same map, so the two
-// packages can never drift apart on the exact env shape). Without it,
-// `brew outdated` (brewStep's Check, documented as "no mutation, always
-// safe") can fetch and mutate local tap/formula-index state as a side
-// effect the caller never asked for and `update check` never disclosed.
-// Applied to every brew invocation in this step (Check and Apply alike) so
-// the roster's behavior is deterministic regardless of how stale the
-// ambient Homebrew auto-update timestamp happens to be.
-var homebrewNoAutoUpdate = exec.HomebrewNoAutoUpdate
-
 // brewStep: Check and Apply are both scoped to --formula — no cask is listed
 // or upgraded here. One residue: `brew cleanup` takes no --formula/--cask
 // switch, so it still prunes stale cask DOWNLOADS. Old-version deletion stays
 // formula-only, which is what keeps the Cellar-rollback caveat below exact.
 // Check lists outdated
-// formulae (never mutates, HOMEBREW_NO_AUTO_UPDATE pinned — see above);
+// formulae (never mutates, HOMEBREW_NO_AUTO_UPDATE pinned — see below);
 // Apply runs the standard three-command weekly refresh in sequence — update
 // (refresh the formula index), upgrade --formula (install newer formula
 // versions), cleanup (reclaim disk). Destructive: cleanup ALSO removes old
@@ -73,15 +62,23 @@ var homebrewNoAutoUpdate = exec.HomebrewNoAutoUpdate
 // would otherwise show up in every weekly check forever with nothing
 // explaining why `update run --yes` never clears it. Cask upgrades stay a
 // manual `brew upgrade --cask` outside this tool.
+//
+// Every brew invocation here (Check and Apply alike) carries a fresh
+// exec.HomebrewNoAutoUpdate(), the definition internal/selfupdate's brew
+// calls share, so the two packages never drift apart on the env shape.
+// Without it, `brew outdated` (Check, documented as "no mutation, always
+// safe") can fetch and mutate local tap/formula-index state as a side effect
+// the caller never asked for and `update check` never disclosed, depending
+// on how stale the ambient Homebrew auto-update timestamp happens to be.
 func brewStep() Step {
 	return Step{
 		Name:        StepBrew,
 		Destructive: true,
 		Check: func(ctx context.Context, run exec.Runner) (string, error) {
-			return run.RunWithEnv(ctx, homebrewNoAutoUpdate, "brew", "outdated", "--formula")
+			return run.RunWithEnv(ctx, exec.HomebrewNoAutoUpdate(), "brew", "outdated", "--formula")
 		},
 		Apply: func(ctx context.Context, run exec.Runner) (string, error) {
-			return runSequence(ctx, run, homebrewNoAutoUpdate,
+			return runSequence(ctx, run, exec.HomebrewNoAutoUpdate(),
 				[]string{"brew", "update"},
 				[]string{"brew", "upgrade", "--formula"},
 				[]string{"brew", "cleanup"},
