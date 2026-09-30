@@ -863,7 +863,7 @@ var readAsideBytes = readFileInRoot
 // drift into reading the file differently — which would make their byte
 // comparison meaningless.
 func readFileInRoot(root *os.Root, name string) ([]byte, error) {
-	file, err := root.Open(name)
+	file, err := openRegularInRoot(root, name)
 	if err != nil {
 		return nil, fmt.Errorf("read set-aside record %s: %w", termsafe.QuotePath(name), termsafe.Error(err))
 	}

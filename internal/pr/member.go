@@ -202,6 +202,7 @@ func (c *Client) resolveBreadcrumbEntry(operand string) (breadcrumbMember, error
 	// The Lstat above checks the path; readRecordFile checks what the open
 	// reaches (O_NOFOLLOW|O_NONBLOCK, then a regular-file Fstat), so a FIFO
 	// swapped in between cannot block this read (forgectl#621).
+	beforeMemberRead(selected.lexical)
 	data, err := readRecordFile(selected.lexical)
 	if err != nil {
 		return breadcrumbMember{}, fmt.Errorf("read breadcrumb %s: %w",
@@ -219,6 +220,11 @@ func (c *Client) resolveBreadcrumbEntry(operand string) (breadcrumbMember, error
 // lexicalAbs returns the absolute, cleaned form of path WITHOUT resolving
 // symlinks — the form an exact-name comparison needs, since resolution is
 // exactly what an exact name is meant to bypass.
+// beforeMemberRead runs between resolveBreadcrumbEntry's Lstat and its read.
+// It is a no-op in production; a test sets it to swap the entry for a FIFO in
+// exactly that window, the one the Lstat cannot cover (forgectl#621).
+var beforeMemberRead = func(string) {}
+
 func lexicalAbs(path string) string {
 	if abs, err := filepath.Abs(path); err == nil {
 		return filepath.Clean(abs)

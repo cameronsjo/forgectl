@@ -15,6 +15,12 @@ package pr
 //       hangs List nor Teardown/Cleanup, and List still lists the real record
 //   [x] The record loader itself refuses a FIFO fast (every verb reads
 //       through loadBreadcrumbRecord)
+//   [x] The pr local clean-room check (recordedWorkspaceFor) skips a FIFO
+//       record and still finds a real one
+//   [x] The pinned-root re-read (openRegularInRoot, behind teardown's three
+//       re-reads and prune's readFileInRoot) refuses a FIFO fast
+//   [x] A FIFO swapped in between the member resolver's Lstat and its read is
+//       refused fast
 
 import (
 	"context"
@@ -164,4 +170,86 @@ func TestTeardownAndCleanup_AFIFONamedLikeARecordFailFast(t *testing.T) {
 			t.Errorf("the FIFO was removed: %v", lerr)
 		}
 	})
+}
+
+// Mutation that turns it red: in recordedWorkspaceFor, drop the
+// e.Type().IsRegular() skip AND read with os.ReadFile — the read blocks on the
+// FIFO. (Dropping only one of the two leaves the other standing.)
+func TestRecordedWorkspaceFor_AFIFORecordIsSkippedFast(t *testing.T) {
+	c := testClient(t, nil)
+	ws := fakeWorkspace(t)
+	seedPhaseRecord(t, c, Ref{Owner: "o", Repo: "r", Number: 2}, PhasePrepared, ws)
+	fifoRecord(t, c.SessionsDir())
+	real, err := filepath.EvalSymlinks(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got string
+	var found bool
+	_ = mustFailFast(t, "recordedWorkspaceFor", func() error {
+		got, found = c.recordedWorkspaceFor(real)
+		return nil
+	})
+	if !found || got != real {
+		t.Errorf("recordedWorkspaceFor(%q) = %q, %v; want the real record's workspace", real, got, found)
+	}
+}
+
+// Mutation that turns it red: make openRegularInRoot a plain root.Open — the
+// open blocks on the FIFO. Dropping only its IsRegular check turns it red a
+// different way: the FIFO opens and reads as empty rather than being refused.
+func TestOpenRegularInRoot_AFIFOIsRefusedFast(t *testing.T) {
+	dir := t.TempDir()
+	fifoRecord(t, dir)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	err = mustFailFast(t, "readFileInRoot on a FIFO", func() error {
+		_, err := readFileInRoot(root, "o-r-1-1.json")
+		return err
+	})
+	if !errors.Is(err, errRecordNotRegular) {
+		t.Fatalf("readFileInRoot on a FIFO = %v, want errRecordNotRegular", err)
+	}
+
+	// Control: a regular file still reads through it, byte for byte.
+	want := v2Record(t, 1)
+	if err := os.WriteFile(filepath.Join(dir, "ok.json"), want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readFileInRoot(root, "ok.json")
+	if err != nil || string(got) != string(want) {
+		t.Errorf("readFileInRoot on a regular file = %q, %v; want %q", got, err, want)
+	}
+}
+
+// TestResolveBreadcrumbMember_AFIFOSwappedInAfterTheLstatFailsFast pins the
+// member resolver's read: its Lstat checks the entry, and beforeMemberRead
+// swaps the entry for a FIFO in exactly the window after it.
+//
+// Mutation that turns it red: in resolveBreadcrumbEntry, read with os.Open
+// (the pre-#621 form) instead of readRecordFile — the open blocks on the FIFO.
+func TestResolveBreadcrumbMember_AFIFOSwappedInAfterTheLstatFailsFast(t *testing.T) {
+	c := testClient(t, nil)
+	path := seedPhaseRecord(t, c, Ref{Owner: "o", Repo: "r", Number: 3}, PhasePrepared, fakeWorkspace(t))
+	original := beforeMemberRead
+	t.Cleanup(func() { beforeMemberRead = original })
+	beforeMemberRead = func(p string) {
+		if err := os.Remove(p); err != nil {
+			t.Error(err)
+		}
+		if err := syscall.Mkfifo(p, 0o600); err != nil {
+			t.Error(err)
+		}
+	}
+	err := mustFailFast(t, "resolveBreadcrumbMember", func() error {
+		_, err := c.resolveBreadcrumbMember(path)
+		return err
+	})
+	if !errors.Is(err, errRecordNotRegular) {
+		t.Fatalf("resolveBreadcrumbMember with a FIFO swapped in = %v, want errRecordNotRegular", err)
+	}
 }

@@ -344,7 +344,7 @@ func (c *Client) discardStale(member breadcrumbMember) error {
 		return fmt.Errorf("breadcrumb %s is no longer a regular file; refusing to remove it", member.displayPath)
 	}
 
-	file, err := root.Open(name)
+	file, err := openRegularInRoot(root, name)
 	if err != nil {
 		return fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
 	}
@@ -439,7 +439,7 @@ func (c *Client) discardRecordOnly(member breadcrumbMember) error {
 		return fmt.Errorf("breadcrumb %s is no longer a regular file; refusing to remove it", member.displayPath)
 	}
 
-	file, err := root.Open(name)
+	file, err := openRegularInRoot(root, name)
 	if err != nil {
 		return fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
 	}
@@ -534,7 +534,7 @@ func (c *Client) setAsideUndecodableRecord(member breadcrumbMember) (string, err
 		return "", fmt.Errorf("breadcrumb %s is no longer a regular file; refusing to move it", member.displayPath)
 	}
 
-	file, err := root.Open(name)
+	file, err := openRegularInRoot(root, name)
 	if err != nil {
 		return "", fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
 	}
