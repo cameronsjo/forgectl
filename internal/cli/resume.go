@@ -24,12 +24,13 @@ import (
 )
 
 // resumeModule declares the cross-project session-resume extension (ADR-0005).
-// It owns no config section: the picker is zero-configuration by design, and
-// the posture it resumes into comes from [launch], which launchModule owns.
+// The picker is zero-configuration by design, and the posture it resumes into
+// comes from [launch], which launchModule owns; [resume] holds only the
+// [[resume.on_update]] hooks `resume hooks run` fires.
 var resumeModule = module.Manifest{
 	Name:      "resume",
 	Tier:      module.TierExtension,
-	ConfigKey: "",
+	ConfigKey: "resume",
 	New:       newResumeCmd,
 }
 
@@ -56,6 +57,7 @@ neither repo nor branch.
   forgectl resume snapshot     capture what a session's exit would destroy
   forgectl resume outdated     list live sessions older than the installed claude
   forgectl resume restart --outdated  restart those sessions in their herdr panes
+  forgectl resume hooks install  restart them automatically when claude updates
 
 THIS COMMAND REPLACES THE PROCESS. On success it execs claude in place (via
 syscall.Exec, the same path forgectl launch uses) and never returns — the
@@ -117,7 +119,7 @@ guard; test the ls output instead.`,
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the resolved session, cwd, and claude argv without resuming")
 	cmd.Flags().IntVar(&limit, "limit", resume.DefaultLimit, "how many recent sessions to consider (0 or negative means the default)")
 
-	cmd.AddCommand(newResumeLsCmd(), newResumeSnapshotCmd(), newResumeOutdatedCmd(deps), newResumeRestartCmd(deps))
+	cmd.AddCommand(newResumeLsCmd(), newResumeSnapshotCmd(), newResumeOutdatedCmd(deps), newResumeRestartCmd(deps), newResumeHooksCmd(deps))
 	return cmd
 }
 
