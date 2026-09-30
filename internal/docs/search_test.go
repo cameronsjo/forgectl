@@ -359,6 +359,29 @@ func TestSearchSilentFailureReportsReason(t *testing.T) {
 	}
 }
 
+// #941: rg's stderr reached SearchError.Message through termsafe only, while
+// the Err arm beside it was redacted (#926). A line holding a credential
+// shape reads as the marker; the line breaks redact.Text works on are still
+// there when it runs, so the line without one survives.
+//
+// Mutation that turns it red: drop redact.Text around stderr in rootFailures
+// (the token shows), or apply it after searchError's escaping (the whole
+// message is one withheld line, and "kept line" disappears).
+func TestSearchRootFailureStderrIsRedacted(t *testing.T) {
+	idx, _ := searchRoot(t, "a.md")
+	rg := &fakeRg{write: rgFails("rg: kept line\nrg: https://u:rgtok941@example.invalid/x: permission denied\n")}
+	resp, err := (Searcher{Runner: rg, LookPath: fakeLookPath}).Search(t.Context(), idx, "x", 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(resp.Errors) != 1 {
+		t.Fatalf("Errors = %+v, want one entry", resp.Errors)
+	}
+	if msg := resp.Errors[0].Message; strings.Contains(msg, "rgtok941") || !strings.Contains(msg, "kept line") || !strings.Contains(msg, "[redacted]") {
+		t.Errorf("Message = %q; want the credential line withheld and the other kept", msg)
+	}
+}
+
 func TestSearchErrorMessageIsCapped(t *testing.T) {
 	idx, _ := searchRoot(t, "a.md")
 	rg := &fakeRg{write: rgFails(strings.Repeat("e", 4000))}
