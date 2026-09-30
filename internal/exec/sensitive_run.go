@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec/internal/sealed"
+	"github.com/cameronsjo/forgectl/internal/exec/internal/validated"
 )
 
 // defaultRetireBound is how long the runner waits for a stream's reader to
@@ -110,7 +111,7 @@ func (r *OSSensitiveRunner) drainBound() time.Duration {
 // It reads keys only. A replacement's value stays sealed until sealed.Start
 // appends it as KEY=value, after every inherited entry, so the order of the
 // final environment is exactly what it was when this function built it whole.
-func (r *OSSensitiveRunner) buildEnv(muts []EnvMutation) ([]string, []sealed.EnvVar) {
+func (r *OSSensitiveRunner) buildEnv(muts []validated.Env) ([]string, []sealed.EnvVar) {
 	if len(muts) == 0 {
 		out := make([]string, len(r.env))
 		copy(out, r.env)
@@ -118,7 +119,7 @@ func (r *OSSensitiveRunner) buildEnv(muts []EnvMutation) ([]string, []sealed.Env
 	}
 	drop := make(map[string]struct{}, len(muts))
 	for _, m := range muts {
-		drop[m.key] = struct{}{}
+		drop[m.Key] = struct{}{}
 	}
 	out := make([]string, 0, len(r.env)+len(muts))
 	for _, entry := range r.env {
@@ -129,8 +130,8 @@ func (r *OSSensitiveRunner) buildEnv(muts []EnvMutation) ([]string, []sealed.Env
 	}
 	var set []sealed.EnvVar
 	for _, m := range muts {
-		if m.op == envOpReplace {
-			set = append(set, sealed.EnvVar{Key: m.key, Value: m.value.v})
+		if m.Op == validated.EnvOpReplace {
+			set = append(set, sealed.EnvVar{Key: m.Key, Value: m.Value})
 		}
 	}
 	return out, set
@@ -147,7 +148,7 @@ func envKeyOf(entry string) string {
 	return entry
 }
 
-// startSealed starts sc's process through sealed.Start, which is the reveal
+// startSealed starts vc's process through sealed.Start, which is the reveal
 // boundary: the only function that takes a SecretArg, Arg or EnvMutation
 // payload out of its wrapper, and it puts every payload into the child
 // process and nowhere else (forgectl#854). What comes back is a *sealed.Proc,
@@ -155,13 +156,18 @@ func envKeyOf(entry string) string {
 // *exec.Cmd, or anything else carrying a plaintext payload. (The inherited
 // environment r.env is plaintext by design; it holds no payload.)
 //
-// Only RunSensitive may call this: it skips validate, so a direct call would
-// start a relative path or a dash-leading operand that validate refuses.
-// TestSealedStartHasOneCaller pins that, and sealed.Start refuses a
-// non-absolute path on its own as defense in depth. It is a plain func, not a
-// method, on purpose: a package-level func is reachable only by naming it, so
-// the test's Uses walk sees every route, where a method could be reached
-// through an interface value the walk would not attribute to it.
+// It accepts only a validated.Command, which only validated.New builds, from
+// a copy it checked, so what it starts passed validation, and a later write
+// to the caller's SensitiveCommand cannot reach it. The validated package's
+// boundary makes that the compiler's property (forgectl#888). Only RunSensitive
+// may call it, once, as a direct call and never as a func value, so every
+// launch goes through the runner's pipes and bounds
+// (TestSealedStartHasOneCaller, TestValidateDominatesStartSealed).
+// sealed.Start refuses a non-absolute path on its own as defense in depth. It
+// is a plain func, not a method, on purpose: a package-level func is
+// reachable only by naming it, so the test's Uses walk sees every route,
+// where a method could be reached through an interface value the walk would
+// not attribute to it.
 //
 // What the compiler enforces, against ordinary Go (calls, method values,
 // interfaces, generic constraints, conversions):
@@ -178,7 +184,15 @@ func envKeyOf(entry string) string {
 // a closure's captured variables, without importing unsafe. Value.Addr on the
 // field, then Value.UnsafePointer, then a conversion of the pointer to *T
 // reads a sealed.Value's payload or the Cmd behind a Proc, from any package
-// holding one. No guard test refuses that today; it is a review property.
+// holding one. The guard tests below refuse it; they do not make it
+// impossible.
+//
+// Residual risk, which no guard here closes: code in the module can read
+// its own process memory through the operating system with neither reflect
+// nor unsafe, for example /proc/self/mem, or a raw syscall handed a uintptr,
+// at an address taken from fmt's %p or text/template's printing of a
+// pointer. %p and a template only give an address; the read is the part that
+// matters, and it is a review property.
 //
 // What the guard tests enforce, as the backstop for what the compiler cannot
 // see:
@@ -203,6 +217,11 @@ func envKeyOf(entry string) string {
 //   - no package but this one (and sealed's own test binary) imports sealed,
 //     a subpackage of internal/exec included, which the internal-package
 //     rule would admit (TestOnlyExecImportsSealed);
+//   - the reflect route above: no production file in the module holds an
+//     unsafe.Pointer-typed value without importing "unsafe", or uses
+//     reflect.Value's Addr, UnsafeAddr, UnsafePointer or Pointer (or a
+//     method that reaches them by name), on every guard platform
+//     (TestNoFileReadsMemoryThroughReflect, forgectl#888);
 //   - in this package's production files, sealed.Start is named only here
 //     (TestSealedStartHasOneCaller). A package-level func can be reached only
 //     by naming it, so this check has no interface or method-value gap.
@@ -224,13 +243,9 @@ func envKeyOf(entry string) string {
 // validate has already required an absolute path, so no PATH lookup happens
 // — which matters, because LookPath reads the live process PATH rather than
 // this runner's captured environment.
-func startSealed(r *OSSensitiveRunner, sc SensitiveCommand, stdout, stderr *os.File) (*sealed.Proc, error) {
-	args := make([]sealed.Value, len(sc.Args))
-	for i := range sc.Args {
-		args[i] = sc.Args[i].v
-	}
-	env, set := r.buildEnv(sc.Env)
-	return sealed.Start(sc.Path.v, args, env, set, stdout, stderr)
+func startSealed(r *OSSensitiveRunner, vc validated.Command, stdout, stderr *os.File) (*sealed.Proc, error) {
+	env, set := r.buildEnv(vc.Env())
+	return sealed.Start(vc.Path(), vc.Args(), env, set, stdout, stderr)
 }
 
 // failedResult is what every never-ran path returns. ExitCode is -1, never 0:
@@ -268,7 +283,8 @@ func failedResult() SensitiveResult {
 // read the completeness flag — CopyBytesForParse returns it alongside the bytes
 // so it cannot be skipped by accident.
 func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveCommand) (SensitiveResult, error) {
-	if err := sc.validate(); err != nil {
+	vc, err := sc.validated()
+	if err != nil {
 		slog.Debug("Refusing sensitive command before start.", "cmd", sc, "reason", err.Error())
 		return failedResult(), newSensitiveError(sc.Kind, OutcomeInvalid, failedResult(), err.Error())
 	}
@@ -298,7 +314,7 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 	slog.Debug("Preparing to run sensitive command.", "cmd", sc)
 	start := time.Now()
 
-	proc, err := startSealed(r, sc, outW, errW)
+	proc, err := startSealed(r, vc, outW, errW)
 	if err != nil {
 		closeAll(outR, outW, errR, errW)
 		slog.Error("Sensitive command failed to start.", "kind", sc.Kind.String())
