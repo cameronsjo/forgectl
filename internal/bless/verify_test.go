@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -424,5 +425,33 @@ func TestNewVerifier_AnchorPathCompiledIn(t *testing.T) {
 	}
 	if got := NewVerifier().anchorPath; got != want {
 		t.Errorf("NewVerifier().anchorPath = %q, want %q", got, want)
+	}
+}
+
+// TestTrustedStore_CapsAnchorKeyIDEcho pins #761: a signed store whose
+// anchor_key_id disagrees with the anchor is refused with that id capped, not
+// echoed whole.
+func TestTrustedStore_CapsAnchorKeyIDEcho(t *testing.T) {
+	env := newTestEnv(t)
+	long := strings.Repeat("A", 300)
+	storeBytes := mustEncodeStore(t, Store{Schema: StoreSchema, AnchorKeyID: long})
+	writeFile(t, env.storePath, storeBytes)
+	writeFile(t, SidecarPath(env.storePath), mustEncodeEnvelope(t, Envelope{
+		Schema:    EnvelopeSchema,
+		Algo:      AlgoECDSAP256SHA256,
+		KeyID:     env.anchorFP,
+		Signature: signB64(t, env.anchorKey, DomainTrust, storeBytes),
+		SignedAt:  fixedTime.Format(time.RFC3339),
+	}))
+
+	_, err := env.verifier().TrustedStore()
+	if !errors.Is(err, ErrTrustStoreInvalid) {
+		t.Fatalf("TrustedStore = %v, want ErrTrustStoreInvalid", err)
+	}
+	if strings.Contains(err.Error(), long[:81]) {
+		t.Errorf("error %q echoes anchor_key_id uncapped", err)
+	}
+	if !strings.Contains(err.Error(), "anchor_key_id") || !strings.Contains(err.Error(), "…") {
+		t.Errorf("error %q should name anchor_key_id and mark the cap", err)
 	}
 }

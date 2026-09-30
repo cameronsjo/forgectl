@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // AnchorPath is the compiled-in, root-owned trust anchor location. It is a
@@ -163,7 +164,9 @@ func (v *Verifier) TrustedStore() (Store, error) {
 		return Store{}, fmt.Errorf("%w: %v", ErrTrustStoreInvalid, err)
 	}
 	if store.AnchorKeyID != anchorFP {
-		return Store{}, fmt.Errorf("%w: store anchor_key_id %s does not match the anchor %s", ErrTrustStoreInvalid, store.AnchorKeyID, anchorFP)
+		// Signature-checked by now, but still file text, never a fingerprint
+		// this code computed: capped, not echoed whole (#761).
+		return Store{}, fmt.Errorf("%w: store anchor_key_id %s does not match the anchor %s", ErrTrustStoreInvalid, termsafe.QuoteArgMax(store.AnchorKeyID, 0), anchorFP)
 	}
 	return store, nil
 }

@@ -49,3 +49,21 @@ func OutdatedDetail(out string) string {
 	}
 	return "a newer forgectl is available"
 }
+
+// UpgradedVersions reads the from and to versions out of Upgrade's output from
+// version tokens only, never from its text (#761): brew reports the cask it
+// upgraded as "<cask> <from> -> <to>". It takes the last line that names
+// forgectl and holds exactly two versions, since the upgrade step's output
+// follows brew update's. ok is false when no such line exists (brew changed
+// its wording, or had nothing to upgrade).
+func UpgradedVersions(out string) (from, to string, ok bool) {
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "forgectl") {
+			continue
+		}
+		if vs := FindVersions(line); len(vs) == 2 {
+			from, to, ok = vs[0], vs[1], true
+		}
+	}
+	return from, to, ok
+}
