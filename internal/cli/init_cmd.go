@@ -256,6 +256,21 @@ const herdrScaffold = `
 # workspace = "forge"
 `
 
+// resumeScaffold is the [resume] section. The header is ACTIVE so the section
+// exists and `forgectl init` does not re-append it, and the one hook stays
+// commented: restart is the hook most operators want, but firing it is a
+// choice (it stops and relaunches sessions), so it is offered, not enabled.
+// It fires only once `forgectl resume hooks install` has loaded the watcher.
+const resumeScaffold = `
+# ── resume: hooks fired when a harness updates (forgectl resume hooks) ──────
+[resume]
+# [[resume.on_update]]
+# harness = "claude"   # only "claude" is supported so far
+# action  = "restart"  # built-in: forgectl resume restart --outdated; or instead:
+# command = ["/usr/bin/say", "claude updated"]  # argv, no shell; gets FORGECTL_HARNESS/_OLD_VERSION/_NEW_VERSION
+# timeout_seconds = 0  # 0 = default (restart 1800, command 300)
+`
+
 // initSection is one scaffoldable block: a config.toml section (or, for the
 // empty name, the host-scalar preamble) plus its annotated template.
 type initSection struct {
@@ -295,6 +310,7 @@ var initSections = []initSection{
 	{"pr", "pr", prScaffold},
 	{"theme", "theme", themeScaffold},
 	{"herdr", "herdr", herdrScaffold},
+	{"resume", "resume", resumeScaffold},
 }
 
 // initModule declares the full-scaffold convenience extension (ADR-0005). It
