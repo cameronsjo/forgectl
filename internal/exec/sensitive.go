@@ -25,11 +25,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/cameronsjo/forgectl/internal/exec/internal/sealed"
 	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
@@ -179,31 +179,34 @@ func redactedJSON() ([]byte, error) { return []byte(strconv.Quote(Redacted)), ni
 
 // SecretArg is an opaque command path or environment value.
 //
-// The payload is held in a closure, not a string field, and that is the whole
-// containment mechanism rather than a stylistic choice. fmt consults a value's
-// Formatter, Stringer, or GoStringer only when reflect.Value.CanInterface()
-// reports true, which is false for anything reached through an *unexported*
-// field. So a plain string payload here would be printed verbatim by %v, %+v,
-// and %#v of any struct that holds this type in an unexported field — the
-// natural shape for an adapter client — and slog's TextHandler, which
-// production installs, renders a non-TextMarshaler value with exactly
-// fmt.Sprintf("%+v", v). A func value prints as an address under every verb at
-// every depth, so reflection has nothing to reach.
+// The payload lives in a sealed.Value (internal/exec/internal/sealed), and
+// that package is the only code that can read it: this one cannot either
+// (forgectl#854). sealed.Value holds the payload in a closure, not a string
+// field, and that is the containment mechanism against rendering rather than a
+// stylistic choice. fmt consults a value's Formatter, Stringer, or GoStringer
+// only when reflect.Value.CanInterface() reports true, which is false for
+// anything reached through an *unexported* field. So a plain string payload
+// would be printed verbatim by %v, %+v, and %#v of any struct that holds this
+// type in an unexported field — the natural shape for an adapter client — and
+// slog's TextHandler, which production installs, renders a non-TextMarshaler
+// value with exactly fmt.Sprintf("%+v", v). A func value prints as an address
+// under every verb at every depth, so reflection has nothing to reach.
 //
 // The cost is that this type is no longer comparable with ==; use Equal.
 //
-// Every constructor here closes over an immutable string, so reveal is pure
-// and repeatable. That is load-bearing, not incidental: validate reveals to
-// check the path and the argv, and buildCmd reveals again to fill exec.Cmd.
-// A constructor accepting a caller-supplied func would make that pair a
-// time-of-check/time-of-use gap while looking like a natural extension.
+// Every constructor here seals an immutable string, so a reveal is pure and
+// repeatable. That is load-bearing, not incidental: validate checks the path
+// and the argv through sealed's predicates, and buildCmd reveals again through
+// sealed.Command to fill exec.Cmd. A constructor accepting a caller-supplied
+// func would make that pair a time-of-check/time-of-use gap while looking like
+// a natural extension.
 type SecretArg struct {
-	reveal func() string
+	v sealed.Value
 }
 
 // Secret wraps a dynamic value — a path, a socket, a nonce, a prompt — so it
 // can travel through adapters without any of them being able to render it.
-func Secret(v string) SecretArg { return SecretArg{reveal: func() string { return v }} }
+func Secret(v string) SecretArg { return SecretArg{v: sealed.New(v)} }
 
 func (SecretArg) String() string                { return Redacted }
 func (SecretArg) GoString() string              { return Redacted }
@@ -216,16 +219,11 @@ func (SecretArg) MarshalText() ([]byte, error)  { return []byte(Redacted), nil }
 // which the closure payload makes unavailable. Note this is a confirmation
 // oracle by construction — a caller who guesses a value can confirm it — which
 // is the same trade == offered and is what makes adapter fakes assertable.
-func (s SecretArg) Equal(other SecretArg) bool {
-	if s.reveal == nil || other.reveal == nil {
-		return s.reveal == nil && other.reveal == nil
-	}
-	return s.reveal() == other.reveal()
-}
+func (s SecretArg) Equal(other SecretArg) bool { return s.v.Equal(other.v) }
 
-func (s SecretArg) set() bool { return s.reveal != nil }
+func (s SecretArg) set() bool { return s.v.Set() }
 
-func (s SecretArg) present() bool { return s.reveal != nil && s.reveal() != "" }
+func (s SecretArg) present() bool { return s.v.Present() }
 
 // argKind separates the three argv element classes the seam recognizes.
 type argKind uint8
@@ -241,13 +239,13 @@ const (
 	argEndOfOptions
 )
 
-// Arg is one argv element. Its payload is a closure for the same reason
+// Arg is one argv element. Its payload is a sealed.Value for the same reason
 // SecretArg's is; see that type's comment. Both fixed and opaque arguments
 // render redacted — the runner logs argument counts, never argument text, so
 // there is no rendering difference for a reader to exploit.
 type Arg struct {
-	reveal func() string
-	kind   argKind
+	v    sealed.Value
+	kind argKind
 }
 
 // fixed builds an argv element from a backend constant such as "new-session"
@@ -271,7 +269,7 @@ func fixed(v string) (Arg, error) {
 			return Arg{}, fmt.Errorf("%w: fixed argument contains a control character", ErrInvalidCommand)
 		}
 	}
-	return Arg{reveal: func() string { return v }, kind: argFixed}, nil
+	return Arg{v: sealed.New(v), kind: argFixed}, nil
 }
 
 // constantArg is the parameter type of MustFixed, and it is what makes "only a
@@ -312,7 +310,7 @@ func MustFixed(v constantArg) Arg {
 // a flag, so validate refuses it unless an EndOfOptions separator precedes it.
 // That check lives in the seam rather than in each adapter because the seam's
 // own redaction is what would make the resulting argv hard to diagnose.
-func Opaque(v string) Arg { return Arg{reveal: func() string { return v }, kind: argOpaque} }
+func Opaque(v string) Arg { return Arg{v: sealed.New(v), kind: argOpaque} }
 
 // EndOfOptions is the literal "--" separator. Its scope is everything after
 // it: once present, no later opaque argument is checked for a leading dash, so
@@ -320,7 +318,7 @@ func Opaque(v string) Arg { return Arg{reveal: func() string { return v }, kind:
 // honours "--" at the specific subcommand is the caller's assertion — the seam
 // cannot check it, and a second separator reaches the argv as a literal operand.
 func EndOfOptions() Arg {
-	return Arg{reveal: func() string { return "--" }, kind: argEndOfOptions}
+	return Arg{v: sealed.New("--"), kind: argEndOfOptions}
 }
 
 func (Arg) String() string                { return Redacted }
@@ -332,13 +330,7 @@ func (Arg) MarshalText() ([]byte, error)  { return []byte(Redacted), nil }
 
 // Equal compares two arguments without revealing either; see SecretArg.Equal.
 func (a Arg) Equal(other Arg) bool {
-	if a.kind != other.kind {
-		return false
-	}
-	if a.reveal == nil || other.reveal == nil {
-		return a.reveal == nil && other.reveal == nil
-	}
-	return a.reveal() == other.reveal()
+	return a.kind == other.kind && a.v.Equal(other.v)
 }
 
 // Secret reports whether this argument was built from a dynamic value rather
@@ -346,7 +338,7 @@ func (a Arg) Equal(other Arg) bool {
 // payload.
 func (a Arg) Secret() bool { return a.kind == argOpaque }
 
-func (a Arg) set() bool { return a.reveal != nil && a.kind != argUnset }
+func (a Arg) set() bool { return a.v.Set() && a.kind != argUnset }
 
 // Environment keys the seam is allowed to touch. There is no constructor that
 // takes a key, so an unknown key is unrepresentable rather than rejected.
@@ -598,8 +590,9 @@ func (c SensitiveCommand) Equal(other SensitiveCommand) bool {
 
 // validate refuses before process start. Every message here is static text: a
 // validation failure must not become the rendering path that reveals what was
-// wrong with the value. It reveals the path only to test filepath.IsAbs, and
-// the argv only to test a leading dash; neither result reaches a message.
+// wrong with the value. It never reveals a payload: sealed answers the two
+// questions it asks, whether the path (and a TMPDIR value) is absolute and
+// whether a dynamic argument leads with a dash, as one bit each.
 func (c SensitiveCommand) validate() error {
 	if !c.Kind.Valid() {
 		return errors.New("command kind is not a known operation")
@@ -614,7 +607,7 @@ func (c SensitiveCommand) validate() error {
 	// not by exec.LookPath, which reads the live process PATH rather than the
 	// runner's captured environment — the one decision where the snapshot
 	// would otherwise not apply.
-	if !filepath.IsAbs(c.Path.reveal()) {
+	if !c.Path.v.IsAbs() {
 		return errors.New("command path is not absolute")
 	}
 	seenEndOfOptions := false
@@ -627,7 +620,7 @@ func (c SensitiveCommand) validate() error {
 			seenEndOfOptions = true
 			continue
 		}
-		if a.kind == argOpaque && !seenEndOfOptions && strings.HasPrefix(a.reveal(), "-") {
+		if a.kind == argOpaque && !seenEndOfOptions && a.v.LeadsWithDash() {
 			return fmt.Errorf("dynamic argument %d begins with a dash and no end-of-options separator precedes it", i)
 		}
 	}
@@ -648,7 +641,7 @@ func (c SensitiveCommand) validate() error {
 			if c.Kind != KindSopsEdit {
 				return fmt.Errorf("environment mutation %d is not permitted for this command kind", i)
 			}
-			if !filepath.IsAbs(m.value.reveal()) {
+			if !m.value.v.IsAbs() {
 				return fmt.Errorf("environment mutation %d needs an absolute path", i)
 			}
 		}

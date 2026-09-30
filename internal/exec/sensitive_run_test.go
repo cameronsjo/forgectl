@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -793,7 +794,10 @@ func TestReadCapped_MarksANonEOFStopAsIncomplete(t *testing.T) {
 
 // TestBuildEnv_RemovesEveryOccurrenceAndAppendsOnce pins the pure mutation
 // logic, so a failure in the end-to-end test above is attributable to either
-// the policy or the process plumbing rather than to both at once.
+// the policy or the process plumbing rather than to both at once. It reads the
+// environment buildCmd assembles, since a replacement value is appended only
+// inside sealed.Command, and pins the exact order: the surviving inherited
+// entries byte-exact, then each replacement in mutation order.
 func TestBuildEnv_RemovesEveryOccurrenceAndAppendsOnce(t *testing.T) {
 	runner := &OSSensitiveRunner{env: []string{
 		"PATH=/usr/bin",
@@ -803,30 +807,25 @@ func TestBuildEnv_RemovesEveryOccurrenceAndAppendsOnce(t *testing.T) {
 		"TMUX=/tmp/a,1,0",
 		"BAREKEY",
 	}}
+	build := func(muts ...EnvMutation) []string {
+		return runner.buildCmd(SensitiveCommand{Kind: KindCmuxCreate, Path: Secret("/bin/true"), Env: muts}).Env
+	}
 
-	got := runner.buildEnv([]EnvMutation{ReplaceCmuxSocketPath("/resolved"), UnsetTmux()})
-
-	counts := map[string]int{}
-	for _, entry := range got {
-		counts[envKeyOf(entry)]++
-	}
-	if counts["CMUX_SOCKET_PATH"] != 1 {
-		t.Errorf("CMUX_SOCKET_PATH appears %d times, want exactly 1: %q", counts["CMUX_SOCKET_PATH"], got)
-	}
-	if counts["TMUX"] != 0 {
-		t.Errorf("TMUX survived the unset: %q", got)
-	}
-	joined := strings.Join(got, "\n")
-	for _, keep := range []string{"PATH=/usr/bin", "CMUX_AUTH_TOKEN=untouched", "BAREKEY", "CMUX_SOCKET_PATH=/resolved"} {
-		if !strings.Contains(joined, keep) {
-			t.Errorf("missing %q in %q", keep, got)
-		}
+	got := build(ReplaceCmuxSocketPath("/resolved"), UnsetTmux(), SetCmuxQuiet())
+	want := []string{"PATH=/usr/bin", "CMUX_AUTH_TOKEN=untouched", "BAREKEY", "CMUX_SOCKET_PATH=/resolved", "CMUX_QUIET=1"}
+	if !slices.Equal(got, want) {
+		t.Errorf("env = %q, want %q", got, want)
 	}
 
 	// The captured environment must not be mutated in place — a second call
 	// with no mutations still sees the original entries.
-	if plain := runner.buildEnv(nil); len(plain) != 6 {
+	if plain := build(); len(plain) != 6 {
 		t.Errorf("captured environment was mutated: %q", plain)
+	}
+	// An empty captured environment still yields a non-nil Env, or the child
+	// would inherit the live process environment.
+	if empty := (&OSSensitiveRunner{}).buildCmd(SensitiveCommand{Path: Secret("/bin/true")}).Env; empty == nil {
+		t.Error("an empty captured environment built a nil Env; the child would inherit the live environment")
 	}
 }
 

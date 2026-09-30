@@ -175,7 +175,10 @@ func listCompiledFiles(ctx context.Context) ([]moduleFile, error) {
 			}
 			// A package whose own directory is in the tree is in scope whatever
 			// its module fields say: in vendor mode a vendored package reports
-			// its Dir under vendor/ and no Module.Dir at all.
+			// its Dir under vendor/ and no Module.Dir at all. Keying on pkg.Dir
+			// under root can only over-include: a GOROOT or module cache inside
+			// the tree would pull their files in and fail loudly, never pass
+			// silently.
 			if !pkg.Module.inTree(root) && (pkg.Dir == "" || !underRoot(root, pkg.Dir)) {
 				continue
 			}
@@ -241,9 +244,14 @@ var hiddenSourceAllowed = map[string]bool{}
 //   - no "C" import outside cgoAllowed;
 //   - no compiled file that is not Go source.
 //
-// This is the interim guard; sealing the payload behind a package boundary
-// (forgectl#854) does not retire it, because a linkname reaches into an
-// internal package too.
+// Sealing the payload behind a package boundary (forgectl#854) is the primary
+// control: a payload's reveal is unexported inside
+// internal/exec/internal/sealed, which only internal/exec can import, so an
+// ordinary reveal anywhere else does not compile. This test is the backstop
+// for the ways around the compiler, which sealing does not retire: a
+// linkname reaches into an internal package too (to sealed.Command, or to
+// buildCmd), and unsafe reads a sealed.Value's closure as readily as it read
+// the old field.
 //
 // Mutations that turn it red, each with a package that imports it: a file
 // with `import _ "unsafe"` and `//go:linkname buildCmd
@@ -286,7 +294,7 @@ func TestNoFileReachesPastTheTypeSystem(t *testing.T) {
 			}
 		}
 		for _, line := range linknameLines(src) {
-			findings = append(findings, f.rel+":"+strconv.Itoa(line)+": a //go:linkname directive binds to any symbol, unexported or internal, so it can call buildCmd and read a payload")
+			findings = append(findings, f.rel+":"+strconv.Itoa(line)+": a //go:linkname directive binds to any symbol, unexported or internal, so it can call sealed.Command or buildCmd and read a payload")
 		}
 	}
 	for _, f := range findings {

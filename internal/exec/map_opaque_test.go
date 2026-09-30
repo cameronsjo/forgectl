@@ -1,31 +1,30 @@
 package exec
 
-import "testing"
+import (
+	"testing"
 
-// TestMapOpaque_RespellsOnceAndRefusesNonOpaque pins MapOpaque's promises. An
-// opaque argument comes back opaque, holding the transform of its payload,
-// with the transform run exactly once however often the result is revealed.
+	"github.com/cameronsjo/forgectl/internal/tmux/tmuxesc"
+)
+
+// TestMapOpaque_RespellsAndRefusesNonOpaque pins MapOpaque's promises. An
+// opaque argument comes back opaque, holding the transform of its payload.
 // Anything else, or the zero Transform, comes back as the zero Arg, which
-// validate refuses, so re-spelling a constant fails loudly.
+// validate refuses, so re-spelling a constant fails loudly. That the
+// transform runs exactly once however often the result is revealed is pinned
+// in sealed's own tests (TestMap_RunsTheTransformOnce), the only package that
+// can mint a counting Transform.
 //
-// Mutations that turn it red: return a unchanged for a non-opaque input (the
-// fixed and separator cases stay set), or return Arg{reveal: func() string {
-// return t.apply(a.reveal()) }, kind: argOpaque} (the transform runs on every
-// reveal).
-func TestMapOpaque_RespellsOnceAndRefusesNonOpaque(t *testing.T) {
-	calls := 0
-	counting := Transform{apply: func(s string) string {
-		calls++
-		return s + "!"
-	}}
-	got := MapOpaque(Opaque("/w/x#(y);"), counting)
-	if !got.Secret() || !got.Equal(Opaque("/w/x#(y);!")) {
+// Mutations that turn it red: drop the argOpaque check (the fixed and
+// separator cases stay set); return Arg{v: a.v, kind: argOpaque} (the payload
+// is not re-spelled).
+func TestMapOpaque_RespellsAndRefusesNonOpaque(t *testing.T) {
+	const payload = "/w/x#(y);"
+	got := MapOpaque(Opaque(payload), TmuxDirOperand())
+	if !got.Secret() || !got.Equal(Opaque(tmuxesc.DirOperand(payload))) {
 		t.Fatal("MapOpaque did not return an opaque argument holding the transformed payload")
 	}
-	_ = got.reveal()
-	_ = got.reveal()
-	if calls != 1 {
-		t.Fatalf("the transform ran %d times, want exactly once", calls)
+	if got.Equal(Opaque(payload)) {
+		t.Fatal("MapOpaque returned the payload unchanged")
 	}
 
 	for name, a := range map[string]Arg{
@@ -33,7 +32,7 @@ func TestMapOpaque_RespellsOnceAndRefusesNonOpaque(t *testing.T) {
 		"separator": EndOfOptions(),
 		"zero":      {},
 	} {
-		if MapOpaque(a, counting).set() {
+		if MapOpaque(a, TmuxDirOperand()).set() {
 			t.Errorf("MapOpaque(%s) is set; want the zero Arg validate refuses", name)
 		}
 	}

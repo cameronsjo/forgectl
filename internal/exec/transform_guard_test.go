@@ -32,7 +32,11 @@ var transformCallers = map[string]bool{
 
 // TestNoCallerCodeReceivesAnOpaquePayload keeps the sealed-payload promise
 // that buildCmd, FakeSensitiveRunner and backend.BootstrapCommand state: no
-// payload is handed to code outside this package. The in-package rules run
+// payload is handed to code outside this package. Since forgectl#854 the
+// compiler is the primary control (a payload sits in
+// internal/exec/internal/sealed, whose reveal nothing outside it can call),
+// and this test is the backstop that keeps the one sanctioned re-spelling
+// route, MapOpaque, to reviewed callers. The in-package rules run
 // on the type-checked package (TestExportedAPI,
 // TestTransformIsMintedOnlyInTransformGo); this one reads every Go file the
 // go tool compiles into the module (moduleCompiledFiles), tests included and
@@ -122,27 +126,32 @@ func execAlias(file *ast.File, report func(token.Pos, string)) string {
 	return ""
 }
 
-// TestTransformIsMintedOnlyInTransformGo keeps the Transform set closed: no
-// production file of internal/exec but transform.go may, on any platform in
-// guardPlatforms,
+// TestTransformIsMintedOnlyInTransformGo keeps every exec-side Transform
+// declared in transform.go: no production file of internal/exec but
+// transform.go may, on any platform in guardPlatforms,
 //
 //   - write a Transform composite literal with elements,
-//   - convert any value to Transform (which would mint one from an
-//     identical struct type holding an arbitrary func),
-//   - assign Transform.apply, or
-//   - take the address of Transform.apply (which would let the pointer's
-//     holder assign it later).
+//   - convert any value to Transform, or
+//   - assign or take the address of Transform.t.
 //
-// The API golden (TestExportedAPI) cannot see this, because minting inside
-// the package changes no signature.
+// Since forgectl#854 this is the backstop, not the control. The function a
+// Transform runs is sealed.Transform's unexported apply, which only a
+// constructor in internal/exec/internal/sealed can set, so minting a
+// Transform over an arbitrary function (Transform{apply: strings.ToUpper}
+// before the refactor) no longer compiles in this package at all, and a
+// conversion from a look-alike struct does not compile either, because an
+// unexported field name from another package is a different field. What this
+// test still keeps is tidiness the compiler does not: every exec-side
+// Transform names its sealed constructor in one file. The API golden
+// (TestExportedAPI) cannot see this, because minting inside the package
+// changes no signature.
 //
 // Mutations that turn it red, each written in sensitive.go:
 //
-//   - var t Transform; t.apply = strings.ToUpper     (minting by assignment)
-//   - Transform{apply: strings.ToUpper}              (minting by literal)
-//   - Transform(struct{ apply func(string) string }{strings.ToUpper})
-//     (minting by conversion)
-//   - p := &t.apply; *p = strings.ToUpper              (minting through a pointer)
+//   - var t Transform; t.t = sealed.TmuxDirOperand()  (minting by assignment)
+//   - Transform{t: sealed.TmuxDirOperand()}           (minting by literal)
+//   - Transform(struct{ t sealed.Transform }{})       (minting by conversion)
+//   - p := &t.t; *p = sealed.TmuxDirOperand()         (minting through a pointer)
 func TestTransformIsMintedOnlyInTransformGo(t *testing.T) {
 	for _, p := range guardPlatforms {
 		c := checkExecFor(t, p)
@@ -160,28 +169,28 @@ func mintingFindings(t *testing.T, c *checkedPackage) []string {
 	if !ok {
 		t.Fatal("internal/exec declares no Transform type")
 	}
-	var apply *types.Var
+	var field *types.Var
 	if st, ok := transform.Type().Underlying().(*types.Struct); ok {
 		for i := 0; i < st.NumFields(); i++ {
-			if st.Field(i).Name() == "apply" {
-				apply = st.Field(i)
+			if st.Field(i).Name() == "t" {
+				field = st.Field(i)
 			}
 		}
 	}
-	if apply == nil {
-		t.Fatal("Transform has no apply field; the minting rule would check nothing")
+	if field == nil {
+		t.Fatal("Transform has no t field; the minting rule would check nothing")
 	}
 	var findings []string
 	report := func(pos token.Pos, msg string) {
 		findings = append(findings, c.fset.Position(pos).String()+": "+msg+"; keep the closed set in transform.go")
 	}
-	isApply := func(e ast.Expr) bool {
+	isField := func(e ast.Expr) bool {
 		sel, ok := ast.Unparen(e).(*ast.SelectorExpr)
 		if !ok {
 			return false
 		}
 		s, ok := c.info.Selections[sel]
-		return ok && s.Obj() == apply
+		return ok && s.Obj() == field
 	}
 	for _, f := range c.files {
 		if filepath.Base(c.fset.Position(f.Pos()).Filename) == "transform.go" {
@@ -199,13 +208,13 @@ func mintingFindings(t *testing.T, c *checkedPackage) []string {
 				}
 			case *ast.AssignStmt:
 				for _, lhs := range node.Lhs {
-					if isApply(lhs) {
-						report(lhs.Pos(), "Transform.apply is assigned outside transform.go")
+					if isField(lhs) {
+						report(lhs.Pos(), "Transform.t is assigned outside transform.go")
 					}
 				}
 			case *ast.UnaryExpr:
-				if node.Op == token.AND && isApply(node.X) {
-					report(node.Pos(), "the address of Transform.apply is taken outside transform.go")
+				if node.Op == token.AND && isField(node.X) {
+					report(node.Pos(), "the address of Transform.t is taken outside transform.go")
 				}
 			}
 			return true
@@ -214,9 +223,12 @@ func mintingFindings(t *testing.T, c *checkedPackage) []string {
 	return findings
 }
 
-// TestTmuxescIsALeaf keeps internal/tmux/tmuxesc what transform.go relies on:
-// pure string escapes that hold no state and import nothing but strings, so
-// the payload MapOpaque hands them can go nowhere but the returned string.
+// TestTmuxescIsALeaf keeps internal/tmux/tmuxesc what sealed.Transform relies
+// on: pure string escapes that hold no state and import nothing but strings,
+// so the payload sealed.Value.Map hands them can go nowhere but the returned
+// string. Sealing cannot express this: tmuxesc is outside the sealed package
+// and receives a plaintext payload by design, so this test stays the control
+// for what an escape may do with it.
 // It reads every non-test .go file in the directory, whatever its build
 // constraint, so a file tagged for another platform is held to the same
 // rules:
