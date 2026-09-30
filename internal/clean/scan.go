@@ -48,11 +48,11 @@ package clean
 //       the root stays a best-effort skip
 
 import (
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -215,7 +215,7 @@ func Scan(opts ScanOptions) (Report, error) {
 			if !d.IsDir() {
 				// A regular file or a dangling symlink has nothing to walk;
 				// WalkDir would visit it once and report an empty tree.
-				return errors.New("not a directory")
+				return &fs.PathError{Op: "walk", Path: path, Err: syscall.ENOTDIR}
 			}
 			return nil
 		}

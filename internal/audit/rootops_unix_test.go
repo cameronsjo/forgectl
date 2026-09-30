@@ -1,4 +1,7 @@
-//go:build unix
+//go:build unix && !aix && !illumos && !solaris
+
+// aix, illumos and solaris are unix but have no syscall.Mkfifo, so this file
+// would not compile there. rootops_flags_test.go still pins both flags on them.
 
 package audit
 

@@ -16,7 +16,10 @@
 // Paths are reported in the caller's spelling of the root, made absolute but
 // never symlink-resolved, so Report.Root, every Finding.Path and Repo, and any
 // filepath.Rel a consumer takes against Root agree even when the root sits
-// under a symlinked parent (on macOS, anything under /var or /tmp).
+// under a symlinked parent (on macOS, anything under /var or /tmp). The
+// root is opened once, so a root symlink repointed mid-scan does not move the
+// walk, which finishes in the directory it opened; the reported paths then
+// carry a spelling that names the new target.
 package audit
 
 import (
@@ -319,7 +322,11 @@ func (s *scanner) classify(segs []string, repo string) (quarantine.Carrier, stri
 // only where quarantine would look behind it, and only when it can be a
 // directory:
 //   - the prefix must be anchored at the enclosing repo root, since every
-//     multi-segment entry is root-only (`pkg/.hidden` is not a position);
+//     multi-segment entry is root-only (`pkg/.hidden` is not a position).
+//     So a symlinked `.gemini` below a repo root, or outside any repo, is
+//     neither reported nor walked, while a real `.gemini/mcp.json` in the
+//     same place is reported as off-root. docs/commands/audit.md states this
+//     limit;
 //   - root.Stat must not show a non-directory or a missing target (`.env`,
 //     `.eslintrc`, a dangling link). A target outside the root cannot be
 //     stat'd without leaving it, so it stays reported: that is the escaping
