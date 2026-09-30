@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -408,8 +409,11 @@ func (w *Watcher) Run(ctx context.Context) {
 			// revealed it carries no markdown of its own, and the containing
 			// directory may itself have just been replaced.
 			wasPending := w.resetPending
+			// Decided before refreshWatch, which may change the watch set
+			// but never the filesystem the event came through.
+			stray := w.strayEvent(ev.Name)
 			w.refreshWatch(ev)
-			moved := w.dirMoved(ev)
+			moved := !stray && w.dirMoved(ev)
 			if moved {
 				// The moved tree's descendants keep their watches wherever
 				// it went, outside the root or into an excluded directory;
@@ -421,7 +425,7 @@ func (w *Watcher) Run(ctx context.Context) {
 			// by an event that is not otherwise relevant, so churn on other
 			// files cannot keep postponing it.
 			resetNeedsArming := w.resetPending && (!wasPending || settledC == nil)
-			if !w.relevant(ev.Name) && !moved && !resetNeedsArming {
+			if (stray || !w.relevant(ev.Name)) && !moved && !resetNeedsArming {
 				continue
 			}
 			if timer == nil {
@@ -546,6 +550,92 @@ func (w *Watcher) dirMoved(ev fsnotify.Event) bool {
 	}
 	_, ok := w.dirs[ev.Name]
 	return ok
+}
+
+// strayEvent reports whether an event reached the watcher through a watch
+// that is now bound outside the watched tree (forgectl#865). fsnotify names
+// an event by the path its watch was registered under, and on kqueue
+// (macOS, BSD) it also watches every entry of a watched directory itself,
+// listing and opening them by path with no O_NOFOLLOW. A directory swapped
+// for a symlink to an outside directory is then listed through the symlink,
+// and each outside entry gets a watch named inside the root
+// (root/a/<entry>) without any Add of ours. addVerified's checks cannot see
+// those watches, and relevant() is lexical, so a write to an outside
+// markdown file would drive a reload.
+//
+// So the event's containing directory is resolved as it is now. When that
+// resolves through a symlink to a directory the watcher would not watch
+// (outside every root, or under an excluded directory), the event is stray:
+// it neither reloads nor counts as a watched directory moving. A compat
+// symlink that leads elsewhere inside the root is not stray. The check
+// fails closed: a directory that cannot be resolved for any reason but its
+// own absence (a dangling symlink, a loop) counts as stray. A deleted
+// directory resolves through its deepest existing ancestor, so its events
+// still reload.
+//
+// It is a delivery-time check, so a directory swapped back between the event
+// and the check passes it. The stray watches themselves last until the next
+// full rebuild (replaceWatcher) or Close; fsnotify has no by-handle Remove.
+func (w *Watcher) strayEvent(name string) bool {
+	dir := filepath.Dir(name)
+	resolved, err := resolveNow(dir)
+	if err != nil {
+		return true
+	}
+	return resolved != dir && !w.watchableDir(resolved)
+}
+
+// resolveNow resolves every symlink in dir as the filesystem stands now. A
+// dir that does not exist resolves through its deepest existing ancestor,
+// with the missing tail joined back on. Any other failure is an error,
+// including a component that exists but resolves nowhere (a dangling
+// symlink).
+func resolveNow(dir string) (string, error) {
+	tail := ""
+	for p := dir; ; {
+		resolved, err := filepath.EvalSymlinks(p)
+		if err == nil {
+			return filepath.Join(resolved, tail), nil
+		}
+		if _, lerr := os.Lstat(p); !errors.Is(err, fs.ErrNotExist) || !errors.Is(lerr, fs.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return "", err
+		}
+		tail = filepath.Join(filepath.Base(p), tail)
+		p = parent
+	}
+}
+
+// watchableDir reports whether dir, a resolved directory path, is one the
+// watcher would watch: a root, or below a directory root with no excluded
+// component. It decides as relevant() does, lexically against the
+// canonical root paths.
+func (w *Watcher) watchableDir(dir string) bool {
+	for _, root := range w.store.Current().Roots() {
+		if !withinRoot(root.Path, dir) {
+			continue
+		}
+		if root.OnlyFile != "" {
+			return dir == root.Path
+		}
+		rel, err := filepath.Rel(root.Path, dir)
+		if err != nil {
+			return false
+		}
+		if rel == "." {
+			return true
+		}
+		for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
+			if excludedDir(seg) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // relevant reports whether an event path should trigger a reload.

@@ -29,6 +29,13 @@ package docs
 //   [x] A pending rebuild walks every root once, and still watches a root
 //              replaced since the last index
 //   [x] Churn on non-markdown files does not postpone a pending rebuild
+//   [x] Unhappy: an event named inside the root but delivered through a
+//              directory now resolving outside it (kqueue's own entry
+//              watches after a swap, forgectl#865) does not reload, nor
+//              count as a watched directory moving; fails closed on a
+//              dangling symlink
+//   [x] Happy: an event through an in-root compat symlink, or under a
+//              directory deleted since, still reloads
 
 import (
 	"context"
@@ -117,8 +124,18 @@ func requireWatched(t *testing.T, w *Watcher, paths ...string) {
 // link's name while binding it to the target, so the list alone cannot say
 // what is watched there. The control write proves the watches were live, so
 // silence about quiet is evidence and not a dead watcher.
+//
+// It first syncs with fsnotify's reaction to the swap (syncWithWatch), so
+// the probe is written only after that reaction is over. On kqueue that
+// reaction lists the swapped name through its new symlink and watches the
+// outside entries it finds under in-root names; a probe created while it
+// ran could be watched that way and report a write (forgectl#865). The
+// watcher drops such events at delivery (strayEvent); this check is about
+// the watch set, so it keeps the probe out of that race rather than
+// tolerating the event.
 func requireNoEventFrom(t *testing.T, w *Watcher, quiet, control string) {
 	t.Helper()
+	syncWithWatch(t, w, "sync-"+filepath.Base(control))
 	writeFile(t, quiet, "# Quiet\n")
 	writeFile(t, control, "# Control\n")
 	var sawControl bool
@@ -141,6 +158,33 @@ func requireNoEventFrom(t *testing.T, w *Watcher, quiet, control string) {
 				t.Fatalf("no event for the control write %s within %s; the watches were not live, so no silence proves anything", control, recvTimeout)
 			}
 			return
+		}
+	}
+}
+
+// syncWithWatch writes name into every root and reads the watcher's raw
+// event channel until an event names it in each, failing after recvTimeout.
+// Every swap in these tests changes an entry of a root, which fsnotify
+// handles on the root's own watch: its events from before the sync write
+// are delivered first, or are coalesced with it and handled in the same
+// pass (kqueue lists the directory once for both). So once the sync file's
+// event arrives, fsnotify has finished reacting to the swap. The watcher
+// must not be running.
+func syncWithWatch(t *testing.T, w *Watcher, name string) {
+	t.Helper()
+	pending := map[string]bool{}
+	for _, root := range w.store.Current().Roots() {
+		p := filepath.Join(root.Path, name)
+		writeFile(t, p, "sync\n")
+		pending[p] = true
+	}
+	deadline := time.After(recvTimeout)
+	for len(pending) > 0 {
+		select {
+		case ev := <-w.fsw.Events:
+			delete(pending, ev.Name)
+		case <-deadline:
+			t.Fatalf("no event for the sync write %s within %s", name, recvTimeout)
 		}
 	}
 }
@@ -590,13 +634,21 @@ func TestWatcherRun_RepeatedReset_BacksOff(t *testing.T) {
 	w.debounce = testDebounce
 	sub, unsubscribe := broker.Subscribe()
 	ctx, cancel := context.WithCancel(context.Background())
+	// Run must have returned before setWatchHook's cleanup restores the
+	// hook: cancel alone does not wait, and a reload still walking would
+	// read the hook as it is restored (a data race under -race).
+	runDone := make(chan struct{})
 	t.Cleanup(func() {
 		cancel()
+		<-runDone
 		unsubscribe()
 		broker.Close()
 		_ = w.Close()
 	})
-	go w.Run(ctx)
+	go func() {
+		defer close(runDone)
+		w.Run(ctx)
+	}()
 
 	// 20 ms doubling from 40 ms: a reload at about 20, 60, 140, 300, 620 and
 	// 1260 ms, so about six in the window, plus any the swap's own events
@@ -707,4 +759,132 @@ func TestWatcherRun_IrrelevantChurn_DoesNotPostponeReset(t *testing.T) {
 			t.Fatal("no reload during 2s of churn on a non-markdown file; each event postponed the pending rebuild")
 		}
 	}
+}
+
+// startWatcher runs w with the test debounce and returns a reload
+// subscription; the watcher stops with the test.
+func startWatcher(t *testing.T, w *Watcher) <-chan string {
+	t.Helper()
+	w.debounce = testDebounce
+	sub, unsubscribe := w.broker.Subscribe()
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		<-runDone
+		unsubscribe()
+		w.broker.Close()
+	})
+	go func() {
+		defer close(runDone)
+		w.Run(ctx)
+	}()
+	return sub
+}
+
+// injectEvent hands ev to the running watcher as though fsnotify had
+// delivered it. It stands in for kqueue, which (unlike inotify) names an
+// outside file's write under an in-root path after a directory swap
+// (forgectl#865), so the delivery-time filter is exercised on every
+// platform.
+func injectEvent(t *testing.T, w *Watcher, ev fsnotify.Event) {
+	t.Helper()
+	w.mu.Lock()
+	events := w.fsw.Events
+	w.mu.Unlock()
+	select {
+	case events <- ev:
+	case <-time.After(recvTimeout):
+		t.Fatalf("the watcher did not take the injected event %v within %s", ev, recvTimeout)
+	}
+}
+
+// requireNoReload fails if a reload arrives within quietWindow.
+func requireNoReload(t *testing.T, sub <-chan string, what string) {
+	t.Helper()
+	select {
+	case <-sub:
+		t.Fatalf("a reload followed %s", what)
+	case <-time.After(quietWindow):
+	}
+}
+
+// An event named inside the root whose directory now resolves, through a
+// swapped-in symlink, outside every root or into an excluded directory is
+// what kqueue delivers for an outside file after the swap (forgectl#865).
+// It must not reload. An event through a compat symlink that stays inside
+// the root, and one under a directory deleted since, still reload.
+//
+// Mutation that turns it red: drop the stray term from Run's relevance
+// gate (the outside and excluded rows reload); make strayEvent true for
+// any symlinked directory (the compat row goes silent); make resolveNow
+// fail on a missing directory (the deleted row goes silent); or make
+// strayEvent return false on a resolution error (the dangling row
+// reloads); or let watchableDir accept an excluded component (the vendored
+// row reloads).
+func TestWatcherRun_EventThroughSwappedDir_DoesNotReload(t *testing.T) {
+	root, outside := swapFixture(t)
+	for _, d := range []string{"c", "node_modules/pkg"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o750); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+	}
+	w := newUnstartedWatcher(t, root)
+	a := filepath.Join(root, "a")
+	swapForSymlink(t, a, outside)
+	for link, target := range map[string]string{
+		"compat":   filepath.Join(root, "c"),
+		"vendored": filepath.Join(root, "node_modules", "pkg"),
+		"dangling": filepath.Join(outside, "gone"),
+	} {
+		if err := os.Symlink(target, filepath.Join(root, link)); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+	}
+	writeFile(t, filepath.Join(outside, "secret.md"), "# Secret\n")
+	writeFile(t, filepath.Join(root, "c", "doc.md"), "# Doc\n")
+	writeFile(t, filepath.Join(root, "node_modules", "pkg", "doc.md"), "# Doc\n")
+	syncWithWatch(t, w, "sync")
+	sub := startWatcher(t, w)
+	drainReloads(sub)
+
+	for _, name := range []string{
+		filepath.Join(a, "secret.md"),
+		filepath.Join(root, "vendored", "doc.md"),
+		filepath.Join(root, "dangling", "doc.md"),
+	} {
+		injectEvent(t, w, fsnotify.Event{Name: name, Op: fsnotify.Write})
+		requireNoReload(t, sub, "a write event named "+name)
+	}
+
+	// CONTROLS: the gate still passes events it must.
+	injectEvent(t, w, fsnotify.Event{Name: filepath.Join(root, "compat", "doc.md"), Op: fsnotify.Write})
+	awaitReload(t, sub, "a write through a compat symlink inside the root")
+	drainReloads(sub)
+	injectEvent(t, w, fsnotify.Event{Name: filepath.Join(root, "gone", "deeper", "doc.md"), Op: fsnotify.Remove})
+	awaitReload(t, sub, "a remove under a directory deleted since")
+}
+
+// A Rename naming a directory the watcher watched, delivered through a
+// directory that now resolves outside the root, is not a watched directory
+// moving: it must not drive the reload a move does.
+//
+// Mutation that turns it red: compute moved without the stray gate in Run.
+func TestWatcherRun_StrayRename_IsNotAMove(t *testing.T) {
+	root, outside := swapFixture(t)
+	if err := os.MkdirAll(filepath.Join(root, "a", "sub"), 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	w := newUnstartedWatcher(t, root)
+	sub := filepath.Join(root, "a", "sub")
+	requireWatched(t, w, sub)
+	swapForSymlink(t, filepath.Join(root, "a"), outside)
+	// Consume the swap's own events before Run starts: root/a's Rename is a
+	// real move and would rebuild the watches, and the dirs entry for
+	// root/a/sub with them.
+	syncWithWatch(t, w, "sync")
+	reloads := startWatcher(t, w)
+
+	injectEvent(t, w, fsnotify.Event{Name: sub, Op: fsnotify.Rename})
+	requireNoReload(t, reloads, "a Rename delivered through a swapped directory")
 }
