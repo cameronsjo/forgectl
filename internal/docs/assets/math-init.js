@@ -53,39 +53,86 @@
   // \left…\right and the \begingroup/\bgroup forms together: each nests the
   // output a level deeper (nested matrices crash with no brace nesting at
   // all), and they can be mixed to dodge a per-kind count.
+  //
+  // MAX_CELLS bounds the alignment separators, & and \\, a formula may hold
+  // (forgectl#690). Each one opens a cell, a macro-free source can hold
+  // thousands of them, and a cell costs a dozen or more nodes even when it
+  // is empty: an empty matrix row of 9,900 & builds about 170,000 nodes, in
+  // about 2 s, before tooBig can reject it. 2,000 cells is a 40 × 50
+  // matrix, far past any written by hand, and builds at most about 35,000
+  // nodes, under MAX_NODES.
   var MAX_SOURCE = 10000;
   var MAX_DEPTH = 100;
+  var MAX_CELLS = 2000;
 
-  // tooComplex reports whether src is over MAX_SOURCE characters or nests
-  // deeper than MAX_DEPTH. An escaped brace (\{, \}) is a literal, a
-  // control symbol (\\, \$, …) consumes the one character after it, and a
-  // % comment runs to the end of its line, as KaTeX reads them. A closer
-  // never takes the depth below zero, so surplus closers cannot bank credit
-  // for later openers.
+  // LINE_END matches the characters that end a line for KaTeX's lexer, whose
+  // \verb match uses ".", which stops at each of them.
+  var LINE_END = /[\n\r\u2028\u2029]/;
+
+  // verbEnd returns the index of the delimiter that closes a \verb whose
+  // delimiter is at src[k], or -1 when KaTeX would not lex it as \verb. It
+  // follows KaTeX's lexer: \verb*<d>…<d> takes any <d>; plain \verb<d>…<d>
+  // takes any <d> but * and an ASCII letter (@ included); the body is the
+  // shortest run to the next <d> that does not cross a line end.
+  function verbEnd(src, k, star) {
+    if (k >= src.length) { return -1; }
+    var d = src.charAt(k);
+    if (!star && (d === "*" || /[A-Za-z]/.test(d))) { return -1; }
+    for (var m = k + 1; m < src.length; m++) {
+      var ch = src.charAt(m);
+      if (ch === d) { return m; }
+      if (LINE_END.test(ch)) { return -1; }
+    }
+    return -1;
+  }
+
+  // tooComplex reports whether src is over MAX_SOURCE characters, nests
+  // deeper than MAX_DEPTH, or holds more than MAX_CELLS & and \\. An escaped
+  // brace (\{, \}) is a literal, a control symbol (\\, \$, …) consumes the
+  // one character after it, a % comment runs to the end of its line, and
+  // \verb<d>…<d> is one opaque token, as KaTeX reads them. The \verb rule
+  // is what keeps a % inside it (\verb|%|) from reading as a comment that
+  // hides the openers after it (forgectl#690). A \verb KaTeX would not lex
+  // (no closing delimiter on its line) is scanned as ordinary text, which can
+  // only count more. A closer never takes the depth below zero, so surplus
+  // closers cannot bank credit for later openers.
   function tooComplex(src) {
     if (src.length > MAX_SOURCE) { return true; }
     var depth = 0;
+    var cells = 0;
     for (var i = 0; i < src.length; i++) {
       var c = src.charAt(i);
       if (c === "{") {
         depth++;
       } else if (c === "}") {
         depth = Math.max(0, depth - 1);
+      } else if (c === "&") {
+        cells++;
       } else if (c === "%") {
         while (i + 1 < src.length && src.charAt(i + 1) !== "\n") { i++; }
       } else if (c === "\\") {
         var j = i + 1;
         while (j < src.length && /[A-Za-z]/.test(src.charAt(j))) { j++; }
         var name = src.slice(i + 1, j);
+        if (name === "verb") {
+          var star = src.charAt(j) === "*";
+          var end = verbEnd(src, star ? j + 1 : j, star);
+          if (end >= 0) {
+            i = end;
+            continue;
+          }
+        }
         if (name === "begin" || name === "left" || name === "begingroup" || name === "bgroup") {
           depth++;
         } else if (name === "end" || name === "right" || name === "endgroup" || name === "egroup") {
           depth = Math.max(0, depth - 1);
+        } else if (name === "" && src.charAt(j) === "\\") {
+          cells++;
         }
         // A command name ends before j; a control symbol is one character.
         i = name === "" ? i + 1 : j - 1;
       }
-      if (depth > MAX_DEPTH) { return true; }
+      if (depth > MAX_DEPTH || cells > MAX_CELLS) { return true; }
     }
     return false;
   }
@@ -120,9 +167,7 @@
   // takes 2 to 3 s to lay out at 250 levels and 19 s at 491, and the cost
   // is paid again on every theme toggle (forgectl#675). Each \frac level is
   // 7 DOM levels, so 34 nested fractions render and 35 do not. MAX_NODES
-  // bounds how much output a formula can build. A macro-free source under
-  // MAX_SOURCE can still pass it: an empty matrix row of 9,900 & builds
-  // about 170,000 nodes, in about 2 s.
+  // bounds how much output a formula can build.
   var MAX_DOM_DEPTH = 250;
   var MAX_NODES = 100000;
 

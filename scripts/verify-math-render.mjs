@@ -28,8 +28,11 @@
 //   - the DOM bound: output at most 250 levels deep renders (for \frac,
 //     pmatrix, \boxed and subscripts nested to just under it), and output
 //     past it is left as TeX source;
-//   - the node bound: a macro-free empty matrix row that builds more than
-//     100,000 nodes is left as TeX source;
+//   - the cell bound: more than 2,000 & or \\ is left as TeX source before
+//     KaTeX runs (forgectl#690);
+//   - \verb<d>…<d> is opaque to the source scan, so \verb|%| cannot hide
+//     the openers after it, and braces inside \verb are not nesting
+//     (forgectl#690);
 //   - maxExpand is 500 (250 \dots render, 251 do not), and maxSize caps
 //     \rule{100000em}{…} at 500em.
 //
@@ -90,7 +93,10 @@ const DEFINES_MACRO = 'Not rendered: this formula defines a macro (\\def, \\newc
 // TeX source, .math-skipped), 'error' (a KaTeX parse error whose message
 // includes the fixture's `error`) or 'none' (no .math element at all). A skipped
 // fixture's `title` is the tooltip it must carry, and `maxMs` bounds the
-// time from navigation to the render finishing. Fixtures
+// time from navigation to the render finishing. `builds` is the exact
+// number of katex.render calls the page load makes, counted by wrapping
+// katex.render before the bundle runs: 0 means the pre-scan rejected every
+// formula without building it. Fixtures
 // live in a vault root, because single-dollar inline math is recognized
 // only there (forgectl#600); `root: 'docs'` puts one in a plain docs root.
 const fixtures = {
@@ -202,12 +208,67 @@ const fixtures = {
     want: 'rendered',
     minDepth: 240,
   },
-  // The node bound without macros: an empty matrix row of 6,500 & builds
-  // about 110,000 nodes from 6,526 characters.
+  // An empty matrix row of 6,500 & would build about 110,000 nodes from
+  // 6,526 characters; the cell bound now rejects it before KaTeX runs.
   'nodes-over-cap.md': {
     body: '$$\\begin{matrix}' + rep('&', 6500) + '\\end{matrix}$$\n',
     want: 'skipped',
     title: TOO_COMPLEX,
+    builds: 0,
+  },
+  // The cell bound (forgectl#690): 2,000 & or \\ render, one more is left
+  // as source before KaTeX builds anything. On origin/main, 9,900 & built
+  // about 170,000 nodes, for about 2 s, before the node bound rejected it.
+  'cells-at-cap.md': {
+    body: '$$\\begin{matrix}' + rep('&', 2000) + '\\end{matrix}$$\n',
+    want: 'rendered',
+    builds: 1,
+  },
+  'cells-over-cap.md': {
+    body: '$$\\begin{matrix}' + rep('&', 2001) + '\\end{matrix}$$\n',
+    want: 'skipped',
+    title: TOO_COMPLEX,
+    builds: 0,
+  },
+  'rows-over-cap.md': {
+    body: '$$\\begin{matrix}' + rep('x\\\\', 2001) + '\\end{matrix}$$\n',
+    want: 'skipped',
+    title: TOO_COMPLEX,
+    builds: 0,
+  },
+  // An escaped \& is a literal, not a cell.
+  'escaped-amp.md': {
+    body: '$' + rep('\\&', 2500) + '$\n',
+    want: 'rendered',
+    builds: 1,
+  },
+  // \verb|%| is one token to KaTeX, so the % is not a comment and the
+  // openers after it are live (forgectl#690). A scan that read the % as a
+  // comment saw no nesting and let KaTeX build and lay out 240 levels.
+  'verb-hides-openers.md': {
+    body: '$$\\verb|%|' + rep('{', 240) + 'x' + rep('}', 240) + '$$\n',
+    want: 'skipped',
+    title: TOO_COMPLEX,
+    builds: 0,
+  },
+  'verb-star-hides-openers.md': {
+    body: '$$\\verb*|%|' + rep('{', 240) + 'x' + rep('}', 240) + '$$\n',
+    want: 'skipped',
+    title: TOO_COMPLEX,
+    builds: 0,
+  },
+  // \verb* takes any delimiter, a letter included.
+  'verb-star-letter.md': {
+    body: '$$\\verb*a%a' + rep('{', 240) + 'x' + rep('}', 240) + '$$\n',
+    want: 'skipped',
+    title: TOO_COMPLEX,
+    builds: 0,
+  },
+  // Braces inside \verb are literal text, so they are not nesting.
+  'verb-braces.md': {
+    body: '$\\verb|' + rep('{', 150) + '|$\n',
+    want: 'rendered',
+    builds: 1,
   },
   // A formula that defines a macro is skipped before KaTeX runs
   // (forgectl#675). The multiplier: 445 expansions, under maxExpand, and
@@ -305,6 +366,20 @@ for (const [name, f] of Object.entries(fixtures)) {
   const page = await browser.newPage();
   let crashed = false;
   page.on('crash', () => { crashed = true; });
+  // Count katex.render calls: wrap it as the bundle assigns window.katex.
+  await page.addInitScript(() => {
+    window.__katexBuilds = 0;
+    let k;
+    Object.defineProperty(window, 'katex', {
+      configurable: true,
+      get() { return k; },
+      set(v) {
+        const render = v.render;
+        v.render = function () { window.__katexBuilds++; return render.apply(this, arguments); };
+        k = v;
+      },
+    });
+  });
   try {
     const start = Date.now();
     // Never 'networkidle': the live-reload SSE stream never goes idle.
@@ -312,6 +387,8 @@ for (const [name, f] of Object.entries(fixtures)) {
     await page.waitForFunction(() => window.ForgectlMath !== undefined, null, { timeout: 10000 });
     const elapsed = Date.now() - start;
     if (f.maxMs && elapsed > f.maxMs) problems.push(`${name}: took ${elapsed} ms, want at most ${f.maxMs}`);
+    const builds = await page.evaluate(() => window.__katexBuilds);
+    if (f.builds !== undefined && builds !== f.builds) problems.push(`${name}: KaTeX built ${builds} time(s), want ${f.builds}`);
     const r = await page.evaluate(() => [...document.querySelectorAll('.math')].map((el) => {
       const katexEl = el.querySelector('.katex');
       const errorEl = el.querySelector('.katex-error');
