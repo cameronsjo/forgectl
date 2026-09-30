@@ -183,7 +183,7 @@ func trySurfaceExec(ctx context.Context, argv []string, rt trampolineRuntime) (h
 //
 // It is equally deliberately narrower than "argv contains _exec anywhere". The
 // leading `surface` is what keeps the launch passthrough intact: `forgectl
-// launch -p _exec` forwards an operator's prompt to claude byte-clean, and a
+// launch -p _exec` forwards an operator's prompt to claude verbatim, and a
 // classifier that claimed it would break an ordinary launch to defend a token
 // that is only reserved under `surface`.
 func isBootstrapCandidate(argv []string) bool {

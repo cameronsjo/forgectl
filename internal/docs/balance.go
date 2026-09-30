@@ -46,8 +46,10 @@ import (
 // Anything else is replaced by that tree re-serialized, which is balanced by
 // construction, and re-sanitized: re-serializing is a parse-and-render round
 // trip, the classic mutation-XSS shape, so the bytes served are once again
-// the sanitizer's output. Only a document whose HTML was not well nested
-// changes, and it changes into what a browser would have built from it.
+// the sanitizer's output. Only a document whose HTML was not well nested,
+// or that holds an SVG-only element in HTML content, changes: the first into
+// what a browser would have built from it, the second with that element
+// unwrapped and its content kept.
 //
 // It runs after the sanitizer and BEFORE transformCallouts. The callout
 // rewrite is balance-preserving by construction — it swaps a real
@@ -400,7 +402,10 @@ var voidElements = map[string]bool{
 // <select>, <template>, the other scope-stopping <object>, <applet> and
 // <marquee>, and the raw-text elements (script, style, textarea, title and
 // the like) — are dropped with their content kept, escaped where it is raw
-// text; the policy allows none of them.
+// text; the policy allows none of them. An SVG-only element name (every
+// svgElements name but svg) in HTML content is dropped with its content
+// kept too, start and end tag both, as balancePasses unwraps it
+// (cameronsjo/forgectl#619).
 //
 // It is linear in the input: each element is pushed and popped once, and an
 // end tag with no element of its name is dropped on a count lookup rather
