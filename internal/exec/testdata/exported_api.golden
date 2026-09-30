@@ -1,0 +1,248 @@
+file internal/exec/capture.go build=any
+file internal/exec/exec.go build=any
+file internal/exec/fake.go build=any
+file internal/exec/mask.go build=any
+file internal/exec/opaque.go build=any
+file internal/exec/sensitive.go build=any
+file internal/exec/sensitive_fake.go build=any
+file internal/exec/sensitive_run.go build=any
+file internal/exec/streaming.go build=any
+file internal/exec/transform.go build=any
+file internal/tmux/tmuxesc/tmuxesc.go build=any
+const CaptureCmuxWorkspaceList CaptureMode
+const CaptureRaw CaptureMode
+const EnvSopsNonce untyped string
+const EnvSopsPath untyped string
+const EnvSopsWorkdir untyped string
+const KindCmuxCleanup CommandKind
+const KindCmuxCreate CommandKind
+const KindCmuxProbe CommandKind
+const KindCmuxReadiness CommandKind
+const KindCmuxReconcile CommandKind
+const KindCmuxSnapshot CommandKind
+const KindHerdrCleanup CommandKind
+const KindHerdrCreate CommandKind
+const KindHerdrProbe CommandKind
+const KindHerdrReadiness CommandKind
+const KindHerdrReconcile CommandKind
+const KindHerdrSnapshot CommandKind
+const KindSopsEdit CommandKind
+const KindSopsExtract CommandKind
+const KindTmuxCleanup CommandKind
+const KindTmuxCreate CommandKind
+const KindTmuxProbe CommandKind
+const KindTmuxReadiness CommandKind
+const KindTmuxReconcile CommandKind
+const KindTmuxSnapshot CommandKind
+const KindUnspecified CommandKind
+const MaxOutputBytes int64
+const OutcomeCanceled Outcome
+const OutcomeExit Outcome
+const OutcomeInvalid Outcome
+const OutcomeOutputLimit Outcome
+const OutcomeStartFailed Outcome
+const OutcomeTimeout Outcome
+const OutcomeUnspecified Outcome
+const OutputComplete OutputCause
+const OutputOverflowed OutputCause
+const OutputRetired OutputCause
+const Redacted untyped string
+func BoundedOutputForTest(data []byte, cause OutputCause) BoundedOutput
+func EndOfOptions() Arg
+func MapOpaque(a Arg, t Transform) Arg
+func MustFixed(v constantArg) Arg
+func NewOSSensitiveRunner() *OSSensitiveRunner
+func Opaque(v string) Arg
+func ReplaceCmuxSocketPath(path string) EnvMutation
+func ReplaceHerdrConfigPath(path string) EnvMutation
+func ReplaceSopsEditor(command string) EnvMutation
+func ReplaceSopsNonce(nonce string) EnvMutation
+func ReplaceSopsPath(path string) EnvMutation
+func ReplaceSopsTmpdir(path string) EnvMutation
+func ReplaceSopsWorkdir(path string) EnvMutation
+func Secret(v string) SecretArg
+func SensitiveErrorForTest(kind CommandKind, outcome Outcome) *SensitiveError
+func SetCmuxQuiet() EnvMutation
+func TmuxDirOperand() Transform
+func UnsetTmux() EnvMutation
+func WithMaskedAssignments(ctx context.Context, entries []string) context.Context
+func WithOpaqueArgs(ctx context.Context, from int, n int) context.Context
+func WithoutOutput(err error) error
+method (*CommandError) Error() string
+method (*CommandError) Unwrap() error
+method (*FakeRunner) Last() Call
+method (*FakeRunner) Run(_ context.Context, name string, args ...string) (string, error)
+method (*FakeRunner) RunInteractive(_ context.Context, name string, args ...string) error
+method (*FakeRunner) RunWithEnv(_ context.Context, env map[string]string, name string, args ...string) (string, error)
+method (*FakeRunner) RunWithEnvFiltered(_ context.Context, env map[string]string, unset []string, name string, args ...string) (string, error)
+method (*FakeRunner) RunWithInput(_ context.Context, stdin string, name string, args ...string) (string, error)
+method (*FakeSensitiveRunner) Calls() []SensitiveCommand
+method (*FakeSensitiveRunner) Last() (SensitiveCommand, bool)
+method (*FakeSensitiveRunner) RunSensitive(ctx context.Context, cmd SensitiveCommand) (SensitiveResult, error)
+method (*OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveCommand) (SensitiveResult, error)
+method (*OSSensitiveRunner) StartedCount() int64
+method (*OSSensitiveRunner) awaitOutcome(ctx context.Context, waitCh chan error, overflow chan struct{}, kill func()) (Outcome, error)
+method (*OSSensitiveRunner) bound() time.Duration
+method (*OSSensitiveRunner) buildCmd(sc SensitiveCommand) *os/exec.Cmd
+method (*OSSensitiveRunner) buildEnv(muts []EnvMutation) []string
+method (*OSSensitiveRunner) drainBound() time.Duration
+method (*OSSensitiveRunner) retire(stopped bool, kind CommandKind, outR *os.File, errR *os.File, outCh <-chan BoundedOutput, errCh <-chan BoundedOutput) (BoundedOutput, BoundedOutput)
+method (*SensitiveError) Error() string
+method (*SensitiveError) Format(f fmt.State, verb rune)
+method (*SensitiveError) GoString() string
+method (*SensitiveError) LogValue() log/slog.Value
+method (*SensitiveError) MarshalJSON() ([]byte, error)
+method (*SensitiveError) MarshalText() ([]byte, error)
+method (*SensitiveError) Unwrap() error
+method (*ceilingWriter) Write(p []byte) (int, error)
+method (*onceCloser) close()
+method (*streamPipes) closeAll()
+method (*streamPipes) closeChildEnds()
+method (*streamPipes) drain(ctx context.Context, grace time.Duration) (cut bool, err error)
+method (*streamPipes) output(w io.Writer) (io.Writer, error)
+method (*streamPipes) startCopies()
+method (*streamPipes) wire(cmd *os/exec.Cmd, stdin io.Reader, stdout io.Writer, stderr io.Writer) error
+method (*tailBuffer) Write(p []byte) (int, error)
+method (*tailBuffer) tail() ([]byte, int64)
+method (Arg) Equal(other Arg) bool
+method (Arg) Format(f fmt.State, verb rune)
+method (Arg) GoString() string
+method (Arg) LogValue() log/slog.Value
+method (Arg) MarshalJSON() ([]byte, error)
+method (Arg) MarshalText() ([]byte, error)
+method (Arg) Secret() bool
+method (Arg) String() string
+method (Arg) set() bool
+method (BoundedOutput) Complete() bool
+method (BoundedOutput) CopyBytesForParse() (data []byte, complete bool)
+method (BoundedOutput) Format(f fmt.State, verb rune)
+method (BoundedOutput) GoString() string
+method (BoundedOutput) Len() int
+method (BoundedOutput) LogValue() log/slog.Value
+method (BoundedOutput) MarshalJSON() ([]byte, error)
+method (BoundedOutput) MarshalText() ([]byte, error)
+method (BoundedOutput) String() string
+method (CaptureMode) String() string
+method (CaptureMode) valid() bool
+method (CommandKind) String() string
+method (CommandKind) Valid() bool
+method (EnvMutation) Equal(other EnvMutation) bool
+method (EnvMutation) Format(f fmt.State, verb rune)
+method (EnvMutation) GoString() string
+method (EnvMutation) LogValue() log/slog.Value
+method (EnvMutation) MarshalJSON() ([]byte, error)
+method (EnvMutation) MarshalText() ([]byte, error)
+method (EnvMutation) String() string
+method (EnvMutation) valid() bool
+method (OSRunner) Run(ctx context.Context, name string, args ...string) (string, error)
+method (OSRunner) RunDiscardingStdout(ctx context.Context, name string, args ...string) error
+method (OSRunner) RunInteractive(ctx context.Context, name string, args ...string) error
+method (OSRunner) RunStreaming(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, name string, args ...string) error
+method (OSRunner) RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (string, error)
+method (OSRunner) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error)
+method (OSRunner) RunWithInput(ctx context.Context, stdin string, name string, args ...string) (string, error)
+method (OSRunner) ceiling() int
+method (Outcome) String() string
+method (SecretArg) Equal(other SecretArg) bool
+method (SecretArg) Format(f fmt.State, verb rune)
+method (SecretArg) GoString() string
+method (SecretArg) LogValue() log/slog.Value
+method (SecretArg) MarshalJSON() ([]byte, error)
+method (SecretArg) MarshalText() ([]byte, error)
+method (SecretArg) String() string
+method (SecretArg) present() bool
+method (SecretArg) set() bool
+method (SensitiveCommand) Equal(other SensitiveCommand) bool
+method (SensitiveCommand) Format(f fmt.State, verb rune)
+method (SensitiveCommand) GoString() string
+method (SensitiveCommand) LogValue() log/slog.Value
+method (SensitiveCommand) MarshalJSON() ([]byte, error)
+method (SensitiveCommand) MarshalText() ([]byte, error)
+method (SensitiveCommand) String() string
+method (SensitiveCommand) validate() error
+method (SensitiveResult) Format(f fmt.State, verb rune)
+method (SensitiveResult) GoString() string
+method (SensitiveResult) LogValue() log/slog.Value
+method (SensitiveResult) MarshalJSON() ([]byte, error)
+method (SensitiveResult) MarshalText() ([]byte, error)
+method (SensitiveResult) String() string
+method (argMask) args(args []string) []string
+method (argMask) cover(s string) bitset
+method (argMask) runShown(run string) string
+method (argMask) sorted() argMask
+method (argMask) straddleLen(s string) int
+method (argMask) text(s string) string
+method (argMask) withValues(values []string) argMask
+method (bitset) has(i int) bool
+method (bitset) set(from int, to int)
+method (onceCloser) Chdir() error
+method (onceCloser) Chmod(mode os.FileMode) error
+method (onceCloser) Chown(uid int, gid int) error
+method (onceCloser) Close() error
+method (onceCloser) Fd() uintptr
+method (onceCloser) Name() string
+method (onceCloser) Read(b []byte) (n int, err error)
+method (onceCloser) ReadAt(b []byte, off int64) (n int, err error)
+method (onceCloser) ReadDir(n int) ([]os.DirEntry, error)
+method (onceCloser) ReadFrom(r io.Reader) (n int64, err error)
+method (onceCloser) Readdir(n int) ([]os.FileInfo, error)
+method (onceCloser) Readdirnames(n int) (names []string, err error)
+method (onceCloser) Seek(offset int64, whence int) (ret int64, err error)
+method (onceCloser) SetDeadline(t time.Time) error
+method (onceCloser) SetReadDeadline(t time.Time) error
+method (onceCloser) SetWriteDeadline(t time.Time) error
+method (onceCloser) Stat() (os.FileInfo, error)
+method (onceCloser) Sync() error
+method (onceCloser) SyscallConn() (syscall.RawConn, error)
+method (onceCloser) Truncate(size int64) error
+method (onceCloser) Write(b []byte) (n int, err error)
+method (onceCloser) WriteAt(b []byte, off int64) (n int, err error)
+method (onceCloser) WriteString(s string) (n int, err error)
+method (onceCloser) WriteTo(w io.Writer) (n int64, err error)
+type Arg struct{reveal func() string; kind argKind}
+type BoundedOutput struct{buf *outputBuf; overflow bool; forced bool}
+type Call struct{Name string; Args []string; Interactive bool; Input string; Env map[string]string; UnsetEnv []string}
+type CaptureMode uint8
+type CommandError struct{Name string; Args []string; Stderr string; StderrDropped int64; Output string; ExitCode int; Err error; span opaqueSpan}
+type CommandKind uint8
+type DiscardingRunner interface{RunDiscardingStdout(ctx context.Context, name string, args ...string) error}
+type EnvMutation struct{key string; value SecretArg; op envOp}
+type FakeRunner struct{RunFunc func(name string, args []string) (string, error); InteractiveErr error; mu sync.Mutex; Calls []Call}
+type FakeSensitiveRunner struct{RunFunc func(cmd SensitiveCommand) (SensitiveResult, error); mu sync.Mutex; calls []SensitiveCommand}
+type OSRunner struct{stdoutCeiling int}
+type OSSensitiveRunner struct{env []string; retireBound time.Duration; killDrainBound time.Duration; started sync/atomic.Int64; stdoutTap func(io.Reader) io.Reader}
+type Outcome uint8
+type OutputCause uint8
+type Runner interface{Run(ctx context.Context, name string, args ...string) (string, error); RunInteractive(ctx context.Context, name string, args ...string) error; RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (string, error); RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error); RunWithInput(ctx context.Context, stdin string, name string, args ...string) (string, error)}
+type SecretArg struct{reveal func() string}
+type SensitiveCommand struct{Kind CommandKind; Path SecretArg; Args []Arg; Env []EnvMutation; StdoutMode CaptureMode; StdoutCap int64; StderrCap int64}
+type SensitiveError struct{Kind CommandKind; Outcome Outcome; ExitCode int; StdoutBytes int; StderrBytes int; reason string}
+type SensitiveResult struct{Stdout BoundedOutput; Stderr BoundedOutput; ExitCode int}
+type SensitiveRunner interface{RunSensitive(ctx context.Context, cmd SensitiveCommand) (SensitiveResult, error)}
+type StreamingRunner interface{RunStreaming(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, name string, args ...string) error}
+type Transform struct{apply func(string) string}
+type argKind uint8
+type argMask struct{shown map[string]string; pats []maskPat; values []string; entries []string}
+type bitset []uint64
+type ceilingWriter struct{limit int; discard bool; buf []byte; over bool; proc func() *os.Process}
+type constantArg string
+type copyJob struct{dst io.Writer; src *onceCloser}
+type copyResult struct{stdin bool; err error}
+type envOp uint8
+type maskKey struct{}
+type maskPat struct{text string; shown string}
+type onceCloser struct{*os.File; once sync.Once}
+type opaqueKey struct{}
+type opaqueSpan struct{from int; n int}
+type outputBuf struct{data []byte}
+type projectedCmuxWorkspace struct{ID string "json:\"id\""; Description string "json:\"description\""}
+type streamPipes struct{childEnds []*os.File; readEnds []*onceCloser; stdinW *onceCloser; outputs []copyJob; stdin io.Reader; results chan copyResult; nOut int; nIn int}
+type tailBuffer struct{limit int; buf []byte; dropped int64}
+var ErrCanceled error
+var ErrInvalidCommand error
+var ErrNonzeroExit error
+var ErrOutputLimit error
+var ErrOutputTooLarge error
+var ErrStartFailed error
+var ErrTimeout error
+var HomebrewNoAutoUpdate map[string]string
