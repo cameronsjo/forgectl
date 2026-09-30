@@ -8,13 +8,17 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -461,6 +465,55 @@ func TestScanInjection_UnreadableCounted(t *testing.T) {
 	}
 }
 
+// modulePath prefixes this module's own import paths.
+const modulePath = "github.com/cameronsjo/forgectl/"
+
+// auditImports is the import-set allowlist for the package's shipped files:
+// exactly what they import today. A filesystem path that needs no call the
+// use check below names (io/ioutil, os/exec, net, plugin, another internal
+// package) is refused by its import, so the pin covers indirect reach and not
+// only direct calls. Widening this list is a deliberate edit, audited here.
+var auditImports = map[string]bool{
+	"errors":                           true,
+	"fmt":                              true,
+	"io/fs":                            true,
+	"path":                             true,
+	"path/filepath":                    true,
+	"sort":                             true,
+	"time":                             true,
+	modulePath + "internal/quarantine": true,
+	modulePath + "internal/termsafe":   true,
+}
+
+// rootopsImports are the imports only the rootops files may add.
+var rootopsImports = map[string]bool{"os": true, "syscall": true}
+
+// internalAllowed names every function and package-level variable the
+// package may use from another internal package. Each one does no
+// filesystem I/O; quarantine.ExpandTargets, which lists directories, is the
+// kind of helper this refuses. Types, constants and struct fields are data
+// and need no entry; neither allowed package exports a func-typed field, which
+// would be the one field a call could go through.
+var internalAllowed = map[string]bool{
+	"internal/quarantine.DefaultTargets":             true,
+	"internal/quarantine.NewCarrierMatcher":          true,
+	"internal/quarantine.CarrierMatcher.Match":       true,
+	"internal/quarantine.CarrierMatcher.MatchPrefix": true,
+	"internal/quarantine.CarrierMatcher.MaxSegments": true,
+	"internal/termsafe.QuotePath":                    true,
+	"internal/termsafe.Error":                        true,
+}
+
+// confinementUses is what unconfinedUses reports: every violation, plus how
+// many allowlisted os uses and internal-package function uses it resolved,
+// so a caller can prove neither half of the check was vacuous (an importer
+// failure would resolve none).
+type confinementUses struct {
+	bad          []string
+	allowedOS    int
+	internalUses int
+}
+
 // unconfinedUses type-checks files and returns every use of a filesystem
 // function that could resolve outside the os.Root, outside the allowlisted
 // rootops files. It resolves identifiers through go/types (Info.Uses), so an
@@ -472,21 +525,51 @@ func TestScanInjection_UnreadableCounted(t *testing.T) {
 //   - the io/fs interface methods that stat, list or open (DirEntry.Info,
 //     DirEntry.Type, FS.Open, ReadDir, ReadFile, Stat, Glob, Sub).
 //
-// It also returns how many allowlisted os uses it resolved, so a caller can
-// prove the check was not vacuous (an importer failure would resolve none).
-func unconfinedUses(t *testing.T, fset *token.FileSet, files []*ast.File) (bad []string, allowedOS int) {
+// Indirect reach is refused too, in every file including rootops:
+//   - an import outside auditImports (plus rootopsImports in the rootops
+//     files), so io/ioutil and os/exec never enter the package;
+//   - a function, method or package-level variable of another internal
+//     package that is not in internalAllowed.
+func unconfinedUses(t *testing.T, fset *token.FileSet, files []*ast.File) confinementUses {
 	t.Helper()
+	var out confinementUses
+	for _, file := range files {
+		base := filepath.Base(fset.Position(file.Pos()).Filename)
+		for _, imp := range file.Imports {
+			p, err := strconv.Unquote(imp.Path.Value)
+			if err != nil {
+				t.Fatalf("%s: import %s: %v", base, imp.Path.Value, err)
+			}
+			if auditImports[p] || (isRootops(base) && rootopsImports[p]) {
+				continue
+			}
+			out.bad = append(out.bad, fmt.Sprintf("%s: import %q is not in the audit import allowlist", fset.Position(imp.Pos()), p))
+		}
+	}
 	info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
-	conf := types.Config{Importer: importer.Default(), Error: func(error) {}}
-	_, _ = conf.Check("audit", fset, files, info) // internal imports may not resolve; stdlib uses still do
+	conf := types.Config{Importer: importer.ForCompiler(fset, "gc", exportData), Error: func(error) {}}
+	_, _ = conf.Check("audit", fset, files, info) // a refused import may not resolve; every other use still does
 	fsMethods := map[string]bool{"Info": true, "Type": true, "Open": true, "ReadDir": true, "ReadFile": true, "Stat": true, "Glob": true, "Sub": true}
 	filepathFuncs := map[string]bool{"EvalSymlinks": true, "Glob": true, "Walk": true, "WalkDir": true}
 	for id, obj := range info.Uses {
-		fn, ok := obj.(*types.Func)
-		if !ok || fn.Pkg() == nil {
+		if obj.Pkg() == nil {
 			continue
 		}
-		pkg := fn.Pkg().Path()
+		pkg := obj.Pkg().Path()
+		pos := fset.Position(id.Pos())
+		if strings.HasPrefix(pkg, modulePath) {
+			if key, gated := internalKey(obj); gated {
+				out.internalUses++
+				if !internalAllowed[key] {
+					out.bad = append(out.bad, fmt.Sprintf("%s: %s is not in the internal-helper allowlist", pos, key))
+				}
+			}
+			continue
+		}
+		fn, ok := obj.(*types.Func)
+		if !ok {
+			continue
+		}
 		sig, _ := fn.Type().(*types.Signature)
 		method := sig != nil && sig.Recv() != nil
 		var banned bool
@@ -503,23 +586,84 @@ func unconfinedUses(t *testing.T, fset *token.FileSet, files []*ast.File) (bad [
 		if !banned {
 			continue
 		}
-		pos := fset.Position(id.Pos())
-		base := filepath.Base(pos.Filename)
-		if strings.HasPrefix(base, "rootops") && !strings.HasSuffix(base, "_test.go") {
+		if isRootops(filepath.Base(pos.Filename)) {
 			if pkg == "os" {
-				allowedOS++
+				out.allowedOS++
 			}
 			continue
 		}
-		bad = append(bad, fmt.Sprintf("%s: %s.%s", pos, pkg, fn.Name()))
+		out.bad = append(out.bad, fmt.Sprintf("%s: %s.%s", pos, pkg, fn.Name()))
 	}
-	sort.Strings(bad)
-	return bad, allowedOS
+	sort.Strings(out.bad)
+	return out
+}
+
+// exportData opens the compiler export data `go list -export` reports for an
+// import path, this module's internal packages included. importer.Default
+// finds only the standard library's, and without an internal package's types
+// every internal use would resolve to nothing and pass the allowlist unseen
+// (the internalUses count catches that).
+func exportData(importPath string) (io.ReadCloser, error) {
+	exportFilesMu.Lock()
+	file, ok := exportFiles[importPath]
+	exportFilesMu.Unlock()
+	if !ok {
+		out, err := exec.Command("go", "list", "-export", "-f", "{{.Export}}", "--", importPath).Output() //nolint:gosec,noctx // G204: the go tool resolving an import path the type checker asked for
+		if err != nil {
+			return nil, fmt.Errorf("go list -export %s: %w", importPath, err)
+		}
+		file = strings.TrimSpace(string(out))
+		exportFilesMu.Lock()
+		exportFiles[importPath] = file
+		exportFilesMu.Unlock()
+	}
+	if file == "" {
+		return nil, fmt.Errorf("go list -export %s: no export data", importPath)
+	}
+	return os.Open(filepath.Clean(file))
+}
+
+var (
+	exportFilesMu sync.Mutex
+	exportFiles   = map[string]string{}
+)
+
+func isRootops(base string) bool {
+	return strings.HasPrefix(base, "rootops") && !strings.HasSuffix(base, "_test.go")
+}
+
+// internalKey names an internal package's function, method or package-level
+// variable as internalAllowed spells it ("internal/pkg.Func",
+// "internal/pkg.Type.Method"). gated is false for the objects that are data
+// (types, constants, struct fields), which need no entry.
+func internalKey(obj types.Object) (key string, gated bool) {
+	prefix := strings.TrimPrefix(obj.Pkg().Path(), modulePath) + "."
+	switch o := obj.(type) {
+	case *types.Func:
+		if sig, _ := o.Type().(*types.Signature); sig != nil && sig.Recv() != nil {
+			recv := sig.Recv().Type()
+			if ptr, ok := recv.(*types.Pointer); ok {
+				recv = ptr.Elem()
+			}
+			if named, ok := recv.(*types.Named); ok {
+				return prefix + named.Obj().Name() + "." + o.Name(), true
+			}
+			return prefix + "?." + o.Name(), true
+		}
+		return prefix + o.Name(), true
+	case *types.Var:
+		if o.IsField() {
+			return "", false
+		}
+		return prefix + o.Name(), true
+	}
+	return "", false
 }
 
 // TestAuditSource_NoUnconfinedFilesystemCalls is the static half of the
 // confinement pin: outside rootops*.go, the package's shipped source makes no
-// filesystem call that could resolve outside the os.Root.
+// filesystem call that could resolve outside the os.Root, and no file reaches
+// the filesystem indirectly through an unlisted import or internal helper.
 func TestAuditSource_NoUnconfinedFilesystemCalls(t *testing.T) {
 	fset := token.NewFileSet()
 	dirents, err := os.ReadDir(".")
@@ -542,12 +686,15 @@ func TestAuditSource_NoUnconfinedFilesystemCalls(t *testing.T) {
 		}
 		files = append(files, file)
 	}
-	bad, allowedOS := unconfinedUses(t, fset, files)
-	for _, b := range bad {
-		t.Errorf("unconfined filesystem call outside rootops: %s", b)
+	uses := unconfinedUses(t, fset, files)
+	for _, b := range uses.bad {
+		t.Errorf("unconfined filesystem reach: %s", b)
 	}
-	if allowedOS == 0 {
+	if uses.allowedOS == 0 {
 		t.Fatal("resolved no os use in rootops.go; the type check is vacuous")
+	}
+	if uses.internalUses == 0 {
+		t.Fatal("resolved no internal-package function use; the internal-helper check is vacuous")
 	}
 }
 
@@ -559,27 +706,46 @@ func dirOpenFlagsFile() string {
 }
 
 // TestAuditSource_ProbesGoRed proves the static pin sees through each evasion
-// the naive text check missed. Every probe must be refused, and the same
-// call in an allowlisted rootops file must not be.
+// the naive text check missed. Every probe must be refused. A direct call
+// probe must not be refused in an allowlisted rootops file; an indirect-reach
+// probe (a banned import, an unlisted internal helper) is refused there too.
+//
+// Mutation that turns it red: add "io/ioutil" or "os/exec" to auditImports,
+// or "internal/quarantine.ExpandTargets" to internalAllowed.
 func TestAuditSource_ProbesGoRed(t *testing.T) {
-	probes := map[string]string{
-		"aliased import": `package audit
+	type probe struct {
+		src      string
+		indirect bool // refused in rootops.go as well
+	}
+	probes := map[string]probe{
+		"aliased import": {src: `package audit
 import xos "os"
-func f() { _, _ = xos.Lstat("x") }`,
-		"method value": `package audit
+func f() { _, _ = xos.Lstat("x") }`},
+		"method value": {src: `package audit
 import "io/fs"
-func f(e fs.DirEntry) { g := e.Info; _ = g }`,
-		"EvalSymlinks": `package audit
+func f(e fs.DirEntry) { g := e.Info; _ = g }`},
+		"EvalSymlinks": {src: `package audit
 import "path/filepath"
-func f() { _, _ = filepath.EvalSymlinks("x") }`,
-		"os.Root method outside rootops": `package audit
+func f() { _, _ = filepath.EvalSymlinks("x") }`},
+		"os.Root method outside rootops": {src: `package audit
 import "os"
-func f(r *os.Root) { _, _ = r.Lstat("x") }`,
+func f(r *os.Root) { _, _ = r.Lstat("x") }`},
+		"io/ioutil": {indirect: true, src: `package audit
+import "io/ioutil"
+func f() { _, _ = ioutil.ReadDir("x") }`},
+		"os/exec": {indirect: true, src: `package audit
+import "os/exec"
+func f() { _ = exec.Command("stat", "x").Run() }`},
+		"blank os/exec": {indirect: true, src: `package audit
+import _ "os/exec"`},
+		"internal helper": {indirect: true, src: `package audit
+import "github.com/cameronsjo/forgectl/internal/quarantine"
+func f() { _, _ = quarantine.ExpandTargets("x", quarantine.PrefixUnderscore, nil) }`},
 	}
 	if runtime.GOOS != "windows" {
-		probes["syscall.Lstat"] = `package audit
+		probes["syscall.Lstat"] = probe{src: `package audit
 import "syscall"
-func f() { var st syscall.Stat_t; _ = syscall.Lstat("x", &st) }`
+func f() { var st syscall.Stat_t; _ = syscall.Lstat("x", &st) }`}
 	}
 	check := func(filename, src string) []string {
 		fset := token.NewFileSet()
@@ -587,14 +753,17 @@ func f() { var st syscall.Stat_t; _ = syscall.Lstat("x", &st) }`
 		if err != nil {
 			t.Fatalf("parse %s: %v", filename, err)
 		}
-		bad, _ := unconfinedUses(t, fset, []*ast.File{file})
-		return bad
+		return unconfinedUses(t, fset, []*ast.File{file}).bad
 	}
-	for name, src := range probes {
-		if bad := check("probe.go", src); len(bad) == 0 {
+	for name, p := range probes {
+		if bad := check("probe.go", p.src); len(bad) == 0 {
 			t.Errorf("probe %q was not refused", name)
 		}
-		if bad := check("rootops.go", src); len(bad) != 0 {
+		bad := check("rootops.go", p.src)
+		if p.indirect && len(bad) == 0 {
+			t.Errorf("probe %q was not refused in rootops.go", name)
+		}
+		if !p.indirect && len(bad) != 0 {
 			t.Errorf("probe %q refused even in the allowlisted rootops.go: %v", name, bad)
 		}
 	}

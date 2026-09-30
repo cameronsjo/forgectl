@@ -42,7 +42,8 @@ func failReadDir(t *testing.T, dir string) {
 //
 // Mutation that turns it red: drop the `path == opts.Root` return in Scan's
 // error branch (missing, unreadable), or the root's !d.IsDir() refusal
-// (regular file, dangling symlink).
+// (regular file, dangling symlink), or return that refusal as a bare
+// errors.New with no op and path.
 func TestScan_UnscannableRootFails(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
@@ -75,6 +76,13 @@ func TestScan_UnscannableRootFails(t *testing.T) {
 			report, err := Scan(ScanOptions{Root: root})
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("Scan(%s) error = %v, want one containing %q", root, err, tt.wantErr)
+			}
+			// Every root failure names its op and path, the refusal of a
+			// non-directory included, so a caller of Scan itself sees which
+			// path failed without a wrapper.
+			var pathErr *fs.PathError
+			if !errors.As(err, &pathErr) || pathErr.Path != root {
+				t.Errorf("Scan(%s) error = %#v, want an *fs.PathError naming the root", root, err)
 			}
 			if len(report.Targets) != 0 || report.TotalSize != 0 {
 				t.Errorf("a failed scan returned a report: %+v", report)
@@ -136,5 +144,50 @@ func TestPreview_UnscannableRootFails(t *testing.T) {
 	}
 	if len(result.Items) != 0 {
 		t.Errorf("a failed preview returned items: %+v", result.Items)
+	}
+}
+
+// TestScanReport_SymlinkedRootIsFollowed pins a clean root that is a symlink
+// to a directory, through both entry points. Scan alone refuses such a root
+// (its Lstat sees a symlink, not a directory), so this works only because
+// ScanReport resolves the root with EvalSymlinks first; every target and the
+// returned root are then in the resolved spelling, which is what apply's
+// containment re-check compares against.
+//
+// Mutation that turns it red: drop ScanReport's filepath.EvalSymlinks call
+// (use absRoot as resolvedRoot).
+func TestScanReport_SymlinkedRootIsFollowed(t *testing.T) {
+	statusErrors = map[string]error{}
+	dir := t.TempDir()
+	realDir := filepath.Join(dir, "real")
+	mustWriteFile(t, filepath.Join(realDir, "proj", "node_modules", "a.js"), 10)
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+	want := resolvedPath(t, realDir)
+	wantTarget := filepath.Join(want, "proj", "node_modules")
+	client := New(fakeGitRunner(nil), WithRoot(link))
+
+	gotRoot, report, err := client.ScanReport(CleanOptions{})
+	if err != nil {
+		t.Fatalf("ScanReport(%s): %v", link, err)
+	}
+	if gotRoot != want {
+		t.Errorf("ScanReport root = %q, want the resolved %q", gotRoot, want)
+	}
+	if len(report.Targets) != 1 || report.Targets[0].Path != wantTarget {
+		t.Errorf("ScanReport targets = %+v, want only %s", report.Targets, wantTarget)
+	}
+
+	gotRoot, result, err := client.Preview(context.Background())
+	if err != nil {
+		t.Fatalf("Preview(%s): %v", link, err)
+	}
+	if gotRoot != want {
+		t.Errorf("Preview root = %q, want the resolved %q", gotRoot, want)
+	}
+	if len(result.Items) != 1 || result.Items[0].Path != wantTarget || result.TotalReclaimable != 10 {
+		t.Errorf("Preview items = %+v (reclaimable %d), want only %s at 10 bytes", result.Items, result.TotalReclaimable, wantTarget)
 	}
 }
