@@ -833,7 +833,7 @@ func (c *Client) parkLegacyRecordLocked(path, reason string) error {
 		return fmt.Errorf("session record %s is no longer a legacy record; nothing was changed", termsafe.QuotePath(path))
 	}
 	return c.convertLegacyRecordLocked(path, bc, PhaseNeedsRepair, func(rec *Breadcrumb) {
-		rec.RepairReason = recordText(reason)
+		rec.RepairReason = breadcrumbText(reason)
 	})
 }
 
