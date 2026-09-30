@@ -106,11 +106,12 @@ func TestLaunchStats_SkippedRowsPrintTheReportThenExitOne(t *testing.T) {
 	if code := ExitCode(err); code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
-	if !strings.Contains(err.Error(), "skipped 1 unreadable") {
-		t.Fatalf("diagnostic = %q, want it to name the skipped row count", err.Error())
+	// Under --json the aggregate's skipped_rows is the diagnostic
+	// (forgectl#862): the exit is silent, so fang renders no error frame.
+	if _, ok := err.(*silentCodedError); !ok {
+		t.Fatalf("err = %T %q, want a silentCodedError under --json", err, err.Error())
 	}
-	// The complete report still lands on stdout — exactly one JSON object,
-	// with the single diagnostic left for the root error handler to render.
+	// The complete report still lands on stdout — exactly one JSON object.
 	//
 	// Assert on the first line rather than all of stdout: a subcommand
 	// executed standalone has no parent, so cobra resolves SilenceUsage

@@ -346,8 +346,16 @@ func TestFinishSync_MissingFailsRunInBothRenderings(t *testing.T) {
 		r := &sessions.Receipt{SessionsFound: 2, SessionsUpserted: 1, Missing: []string{"abc"}}
 		var buf bytes.Buffer
 		err := finishSync(&buf, r, asJSON)
-		if err == nil || !strings.Contains(err.Error(), "reconcile failed") {
-			t.Errorf("asJSON=%v: error = %v, want the reconcile failure", asJSON, err)
+		if ExitCode(err) != 1 {
+			t.Errorf("asJSON=%v: exit code = %d, want 1", asJSON, ExitCode(err))
+		}
+		if asJSON {
+			// The receipt is the verdict: a silent exit (forgectl#862).
+			if _, ok := err.(*silentCodedError); !ok {
+				t.Errorf("asJSON=true: error = %T %v, want a silentCodedError", err, err)
+			}
+		} else if err == nil || !strings.Contains(err.Error(), "reconcile failed") {
+			t.Errorf("asJSON=false: error = %v, want the reconcile failure", err)
 		}
 		if asJSON {
 			var got map[string]any

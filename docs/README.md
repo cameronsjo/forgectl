@@ -9,6 +9,8 @@ operated.
 - **[`commands/`](commands/)** — per-command deep dives (env, launch, k8s,
   docs, [recipe](commands/recipe.md), …) split out of the README; the README keeps the full roster and
   usage summary.
+- **[`json-contract.md`](json-contract.md)** — what a `--json` verb writes to
+  stderr when it exits non-zero, and the failure object's `code` strings.
 - **[`configuration.md`](configuration.md)** — every `config.toml` section,
   key by key, plus logging.
 - **[`herdr.md`](herdr.md)** — the `internal/herdr` client: session and fork requirements, failure shapes, and why ids move.

@@ -69,9 +69,9 @@ Before the scratch directory, the atomic write put its temp file directly beside
 | `code` | Exit | When | `path` |
 | --- | --- | --- | --- |
 | `file_not_found` | `2` | the env file or the `--example` file is absent (`error` is always `"env file not found"`) | the missing file, relative to the repository root |
-| `check_failed` | `1` | anything else: a refused `--file`/`--example` name, a file outside the repository, a file that won't parse, an unknown flag, a flag missing its value, or a stray argument (`error` is the message) | for a refused `--file`/`--example` name, that file, relative to the repository root; otherwise `""` (outside the repository, a parse failure, a bad flag or argument) |
+| `check_failed` | `1` | anything else: a refused `--file`/`--example` name, a file outside the repository, a file that won't parse, an unknown flag, a flag missing its value, or a stray argument (`error` is the message) | for a refused `--file`/`--example` name, or an `--any-file` refusal (no interactive terminal, or the confirmation declined or failed), that file, relative to the repository root; otherwise `""` (outside the repository, a parse failure, a bad flag or argument) |
 
-A caller tells drift from a `check_failed` at exit `1` by where the output went: drift puts its verdict on stdout, and a failure leaves stdout empty and puts its object on stderr.
+A caller tells drift from a `check_failed` at exit `1` by where the output went: drift puts its verdict on stdout, and a failure leaves stdout empty and puts its object on stderr. This is the repo-wide `--json` stderr contract ([json-contract.md](../json-contract.md)) with `env check`'s own `code` strings.
 
 **Blessed value producers** for `env set`, non-inline patterns first:
 

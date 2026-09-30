@@ -113,10 +113,12 @@ only), 2 error.`,
 			}
 
 			if !apply && !report.ChangeSet.Aligned() {
-				return WithExitCode(
+				// Under --json the report on stdout is the verdict
+				// (forgectl#862).
+				return jsonVerdict(WithExitCode(
 					fmt.Errorf("misaligned: %d to enable, %d to disable", len(report.ChangeSet.Enable), len(report.ChangeSet.Disable)),
 					1,
-				)
+				), asJSON)
 			}
 			return nil
 		},

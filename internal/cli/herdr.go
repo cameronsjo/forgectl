@@ -199,6 +199,8 @@ func organizeOnce(cmd *cobra.Command, deps module.Deps, opts organizeOpts) error
 		if err := writeOrganizeJSON(cmd.OutOrStdout(), plan, &res, runErr); err != nil {
 			return err
 		}
+		// The object on stdout already carries runErr (forgectl#862).
+		return jsonVerdict(runErr, true)
 	}
 	return runErr // already terminal-safe, and possibly several lines
 }

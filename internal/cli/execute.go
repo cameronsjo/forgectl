@@ -344,10 +344,10 @@ func termsafeErrorHandler(w io.Writer, styles fang.Styles, err error) {
 		renderStructuredTerminalError(w, styles, structured)
 		return
 	}
-	// env check --json (forgectl#481) has already written its one JSON
-	// object to stderr by the time it returns this — fang's error frame
-	// must render nothing on top of it, or the agent-facing "exactly one
-	// object" contract breaks.
+	// A --json verb has already written its verdict to stdout, or its one
+	// failure object to stderr, by the time it returns this (forgectl#481,
+	// #862; json_errors.go) — fang's error frame must render nothing on top
+	// of it, or the agent-facing contract breaks.
 	if _, ok := err.(*silentCodedError); ok {
 		return
 	}
