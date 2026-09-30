@@ -75,6 +75,54 @@ func TestClassifyDeadSocket(t *testing.T) {
 	}
 }
 
+// TestClassifyDeadSocketNeedsTwoRefusals is the forgectl#806 macOS hardening:
+// on Darwin a live server with a full listen backlog also refuses a connect,
+// so one refusal is not enough to call the socket dead. Only a second refusal
+// after the pause is.
+//
+// Mutation that turns it red: return true after the first refusal (the
+// "refused, then accepted" row reads dead, and the dead row dials once).
+func TestClassifyDeadSocketNeedsTwoRefusals(t *testing.T) {
+	args := []string{"list-sessions", "-F", sessionFormat}
+	socket := fakeFileInfo{mode: fs.ModeSocket | 0o600}
+	for name, tc := range map[string]struct {
+		answers []error
+		want    serverFailureKind
+	}{
+		"refused twice":               {[]error{syscall.ECONNREFUSED, syscall.ECONNREFUSED}, serverDeadSocket},
+		"refused, then accepted":      {[]error{syscall.ECONNREFUSED, nil}, serverStaleSocket},
+		"refused, then another error": {[]error{syscall.ECONNREFUSED, syscall.EAGAIN}, serverStaleSocket},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, _ := deadSocketClient(&internalexec.FakeRunner{}, socket, nil)
+			var dials int
+			c.dialSocket = func(context.Context, string) error {
+				answer := tc.answers[dials]
+				dials++
+				return answer
+			}
+			got := c.classifyServerFailure(context.Background(), args, commandFailure("tmux", args, "no server running"))
+			if got.Kind != tc.want {
+				t.Fatalf("kind = %v, want %v", got.Kind, tc.want)
+			}
+			if dials != 2 {
+				t.Fatalf("dialed %d times, want 2", dials)
+			}
+		})
+	}
+
+	// A canceled context during the pause is not a second refusal.
+	c, _ := deadSocketClient(&internalexec.FakeRunner{}, socket, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	c.dialSocket = func(context.Context, string) error {
+		cancel()
+		return syscall.ECONNREFUSED
+	}
+	if c.socketRefusesConnect(ctx, "/tmp/tmux-501/default", socket) {
+		t.Fatal("a probe canceled during the pause read the socket as dead")
+	}
+}
+
 // TestDeadSocketIsEmptyOnlyForOptedInCallers is the #786 split. A dead socket
 // lists as empty for display, and EnsureSession creates over it. A kill-time
 // revalidation still refuses: it must not turn a dead socket into
@@ -114,6 +162,12 @@ func TestDeadSocketIsEmptyOnlyForOptedInCallers(t *testing.T) {
 	}
 	if errors.Is(err, ErrNoServer) {
 		t.Fatalf("ListSessions = %v; a dead socket must not read as the create-permitting ErrNoServer", err)
+	}
+	// forgectl#805: every refusal that wraps this carries the remedy, since the
+	// strict callers (repair, teardown, prune) otherwise print no next step.
+	// Mutation that turns it red: drop the remedy from ErrServerExited's text.
+	if !strings.Contains(err.Error(), "start any tmux session to clear the socket, then retry") {
+		t.Errorf("ListSessions = %q, want the exited-server remedy in the message", err)
 	}
 
 	gen := ServerGeneration{Selector: ServerSelector{TmpDir: "/tmp"}, PID: "123", StartTime: "456"}

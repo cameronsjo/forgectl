@@ -311,15 +311,28 @@ func findCliCall(calls []exec.Call, name string) (exec.Call, bool) {
 
 func TestWindowStatus_Live(t *testing.T) {
 	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 9}
-	if got := windowStatus(map[pr.Ref]bool{ref: true}, ref, true); got != "live" {
+	if got := windowStatus(map[pr.Ref]bool{ref: true}, ref, tmuxReadable); got != "live" {
 		t.Errorf("windowStatus(live) = %q, want %q", got, "live")
 	}
 }
 
 func TestWindowStatus_Gone(t *testing.T) {
 	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 9}
-	if got := windowStatus(map[pr.Ref]bool{}, ref, true); got != "window gone" {
+	if got := windowStatus(map[pr.Ref]bool{}, ref, tmuxReadable); got != "window gone" {
 		t.Errorf("windowStatus(absent) = %q, want %q", got, "window gone")
+	}
+}
+
+// TestWindowStatus_NoTmuxServer is forgectl#805 item 5: over an exited
+// server's leftover socket no window is live, but the row must not say
+// "window gone" — the strict reads refuse that verdict on the same evidence,
+// and the label sends an operator to teardown.
+//
+// Mutation that turns it red: drop windowStatus's tmuxNoServer arm.
+func TestWindowStatus_NoTmuxServer(t *testing.T) {
+	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 9}
+	if got := windowStatus(map[pr.Ref]bool{ref: false}, ref, tmuxNoServer); got != noTmuxServerStatus {
+		t.Errorf("windowStatus(no server) = %q, want %q", got, noTmuxServerStatus)
 	}
 }
 
@@ -329,10 +342,10 @@ func TestWindowStatus_Gone(t *testing.T) {
 // every healthy launch.
 func TestWindowStatus_UnreadableTmux(t *testing.T) {
 	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 9}
-	if got := windowStatus(map[pr.Ref]bool{ref: true}, ref, false); got != "?" {
+	if got := windowStatus(map[pr.Ref]bool{ref: true}, ref, tmuxUnreadable); got != "?" {
 		t.Errorf("windowStatus(tmuxOK=false) = %q, want %q", got, "?")
 	}
-	if got := windowStatus(nil, ref, false); got != "?" {
+	if got := windowStatus(nil, ref, tmuxUnreadable); got != "?" {
 		t.Errorf("windowStatus(nil map, tmuxOK=false) = %q, want %q", got, "?")
 	}
 }

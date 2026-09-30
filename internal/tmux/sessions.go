@@ -39,15 +39,22 @@ const sessionIdentityFormat = "#{pid}" + FieldSep + "#{start_time}" + FieldSep +
 // returns an empty slice (not an error) — "no sessions" is a normal state, not
 // a failure.
 func (c *Client) ListSessions(ctx context.Context) ([]Session, error) {
+	sessions, _, err := c.listSessions(ctx)
+	return sessions, err
+}
+
+// listSessions is ListSessions plus how many rows it could not read
+// (parseSessionRows), for a listing that tells the operator about them.
+func (c *Client) listSessions(ctx context.Context) ([]Session, int, error) {
 	args := c.tmuxArgs("list-sessions", "-F", sessionFormat)
 	out, err := c.run.Run(ctx, c.tmuxBin, args...)
 	if err != nil {
 		if c.absentServer(ctx, args, err) {
-			return nil, nil
+			return nil, 0, nil
 		}
-		return nil, c.serverStateError(ctx, args, err)
+		return nil, 0, c.serverStateError(ctx, args, err)
 	}
-	return parseSessions(out)
+	return parseSessionRows(out)
 }
 
 // parseSessions turns list-sessions output into Sessions.
@@ -62,11 +69,25 @@ func (c *Client) ListSessions(ctx context.Context) ([]Session, error) {
 // bug: field 2 is the native session id, and a shifted row would offer a
 // well-formed-looking id that names a different session.
 func parseSessions(out string) ([]Session, error) {
+	sessions, _, err := parseSessionRows(out)
+	return sessions, err
+}
+
+// parseSessionRows is parseSessions plus the number of non-empty rows it
+// dropped (forgectl#806). A dropped row is a real session nobody can see —
+// its name carries FieldSep, most likely — so a listing shown to an operator
+// reports the count rather than silently showing fewer sessions. The drop
+// itself stays: see parsedRows for why partial loss must not fail the list.
+func parseSessionRows(out string) ([]Session, int, error) {
 	lines := splitLines(out)
 	sessions := make([]Session, 0, len(lines))
+	unreadable := 0
 	for _, line := range lines {
 		f := splitFields(line)
 		if len(f) != sessionFieldCount {
+			if line != "" {
+				unreadable++
+			}
 			continue
 		}
 		// Drop a row whose native id is not well formed, alongside the
@@ -75,6 +96,7 @@ func parseSessions(out string) ([]Session, error) {
 		// can offer a plausible-looking value naming something else. Validating
 		// here means no unvalidated id ever leaves a parser.
 		if ValidateSessionID(f[2]) != nil {
+			unreadable++
 			continue
 		}
 		sessions = append(sessions, Session{
@@ -88,7 +110,11 @@ func parseSessions(out string) ([]Session, error) {
 			Path:        f[7],
 		})
 	}
-	return parsedRows(sessions, lines, "list-sessions", sessionFieldCount)
+	sessions, err := parsedRows(sessions, lines, "list-sessions", sessionFieldCount)
+	if err != nil {
+		return nil, 0, err
+	}
+	return sessions, unreadable, nil
 }
 
 // ResolveSessionExact finds the session whose name matches exactly, by Go
@@ -144,7 +170,18 @@ func (c *Client) CreateSession(ctx context.Context, name, dir string) (SessionId
 	if name == "" {
 		return SessionIdentity{}, errors.New("cannot create a tmux session with an empty name")
 	}
-	args := c.tmuxArgs("new-session", "-d", "-P", "-F", sessionIdentityFormat, "-s", name)
+	// A name carrying FieldSep could never be listed again: its row splits
+	// into too many fields (forgectl#806), so forgectl could not resolve,
+	// rename or kill the session it had just made.
+	if strings.Contains(name, FieldSep) {
+		return SessionIdentity{}, fmt.Errorf("%w: session name %q carries the tmux field separator (0x1F)", ErrUnsafeOperand, name)
+	}
+	// escapeFormat: tmux format-expands -s, so `#(cmd)` in a name would run
+	// a shell job and `#{...}` would be substituted (forgectl#806). The
+	// escaped operand expands back to exactly name, which is also what tmux's
+	// "duplicate session: <name>" line names, so classifyCreateFailure's exact
+	// comparison against name still holds.
+	args := c.tmuxArgs("new-session", "-d", "-P", "-F", sessionIdentityFormat, "-s", escapeFormat(name))
 	if dir != "" {
 		args = append(args, "-c", dir)
 	}
@@ -259,7 +296,8 @@ func (c *Client) EnsureSession(ctx context.Context, name, dir string) (SessionId
 // tmux as a single-quoted token of a command string tmux parses again
 // (quoteCommandOperand); a name that cannot be carried through that parser
 // unchanged — one with a control character (0x00-0x1F, 0x7F) or a 0xFF byte —
-// is refused before any command runs.
+// is refused before any command runs. The name is also format-escaped
+// (escapeFormat), because rename-session expands `#{...}` and `#(...)` in it.
 //
 // The `--` is what keeps newName an operand. It is the only operator-controlled
 // POSITIONAL this package hands tmux, and the TUI's rename field (internal/tui)
@@ -271,7 +309,15 @@ func (c *Client) RenameSession(ctx context.Context, want SessionIdentity, newNam
 	if newName == "" {
 		return errors.New("cannot rename a tmux session to an empty name")
 	}
-	quotedName, err := quoteCommandOperand(newName)
+	// Validated as typed, so a refusal's byte offset is the operator's; then
+	// escaped and quoted. rename-session format-expands its new name even
+	// inside the guard's quotes (forgectl#806), and the quoting carries the
+	// escaped bytes through the command parser unchanged. Escaping only adds
+	// '#', which quoteCommandOperand never refuses.
+	if _, err := quoteCommandOperand(newName); err != nil {
+		return fmt.Errorf("rename session %q: %w", want.Name, err)
+	}
+	quotedName, err := quoteCommandOperand(escapeFormat(newName))
 	if err != nil {
 		return fmt.Errorf("rename session %q: %w", want.Name, err)
 	}

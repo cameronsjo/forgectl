@@ -26,6 +26,9 @@ func newTmuxRenameCmd(client *tmux.Client) *cobra.Command {
 				if errors.Is(err, tmux.ErrSessionNotFound) {
 					return fmt.Errorf("no such session: %s", oldName)
 				}
+				if errors.Is(err, tmux.ErrServerExited) {
+					return noServerForSession("rename", oldName)
+				}
 				return err
 			}
 			slog.Debug("Preparing to rename session.", "from", oldName, "to", newName, "session_id", session.ID)
@@ -38,4 +41,15 @@ func newTmuxRenameCmd(client *tmux.Client) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// noServerForSession is `tmux kill`/`tmux rename`'s answer when the server has
+// exited and left its socket behind (forgectl#805). The strict resolve still
+// refuses, which keeps the exit non-zero, but its "state could not be read"
+// wording misstates what tmux said: there is no server, so there is no
+// session to act on. Only the ErrServerExited sentinel is carried on — its
+// text is the remedy — so errors.Is still sees it. %q, not %s: the name is
+// operator-typed and reaches a terminal.
+func noServerForSession(verb, name string) error {
+	return fmt.Errorf("no tmux server is running, so there is no session %q to %s: %w", name, verb, tmux.ErrServerExited)
 }

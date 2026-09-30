@@ -219,7 +219,9 @@ func TestRenameSession_QuotesTheNewNameForTheGuard(t *testing.T) {
 	for newName, wantCommand := range map[string]string{
 		"it's":              `rename-session -t '$1' -- 'it'\''s'`,
 		"'; kill-server; '": `rename-session -t '$1' -- ''\''; kill-server; '\'''`,
-		"$HOME ~ #{pid}":    `rename-session -t '$1' -- '$HOME ~ #{pid}'`,
+		// The '#' is doubled by escapeFormat (forgectl#806): rename-session
+		// format-expands its new name even inside the quotes.
+		"$HOME ~ #{pid}": `rename-session -t '$1' -- '$HOME ~ ##{pid}'`,
 	} {
 		t.Run(newName, func(t *testing.T) {
 			fake, c, identity := opsFixture(t, false)
@@ -415,9 +417,15 @@ func TestWindowVerbs_TargetNativeID(t *testing.T) {
 			},
 		},
 		"SelectWindow": {
-			run:         func(c *Client, id WindowIdentity) error { return c.SelectWindow(context.Background(), id) },
-			want:        []string{"select-window", "-t", "@3"},
-			interactive: true,
+			run: func(c *Client, id WindowIdentity) error { return c.SelectWindow(context.Background(), id) },
+			// forgectl#805: the select re-proves the captured generation on the
+			// captured Run path, where the guard's answer can be read back.
+			// Mutation that turns it red: issue the bare select-window through
+			// RunInteractive again.
+			want: []string{
+				"if-shell", "-F", "-t", "@3", "#{==:#{pid}/#{start_time},123/456}",
+				"select-window -t @3", `display-message -p "forgectl-generation-mismatch #{pid}/#{start_time}"`,
+			},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
