@@ -270,7 +270,7 @@ func readFindingsMarker(dir *os.Root) (string, error) {
 // tolerant (no DisallowUnknownFields), so a record written by a newer
 // forgectl still counts, the same reasoning recordedWorkspaceFor applies.
 func (c *Client) ownerRecordLive(name string) bool {
-	sessions, err := os.OpenRoot(c.sessionsDir)
+	sessions, err := openDirRoot(c.sessionsDir)
 	if err != nil {
 		return !errors.Is(err, fs.ErrNotExist)
 	}

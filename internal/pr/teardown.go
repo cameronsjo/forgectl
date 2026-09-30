@@ -278,7 +278,7 @@ func resolvePath(path string) string {
 // against the filesystem again, and every step runs through ONE pinned
 // directory handle opened at the top:
 //
-//	os.OpenRoot(sessionsDir)             -> pin the directory for every step below
+//	openDirRoot(sessionsDir)             -> pin the directory for every step below
 //	Lstat "." through the handle         -> SameFile as at check time
 //	Lstat the member's base name         -> SameFile as at check time
 //	re-read that name through the handle -> byte-identical
@@ -299,7 +299,7 @@ func resolvePath(path string) string {
 // spelled out on validateWorkspace. That warning is about following a symlink
 // to its target; os.Root REFUSES an escaping symlink rather than following it,
 // so acting through the handle can never widen into a deletion elsewhere.
-// OpenRoot resolves c.sessionsDir itself in the ordinary way, so a symlinked
+// openDirRoot resolves c.sessionsDir itself in the ordinary way, so a symlinked
 // session directory remains supported.
 //
 // Any drift refuses: an identity mismatch, a symlink swapped in, a byte or
@@ -344,7 +344,7 @@ func (c *Client) discardStale(member breadcrumbMember) error {
 	slog.Debug("Preparing to discard a stale review breadcrumb.",
 		"ref", member.breadcrumb.Ref, "path", member.path)
 
-	root, err := os.OpenRoot(c.sessionsDir)
+	root, err := openDirRoot(c.sessionsDir)
 	if err != nil {
 		return fmt.Errorf("pin pr sessions dir %s: %w", c.sessionsDir, err)
 	}
@@ -439,7 +439,7 @@ func (c *Client) discardRecordOnly(member breadcrumbMember) error {
 	slog.Debug("Preparing to discard a session record with no workspace.",
 		"ref", member.breadcrumb.Ref, "path", member.path, "phase", string(member.breadcrumb.Phase))
 
-	root, err := os.OpenRoot(c.sessionsDir)
+	root, err := openDirRoot(c.sessionsDir)
 	if err != nil {
 		return fmt.Errorf("pin pr sessions dir %s: %w", c.sessionsDir, err)
 	}
@@ -526,7 +526,7 @@ const unreadableSuffix = ".unreadable-"
 func (c *Client) setAsideUndecodableRecord(member breadcrumbMember) (string, error) {
 	slog.Debug("Preparing to set aside a session record this build cannot read.", "path", member.path)
 
-	root, err := os.OpenRoot(c.sessionsDir)
+	root, err := openDirRoot(c.sessionsDir)
 	if err != nil {
 		return "", fmt.Errorf("pin pr sessions dir %s: %w", c.sessionsDir, err)
 	}

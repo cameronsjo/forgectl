@@ -639,7 +639,7 @@ func (c *Client) enumerateAsideFiles(now time.Time, olderThan time.Duration) (fs
 	// through. Opening by path would follow a symlink swapped in between the
 	// Lstat and the open, putting another file's bytes into the audit row —
 	// and then the pinned re-read would be comparing against those.
-	root, err := os.OpenRoot(c.sessionsDir)
+	root, err := openDirRoot(c.sessionsDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("pin pr sessions dir %s: %w", termsafe.QuotePath(c.sessionsDir), err)
 	}
@@ -805,7 +805,7 @@ func (c *Client) pruneOne(cand *asideCandidate, dirInfo fs.FileInfo) {
 // decodable — which is the point, since a set-aside file is by definition one
 // nothing here can read.
 func (c *Client) removeAsideFile(cand *asideCandidate, dirInfo fs.FileInfo) error {
-	root, err := os.OpenRoot(c.sessionsDir)
+	root, err := openDirRoot(c.sessionsDir)
 	if err != nil {
 		return fmt.Errorf("pin pr sessions dir %s: %w", termsafe.QuotePath(c.sessionsDir), err)
 	}
