@@ -47,7 +47,8 @@ func TestEnsureSessionDottedNameOnceIsolated(t *testing.T) {
 // half only logs, so a future tmux that stops rewriting does not fail CI.
 //
 // Mutation that turns it red: map ':' or '.' to anything other than '_' in
-// sessionNameReplacer, or refuse "a$1" (startsTmuxVariable accepting digits).
+// sessionNameReplacer, refuse "a$1" (startsTmuxVariable accepting digits), or
+// run normalizeSessionName's refusal before its mapping ("r$.b" is created).
 func TestNameRulesMatchTmuxIsolated(t *testing.T) {
 	c, runner, tmuxBin := isolatedTmux(t)
 	ctx := context.Background()
@@ -80,7 +81,7 @@ func TestNameRulesMatchTmuxIsolated(t *testing.T) {
 		}
 	}
 
-	for _, name := range []string{"r$b", "r${x}", `r\b`, "r;"} {
+	for _, name := range []string{"r$b", "r${x}", `r\b`, "r;", "r$.b", "r$:c"} {
 		if _, err := c.CreateSession(ctx, name, ""); !errors.Is(err, ErrUnsafeOperand) {
 			t.Fatalf("CreateSession(%q) = %v, want ErrUnsafeOperand", name, err)
 		}
@@ -93,7 +94,7 @@ func TestNameRulesMatchTmuxIsolated(t *testing.T) {
 			t.Fatalf("ListSessions: %v", err)
 		}
 		for _, s := range sessions {
-			if s.ID == out && s.Name == name {
+			if s.ID == out && s.Name == StoredSessionName(name) {
 				t.Logf("tmux now stores session name %q verbatim; its refusal could be relaxed", name)
 			}
 		}

@@ -280,7 +280,9 @@ func (e exitedSocketError) Error() string {
 // ExitedSocketPath returns the socket file an exited server left behind, when
 // err carries one (an ErrServerExited verdict). A message that rewords that
 // verdict uses it to keep the path: an operator running more than one server
-// needs to know which socket to clear (forgectl#815).
+// needs to know which socket to clear (forgectl#815). The path is returned
+// raw, unescaped: it can derive from $TMUX_TMPDIR, so a caller printing it
+// must quote it (termsafe.QuotePath) before it reaches a terminal.
 func ExitedSocketPath(err error) (string, bool) {
 	var exited exitedSocketError
 	if errors.As(err, &exited) {

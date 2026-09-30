@@ -69,8 +69,9 @@ func TestNewWindowRefusesNamesTmuxRewrites(t *testing.T) {
 // names tmux would rewrite unpredictably are refused before any command.
 //
 // Mutation that turns it red: return name unchanged from normalizeSessionName
-// (the argv carries "my.proj"), or drop its refuseRewrittenName call (the
-// refused names reach new-session).
+// (the argv carries "my.proj"), drop its refuseRewrittenName call (the refused
+// names reach new-session), or run that refusal on the raw name ("a$.b"
+// reaches new-session as "a$_b").
 func TestCreateSessionNormalizesAndRefuses(t *testing.T) {
 	for name, stored := range map[string]string{"my.proj": "my_proj", "a:b.c": "a_b_c", "a$1;b": "a$1;b"} {
 		t.Run(name, func(t *testing.T) {
@@ -89,7 +90,9 @@ func TestCreateSessionNormalizesAndRefuses(t *testing.T) {
 			}
 		})
 	}
-	for _, name := range []string{"a$b", "a${x}", `a\b`, "x;", "a\tb", "a\x7fb", "a\xffb", "a\x1fb"} {
+	// "a$.b" and "a$:b" pass a check of the raw name but map to "a$_b", which
+	// tmux stores with a backslash: the refusal must run on the mapped name.
+	for _, name := range []string{"a$b", "a${x}", `a\b`, "x;", "a\tb", "a\x7fb", "a\xffb", "a\x1fb", "a$.b", "a$:b"} {
 		t.Run(name, func(t *testing.T) {
 			fake := &exec.FakeRunner{}
 			c := New(fake)

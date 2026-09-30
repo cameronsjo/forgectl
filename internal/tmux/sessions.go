@@ -168,11 +168,25 @@ var sessionNameReplacer = strings.NewReplacer(":", "_", ".", "_")
 //   - everything refuseRewrittenName lists is REFUSED. Those rewrites are
 //     escaping artefacts rather than a naming rule, and predicting one would
 //     silently bring the duplicate-create bug back the day tmux changed it.
+//
+// The refusal runs on the MAPPED name, not the one asked for: mapping can
+// create a rewrite the original did not have ("a$.b" maps to "a$_b", and tmux
+// stores that as `a\$_b`).
 func normalizeSessionName(name string) (string, error) {
-	if err := refuseRewrittenName(name, true, true); err != nil {
+	stored := StoredSessionName(name)
+	if err := refuseRewrittenName(stored, true, true); err != nil {
 		return "", err
 	}
-	return sessionNameReplacer.Replace(name), nil
+	return stored, nil
+}
+
+// StoredSessionName maps name the way tmux does when it stores a session name:
+// ':' and '.' become '_' (forgectl#815). A caller that compares a listed
+// session name against a configured one uses it, so the configured "x.y"
+// matches the "x_y" every listing shows. It does not refuse anything;
+// EnsureSession and CreateSession do that.
+func StoredSessionName(name string) string {
+	return sessionNameReplacer.Replace(name)
 }
 
 // refuseRewrittenName refuses a session or window name that tmux 3.4 would
