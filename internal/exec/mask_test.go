@@ -549,6 +549,20 @@ func TestEachMatch_FindsEveryOverlappingOccurrence(t *testing.T) {
 //
 // Mutation: delete the entries loop from straddleLen and the tail keeps
 // "EYNAME=abcd".
+// Every cut position through a glued entry, including the one that lands
+// exactly after '=', must keep the short value out of the tail.
+func TestMaskedTail_NoCutPositionExposesTheGluedValue(t *testing.T) {
+	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"LONGKEYNAME=ab"}))
+	const stream = "xxxxxxxxxxxxxxxxxxxxxxxx LONGKEYNAME=abcd tail"
+	for limit := 1; limit <= len(stream); limit++ {
+		tb := &tailBuffer{limit: limit}
+		_, _ = tb.Write([]byte(stream))
+		if got, _ := maskedTail(tb, m); strings.Contains(got, "ab") {
+			t.Errorf("limit %d: the value survived the cut: %q", limit, got)
+		}
+	}
+}
+
 func TestMaskedTail_CutInsideAnEntryKeyHidesTheGluedValue(t *testing.T) {
 	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"LONGKEYNAME=ab"}))
 	tb := &tailBuffer{limit: 16}

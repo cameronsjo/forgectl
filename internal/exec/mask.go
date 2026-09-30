@@ -365,9 +365,11 @@ func (m argMask) straddleLen(s string) int {
 		}
 		for _, e := range m.entries {
 			_, v, _ := strings.Cut(e, "=")
-			// Longer than the value: "=VALUE" at the least, so the whole
-			// value is inside it.
-			for l := min(len(e)-1, len(s)); l > max(n, len(v)); l-- {
+			// At least as long as the value: a suffix of exactly the value
+			// is the cut landing right after '=', where the bare value then
+			// starts the tail glued to whatever followed it. Dropping a tail
+			// that merely starts with the value is harmless.
+			for l := min(len(e)-1, len(s)); l > max(n, len(v)-1); l-- {
 				if strings.HasPrefix(s, e[len(e)-l:]) {
 					n = l
 					break
