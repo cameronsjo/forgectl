@@ -3,12 +3,12 @@
 package cli
 
 import (
-	"errors"
 	"os"
 	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -68,12 +68,12 @@ func jsonFailure(cmd *cobra.Command, err error, asJSON bool, code string) error 
 		return err
 	}
 	var silent *silentCodedError
-	if errors.As(err, &silent) {
+	if chainAs(err, &silent) {
 		return silent
 	}
 	path := ""
 	var withPath jsonFailurePath
-	if errors.As(err, &withPath) {
+	if chainAs(err, &withPath) {
 		path = withPath.jsonFailurePath()
 	}
 	enc := termsafe.JSONEncoder(cmd.ErrOrStderr())
@@ -112,7 +112,8 @@ var jsonOSArgs = func() []string { return os.Args[1:] }
 // argvWantsJSON reports whether cmd was asked for --json, for the one caller
 // that cannot trust the parsed flag: a flag-error handler, where a parse
 // failure stopped pflag before it reached --json. It scans the raw arguments
-// (up to a "--" terminator), mirroring pflag: a bare --json is true,
+// (up to a "--" terminator), mirroring pflag: a token that is the value of a
+// known value-taking flag is skipped, a bare --json is true,
 // --json=<v> is strconv.ParseBool(v) (an unparseable value is ignored, as
 // pflag would have rejected it), and the LAST occurrence wins. With no
 // occurrence in the arguments the parsed flag value decides. A verb that does
@@ -122,8 +123,10 @@ func argvWantsJSON(cmd *cobra.Command) bool {
 		return false
 	}
 	seen, want := false, false
+	args := jsonOSArgs()
 scan:
-	for _, a := range jsonOSArgs() {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		switch {
 		case a == "--":
 			break scan
@@ -133,12 +136,37 @@ scan:
 			if v, err := strconv.ParseBool(strings.TrimPrefix(a, "--json=")); err == nil {
 				seen, want = true, v
 			}
+		case takesSeparateValue(cmd, a):
+			// pflag hands the next token to this flag as its value, so a
+			// --json there (`--host --json`) is data, not the flag.
+			i++
 		}
 	}
 	if seen {
 		return want
 	}
 	return jsonFlagParsed(cmd)
+}
+
+// takesSeparateValue reports whether token a is a flag cmd knows that takes
+// its value from the following token: `--name` or `-n` with no inline value,
+// on a flag that has no NoOptDefVal (a bool's is "true"). An unknown flag is
+// assumed not to take one, since pflag stops at it anyway.
+func takesSeparateValue(cmd *cobra.Command, a string) bool {
+	var f *pflag.Flag
+	switch {
+	case strings.HasPrefix(a, "--") && len(a) > 2 && !strings.Contains(a, "="):
+		name := a[2:]
+		if f = cmd.Flags().Lookup(name); f == nil {
+			f = cmd.InheritedFlags().Lookup(name)
+		}
+	case len(a) == 2 && a[0] == '-' && a[1] != '-':
+		short := a[1:]
+		if f = cmd.Flags().ShorthandLookup(short); f == nil {
+			f = cmd.InheritedFlags().ShorthandLookup(short)
+		}
+	}
+	return f != nil && f.NoOptDefVal == ""
 }
 
 // installJSONErrorContract walks root's tree and, on every command that

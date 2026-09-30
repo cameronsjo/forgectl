@@ -181,6 +181,8 @@ func TestArgvWantsJSON_ParsesArgs(t *testing.T) {
 		{"double bare", []string{"--json", "--json"}, true},
 		{"true then false", []string{"--json", "--json=false"}, false},
 		{"false then true", []string{"--json=false", "--json"}, true},
+		{"value of a value-taking flag", []string{"list", "--limit", "--json"}, false},
+		{"after a flag's value", []string{"list", "--limit", "5", "--json"}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

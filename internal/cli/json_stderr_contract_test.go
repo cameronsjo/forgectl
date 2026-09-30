@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,6 +126,22 @@ func decodeOneStderrObject(t *testing.T, stderr string) map[string]any {
 	return got
 }
 
+// stderrJSONObject returns the first JSON object found at the start of a
+// stderr line, or "". Human progress lines never open with "{", so any hit
+// is a failure object written on top of a verdict.
+func stderrJSONObject(stderr string) string {
+	for i := 0; i < len(stderr); i++ {
+		if stderr[i] != '{' || (i > 0 && stderr[i-1] != '\n') {
+			continue
+		}
+		var obj map[string]any
+		if json.NewDecoder(strings.NewReader(stderr[i:])).Decode(&obj) == nil {
+			return stderr[i:]
+		}
+	}
+	return ""
+}
+
 // TestJSONStderr_BadFlag_EveryVerb runs every --json verb in the production
 // tree with an unknown flag, both after --json (pflag has parsed it) and before
 // it (pflag stopped first, so only the raw-argv scan can tell). Each run must
@@ -139,8 +156,10 @@ func TestJSONStderr_BadFlag_EveryVerb(t *testing.T) {
 	isolateJSONContractEnv(t)
 	paths := jsonVerbPaths(productionJSONRoot(&exec.FakeRunner{}))
 	// A floor, so a walker that stopped finding verbs cannot pass vacuously.
-	if len(paths) < 40 {
-		t.Fatalf("found %d --json verbs, want at least 40: %v", len(paths), paths)
+	// The floor is the real count, so losing a verb (or a whole command
+	// group) fails here; raise it when a --json verb lands.
+	if len(paths) < 54 {
+		t.Fatalf("found %d --json verbs, want at least 54: %v", len(paths), paths)
 	}
 	for _, path := range paths {
 		name := strings.Join(path, " ")
@@ -203,10 +222,12 @@ func TestJSONStderr_BadFlag_EveryVerb(t *testing.T) {
 // TestJSONStderr_NoUnwrappedErrorSites pins the assumption
 // installJSONErrorContract rests on: cobra's required-flag and flag-group
 // checks, and the legacy unknown-subcommand check on a parent with a nil Args,
-// all raise errors outside the three sites the contract wraps. No --json verb
-// may use them until the contract covers them too.
+// all raise errors outside the three sites the contract wraps, and so do
+// PreRun and PersistentPreRun hooks. No --json verb may use them until the
+// contract covers them too.
 //
-// Mutation that turns it red: MarkFlagRequired on any --json verb's flag.
+// Mutations that turn it red: MarkFlagRequired on any --json verb's flag; a
+// PreRunE on any --json verb, or a PersistentPreRunE on the root.
 func TestJSONStderr_NoUnwrappedErrorSites(t *testing.T) {
 	isolateJSONContractEnv(t)
 	root := productionJSONRoot(&exec.FakeRunner{})
@@ -228,6 +249,15 @@ func TestJSONStderr_NoUnwrappedErrorSites(t *testing.T) {
 				}
 			}
 		})
+		for c := cmd; c != nil; c = c.Parent() {
+			// A hook error leaves cobra outside the three wrapped sites.
+			if c.PersistentPreRunE != nil || c.PersistentPreRun != nil {
+				t.Errorf("%s: %s has a PersistentPreRun hook, whose error bypasses the --json contract", cmd.CommandPath(), c.CommandPath())
+			}
+		}
+		if cmd.PreRunE != nil || cmd.PreRun != nil {
+			t.Errorf("%s has a PreRun hook, whose error bypasses the --json contract", cmd.CommandPath())
+		}
 		if cmd.HasSubCommands() && cmd.Args == nil {
 			t.Errorf("%s has subcommands and a nil Args: cobra's legacy unknown-subcommand error bypasses the --json contract", cmd.CommandPath())
 		}
@@ -387,6 +417,11 @@ func TestJSONStderr_VerdictEmitted_SilentExit(t *testing.T) {
 		{name: "projects list: strict on a degraded host", build: func(t *testing.T) (*cobra.Command, []string) {
 			return newProjectsListCmd(listFixture(t, degradedGitHubRunFunc)), []string{"list", "--json", "--strict"}
 		}},
+		{name: "docs check: error findings", stderrFree: true, build: func(t *testing.T) (*cobra.Command, []string) {
+			dir := t.TempDir()
+			docsCheckWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[x](missing.md)\n")
+			return newDocsCheckCmd(module.Deps{}), []string{"check", "--json", dir}
+		}},
 		{name: "update run: a step failed", build: func(t *testing.T) (*cobra.Command, []string) {
 			client := updatepkg.New(&exec.FakeRunner{}, updatepkg.WithSteps([]updatepkg.Step{
 				fakeUpdateStep("npm", true, errors.New("boom")),
@@ -406,8 +441,8 @@ func TestJSONStderr_VerdictEmitted_SilentExit(t *testing.T) {
 				t.Fatalf("stdout = %q, not one JSON verdict: %v", stdout, jerr)
 			}
 			assertNoFangFrame(t, stderr)
-			if strings.Contains(stderr, `"code"`) {
-				t.Errorf("stderr = %q carries a failure object on top of the verdict", stderr)
+			if obj := stderrJSONObject(stderr); obj != "" {
+				t.Errorf("stderr carries a JSON object on top of the stdout verdict: %s", obj)
 			}
 			if tt.stderrFree && stderr != "" {
 				t.Errorf("stderr = %q, want empty", stderr)
@@ -478,5 +513,46 @@ func TestJSONFailure_Unit(t *testing.T) {
 	}
 	if err := jsonVerdict(nil, true); err != nil {
 		t.Errorf("jsonVerdict(nil) = %v", err)
+	}
+}
+
+// TestJSONStderr_JSONAsAnotherFlagsValue pins the raw-argv scan's value skip:
+// in `--host --json --forgectl-bogus` pflag reads --json as --host's value, so
+// the unknown-flag error is the human one.
+//
+// Mutation that turns it red: drop the takesSeparateValue case in
+// argvWantsJSON.
+func TestJSONStderr_JSONAsAnotherFlagsValue(t *testing.T) {
+	isolateJSONContractEnv(t)
+	_, stderr, err := runJSONThroughFang(t, productionJSONRoot(&exec.FakeRunner{}), "projects", "list", "--host", "--json", "--forgectl-bogus")
+	if err == nil {
+		t.Fatal("an unknown flag was accepted")
+	}
+	if strings.Contains(stderr, `"code"`) {
+		t.Errorf("stderr = %q, want the human error: --json here is --host's value", stderr)
+	}
+}
+
+// TestExitCode_TypedNilInChainDoesNotPanic pins the pre-existing crash: a
+// chain holding a typed-nil *os.PathError panics inside errors.As, because
+// (*os.PathError)(nil).Unwrap dereferences its receiver. ExitCode and
+// jsonFailure must fall back to exit 1 instead.
+//
+// Mutation that turns it red: make chainAs call errors.As with no recover.
+func TestExitCode_TypedNilInChainDoesNotPanic(t *testing.T) {
+	err := fmt.Errorf("stat: %w", (*os.PathError)(nil))
+	if got := ExitCode(err); got != 1 {
+		t.Errorf("ExitCode = %d, want 1", got)
+	}
+	var buf bytes.Buffer
+	c := &cobra.Command{Use: "x"}
+	c.SetErr(&buf)
+	got := jsonFailure(c, err, true, jsonCodeFailed)
+	if ExitCode(got) != 1 {
+		t.Errorf("jsonFailure exit = %d, want 1", ExitCode(got))
+	}
+	var obj jsonFailureObject
+	if jerr := json.Unmarshal(buf.Bytes(), &obj); jerr != nil || obj.Code != jsonCodeFailed || obj.Path != "" {
+		t.Errorf("stderr = %q (%v), want one failed object with an empty path", buf.String(), jerr)
 	}
 }
