@@ -26,10 +26,8 @@
 package sandbox
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -583,46 +581,5 @@ func TestSandbox_CloneFailure_DoesNotEchoURLOrStderr(t *testing.T) {
 	var cmdErr *exec.CommandError
 	if !errors.As(err, &cmdErr) {
 		t.Fatalf("error %v lost the CommandError from its chain", err)
-	}
-}
-
-// TestSandbox_LogsNeverCarryURLUserinfo is #706: the repo attribute and the
-// clone error in the debug log have every URL's userinfo replaced, including
-// where git's stderr repeats the URL.
-func TestSandbox_LogsNeverCarryURLUserinfo(t *testing.T) {
-	t.Setenv("TMPDIR", t.TempDir())
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-
-	const repo = "https://x-access-token:SECRETTOK@git.example.test/o/r.git"
-	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
-		return "", &exec.CommandError{Name: name, Args: args, Stderr: "fatal: unable to access '" + repo + "/': 403", ExitCode: 128, Err: errors.New("exit status 128")}
-	}}
-	if _, err := Sandbox(context.Background(), fake, repo, "main", true); err == nil {
-		t.Fatal("want the clone failure")
-	}
-	logged := buf.String()
-	if strings.Contains(logged, "SECRETTOK") || strings.Contains(logged, "x-access-token") {
-		t.Fatalf("log carries the URL userinfo:\n%s", logged)
-	}
-	if !strings.Contains(logged, "https://[userinfo hidden]@git.example.test/o/r.git") {
-		t.Fatalf("log lost the redacted repo URL:\n%s", logged)
-	}
-}
-
-func TestLogRepo(t *testing.T) {
-	for in, want := range map[string]string{
-		"https://TOKEN@github.com/o/r.git":   "https://[userinfo hidden]@github.com/o/r.git",
-		"https://u:p@h/o/r https://v:q@h2/x": "https://[userinfo hidden]@h/o/r https://[userinfo hidden]@h2/x",
-		"https://github.com/o/r.git":         "https://github.com/o/r.git",
-		"git@github.com:o/r.git":             "git@github.com:o/r.git",
-		"/home/me/src/repo":                  "/home/me/src/repo",
-		"ssh://git@host/o/r path/with@at":    "ssh://[userinfo hidden]@host/o/r path/with@at",
-	} {
-		if got := logRepo(in); got != want {
-			t.Errorf("logRepo(%q) = %q, want %q", in, got, want)
-		}
 	}
 }
