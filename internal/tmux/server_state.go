@@ -187,13 +187,16 @@ func (c *Client) classifiableSocket(args []string) (path string, ok bool, refusa
 // it is safe there: a false positive only withholds the proceed verdict.
 func (c *Client) pinnedArgs(args []string) bool {
 	if len(args) < 2 || args[0] != "-S" || args[1] != c.socket {
+		// The length, never the argv: a refused argv can carry
+		// `new-window -e KEY=VALUE`, whose value the Runner's per-call mask
+		// would hide but this log line cannot see (forgectl#775).
 		slog.Debug("Refusing argv this pinned client did not build.",
-			"pin", c.socket, "argv", args)
+			"pin", c.socket, "argc", len(args), "reason", "the argv does not lead with the pin")
 		return false
 	}
 	if hasExplicitSocketArg(args[2:]) {
 		slog.Debug("Refusing argv naming a second socket after the pin.",
-			"pin", c.socket, "argv", args)
+			"pin", c.socket, "argc", len(args), "reason", "a socket option follows the pin")
 		return false
 	}
 	return true
