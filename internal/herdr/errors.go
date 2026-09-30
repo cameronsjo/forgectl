@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"unicode"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/redact"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // exitFailure is the status herdr exits with when it refuses a request
@@ -30,21 +30,20 @@ type Error struct {
 // every other child-stderr text forgectl renders: herdr can echo a value it
 // was handed, and a line holding a credential shape reads as [redacted].
 // redact.Text works per line, so it runs first, while the line breaks that
-// printable drops still mark its boundaries.
+// printable escapes still mark its boundaries.
 func (e *Error) Error() string {
 	return "herdr: " + printable(e.Code) + ": " + printable(redact.Text(e.Message))
 }
 
-// printable drops control characters. herdr's text can echo pane-controlled
-// values (labels, titles), and a decoded \u001b would otherwise reach a
-// terminal that prints the error.
+// printable renders herdr text as one inert terminal line through
+// termsafe.SafeLine, as forgectl's other child-stderr echoes are. herdr's
+// text can echo pane-controlled values (labels, titles): a decoded \u001b
+// would drive a terminal that prints the error, and a bidi override or other
+// format character (Cf, e.g. U+202E) would reorder what the operator reads
+// (#825). SafeLine shows each such rune as its escape rather than dropping
+// it, so the operator can see something was there.
 func printable(s string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return -1
-		}
-		return r
-	}, s)
+	return termsafe.SafeLine(s)
 }
 
 // Unwrap returns the *[exec.CommandError] behind the refusal.
