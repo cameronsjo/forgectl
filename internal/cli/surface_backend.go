@@ -13,6 +13,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/surface/cmuxadapter"
 	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/tmuxadapter"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Backend selection.
@@ -99,7 +100,7 @@ func newTmuxAdapter() (backend.Adapter, error) {
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return nil, fmt.Errorf("%w: resolve tmux path: %w", errBackendUnavailable, err)
+		return nil, fmt.Errorf("%w: resolve tmux path: %w", errBackendUnavailable, termsafe.Error(err))
 	}
 	// Assigned and returned explicitly rather than forwarded. A bare
 	// `return tmuxadapter.New(...)` converts New's nil *Adapter into a NON-nil
@@ -128,7 +129,7 @@ func newHerdrAdapter(warnings io.Writer) (backend.Adapter, error) {
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return nil, fmt.Errorf("%w: resolve herdr path: %w", errBackendUnavailable, err)
+		return nil, fmt.Errorf("%w: resolve herdr path: %w", errBackendUnavailable, termsafe.Error(err))
 	}
 	// Assigned and returned explicitly rather than forwarded, for the reason
 	// spelled out in newTmuxAdapter: a bare return converts a nil *Adapter into
@@ -157,7 +158,7 @@ func newCmuxAdapter(warnings io.Writer) (backend.Adapter, error) {
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return nil, fmt.Errorf("%w: resolve cmux path: %w", errBackendUnavailable, err)
+		return nil, fmt.Errorf("%w: resolve cmux path: %w", errBackendUnavailable, termsafe.Error(err))
 	}
 	// Assigned and returned explicitly rather than forwarded, for the reason
 	// spelled out in newTmuxAdapter: a bare return would convert a nil *Adapter

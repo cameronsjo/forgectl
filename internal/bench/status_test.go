@@ -196,13 +196,18 @@ func TestCheckHearth_UnavailableWhenDockerFails(t *testing.T) {
 	t.Setenv("HEARTH_DIR", "")
 	cfg := config.Config{Bench: config.BenchConfig{HearthDir: "/x/hearth"}}
 	runner := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
-		return "", errors.New("docker: command not found")
+		return "", errors.New("docker: STDERRMARKER\x1b[2J")
 	}}
 
 	c := checkHearth(context.Background(), cfg, runner, &fakeProber{code: 200})
 
 	if c.State != StateUnavailable {
 		t.Fatalf("state = %q; want unavailable", c.State)
+	}
+	// docker's stderr is the daemon's and plugins' text: the Reason names
+	// the failure without it (#716).
+	if c.Reason != "docker compose unavailable" {
+		t.Errorf("reason = %q, want the categorical failure without docker's stderr", c.Reason)
 	}
 }
 
@@ -278,13 +283,16 @@ func TestCheckChronicle_UnavailableWhenStatusFails(t *testing.T) {
 	t.Setenv("CHRONICLE_DIR", "")
 	cfg := config.Config{Bench: config.BenchConfig{ChronicleDir: "/x/chronicle"}}
 	runner := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
-		return "", errors.New("uv: no such directory")
+		return "", errors.New("uv: STDERRMARKER\x1b[2J")
 	}}
 
 	c := checkChronicle(context.Background(), cfg, runner)
 
 	if c.State != StateUnavailable {
 		t.Fatalf("state = %q; want unavailable", c.State)
+	}
+	if c.Reason != "chronicle status failed" {
+		t.Errorf("reason = %q, want the categorical failure without chronicle's stderr (#716)", c.Reason)
 	}
 }
 
@@ -517,4 +525,40 @@ func equalStr(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestLastSyncDetail: chronicle's last_sync is rendered from the parsed time,
+// never from its JSON text (#716), and an offset-less value renders with no
+// zone rather than a "Z" it never stated (#738).
+func TestLastSyncDetail(t *testing.T) {
+	for raw, want := range map[string]string{
+		"2026-07-08T10:00:00Z":                             "2026-07-08T10:00:00Z",
+		"2026-07-08T10:00:00.123456+02:00":                 "2026-07-08T10:00:00+02:00",
+		"2026-07-08T10:00:00.123456":                       "2026-07-08T10:00:00",
+		"2026-07-08T10:00:00":                              "2026-07-08T10:00:00",
+		"MARKER\x1b[2J":                                    "unrecognized timestamp",
+		"2026-07-08T10:00:00Z" + strings.Repeat("x", 5000): "unrecognized timestamp",
+	} {
+		if got := lastSyncDetail(raw); got != want {
+			t.Errorf("lastSyncDetail(%.40q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestCheckChronicle_LastSyncIsNeverRawText(t *testing.T) {
+	t.Setenv("CHRONICLE_DIR", "")
+	cfg := config.Config{Bench: config.BenchConfig{ChronicleDir: "/x/chronicle"}}
+	body := strings.Replace(chronicleJSON, `"last_sync":"2026-07-08T10:00:00Z"`, `"last_sync":"MARKER\u001b[2J"`, 1)
+	runner := &exec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
+		if name == "uv" {
+			return body, nil
+		}
+		return "", nil
+	}}
+	c := checkChronicle(context.Background(), cfg, runner)
+	for _, d := range c.Details {
+		if strings.Contains(d, "MARKER") {
+			t.Fatalf("detail %q renders chronicle's last_sync text", d)
+		}
+	}
 }

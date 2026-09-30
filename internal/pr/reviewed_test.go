@@ -198,3 +198,23 @@ func TestReviewedStore_Sync_NoChange_NoWrite(t *testing.T) {
 		t.Errorf("no-op Sync wrote a file (err=%v)", err)
 	}
 }
+
+// splitLastElem must not Clean: "link/.." keeps its ".." for EvalSymlinks to
+// apply physically (forgectl#791).
+//
+// Mutation that turns it red: implement it as filepath.Dir(p),
+// filepath.Base(p) (the ".." case collapses by name).
+func TestSplitLastElem_DoesNotClean(t *testing.T) {
+	sep := string(filepath.Separator)
+	for _, tc := range []struct{ in, dir, base string }{
+		{sep + "a" + sep + "link" + sep + ".." + sep + "x", sep + "a" + sep + "link" + sep + "..", "x"},
+		{sep + "x", sep, "x"},
+		{"x", ".", "x"},
+		{"a" + sep, "a", ""},
+	} {
+		dir, base := splitLastElem(tc.in)
+		if dir != tc.dir || base != tc.base {
+			t.Errorf("splitLastElem(%q) = (%q, %q), want (%q, %q)", tc.in, dir, base, tc.dir, tc.base)
+		}
+	}
+}

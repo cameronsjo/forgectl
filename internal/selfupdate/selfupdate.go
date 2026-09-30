@@ -13,6 +13,7 @@ package selfupdate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -26,7 +27,7 @@ import (
 const CaskRef = "cameronsjo/tap/forgectl"
 
 // homebrewSafeEnv pins every brew invocation this package makes:
-// exec.HomebrewNoAutoUpdate (the same definition internal/update's brewStep
+// exec.HomebrewNoAutoUpdate() (the same definition internal/update's brewStep
 // merges onto its own calls, so the two packages can never drift apart on
 // that shape) plus three additional HOMEBREW_* variables that redirect
 // where brew's artifact or tap comes from: HOMEBREW_ARTIFACT_DOMAIN
@@ -45,12 +46,26 @@ const CaskRef = "cameronsjo/tap/forgectl"
 // appending is reliable because os/exec.Cmd.Env documents duplicate keys
 // resolving to the LAST occurrence in the slice — our override always sorts
 // after the inherited os.Environ() copy RunWithEnv builds from.
-var homebrewSafeEnv = map[string]string{
-	"HOMEBREW_NO_AUTO_UPDATE":  exec.HomebrewNoAutoUpdate["HOMEBREW_NO_AUTO_UPDATE"],
-	"HOMEBREW_ARTIFACT_DOMAIN": "",
-	"HOMEBREW_CASK_OPTS":       "",
-	"HOMEBREW_BREW_GIT_REMOTE": "",
+//
+// It returns a fresh map on every call, so no brew invocation shares mutable
+// env state with another (forgectl#851).
+func homebrewSafeEnv() map[string]string {
+	env := exec.HomebrewNoAutoUpdate()
+	env["HOMEBREW_ARTIFACT_DOMAIN"] = ""
+	env["HOMEBREW_CASK_OPTS"] = ""
+	env["HOMEBREW_BREW_GIT_REMOTE"] = ""
+	return env
 }
+
+// ErrTapUpdate and ErrCaskUpgrade mark which step of Upgrade failed, so a
+// caller can word the failure from fixed text (#761) without parsing brew's
+// argv or stderr, which relay what the tap's server and git transport send.
+// Each wraps alongside the step's own error; errors.As still reaches the
+// underlying exec.CommandError.
+var (
+	ErrTapUpdate   = errors.New("brew update failed")
+	ErrCaskUpgrade = errors.New("brew upgrade --cask failed")
+)
 
 // IsSourceBuild reports whether the running binary lacks release metadata.
 // meta.Version stays "dev" only on a plain `go build`/`go run` — goreleaser's
@@ -68,7 +83,7 @@ func IsSourceBuild() bool {
 // mutates, safe to call any time. Empty output means up to date; non-empty is
 // brew's own outdated line, returned verbatim as detail.
 func CheckOutdated(ctx context.Context, run exec.Runner) (outdated bool, detail string, err error) {
-	out, err := run.RunWithEnv(ctx, homebrewSafeEnv, "brew", "outdated", "--cask", CaskRef)
+	out, err := run.RunWithEnv(ctx, homebrewSafeEnv(), "brew", "outdated", "--cask", CaskRef)
 	if err != nil {
 		return false, "", fmt.Errorf("brew outdated --cask %s: %w", CaskRef, err)
 	}
@@ -86,20 +101,20 @@ func CheckOutdated(ctx context.Context, run exec.Runner) (outdated bool, detail 
 func Upgrade(ctx context.Context, run exec.Runner) (string, error) {
 	var parts []string
 
-	updateOut, err := run.RunWithEnv(ctx, homebrewSafeEnv, "brew", "update")
+	updateOut, err := run.RunWithEnv(ctx, homebrewSafeEnv(), "brew", "update")
 	if updateOut != "" {
 		parts = append(parts, updateOut)
 	}
 	if err != nil {
-		return strings.Join(parts, "\n\n"), fmt.Errorf("brew update: %w", err)
+		return strings.Join(parts, "\n\n"), fmt.Errorf("%w: %w", ErrTapUpdate, err)
 	}
 
-	upgradeOut, err := run.RunWithEnv(ctx, homebrewSafeEnv, "brew", "upgrade", "--cask", CaskRef)
+	upgradeOut, err := run.RunWithEnv(ctx, homebrewSafeEnv(), "brew", "upgrade", "--cask", CaskRef)
 	if upgradeOut != "" {
 		parts = append(parts, upgradeOut)
 	}
 	if err != nil {
-		return strings.Join(parts, "\n\n"), fmt.Errorf("brew upgrade --cask %s: %w", CaskRef, err)
+		return strings.Join(parts, "\n\n"), fmt.Errorf("%w: %w", ErrCaskUpgrade, err)
 	}
 	return strings.Join(parts, "\n\n"), nil
 }

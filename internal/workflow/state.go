@@ -15,6 +15,8 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/digest"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/tomlerr"
 )
 
 // StateSchema is the run-state sidecar's schema version. It is bumped only on an
@@ -131,13 +133,13 @@ func StatePath(name string) (string, error) {
 func guardAndMakeStateDir(dir string) error {
 	if info, err := os.Lstat(dir); err == nil {
 		if !info.IsDir() {
-			return fmt.Errorf("workflow state path %s is not a real directory (a symlink or file is planted there) — refusing to use it", dir)
+			return fmt.Errorf("workflow state path %s is not a real directory (a symlink or file is planted there) — refusing to use it", termsafe.QuotePath(dir))
 		}
 	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("stat workflow state dir %s: %w", dir, err)
+		return fmt.Errorf("stat workflow state dir %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create workflow state dir %s: %w", dir, err)
+		return fmt.Errorf("create workflow state dir %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	return nil
 }
@@ -160,7 +162,7 @@ func LoadState(name string) (RunState, bool, error) {
 	}
 	var st RunState
 	if _, err := toml.Decode(string(data), &st); err != nil {
-		return RunState{}, false, fmt.Errorf("parse workflow state %q: %w", name, err)
+		return RunState{}, false, fmt.Errorf("parse workflow state %q: %w", name, tomlerr.Scrub(err))
 	}
 	if st.Schema > StateSchema {
 		return RunState{}, false, fmt.Errorf("workflow state %q has schema %d, newer than this binary understands (%d)", name, st.Schema, StateSchema)
@@ -227,7 +229,7 @@ func WriteState(st RunState) error {
 	// The final name is the base of the StatePath already computed above — deriving
 	// it from path keeps the ".state.toml" convention defined only in StatePath.
 	if err := d.rename(tmpName, filepath.Base(path)); err != nil {
-		return fmt.Errorf("commit state file %s: %w", path, err)
+		return fmt.Errorf("commit state file %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	// The rename is atomic, but the parent directory entry stays in the page
 	// cache until the directory itself is fsynced — so a crash right after the

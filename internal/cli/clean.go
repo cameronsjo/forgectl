@@ -10,6 +10,7 @@ import (
 
 	cleanpkg "github.com/cameronsjo/forgectl/internal/clean"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -201,13 +202,13 @@ func runCleanDirs(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.Cle
 	printCleanItems(out, preview.Items)
 
 	if preview.TotalReclaimable == 0 {
-		fmt.Fprintln(out, "\nnothing to reclaim")
+		_, _ = fmt.Fprintln(out, "\nnothing to reclaim")
 		return nil
 	}
-	fmt.Fprintf(out, "\n%s reclaimable across %d target(s)\n", formatBytes(preview.TotalReclaimable), countReclaimable(preview.Items))
+	_, _ = fmt.Fprintf(out, "\n%s reclaimable across %d target(s)\n", formatBytes(preview.TotalReclaimable), countReclaimable(preview.Items))
 
 	if !opts.Apply {
-		fmt.Fprintln(out, "re-run with --apply to delete them")
+		_, _ = fmt.Fprintln(out, "re-run with --apply to delete them")
 		return nil
 	}
 
@@ -216,7 +217,7 @@ func runCleanDirs(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.Cle
 		return err
 	}
 	if !ok {
-		fmt.Fprintln(out, "cancelled")
+		_, _ = fmt.Fprintln(out, "cancelled")
 		return nil
 	}
 
@@ -225,22 +226,22 @@ func runCleanDirs(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.Cle
 		return err
 	}
 
-	fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out)
 	failed := 0
 	for _, item := range result.Items {
 		switch {
 		case item.Err != nil:
-			fmt.Fprintf(out, "FAILED  %s: %v\n", item.Path, item.Err)
+			_, _ = fmt.Fprintf(out, "FAILED  %s: %v\n", termsafe.QuotePath(item.Path), termsafe.Error(item.Err))
 			failed++
 		case item.Skipped:
 			// Already printed in the preview pass above; apply-phase output
 			// only needs to report what actually happened to a delete
 			// attempt.
 		case item.Deleted:
-			fmt.Fprintf(out, "reclaimed %s (%s)\n", item.Path, formatBytes(item.Size))
+			_, _ = fmt.Fprintf(out, "reclaimed %s (%s)\n", termsafe.QuotePath(item.Path), formatBytes(item.Size))
 		}
 	}
-	fmt.Fprintf(out, "\nreclaimed %s\n", formatBytes(result.TotalReclaimed))
+	_, _ = fmt.Fprintf(out, "\nreclaimed %s\n", formatBytes(result.TotalReclaimed))
 	if failed > 0 {
 		// A partial delete failure must not exit 0 — a scripted caller
 		// reading only the exit code needs to see that not everything
@@ -260,19 +261,19 @@ func runCleanCaches(cmd *cobra.Command, client *cleanpkg.Client, apply bool, th 
 	out := cmd.OutOrStdout()
 
 	items := client.ScanCaches(ctx, nil)
-	fmt.Fprintln(out, "\npackage-manager caches:")
+	_, _ = fmt.Fprintln(out, "\npackage-manager caches:")
 	printCacheItems(out, items)
 
 	total := totalCacheSize(items)
 	detected := countCacheDetected(items)
 	if total == 0 {
-		fmt.Fprintln(out, "nothing to reclaim")
+		_, _ = fmt.Fprintln(out, "nothing to reclaim")
 		return nil
 	}
-	fmt.Fprintf(out, "%s reclaimable across %d cache(s)\n", formatBytes(total), detected)
+	_, _ = fmt.Fprintf(out, "%s reclaimable across %d cache(s)\n", formatBytes(total), detected)
 
 	if !apply {
-		fmt.Fprintln(out, "re-run with --apply to clear them")
+		_, _ = fmt.Fprintln(out, "re-run with --apply to clear them")
 		return nil
 	}
 
@@ -288,7 +289,7 @@ func runCleanCaches(cmd *cobra.Command, client *cleanpkg.Client, apply bool, th 
 		return err
 	}
 	if !ok {
-		fmt.Fprintln(out, "cancelled")
+		_, _ = fmt.Fprintln(out, "cancelled")
 		return nil
 	}
 
@@ -300,16 +301,16 @@ func runCleanCaches(cmd *cobra.Command, client *cleanpkg.Client, apply bool, th 
 		case item.Skipped:
 			// Already printed in the preview pass above.
 		case item.Err != nil:
-			fmt.Fprintf(out, "FAILED  %s: %v\n", cacheDisplayName(item.Kind), item.Err)
+			_, _ = fmt.Fprintf(out, "FAILED  %s: %v\n", cacheDisplayName(item.Kind), termsafe.Error(item.Err))
 			failed++
 		case item.Applied:
 			// Reclaimed is the ACTUAL measured delta (dirSize before vs
 			// after the prune), never the pre-prune Size estimate.
-			fmt.Fprintf(out, "cleared %s (%s)\n", cacheDisplayName(item.Kind), formatBytes(item.Reclaimed))
+			_, _ = fmt.Fprintf(out, "cleared %s (%s)\n", cacheDisplayName(item.Kind), formatBytes(item.Reclaimed))
 			totalReclaimed += item.Reclaimed
 		}
 	}
-	fmt.Fprintf(out, "\nreclaimed %s\n", formatBytes(totalReclaimed))
+	_, _ = fmt.Fprintf(out, "\nreclaimed %s\n", formatBytes(totalReclaimed))
 	if failed > 0 {
 		return fmt.Errorf("%d cache(s) failed to clear", failed)
 	}
@@ -357,11 +358,11 @@ func runCleanDocker(cmd *cobra.Command, client *cleanpkg.Client, apply bool, th 
 	out := cmd.OutOrStdout()
 
 	items := client.ScanDocker(ctx)
-	fmt.Fprintln(out, "\ndocker prune:")
+	_, _ = fmt.Fprintln(out, "\ndocker prune:")
 	printDockerItems(out, items)
 
 	if !anyDockerDetected(items) {
-		fmt.Fprintln(out, "docker unreachable; skipping")
+		_, _ = fmt.Fprintln(out, "docker unreachable; skipping")
 		return nil
 	}
 	total := totalDockerReclaimable(items)
@@ -369,14 +370,14 @@ func runCleanDocker(cmd *cobra.Command, client *cleanpkg.Client, apply bool, th 
 	switch {
 	case total == 0 && !unknown:
 		// A GENUINE zero: every non-skipped category parsed cleanly to 0.
-		fmt.Fprintln(out, "nothing to reclaim")
+		_, _ = fmt.Fprintln(out, "nothing to reclaim")
 		return nil
 	case unknown && total == 0:
 		// NOT a genuine zero — one or more categories' size string (shown
 		// above) didn't parse, so the true total is unknown, not zero.
 		// Saying "nothing to reclaim" here would contradict a nonzero-
 		// looking line printed one line above it (forgectl#165 item 6).
-		fmt.Fprintln(out, "reclaimable size unknown for one or more categories (see above) — docker's own output didn't parse cleanly, so this is NOT reported as zero")
+		_, _ = fmt.Fprintln(out, "reclaimable size unknown for one or more categories (see above) — docker's own output didn't parse cleanly, so this is NOT reported as zero")
 	case unknown:
 		// total > 0 here, but ALSO unknown: at least one OTHER category's
 		// size didn't parse, so total only reflects the categories that DID
@@ -384,13 +385,13 @@ func runCleanDocker(cmd *cobra.Command, client *cleanpkg.Client, apply bool, th 
 		// preview printed a flat total with no caveat while the prompt below
 		// (which also keys off `unknown`) asked to prune "an unknown
 		// amount" — a preview/prompt mismatch caught in review.
-		fmt.Fprintf(out, "at least %s reclaimable from docker (one or more categories' size could not be parsed — see above)\n", formatBytes(total))
+		_, _ = fmt.Fprintf(out, "at least %s reclaimable from docker (one or more categories' size could not be parsed — see above)\n", formatBytes(total))
 	default:
-		fmt.Fprintf(out, "%s reclaimable from docker\n", formatBytes(total))
+		_, _ = fmt.Fprintf(out, "%s reclaimable from docker\n", formatBytes(total))
 	}
 
 	if !apply {
-		fmt.Fprintln(out, "re-run with --apply to prune")
+		_, _ = fmt.Fprintln(out, "re-run with --apply to prune")
 		return nil
 	}
 
@@ -403,7 +404,7 @@ func runCleanDocker(cmd *cobra.Command, client *cleanpkg.Client, apply bool, th 
 		return err
 	}
 	if !ok {
-		fmt.Fprintln(out, "cancelled")
+		_, _ = fmt.Fprintln(out, "cancelled")
 		return nil
 	}
 
@@ -416,18 +417,18 @@ func runCleanDocker(cmd *cobra.Command, client *cleanpkg.Client, apply bool, th 
 		case item.Skipped:
 			// Already printed in the preview pass above.
 		case item.Err != nil:
-			fmt.Fprintf(out, "FAILED  %s: %v\n", item.Kind, item.Err)
+			_, _ = fmt.Fprintf(out, "FAILED  %s: %v\n", item.Kind, termsafe.Error(item.Err))
 			failed++
 		case item.Applied && item.ReclaimedKnown:
 			// Reclaimed is parsed from docker's OWN prune-command output,
 			// never the pre-prune Reclaimable estimate.
-			fmt.Fprintf(out, "pruned %s (%s)\n", item.Kind, formatBytes(item.Reclaimed))
+			_, _ = fmt.Fprintf(out, "pruned %s (%s)\n", item.Kind, formatBytes(item.Reclaimed))
 			totalReclaimed += item.Reclaimed
 		case item.Applied:
 			// The prune succeeded, but its output had no parseable "Total"
 			// summary line (a docker version difference, an empty prune) —
 			// say so rather than silently reporting a fabricated zero.
-			fmt.Fprintf(out, "pruned %s (reclaimed size unknown — no parseable total in docker's output)\n", item.Kind)
+			_, _ = fmt.Fprintf(out, "pruned %s (reclaimed size unknown — no parseable total in docker's output)\n", item.Kind)
 			anyUnknown = true
 		}
 	}
@@ -435,7 +436,7 @@ func runCleanDocker(cmd *cobra.Command, client *cleanpkg.Client, apply bool, th 
 	if anyUnknown {
 		msg += " (at least — one or more categories' reclaimed size could not be parsed)"
 	}
-	fmt.Fprintln(out, msg)
+	_, _ = fmt.Fprintln(out, msg)
 	if failed > 0 {
 		return fmt.Errorf("%d docker categories failed to prune", failed)
 	}
@@ -450,10 +451,10 @@ func runCleanDocker(cmd *cobra.Command, client *cleanpkg.Client, apply bool, th 
 func printCacheItems(out io.Writer, items []cleanpkg.CacheItem) {
 	for _, item := range items {
 		if item.Skipped {
-			fmt.Fprintf(out, "skip  %s — %s\n", cacheDisplayName(item.Kind), item.SkipReason)
+			_, _ = fmt.Fprintf(out, "skip  %s — %s\n", cacheDisplayName(item.Kind), item.SkipReason)
 			continue
 		}
-		fmt.Fprintf(out, "%s %s — %s\n", cacheDisplayName(item.Kind), item.Path, formatBytes(item.Size))
+		_, _ = fmt.Fprintf(out, "%s %s — %s\n", cacheDisplayName(item.Kind), termsafe.QuotePath(item.Path), formatBytes(item.Size))
 	}
 }
 
@@ -486,7 +487,7 @@ func countCacheDetected(items []cleanpkg.CacheItem) int {
 func printDockerItems(out io.Writer, items []cleanpkg.DockerItem) {
 	for _, item := range items {
 		if item.Skipped {
-			fmt.Fprintf(out, "skip  %-11s — %s\n", item.Kind, item.SkipReason)
+			_, _ = fmt.Fprintf(out, "skip  %-11s — %s\n", item.Kind, termsafe.SafeLine(item.SkipReason))
 			continue
 		}
 		size := formatBytes(item.Reclaimable)
@@ -502,7 +503,7 @@ func printDockerItems(out io.Writer, items []cleanpkg.DockerItem) {
 				size = "unknown"
 			}
 		}
-		fmt.Fprintf(out, "%-11s %s\n", item.Kind, size)
+		_, _ = fmt.Fprintf(out, "%-11s %s\n", item.Kind, size)
 	}
 }
 
@@ -541,18 +542,20 @@ func anyDockerReclaimableUnknown(items []cleanpkg.DockerItem) bool {
 }
 
 // printCleanItems prints the dry-run report: one line per matched target,
-// grouped by whether it would be reclaimed or was skipped.
+// grouped by whether it would be reclaimed or was skipped. A target's path is
+// named by whatever directories sit under the scanned root, so it is quoted
+// on its way to the terminal (forgectl#855); --json keeps it raw.
 func printCleanItems(out io.Writer, items []cleanpkg.Item) {
 	if len(items) == 0 {
-		fmt.Fprintln(out, "no reclaimable directories found")
+		_, _ = fmt.Fprintln(out, "no reclaimable directories found")
 		return
 	}
 	for _, item := range items {
 		if item.Skipped {
-			fmt.Fprintf(out, "skip  %s — %s\n", item.Path, item.SkipReason)
+			_, _ = fmt.Fprintf(out, "skip  %s — %s\n", termsafe.QuotePath(item.Path), item.SkipReason)
 			continue
 		}
-		fmt.Fprintf(out, "%-8s %s — %s\n", item.Kind, item.Path, formatBytes(item.Size))
+		_, _ = fmt.Fprintf(out, "%-8s %s — %s\n", item.Kind, termsafe.QuotePath(item.Path), formatBytes(item.Size))
 	}
 }
 

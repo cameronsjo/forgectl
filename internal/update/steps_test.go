@@ -245,3 +245,24 @@ func assertArgv(t *testing.T, got, want []string) {
 		}
 	}
 }
+
+// SequenceError.Command renders the failed argv through redact.Args (#782).
+// Every argv here is built by this package today; this pins the path a
+// future user-supplied argument would take into the error text.
+//
+// Mutation that turns it red: build Command from a raw strings.Join(argv, " ").
+func TestRunSequence_CommandRedactsArgv(t *testing.T) {
+	const secret = "SEKRIT-update-782" //nolint:gosec // G101: a fake credential the test plants
+	fr := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return "", errors.New("boom") }}
+	_, err := runSequence(context.Background(), fr, nil, []string{"tool", "--token", secret})
+	var seqErr *SequenceError
+	if !errors.As(err, &seqErr) {
+		t.Fatalf("err = %v, want a *SequenceError", err)
+	}
+	if strings.Contains(seqErr.Command, secret) || strings.Contains(err.Error(), secret) {
+		t.Errorf("Command %q / Error %q carries the credential", seqErr.Command, err)
+	}
+	if !strings.HasPrefix(seqErr.Command, "tool --token ") {
+		t.Errorf("Command = %q, want the command and flag name kept", seqErr.Command)
+	}
+}

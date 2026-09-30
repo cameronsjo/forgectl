@@ -6,6 +6,9 @@
 forgectl launch                    # drop straight into the resolved profile (no prompt)
 forgectl launch <harness args…>    # apply the project profile, then exec the configured harness
 forgectl launch agents --json      # pure passthrough (byte-clean); posture injected only when interactive
+forgectl launch mcp list           # Claude subcommands, -- --help, --version: byte-clean, no posture
+forgectl launch -p "<prompt>"      # print mode: only the profile's --permission-mode is injected
+forgectl launch -- <harness args…> # `--` ends launch verbs: `-- doctor` is claude's, not forgectl's
 forgectl launch which              # show the profile resolved for the current directory (alias: config)
 forgectl launch init               # scaffold the [launch] section into config.toml
 forgectl launch migrate            # explicitly import an existing claunch.conf without retiring it
@@ -65,14 +68,50 @@ A command-line `--model` does *not* re-derive: `forgectl launch --model sonnet` 
 
 An `effort` outside the five accepted levels is rejected before anything is launched — by `forgectl launch`, `forgectl launch doctor`, and the `forgectl pr` review dispatch. That last one is why the check exists: a review runs in a *detached* tmux window, and `tmux new-window` returns 0 the instant the window exists — it never observes the child. When the agent then rejects a value and exits, tmux **destroys the window** (`remain-on-exit` is off by default), taking the error message with it. Nothing is left to read. `forgectl pr list` reports each session's window liveness for exactly this reason — see the [pr](pr.md) section.
 
-**Design invariants** (verified against `claude` v2.1.183):
+**Design invariants** (verified against `claude` v2.1.285):
 
 - **Injected posture first, user args last** — a user-supplied flag (e.g. `--model`) overrides the profile because Claude Code is last-flag-wins.
+- **`--add-dir` never sits directly before user args** — it is variadic, so
+  the builder emits every `--add-dir` ahead of `--model`, which closes the
+  list. Otherwise `forgectl launch "<prompt>"` would hand the prompt to claude
+  as one more directory.
+- **Claude subcommands, help, and version pass through byte-clean** — when the
+  first argument is a Claude subcommand (`mcp`, `doctor`, `update`, …; also
+  right after a leading `--`, since claude dispatches it there too) or is
+  `-h`/`--help`/`-v`/`--version`, claude runs with no injected flags and no
+  banner, as plain `claude` would, unless print mode is also selected
+  (`launch -v -p hi` gets the print posture). The profile environment still
+  applies. `forgectl launch --help` and `-h` are forgectl's own help; reach
+  claude's with `forgectl launch -- --help`. Only
+  the first argument counts: later, a help flag can be another flag's value
+  (`-p --append-system-prompt --help "<task>"` runs the task), so it keeps the
+  print or builder posture. The subcommand list is pinned against the
+  installed `claude --help` by a test.
+- **Print mode keeps only the permission mode** — when an argument before
+  Claude's own `--` is `-p`/`--print` in flag position, or `--output-format`
+  with stdout not a terminal (piped or redirected), forgectl injects the
+  profile's `--permission-mode` first and nothing else: no model, effort,
+  `--add-dir`, or `--allow-dangerously-skip-permissions`, and no banner. A
+  later `--permission-mode` of your own still wins. On a terminal,
+  `--output-format` without `-p` opens Claude's interactive session, so it
+  keeps the builder posture, which also carries the permission mode. A print flag that is
+  another option's value is not print mode: `--append-system-prompt -p
+  "<task>"` keeps the builder posture. A flag forgectl does not know is
+  assumed to take a value, which leaves the builder posture and its
+  permission mode in place.
+- **One leading `--` belongs to forgectl, for every harness** — `forgectl
+  launch -- <args>` skips launch's own verbs (`which`, `doctor`, `edit`, …) and
+  drops the separator, so Claude, Codex, and Pi never see it. A shell wrapper
+  that should behave like `claude` is `claude() { forgectl launch -- "$@"; }`.
 - **`agents` is Claude-only** — Codex and Pi profiles reject the passthrough and
   point out that no adapter ships. Claude retains its agents-valid injection
-  and byte-clean `--json`/`--help` passthrough.
+  and byte-clean `--json`/`--help` passthrough. Those count only in flag
+  position, not as a preceding option's value (`agents --settings --help`
+  keeps its posture).
 - **Claude and Codex start in postures that cannot write** — `permission_mode =
-  "plan"` for Claude, `sandbox = "read-only"` for Codex. Both are opt-ups:
+  "plan"` for Claude (print mode included; only subcommands, help, and version,
+  which start no session, carry no permission mode), `sandbox = "read-only"`
+  for Codex. Both are opt-ups:
   `allow_danger` makes bypass reachable, `sandbox = "workspace-write"` makes
   the checkout writable. Neither is on by default.
 - **Pi uses Pi's native tool posture** — forgectl injects only configured

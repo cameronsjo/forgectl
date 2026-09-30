@@ -7,7 +7,7 @@ package pr
 //   [x] An unparseable name yields no time, so the caller lists and keeps it
 // parseRetention (Classification: pure, operator-supplied window)
 //   [x] <N>d and every time.ParseDuration form; zero and negative refuse
-// classifyRepairRows (Classification: what compaction may drop, through both
+// compactLines (Classification: what compaction may drop, through both
 //   streaming passes — scanRepairLog and copyKept)
 //   [x] A settled pair past the cutoff drops
 //   [x] An UNPAIRED intent is kept at any age — it is the dangling signal
@@ -21,6 +21,8 @@ package pr
 //   [x] The intent row precedes the unlink and carries the record's bytes
 //   [x] A failed intent row removes nothing
 //   [x] A byte mismatch against the pinned re-read refuses
+//   [x] A same-bytes copy swapped in after the Lstat is refused on identity,
+//       at the pin read and at the removal re-read (#791)
 //   [x] A compaction rename failure leaves the old log intact and readable
 //   [x] Compaction's own intent row survives into the new file
 //   [x] An over-long line compacts and survives byte-identical, in place (#544)
@@ -34,6 +36,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -145,10 +148,10 @@ func rowLine(t *testing.T, id, outcome string, ts time.Time) []byte {
 	return bytes.TrimSuffix(data, []byte("\n"))
 }
 
-// classifyRepairRows runs lines through both streaming passes and splits the
+// compactLines runs lines through both streaming passes and splits the
 // copy back into lines, so the classification cases below exercise exactly
 // the code a compaction runs.
-func classifyRepairRows(t *testing.T, lines [][]byte, cutoff time.Time) ([][]byte, int) {
+func compactLines(t *testing.T, lines [][]byte, cutoff time.Time) ([][]byte, int) {
 	t.Helper()
 	var data []byte
 	for _, line := range lines {
@@ -165,7 +168,7 @@ func classifyRepairRows(t *testing.T, lines [][]byte, cutoff time.Time) ([][]byt
 	return keep, dropped
 }
 
-func TestClassifyRepairRows(t *testing.T) {
+func TestCompactionKeepsAndDrops(t *testing.T) {
 	now := fixedTime()
 	cutoff := now.Add(-24 * time.Hour)
 	old := now.Add(-48 * time.Hour)
@@ -176,7 +179,7 @@ func TestClassifyRepairRows(t *testing.T) {
 			rowLine(t, "aaa", repairOutcomeIntent, old),
 			rowLine(t, "aaa", repairOutcomeApplied, old),
 		}
-		keep, dropped := classifyRepairRows(t, lines, cutoff)
+		keep, dropped := compactLines(t, lines, cutoff)
 		if dropped != 2 || len(keep) != 0 {
 			t.Fatalf("dropped = %d, kept = %d, want the whole settled pair dropped", dropped, len(keep))
 		}
@@ -187,7 +190,7 @@ func TestClassifyRepairRows(t *testing.T) {
 			rowLine(t, "bbb", repairOutcomeIntent, old),
 			rowLine(t, "bbb", repairOutcomeFailed, old),
 		}
-		keep, dropped := classifyRepairRows(t, lines, cutoff)
+		keep, dropped := compactLines(t, lines, cutoff)
 		if dropped != 2 || len(keep) != 0 {
 			t.Fatalf("dropped = %d, kept = %d, want a failed pair dropped too", dropped, len(keep))
 		}
@@ -195,7 +198,7 @@ func TestClassifyRepairRows(t *testing.T) {
 
 	t.Run("an unpaired intent is kept at any age", func(t *testing.T) {
 		lines := [][]byte{rowLine(t, "ccc", repairOutcomeIntent, old)}
-		keep, dropped := classifyRepairRows(t, lines, cutoff)
+		keep, dropped := compactLines(t, lines, cutoff)
 		if dropped != 0 || len(keep) != 1 {
 			t.Fatalf("dropped = %d, kept = %d — a dangling intent is the only pointer left to a clean room",
 				dropped, len(keep))
@@ -204,7 +207,7 @@ func TestClassifyRepairRows(t *testing.T) {
 
 	t.Run("an unparseable line is kept", func(t *testing.T) {
 		lines := [][]byte{[]byte("{not json"), rowLine(t, "ddd", repairOutcomeIntent, old), rowLine(t, "ddd", repairOutcomeApplied, old)}
-		keep, dropped := classifyRepairRows(t, lines, cutoff)
+		keep, dropped := compactLines(t, lines, cutoff)
 		if dropped != 2 {
 			t.Fatalf("dropped = %d, want only the settled pair", dropped)
 		}
@@ -218,7 +221,7 @@ func TestClassifyRepairRows(t *testing.T) {
 			rowLine(t, "eee", repairOutcomeIntent, time.Time{}),
 			rowLine(t, "eee", repairOutcomeApplied, time.Time{}),
 		}
-		keep, dropped := classifyRepairRows(t, lines, cutoff)
+		keep, dropped := compactLines(t, lines, cutoff)
 		if dropped != 0 || len(keep) != 2 {
 			t.Fatalf("dropped = %d, kept = %d — no age could be established, so nothing may drop", dropped, len(keep))
 		}
@@ -229,7 +232,7 @@ func TestClassifyRepairRows(t *testing.T) {
 			rowLine(t, "fff", repairOutcomeIntent, recent),
 			rowLine(t, "fff", repairOutcomeApplied, recent),
 		}
-		keep, dropped := classifyRepairRows(t, lines, cutoff)
+		keep, dropped := compactLines(t, lines, cutoff)
 		if dropped != 0 || len(keep) != 2 {
 			t.Fatalf("dropped = %d, kept = %d, want an in-window pair kept", dropped, len(keep))
 		}
@@ -240,7 +243,7 @@ func TestClassifyRepairRows(t *testing.T) {
 			rowLine(t, "ggg", repairOutcomeIntent, old),
 			rowLine(t, "ggg", repairOutcomeApplied, recent),
 		}
-		keep, dropped := classifyRepairRows(t, lines, cutoff)
+		keep, dropped := compactLines(t, lines, cutoff)
 		if dropped != 0 || len(keep) != 2 {
 			t.Fatalf("dropped = %d, kept = %d, want the whole pair kept", dropped, len(keep))
 		}
@@ -248,7 +251,7 @@ func TestClassifyRepairRows(t *testing.T) {
 
 	t.Run("a row with no id is kept", func(t *testing.T) {
 		lines := [][]byte{rowLine(t, "", repairOutcomeApplied, old)}
-		keep, dropped := classifyRepairRows(t, lines, cutoff)
+		keep, dropped := compactLines(t, lines, cutoff)
 		if dropped != 0 || len(keep) != 1 {
 			t.Fatalf("dropped = %d, kept = %d — an id-less row can be paired with nothing", dropped, len(keep))
 		}
@@ -477,6 +480,9 @@ func TestPrune_AnUnreadableWindowListRefusesOnlyRefBearingItems(t *testing.T) {
 		t.Errorf("outcome for the ref-bearing file = %q, want %q — an unreadable list is not an absent window",
 			got, pruneOutcomeRefused)
 	}
+	if got := byPath[withRef].Reason; !strings.Contains(got, "could not be read") {
+		t.Errorf("reason for the ref-bearing file = %q, want the generic unreadable-list text", got)
+	}
 	if _, serr := os.Stat(withRef); serr != nil {
 		t.Errorf("a refused item was removed: %v", serr)
 	}
@@ -495,7 +501,10 @@ func TestPrune_AByteMismatchAgainstThePinnedRereadRefuses(t *testing.T) {
 	path := seedAside(t, c, "o-r-1-1.json", 60*24*time.Hour, []byte("{not json"))
 
 	original := readAsideBytes
-	readAsideBytes = func(*os.Root, string) ([]byte, error) { return []byte("{different"), nil }
+	readAsideBytes = func(root *os.Root, name string) ([]byte, fs.FileInfo, error) {
+		_, info, err := original(root, name)
+		return []byte("{different"), info, err
+	}
 	t.Cleanup(func() { readAsideBytes = original })
 
 	report, err := c.Prune(context.Background(), defaultPruneOpts())
@@ -507,6 +516,78 @@ func TestPrune_AByteMismatchAgainstThePinnedRereadRefuses(t *testing.T) {
 	}
 	if _, serr := os.Stat(path); serr != nil {
 		t.Errorf("a file that changed under the sweep was removed anyway: %v", serr)
+	}
+}
+
+// swapAsideForCopy installs beforeAsideRead so that its nth call replaces the
+// set-aside file with a same-bytes copy: a new inode, the same name and bytes.
+// Call 1 is pinAsideCandidate's read, call 2 removeAsideFile's re-read.
+func swapAsideForCopy(t *testing.T, c *Client, nth int) {
+	t.Helper()
+	calls := 0
+	original := beforeAsideRead
+	t.Cleanup(func() { beforeAsideRead = original })
+	beforeAsideRead = func(name string) {
+		calls++
+		if calls != nth {
+			return
+		}
+		path := filepath.Join(c.SessionsDir(), name)
+		data, err := os.ReadFile(filepath.Clean(path))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		// Written beside the original and renamed over it, so the copy's inode
+		// is allocated while the original's is still in use and cannot reuse
+		// its number.
+		copyPath := path + ".copy"
+		if err := os.WriteFile(copyPath, data, 0o600); err != nil { //nolint:gosec // G703: a name beside the test's own seeded set-aside file
+			t.Error(err)
+		}
+		if err := os.Rename(copyPath, path); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+// A same-bytes copy swapped in between a set-aside file's Lstat and its read
+// is refused before its bytes, which match, could approve it (#791). At the
+// pin the refusal is the item's (refused); at the removal it lands after the
+// intent row (failed). Either way the copy stays on disk.
+//
+// Mutations that turn it red: drop the os.SameFile(readInfo, info) check in
+// pinAsideCandidate (the pin case pins the copy, and the removal's own Lstat
+// then refuses it as failed, not refused); or drop the os.SameFile(readInfo,
+// cand.info) check in removeAsideFile (the removal case removes the copy).
+func TestPrune_ASameBytesCopySwappedInAfterTheLstatIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		nth  int
+		want string
+	}{
+		{"at the pin read", 1, pruneOutcomeRefused},
+		{"at the removal re-read", 2, pruneOutcomeFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := pruneClient(t, repairRunner(nil))
+			path := seedAside(t, c, "o-r-1-1.json", 60*24*time.Hour, []byte("{not json"))
+			swapAsideForCopy(t, c, tc.nth)
+
+			report, err := c.Prune(context.Background(), defaultPruneOpts())
+			if err != nil {
+				t.Fatalf("Prune: %v", err)
+			}
+			if len(report.Items) != 1 || report.Items[0].Outcome != tc.want {
+				t.Fatalf("items = %+v, want one %q item", report.Items, tc.want)
+			}
+			if !strings.Contains(report.Items[0].Error, "changed identity") {
+				t.Errorf("error = %q, want the identity refusal", report.Items[0].Error)
+			}
+			if _, serr := os.Stat(path); serr != nil {
+				t.Errorf("the swapped-in copy was removed: %v", serr)
+			}
+		})
 	}
 }
 

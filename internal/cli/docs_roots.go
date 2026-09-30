@@ -7,6 +7,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	docspkg "github.com/cameronsjo/forgectl/internal/docs"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // cadenceFieldReportsEnv names the environment variable forgectl#93's
@@ -33,7 +34,7 @@ func resolveDocsRoots(args []string, cfg config.DocsConfig) ([]string, error) {
 
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, fmt.Errorf("resolve cwd: %w", err)
+		return nil, fmt.Errorf("resolve cwd: %w", termsafe.Error(err))
 	}
 	roots := []string{cwd}
 

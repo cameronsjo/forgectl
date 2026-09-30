@@ -34,6 +34,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // githubRemoteURL is `git remote get-url origin` output for a github.com
@@ -130,7 +131,7 @@ func TestPrune_RemoteDelete_VerifiesViaSingularEndpoint_NeverPlural(t *testing.T
 			case name == "gh" && len(args) > 0 && args[0] == "api":
 				// A real 404 from gh surfaces as a non-nil error whose message
 				// carries the HTTP status — that's the "confirmed gone" signal.
-				return "", &exec.CommandError{Name: "gh", Args: args, Stderr: "HTTP 404: Not Found (https://api.github.com/...)", Err: errors.New("exit status 1")}
+				return "", ghNotFound(args)
 			}
 			return "", nil
 		},
@@ -225,14 +226,14 @@ func TestPrune_RemoteDelete_VerifiesOnTheOriginHost(t *testing.T) {
 					case name == "gh" && len(args) > 0 && args[0] == "api":
 						if contains(args, "--hostname="+tc.wantHost) {
 							// The ref is gone on the host that owns the repo.
-							return "", &exec.CommandError{Name: "gh", Args: args, Stderr: "HTTP 404: Not Found", Err: errors.New("exit status 1")}
+							return "", ghNotFound(args)
 						}
 						if tc.wantHost == "github.com" {
 							return "", errors.New("verification did not name its host")
 						}
 						// Any other host: github.com answering for a repo it
 						// does not have. A 404 here is the false confirmation.
-						return "", &exec.CommandError{Name: "gh", Args: args, Stderr: "HTTP 404: Not Found (https://api.github.com/...)", Err: errors.New("exit status 1")}
+						return "", ghNotFound(args)
 					}
 					return "", nil
 				},
@@ -259,8 +260,8 @@ func TestPrune_RemoteDelete_VerifiesOnTheOriginHost(t *testing.T) {
 			}
 			var gotRemote string
 			for _, call := range fake.Calls {
-				if isGetURL(call.Name, call.Args) && len(call.Args) == 3 {
-					gotRemote = call.Args[2]
+				if isGetURL(call.Name, call.Args) {
+					gotRemote = call.Args[len(call.Args)-1]
 				}
 			}
 			if gotRemote != "upstream" {
@@ -292,7 +293,7 @@ func TestPrune_RemoteDelete_UnverifiableOriginIsAFailure(t *testing.T) {
 						return tc.view, nil
 					}
 					if name == "gh" && len(args) > 0 && args[0] == "api" {
-						return "", &exec.CommandError{Name: "gh", Args: args, Stderr: "HTTP 404: Not Found", Err: errors.New("exit status 1")}
+						return "", ghNotFound(args)
 					}
 					return "", nil
 				},
@@ -592,6 +593,16 @@ func TestEnumerate_GoneBranch_OmittedByDefault_SurfacedWithIncludeGone(t *testin
 	}
 }
 
+// ghNotFound is what `gh api -i` returns for a ref that is gone: exit 1, the
+// status line and headers on stdout, and gh's error line on stderr.
+func ghNotFound(args []string) error {
+	return &exec.CommandError{
+		Name: "gh", Args: args, ExitCode: 1, Err: errors.New("exit status 1"),
+		Output: "HTTP/2.0 404 Not Found\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{\"message\":\"Not Found\",\"status\":\"404\"}",
+		Stderr: "gh: Not Found (HTTP 404)",
+	}
+}
+
 // subprocessFailure is a failed call as the real runner reports it: its text
 // is the subprocess's stderr, which for `git push` relays the remote's
 // sideband and for gh is host-chosen text (#658).
@@ -661,4 +672,226 @@ func TestPrune_RemoteDeleteVerifyFailure_DoesNotEchoGhStderr(t *testing.T) {
 		t.Fatalf("results = %+v, want one unverified failure", results)
 	}
 	assertNoSubprocessEcho(t, results[0].Err)
+}
+
+// TestPrune_VerifyFailureOnABranchNamed404IsNotADelete is #749 item 5 and
+// #812. The verification GET's argv carries the branch name, and
+// CommandError.Error() renders that argv, so matching "404" in the error text
+// read a branch named fix-404 as verified-deleted when gh failed for another
+// reason. gh's stderr is no better: its "gh: … (HTTP N)" line is built from
+// the response body, which the server writes. Only the status line that
+// `gh api -i` prints first on stdout confirms the ref is gone.
+//
+// Mutations, each turning a row red: restore strings.Contains(err.Error(),
+// "404"), or any stderr match for "(HTTP 404)" or "gh: HTTP 404", and the
+// forged-body rows read as deleted; drop "-i" from the argv and the real 404
+// rows fail the argv check; match "404" anywhere in the first line and the
+// reason-phrase row reads as deleted; read another line of stdout (the last)
+// and the body row reads as deleted while the real 404s do not; drop the
+// "HTTP/" prefix check and the bare "x 404" row reads as deleted.
+func TestPrune_VerifyFailureOnABranchNamed404IsNotADelete(t *testing.T) {
+	const real404 = "HTTP/2.0 404 Not Found\r\nContent-Type: application/json\r\n\r\n{\"message\":\"Not Found\"}"
+	for _, tc := range []struct {
+		name        string
+		stdout      string
+		stderr      string
+		wantDeleted bool
+	}{
+		{"real 404", real404, "gh: Not Found (HTTP 404)", true},
+		{"real 404, HTTP/1.1, no message", "HTTP/1.1 404 Not Found\r\n\r\n", "gh: HTTP 404", true},
+		{"real 404 with a scope hint", real404, "gh: Not Found (HTTP 404)\ngh: This API operation needs the \"repo\" scope. To request it, run:  gh auth refresh -h github.com -s repo", true},
+		// #812 review: bodies that make gh's stderr line read as a 404 on
+		// another status.
+		{"502, errors string + message", "HTTP/2.0 502 Bad Gateway\r\n\r\n{\"errors\":\"x\",\"message\":\"HTTP 404\"}", "gh: x (HTTP 404)", false},
+		{"502, errors string only", "HTTP/2.0 502 Bad Gateway\r\n\r\n{\"errors\":\"HTTP 404\"}", "gh: HTTP 404", false},
+		{"403, errors array", "HTTP/2.0 403 Forbidden\r\n\r\n{\"errors\":[{\"message\":\"Not Found (HTTP 404)\"}]}", "gh: Not Found (HTTP 404)", false},
+		// Server text on the status line (the HTTP/1.1 reason phrase) and in
+		// the body cannot make a 404.
+		{"502 with a 404 reason phrase", "HTTP/1.1 502 404 Not Found\r\n\r\n", "gh: HTTP 502", false},
+		{"502 with a 404 status line in its body", "HTTP/2.0 502 Bad Gateway\r\n\r\nHTTP/2.0 404 Not Found", "gh: HTTP 502", false},
+		{"not a status line", "x 404 Not Found", "gh: HTTP 404", false},
+		{"no stdout (gh never got a response)", "", "gh: Not Found (HTTP 404)", false},
+		{"earlier stderr shapes", "HTTP/2.0 502 Bad Gateway\r\n\r\n", "gh: upstream said\ngh: Not Found (HTTP 404)\n (HTTP 502)\n", false},
+	} {
+		fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+			switch {
+			case isGetURL(name, args):
+				return githubRemoteURL, nil
+			case name == "gh" && len(args) > 0 && args[0] == "api":
+				if !contains(args, "-i") {
+					return "", subprocessFailure(name, args)
+				}
+				return "", &exec.CommandError{Name: name, Args: args, Output: tc.stdout, Stderr: tc.stderr, ExitCode: 1, Err: errors.New("exit status 1")}
+			}
+			return "", nil
+		}}
+		item := Classification{
+			Info:  Info{Name: "fix-404", RemoteExists: true, MergedOnServer: true},
+			Group: SafeToDelete,
+		}
+		results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
+		if len(results) != 1 || results[0].Deleted != tc.wantDeleted || (results[0].Err == nil) != tc.wantDeleted {
+			t.Errorf("%s: results = %+v, want deleted=%v", tc.name, results, tc.wantDeleted)
+		}
+	}
+}
+
+// TestPrune_ErrIsTerminalSafeByConstruction is #717: every PruneResult.Err is
+// safe to print as-is, whatever sink reads it. The branch name and worktree
+// path are hostile (a remote refname can carry ESC, C1 controls and U+202E),
+// and git's own stderr is never echoed. printPruneResults escapes again, but
+// the package must not rely on that one sink.
+func TestPrune_ErrIsTerminalSafeByConstruction(t *testing.T) {
+	const hostile = "feat/\x1b[2J\u202egpj.exe\u0085x"
+	const wtPath = "/tmp/wt\x1b]0;pwned\x07"
+	isAPI := func(name string, args []string) bool { return name == "gh" && len(args) > 0 && args[0] == "api" }
+	for _, tc := range []struct {
+		name string
+		opts PruneOptions
+		info Info
+		run  func(name string, args []string) (string, error)
+	}{
+		{"worktree remove fails", PruneOptions{Local: true}, Info{Name: hostile, LocalExists: true, WorktreePath: wtPath},
+			func(name string, args []string) (string, error) {
+				if name == "git" && args[0] == "worktree" {
+					return "", subprocessFailure(name, args)
+				}
+				return "", nil
+			}},
+		{"branch -D fails", PruneOptions{Local: true}, Info{Name: hostile, LocalExists: true},
+			func(name string, args []string) (string, error) {
+				if name == "git" && args[0] == "branch" {
+					return "", subprocessFailure(name, args)
+				}
+				return "", nil
+			}},
+		{"push --delete fails", PruneOptions{RemoteName: "up\x1b[31m", Remote: true}, Info{Name: hostile, RemoteExists: true},
+			func(name string, args []string) (string, error) {
+				if name == "git" && args[0] == "push" {
+					return "", subprocessFailure(name, args)
+				}
+				return "", nil
+			}},
+		{"remote unresolvable", PruneOptions{RemoteName: "origin", Remote: true}, Info{Name: hostile, RemoteExists: true},
+			func(name string, args []string) (string, error) {
+				if isGetURL(name, args) {
+					return "", subprocessFailure(name, args)
+				}
+				return "", nil
+			}},
+		{"still exists", PruneOptions{RemoteName: "origin", Remote: true}, Info{Name: hostile, RemoteExists: true},
+			func(name string, args []string) (string, error) {
+				if isGetURL(name, args) {
+					return githubRemoteURL, nil
+				}
+				return "", nil
+			}},
+		{"verify fails", PruneOptions{RemoteName: "origin", Remote: true}, Info{Name: hostile, RemoteExists: true},
+			func(name string, args []string) (string, error) {
+				switch {
+				case isGetURL(name, args):
+					return githubRemoteURL, nil
+				case isAPI(name, args):
+					return "", subprocessFailure(name, args)
+				}
+				return "", nil
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.info.MergedOnServer = true
+			fake := &exec.FakeRunner{RunFunc: tc.run}
+			item := Classification{Info: tc.info, Group: SafeToDelete}
+			results := New(fake).Prune(context.Background(), []Classification{item}, tc.opts)
+			if len(results) != 1 || results[0].Err == nil || results[0].Deleted {
+				t.Fatalf("results = %+v, want one failure", results)
+			}
+			msg := results[0].Err.Error()
+			for _, r := range msg {
+				if termsafe.IsUnsafeTerminalRune(r) {
+					t.Fatalf("Err %q carries raw unsafe rune %U", msg, r)
+				}
+			}
+			if strings.Contains(msg, "MARKER") {
+				t.Fatalf("Err %q echoes git/gh stderr", msg)
+			}
+			if !strings.Contains(msg, `\x1b[2J`) {
+				t.Fatalf("Err %q does not name the branch in escaped form", msg)
+			}
+		})
+	}
+}
+
+// TestPrune_RemoteDelete_VerifiesAgainstThePushURL is #707: `git push
+// --delete` goes to the remote's push URL, so verification must ask about
+// that repository. A triangular remote fetches from upstream and pushes to a
+// fork; checking the fetch URL asked upstream, whose 404 for a branch it
+// never had read as a confirmed delete while the branch survived on the fork.
+func TestPrune_RemoteDelete_VerifiesAgainstThePushURL(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			switch {
+			case name == "git" && len(args) > 0 && args[0] == "push":
+				return "", nil
+			case isGetURL(name, args) && contains(args, "--push"):
+				return "git@github.com:fork/tools.git", nil
+			case isGetURL(name, args):
+				return "https://github.com/upstream/tools.git", nil
+			case name == "gh" && len(args) > 0 && args[0] == "api":
+				if contains(args, "repos/fork/tools/git/ref/heads/feat/done") {
+					// The delete did not take on the fork: the ref is still there.
+					return `{"ref":"refs/heads/feat/done"}`, nil
+				}
+				return "", ghNotFound(args)
+			}
+			return "", nil
+		},
+	}
+	item := Classification{
+		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Group: SafeToDelete,
+	}
+	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
+	if len(results) != 1 || results[0].Err == nil || results[0].Deleted {
+		t.Fatalf("expected the surviving fork branch to fail verification, got %+v", results)
+	}
+	if !strings.Contains(results[0].Err.Error(), "still exists") {
+		t.Fatalf("Err = %v, want the still-exists verdict from the fork", results[0].Err)
+	}
+}
+
+// TestPrune_RemoteDelete_SeveralPushURLsCannotVerify: `git push --delete`
+// pushes to every push URL, and get-url without --all prints only the first.
+// Verification reads all of them (--all) and refuses more than one rather
+// than checking one repository and leaving the rest unverified.
+func TestPrune_RemoteDelete_SeveralPushURLsCannotVerify(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			switch {
+			case isGetURL(name, args) && contains(args, "--all"):
+				return "git@github.com:a/tools.git\ngit@github.com:b/tools.git\n", nil
+			case isGetURL(name, args):
+				// get-url --push without --all: the first URL only, exit 0.
+				return "git@github.com:a/tools.git", nil
+			case name == "gh" && len(args) > 0 && args[0] == "api":
+				return "", ghNotFound(args)
+			}
+			return "", nil
+		},
+	}
+	item := Classification{
+		Info:  Info{Name: "feat/done", RemoteExists: true, MergedOnServer: true},
+		Group: SafeToDelete,
+	}
+	results := New(fake).Prune(context.Background(), []Classification{item}, PruneOptions{RemoteName: "origin", Remote: true})
+	if len(results) != 1 || results[0].Err == nil || results[0].Deleted {
+		t.Fatalf("expected an unverifiable delete to be a failure, got %+v", results)
+	}
+	if !strings.Contains(results[0].Err.Error(), "more than one push URL") {
+		t.Fatalf("Err = %v, want the several-push-URLs refusal", results[0].Err)
+	}
+	for _, call := range fake.Calls {
+		if call.Name == "gh" {
+			t.Fatalf("gh ran (%q) though the remote has two push URLs", call.Args)
+		}
+	}
 }

@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Snapshot is everything a cache holds: task, project, and label data plus
@@ -32,10 +34,10 @@ func SaveCache(path string, snap Snapshot) error {
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("tasks: create cache directory %s: %w", dir, err)
+		return fmt.Errorf("tasks: create cache directory %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("tasks: write cache %s: %w", path, err)
+		return fmt.Errorf("tasks: write cache %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	return nil
 }
@@ -50,7 +52,7 @@ func LoadCache(path string) (Snapshot, error) {
 	}
 	var snap Snapshot
 	if err := json.Unmarshal(data, &snap); err != nil {
-		return Snapshot{}, fmt.Errorf("tasks: decode cache %s: %w", path, err)
+		return Snapshot{}, termsafe.Categorical("tasks: decode cache "+termsafe.QuotePath(path)+": the cache file is not valid JSON", err)
 	}
 	return snap, nil
 }

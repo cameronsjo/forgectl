@@ -55,6 +55,9 @@ main.surface-document { max-width: 820px; }
    columns of a highlighted block stopped lining up. Fixed upstream after
    Artificer 0.26.0 (docs/artificer-adaptations.md A6). */
 .doc-body pre, .doc-body pre *, .doc-body code * { font-family: var(--font-mono); }
+/* A document past the markup guard is shown as its source (markupguard.go);
+   wrap it, since its lines can be a megabyte long. */
+.doc-body pre.doc-plain-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* A plain quote: a quiet rule on the left. Callouts are blockquotes too and
    carry their own tier styling below. */
 .doc-body blockquote:not(.callout) {
@@ -64,7 +67,8 @@ main.surface-document { max-width: 820px; }
 
 /* ── Properties frontmatter (render.go emits post-sanitizer, escaped fragments) ── */
 .props {
-  background: color-mix(in oklch, var(--bg-raised) 60%, transparent);
+  --props-tint: color-mix(in oklch, var(--bg-raised) 60%, transparent);
+  background: var(--props-tint);
   border: 1px solid var(--border); border-radius: var(--radius-md);
   margin: 0 0 24px; font-family: var(--font-mono); font-size: 13px; overflow: hidden;
 }
@@ -93,10 +97,10 @@ main.surface-document { max-width: 820px; }
 .callout { border-left: 2px solid var(--steel); background: color-mix(in oklch, var(--steel) 10%, transparent); padding: 12px 16px; border-radius: 0 var(--radius-md) var(--radius-md) 0; margin: 16px 0; }
 /* Artificer's global .note (a footnote-scale label rule) also matches the
    note-tier class; restore the size and colour the other tiers inherit. */
-.callout.note { font-size: inherit; color: inherit; border-left-color: var(--accent); background: color-mix(in oklch, var(--accent) 8%, transparent); }
-.callout.warning { border-left-color: var(--attention); background: color-mix(in oklch, var(--attention) 8%, transparent); }
-.callout.danger { border-left-color: var(--urgent); background: color-mix(in oklch, var(--urgent) 8%, transparent); }
-.callout.tip { border-left-color: var(--success); background: color-mix(in oklch, var(--success) 8%, transparent); }
+.callout.note { --callout-tint: color-mix(in oklch, var(--accent) 8%, transparent); font-size: inherit; color: inherit; border-left-color: var(--accent); background: var(--callout-tint); }
+.callout.warning { --callout-tint: color-mix(in oklch, var(--attention) 8%, transparent); border-left-color: var(--attention); background: var(--callout-tint); }
+.callout.danger { --callout-tint: color-mix(in oklch, var(--urgent) 8%, transparent); border-left-color: var(--urgent); background: var(--callout-tint); }
+.callout.tip { --callout-tint: color-mix(in oklch, var(--success) 8%, transparent); border-left-color: var(--success); background: var(--callout-tint); }
 .callout-title { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-weight: 700; font-size: 13px; letter-spacing: 0.04em; color: var(--accent); }
 .callout.warning .callout-title { color: var(--attention); }
 .callout.danger .callout-title { color: var(--urgent); }
@@ -223,6 +227,36 @@ main.surface-document { max-width: 820px; }
 .home .table .num { white-space: nowrap; }
 .docs-nav .sidenav { border-radius: 0; border: 0; flex: 1; overflow-y: auto; }
 main.surface-document { padding: var(--s-xl); overflow-y: auto; min-height: 0; }
+/* The doc pane is the containing block, and the paint clip, for everything a
+   doc renders (forgectl#745). A doc can wear Artificer's position:absolute
+   classes (.tooltip is z-index 1000, white-space: nowrap), and with no
+   positioned ancestor they anchored to the page: a .tooltip--bottom sat under
+   the status bar and made the whole page scroll, a long .tooltip ran across
+   the outline column. contain: paint also contains position:fixed. It sits
+   on <main>, the pane's scroll container, not on .doc-body: clipping
+   .doc-body cut off wide tables and display math that scroll <main>
+   sideways today. Sticky table heads and the pan/zoom viewport are
+   unchanged (measured). */
+main.surface-document { position: relative; contain: paint; }
+/* Four pieces of chrome live inside the doc pane, so that clip cannot keep a
+   doc off them (forgectl#759): the narrow-width outline, the skip-content
+   banner and the properties block (render.go puts both above the doc), and
+   the missing-doc banner (reload.js prepends it). A doc's .tooltip (z-index
+   var(--z-popover)) anchored to a positioned wrapper just below any of them
+   (.phase, .has-tooltip, .grain) painted over it. Each gets its own
+   stacking context one step above --z-popover, and an opaque base under its
+   tint so nothing shows through; the missing-doc banner's background is
+   already opaque (.banner--attention mixes into --bg-raised). The two
+   data attributes are the server's own, never a doc's: the sanitizer strips
+   every data-* attribute from a doc, and mermaid-init.js scrubs them from
+   rendered diagrams. A fifth reader-injected element, the mermaid .embed
+   card (mermaid-init.js wrapEmbeds), is deliberately NOT elevated: it wraps
+   the doc's own diagram in the doc's flow, so it stacks as doc content, and
+   a doc tooltip over its bar spoofs nothing but a "reset" button. */
+.outline-inline, [data-forgectl-notice], [data-forgectl-props], [data-fc="doc-missing"] { position: relative; z-index: calc(var(--z-popover) + 1); isolation: isolate; }
+.outline-inline { background: var(--bg); }
+[data-forgectl-notice].callout.warning { background: linear-gradient(var(--callout-tint), var(--callout-tint)), var(--bg); }
+.props[data-forgectl-props] { background: linear-gradient(var(--props-tint), var(--props-tint)), var(--bg); }
 /* The document pane scrolls, so with no link in view the browser makes the
    pane itself the keyboard stop. Give it the house ring, inset so the grid's
    edges don't clip it. */

@@ -18,6 +18,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // catalogRelPath is the generated catalog's location inside an installed
@@ -85,12 +87,12 @@ func ParseHeaders(r io.Reader) (map[string]PluginInfo, error) {
 func ReadCatalog(path string) (map[string]PluginInfo, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("open catalog %s: %w", path, err)
+		return nil, fmt.Errorf("open catalog %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	defer f.Close()
 	plugins, err := ParseHeaders(f)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	return plugins, nil
 }
@@ -189,7 +191,7 @@ func locateViaCacheGlob(homeDir string) (string, error) {
 	pattern := filepath.Join(homeDir, ".claude", "plugins", "cache", "*", "cadence", "*")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
-		return "", fmt.Errorf("glob plugin cache %s: %w", pattern, err)
+		return "", fmt.Errorf("glob plugin cache %s: %w", termsafe.QuotePath(pattern), termsafe.Error(err))
 	}
 	var newest string
 	var newestMod time.Time

@@ -582,6 +582,17 @@ func TestRender_Math_BlockMarkupEscaped(t *testing.T) {
 	if !strings.Contains(out, mathDivOpen+"$$\n&lt;/div&gt;") {
 		t.Errorf("markup was not escaped inside the display block: %s", out)
 	}
+	// TeX lines that start with "<" are math, not HTML: a bra-ket, an
+	// inner product, a comparison (forgectl#767 review).
+	for _, tc := range []struct{ src, want string }{
+		{"$$\n<a|b> = 1\n$$\n", "$$\n&lt;a|b&gt; = 1"},
+		{"$$\n<x, y> = 0\n$$\n", "$$\n&lt;x, y&gt; = 0"},
+		{"$$\na\n<b\n$$\n", "$$\na\n&lt;b"},
+	} {
+		if out := renderOrFail(t, tc.src); !strings.Contains(out, mathDivOpen+tc.want) {
+			t.Errorf("%q is not a display block: %s", tc.src, out)
+		}
+	}
 }
 
 func TestRender_Math_HeadingIDUnchanged(t *testing.T) {

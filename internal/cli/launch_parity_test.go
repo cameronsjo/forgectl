@@ -306,17 +306,17 @@ func TestParity_PiOrdinaryLaunch(t *testing.T) {
 // this branch prints no banner at all.
 func TestParity_ClaudeBuilderLaunch(t *testing.T) {
 	h := newParityHarness(t, parityClaudeConfig)
-	stdout, stderr := h.run(t, "-p", "summarize this")
+	stdout, stderr := h.run(t, "summarize this")
 
 	_, gotArgv, _ := h.recorded(t)
 
 	assertArgv(t, gotArgv, []string{
 		"--permission-mode", "plan",
 		"--allow-dangerously-skip-permissions",
+		"--add-dir", "/tmp/parity-shared",
 		"--model", "sonnet",
 		"--effort", "high",
-		"--add-dir", "/tmp/parity-shared",
-		"-p", "summarize this",
+		"summarize this",
 	})
 
 	if stderr != "" {

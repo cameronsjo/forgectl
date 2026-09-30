@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -329,5 +330,25 @@ func TestHelperBlesser_ExitCodeMapping(t *testing.T) {
 		if errors.Is(err, s) {
 			t.Errorf("exit 1 must not map to %v", s)
 		}
+	}
+}
+
+// TestNewHelperBlesser_QuotesTheHelperPath pins forgectl#855: the helper path
+// is the running binary's directory, which the operator's install chose, so
+// the missing-helper error names it quoted with controls escaped.
+//
+// Mutation that turns it red: print path raw in the ErrNoBlesser stat error.
+func TestNewHelperBlesser_QuotesTheHelperPath(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ev\u202eil\u009b31m")
+	stubSelf(t, filepath.Join(dir, "forgectl"))
+	_, err := NewHelperBlesser(context.Background(), &exec.FakeRunner{})
+	if !errors.Is(err, ErrNoBlesser) {
+		t.Fatalf("NewHelperBlesser = %v, want ErrNoBlesser", err)
+	}
+	if strings.ContainsAny(err.Error(), "\u202e\u009b") {
+		t.Errorf("error carries a raw bidi/control rune: %q", err)
+	}
+	if !strings.Contains(err.Error(), `ev\u202eil\u009b31m`) || !strings.Contains(err.Error(), helperName+`":`) {
+		t.Errorf("error = %q, want the helper path escaped and quoted", err)
 	}
 }

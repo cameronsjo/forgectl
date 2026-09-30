@@ -1,4 +1,9 @@
+//go:build unix
+
 package tmuxadapter
+
+// The fake FileInfo carries a *syscall.Stat_t, the socket identity the
+// adapter proves on unix; the adapter has no such proof elsewhere (#810).
 
 import (
 	"context"
@@ -290,11 +295,13 @@ func TestEveryCommandIsPinnedToTheSocket(t *testing.T) {
 	if len(calls) == 0 {
 		t.Fatal("no commands recorded — the test drove nothing")
 	}
-	wantPin := []exec.Arg{exec.MustFixed("-S"), exec.Opaque(testSocket)}
+	// The pin, then -u (forgectl#840): every command here parses -F output,
+	// which a non-UTF-8 locale would otherwise sanitize.
+	wantPin := []exec.Arg{exec.MustFixed("-S"), exec.Opaque(testSocket), exec.MustFixed("-u")}
 	seen := map[exec.CommandKind]bool{}
 	for i, cmd := range calls {
-		if len(cmd.Args) < 2 || !cmd.Args[0].Equal(wantPin[0]) || !cmd.Args[1].Equal(wantPin[1]) {
-			t.Errorf("call %d (kind %v) does not lead with the socket pin", i, cmd.Kind)
+		if !leadsWith(cmd.Args, wantPin) {
+			t.Errorf("call %d (kind %v) does not lead with the socket pin and -u", i, cmd.Kind)
 		}
 		if !cmd.Path.Equal(exec.Secret(testTmux)) {
 			t.Errorf("call %d ran a binary other than the resolved tmux", i)
@@ -313,8 +320,8 @@ func TestEveryCommandIsPinnedToTheSocket(t *testing.T) {
 	}}.runFunc}
 	_ = newTestAdapter(t, reconcileRun, nil, WithLstat(liveSocket(liveInode))).Start(ctx, spec)
 	for i, cmd := range reconcileRun.Calls() {
-		if len(cmd.Args) < 2 || !cmd.Args[0].Equal(wantPin[0]) || !cmd.Args[1].Equal(wantPin[1]) {
-			t.Errorf("reconcile-path call %d (kind %v) does not lead with the socket pin", i, cmd.Kind)
+		if !leadsWith(cmd.Args, wantPin) {
+			t.Errorf("reconcile-path call %d (kind %v) does not lead with the socket pin and -u", i, cmd.Kind)
 		}
 		seen[cmd.Kind] = true
 	}
@@ -330,6 +337,19 @@ func TestEveryCommandIsPinnedToTheSocket(t *testing.T) {
 			t.Errorf("no command recorded for kind %v", kind)
 		}
 	}
+}
+
+// leadsWith reports whether args begins with every element of prefix.
+func leadsWith(args, prefix []exec.Arg) bool {
+	if len(args) < len(prefix) {
+		return false
+	}
+	for i, want := range prefix {
+		if !args[i].Equal(want) {
+			return false
+		}
+	}
+	return true
 }
 
 // TestStartReturnsRefKnownOnACleanCreate also pins that the reference carries

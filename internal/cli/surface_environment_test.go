@@ -3,6 +3,8 @@ package cli
 import (
 	"slices"
 	"testing"
+
+	"github.com/cameronsjo/forgectl/internal/config"
 )
 
 // TestSurfaceLaunchEnvironment_StripsOnlyTheClaudeChildMarker pins Cameron's
@@ -39,5 +41,21 @@ func TestSurfaceLaunchEnvironment_WithoutMarkerIsUnchanged(t *testing.T) {
 	got := surfaceLaunchEnvironment(base)
 	if !slices.Equal(got, base) {
 		t.Fatalf("surface environment = %q, want unchanged %q", got, base)
+	}
+}
+
+// TestSurfaceInvocationRequest_StdoutIsATerminal is #816: the surface launches
+// the harness into a TTY pane, so the request says its stdout is a terminal
+// rather than leaving the zero value, which means "not a terminal" and lets
+// --output-format alone select the print posture (forgectl#795).
+//
+// Mutation: drop StdoutTerminal from surfaceInvocationRequest and this fails.
+func TestSurfaceInvocationRequest_StdoutIsATerminal(t *testing.T) {
+	req := surfaceInvocationRequest(config.LaunchConfig{}, "/p", nil, nil)
+	if !req.StdoutTerminal {
+		t.Error("surface request leaves StdoutTerminal false; the harness runs in a TTY pane")
+	}
+	if req.Args != nil || req.CWD != "/p" {
+		t.Errorf("request = %+v, want no args and CWD /p", req)
 	}
 }

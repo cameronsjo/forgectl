@@ -21,6 +21,16 @@ import (
 // call returns" are different events separated by a descendant's lifetime.
 const defaultRetireBound = 2 * time.Second
 
+// defaultKillDrainBound is how long, after a kill, the runner lets each
+// stream's reader take what the child had already written before the read
+// ends are force-closed (forgectl#794). Once the child is reaped its write
+// ends are closed, so a reader with bytes still in the pipe reaches io.EOF
+// within microseconds; the bound only matters when a descendant still holds
+// a write end, and then it caps the extra wait. It is short, because a kill
+// means the caller is already done waiting, and it never exceeds the
+// retirement bound.
+const defaultKillDrainBound = 250 * time.Millisecond
+
 // maxZeroProgressReads bounds a reader that keeps returning (0, nil), which
 // io.Reader permits and os.File does not do in practice. Purely defensive: it
 // converts a theoretical spin into a bounded stop.
@@ -36,6 +46,10 @@ type OSSensitiveRunner struct {
 	// descendant-holds-a-pipe case can be proven without a two-second wait.
 	retireBound time.Duration
 
+	// killDrainBound overrides defaultKillDrainBound; tests set it directly
+	// so the drain can be proven without racing a short window.
+	killDrainBound time.Duration
+
 	// started counts successful fork/execs. It exists because "this command
 	// never ran" is not observable from the child: a refusal that kills, or a
 	// pre-start check that never forks, both leave no trace in the child's own
@@ -43,6 +57,16 @@ type OSSensitiveRunner struct {
 	// place a process comes into existence is what makes the refusal provable
 	// rather than assumed.
 	started atomic.Int64
+
+	// stdoutTap, when set, wraps the stdout read end before its reader sees
+	// it. It is a test seam and nil in production. It lets a test act on the
+	// event "the parent has read the child's bytes", which is the event a kill
+	// has to follow for those bytes to be captured. An abnormal ending used
+	// to force-close the read ends at once, dropping bytes the child wrote
+	// but the reader had not yet taken (forgectl#787); it now drains for
+	// drainBound first (forgectl#794), and a test delays the reader through
+	// this seam to prove it.
+	stdoutTap func(io.Reader) io.Reader
 }
 
 // StartedCount reports how many processes this runner has successfully
@@ -60,6 +84,16 @@ func (r *OSSensitiveRunner) bound() time.Duration {
 		return r.retireBound
 	}
 	return defaultRetireBound
+}
+
+// drainBound is the post-kill drain window: killDrainBound or its default,
+// never longer than the retirement bound.
+func (r *OSSensitiveRunner) drainBound() time.Duration {
+	d := defaultKillDrainBound
+	if r.killDrainBound > 0 {
+		d = r.killDrainBound
+	}
+	return min(d, r.bound())
 }
 
 // buildEnv clones the captured environment, drops every occurrence of each
@@ -107,9 +141,40 @@ func envKeyOf(entry string) string {
 
 // buildCmd is the reveal boundary. It is the only place in the package where a
 // SecretArg or Arg payload leaves its wrapper, and everything it produces goes
-// straight into the *exec.Cmd. It is a separate function so internal/exec's own
-// tests can assert that the real values do reach exec.Cmd.Args — the mirror of
-// the redaction tests, without a production accessor that reveals.
+// straight into the *exec.Cmd. Elsewhere a payload is read only to be checked
+// (validate), compared (Equal), or re-spelled (MapOpaque). No test enforces
+// that in-package rule; review keeps it. A re-spelling passes the payload to
+// one pure escape in the leaf package tmuxesc and seals the result as a new
+// Arg. What the guard tests do enforce:
+//
+//   - outside transform.go, no production file of this package writes a
+//     Transform literal, converts a value to Transform, or assigns or takes
+//     the address of Transform.apply, type-checked for every platform in
+//     guardPlatforms, which covers each pair .goreleaser.yaml ships
+//     (TestTransformIsMintedOnlyInTransformGo,
+//     TestGuardPlatformsCoverReleaseTargets);
+//   - outside this package, only the files in transformCallers name
+//     MapOpaque, Transform or TmuxDirOperand, and no file dot-imports it,
+//     checked across every Go file in the module whatever its build tags
+//     (TestNoCallerCodeReceivesAnOpaquePayload);
+//   - every non-test tmuxesc file, whatever its build tags, imports only
+//     strings, declares no var, const, type or init, and declares only funcs
+//     with a body from strings to one string or bool that call nothing but
+//     strings, len, string conversions and each other (TestTmuxescIsALeaf);
+//   - the file list of this package and tmuxesc with each file's build
+//     constraint, every exported func, var and const, and every named type
+//     with its full underlying type and method set match
+//     testdata/exported_api.golden on every platform in guardPlatforms
+//     (TestExportedAPI).
+//
+// The golden pins the surface; it does not judge it. That no exported name
+// hands a payload to caller code (a callback parameter, an accessor, a func
+// var) is a property the reviewer of each golden update keeps; the test only
+// makes sure no such change lands without that review.
+//
+// It is a separate function so internal/exec's own tests can assert that the
+// real values do reach exec.Cmd.Args — the mirror of the redaction tests,
+// without a production accessor that reveals.
 //
 // It builds with exec.Command rather than exec.CommandContext deliberately.
 // CommandContext kills on context completion but does not own what happens
@@ -217,7 +282,11 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 	overflow := make(chan struct{}, 2)
 	outCh := make(chan BoundedOutput, 1)
 	errCh := make(chan BoundedOutput, 1)
-	go readCappedMode(outR, sc.StdoutCap, sc.StdoutMode, outCh, overflow)
+	var stdoutSrc io.Reader = outR
+	if r.stdoutTap != nil {
+		stdoutSrc = r.stdoutTap(outR)
+	}
+	go readCappedMode(stdoutSrc, sc.StdoutCap, sc.StdoutMode, outCh, overflow)
 	go readCapped(errR, sc.StderrCap, errCh, overflow)
 
 	waitCh := make(chan error, 1)
@@ -254,10 +323,11 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 		}
 	}
 
-	// Retire both pipes. On an abnormal ending there is nothing left worth
-	// waiting for, so the read ends close immediately; on a clean exit the
-	// readers get the bound to drain what the CLI already wrote before the
-	// same force-close applies to whatever descendant inherited the pipe.
+	// Retire both pipes. On an abnormal ending the readers get a short drain
+	// window (drainBound) to take what the child had already written, so a
+	// kill does not drop a prefix still sitting in the pipe (forgectl#794);
+	// on a clean exit they get the full retirement bound. Either way the same
+	// force-close then applies to whatever descendant inherited the pipe.
 	// A force-closed read returns os.ErrClosed, not io.EOF, so a reader cannot
 	// tell a retired stream from a finished one on its own. readCapped makes
 	// that call for each stream as it ends, so a stdout that reached EOF stays
@@ -387,6 +457,12 @@ func retireReason(o Outcome) string {
 // blocked on it, so the force-close is what unblocks a reader no EOF is ever
 // coming for.
 //
+// stopped (the child was killed) shortens the wait from the retirement
+// bound to drainBound, and the expiry is logged at Debug rather than Warn:
+// the caller already chose to stop, so the wait is only a bounded chance for
+// the readers to collect bytes the child wrote before the kill. Before
+// forgectl#794 a kill force-closed at once and dropped them.
+//
 // It does not mark the streams it cuts off, deliberately. The interrupted Read
 // returns os.ErrClosed, which readCapped already classifies as a stop short of
 // the end, and a reader that finished before the close carries its own correct
@@ -398,13 +474,12 @@ func retireReason(o Outcome) string {
 // from one that was killed. RunSensitive marks that case — both when it did
 // the killing and when something outside it did, which the wait status
 // reports.
-func (r *OSSensitiveRunner) retire(immediate bool, kind CommandKind, outR, errR *os.File, outCh, errCh <-chan BoundedOutput) (BoundedOutput, BoundedOutput) {
-	if immediate {
-		closeAll(outR, errR)
-		return <-outCh, <-errCh
+func (r *OSSensitiveRunner) retire(stopped bool, kind CommandKind, outR, errR *os.File, outCh, errCh <-chan BoundedOutput) (BoundedOutput, BoundedOutput) {
+	bound := r.bound()
+	if stopped {
+		bound = r.drainBound()
 	}
-
-	timer := time.NewTimer(r.bound())
+	timer := time.NewTimer(bound)
 	defer timer.Stop()
 
 	var (
@@ -422,8 +497,13 @@ func (r *OSSensitiveRunner) retire(immediate bool, kind CommandKind, outR, errR 
 			// call that is not the backend's own, and an unattributed
 			// multi-second pause is exactly what a future debugging session
 			// would otherwise have to rediscover.
-			slog.Warn("Retirement bound expired with a pipe still held; closing it.",
-				"kind", kind.String(), "bound", r.bound())
+			if stopped {
+				slog.Debug("Post-kill drain window expired with a pipe still held; closing it.",
+					"kind", kind.String(), "bound", bound)
+			} else {
+				slog.Warn("Retirement bound expired with a pipe still held; closing it.",
+					"kind", kind.String(), "bound", bound)
+			}
 			closeAll(outR, errR)
 			if !gotOut {
 				stdout = <-outCh

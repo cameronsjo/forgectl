@@ -65,7 +65,11 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 		exec.MustFixed("-s"),
 		exec.Opaque(name),
 		exec.MustFixed("-c"),
-		spec.CWD(),
+		// tmux format-expands -c and ends a command at an argv element ending
+		// in ';', so the directory is re-spelled for both (forgectl#839,
+		// forgectl#836). Unescaped, a directory holding `#(cmd)` ran cmd in
+		// the tmux server before the session even existed.
+		exec.MapOpaque(spec.CWD(), exec.TmuxDirOperand()),
 		// Everything past here is the shell-command operand, and it is what
 		// makes the created session the SURFACE rather than a login shell: the
 		// bootstrap re-enters forgectl carrying the socket path and the one-shot
@@ -278,17 +282,29 @@ const (
 // TOTAL parse failure is the fail-closed half, and it is not hypothetical:
 // internal/tmux measured tmux 3.7b under a non-UTF-8 locale SUBSTITUTING `_`
 // for the separator, lossily, so every row collapses to one field and every
-// exact-count check drops it (see internal/tmux/format.go, which takes the same
-// contract at parsedRows and explains why there is no rendering-side fix).
-// Without this, an operator's LANG turns a live session into a confident "no
-// such session" — reported as NotMutated by Start and AlreadyGone by Close,
-// orphaning the surface with the harness inside it.
+// exact-count check drops it (see internal/tmux/format.go, which explains why
+// there is no rendering-side fix). Without this, an operator's LANG turns a
+// live session into a confident "no such session" — reported as NotMutated by
+// Start and AlreadyGone by Close, orphaning the surface with the harness
+// inside it.
 //
 // PARTIAL loss stays a silent drop, deliberately and for the same reason
 // internal/tmux gives: one row can legitimately fail its count because a name
 // carries the separator, and erroring on that would let anyone who can name a
-// session break every lookup on the server. Total loss cannot be caused that
-// way — every row failing at once means the separator itself is gone.
+// session break every lookup on the server.
+//
+// Total loss has a second cause, and this is where the adapter deliberately
+// parts from internal/tmux's parsedRows. A server whose only sessions carry
+// the separator in their names drops every row with the separator intact
+// (forgectl#826). parsedRows reads a line that proves the separator survived
+// and reports that as an empty listing plus an unreadable count. This
+// function does not: it still reports parseUnreadable, and its callers turn
+// that into OutcomeUnknown, never NotMutated or AlreadyGone. That is
+// conservative rather than exact. Our own forgectl-<hex> names cannot carry
+// the separator, so on an honest server absence would be true. But a lossy
+// listing can be forged into looking like proof (forgectl#836 item 5), and
+// here a wrong "absent" orphans a live surface while a wrong "unknown" costs
+// an operator one look.
 func parseRows(out exec.BoundedOutput) ([]identityRow, parseStatus) {
 	raw, complete := out.CopyBytesForParse()
 	var rows []identityRow

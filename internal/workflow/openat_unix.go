@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // stateDir is an open handle to the workflow state directory, pinned by an
@@ -50,7 +51,7 @@ func openStateDir() (*stateDir, error) {
 	}
 	fd, err := unix.Openat(unix.AT_FDCWD, dir, unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return nil, fmt.Errorf("open workflow state dir %s: %w", dir, err)
+		return nil, fmt.Errorf("open workflow state dir %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	return &stateDir{fd: fd, path: dir}, nil
 }
@@ -122,7 +123,7 @@ func (d *stateDir) openLock(name string) (*os.File, error) {
 // open rather than reopening the path.
 func (d *stateDir) syncDir() error {
 	if err := unix.Fsync(d.fd); err != nil {
-		return fmt.Errorf("sync state dir %s: %w", d.path, err)
+		return fmt.Errorf("sync state dir %s: %w", termsafe.QuotePath(d.path), termsafe.Error(err))
 	}
 	return nil
 }

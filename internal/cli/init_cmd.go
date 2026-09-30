@@ -241,6 +241,21 @@ const themeScaffold = `
 # danger = { dark = "#e6a8a2", light = "#8a2418" } # table: per-mode override
 `
 
+// herdrScaffold is the [herdr.organize] section. The header is ACTIVE so the
+// section exists (an empty table decodes to no rules, which `forgectl herdr
+// organize` reports by pointing at this section instead of at init), and every
+// key stays commented: a rule names workspaces and paths that are one
+// machine's, so there is no default worth baking in.
+const herdrScaffold = `
+# ── herdr: group herdr tabs into workspaces (forgectl herdr organize) ───────
+[herdr.organize]
+# default = "misc"                     # workspace for tabs no rule matches; required once a rule exists
+# workspace_order = ["forge", "misc"]  # left-to-right order; a label with no workspace yet is skipped
+# [[herdr.organize.rule]]
+# glob      = "*/Projects/forge/* :: *"  # matched against "<cwd> :: <title>"; * also matches /
+# workspace = "forge"
+`
+
 // initSection is one scaffoldable block: a config.toml section (or, for the
 // empty name, the host-scalar preamble) plus its annotated template.
 type initSection struct {
@@ -279,6 +294,7 @@ var initSections = []initSection{
 	{"update", "update", updateScaffold},
 	{"pr", "pr", prScaffold},
 	{"theme", "theme", themeScaffold},
+	{"herdr", "herdr", herdrScaffold},
 }
 
 // initModule declares the full-scaffold convenience extension (ADR-0005). It

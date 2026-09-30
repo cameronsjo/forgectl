@@ -14,6 +14,9 @@ package pr
 //       non-reentrant by construction, and this test documents it
 //   [x] Refusal asserts zero mutation: a timed-out caller never rewrites the
 //       holder body
+//   [x] The timeout reads the holder from the descriptor it opened, not the
+//       path: a path swapped after the checked open is never read (#621)
+//   [x] The holder text a timeout reads is bounded, however large the file
 
 import (
 	"context"
@@ -24,6 +27,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -175,5 +180,90 @@ func TestLifecycleLock_NestedAcquisitionIsRefused(t *testing.T) {
 	var busy *lockBusyError
 	if !errors.As(inner, &busy) {
 		t.Fatalf("nested acquisition = %v, want *lockBusyError (the lock is non-reentrant)", inner)
+	}
+}
+
+// holdLockFile flocks path from a descriptor the test owns, standing in for a
+// holder in another process, and releases it at cleanup.
+func holdLockFile(t *testing.T, path string) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Clean(path), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatalf("flock: %v", err)
+	}
+}
+
+// TestLifecycleLock_TimeoutReadsTheOpenDescriptorNotThePath is forgectl#621
+// item 1. The lock path is swapped after the checked O_NOFOLLOW open — the
+// original file renamed aside, a symlink to a decoy left in its place — and
+// the timeout must still name the real holder, read from the descriptor it
+// holds. A by-path read would follow the symlink: to a FIFO it would block,
+// to /dev/zero it would never end; the decoy file makes that read visible
+// without hanging the suite.
+//
+// Mutation that turns it red: in withLifecycleLock, replace
+// readLockHolder(f) with a read of os.ReadFile(lockPath).
+func TestLifecycleLock_TimeoutReadsTheOpenDescriptorNotThePath(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, lifecycleLockName)
+	if err := os.WriteFile(lockPath, []byte("pid=1 verb=real-holder\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	holdLockFile(t, lockPath)
+	decoy := filepath.Join(dir, "decoy")
+	if err := os.WriteFile(decoy, []byte("pid=2 verb=decoy-through-the-path\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := lockClient(t, dir, 150*time.Millisecond)
+	c.afterLockOpen = func() {
+		if err := os.Rename(lockPath, lockPath+".aside"); err != nil {
+			t.Error(err)
+		}
+		if err := os.Symlink(decoy, lockPath); err != nil {
+			t.Error(err)
+		}
+	}
+	err := c.withLifecycleLock(context.Background(), "second", func() error {
+		t.Fatal("fn ran under a lock that should have timed out")
+		return nil
+	})
+	var busy *lockBusyError
+	if !errors.As(err, &busy) {
+		t.Fatalf("err = %v, want *lockBusyError", err)
+	}
+	if !strings.Contains(busy.holder, "verb=real-holder") || strings.Contains(err.Error(), "decoy") {
+		t.Errorf("holder = %q, want the body of the file the descriptor holds, never the path's new target", busy.holder)
+	}
+}
+
+// TestLifecycleLock_TimeoutHolderReadIsBounded: a lock file far larger than
+// any body forgectl writes costs a timeout at most maxLockHolderBytes.
+//
+// Mutation that turns it red: drop the bound (read the whole file with
+// io.ReadAll(io.NewSectionReader(f, 0, 1<<62))).
+func TestLifecycleLock_TimeoutHolderReadIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, lifecycleLockName)
+	if err := os.WriteFile(lockPath, []byte(strings.Repeat("h", 1<<20)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	holdLockFile(t, lockPath)
+
+	c := lockClient(t, dir, 150*time.Millisecond)
+	err := c.withLifecycleLock(context.Background(), "second", func() error {
+		t.Fatal("fn ran under a lock that should have timed out")
+		return nil
+	})
+	var busy *lockBusyError
+	if !errors.As(err, &busy) {
+		t.Fatalf("err = %v, want *lockBusyError", err)
+	}
+	if got := len(busy.holder); got == 0 || got > maxLockHolderBytes {
+		t.Errorf("holder is %d bytes, want 1..%d", got, maxLockHolderBytes)
 	}
 }

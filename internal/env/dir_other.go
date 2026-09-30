@@ -87,10 +87,6 @@ func (d *dirPin) createTemp(prefix string) (*os.File, string, error) {
 	return f, filepath.Base(f.Name()), nil
 }
 
-func (d *dirPin) rename(from, to string) error {
-	return os.Rename(filepath.Join(d.path, from), filepath.Join(d.path, to))
-}
-
 func (d *dirPin) names() ([]string, error) {
 	f, err := os.Open(d.path)
 	if err != nil {
@@ -102,4 +98,29 @@ func (d *dirPin) names() ([]string, error) {
 
 func (d *dirPin) remove(name string) error {
 	return os.Remove(filepath.Join(d.path, name))
+}
+
+// mkScratchDir creates the scratch directory by path; see the unix version.
+func (d *dirPin) mkScratchDir(prefix string) (*dirPin, string, error) {
+	dir, err := MakeScratchDir(d.path, prefix)
+	if err != nil {
+		return nil, "", err
+	}
+	return &dirPin{path: dir}, filepath.Base(dir), nil
+}
+
+// unlinkScratchEntry is the unix version's test seam; see there.
+var unlinkScratchEntry = func(sub *dirPin, name string) error { return sub.remove(name) }
+
+// removeScratchDir unlinks own, then removes the directory by the teardown
+// rule; see the unix version.
+func (d *dirPin) removeScratchDir(sub *dirPin, name string, own ...string) error {
+	for _, n := range own {
+		_ = unlinkScratchEntry(sub, n)
+	}
+	return RemoveScratchDir(filepath.Join(d.path, name))
+}
+
+func (d *dirPin) renameFrom(sub *dirPin, from, to string) error {
+	return os.Rename(filepath.Join(sub.path, from), filepath.Join(d.path, to))
 }

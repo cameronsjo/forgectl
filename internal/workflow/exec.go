@@ -7,7 +7,9 @@ import (
 	"log/slog"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Recorder is notified as each step completes so a run can be checkpointed for
@@ -130,7 +132,7 @@ func (e *Executor) Run(ctx context.Context, plan Plan, wctx *Context) error {
 		def, ok := e.registry[step.Uses]
 		if !ok {
 			slog.Error("Unknown step verb.", "stepIndex", i, "stepUse", step.Uses)
-			return fmt.Errorf("step %d: unknown step verb %q", i, step.Uses)
+			return fmt.Errorf("step %d: unknown step verb %s", i, termsafe.QuoteArgMax(step.Uses, 0))
 		}
 		// Re-interpolate the step's fields against the live Context: exports
 		// earlier steps produced (${workspace}, ${review}) resolve here, where
@@ -209,7 +211,14 @@ func runStep(ctx context.Context, run exec.Runner, _ *Context, step PlanStep) er
 		slog.Warn("Run step missing required cmd field.")
 		return errors.New("run step requires cmd")
 	}
-	slog.Debug("Running command.", "cmd", step.Cmd, "args", step.Args)
+	// The args are the workflow author's, so the Runner renders them as flag
+	// names only (#749), and so does this line: a token in any shape (a
+	// clone URL, docker login -p X, curl -u u:X) would otherwise reach the
+	// log. --dry-run's plan printout is deliberate review output and still
+	// shows them (printPlan, #782). The span also scrubs these values from
+	// the stderr the Runner captures, in case the command echoes them.
+	ctx = exec.WithOpaqueArgs(ctx, 0, len(step.Args))
+	slog.Debug("Running command.", "cmd", redact.Arg(step.Cmd), "args", redact.UserArgs(step.Args))
 	if d, ok := run.(exec.DiscardingRunner); ok {
 		return d.RunDiscardingStdout(ctx, step.Cmd, step.Args...)
 	}

@@ -9,11 +9,13 @@ package projects
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // subprocessFailure is a failed call as the real runner reports it. Its
@@ -104,6 +106,33 @@ func TestEcho_WorktreeSubprocessFailuresAreCategorical(t *testing.T) {
 	// locating detail left once git's text is withheld.
 	if !strings.Contains(err.Error(), ".bare") {
 		t.Errorf("error %q, want it to name the bare dir", err)
+	}
+}
+
+// TestEcho_BareDirIsQuotedNotRaw pins HOW the bare dir is named (#717): the
+// projects Dir is operator config and can carry a control or bidi rune, so
+// the path must appear escaped, never raw. The tests above only assert that
+// ".bare" appears, which a raw path satisfies too.
+func TestEcho_BareDirIsQuotedNotRaw(t *testing.T) {
+	r := Repo{Host: "github.com", Owner: "cameronsjo", Name: "forgectl"}
+	dir := filepath.Join(t.TempDir(), "d\x1b[31m\u202eX")
+	for _, step := range []string{"fetch origin", "worktree add"} {
+		t.Run(step, func(t *testing.T) {
+			c := &Client{Dir: dir, run: &exec.FakeRunner{RunFunc: worktreeFailAt(step, "main")}, gitBin: "git"}
+			_, err := c.Worktree(context.Background(), r, "")
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			msg := err.Error()
+			for _, ch := range msg {
+				if termsafe.IsUnsafeTerminalRune(ch) {
+					t.Fatalf("error %q carries raw unsafe rune %U", msg, ch)
+				}
+			}
+			if !strings.Contains(msg, `d\x1b[31m\u202eX`) || !strings.Contains(msg, ".bare") {
+				t.Fatalf("error %q, want the bare dir named in escaped form", msg)
+			}
+		})
 	}
 }
 

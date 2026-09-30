@@ -172,11 +172,11 @@ func resolveDocsReadTarget(idx *docspkg.Index, target string) (docspkg.Doc, stri
 	if _, statErr := os.Stat(target); statErr == nil {
 		abs, err := filepath.Abs(target)
 		if err != nil {
-			return docspkg.Doc{}, "", fmt.Errorf("resolve %s: %w", termsafe.QuotePath(target), err)
+			return docspkg.Doc{}, "", fmt.Errorf("resolve %s: %w", termsafe.QuotePath(target), termsafe.Error(err))
 		}
 		canonical, err := filepath.EvalSymlinks(abs)
 		if err != nil {
-			return docspkg.Doc{}, "", fmt.Errorf("resolve %s: %w", termsafe.QuotePath(target), err)
+			return docspkg.Doc{}, "", fmt.Errorf("resolve %s: %w", termsafe.QuotePath(target), termsafe.Error(err))
 		}
 		doc, ok := idx.FindByAbsPath(filepath.Clean(canonical))
 		if !ok {
@@ -263,6 +263,15 @@ func mdrollArgs(path string) []string {
 // mdroll's exit status becomes forgectl's, and a signal that killed it becomes
 // 128+signo, the shell's convention.
 func runMdroll(cmd *cobra.Command, mdroll, path string) error {
+	// mdroll reads the doc by path, and re-reads it by path under --watch, so
+	// a check-then-open window remains between Index.Resolve and each of
+	// mdroll's opens. Only someone who can write to a directory on the doc's
+	// path inside the root (including a member of a group that can write to
+	// a shared root) can race it, and that writer could change the doc
+	// directly. Such a writer could also redirect the path outside the root,
+	// which shows only the user's own file on the user's own terminal. It is
+	// accepted rather than closed: handing mdroll content instead of a path
+	// would drop --watch and relative image resolution (forgectl#773).
 	child := osexec.CommandContext(cmd.Context(), mdroll, mdrollArgs(path)...) //nolint:gosec // G204: absolute LookPath result, fixed flags, "--" before an index-resolved path
 	child.Stdin = cmd.InOrStdin()
 	child.Stdout = cmd.OutOrStdout()
