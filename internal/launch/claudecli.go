@@ -46,36 +46,56 @@ func isClaudeSubcommand(tok string) bool {
 // IsClaudePassthrough reports whether a Claude argv must reach claude
 // byte-clean, with no injected posture and no banner. That is the case when
 // args[0] is a non-session Claude subcommand (`mcp`, `doctor`, `update`, …),
-// or when any argument before Claude's own `--` selects print mode or asks
-// only for help or the version.
+// or when any argument before Claude's own `--` asks only for help or the
+// version. Neither starts a session, so there is no posture for the profile to
+// set, and the injected flags can break a subcommand outright: the variadic
+// `--add-dir <directories...>` swallows `mcp list` as two more directories,
+// and claude then starts a session instead (Claude Code 2.1.285).
 //
-// Posture flags do not belong on any of these. Print mode is what scripts
-// run, and a script expects plain `claude -p` rather than the profile's plan
-// mode and model. A subcommand can be broken outright by the injected flags:
-// the variadic `--add-dir <directories...>` swallows `mcp list` as two more
-// directories, and claude then starts a session instead (Claude Code
-// 2.1.285).
+// A subcommand after a leading `--` counts too, because claude dispatches it
+// anyway: `claude -- mcp list` runs `mcp list` (2.1.285). That is the argv
+// `forgectl launch -- -- mcp list` leaves once forgectl consumes its own `--`.
 //
-// Only args[0] is checked for a subcommand. Finding the first positional past
-// the flags would mean knowing which Claude flags take a value, and a
-// hand-kept table of that would drift silently.
+// Only that first positional slot is checked. Finding the first positional
+// past arbitrary flags would mean knowing which Claude flags take a value, and
+// a hand-kept table of that would drift silently.
+//
+// "agents" is never a passthrough here, in either slot: it starts sessions,
+// so it keeps the posture-injecting branch selectPosture gives it.
 func IsClaudePassthrough(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
-	if args[0] != "agents" && isClaudeSubcommand(args[0]) {
+	sub := args[0]
+	if sub == "--" && len(args) > 1 {
+		sub = args[1]
+	}
+	if sub != "agents" && isClaudeSubcommand(sub) {
 		return true
 	}
+	return scanClaudeFlags(args, "-h", "--help", "-v", "--version")
+}
+
+// IsClaudePrintMode reports whether any argument before Claude's own `--`
+// selects print mode: `-p`, `--print`, or `--output-format` (which only works
+// with --print). Print mode is what scripts run, so it gets the print posture
+// (PrintArgs) rather than the full builder posture.
+func IsClaudePrintMode(args []string) bool {
+	return scanClaudeFlags(args, "-p", "--print", "--output-format")
+}
+
+// scanClaudeFlags reports whether any argument before Claude's own `--`
+// separator equals one of flags, or is `<flag>=<value>` for one of them.
+// Everything after that separator is prompt text.
+func scanClaudeFlags(args []string, flags ...string) bool {
 	for _, a := range args {
-		switch {
-		case a == "--":
-			// Everything after Claude's own separator is prompt text.
+		if a == "--" {
 			return false
-		case a == "-p", a == "--print",
-			a == "--output-format", strings.HasPrefix(a, "--output-format="),
-			a == "-h", a == "--help",
-			a == "-v", a == "--version":
-			return true
+		}
+		for _, f := range flags {
+			if a == f || strings.HasPrefix(a, f+"=") {
+				return true
+			}
 		}
 	}
 	return false

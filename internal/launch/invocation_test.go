@@ -670,11 +670,18 @@ func TestBuildInvocation_Postures(t *testing.T) {
 			wantArgs:    func(p Profile) []string { return BuilderArgs(p, []string{"hello"}) },
 		},
 		{
-			name:        "claude print mode passes through byte-clean",
+			name:        "claude print mode keeps only the permission mode",
 			cfg:         claudeCfg,
 			args:        []string{"-p", "hello"},
+			wantPosture: PostureClaudePrint,
+			wantArgs:    func(p Profile) []string { return PrintArgs(p, []string{"-p", "hello"}) },
+		},
+		{
+			name:        "claude subcommand after claude's own separator passes through",
+			cfg:         claudeCfg,
+			args:        []string{"--", "mcp", "list"},
 			wantPosture: PostureClaudePassthrough,
-			wantArgs:    func(Profile) []string { return []string{"-p", "hello"} },
+			wantArgs:    func(Profile) []string { return []string{"--", "mcp", "list"} },
 		},
 		{
 			name:        "claude subcommand passes through byte-clean",
@@ -842,7 +849,7 @@ func TestEmitBanner_ClassifiesEveryPosture(t *testing.T) {
 		t.Fatal("allPostures is empty; the loop below would pass vacuously")
 	}
 
-	silent := map[Posture]bool{PostureClaudeBuilder: true, PostureAgentsPassthrough: true, PostureClaudePassthrough: true}
+	silent := map[Posture]bool{PostureClaudeBuilder: true, PostureAgentsPassthrough: true, PostureClaudePassthrough: true, PostureClaudePrint: true}
 	seen := map[Posture]bool{}
 
 	for _, p := range allPostures {
@@ -900,6 +907,7 @@ func TestEmitBanner_ByPosture(t *testing.T) {
 		{PostureClaudeBuilder, ""},
 		{PostureAgentsPassthrough, ""},
 		{PostureClaudePassthrough, ""},
+		{PostureClaudePrint, ""},
 	}
 
 	for _, tc := range tests {

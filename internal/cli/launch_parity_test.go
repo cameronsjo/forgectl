@@ -313,9 +313,9 @@ func TestParity_ClaudeBuilderLaunch(t *testing.T) {
 	assertArgv(t, gotArgv, []string{
 		"--permission-mode", "plan",
 		"--allow-dangerously-skip-permissions",
+		"--add-dir", "/tmp/parity-shared",
 		"--model", "sonnet",
 		"--effort", "high",
-		"--add-dir", "/tmp/parity-shared",
 		"summarize this",
 	})
 

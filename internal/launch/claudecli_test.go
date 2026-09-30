@@ -8,12 +8,13 @@ import (
 	"testing"
 )
 
-// TestIsClaudePassthrough pins which Claude argv skips posture injection.
+// TestIsClaudePassthrough pins which Claude argv reaches claude byte-clean.
 //
-// Mutation that turns it red: drop the `a == "--"` stop (the "after claude's
-// separator" rows flip to true), drop "--output-format=" prefix matching (that
-// row flips to false), or drop the args[0] subcommand check (the "mcp" and
-// "update" rows flip to false).
+// Mutation that turns it red: drop the args[0] subcommand check (the "mcp"
+// and "update" rows flip to false), drop the args[1]-after-"--" check (the
+// "-- mcp list" row flips), drop the agents exclusion (the agents rows flip
+// to true), or drop the `--` stop in scanClaudeFlags (the "after claude's
+// separator" rows flip to true).
 func TestIsClaudePassthrough(t *testing.T) {
 	cases := []struct {
 		args []string
@@ -27,26 +28,55 @@ func TestIsClaudePassthrough(t *testing.T) {
 		{[]string{"update"}, true},
 		{[]string{"plugins"}, true},
 		{[]string{"doctor"}, true},
-		{[]string{"-p", "hi"}, true},
-		{[]string{"--model", "opus", "--print", "hi"}, true},
-		{[]string{"--output-format", "json", "-p", "hi"}, true},
-		{[]string{"--output-format=stream-json"}, true},
 		{[]string{"--help"}, true},
-		{[]string{"-v"}, true},
+		{[]string{"-p", "hi", "-v"}, true},
+		{[]string{"--version"}, true},
+		// Print mode is its own posture, not a byte-clean passthrough.
+		{[]string{"-p", "hi"}, false},
+		// claude dispatches a subcommand after its own `--` too.
+		{[]string{"--", "mcp", "list"}, true},
+		{[]string{"--", "hello"}, false},
+		{[]string{"--"}, false},
 		// Claude's own separator makes what follows prompt text.
-		{[]string{"--", "-p"}, false},
 		{[]string{"--model", "opus", "--", "--help"}, false},
 		// A subcommand name is only a subcommand in first position; later it
 		// is a prompt word or a flag value.
 		{[]string{"--model", "opus", "mcp"}, false},
 		{[]string{"explain", "doctor"}, false},
-		// agents is routed by selectPosture before this check, and a bare
-		// `agents` must keep its posture-injecting branch.
+		// agents starts sessions, so it keeps its posture in either slot.
 		{[]string{"agents"}, false},
+		{[]string{"--", "agents"}, false},
 	}
 	for _, tc := range cases {
 		if got := IsClaudePassthrough(tc.args); got != tc.want {
 			t.Errorf("IsClaudePassthrough(%q) = %v, want %v", tc.args, got, tc.want)
+		}
+	}
+}
+
+// TestIsClaudePrintMode pins which argv takes the print posture.
+//
+// Mutation that turns it red: drop "--output-format" from the flag list (both
+// output-format rows flip), drop the `=value` prefix match (the
+// "--output-format=stream-json" row flips), or drop the `--` stop (the
+// "-- -p" row flips).
+func TestIsClaudePrintMode(t *testing.T) {
+	cases := []struct {
+		args []string
+		want bool
+	}{
+		{nil, false},
+		{[]string{"hello"}, false},
+		{[]string{"-p", "hi"}, true},
+		{[]string{"--model", "opus", "--print", "hi"}, true},
+		{[]string{"--output-format", "json", "hi"}, true},
+		{[]string{"--output-format=stream-json"}, true},
+		{[]string{"--", "-p"}, false},
+		{[]string{"--model", "opus", "--", "--print"}, false},
+	}
+	for _, tc := range cases {
+		if got := IsClaudePrintMode(tc.args); got != tc.want {
+			t.Errorf("IsClaudePrintMode(%q) = %v, want %v", tc.args, got, tc.want)
 		}
 	}
 }

@@ -78,8 +78,15 @@ func ResumeArgs(p Profile, sessionID string, fork bool) []string {
 // args verbatim. Injected flags go first so a user override (e.g. --model) wins
 // under Claude Code's last-flag-wins parsing. Interactive-only flags (--ide,
 // --exclude-…, --resume) are intentionally omitted — they break -p/--print,
-// which `forgectl launch` no longer routes here (see IsClaudePassthrough) but
-// the `forgectl pr` review dispatch still does.
+// which `forgectl launch` routes to PrintArgs instead but the `forgectl pr`
+// review dispatch still sends here.
+//
+// Every --add-dir is emitted BEFORE --model, never last. --add-dir is variadic
+// (`<directories...>`), so an add-dir directly ahead of the user's args
+// swallows a bare prompt as one more directory: `claude -p --add-dir /tmp hi`
+// fails "Input must be provided", while `--add-dir /tmp --model sonnet hi`
+// runs the prompt (Claude Code 2.1.285). --model is unconditional, so it
+// always closes the list.
 //
 // --strict-mcp-config is GATED on Profile.StrictMCP, never unconditional: this
 // function also serves the operator's ordinary `forgectl launch`, which must
@@ -92,12 +99,27 @@ func BuilderArgs(p Profile, userArgs []string) []string {
 	if p.StrictMCP {
 		args = append(args, "--strict-mcp-config")
 	}
-	args = append(args, "--model", p.Model)
-	args = appendEffort(args, p)
 	for _, d := range p.AddDir {
 		args = append(args, "--add-dir", d)
 	}
+	args = append(args, "--model", p.Model)
+	args = appendEffort(args, p)
 	return append(args, userArgs...)
+}
+
+// PrintArgs is the print-mode posture (`-p`, `--print`, `--output-format`):
+// the profile's permission mode, and nothing else, ahead of the user's args.
+//
+// The permission mode stays because it keeps launch's invariant that it always
+// starts in a posture that cannot write (builtinPermissionMode). An unattended
+// `forgectl launch -p …` is the case that invariant exists for, and without
+// the flag it would fall back to settings.json's defaultMode. It takes one
+// value and is valid with -p, and it goes first, so a later user
+// --permission-mode still wins. Everything else is dropped, so a script gets
+// the model, effort, and directories it asks for, as with plain `claude -p`,
+// and allow_danger never makes bypass reachable in an unattended run.
+func PrintArgs(p Profile, userArgs []string) []string {
+	return append([]string{"--permission-mode", p.PermissionMode}, userArgs...)
 }
 
 // AgentsArgs injects only the agents-valid posture subset between the "agents"

@@ -93,7 +93,8 @@ then execs the configured harness with that posture — no prompts.
   forgectl launch                 drop straight into the resolved profile
   forgectl launch <args…>          apply the profile and pass args through
   forgectl launch agents …         Claude-only agent-management passthrough
-  forgectl launch mcp …            Claude subcommands and -p runs get no posture
+  forgectl launch mcp …            Claude subcommands run with no posture
+  forgectl launch -p …             print mode: only the permission mode
   forgectl launch -- <args…>       skip launch's own verbs; "--" is dropped
 
 To resume or fork an earlier session, use "forgectl resume" — it discovers
