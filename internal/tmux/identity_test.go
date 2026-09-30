@@ -216,6 +216,117 @@ func TestRevalidateWindowProvesParentage(t *testing.T) {
 	}
 }
 
+// TestKillWindowClassifiesOnlyTheExactGoneAnswer is forgectl#746: a window
+// that dies between KillWindow's revalidation and its kill-window makes tmux
+// answer "can't find window: <id>" and exit 1. That exact answer, for the id
+// just revalidated, is ErrObjectGone; any near miss is returned unclassified,
+// so a caller keeps failing closed on it.
+//
+// Mutation that turns it red: compare with strings.Contains(stderr,
+// "can't find window") instead of equality with the id — the other-id and
+// trailing-text rows then classify as gone; or drop the ExitCode check — the
+// exit-2 row does.
+func TestKillWindowClassifiesOnlyTheExactGoneAnswer(t *testing.T) {
+	gen := ServerGeneration{Selector: ServerSelector{TmpDir: "/tmp"}, PID: "9", StartTime: "100"}
+	want := WindowIdentity{Generation: gen, ID: "@3", SessionID: "$1", Name: "pr-o-r-1"}
+	row := windowRow("9", "100", "@3", "$1", "forge", 0, "pr-o-r-1")
+	sameServer := sessionRow("9", "100", "$1", "forge", "/w")
+	cmdErr := func(stderr string, code int, dropped int64) error {
+		return &internalexec.CommandError{Name: "tmux", Stderr: stderr, ExitCode: code, StderrDropped: dropped,
+			Err: errors.New("exit status " + strconv.Itoa(code))}
+	}
+	for _, tc := range []struct {
+		name     string
+		killErr  error
+		wantGone bool
+	}{
+		{"exact answer for the id", cmdErr("can't find window: @3", 1, 0), true},
+		{"another id", cmdErr("can't find window: @33", 1, 0), false},
+		{"trailing text", cmdErr("can't find window: @3 (and more)", 1, 0), false},
+		{"another exit code", cmdErr("can't find window: @3", 2, 0), false},
+		{"a truncated stderr tail", cmdErr("can't find window: @3", 1, 10), false},
+		{"no server", cmdErr("no server running on /tmp/tmux-0/default", 1, 0), false},
+		{"not a command error", errors.New("can't find window: @3"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := &internalexec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+				if len(args) > 0 && args[0] == "kill-window" {
+					return "", tc.killErr
+				}
+				if len(args) > 0 && args[0] == "list-sessions" {
+					return sameServer, nil
+				}
+				return row, nil
+			}}
+			c := New(run)
+			identityEnv(c, "", "/tmp")
+			err := c.KillWindow(context.Background(), want)
+			if err == nil {
+				t.Fatal("KillWindow = nil, want the kill-window failure")
+			}
+			if got := errors.Is(err, ErrObjectGone); got != tc.wantGone {
+				t.Errorf("errors.Is(%v, ErrObjectGone) = %v, want %v", err, got, tc.wantGone)
+			}
+			if !errors.Is(err, tc.killErr) {
+				t.Errorf("err = %v, want the kill-window failure still reachable", err)
+			}
+		})
+	}
+}
+
+// TestKillWindowConfirmsTheServerBehindTheGoneAnswer: the exact "can't find
+// window" answer is only ErrObjectGone when a re-read shows the captured
+// server generation still answering. A replaced server is
+// ErrGenerationChanged, and an absent or unreadable server confirms nothing,
+// so the kill error comes back unclassified (#755 review).
+//
+// Mutation that turns it red: skip the re-read (return ErrObjectGone straight
+// from the exact-stderr match) — the replaced, absent and unreadable rows all
+// read as gone; or drop the generation comparison — the replaced row does.
+func TestKillWindowConfirmsTheServerBehindTheGoneAnswer(t *testing.T) {
+	gen := ServerGeneration{Selector: ServerSelector{TmpDir: "/tmp"}, PID: "9", StartTime: "100"}
+	want := WindowIdentity{Generation: gen, ID: "@3", SessionID: "$1", Name: "pr-o-r-1"}
+	row := windowRow("9", "100", "@3", "$1", "forge", 0, "pr-o-r-1")
+	killErr := &internalexec.CommandError{Name: "tmux", Stderr: "can't find window: @3", ExitCode: 1,
+		Err: errors.New("exit status 1")}
+	for _, tc := range []struct {
+		name        string
+		sessions    string
+		sessionsErr error
+		wantGone    bool
+		wantGen     bool
+	}{
+		{"same server", sessionRow("9", "100", "$1", "forge", "/w"), nil, true, false},
+		{"replaced server", sessionRow("77", "500", "$1", "forge", "/w"), nil, false, true},
+		{"no server left", "", nil, false, false},
+		{"re-read unreadable", "", errors.New("tmux: permission denied"), false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := &internalexec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+				switch {
+				case len(args) > 0 && args[0] == "kill-window":
+					return "", killErr
+				case len(args) > 0 && args[0] == "list-sessions":
+					return tc.sessions, tc.sessionsErr
+				}
+				return row, nil
+			}}
+			c := New(run)
+			identityEnv(c, "", "/tmp")
+			err := c.KillWindow(context.Background(), want)
+			if err == nil {
+				t.Fatal("KillWindow = nil, want an error")
+			}
+			if got := errors.Is(err, ErrObjectGone); got != tc.wantGone {
+				t.Errorf("errors.Is(%v, ErrObjectGone) = %v, want %v", err, got, tc.wantGone)
+			}
+			if got := errors.Is(err, ErrGenerationChanged); got != tc.wantGen {
+				t.Errorf("errors.Is(%v, ErrGenerationChanged) = %v, want %v", err, got, tc.wantGen)
+			}
+		})
+	}
+}
+
 // TestRevalidateSurfacesUnreadableFields keeps #242's fail-closed contract
 // reachable through the identity layer: a lossy separator rendering must not be
 // read as "the object is gone", which would send a caller down a create or
