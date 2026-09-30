@@ -116,17 +116,21 @@ func TestPostReview_IsTheOnlyReviewPoster(t *testing.T) {
 	}
 }
 
-// reviewLiteralAllowlist is every file outside internal/pr allowed to hold a
-// literal postsReview matches, with exactly how many it holds. None of them
-// posts a review: the `forgectl init` scaffold row for the review workflow
-// (its name and config key), the review workflow's own Name and ConfigKey, and
-// the review workflow's launch export. The count is exact, so a new literal
-// in an allowlisted file fails as surely as one anywhere else, and so does an
-// entry whose literals are gone.
-var reviewLiteralAllowlist = map[string]int{
-	"internal/cli/init_cmd.go": 2,
-	"internal/cli/review.go":   2,
-	"internal/launch/steps.go": 1,
+// reviewLiteral is one postsReview-matching literal value in one file.
+type reviewLiteral struct{ file, value string }
+
+// reviewLiteralAllowlist is every postsReview-matching literal outside
+// internal/pr, keyed by file AND value, with exactly how many times that value
+// appears there. None of them posts a review: the `forgectl init` scaffold row
+// for the review workflow (its name and config key), the review workflow's own
+// Name and ConfigKey, and the review workflow's launch export. Keying by value
+// means a "/reviews" path added to an allowlisted file fails even though the
+// file already holds a "review"; the exact count means a second "review" fails
+// too, and so does an entry whose literal is gone.
+var reviewLiteralAllowlist = map[reviewLiteral]int{
+	{"internal/cli/init_cmd.go", "review"}: 2,
+	{"internal/cli/review.go", "review"}:   2,
+	{"internal/launch/steps.go", "review"}: 1,
 }
 
 // TestPostReview_NoReviewPosterOutsideThePackage widens
@@ -139,9 +143,10 @@ var reviewLiteralAllowlist = map[string]int{
 // for.
 //
 // Mutations that turn it red: add `var reviewsPath =
-// "repos/%s/pulls/%d/reviews"` to a non-test file in internal/cli; add a third
-// "review" literal to internal/cli/review.go; or remove the scaffold row from
-// init_cmd.go (its allowlist entry goes stale).
+// "repos/%s/pulls/%d/reviews"` to a non-test file in internal/cli, or to
+// internal/cli/review.go (allowlisted for "review", not for that value); add
+// a third "review" literal to internal/cli/review.go; or remove the scaffold
+// row from init_cmd.go (its allowlist entry goes stale).
 func TestPostReview_NoReviewPosterOutsideThePackage(t *testing.T) {
 	root, err := os.OpenRoot(filepath.Join("..", ".."))
 	if err != nil {
@@ -153,7 +158,7 @@ func TestPostReview_NoReviewPosterOutsideThePackage(t *testing.T) {
 	}
 	fsys := root.FS()
 	fset := token.NewFileSet()
-	got := map[string]int{}
+	got := map[reviewLiteral]int{}
 	err = fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -183,8 +188,9 @@ func TestPostReview_NoReviewPosterOutsideThePackage(t *testing.T) {
 				return true
 			}
 			if s, err := strconv.Unquote(lit.Value); err == nil && postsReview(s) {
-				got[path]++
-				if _, allowed := reviewLiteralAllowlist[path]; !allowed {
+				key := reviewLiteral{path, s}
+				got[key]++
+				if _, allowed := reviewLiteralAllowlist[key]; !allowed {
 					t.Errorf("%s: review-post literal %q outside internal/pr; post through pr.PostReview so its token scan runs",
 						fset.Position(lit.Pos()), s)
 				}
@@ -196,11 +202,11 @@ func TestPostReview_NoReviewPosterOutsideThePackage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("walk the module: %v", err)
 	}
-	for path, want := range reviewLiteralAllowlist {
-		if got[path] != want {
-			t.Errorf("%s holds %d review-post literals, allowlisted for %d; "+
+	for key, want := range reviewLiteralAllowlist {
+		if got[key] != want {
+			t.Errorf("%s holds %q %d times, allowlisted for %d; "+
 				"a new one must post through pr.PostReview, and a removed one must leave the allowlist",
-				path, got[path], want)
+				key.file, key.value, got[key], want)
 		}
 	}
 }
