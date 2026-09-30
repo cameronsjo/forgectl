@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	osexec "os/exec"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/selfupdate"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // upgradeModule declares the self-update extension (ADR-0005): no config
@@ -107,14 +109,19 @@ func runUpgrade(cmd *cobra.Command, deps module.Deps, checkOnly bool) error {
 
 // runUpgradeCheck reports whether an upgrade is available, without applying
 // one — `upgrade --check`'s body. Never mutates: it's the same
-// selfupdate.CheckOutdated call `doctor`'s "forgectl version" check makes.
+// selfupdate.CheckOutdated call `doctor`'s "forgectl version" check makes,
+// and it words the result the same way (#738): the error is categorical,
+// because it carries brew's argv and stderr, which relay what the tap's
+// server and git transport send; the detail is rebuilt from the version
+// tokens in brew's output, never from its text.
 func runUpgradeCheck(ctx context.Context, deps module.Deps, out io.Writer) error {
 	outdated, detail, err := selfupdate.CheckOutdated(ctx, deps.Runner)
 	if err != nil {
-		return WithExitCode(fmt.Errorf("check: %w", err), 1)
+		slog.Warn("brew outdated failed.", "error", err)
+		return WithExitCode(termsafe.Categorical("check: brew outdated failed; check network access to the Homebrew tap", err), 1)
 	}
 	if outdated {
-		fmt.Fprintf(out, "update available: %s\n", detail)
+		fmt.Fprintf(out, "update available: %s\n", selfupdate.OutdatedDetail(detail))
 		return nil
 	}
 	fmt.Fprintln(out, "forgectl is up to date.")
