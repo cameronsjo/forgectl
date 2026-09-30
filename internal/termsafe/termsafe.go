@@ -111,10 +111,12 @@ const argEchoEllipsis = "…"
 
 // QuoteArgMax is QuoteText over at most maxRunes runes of s, followed by an
 // ellipsis when s was longer. It is the echo form for a rejected value the
-// operator just typed on the command line, where showing it back is the whole
-// diagnostic. It is NOT for values from config, a subprocess, or disk: those
-// get a categorical error that never renders them, because nobody in front of
-// the terminal chose that text (#562).
+// operator chose, where showing it back is the whole diagnostic: an argument
+// just typed on the command line, or a value in their own config.toml named
+// by a validation error (#706). It is NOT for text a subprocess, a server, or
+// a file forgectl did not ask the operator to write supplies: those get a
+// categorical error that never renders them, because nobody in front of the
+// terminal chose that text (#562).
 //
 // The cut counts INPUT runes, before escaping, so it never splits an escape;
 // escaping can lengthen the output (at most 10 bytes per rune, for \U0010ffff),

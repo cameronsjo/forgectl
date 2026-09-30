@@ -1,0 +1,58 @@
+{
+  "id": "cli:tab:move",
+  "result": {
+    "move_result": {
+      "changed": true,
+      "tab_id": "w2:t1",
+      "workspace_id": "w2"
+    },
+    "tabs": [
+      {
+        "agent_status": "working",
+        "focused": false,
+        "label": "label-4",
+        "number": 39,
+        "pane_count": 4,
+        "tab_id": "w2:t2",
+        "workspace_id": "w2"
+      },
+      {
+        "agent_status": "unknown",
+        "focused": false,
+        "label": "label-5",
+        "number": 40,
+        "pane_count": 1,
+        "tab_id": "w2:t3",
+        "workspace_id": "w2"
+      },
+      {
+        "agent_status": "idle",
+        "focused": false,
+        "label": "label-6",
+        "number": 38,
+        "pane_count": 2,
+        "tab_id": "w2:t4",
+        "workspace_id": "w2"
+      },
+      {
+        "agent_status": "idle",
+        "focused": true,
+        "label": "label-7",
+        "number": 28,
+        "pane_count": 1,
+        "tab_id": "w2:t5",
+        "workspace_id": "w2"
+      },
+      {
+        "agent_status": "unknown",
+        "focused": false,
+        "label": "label-2",
+        "number": 41,
+        "pane_count": 1,
+        "tab_id": "w2:t1",
+        "workspace_id": "w2"
+      }
+    ],
+    "type": "tab_move"
+  }
+}
