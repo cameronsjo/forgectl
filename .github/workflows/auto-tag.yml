@@ -15,12 +15,19 @@ name: Auto Tag
 # release PRs outstanding" inside a green job — no release PR is ever opened
 # again. Taking over the tagging means taking over the flip too, so this
 # workflow closes the loop itself (see "Flip the release PR label" below).
+#
+# Only the ship gate releases (cadence-ecosystem ADR-0044). A manifest bump is
+# tagged only when the pushed commit is the Forge Bellows App's own merge of
+# its `chore(main): release X.Y.Z` PR (the `gate` job).
+# Any other bump that reaches main is left untagged with a notice. Ported
+# from cadence-hooks' "Require a gated release merge" step (forgectl security
+# review F-I1).
 on:
   push:
     branches: [main]
     paths: [.release-please-manifest.json]
 
-# Deny by default; the one job that needs anything grants it job-scoped.
+# Deny by default; each job grants what it needs, job-scoped.
 permissions: {}
 
 # Serialize. Each run produces a distinct tag, so a second run must land
@@ -30,48 +37,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  tag:
-    name: Tag version bump
+  # Decides whether to tag. It runs with no environment, so it can never read
+  # RELEASE_APP_PRIVATE_KEY: an ungated bump never enters the `release`
+  # environment. The gate's logic is inline, not in a repo script, so changing
+  # it needs the `workflows` permission that changing this file needs, and no
+  # code from the commit under judgement decides its own release.
+  gate:
+    name: Check the release merge
     runs-on: ubuntu-latest
-    # Job-scoped, deliberately. `contents: read` is all GITHUB_TOKEN needs
-    # here: the tag push authenticates with the App token instead (see
-    # below), so a `contents: write` grant would be dead weight — and paired
-    # with `pull-requests: write` it would hand GITHUB_TOKEN the ability to
-    # merge pull requests, which nothing in this job does.
     permissions:
-      contents: read # clone the repo and resolve existing tags
-      pull-requests: write # flip the merged release PR's autorelease label
-    # RELEASE_APP_PRIVATE_KEY belongs only in the `release` environment, with
-    # a deployment policy of branch `main` plus tag `v*` and no repo-level
-    # copy. With that in place, and the `v*` tag ruleset limiting who can
-    # create a tag, a copy of this workflow on another ref cannot read the
-    # key (cadence-ecosystem ADR-0044 (i)).
-    environment: release
+      contents: read # read the manifest and resolve existing tags
+      pull-requests: read # look up the PR that produced this commit
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.check.outputs.version }}
+      exists: ${{ steps.check.outputs.exists }}
+      gated: ${{ steps.gate.outputs.gated }}
     steps:
-      # An App token, not GITHUB_TOKEN: a tag pushed with GITHUB_TOKEN does
-      # NOT trigger `on: push: tags`, so release.yml would never fire and the
-      # release would silently never happen. That constraint is specific to
-      # pushing refs — the label flip further down has no such problem and
-      # deliberately stays on GITHUB_TOKEN.
-      #
-      # SHA-pinned: this action mints a live write-scoped installation token
-      # from a private key, so a silent upstream retag of `v3` is worth not
-      # trusting. Note
-      # actionlint's bundled metadata for this action is stale and will claim
-      # `client-id` is undefined — it is defined at this ref; check action.yml
-      # before "fixing" it back to the deprecated `app-id`.
-      - name: Generate Forge Bellows token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          permission-contents: write
-
-      # `persist-credentials: false`: nothing is written into .git/config, so
-      # no token outlives the step that needs it. The checkout itself reads
-      # with the job's own `contents: read` GITHUB_TOKEN; the App token is
-      # handed to the push step alone, per-invocation.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -106,14 +88,142 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Only the ship gate's merge releases. The commit must be the merge of a
+      # `chore(main): release <version>` PR that artificer-forge-bellows[bot]
+      # both opened and merged, and the PR's merge_commit_sha must be this
+      # commit. Identity comes from PR account logins through the API, never
+      # from commit emails, which anyone can set. Anything else writes
+      # `gated=false` and exits 0 with a notice; an API error or a malformed
+      # response fails the job. release_merge_test.go runs this exact block
+      # against a stub `gh`.
+      - name: Require a gated release merge
+        id: gate
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          readonly BOT='artificer-forge-bellows[bot]'
+          : "${GITHUB_REPOSITORY:?}" "${HEAD_SHA:?}" "${VERSION:?}" "${GITHUB_OUTPUT:?}"
+          # Test hooks: production uses the defaults.
+          attempts="${LINK_ATTEMPTS:-6}"
+          sleep_seconds="${LINK_SLEEP_SECONDS:-10}"
+          [[ "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::GITHUB_REPOSITORY is not owner/repo"; exit 1; }
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::HEAD_SHA is not a 40-hex commit id"; exit 1; }
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || { echo "::error::VERSION is not a semver"; exit 1; }
+          [[ "$attempts" =~ ^[1-9][0-9]*$ && "$sleep_seconds" =~ ^[0-9]+$ ]] || { echo "::error::bad LINK_ATTEMPTS or LINK_SLEEP_SECONDS"; exit 1; }
+          title="chore(main): release ${VERSION}"
+
+          not_gated() {
+            echo "::notice::not tagging v${VERSION}: $1. Only the ship gate's merge of its release PR is tagged; recovery is in docs/RELEASING.md."
+            echo "gated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          # GitHub links a merge commit to its PR shortly after the push. An
+          # empty list is retried; a non-empty list with no match is final.
+          # `gh api` exits non-zero on any HTTP error, and `set -e` stops here.
+          pr=''
+          for ((i = 1; i <= attempts; i++)); do
+            pulls="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/pulls")"
+            count="$(jq 'if type == "array" then length else error("commits/{sha}/pulls did not return an array") end' <<< "$pulls")"
+            if [[ "$count" != 0 ]]; then
+              pr="$(jq -r --arg t "$title" --arg bot "$BOT" \
+                '[.[] | select(.merged_at != null and .title == $t and .user.login == $bot)] | first | .number // ""' <<< "$pulls")"
+              break
+            fi
+            echo "No PR linked to ${HEAD_SHA} yet (attempt ${i}/${attempts})."
+            if ((i < attempts)); then sleep "$sleep_seconds"; fi
+          done
+          [[ "$count" != 0 ]] || not_gated "no PR is linked to ${HEAD_SHA}"
+          [[ -n "$pr" ]] || not_gated "no merged PR titled '${title}' and opened by ${BOT} contains ${HEAD_SHA}"
+          [[ "$pr" =~ ^[0-9]+$ ]] || { echo "::error::resolved PR reference is not a number: ${pr}"; exit 1; }
+
+          # The list matches any PR whose head contains the commit. Fetch the
+          # PR itself: its merge must have produced exactly this commit, and
+          # the App, not a person, must have pressed merge.
+          pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr}")"
+          # Unit-separator delimited, not tab: tab is IFS whitespace, so
+          # `read` would merge an empty field (a null merged_by) into its
+          # neighbour. The title goes last, so a separator inside it stays in
+          # the title and can only fail the comparison.
+          fields="$(jq -r 'if type == "object" then
+              [(.merged // false), (.user.login // ""), (.merged_by.login // ""), (.merge_commit_sha // ""), (.title // "")] | join("\u001f")
+            else error("pulls/{number} did not return an object") end' <<< "$pull")"
+          IFS=$'\x1f' read -r merged author merged_by merge_sha pr_title <<< "$fields"
+          [[ "$merged" == true ]] || not_gated "#${pr} is not merged"
+          [[ "$pr_title" == "$title" ]] || not_gated "#${pr} is titled '${pr_title}', not '${title}'"
+          [[ "$author" == "$BOT" ]] || not_gated "#${pr} was opened by '${author}', not ${BOT}"
+          [[ "$merged_by" == "$BOT" ]] || not_gated "#${pr} was merged by '${merged_by}', not ${BOT} (the ship gate)"
+          [[ "$merge_sha" == "$HEAD_SHA" ]] || not_gated "#${pr} merged as ${merge_sha}, not ${HEAD_SHA}"
+          echo "#${pr} was opened and merged by ${BOT}; tagging v${VERSION}."
+          echo "gated=true" >> "$GITHUB_OUTPUT"
+
+  tag:
+    name: Tag version bump
+    needs: gate
+    # A gated bump gets its tag and label flip. An existing tag (a re-run
+    # after the flip failed) gets the flip alone. An ungated bump stops at
+    # the gate and never enters the `release` environment.
+    if: needs.gate.outputs.gated == 'true' || needs.gate.outputs.exists == 'true'
+    runs-on: ubuntu-latest
+    # Job-scoped, deliberately. `contents: read` is all GITHUB_TOKEN needs
+    # here: the tag push authenticates with the App token instead (see
+    # below), so a `contents: write` grant would be dead weight — and paired
+    # with `pull-requests: write` it would hand GITHUB_TOKEN the ability to
+    # merge pull requests, which nothing in this job does.
+    permissions:
+      contents: read # clone the repo
+      pull-requests: write # flip the merged release PR's autorelease label
+    # RELEASE_APP_PRIVATE_KEY belongs only in the `release` environment, with
+    # a deployment policy of branch `main` plus tag `v*` and no repo-level
+    # copy. With that in place, and the `v*` tag ruleset limiting who can
+    # create a tag, a copy of this workflow on another ref cannot read the
+    # key (cadence-ecosystem ADR-0044 (i)). This job runs no code from the
+    # repository: only pinned actions, git, and gh.
+    environment: release
+    steps:
+      # An App token, not GITHUB_TOKEN: a tag pushed with GITHUB_TOKEN does
+      # NOT trigger `on: push: tags`, so release.yml would never fire and the
+      # release would silently never happen. It is also the only actor the
+      # `v*` tag ruleset lets create a tag (App 2953149 is its sole bypass).
+      # That constraint is specific to pushing refs — the label flip further
+      # down has no such problem and deliberately stays on GITHUB_TOKEN.
+      #
+      # SHA-pinned: this action mints a live write-scoped installation token
+      # from a private key, so a silent upstream retag of `v3` is worth not
+      # trusting. Note
+      # actionlint's bundled metadata for this action is stale and will claim
+      # `client-id` is undefined — it is defined at this ref; check action.yml
+      # before "fixing" it back to the deprecated `app-id`.
+      - name: Generate Forge Bellows token
+        id: app-token
+        if: needs.gate.outputs.gated == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      # `persist-credentials: false`: nothing is written into .git/config, so
+      # no token outlives the step that needs it. The checkout itself reads
+      # with the job's own `contents: read` GITHUB_TOKEN; the App token is
+      # handed to the push step alone, per-invocation.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.gate.outputs.gated == 'true'
+        with:
+          persist-credentials: false
+
       # The App token reaches git through GIT_CONFIG_* environment variables,
       # so it lands in neither .git/config (checkout persists nothing), a
       # remote URL that git would echo back in an error, nor the process
       # argument list that anything else on the runner could read.
       - name: Create and push tag
-        if: steps.check.outputs.exists == 'false'
+        if: needs.gate.outputs.gated == 'true'
         env:
-          TAG: ${{ steps.check.outputs.tag }}
+          TAG: ${{ needs.gate.outputs.tag }}
           APP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
@@ -141,15 +251,16 @@ jobs:
       # `can_approve_pull_request_reviews: false` stops it from creating or
       # approving PRs (cadence-ecosystem ADR-0044 (i)). The tag-push
       # constraint that forced the App token upward does not apply to labels.
-      # No `if:` on purpose — the flip is idempotent and must stay re-runnable.
-      # If the tag push succeeds and this step then fails, gating on
-      # `exists == 'false'` would make a re-run skip both steps and exit green
-      # with the label still pending: the wedge, now unfixable by re-run.
+      # No step `if:` on purpose: the flip is idempotent and must stay
+      # re-runnable. If the tag push succeeds and this step then fails, a
+      # re-run sees `exists == 'true'` and reaches this step alone. An ungated
+      # bump never reaches this job, so its PR keeps `autorelease: pending`:
+      # labelling it tagged would claim a release that never happened.
       - name: Flip the release PR label
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          VERSION: ${{ steps.check.outputs.version }}
+          VERSION: ${{ needs.gate.outputs.version }}
           HEAD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail

@@ -15,10 +15,17 @@ package pr
 //   [x] A missing log still reads as empty (history and prune)
 //   [x] A normal log reads and appends as before, and the reader's descriptor
 //       is left blocking
+//   [x] A socket and a directory are the typed refusal for every opener, even
+//       where the kernel refuses the open itself (ENXIO, EISDIR) (#621)
+//   [x] ELOOP names the log only when the log is the symlink; a loop in a
+//       directory above it names the directory instead (#621)
+//   [x] The refusal says "audit log" once, not twice (#621)
+//   [x] A hard-linked log is ACCEPTED, as documented on openRepairLogFile (#621)
 
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -310,5 +317,160 @@ func TestRepairLog_ARegularLogIsUnchanged(t *testing.T) {
 	}
 	if nonblock {
 		t.Error("the helper returned a non-blocking descriptor; O_NONBLOCK is for the open only")
+	}
+}
+
+// shortSessionsDir is a sessions dir short enough for a unix socket address:
+// sun_path is 104 bytes on macOS, which a t.TempDir path there overruns, so a
+// socket test under t.TempDir would skip on the macOS runner and prove nothing.
+func shortSessionsDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "fsock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+// socketLog replaces the log with a listening unix socket, skipping when the
+// path is still too long for a socket address.
+func socketLog(t *testing.T, c *Client) {
+	t.Helper()
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", c.repairLogPath())
+	if err != nil {
+		t.Skipf("cannot bind a unix socket at the log path: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+}
+
+// dirLog replaces the log with a directory.
+func dirLog(t *testing.T, c *Client) {
+	t.Helper()
+	if err := os.Mkdir(c.repairLogPath(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Mutation that turns it red: remove the ENXIO/EOPNOTSUPP/EISDIR arm in
+// openRepairLogNoFollow. A socket then fails every opener with a bare
+// "no such device or address" (Linux) or "operation not supported" (macOS),
+// and the append's O_RDWR on a directory with a bare "is a directory" —
+// neither the typed refusal. The socket cases run in a short sessions dir so
+// the macOS runner binds rather than skips.
+func TestRepairLog_ASocketOrDirectoryIsTheTypedRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		kind  string
+		place func(*testing.T, *Client)
+		short bool
+	}{
+		{"socket", socketLog, true},
+		{"directory", dirLog, false},
+	} {
+		sessionsDir := func(t *testing.T) string {
+			if tc.short {
+				return shortSessionsDir(t)
+			}
+			return t.TempDir()
+		}
+		t.Run(tc.kind+"/history", func(t *testing.T) {
+			c := testClientAt(t, nil, sessionsDir(t))
+			tc.place(t, c)
+			err := mustFailFast(t, "RepairHistory", func() error { return historyErr(c) })
+			wantNotRegular(t, "RepairHistory", err)
+			if !strings.Contains(err.Error(), "is a "+tc.kind) {
+				t.Errorf("error %q does not name the %s", err, tc.kind)
+			}
+		})
+		t.Run(tc.kind+"/append", func(t *testing.T) {
+			c := testClientAt(t, nil, sessionsDir(t))
+			tc.place(t, c)
+			err := mustFailFast(t, "appendRepairRowLocked", func() error { return appendErr(c) })
+			wantNotRegular(t, "appendRepairRowLocked", err)
+			if !strings.Contains(err.Error(), "is a "+tc.kind) {
+				t.Errorf("error %q does not name the %s", err, tc.kind)
+			}
+		})
+		t.Run(tc.kind+"/prune", func(t *testing.T) {
+			c := pruneClient(t, repairRunner(nil), WithSessionsDir(sessionsDir(t)))
+			tc.place(t, c)
+			var report PruneReport
+			err := mustFailFast(t, "Prune", func() error {
+				var perr error
+				report, perr = pruneLogErr(c)
+				return perr
+			})
+			wantPruneRefusedLog(t, report, err)
+		})
+	}
+}
+
+// Mutation that turns it red: drop the Lstat in the ELOOP arm of
+// openRepairLogNoFollow and report every ELOOP as "is a symlink" — the
+// parent-loop case then names the log and reads as the typed refusal.
+func TestRepairLog_ELOOPNamesTheRightComponent(t *testing.T) {
+	dir := t.TempDir()
+	t.Run("the log itself is a symlink", func(t *testing.T) {
+		link := filepath.Join(dir, "self.jsonl")
+		if err := os.Symlink(filepath.Join(dir, "elsewhere"), link); err != nil {
+			t.Fatal(err)
+		}
+		_, err := openRepairLogFile(link, os.O_RDONLY, 0)
+		if !errors.Is(err, errRepairLogNotRegular) || !strings.Contains(err.Error(), "is a symlink") {
+			t.Errorf("err = %v, want the typed refusal naming the log as a symlink", err)
+		}
+	})
+	t.Run("a directory above the log loops", func(t *testing.T) {
+		loop := filepath.Join(dir, "loop")
+		if err := os.Symlink("loop", loop); err != nil {
+			t.Fatal(err)
+		}
+		_, err := openRepairLogFile(filepath.Join(loop, repairLogName), os.O_RDONLY, 0)
+		if err == nil || errors.Is(err, errRepairLogNotRegular) || strings.Contains(err.Error(), "is a symlink") {
+			t.Fatalf("err = %v, want an untyped error that does not call the log a symlink", err)
+		}
+		if !errors.Is(err, syscall.ELOOP) || !strings.Contains(err.Error(), "a directory above") {
+			t.Errorf("err = %v, want ELOOP naming a directory above the log", err)
+		}
+	})
+}
+
+// Mutation that turns it red: restore the old sentinel text ("the repair
+// audit log is not a regular file") — the append's refusal then reads
+// "open repair audit log: the repair audit log is not a regular file: …".
+func TestRepairLog_TheRefusalDoesNotRepeatItself(t *testing.T) {
+	c := testClient(t, nil)
+	fifoLog(t, c)
+	err := mustFailFast(t, "appendRepairRowLocked", func() error { return appendErr(c) })
+	wantNotRegular(t, "appendRepairRowLocked", err)
+	if n := strings.Count(err.Error(), "audit log"); n != 1 {
+		t.Errorf("error %q says \"audit log\" %d times, want once", err, n)
+	}
+}
+
+// TestRepairLog_AHardLinkedLogIsAccepted pins the documented decision on
+// openRepairLogFile: a hard link is a regular file and is read and appended to
+// like one. If this goes red, the decision changed and the doc comment must
+// change with it.
+//
+// Mutation that turns it red: refuse Nlink > 1 in openRepairLogFile.
+func TestRepairLog_AHardLinkedLogIsAccepted(t *testing.T) {
+	c := testClient(t, nil)
+	other := filepath.Join(c.SessionsDir(), "other-name.jsonl")
+	if err := os.WriteFile(other, []byte(`{"id":"linked","outcome":"intent"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(other, c.repairLogPath()); err != nil {
+		t.Skipf("hard links unsupported: %v", err)
+	}
+	if err := appendErr(c); err != nil {
+		t.Fatalf("appendRepairRowLocked on a hard-linked log: %v", err)
+	}
+	trail, err := c.RepairHistory(context.Background())
+	if err != nil {
+		t.Fatalf("RepairHistory on a hard-linked log: %v", err)
+	}
+	if len(trail.Rows) != 2 || trail.Rows[0].ID != "linked" || trail.Rows[1].ID != "a" {
+		t.Errorf("rows = %+v, want linked then a", trail.Rows)
 	}
 }
