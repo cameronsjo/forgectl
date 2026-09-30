@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // Prune outcomes. `kept` is the one that is not an action: a file this sweep
@@ -745,16 +746,23 @@ func (c *Client) screenLiveWindows(ctx context.Context, candidates []*asideCandi
 	if len(refs) == 0 {
 		return eligible
 	}
-	live, tmuxOK := c.WindowsLive(ctx, refs)
+	// The same strict read as WindowsLive, with ListWindows' error kept so the
+	// refusal can name its remedy (forgectl#805). windowsLive's own second
+	// result says only whether that error was nil, so it is not read here.
+	var listErr error
+	live, _ := c.windowsLive(ctx, refs, func(ctx context.Context) ([]tmux.Window, error) {
+		wins, err := c.tmuxClient.ListWindows(ctx)
+		listErr = err
+		return wins, err
+	})
 	var out []*asideCandidate
 	for _, cand := range eligible {
 		switch {
 		case !cand.hasRef:
 			out = append(out, cand)
-		case !tmuxOK:
+		case listErr != nil:
 			cand.item.Outcome = pruneOutcomeRefused
-			cand.item.Reason = "the tmux window list could not be read, and an unreadable list is not an absent window — " +
-				"check `tmux list-windows -a`, then retry"
+			cand.item.Reason = pruneWindowListRefusal(listErr)
 		case live[cand.ref]:
 			cand.item.Outcome = pruneOutcomeRefused
 			cand.item.Reason = fmt.Sprintf("it names %s, whose review window is still live — "+
@@ -764,6 +772,22 @@ func (c *Client) screenLiveWindows(ctx context.Context, candidates []*asideCandi
 		}
 	}
 	return out
+}
+
+// pruneWindowListRefusal is the reason prune gives a ref-bearing file when
+// the strict window read failed. An exited server's leftover socket
+// (tmux.ErrServerExited) gets its own remedy (forgectl#805): the generic
+// "check tmux list-windows" only prints "no server running", which is no next
+// step at all. It stays a refusal either way: a refused connect proves no
+// server listens now, not that a crashed server's panes died with it (#746,
+// #765).
+func pruneWindowListRefusal(err error) string {
+	if errors.Is(err, tmux.ErrServerExited) {
+		return "the tmux server has exited and left its socket behind, and a refused connect is not an absent window — " +
+			"once no review agent is still running, start any tmux session to clear the socket, then retry"
+	}
+	return "the tmux window list could not be read, and an unreadable list is not an absent window — " +
+		"check `tmux list-windows -a`, then retry"
 }
 
 // pruneOne writes the intent, unlinks, and completes the row.

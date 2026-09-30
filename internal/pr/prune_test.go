@@ -480,6 +480,9 @@ func TestPrune_AnUnreadableWindowListRefusesOnlyRefBearingItems(t *testing.T) {
 		t.Errorf("outcome for the ref-bearing file = %q, want %q — an unreadable list is not an absent window",
 			got, pruneOutcomeRefused)
 	}
+	if got := byPath[withRef].Reason; !strings.Contains(got, "could not be read") {
+		t.Errorf("reason for the ref-bearing file = %q, want the generic unreadable-list text", got)
+	}
 	if _, serr := os.Stat(withRef); serr != nil {
 		t.Errorf("a refused item was removed: %v", serr)
 	}
