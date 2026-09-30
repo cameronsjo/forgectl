@@ -191,3 +191,41 @@ func TestScanReport_SymlinkedRootIsFollowed(t *testing.T) {
 		t.Errorf("Preview items = %+v (reclaimable %d), want only %s at 10 bytes", result.Items, result.TotalReclaimable, wantTarget)
 	}
 }
+
+// TestScanReport_TildeRootWithoutHomeFails pins forgectl#972: when the home
+// directory cannot be resolved, a ~ root is refused — never read as a relative
+// directory named "~" under the working directory.
+//
+// Mutation that turns it red: delete the `c.home == "" && usesTilde(root)`
+// refusal in ScanReport.
+func TestScanReport_TildeRootWithoutHomeFails(t *testing.T) {
+	noHome := func() (string, error) { return "", errors.New("no $HOME") }
+	for _, tt := range []struct {
+		name string
+		opts []Option
+		root string
+	}{
+		{"flag root", nil, "~/Projects"},
+		{"bare tilde", nil, "~"},
+		{"config default_root", []Option{WithRoot("~/src")}, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Chdir(dir)
+			// A literal "~" directory under the cwd is what the bug would scan.
+			mustWriteFile(t, filepath.Join(dir, "~", "proj", "node_modules", "a.js"), 10)
+			c := newWithHome(nil, noHome, tt.opts...)
+			_, _, err := c.ScanReport(CleanOptions{Root: tt.root})
+			if err == nil || !strings.Contains(err.Error(), "home directory is not resolvable") {
+				t.Fatalf("ScanReport err = %v, want a home-not-resolvable refusal", err)
+			}
+		})
+	}
+	t.Run("absolute root still works", func(t *testing.T) {
+		dir := t.TempDir()
+		c := newWithHome(nil, noHome)
+		if _, _, err := c.ScanReport(CleanOptions{Root: dir}); err != nil {
+			t.Fatalf("absolute root without home: %v", err)
+		}
+	})
+}

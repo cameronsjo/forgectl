@@ -197,3 +197,25 @@ func TestSeshPick_RefusalEchoIsCapped(t *testing.T) {
 		t.Fatalf("refusal message is %d bytes; the echoed name must be capped", n)
 	}
 }
+
+// TestSeshResolvedPaths_HomeLookup pins forgectl#972: home is looked up only
+// for a "~" candidate, and a failed lookup there is an error, not a skipped
+// '#' check.
+//
+// Mutation that turns it red: make seshResolvedPaths return (nil, nil) on the
+// lookup error, or look the home directory up unconditionally.
+func TestSeshResolvedPaths_HomeLookup(t *testing.T) {
+	failing := func() (string, error) { return "", errors.New("no $HOME") }
+	if _, err := seshResolvedPaths("~/proj", failing); err == nil {
+		t.Fatal("a ~ candidate with no home directory must be an error")
+	}
+	paths, err := seshResolvedPaths("/tmp/a#b", failing)
+	if err != nil || len(paths) == 0 || !strings.Contains(paths[0], "#") {
+		t.Fatalf("non-~ candidate must resolve without home: paths=%v err=%v", paths, err)
+	}
+	ok := func() (string, error) { return "/home/u#x", nil }
+	paths, err = seshResolvedPaths("~/proj", ok)
+	if err != nil || len(paths) == 0 || paths[0] != "/home/u#x/proj" {
+		t.Fatalf("paths=%v err=%v", paths, err)
+	}
+}
