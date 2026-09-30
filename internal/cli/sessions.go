@@ -188,7 +188,8 @@ func finishSync(out io.Writer, r *sessions.Receipt, asJSON bool) error {
 		if err := writeJSON(out, newReceiptJSON(r)); err != nil {
 			return err
 		}
-		return receiptError(r)
+		// The receipt on stdout is the verdict (forgectl#862).
+		return jsonVerdict(receiptError(r), true)
 	}
 	return printReceipt(out, r)
 }

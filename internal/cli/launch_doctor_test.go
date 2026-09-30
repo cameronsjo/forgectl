@@ -222,6 +222,11 @@ func TestIntegration_LaunchDoctor_JSON(t *testing.T) {
 	if strings.Contains(stdout+stderr, secret) {
 		t.Fatalf("output leaked the endpoint secret:\nstdout=%s\nstderr=%s", stdout, stderr)
 	}
+	// The checks on stdout are the verdict: no error frame on top of them
+	// (forgectl#862).
+	if strings.Contains(stderr, "doctor found problems") {
+		t.Errorf("stderr = %q, want no error frame under --json", stderr)
+	}
 
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(stdout), &fields); err != nil {

@@ -559,10 +559,11 @@ func newEnvCheckCmd(file *string, anyFile *bool, th theme.Theme) *cobra.Command 
 
 Exit codes: 0 the file matches the example · 1 keys are missing or extra · 2 the file or the example was not found`,
 		// Cobra checks the positional arguments before RunE, so a stray
-		// argument would bypass the RunE wrapper below; --json is read with
-		// docsWantsJSON's raw-argument scan, as the docs verbs do.
+		// argument would bypass the RunE wrapper below. Flags are parsed by
+		// then, so --json is the parsed flag (forgectl#862): in
+		// `--example --json extra` the --json is --example's value.
 		Args: func(c *cobra.Command, args []string) error {
-			return checkJSONFailure(c, cobra.NoArgs(c, args), docsWantsJSON(c))
+			return checkJSONFailure(c, cobra.NoArgs(c, args), jsonFlagParsed(c))
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cwd, err := os.Getwd()
@@ -640,7 +641,7 @@ Exit codes: 0 the file matches the example · 1 keys are missing or extra · 2 t
 	// pflag before it reaches --json, so asJSON is still false here; the
 	// raw-argument scan decides instead.
 	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
-		return checkJSONFailure(c, err, docsWantsJSON(c))
+		return checkJSONFailure(c, err, argvWantsJSON(c))
 	})
 	cmd.Flags().StringVar(&example, "example", ".env.example", "path to the example file to check against")
 	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"missing":[...],"extra":[...]} to stdout instead of the human sections`)
@@ -673,40 +674,25 @@ func notFoundCheckError(cmd *cobra.Command, target envpkg.Target, wordingFmt str
 }
 
 // checkJSONFailure keeps env check's --json stderr free of fang's human error
-// frame (forgectl#858). Any failure the command has not already rendered
-// itself (notFoundCheckError's object, the drift exit) — a refused
-// --file/--example name, a file outside the repository, a parse failure, a
-// bad flag or stray argument — is written as one checkErrorJSON object with
-// code "check_failed" and handed back as a silentCodedError carrying the
-// exit code the error already had, so --json never changes an exit code.
-// path is the repo-relative path of the one file the failure is about when
+// frame (forgectl#858) through the shared --json contract (jsonFailure,
+// forgectl#862). Any failure the command has not already rendered itself
+// (notFoundCheckError's object, the drift exit) — a refused --file/--example
+// name, a file outside the repository, a parse failure, a bad flag or stray
+// argument — is written as one object with env check's own code
+// "check_failed" and handed back as a silentCodedError carrying the exit code
+// the error already had, so --json never changes an exit code. path is the
+// repo-relative path of the one file the failure is about when
 // resolveEnvTarget got far enough to know it (envTargetError), and "" when
 // there is no single resolved file (outside the repository, a bad flag).
 // Without --json, err passes through untouched to the human renderer.
 func checkJSONFailure(cmd *cobra.Command, err error, asJSON bool) error {
-	if err == nil || !asJSON {
-		return err
-	}
-	if _, ok := err.(*silentCodedError); ok {
-		return err
-	}
-	enc := termsafe.JSONEncoder(cmd.ErrOrStderr())
-	enc.SetIndent("", "  ")
-	path := ""
-	var targetErr *envTargetError
-	if errors.As(err, &targetErr) {
-		path = targetErr.rel
-	}
-	if encErr := enc.Encode(checkErrorJSON{Error: err.Error(), Code: "check_failed", Path: path}); encErr != nil {
-		return err
-	}
-	return newSilentCodedError(ExitCode(err))
+	return jsonFailure(cmd, err, asJSON, "check_failed")
 }
 
 // envTargetError is a resolveEnvTarget refusal that happened after the
 // target resolved, so it knows the repo-relative path it refused. The message
-// and unwrap chain are the wrapped error's own; only env check --json reads
-// rel, as its check_failed object's path.
+// and unwrap chain are the wrapped error's own; a --json failure object reads
+// rel as its path (jsonFailurePath).
 type envTargetError struct {
 	err error
 	rel string
@@ -715,14 +701,14 @@ type envTargetError struct {
 func (e *envTargetError) Error() string { return e.err.Error() }
 func (e *envTargetError) Unwrap() error { return e.err }
 
+// jsonFailurePath hands rel to the --json failure object's path field.
+func (e *envTargetError) jsonFailurePath() string { return e.rel }
+
 // checkErrorJSON is env check --json's failure wire shape: file_not_found
 // (forgectl#481) and check_failed (forgectl#858) — distinct from checkJSON,
-// which reports a completed comparison's missing/extra keys.
-type checkErrorJSON struct {
-	Error string `json:"error"`
-	Code  string `json:"code"`
-	Path  string `json:"path"`
-}
+// which reports a completed comparison's missing/extra keys. It is the shared
+// --json failure object (forgectl#862), with env check's own code strings.
+type checkErrorJSON = jsonFailureObject
 
 // writeCheckErrorJSON encodes the not-found object to out (stderr).
 func writeCheckErrorJSON(out io.Writer, path string) error {
