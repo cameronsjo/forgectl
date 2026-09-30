@@ -25,7 +25,10 @@ type replacedServerRunner struct {
 
 func (r replacedServerRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
 	out, err := r.Runner.Run(ctx, name, args...)
-	if len(args) > 0 && strings.HasPrefix(args[0], "list-") {
+	// The command, not args[0]: a real argv leads with -u (forgectl#840), and
+	// keying on args[0] left every listing unrewritten, so the test passed
+	// with the guard disabled.
+	if sub := internalexec.TmuxSubcommand(args); len(sub) > 0 && strings.HasPrefix(sub[0], "list-") {
 		// tmux 3.4 renders FieldSep in -F output as the escaped text \037
 		// (escapedFieldSep, format.go), so both spellings are rewritten.
 		for _, sep := range []string{FieldSep, escapedFieldSep} {

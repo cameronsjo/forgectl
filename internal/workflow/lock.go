@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // ErrWorkflowRunning is returned by AcquireRunLock when another run of the same
@@ -61,7 +62,7 @@ func AcquireRunLock(name string) (*RunLock, error) {
 
 	f, err := d.openLock(name + ".lock")
 	if err != nil {
-		return nil, fmt.Errorf("open workflow lock %s: %w", path, err)
+		return nil, fmt.Errorf("open workflow lock %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	// Both failure paths below Close f best-effort: we are already returning the
 	// causal error, so surfacing a Close error would only mask it — the fd is

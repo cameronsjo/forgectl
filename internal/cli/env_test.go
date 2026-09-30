@@ -56,6 +56,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -70,6 +71,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/module"
 	sopspkg "github.com/cameronsjo/forgectl/internal/sops"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -1049,6 +1051,65 @@ func TestEnvCheckCmd_JSON_MissingFile_OneStderrObject_ExitTwo(t *testing.T) {
 	}
 	if strings.ContainsRune(stderr.String(), 0x1b) {
 		t.Errorf("stderr contained an ESC byte: %q", stderr.String())
+	}
+}
+
+// TestEnvCheckCmd_MissingFile_HumanQuotesJSONKeepsRaw is the #847 review
+// fix: notFoundCheckError printed the path raw on the human branch while
+// env get and env keys quoted theirs. The human line now quotes it as
+// QuotePath does, and the --json path field keeps the raw value.
+//
+// Mutation that turns it red: pass rel, not termsafe.QuotePath(rel), to the
+// human wording in notFoundCheckError.
+func TestEnvCheckCmd_MissingFile_HumanQuotesJSONKeepsRaw(t *testing.T) {
+	const name = "rlo\u202e.env"
+	for _, tt := range []struct {
+		name, flag, present, wording string
+	}{
+		{"file", "--file", ".env.example", "env file %s not found"},
+		{"example", "--example", ".env", "example file %s not found"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := t.TempDir()
+			initEnvGitRepo(t, repo)
+			if err := os.WriteFile(filepath.Join(repo, tt.present), []byte("A=1\n"), 0o600); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			t.Chdir(repo)
+
+			for _, asJSON := range []bool{false, true} {
+				client, _ := envFixture()
+				cmd := newEnvTestCmd(client, theme.Theme{})
+				var stdout, stderr bytes.Buffer
+				cmd.SetOut(&stdout)
+				cmd.SetErr(&stderr)
+				args := []string{"check", tt.flag, name}
+				if tt.flag == "--example" {
+					args = append(args, "--file", ".env")
+				}
+				if asJSON {
+					args = append(args, "--json")
+				}
+				cmd.SetArgs(args)
+				err := cmd.ExecuteContext(context.Background())
+				if code := ExitCode(err); code != 2 {
+					t.Fatalf("json=%t: ExitCode = %d (err %v), want 2", asJSON, code, err)
+				}
+				if !asJSON {
+					if got, want := err.Error(), fmt.Sprintf(tt.wording, termsafe.QuotePath(name)); got != want {
+						t.Errorf("human error = %q, want %q", got, want)
+					}
+					continue
+				}
+				var got checkErrorJSONWire
+				if decErr := json.NewDecoder(&stderr).Decode(&got); decErr != nil {
+					t.Fatalf("stderr = %q, not valid JSON: %v", stderr.String(), decErr)
+				}
+				if got.Path != name {
+					t.Errorf("--json path = %q, want the raw %q", got.Path, name)
+				}
+			}
+		})
 	}
 }
 

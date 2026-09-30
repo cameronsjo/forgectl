@@ -50,17 +50,17 @@ func ReadDocument(path string) (Document, error) {
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return Document{}, fmt.Errorf("parse %s: %w", path, err)
+		return Document{}, fmt.Errorf("parse %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	doc := Document{Present: true}
 	if v, ok := raw["enabledPlugins"]; ok {
 		if err := json.Unmarshal(v, &doc.EnabledPlugins); err != nil {
-			return Document{}, fmt.Errorf("parse %s enabledPlugins: %w", path, err)
+			return Document{}, fmt.Errorf("parse %s enabledPlugins: %w", termsafe.QuotePath(path), termsafe.Error(err))
 		}
 	}
 	if v, ok := raw["extraKnownMarketplaces"]; ok {
 		if err := json.Unmarshal(v, &doc.Marketplaces); err != nil {
-			return Document{}, fmt.Errorf("parse %s extraKnownMarketplaces: %w", path, err)
+			return Document{}, fmt.Errorf("parse %s extraKnownMarketplaces: %w", termsafe.QuotePath(path), termsafe.Error(err))
 		}
 	}
 	return doc, nil
@@ -134,7 +134,7 @@ func WriteLocal(projectDir string, enabled map[string]bool, marketplaces map[str
 	raw := map[string]json.RawMessage{}
 	if existing, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(existing, &raw); err != nil {
-			return "", fmt.Errorf("parse existing %s: %w", path, err)
+			return "", fmt.Errorf("parse existing %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 		}
 	} else if !os.IsNotExist(err) {
 		return "", fmt.Errorf("read %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
@@ -164,7 +164,7 @@ func WriteLocal(projectDir string, enabled map[string]bool, marketplaces map[str
 	// termsafe:allow-raw-json persisted Claude settings file, never command output
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
-		return "", fmt.Errorf("marshal %s: %w", path, err)
+		return "", fmt.Errorf("marshal %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	if err := writeLocalAtomic(path, append(data, '\n')); err != nil {
 		return "", err

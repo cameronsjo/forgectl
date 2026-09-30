@@ -94,9 +94,9 @@ func (c *Client) attachOrSwitch(ctx context.Context, sessionID, label string) er
 	slog.Debug("Preparing to attach.", "session_id", sessionID, "name", label, "inside_tmux", inside)
 	var err error
 	if inside {
-		_, err = c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("switch-client", "-t", sessionID)...)
+		_, err = c.run.Run(ctx, c.tmuxBin, c.interactiveArgs("switch-client", "-t", sessionID)...)
 	} else {
-		err = c.run.RunInteractive(ctx, c.tmuxBin, c.tmuxArgs("attach-session", "-t", sessionID)...)
+		err = c.run.RunInteractive(ctx, c.tmuxBin, c.interactiveArgs("attach-session", "-t", sessionID)...)
 	}
 	if err != nil {
 		slog.Error("Failed to attach.", "session_id", sessionID, "name", label, "error", err)
@@ -117,7 +117,7 @@ func (c *Client) LastSession(ctx context.Context) error {
 		return err
 	}
 	if c.InsideTmux() {
-		_, err := c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("switch-client", "-l")...)
+		_, err := c.run.Run(ctx, c.tmuxBin, c.interactiveArgs("switch-client", "-l")...)
 		return err
 	}
 	identity, unreadable, err := c.mostRecentSession(ctx)

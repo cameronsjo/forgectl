@@ -39,7 +39,7 @@ func forkRunner(t *testing.T) *exec.FakeRunner {
 	return runnerFor("", &exec.CommandError{Name: Binary, ExitCode: 2, Stderr: fixture(t, "probe_tab_move_stderr.txt")})
 }
 
-func TestProbeAcceptsTheForkExactlyAsMeasured(t *testing.T) {
+func TestGatesAcceptTheForkExactlyAsMeasured(t *testing.T) {
 	r := forkRunner(t)
 	if err := probe(context.Background(), r, envOf(inPane), statSocket); err != nil {
 		t.Fatalf("probe: %v", err)
@@ -49,7 +49,7 @@ func TestProbeAcceptsTheForkExactlyAsMeasured(t *testing.T) {
 	}
 }
 
-func TestProbeAcceptsClapStyleHelpOnStdout(t *testing.T) {
+func TestGatesAcceptClapStyleHelpOnStdout(t *testing.T) {
 	// Synthetic: a clap-style rewrite would exit 0 and print "Usage: ..." on stdout.
 	r := runnerFor("Move a tab\n\nUsage: herdr tab move [OPTIONS] <TAB_ID>\n", nil)
 	if err := probe(context.Background(), r, envOf(inPane), statSocket); err != nil {
@@ -57,7 +57,7 @@ func TestProbeAcceptsClapStyleHelpOnStdout(t *testing.T) {
 	}
 }
 
-func TestProbeRejectsAnyOtherExit2(t *testing.T) {
+func TestGatesRejectAnyOtherExit2(t *testing.T) {
 	for name, stderr := range map[string]string{
 		// Real: the fork's reply to an unknown subcommand lists the move lines but has no usage line.
 		"unknown subcommand listing the fork's verbs": fixture(t, "probe_unknown_stderr.txt"),
@@ -75,14 +75,14 @@ func TestProbeRejectsAnyOtherExit2(t *testing.T) {
 	}
 }
 
-func TestProbeRejectsExit0WithoutAUsageLine(t *testing.T) {
+func TestGatesRejectExit0WithoutAUsageLine(t *testing.T) {
 	r := runnerFor(fixture(t, "probe_tab_help_stdout.txt"), nil)
 	if err := probe(context.Background(), r, envOf(inPane), statSocket); !errors.Is(err, ErrForkRequired) {
 		t.Fatalf("err = %v, want ErrForkRequired", err)
 	}
 }
 
-func TestProbeOtherFailuresAreNotEvidenceAboutTheVerb(t *testing.T) {
+func TestGatesOtherFailuresAreNotEvidenceAboutTheVerb(t *testing.T) {
 	for name, err := range map[string]error{
 		"exit 1":           &exec.CommandError{Name: Binary, ExitCode: 1, Stderr: "boom"},
 		"binary not found": &exec.CommandError{Name: Binary, ExitCode: -1, Err: errors.New("executable file not found")},
@@ -97,7 +97,7 @@ func TestProbeOtherFailuresAreNotEvidenceAboutTheVerb(t *testing.T) {
 	}
 }
 
-func TestProbeGate(t *testing.T) {
+func TestSessionGate(t *testing.T) {
 	fork := forkRunner(t)
 	for name, tt := range map[string]struct {
 		env  map[string]string
@@ -119,7 +119,7 @@ func TestProbeGate(t *testing.T) {
 	}
 }
 
-func TestProbeFailureMessageCarriesNoControlCharacters(t *testing.T) {
+func TestGateFailureMessageCarriesNoControlCharacters(t *testing.T) {
 	// A herdr failure that is neither the usage exit nor a launch failure puts its
 	// stderr in the message; that text can echo pane-controlled values.
 	r := runnerFor("", &exec.CommandError{Name: Binary, ExitCode: 1, Stderr: "bad\x1b[31m red\x07"})
@@ -134,7 +134,7 @@ func TestProbeFailureMessageCarriesNoControlCharacters(t *testing.T) {
 	}
 }
 
-func TestProbeVerbMustEndAtTheVerb(t *testing.T) {
+func TestForkCheckVerbMustEndAtTheVerb(t *testing.T) {
 	for name, stderr := range map[string]string{
 		"a longer verb":     "usage: herdr tab move-all <tab_id>",
 		"a longer verb (2)": "Usage: herdr tab moves <tab_id>",
@@ -146,7 +146,7 @@ func TestProbeVerbMustEndAtTheVerb(t *testing.T) {
 	}
 }
 
-func TestProbeStatFailureKeepsItsCause(t *testing.T) {
+func TestSessionGateStatFailureKeepsItsCause(t *testing.T) {
 	stat := func(string) (fs.FileInfo, error) { return nil, os.ErrPermission }
 	err := probe(context.Background(), forkRunner(t), envOf(inPane), stat)
 	if !errors.Is(err, ErrNotInSession) || !errors.Is(err, os.ErrPermission) {
@@ -154,11 +154,21 @@ func TestProbeStatFailureKeepsItsCause(t *testing.T) {
 	}
 }
 
-// TestProbeThroughTheRealStat drives the exported Probe, which is the only
-// code that passes os.Stat, against a real unix socket. macOS caps a socket
-// path near 104 bytes and t.TempDir() overflows it, so the socket lives under
-// a short os.MkdirTemp directory.
-func TestProbeThroughTheRealStat(t *testing.T) {
+// probe is the gate order a mutating caller follows: CheckSession, then
+// CheckFork. The CLI runs the two separately; the tests drive the pair
+// through a fake stat.
+func probe(ctx context.Context, r exec.Runner, lookupEnv func(string) (string, bool), stat func(string) (fs.FileInfo, error)) error {
+	if err := checkSession(lookupEnv, stat); err != nil {
+		return err
+	}
+	return CheckFork(ctx, r)
+}
+
+// TestCheckSessionThroughTheRealStat drives the exported CheckSession, the
+// only code that passes os.Stat, against a real unix socket. macOS caps a
+// socket path near 104 bytes and t.TempDir() overflows it, so the socket
+// lives under a short os.MkdirTemp directory.
+func TestCheckSessionThroughTheRealStat(t *testing.T) {
 	dir, err := os.MkdirTemp("", "hp")
 	if err != nil {
 		t.Fatal(err)
@@ -172,16 +182,16 @@ func TestProbeThroughTheRealStat(t *testing.T) {
 	t.Cleanup(func() { _ = l.Close() })
 
 	env := envOf(map[string]string{"HERDR_ENV": "1", "HERDR_SOCKET_PATH": sock})
-	if err := Probe(context.Background(), forkRunner(t), env); err != nil {
-		t.Fatalf("Probe with a real socket: %v", err)
+	if err := CheckSession(env); err != nil {
+		t.Fatalf("CheckSession with a real socket: %v", err)
 	}
 	notASocket := filepath.Join(dir, "plain")
 	if err := os.WriteFile(notASocket, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	env = envOf(map[string]string{"HERDR_ENV": "1", "HERDR_SOCKET_PATH": notASocket})
-	if err := Probe(context.Background(), forkRunner(t), env); !errors.Is(err, ErrNotInSession) {
-		t.Fatalf("Probe with a regular file: err = %v, want ErrNotInSession", err)
+	if err := CheckSession(env); !errors.Is(err, ErrNotInSession) {
+		t.Fatalf("CheckSession with a regular file: err = %v, want ErrNotInSession", err)
 	}
 }
 
@@ -210,7 +220,7 @@ func TestCheckForkChecksOnlyTheCapability(t *testing.T) {
 	}
 }
 
-func TestProbeGateErrorWinsAndSkipsTheRunner(t *testing.T) {
+func TestSessionGateErrorWinsAndSkipsTheRunner(t *testing.T) {
 	// Both the gate and the capability check would fail; the gate is reported and herdr is never run.
 	stockish := runnerFor("", &exec.CommandError{Name: Binary, ExitCode: 2, Stderr: ""})
 	err := probe(context.Background(), stockish, envOf(map[string]string{}), statSocket)

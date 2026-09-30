@@ -168,12 +168,10 @@ func TestRevalidateSession(t *testing.T) {
 
 // tmuxVerb names the tmux command an argv runs, seeing through the generation
 // guard (forgectl#756): a guarded command is an if-shell whose then-branch is
-// the real command, so it reads as that command's verb. A leading -S pin is
-// skipped.
+// the real command, so it reads as that command's verb. Leading global options
+// (the -S pin, -u) are skipped.
 func tmuxVerb(args []string) string {
-	if len(args) >= 2 && args[0] == "-S" {
-		args = args[2:]
-	}
+	args = internalexec.TmuxSubcommand(args)
 	if len(args) == 0 {
 		return ""
 	}

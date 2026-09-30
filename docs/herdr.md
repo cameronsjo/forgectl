@@ -4,11 +4,11 @@
 
 ## Requirements
 
-- **A herdr pane.** `Probe` requires `HERDR_ENV=1` and a `HERDR_SOCKET_PATH` that names an existing socket. herdr exports both into every pane it hosts.
-- **The `cameronsjo/herdr` fork for `tab move`.** Upstream herdr has no `tab move`, and the fork hides it from `herdr tab --help`. `Probe` runs `herdr tab move --help` and accepts only a usage line at the start of a line (`usage: herdr tab move ...`, matched case-insensitively so a clap-style `Usage:` also passes). Anything else returns `ErrForkRequired`.
-- **`Probe` checks the CLI, not the server.** A fork CLI talking to a server still running an older binary passes the probe and fails at `MoveTab` with a typed `*herdr.Error`. Restart the herdr server after upgrading the binary. The client does not translate that server error into `ErrForkRequired`: herdr's code for a missing verb could not be measured without a stock binary.
-- **`Probe` reads the environment you give it.** Pass a lookup that matches the environment of the `Runner` you will use. If the `Runner` pins a different `HERDR_SOCKET_PATH`, the lookup must reflect that pin, or the gate checks the wrong socket.
-- **Call `Probe` once.** It spawns `herdr` each time, and the answer does not change within a process.
+- **A herdr pane.** `CheckSession` requires `HERDR_ENV=1` and a `HERDR_SOCKET_PATH` that names an existing socket. herdr exports both into every pane it hosts. It runs no herdr command, so a read-only caller needs nothing else.
+- **The `cameronsjo/herdr` fork for `tab move`.** Upstream herdr has no `tab move`, and the fork hides it from `herdr tab --help`. `CheckFork` runs `herdr tab move --help` and accepts only a usage line at the start of a line (`usage: herdr tab move ...`, matched case-insensitively so a clap-style `Usage:` also passes). Anything else returns `ErrForkRequired`. Run it after `CheckSession`, before a mutation.
+- **`CheckFork` checks the CLI, not the server.** A fork CLI talking to a server still running an older binary passes the check and fails at `MoveTab` with a typed `*herdr.Error`. Restart the herdr server after upgrading the binary. The client does not translate that server error into `ErrForkRequired`: herdr's code for a missing verb could not be measured without a stock binary.
+- **`CheckSession` reads the environment you give it.** Pass a lookup that matches the environment of the `Runner` you will use. If the `Runner` pins a different `HERDR_SOCKET_PATH`, the lookup must reflect that pin, or the gate checks the wrong socket.
+- **Call `CheckFork` once.** It spawns `herdr` each time, and the answer does not change within a process.
 
 ## Failure shapes
 
@@ -35,7 +35,7 @@ There is no `FocusPane`. herdr's `pane focus` is directional only, so `FocusTab`
 
 ## Logging
 
-`exec.OSRunner` logs any non-zero exit at `ERROR`, including the probe's expected exit 2. A caller that runs `Probe` will see one `ERROR` line per call even on success.
+`exec.OSRunner` logs any non-zero exit at `ERROR`, including the probe's expected exit 2. A caller that runs `CheckFork` will see one `ERROR` line per call even on success.
 
 ## Testing
 

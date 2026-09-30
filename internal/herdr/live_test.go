@@ -8,7 +8,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
-// TestLiveSession runs the probe and the read calls against the herdr session
+// TestLiveSession runs the session and fork gates and the read calls against the herdr session
 // this test runs inside. It is read-only and skipped unless HERDR_LIVE=1:
 //
 //	HERDR_LIVE=1 go test ./internal/herdr/ -run TestLiveSession -v
@@ -18,8 +18,11 @@ func TestLiveSession(t *testing.T) {
 	}
 	ctx := context.Background()
 	r := exec.OSRunner{}
-	if err := Probe(ctx, r, os.LookupEnv); err != nil {
-		t.Fatalf("Probe: %v", err)
+	if err := CheckSession(os.LookupEnv); err != nil {
+		t.Fatalf("CheckSession: %v", err)
+	}
+	if err := CheckFork(ctx, r); err != nil {
+		t.Fatalf("CheckFork: %v", err)
 	}
 	c := New(r)
 	workspaces, err := c.Workspaces(ctx)

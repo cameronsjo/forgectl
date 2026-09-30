@@ -134,7 +134,7 @@ const maxNamedLeftovers = 8
 func scanLeftovers(t Target) error {
 	names, err := t.dir.names()
 	if err != nil {
-		return fmt.Errorf("refusing to write %s: its directory could not be listed to check for leftovers from an interrupted run: %w", t.Rel(), err)
+		return fmt.Errorf("refusing to write %s: its directory could not be listed to check for leftovers from an interrupted run: %w", termsafe.QuotePath(t.Rel()), termsafe.Error(err))
 	}
 	sort.Strings(names)
 

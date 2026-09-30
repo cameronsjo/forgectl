@@ -43,33 +43,18 @@ var (
 // command list, and only a usage line proves the verb is real.
 var tabMoveUsage = regexp.MustCompile(`(?im)^\s*usage:\s+herdr tab move(?:\s|$)`)
 
-// Probe reports whether the herdr this process would talk to can do what the
-// client needs: the process is in a herdr pane whose socket exists, and the
-// CLI has `tab move`.
+// CheckSession reports whether the process is inside a herdr pane whose socket
+// exists. It runs no herdr command, so a read-only caller can use it without
+// needing the fork.
 //
-// lookupEnv must read the environment the Runner's calls will run in. A caller
+// lookupEnv must read the environment herdr's calls will run in. A caller
 // that pins a different server by setting HERDR_SOCKET_PATH on its Runner
 // passes a lookup that reflects that pin, or the gate checks the wrong socket.
 //
-// Probe inspects the CLI only. A fork CLI talking to a server still running an
-// older binary passes; that failure surfaces at [Client.MoveTab] as a typed
-// *[Error]. Gate failures are reported before the capability check, and herdr
-// is not run at all when the gate fails. The check spawns herdr once, and the
-// answer cannot change within a process, so call it once.
-func Probe(ctx context.Context, r exec.Runner, lookupEnv func(string) (string, bool)) error {
-	return probe(ctx, r, lookupEnv, os.Stat)
-}
-
-func probe(ctx context.Context, r exec.Runner, lookupEnv func(string) (string, bool), stat func(string) (fs.FileInfo, error)) error {
-	if err := checkSession(lookupEnv, stat); err != nil {
-		return err
-	}
-	return CheckFork(ctx, r)
-}
-
-// CheckSession reports whether the process is inside a herdr pane whose socket
-// exists. It runs no herdr command, so a read-only caller can use it without
-// needing the fork. See [Probe] for what lookupEnv must read.
+// Gate a mutation on CheckSession and then [CheckFork], in that order: herdr
+// is not worth running when the gate fails. CheckFork inspects the CLI only, so
+// a fork CLI talking to a server still running an older binary passes; that
+// failure surfaces at [Client.MoveTab] as a typed *[Error].
 func CheckSession(lookupEnv func(string) (string, bool)) error {
 	return checkSession(lookupEnv, os.Stat)
 }
