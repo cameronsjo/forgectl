@@ -221,10 +221,20 @@ var agentsBooleanFlags = map[string]bool{
 // after it is an operand, so `agents -- x --json` is not a JSON listing:
 // claude fails it "too many arguments for 'agents'" (2.1.285). It keeps the
 // posture-injecting branch.
+//
+// A `--` in a value slot is that option's value, not the end of options:
+// `claude agents --settings -- --json` reads "--" as the settings file
+// (2.1.285), so the scan goes on past it (forgectl#766). Unlike the top-level
+// print scan this needs no list of value flags. If a flag assumed to take a
+// value is really boolean, claude reads the `--` as the end of options and
+// fails the run with "too many arguments", so no session starts either way.
 func IsAgentsPassthrough(agentArgs []string) bool {
 	for i := 1; i < len(agentArgs); i++ {
 		switch agentArgs[i] {
 		case "--":
+			if i > 1 && !inFlagPosition(agentArgs[i-1], agentsBooleanFlags) {
+				continue // the option's value, not the end of options
+			}
 			return false
 		case "--json", "--help", "-h":
 		default:
