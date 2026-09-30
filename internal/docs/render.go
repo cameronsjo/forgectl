@@ -1041,7 +1041,8 @@ type frontmatterBlock struct {
 // termination. Every consumer — the renderer's well-formedness gate,
 // countWords, and scanDoc's alias extraction — reads through this function
 // so they can never disagree about where a document's metadata ends and
-// its body begins.
+// its body begins. A block over maxFrontmatterBytes is not frontmatter
+// either, so no consumer ever decodes one (#910).
 func splitFrontmatter(source []byte) (frontmatterBlock, bool) {
 	lines := bytes.SplitAfter(source, []byte("\n"))
 	if len(lines) == 0 {
@@ -1051,9 +1052,15 @@ func splitFrontmatter(source []byte) (frontmatterBlock, bool) {
 	if delim == 0 {
 		return frontmatterBlock{}, false
 	}
+	blockLen := 0
 	for i := 1; i < len(lines); i++ {
 		d, c := frontmatterDelim(bytes.TrimSuffix(lines[i], []byte("\n")))
 		if d != delim || c != count {
+			// Past the cap no closing fence can make this frontmatter,
+			// so stop looking for one.
+			if blockLen += len(lines[i]); blockLen > maxFrontmatterBytes {
+				return frontmatterBlock{}, false
+			}
 			continue
 		}
 		fm := frontmatterBlock{
@@ -1075,6 +1082,22 @@ func splitFrontmatter(source []byte) (frontmatterBlock, bool) {
 	}
 	return frontmatterBlock{}, false
 }
+
+// maxFrontmatterBytes is the largest frontmatter block, fences excluded,
+// that splitFrontmatter accepts. A larger block is treated as no
+// frontmatter: the document renders and indexes as markdown, fences and
+// all, so its source stays readable. The cap exists because the YAML
+// decode runs before every other bound (the render deadline, the markup
+// guard, the render lock), in the index scan of every doc, and more than
+// once per page, and decoding into a map is quadratic in the number of
+// keys: a block of short keys took 34 ms of CPU at 16 KiB, 127 ms at
+// 32 KiB, and 1.6 s at 256 KiB (#910). At the cap the worst shapes
+// measured, dense keys and flow collections nested as deep as the block
+// allows (`k: [[[…]]]`), each decode in about 35 ms of CPU; yaml.v3
+// itself refuses nesting past 10000, so depth needs no bound of its own.
+// Written frontmatter is far smaller: the largest found across this
+// estate's docs and vaults was about 7 KiB.
+const maxFrontmatterBytes = 16 << 10
 
 // frontmatterDelim interprets one newline-stripped line as a frontmatter
 // fence: the opening byte (- or +) repeated for the whole line, minimum
