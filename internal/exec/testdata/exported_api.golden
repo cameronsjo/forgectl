@@ -4,6 +4,9 @@ file internal/exec/fake.go build=any
 file internal/exec/internal/sealed/sealed.go build=any
 file internal/exec/mask.go build=any
 file internal/exec/opaque.go build=any
+file internal/exec/pgroup.go build=any
+file internal/exec/pgroup_other.go build="!unix"
+file internal/exec/pgroup_unix.go build="unix"
 file internal/exec/sensitive.go build=any
 file internal/exec/sensitive_fake.go build=any
 file internal/exec/sensitive_run.go build=any
@@ -70,6 +73,7 @@ func TmuxSubcommand(args []string) []string
 func UnsetTmux() EnvMutation
 func WithMaskedAssignments(ctx context.Context, entries []string) context.Context
 func WithOpaqueArgs(ctx context.Context, from int, n int) context.Context
+func WithProcessGroup(ctx context.Context) context.Context
 func WithoutOutput(err error) error
 method (*CommandError) Error() string
 method (*CommandError) Unwrap() error
@@ -239,6 +243,7 @@ type onceCloser struct{*os.File; once sync.Once}
 type opaqueKey struct{}
 type opaqueSpan struct{from int; n int}
 type outputBuf struct{data []byte}
+type processGroupKey struct{}
 type projectedCmuxWorkspace struct{ID string "json:\"id\""; Description string "json:\"description\""}
 type streamPipes struct{childEnds []*os.File; readEnds []*onceCloser; stdinW *onceCloser; outputs []copyJob; stdin io.Reader; results chan copyResult; nOut int; nIn int}
 type tailBuffer struct{limit int; buf []byte; dropped int64}

@@ -1,7 +1,7 @@
 ---
-status: in-flight
+status: done
 branch: plan/harness-update-hooks
-next: items 1 (#725, PR #874) and 2 (#726, PR #875) merged; item 3 (#727) is PR #876; then item 4 (#728) on [[on_update]] hooks, calling resume.RestartOutdated
+next: complete when #892 merges (items 1-3 shipped in #874, #875, #876; item 4 is #892). Remaining check is live: install the watcher on a released build and confirm `forgectl resume hooks status` after the next Claude Code update.
 ---
 
 # Harness update hooks — Roadmap (2026-09-29)
@@ -66,3 +66,8 @@ Restart (item 3) is the outcome; outdated detection (item 2) is what it targets,
 - `status` is written by Claude Code and undocumented; a harness update can change its values. Item 2 must treat unknown values as busy.
 - The registry file can outlive its process; liveness comes from the pid probe, never from `status`.
 - Pid reuse: a stale registry file whose pid now belongs to another process. Restart must confirm the pid is a `claude` process before signalling it.
+
+## Deviations
+
+- item 4 (#728): the spec and this plan name a top-level `[[on_update]]`; it shipped as `[[resume.on_update]]`, because `resumeModule` owns config section `resume` (`ConfigKey: "resume"`) and every section has exactly one owning module. A top-level `[[on_update]]` or `[on_update]` is a config error that names `[[resume.on_update]]`, so the spelling from the spec fails loudly instead of being ignored.
+- item 4 (#728): the timeout key is `timeout_seconds`, following `[net] ttl_seconds` / `timeout_ms`.
