@@ -123,7 +123,32 @@ func TestSeshPick_RefusesSymlinkToHashDir(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	symlinkOrSkip(t, hostile, filepath.Join(home, "proj"))
 
-	for _, name := range []string{link, "~/proj"} {
+	for _, name := range []string{link, "~/proj", "$HOME/proj"} {
+		t.Run(name, func(t *testing.T) {
+			fake := liveServer()
+			err := seshPick(context.Background(), seshPickClient(fake), name)
+			if !errors.Is(err, errSeshUnsafeCandidate) {
+				t.Fatalf("err = %v, want errSeshUnsafeCandidate", err)
+			}
+			if n := seshCalls(fake); n != 0 {
+				t.Fatalf("sesh was invoked %d time(s); the gate must refuse before sesh runs", n)
+			}
+		})
+	}
+}
+
+// sesh makes a candidate absolute against the working directory it inherits
+// from forgectl, so a relative candidate naming a '#' cwd reaches
+// `new-session -c` with the '#' although the candidate has none. "missing"
+// does not exist, so EvalSymlinks fails and only the Abs path can catch it.
+func TestSeshPick_RefusesRelativeCandidateInHashCwd(t *testing.T) {
+	hostile := filepath.Join(t.TempDir(), "x#(id)")
+	if err := os.MkdirAll(filepath.Join(hostile, "sub"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(hostile)
+
+	for _, name := range []string{".", "./", "sub/..", "missing"} {
 		t.Run(name, func(t *testing.T) {
 			fake := liveServer()
 			err := seshPick(context.Background(), seshPickClient(fake), name)

@@ -61,12 +61,13 @@ func newTmuxPickCmd(client *tmux.Client) *cobra.Command {
 //
 // A '#' can also reach sesh's tmux argv from a candidate that has none:
 //
-//   - sesh's namer resolves a directory candidate with EvalSymlinks and names
-//     the session after the target, so a listed symlink pointing at a '#'
-//     directory carries the '#' into -s. seshPick closes the part of this it
-//     can see: an existing-path candidate is resolved the same way and refused
-//     if the target contains '#'. The check is best-effort (the link can be
-//     retargeted between the check and sesh's own resolution).
+//   - sesh expands env vars and a leading ~, makes the candidate absolute
+//     against the inherited working directory (so "." names a '#' cwd), and
+//     its namer resolves symlinks before naming the session, so a symlink to
+//     a '#' directory carries the '#' into -s. seshPick closes these by
+//     resolving the candidate in sesh's own order (seshResolvedPaths). The
+//     check is best-effort: a link can be retargeted between the check and
+//     sesh's own resolution.
 //   - sesh's git namer names a linked worktree after its main worktree's root,
 //     and sesh's zoxide lookup fuzzy-matches a '#'-free query to a '#' path.
 //     Neither is visible from here without re-implementing sesh's strategy
@@ -76,34 +77,56 @@ var errSeshUnsafeCandidate = errors.New("refusing to hand sesh a name containing
 // seshPick is the single forgectl-side gate in front of `sesh connect`. Both
 // the `tmux pick <name>` command and the TUI picker's hand-off route through
 // it.
+//
+// A refusal on a resolved path echoes only the candidate, never the resolved
+// path: resolution runs os.ExpandEnv, and a candidate like `$SOME_TOKEN/x`
+// must not turn the error into a print of an environment value.
 func seshPick(ctx context.Context, client *tmux.Client, name string) error {
 	if strings.Contains(name, "#") {
 		return fmt.Errorf("%w: %s", errSeshUnsafeCandidate, termsafe.QuotePath(name))
 	}
-	if resolved, ok := resolveSeshPath(name); ok && strings.Contains(resolved, "#") {
-		return fmt.Errorf("%w: %s resolves to %s", errSeshUnsafeCandidate,
-			termsafe.QuotePath(name), termsafe.QuotePath(resolved))
+	for _, p := range seshResolvedPaths(name) {
+		if strings.Contains(p, "#") {
+			return fmt.Errorf("%w: %s resolves to a path containing '#'",
+				errSeshUnsafeCandidate, termsafe.QuotePath(name))
+		}
 	}
 	return client.Pick(ctx, name)
 }
 
-// resolveSeshPath resolves a candidate the way sesh's namer does when the
-// candidate names an existing path: a leading ~ expands to the home directory
-// (sesh lists zoxide entries home-shortened), then EvalSymlinks. ok is false
-// when the candidate is not an existing path, which is the session-name and
-// zoxide-query case sesh resolves on its own.
-func resolveSeshPath(name string) (string, bool) {
-	path := name
-	if path == "~" || strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", false
-		}
-		path = filepath.Join(home, strings.TrimPrefix(path, "~"))
-	}
-	resolved, err := filepath.EvalSymlinks(path)
+// seshResolvedPaths returns the paths sesh can derive from a candidate, in the
+// order sesh v2.31.0 derives them:
+//
+//  1. os.ExpandEnv, then one leading "~" replaced with the home directory by
+//     plain string replacement, so "~user" becomes "<home>user"
+//     (home/home.go:35-44, RealHome.ExpandPath);
+//  2. filepath.Abs against the working directory, which sesh inherits from
+//     forgectl (connector/dir.go:12 via dir/dir.go:27) — the path handed to
+//     `new-session -c`;
+//  3. filepath.EvalSymlinks, which the namer applies before naming the
+//     session (namer/namer.go:36) — the source of `-s`.
+//
+// The Abs path is returned even when EvalSymlinks fails, so a relative
+// candidate such as "." or "sub/.." is checked against the working directory
+// it really names. That over-refuses a session-name candidate picked from
+// inside a '#' directory, which is the safe direction. With no home directory
+// sesh's ExpandPath errors before any tmux call, so nothing is returned.
+func seshResolvedPaths(name string) []string {
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", false
+		return nil
 	}
-	return resolved, true
+	path := os.ExpandEnv(name)
+	if strings.HasPrefix(path, "~") {
+		path = strings.Replace(path, "~", home, 1)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil
+	}
+	paths := []string{abs}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		paths = append(paths, resolved)
+	}
+	return paths
 }
