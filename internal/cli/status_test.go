@@ -507,3 +507,44 @@ func TestStatus_DefaultPRsSourceReadsTheDashboard(t *testing.T) {
 		t.Errorf("your_open = %+v, active_reviews = %v; want the dash document", d.YourOpen, d.ActiveReviews)
 	}
 }
+
+// TestStatus_DefaultCleanSourceFailsOnAnUnscannableRoot pins forgectl#915
+// at status: a clean root the scan cannot read makes the clean section
+// failed, not ok with 0 B, in --json and text alike, while the other
+// sections still report.
+//
+// Mutation that turns it red: drop the `path == opts.Root` return in
+// internal/clean's Scan error branch.
+func TestStatus_DefaultCleanSourceFailsOnAnUnscannableRoot(t *testing.T) {
+	for name, root := range unscannableCleanRoots(t) {
+		t.Run(name, func(t *testing.T) {
+			deps := module.Deps{Runner: &exec.FakeRunner{}}
+			deps.Cfg.Clean.DefaultRoot = root
+			src := okStatusSources()
+			src.Clean = defaultStatusSources(deps).Clean
+
+			stdout, _, err := runStatus(t, src, "--json")
+			if err != nil {
+				t.Fatalf("status --json: %v", err)
+			}
+			var got statusReportJSON
+			if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+				t.Fatalf("decode: %v\n%s", err, stdout)
+			}
+			if got.Clean.State != status.StateFailed || got.Clean.Data != nil || !strings.Contains(got.Clean.Error, filepath.Base(root)) {
+				t.Errorf("clean = %+v, want failed naming the root", got.Clean)
+			}
+			if got.Git.State != status.StateOK {
+				t.Errorf("git = %+v, want ok: one failed section must not take the others with it", got.Git)
+			}
+
+			text, _, err := runStatus(t, src)
+			if err != nil {
+				t.Fatalf("status: %v", err)
+			}
+			if !strings.Contains(text, "clean  failed: ") || strings.Contains(text, "reclaimable across") {
+				t.Errorf("text = %q, want the clean section failed with no reclaim total", text)
+			}
+		})
+	}
+}

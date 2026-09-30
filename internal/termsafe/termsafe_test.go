@@ -13,6 +13,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/cameronsjo/forgectl/internal/perftest"
 )
 
 func TestIsUnsafeTerminalRuneMatchesUnicodeProperties(t *testing.T) {
@@ -593,53 +595,55 @@ func (f *fanOutCycle) Unwrap() []error { return []error{f, f, f.pathErr} }
 
 // TestError_FanOutUnwrapCycleTerminates is #845 item 1: the chain walk has a
 // node budget, so a cycle through Unwrap() []error ends, and the path error
-// it keeps revisiting is still capped once per span.
+// it keeps revisiting is still capped once per span. The walk returns in
+// milliseconds; the deadline is a hang backstop only, generous so host load
+// cannot trip it (forgectl#879).
 //
 // Mutation that turns it red: drop `|| budget <= 0` from overlongPathErrors's
 // guard, and the walk never returns within the deadline.
 func TestError_FanOutUnwrapCycleTerminates(t *testing.T) {
+	const deadline = 10 * time.Second
 	pathErr := &os.PathError{Op: "open", Path: "/" + strings.Repeat("a", PathEchoMaxRunes) + "TAIL", Err: errors.New("denied")}
 	cyclic := &fanOutCycle{pathErr: pathErr}
 	done := make(chan string, 1)
-	start := time.Now()
 	go func() { done <- Error(cyclic).Error() }()
 	select {
 	case got := <-done:
-		if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-			t.Errorf("Error took %v on a fan-out cycle, want well under 100ms", elapsed)
-		}
 		if want := "cycle: " + Error(pathErr).Error(); got != want {
 			t.Errorf("Error() =\n%q\nwant\n%q", got, want)
 		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("Error did not return within 100ms on a fan-out-2 Unwrap cycle")
+	case <-time.After(deadline):
+		t.Fatalf("Error did not return within %v on a fan-out-2 Unwrap cycle", deadline)
 	}
 }
 
 // TestError_JoinOfManyOverlongPathsIsLinear is #845 item 2: an errors.Join of
 // 2000 over-cap path errors (a ~1 MB message) took 3.2s when every match
-// re-scanned and re-concatenated the rest of the message. One scan and one
-// build bring it to ~150ms; the bound leaves room for a slow runner.
+// re-scanned and re-concatenated the rest of the message; one scan and one
+// build are linear. The check is a ratio in CPU time (perftest.Linear,
+// forgectl#879): the Join of 4000 against the Join of 500. Below about 500 errors the old cost is not yet quadratic,
+// which is why the sizes are this large.
 //
 // Mutation that turns it red: restore the recursive capWrappedPaths from
 // before #845 (strings.Index per error, recursing on both sides of each
-// match), and this takes ~3s.
+// match), and eight times the errors costs 60 to 70 times as much.
 func TestError_JoinOfManyOverlongPathsIsLinear(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing test")
 	}
-	errs, err := joinOfOverlongPaths(2000)
-	start := time.Now()
-	got := Error(err).Error()
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Errorf("Error of a Join of %d over-cap path errors took %v, want linear time", len(errs), elapsed)
-	}
-	for _, i := range []int{0, 999, 1999} {
+	const n, k = 4000, 8
+	_, small := joinOfOverlongPaths(n / k)
+	errs, err := joinOfOverlongPaths(n)
+	var got string
+	perftest.Linear(t, "Error of a Join of over-cap path errors", k,
+		func() { _ = Error(small).Error() },
+		func() { got = Error(err).Error() })
+	for _, i := range []int{0, n / 2, n - 1} {
 		if !strings.Contains(got, Error(errs[i]).Error()) {
 			t.Errorf("error %d was not capped in the joined message", i)
 		}
 	}
-	if strings.Contains(got, errs[1999].(*os.PathError).Path) {
+	if strings.Contains(got, errs[n-1].(*os.PathError).Path) {
 		t.Error("a whole over-cap path survived in the joined message")
 	}
 }
