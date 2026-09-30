@@ -144,9 +144,12 @@ type Heading struct {
 //     Built for every root; consulted for vault roots only, as the last
 //     fallback.
 //   - attRel / attByName: a vault root's attachments (walkRoot), keyed by
-//     relKey of the root-relative path and by nameKey of the basename; the
-//     byName values are the relKey'd paths. Consulted by resolveAttachment
-//     only, after every doc table has missed. Empty for a docs root.
+//     attKey of the root-relative path and of the basename; the attByName
+//     values are the attKey'd paths. attKey folds case like relKey but never
+//     strips an extension: an attachment's extension is part of its name, so
+//     "[[foo.md]]" must not reach a file named "foo". Consulted by
+//     resolveAttachment only, after every doc table has missed. Empty for a
+//     docs root.
 //
 // Case: a vault root folds every key (fold == true), matching Obsidian's
 // case-insensitive links. A docs root keeps exact case — a relative markdown
@@ -177,6 +180,15 @@ func (ri *rootIndex) relKey(p string) string {
 		key = strings.ToLower(key)
 	}
 	return key
+}
+
+// attKey folds a slash-separated relative path to the attachment tables' key
+// shape: lowercased when the root folds, and nothing stripped.
+func (ri *rootIndex) attKey(p string) string {
+	if ri.fold {
+		return strings.ToLower(p)
+	}
+	return p
 }
 
 // nameKey is relKey applied to p's last path segment — byName's key shape.
@@ -210,9 +222,9 @@ func buildRootIndexes(roots []Root, docs []Doc, attachments map[string][]string)
 			attByName: map[string][]string{},
 		}
 		for _, rel := range attachments[r.Label] {
-			key := ri.relKey(rel)
+			key := ri.attKey(rel)
 			ri.attRel[key] = true
-			name := ri.nameKey(rel)
+			name := ri.attKey(path.Base(rel))
 			ri.attByName[name] = append(ri.attByName[name], key)
 		}
 		out[r.Label] = ri
@@ -399,15 +411,15 @@ func resolveAttachment(ri *rootIndex, from *Doc, path0 string) Miss {
 		return MissNoTarget
 	}
 	if isExplicitlyRelative(path0) {
-		if ri.attRel[ri.relKey(path.Clean(path.Join(path.Dir(from.RelPath), path0)))] {
+		if ri.attRel[ri.attKey(path.Clean(path.Join(path.Dir(from.RelPath), path0)))] {
 			return MissAttachment
 		}
 		return MissNoTarget
 	}
 	clean := strings.TrimPrefix(path.Clean(path0), "/")
-	want := ri.relKey(clean)
+	want := ri.attKey(clean)
 	best, ties := -1, 0
-	for _, key := range ri.attByName[ri.nameKey(clean)] {
+	for _, key := range ri.attByName[ri.attKey(path.Base(clean))] {
 		if key != want && !strings.HasSuffix(key, "/"+want) {
 			continue
 		}

@@ -33,6 +33,11 @@ func attachmentVault(t *testing.T, links []string) (idx *Index, from *Doc, symli
 		"docs/report.pdf",
 		"a/dup.png",
 		"b/dup.png",
+		"deep/z/dup.png",
+		"pick.png",
+		"a/pick.png",
+		"b/pick.png",
+		"plain",
 		"near.png",
 		"deep/x/near.png",
 		"sub/sibling.png",
@@ -82,6 +87,10 @@ var attachmentCases = []struct {
 	{"[[near.png]]", attResolved},
 	{"[[x/near.png]]", attResolved},
 	{"[[logo.png|The logo]]", attResolved},
+	// The closest match wins even when the matches further from the root
+	// tie among themselves; an extensionless file is named without one.
+	{"[[pick.png]]", attResolved},
+	{"[[plain]]", attResolved},
 	// Missing: no such file, no extension, a suffix that names another
 	// folder, a directory form, relative to the wrong folder, a dot-file, a
 	// file under an excluded directory, and a folder.
@@ -94,7 +103,12 @@ var attachmentCases = []struct {
 	{"[[trashed.png]]", attMissing},
 	{"[[pkg.png]]", attMissing},
 	{"[[folder]]", attMissing},
-	// Two matches equally close to the root.
+	// A suffix matches whole folder names only, and ".md" is never
+	// stripped from an attachment target.
+	{"[[ssets/logo.png]]", attMissing},
+	{"[[plain.md]]", attMissing},
+	// Two matches equally close to the root, though a third further out is
+	// unique.
 	{"[[dup.png]]", attAmbiguous},
 	// Out of the root, though the file exists there.
 	{"[[../../outside.png]]", attOutside},

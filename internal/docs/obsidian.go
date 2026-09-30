@@ -3,6 +3,7 @@ package docs
 import (
 	"bytes"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"unicode"
@@ -768,6 +769,10 @@ const (
 // colon-free for the same reasons as the miss titles above.
 const titleAttachment = "Attachment, not viewable in the reader yet"
 
+// attachmentSpanOpen opens the span a wikilink to an attachment renders in.
+// Every byte of it is fixed.
+const attachmentSpanOpen = `<span class="wikilink wikilink-attachment" title="` + titleAttachment + `">`
+
 // missTitle is the title for a wikilink that missed. docResolved is whether
 // the note itself resolved, in which case only its heading or block id did
 // not.
@@ -804,7 +809,11 @@ type resolvedWikilinkNode struct {
 func (n *resolvedWikilinkNode) Kind() ast.NodeKind { return kindWikilink }
 
 func (n *resolvedWikilinkNode) Dump(source []byte, level int) {
-	ast.DumpHelper(n, source, level, map[string]string{"Href": n.Href, "Title": n.Title}, nil)
+	ast.DumpHelper(n, source, level, map[string]string{
+		"Href":       n.Href,
+		"Title":      n.Title,
+		"Attachment": strconv.FormatBool(n.Attachment),
+	}, nil)
 }
 
 // wikilinkTransformer resolves each wikilink on the page through the
@@ -983,8 +992,8 @@ func hasLinkAncestor(n ast.Node) bool {
 // one for a hit, a marked one for a doc whose heading or block id is missing.
 // An attachment is an attachment span with no href. Anything else is a miss
 // span with no href. The href is checked for the /doc/ prefix again here, so
-// an href that did not come from docHref can never reach the page. The label renders as the node's children, which
-// goldmark escapes as text.
+// an href that did not come from docHref can never reach the page. The label
+// renders as the node's children, which goldmark escapes as text.
 func renderResolvedWikilink(w util.BufWriter, _ []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
 	rw, ok := n.(*resolvedWikilinkNode)
 	if !ok {
@@ -1001,7 +1010,7 @@ func renderResolvedWikilink(w util.BufWriter, _ []byte, n ast.Node, entering boo
 	}
 	if !anchor {
 		if rw.Attachment {
-			_, _ = w.WriteString(`<span class="wikilink wikilink-attachment" title="` + titleAttachment + `">`)
+			_, _ = w.WriteString(attachmentSpanOpen)
 			return ast.WalkContinue, nil
 		}
 		title := rw.Title
