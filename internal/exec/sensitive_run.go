@@ -145,24 +145,32 @@ func envKeyOf(entry string) string {
 // (validate), compared (Equal), or re-spelled (MapOpaque). No test enforces
 // that in-package rule; review keeps it. A re-spelling passes the payload to
 // one pure escape in the leaf package tmuxesc and seals the result as a new
-// Arg. What the guard tests do enforce, for linux, darwin,
-// windows and freebsd builds alike:
+// Arg. What the guard tests do enforce:
 //
-//   - a Transform is minted only in transform.go
-//     (TestTransformIsMintedOnlyInTransformGo);
+//   - outside transform.go, no production file of this package writes a
+//     Transform literal, converts a value to Transform, or assigns or takes
+//     the address of Transform.apply, type-checked for every platform in
+//     guardPlatforms, which covers each pair .goreleaser.yaml ships
+//     (TestTransformIsMintedOnlyInTransformGo,
+//     TestGuardPlatformsCoverReleaseTargets);
 //   - outside this package, only the files in transformCallers name
-//     MapOpaque, Transform or TmuxDirOperand
+//     MapOpaque, Transform or TmuxDirOperand, and no file dot-imports it,
+//     checked across every Go file in the module whatever its build tags
 //     (TestNoCallerCodeReceivesAnOpaquePayload);
-//   - tmuxesc imports only strings, holds no package-level state, and
-//     declares only funcs from strings to one string or bool
-//     (TestTmuxescIsALeaf);
-//   - the exported API, every exported func, var, const, type, field and
-//     method, matches testdata/exported_api.golden (TestExportedAPI).
+//   - every non-test tmuxesc file, whatever its build tags, imports only
+//     strings, declares no var, const, type or init, and declares only funcs
+//     with a body from strings to one string or bool that call nothing but
+//     strings, len, string conversions and each other (TestTmuxescIsALeaf);
+//   - the file list of this package and tmuxesc with each file's build
+//     constraint, every exported func, var and const, and every named type
+//     with its full underlying type and method set match
+//     testdata/exported_api.golden on every platform in guardPlatforms
+//     (TestExportedAPI).
 //
-// The last one pins the surface; it does not judge it. That no exported name
+// The golden pins the surface; it does not judge it. That no exported name
 // hands a payload to caller code (a callback parameter, an accessor, a func
-// var) is a property the reviewer of each golden update keeps, and the
-// golden makes sure no such change lands without that review.
+// var) is a property the reviewer of each golden update keeps; the test only
+// makes sure no such change lands without that review.
 //
 // It is a separate function so internal/exec's own tests can assert that the
 // real values do reach exec.Cmd.Args — the mirror of the redaction tests,

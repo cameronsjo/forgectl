@@ -144,26 +144,37 @@ func execAlias(file *ast.File, report func(token.Pos, string)) string {
 }
 
 // TestTransformIsMintedOnlyInTransformGo keeps the Transform set closed: no
-// production file of internal/exec but transform.go may write a Transform
-// literal with elements or assign Transform.apply, for any GOOS in
-// guardGOOS. The exported-API golden (TestExportedAPI) cannot see this,
-// because minting inside the package changes no exported signature.
+// production file of internal/exec but transform.go may, on any platform in
+// guardPlatforms,
+//
+//   - write a Transform composite literal with elements,
+//   - convert any value to Transform (which would mint one from an
+//     identical struct type holding an arbitrary func),
+//   - assign Transform.apply, or
+//   - take the address of Transform.apply (which would let the pointer's
+//     holder assign it later).
+//
+// The API golden (TestExportedAPI) cannot see this, because minting inside
+// the package changes no signature.
 //
 // Mutations that turn it red, each written in sensitive.go:
 //
 //   - var t Transform; t.apply = strings.ToUpper     (minting by assignment)
 //   - Transform{apply: strings.ToUpper}              (minting by literal)
+//   - Transform(struct{ apply func(string) string }{strings.ToUpper})
+//     (minting by conversion)
+//   - p := &t.apply; *p = strings.ToUpper              (minting through a pointer)
 func TestTransformIsMintedOnlyInTransformGo(t *testing.T) {
-	for _, goos := range guardGOOS {
-		c := checkExecFor(t, goos)
+	for _, p := range guardPlatforms {
+		c := checkExecFor(t, p)
 		for _, f := range mintingFindings(t, c) {
-			t.Errorf("[GOOS=%s] %s", goos, f)
+			t.Errorf("[%s] %s", p, f)
 		}
 	}
 }
 
-// mintingFindings returns a finding for any composite literal of Transform
-// with elements, or any assignment to Transform.apply, outside transform.go.
+// mintingFindings returns a finding for each TestTransformIsMintedOnlyInTransformGo
+// rule broken outside transform.go.
 func mintingFindings(t *testing.T, c *checkedPackage) []string {
 	t.Helper()
 	transform, ok := c.pkg.Scope().Lookup("Transform").(*types.TypeName)
@@ -183,7 +194,15 @@ func mintingFindings(t *testing.T, c *checkedPackage) []string {
 	}
 	var findings []string
 	report := func(pos token.Pos, msg string) {
-		findings = append(findings, c.fset.Position(pos).String()+": "+msg)
+		findings = append(findings, c.fset.Position(pos).String()+": "+msg+"; keep the closed set in transform.go")
+	}
+	isApply := func(e ast.Expr) bool {
+		sel, ok := ast.Unparen(e).(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		s, ok := c.info.Selections[sel]
+		return ok && s.Obj() == apply
 	}
 	for _, f := range c.files {
 		if filepath.Base(c.fset.Position(f.Pos()).Filename) == "transform.go" {
@@ -193,17 +212,21 @@ func mintingFindings(t *testing.T, c *checkedPackage) []string {
 			switch node := n.(type) {
 			case *ast.CompositeLit:
 				if tv, ok := c.info.Types[node]; ok && types.Identical(tv.Type, transform.Type()) && len(node.Elts) > 0 {
-					report(node.Pos(), "a Transform is minted outside transform.go; keep the closed set in one file")
+					report(node.Pos(), "a Transform is minted by a composite literal outside transform.go")
+				}
+			case *ast.CallExpr:
+				if tv, ok := c.info.Types[node.Fun]; ok && tv.IsType() && types.Identical(tv.Type, transform.Type()) {
+					report(node.Pos(), "a value is converted to Transform outside transform.go")
 				}
 			case *ast.AssignStmt:
 				for _, lhs := range node.Lhs {
-					sel, ok := ast.Unparen(lhs).(*ast.SelectorExpr)
-					if !ok {
-						continue
+					if isApply(lhs) {
+						report(lhs.Pos(), "Transform.apply is assigned outside transform.go")
 					}
-					if s, ok := c.info.Selections[sel]; ok && s.Obj() == apply {
-						report(sel.Pos(), "Transform.apply is assigned outside transform.go; keep the closed set in one file")
-					}
+				}
+			case *ast.UnaryExpr:
+				if node.Op == token.AND && isApply(node.X) {
+					report(node.Pos(), "the address of Transform.apply is taken outside transform.go")
 				}
 			}
 			return true
@@ -216,16 +239,23 @@ func mintingFindings(t *testing.T, c *checkedPackage) []string {
 // pure string escapes that hold no state and import nothing but strings, so
 // the payload MapOpaque hands them can go nowhere but the returned string.
 // It reads every non-test .go file in the directory, whatever its build
-// constraint, so a file tagged for another GOOS is held to the same rules:
+// constraint, so a file tagged for another platform is held to the same
+// rules:
 //
 //   - the only import is strings;
 //   - the only declarations are funcs: no package-level var (which could
 //     capture a payload), const, type or init;
-//   - every func is a plain, non-generic, non-method func whose parameters
-//     are all string and whose single result is string or bool.
+//   - every func is a plain, non-generic, non-method func with a body (no
+//     assembly), whose parameters are all string and whose single result is
+//     string or bool;
+//   - a body starts no goroutine and calls only a strings func, a method on
+//     a value (whose type can only come from strings), the builtin len, a
+//     string conversion, or another func of this package. print, println and
+//     every other builtin are refused, so nothing is written anywhere.
 //
 // Mutations that turn it red: import "os" in tmuxesc.go; declare
-// `var last string` in tmuxesc.go; add `func Hook(f func(string)) string`.
+// `var last string`; add `func Hook(f func(string)) string`; call
+// println(s) inside Format.
 func TestTmuxescIsALeaf(t *testing.T) {
 	dir, err := filepath.Abs(filepath.Join("..", "tmux", "tmuxesc"))
 	if err != nil {
@@ -236,7 +266,8 @@ func TestTmuxescIsALeaf(t *testing.T) {
 		t.Fatal(err)
 	}
 	fset := token.NewFileSet()
-	funcs := 0
+	var files []*ast.File
+	own := map[string]bool{}
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -246,7 +277,16 @@ func TestTmuxescIsALeaf(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, f := range tmuxescFindings(fset, file, &funcs) {
+		files = append(files, file)
+		for _, decl := range file.Decls {
+			if d, ok := decl.(*ast.FuncDecl); ok && d.Recv == nil {
+				own[d.Name.Name] = true
+			}
+		}
+	}
+	funcs := 0
+	for _, file := range files {
+		for _, f := range tmuxescFindings(fset, file, own, &funcs) {
 			t.Error(f)
 		}
 	}
@@ -256,8 +296,8 @@ func TestTmuxescIsALeaf(t *testing.T) {
 }
 
 // tmuxescFindings applies TestTmuxescIsALeaf's rules to one file, counting
-// the funcs it accepts into funcs.
-func tmuxescFindings(fset *token.FileSet, file *ast.File, funcs *int) []string {
+// the funcs it accepts into funcs. own names the package's plain funcs.
+func tmuxescFindings(fset *token.FileSet, file *ast.File, own map[string]bool, funcs *int) []string {
 	var findings []string
 	report := func(pos token.Pos, msg string) {
 		findings = append(findings, fset.Position(pos).String()+": "+msg)
@@ -289,6 +329,9 @@ func tmuxescFindings(fset *token.FileSet, file *ast.File, funcs *int) []string {
 			case d.Type.TypeParams != nil:
 				report(d.Pos(), name+" is generic; tmuxesc funcs take only string parameters")
 				continue
+			case d.Body == nil:
+				report(d.Pos(), name+" has no body; an assembly func cannot be checked")
+				continue
 			}
 			ok := true
 			for _, p := range d.Type.Params.List {
@@ -304,7 +347,29 @@ func tmuxescFindings(fset *token.FileSet, file *ast.File, funcs *int) []string {
 				report(d.Pos(), name+" is not a func of strings returning one string or bool; a payload could leave tmuxesc through it")
 				continue
 			}
-			*funcs++
+			bodyOK := true
+			ast.Inspect(d.Body, func(n ast.Node) bool {
+				switch node := n.(type) {
+				case *ast.GoStmt:
+					report(node.Pos(), name+" starts a goroutine; tmuxesc funcs must be pure")
+					bodyOK = false
+				case *ast.CallExpr:
+					switch fun := node.Fun.(type) {
+					case *ast.SelectorExpr:
+						return true // strings.X, or a method on a value whose type only strings can supply
+					case *ast.Ident:
+						if fun.Name == "len" || fun.Name == "string" || own[fun.Name] {
+							return true
+						}
+					}
+					report(node.Pos(), name+" calls "+types.ExprString(node.Fun)+"; tmuxesc bodies may call only strings, len, string conversions and the package's own funcs")
+					bodyOK = false
+				}
+				return true
+			})
+			if bodyOK {
+				*funcs++
+			}
 		}
 	}
 	return findings
