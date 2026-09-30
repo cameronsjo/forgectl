@@ -5,7 +5,7 @@
 ## Requirements
 
 - **A herdr pane.** `Probe` requires `HERDR_ENV=1` and a `HERDR_SOCKET_PATH` that names an existing socket. herdr exports both into every pane it hosts.
-- **The `cameronsjo/herdr` fork for `tab move`.** Upstream herdr has no `tab move`, and the fork hides it from `herdr tab --help`. `Probe` runs `herdr tab move --help` and accepts only a real usage line (`usage: herdr tab move ...` at the start of a line). Anything else returns `ErrForkRequired`.
+- **The `cameronsjo/herdr` fork for `tab move`.** Upstream herdr has no `tab move`, and the fork hides it from `herdr tab --help`. `Probe` runs `herdr tab move --help` and accepts only a usage line at the start of a line (`usage: herdr tab move ...`, matched case-insensitively so a clap-style `Usage:` also passes). Anything else returns `ErrForkRequired`.
 - **`Probe` checks the CLI, not the server.** A fork CLI talking to a server still running an older binary passes the probe and fails at `MoveTab` with a typed `*herdr.Error`. Restart the herdr server after upgrading the binary. The client does not translate that server error into `ErrForkRequired`: herdr's code for a missing verb could not be measured without a stock binary.
 - **`Probe` reads the environment you give it.** Pass a lookup that matches the environment of the `Runner` you will use. If the `Runner` pins a different `HERDR_SOCKET_PATH`, the lookup must reflect that pin, or the gate checks the wrong socket.
 - **Call `Probe` once.** It spawns `herdr` each time, and the answer does not change within a process.
@@ -16,7 +16,7 @@
 |---|---|
 | herdr fails (exit 1, JSON on stderr) | `*herdr.Error{Code, Message}`; match on `Code` (`workspace_not_found`, `pane_not_found`, `server_not_running`, ...). It unwraps to the `*exec.CommandError` |
 | stderr is truncated, has log lines before the JSON, or is not JSON | the wrapped `*exec.CommandError` (never an `*Error` with an empty code) |
-| the child was killed or timed out (exit -1), even with an error object on stderr | the wrapped `*exec.CommandError`, so `errors.Is(err, context.DeadlineExceeded)` still works |
+| the child was killed or timed out (exit -1), even with an error object on stderr | the wrapped `*exec.CommandError`, never an `*Error`. The runner reports a kill as `signal: killed`, not as `context.DeadlineExceeded`, so tell a timeout by checking `ctx.Err()` |
 | `tab move` exits 0 with `move_result.changed=false` | `*herdr.Declined{Reason}`, for example `last_tab_in_workspace` |
 | a move reply that lacks `move_result` (except an index move), lacks `changed`, or names no tab or workspace | an error; `MoveTab` fails closed |
 | the response has no `result`, or a list reply lacks its list (`panes`, `tabs`, ...) | an error. A renamed key must not read as an empty session; an empty `[]` is fine |

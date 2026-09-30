@@ -75,9 +75,10 @@ func probe(ctx context.Context, r exec.Runner, lookupEnv func(string) (string, b
 		return fmt.Errorf("%w: %s names %s, which is not a socket", ErrNotInSession, envSocket, sock)
 	}
 
-	// The text to search: stdout when herdr answers, stderr and stdout when it
-	// exits with its usage status. Any other failure is not evidence about the
-	// verb either way.
+	// The text to search: stdout when herdr answers (exit 0; a herdr that put its
+	// usage on stderr and exited 0 would read as missing, which is not the
+	// measured fork behaviour), stderr and stdout when it exits with its usage
+	// status. Any other failure is not evidence about the verb either way.
 	text, code := "", 0
 	out, err := r.Run(ctx, Binary, "tab", "move", "--help")
 	if err == nil {
@@ -88,7 +89,7 @@ func probe(ctx context.Context, r exec.Runner, lookupEnv func(string) (string, b
 			return fmt.Errorf("cannot run %s: %w", Binary, err)
 		}
 		if ce.ExitCode != exitUsage {
-			return fmt.Errorf("`%s tab move --help` failed with exit %d: %s", Binary, ce.ExitCode, strings.TrimSpace(ce.Stderr))
+			return fmt.Errorf("`%s tab move --help` failed with exit %d: %s", Binary, ce.ExitCode, printable(strings.TrimSpace(ce.Stderr)))
 		}
 		text, code = ce.Stderr+"\n"+ce.Output, ce.ExitCode
 	}

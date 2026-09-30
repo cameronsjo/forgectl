@@ -5,7 +5,10 @@ import (
 	"errors"
 	"os"
 	"regexp"
+	"runtime"
+	"strings"
 	"testing"
+	"time"
 	"unicode"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -102,20 +105,36 @@ func TestErrorUnwrapsToTheCommandError(t *testing.T) {
 	}
 }
 
+// TestEnvelopeFromAKilledChildIsNotHerdrsRefusal uses a REAL child. exec.OSRunner
+// reports a context kill as an *os/exec.ExitError ("signal: killed") with
+// ExitCode -1; it does not wrap context.DeadlineExceeded, so a hand-built
+// CommandError would have hidden that. Callers tell a timeout by ctx.Err().
 func TestEnvelopeFromAKilledChildIsNotHerdrsRefusal(t *testing.T) {
-	// The context deadline killed herdr after it wrote a complete error object.
-	// That is a timeout, not a herdr refusal, and callers must be able to tell.
-	ce := &exec.CommandError{
-		Name: Binary, ExitCode: -1, Err: context.DeadlineExceeded,
-		Stderr: `{"error":{"code":"workspace_not_found","message":"m"}}`,
+	if runtime.GOOS == "windows" {
+		t.Skip("needs sh")
 	}
-	_, err := New(runnerFor("", ce)).Workspaces(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	const envelope = `{"error":{"code":"workspace_not_found","message":"m"}}`
+	// exec replaces sh with sleep so the kill lands on the process holding stderr.
+	_, runErr := exec.OSRunner{}.Run(ctx, "sh", "-c", "echo '"+envelope+"' >&2; exec sleep 5")
+
+	var ce *exec.CommandError
+	if !errors.As(runErr, &ce) || ce.ExitCode != -1 || !strings.Contains(ce.Stderr, "workspace_not_found") {
+		t.Fatalf("precondition: want a killed child with the envelope on stderr, got %v (%+v)", runErr, ce)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("precondition: the context should have expired")
+	}
+
+	err := classify([]string{"workspace", "list"}, runErr)
 	var he *Error
 	if errors.As(err, &he) {
-		t.Fatalf("got *Error %+v for a killed child", he)
+		t.Fatalf("got *Error %+v for a killed child; that is a timeout, not a herdr refusal", he)
 	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err = %v, want it to still match context.DeadlineExceeded", err)
+	var got *exec.CommandError
+	if !errors.As(err, &got) || got.ExitCode != -1 {
+		t.Fatalf("err = %v, want the wrapped *exec.CommandError with exit -1", err)
 	}
 }
 

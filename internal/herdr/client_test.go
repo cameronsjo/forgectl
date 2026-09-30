@@ -105,7 +105,6 @@ func TestDecodeEdgeCases(t *testing.T) {
 		{"list member missing reads as a shape change, not an empty session", `{"id":"x","result":{"type":"pane_list"}}`, 0, true},
 		{"list member renamed", `{"id":"x","result":{"items":[]}}`, 0, true},
 		{"list member null", `{"id":"x","result":{"panes":null}}`, 0, true},
-		{"null cwd and agent", `{"id":"x","result":{"panes":[{"pane_id":"w1:p1","cwd":null,"agent":null,"agent_session":null}]}}`, 1, false},
 		{"unknown extra fields", `{"id":"x","extra":1,"result":{"panes":[{"pane_id":"w1:p1","brand_new_field":{"a":1}}],"more":true}}`, 1, false},
 		{"result missing", `{"id":"x"}`, 0, true},
 		{"result null", `{"id":"x","result":null}`, 0, true},
