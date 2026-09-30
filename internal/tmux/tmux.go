@@ -11,10 +11,10 @@ import (
 	osexec "os/exec"
 	"path/filepath"
 	"slices"
-	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/tmux/tmuxesc"
 )
 
 // Client wraps tmux + sesh behind the exec.Runner seam.
@@ -197,29 +197,13 @@ func (c *Client) tmuxArgs(args ...string) []string {
 	return append([]string{"-S", c.socket}, args...)
 }
 
-// escapeArgvSeparator makes an argv operand survive tmux's command splitter
-// (forgectl#823). cmd_parse_from_arguments (cmd-parse.y, byte-identical in
-// tmux 3.4 and 3.7c) treats any argv element ending in ';' as the end of a
-// command: it strips the ';' and starts a new command with the next element.
-// The same function supports one escape: when the character left before the
-// stripped ';' is a backslash, that backslash becomes the ';' and the command
-// does not end. So replacing a trailing ';' with `\;` always lands the operand
-// as given, whatever precedes it: "x;" is sent as `x\;`, `x\;` as `x\\;`,
-// and a lone ";" as `\;`.
-//
-// Unescaped, a directory ending in ';' silently gave a session or window a
-// different working directory (measured on tmux 3.4: `-c "<dir>;"` landed in
-// <dir>), and a command argument ending in ';' was cut short, with every later
-// argument read as a tmux command of its own. Escaping rather than refusing
-// keeps ordinary commands working, such as `sh -c 'a; b;'` or
-// `find . -exec rm {} \;`. An operand without a trailing ';' is returned
-// unchanged, so every everyday argv is byte-identical.
-func escapeArgvSeparator(s string) string {
-	if !strings.HasSuffix(s, ";") {
-		return s
-	}
-	return s[:len(s)-1] + `\;`
-}
+// escapeArgvSeparator is tmuxesc.ArgvSeparator, which documents the tmux
+// argv-splitter rule it answers (forgectl#823).
+func escapeArgvSeparator(s string) string { return tmuxesc.ArgvSeparator(s) }
+
+// escapeDirOperand is tmuxesc.DirOperand: a -c directory escaped for both the
+// argv splitter and format expansion (forgectl#839).
+func escapeDirOperand(dir string) string { return tmuxesc.DirOperand(dir) }
 
 // New builds a Client over the given Runner.
 func New(run exec.Runner, opts ...Option) *Client {
