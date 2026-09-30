@@ -42,8 +42,10 @@ var (
 // walking the tree because the go tool is what decides: a package under a
 // dot-directory, under testdata or behind a symlinked directory is outside
 // ./... yet compiles the moment something imports it by path, and -deps
-// follows that import (forgectl#854). There is nothing to skip. The list is
-// computed once per test binary.
+// follows that import (forgectl#854). There is nothing to skip. A package
+// counts as this module's when its module lives in the tree (goListModule's
+// inTree), and every go command runs under pinnedGoEnv. The list is computed
+// once per test binary, its go list runs concurrently.
 //
 // It fails, never skips, when the go tool cannot be run: a guard that goes
 // quiet when its input is missing is a green light with no bulb.
@@ -62,12 +64,52 @@ type goListPackage struct {
 	Name       string
 	Dir        string
 	ForTest    string
-	Module     *struct{ Path string }
+	Module     *goListModule
 
 	GoFiles, CgoFiles, TestGoFiles, XTestGoFiles        []string
 	SFiles, SysoFiles, CFiles, CXXFiles, MFiles, HFiles []string
 	FFiles, SwigFiles, SwigCXXFiles                     []string
 }
+
+// goListModule is the part of a package's module go list reports.
+type goListModule struct {
+	Path    string
+	Dir     string
+	Replace *struct{ Dir string }
+}
+
+// inTree reports whether m's source lives under root: this module, or any
+// module whose directory (or local replacement directory) sits inside the
+// tree, such as a nested module pulled in by a local replace. Keying on the
+// directory rather than the module path is what keeps such a module from
+// escaping the scan under a path of its own (forgectl#854).
+func (m *goListModule) inTree(root string) bool {
+	if m == nil {
+		return false // the standard library
+	}
+	if m.Path == modulePath {
+		return true
+	}
+	dirs := []string{m.Dir}
+	if m.Replace != nil {
+		dirs = append(dirs, m.Replace.Dir)
+	}
+	return slices.ContainsFunc(dirs, func(dir string) bool { return dir != "" && underRoot(root, dir) })
+}
+
+// underRoot reports whether path is root or lies below it.
+func underRoot(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// pinnedGoEnv is the environment every go command the guards run gets on top
+// of the ambient one, so nothing ambient can change what the go tool reports.
+// An ambient GOFLAGS=-tags=x would hide every file tagged !x from go list, and
+// with it from both guards; a go.work could swap in other modules; a
+// GOTOOLCHAIN switch could run another go. GOENV=off keeps a user go.env
+// file from injecting any of those back.
+var pinnedGoEnv = []string{"GOFLAGS=", "GOWORK=off", "GO111MODULE=on", "GOTOOLCHAIN=local", "GOENV=off"}
 
 func (p goListPackage) files() []string {
 	return slices.Concat(p.GoFiles, p.CgoFiles, p.TestGoFiles, p.XTestGoFiles,
@@ -90,46 +132,66 @@ func listCompiledFiles(ctx context.Context) ([]moduleFile, error) {
 	if _, err := osexec.LookPath("go"); err != nil {
 		return nil, fmt.Errorf("the go tool is not on PATH, and it is the only source of the compiled file set: %w", err)
 	}
-	seen := map[string]moduleFile{}
+	// One go list per platform and cgo setting, run concurrently.
+	type run struct {
+		p   guardPlatform
+		cgo string
+		out []byte
+		err error
+	}
+	var runs []*run
 	for _, p := range guardPlatforms {
 		for _, cgo := range []string{"0", "1"} {
+			runs = append(runs, &run{p: p, cgo: cgo})
+		}
+	}
+	var wg sync.WaitGroup
+	for _, r := range runs {
+		wg.Go(func() {
 			cmd := osexec.CommandContext(ctx, "go", "list", "-deps", "-test", "-json", "./...")
 			cmd.Dir = root
-			cmd.Env = append(os.Environ(), "GOOS="+p.goos, "GOARCH="+p.goarch, "CGO_ENABLED="+cgo)
+			cmd.Env = append(append(os.Environ(), pinnedGoEnv...), "GOOS="+r.p.goos, "GOARCH="+r.p.goarch, "CGO_ENABLED="+r.cgo)
 			var stderr bytes.Buffer
 			cmd.Stderr = &stderr
-			out, err := cmd.Output()
-			if err != nil {
-				return nil, fmt.Errorf("go list for %s cgo=%s: %w\n%s", p, cgo, err, stderr.String())
+			r.out, r.err = cmd.Output()
+			if r.err != nil {
+				r.err = fmt.Errorf("go list for %s cgo=%s: %w\n%s", r.p, r.cgo, r.err, stderr.String())
 			}
-			dec := json.NewDecoder(bytes.NewReader(out))
-			for {
-				var pkg goListPackage
-				if err := dec.Decode(&pkg); errors.Is(err, io.EOF) {
-					break
-				} else if err != nil {
-					return nil, fmt.Errorf("decode go list for %s cgo=%s: %w", p, cgo, err)
+		})
+	}
+	wg.Wait()
+	seen := map[string]moduleFile{}
+	for _, r := range runs {
+		if r.err != nil {
+			return nil, r.err
+		}
+		dec := json.NewDecoder(bytes.NewReader(r.out))
+		for {
+			var pkg goListPackage
+			if err := dec.Decode(&pkg); errors.Is(err, io.EOF) {
+				break
+			} else if err != nil {
+				return nil, fmt.Errorf("decode go list for %s cgo=%s: %w", r.p, r.cgo, err)
+			}
+			if !pkg.Module.inTree(root) {
+				continue
+			}
+			for _, name := range pkg.files() {
+				abs := name
+				if !filepath.IsAbs(abs) {
+					abs = filepath.Join(pkg.Dir, name)
 				}
-				if pkg.Module == nil || pkg.Module.Path != modulePath {
-					continue
+				if !underRoot(root, abs) {
+					if pkg.isTestMain() {
+						continue
+					}
+					return nil, fmt.Errorf("go list places %s of package %s outside the module root", abs, pkg.ImportPath)
 				}
-				for _, name := range pkg.files() {
-					abs := name
-					if !filepath.IsAbs(abs) {
-						abs = filepath.Join(pkg.Dir, name)
-					}
-					rel, err := filepath.Rel(root, abs)
-					if err != nil {
-						return nil, err
-					}
-					if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-						if pkg.isTestMain() {
-							continue
-						}
-						return nil, fmt.Errorf("go list places %s of package %s outside the module root", abs, pkg.ImportPath)
-					}
-					seen[abs] = moduleFile{rel: filepath.ToSlash(rel), abs: abs}
+				rel, err := filepath.Rel(root, abs)
+				if err != nil {
+					return nil, err
 				}
+				seen[abs] = moduleFile{rel: filepath.ToSlash(rel), abs: abs}
 			}
 		}
 	}
@@ -185,7 +247,9 @@ var hiddenSourceAllowed = map[string]bool{}
 // github.com/cameronsjo/forgectl/internal/exec.(*OSSensitiveRunner).buildCmd`
 // placed in internal/, in internal/exec/testdata/, in a dot-directory, or
 // behind a symlinked directory (add it to unsafeAllowed and the linkname rule
-// still fires); a new file importing "unsafe" alone; a file importing "C".
+// still fires); the same file tagged //go:build !zztag, run under an ambient
+// GOFLAGS=-tags=zztag; the same file in a nested module .zzmod pulled in by a
+// local replace; a new file importing "unsafe" alone; a file importing "C".
 func TestNoFileReachesPastTheTypeSystem(t *testing.T) {
 	fset := token.NewFileSet()
 	parsed, sawExec := 0, false
@@ -277,7 +341,12 @@ func TestLinknameLinesSeesPastAByteOrderMark(t *testing.T) {
 //     testdata, unless hiddenSourceAllowed names it.
 //
 // A directory holding its own go.mod is another module (a nested worktree,
-// say), which this module's build never compiles, and is not descended into.
+// say) and is not descended into. That skip is safe only because nothing can
+// pull such a module into this build: go list runs with GOWORK=off, and
+// TestGoModPullsInNoLocalModule refuses a local replace and any go.work; a
+// nested module that did get in would still be scanned by the go-list layer,
+// which keys on where a module lives, not on its path. A go.work file
+// anywhere in the walked tree is refused here too.
 //
 // Mutations that turn it red: a .go file in internal/exec/testdata/zz/; a
 // .go file in .zzprobe/zz/; a symlink internal/zzlink pointing at a directory.
@@ -317,6 +386,10 @@ func TestModuleTreeHidesNoGoSource(t *testing.T) {
 			}
 			return nil
 		}
+		if entry.Name() == "go.work" {
+			findings = append(findings, path+": a go.work can pull another module's source into this build; forgectl uses none")
+			return nil
+		}
 		switch filepath.Ext(path) {
 		case ".go", ".s", ".S":
 		default:
@@ -338,5 +411,56 @@ func TestModuleTreeHidesNoGoSource(t *testing.T) {
 	}
 	if walked < 2 {
 		t.Fatal("walked nothing; the walk is broken, not the module clean")
+	}
+}
+
+// localReplaceAllowed is the allowlist of module paths go.mod may replace with
+// a local directory. It is empty: go.mod has no replace directive today.
+var localReplaceAllowed = map[string]string{}
+
+// TestGoModPullsInNoLocalModule refuses the two ways another module's source
+// in this tree could enter the build unseen (forgectl#854): a go.mod replace
+// whose target is a local directory (one with no version; go mod edit -json
+// reports such a target with an empty Version), outside localReplaceAllowed,
+// and a go.work at the module root. The tree walk does not descend into a
+// nested module, so without this test such a module would be scanned only by
+// the go-list layer.
+//
+// Mutation that turns it red: `replace example.com/zzmod => ./.zzmod` in
+// go.mod, or an empty go.work at the root.
+func TestGoModPullsInNoLocalModule(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := osexec.CommandContext(t.Context(), "go", "mod", "edit", "-json")
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), pinnedGoEnv...)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go mod edit -json: %v", err)
+	}
+	var mod struct {
+		Module  struct{ Path string }
+		Replace []struct {
+			Old struct{ Path string }
+			New struct{ Path, Version string }
+		}
+	}
+	if err := json.Unmarshal(out, &mod); err != nil {
+		t.Fatal(err)
+	}
+	if mod.Module.Path != modulePath {
+		t.Fatalf("go mod edit -json reports module %q, want %q; the parse is broken", mod.Module.Path, modulePath)
+	}
+	for _, r := range mod.Replace {
+		if r.New.Version == "" && localReplaceAllowed[r.Old.Path] == "" {
+			t.Errorf("go.mod replaces %s with the local directory %s; a local module's source enters the build under its own path, so add it to localReplaceAllowed only after review", r.Old.Path, r.New.Path)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "go.work")); err == nil {
+		t.Error("go.work exists at the module root; a workspace can pull other modules' source into the build")
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
 	}
 }
