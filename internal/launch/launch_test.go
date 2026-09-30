@@ -323,7 +323,8 @@ func TestAgentsArgs_AllowDangerOff_OmitsFlag(t *testing.T) {
 //
 // Mutation that turns it red: match the tokens anywhere again, ignoring the
 // preceding token (the value-slot rows flip to true), or drop "--all" from
-// agentsBooleanFlags (the --all --json row flips to false).
+// agentsBooleanFlags (the --all --json row flips to false), or drop the `--`
+// stop (the rows after claude's separator flip to true).
 func TestIsAgentsPassthrough(t *testing.T) {
 	cases := []struct {
 		args []string
@@ -342,6 +343,10 @@ func TestIsAgentsPassthrough(t *testing.T) {
 		{[]string{"agents", "--settings", "--help"}, false},
 		{[]string{"agents", "--model", "--json"}, false},
 		{[]string{"agents", "--permission-mode", "-h"}, false},
+		// After claude's own `--`, everything is an operand.
+		{[]string{"agents", "--", "x", "--json"}, false},
+		{[]string{"agents", "--", "--help"}, false},
+		{[]string{"agents", "--json", "--", "x"}, true},
 	}
 	for _, tc := range cases {
 		got := IsAgentsPassthrough(tc.args)

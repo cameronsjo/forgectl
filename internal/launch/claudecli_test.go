@@ -79,7 +79,9 @@ func TestIsClaudeHelpOrVersion(t *testing.T) {
 // Mutation that turns it red: drop "--output-format" from the flag list (both
 // output-format rows flip), drop the `=value` prefix match (the
 // "--output-format=stream-json" row flips), or drop the `--` stop (the
-// "-- -p" row flips).
+// "-- -p" row flips). Match a print flag in any slot again, ignoring the token
+// before it (every value-slot row flips to true), or drop "--resume" from
+// claudeNoValueFlags (the "--resume -p" row flips to false).
 func TestIsClaudePrintMode(t *testing.T) {
 	cases := []struct {
 		args []string
@@ -93,6 +95,19 @@ func TestIsClaudePrintMode(t *testing.T) {
 		{[]string{"--output-format=stream-json"}, true},
 		{[]string{"--", "-p"}, false},
 		{[]string{"--model", "opus", "--", "--print"}, false},
+		// Flag position: after a bare token, a --flag=value, a boolean flag,
+		// or an optional-value flag (which never takes a dash-prefixed token).
+		{[]string{"hi", "-p"}, true},
+		{[]string{"--model=opus", "-p", "hi"}, true},
+		{[]string{"--verbose", "--print", "hi"}, true},
+		{[]string{"--resume", "-p", "hi"}, true},
+		// A value slot: the option's value, not print mode.
+		{[]string{"--append-system-prompt", "-p", "task"}, false},
+		{[]string{"--model", "--print", "hi"}, false},
+		{[]string{"--append-system-prompt", "--output-format", "hi"}, false},
+		{[]string{"--system-prompt", "--output-format=json", "hi"}, false},
+		// An unknown flag is assumed to take a value.
+		{[]string{"--some-future-flag", "-p", "hi"}, false},
 	}
 	for _, tc := range cases {
 		if got := IsClaudePrintMode(tc.args); got != tc.want {
