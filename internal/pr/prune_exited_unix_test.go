@@ -14,8 +14,8 @@ import (
 // "could not be read", whose `tmux list-windows -a` only prints "no server
 // running" (forgectl#805, #815 item 4).
 //
-// Mutation that turns it red: have pruneWindowListRefusal return the generic
-// text for every error (drop its tmux.ErrServerExited branch).
+// Mutation that turns it red: set prune's refusal reason to the fixed
+// generic text again instead of windowListUnreadable(listErr).
 func TestPrune_AnExitedServerRefusesWithItsOwnRemedy(t *testing.T) {
 	c := pruneClient(t, deadSocketServer(t))
 	future := []byte(`{"workspace":"/tmp/forgectl-workflow-x","ref":"o/r#1","agent":"claude",` +
