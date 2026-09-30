@@ -57,7 +57,7 @@ func TestOSRunner_URLCredentialsNeverLogged(t *testing.T) {
 
 // TestOSRunner_ChildGetsRealURL: redaction is display-only.
 func TestOSRunner_ChildGetsRealURL(t *testing.T) {
-	url := "https://user:tok@example.invalid/x"
+	url := "https://user:tok@example.invalid/x" //nolint:gosec // G101: fake credential; the test proves the child still receives it
 	out, err := OSRunner{}.Run(context.Background(), "sh", "-c", `printf %s "$1"`, "sh", url)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -71,7 +71,7 @@ func TestOSRunner_ChildGetsRealURL(t *testing.T) {
 // point, so a CommandError another Runner (or a fake) builds with a raw argv
 // and stderr renders without the credential too.
 func TestCommandError_ErrorRedactsAHandBuiltError(t *testing.T) {
-	e := &CommandError{
+	e := &CommandError{ //nolint:gosec // G101: fake credential the test asserts Error() withholds
 		Name:   "git",
 		Args:   []string{"clone", "--", "https://u:s3cr3t@example.invalid/o/r"},
 		Stderr: "remote: see https://u:s3cr3t@example.invalid/o/r",
