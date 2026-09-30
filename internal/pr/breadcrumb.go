@@ -346,15 +346,11 @@ func loadBreadcrumbRecord(path, sessionsDir string) (Breadcrumb, []byte, error) 
 		return Breadcrumb{}, nil, fmt.Errorf("breadcrumb %s is not inside the forgectl session-state dir", termsafe.QuotePath(path))
 	}
 
-	// (2) CONTENT — only now read and decode. LimitReader bounds the allocation
-	// before parsing rather than discovering an oversized record after ReadFile
-	// has already buffered it all.
-	file, err := os.Open(path) //nolint:gosec // path was location-validated above
-	if err != nil {
-		return Breadcrumb{}, nil, fmt.Errorf("read breadcrumb %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
-	}
-	defer func() { _ = file.Close() }()
-	data, err := readBreadcrumbBytes(file)
+	// (2) CONTENT — only now read and decode, through the one record reader:
+	// O_NOFOLLOW|O_NONBLOCK and a regular-file Fstat, so a FIFO named like a
+	// record cannot block this open under the lifecycle lock (forgectl#621),
+	// and a size bound applied before parsing rather than after buffering.
+	data, err := readRecordFile(path)
 	if err != nil {
 		return Breadcrumb{}, nil, fmt.Errorf("read breadcrumb %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}

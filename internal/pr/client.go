@@ -62,6 +62,13 @@ type Client struct {
 	// invisible from outside. Never set in production.
 	onLock func(verb, event string)
 
+	// afterLockOpen, when non-nil, is called once withLifecycleLock has
+	// opened and Fstat'ed the lock file and before it first tries the flock.
+	// It lets an in-package test swap the lock's path after the checked open,
+	// deterministically, to prove the timeout diagnostic reads the descriptor
+	// rather than the path (forgectl#621). Never set in production.
+	afterLockOpen func()
+
 	// findingsDir is the forgectl-owned directory (config.PrFindingsDir) that
 	// holds `forgectl pr local` findings — the deliverable of a local
 	// clean-room review, which must outlive the disposable workspace.

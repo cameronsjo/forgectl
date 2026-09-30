@@ -118,6 +118,10 @@ func TestCleanupFailureLine_AmbiguousWindowSaysWhetherTheRecordWasParked(t *test
 			if !strings.Contains(line, "so none was killed") || strings.Contains(line, "neither") {
 				t.Errorf("line = %q, want %q and no \"neither\"", line, "so none was killed")
 			}
+			// ...and asks for every extra window to be closed, as attach does (#746).
+			if !strings.Contains(line, "Close the ones that are not the review") {
+				t.Errorf("line = %q, want the plural %q", line, "Close the ones that are not the review")
+			}
 			if tc.name == "not parked" && strings.Contains(line, "is parked") {
 				t.Errorf("line = %q claims a park that never happened", line)
 			}
@@ -145,6 +149,10 @@ func TestCleanupFailureLine_UnreadableWindowSaysNothingWasRemoved(t *testing.T) 
 			if !strings.HasPrefix(line, "refused ") || !strings.Contains(line, "not treated as gone") ||
 				!strings.Contains(line, tc.want) {
 				t.Errorf("line = %q, want the unreadable-window wording and %q", line, tc.want)
+			}
+			// A cleanup's returned error is a tally, so its line carries the cause.
+			if !strings.Contains(line, tmux.ErrServerUnreadable.Error()) {
+				t.Errorf("line = %q, want the cause in a cleanup line", line)
 			}
 			if tc.name == "not parked" && strings.Contains(line, "is parked") {
 				t.Errorf("line = %q claims a park that never happened", line)
@@ -216,9 +224,14 @@ func TestPrTeardown_NotesEveryFailClosedRefusalOnStderr(t *testing.T) {
 			if err := cmd.ExecuteContext(context.Background()); err == nil {
 				t.Fatal("teardown should have failed closed")
 			}
-			note := errOut.String()
+			note, _, _ := strings.Cut(errOut.String(), "\n")
 			if !strings.Contains(note, tc.wantNote) || !strings.Contains(note, "the record is parked as needs-repair") {
-				t.Errorf("stderr = %q, want %q and the parked note", note, tc.wantNote)
+				t.Errorf("stderr note = %q, want %q and the parked note", note, tc.wantNote)
+			}
+			// The command returns the error, which is printed after the note,
+			// so the note must not print the cause too (#746).
+			if strings.Contains(note, "permission denied") {
+				t.Errorf("stderr note = %q repeats the cause the returned error prints", note)
 			}
 			if _, serr := os.Stat(ws); serr != nil {
 				t.Errorf("workspace was removed: %v", serr)

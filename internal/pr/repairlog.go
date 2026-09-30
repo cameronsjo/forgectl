@@ -169,8 +169,10 @@ func composeRepairActor(name, sessionID string) string {
 }
 
 // errRepairLogNotRegular is openRepairLogFile's refusal of a log that is not
-// a regular file: a symlink, a FIFO, a device, a directory.
-var errRepairLogNotRegular = errors.New("the repair audit log is not a regular file")
+// a regular file: a symlink, a FIFO, a device, a directory, a socket. Its text
+// is short because every caller already prefixes "open repair audit log" or
+// "read repair audit log", and the refusal names the path before it.
+var errRepairLogNotRegular = errors.New("not a regular file")
 
 // openRepairLogFile is the ONE way this package opens the repair audit log,
 // for reading and for appending alike (forgectl#614).
@@ -188,6 +190,15 @@ var errRepairLogNotRegular = errors.New("the repair audit log is not a regular f
 // A missing log comes back as an error errors.Is matches to fs.ErrNotExist,
 // exactly as os.Open's did, so callers that read a missing log as empty keep
 // doing so.
+//
+// A HARD-LINKED log is accepted: it is a regular file, and a second name for
+// the same inode is indistinguishable from the first. That is a decision, not
+// a gap (the #595 option-(a) reasoning, applied here by forgectl#621): making
+// the link takes write access to the 0700 sessions dir, whose owner can already
+// forge or delete any row directly, and an Nlink>1 refusal would be a heuristic
+// that also fires on legitimate backup and snapshot layouts. The effect of one
+// is bounded: an append lands in the shared inode, and compaction's rename
+// replaces this name only, leaving the other name with the uncompacted file.
 func openRepairLogFile(path string, flag int, perm os.FileMode) (*os.File, error) {
 	f, err := openRepairLogNoFollow(path, flag, perm)
 	if err != nil {
@@ -200,8 +211,8 @@ func openRepairLogFile(path string, flag int, perm os.FileMode) (*os.File, error
 	}
 	if !info.Mode().IsRegular() {
 		_ = f.Close()
-		return nil, fmt.Errorf("%w: %s is a %s; refusing it",
-			errRepairLogNotRegular, termsafe.QuotePath(path), fileKind(info.Mode()))
+		return nil, fmt.Errorf("%s is a %s: %w; refusing it",
+			termsafe.QuotePath(path), fileKind(info.Mode()), errRepairLogNotRegular)
 	}
 	return f, nil
 }
