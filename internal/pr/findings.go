@@ -27,13 +27,19 @@ type FindingsEntry struct {
 // FindingsList enumerates the direct children of c.findingsDir. A missing
 // dir (no local review has ever run) returns (nil, nil), mirroring List's
 // os.IsNotExist handling for the sessions dir.
+//
+// It opens the store through openFindingsStore, so a store that is not
+// private to this user is refused with errFindingsStoreUnsafe here too
+// (forgectl#754): anyone else who can write there chooses what the list
+// reports, and the list is what a human reads before choosing a dir to act
+// on.
 func (c *Client) FindingsList() ([]FindingsEntry, error) {
-	store, err := os.OpenRoot(c.findingsDir)
+	store, err := c.openFindingsStore()
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read pr findings dir: %w", err)
+		return nil, err
 	}
 	defer func() { _ = store.Close() }()
 	entries, err := fs.ReadDir(store.FS(), ".")
@@ -83,8 +89,9 @@ func (c *Client) openFindingsStore() (*os.Root, error) {
 }
 
 // errFindingsStoreUnsafe is openFindingsStore's refusal of a store that is
-// not private to this user. Its text never names the store's path.
-var errFindingsStoreUnsafe = errors.New("refusing to clean up the pr findings store: it is not private to you")
+// not private to this user, for cleanup, list, and the marker write alike.
+// Its text never names the store's path.
+var errFindingsStoreUnsafe = errors.New("refusing to use the pr findings store: it is not private to you")
 
 // errFindingsChildMoved is openFindingsChild's refusal of a name that no
 // longer resolves to the directory the caller checked.

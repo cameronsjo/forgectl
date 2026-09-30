@@ -61,3 +61,61 @@ func TestFindingsCleanup_FIFOMarkerFailsFastAndIsStale(t *testing.T) {
 	}
 	wantGone(t, d)
 }
+
+// The marker write goes through a handle on the findings dir opened from the
+// store (forgectl#754). A findings dir swapped for a symlink to a dir outside
+// the store after MkdirTemp gets no marker, and neither does the link's
+// target: the write is refused rather than following the link.
+//
+// Mutations that turn it red: drop the plain-directory check and open the
+// dir by its path, os.OpenRoot(findingsDir), instead of openFindingsChild
+// (the link is followed and the marker lands in the outside dir). The
+// origin/main writer, a c.fs.OpenExclusive and os.Link on joined paths, fails
+// it the same way: O_NOFOLLOW guards only the last component.
+func TestWriteFindingsMarker_SymlinkedDirIsRefused(t *testing.T) {
+	store := t.TempDir()
+	c := findingsClient(t, store)
+	outside := t.TempDir()
+	d := filepath.Join(store, findingsDirPrefix+"swapped")
+	if err := os.Symlink(outside, d); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.writeFindingsMarker(d, filepath.Join(c.sessionsDir, ownerRecord)); err == nil {
+		t.Fatal("writeFindingsMarker through a symlinked findings dir succeeded, want a refusal")
+	}
+	for _, name := range []string{findingsOwnerMarker, findingsMarkerTemp} {
+		if _, err := os.Lstat(filepath.Join(outside, name)); !os.IsNotExist(err) {
+			t.Errorf("%s was written into the link's target (lstat err %v)", name, err)
+		}
+	}
+}
+
+// The owner record is opened through a handle on the sessions dir, with the
+// marker reader's no-follow open, not by a joined path (forgectl#754).
+//
+// Mutation that turns it red: open the record in ownerRecordLive with
+// openNoFollowNonblock(filepath.Join(c.sessionsDir, name), os.O_RDONLY, 0)
+// again (the seam is never called).
+func TestOwnerRecordLive_OpensThroughSessionsHandle(t *testing.T) {
+	c := findingsClient(t, t.TempDir())
+	liveRecord(t, c, ownerRecord, `{"local":true}`)
+	orig := openOwnerRecord
+	t.Cleanup(func() { openOwnerRecord = orig })
+	var gotRoot, gotName string
+	openOwnerRecord = func(dir *os.Root, name string) (*os.File, error) {
+		gotRoot, gotName = dir.Name(), name
+		return orig(dir, name)
+	}
+
+	if !c.ownerRecordLive(ownerRecord) {
+		t.Error("ownerRecordLive = false for an existing local record")
+	}
+	if gotRoot != c.sessionsDir || gotName != ownerRecord {
+		t.Errorf("record opened as (%q, %q), want (%q, %q) through the sessions handle",
+			gotRoot, gotName, c.sessionsDir, ownerRecord)
+	}
+	if c.ownerRecordLive(staleOwnerRecord) {
+		t.Error("ownerRecordLive = true for a record that does not exist")
+	}
+}
