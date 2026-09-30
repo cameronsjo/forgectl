@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -867,5 +868,36 @@ func TestRender_DeepStraySVGNames_Unwrapped(t *testing.T) {
 	}
 	if strings.Count(out, "<path") != 1 || strings.Contains(out, "<rect") || !strings.Contains(out, `<g><path d="M0 0"/></g>`) {
 		t.Errorf("deep render kept a stray SVG name or lost the inline one:\n%.400s", out[strings.LastIndex(out, "<b>"):])
+	}
+}
+
+// htmlElementNames is every element name the HTML Living Standard defines,
+// plus the obsolete ones browsers still parse as HTML, lowercased.
+var htmlElementNames = strings.Fields(`
+a abbr address area article aside audio b base bdi bdo blockquote body br
+button canvas caption cite code col colgroup data datalist dd del details
+dfn dialog div dl dt em embed fieldset figcaption figure footer form h1 h2
+h3 h4 h5 h6 head header hgroup hr html i iframe img input ins kbd label
+legend li link main map mark menu meta meter nav noscript object ol
+optgroup option output p picture pre progress q rp rt ruby s samp script
+search section select slot small source span strong style sub summary sup
+table tbody td template textarea tfoot th thead time title tr track u ul
+var video wbr
+acronym applet basefont bgsound big blink center dir font frame frameset
+image isindex keygen listing marquee menuitem multicol nextid nobr noembed
+noframes plaintext rb rtc spacer strike tt xmp`)
+
+// Every svgElements name but svg is unwrapped wherever it appears in HTML
+// content (strayForeignElements, balanceDeep). A name that is also an HTML
+// element (a, title, style, image) would silently unwrap every legitimate
+// use of that element, so none may be one (cameronsjo/forgectl#745).
+func TestSVGElements_NoneIsAnHTMLElementName(t *testing.T) {
+	if len(htmlElementNames) < 130 {
+		t.Fatalf("htmlElementNames has %d names; the list is truncated", len(htmlElementNames))
+	}
+	for _, name := range svgElements {
+		if slices.Contains(htmlElementNames, strings.ToLower(name)) {
+			t.Errorf("svgElements lists %q, which is also an HTML element: every HTML <%s> would be unwrapped as a stray SVG element", name, name)
+		}
 	}
 }

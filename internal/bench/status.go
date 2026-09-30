@@ -365,9 +365,17 @@ func hearthDiskPercent(ctx context.Context, runner exec.Runner) (int, bool) {
 	return pct, true
 }
 
-// lastSyncLayouts are the ISO-8601 shapes chronicle's `status --json` writes
-// last_sync in: RFC 3339 with an offset, or Python's isoformat without one.
-var lastSyncLayouts = []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999"}
+// lastSyncLayouts are the ISO-8601 shapes chronicle's `status --json` may
+// write last_sync in, each paired with the layout it renders in. Chronicle
+// reads a TIMESTAMPTZ column (files.last_imported) and writes Python's
+// isoformat, which carries an offset, so RFC 3339 is the shape it emits.
+// An offset-less isoformat names no zone at all: reading it as UTC and
+// printing "Z" would claim a zone the value never stated (#738), so it
+// renders without one.
+var lastSyncLayouts = []struct{ parse, render string }{
+	{time.RFC3339Nano, time.RFC3339},
+	{"2006-01-02T15:04:05.999999999", "2006-01-02T15:04:05"},
+}
 
 // lastSyncDetail renders chronicle's last_sync from the parsed time, never
 // from the JSON text (#716): chronicle's output is another program's text,
@@ -375,8 +383,8 @@ var lastSyncLayouts = []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999"
 // timestamp reads as a fixed category.
 func lastSyncDetail(raw string) string {
 	for _, layout := range lastSyncLayouts {
-		if t, err := time.Parse(layout, raw); err == nil {
-			return t.Format(time.RFC3339)
+		if t, err := time.Parse(layout.parse, raw); err == nil {
+			return t.Format(layout.render)
 		}
 	}
 	return "unrecognized timestamp"

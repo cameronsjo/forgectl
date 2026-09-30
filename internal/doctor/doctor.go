@@ -21,7 +21,6 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/bench"
@@ -292,28 +291,11 @@ func checkSops(ctx context.Context, d Deps) Check {
 	// the line itself: sops can append an update notice, and whatever else it
 	// prints is the tool's text, not ours (#716).
 	line, _, _ := strings.Cut(out, "\n")
-	if vs := findVersions(line); len(vs) > 0 {
+	if vs := selfupdate.FindVersions(line); len(vs) > 0 {
 		return Check{Name: "sops", State: StateOK, Detail: "sops " + vs[0]}
 	}
 	slog.Warn("sops --version printed no recognizable version.", "output", termsafe.SafeLineMax(line, 200))
 	return Check{Name: "sops", State: StateOK, Detail: "sops present; version not recognized"}
-}
-
-// versionPattern matches a whole dotted release number, optionally after a
-// "v" and with a short pre-release suffix — the one part of a tool's version
-// output doctor renders. It is anchored at word boundaries on both sides, so it
-// never picks a version-shaped piece out of a longer token, and the charset
-// and lengths are fixed, so a match can carry nothing the tool chose beyond a
-// version-shaped token.
-var versionPattern = regexp.MustCompile(`\bv?([0-9]{1,6}(?:\.[0-9]{1,6}){1,3}(?:-[0-9A-Za-z]{1,12}(?:\.[0-9A-Za-z]{1,12})?)?)\b`)
-
-// findVersions returns every version number in s, without any "v" prefix.
-func findVersions(s string) []string {
-	var out []string
-	for _, m := range versionPattern.FindAllStringSubmatch(s, -1) {
-		out = append(out, m[1])
-	}
-	return out
 }
 
 // benchChecks folds bench.Status's hearth and chronicle components into doctor
@@ -487,19 +469,7 @@ func checkForgectlVersion(ctx context.Context, d Deps) Check {
 		return Check{Name: "forgectl version", State: StateWarn, Detail: "brew outdated failed", Hint: "check network access to the Homebrew tap"}
 	}
 	if outdated {
-		return Check{Name: "forgectl version", State: StateWarn, Detail: outdatedDetail(detail), Hint: "run `forgectl upgrade`"}
+		return Check{Name: "forgectl version", State: StateWarn, Detail: selfupdate.OutdatedDetail(detail), Hint: "run `forgectl upgrade`"}
 	}
 	return Check{Name: "forgectl version", State: StateOK, Detail: "up to date"}
-}
-
-// outdatedDetail words `brew outdated` output for the report from the version
-// numbers it contains, never from its text (#716). brew's verbose form is
-// "<cask> (<installed>) != <latest>"; any other shape, including the terse
-// cask-name-only form, reads as a plain "newer version available".
-func outdatedDetail(out string) string {
-	line, _, _ := strings.Cut(out, "\n")
-	if vs := findVersions(line); len(vs) == 2 {
-		return fmt.Sprintf("forgectl %s installed, %s available", vs[0], vs[1])
-	}
-	return "a newer forgectl is available"
 }
