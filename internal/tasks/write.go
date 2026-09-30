@@ -82,7 +82,7 @@ func (c *Client) CreateTask(ctx context.Context, projectID int, title, descripti
 	}
 	var created Task
 	if err := json.Unmarshal(body, &created); err != nil {
-		return Task{}, fmt.Errorf("%w: create in project %d: decode response: %v", ErrUnexpectedStatus, projectID, err)
+		return Task{}, malformedJSON(fmt.Sprintf("create in project %d: decode response", projectID), err)
 	}
 	return created, nil
 }
@@ -106,7 +106,7 @@ func (c *Client) AddComment(ctx context.Context, taskID int, comment string) (Co
 	}
 	var created Comment
 	if err := json.Unmarshal(body, &created); err != nil {
-		return Comment{}, fmt.Errorf("%w: comment on task %d: decode response: %v", ErrUnexpectedStatus, taskID, err)
+		return Comment{}, malformedJSON(fmt.Sprintf("comment on task %d: decode response", taskID), err)
 	}
 	return created, nil
 }
@@ -122,7 +122,7 @@ func (c *Client) FetchTask(ctx context.Context, taskID int) (Task, error) {
 	}
 	var task Task
 	if err := json.Unmarshal(body, &task); err != nil {
-		return Task{}, fmt.Errorf("%w: task %d: decode response: %v", ErrUnexpectedStatus, taskID, err)
+		return Task{}, malformedJSON(fmt.Sprintf("task %d: decode response", taskID), err)
 	}
 	return task, nil
 }
@@ -141,7 +141,7 @@ func (c *Client) FetchProject(ctx context.Context, projectID int) (Project, erro
 	}
 	var project Project
 	if err := json.Unmarshal(body, &project); err != nil {
-		return Project{}, fmt.Errorf("%w: project %d: decode response: %v", ErrUnexpectedStatus, projectID, err)
+		return Project{}, malformedJSON(fmt.Sprintf("project %d: decode response", projectID), err)
 	}
 	return project, nil
 }

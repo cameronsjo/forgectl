@@ -242,7 +242,7 @@ func getPage[T any](ctx context.Context, c *Client, path string, page int) (item
 		return nil, false, err
 	}
 	if err := json.Unmarshal(body, &items); err != nil {
-		return nil, false, fmt.Errorf("%w: %s: decode page %d: %v", ErrUnexpectedStatus, path, page, err)
+		return nil, false, malformedJSON(fmt.Sprintf("%s: decode page %d", path, page), err)
 	}
 	return items, len(items) == pageSize, nil
 }

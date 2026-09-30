@@ -65,9 +65,13 @@ func TestTeardown_AcceptsMember(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected a tmux kill-window call; got %+v", fake.Calls)
 	}
-	// The native window id, resolved under the review session and revalidated
-	// immediately before the kill.
-	if want := []string{"kill-window", "-t", "@5"}; !equalArgs(call.Args, want) {
+	// The native window id, resolved under the review session, revalidated
+	// immediately before the kill, and killed only if the server answering is
+	// still the generation captured at resolve (forgectl#756).
+	if want := []string{
+		"if-shell", "-F", "-t", "@5", "#{==:#{pid}/#{start_time},123/456}",
+		"kill-window -t @5", `display-message -p "forgectl-generation-mismatch #{pid}/#{start_time}"`,
+	}; !equalArgs(call.Args, want) {
 		t.Errorf("tmux args = %v, want %v", call.Args, want)
 	}
 }
@@ -158,7 +162,7 @@ func TestTeardown_LiveOrderRemovesBreadcrumbLast(t *testing.T) {
 	inner := server.RunFunc
 	fake := &exec.FakeRunner{}
 	fake.RunFunc = func(name string, args []string) (string, error) {
-		if name == "tmux" && len(args) > 0 && args[0] == "kill-window" {
+		if name == "tmux" && tmuxVerb(args) == "kill-window" {
 			_, err := os.Stat(bcPath)
 			breadcrumbAtTmux = err == nil
 		}
@@ -572,7 +576,7 @@ type hangingTmux struct {
 }
 
 func (h *hangingTmux) Run(ctx context.Context, name string, args ...string) (string, error) {
-	if name == "tmux" && len(args) > 0 && (h.blockVerb == "" || args[0] == h.blockVerb) {
+	if name == "tmux" && len(args) > 0 && (h.blockVerb == "" || tmuxVerb(args) == h.blockVerb) {
 		_, _ = h.FakeRunner.Run(ctx, name, args...) // only the call ledger matters
 		<-ctx.Done()
 		return "", ctx.Err()
@@ -812,7 +816,7 @@ func killStepServer(name, secondOut string, secondErr, killErr error) *exec.Fake
 	lists := 0
 	base.RunFunc = func(bin string, args []string) (string, error) {
 		if bin == "tmux" && len(args) > 0 {
-			switch args[0] {
+			switch tmuxVerb(args) {
 			case "list-windows":
 				lists++
 				if lists > 1 {

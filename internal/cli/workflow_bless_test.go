@@ -871,3 +871,23 @@ func TestTrust_NoPeerEnrollmentVerb_GuardsRebuild(t *testing.T) {
 		}
 	}
 }
+
+// TestWorkflowBless_UnknownVerbIsCapped pins #761: the unknown-verb refusal
+// echoes the verb capped, never whole.
+func TestWorkflowBless_UnknownVerbIsCapped(t *testing.T) {
+	dir := cliRedirectConfigDir(t)
+	long := strings.Repeat("v", 300)
+	wf := "dsl_version = 1\nname = \"demo\"\nversion = \"1.0.0\"\n\n[[step]]\nuses = \"" + long + "\"\n"
+	cliWriteUserWorkflow(t, dir, "demo", []byte(wf))
+	cmd := newWorkflowBlessCmd(module.Deps{Runner: &exec.FakeRunner{}})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"demo"})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "unknown verb") {
+		t.Fatalf("want an unknown-verb refusal, got %v", err)
+	}
+	if strings.Contains(err.Error(), long[:81]) || !strings.Contains(err.Error(), "…") {
+		t.Errorf("error %q echoes the verb uncapped", err)
+	}
+}

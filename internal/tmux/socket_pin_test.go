@@ -174,7 +174,7 @@ func TestPinnedClientPinsEveryCommand(t *testing.T) {
 			t.Errorf("argv %v does not lead with the socket pin -S %s", call.Args, testSocket)
 			continue
 		}
-		seen[call.Args[2]] = true
+		seen[tmuxVerb(call.Args)] = true
 	}
 
 	// The mutating verbs are listed explicitly because they are the ones with

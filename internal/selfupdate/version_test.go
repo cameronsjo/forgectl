@@ -49,3 +49,27 @@ func TestOutdatedDetail(t *testing.T) {
 		}
 	}
 }
+
+// TestUpgradedVersions pins #761's success line: from and to come from version
+// tokens on a line naming forgectl, the upgrade step's line wins over brew
+// update's, and anything else reads as not-found.
+func TestUpgradedVersions(t *testing.T) {
+	for _, tc := range []struct {
+		in       string
+		from, to string
+		ok       bool
+	}{
+		{"==> Upgrading 1 outdated package:\ncameronsjo/tap/forgectl 1.0.0 -> 1.1.0", "1.0.0", "1.1.0", true},
+		{"Updated 2 taps.\nother/tap/thing 3.0.0 -> 4.0.0\n\ncameronsjo/tap/forgectl 1.0.0 -> 1.1.0", "1.0.0", "1.1.0", true},
+		{"cameronsjo/tap/forgectl 9.9.9 -> 9.9.10\n\ncameronsjo/tap/forgectl 1.0.0 -> 1.1.0", "1.0.0", "1.1.0", true},
+		{"\x1b]0;x\x07cameronsjo/tap/forgectl 1.0.0 -> 1.1.0 SECRET\x1b[2J", "1.0.0", "1.1.0", true},
+		{"other/tap/thing 3.0.0 -> 4.0.0", "", "", false},
+		{"Warning: cameronsjo/tap/forgectl 1.1.0 is already installed", "", "", false},
+		{"", "", "", false},
+	} {
+		from, to, ok := UpgradedVersions(tc.in)
+		if from != tc.from || to != tc.to || ok != tc.ok {
+			t.Errorf("UpgradedVersions(%q) = %q, %q, %v; want %q, %q, %v", tc.in, from, to, ok, tc.from, tc.to, tc.ok)
+		}
+	}
+}
