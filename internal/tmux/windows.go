@@ -305,9 +305,11 @@ func (c *Client) NewWindowWithEnv(
 	// escapeArgvSeparator on -c and on every command argument: tmux ends a
 	// command at any argv element ending in ';', which would move the window's
 	// directory or cut the command short (forgectl#823). The -e values are
-	// refused instead, by validateEnvAssignment.
+	// refused instead, by validateEnvAssignment. The -c operand is also
+	// format-expanded, so it takes EscapeDirOperand, which adds escapeFormat
+	// (forgectl#839); the command arguments are not expanded.
 	if dir != "" {
-		args = append(args, "-c", escapeArgvSeparator(dir))
+		args = append(args, "-c", EscapeDirOperand(dir))
 	}
 	for _, e := range env {
 		args = append(args, "-e", e)

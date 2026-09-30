@@ -56,11 +56,19 @@ const escapedFieldSep = `\037`
 // rendering of FieldSep (see escapedFieldSep). Exported for internal/pr, which
 // parses dispatch identities produced by this package's formats.
 //
-// Raw wins when present, and the two renderings can never be confused: a tmux
-// that escapes never emits a bare 0x1f — it escapes every control byte, and
-// the backslash itself — so a line carrying the raw separator can only have
-// come from a non-escaping tmux, where a literal `\037` inside a name is just
-// four ordinary characters.
+// Raw wins when present. A tmux that escapes never emits a bare 0x1f — vis(3)
+// encodes every control byte — so a line carrying the raw separator can only
+// have come from a non-escaping tmux, where a literal `\037` inside a name is
+// just four ordinary characters.
+//
+// The reverse does NOT hold, and an escaping tmux's own output can forge the
+// escaped separator. It renders with VIS_NOSLASH, so it does not escape a
+// backslash (tmux 3.4 server_client_print; measured on 3.4 against an
+// isolated socket): a pane title or pane command holding the literal text
+// `\037` arrives exactly as the separator does. A session or window name is
+// no safer, because tmux doubles the backslash when it STORES the name, and
+// `\\037` still contains `\037`. So on an escaping tmux, a name, pane title or
+// pane command can add fields to its own row.
 //
 // Splitting can only ever ADD fields, never remove them, which is what lets
 // the exact field-count checks at the call sites stand as the real defense: a

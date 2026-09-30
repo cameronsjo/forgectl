@@ -221,6 +221,28 @@ func escapeArgvSeparator(s string) string {
 	return s[:len(s)-1] + `\;`
 }
 
+// EscapeDirOperand spells a directory for a tmux `-c` operand so that it
+// lands exactly as given (forgectl#839). Two tmux layers read that operand,
+// and it needs an escape for each:
+//
+//   - the argv splitter, which ends a command at an element ending in ';'
+//     (escapeArgvSeparator), and
+//   - format expansion. new-session expands its -c with format_single
+//     (cmd-new-session.c), and spawn expands the pane's -c again (spawn.c),
+//     in tmux 3.4 and 3.7c alike. Unescaped, a directory whose path holds
+//     `#(cmd)` runs cmd in the tmux server, and one holding `#{...}` or `##`
+//     is rewritten, so the session starts in $HOME instead. A cloned repo or
+//     an extracted archive can name a directory that way.
+//
+// The two escapes touch disjoint bytes (a trailing ';' and '#'), so their
+// order does not matter. A path with neither is returned unchanged.
+//
+// Exported for internal/surface/tmuxadapter, which passes a -c operand of its
+// own through the sensitive seam.
+func EscapeDirOperand(dir string) string {
+	return escapeFormat(escapeArgvSeparator(dir))
+}
+
 // New builds a Client over the given Runner.
 func New(run exec.Runner, opts ...Option) *Client {
 	c := &Client{

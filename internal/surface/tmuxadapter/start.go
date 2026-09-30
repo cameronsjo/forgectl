@@ -65,7 +65,11 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 		exec.MustFixed("-s"),
 		exec.Opaque(name),
 		exec.MustFixed("-c"),
-		spec.CWD(),
+		// tmux format-expands -c and ends a command at an argv element ending
+		// in ';', so the directory is re-spelled for both (forgectl#839,
+		// forgectl#836). Unescaped, a directory holding `#(cmd)` ran cmd in
+		// the tmux server before the session even existed.
+		exec.MapOpaque(spec.CWD(), tmux.EscapeDirOperand),
 		// Everything past here is the shell-command operand, and it is what
 		// makes the created session the SURFACE rather than a login shell: the
 		// bootstrap re-enters forgectl carrying the socket path and the one-shot
