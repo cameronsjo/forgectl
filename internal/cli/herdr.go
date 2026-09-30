@@ -351,7 +351,7 @@ func (r organizeReport) preamble(cfg config.HerdrOrganizeConfig, plan organize.P
 }
 
 func (r organizeReport) blocked(m organize.Move) {
-	r.printf("blocked  %s  %s -> %s: %s\n", r.tab(m.Title, m.TabID), r.safe(m.From), r.safe(m.To), m.BlockedReason)
+	r.printf("blocked  %s  %s -> %s: %s\n", r.tab(m.Title, m.TabID), r.safe(m.From), r.safe(m.To), r.safe(m.BlockedReason))
 	r.printf("         fix: open another tab in %s, or move it by hand\n", r.safe(m.From))
 }
 

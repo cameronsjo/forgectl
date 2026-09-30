@@ -458,6 +458,22 @@ func TestHerdrOrganize_HostileTitleNeverReachesTheTerminalRaw(t *testing.T) {
 	}
 }
 
+func TestHerdrOrganize_HostileWorkspaceLabelNeverReachesTheTerminalRaw(t *testing.T) {
+	setHerdrSeams(t, inSession)
+	// The label lands in the blocked reason, which the planner builds as text.
+	hostile := "forge\x1b]52;c;AAAA\x07"
+	w := newWorld(hws("w1", hostile, 1), hws("w2", "misc", 2)).
+		tab("w1", "t1", "term1", "/r/x/a", "sole").
+		tab("w2", "t2", "term2", "/r/x/b", "b")
+	r := runOrganize(t, organizeCfg(), w)
+	if !strings.Contains(r.stdout, "blocked") {
+		t.Fatalf("no blocked line was printed; the test would pass vacuously:\n%s", r.stdout)
+	}
+	if strings.ContainsAny(r.stdout, "\x1b\x07") {
+		t.Errorf("stdout carries a raw control byte: %q", r.stdout)
+	}
+}
+
 func TestHerdrOrganize_LongTitleIsTruncated(t *testing.T) {
 	setHerdrSeams(t, inSession)
 	long := strings.Repeat("x", 80)
