@@ -1,16 +1,21 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
@@ -60,9 +65,15 @@ Every run writes a transcript to stderr and to a timestamped log file
 [update] log_dir): a status line per step as it finishes, plus that step's
 own captured output underneath it — for ` + "`check`" + `, the output IS the point
 (brew's outdated list, softwareupdate's available updates, npm's outdated
-table). Each step's line appears only once that step completes, not as its
-command runs — a slow step (a ten-minute ` + "`brew upgrade`" + `) prints nothing
-until it finishes, so the transcript streams step-by-step, not byte-by-byte.
+table). The log file holds every step's full output and a failed step's
+error text, each line escaped. The terminal shows the output escaped too,
+except brew's, which is relayed from its taps and stays in the log file;
+` + "`check`" + ` shows brew's outdated list rebuilt from formula names and versions
+only. A failed step's line names the failed command and its exit status and
+points at the log file (or, if it could not be opened, at --json). Each step's
+line appears only once that step completes, not as its command runs — a
+slow step (a ten-minute ` + "`brew upgrade`" + `) prints nothing until it finishes,
+so the transcript streams step-by-step, not byte-by-byte.
 stdout carries ONLY the summary — the per-step recap in human mode, or the
 ` + "`--json`" + ` machine-readable report (which repeats each step's captured
 output in its own field) — never the transcript, so
@@ -221,15 +232,20 @@ func runUpdatePass(cmd *cobra.Command, client *updatepkg.Client, cfg config.Upda
 		opts.Yes = true
 	}
 
-	transcript, closeLog, logPath := openTranscript(cfg, cmd.ErrOrStderr())
+	tr, closeLog := openTranscript(cfg, cmd.ErrOrStderr())
 	defer closeLog()
-	if logPath != "" {
-		fmt.Fprintf(transcript, "logging transcript to %s\n", logPath)
+	if tr.path != "" {
+		_, _ = fmt.Fprintf(tr.both(), "logging transcript to %s\n", termsafe.QuotePathIfUnsafe(tr.path))
 	}
 
+	checkOnly := opts.CheckOnly
+	pointer := tr.pointer()
 	opts.OnStep = func(res updatepkg.Result) {
-		writeStepLine(transcript, res)
-		writeStepOutput(transcript, res)
+		writeStepLine(tr.both(), res, pointer)
+		writeStepOutput(tr.term, res, checkOnly, pointer)
+		if tr.file != nil {
+			writeStepDetail(tr.file, res)
+		}
 	}
 	report := client.Run(ctx, opts)
 
@@ -239,30 +255,62 @@ func runUpdatePass(cmd *cobra.Command, client *updatepkg.Client, cfg config.Upda
 			return WithExitCode(err, 2)
 		}
 	} else {
-		printUpdateSummary(out, report)
+		printUpdateSummary(out, report, pointer)
 	}
 
 	if report.Failed() {
-		return WithExitCode(fmt.Errorf("update: %w", report.Err()), 1)
+		// Categorical (#778): report.Err() carries each failed command's
+		// stderr. The step names are this package's own constants; the
+		// transcript file holds the rest, escaped.
+		return WithExitCode(termsafe.Categorical("update: "+failedStepNames(report.Results)+" failed; "+pointer, report.Err()), 1)
 	}
 	return nil
 }
 
-// openTranscript returns a writer that duplicates every transcript line to
-// stderr and to a timestamped log file, plus a closer and the log file's
-// path (empty if the file couldn't be opened). Opening the log file reuses
+// updateTranscript is where a run's transcript goes: term (stderr) and, when
+// it could be opened, file, a timestamped log under update-logs/. The two get
+// different renderings of a step's subprocess text (#778): the terminal gets
+// the fixed, categorical form, and the file gets the text itself, each line
+// escaped with termsafe.SafeLine so `cat` on it is safe too.
+type updateTranscript struct {
+	term io.Writer
+	file io.Writer // nil when the log file could not be opened
+	path string    // the file's path; "" exactly when file is nil
+}
+
+// both is a writer for lines that go to the terminal and the file alike.
+func (t updateTranscript) both() io.Writer {
+	if t.file == nil {
+		return t.term
+	}
+	return io.MultiWriter(t.term, t.file)
+}
+
+// pointer tells the reader where a step's full output and error text are:
+// the transcript file when there is one, and otherwise the two ways to get
+// them back (--json carries them, and log_level = "debug" logs them).
+func (t updateTranscript) pointer() string {
+	if t.path != "" {
+		return "see the transcript " + termsafe.QuotePathIfUnsafe(t.path)
+	}
+	return `rerun with --json, or set log_level = "debug", for the details`
+}
+
+// openTranscript opens the run's transcript: stderr, plus a timestamped log
+// file when one can be opened. Opening the log file reuses
 // config.OpenAppendFile's shared mkdir+open trio (the same one
 // config.SetupLogger's own log file goes through); this caller's fallback
 // differs from SetupLogger's own silent one — it warns to stderr before
 // degrading, since the transcript here is the CLI's whole point, not an
 // incidental side channel.
-func openTranscript(cfg config.UpdateConfig, stderr io.Writer) (w io.Writer, closeLog func(), path string) {
+func openTranscript(cfg config.UpdateConfig, stderr io.Writer) (updateTranscript, func()) {
+	noFile := updateTranscript{term: stderr}
 	dir := cfg.LogDir
 	if dir == "" {
 		d, err := config.UpdateLogDir()
 		if err != nil {
-			fmt.Fprintf(stderr, "warning: could not determine update log directory: %v (continuing with stderr only)\n", err)
-			return stderr, func() {}, ""
+			_, _ = fmt.Fprintf(stderr, "warning: could not determine update log directory: %v (continuing with stderr only)\n", termsafe.Error(err))
+			return noFile, func() {}
 		}
 		dir = d
 	}
@@ -271,43 +319,149 @@ func openTranscript(cfg config.UpdateConfig, stderr io.Writer) (w io.Writer, clo
 	logPath := filepath.Join(dir, name)
 	f, err := config.OpenAppendFile(logPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "warning: could not open update log file %s: %v (continuing with stderr only)\n", logPath, err)
-		return stderr, func() {}, ""
+		_, _ = fmt.Fprintf(stderr, "warning: could not open update log file %s: %v (continuing with stderr only)\n", termsafe.QuotePath(logPath), termsafe.Error(err))
+		return noFile, func() {}
 	}
 	config.PruneUpdateLogs(dir)
-	return io.MultiWriter(stderr, f), func() { _ = f.Close() }, logPath
+	return updateTranscript{term: stderr, file: f, path: logPath}, func() { _ = f.Close() }
 }
 
 // writeStepLine writes one line of the transcript for a completed step —
 // the CLI's Options.OnStep hook, called as each step finishes so the
 // transcript streams rather than appearing only once the whole roster is
 // done.
-func writeStepLine(w io.Writer, res updatepkg.Result) {
+//
+// pointer ends a FAIL line: where the step's output and error text are.
+func writeStepLine(w io.Writer, res updatepkg.Result, pointer string) {
 	dur := res.Duration.Round(time.Millisecond)
 	switch {
 	case res.Skipped:
 		fmt.Fprintf(w, "skip  %-15s %s\n", res.Name, res.SkipReason)
 	case res.Failed():
-		fmt.Fprintf(w, "FAIL  %-15s (%s) %v\n", res.Name, dur, res.Err)
+		_, _ = fmt.Fprintf(w, "FAIL  %-15s (%s) %s\n", res.Name, dur, stepFailure(res.Err, pointer))
 	default:
 		fmt.Fprintf(w, "ok    %-15s (%s)\n", res.Name, dur)
 	}
 }
 
-// writeStepOutput writes a step's captured output to the transcript,
-// indented under its status line — the ONLY place this appears for a human
-// running `update` interactively: the final recap (printUpdateSummary)
-// stays a terse one-line-per-step summary, and it's the transcript (stderr
-// + the log file) that carries the actual deliverable, especially for
-// `check`, where a step's output IS the point. Omitted entirely when Output
-// is empty (a step that produced no stdout).
-func writeStepOutput(w io.Writer, res updatepkg.Result) {
+// stepFailure words a failed step for the terminal from fixed text (#778):
+// err carries the child's stderr (a CommandError) and, for brew, text the
+// tap's server and git transport send, so it is never rendered here. The
+// failed command's name comes from the argv this binary built
+// (SequenceError) and the exit status is an integer; pointer says where the
+// error text itself is (writeStepDetail puts it in the transcript file).
+func stepFailure(err error, pointer string) string {
+	what := "failed"
+	var seqErr *updatepkg.SequenceError
+	if errors.As(err, &seqErr) {
+		what = termsafe.SafeLine(seqErr.Command) + " failed"
+	}
+	var cmdErr *exec.CommandError
+	if errors.As(err, &cmdErr) && cmdErr.ExitCode >= 0 {
+		what += " (exit " + strconv.Itoa(cmdErr.ExitCode) + ")"
+	}
+	return what + "; " + pointer
+}
+
+// writeStepDetail writes a step's captured output and, when it failed, its
+// error text to the transcript FILE, never the terminal: this is the
+// recoverable detail the terminal's fixed wording points at. Each line is
+// escaped with termsafe.SafeLine, so the file is inert under `cat` too.
+func writeStepDetail(w io.Writer, res updatepkg.Result) {
+	if res.Output != "" {
+		for _, line := range strings.Split(strings.TrimRight(res.Output, "\n"), "\n") {
+			_, _ = fmt.Fprintf(w, "      | %s\n", termsafe.SafeLine(strings.TrimSuffix(line, "\r")))
+		}
+	}
+	if res.Failed() {
+		for _, line := range strings.Split(res.Err.Error(), "\n") {
+			_, _ = fmt.Fprintf(w, "      error: %s\n", termsafe.SafeLine(line))
+		}
+	}
+}
+
+// failedStepNames lists the failed steps by name, comma-separated.
+func failedStepNames(results []updatepkg.Result) string {
+	var names []string
+	for _, res := range results {
+		if res.Failed() {
+			names = append(names, termsafe.SafeLine(res.Name))
+		}
+	}
+	return strings.Join(names, ", ")
+}
+
+// stepOutputLineMaxRunes caps one rendered line of a step's captured output.
+const stepOutputLineMaxRunes = 500
+
+// brewTokenPattern is one field of a line `brew outdated` prints: a formula
+// name (tap-qualified or not) or, in its verbose form, a version, a
+// parenthesized version, a comparison sign, or a word of a bracketed note
+// such as "[pinned at 1.2]". Nothing it matches can drive a terminal.
+var brewTokenPattern = regexp.MustCompile(`^[A-Za-z0-9@._+/(),<>=!\[\]-]{1,128}$`)
+
+// brewLineMaxTokens bounds a rebuilt brew line: "name (1.0) < 2.0" is four,
+// and "[pinned at 1.0]" adds three.
+const brewLineMaxTokens = 8
+
+// writeStepOutput writes a step's captured output to the TERMINAL, indented
+// under its status line: the final recap (printUpdateSummary) stays a terse
+// one-line-per-step summary, and for `check` a step's output IS the point.
+// Omitted entirely when Output is empty (a step that produced no stdout).
+// The transcript file gets the full text from writeStepDetail instead.
+//
+// Output is subprocess text, so it is never written raw (#778). brew's stays
+// off the terminal, as `forgectl upgrade`'s does (#777): brew relays what the
+// tap's server and git transport send. pointer says where it is instead. The
+// one exception is `update check`, whose deliverable is brew's outdated list,
+// so that list is rebuilt from formula-name and version tokens, with a count
+// of any line that is not one. Every other step's lines are escaped and
+// capped.
+func writeStepOutput(w io.Writer, res updatepkg.Result, checkOnly bool, pointer string) {
 	if res.Output == "" {
 		return
 	}
-	for _, line := range strings.Split(res.Output, "\n") {
-		fmt.Fprintf(w, "      %s\n", line)
+	if res.Name != updatepkg.StepBrew {
+		for _, line := range strings.Split(res.Output, "\n") {
+			line = strings.TrimSuffix(line, "\r")
+			_, _ = fmt.Fprintf(w, "      %s\n", termsafe.SafeLineMax(line, stepOutputLineMaxRunes))
+		}
+		return
 	}
+	slog.Debug("brew output.", "step", res.Name, "output", res.Output)
+	if !checkOnly {
+		_, _ = fmt.Fprintf(w, "      (brew's output is not shown here; %s)\n", pointer)
+		return
+	}
+	hidden := 0
+	for _, line := range strings.Split(res.Output, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if rebuilt, ok := brewTokens(line); ok {
+			_, _ = fmt.Fprintf(w, "      %s\n", rebuilt)
+			continue
+		}
+		hidden++
+	}
+	if hidden > 0 {
+		_, _ = fmt.Fprintf(w, "      (%d line(s) of brew output not shown: not a formula line; %s)\n", hidden, pointer)
+	}
+}
+
+// brewTokens rebuilds one line of `brew outdated` from its fields, when every
+// field is a brewTokenPattern token and there are at most brewLineMaxTokens.
+func brewTokens(line string) (string, bool) {
+	fields := strings.Fields(line)
+	if len(fields) == 0 || len(fields) > brewLineMaxTokens {
+		return "", false
+	}
+	for _, f := range fields {
+		if !brewTokenPattern.MatchString(f) {
+			return "", false
+		}
+	}
+	return strings.Join(fields, " "), true
 }
 
 // tallyResults counts ok/skipped/failed across results — shared by
@@ -330,9 +484,9 @@ func tallyResults(results []updatepkg.Result) (ok, skipped, failed int) {
 // printUpdateSummary writes the human-readable summary to stdout: one line
 // per step (identical shape to the transcript, since stdout in non-JSON
 // mode IS the summary) plus a totals line.
-func printUpdateSummary(out io.Writer, report updatepkg.Report) {
+func printUpdateSummary(out io.Writer, report updatepkg.Report, pointer string) {
 	for _, res := range report.Results {
-		writeStepLine(out, res)
+		writeStepLine(out, res, pointer)
 	}
 	ok, skipped, failed := tallyResults(report.Results)
 	fmt.Fprintf(out, "\n%d ok, %d skipped, %d failed\n", ok, skipped, failed)

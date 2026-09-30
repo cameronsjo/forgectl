@@ -411,7 +411,7 @@ func newWorkflowStatusCmd() *cobra.Command {
 			} else {
 				fmt.Fprintf(out, "  %d step(s) complete:\n", len(state.Steps))
 				for _, s := range state.Steps {
-					fmt.Fprintf(out, "    %d. %-10s done %s\n", s.Index+1, termsafe.SafeLine(s.Uses), termsafe.SafeLine(s.CompletedAt))
+					_, _ = fmt.Fprintf(out, "    %d. %-10s done %s\n", s.Index+1, termsafe.SafeLineMax(s.Uses, termsafe.ArgEchoMaxRunes), termsafe.SafeLine(s.CompletedAt))
 				}
 			}
 
@@ -486,7 +486,9 @@ func printPlan(out io.Writer, plan workflow.Plan) {
 	fmt.Fprintf(out, "workflow %s@%s — %d step(s):\n",
 		termsafe.SafeLine(plan.Name), termsafe.SafeLine(plan.Version), len(plan.Steps))
 	for i, s := range plan.Steps {
-		fmt.Fprintf(out, "  %d. %s\n", i+1, termsafe.SafeLine(s.Uses))
+		// Capped (#778): --dry-run skips the registry check, so uses is
+		// unvetted file text of any length; a verb name never needs more.
+		_, _ = fmt.Fprintf(out, "  %d. %s\n", i+1, termsafe.SafeLineMax(s.Uses, termsafe.ArgEchoMaxRunes))
 		printField(out, "repo", s.Repo)
 		printField(out, "ref", s.Ref)
 		if len(s.Globs) > 0 {

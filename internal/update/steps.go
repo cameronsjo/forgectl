@@ -3,7 +3,6 @@ package update
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -172,6 +171,20 @@ func npmStep() Step {
 	}
 }
 
+// SequenceError is runSequence's failure: which of its commands failed, and
+// why. Command is the argv this package built (brew update, say), never
+// subprocess text, so a renderer can name the failed command without
+// rendering Err, which carries the child's stderr (#778). Error() reads
+// "<command>: <err>", the text this failure has always had.
+type SequenceError struct {
+	Command string
+	Err     error
+}
+
+func (e *SequenceError) Error() string { return e.Command + ": " + e.Err.Error() }
+
+func (e *SequenceError) Unwrap() error { return e.Err }
+
 // runSequence runs each argv in order (with env merged onto each
 // invocation's environment), stopping at the first failure. Output from
 // every command that ran — including the failing one — is joined with
@@ -194,7 +207,7 @@ func runSequence(ctx context.Context, run exec.Runner, env map[string]string, ar
 			if errors.As(err, &cmdErr) && cmdErr.Output != "" {
 				parts = append(parts, cmdErr.Output)
 			}
-			return strings.Join(parts, "\n\n"), fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
+			return strings.Join(parts, "\n\n"), &SequenceError{Command: strings.Join(argv, " "), Err: err}
 		}
 	}
 	return strings.Join(parts, "\n\n"), nil

@@ -8,6 +8,7 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -448,6 +449,11 @@ type workDir struct {
 	keep string
 }
 
+// readNonce fills the work directory's nonce. It is crypto/rand.Read, and a
+// variable only so a test can make it fail and prove newWorkDir removes the
+// directory it just made.
+var readNonce = rand.Read
+
 // newWorkDir creates the directory as a SIBLING of the target.
 //
 // Not $TMPDIR, and that is not a preference: os.Rename across filesystems
@@ -470,8 +476,10 @@ func newWorkDir(target env.Target) (*workDir, error) {
 	}
 
 	buf := make([]byte, nonceBytes)
-	if _, err := rand.Read(buf); err != nil {
-		_ = env.RemoveScratchDir(dir)
+	if _, err := readNonce(buf); err != nil {
+		if rerr := env.RemoveScratchDir(dir); rerr != nil {
+			slog.Warn("Failed to remove the sops work directory.", "error", rerr)
+		}
 		return nil, errors.New("could not generate a nonce")
 	}
 
@@ -677,7 +685,11 @@ func (w *workDir) cleanup() {
 		}
 		_ = removeWorkDirEntry(filepath.Join(w.dir, e.Name()))
 	}
-	_ = env.RemoveScratchDir(w.dir)
+	// A leftover is still ignored by git and refused by the next run's scan;
+	// the warning says why it is there (#768).
+	if err := env.RemoveScratchDir(w.dir); err != nil {
+		slog.Warn("Failed to remove the sops work directory.", "error", err)
+	}
 }
 
 // removeWorkDirEntry removes one entry of the work directory, recursively. It

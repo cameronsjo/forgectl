@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // maxTitleRunes and maxCommentRunes bound what this client will SEND. The
@@ -168,12 +170,12 @@ func (c *Client) AssertVikunja(ctx context.Context) error {
 		Version string `json:"version"`
 	}
 	if err := json.Unmarshal(body, &info); err != nil {
-		return fmt.Errorf("%w: %s/info did not return JSON with a version field — this host is answering with something that is not the Vikunja API",
-			ErrUnexpectedStatus, c.baseURL)
+		return fmt.Errorf("%w: %s did not return JSON with a version field — this host is answering with something that is not the Vikunja API",
+			ErrUnexpectedStatus, termsafe.QuoteArgMax(c.baseURL+"/info", 0))
 	}
 	if strings.TrimSpace(info.Version) == "" {
-		return fmt.Errorf("%w: %s/info returned JSON with no version field — this host is answering with something that is not the Vikunja API",
-			ErrUnexpectedStatus, c.baseURL)
+		return fmt.Errorf("%w: %s returned JSON with no version field — this host is answering with something that is not the Vikunja API",
+			ErrUnexpectedStatus, termsafe.QuoteArgMax(c.baseURL+"/info", 0))
 	}
 	return nil
 }
