@@ -13,10 +13,10 @@ import (
 var findingsStoreOwner = os.Geteuid
 
 // verifyFindingsStore refuses a findings store that is not private to this
-// user before cleanup decides anything from it (forgectl#680): one owned by
-// another uid, or one that grants group or world write. Either lets someone
-// else plant or swap entries in the store that cleanup would then judge and
-// remove. It is the privdir posture (owner is the euid, checked on the pinned
+// user before cleanup, list, or a marker write uses it (forgectl#680,
+// forgectl#754): one owned by another uid, or one that grants group or
+// world write. Either lets someone else plant or swap entries in the store
+// that cleanup would then judge and remove. It is the privdir posture (owner is the euid, checked on the pinned
 // descriptor), except that a broad store is refused rather than narrowed:
 // cleanup is not the store's creator, and a chmod is not its call.
 //

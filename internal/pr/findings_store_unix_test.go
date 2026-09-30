@@ -95,3 +95,38 @@ func TestFindingsCleanup_SymlinkedStoreIsCheckedAtItsTarget(t *testing.T) {
 	wantStoreRefused(t, err, store)
 	wantKept(t, target)
 }
+
+// FindingsList makes the same store check as cleanup (forgectl#754): a
+// group- or world-writable store, or one owned by another user, is refused
+// rather than listed.
+//
+// Mutation that turns it red: open the store in FindingsList with
+// os.OpenRoot instead of openFindingsStore (both stores are listed).
+func TestFindingsList_UnsafeStoreIsRefused(t *testing.T) {
+	t.Run("writable", func(t *testing.T) {
+		store := t.TempDir()
+		c := findingsClient(t, store)
+		mustMkdir(t, filepath.Join(store, findingsDirPrefix+"old"))
+		if err := os.Chmod(store, 0o777); err != nil { //nolint:gosec // G302: a directory needs its x bits; the broad mode is the case under test
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(store, 0o700) }) //nolint:gosec // G302: a directory needs 0700; 0600 makes it non-traversable
+
+		entries, err := c.FindingsList()
+		wantStoreRefused(t, err, store)
+		if len(entries) != 0 {
+			t.Errorf("entries = %v, want none", entries)
+		}
+	})
+	t.Run("foreign owner", func(t *testing.T) {
+		store := t.TempDir()
+		c := findingsClient(t, store)
+		mustMkdir(t, filepath.Join(store, findingsDirPrefix+"old"))
+		orig := findingsStoreOwner
+		t.Cleanup(func() { findingsStoreOwner = orig })
+		findingsStoreOwner = func() int { return os.Geteuid() + 1 }
+
+		_, err := c.FindingsList()
+		wantStoreRefused(t, err, store)
+	})
+}

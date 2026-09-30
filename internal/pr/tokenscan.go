@@ -28,8 +28,12 @@ var githubTokenShape = regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{30,}|github_pat
 var errReviewHasTokenShape = errors.New("refusing to post the review: it contains text shaped like a GitHub token; " +
 	"remove it from the review before posting")
 
-// maxUnescapeRounds bounds the HTML-reference decoding: enough for a
-// reference encoded inside another (&amp;#112;) a few times over.
+// maxUnescapeRounds bounds the HTML-reference decoding. GitHub's markdown
+// decodes references once, so one round is what a reader sees; the extra
+// rounds also catch a reference encoded inside another (&amp;#112;), which
+// renders as the literal text "&#112;". That over-matches, which is the safe
+// direction for a tripwire: the cost is a refused review with a visible
+// "&#112;" in it, never a token posted.
 const maxUnescapeRounds = 4
 
 // scanReviewForTokens refuses a review whose text carries a GitHub token
@@ -50,18 +54,20 @@ func scanReviewForTokens(review string) error {
 // normalizeReviewText undoes the spellings that hide a token from a plain
 // match but not from someone reading the rendered review:
 //
-//   - Unicode format characters (category Cf: zero-width space U+200B, word
-//     joiner U+2060, BOM U+FEFF, soft hyphen U+00AD, and the rest), which
-//     render as nothing;
+//   - the default-ignorable code points, which browsers render as nothing
+//     (invisibleInToken strips category Cf, Other_Default_Ignorable_Code_Point,
+//     and Variation_Selector, the sets Unicode derives the property from);
 //   - HTML character references, named, decimal, and hex (&lowbar;, &#112;,
-//     &#x70;), which GitHub's markdown renders as the character, decoded
-//     repeatedly so a reference inside another (&amp;#112;) is caught;
+//     &#x70;), which GitHub's markdown renders as the character. GitHub
+//     decodes one level; this decodes up to maxUnescapeRounds, so a doubly
+//     encoded reference (&amp;#112;) matches too, although it renders as
+//     "&#112;" (an over-match, see maxUnescapeRounds);
 //   - markdown backslash escapes of ASCII punctuation (ghp\_…), which render
 //     as the bare punctuation.
 //
-// Format characters are stripped after decoding, since a reference can spell
-// one (&#8203;). One inside a reference breaks the reference when it renders,
-// so there is nothing to strip before decoding.
+// Invisible characters are stripped after decoding, since a reference can
+// spell one (&#8203;). One inside a reference breaks the reference when it
+// renders, so there is nothing to strip before decoding.
 func normalizeReviewText(s string) string {
 	for range maxUnescapeRounds {
 		u := html.UnescapeString(s)
@@ -75,11 +81,40 @@ func normalizeReviewText(s string) string {
 
 func stripFormatChars(s string) string {
 	return strings.Map(func(r rune) rune {
-		if unicode.Is(unicode.Cf, r) {
+		if invisibleInToken(r) {
 			return -1
 		}
 		return r
 	}, s)
+}
+
+// invisibleInToken reports whether r is stripped before the second match:
+// exactly the runes in category Cf, Other_Default_Ignorable_Code_Point, or
+// Variation_Selector. Unicode derives Default_Ignorable_Code_Point from those
+// three sets (less White_Space and a few Cf prepended-concatenation,
+// Egyptian format and interlinear annotation marks, U+FFF9-U+FFFB among
+// them, which this keeps stripping), and browsers render a
+// default-ignorable code point as nothing, so one placed inside a token
+// splits it for a plain match but not for a reader (forgectl#764). That
+// covers the format characters, U+034F, the Hangul fillers, the Khmer
+// inherent vowels U+17B4/U+17B5, U+2065, U+FFF0-U+FFF8, the variation
+// selectors, and the assigned and unassigned tag-plane ranges.
+//
+// Property tables, not a hand list, so a code point Unicode adds to the set
+// is stripped when the Go toolchain's tables pick it up. Stripping more than
+// the derived property can only over-match, and the strip removes only
+// non-ASCII, so it can never hide a token. The token alphabet is ASCII, so a
+// visible character between two token characters already breaks the token
+// for a reader too.
+//
+// Normalization can hide one another way: html.UnescapeString decodes the
+// legacy entities that need no semicolon, and &reg, &szlig, &AElig and
+// &aelig end in "g", so "&re" before a token eats its leading "g". The
+// rendered page then shows no token, but the raw markdown still carries it
+// through the API, the edit view and notification email. That is why
+// scanReviewForTokens also matches the raw text; it is not redundant.
+func invisibleInToken(r rune) bool {
+	return unicode.In(r, unicode.Cf, unicode.Other_Default_Ignorable_Code_Point, unicode.Variation_Selector)
 }
 
 // unescapeMarkdownPunct drops a backslash that escapes ASCII punctuation, the

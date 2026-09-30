@@ -148,3 +148,38 @@ func TestFindingsRemove_EmptyDirRenamedOntoJudgedNameSurvives(t *testing.T) {
 	}
 	wantKept(t, judged)
 }
+
+// A judged dir that still holds an entry when its name is removed (one that
+// arrived after the emptying) is refused as errFindingsDirSwapped, not
+// reported as a raw rmdir failure. The refusal is matched as fs.ErrExist,
+// which covers ENOTEMPTY here and ERROR_DIR_NOT_EMPTY on Windows
+// (forgectl#764). The child handle is pinned to a different, empty dir, so
+// the emptying leaves the judged dir full and the rmdir hits ENOTEMPTY.
+//
+// Mutation that turns it red: drop the fs.ErrExist branch in
+// removeJudgedFindingsDir (the raw ENOTEMPTY comes back instead).
+func TestRemoveJudgedFindingsDir_EntryAfterEmptyingIsSwapped(t *testing.T) {
+	storeDir := t.TempDir()
+	judged := markedDir(t, storeDir, "judged", staleOwnerRecord)
+	mustMkdirUnmarked(t, filepath.Join(storeDir, "elsewhere"))
+	store, err := os.OpenRoot(storeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	name := filepath.Base(judged)
+	info, err := store.Lstat(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := store.OpenRoot("elsewhere")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = removeJudgedFindingsDir(store, child, name, info)
+	if !errors.Is(err, errFindingsDirSwapped) {
+		t.Errorf("removeJudgedFindingsDir error = %v, want errFindingsDirSwapped", err)
+	}
+	wantKept(t, judged)
+}

@@ -371,7 +371,7 @@ func cleanRoomError(absPath, workspace string) error {
 func (c *Client) teardownLocalArtifacts(ctx context.Context, workspace, findingsDir string) {
 	_ = sandbox.Teardown(ctx, c.run, workspace)
 	if err := c.removeOwnFindingsDir(findingsDir); err != nil {
-		slog.Warn("Could not remove the findings dir of a failed local review.", "findings", findingsDir, "error", err)
+		slog.Warn("Could not remove the findings dir of a failed local review.", "findings", findingsDir, "error", safeErrString(err))
 	}
 }
 
