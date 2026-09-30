@@ -22,6 +22,21 @@ import (
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
+// pathEchoMaxRunes caps a target, pattern, or path echoed in a quarantine
+// error (#810). Targets come from config and paths from a fetched clone, so
+// they are bounded rather than trusted. The budget matches the pr package's
+// workspace echo, since a path under a macOS $TMPDIR runs to about 80 runes
+// before the clone's own segments.
+const pathEchoMaxRunes = 256
+
+// quote is the echo form of a target, pattern, or path in a quarantine error:
+// quoted with every control and format rune escaped, and capped at
+// pathEchoMaxRunes. A wrapped filesystem error goes through termsafe.Error,
+// which escapes the path it carries and keeps it on the chain.
+func quote(s string) string {
+	return termsafe.QuoteArgMax(s, pathEchoMaxRunes)
+}
+
 // Scheme selects how a quarantined path is renamed.
 type Scheme int
 
@@ -50,7 +65,7 @@ func ParseScheme(s string) (Scheme, error) {
 	case "suffix":
 		return SuffixQuarantined, nil
 	default:
-		return PrefixUnderscore, fmt.Errorf("unknown quarantine scheme %q (want prefix or suffix)", s)
+		return PrefixUnderscore, fmt.Errorf("unknown quarantine scheme %s (want prefix or suffix)", termsafe.QuoteArgMax(s, 0))
 	}
 }
 
@@ -358,7 +373,7 @@ func coveredRootEntries(root string, scheme Scheme, targets []string) (map[strin
 	covered := make(map[string]string, len(targets)*2)
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return nil, fmt.Errorf("read quarantine root: %w", err)
+		return nil, fmt.Errorf("read quarantine root: %w", termsafe.Error(err))
 	}
 	for _, t := range targets {
 		clean := filepath.Clean(t)
@@ -387,7 +402,7 @@ func coveredRootEntries(root string, scheme Scheme, targets []string) (map[strin
 			if prior, exists := covered[key]; exists && prior != accepted {
 				pair := []string{prior, accepted}
 				sort.Strings(pair)
-				return nil, fmt.Errorf("quarantine targets %q and %q identify the same covered root", pair[0], pair[1])
+				return nil, fmt.Errorf("quarantine targets %s and %s identify the same covered root", quote(pair[0]), quote(pair[1]))
 			}
 			covered[key] = accepted
 		}
@@ -404,7 +419,7 @@ func uniqueFoldedEntry(entries []fs.DirEntry, wanted string) (fs.DirEntry, error
 		}
 	}
 	if len(matches) > 1 {
-		return nil, fmt.Errorf("quarantine target %q has ambiguous case-fold spellings", wanted)
+		return nil, fmt.Errorf("quarantine target %s has ambiguous case-fold spellings", quote(wanted))
 	}
 	if len(matches) == 0 {
 		return nil, nil
@@ -431,7 +446,7 @@ func expandPatterns(root, realRoot string, scheme Scheme, patterns []string, cov
 		for _, form := range []string{filepath.Clean(p), renamedPath(scheme, filepath.Clean(p))} {
 			matches, err := globFold(root, form)
 			if err != nil {
-				return nil, fmt.Errorf("expand quarantine pattern %q: %w", p, err)
+				return nil, fmt.Errorf("expand quarantine pattern %s: %w", quote(p), termsafe.Error(err))
 			}
 			for _, m := range matches {
 				rel, relErr := filepath.Rel(root, m)
@@ -741,7 +756,7 @@ func walkNestable(root string, scheme Scheme, targets []string, covered map[stri
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("walk %s for nested instruction files: %w", root, err)
+		return nil, fmt.Errorf("walk %s for nested instruction files: %w", quote(root), termsafe.Error(err))
 	}
 	sort.Strings(found)
 	return found, nil
@@ -776,24 +791,24 @@ func normalizeTargetRule(raw string) (targetRule, error) {
 	}
 	portable := strings.ReplaceAll(raw, "\\", "/")
 	if filepath.IsAbs(raw) || strings.HasPrefix(portable, "/") {
-		return targetRule{}, fmt.Errorf("quarantine target %q must not be absolute", raw)
+		return targetRule{}, fmt.Errorf("quarantine target %s must not be absolute", quote(raw))
 	}
 	if filepath.VolumeName(raw) != "" || hasPortableVolume(portable) {
-		return targetRule{}, fmt.Errorf("quarantine target %q must not be volume-qualified", raw)
+		return targetRule{}, fmt.Errorf("quarantine target %s must not be volume-qualified", quote(raw))
 	}
 	for _, segment := range strings.Split(portable, "/") {
 		if segment == ".." {
-			return targetRule{}, fmt.Errorf("quarantine target %q must not traverse outside root", raw)
+			return targetRule{}, fmt.Errorf("quarantine target %s must not traverse outside root", quote(raw))
 		}
 	}
 	clean := path.Clean(portable)
 	if clean == "." || clean == "/" {
-		return targetRule{}, fmt.Errorf("quarantine target %q must not name root", raw)
+		return targetRule{}, fmt.Errorf("quarantine target %s must not name root", quote(raw))
 	}
 	pattern := isPattern(clean)
 	if pattern {
 		if _, err := path.Match(clean, ""); err != nil {
-			return targetRule{}, fmt.Errorf("quarantine target %q has invalid pattern: %w", raw, err)
+			return targetRule{}, fmt.Errorf("quarantine target %s has invalid pattern: %w", quote(raw), err)
 		}
 	}
 	return targetRule{text: filepath.FromSlash(clean), pattern: pattern}, nil
@@ -829,7 +844,7 @@ func normalizeConcreteTargets(root string, scheme Scheme, raw []string) ([]concr
 	targets := make([]concreteTarget, 0, len(rules))
 	for _, rule := range rules {
 		if rule.pattern {
-			return nil, fmt.Errorf("quarantine target %q is a pattern; expand it before computing moves", filepath.ToSlash(rule.text))
+			return nil, fmt.Errorf("quarantine target %s is a pattern; expand it before computing moves", quote(filepath.ToSlash(rule.text)))
 		}
 		logical, err := resolveConcreteSpelling(root, scheme, rule.text)
 		if err != nil {
@@ -888,7 +903,7 @@ func resolveExistingSpelling(root, target string) (string, bool, error) {
 	for i, wanted := range segments {
 		entries, err := os.ReadDir(current)
 		if err != nil {
-			return "", false, fmt.Errorf("read quarantine target parent %q: %w", strings.Join(actual, "/"), err)
+			return "", false, fmt.Errorf("read quarantine target parent %s: %w", quote(strings.Join(actual, "/")), termsafe.Error(err))
 		}
 		var matches []string
 		for _, entry := range entries {
@@ -897,7 +912,7 @@ func resolveExistingSpelling(root, target string) (string, bool, error) {
 			}
 		}
 		if len(matches) > 1 {
-			return "", false, fmt.Errorf("quarantine target %q has ambiguous case-fold spellings at %q", filepath.ToSlash(target), strings.Join(actual, "/"))
+			return "", false, fmt.Errorf("quarantine target %s has ambiguous case-fold spellings at %s", quote(filepath.ToSlash(target)), quote(strings.Join(actual, "/")))
 		}
 		if len(matches) == 0 {
 			actual = append(actual, segments[i:]...)
@@ -935,12 +950,12 @@ func canonicalRenameLocation(root rootIdentity, target string) (pathIdentity, er
 		if _, statErr := os.Lstat(candidate); statErr == nil {
 			resolved, resolveErr := filepath.EvalSymlinks(candidate)
 			if resolveErr != nil {
-				return pathIdentity{}, fmt.Errorf("resolve quarantine target parent %q: %w", filepath.ToSlash(current), resolveErr)
+				return pathIdentity{}, fmt.Errorf("resolve quarantine target parent %s: %w", quote(filepath.ToSlash(current)), termsafe.Error(resolveErr))
 			}
 			resolvedParent = resolved
 			break
 		} else if !os.IsNotExist(statErr) {
-			return pathIdentity{}, fmt.Errorf("stat quarantine target parent %q: %w", filepath.ToSlash(current), statErr)
+			return pathIdentity{}, fmt.Errorf("stat quarantine target parent %s: %w", quote(filepath.ToSlash(current)), termsafe.Error(statErr))
 		}
 		remaining = append([]string{filepath.Base(current)}, remaining...)
 		next := filepath.Dir(current)
@@ -950,7 +965,7 @@ func canonicalRenameLocation(root rootIdentity, target string) (pathIdentity, er
 		current = next
 	}
 	if !pathWithin(root.real, resolvedParent) {
-		return pathIdentity{}, fmt.Errorf("quarantine target %q escapes root through its parent", filepath.ToSlash(target))
+		return pathIdentity{}, fmt.Errorf("quarantine target %s escapes root through its parent", quote(filepath.ToSlash(target)))
 	}
 	parts := append(append([]string{}, remaining...), filepath.Base(filepath.Clean(target)))
 	exact := filepath.Clean(filepath.Join(append([]string{resolvedParent}, parts...)...))
@@ -999,12 +1014,12 @@ func validateMoveGraph(targets []concreteTarget) error {
 					outer, inner = b, a
 				}
 				conflicts = append(conflicts, graphConflict{1, outer.display, inner.display,
-					fmt.Sprintf("quarantine targets %q (outer) and %q (inner) overlap: replace the inner entry, do not join it", outer.display, inner.display)})
+					fmt.Sprintf("quarantine targets %s (outer) and %s (inner) overlap: replace the inner entry, do not join it", quote(outer.display), quote(inner.display))})
 			}
 			if sameIdentity(a.sourceIdentity, b.sourceIdentity) {
 				first, second := orderedPair(a.display, b.display)
 				conflicts = append(conflicts, graphConflict{2, first, second,
-					fmt.Sprintf("quarantine targets %q and %q identify the same rename location", first, second)})
+					fmt.Sprintf("quarantine targets %s and %s identify the same rename location", quote(first), quote(second))})
 			}
 			for _, edge := range []struct {
 				from concreteTarget
@@ -1014,20 +1029,20 @@ func validateMoveGraph(targets []concreteTarget) error {
 					first, second := orderedPair(a.display, b.display)
 					destination := filepath.ToSlash(edge.from.destination)
 					conflicts = append(conflicts, graphConflict{3, first, second,
-						fmt.Sprintf("quarantine moves for %q and %q conflict: destination %q is another source", first, second, destination)})
+						fmt.Sprintf("quarantine moves for %s and %s conflict: destination %s is another source", quote(first), quote(second), quote(destination))})
 				}
 			}
 			if sameIdentity(a.destinationIdentity, b.destinationIdentity) || sameIdentity(a.destinationLexical, b.destinationLexical) {
 				first, second := orderedPair(a.display, b.display)
 				destination := filepath.ToSlash(a.destination)
 				conflicts = append(conflicts, graphConflict{4, first, second,
-					fmt.Sprintf("quarantine moves for %q and %q conflict: destination %q is shared", first, second, destination)})
+					fmt.Sprintf("quarantine moves for %s and %s conflict: destination %s is shared", quote(first), quote(second), quote(destination))})
 			}
 		}
 		if sameIdentity(targets[i].sourceIdentity, targets[i].destinationIdentity) || sameIdentity(targets[i].sourceLexical, targets[i].destinationLexical) {
 			display := targets[i].display
 			conflicts = append(conflicts, graphConflict{5, display, display,
-				fmt.Sprintf("quarantine move for %q maps its source onto itself", display)})
+				fmt.Sprintf("quarantine move for %s maps its source onto itself", quote(display))})
 		}
 	}
 	if len(conflicts) == 0 {
@@ -1103,7 +1118,7 @@ func (c *Client) Hide(_ context.Context, root string, scheme Scheme, targets []s
 				slog.Debug("Quarantine target missing; skipping.", "target", target.logical)
 				continue
 			}
-			return nil, fmt.Errorf("stat quarantine target %q: %w", filepath.ToSlash(target.logical), err)
+			return nil, fmt.Errorf("stat quarantine target %s: %w", quote(filepath.ToSlash(target.logical)), termsafe.Error(err))
 		}
 
 		// A target with no ".." can still reach outside root via a symlink;
@@ -1111,7 +1126,7 @@ func (c *Client) Hide(_ context.Context, root string, scheme Scheme, targets []s
 		// withinWorkspace guard on strip matches).
 		if !withinRoot(canonicalRoot.real, move.From) {
 			slog.Error("Quarantine target escapes root; refusing.", "target", target.logical, "resolved", move.From)
-			return nil, fmt.Errorf("quarantine target %q escapes root", filepath.ToSlash(target.logical))
+			return nil, fmt.Errorf("quarantine target %s escapes root", quote(filepath.ToSlash(target.logical)))
 		}
 
 		// os.Rename silently overwrites its destination, so a checkout crafted to
@@ -1119,9 +1134,9 @@ func (c *Client) Hide(_ context.Context, root string, scheme Scheme, targets []s
 		// Fetched PR content is hostile input; fail loud rather than clobber.
 		if _, err := c.lstat(move.To); err == nil {
 			slog.Error("Quarantine destination already exists; refusing to clobber.", "target", target.logical, "destination", move.To)
-			return nil, fmt.Errorf("quarantine destination %q already exists", filepath.ToSlash(target.destination))
+			return nil, fmt.Errorf("quarantine destination %s already exists", quote(filepath.ToSlash(target.destination)))
 		} else if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("stat quarantine destination %q: %w", filepath.ToSlash(target.destination), err)
+			return nil, fmt.Errorf("stat quarantine destination %s: %w", quote(filepath.ToSlash(target.destination)), termsafe.Error(err))
 		}
 		ready = append(ready, target)
 	}
@@ -1136,7 +1151,7 @@ func (c *Client) Hide(_ context.Context, root string, scheme Scheme, targets []s
 		move := target.move
 		if err := c.rename(move.From, move.To); err != nil {
 			slog.Error("Failed to quarantine target.", "target", target.logical, "error", err)
-			return nil, fmt.Errorf("rename quarantine target %q to %q: %w", filepath.ToSlash(target.logical), filepath.ToSlash(target.destination), err)
+			return nil, fmt.Errorf("rename quarantine target %s to %s: %w", quote(filepath.ToSlash(target.logical)), quote(filepath.ToSlash(target.destination)), termsafe.Error(err))
 		}
 	}
 	slog.Info("Successfully quarantined instruction files.", "root", root, "moved", len(moves), "dryRun", dryRun)
@@ -1154,7 +1169,7 @@ func (c *Client) Restore(_ context.Context, moves []Move) error {
 				slog.Debug("Quarantine move already restored; skipping.", "to", m.To)
 				continue
 			}
-			return fmt.Errorf("stat %s: %w", m.To, err)
+			return fmt.Errorf("stat %s: %w", quote(m.To), termsafe.Error(err))
 		}
 		// An occupied destination is WARNED, not fatal — deliberately asymmetric
 		// with Hide, which refuses.
@@ -1175,11 +1190,11 @@ func (c *Client) Restore(_ context.Context, moves []Move) error {
 				"from", m.From, "to", m.To)
 			continue
 		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("stat %s: %w", m.From, err)
+			return fmt.Errorf("stat %s: %w", quote(m.From), termsafe.Error(err))
 		}
 		if err := os.Rename(m.To, m.From); err != nil {
 			slog.Error("Failed to restore quarantined file.", "from", m.From, "to", m.To, "error", err)
-			return fmt.Errorf("rename %s: %w", m.To, err)
+			return fmt.Errorf("rename %s: %w", quote(m.To), termsafe.Error(err))
 		}
 	}
 	slog.Info("Successfully restored quarantined files.", "moveCount", len(moves))
