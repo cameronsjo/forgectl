@@ -44,3 +44,28 @@ func TestOnlyWindowWithFieldSepIsAnEmptyListingIsolated(t *testing.T) {
 		t.Fatalf("TreeListing = (%+v, %v), want 1 unreadable window and no error", rows, err)
 	}
 }
+
+// TestNeverAttachedUnreadableSessionIsEmptyIsolated is the lastAttachedFormat
+// half of forgectl#836 on a real tmux. The only session has never been
+// attached, so tmux renders its #{session_last_attached} as "", and its name
+// carries FieldSep, so its row is unreadable. mostRecentSession must report
+// no session plus one unreadable row. It must not report the locale error: a
+// format led by the empty sort key has no decimal first field to prove the
+// separator survived.
+//
+// Mutation that turns it red: move #{session_last_attached} back to the front
+// of lastAttachedFormat (and the field indices with it).
+func TestNeverAttachedUnreadableSessionIsEmptyIsolated(t *testing.T) {
+	c, runner, tmuxBin := isolatedTmux(t)
+	ctx := context.Background()
+	if _, err := runner.Run(ctx, tmuxBin, "new-session", "-d", "-s", "a"+FieldSep+"b", "sleep 60"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	got, unreadable, err := c.mostRecentSession(ctx)
+	if err != nil {
+		t.Fatalf("mostRecentSession: %v; want no session and one unreadable row", err)
+	}
+	if got.ID != "" || unreadable != 1 {
+		t.Fatalf("mostRecentSession = %+v, %d unreadable; want none and 1", got, unreadable)
+	}
+}

@@ -130,8 +130,9 @@ var ErrUnreadableFields = errors.New("tmux field separator did not survive the -
 // name holding the literal text `\037` enough times splits into want fields,
 // and without this check one such name would turn a live, unreadable listing
 // into a confident empty one (killReviewWindow would then read a live review
-// window as already gone). Every format here opens with a decimal field
-// (#{pid}, or #{session_last_attached}), and a lossy line cannot supply one:
+// window as already gone). Every format here opens with #{pid}, which is
+// always decimal (lastAttachedFormat says why its sort key cannot lead), and
+// a lossy line cannot supply one:
 // its first field runs from that number through the `_` substitutes and into
 // the next field, up to the forger's first `\037`.
 func parsedRows[T any](rows []T, lines []string, command string, want int) ([]T, error) {
@@ -144,7 +145,7 @@ func parsedRows[T any](rows []T, lines []string, command string, want int) ([]T,
 		}
 	}
 	return nil, fmt.Errorf(
-		"%w: %s returned %d line(s), none of which split into %d fields (first line %q); "+
+		"%w: %s returned %d line(s), none of which split into %d fields led by a number (first line %q); "+
 			"tmux renders the separator lossily outside a UTF-8 locale — set LANG/LC_ALL to a UTF-8 locale and retry",
 		ErrUnreadableFields, command, len(lines), want, lines[0])
 }

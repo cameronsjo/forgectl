@@ -140,9 +140,16 @@ func (c *Client) LastSession(ctx context.Context) error {
 // lastAttachedFormat carries the sort key plus a full identity, so the winner is
 // attached by native id rather than by the name it happened to have when the
 // list was taken.
-const lastAttachedFormat = "#{session_last_attached}" + FieldSep +
-	"#{pid}" + FieldSep +
+//
+// #{pid} comes first, like every other format here, because parsedRows reads
+// a decimal first field as the proof that the separator survived. The sort key
+// cannot lead: tmux renders #{session_last_attached} as "" for a session that
+// has never been attached (measured on 3.4), so a server whose only session is
+// never-attached and unreadable would fail that proof and report the locale
+// error instead of an empty listing (forgectl#836).
+const lastAttachedFormat = "#{pid}" + FieldSep +
 	"#{start_time}" + FieldSep +
+	"#{session_last_attached}" + FieldSep +
 	"#{session_id}" + FieldSep +
 	"#{session_name}"
 
@@ -182,14 +189,15 @@ func (c *Client) mostRecentSession(ctx context.Context) (SessionIdentity, int, e
 		return ValidateSessionID(f[3]) == nil
 	})
 	selector := c.currentSelector()
-	// -1 (not 0) so a session that has never been attached (last_attached=0)
-	// still beats the sentinel and gets picked when it's the only candidate.
+	// -1 (not 0) so a session that has never been attached still beats the
+	// sentinel and gets picked when it's the only candidate. tmux renders its
+	// #{session_last_attached} as "" (measured on 3.4), which atoi reads as 0.
 	best, bestTS := SessionIdentity{}, -1
 	for _, f := range rows {
-		if ts := atoi(f[0]); ts > bestTS {
+		if ts := atoi(f[2]); ts > bestTS {
 			bestTS = ts
 			best = SessionIdentity{
-				Generation: ServerGeneration{Selector: selector, PID: f[1], StartTime: f[2]},
+				Generation: ServerGeneration{Selector: selector, PID: f[0], StartTime: f[1]},
 				ID:         f[3],
 				Name:       f[4],
 			}
