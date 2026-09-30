@@ -5,13 +5,14 @@
 //
 // A doc can carry any class, and the sanitizer keeps some chrome tags
 // (<aside>, <details>). Mermaid renders in the browser after the sanitizer,
-// and its own DOMPurify keeps data-*, so a diagram label can carry a data-fc
-// hook until mermaid-init.js scrubs it. This serves one hostile doc that
-// plants a copy of every chrome class the scripts once looked up, plus
-// data-fc hooks in a classDiagram label and in an htmlLabels flowchart, and
-// checks that the real chrome still does its job:
+// and its own DOMPurify keeps data-*, so with HTML labels on a diagram label
+// could carry a data-fc hook. This serves one hostile doc that plants a copy
+// of every chrome class the scripts once looked up, plus data-fc hooks in a
+// classDiagram label and in a flowchart whose directive asks for
+// htmlLabels, and checks that the real chrome still does its job:
 //
-//   - no data-fc hook survives inside the doc body once mermaid has rendered,
+//   - the mermaid labels render as inert SVG text (forgectl#713), and no
+//     data-fc hook survives inside the doc body once mermaid has rendered,
 //     on first load and again after a live-reload swap re-renders it;
 //   - the sidebar filter folds and hides only the sidenav, never the doc's
 //     planted <div class="sidenav"> with its <details> and group heading;
@@ -86,9 +87,9 @@ const planted = [
   '<div class="doc-body"><p>PLANTED-BODY copy me</p></div>',
 ].join('\n\n');
 
-// Rendered by mermaid, which keeps data-* in labels. The flowchart turns on
-// htmlLabels with a doc-level init directive, which the reader's own config
-// sets false.
+// Rendered by mermaid, whose DOMPurify keeps data-* in HTML labels. The
+// flowchart asks for htmlLabels with a doc-level init directive, which the
+// reader's config pins off (forgectl#713).
 const mermaidPlants = [
   '```mermaid\nclassDiagram\nclass Foo["<i data-fc=\'outline\'>MER-CLASS</i>"]\n```',
   '```mermaid\n%%{init: {"flowchart": {"htmlLabels": true}}}%%\nflowchart LR\n' +
@@ -160,15 +161,17 @@ try {
   if (plantedCount !== 4) problems.push(`fixture: ${plantedCount}/4 planted elements survived; the checks below prove nothing`);
 
   await mermaidRendered(page);
-  // Fixture sanity: the labels rendered as markup, not as escaped text.
+  // The labels rendered, and as SVG text rather than live markup.
   const labels = await page.evaluate(() => {
     const body = document.querySelector('[data-fc="doc-body"]');
+    const text = [...body.querySelectorAll('pre.mermaid svg')].map((s) => s.textContent).join(' ');
     return {
-      cls: [...body.querySelectorAll('pre.mermaid i')].some((i) => i.textContent === 'MER-CLASS'),
-      det: [...body.querySelectorAll('pre.mermaid details')].some((d) => d.textContent.includes('MER-DETAILS')),
+      rendered: text.includes('MER-CLASS') && text.includes('MER-DETAILS'),
+      markup: body.querySelectorAll('pre.mermaid i, pre.mermaid details, pre.mermaid span[data-fc]').length,
     };
   });
-  if (!labels.cls || !labels.det) problems.push(`fixture: mermaid labels did not render as markup ${JSON.stringify(labels)}; the hook checks prove nothing`);
+  if (!labels.rendered) problems.push('fixture: the mermaid label text did not render; the hook checks prove nothing');
+  if (labels.markup > 0) problems.push(`mermaid: ${labels.markup} label element(s) rendered as live HTML (htmlLabels is on)`);
   await noForgedHooks(page, 'first render');
 
   // Sidebar filter: a query that matches no doc.
@@ -177,9 +180,7 @@ try {
     const body = document.querySelector('[data-fc="doc-body"]');
     const det = [...body.querySelectorAll('details')].find((d) => d.textContent.includes('PLANTED-DETAILS'));
     const grp = [...body.querySelectorAll('.sidenav__group')].find((g) => g.textContent.includes('PLANTED-GROUP'));
-    const mer = [...body.querySelectorAll('pre.mermaid details')].find((d) => d.textContent.includes('MER-DETAILS'));
     return {
-      merOpen: mer ? mer.open : null,
       detOpen: det.open,
       detShown: getComputedStyle(det).display !== 'none',
       detMarked: det.dataset.openAtRest !== undefined,
@@ -188,7 +189,6 @@ try {
     };
   });
   if (!filter.detOpen || !filter.detShown || filter.detMarked) problems.push(`filter: reached the doc's planted <details> ${JSON.stringify(filter)}`);
-  if (filter.merOpen === false) problems.push('filter: folded a <details> inside a mermaid label');
   if (!filter.grpShown) problems.push('filter: hid the doc\'s planted .sidenav__group');
   if (!filter.empty) problems.push('filter: the real "no docs match" note did not show');
   await page.fill('[data-fc="doc-filter"]', '');

@@ -73,16 +73,63 @@
     };
   }
 
+  // A doc can reconfigure its own diagram with a %%{init: {...}}%% directive
+  // or a frontmatter config: block, and mermaid merges either over the config
+  // below (forgectl#713). Measured on 11.12.3, that let a doc turn on
+  // themeCSS (raw CSS in the diagram's <style>, url() fetches included),
+  // htmlLabels, flowchart.htmlLabels, fontFamily, theme and themeVariables.
+  //
+  // mermaid already deletes any directive key that is not a key somewhere in
+  // its defaultConfig (sanitizeDirective's keyify set), and then any key named
+  // in `secure`, which it checks at the top level only. So `secure` here is
+  // that same keyify set, every key at every depth, minus DOC_SETTABLE. A
+  // top-level key that survives the first filter is then caught by the
+  // second, so a doc can set nothing but DOC_SETTABLE, and a key a future
+  // mermaid adds is pinned the day it is vendored. NO_DEFAULT_KEYS covers
+  // schema keys with no default, in case a re-vendor drops one from the set.
+  // mermaid's own six secure keys come first: initialize merges this list
+  // over its default one, and the default can never be narrowed.
+  var DOC_SETTABLE = { wrap: true };
+  var NO_DEFAULT_KEYS = ["htmlLabels", "dompurifyConfig", "altFontFamily"];
+
+  function keyify(obj, out) {
+    Object.keys(obj).forEach(function (k) {
+      out.push(k);
+      var v = obj[k];
+      if (v !== null && typeof v === "object" && !Array.isArray(v)) { keyify(v, out); }
+    });
+    return out;
+  }
+
+  function pinnedKeys() {
+    var defaults = (mermaid.mermaidAPI && mermaid.mermaidAPI.defaultConfig) || {};
+    var keys = ["secure", "securityLevel", "startOnLoad", "maxTextSize", "suppressErrorRendering", "maxEdges"]
+      .concat(keyify(defaults, []), NO_DEFAULT_KEYS);
+    var seen = Object.create(null);
+    return keys.filter(function (k) {
+      if (seen[k] === true || DOC_SETTABLE[k] === true) { return false; }
+      seen[k] = true;
+      return true;
+    });
+  }
+
   function config() {
     return {
+      secure: pinnedKeys(),
       startOnLoad: false,
       theme: "base",
       themeVariables: themeVariables(),
       // The reader renders documents the operator wrote or Claude wrote for
       // them; it is not a hosted service accepting diagrams from strangers.
-      // 'strict' keeps mermaid from honoring click-directives and inline HTML in
-      // labels, which is the posture that matches the sanitizer upstream of it.
+      // 'strict' keeps mermaid from honoring click-directives, which is the
+      // posture that matches the sanitizer upstream of it.
       securityLevel: "strict",
+      // Labels as SVG text, not live HTML in a foreignObject. In 11.12.3 the
+      // top-level key is the one that decides: with only flowchart.htmlLabels
+      // false, flowchart and classDiagram labels still rendered author
+      // markup (a <details> stayed a live <details>). Markdown-string bold
+      // and italics still render as SVG text styling.
+      htmlLabels: false,
       flowchart: { useMaxWidth: false, htmlLabels: false, curve: "basis" },
       sequence: { useMaxWidth: false },
       gantt: { useMaxWidth: false }
@@ -96,12 +143,13 @@
   // The reader's scripts find chrome by data-fc (forgectl#617, #643), which
   // holds only because a doc cannot plant one. The server's sanitizer strips
   // every data-* attribute, but mermaid renders in the browser AFTER it, and
-  // mermaid's own DOMPurify pass keeps data-*: a classDiagram label, or a
-  // flowchart label under a doc's %%{init}%% htmlLabels:true, can emit
-  // <i data-fc="outline">. mermaid's dompurifyConfig cannot close that, since
-  // a doc's init directive can override it, so the rendered output is
-  // scrubbed here instead: inside every diagram, and inside the temporary
-  // container mermaid renders into (#dmermaid-N, appended to <body>).
+  // mermaid's own DOMPurify pass keeps data-*: with HTML labels on, a
+  // flowchart, classDiagram, state, mindmap or kanban label can emit
+  // <i data-fc="outline">. The htmlLabels:false pin above closes that on
+  // 11.12.3; this scrub stays as the second wall, for a diagram type or a
+  // future mermaid that puts author markup in the SVG some other way. It
+  // covers every diagram, and the temporary container mermaid renders into
+  // (#dmermaid-N, appended to <body>).
   var FORGED_HOOKS = 'pre.mermaid [data-fc], [id^="dmermaid-"] [data-fc]';
 
   function scrubHooks() {
