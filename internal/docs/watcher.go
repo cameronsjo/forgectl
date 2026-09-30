@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -453,12 +454,17 @@ func (w *Watcher) Run(ctx context.Context) {
 			if docEvent {
 				sawDocEvent = true
 			}
+			// An attachment added, removed or renamed arms a settle but is
+			// not a doc event: it publishes only through the attachment set
+			// the rebuilt index compares (sameIndex), so a name that did not
+			// change what resolves stays silent (forgectl#904).
+			attachmentEvent := !stray && w.attachmentRelevant(ev)
 
 			// A reset already pending with its reload armed is not re-armed
 			// by an event that is not otherwise relevant, so churn on other
 			// files cannot keep postponing it.
 			resetNeedsArming := w.resetPending && (!wasPending || settledC == nil)
-			if !docEvent && !moved && !resetNeedsArming {
+			if !docEvent && !attachmentEvent && !moved && !resetNeedsArming {
 				continue
 			}
 			arm()
@@ -667,6 +673,30 @@ func (w *Watcher) relevant(path string) bool {
 	return AllowedExt(path) && w.inTree(path)
 }
 
+// attachmentRelevant reports whether ev can change a vault root's attachment
+// set (walkRoot): a Create, Remove or Rename of a non-markdown name that is
+// not a dot-file, in the tree inTree accepts, under a vault root. A write to
+// an attachment's contents is not relevant, since resolution reads names
+// only. Like relevant() it is lexical, because a removed or renamed-away
+// path cannot be stat'ed; a Create of a directory or a symlink with such a
+// name arms a settle too, and the rebuilt index, which lists neither,
+// leaves it unpublished.
+func (w *Watcher) attachmentRelevant(ev fsnotify.Event) bool {
+	if !ev.Has(fsnotify.Create) && !ev.Has(fsnotify.Remove) && !ev.Has(fsnotify.Rename) {
+		return false
+	}
+	if AllowedExt(ev.Name) || strings.HasPrefix(filepath.Base(ev.Name), ".") || !w.inTree(ev.Name) {
+		return false
+	}
+	// inTree accepted the first root holding the path; its kind decides.
+	for _, root := range w.store.Current().Roots() {
+		if withinRoot(root.Path, ev.Name) {
+			return root.Kind == RootVault
+		}
+	}
+	return false
+}
+
 // inTree is relevant() without the extension rule: whether path lies in a
 // root, is that root's one file when it is an OnlyFile root, and has no
 // excluded directory component.
@@ -710,8 +740,12 @@ func (w *Watcher) inTree(path string) bool {
 // the rebuild could not see as an event (a doc edited before its directory
 // was watched again) still reaches the index and, by changing it,
 // publishes. A settle only a stray event armed cannot publish on that
-// event's account: the index is built by a walk confined to the roots, so
-// nothing outside them can change it.
+// event's account, but the rebuild it runs can still find a change. The
+// docs, attachments and skipped paths come from a walk confined to the
+// roots. Each root's kind and vault path do not: detectRootKind looks for a
+// .obsidian directory in every ancestor of the root below $HOME, so a
+// .obsidian created or removed above a root changes the index from outside
+// it, and a settle that happens to run then publishes that change.
 //
 // A pending watch rebuild registers every root once. The fresh watcher is
 // registered against the current index before the rebuild, so a change
@@ -756,8 +790,9 @@ func (w *Watcher) reload(docEvent bool) {
 
 // sameIndex reports whether b holds what a does as far as a reader can
 // tell: the same roots (by label, path, single file, kind and vault), the
-// same docs in the same order with every scanned field equal, and the same
-// skipped paths. A root's pinned directory identity is not compared: a
+// same docs in the same order with every scanned field equal, the same
+// attachment set per root (what a vault wikilink can resolve to,
+// forgectl#904), and the same skipped paths. A root's pinned directory identity is not compared: a
 // root replaced by an identical tree serves the same pages.
 func sameIndex(a, b *Index) bool {
 	if len(a.roots) != len(b.roots) || len(a.docs) != len(b.docs) || !slices.Equal(a.skipped, b.skipped) {
@@ -766,6 +801,9 @@ func sameIndex(a, b *Index) bool {
 	for i := range a.roots {
 		x, y := a.roots[i], b.roots[i]
 		if x.Label != y.Label || x.Path != y.Path || x.OnlyFile != y.OnlyFile || x.Kind != y.Kind || x.VaultPath != y.VaultPath {
+			return false
+		}
+		if !maps.Equal(a.attachmentSet(x.Label), b.attachmentSet(y.Label)) {
 			return false
 		}
 	}
