@@ -674,7 +674,10 @@ func TestPrune_RemoteDeleteVerifyFailure_DoesNotEchoGhStderr(t *testing.T) {
 // verifyRemoteDeleted and the 502 reads as a successful delete; match a bare
 // "HTTP 404" in stderr and the 502 that mentions one does; match
 // "(HTTP 404)" anywhere and the "(HTTP 404) (HTTP 502)" row does; drop the
-// "gh: HTTP 404" arm and gh's no-message 404 reads as a failure.
+// "gh: HTTP 404" arm and gh's no-message 404 reads as a failure; scan every
+// stderr line again (or take the last "gh: " line rather than the last
+// non-empty one, drop the "gh: " prefix check, or drop the scope-hint
+// refusal) and a #812 non-404 row reads as deleted.
 func TestPrune_VerifyFailureOnABranchNamed404IsNotADelete(t *testing.T) {
 	for _, tc := range []struct {
 		stderr      string
@@ -686,6 +689,15 @@ func TestPrune_VerifyFailureOnABranchNamed404IsNotADelete(t *testing.T) {
 		{"gh: HTTP 404", true},
 		{"{\"message\":\"x\"}\ngh: Not Found (HTTP 404)\n", true},
 		{"gh: Not Found (HTTP 404)", true},
+		// #812: a server message whose own inner line ends in "(HTTP 404)"
+		// while gh's final status is a 502.
+		{"gh: upstream said\nNot Found (HTTP 404)\nretry later (HTTP 502)\n", false},
+		{"gh: upstream said\ngh: Not Found (HTTP 404)\n (HTTP 502)\n", false},
+		{"gh: Forbidden (HTTP 403)\ngh: This API operation needs the \"x (HTTP 404)\" scope. To request it, run:  gh auth refresh -h github.com -s x (HTTP 404)\n", false},
+		{"gh: Forbidden (HTTP 403)\nAuthorize in your web browser:  https://example.com/sso(HTTP 404)\n", false},
+		// Both real gh 404 forms, with trailing blank lines.
+		{"gh: Not Found (HTTP 404)\n\n", true},
+		{"gh: HTTP 404\n", true},
 	} {
 		fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 			switch {
