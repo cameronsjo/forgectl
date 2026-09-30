@@ -16,7 +16,9 @@
 // are readable by any package that holds one and is willing to write that.
 // The compiler does not keep such code out; internal/exec's
 // TestNoFileReadsMemoryThroughReflect refuses it in every production file of
-// the module (forgectl#854, forgectl#888).
+// the module (forgectl#854, forgectl#888). What that leaves open, memory
+// read through the operating system, is the residual-risk paragraph of
+// internal/exec's startSealed doc.
 //
 // The one way a payload leaves is Start, which puts it into a child process's
 // path, argv and environment and hands back a *Proc that can only wait for or

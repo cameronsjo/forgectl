@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
-	"go/token"
 	"go/types"
 	"io"
 	"os"
@@ -85,23 +84,23 @@ func TestSealedIsUnimportableOutsideExec(t *testing.T) {
 // TestSealedStartHasOneCaller pins, in internal/exec's production files on
 // every platform in guardPlatforms, the one path to a process: sealed.Start,
 // the one function that puts a payload into a process, is named only inside
-// the func startSealed, and startSealed, which skips validate, is named only
-// inside (*OSSensitiveRunner).RunSensitive. That the one call there comes
-// after validate, and that startSealed is never used as a value, is
-// TestValidateDominatesStartSealed's. Test files are not checked.
+// the func startSealed, and startSealed is named only inside
+// (*OSSensitiveRunner).RunSensitive. That what it starts was validated is
+// the validatedCommand type state's (TestOnlyValidatedBuildsAValidatedCommand),
+// and that it is never used as a value is TestValidateDominatesStartSealed's.
+// Test files are not checked.
 //
 // This is not what keeps plaintext out of internal/exec: the compiler does
 // that, since sealed.Start returns only a *sealed.Proc (wait and kill, no
 // accessor, pinned by the golden) and no exported name of sealed returns an
 // *exec.Cmd. It keeps process launches through the seam to the runner, so a
-// second launch path, or one that skips validate, cannot appear without
-// review. Both targets are package-level funcs, which can be reached only by
+// second launch path cannot appear without review. Both targets are package-level funcs, which can be reached only by
 // naming them (a call or a func value), so a Uses walk sees every route;
 // there is no interface or method-value shape that avoids it.
 //
 // Mutations that turn it red, each in sensitive.go: `var _ = sealed.Start`;
-// `var _, _ = startSealed(&OSSensitiveRunner{}, SensitiveCommand{Path:
-// Secret("sh"), Args: []Arg{Opaque("-c")}}, nil, nil)`.
+// `var _, _ = startSealed(&OSSensitiveRunner{}, validatedCommand{}, nil,
+// nil)`.
 func TestSealedStartHasOneCaller(t *testing.T) {
 	for _, p := range guardPlatforms {
 		c := checkExecFor(t, p)
@@ -118,49 +117,39 @@ func TestSealedStartHasOneCaller(t *testing.T) {
 			t.Fatalf("[%s] internal/exec declares no startSealed func; the rule would check nothing", p)
 		}
 		for _, f := range namedOutside(c, startSealed, "*OSSensitiveRunner", "RunSensitive") {
-			t.Errorf("[%s] %s: startSealed is named outside (*OSSensitiveRunner).RunSensitive; it skips validate, so only RunSensitive may call it",
+			t.Errorf("[%s] %s: startSealed is named outside (*OSSensitiveRunner).RunSensitive; launch sealed processes through the runner",
 				p, f)
 		}
 	}
 }
 
-// TestValidateDominatesStartSealed pins the ordering TestSealedStartHasOneCaller
-// cannot see (forgectl#888): inside (*OSSensitiveRunner).RunSensitive, on
-// every platform in guardPlatforms, validate runs, and refuses, before the
-// one startSealed call can be reached. The rule is deliberately simple
-// enough to read at a glance:
+// TestValidateDominatesStartSealed pins, on every platform in
+// guardPlatforms, that validation cannot be skipped or outrun on the way to a
+// process (forgectl#888). Most of that is now the compiler's: startSealed
+// accepts only a validatedCommand, and TestOnlyValidatedBuildsAValidatedCommand
+// pins that only SensitiveCommand.validated builds one, so moving the call
+// above validation does not compile, and a write to sc after it cannot reach
+// the copy that is started. What is left for this test is the shape of the
+// one call: inside (*OSSensitiveRunner).RunSensitive, startSealed is named
+// exactly once, as the function of a direct call outside every func literal,
+// so it is never a func value, never captured by a closure and never stored
+// where a launch could skip the runner's pipes and bounds.
 //
-//   - startSealed is named exactly once, as the function of a direct call
-//     expression that sits outside every func literal, so it is never a
-//     func value, never captured by a closure and never stored;
-//   - a statement at the top level of RunSensitive's body is
-//     `if err := sc.validate(); err != nil { ...; return ... }`, with no
-//     else, whose sc is RunSensitive's own parameter, and the statement
-//     holding the startSealed call comes after it in that same block;
-//   - that call passes the same sc, and nothing in RunSensitive assigns to
-//     sc, takes its address, or reaches a field of it on the left of an
-//     assignment, so the command validated is the command started;
-//   - RunSensitive holds no goto and no label, so no jump skips validate.
-//
-// A mutation of sc through a helper that is handed sc.Args stays a review
-// property.
-//
-// Mutations that turn it red, each in RunSensitive: move the startSealed
-// call above the validate statement; add `zzEsc = func() (*sealed.Proc,
-// error) { return startSealed(r, sc, nil, nil) }` with a package var zzEsc;
-// add `zzEsc = startSealed`; add `sc.Path = Secret("/bin/sh")` after
-// validate.
+// Mutations that turn it red, each in RunSensitive: add `zzEsc = func()
+// (*sealed.Proc, error) { return startSealed(r, vc, nil, nil) }` with a
+// package var zzEsc; add `zzEscV = startSealed` with a package var zzEscV of
+// its type.
 func TestValidateDominatesStartSealed(t *testing.T) {
 	for _, p := range guardPlatforms {
-		for _, f := range validateDominanceFindings(checkExecFor(t, p)) {
+		for _, f := range startSealedCallFindings(checkExecFor(t, p)) {
 			t.Errorf("[%s] %s", p, f)
 		}
 	}
 }
 
-// validateDominanceFindings returns every way c's RunSensitive breaks the
-// rule TestValidateDominatesStartSealed states.
-func validateDominanceFindings(c *checkedPackage) []string {
+// startSealedCallFindings returns every way c's RunSensitive breaks the rule
+// TestValidateDominatesStartSealed states.
+func startSealedCallFindings(c *checkedPackage) []string {
 	startSealed, ok := c.pkg.Scope().Lookup("startSealed").(*types.Func)
 	if !ok {
 		return []string{"internal/exec declares no startSealed func; the rule would check nothing"}
@@ -180,36 +169,8 @@ func validateDominanceFindings(c *checkedPackage) []string {
 	}
 	var findings []string
 	pos := func(n ast.Node) string { return c.fset.Position(n.Pos()).String() }
-
-	// sc is RunSensitive's SensitiveCommand parameter, found through its
-	// uses (checkExecFor records no Defs).
-	var sc types.Object
-	for _, field := range fd.Type.Params.List {
-		if types.ExprString(field.Type) != "SensitiveCommand" || len(field.Names) != 1 {
-			continue
-		}
-		name := field.Names[0]
-		ast.Inspect(fd.Body, func(n ast.Node) bool {
-			if id, ok := n.(*ast.Ident); ok && sc == nil {
-				if obj := c.info.Uses[id]; obj != nil && obj.Pos() == name.Pos() {
-					sc = obj
-				}
-			}
-			return sc == nil
-		})
-	}
-	if sc == nil {
-		return []string{pos(fd) + ": RunSensitive has no single SensitiveCommand parameter used in its body; the rule would check nothing"}
-	}
-	isSC := func(e ast.Expr) bool {
-		id, ok := ast.Unparen(e).(*ast.Ident)
-		return ok && c.info.Uses[id] == sc
-	}
-
-	// Every use of startSealed must be the Fun of a call outside any func
-	// literal; record the call.
-	var calls []*ast.CallExpr
-	var walk func(n ast.Node, inLit bool)
+	calls := 0
+	var walk func(root ast.Node, inLit bool)
 	walk = func(root ast.Node, inLit bool) {
 		ast.Inspect(root, func(n ast.Node) bool {
 			switch n := n.(type) {
@@ -221,9 +182,9 @@ func validateDominanceFindings(c *checkedPackage) []string {
 			case *ast.CallExpr:
 				if id, ok := ast.Unparen(n.Fun).(*ast.Ident); ok && c.info.Uses[id] == startSealed {
 					if inLit {
-						findings = append(findings, pos(n)+": startSealed is called inside a func literal; a closure can carry it past validate")
+						findings = append(findings, pos(n)+": startSealed is called inside a func literal, which can be stored and run outside the runner")
 					} else {
-						calls = append(calls, n)
+						calls++
 					}
 					for _, arg := range n.Args {
 						walk(arg, inLit)
@@ -234,138 +195,145 @@ func validateDominanceFindings(c *checkedPackage) []string {
 				if c.info.Uses[n] == startSealed {
 					findings = append(findings, pos(n)+": startSealed is used as a value; only a direct call in RunSensitive may name it")
 				}
-			case *ast.BranchStmt:
-				if n.Tok == token.GOTO {
-					findings = append(findings, pos(n)+": goto in RunSensitive; a jump can skip validate")
-				}
-			case *ast.LabeledStmt:
-				findings = append(findings, pos(n)+": label in RunSensitive; a jump can skip validate")
-			case *ast.AssignStmt:
-				for _, lhs := range n.Lhs {
-					if isSC(rootOperand(lhs)) {
-						findings = append(findings, pos(lhs)+": RunSensitive writes sc after it is validated")
-					}
-				}
-			case *ast.IncDecStmt:
-				if isSC(rootOperand(n.X)) {
-					findings = append(findings, pos(n)+": RunSensitive writes sc after it is validated")
-				}
-			case *ast.RangeStmt:
-				for _, e := range []ast.Expr{n.Key, n.Value} {
-					if e != nil && n.Tok == token.ASSIGN && isSC(rootOperand(e)) {
-						findings = append(findings, pos(e)+": RunSensitive writes sc after it is validated")
-					}
-				}
-			case *ast.UnaryExpr:
-				if n.Op == token.AND && isSC(rootOperand(n.X)) {
-					findings = append(findings, pos(n)+": RunSensitive takes sc's address, so it can change after validate")
-				}
-			case *ast.SelectorExpr:
-				if sel := c.info.Selections[n]; sel != nil && sel.Kind() != types.FieldVal && isSC(rootOperand(n.X)) {
-					if sig, ok := sel.Obj().Type().(*types.Signature); ok && sig.Recv() != nil {
-						if _, ptr := sig.Recv().Type().(*types.Pointer); ptr {
-							findings = append(findings, pos(n)+": RunSensitive calls a pointer-receiver method on sc, so it can change after validate")
-						}
-					}
-				}
 			}
 			return true
 		})
 	}
 	walk(fd.Body, false)
-	if len(calls) != 1 {
-		findings = append(findings, fmt.Sprintf("%s: RunSensitive calls startSealed directly %d times, want exactly 1", pos(fd), len(calls)))
-		return findings
-	}
-	call := calls[0]
-	if len(call.Args) < 2 || !isSC(call.Args[1]) {
-		findings = append(findings, pos(call)+": startSealed is not passed RunSensitive's own sc, the command validate checked")
-	}
-
-	validateAt, callAt := -1, -1
-	for i, stmt := range fd.Body.List {
-		if validateAt < 0 && isValidateGate(c, stmt, isSC) {
-			validateAt = i
-		}
-		if stmt.Pos() <= call.Pos() && call.End() <= stmt.End() {
-			callAt = i
-		}
-	}
-	switch {
-	case validateAt < 0:
-		findings = append(findings, pos(fd)+": RunSensitive has no top-level `if err := sc.validate(); err != nil { ...; return ... }`")
-	case callAt <= validateAt:
-		findings = append(findings, pos(call)+": startSealed is called before the validate statement at "+pos(fd.Body.List[validateAt]))
+	if calls != 1 {
+		findings = append(findings, fmt.Sprintf("%s: RunSensitive calls startSealed directly %d times, want exactly 1", pos(fd), calls))
 	}
 	return findings
 }
 
-// isValidateGate reports whether stmt is `if err := sc.validate(); err != nil
-// { ...; return ... }` with no else, sc matching isSC and validate being
-// SensitiveCommand's own method.
-func isValidateGate(c *checkedPackage, stmt ast.Stmt, isSC func(ast.Expr) bool) bool {
-	ifs, ok := stmt.(*ast.IfStmt)
-	if !ok || ifs.Else != nil || len(ifs.Body.List) == 0 {
-		return false
+// TestOnlyValidatedBuildsAValidatedCommand pins the constructor half of the
+// type state startSealed relies on (forgectl#888), in internal/exec's
+// production files on every platform in guardPlatforms: the type
+// validatedCommand, and each of its fields, is named only inside
+// (SensitiveCommand).validated, which builds it from a validated copy, and
+// startSealed, which reads it. So no other code can build one (a composite
+// literal, a var declaration, new, a conversion) or rewrite one it was
+// handed, and whatever startSealed starts came out of validated.
+//
+// Mutations that turn it red, each in sensitive_run.go: in RunSensitive,
+// `vc = validatedCommand{path: sc.Path}` after validation; `vc.args =
+// sc.Args` after validation.
+func TestOnlyValidatedBuildsAValidatedCommand(t *testing.T) {
+	doors := []funcRef{{recv: "SensitiveCommand", name: "validated"}, {name: "startSealed"}}
+	for _, p := range guardPlatforms {
+		c := checkExecFor(t, p)
+		tn, ok := c.pkg.Scope().Lookup("validatedCommand").(*types.TypeName)
+		if !ok {
+			t.Fatalf("[%s] internal/exec declares no validatedCommand type; the rule would check nothing", p)
+		}
+		st, ok := tn.Type().Underlying().(*types.Struct)
+		if !ok || st.NumFields() == 0 {
+			t.Fatalf("[%s] validatedCommand is not a struct with fields; the rule would check nothing", p)
+		}
+		targets := []types.Object{tn}
+		for f := range st.Fields() {
+			targets = append(targets, f)
+		}
+		for _, target := range targets {
+			for _, f := range usedOutside(c, target, doors) {
+				t.Errorf("[%s] %s: %s is named outside validated and startSealed; only validated may build a validatedCommand",
+					p, f, target.Name())
+			}
+		}
 	}
-	if _, ok := ifs.Body.List[len(ifs.Body.List)-1].(*ast.ReturnStmt); !ok {
-		return false
-	}
-	init, ok := ifs.Init.(*ast.AssignStmt)
-	if !ok || init.Tok != token.DEFINE || len(init.Lhs) != 1 || len(init.Rhs) != 1 {
-		return false
-	}
-	errID, ok := init.Lhs[0].(*ast.Ident)
-	if !ok {
-		return false
-	}
-	call, ok := init.Rhs[0].(*ast.CallExpr)
-	if !ok || len(call.Args) != 0 {
-		return false
-	}
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || !isSC(sel.X) {
-		return false
-	}
-	fn, ok := c.info.Uses[sel.Sel].(*types.Func)
-	if !ok || fn.Name() != "validate" || fn.Pkg() != c.pkg {
-		return false
-	}
-	if recv := fn.Signature().Recv(); recv == nil || types.TypeString(recv.Type(), nil) != execImportPath+".SensitiveCommand" {
-		return false
-	}
-	cond, ok := ifs.Cond.(*ast.BinaryExpr)
-	if !ok || cond.Op != token.NEQ {
-		return false
-	}
-	x, ok := cond.X.(*ast.Ident)
-	if !ok || c.info.Uses[x] == nil || c.info.Uses[x].Pos() != errID.Pos() {
-		return false
-	}
-	y, ok := cond.Y.(*ast.Ident)
-	return ok && y.Name == "nil" && c.info.Uses[y] == types.Universe.Lookup("nil")
 }
 
-// rootOperand strips selectors, indexes, slices, derefs and parens down to
-// the operand an lvalue is rooted at: sc for sc.Args[0].v.
-func rootOperand(e ast.Expr) ast.Expr {
-	for {
-		switch x := e.(type) {
-		case *ast.ParenExpr:
-			e = x.X
-		case *ast.SelectorExpr:
-			e = x.X
-		case *ast.IndexExpr:
-			e = x.X
-		case *ast.IndexListExpr:
-			e = x.X
-		case *ast.SliceExpr:
-			e = x.X
-		case *ast.StarExpr:
-			e = x.X
-		default:
-			return e
+// funcRef names a func declaration: a method of recv (its receiver type
+// expression, pointer star included) or, when recv is empty, a plain func.
+type funcRef struct{ recv, name string }
+
+func (r funcRef) matches(fd *ast.FuncDecl) bool {
+	if fd.Name.Name != r.name {
+		return false
+	}
+	if r.recv == "" {
+		return fd.Recv == nil
+	}
+	return fd.Recv != nil && len(fd.Recv.List) == 1 && types.ExprString(fd.Recv.List[0].Type) == r.recv
+}
+
+// usedOutside returns the position of every use of target in c's production
+// files outside the funcs doors names, plus one extra finding when no door
+// uses it at all, since then the matcher, not the package, is what is clean.
+func usedOutside(c *checkedPackage, target types.Object, doors []funcRef) []string {
+	var findings []string
+	inside := 0
+	for _, f := range c.files {
+		for _, decl := range f.Decls {
+			fd, isFunc := decl.(*ast.FuncDecl)
+			door := isFunc && slices.ContainsFunc(doors, func(r funcRef) bool { return r.matches(fd) })
+			ast.Inspect(decl, func(n ast.Node) bool {
+				id, ok := n.(*ast.Ident)
+				if !ok || c.info.Uses[id] != target {
+					return true
+				}
+				if door {
+					inside++
+				} else {
+					findings = append(findings, c.fset.Position(id.Pos()).String())
+				}
+				return true
+			})
 		}
+	}
+	if inside == 0 {
+		findings = append(findings, "(no use inside the allowed funcs at all: the matcher is broken, not the package clean)")
+	}
+	return findings
+}
+
+// TestValidatedCommandIsACopy pins that validated copies before it checks:
+// a write to the caller's Args or Env backing array after validation
+// reaches neither the validatedCommand nor the argv of the process
+// startSealed starts from it (forgectl#888). It starts this test binary in
+// its argv helper mode through startSealed and reads the argv back.
+//
+// Mutation that turns it red: in validated, drop the two slices.Clone lines
+// (a shallow copy shares the caller's backing arrays).
+func TestValidatedCommandIsACopy(t *testing.T) {
+	runner, self := helperRunner(t, "argv", defaultRetireBound)
+	sc := helperCommand(KindCmuxProbe, self, 4096, ReplaceCmuxSocketPath("/validated/socket"))
+	sc.Args = []Arg{Opaque("validated-arg")}
+	vc, err := sc.validated()
+	if err != nil {
+		t.Fatalf("validated: %v", err)
+	}
+	sc.Args[0] = Opaque("mutated-arg")
+	sc.Env[0] = UnsetTmux()
+	if len(vc.env) != 1 || vc.env[0].key != ReplaceCmuxSocketPath("x").key {
+		t.Errorf("a write to sc.Env after validation reached the validated command's env")
+	}
+
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proc, err := startSealed(runner, vc, outW, errW)
+	closeAll(outW, errW)
+	if err != nil {
+		closeAll(outR, errR)
+		t.Fatalf("startSealed: %v", err)
+	}
+	out, readErr := io.ReadAll(outR)
+	closeAll(outR, errR)
+	if err := proc.Wait(); err != nil {
+		t.Fatalf("helper exited: %v", err)
+	}
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	argv := strings.Split(string(out), "\x00")
+	if !slices.Equal(argv[1:], []string{"validated-arg"}) {
+		t.Errorf("started argv = %q, want the validated argument only; a write after validation reached the process", argv[1:])
 	}
 }
 

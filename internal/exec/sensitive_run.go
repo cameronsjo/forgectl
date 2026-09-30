@@ -147,7 +147,7 @@ func envKeyOf(entry string) string {
 	return entry
 }
 
-// startSealed starts sc's process through sealed.Start, which is the reveal
+// startSealed starts vc's process through sealed.Start, which is the reveal
 // boundary: the only function that takes a SecretArg, Arg or EnvMutation
 // payload out of its wrapper, and it puts every payload into the child
 // process and nowhere else (forgectl#854). What comes back is a *sealed.Proc,
@@ -155,10 +155,12 @@ func envKeyOf(entry string) string {
 // *exec.Cmd, or anything else carrying a plaintext payload. (The inherited
 // environment r.env is plaintext by design; it holds no payload.)
 //
-// Only RunSensitive may call this: it skips validate, so a direct call would
-// start a relative path or a dash-leading operand that validate refuses.
-// TestSealedStartHasOneCaller pins that, TestValidateDominatesStartSealed
-// pins that the one call comes after validate and is never a func value, and
+// It accepts only a validatedCommand, which only SensitiveCommand.validated
+// builds, so what it starts has passed validate, and a later write to the
+// caller's SensitiveCommand cannot reach it (forgectl#888). Only RunSensitive
+// may call it, once, as a direct call and never as a func value, so every
+// launch goes through the runner's pipes and bounds
+// (TestSealedStartHasOneCaller, TestValidateDominatesStartSealed).
 // sealed.Start refuses a non-absolute path on its own as defense in depth. It
 // is a plain func, not a method, on purpose: a package-level func is
 // reachable only by naming it, so the test's Uses walk sees every route,
@@ -182,6 +184,13 @@ func envKeyOf(entry string) string {
 // reads a sealed.Value's payload or the Cmd behind a Proc, from any package
 // holding one. The guard tests below refuse it; they do not make it
 // impossible.
+//
+// Residual risk, which no guard here closes: code in the module can read
+// its own process memory through the operating system with neither reflect
+// nor unsafe, for example /proc/self/mem, or a raw syscall handed a uintptr,
+// at an address taken from fmt's %p or text/template's printing of a
+// pointer. %p and a template only give an address; the read is the part that
+// matters, and it is a review property.
 //
 // What the guard tests enforce, as the backstop for what the compiler cannot
 // see:
@@ -232,13 +241,13 @@ func envKeyOf(entry string) string {
 // validate has already required an absolute path, so no PATH lookup happens
 // — which matters, because LookPath reads the live process PATH rather than
 // this runner's captured environment.
-func startSealed(r *OSSensitiveRunner, sc SensitiveCommand, stdout, stderr *os.File) (*sealed.Proc, error) {
-	args := make([]sealed.Value, len(sc.Args))
-	for i := range sc.Args {
-		args[i] = sc.Args[i].v
+func startSealed(r *OSSensitiveRunner, vc validatedCommand, stdout, stderr *os.File) (*sealed.Proc, error) {
+	args := make([]sealed.Value, len(vc.args))
+	for i := range vc.args {
+		args[i] = vc.args[i].v
 	}
-	env, set := r.buildEnv(sc.Env)
-	return sealed.Start(sc.Path.v, args, env, set, stdout, stderr)
+	env, set := r.buildEnv(vc.env)
+	return sealed.Start(vc.path.v, args, env, set, stdout, stderr)
 }
 
 // failedResult is what every never-ran path returns. ExitCode is -1, never 0:
@@ -276,7 +285,8 @@ func failedResult() SensitiveResult {
 // read the completeness flag — CopyBytesForParse returns it alongside the bytes
 // so it cannot be skipped by accident.
 func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveCommand) (SensitiveResult, error) {
-	if err := sc.validate(); err != nil {
+	vc, err := sc.validated()
+	if err != nil {
 		slog.Debug("Refusing sensitive command before start.", "cmd", sc, "reason", err.Error())
 		return failedResult(), newSensitiveError(sc.Kind, OutcomeInvalid, failedResult(), err.Error())
 	}
@@ -306,7 +316,7 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 	slog.Debug("Preparing to run sensitive command.", "cmd", sc)
 	start := time.Now()
 
-	proc, err := startSealed(r, sc, outW, errW)
+	proc, err := startSealed(r, vc, outW, errW)
 	if err != nil {
 		closeAll(outR, outW, errR, errW)
 		slog.Error("Sensitive command failed to start.", "kind", sc.Kind.String())

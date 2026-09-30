@@ -163,6 +163,7 @@ method (SensitiveCommand) MarshalJSON() ([]byte, error)
 method (SensitiveCommand) MarshalText() ([]byte, error)
 method (SensitiveCommand) String() string
 method (SensitiveCommand) validate() error
+method (SensitiveCommand) validated() (validatedCommand, error)
 method (SensitiveResult) Format(f fmt.State, verb rune)
 method (SensitiveResult) GoString() string
 method (SensitiveResult) LogValue() log/slog.Value
@@ -241,6 +242,7 @@ type outputBuf struct{data []byte}
 type projectedCmuxWorkspace struct{ID string "json:\"id\""; Description string "json:\"description\""}
 type streamPipes struct{childEnds []*os.File; readEnds []*onceCloser; stdinW *onceCloser; outputs []copyJob; stdin io.Reader; results chan copyResult; nOut int; nIn int}
 type tailBuffer struct{limit int; buf []byte; dropped int64}
+type validatedCommand struct{path SecretArg; args []Arg; env []EnvMutation}
 var ErrCanceled error
 var ErrInvalidCommand error
 var ErrNonzeroExit error

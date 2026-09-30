@@ -38,12 +38,13 @@ var reflectMemoryAllowed = map[string]string{}
 // refusedReflectMethods names the methods that hand out an address, or
 // dispatch dynamically to one that does, keyed by receiver ("Value" is
 // reflect.Value, "Type" is reflect.Type). Addr is allowed on an unexported
-// field, UnsafePointer and UnsafeAddr skip the read-only check, and Pointer
-// and UnsafeAddr give the same address as a uintptr. Method and MethodByName
+// field, UnsafePointer and UnsafeAddr skip the read-only check, Pointer and
+// UnsafeAddr give the same address as a uintptr, and InterfaceData gives an
+// interface's data word as one. Method and MethodByName
 // reach every one of them by name at run time, so they would step around the
 // static check without naming it (forgectl#888).
 var refusedReflectMethods = map[string][]string{
-	"Value": {"Addr", "UnsafeAddr", "UnsafePointer", "Pointer", "Method", "MethodByName"},
+	"Value": {"Addr", "UnsafeAddr", "UnsafePointer", "Pointer", "InterfaceData", "Method", "MethodByName"},
 	"Type":  {"Method", "MethodByName"},
 }
 
@@ -77,9 +78,9 @@ var refusedReflectMethods = map[string][]string{
 // constraint does not hide a use. TestTypedFindingsSeeEveryRoute pins the
 // matcher against each route.
 //
-// What it does not close: reading raw memory through the operating system,
-// such as /proc/self/mem at an address printed with %p, needs no reflect and
-// no unsafe. That is a review property.
+// What it does not close is the residual risk in startSealed's doc
+// (sensitive_run.go): memory read through the operating system needs no
+// reflect and no unsafe.
 //
 // Mutations that turn it red: a production file in internal/tmux that does
 // `p := reflect.ValueOf(&a).Elem().Field(0).Addr().UnsafePointer()` and
@@ -174,8 +175,8 @@ func listTypedPackages(ctx context.Context, root string, p guardPlatform, cgo st
 	return pkgs, nil
 }
 
-// typedGuardPlatform type-checks every in-tree package for p, cgo off and
-// then on, and returns typedFindings over them plus the import paths it
+// typedGuardPlatform type-checks every in-tree package for p with cgo off,
+// and again with cgo on when that changes an in-tree file list, and returns typedFindings over them plus the import paths it
 // checked. Out-of-tree packages always come from the cgo-off listing and are
 // checked without function bodies: under cgo on, the standard library's cgo
 // files would need the C toolchain, and no dependency's exported surface
@@ -189,19 +190,29 @@ func typedGuardPlatform(ctx context.Context, root string, p guardPlatform) (find
 	if err != nil {
 		return nil, nil, err
 	}
+	inTree := func(listing map[string]*typedListPackage) map[string]*typedListPackage {
+		mod := map[string]*typedListPackage{}
+		for path, lp := range listing {
+			if lp.Module.inTree(root) || (lp.Dir != "" && underRoot(root, lp.Dir)) {
+				mod[path] = lp
+			}
+		}
+		return mod
+	}
+	passes := []map[string]*typedListPackage{inTree(off)}
+	// The cgo-on pass re-checks the in-tree packages only when cgo changes
+	// one of their file lists; otherwise it would check the same files twice.
+	if modOn := inTree(on); !sameFileSets(passes[0], modOn) {
+		passes = append(passes, modOn)
+	}
 	fset := token.NewFileSet()
 	depPkgs := map[string]*types.Package{}
 	seen := map[string]bool{}
-	for _, listing := range []map[string]*typedListPackage{off, on} {
+	for _, mod := range passes {
 		l := &typedLoader{
 			root: root, fset: fset, sizes: types.SizesFor("gc", p.goarch),
-			deps: off, mod: map[string]*typedListPackage{},
+			deps: off, mod: mod,
 			depPkgs: depPkgs, modPkgs: map[string]*types.Package{},
-		}
-		for path, lp := range listing {
-			if lp.Module.inTree(root) || (lp.Dir != "" && underRoot(root, lp.Dir)) {
-				l.mod[path] = lp
-			}
 		}
 		paths := make([]string, 0, len(l.mod))
 		for path := range l.mod {
@@ -232,6 +243,21 @@ func typedGuardPlatform(ctx context.Context, root string, p guardPlatform) (find
 		}
 	}
 	return findings, checked, nil
+}
+
+// sameFileSets reports whether a and b list the same packages with the same
+// Go and cgo files.
+func sameFileSets(a, b map[string]*typedListPackage) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for path, pa := range a {
+		pb, ok := b[path]
+		if !ok || !slices.Equal(pa.GoFiles, pb.GoFiles) || !slices.Equal(pa.CgoFiles, pb.CgoFiles) {
+			return false
+		}
+	}
+	return true
 }
 
 // typedLoader type-checks packages from the source go list names, resolving
@@ -426,9 +452,11 @@ func typedFindings(fset *token.FileSet, files []*ast.File, info *types.Info, ref
 // reflect.Type can satisfy), the refused method of the same name and an
 // identical signature. It returns nil for anything else.
 func refusedReflectUse(fn *types.Func, refused []*types.Func) *types.Func {
-	fn = fn.Origin()
-	if slices.Contains(refused, fn) {
-		return fn
+	// Identity is decided on the origin, but the signature compared below is
+	// fn's own: the method of an instantiated generic interface such as
+	// I[uintptr] has signature () uintptr, while its origin's is () T.
+	if slices.Contains(refused, fn.Origin()) {
+		return fn.Origin()
 	}
 	recv := fn.Signature().Recv()
 	if recv == nil || !types.IsInterface(recv.Type()) {
@@ -532,7 +560,8 @@ func holdsUnsafePointer(t types.Type, seen map[types.Type]bool) bool {
 //
 // Mutations that turn it red: drop the Types walk (the NewAt and SetPointer
 // rows go quiet), drop the interface arm of refusedReflectUse (the look-alike
-// and constraint rows go quiet), or enter a named struct in
+// and constraint rows go quiet), compare fn.Origin()'s signature instead of
+// fn's (the two generic-interface rows go quiet), or enter a named struct in
 // holdsUnsafePointer (the clean reflect row reports reflect.Value).
 func TestTypedFindingsSeeEveryRoute(t *testing.T) {
 	const prelude = "package probe\n\nimport \"reflect\"\n\nvar _ reflect.Value\n\ntype sealedArg struct{ reveal func() string }\n\n"
@@ -555,6 +584,11 @@ func f(x w) reflect.Value { return x.Addr() }`, true},
 	return any(v).(interface{ UnsafeAddr() uintptr }).UnsafeAddr()
 }`, true},
 		{"type-parameter constraint", `func f[T interface{ UnsafeAddr() uintptr }](v T) uintptr { return v.UnsafeAddr() }`, true},
+		{"generic interface look-alike", `type I[T any] interface{ UnsafeAddr() T }
+func f(v reflect.Value) uintptr { return any(v).(I[uintptr]).UnsafeAddr() }`, true},
+		{"generic interface as a constraint", `type I[T any] interface{ UnsafeAddr() T }
+func f[V I[uintptr]](v V) uintptr { return v.UnsafeAddr() }`, true},
+		{"InterfaceData call", `func f(v reflect.Value) [2]uintptr { return v.InterfaceData() }`, true},
 		{"dynamic MethodByName", `func f(v reflect.Value) reflect.Value { return reflect.ValueOf(v).MethodByName("Addr") }`, true},
 		{"reflect.Type MethodByName", `func f(v reflect.Value) (reflect.Method, bool) { return reflect.TypeOf(v).MethodByName("Addr") }`, true},
 		{"reflect.NewAt as a value", `var g = reflect.NewAt`, true},
@@ -564,9 +598,10 @@ func f(x w) reflect.Value { return x.Addr() }`, true},
 	return v.Kind(), v.Type().String(), reflect.DeepEqual(a, a)
 }`, false},
 	}
+	probe := newTypedProbe(t)
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
-			got := typedProbeFindings(t, prelude+row.src+"\n")
+			got := probe.findings(t, prelude+row.src+"\n")
 			if row.want && len(got) == 0 {
 				t.Errorf("no finding; the matcher misses this route")
 			}
@@ -577,30 +612,24 @@ func f(x w) reflect.Value { return x.Addr() }`, true},
 	}
 	t.Run("a file importing unsafe is the import guard's", func(t *testing.T) {
 		src := "package probe\n\nimport \"unsafe\"\n\nfunc f(p unsafe.Pointer) *int { return (*int)(p) }\n"
-		if got := typedProbeFindings(t, src); len(got) != 0 {
+		if got := probe.findings(t, src); len(got) != 0 {
 			t.Errorf("findings in an unsafe-importing file, which TestNoFileReachesPastTheTypeSystem refuses instead:\n%s", strings.Join(got, "\n"))
 		}
 	})
 }
 
-// typedProbeFindings type-checks src as one file against the host's standard
-// library and returns typedFindings over it.
-func typedProbeFindings(t *testing.T, src string) []string {
+// typedProbe type-checks probe sources against the host's standard library,
+// through one source importer so reflect is loaded once for every row.
+type typedProbe struct {
+	fset    *token.FileSet
+	imp     types.Importer
+	refused []*types.Func
+}
+
+func newTypedProbe(t *testing.T) *typedProbe {
 	t.Helper()
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "probe.go", src, parser.SkipObjectResolution)
-	if err != nil {
-		t.Fatal(err)
-	}
-	info := &types.Info{
-		Types: map[ast.Expr]types.TypeAndValue{},
-		Uses:  map[*ast.Ident]types.Object{},
-	}
 	imp := importer.ForCompiler(fset, "source", nil)
-	conf := types.Config{Importer: imp}
-	if _, err := conf.Check("probe", fset, []*ast.File{file}, info); err != nil {
-		t.Fatalf("type-check probe: %v\n%s", err, src)
-	}
 	reflectPkg, err := imp.Import("reflect")
 	if err != nil {
 		t.Fatal(err)
@@ -609,5 +638,23 @@ func typedProbeFindings(t *testing.T, src string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return typedFindings(fset, []*ast.File{file}, info, refused, func(s string) string { return s })
+	return &typedProbe{fset: fset, imp: imp, refused: refused}
+}
+
+// findings type-checks src as one file and returns typedFindings over it.
+func (p *typedProbe) findings(t *testing.T, src string) []string {
+	t.Helper()
+	file, err := parser.ParseFile(p.fset, "probe.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := &types.Info{
+		Types: map[ast.Expr]types.TypeAndValue{},
+		Uses:  map[*ast.Ident]types.Object{},
+	}
+	conf := types.Config{Importer: p.imp}
+	if _, err := conf.Check("probe", p.fset, []*ast.File{file}, info); err != nil {
+		t.Fatalf("type-check probe: %v\n%s", err, src)
+	}
+	return typedFindings(p.fset, []*ast.File{file}, info, p.refused, func(s string) string { return s })
 }

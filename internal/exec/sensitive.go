@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -586,6 +587,35 @@ func (c SensitiveCommand) Equal(other SensitiveCommand) bool {
 		}
 	}
 	return true
+}
+
+// validatedCommand is the part of a SensitiveCommand that reaches a process
+// (its path, argv and environment mutations), as validated returned it. It
+// is the only thing startSealed accepts, and only validated builds one
+// (TestOnlyValidatedBuildsAValidatedCommand), so the command started is the
+// command validated, by construction (forgectl#888). A write to the caller's
+// SensitiveCommand after validation, including one through its Args or Env
+// backing array, cannot reach it: validated copied both slices before
+// checking them. Its zero value, which validated returns on refusal, has no
+// path, and sealed.Start refuses that on its own.
+type validatedCommand struct {
+	path SecretArg
+	args []Arg
+	env  []EnvMutation
+}
+
+// validated copies c's Args and Env, validates the copy, and returns it as a
+// validatedCommand. The checks run on the copy, not on c, so no write between
+// the check and the copy can slip past them: the slices validate reads are
+// the slices startSealed starts. Arg, SecretArg and EnvMutation hold only
+// immutable sealed values and scalars, so an element copy is a deep copy.
+func (c SensitiveCommand) validated() (validatedCommand, error) {
+	c.Args = slices.Clone(c.Args)
+	c.Env = slices.Clone(c.Env)
+	if err := c.validate(); err != nil {
+		return validatedCommand{}, err
+	}
+	return validatedCommand{path: c.Path, args: c.Args, env: c.Env}, nil
 }
 
 // validate refuses before process start. Every message here is static text: a
