@@ -20,8 +20,16 @@ Releases are driven by [Release Please](https://github.com/googleapis/release-pl
 3. That manifest bump triggers `.github/workflows/auto-tag.yml`, which reads the
    new version out of `.release-please-manifest.json`, pushes the `vX.Y.Z` tag,
    and flips the release PR's `autorelease: pending` label to
-   `autorelease: tagged`.
-4. The pushed tag triggers `.github/workflows/release.yml`, which runs
+   `autorelease: tagged`. It tags only when the pushed commit is the Forge
+   Bellows App's own merge of its release PR: its `gate` job checks, by
+   account login, that `artificer-forge-bellows[bot]` opened and merged a PR
+   with the exact title and that the PR merged as this commit. The nightly
+   `ship.yml` gate is that merge. A bump that reaches `main` any other way (a
+   hand merge, a PR that edits the manifest) is left untagged with a notice;
+   see "An ungated bump" below.
+4. The pushed tag triggers `.github/workflows/release.yml`. Its first job,
+   `verify`, fails closed unless the tagged commit is on `main` and the CI
+   workflow's `push` run for that commit succeeded. Only then does it run
    `goreleaser release --clean` — builds all targets, signs the macOS bless
    helper, cuts the GitHub Release, and pushes the Homebrew cask to
    `cameronsjo/homebrew-tap/Casks/forgectl.rb`.
@@ -47,6 +55,22 @@ with "There are untagged, merged release PRs outstanding" — inside an otherwis
 green job — and no new release PR is ever opened again. Recovering from a
 hand-pushed tag means manually reconciling the manifest and the PR label; avoid
 creating the wedge in the first place by always releasing through the release PR.
+
+The `v*` tag ruleset now enforces this: only the Forge Bellows App can create,
+update, or delete a `v*` tag, so a hand-pushed tag is refused.
+
+## An ungated bump
+
+If the release PR is merged by hand, or another PR edits
+`.release-please-manifest.json`, `auto-tag.yml` does not tag and logs a
+notice. Nothing is released, and a hand-merged release PR stays
+`autorelease: pending`, which wedges release-please as described above.
+
+To recover, revert the bump commit on `main` through a normal PR, then remove
+the `autorelease: pending` label from the hand-merged release PR. The next
+release-please run reopens a release PR, and the nightly gate merges it. This
+recovery has not been exercised yet: check that the next release-please run
+opens a new PR instead of aborting.
 
 ## Release notes
 

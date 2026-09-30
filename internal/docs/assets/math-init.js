@@ -17,6 +17,10 @@
 (function () {
   "use strict";
 
+  // Same stub as mermaid-init.js's (forgectl#759): a doc's
+  // <div id="ForgectlMath"> is the global until this script assigns it.
+  window.ForgectlMath = { refresh: function () {} };
+
   if (typeof katex === "undefined") {
     // The bundle failed to load. The TeX stays visible as text with its
     // delimiters, which is a legible degradation.
