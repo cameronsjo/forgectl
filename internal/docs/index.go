@@ -661,14 +661,15 @@ var errRootMoved = errors.New("root directory changed while it was being opened"
 
 // openRootDir opens the canonical root directory as an os.Root and returns
 // it with its Stat, which becomes Root.dirInfo, the pin openPinnedRoot
-// checks every later open against. The Stat is the open Root's own rather
-// than a second lookup by path: on Windows os.Stat leaves the file ID to be
+// checks every later open against. openDirRoot refuses a FIFO at the path
+// rather than blocking on it (forgectl#798). The Stat is the open Root's own
+// rather than a second lookup by path: on Windows os.Stat leaves the file ID to be
 // filled by path at the first os.SameFile, which would pin whatever the path
 // named at the first request instead of at index time (forgectl#743). The
 // path must still name a directory, not a symlink swapped in after
 // CanonicalizeRoot, since os.OpenRoot follows one.
 func openRootDir(canonical string) (*os.Root, fs.FileInfo, error) {
-	rt, err := os.OpenRoot(canonical)
+	rt, err := openDirRoot(canonical)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1156,12 +1157,14 @@ func (idx *Index) resolveOpen(rootLabel, relPath string) (*os.Root, *walkEnd, st
 // openPinnedRoot opens r's directory and returns it only if it is still the
 // directory the index was built from. os.OpenRoot follows a symlink at the
 // root path itself, so without this a root moved aside and replaced by a
-// symlink after indexing would serve whatever the symlink names.
+// symlink after indexing would serve whatever the symlink names. The open
+// is openDirRoot's, so a FIFO swapped in at the path fails at once instead
+// of blocking the request (forgectl#798).
 func openPinnedRoot(r Root) (*os.Root, error) {
 	if r.dirInfo == nil {
 		return nil, ErrOutsideRoot
 	}
-	rt, err := os.OpenRoot(r.Path)
+	rt, err := openDirRoot(r.Path)
 	if err != nil {
 		return nil, ErrOutsideRoot
 	}
