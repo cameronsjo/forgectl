@@ -14,6 +14,10 @@ import (
 // by reading an argument back out as a string. That is deliberate: a reveal
 // accessor on the fake would be a reveal accessor in the production API
 // surface, reachable from any package that imports exec.
+//
+// No production file but this one may name it, one of its fields or one of
+// its methods (TestNoProductionFileUsesTheFakeRunner, forgectl#941): it
+// starts no process, so production code wired to it would do nothing.
 type FakeSensitiveRunner struct {
 	// RunFunc produces the result for a call. If nil, every call returns an
 	// empty successful result. It receives the command so a test can branch on

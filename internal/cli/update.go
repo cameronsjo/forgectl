@@ -17,6 +17,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 	updatepkg "github.com/cameronsjo/forgectl/internal/update"
@@ -410,13 +411,21 @@ func writeStepDetail(w io.Writer, res updatepkg.Result) {
 // that command's stdout only in its CommandError (#808). The transcript file
 // and --json both carry it, so the no-transcript pointer's "rerun with
 // --json" is true for it too (#810). It is "" for a step that did not fail.
+//
+// It is redacted (redact.Text) as runSequence redacts the same stdout into
+// Output (#941), so a line holding a credential shape reads as the marker in
+// both renderers, and the Contains check compares like with like: against the
+// raw text it would miss a sequence's redacted copy and write it twice.
 func failedCommandOutput(res updatepkg.Result) string {
 	if !res.Failed() {
 		return ""
 	}
 	var cmdErr *exec.CommandError
-	if errors.As(res.Err, &cmdErr) && cmdErr.Output != "" && !strings.Contains(res.Output, cmdErr.Output) {
-		return cmdErr.Output
+	if !errors.As(res.Err, &cmdErr) || cmdErr.Output == "" {
+		return ""
+	}
+	if out := redact.Text(cmdErr.Output); !strings.Contains(res.Output, out) {
+		return out
 	}
 	return ""
 }

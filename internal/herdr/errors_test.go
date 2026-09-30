@@ -3,6 +3,7 @@ package herdr
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"regexp"
 	"runtime"
@@ -196,6 +197,36 @@ func TestErrorMessageIsRedacted(t *testing.T) {
 	}
 	if got := he.Error(); strings.Contains(got, secret) || !strings.Contains(got, "kept line") {
 		t.Errorf("Error() = %q; want the credential line withheld and the other kept", got)
+	}
+}
+
+// TestErrorFieldsHoldRedactedText is #941: Message and Reason are exported
+// and were stored raw, redacted only by Error(), so %#v, a log of the struct,
+// or a future reader of the field showed herdr's text. They are stored
+// redacted now; a line without a credential shape survives.
+//
+// Mutation that turns it red: store env.Error.Message raw in parseEnvelope
+// (the Message row), or mr.Reason raw in MoveTab (the Reason row).
+func TestErrorFieldsHoldRedactedText(t *testing.T) {
+	const secret = "SEKRIT-herdr-941" //nolint:gosec // G101: a fake credential the test plants
+	env := `{"error":{"code":"bad_request","message":"kept line\nAuthorization: Bearer ` + secret + `"}}`
+	_, err := New(runnerFor("", &exec.CommandError{Name: Binary, ExitCode: 1, Stderr: env})).Workspaces(context.Background())
+	var he *Error
+	if !errors.As(err, &he) {
+		t.Fatalf("err = %v, want *Error", err)
+	}
+	if got := fmt.Sprintf("%#v", he); strings.Contains(got, secret) || !strings.Contains(he.Message, "kept line") {
+		t.Errorf("Message row: %%#v = %s; want the credential line withheld and the other kept", got)
+	}
+
+	out := `{"id":"1","result":{"move_result":{"changed":false,"reason":"last_tab_in_workspace\nAuthorization: Bearer ` + secret + `"}}}`
+	_, err = New(runnerFor(out, nil)).MoveTab(context.Background(), "w1:t1", ToIndex(0))
+	var d *Declined
+	if !errors.As(err, &d) {
+		t.Fatalf("MoveTab err = %v, want *Declined", err)
+	}
+	if got := fmt.Sprintf("%#v", d); strings.Contains(got, secret) || !strings.Contains(d.Reason, "last_tab_in_workspace") {
+		t.Errorf("Reason row: %%#v = %s; want the credential line withheld and the reason code kept", got)
 	}
 }
 

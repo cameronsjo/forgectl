@@ -27,7 +27,8 @@ package cli
 //   [x] a failed single-command step's stdout (CommandError.Output) is in the
 //       transcript file, escaped, and a sequence's is not written twice (#808)
 //   [x] --json carries that stdout too, in the step's output field, raw
-//       (#810)
+//       (#810) but for a line holding a credential shape, which reads as
+//       redact.Marker there and in the transcript file (#941)
 //   [x] the transcript file names a failed sequence command once, not
 //       "brew update: brew update: …", while --json keeps that text (#808)
 
@@ -42,6 +43,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	updatepkg "github.com/cameronsjo/forgectl/internal/update"
 )
@@ -313,7 +315,9 @@ func TestUpdateRun_TranscriptPointerQuotesAPathWithASpace(t *testing.T) {
 
 // #810: the no-transcript pointer says "rerun with --json … for the details",
 // so --json must carry a failed single-command step's stdout, which only its
-// CommandError holds. It is value-preserving, as the rest of --json is.
+// CommandError holds. It is value-preserving, as the rest of --json is, but
+// for a line redact.Text withholds (#941), as the error field's Error() text
+// already is.
 //
 // Mutation: drop the failedCommandOutput append from writeUpdateJSON and
 // output is empty.
@@ -339,5 +343,66 @@ func TestUpdateRun_JSONCarriesAFailedSingleCommandStepsOutput(t *testing.T) {
 	}
 	if strings.ContainsRune(stdout, 0x1b) {
 		t.Errorf("the JSON stream carries a raw control: %q", stdout)
+	}
+}
+
+// #941: a failed command's stdout (CommandError.Output) reached the transcript
+// file and --json through termsafe only, the one CommandError field no
+// renderer redacted. A line holding a credential shape now reads as the
+// marker in both, and a line without one survives.
+//
+// Mutation that turns it red: return cmdErr.Output raw from
+// failedCommandOutput (the secret shows in both).
+func TestUpdateRun_FailedCommandOutputIsRedacted(t *testing.T) {
+	captureDebugLog(t)
+	const secret = "SEKRIT-update-941" //nolint:gosec // G101: a fake credential the test plants
+	fr := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "", &exec.CommandError{Name: name, Args: args, Stderr: "GOERR", Output: "GOOUT kept\nfetching https://u:" + secret + "@example.test/x", ExitCode: 1}
+	}}
+	for _, mode := range []string{"transcript", "json"} {
+		t.Run(mode, func(t *testing.T) {
+			client := updatepkg.New(fr, updatepkg.WithSteps([]updatepkg.Step{fakeUpdateStep("go", true, nil)}))
+			logDir := t.TempDir()
+			args := []string{"run", "--yes"}
+			if mode == "json" {
+				args = append(args, "--json")
+			}
+			stdout, _, _ := runUpdate(t, client, config.UpdateConfig{LogDir: logDir}, args...)
+			text := stdout
+			if mode == "transcript" {
+				_, text = transcriptFile(t, logDir)
+			}
+			if strings.Contains(text, secret) || !strings.Contains(text, "GOOUT kept") || !strings.Contains(text, redact.Marker) {
+				t.Errorf("want the credential line withheld as %s and the other kept: %q", redact.Marker, text)
+			}
+		})
+	}
+}
+
+// #941: runSequence puts the failing command's stdout into Output redacted,
+// and failedCommandOutput compares the redacted text against it, so a
+// sequence's failed stdout is still written once, not twice.
+//
+// Mutation that turns it red: compare the raw cmdErr.Output in
+// failedCommandOutput's Contains check (the withheld line is written twice).
+func TestUpdateRun_RedactedSequenceOutputIsWrittenOnce(t *testing.T) {
+	captureDebugLog(t)
+	const secret = "SEKRIT-update-941-seq" //nolint:gosec // G101: a fake credential the test plants
+	fr := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		if len(args) > 0 && args[0] == "upgrade" {
+			return "", &exec.CommandError{Name: "brew", Args: args, Stderr: "BREWERR", Output: "UPGRADED kept\nfrom https://u:" + secret + "@example.test/tap", ExitCode: 1}
+		}
+		return "", nil
+	}}
+	client := updatepkg.New(fr, updatepkg.WithSteps(realBrewStep(t)))
+	logDir := t.TempDir()
+
+	_, _, _ = runUpdate(t, client, config.UpdateConfig{LogDir: logDir}, "run", "--yes")
+	_, file := transcriptFile(t, logDir)
+	if strings.Contains(file, secret) {
+		t.Errorf("the transcript file carries the credential: %q", file)
+	}
+	if got := strings.Count(file, "UPGRADED kept"); got != 1 {
+		t.Errorf("the failed command's stdout is written %d times, want once: %q", got, file)
 	}
 }
