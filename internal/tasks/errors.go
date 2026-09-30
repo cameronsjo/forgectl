@@ -1,6 +1,10 @@
 package tasks
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
+)
 
 // Sentinels for errors.Is. A caller (the CLI layer) matches on these to pick
 // a distinct process exit code and to decide whether a stale cache may be
@@ -24,6 +28,18 @@ var (
 	// this path, so decoding is refused before it can be attempted.
 	ErrUnexpectedStatus = errors.New("tasks: unexpected response status")
 )
+
+// malformedJSON is the categorical refusal of a server response that does not
+// decode (#761). A *json.SyntaxError quotes a character of server text and an
+// *json.UnmarshalTypeError names server-chosen fields, so the message is fixed
+// text plus where, which the caller builds from code-owned paths and ids only.
+// The chain carries both ErrUnexpectedStatus, for the CLI's exit-code
+// disposition, and the decode error, for errors.As.
+func malformedJSON(where string, err error) error {
+	return termsafe.Categorical(
+		ErrUnexpectedStatus.Error()+": "+where+": the tasks server returned malformed JSON",
+		errors.Join(ErrUnexpectedStatus, err))
+}
 
 // IsHostRefused reports whether err (or anything it wraps) is the host-pinning
 // refusal. It is deliberately NOT folded into ErrUnreachable: "I declined to

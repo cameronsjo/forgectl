@@ -195,7 +195,7 @@ func TestScrub_PassesThroughOtherErrors(t *testing.T) {
 }
 
 // TestKeys_QuotedCappedAndBounded: an unknown-key list is quoted per key,
-// capped per key, and cut after maxKeysShown keys.
+// capped per key, and cut after MaxKeysShown keys.
 func TestKeys_QuotedCappedAndBounded(t *testing.T) {
 	var body strings.Builder
 	for i := 0; i < 20; i++ {
@@ -210,13 +210,36 @@ func TestKeys_QuotedCappedAndBounded(t *testing.T) {
 	if strings.Contains(got, "\x1b") || strings.Contains(got, strings.Repeat("K", 81)) {
 		t.Errorf("Keys = %q, echoes a key uncapped or unescaped", got)
 	}
-	if n := strings.Count(got, `"…`); n != maxKeysShown {
-		t.Errorf("Keys shows %d keys, want %d: %q", n, maxKeysShown, got)
+	if n := strings.Count(got, `"…`); n != MaxKeysShown {
+		t.Errorf("Keys shows %d keys, want %d: %q", n, MaxKeysShown, got)
 	}
 	if !strings.HasSuffix(got, ", …") {
 		t.Errorf("Keys = %q, want a trailing ellipsis", got)
 	}
 	if got := Keys([]toml.Key{{"a", "b"}}); got != `"a.b"` {
 		t.Errorf("Keys(one) = %q", got)
+	}
+}
+
+// TestKeyStrings_MatchesKeys pins #761: the string form renders exactly as
+// Keys does, so config's unrecognized-key list reads like every other
+// unknown-key error.
+func TestKeyStrings_MatchesKeys(t *testing.T) {
+	long := strings.Repeat("K", 200)
+	var keys []toml.Key
+	var dotted []string
+	for i := 0; i < 7; i++ {
+		k := toml.Key{"s", string(rune('a'+i)) + long}
+		keys = append(keys, k)
+		dotted = append(dotted, k.String())
+	}
+	if got, want := KeyStrings(dotted), Keys(keys); got != want {
+		t.Errorf("KeyStrings = %q, want Keys' %q", got, want)
+	}
+	if got := KeyStrings(dotted); strings.Contains(got, long[:81]) || !strings.HasSuffix(got, ", …") {
+		t.Errorf("KeyStrings = %q, want capped keys and a trailing ellipsis", got)
+	}
+	if got := KeyStrings(dotted[:MaxKeysShown]); strings.HasSuffix(got, ", …") {
+		t.Errorf("KeyStrings(%d) = %q, want no ellipsis at exactly the cap", MaxKeysShown, got)
 	}
 }
