@@ -600,7 +600,7 @@ Exit codes: 0 the file matches the example · 1 keys are missing or extra · 2 t
 				if !drift {
 					// Clean: stdout stays empty so a caller can treat any
 					// output as drift, and the reassurance goes to stderr.
-					fmt.Fprintf(cmd.ErrOrStderr(), "%s matches %s\n", termsafe.QuotePath(*file), termsafe.QuotePath(example))
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%s matches %s\n", termsafe.QuotePath(*file), termsafe.QuotePath(example))
 				}
 			}
 
