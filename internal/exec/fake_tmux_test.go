@@ -57,11 +57,15 @@ func TestFakeRunnerPresentsTmuxArgvWithoutUTF8Flag(t *testing.T) {
 // TestFakeRunnerRestoresIssuedArgvOnCommandError: a CommandError a RunFunc
 // builds from the argv it was shown must come back naming the argv the caller
 // issued, because a real runner's does and internal/tmux compares the two to
-// classify a failure. An error naming some other argv, or one wrapped inside
-// another error, is left alone.
+// classify a failure. An error naming some other argv is left alone, wrapped
+// or not; one naming the view but wrapped inside another error is refused
+// with a panic, because the fake cannot restore its argv and classification
+// would silently miss it (forgectl#851).
 //
 // Mutations that turn it red: drop the rewrite (the first error keeps the
-// view); rewrite without the equality check (the "other" error changes).
+// view); rewrite without the equality check (the "other" error changes); drop
+// the wrapped-view panic (the "wrapped" call returns instead of panicking);
+// panic on any wrapped CommandError (the "wrapped other" call panics).
 func TestFakeRunnerRestoresIssuedArgvOnCommandError(t *testing.T) {
 	other := []string{"new-session", "-s", "x"}
 	f := &FakeRunner{RunFunc: func(name string, args []string) (string, error) {
@@ -70,6 +74,8 @@ func TestFakeRunnerRestoresIssuedArgvOnCommandError(t *testing.T) {
 			return "", &CommandError{Name: name, Args: slices.Clone(other)}
 		case "wrapped":
 			return "", fmt.Errorf("wrapped: %w", &CommandError{Name: name, Args: slices.Clone(args)})
+		case "wrapped-other":
+			return "", fmt.Errorf("wrapped: %w", &CommandError{Name: name, Args: slices.Clone(other)})
 		}
 		return "", &CommandError{Name: name, Args: slices.Clone(args)}
 	}}
@@ -83,10 +89,18 @@ func TestFakeRunnerRestoresIssuedArgvOnCommandError(t *testing.T) {
 	if !errors.As(err, &cmdErr) || !slices.Equal(cmdErr.Args, other) {
 		t.Errorf("error argv = %v, want the untouched %q", err, other)
 	}
-	_, err = f.Run(context.Background(), "tmux", "-u", "wrapped")
-	if !errors.As(err, &cmdErr) || !slices.Equal(cmdErr.Args, []string{"wrapped"}) {
-		t.Errorf("wrapped error argv = %v, want it left as the view", err)
+	_, err = f.Run(context.Background(), "tmux", "-u", "wrapped-other")
+	if !errors.As(err, &cmdErr) || !slices.Equal(cmdErr.Args, other) {
+		t.Errorf("wrapped error argv = %v, want the untouched %q", err, other)
 	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("a wrapped CommandError naming the view was returned; want the fake to refuse it")
+			}
+		}()
+		_, _ = f.Run(context.Background(), "tmux", "-u", "wrapped")
+	}()
 }
 
 // TestFakeRunnerRewritesACopyOfAReusedError: a RunFunc may hand back one error

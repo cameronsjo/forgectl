@@ -27,7 +27,7 @@ import (
 const CaskRef = "cameronsjo/tap/forgectl"
 
 // homebrewSafeEnv pins every brew invocation this package makes:
-// exec.HomebrewNoAutoUpdate (the same definition internal/update's brewStep
+// exec.HomebrewNoAutoUpdate() (the same definition internal/update's brewStep
 // merges onto its own calls, so the two packages can never drift apart on
 // that shape) plus three additional HOMEBREW_* variables that redirect
 // where brew's artifact or tap comes from: HOMEBREW_ARTIFACT_DOMAIN
@@ -47,7 +47,7 @@ const CaskRef = "cameronsjo/tap/forgectl"
 // resolving to the LAST occurrence in the slice — our override always sorts
 // after the inherited os.Environ() copy RunWithEnv builds from.
 var homebrewSafeEnv = map[string]string{
-	"HOMEBREW_NO_AUTO_UPDATE":  exec.HomebrewNoAutoUpdate["HOMEBREW_NO_AUTO_UPDATE"],
+	"HOMEBREW_NO_AUTO_UPDATE":  exec.HomebrewNoAutoUpdate()["HOMEBREW_NO_AUTO_UPDATE"],
 	"HOMEBREW_ARTIFACT_DOMAIN": "",
 	"HOMEBREW_CASK_OPTS":       "",
 	"HOMEBREW_BREW_GIT_REMOTE": "",

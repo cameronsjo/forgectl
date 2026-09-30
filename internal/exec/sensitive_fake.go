@@ -18,6 +18,15 @@ type FakeSensitiveRunner struct {
 	// RunFunc produces the result for a call. If nil, every call returns an
 	// empty successful result. It receives the command so a test can branch on
 	// Kind or argument count; it cannot read an argument's payload.
+	//
+	// An exported func field that receives a SensitiveCommand is intended and
+	// widens nothing (forgectl#851): RunFunc is handed the very value the
+	// caller of RunSensitive already held, so it learns nothing that caller
+	// could not. Every payload inside stays sealed — Arg and SecretArg expose
+	// only redacting formatters, Secret, and Equal, which compares against a
+	// value the holder must already have built — so no string payload is
+	// reachable through it, and the exported-API golden pins that surface.
+	// Only buildCmd reveals a payload, and the fake never calls it.
 	RunFunc func(cmd SensitiveCommand) (SensitiveResult, error)
 
 	mu    sync.Mutex

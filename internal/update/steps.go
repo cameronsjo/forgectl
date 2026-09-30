@@ -36,7 +36,7 @@ func DefaultSteps() []Step {
 	}
 }
 
-// homebrewNoAutoUpdate is exec.HomebrewNoAutoUpdate (the shared definition —
+// homebrewNoAutoUpdate is exec.HomebrewNoAutoUpdate() (the shared definition —
 // internal/selfupdate's own brew calls merge the same map, so the two
 // packages can never drift apart on the exact env shape). Without it,
 // `brew outdated` (brewStep's Check, documented as "no mutation, always
@@ -44,8 +44,9 @@ func DefaultSteps() []Step {
 // effect the caller never asked for and `update check` never disclosed.
 // Applied to every brew invocation in this step (Check and Apply alike) so
 // the roster's behavior is deterministic regardless of how stale the
-// ambient Homebrew auto-update timestamp happens to be.
-var homebrewNoAutoUpdate = exec.HomebrewNoAutoUpdate
+// ambient Homebrew auto-update timestamp happens to be. Each call gets a
+// fresh map, so no invocation shares mutable env state with another.
+func homebrewNoAutoUpdate() map[string]string { return exec.HomebrewNoAutoUpdate() }
 
 // brewStep: Check and Apply are both scoped to --formula — no cask is listed
 // or upgraded here. One residue: `brew cleanup` takes no --formula/--cask
@@ -78,10 +79,10 @@ func brewStep() Step {
 		Name:        StepBrew,
 		Destructive: true,
 		Check: func(ctx context.Context, run exec.Runner) (string, error) {
-			return run.RunWithEnv(ctx, homebrewNoAutoUpdate, "brew", "outdated", "--formula")
+			return run.RunWithEnv(ctx, homebrewNoAutoUpdate(), "brew", "outdated", "--formula")
 		},
 		Apply: func(ctx context.Context, run exec.Runner) (string, error) {
-			return runSequence(ctx, run, homebrewNoAutoUpdate,
+			return runSequence(ctx, run, homebrewNoAutoUpdate(),
 				[]string{"brew", "update"},
 				[]string{"brew", "upgrade", "--formula"},
 				[]string{"brew", "cleanup"},
