@@ -474,6 +474,17 @@ func (c *Client) confirmGoneAtKill(ctx context.Context, want WindowIdentity, kil
 // "no server running on <socket>". The id is a validated "@N", so the line
 // cannot be forged by a window name, and a stderr tail that dropped bytes,
 // carries any other text, or names another id is not this answer.
+//
+// "server exited unexpectedly" is deliberately NOT this answer either
+// (forgectl#765). Measured on tmux 3.4: tmux prints it, exit 1, when the
+// server dies under a client mid-command (a kill -9), and the socket file
+// stays behind; a kill-window that takes the server's last window, which
+// makes the server exit on purpose, exits 0 with no message. So the line
+// means a crash, not a finished kill, and a crashed server's pane processes
+// can outlive it. A re-read after it nearly always meets the stale socket
+// (ErrServerUnreadable), so gating it on one would only add a path to a
+// "gone" verdict built on a crash. It stays unclassified, and the caller
+// parks.
 func windowGoneAtKillStderr(err error, id string) bool {
 	var cmdErr *exec.CommandError
 	if !errors.As(err, &cmdErr) {

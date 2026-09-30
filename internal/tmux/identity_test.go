@@ -371,17 +371,21 @@ func TestKillWindowConfirmsTheServerBehindTheGoneAnswer(t *testing.T) {
 // means a different server received the kill and ran nothing, so it is
 // ErrGenerationChanged. The marker naming the captured generation means tmux
 // skipped the comparison, and any other output is unexpected; both stay
-// unclassified rather than read as a kill.
+// unclassified rather than read as a kill. "server exited unexpectedly" is a
+// crash, not a finished kill, so it stays unclassified too (forgectl#765).
 //
 // Mutations that turn it red: treat any exit-0 answer as a kill (the marker
 // and stray-output rows read as nil); map every marker to
 // ErrGenerationChanged without comparing the reported generation (the
 // guard-not-evaluated row gains it); map the marker to ErrObjectGone (the
-// another-server row loses ErrGenerationChanged).
+// another-server row loses ErrGenerationChanged); add "server exited
+// unexpectedly" to windowGoneAtKillStderr (the crash row reads as gone).
 func TestKillWindowReadsTheGenerationGuard(t *testing.T) {
 	gen := ServerGeneration{Selector: ServerSelector{TmpDir: "/tmp"}, PID: "9", StartTime: "100"}
 	want := WindowIdentity{Generation: gen, ID: "@3", SessionID: "$1", Name: "pr-o-r-1"}
 	row := windowRow("9", "100", "@3", "$1", "forge", 0, "pr-o-r-1")
+	crash := &internalexec.CommandError{Name: "tmux", Stderr: "server exited unexpectedly", ExitCode: 1,
+		Err: errors.New("exit status 1")}
 	for _, tc := range []struct {
 		name    string
 		out     string
@@ -397,6 +401,7 @@ func TestKillWindowReadsTheGenerationGuard(t *testing.T) {
 		{"marker without a generation", generationMismatchMarker, nil, false, false},
 		{"marker with a non-decimal generation", generationMismatchMarker + " 77/5x0", nil, false, false},
 		{"stray output", "something else", nil, false, false},
+		{"server crashed mid-kill", "", crash, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			run := &internalexec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
