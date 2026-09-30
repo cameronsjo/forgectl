@@ -377,3 +377,61 @@ func TestFinishSync_CompleteAndDryRunSucceed(t *testing.T) {
 		}
 	}
 }
+
+// TestSessionsText_CapsRunbookTitles pins forgectl#891 item 5: the indexer
+// stores a runbook title uncut, so every `sessions` text line that prints one
+// caps it at runbookTitleMaxRunes, while --json carries it whole.
+//
+// Mutations that turn it red, one per row: print h.Title through safeTerm in
+// printSearchHits (search), h.Title in printWhyHits (why), or a.Title in
+// printLastSession (last).
+func TestSessionsText_CapsRunbookTitles(t *testing.T) {
+	long := strings.Repeat("t", runbookTitleMaxRunes*4)
+	ts := ptrTime("2026-07-09T11:00:00Z")
+	for _, tt := range []struct {
+		sink       string
+		text, json func(cmd *cobra.Command) error
+	}{
+		{
+			sink: "search",
+			text: func(cmd *cobra.Command) error {
+				return printSearchHits(cmd.OutOrStdout(), []sessions.SearchHit{{Path: "p/x.md", Title: long}})
+			},
+			json: func(cmd *cobra.Command) error {
+				return writeSearchHitsJSON(cmd.OutOrStdout(), []sessions.SearchHit{{Path: "p/x.md", Title: long}})
+			},
+		},
+		{
+			sink: "why",
+			text: func(cmd *cobra.Command) error {
+				return printWhyHits(cmd, []sessions.WhyHit{{SessionID: "s1", LastTs: ts, Title: long, Path: "p/x.md"}}, false)
+			},
+			json: func(cmd *cobra.Command) error {
+				return printWhyHits(cmd, []sessions.WhyHit{{SessionID: "s1", LastTs: ts, Title: long, Path: "p/x.md"}}, true)
+			},
+		},
+		{
+			sink: "last",
+			text: func(cmd *cobra.Command) error {
+				return printLastSession(cmd, "p", &sessions.SessionSummary{SessionID: "s1", LastTs: ts,
+					Artifacts: []sessions.Artifact{{Type: "handoff", Title: long, Path: "p/x.md"}}}, false)
+			},
+			json: func(cmd *cobra.Command) error {
+				return printLastSession(cmd, "p", &sessions.SessionSummary{SessionID: "s1", LastTs: ts,
+					Artifacts: []sessions.Artifact{{Type: "handoff", Title: long, Path: "p/x.md"}}}, true)
+			},
+		},
+	} {
+		text, _ := renderCmd(t, tt.text)
+		if strings.Contains(text, strings.Repeat("t", runbookTitleMaxRunes+1)) {
+			t.Errorf("%s text printed more than %d runes of the title", tt.sink, runbookTitleMaxRunes)
+		}
+		if !strings.Contains(text, strings.Repeat("t", runbookTitleMaxRunes/2)) {
+			t.Errorf("%s text lost the title's head: %q", tt.sink, text)
+		}
+		asJSON, _ := renderCmd(t, tt.json)
+		if !strings.Contains(asJSON, long) {
+			t.Errorf("%s --json did not carry the title whole", tt.sink)
+		}
+	}
+}

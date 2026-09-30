@@ -296,7 +296,7 @@ func printSearchHits(out io.Writer, hits []sessions.SearchHit) error {
 	}
 	for _, h := range hits {
 		if _, err := fmt.Fprintf(out, "%s\t%s\t[%s]\t(%s, indexed by %s)\n\t%s\n",
-			safeTerm(h.Path), safeTerm(h.Title), safeTerm(h.Type),
+			safeTerm(h.Path), safeTitle(h.Title), safeTerm(h.Type),
 			safeTerm(h.Project), safeTerm(h.Machine), safeTerm(h.Snippet)); err != nil {
 			return err
 		}
@@ -441,7 +441,7 @@ func printWhyHits(cmd *cobra.Command, hits []sessions.WhyHit, asJSON bool) error
 	for _, h := range hits {
 		fmt.Fprintf(out, "%s\t%s\t[%s]\t%s\n",
 			safeTerm(h.SessionID), humanTs(h.LastTs), safeTerm(h.Project), safeTerm(h.Model))
-		fmt.Fprintf(out, "\t%s · %s\n", safeTerm(h.Type), safeTerm(h.Title))
+		_, _ = fmt.Fprintf(out, "\t%s · %s\n", safeTerm(h.Type), safeTitle(h.Title))
 		fmt.Fprintf(out, "\t%s\n", safeTerm(h.Path))
 		fmt.Fprintf(out, "\t%s\n", safeTerm(h.Snippet))
 	}
@@ -506,7 +506,7 @@ func printLastSession(cmd *cobra.Command, repo string, s *sessions.SessionSummar
 	}
 	for _, a := range s.Artifacts {
 		fmt.Fprintf(out, "\t%s · %s\n\t  %s\n",
-			safeTerm(a.Type), safeTerm(a.Title), safeTerm(a.Path))
+			safeTerm(a.Type), safeTitle(a.Title), safeTerm(a.Path))
 	}
 	return nil
 }
@@ -539,4 +539,16 @@ func humanTs(t *time.Time) string {
 // would corrupt the machine contract.
 func safeTerm(s string) string {
 	return termsafe.SafeLine(s)
+}
+
+// runbookTitleMaxRunes caps a runbook title in a line of `sessions` text
+// output. The indexer stores a title as the document gave it (a frontmatter
+// `title:` or the first heading, uncut), so nobody at the terminal chose its
+// length (forgectl#891). --json carries it whole.
+const runbookTitleMaxRunes = 256
+
+// safeTitle is a runbook title made terminal-safe and bounded for a line of
+// text output.
+func safeTitle(s string) string {
+	return termsafe.SafeLineMax(s, runbookTitleMaxRunes)
 }

@@ -1176,3 +1176,42 @@ func TestCleanFailureText_OnceThenPanicNeverSplitsAnEscape(t *testing.T) {
 		}
 	}
 }
+
+// panicThenWorkErr is an error whose Error method panics on its first call
+// and works on every later one.
+type panicThenWorkErr struct {
+	text  string
+	calls *int
+}
+
+func (e panicThenWorkErr) Error() string {
+	*e.calls++
+	if *e.calls == 1 {
+		panic("Error called first")
+	}
+	return e.text
+}
+
+// TestCleanFailureText_PanicThenWorkNeverSplitsAnEscape pins forgectl#891
+// item 1, the reverse of the #871 case: an Error method that panics first and
+// then works leaves only escaped text, and an overlong one must not be cut
+// inside an escape. It gets the fixed stand-in instead. A short one that fits
+// keeps its escaped rendering.
+//
+// Mutation that turns it red: cut the escaped text with SafeLineMax in the
+// !ok branch of cleanFailureText, as it was.
+func TestCleanFailureText_PanicThenWorkNeverSplitsAnEscape(t *testing.T) {
+	calls := 0
+	text := strings.Repeat("x", 490) + strings.Repeat(string(rune(0x202e)), 100)
+	got := cleanFailureText(panicThenWorkErr{text: text, calls: &calls})
+	if got != cleanTextUnavailable {
+		t.Errorf("overlong rendering = %q, want the stand-in %q", got, cleanTextUnavailable)
+	}
+
+	calls = 0
+	short := "daemon said " + string(rune(0x202e))
+	got = cleanFailureText(panicThenWorkErr{text: short, calls: &calls})
+	if want := `daemon said \u202e`; got != want {
+		t.Errorf("short rendering = %q, want %q", got, want)
+	}
+}
