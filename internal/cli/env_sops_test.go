@@ -14,6 +14,8 @@ package cli
 //   [x] A missing target refuses without attempting creation
 //   [x] A .env target refuses (the two allowlists do not overlap)
 //   [x] No refusal echoes the value
+//   [x] The added/replaced success lines name the outcome and quote the path
+//       (a fake driver behind the sopsSetter seam, forgectl#867)
 //
 // The editor
 //   [x] Refuses with no work directory in the environment
@@ -28,6 +30,10 @@ import (
 	"strings"
 	"testing"
 
+	clippkg "github.com/cameronsjo/forgectl/internal/clip"
+	envpkg "github.com/cameronsjo/forgectl/internal/env"
+	"github.com/cameronsjo/forgectl/internal/exec"
+	sopspkg "github.com/cameronsjo/forgectl/internal/sops"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -432,5 +438,67 @@ func TestSopsEdit_RecordsTheOutcome(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(recorded)); got != "added" {
 		t.Errorf("recorded outcome = %q, want %q", got, "added")
+	}
+}
+
+// fakeSopsSetter stands in for the sops driver so the --sops route's success
+// lines are reachable without a sops binary on PATH (forgectl#867).
+type fakeSopsSetter struct {
+	outcome sopspkg.Outcome
+	calls   int
+}
+
+func (f *fakeSopsSetter) SetValue(context.Context, envpkg.Target, string, string) (sopspkg.Outcome, error) {
+	f.calls++
+	return f.outcome, nil
+}
+
+// TestEnvSetSops_SuccessLinesNameTheOutcomeAndQuoteThePath is forgectl#867
+// item 5: the --sops route says whether it added or replaced the key, and the
+// repo-relative path in that line reaches the terminal quoted and escaped. The
+// runes are \u escapes so no literal format character sits in source.
+//
+// Mutations that turn it red: swap the added/replaced cases in
+// runEnvSetSops, or print target.Rel() raw on either line.
+func TestEnvSetSops_SuccessLinesNameTheOutcomeAndQuoteThePath(t *testing.T) {
+	const name = "ev\u202eil\u009b31m.sops.yaml"
+	const quoted = `"ev\u202eil\u009b31m.sops.yaml"`
+	for _, tc := range []struct {
+		outcome sopspkg.Outcome
+		want    string
+	}{
+		{sopspkg.OutcomeAdded, "added agentgateway.llm_key_hermes to " + quoted + "\n"},
+		{sopspkg.OutcomeReplaced, "replaced agentgateway.llm_key_hermes in " + quoted + "\n"},
+	} {
+		t.Run(tc.want[:strings.IndexByte(tc.want, ' ')], func(t *testing.T) {
+			repo := t.TempDir()
+			initEnvGitRepo(t, repo)
+			if err := os.WriteFile(filepath.Join(repo, name), []byte(sopsFixtureDoc), 0o600); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			t.Chdir(repo)
+			forceNonTTY(t)
+
+			client, _ := envFixture()
+			fake := &fakeSopsSetter{outcome: tc.outcome}
+			cmd := newEnvCmdForClient(client, fake, clippkg.New(&exec.FakeRunner{}, clippkg.WithSensitive()), theme.Theme{})
+			var stdout, stderr bytes.Buffer
+			cmd.SetIn(strings.NewReader("value1\n"))
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			cmd.SetArgs([]string{"set", "agentgateway.llm_key_hermes", "--sops", "--file", name})
+			if err := cmd.ExecuteContext(context.Background()); err != nil {
+				t.Fatalf("env set --sops: %v", err)
+			}
+			if fake.calls != 1 {
+				t.Fatalf("sops driver called %d time(s), want 1", fake.calls)
+			}
+			if got := stdout.String(); got != tc.want {
+				t.Errorf("stdout = %q, want %q", got, tc.want)
+			}
+			if strings.ContainsAny(stdout.String(), "\u202e\u009b") {
+				t.Errorf("stdout carries a raw bidi/control rune: %q", stdout.String())
+			}
+		})
 	}
 }
