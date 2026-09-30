@@ -558,7 +558,10 @@ const cleanElision = " … [truncated] … "
 // termsafe.Error then withholds its own rendering behind a short stand-in,
 // which fits. Read in the other order, the good call went to the escaped
 // rendering and the cut had only escaped text to work on, where it could
-// split an escape in half (forgectl#871).
+// split an escape in half (forgectl#871). The reverse, an Error method that
+// panics once and then works, leaves only the escaped rendering; when that
+// fits it is kept, and when it does not, cleanTextUnavailable stands in for
+// it rather than a cut of escaped text.
 func cleanFailureText(err error) string {
 	raw, ok := rawErrorText(err)
 	full := termsafe.Error(err).Error()
@@ -566,15 +569,20 @@ func cleanFailureText(err error) string {
 		return full
 	}
 	if !ok {
-		// The raw call panicked but the later one rendered: only the
-		// escaped text exists, so it is cut as it stands.
-		return termsafe.SafeLineMax(full, cleanDiagnosticMaxRunes-utf8.RuneCountInString(termsafe.TruncatedMarker))
+		// The raw call panicked but the later one rendered, and too long to
+		// keep: only the escaped text exists, and cutting it could split an
+		// escape, so a fixed stand-in takes its place (forgectl#891).
+		return cleanTextUnavailable
 	}
 	if text, ok := cleanCommandFailure(err, raw); ok {
 		return text
 	}
 	return cleanDiagnostic(raw)
 }
+
+// cleanTextUnavailable stands in for an overlong failure whose raw text
+// could not be read, the one case where only escaped text is left to cut.
+const cleanTextUnavailable = "error text withheld: its Error method panicked, then gave text too long to show"
 
 // rawErrorText is err.Error(), or ok=false when that method panics — the
 // case termsafe.Error withholds the text for.
