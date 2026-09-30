@@ -77,26 +77,160 @@ func (w *Watcher) Close() error {
 // as the re-registration pass after a rebuild picks up new directories.
 func (w *Watcher) register(idx *Index) {
 	for _, root := range idx.Roots() {
-		err := filepath.WalkDir(root.Path, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil //nolint:nilerr // unreadable subtree: skip it, keep the rest of the walk
-			}
-			if !d.IsDir() {
-				return nil
-			}
-			// Identical exemption to walkRoot's: a root the user named
-			// explicitly is watched even if its own base name looks excluded.
-			if path != root.Path && excludedDir(d.Name()) {
-				return filepath.SkipDir
-			}
-			if addErr := w.fsw.Add(path); addErr != nil {
-				slog.Debug("docs: could not watch directory for live reload.", "path", path, "error", addErr)
-			}
-			return nil
-		})
+		rt, err := openPinnedRoot(root)
 		if err != nil {
+			slog.Debug("docs: live-reload registration could not open a root.", "root", root.Label, "error", err)
+			continue
+		}
+		if err := w.watchTree(rt, root.Path); err != nil {
 			slog.Debug("docs: live-reload registration walk failed for a root.", "root", root.Label, "error", err)
 		}
+		_ = rt.Close()
+	}
+}
+
+// watchTree adds a watch for top, the directory dir holds, and for every
+// directory below it that the indexer would descend into (forgectl#769).
+//
+// The walk is the index's own held walk (walkHeld). Every directory is listed
+// through an os.Root opened in the one above it, and it must be the directory
+// its Lstat saw. So a directory swapped for a symlink mid-walk is neither
+// listed nor descended, and the walk cannot wander outside the root.
+// fsnotify only adds a watch by path, though, so each Add goes through
+// addVerified, which drops a watch whose path no longer names the directory
+// the walk listed. top is exempt from the excluded-name rule, as a root is
+// in walkRoot.
+func (w *Watcher) watchTree(dir *os.Root, top string) error {
+	return walkHeld(dir, top, func(path string, _ *os.Root, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil //nolint:nilerr // unreadable subtree: skip it, keep the rest of the walk
+		}
+		if path != top && excludedDir(d.Name()) {
+			return filepath.SkipDir
+		}
+		want, err := d.Info()
+		if err != nil || !want.IsDir() || !w.addVerified(path, want) {
+			return filepath.SkipDir
+		}
+		return nil
+	})
+}
+
+// testHookWatch, when set, runs around each watch addVerified adds: before
+// the Add (added false) and after the watch passed its identity check (added
+// true). Tests use it to swap a directory at exactly those points.
+var testHookWatch func(path string, added bool)
+
+// addVerified adds a watch on path and keeps it only if path still names
+// want, the directory the held walk listed. fsnotify.Add resolves path
+// itself and follows a symlink, so a directory swapped for a symlink to an
+// outside directory between the walk and the Add would otherwise leave a
+// watch outside the root, and changes there would drive rebuilds.
+//
+// The check follows the Add, so it tests what the path named when the watch
+// was bound, give or take a swap and swap back between the two calls. That
+// window stays open because fsnotify has no by-handle Add, but a watch can
+// only ever cause a rebuild, never a read: the rebuild walks through the
+// pinned roots, and every serve re-verifies the path.
+func (w *Watcher) addVerified(path string, want fs.FileInfo) bool {
+	if testHookWatch != nil {
+		testHookWatch(path, false)
+	}
+	if err := w.fsw.Add(path); err != nil {
+		slog.Debug("docs: could not watch directory for live reload.", "path", path, "error", err)
+		return false
+	}
+	got, err := os.Stat(path)
+	if err != nil || !os.SameFile(want, got) {
+		w.dropWatch(path)
+		slog.Debug("docs: dropped a live-reload watch whose directory changed during registration.", "path", path)
+		return false
+	}
+	if testHookWatch != nil {
+		testHookWatch(path, true)
+	}
+	return true
+}
+
+// readdVerified re-adds a watch on dir, an event's containing directory,
+// and keeps it only if dir still resolves to itself. The root paths are
+// canonical and every watched directory was reached by real names below
+// one, so a watched path that no longer resolves to itself has had a
+// component swapped for a symlink, and the re-Add may have bound a
+// directory outside the root.
+func (w *Watcher) readdVerified(dir string) {
+	if err := w.fsw.Add(dir); err != nil {
+		return // best-effort; a removed dir legitimately fails here
+	}
+	if real, err := filepath.EvalSymlinks(dir); err != nil || real != dir {
+		w.dropWatch(dir)
+	}
+}
+
+// dropWatch removes the watch Add bound for path. The inotify backend
+// (Linux) keys that watch by path. The kqueue backend (macOS) keys a watch
+// added through a symlink by the link's target instead, so the target is
+// removed too when it lies outside every root. A target inside a root is a
+// directory the walk watches in its own right, and removing it would cost
+// that directory its live reload.
+func (w *Watcher) dropWatch(path string) {
+	_ = w.fsw.Remove(path) //nolint:errcheck // best-effort; kqueue may not know the watch by this name
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil || target == path {
+		return
+	}
+	for _, root := range w.store.Current().Roots() {
+		if withinRoot(root.Path, target) {
+			return
+		}
+	}
+	_ = w.fsw.Remove(target) //nolint:errcheck // best-effort; inotify keyed the watch by path and it is gone already
+}
+
+// watchCreatedDir watches a directory created at path, and its subtree,
+// under every root that holds it. The directory is opened through the
+// pinned root one held component at a time, so a symlink anywhere on the
+// way is refused rather than followed, and a component the indexer would
+// not descend into stops the registration.
+func (w *Watcher) watchCreatedDir(path string) {
+	for _, root := range w.store.Current().Roots() {
+		if path == root.Path || !withinRoot(root.Path, path) {
+			continue
+		}
+		rel, err := filepath.Rel(root.Path, path)
+		if err != nil {
+			continue
+		}
+		rt, err := openPinnedRoot(root)
+		if err != nil {
+			continue
+		}
+		dir := rt
+		for depth, name := range strings.Split(rel, string(filepath.Separator)) {
+			if excludedDir(name) {
+				if dir != rt {
+					_ = dir.Close()
+				}
+				dir = nil
+				break
+			}
+			sub, err := openHeldSubdir(dir, name, depth)
+			if dir != rt {
+				_ = dir.Close()
+			}
+			if err != nil {
+				dir = nil
+				break
+			}
+			dir = sub
+		}
+		if dir != nil {
+			_ = w.watchTree(dir, path) //nolint:errcheck // best-effort, as register is
+			if dir != rt {
+				_ = dir.Close()
+			}
+		}
+		_ = rt.Close()
 	}
 }
 
@@ -160,7 +294,7 @@ func (w *Watcher) Run(ctx context.Context) {
 // deliberately NOT watched — see relevant() for why that matters.
 func (w *Watcher) refreshWatch(ev fsnotify.Event) {
 	if dir := filepath.Dir(ev.Name); dir != "" {
-		_ = w.fsw.Add(dir) //nolint:errcheck // best-effort; a removed dir legitimately fails here
+		w.readdVerified(dir)
 	}
 
 	if !ev.Has(fsnotify.Create) {
@@ -175,16 +309,7 @@ func (w *Watcher) refreshWatch(ev fsnotify.Event) {
 	}
 	// A directory arriving whole (an mv of a populated tree) can surface as a
 	// single Create with no per-file events, so walk and watch it now.
-	_ = filepath.WalkDir(ev.Name, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || !d.IsDir() {
-			return nil //nolint:nilerr // skip unreadable entries, keep walking
-		}
-		if path != ev.Name && excludedDir(d.Name()) {
-			return filepath.SkipDir
-		}
-		_ = w.fsw.Add(path) //nolint:errcheck // best-effort
-		return nil
-	})
+	w.watchCreatedDir(ev.Name)
 }
 
 // relevant reports whether an event path should trigger a reload.
