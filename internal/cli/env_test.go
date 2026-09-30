@@ -535,6 +535,48 @@ func TestEnvSetCmd_NewFile_0600(t *testing.T) {
 	}
 }
 
+// TestEnvSetCmd_SuccessLinesQuoteThePath is forgectl#864: the `env set`
+// success line and the tightened notice quote the repo-relative path, so a
+// file name carrying a bidi override or a C1 CSI reaches the terminal escaped.
+// The runes are \u escapes so no literal format character sits in source.
+//
+// Mutation that turns it red: print target.Rel() raw on the set line or the
+// tightened line.
+func TestEnvSetCmd_SuccessLinesQuoteThePath(t *testing.T) {
+	const name = ".env.ev\u202eil\u009b31m"
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	// Looser than 0600, so the write tightens it and says so.
+	if err := os.WriteFile(filepath.Join(repo, name), []byte("OTHER=1\n"), 0o644); err != nil { //nolint:gosec // G306: the loose mode is the fixture
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Chdir(repo)
+	forceNonTTY(t)
+
+	client, _ := envFixture()
+	cmd := newEnvTestCmd(client, theme.Theme{})
+	var stdout, stderr bytes.Buffer
+	cmd.SetIn(strings.NewReader("value1\n"))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"set", "KEY", "--file", name})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("env set: %v", err)
+	}
+
+	for sink, want := range map[string]struct{ got, line string }{
+		"stdout": {stdout.String(), `set KEY in ".env.ev\u202eil\u009b31m"`},
+		"stderr": {stderr.String(), `tightened ".env.ev\u202eil\u009b31m" to 0600`},
+	} {
+		if strings.ContainsAny(want.got, "\u202e\u009b") {
+			t.Errorf("%s carries a raw bidi/control rune: %q", sink, want.got)
+		}
+		if !strings.Contains(want.got, want.line) {
+			t.Errorf("%s = %q, want it to contain %q", sink, want.got, want.line)
+		}
+	}
+}
+
 func TestEnvSetCmd_EmptyStdin_Refused(t *testing.T) {
 	repo := t.TempDir()
 	initEnvGitRepo(t, repo)
