@@ -116,6 +116,21 @@ func TestProbeGate(t *testing.T) {
 	}
 }
 
+func TestProbeFailureMessageCarriesNoControlCharacters(t *testing.T) {
+	// A herdr failure that is neither the usage exit nor a launch failure puts its
+	// stderr in the message; that text can echo pane-controlled values.
+	r := runnerFor("", &exec.CommandError{Name: Binary, ExitCode: 1, Stderr: "bad\x1b[31m red\x07"})
+	err := probe(context.Background(), r, envOf(inPane), statSocket)
+	if err == nil {
+		t.Fatal("exit 1 accepted")
+	}
+	for _, c := range err.Error() {
+		if c == 0x1b || c == 0x07 {
+			t.Fatalf("message %q contains control character %U", err.Error(), c)
+		}
+	}
+}
+
 func TestProbeVerbMustEndAtTheVerb(t *testing.T) {
 	for name, stderr := range map[string]string{
 		"a longer verb":     "usage: herdr tab move-all <tab_id>",

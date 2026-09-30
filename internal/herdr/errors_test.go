@@ -113,7 +113,8 @@ func TestEnvelopeFromAKilledChildIsNotHerdrsRefusal(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("needs sh")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	// One second, so a loaded machine cannot kill sh before its echo lands.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	const envelope = `{"error":{"code":"workspace_not_found","message":"m"}}`
 	// exec replaces sh with sleep so the kill lands on the process holding stderr.
