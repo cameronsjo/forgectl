@@ -234,6 +234,15 @@ func hasExplicitSocketArg(args []string) bool {
 	return false
 }
 
+// absentServer reports whether a failed command proves no server is running
+// on this client's socket. It never reads tmux's message: the proof is exit 1
+// plus the socket file being absent (classifyServerFailure). "no server
+// running on <socket>" and "server exited unexpectedly" are therefore
+// classified alike. On tmux 3.4 both come with the socket file still present
+// (a dead server does not unlink it), which is stale, not absent. Only the
+// file being gone ("error connecting to <socket> (No such file or
+// directory)") reads as absent, whichever message came with it
+// (forgectl#765).
 func (c *Client) absentServer(ctx context.Context, args []string, err error) bool {
 	return c.classifyServerFailure(ctx, args, err).Kind == serverAbsent
 }

@@ -333,6 +333,14 @@ func (c *Client) RevalidateSession(ctx context.Context, want SessionIdentity) (S
 
 // RevalidateWindow proves a captured window still exists on the same server
 // incarnation AND still belongs to the session it was captured under.
+//
+// "Belongs to" means ANY row carrying the id sits under the captured session,
+// not the first one. `link-window` puts one window into several sessions, and
+// `list-windows -a` then prints it once per session with the same @id, so the
+// captured parent can be the second row. Refusing on the first foreign row
+// would call a linked window reparented when it is still exactly where it was
+// captured (forgectl#762). ErrWrongParent is reserved for an id whose rows
+// ALL name some other session.
 func (c *Client) RevalidateWindow(ctx context.Context, want WindowIdentity) (WindowIdentity, error) {
 	if err := c.preflight(want.Generation, want.ID, ValidateWindowID); err != nil {
 		return WindowIdentity{}, err
@@ -344,6 +352,7 @@ func (c *Client) RevalidateWindow(ctx context.Context, want WindowIdentity) (Win
 	if err != nil {
 		return WindowIdentity{}, err
 	}
+	foreignParent := ""
 	for _, w := range windows {
 		if !want.Generation.matches(w.ServerPID, w.ServerStart) {
 			return WindowIdentity{}, generationDrift(want.Generation, w.ServerPID, w.ServerStart)
@@ -352,11 +361,17 @@ func (c *Client) RevalidateWindow(ctx context.Context, want WindowIdentity) (Win
 			continue
 		}
 		if w.SessionID != want.SessionID {
-			return WindowIdentity{}, fmt.Errorf(
-				"%w: window %s was under session %s at capture and is now under %s",
-				ErrWrongParent, w.ID, want.SessionID, w.SessionID)
+			if foreignParent == "" {
+				foreignParent = w.SessionID
+			}
+			continue
 		}
 		return WindowIdentity{Generation: want.Generation, ID: w.ID, SessionID: w.SessionID, Name: w.Name}, nil
+	}
+	if foreignParent != "" {
+		return WindowIdentity{}, fmt.Errorf(
+			"%w: window %s was under session %s at capture and is now under %s",
+			ErrWrongParent, want.ID, want.SessionID, foreignParent)
 	}
 	return WindowIdentity{}, fmt.Errorf("%w: window %s (%q)", ErrObjectGone, want.ID, want.Name)
 }

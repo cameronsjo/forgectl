@@ -80,7 +80,7 @@ func mutatingTmuxCalls(calls []exec.Call) []exec.Call {
 		if c.Name != "tmux" || len(c.Args) == 0 {
 			continue
 		}
-		switch c.Args[0] {
+		switch tmuxVerb(c.Args) {
 		case "new-window", "kill-window", "select-window", "rename-window", "move-window", "new-session":
 			out = append(out, c)
 		}
