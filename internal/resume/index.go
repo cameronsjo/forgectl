@@ -332,7 +332,7 @@ func scanHistory(path string) (map[string]*Session, error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			return map[string]*Session{}, nil
 		}
-		return nil, err
+		return nil, termsafe.Error(err)
 	}
 	defer func() { _ = f.Close() }()
 

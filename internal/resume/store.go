@@ -174,18 +174,28 @@ func Save(dir string, r *Record) error {
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(data); err != nil {
+	if _, err := saveWrite(tmp, data); err != nil {
 		_ = tmp.Close()
-		return err
+		return termsafe.Error(err)
 	}
-	if err := tmp.Close(); err != nil {
-		return err
+	if err := saveClose(tmp); err != nil {
+		return termsafe.Error(err)
 	}
-	if err := os.Chmod(tmpName, 0o600); err != nil {
-		return err
+	if err := saveChmod(tmpName, 0o600); err != nil {
+		return termsafe.Error(err)
 	}
-	return os.Rename(tmpName, final)
+	return termsafe.Error(os.Rename(tmpName, final))
 }
+
+// saveWrite, saveClose, and saveChmod are Save's temp-file operations, seamed
+// so a test can fail each one: none fails on demand against a real file, even
+// as root, and each failure's *PathError carries the store path Save must
+// escape before returning it.
+var (
+	saveWrite = (*os.File).Write
+	saveClose = (*os.File).Close
+	saveChmod = os.Chmod
+)
 
 // mergeTasks folds live task bodies over previously snapshotted ones, keyed by
 // task id.

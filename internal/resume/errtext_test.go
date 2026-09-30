@@ -42,8 +42,9 @@ func assertSourceSafe(t *testing.T, err error, cause error) {
 		t.Errorf("errors.Is(err, %v) = false; the wrap lost the cause: %v", cause, err)
 	}
 	var pathErr *fs.PathError
-	if cause != nil && !errors.As(err, &pathErr) {
-		t.Errorf("errors.As(err, *fs.PathError) = false; the wrap lost the cause: %v", err)
+	var linkErr *os.LinkError
+	if cause != nil && !errors.As(err, &pathErr) && !errors.As(err, &linkErr) {
+		t.Errorf("errors.As(err, *fs.PathError or *os.LinkError) = false; the wrap lost the cause: %v", err)
 	}
 }
 
@@ -149,5 +150,106 @@ func TestDefaultPaths_ErrorIsWrappedAtTheSource(t *testing.T) {
 			}
 			assertSourceSafe(t, err, nil)
 		})
+	}
+}
+
+// hostileDir creates a directory under a fresh temp dir whose name carries
+// hostile runes, skipping where the OS refuses them (Windows).
+func hostileDir(t *testing.T, label string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), termsafetest.Hostile(label))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Skipf("cannot create the hostile fixture directory: %v", err)
+	}
+	return dir
+}
+
+// Save's write, close, and chmod cannot be made to fail against a real file,
+// so each is failed through its seam with the *PathError the real operation
+// would return: the op and the (hostile) temp-file path.
+func TestSave_TempFileErrorsAreTerminalSafeAtTheSource(t *testing.T) {
+	injected := func(op, path string) error {
+		return &fs.PathError{Op: op, Path: path, Err: fs.ErrInvalid}
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func()
+	}{
+		{name: "write", setup: func() {
+			saveWrite = func(f *os.File, _ []byte) (int, error) { return 0, injected("write", f.Name()) }
+		}},
+		{name: "close", setup: func() {
+			saveClose = func(f *os.File) error {
+				_ = f.Close()
+				return injected("close", f.Name())
+			}
+		}},
+		{name: "chmod", setup: func() {
+			saveChmod = func(name string, _ os.FileMode) error { return injected("chmod", name) }
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, c, m := saveWrite, saveClose, saveChmod
+			t.Cleanup(func() { saveWrite, saveClose, saveChmod = w, c, m })
+			tc.setup()
+			err := Save(hostileDir(t, "store"), &Record{ID: "abc123"})
+			assertSourceSafe(t, err, fs.ErrInvalid)
+		})
+	}
+}
+
+func TestSave_RenameErrorIsTerminalSafeAtTheSource(t *testing.T) {
+	// The final record path is a non-empty directory, which a rename of a
+	// regular file over it refuses on every platform, root included.
+	dir := hostileDir(t, "store")
+	if err := os.MkdirAll(filepath.Join(dir, "abc123.json", "keep"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := Save(dir, &Record{ID: "abc123"})
+	var linkErr *os.LinkError
+	if !errors.As(err, &linkErr) {
+		t.Fatalf("want the rename's *os.LinkError, got %T %v", err, err)
+	}
+	assertSourceSafe(t, err, linkErr.Err)
+}
+
+// A history.jsonl that is a symlink to itself fails to open with ELOOP, not
+// ErrNotExist, so Scan returns the error rather than an empty list.
+func TestScan_HistoryOpenErrorIsTerminalSafeAtTheSource(t *testing.T) {
+	home := hostileDir(t, "claude")
+	history := filepath.Join(home, "history.jsonl")
+	if err := os.Symlink(history, history); err != nil {
+		t.Skipf("cannot create the fixture symlink: %v", err)
+	}
+	_, err := Scan(Paths{ClaudeHome: home, StoreDir: filepath.Join(t.TempDir(), "store")}, Opts{})
+	var pathErr *fs.PathError
+	if !errors.As(err, &pathErr) {
+		t.Fatalf("want the history open's *fs.PathError, got %T %v", err, err)
+	}
+	assertSourceSafe(t, err, pathErr.Err)
+}
+
+// The projects-dir read error is only tested against nil by today's callers;
+// it is escaped where it is built so a caller that prints it gets safe text.
+// The cached (non-nil receiver) and uncached forms return the same error.
+func TestProjectIndex_ReadErrorIsTerminalSafeAtTheSource(t *testing.T) {
+	home := hostileDir(t, "claude")
+	// projects as a regular file: ReadDir fails on it on every platform.
+	if err := os.WriteFile(filepath.Join(home, "projects"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := Paths{ClaudeHome: home}
+	for _, idx := range []*projectIndex{nil, {}} {
+		_, err := idx.list(p)
+		var pathErr *fs.PathError
+		if !errors.As(err, &pathErr) {
+			t.Fatalf("want the ReadDir *fs.PathError, got %T %v", err, err)
+		}
+		assertSourceSafe(t, err, pathErr.Err)
+		if idx != nil {
+			if _, again := idx.list(p); again == nil || again.Error() != err.Error() {
+				t.Errorf("the cached error differs: %v vs %v", again, err)
+			}
+		}
 	}
 }
