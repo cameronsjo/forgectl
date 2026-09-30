@@ -13,9 +13,11 @@ import (
 
 // postsReview reports whether the string literal s is one a review post is
 // built from: the `review` subcommand of `gh pr review`, a REST path to a
-// pull request's reviews, or the GraphQL mutation that adds a review.
+// pull request's reviews (whole, or its "reviews" segment on its own), or the
+// GraphQL mutation that adds a review.
 func postsReview(s string) bool {
-	return s == "review" || strings.Contains(s, "/reviews") || strings.Contains(s, "addPullRequestReview")
+	return s == "review" || s == "reviews" || strings.Contains(s, "/reviews") ||
+		strings.Contains(s, "addPullRequestReview")
 }
 
 // PostReview is the only function in this package that builds a review post,
@@ -25,18 +27,20 @@ func postsReview(s string) bool {
 // moment such a literal appears outside PostReview, so the new caller has to
 // route through PostReview instead.
 //
-// It is a syntactic check over the package's non-test files: every string
-// literal is read, wherever it sits (a call's argv, a slice literal built up
-// for one later, a constant), so an argv assembled away from the Run call is
-// still seen. It also requires that PostReview itself holds at least one such
-// literal, so a scan that finds nothing anywhere cannot pass.
+// It is scoped to this package, internal/pr: a poster built in another
+// package is not seen. Within it, it is a syntactic check over the non-test
+// files: every string literal is read, wherever it sits (a call's argv, a
+// slice literal built up for one later, a constant), so an argv assembled
+// away from the Run call is still seen. It also requires that PostReview
+// itself holds at least one such literal, so a scan that finds nothing
+// anywhere cannot pass.
 //
 // Mutations that turn it red: add `func postElsewhere(ctx context.Context, r
 // Runner) { _, _ = r.Run(ctx, "gh", "pr", "review") }` to a non-test file
 // (a literal outside PostReview); a `const reviewsPath =
-// "repos/%s/pulls/%d/reviews"` anywhere outside it; delete the
-// scanReviewForTokens call from PostReview, or move it below the gh argv
-// (the scan no longer precedes the post).
+// "repos/%s/pulls/%d/reviews"` anywhere outside it; a path joined from a bare
+// "reviews" segment; delete the scanReviewForTokens call from PostReview, or
+// move it below the gh argv (the scan no longer precedes the post).
 func TestPostReview_IsTheOnlyReviewPoster(t *testing.T) {
 	fset := token.NewFileSet()
 	files, err := filepath.Glob("*.go")
