@@ -45,9 +45,9 @@ type Root struct {
 	// any resolved path other than OnlyFile: naming one file must not
 	// silently grant access to every other file in its directory.
 	OnlyFile string
-	// dirInfo is Path's Stat, taken when the root was indexed. Index.Open
-	// refuses to read through Path once it names a different directory
-	// (openPinnedRoot).
+	// dirInfo is the Stat of the os.Root the index opened on Path when the
+	// root was indexed (openRootDir). Index.Open refuses to read through Path
+	// once it names a different directory (openPinnedRoot).
 	dirInfo fs.FileInfo
 	// Kind classifies this root's link syntax and anchor semantics —
 	// RootDocs (ordinary relative markdown links) or RootVault (Obsidian
@@ -435,10 +435,11 @@ func indexDirRoot(ctx context.Context, labels map[string]bool, dir string, overr
 	}
 	label := uniqueLabel(labels, filepath.Base(canonical))
 	kind, vaultPath := resolveRootKind(canonical, override, hasOverride)
-	dirInfo, err := os.Stat(canonical)
+	rt, dirInfo, err := openRootDir(canonical)
 	if err != nil {
 		return Root{}, nil, nil, fmt.Errorf("docs root %q: %w", dir, err)
 	}
+	_ = rt.Close()
 	root := Root{Label: label, Path: canonical, Kind: kind, VaultPath: vaultPath, dirInfo: dirInfo}
 	docs, skipped, err := walkRoot(ctx, root)
 	if err != nil {
@@ -477,10 +478,11 @@ func indexFileRoot(labels map[string]bool, file string, override RootKind, hasOv
 	base := filepath.Base(real)
 	label := uniqueLabel(labels, strings.TrimSuffix(base, filepath.Ext(base)))
 	kind, vaultPath := resolveRootKind(parent, override, hasOverride)
-	dirInfo, err := os.Stat(parent)
+	rt, dirInfo, err := openRootDir(parent)
 	if err != nil {
 		return Root{}, Doc{}, fmt.Errorf("docs root %q: %w", file, err)
 	}
+	_ = rt.Close()
 	root := Root{Label: label, Path: parent, OnlyFile: real, Kind: kind, VaultPath: vaultPath, dirInfo: dirInfo}
 
 	fi, err := os.Stat(real)
@@ -495,6 +497,36 @@ func indexFileRoot(labels map[string]bool, file string, override RootKind, hasOv
 		return Root{}, Doc{}, fmt.Errorf("docs root %q: %w", file, err)
 	}
 	return root, newDoc(label, base, real, fi.ModTime(), meta), nil
+}
+
+// errRootMoved reports that a root's canonical path no longer named the
+// directory CanonicalizeRoot resolved by the time the index opened it.
+var errRootMoved = errors.New("root directory changed while it was being opened")
+
+// openRootDir opens the canonical root directory as an os.Root and returns
+// it with its Stat, which becomes Root.dirInfo, the pin openPinnedRoot
+// checks every later open against. The Stat is the open Root's own rather
+// than a second lookup by path: on Windows os.Stat leaves the file ID to be
+// filled by path at the first os.SameFile, which would pin whatever the path
+// named at the first request instead of at index time (forgectl#743). The
+// path must still name a directory, not a symlink swapped in after
+// CanonicalizeRoot, since os.OpenRoot follows one.
+func openRootDir(canonical string) (*os.Root, fs.FileInfo, error) {
+	rt, err := os.OpenRoot(canonical)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := rt.Stat(".")
+	if err != nil {
+		_ = rt.Close()
+		return nil, nil, err
+	}
+	li, err := os.Lstat(canonical)
+	if err != nil || li.Mode()&fs.ModeSymlink != 0 || !os.SameFile(li, info) {
+		_ = rt.Close()
+		return nil, nil, errRootMoved
+	}
+	return rt, info, nil
 }
 
 // newDoc is the one place a Doc is assembled from its scan result, so the
@@ -936,6 +968,8 @@ func (idx *Index) resolveOpen(rootLabel, relPath string) (*os.Root, *walkEnd, st
 		if err != nil {
 			return nil, nil, "", err
 		}
+		// r.dirInfo stands in for the root's own Stat: openPinnedRoot just
+		// proved rt is that directory, so resolveIn need not stat it again.
 		end, resolved, err := idx.checkInRoot(rt, r, relPath)
 		if err != nil {
 			_ = rt.Close()
@@ -969,7 +1003,7 @@ func openPinnedRoot(r Root) (*os.Root, error) {
 // checkInRoot runs the resolution chain and the index's own gates for one
 // root over its open Root. On success the caller owns end.
 func (idx *Index) checkInRoot(rt *os.Root, r Root, relPath string) (*walkEnd, string, error) {
-	end, err := resolveIn(rt, r.Path, relPath)
+	end, err := resolveIn(rt, r.dirInfo, r.Path, relPath)
 	if err != nil {
 		return nil, "", err
 	}
