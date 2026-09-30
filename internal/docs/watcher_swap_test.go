@@ -22,6 +22,13 @@ package docs
 //   [x] Regression: a directory renamed behind a compat symlink keeps its
 //              watch, and writes in it keep reloading
 //   [x] Run carries out a rebuild left pending by NewWatcher
+//   [x] Unhappy: a watched subtree moved out of the root loses its
+//              descendants' watches (forgectl#796)
+//   [x] Repeated rebuilds back off (settleDelay, and Run under a swap that
+//              wins every pass)
+//   [x] A pending rebuild walks every root once, and still watches a root
+//              replaced since the last index
+//   [x] Churn on non-markdown files does not postpone a pending rebuild
 
 import (
 	"context"
@@ -173,11 +180,11 @@ func TestWatcherRegister_DirSwappedBeforeCheck_IsNotAdded(t *testing.T) {
 
 // A directory swapped for a symlink between the pre-Add check and the Add
 // binds a watch outside the root. The post-Add check notices, removes
-// nothing (see resetWatches), and schedules a full rebuild, after which
+// nothing (see replaceWatcher), and schedules a full rebuild, after which
 // nothing outside the root is watched.
 //
 // Mutation that turns it red: drop addVerified's post-Add namesDir check
-// (no rebuild is scheduled), or make resetWatches keep the old fsnotify
+// (no rebuild is scheduled), or make replaceWatcher keep the old fsnotify
 // watcher (the outside watch survives the reload).
 func TestWatcherRegister_DirSwappedBeforeAdd_RebuildsWatches(t *testing.T) {
 	root, outside := swapFixture(t)
@@ -437,4 +444,240 @@ func TestWatcherRefresh_CompatSymlinkedDir_KeepsItsWatch(t *testing.T) {
 	w.refreshWatch(fsnotify.Event{Name: filepath.Join(a, "doc.md"), Op: fsnotify.Write})
 
 	requireWatched(t, w, a)
+}
+
+// A watched subtree moved out of the root keeps its descendants' watches
+// unless the watcher rebuilds them: inotify drops only the moved directory's
+// own watch (IN_MOVE_SELF), and the watches below it still report under
+// their old in-root names. A write there would then drive a reload, leaking
+// reload timing for a file outside every root (forgectl#796). The move marks
+// a watch rebuild pending, so the reload that follows starts from a fresh
+// fsnotify watcher.
+//
+// Mutation that turns it red: drop the resetPending assignment on a
+// dirMoved event in Run (the write under outside/a/sub reloads).
+func TestWatcher_SubtreeMovedOutOfRoot_DropsDescendantWatches(t *testing.T) {
+	root, outside := swapFixture(t)
+	sub := filepath.Join(root, "a", "sub")
+	if err := os.MkdirAll(sub, 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	writeFile(t, filepath.Join(sub, "doc.md"), "# Doc\n")
+	_, reloads, _ := newTestWatcher(t, root)
+
+	moved := filepath.Join(outside, "a")
+	if err := os.Rename(filepath.Join(root, "a"), moved); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	awaitReload(t, reloads, "moving root/a out of the root")
+	drainReloads(reloads)
+
+	writeFile(t, filepath.Join(moved, "sub", "secret.md"), "# Secret\n")
+	select {
+	case <-reloads:
+		t.Fatal("a write under a subtree moved out of the root reloaded the reader; its descendant watches outlived the move")
+	case <-time.After(quietWindow):
+	}
+
+	// CONTROL: the watcher is still live for the root itself.
+	writeFile(t, filepath.Join(root, "top.md"), "# Top\n\nedited\n")
+	awaitReload(t, reloads, "a write to root/top.md")
+}
+
+// settleDelay is the plain debounce unless a watch rebuild is pending
+// within resetQuiet of the last one; then it doubles once more than the
+// streak so far, and caps.
+//
+// Mutation that turns it red: return w.debounce unconditionally (no
+// backoff), drop the maxResetBackoff cap, or back off with no rebuild
+// pending (the plain-edit row).
+func TestWatcherSettleDelay_BacksOffAndCaps(t *testing.T) {
+	w := &Watcher{debounce: 100 * time.Millisecond}
+	if got := w.settleDelay(); got != w.debounce {
+		t.Errorf("settleDelay with no rebuild ever run = %v, want the debounce", got)
+	}
+	w.lastReset = time.Now()
+	w.resetStreak = 3
+	if got := w.settleDelay(); got != w.debounce {
+		t.Errorf("settleDelay with no rebuild pending = %v, want the debounce: a plain edit is never backed off", got)
+	}
+	w.resetPending = true
+	for streak, want := range []time.Duration{
+		200 * time.Millisecond,
+		400 * time.Millisecond,
+		800 * time.Millisecond,
+	} {
+		w.resetStreak = streak
+		if got := w.settleDelay(); got != want {
+			t.Errorf("settleDelay at streak %d = %v, want %v", streak, got, want)
+		}
+	}
+	w.resetStreak = 1000
+	if got := w.settleDelay(); got != maxResetBackoff {
+		t.Errorf("settleDelay at streak 1000 = %v, want the cap %v", got, maxResetBackoff)
+	}
+	w.lastReset = time.Now().Add(-resetQuiet)
+	if got := w.settleDelay(); got != w.debounce {
+		t.Errorf("settleDelay after resetQuiet = %v, want the debounce", got)
+	}
+}
+
+// A directory swap that wins the race against every registration pass
+// leaves a watch rebuild pending after every reload. Run backs off instead
+// of reloading at the debounce rate for as long as that lasts.
+//
+// Mutation that turns it red: drop Run's resetStreak increment, or reset
+// the streak on any reload that ends clean (a reload every debounce or two,
+// dozens in the window).
+func TestWatcherRun_RepeatedReset_BacksOff(t *testing.T) {
+	root, outside := swapFixture(t)
+	a := filepath.Join(root, "a")
+	moved := a + ".moved"
+	// Every registration pass swaps root/a for a symlink during its Add,
+	// which marks a rebuild pending, then puts it back when the walk
+	// reaches root/b, so the next pass meets it again.
+	setWatchHook(t, func(path string, stage watchStage) {
+		switch {
+		case path == a && stage == stageBeforeAdd:
+			_ = os.Rename(a, moved)
+			_ = os.Symlink(outside, a)
+		case path == filepath.Join(root, "b") && stage == stageBeforeCheck:
+			if _, err := os.Stat(moved); err == nil {
+				_ = os.Remove(a)
+				_ = os.Rename(moved, a)
+			}
+		}
+	})
+	idx, err := NewIndex([]string{root})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	broker := NewBroker()
+	w, err := NewWatcher(NewStore(idx), broker)
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	if !w.resetPending {
+		t.Fatal("the swapping hook did not leave a rebuild pending; the fixture exercises nothing")
+	}
+	w.debounce = testDebounce
+	sub, unsubscribe := broker.Subscribe()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		unsubscribe()
+		broker.Close()
+		_ = w.Close()
+	})
+	go w.Run(ctx)
+
+	// 20 ms doubling from 40 ms: a reload at about 20, 60, 140, 300, 620 and
+	// 1260 ms, so about six in the window, plus any the swap's own events
+	// arm. Without backoff it is one per debounce or two.
+	window := time.After(1500 * time.Millisecond)
+	reloads := 0
+	for done := false; !done; {
+		select {
+		case <-sub:
+			reloads++
+		case <-window:
+			done = true
+		}
+	}
+	t.Logf("%d reloads in the window", reloads)
+	if reloads < 2 {
+		t.Fatalf("%d reloads in the window; the pending rebuild never repeated, so nothing was measured", reloads)
+	}
+	if reloads > 12 {
+		t.Errorf("%d reloads in 1.5s under a rebuild that stays pending; want backoff (at most about 7)", reloads)
+	}
+}
+
+// A pending watch rebuild walks every root once: the fresh watcher is
+// registered before the index rebuild, and not again after it.
+//
+// Mutation that turns it red: register the fresh index in full after the
+// rebuild whatever the reset pass did (the root is walked twice).
+func TestWatcherReload_PendingReset_RegistersOnce(t *testing.T) {
+	root, _ := swapFixture(t)
+	w := newUnstartedWatcher(t, root)
+	walks := 0
+	setWatchHook(t, func(path string, stage watchStage) {
+		if path == root && stage == stageBeforeCheck {
+			walks++
+		}
+	})
+	w.resetPending = true
+	w.reload()
+	if walks != 1 {
+		t.Errorf("a reload with a watch rebuild pending walked the root %d times, want 1", walks)
+	}
+	requireWatched(t, w, root, filepath.Join(root, "a"), filepath.Join(root, "b"))
+}
+
+// A root replaced by a new directory since the last index cannot be opened
+// through the current index's pin, so the rebuild's pass before the index
+// rebuild skips it. The fresh index pins the new directory, and the reload
+// registers that root from it.
+//
+// Mutation that turns it red: skip the post-rebuild registration of the
+// roots the reset pass could not open (the new root is never watched).
+func TestWatcherReload_PendingReset_RegistersReplacedRoot(t *testing.T) {
+	root, _ := swapFixture(t)
+	w := newUnstartedWatcher(t, root)
+	if err := os.Rename(root, root+".old"); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "fresh"), 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	writeFile(t, filepath.Join(root, "doc.md"), "# Doc\n")
+	w.resetPending = true
+	w.reload()
+	requireWatched(t, w, root, filepath.Join(root, "fresh"))
+}
+
+// While a watch rebuild is pending and its reload is armed, an event that
+// is not otherwise relevant does not re-arm the timer: churn on other files
+// cannot keep postponing the rebuild.
+//
+// Mutation that turns it red: re-arm on every event while resetPending is
+// set (the reload waits for the churn to stop).
+func TestWatcherRun_IrrelevantChurn_DoesNotPostponeReset(t *testing.T) {
+	root, _ := swapFixture(t)
+	idx, err := NewIndex([]string{root})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	broker := NewBroker()
+	w, err := NewWatcher(NewStore(idx), broker)
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	w.debounce = 200 * time.Millisecond
+	w.resetPending = true
+	sub, unsubscribe := broker.Subscribe()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		unsubscribe()
+		broker.Close()
+		_ = w.Close()
+	})
+	go w.Run(ctx)
+
+	churn := filepath.Join(root, "notes.txt")
+	stop := time.After(2 * time.Second)
+	tick := time.NewTicker(30 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-sub:
+			return // the rebuild ran while the churn went on
+		case <-tick.C:
+			writeFile(t, churn, time.Now().String())
+		case <-stop:
+			t.Fatal("no reload during 2s of churn on a non-markdown file; each event postponed the pending rebuild")
+		}
+	}
 }
