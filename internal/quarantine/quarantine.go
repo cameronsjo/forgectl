@@ -927,15 +927,15 @@ func resolveExistingSpelling(root, target string) (string, bool, error) {
 func resolveRootIdentity(root string) (rootIdentity, error) {
 	absolute, err := filepath.Abs(root)
 	if err != nil {
-		return rootIdentity{}, fmt.Errorf("make quarantine root absolute: %w", err)
+		return rootIdentity{}, fmt.Errorf("make quarantine root absolute: %w", termsafe.Error(err))
 	}
 	realRoot, err := filepath.EvalSymlinks(absolute)
 	if err != nil {
-		return rootIdentity{}, fmt.Errorf("resolve quarantine root: %w", err)
+		return rootIdentity{}, fmt.Errorf("resolve quarantine root: %w", termsafe.Error(err))
 	}
 	realRoot, err = filepath.Abs(realRoot)
 	if err != nil {
-		return rootIdentity{}, fmt.Errorf("make resolved quarantine root absolute: %w", err)
+		return rootIdentity{}, fmt.Errorf("make resolved quarantine root absolute: %w", termsafe.Error(err))
 	}
 	return rootIdentity{absolute: absolute, real: realRoot}, nil
 }

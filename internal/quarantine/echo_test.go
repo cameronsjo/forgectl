@@ -7,6 +7,7 @@ package quarantine
 //   [x] a rejected target rule is quoted and capped
 //   [x] Restore's stat failure names the move path quoted, not raw, and keeps
 //       the PathError on the chain
+//   [x] resolveRootIdentity's wrapped root errors are escaped
 
 import (
 	"context"
@@ -62,5 +63,23 @@ func TestRestore_StatFailureQuotesTheMovePath(t *testing.T) {
 	var pathErr *os.PathError
 	if !errors.As(err, &pathErr) || !errors.Is(err, syscall.ENOTDIR) {
 		t.Errorf("the PathError fell off the chain: %v", err)
+	}
+}
+
+// resolveRootIdentity's errors wrap the root's own PathError, whose path is
+// the workspace. They go through termsafe.Error like the rest of the file.
+//
+// Mutation: drop termsafe.Error from the "resolve quarantine root" wrap and
+// the raw control reaches the error.
+func TestResolveRootIdentity_EscapesTheRootPath(t *testing.T) {
+	_, err := resolveRootIdentity(filepath.Join(t.TempDir(), "gone"+hostile))
+	if err == nil {
+		t.Fatal("resolveRootIdentity(missing root) = nil, want an error")
+	}
+	if strings.ContainsAny(err.Error(), "\x1b\x07") {
+		t.Errorf("the error carries a raw control from the root path: %q", err)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the not-exist cause fell off the chain: %v", err)
 	}
 }
