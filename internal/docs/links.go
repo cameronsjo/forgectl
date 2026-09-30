@@ -575,7 +575,7 @@ const maxRenderedFragment = 512
 const maxFragmentParseBytes = 64 << 10
 
 // fragmentBudget is the remaining parse allowance of ONE source document:
-// one per render, and one per document while the index builds. A nil budget
+// one per render, and one per document while docs check runs. A nil budget
 // is unlimited, which ResolveLink's single lookups use.
 //
 // The bound makes resolution order-dependent: once a note has spent its
@@ -583,7 +583,12 @@ const maxFragmentParseBytes = 64 << 10
 // text, while earlier ones did. That is deliberate and fail-closed: a link
 // past the budget misses (its slug and as-written match still work), and
 // never lands on a different heading.
-type fragmentBudget struct{ remaining int }
+type fragmentBudget struct {
+	remaining int
+	// refused counts the fragments take turned away. docs check reads it
+	// to tell a link the budget left unchecked from a real broken anchor.
+	refused int
+}
 
 func newFragmentBudget() *fragmentBudget {
 	return &fragmentBudget{remaining: maxFragmentParseBytes}
@@ -596,6 +601,7 @@ func (b *fragmentBudget) take(n int) bool {
 		return true
 	}
 	if n > b.remaining {
+		b.refused++
 		return false
 	}
 	b.remaining -= n
