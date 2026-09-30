@@ -78,3 +78,45 @@ func TestTrailingSeparatorOperandsLandVerbatimIsolated(t *testing.T) {
 		t.Errorf("window's command got arguments %q, want %q", args, want)
 	}
 }
+
+// TestEnvValueEndingInSemicolonLandsIsolated is forgectl#836 item 4 on a real
+// tmux: an -e value ending in ';' reaches the window's environment as given,
+// and the command after it still runs.
+//
+// Mutation that turns it red: append e rather than escapeArgvSeparator(e) at
+// NewWindowWithEnv's -e (tmux ends the command at the entry and fails).
+func TestEnvValueEndingInSemicolonLandsIsolated(t *testing.T) {
+	c, _, _ := isolatedTmux(t)
+	ctx := context.Background()
+
+	root, err := os.MkdirTemp("/tmp", "f836-env-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	session, err := c.CreateSession(ctx, "env", root)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	out := filepath.Join(root, "out")
+	script := `printf '%s|%s' "$SEMI" "$HASH" > "$OUT.tmp" && mv "$OUT.tmp" "$OUT"; sleep 60`
+	if _, err := c.NewWindowWithEnv(ctx, session, "w", root,
+		[]string{"OUT=" + out, "SEMI=a;", "HASH=#{pid}"}, "sh", "-c", script); err != nil {
+		t.Fatalf("NewWindowWithEnv: %v", err)
+	}
+	var got []byte
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		got, err = os.ReadFile(filepath.Clean(out))
+		if err == nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("the window's command never wrote %s: %v", out, err)
+	}
+	if want := "a;|#{pid}"; string(got) != want {
+		t.Errorf("window environment = %q, want %q", got, want)
+	}
+}

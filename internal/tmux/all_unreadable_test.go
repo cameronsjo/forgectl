@@ -75,6 +75,48 @@ func TestAllRowsUnreadableKeepsTheLocaleErrorWhenNoSeparatorSurvived(t *testing.
 	}
 }
 
+// TestForgedLossyRowKeepsTheLocaleError is forgectl#836 item 5. Under tmux
+// 3.7b's lossy `_` rendering every row is one field, but a window name holding
+// the literal text `\037` enough times splits its OWN row into the format's
+// field count. Without the decimal-first-field rule that forged row "proves"
+// the separator survived, so the whole listing, live windows included, comes
+// back empty with no error. It must stay the locale error.
+//
+// Mutation that turns it red: drop `&& isDecimal(f[0])` from parsedRows.
+func TestForgedLossyRowKeepsTheLocaleError(t *testing.T) {
+	live := strings.ReplaceAll(windowRow("1", "2", "@1", "$1", "work", 0, "ok"), FieldSep, "_")
+	forged := strings.ReplaceAll(windowRow("1", "2", "@2", "$1", "work", 1,
+		strings.Repeat(escapedFieldSep, windowFieldCount)), FieldSep, "_")
+	if n := len(splitFields(forged)); n < windowFieldCount {
+		t.Fatalf("fixture: the forged row splits into %d fields, want at least %d", n, windowFieldCount)
+	}
+	windows, _, err := parseWindowRows(live + "\n" + forged)
+	if !errors.Is(err, ErrUnreadableFields) {
+		t.Fatalf("parseWindowRows = (%d windows, %v), want ErrUnreadableFields", len(windows), err)
+	}
+}
+
+// TestNeverAttachedUnreadableRowIsEmpty is the parse-level half of
+// TestNeverAttachedUnreadableSessionIsEmptyIsolated, which skips on tmux 3.7c
+// (it refuses a 0x1F session name). tmux renders a never-attached session's
+// #{session_last_attached} as "", so a format led by it has no decimal first
+// field. The lone unreadable row must still read as no session plus one
+// unreadable row, not the locale error.
+//
+// Mutation that turns it red: move #{session_last_attached} back to the front
+// of lastAttachedFormat, and lastAttachedRow's ts with it.
+func TestNeverAttachedUnreadableRowIsEmpty(t *testing.T) {
+	out := lastAttachedRow("", "91", "1700000000", "$0", "a"+FieldSep+"b")
+	fake := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return out, nil }}
+	got, unreadable, err := New(fake).mostRecentSession(context.Background())
+	if err != nil {
+		t.Fatalf("mostRecentSession: %v; want no session and one unreadable row", err)
+	}
+	if got.ID != "" || unreadable != 1 {
+		t.Fatalf("mostRecentSession = %+v, %d unreadable; want none and 1", got, unreadable)
+	}
+}
+
 // TestTreeListingWithOnlyUnreadableRows: `tmux tree` and the TUI get an empty
 // tree plus the counts, so they print the unreadable-rows note instead of an
 // error blaming the locale (forgectl#826).

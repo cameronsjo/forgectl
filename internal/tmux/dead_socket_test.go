@@ -130,9 +130,9 @@ func TestClassifyDeadSocketNeedsTwoRefusals(t *testing.T) {
 // that a crashed server's panes died with it (#765).
 //
 // Mutations that turn it red: read serverDeadSocket as absent in absentServer
-// (the revalidation becomes ErrObjectGone); drop exitedIsEmpty's check (the
-// display listing errors); drop EnsureSession's ErrServerExited arm (the
-// create never runs).
+// (the revalidation becomes ErrObjectGone); drop the ErrServerExited arm from
+// any Display*Listing (that display listing errors); drop EnsureSession's
+// ErrServerExited arm (the create never runs).
 func TestDeadSocketIsEmptyOnlyForOptedInCallers(t *testing.T) {
 	socket := fakeFileInfo{mode: fs.ModeSocket | 0o600}
 	created := false
@@ -152,8 +152,8 @@ func TestDeadSocketIsEmptyOnlyForOptedInCallers(t *testing.T) {
 	if windows, err := c.DisplayWindows(ctx); err != nil || len(windows) != 0 {
 		t.Fatalf("DisplayWindows = (%v, %v), want empty, nil", windows, err)
 	}
-	if panes, err := c.DisplayPanes(ctx); err != nil || len(panes) != 0 {
-		t.Fatalf("DisplayPanes = (%v, %v), want empty, nil", panes, err)
+	if panes, unreadable, err := c.DisplayPaneListing(ctx); err != nil || len(panes) != 0 || unreadable != 0 {
+		t.Fatalf("DisplayPaneListing = (%v, %d, %v), want empty, 0, nil", panes, unreadable, err)
 	}
 
 	_, err := c.ListSessions(ctx)

@@ -56,11 +56,19 @@ const escapedFieldSep = `\037`
 // rendering of FieldSep (see escapedFieldSep). Exported for internal/pr, which
 // parses dispatch identities produced by this package's formats.
 //
-// Raw wins when present, and the two renderings can never be confused: a tmux
-// that escapes never emits a bare 0x1f — it escapes every control byte, and
-// the backslash itself — so a line carrying the raw separator can only have
-// come from a non-escaping tmux, where a literal `\037` inside a name is just
-// four ordinary characters.
+// Raw wins when present. A tmux that escapes never emits a bare 0x1f — vis(3)
+// encodes every control byte — so a line carrying the raw separator can only
+// have come from a non-escaping tmux, where a literal `\037` inside a name is
+// just four ordinary characters.
+//
+// The reverse does NOT hold, and an escaping tmux's own output can forge the
+// escaped separator. It renders with VIS_NOSLASH, so it does not escape a
+// backslash (tmux 3.4 server_client_print; measured on 3.4 against an
+// isolated socket): a pane title or pane command holding the literal text
+// `\037` arrives exactly as the separator does. A session or window name is
+// no safer, because tmux doubles the backslash when it STORES the name, and
+// `\\037` still contains `\037`. So on an escaping tmux, a name, pane title or
+// pane command can add fields to its own row.
 //
 // Splitting can only ever ADD fields, never remove them, which is what lets
 // the exact field-count checks at the call sites stand as the real defense: a
@@ -116,17 +124,28 @@ var ErrUnreadableFields = errors.New("tmux field separator did not survive the -
 // result is an empty listing, and the caller's unreadable count carries the
 // news, rather than an error blaming the operator's locale. A lossy rendering
 // such as 3.7b's `_` leaves every line a single field, so it stays loud.
+//
+// The proving line must also open with a decimal field, because a lossy line
+// can be FORGED into splitting (forgectl#836): under 3.7b's `_` rendering a
+// name holding the literal text `\037` enough times splits into want fields,
+// and without this check one such name would turn a live, unreadable listing
+// into a confident empty one (killReviewWindow would then read a live review
+// window as already gone). Every format here opens with #{pid}, which is
+// always decimal (lastAttachedFormat says why its sort key cannot lead), and
+// a lossy line cannot supply one:
+// its first field runs from that number through the `_` substitutes and into
+// the next field, up to the forger's first `\037`.
 func parsedRows[T any](rows []T, lines []string, command string, want int) ([]T, error) {
 	if len(rows) > 0 || len(lines) == 0 {
 		return rows, nil
 	}
 	for _, line := range lines {
-		if len(splitFields(line)) >= want {
+		if f := splitFields(line); len(f) >= want && isDecimal(f[0]) {
 			return rows, nil
 		}
 	}
 	return nil, fmt.Errorf(
-		"%w: %s returned %d line(s), none of which split into %d fields (first line %q); "+
+		"%w: %s returned %d line(s), none of which split into %d fields led by a number (first line %q); "+
 			"tmux renders the separator lossily outside a UTF-8 locale — set LANG/LC_ALL to a UTF-8 locale and retry",
 		ErrUnreadableFields, command, len(lines), want, lines[0])
 }

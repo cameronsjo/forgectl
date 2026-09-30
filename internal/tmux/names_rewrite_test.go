@@ -204,8 +204,8 @@ func TestParseWindowRowsCountsDroppedRows(t *testing.T) {
 // mostRecentSession.
 func TestMostRecentSessionCountsDroppedRows(t *testing.T) {
 	out := strings.Join([]string{
-		strings.Join([]string{"100", "1", "2", "$1", "older"}, FieldSep),
-		strings.Join([]string{"200", "1", "2", "$2", "newer" + FieldSep + "pad"}, FieldSep),
+		lastAttachedRow("100", "1", "2", "$1", "older"),
+		lastAttachedRow("200", "1", "2", "$2", "newer"+FieldSep+"pad"),
 	}, "\n")
 	fake := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return out, nil }}
 	got, unreadable, err := New(fake).mostRecentSession(context.Background())
@@ -219,14 +219,15 @@ func TestMostRecentSessionCountsDroppedRows(t *testing.T) {
 
 // TestUnreadableRowsNote pins the note's wording: the sessions-only form is
 // byte-identical to what `tmux ls` printed before forgectl#815, a zero count
-// says nothing, and a pane count (forgectl#823) names the pane command too.
+// says nothing, and a pane count (forgectl#823) names the pane title and
+// command too (forgectl#836).
 //
 // Mutation that turns it red: drop the Panes part from Note.
 func TestUnreadableRowsNote(t *testing.T) {
 	const tail = " could not be read and are not listed — a name carrying the 0x1F field separator hides its row; " +
 		"rename or kill it with tmux itself"
-	const paneTail = " could not be read and are not listed — a name or pane command carrying the 0x1F field separator " +
-		"hides its row; rename or kill it with tmux itself"
+	const paneTail = " could not be read and are not listed — a name, pane title or pane command carrying the 0x1F " +
+		`field separator (or the text \037) hides its row; rename or kill it with tmux itself`
 	for u, want := range map[UnreadableRows]string{
 		{}:                                  "",
 		{Sessions: 2}:                       "2 session(s)" + tail,
