@@ -216,15 +216,21 @@ var agentsBooleanFlags = map[string]bool{
 // dispatching agents run. A token is in flag position when it follows
 // `agents` itself, a `--flag=value`, a known boolean flag, or a bare value
 // (agents takes no positionals, so a bare token is always some flag's value).
+//
+// The scan stops at claude's own `--`, as IsClaudePrintMode does. Everything
+// after it is an operand, so `agents -- x --json` is not a JSON listing:
+// claude fails it "too many arguments for 'agents'" (2.1.285). It keeps the
+// posture-injecting branch.
 func IsAgentsPassthrough(agentArgs []string) bool {
 	for i := 1; i < len(agentArgs); i++ {
 		switch agentArgs[i] {
+		case "--":
+			return false
 		case "--json", "--help", "-h":
 		default:
 			continue
 		}
-		prev := agentArgs[i-1]
-		if i == 1 || !strings.HasPrefix(prev, "-") || strings.Contains(prev, "=") || agentsBooleanFlags[prev] {
+		if i == 1 || inFlagPosition(agentArgs[i-1], agentsBooleanFlags) {
 			return true
 		}
 	}
