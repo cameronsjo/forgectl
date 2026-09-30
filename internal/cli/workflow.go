@@ -457,7 +457,7 @@ func workflowStatusNote(rawName, safeName string, state workflow.RunState) strin
 		// wrapped *os.PathError cannot reinsert the raw path its own Error
 		// method would print. The result is already terminal-safe, so both
 		// the human and --json callers use it as-is with no further escaping.
-		return fmt.Sprintf("could not load the current definition of %s (%v) — resume is unavailable until it loads", safeName, termsafe.Error(err))
+		return fmt.Sprintf("could not load the current definition of %s (%s) — resume is unavailable until it loads", safeName, safeText(termsafe.Error(err).Error()))
 	}
 	if workflow.DefinitionHash(src.Data) != state.DefinitionHash {
 		return fmt.Sprintf("%s has changed since this run (any edit to the file invalidates every checkpoint) — resume will be refused; run it fresh", safeName)

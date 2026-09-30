@@ -236,7 +236,7 @@ func runCleanDirs(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.Cle
 	for _, item := range result.Items {
 		switch {
 		case item.Err != nil:
-			_, _ = fmt.Fprintf(out, "FAILED  %s: %v\n", termsafe.QuotePath(item.Path), termsafe.Error(item.Err))
+			_, _ = fmt.Fprintf(out, "FAILED  %s: %s\n", termsafe.QuotePath(item.Path), safeText(termsafe.Error(item.Err).Error()))
 			failed++
 		case item.Skipped:
 			// Already printed in the preview pass above; apply-phase output

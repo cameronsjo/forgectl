@@ -65,6 +65,11 @@ const (
 // silently truncate at gh's default of 30.
 const ghListLimit = "500"
 
+// branchEchoMaxRunes caps a branch or remote name quoted in an error (#934),
+// in input runes (termsafe.QuoteTextMax). 256 holds git's longest practical
+// ref name whole; a longer one ends in an ellipsis outside the quote.
+const branchEchoMaxRunes = 256
+
 // Client enumerates and prunes git branches. Every git/gh shell-out goes
 // through the exec.Runner seam, never os/exec directly.
 type Client struct {
@@ -291,7 +296,7 @@ func (c *Client) deleteLocal(ctx context.Context, info Info) error {
 			slog.Error("Failed to remove worktree.", "branch", info.Name, "worktree", info.WorktreePath, "error", err)
 			// Categorical cause (#717): git's stderr is not echoed; the path
 			// and name are quoted so a control or bidi rune stays inert.
-			return fmt.Errorf("remove worktree %s before deleting branch %s: %w", termsafe.QuotePath(info.WorktreePath), termsafe.QuoteText(info.Name), termsafe.Categorical("git worktree remove failed", err))
+			return fmt.Errorf("remove worktree %s before deleting branch %s: %w", termsafe.QuotePath(info.WorktreePath), termsafe.QuoteTextMax(info.Name, branchEchoMaxRunes), termsafe.Categorical("git worktree remove failed", err))
 		}
 		slog.Debug("Successfully removed worktree.", "branch", info.Name, "worktree", info.WorktreePath)
 	}
@@ -305,7 +310,7 @@ func (c *Client) deleteLocal(ctx context.Context, info Info) error {
 	slog.Debug("Preparing to delete local branch.", "branch", info.Name)
 	if _, err := c.run.Run(ctx, "git", "branch", "-D", "--", info.Name); err != nil {
 		slog.Error("Failed to delete local branch.", "branch", info.Name, "error", err)
-		return fmt.Errorf("delete local branch %s: %w", termsafe.QuoteText(info.Name), termsafe.Categorical("git branch -D failed", err))
+		return fmt.Errorf("delete local branch %s: %w", termsafe.QuoteTextMax(info.Name, branchEchoMaxRunes), termsafe.Categorical("git branch -D failed", err))
 	}
 	slog.Info("Successfully deleted local branch.", "branch", info.Name)
 	return nil
@@ -319,12 +324,12 @@ func (c *Client) deleteRemote(ctx context.Context, remoteName string, info Info)
 		slog.Error("Failed to delete remote branch.", "remote", remoteName, "branch", info.Name, "error", err)
 		// Categorical cause (#658): git relays the remote's sideband
 		// ("remote: …") on stderr, which is server-chosen text.
-		return fmt.Errorf("delete remote branch %s on remote %s: %w", termsafe.QuoteText(info.Name), termsafe.QuoteText(remoteName), termsafe.Categorical("git push --delete failed", err))
+		return fmt.Errorf("delete remote branch %s on remote %s: %w", termsafe.QuoteTextMax(info.Name, branchEchoMaxRunes), termsafe.QuoteTextMax(remoteName, branchEchoMaxRunes), termsafe.Categorical("git push --delete failed", err))
 	}
 
 	origin, err := c.resolveRemote(ctx, remoteName)
 	if err != nil {
-		return fmt.Errorf("resolve owner/repo to verify remote delete of %s: %w", termsafe.QuoteText(info.Name), err)
+		return fmt.Errorf("resolve owner/repo to verify remote delete of %s: %w", termsafe.QuoteTextMax(info.Name, branchEchoMaxRunes), err)
 	}
 	if err := c.verifyRemoteDeleted(ctx, origin, info.Name); err != nil {
 		slog.Error("Failed to verify remote branch deletion.", "remote", remoteName, "branch", info.Name, "error", err)
@@ -415,13 +420,13 @@ func (c *Client) verifyRemoteDeleted(ctx context.Context, origin originRepo, nam
 	if err == nil {
 		// The response body is gh output and is not echoed (#562). The name
 		// is rendered once, quoted; owner and repo are validated parts.
-		return fmt.Errorf("remote branch %s still exists on %s/%s after delete (its ref GET succeeded)", termsafe.QuoteText(name), origin.owner, origin.repo)
+		return fmt.Errorf("remote branch %s still exists on %s/%s after delete (its ref GET succeeded)", termsafe.QuoteTextMax(name, branchEchoMaxRunes), origin.owner, origin.repo)
 	}
 	if !isGhNotFound(err) {
 		// Categorical cause (#658), as the git push leg: err is gh's stderr,
 		// text the host chooses.
 		slog.Error("Failed to verify remote branch deletion.", "branch", name, "error", err)
-		return fmt.Errorf("verify remote branch %s deletion: %w", termsafe.QuoteText(name), termsafe.Categorical("gh api failed", err))
+		return fmt.Errorf("verify remote branch %s deletion: %w", termsafe.QuoteTextMax(name, branchEchoMaxRunes), termsafe.Categorical("gh api failed", err))
 	}
 	return nil
 }

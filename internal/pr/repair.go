@@ -215,7 +215,7 @@ func (c *Client) repairInspectLocked(ctx context.Context) (RepairReport, error) 
 			RecordPath: u.path,
 			FromPhase:  repairPhaseUnreadable,
 			Outcome:    repairOutcomeUnreadable,
-			Error:      termsafe.SafeLine(u.err.Error()),
+			Error:      recordText(u.err.Error()),
 		})
 	}
 	if len(candidates) == 0 {
@@ -311,7 +311,7 @@ func (c *Client) repairUndecodableLocked(ctx context.Context, opts RepairOpts, m
 		RecordPath: member.path,
 		FromPhase:  repairPhaseUnreadable,
 		Outcome:    repairOutcomeRefused,
-		Error:      termsafe.SafeLine(decodeErr.Error()),
+		Error:      recordText(decodeErr.Error()),
 	}
 	if !opts.ForgetIfAbsent {
 		return item, fmt.Errorf("this build cannot read session record %s, so it cannot adopt or roll it back: %w — "+
@@ -485,7 +485,7 @@ func setAsidePrompt(member breadcrumbMember, decodeErr error, refKnown bool) str
 		"  record: %s\n"+
 		"  reason: %s\n"+
 		"  the file is renamed, not deleted — but whether it named a clean room cannot be checked",
-		termsafe.QuoteText(member.path), termsafe.SafeLine(decodeErr.Error()))
+		termsafe.QuoteText(member.path), recordText(decodeErr.Error()))
 	if !refKnown {
 		prompt += "\n  no ref could be read, so whether its review window is live was not checked"
 	}
@@ -837,7 +837,7 @@ func (c *Client) completeRepairRow(id string, row RepairRow, cause error) {
 	row.Error = ""
 	if cause != nil {
 		row.Outcome = repairOutcomeFailed
-		row.Error = termsafe.SafeLine(safeErrString(cause))
+		row.Error = recordText(safeErrString(cause))
 	}
 	if err := c.appendRepairRowLocked(row); err != nil {
 		slog.Error("Failed to complete a repair audit row; the intent row is left dangling, which is the honest record.",

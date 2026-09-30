@@ -647,7 +647,7 @@ func (m model) pickerView() string {
 	}
 	switch {
 	case p.errText != "":
-		lines = append(lines, s.Danger.Render(termsafe.SafeLine("✗ "+p.errText)))
+		lines = append(lines, s.Danger.Render(termsafe.SafeLineMax("✗ "+p.errText, statusMaxRunes)))
 	case len(p.candidates) == 0 && p.optional:
 		lines = append(lines, s.Muted.Render("(type a value, or enter to run without one)"))
 	case len(p.candidates) == 0:

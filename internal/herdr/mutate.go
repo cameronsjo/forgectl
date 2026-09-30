@@ -24,7 +24,7 @@ type Declined struct {
 // Reason is capped as Message is (#837), and stored redacted as Message is
 // (#941), so the exported field never holds herdr's raw text.
 func (d *Declined) Error() string {
-	return "herdr declined to move tab " + printable(d.TabID) + ": " + printableMax(redact.Text(d.Reason))
+	return "herdr declined to move tab " + printableMax(d.TabID) + ": " + printableMax(redact.Text(d.Reason))
 }
 
 // MoveTarget says where a tab goes. Build one with [ToWorkspace],
