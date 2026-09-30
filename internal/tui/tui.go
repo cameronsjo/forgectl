@@ -147,10 +147,13 @@ type HubLeaf struct {
 //
 // Header is the hub's status line and ArgSources feeds the argument picker,
 // keyed by the space-joined argv before the argument ("projects clone").
+// BuildArgv turns a picker choice into argv against the live command tree;
+// nil falls back to the tree-blind PickerArgv.
 type RunOptions struct {
 	Hub         []HubEntry
 	Header      HubHeader
 	ArgSources  map[string]ArgSource
+	BuildArgv   ArgvBuilder
 	StartInTmux bool
 	NoIcons     bool
 	Theme       theme.Theme
@@ -224,6 +227,7 @@ type model struct {
 	// header is the hub's status line; argSources feeds picker candidates.
 	header     HubHeader
 	argSources map[string]ArgSource
+	buildArgv  ArgvBuilder
 	// picker is the open argument picker, or nil. While it is open it owns
 	// the keyboard (updatePicker).
 	picker *argPicker
@@ -273,6 +277,7 @@ func newModel(ctx context.Context, client *tmux.Client, opts RunOptions) model {
 
 		header:     opts.Header,
 		argSources: opts.ArgSources,
+		buildArgv:  opts.BuildArgv,
 	}
 	if opts.StartInTmux {
 		m.title = "menu"
@@ -479,6 +484,13 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
 		if idx := int(key[0] - '1'); idx < len(m.l.VisibleItems()) {
 			m.l.Select(idx)
+			if it, ok := m.l.SelectedItem().(hubItem); ok && it.entry.Heading {
+				// A divider's number is not a row: land on the next real
+				// row and wait for enter rather than run something the
+				// operator did not number.
+				m.skipHeading(false)
+				return m, nil
+			}
 			return m.activate()
 		}
 	}

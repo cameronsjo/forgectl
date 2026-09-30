@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -414,5 +415,66 @@ func TestPicker_LongInputKeepsTheBoxHeight(t *testing.T) {
 	}
 	if !strings.Contains(view, "…"+strings.Repeat("a", 30)) || !strings.Contains(view, "END") {
 		t.Errorf("the edit line does not show the value's tail:\n%s", view)
+	}
+}
+
+// TestPicker_UsesTheSuppliedBuilder pins that the picker runs every choice —
+// typed values and candidates alike — through RunOptions.BuildArgv, so the
+// caller's tree-aware refusal holds on both paths.
+func TestPicker_UsesTheSuppliedBuilder(t *testing.T) {
+	refuseDrain := func(prefix []string, arg string, optional bool) ([]string, error) {
+		if arg == "drain" {
+			return nil, errors.New("that value names a subcommand")
+		}
+		return PickerArgv(prefix, arg, optional)
+	}
+	hub := []HubEntry{{Name: "pr", Use: "pr <ref>"}}
+	sources := map[string]ArgSource{"pr": func(context.Context) []string { return []string{"drain", "o/r#1"} }}
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{
+		Hub: hub, ArgSources: sources, BuildArgv: refuseDrain, NoIcons: true, Theme: theme.Default(),
+	}), 80, 30)
+	m, _ = press(m, tea.KeyEnter)
+	if got := strings.Join(m.picker.candidates, ","); got != "o/r#1" {
+		t.Errorf("candidates = %q, want the refused one dropped", got)
+	}
+	m = typeInto(m, "drain")
+	m, cmd := press(m, tea.KeyEnter)
+	if m.action.Kind != ActionNone || cmd != nil {
+		t.Fatalf("a refused value ran: %+v", m.action)
+	}
+	if !strings.Contains(m.View().Content, "names a subcommand") {
+		t.Errorf("the refusal is not shown:\n%s", m.View().Content)
+	}
+}
+
+// TestPicker_SlowSourceOpensWithoutCandidates pins pickerSourceBudget.
+func TestPicker_SlowSourceOpensWithoutCandidates(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	slow := map[string]ArgSource{"pr": func(context.Context) []string { <-release; return []string{"late"} }}
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{
+		Hub: []HubEntry{{Name: "pr", Use: "pr <ref>"}}, ArgSources: slow, NoIcons: true, Theme: theme.Default(),
+	}), 80, 30)
+	start := time.Now()
+	m, _ = press(m, tea.KeyEnter)
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("opening the picker waited on a stalled source")
+	}
+	if m.picker == nil || len(m.picker.candidates) != 0 {
+		t.Errorf("picker = %+v, want it open with no candidates", m.picker)
+	}
+}
+
+// TestHub_NumberKeyOnDividerMovesToNextRow pins that a divider's number runs
+// nothing: the cursor lands on the next real row.
+func TestHub_NumberKeyOnDividerMovesToNextRow(t *testing.T) {
+	m := pickerHubModel(nil)
+	out, cmd := m.Update(key("3")) // index 2 is the "recent" divider
+	m = out.(model)
+	if cmd != nil || m.action.Kind != ActionNone || m.picker != nil {
+		t.Fatalf("a divider's number ran something: action=%+v picker=%v", m.action, m.picker != nil)
+	}
+	if it, ok := m.l.SelectedItem().(hubItem); !ok || it.entry.Name != "sessions last" {
+		t.Errorf("cursor = %+v, want the row after the divider", m.l.SelectedItem())
 	}
 }

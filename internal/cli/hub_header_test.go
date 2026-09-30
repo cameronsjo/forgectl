@@ -2,9 +2,9 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -89,61 +89,133 @@ func TestGatherHubHeader_StalledSourceIsOmittedOnTime(t *testing.T) {
 	}
 }
 
-// TestGitProjectBranch pins the one git call the header makes and how its
-// two lines are read.
+func writeFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestGitProjectBranch pins the header's .git read: branch, detached, a repo
+// with no commits yet (the case `git rev-parse --abbrev-ref HEAD` fails on),
+// a linked worktree's .git pointer file, a subdirectory, and no checkout.
 func TestGitProjectBranch(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "forgectl", ".git", "HEAD"), "ref: refs/heads/main\n")
+	writeFile(t, filepath.Join(root, "unborn", ".git", "HEAD"), "ref: refs/heads/trunk\n") // no objects, no refs
+	writeFile(t, filepath.Join(root, "detached", ".git", "HEAD"), strings.Repeat("a1", 20)+"\n")
+	writeFile(t, filepath.Join(root, "broken", ".git", "HEAD"), "garbage\n")
+	writeFile(t, filepath.Join(root, "gitdirs", "wt", "HEAD"), "ref: refs/heads/feat/x\n")
+	writeFile(t, filepath.Join(root, "linked", ".git"), "gitdir: "+filepath.Join(root, "gitdirs", "wt")+"\n")
+	if err := os.MkdirAll(filepath.Join(root, "forgectl", "internal", "cli"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "plain"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
 	for _, tc := range []struct {
-		name          string
-		out           string
-		err           error
-		project, head string
-		ok            bool
+		dir, project, branch string
+		ok                   bool
 	}{
-		{"branch", "/home/u/Projects/forgectl\nmain\n", nil, "forgectl", "main", true},
-		{"detached", "/w/repo\nHEAD\n", nil, "repo", "(detached)", true},
-		{"not a repo", "", errors.New("exit 128"), "", "", false},
-		{"one line", "/w/repo\n", nil, "", "", false},
+		{"forgectl", "forgectl", "main", true},
+		{"forgectl/internal/cli", "forgectl", "main", true},
+		{"unborn", "unborn", "trunk", true},
+		{"detached", "detached", "(detached)", true},
+		{"broken", "broken", "", true},
+		{"linked", "linked", "feat/x", true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
-				if name != "git" || strings.Join(args, " ") != "rev-parse --show-toplevel --abbrev-ref HEAD" {
-					t.Errorf("unexpected call %s %v", name, args)
-				}
-				return tc.out, tc.err
-			}}
-			project, branch, ok := gitProjectBranch(context.Background(), fake)
-			if project != tc.project || branch != tc.head || ok != tc.ok {
-				t.Errorf("gitProjectBranch = (%q, %q, %v), want (%q, %q, %v)", project, branch, ok, tc.project, tc.head, tc.ok)
-			}
-		})
+		project, branch, ok := gitProjectBranch(filepath.Join(root, tc.dir))
+		if project != tc.project || branch != tc.branch || ok != tc.ok {
+			t.Errorf("gitProjectBranch(%s) = (%q, %q, %v), want (%q, %q, %v)", tc.dir, project, branch, ok, tc.project, tc.branch, tc.ok)
+		}
+	}
+	// "plain" sits under root, which is inside no checkout of its own; walk
+	// only as far as the temp root's real ancestors allow.
+	if project, _, ok := gitProjectBranch(filepath.Join(root, "plain")); ok && project == "plain" {
+		t.Errorf("a directory with no .git reported itself as a checkout")
 	}
 }
 
-// TestReviewCounts_AbsentStoreIsUnavailableAndUncreated pins that opening the
-// hub never creates the pr sessions directory, and that no store reads as
-// unavailable rather than as zero reviews.
-func TestReviewCounts_AbsentStoreIsUnavailableAndUncreated(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "pr-sessions")
-	client := pr.New(&exec.FakeRunner{}, pr.WithSessionsDir(dir))
-	if _, _, ok := reviewCounts(context.Background(), client); ok {
-		t.Error("reviewCounts reported a count for a store that does not exist")
+// storeState records every entry in dir by name, size, mode, and mtime.
+func storeState(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Lstat(dir); err == nil {
-		t.Error("reviewCounts created the sessions directory")
+	var rows []string
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, e.Name()+"|"+info.Mode().String()+"|"+strconv.FormatInt(info.Size(), 10)+"|"+info.ModTime().Format(time.RFC3339Nano))
 	}
+	return strings.Join(rows, "\n")
 }
 
-// TestReviewCounts_EmptyStoreCountsZero is the control for the test above:
-// an existing, empty store is available and counts nothing.
-func TestReviewCounts_EmptyStoreCountsZero(t *testing.T) {
+// TestHubHeader_ReviewsReadWritesNothing pins the review's Important 2: a
+// header gather over a store holding a record creates, changes, and locks
+// nothing — no lifecycle lock file appears.
+func TestHubHeader_ReviewsReadWritesNothing(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "pr-sessions")
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	client := pr.New(&exec.FakeRunner{}, pr.WithSessionsDir(dir))
-	running, queued, ok := reviewCounts(context.Background(), client)
-	if !ok || running != 0 || queued != 0 {
-		t.Errorf("reviewCounts = (%d, %d, %v), want (0, 0, true)", running, queued, ok)
+	if _, err := client.Queue(context.Background(), pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}, pr.PrepareOpts{}); err != nil {
+		t.Fatalf("Queue: %v", err)
+	}
+	// Queue took the lifecycle lock; remove its file so the gather is shown
+	// not to create one.
+	if err := os.Remove(filepath.Join(dir, ".pr-session-lifecycle.lock")); err != nil {
+		t.Fatalf("remove setup lock: %v", err)
+	}
+	before := storeState(t, dir)
+
+	h := gatherHubHeader(context.Background(), liveHubHeaderSources(nil, client), time.Second)
+
+	if after := storeState(t, dir); after != before {
+		t.Errorf("a header gather changed the review store:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("the store holds %d entries after the gather, want only the record", len(entries))
+	}
+	if !h.HasReviews || h.ReviewsQueued != 1 || h.ReviewsRunning != 0 {
+		t.Errorf("header = %+v, want one queued review read from the store", h)
+	}
+}
+
+// TestHubHeader_AbsentStoreIsUnavailableAndUncreated pins that opening the hub
+// never creates the pr sessions directory, and that no store reads as
+// unavailable rather than as zero reviews.
+func TestHubHeader_AbsentStoreIsUnavailableAndUncreated(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "pr-sessions")
+	h := gatherHubHeader(context.Background(), liveHubHeaderSources(nil, pr.New(&exec.FakeRunner{}, pr.WithSessionsDir(dir))), time.Second)
+	if h.HasReviews {
+		t.Error("the header reported review counts for a store that does not exist")
+	}
+	if _, err := os.Lstat(dir); err == nil {
+		t.Error("the header gather created the sessions directory")
+	}
+}
+
+// TestHubHeader_EmptyStoreCountsZero is the control for the test above.
+func TestHubHeader_EmptyStoreCountsZero(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "pr-sessions")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h := gatherHubHeader(context.Background(), liveHubHeaderSources(nil, pr.New(&exec.FakeRunner{}, pr.WithSessionsDir(dir))), time.Second)
+	if !h.HasReviews || h.ReviewsRunning != 0 || h.ReviewsQueued != 0 {
+		t.Errorf("header = %+v, want an available zero count", h)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("the gather wrote %d entries into an empty store", len(entries))
 	}
 }
 

@@ -103,3 +103,19 @@ func TestHistoryCommand_NeverSurfacesHistoryText(t *testing.T) {
 		}
 	}
 }
+
+// TestRecentCommands_PinnedModulesStayOut pins that a pinned module's bare
+// invocation never takes a recent slot, however often it ran — it already
+// has a row above.
+func TestRecentCommands_PinnedModulesStayOut(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	var lines []string
+	for range 10 {
+		lines = append(lines, "forgectl pr", "forgectl docs", "forgectl projects", "forgectl tmux", "forgectl sessions")
+	}
+	lines = append(lines, "forgectl doctor")
+	got := cmdPaths(recentCommands(root, historyOf(lines...), 3))
+	if strings.Join(got, "|") != "doctor" {
+		t.Errorf("recentCommands = %v, want only [doctor]: pinned modules have rows already", got)
+	}
+}

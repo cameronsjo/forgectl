@@ -133,7 +133,21 @@ func capSafe(s string, maxRunes int) string {
 
 // ArgSource lists picker candidates for one command path. It must stay local:
 // the hub makes no network calls, and a picker opening is no reason to start.
+// It is also bounded: a source still running after pickerSourceBudget is
+// abandoned and the picker opens without candidates.
 type ArgSource func(ctx context.Context) []string
+
+// ArgvBuilder turns a picker choice into the argv that runs. The caller
+// supplies one that knows the live command tree (RunOptions.BuildArgv): it
+// must refuse a value that would dispatch to any command other than the one
+// the row names — a typed "drain" under `pr <ref>` is `forgectl pr drain`,
+// not a ref. PickerArgv is the tree-blind default and the validation every
+// builder starts from.
+type ArgvBuilder func(prefix []string, arg string, optional bool) ([]string, error)
+
+// pickerSourceBudget bounds an ArgSource, so a slow walk cannot stall the
+// keypress that opened the picker.
+const pickerSourceBudget = 300 * time.Millisecond
 
 const (
 	// pickerArgMaxRunes caps one typed or picked argument. A ref, a URL, or a
@@ -216,6 +230,12 @@ func pickerSpec(use string) (placeholder string, optional bool, ok bool) {
 	default:
 		return "", false, false
 	}
+}
+
+// PickerSpec is pickerSpec for callers outside this package: the hub's argv
+// builder and its tests use it to find every command the picker can open on.
+func PickerSpec(use string) (placeholder string, optional bool, ok bool) {
+	return pickerSpec(use)
 }
 
 // moduleNeedsArg reports whether a module row's own command requires exactly
@@ -387,27 +407,51 @@ type argPicker struct {
 	// subcommands (pr's own row opens the picker, not its leaves).
 	browse  *HubEntry
 	errText string
+	// build turns the current choice into argv; never nil.
+	build ArgvBuilder
 }
 
-func newArgPicker(ctx context.Context, prefix []string, placeholder string, optional bool, source ArgSource, browse *HubEntry) *argPicker {
+func newArgPicker(ctx context.Context, prefix []string, placeholder string, optional bool, source ArgSource, browse *HubEntry, build ArgvBuilder) *argPicker {
+	if build == nil {
+		build = PickerArgv
+	}
 	p := &argPicker{
 		prefix:      append([]string(nil), prefix...),
 		placeholder: placeholder,
 		optional:    optional,
 		browse:      browse,
+		build:       build,
 	}
-	if source != nil {
-		for _, c := range source(ctx) {
-			if len(p.candidates) == pickerCandidateMax {
-				break
-			}
-			if validatePickerArg(c, false) != nil {
-				continue
-			}
-			p.candidates = append(p.candidates, c)
+	for _, c := range boundedSource(ctx, source) {
+		if len(p.candidates) == pickerCandidateMax {
+			break
 		}
+		// A candidate runs through the same builder a typed value does, so a
+		// project that happens to be named like a subcommand is never offered.
+		if _, err := build(p.prefix, c, false); err != nil {
+			continue
+		}
+		p.candidates = append(p.candidates, c)
 	}
 	return p
+}
+
+// boundedSource runs source under pickerSourceBudget and returns nil when it
+// does not answer in time; the abandoned call finishes on its own.
+func boundedSource(ctx context.Context, source ArgSource) []string {
+	if source == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, pickerSourceBudget)
+	defer cancel()
+	done := make(chan []string, 1)
+	go func() { done <- source(ctx) }()
+	select {
+	case got := <-done:
+		return got
+	case <-ctx.Done():
+		return nil
+	}
 }
 
 // rows lists what the cursor moves over: the literal typed text first (free
@@ -463,12 +507,12 @@ func (p *argPicker) typeText(s string) {
 func (p *argPicker) pending() ([]string, error) {
 	row, ok := p.current()
 	if !ok {
-		return PickerArgv(p.prefix, "", p.optional)
+		return p.build(p.prefix, "", p.optional)
 	}
 	if row.kind == pickerRowBrowse {
 		return nil, errors.New("browse")
 	}
-	return PickerArgv(p.prefix, row.value, p.optional)
+	return p.build(p.prefix, row.value, p.optional)
 }
 
 // updatePicker handles every message while the picker is open: the picker
@@ -553,7 +597,7 @@ func (m *model) openPicker(prefix []string, use string, browse *HubEntry) bool {
 	if m.argSources != nil {
 		source = m.argSources[strings.Join(prefix, " ")]
 	}
-	m.picker = newArgPicker(m.ctx, prefix, placeholder, optional, source, browse)
+	m.picker = newArgPicker(m.ctx, prefix, placeholder, optional, source, browse, m.buildArgv)
 	m.applySize()
 	return true
 }
