@@ -162,7 +162,7 @@ func (w *Watcher) readdVerified(dir string) {
 	if err := w.fsw.Add(dir); err != nil {
 		return // best-effort; a removed dir legitimately fails here
 	}
-	if real, err := filepath.EvalSymlinks(dir); err != nil || real != dir {
+	if resolved, err := filepath.EvalSymlinks(dir); err != nil || resolved != dir {
 		w.dropWatch(dir)
 	}
 }
