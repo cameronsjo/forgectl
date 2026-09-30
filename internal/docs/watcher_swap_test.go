@@ -171,6 +171,29 @@ func requireNoEventFrom(t *testing.T, w *Watcher, quiet, control string) {
 	}
 }
 
+// rewriteInPlace writes path's own bytes back over it, with no truncation,
+// so the rewrite raises exactly one write event (a truncating WriteFile
+// raises two on inotify, and the second would outlive the sync).
+func rewriteInPlace(t *testing.T, path string) {
+	t.Helper()
+	path = filepath.Clean(path)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", path, err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("OpenFile %s: %v", path, err)
+	}
+	if _, err := f.WriteAt(body, 0); err != nil {
+		_ = f.Close()
+		t.Fatalf("WriteAt %s: %v", path, err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close %s: %v", path, err)
+	}
+}
+
 // syncWithWatch rewrites, in place, one doc each root indexed directly in
 // it, and reads the watcher's raw event channel until a write event names
 // each, failing after recvTimeout. The watcher must not be running.
@@ -205,14 +228,7 @@ func syncWithWatch(t *testing.T, w *Watcher) {
 		if doc == "" {
 			t.Fatalf("root %s indexed no doc to sync on", root.Path)
 		}
-		doc = filepath.Clean(doc)
-		body, err := os.ReadFile(doc)
-		if err != nil {
-			t.Fatalf("ReadFile %s: %v", doc, err)
-		}
-		if err := os.WriteFile(doc, body, 0o600); err != nil { //nolint:gosec // G703: doc is an indexed doc under the test's own TempDir root
-			t.Fatalf("WriteFile %s: %v", doc, err)
-		}
+		rewriteInPlace(t, doc)
 		pending[doc] = true
 	}
 	deadline := time.After(recvTimeout)
@@ -1036,6 +1052,7 @@ func TestWatcherRun_StrayEvent_RebuildsWatchesSilently(t *testing.T) {
 	before := w.fsw
 	w.mu.Unlock()
 	reloads := startWatcher(t, w)
+	drainReloads(reloads)
 
 	injectEvent(t, w, fsnotify.Event{Name: filepath.Join(a, "secret.md"), Op: fsnotify.Write})
 	deadline := time.Now().Add(recvTimeout)
