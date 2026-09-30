@@ -127,8 +127,10 @@ func TestKillCmd_MissingSessionErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing session, got nil")
 	}
-	if !strings.Contains(err.Error(), "no such session") {
-		t.Errorf("error message = %q, want it to mention no such session", err.Error())
+	// %q since forgectl#815: the name is operator-typed and reaches a
+	// terminal. Mutation that turns it red: print it with %s again.
+	if err.Error() != `no such session: "nosuch"` {
+		t.Errorf("error message = %q, want the quoted name", err.Error())
 	}
 }
 
@@ -184,5 +186,19 @@ func TestKillCmd_OthersRefusesStaleIdentity(t *testing.T) {
 		if _, ok := killSessionCommand(c.Args); ok {
 			t.Fatalf("kill-session ran with %v after the generation changed", c.Args)
 		}
+	}
+}
+
+// TestRenameCmd_MissingSessionQuotesTheName is forgectl#815 item 6 for
+// `tmux rename`: the operator-typed name is printed with %q.
+//
+// Mutation that turns it red: print it with %s again.
+func TestRenameCmd_MissingSessionQuotesTheName(t *testing.T) {
+	cmd := newTmuxRenameCmd(tmux.New(absentRunner()))
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetArgs([]string{"no such", "new"})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || err.Error() != `no such session: "no such"` {
+		t.Fatalf("error = %v, want the quoted name", err)
 	}
 }

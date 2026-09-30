@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"unicode/utf8"
 
 	internalexec "github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -80,25 +81,16 @@ func parseSessions(out string) ([]Session, error) {
 // itself stays: see parsedRows for why partial loss must not fail the list.
 func parseSessionRows(out string) ([]Session, int, error) {
 	lines := splitLines(out)
-	sessions := make([]Session, 0, len(lines))
-	unreadable := 0
-	for _, line := range lines {
-		f := splitFields(line)
-		if len(f) != sessionFieldCount {
-			if line != "" {
-				unreadable++
-			}
-			continue
-		}
-		// Drop a row whose native id is not well formed, alongside the
-		// field-count check and for the same reason: a row that reaches a caller
-		// carries an id that will be handed to `-t`, and a shifted or forged row
-		// can offer a plausible-looking value naming something else. Validating
-		// here means no unvalidated id ever leaves a parser.
-		if ValidateSessionID(f[2]) != nil {
-			unreadable++
-			continue
-		}
+	// Drop a row whose native id is not well formed, alongside the field-count
+	// check and for the same reason: a row that reaches a caller carries an id
+	// that will be handed to `-t`, and a shifted or forged row can offer a
+	// plausible-looking value naming something else. Validating here means no
+	// unvalidated id ever leaves a parser.
+	rows, unreadable := readableRows(lines, sessionFieldCount, func(f []string) bool {
+		return ValidateSessionID(f[2]) == nil
+	})
+	sessions := make([]Session, 0, len(rows))
+	for _, f := range rows {
 		sessions = append(sessions, Session{
 			ServerPID:   f[0],
 			ServerStart: f[1],
@@ -158,6 +150,81 @@ func (c *Client) ResolveSessionExact(ctx context.Context, name string) (SessionI
 	return found.Identity(selector), nil
 }
 
+// sessionNameReplacer is tmux's own session_check_name rewrite: ':' and '.'
+// are target-grammar separators, so tmux stores each as '_'.
+var sessionNameReplacer = strings.NewReplacer(":", "_", ".", "_")
+
+// normalizeSessionName returns the name tmux will list for a session created
+// as name, or refuses a name tmux would rewrite in a way forgectl does not
+// predict (forgectl#815).
+//
+// Measured on tmux 3.4 against an isolated socket, `new-session -s`:
+//
+//   - ':' and '.' land as '_' ("my.proj" lists as "my_proj"). This is a fixed
+//     rule in tmux's session_check_name, not version- or locale-dependent, so
+//     it is PREDICTED: EnsureSession looks up and creates the '_' spelling,
+//     and `forgectl open` on a directory such as my.proj finds its session
+//     again rather than creating a duplicate every time.
+//   - everything refuseRewrittenName lists is REFUSED. Those rewrites are
+//     escaping artefacts rather than a naming rule, and predicting one would
+//     silently bring the duplicate-create bug back the day tmux changed it.
+func normalizeSessionName(name string) (string, error) {
+	if err := refuseRewrittenName(name, true, true); err != nil {
+		return "", err
+	}
+	return sessionNameReplacer.Replace(name), nil
+}
+
+// refuseRewrittenName refuses a session or window name that tmux 3.4 would
+// store as something else, so an exact-name lookup after it could never find
+// the object again (forgectl#815). Measured against an isolated socket:
+//
+//   - '$' followed by an ASCII letter, '_' or '{' gains a backslash ("a$b"
+//     lists as `a\$b`), in session and window names alike, on the argv path
+//     and inside a guarded command's single quotes. "a$1", "a$}", "a$@" and a
+//     trailing '$' land unchanged.
+//   - on the argv path (argv), a trailing ';' is read as a command separator
+//     and dropped ("x;" lands as "x"). A ';' elsewhere lands as given, and a
+//     guarded rename's quotes keep a trailing one.
+//   - in a SESSION name (session), tmux vis-encodes what it stores: '\' lists
+//     as `\\`, a control byte as `\t` or octal, and invalid UTF-8 as octal.
+//
+// FieldSep is refused first, with CreateSession's existing wording, because a
+// name carrying it can never be listed at all (forgectl#806).
+func refuseRewrittenName(name string, session, argv bool) error {
+	if strings.Contains(name, FieldSep) {
+		return fmt.Errorf("%w: name %q carries the tmux field separator (0x1F)", ErrUnsafeOperand, name)
+	}
+	for i := 0; i < len(name); i++ {
+		b := name[i]
+		switch {
+		case b == '$' && i+1 < len(name) && startsTmuxVariable(name[i+1]):
+			return fmt.Errorf(`%w: name %q: tmux stores "$" followed by a letter, "_" or "{" with a backslash added, so the name could not be found again`,
+				ErrUnsafeOperand, name)
+		case session && b == '\\':
+			return fmt.Errorf(`%w: name %q: tmux stores a backslash in a session name as "\\", so the name could not be found again`,
+				ErrUnsafeOperand, name)
+		case session && (b < 0x20 || b == 0x7f):
+			return fmt.Errorf("%w: name %q: tmux stores control byte 0x%02X at offset %d escaped, so the name could not be found again",
+				ErrUnsafeOperand, name, b, i)
+		}
+	}
+	if session && !utf8.ValidString(name) {
+		return fmt.Errorf("%w: name %q is not valid UTF-8, which tmux stores escaped, so the name could not be found again",
+			ErrUnsafeOperand, name)
+	}
+	if argv && strings.HasSuffix(name, ";") {
+		return fmt.Errorf(`%w: name %q: tmux reads a trailing ";" as a command separator and drops it`, ErrUnsafeOperand, name)
+	}
+	return nil
+}
+
+// startsTmuxVariable reports whether b, following a '$', makes tmux 3.4 escape
+// that '$' (see refuseRewrittenName).
+func startsTmuxVariable(b byte) bool {
+	return b == '_' || b == '{' || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
+}
+
 // CreateSession creates a detached session and returns its identity, captured
 // from the create command's own output so the id and the generation that minted
 // it come from a single call.
@@ -172,9 +239,13 @@ func (c *Client) CreateSession(ctx context.Context, name, dir string) (SessionId
 	}
 	// A name carrying FieldSep could never be listed again: its row splits
 	// into too many fields (forgectl#806), so forgectl could not resolve,
-	// rename or kill the session it had just made.
-	if strings.Contains(name, FieldSep) {
-		return SessionIdentity{}, fmt.Errorf("%w: session name %q carries the tmux field separator (0x1F)", ErrUnsafeOperand, name)
+	// rename or kill the session it had just made. The other names tmux would
+	// rewrite are refused for the same reason, and ':' and '.' are mapped to
+	// the '_' tmux stores (forgectl#815), so the identity returned names the
+	// session the way every later listing will.
+	name, err := normalizeSessionName(name)
+	if err != nil {
+		return SessionIdentity{}, fmt.Errorf("create tmux session: %w", err)
 	}
 	// escapeFormat: tmux format-expands -s, so `#(cmd)` in a name would run
 	// a shell job and `#{...}` would be substituted (forgectl#806). The
@@ -247,6 +318,18 @@ func (c *Client) classifyCreateFailure(args []string, name string, err error) er
 //     re-list where the name still is not there, a prefix sibling standing in
 //     for it — fails closed with no second create and no attach.
 func (c *Client) EnsureSession(ctx context.Context, name, dir string) (SessionIdentity, error) {
+	// The lookup must use the name tmux STORES, not the one asked for: tmux
+	// lists "my.proj" as "my_proj", so an exact lookup of "my.proj" never
+	// matched and every `forgectl open` created another session
+	// (forgectl#815). A name tmux would rewrite unpredictably is refused
+	// here, before the lookup, for the same reason.
+	if name != "" {
+		normalized, err := normalizeSessionName(name)
+		if err != nil {
+			return SessionIdentity{}, fmt.Errorf("create tmux session: %w", err)
+		}
+		name = normalized
+	}
 	identity, err := c.ResolveSessionExact(ctx, name)
 	switch {
 	case err == nil:
@@ -317,6 +400,27 @@ func (c *Client) RenameSession(ctx context.Context, want SessionIdentity, newNam
 	if _, err := quoteCommandOperand(newName); err != nil {
 		return fmt.Errorf("rename session %q: %w", want.Name, err)
 	}
+	// A typed name tmux would store as something else is refused rather than
+	// rewritten (forgectl#815): the rename would report "renamed to my.proj"
+	// while tmux lists "my_proj", and nothing could find it by the name the
+	// operator typed. The quotes keep a trailing ';', so only the argv rule is
+	// off here.
+	if err := refuseRewrittenName(newName, true, false); err != nil {
+		return fmt.Errorf("rename session %q: %w", want.Name, err)
+	}
+	if stored := sessionNameReplacer.Replace(newName); stored != newName {
+		return fmt.Errorf(`rename session %q: %w: tmux stores ":" and "." in a session name as "_", so %q would land as %q; use that name instead`,
+			want.Name, ErrUnsafeOperand, newName, stored)
+	}
+	return c.renameSessionGuarded(ctx, want, newName)
+}
+
+// renameSessionGuarded is RenameSession after its name checks: it escapes and
+// quotes newName, revalidates, and runs the guarded rename. It is split out so
+// the real-tmux test of quoteCommandOperand can still drive names the checks
+// refuse (a backslash, a '$'), which are exactly the ones that exercise the
+// quoting.
+func (c *Client) renameSessionGuarded(ctx context.Context, want SessionIdentity, newName string) error {
 	quotedName, err := quoteCommandOperand(escapeFormat(newName))
 	if err != nil {
 		return fmt.Errorf("rename session %q: %w", want.Name, err)

@@ -143,7 +143,7 @@ func TestMostRecentSessionFailsClosedOnUnreadableSeparator(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) {
 		return renderUnderscore("1700000000", "reviews"), nil
 	}}
-	got, err := New(fake).mostRecentSession(context.Background())
+	got, _, err := New(fake).mostRecentSession(context.Background())
 	if err == nil {
 		t.Fatalf("mostRecentSession = %q, nil; want an error", got)
 	}

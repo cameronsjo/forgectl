@@ -267,6 +267,28 @@ func (c *Client) WindowIdentity(w Window) WindowIdentity {
 	return w.Identity(c.currentSelector())
 }
 
+// exitedSocketError names the leftover socket of an exited server inside a
+// serverStateError chain.
+type exitedSocketError struct{ path string }
+
+// Error is the "socket <path>" text the chain always carried, quoted because
+// the path can derive from $TMUX_TMPDIR and reaches a terminal.
+func (e exitedSocketError) Error() string {
+	return "socket " + termsafe.QuotePath(e.path)
+}
+
+// ExitedSocketPath returns the socket file an exited server left behind, when
+// err carries one (an ErrServerExited verdict). A message that rewords that
+// verdict uses it to keep the path: an operator running more than one server
+// needs to know which socket to clear (forgectl#815).
+func ExitedSocketPath(err error) (string, bool) {
+	var exited exitedSocketError
+	if errors.As(err, &exited) {
+		return exited.path, true
+	}
+	return "", false
+}
+
 // serverStateError maps a failed tmux command onto a typed server-state error,
 // routing #242's classifier rather than adding a second one. Only
 // serverAbsent becomes ErrNoServer; every other verdict — including a
@@ -303,8 +325,11 @@ func (c *Client) serverStateError(ctx context.Context, args []string, err error)
 		// create reads as "no server".
 		// The socket leads so the remediation ErrServerExited ends on is not
 		// separated from the state it describes.
-		return fmt.Errorf("%w (socket %s): %w: %w",
-			ErrServerUnreadable, termsafe.QuotePath(failure.SocketPath), ErrServerExited, err)
+		// The socket rides as a typed error so a caller that rewords the
+		// verdict can still name which socket to clear (ExitedSocketPath);
+		// its text is exactly the "socket <path>" this line always carried.
+		return fmt.Errorf("%w (%w): %w: %w",
+			ErrServerUnreadable, exitedSocketError{path: failure.SocketPath}, ErrServerExited, err)
 	default:
 		cause := failure.Cause
 		if cause == nil {
