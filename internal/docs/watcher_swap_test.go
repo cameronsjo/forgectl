@@ -205,11 +205,12 @@ func syncWithWatch(t *testing.T, w *Watcher) {
 		if doc == "" {
 			t.Fatalf("root %s indexed no doc to sync on", root.Path)
 		}
-		body, err := os.ReadFile(filepath.Clean(doc))
+		doc = filepath.Clean(doc)
+		body, err := os.ReadFile(doc)
 		if err != nil {
 			t.Fatalf("ReadFile %s: %v", doc, err)
 		}
-		if err := os.WriteFile(doc, body, 0o600); err != nil {
+		if err := os.WriteFile(doc, body, 0o600); err != nil { //nolint:gosec // G703: doc is an indexed doc under the test's own TempDir root
 			t.Fatalf("WriteFile %s: %v", doc, err)
 		}
 		pending[doc] = true
