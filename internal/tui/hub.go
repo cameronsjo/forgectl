@@ -293,8 +293,9 @@ func useGroups(s string) (groups []string, clean bool) {
 //   - a leading "-" would be parsed as a flag, not the positional the row asked
 //     for (`--agent=…` typed into the pr picker would pick the review agent);
 //   - a control or bidi character would reach the echo line and the command;
-//   - an invisible format character (U+200B, U+FEFF, a tag character) would
-//     make the argument differ from the ref or name it looks like (#916);
+//   - an invisible or blank-rendering rune (U+200B, U+FEFF, a tag character,
+//     a variation selector, a Hangul filler, U+2800) would make the argument
+//     differ from the ref or name it looks like (#916, #948);
 //   - a blank or oversized value is never a real ref, URL, or query.
 func validatePickerArg(arg string, optional bool) error {
 	if arg == "" {

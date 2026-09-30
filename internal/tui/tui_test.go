@@ -191,7 +191,7 @@ func hubTestModel() model {
 		{Name: "tmux", Short: "sessions, windows, tree", Core: true},
 		{Name: "doctor", Short: "health check", Core: false},
 		{Name: "pr", Short: "review a PR", Core: true, Leaves: []HubLeaf{
-			{Name: "pr", Short: "review a PR", Use: "pr <ref>", NeedsArgs: true},
+			{Name: "pr", Short: "review a PR", Use: "pr <ref>", NeedsArgs: true, Self: true},
 			{Name: "list", Short: "list sessions", Use: "list"},
 		}},
 	}
@@ -372,7 +372,7 @@ func TestMenuDigitBeyondFilteredRowsIsIgnored(t *testing.T) {
 func nestedHubModel() model {
 	hub := []HubEntry{
 		{Name: "pr", Short: "review a PR", Core: true, Leaves: []HubLeaf{
-			{Name: "pr", Short: "review a PR", Use: "pr <ref>", NeedsArgs: true},
+			{Name: "pr", Short: "review a PR", Use: "pr <ref>", NeedsArgs: true, Self: true},
 			{Name: "list", Short: "list sessions", Use: "list"},
 			{Name: "reviewed", Short: "manage marks", Use: "reviewed", Leaves: []HubLeaf{
 				{Name: "mark", Short: "mark a PR", Use: "mark <ref>", NeedsArgs: true},
@@ -450,5 +450,47 @@ func TestHub_NestedGroupEscClimbsOneLevel(t *testing.T) {
 	m = out.(model)
 	if m.mode != hubMode {
 		t.Errorf("second esc: mode=%v, want hubMode", m.mode)
+	}
+}
+
+// TestHub_ChildNamedLikeItsParent pins #948: the synthetic self leaf is told
+// apart from a real subcommand by its Self flag, not by name. Under pr, the
+// self leaf runs `pr <ref>` while a real child group also named "pr" opens,
+// and its own verb runs as pr pr run; esc climbs back onto that group's row,
+// not onto the self leaf that shares its name.
+func TestHub_ChildNamedLikeItsParent(t *testing.T) {
+	self := HubLeaf{Name: "pr", Use: "pr <ref>", NeedsArgs: true, Self: true}
+	child := HubLeaf{Name: "pr", Use: "pr", Leaves: []HubLeaf{{Name: "run", Use: "run"}}}
+	if got := strings.Join(leafArgv([]string{"pr"}, self), " "); got != "pr" {
+		t.Errorf("leafArgv(self) = %q, want pr", got)
+	}
+	if got := strings.Join(leafArgv([]string{"pr"}, child), " "); got != "pr pr" {
+		t.Errorf("leafArgv(child named pr) = %q, want pr pr", got)
+	}
+
+	hub := []HubEntry{{Name: "pr", Short: "review a PR", Core: true, Leaves: []HubLeaf{self, child}}}
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{Hub: hub, Theme: theme.Default()}), 80, 24)
+	out, _ := m.Update(key("1"))
+	m = out.(model)
+	out, _ = m.Update(key("2")) // the child group named pr
+	m = out.(model)
+	if strings.Join(m.leavesPath, " ") != "pr pr" {
+		t.Fatalf("child group did not open: path=%q", m.leavesPath)
+	}
+	out, _ = m.Update(key("1")) // run
+	m = out.(model)
+	if m.action.Kind != ActionRunVerb || strings.Join(m.action.Argv, " ") != "pr pr run" {
+		t.Errorf("nested verb = %+v, want ActionRunVerb [pr pr run]", m.action)
+	}
+
+	m = sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{Hub: hub, Theme: theme.Default()}), 80, 24)
+	out, _ = m.Update(key("1"))
+	m = out.(model)
+	out, _ = m.Update(key("2"))
+	m = out.(model)
+	out, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = out.(model)
+	if it, ok := m.l.SelectedItem().(leafItem); !ok || it.leaf.Self || len(it.leaf.Leaves) == 0 {
+		t.Errorf("cursor after esc = %+v, want the child group's row", m.l.SelectedItem())
 	}
 }
