@@ -29,13 +29,16 @@ package docs
 //   [x] A pending rebuild walks every root once, and still watches a root
 //              replaced since the last index
 //   [x] Churn on non-markdown files does not postpone a pending rebuild
-//   [x] Unhappy: an event named inside the root but delivered through a
-//              directory now resolving outside it (kqueue's own entry
-//              watches after a swap, forgectl#865) does not reload, nor
+//   [x] Unhappy: an event named inside the root whose full name now
+//              resolves, through a symlink anywhere on its path, to a path
+//              relevance refuses (kqueue's own entry watches after a swap,
+//              forgectl#865: outside, excluded, an OnlyFile root's sibling,
+//              a leaf symlink, a *.md directory link) does not reload, nor
 //              count as a watched directory moving; fails closed on a
 //              dangling symlink
-//   [x] Happy: an event through an in-root compat symlink, or under a
-//              directory deleted since, still reloads
+//   [x] Happy: an event through an in-root compat or leaf symlink, to an
+//              OnlyFile root's own file, or under a directory deleted
+//              since, still reloads
 
 import (
 	"context"
@@ -92,9 +95,9 @@ func setWatchHook(t *testing.T, fn func(path string, stage watchStage)) {
 
 // newUnstartedWatcher indexes root and builds a watcher over it without
 // running it, so the test reads its watch list directly.
-func newUnstartedWatcher(t *testing.T, root string) *Watcher {
+func newUnstartedWatcher(t *testing.T, root string, more ...string) *Watcher {
 	t.Helper()
-	idx, err := NewIndex([]string{root})
+	idx, err := NewIndex(append([]string{root}, more...))
 	if err != nil {
 		t.Fatalf("NewIndex: %v", err)
 	}
@@ -809,19 +812,24 @@ func requireNoReload(t *testing.T, sub <-chan string, what string) {
 	}
 }
 
-// An event named inside the root whose directory now resolves, through a
-// swapped-in symlink, outside every root or into an excluded directory is
-// what kqueue delivers for an outside file after the swap (forgectl#865).
-// It must not reload. An event through a compat symlink that stays inside
-// the root, and one under a directory deleted since, still reload.
+// An event named inside the root whose full name now resolves, through a
+// symlink anywhere on its path, to a path relevance refuses is what kqueue
+// delivers for an outside file after a swap (forgectl#865). It must not
+// reload: through a swapped directory to outside, into an excluded
+// directory, to an OnlyFile root's sibling file, through a leaf symlink to
+// an outside file, through a directory named *.md that links outside, or
+// through a dangling symlink. An event through a compat symlink or a leaf
+// symlink to a doc inside the root, to an OnlyFile root's own file, and
+// one under a directory deleted since, still reload.
 //
 // Mutation that turns it red: drop the stray term from Run's relevance
-// gate (the outside and excluded rows reload); make strayEvent true for
-// any symlinked directory (the compat row goes silent); make resolveNow
-// fail on a missing directory (the deleted row goes silent); or make
-// strayEvent return false on a resolution error (the dangling row
-// reloads); or let watchableDir accept an excluded component (the vendored
-// row reloads).
+// gate (the outside rows reload); make strayEvent true for any symlinked
+// path (the compat, alias and only-file controls go silent); make
+// resolveNow fail on a missing path (the deleted control goes silent);
+// make strayEvent return false on a resolution error (the dangling row
+// reloads); resolve only the event's directory and join the base back on
+// (the leaf and *.md-directory rows reload); or accept any resolved path
+// inside some root (the OnlyFile-sibling and vendored rows reload).
 func TestWatcherRun_EventThroughSwappedDir_DoesNotReload(t *testing.T) {
 	root, outside := swapFixture(t)
 	for _, d := range []string{"c", "node_modules/pkg"} {
@@ -829,13 +837,20 @@ func TestWatcherRun_EventThroughSwappedDir_DoesNotReload(t *testing.T) {
 			t.Fatalf("MkdirAll: %v", err)
 		}
 	}
-	w := newUnstartedWatcher(t, root)
+	only := filepath.Join(filepath.Dir(root), "only")
+	writeFile(t, filepath.Join(only, "x.md"), "# X\n")
+	writeFile(t, filepath.Join(only, "other.md"), "# Other\n")
+	w := newUnstartedWatcher(t, root, filepath.Join(only, "x.md"))
 	a := filepath.Join(root, "a")
 	swapForSymlink(t, a, outside)
 	for link, target := range map[string]string{
 		"compat":   filepath.Join(root, "c"),
 		"vendored": filepath.Join(root, "node_modules", "pkg"),
 		"dangling": filepath.Join(outside, "gone"),
+		"onlylink": only,
+		"leak.md":  filepath.Join(outside, "secret.md"),
+		"dir.md":   outside,
+		"alias.md": filepath.Join(root, "c", "doc.md"),
 	} {
 		if err := os.Symlink(target, filepath.Join(root, link)); err != nil {
 			t.Fatalf("Symlink: %v", err)
@@ -852,6 +867,9 @@ func TestWatcherRun_EventThroughSwappedDir_DoesNotReload(t *testing.T) {
 		filepath.Join(a, "secret.md"),
 		filepath.Join(root, "vendored", "doc.md"),
 		filepath.Join(root, "dangling", "doc.md"),
+		filepath.Join(root, "onlylink", "other.md"),
+		filepath.Join(root, "leak.md"),
+		filepath.Join(root, "dir.md"),
 	} {
 		injectEvent(t, w, fsnotify.Event{Name: name, Op: fsnotify.Write})
 		requireNoReload(t, sub, "a write event named "+name)
@@ -860,6 +878,12 @@ func TestWatcherRun_EventThroughSwappedDir_DoesNotReload(t *testing.T) {
 	// CONTROLS: the gate still passes events it must.
 	injectEvent(t, w, fsnotify.Event{Name: filepath.Join(root, "compat", "doc.md"), Op: fsnotify.Write})
 	awaitReload(t, sub, "a write through a compat symlink inside the root")
+	drainReloads(sub)
+	injectEvent(t, w, fsnotify.Event{Name: filepath.Join(root, "alias.md"), Op: fsnotify.Write})
+	awaitReload(t, sub, "a write on a leaf symlink to a doc inside the root")
+	drainReloads(sub)
+	injectEvent(t, w, fsnotify.Event{Name: filepath.Join(root, "onlylink", "x.md"), Op: fsnotify.Write})
+	awaitReload(t, sub, "a write through a symlink to an OnlyFile root's own file")
 	drainReloads(sub)
 	injectEvent(t, w, fsnotify.Event{Name: filepath.Join(root, "gone", "deeper", "doc.md"), Op: fsnotify.Remove})
 	awaitReload(t, sub, "a remove under a directory deleted since")

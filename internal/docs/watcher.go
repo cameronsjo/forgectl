@@ -556,43 +556,53 @@ func (w *Watcher) dirMoved(ev fsnotify.Event) bool {
 // that is now bound outside the watched tree (forgectl#865). fsnotify names
 // an event by the path its watch was registered under, and on kqueue
 // (macOS, BSD) it also watches every entry of a watched directory itself,
-// listing and opening them by path with no O_NOFOLLOW. A directory swapped
-// for a symlink to an outside directory is then listed through the symlink,
-// and each outside entry gets a watch named inside the root
-// (root/a/<entry>) without any Add of ours. addVerified's checks cannot see
-// those watches, and relevant() is lexical, so a write to an outside
-// markdown file would drive a reload.
+// listing and opening each by path, so every symlink on the way is
+// followed: an intermediate one (a directory swapped for a symlink to an
+// outside directory is listed through it, and each outside entry gets a
+// watch named root/a/<entry> without any Add of ours) and a leaf one (an
+// in-root leak.md linking to an outside file, or a directory named *.md
+// swapped for such a link, is watched at its target). addVerified's checks
+// cannot see those watches, and relevant() is lexical, so a write to the
+// outside file would drive a reload.
 //
-// So the event's containing directory is resolved as it is now. When that
-// resolves through a symlink to a directory the watcher would not watch
-// (outside every root, or under an excluded directory), the event is stray:
-// it neither reloads nor counts as a watched directory moving. A compat
-// symlink that leads elsewhere inside the root is not stray. The check
-// fails closed: a directory that cannot be resolved for any reason but its
-// own absence (a dangling symlink, a loop) counts as stray. A deleted
-// directory resolves through its deepest existing ancestor, so its events
-// still reload.
+// So the event's full name is resolved as the filesystem stands now
+// (resolveNow), and when it resolves through any symlink the resolved path
+// must pass the same predicate the name did: relevant() for a doc name,
+// which keeps an OnlyFile root to its one file and refuses excluded
+// directories, or inTree() for any other name (a directory's own Rename).
+// An event whose resolved path fails is stray: it neither reloads nor
+// counts as a watched directory moving. A compat symlink that leads to a
+// doc elsewhere inside the root is not stray, and a name with no symlink on
+// its path is decided exactly as before. The check fails closed: a path
+// that cannot be resolved for any reason but its own absence (a dangling
+// symlink, a loop) is stray. A deleted path resolves through its deepest
+// existing ancestor, so its events still reload.
 //
-// It is a delivery-time check, so a directory swapped back between the event
-// and the check passes it. The stray watches themselves last until the next
+// It is a delivery-time check, so a path swapped back between the event and
+// the check passes it. The stray watches themselves last until the next
 // full rebuild (replaceWatcher) or Close; fsnotify has no by-handle Remove.
 func (w *Watcher) strayEvent(name string) bool {
-	dir := filepath.Dir(name)
-	resolved, err := resolveNow(dir)
+	resolved, err := resolveNow(name)
 	if err != nil {
 		return true
 	}
-	return resolved != dir && !w.watchableDir(resolved)
+	if resolved == name {
+		return false
+	}
+	if AllowedExt(name) {
+		return !w.relevant(resolved)
+	}
+	return !w.inTree(resolved)
 }
 
-// resolveNow resolves every symlink in dir as the filesystem stands now. A
-// dir that does not exist resolves through its deepest existing ancestor,
-// with the missing tail joined back on. Any other failure is an error,
-// including a component that exists but resolves nowhere (a dangling
-// symlink).
-func resolveNow(dir string) (string, error) {
+// resolveNow resolves every symlink in path, the leaf included, as the
+// filesystem stands now. A path that does not exist resolves through its
+// deepest existing ancestor, with the missing tail joined back on. Any
+// other failure is an error, including a component that exists but
+// resolves nowhere (a dangling symlink).
+func resolveNow(path string) (string, error) {
 	tail := ""
-	for p := dir; ; {
+	for p := path; ; {
 		resolved, err := filepath.EvalSymlinks(p)
 		if err == nil {
 			return filepath.Join(resolved, tail), nil
@@ -607,35 +617,6 @@ func resolveNow(dir string) (string, error) {
 		tail = filepath.Join(filepath.Base(p), tail)
 		p = parent
 	}
-}
-
-// watchableDir reports whether dir, a resolved directory path, is one the
-// watcher would watch: a root, or below a directory root with no excluded
-// component. It decides as relevant() does, lexically against the
-// canonical root paths.
-func (w *Watcher) watchableDir(dir string) bool {
-	for _, root := range w.store.Current().Roots() {
-		if !withinRoot(root.Path, dir) {
-			continue
-		}
-		if root.OnlyFile != "" {
-			return dir == root.Path
-		}
-		rel, err := filepath.Rel(root.Path, dir)
-		if err != nil {
-			return false
-		}
-		if rel == "." {
-			return true
-		}
-		for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
-			if excludedDir(seg) {
-				return false
-			}
-		}
-		return true
-	}
-	return false
 }
 
 // relevant reports whether an event path should trigger a reload.
@@ -653,10 +634,13 @@ func (w *Watcher) watchableDir(dir string) bool {
 // trigger a rebuild, so relevance is decided from the path string against the
 // already-canonical root paths.
 func (w *Watcher) relevant(path string) bool {
-	if !AllowedExt(path) {
-		return false
-	}
+	return AllowedExt(path) && w.inTree(path)
+}
 
+// inTree is relevant() without the extension rule: whether path lies in a
+// root, is that root's one file when it is an OnlyFile root, and has no
+// excluded directory component.
+func (w *Watcher) inTree(path string) bool {
 	idx := w.store.Current()
 	for _, root := range idx.Roots() {
 		if !withinRoot(root.Path, path) {
