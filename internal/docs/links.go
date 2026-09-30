@@ -255,6 +255,15 @@ func buildRootIndexes(roots []Root, docs []Doc, attachments map[string][]string)
 	return out
 }
 
+// attachmentSet is the root's attachment set, keyed as attRel keys it; nil
+// for a root with no tables.
+func (idx *Index) attachmentSet(label string) map[string]bool {
+	if ri := idx.byRoot[label]; ri != nil {
+		return ri.attRel
+	}
+	return nil
+}
+
 // rootByLabel returns the Root with the given Label, if indexed.
 func (idx *Index) rootByLabel(label string) (Root, bool) {
 	for _, r := range idx.roots {
@@ -382,8 +391,9 @@ func (idx *Index) resolveVaultDoc(rootIdx *rootIndex, from *Doc, path0 string) (
 }
 
 // resolveAttachment resolves a vault wikilink path that matched no doc
-// against the root's attachments, the way Obsidian resolves a link to a
-// non-note file (forgectl#709):
+// against the root's attachments, by the shortest-path basename rule the
+// forgectl#709 owner ruling set. Its tie and precedence behaviour has not
+// been checked against Obsidian itself:
 //
 //   - A target written relative to the linking note ("./a.png", "../a.png")
 //     names exactly that path, joined against the note's directory.
@@ -392,20 +402,19 @@ func (idx *Index) resolveVaultDoc(rootIdx *rootIndex, from *Doc, path0 string) (
 //     and "x/assets/logo.png", never "other/logo.png"). The match with the
 //     fewest path segments, the one closest to the root, wins. A
 //     root-relative path is always its own closest match, so this one rule
-//     is both Obsidian's shortest-path match and its root-relative lookup.
-//   - Two matches equally close to the root are MissAmbiguous. Obsidian
-//     picks one of them by its own internal file order, which the reader
-//     cannot reproduce, so it reports the tie rather than guessing.
+//     is both the shortest-path match and the root-relative lookup.
+//   - Two matches equally close to the root are MissAmbiguous: the reader
+//     reports the tie rather than guessing.
 //
-// The extension is part of the name, as in Obsidian: "[[logo]]" never
+// The extension is part of the name: "[[logo]]" never
 // reaches logo.png. A target written as a directory ("logo.png/") matches
 // nothing. Only the walk's own entries are ever matched, so a symlink, a
 // file under an excluded directory, and anything outside the root cannot
 // resolve; the caller has already refused a target that escapes the root.
 //
-// Known divergence: a note always wins over an attachment, because the doc
-// tables are consulted first, while Obsidian's exact-path lookup would pick
-// the attachment "x.png" over a note "x.png.md" for "[[x.png]]".
+// A note always wins over an attachment, because the doc tables are
+// consulted first: "[[x.png]]" reaches a note "x.png.md" over an attachment
+// "x.png".
 func resolveAttachment(ri *rootIndex, from *Doc, path0 string) Miss {
 	if namesDirectory(path0) {
 		return MissNoTarget
