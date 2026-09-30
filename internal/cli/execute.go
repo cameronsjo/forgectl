@@ -176,7 +176,8 @@ func Execute(ctx context.Context) error {
 	tmuxClient := tmux.New(exec.OSRunner{})
 	root := buildRoot(deps)
 	args := normalizeArgs(processArgs())
-	// The gate's verb lookup uses the default-config tree, not root: a module
+	// The gate's exempt-verb lookup gets the built root. Only
+	// preFangFailure's --json lookup uses the default-config tree: a module
 	// built over a config that failed to decode can stand in a stub without
 	// its flags (projects does), which would hide the verb's --json.
 	if err := configParseGate(cfg, root, args); err != nil {

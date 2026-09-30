@@ -102,6 +102,11 @@ func TestExecute_MalformedConfigUnderJSON(t *testing.T) {
 			}
 		}},
 		{name: "json as another flag's value", argv: []string{"projects", "list", "--host", "--json"}},
+		{name: "a -- that is another flag's value", argv: []string{"projects", "list", "--host", "--", "--json"}, wantJSON: true, check: func(t *testing.T, obj map[string]any) {
+			if obj["code"] != jsonCodeFailed {
+				t.Errorf("object = %v, want code %q", obj, jsonCodeFailed)
+			}
+		}},
 		{name: "no json", argv: []string{"projects", "list"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -150,7 +155,8 @@ func TestExecute_EnvFailureUnderJSON(t *testing.T) {
 //
 // Mutations that turn it red: drop the "--" break in preFangJSONTarget's scan
 // (the terminator row then builds the tree for nothing); drop the
-// argvWantsJSONIn check (the --host and --json=false rows).
+// argvWantsJSONIn check (the --host, --json=false and --no-icons rows); break
+// at every "--" regardless of the token before it (the --host -- row).
 func TestPreFangJSONTarget(t *testing.T) {
 	isolateJSONContractEnv(t)
 	for _, tt := range []struct {
@@ -165,6 +171,11 @@ func TestPreFangJSONTarget(t *testing.T) {
 		{args: []string{"launch", "--json"}, built: true},
 		{args: []string{"projects", "list", "--", "--json"}},
 		{args: []string{"projects", "list"}},
+		// A "--" that is --host's value is not the terminator (#886).
+		{args: []string{"projects", "list", "--host", "--", "--json"}, want: "forgectl projects list", built: true},
+		// A "--" after a flag that turns out to be a bool is the terminator:
+		// the tree is built to find out, and the --json after it is not counted.
+		{args: []string{"docs", "list", "--no-icons", "--", "--json"}, built: true},
 	} {
 		built := false
 		root := func() *cobra.Command { built = true; return newRoot(module.Deps{Runner: &exec.FakeRunner{}}) }
@@ -309,6 +320,36 @@ func TestPrintDocsSearch_EncodeFailuresKeepDocsShape(t *testing.T) {
 	}
 	if stdout.Len() == 0 {
 		t.Error("the response never reached stdout")
+	}
+}
+
+// TestDocsList_StdoutEncodeFailureKeepsDocsShape is #886 item 1: when stdout
+// refuses the list, stderr gets the docs integer-code object, the way docs
+// search's does, not the generic contract's string-code shape. The exit code
+// stays 1 with or without --json.
+//
+// Mutation that turns it red: return printDocsList's error unchanged from
+// newDocsListCmd's RunE.
+func TestDocsList_StdoutEncodeFailureKeepsDocsShape(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "page.md"), []byte("# Page"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	cmd := newDocsListCmd(module.Deps{})
+	cmd.SetOut(failWriter{})
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--json", dir})
+	err := cmd.ExecuteContext(context.Background())
+	if ExitCode(err) != 1 {
+		t.Errorf("exit = %d (err %v), want 1", ExitCode(err), err)
+	}
+	if _, ok := err.(*silentCodedError); !ok {
+		t.Errorf("err = %T, want *silentCodedError", err)
+	}
+	var obj docsErrorJSON
+	if jerr := json.Unmarshal(stderr.Bytes(), &obj); jerr != nil || obj.Code != 1 || !strings.Contains(obj.Error, "write refused") {
+		t.Errorf("stderr = %q (%v), want one docs object with code 1", stderr.String(), jerr)
 	}
 }
 

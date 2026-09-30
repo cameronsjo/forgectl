@@ -674,7 +674,7 @@ func printSessions(out, errOut io.Writer, sessions []resume.Session, asJSON bool
 		_, _ = fmt.Fprintln(out, sessionRowWidth(s, l))
 		_, _ = fmt.Fprintf(out, "\t%s\n", safeTerm(s.Cwd))
 		if s.LastPrompt != "" {
-			_, _ = fmt.Fprintf(out, "\t%s\n", safeTerm(s.LastPrompt))
+			_, _ = fmt.Fprintf(out, "\t%s\n", safePrompt(s))
 		}
 	}
 	_, _ = fmt.Fprintf(errOut, "%d session(s)\n", len(sessions))
@@ -760,6 +760,17 @@ const sessionNameMaxRunes = 256
 // safeName is displayName made terminal-safe and bounded for a prose line.
 func safeName(s resume.Session) string {
 	return termsafe.SafeLineMax(displayName(s), sessionNameMaxRunes)
+}
+
+// sessionPromptMaxRunes caps the last-prompt line `resume ls` prints. The
+// prompt is the first line of whatever was last typed or pasted, so nobody at
+// the terminal chose its length (forgectl#871); JSON output carries it whole.
+const sessionPromptMaxRunes = 256
+
+// safePrompt is the session's last prompt made terminal-safe and bounded for
+// its line in `resume ls`.
+func safePrompt(s resume.Session) string {
+	return termsafe.SafeLineMax(s.LastPrompt, sessionPromptMaxRunes)
 }
 
 // displayName is the session's best label, falling back to the id.

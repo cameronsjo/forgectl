@@ -39,7 +39,7 @@ A flag error is reported as JSON even when `--json` comes after the bad flag (`-
 Two verb families shipped their own shapes before this contract existed. Callers already parse them, so they are unchanged (ADR-0008: JSON shapes change only additively).
 
 - **`env check`** uses the same `{"error","code","path"}` object with its own codes: `file_not_found` (exit 2) and `check_failed` (exit 1, used for usage errors too). See [commands/env.md](commands/env.md).
-- **The `docs` verbs** (`list`, `check`, `search`) write `{"error","code","root"}`, where `code` is the integer exit code, not a string, and `root` names the docs root a failure stopped on. One case differs from the rule above: a partial `docs search` writes its full response to stdout **and** a code-1 object to stderr. See [commands/docs.md](commands/docs.md#exit-codes-and-errors).
+- **The `docs` verbs** (`list`, `check`, `search`) write `{"error","code","root"}`, where `code` is the integer exit code, not a string, and `root` names the docs root a failure stopped on. One case differs from the rule above: a partial `docs search` writes its full response to stdout **and** a code-1 object to stderr. If stdout fails partway through a `docs search` response, the part already written stays on stdout, truncated, next to a code-1 object on stderr whose `error` names the write failure rather than roots that could not be searched. See [commands/docs.md](commands/docs.md#exit-codes-and-errors).
 
 ## Enforcement
 
