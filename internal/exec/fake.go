@@ -2,7 +2,6 @@ package exec
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -101,16 +100,31 @@ func (f *FakeRunner) answer(call Call, args []string) (string, error) {
 	}
 	out, err := f.RunFunc(call.Name, call.Args)
 	if call.TmuxUTF8 {
-		// A CommandError a RunFunc builds from the argv it was shown must still
-		// name the argv the caller issued, because a real runner's does and
-		// internal/tmux compares the two to classify a failure. Only an error
-		// naming exactly this call's view is rewritten.
-		var cmdErr *CommandError
-		if errors.As(err, &cmdErr) && cmdErr.Name == call.Name && slices.Equal(cmdErr.Args, call.Args) {
-			cmdErr.Args = slices.Clone(args)
-		}
+		err = issuedArgvError(err, call, args)
 	}
 	return out, err
+}
+
+// issuedArgvError makes a CommandError a RunFunc built from the argv it was
+// shown name the argv the caller issued, because a real runner's does and
+// internal/tmux compares the two to classify a failure.
+//
+// Only a *CommandError returned directly, naming exactly this call's view, is
+// replaced, and it is replaced by a COPY: a RunFunc may return one error value
+// from every call, and rewriting it in place would change what that value says
+// to the test holding it and to every later call. The copy keeps Err, so
+// errors.Is and errors.As through it reach what the original reached; it is
+// not the same pointer, so errors.Is(err, original) no longer holds. A
+// CommandError wrapped inside another error is returned untouched, because
+// rebuilding an arbitrary wrapper chain around a copy is not possible.
+func issuedArgvError(err error, call Call, issued []string) error {
+	cmdErr, ok := err.(*CommandError) //nolint:errorlint // only a direct CommandError is replaced; see above
+	if !ok || cmdErr.Name != call.Name || !slices.Equal(cmdErr.Args, call.Args) {
+		return err
+	}
+	cp := *cmdErr
+	cp.Args = slices.Clone(issued)
+	return &cp
 }
 
 // tmuxView is the argv a tmux call presents to RunFunc and to Calls: the
@@ -141,4 +155,27 @@ func tmuxView(name string, args []string) ([]string, bool) {
 		}
 	}
 	return args, false
+}
+
+// TmuxSubcommand is a tmux argv past its leading global options: `-u` (which
+// internal/tmux passes on every non-interactive call, forgectl#840) and the
+// value-taking `-S <path>`, `-L <name>` and `-f <file>`. It is the one
+// definition every hand-written test runner and verb helper uses to find the
+// command it keys on, rather than reading args[0], which is `-u` or `-S` on a
+// real argv. A global option missing its value leaves nothing.
+func TmuxSubcommand(args []string) []string {
+	for len(args) > 0 {
+		switch args[0] {
+		case "-u":
+			args = args[1:]
+		case "-S", "-L", "-f":
+			if len(args) < 2 {
+				return nil
+			}
+			args = args[2:]
+		default:
+			return args
+		}
+	}
+	return args
 }

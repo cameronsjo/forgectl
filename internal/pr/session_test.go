@@ -55,27 +55,6 @@ func findCall(calls []exec.Call, name string) (exec.Call, bool) {
 	return exec.Call{}, false
 }
 
-// tmuxSubcommand is argv past tmux's leading global options: `-u` (which
-// internal/tmux passes on every non-interactive call, forgectl#840) and the
-// value-taking `-S <path>`, `-L <name>` and `-f <file>`. A fake that keys on
-// the command reads it here rather than at args[0].
-func tmuxSubcommand(args []string) []string {
-	for len(args) > 0 {
-		switch args[0] {
-		case "-u":
-			args = args[1:]
-		case "-S", "-L", "-f":
-			if len(args) < 2 {
-				return nil
-			}
-			args = args[2:]
-		default:
-			return args
-		}
-	}
-	return args
-}
-
 // tmuxVerb names the tmux command an argv runs. tmux.KillWindow sends its kill
 // wrapped in a generation guard (forgectl#756): an if-shell whose then-branch
 // is the kill-window, so that argv reads as kill-window here. Keying on
@@ -84,7 +63,7 @@ func tmuxSubcommand(args []string) []string {
 // are skipped, as its twin in internal/tmux does, so a pinned argv reads as
 // its command too.
 func tmuxVerb(args []string) string {
-	args = tmuxSubcommand(args)
+	args = exec.TmuxSubcommand(args)
 	if len(args) == 0 {
 		return ""
 	}

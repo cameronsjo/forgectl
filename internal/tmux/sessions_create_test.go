@@ -125,7 +125,7 @@ type scriptedRunner struct {
 }
 
 func (s *scriptedRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
-	sub := tmuxSubcommand(args)
+	sub := internalexec.TmuxSubcommand(args)
 	if len(sub) > 0 && sub[0] == "list-sessions" {
 		i := s.lists
 		s.lists++

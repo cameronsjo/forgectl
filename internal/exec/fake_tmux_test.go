@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 )
@@ -56,15 +57,19 @@ func TestFakeRunnerPresentsTmuxArgvWithoutUTF8Flag(t *testing.T) {
 // TestFakeRunnerRestoresIssuedArgvOnCommandError: a CommandError a RunFunc
 // builds from the argv it was shown must come back naming the argv the caller
 // issued, because a real runner's does and internal/tmux compares the two to
-// classify a failure. An error naming some other argv is left alone.
+// classify a failure. An error naming some other argv, or one wrapped inside
+// another error, is left alone.
 //
-// Mutation that turns it red: drop the rewrite in answer (the first error keeps
-// the view); rewrite without the equality check (the second error changes).
+// Mutations that turn it red: drop the rewrite (the first error keeps the
+// view); rewrite without the equality check (the "other" error changes).
 func TestFakeRunnerRestoresIssuedArgvOnCommandError(t *testing.T) {
 	other := []string{"new-session", "-s", "x"}
 	f := &FakeRunner{RunFunc: func(name string, args []string) (string, error) {
-		if args[len(args)-1] == "other" {
+		switch args[len(args)-1] {
+		case "other":
 			return "", &CommandError{Name: name, Args: slices.Clone(other)}
+		case "wrapped":
+			return "", fmt.Errorf("wrapped: %w", &CommandError{Name: name, Args: slices.Clone(args)})
 		}
 		return "", &CommandError{Name: name, Args: slices.Clone(args)}
 	}}
@@ -77,5 +82,62 @@ func TestFakeRunnerRestoresIssuedArgvOnCommandError(t *testing.T) {
 	_, err = f.Run(context.Background(), "tmux", "-u", "other")
 	if !errors.As(err, &cmdErr) || !slices.Equal(cmdErr.Args, other) {
 		t.Errorf("error argv = %v, want the untouched %q", err, other)
+	}
+	_, err = f.Run(context.Background(), "tmux", "-u", "wrapped")
+	if !errors.As(err, &cmdErr) || !slices.Equal(cmdErr.Args, []string{"wrapped"}) {
+		t.Errorf("wrapped error argv = %v, want it left as the view", err)
+	}
+}
+
+// TestFakeRunnerRewritesACopyOfAReusedError: a RunFunc may hand back one error
+// value from every call. The rewrite must leave that value as the test built
+// it, give each call its own issued argv, and keep the chain behind it, so
+// errors.Is still reaches the wrapped cause.
+//
+// Mutation that turns it red: rewrite cmdErr.Args in place and return err (the
+// shared value's Args change, and the second call's error reports the first
+// call's argv, because the view no longer matches).
+func TestFakeRunnerRewritesACopyOfAReusedError(t *testing.T) {
+	cause := errors.New("exit status 1")
+	shared := &CommandError{Name: "tmux", Args: []string{"list-sessions"}, Err: cause}
+	f := &FakeRunner{RunFunc: func(string, []string) (string, error) { return "", shared }}
+
+	for _, issued := range [][]string{{"-u", "list-sessions"}, {"-S", "/s2", "-u", "list-sessions"}} {
+		_, err := f.Run(context.Background(), "tmux", issued...)
+		var cmdErr *CommandError
+		if !errors.As(err, &cmdErr) {
+			t.Fatalf("error = %v, want a CommandError", err)
+		}
+		if issued[0] == "-u" && !slices.Equal(cmdErr.Args, issued) {
+			t.Errorf("error argv = %q, want the issued %q", cmdErr.Args, issued)
+		}
+		if !errors.Is(err, cause) {
+			t.Errorf("error %v lost its wrapped cause", err)
+		}
+	}
+	if !slices.Equal(shared.Args, []string{"list-sessions"}) {
+		t.Errorf("the RunFunc's own error value was rewritten to %q", shared.Args)
+	}
+}
+
+// TestTmuxSubcommand pins the one helper hand-written runners use to find a
+// tmux command past its global options.
+//
+// Mutations that turn it red: drop the -u case; drop the value skip for -S.
+func TestTmuxSubcommand(t *testing.T) {
+	tests := []struct {
+		args, want []string
+	}{
+		{[]string{"list-sessions", "-F", "x"}, []string{"list-sessions", "-F", "x"}},
+		{[]string{"-u", "list-sessions"}, []string{"list-sessions"}},
+		{[]string{"-S", "/s", "-u", "kill-server"}, []string{"kill-server"}},
+		{[]string{"-L", "lab", "-f", "/c", "ls"}, []string{"ls"}},
+		{[]string{"-S"}, nil},
+		{[]string{"send-keys", "-u"}, []string{"send-keys", "-u"}},
+	}
+	for _, tt := range tests {
+		if got := TmuxSubcommand(tt.args); !slices.Equal(got, tt.want) {
+			t.Errorf("TmuxSubcommand(%q) = %q, want %q", tt.args, got, tt.want)
+		}
 	}
 }
