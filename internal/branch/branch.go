@@ -405,10 +405,10 @@ func (c *Client) resolveRemote(ctx context.Context, remoteName string) (originRe
 //
 // The branch name reaches the path escaped, one `/` segment at a time
 // (escapeRefPath, #828): gh concatenates the path onto its API prefix, so a
-// raw `#` or `?` would cut the ref short, a `%XX` would be decoded, and a
-// literal `{branch}` would be filled by gh's placeholder expansion. Each of
-// those asks about a different ref, whose 404 would read as a confirmed
-// delete of this one.
+// raw `#` would cut the ref short, a `%XX` would be decoded, and a literal
+// `{branch}` would be filled by gh's placeholder expansion. Each of those asks
+// about a different ref, whose 404 would read as a confirmed delete of this
+// one. (`?` would cut it too, but git refuses `?` in a branch name.)
 func (c *Client) verifyRemoteDeleted(ctx context.Context, origin originRepo, name string) error {
 	path := fmt.Sprintf("repos/%s/%s/git/ref/heads/%s", origin.owner, origin.repo, escapeRefPath(name))
 	_, err := c.run.Run(ctx, "gh", "api", "-i", "--hostname="+origin.host, path)
@@ -428,11 +428,14 @@ func (c *Client) verifyRemoteDeleted(ctx context.Context, origin originRepo, nam
 
 // escapeRefPath path-escapes each `/`-separated segment of a ref name and
 // rejoins them with `/`, so the name's hierarchy stays the endpoint's path
-// and nothing else in it can be read as URL syntax (#828).
+// and nothing else in it can be read as URL syntax (#828). A `+` is sent as
+// %2B, which url.PathEscape leaves literal: `a+b` is a legal branch name, and
+// a server that reads `+` in a path as a space would ask about another ref
+// (#832).
 func escapeRefPath(name string) string {
 	segments := strings.Split(name, "/")
 	for i, seg := range segments {
-		segments[i] = url.PathEscape(seg)
+		segments[i] = strings.ReplaceAll(url.PathEscape(seg), "+", "%2B")
 	}
 	return strings.Join(segments, "/")
 }

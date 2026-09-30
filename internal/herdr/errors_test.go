@@ -197,6 +197,20 @@ func TestErrorMessageIsRedacted(t *testing.T) {
 	}
 }
 
+// TestDeclinedReasonIsRedacted is #832 item 7: Declined.Reason rendered
+// through printable only, while (*Error).Error already redacted Message. A
+// credential herdr put in the reason is now withheld, and a line without a
+// credential shape survives.
+//
+// Mutation: drop redact.Text from (*Declined).Error and the secret shows.
+func TestDeclinedReasonIsRedacted(t *testing.T) {
+	const secret = "SEKRIT-herdr-832" //nolint:gosec // G101: a fake credential the test plants
+	got := (&Declined{TabID: "w1:t1", Reason: "last_tab_in_workspace\nAuthorization: Bearer " + secret}).Error()
+	if strings.Contains(got, secret) || !strings.Contains(got, "last_tab_in_workspace") {
+		t.Errorf("Declined.Error() = %q; want the credential line withheld and the reason code kept", got)
+	}
+}
+
 // TestErrorTextEscapesFormatCharacters is #825 item 2: printable dropped only
 // Cc controls, so a bidi override (U+202E) and other Cf format characters in
 // herdr's text reached the terminal and could reorder what the operator read.

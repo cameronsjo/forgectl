@@ -30,7 +30,10 @@ func pinDirRoot(path string, want fs.FileInfo) (*os.Root, error) {
 }
 
 // errNotADirectory is openChildDirRoot's refusal of a child that is not a
-// plain directory when it is opened: a FIFO, a file, or a symlink.
+// plain directory when it is opened: a FIFO, a file, or a symlink that stays
+// inside the parent. A symlink leading outside the parent is refused by
+// os.Root itself, with "path escapes from parent" rather than this error;
+// both fail closed.
 var errNotADirectory = errors.New("not a directory")
 
 // openChildDirRoot is openDirRoot for name, a single component directly

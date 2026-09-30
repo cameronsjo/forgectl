@@ -173,9 +173,9 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	cfg.Launch = effLaunch
 	lc, _ := resolveLaunchConfig(boundary, cfg, effFrom)
 
-	cwd, err := os.Getwd()
+	cwd, err := launchWorkingDirectory()
 	if err != nil {
-		return termsafe.Error(fmt.Errorf("determine working directory: %w", err))
+		return err
 	}
 	built, err := launch.BuildInvocation(launch.InvocationRequest{
 		Config:      lc,

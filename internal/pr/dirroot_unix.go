@@ -49,8 +49,10 @@ func openDirRoot(path string) (*os.Root, error) {
 // own descriptor, so it needs only search permission on parent, as
 // parent.OpenRoot does.
 //
-// parent.OpenFile passes O_NOFOLLOW to the kernel, but on ELOOP it resolves a
-// symlink that stays inside parent and opens its target. So the probe then
+// parent.OpenFile passes O_NOFOLLOW to the kernel, but on ELOOP or ENOTDIR
+// (os/root_unix.go, rootOpenFileNolog) it resolves a symlink that stays
+// inside parent and opens its target; one that leads outside parent fails
+// with os.Root's "path escapes from parent". So the probe then
 // takes parent.Lstat(name), which must be a plain directory and the same file
 // the open reached: a symlink at name is refused as not a directory rather
 // than followed to another store child, and a directory swapped in between is
