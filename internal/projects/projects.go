@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	neturl "net/url"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
@@ -507,10 +509,9 @@ func (c *Client) localRepos(ctx context.Context) ([]Repo, error) {
 				if host, owner, name := parseRemoteURL(url, c.effectiveGitHubHost()); name != "" {
 					r.Host, r.Owner, r.Name = host, owner, name
 					// SSHURL is contractually an SSH clone URL; an HTTPS origin would
-					// mislabel it in the JSON inventory, so only store SSH-form origins.
-					if isSSHURL(url) {
-						r.SSHURL = url
-					}
+					// mislabel it in the JSON inventory, so only store SSH-form origins,
+					// and none that carries a password (inventorySSHURL).
+					r.SSHURL = inventorySSHURL(url)
 				}
 			}
 		}
@@ -908,6 +909,39 @@ func (c *Client) originMatches(ctx context.Context, dir string, r Repo) bool {
 	}
 	host, owner, name := parseRemoteURL(strings.TrimSpace(url), c.effectiveGitHubHost())
 	return host == r.Host && owner == r.Owner && name == r.Name
+}
+
+// inventorySSHURL returns origin as the SSHURL a local repo records in the
+// JSON inventory, or "" (#749). The inventory is written down and printed,
+// so an origin such as ssh://user:PASS@host/o/r must not reach it. Only an
+// SSH-form origin is kept, and only when it is a redact.Repo shape or holds
+// at most one '@' and no "::" and is scp-like git@host:path or an ssh:// URL
+// with a host and no password.
+// Dropping a password-bearing origin loses no working clone URL: git hands
+// ssh the whole "user:PASS@host" as the destination, so ssh logs in as the
+// user "user:PASS" and the password is never used as one.
+func inventorySSHURL(origin string) string {
+	if !isSSHURL(origin) {
+		return ""
+	}
+	if _, ok := redact.Repo(origin); ok {
+		return origin
+	}
+	if strings.Count(origin, "@") > 1 || strings.Contains(origin, "::") {
+		return ""
+	}
+	if !strings.HasPrefix(origin, "ssh://") {
+		// scp-like git@host:path: the userinfo is exactly "git".
+		return origin
+	}
+	u, err := neturl.Parse(origin)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	if _, hasPassword := u.User.Password(); hasPassword {
+		return ""
+	}
+	return origin
 }
 
 // isSSHURL reports whether a git remote URL uses an SSH transport — the ssh://
