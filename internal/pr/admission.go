@@ -2,6 +2,7 @@ package pr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -28,11 +29,32 @@ func MaxConcurrentReviews(cfgMax int) int {
 	return cfgMax
 }
 
+// countableWindows is ListWindows for COUNTING review windows: a tmux server
+// that has exited and left its socket behind (tmux.ErrServerExited — tmux 3.4
+// leaves one on every exit, including when the last review window closes) has
+// no windows, so it counts as zero rather than as an unreadable server
+// (forgectl#786). Every other failure stays an error.
+//
+// It is for counts and for listings shown to an operator ONLY. It must never
+// feed a "gone" verdict or anything that destroys state: a refused connect
+// proves no server listens now, not that a crashed server's panes died with
+// it (#746, #765). WindowsLive — which gates repair's rollback and forget,
+// prune, and drain's retry — and VerifyDispatched, which reports reviews
+// gone, keep the strict ListWindows for exactly that reason.
+func (c *Client) countableWindows(ctx context.Context) ([]tmux.Window, error) {
+	wins, err := c.tmuxClient.ListWindows(ctx)
+	if errors.Is(err, tmux.ErrServerExited) {
+		return nil, nil
+	}
+	return wins, err
+}
+
 // LiveReviews counts tmux windows across ALL sessions whose session matches
 // the client's exactly and whose name starts with reviewWindowPrefix — the
 // live count of in-flight review launches. ok is false only when the window
 // count genuinely could not be read (list-windows erroring for a reason
-// other than a proven absent default socket); a server with no matching windows is a
+// other than a proven absent default socket, or an exited server's leftover
+// one — see countableWindows); a server with no matching windows is a
 // legitimate zero, not a failure.
 //
 // ListWindows is the SOLE discriminator, deliberately — it lists every
@@ -66,8 +88,7 @@ func MaxConcurrentReviews(cfgMax int) int {
 // "pr-*" window unrelated to a review gets counted too, which only makes
 // admission MORE conservative (fewer slots granted), never less.
 func (c *Client) LiveReviews(ctx context.Context) (n int, ok bool) {
-	t := c.tmuxClient
-	wins, err := t.ListWindows(ctx)
+	wins, err := c.countableWindows(ctx)
 	if err != nil {
 		return 0, false
 	}
@@ -107,6 +128,12 @@ func (c *Client) WindowLive(ctx context.Context, ref Ref) (live bool, ok bool) {
 // process per session. ok is false when the window list could not be read;
 // the returned map is nil in that case, never a map of falses.
 //
+// It reads the STRICT window list: an exited server's leftover socket is
+// ok=false here, not "no window is live", because repair's rollback and
+// forget, prune, and drain's retry read not-live as permission to remove or
+// re-create (#786; the same-server proof of #746). WindowsLiveForListing is
+// the display-only variant.
+//
 // What is shared with LiveReviews is the exact SESSION comparison
 // (w.Session == c.tmuxSession) and ListWindows as the sole discriminator —
 // the load-bearing part. The window test differs by design: LiveReviews
@@ -122,8 +149,19 @@ func (c *Client) WindowLive(ctx context.Context, ref Ref) (live bool, ok bool) {
 // the lifecycle lock, and a timeout reads as ok=false — "unknown", which every
 // caller already treats as a window that may exist.
 func (c *Client) WindowsLive(ctx context.Context, refs []Ref) (map[Ref]bool, bool) {
+	return c.windowsLive(ctx, refs, c.tmuxClient.ListWindows)
+}
+
+// WindowsLiveForListing is WindowsLive for `pr list`'s display: an exited
+// server's leftover socket reads as no live window (countableWindows), not as
+// an unreadable tmux (forgectl#786). It must never gate an action.
+func (c *Client) WindowsLiveForListing(ctx context.Context, refs []Ref) (map[Ref]bool, bool) {
+	return c.windowsLive(ctx, refs, c.countableWindows)
+}
+
+func (c *Client) windowsLive(ctx context.Context, refs []Ref, list func(context.Context) ([]tmux.Window, error)) (map[Ref]bool, bool) {
 	tctx, done := boundedTmux(ctx)
-	wins, err := c.tmuxClient.ListWindows(tctx)
+	wins, err := list(tctx)
 	done()
 	if err != nil {
 		return nil, false
@@ -154,7 +192,10 @@ func (c *Client) WindowsLive(ctx context.Context, refs []Ref) (map[Ref]bool, boo
 
 // VerifyDispatched performs one delayed window snapshot for a whole launch
 // batch and returns dispatches whose generation, session, and name no longer
-// match. Errors leave liveness unknown and never fabricate gone reviews.
+// match. Errors leave liveness unknown and never fabricate gone reviews, and
+// that includes an exited server's leftover socket (tmux.ErrServerExited):
+// reading it as "no windows" would report every dispatch gone on the strength
+// of a refused connect alone (#786, #765).
 func (c *Client) VerifyDispatched(ctx context.Context, dispatches []Dispatch) ([]Dispatch, error) {
 	if len(dispatches) == 0 {
 		return nil, nil
@@ -388,7 +429,7 @@ func (c *Client) occupancyFrom(ctx context.Context, summaries []SessionSummary) 
 // timeout is ok=false, which refuses the admission rather than granting a slot.
 func (c *Client) reviewWindowSnapshot(ctx context.Context) (live int, names map[string]bool, ok bool) {
 	tctx, done := boundedTmux(ctx)
-	wins, err := c.tmuxClient.ListWindows(tctx)
+	wins, err := c.countableWindows(tctx)
 	done()
 	if err != nil {
 		return 0, nil, false

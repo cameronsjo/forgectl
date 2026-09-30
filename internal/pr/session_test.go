@@ -55,16 +55,16 @@ func findCall(calls []exec.Call, name string) (exec.Call, bool) {
 	return exec.Call{}, false
 }
 
-// findCallVerb finds the first call to name whose first arg (the tmux
-// subcommand) equals verb — for asserting on one specific call among
-// several to the same binary, e.g. new-window after ensureSession's own
-// has-session check.
 // tmuxVerb names the tmux command an argv runs. tmux.KillWindow sends its kill
 // wrapped in a generation guard (forgectl#756): an if-shell whose then-branch
 // is the kill-window, so that argv reads as kill-window here. Keying on
 // args[0] alone would make every "no kill ran" assertion in this package pass
-// vacuously against the guarded form.
+// vacuously against the guarded form. A leading -S pin is skipped, as its
+// twin in internal/tmux does, so a pinned argv reads as its command too.
 func tmuxVerb(args []string) string {
+	if len(args) >= 2 && args[0] == "-S" {
+		args = args[2:]
+	}
 	if len(args) == 0 {
 		return ""
 	}
@@ -75,6 +75,21 @@ func tmuxVerb(args []string) string {
 	return args[0]
 }
 
+// TestTmuxVerbSeesThroughPinAndGuard pins the helper every "no kill ran"
+// assertion in this package rests on. Mutation that turns it red: drop the
+// -S skip, and a pinned guarded kill reads as "-S".
+func TestTmuxVerbSeesThroughPinAndGuard(t *testing.T) {
+	guarded := []string{"if-shell", "-F", "-t", "@1", "#{==:#{pid}/#{start_time},1/2}", "kill-window -t @1", "display-message -p x"}
+	for _, args := range [][]string{guarded, append([]string{"-S", "/tmp/s"}, guarded...)} {
+		if got := tmuxVerb(args); got != "kill-window" {
+			t.Errorf("tmuxVerb(%v) = %q, want kill-window", args, got)
+		}
+	}
+}
+
+// findCallVerb finds the first call to name whose tmux command (tmuxVerb)
+// equals verb — for asserting on one specific call among several to the same
+// binary, e.g. new-window after ensureSession's own has-session check.
 func findCallVerb(calls []exec.Call, name, verb string) (exec.Call, bool) {
 	for _, c := range calls {
 		if c.Name == name && tmuxVerb(c.Args) == verb {

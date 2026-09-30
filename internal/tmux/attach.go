@@ -40,6 +40,9 @@ func (c *Client) AttachSession(ctx context.Context, want SessionIdentity) error 
 // against a detached session perfectly well, so doing it first means the client
 // arrives already looking at the right window rather than flashing whatever was
 // current.
+//
+// The select-window runs inside generationGuarded (forgectl#785), so a server
+// replaced after the revalidation does not select its own @N.
 func (c *Client) AttachWindow(ctx context.Context, want WindowIdentity) error {
 	// Up front, for AttachSession's reason — and here it also spares a
 	// select-window against a session the client could never then attach to.
@@ -50,8 +53,12 @@ func (c *Client) AttachWindow(ctx context.Context, want WindowIdentity) error {
 	if err != nil {
 		return fmt.Errorf("attach window %q: %w", want.Name, err)
 	}
-	if _, err := c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("select-window", "-t", current.ID)...); err != nil {
-		return fmt.Errorf("select window %s: %w", current.ID, err)
+	if err := ValidateWindowID(current.ID); err != nil {
+		return fmt.Errorf("select window %q: %w", want.Name, err)
+	}
+	if err := c.runGuarded(ctx, "select window "+current.ID, current.Generation, current.ID,
+		"select-window -t "+current.ID); err != nil {
+		return err
 	}
 	return c.attachOrSwitch(ctx, current.SessionID, current.Name)
 }
@@ -141,7 +148,14 @@ func (c *Client) mostRecentSession(ctx context.Context) (SessionIdentity, error)
 		if c.absentServer(ctx, args, err) {
 			return SessionIdentity{}, nil
 		}
-		return SessionIdentity{}, c.serverStateError(ctx, args, err)
+		// An exited server's leftover socket also means no session to jump
+		// to (forgectl#786). The zero identity is only ever reported, never
+		// acted on.
+		stateErr := c.serverStateError(ctx, args, err)
+		if errors.Is(stateErr, ErrServerExited) {
+			return SessionIdentity{}, nil
+		}
+		return SessionIdentity{}, stateErr
 	}
 	lines := splitLines(out)
 	// parsed holds the rows that split cleanly. Only its emptiness is read

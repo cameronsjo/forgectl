@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	internalexec "github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -34,6 +37,13 @@ const (
 	// directory but never an explicit `-S` one — so "absent, go create it" would
 	// send the caller into a bind failure against a path nothing can bind.
 	serverSocketDirMissing
+	// serverDeadSocket means the socket file exists, is a socket, and a
+	// connect to it was refused: nothing listens there (forgectl#786). tmux
+	// 3.4 leaves its socket behind whenever the server exits, cleanly or not,
+	// so this is the ordinary state after the last session closes. It is NOT
+	// serverAbsent: it maps to ErrServerUnreadable wrapped with
+	// ErrServerExited, which only opted-in callers read as "no server".
+	serverDeadSocket
 )
 
 // String renders a serverFailureKind for logging — the log line at the bottom
@@ -55,6 +65,8 @@ func (k serverFailureKind) String() string {
 		return "pin_mismatch"
 	case serverSocketDirMissing:
 		return "socket_dir_missing"
+	case serverDeadSocket:
+		return "dead_socket"
 	default:
 		return "unknown"
 	}
@@ -78,7 +90,7 @@ func (c *Client) classifyServerFailure(ctx context.Context, expectedArgs []strin
 	if !ok {
 		return serverFailure{Kind: refusal, Cause: err}
 	}
-	_, statErr := c.lstat(socketPath)
+	info, statErr := c.lstat(socketPath)
 	var failure serverFailure
 	switch {
 	case errors.Is(statErr, os.ErrNotExist) && !c.socketDirUsable(socketPath):
@@ -89,6 +101,8 @@ func (c *Client) classifyServerFailure(ctx context.Context, expectedArgs []strin
 		failure = serverFailure{Kind: serverAbsent, SocketPath: socketPath, Cause: err}
 	case errors.Is(statErr, os.ErrPermission):
 		failure = serverFailure{Kind: serverSocketPermission, SocketPath: socketPath, Cause: statErr}
+	case statErr == nil && c.socketRefusesConnect(ctx, socketPath, info):
+		failure = serverFailure{Kind: serverDeadSocket, SocketPath: socketPath, Cause: err}
 	case statErr == nil:
 		failure = serverFailure{Kind: serverStaleSocket, SocketPath: socketPath, Cause: err}
 	default:
@@ -101,6 +115,33 @@ func (c *Client) classifyServerFailure(ctx context.Context, expectedArgs []strin
 	slog.Debug("Classified tmux server failure.",
 		"kind", failure.Kind, "socket", socketPath, "pinned", c.socket != "")
 	return failure
+}
+
+// socketRefusesConnect reports whether the socket file at path is proven
+// dead: lstat saw a socket (not a symlink, not a regular file) and a unix
+// connect to it failed with ECONNREFUSED, which is the kernel saying no
+// process is listening on it. Every other outcome — a connect that succeeds
+// (a live server that failed the command for some other reason), a
+// permission error, a timeout, a canceled context — is not proof, and the
+// caller keeps the fail-closed serverStaleSocket.
+func (c *Client) socketRefusesConnect(ctx context.Context, path string, info os.FileInfo) bool {
+	if info == nil || info.Mode().Type() != os.ModeSocket {
+		return false
+	}
+	err := c.dialSocket(ctx, path)
+	return errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// dialUnixSocket is the production dialSocket: one bounded unix connect,
+// closed at once. A live tmux server sees a client that connects and leaves,
+// which it handles like any client that disconnects.
+func dialUnixSocket(ctx context.Context, path string) error {
+	dialer := net.Dialer{Timeout: time.Second}
+	conn, err := dialer.DialContext(ctx, "unix", path)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
 }
 
 // socketDirUsable reports whether the socket's parent directory exists, so an
@@ -187,13 +228,16 @@ func (c *Client) classifiableSocket(args []string) (path string, ok bool, refusa
 // it is safe there: a false positive only withholds the proceed verdict.
 func (c *Client) pinnedArgs(args []string) bool {
 	if len(args) < 2 || args[0] != "-S" || args[1] != c.socket {
+		// The length, never the argv: a refused argv can carry
+		// `new-window -e KEY=VALUE`, whose value the Runner's per-call mask
+		// would hide but this log line cannot see (forgectl#775).
 		slog.Debug("Refusing argv this pinned client did not build.",
-			"pin", c.socket, "argv", args)
+			"pin", c.socket, "argc", len(args), "reason", "the argv does not lead with the pin")
 		return false
 	}
 	if hasExplicitSocketArg(args[2:]) {
 		slog.Debug("Refusing argv naming a second socket after the pin.",
-			"pin", c.socket, "argv", args)
+			"pin", c.socket, "argc", len(args), "reason", "a socket option follows the pin")
 		return false
 	}
 	return true
@@ -232,6 +276,32 @@ func hasExplicitSocketArg(args []string) bool {
 		}
 	}
 	return false
+}
+
+// DisplaySessions is ListSessions for a listing shown to an operator: a server
+// that has exited and left its socket behind (ErrServerExited) reads as no
+// sessions, exactly like a server that never ran (forgectl#786). It is for
+// display only. A "gone" verdict must come from ListSessions or a
+// revalidation, which keep failing closed on that state.
+func (c *Client) DisplaySessions(ctx context.Context) ([]Session, error) {
+	return exitedIsEmpty(c.ListSessions(ctx))
+}
+
+// DisplayWindows is ListWindows under DisplaySessions' rule.
+func (c *Client) DisplayWindows(ctx context.Context) ([]Window, error) {
+	return exitedIsEmpty(c.ListWindows(ctx))
+}
+
+// DisplayPanes is ListPanes under DisplaySessions' rule.
+func (c *Client) DisplayPanes(ctx context.Context) ([]Pane, error) {
+	return exitedIsEmpty(c.ListPanes(ctx))
+}
+
+func exitedIsEmpty[T any](rows []T, err error) ([]T, error) {
+	if errors.Is(err, ErrServerExited) {
+		return nil, nil
+	}
+	return rows, err
 }
 
 // absentServer reports whether a failed command proves no server is running

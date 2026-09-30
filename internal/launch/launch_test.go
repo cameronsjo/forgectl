@@ -324,7 +324,10 @@ func TestAgentsArgs_AllowDangerOff_OmitsFlag(t *testing.T) {
 // Mutation that turns it red: match the tokens anywhere again, ignoring the
 // preceding token (the value-slot rows flip to true), or drop "--all" from
 // agentsBooleanFlags (the --all --json row flips to false), or drop the `--`
-// stop (the rows after claude's separator flip to true).
+// stop (the rows after claude's separator flip to true). Stop at every `--`
+// again, value slot or not (the "--settings -- --json" rows flip to false),
+// or drop the `prev == "--"` case from inFlagPosition (the "--settings --
+// --json" row flips to false: the token after a value `--` reads as a value).
 func TestIsAgentsPassthrough(t *testing.T) {
 	cases := []struct {
 		args []string
@@ -347,6 +350,15 @@ func TestIsAgentsPassthrough(t *testing.T) {
 		{[]string{"agents", "--", "x", "--json"}, false},
 		{[]string{"agents", "--", "--help"}, false},
 		{[]string{"agents", "--json", "--", "x"}, true},
+		// A `--` in a value slot is that option's value (forgectl#766):
+		// `claude agents --settings -- --json` reads "--" as the settings
+		// file (2.1.285). A `--` in flag position still ends the options,
+		// including one right after a `--` taken as a value.
+		{[]string{"agents", "--settings", "--", "--json"}, true},
+		{[]string{"agents", "--settings", "--", "--settings", "--", "-h"}, true},
+		{[]string{"agents", "--settings", "--", "--", "--json"}, false},
+		{[]string{"agents", "--all", "--", "--json"}, false},
+		{[]string{"agents", "--cwd=/x", "--", "--json"}, false},
 	}
 	for _, tc := range cases {
 		got := IsAgentsPassthrough(tc.args)

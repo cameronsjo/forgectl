@@ -504,7 +504,9 @@ func prListLiveness(ctx context.Context, client *pr.Client, summaries []pr.Sessi
 	}
 	tmuxOK = true
 	if len(refs) > 0 {
-		live, tmuxOK = client.WindowsLive(ctx, refs)
+		// Display only: an exited tmux server's leftover socket reads as no
+		// live window here, not "?" (forgectl#786).
+		live, tmuxOK = client.WindowsLiveForListing(ctx, refs)
 	}
 	return live, tmuxOK
 }

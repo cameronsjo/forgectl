@@ -5,6 +5,7 @@
 package tmux
 
 import (
+	"context"
 	"fmt"
 	"os"
 	osexec "os/exec"
@@ -49,6 +50,10 @@ type Client struct {
 	// running reviews.
 	getuid func() int
 	lstat  func(string) (os.FileInfo, error)
+	// dialSocket connects to a unix socket and closes the connection; its
+	// error is how classifyServerFailure tells a dead socket from a live one
+	// (forgectl#786). Injectable so the classifier stays deterministic.
+	dialSocket func(context.Context, string) error
 
 	// socket pins every command to one tmux server via `-S`, overriding the
 	// environmental selection. Empty means the environmental mode, which is
@@ -204,6 +209,8 @@ func New(run exec.Runner, opts ...Option) *Client {
 		getenv:   os.Getenv,
 		getuid:   os.Getuid,
 		lstat:    os.Lstat,
+
+		dialSocket: dialUnixSocket,
 	}
 	for _, opt := range opts {
 		opt(c)
