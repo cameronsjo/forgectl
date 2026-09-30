@@ -186,15 +186,46 @@ func Categorical(message string, cause error) error {
 // while preserving its unwrap chain for errors.Is/errors.As disposition.
 // Known filesystem errors are reconstructed from individually escaped fields
 // so a raw path can never be reinserted by their native Error method.
+//
+// An Error method that panics gets errTextUnavailable in place of its text,
+// and the rest of the message still renders; see errorText.
 func Error(err error) error {
 	if err == nil {
 		return nil
 	}
-	message := SafeLine(err.Error())
+	var message string
 	if linkErr, ok := err.(*os.LinkError); ok {
-		message = fmt.Sprintf("%s %s %s: %s", SafeLine(linkErr.Op), QuotePath(linkErr.Old), QuotePath(linkErr.New), SafeLine(linkErr.Err.Error()))
+		message = fmt.Sprintf("%s %s %s: %s", SafeLine(linkErr.Op), QuotePath(linkErr.Old), QuotePath(linkErr.New), SafeLine(errorText(linkErr.Err)))
 	} else if pathErr, ok := err.(*os.PathError); ok {
-		message = fmt.Sprintf("%s %s: %s", SafeLine(pathErr.Op), QuotePath(pathErr.Path), SafeLine(pathErr.Err.Error()))
+		message = fmt.Sprintf("%s %s: %s", SafeLine(pathErr.Op), QuotePath(pathErr.Path), SafeLine(errorText(pathErr.Err)))
+	} else {
+		message = SafeLine(errorText(err))
 	}
 	return safeError{message: message, cause: err}
+}
+
+// errTextUnavailable is the text Error gives an error whose Error method
+// panicked. It says what happened without repeating the panic value.
+const errTextUnavailable = "error text unavailable: its Error method panicked"
+
+// errorText is err.Error(), or errTextUnavailable when that call panics.
+//
+// Go 1.26.0's os.RemoveAll and os.Root.RemoveAll can return a *PathError
+// wrapping the runtime's internal errSymlink when a same-uid racer swaps a
+// directory for a symlink mid-walk, and errSymlink's Error method is a panic
+// (forgectl#783, #764). go.mod's go directive now requires a patch that maps
+// it away, but this is the boundary every filesystem error crosses on its way
+// to the terminal, so it does not rely on the toolchain alone. fmt and slog
+// recover such a panic; a direct call does not.
+//
+// The cause stays in the chain Error returns, so errors.Is and errors.As keep
+// working. A caller that unwraps to it and calls its Error method directly
+// reintroduces the panic.
+func errorText(err error) (text string) {
+	defer func() {
+		if recover() != nil {
+			text = errTextUnavailable
+		}
+	}()
+	return err.Error()
 }
