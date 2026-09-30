@@ -1,8 +1,11 @@
 package step
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Context is the shared variable table threaded through resolve/plan/execute:
@@ -68,6 +71,10 @@ func nextRef(s string, from int) (name string, start, after int, ok, unterminate
 	return s[start+2 : end], start, end + 1, true, false
 }
 
+// errUnterminatedRef is Interpolate's refusal of a "${" with no closing "}".
+// It never carries the value (#778).
+var errUnterminatedRef = errors.New("unterminated ${...}; the value is not shown")
+
 // Interpolate resolves every ${var} reference in s against the Context. A
 // reference to a deferred export passes through as the literal ${var}; any
 // other unresolved variable is an error — referencing a param or export that
@@ -82,7 +89,10 @@ func (c *Context) Interpolate(s string) (string, error) {
 	for i < len(s) {
 		name, start, after, ok, unterminated := nextRef(s, i)
 		if unterminated {
-			return "", fmt.Errorf("unterminated ${...} in %q", s)
+			// Fixed (#778): s is a whole workflow field (a run step's cmd,
+			// say), unvetted file text of any length, so it is never echoed.
+			// PlanStep.Interpolate names the field; the planner names the step.
+			return "", errUnterminatedRef
 		}
 		if !ok {
 			b.WriteString(s[i:])
@@ -95,7 +105,7 @@ func (c *Context) Interpolate(s string) (string, error) {
 		case c.deferred[name]:
 			b.WriteString("${" + name + "}")
 		default:
-			return "", fmt.Errorf("unknown variable ${%s} in %q", name, s)
+			return "", fmt.Errorf("unknown variable %s", termsafe.QuoteArgMax("${"+name+"}", 0))
 		}
 		i = after
 	}

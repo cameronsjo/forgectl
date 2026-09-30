@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Plan is the ordered, resolved step sequence a workflow run will execute.
@@ -68,8 +70,11 @@ func BuildPlan(wf Workflow, cliParams map[string]string, registry StepRegistry) 
 	for i, s := range wf.Steps {
 		ps, err := planStep(ctx, s)
 		if err != nil {
-			slog.Error("Failed to plan step.", "workflowName", wf.Name, "stepIndex", i, "stepUse", s.Uses, "error", err)
-			return Plan{}, fmt.Errorf("step %d (%s): %w", i, s.Uses, err)
+			// Capped (#761): this fires before exec.go's registry check, so
+			// s.Uses is still unvetted workflow-file text of any length.
+			uses := termsafe.QuoteArgMax(s.Uses, 0)
+			slog.Error("Failed to plan step.", "workflowName", wf.Name, "stepIndex", i, "stepUse", uses, "error", err)
+			return Plan{}, fmt.Errorf("step %d (%s): %w", i, uses, err)
 		}
 		steps = append(steps, ps)
 	}
@@ -96,7 +101,7 @@ func resolveParams(declared map[string]Param, cliParams map[string]string) (map[
 		slog.Debug("Rejecting undeclared params.", "params", unknown)
 		quoted := make([]string, len(unknown))
 		for i, name := range unknown {
-			quoted[i] = fmt.Sprintf("%q", name)
+			quoted[i] = termsafe.QuoteArgMax(name, 0)
 		}
 		return nil, fmt.Errorf("unknown param %s: not declared by this workflow", strings.Join(quoted, ", "))
 	}
@@ -109,7 +114,7 @@ func resolveParams(declared map[string]Param, cliParams map[string]string) (map[
 		}
 		if p.Required {
 			slog.Warn("Missing required param.", "param", name)
-			return nil, fmt.Errorf("missing required param %q", name)
+			return nil, fmt.Errorf("missing required param %s", termsafe.QuoteArgMax(name, 0))
 		}
 		out[name] = p.Default
 	}

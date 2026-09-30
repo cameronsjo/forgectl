@@ -62,7 +62,9 @@ func (c *Client) CheckGenerationCapability(ctx context.Context) (GenerationCapab
 	out, err := c.run.Run(ctx, c.tmuxBin, args...)
 	if err != nil {
 		failure := c.classifyServerFailure(ctx, args, err)
-		if failure.Kind == serverAbsent {
+		// An exited server's leftover socket is no server too (forgectl#786):
+		// the probe needs a live server's identity only when one answers.
+		if failure.Kind == serverAbsent || failure.Kind == serverDeadSocket {
 			return GenerationCapability{Version: normalized}, nil
 		}
 		cause := failure.Cause

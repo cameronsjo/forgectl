@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -345,15 +346,11 @@ func loadBreadcrumbRecord(path, sessionsDir string) (Breadcrumb, []byte, error) 
 		return Breadcrumb{}, nil, fmt.Errorf("breadcrumb %s is not inside the forgectl session-state dir", termsafe.QuotePath(path))
 	}
 
-	// (2) CONTENT — only now read and decode. LimitReader bounds the allocation
-	// before parsing rather than discovering an oversized record after ReadFile
-	// has already buffered it all.
-	file, err := os.Open(path) //nolint:gosec // path was location-validated above
-	if err != nil {
-		return Breadcrumb{}, nil, fmt.Errorf("read breadcrumb %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
-	}
-	defer func() { _ = file.Close() }()
-	data, err := readBreadcrumbBytes(file)
+	// (2) CONTENT — only now read and decode, through the one record reader:
+	// O_NOFOLLOW|O_NONBLOCK and a regular-file Fstat, so a FIFO named like a
+	// record cannot block this open under the lifecycle lock (forgectl#621),
+	// and a size bound applied before parsing rather than after buffering.
+	data, err := readRecordFile(path)
 	if err != nil {
 		return Breadcrumb{}, nil, fmt.Errorf("read breadcrumb %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
@@ -596,22 +593,48 @@ func validWindowID(id string) bool {
 // session-state dir under $HOME — same-uid arbitrary write — an actor who
 // can delete the target outright without forgectl.
 func validateWorkspace(workspace string) error {
+	ws := quoteWorkspace(workspace)
 	if !filepath.IsAbs(workspace) {
-		return fmt.Errorf("workspace %q must be an absolute path", workspace)
+		return fmt.Errorf("workspace %s must be an absolute path", ws)
 	}
 	info, err := fsStat(workspace)
 	if err != nil {
-		return fmt.Errorf("workspace %q does not exist: %w", workspace, err)
+		return fmt.Errorf("workspace %s does not exist: %w", ws, pathErrCause(err))
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("workspace %q is not a directory", workspace)
+		return fmt.Errorf("workspace %s is not a directory", ws)
 	}
 	resolved, err := fsEvalSymlinks(workspace)
 	if err != nil {
-		return fmt.Errorf("workspace %q could not be resolved: %w", workspace, err)
+		return fmt.Errorf("workspace %s could not be resolved: %w", ws, pathErrCause(err))
 	}
 	if !strings.HasPrefix(filepath.Base(resolved), sandboxPrefix) {
-		return fmt.Errorf("workspace %q lacks the %q sandbox prefix", workspace, sandboxPrefix)
+		return fmt.Errorf("workspace %s lacks the %q sandbox prefix", ws, sandboxPrefix)
 	}
 	return nil
+}
+
+// workspaceEchoMaxRunes caps a workspace path echoed in an error (#706). The
+// path comes from a breadcrumb on disk, so it is bounded rather than trusted;
+// it is still echoed because on the teardown path it is the one pointer to
+// what was refused. The budget is well above termsafe.ArgEchoMaxRunes because
+// a macOS $TMPDIR sandbox path alone runs to about 80 runes.
+const workspaceEchoMaxRunes = 256
+
+// quoteWorkspace is the echo form of a recorded workspace path: quoted with
+// control characters escaped, and capped at workspaceEchoMaxRunes.
+func quoteWorkspace(path string) string {
+	return termsafe.QuoteArgMax(path, workspaceEchoMaxRunes)
+}
+
+// pathErrCause strips a *fs.PathError down to its underlying cause, so an
+// error that already names the workspace (capped) does not render the raw path
+// a second time through the PathError's own text. errors.Is disposition on the
+// cause (fs.ErrNotExist, fs.ErrPermission) is unchanged.
+func pathErrCause(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	return err
 }

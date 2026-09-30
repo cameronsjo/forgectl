@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // BinarySource names the configuration layer that selected a harness binary.
@@ -68,6 +69,8 @@ const (
 	PostureClaudeBuilder     Posture = "claude-builder"
 	PostureClaudeAgents      Posture = "claude-agents"
 	PostureAgentsPassthrough Posture = "agents-passthrough"
+	PostureClaudePassthrough Posture = "claude-passthrough" //nolint:gosec // G101: a posture name ("passthrough"), not a credential
+	PostureClaudePrint       Posture = "claude-print"
 	PostureCodexSession      Posture = "codex-session"
 	PostureCodexExec         Posture = "codex-exec"
 	PosturePiSession         Posture = "pi-session"
@@ -99,6 +102,11 @@ type InvocationRequest struct {
 	// wins over a removal, because it is the operator naming a value explicitly.
 	UnsetEnv []string
 	Resolve  BinaryResolver
+	// StdoutTerminal reports whether the harness's stdout (forgectl's own,
+	// since launch execs it) is a terminal. It decides whether
+	// `--output-format` alone selects the print posture (IsClaudePrintMode,
+	// forgectl#795). The zero value, not a terminal, keeps it print mode.
+	StdoutTerminal bool
 }
 
 // BuiltInvocation is the invocation plus the two things the caller needs to
@@ -135,7 +143,7 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 	}
 
 	args := cloneStrings(req.Args)
-	posture, harnessArgs, err := selectPosture(profile, args)
+	posture, harnessArgs, err := selectPosture(profile, args, req.StdoutTerminal)
 	if err != nil {
 		return BuiltInvocation{}, err
 	}
@@ -170,8 +178,8 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 
 // selectPosture routes args to the builder that owns them and reports which one
 // ran. args is already a private copy, so the passthrough branch can return it
-// without aliasing the caller.
-func selectPosture(p Profile, args []string) (Posture, []string, error) {
+// without aliasing the caller. stdoutTerminal is InvocationRequest's.
+func selectPosture(p Profile, args []string, stdoutTerminal bool) (Posture, []string, error) {
 	if p.Harness == "pi" {
 		if len(args) > 0 && args[0] == "agents" {
 			return "", nil, fmt.Errorf(
@@ -203,6 +211,18 @@ func selectPosture(p Profile, args []string) (Posture, []string, error) {
 			return PostureAgentsPassthrough, args, nil
 		}
 		return PostureClaudeAgents, AgentsArgs(p, args), nil
+	// A subcommand in the first slot can never be a flag's value, so it goes
+	// first. Print mode goes before help/version as defence in depth. Help and
+	// version only count at args[0], so a later help token cannot reach the
+	// passthrough on its own. The order still means that if that check ever
+	// widens to scan argv, `-p x --help` keeps its permission mode. A run that
+	// selects both, such as `-v -p hi`, gets the print posture.
+	case IsClaudeSubcommandCall(args):
+		return PostureClaudePassthrough, args, nil
+	case IsClaudePrintMode(args, stdoutTerminal):
+		return PostureClaudePrint, PrintArgs(p, args), nil
+	case IsClaudeHelpOrVersion(args):
+		return PostureClaudePassthrough, args, nil
 	default:
 		return PostureClaudeBuilder, BuilderArgs(p, args), nil
 	}
@@ -217,9 +237,10 @@ func selectPosture(p Profile, args []string) (Posture, []string, error) {
 // Codex launch would leave no record of the argv it ran with — including the
 // approval and sandbox posture, which is the part worth auditing.
 //
-// Two postures stay silent. The builder path is what an operator scripts
-// against, and the agents scripting passthrough must reach claude byte-clean
-// with no injection and no banner.
+// Four postures stay silent. The builder and print paths are what an operator
+// scripts against, and the agents scripting passthrough and the Claude
+// passthrough (subcommands, help, version) must reach claude byte-clean with no
+// injection and no banner.
 // An unrecognised posture banners rather than falling through silently. A
 // posture added to selectPosture but forgotten here would otherwise suppress
 // the only pre-session record of the argv — including
@@ -229,7 +250,7 @@ func selectPosture(p Profile, args []string) (Posture, []string, error) {
 // stdout. allPostures pins the known set, so the default should stay dead.
 func EmitBanner(w io.Writer, b BuiltInvocation) {
 	switch b.Posture {
-	case PostureClaudeBuilder, PostureAgentsPassthrough:
+	case PostureClaudeBuilder, PostureAgentsPassthrough, PostureClaudePassthrough, PostureClaudePrint:
 	case PostureClaudeSession, PostureClaudeAgents:
 		Banner(w, b.Invocation.Args)
 	case PostureCodexSession, PostureCodexExec, PosturePiSession, PosturePiArgs:
@@ -248,6 +269,8 @@ var allPostures = []Posture{
 	PostureClaudeBuilder,
 	PostureClaudeAgents,
 	PostureAgentsPassthrough,
+	PostureClaudePassthrough,
+	PostureClaudePrint,
 	PostureCodexSession,
 	PostureCodexExec,
 	PosturePiSession,
@@ -297,7 +320,7 @@ func ResolveBinary(harness string, defaults config.LaunchDefaults) (ResolvedBina
 			name:        "pi",
 		})
 	default:
-		return ResolvedBinary{}, fmt.Errorf("unsupported launch harness %q: want claude, codex, or pi", harness)
+		return ResolvedBinary{}, fmt.Errorf("unsupported launch harness %s: want claude, codex, or pi", termsafe.QuoteArgMax(harness, 0))
 	}
 }
 

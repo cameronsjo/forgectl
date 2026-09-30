@@ -15,6 +15,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/resume"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -788,5 +789,32 @@ func TestWriterWidth_NonTerminalIsZero(t *testing.T) {
 	defer func() { _ = f.Close() }()
 	if got := writerWidth(f); got != 0 {
 		t.Errorf("writerWidth(file) = %d, want 0", got)
+	}
+}
+
+// TestResumeSession_CapsTheSessionName is forgectl#864: a transcript-derived
+// session name is capped where resume prints it in a line of prose, in the
+// live refusal and on the --dry-run name line alike.
+//
+// Mutation that turns it red: have safeName return safeTerm(displayName(s)).
+func TestResumeSession_CapsTheSessionName(t *testing.T) {
+	fakeClaudeBin(t)
+	s := resume.Session{
+		ID: "aaaaaaaa-0000-0000-0000-000000000010", Name: strings.Repeat("n", 5000),
+		Cwd: t.TempDir(), Live: true, Pid: 4242,
+	}
+	cmd, out, _ := newTestCmd()
+
+	err := resumeSession(cmd, config.Config{}, nil, s, false, true)
+	if err == nil {
+		t.Fatal("--dry-run of a live session returned nil, want the live refusal")
+	}
+	for sink, text := range map[string]string{"refusal": err.Error(), "dry-run": out.String()} {
+		if strings.Contains(text, strings.Repeat("n", sessionNameMaxRunes+1)) {
+			t.Errorf("%s printed more than %d runes of the name", sink, sessionNameMaxRunes)
+		}
+		if !strings.Contains(text, termsafe.TruncatedMarker) {
+			t.Errorf("%s = %.300q, want the truncation marker", sink, text)
+		}
 	}
 }

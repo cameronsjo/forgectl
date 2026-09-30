@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // HomelabGateway is the homelab LAN's default gateway address. An RFC1918
@@ -234,6 +235,11 @@ func defaultGateway(ctx context.Context, runner exec.Runner) string {
 	return ""
 }
 
+// resolveErrMaxRunes caps the resolver's error text in an unreachable-host
+// refusal: it names the host again, and the host is operator config of any
+// length (#778).
+const resolveErrMaxRunes = 200
+
 // checkHostPinning resolves host, refuses to proceed unless every resolved
 // address is a sanctioned destination for the bearer token, and returns the
 // addresses it vetted plus the gateway it corroborated against.
@@ -256,10 +262,10 @@ func defaultGateway(ctx context.Context, runner exec.Runner) string {
 func checkHostPinning(ctx context.Context, runner exec.Runner, host string, pins []net.IP) (vetted []net.IP, gateway string, err error) {
 	ips, err := resolveHost(ctx, host)
 	if err != nil {
-		return nil, "", fmt.Errorf("%w: %s does not resolve: %v", ErrUnreachable, host, err)
+		return nil, "", fmt.Errorf("%w: %s does not resolve: %s", ErrUnreachable, termsafe.QuoteArgMax(host, 0), termsafe.SafeLineMax(err.Error(), resolveErrMaxRunes))
 	}
 	if len(ips) == 0 {
-		return nil, "", fmt.Errorf("%w: %s did not resolve to any address", ErrUnreachable, host)
+		return nil, "", fmt.Errorf("%w: %s did not resolve to any address", ErrUnreachable, termsafe.QuoteArgMax(host, 0))
 	}
 	gateway = defaultGateway(ctx, runner)
 	for _, ip := range ips {
@@ -269,7 +275,7 @@ func checkHostPinning(ctx context.Context, runner exec.Runner, host string, pins
 			// that was applied. Naming only the offending address leaves them
 			// guessing whether the list or the DNS answer is wrong.
 			return nil, "", fmt.Errorf("%w: %s %s (resolved to %s; --pin-ip list %s)",
-				ErrHostRefused, host, reason, formatIPList(ips), formatIPList(pins))
+				ErrHostRefused, termsafe.QuoteArgMax(host, 0), reason, formatIPList(ips), formatIPList(pins))
 		}
 	}
 	return ips, gateway, nil
@@ -320,7 +326,10 @@ func pinnedDialerWithClassifier(
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		_, port, err := net.SplitHostPort(addr)
 		if err != nil {
-			return nil, fmt.Errorf("%w: cannot parse dial address %q: %v", ErrHostRefused, addr, err)
+			// net's parse error names the address again, so both are
+			// escaped and capped (#810).
+			return nil, fmt.Errorf("%w: cannot parse dial address %s: %s", ErrHostRefused,
+				termsafe.QuoteArgMax(addr, 0), termsafe.SafeLineMax(err.Error(), resolveErrMaxRunes))
 		}
 		var lastErr error
 		for _, ip := range pinned {

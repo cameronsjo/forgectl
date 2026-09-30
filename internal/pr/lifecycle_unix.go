@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -43,6 +44,29 @@ func (e *lockBusyError) Error() string {
 	}
 	return fmt.Sprintf("lifecycle lock busy after %s: %s (%s) — check with 'forgectl pr list'; the lock releases when that process exits",
 		e.waited.Round(time.Millisecond), termsafe.QuotePath(e.path), holder)
+}
+
+// maxLockHolderBytes bounds the holder text a timeout reads back. The body
+// this package writes is one short line (pid, verb, time, host), so anything
+// longer is not a body forgectl wrote and only its prefix is worth showing.
+const maxLockHolderBytes = 512
+
+// readLockHolder reads the holder body for a timeout's diagnostic from f, the
+// descriptor withLifecycleLock already opened with O_NOFOLLOW and Fstat'ed as
+// a regular file (forgectl#621). It never reopens the lock by path: a path
+// swapped since the open for a symlink to /dev/zero or for a FIFO would feed a
+// by-path read an endless stream or block it, and either stalls a caller that
+// is only trying to report that the lock is busy. The read is bounded by
+// maxLockHolderBytes, and a read error yields "" (holder unknown).
+func readLockHolder(f *os.File) string {
+	buf := make([]byte, maxLockHolderBytes)
+	n, err := f.ReadAt(buf, 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return ""
+	}
+	// Trimmed before the escape, so the body's own trailing newline is
+	// dropped rather than rendered as a literal "\n".
+	return termsafe.SafeLine(strings.TrimSpace(string(buf[:n])))
 }
 
 // withLifecycleLock runs fn while holding the exclusive lifecycle lock for
@@ -144,6 +168,9 @@ func (c *Client) withLifecycleLock(ctx context.Context, verb string, fn func() e
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("lifecycle lock %s is not a regular file; refusing", termsafe.QuotePath(lockPath))
 	}
+	if c.afterLockOpen != nil {
+		c.afterLockOpen()
+	}
 
 	wait := c.lockWait
 	if wait <= 0 {
@@ -159,8 +186,7 @@ func (c *Client) withLifecycleLock(ctx context.Context, verb string, fn func() e
 			return fmt.Errorf("lock %s: %w", termsafe.QuotePath(lockPath), err)
 		}
 		if time.Now().After(deadline) {
-			body, _ := os.ReadFile(lockPath) //nolint:gosec // our own lock file, diagnostic text only
-			return &lockBusyError{path: lockPath, holder: strings.TrimSpace(termsafe.SafeLine(string(body))), waited: wait}
+			return &lockBusyError{path: lockPath, holder: readLockHolder(f), waited: wait}
 		}
 		select {
 		case <-ctx.Done():

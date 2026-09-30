@@ -218,6 +218,26 @@ func TestCheck_SymlinkEscapeIsBroken(t *testing.T) {
 	}
 }
 
+// forgectl#611 item 3: a link written as a directory must name one. A
+// trailing slash on a regular file, a doc or not, is a broken link; on a
+// real directory it passes as before.
+func TestCheck_TrailingSlashOnAFileIsBroken(t *testing.T) {
+	dir := t.TempDir()
+	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[g](guide.md/) [l](LICENSE/) [s](sub/) [ok](guide.md)\n")
+	checkWrite(t, filepath.Join(dir, "guide.md"), "# G\n")
+	checkWrite(t, filepath.Join(dir, "LICENSE"), "MIT\n")
+	checkWrite(t, filepath.Join(dir, "sub", "notes.txt"), "n\n")
+
+	r := checkIndex(t, dir).Check()
+	var targets []string
+	for _, f := range findingsOf(r, FindingBrokenLink) {
+		targets = append(targets, f.Target)
+	}
+	if len(targets) != 2 || targets[0] != "LICENSE/" || targets[1] != "guide.md/" {
+		t.Fatalf("broken_link targets = %q, want [LICENSE/ guide.md/]; findings %+v", targets, r.Findings)
+	}
+}
+
 func TestCheck_Orphan(t *testing.T) {
 	dir := t.TempDir()
 	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[a](a.md)\n")
@@ -684,5 +704,70 @@ func TestCheck_OrphanOKDoesNotHideLinkFindings(t *testing.T) {
 	}
 	if len(findingsOf(r, FindingOrphan)) != 0 {
 		t.Errorf("findings = %+v, want no orphan", r.Findings)
+	}
+}
+
+// TestCheck_VaultFragmentBudgetPerDoc (#710): docs check spends at most one
+// fragment budget of rendered-text parsing per source doc. A doc of more
+// markup-laden heading links than the budget covers gets broken_anchor for
+// the links the budget parsed and an info anchor_unchecked for the rest, a
+// second doc gets a fresh budget, and a slug link past the budget still
+// resolves. The broken_anchor count is the parse count, so it bounds the
+// work: a nil (unlimited) budget in Check turns it red (every link parsed,
+// no anchor_unchecked), and so does one budget shared by every doc (the
+// second doc gets none). Returning "broken_anchor" for a refusal turns the
+// severity and summary checks red.
+func TestCheck_VaultFragmentBudgetPerDoc(t *testing.T) {
+	// A fragment that misses "## x" as written and by its rendered text
+	// ("q"), and costs one maxRenderedFragment-byte parse.
+	const head, tail = "[q](y)%%", "%%"
+	frag := head + strings.Repeat("c", maxRenderedFragment-len(head)-len(tail)) + tail
+	const budgetLinks = maxFragmentParseBytes / maxRenderedFragment
+	const extra = 7
+	note := func(title string) string {
+		var sb strings.Builder
+		sb.WriteString("# " + title + "\n\n## x\n\n")
+		for i := 0; i < budgetLinks+extra; i++ {
+			sb.WriteString("[[t#" + frag + "]]\n")
+		}
+		sb.WriteString("[[t#x]]\n")
+		return sb.String()
+	}
+	vault := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	checkWrite(t, filepath.Join(vault, "t.md"), "# T\n\n## x\n")
+	checkWrite(t, filepath.Join(vault, "a.md"), note("A"))
+	checkWrite(t, filepath.Join(vault, "b.md"), note("B"))
+
+	r := checkIndex(t, vault).Check()
+	for _, path := range []string{"a.md", "b.md"} {
+		broken, unchecked := 0, 0
+		for _, f := range r.Findings {
+			if f.Path != path {
+				continue
+			}
+			switch f.Kind {
+			case FindingBrokenAnchor:
+				broken++
+			case FindingUncheckedAnchor:
+				unchecked++
+				if f.Severity != SeverityInfo || f.Line == 0 || f.Target == "" {
+					t.Errorf("%s: anchor_unchecked finding %+v, want severity info with a line and target", path, f)
+				}
+			default:
+				t.Errorf("%s: unexpected finding %+v", path, f)
+			}
+		}
+		if broken != budgetLinks || unchecked != extra {
+			t.Errorf("%s: %d broken_anchor + %d anchor_unchecked, want %d + %d", path, broken, unchecked, budgetLinks, extra)
+		}
+	}
+	if r.Summary.UncheckedAnchors != 2*extra || r.Summary.BrokenAnchors != 2*budgetLinks {
+		t.Errorf("summary = %+v, want %d unchecked and %d broken anchors", r.Summary, 2*extra, 2*budgetLinks)
+	}
+	if got, want := r.Errors(), 2*budgetLinks; got != want {
+		t.Errorf("Errors() = %d, want %d: anchor_unchecked must not fail the check", got, want)
 	}
 }

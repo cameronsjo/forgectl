@@ -257,7 +257,7 @@ func lastSessionRunner(lastAttached []string, sessions []string) *exec.FakeRunne
 }
 
 func lastAttachedRow(ts, pid, start, id, name string) string {
-	return strings.Join([]string{ts, pid, start, id, name}, sep)
+	return strings.Join([]string{pid, start, ts, id, name}, sep)
 }
 
 func TestLastSession_OutsideAllZeroTimestamps(t *testing.T) {

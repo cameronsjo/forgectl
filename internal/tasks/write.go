@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // maxTitleRunes and maxCommentRunes bound what this client will SEND. The
@@ -82,7 +84,7 @@ func (c *Client) CreateTask(ctx context.Context, projectID int, title, descripti
 	}
 	var created Task
 	if err := json.Unmarshal(body, &created); err != nil {
-		return Task{}, fmt.Errorf("%w: create in project %d: decode response: %v", ErrUnexpectedStatus, projectID, err)
+		return Task{}, malformedJSON(fmt.Sprintf("create in project %d: decode response", projectID), err)
 	}
 	return created, nil
 }
@@ -106,7 +108,7 @@ func (c *Client) AddComment(ctx context.Context, taskID int, comment string) (Co
 	}
 	var created Comment
 	if err := json.Unmarshal(body, &created); err != nil {
-		return Comment{}, fmt.Errorf("%w: comment on task %d: decode response: %v", ErrUnexpectedStatus, taskID, err)
+		return Comment{}, malformedJSON(fmt.Sprintf("comment on task %d: decode response", taskID), err)
 	}
 	return created, nil
 }
@@ -122,7 +124,7 @@ func (c *Client) FetchTask(ctx context.Context, taskID int) (Task, error) {
 	}
 	var task Task
 	if err := json.Unmarshal(body, &task); err != nil {
-		return Task{}, fmt.Errorf("%w: task %d: decode response: %v", ErrUnexpectedStatus, taskID, err)
+		return Task{}, malformedJSON(fmt.Sprintf("task %d: decode response", taskID), err)
 	}
 	return task, nil
 }
@@ -141,7 +143,7 @@ func (c *Client) FetchProject(ctx context.Context, projectID int) (Project, erro
 	}
 	var project Project
 	if err := json.Unmarshal(body, &project); err != nil {
-		return Project{}, fmt.Errorf("%w: project %d: decode response: %v", ErrUnexpectedStatus, projectID, err)
+		return Project{}, malformedJSON(fmt.Sprintf("project %d: decode response", projectID), err)
 	}
 	return project, nil
 }
@@ -168,12 +170,12 @@ func (c *Client) AssertVikunja(ctx context.Context) error {
 		Version string `json:"version"`
 	}
 	if err := json.Unmarshal(body, &info); err != nil {
-		return fmt.Errorf("%w: %s/info did not return JSON with a version field — this host is answering with something that is not the Vikunja API",
-			ErrUnexpectedStatus, c.baseURL)
+		return fmt.Errorf("%w: %s did not return JSON with a version field — this host is answering with something that is not the Vikunja API",
+			ErrUnexpectedStatus, termsafe.QuoteArgMax(c.baseURL+"/info", 0))
 	}
 	if strings.TrimSpace(info.Version) == "" {
-		return fmt.Errorf("%w: %s/info returned JSON with no version field — this host is answering with something that is not the Vikunja API",
-			ErrUnexpectedStatus, c.baseURL)
+		return fmt.Errorf("%w: %s returned JSON with no version field — this host is answering with something that is not the Vikunja API",
+			ErrUnexpectedStatus, termsafe.QuoteArgMax(c.baseURL+"/info", 0))
 	}
 	return nil
 }

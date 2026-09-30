@@ -62,6 +62,13 @@ type Client struct {
 	// invisible from outside. Never set in production.
 	onLock func(verb, event string)
 
+	// afterLockOpen, when non-nil, is called once withLifecycleLock has
+	// opened and Fstat'ed the lock file and before it first tries the flock.
+	// It lets an in-package test swap the lock's path after the checked open,
+	// deterministically, to prove the timeout diagnostic reads the descriptor
+	// rather than the path (forgectl#621). Never set in production.
+	afterLockOpen func()
+
 	// findingsDir is the forgectl-owned directory (config.PrFindingsDir) that
 	// holds `forgectl pr local` findings — the deliverable of a local
 	// clean-room review, which must outlive the disposable workspace.
@@ -207,8 +214,13 @@ func (c *Client) prHost(ref Ref) (string, exec.Runner, error) {
 }
 
 // WithTmuxSession overrides the tmux session review windows are created under.
+//
+// The name is stored as tmux stores it (tmux.StoredSessionName): tmux lists a
+// session created as "x.y" as "x_y", and every comparison below is against a
+// listed name, so a raw "x.y" would never match its own session's windows
+// (forgectl#815).
 func WithTmuxSession(name string) Option {
-	return func(c *Client) { c.tmuxSession = name }
+	return func(c *Client) { c.tmuxSession = tmux.StoredSessionName(name) }
 }
 
 // WithTmuxClient supplies the tmux boundary used by every pr operation. It is

@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 type configParentOps struct {
@@ -29,17 +31,17 @@ func ensureConfigParentDurable(configPath string, ops configParentOps) (created 
 		info, statErr := ops.stat(current)
 		if statErr == nil {
 			if !info.IsDir() {
-				return created, fmt.Errorf("config ancestor is not a directory: %s", current)
+				return created, fmt.Errorf("config ancestor is not a directory: %s", termsafe.QuotePath(current))
 			}
 			break
 		}
 		if !errors.Is(statErr, fs.ErrNotExist) {
-			return created, fmt.Errorf("inspect config ancestor %s: %w", current, statErr)
+			return created, fmt.Errorf("inspect config ancestor %s: %w", termsafe.QuotePath(current), termsafe.Error(statErr))
 		}
 		missing = append(missing, current)
 		next := filepath.Dir(current)
 		if next == current {
-			return created, fmt.Errorf("no existing ancestor for config parent %s", parent)
+			return created, fmt.Errorf("no existing ancestor for config parent %s", termsafe.QuotePath(parent))
 		}
 	}
 
@@ -47,28 +49,28 @@ func ensureConfigParentDurable(configPath string, ops configParentOps) (created 
 		dir := missing[i]
 		if mkdirErr := ops.mkdir(dir, 0o700); mkdirErr != nil {
 			if !errors.Is(mkdirErr, fs.ErrExist) {
-				return created, fmt.Errorf("create config directory %s: %w", dir, mkdirErr)
+				return created, fmt.Errorf("create config directory %s: %w", termsafe.QuotePath(dir), termsafe.Error(mkdirErr))
 			}
 			info, statErr := ops.stat(dir)
 			if statErr != nil || !info.IsDir() {
-				return created, fmt.Errorf("config directory race at %s did not produce a directory", dir)
+				return created, fmt.Errorf("config directory race at %s did not produce a directory", termsafe.QuotePath(dir))
 			}
 			// A racing process made the name visible, but this attempt still
 			// needs its own durability proof before building the next child.
 			if syncErr := ops.syncDir(dir); syncErr != nil {
-				return created, fmt.Errorf("sync raced config directory %s: %w", dir, syncErr)
+				return created, fmt.Errorf("sync raced config directory %s: %w", termsafe.QuotePath(dir), termsafe.Error(syncErr))
 			}
 			if syncErr := ops.syncDir(filepath.Dir(dir)); syncErr != nil {
-				return created, fmt.Errorf("sync parent after raced config directory %s: %w", dir, syncErr)
+				return created, fmt.Errorf("sync parent after raced config directory %s: %w", termsafe.QuotePath(dir), termsafe.Error(syncErr))
 			}
 			continue
 		}
 		created = append(created, dir)
 		if syncErr := ops.syncDir(dir); syncErr != nil {
-			return created, fmt.Errorf("sync new config directory %s: %w", dir, syncErr)
+			return created, fmt.Errorf("sync new config directory %s: %w", termsafe.QuotePath(dir), termsafe.Error(syncErr))
 		}
 		if syncErr := ops.syncDir(filepath.Dir(dir)); syncErr != nil {
-			return created, fmt.Errorf("sync parent after creating config directory %s: %w", dir, syncErr)
+			return created, fmt.Errorf("sync parent after creating config directory %s: %w", termsafe.QuotePath(dir), termsafe.Error(syncErr))
 		}
 	}
 	return created, nil

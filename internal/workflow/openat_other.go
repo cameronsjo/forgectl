@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // stateDir is the path-based fallback for platforms without openat-relative
@@ -70,14 +71,14 @@ func (d *stateDir) openLock(name string) (*os.File, error) {
 func (d *stateDir) syncDir() error {
 	f, err := os.Open(d.path)
 	if err != nil {
-		return fmt.Errorf("open state dir for durable rename %s: %w", d.path, err)
+		return fmt.Errorf("open state dir for durable rename %s: %w", termsafe.QuotePath(d.path), termsafe.Error(err))
 	}
 	if err := f.Sync(); err != nil {
 		f.Close() //nolint:errcheck
-		return fmt.Errorf("sync state dir %s: %w", d.path, err)
+		return fmt.Errorf("sync state dir %s: %w", termsafe.QuotePath(d.path), termsafe.Error(err))
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("close state dir after sync %s: %w", d.path, err)
+		return fmt.Errorf("close state dir after sync %s: %w", termsafe.QuotePath(d.path), termsafe.Error(err))
 	}
 	return nil
 }

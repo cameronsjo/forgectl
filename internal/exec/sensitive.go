@@ -29,12 +29,14 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
 // Redacted is the single fixed public representation of every opaque value in
 // this file. It is what %v, %+v, %#v, %q, slog, JSON, and text marshaling all
 // produce, so no rendering path has a payload-revealing branch to find.
-const Redacted = "[redacted]"
+const Redacted = redact.Marker
 
 // MaxOutputBytes is the runner-owned hard ceiling on each captured stream.
 // A caller-supplied cap may only narrow it; a cap above this refuses before

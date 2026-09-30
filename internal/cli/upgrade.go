@@ -2,14 +2,17 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	osexec "os/exec"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/selfupdate"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // upgradeModule declares the self-update extension (ADR-0005): no config
@@ -94,27 +97,67 @@ func runUpgrade(cmd *cobra.Command, deps module.Deps, checkOnly bool) error {
 		return runUpgradeCheck(ctx, deps, out)
 	}
 
+	return runUpgradeApply(ctx, deps, out)
+}
+
+// runUpgradeApply is the applying path. Like --check (#738), it never renders
+// brew's text (#761): brew's stdout relays what the tap's server and git
+// transport send, and the CommandError carries brew's argv and stderr. The
+// progress and the outcome are fixed text; brew's output goes to the debug
+// log, whose text handler quotes it, and the CommandError stays on the chain
+// for errors.As.
+func runUpgradeApply(ctx context.Context, deps module.Deps, out io.Writer) error {
+	_, _ = fmt.Fprintln(out, "Refreshing the Homebrew tap and upgrading "+selfupdate.CaskRef+"…")
 	upgradeOut, err := selfupdate.Upgrade(ctx, deps.Runner)
 	if upgradeOut != "" {
-		fmt.Fprintln(out, upgradeOut)
+		slog.Debug("brew output.", "output", upgradeOut)
 	}
 	if err != nil {
-		return WithExitCode(fmt.Errorf("upgrade: %w", err), 1)
+		slog.Warn("brew upgrade failed.", "error", err)
+		return WithExitCode(termsafe.Categorical(upgradeFailure(ctx, err), err), 1)
 	}
-	fmt.Fprintln(out, "forgectl upgraded — restart your shell (or open a new one) to pick up the new binary.")
+	if from, to, ok := selfupdate.UpgradedVersions(upgradeOut); ok {
+		_, _ = fmt.Fprintf(out, "forgectl upgraded %s → %s — restart your shell (or open a new one) to pick up the new binary.\n", from, to)
+		return nil
+	}
+	_, _ = fmt.Fprintln(out, "forgectl upgraded — restart your shell (or open a new one) to pick up the new binary.")
 	return nil
+}
+
+// upgradeFailure words a failed apply from fixed text, by cause. The
+// interrupt arm is defensive. The binary installs no signal context
+// (main.go, forgectl#788), so a terminal Ctrl-C ends forgectl under Go's
+// default disposition before this runs. The arm is reached only when ctx was
+// cancelled some other way, a caller's deadline or a test. It comes first
+// because os/exec reports a brew killed by that cancellation as a signal
+// exit, not as context.Canceled, so the context itself is consulted too, and
+// a cancellation must not read as a network fault.
+func upgradeFailure(ctx context.Context, err error) string {
+	switch {
+	case ctx.Err() != nil || errors.Is(err, context.Canceled):
+		return "upgrade: interrupted before brew finished; run `forgectl --version` to see what is installed"
+	case errors.Is(err, selfupdate.ErrTapUpdate):
+		return "upgrade: brew update failed; check network access to the Homebrew tap"
+	default:
+		return "upgrade: brew upgrade --cask failed; the installed forgectl may be unchanged; run `forgectl --version`"
+	}
 }
 
 // runUpgradeCheck reports whether an upgrade is available, without applying
 // one — `upgrade --check`'s body. Never mutates: it's the same
-// selfupdate.CheckOutdated call `doctor`'s "forgectl version" check makes.
+// selfupdate.CheckOutdated call `doctor`'s "forgectl version" check makes,
+// and it words the result the same way (#738): the error is categorical,
+// because it carries brew's argv and stderr, which relay what the tap's
+// server and git transport send; the detail is rebuilt from the version
+// tokens in brew's output, never from its text.
 func runUpgradeCheck(ctx context.Context, deps module.Deps, out io.Writer) error {
 	outdated, detail, err := selfupdate.CheckOutdated(ctx, deps.Runner)
 	if err != nil {
-		return WithExitCode(fmt.Errorf("check: %w", err), 1)
+		slog.Warn("brew outdated failed.", "error", err)
+		return WithExitCode(termsafe.Categorical("check: brew outdated failed; check network access to the Homebrew tap", err), 1)
 	}
 	if outdated {
-		fmt.Fprintf(out, "update available: %s\n", detail)
+		_, _ = fmt.Fprintf(out, "update available: %s\n", selfupdate.OutdatedDetail(detail))
 		return nil
 	}
 	fmt.Fprintln(out, "forgectl is up to date.")

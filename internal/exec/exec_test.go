@@ -342,3 +342,47 @@ func TestWithoutOutput_ClearsOutputKeepsTheRest(t *testing.T) {
 		t.Errorf("an error with no *CommandError must pass through unchanged")
 	}
 }
+
+// TestWithoutOutput_LeavesADirectlyNestedOriginalAlone pins #708 item 3: a
+// *CommandError wrapped directly in another's Err is copied too, so the
+// original chain keeps its Output.
+//
+// Mutation: clear cp.Err in place (clearOutputs(cp.Err)) instead of copying
+// it, and inner.Output is emptied in the caller's original.
+func TestWithoutOutput_LeavesADirectlyNestedOriginalAlone(t *testing.T) {
+	sentinel := errors.New("exit status 3")
+	inner := &CommandError{Name: "in", Output: "secret-in", Err: sentinel}
+	outer := &CommandError{Name: "out", Output: "secret-out", Err: inner}
+	got := WithoutOutput(outer)
+	if outer.Output != "secret-out" || inner.Output != "secret-in" {
+		t.Errorf("original modified: outer %q, inner %q", outer.Output, inner.Output)
+	}
+	var cleared []string
+	for e := got; e != nil; e = errors.Unwrap(e) {
+		if ce, ok := e.(*CommandError); ok {
+			cleared = append(cleared, ce.Name+"="+ce.Output)
+		}
+	}
+	if len(cleared) != 2 || cleared[0] != "out=" || cleared[1] != "in=" {
+		t.Errorf("copy chain: %v, want both Outputs cleared", cleared)
+	}
+	if !errors.Is(got, sentinel) {
+		t.Error("the copy must still reach the sentinel")
+	}
+}
+
+// TestHomebrewNoAutoUpdateReturnsAFreshMap: each call hands back its own map,
+// so a caller that mutates what it got (or merges onto it) cannot change what
+// any other brew caller sends (forgectl#851).
+//
+// Mutation that turns it red: return one package-level map from every call
+// (the second call sees the first call's rewrite).
+func TestHomebrewNoAutoUpdateReturnsAFreshMap(t *testing.T) {
+	first := HomebrewNoAutoUpdate()
+	first["HOMEBREW_NO_AUTO_UPDATE"] = "0"
+	first["EXTRA"] = "x"
+	second := HomebrewNoAutoUpdate()
+	if len(second) != 1 || second["HOMEBREW_NO_AUTO_UPDATE"] != "1" {
+		t.Errorf("HomebrewNoAutoUpdate() = %v after a caller mutated an earlier result, want only HOMEBREW_NO_AUTO_UPDATE=1", second)
+	}
+}

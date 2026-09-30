@@ -31,6 +31,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/resume"
 	"github.com/cameronsjo/forgectl/internal/selfupdate"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // State is a check's resolved health — a small closed vocabulary, mirroring
@@ -141,11 +142,15 @@ func Run(ctx context.Context, d Deps) Report {
 // launch doctor` already reports on (env override, configured binary_path,
 // PATH) — rather than re-deriving PATH resolution here.
 func checkClaude(d Deps) Check {
-	if p, err := launch.ClaudePath(d.Cfg.Launch.Defaults); err == nil {
+	p, err := launch.ClaudePath(d.Cfg.Launch.Defaults)
+	if err == nil {
 		return Check{Name: "claude", State: StateOK, Detail: p}
-	} else {
-		return Check{Name: "claude", State: StateFail, Detail: err.Error(), Hint: "install claude, or set [launch.defaults].binary_path / $FORGECTL_CLAUDE_BIN"}
 	}
+	// Categorical (#716): err renders a path from the environment or config
+	// and a wrapped filesystem error. The report and --json say which way it
+	// failed; the log keeps the rest.
+	slog.Warn("claude binary could not be resolved.", "error", err)
+	return Check{Name: "claude", State: StateFail, Detail: "claude binary not found or not usable", Hint: "install claude, or set [launch.defaults].binary_path / $FORGECTL_CLAUDE_BIN"}
 }
 
 // checkConfig reuses config.Validate() — the exact parse `forgectl launch
@@ -154,7 +159,7 @@ func checkClaude(d Deps) Check {
 func checkConfig(d Deps) Check {
 	path, pathErr := config.ConfigPath()
 	if err := config.Validate(); err != nil {
-		return Check{Name: "config", State: StateFail, Detail: err.Error(), Hint: "fix the malformed config.toml (see the parse error above)"}
+		return Check{Name: "config", State: StateFail, Detail: err.Error(), Hint: "fix config.toml so it can be read and parsed (see the error above)"}
 	}
 	if pathErr != nil {
 		return Check{Name: "config", State: StateWarn, Detail: pathErr.Error(), Hint: "config directory could not be resolved"}
@@ -278,17 +283,19 @@ func checkSops(ctx context.Context, d Deps) Check {
 	}
 	out, err := d.Runner.Run(ctx, "sops", "--version", "--disable-version-check")
 	if err != nil {
-		return Check{Name: "sops", State: StateFail, Detail: err.Error(), Hint: "reinstall with `brew reinstall sops`"}
+		// Categorical (#716): err is sops's argv and stderr.
+		slog.Warn("sops --version failed.", "error", err)
+		return Check{Name: "sops", State: StateFail, Detail: "sops --version failed", Hint: "reinstall with `brew reinstall sops`"}
 	}
-	return Check{Name: "sops", State: StateOK, Detail: firstLine(out)}
-}
-
-// firstLine trims a command's output to its first line. `sops --version` can
-// append an update notice, and a multi-line Detail breaks the report's
-// one-check-per-line shape.
-func firstLine(s string) string {
-	line, _, _ := strings.Cut(s, "\n")
-	return strings.TrimSpace(line)
+	// The Detail carries the version number parsed out of the first line, never
+	// the line itself: sops can append an update notice, and whatever else it
+	// prints is the tool's text, not ours (#716).
+	line, _, _ := strings.Cut(out, "\n")
+	if vs := selfupdate.FindVersions(line); len(vs) > 0 {
+		return Check{Name: "sops", State: StateOK, Detail: "sops " + vs[0]}
+	}
+	slog.Warn("sops --version printed no recognizable version.", "output", termsafe.SafeLineMax(line, 200))
+	return Check{Name: "sops", State: StateOK, Detail: "sops present; version not recognized"}
 }
 
 // benchChecks folds bench.Status's hearth and chronicle components into doctor
@@ -347,7 +354,7 @@ func checkTrustStore(d Deps) Check {
 	case err == nil:
 		return Check{Name: "trust store", State: StateOK, Detail: fmt.Sprintf("verified, %d enrolled key(s)", len(store.Keys))}
 	case errors.Is(err, bless.ErrTrustStoreMissing):
-		return Check{Name: "trust store", State: StateSkip, Detail: err.Error(), Hint: "run `forgectl workflow bless` to enroll a signing key, if you use blessed workflows"}
+		return Check{Name: "trust store", State: StateSkip, Detail: "trust store not found", Hint: "run `forgectl workflow bless` to enroll a signing key, if you use blessed workflows"}
 	case errors.Is(err, bless.ErrNoAnchor) && errors.Is(err, fs.ErrNotExist) && trustStoreAbsent(d):
 		// No anchor AND no store: blessed workflows were never set up here, so
 		// there is nothing to verify (forgectl#635). Any other anchor failure
@@ -355,7 +362,18 @@ func checkTrustStore(d Deps) Check {
 		// a store that exists without its anchor falls through to fail.
 		return Check{Name: "trust store", State: StateSkip, Detail: "blessed workflows not set up (no trust anchor, no trust store)", Hint: "run `forgectl workflow bless` to set up blessed workflows, if you use them"}
 	default:
-		return Check{Name: "trust store", State: StateFail, Detail: err.Error(), Hint: "the trust store or its root of trust failed to verify — see `forgectl workflow trust list` and bless/verify.go's error taxonomy"}
+		// Categorical (#716): err renders key ids, paths and decoder text read
+		// from the store and anchor files on disk. The sentinel names which
+		// root of trust failed; the log keeps the rest.
+		slog.Warn("Trust store failed to verify.", "error", err)
+		detail := "trust store could not be read or verified"
+		switch {
+		case errors.Is(err, bless.ErrNoAnchor):
+			detail = "trust anchor is missing or not root-owned"
+		case errors.Is(err, bless.ErrTrustStoreInvalid):
+			detail = "trust store failed to verify under the anchor"
+		}
+		return Check{Name: "trust store", State: StateFail, Detail: detail, Hint: "the trust store or its root of trust failed to verify — see `forgectl workflow trust list` and bless/verify.go's error taxonomy"}
 	}
 }
 
@@ -417,12 +435,13 @@ func checkResumeTasks(d Deps) Check {
 	case drift.Drifted():
 		return Check{
 			Name: name, State: StateWarn,
-			// %q, not %s: drift.Dir is a raw directory name off disk, where
+			// Quoted, not %s: drift.Dir is a raw directory name off disk, where
 			// every byte but '/' and NUL is legal. Quoting at construction
 			// preserves the directory boundaries in both human output (which
 			// also crosses SafeLine) and JSON output (which preserves values
-			// while escaping its syntax).
-			Detail: fmt.Sprintf("restore writes the %q dialect, but every task directory on disk is %q (newest: %q)", drift.Restores, drift.Newest, drift.Dir),
+			// while escaping its syntax), and QuoteArgMax bounds its length
+			// (#716). Restores and Newest are resume's fixed dialect names.
+			Detail: fmt.Sprintf("restore writes the %q dialect, but every task directory on disk is %q (newest: %s)", drift.Restores, drift.Newest, termsafe.QuoteArgMax(drift.Dir, 0)),
 			Hint:   "Claude Code appears to have changed how it names task directories — `forgectl resume` would restore tasks where nothing reads them; please file this at github.com/cameronsjo/forgectl",
 		}
 	default:
@@ -444,10 +463,13 @@ func checkForgectlVersion(ctx context.Context, d Deps) Check {
 	}
 	outdated, detail, err := selfupdate.CheckOutdated(ctx, d.Runner)
 	if err != nil {
-		return Check{Name: "forgectl version", State: StateWarn, Detail: err.Error(), Hint: "check network access to the Homebrew tap"}
+		// Categorical (#716): err is brew's argv and stderr, which relays
+		// what the tap's server and git transport send.
+		slog.Warn("brew outdated failed.", "error", err)
+		return Check{Name: "forgectl version", State: StateWarn, Detail: "brew outdated failed", Hint: "check network access to the Homebrew tap"}
 	}
 	if outdated {
-		return Check{Name: "forgectl version", State: StateWarn, Detail: detail, Hint: "run `forgectl upgrade`"}
+		return Check{Name: "forgectl version", State: StateWarn, Detail: selfupdate.OutdatedDetail(detail), Hint: "run `forgectl upgrade`"}
 	}
 	return Check{Name: "forgectl version", State: StateOK, Detail: "up to date"}
 }

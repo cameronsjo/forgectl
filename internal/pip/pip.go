@@ -9,6 +9,7 @@ import (
 	"runtime"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Client edits a pip.conf file through the comment-preserving inifile model
@@ -148,7 +149,7 @@ func (c *Client) load() (*File, error) {
 			slog.Debug("pip.conf not found; starting from an empty file.", "path", c.path)
 			return NewFile(), nil
 		}
-		return nil, fmt.Errorf("read %s: %w", c.path, err)
+		return nil, fmt.Errorf("read %s: %w", termsafe.QuotePath(c.path), termsafe.Error(err))
 	}
 	return Parse(data), nil
 }
@@ -158,10 +159,10 @@ func (c *Client) load() (*File, error) {
 func (c *Client) save(f *File) error {
 	dir := filepath.Dir(c.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("mkdir %s: %w", dir, err)
+		return fmt.Errorf("mkdir %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	if err := os.WriteFile(c.path, f.Serialize(), 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", c.path, err)
+		return fmt.Errorf("write %s: %w", termsafe.QuotePath(c.path), termsafe.Error(err))
 	}
 	return nil
 }

@@ -26,6 +26,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
 // Runner abstracts running an external command. Five modes:
@@ -78,6 +80,21 @@ import (
 // SensitiveRunner logs metadata only and caps both streams, but it serves only
 // its closed CommandKind set. A command whose output may carry a secret needs
 // its own path, not Runner.
+//
+// Independently of any mask, every rendering of argv and stderr (the debug
+// log, the failure log line, CommandError.Error()) goes through redact.Args
+// and redact.Text (#734): an argv element that could carry a URL credential
+// (it holds an '@', "://" or "::") is withheld whole, or shown as
+// host/owner/repo when it parses as a plain repository locator, and so is the
+// value after a credential-bearing flag or config key (-H, --token,
+// http.extraHeader=…) (#749); a stderr line holding any such word is
+// withheld whole. The CommandError fields themselves keep what the command
+// ran with, apart from Args under WithMaskedAssignments or WithOpaqueArgs.
+//
+// Argv a user wrote and forgectl passes through (a workflow run step,
+// docker's pass-through arguments) cannot be judged element by element, so
+// those sites mark it with WithOpaqueArgs and it renders as flag names only,
+// and its values are scrubbed from captured stderr the way a masked value is.
 type Runner interface {
 	Run(ctx context.Context, name string, args ...string) (string, error)
 	RunInteractive(ctx context.Context, name string, args ...string) error
@@ -115,7 +132,13 @@ type DiscardingRunner interface {
 // deterministic regardless of how stale the ambient Homebrew auto-update
 // timestamp happens to be — a single definition so the two callers can
 // never drift apart on the exact env shape.
-var HomebrewNoAutoUpdate = map[string]string{"HOMEBREW_NO_AUTO_UPDATE": "1"}
+//
+// It returns a fresh map on every call rather than exposing a package-level
+// map: an exported map is shared mutable state any importer could rewrite
+// (or have a RunWithEnv caller mutate) for every other caller (forgectl#851).
+func HomebrewNoAutoUpdate() map[string]string {
+	return map[string]string{"HOMEBREW_NO_AUTO_UPDATE": "1"}
+}
 
 // OSRunner is the production Runner: it actually spawns processes. Its zero
 // value is the production configuration.
@@ -139,13 +162,13 @@ func (r OSRunner) ceiling() int {
 // always mean the command produced nothing worth seeing (e.g. `npm outdated`
 // exits 1 precisely when its output has something to report).
 func (r OSRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
-	return runAndWrap(exec.CommandContext(ctx, name, args...), r.ceiling(), "Preparing to run command.", "Successfully ran command.", "Failed to run command.", maskFrom(ctx), name, args) //nolint:gosec // structural argv is the purpose of this execution seam
+	return runAndWrap(ctx, exec.CommandContext(ctx, name, args...), r.ceiling(), "Preparing to run command.", "Successfully ran command.", "Failed to run command.", args, name) //nolint:gosec // structural argv is the purpose of this execution seam
 }
 
 // RunDiscardingStdout executes name+args like Run but discards stdout rather
 // than capturing it, so no stdout ceiling applies (DiscardingRunner).
 func (r OSRunner) RunDiscardingStdout(ctx context.Context, name string, args ...string) error {
-	_, err := runAndWrap(exec.CommandContext(ctx, name, args...), discardStdout, "Preparing to run command, discarding stdout.", "Successfully ran command, discarding stdout.", "Failed to run command, discarding stdout.", maskFrom(ctx), name, args) //nolint:gosec // structural argv is the purpose of this execution seam
+	_, err := runAndWrap(ctx, exec.CommandContext(ctx, name, args...), discardStdout, "Preparing to run command, discarding stdout.", "Successfully ran command, discarding stdout.", "Failed to run command, discarding stdout.", args, name) //nolint:gosec // structural argv is the purpose of this execution seam
 	return err
 }
 
@@ -155,7 +178,7 @@ func (r OSRunner) RunDiscardingStdout(ctx context.Context, name string, args ...
 func (r OSRunner) RunWithInput(ctx context.Context, stdin string, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = strings.NewReader(stdin)
-	return runAndWrap(cmd, r.ceiling(), "Preparing to run command with stdin.", "Successfully ran command with stdin.", "Failed to run command with stdin.", maskFrom(ctx), name, args)
+	return runAndWrap(ctx, cmd, r.ceiling(), "Preparing to run command with stdin.", "Successfully ran command with stdin.", "Failed to run command with stdin.", args, name)
 }
 
 // RunWithEnv executes name+args with env merged on top of the inherited
@@ -167,7 +190,7 @@ func (r OSRunner) RunWithEnv(ctx context.Context, env map[string]string, name st
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
-	return runAndWrap(cmd, r.ceiling(), "Preparing to run command with environment overrides.", "Successfully ran command with environment overrides.", "Failed to run command with environment overrides.", maskFrom(ctx), name, args)
+	return runAndWrap(ctx, cmd, r.ceiling(), "Preparing to run command with environment overrides.", "Successfully ran command with environment overrides.", "Failed to run command with environment overrides.", args, name)
 }
 
 // RunWithEnvFiltered executes name+args after removing unset from the inherited
@@ -176,7 +199,7 @@ func (r OSRunner) RunWithEnv(ctx context.Context, env map[string]string, name st
 func (r OSRunner) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // structural argv is the purpose of this execution seam
 	cmd.Env = filteredEnvironment(env, unset)
-	return runAndWrap(cmd, r.ceiling(), "Preparing to run command with a filtered environment.", "Successfully ran command with a filtered environment.", "Failed to run command with a filtered environment.", maskFrom(ctx), name, args)
+	return runAndWrap(ctx, cmd, r.ceiling(), "Preparing to run command with a filtered environment.", "Successfully ran command with a filtered environment.", "Failed to run command with a filtered environment.", args, name)
 }
 
 func filteredEnvironment(overrides map[string]string, unset []string) []string {
@@ -221,13 +244,15 @@ const pipeWaitDelay = 500 * time.Millisecond
 // contract: trimmed stdout on success, or a *CommandError — carrying stderr,
 // the captured stdout, and the exit code — on failure. Shared body behind
 // Run, RunWithInput, RunWithEnv, and RunWithEnvFiltered, which differ only in
-// how they configure cmd beforehand and which log messages they use. mask
-// governs every rendering of argv and what the failure path keeps of stderr
-// and stdout, plus the stderr it logs (WithMaskedAssignments); cmd itself was
-// built from the real args.
-func runAndWrap(cmd *exec.Cmd, ceiling int, preparingMsg, successMsg, failureMsg string, mask argMask, name string, args []string) (string, error) {
-	shown := mask.args(args)
-	slog.Debug(preparingMsg, "cmd", name, "args", shown)
+// how they configure cmd beforehand and which log messages they use. args is
+// the real argv cmd was built from; ctx says how it may be rendered. shown is
+// argv as it may be rendered and kept on a *CommandError (shownArgs:
+// WithMaskedAssignments and WithOpaqueArgs applied); mask (maskFor) governs
+// what the failure path keeps of stderr and stdout, plus the stderr it logs,
+// and includes the values a user span withholds.
+func runAndWrap(ctx context.Context, cmd *exec.Cmd, ceiling int, preparingMsg, successMsg, failureMsg string, args []string, name string) (string, error) {
+	mask, shown, span := maskFor(ctx, args), shownArgs(ctx, args), spanFor(ctx, len(args))
+	slog.Debug(preparingMsg, "cmd", name, "args", renderArgs(shown, span))
 	start := time.Now()
 
 	// Unlike RunSensitive, runAndWrap has no Complete flag: it returns full
@@ -258,12 +283,14 @@ func runAndWrap(cmd *exec.Cmd, ceiling int, preparingMsg, successMsg, failureMsg
 		// Empty after an overflow: ceilingWriter drops what it held.
 		trimmed := mask.text(strings.TrimRight(string(stdout.buf), "\n"))
 		tail, dropped := maskedTail(stderr, mask)
-		cmdErr := &CommandError{Name: name, Args: shown, Stderr: strings.TrimSpace(tail), StderrDropped: dropped, Output: trimmed, ExitCode: exitCodeOf(err), Err: err}
+		cmdErr := &CommandError{Name: name, Args: shown, Stderr: strings.TrimSpace(tail), StderrDropped: dropped, Output: trimmed, ExitCode: exitCodeOf(err), Err: err, span: span}
+		// The logged stderr is masked (maskedTail), then redact.Text; the
+		// field on cmdErr stays masked-only, because callers compare it.
 		switch {
 		case cmdErr.Stderr != "" && dropped > 0:
-			slog.Error(failureMsg, "cmd", name, "stderr", cmdErr.Stderr, "stderr_dropped", dropped, "error", err)
+			slog.Error(failureMsg, "cmd", name, "stderr", redact.Text(cmdErr.Stderr), "stderr_dropped", dropped, "error", err)
 		case cmdErr.Stderr != "":
-			slog.Error(failureMsg, "cmd", name, "stderr", cmdErr.Stderr, "error", err)
+			slog.Error(failureMsg, "cmd", name, "stderr", redact.Text(cmdErr.Stderr), "error", err)
 		default:
 			slog.Error(failureMsg, "cmd", name, "error", err)
 		}
@@ -275,7 +302,7 @@ func runAndWrap(cmd *exec.Cmd, ceiling int, preparingMsg, successMsg, failureMsg
 
 // RunInteractive wires the child to the real stdio so it can drive the tty.
 func (OSRunner) RunInteractive(ctx context.Context, name string, args ...string) error {
-	slog.Debug("Preparing to run interactive command.", "cmd", name, "args", maskFrom(ctx).args(args))
+	slog.Debug("Preparing to run interactive command.", "cmd", name, "args", renderArgs(shownArgs(ctx, args), spanFor(ctx, len(args))))
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -289,10 +316,16 @@ func (OSRunner) RunInteractive(ctx context.Context, name string, args ...string)
 // leaking the whole environment.
 type CommandError struct {
 	Name string
+
+	// Args is argv as WithMaskedAssignments and WithOpaqueArgs allow it to
+	// be rendered, with any URL credential still in it: callers compare it
+	// with the argv they passed (internal/tmux). Error() redacts it (#734).
 	Args []string
 
 	// Stderr is the child's stderr, masked and trimmed. It is a tail, not
-	// the whole stream, whenever StderrDropped is nonzero.
+	// the whole stream, whenever StderrDropped is nonzero. Like Args it keeps
+	// any URL credential, for callers that compare it; Error() and the
+	// failure log line redact it.
 	Stderr string
 
 	// StderrDropped counts the bytes cut from the front of stderr before
@@ -316,18 +349,32 @@ type CommandError struct {
 	ExitCode int
 
 	Err error
+
+	// span is the WithOpaqueArgs user span within Args, or the zero span.
+	// Error() renders the parts either side of it separately (renderArgs).
+	span opaqueSpan
 }
 
+// Error renders the command, its argv (redact.Args) and its stderr
+// (redact.Text), so no URL credential reaches the text (#734): callers wrap
+// and log it ("error", err), and show it to the user, so it is a rendering
+// point like the debug log. The cost is that an argv element holding an '@',
+// "://" or "::", or following a credential-bearing flag, reads as a
+// placeholder or host/owner/repo, and a stderr line holding such a word reads
+// as [redacted] whole.
+// It redacts rather than trusting its constructor, so a CommandError built
+// by a fake or another Runner renders safely too. Only the text changes; the
+// fields keep what the command ran with.
 func (e *CommandError) Error() string {
 	cmd := e.Name
 	if len(e.Args) > 0 {
-		cmd += " " + strings.Join(e.Args, " ")
+		cmd += " " + strings.Join(renderArgs(e.Args, e.span), " ")
 	}
 	if e.Stderr != "" {
 		if e.StderrDropped > 0 {
-			return cmd + ": [stderr truncated, " + strconv.FormatInt(e.StderrDropped, 10) + " earlier bytes dropped] " + e.Stderr
+			return cmd + ": [stderr truncated, " + strconv.FormatInt(e.StderrDropped, 10) + " earlier bytes dropped] " + redact.Text(e.Stderr)
 		}
-		return cmd + ": " + e.Stderr
+		return cmd + ": " + redact.Text(e.Stderr)
 	}
 	if e.Err == nil {
 		// Production constructors always set Err; a hand-built CommandError
@@ -335,7 +382,7 @@ func (e *CommandError) Error() string {
 		// panic.
 		return cmd + ": exit " + strconv.Itoa(e.ExitCode)
 	}
-	return cmd + ": " + e.Err.Error()
+	return cmd + ": " + redact.Text(e.Err.Error())
 }
 
 func (e *CommandError) Unwrap() error { return e.Err }
@@ -346,18 +393,23 @@ func (e *CommandError) Unwrap() error { return e.Err }
 // was empty, and Output is readable by anything that holds the error. Stderr,
 // ExitCode and Err are kept, so errors.As and errors.Is behave as before.
 //
-// When err is itself a *CommandError, a copy is returned and err is left
-// alone. Every *CommandError deeper in the tree, through Unwrap() error and
-// through the Unwrap() []error of errors.Join or a multi-%w fmt.Errorf, is
-// cleared in place: a chain cannot be rebuilt around a copy, and the caller
-// that just received the error from the Runner is its only holder.
+// When err is itself a *CommandError, a new copy is returned (always a new
+// pointer) and err is left alone, and so is every *CommandError reached from
+// it through a chain of *CommandError.Err links alone: each one is copied in
+// turn. Any other wrapper cannot be rebuilt around a copy, so every
+// *CommandError beneath one (through Unwrap() error, or the Unwrap() []error
+// of errors.Join or a multi-%w fmt.Errorf) is cleared in place, and that
+// clearing is visible through err too, since the copy shares that part of
+// the chain (#708). The caller that just received the error from the Runner
+// is normally its only holder. A custom As method is not followed: a
+// *CommandError reachable only through one keeps its Output.
 func WithoutOutput(err error) error {
-	// A direct assertion, not errors.As: only the top-level case can be
+	// A direct assertion, not errors.As: only a *CommandError itself can be
 	// replaced by a copy.
 	if top, ok := err.(*CommandError); ok {
 		cp := *top
 		cp.Output = ""
-		clearOutputs(cp.Err)
+		cp.Err = WithoutOutput(cp.Err)
 		return &cp
 	}
 	clearOutputs(err)

@@ -311,15 +311,28 @@ func findCliCall(calls []exec.Call, name string) (exec.Call, bool) {
 
 func TestWindowStatus_Live(t *testing.T) {
 	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 9}
-	if got := windowStatus(map[pr.Ref]bool{ref: true}, ref, true); got != "live" {
+	if got := windowStatus(map[pr.Ref]bool{ref: true}, ref, tmuxReadable); got != "live" {
 		t.Errorf("windowStatus(live) = %q, want %q", got, "live")
 	}
 }
 
 func TestWindowStatus_Gone(t *testing.T) {
 	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 9}
-	if got := windowStatus(map[pr.Ref]bool{}, ref, true); got != "window gone" {
+	if got := windowStatus(map[pr.Ref]bool{}, ref, tmuxReadable); got != "window gone" {
 		t.Errorf("windowStatus(absent) = %q, want %q", got, "window gone")
+	}
+}
+
+// TestWindowStatus_NoTmuxServer is forgectl#805 item 5: over an exited
+// server's leftover socket no window is live, but the row must not say
+// "window gone" — the strict reads refuse that verdict on the same evidence,
+// and the label sends an operator to teardown.
+//
+// Mutation that turns it red: drop windowStatus's tmuxNoServer arm.
+func TestWindowStatus_NoTmuxServer(t *testing.T) {
+	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 9}
+	if got := windowStatus(map[pr.Ref]bool{ref: false}, ref, tmuxNoServer); got != noTmuxServerStatus {
+		t.Errorf("windowStatus(no server) = %q, want %q", got, noTmuxServerStatus)
 	}
 }
 
@@ -329,10 +342,10 @@ func TestWindowStatus_Gone(t *testing.T) {
 // every healthy launch.
 func TestWindowStatus_UnreadableTmux(t *testing.T) {
 	ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 9}
-	if got := windowStatus(map[pr.Ref]bool{ref: true}, ref, false); got != "?" {
+	if got := windowStatus(map[pr.Ref]bool{ref: true}, ref, tmuxUnreadable); got != "?" {
 		t.Errorf("windowStatus(tmuxOK=false) = %q, want %q", got, "?")
 	}
-	if got := windowStatus(nil, ref, false); got != "?" {
+	if got := windowStatus(nil, ref, tmuxUnreadable); got != "?" {
 		t.Errorf("windowStatus(nil map, tmuxOK=false) = %q, want %q", got, "?")
 	}
 }
@@ -510,8 +523,10 @@ func (b blockingTmux) Run(ctx context.Context, name string, args ...string) (str
 
 // TestPrTeardown_NotesAnUnresponsiveTmuxOnStderr: when tmux never answers, the
 // window's state is unknown, so teardown removes nothing and says so on stderr
-// — the slog warning alone is discarded by default. The note claims the record
-// was parked only when it really was: a legacy record (no version) cannot be.
+// — the slog warning alone is discarded by default. The note says the record
+// was parked, and it really was: a legacy record (no version) is converted to
+// a v2 needs-repair record rather than left with no repair path (#696). The
+// not-parked wording is pinned by TestCleanupFailureLine_TimeoutNotParked.
 func TestPrTeardown_NotesAnUnresponsiveTmuxOnStderr(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -519,7 +534,7 @@ func TestPrTeardown_NotesAnUnresponsiveTmuxOnStderr(t *testing.T) {
 		wantParked bool
 	}{
 		{"v2 record is parked", false, true},
-		{"legacy record cannot be parked", true, false},
+		{"legacy record is converted and parked", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -583,5 +598,19 @@ func TestPrTeardown_NotesAnUnresponsiveTmuxOnStderr(t *testing.T) {
 				t.Errorf("stdout claims a teardown: %q", out.String())
 			}
 		})
+	}
+}
+
+// TestPrListHelpNamesEveryWindowValue is forgectl#815 item 6: the WINDOW
+// column's help lists every value windowStatus can print, including the
+// exited-server one.
+//
+// Mutation that turns it red: drop "no tmux server" from `pr list`'s Long.
+func TestPrListHelpNamesEveryWindowValue(t *testing.T) {
+	long := strings.Join(strings.Fields(newPrListCmd(nil).Long), " ")
+	for _, value := range []string{"live", "window gone", noTmuxServerStatus, "?"} {
+		if !strings.Contains(long, value) {
+			t.Errorf("pr list --help does not name the WINDOW value %q", value)
+		}
 	}
 }

@@ -3,12 +3,16 @@ package tmux
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	internalexec "github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -34,6 +38,13 @@ const (
 	// directory but never an explicit `-S` one — so "absent, go create it" would
 	// send the caller into a bind failure against a path nothing can bind.
 	serverSocketDirMissing
+	// serverDeadSocket means the socket file exists, is a socket, and a
+	// connect to it was refused: nothing listens there (forgectl#786). tmux
+	// 3.4 leaves its socket behind whenever the server exits, cleanly or not,
+	// so this is the ordinary state after the last session closes. It is NOT
+	// serverAbsent: it maps to ErrServerUnreadable wrapped with
+	// ErrServerExited, which only opted-in callers read as "no server".
+	serverDeadSocket
 )
 
 // String renders a serverFailureKind for logging — the log line at the bottom
@@ -55,6 +66,8 @@ func (k serverFailureKind) String() string {
 		return "pin_mismatch"
 	case serverSocketDirMissing:
 		return "socket_dir_missing"
+	case serverDeadSocket:
+		return "dead_socket"
 	default:
 		return "unknown"
 	}
@@ -78,7 +91,7 @@ func (c *Client) classifyServerFailure(ctx context.Context, expectedArgs []strin
 	if !ok {
 		return serverFailure{Kind: refusal, Cause: err}
 	}
-	_, statErr := c.lstat(socketPath)
+	info, statErr := c.lstat(socketPath)
 	var failure serverFailure
 	switch {
 	case errors.Is(statErr, os.ErrNotExist) && !c.socketDirUsable(socketPath):
@@ -89,6 +102,8 @@ func (c *Client) classifyServerFailure(ctx context.Context, expectedArgs []strin
 		failure = serverFailure{Kind: serverAbsent, SocketPath: socketPath, Cause: err}
 	case errors.Is(statErr, os.ErrPermission):
 		failure = serverFailure{Kind: serverSocketPermission, SocketPath: socketPath, Cause: statErr}
+	case statErr == nil && c.socketRefusesConnect(ctx, socketPath, info):
+		failure = serverFailure{Kind: serverDeadSocket, SocketPath: socketPath, Cause: err}
 	case statErr == nil:
 		failure = serverFailure{Kind: serverStaleSocket, SocketPath: socketPath, Cause: err}
 	default:
@@ -101,6 +116,54 @@ func (c *Client) classifyServerFailure(ctx context.Context, expectedArgs []strin
 	slog.Debug("Classified tmux server failure.",
 		"kind", failure.Kind, "socket", socketPath, "pinned", c.socket != "")
 	return failure
+}
+
+// socketRefusesConnect reports whether the socket file at path is proven
+// dead: lstat saw a socket (not a symlink, not a regular file) and a unix
+// connect to it failed with ECONNREFUSED, which is the kernel saying no
+// process is listening on it. Every other outcome — a connect that succeeds
+// (a live server that failed the command for some other reason), a
+// permission error, a timeout, a canceled context — is not proof, and the
+// caller keeps the fail-closed serverStaleSocket.
+//
+// The refusal must be seen TWICE, deadSocketRecheck apart (forgectl#806). On
+// Darwin and the BSDs a unix socket whose listen backlog is full also answers
+// ECONNREFUSED, so one refused connect to a live but saturated server would
+// read as dead, and EnsureSession would start a second server over it,
+// orphaning the live one. A second refusal after a pause narrows that to a
+// backlog that stays full for the whole pause; it is a cheap hardening, not
+// a proof, and the pause is paid only on the path that already saw a refusal.
+// (Linux answers a full backlog with EAGAIN, which was never proof.)
+func (c *Client) socketRefusesConnect(ctx context.Context, path string, info os.FileInfo) bool {
+	if info == nil || info.Mode().Type() != os.ModeSocket {
+		return false
+	}
+	if !errors.Is(c.dialSocket(ctx, path), syscall.ECONNREFUSED) {
+		return false
+	}
+	pause := time.NewTimer(deadSocketRecheck)
+	defer pause.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-pause.C:
+	}
+	return errors.Is(c.dialSocket(ctx, path), syscall.ECONNREFUSED)
+}
+
+// deadSocketRecheck is the pause between socketRefusesConnect's two probes.
+const deadSocketRecheck = 50 * time.Millisecond
+
+// dialUnixSocket is the production dialSocket: one bounded unix connect,
+// closed at once. A live tmux server sees a client that connects and leaves,
+// which it handles like any client that disconnects.
+func dialUnixSocket(ctx context.Context, path string) error {
+	dialer := net.Dialer{Timeout: time.Second}
+	conn, err := dialer.DialContext(ctx, "unix", path)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
 }
 
 // socketDirUsable reports whether the socket's parent directory exists, so an
@@ -187,13 +250,16 @@ func (c *Client) classifiableSocket(args []string) (path string, ok bool, refusa
 // it is safe there: a false positive only withholds the proceed verdict.
 func (c *Client) pinnedArgs(args []string) bool {
 	if len(args) < 2 || args[0] != "-S" || args[1] != c.socket {
+		// The length, never the argv: a refused argv can carry
+		// `new-window -e KEY=VALUE`, whose value the Runner's per-call mask
+		// would hide but this log line cannot see (forgectl#775).
 		slog.Debug("Refusing argv this pinned client did not build.",
-			"pin", c.socket, "argv", args)
+			"pin", c.socket, "argc", len(args), "reason", "the argv does not lead with the pin")
 		return false
 	}
 	if hasExplicitSocketArg(args[2:]) {
 		slog.Debug("Refusing argv naming a second socket after the pin.",
-			"pin", c.socket, "argv", args)
+			"pin", c.socket, "argc", len(args), "reason", "a socket option follows the pin")
 		return false
 	}
 	return true
@@ -234,6 +300,97 @@ func hasExplicitSocketArg(args []string) bool {
 	return false
 }
 
+// DisplaySessionListing is ListSessions for a listing shown to an operator: a
+// server that has exited and left its socket behind (ErrServerExited) reads as
+// no sessions, exactly like a server that never ran (forgectl#786). It is for
+// display only. A "gone" verdict must come from ListSessions or a
+// revalidation, which keep failing closed on that state.
+//
+// It also returns the number of session rows tmux returned that could not be
+// read, most likely because a name carries the field separator (forgectl#806).
+// Such a session is real but cannot be resolved, renamed or killed through
+// forgectl, so a listing should say it exists rather than show one fewer
+// session with no sign of it.
+func (c *Client) DisplaySessionListing(ctx context.Context) (sessions []Session, unreadable int, err error) {
+	sessions, unreadable, err = c.listSessions(ctx)
+	if errors.Is(err, ErrServerExited) {
+		return nil, 0, nil
+	}
+	return sessions, unreadable, err
+}
+
+// DisplayWindowListing is ListWindows under DisplaySessionListing's rule,
+// plus the number of window rows tmux returned that could not be read
+// (forgectl#815), for DisplaySessionListing's reason.
+func (c *Client) DisplayWindowListing(ctx context.Context) (windows []Window, unreadable int, err error) {
+	windows, unreadable, err = c.listWindows(ctx)
+	if errors.Is(err, ErrServerExited) {
+		return nil, 0, nil
+	}
+	return windows, unreadable, err
+}
+
+// UnreadableRows counts the rows an operator-facing listing could not read,
+// per kind (forgectl#806, forgectl#815, forgectl#823).
+type UnreadableRows struct {
+	Sessions, Windows, Panes int
+}
+
+// Note is the one-line notice a listing prints when any row was unreadable,
+// and "" when none was. It is one line on purpose: the TUI shows it in a
+// single-line footer, and the CLI prints it on stderr so --json output keeps
+// its shape.
+func (u UnreadableRows) Note() string {
+	var parts []string
+	if u.Sessions > 0 {
+		parts = append(parts, fmt.Sprintf("%d session(s)", u.Sessions))
+	}
+	if u.Windows > 0 {
+		parts = append(parts, fmt.Sprintf("%d window(s)", u.Windows))
+	}
+	if u.Panes > 0 {
+		parts = append(parts, fmt.Sprintf("%d pane(s)", u.Panes))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	joined := parts[0]
+	if len(parts) > 1 {
+		joined = strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
+	}
+	// A pane row is hidden by its title or command, not only a name
+	// (parsePaneRows), so the pane form names both rather than sending the
+	// operator looking for a name to fix. The title can hide a row only on a
+	// tmux that escapes the separator (3.5a and older), where the literal text
+	// \037 renders as it does (forgectl#836), so the pane form names that text.
+	cause := "a name carrying the 0x1F field separator hides its row; rename or kill it with tmux itself"
+	if u.Panes > 0 {
+		cause = `a name, pane title or pane command carrying the 0x1F field separator (or the text \037) hides its row; ` +
+			"rename or kill it with tmux itself"
+	}
+	return joined + " could not be read and are not listed — " + cause
+}
+
+// DisplayPaneListing is ListPanes under DisplaySessionListing's rule, plus the
+// number of pane rows tmux returned that could not be read (forgectl#823), for
+// DisplaySessionListing's reason.
+func (c *Client) DisplayPaneListing(ctx context.Context) (panes []Pane, unreadable int, err error) {
+	panes, unreadable, err = c.listPanes(ctx)
+	if errors.Is(err, ErrServerExited) {
+		return nil, 0, nil
+	}
+	return panes, unreadable, err
+}
+
+// absentServer reports whether a failed command proves no server is running
+// on this client's socket. It never reads tmux's message: the proof is exit 1
+// plus the socket file being absent (classifyServerFailure). "no server
+// running on <socket>" and "server exited unexpectedly" are therefore
+// classified alike. On tmux 3.4 both come with the socket file still present
+// (a dead server does not unlink it), which is stale, not absent. Only the
+// file being gone ("error connecting to <socket> (No such file or
+// directory)") reads as absent, whichever message came with it
+// (forgectl#765).
 func (c *Client) absentServer(ctx context.Context, args []string, err error) bool {
 	return c.classifyServerFailure(ctx, args, err).Kind == serverAbsent
 }

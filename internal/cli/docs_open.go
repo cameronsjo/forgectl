@@ -133,7 +133,7 @@ func runDocsOpen(cmd *cobra.Command, deps module.Deps, target string, printOnly 
 func resolveOpenTarget(ctx context.Context, server docspkg.DiscoveredServer, target string) (string, error) {
 	abs, err := filepath.Abs(target)
 	if err != nil {
-		return "", fmt.Errorf("resolve %s: %w", termsafe.QuotePath(target), err)
+		return "", fmt.Errorf("resolve %s: %w", termsafe.QuotePath(target), termsafe.Error(err))
 	}
 
 	root, rel, err := docspkg.LocateDoc(ctx, server, abs)
