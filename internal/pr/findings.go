@@ -68,7 +68,7 @@ func (c *Client) FindingsList() ([]FindingsEntry, error) {
 }
 
 // openFindingsStore opens the findings store once, as the handle every
-// cleanup step below goes through. os.OpenRoot resolves c.findingsDir in the
+// cleanup step below goes through. openDirRoot resolves c.findingsDir in the
 // ordinary way, so a symlinked store still opens (and reclaims) its target;
 // what the handle pins is the directory that resolution reached.
 //
@@ -77,7 +77,7 @@ func (c *Client) FindingsList() ([]FindingsEntry, error) {
 // errFindingsStoreUnsafe. A missing store is an error errors.Is matches to
 // fs.ErrNotExist.
 func (c *Client) openFindingsStore() (*os.Root, error) {
-	store, err := os.OpenRoot(c.findingsDir)
+	store, err := openDirRoot(c.findingsDir)
 	if err != nil {
 		return nil, fmt.Errorf("open pr findings store: %w", err)
 	}

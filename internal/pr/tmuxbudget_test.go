@@ -260,7 +260,8 @@ func TestCleanup_HungTmuxSharesOneBudgetAndSkipsTheRest(t *testing.T) {
 // testClock is a manual clock behind budgetTimeout. A bounded context expires
 // only when Advance moves the clock to or past its deadline, never on wall
 // time, and Advance cancels every context it expires before returning. So a
-// caller that checks ctx.Err() right after advancing sees an exact verdict,
+// caller that checks ctx.Err() right after advancing sees an exact verdict
+// (DeadlineExceeded, as from a real deadline; see clockCtx),
 // however loaded the machine is (forgectl#757).
 type testClock struct {
 	mu      sync.Mutex
@@ -292,11 +293,46 @@ func (c *testClock) withTimeout(parent context.Context, d time.Duration) (contex
 	c.nextID++
 	c.pending[id] = clockDeadline{at: c.now + d, expire: cancel}
 	c.mu.Unlock()
-	return ctx, func() {
+	return clockCtx{ctx}, func() {
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
 		cancel(context.Canceled)
+	}
+}
+
+// clockCtx is a testClock context. It reports the same Err a real
+// context.WithTimeout does: DeadlineExceeded once Advance expired it, and
+// Canceled once its cancel func ran first (forgectl#791). Underneath it is a
+// WithCancelCause context, whose own Err is Canceled either way; the expiry
+// is carried as its cause.
+type clockCtx struct{ context.Context }
+
+func (c clockCtx) Err() error {
+	err := c.Context.Err()
+	if err != nil && errors.Is(context.Cause(c.Context), context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	return err
+}
+
+// Mutation that turns it red: return the bare WithCancelCause context from
+// testClock.withTimeout instead of wrapping it in clockCtx (an expired
+// context then reports Canceled).
+func TestTestClock_ErrMatchesARealDeadline(t *testing.T) {
+	clk := &testClock{pending: make(map[int]clockDeadline)}
+
+	expired, cancelExpired := clk.withTimeout(context.Background(), time.Second)
+	defer cancelExpired()
+	clk.Advance(time.Second)
+	if err := expired.Err(); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expired context Err = %v, want context.DeadlineExceeded", err)
+	}
+
+	cancelled, cancelFirst := clk.withTimeout(context.Background(), time.Second)
+	cancelFirst()
+	if err := cancelled.Err(); !errors.Is(err, context.Canceled) {
+		t.Errorf("cancelled context Err = %v, want context.Canceled", err)
 	}
 }
 

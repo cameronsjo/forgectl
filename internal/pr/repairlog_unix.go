@@ -59,9 +59,9 @@ func openRepairLogNoFollow(path string, flag int, perm os.FileMode) (*os.File, e
 }
 
 // openNoFollowNonblock is the open under openRepairLogNoFollow, shared with
-// ownerRecordLive's session-record read (forgectl#558); the findings marker
-// itself is read with its openat twin, openInRootNoFollowNonblock
-// (forgectl#685): O_NOFOLLOW on the final
+// readRecordFile's session-record read (forgectl#621); the findings marker and
+// ownerRecordLive's record are read with its openat twin,
+// openInRootNoFollowNonblock (forgectl#685, #754): O_NOFOLLOW on the final
 // component, O_NONBLOCK for the open only (cleared before return), O_CLOEXEC.
 // A symlink comes back as a *os.PathError wrapping ELOOP, and the caller still
 // owes an Fstat regular-file check on the returned handle.
@@ -69,9 +69,12 @@ func openNoFollowNonblock(path string, flag int, perm os.FileMode) (*os.File, er
 	return openNonblock(path, flag|unix.O_NOFOLLOW, perm)
 }
 
-// openNonblock is openNoFollowNonblock without O_NOFOLLOW: a symlink at the
-// final component is followed. It is for a file the user may legitimately
-// symlink, the pr reviewed-state store under the config dir (forgectl#765).
+// openNonblock is the open every non-blocking path open in this package
+// shares: openNoFollowNonblock is openNonblock with O_NOFOLLOW added, so the
+// repair log and readRecordFile's session-record reads come through here.
+// Called directly, without O_NOFOLLOW, a symlink at the final component is
+// followed; that is only for a file the user may legitimately symlink, which
+// today is the pr reviewed-state store under the config dir (forgectl#765).
 // The open itself cannot block on a FIFO, and the caller still owes an Fstat
 // regular-file check on the returned handle.
 func openNonblock(path string, flag int, perm os.FileMode) (*os.File, error) {

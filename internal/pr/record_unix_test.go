@@ -208,7 +208,7 @@ func TestOpenRegularInRoot_AFIFOIsRefusedFast(t *testing.T) {
 	}
 	defer func() { _ = root.Close() }()
 	err = mustFailFast(t, "readFileInRoot on a FIFO", func() error {
-		_, err := readFileInRoot(root, "o-r-1-1.json")
+		_, _, err := readFileInRoot(root, "o-r-1-1.json")
 		return err
 	})
 	if !errors.Is(err, errRecordNotRegular) {
@@ -220,7 +220,7 @@ func TestOpenRegularInRoot_AFIFOIsRefusedFast(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "ok.json"), want, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := readFileInRoot(root, "ok.json")
+	got, _, err := readFileInRoot(root, "ok.json")
 	if err != nil || string(got) != string(want) {
 		t.Errorf("readFileInRoot on a regular file = %q, %v; want %q", got, err, want)
 	}

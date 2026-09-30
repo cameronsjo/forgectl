@@ -1,12 +1,17 @@
 package pr
 
 import (
+	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // panicError stands in for Go 1.26's os.errSymlink, whose Error method is a
@@ -133,5 +138,89 @@ func TestCompleteRepairRow_PanickingCauseIsCategorical(t *testing.T) {
 	}
 	if rows[1].Outcome != repairOutcomeFailed || rows[1].Error != "RemoveAll sub: "+errTextUnavailable {
 		t.Errorf("completion = %q / %q, want failed with the categorical text", rows[1].Outcome, rows[1].Error)
+	}
+}
+
+// Mutation that turns it red: make safeTermError plain termsafe.Error(err)
+// (the panicking case crashes the test).
+func TestSafeTermError(t *testing.T) {
+	if safeTermError(nil) != nil {
+		t.Error("safeTermError(nil) != nil")
+	}
+	plain := &fs.PathError{Op: "remove", Path: "x.json", Err: fs.ErrNotExist}
+	got := safeTermError(plain)
+	if !errors.Is(got, fs.ErrNotExist) {
+		t.Errorf("safeTermError dropped a renderable error's chain: %v", got)
+	}
+	msg := safeTermError(&fs.PathError{Op: "remove", Path: "x.json", Err: panicError{}}).Error()
+	if !strings.Contains(msg, errTextUnavailable) {
+		t.Errorf("safeTermError(panicking).Error() = %q, want the categorical text", msg)
+	}
+}
+
+// Every Root error the pinned-handle protocols in prune.go and teardown.go
+// render goes through safeErrString or safeTermError (forgectl#776). A direct
+// termsafe.Error(err) or err.Error() there would crash on the leaked
+// errSymlink, so this fails the moment one appears in either file.
+//
+// Mutation that turns it red: revert any site to termsafe.Error(err), or to
+// termsafe.SafeLine(err.Error()).
+func TestPinnedProtocols_RenderErrorsSafely(t *testing.T) {
+	fset := token.NewFileSet()
+	for _, name := range []string{"prune.go", "teardown.go"} {
+		src, err := os.ReadFile(filepath.Clean(name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "termsafe" && sel.Sel.Name == "Error" {
+				t.Errorf("%s: termsafe.Error calls Error() directly; use safeTermError", fset.Position(call.Pos()))
+			}
+			if sel.Sel.Name == "Error" && len(call.Args) == 0 {
+				t.Errorf("%s: a direct .Error() call; use safeErrString", fset.Position(call.Pos()))
+			}
+			return true
+		})
+	}
+}
+
+// A removal re-read whose error panics when rendered reaches pruneOne's
+// report field and its completion row; both must render it categorically.
+//
+// Mutation that turns it red: in pruneOne, render the removal error as
+// termsafe.SafeLine(rerr.Error()) again (Prune panics).
+func TestPrune_APanickingRereadErrorIsRenderedSafely(t *testing.T) {
+	c := pruneClient(t, repairRunner(nil))
+	path := seedAside(t, c, "o-r-1-1.json", 60*24*time.Hour, []byte("{not json"))
+	original := readAsideBytes
+	t.Cleanup(func() { readAsideBytes = original })
+	readAsideBytes = func(*os.Root, string) ([]byte, fs.FileInfo, error) {
+		return nil, nil, &fs.PathError{Op: "openat", Path: "o-r-1-1.json", Err: panicError{}}
+	}
+
+	report, err := c.Prune(context.Background(), defaultPruneOpts())
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if len(report.Items) != 1 || report.Items[0].Outcome != pruneOutcomeFailed {
+		t.Fatalf("items = %+v, want the removal to have failed", report.Items)
+	}
+	if !strings.Contains(report.Items[0].Error, errTextUnavailable) {
+		t.Errorf("error = %q, want the categorical text", report.Items[0].Error)
+	}
+	if _, serr := os.Stat(path); serr != nil {
+		t.Errorf("the file was removed although its re-read failed: %v", serr)
 	}
 }

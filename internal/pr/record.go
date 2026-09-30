@@ -128,6 +128,13 @@ func (osRecordFS) Lstat(path string) (fs.FileInfo, error) { return os.Lstat(path
 // root.Open would follow, and a FIFO swapped in after a caller's Lstat cannot
 // block the open under the lifecycle lock (forgectl#776).
 //
+// That is the Unix build. Off Unix, openInRootNoFollowNonblock is root's own
+// OpenFile (findings_open_other.go), which DOES follow a symlink that stays
+// inside the root and has no O_NONBLOCK; only the regular-file Fstat and the
+// callers' SameFile check remain. That path is unreachable in practice: every
+// caller runs under withLifecycleLock, which refuses off Unix before any of
+// them is reached, and no shipped binary runs there.
+//
 // It returns the descriptor's own Fstat, so a caller can prove that the file
 // it reads is the one its Lstat checked (os.SameFile), not whatever the name
 // reached by the time of the open.

@@ -3,6 +3,8 @@ package pr
 import (
 	"errors"
 	"io/fs"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // errTextUnavailable is the categorical text safeErrString gives an error
@@ -65,4 +67,12 @@ func unrenderableErrText(err error) string {
 		return pe.Op + " " + pe.Path + ": " + errTextUnavailable
 	}
 	return errTextUnavailable
+}
+
+// safeTermError is termsafe.Error for an error whose Error method may panic:
+// termsafe.Error calls err.Error() directly, so a Root error carrying the
+// leaked errSymlink would crash it. The pinned-handle protocols in prune.go
+// and teardown.go wrap every Root error through here (forgectl#776).
+func safeTermError(err error) error {
+	return termsafe.Error(renderableErr(err))
 }
