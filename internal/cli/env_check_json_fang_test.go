@@ -30,7 +30,13 @@ func runEnvCheckThroughFang(t *testing.T, args ...string) (stdout, stderr string
 	var out, errOut bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&errOut)
-	root.SetArgs(append([]string{"env"}, args...))
+	argv := append([]string{"env"}, args...)
+	root.SetArgs(argv)
+	// A flag-parse failure leaves --json unparsed, so env check reads the
+	// raw process arguments through the docsOSArgs seam; point it at argv.
+	prev := docsOSArgs
+	docsOSArgs = func() []string { return argv }
+	t.Cleanup(func() { docsOSArgs = prev })
 	err = fang.Execute(context.Background(), root, fangOptions("0.0.0", "deadbeef", theme.Default())...)
 	return out.String(), errOut.String(), err
 }
@@ -77,21 +83,29 @@ func TestEnvCheckJSON_Drift_StderrEmptyThroughFang(t *testing.T) {
 }
 
 // TestEnvCheckJSON_RefusedName_OneStderrObjectThroughFang pins #858's refusal
-// half for both flags and for a path outside the repository: stdout stays
-// empty, stderr carries exactly one check_failed object and no fang frame
-// (no ESC byte, no "ERROR" header), and the exit code is still 1.
+// half for both flags, a path outside the repository, and the usage errors
+// cobra raises before RunE (an unknown flag, a stray argument, --example with
+// no value): stdout stays empty, stderr carries exactly one check_failed
+// object and no fang frame (no ESC byte, no "ERROR" header), path names the
+// refused file when one resolved, and the exit code is still 1.
 //
-// Mutation that turns it red: make checkJSONFailure return err unchanged
-// (or drop the cmd.RunE wrapper in newEnvCheckCmd).
+// Mutations that turn it red: make checkJSONFailure return err unchanged
+// (every row); drop cmd.SetFlagErrorFunc (the flag rows); restore
+// Args: cobra.NoArgs (the stray-argument row); drop the rel in
+// resolveEnvTarget's refuse (the path of the name rows).
 func TestEnvCheckJSON_RefusedName_OneStderrObjectThroughFang(t *testing.T) {
 	for _, tt := range []struct {
-		name string
-		args []string
-		want string
+		name     string
+		args     []string
+		want     string
+		wantPath string
 	}{
-		{name: "file not an env name", args: []string{"--file", "notes.txt"}, want: `refusing "notes.txt": not an env file`},
-		{name: "example not an env name", args: []string{"--example", "notes.txt"}, want: `refusing "notes.txt": not an env file`},
+		{name: "file not an env name", args: []string{"--file", "notes.txt"}, want: `refusing "notes.txt": not an env file`, wantPath: "notes.txt"},
+		{name: "example not an env name", args: []string{"--example", "notes.txt"}, want: `refusing "notes.txt": not an env file`, wantPath: "notes.txt"},
 		{name: "file outside the repository", args: []string{"--file", "../outside.env"}, want: `refusing "../outside.env": outside the repository`},
+		{name: "unknown flag", args: []string{"--bogus"}, want: "unknown flag: --bogus"},
+		{name: "stray positional argument", args: []string{"extra"}, want: `unknown command "extra"`},
+		{name: "example with no value", args: []string{"--example"}, want: "flag needs an argument: --example"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			driftRepo(t)
@@ -119,10 +133,43 @@ func TestEnvCheckJSON_RefusedName_OneStderrObjectThroughFang(t *testing.T) {
 			if !strings.HasPrefix(got.Error, tt.want) {
 				t.Errorf("error = %q, want prefix %q", got.Error, tt.want)
 			}
-			if got.Path != "" {
-				t.Errorf("path = %q, want empty for an unresolved target", got.Path)
+			if got.Path != tt.wantPath {
+				t.Errorf("path = %q, want %q", got.Path, tt.wantPath)
 			}
 		})
+	}
+}
+
+// TestEnvCheckJSON_NotFound_ExitTwoThroughFang pins the exit-2 pass-through
+// at the fang level: the not-found object is the only thing on stderr and
+// the process exit code is still 2 (checkJSONFailure must hand an existing
+// silentCodedError back unchanged, not re-encode or re-code it).
+//
+// Mutation that turns it red: drop the silentCodedError early return in
+// checkJSONFailure (a second, empty-message check_failed object lands on
+// stderr after the not-found one).
+func TestEnvCheckJSON_NotFound_ExitTwoThroughFang(t *testing.T) {
+	driftRepo(t)
+	if err := os.Remove(".env"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	stdout, stderr, err := runEnvCheckThroughFang(t, "check", "--json")
+	if code := ExitCode(err); err == nil || code != 2 {
+		t.Fatalf("ExitCode = %d (err %v), want 2 for a missing --file", code, err)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	dec := json.NewDecoder(strings.NewReader(stderr))
+	var got checkErrorJSONWire
+	if decErr := dec.Decode(&got); decErr != nil {
+		t.Fatalf("stderr = %q, not valid JSON: %v", stderr, decErr)
+	}
+	if dec.More() {
+		t.Fatalf("stderr carried more than one JSON value: %q", stderr)
+	}
+	if got.Code != "file_not_found" || got.Path != ".env" {
+		t.Errorf("got %+v, want code file_not_found, path .env", got)
 	}
 }
 

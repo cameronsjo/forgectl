@@ -64,7 +64,14 @@ The scan refuses on a name, not on proof that forgectl made it. A file committed
 
 Before the scratch directory, the atomic write put its temp file directly beside the target as `.env-<hash>.<random>.tmp`, where `git status` shows it. A leftover under that name still refuses the next write the same way. Leftovers from a forgectl version that predates hashed names (`.env-<random>.tmp`, `.forgectl-sops-<digits>/`) can't be tied to a target. They draw a warning on stderr rather than a refusal. Delete them by hand after checking them.
 
-**`env check`'s exit codes are part of its contract, not incidental:** exit `1` means the file and its example both exist but disagree — missing and/or extra keys (drift); exit `2` means either the env file or the `--example` file is absent, so no comparison could run at all. `env check --json` emits the drift as a single object on stdout, `{"missing":[...],"extra":[...]}`, for scripted callers.
+**`env check`'s exit codes are part of its contract, not incidental:** exit `1` means the file and its example both exist but disagree — missing and/or extra keys (drift); exit `2` means either the env file or the `--example` file is absent, so no comparison could run at all. `env check --json` emits the drift as a single object on stdout, `{"missing":[...],"extra":[...]}`, for scripted callers. Under `--json`, stderr is empty on exit `0` and on drift. Every other failure writes exactly one error object to stderr and nothing to stdout, with no human error frame, shaped `{"error":"<message>","code":"<code>","path":"<file>"}`:
+
+| `code` | Exit | When | `path` |
+| --- | --- | --- | --- |
+| `file_not_found` | `2` | the env file or the `--example` file is absent (`error` is always `"env file not found"`) | the missing file, relative to the repository root |
+| `check_failed` | `1` | anything else: a refused `--file`/`--example` name, a file outside the repository, a file that won't parse, an unknown flag, a flag missing its value, or a stray argument (`error` is the message) | for a refused `--file`/`--example` name, that file, relative to the repository root; otherwise `""` (outside the repository, a parse failure, a bad flag or argument) |
+
+A caller tells drift from a `check_failed` at exit `1` by where the output went: drift puts its verdict on stdout, and a failure leaves stdout empty and puts its object on stderr.
 
 **Blessed value producers** for `env set`, non-inline patterns first:
 
