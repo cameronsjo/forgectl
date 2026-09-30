@@ -532,12 +532,14 @@ func ChromaCSS() []byte {
 	return chromaArtificerCSS
 }
 
-// renderMu serializes goldmark.Convert calls. goldmark's Markdown value is
+// renderMu serializes renders. goldmark's Markdown value is
 // safe for concurrent Convert calls per its own docs in the common case, but
 // the highlighting extension's CSSWriter option (unused here) and some
 // third-party extensions are documented as not concurrency-safe; a mutex
 // costs nothing at docs-server request volumes and removes the question
-// entirely.
+// entirely. A request holds it for at most renderDeadline; a render that
+// outlives that keeps goldmark to itself through renderInFlight instead
+// (renderdeadline.go).
 var renderMu sync.Mutex
 
 // Render converts markdown source to sanitized HTML: goldmark (GFM +
@@ -572,7 +574,8 @@ func render(source []byte, kind RootKind) (string, error) {
 
 // renderWith is render with a wikilink resolver for a vault page. A nil
 // resolve, or any other root kind, renders exactly as render does. resolve
-// runs under renderMu, so it must never render.
+// runs on the render goroutine, one render at a time, so it must never
+// render.
 func renderWith(source []byte, kind RootKind, resolve wikilinkResolver) (string, error) {
 	rendered, _, err := renderHidden(source, kind, resolve)
 	return rendered, err
@@ -600,6 +603,11 @@ func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (strin
 	default:
 		md = markdownPlain
 	}
+	// A document over the render-CPU cap is shown as its source text,
+	// before any parse (renderdeadline.go).
+	if len(source) > maxRenderBytes {
+		return tooLargeToRenderDoc(source), nil, nil
+	}
 	// A document goldmark would take superlinear time on is shown as plain
 	// text instead, before renderMu is taken. The guard measures the block
 	// structure md itself gives source (markupguard.go).
@@ -610,7 +618,15 @@ func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (strin
 	if tooComplex {
 		return plainTextDoc(source), nil, nil
 	}
-	renderMu.Lock()
+	return renderBounded(md, source, kind, resolve)
+}
+
+// renderPipeline is the render proper: goldmark, then the sanitizer, the
+// balancer and the post-sanitizer additions. It runs only on the render
+// goroutine renderBounded starts, never two at a time, and may outlive the
+// request that started it, so it must not touch anything request-scoped
+// beyond its arguments.
+func renderPipeline(md goldmark.Markdown, source []byte, kind RootKind, resolve wikilinkResolver) (string, []text.Segment, error) {
 	var buf bytes.Buffer
 	ctx := newParseContext()
 	if kind == RootVault && resolve != nil {
@@ -623,7 +639,6 @@ func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (strin
 	if err == nil && kind == RootVault {
 		hidden = hiddenComments(doc, ctx)
 	}
-	renderMu.Unlock()
 	if err != nil {
 		return "", nil, fmt.Errorf("render markdown: %w", err)
 	}
