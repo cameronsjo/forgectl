@@ -297,7 +297,7 @@ func printSearchHits(out io.Writer, hits []sessions.SearchHit) error {
 	for _, h := range hits {
 		if _, err := fmt.Fprintf(out, "%s\t%s\t[%s]\t(%s, indexed by %s)\n\t%s\n",
 			safeTerm(h.Path), safeTitle(h.Title), safeTerm(h.Type),
-			safeTerm(h.Project), safeTerm(h.Machine), safeTerm(h.Snippet)); err != nil {
+			safeTerm(h.Project), safeTerm(h.Machine), safeSnippet(h.Snippet)); err != nil {
 			return err
 		}
 	}
@@ -439,11 +439,11 @@ func printWhyHits(cmd *cobra.Command, hits []sessions.WhyHit, asJSON bool) error
 		return nil
 	}
 	for _, h := range hits {
-		fmt.Fprintf(out, "%s\t%s\t[%s]\t%s\n",
+		_, _ = fmt.Fprintf(out, "%s\t%s\t[%s]\t%s\n",
 			safeTerm(h.SessionID), humanTs(h.LastTs), safeTerm(h.Project), safeTerm(h.Model))
 		_, _ = fmt.Fprintf(out, "\t%s · %s\n", safeTerm(h.Type), safeTitle(h.Title))
-		fmt.Fprintf(out, "\t%s\n", safeTerm(h.Path))
-		fmt.Fprintf(out, "\t%s\n", safeTerm(h.Snippet))
+		_, _ = fmt.Fprintf(out, "\t%s\n", safeTerm(h.Path))
+		_, _ = fmt.Fprintf(out, "\t%s\n", safeSnippet(h.Snippet))
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "Found %d sessions\n", len(hits))
 	return nil
@@ -551,4 +551,20 @@ const runbookTitleMaxRunes = 256
 // text output.
 func safeTitle(s string) string {
 	return termsafe.SafeLineMax(s, runbookTitleMaxRunes)
+}
+
+// runbookSnippetMaxRunes caps a match snippet in a line of `sessions` text
+// output. The snippet is Postgres ts_headline with MaxWords=20, which bounds
+// words, not characters: one long word, or a run of punctuation or control
+// characters between words, passes through whole, so one headline can be
+// tens of thousands of characters (forgectl#891). 320 is
+// docs search's snippet cap (docsSearchSnippetRunes) and holds 20 ordinary
+// words plus the <<>> match markers several times over. --json carries it
+// whole.
+const runbookSnippetMaxRunes = 320
+
+// safeSnippet is a match snippet made terminal-safe and bounded for a line of
+// text output.
+func safeSnippet(s string) string {
+	return termsafe.SafeLineMax(s, runbookSnippetMaxRunes)
 }

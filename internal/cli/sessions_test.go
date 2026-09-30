@@ -435,3 +435,44 @@ func TestSessionsText_CapsRunbookTitles(t *testing.T) {
 		}
 	}
 }
+
+// TestSessionsText_CapsSnippets pins the #891 review finding: ts_headline's
+// MaxWords bounds words, not characters, so a match snippet can be tens of
+// thousands of characters. search and why cap it at runbookSnippetMaxRunes
+// in text output, while --json carries it whole.
+//
+// Mutations that turn it red, one per row: print h.Snippet through safeTerm
+// in printSearchHits (search) or in printWhyHits (why).
+func TestSessionsText_CapsSnippets(t *testing.T) {
+	long := strings.Repeat("s", runbookSnippetMaxRunes*4)
+	ts := ptrTime("2026-07-09T11:00:00Z")
+	search := []sessions.SearchHit{{Path: "p/x.md", Title: "T", Snippet: long}}
+	why := []sessions.WhyHit{{SessionID: "s1", LastTs: ts, Title: "T", Path: "p/x.md", Snippet: long}}
+	for _, tt := range []struct {
+		sink       string
+		text, json func(cmd *cobra.Command) error
+	}{
+		{
+			sink: "search",
+			text: func(cmd *cobra.Command) error { return printSearchHits(cmd.OutOrStdout(), search) },
+			json: func(cmd *cobra.Command) error { return writeSearchHitsJSON(cmd.OutOrStdout(), search) },
+		},
+		{
+			sink: "why",
+			text: func(cmd *cobra.Command) error { return printWhyHits(cmd, why, false) },
+			json: func(cmd *cobra.Command) error { return printWhyHits(cmd, why, true) },
+		},
+	} {
+		text, _ := renderCmd(t, tt.text)
+		if strings.Contains(text, strings.Repeat("s", runbookSnippetMaxRunes+1)) {
+			t.Errorf("%s text printed more than %d runes of the snippet", tt.sink, runbookSnippetMaxRunes)
+		}
+		if !strings.Contains(text, strings.Repeat("s", runbookSnippetMaxRunes/2)) {
+			t.Errorf("%s text lost the snippet's head: %q", tt.sink, text)
+		}
+		asJSON, _ := renderCmd(t, tt.json)
+		if !strings.Contains(asJSON, long) {
+			t.Errorf("%s --json did not carry the snippet whole", tt.sink)
+		}
+	}
+}
