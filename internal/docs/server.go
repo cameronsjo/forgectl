@@ -497,7 +497,8 @@ func handleDoc(store *Store) http.HandlerFunc {
 // scan's cap on purpose: an over-cap document is indexed by title only, so
 // rendering it in full would show links and anchors the index knows nothing
 // about. The cap bounds memory and the per-request read; it does NOT bound
-// render CPU, since the superlinear parse cases sit far below it.
+// render CPU, since the superlinear parse cases sit far below it; the
+// markup guard (markupguard.go) bounds those.
 const renderCapBytes = maxScanBytes
 
 // readDocCapped reads at most renderCapBytes of path. tooLarge reports that

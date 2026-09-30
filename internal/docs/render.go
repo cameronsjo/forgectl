@@ -569,6 +569,11 @@ func renderWith(source []byte, kind RootKind, resolve wikilinkResolver) (string,
 // the same parse the page is rendered from, so countWords can leave comment
 // text out of the reading estimate.
 func renderHidden(source []byte, kind RootKind, resolve wikilinkResolver) (string, []text.Segment, error) {
+	// A document goldmark would take superlinear time on is shown as plain
+	// text instead, before renderMu is taken (markupguard.go).
+	if markupTooComplex(source) {
+		return plainTextDoc(source), nil, nil
+	}
 	// Route through the frontmatter-aware parser only when a well-formed
 	// block actually opens the document. The extension's opener is greedy —
 	// any leading --- fence starts a block, and an unterminated one consumes

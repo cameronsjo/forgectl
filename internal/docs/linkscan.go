@@ -121,11 +121,12 @@ func scanDocFor(kind RootKind, absPath, relPath string) (docMeta, error) {
 		return docMeta{}, err
 	}
 
-	if len(source) > maxScanBytes {
-		// Past the cap there is no whole-document parse, so the title is
-		// firstH1's line scan; a vault title is then parsed on its own to
-		// drop its comments. A "# " line inside a fence or a %% block of an
-		// over-cap document can still reach it.
+	// Past the cap, or past the markup guard (markupguard.go), there is no
+	// whole-document parse.
+	if len(source) > maxScanBytes || markupTooComplex(source) {
+		// The title is firstH1's line scan; a vault title is then
+		// parsed on its own to drop its comments. A "# " line inside a
+		// fence or a %% block of such a document can still reach it.
 		// The scan runs on the body: a YAML "# comment" in the frontmatter
 		// is not a heading.
 		scanSrc := source
@@ -139,8 +140,8 @@ func scanDocFor(kind RootKind, absPath, relPath string) (docMeta, error) {
 		if title == "" {
 			title = titleFromFilename(relPath)
 		}
-		slog.Debug("docs: document exceeds scan cap; indexed by title only.",
-			"path", relPath, "limit", maxScanBytes)
+		slog.Debug("docs: document exceeds the scan cap or the markup guard; indexed by title only.",
+			"path", relPath, "limit", maxScanBytes, "bytes", len(source))
 		return docMeta{Title: title}, nil
 	}
 
@@ -566,9 +567,14 @@ func parsedTitle(source []byte, bodyOffset int, body []byte, h1s []h1Candidate) 
 // vaultLineTitle is the over-cap vault title: firstH1's text parsed on its
 // own as an H1, so its comments are cut the same way the full parse cuts
 // them. It falls back to "" (the filename) if the line no longer parses as
-// a heading with visible text.
+// a heading with visible text, or if the line is past the markup guard:
+// firstH1 reads one line of any length, so it can be the whole trigger.
 func vaultLineTitle(title string) string {
-	scan, err := scanBodyFor(RootVault, []byte("# "+title+"\n"))
+	src := []byte("# " + title + "\n")
+	if markupTooComplex(src) {
+		return ""
+	}
+	scan, err := scanBodyFor(RootVault, src)
 	if err != nil || len(scan.h1s) == 0 {
 		return ""
 	}
