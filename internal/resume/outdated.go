@@ -90,6 +90,9 @@ type OutdatedSession struct {
 	// empty when unknown. It is a claim, not a verified pane: a nested claude
 	// inherits its parent's id.
 	Pane string
+	// ProcStart is the registry's recorded process start time, kept so a later
+	// restart can tell this process from a successor that reused its pid.
+	ProcStart string
 }
 
 // PaneLookup returns the terminal pane id for a pid, or "" when unknown.
@@ -120,6 +123,7 @@ func FindOutdated(entries []RegistryEntry, installed string, lookup PaneLookup) 
 			Status: e.Status, Busy: IsBusy(e.Status),
 			Version: e.Version, InstalledVersion: installed,
 			VersionUnparseable: unparseable,
+			ProcStart:          e.ProcStart,
 		}
 		if lookup != nil {
 			o.Pane = lookup(e.Pid)
@@ -232,27 +236,30 @@ func paneFromEnv(env []string) string {
 	return ""
 }
 
-// parseProcArgs2 extracts the environment from a KERN_PROCARGS2 buffer:
-// a native-endian int32 argc, the NUL-terminated exec path, NUL padding, argc
-// NUL-terminated arguments, then the NUL-terminated environment. Keeping argv
-// and the environment apart is the point — an argument that happens to read
-// "HERDR_PANE_ID=x" is not the process's environment.
-func parseProcArgs2(buf []byte) ([]string, error) {
+// parseProcArgs2 extracts the exec path and the environment from a
+// KERN_PROCARGS2 buffer: a native-endian int32 argc, the NUL-terminated exec
+// path, NUL padding, argc NUL-terminated arguments, then the NUL-terminated
+// environment. Keeping argv and the environment apart is the point — an
+// argument that happens to read "HERDR_PANE_ID=x" is not the process's
+// environment. The arguments themselves are skipped, never returned: they can
+// carry a prompt or a token, and no caller needs them.
+func parseProcArgs2(buf []byte) (execPath string, env []string, err error) {
 	if len(buf) < 4 {
-		return nil, errors.New("procargs2: buffer too short for argc")
+		return "", nil, errors.New("procargs2: buffer too short for argc")
 	}
 	n := binary.NativeEndian.Uint32(buf[:4])
 	// Every argument costs at least its NUL, so a larger argc is corrupt.
 	if int64(n) > int64(len(buf)) {
-		return nil, fmt.Errorf("procargs2: argc %d exceeds the %d-byte buffer", n, len(buf))
+		return "", nil, fmt.Errorf("procargs2: argc %d exceeds the %d-byte buffer", n, len(buf))
 	}
 	argc := int(n)
 	rest := buf[4:]
 	// Exec path, then its NUL padding.
 	i := bytes.IndexByte(rest, 0)
 	if i < 0 {
-		return nil, errors.New("procargs2: unterminated exec path")
+		return "", nil, errors.New("procargs2: unterminated exec path")
 	}
+	execPath = string(rest[:i])
 	rest = rest[i:]
 	for len(rest) > 0 && rest[0] == 0 {
 		rest = rest[1:]
@@ -260,11 +267,10 @@ func parseProcArgs2(buf []byte) ([]string, error) {
 	for n := 0; n < argc; n++ {
 		i := bytes.IndexByte(rest, 0)
 		if i < 0 {
-			return nil, fmt.Errorf("procargs2: argument %d of %d is unterminated", n+1, argc)
+			return "", nil, fmt.Errorf("procargs2: argument %d of %d is unterminated", n+1, argc)
 		}
 		rest = rest[i+1:]
 	}
-	var env []string
 	for len(rest) > 0 {
 		i := bytes.IndexByte(rest, 0)
 		if i <= 0 { // an empty string ends the environment
@@ -273,7 +279,7 @@ func parseProcArgs2(buf []byte) ([]string, error) {
 		env = append(env, string(rest[:i]))
 		rest = rest[i+1:]
 	}
-	return env, nil
+	return execPath, env, nil
 }
 
 // validPane admits only a conservative id alphabet. The value comes from
