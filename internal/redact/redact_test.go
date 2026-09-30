@@ -3,6 +3,8 @@ package redact
 import (
 	"strings"
 	"testing"
+
+	"github.com/cameronsjo/forgectl/internal/redact/redacttest"
 )
 
 // secretForms are credential-bearing locators, each of which git 2.43 either
@@ -296,6 +298,74 @@ func TestLogRepo(t *testing.T) {
 	} {
 		if got := LogRepo(tc.in); got != tc.want {
 			t.Errorf("LogRepo(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestUserArgs_ShowsNoUserValue runs the #749 review corpus through
+// UserArgs: every value and positional is withheld, whatever flag grammar
+// the tool has, so no row renders the secret.
+//
+// Mutation: in userArg, return a glued short flag (-pSEKRIT) whole, or show
+// a --name=VALUE whole, and rows go red.
+func TestUserArgs_ShowsNoUserValue(t *testing.T) {
+	for _, argv := range redacttest.Corpus {
+		got := strings.Join(UserArgs(argv[1:]), " ")
+		if strings.Contains(got, redacttest.Secret) {
+			t.Errorf("UserArgs(%q) = %q", argv[1:], got)
+		}
+	}
+	for _, c := range []struct{ in, want []string }{
+		{
+			[]string{"--target", "builder", "--build-arg=NPM_TOKEN=X", "-e", "-pX", "--", "-", "img"},
+			[]string{"--target", UserArgMarker, "--build-arg=" + UserArgMarker, "-e", "-p" + UserArgMarker, "--", "-", UserArgMarker},
+		},
+		{
+			[]string{"--to\u200bken=X", "--//reg/:_authToken=X", "\u2014token", "---x", "-_x", "--=X", "-"},
+			[]string{UserArgMarker, UserArgMarker, UserArgMarker, "---x", UserArgMarker, UserArgMarker, "-"},
+		},
+	} {
+		if got := UserArgs(c.in); strings.Join(got, "\x00") != strings.Join(c.want, "\x00") {
+			t.Errorf("UserArgs(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestArgs_WithheldTriggerStaysArmed: a withheld element that would itself
+// withhold the next one, "--", or a marker keeps Args withholding, so the
+// value after it does not show.
+//
+// Mutation: disarm after every withheld element (withhold = false) and all
+// three rows show X.
+func TestArgs_WithheldTriggerStaysArmed(t *testing.T) {
+	for _, argv := range [][]string{
+		{"tool", "-H", "-H", "X"},
+		{"tool", "--token", "--password", "X"},
+		{"tool", "--token", "--", "X"},
+		{"tool", "--token", Marker, "X"},
+	} {
+		if got := Args(argv); got[len(got)-1] != ArgMarker {
+			t.Errorf("Args(%q) = %q, the last element shows", argv, got)
+		}
+	}
+}
+
+// TestText_KeepsALineWhoseOnlyURLIsARepo: git's "repository '…' not found"
+// names a plain repository URL, which carries nothing to withhold; the same
+// line with userinfo in the URL still goes whole.
+//
+// Mutation: drop the repoWord check from lineWithheld and the first row
+// reads [redacted].
+func TestText_KeepsALineWhoseOnlyURLIsARepo(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"fatal: repository 'https://github.com/o/r/' not found", "fatal: repository 'https://github.com/o/r/' not found"},
+		{"Cloning into 'r'... from git@github.com:o/r.git.", "Cloning into 'r'... from git@github.com:o/r.git."},
+		{"fatal: repository 'https://u:SEKRIT@github.com/o/r/' not found", Marker},
+		{"fatal: repository 'https://github.com/o/r/?t=SEKRIT' not found", Marker},
+		{"see https://github.com/o/r and --token SEKRIT", Marker},
+	} {
+		if got := Text(c.in); got != c.want {
+			t.Errorf("Text(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }

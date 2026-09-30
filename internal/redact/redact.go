@@ -34,6 +34,67 @@ const Marker = "[redacted]"
 // ArgMarker replaces a withheld argv element or repository argument (Arg).
 const ArgMarker = "[redacted-arg]"
 
+// UserArgMarker replaces a user-written argv value or positional (UserArgs).
+const UserArgMarker = "[user-arg]"
+
+// UserArgs renders argv that a user wrote and forgectl passes through (a
+// workflow run step, docker's pass-through arguments) as flag names only
+// (#749). Guessing which of a user's arguments carries a credential is a
+// denylist over every tool's flag grammar, and it kept leaking (docker login
+// -p X, mysql -pX, curl -u u:X, gh secret set --body X). So no user value is
+// shown:
+//
+//   - "--" and "-" as they are;
+//   - --name as it is, and --name=VALUE as --name=[user-arg], when the name
+//     is ASCII letters, digits, '-', '_' and '.';
+//   - -x as it is, and a glued -xVALUE as -x[user-arg], when x is an ASCII
+//     letter or digit;
+//   - everything else, every value and positional, as UserArgMarker.
+func UserArgs(args []string) []string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = userArg(a)
+	}
+	return out
+}
+
+func userArg(a string) string {
+	switch {
+	case a == "--" || a == "-":
+		return a
+	case strings.HasPrefix(a, "--"):
+		name, _, joined := strings.Cut(a, "=")
+		if len(name) == 2 || !isFlagName(name[2:]) {
+			return UserArgMarker
+		}
+		if joined {
+			return name + "=" + UserArgMarker
+		}
+		return name
+	case strings.HasPrefix(a, "-") && isFlagName(a[1:2]) && a[1] != '-' && a[1] != '.' && a[1] != '_':
+		if len(a) == 2 {
+			return a
+		}
+		return a[:2] + UserArgMarker
+	}
+	return UserArgMarker
+}
+
+// isFlagName reports whether s is a non-empty run of ASCII letters, digits,
+// '-', '_' and '.'.
+func isFlagName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c != '-' && c != '_' && c != '.' && (c < '0' || c > '9') && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
 // Arg returns one argv element (or a repository argument) as it may be
 // written down:
 //
@@ -69,18 +130,26 @@ func Arg(s string) string {
 //
 // It is a withhold list, not a parser of any one tool's flags, so it errs
 // toward withholding: a boolean flag with a credential-looking name costs the
-// element after it. A value already rendered as Marker or ArgMarker (exec's
-// masked entries) is left as it is. Args copies only when an element changes.
+// element after it. A withheld element that would itself withhold the next
+// one, "--", or a marker keeps withholding armed. A value already rendered as
+// a marker (Marker, ArgMarker, UserArgMarker) is left as it is. Args copies
+// only when an element changes.
 func Args(args []string) []string {
 	var out []string
 	withhold := false
 	for i, a := range args {
 		r := a
 		if withhold {
-			withhold = false
-			if a != Marker && a != ArgMarker {
+			// The withheld element is the value, whatever it looks like. If
+			// it would itself withhold the next one (-H -H X, --token
+			// --password X), or is "--" or an already-rendered marker, where
+			// the value may be the element after it (--token -- X), stay
+			// armed.
+			if !isMarker(a) {
 				r = ArgMarker
 			}
+			_, next := argWord(a)
+			withhold = next || a == "--" || isMarker(a)
 		} else {
 			r, withhold = argWord(a)
 		}
@@ -157,7 +226,7 @@ func argWord(a string) (string, bool) {
 // withheldValue shows key=ArgMarker, leaving an already-rendered value as it
 // is so Args is idempotent over exec's masked KEY=[redacted] entries.
 func withheldValue(key, value string) string {
-	if value == Marker || value == ArgMarker {
+	if isMarker(value) {
 		return key + "=" + value
 	}
 	return key + "=" + ArgMarker
@@ -294,7 +363,10 @@ func Text(s string) string {
 // lineWithheld reports whether any whitespace-separated word of line is one
 // Text withholds.
 func lineWithheld(line string) bool {
-	for _, w := range strings.FieldsFunc(line, isSpaceRune) {
+	for _, w := range strings.FieldsFunc(line, isSpace) {
+		if repoWord(w) {
+			continue
+		}
 		if !Plain(w) {
 			return true
 		}
@@ -303,6 +375,20 @@ func lineWithheld(line string) bool {
 		}
 	}
 	return false
+}
+
+// repoWord reports whether a word of free text is exactly one of Repo's
+// shapes once the quotes and punctuation git's messages put around a URL are
+// trimmed: fatal: repository 'https://github.com/o/r/' not found. Repo has no
+// userinfo, query or other slack, and the trim removes only quote and
+// punctuation bytes from the ends plus one trailing '/', so nothing else can
+// ride along in the word.
+func repoWord(w string) bool {
+	w = strings.TrimLeft(w, "'\"`(<[")
+	w = strings.TrimRight(w, "'\"`)>],.:;")
+	w = strings.TrimSuffix(w, "/")
+	_, ok := Repo(w)
+	return ok
 }
 
 // Plain reports whether s can be written down as is: it holds no "://" and
@@ -384,12 +470,12 @@ func HasLocalPathPrefix(repo string) bool {
 	return strings.HasPrefix(repo, "/") || strings.HasPrefix(repo, "./") || strings.HasPrefix(repo, "../") || repo == "."
 }
 
-func isSpace(c byte) bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
+func isSpace(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\v' || r == '\f'
 }
 
-// isSpaceRune is isSpace for strings.FieldsFunc, so Text's words split where
-// its lines' words always have.
-func isSpaceRune(r rune) bool {
-	return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\v' || r == '\f'
+// isMarker reports whether s is one of the placeholders this package or exec
+// renders in place of a withheld value.
+func isMarker(s string) bool {
+	return s == Marker || s == ArgMarker || s == UserArgMarker
 }
