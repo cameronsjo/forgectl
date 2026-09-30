@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -22,6 +23,11 @@ type RegistryEntry struct {
 	Name      string `json:"name"`
 	Status    string `json:"status"`
 	UpdatedAt int64  `json:"updatedAt"`
+	// ProcStart is the process's start time as Claude Code recorded it, in
+	// ps(1)'s lstart layout and UTC ("Tue Sep 29 23:12:27 2026"). A pid can be
+	// reused once its process exits; the start time cannot, so `resume restart`
+	// compares it before signalling anything.
+	ProcStart string `json:"procStart"`
 
 	// Live is the result of probing Pid, not a field on disk. A registry
 	// file whose process is gone is stale — the file outliving the process
@@ -41,6 +47,37 @@ func (e RegistryEntry) Updated() time.Time {
 // pidAlive is the liveness probe, indirected so tests can pin a pid dead or
 // alive without spawning processes.
 var pidAlive = processAlive
+
+// ReadEntry re-reads one pid's registry file, <pid>.json, straight from disk,
+// with Live probed fresh. It reports false when the file is missing, will not
+// parse, or names an invalid session id — each of which means the entry a
+// caller saw earlier can no longer be vouched for.
+func ReadEntry(p Paths, pid int) (RegistryEntry, bool) {
+	if pid <= 0 {
+		return RegistryEntry{}, false
+	}
+	path := filepath.Join(p.registryDir(), strconv.Itoa(pid)+".json")
+	data, err := os.ReadFile(path) // #nosec G304 -- <int>.json under the caller's own ~/.claude/sessions
+	if err != nil {
+		return RegistryEntry{}, false
+	}
+	var e RegistryEntry
+	if json.Unmarshal(data, &e) != nil || !validSessionID(e.SessionID) {
+		return RegistryEntry{}, false
+	}
+	e.Live = pidAlive(e.Pid)
+	return e, true
+}
+
+// LiveSession returns the live registry entry for a session id, if any
+// process currently holds it.
+func LiveSession(p Paths, sessionID string) (RegistryEntry, bool) {
+	e, ok := readRegistry(p.registryDir())[sessionID]
+	if !ok || !e.Live {
+		return RegistryEntry{}, false
+	}
+	return e, true
+}
 
 // readRegistry reads every live-session file, keyed by session id. A file that
 // will not parse is skipped rather than failing the scan: the registry is

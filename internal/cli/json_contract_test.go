@@ -66,6 +66,7 @@ var jsonContractExempt = map[string]string{
 	"quarantine restore":     "renames quarantined files back and prints the per-file move list; the `--dry-run` arm is a flag arm, out of scope (`quarantine status --json` reports the state)",
 	"recipe afk":             "journals and compacts the current Herdr pane; the exit code is the outcome",
 	"resume":                 "a bare `resume` picks a session and resumes it; `resume ls --json` lists sessions",
+	"resume restart":         "stops and resumes sessions in their panes, one progress line per state change; the exit code is the outcome (`resume outdated --json` reports the sessions it acts on)",
 	"resume snapshot":        "writes a snapshot of what a live session's exit would destroy; the exit code is the outcome (`resume ls --json` lists sessions)",
 	"review mark":            "records a reviewed mark; the exit code is the outcome",
 	"review sync":            "prunes reviewed marks for closed work items; the exit code is the outcome",
