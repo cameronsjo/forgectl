@@ -581,10 +581,15 @@ func windowKillTimeoutNote(target string, parked bool) string {
 // timeout, an unreadable window state, or a duplicate window name — so the
 // operator learns whether the record is now needs-repair. Other failures get
 // no note; the returned error already says everything.
+//
+// The note leaves the cause out: the command returns err, and execute.go
+// prints it on the next line, so embedding it here printed it twice
+// (forgectl#746). `pr cleanup` keeps it, because its returned error is a tally
+// that names no single failure.
 func noteTeardownRefusal(cmd *cobra.Command, err error, target string) {
 	if errors.Is(err, pr.ErrWindowKillTimedOut) || errors.Is(err, pr.ErrWindowStateUnreadable) ||
 		errors.Is(err, tmux.ErrAmbiguousWindow) {
-		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), cleanupFailureLine(pr.CleanupFailure{Path: target, Err: err}))
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), refusalLine(pr.CleanupFailure{Path: target, Err: err}, false))
 	}
 }
 
@@ -638,6 +643,13 @@ func newPrCleanupCmd(client *pr.Client) *cobra.Command {
 // past a failure, so a single note describing only the first — and claiming
 // "nothing was removed" for a sweep that removed plenty — misled.
 func cleanupFailureLine(f pr.CleanupFailure) string {
+	return refusalLine(f, true)
+}
+
+// refusalLine is cleanupFailureLine's body. withCause embeds f.Err's text
+// where a line would otherwise not say what tmux answered; a caller whose
+// returned error prints that text anyway passes false.
+func refusalLine(f pr.CleanupFailure, withCause bool) string {
 	switch {
 	case errors.Is(f.Err, pr.ErrTmuxBudgetSpent):
 		return fmt.Sprintf("skipped %s: tmux stopped answering earlier in this sweep, so it was not attempted and "+
@@ -651,16 +663,20 @@ func cleanupFailureLine(f pr.CleanupFailure) string {
 			state = "the record could not be parked as needs-repair and was left as it was"
 		}
 		return fmt.Sprintf("refused %s: more than one tmux window carries its review's name, so none was killed: "+
-			"nothing was removed and %s. Close the window that is not the review, then run 'forgectl pr teardown' "+
+			"nothing was removed and %s. Close the ones that are not the review, then run 'forgectl pr teardown' "+
 			"again, or see 'forgectl pr repair'", termsafe.QuotePathIfUnsafe(f.Path), state)
 	case errors.Is(f.Err, pr.ErrWindowStateUnreadable):
 		state := "the record is parked as needs-repair"
 		if errors.Is(f.Err, pr.ErrRecordNotParked) {
 			state = "the record could not be parked as needs-repair and was left as it was"
 		}
+		cause := ""
+		if withCause {
+			cause = " (" + termsafe.SafeLine(f.Err.Error()) + ")"
+		}
 		return fmt.Sprintf("refused %s: tmux could not say whether its review window still exists, so it was not "+
-			"treated as gone: nothing was removed and %s (%s). Once tmux reads cleanly, run 'forgectl pr teardown' "+
-			"again, or see 'forgectl pr repair'", termsafe.QuotePathIfUnsafe(f.Path), state, termsafe.SafeLine(f.Err.Error()))
+			"treated as gone: nothing was removed and %s%s. Once tmux reads cleanly, run 'forgectl pr teardown' "+
+			"again, or see 'forgectl pr repair'", termsafe.QuotePathIfUnsafe(f.Path), state, cause)
 	default:
 		return fmt.Sprintf("failed %s: %s", termsafe.QuotePathIfUnsafe(f.Path), termsafe.SafeLine(f.Err.Error()))
 	}

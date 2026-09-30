@@ -306,13 +306,77 @@ func secretBearing(env []string) []string {
 // KillWindow kills the window the identity names, revalidating generation and
 // parentage first. A window that moved to another session since capture is
 // refused rather than killed — its @id would still resolve.
+//
+// A window that dies between the revalidation and the kill is ErrObjectGone,
+// but only on tmux's exact answer for that id (windowGoneAtKillStderr) AND a
+// re-read showing the same server generation answered it (confirmGoneAtKill);
+// any other failure is returned as it came.
 func (c *Client) KillWindow(ctx context.Context, want WindowIdentity) error {
 	current, err := c.RevalidateWindow(ctx, want)
 	if err != nil {
 		return fmt.Errorf("kill window %q: %w", want.Name, err)
 	}
 	_, err = c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("kill-window", "-t", current.ID)...)
+	if windowGoneAtKillStderr(err, current.ID) {
+		return c.confirmGoneAtKill(ctx, want, err)
+	}
 	return err
+}
+
+// confirmGoneAtKill settles what kill-window's exact "can't find window"
+// answer means. The answer came from whatever server the socket reached at
+// that instant, and an id is only unique within one server generation, so the
+// server is re-read (#{pid}/#{start_time} on every session row):
+//
+//   - the captured generation still answers: the window is gone
+//     (ErrObjectGone);
+//   - another generation answers: the server was replaced between the
+//     revalidation and the kill, so the answer is about a different server
+//     (ErrGenerationChanged — the old one's windows are gone or unreachable,
+//     the same verdict the revalidation itself would give);
+//   - no server answers, or the re-read fails: nothing confirms which server
+//     spoke, so the kill error is returned unclassified and the caller fails
+//     closed. That includes a review window that was the server's last, whose
+//     server exited with it — a park, not a guess.
+//
+// Why the empty arm is not ErrObjectGone like the other two: both of those
+// rest on a server that answered the re-read, which is positive evidence
+// about who gave the "can't find window" answer. An empty or failed re-read
+// is the absence of evidence — the answer may have come from a replacement
+// that has since exited too, while the captured server lives on behind an
+// unlinked socket. The costs are also unequal: a spurious park is settled by
+// `pr repair`, while a wrong "gone" lets teardown remove the workspace of a
+// window that may still be running.
+func (c *Client) confirmGoneAtKill(ctx context.Context, want WindowIdentity, killErr error) error {
+	sessions, err := c.ListSessions(ctx)
+	if err != nil {
+		return fmt.Errorf("kill window %q: %w (re-reading the server to confirm it: %w)", want.Name, killErr, err)
+	}
+	if len(sessions) == 0 {
+		return fmt.Errorf("kill window %q: %w (no server answered the re-read that would confirm it)", want.Name, killErr)
+	}
+	for _, s := range sessions {
+		if !want.Generation.matches(s.ServerPID, s.ServerStart) {
+			return fmt.Errorf("kill window %q: %w", want.Name, generationDrift(want.Generation, s.ServerPID, s.ServerStart))
+		}
+	}
+	return fmt.Errorf("%w: window %s (%q) was gone by kill-window: %w", ErrObjectGone, want.ID, want.Name, killErr)
+}
+
+// windowGoneAtKillStderr reports whether a kill-window failure is tmux saying
+// the target id does not exist: exit status 1 and, as the whole of stderr,
+// "can't find window: <id>" for the very id passed (forgectl#746). Measured on
+// tmux 3.4 against an isolated socket: a kill of an already-killed @1 printed
+// exactly that line and exited 1, while a missing server printed
+// "no server running on <socket>". The id is a validated "@N", so the line
+// cannot be forged by a window name, and a stderr tail that dropped bytes,
+// carries any other text, or names another id is not this answer.
+func windowGoneAtKillStderr(err error, id string) bool {
+	var cmdErr *exec.CommandError
+	if !errors.As(err, &cmdErr) {
+		return false
+	}
+	return cmdErr.ExitCode == 1 && cmdErr.StderrDropped == 0 && cmdErr.Stderr == "can't find window: "+id
 }
 
 // treeMarkers are the structural glyphs buildTree uses. Kept here (not in the

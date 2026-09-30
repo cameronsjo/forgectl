@@ -352,8 +352,8 @@ func TestPrune_ALargeLogCompactsToTheLegacyBytes(t *testing.T) {
 // pins what happens if something outside that contract appends anyway — a
 // row pass one never classified must not be copied under the old plan.
 //
-// Mutation that turns it red: delete the size/kept/dropped comparison in
-// copyKept.
+// Mutation that turns it red: delete the size/kept/dropped comparison and the
+// sum comparison in copyKept.
 func TestRewriteRepairLog_ALogThatChangesBetweenThePassesRefuses(t *testing.T) {
 	now := fixedTime()
 	cutoff := now.Add(-24 * time.Hour)
@@ -392,6 +392,42 @@ func TestRewriteRepairLog_ALogThatChangesBetweenThePassesRefuses(t *testing.T) {
 		if strings.Contains(e.Name(), ".tmp-") {
 			t.Errorf("a temp log was left behind: %s", e.Name())
 		}
+	}
+}
+
+// TestRewriteRepairLog_ASameLengthEditBetweenThePassesRefuses is
+// forgectl#621: an edit that keeps the log's size and every kept/dropped count
+// still refuses. Here a settled pair's completion moves from old to inside the
+// window at the same width, so pass two — dropping by pass one's plan — would
+// drop a row that is no longer settled, with no size or count to show it.
+//
+// Mutation that turns it red: delete the sum comparison in copyKept.
+func TestRewriteRepairLog_ASameLengthEditBetweenThePassesRefuses(t *testing.T) {
+	now := fixedTime()
+	cutoff := now.Add(-24 * time.Hour)
+	old := now.Add(-48 * time.Hour)
+	intent := term(rowLine(t, "pair", repairOutcomeIntent, old))
+	settled := term(rowLine(t, "pair", repairOutcomeApplied, old))
+	moved := term(rowLine(t, "pair", repairOutcomeApplied, now.Add(-time.Hour)))
+	if len(moved) != len(settled) || bytes.Equal(moved, settled) {
+		t.Fatalf("fixture: the edit must keep the width and change the bytes (%d vs %d)", len(moved), len(settled))
+	}
+	data := joinLog(intent, settled)
+	plan, err := scanRepairLog(bytes.NewReader(data), cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.dropped != 2 {
+		t.Fatalf("fixture: pass one should plan to drop the settled pair, planned %d", plan.dropped)
+	}
+	var out bytes.Buffer
+	err = plan.copyKept(bytes.NewReader(joinLog(intent, moved)), &out)
+	if !errors.Is(err, errRepairLogChanged) {
+		t.Fatalf("copyKept over a same-length edit = %v, want errRepairLogChanged", err)
+	}
+	// Control: the unchanged log still copies under the same plan.
+	if err := plan.copyKept(bytes.NewReader(data), io.Discard); err != nil {
+		t.Fatalf("copyKept over the planned log: %v", err)
 	}
 }
 

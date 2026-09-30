@@ -326,14 +326,18 @@ func (c *Client) recordedWorkspaceFor(real string) (string, bool) {
 		return "", false
 	}
 	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+		// Only a regular file can be a record forgectl wrote; a FIFO named like
+		// one would block a plain read forever (forgectl#621), so it is skipped
+		// before any open, as listLocked does, and the read itself goes
+		// through the one FIFO-safe record reader.
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" || !e.Type().IsRegular() {
 			continue
 		}
 		path := filepath.Join(c.sessionsDir, e.Name())
 		if !sandbox.WithinWorkspace(c.sessionsDir, path) {
 			continue // same location guard loadBreadcrumb applies first
 		}
-		data, err := os.ReadFile(path) //nolint:gosec // location-validated above
+		data, err := readRecordFile(path)
 		if err != nil {
 			continue
 		}
