@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -12,7 +12,9 @@ import (
 	"github.com/spf13/cobra"
 
 	cleanpkg "github.com/cameronsjo/forgectl/internal/clean"
+	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
@@ -518,27 +520,22 @@ func printDockerItems(out io.Writer, items []cleanpkg.DockerItem) {
 // cleanDiagnosticMaxRunes caps a subprocess or docker-daemon diagnostic in a
 // clean row. exec keeps up to a 64 KiB stderr tail, and each FAILED row or
 // docker skip line would otherwise print all of it as one escaped line
-// (forgectl#867).
+// (forgectl#867). Every rendering below stays at or under it, elision and
+// dropped-bytes note included.
 //
 // The cap keeps both ends, not just the head. exec keeps the stderr TAIL on
 // purpose: brew, npm and docker print their fatal line ("Error: ...") LAST,
 // after any warnings. A head-only cut would drop exactly that line, and a
-// few escaped newlines are enough to push it past the cap. The head is
-// shorter than the tail because it only has to name the command.
+// few escaped newlines are enough to push it past the cap. The head gets
+// cleanDiagnosticHeadRunes because it only has to name the command; the tail
+// gets whatever the head leaves.
 const (
 	cleanDiagnosticMaxRunes  = 512
 	cleanDiagnosticHeadRunes = 128
-	cleanDiagnosticTailRunes = cleanDiagnosticMaxRunes - cleanDiagnosticHeadRunes
 )
 
 // cleanElision joins the kept head and tail of a capped diagnostic.
 const cleanElision = " … [truncated] … "
-
-// stderrDroppedMarker matches the note exec's CommandError.Error puts ahead
-// of a stderr tail it cut ("[stderr truncated, N earlier bytes dropped]").
-// A capped diagnostic keeps it whole, because it is how the reader knows
-// the text they see is already partial.
-var stderrDroppedMarker = regexp.MustCompile(`\[stderr truncated, [0-9]+ earlier bytes dropped\]`)
 
 // cleanFailureText renders a prune/clear failure for a FAILED row.
 //
@@ -547,12 +544,14 @@ var stderrDroppedMarker = regexp.MustCompile(`\[stderr truncated, [0-9]+ earlier
 // safe to keep here: exec's CommandError already runs stderr through
 // redact.Text, and that text is the only diagnostic the operator gets for why
 // brew/npm/docker refused — a fixed category string would leave them nothing
-// to act on. Escaping bounds what it can do to the terminal, and
-// cleanDiagnostic bounds its length. Do not "fix" this back to Categorical.
+// to act on. Escaping bounds what it can do to the terminal, and the cap
+// bounds its length. Do not "fix" this back to Categorical.
 //
 // Text that fits is termsafe.Error's rendering unchanged. Longer text is cut
 // from the error's RAW text and only then escaped, so the cut can never
-// split an escape sequence or a quoted path.
+// split an escape sequence or a quoted path. A *exec.CommandError is cut
+// from its fields (cleanCommandFailure); anything else gets the plain
+// head+tail cut.
 func cleanFailureText(err error) string {
 	full := termsafe.Error(err).Error()
 	if utf8.RuneCountInString(full) <= cleanDiagnosticMaxRunes {
@@ -560,7 +559,10 @@ func cleanFailureText(err error) string {
 	}
 	raw, ok := rawErrorText(err)
 	if !ok {
-		return termsafe.SafeLineMax(full, cleanDiagnosticMaxRunes)
+		return termsafe.SafeLineMax(full, cleanDiagnosticMaxRunes-utf8.RuneCountInString(termsafe.TruncatedMarker))
+	}
+	if text, ok := cleanCommandFailure(err, raw); ok {
+		return text
 	}
 	return cleanDiagnostic(raw)
 }
@@ -576,37 +578,65 @@ func rawErrorText(err error) (text string, ok bool) {
 	return err.Error(), true
 }
 
+// cleanCommandFailure caps the text of a failure that carries a
+// *exec.CommandError, whose rendering is "<command>: [<dropped note>] <stderr>".
+// It works from the struct, never by searching the text: the dropped-bytes
+// note is rebuilt from StderrDropped, so a look-alike note inside stderr (or
+// a remote daemon's reply) is only ever stderr, cut like the rest of it. The
+// command, and any text a wrapper put before it, gets the head budget, the
+// note is kept whole, and stderr gets the tail. ok is false when raw does not
+// end in the CommandError's stderr, so the caller falls back to the plain cut.
+func cleanCommandFailure(err error, raw string) (string, bool) {
+	var ce *exec.CommandError
+	if !errors.As(err, &ce) || ce == nil || ce.Stderr == "" {
+		return "", false
+	}
+	stderr := redact.Text(ce.Stderr)
+	if !strings.HasSuffix(raw, stderr) {
+		return "", false
+	}
+	command := strings.TrimSuffix(raw, stderr)
+	note := ""
+	if ce.StderrDropped > 0 {
+		note = "[stderr truncated, " + strconv.FormatInt(ce.StderrDropped, 10) + " earlier bytes dropped] "
+		trimmed, found := strings.CutSuffix(command, note)
+		if !found {
+			return "", false
+		}
+		command = trimmed
+	}
+
+	elisionN := utf8.RuneCountInString(cleanElision)
+	head := termsafe.SafeLine(command)
+	if utf8.RuneCountInString(head) > cleanDiagnosticHeadRunes {
+		head, _ = takeHead(escapedPieces(command), cleanDiagnosticHeadRunes-elisionN)
+		head += cleanElision
+	}
+	budget := cleanDiagnosticMaxRunes - utf8.RuneCountInString(head) - utf8.RuneCountInString(note)
+	tail := termsafe.SafeLine(stderr)
+	if utf8.RuneCountInString(tail) > budget {
+		tail, _ = takeTail(escapedPieces(stderr), budget-elisionN)
+		tail = cleanElision + tail
+	}
+	return head + note + tail, true
+}
+
 // cleanDiagnostic escapes raw for a clean row and, when the escaped text is
-// over cleanDiagnosticMaxRunes, keeps its first cleanDiagnosticHeadRunes and
-// last cleanDiagnosticTailRunes runes of OUTPUT around cleanElision. The
-// budget counts escaped runes, and the cut falls only between whole escapes.
-// exec's dropped-bytes marker, when present, is kept whole after the head.
+// over cleanDiagnosticMaxRunes, keeps up to cleanDiagnosticHeadRunes runes of
+// head and fills the rest of the cap with tail, around cleanElision. The
+// budget counts escaped output runes, elision included, and the cut falls
+// only between whole escapes. Nothing in raw is interpreted: a look-alike of
+// exec's dropped-bytes note is cut like any other text.
 func cleanDiagnostic(raw string) string {
 	escaped := termsafe.SafeLine(raw)
 	if utf8.RuneCountInString(escaped) <= cleanDiagnosticMaxRunes {
 		return escaped
 	}
-	before, marker, after := raw, "", raw
-	if loc := stderrDroppedMarker.FindStringIndex(raw); loc != nil {
-		before, marker, after = raw[:loc[0]], raw[loc[0]:loc[1]], raw[loc[1]:]
-	}
-	if marker == "" {
-		pieces := escapedPieces(raw)
-		head, headN := takeHead(pieces, cleanDiagnosticHeadRunes)
-		tail, _ := takeTail(pieces[headN:], cleanDiagnosticTailRunes)
-		return head + cleanElision + tail
-	}
-	headPieces := escapedPieces(before)
-	head, headN := takeHead(headPieces, cleanDiagnosticHeadRunes)
-	if headN < len(headPieces) {
-		head += cleanElision
-	}
-	tailPieces := escapedPieces(after)
-	tail, tailN := takeTail(tailPieces, cleanDiagnosticTailRunes)
-	if tailN < len(tailPieces) {
-		tail = cleanElision + tail
-	}
-	return head + marker + tail
+	pieces := escapedPieces(raw)
+	head, headN := takeHead(pieces, cleanDiagnosticHeadRunes)
+	budget := cleanDiagnosticMaxRunes - utf8.RuneCountInString(head) - utf8.RuneCountInString(cleanElision)
+	tail, _ := takeTail(pieces[headN:], budget)
+	return head + cleanElision + tail
 }
 
 // escapedPieces is s split into one SafeLine rendering per rune, so a cut

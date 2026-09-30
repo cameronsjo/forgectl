@@ -1045,3 +1045,92 @@ func TestCleanDiagnostic_NeverSplitsAnEscape(t *testing.T) {
 		}
 	}
 }
+
+// TestCleanDiagnostic_LookAlikeDroppedNoteStaysCapped is the forgectl#867
+// delta-review catch: exec's dropped-bytes note is rebuilt from
+// CommandError.StderrDropped, never found by searching the text. A
+// look-alike note with 20,000 digits, planted in stderr or in a remote
+// daemon's skip reason, is cut like any other text, so the rendering stays
+// at or under the cap.
+//
+// Mutation that turns it red: search the raw text for the note with an
+// unanchored `\[stderr truncated, [0-9]+ earlier bytes dropped\]` regex and
+// print the match whole outside the budget (the pre-fix cleanDiagnostic).
+func TestCleanDiagnostic_LookAlikeDroppedNoteStaysCapped(t *testing.T) {
+	fake := "[stderr truncated, " + strings.Repeat("9", 20000) + " earlier bytes dropped] Error: fatal"
+	for name, got := range map[string]string{
+		"skip reason": cleanDiagnostic("docker unreachable: " + fake),
+		"plain error": cleanFailureText(errors.New("daemon said " + fake)),
+		"command error": cleanFailureText(&exec.CommandError{
+			Name: "docker", Args: []string{"image", "prune", "-f"},
+			Stderr: fake, ExitCode: 1, Err: errors.New("exit status 1"),
+		}),
+		"command error with a real drop": cleanFailureText(&exec.CommandError{
+			Name: "docker", Args: []string{"image", "prune", "-f"},
+			Stderr: fake, StderrDropped: 7, ExitCode: 1, Err: errors.New("exit status 1"),
+		}),
+	} {
+		if n := utf8.RuneCountInString(got); n > cleanDiagnosticMaxRunes {
+			t.Errorf("%s: rendering is %d runes, over the %d-rune cap: %.120q", name, n, cleanDiagnosticMaxRunes, got)
+		}
+		if !strings.HasSuffix(got, "Error: fatal") {
+			t.Errorf("%s: lost the last words: ...%q", name, got[max(0, len(got)-40):])
+		}
+	}
+}
+
+// TestCleanDiagnostic_JustOverTheCapStaysUnderIt pins that the elision counts
+// against the cap: text one rune over it must not come out longer than it
+// went in. Each shape is checked at 513 runes and at a size where a cut is
+// certain.
+//
+// Mutation that turns it red: leave cleanElision out of the tail budget in
+// cleanDiagnostic.
+func TestCleanDiagnostic_JustOverTheCapStaysUnderIt(t *testing.T) {
+	for _, size := range []int{cleanDiagnosticMaxRunes + 1, 4 * cleanDiagnosticMaxRunes} {
+		text := strings.Repeat("a", size)
+		for name, got := range map[string]string{
+			"skip reason":   cleanDiagnostic(text),
+			"plain error":   cleanFailureText(errors.New(text)),
+			"command error": cleanFailureText(&exec.CommandError{Name: "npm", Stderr: text, StderrDropped: 12, ExitCode: 1, Err: errors.New("exit status 1")}),
+		} {
+			if n := utf8.RuneCountInString(got); n > cleanDiagnosticMaxRunes {
+				t.Errorf("%s at %d runes: rendering is %d runes, over the %d-rune cap", name, size, n, cleanDiagnosticMaxRunes)
+			}
+			if !strings.Contains(got, cleanElision) {
+				t.Errorf("%s at %d runes: rendering was not cut: %.80q", name, size, got)
+			}
+		}
+	}
+}
+
+// TestCleanFailureText_LongCommandKeepsTheDroppedNote pins the struct-driven
+// cut: a command line longer than the head budget is cut on its own, and
+// exec's dropped-bytes note (rebuilt from StderrDropped) still follows it
+// whole, ahead of the stderr tail. A plain text cut would spend the whole
+// head on the command and lose the note.
+//
+// Mutation that turns it red: have cleanCommandFailure always report
+// ok=false, so every CommandError takes the plain cut.
+func TestCleanFailureText_LongCommandKeepsTheDroppedNote(t *testing.T) {
+	got := cleanFailureText(&exec.CommandError{
+		Name:          "npm",
+		Args:          []string{"cache", "clean", "--cache", "/" + strings.Repeat("p", 300)},
+		Stderr:        strings.Repeat("npm warn noise\n", 80) + "Error: fatal",
+		StderrDropped: 99,
+		ExitCode:      1,
+		Err:           errors.New("exit status 1"),
+	})
+	if !strings.HasPrefix(got, "npm cache clean --cache /ppp") {
+		t.Errorf("rendering lost the command head: %.80q", got)
+	}
+	if !strings.Contains(got, cleanElision+"[stderr truncated, 99 earlier bytes dropped] ") {
+		t.Errorf("rendering lost the dropped-bytes note after the cut command: %.300q", got)
+	}
+	if !strings.HasSuffix(got, "Error: fatal") {
+		t.Errorf("rendering lost the last words: ...%q", got[max(0, len(got)-40):])
+	}
+	if n := utf8.RuneCountInString(got); n > cleanDiagnosticMaxRunes {
+		t.Errorf("rendering is %d runes, over the %d-rune cap", n, cleanDiagnosticMaxRunes)
+	}
+}
