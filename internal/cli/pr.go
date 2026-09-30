@@ -436,12 +436,12 @@ func newPrListCmd(client *pr.Client) *cobra.Command {
 
   REF   CREATED   PATH   WINDOW   PHASE   REASON
 
-WINDOW is what tmux reports RIGHT NOW — live, window gone, or ? when tmux
-could not be read at all. PHASE is what the record SAYS about how far the
-session got. The two are separate on purpose: a record reading 'launching'
-beside 'no window' is a session that died between the two, and
-'forgectl pr repair' is what settles that disagreement. PHASE is '-' on a
-record written before phases existed.
+WINDOW is what tmux reports RIGHT NOW — live, window gone, no tmux server
+when no server is running, or ? when tmux could not be read at all. PHASE
+is what the record SAYS about how far the session got. The two are separate
+on purpose: a record reading 'launching' beside 'no window' is a session that
+died between the two, and 'forgectl pr repair' is what settles that
+disagreement. PHASE is '-' on a record written before phases existed.
 
 Fields are append-only: PATH is field 3 and stays there, because it is the
 operand 'forgectl pr teardown' takes.

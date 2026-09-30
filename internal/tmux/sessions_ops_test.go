@@ -201,11 +201,13 @@ func TestSessionVerbs_ReadTheGuardsAnswer(t *testing.T) {
 // that reads as target syntax must not be "helpfully" rewritten.
 func TestRenameSession_NewNameIsAnOperand(t *testing.T) {
 	fake, c, identity := opsFixture(t, false)
-	const newName = "=fresh:"
+	// No trailing ':' since forgectl#815: RenameSession refuses one, because
+	// tmux would store it as '_'.
+	const newName = "=fresh"
 	if err := c.RenameSession(context.Background(), identity, newName); err != nil {
 		t.Fatalf("RenameSession: %v", err)
 	}
-	argsEqual(t, fake.Last().Args, guardedArgv("$1", "rename-session -t '$1' -- '=fresh:'"))
+	argsEqual(t, fake.Last().Args, guardedArgv("$1", "rename-session -t '$1' -- '=fresh'"))
 }
 
 // TestRenameSession_QuotesTheNewNameForTheGuard pins quoteCommandOperand. The
@@ -221,7 +223,9 @@ func TestRenameSession_QuotesTheNewNameForTheGuard(t *testing.T) {
 		"'; kill-server; '": `rename-session -t '$1' -- ''\''; kill-server; '\'''`,
 		// The '#' is doubled by escapeFormat (forgectl#806): rename-session
 		// format-expands its new name even inside the quotes.
-		"$HOME ~ #{pid}": `rename-session -t '$1' -- '$HOME ~ ##{pid}'`,
+		// "$9", not "$HOME": since forgectl#815 a '$' before a letter is
+		// refused, because tmux stores it with a backslash added.
+		"$9 ~ #{pid}": `rename-session -t '$1' -- '$9 ~ ##{pid}'`,
 	} {
 		t.Run(newName, func(t *testing.T) {
 			fake, c, identity := opsFixture(t, false)

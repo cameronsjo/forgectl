@@ -126,6 +126,32 @@ func splitLines(out string) []string {
 	return strings.Split(out, "\n")
 }
 
+// readableRows is the counting row parser every listing shares
+// (forgectl#806, forgectl#815). It splits each line into fields and keeps the
+// rows with EXACTLY want fields that valid accepts — exact for the reason
+// parseWindows gives. Every non-empty line it drops is counted, because a
+// dropped row is a real object (a name carrying FieldSep, most likely) that a
+// listing shown to an operator should admit to rather than silently omit.
+// Blank lines are not rows and are never counted.
+func readableRows(lines []string, want int, valid func(f []string) bool) (rows [][]string, unreadable int) {
+	rows = make([][]string, 0, len(lines))
+	for _, line := range lines {
+		f := splitFields(line)
+		if len(f) != want {
+			if line != "" {
+				unreadable++
+			}
+			continue
+		}
+		if !valid(f) {
+			unreadable++
+			continue
+		}
+		rows = append(rows, f)
+	}
+	return rows, unreadable
+}
+
 // splitFields is the package-internal spelling of SplitFields.
 func splitFields(line string) []string {
 	return SplitFields(line)

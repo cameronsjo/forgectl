@@ -97,6 +97,5 @@ func newTmuxLsCmd(client *tmux.Client) *cobra.Command {
 // unreadableSessionsNote is what `tmux ls` prints on stderr when tmux listed
 // sessions whose rows could not be read (forgectl#806).
 func unreadableSessionsNote(n int) string {
-	return fmt.Sprintf("%d session(s) could not be read and are not listed — a name carrying the 0x1F field separator hides its row; "+
-		"rename or kill it with tmux itself", n)
+	return tmux.UnreadableRows{Sessions: n}.Note()
 }

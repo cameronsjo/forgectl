@@ -33,9 +33,14 @@ func TestCreateSessionArgvAndIdentity(t *testing.T) {
 	// A name that is entirely tmux target syntax proves it is passed through as
 	// an operand: if anything ran it through a target builder, this argv would
 	// not survive.
+	//
+	// The ':' is mapped to the '_' tmux stores (forgectl#815), so the argv and
+	// the identity carry "=forge_" — still target syntax a builder would
+	// have rewritten.
 	const hostile = "=forge:"
+	const stored = "=forge_"
 	fake := &internalexec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
-		argsEqual(t, args, createArgs(hostile, "/repo"))
+		argsEqual(t, args, createArgs(stored, "/repo"))
 		return identityOut("123", "456", "$4"), nil
 	}}
 	c := New(fake)
@@ -44,8 +49,8 @@ func TestCreateSessionArgvAndIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if got.ID != "$4" || got.Name != hostile {
-		t.Fatalf("identity = %+v, want $4 named %q", got, hostile)
+	if got.ID != "$4" || got.Name != stored {
+		t.Fatalf("identity = %+v, want $4 named %q", got, stored)
 	}
 	if got.Generation.PID != "123" || got.Generation.StartTime != "456" {
 		t.Fatalf("generation = %+v, want 123/456 captured from the create itself", got.Generation)

@@ -214,8 +214,13 @@ func (c *Client) prHost(ref Ref) (string, exec.Runner, error) {
 }
 
 // WithTmuxSession overrides the tmux session review windows are created under.
+//
+// The name is stored as tmux stores it (tmux.StoredSessionName): tmux lists a
+// session created as "x.y" as "x_y", and every comparison below is against a
+// listed name, so a raw "x.y" would never match its own session's windows
+// (forgectl#815).
 func WithTmuxSession(name string) Option {
-	return func(c *Client) { c.tmuxSession = name }
+	return func(c *Client) { c.tmuxSession = tmux.StoredSessionName(name) }
 }
 
 // WithTmuxClient supplies the tmux boundary used by every pr operation. It is
