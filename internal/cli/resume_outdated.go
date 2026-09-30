@@ -11,6 +11,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/resume"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // installedVersionFn is the seam for resolving the installed harness version,
@@ -39,7 +40,8 @@ older than the installed claude. It is read-only: it signals no process, writes
 to no pane, and modifies no registry file.
 
 The installed version is the basename of the claude binary's symlink target
-(~/.local/bin/claude -> versions/<X>), falling back to ` + "`claude --version`" + `. The
+when it points into a versions directory (~/.local/bin/claude ->
+versions/<X>); any other layout runs ` + "`claude --version`" + `. The
 binary is found the way ` + "`forgectl launch`" + ` finds it, so FORGECTL_CLAUDE_BIN and
 [launch.defaults] binary_path are respected. Versions compare numerically per
 segment (2.1.100 is newer than 2.1.99).
@@ -53,7 +55,8 @@ listed and marked, since nothing proves it current.
   session_id           session uuid
   pid                  process id
   cwd                  working directory
-  status               registry status, verbatim (busy | idle | shell | ...)
+  status               registry status, verbatim (idle | busy | waiting |
+                       shell | ...)
   busy                 bool; true for every status except "idle", so an
                        unknown status counts as busy
   version              the session's version, verbatim
@@ -63,12 +66,14 @@ listed and marked, since nothing proves it current.
 
 The pane is what the process's environment CLAIMS, not a verified pane: a
 claude launched from inside another session inherits its parent's id, so two
-processes can name the same pane. It is read from the process environment (ps eww on macOS,
-/proc/<pid>/environ on Linux), same-user only; failing to read it leaves it
-empty and never fails the command.
+processes can name the same pane. It is read in-process from the process's
+environment (the kern.procargs2 sysctl on macOS, /proc/<pid>/environ on
+Linux), same-user only; failing to read it leaves it empty and never fails the
+command.
 
-Exit 0 whether or not anything is outdated; non-zero only when the installed
-version or the session registry cannot be read.`,
+Exit 0 whether or not anything is outdated, and non-zero only when the
+installed version cannot be determined. A missing or unreadable session
+registry lists as empty.`,
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -85,7 +90,7 @@ version or the session registry cannot be read.`,
 			if err != nil {
 				return err
 			}
-			list, err := resume.Outdated(paths, installed, resume.PaneFor(ctx, deps.Runner))
+			list, err := resume.Outdated(paths, installed, resume.PaneFor())
 			if err != nil {
 				return err
 			}
@@ -112,7 +117,8 @@ type outdatedDTO struct {
 
 // printOutdated renders the list. Every string is registry-derived and
 // untrusted (another process wrote it): the JSON path leaves escaping to
-// writeJSON's encoder, the table path quotes through safeTerm.
+// writeJSON's encoder, and each table cell is escaped exactly once — safeTerm,
+// or termsafe.QuoteText for the quoted unparseable version.
 func printOutdated(out io.Writer, list []resume.OutdatedSession, asJSON, tty bool) error {
 	if asJSON {
 		dto := make([]outdatedDTO, 0, len(list))
@@ -140,7 +146,7 @@ func printOutdated(out io.Writer, list []resume.OutdatedSession, asJSON, tty boo
 	for _, s := range list {
 		version := safeTerm(s.Version)
 		if s.VersionUnparseable {
-			version = fmt.Sprintf("%q (unparseable)", version)
+			version = termsafe.QuoteText(s.Version) + " (unparseable)"
 		}
 		pane := safeTerm(s.Pane)
 		if pane == "" {

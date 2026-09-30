@@ -145,7 +145,7 @@ forgectl resume ls                 # list without acting (the only subcommand th
 forgectl resume ls --json          # machine-readable JSON (safe to pipe; counts go to stderr; see `resume ls --help` for the field table)
 forgectl resume snapshot           # capture what a live session's exit would destroy
 forgectl resume snapshot --quiet   # same, silent — the form a Stop hook uses
-forgectl resume outdated         # list live sessions running an older claude than the one installed (read-only)
+forgectl resume outdated           # list live sessions running an older claude than the one installed (read-only)
 forgectl resume outdated --json    # stable JSON array for scripts; see `resume outdated --help` for the field table
 
 # surface — start a harness inside a terminal manager without exposing its invocation

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -98,18 +99,41 @@ func TestPrintOutdated_TableAndTTYMessage(t *testing.T) {
 		t.Fatalf("tty empty = %q, %v", buf.String(), err)
 	}
 	buf.Reset()
-	list := []resume.OutdatedSession{{
-		SessionID: "s1", Cwd: "/w/\x1b[31mred", Status: "busy",
-		Version: "2.1.9", InstalledVersion: "2.1.10", Pane: "",
-	}}
+	list := []resume.OutdatedSession{
+		{
+			SessionID: "s1", Cwd: "/w/\x1b[31mred", Status: "busy",
+			Version: "2.1.9", InstalledVersion: "2.1.10", Pane: "",
+		},
+		{
+			SessionID: "s2", Cwd: "/w", Status: "idle",
+			Version: "2.1\tx", InstalledVersion: "2.1.10", Pane: "w7H:p6", VersionUnparseable: true,
+		},
+	}
 	if err := printOutdated(&buf, list, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(buf.String(), "\x1b") {
 		t.Errorf("raw escape reached the terminal: %q", buf.String())
 	}
-	if !strings.Contains(buf.String(), "2.1.9") || !strings.Contains(buf.String(), "2.1.10") {
-		t.Errorf("table missing versions: %q", buf.String())
+	rows := map[string][]string{}
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		f := regexp.MustCompile(`\s{2,}`).Split(strings.TrimSpace(line), -1)
+		rows[f[0]] = f
+	}
+	for id, want := range map[string][]string{
+		"SESSION": {"SESSION", "STATUS", "VERSION", "INSTALLED", "HERDR_PANE_ID", "CWD"},
+		"s1":      {"s1", "busy", "2.1.9", "2.1.10", "-"},
+		"s2":      {"s2", "idle", `"2.1\tx" (unparseable)`, "2.1.10", "w7H:p6", "/w"},
+	} {
+		got := rows[id]
+		if len(got) < len(want) {
+			t.Fatalf("row %s = %q, want prefix %q", id, got, want)
+		}
+		for i, w := range want {
+			if got[i] != w {
+				t.Errorf("row %s column %d = %q, want %q (row %q)", id, i, got[i], w, got)
+			}
+		}
 	}
 }
 

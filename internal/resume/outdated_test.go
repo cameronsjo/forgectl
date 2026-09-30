@@ -2,7 +2,9 @@ package resume
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -61,7 +63,6 @@ func liveEntry(id string, pid int, version, status string) RegistryEntry {
 }
 
 func TestFindOutdated_ListsOnlyOlderLiveSessions(t *testing.T) {
-	installed, _ := ParseVersion("2.1.100")
 	dead := liveEntry("dead", 4, "2.1.1", "idle")
 	dead.Live = false
 	entries := []RegistryEntry{
@@ -73,7 +74,10 @@ func TestFindOutdated_ListsOnlyOlderLiveSessions(t *testing.T) {
 		liveEntry("e-junk", 6, "garbage", "idle"),
 	}
 	panes := map[int]string{1: "w1-2"}
-	got := FindOutdated(entries, installed, "2.1.100", func(pid int) string { return panes[pid] })
+	got, err := FindOutdated(entries, "2.1.100", func(pid int) string { return panes[pid] })
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var ids []string
 	for _, o := range got {
@@ -125,21 +129,39 @@ func TestOutdated_RefusesUnparseableInstalled(t *testing.T) {
 	}
 }
 
-func pinSymlink(t *testing.T, target string, err error) {
-	t.Helper()
-	prev := evalSymlinks
-	evalSymlinks = func(string) (string, error) { return target, err }
-	t.Cleanup(func() { evalSymlinks = prev })
-}
-
 func versionRunner(out string, err error) *exec.FakeRunner {
 	return &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return out, err }}
 }
 
-func TestInstalledVersion_PrefersSymlinkTarget(t *testing.T) {
-	pinSymlink(t, "/home/u/.local/share/claude/versions/2.1.285", nil)
+// installLayout builds a real directory tree: files named by each key, and
+// bin/claude as a symlink to link (relative to root) when link is non-empty.
+func installLayout(t *testing.T, files []string, link string) string {
+	t.Helper()
+	root := t.TempDir()
+	for _, f := range files {
+		path := filepath.Join(root, f)
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if link != "" {
+		if err := os.MkdirAll(filepath.Join(root, "bin"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(root, link), filepath.Join(root, "bin", "claude")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+func TestInstalledVersion_PrefersVersionsSymlink(t *testing.T) {
+	root := installLayout(t, []string{"share/claude/versions/2.1.285"}, "share/claude/versions/2.1.285")
 	run := versionRunner("9.9.9 (Claude Code)", nil)
-	got, err := InstalledVersion(context.Background(), "/bin/claude", run)
+	got, err := InstalledVersion(context.Background(), filepath.Join(root, "bin", "claude"), run)
 	if err != nil || got != "2.1.285" {
 		t.Fatalf("got %q, %v; want 2.1.285", got, err)
 	}
@@ -150,18 +172,21 @@ func TestInstalledVersion_PrefersSymlinkTarget(t *testing.T) {
 
 func TestInstalledVersion_FallsBackToVersionFlag(t *testing.T) {
 	for name, tc := range map[string]struct {
-		target string
-		err    error
+		files []string
+		link  string
+		bin   string // relative to root
 	}{
-		"target is not a version":  {"/opt/claude/bin/claude", nil},
-		"symlink resolution fails": {"", errors.New("no such file")},
+		"plain file named like a version": {files: []string{"opt/2.1"}, bin: "opt/2.1"},
+		"symlink outside a versions dir":  {files: []string{"opt/2.1.290"}, link: "opt/2.1.290", bin: "bin/claude"},
+		"pre-release version dir entry":   {files: []string{"versions/2.1.286-beta"}, link: "versions/2.1.286-beta", bin: "bin/claude"},
+		"binary does not exist":           {bin: "nowhere/claude"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			pinSymlink(t, tc.target, tc.err)
+			root := installLayout(t, tc.files, tc.link)
 			run := versionRunner("2.1.285 (Claude Code)\n", nil)
-			got, err := InstalledVersion(context.Background(), "/bin/claude", run)
+			got, err := InstalledVersion(context.Background(), filepath.Join(root, tc.bin), run)
 			if err != nil || got != "2.1.285" {
-				t.Fatalf("got %q, %v; want 2.1.285", got, err)
+				t.Fatalf("got %q, %v; want 2.1.285 from --version", got, err)
 			}
 			if len(run.Calls) != 1 || run.Calls[0].Args[0] != "--version" {
 				t.Errorf("calls = %+v, want one --version", run.Calls)
@@ -171,63 +196,123 @@ func TestInstalledVersion_FallsBackToVersionFlag(t *testing.T) {
 }
 
 func TestInstalledVersion_ErrorNamesEverythingTried(t *testing.T) {
-	pinSymlink(t, "/opt/claude/bin/claude", nil)
-	_, err := InstalledVersion(context.Background(), "/bin/claude", versionRunner("", errors.New("boom")))
-	if err == nil || !strings.Contains(err.Error(), "symlink target") || !strings.Contains(err.Error(), "--version") {
+	root := installLayout(t, []string{"opt/claude"}, "")
+	bin := filepath.Join(root, "opt", "claude")
+	_, err := InstalledVersion(context.Background(), bin, versionRunner("", errors.New("boom")))
+	if err == nil || !strings.Contains(err.Error(), "not a symlink") || !strings.Contains(err.Error(), "--version") {
 		t.Fatalf("error should name both attempts, got %v", err)
 	}
-	_, err = InstalledVersion(context.Background(), "/bin/claude", versionRunner("garbage output", nil))
+	_, err = InstalledVersion(context.Background(), bin, versionRunner("garbage output", nil))
 	if err == nil || !strings.Contains(err.Error(), "garbage output") {
 		t.Fatalf("error should quote the unusable output, got %v", err)
 	}
 }
 
-func TestPaneFor(t *testing.T) {
-	ctx := context.Background()
-	prevOS, prevEnv := hostOS, procEnviron
-	t.Cleanup(func() { hostOS, procEnviron = prevOS, prevEnv })
+func pinEnv(t *testing.T, env []string, err error) {
+	t.Helper()
+	prev := processEnv
+	processEnv = func(int) ([]string, error) { return env, err }
+	t.Cleanup(func() { processEnv = prev })
+}
 
-	t.Run("darwin reads ps eww", func(t *testing.T) {
-		hostOS = "darwin"
-		run := versionRunner("claude --resume HOME=/Users/u HERDR_PANE_ID=w2-3 TERM=xterm", nil)
-		if got := PaneFor(ctx, run)(42); got != "w2-3" {
+func TestPaneFor(t *testing.T) {
+	t.Run("reads the environment entry", func(t *testing.T) {
+		pinEnv(t, []string{"A=1", "HERDR_PANE_ID=p_7", "B=2"}, nil)
+		if got := PaneFor()(42); got != "p_7" {
 			t.Errorf("pane = %q", got)
 		}
-		if c := run.Calls[0]; c.Name != "ps" || strings.Join(c.Args, " ") != "eww -o command= -p 42" {
-			t.Errorf("call = %+v", c)
+	})
+	t.Run("first entry wins, as getenv", func(t *testing.T) {
+		pinEnv(t, []string{"HERDR_PANE_ID=w1:p2", "HERDR_PANE_ID=w9:p9"}, nil)
+		if got := PaneFor()(42); got != "w1:p2" {
+			t.Errorf("pane = %q", got)
 		}
 	})
-	t.Run("darwin ps failure leaves the pane empty", func(t *testing.T) {
-		hostOS = "darwin"
-		if got := PaneFor(ctx, versionRunner("", errors.New("ps: denied")))(42); got != "" {
+	t.Run("read failure leaves the pane empty", func(t *testing.T) {
+		pinEnv(t, nil, errors.New("permission denied"))
+		if got := PaneFor()(42); got != "" {
 			t.Errorf("pane = %q, want empty", got)
 		}
 	})
 	t.Run("missing pane id is empty", func(t *testing.T) {
-		hostOS = "darwin"
-		if got := PaneFor(ctx, versionRunner("claude HOME=/x", nil))(42); got != "" {
-			t.Errorf("pane = %q, want empty", got)
-		}
-	})
-	t.Run("linux reads /proc environ", func(t *testing.T) {
-		hostOS = "linux"
-		procEnviron = func(int) ([]byte, error) { return []byte("A=1\x00HERDR_PANE_ID=p_7\x00B=2\x00"), nil }
-		if got := PaneFor(ctx, &exec.FakeRunner{})(42); got != "p_7" {
-			t.Errorf("pane = %q", got)
-		}
-	})
-	t.Run("linux read failure leaves the pane empty", func(t *testing.T) {
-		hostOS = "linux"
-		procEnviron = func(int) ([]byte, error) { return nil, errors.New("permission denied") }
-		if got := PaneFor(ctx, &exec.FakeRunner{})(42); got != "" {
+		pinEnv(t, []string{"HOME=/x"}, nil)
+		if got := PaneFor()(42); got != "" {
 			t.Errorf("pane = %q, want empty", got)
 		}
 	})
 	t.Run("an id outside the safe alphabet is unknown", func(t *testing.T) {
-		hostOS = "linux"
-		procEnviron = func(int) ([]byte, error) { return []byte("HERDR_PANE_ID=\x1b]0;x\x07\x00"), nil }
-		if got := PaneFor(ctx, &exec.FakeRunner{})(42); got != "" {
+		pinEnv(t, []string{"HERDR_PANE_ID=\x1b]0;x\x07"}, nil)
+		if got := PaneFor()(42); got != "" {
 			t.Errorf("pane = %q, want empty", got)
 		}
 	})
+	t.Run("a non-positive pid reads nothing", func(t *testing.T) {
+		pinEnv(t, []string{"HERDR_PANE_ID=p_7"}, nil)
+		if got := PaneFor()(0); got != "" {
+			t.Errorf("pane = %q, want empty", got)
+		}
+	})
+}
+
+// procArgs2 builds a KERN_PROCARGS2 buffer the way the kernel lays it out.
+func procArgs2(execPath string, argv, env []string) []byte {
+	var argc uint32
+	for range argv {
+		argc++
+	}
+	buf := binary.NativeEndian.AppendUint32(nil, argc)
+	buf = append(buf, execPath...)
+	buf = append(buf, 0, 0, 0, 0) // terminator plus alignment padding
+	for _, a := range argv {
+		buf = append(append(buf, a...), 0)
+	}
+	for _, e := range env {
+		buf = append(append(buf, e...), 0)
+	}
+	return append(buf, 0, 'j', 'u', 'n', 'k', 0) // trailing apple[] strings after an empty entry
+}
+
+func TestParseProcArgs2_KeepsArgvOutOfTheEnvironment(t *testing.T) {
+	buf := procArgs2("/usr/local/bin/claude",
+		[]string{"claude", "--append-system-prompt", "HERDR_PANE_ID=decoy"},
+		[]string{"HOME=/Users/u", "HERDR_PANE_ID=w7H:p6", "TERM=xterm"})
+	env, err := parseProcArgs2(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(env, ","); got != "HOME=/Users/u,HERDR_PANE_ID=w7H:p6,TERM=xterm" {
+		t.Fatalf("env = %q", got)
+	}
+	if got := paneFromEnv(env); got != "w7H:p6" {
+		t.Errorf("pane = %q, want the environment's value, not the argv decoy", got)
+	}
+}
+
+func TestParseProcArgs2_RefusesMalformedBuffers(t *testing.T) {
+	good := procArgs2("/bin/claude", []string{"claude", "x"}, []string{"A=1"})
+	for name, buf := range map[string][]byte{
+		"empty":                  nil,
+		"argc only":              good[:4],
+		"unterminated path":      []byte{1, 0, 0, 0, '/', 'b'},
+		"argv shorter than argc": append(binary.NativeEndian.AppendUint32(nil, 5), "/bin/c\x00\x00a\x00"...),
+	} {
+		if env, err := parseProcArgs2(buf); err == nil {
+			t.Errorf("%s: env = %q, want an error", name, env)
+		}
+	}
+}
+
+// TestReadProcessEnv_ReadsThisProcess exercises the real platform reader
+// (sysctl on macOS, /proc elsewhere) against the test binary itself.
+func TestReadProcessEnv_ReadsThisProcess(t *testing.T) {
+	env, err := readProcessEnv(os.Getpid())
+	if err != nil {
+		t.Skipf("platform cannot read process environments here: %v", err)
+	}
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			return
+		}
+	}
+	t.Fatalf("no PATH= entry among %d environment entries", len(env))
 }

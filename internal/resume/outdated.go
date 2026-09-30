@@ -1,12 +1,13 @@
 package resume
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,9 +67,10 @@ func (v Version) Compare(o Version) int {
 }
 
 // IsBusy reports whether a restart could destroy in-flight work. Only "idle"
-// is known safe: "busy", "waiting" (a permission prompt is open), and "shell" (a shell
-// command is running) are busy, and so is any status Claude Code adds later — the safe reading of a value this
-// code has never seen is that work is happening.
+// is known safe. "busy" covers a model turn and a running `!` command,
+// "waiting" an open permission prompt, and "shell" a background shell that
+// outlived its turn (a stop kills it). Any status Claude Code adds later is
+// busy too: the safe reading of an unknown value is that work is happening.
 func IsBusy(status string) bool { return status != "idle" }
 
 // OutdatedSession is one live session running an older harness than the one
@@ -96,7 +98,11 @@ type PaneLookup func(pid int) string
 // FindOutdated filters live registry entries to those older than installed,
 // sorted by session id. An entry whose version does not parse is included with
 // VersionUnparseable set. lookup may be nil.
-func FindOutdated(entries []RegistryEntry, installed Version, installedText string, lookup PaneLookup) []OutdatedSession {
+func FindOutdated(entries []RegistryEntry, installed string, lookup PaneLookup) ([]OutdatedSession, error) {
+	iv, err := ParseVersion(installed)
+	if err != nil {
+		return nil, fmt.Errorf("installed version: %w", err)
+	}
 	var out []OutdatedSession
 	for _, e := range entries {
 		if !e.Live {
@@ -105,13 +111,13 @@ func FindOutdated(entries []RegistryEntry, installed Version, installedText stri
 		unparseable := false
 		if v, err := ParseVersion(e.Version); err != nil {
 			unparseable = true
-		} else if v.Compare(installed) >= 0 {
+		} else if v.Compare(iv) >= 0 {
 			continue
 		}
 		o := OutdatedSession{
 			SessionID: e.SessionID, Pid: e.Pid, Cwd: e.Cwd,
 			Status: e.Status, Busy: IsBusy(e.Status),
-			Version: e.Version, InstalledVersion: installedText,
+			Version: e.Version, InstalledVersion: installed,
 			VersionUnparseable: unparseable,
 		}
 		if lookup != nil {
@@ -120,41 +126,27 @@ func FindOutdated(entries []RegistryEntry, installed Version, installedText stri
 		out = append(out, o)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].SessionID < out[j].SessionID })
-	return out
+	return out, nil
 }
 
 // Outdated lists the live sessions behind installed.
 func Outdated(p Paths, installed string, lookup PaneLookup) ([]OutdatedSession, error) {
-	v, err := ParseVersion(installed)
-	if err != nil {
-		return nil, fmt.Errorf("installed version: %w", err)
-	}
-	return FindOutdated(LiveEntries(p), v, installed, lookup), nil
+	return FindOutdated(LiveEntries(p), installed, lookup)
 }
-
-// evalSymlinks is the symlink seam for InstalledVersion.
-var evalSymlinks = filepath.EvalSymlinks
 
 // InstalledVersion resolves the installed harness version from binPath.
 //
-// The symlink target's basename is preferred — ~/.local/bin/claude points at
-// versions/<X>, and reading a link spawns nothing. `<bin> --version` is the
-// fallback, for a binary that is not a symlink into a versions directory. The
-// two can disagree mid-update; the link wins because it names what the next
-// launch will run. When neither yields a parseable version the error names
-// both attempts.
+// When binPath is a symlink into a directory named "versions" — the native
+// installer's ~/.local/bin/claude -> ~/.local/share/claude/versions/<X> — the
+// target's basename is the version, and reading a link spawns nothing. Any
+// other layout runs `<bin> --version`: a plain file's name is not evidence of
+// its version. The two can disagree mid-update; the link wins because it names
+// what the next launch will run. When neither yields a parseable version the
+// error names both attempts.
 func InstalledVersion(ctx context.Context, binPath string, run exec.Runner) (string, error) {
-	var linkErr error
-	target, err := evalSymlinks(binPath)
-	if err == nil {
-		name := filepath.Base(target)
-		_, perr := ParseVersion(name)
-		if perr == nil {
-			return name, nil
-		}
-		linkErr = fmt.Errorf("symlink target %q does not name a version: %w", target, perr)
-	} else {
-		linkErr = fmt.Errorf("resolve symlink: %w", err)
+	version, linkErr := versionFromLink(binPath)
+	if linkErr == nil {
+		return version, nil
 	}
 
 	out, err := run.Run(ctx, binPath, "--version")
@@ -171,6 +163,31 @@ func InstalledVersion(ctx context.Context, binPath string, run exec.Runner) (str
 	return "", fmt.Errorf("could not determine the installed version of %s: tried the symlink target (%v) and `--version`, whose output %q has no leading version", binPath, linkErr, truncateForError(out))
 }
 
+// versionFromLink returns the version named by binPath's symlink target when
+// that target is versions/<parseable version>, and otherwise an error saying
+// why not.
+func versionFromLink(binPath string) (string, error) {
+	fi, err := os.Lstat(binPath)
+	if err != nil {
+		return "", fmt.Errorf("stat: %w", err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		return "", errors.New("not a symlink")
+	}
+	target, err := filepath.EvalSymlinks(binPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve symlink: %w", err)
+	}
+	if filepath.Base(filepath.Dir(target)) != "versions" {
+		return "", fmt.Errorf("symlink target %q is not inside a versions directory", target)
+	}
+	name := filepath.Base(target)
+	if _, err := ParseVersion(name); err != nil {
+		return "", fmt.Errorf("symlink target %q does not name a version: %w", target, err)
+	}
+	return name, nil
+}
+
 func truncateForError(s string) string {
 	s = strings.TrimSpace(s)
 	if len(s) > 80 {
@@ -181,42 +198,32 @@ func truncateForError(s string) string {
 
 const paneEnvKey = "HERDR_PANE_ID"
 
-// procEnviron is the Linux environment seam: it reads /proc/<pid>/environ.
-var procEnviron = func(pid int) ([]byte, error) {
-	return os.ReadFile("/proc/" + strconv.Itoa(pid) + "/environ") // #nosec G304 -- fixed /proc path, pid is an int
-}
-
-// hostOS is the platform seam for PaneFor.
-var hostOS = runtime.GOOS
+// processEnv is the environment seam: it returns a process's environment as
+// KEY=VALUE entries. It is implemented per platform (outdated_env_*.go) and
+// reads in-process — sysctl on macOS, /proc elsewhere — so the environment,
+// which holds secrets, never passes through a subprocess's captured output.
+var processEnv = readProcessEnv
 
 // PaneFor returns a PaneLookup that reads HERDR_PANE_ID from a process's
-// environment: `ps eww` on macOS, /proc/<pid>/environ elsewhere. Both are
-// same-user only, so any failure — a foreign process, a vanished pid — yields
-// "" rather than an error. Only the one variable is extracted; the rest of the
-// environment (which holds secrets) is never kept or logged.
-func PaneFor(ctx context.Context, run exec.Runner) PaneLookup {
+// environment. Reading another process's environment is same-user only, so
+// any failure — a foreign process, a vanished pid — yields "" rather than an
+// error. Only the one variable is extracted; the rest is never kept or logged.
+func PaneFor() PaneLookup {
 	return func(pid int) string {
 		if pid <= 0 {
 			return ""
 		}
-		if hostOS == "darwin" {
-			out, err := run.Run(ctx, "ps", "eww", "-o", "command=", "-p", strconv.Itoa(pid))
-			if err != nil {
-				return ""
-			}
-			return paneFromPS(out)
-		}
-		data, err := procEnviron(pid)
+		env, err := processEnv(pid)
 		if err != nil {
 			return ""
 		}
-		return paneFromEnviron(data)
+		return paneFromEnv(env)
 	}
 }
 
-// paneFromEnviron extracts the pane id from NUL-separated KEY=VALUE pairs.
-func paneFromEnviron(data []byte) string {
-	for _, kv := range strings.Split(string(data), "\x00") {
+// paneFromEnv returns the first HERDR_PANE_ID entry's value, as getenv would.
+func paneFromEnv(env []string) string {
+	for _, kv := range env {
 		if v, ok := strings.CutPrefix(kv, paneEnvKey+"="); ok {
 			return validPane(v)
 		}
@@ -224,16 +231,48 @@ func paneFromEnviron(data []byte) string {
 	return ""
 }
 
-// paneFromPS extracts the pane id from `ps eww` output, where the command line
-// is followed by space-separated KEY=VALUE pairs. A pane id has no spaces, so
-// the value ends at the next whitespace.
-func paneFromPS(out string) string {
-	for _, tok := range strings.Fields(out) {
-		if v, ok := strings.CutPrefix(tok, paneEnvKey+"="); ok {
-			return validPane(v)
-		}
+// parseProcArgs2 extracts the environment from a KERN_PROCARGS2 buffer:
+// a native-endian int32 argc, the NUL-terminated exec path, NUL padding, argc
+// NUL-terminated arguments, then the NUL-terminated environment. Keeping argv
+// and the environment apart is the point — an argument that happens to read
+// "HERDR_PANE_ID=x" is not the process's environment.
+func parseProcArgs2(buf []byte) ([]string, error) {
+	if len(buf) < 4 {
+		return nil, errors.New("procargs2: buffer too short for argc")
 	}
-	return ""
+	n := binary.NativeEndian.Uint32(buf[:4])
+	// Every argument costs at least its NUL, so a larger argc is corrupt.
+	if int64(n) > int64(len(buf)) {
+		return nil, fmt.Errorf("procargs2: argc %d exceeds the %d-byte buffer", n, len(buf))
+	}
+	argc := int(n)
+	rest := buf[4:]
+	// Exec path, then its NUL padding.
+	i := bytes.IndexByte(rest, 0)
+	if i < 0 {
+		return nil, errors.New("procargs2: unterminated exec path")
+	}
+	rest = rest[i:]
+	for len(rest) > 0 && rest[0] == 0 {
+		rest = rest[1:]
+	}
+	for n := 0; n < argc; n++ {
+		i := bytes.IndexByte(rest, 0)
+		if i < 0 {
+			return nil, fmt.Errorf("procargs2: argument %d of %d is unterminated", n+1, argc)
+		}
+		rest = rest[i+1:]
+	}
+	var env []string
+	for len(rest) > 0 {
+		i := bytes.IndexByte(rest, 0)
+		if i <= 0 { // an empty string ends the environment
+			break
+		}
+		env = append(env, string(rest[:i]))
+		rest = rest[i+1:]
+	}
+	return env, nil
 }
 
 // validPane admits only a conservative id alphabet. The value comes from
