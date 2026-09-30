@@ -30,7 +30,7 @@ func pinDirRoot(path string, want fs.FileInfo) (*os.Root, error) {
 }
 
 // errNotADirectory is openChildDirRoot's refusal of a child that is not a
-// directory, a FIFO among them.
+// plain directory when it is opened: a FIFO, a file, or a symlink.
 var errNotADirectory = errors.New("not a directory")
 
 // openChildDirRoot is openDirRoot for name, a single component directly
@@ -38,32 +38,28 @@ var errNotADirectory = errors.New("not a directory")
 // open (forgectl#798). Root.OpenRoot, like os.OpenRoot, opens with neither
 // O_DIRECTORY nor O_NONBLOCK, so a FIFO swapped in for a store child blocks
 // it until a writer appears, and the findings cleanup preview opens store
-// children outside the lifecycle lock.
+// children outside the lifecycle lock. It returns the child's own stat
+// alongside it, so a caller comparing identities does not stat it again.
 //
-// The first open is openInRootNoFollowNonblock, an openat against parent's
-// own descriptor that cannot wait for a writer and does not follow a symlink
-// at name; its fstat must say directory. The second is parent.OpenRoot, kept
-// only if it is the very directory the probe reached (os.SameFile), so a
-// directory swapped in between is refused rather than pinned. As with
-// openDirRoot, a FIFO swapped in during that two-syscall window would still
-// block the second open; that needs a same-uid racer inside a store already
-// verified private.
-func openChildDirRoot(parent *os.Root, name string) (*os.Root, error) {
-	probe, err := openInRootNoFollowNonblock(parent, name)
+// The first step is probeChildDir, which refuses a non-directory without
+// waiting for a writer and refuses a symlink at name; how it does both is
+// per platform (dirroot_unix.go, dirroot_other.go). The second is
+// parent.OpenRoot, kept only if it is the very directory the probe reached
+// (os.SameFile), so a directory swapped in between is refused rather than
+// pinned. As with openDirRoot, a FIFO swapped in during that window would
+// still block the second open; that needs a same-uid racer inside a store
+// already verified private.
+func openChildDirRoot(parent *os.Root, name string) (*os.Root, fs.FileInfo, error) {
+	want, err := probeChildDir(parent, name)
 	if err != nil {
-		return nil, err
-	}
-	want, err := probe.Stat()
-	_ = probe.Close()
-	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !want.IsDir() {
-		return nil, &os.PathError{Op: "open", Path: name, Err: errNotADirectory}
+		return nil, nil, &os.PathError{Op: "open", Path: name, Err: errNotADirectory}
 	}
 	child, err := parent.OpenRoot(name)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	got, err := child.Stat(".")
 	if err == nil && !os.SameFile(want, got) {
@@ -71,7 +67,7 @@ func openChildDirRoot(parent *os.Root, name string) (*os.Root, error) {
 	}
 	if err != nil {
 		_ = child.Close()
-		return nil, err
+		return nil, nil, err
 	}
-	return child, nil
+	return child, got, nil
 }
