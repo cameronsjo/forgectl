@@ -154,11 +154,21 @@ func TestProbeStatFailureKeepsItsCause(t *testing.T) {
 	}
 }
 
-// TestProbeThroughTheRealStat drives the exported Probe, which is the only
-// code that passes os.Stat, against a real unix socket. macOS caps a socket
-// path near 104 bytes and t.TempDir() overflows it, so the socket lives under
-// a short os.MkdirTemp directory.
-func TestProbeThroughTheRealStat(t *testing.T) {
+// probe is the gate order a mutating caller follows: CheckSession, then
+// CheckFork. The CLI runs the two separately; the tests drive the pair
+// through a fake stat.
+func probe(ctx context.Context, r exec.Runner, lookupEnv func(string) (string, bool), stat func(string) (fs.FileInfo, error)) error {
+	if err := checkSession(lookupEnv, stat); err != nil {
+		return err
+	}
+	return CheckFork(ctx, r)
+}
+
+// TestCheckSessionThroughTheRealStat drives the exported CheckSession, the
+// only code that passes os.Stat, against a real unix socket. macOS caps a
+// socket path near 104 bytes and t.TempDir() overflows it, so the socket
+// lives under a short os.MkdirTemp directory.
+func TestCheckSessionThroughTheRealStat(t *testing.T) {
 	dir, err := os.MkdirTemp("", "hp")
 	if err != nil {
 		t.Fatal(err)
@@ -172,16 +182,16 @@ func TestProbeThroughTheRealStat(t *testing.T) {
 	t.Cleanup(func() { _ = l.Close() })
 
 	env := envOf(map[string]string{"HERDR_ENV": "1", "HERDR_SOCKET_PATH": sock})
-	if err := Probe(context.Background(), forkRunner(t), env); err != nil {
-		t.Fatalf("Probe with a real socket: %v", err)
+	if err := CheckSession(env); err != nil {
+		t.Fatalf("CheckSession with a real socket: %v", err)
 	}
 	notASocket := filepath.Join(dir, "plain")
 	if err := os.WriteFile(notASocket, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	env = envOf(map[string]string{"HERDR_ENV": "1", "HERDR_SOCKET_PATH": notASocket})
-	if err := Probe(context.Background(), forkRunner(t), env); !errors.Is(err, ErrNotInSession) {
-		t.Fatalf("Probe with a regular file: err = %v, want ErrNotInSession", err)
+	if err := CheckSession(env); !errors.Is(err, ErrNotInSession) {
+		t.Fatalf("CheckSession with a regular file: err = %v, want ErrNotInSession", err)
 	}
 }
 
