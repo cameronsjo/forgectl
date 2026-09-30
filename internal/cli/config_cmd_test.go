@@ -550,3 +550,44 @@ func TestConfig_NestedSectionRendered(t *testing.T) {
 		t.Error("review.gitea.host set = false, want true")
 	}
 }
+
+// HomeNote reflects a home-relative project match, not only defaults add_dir,
+// in both the text and --json renderings. The config is built in memory: on
+// macOS the config file lives under $HOME, so a test that unsets HOME cannot
+// also load a file.
+func TestConfig_HomeNoteWhenHomeIsUnresolved(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	if _, err := os.UserHomeDir(); err == nil {
+		t.Skip("this platform resolves a home without HOME")
+	}
+	cfg := config.Config{Launch: config.LaunchConfig{
+		Projects: []config.LaunchProject{{Match: "~/work"}},
+	}}
+	resolved := resolveLaunchView(cfg)
+	if resolved.HomeNote == "" {
+		t.Fatal("HomeNote is empty for a ~ project match with no home")
+	}
+
+	var txt bytes.Buffer
+	renderConfigText(&txt, nil, config.Report{}, hostResolvedView{}, resolved)
+	if !strings.Contains(txt.String(), "launch.home") || !strings.Contains(txt.String(), "unresolved") {
+		t.Errorf("text output missing the home note:\n%s", txt.String())
+	}
+
+	var js bytes.Buffer
+	if err := emitConfigJSON(&js, nil, config.Report{}, hostResolvedView{}, resolved); err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		LaunchResolved struct {
+			HomeNote string `json:"home_note"`
+		} `json:"launch_resolved"`
+	}
+	if err := json.Unmarshal(js.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.LaunchResolved.HomeNote == "" {
+		t.Errorf("--json launch_resolved.home_note is empty:\n%s", js.String())
+	}
+}

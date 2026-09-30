@@ -81,6 +81,13 @@ type Watcher struct {
 	debounce time.Duration
 	maxWait  time.Duration
 
+	// createArmsSettle turns on the forgectl#895 workaround in Run: any
+	// in-tree Create that is not stray arms a settle. NewWatcher sets it
+	// from kqueueListing, since only kqueue's directory listing can hide a
+	// new doc behind an unopenable entry (forgectl#936). It is a field so
+	// tests elsewhere can exercise the workaround; set it before Run starts.
+	createArmsSettle bool
+
 	// resetPending records that a watch was added through a path that
 	// stopped naming its directory, or that a watched directory moved.
 	// fsnotify's bookkeeping for such a watch cannot be trusted, and a moved
@@ -116,7 +123,7 @@ func NewWatcher(store *Store, broker *Broker) (*Watcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	w := &Watcher{fsw: fsw, store: store, broker: broker, debounce: DefaultDebounce, maxWait: DefaultMaxWait}
+	w := &Watcher{fsw: fsw, store: store, broker: broker, debounce: DefaultDebounce, maxWait: DefaultMaxWait, createArmsSettle: kqueueListing}
 	w.register(store.Current())
 	return w, nil
 }
@@ -454,7 +461,7 @@ func (w *Watcher) Run(ctx context.Context) {
 			// Decided before refreshWatch, which may change the watch set
 			// but never the filesystem the event came through.
 			stray := w.strayEvent(ev.Name)
-			w.refreshWatch(ev)
+			createdDir := w.refreshWatch(ev)
 			// A Rename of a watched directory rebuilds the watches: the
 			// moved tree's descendants keep theirs wherever it went,
 			// outside the root or into an excluded directory, and only a
@@ -484,8 +491,8 @@ func (w *Watcher) Run(ctx context.Context) {
 			// the rebuilt index compares (sameIndex), so a name that did not
 			// change what resolves stays silent (forgectl#904).
 			attachmentEvent := !stray && w.attachmentRelevant(ev)
-			// Any in-tree Create arms a settle too, and publishes only if
-			// the rebuilt index changed (forgectl#895). On kqueue a new
+			// On kqueue, any in-tree Create arms a settle too, and publishes
+			// only if the rebuilt index changed (forgectl#895). A new
 			// entry reaches us only as the Create fsnotify's dirChange sends
 			// while listing the directory, and that listing stops at the
 			// first entry it cannot open (EACCES, EPERM, ENOENT), which it
@@ -495,7 +502,13 @@ func (w *Watcher) Run(ctx context.Context) {
 			// rebuilds already; an unopenable plain file's lands here, and
 			// the rebuild's walk finds the docs the listing missed. It can
 			// postpone a pending rebuild no further than settleIn allows.
-			createEvent := !stray && ev.Has(fsnotify.Create) && w.inTree(ev.Name)
+			// Other backends report each entry itself, so there a non-doc
+			// file's Create (build output, say) costs no reload
+			// (forgectl#936). A directory's Create still arms one on every
+			// backend: a tree moved, copied or unpacked in arrives as that
+			// one Create, and a doc written into it before its watch landed
+			// sends nothing, so only the rebuild's walk finds them.
+			createEvent := (w.createArmsSettle || createdDir) && !stray && ev.Has(fsnotify.Create) && w.inTree(ev.Name)
 
 			// A reset already pending with its reload armed is not re-armed
 			// by an event that is not otherwise relevant, so churn on other
@@ -583,24 +596,26 @@ func (w *Watcher) settleDelay() time.Duration {
 // directory that was itself replaced) and registers a newly created directory
 // subtree. A created directory that the indexer would refuse to descend into is
 // deliberately NOT watched — see relevant() for why that matters.
-func (w *Watcher) refreshWatch(ev fsnotify.Event) {
+//
+// It reports whether ev created a directory the indexer would descend
+// into: Run arms a settle for it, since docs already inside send no events
+// of their own (forgectl#936).
+func (w *Watcher) refreshWatch(ev fsnotify.Event) bool {
 	if dir := filepath.Dir(ev.Name); dir != "" {
 		w.readdVerified(dir)
 	}
 
-	if !ev.Has(fsnotify.Create) {
-		return
+	if !ev.Has(fsnotify.Create) || excludedDir(filepath.Base(ev.Name)) {
+		return false
 	}
 	info, err := os.Lstat(ev.Name)
 	if err != nil || !info.IsDir() {
-		return
-	}
-	if excludedDir(filepath.Base(ev.Name)) {
-		return
+		return false
 	}
 	// A directory arriving whole (an mv of a populated tree) can surface as a
 	// single Create with no per-file events, so walk and watch it now.
 	w.watchCreatedDir(ev.Name)
+	return true
 }
 
 // dirMoved reports whether ev is a Rename of a directory addVerified

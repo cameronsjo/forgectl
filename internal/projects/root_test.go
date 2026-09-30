@@ -1,8 +1,10 @@
 package projects
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -60,5 +62,33 @@ func TestResolveRoot_HomeLookupFailure(t *testing.T) {
 func TestPlacement_RefusesEmptyRoot(t *testing.T) {
 	if _, err := Placement("", Repo{Host: "github.com", Owner: "o", Name: "n"}, ""); err == nil {
 		t.Fatal("Placement with an empty root must refuse, not place relative to the cwd")
+	}
+}
+
+func TestNew_FailedRootLookupKeepsTheCause(t *testing.T) {
+	t.Setenv("PROJECTS_DIR", "")
+	lookupErr := errors.New("no home")
+	c := newWithRoot(nil, func() (string, error) {
+		return resolveRoot(func() (string, error) { return "", lookupErr })
+	}, withGitLookPath(func(string) (string, error) { return "", errors.New("no git") }))
+	if c.Dir != "" {
+		t.Fatalf("Dir = %q, want empty after a failed lookup", c.Dir)
+	}
+
+	_, err := c.Discover(context.Background())
+	if !errors.Is(err, lookupErr) || strings.Contains(err.Error(), "directory not found") {
+		t.Errorf("Discover error = %v, want the lookup cause and not %q", err, "projects directory not found")
+	}
+
+	_, err = c.ResolveTarget("anything")
+	if !errors.Is(err, lookupErr) || !errors.Is(err, ErrTargetNotFound) {
+		t.Errorf("ResolveTarget error = %v, want ErrTargetNotFound wrapping the lookup cause", err)
+	}
+}
+
+func TestDiscoverDir_ExplicitDirIgnoresRootError(t *testing.T) {
+	c := &Client{rootErr: errors.New("no home")}
+	if _, err := c.discoverDir(context.Background(), filepath.Join(t.TempDir(), "missing")); err == nil || strings.Contains(err.Error(), "no home") {
+		t.Errorf("discoverDir of an explicit missing dir = %v, want the not-found error, not the root cause", err)
 	}
 }

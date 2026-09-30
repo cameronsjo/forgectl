@@ -380,7 +380,10 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("resolve codex binary: %w", err)
 	}
-	resolved := launch.Resolve(cfg.Launch, sess.Workspace)
+	resolved, err := launch.Resolve(cfg.Launch, sess.Workspace)
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("resolve launch profile: %w", err)
+	}
 	profile := launch.Profile{
 		Harness:        "codex",
 		ApprovalPolicy: "never",
@@ -492,7 +495,10 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// plan mode. Inheriting a permissive config (AllowDanger, a bypass permission
 	// mode) would let the review agent ignore the deny-by-default workspace
 	// allowlist — the whole clean-room control. Force the safe posture here.
-	profile := launch.Resolve(cfg.Launch, sess.Workspace)
+	profile, err := launch.Resolve(cfg.Launch, sess.Workspace)
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("resolve launch profile: %w", err)
+	}
 	profile.AllowDanger = false
 	profile.PermissionMode = "plan"
 	// Refuse every DISCOVERED MCP configuration. The workspace is a third
