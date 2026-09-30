@@ -199,14 +199,13 @@ func takesSeparateValue(cmd *cobra.Command, a string) bool {
 // shorthands (the token without its dash): each letter that names a flag with
 // a NoOptDefVal (a bool) is consumed on its own, and the first letter that
 // names a value flag takes the rest of the group as its value, or the next
-// token when it is the last letter. `-x=v` hands v to x inline. So in `-vH`
-// with a bool v and a value flag H, H takes the next token, and in `-Hv`, H
-// takes "v". An unknown letter stops pflag with an error, so it takes nothing.
+// token when it is the last letter. So in `-vH` with a bool v and a value
+// flag H, H takes the next token, and in `-Hv`, H takes "v". An unknown letter
+// stops pflag with an error, so it takes nothing. `-x=v` needs no case of its
+// own: a value flag x is not the last letter, and a bool x moves on to "=",
+// which names no shorthand.
 func shorthandGroupTakesNext(cmd *cobra.Command, group string) bool {
 	for i := 0; i < len(group); i++ {
-		if len(group)-i > 2 && group[i+1] == '=' {
-			return false // -x=v: the value is inline
-		}
 		f := lookupShorthand(cmd, group[i:i+1])
 		switch {
 		case f == nil:
@@ -257,10 +256,17 @@ func preFangFailure(root func() *cobra.Command, args []string, err error) error 
 // --json and args ask for it, or nil. Flags have not parsed yet, so args are
 // scanned the way argvWantsJSON scans the raw argv: `--json` after a "--", or
 // as another flag's value, does not count.
+//
+// The first loop only decides whether building the tree is worth it, so it
+// must never miss a --json that argvWantsJSONIn would count. A "--" right
+// after a token that could be a flag waiting for its value (`--host --
+// --json`) may be that value rather than the terminator, and without the tree
+// there is no telling which, so the scan keeps going and argvWantsJSONIn's
+// value-skip settles it.
 func preFangJSONTarget(root func() *cobra.Command, args []string) *cobra.Command {
 	mentioned := false
-	for _, a := range args {
-		if a == "--" {
+	for i, a := range args {
+		if a == "--" && (i == 0 || !mayTakeNextValue(args[i-1])) {
 			break
 		}
 		if a == "--json" || strings.HasPrefix(a, "--json=") {
@@ -276,6 +282,14 @@ func preFangJSONTarget(root func() *cobra.Command, args []string) *cobra.Command
 		return nil
 	}
 	return cmd
+}
+
+// mayTakeNextValue reports whether a, read with no command tree, could be a
+// flag that takes the following token as its value: a dash-led token other
+// than "--" with no inline "=value". It over-reports (a bool flag qualifies),
+// which only costs building the tree.
+func mayTakeNextValue(a string) bool {
+	return len(a) > 1 && a[0] == '-' && a != "--" && !strings.Contains(a, "=")
 }
 
 // jsonFamilyFailure writes err as the one --json failure object cmd's family
