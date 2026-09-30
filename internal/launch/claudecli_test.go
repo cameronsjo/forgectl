@@ -79,7 +79,7 @@ func TestIsClaudeHelpOrVersion(t *testing.T) {
 // Mutation that turns it red: drop "--output-format" from the flag list (both
 // output-format rows flip), drop the `=value` prefix match (the
 // "--output-format=stream-json" row flips), or drop the `--` stop (the
-// "-- -p" row flips). Match a print flag in any slot again, ignoring the token
+// "-- hi -p" row flips; after `--` a bare token puts -p in flag position). Match a print flag in any slot again, ignoring the token
 // before it (every value-slot row flips to true), or drop "--resume" from
 // claudeNoValueFlags (the "--resume -p" row flips to false).
 func TestIsClaudePrintMode(t *testing.T) {
@@ -95,6 +95,7 @@ func TestIsClaudePrintMode(t *testing.T) {
 		{[]string{"--output-format=stream-json"}, true},
 		{[]string{"--", "-p"}, false},
 		{[]string{"--model", "opus", "--", "--print"}, false},
+		{[]string{"--", "hi", "-p"}, false},
 		// Flag position: after a bare token, a --flag=value, a boolean flag,
 		// or an optional-value flag (which never takes a dash-prefixed token).
 		{[]string{"hi", "-p"}, true},
