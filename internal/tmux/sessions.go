@@ -206,8 +206,11 @@ func StoredSessionName(name string) string {
 //
 //   - '$' followed by an ASCII letter, '_' or '{' gains a backslash ("a$b"
 //     lists as `a\$b`), on the argv path and inside a guarded command's single
-//     quotes. The rule is the VIS_DQ branch of utf8_strvis (utf8.c), unchanged
-//     from 3.4 to 3.7c. "a$1", "a$}", "a$@" and a trailing '$' land unchanged.
+//     quotes. That is tmux 3.4, where utf8_strvis (utf8.c) escapes it
+//     unconditionally. In 3.7c the same escape runs only under VIS_DQ, which
+//     only argument escaping (arguments.c) sets and clean_name does not, so
+//     there the refusal is conservative: it turns away some names 3.7c would
+//     store as given. "a$1", "a$}", "a$@" and a trailing '$' land unchanged.
 //   - on the argv path (argv), a trailing ';' is read as a command separator
 //     and dropped ("x;" lands as "x"): cmd_parse_from_arguments, unchanged
 //     from 3.4 to 3.7c. A ';' elsewhere lands as given, and a guarded rename's
@@ -284,7 +287,9 @@ func (c *Client) CreateSession(ctx context.Context, name, dir string) (SessionId
 	// comparison against name still holds.
 	args := c.tmuxArgs("new-session", "-d", "-P", "-F", sessionIdentityFormat, "-s", escapeFormat(name))
 	if dir != "" {
-		args = append(args, "-c", dir)
+		// escapeArgvSeparator: a dir ending in ';' would otherwise end the
+		// command there and the session would start somewhere else.
+		args = append(args, "-c", escapeArgvSeparator(dir))
 	}
 	out, err := c.run.Run(ctx, c.tmuxBin, args...)
 	if err != nil {
