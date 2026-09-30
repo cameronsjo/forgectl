@@ -1,0 +1,23 @@
+{
+  "id": "cli:tab:move",
+  "result": {
+    "move_result": {
+      "changed": false,
+      "reason": "last_tab_in_workspace",
+      "tab_id": "w1:t1",
+      "workspace_id": "w1"
+    },
+    "tabs": [
+      {
+        "agent_status": "unknown",
+        "focused": false,
+        "label": "label-1",
+        "number": 1,
+        "pane_count": 1,
+        "tab_id": "w1:t1",
+        "workspace_id": "w1"
+      }
+    ],
+    "type": "tab_move"
+  }
+}

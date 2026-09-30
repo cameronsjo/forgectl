@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/url"
 	osexec "os/exec"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -79,8 +81,12 @@ func checkHearth(ctx context.Context, cfg config.Config, runner exec.Runner, pro
 
 	out, err := runner.Run(ctx, "docker", "compose", "-p", hearthProject, "ps", "--all", "--format", "json")
 	if err != nil {
+		// Categorical (#716): err is docker's argv and stderr, text the
+		// daemon and any compose plugin choose. It reaches `bench status`
+		// and doctor's report, so it goes to the log instead.
+		slog.Warn("docker compose ps failed.", "project", hearthProject, "error", err)
 		c.State = StateUnavailable
-		c.Reason = "docker compose unavailable: " + firstLine(err.Error())
+		c.Reason = "docker compose unavailable"
 		return c
 	}
 	total, running, unhealthy, restarting, perr := parseComposePS(out)
@@ -139,8 +145,10 @@ func checkChronicle(ctx context.Context, cfg config.Config, runner exec.Runner) 
 
 	out, err := runner.Run(ctx, name, args...)
 	if err != nil {
+		// Categorical (#716): err carries chronicle's stderr.
+		slog.Warn("chronicle status failed.", "error", err)
 		c.State = StateUnavailable
-		c.Reason = "chronicle status failed: " + firstLine(err.Error())
+		c.Reason = "chronicle status failed"
 		return c
 	}
 	var st ChronicleStatus
@@ -151,7 +159,7 @@ func checkChronicle(ctx context.Context, cfg config.Config, runner exec.Runner) 
 	}
 	c.Details = append(c.Details, fmt.Sprintf("sessions: %d, events: %d, files: %d", st.Sessions, st.Events, st.Files))
 	if st.LastSync != nil {
-		c.Details = append(c.Details, "last sync: "+*st.LastSync)
+		c.Details = append(c.Details, "last sync: "+lastSyncDetail(*st.LastSync))
 	} else {
 		c.Details = append(c.Details, "last sync: never")
 	}
@@ -322,15 +330,6 @@ func recordTCP(ctx context.Context, probe Prober, label, target string, c *Compo
 	return true
 }
 
-// firstLine trims a possibly multi-line error string to its first line so a
-// component reason stays a single tidy line.
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	return strings.TrimSpace(s)
-}
-
 // dockerDataDir is where colima's Lima VM mounts the Docker data volume —
 // disk pressure there, not the host's, is what starves the hearth stack.
 const dockerDataDir = "/var/lib/docker"
@@ -364,4 +363,21 @@ func hearthDiskPercent(ctx context.Context, runner exec.Runner) (int, bool) {
 		return 0, false
 	}
 	return pct, true
+}
+
+// lastSyncLayouts are the ISO-8601 shapes chronicle's `status --json` writes
+// last_sync in: RFC 3339 with an offset, or Python's isoformat without one.
+var lastSyncLayouts = []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999"}
+
+// lastSyncDetail renders chronicle's last_sync from the parsed time, never
+// from the JSON text (#716): chronicle's output is another program's text,
+// and `bench status` and doctor print this detail. A value that is not a
+// timestamp reads as a fixed category.
+func lastSyncDetail(raw string) string {
+	for _, layout := range lastSyncLayouts {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t.Format(time.RFC3339)
+		}
+	}
+	return "unrecognized timestamp"
 }

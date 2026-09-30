@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // BinarySource names the configuration layer that selected a harness binary.
@@ -297,7 +298,7 @@ func ResolveBinary(harness string, defaults config.LaunchDefaults) (ResolvedBina
 			name:        "pi",
 		})
 	default:
-		return ResolvedBinary{}, fmt.Errorf("unsupported launch harness %q: want claude, codex, or pi", harness)
+		return ResolvedBinary{}, fmt.Errorf("unsupported launch harness %s: want claude, codex, or pi", termsafe.QuoteArgMax(harness, 0))
 	}
 }
 

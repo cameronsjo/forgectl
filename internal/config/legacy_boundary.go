@@ -119,7 +119,7 @@ func decodeLegacyLaunch(data []byte) (LaunchConfig, []string, error) {
 	var lc LaunchConfig
 	md, err := toml.Decode(string(data), &lc)
 	if err != nil {
-		return LaunchConfig{}, nil, fmt.Errorf("%w: %v", ErrLegacyMalformed, err)
+		return LaunchConfig{}, nil, fmt.Errorf("%w: %v", ErrLegacyMalformed, scrubTOMLError(err))
 	}
 	undecoded := md.Undecoded()
 	keys := make([]string, 0, len(undecoded))
