@@ -738,8 +738,9 @@ func (c *Client) killReviewWindow(ctx context.Context, ref Ref, budget *tmuxBudg
 
 // windowGoneAtKill reports whether a KillWindow failure means the resolved
 // window is gone: a clean listing without it (windowConfirmedAbsent), tmux's
-// exact "can't find window" answer to the kill of the id just revalidated
-// (ErrObjectGone, forgectl#746), or a generation change — the socket now
+// exact "can't find window" answer to the kill of the id just revalidated,
+// confirmed by a re-read showing the same server generation (ErrObjectGone,
+// forgectl#746), or a generation change — the socket now
 // answers from a different server, and the old one's windows are gone or
 // unreachable. "Unreachable" is the blind spot: an old server whose socket was
 // unlinked and replaced keeps its windows running where no command can reach
