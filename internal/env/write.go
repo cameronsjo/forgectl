@@ -5,6 +5,7 @@
 package env
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -98,25 +99,52 @@ func writeAtomic(target Target, data []byte) (tightened bool, err error) {
 	return writeAtomicTracked(target, data, nil)
 }
 
-// writeAtomicTracked is writeAtomic, reporting the scratch directory's
-// absolute path to track (when non-nil) as soon as the directory exists and
-// before anything is written into it. An error from track abandons the write:
-// the directory is removed and the error returned, wrapped.
-func writeAtomicTracked(target Target, data []byte, track func(scratchDir string) error) (tightened bool, err error) {
+// ScratchTracker wraps the creation of a write's scratch directory. It must
+// either call mkdir exactly once, recording the absolute path mkdir returns so
+// it can remove that directory later, or return an error without calling it.
+// Calling mkdir inside its own critical section leaves no instant at which
+// the directory exists and the tracker does not know it. An error abandons
+// the write, and a directory mkdir made is removed.
+type ScratchTracker func(mkdir func() (string, error)) error
+
+// errScratchNotMade is writeAtomicTracked's refusal of a tracker that returned
+// no error without calling mkdir.
+var errScratchNotMade = errors.New("the scratch directory was never created")
+
+// writeAtomicTracked is writeAtomic, creating the scratch directory through
+// track when it is non-nil. See ScratchTracker.
+func writeAtomicTracked(target Target, data []byte, track ScratchTracker) (tightened bool, err error) {
 	priorMode, _, hadPrior, statErr := target.dir.lstat(target.base)
 	if statErr != nil {
 		return false, fmt.Errorf("stat %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(statErr))
 	}
 
-	scratch, scratchName, err := target.dir.mkScratchDir(target.envScratchDirPrefix())
-	if err != nil {
-		return false, fmt.Errorf("create a scratch directory beside %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(err))
-	}
-	if track != nil {
-		if err := track(filepath.Join(filepath.Dir(target.Abs()), scratchName)); err != nil {
-			_ = target.dir.removeScratchDir(scratch, scratchName)
-			return false, fmt.Errorf("write %s: %w", termsafe.QuotePath(target.Rel()), err)
+	var scratch *dirPin
+	var scratchName string
+	var mkErr error
+	mkdir := func() (string, error) {
+		scratch, scratchName, mkErr = target.dir.mkScratchDir(target.envScratchDirPrefix())
+		if mkErr != nil {
+			return "", mkErr
 		}
+		return filepath.Join(filepath.Dir(target.Abs()), scratchName), nil
+	}
+	var trackErr error
+	if track != nil {
+		trackErr = track(mkdir)
+	} else {
+		_, _ = mkdir()
+	}
+	switch {
+	case mkErr != nil:
+		return false, fmt.Errorf("create a scratch directory beside %s: %w", termsafe.QuotePath(target.Rel()), termsafe.Error(mkErr))
+	case trackErr != nil:
+		if scratch != nil {
+			_ = target.dir.removeScratchDir(scratch, scratchName)
+		}
+		return false, fmt.Errorf("write %s: %w", termsafe.QuotePath(target.Rel()), trackErr)
+	case scratch == nil:
+		return false, fmt.Errorf("write %s: %w", termsafe.QuotePath(target.Rel()), errScratchNotMade)
 	}
 
 	tmp, tmpName, err := scratch.createTemp(scratchTempPrefix)

@@ -563,11 +563,12 @@ func (w *workDir) readEditorError() string {
 // success. A restore that reports success without checking is the one thing
 // worse than no restore at all.
 //
-// The write's own scratch directory beside the target goes to track as soon
-// as it exists, so the signal guard removes it if a signal lands mid-restore
-// (cameronsjo/forgectl#751). Untracked, the handler terminated the process
-// with it on disk, and the next write refused on it.
-func (w *workDir) restore(target env.Target, track func(scratchDir string) error) error {
+// The write's own scratch directory beside the target is created through
+// track, which the signal guard holds its lock across and records, so the
+// guard removes it if a signal lands mid-restore (cameronsjo/forgectl#751).
+// Untracked, the handler terminated the process with it on disk, and the next
+// write refused on it.
+func (w *workDir) restore(target env.Target, track env.ScratchTracker) error {
 	backup, err := os.ReadFile(w.backup)
 	if err != nil {
 		return errors.New("the backup is unreadable")

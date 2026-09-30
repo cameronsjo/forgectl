@@ -23,8 +23,8 @@ import (
 	"testing"
 )
 
-// stashGitArgs are the identity flags a stash needs, kept out of any config.
-var stashGitArgs = []string{"-c", "user.name=forgectl-test", "-c", "user.email=test@example.invalid"}
+// testIdentityArgs are the identity flags a stash needs, kept out of any config.
+var testIdentityArgs = []string{"-c", "user.name=forgectl-test", "-c", "user.email=test@example.invalid"}
 
 // commitControl commits the control file, which a stash needs a HEAD for.
 func commitControl(t *testing.T, repo string) {
@@ -32,7 +32,7 @@ func commitControl(t *testing.T, repo string) {
 	if out, err := runEnvGit(t, repo, "add", "control.txt"); err != nil {
 		t.Fatalf("git add: %v\n%s", err, out)
 	}
-	if out, err := runEnvGit(t, repo, append(stashGitArgs, "commit", "-q", "-m", "control")...); err != nil {
+	if out, err := runEnvGit(t, repo, append(testIdentityArgs, "commit", "-q", "-m", "control")...); err != nil {
 		t.Fatalf("git commit: %v\n%s", err, out)
 	}
 }
@@ -41,7 +41,7 @@ func commitControl(t *testing.T, repo string) {
 // it in the working tree, which would make every assertion after it vacuous.
 func stashAll(t *testing.T, repo, dir string) {
 	t.Helper()
-	if out, err := runEnvGit(t, repo, append(stashGitArgs, "stash", "--all", "-q")...); err != nil {
+	if out, err := runEnvGit(t, repo, append(testIdentityArgs, "stash", "--all", "-q")...); err != nil {
 		t.Fatalf("git stash --all: %v\n%s", err, out)
 	}
 	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
@@ -84,7 +84,7 @@ func TestScanRefusesAnOlderStashEntry(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "control.txt"), []byte("changed\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if out, err := runEnvGit(t, repo, append(stashGitArgs, "stash", "-q")...); err != nil {
+	if out, err := runEnvGit(t, repo, append(testIdentityArgs, "stash", "-q")...); err != nil {
 		t.Fatalf("git stash: %v\n%s", err, out)
 	}
 

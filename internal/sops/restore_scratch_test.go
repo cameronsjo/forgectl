@@ -10,6 +10,8 @@ package sops
 //       handler runs, and the write goes no further, as die never returns
 //   [x] A signal before the restore begins refuses its scratch directory: the
 //       restore fails and leaves no scratch directory behind
+//   [x] The directory is created while the guard's lock is held, so no signal
+//       can land between its creation and its registration
 
 import (
 	"errors"
@@ -74,11 +76,14 @@ func TestGuard_SignalDuringRestoreRemovesItsScratch(t *testing.T) {
 
 	type killed struct{}
 	var seen string
-	track := func(dir string) error {
-		if err := g.trackScratch(dir); err != nil {
+	track := func(mkdir func() (string, error)) error {
+		if err := g.trackScratch(func() (string, error) {
+			dir, err := mkdir()
+			seen = dir
+			return dir, err
+		}); err != nil {
 			return err
 		}
-		seen = dir
 		// The handler, run where a signal would land: the directory exists
 		// and the write is about to fill it. In production die does not
 		// return, so the write goes no further; the panic stands in for that.
@@ -123,5 +128,34 @@ func TestGuard_SignalBeforeRestoreRefusesItsScratch(t *testing.T) {
 	}
 	if left := envScratchIn(t, repo); len(left) != 0 {
 		t.Errorf("a refused restore left its scratch directory behind: %v", left)
+	}
+}
+
+func TestGuard_RestoreScratchIsCreatedUnderTheLock(t *testing.T) {
+	repo, target, g, work, _ := restoreFixture(t)
+
+	var calls int
+	var heldDuringMkdir bool
+	track := func(mkdir func() (string, error)) error {
+		return g.trackScratch(func() (string, error) {
+			calls++
+			// A signal handler takes this lock first; if it is free here, a
+			// signal could run between the mkdir and the registration.
+			if g.mu.TryLock() {
+				g.mu.Unlock()
+			} else {
+				heldDuringMkdir = true
+			}
+			return mkdir()
+		})
+	}
+	if err := work.restore(target, track); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if calls != 1 || !heldDuringMkdir {
+		t.Fatalf("mkdir ran %d times, lock held during it = %v; want once, held", calls, heldDuringMkdir)
+	}
+	if left := envScratchIn(t, repo); len(left) != 0 {
+		t.Errorf("a completed restore left its scratch directory behind: %v", left)
 	}
 }

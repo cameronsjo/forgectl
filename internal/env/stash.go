@@ -26,16 +26,53 @@
 // refusal, as a directory that cannot be listed is. It removes nothing, and it
 // never drops a stash: the stash may also hold the operator's other work.
 //
-// git runs with core.fsmonitor and log.showSignature off, so neither a
-// repository's configured fsmonitor hook nor its gpg.program is launched by a
-// write that only wanted to read refs, and with literal pathspecs, so a
-// directory whose name holds a glob character is matched as itself.
+// # How git is run
+//
+// The stash check runs git inside a repository, whose .git/config the check
+// does not control and cannot drop: repository extensions such as
+// objectFormat and partialClone live there. So the invocation pins off each
+// way a read of refs and trees can be made to run a program or reach the
+// network, rather than trusting the repository not to ask (stashGitArgs,
+// stashGitEnv):
+//
+//   - lazy fetch. In a partial clone (a promisor remote), reading a missing
+//     object fetches it, which runs the transport and with it core.sshCommand
+//     or a remote's uploadpack. A refs/stash naming a missing commit, or a
+//     stash whose untracked tree is missing, triggers it. Measured on git
+//     2.43: `stash list` and `ls-tree` both ran a canary core.sshCommand.
+//     protocol.allow=never refuses every transport before it starts, on every
+//     git version; GIT_NO_LAZY_FETCH=1 (git 2.44 and later) stops the fetch
+//     before a transport is chosen. The read then fails, and the scan refuses.
+//   - core.fsmonitor, which names a hook git launches to query the working
+//     tree.
+//   - log.showSignature, which runs gpg.program on a signed commit that
+//     `stash list` walks.
+//   - replace refs, which could substitute another object for a stash commit
+//     or its tree (--no-replace-objects).
+//
+// None of the three commands runs a hook, reads the index, or opens a pager
+// (stdout is a pipe). User-level config, global and system, is kept: it is the
+// operator's own, and dropping it would drop safe.directory, which turns a
+// repository the operator marked safe into a skipped check.
+//
+// The environment is scrubbed of the variables git itself clears before it
+// works in another repository (`git rev-parse --local-env-vars`): GIT_DIR,
+// GIT_WORK_TREE, GIT_INDEX_FILE, GIT_COMMON_DIR, the object-directory
+// variables, and the config injected by a parent git's -c. Inside a git hook,
+// or under a caller that exported GIT_DIR, they would point every call at a
+// repository other than the target's, and the check would read the wrong
+// stashes. GIT_CEILING_DIRECTORIES and GIT_DISCOVERY_ACROSS_FILESYSTEM stay:
+// they only narrow discovery, and they are the operator's to set.
+//
+// Pathspecs are literal, so a directory whose name holds a glob character is
+// matched as itself.
 package env
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -44,17 +81,70 @@ import (
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
-// stashGitTimeout bounds each git call the stash check makes.
-const stashGitTimeout = 10 * time.Second
+// stashGitTimeout bounds each git call the stash check makes. It is a
+// variable only so a test can make a hung git time out quickly.
+var stashGitTimeout = 10 * time.Second
+
+// stashGitWaitDelay bounds how long a timed-out git call may keep its output
+// pipes open after it is killed: a grandchild that inherited them (a
+// transport, a hook) would otherwise hold Output past the deadline.
+const stashGitWaitDelay = 2 * time.Second
+
+// stashGitArgs precede every git call the stash check makes. See "How git is
+// run" above.
+var stashGitArgs = []string{
+	"-c", "protocol.allow=never",
+	"-c", "core.fsmonitor=false",
+	"-c", "log.showSignature=false",
+	"--no-replace-objects",
+	"--literal-pathspecs",
+}
+
+// stashGitScrubbed is the output of `git rev-parse --local-env-vars` on git
+// 2.43: what git clears before it works in another repository.
+var stashGitScrubbed = map[string]bool{
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES": true,
+	"GIT_CONFIG":                       true,
+	"GIT_CONFIG_PARAMETERS":            true,
+	"GIT_CONFIG_COUNT":                 true,
+	"GIT_OBJECT_DIRECTORY":             true,
+	"GIT_DIR":                          true,
+	"GIT_WORK_TREE":                    true,
+	"GIT_IMPLICIT_WORK_TREE":           true,
+	"GIT_GRAFT_FILE":                   true,
+	"GIT_INDEX_FILE":                   true,
+	"GIT_NO_REPLACE_OBJECTS":           true,
+	"GIT_REPLACE_REF_BASE":             true,
+	"GIT_PREFIX":                       true,
+	"GIT_SHALLOW_FILE":                 true,
+	"GIT_COMMON_DIR":                   true,
+}
+
+// stashGitEnv is environ without the scrubbed variables (and the numbered
+// GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n pairs GIT_CONFIG_COUNT indexes), plus
+// the pins that need the environment.
+func stashGitEnv(environ []string) []string {
+	out := make([]string, 0, len(environ)+2)
+	for _, kv := range environ {
+		key, _, _ := strings.Cut(kv, "=")
+		if stashGitScrubbed[key] || strings.HasPrefix(key, "GIT_CONFIG_KEY_") || strings.HasPrefix(key, "GIT_CONFIG_VALUE_") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0")
+}
 
 // stashGit runs git with args in dir and returns its stdout. It is a variable
 // only so a test can make one call fail the way a corrupt repository would.
 var stashGit = func(dir string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), stashGitTimeout)
 	defer cancel()
-	full := append([]string{"-c", "core.fsmonitor=false", "-c", "log.showSignature=false", "--literal-pathspecs"}, args...)
+	full := append(append([]string{}, stashGitArgs...), args...)
 	cmd := exec.CommandContext(ctx, "git", full...) //nolint:gosec // G204: git with read-only arguments this package builds; the only variable parts are a commit id git printed and a path prefix after "--"
 	cmd.Dir = dir
+	cmd.Env = stashGitEnv(os.Environ())
+	cmd.WaitDelay = stashGitWaitDelay
 	return cmd.Output()
 }
 

@@ -177,15 +177,23 @@ func (g *plaintextGuard) track(create func() (*workDir, error)) (*workDir, error
 	return w, nil
 }
 
-// trackScratch records a scratch directory that a restore's atomic write has
-// just created, under the guard's lock, so a signal from then on removes it.
-// A signal that already fired refuses it, and the write abandons itself and
-// removes the directory. It is the track callback of env.WriteTargetTracked.
-func (g *plaintextGuard) trackScratch(dir string) error {
+// trackScratch creates a restore's scratch directory under the guard's lock
+// and records it, so there is no instant at which the directory exists and
+// the handler does not know about it: a signal that arrives during the mkdir
+// waits for it, and then removes the directory. A signal that already fired
+// refuses the directory before it is made, and the write abandons itself. It
+// is the env.ScratchTracker the restore passes to env.WriteTargetTracked, and
+// the lock is held across the mkdir only, as track holds it across the work
+// directory's creation.
+func (g *plaintextGuard) trackScratch(mkdir func() (string, error)) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.fired {
 		return errInterrupted
+	}
+	dir, err := mkdir()
+	if err != nil {
+		return err
 	}
 	g.scratch = append(g.scratch, dir)
 	return nil
