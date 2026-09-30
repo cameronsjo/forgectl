@@ -87,10 +87,10 @@ method (*OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 method (*OSSensitiveRunner) StartedCount() int64
 method (*OSSensitiveRunner) awaitOutcome(ctx context.Context, waitCh chan error, overflow chan struct{}, kill func()) (Outcome, error)
 method (*OSSensitiveRunner) bound() time.Duration
-method (*OSSensitiveRunner) buildCmd(sc SensitiveCommand) *os/exec.Cmd
 method (*OSSensitiveRunner) buildEnv(muts []EnvMutation) ([]string, []github.com/cameronsjo/forgectl/internal/exec/internal/sealed.EnvVar)
 method (*OSSensitiveRunner) drainBound() time.Duration
 method (*OSSensitiveRunner) retire(stopped bool, kind CommandKind, outR *os.File, errR *os.File, outCh <-chan BoundedOutput, errCh <-chan BoundedOutput) (BoundedOutput, BoundedOutput)
+method (*OSSensitiveRunner) startSealed(sc SensitiveCommand, stdout *os.File, stderr *os.File) (*github.com/cameronsjo/forgectl/internal/exec/internal/sealed.Proc, error)
 method (*SensitiveError) Error() string
 method (*SensitiveError) Format(f fmt.State, verb rune)
 method (*SensitiveError) GoString() string
@@ -249,9 +249,11 @@ var ErrOutputLimit error
 var ErrOutputTooLarge error
 var ErrStartFailed error
 var ErrTimeout error
-sealed: func Command(path Value, args []Value, env []string, set []EnvVar) *os/exec.Cmd
 sealed: func New(v string) Value
+sealed: func Start(path Value, args []Value, env []string, set []EnvVar, stdout *os.File, stderr *os.File) (*Proc, error)
 sealed: func TmuxDirOperand() Transform
+sealed: method (*Proc) Kill() error
+sealed: method (*Proc) Wait() error
 sealed: method (Value) Equal(other Value) bool
 sealed: method (Value) IsAbs() bool
 sealed: method (Value) LeadsWithDash() bool
@@ -259,5 +261,6 @@ sealed: method (Value) Map(t Transform) Value
 sealed: method (Value) Present() bool
 sealed: method (Value) Set() bool
 sealed: type EnvVar struct{Key string; Value Value}
+sealed: type Proc struct{wait func() error; kill func() error}
 sealed: type Transform struct{apply func(string) string}
 sealed: type Value struct{reveal func() string}

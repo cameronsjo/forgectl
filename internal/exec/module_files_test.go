@@ -229,9 +229,11 @@ var hiddenSourceAllowed = map[string]bool{}
 // cannot see (forgectl#854, P-1): every one of them reasons about what Go's
 // type system lets a file name, and four things step around it. A
 // //go:linkname directive binds a local declaration to any symbol in any
-// package, unexported or internal, so another package could call
-// (*OSSensitiveRunner).buildCmd and read the argv it assembles; a probe did,
-// and got the payload back while every other guard stayed green. An "unsafe"
+// package, unexported or internal, so another package could call the function
+// that assembles the argv and read it; a probe against what was then
+// (*OSSensitiveRunner).buildCmd did, and got the payload back while every
+// other guard stayed green. That function is now sealed's unexported command,
+// and a linkname reaches it just the same. An "unsafe"
 // import reads any memory, including a sealed Arg's closure, and it is also
 // what the compiler requires before it honours a linkname. A cgo file runs C
 // with the same reach. An assembly, C or object file links in code that names
@@ -249,13 +251,13 @@ var hiddenSourceAllowed = map[string]bool{}
 // internal/exec/internal/sealed, which only internal/exec can import, so an
 // ordinary reveal anywhere else does not compile. This test is the backstop
 // for the ways around the compiler, which sealing does not retire: a
-// linkname reaches into an internal package too (to sealed.Command, or to
-// buildCmd), and unsafe reads a sealed.Value's closure as readily as it read
+// linkname reaches into an internal package too (to sealed's unexported
+// command), and unsafe reads a sealed.Value's closure as readily as it read
 // the old field.
 //
 // Mutations that turn it red, each with a package that imports it: a file
-// with `import _ "unsafe"` and `//go:linkname buildCmd
-// github.com/cameronsjo/forgectl/internal/exec.(*OSSensitiveRunner).buildCmd`
+// with `import _ "unsafe"` and `//go:linkname command
+// github.com/cameronsjo/forgectl/internal/exec/internal/sealed.command`
 // placed in internal/, in internal/exec/testdata/, in a dot-directory, or
 // behind a symlinked directory (add it to unsafeAllowed and the linkname rule
 // still fires); the same file tagged //go:build !zztag, run under an ambient
@@ -294,7 +296,7 @@ func TestNoFileReachesPastTheTypeSystem(t *testing.T) {
 			}
 		}
 		for _, line := range linknameLines(src) {
-			findings = append(findings, f.rel+":"+strconv.Itoa(line)+": a //go:linkname directive binds to any symbol, unexported or internal, so it can call sealed.Command or buildCmd and read a payload")
+			findings = append(findings, f.rel+":"+strconv.Itoa(line)+": a //go:linkname directive binds to any symbol, unexported or internal, so it can call sealed's unexported command and read a payload")
 		}
 	}
 	for _, f := range findings {

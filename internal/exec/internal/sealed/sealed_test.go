@@ -1,7 +1,9 @@
 package sealed
 
 import (
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -74,7 +76,7 @@ func TestEqual(t *testing.T) {
 	}
 }
 
-// TestCommand_FillsTheCmdAndCopiesEnv pins Command's assembly: the path and
+// TestCommand_FillsTheCmdAndCopiesEnv pins command's assembly: the path and
 // argv in order, env copied (never aliased) and followed by each set entry in
 // order, and a non-nil Env even when both are empty, since a nil Env would
 // make the child inherit the live process environment.
@@ -85,7 +87,7 @@ func TestCommand_FillsTheCmdAndCopiesEnv(t *testing.T) {
 	backing := make([]string, 4)
 	backing[0] = "PATH=/usr/bin"
 	env := backing[:1]
-	cmd := Command(New("/bin/tool"), []Value{New("-t"), New("a b")}, env,
+	cmd := command(New("/bin/tool"), []Value{New("-t"), New("a b")}, env,
 		[]EnvVar{{Key: "K1", Value: New("v1")}, {Key: "K2", Value: New("")}})
 	if cmd.Path != "/bin/tool" || !slices.Equal(cmd.Args, []string{"/bin/tool", "-t", "a b"}) {
 		t.Errorf("Path, Args = %q, %q", cmd.Path, cmd.Args)
@@ -94,9 +96,26 @@ func TestCommand_FillsTheCmdAndCopiesEnv(t *testing.T) {
 		t.Errorf("Env = %q, want %q", cmd.Env, want)
 	}
 	if backing[1] != "" {
-		t.Errorf("Command wrote into the caller's env backing array: %q", backing)
+		t.Errorf("command wrote into the caller's env backing array: %q", backing)
 	}
-	if empty := Command(New("/bin/tool"), nil, nil, nil); empty.Env == nil || len(empty.Env) != 0 {
+	if empty := command(New("/bin/tool"), nil, nil, nil); empty.Env == nil || len(empty.Env) != 0 {
 		t.Errorf("Env = %#v for no env and no set; want a non-nil empty slice", empty.Env)
+	}
+}
+
+// TestStart_FailureNeverCarriesThePath pins that a failed start returns the
+// fixed errNotStarted, not os/exec's error, whose text names the path it
+// could not start.
+//
+// Mutation that turns it red: return err from cmd.Start instead of
+// errNotStarted.
+func TestStart_FailureNeverCarriesThePath(t *testing.T) {
+	const path = "/nonexistent/SEALED-PATH-SENTINEL-4f3e"
+	proc, err := Start(New(path), []Value{New("SEALED-ARG-SENTINEL")}, nil, nil, nil, nil)
+	if proc != nil || !errors.Is(err, errNotStarted) {
+		t.Fatalf("Start of a missing path = (%v, %v), want (nil, errNotStarted)", proc, err)
+	}
+	if strings.Contains(err.Error(), "SENTINEL") {
+		t.Fatalf("Start's error renders a payload: %q", err)
 	}
 }

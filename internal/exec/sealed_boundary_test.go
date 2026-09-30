@@ -81,54 +81,30 @@ func TestSealedIsUnimportableOutsideExec(t *testing.T) {
 	}
 }
 
-// TestTheRevealHasOneDoor pins, in internal/exec's production files on every
-// platform in guardPlatforms, the two-step path a plaintext payload takes to
-// a process:
+// TestSealedStartHasOneCaller pins that sealed.Start, the one function that
+// puts a payload into a process, is named in internal/exec's production files
+// only inside (*OSSensitiveRunner).startSealed, on every platform in
+// guardPlatforms. Test files are not checked.
 //
-//   - sealed.Command, which fills an *exec.Cmd with the plaintext, is named
-//     only inside (*OSSensitiveRunner).buildCmd;
-//   - buildCmd, whose returned *exec.Cmd carries that plaintext, is named only
-//     inside (*OSSensitiveRunner).RunSensitive.
+// This is not what keeps plaintext out of internal/exec: the compiler does
+// that, since sealed.Start returns only a *sealed.Proc (wait and kill, no
+// accessor, pinned by the golden) and no exported name of sealed returns an
+// *exec.Cmd. It keeps process launches through the seam to the runner, so a
+// second launch path cannot appear without review. A package-level func can
+// be reached only by naming it (a call or a func value), so a Uses walk sees
+// every route; there is no interface or method-value shape that avoids it.
 //
-// A call elsewhere, or a reference that stores either func for later (a
-// method value or a method expression included), is a finding. Test files are
-// not checked: they may call buildCmd to assert that real values reach the
-// *exec.Cmd. Sealing makes a reveal outside internal/exec uncompilable; inside
-// it, this is what keeps the reveal from spreading past the runner. What
-// RunSensitive does with the *exec.Cmd once it holds it (start, wait, pipe
-// wiring, never a log) is not checked here and stays a review property.
-//
-// Mutations that turn it red, each in sensitive.go: `var _ = sealed.Command`;
-// `func zzLeak(sc SensitiveCommand) []string { return
-// (&OSSensitiveRunner{}).buildCmd(sc).Args }`.
-func TestTheRevealHasOneDoor(t *testing.T) {
+// Mutation that turns it red: `var _ = sealed.Start` in sensitive.go.
+func TestSealedStartHasOneCaller(t *testing.T) {
 	for _, p := range guardPlatforms {
 		c := checkExecFor(t, p)
-		command, ok := c.sealed.Scope().Lookup("Command").(*types.Func)
+		start, ok := c.sealed.Scope().Lookup("Start").(*types.Func)
 		if !ok {
-			t.Fatalf("[%s] sealed declares no Command func; the rule would check nothing", p)
+			t.Fatalf("[%s] sealed declares no Start func; the rule would check nothing", p)
 		}
-		runner, ok := c.pkg.Scope().Lookup("OSSensitiveRunner").(*types.TypeName)
-		if !ok {
-			t.Fatalf("[%s] internal/exec declares no OSSensitiveRunner", p)
-		}
-		obj, _, _ := types.LookupFieldOrMethod(types.NewPointer(runner.Type()), true, c.pkg, "buildCmd")
-		buildCmd, ok := obj.(*types.Func)
-		if !ok {
-			t.Fatalf("[%s] OSSensitiveRunner has no buildCmd method; the rule would check nothing", p)
-		}
-		for _, door := range []struct {
-			target *types.Func
-			name   string
-			within string
-		}{
-			{command, "sealed.Command", "buildCmd"},
-			{buildCmd, "(*OSSensitiveRunner).buildCmd", "RunSensitive"},
-		} {
-			for _, f := range namedOutside(c, door.target, door.within) {
-				t.Errorf("[%s] %s: %s is named outside (*OSSensitiveRunner).%s; the reveal must stay behind that one door",
-					p, f, door.name, door.within)
-			}
+		for _, f := range namedOutside(c, start, "startSealed") {
+			t.Errorf("[%s] %s: sealed.Start is named outside (*OSSensitiveRunner).startSealed; launch sealed processes through the runner",
+				p, f)
 		}
 	}
 }

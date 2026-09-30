@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/exec/internal/sealed"
 )
 
 // helperModeEnv turns this test binary into the child process the runner
@@ -112,6 +114,9 @@ func helperMain(mode string) int {
 			return 95
 		}
 		_ = f.Close()
+		return 0
+	case "argv":
+		_, _ = fmt.Fprint(os.Stdout, strings.Join(os.Args, "\x00"))
 		return 0
 	case "env":
 		for _, key := range strings.Split(arg, ",") {
@@ -794,10 +799,14 @@ func TestReadCapped_MarksANonEOFStopAsIncomplete(t *testing.T) {
 
 // TestBuildEnv_RemovesEveryOccurrenceAndAppendsOnce pins the pure mutation
 // logic, so a failure in the end-to-end test above is attributable to either
-// the policy or the process plumbing rather than to both at once. It reads the
-// environment buildCmd assembles, since a replacement value is appended only
-// inside sealed.Command, and pins the exact order: the surviving inherited
-// entries byte-exact, then each replacement in mutation order.
+// the policy or the process plumbing rather than to both at once. It pins
+// both halves buildEnv hands sealed.Start in their exact order: the
+// surviving inherited entries byte-exact, and each replacement in mutation
+// order, its value compared sealed. sealed's own command test pins that the
+// replacements land after the inherited entries.
+//
+// Mutations that turn it red: drop only the first occurrence of a mutated
+// key; collect replacements in reverse.
 func TestBuildEnv_RemovesEveryOccurrenceAndAppendsOnce(t *testing.T) {
 	runner := &OSSensitiveRunner{env: []string{
 		"PATH=/usr/bin",
@@ -807,25 +816,33 @@ func TestBuildEnv_RemovesEveryOccurrenceAndAppendsOnce(t *testing.T) {
 		"TMUX=/tmp/a,1,0",
 		"BAREKEY",
 	}}
-	build := func(muts ...EnvMutation) []string {
-		return runner.buildCmd(SensitiveCommand{Kind: KindCmuxCreate, Path: Secret("/bin/true"), Env: muts}).Env
-	}
 
-	got := build(ReplaceCmuxSocketPath("/resolved"), UnsetTmux(), SetCmuxQuiet())
-	want := []string{"PATH=/usr/bin", "CMUX_AUTH_TOKEN=untouched", "BAREKEY", "CMUX_SOCKET_PATH=/resolved", "CMUX_QUIET=1"}
-	if !slices.Equal(got, want) {
-		t.Errorf("env = %q, want %q", got, want)
+	env, set := runner.buildEnv([]EnvMutation{ReplaceCmuxSocketPath("/resolved"), UnsetTmux(), SetCmuxQuiet()})
+	if want := []string{"PATH=/usr/bin", "CMUX_AUTH_TOKEN=untouched", "BAREKEY"}; !slices.Equal(env, want) {
+		t.Errorf("inherited env = %q, want %q", env, want)
+	}
+	wantSet := []sealed.EnvVar{
+		{Key: "CMUX_SOCKET_PATH", Value: sealed.New("/resolved")},
+		{Key: "CMUX_QUIET", Value: sealed.New("1")},
+	}
+	if len(set) != len(wantSet) {
+		t.Fatalf("buildEnv returned %d replacements, want %d", len(set), len(wantSet))
+	}
+	for i := range wantSet {
+		if set[i].Key != wantSet[i].Key || !set[i].Value.Equal(wantSet[i].Value) {
+			t.Errorf("replacement %d has key %q, want %q (or its sealed value differs)", i, set[i].Key, wantSet[i].Key)
+		}
 	}
 
 	// The captured environment must not be mutated in place — a second call
 	// with no mutations still sees the original entries.
-	if plain := build(); len(plain) != 6 {
+	if plain, none := runner.buildEnv(nil); len(plain) != 6 || none != nil {
 		t.Errorf("captured environment was mutated: %q", plain)
 	}
-	// An empty captured environment still yields a non-nil Env, or the child
+	// An empty captured environment still yields a non-nil env, or the child
 	// would inherit the live process environment.
-	if empty := (&OSSensitiveRunner{}).buildCmd(SensitiveCommand{Path: Secret("/bin/true")}).Env; empty == nil {
-		t.Error("an empty captured environment built a nil Env; the child would inherit the live environment")
+	if empty, _ := (&OSSensitiveRunner{}).buildEnv(nil); empty == nil {
+		t.Error("an empty captured environment built a nil env; the child would inherit the live environment")
 	}
 }
 

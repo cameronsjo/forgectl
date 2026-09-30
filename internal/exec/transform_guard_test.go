@@ -31,7 +31,7 @@ var transformCallers = map[string]bool{
 }
 
 // TestNoCallerCodeReceivesAnOpaquePayload keeps the sealed-payload promise
-// that buildCmd, FakeSensitiveRunner and backend.BootstrapCommand state: no
+// that sealed.Start, FakeSensitiveRunner and backend.BootstrapCommand state: no
 // payload is handed to code outside this package. Since forgectl#854 the
 // compiler is the primary control (a payload sits in
 // internal/exec/internal/sealed, whose reveal nothing outside it can call),

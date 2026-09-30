@@ -196,8 +196,8 @@ func redactedJSON() ([]byte, error) { return []byte(strconv.Quote(Redacted)), ni
 //
 // Every constructor here seals an immutable string, so a reveal is pure and
 // repeatable. That is load-bearing, not incidental: validate checks the path
-// and the argv through sealed's predicates, and buildCmd reveals again through
-// sealed.Command to fill exec.Cmd. A constructor accepting a caller-supplied
+// and the argv through sealed's predicates, and sealed.Start reveals again to
+// start the process. A constructor accepting a caller-supplied
 // func would make that pair a time-of-check/time-of-use gap while looking like
 // a natural extension.
 type SecretArg struct {

@@ -98,7 +98,7 @@ func (r *OSSensitiveRunner) drainBound() time.Duration {
 	return min(d, r.bound())
 }
 
-// buildEnv splits muts into what buildCmd hands sealed.Command: a fresh copy
+// buildEnv splits muts into what startSealed hands sealed.Start: a fresh copy
 // of the captured environment with every occurrence of each mutated key
 // dropped, and one replacement per replace mutation, in mutation order.
 // Removing all occurrences matters: a duplicated key in the inherited
@@ -107,7 +107,7 @@ func (r *OSSensitiveRunner) drainBound() time.Duration {
 // byte-exact and never inspected. Key matching is case-sensitive, which is
 // correct for the POSIX platforms forgectl targets.
 //
-// It reads keys only. A replacement's value stays sealed until sealed.Command
+// It reads keys only. A replacement's value stays sealed until sealed.Start
 // appends it as KEY=value, after every inherited entry, so the order of the
 // final environment is exactly what it was when this function built it whole.
 func (r *OSSensitiveRunner) buildEnv(muts []EnvMutation) ([]string, []sealed.EnvVar) {
@@ -147,36 +147,36 @@ func envKeyOf(entry string) string {
 	return entry
 }
 
-// buildCmd assembles the *exec.Cmd through sealed.Command, which is the
-// reveal boundary: the only function that takes a SecretArg, Arg or
-// EnvMutation payload out of its wrapper, and it puts every payload into the
-// *exec.Cmd it returns (forgectl#854). A payload sits in a sealed.Value whose
-// reveal is unexported inside internal/exec/internal/sealed, and Go's
-// internal-package rule lets nothing outside internal/exec import that
-// package, so no other reveal compiles, in this package or anywhere else.
-// validate asks sealed one-bit questions (IsAbs, LeadsWithDash), Equal
-// compares inside sealed, and MapOpaque re-spells through sealed's closed
-// Transform set, which only sealed can mint.
+// startSealed starts sc's process through sealed.Start, which is the reveal
+// boundary: the only function that takes a SecretArg, Arg or EnvMutation
+// payload out of its wrapper, and it puts every payload into the child
+// process and nowhere else (forgectl#854). What comes back is a *sealed.Proc,
+// which can only wait for and kill the process. This package never holds an
+// *exec.Cmd, or anything else with a plaintext path, argv or environment.
 //
-// The returned *exec.Cmd holds the plaintext in Path, Args and Env, so
-// holding one is holding every payload. The compiler cannot restrict who
-// calls this method inside the package; TestTheRevealHasOneDoor does, for
-// production files: sealed.Command is named only here, and this method only
-// in RunSensitive. Tests may call it. What RunSensitive does with the Cmd
-// (start, wait and pipe wiring, never a log) is kept by review.
+// What the compiler enforces:
 //
-// That is the primary control. The guard tests are the backstop for what the
-// compiler cannot see:
+//   - a payload sits in a sealed.Value whose reveal is unexported inside
+//     internal/exec/internal/sealed, so no code outside sealed can read one,
+//     this package included, whatever the shape of the attempt (a call, a
+//     method value, an interface, a generic constraint);
+//   - the *exec.Cmd that sealed.Start builds never leaves sealed: no
+//     exported name returns it, and Proc's fields are closures over it;
+//   - Go's internal-package rule lets nothing outside internal/exec import
+//     sealed at all.
+//
+// What the guard tests enforce, as the backstop for what the compiler cannot
+// see:
 //
 //   - a //go:linkname directive or an "unsafe" import reaches an unexported
-//     symbol in any package, internal or not, so a linkname to sealed.Command
-//     or to this method would still read a payload
+//     symbol in any package, internal or not, so a linkname to sealed's
+//     unexported command would still read a payload
 //     (TestNoFileReachesPastTheTypeSystem refuses both module-wide);
-//   - the exported surface of this package, of sealed, and of tmuxesc, with
-//     every file and its build constraint, is pinned in
-//     testdata/exported_api.golden on every platform in guardPlatforms
-//     (TestExportedAPI), so a new export that hands a payload out, here or in
-//     sealed, fails until reviewed;
+//   - the exported surface of this package, of sealed (Proc among it, with
+//     no accessor that reads a payload), and of tmuxesc, with every file and
+//     its build constraint, is pinned in testdata/exported_api.golden on
+//     every platform in guardPlatforms (TestExportedAPI), so a new export
+//     that hands a payload out, here or in sealed, fails until reviewed;
 //   - outside this package, only the files in transformCallers name
 //     MapOpaque, Transform or TmuxDirOperand
 //     (TestNoCallerCodeReceivesAnOpaquePayload);
@@ -188,14 +188,16 @@ func envKeyOf(entry string) string {
 //   - no package but this one (and sealed's own test binary) imports sealed,
 //     a subpackage of internal/exec included, which the internal-package
 //     rule would admit (TestOnlyExecImportsSealed);
-//   - in this package's production files, sealed.Command is named only here
-//     and this method only in RunSensitive (TestTheRevealHasOneDoor).
+//   - in this package's production files, sealed.Start is named only here
+//     (TestSealedStartHasOneCaller). A package-level func can be reached only
+//     by naming it, so this check has no interface or method-value gap.
 //
-// It is a separate function so internal/exec's own tests can assert that the
-// real values do reach exec.Cmd.Args — the mirror of the redaction tests,
-// without a production accessor that reveals.
+// What neither enforces: the child is the caller's chosen backend, and a
+// backend that echoes its argv or environment to stdout hands a payload back
+// through the result by design. The seam keeps payloads out of logs and error
+// strings; it does not vet the program it runs.
 //
-// sealed.Command builds with exec.Command rather than exec.CommandContext
+// sealed.Start builds with exec.Command rather than exec.CommandContext
 // deliberately. CommandContext kills on context completion but does not own
 // what happens next, and this runner does: it must kill, reap, and retire two
 // pipe ends in a defined order and within a tested bound, and it must
@@ -204,16 +206,16 @@ func envKeyOf(entry string) string {
 // killers racing for the same process. The context check that CommandContext
 // performs before Start is done explicitly in RunSensitive instead.
 //
-// validate has already required an absolute path, so exec.Command performs no
-// PATH lookup here — which matters, because LookPath reads the live process
-// PATH rather than this runner's captured environment.
-func (r *OSSensitiveRunner) buildCmd(sc SensitiveCommand) *exec.Cmd {
+// validate has already required an absolute path, so no PATH lookup happens
+// — which matters, because LookPath reads the live process PATH rather than
+// this runner's captured environment.
+func (r *OSSensitiveRunner) startSealed(sc SensitiveCommand, stdout, stderr *os.File) (*sealed.Proc, error) {
 	args := make([]sealed.Value, len(sc.Args))
 	for i := range sc.Args {
 		args[i] = sc.Args[i].v
 	}
 	env, set := r.buildEnv(sc.Env)
-	return sealed.Command(sc.Path.v, args, env, set)
+	return sealed.Start(sc.Path.v, args, env, set, stdout, stderr)
 }
 
 // failedResult is what every never-ran path returns. ExitCode is -1, never 0:
@@ -258,7 +260,7 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 
 	// An already-done context must not buy a fork/exec. exec.CommandContext
 	// performs this check internally; since this runner deliberately does not
-	// use it (see buildCmd), the check is explicit here.
+	// use it (see startSealed), the check is explicit here.
 	if err := ctx.Err(); err != nil {
 		outcome := OutcomeCanceled
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -278,14 +280,11 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 		return failedResult(), newSensitiveError(sc.Kind, OutcomeStartFailed, failedResult(), "stderr pipe unavailable")
 	}
 
-	cmd := r.buildCmd(sc)
-	cmd.Stdout = outW
-	cmd.Stderr = errW
-
 	slog.Debug("Preparing to run sensitive command.", "cmd", sc)
 	start := time.Now()
 
-	if err := cmd.Start(); err != nil {
+	proc, err := r.startSealed(sc, outW, errW)
+	if err != nil {
 		closeAll(outR, outW, errR, errW)
 		slog.Error("Sensitive command failed to start.", "kind", sc.Kind.String())
 		return failedResult(), newSensitiveError(sc.Kind, OutcomeStartFailed, failedResult(), "fork/exec did not succeed")
@@ -308,7 +307,7 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 	go readCapped(errR, sc.StderrCap, errCh, overflow)
 
 	waitCh := make(chan error, 1)
-	go func() { waitCh <- cmd.Wait() }()
+	go func() { waitCh <- proc.Wait() }()
 
 	var (
 		killOnce sync.Once
@@ -318,7 +317,7 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 	// The Kill error is dropped deliberately: the only failure it reports is
 	// os.ErrProcessDone, which is the state kill was trying to reach. Every
 	// caller of kill follows it with a Wait, which carries the real outcome.
-	kill := func() { killOnce.Do(func() { _ = cmd.Process.Kill() }) }
+	kill := func() { killOnce.Do(func() { _ = proc.Kill() }) }
 
 	// A completed process wins over a simultaneously-ready cancellation. Go's
 	// select picks uniformly among ready cases, so without this the outcome of
