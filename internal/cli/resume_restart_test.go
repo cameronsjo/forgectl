@@ -24,11 +24,13 @@ const (
 // cliRestartEnv is a RestartEnv whose reads describe one ready session and
 // whose actions are counted.
 type cliRestartEnv struct {
-	pid                              int
-	pane                             string
-	ancestors                        map[int]bool
-	relaunchErr                      error
-	stopped                          bool
+	pid         int
+	pane        string
+	ancestors   map[int]bool
+	relaunchErr error
+	stopped     bool
+	// status overrides the registry status ReadEntry reports; "" is idle.
+	status                           string
 	terminated, relaunched, prepared int
 }
 
@@ -36,7 +38,11 @@ func (f *cliRestartEnv) ReadEntry(int) (resume.RegistryEntry, bool) {
 	if f.stopped {
 		return resume.RegistryEntry{}, false
 	}
-	return resume.RegistryEntry{Pid: f.pid, SessionID: restartSID, Status: "idle", ProcStart: restartProcStart}, true
+	status := f.status
+	if status == "" {
+		status = "idle"
+	}
+	return resume.RegistryEntry{Pid: f.pid, SessionID: restartSID, Status: status, ProcStart: restartProcStart}, true
 }
 func (f *cliRestartEnv) Alive(int) bool { return !f.stopped }
 func (f *cliRestartEnv) Identity(int) (resume.ProcIdentity, error) {
