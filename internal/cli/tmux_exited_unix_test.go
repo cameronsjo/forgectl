@@ -88,6 +88,14 @@ func TestTmuxKillAndRenameOnAnExitedServer(t *testing.T) {
 			if !errors.Is(err, tmux.ErrServerExited) {
 				t.Errorf("error = %v, want it to wrap tmux.ErrServerExited", err)
 			}
+			// forgectl#815: the leftover socket is named, so an operator with
+			// more than one server knows which one the remedy is about.
+			// Mutation that turns it red: drop the ExitedSocketPath arm of
+			// noServerForSession.
+			wantSocket := "tmux-" + strconv.Itoa(os.Getuid()) + "/default"
+			if !strings.Contains(msg, "on socket ") || !strings.Contains(msg, wantSocket) {
+				t.Errorf("error = %q, want it to name the leftover socket (%s)", msg, wantSocket)
+			}
 		})
 	}
 }

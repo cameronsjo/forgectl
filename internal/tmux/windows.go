@@ -48,39 +48,52 @@ const (
 
 // ListWindows returns every window across all sessions (list-windows -a).
 func (c *Client) ListWindows(ctx context.Context) ([]Window, error) {
+	windows, _, err := c.listWindows(ctx)
+	return windows, err
+}
+
+// listWindows is ListWindows plus how many rows it could not read
+// (parseWindowRows), for a listing that tells the operator about them.
+func (c *Client) listWindows(ctx context.Context) ([]Window, int, error) {
 	args := c.tmuxArgs("list-windows", "-a", "-F", windowFormat)
 	out, err := c.run.Run(ctx, c.tmuxBin, args...)
 	if err != nil {
 		if c.absentServer(ctx, args, err) {
-			return nil, nil
+			return nil, 0, nil
 		}
-		return nil, c.serverStateError(ctx, args, err)
+		return nil, 0, c.serverStateError(ctx, args, err)
 	}
-	return parseWindows(out)
+	return parseWindowRows(out)
 }
 
 func parseWindows(out string) ([]Window, error) {
+	windows, _, err := parseWindowRows(out)
+	return windows, err
+}
+
+// parseWindowRows is parseWindows plus the number of non-empty rows it dropped
+// (forgectl#815), for the reason parseSessionRows counts them: a window whose
+// name carries FieldSep is real, and a listing that silently omits it reads as
+// a smaller server.
+func parseWindowRows(out string) ([]Window, int, error) {
 	lines := splitLines(out)
-	windows := make([]Window, 0, len(lines))
-	for _, line := range lines {
-		f := splitFields(line)
-		// EXACT, not >=: windowFormat emits exactly windowFieldCount fields, and
-		// a window name may legally contain FieldSep
-		// (`tmux rename-window $'pr-o-r-1\x1fpad'`). Under a >= check that name
-		// splits into a row whose Name reads "pr-o-r-1", so LiveReviews
-		// (internal/pr/admission.go) would report a torn-down review as still
-		// live in `pr list`. A separator in a name can only ever push the count
-		// ABOVE the expected number, so requiring it exactly drops the forged row
-		// instead of misreading it. The count is spelled once, in the constant —
-		// forgectl#237 raised it from 8 to 9 by adding the parent session id.
-		if len(f) != windowFieldCount {
-			continue
-		}
-		// The window id AND its parent session id, both — a row is only usable
-		// as an identity if both halves are well formed (see parseSessions).
-		if ValidateWindowID(f[2]) != nil || ValidateSessionID(f[3]) != nil {
-			continue
-		}
+	// EXACT, not >=: windowFormat emits exactly windowFieldCount fields, and a
+	// window name may legally contain FieldSep
+	// (`tmux rename-window $'pr-o-r-1\x1fpad'`). Under a >= check that name
+	// splits into a row whose Name reads "pr-o-r-1", so LiveReviews
+	// (internal/pr/admission.go) would report a torn-down review as still live
+	// in `pr list`. A separator in a name can only ever push the count ABOVE
+	// the expected number, so requiring it exactly drops the forged row instead
+	// of misreading it. The count is spelled once, in the constant —
+	// forgectl#237 raised it from 8 to 9 by adding the parent session id.
+	//
+	// The window id AND its parent session id, both — a row is only usable as
+	// an identity if both halves are well formed (see parseSessions).
+	rows, unreadable := readableRows(lines, windowFieldCount, func(f []string) bool {
+		return ValidateWindowID(f[2]) == nil && ValidateSessionID(f[3]) == nil
+	})
+	windows := make([]Window, 0, len(rows))
+	for _, f := range rows {
 		windows = append(windows, Window{
 			ServerPID:   f[0],
 			ServerStart: f[1],
@@ -95,7 +108,11 @@ func parseWindows(out string) ([]Window, error) {
 	}
 	// Every row failing at once is the separator being gone, not eight forged
 	// names — see parsedRows for why that must be loud.
-	return parsedRows(windows, lines, "list-windows", windowFieldCount)
+	windows, err := parsedRows(windows, lines, "list-windows", windowFieldCount)
+	if err != nil {
+		return nil, 0, err
+	}
+	return windows, unreadable, nil
 }
 
 // ListPanes returns every pane across all sessions (list-panes -a).
@@ -240,6 +257,13 @@ func (c *Client) NewWindowWithEnv(
 ) (WindowIdentity, error) {
 	if name == "" {
 		return WindowIdentity{}, fmt.Errorf("cannot create a tmux window with an empty name")
+	}
+	// A name tmux would store as something else, or reject, could never be
+	// resolved by ResolveWindowExact again (forgectl#815): see
+	// refuseRewrittenName. A '.' or ':' lands as given on 3.4 and 3.7a+; only
+	// tmux 3.7 itself refuses one, loudly, so it is left to tmux.
+	if err := refuseRewrittenName(name, true); err != nil {
+		return WindowIdentity{}, fmt.Errorf("create window %q: %w", name, err)
 	}
 	for _, e := range env {
 		if err := validateEnvAssignment(e); err != nil {
@@ -624,23 +648,32 @@ var (
 // panes by index; the attached session and active window/pane are marked. Pass
 // icons=false for ASCII markers (NO_COLOR / --no-icons / misconfigured term).
 func (c *Client) Tree(ctx context.Context, icons bool) (string, error) {
-	sessions, err := c.DisplaySessions(ctx)
+	tree, _, err := c.TreeListing(ctx, icons)
+	return tree, err
+}
+
+// TreeListing is Tree plus how many session and window rows tmux returned
+// that could not be read (forgectl#815), so `tmux tree` and the TUI can say
+// the tree is missing them rather than draw a smaller server.
+func (c *Client) TreeListing(ctx context.Context, icons bool) (string, UnreadableRows, error) {
+	sessions, unreadableSessions, err := c.DisplaySessionListing(ctx)
 	if err != nil {
-		return "", err
+		return "", UnreadableRows{}, err
 	}
-	windows, err := c.DisplayWindows(ctx)
+	windows, unreadableWindows, err := c.DisplayWindowListing(ctx)
 	if err != nil {
-		return "", err
+		return "", UnreadableRows{}, err
 	}
 	panes, err := c.DisplayPanes(ctx)
 	if err != nil {
-		return "", err
+		return "", UnreadableRows{}, err
 	}
 	m := iconTreeMarkers
 	if !icons {
 		m = asciiTreeMarkers
 	}
-	return buildTree(sessions, windows, panes, m), nil
+	return buildTree(sessions, windows, panes, m),
+		UnreadableRows{Sessions: unreadableSessions, Windows: unreadableWindows}, nil
 }
 
 // buildTree is the pure assembly step — no exec, no I/O — so it's directly

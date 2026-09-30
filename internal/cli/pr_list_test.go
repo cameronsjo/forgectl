@@ -600,3 +600,17 @@ func TestPrTeardown_NotesAnUnresponsiveTmuxOnStderr(t *testing.T) {
 		})
 	}
 }
+
+// TestPrListHelpNamesEveryWindowValue is forgectl#815 item 6: the WINDOW
+// column's help lists every value windowStatus can print, including the
+// exited-server one.
+//
+// Mutation that turns it red: drop "no tmux server" from `pr list`'s Long.
+func TestPrListHelpNamesEveryWindowValue(t *testing.T) {
+	long := strings.Join(strings.Fields(newPrListCmd(nil).Long), " ")
+	for _, value := range []string{"live", "window gone", noTmuxServerStatus, "?"} {
+		if !strings.Contains(long, value) {
+			t.Errorf("pr list --help does not name the WINDOW value %q", value)
+		}
+	}
+}

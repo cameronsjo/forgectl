@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -324,7 +325,44 @@ func (c *Client) DisplaySessionListing(ctx context.Context) (sessions []Session,
 
 // DisplayWindows is ListWindows under DisplaySessions' rule.
 func (c *Client) DisplayWindows(ctx context.Context) ([]Window, error) {
-	return exitedIsEmpty(c.ListWindows(ctx))
+	windows, _, err := c.DisplayWindowListing(ctx)
+	return windows, err
+}
+
+// DisplayWindowListing is DisplayWindows plus the number of window rows tmux
+// returned that could not be read (forgectl#815), for DisplaySessionListing's
+// reason.
+func (c *Client) DisplayWindowListing(ctx context.Context) (windows []Window, unreadable int, err error) {
+	windows, unreadable, err = c.listWindows(ctx)
+	if errors.Is(err, ErrServerExited) {
+		return nil, 0, nil
+	}
+	return windows, unreadable, err
+}
+
+// UnreadableRows counts the rows an operator-facing listing could not read,
+// per kind (forgectl#806, forgectl#815).
+type UnreadableRows struct {
+	Sessions, Windows int
+}
+
+// Note is the one-line notice a listing prints when any row was unreadable,
+// and "" when none was. It is one line on purpose: the TUI shows it in a
+// single-line footer, and the CLI prints it on stderr so --json output keeps
+// its shape.
+func (u UnreadableRows) Note() string {
+	var parts []string
+	if u.Sessions > 0 {
+		parts = append(parts, fmt.Sprintf("%d session(s)", u.Sessions))
+	}
+	if u.Windows > 0 {
+		parts = append(parts, fmt.Sprintf("%d window(s)", u.Windows))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " and ") + " could not be read and are not listed — " +
+		"a name carrying the 0x1F field separator hides its row; rename or kill it with tmux itself"
 }
 
 // DisplayPanes is ListPanes under DisplaySessions' rule.

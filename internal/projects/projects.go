@@ -473,6 +473,10 @@ func isGitRepo(dir string) bool {
 // called `forge` while a `forge-review` session existed found the sibling and
 // attached to it — the project never opened, and nothing reported a problem
 // (forgectl#237).
+//
+// tmux stores ':' and '.' in a session name as '_', so directories named
+// a.b, a:b and a_b share one session, the same way two directories with one
+// basename already do (forgectl#815).
 func (c *Client) Open(ctx context.Context, dir string) error {
 	name := filepath.Base(dir)
 	client := tmux.New(c.run)

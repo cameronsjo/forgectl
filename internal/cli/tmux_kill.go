@@ -27,10 +27,10 @@ func newTmuxKillCmd(client *tmux.Client, th theme.Theme) *cobra.Command {
 			session, err := client.ResolveSessionExact(cmd.Context(), name)
 			if err != nil {
 				if errors.Is(err, tmux.ErrSessionNotFound) {
-					return fmt.Errorf("no such session: %s", name)
+					return fmt.Errorf("no such session: %q", name)
 				}
 				if errors.Is(err, tmux.ErrServerExited) {
-					return noServerForSession("kill", name)
+					return noServerForSession("kill", name, err)
 				}
 				return err
 			}

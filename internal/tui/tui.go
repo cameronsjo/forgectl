@@ -29,6 +29,33 @@ func errStatus(prefix string, err error, s theme.Styles) string {
 	return s.Danger.Render(termsafe.SafeLine("✗ " + prefix + err.Error()))
 }
 
+// unreadableStatus is the footer note for a listing that could not read some
+// of tmux's rows (forgectl#815), or "" when it read them all — so a screen
+// with a silently missing session or window does not read as a smaller
+// server. The note is forgectl's own text, but it goes through SafeLine like
+// every other footer.
+func unreadableStatus(u tmux.UnreadableRows, s theme.Styles) string {
+	note := u.Note()
+	if note == "" {
+		return ""
+	}
+	return s.Warn.Render(termsafe.SafeLine("! " + note))
+}
+
+// noteUnreadable adds unreadableStatus to the footer. It appends rather than
+// replaces: a screen reload right after a kill or rename must keep that
+// mutation's result visible beside the note.
+func (m *model) noteUnreadable(u tmux.UnreadableRows) {
+	note := unreadableStatus(u, m.styles)
+	if note == "" {
+		return
+	}
+	if m.status != "" {
+		m.status += "  "
+	}
+	m.status += note
+}
+
 // ActionKind is the deferred jump the TUI selected. Jumps that need the tty
 // (attach/sesh connect) can't run while Bubble Tea owns the terminal, so the
 // TUI records the intent and quits; the caller performs it afterward. Mutations
@@ -609,10 +636,12 @@ func (m *model) enterPick() {
 }
 
 func (m *model) enterSessions() {
-	sessions, err := m.client.DisplaySessions(m.ctx)
+	sessions, unreadable, err := m.client.DisplaySessionListing(m.ctx)
 	if err != nil {
 		slog.Error("Failed to load sessions.", "error", err)
 		m.status = errStatus("tmux: ", err, m.styles)
+	} else {
+		m.noteUnreadable(tmux.UnreadableRows{Sessions: unreadable})
 	}
 	items := make([]list.Item, 0, len(sessions))
 	for _, s := range sessions {
@@ -624,10 +653,12 @@ func (m *model) enterSessions() {
 }
 
 func (m *model) enterWindows() {
-	windows, err := m.client.DisplayWindows(m.ctx)
+	windows, unreadable, err := m.client.DisplayWindowListing(m.ctx)
 	if err != nil {
 		slog.Error("Failed to load windows.", "error", err)
 		m.status = errStatus("tmux: ", err, m.styles)
+	} else {
+		m.noteUnreadable(tmux.UnreadableRows{Windows: unreadable})
 	}
 	items := make([]list.Item, 0, len(windows))
 	for _, w := range windows {
@@ -639,10 +670,12 @@ func (m *model) enterWindows() {
 }
 
 func (m *model) enterTree() {
-	out, err := m.client.Tree(m.ctx, !m.noIcons)
+	out, unreadable, err := m.client.TreeListing(m.ctx, !m.noIcons)
 	if err != nil {
 		slog.Error("Failed to load tree.", "error", err)
 		m.status = errStatus("tmux: ", err, m.styles)
+	} else {
+		m.noteUnreadable(unreadable)
 	}
 	m.tree.SetContent(out)
 	m.tree.GotoTop()

@@ -127,8 +127,12 @@ func TestSessionVerbsGenerationGuardIsolated(t *testing.T) {
 		if _, err := runner.Run(ctx, tmuxBin, "rename-session", "-t", "$0", "--", hostile+" bare"); err != nil {
 			t.Fatalf("bare reference rename to %q: %v", hostile, err)
 		}
-		if err := c.RenameSession(ctx, bravo, hostile); err != nil {
-			t.Fatalf("RenameSession(%q): %v", hostile, err)
+		// renameSessionGuarded, not RenameSession: since forgectl#815
+		// RenameSession refuses a backslash or "$HOME" in a session name, but
+		// these are the names that prove the quoting, so the guarded path is
+		// driven directly.
+		if err := c.renameSessionGuarded(ctx, bravo, hostile); err != nil {
+			t.Fatalf("renameSessionGuarded(%q): %v", hostile, err)
 		}
 		got := sessionNames(t, c)
 		guardedName = ""
