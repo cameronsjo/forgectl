@@ -81,6 +81,13 @@ type Watcher struct {
 	debounce time.Duration
 	maxWait  time.Duration
 
+	// createArmsSettle turns on the forgectl#895 workaround in Run: any
+	// in-tree Create that is not stray arms a settle. NewWatcher sets it
+	// from kqueueListing, since only kqueue's directory listing can hide a
+	// new doc behind an unopenable entry (forgectl#936). It is a field so
+	// tests elsewhere can exercise the workaround; set it before Run starts.
+	createArmsSettle bool
+
 	// resetPending records that a watch was added through a path that
 	// stopped naming its directory, or that a watched directory moved.
 	// fsnotify's bookkeeping for such a watch cannot be trusted, and a moved
@@ -116,7 +123,7 @@ func NewWatcher(store *Store, broker *Broker) (*Watcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	w := &Watcher{fsw: fsw, store: store, broker: broker, debounce: DefaultDebounce, maxWait: DefaultMaxWait}
+	w := &Watcher{fsw: fsw, store: store, broker: broker, debounce: DefaultDebounce, maxWait: DefaultMaxWait, createArmsSettle: kqueueListing}
 	w.register(store.Current())
 	return w, nil
 }
@@ -484,8 +491,8 @@ func (w *Watcher) Run(ctx context.Context) {
 			// the rebuilt index compares (sameIndex), so a name that did not
 			// change what resolves stays silent (forgectl#904).
 			attachmentEvent := !stray && w.attachmentRelevant(ev)
-			// Any in-tree Create arms a settle too, and publishes only if
-			// the rebuilt index changed (forgectl#895). On kqueue a new
+			// On kqueue, any in-tree Create arms a settle too, and publishes
+			// only if the rebuilt index changed (forgectl#895). A new
 			// entry reaches us only as the Create fsnotify's dirChange sends
 			// while listing the directory, and that listing stops at the
 			// first entry it cannot open (EACCES, EPERM, ENOENT), which it
@@ -495,7 +502,9 @@ func (w *Watcher) Run(ctx context.Context) {
 			// rebuilds already; an unopenable plain file's lands here, and
 			// the rebuild's walk finds the docs the listing missed. It can
 			// postpone a pending rebuild no further than settleIn allows.
-			createEvent := !stray && ev.Has(fsnotify.Create) && w.inTree(ev.Name)
+			// Other backends report each entry itself, so there a non-doc
+			// Create (build output, say) costs no reload (forgectl#936).
+			createEvent := w.createArmsSettle && !stray && ev.Has(fsnotify.Create) && w.inTree(ev.Name)
 
 			// A reset already pending with its reload armed is not re-armed
 			// by an event that is not otherwise relevant, so churn on other
