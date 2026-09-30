@@ -710,7 +710,7 @@ func captureLog(t *testing.T) *strings.Builder {
 // success and failure, names the repo without its token, and a failure line
 // does not render the CommandError (whose text is the argv, token included).
 func TestSandbox_LogLinesCarryNoRepoCredential(t *testing.T) {
-	const repo = "https://x-access-token:SECRETTOK@git.example.test/o/r.git"
+	const repo = "https://x-access-token:SECRETTOK@git.example.test/o/r.git" //nolint:gosec // G101: a fake credential the test asserts never reaches a log line
 	for _, tc := range []struct {
 		name string
 		fail bool

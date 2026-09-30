@@ -670,7 +670,7 @@ func TestPrune_RemoteDeleteVerifyFailure_DoesNotEchoGhStderr(t *testing.T) {
 // and git's own stderr is never echoed. printPruneResults escapes again, but
 // the package must not rely on that one sink.
 func TestPrune_ErrIsTerminalSafeByConstruction(t *testing.T) {
-	const hostile = "feat/\x1b[2J‮gpj.exe\u0085x"
+	const hostile = "feat/\x1b[2J\u202egpj.exe\u0085x"
 	const wtPath = "/tmp/wt\x1b]0;pwned\x07"
 	isAPI := func(name string, args []string) bool { return name == "gh" && len(args) > 0 && args[0] == "api" }
 	for _, tc := range []struct {
