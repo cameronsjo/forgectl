@@ -32,6 +32,45 @@ var sandboxTeardown = sandbox.Teardown
 // not depend on whether the host filesystem recycles an inode into a symlink.
 var staleMemberIsRegular = func(info fs.FileInfo) bool { return info.Mode().IsRegular() }
 
+// beforeTeardownReread runs between a pinned-handle protocol's root.Lstat of
+// the member and its re-read open (discardStale, discardRecordOnly,
+// setAsideUndecodableRecord). It is a no-op in production; a test sets it to
+// swap the entry in exactly the window the Lstat cannot cover (forgectl#776).
+// Tests must restore it and must not run in parallel while overriding it.
+var beforeTeardownReread = func(string) {}
+
+// rereadPinnedMember re-reads member's bytes through root, the pinned
+// sessions-dir handle, for the byte comparison each pinned-handle protocol
+// makes before it acts. name is the member's base name in root.
+//
+// The caller's root.Lstat checked the NAME; this proves what the open
+// reached. openRegularInRoot refuses a symlink (even one inside the root) and a
+// FIFO without blocking, and the descriptor must be the very file the member
+// was resolved from (os.SameFile against member.info). So a same-bytes copy,
+// or the original reached through a link, is refused before its bytes are
+// compared (forgectl#776).
+func rereadPinnedMember(root *os.Root, name string, member breadcrumbMember) ([]byte, error) {
+	beforeTeardownReread(member.path)
+	file, info, err := openRegularInRoot(root, name)
+	if err != nil {
+		return nil, fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+	}
+	if !os.SameFile(info, member.info) {
+		_ = file.Close()
+		return nil, fmt.Errorf("breadcrumb %s changed identity before its re-read; refusing to act on it",
+			member.displayPath)
+	}
+	data, readErr := readBreadcrumbBytes(file)
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(readErr))
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close breadcrumb %s after re-read: %w", member.displayPath, termsafe.Error(closeErr))
+	}
+	return data, nil
+}
+
 // Teardown discards the review session recorded at path.
 //
 // path MUST resolve to a member of the current breadcrumb set — a
@@ -344,17 +383,9 @@ func (c *Client) discardStale(member breadcrumbMember) error {
 		return fmt.Errorf("breadcrumb %s is no longer a regular file; refusing to remove it", member.displayPath)
 	}
 
-	file, err := openRegularInRoot(root, name)
+	data, err := rereadPinnedMember(root, name, member)
 	if err != nil {
-		return fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
-	}
-	data, readErr := readBreadcrumbBytes(file)
-	closeErr := file.Close()
-	if readErr != nil {
-		return fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(readErr))
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close breadcrumb %s after re-read: %w", member.displayPath, termsafe.Error(closeErr))
+		return err
 	}
 	if !bytes.Equal(data, member.bytes) {
 		return fmt.Errorf("breadcrumb %s changed on disk during teardown; refusing to remove it", member.displayPath)
@@ -439,17 +470,9 @@ func (c *Client) discardRecordOnly(member breadcrumbMember) error {
 		return fmt.Errorf("breadcrumb %s is no longer a regular file; refusing to remove it", member.displayPath)
 	}
 
-	file, err := openRegularInRoot(root, name)
+	data, err := rereadPinnedMember(root, name, member)
 	if err != nil {
-		return fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
-	}
-	data, readErr := readBreadcrumbBytes(file)
-	closeErr := file.Close()
-	if readErr != nil {
-		return fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(readErr))
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close breadcrumb %s after re-read: %w", member.displayPath, termsafe.Error(closeErr))
+		return err
 	}
 	if !bytes.Equal(data, member.bytes) {
 		return fmt.Errorf("breadcrumb %s changed on disk during teardown; refusing to remove it", member.displayPath)
@@ -534,17 +557,9 @@ func (c *Client) setAsideUndecodableRecord(member breadcrumbMember) (string, err
 		return "", fmt.Errorf("breadcrumb %s is no longer a regular file; refusing to move it", member.displayPath)
 	}
 
-	file, err := openRegularInRoot(root, name)
+	data, err := rereadPinnedMember(root, name, member)
 	if err != nil {
-		return "", fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
-	}
-	data, readErr := readBreadcrumbBytes(file)
-	closeErr := file.Close()
-	if readErr != nil {
-		return "", fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(readErr))
-	}
-	if closeErr != nil {
-		return "", fmt.Errorf("close breadcrumb %s after re-read: %w", member.displayPath, termsafe.Error(closeErr))
+		return "", err
 	}
 	if !bytes.Equal(data, member.bytes) {
 		return "", fmt.Errorf("breadcrumb %s changed on disk during repair; refusing to move it", member.displayPath)

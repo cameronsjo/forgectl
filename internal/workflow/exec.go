@@ -7,6 +7,7 @@ import (
 	"log/slog"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -210,7 +211,13 @@ func runStep(ctx context.Context, run exec.Runner, _ *Context, step PlanStep) er
 		slog.Warn("Run step missing required cmd field.")
 		return errors.New("run step requires cmd")
 	}
-	slog.Debug("Running command.", "cmd", step.Cmd, "args", step.Args)
+	// The args are the workflow author's, so the Runner renders them as flag
+	// names only (#749), and so does this line: a token in any shape (a
+	// clone URL, docker login -p X, curl -u u:X) would otherwise reach the
+	// log. --dry-run's plan printout is deliberate review output and still
+	// shows them.
+	ctx = exec.WithOpaqueArgs(ctx, 0, len(step.Args))
+	slog.Debug("Running command.", "cmd", redact.Arg(step.Cmd), "args", redact.UserArgs(step.Args))
 	if d, ok := run.(exec.DiscardingRunner); ok {
 		return d.RunDiscardingStdout(ctx, step.Cmd, step.Args...)
 	}
