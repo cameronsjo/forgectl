@@ -31,6 +31,16 @@ type SystemRestartEnv struct {
 	runner exec.Runner
 	// forgectl is the absolute path typed into each pane.
 	forgectl string
+	// herdr is the herdr binary; "" runs `herdr` from PATH.
+	herdr string
+}
+
+// herdrBin is the herdr binary every call runs.
+func (e SystemRestartEnv) herdrBin() string {
+	if e.herdr != "" {
+		return e.herdr
+	}
+	return "herdr"
 }
 
 var _ RestartEnv = SystemRestartEnv{}
@@ -115,7 +125,7 @@ func (e SystemRestartEnv) Pane(ctx context.Context, pane string) (PaneState, err
 	if err := checkPaneArg(pane); err != nil {
 		return PaneState{}, err
 	}
-	out, err := e.runner.Run(ctx, "herdr", "pane", "get", pane)
+	out, err := e.runner.Run(ctx, e.herdrBin(), "pane", "get", pane)
 	if err != nil {
 		if paneNotFound(err) {
 			return PaneState{}, fmt.Errorf("pane %s: %w", pane, ErrPaneGone)
@@ -126,7 +136,7 @@ func (e SystemRestartEnv) Pane(ctx context.Context, pane string) (PaneState, err
 	if err != nil {
 		return PaneState{}, err
 	}
-	out, err = e.runner.Run(ctx, "herdr", "pane", "process-info", "--pane", pane)
+	out, err = e.runner.Run(ctx, e.herdrBin(), "pane", "process-info", "--pane", pane)
 	if err != nil {
 		if paneNotFound(err) {
 			return PaneState{}, fmt.Errorf("pane %s: %w", pane, ErrPaneGone)
@@ -145,7 +155,7 @@ func (e SystemRestartEnv) Screen(ctx context.Context, pane string) (string, erro
 	if err := checkPaneArg(pane); err != nil {
 		return "", err
 	}
-	out, err := e.runner.Run(ctx, "herdr", "pane", "read", pane, "--source", "visible")
+	out, err := e.runner.Run(ctx, e.herdrBin(), "pane", "read", pane, "--source", "visible")
 	if err != nil {
 		// Dropped whole rather than wrapped: a *CommandError keeps stdout on
 		// its Output field, and stdout here is screen text.
@@ -163,7 +173,7 @@ func (e SystemRestartEnv) ClearInput(ctx context.Context, pane string) error {
 	if err := checkPaneArg(pane); err != nil {
 		return err
 	}
-	if _, err := e.runner.Run(ctx, "herdr", "pane", "send-keys", pane, "ctrl+u"); err != nil {
+	if _, err := e.runner.Run(ctx, e.herdrBin(), "pane", "send-keys", pane, "ctrl+u"); err != nil {
 		return fmt.Errorf("herdr pane send-keys: %w", err)
 	}
 	return nil
@@ -178,7 +188,7 @@ func (e SystemRestartEnv) Relaunch(ctx context.Context, pane, sessionID string) 
 	if err != nil {
 		return err
 	}
-	if _, err := e.runner.Run(ctx, "herdr", "pane", "run", pane, line); err != nil {
+	if _, err := e.runner.Run(ctx, e.herdrBin(), "pane", "run", pane, line); err != nil {
 		return fmt.Errorf("herdr pane run: %w", err)
 	}
 	return nil

@@ -149,6 +149,9 @@ forgectl resume snapshot --quiet   # same, silent — the form a Stop hook uses
 forgectl resume outdated           # list live sessions running an older claude than the one installed (read-only)
 forgectl resume outdated --json    # stable JSON array for scripts; see `resume outdated --help` for the field table
 forgectl resume restart --outdated # stop + resume those sessions in their herdr panes once each is idle (--dry-run: plan only)
+forgectl resume hooks run          # fire the [[resume.on_update]] hooks if claude changed version (--dry-run: show what would fire)
+forgectl resume hooks install      # install the launchd watcher that runs the hooks when claude updates (macOS)
+forgectl resume hooks status       # watcher installed/loaded, recorded versions, last hook runs (--json)
 
 # surface — start a harness inside a terminal manager without exposing its invocation
 forgectl surface launch <target> --surface tmux           # tmux, cmux, or herdr — always explicit, never a default
