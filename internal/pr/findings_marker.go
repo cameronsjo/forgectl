@@ -57,8 +57,10 @@ var errFindingsMarkerIncomplete = errors.New("findings owner marker is incomplet
 var errFindingsMarkerUnreadable = errors.New("findings owner marker cannot be opened")
 
 // openFindingsMarker is the marker opener, a seam so a test can inject open
-// errors (EACCES, EMFILE) that root and a healthy process cannot produce.
-var openFindingsMarker = openNoFollowNonblock
+// errors (EACCES, EMFILE) that root and a healthy process cannot produce. It
+// opens name inside dir, the handle on one findings dir, never by path
+// (forgectl#685).
+var openFindingsMarker = openInRootNoFollowNonblock
 
 // findingsLiveness is the removal verdict for one findings dir.
 type findingsLiveness int
@@ -170,12 +172,17 @@ func validFindingsOwnerName(name string) bool {
 // reviewer can produce those, and making its own dir removable is the only
 // thing it gains.
 //
-// The open is openNoFollowNonblock, the repair-log opener's core: a symlinked
-// marker fails with ELOOP rather than being followed (so it is unreadable,
-// and kept), and a FIFO opens without blocking and is then refused by the
-// Fstat check. The read is capped before it allocates.
-func readFindingsMarker(dir string) (string, error) {
-	f, err := openFindingsMarker(filepath.Join(dir, findingsOwnerMarker), os.O_RDONLY, 0)
+// dir is the handle on the findings dir that cleanup judges and removes, so
+// the marker read is the marker of that directory, whatever happens to the
+// store's path meanwhile (forgectl#685). The open is
+// openInRootNoFollowNonblock, an openat against dir's descriptor with the
+// repair-log opener's flags: a symlinked marker fails with ELOOP rather than
+// being followed (so it is unreadable, and kept), and a FIFO opens without
+// blocking and is then refused by the Fstat check. os.Root.OpenFile would not
+// do: it resolves a symlink that stays inside the root, and so would follow a
+// marker linked to another marker. The read is capped before it allocates.
+func readFindingsMarker(dir *os.Root) (string, error) {
+	f, err := openFindingsMarker(dir, findingsOwnerMarker)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", err
 	}
@@ -241,11 +248,11 @@ func (c *Client) ownerRecordLive(name string) bool {
 	return rec.Local
 }
 
-// findingsDirLiveness classifies the findings dir at full for removal. full
-// must already be a plain directory directly under the store: both callers
-// run isFindingsStoreChild and a directory check before asking.
-func (c *Client) findingsDirLiveness(full string) findingsLiveness {
-	name, err := readFindingsMarker(full)
+// findingsDirLiveness classifies the findings dir dir for removal. dir must
+// be a handle from openFindingsChild, so it is a plain directory directly
+// under the store; full is its path, for log lines only.
+func (c *Client) findingsDirLiveness(dir *os.Root, full string) findingsLiveness {
+	name, err := readFindingsMarker(dir)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return findingsUnmarked
@@ -266,13 +273,14 @@ func (c *Client) findingsDirLiveness(full string) findingsLiveness {
 }
 
 // skipLiveFindingsDir reports whether the dir at full must be kept because
-// a live review may still own it, logging a live skip at Info. An unmarked
+// a live review may still own it, logging a live skip at Info. dir is the
+// handle on it and full its path, for log lines only. An unmarked
 // dir is only counted into *unmarked; the caller logs one summary line per
 // run (warnUnmarkedFindings) instead of a warning per dir per run. It is the
 // one place both the preview and the apply-time re-check turn a verdict into
 // a skip.
-func (c *Client) skipLiveFindingsDir(full string, unmarked *int) bool {
-	switch c.findingsDirLiveness(full) {
+func (c *Client) skipLiveFindingsDir(dir *os.Root, full string, unmarked *int) bool {
+	switch c.findingsDirLiveness(dir, full) {
 	case findingsLive:
 		slog.Info("Skipping findings dir: the review that owns it still has a session record.", "path", full)
 		return true

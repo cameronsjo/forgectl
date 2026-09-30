@@ -2,6 +2,7 @@ package pr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -27,11 +28,16 @@ type FindingsEntry struct {
 // dir (no local review has ever run) returns (nil, nil), mirroring List's
 // os.IsNotExist handling for the sessions dir.
 func (c *Client) FindingsList() ([]FindingsEntry, error) {
-	entries, err := os.ReadDir(c.findingsDir)
+	store, err := os.OpenRoot(c.findingsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
+		return nil, fmt.Errorf("read pr findings dir: %w", err)
+	}
+	defer func() { _ = store.Close() }()
+	entries, err := fs.ReadDir(store.FS(), ".")
+	if err != nil {
 		return nil, fmt.Errorf("read pr findings dir: %w", err)
 	}
 	var out []FindingsEntry
@@ -48,10 +54,54 @@ func (c *Client) FindingsList() ([]FindingsEntry, error) {
 		out = append(out, FindingsEntry{
 			Path:    full,
 			ModTime: info.ModTime(),
-			Size:    findingsDirSize(full),
+			Size:    findingsChildSize(store, e.Name()),
 		})
 	}
 	return out, nil
+}
+
+// openFindingsStore opens the findings store once, as the handle every
+// cleanup step below goes through. os.OpenRoot resolves c.findingsDir in the
+// ordinary way, so a symlinked store still opens (and reclaims) its target;
+// what the handle pins is the directory that resolution reached.
+//
+// A missing store is an error errors.Is matches to fs.ErrNotExist.
+func (c *Client) openFindingsStore() (*os.Root, error) {
+	store, err := os.OpenRoot(c.findingsDir)
+	if err != nil {
+		return nil, fmt.Errorf("open pr findings store: %w", err)
+	}
+	return store, nil
+}
+
+// errFindingsChildMoved is openFindingsChild's refusal of a name that no
+// longer resolves to the directory the caller checked.
+var errFindingsChildMoved = errors.New("findings dir changed between the check and the open")
+
+// openFindingsChild opens name, a direct child of store, as its own handle,
+// and proves it is the same directory as checked, the Lstat result the
+// caller already judged a plain directory (forgectl#685). Everything cleanup
+// then reads about the dir, its marker and its size, goes through that
+// handle, so the dir that is judged is the dir the store handle removes.
+//
+// store.OpenRoot follows a symlink that stays inside the store, so a name
+// swapped for one after the caller's Lstat would open some other findings
+// dir. The SameFile check against checked refuses that: the handle is either
+// the checked directory or nothing.
+func openFindingsChild(store *os.Root, name string, checked fs.FileInfo) (*os.Root, error) {
+	child, err := store.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	got, err := child.Stat(".")
+	if err == nil && !os.SameFile(checked, got) {
+		err = errFindingsChildMoved
+	}
+	if err != nil {
+		_ = child.Close()
+		return nil, err
+	}
+	return child, nil
 }
 
 // findingsRemovalCandidate is the pure per-entry removal decision
@@ -138,12 +188,21 @@ func isFindingsStoreChild(findingsDir, full string) bool {
 // with apply=false and hand it to FindingsRemove, rather than calling
 // FindingsCleanup a second time with apply=true — a second call re-derives
 // its set from a fresh ReadDir and could diverge from what was confirmed.
+//
+// The store is opened once (openFindingsStore), and every read below goes
+// through that handle. A store that cannot be opened stops the run with one
+// error (forgectl#685); only a missing one is the empty result.
 func (c *Client) FindingsCleanup(ctx context.Context, olderThan time.Duration, apply bool) ([]string, error) {
-	entries, err := os.ReadDir(c.findingsDir)
+	store, err := c.openFindingsStore()
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
+		return nil, err
+	}
+	defer func() { _ = store.Close() }()
+	entries, err := fs.ReadDir(store.FS(), ".")
+	if err != nil {
 		return nil, fmt.Errorf("read pr findings dir: %w", err)
 	}
 	cutoff := time.Now().Add(-olderThan)
@@ -161,7 +220,7 @@ func (c *Client) FindingsCleanup(ctx context.Context, olderThan time.Duration, a
 		}
 		// Advisory here, outside the lock, so the preview never offers a live
 		// review's dir. FindingsRemove re-asks under the lock before removing.
-		if c.skipLiveFindingsDir(full, &unmarked) {
+		if c.skipFindingsChild(store, e.Name(), info, full, &unmarked) {
 			continue
 		}
 		candidates = append(candidates, full)
@@ -170,7 +229,21 @@ func (c *Client) FindingsCleanup(ctx context.Context, olderThan time.Duration, a
 	if !apply {
 		return candidates, nil
 	}
-	return c.FindingsRemove(ctx, candidates)
+	return c.findingsRemoveFrom(ctx, store, candidates)
+}
+
+// skipFindingsChild is the preview's liveness ask for the store child name:
+// it opens the child as its own handle and asks skipLiveFindingsDir through
+// it. A child that cannot be opened as the directory the scan listed cannot be
+// classified, so it is kept.
+func (c *Client) skipFindingsChild(store *os.Root, name string, info fs.FileInfo, full string, unmarked *int) bool {
+	child, err := openFindingsChild(store, name, info)
+	if err != nil {
+		slog.Warn("Skipping findings dir that cannot be opened through the store.", "path", full, "error", err)
+		return true
+	}
+	defer func() { _ = child.Close() }()
+	return c.skipLiveFindingsDir(child, full, unmarked)
 }
 
 // FindingsRemove removes exactly the given findings-dir paths — the set a
@@ -189,7 +262,7 @@ func (c *Client) FindingsCleanup(ctx context.Context, olderThan time.Duration, a
 // The re-validation — it must be a findings dir directly under c.findingsDir
 // (isFindingsStoreChild: never the store itself, never nested deeper, always
 // carrying the findings prefix), exist, be a plain directory (not a symlink),
-// remain contained within c.findingsDir after symlink resolution, and not be
+// open through the store handle as that same directory, and not be
 // owned by a review whose session record still exists or carry no owner
 // marker at all (findingsDirLiveness, forgectl#558) — means a
 // path that never qualified, or stopped qualifying between preview and apply
@@ -201,15 +274,38 @@ func (c *Client) FindingsCleanup(ctx context.Context, olderThan time.Duration, a
 // same string the audit row records as RecordPath — not the caller's spelling,
 // which may carry a trailing slash or dot segments.
 //
-// The first error stops the run and returns the paths removed so far: a busy
+// A missing store removes nothing and is not an error. The first error stops
+// the run and returns the paths removed so far: a store that exists but cannot
+// be opened (reported once, before any path, forgectl#685), a busy
 // lock, a cancelled ctx, an intent row that could not be written (the removal
 // is refused and the dir is left in place), or a failed removal.
 func (c *Client) FindingsRemove(ctx context.Context, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	store, err := c.openFindingsStore()
+	if errors.Is(err, fs.ErrNotExist) {
+		// Nothing under a store that is not there, the same answer
+		// FindingsCleanup gives; one line, not one per path.
+		slog.Warn("The findings store does not exist; nothing to remove.", "count", len(paths))
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = store.Close() }()
+	return c.findingsRemoveFrom(ctx, store, paths)
+}
+
+// findingsRemoveFrom is FindingsRemove's loop over an already opened store
+// handle. FindingsCleanup's apply half calls it with the handle its scan used,
+// so the scan and the removal go through one open of the store.
+func (c *Client) findingsRemoveFrom(ctx context.Context, store *os.Root, paths []string) ([]string, error) {
 	var removed []string
 	var unmarked int
 	defer func() { warnUnmarkedFindings(unmarked) }()
 	for _, full := range paths {
-		got, err := c.removeFindingsDirAudited(ctx, full, &unmarked)
+		got, err := c.removeFindingsDirAudited(ctx, store, full, &unmarked)
 		if err != nil {
 			return removed, err
 		}
@@ -229,7 +325,7 @@ func (c *Client) FindingsRemove(ctx context.Context, paths []string) ([]string, 
 // record: RecordPath names the findings dir and Detail its size, while Ref,
 // Mode, FromPhase, and Workspace stay empty — filling any of them would make
 // the trail claim a session was involved.
-func (c *Client) removeFindingsDirAudited(ctx context.Context, full string, unmarked *int) (string, error) {
+func (c *Client) removeFindingsDirAudited(ctx context.Context, store *os.Root, full string, unmarked *int) (string, error) {
 	removed := ""
 	err := c.withLifecycleLock(ctx, auditVerbFindingsCleanup, func() error {
 		if !isFindingsStoreChild(c.findingsDir, full) {
@@ -240,21 +336,19 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, full string, unma
 		// slash would make Lstat follow a symlink to its target and report a
 		// plain directory, defeating the symlink check that follows.
 		full = filepath.Clean(full)
-		// The store is opened ONCE, and the plain-dir check and the removal
-		// below both go through that handle (forgectl#644). A path-based
-		// RemoveAll after an Lstat re-resolved every component at removal
-		// time, so a store (or ancestor) swapped for a symlink between the
-		// check and the removal redirected it outside the store. The handle
-		// pins the directory that was checked, and os.Root refuses any name
-		// that would climb out of it.
-		root, err := os.OpenRoot(c.findingsDir)
-		if err != nil {
-			slog.Warn("Skipping findings removal target: the findings store cannot be opened.", "path", full, "error", err)
-			return nil
-		}
-		defer func() { _ = root.Close() }()
+		// The store is opened ONCE, by the caller, and the plain-dir check,
+		// the marker read, the size, and the removal below all go through that
+		// handle or the child handle opened from it (forgectl#644,
+		// forgectl#685). A path-based RemoveAll after an Lstat re-resolved
+		// every component at removal time, so a store (or ancestor) swapped
+		// for a symlink between the check and the removal redirected it
+		// outside the store. The handle pins the directory that was checked,
+		// and os.Root refuses any name that would climb out of it, which is
+		// also why no path-based containment check (sandbox.WithinWorkspace)
+		// runs here any more: it would resolve the path at a different moment
+		// from the one the handle was opened at.
 		name := filepath.Base(full)
-		info, err := root.Lstat(name)
+		info, err := store.Lstat(name)
 		if err != nil {
 			slog.Warn("Skipping findings removal target that no longer exists.", "path", full, "error", err)
 			return nil
@@ -263,8 +357,9 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, full string, unma
 			slog.Warn("Skipping findings removal target that is no longer a plain directory.", "path", full)
 			return nil
 		}
-		if !sandbox.WithinWorkspace(c.findingsDir, full) {
-			slog.Warn("Skipping findings removal target that escapes the findings dir.", "path", full)
+		child, err := openFindingsChild(store, name, info)
+		if err != nil {
+			slog.Warn("Skipping findings removal target that cannot be opened through the store.", "path", full, "error", err)
 			return nil
 		}
 		// LIVENESS (forgectl#558), asked in the same lock hold as the removal,
@@ -276,19 +371,24 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, full string, unma
 		// reverse flip, a live record deleted mid-check, only keeps a dir
 		// that could have gone, and teardown deletes records under this same
 		// lock, so it cannot land inside this hold anyway.
-		if c.skipLiveFindingsDir(full, unmarked) {
+		skip := c.skipLiveFindingsDir(child, full, unmarked)
+		size := findingsDirSize(child)
+		// Closed before the removal: an open handle on a directory blocks
+		// its deletion on Windows.
+		_ = child.Close()
+		if skip {
 			return nil
 		}
 		row := RepairRow{
 			Verb:       auditVerbFindingsCleanup,
 			RecordPath: full,
-			Detail:     fmt.Sprintf("findings dir, %d bytes", findingsDirSize(full)),
+			Detail:     fmt.Sprintf("findings dir, %d bytes", size),
 		}
 		rowID, err := c.beginRepairRow(row)
 		if err != nil {
 			return fmt.Errorf("remove findings dir %s: %w", full, err)
 		}
-		rerr := findingsRemoveAll(root, name)
+		rerr := findingsRemoveAll(store, name)
 		c.completeRepairRow(rowID, row, rerr)
 		if rerr != nil {
 			slog.Error("Failed to remove findings dir.", "path", full, "error", rerr)
@@ -315,14 +415,26 @@ func (c *Client) removeFindingsDirAudited(ctx context.Context, full string, unma
 // t.Parallel.
 var findingsRemoveAll = (*os.Root).RemoveAll
 
-// findingsDirSize sums the size of every regular file under root,
+// findingsChildSize is findingsDirSize for the store child name, for the
+// `pr findings list` report; a child that cannot be opened counts as 0.
+func findingsChildSize(store *os.Root, name string) int64 {
+	child, err := store.OpenRoot(name)
+	if err != nil {
+		return 0
+	}
+	defer func() { _ = child.Close() }()
+	return findingsDirSize(child)
+}
+
+// findingsDirSize sums the size of every regular file under dir,
 // recursively — a best-effort accounting for the `pr findings list` report
-// and the size detail on a `pr findings cleanup --apply` audit row.
-// A walk error on any individual entry is swallowed, and symlinks are
-// skipped rather than counted (mirrors internal/clean's dirSize).
-func findingsDirSize(root string) int64 {
+// and the size detail on a `pr findings cleanup --apply` audit row. It walks
+// through the handle, so it counts the directory that handle pinned
+// (forgectl#685). A walk error on any individual entry is swallowed, and
+// symlinks are skipped rather than counted (mirrors internal/clean's dirSize).
+func findingsDirSize(dir *os.Root) int64 {
 	var total int64
-	_ = filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
+	_ = fs.WalkDir(dir.FS(), ".", func(_ string, d fs.DirEntry, err error) error {
 		if err != nil || d == nil || d.IsDir() || d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
