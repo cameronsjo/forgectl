@@ -19,7 +19,7 @@ package sops
 //       backup; one outside it keeps nothing
 //   [x] keepBackup reports where the backup went
 //   [x] With the keep path taken, a normal return leaves the work directory
-//       holding the backup and nothing else
+//       holding the backup and its .gitignore, and nothing else
 
 import (
 	"os"
@@ -191,9 +191,9 @@ func TestExitStatusFor(t *testing.T) {
 
 const backupCiphertext = "a: ENC[AES256_GCM,data:x,type:str]\nsops:\n    mac: m\n"
 
-// backedWorkDir makes a work directory the way stage leaves it: the ciphertext
-// backup, the plaintext value, and a decrypted read-back. keep is beside it,
-// where the target would be.
+// backedWorkDir makes a work directory the way newWorkDir and stage leave it:
+// the .gitignore, the ciphertext backup, the plaintext value, and a decrypted
+// read-back. keep is beside it, where the target would be.
 func backedWorkDir(t *testing.T) (create func() (*workDir, error), keep string) {
 	t.Helper()
 	parent := t.TempDir()
@@ -204,7 +204,7 @@ func backedWorkDir(t *testing.T) (create func() (*workDir, error), keep string) 
 			return nil, err
 		}
 		w := &workDir{dir: dir, backup: filepath.Join(dir, "backup"), keep: keep}
-		for name, body := range map[string]string{"backup": backupCiphertext, "value": "s3cr3t", "landed": "s3cr3t"} {
+		for name, body := range map[string]string{workDirIgnoreName: workDirIgnore, "backup": backupCiphertext, "value": "s3cr3t", "landed": "s3cr3t"} {
 			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
 				return nil, err
 			}
@@ -411,22 +411,31 @@ func TestGuard_KeepPathTakenLeavesOnlyTheBackup(t *testing.T) {
 	g.cleanup()
 	g.release()
 
-	entries, err := os.ReadDir(work.dir)
-	if err != nil {
-		t.Fatalf("the work directory holding the only backup was removed: %v", err)
-	}
-	if len(entries) != 1 || entries[0].Name() != "backup" {
-		var names []string
-		for _, e := range entries {
-			names = append(names, e.Name())
-		}
-		t.Errorf("the kept work directory holds %v, want only the backup", names)
-	}
+	assertHoldsOnlyTheBackup(t, work.dir)
 	got, err := os.ReadFile(filepath.Clean(work.backup))
 	if err != nil || string(got) != backupCiphertext {
 		t.Errorf("the backup = %q, %v; want the ciphertext unchanged", got, err)
 	}
 	if got, err := os.ReadFile(filepath.Clean(keep)); err != nil || string(got) != earlier {
 		t.Errorf("the existing file at the keep path was replaced: %q, %v", got, err)
+	}
+}
+
+// assertHoldsOnlyTheBackup requires a kept work directory to hold the
+// ciphertext backup and its .gitignore, and nothing else: no plaintext stays
+// with the backup, and the directory stays as uncommittable as a live one
+// (cameronsjo/forgectl#698).
+func assertHoldsOnlyTheBackup(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("the work directory holding the only backup was removed: %v", err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) != 2 || names[0] != workDirIgnoreName || names[1] != "backup" {
+		t.Errorf("the kept work directory holds %v, want only [%s backup]", names, workDirIgnoreName)
 	}
 }
