@@ -142,7 +142,9 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 				}
 			}
 			if !healthy {
-				return fmt.Errorf("doctor found problems")
+				// Under --json the checks on stdout are the verdict
+				// (forgectl#862).
+				return jsonVerdict(fmt.Errorf("doctor found problems"), asJSON)
 			}
 			return nil
 		},

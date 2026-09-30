@@ -263,7 +263,8 @@ func runUpdatePass(cmd *cobra.Command, client *updatepkg.Client, cfg config.Upda
 		// Categorical (#778): report.Err() carries each failed command's
 		// stderr. The step names are this package's own constants; the
 		// transcript file holds the rest, escaped.
-		return WithExitCode(termsafe.Categorical("update: "+failedStepNames(report.Results)+" failed; "+tr.pointer(), report.Err()), 1)
+		// Under --json the summary on stdout is the verdict (forgectl#862).
+		return jsonVerdict(WithExitCode(termsafe.Categorical("update: "+failedStepNames(report.Results)+" failed; "+tr.pointer(), report.Err()), 1), asJSON)
 	}
 	return nil
 }
