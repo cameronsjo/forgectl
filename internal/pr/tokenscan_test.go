@@ -16,8 +16,12 @@ var fakeTokenBody = strings.Repeat("a1B2", 9)
 // the token (forgectl#681).
 //
 // Mutations that turn it red: delete the scanReviewForTokens call from
-// PostReview (every case posts); or narrow gh[pousr]_ to ghp_ in
-// githubTokenShape (the gho_/ghu_/ghs_/ghr_ cases post).
+// PostReview (every case posts); narrow gh[pousr]_ to ghp_ in
+// githubTokenShape (the gho_/ghu_/ghs_/ghr_ cases post); drop
+// stripFormatChars (the Cf cases, and the ref-spelled zwsp case, post); drop
+// the html.UnescapeString loop (the reference cases post), or cap it at one
+// round (the double-encoded case posts); drop
+// unescapeMarkdownPunct (the markdown case posts).
 func TestPostReview_TokenShapedReviewIsRefused(t *testing.T) {
 	tokens := map[string]string{
 		"personal":     "gh" + "p_" + fakeTokenBody,
@@ -27,6 +31,19 @@ func TestPostReview_TokenShapedReviewIsRefused(t *testing.T) {
 		"refresh":      "gh" + "r_" + fakeTokenBody,
 		"fine-grained": "github" + "_pat_" + fakeTokenBody + "_" + fakeTokenBody,
 		"glued":        "token=x" + "gh" + "p_" + fakeTokenBody,
+		// Invisible format characters (Cf) split the token.
+		"zero-width space": "gh" + "p_" + fakeTokenBody[:10] + "\u200b" + fakeTokenBody[10:],
+		"word joiner":      "gh" + "\u2060" + "p_" + fakeTokenBody,
+		"bom":              "gh" + "p\ufeff_" + fakeTokenBody,
+		"soft hyphen":      "github" + "_pat_" + fakeTokenBody[:5] + "\u00ad" + fakeTokenBody[5:],
+		// HTML character references render as the character.
+		"decimal ref":        "gh&#112;_" + fakeTokenBody,
+		"hex ref":            "gh&#x70;_" + fakeTokenBody,
+		"named ref":          "gh" + "p&lowbar;" + fakeTokenBody,
+		"double-encoded ref": "gh&amp;#112;_" + fakeTokenBody,
+		"ref-spelled zwsp":   "gh" + "p_" + fakeTokenBody[:10] + "&#8203;" + fakeTokenBody[10:],
+		// A markdown backslash escape renders as the bare punctuation.
+		"markdown escape": "gh" + "p\\_" + fakeTokenBody,
 	}
 	for name, token := range tokens {
 		t.Run(name, func(t *testing.T) {
@@ -69,5 +86,24 @@ func TestPostReview_TokenPrefixInProseStillPosts(t *testing.T) {
 	}
 	if !posted {
 		t.Error("a review that only names token prefixes was not posted")
+	}
+}
+
+// A headless (staged) review carrying a token shape is refused too, rather
+// than staged silently for a later post.
+//
+// Mutation that turns it red: move the scanReviewForTokens call back below
+// the headless return in PostReview.
+func TestPostReview_HeadlessTokenShapedReviewIsRefused(t *testing.T) {
+	fake := successfulLaunchRunner()
+	c := postClient(fake, true, true)
+	review := "staged: " + "gh" + "p_" + fakeTokenBody
+
+	posted, err := c.PostReview(context.Background(), testSess, review, true)
+	if !errors.Is(err, errReviewHasTokenShape) {
+		t.Fatalf("PostReview(headless) error = %v, want errReviewHasTokenShape", err)
+	}
+	if posted || len(fake.Calls) != 0 {
+		t.Errorf("posted=%v calls=%+v, want refused with zero Runner calls", posted, fake.Calls)
 	}
 }
