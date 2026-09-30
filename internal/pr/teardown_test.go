@@ -15,6 +15,7 @@ package pr
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -874,6 +875,7 @@ func TestTeardown_KillStepFailureFailsClosed(t *testing.T) {
 	ref := Ref{Owner: "o", Repo: "r", Number: 27}
 	name := mustWindowName(t, ref)
 	row := strings.Join([]string{"123", "456", "@5", "$1", "forgectl", "0", name, "0", "1"}, "\x1f")
+	reparented := strings.Join([]string{"123", "456", "@5", "$2", "elsewhere", "0", name, "0", "1"}, "\x1f")
 	for _, tc := range []struct {
 		name       string
 		secondOut  string
@@ -883,6 +885,14 @@ func TestTeardown_KillStepFailureFailsClosed(t *testing.T) {
 	}{
 		{"revalidation list unreadable", "", errors.New("tmux: permission denied"), nil, false},
 		{"kill-window fails", row, nil, errors.New("tmux: kill-window exited 1"), true},
+		// A window moved to another session keeps its @id; revalidation
+		// refuses it (ErrWrongParent), and that is not "gone" (#746).
+		{"reparented before the kill", reparented, nil, nil, false},
+		// kill-window's "can't find window" for an id other than the one
+		// passed is not tmux's gone answer for ours (#746).
+		{"kill-window names another id", row, nil, &exec.CommandError{
+			Name: "tmux", Stderr: "can't find window: @55", ExitCode: 1, Err: errors.New("exit status 1"),
+		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := killStepServer(name, tc.secondOut, tc.secondErr, tc.killErr)
@@ -907,6 +917,63 @@ func TestTeardown_KillStepFailureFailsClosed(t *testing.T) {
 				t.Errorf("kill-window issued = %v, want %v", ok, tc.wantKilled)
 			}
 		})
+	}
+}
+
+// TestTeardown_KillStepCantFindWindowStillTearsDown is forgectl#746: the
+// window dies after revalidation and before kill-window, and tmux answers
+// exactly "can't find window: @5" for the id it was passed. That is gone, not
+// unreadable, so the teardown proceeds instead of parking a spurious
+// needs-repair.
+//
+// Mutation that turns it red: remove the windowGoneAtKillStderr branch in
+// tmux.KillWindow — the kill failure then parks the record.
+func TestTeardown_KillStepCantFindWindowStillTearsDown(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "r", Number: 29}
+	name := mustWindowName(t, ref)
+	row := strings.Join([]string{"123", "456", "@5", "$1", "forgectl", "0", name, "0", "1"}, "\x1f")
+	gone := &exec.CommandError{Name: "tmux", Stderr: "can't find window: @5", ExitCode: 1, Err: errors.New("exit status 1")}
+	fake := killStepServer(name, row, nil, gone)
+	c := New(fake, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+		WithApprover(func(string) (bool, error) { return false, nil }),
+		WithTTYCheck(func() bool { return false }))
+	ws := fakeWorkspace(t)
+	path := seedPhaseRecord(t, c, ref, PhasePrepared, ws)
+
+	if err := c.Teardown(context.Background(), path); err != nil {
+		t.Fatalf("Teardown with the window gone at kill-window: %v", err)
+	}
+	if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+		t.Errorf("the record should be removed: %v", serr)
+	}
+	if _, ok := findCallVerb(fake.Calls, "tmux", "kill-window"); !ok {
+		t.Error("the test must reach kill-window, or it exercised the revalidation instead")
+	}
+}
+
+// TestWindowGoneAtKill_OnlyAbsenceAndGenerationAreGone pins the kill-step
+// classifier directly (#746): ErrWrongParent and ErrSelectorChanged, as
+// KillWindow wraps them, leave the window possibly live.
+//
+// Mutation that turns it red: add tmux.ErrWrongParent (or
+// tmux.ErrSelectorChanged) to windowGoneAtKill.
+func TestWindowGoneAtKill_OnlyAbsenceAndGenerationAreGone(t *testing.T) {
+	wrap := func(err error) error { return fmt.Errorf("kill window %q: %w", "pr-o-r-1", err) }
+	for _, tc := range []struct {
+		err  error
+		gone bool
+	}{
+		{wrap(tmux.ErrObjectGone), true},
+		{wrap(tmux.ErrGenerationChanged), true},
+		{wrap(tmux.ErrSessionNotFound), true},
+		{wrap(tmux.ErrWrongParent), false},
+		{wrap(tmux.ErrSelectorChanged), false},
+		{wrap(tmux.ErrServerUnreadable), false},
+		{errors.New("tmux: kill-window exited 1"), false},
+	} {
+		if got := windowGoneAtKill(tc.err); got != tc.gone {
+			t.Errorf("windowGoneAtKill(%v) = %v, want %v", tc.err, got, tc.gone)
+		}
 	}
 }
 

@@ -306,13 +306,36 @@ func secretBearing(env []string) []string {
 // KillWindow kills the window the identity names, revalidating generation and
 // parentage first. A window that moved to another session since capture is
 // refused rather than killed — its @id would still resolve.
+//
+// A window that dies between the revalidation and the kill is ErrObjectGone,
+// but only on tmux's exact answer for that id (windowGoneAtKillStderr); any
+// other failure is returned as it came.
 func (c *Client) KillWindow(ctx context.Context, want WindowIdentity) error {
 	current, err := c.RevalidateWindow(ctx, want)
 	if err != nil {
 		return fmt.Errorf("kill window %q: %w", want.Name, err)
 	}
 	_, err = c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("kill-window", "-t", current.ID)...)
+	if windowGoneAtKillStderr(err, current.ID) {
+		return fmt.Errorf("%w: window %s (%q) was gone by kill-window: %w", ErrObjectGone, current.ID, want.Name, err)
+	}
 	return err
+}
+
+// windowGoneAtKillStderr reports whether a kill-window failure is tmux saying
+// the target id does not exist: exit status 1 and, as the whole of stderr,
+// "can't find window: <id>" for the very id passed (forgectl#746). Measured on
+// tmux 3.4 against an isolated socket: a kill of an already-killed @1 printed
+// exactly that line and exited 1, while a missing server printed
+// "no server running on <socket>". The id is a validated "@N", so the line
+// cannot be forged by a window name, and a stderr tail that dropped bytes,
+// carries any other text, or names another id is not this answer.
+func windowGoneAtKillStderr(err error, id string) bool {
+	var cmdErr *exec.CommandError
+	if !errors.As(err, &cmdErr) {
+		return false
+	}
+	return cmdErr.ExitCode == 1 && cmdErr.StderrDropped == 0 && cmdErr.Stderr == "can't find window: "+id
 }
 
 // treeMarkers are the structural glyphs buildTree uses. Kept here (not in the

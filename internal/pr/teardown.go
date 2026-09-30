@@ -656,8 +656,9 @@ const windowAmbiguousReason = "more than one review window carries this review's
 // case after the reviewer exits; it must never widen into killing whatever
 // tmux would have matched. The kill step is held to the same standard: its
 // revalidation re-reads the window list, and a failure there or in
-// kill-window itself is gone only when it is a confirmed absence or a server
-// restart (windowGoneAtKill); every other kill failure is unsettled too.
+// kill-window itself is gone only when it is a confirmed absence, tmux's
+// exact "can't find window" for the revalidated id, or a server generation
+// change (windowGoneAtKill); every other kill failure is unsettled too.
 //
 // Three outcomes are NOT "nothing to kill", and the caller fails closed on
 // each (forgectl#702):
@@ -736,11 +737,16 @@ func (c *Client) killReviewWindow(ctx context.Context, ref Ref, budget *tmuxBudg
 }
 
 // windowGoneAtKill reports whether a KillWindow failure means the resolved
-// window no longer exists: a clean listing without it (windowConfirmedAbsent),
-// or a server restarted since resolution, which took every window of the old
-// generation with it. Anything else — an unreadable list, a pin mismatch, a
-// reparented window, kill-window itself failing — leaves the window possibly
-// live (forgectl#702).
+// window is gone: a clean listing without it (windowConfirmedAbsent), tmux's
+// exact "can't find window" answer to the kill of the id just revalidated
+// (ErrObjectGone, forgectl#746), or a generation change — the socket now
+// answers from a different server, and the old one's windows are gone or
+// unreachable. "Unreachable" is the blind spot: an old server whose socket was
+// unlinked and replaced keeps its windows running where no command can reach
+// them, which the resolve step's ErrSessionNotFound shares. Anything else — an
+// unreadable list, a pin mismatch (ErrSelectorChanged), a reparented window
+// (ErrWrongParent), kill-window itself failing for another reason — leaves the
+// window possibly live (forgectl#702).
 func windowGoneAtKill(err error) bool {
 	return windowConfirmedAbsent(err) || errors.Is(err, tmux.ErrGenerationChanged)
 }
