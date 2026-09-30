@@ -552,45 +552,42 @@ func TestConfig_NestedSectionRendered(t *testing.T) {
 }
 
 // HomeNote reflects a home-relative project match, not only defaults add_dir,
-// in both the text and --json renderings.
+// in both the text and --json renderings. The config is built in memory: on
+// macOS the config file lives under $HOME, so a test that unsets HOME cannot
+// also load a file.
 func TestConfig_HomeNoteWhenHomeIsUnresolved(t *testing.T) {
-	const body = "[[launch.project]]\nmatch = \"~/work\"\n"
-	base := t.TempDir()
-	if err := os.MkdirAll(filepath.Dir(childConfigPath(base)), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(childConfigPath(base), []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("XDG_CONFIG_HOME", base)
 	t.Setenv("HOME", "")
 	t.Setenv("USERPROFILE", "")
 	if _, err := os.UserHomeDir(); err == nil {
 		t.Skip("this platform resolves a home without HOME")
 	}
-	run := func(args ...string) string {
-		cmd := newConfigCmd(module.Deps{})
-		var buf bytes.Buffer
-		cmd.SetOut(&buf)
-		cmd.SetErr(&buf)
-		cmd.SetArgs(args)
-		if err := cmd.Execute(); err != nil {
-			t.Fatalf("config %v: %v", args, err)
-		}
-		return buf.String()
+	cfg := config.Config{Launch: config.LaunchConfig{
+		Projects: []config.LaunchProject{{Match: "~/work"}},
+	}}
+	resolved := resolveLaunchView(cfg)
+	if resolved.HomeNote == "" {
+		t.Fatal("HomeNote is empty for a ~ project match with no home")
 	}
-	if txt := run(); !strings.Contains(txt, "launch.home") || !strings.Contains(txt, "unresolved") {
-		t.Errorf("text output missing the home note:\n%s", txt)
+
+	var txt bytes.Buffer
+	renderConfigText(&txt, nil, config.Report{}, hostResolvedView{}, resolved)
+	if !strings.Contains(txt.String(), "launch.home") || !strings.Contains(txt.String(), "unresolved") {
+		t.Errorf("text output missing the home note:\n%s", txt.String())
+	}
+
+	var js bytes.Buffer
+	if err := emitConfigJSON(&js, nil, config.Report{}, hostResolvedView{}, resolved); err != nil {
+		t.Fatal(err)
 	}
 	var doc struct {
 		LaunchResolved struct {
 			HomeNote string `json:"home_note"`
 		} `json:"launch_resolved"`
 	}
-	if err := json.Unmarshal([]byte(run("--json")), &doc); err != nil {
+	if err := json.Unmarshal(js.Bytes(), &doc); err != nil {
 		t.Fatal(err)
 	}
 	if doc.LaunchResolved.HomeNote == "" {
-		t.Error("--json launch_resolved.home_note is empty")
+		t.Errorf("--json launch_resolved.home_note is empty:\n%s", js.String())
 	}
 }
