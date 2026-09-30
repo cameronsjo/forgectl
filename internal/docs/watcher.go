@@ -162,7 +162,8 @@ func (w *Watcher) replaceWatcher() bool {
 }
 
 // register walks every root in idx and adds a watch for each directory the
-// indexer would descend into. Failures are logged and skipped rather than
+// indexer would descend into; a single-file root gets one watch, on its own
+// directory (watchOnlyFileDir). Failures are logged and skipped rather than
 // returned: a single unreadable subdirectory should cost live reload for that
 // subtree, not refuse to start the reader at all.
 //
@@ -184,7 +185,9 @@ func (w *Watcher) registerRoots(roots []Root) map[string]bool {
 			slog.Debug("docs: live-reload registration could not open a root.", "root", root.Label, "error", err)
 			continue
 		}
-		if err := w.watchTree(rt, root.Path); err != nil {
+		if root.OnlyFile != "" {
+			w.watchOnlyFileDir(rt, root.Path)
+		} else if err := w.watchTree(rt, root.Path); err != nil {
 			slog.Debug("docs: live-reload registration walk failed for a root.", "root", root.Label, "error", err)
 		}
 		_ = rt.Close()
@@ -218,6 +221,21 @@ func (w *Watcher) watchTree(dir *os.Root, top string) error {
 		}
 		return nil
 	})
+}
+
+// watchOnlyFileDir watches dir, the directory a single-file root's rt holds,
+// and nothing below it (forgectl#923). The one file the root serves lives
+// directly in dir, so its events arrive on that watch, and a walk of the
+// subtree would put watches on directories the user never asked to serve:
+// renaming one would rebuild the watches, and writes under it would wake
+// the watcher. Run drops the events the watch delivers for the file's
+// siblings (onlyFileSibling).
+func (w *Watcher) watchOnlyFileDir(rt *os.Root, dir string) {
+	want, err := rt.Stat(".")
+	if err != nil || !want.IsDir() {
+		return
+	}
+	w.addVerified(dir, want)
 }
 
 // watchStage names the points in addVerified that testHookWatch runs at.
@@ -334,10 +352,11 @@ func (w *Watcher) insideSomeRoot(path string) bool {
 // under every root that holds it. The directory is opened through the
 // pinned root one held component at a time, so a symlink anywhere on the
 // way is refused rather than followed, and a component the indexer would
-// not descend into stops the registration.
+// not descend into stops the registration. A single-file root watches only
+// its own directory (watchOnlyFileDir), so it registers nothing here.
 func (w *Watcher) watchCreatedDir(path string) {
 	for _, root := range w.store.Current().Roots() {
-		if path == root.Path || !withinRoot(root.Path, path) {
+		if root.OnlyFile != "" || path == root.Path || !withinRoot(root.Path, path) {
 			continue
 		}
 		rel, err := filepath.Rel(root.Path, path)
@@ -420,6 +439,12 @@ func (w *Watcher) Run(ctx context.Context) {
 		case ev, ok := <-w.fsw.Events:
 			if !ok {
 				return
+			}
+			// A single-file root's directory watch also reports the file's
+			// siblings, which the root does not serve. Nothing about them
+			// may reach the watch set or the settle (forgectl#923).
+			if w.onlyFileSibling(ev.Name) {
+				continue
 			}
 			// Keep the watch set current before deciding relevance: a newly
 			// created directory needs watching even when the event that
@@ -710,6 +735,27 @@ func (w *Watcher) attachmentRelevant(ev fsnotify.Event) bool {
 	return false
 }
 
+// onlyFileSibling reports whether name lies in some root but every root
+// holding it is a single-file root that name is neither the file of nor
+// the directory of: a sibling of the file, or something below one, which
+// the root's directory watch (or, on kqueue, fsnotify's own watch of each
+// entry of that directory) reports although no root serves it
+// (forgectl#923). Lexical, like relevant(). A name no root holds is not a
+// sibling, and goes through Run's usual checks.
+func (w *Watcher) onlyFileSibling(name string) bool {
+	held := false
+	for _, root := range w.store.Current().Roots() {
+		if !withinRoot(root.Path, name) {
+			continue
+		}
+		if root.OnlyFile == "" || name == root.OnlyFile || name == root.Path {
+			return false
+		}
+		held = true
+	}
+	return held
+}
+
 // inTree is relevant() without the extension rule: whether some root
 // accepts path (rootAccepts). Every containing root is consulted, not just
 // the first: with overlapping roots (docs serve ~/v/n.md ~/v) the first may
@@ -725,7 +771,16 @@ func (w *Watcher) inTree(path string) bool {
 }
 
 // rootAccepts reports whether path lies in root, is root's one file when it
-// is an OnlyFile root, and has no excluded directory component below it.
+// is an OnlyFile root, has no excluded directory component below it, and
+// sits no deeper than the index walk descends (maxHeldDirs directories
+// below the root, walkHeld).
+//
+// It is lexical, so a deleted or renamed-away path is still judged, and so
+// it cannot see a symlink on the path: a name through an in-root link to a
+// directory elsewhere passes. The callers own that rule. Run resolves every
+// event's name first and refuses one that resolves somewhere rootAccepts
+// would not (strayEvent), and the watch set is built by the held walk,
+// which never descends a link (watchTree, addVerified).
 func rootAccepts(root Root, path string) bool {
 	if !withinRoot(root.Path, path) {
 		return false
@@ -743,6 +798,9 @@ func rootAccepts(root Root, path string) bool {
 	// not a file that merely happens to start with a dot, so the final
 	// segment (the filename) is not subject to the rule.
 	segments := strings.Split(filepath.ToSlash(rel), "/")
+	if len(segments)-1 > maxHeldDirs {
+		return false // the walk skips a directory this deep, so nothing in it is indexed
+	}
 	for _, dir := range segments[:len(segments)-1] {
 		if excludedDir(dir) {
 			return false
@@ -821,7 +879,9 @@ func (w *Watcher) reload(docEvent bool) {
 // Attachments compare by basename table, one entry per file, rather than by
 // the case-folded path set: removing a/Dup.png beside a/dup.png leaves the
 // folded set unchanged but turns an ambiguous [[dup.png]] into a hit
-// (forgectl#917).
+// (forgectl#917). buildRootIndexes sorts each entry's paths, so a change of
+// walk order alone (a directory renamed Z to z) compares equal
+// (forgectl#923).
 func sameIndex(a, b *Index) bool {
 	if len(a.roots) != len(b.roots) || len(a.docs) != len(b.docs) || !slices.Equal(a.skipped, b.skipped) {
 		return false
