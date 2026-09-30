@@ -29,7 +29,10 @@
 //   - a live-reload swap keeps focus on a doc link that mimics a sidenav
 //     link's href and class, rather than moving it to the sidenav;
 //   - a live-reload swap puts focus back on a diagram's pan/zoom viewport or
-//     reset button once the diagram has re-rendered;
+//     reset button once the diagram has re-rendered, and so does a theme flip;
+//   - a planted .tooltip paints nothing outside the doc pane and never makes
+//     the page itself scroll, and a diagram's own chrome class names
+//     (A:::scrim) are scrubbed from its nodes;
 //   - a swap that adds text above a heading slugged "doc-filter" (a chrome
 //     id) keeps that heading where the reader had it;
 //   - deleting the doc puts the missing banner in the real doc body.
@@ -93,6 +96,8 @@ const planted = [
   '<div class="doc-body"><p>PLANTED-BODY copy me</p></div>',
   '<div class="scrim">PLANTED-SCRIM</div>',
   '<div class="toast-region">PLANTED-TOAST</div>',
+  '<div class="tooltip tooltip--bottom">PLANTED-TIP-BOTTOM</div>',
+  `<div class="tooltip">PLANTED-TIP-LONG ${'wide '.repeat(600)}</div>`,
 ].join('\n\n');
 
 // Rendered by mermaid, whose DOMPurify keeps data-* in HTML labels. The
@@ -103,7 +108,8 @@ const mermaidPlants = [
   '```mermaid\n%%{init: {"flowchart": {"htmlLabels": true}}}%%\nflowchart LR\n' +
     '  A["<details open data-fc=\'sidenav\'><summary>MER-DETAILS</summary>x</details>' +
     '<span data-fc=\'outline\'>MER-OUTLINE</span><span data-fc=\'statusbar\'>s</span>' +
-    '<span data-fc=\'live-status\'>l</span><span data-fc=\'doc-missing\'>m</span>"]\n```',
+    '<span data-fc=\'live-status\'>l</span><span data-fc=\'doc-missing\'>m</span>"]\n' +
+    '  A --> B:::scrim\n  class A statusbar\n```',
 ].join('\n\n');
 
 // Enough prose that the doc pane scrolls, with a heading whose slug is the
@@ -189,6 +195,48 @@ try {
   }
 
   await mermaidRendered(page);
+
+  // A doc's absolute-positioned Artificer classes stay inside the doc pane
+  // (forgectl#745). .tooltip is position:absolute, z-index 1000 and
+  // white-space:nowrap; with no positioned ancestor a .tooltip--bottom sat
+  // under the status bar and made the page itself scroll, and the long one
+  // ran across the outline column. The pane clips what overflows it, so the
+  // check is what paints outside it: each chrome region is screenshotted
+  // with the tooltips in place and again with them removed.
+  const tipsFound = await page.evaluate(() => [...document.querySelectorAll('[data-fc="doc-body"] div')]
+    .filter((d) => d.textContent.startsWith('PLANTED-TIP-')).length);
+  if (tipsFound !== 2) {
+    problems.push(`fixture: ${tipsFound}/2 planted tooltips survived; the containment check proves nothing`);
+  } else {
+    const pageScroll = await page.evaluate(() => {
+      const se = document.scrollingElement;
+      return { h: se.scrollHeight - window.innerHeight, w: se.scrollWidth - window.innerWidth };
+    });
+    if (pageScroll.h > 0 || pageScroll.w > 0) problems.push(`containment: the page itself scrolls by ${JSON.stringify(pageScroll)}; a planted tooltip escaped the doc pane`);
+    const regions = await page.evaluate(() => ['outline', 'statusbar', 'appbar', 'sidenav'].map((id) => {
+      const el = document.querySelector(`[data-fc="${id}"]`);
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { id, clip: { x: r.left, y: r.top, width: Math.min(r.width, window.innerWidth - r.left), height: Math.min(r.height, window.innerHeight - r.top) } };
+    }).filter((r) => r && r.clip.width > 0 && r.clip.height > 0));
+    const shots = async () => Promise.all(regions.map((r) => page.screenshot({ clip: r.clip })));
+    const withTips = await shots();
+    await page.evaluate(() => [...document.querySelectorAll('[data-fc="doc-body"] div')]
+      .filter((d) => d.textContent.startsWith('PLANTED-TIP-')).forEach((d) => { d.hidden = true; }));
+    const without = await shots();
+    await page.evaluate(() => [...document.querySelectorAll('[data-fc="doc-body"] div')]
+      .filter((d) => d.textContent.startsWith('PLANTED-TIP-')).forEach((d) => { d.hidden = false; }));
+    regions.forEach((r, i) => {
+      if (!withTips[i].equals(without[i])) problems.push(`containment: a planted tooltip paints over the ${r.id} chrome`);
+    });
+  }
+
+  // Chrome class names a diagram gives its own nodes (A:::scrim, class A
+  // statusbar) are scrubbed like forged hooks (forgectl#745).
+  const merChrome = await page.evaluate(() => [...document.querySelectorAll('[data-fc="doc-body"] pre.mermaid [class]')]
+    .flatMap((el) => [...el.classList]).filter((c) => /^(scrim|statusbar)([-_]|$)/.test(c)));
+  if (merChrome.length > 0) problems.push(`mermaid: chrome classes survived on diagram nodes: ${merChrome.join(', ')}`);
+
   // The labels rendered, and as SVG text rather than live markup.
   const labels = await page.evaluate(() => {
     const body = document.querySelector('[data-fc="doc-body"]');
@@ -380,6 +428,33 @@ try {
         return f ? `${f.localName}.${f.className}` : null;
       });
       problems.push(`diagram focus: after a swap focus is on ${now}, not the second diagram's ${part}`);
+    }
+  }
+
+  // A theme flip re-renders every diagram too, and puts focus back the
+  // same way (forgectl#745).
+  // The flip's observer runs as a microtask, so the drop is sampled after
+  // one: the old viewport must have left the document by then.
+  const themeFocus = await page.evaluate(async () => {
+    const vp = document.querySelectorAll('[data-fc="doc-body"] .embed')[1]?.querySelector('.dia-viewport');
+    if (!vp) return false;
+    vp.focus({ preventScroll: true });
+    const root = document.documentElement;
+    root.setAttribute('data-theme', root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+    await Promise.resolve();
+    return !vp.isConnected && document.activeElement !== vp;
+  });
+  if (!themeFocus) {
+    problems.push('theme focus: the flip did not drop focus from the viewport; the check proves nothing');
+  } else {
+    try {
+      await page.waitForFunction(() => {
+        const embed = document.querySelectorAll('[data-fc="doc-body"] .embed')[1];
+        return embed && document.activeElement === embed.querySelector('.dia-viewport');
+      }, null, { timeout: 10000 });
+    } catch {
+      const now = await page.evaluate(() => document.activeElement && document.activeElement.localName);
+      problems.push(`theme focus: after a theme flip focus is on ${now}, not the second diagram's .dia-viewport`);
     }
   }
 

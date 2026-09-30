@@ -15,7 +15,9 @@
 //     label into live HTML: no <details>, no <foreignObject>;
 //   - securityLevel: 'loose' does not bind a click directive's callback;
 //   - the control diagram renders with no label markup either, since the
-//     reader's own config keeps labels as SVG text.
+//     reader's own config keeps labels as SVG text;
+//   - with mermaid's defaultConfig gone (a bad re-vendor), a re-render
+//     leaves every diagram as source text and logs an error.
 //
 // Every check first proves the diagram rendered and its label text is there,
 // so a render failure cannot pass as "inert". Run it against a build from
@@ -175,6 +177,29 @@ try {
   if (clicked.length > 0) problems.push(`click: no node for ${clicked.join(', ')}; the securityLevel check proves nothing`);
   if (await page.evaluate(() => window.__fc713Clicked === true)) {
     problems.push("securityLevel: a click directive's callback ran ('loose' took effect)");
+  }
+
+  // Fail closed: if a re-vendor drops mermaid's defaultConfig, the pin list
+  // cannot be derived, and the reader must leave diagrams as source rather
+  // than render them with a doc-settable config. Simulated by hiding the
+  // key set and flipping the theme, which re-renders every diagram.
+  const errors = [];
+  page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+  const hidden = await page.evaluate(() => {
+    // mermaidAPI is frozen, but mermaid.mermaidAPI itself is writable.
+    mermaid.mermaidAPI = Object.assign({}, mermaid.mermaidAPI, { defaultConfig: undefined });
+    const root = document.documentElement;
+    root.setAttribute('data-theme', root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+    return mermaid.mermaidAPI.defaultConfig === undefined;
+  });
+  if (!hidden) {
+    problems.push('fail-closed: could not hide mermaid defaultConfig; the check proves nothing');
+  } else {
+    await page.waitForTimeout(1500);
+    const after = await page.evaluate(() => [...document.querySelectorAll('[data-fc="doc-body"] pre.mermaid')]
+      .map((p) => ({ svg: !!p.querySelector('svg'), source: p.textContent.includes('flowchart LR') })));
+    if (after.some((d) => d.svg || !d.source)) problems.push(`fail-closed: diagrams rendered without a derivable pin list ${JSON.stringify(after)}`);
+    if (!errors.some((e) => e.includes('defaultConfig'))) problems.push('fail-closed: no console error named the missing defaultConfig');
   }
 } catch (err) {
   problems.push(String(err).split('\n')[0]);

@@ -19,7 +19,9 @@ import (
 // outline-item, trust-badge--stale). Two tests keep the list honest:
 // every class the shell template uses must be denied here or named as
 // shared content vocabulary, and every class in a position:fixed or
-// position:sticky rule of a served stylesheet must be denied.
+// position:sticky rule of a served stylesheet must be denied. mermaid-init.js
+// carries a copy for rendered diagrams, which never pass through this strip;
+// TestChromeClasses_MermaidInitMirrorsGoList keeps the copy in step.
 var chromeClassFamilies = []string{
 	// The reader shell (templates/shell.html.tmpl).
 	"appbar", "content-grid", "doc-body", "docs-nav", "empty-state", "home",

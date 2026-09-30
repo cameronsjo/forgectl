@@ -101,8 +101,19 @@
     return out;
   }
 
+  // MIN_DEFAULT_KEYS guards the derivation. 11.12.3's defaultConfig has 45
+  // top-level keys; a re-vendor that renames or drops it would otherwise
+  // hand `secure` only the six fixed names and silently reopen #713.
+  var MIN_DEFAULT_KEYS = 30;
+
+  // pinnedKeys returns null when mermaid's defaultConfig is missing or
+  // thinner than MIN_DEFAULT_KEYS. render() then leaves every diagram as
+  // source text: failing closed, not rendering with a doc-settable config.
   function pinnedKeys() {
-    var defaults = (mermaid.mermaidAPI && mermaid.mermaidAPI.defaultConfig) || {};
+    var defaults = mermaid.mermaidAPI && mermaid.mermaidAPI.defaultConfig;
+    if (!defaults || typeof defaults !== "object" || Object.keys(defaults).length < MIN_DEFAULT_KEYS) {
+      return null;
+    }
     var keys = ["secure", "securityLevel", "startOnLoad", "maxTextSize", "suppressErrorRendering", "maxEdges"]
       .concat(keyify(defaults, []), NO_DEFAULT_KEYS);
     var seen = Object.create(null);
@@ -113,9 +124,9 @@
     });
   }
 
-  function config() {
+  function config(secure) {
     return {
-      secure: pinnedKeys(),
+      secure: secure,
       startOnLoad: false,
       theme: "base",
       themeVariables: themeVariables(),
@@ -153,9 +164,38 @@
   // 11.12.3), so this selector covers that too.
   var FORGED_HOOKS = "pre.mermaid [data-fc]";
 
+  // The same pass strips the reader's chrome class families (forgectl#745).
+  // A diagram's `A:::scrim` or `class A statusbar` puts the author's class on
+  // an SVG <g>, and mermaid's output never meets the server's class strip
+  // (chromeclass.go). position is inert on SVG, and with htmlLabels off there
+  // is no HTML label to style, so no live spoof was measured; this keeps it
+  // that way if either changes. The list mirrors chromeClassFamilies;
+  // TestChromeClasses_MermaidInitMirrorsGoList keeps the two in step.
+  var CHROME_CLASS_FAMILIES = [
+    "appbar", "content-grid", "doc-body", "docs-nav", "empty-state", "home",
+    "live-dot", "live-status", "nav-toggle", "outline", "sidenav",
+    "skip-link", "status-item", "status-spacer", "statusbar",
+    "surface-document", "surface-tool", "theme-toggle", "wordmark",
+    "trust-badge", "status-chip",
+    "app-shell", "nav-drawer", "nav-scrim", "page-shell", "palette", "scrim",
+    "toast-region"
+  ];
+
+  function isChromeClass(token) {
+    return CHROME_CLASS_FAMILIES.some(function (f) {
+      if (token === f) { return true; }
+      var c = token.charAt(f.length);
+      return token.length > f.length && token.lastIndexOf(f, 0) === 0 && (c === "-" || c === "_");
+    });
+  }
+
   function scrubHooks() {
     document.querySelectorAll(FORGED_HOOKS).forEach(function (el) {
       el.removeAttribute("data-fc");
+    });
+    document.querySelectorAll("pre.mermaid [class]").forEach(function (el) {
+      var chrome = Array.prototype.filter.call(el.classList, isChromeClass);
+      if (chrome.length) { el.classList.remove.apply(el.classList, chrome); }
     });
   }
 
@@ -174,8 +214,13 @@
   }
 
   function render() {
-    mermaid.initialize(config());
     var blocks = document.querySelectorAll("pre.mermaid");
+    var secure = pinnedKeys();
+    if (!secure) {
+      console.error("[forgectl docs] mermaid defaultConfig missing or incomplete; diagrams left as source so a doc cannot reconfigure mermaid (forgectl#713)");
+      return Promise.resolve();
+    }
+    mermaid.initialize(config(secure));
     if (!blocks.length) { return Promise.resolve(); }
     // mermaid.run replaces each element's content with rendered SVG. Passing the
     // node list explicitly (rather than letting it scan) keeps it off anything
@@ -196,6 +241,9 @@
       var now = document.documentElement.getAttribute("data-theme");
       if (now === last) { return; }
       last = now;
+      // The re-render replaces each diagram's SVG and its pan/zoom viewport,
+      // which drops keyboard focus held there (forgectl#745).
+      var focus = diagramFocusKey(document.activeElement);
       // Diagram sources are gone from the DOM after the first render (replaced
       // by SVG), so a re-render needs the original text back. Stash it on first
       // render and restore before re-running.
@@ -205,8 +253,55 @@
           el.removeAttribute("data-processed");
         }
       });
-      render();
+      render().then(function () { restoreDiagramFocus(focus); });
     }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  }
+
+  // Focus inside a diagram (its reset button, its pan/zoom viewport, or a
+  // link in the SVG) cannot survive a re-render: the viewport and links exist
+  // only once mermaid has rendered the diagram again (forgectl#718, #745).
+  // The key names the diagram by its index among the doc's diagrams, plus
+  // the part of it that held focus. A live-reload swap (reload.js) and a
+  // theme flip (watchTheme) both take a key before and restore after.
+  function diagramFocusKey(el) {
+    if (!el || el === document.body || !el.closest) { return null; }
+    var embed = el.closest(".embed");
+    var body = document.querySelector('[data-fc="doc-body"]');
+    if (!embed || !body || !body.contains(embed)) { return null; }
+    var diagrams = Array.prototype.slice.call(body.querySelectorAll("pre.mermaid"));
+    var index = diagrams.indexOf(embed.querySelector("pre.mermaid"));
+    if (index < 0) { return null; }
+    var key = { region: "doc-body", diagram: index };
+    var href = el.getAttribute("href") || el.getAttribute("xlink:href");
+    if (el.classList.contains("embed-reset")) { key.part = "reset"; }
+    else if (el.classList.contains("dia-viewport")) { key.part = "viewport"; }
+    else if (href) { key.part = "link"; key.link = href; }
+    else { return null; }
+    return key;
+  }
+
+  // Best effort: if the reader has put focus somewhere else while the
+  // diagram re-rendered, that choice stands.
+  function restoreDiagramFocus(key) {
+    if (!key) { return; }
+    var active = document.activeElement;
+    if (active && active !== document.body) { return; }
+    var body = document.querySelector('[data-fc="doc-body"]');
+    var pre = body ? body.querySelectorAll("pre.mermaid")[key.diagram] : null;
+    var embed = pre ? pre.closest(".embed") : null;
+    if (!embed) { return; }
+    var el = null;
+    if (key.part === "reset") {
+      el = embed.querySelector(".embed-reset");
+    } else if (key.part === "viewport") {
+      el = embed.querySelector(".dia-viewport");
+    } else {
+      Array.prototype.some.call(pre.querySelectorAll("a"), function (a) {
+        if ((a.getAttribute("href") || a.getAttribute("xlink:href")) === key.link) { el = a; return true; }
+        return false;
+      });
+    }
+    if (el) { el.focus({ preventScroll: true }); }
   }
 
   function stashSources() {
@@ -265,12 +360,15 @@
   // it brings in are new, unrendered pre.mermaid blocks. refresh runs the same
   // first-render path over them; already-rendered diagrams elsewhere are gone
   // with the old body. svg-panzoom.js needs no hook: it watches <main>.
-  // refresh returns a promise that settles when the render has.
+  // refresh returns a promise that settles when the render has; focusKey and
+  // restoreFocus let reload.js carry diagram focus across it.
   window.ForgectlMermaid = {
     refresh: function () {
       stashSources();
       wrapEmbeds();
       return render();
-    }
+    },
+    focusKey: diagramFocusKey,
+    restoreFocus: restoreDiagramFocus
   };
 })();

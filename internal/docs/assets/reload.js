@@ -31,13 +31,14 @@
 
   var STORAGE_KEY = "forgectl-docs-scroll";
 
-  // Chrome is found by data-fc, never by class or tag (forgectl#643). The
-  // sanitizer lets a doc carry any class and some of these tags (a raw
-  // <aside class="outline"> survives it), and a planted copy that comes first
-  // in document order would be the one a lookup returns. A data-fc cannot be
-  // planted: the sanitizer strips every data-* attribute from the doc, and
-  // mermaid-init.js scrubs data-fc from rendered diagrams, whose own
-  // sanitizer keeps data-*.
+  // Chrome is found by data-fc, never by class or tag (forgectl#643). A doc
+  // keeps some of these tags (a raw <aside> survives the sanitizer), and a
+  // planted copy that comes first in document order would be the one a tag
+  // lookup returns. Its chrome class names are stripped since forgectl#700
+  // (chromeclass.go), but every other class survives, so a class lookup is
+  // no safer. A data-fc cannot be planted: the sanitizer strips every data-*
+  // attribute from the doc, and mermaid-init.js scrubs data-fc from rendered
+  // diagrams, whose own sanitizer keeps data-*.
   var MAIN = '[data-fc="doc-main"]';
   var SIDENAV = '[data-fc="sidenav"]';
   var DOC_BODY = '[data-fc="doc-body"]';
@@ -128,7 +129,9 @@
   function focusKey() {
     var el = document.activeElement;
     if (!el || el === document.body) { return null; }
-    var diagram = diagramFocusKey(el);
+    // Focus inside a diagram is mermaid-init.js's to key and restore: the
+    // diagram is re-rendered after the swap (forgectl#718).
+    var diagram = window.ForgectlMermaid ? window.ForgectlMermaid.focusKey(el) : null;
     if (diagram) { return diagram; }
     var region = el.closest("[data-fc]");
     var key = { region: region ? region.getAttribute("data-fc") : null };
@@ -140,51 +143,6 @@
       if (label) { key.summary = label.textContent; return key; }
     }
     return null;
-  }
-
-  // Focus inside a diagram (its reset button, its pan/zoom viewport, or a
-  // link in the SVG) cannot go back when the rest does: the swap brings each
-  // diagram back as unrendered source, and the viewport and links exist only
-  // once mermaid has rendered it again (forgectl#718). So the key names the
-  // diagram by its index among the doc's diagrams, plus the part of it that
-  // held focus, and restoreDiagramFocus runs when the re-render settles.
-  function diagramFocusKey(el) {
-    var embed = el.closest(".embed");
-    var body = document.querySelector(DOC_BODY);
-    if (!embed || !body || !body.contains(embed)) { return null; }
-    var diagrams = Array.prototype.slice.call(body.querySelectorAll("pre.mermaid"));
-    var index = diagrams.indexOf(embed.querySelector("pre.mermaid"));
-    if (index < 0) { return null; }
-    var key = { region: "doc-body", diagram: index };
-    var href = el.getAttribute("href") || el.getAttribute("xlink:href");
-    if (el.classList.contains("embed-reset")) { key.part = "reset"; }
-    else if (el.classList.contains("dia-viewport")) { key.part = "viewport"; }
-    else if (href) { key.part = "link"; key.link = href; }
-    else { return null; }
-    return key;
-  }
-
-  // Best effort: if the reader has put focus somewhere else while the
-  // diagram re-rendered, that choice stands.
-  function restoreDiagramFocus(key) {
-    var active = document.activeElement;
-    if (active && active !== document.body) { return; }
-    var body = document.querySelector(DOC_BODY);
-    var pre = body ? body.querySelectorAll("pre.mermaid")[key.diagram] : null;
-    var embed = pre ? pre.closest(".embed") : null;
-    if (!embed) { return; }
-    var el = null;
-    if (key.part === "reset") {
-      el = embed.querySelector(".embed-reset");
-    } else if (key.part === "viewport") {
-      el = embed.querySelector(".dia-viewport");
-    } else {
-      within(pre, "a").some(function (a) {
-        if ((a.getAttribute("href") || a.getAttribute("xlink:href")) === key.link) { el = a; return true; }
-        return false;
-      });
-    }
-    if (el) { el.focus({ preventScroll: true }); }
   }
 
   // Every element matching sel in root's subtree, root itself first when it
@@ -268,7 +226,7 @@
     applyAnchor(anchor);
     restoreFocus(focus);
     if (focus && focus.diagram !== undefined) {
-      Promise.resolve(rendered).then(function () { restoreDiagramFocus(focus); });
+      Promise.resolve(rendered).then(function () { window.ForgectlMermaid.restoreFocus(focus); });
     }
     return true;
   }

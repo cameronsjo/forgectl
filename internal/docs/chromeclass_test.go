@@ -3,6 +3,7 @@ package docs
 import (
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -161,5 +162,47 @@ func TestChromeClasses_CoverFixedAndStickyCSS(t *testing.T) {
 	}
 	if rules < 8 {
 		t.Fatalf("found only %d fixed/sticky rules; the scan is broken", rules)
+	}
+}
+
+// mermaid-init.js strips the same chrome families from rendered diagrams,
+// whose classes never pass through the Go strip (forgectl#745). The two
+// lists must match.
+func TestChromeClasses_MermaidInitMirrorsGoList(t *testing.T) {
+	src := chromeRead(t, filepath.Join("assets", "mermaid-init.js"))
+	m := regexp.MustCompile(`(?s)var CHROME_CLASS_FAMILIES = \[(.*?)\];`).FindStringSubmatch(src)
+	if m == nil {
+		t.Fatal("no CHROME_CLASS_FAMILIES array in mermaid-init.js")
+	}
+	var js []string
+	for _, q := range regexp.MustCompile(`"([^"]+)"`).FindAllStringSubmatch(m[1], -1) {
+		js = append(js, q[1])
+	}
+	if !slices.Equal(js, chromeClassFamilies) {
+		t.Errorf("mermaid-init.js CHROME_CLASS_FAMILIES = %v\nchromeclass.go chromeClassFamilies = %v", js, chromeClassFamilies)
+	}
+}
+
+// The doc pane is the containing block and paint clip for everything a doc
+// renders (forgectl#745): a doc can wear Artificer's position:absolute
+// classes (.tooltip, .phase::before), and without this they anchor to the
+// page and paint over the chrome.
+func TestShell_DocPaneContainsPositionedContent(t *testing.T) {
+	tmpl := chromeRead(t, filepath.Join("templates", "shell.html.tmpl"))
+	if !regexp.MustCompile(`<main\b[^>]*class="surface-document[^"]*"[^>]*data-fc="doc-main"`).MatchString(tmpl) {
+		t.Fatal(`the doc pane is no longer <main class="surface-document ..." data-fc="doc-main">; the rule below targets it`)
+	}
+	style := regexp.MustCompile(`(?s)<style>(.*?)</style>`).FindStringSubmatch(tmpl)[1]
+	style = regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(style, "")
+	var decls []string
+	for _, r := range regexp.MustCompile(`(?m)^main\.surface-document\s*\{([^}]*)\}`).FindAllStringSubmatch(style, -1) {
+		decls = append(decls, r[1])
+	}
+	all := strings.Join(decls, ";")
+	if !regexp.MustCompile(`position\s*:\s*relative`).MatchString(all) {
+		t.Errorf("main.surface-document is not position: relative; a doc's absolute-positioned classes anchor to the page")
+	}
+	if !regexp.MustCompile(`contain\s*:\s*[^;]*\b(paint|content|strict)\b`).MatchString(all) {
+		t.Errorf("main.surface-document has no paint containment; a doc's positioned content can paint over the chrome")
 	}
 }

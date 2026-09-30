@@ -198,9 +198,12 @@ var contentLookups = map[string]map[string]string{
 	},
 	"mermaid-init.js": {
 		"pre.mermaid [data-fc]": "scrubs hooks forged inside rendered diagrams",
-		"pre.mermaid":           "content: the diagrams it renders",
-		".embed":                "content: the frame it wraps around a diagram",
+		"pre.mermaid":           "content: the diagrams it renders; diagram focus: the diagrams under the doc-body hook, or the one inside an .embed",
+		"pre.mermaid [class]":   "scrubs chrome class names off rendered diagram elements",
+		".embed":                "content: the frame it wraps around a diagram; diagram focus: up from the focused control, kept only inside the doc-body hook",
 		".dia-viewport":         "scoped to an .embed this script created",
+		".embed-reset":          "diagram focus: inside a doc-body diagram's .embed",
+		"a":                     "diagram focus: links inside one doc-body diagram",
 	},
 	"reload.js": {
 		":is(h1,h2,h3,h4,h5,h6)[id]":  "content: headings, on the doc-main root",
@@ -215,11 +218,6 @@ var contentLookups = map[string]map[string]string{
 		"summary":                                      "focus restore: inside the recorded region",
 		".live-dot":                                    "under the live-status data-fc hook",
 		".live-status__text":                           "under the live-status data-fc hook",
-		".embed":                                       "diagram focus: up from the focused control, kept only inside the doc-body hook; or up from a doc-body diagram",
-		"pre.mermaid":                                  "diagram focus: the diagrams under the doc-body hook, or the one inside an .embed found there",
-		".embed-reset":                                 "diagram focus: inside a doc-body diagram's .embed",
-		".dia-viewport":                                "diagram focus: inside a doc-body diagram's .embed",
-		"a":                                            "diagram focus: links inside one doc-body diagram",
 	},
 	"sidenav-filter.js": {
 		"li":                  "up from a link or folder under the sidenav data-fc hook",
@@ -369,20 +367,48 @@ type chromeLookup struct {
 }
 
 // jsBlockEnd returns the index of the brace closing the block that opens at
-// src[open], skipping string literals, or -1 when it never closes.
+// src[open], or -1 when it never closes. It skips string literals, // and
+// /* */ comments, and regex literals, so a brace in any of them does not
+// count: a comment reading "returns {}" inside a wrapper would otherwise end
+// its body early and hand the exemption to code after it.
 func jsBlockEnd(src string, open int) int {
 	depth := 0
 	for j := open; j < len(src); j++ {
-		switch c := src[j]; c {
-		case '"', '\'', '`':
+		switch c := src[j]; {
+		case c == '"' || c == '\'' || c == '`':
 			for j++; j < len(src) && src[j] != c; j++ {
 				if src[j] == '\\' {
 					j++
 				}
 			}
-		case '{':
+		case c == '/' && j+1 < len(src) && src[j+1] == '/':
+			for j < len(src) && src[j] != '\n' {
+				j++
+			}
+		case c == '/' && j+1 < len(src) && src[j+1] == '*':
+			end := strings.Index(src[j+2:], "*/")
+			if end < 0 {
+				return -1
+			}
+			j += end + 3
+		case c == '/' && jsRegexCanStart(src[:j]):
+			inClass := false
+			for j++; j < len(src) && src[j] != '\n'; j++ {
+				switch src[j] {
+				case '\\':
+					j++
+				case '[':
+					inClass = true
+				case ']':
+					inClass = false
+				}
+				if src[j] == '/' && !inClass {
+					break
+				}
+			}
+		case c == '{':
 			depth++
-		case '}':
+		case c == '}':
 			depth--
 			if depth == 0 {
 				return j
@@ -390,6 +416,20 @@ func jsBlockEnd(src string, open int) int {
 		}
 	}
 	return -1
+}
+
+// jsRegexCanStart reports whether a '/' after before opens a regex literal
+// rather than dividing: true after an operator, an opening bracket, or a
+// keyword like return, false after a value.
+func jsRegexCanStart(before string) bool {
+	t := strings.TrimRight(before, " \t\r\n")
+	if t == "" {
+		return true
+	}
+	if strings.IndexByte("(,=:[!&|?{};+-*%<>~^", t[len(t)-1]) >= 0 {
+		return true
+	}
+	return strings.HasSuffix(t, "return") || strings.HasSuffix(t, "typeof")
 }
 
 // wrapperBody is the source range of a selector wrapper's body and the name
@@ -589,5 +629,26 @@ func TestChrome_WrapperPassThroughIsKeyedByFunction(t *testing.T) {
 	}
 	if !slices.Equal(passed, []int{3}) {
 		t.Errorf("pass-through lookups on lines %v, want [3] (all's querySelectorAll(sel))", passed)
+	}
+}
+
+// A brace inside a comment or a regex literal in a wrapper's body must not
+// end the body early and cost the wrapper its own pass-through lookup.
+func TestChrome_WrapperBodySkipsCommentsAndRegexes(t *testing.T) {
+	src := "function all(sel) {\n" +
+		"  // a stray } in a comment\n" +
+		"  /* and { another } here */\n" +
+		"  var re = /[}]\\}/;\n" +
+		"  return document.querySelectorAll(sel);\n" +
+		"}\n" +
+		"all('[data-fc=\"sidenav\"] a');\n"
+	lookups, _ := scanChromeLookups(src, map[string]int{"all": 0})
+	for _, l := range lookups {
+		if l.line == 5 && !l.passThrough {
+			t.Errorf("querySelectorAll(sel) on line 5 lost its pass-through: the body scan ended early")
+		}
+		if !l.rooted && !l.passThrough {
+			t.Errorf("line %d: unrooted lookup %q", l.line, l.key)
+		}
 	}
 }
