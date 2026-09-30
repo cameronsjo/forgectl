@@ -13,6 +13,7 @@ forgectl herdr organize --json      # the plan as one JSON object on stdout; the
 
 - **A herdr pane.** The command needs `HERDR_ENV=1` and a `HERDR_SOCKET_PATH` naming a live socket, which herdr sets in every pane it hosts.
 - **Rules in `config.toml`.** `forgectl herdr organize` refuses to run with none (exit 2) and says what it found. `forgectl init` adds a commented `[herdr.organize]` section.
+- **A Unix build, to move tabs.** `--apply` serializes runs with a file lock that forgectl has only on Unix; elsewhere it refuses with exit 2 before any change. The report works everywhere.
 - **The `cameronsjo/herdr` fork, to move tabs.** Upstream herdr has no `tab move`, and `--apply` needs it. It checks before changing anything and refuses with exit 2 on stock herdr. The report only lists, so it works on stock herdr. Restart the herdr server after upgrading its binary: the check reads the CLI, not the running server.
 
 ## organize
@@ -83,7 +84,7 @@ With `--json`, `result` carries `applied`, `blocked`, `not_run`, and `error`, in
 |---|---|
 | 0 | done, or a report, including moves it predicts herdr will block |
 | 1 | herdr failed or declined a call |
-| 2 | not in a herdr pane, no rules configured, an invalid config, or a usage error |
+| 2 | not in a herdr pane, no rules configured, an invalid config, `--apply` on stock herdr or off Unix, or a usage error |
 
 ### Moving from the `forgectl-herdr` script
 

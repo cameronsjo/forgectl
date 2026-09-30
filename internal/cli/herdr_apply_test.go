@@ -812,6 +812,33 @@ func TestApply_ABlockedTabInADuplicateDoesNotStallTheTabOrder(t *testing.T) {
 	}
 }
 
+// TestApply_WithNoFileLockRefusesBeforeAnyHerdrCall: off Unix the organize
+// lock serializes nothing, so --apply refuses with exit 2 before the fork
+// probe, the lock, or any herdr call, while the report still runs (#732).
+func TestApply_WithNoFileLockRefusesBeforeAnyHerdrCall(t *testing.T) {
+	old := herdrLockSupported
+	t.Cleanup(func() { herdrLockSupported = old })
+	herdrLockSupported = false
+
+	w := sessionWorld()
+	a := runApply(t, herdrSeams{env: inSession.env}, w)
+	if ExitCode(a.err) != 2 || a.err == nil || !strings.Contains(a.err.Error(), "only on Unix") {
+		t.Fatalf("err = %v (exit %d), want exit 2 naming the missing lock", a.err, ExitCode(a.err))
+	}
+	if len(a.runner.Calls) != 0 {
+		t.Errorf("herdr was called: %v", a.runner.Calls)
+	}
+	for _, e := range a.events {
+		if e == "fork" || e == "lock" {
+			t.Errorf("event %q happened, want the refusal first", e)
+		}
+	}
+
+	if dry := runOrganize(t, organizeCfg(), w); dry.err != nil {
+		t.Errorf("the report without --apply failed: %v", dry.err)
+	}
+}
+
 // TestApply_AnIndexMoveReplyWithNoTabsIsListedAgain: an index move whose reply
 // carries a move_result but no tab list must not read as an empty, settled
 // workspace; the stage lists the tabs again and finishes the order (#945).
