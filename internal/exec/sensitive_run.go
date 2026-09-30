@@ -43,6 +43,14 @@ type OSSensitiveRunner struct {
 	// place a process comes into existence is what makes the refusal provable
 	// rather than assumed.
 	started atomic.Int64
+
+	// stdoutTap, when set, wraps the stdout read end before its reader sees
+	// it. It is a test seam and nil in production. It lets a test act on the
+	// event "the parent has read the child's bytes", which is the event a kill
+	// has to follow for those bytes to be captured: an abnormal ending
+	// force-closes the read ends at once, so bytes the child wrote but the
+	// reader had not yet taken are dropped (forgectl#787).
+	stdoutTap func(io.Reader) io.Reader
 }
 
 // StartedCount reports how many processes this runner has successfully
@@ -217,7 +225,11 @@ func (r *OSSensitiveRunner) RunSensitive(ctx context.Context, sc SensitiveComman
 	overflow := make(chan struct{}, 2)
 	outCh := make(chan BoundedOutput, 1)
 	errCh := make(chan BoundedOutput, 1)
-	go readCappedMode(outR, sc.StdoutCap, sc.StdoutMode, outCh, overflow)
+	var stdoutSrc io.Reader = outR
+	if r.stdoutTap != nil {
+		stdoutSrc = r.stdoutTap(outR)
+	}
+	go readCappedMode(stdoutSrc, sc.StdoutCap, sc.StdoutMode, outCh, overflow)
 	go readCapped(errR, sc.StderrCap, errCh, overflow)
 
 	waitCh := make(chan error, 1)
