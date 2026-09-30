@@ -14,7 +14,9 @@ package sops
 //       the target, intact, and removes the plaintext and the directory
 //   [x] A signal before the span (target untouched) keeps nothing
 //   [x] A signal after settle (target proven) keeps nothing
-//   [x] An existing file at the keep path is never replaced
+//   [x] An existing file at the keep path is never replaced or removed, and
+//       a signal then leaves the work directory holding only this run's
+//       backup rather than deleting it
 //   [x] A normal return inside the span (a failed restore, a panic) keeps the
 //       backup; one outside it keeps nothing
 //   [x] keepBackup reports where the backup went
@@ -277,6 +279,11 @@ func TestGuard_SignalOutsideMutationKeepsNothing(t *testing.T) {
 	}
 }
 
+// A file already at the keep path, planted outside the lock, is never
+// replaced and never removed, and the signal does not delete this run's
+// backup either: the work directory stays holding only the backup and its
+// .gitignore, as on the no-child path (cameronsjo/forgectl#692). It used to
+// remove the directory whole, backup included.
 func TestGuard_KeepNeverReplacesAnExistingFile(t *testing.T) {
 	ch := make(chan os.Signal, 1)
 	death := newFakeDeath()
@@ -290,16 +297,29 @@ func TestGuard_KeepNeverReplacesAnExistingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("track: %v", err)
 	}
+	// sops' decrypted copy of the whole document, in its own subdirectory
+	// of the work directory, as TMPDIR puts it there.
+	if err := os.Mkdir(filepath.Join(work.dir, "1234"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work.dir, "1234", "doc.yaml"), []byte("a: s3cr3t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	g.beginMutation()
 	fireAndWait(t, ch, death)
 
-	assertGone(t, work.dir)
 	got, err := os.ReadFile(filepath.Clean(keep))
 	if err != nil || string(got) != earlier {
-		t.Errorf("the existing file at the keep path was replaced: %q, %v", got, err)
+		t.Errorf("the existing file at the keep path was replaced or removed: %q, %v", got, err)
+	}
+	assertHoldsOnlyTheBackup(t, work.dir)
+	got, err = os.ReadFile(filepath.Clean(work.backup))
+	if err != nil || string(got) != backupCiphertext {
+		t.Errorf("this run's backup = %q, %v; want the ciphertext unchanged", got, err)
 	}
 	g.cleanup()
 	g.release()
+	assertHoldsOnlyTheBackup(t, work.dir)
 }
 
 // A normal return from inside the span means the target was never verified
