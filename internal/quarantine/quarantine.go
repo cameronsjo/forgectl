@@ -19,6 +19,7 @@ import (
 	"unicode"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Scheme selects how a quarantined path is renamed.
@@ -578,7 +579,7 @@ func globFold(root, pattern string) ([]string, error) {
 			for _, e := range entries {
 				ok, matchErr := filepath.Match(folded, e.Name())
 				if matchErr != nil {
-					return nil, fmt.Errorf("match pattern %q: %w", pattern, matchErr)
+					return nil, fmt.Errorf("match pattern %s: %w", termsafe.QuoteArgMax(pattern, 0), matchErr)
 				}
 				if ok {
 					next = append(next, filepath.Join(dir, e.Name()))
