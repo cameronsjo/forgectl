@@ -199,6 +199,14 @@ func TestQMDSearchNonZeroExit(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "exit 3") || strings.Contains(err.Error(), "secretquery") {
 		t.Errorf("silent failure err = %v, want it to name exit 3", err)
 	}
+
+	// #926: Err's text is redacted as CommandError.Error() redacts it.
+	// Mutation: drop redact.Text around cmdErr.Err.Error() in qmdFailure.
+	r = &fakeQMD{err: &forgexec.CommandError{Name: "qmd", Args: args, ExitCode: -1, Err: errors.New(`exec: "https://u:qmdtok@example.invalid/qmd": permission denied`)}}
+	_, err = qmdSearcher(r, t.TempDir()).Search(context.Background(), idx, "secretquery", 5)
+	if err == nil || strings.Contains(err.Error(), "qmdtok") || !strings.Contains(err.Error(), "[redacted]") {
+		t.Errorf("never-ran err = %v, want Err's text withheld", err)
+	}
 }
 
 func TestQMDSearchMissingBinary(t *testing.T) {
