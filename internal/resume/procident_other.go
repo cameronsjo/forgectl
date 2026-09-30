@@ -26,6 +26,10 @@ func readProcessIdentity(pid int) (ProcIdentity, error) {
 	if err != nil {
 		return ProcIdentity{}, err
 	}
+	// The kernel appends " (deleted)" once the binary is unlinked, which is
+	// exactly what Claude Code's updater does to old versions — the very
+	// sessions this identity check exists for.
+	execPath = strings.TrimSuffix(execPath, " (deleted)")
 	stat, err := os.ReadFile(base + "/stat") // #nosec G304 -- fixed /proc path, pid is an int
 	if err != nil {
 		return ProcIdentity{}, err

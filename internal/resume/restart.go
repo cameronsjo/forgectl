@@ -48,6 +48,10 @@ type PaneState struct {
 	// session can relabel its parent's pane — hence check 3 also wants the pid.
 	Agent        string
 	AgentSession string
+	// ScrolledBack is scroll.offset_from_bottom > 0: the operator is looking
+	// at older output, so the visible screen need not show the live input
+	// line — and a stale box frame left in the scrollback could read as empty.
+	ScrolledBack bool
 	// ForegroundPGID and ShellPID come from `herdr pane process-info`. The shell
 	// owning the foreground again is what says a stopped session's pane is
 	// ready for the next command.
@@ -203,6 +207,9 @@ func Evaluate(want OutdatedSession, obs Observation) Check {
 	}
 	if c, ok := checkPane(want, obs); !ok {
 		return c
+	}
+	if obs.Pane.ScrolledBack {
+		return Check{NotYet, "the pane is scrolled back, so its live input line is not on screen"}
 	}
 	if obs.ScreenErr != nil {
 		return Check{NotYet, "could not read the pane's screen"}

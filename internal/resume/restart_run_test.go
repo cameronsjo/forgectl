@@ -28,6 +28,7 @@ type fakeEnv struct {
 
 	// Record.
 	terminated, relaunched, prepared int
+	paneReads, screenReads           int
 	stopped                          bool
 	order                            []string
 }
@@ -46,9 +47,11 @@ func (f *fakeEnv) ReadEntry(int) (RegistryEntry, bool) {
 }
 func (f *fakeEnv) Alive(int) bool                     { return !f.stopped && f.obs.Alive }
 func (f *fakeEnv) Identity(int) (ProcIdentity, error) { return f.obs.Proc, f.obs.ProcErr }
+
 // Pane and Relaunch fail on a done context, as exec.CommandContext does, so a
 // cancel that reached them would show.
 func (f *fakeEnv) Pane(ctx context.Context, _ string) (PaneState, error) {
+	f.paneReads++
 	if err := ctx.Err(); err != nil {
 		return PaneState{}, err
 	}
@@ -69,7 +72,10 @@ func (f *fakeEnv) Pane(ctx context.Context, _ string) (PaneState, error) {
 	}
 	return f.obs.Pane, f.obs.PaneErr
 }
-func (f *fakeEnv) Screen(context.Context, string) (string, error) { return f.obs.Screen, f.obs.ScreenErr }
+func (f *fakeEnv) Screen(context.Context, string) (string, error) {
+	f.screenReads++
+	return f.obs.Screen, f.obs.ScreenErr
+}
 func (f *fakeEnv) Prepare(string) error {
 	f.prepared++
 	f.order = append(f.order, "prepare")
@@ -341,5 +347,30 @@ func TestSystemRestartEnv_Relaunch(t *testing.T) {
 	}
 	if len(run.Calls) != 1 {
 		t.Errorf("a refused relaunch reached herdr: %+v", run.Calls)
+	}
+}
+
+func TestRunRestart_BusyAndRefusedSessionsCostNoPaneReads(t *testing.T) {
+	busy := newFakeEnv()
+	busy.obs.Entry.Status = "busy"
+	runOne(t, context.Background(), busy, nil)
+	if busy.paneReads+busy.screenReads != 0 {
+		t.Errorf("busy session: %d pane and %d screen reads; want none", busy.paneReads, busy.screenReads)
+	}
+	mislabelled := newFakeEnv()
+	mislabelled.obs.Pane.AgentSession = "ffff"
+	runOne(t, context.Background(), mislabelled, nil)
+	if mislabelled.screenReads != 0 {
+		t.Errorf("refused pane: %d screen reads; want none", mislabelled.screenReads)
+	}
+}
+
+func TestRunRestart_CancelBeforeTheFirstCheckHasACleanDetail(t *testing.T) {
+	env := newFakeEnv()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	final, _ := runOne(t, ctx, env, nil)
+	if final.State != StateLeft || strings.Contains(final.Detail, "()") || env.terminated != 0 {
+		t.Fatalf("final = %+v, terminated = %d", final, env.terminated)
 	}
 }

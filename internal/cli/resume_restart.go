@@ -227,6 +227,8 @@ func printRestartEvent(out io.Writer, ev resume.RestartEvent) {
 	if ev.Manual != "" {
 		line += "; by hand: " + ev.Manual
 	}
+	// A failed progress write must not abort the run: it can land between a
+	// stop and its relaunch, and stranding a session is worse than a lost line.
 	_, _ = fmt.Fprintln(out, safeTerm(line))
 }
 

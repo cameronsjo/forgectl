@@ -147,6 +147,9 @@ func parsePaneGet(out string) (PaneState, error) {
 					Agent string `json:"agent"`
 					Value string `json:"value"`
 				} `json:"agent_session"`
+				Scroll *struct {
+					OffsetFromBottom int `json:"offset_from_bottom"`
+				} `json:"scroll"`
 			} `json:"pane"`
 		} `json:"result"`
 	}
@@ -159,6 +162,9 @@ func parsePaneGet(out string) (PaneState, error) {
 	var st PaneState
 	if as := reply.Result.Pane.AgentSession; as != nil {
 		st.Agent, st.AgentSession = as.Agent, as.Value
+	}
+	if sc := reply.Result.Pane.Scroll; sc != nil {
+		st.ScrolledBack = sc.OffsetFromBottom > 0
 	}
 	return st, nil
 }

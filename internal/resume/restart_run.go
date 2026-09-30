@@ -198,9 +198,13 @@ func RunRestart(ctx context.Context, env RestartEnv, plan []RestartPlanItem, opt
 		}
 		if why != "" {
 			for _, item := range pending {
+				detail := why
+				if w := waiting[item.SessionID]; w != "" {
+					detail += " (" + w + ")"
+				}
 				finish(RestartEvent{
 					SessionID: item.SessionID, State: StateLeft,
-					Detail: why + " (" + waiting[item.SessionID] + "); never signalled, still running",
+					Detail: detail + "; never signalled, still running",
 					Manual: ManualResume(item.SessionID),
 				})
 			}
@@ -220,12 +224,23 @@ func RunRestart(ctx context.Context, env RestartEnv, plan []RestartPlanItem, opt
 // observe gathers one Observation. Every read is fresh: nothing a previous
 // round saw is reused, because the point is to check immediately before the
 // signal.
+//
+// It stops reading at the first stage Evaluate would stop at, in Evaluate's
+// own order, so a busy or refused session costs no herdr calls and its screen
+// — another program's output — is not read every poll for nothing. The
+// fields left zero are ones Evaluate never reaches.
 func observe(ctx context.Context, env RestartEnv, s OutdatedSession) Observation {
 	var obs Observation
 	obs.Entry, obs.EntryFound = env.ReadEntry(s.Pid)
 	obs.Alive = env.Alive(s.Pid)
 	obs.Proc, obs.ProcErr = env.Identity(s.Pid)
+	if _, ok := checkIdentity(s, obs); !ok || IsBusy(obs.Entry.Status) {
+		return obs
+	}
 	obs.Pane, obs.PaneErr = env.Pane(ctx, s.Pane)
+	if _, ok := checkPane(s, obs); !ok || obs.Pane.ScrolledBack {
+		return obs
+	}
 	obs.Screen, obs.ScreenErr = env.Screen(ctx, s.Pane)
 	return obs
 }

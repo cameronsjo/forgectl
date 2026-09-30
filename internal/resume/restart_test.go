@@ -91,14 +91,14 @@ func TestInputLineEmpty(t *testing.T) {
 
 func TestIsClaudeExec(t *testing.T) {
 	for path, want := range map[string]bool{
-		"/Users/u/.local/bin/claude":                   true,
+		"/Users/u/.local/bin/claude":                    true,
 		"/Users/u/.local/share/claude/versions/2.1.283": true,
-		"/opt/homebrew/bin/claude":                     true,
-		"/usr/local/bin/node":                          false,
-		"/Users/u/.local/share/claude/versions/latest": false,
-		"/tmp/2.1.283":                                 false,
-		"/usr/bin/claude-code":                         false,
-		"":                                             false,
+		"/opt/homebrew/bin/claude":                      true,
+		"/usr/local/bin/node":                           false,
+		"/Users/u/.local/share/claude/versions/latest":  false,
+		"/tmp/2.1.283":                                  false,
+		"/usr/bin/claude-code":                          false,
+		"":                                              false,
 	} {
 		if got := IsClaudeExec(path); got != want {
 			t.Errorf("IsClaudeExec(%q) = %v, want %v", path, got, want)
@@ -190,6 +190,7 @@ func TestEvaluate(t *testing.T) {
 		// Check 4: the input line. Waits.
 		{"draft", func(_ *OutdatedSession, o *Observation) { o.Screen = screen("❯ half a thought") }, NotYet, "draft"},
 		{"unrecognized screen", func(_ *OutdatedSession, o *Observation) { o.Screen = "$ " }, NotYet, "not recognized"},
+		{"pane scrolled back", func(_ *OutdatedSession, o *Observation) { o.Pane.ScrolledBack = true }, NotYet, "scrolled back"},
 		{"screen unreadable", func(_ *OutdatedSession, o *Observation) { o.ScreenErr = errors.New("x") }, NotYet, "could not read the pane's screen"},
 	}
 	for _, tt := range tests {
@@ -263,6 +264,14 @@ func TestParseHerdrReplies(t *testing.T) {
 	st.ForegroundPGID = 51365
 	if !st.ShellForeground() {
 		t.Error("the shell's own group in the foreground is the ready state")
+	}
+
+	scrolled, err := parsePaneGet(`{"result":{"pane":{"scroll":{"max_offset_from_bottom":40,"offset_from_bottom":12}}}}`)
+	if err != nil || !scrolled.ScrolledBack {
+		t.Errorf("offset_from_bottom 12 = %+v, %v; want ScrolledBack", scrolled, err)
+	}
+	if st.ScrolledBack {
+		t.Error("the captured reply has no scroll object and must read as at the bottom")
 	}
 
 	unlabelled, err := parsePaneGet(`{"result":{"pane":{"pane_id":"w7P:p1"}}}`)
