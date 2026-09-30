@@ -62,7 +62,8 @@ func (m argMask) withValues(values []string) argMask {
 
 // maskData is an argMask's data: each marked KEY=VALUE argv element mapped to
 // its display form, plus the bare values to scrub from stderr. Only an
-// argMask's closure holds one; never store it in a field of anything else.
+// argMask's closure holds one; never store it in a field of anything else
+// (TestSealedDataHasOneHolder).
 type maskData struct {
 	shown map[string]string
 	// pats is every string text scrubs, whole entries and bare values

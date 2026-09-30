@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	forgexec "github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -380,8 +381,8 @@ func rootFailures(root Root, unparsed int, runErr error, stderr string, truncate
 			// *exec.ExitError ("exit status 2") and ExitCode is 2.
 			// cmdErr.Err, not cmdErr.Error(): the latter prefixes the
 			// command line, which a runner that keeps Args would fill with
-			// the query.
-			msg = cmdErr.Err.Error()
+			// the query. Its text is redacted as Error() redacts it (#926).
+			msg = redact.Text(cmdErr.Err.Error())
 		case isCmdErr:
 			msg = fmt.Sprintf("exit %d", cmdErr.ExitCode)
 		default:

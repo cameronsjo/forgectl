@@ -77,6 +77,9 @@ func WithOpaqueArgs(ctx context.Context, from int, n int) context.Context
 func WithProcessGroup(ctx context.Context) context.Context
 func WithoutOutput(err error) error
 method (*CommandError) Error() string
+method (*CommandError) Format(f fmt.State, verb rune)
+method (*CommandError) GoString() string
+method (*CommandError) LogValue() log/slog.Value
 method (*CommandError) Unwrap() error
 method (*FakeRunner) Last() Call
 method (*FakeRunner) Run(_ context.Context, name string, args ...string) (string, error)

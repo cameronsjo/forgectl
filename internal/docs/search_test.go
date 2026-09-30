@@ -341,6 +341,9 @@ func TestSearchSilentFailureReportsReason(t *testing.T) {
 		{"start failure", &forgexec.CommandError{Name: "rg", ExitCode: -1, Err: errors.New("exec format error")}, "rg failed: exec format error"},
 		{"real exit with empty stderr", &forgexec.CommandError{Name: "rg", ExitCode: 2, Err: errors.New("exit status 2")}, "rg failed: exit status 2"},
 		{"nil Err", &forgexec.CommandError{Name: "rg", ExitCode: 2}, "rg failed: exit 2"},
+		// #926: Err's text is redacted as CommandError.Error() redacts it.
+		// Mutation: drop redact.Text around cmdErr.Err.Error() in rootFailures.
+		{"credential in Err", &forgexec.CommandError{Name: "rg", ExitCode: -1, Err: errors.New(`exec: "https://u:tok@example.invalid/rg": permission denied`)}, "rg failed: [redacted]"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			idx, _ := searchRoot(t, "a.md")
