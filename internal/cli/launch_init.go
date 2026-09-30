@@ -194,7 +194,7 @@ func runLaunchMigrate(cmd *cobra.Command, boundary *config.LegacyMigrationBounda
 			// from boundary.Source: one source for the list, and no second
 			// dereference of a snapshot this arm does not otherwise touch.
 			return fmt.Errorf("legacy claunch.conf carries settings forgectl cannot represent, not importing: %s",
-				termsafe.SafeLine(result.Err.Error()))
+				safeText(result.Err.Error()))
 		}
 		return result.Err
 	}

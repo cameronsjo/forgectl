@@ -1,6 +1,10 @@
 package organize
 
-import "slices"
+import (
+	"slices"
+
+	"github.com/cameronsjo/forgectl/internal/herdr"
+)
 
 // OrderStep is one index move that brings a tab to its place: move the tab
 // identified by TerminalID to Position (0-based) in its workspace.
@@ -98,24 +102,51 @@ func Reorders(snap Snapshot, plan Plan) []Reorder {
 	return out
 }
 
+// WorkspaceOrderTarget returns the workspace ids in their current left-to-right
+// order and in the order plan.Layout wants: each layout label's canonical
+// workspace (lowest Number, as the plan picks it) in layout order, then every
+// other workspace in the order it has now. A workspace that repeats a label is
+// not canonical, so it lands behind the layout's workspaces. The dry run and
+// --apply both order workspaces from this, so they agree on what is pending.
+func WorkspaceOrderTarget(wss []herdr.Workspace, layout Layout) (current, target []string) {
+	_, canonical, _ := indexWorkspaces(wss)
+	current = make([]string, 0, len(wss))
+	for _, w := range wss {
+		current = append(current, w.WorkspaceID)
+	}
+	target = make([]string, 0, len(wss))
+	placed := make(map[string]bool, len(wss))
+	for _, lw := range layout.Workspaces {
+		if id, ok := canonical[lw.Label]; ok && !placed[id] {
+			placed[id] = true
+			target = append(target, id)
+		}
+	}
+	for _, id := range current {
+		if !placed[id] {
+			target = append(target, id)
+		}
+	}
+	return current, target
+}
+
 // WorkspaceOrderChange compares the workspaces' current left-to-right order
-// with the order plan.Layout wants, over the labels that exist now. A
+// with the order plan.Layout wants, as labels, using [WorkspaceOrderTarget]. A
 // workspace the plan creates is not counted: its position is only known once
-// it exists. Repeated labels count once, at their first position.
+// it exists. A repeated label appears once per workspace that carries it.
 func WorkspaceOrderChange(snap Snapshot, plan Plan) (from, to []string, changed bool) {
-	seen := map[string]bool{}
+	current, target := WorkspaceOrderTarget(snap.Workspaces, plan.Layout)
+	labelOf := make(map[string]string, len(snap.Workspaces))
 	for _, w := range snap.Workspaces {
-		if !seen[w.Label] {
-			seen[w.Label] = true
-			from = append(from, w.Label)
-		}
+		labelOf[w.WorkspaceID] = w.Label
 	}
-	for _, lw := range plan.Layout.Workspaces {
-		if seen[lw.Label] {
-			to = append(to, lw.Label)
-		}
+	for _, id := range current {
+		from = append(from, labelOf[id])
 	}
-	return from, to, !slices.Equal(from, to)
+	for _, id := range target {
+		to = append(to, labelOf[id])
+	}
+	return from, to, !slices.Equal(current, target)
 }
 
 // StandInID names a tab that has no pane, so it can take a position in an

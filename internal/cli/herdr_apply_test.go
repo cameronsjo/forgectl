@@ -635,3 +635,140 @@ func TestOrganizeLockPath_LivesBesideTheConfigNotOnIt(t *testing.T) {
 		t.Errorf("the lock directory must exist: %v", err)
 	}
 }
+
+// countBetween counts the herdr calls with prefix among events after the first
+// event equal to from and before the next "herdr tab move" call.
+func countBetween(events []string, from, prefix string) (int, bool) {
+	start := -1
+	for i, e := range events {
+		if e == from {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return 0, false
+	}
+	n := 0
+	for _, e := range events[start+1:] {
+		if strings.HasPrefix(e, "herdr tab move") {
+			break
+		}
+		if strings.HasPrefix(e, prefix) {
+			n++
+		}
+	}
+	return n, true
+}
+
+func TestApply_MovesReReadOnlyAfterACallThatChangedTheSession(t *testing.T) {
+	w := threeMoveWorld()
+	w.intercept = func(args []string) (string, error, bool) {
+		if len(args) >= 4 && args[0] == "tab" && args[1] == "move" && args[2] == "t1" && args[3] == "--workspace" {
+			return `{"id":"x","result":{"move_result":{"changed":false,"reason":"last_tab_in_workspace"}}}`, nil, true
+		}
+		return "", nil, false
+	}
+	a := runApply(t, inSession, w)
+	if a.err == nil || !strings.Contains(a.err.Error(), "last_tab_in_workspace") {
+		t.Fatalf("err = %v, want the decline reported", a.err)
+	}
+	// The declined move changed nothing, so the next move reuses the last read.
+	for _, list := range []string{"herdr pane list", "herdr workspace list"} {
+		n, ok := countBetween(a.events, "herdr tab move t1 --workspace w2", list)
+		if !ok || n != 0 {
+			t.Errorf("%d %q calls between the declined move and the next (found=%v), want 0\n%v", n, list, ok, a.events)
+		}
+		// t2's move was applied and renumbers ids, so t3's move re-reads first.
+		n, ok = countBetween(a.events, "herdr tab move t2 --workspace w2", list)
+		if !ok || n != 1 {
+			t.Errorf("%d %q calls between an applied move and the next (found=%v), want 1\n%v", n, list, ok, a.events)
+		}
+	}
+}
+
+func TestApply_TabOrderReadsTheSessionOncePerWorkspace(t *testing.T) {
+	w := newWorld(hws("w1", "forge", 1)).
+		tab("w1", "t1", "term1", "/r/forge/d", "d").
+		tab("w1", "t2", "term2", "/r/forge/c", "c").
+		tab("w1", "t3", "term3", "/r/forge/b", "b").
+		tab("w1", "t4", "term4", "/r/forge/a", "a")
+	w.active = map[string]string{"w1": "t1"}
+	w.focusedTab = "t1"
+	var calls []string
+	w.intercept = func(args []string) (string, error, bool) {
+		calls = append(calls, strings.Join(args, " "))
+		return "", nil, false
+	}
+	cfg := organizeCfg()
+	cfg.Herdr.Organize.WorkspaceOrder = []string{"forge"}
+	cfg.Herdr.Organize.Default = "forge"
+	setHerdrSeams(t, inSession)
+	r := runOrganize(t, cfg, w, "--apply")
+	if r.err != nil {
+		t.Fatalf("err = %v", r.err)
+	}
+	if got, want := w.order("w1"), []string{"term4", "term3", "term2", "term1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
+	// Three index moves; each reply carries the new tab list, so the stage lists
+	// tabs and panes once, not once per move.
+	count := func(prefix string) int {
+		n := 0
+		for _, c := range calls {
+			if strings.HasPrefix(c, prefix) {
+				n++
+			}
+		}
+		return n
+	}
+	// tab list: the snapshot, then the tab-order stage.
+	if n := count("tab list"); n != 2 {
+		t.Errorf("%d tab list calls, want 2 (snapshot + one for the tab-order stage)\n%v", n, calls)
+	}
+	// pane list: the snapshot, the tab-order stage, and the focus restore.
+	if n := count("pane list"); n != 3 {
+		t.Errorf("%d pane list calls, want 3 (snapshot, tab-order stage, focus restore)\n%v", n, calls)
+	}
+}
+
+// TestApply_DuplicateLabelWorkspaceOrderMatchesTheDryRun: the dry run must
+// report the workspace reorder --apply performs when two workspaces share a
+// label, and a second run must find nothing left to reorder (#732).
+func TestApply_DuplicateLabelWorkspaceOrderMatchesTheDryRun(t *testing.T) {
+	w := newWorld(hws("w1", "forge", 1), hws("w2", "forge", 2), hws("w3", "misc", 3)).
+		tab("w1", "t1", "term1", "/r/forge/a", "a").
+		tab("w2", "t2", "term2", "/r/forge/b", "b").
+		tab("w3", "t3", "term3", "/r/x/c", "c").
+		tab("w3", "t4", "term4", "/r/x/d", "d").
+		tab("w3", "t5", "term5", "/r/forge/e", "e")
+	w.active = map[string]string{"w1": "t1", "w2": "t2", "w3": "t3"}
+	w.focusedTab = "t3"
+	setHerdrSeams(t, inSession)
+
+	dry := runOrganize(t, organizeCfg(), w)
+	if dry.err != nil {
+		t.Fatalf("dry run err = %v", dry.err)
+	}
+	const wantLine = "order    workspaces: forge, misc, forge"
+	if !strings.Contains(dry.stdout, wantLine) {
+		t.Fatalf("dry run missing %q:\n%s", wantLine, dry.stdout)
+	}
+
+	// The duplicate's lone tab is blocked; the rest applies cleanly.
+	a := runOrganize(t, organizeCfg(), w, "--apply")
+	if a.err != nil {
+		t.Fatalf("apply err = %v\n%s", a.err, a.stdout)
+	}
+	if !strings.Contains(a.stdout, `ordered  workspace "misc" -> position 2`) {
+		t.Errorf("apply did not report the workspace reorder:\n%s", a.stdout)
+	}
+	if got, want := w.labels(), []string{"forge", "misc", "forge"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("labels after apply = %v, want %v (what the dry run reported)", got, want)
+	}
+
+	again := runOrganize(t, organizeCfg(), w)
+	if strings.Contains(again.stdout, "order    workspaces") {
+		t.Errorf("a second dry run still reports a workspace reorder; apply and the dry run disagree:\n%s", again.stdout)
+	}
+}

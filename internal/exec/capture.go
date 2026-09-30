@@ -35,7 +35,8 @@ var ErrOutputTooLarge = errors.New("command stdout exceeded the capture ceiling"
 
 // tailBuffer is an io.Writer that keeps only the last limit bytes written to
 // it and counts the rest. It never returns an error, so the child's stderr is
-// drained to EOF however much it writes.
+// drained to EOF however much it writes. buf is the raw, unmasked tail, so a
+// tailBuffer never leaves runAndWrap (TestRawCaptureStaysInRunAndWrap).
 type tailBuffer struct {
 	limit   int
 	buf     []byte
@@ -98,7 +99,8 @@ func maskedTail(t *tailBuffer, mask argMask) (string, int64) {
 // either.
 //
 // With discard set it keeps nothing and never fails, so the child's stdout is
-// drained to EOF however much it writes.
+// drained to EOF however much it writes. buf is the raw, unmasked stdout, so a
+// ceilingWriter never leaves runAndWrap (TestRawCaptureStaysInRunAndWrap).
 type ceilingWriter struct {
 	limit   int
 	discard bool

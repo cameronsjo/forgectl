@@ -56,7 +56,7 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 			// the render anyway. Stderr only — a --json pipe stays clean.
 			if gh := client.GitHubHost(); gh != githubauth.DefaultHost {
 				// Best-effort diagnostic write, same as every stderr note here.
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "github host: %s\n", termsafe.SafeLine(gh))
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "github host: %s\n", safeTitle(gh))
 			}
 
 			repos, notes, err := client.Inventory(ctx)
@@ -89,7 +89,7 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 					// is the whole diagnostic; the suggestion list is derived
 					// from server-supplied hostnames, so it goes through termsafe.
 					return fmt.Errorf("unknown --host %s; this inventory has: %s",
-						termsafe.QuoteArgMax(host, termsafe.ArgEchoMaxRunes), termsafe.SafeLine(strings.Join(slices.Sorted(maps.Keys(known)), ", ")))
+						termsafe.QuoteArgMax(host, termsafe.ArgEchoMaxRunes), safeText(strings.Join(slices.Sorted(maps.Keys(known)), ", ")))
 				}
 			}
 
@@ -212,7 +212,7 @@ func renderRepoTable(out, errOut io.Writer, repos []projects.Repo) error {
 		// hostname, gh's JSON, tea's TSV columns — and this writes them to a
 		// terminal. Host reaches here for EVERY row now that it is a hostname
 		// rather than one of two fixed tokens, but owner and name always did.
-		host := termsafe.SafeLine(r.Host)
+		host := safeTitle(r.Host)
 		if host == "" {
 			host = "local"
 		}
@@ -227,9 +227,9 @@ func renderRepoTable(out, errOut io.Writer, repos []projects.Repo) error {
 				}
 			}
 		}
-		name := termsafe.SafeLine(r.Name)
+		name := safeTitle(r.Name)
 		if r.Owner != "" {
-			name = termsafe.SafeLine(r.Owner) + "/" + name
+			name = safeTitle(r.Owner) + "/" + name
 		}
 		if r.Mirror {
 			name += " (mirror)"

@@ -138,7 +138,7 @@ func cloneOrg(ctx context.Context, client *projects.Client, cmd *cobra.Command, 
 			// error handler, so nothing else would escape a path or cause
 			// that carries a control (#658).
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "error: %s/%s: %v\n",
-				termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), termsafe.Error(err))
+				safeTitle(r.Owner), safeTitle(r.Name), termsafe.Error(err))
 			failed++
 		}
 	}
@@ -171,7 +171,7 @@ func cloneOnly(ctx context.Context, client *projects.Client, cmd *cobra.Command,
 	if r.Cloned {
 		// Best-effort diagnostic write, same as every stderr note here.
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%s/%s already on disk at %s\n",
-			termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), termsafe.QuotePath(r.LocalPath))
+			safeTitle(r.Owner), safeTitle(r.Name), termsafe.QuotePath(r.LocalPath))
 		// The one stdout line is the scriptable contract; a failed write there is
 
 		// the caller's pipe closing, not something this command can act on.
@@ -194,7 +194,7 @@ func cloneOnly(ctx context.Context, client *projects.Client, cmd *cobra.Command,
 	}
 	// Best-effort diagnostic write, same as every stderr note here.
 	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s/%s from %s…\n",
-		termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), termsafe.SafeLine(r.Host))
+		safeTitle(r.Owner), safeTitle(r.Name), safeTitle(r.Host))
 	dest, err := client.CloneInto(ctx, r, wing)
 	if err != nil {
 		return err

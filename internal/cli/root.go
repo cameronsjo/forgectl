@@ -72,10 +72,10 @@ func safeRootArgs(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	headline := fmt.Sprintf("unknown command %s for %s", termsafe.QuoteText(args[0]), termsafe.QuoteText(cmd.CommandPath()))
+	headline := fmt.Sprintf("unknown command %s for %s", termsafe.QuoteArgMax(args[0], termsafe.ArgEchoMaxRunes), termsafe.QuoteArgMax(cmd.CommandPath(), termsafe.ArgEchoMaxRunes))
 	suggestions := cmd.SuggestionsFor(args[0])
 	for i := range suggestions {
-		suggestions[i] = termsafe.SafeLine(suggestions[i])
+		suggestions[i] = safeLabel(suggestions[i])
 	}
 
 	return &structuredTerminalError{headline: headline, suggestions: suggestions}

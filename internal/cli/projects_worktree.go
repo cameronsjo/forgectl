@@ -7,7 +7,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/projects"
-	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -78,7 +77,7 @@ from projects list --json, or rerun interactively when no sshUrl is available.`,
 // to stderr so a `$(forgectl proj worktree …)` capture stays clean.
 func worktreeOnly(ctx context.Context, client *projects.Client, cmd *cobra.Command, r projects.Repo, branch string) error {
 	// Best-effort diagnostic write, same as every stderr note here.
-	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Initializing worktree for %s/%s from %s…\n", termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), termsafe.SafeLine(r.Host))
+	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Initializing worktree for %s/%s from %s…\n", safeTitle(r.Owner), safeTitle(r.Name), safeTitle(r.Host))
 	dir, err := client.Worktree(ctx, r, branch)
 	if err != nil {
 		return err
