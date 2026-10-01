@@ -479,3 +479,35 @@ func TestFastest_NamesTheClock(t *testing.T) {
 		}
 	}
 }
+
+// TestUnscaledMessagesSayNoRepeat: when scaled returns at its first step, a
+// floor or Ceiling message says nothing about repeating, rather than
+// "repeated 1 times" (#1009). A free small side against a 1.5 s large side
+// cannot scale (one more step would pass scaleBudget), and a 70 s large side
+// is over Ceiling at once.
+// Mutation: drop the reps == 1 branch in repeatNote (or print the count
+// unconditionally) and every row goes red.
+func TestUnscaledMessagesSayNoRepeat(t *testing.T) {
+	runWithin := func(base, subject int) *fakeTB {
+		c := &counter{}
+		f := &fakeTB{}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			within(f, "fake", 4, c.side(base), c.side(subject), c.measure)
+		}()
+		<-done
+		return f
+	}
+	for name, f := range map[string]*fakeTB{
+		"linear floor":   runFake(&counter{}, 8, 0, 1500),
+		"linear ceiling": runFake(&counter{}, 8, 10, 70000),
+		"within floor":   runWithin(0, 1500),
+		"within ceiling": runWithin(10, 70000),
+	} {
+		got := strings.Join(append(f.fatals, f.errors...), "; ")
+		if got == "" || strings.Contains(got, "repeated") {
+			t.Errorf("%s: reports %q, want a refusal that does not mention repeating", name, got)
+		}
+	}
+}

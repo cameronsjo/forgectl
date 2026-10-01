@@ -88,6 +88,10 @@ var envTemplateExts = map[string]bool{
 // scannerConfigNames are the files gitleaks reads from a scanned directory.
 var scannerConfigNames = map[string]bool{".gitleaks.toml": true, ".gitleaksignore": true}
 
+// isScannerConfigName reports whether name is one of scannerConfigNames,
+// matched as checkScannerConfig matches it.
+func isScannerConfigName(name string) bool { return scannerConfigNames[asciiLower(name)] }
+
 // asciiLower folds only A-Z, so a non-ASCII rune that Unicode lowercases to
 // ASCII (the Kelvin sign to k) cannot make a name match.
 func asciiLower(s string) string {
@@ -226,7 +230,7 @@ func scanSecretsWith(root string, ops fsOps, so SecretsOptions, euid int) (Secre
 	}
 	stats := &walkStats{CappedBy: []string{}}
 	s := &secretScanner{root: root, ops: ops, opts: opts, euid: euid, report: &report, stats: stats}
-	w := &walker{ops: ops, root: root, maxEntries: opts.MaxEntries, maxDepth: opts.MaxDepth, stats: stats, visit: s.visit, onRepo: s.checkScannerConfig}
+	w := &walker{ops: ops, root: root, maxEntries: opts.MaxEntries, maxDepth: opts.MaxDepth, stats: stats, visit: s.visit, onRepo: s.checkScannerConfig, repoNames: isScannerConfigName}
 	if err := w.run(); err != nil {
 		return SecretsReport{}, err
 	}
@@ -255,7 +259,7 @@ func sortSecretFindings(list []SecretFinding) {
 // An entry that cannot be Lstat'd cannot be judged and counts as unsafe.
 func (s *secretScanner) checkScannerConfig(dir string, names []string) {
 	for _, name := range names {
-		if !scannerConfigNames[asciiLower(name)] {
+		if !isScannerConfigName(name) {
 			continue
 		}
 		info, err := s.ops.lstat(path.Join(dir, name))

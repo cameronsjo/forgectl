@@ -13,27 +13,6 @@ import (
 	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 )
 
-// operatorAllowsExt points git at a global config that admits the ext::
-// transport, as an operator's own protocol.ext.allow=always would, and clears
-// the variables that would refuse or replace it before the clone sees it.
-func operatorAllowsExt(t *testing.T) {
-	t.Helper()
-	gitenvtest.RequireGit(t)
-	for _, key := range []string{"GIT_ALLOW_PROTOCOL", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"} {
-		t.Setenv(key, "")
-		if err := os.Unsetenv(key); err != nil {
-			t.Fatal(err)
-		}
-	}
-	global := filepath.Join(t.TempDir(), "gitconfig")
-	if err := os.WriteFile(global, []byte("[protocol \"ext\"]\n\tallow = always\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GIT_CONFIG_GLOBAL", global)
-	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	t.Setenv("TMPDIR", t.TempDir())
-}
-
 // #978 item 1: a workflow-supplied ext:: URL cannot run its command through
 // the sandbox clone, even where the operator's own config admits ext::.
 // The control clones the same URL with the options the sandbox clone carried
@@ -41,7 +20,7 @@ func operatorAllowsExt(t *testing.T) {
 // Mutation: drop "-c protocol.ext.allow=never" from the clone's argv: the
 // canary runs.
 func TestSandbox_CloneRefusesExtEvenWhenTheOperatorAllowsIt(t *testing.T) {
-	operatorAllowsExt(t)
+	gitenvtest.OperatorAllowsExt(t)
 	control := filepath.Join(t.TempDir(), "control")
 	ctl := gitenv.Command(t.Context(), gitenv.Transport, "clone", "--", "ext::sh -c touch% "+control, filepath.Join(t.TempDir(), "c"))
 	_ = ctl.Run()
@@ -61,7 +40,7 @@ func TestSandbox_CloneRefusesExtEvenWhenTheOperatorAllowsIt(t *testing.T) {
 // The refusal leaves a local path cloneable: alwaysClone of a local
 // repository still clones it.
 func TestSandbox_AlwaysCloneOfALocalPathStillWorks(t *testing.T) {
-	operatorAllowsExt(t)
+	gitenvtest.OperatorAllowsExt(t)
 	src := filepath.Join(t.TempDir(), "src")
 	if err := os.Mkdir(src, 0o750); err != nil {
 		t.Fatal(err)
@@ -88,7 +67,7 @@ func TestSandbox_AlwaysCloneOfALocalPathStillWorks(t *testing.T) {
 // canary runs); or drop GIT_ALLOW_PROTOCOL instead of filtering it (no
 // failure here, but TestRunRefusingKeepsTheOperatorsOtherTransports fails).
 func TestSandbox_CloneRefusesExtThatGitAllowProtocolAdmits(t *testing.T) {
-	operatorAllowsExt(t)
+	gitenvtest.OperatorAllowsExt(t)
 	t.Setenv("GIT_ALLOW_PROTOCOL", "ext:file")
 	control := filepath.Join(t.TempDir(), "control")
 	ctl := gitenv.Command(t.Context(), gitenv.Transport, "-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never", "clone", "--", "ext::sh -c touch% "+control, filepath.Join(t.TempDir(), "c"))

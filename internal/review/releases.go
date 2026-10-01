@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/yamlsafe"
+	"gopkg.in/yaml.v3"
 )
 
 // Registry classes (ADR-0044 (e)).
@@ -193,7 +194,7 @@ func ParseRegistry(raw []byte) (Registry, error) {
 		return Registry{}, fmt.Errorf("registry is larger than the %d KiB limit", maxRegistryBytes>>10)
 	}
 	if err != nil {
-		return Registry{}, fmt.Errorf("parse registry: %w", err)
+		return Registry{}, registryYAMLError(err)
 	}
 	var reg Registry
 	if root := yamlsafe.Root(doc); root != nil {
@@ -201,10 +202,36 @@ func ParseRegistry(raw []byte) (Registry, error) {
 			return Registry{}, fmt.Errorf("parse registry: %w", err)
 		}
 		if err := doc.Decode(&reg); err != nil {
-			return Registry{}, fmt.Errorf("parse registry: %w", err)
+			return Registry{}, registryYAMLError(err)
 		}
 	}
 	return validateRegistry(reg)
+}
+
+// yamlLine matches the line number yaml.v3 puts at the front of a syntax
+// error ("yaml: line 3: …") and of each decode error ("line 3: …").
+var yamlLine = regexp.MustCompile(`^(?:yaml: )?line ([0-9]+): `)
+
+// registryYAMLError words a yaml.v3 parse or decode failure as its kind and
+// line only. yaml.v3's own text quotes the start of a value (cannot
+// unmarshal !!str `abcdefg...`) and anchor names, so it never passes through
+// (#1006). A failure with no line number says so without one.
+func registryYAMLError(err error) error {
+	var te *yaml.TypeError
+	if errors.As(err, &te) && len(te.Errors) > 0 {
+		msg := "a value has the wrong type"
+		if m := yamlLine.FindStringSubmatch(te.Errors[0]); m != nil {
+			msg = "line " + m[1] + ": " + msg
+		}
+		if n := len(te.Errors) - 1; n > 0 {
+			msg += fmt.Sprintf(" (and %d more)", n)
+		}
+		return errors.New("parse registry: " + msg)
+	}
+	if m := yamlLine.FindStringSubmatch(err.Error()); m != nil {
+		return errors.New("parse registry: line " + m[1] + ": not valid YAML")
+	}
+	return errors.New("parse registry: not valid YAML")
 }
 
 // validateRegistry checks a decoded registry's version and entries.

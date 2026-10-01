@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"sort"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -21,8 +22,13 @@ import (
 // an *os.Root; a test binds a failing or counting double to prove no
 // metadata arrives any other way.
 type fsOps struct {
-	// names lists a directory's entry names, with no per-entry stat.
-	names func(dir string) ([]string, error)
+	// names lists a directory's entry names, sorted, with no per-entry
+	// stat: the limit smallest names, plus every name keep reports true for
+	// (keep may be nil). The directory is read in batches and never held
+	// whole, so memory is bounded by the limit and not by the directory's
+	// size (#994); the result is exactly the sorted prefix a whole read
+	// would give, so a capped walk visits the same entries.
+	names func(dir string, limit int, keep func(string) bool) ([]string, error)
 	// lstat describes an entry without following a final symlink.
 	lstat func(name string) (fs.FileInfo, error)
 	// stat follows a symlink, but only within the root; a target outside it
@@ -64,7 +70,7 @@ func openRootOps(abs string) (fsOps, func(), error) {
 
 func rootOps(r *os.Root) fsOps {
 	return fsOps{
-		names: func(dir string) ([]string, error) {
+		names: func(dir string, limit int, keep func(string) bool) ([]string, error) {
 			// dirOpenFlags carries O_DIRECTORY|O_NONBLOCK where the platform has
 			// them: a directory swapped for a FIFO between the parent's lstat
 			// and this open fails fast instead of blocking for a writer.
@@ -73,12 +79,54 @@ func rootOps(r *os.Root) fsOps {
 				return nil, err
 			}
 			defer func() { _ = f.Close() }()
-			return f.Readdirnames(-1)
+			return readNames(f, limit, keep)
 		},
 		lstat: r.Lstat,
 		stat:  r.Stat,
 		sniff: func(name string) (bool, error) { return sniffRoot(r, name) },
 	}
+}
+
+// dirReadBatch is how many names one Readdirnames call asks for.
+const dirReadBatch = 256
+
+// readNames reads the directory f in batches of dirReadBatch and returns,
+// sorted, the limit smallest names plus every name keep reports true for.
+// It holds at most about twice limit names (plus one batch, plus the kept
+// names): once that many are pending, it sorts them and drops all but the
+// limit smallest, which no later name can push back in.
+func readNames(f *os.File, limit int, keep func(string) bool) ([]string, error) {
+	var smallest, kept []string
+	trim := func() {
+		sort.Strings(smallest)
+		if len(smallest) > limit {
+			clear(smallest[limit:])
+			smallest = smallest[:limit]
+		}
+	}
+	for {
+		batch, err := f.Readdirnames(dirReadBatch)
+		for _, name := range batch {
+			if keep != nil && keep(name) {
+				kept = append(kept, name)
+				continue
+			}
+			smallest = append(smallest, name)
+		}
+		if len(smallest)-limit > limit {
+			trim()
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	trim()
+	out := append(smallest, kept...)
+	sort.Strings(out)
+	return out, nil
 }
 
 // sniffRoot is fsOps.sniff over r. The open carries O_NONBLOCK where the

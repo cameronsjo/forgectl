@@ -2,7 +2,7 @@ package sops
 
 // Test plan for file.go
 //
-// IsSOPSFile
+// isSOPSFile
 //   [x] True for a document with a top-level sops: mapping
 //   [x] False for plain YAML, for invalid YAML, for a `sops:` that is a
 //       scalar or a sequence rather than a mapping, and for a nested one
@@ -12,7 +12,7 @@ package sops
 //   [x] Refused: .env names, a bare .yaml, a different case, a path rather
 //       than a basename
 //
-// ReadPlaintextRules / WouldStoreCleartext
+// readPlaintextRules / WouldStoreCleartext
 //   [x] unencrypted_suffix refuses a matching key and admits others
 //   [x] The _unencrypted DEFAULT applies when the file configures no rule
 //   [x] encrypted_suffix refuses a key that does NOT match
@@ -83,8 +83,8 @@ func TestIsSOPSFile(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := IsSOPSFile([]byte(c.doc)); got != c.want {
-				t.Errorf("IsSOPSFile = %v, want %v", got, c.want)
+			if got := isSOPSFile([]byte(c.doc)); got != c.want {
+				t.Errorf("isSOPSFile = %v, want %v", got, c.want)
 			}
 		})
 	}
@@ -263,9 +263,9 @@ func TestWouldStoreCleartext(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			rules, err := ReadPlaintextRules([]byte(c.doc))
+			rules, err := readPlaintextRules([]byte(c.doc))
 			if err != nil {
-				t.Fatalf("ReadPlaintextRules: %v", err)
+				t.Fatalf("readPlaintextRules: %v", err)
 			}
 			isClear, reason := rules.WouldStoreCleartext(c.path)
 			if isClear != c.wantClear {
@@ -320,9 +320,9 @@ func TestReadPlaintextRules_Refusals(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := ReadPlaintextRules([]byte(c.doc))
+			_, err := readPlaintextRules([]byte(c.doc))
 			if err == nil {
-				t.Fatal("ReadPlaintextRules returned nil error, want a refusal")
+				t.Fatal("readPlaintextRules returned nil error, want a refusal")
 			}
 			if !strings.Contains(err.Error(), c.want) {
 				t.Errorf("error = %q, want it to mention %q", err.Error(), c.want)

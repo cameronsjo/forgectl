@@ -111,6 +111,26 @@ func TestHerdrOrganize_Validate(t *testing.T) {
 			want: "a label must not contain control characters",
 		},
 		{
+			name: "rule workspace with a bidi override",
+			cfg:  HerdrOrganizeConfig{Default: "d", Rules: []HerdrOrganizeRule{{Glob: "a", Workspace: "w\u202e"}}},
+			want: "a label must not contain control characters",
+		},
+		{
+			name: "default with a zero width space",
+			cfg:  HerdrOrganizeConfig{Default: "d\u200b", Rules: []HerdrOrganizeRule{{Glob: "a", Workspace: "w"}}},
+			want: "a label must not contain invisible characters or invalid UTF-8",
+		},
+		{
+			name: "order label with a line separator",
+			cfg:  HerdrOrganizeConfig{WorkspaceOrder: []string{"ok", "o\u2028"}},
+			want: "workspace_order entry #2",
+		},
+		{
+			name: "order label that is not UTF-8",
+			cfg:  HerdrOrganizeConfig{WorkspaceOrder: []string{"o\xff"}},
+			want: "a label must not contain invisible characters or invalid UTF-8",
+		},
+		{
 			name: "order label starting with a dash",
 			cfg:  HerdrOrganizeConfig{WorkspaceOrder: []string{"ok", "-x"}},
 			want: `workspace_order entry #2 "-x": a label must not start with '-'`,
@@ -176,5 +196,23 @@ func TestValidatePath_ChecksHerdrOrganize(t *testing.T) {
 	err := ValidatePath(path)
 	if err == nil || !strings.Contains(err.Error(), "workspace_order") {
 		t.Errorf("ValidatePath = %v, want the workspace_order error (doctor must see it)", err)
+	}
+}
+
+// TestHerdrOrganize_JoinedLabelsPass: labels that real herdr workspaces carry
+// (VS16 emoji, a ZWJ emoji sequence, ZWJ inside Sinhala) pass Validate on
+// every path, so an existing workspace with one can still be targeted.
+//
+// Mutation: drop U+200D or U+FE0F from wire.operandJoiners and its rows go red.
+func TestHerdrOrganize_JoinedLabelsPass(t *testing.T) {
+	for _, label := range []string{"\u2764\ufe0f home", "\U0001F468\u200d\U0001F4BB dev", "\u0dc1\u0dca\u200d\u0dbb\u0dd3"} {
+		cfg := HerdrOrganizeConfig{
+			Default:        label,
+			Rules:          []HerdrOrganizeRule{{Glob: "a", Workspace: label}},
+			WorkspaceOrder: []string{label},
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("%q refused: %v", label, err)
+		}
 	}
 }

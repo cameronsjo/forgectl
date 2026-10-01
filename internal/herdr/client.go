@@ -193,7 +193,8 @@ func need[P any](p *P, key string, args []string) (P, error) {
 
 // checkID refuses an id or label that is not one safe herdr operand, by
 // [wire.CheckOperand]: empty, read as a flag, longer than
-// [wire.MaxOperandLen], or carrying a control character.
+// [wire.MaxOperandLen], not valid UTF-8, or carrying a control, bidi or
+// invisible character.
 func checkID(what, id string) error {
 	if err := wire.CheckOperand(id); err != nil {
 		if errors.Is(err, wire.ErrEmptyOperand) {

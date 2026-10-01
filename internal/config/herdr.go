@@ -79,8 +79,8 @@ func (hc HerdrOrganizeConfig) Validate() error {
 
 // checkLabel refuses a workspace label herdr's client would refuse at apply
 // time, by the same check the client runs (wire.CheckOperand): one that starts
-// with '-' (read as a flag), holds a control character, or is over
-// wire.MaxOperandLen bytes. Catching it here means the dry run cannot promise a
+// with '-' (read as a flag), holds a control, bidi or invisible character, is
+// not valid UTF-8, or is over wire.MaxOperandLen bytes. Catching it here means the dry run cannot promise a
 // move that --apply then fails halfway through. An empty label passes: whether
 // one may be empty is each caller's own check.
 func checkLabel(label string) error {
@@ -94,6 +94,8 @@ func checkLabel(label string) error {
 		return errors.New("a label must not start with '-'")
 	case errors.Is(err, wire.ErrControlOperand):
 		return errors.New("a label must not contain control characters")
+	case errors.Is(err, wire.ErrInvisibleOperand), errors.Is(err, wire.ErrEncodingOperand):
+		return errors.New("a label must not contain invisible characters or invalid UTF-8")
 	case errors.Is(err, wire.ErrLongOperand):
 		return fmt.Errorf("a label is over %d bytes", wire.MaxOperandLen)
 	default:

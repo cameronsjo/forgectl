@@ -2,6 +2,7 @@ package audit
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -428,5 +429,31 @@ func TestScanSecrets_RepoRelIsTheGitPathspec(t *testing.T) {
 	}
 	if !slices.Equal(r.Repos, []string{outer, inner}) {
 		t.Errorf("repos = %v, want both, sorted", r.Repos)
+	}
+}
+
+// TestScanSecrets_CappedListingStillSeesGitAndScannerConfig: in a directory
+// whose listing the entry cap bounds, .git and the scanner-config names are
+// still seen though they sort after the names the bound keeps ('+' sorts
+// before '.'), so the repo is still found and an unsafe .gitleaksignore is
+// still reported, as when the directory was read whole (#1013 review).
+//
+// Mutation: drop the keep predicate from readNames (keep only the smallest
+// names) and the repo and the unsafe config are lost.
+func TestScanSecrets_CappedListingStillSeesGitAndScannerConfig(t *testing.T) {
+	root := t.TempDir()
+	repo := mkrepo(t, root, "r")
+	if err := os.MkdirAll(filepath.Join(repo, ".gitleaksignore"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 600 {
+		mkfile(t, repo, fmt.Sprintf("+%03d", i))
+	}
+	r, err := ScanSecrets(SecretsOptions{Root: root, MaxEntries: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Truncated || len(r.Repos) != 1 || len(r.UnsafeScannerConfig) != 1 {
+		t.Errorf("truncated=%v repos=%v unsafe=%v, want true, [r], [r]", r.Truncated, r.Repos, r.UnsafeScannerConfig)
 	}
 }
