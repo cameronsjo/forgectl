@@ -80,9 +80,16 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 		// Clone the default branch when no ref was given; git clone --branch
 		// wants a real branch/tag name, so "HEAD" can't stand in for it. The --
 		// separator ends option parsing before the repo/dir positionals.
-		args := []string{"clone", "--", repo, dir}
+		//
+		// repo comes from a shared workflow file, so the ext:: and fd::
+		// transports, which run a command or read a descriptor the URL names,
+		// are refused as the Gitea clones refuse them. git already refuses
+		// ext:: by default, but an operator's protocol.ext.allow (or
+		// protocol.allow) would admit it; these -c options outrank it.
+		// file and https/ssh/git stay, so an alwaysClone of a local path works.
+		args := []string{"-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never", "clone", "--", repo, dir}
 		if ref != "" {
-			args = []string{"clone", "--branch", ref, "--", repo, dir}
+			args = []string{"-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never", "clone", "--branch", ref, "--", repo, dir}
 		}
 		if _, err := gitenv.Run(ctx, run, gitenv.Transport, args...); err != nil {
 			slog.Error("Failed to clone repo.", "repo", shownRepo, "sandbox", dir, "exit_code", exitCode(err))

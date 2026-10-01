@@ -3,6 +3,7 @@ package projects
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -321,5 +322,42 @@ func TestWithGitHubOwners_CopiesInput(t *testing.T) {
 
 	if len(c.githubOwners) != 1 || c.githubOwners[0] != "alpha" {
 		t.Fatalf("client owners = %v, want the value copied at construction", c.githubOwners)
+	}
+}
+
+// #978 item 2: gh runs git clone outside internal/gitenv, so the variables
+// that would point that clone's checkout or index at another repository are
+// removed from gh's environment, on both clone paths, and the host pin
+// survives the switch to the filtered path.
+// Mutation: run either clone through Run (no removals): GIT_WORK_TREE and
+// GIT_INDEX_FILE reach gh.
+func TestCloneRepo_ScrubsRepositoryVariablesFromGh(t *testing.T) {
+	t.Setenv("GIT_WORK_TREE", "/elsewhere")
+	t.Setenv("GIT_INDEX_FILE", "/elsewhere/index")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	for name, clone := range map[string]func(context.Context, exec.Runner, string, string, string) error{
+		"cloneRepo": cloneRepo, "cloneBareRepo": cloneBareRepo,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := &exec.FakeRunner{}
+			if err := clone(context.Background(), fake, "cameronsjo/forgectl", t.TempDir(), githubauth.DefaultHost); err != nil {
+				t.Fatal(err)
+			}
+			c := fake.Last()
+			if c.Name != "gh" || len(c.Args) < 2 || c.Args[1] != "clone" {
+				t.Fatalf("call = %+v, want gh repo clone", c)
+			}
+			for _, k := range []string{"GIT_WORK_TREE", "GIT_INDEX_FILE"} {
+				if !slices.Contains(c.UnsetEnv, k) {
+					t.Errorf("gh's removals %v lack %s", c.UnsetEnv, k)
+				}
+			}
+			if slices.Contains(c.UnsetEnv, "GIT_CONFIG_COUNT") {
+				t.Errorf("gh's removals %v drop the operator's injected config, which Transport keeps", c.UnsetEnv)
+			}
+			if c.Env["GH_HOST"] != githubauth.DefaultHost {
+				t.Errorf("GH_HOST = %q, want the pin %q", c.Env["GH_HOST"], githubauth.DefaultHost)
+			}
+		})
 	}
 }

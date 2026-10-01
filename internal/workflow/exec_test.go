@@ -372,7 +372,8 @@ func TestExecutor_CloneVerb_ClonesAndExportsWorkspace(t *testing.T) {
 	if call.Name != "git" {
 		t.Errorf("call.Name = %q, want git", call.Name)
 	}
-	if len(call.Args) == 0 || call.Args[0] != "clone" {
+	// The sandbox clone refuses ext:: and fd:: ahead of the subcommand (#978).
+	if len(call.Args) < 5 || strings.Join(call.Args[:5], " ") != "-c protocol.ext.allow=never -c protocol.fd.allow=never clone" {
 		t.Errorf("expected a git clone invocation, got args %v", call.Args)
 	}
 
@@ -408,7 +409,7 @@ func TestExecutor_CloneVerb_ClonesLocalRepo(t *testing.T) {
 	}
 	call := fake.Calls[0]
 	call.Args = gitenvtest.Strip(call.Args)
-	if call.Name != "git" || len(call.Args) == 0 || call.Args[0] != "clone" {
+	if call.Name != "git" || len(call.Args) < 5 || call.Args[4] != "clone" {
 		t.Errorf("explicit clone on a local repo must git-clone, got %s %v", call.Name, call.Args)
 	}
 	if workspace, ok := wctx.Get("workspace"); ok && workspace != "" {

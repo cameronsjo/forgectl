@@ -254,8 +254,8 @@ func TestReadPlainDataFailsPastItsDepth(t *testing.T) {
 //
 // Mutation that turns it red: have Len return len(b.buf.read()).
 func TestOnlyCopyBytesForParseReadsOutput(t *testing.T) {
-	for _, p := range guardPlatforms {
-		c := checkExecFor(t, p)
+	for _, p := range guardConfigs {
+		c := checkExec(t, p)
 		tn, ok := c.pkg.Scope().Lookup("outputBuf").(*types.TypeName)
 		if !ok {
 			t.Fatalf("[%s] internal/exec declares no outputBuf type; the rule would check nothing", p)
@@ -405,7 +405,7 @@ func storedIn(c *checkedPackage, target *types.TypeName, except ...*types.Var) [
 // execStruct returns internal/exec's struct type name and its field called
 // field (nil for an empty name), failing the test when either is gone, since
 // the rule would then check nothing.
-func execStruct(t *testing.T, c *checkedPackage, p guardPlatform, name, field string) (*types.TypeName, *types.Struct, *types.Var) {
+func execStruct(t *testing.T, c *checkedPackage, p guardConfig, name, field string) (*types.TypeName, *types.Struct, *types.Var) {
 	t.Helper()
 	tn, ok := c.pkg.Scope().Lookup(name).(*types.TypeName)
 	if !ok {
@@ -444,8 +444,8 @@ func execStruct(t *testing.T, c *checkedPackage, p guardPlatform, name, field st
 // argMask a second `peek func() maskData` field; give outputBuf a
 // `peek func() []byte` field.
 func TestSealedDataHasOneHolder(t *testing.T) {
-	for _, p := range guardPlatforms {
-		c := checkExecFor(t, p)
+	for _, p := range guardConfigs {
+		c := checkExec(t, p)
 		md, _, _ := execStruct(t, c, p, "maskData", "")
 		_, _, get := execStruct(t, c, p, "argMask", "get")
 		if !mentionsType(get.Type(), md, map[types.Type]bool{}) {
@@ -489,8 +489,8 @@ func TestSealedDataHasOneHolder(t *testing.T) {
 // declare a `func() *tailBuffer` literal in runAndWrap; build a tailBuffer in a
 // helper outside runAndWrap; read a ceilingWriter's buf in maskedTail.
 func TestRawCaptureStaysInRunAndWrap(t *testing.T) {
-	for _, p := range guardPlatforms {
-		c := checkExecFor(t, p)
+	for _, p := range guardConfigs {
+		c := checkExec(t, p)
 		for _, name := range []string{"tailBuffer", "ceilingWriter"} {
 			tn, _, buf := execStruct(t, c, p, name, "buf")
 			for _, s := range storedIn(c, tn) {

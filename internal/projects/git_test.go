@@ -223,9 +223,9 @@ func TestGitStatus_UsesOnePorcelainV2BranchProbe(t *testing.T) {
 	mkGitDir(t, tmp, "clean")
 	repo := filepath.Join(tmp, "clean")
 
-	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+	fake := &exec.FakeRunner{RunFunc: gitenvtest.NoFilters(func(name string, args []string) (string, error) {
 		return v2Branch(2, 3), nil
-	}}
+	})}
 
 	got := gitStatus(context.Background(), fake, "git", repo)
 	want := GitStatus{State: StatusOK, Ahead: 2}
@@ -233,12 +233,14 @@ func TestGitStatus_UsesOnePorcelainV2BranchProbe(t *testing.T) {
 		t.Errorf("gitStatus = %+v, want %+v", got, want)
 	}
 
-	if len(fake.Calls) != 1 {
-		t.Fatalf("git calls = %d (%v), want exactly 1", len(fake.Calls), fake.Calls)
+	// The filter-driver listing ahead of it is #977's, and its own process.
+	if len(fake.Calls) != 2 || !gitenvtest.FilterListing(fake.Calls[0].Args) {
+		t.Fatalf("git calls = %d (%v), want the filter listing and one status probe", len(fake.Calls), fake.Calls)
 	}
+	probes := withoutListings(fake.Calls)
 	wantArgs := append(gitenv.Args(gitenv.Local), "-C", repo, "status", "--porcelain=v2", "--branch")
-	if fake.Calls[0].Name != "git" || !reflect.DeepEqual(fake.Calls[0].Args, wantArgs) {
-		t.Errorf("argv = %s %v, want git %v", fake.Calls[0].Name, fake.Calls[0].Args, wantArgs)
+	if len(probes) != 1 || probes[0].Name != "git" || !reflect.DeepEqual(probes[0].Args, wantArgs) {
+		t.Errorf("probes = %v, want one git %v", probes, wantArgs)
 	}
 	counts := countGitSubcommands(fake.Calls, repo)
 	if counts["rev-list"] != 0 {
@@ -292,13 +294,18 @@ func TestGitStatus_CombinedCommandFailureIsUnknownWithoutFallback(t *testing.T) 
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := tc.ctx()
 			defer cancel()
-			run := &ctxRunner{fn: tc.fn}
+			run := &ctxRunner{fn: func(ctx context.Context, name string, args []string) (string, error) {
+				if gitenvtest.FilterListing(args) {
+					return "", gitenvtest.ErrNoFilterDrivers(name, args)
+				}
+				return tc.fn(ctx, name, args)
+			}}
 
 			if got := gitStatus(ctx, run, "git", repo); got.State != StatusUnknown {
 				t.Errorf("gitStatus = %+v, want State %q", got, StatusUnknown)
 			}
 
-			calls := run.Calls()
+			calls := withoutListings(run.Calls())
 			if len(calls) != 1 {
 				t.Fatalf("git calls = %d (%v), want exactly 1 attempted probe", len(calls), calls)
 			}
@@ -472,14 +479,14 @@ func TestGitStatus_ParsesPorcelainV2(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) {
+			fake := &exec.FakeRunner{RunFunc: gitenvtest.NoFilters(func(string, []string) (string, error) {
 				return tc.out, nil
-			}}
+			})}
 			if got := gitStatus(context.Background(), fake, "git", repo); got != tc.want {
 				t.Errorf("gitStatus = %+v, want %+v\n--- output ---\n%s", got, tc.want, tc.out)
 			}
-			if len(fake.Calls) != 1 {
-				t.Errorf("git calls = %d, want exactly 1", len(fake.Calls))
+			if n := len(withoutListings(fake.Calls)); n != 1 {
+				t.Errorf("git calls beside the filter listing = %d, want exactly 1", n)
 			}
 		})
 	}
@@ -520,9 +527,9 @@ func TestGitStatus_HeaderlessPayloadIsUnknown(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) {
+			fake := &exec.FakeRunner{RunFunc: gitenvtest.NoFilters(func(string, []string) (string, error) {
 				return tc.out, nil
-			}}
+			})}
 			if got := gitStatus(context.Background(), fake, "git", repo); got != tc.want {
 				t.Errorf("gitStatus = %+v, want %+v\n--- output ---\n%s", got, tc.want, tc.out)
 			}
@@ -557,9 +564,21 @@ func TestGitStatusV2_RecordOrderDoesNotAffectCounts(t *testing.T) {
 
 	for _, perm := range perms {
 		out := v2Out(append([]string{v2Branch(2, 0)}, perm...)...)
-		fake := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return out, nil }}
+		fake := &exec.FakeRunner{RunFunc: gitenvtest.NoFilters(func(string, []string) (string, error) { return out, nil })}
 		if got := gitStatus(context.Background(), fake, "git", repo); got != want {
 			t.Errorf("permutation %v: gitStatus = %+v, want %+v", perm, got, want)
 		}
 	}
+}
+
+// withoutListings returns calls minus gitenv.RunUnfiltered's filter
+// listings, for a test that asserts on the calls gitStatus made itself.
+func withoutListings(calls []exec.Call) []exec.Call {
+	var out []exec.Call
+	for _, c := range calls {
+		if !gitenvtest.FilterListing(c.Args) {
+			out = append(out, c)
+		}
+	}
+	return out
 }

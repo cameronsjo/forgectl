@@ -153,8 +153,8 @@ func execAlias(file *ast.File, report func(token.Pos, string)) string {
 //   - Transform(struct{ t sealed.Transform }{})       (minting by conversion)
 //   - p := &t.t; *p = sealed.TmuxDirOperand()         (minting through a pointer)
 func TestTransformIsMintedOnlyInTransformGo(t *testing.T) {
-	for _, p := range guardPlatforms {
-		c := checkExecFor(t, p)
+	for _, p := range guardConfigs {
+		c := checkExec(t, p)
 		for _, f := range mintingFindings(t, c) {
 			t.Errorf("[%s] %s", p, f)
 		}
