@@ -109,14 +109,14 @@ func userArg(a string) string {
 }
 
 // tokenPrefixes are the leading bytes of well-known credential formats
-// (GitHub, GitLab personal and pipeline-trigger, Slack, OpenAI/Stripe-style,
+// (GitHub, GitLab personal, pipeline-trigger and CI job, Slack, OpenAI/Stripe-style,
 // AWS access key ids, Google API keys, npm, PyPI, Hugging Face, Shopify),
 // written lower-case and matched case-insensitively. A token pasted where a
 // flag name goes (--ghp_…) is a value, not a name. stdoutTokens, below, are
 // the same formats at their issued case and length, for Stdout; a format
 // added to one belongs in the other.
 var tokenPrefixes = []string{
-	"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "glptt-", "xox", "sk-", "sk_", "akia", "asia",
+	"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "glptt-", "glcbt-", "xox", "sk-", "sk_", "akia", "asia",
 	"aiza", "npm_", "pypi-", "hf_", "shpat_",
 }
 
@@ -130,8 +130,8 @@ type stdoutToken struct {
 
 // stdoutTokens are the credential formats Stdout withholds, each at its
 // issuer's minimum length after the prefix: GitHub classic (36) and
-// fine-grained (82, matched from 22), GitLab personal and pipeline-trigger
-// (20), OpenAI and Anthropic (sk-, sk-proj-, sk-ant-: 20 and up), Stripe
+// fine-grained (82, matched from 22), GitLab personal, pipeline-trigger and
+// CI job (20), OpenAI and Anthropic (sk-, sk-proj-, sk-ant-: 20 and up), Stripe
 // secret and restricted keys, Slack (xoxb- and its siblings), AWS access key
 // ids (16 after AKIA or ASIA), npm (36), Google API keys (35), Hugging Face
 // (34), PyPI (50 and up; issued tokens run past 150) and Shopify (32 hex).
@@ -145,7 +145,7 @@ type stdoutToken struct {
 var stdoutTokens = []stdoutToken{
 	{"ghp_", 36, isAlnum}, {"gho_", 36, isAlnum}, {"ghu_", 36, isAlnum}, {"ghs_", 36, isAlnum}, {"ghr_", 36, isAlnum},
 	{"github_pat_", 22, isTokenByte},
-	{"glpat-", 20, isTokenByte}, {"glptt-", 20, isTokenByte},
+	{"glpat-", 20, isTokenByte}, {"glptt-", 20, isTokenByte}, {"glcbt-", 20, isTokenByte},
 	{"sk-", 20, isTokenByte},
 	{"sk_live_", 16, isAlnum}, {"sk_test_", 16, isAlnum}, {"rk_live_", 16, isAlnum}, {"rk_test_", 16, isAlnum},
 	{"AKIA", 16, isUpperDigit}, {"ASIA", 16, isUpperDigit},
@@ -394,11 +394,19 @@ func credentialValue(s string) bool {
 	if strings.Contains(l, "authorization:") || strings.HasPrefix(l, "bearer ") || strings.HasPrefix(l, "basic ") {
 		return true
 	}
-	// A header name is letters, digits and '-'. It must hold a '-' or be
-	// Cookie, so that prose such as "invalid token: expired" in a child's
-	// stderr is not read as a header.
 	name, _, ok := strings.Cut(l, ":")
-	if !ok || name == "" || strings.Trim(name, "abcdefghijklmnopqrstuvwxyz0123456789-") != "" {
+	return ok && credentialHeaderName(name)
+}
+
+// credentialHeaderName reports whether name, lowercased, is an HTTP header
+// name that carries a credential: Cookie, or a hyphenated name credentialName
+// accepts (Private-Token, X-Api-Key, X-Auth-Token, X-GitHub-Token,
+// Proxy-Authorization). A header name is letters, digits and '-'. It must
+// hold a '-' or be Cookie, so that prose such as "invalid token: expired" in
+// a child's stderr is not read as a header. Text (credentialValue) and Stdout
+// (headerIn) share it, so their header lists cannot drift (#974).
+func credentialHeaderName(name string) bool {
+	if name == "" || strings.Trim(name, "abcdefghijklmnopqrstuvwxyz0123456789-") != "" {
 		return false
 	}
 	return (strings.Contains(name, "-") || name == "cookie") && credentialName(name)
@@ -422,7 +430,9 @@ func credentialValue(s string) bool {
 // a withheld word.
 //
 // Text also withholds every line Stdout does (#952), a PEM private-key
-// block's lines included, so it is always the stronger of the two.
+// block's lines included, so it is always the stronger of the two: it runs
+// Stdout's shapes without the exemptions Stdout alone makes for deliverable
+// output (#974, pemScan.deliverable).
 func Text(s string) string {
 	var sc pemScan
 	return withholdLines(s, func(line string) bool {

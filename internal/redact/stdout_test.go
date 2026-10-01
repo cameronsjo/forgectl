@@ -43,9 +43,9 @@ var stdoutKept = []string{
 	"Cloning into 'r'... from git@github.com:o/r.git.",
 	"remote: ssh://git@github.com/o/r.git",
 	"try main@{u} instead",
-	// gh auth status: gh masks the token itself.
+	// gh auth status. Its masked "  - Token: gho_***" row reads as a YAML
+	// credential key and is withheld (stdoutWithheld).
 	"  \u2713 Logged in to github.com account octocat (keyring)",
-	"  - Token: gho_************************************",
 	"  - Token scopes: 'gist', 'read:org', 'repo'",
 	// go.
 	"go version go1.26.0 darwin/arm64",
@@ -63,6 +63,38 @@ var stdoutKept = []string{
 	"-----BEGIN CERTIFICATE-----",
 	Marker,
 	"",
+	// #974 item 1 near misses: a JSON or YAML credential key with nothing in
+	// its value, a key that is not the line's own, a port and path before
+	// an '@', an eyJ word with fewer than two dots or short segments, a
+	// flag with no value after it, a color code around a plain word.
+	`"token": "",`,
+	`"password": null`,
+	`  "credentials": {`,
+	"password:",
+	"  token: |",
+	"api_key: ~",
+	`"tokens": []`,
+	"Downloading http://registry.local:4873/@scope/pkg/-/pkg-1.0.0.tgz",
+	"GET https://registry.npmjs.org/@anthropic-ai%2fclaude-code 200",
+	"eyJhbGciOiJIUzI1NiJ9",
+	"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0",
+	"eyJ.abcd.efgh",
+	"glcbt-short",
+	"pass the token with --token",
+	"\x1b[32m==>\x1b[0m \x1b[1mUpgrading 1 outdated package:\x1b[0m",
+	// #974 item 2, deliverable false positives Stdout keeps and Text still
+	// withholds (TestText_KeepsWithholdingStdoutExemptions).
+	"basic authentication disabled",
+	"bearer authentication is not configured",
+	"pass=1 fail=0 skip=2",
+	"auth=ok",
+	"Cookie: none",
+	"> Cookie: none",
+	"  auth: true",
+	`  "auth": "ok",`,
+	" src/token=x.go | 1 +",
+	" src/password=reset.go | 12 ++++++------",
+	" assets/token=logo.png | Bin 0 -> 1234 bytes",
 }
 
 // stdoutWithheld are lines Stdout must withhold, one per shape, each carrying
@@ -114,6 +146,54 @@ var stdoutWithheld = []string{
 	"export NPM_AUTH=SEKRIT",
 	"--password=SEKRIT",
 	"HOMEBREW_GITHUB_API_TOKEN=SEKRIT",
+	// #974 item 1: JSON and YAML credential keys.
+	`"token": "SEKRIT"`,
+	`{"access_token":"SEKRIT","token_type":"bearer"}`,
+	`  "password" : "SEKRIT",`,
+	`{"client_secret": 12345678}`,
+	"password: SEKRIT",
+	"  - api_key: SEKRIT",
+	"'secret': SEKRIT",
+	"  - Token: gho_************************************",
+	// The headers Text catches through credentialHeaderName.
+	"X-Auth-Token: SEKRIT",
+	"< x-github-token: SEKRIT",
+	// A credential flag's value after a space.
+	"--password SEKRIT",
+	"gh auth login --with-token SEKRIT",
+	// JWTs, signed and alg none.
+	"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJTRUtSSVQifQ.c2lnbmF0dXJl",
+	"id_token=eyJhbGciOiJub25lIn0.eyJhIjoxfQ.",
+	// GitLab CI job token.
+	"glcbt-64_" + strings.Repeat("x", 20),
+	"glcbt-" + strings.Repeat("y", 20),
+	// Userinfo whose password holds a raw '/', '?' or '#'; git 2.43 prints
+	// the first form as it is.
+	"fatal: unable to access 'http://user:pa/SEKRIT@127.0.0.1:9/r/': URL rejected: Port number was not a decimal number between 0 and 65535",
+	"http://user:pa?SEKRIT@host/r",
+	"https://user:pa#SEKRIT@host/r",
+	"https://user:/SEKRIT@host/r",
+	// A credential split by a color code, or wrapped in one.
+	"ghp_" + strings.Repeat("A", 18) + "\x1b[0m" + strings.Repeat("A", 18),
+	"\x1b[1mAuthorization\x1b[0m: SEKRIT",
+	"GITHUB_TOKEN=\x1b[31m",
+	// #974 item 2 edges that stay withheld in Stdout: the scheme spelled
+	// exactly, or a run with a digit or '+', '/', '='; a status word that
+	// is not the whole value; a count of four digits; a line with a
+	// diffstat bar that is not a diffstat row.
+	"Basic authentication disabled",
+	"Bearer authentication",
+	"basic dXNlcjpTRUtSSVQ=",
+	"bearer abc123defghij",
+	"PASSWORD=ok horse battery",
+	"pass=1234",
+	"Cookie: none; sid=SEKRIT",
+	"> Cookie: none; sid=SEKRIT",
+	"> Cookie: none SEKRIT",
+	`"auth": "ok SEKRIT"`,
+	"auth: ok SEKRIT",
+	" src/app.go | 1 + GITHUB_TOKEN=SEKRIT",
+	"GITHUB_TOKEN=SEKRIT src/app.go | 1 +",
 }
 
 // TestStdout: every stdoutKept line survives, every stdoutWithheld line reads
@@ -130,6 +210,21 @@ var stdoutWithheld = []string{
 // drop schemeAt (the Bearer and Basic rows show); drop credentialAssignment
 // (the NAME=value rows show), or its empty-value skip (GITHUB_TOKEN= is
 // withheld).
+//
+// For #974: drop jsonKeyIn (the JSON rows show) or yamlKey (the YAML rows);
+// drop any keyValueCarries empty case (its kept row is withheld); drop
+// credentialHeaderName from isCredentialHeader (X-Auth-Token shows); drop
+// flagValueIn (--password SEKRIT shows) or its value-after check (pass the
+// token with --token is withheld); drop stdoutJWT (the JWT rows show); drop
+// the glcbt- entry; drop the raw-'/' userinfo alternative (the git row
+// shows) or its port arm (the registry:4873 row is withheld); drop the
+// stripCSI pass (the split ghp_ row shows) or the as-is pass
+// (GITHUB_TOKEN=ESC[31m shows); make schemeAt ignore case-exactness
+// (Basic authentication disabled shows) or the digit check (basic
+// dXNlc…= shows); let benignAssignment accept any following word
+// (PASSWORD=ok horse battery shows) or benignValue any digit count
+// (pass=1234 shows); drop headerIn's textEnd bound (Cookie: none;
+// sid=SEKRIT shows); drop the diffstat anchors (the src/app.go row shows).
 func TestStdout(t *testing.T) {
 	for _, line := range stdoutKept {
 		if got := Stdout(line); got != line {
@@ -277,9 +372,81 @@ func TestText_WithholdsStdoutShapes(t *testing.T) {
 	}
 }
 
+// stdoutExempt are the #974 item-2 lines: deliverable false positives that
+// Stdout keeps (they are also stdoutKept rows) and that Text went on
+// withholding before #974 and must still withhold.
+var stdoutExempt = []string{
+	"basic authentication disabled",
+	"bearer authentication is not configured",
+	"pass=1 fail=0 skip=2",
+	"auth=ok",
+	"Cookie: none",
+	"> Cookie: none",
+	" src/token=x.go | 1 +",
+	" src/password=reset.go | 12 ++++++------",
+	" assets/token=logo.png | Bin 0 -> 1234 bytes",
+}
+
+// TestText_KeepsWithholdingStdoutExemptions: Stdout's exemptions for
+// deliverable output (#974) are Stdout's alone. Text withholds every line
+// they keep, as it did before them, and the Text-mode shape check
+// (pemScan{}) still reports each of them.
+//
+// Mutations that turn it red: make Text's pemScan deliverable (the basic
+// and bearer prose rows come through Text, since its word rule does not see
+// them); drop the deliverable guard in front of any one exemption
+// (schemeAt's, benignAssignment's, benignRest's, diffstatRow's), and its
+// rows come through the Text-mode check.
+func TestText_KeepsWithholdingStdoutExemptions(t *testing.T) {
+	for _, line := range stdoutExempt {
+		if got := Stdout(line); got != line {
+			t.Errorf("Stdout(%q) = %q, want it kept", line, got)
+		}
+		if got := Text(line); got != Marker {
+			t.Errorf("Text(%q) = %q, want %q as before #974", line, got, Marker)
+		}
+		var sc pemScan
+		if !sc.stdoutWithheld(line) {
+			t.Errorf("the Text-mode shape check keeps %q; want it withheld, so Text's own shapes do not lean on lineWithheld", line)
+		}
+	}
+}
+
+// TestText_KeepsEmptyCredentialKeys: a JSON or YAML credential key whose
+// value is empty carries nothing, in Text as in Stdout, so the key shape
+// (#974) does not add withheld lines to Text that hold no value.
+//
+// Mutation that turns it red: drop any one keyValueCarries empty case
+// ("null", "~", "{", "[]", the empty quoted string, the block-scalar
+// indicator); Stdout still keeps a status word such as null, Text does not.
+func TestText_KeepsEmptyCredentialKeys(t *testing.T) {
+	for _, line := range []string{
+		`"token": "",`,
+		`"password": null`,
+		`  "credentials": {`,
+		"password:",
+		"  token: |",
+		"  token: >-",
+		"api_key: ~",
+		`"tokens": []`,
+	} {
+		if got := Text(line); got != line {
+			t.Errorf("Text(%q) = %q, want it kept", line, got)
+		}
+		if got := Stdout(line); got != line {
+			t.Errorf("Stdout(%q) = %q, want it kept", line, got)
+		}
+	}
+}
+
 // adversarialStdout are inputs built to cost a regex engine more than a
 // pass: a URL marker with no '@', a run of token prefixes each one byte
-// short, a long run of '@', a PEM armor run, and a NAME= run.
+// short, a long run of '@', a PEM armor run, and a NAME= run; and for #974's
+// shapes, runs that make each per-':' or per-word check re-read a shared
+// tail: JSON keys with trailing blanks, quotes or digits, header values
+// with trailing blanks, eyJ words with no second dot, credential flags with
+// no value, userinfo with a port and no '@', lowercase scheme words with a
+// letters-only run, status-word assignments, and CSI escapes.
 func adversarialStdout(n int) []string {
 	return []string{
 		strings.Repeat("a://", n/4),
@@ -289,6 +456,28 @@ func adversarialStdout(n int) []string {
 		strings.Repeat("-----BEGIN PRIVATE KEY-----", n/27),
 		strings.Repeat("x=", n/2),
 		strings.Repeat("Bearer ", n/7),
+		strings.Repeat(`"token":""`, n/20) + strings.Repeat(" ", n/2),
+		strings.Repeat(`"abcdefgh"   :`, n/14),
+		strings.Repeat(`"token":null,`, n/13),
+		"x " + strings.Repeat("xcookie: ", n/9),
+		strings.Repeat("a:", n/2),
+		"Cookie: none" + strings.Repeat(" ", n),
+		strings.Repeat("eyJaaaaaaaa.aaa ", n/16),
+		"eyJ" + strings.Repeat("a", n),
+		strings.Repeat("eyJ-", n/4),
+		"--token" + strings.Repeat(" ", n),
+		strings.Repeat("--tok ", n/6),
+		strings.Repeat("-", n),
+		strings.Repeat("h://u:1/", n/8),
+		"h://u:" + strings.Repeat("a/", n/2),
+		strings.Repeat("basic "+strings.Repeat("a", 12)+" ", n/20),
+		"basic " + strings.Repeat("a", n),
+		strings.Repeat("pass=1 ", n/7),
+		strings.Repeat("auth=ok&", n/8),
+		strings.Repeat("\x1b[", n/2),
+		strings.Repeat("\x1b[0m", n/4) + "x",
+		"password: |" + strings.Repeat("-", n),
+		" " + strings.Repeat("a", n) + " | 1 +",
 	}
 }
 
@@ -298,9 +487,14 @@ func adversarialStdout(n int) []string {
 // against a wall-clock bound, so a loaded host does not fail it. RE2 is
 // linear; the rest of the scan must stay so too.
 //
-// Mutation that turns it red: in credentialAssignment, scan back from each
+// Text runs the same shapes without Stdout's exemptions, so each family is
+// timed through Text too.
+//
+// Mutations that turn it red: in credentialAssignment, scan back from each
 // '=' over every earlier byte, '=' included (isNameByte(c) || c == '='), and
-// the NAME= row goes quadratic.
+// the NAME= row goes quadratic; in headerIn, check the benign value with
+// benignValue(strings.TrimSpace(line[i+1:])) in place of benignRest (the
+// Cookie: none row goes quadratic).
 func TestStdout_LinearOnAdversarialInput(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing test")
@@ -311,6 +505,9 @@ func TestStdout_LinearOnAdversarialInput(t *testing.T) {
 		perftest.Linear(t, "Stdout on adversarial input "+strconv.Itoa(i), k,
 			func() { _ = Stdout(small[i]) },
 			func() { _ = Stdout(large[i]) })
+		perftest.Linear(t, "Text on adversarial input "+strconv.Itoa(i), k,
+			func() { _ = Text(small[i]) },
+			func() { _ = Text(large[i]) })
 	}
 }
 
@@ -319,7 +516,8 @@ func TestStdout_LinearOnAdversarialInput(t *testing.T) {
 //
 // Mutation that turns it red: drop the word-start check in headerIn.
 func TestStdout_HeaderStartsAWord(t *testing.T) {
-	for _, line := range []string{"fortunecookie: yes", "preauthorization: pending"} {
+	// Each starts after a word, so the YAML key shape does not apply.
+	for _, line := range []string{"x fortunecookie: yes", "x preauthorization: pending"} {
 		if got := Stdout(line); got != line {
 			t.Errorf("Stdout(%q) = %q, want it kept", line, got)
 		}
