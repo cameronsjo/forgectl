@@ -39,6 +39,11 @@ const breadcrumbTextMaxBytes = 1536
 // breadcrumbText is recordText further bounded by breadcrumbTextMaxBytes of
 // encoded JSON: every free-text field a breadcrumb record carries is written
 // through it, so no error text can push the record past its size limit.
+//
+// SafeLineMaxJSON returns "" for a value it has to cut when the byte cap is
+// smaller than TruncatedMarker's encoded size, and an empty RepairReason
+// fails a needs-repair record's validation. breadcrumbTextMaxBytes is far
+// above that size; TestBreadcrumbTextNeverCutsToEmpty holds it there.
 func breadcrumbText(s string) string {
 	return termsafe.SafeLineMaxJSON(s, recordTextMaxRunes, breadcrumbTextMaxBytes)
 }

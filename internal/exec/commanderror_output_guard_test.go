@@ -51,7 +51,11 @@ var commandErrorOutputAllowed = map[string]string{
 // cmdErr.Output rather than redact.Stdout(cmdErr.Output); in
 // internal/cli/update.go, compare strings.Contains(res.Output, cmdErr.Output);
 // drop the herdr entry from commandErrorOutputAllowed; add an entry for a
-// function that does not exist.
+// function that does not exist; add an entry for
+// "internal/exec/exec.go WithoutOutput", which this pass never scans (it
+// skips internal/exec) and which only commandErrorValueAllowed's pass
+// matches, so it reads as stale only while each allowlist has its own seen
+// map.
 func TestEveryCommandErrorOutputReadIsRedacted(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -72,7 +76,7 @@ func TestEveryCommandErrorOutputReadIsRedacted(t *testing.T) {
 	for _, f := range keys {
 		t.Errorf("%s [%s]", f, strings.Join(slices.Compact(byFinding[f]), " "))
 	}
-	unmatchedAllowlistKeys(t, "commandErrorOutputAllowed", commandErrorOutputAllowed, results)
+	unmatchedAllowlistKeys(t, "commandErrorOutputAllowed", commandErrorOutputAllowed, results, func(r *typedResult) map[string]bool { return r.outputSeen })
 }
 
 // commandErrorOutputField is the Output field of cmdErr, CommandError's
@@ -238,8 +242,10 @@ func calledFunc(info *types.Info, call *ast.CallExpr) *types.Func {
 // Mutations that turn it red: admit every CallExpr argument (the
 // strings.Contains row goes quiet); admit any BinaryExpr (the "+" row goes
 // quiet); drop the ParenExpr walk (the parenthesized rows report); admit
-// any assignment (the += row goes quiet); drop the TrimSpace arm (its row
-// reports); drop the len arm (its row reports).
+// any assignment (the += row goes quiet); admit any plain = assignment,
+// dropping the check that Output is on its left (the "right of a plain ="
+// row goes quiet); drop the TrimSpace arm (its row reports); drop the len
+// arm (its row reports).
 func TestCommandErrorOutputFindingsSeeEveryRoute(t *testing.T) {
 	const prelude = "package probe\n\nimport \"strings\"\n\nvar _ = strings.TrimSpace\n\n" +
 		"type CommandError struct{ Name, Output string }\n\ntype wrap struct{ *CommandError }\n\n" +
@@ -260,6 +266,7 @@ func TestCommandErrorOutputFindingsSeeEveryRoute(t *testing.T) {
 		{"TrimSpace compared with empty", `func f(ce *CommandError) bool { return strings.TrimSpace(ce.Output) != "" }`, false},
 		{"len compared with a constant", `func f(ce *CommandError) bool { return len(ce.Output) > 0 }`, false},
 		{"read by +=", `func f(ce *CommandError) { ce.Output += "x" }`, true},
+		{"read on the right of a plain =", `func f(ce *CommandError) (o string) { o = ce.Output; return o }`, true},
 		{"written", `func f(ce *CommandError) { ce.Output = "" }`, false},
 	}
 	probe := newTypedProbe(t)

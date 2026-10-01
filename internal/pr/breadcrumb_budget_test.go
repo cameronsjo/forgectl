@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
@@ -98,5 +99,20 @@ func TestBreadcrumbWorstCaseFitsTheRecordLimit(t *testing.T) {
 				t.Fatalf("record is %d bytes, over %d", len(data), maxBreadcrumbRecordBytes)
 			}
 		})
+	}
+}
+
+// TestBreadcrumbTextNeverCutsToEmpty is #974 item 9: SafeLineMaxJSON cuts a
+// value to "" when its byte cap is below TruncatedMarker's encoded size, and
+// an empty RepairReason fails a needs-repair record's validation. So a cut
+// breadcrumb text must keep the marker at least.
+//
+// Mutation that turns it red: set breadcrumbTextMaxBytes to 15, one byte
+// under the marker.
+func TestBreadcrumbTextNeverCutsToEmpty(t *testing.T) {
+	for _, text := range []string{strings.Repeat("a", 5000), strings.Repeat("<", 5000), strings.Repeat("\U0001F600", 5000)} {
+		if got := breadcrumbText(text); !strings.HasSuffix(got, termsafe.TruncatedMarker) {
+			t.Errorf("breadcrumbText(%.10q…) = %.40q; want a cut value ending in the marker, never empty", text, got)
+		}
 	}
 }
