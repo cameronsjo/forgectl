@@ -124,9 +124,26 @@ const TruncatedMarker = " … [truncated]"
 // whole escapes: a \u202e is kept or dropped entire, never split into text
 // that reads as something else. A cut value ends in TruncatedMarker, which
 // is not counted against maxRunes. maxRunes < 1 means no cap.
+//
+// Printable ASCII is its own one-rune rendering, so when the first
+// maxRunes bytes (or all of s, if shorter) are all of it the result is s
+// itself, or those bytes and the marker, without visiting a rune (#963):
+// whatever follows them renders as at least one rune, so it is cut. Anything
+// else takes the per-rune loop.
 func SafeLineMax(s string, maxRunes int) string {
 	if maxRunes < 1 {
 		return SafeLine(s)
+	}
+	limit := min(len(s), maxRunes)
+	i := 0
+	for i < limit && isPlainASCII(s[i]) {
+		i++
+	}
+	if i == limit {
+		if len(s) <= maxRunes {
+			return s
+		}
+		return s[:maxRunes] + TruncatedMarker
 	}
 	return safeLineCapped(s, maxRunes, 0)
 }
@@ -157,12 +174,23 @@ func safeLineCapped(s string, maxRunes, maxBytes int) string {
 	// fit is the output length at the last escape boundary where the text
 	// plus the marker still fits the byte cap.
 	fit := 0
-	for _, r := range s {
-		piece := safeRune(r)
-		n := utf8.RuneCountInString(piece)
-		b := 0
-		if maxBytes > 0 {
-			b = jsonStringBytes(piece)
+	for i, r := range s {
+		var piece string
+		n, b := 1, 1
+		if isPlainASCII(s[i]) {
+			// One byte, one rune, rendered as itself: slice it rather than
+			// allocate it through safeRune. JSON writes it in one byte
+			// unless it is one of the five it escapes.
+			piece = s[i : i+1]
+			if maxBytes > 0 && jsonEscapesASCII(s[i]) {
+				b = jsonStringBytes(piece)
+			}
+		} else {
+			piece = safeRune(r)
+			n = utf8.RuneCountInString(piece)
+			if maxBytes > 0 {
+				b = jsonStringBytes(piece)
+			}
 		}
 		if (maxRunes > 0 && runes+n > maxRunes) || (maxBytes > 0 && size+b > maxBytes) {
 			if maxBytes > 0 && markerBytes > maxBytes {
@@ -178,6 +206,13 @@ func safeLineCapped(s string, maxRunes, maxBytes int) string {
 		}
 	}
 	return safe.String()
+}
+
+// jsonEscapesASCII reports whether encoding/json's default encoder writes
+// the printable ASCII byte c as more than one byte: the quote and backslash
+// short escapes, and the three HTML characters it writes as \u00XX.
+func jsonEscapesASCII(c byte) bool {
+	return c == '"' || c == '\\' || c == '<' || c == '>' || c == '&'
 }
 
 // jsonStringBytes is how many bytes encoding/json's default (HTML-escaping)

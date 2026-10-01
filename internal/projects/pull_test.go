@@ -125,7 +125,7 @@ func TestPullAll_StatusAndPullUseTheSamePinnedGitBinary(t *testing.T) {
 			t.Fatalf("command binary = %q, want pinned %q", name, pinnedGit)
 		}
 		if gitenvtest.FilterListing(args) {
-			return "", gitenvtest.ErrNoFilterDrivers(name, args)
+			return gitenvtest.AnswerListing(name, args)
 		}
 		args = gitenvtest.Strip(args)
 		if len(args) >= 3 && args[2] == "status" {
@@ -142,8 +142,8 @@ func TestPullAll_StatusAndPullUseTheSamePinnedGitBinary(t *testing.T) {
 	if len(results) != 1 || results[0].Status != PullUpToDate {
 		t.Fatalf("results = %+v, want one up-to-date repo", results)
 	}
-	if len(fake.Calls) != 3 {
-		t.Fatalf("calls = %v, want the filter listing, one status and one pull", fake.Calls)
+	if len(fake.Calls) != 4 {
+		t.Fatalf("calls = %v, want the filter-driver and submodule listings, one status and one pull", fake.Calls)
 	}
 	for _, call := range fake.Calls {
 		if call.Name != pinnedGit {

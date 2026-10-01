@@ -70,10 +70,12 @@
 //     whenever git re-hashes the file, which status does for any stat-dirty
 //     entry, and so does worktree remove's dirty check. No option turns
 //     filters off, and the repository's own config can define them. A call
-//     that needs no filter uses RunUnfiltered, which lists the drivers and
-//     blanks each one by name (#977); the projects status probe and clean's
-//     dirty check do. It reads the superproject's config only: status runs a
-//     child git in each submodule, whose own drivers it does not list.
+//     that needs no filter uses RunUnfiltered, which lists the drivers the
+//     repository and each of its submodules define and blanks each one by
+//     name (#977); the projects status probe, clean's dirty check and
+//     branch prune's worktree remove do. The operator's own drivers are
+//     blanked too: git-lfs's global filter runs the program a repository's
+//     lfs.extension config names.
 //
 //   - The operator's own filters on checkout. worktree add runs smudge
 //     filters, git-lfs's among them, which may fetch objects themselves.
@@ -104,8 +106,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -269,6 +274,45 @@ func Run(ctx context.Context, r Runner, p Profile, args ...string) (string, erro
 	return RunBin(ctx, r, Bin, p, args...)
 }
 
+// RunRefusing is Run with each transport in refuse refused whatever the
+// operator's configuration or environment allows: the call carries
+// `-c protocol.<name>.allow=never` for each, and under Transport an
+// inherited GIT_ALLOW_PROTOCOL loses them from its list. git honours that
+// variable ahead of every protocol.allow setting, so without the second step
+// an operator's GIT_ALLOW_PROTOCOL naming ext would admit an ext:: URL past
+// the first (measured on git 2.43). The rest of the operator's list stays,
+// so the result never allows a transport it did not. Local needs neither
+// step: its GIT_ALLOW_PROTOCOL is pinned empty, which refuses them all.
+func RunRefusing(ctx context.Context, r Runner, p Profile, refuse []string, args ...string) (string, error) {
+	overrides, unset := filter(p, os.Environ())
+	if v, ok := os.LookupEnv(allowProtocolVar); ok && p == Transport {
+		if overrides == nil {
+			overrides = map[string]string{}
+		}
+		overrides[allowProtocolVar] = withoutProtocols(v, refuse)
+	}
+	pre := Args(p)
+	for _, name := range refuse {
+		pre = append(pre, "-c", "protocol."+name+".allow=never")
+	}
+	return r.RunWithEnvFiltered(ctx, overrides, unset, Bin, append(pre, args...)...)
+}
+
+// allowProtocolVar is git's transport allowlist variable.
+const allowProtocolVar = "GIT_ALLOW_PROTOCOL"
+
+// withoutProtocols is the colon-separated GIT_ALLOW_PROTOCOL list allowed
+// without the names in refuse. git matches a name exactly.
+func withoutProtocols(allowed string, refuse []string) string {
+	var kept []string
+	for _, name := range strings.Split(allowed, ":") {
+		if !slices.Contains(refuse, name) {
+			kept = append(kept, name)
+		}
+	}
+	return strings.Join(kept, ":")
+}
+
 // RunBin is Run with the git executable named: internal/projects runs the
 // absolute path it resolved once at construction.
 func RunBin(ctx context.Context, r Runner, bin string, p Profile, args ...string) (string, error) {
@@ -305,6 +349,15 @@ const filterDriverKeys = `^filter\..*\.(clean|smudge|process)$`
 // RunUnfiltered blanks them.
 var filterDriverVars = []string{"clean", "smudge", "process"}
 
+// maxSubmoduleDepth is how deeply nested a submodule RunUnfiltered follows
+// before it refuses the call. git sets no bound of its own.
+const maxSubmoduleDepth = 32
+
+// maxUnfilteredRepos is how many repositories, the superproject, each
+// submodule and each extra working tree together, RunUnfiltered lists
+// before it refuses the call. Each costs two git processes.
+const maxUnfilteredRepos = 256
+
 // RunUnfiltered runs git with args in dir under Local, as RunBin would, with
 // every filter driver git's configuration defines switched off
 // (cameronsjo/forgectl#977). It is for a call that can run a filter on the
@@ -314,36 +367,113 @@ var filterDriverVars = []string{"clean", "smudge", "process"}
 // filters off, and the repository's own .gitattributes and .git/config
 // select and define them.
 //
-// So it costs one more git process: `git config --get-regexp` lists the
-// drivers first, under Local, and the call then carries
+// So it lists the drivers first, under Local, with `git config
+// --get-regexp`, and the call then carries
 // `-c filter.<name>.clean= -c filter.<name>.smudge= -c filter.<name>.process=`
 // for each name found, which outranks every configuration file. A driver
 // with filter.<name>.required set then fails the call instead of running,
-// which the callers read as an unknown state, never a clean one. The
-// operator's own drivers, git-lfs's among them, are switched off too.
+// which the callers read as an unknown state, never a clean one.
 //
-// It fails closed: when the listing fails, or names a driver that -c cannot
-// override (a name holding '=', where git splits a -c argument), the call is
-// not run and the error says why. dir "" lists and runs in the current
-// directory. A submodule's own drivers are not listed (see the package doc).
+// Every driver is blanked, whatever scope defines it. The operator's own,
+// git-lfs's among them, are switched off too: a driver defined globally
+// still reads the repository's config, and git-lfs runs the program a
+// repository's lfs.extension.<name>.clean names through the operator's
+// global filter.lfs.process. A stat-dirty LFS file then reads unknown.
+//
+// The listing covers dir's repository and every populated submodule under
+// it, nested ones included, found through `git ls-files --stage`: status runs
+// a child git in each submodule, which reads that submodule's own config,
+// and the -c options reach those children, because git passes its command
+// line config on to a submodule's git (measured on git 2.43). A repository
+// with no submodule costs two git processes ahead of the call; each
+// populated submodule costs two more.
+//
+// It fails closed, refusing the call with an error that says why, when:
+//   - a listing fails, or lists anything it does not expect;
+//   - a driver's name holds '=' (git splits a -c argument there) or a
+//     newline, which -c cannot override;
+//   - a gitlink's path is a symbolic link, or its .git is a symbolic link
+//     or not a repository (a directory with no HEAD, or a gitfile that names
+//     none). git itself would not enter such a submodule, but proving that
+//     costs more than refusing;
+//   - any repository's .git, dir's own included, is neither a directory nor
+//     a regular file: a FIFO or a device, whose read could block or never
+//     end;
+//   - two paths reach one repository, submodules nest past
+//     maxSubmoduleDepth, or the walk passes maxUnfilteredRepos.
+//
+// dir "" lists and runs in the current directory.
 func RunUnfiltered(ctx context.Context, r Runner, bin, dir string, args ...string) (string, error) {
-	var at []string
-	if dir != "" {
-		at = []string{"-C", dir}
+	return RunUnfilteredAlso(ctx, r, bin, dir, nil, args...)
+}
+
+// RunUnfilteredAlso is RunUnfiltered for a call that reaches working trees
+// besides dir's. worktree remove is one: its dirty check runs status in the
+// working tree it removes, under that worktree's own config.worktree, which
+// a listing in dir does not read (measured on git 2.43). The drivers of each
+// repository in also, and of its submodules, are blanked as well. A path in
+// also that does not exist is skipped: git runs no filter in a working tree
+// that is not there, and worktree remove still prunes its record.
+func RunUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []string, args ...string) (string, error) {
+	type repo struct {
+		dir   string
+		depth int
 	}
-	out, err := RunBin(ctx, r, bin, Local, append(slices.Clone(at), "config", "-z", "--name-only", "--get-regexp", filterDriverKeys)...)
-	if err != nil {
-		// git config exits 1, printing nothing, when no key matches.
-		var ce *fexec.CommandError
-		if !errors.As(err, &ce) || ce.ExitCode != 1 || ce.Output != "" {
-			return "", fmt.Errorf("list the filter drivers git could run: %w", err)
+	queue := []repo{{dir: dir}}
+	for _, d := range also {
+		if _, err := os.Lstat(d); errors.Is(err, fs.ErrNotExist) {
+			continue
 		}
-		out = ""
+		queue = append(queue, repo{dir: d})
 	}
-	names, err := filterDriverNames(out)
-	if err != nil {
-		return "", err
+	// The starting repositories are keyed when their .git can be read, so a
+	// submodule that leads back to one of them is refused as a revisit. One
+	// that cannot be is left to git: dir may be a subdirectory of its
+	// working tree, or a worktree whose layout the listing need not model.
+	// A .git that is neither a directory nor a regular file is refused.
+	visited := map[string]bool{}
+	for _, q := range queue {
+		key, err := gitDirKey(q.dir)
+		if errors.Is(err, errGitfileNotRegular) {
+			return "", err
+		}
+		if err == nil && key != "" {
+			visited[key] = true
+		}
 	}
+	var names []string
+	for listed := 0; len(queue) > 0; listed++ {
+		if listed == maxUnfilteredRepos {
+			return "", errTooManyRepos
+		}
+		cur := queue[0]
+		queue = queue[1:]
+		found, err := listFilterDrivers(ctx, r, bin, cur.dir)
+		if err != nil {
+			return "", err
+		}
+		for _, name := range found {
+			if !slices.Contains(names, name) {
+				names = append(names, name)
+			}
+		}
+		subs, err := populatedSubmodules(ctx, r, bin, cur.dir)
+		if err != nil {
+			return "", err
+		}
+		if len(subs) > 0 && cur.depth >= maxSubmoduleDepth {
+			return "", errSubmoduleDepth
+		}
+		for _, sub := range subs {
+			if visited[sub.key] {
+				return "", errSubmoduleRevisit
+			}
+			visited[sub.key] = true
+			queue = append(queue, repo{dir: sub.dir, depth: cur.depth + 1})
+		}
+	}
+	slices.Sort(names)
+	at := atDir(dir)
 	off := make([]string, 0, 2*len(filterDriverVars)*len(names)+len(at)+len(args))
 	for _, name := range names {
 		for _, v := range filterDriverVars {
@@ -353,12 +483,187 @@ func RunUnfiltered(ctx context.Context, r Runner, bin, dir string, args ...strin
 	return RunBin(ctx, r, bin, Local, append(append(off, at...), args...)...)
 }
 
+// atDir is the -C option that points git at dir, or none for "".
+func atDir(dir string) []string {
+	if dir == "" {
+		return nil
+	}
+	return []string{"-C", dir}
+}
+
+// listFilterDrivers returns every filter driver dir's configuration
+// defines, in any scope.
+func listFilterDrivers(ctx context.Context, r Runner, bin, dir string) ([]string, error) {
+	out, err := RunBin(ctx, r, bin, Local, append(atDir(dir), "config", "-z", "--name-only", "--get-regexp", filterDriverKeys)...)
+	if err != nil {
+		// git config exits 1, printing nothing, when no key matches.
+		var ce *fexec.CommandError
+		if !errors.As(err, &ce) || ce.ExitCode != 1 || ce.Output != "" {
+			return nil, fmt.Errorf("list the filter drivers git could run: %w", err)
+		}
+		out = ""
+	}
+	return filterDriverNames(out)
+}
+
+// submodule is a populated submodule's working tree and the key of the
+// repository it holds.
+type submodule struct {
+	dir, key string
+}
+
+// populatedSubmodules returns every submodule in dir's index that status
+// would enter: a gitlink entry whose path holds a .git.
+func populatedSubmodules(ctx context.Context, r Runner, bin, dir string) ([]submodule, error) {
+	// ":/" covers the whole tree when dir is below its top, as status does.
+	out, err := RunBin(ctx, r, bin, Local, append(atDir(dir), "ls-files", "-z", "--stage", "--", ":/")...)
+	if err != nil {
+		return nil, fmt.Errorf("list the submodules git status would enter: %w", err)
+	}
+	var subs []submodule
+	for _, entry := range strings.Split(out, "\x00") {
+		if entry == "" {
+			continue
+		}
+		meta, p, ok := strings.Cut(entry, "\t")
+		if !ok || p == "" {
+			return nil, errUnexpectedIndexEntry
+		}
+		if !strings.HasPrefix(meta, "160000 ") {
+			continue
+		}
+		sub := filepath.Join(dir, filepath.FromSlash(p))
+		fi, err := os.Lstat(sub)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("inspect a submodule's working tree: %w", err)
+		case fi.Mode()&fs.ModeSymlink != 0:
+			return nil, errSubmoduleSymlink
+		case !fi.IsDir():
+			continue
+		}
+		key, err := gitDirKey(sub)
+		if err != nil {
+			return nil, err
+		}
+		if key != "" {
+			subs = append(subs, submodule{dir: sub, key: key})
+		}
+	}
+	return subs, nil
+}
+
+// maxGitfileBytes bounds a gitfile read: "gitdir: " and a path.
+const maxGitfileBytes = 64 << 10
+
+// gitDirKey returns the resolved repository directory that the working
+// tree sub's .git names: the directory itself, or the one a gitfile points
+// at. It returns "" when sub holds no .git. It returns errSubmoduleSymlink
+// when .git is a symbolic link, errGitfileNotRegular when .git is neither a
+// directory nor a regular file (a FIFO or a device, whose read could block
+// or never end; git's own read_gitfile refuses them too), and
+// errInvalidSubmoduleGit when .git names no repository (no HEAD in it). It
+// never reads more than maxGitfileBytes.
+func gitDirKey(sub string) (string, error) {
+	dotGit := filepath.Join(sub, ".git")
+	fi, err := os.Lstat(dotGit)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "", nil
+	case err != nil:
+		return "", fmt.Errorf("inspect a submodule's .git: %w", err)
+	case fi.Mode()&fs.ModeSymlink != 0:
+		return "", errSubmoduleSymlink
+	case !fi.IsDir() && !fi.Mode().IsRegular():
+		return "", errGitfileNotRegular
+	}
+	gitDir := dotGit
+	if !fi.IsDir() {
+		target, err := readGitfile(dotGit)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(sub, target)
+		}
+		gitDir = target
+	}
+	resolved, err := filepath.EvalSymlinks(gitDir)
+	if err != nil {
+		return "", errInvalidSubmoduleGit
+	}
+	// The gitfile names any path it likes; only its HEAD is checked.
+	if _, err := os.Lstat(filepath.Join(resolved, "HEAD")); err != nil { //nolint:gosec // G703: a gitfile may point anywhere, as git allows; this only checks for a HEAD there
+		return "", errInvalidSubmoduleGit
+	}
+	return resolved, nil
+}
+
+// readGitfile returns the path the gitfile at path names. It opens the file
+// without following a link or blocking (openGitfile), refuses a handle that
+// is not a regular file, and reads at most maxGitfileBytes+1 bytes.
+func readGitfile(path string) (string, error) {
+	f, err := openGitfile(path)
+	if err != nil {
+		return "", fmt.Errorf("open a submodule's gitfile: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("inspect a submodule's gitfile: %w", err)
+	}
+	if !fi.Mode().IsRegular() {
+		return "", errGitfileNotRegular
+	}
+	body, err := io.ReadAll(io.LimitReader(f, maxGitfileBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read a submodule's gitfile: %w", err)
+	}
+	if len(body) > maxGitfileBytes {
+		return "", errInvalidSubmoduleGit
+	}
+	target, ok := strings.CutPrefix(strings.TrimRight(string(body), "\r\n"), "gitdir: ")
+	if !ok || target == "" {
+		return "", errInvalidSubmoduleGit
+	}
+	return target, nil
+}
+
+// errGitfileNotRegular is returned for a .git that is neither a directory
+// nor a regular file.
+var errGitfileNotRegular = errors.New("a repository's .git is neither a directory nor a regular file; refusing to run unfiltered")
+
 // errUnexpectedFilterKey is returned for listing output that is not a
 // NUL-separated list of filter driver keys.
 var errUnexpectedFilterKey = errors.New("git config listed a key that names no filter driver; refusing to run unfiltered")
 
 // errUnoverridableFilter is returned for a driver name -c cannot override.
 var errUnoverridableFilter = errors.New("a filter driver's name holds '=' or a newline, which git -c cannot override; refusing to run with it live")
+
+// errUnexpectedIndexEntry is returned for ls-files output that is not
+// NUL-separated "mode object stage<TAB>path" entries.
+var errUnexpectedIndexEntry = errors.New("git ls-files listed an entry it should not; refusing to run unfiltered")
+
+// errSubmoduleSymlink is returned for a submodule path, or its .git, that
+// is a symbolic link.
+var errSubmoduleSymlink = errors.New("a submodule's path or .git is a symbolic link; refusing to run unfiltered")
+
+// errInvalidSubmoduleGit is returned for a submodule .git that names no
+// repository.
+var errInvalidSubmoduleGit = errors.New("a submodule's .git names no repository; refusing to run unfiltered")
+
+// errSubmoduleRevisit is returned when two submodule paths reach one
+// repository.
+var errSubmoduleRevisit = errors.New("two submodule paths reach one repository; refusing to run unfiltered")
+
+// errSubmoduleDepth is returned for submodules nested past
+// maxSubmoduleDepth.
+var errSubmoduleDepth = errors.New("submodules nest too deeply to list their filter drivers; refusing to run unfiltered")
+
+// errTooManyRepos is returned when the walk passes maxUnfilteredRepos.
+var errTooManyRepos = errors.New("too many submodules to list their filter drivers; refusing to run unfiltered")
 
 // filterDriverNames parses `git config -z --name-only --get-regexp
 // filterDriverKeys` output into the sorted, distinct driver names.
