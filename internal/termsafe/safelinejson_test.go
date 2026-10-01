@@ -85,9 +85,11 @@ func TestSafeLineMaxJSONCutsBetweenWholeEscapes(t *testing.T) {
 // valid UTF-8, and for an invalid byte, it is exactly what encoding/json
 // writes.
 //
-// Mutation that turns it red: count U+2028 as its three UTF-8 bytes.
+// Mutations that turn it red: count U+2028 as its three UTF-8 bytes; drop
+// '\b' or '\f' from the two-byte short-escape arm (encoding/json writes them
+// as \b and \f, not as \u0008 and \u000c).
 func TestJSONStringBytesMatchesEncodingJSON(t *testing.T) {
-	for _, s := range []string{"", "plain", "<>&", "\"\\", "\n\r\t\x00\x1f", "\u2028\u2029", "\u6f22\U0001F600é", "\ufffd", "a\x7fb", "\xff"} {
+	for _, s := range []string{"", "plain", "<>&", "\"\\", "\n\r\t\x00\x1f", "\b", "\f", "a\bb\fc\x0b", "\u2028\u2029", "\u6f22\U0001F600é", "\ufffd", "a\x7fb", "\xff"} {
 		enc, err := json.Marshal(s)
 		if err != nil {
 			t.Fatal(err)

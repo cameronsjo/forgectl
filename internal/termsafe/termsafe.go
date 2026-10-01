@@ -190,7 +190,8 @@ func jsonStringBytes(s string) int {
 		switch {
 		case r == '"' || r == '\\':
 			n += 2
-		case r == '\n' || r == '\r' || r == '\t':
+		case r == '\n' || r == '\r' || r == '\t' || r == '\b' || r == '\f':
+			// encoding/json's two-byte short escapes.
 			n += 2
 		case r < 0x20 || r == '<' || r == '>' || r == '&' || r == '\u2028' || r == '\u2029':
 			n += 6

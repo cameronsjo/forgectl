@@ -9,11 +9,15 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // breadcrumbVersion is the record schema this build writes when it writes a
@@ -168,6 +172,53 @@ func encodeBreadcrumb(bc Breadcrumb) ([]byte, error) {
 		return nil, errBreadcrumbRecordTooLarge
 	}
 	return data, nil
+}
+
+// widestWindowID is the longest WindowID newDispatch writes: a tmux server
+// pid and start time and a window id, each at most a decimal int64.
+var widestWindowID = strings.Join([]string{
+	strconv.Itoa(math.MaxInt64),
+	strconv.Itoa(math.MaxInt64),
+	"@" + strconv.Itoa(math.MaxInt64),
+}, tmux.FieldSep)
+
+// checkParkHeadroom refuses a record that fits now but could overflow
+// maxBreadcrumbRecordBytes later in its life (#974). Prepare writes the
+// record with no free text; a park later adds LastError and RepairReason at
+// up to breadcrumbTextMaxBytes each, and widens the counters, the window id
+// and the attempt time. A write that overflows then fails, and the record
+// cannot leave its phase. So Prepare measures bc at that widest, and refuses
+// here, before the review starts, rather than at the park. The workspace is
+// the one structured field forgectl does not choose: it sits under $TMPDIR,
+// and encoding/json writes each '<', '>' or '&' in it as six bytes.
+func checkParkHeadroom(bc Breadcrumb) error {
+	widest := bc
+	widest.Phase = PhaseNeedsRepair
+	widest.Revision = math.MaxInt64
+	widest.Attempts = math.MaxInt64
+	widest.WindowID = widestWindowID
+	widest.RepairReason = strings.Repeat("r", breadcrumbTextMaxBytes)
+	widest.LastError = strings.Repeat("e", breadcrumbTextMaxBytes)
+	widest.LastAttempt = time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.UTC)
+	_, err := encodeBreadcrumb(widest)
+	if !errors.Is(err, errBreadcrumbRecordTooLarge) {
+		return err
+	}
+	widest.Workspace = ""
+	rest, err := encodeBreadcrumb(widest)
+	if err != nil {
+		return err
+	}
+	// termsafe:allow-raw-json measures the workspace's encoded size; nothing is written
+	quoted, err := json.Marshal(bc.Workspace)
+	if err != nil {
+		return fmt.Errorf("measure the workspace path: %w", err)
+	}
+	// Categorical: the path is not echoed, only its size and the room left.
+	return fmt.Errorf("the clean-room workspace path is too long to record: it takes %d bytes in a session record, "+
+		"which has room for %d once the other fields are at their largest; "+
+		"set TMPDIR to a shorter directory (each '<', '>' or '&' in it counts six bytes)",
+		len(quoted)-2, maxBreadcrumbRecordBytes-len(rest))
 }
 
 // writeRecordAtomic replaces dir/name with data so that a crash at any point
