@@ -43,7 +43,7 @@ func TestMain(m *testing.M) {
 
 func helperMain(mode string) int {
 	if dir := os.Getenv(helperPidDirEnv); dir != "" {
-		_ = os.WriteFile(filepath.Join(dir, strconv.Itoa(os.Getpid())), nil, 0o600)
+		_ = os.WriteFile(filepath.Join(filepath.Clean(dir), strconv.Itoa(os.Getpid())), nil, 0o600) //nolint:gosec // G703: a directory the test itself passes
 	}
 	verb, arg, _ := strings.Cut(mode, ":")
 	switch verb {
