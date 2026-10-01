@@ -220,9 +220,12 @@ func scanSecretsWithRoot(t *testing.T, root string, adjust func(*fsOps)) (Secret
 // Mutation that turns it red: raise sniffBytes, or read with io.ReadAll.
 func TestScanSecrets_SniffIsCapped(t *testing.T) {
 	root := t.TempDir()
+	// The cap is the documented 4 KiB, spelled here rather than read from
+	// sniffBytes, so raising the constant fails this test.
+	const documentedCap = 4096
 	marker := string(privateKeyMarker)
-	inside := strings.Repeat("x", sniffBytes-len(marker)) + marker
-	past := strings.Repeat("x", sniffBytes+1) + "-----BEGIN RSA " + marker
+	inside := strings.Repeat("x", documentedCap-len(marker)) + marker
+	past := strings.Repeat("x", documentedCap+1) + "-----BEGIN RSA " + marker
 	writeMode(t, root, "inside.pem", inside, 0o600)
 	writeMode(t, root, "past.pem", past, 0o600)
 	got := secretsByPath(scanSecrets(t, root))
