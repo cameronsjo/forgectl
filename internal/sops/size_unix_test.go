@@ -17,7 +17,7 @@ import (
 // document", and before sops runs. A stand-in sops on PATH only has to
 // exist; the refusal comes first.
 //
-// Mutation that turns it red: drop the CheckSize call from setLocked (the
+// Mutation that turns it red: drop the CheckSize call from ReadDocument (the
 // refusal reads "not a SOPS document").
 func TestSetValueRefusesAnOversizedFileByName(t *testing.T) {
 	bin := t.TempDir()

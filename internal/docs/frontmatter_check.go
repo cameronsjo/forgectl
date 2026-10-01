@@ -57,7 +57,7 @@ func yamlFrontmatterRoot(block []byte) (*yaml.Node, bool) {
 	case root.Kind != yaml.MappingNode:
 		return nil, false
 	}
-	if yamlsafe.CheckTree(root, 0) != nil {
+	if yamlsafe.CheckTree(root, yamlsafe.Options{}) != nil {
 		return nil, false
 	}
 	return root, true

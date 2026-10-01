@@ -12,8 +12,9 @@
 //
 // So a caller parses with Parse, which refuses input over its byte cap,
 // and then either reads the node or runs CheckTree before it decodes. A
-// size cap alone does not help a map decode, which goes quadratic well
-// inside any cap a real file needs.
+// caller that only reads or edits the node, and never decodes it, may pass
+// Options.AllowMerge. A size cap alone does not help a map decode, which
+// goes quadratic well inside any cap a real file needs.
 package yamlsafe
 
 import (
@@ -51,27 +52,38 @@ func Root(doc *yaml.Node) *yaml.Node {
 	return doc.Content[0]
 }
 
+// Options tunes CheckTree.
+type Options struct {
+	// MaxKeys, when positive, refuses a mapping with more than that many
+	// keys. The cap bounds the decoder's pairwise key check, which runs
+	// again each time an alias to the mapping expands.
+	MaxKeys int
+
+	// AllowMerge accepts a merge key (`<<`), for a caller that reads or
+	// edits the node and never decodes the tree into a map or a struct, so
+	// no merge is ever applied. The walk stays linear either way: it never
+	// follows the alias a merge names.
+	AllowMerge bool
+}
+
 // CheckTree walks the tree under root once, without following aliases, and
 // returns an error for the first node a map decode would refuse, plus merge
-// keys and over-wide mappings. It returns nil when there is no such node.
+// keys (unless opts.AllowMerge) and mappings over opts.MaxKeys. It returns
+// nil when there is no such node.
 //
 // It refuses:
 //   - a mapping with a duplicate key, by the decoder's own test (same kind
-//     and same value);
+//     and same value), merge keys included;
 //   - a merge key (`<<`), which a reader of the node would not apply, so a
-//     merged key would silently go missing;
+//     merged key would silently go missing, unless opts.AllowMerge;
 //   - a key that is a sequence, a mapping, or an alias to one;
 //   - an alias to a node that contains it;
 //   - a scalar whose explicit tag does not fit its value.
 //
-// A positive maxKeys also refuses a mapping with more than that many keys.
-// The cap bounds the decoder's pairwise key check, which runs again each
-// time an alias to the mapping expands. maxKeys < 1 means no cap.
-//
 // Each node is visited once and each mapping's keys go through one set, so
 // the walk is linear in the tree. The errors name a line, never a key or a
 // value, because the document is untrusted text.
-func CheckTree(root *yaml.Node, maxKeys int) error {
+func CheckTree(root *yaml.Node, opts Options) error {
 	type frame struct {
 		n    *yaml.Node
 		exit bool
@@ -106,10 +118,10 @@ func CheckTree(root *yaml.Node, maxKeys int) error {
 			}
 			continue
 		case yaml.MappingNode:
-			if maxKeys > 0 && len(n.Content)/2 > maxKeys {
-				return fmt.Errorf("line %d: a mapping has %d keys, over the limit of %d", n.Line, len(n.Content)/2, maxKeys)
+			if opts.MaxKeys > 0 && len(n.Content)/2 > opts.MaxKeys {
+				return fmt.Errorf("line %d: a mapping has %d keys, over the limit of %d", n.Line, len(n.Content)/2, opts.MaxKeys)
 			}
-			if err := CheckKeys(n); err != nil {
+			if err := checkKeys(n, opts.AllowMerge); err != nil {
 				return err
 			}
 		}
@@ -126,6 +138,11 @@ func CheckTree(root *yaml.Node, maxKeys int) error {
 // decoder's own test: same kind and same value), free of merge keys, and
 // all scalars or aliases of scalars. It is linear in the mapping.
 func CheckKeys(m *yaml.Node) error {
+	return checkKeys(m, false)
+}
+
+// checkKeys is CheckKeys, accepting merge keys when allowMerge is set.
+func checkKeys(m *yaml.Node, allowMerge bool) error {
 	type key struct {
 		kind  yaml.Kind
 		value string
@@ -135,7 +152,7 @@ func CheckKeys(m *yaml.Node) error {
 		k := m.Content[i]
 		switch k.Kind {
 		case yaml.ScalarNode:
-			if k.Value == "<<" && k.ShortTag() == "!!merge" {
+			if !allowMerge && k.Value == "<<" && k.ShortTag() == "!!merge" {
 				return fmt.Errorf("line %d: a merge key (<<) is not supported", k.Line)
 			}
 		case yaml.AliasNode:

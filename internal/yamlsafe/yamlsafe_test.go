@@ -58,7 +58,9 @@ func TestRootOfEmptyInput(t *testing.T) {
 // Mutations that turn it red: drop the maxKeys check (the wide mapping
 // passes); compare len(n.Content) rather than its half against maxKeys (the
 // at-cap mapping is refused); drop the CheckKeys call (the duplicate, merge
-// and non-scalar keys pass).
+// and non-scalar keys pass); ignore AllowMerge (the allowed merge row is
+// refused); skip the repeated-key check for merge keys when AllowMerge is
+// set (the repeated merge row passes).
 func TestCheckTree(t *testing.T) {
 	wide := func(n int) string {
 		var b strings.Builder
@@ -71,29 +73,33 @@ func TestCheckTree(t *testing.T) {
 		return b.String()
 	}
 	for _, tc := range []struct {
-		name    string
-		doc     string
-		maxKeys int
-		want    string // "" means accepted
+		name       string
+		doc        string
+		maxKeys    int
+		allowMerge bool
+		want       string // "" means accepted
 	}{
-		{"plain nested", "a:\n  b: [1, 2]\n  c: {d: e}\n", 0, ""},
-		{"alias to a mapping", "a: &x {b: 1}\nc: *x\n", 0, ""},
-		{"duplicate key, nested", "a:\n  b: 1\n  b: 2\n", 0, "line 3: a mapping key is repeated"},
-		{"merge key", "a: &x {b: 1}\nc:\n  <<: *x\n", 0, "line 3: a merge key"},
-		{"mapping as a key", "? {a: 1}\n: 2\n", 0, "a key is a sequence or a mapping"},
-		{"alias key to a mapping", "a: &x {b: 1}\n*x : 2\n", 0, "a key is an alias to a sequence or a mapping"},
-		{"self-containing anchor", "a: &x [*x]\n", 0, "an alias refers to a node that contains it"},
-		{"tag that does not fit", "a: !!int abc\n", 0, "does not fit its explicit tag"},
-		{"at the key cap", wide(8), 8, ""},
-		{"over the key cap", wide(9), 8, "line 2: a mapping has 9 keys, over the limit of 8"},
-		{"no key cap", wide(200), 0, ""},
+		{"plain nested", "a:\n  b: [1, 2]\n  c: {d: e}\n", 0, false, ""},
+		{"alias to a mapping", "a: &x {b: 1}\nc: *x\n", 0, false, ""},
+		{"duplicate key, nested", "a:\n  b: 1\n  b: 2\n", 0, false, "line 3: a mapping key is repeated"},
+		{"merge key", "a: &x {b: 1}\nc:\n  <<: *x\n", 0, false, "line 3: a merge key"},
+		{"merge key, allowed", "a: &x {b: 1}\nc:\n  <<: *x\n  d: 2\n", 0, true, ""},
+		{"repeated merge key, allowed", "a: &x {b: 1}\nc:\n  <<: *x\n  <<: *x\n", 0, true, "line 4: a mapping key is repeated"},
+		{"self-containing anchor, merges allowed", "a: &x {<<: *x}\n", 0, true, "an alias refers to a node that contains it"},
+		{"mapping as a key", "? {a: 1}\n: 2\n", 0, false, "a key is a sequence or a mapping"},
+		{"alias key to a mapping", "a: &x {b: 1}\n*x : 2\n", 0, false, "a key is an alias to a sequence or a mapping"},
+		{"self-containing anchor", "a: &x [*x]\n", 0, false, "an alias refers to a node that contains it"},
+		{"tag that does not fit", "a: !!int abc\n", 0, false, "does not fit its explicit tag"},
+		{"at the key cap", wide(8), 8, false, ""},
+		{"over the key cap", wide(9), 8, false, "line 2: a mapping has 9 keys, over the limit of 8"},
+		{"no key cap", wide(200), 0, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			doc, err := Parse([]byte(tc.doc), 1<<20)
 			if err != nil {
 				t.Fatalf("Parse: %v", err)
 			}
-			err = CheckTree(Root(doc), tc.maxKeys)
+			err = CheckTree(Root(doc), Options{MaxKeys: tc.maxKeys, AllowMerge: tc.allowMerge})
 			switch {
 			case tc.want == "" && err != nil:
 				t.Fatalf("CheckTree = %v, want nil", err)
@@ -116,7 +122,7 @@ func TestCheckTreeErrorsDoNotEchoTheDocument(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = CheckTree(Root(doc), 0)
+	err = CheckTree(Root(doc), Options{})
 	if err == nil {
 		t.Fatal("CheckTree accepted a repeated key")
 	}

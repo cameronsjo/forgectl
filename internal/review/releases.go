@@ -197,7 +197,7 @@ func ParseRegistry(raw []byte) (Registry, error) {
 	}
 	var reg Registry
 	if root := yamlsafe.Root(doc); root != nil {
-		if err := yamlsafe.CheckTree(root, maxRegistryMappingKeys); err != nil {
+		if err := yamlsafe.CheckTree(root, yamlsafe.Options{MaxKeys: maxRegistryMappingKeys}); err != nil {
 			return Registry{}, fmt.Errorf("parse registry: %w", err)
 		}
 		if err := doc.Decode(&reg); err != nil {

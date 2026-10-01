@@ -191,7 +191,10 @@ func runSopsEdit(tempPath string) error {
 		if errors.Is(err, yamlsafe.ErrTooLarge) {
 			return fmt.Errorf("the edited document is larger than %d MiB; refusing to hand it back", sopspkg.MaxRewrittenBytes>>20)
 		}
-		return errors.New("the edited document does not parse as YAML; refusing to hand it back")
+		if errors.Is(err, errNotYAMLMapping) {
+			return errors.New("the edited document does not parse as a YAML mapping; refusing to hand it back")
+		}
+		return fmt.Errorf("the edited document is refused: %w", err)
 	}
 
 	// The result is recorded before the document is written, so the driver
@@ -250,34 +253,55 @@ func readEditorTarget(path string) ([]byte, error) {
 	}
 
 	// A mapping at the root is what sops' decrypted buffer always is, and what
-	// SetScalar needs in order to mean anything. The decrypted buffer is
-	// smaller than the ciphertext the driver already held to
-	// MaxDocumentBytes.
-	if err := checkYAMLMapping(doc, sopspkg.MaxDocumentBytes); err != nil {
+	// SetScalar needs in order to mean anything. The ciphertext was held to
+	// MaxDocumentBytes, and decrypting drops each value's ENC[...] wrapper
+	// and the sops: block, but sops re-emits the document in its own layout
+	// (indentation, quoting), so the buffer is not guaranteed to be smaller.
+	// It gets MaxRewrittenBytes, the same headroom as the edited document.
+	if err := checkYAMLMapping(doc, sopspkg.MaxRewrittenBytes); err != nil {
 		if errors.Is(err, yamlsafe.ErrTooLarge) {
-			return nil, fmt.Errorf("the document to edit is larger than %d MiB; refusing", sopspkg.MaxDocumentBytes>>20)
+			return nil, fmt.Errorf("the document to edit is larger than %d MiB; refusing", sopspkg.MaxRewrittenBytes>>20)
 		}
-		return nil, errors.New("the document to edit is not a YAML mapping; refusing")
+		if errors.Is(err, errNotYAMLMapping) {
+			return nil, errors.New("the document to edit is not a YAML mapping; refusing")
+		}
+		return nil, fmt.Errorf("the document to edit is refused: %w", err)
 	}
 	return doc, nil
 }
+
+// errNotYAMLMapping is checkYAMLMapping's error for a document that does
+// not parse, or whose top level is not a mapping.
+var errNotYAMLMapping = errors.New("not a YAML mapping")
 
 // checkYAMLMapping reports whether doc, at most maxBytes, is one YAML
 // document whose top level is a mapping and that a decode into a map would
 // accept (#959). It used to be that decode, into map[string]any, which is
 // quadratic in a mapping's keys; this parses into a node and runs the
-// linear yamlsafe.CheckTree, which also refuses a merge key. Over the cap,
-// the error wraps yamlsafe.ErrTooLarge.
+// linear yamlsafe.CheckTree.
+//
+// Merge keys (`<<`) are allowed. SetScalar edits the document as lines and
+// nothing here decodes it, so no merge is ever applied, and Helm-style
+// values files use `<<: *defaults` freely; the old map decode accepted them
+// too. A repeated key, merge keys included, is still refused, as that
+// decode refused it.
+//
+// Over the cap, the error wraps yamlsafe.ErrTooLarge; a document that does
+// not parse, or is not a mapping, gets errNotYAMLMapping; anything else is
+// CheckTree's error, which names a line and never document text.
 func checkYAMLMapping(doc []byte, maxBytes int) error {
 	parsed, err := yamlsafe.Parse(doc, maxBytes)
-	if err != nil {
+	if errors.Is(err, yamlsafe.ErrTooLarge) {
 		return err
+	}
+	if err != nil {
+		return errNotYAMLMapping
 	}
 	root := yamlsafe.Root(parsed)
 	if root == nil || root.Kind != yaml.MappingNode {
-		return errors.New("the top level is not a mapping")
+		return errNotYAMLMapping
 	}
-	return yamlsafe.CheckTree(root, 0)
+	return yamlsafe.CheckTree(root, yamlsafe.Options{AllowMerge: true})
 }
 
 // checkSopsNonce requires the environment's nonce to equal the one in the

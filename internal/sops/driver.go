@@ -126,17 +126,12 @@ func (c *Client) setLocked(ctx context.Context, sopsBin string, target env.Targe
 		return OutcomeUnspecified, err
 	}
 
-	// Both checks run against the bytes just read, not a re-open. Re-opening
-	// by name between the check and the use is how the final path component
-	// gets swapped underneath a decision. The size goes first, so an
-	// oversized file is refused as that rather than as "not a SOPS document".
-	if err := CheckSize(before); err != nil {
-		return OutcomeUnspecified, fmt.Errorf("refusing %s: %w", termsafe.QuotePath(target.Rel()), err)
-	}
-	if !IsSOPSFile(before) {
-		return OutcomeUnspecified, fmt.Errorf("refusing %s: it has no top-level sops: block, so it is not a SOPS document", termsafe.QuotePath(target.Rel()))
-	}
-	rules, err := ReadPlaintextRules(before)
+	// Every check runs against the bytes just read, not a re-open.
+	// Re-opening by name between the check and the use is how the final path
+	// component gets swapped underneath a decision. ReadDocument parses them
+	// once: the size first, so an oversized file is refused as that rather
+	// than as "not a SOPS document", then the sops: block, then its rules.
+	rules, err := ReadDocument(before)
 	if err != nil {
 		return OutcomeUnspecified, fmt.Errorf("refusing %s: %w", termsafe.QuotePath(target.Rel()), err)
 	}

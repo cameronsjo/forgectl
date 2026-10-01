@@ -14,6 +14,7 @@ package sops
 //   [x] sopsBlockKeys names every sopsBlock field
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -236,5 +237,42 @@ func TestSOPSBlockKeysMatchTheStruct(t *testing.T) {
 	}
 	if !reflect.DeepEqual(tags, sopsBlockKeys) {
 		t.Fatalf("sopsBlock's yaml tags are %q, sopsBlockKeys is %q", tags, sopsBlockKeys)
+	}
+}
+
+// TestReadDocumentParsesOnceAndRefusesInOrder pins the driver's single read
+// (#1001 Gate 2 nit c): an oversized file is refused for its size; plain
+// YAML and unparseable YAML are ErrNotSOPSDocument; a merge key in the top
+// level is refused by name; a sops file whose values use `<<: *defaults`
+// deep down is read, since only the top level and the sops: block are
+// decoded; and the rules match ReadPlaintextRules'.
+//
+// Mutations that turn it red: drop the errRefusedShape branch (the merge
+// row reads as not a SOPS document); drop the isSOPSDoc check (plain YAML
+// returns default rules); skip CheckSize (the size row reads as a parse
+// failure).
+func TestReadDocumentParsesOnceAndRefusesInOrder(t *testing.T) {
+	if _, err := ReadDocument(padTo(t, MaxDocumentBytes+1)); err == nil || !strings.Contains(err.Error(), "larger than 4 MiB") {
+		t.Errorf("oversized: %v, want the size limit named", err)
+	}
+	for _, doc := range []string{"key: value\n", "key: [unclosed\n"} {
+		if _, err := ReadDocument([]byte(doc)); !errors.Is(err, ErrNotSOPSDocument) {
+			t.Errorf("ReadDocument(%q) = %v, want ErrNotSOPSDocument", doc, err)
+		}
+	}
+	if _, err := ReadDocument([]byte("base: &b {sops: {mac: m}}\n<<: *b\n")); err == nil || !strings.Contains(err.Error(), "merge key") {
+		t.Errorf("top-level merge: %v, want a merge-key refusal", err)
+	}
+	values := "defaults: &defaults\n    replicas: ENC[AES256_GCM,data:x]\napp:\n    web:\n        <<: *defaults\n        token: ENC[AES256_GCM,data:y]\nsops:\n    mac: ENC[x]\n    unencrypted_regex: ^public$\n"
+	got, err := ReadDocument([]byte(values))
+	if err != nil {
+		t.Fatalf("a sops file with merge keys in its values: %v", err)
+	}
+	want, err := ReadPlaintextRules([]byte(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.unencryptedRegex.String() != want.unencryptedRegex.String() || got.unencryptedRegex.String() != "^public$" {
+		t.Errorf("ReadDocument's rules = %+v, ReadPlaintextRules' = %+v", got, want)
 	}
 }

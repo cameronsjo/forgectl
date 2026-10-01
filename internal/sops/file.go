@@ -35,6 +35,10 @@ const MaxDocumentBytes = 4 << 20
 // accepted from being refused after sops ran.
 const MaxRewrittenBytes = MaxDocumentBytes + 1<<20
 
+// errRefusedShape wraps keepKeys' refusal of a merge, repeated or
+// non-scalar key in the top level or the sops: block.
+var errRefusedShape = errors.New("the file's YAML is refused")
+
 // errTooLarge is the refusal for a document over MaxDocumentBytes.
 var errTooLarge = fmt.Errorf("the file is larger than %d MiB, the limit for a SOPS document", MaxDocumentBytes>>20)
 
@@ -106,7 +110,7 @@ func parseTop(data []byte) (*yaml.Node, error) {
 // the sops: block from elsewhere would otherwise go unread.
 func keepKeys(m *yaml.Node, names ...string) (*yaml.Node, error) {
 	if err := yamlsafe.CheckKeys(m); err != nil {
-		return nil, fmt.Errorf("the file's YAML is refused: %w", err)
+		return nil, fmt.Errorf("%w: %w", errRefusedShape, err)
 	}
 	kept := *m
 	kept.Content = nil
@@ -136,15 +140,44 @@ func keepKeys(m *yaml.Node, names ...string) (*yaml.Node, error) {
 // is not one (see CheckSize and keepKeys).
 func IsSOPSFile(data []byte) bool {
 	doc, err := parseTop(data)
-	if err != nil {
-		return false
-	}
+	return err == nil && isSOPSDoc(doc)
+}
+
+// isSOPSDoc is IsSOPSFile over a document parseTop returned.
+func isSOPSDoc(doc *yaml.Node) bool {
 	var probe map[string]yaml.Node
 	if err := doc.Decode(&probe); err != nil {
 		return false
 	}
 	node, ok := probe["sops"]
 	return ok && node.Kind == yaml.MappingNode
+}
+
+// ErrNotSOPSDocument is ReadDocument's refusal for data that does not parse
+// as YAML or has no top-level sops: mapping.
+var ErrNotSOPSDocument = errors.New("it has no top-level sops: block, so it is not a SOPS document")
+
+// ReadDocument is CheckSize, IsSOPSFile and ReadPlaintextRules over one
+// parse of data, for a caller that needs all three: the size refusal, then
+// ErrNotSOPSDocument, then the rules or their refusal. A merge key or a
+// repeated key at the top level or in the sops: block is refused by name
+// rather than as ErrNotSOPSDocument.
+func ReadDocument(data []byte) (PlaintextRules, error) {
+	if err := CheckSize(data); err != nil {
+		return PlaintextRules{}, err
+	}
+	doc, err := parseTop(data)
+	if errors.Is(err, errRefusedShape) {
+		return PlaintextRules{}, err
+	}
+	if err != nil || !isSOPSDoc(doc) {
+		return PlaintextRules{}, ErrNotSOPSDocument
+	}
+	meta, err := metadataOf(doc)
+	if err != nil {
+		return PlaintextRules{}, err
+	}
+	return rulesOf(meta)
 }
 
 // sopsNamePatterns is the filename allowlist for the --sops route.
@@ -228,7 +261,13 @@ func ReadPlaintextRules(data []byte) (PlaintextRules, error) {
 	if err != nil {
 		return PlaintextRules{}, err
 	}
+	return rulesOf(meta)
+}
 
+// rulesOf builds the rules from decoded metadata, applying sops' default
+// and refusing an uncompilable or implausibly long rule.
+func rulesOf(meta metadata) (PlaintextRules, error) {
+	var err error
 	rules := PlaintextRules{
 		unencryptedSuffix: meta.Sops.UnencryptedSuffix,
 		encryptedSuffix:   meta.Sops.EncryptedSuffix,
@@ -264,6 +303,12 @@ func readMetadata(data []byte) (metadata, error) {
 	if err != nil {
 		return metadata{}, err
 	}
+	return metadataOf(doc)
+}
+
+// metadataOf is readMetadata over a document parseTop returned.
+func metadataOf(doc *yaml.Node) (metadata, error) {
+	var err error
 	// The block is taken as a node first, so it can be pruned before its
 	// fields are decoded.
 	var top struct {
