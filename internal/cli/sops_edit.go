@@ -14,6 +14,7 @@ import (
 	execpkg "github.com/cameronsjo/forgectl/internal/exec"
 	sopspkg "github.com/cameronsjo/forgectl/internal/sops"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/yamlsafe"
 )
 
 // The fixed file names inside the work directory. Only the directory's path
@@ -186,9 +187,14 @@ func runSopsEdit(tempPath string) error {
 	// Parse what we are about to hand back. sops answers an unparseable
 	// document by re-invoking its editor, forever; refusing here converts
 	// that into one clean failure with the encrypted file untouched.
-	var probe map[string]any
-	if err := yaml.Unmarshal(edited, &probe); err != nil {
-		return errors.New("the edited document does not parse as YAML; refusing to hand it back")
+	if err := checkYAMLMapping(edited, sopspkg.MaxRewrittenBytes); err != nil {
+		if errors.Is(err, yamlsafe.ErrTooLarge) {
+			return fmt.Errorf("the edited document is larger than %d MiB; refusing to hand it back", sopspkg.MaxRewrittenBytes>>20)
+		}
+		if errors.Is(err, errNotYAMLMapping) {
+			return errors.New("the edited document does not parse as a YAML mapping; refusing to hand it back")
+		}
+		return fmt.Errorf("the edited document is refused: %w", err)
 	}
 
 	// The result is recorded before the document is written, so the driver
@@ -247,12 +253,55 @@ func readEditorTarget(path string) ([]byte, error) {
 	}
 
 	// A mapping at the root is what sops' decrypted buffer always is, and what
-	// SetScalar needs in order to mean anything.
-	var probe map[string]any
-	if err := yaml.Unmarshal(doc, &probe); err != nil || probe == nil {
-		return nil, errors.New("the document to edit is not a YAML mapping; refusing")
+	// SetScalar needs in order to mean anything. The ciphertext was held to
+	// MaxDocumentBytes, and decrypting drops each value's ENC[...] wrapper
+	// and the sops: block, but sops re-emits the document in its own layout
+	// (indentation, quoting), so the buffer is not guaranteed to be smaller.
+	// It gets MaxRewrittenBytes, the same headroom as the edited document.
+	if err := checkYAMLMapping(doc, sopspkg.MaxRewrittenBytes); err != nil {
+		if errors.Is(err, yamlsafe.ErrTooLarge) {
+			return nil, fmt.Errorf("the document to edit is larger than %d MiB; refusing", sopspkg.MaxRewrittenBytes>>20)
+		}
+		if errors.Is(err, errNotYAMLMapping) {
+			return nil, errors.New("the document to edit is not a YAML mapping; refusing")
+		}
+		return nil, fmt.Errorf("the document to edit is refused: %w", err)
 	}
 	return doc, nil
+}
+
+// errNotYAMLMapping is checkYAMLMapping's error for a document that does
+// not parse, or whose top level is not a mapping.
+var errNotYAMLMapping = errors.New("not a YAML mapping")
+
+// checkYAMLMapping reports whether doc, at most maxBytes, is one YAML
+// document whose top level is a mapping and that a decode into a map would
+// accept (#959). It used to be that decode, into map[string]any, which is
+// quadratic in a mapping's keys; this parses into a node and runs the
+// linear yamlsafe.CheckTree.
+//
+// Merge keys (`<<`) are allowed. SetScalar edits the document as lines and
+// nothing here decodes it, so no merge is ever applied, and Helm-style
+// values files use `<<: *defaults` freely; the old map decode accepted them
+// too. A repeated key, merge keys included, is still refused, as that
+// decode refused it.
+//
+// Over the cap, the error wraps yamlsafe.ErrTooLarge; a document that does
+// not parse, or is not a mapping, gets errNotYAMLMapping; anything else is
+// CheckTree's error, which names a line and never document text.
+func checkYAMLMapping(doc []byte, maxBytes int) error {
+	parsed, err := yamlsafe.Parse(doc, maxBytes)
+	if errors.Is(err, yamlsafe.ErrTooLarge) {
+		return err
+	}
+	if err != nil {
+		return errNotYAMLMapping
+	}
+	root := yamlsafe.Root(parsed)
+	if root == nil || root.Kind != yaml.MappingNode {
+		return errNotYAMLMapping
+	}
+	return yamlsafe.CheckTree(root, yamlsafe.Options{AllowMerge: true})
 }
 
 // checkSopsNonce requires the environment's nonce to equal the one in the

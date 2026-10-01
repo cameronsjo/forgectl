@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/cameronsjo/forgectl/internal/yamlsafe"
 )
 
 // maxRuleBytes bounds a suffix or regex read out of a file's own metadata.
@@ -15,18 +18,112 @@ import (
 // repository; a rule longer than this is not a rule anyone wrote.
 const maxRuleBytes = 1024
 
+// MaxDocumentBytes is the largest SOPS document forgectl reads (#959). sops
+// sets no limit of its own, and real files hold certificate bundles,
+// kubeconfigs and whole Helm values files. Encryption adds about 1.4x plus
+// about 80 bytes per value, so 4 MiB holds about 2.8 MiB of plaintext, far
+// beyond any file in the estate. The cap bounds the parse, which is linear
+// (0.17 s for a sops-shaped 4 MiB file, 2 s for the worst shape). It is not
+// what keeps a hostile document cheap: the readers below never decode the
+// whole document into a map, which goes quadratic far inside any cap a real
+// file needs (see internal/yamlsafe).
+const MaxDocumentBytes = 4 << 20
+
+// MaxRewrittenBytes bounds a document forgectl has edited: one that passed
+// MaxDocumentBytes before the edit, plus one value of at most maxValueBytes
+// once sops encrypted it. The 1 MiB of headroom keeps a write that was
+// accepted from being refused after sops ran.
+const MaxRewrittenBytes = MaxDocumentBytes + 1<<20
+
+// errRefusedShape wraps keepKeys' refusal of a merge, repeated or
+// non-scalar key in the top level or the sops: block.
+var errRefusedShape = errors.New("the file's YAML is refused")
+
+// errTooLarge is the refusal for a document over MaxDocumentBytes.
+var errTooLarge = fmt.Errorf("the file is larger than %d MiB, the limit for a SOPS document", MaxDocumentBytes>>20)
+
+// CheckSize refuses a document over MaxDocumentBytes, so a caller can say
+// that, not "not a SOPS document", before IsSOPSFile.
+func CheckSize(data []byte) error {
+	if len(data) > MaxDocumentBytes {
+		return errTooLarge
+	}
+	return nil
+}
+
 // metadata is the plaintext half of a SOPS document. The sops: block is never
 // encrypted — that is what lets every check in this file run without a key,
 // a subprocess, or a decryption.
 type metadata struct {
-	Sops struct {
-		UnencryptedSuffix string `yaml:"unencrypted_suffix"`
-		EncryptedSuffix   string `yaml:"encrypted_suffix"`
-		EncryptedRegex    string `yaml:"encrypted_regex"`
-		UnencryptedRegex  string `yaml:"unencrypted_regex"`
-		Mac               string `yaml:"mac"`
-		Version           string `yaml:"version"`
-	} `yaml:"sops"`
+	Sops sopsBlock `yaml:"sops"`
+}
+
+// sopsBlock is the sops: block's fields that the checks here read.
+type sopsBlock struct {
+	UnencryptedSuffix string `yaml:"unencrypted_suffix"`
+	EncryptedSuffix   string `yaml:"encrypted_suffix"`
+	EncryptedRegex    string `yaml:"encrypted_regex"`
+	UnencryptedRegex  string `yaml:"unencrypted_regex"`
+	Mac               string `yaml:"mac"`
+	Version           string `yaml:"version"`
+}
+
+// sopsBlockKeys are sopsBlock's yaml names, the keys keepKeys keeps.
+var sopsBlockKeys = []string{"unencrypted_suffix", "encrypted_suffix", "encrypted_regex", "unencrypted_regex", "mac", "version"}
+
+// parseTop parses data, at most MaxDocumentBytes, into a document whose
+// top-level mapping keeps only the `sops` pair (see keepKeys). A document
+// whose top level is not a mapping comes back whole: yaml.v3 refuses it, or
+// decodes it to nothing, without walking its content.
+func parseTop(data []byte) (*yaml.Node, error) {
+	if err := CheckSize(data); err != nil {
+		return nil, err
+	}
+	doc, err := yamlsafe.Parse(data, MaxDocumentBytes)
+	if err != nil {
+		return nil, errors.New("file does not parse as YAML")
+	}
+	root := yamlsafe.Root(doc)
+	if root == nil || root.Kind != yaml.MappingNode {
+		return doc, nil
+	}
+	kept, err := keepKeys(root, "sops")
+	if err != nil {
+		return nil, err
+	}
+	pruned := *doc
+	pruned.Content = []*yaml.Node{kept}
+	return &pruned, nil
+}
+
+// keepKeys returns a copy of mapping m that holds only the pairs whose key
+// decodes to one of names, after checking m's keys as yaml.v3's map and
+// struct decode checks them (yamlsafe.CheckKeys), plus a refusal of merge
+// keys. Decoding the copy is then what decoding m was, minus the keys
+// nobody reads, and costs nothing for those: yaml.v3 compares every key of a
+// mapping with every later key, so a document with many keys made the old
+// whole-document decode quadratic (#959).
+//
+// A key is matched by its decoded value, as the struct decode matches it,
+// so an alias key or a tagged one is kept when it names a field. A merge
+// key is refused rather than applied, which fails closed: a rule merged into
+// the sops: block from elsewhere would otherwise go unread.
+func keepKeys(m *yaml.Node, names ...string) (*yaml.Node, error) {
+	if err := yamlsafe.CheckKeys(m); err != nil {
+		return nil, fmt.Errorf("%w: %w", errRefusedShape, err)
+	}
+	kept := *m
+	kept.Content = nil
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		var name string
+		if err := m.Content[i].Decode(&name); err != nil {
+			return nil, errors.New("file does not parse as YAML")
+		}
+		if slices.Contains(names, name) {
+			kept.Content = append(kept.Content, m.Content[i], m.Content[i+1])
+		}
+	}
+	return &kept, nil
 }
 
 // IsSOPSFile reports whether data parses as YAML and carries a top-level
@@ -38,13 +135,49 @@ type metadata struct {
 // content test alone would accept any encrypted document anywhere in the
 // repository, which is exactly the widening the env-file allowlist exists to
 // prevent.
+//
+// A document over MaxDocumentBytes, or one with a merge key at its top level,
+// is not one (see CheckSize and keepKeys).
 func IsSOPSFile(data []byte) bool {
+	doc, err := parseTop(data)
+	return err == nil && isSOPSDoc(doc)
+}
+
+// isSOPSDoc is IsSOPSFile over a document parseTop returned.
+func isSOPSDoc(doc *yaml.Node) bool {
 	var probe map[string]yaml.Node
-	if err := yaml.Unmarshal(data, &probe); err != nil {
+	if err := doc.Decode(&probe); err != nil {
 		return false
 	}
 	node, ok := probe["sops"]
 	return ok && node.Kind == yaml.MappingNode
+}
+
+// ErrNotSOPSDocument is ReadDocument's refusal for data that does not parse
+// as YAML or has no top-level sops: mapping.
+var ErrNotSOPSDocument = errors.New("it has no top-level sops: block, so it is not a SOPS document")
+
+// ReadDocument is CheckSize, IsSOPSFile and ReadPlaintextRules over one
+// parse of data, for a caller that needs all three: the size refusal, then
+// ErrNotSOPSDocument, then the rules or their refusal. A merge key or a
+// repeated key at the top level or in the sops: block is refused by name
+// rather than as ErrNotSOPSDocument.
+func ReadDocument(data []byte) (PlaintextRules, error) {
+	if err := CheckSize(data); err != nil {
+		return PlaintextRules{}, err
+	}
+	doc, err := parseTop(data)
+	if errors.Is(err, errRefusedShape) {
+		return PlaintextRules{}, err
+	}
+	if err != nil || !isSOPSDoc(doc) {
+		return PlaintextRules{}, ErrNotSOPSDocument
+	}
+	meta, err := metadataOf(doc)
+	if err != nil {
+		return PlaintextRules{}, err
+	}
+	return rulesOf(meta)
 }
 
 // sopsNamePatterns is the filename allowlist for the --sops route.
@@ -118,12 +251,23 @@ type PlaintextRules struct {
 // Every encrypted file in the estate this feature targets carries
 // `unencrypted_suffix: _unencrypted`, so this is live on the exact files the
 // feature is for, not a hypothetical.
+//
+// The document is read as a node, and only the sops: pair and that block's
+// own keys are decoded (keepKeys), so the decode costs the same however
+// many keys the rest of the file has. A merge key in either mapping is
+// refused.
 func ReadPlaintextRules(data []byte) (PlaintextRules, error) {
-	var meta metadata
-	if err := yaml.Unmarshal(data, &meta); err != nil {
-		return PlaintextRules{}, errors.New("file does not parse as YAML")
+	meta, err := readMetadata(data)
+	if err != nil {
+		return PlaintextRules{}, err
 	}
+	return rulesOf(meta)
+}
 
+// rulesOf builds the rules from decoded metadata, applying sops' default
+// and refusing an uncompilable or implausibly long rule.
+func rulesOf(meta metadata) (PlaintextRules, error) {
+	var err error
 	rules := PlaintextRules{
 		unencryptedSuffix: meta.Sops.UnencryptedSuffix,
 		encryptedSuffix:   meta.Sops.EncryptedSuffix,
@@ -138,7 +282,6 @@ func ReadPlaintextRules(data []byte) (PlaintextRules, error) {
 		rules.unencryptedSuffix = "_unencrypted"
 	}
 
-	var err error
 	if rules.encryptedRegex, err = compileRule(meta.Sops.EncryptedRegex, "encrypted_regex"); err != nil {
 		return PlaintextRules{}, err
 	}
@@ -150,6 +293,49 @@ func ReadPlaintextRules(data []byte) (PlaintextRules, error) {
 	}
 
 	return rules, nil
+}
+
+// readMetadata decodes the sops: block's rule fields as a decode of the
+// whole document into metadata would, but over the pruned node: the top
+// level keeps only `sops`, and the block keeps only sopsBlockKeys.
+func readMetadata(data []byte) (metadata, error) {
+	doc, err := parseTop(data)
+	if err != nil {
+		return metadata{}, err
+	}
+	return metadataOf(doc)
+}
+
+// metadataOf is readMetadata over a document parseTop returned.
+func metadataOf(doc *yaml.Node) (metadata, error) {
+	var err error
+	// The block is taken as a node first, so it can be pruned before its
+	// fields are decoded.
+	var top struct {
+		Sops yaml.Node `yaml:"sops"`
+	}
+	if err := doc.Decode(&top); err != nil {
+		return metadata{}, errors.New("file does not parse as YAML")
+	}
+	block := &top.Sops
+	if block.Kind == 0 {
+		return metadata{}, nil
+	}
+	// A struct field decoded from an alias reads the anchored node. Prune
+	// that node; its own aliases still resolve in the decode below.
+	if block.Kind == yaml.AliasNode && block.Alias != nil {
+		block = block.Alias
+	}
+	if block.Kind == yaml.MappingNode {
+		if block, err = keepKeys(block, sopsBlockKeys...); err != nil {
+			return metadata{}, err
+		}
+	}
+	var meta metadata
+	if err := block.Decode(&meta.Sops); err != nil {
+		return metadata{}, errors.New("file does not parse as YAML")
+	}
+	return meta, nil
 }
 
 // compileRule compiles a regex read from file metadata.
