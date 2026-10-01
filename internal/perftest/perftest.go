@@ -60,6 +60,26 @@ func Linear(t testing.TB, what string, k int, small, large func()) {
 	}
 }
 
+// Within fails t unless subject runs in less than limit times base's time,
+// timed as Linear times its runs. It is for a bound that is not a growth
+// rate: a capped operation on an input past its cap against the same
+// input the operation never had to do the capped work on. It also fails t
+// if one subject run exceeds Ceiling.
+func Within(t testing.TB, what string, limit float64, base, subject func()) {
+	t.Helper()
+	if limit < 2 {
+		t.Fatalf("perftest.Within: limit = %v, want at least 2 so noise on the base side cannot fail it", limit)
+	}
+	b, s, clock := fastest(Runs, limit, Ceiling, timed, base, subject)
+	ratio := float64(s) / float64(max(b, 1))
+	t.Logf("%s: %v against a base of %v in %s, ratio %.1f (limit %.0f)", what, s, b, clock, ratio, limit)
+	if s > Ceiling {
+		t.Errorf("%s: one run cost %v, over the %v backstop", what, s, Ceiling)
+	} else if ratio > limit {
+		t.Errorf("%s: cost %v against a base of %v, a ratio of %.1f over the %.0f limit", what, s, b, ratio, limit)
+	}
+}
+
 // fastest times small and large alternately, up to runs pairs, and returns
 // the fastest run of each. It stops early once the fastest large run is at
 // most limit times the fastest small one, so an idle machine pays for one

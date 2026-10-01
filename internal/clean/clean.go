@@ -93,10 +93,17 @@ func WithCleanConfig(cc config.CleanConfig) Option {
 
 // New builds a Client over the given Runner. The default root is
 // <home>/Projects; if the home directory can't be resolved, root is left
-// empty and Clean requires an explicit CleanOptions.Root.
+// empty and Clean requires an explicit CleanOptions.Root. A root that itself
+// starts with ~ is refused in that case rather than read as a relative path
+// named "~" under the working directory (see ScanReport).
 func New(run exec.Runner, opts ...Option) *Client {
+	return newWithHome(run, os.UserHomeDir, opts...)
+}
+
+// newWithHome is New with the home lookup injected.
+func newWithHome(run exec.Runner, userHomeDir func() (string, error), opts ...Option) *Client {
 	c := &Client{run: run}
-	if home, err := os.UserHomeDir(); err == nil {
+	if home, err := userHomeDir(); err == nil && home != "" {
 		c.home = home
 		c.root = filepath.Join(home, defaultRootSubdir)
 	}
@@ -104,6 +111,12 @@ func New(run exec.Runner, opts ...Option) *Client {
 		opt(c)
 	}
 	return c
+}
+
+// usesTilde reports whether path is a bare ~ or starts with ~/ — the forms
+// expandTilde resolves against the home directory.
+func usesTilde(path string) bool {
+	return path == "~" || strings.HasPrefix(path, "~/")
 }
 
 // expandTilde expands a leading ~ or ~/ to home. Mirrors internal/config's
@@ -186,6 +199,9 @@ func (c *Client) ScanReport(opts CleanOptions) (resolvedRoot string, report Repo
 	}
 	if root == "" {
 		return "", Report{}, fmt.Errorf("no root to scan: pass --root, set [clean] default_root, or ensure the home directory is resolvable")
+	}
+	if c.home == "" && usesTilde(root) {
+		return "", Report{}, fmt.Errorf("root %s starts with ~ but the home directory is not resolvable: pass an absolute --root", termsafe.QuotePath(root))
 	}
 	root = expandTilde(root, c.home)
 

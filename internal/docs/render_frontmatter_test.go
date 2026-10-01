@@ -99,7 +99,7 @@ func TestRender_FrontmatterValuesEscaped(t *testing.T) {
 // TestRender_LeadingThematicBreakKeepsBody pins the gate in Render: the
 // frontmatter extension's opener is greedy (any leading --- fence starts a
 // block, and an unterminated one consumes to end of file), so without
-// hasWellFormedFrontmatter a doc opening with a thematic break rendered as a
+// wellFormedFrontmatter a doc opening with a thematic break rendered as a
 // completely empty page.
 func TestRender_LeadingThematicBreakKeepsBody(t *testing.T) {
 	cases := map[string]string{
