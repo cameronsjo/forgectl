@@ -131,3 +131,50 @@ func TestCommandCarriesTheProfile(t *testing.T) {
 		t.Errorf("env was not Local's: %v", cmd.Env)
 	}
 }
+
+// Mutations: take the name from the left (a.b.clean names "a"); drop the
+// dedup (lfs twice); accept any suffix (filter.x.required passes).
+func TestFilterDriverNames(t *testing.T) {
+	got, err := filterDriverNames("filter.lfs.clean\x00filter.lfs.process\x00filter.a.b.clean\x00filter..smudge\x00filter.Q\"x\\y.clean\x00")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"", "Q\"x\\y", "a.b", "lfs"}; !slices.Equal(got, want) {
+		t.Errorf("names = %q, want %q", got, want)
+	}
+	if got, err := filterDriverNames(""); err != nil || len(got) != 0 {
+		t.Errorf("empty listing = %q, %v; want none", got, err)
+	}
+	for _, bad := range []string{"filter.x.required", "core.fsmonitor", "filter.clean", "filter.a=b.clean", "status line\n"} {
+		if _, err := filterDriverNames(bad + "\x00"); err == nil {
+			t.Errorf("filterDriverNames(%q) accepted it", bad)
+		}
+	}
+}
+
+// #978 item 4: on Windows a variable's name has no case, so git_dir is
+// GIT_DIR and the scrub must remove it, under the spelling the environment
+// carries; on POSIX it is another variable and stays.
+// Mutation: compare names with == whatever caseInsensitiveEnv says
+// (git_dir, Git_Config_Key_0 and git_allow_protocol survive Local).
+func TestEnvScrubIgnoresCaseWhereTheOSDoes(t *testing.T) {
+	prev := caseInsensitiveEnv
+	t.Cleanup(func() { caseInsensitiveEnv = prev })
+	in := []string{`Path=C:\w`, `git_dir=C:\o\.git`, "Git_Config_Key_0=core.fsmonitor", "git_allow_protocol=ext", "Git_Work_Tree=x"}
+
+	caseInsensitiveEnv = true
+	if got, want := Env(Local, in), []string{`Path=C:\w`, "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0", "GIT_ALLOW_PROTOCOL="}; !slices.Equal(got, want) {
+		t.Errorf("Env(Local) = %v, want %v", got, want)
+	}
+	if got, want := Env(Transport, in), []string{`Path=C:\w`, "Git_Config_Key_0=core.fsmonitor", "git_allow_protocol=ext"}; !slices.Equal(got, want) {
+		t.Errorf("Env(Transport) = %v, want %v", got, want)
+	}
+	if got, want := Unset(Transport, in), []string{"git_dir", "Git_Work_Tree"}; !slices.Equal(got, want) {
+		t.Errorf("Unset(Transport) = %v, want the keys as the environment spells them, %v", got, want)
+	}
+
+	caseInsensitiveEnv = false
+	if got := Env(Local, in); !slices.Contains(got, `git_dir=C:\o\.git`) {
+		t.Errorf("Env(Local) on a case-sensitive OS dropped git_dir, another variable: %v", got)
+	}
+}

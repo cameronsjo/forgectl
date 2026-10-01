@@ -112,7 +112,7 @@ func TestSandbox_AlwaysClone_RemoteRepo(t *testing.T) {
 		t.Fatalf("expected 1 Runner call, got %d: %+v", len(fake.Calls), fake.Calls)
 	}
 	call := fake.Calls[0]
-	want := append(gitenv.Args(gitenv.Transport), "clone", "--branch", "main", "--", "cameronsjo/forgectl", dir)
+	want := append(gitenv.Args(gitenv.Transport), "-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never", "clone", "--branch", "main", "--", "cameronsjo/forgectl", dir)
 	if len(call.Args) != len(want) {
 		t.Fatalf("args = %v, want %v", call.Args, want)
 	}
@@ -138,7 +138,7 @@ func TestSandbox_Clone_NoRef_OmitsBranchFlag(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	call := fake.Last()
-	want := append(gitenv.Args(gitenv.Transport), "clone", "--", "cameronsjo/forgectl", dir)
+	want := append(gitenv.Args(gitenv.Transport), "-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never", "clone", "--", "cameronsjo/forgectl", dir)
 	if len(call.Args) != len(want) {
 		t.Fatalf("args = %v, want %v (branch flag should be omitted)", call.Args, want)
 	}

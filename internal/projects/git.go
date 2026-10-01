@@ -56,7 +56,9 @@ func gitStatus(ctx context.Context, run gitenv.Runner, gitBin, dir string) GitSt
 		return GitStatus{State: StatusUnknown}
 	}
 
-	out, err := gitenv.RunBin(ctx, run, gitBin, gitenv.Local, "-C", dir, "status", "--porcelain=v2", "--branch")
+	// Unfiltered: status re-hashes a stat-dirty entry through the filter driver
+	// the repository names, which would run its program (#977).
+	out, err := gitenv.RunUnfiltered(ctx, run, gitBin, dir, "status", "--porcelain=v2", "--branch")
 	if err != nil {
 		return GitStatus{State: StatusUnknown}
 	}
