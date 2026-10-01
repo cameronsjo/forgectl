@@ -113,7 +113,7 @@ func TestLinear_PassesLinearWork(t *testing.T) {
 // Mutation: comparing the ratio against k*k instead of k*k/2 turns this red
 // (the quadratic ratio sits at the limit and passes).
 func TestLinear_FailsQuadraticWork(t *testing.T) {
-	const k = 6
+	const k = 5
 	f := run(k, busy(busyUnit), busy(k*k*busyUnit))
 	if len(f.errors) != 1 || !strings.Contains(f.errors[0], "want linear time") {
 		t.Errorf("errors = %q, want one ratio failure", f.errors)
@@ -208,8 +208,9 @@ func TestRepsFor(t *testing.T) {
 	}{
 		{"fastest of three", []time.Duration{4 * time.Millisecond, 2 * time.Millisecond, 3 * time.Millisecond}, 5, 3},
 		{"already long enough", []time.Duration{10 * time.Millisecond, time.Millisecond}, 1, 1},
+		{"a zero reading is skipped", []time.Duration{0, 2 * time.Millisecond, 3 * time.Millisecond}, 5, 3},
 		{"capped", []time.Duration{time.Nanosecond}, maxReps, 3},
-		{"zero-cost run", []time.Duration{0}, maxReps, 3},
+		{"all zero readings", []time.Duration{0}, maxReps, 3},
 	} {
 		n := 0
 		measure := func(func()) (time.Duration, bool) {

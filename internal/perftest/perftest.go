@@ -111,19 +111,27 @@ func Amortize(small, large func()) (func(), func()) {
 	return repeat(reps, small), repeat(reps, large)
 }
 
-// repsFor is how many runs of f cost at least target, from the fastest of up
-// to three runs, stopping at the first that is already that long. measure
+// repsFor is how many runs of f cost at least target, from the fastest
+// nonzero reading of up to three runs, stopping at the first that is already that long. measure
 // times one run, as fastest's does. It is at most maxReps.
 func repsFor(f func(), target time.Duration, measure func(func()) (time.Duration, bool)) int {
 	best := time.Duration(math.MaxInt64)
 	for range 3 {
 		d, _ := measure(f)
+		if d <= 0 {
+			// A zero reading is below the clock's tick, not a free run: one
+			// of them must not drag the fastest down and force maxReps.
+			continue
+		}
 		best = min(best, d)
 		if best >= target {
 			return 1
 		}
 	}
-	return int(min(int64(maxReps), (int64(target)+int64(max(best, 1))-1)/int64(max(best, 1))))
+	if best == time.Duration(math.MaxInt64) {
+		return maxReps
+	}
+	return int(min(int64(maxReps), (int64(target)+int64(best)-1)/int64(best)))
 }
 
 func repeat(n int, f func()) func() {
