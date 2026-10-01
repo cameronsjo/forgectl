@@ -12,7 +12,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/cameronsjo/forgectl/internal/audit"
 	"github.com/cameronsjo/forgectl/internal/audit/gitleaks"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/gitenv"
@@ -359,5 +361,104 @@ func TestAuditSecrets_HelpNamesEveryExit1(t *testing.T) {
 		if !strings.Contains(exits, want) {
 			t.Errorf("exit-code help lacks %q:\n%s", want, exits)
 		}
+	}
+}
+
+// scannerConfigNote is the per-repo wording for a scanner-config skip.
+const scannerConfigNote = ".gitleaksignore or .gitleaks.toml is not a regular file"
+
+// TestAuditSecrets_BudgetSkipsNeverReadAsTampering: repos the budget ran out
+// on are counted in the TIMED OUT line, and the scanner-config wording, which
+// reads as tampering, never appears for them.
+//
+// Mutation that turns it red: print the scanner-config note for every skip,
+// whatever its reason.
+func TestAuditSecrets_BudgetSkipsNeverReadAsTampering(t *testing.T) {
+	o := gitleaksOutcome{mode: gitleaksAuto, status: gitleaks.StatusTimedOut, timeout: 5 * time.Second,
+		binary: gitleaks.Binary{Version: "8.30.1"},
+		result: gitleaks.Result{Findings: []gitleaks.Finding{}, Skipped: []gitleaks.Skip{
+			{Repo: "/p/a", Reason: gitleaks.SkipBudgetExhausted},
+			{Repo: "/p/b", Reason: gitleaks.SkipBudgetExhausted},
+		}}}
+	var out bytes.Buffer
+	writeAuditSecretsText(&out, audit.SecretsReport{Root: "/p"}, o)
+	if strings.Contains(out.String(), scannerConfigNote) || strings.Contains(out.String(), "scanner config") {
+		t.Errorf("budget skips rendered as scanner-config tampering:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "TIMED OUT: the 5s scan budget ran out and 2 repos were skipped") {
+		t.Errorf("the TIMED OUT line does not count the budget skips:\n%s", out.String())
+	}
+}
+
+// TestAuditSecrets_BothSkipReasonsRenderApart: in one run with both skip
+// reasons, only the scanner-config repo gets the scanner-config note, and
+// each reason is counted on its own in the status line.
+//
+// Mutation that turns it red: print the scanner-config note for every skip,
+// or count every skip in the TIMED OUT line.
+func TestAuditSecrets_BothSkipReasonsRenderApart(t *testing.T) {
+	o := gitleaksOutcome{mode: gitleaksAuto, status: gitleaks.StatusTimedOut, timeout: 5 * time.Second,
+		binary: gitleaks.Binary{Version: "8.30.1"},
+		result: gitleaks.Result{Findings: []gitleaks.Finding{}, Skipped: []gitleaks.Skip{
+			{Repo: "/p/fifo", Reason: gitleaks.SkipScannerConfigNotRegular},
+			{Repo: "/p/x", Reason: gitleaks.SkipBudgetExhausted},
+			{Repo: "/p/y", Reason: gitleaks.SkipBudgetExhausted},
+		}}}
+	var out bytes.Buffer
+	writeAuditSecretsText(&out, audit.SecretsReport{Root: "/p"}, o)
+	text := out.String()
+	if n := strings.Count(text, scannerConfigNote); n != 1 || !strings.Contains(text, "gitleaks skipped /p/fifo: its root") {
+		t.Errorf("%d scanner-config notes, want exactly one, for /p/fifo:\n%s", n, text)
+	}
+	for _, repo := range []string{"/p/x", "/p/y"} {
+		if strings.Contains(text, repo) {
+			t.Errorf("budget-skipped %s was listed:\n%s", repo, text)
+		}
+	}
+	if !strings.Contains(text, "and 2 repos were skipped") || !strings.Contains(text, "SKIPPED 1 repos whose scanner config") {
+		t.Errorf("status line does not count each reason apart:\n%s", text)
+	}
+}
+
+// versionBlocksRunner answers like secretsRunner but holds `gitleaks
+// version` until its context ends.
+type versionBlocksRunner struct {
+	*exec.FakeRunner
+	bin string
+}
+
+func (v versionBlocksRunner) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error) {
+	if name == v.bin && len(args) == 1 && args[0] == "version" {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	return v.FakeRunner.RunWithEnvFiltered(ctx, env, unset, name, args...)
+}
+
+// TestAuditSecrets_BudgetSpentInVersionIsTimedOut: a budget that runs out
+// while `gitleaks version` runs reads as timed_out with every repo skipped
+// budget_exhausted, not as a broken gitleaks (version_failed).
+//
+// Mutation that turns it red: drop the budget.Err() check after Resolve.
+func TestAuditSecrets_BudgetSpentInVersionIsTimedOut(t *testing.T) {
+	fx := newSecretsFixture(t)
+	runner := versionBlocksRunner{secretsRunner(t, fx, nil), fx.bin}
+	stdout, _, err := runAuditSecrets(t, fx, runner, nil, "--json", "--timeout=200ms")
+	if err == nil || ExitCode(err) != 1 {
+		t.Errorf("err = %v, want exit 1", err)
+	}
+	var got struct {
+		Gitleaks struct {
+			Status  string `json:"status"`
+			Skipped []struct {
+				Repo, Reason string
+			} `json:"repos_skipped"`
+		} `json:"gitleaks"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Gitleaks.Status != gitleaks.StatusTimedOut || len(got.Gitleaks.Skipped) != 1 || got.Gitleaks.Skipped[0].Reason != gitleaks.SkipBudgetExhausted {
+		t.Errorf("gitleaks = %+v, want timed_out with the repo budget_exhausted", got.Gitleaks)
 	}
 }

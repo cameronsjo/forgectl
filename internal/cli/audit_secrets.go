@@ -130,18 +130,19 @@ when --gitleaks=require and gitleaks did not run; 2 for a bad flag value.`,
 
 			out := gitleaksOutcome{mode: mode, status: gitleaksStatusOff, timeout: timeout, result: gitleaks.Result{Findings: []gitleaks.Finding{}, Skipped: []gitleaks.Skip{}}}
 			if mode != gitleaksOff {
-				if budget.Err() != nil {
-					out.status = gitleaks.StatusTimedOut
-					for _, repo := range report.Repos {
-						out.result.Skipped = append(out.result.Skipped, gitleaks.Skip{Repo: repo, Reason: gitleaks.SkipBudgetExhausted})
-					}
-				} else {
+				if budget.Err() == nil {
 					out.binary = gitleaks.Resolve(budget, d.lookPath, d.runner, report.Root)
 					out.status = out.binary.State
-					if out.binary.State == gitleaks.StateAvailable {
-						out.result = gitleaks.Scan(budget, d.runner, out.binary.Path, report.Repos, gitleaksSkips(report), d.gitleaksRepoTimeout)
-						out.status = out.result.Status
-					}
+				}
+				switch {
+				case budget.Err() != nil:
+					// Spent before gitleaks could start, or while `gitleaks
+					// version` ran: that is the budget, not a broken gitleaks.
+					out.status = gitleaks.StatusTimedOut
+					out.result.Skipped = budgetSkips(report)
+				case out.binary.State == gitleaks.StateAvailable:
+					out.result = gitleaks.Scan(budget, d.runner, out.binary.Path, report.Repos, gitleaksSkips(report), d.gitleaksRepoTimeout)
+					out.status = out.result.Status
 				}
 			}
 
@@ -278,6 +279,22 @@ func gitleaksSkips(r audit.SecretsReport) map[string]string {
 		skip[repo] = gitleaks.SkipScannerConfigNotRegular
 	}
 	return skip
+}
+
+// budgetSkips is every repo as the gitleaks pass would have skipped it when
+// the budget was spent before the pass began: a repo with unsafe scanner
+// config keeps that reason, and the rest are budget_exhausted.
+func budgetSkips(r audit.SecretsReport) []gitleaks.Skip {
+	unsafe := gitleaksSkips(r)
+	out := make([]gitleaks.Skip, 0, len(r.Repos))
+	for _, repo := range r.Repos {
+		reason := gitleaks.SkipBudgetExhausted
+		if why, ok := unsafe[repo]; ok {
+			reason = why
+		}
+		out = append(out, gitleaks.Skip{Repo: repo, Reason: reason})
+	}
+	return out
 }
 
 // auditSecretsJSON is the --json wire shape. Additive changes only
@@ -424,8 +441,12 @@ func writeAuditSecretsText(w io.Writer, r audit.SecretsReport, o gitleaksOutcome
 				return fmt.Sprintf("  %s:%d  %s", auditShowPath(rel), f.StartLine, safeLabel(f.RuleID))
 			})
 	}
+	// A budget_exhausted skip is counted in the TIMED OUT status line, not
+	// listed: only a repo skipped for its own scanner config gets a note.
 	for _, sk := range o.result.Skipped {
-		auditLine(w, "note: gitleaks skipped "+auditShowPath(sk.Repo)+": its root .gitleaksignore or .gitleaks.toml is not a regular file")
+		if sk.Reason == gitleaks.SkipScannerConfigNotRegular {
+			auditLine(w, "note: gitleaks skipped "+auditShowPath(sk.Repo)+": its root .gitleaksignore or .gitleaks.toml is not a regular file")
+		}
 	}
 	if o.result.Rejected > 0 {
 		auditLine(w, fmt.Sprintf("note: %d gitleaks findings named a file outside the repo scanned and were dropped", o.result.Rejected))

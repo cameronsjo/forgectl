@@ -239,3 +239,63 @@ func TestAuditSecrets_UnsafeScannerConfigPastTheFindingsCap(t *testing.T) {
 		t.Errorf("skips = %v, want %s skipped", skip, fx.repo)
 	}
 }
+
+// gitBlocksRunner holds every git call until its context ends.
+type gitBlocksRunner struct{ *exec.FakeRunner }
+
+func (g gitBlocksRunner) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error) {
+	if name == "git" {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	return g.FakeRunner.RunWithEnvFiltered(ctx, env, unset, name, args...)
+}
+
+// TestAuditSecrets_BudgetKeepsScannerConfigReason: when the budget runs out
+// in the git pass, a repo skipped for its own unsafe scanner config keeps
+// that reason; only the others are budget_exhausted.
+//
+// Mutation that turns it red: mark every repo budget_exhausted in
+// budgetSkips.
+func TestAuditSecrets_BudgetKeepsScannerConfigReason(t *testing.T) {
+	fx := newSecretsFixture(t)
+	if err := syscall.Mkfifo(filepath.Join(fx.repo, ".gitleaksignore"), 0o600); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+	other := filepath.Join(fx.root, "other")
+	if err := os.MkdirAll(filepath.Join(other, ".git"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, ".env"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := gitBlocksRunner{secretsRunner(t, fx, nil)}
+	stdout, _, err := runAuditSecrets(t, fx, runner, nil, "--json", "--timeout=200ms")
+	if err == nil || ExitCode(err) != 1 {
+		t.Errorf("err = %v, want exit 1", err)
+	}
+	var got struct {
+		Gitleaks struct {
+			Status  string `json:"status"`
+			Skipped []struct {
+				Repo, Reason string
+			} `json:"repos_skipped"`
+		} `json:"gitleaks"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{fx.repo: gitleaks.SkipScannerConfigNotRegular, other: gitleaks.SkipBudgetExhausted}
+	if got.Gitleaks.Status != gitleaks.StatusTimedOut || len(got.Gitleaks.Skipped) != len(want) {
+		t.Fatalf("gitleaks = %+v", got.Gitleaks)
+	}
+	for _, sk := range got.Gitleaks.Skipped {
+		if want[sk.Repo] != sk.Reason {
+			t.Errorf("%s skipped as %q, want %q", sk.Repo, sk.Reason, want[sk.Repo])
+		}
+	}
+	text, _, _ := runAuditSecrets(t, fx, gitBlocksRunner{secretsRunner(t, fx, nil)}, nil, "--timeout=200ms")
+	if n := strings.Count(text, ".gitleaksignore or .gitleaks.toml is not a regular file"); n != 1 {
+		t.Errorf("%d scanner-config notes, want 1 (the FIFO repo only):\n%s", n, text)
+	}
+}

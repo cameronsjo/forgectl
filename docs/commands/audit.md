@@ -258,7 +258,11 @@ more is started:
 - gitleaks reports `timed_out`, and every repo it did not finish is in
   `repos_skipped` with the reason `budget_exhausted`.
 
-Either one is a partial result, and the verb exits 1. A gitleaks run that only
+Either one is a partial result, and the verb exits 1. The text form counts
+the budget-exhausted repos in its TIMED OUT line rather than listing them, and
+a repo skipped for its own scanner config keeps that reason even when the
+budget ran out first. A budget spent while `gitleaks version` runs reads as
+`timed_out`, not `version_failed`. A gitleaks run that only
 overruns its own 5-minute cap fails that repo (`repos_timed_out`, counted in
 `repos_failed`), and the next repo still runs.
 
@@ -277,6 +281,12 @@ overruns its own 5-minute cap fails that repo (`repos_timed_out`, counted in
   matches `PRIVATE KEY-----`, so a PGP `PRIVATE KEY BLOCK` is not recognized.
 - A symlinked `*.pem` or `*.key` is listed as a key without being checked (see
   above).
+- The per-repo caps bound one repo, not the run: a repo whose scanner config is
+  swapped for a FIFO after the walk checked it, or whose git calls hang, holds
+  its whole slice (5 minutes for gitleaks, 30 seconds for git). Two such repos
+  can spend the default 10-minute budget. The cost is bounded, and the run
+  reports it: the remaining repos come out `budget_exhausted` and the verb
+  exits 1.
 
 `forgectl doctor` has a `gitleaks` row from the same resolver: skipped when
 gitleaks is absent or found only through a relative `PATH` entry, a warning
