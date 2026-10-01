@@ -235,7 +235,7 @@ func Execute(ctx context.Context) error {
 		return errHeadlessMenuRoute
 	default:
 		logDispatch("Dispatching to command verb.", root, args)
-		return execCommand(ctx, root, args, deps.Theme)
+		return execDispatch(ctx, deps, root, args, deps.Theme)
 	}
 }
 
@@ -525,7 +525,44 @@ func runHubVerb(ctx context.Context, deps module.Deps, root *cobra.Command, argv
 	if handled, err := tryExtensionRungs(root, argv, defaultExternalCommandRuntime()); handled {
 		return err
 	}
-	return execCommand(ctx, root, argv, th)
+	return execDispatch(ctx, deps, root, argv, th)
+}
+
+// deferredVerb is the slot a command running under fang fills when it wants
+// another command run after it returns: `status --tui` hands back the
+// `pr <ref>` chosen in the cockpit this way. Running that command from inside
+// the first one's RunE would nest a second fang.Execute in the first — the
+// inner fang renders a failure and the outer renders it again, and root's
+// persistent pre-run runs twice. execDispatch runs it after fang has returned
+// instead, the way the hub's own actions run (runAction, outside fang).
+type deferredVerb struct{ argv []string }
+
+type deferredVerbKey struct{}
+
+// deferVerb records argv in the context's deferred-verb slot. It reports
+// false when the command is not running under execDispatch, and the caller
+// then falls back to printing the invocation.
+func deferVerb(ctx context.Context, argv []string) bool {
+	slot, ok := ctx.Value(deferredVerbKey{}).(*deferredVerb)
+	if !ok || slot == nil {
+		return false
+	}
+	slot.argv = append([]string(nil), argv...)
+	return true
+}
+
+// execDispatch is execCommand plus the deferred-verb slot: when the command
+// it ran succeeded and left an argv in the slot, that argv runs next, through
+// runHubVerb, after fang has returned.
+func execDispatch(ctx context.Context, deps module.Deps, root *cobra.Command, args []string, th theme.Theme) error {
+	slot := &deferredVerb{}
+	if err := execCommand(context.WithValue(ctx, deferredVerbKey{}, slot), root, args, th); err != nil {
+		return err
+	}
+	if slot.argv == nil {
+		return nil
+	}
+	return runHubVerb(ctx, deps, root, slot.argv, th)
 }
 
 // dispatchAction routes a TUI action to the appropriate client call. Separated
