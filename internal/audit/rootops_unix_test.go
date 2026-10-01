@@ -1,7 +1,8 @@
-//go:build unix && !aix && !illumos && !solaris
+//go:build unix && !illumos && !solaris
 
-// aix, illumos and solaris are unix but have no syscall.Mkfifo, so this file
-// would not compile there. rootops_flags_test.go still pins both flags on them.
+// illumos and solaris are unix but have no syscall.Mkfifo, so this file would
+// not compile there. rootops_flags_test.go still pins both flags on them.
+// (aix lacks it too, but forgectl does not build for aix: forgectl#956.)
 
 package audit
 
@@ -43,5 +44,36 @@ func TestRootOps_FIFONeverBlocks(t *testing.T) {
 			_ = f.Close()
 		}
 		t.Fatal("listing a FIFO blocked: the directory open waits for a writer")
+	}
+}
+
+// TestSniffRoot_FIFONeverBlocks: a *.pem swapped for a FIFO after the Lstat
+// fails the sniff at once (O_NONBLOCK, then the fstat refuses a non-regular
+// file) instead of waiting for a writer.
+func TestSniffRoot_FIFONeverBlocks(t *testing.T) {
+	root := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(root, "swapped.pem"), 0o600); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	done := make(chan error, 1)
+	go func() {
+		_, err := sniffRoot(r, "swapped.pem")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("sniffing a FIFO succeeded; want a not-a-regular-file error")
+		}
+	case <-time.After(5 * time.Second):
+		if f, err := os.OpenFile(filepath.Clean(filepath.Join(root, "swapped.pem")), os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			_ = f.Close()
+		}
+		t.Fatal("sniffing a FIFO blocked")
 	}
 }

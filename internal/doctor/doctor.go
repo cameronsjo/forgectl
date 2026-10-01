@@ -23,12 +23,14 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/cameronsjo/forgectl/internal/audit/gitleaks"
 	"github.com/cameronsjo/forgectl/internal/bench"
 	"github.com/cameronsjo/forgectl/internal/bless"
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/launch"
+	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/resume"
 	"github.com/cameronsjo/forgectl/internal/selfupdate"
@@ -99,6 +101,10 @@ type Deps struct {
 	// reads. Seamed so the task-dialect check can run against a fixture
 	// tree rather than the machine's real ~/.claude.
 	ResumePaths func() (resume.Paths, error)
+	// ProjectsRoot resolves the root `forgectl audit secrets` scans, so the
+	// gitleaks row refuses a binary inside it as the scan does. Nil skips
+	// that check.
+	ProjectsRoot func() (string, error)
 }
 
 // NewDeps wires Deps with production seams: os/exec.LookPath, the real
@@ -112,6 +118,7 @@ func NewDeps(cfg config.Config, runner exec.Runner) Deps {
 		TrustStorePath: config.TrustStorePath,
 		Prober:         bench.NewHTTPProber(),
 		ResumePaths:    resume.DefaultPaths,
+		ProjectsRoot:   projects.ResolveRoot,
 	}
 }
 
@@ -130,6 +137,7 @@ func Run(ctx context.Context, d Deps) Report {
 	checks = append(checks, checkBinary(d, "cmux", "cmux not found on PATH — see https://github.com/cameronsjo/cmux"))
 	checks = append(checks, checkMdroll(d))
 	checks = append(checks, checkSops(ctx, d))
+	checks = append(checks, checkGitleaks(ctx, d))
 	checks = append(checks, checkGh(ctx, d))
 	checks = append(checks, benchChecks(ctx, d)...)
 	checks = append(checks, checkTrustStore(d))
@@ -297,6 +305,47 @@ func checkSops(ctx context.Context, d Deps) Check {
 	}
 	slog.Warn("sops --version printed no recognizable version.", "output", termsafe.SafeLineMax(redact.Stdout(line), 200))
 	return Check{Name: "sops", State: StateOK, Detail: "sops present; version not recognized"}
+}
+
+// checkGitleaks reports the gitleaks `forgectl audit secrets` would run,
+// through the same resolver the scan uses (gitleaks.Resolve), so the row and
+// the scan cannot disagree about which binary counts. gitleaks is optional:
+// absent is StateSkip, since the scan's native checks run without it. A
+// binary the scan would refuse or cannot use is StateWarn, because the
+// operator installed it and the scan will not run it.
+func checkGitleaks(ctx context.Context, d Deps) Check {
+	root := ""
+	if d.ProjectsRoot != nil {
+		if r, err := d.ProjectsRoot(); err == nil {
+			root = r
+		}
+	}
+	b := gitleaks.Resolve(ctx, d.LookPath, d.Runner, root)
+	const name = "gitleaks"
+	switch b.State {
+	case gitleaks.StateAvailable:
+		return Check{Name: name, State: StateOK, Detail: "gitleaks " + b.Version}
+	case gitleaks.StateRefused:
+		if b.Reason == gitleaks.ReasonUnderScanRoot {
+			return Check{Name: name, State: StateWarn,
+				Detail: "the gitleaks on PATH lies inside the projects root; `audit secrets` will not run it",
+				Hint:   "install gitleaks outside the projects root (`brew install gitleaks`)"}
+		}
+		return Check{Name: name, State: StateSkip,
+			Detail: "gitleaks found only via a relative PATH entry; ignoring",
+			Hint:   "put gitleaks' directory on PATH as an absolute path"}
+	case gitleaks.StateTooOld:
+		detail := "gitleaks printed no recognizable version; `audit secrets` needs " + gitleaks.MinVersion + " or later"
+		if b.Version != "" {
+			detail = "gitleaks " + b.Version + " is older than " + gitleaks.MinVersion + "; `audit secrets` will not run it"
+		}
+		return Check{Name: name, State: StateWarn, Detail: detail, Hint: "upgrade with `brew upgrade gitleaks`"}
+	case gitleaks.StateVersionFailed:
+		return Check{Name: name, State: StateWarn, Detail: "gitleaks version failed", Hint: "reinstall with `brew reinstall gitleaks`"}
+	}
+	return Check{Name: name, State: StateSkip,
+		Detail: "not found on PATH — optional; `forgectl audit secrets` runs its native checks without it",
+		Hint:   "install with `brew install gitleaks` to add a gitleaks pass to audit secrets"}
 }
 
 // benchChecks folds bench.Status's hearth and chronicle components into doctor

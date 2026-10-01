@@ -267,22 +267,55 @@ func TestCommandError_NilErrEmptyStderr_DoesNotPanic(t *testing.T) {
 // exits 0 while a backgrounded grandchild still holds its stderr (git over ssh
 // ControlPersist does this) succeeded. pipeWaitDelay must stop Run waiting on
 // the pipe without turning that success into exec.ErrWaitDelay.
+//
+// The grandchild sleeps a minute and Run must return inside a 20 s hang
+// bound, far above pipeWaitDelay, so host load cannot fail it, and far below
+// the grandchild's lifetime (forgectl#919; a 1.5 s bound failed under load).
+// The test kills the grandchild when it ends.
+//
+// Mutation: drop cmd.WaitDelay in OSRunner.Run and Run waits out the
+// grandchild's minute, past the hang bound.
 func TestOSRunner_ExitZeroWithADescendantHoldingThePipesSucceeds(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "holder")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho ok\nsleep 5 >/dev/null &\nexit 0\n"), 0o700); err != nil { //nolint:gosec // test-owned script
+	pidFile := filepath.Join(dir, "grandchild.pid")
+	body := fmt.Sprintf("#!/bin/sh\necho ok\nsleep 60 >/dev/null &\necho $! > %q\nexit 0\n", pidFile)
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil { //nolint:gosec // test-owned script
 		t.Fatal(err)
 	}
-	start := time.Now()
-	out, err := OSRunner{}.Run(context.Background(), script)
-	if err != nil {
-		t.Fatalf("a child that exited 0 must succeed, got %v", err)
+	t.Cleanup(func() {
+		b, err := os.ReadFile(filepath.Clean(pidFile))
+		if err != nil {
+			return
+		}
+		var pid int
+		if _, err := fmt.Sscan(string(b), &pid); err != nil {
+			return
+		}
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = p.Kill()
+		}
+	})
+	type result struct {
+		out string
+		err error
 	}
-	if out != "ok" {
-		t.Errorf("out = %q, want %q", out, "ok")
+	done := make(chan result, 1)
+	go func() {
+		out, err := OSRunner{}.Run(context.Background(), script)
+		done <- result{out, err}
+	}()
+	var r result
+	select {
+	case r = <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("Run did not return within 20s; it waited on the descendant's pipe")
 	}
-	if d := time.Since(start); d > time.Second+pipeWaitDelay {
-		t.Errorf("Run took %v; it waited on the descendant's pipe", d)
+	if r.err != nil {
+		t.Fatalf("a child that exited 0 must succeed, got %v", r.err)
+	}
+	if r.out != "ok" {
+		t.Errorf("out = %q, want %q", r.out, "ok")
 	}
 }
 

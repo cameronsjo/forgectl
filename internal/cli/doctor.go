@@ -45,6 +45,7 @@ each domain already knows how to make — it never reimplements one:
   log path        the resolved log path's parent directory exists or can be created
   tmux/ghostty/cmux   present on PATH
   gh              installed and authenticated
+  gitleaks        its version, as forgectl audit secrets would run it (optional)
   hearth/chronicle        the local bench's health (forgectl bench status)
   trust store     the workflow-blessing trust store, if you use blessed workflows
   forgectl version   the Homebrew tap's reachability + forgectl's own currency

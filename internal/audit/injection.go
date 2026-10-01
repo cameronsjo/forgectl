@@ -151,25 +151,16 @@ func (r Report) Stopped() bool {
 	return false
 }
 
-func (r *Report) capped(name string) {
-	r.Truncated = true
-	for _, c := range r.CappedBy {
-		if c == name {
-			return
-		}
-	}
-	r.CappedBy = append(r.CappedBy, name)
-}
-
 // errStop unwinds the walk once a cap is hit.
 var errStop = errors.New("audit: cap reached")
 
 type scanner struct {
-	ops     fsOps
-	root    string
 	matcher *quarantine.CarrierMatcher
+	root    string
 	opts    Options
+	ops     fsOps
 	report  *Report
+	stats   *walkStats
 }
 
 // ScanInjection walks opts.Root and returns every agent-instruction carrier
@@ -188,9 +179,8 @@ func ScanInjection(opts Options) (Report, error) {
 	return scanWith(abs, ops, opts)
 }
 
-// scanWith is ScanInjection's walk over an opened root, reported under the
-// display prefix root, through an explicit filesystem surface.
-func scanWith(root string, ops fsOps, opts Options) (Report, error) {
+// withDefaults fills opts' zero caps.
+func (opts Options) withDefaults() Options {
 	if opts.MaxEntries <= 0 {
 		opts.MaxEntries = DefaultMaxEntries
 	}
@@ -200,6 +190,13 @@ func scanWith(root string, ops fsOps, opts Options) (Report, error) {
 	if opts.MaxDepth <= 0 {
 		opts.MaxDepth = DefaultMaxDepth
 	}
+	return opts
+}
+
+// scanWith is ScanInjection's walk over an opened root, reported under the
+// display prefix root, through an explicit filesystem surface.
+func scanWith(root string, ops fsOps, opts Options) (Report, error) {
+	opts = opts.withDefaults()
 	if opts.Now.IsZero() {
 		opts.Now = time.Now()
 	}
@@ -216,85 +213,43 @@ func scanWith(root string, ops fsOps, opts Options) (Report, error) {
 		Root: root, Findings: []Finding{}, CappedBy: []string{},
 		MaxEntries: opts.MaxEntries, MaxFindings: opts.MaxFindings, MaxDepth: opts.MaxDepth,
 	}
-	s := &scanner{ops: ops, root: root, matcher: matcher, opts: opts, report: &report}
-	if err := s.walk(".", nil, "", false, 0); err != nil && !errors.Is(err, errStop) {
+	stats := &walkStats{CappedBy: []string{}}
+	s := &scanner{matcher: matcher, root: root, opts: opts, ops: ops, report: &report, stats: stats}
+	w := &walker{ops: ops, root: root, maxEntries: opts.MaxEntries, maxDepth: opts.MaxDepth, stats: stats, visit: s.visit}
+	if err := w.run(); err != nil {
 		return Report{}, err
 	}
+	report.Repos = len(stats.Repos)
+	report.Entries = stats.Entries
+	report.Unreadable = stats.Unreadable
+	report.CappedBy = stats.CappedBy
+	report.Truncated = len(stats.CappedBy) > 0
+	report.DepthSkipped = stats.DepthSkipped
 	sort.Slice(report.Findings, func(i, j int) bool { return report.Findings[i].Path < report.Findings[j].Path })
 	return report, nil
 }
 
-// walk lists dir (slash-separated, relative to the root) and classifies each
-// entry. segs are dir's own segments; repo is the nearest git working tree
-// at or above dir, relative to the root, with "" meaning none and "." the
-// root itself. depth is dir's own depth, the root being 0: with MaxDepth N
-// the walk lists directories at depths 0 through N-1.
-func (s *scanner) walk(dir string, segs []string, repo string, vendored bool, depth int) error {
-	names, err := s.ops.names(dir)
-	if err != nil {
-		if dir == "." {
-			return fmt.Errorf("read audit root %s: %w", termsafe.QuotePath(s.root), termsafe.Error(err))
-		}
-		s.report.Unreadable++
-		return nil
+// visit classifies one entry. A matched directory is one carrier: it is
+// reported as a unit and never descended, as quarantine hides it as a unit.
+// That includes a repo's .claude/worktrees/: worktrees parked there are part
+// of the .claude carrier and are not scanned separately.
+func (s *scanner) visit(e entry) (bool, error) {
+	mode := e.info.Mode()
+	carrier, anchor, ok := s.classify(e.segs, e.repo)
+	prefix := false
+	if !ok && mode&fs.ModeSymlink != 0 {
+		carrier, anchor, ok = s.classifyPrefix(e.rel, e.segs, e.repo)
+		prefix = ok
 	}
-	sort.Strings(names)
-	for _, name := range names {
-		if name == ".git" {
-			repo = dir
-			s.report.Repos++
-			break
-		}
+	if !ok {
+		return false, nil
 	}
-
-	for _, name := range names {
-		s.report.Entries++
-		if s.report.Entries > s.opts.MaxEntries {
-			s.report.capped(CapEntries)
-			return errStop
-		}
-		if name == ".git" {
-			continue
-		}
-		rel := path.Join(dir, name)
-		info, err := s.ops.lstat(rel)
-		if err != nil {
-			s.report.Unreadable++ // vanished or unreadable mid-walk: counted, not classified
-			continue
-		}
-		mode := info.Mode()
-		childSegs := append(append(make([]string, 0, len(segs)+1), segs...), name)
-		carrier, anchor, ok := s.classify(childSegs, repo)
-		prefix := false
-		if !ok && mode&fs.ModeSymlink != 0 {
-			carrier, anchor, ok = s.classifyPrefix(rel, childSegs, repo)
-			prefix = ok
-		}
-		if ok {
-			if len(s.report.Findings) >= s.opts.MaxFindings {
-				s.report.capped(CapFindings)
-				return errStop
-			}
-			s.report.Findings = append(s.report.Findings, s.finding(info, childSegs, carrier, anchor, repo, vendored, prefix))
-			// A matched directory is one carrier: it is reported as a unit and
-			// never descended, as quarantine hides it as a unit. That includes
-			// a repo's .claude/worktrees/: worktrees parked there are part of
-			// the .claude carrier and are not scanned separately.
-			continue
-		}
-		if !mode.IsDir() { // Lstat: a symlink is never IsDir, so it is never followed
-			continue
-		}
-		if depth+1 >= s.opts.MaxDepth {
-			s.report.capped(CapDepth)
-			s.report.DepthSkipped++
-			continue
-		}
-		if err := s.walk(rel, childSegs, repo, vendored || dependencyDirs[name], depth+1); err != nil {
-			return err
-		}
+	if len(s.report.Findings) >= s.opts.MaxFindings {
+		s.stats.capped(CapFindings)
+		return true, errStop
 	}
-	return nil
+	s.report.Findings = append(s.report.Findings, s.finding(e.info, e.segs, carrier, anchor, e.repo, e.vendored, prefix))
+	return true, nil
 }
 
 // anchorOf is the directory a k-segment suffix of segs is relative to.
