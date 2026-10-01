@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"time"
 
@@ -31,7 +30,7 @@ type statusTUIRuntime struct {
 	run              func(ctx context.Context, opts tui.CockpitOptions) (tui.Action, error)
 	// runVerb hands the argv the operator chose to whatever runs it once
 	// the cockpit has released the terminal.
-	runVerb func(cmd *cobra.Command, argv []string) error
+	runVerb func(cmd *cobra.Command, th theme.Theme, argv []string) error
 }
 
 func productionStatusTUIRuntime() statusTUIRuntime {
@@ -39,20 +38,8 @@ func productionStatusTUIRuntime() statusTUIRuntime {
 		stdinIsTerminal:  docsReadInputIsTerminal,
 		stdoutIsTerminal: docsReadOutputIsTerminal,
 		run:              tui.RunCockpit,
-		runVerb:          deferStatusVerb,
+		runVerb:          deferHubVerb,
 	}
-}
-
-// deferStatusVerb hands argv back to execDispatch, which runs it after this
-// command and its fang frame have returned, so a failing `pr <ref>` is
-// rendered once, by its own dispatch. Off that path (a status reached some
-// other way) it prints the invocation and runs nothing.
-func deferStatusVerb(cmd *cobra.Command, argv []string) error {
-	if deferVerb(cmd.Context(), argv) {
-		return nil
-	}
-	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), hubDollarLine(theme.Theme{}, argv))
-	return nil
 }
 
 // runStatusCockpit opens the cockpit over src, then performs the action the
@@ -72,7 +59,7 @@ func runStatusCockpit(cmd *cobra.Command, src statusSources, th theme.Theme, rt 
 	if act.Kind != tui.ActionRunVerb || len(act.Argv) == 0 {
 		return nil
 	}
-	return rt.runVerb(cmd, act.Argv)
+	return rt.runVerb(cmd, th, act.Argv)
 }
 
 // statusCockpitSources gives the cockpit one loader per section, each under
