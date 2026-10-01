@@ -35,6 +35,56 @@ func (g gitRealRunner) RunWithEnvFiltered(ctx context.Context, env map[string]st
 	return g.OSRunner.RunWithEnvFiltered(ctx, env, unset, name, args...)
 }
 
+// fifoGitignoreRoot makes a projects root of n git repos, each with a FIFO
+// .gitignore and a .env.
+func fifoGitignoreRoot(t *testing.T, n int) string {
+	t.Helper()
+	root := t.TempDir()
+	for i := 0; i < n; i++ {
+		repo := filepath.Join(root, fmt.Sprintf("r%d", i))
+		init := osexec.Command("git", "init", "-q", repo) //nolint:gosec,noctx // G204: test setup running git with fixed arguments
+		if out, err := init.CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v\n%s", err, out)
+		}
+		if err := syscall.Mkfifo(filepath.Join(repo, ".gitignore"), 0o600); err != nil {
+			t.Skipf("mkfifo: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+// TestAuditSecrets_GitBudgetAloneExits1: with gitleaks off, the budget
+// running out on git status is still a partial result: exit 1.
+//
+// Mutation that turns it red: drop the GitBudgetExhausted verdict.
+func TestAuditSecrets_GitBudgetAloneExits1(t *testing.T) {
+	if _, err := osexec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	root := fifoGitignoreRoot(t, 3)
+	cmd := newAuditSecretsCmd(auditSecretsDeps{
+		resolveRoot:    func() (string, error) { return root, nil },
+		runner:         exec.OSRunner{},
+		lookPath:       absentLookPath,
+		gitRepoTimeout: 300 * time.Millisecond,
+	})
+	var out strings.Builder
+	cmd.SetOut(&out)
+	cmd.SetErr(new(strings.Builder))
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	cmd.SetArgs([]string{"--gitleaks=off", "--timeout=400ms"})
+	err := cmd.Execute()
+	if err == nil || ExitCode(err) != 1 || !strings.Contains(err.Error(), "scan budget ran out") {
+		t.Errorf("err = %v, want exit 1 naming the spent budget", err)
+	}
+	if !strings.Contains(out.String(), "scan budget ran out before git status answered") {
+		t.Errorf("text output lacks the budget note:\n%s", out.String())
+	}
+}
+
 // TestAuditSecrets_OneBudgetBoundsFIFORepos: N repos whose .gitignore is a
 // FIFO each hang git until their slice ends. With 300ms slices and a 1s
 // budget, the whole verb takes about the budget, the repos past it are
@@ -49,20 +99,7 @@ func TestAuditSecrets_OneBudgetBoundsFIFORepos(t *testing.T) {
 		t.Skip("git not on PATH")
 	}
 	const repos = 8
-	root := t.TempDir()
-	for i := 0; i < repos; i++ {
-		repo := filepath.Join(root, fmt.Sprintf("r%d", i))
-		init := osexec.Command("git", "init", "-q", repo) //nolint:gosec,noctx // G204: test setup running git with fixed arguments
-		if out, err := init.CombinedOutput(); err != nil {
-			t.Fatalf("git init: %v\n%s", err, out)
-		}
-		if err := syscall.Mkfifo(filepath.Join(repo, ".gitignore"), 0o600); err != nil {
-			t.Skipf("mkfifo: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
+	root := fifoGitignoreRoot(t, repos)
 	bin := filepath.Join(t.TempDir(), "gitleaks")
 	if err := os.WriteFile(bin, nil, 0o600); err != nil {
 		t.Fatal(err)
