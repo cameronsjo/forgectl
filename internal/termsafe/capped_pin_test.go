@@ -167,8 +167,8 @@ func TestTextPrintersUseCappedHelpers(t *testing.T) {
 		dir := filepath.Join(root, filepath.FromSlash(rel))
 		built := map[string]bool{}
 		var ignored []string
-		for _, goos := range pinGOOS {
-			bp, err := pinContext(goos).ImportDir(dir, 0)
+		for _, target := range pinTargets() {
+			bp, err := pinContext(target).ImportDir(dir, 0)
 			var noGo *build.NoGoError
 			if errors.As(err, &noGo) {
 				if bp != nil {
@@ -177,7 +177,7 @@ func TestTextPrintersUseCappedHelpers(t *testing.T) {
 				continue
 			}
 			if err != nil {
-				t.Fatalf("list %s for %s: %v", rel, goos, err)
+				t.Fatalf("list %s for %s: %v", rel, target, err)
 			}
 			ignored = append(ignored, bp.IgnoredGoFiles...)
 			files := pinFiles(bp)
@@ -205,7 +205,7 @@ func TestTextPrintersUseCappedHelpers(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, name := range unseen {
-			t.Errorf("%s/%s imports termsafe but builds for none of %v (another GOOS, or a build tag), so the pin never reads it; add its GOOS to pinGOOS or drop the constraint", rel, name, pinGOOS)
+			t.Errorf("%s/%s imports termsafe but builds for none of %v with cgo on or off (another GOOS, or a build tag), so the pin never reads it; add its GOOS to pinGOOS or drop the constraint", rel, name, pinGOOS)
 		}
 	}
 	for _, want := range []string{"internal/cli", "internal/tui", "internal/pr", "internal/tmux"} {
@@ -244,13 +244,38 @@ func TestTextPrintersUseCappedHelpers(t *testing.T) {
 // pinGOOS are the targets the pin reads each package as.
 var pinGOOS = []string{"linux", "darwin", "windows"}
 
-// pinContext is the build context for one pinGOOS target. cgo is on
-// regardless of the host's CGO_ENABLED, so a cgo file lands in CgoFiles
-// every time rather than in IgnoredGoFiles on a host without cgo.
-func pinContext(goos string) *build.Context {
+// pinTarget is one build the pin reads a package as: a pinGOOS target with
+// cgo on or off.
+type pinTarget struct {
+	goos string
+	cgo  bool
+}
+
+// pinTargets is every pinGOOS target, each read with cgo on and with cgo off
+// regardless of the host's CGO_ENABLED: cgo on puts a cgo file in CgoFiles
+// rather than IgnoredGoFiles, and cgo off builds a //go:build !cgo file,
+// which a cgo-on build ignores (#974).
+func pinTargets() []pinTarget {
+	var targets []pinTarget
+	for _, goos := range pinGOOS {
+		targets = append(targets, pinTarget{goos, true}, pinTarget{goos, false})
+	}
+	return targets
+}
+
+// String names the target in a failure message.
+func (p pinTarget) String() string {
+	if p.cgo {
+		return p.goos + "/cgo"
+	}
+	return p.goos + "/nocgo"
+}
+
+// pinContext is the build context for one pin target.
+func pinContext(p pinTarget) *build.Context {
 	ctx := build.Default
-	ctx.GOOS = goos
-	ctx.CgoEnabled = true
+	ctx.GOOS = p.goos
+	ctx.CgoEnabled = p.cgo
 	return &ctx
 }
 
@@ -312,7 +337,9 @@ func TestSkippedPackagesExist(t *testing.T) {
 //
 // Mutations that turn it red: make unscannedTermsafeFiles return nil; drop
 // its built[name] skip, and the linux file is reported; make pinFiles return
-// only GoFiles, and the cgo file is neither read nor reported.
+// only GoFiles, and the cgo file is neither read nor reported; make
+// pinContext force CgoEnabled=true, and the //go:build !cgo file is reported
+// as building for no pinned GOOS (the wrong remedy) and never read.
 func TestUnscannedTermsafeFilesFindsConstrainedImports(t *testing.T) {
 	dir := t.TempDir()
 	imp := "import _ \"" + termsafeImportPath + "\"\n"
@@ -324,6 +351,7 @@ func TestUnscannedTermsafeFilesFindsConstrainedImports(t *testing.T) {
 		"other_aix.go":    "//go:build aix\n\npackage p\n",
 		"tagged_test.go":  "//go:build integration\n\npackage p\n" + imp,
 		"cgo.go":          "package p\n\nimport \"C\"\n" + imp,
+		"nocgo.go":        "//go:build !cgo\n\npackage p\n" + imp,
 	}
 	for name, src := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o600); err != nil {
@@ -332,10 +360,10 @@ func TestUnscannedTermsafeFilesFindsConstrainedImports(t *testing.T) {
 	}
 	built := map[string]bool{}
 	var ignored []string
-	for _, goos := range pinGOOS {
-		bp, err := pinContext(goos).ImportDir(dir, 0)
+	for _, target := range pinTargets() {
+		bp, err := pinContext(target).ImportDir(dir, 0)
 		if err != nil {
-			t.Fatalf("list for %s: %v", goos, err)
+			t.Fatalf("list for %s: %v", target, err)
 		}
 		for _, name := range pinFiles(bp) {
 			built[name] = true
@@ -351,6 +379,9 @@ func TestUnscannedTermsafeFilesFindsConstrainedImports(t *testing.T) {
 	}
 	if !built["cgo.go"] {
 		t.Error("cgo.go is in no pinned build's file list; the pin would never read a cgo file")
+	}
+	if !built["nocgo.go"] {
+		t.Error("nocgo.go is in no pinned build's file list; the pin would never read a //go:build !cgo file")
 	}
 }
 

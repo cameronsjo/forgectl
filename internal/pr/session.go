@@ -193,18 +193,30 @@ func (c *Client) Prepare(ctx context.Context, ref Ref, opts PrepareOpts) (Sessio
 // the slot accounted for exactly once from reserve through teardown. It
 // returns the record's own createdAt so the Session and the file on disk agree
 // about when the session began.
+//
+// Either way it first refuses a record that could not later be parked
+// (checkParkHeadroom), so the caller tears the workspace down now rather than
+// leaving a session whose repair write would overflow.
 func (c *Client) recordPrepared(ctx context.Context, ref Ref, bc Breadcrumb, recordPath string) (string, time.Time, error) {
 	if recordPath == "" {
+		if err := checkParkHeadroom(bc); err != nil {
+			return "", time.Time{}, err
+		}
 		path, err := c.writeBreadcrumb(ctx, ref, bc)
 		return path, bc.CreatedAt, err
 	}
 	var createdAt time.Time
 	err := c.transition(ctx, recordPath, PhasePreparing, PhasePrepared, func(rec *Breadcrumb) error {
-		rec.Workspace = bc.Workspace
-		rec.Host = bc.Host
-		rec.Agent = bc.Agent
-		rec.Provenance = bc.Provenance
-		rec.Local = bc.Local
+		next := *rec
+		next.Workspace = bc.Workspace
+		next.Host = bc.Host
+		next.Agent = bc.Agent
+		next.Provenance = bc.Provenance
+		next.Local = bc.Local
+		if err := checkParkHeadroom(next); err != nil {
+			return err
+		}
+		*rec = next
 		createdAt = rec.CreatedAt
 		return nil
 	})

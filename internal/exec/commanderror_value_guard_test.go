@@ -59,7 +59,7 @@ func TestNoProductionExpressionIsACommandErrorValue(t *testing.T) {
 			byFinding[f] = append(byFinding[f], r.p.String())
 		}
 	}
-	unmatchedAllowlistKeys(t, "commandErrorValueAllowed", commandErrorValueAllowed, results)
+	unmatchedAllowlistKeys(t, "commandErrorValueAllowed", commandErrorValueAllowed, results, func(r *typedResult) map[string]bool { return r.valueSeen })
 	keys := make([]string, 0, len(byFinding))
 	for f := range byFinding {
 		keys = append(keys, f)
@@ -328,9 +328,10 @@ func (p *typedProbe) commandErrorValueFindings(t *testing.T, src string) []strin
 }
 
 // unmatchedAllowlistKeys fails t for each key of allowed that no platform's
-// typed pass recorded in allowSeen: an entry naming a function that no
-// longer exists (#952).
-func unmatchedAllowlistKeys(t *testing.T, what string, allowed map[string]string, results []*typedResult) {
+// typed pass recorded in its seen map (seen picks the map allowed's own pass
+// fills): an entry naming a function that no longer exists (#952), or one
+// that only another allowlist's pass reaches (#974).
+func unmatchedAllowlistKeys(t *testing.T, what string, allowed map[string]string, results []*typedResult, seen func(*typedResult) map[string]bool) {
 	t.Helper()
 	keys := make([]string, 0, len(allowed))
 	for k := range allowed {
@@ -338,7 +339,7 @@ func unmatchedAllowlistKeys(t *testing.T, what string, allowed map[string]string
 	}
 	slices.Sort(keys)
 	for _, k := range keys {
-		if !slices.ContainsFunc(results, func(r *typedResult) bool { return r.allowSeen[k] }) {
+		if !slices.ContainsFunc(results, func(r *typedResult) bool { return seen(r)[k] }) {
 			t.Errorf("%s entry %q names no function in any checked production file on any platform; remove it", what, k)
 		}
 	}
