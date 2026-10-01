@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/quarantine"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -344,7 +345,7 @@ func (c *Client) ResolveLocalHead(ctx context.Context, path string) (Ref, string
 	if err := c.rejectCleanRoomPath(absPath); err != nil {
 		return Ref{}, "", err
 	}
-	headOid, err := c.run.Run(ctx, "git", "-C", absPath, "rev-parse", "HEAD")
+	headOid, err := gitenv.Run(ctx, c.run, gitenv.Local, "-C", absPath, "rev-parse", "HEAD")
 	if err != nil {
 		return Ref{}, "", fmt.Errorf("resolve local HEAD commit: %w", err)
 	}

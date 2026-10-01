@@ -105,6 +105,55 @@ func TestLinear_FailsQuadraticWork(t *testing.T) {
 	}
 }
 
+// runWithin calls Within against a fakeTB and returns what it reported.
+func runWithin(limit float64, base, subject func()) *fakeTB {
+	f := &fakeTB{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		Within(f, "busy", limit, base, subject)
+	}()
+	<-done
+	return f
+}
+
+// TestWithin_PassesEqualWork: a subject doing the base's work passes, and
+// the log line names the limit. Mutation: dropping the limit from the log
+// line turns this red.
+func TestWithin_PassesEqualWork(t *testing.T) {
+	f := runWithin(4, busy(busyUnit), busy(busyUnit))
+	if len(f.errors)+len(f.fatals) != 0 {
+		t.Errorf("equal work failed: errors %q, fatals %q", f.errors, f.fatals)
+	}
+	if len(f.logs) != 1 || !strings.Contains(f.logs[0], "limit 4") {
+		t.Errorf("logs = %q, want one line naming the limit", f.logs)
+	}
+}
+
+// TestWithin_FailsWorkOverTheLimit: a subject doing 16 times the base's
+// work fails a limit of 4. Mutation: dropping the ratio check turns this
+// red.
+func TestWithin_FailsWorkOverTheLimit(t *testing.T) {
+	f := runWithin(4, busy(busyUnit), busy(16*busyUnit))
+	if len(f.errors) != 1 || !strings.Contains(f.errors[0], "over the 4 limit") {
+		t.Errorf("errors = %q, want one ratio failure", f.errors)
+	}
+}
+
+// TestWithin_RefusesSmallLimit: a limit under 2 would fail equal work on
+// noise, so Within refuses it before timing anything. Mutation: dropping
+// the limit < 2 check turns this red.
+func TestWithin_RefusesSmallLimit(t *testing.T) {
+	calls := 0
+	f := runWithin(1, func() { calls++ }, func() { calls++ })
+	if len(f.fatals) != 1 || !strings.Contains(f.fatals[0], "limit = 1") {
+		t.Errorf("fatals = %q, want one naming limit = 1", f.fatals)
+	}
+	if calls != 0 {
+		t.Errorf("base and subject ran %d times, want 0 after the refusal", calls)
+	}
+}
+
 // script is a measure that returns the next scripted duration for each
 // side, and counts the runs.
 type script struct {

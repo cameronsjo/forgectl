@@ -15,9 +15,8 @@ package env
 //       with an inherited GIT_ALLOW_PROTOCOL that would allow ext
 //   [x] An inherited GIT_DIR/GIT_WORK_TREE pointing at another repository does
 //       not redirect the check: it still reads the target's own stashes
-//   [x] stashGitEnv drops every variable git clears before entering another
-//       repository, and the numbered GIT_CONFIG_KEY_n/VALUE_n pairs, and keeps
-//       the rest
+//   [x] The environment git runs with is gitenv's Local profile (its own
+//       tests pin the scrub and the pins)
 //   [x] A git that times out and leaves a grandchild holding its output pipe
 //       returns within the wait delay, not when the grandchild exits
 
@@ -26,10 +25,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 )
 
 // makePromisor turns repo into a partial clone whose promisor remote runs a
@@ -91,17 +91,11 @@ func assertCanaryNeverRan(t *testing.T, canary string) {
 }
 
 // withoutLazyFetchPin models a git older than 2.44, which ignores
-// GIT_NO_LAZY_FETCH, by dropping that pin for the test. Every other pin stays.
+// GIT_NO_LAZY_FETCH, by running git through a wrapper that drops it. Every
+// other pin stays.
 func withoutLazyFetchPin(t *testing.T) {
 	t.Helper()
-	prev := stashGitEnvPins
-	stashGitEnvPins = slices.DeleteFunc(slices.Clone(prev), func(kv string) bool {
-		return strings.HasPrefix(kv, "GIT_NO_LAZY_FETCH=")
-	})
-	if len(stashGitEnvPins) == len(prev) {
-		t.Fatal("stashGitEnvPins has no GIT_NO_LAZY_FETCH to drop; the old-git model is wrong")
-	}
-	t.Cleanup(func() { stashGitEnvPins = prev })
+	gitenvtest.WithoutLazyFetchPin(t)
 }
 
 // missingStashCommit points refs/stash at a commit the repository lacks, so
@@ -189,34 +183,6 @@ func TestStashCheckIgnoresAnInheritedGitDir(t *testing.T) {
 	err := setOn(t, repo, ".env")
 	if err == nil || !strings.Contains(err.Error(), "stash@{0}") {
 		t.Fatalf("with GIT_DIR pointing at another repository, set = %v; want the refusal naming stash@{0} in the target's own repository", err)
-	}
-}
-
-func TestStashGitEnvScrubsRepositoryVariables(t *testing.T) {
-	in := []string{"PATH=/bin", "HOME=/h", "GIT_CEILING_DIRECTORIES=/c", "GIT_CONFIG_KEY_0=core.fsmonitor", "GIT_CONFIG_VALUE_0=/evil", "GIT_ALLOW_PROTOCOL=ext:ssh"}
-	for key := range stashGitScrubbed {
-		in = append(in, key+"=x")
-	}
-	got := stashGitEnv(in)
-	for _, kv := range got {
-		key, _, _ := strings.Cut(kv, "=")
-		if stashGitScrubbed[key] || strings.HasPrefix(key, "GIT_CONFIG_KEY_") || strings.HasPrefix(key, "GIT_CONFIG_VALUE_") {
-			t.Errorf("stashGitEnv kept %s", kv)
-		}
-	}
-	var allow []string
-	for _, kv := range got {
-		if strings.HasPrefix(kv, "GIT_ALLOW_PROTOCOL=") {
-			allow = append(allow, kv)
-		}
-	}
-	if !slices.Equal(allow, []string{"GIT_ALLOW_PROTOCOL="}) || got[len(got)-1] != "GIT_ALLOW_PROTOCOL=" {
-		t.Errorf("GIT_ALLOW_PROTOCOL entries = %v with %q last; want only the empty GIT_ALLOW_PROTOCOL=, last", allow, got[len(got)-1])
-	}
-	for _, want := range []string{"PATH=/bin", "HOME=/h", "GIT_CEILING_DIRECTORIES=/c", "GIT_NO_LAZY_FETCH=1"} {
-		if !slices.Contains(got, want) {
-			t.Errorf("stashGitEnv dropped or lacks %s: %v", want, got)
-		}
 	}
 }
 

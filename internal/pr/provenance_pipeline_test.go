@@ -24,6 +24,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 )
 
 // detachedGitRunner is localGitRunner with a DETACHED HEAD — what `gh pr
@@ -31,6 +32,7 @@ import (
 func detachedGitRunner() *exec.FakeRunner {
 	return &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			if name == "git" && len(args) >= 3 && args[2] == "rev-parse" {
 				if contains(args, "--abbrev-ref") {
 					return "HEAD", nil // detached
@@ -47,7 +49,7 @@ func detachedGitRunner() *exec.FakeRunner {
 func revParseCalls(calls []exec.Call) int {
 	n := 0
 	for _, c := range calls {
-		if c.Name == "git" && len(c.Args) >= 3 && c.Args[2] == "rev-parse" {
+		if args := gitenvtest.Strip(c.Args); c.Name == "git" && len(args) >= 3 && args[2] == "rev-parse" {
 			n++
 		}
 	}
@@ -178,6 +180,7 @@ func TestPrepareLocal_UnbornHeadKeepsRevParseError(t *testing.T) {
 	} {
 		fake := &exec.FakeRunner{
 			RunFunc: func(name string, args []string) (string, error) {
+				args = gitenvtest.Strip(args)
 				if name == "git" && len(args) >= 3 && args[2] == "rev-parse" {
 					return "", os.ErrInvalid // unborn HEAD
 				}
