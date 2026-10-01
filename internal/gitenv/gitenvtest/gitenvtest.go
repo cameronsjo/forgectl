@@ -65,7 +65,7 @@ func Strip(args []string) []string {
 
 // FilterListing reports whether args, a git argv as a fake Runner records it,
 // are one of gitenv.RunUnfiltered's listings ahead of its call: the filter
-// drivers, `[-C dir] config -z [--show-scope] --name-only --get-regexp
+// drivers, `[-C dir] config -z --name-only --get-regexp
 // ^filter...`, or the submodules, `[-C dir] ls-files -z --stage -- :/`.
 func FilterListing(args []string) bool {
 	return driverListing(args) || submoduleListing(args)
@@ -321,28 +321,4 @@ func NewSubmoduleFilterCanary(t testing.TB) FilterCanary {
 		}
 	}
 	return c
-}
-
-// NewOperatorFilterCanary builds a FilterCanary and gives the process an
-// operator configuration (GIT_CONFIG_GLOBAL, restored by t.Setenv) defining
-// two clean filters that create the file at the returned path: "op", which
-// only the operator defines, on o.txt; and "both", on b.txt, which the
-// repository's own config defines too, firing the repository's canary. Both
-// files are stat-dirty. Unix only.
-func NewOperatorFilterCanary(t testing.TB) (FilterCanary, string) {
-	t.Helper()
-	c := NewFilterCanary(t, [2]string{"o.txt", "op"}, [2]string{"b.txt", "both"})
-	// NewFilterCanary defined "op" in the repository too; the operator's
-	// global config is to be its only definition.
-	Git(t, c.Dir, "config", "--unset", "filter.op.clean")
-	operator := filepath.Join(filepath.Dir(c.Dir), "operator-canary")
-	global := filepath.Join(filepath.Dir(c.Dir), "gitconfig")
-	fire := "touch '" + operator + "'; cat"
-	// Quoted: an unquoted ';' would start a comment in a config file.
-	conf := "[filter \"op\"]\n\tclean = \"" + fire + "\"\n[filter \"both\"]\n\tclean = \"" + fire + "\"\n"
-	if err := os.WriteFile(global, []byte(conf), 0o600); err != nil {
-		t.Fatalf("WriteFile global config: %v", err)
-	}
-	t.Setenv("GIT_CONFIG_GLOBAL", global)
-	return c, operator
 }

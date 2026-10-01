@@ -1,7 +1,6 @@
 package gitenv
 
 import (
-	"errors"
 	"os"
 	"slices"
 	"strings"
@@ -218,31 +217,5 @@ func TestRunRefusingKeepsTheOperatorsOtherTransports(t *testing.T) {
 	}
 	if _, ok := run(Transport).Env["GIT_ALLOW_PROTOCOL"]; ok {
 		t.Error("RunRefusing set GIT_ALLOW_PROTOCOL where none was inherited")
-	}
-}
-
-// Scopes outside global and system are blanked, unknown ones included, and
-// every key is checked whatever its scope.
-// Mutations: skip only "global" (system's "s" is blanked); check keys only
-// outside operatorScopes (the global filter.x.required passes); accept an
-// odd field count (a key is read as a scope).
-func TestScopedFilterDriverNames(t *testing.T) {
-	got, err := scopedFilterDriverNames("global\x00filter.lfs.clean\x00system\x00filter.s.clean\x00local\x00filter.a.clean\x00worktree\x00filter.w.process\x00command\x00filter.c.smudge\x00unknown\x00filter.u.clean\x00global\x00filter.a.smudge\x00")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := []string{"a", "c", "u", "w"}; !slices.Equal(got, want) {
-		t.Errorf("names = %q, want %q", got, want)
-	}
-	if got, err := scopedFilterDriverNames(""); err != nil || len(got) != 0 {
-		t.Errorf("empty listing = %q, %v; want none", got, err)
-	}
-	for _, bad := range []string{"global\x00filter.x.required\x00", "global\x00filter.a=b.clean\x00", "local\x00core.fsmonitor\x00"} {
-		if _, err := scopedFilterDriverNames(bad); err == nil || errors.Is(err, errScopeUnparsed) {
-			t.Errorf("scopedFilterDriverNames(%q) = %v, want a refusal", bad, err)
-		}
-	}
-	if _, err := scopedFilterDriverNames("local\x00filter.a.clean\x00filter.b.clean\x00"); !errors.Is(err, errScopeUnparsed) {
-		t.Errorf("odd field count: %v, want errScopeUnparsed", err)
 	}
 }

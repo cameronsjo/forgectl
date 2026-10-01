@@ -315,7 +315,7 @@ func scan(fset *token.FileSet, pkgPath, rel string, files []*ast.File) []finding
 					case !ok:
 					case !inShell && shells[constBase(info, a)]:
 						inShell = true
-					case inShell && scriptFlags[v] && i+1 < len(rest) && !isConstString(info, rest[i+1]):
+					case inShell && isScriptFlag(v) && i+1 < len(rest) && !isConstString(info, rest[i+1]):
 						out = append(out, finding{pos: fset.Position(rest[i+1].Pos()).String(), fn: fn, kind: "shell-script"})
 						return true
 					case inShell && gitWord.MatchString(v):
@@ -325,6 +325,11 @@ func scan(fset *token.FileSet, pkgPath, rel string, files []*ast.File) []finding
 						out = append(out, finding{pos: fset.Position(a.Pos()).String(), fn: fn, kind: "gh-git"})
 						return true
 					}
+				}
+				// A shell's arguments spread from a slice (sh args...) may
+				// hold any script; the pin cannot read them.
+				if inShell && call.Ellipsis.IsValid() && len(rest) > 0 && !isConstString(info, rest[len(rest)-1]) {
+					out = append(out, finding{pos: fset.Position(rest[len(rest)-1].Pos()).String(), fn: fn, kind: "shell-script"})
 				}
 				return true
 			})
@@ -378,24 +383,46 @@ func passesGit(info *types.Info, e ast.Expr, looked map[types.Object]bool) bool 
 	}
 	found := false
 	ast.Inspect(e, func(n ast.Node) bool {
+		if found {
+			return false
+		}
 		switch x := n.(type) {
 		case *ast.SelectorExpr:
-			if isGitenvSel(info, x, "Bin") || gitBinName.MatchString(x.Sel.Name) {
-				found = true
-			}
+			found = isGitenvSel(info, x, "Bin") || gitBinName.MatchString(x.Sel.Name)
 		case *ast.Ident:
-			if gitBinName.MatchString(x.Name) {
-				found = true
-			}
+			found = gitBinName.MatchString(x.Name)
 		case ast.Expr:
 			if v, ok := constString(info, x); ok {
-				base := path.Base(strings.ReplaceAll(v, `\`, "/"))
-				found = base == "git" || strings.EqualFold(base, "git.exe")
+				found = isGitExecutable(v)
 			}
 		}
 		return !found
 	})
 	return found
+}
+
+// absPath matches an absolute path: /usr/bin/git, C:\Git\git.exe, \\host\git.
+var absPath = regexp.MustCompile(`^(/|[A-Za-z]:[\\/]|\\\\)`)
+
+// isGitExecutable reports whether the argument v names the git executable:
+// git or git.exe alone, or an absolute path ending in one. A relative path
+// whose last segment is git, as in `gh api repos/o/r/git`, does not.
+func isGitExecutable(v string) bool {
+	isGit := func(s string) bool { return s == "git" || strings.EqualFold(s, "git.exe") }
+	if isGit(v) {
+		return true
+	}
+	return absPath.MatchString(v) && isGit(path.Base(strings.ReplaceAll(v, `\`, "/")))
+}
+
+// bundledScriptFlag matches a shell option bundle that holds c, whose next
+// argument is then the script: -lc, -ec, -xec.
+var bundledScriptFlag = regexp.MustCompile(`^-[A-Za-z]*c[A-Za-z]*$`)
+
+// isScriptFlag reports whether v is a shell option whose next argument is
+// the script.
+func isScriptFlag(v string) bool {
+	return scriptFlags[v] || bundledScriptFlag.MatchString(v)
 }
 
 // isConstString reports whether e is a constant string.
@@ -617,7 +644,10 @@ func productionDirs(root string) ([]string, error) {
 // the shells case (shell, shellExe), or the gh case (ghClone, ghCheckout).
 // For #985's: make passesGit return false (envBin through binArg); drop the
 // scriptFlags case (shellVar, sudoShellVar, cmdVar); start inShell only at
-// a shell executable (sudoShellVar, sudoShellGit).
+// a shell executable (sudoShellVar, sudoShellGit); match scriptFlags only
+// (bundled); drop the spread check (spread); match a constant git by
+// path.Base alone (fineFour's `repos/o/r/git` is flagged); let a later
+// constant in passesGit reset found (inSlice's gitenv.Bin is missed).
 func TestPinFlagsEveryBypass(t *testing.T) {
 	src := `package p
 
@@ -659,6 +689,10 @@ func shellVar(ctx context.Context, r runner, script string) { _, _ = r.Run(ctx, 
 func sudoShellVar(ctx context.Context, r runner, script string) { _, _ = r.Run(ctx, "/usr/bin/sudo", "/bin/sh", "-c", script) }
 func cmdVar(script string) { _ = exec.Command("cmd.exe", "/c", script) }
 func sudoShellGit(ctx context.Context, r runner) { _, _ = r.Run(ctx, "sudo", "bash", "-c", "git pull") }
+func bundled(ctx context.Context, r runner, script string) { _, _ = r.Run(ctx, "bash", "-lc", script) }
+func spread(args []string) { _ = exec.Command("sh", args...) }
+func inSlice(ctx context.Context, r runner) { _, _ = r.Run(ctx, "nice", append([]string{gitenv.Bin}, "status")...) }
+func fineFour(ctx context.Context, r runner, args []string) { _, _ = r.Run(ctx, "gh", "api", "repos/o/r/git"); _, _ = r.Run(ctx, "tmux", args...); _, _ = r.Run(ctx, "bash", "-lc", "true") }
 func fineThree(ctx context.Context, r runner, arg, github string) { _, _ = r.Run(ctx, "sh", "-c", "echo hi", "_", arg); _, _ = r.Run(ctx, "gh", "api", "repos/o/r/git/refs"); _, _ = r.Run(ctx, "tmux", "send-keys", github); _, _ = r.Run(ctx, "sh", "-e", "-c", "true") }
 func fineToo(ctx context.Context, r runner) { p, _ := exec.LookPath("tmux"); _, _ = r.Run(ctx, p); _, _ = r.Run(ctx, "sh", "-c", "echo github digit"); _, _ = r.Run(ctx, "gh", "pr", "view") }
 `
@@ -697,6 +731,9 @@ func fineToo(ctx context.Context, r runner) { p, _ := exec.LookPath("tmux"); _, 
 		"p/p.go:sudoShellVar": {"shell-script"},
 		"p/p.go:cmdVar":       {"shell-script"},
 		"p/p.go:sudoShellGit": {"exec"},
+		"p/p.go:bundled":      {"shell-script"},
+		"p/p.go:spread":       {"shell-script"},
+		"p/p.go:inSlice":      {"git-arg"},
 	}
 	for fn, kinds := range want {
 		if strings.Join(got[fn], ",") != strings.Join(kinds, ",") {
