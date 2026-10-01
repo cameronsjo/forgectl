@@ -326,9 +326,11 @@ func scan(fset *token.FileSet, pkgPath, rel string, files []*ast.File) []finding
 						return true
 					}
 				}
-				// A shell's arguments spread from a slice (sh args...) may
-				// hold any script; the pin cannot read them.
-				if inShell && call.Ellipsis.IsValid() && len(rest) > 0 && !isConstString(info, rest[len(rest)-1]) {
+				// A shell's or a wrapper's arguments spread from a slice
+				// (sh args..., sudo args...) may hold any script, or git
+				// itself; the pin cannot read them unless the slice is a
+				// literal of constant strings.
+				if (inShell || wrappers[base]) && call.Ellipsis.IsValid() && len(rest) > 0 && !constStrings(info, rest[len(rest)-1]) {
 					out = append(out, finding{pos: fset.Position(rest[len(rest)-1].Pos()).String(), fn: fn, kind: "shell-script"})
 				}
 				return true
@@ -405,14 +407,17 @@ func passesGit(info *types.Info, e ast.Expr, looked map[types.Object]bool) bool 
 var absPath = regexp.MustCompile(`^(/|[A-Za-z]:[\\/]|\\\\)`)
 
 // isGitExecutable reports whether the argument v names the git executable:
-// git or git.exe alone, or an absolute path ending in one. A relative path
-// whose last segment is git, as in `gh api repos/o/r/git`, does not.
+// git or git.exe alone, or an absolute or ./- or ../-relative path ending in
+// one. A bare relative path whose last segment is git, as in `gh api
+// repos/o/r/git`, does not.
 func isGitExecutable(v string) bool {
 	isGit := func(s string) bool { return s == "git" || strings.EqualFold(s, "git.exe") }
 	if isGit(v) {
 		return true
 	}
-	return absPath.MatchString(v) && isGit(path.Base(strings.ReplaceAll(v, `\`, "/")))
+	slashed := strings.ReplaceAll(v, `\`, "/")
+	explicit := absPath.MatchString(v) || strings.HasPrefix(slashed, "./") || strings.HasPrefix(slashed, "../")
+	return explicit && isGit(path.Base(slashed))
 }
 
 // bundledScriptFlag matches a shell option bundle that holds c, whose next
@@ -423,6 +428,30 @@ var bundledScriptFlag = regexp.MustCompile(`^-[A-Za-z]*c[A-Za-z]*$`)
 // the script.
 func isScriptFlag(v string) bool {
 	return scriptFlags[v] || bundledScriptFlag.MatchString(v)
+}
+
+// wrappers are executables that run their arguments as another command:
+// sudo git, env X=1 git, nice git. A spread through one is flagged as a
+// shell's is. A wrapper outside this list, or one reached through a
+// non-constant name, is not seen.
+var wrappers = map[string]bool{"sudo": true, "doas": true, "env": true, "nice": true, "nohup": true, "timeout": true, "xargs": true, "setsid": true, "stdbuf": true, "ionice": true, "chrt": true, "taskset": true, "time": true, "command": true, "exec": true, "busybox": true}
+
+// constStrings reports whether e is a constant string, or a slice literal
+// whose elements all are: []string{"-c", "true"}.
+func constStrings(info *types.Info, e ast.Expr) bool {
+	if isConstString(info, e) {
+		return true
+	}
+	lit, ok := e.(*ast.CompositeLit)
+	if !ok {
+		return false
+	}
+	for _, el := range lit.Elts {
+		if !isConstString(info, el) {
+			return false
+		}
+	}
+	return true
 }
 
 // isConstString reports whether e is a constant string.
@@ -647,7 +676,10 @@ func productionDirs(root string) ([]string, error) {
 // a shell executable (sudoShellVar, sudoShellGit); match scriptFlags only
 // (bundled); drop the spread check (spread); match a constant git by
 // path.Base alone (fineFour's `repos/o/r/git` is flagged); let a later
-// constant in passesGit reset found (inSlice's gitenv.Bin is missed).
+// constant in passesGit reset found (inSlice's gitenv.Bin is missed);
+// match only absolute paths (dotSlash); check spreads only in a shell
+// (sudoSpread); treat a constant slice literal as unreadable (fineFive is
+// flagged).
 func TestPinFlagsEveryBypass(t *testing.T) {
 	src := `package p
 
@@ -691,6 +723,9 @@ func cmdVar(script string) { _ = exec.Command("cmd.exe", "/c", script) }
 func sudoShellGit(ctx context.Context, r runner) { _, _ = r.Run(ctx, "sudo", "bash", "-c", "git pull") }
 func bundled(ctx context.Context, r runner, script string) { _, _ = r.Run(ctx, "bash", "-lc", script) }
 func spread(args []string) { _ = exec.Command("sh", args...) }
+func dotSlash(ctx context.Context, r runner) { _, _ = r.Run(ctx, "nice", "./git", "status") }
+func sudoSpread(ctx context.Context, r runner, args []string) { _, _ = r.Run(ctx, "sudo", args...) }
+func fineFive(ctx context.Context, r runner) { _ = exec.Command("sh", []string{"-c", "true"}...); _, _ = r.Run(ctx, "env", []string{"A=1", "true"}...) }
 func inSlice(ctx context.Context, r runner) { _, _ = r.Run(ctx, "nice", append([]string{gitenv.Bin}, "status")...) }
 func fineFour(ctx context.Context, r runner, args []string) { _, _ = r.Run(ctx, "gh", "api", "repos/o/r/git"); _, _ = r.Run(ctx, "tmux", args...); _, _ = r.Run(ctx, "bash", "-lc", "true") }
 func fineThree(ctx context.Context, r runner, arg, github string) { _, _ = r.Run(ctx, "sh", "-c", "echo hi", "_", arg); _, _ = r.Run(ctx, "gh", "api", "repos/o/r/git/refs"); _, _ = r.Run(ctx, "tmux", "send-keys", github); _, _ = r.Run(ctx, "sh", "-e", "-c", "true") }
@@ -734,6 +769,8 @@ func fineToo(ctx context.Context, r runner) { p, _ := exec.LookPath("tmux"); _, 
 		"p/p.go:bundled":      {"shell-script"},
 		"p/p.go:spread":       {"shell-script"},
 		"p/p.go:inSlice":      {"git-arg"},
+		"p/p.go:dotSlash":     {"git-arg"},
+		"p/p.go:sudoSpread":   {"shell-script"},
 	}
 	for fn, kinds := range want {
 		if strings.Join(got[fn], ",") != strings.Join(kinds, ",") {

@@ -106,6 +106,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -395,6 +396,9 @@ const maxUnfilteredRepos = 256
 //     or not a repository (a directory with no HEAD, or a gitfile that names
 //     none). git itself would not enter such a submodule, but proving that
 //     costs more than refusing;
+//   - any repository's .git, dir's own included, is neither a directory nor
+//     a regular file: a FIFO or a device, whose read could block or never
+//     end;
 //   - two paths reach one repository, submodules nest past
 //     maxSubmoduleDepth, or the walk passes maxUnfilteredRepos.
 //
@@ -426,9 +430,14 @@ func RunUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []st
 	// submodule that leads back to one of them is refused as a revisit. One
 	// that cannot be is left to git: dir may be a subdirectory of its
 	// working tree, or a worktree whose layout the listing need not model.
+	// A .git that is neither a directory nor a regular file is refused.
 	visited := map[string]bool{}
 	for _, q := range queue {
-		if key, err := gitDirKey(q.dir); err == nil && key != "" {
+		key, err := gitDirKey(q.dir)
+		if errors.Is(err, errGitfileNotRegular) {
+			return "", err
+		}
+		if err == nil && key != "" {
 			visited[key] = true
 		}
 	}
@@ -551,8 +560,12 @@ const maxGitfileBytes = 64 << 10
 
 // gitDirKey returns the resolved repository directory that the working
 // tree sub's .git names: the directory itself, or the one a gitfile points
-// at. It returns "" when sub holds no .git, and an error when .git is a
-// symbolic link or names no repository (no HEAD in it).
+// at. It returns "" when sub holds no .git. It returns errSubmoduleSymlink
+// when .git is a symbolic link, errGitfileNotRegular when .git is neither a
+// directory nor a regular file (a FIFO or a device, whose read could block
+// or never end; git's own read_gitfile refuses them too), and
+// errInvalidSubmoduleGit when .git names no repository (no HEAD in it). It
+// never reads more than maxGitfileBytes.
 func gitDirKey(sub string) (string, error) {
 	dotGit := filepath.Join(sub, ".git")
 	fi, err := os.Lstat(dotGit)
@@ -563,19 +576,14 @@ func gitDirKey(sub string) (string, error) {
 		return "", fmt.Errorf("inspect a submodule's .git: %w", err)
 	case fi.Mode()&fs.ModeSymlink != 0:
 		return "", errSubmoduleSymlink
+	case !fi.IsDir() && !fi.Mode().IsRegular():
+		return "", errGitfileNotRegular
 	}
 	gitDir := dotGit
 	if !fi.IsDir() {
-		if fi.Size() > maxGitfileBytes {
-			return "", errInvalidSubmoduleGit
-		}
-		body, err := os.ReadFile(filepath.Clean(dotGit))
+		target, err := readGitfile(dotGit)
 		if err != nil {
-			return "", fmt.Errorf("read a submodule's gitfile: %w", err)
-		}
-		target, ok := strings.CutPrefix(strings.TrimRight(string(body), "\r\n"), "gitdir: ")
-		if !ok || target == "" {
-			return "", errInvalidSubmoduleGit
+			return "", err
 		}
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(sub, target)
@@ -592,6 +600,40 @@ func gitDirKey(sub string) (string, error) {
 	}
 	return resolved, nil
 }
+
+// readGitfile returns the path the gitfile at path names. It opens the file
+// without following a link or blocking (openGitfile), refuses a handle that
+// is not a regular file, and reads at most maxGitfileBytes+1 bytes.
+func readGitfile(path string) (string, error) {
+	f, err := openGitfile(path)
+	if err != nil {
+		return "", fmt.Errorf("open a submodule's gitfile: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("inspect a submodule's gitfile: %w", err)
+	}
+	if !fi.Mode().IsRegular() {
+		return "", errGitfileNotRegular
+	}
+	body, err := io.ReadAll(io.LimitReader(f, maxGitfileBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read a submodule's gitfile: %w", err)
+	}
+	if len(body) > maxGitfileBytes {
+		return "", errInvalidSubmoduleGit
+	}
+	target, ok := strings.CutPrefix(strings.TrimRight(string(body), "\r\n"), "gitdir: ")
+	if !ok || target == "" {
+		return "", errInvalidSubmoduleGit
+	}
+	return target, nil
+}
+
+// errGitfileNotRegular is returned for a .git that is neither a directory
+// nor a regular file.
+var errGitfileNotRegular = errors.New("a repository's .git is neither a directory nor a regular file; refusing to run unfiltered")
 
 // errUnexpectedFilterKey is returned for listing output that is not a
 // NUL-separated list of filter driver keys.
