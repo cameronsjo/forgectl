@@ -40,7 +40,11 @@ import (
 //     NAME = value or a Go NAME := value as the line's key (#974, #983),
 //     unless the value is empty (keyValueCarries); and the lines after a
 //     YAML NAME: whose value starts on the next line (password: |), while
-//     they are indented past it (pemScan.inValue, #983);
+//     they are indented past it (pemScan.inValue, #983); and the lines after
+//     a credential key whose value opens a string the key line does not
+//     close (a TOML """ or ''' string, a YAML double-quoted scalar), through
+//     the line that closes it or, with none, the end of the text
+//     (pemScan.inString, #991);
 //   - a PEM private-key block, from its BEGIN line through its END line. A
 //     block with no END is withheld to the end of the text. An empty line
 //     inside one carries nothing and stays empty.
@@ -546,6 +550,16 @@ func openerValue(v string) string {
 // NAME=value is credentialAssignment's, with its own exemptions. It reads
 // line once.
 func assignKey(line string, deliverable bool) bool {
+	name, value, ok := assignEntry(line)
+	if !ok || !keyNameCarries(name, deliverable) {
+		return false
+	}
+	return keyValueCarries(strings.TrimRight(value, " \t\r,;"), deliverable)
+}
+
+// assignEntry parses line as assignKey's assignment and returns its name and
+// its value with the leading blanks trimmed. It reads line once.
+func assignEntry(line string) (name, value string, ok bool) {
 	s := strings.TrimLeft(line, " \t")
 	quote := byte(0)
 	if s != "" && (s[0] == '"' || s[0] == '\'') {
@@ -556,12 +570,12 @@ func assignKey(line string, deliverable bool) bool {
 		n++
 	}
 	if n == 0 {
-		return false
+		return "", "", false
 	}
-	name, s := s[:n], s[n:]
+	name, s = s[:n], s[n:]
 	if quote != 0 {
 		if s == "" || s[0] != quote {
-			return false
+			return "", "", false
 		}
 		s = s[1:]
 	}
@@ -573,12 +587,65 @@ func assignKey(line string, deliverable bool) bool {
 	case spaced && strings.HasPrefix(op, "=") && !strings.HasPrefix(op, "=="):
 		op = op[1:]
 	default:
-		return false
+		return "", "", false
 	}
-	if !keyNameCarries(name, deliverable) {
-		return false
+	return name, strings.TrimLeft(op, " \t"), true
+}
+
+// stringOpener reports whether line is a credential key whose value opens a
+// string that does not close on the line (#991): a TOML assignment (assignEntry)
+// whose value starts a multi-line basic string (""") or literal one (three single quotes),
+// or a YAML entry (yamlEntry) whose value, past its node properties, starts a
+// double-quoted scalar. It returns the delimiter that closes the string. It
+// reads line a fixed number of times.
+func stringOpener(line string, deliverable bool) (string, bool) {
+	if name, v, ok := assignEntry(line); ok {
+		for _, d := range []string{`"""`, `'''`} {
+			if rest, cut := strings.CutPrefix(v, d); cut {
+				if !keyNameCarries(name, deliverable) || stringCloses(rest, d) {
+					return "", false
+				}
+				return d, true
+			}
+		}
+		return "", false
 	}
-	return keyValueCarries(strings.TrimRight(strings.TrimLeft(op, " \t"), " \t\r,;"), deliverable)
+	e, ok := yamlEntry(line)
+	if !ok || !keyNameCarries(e.name, deliverable) {
+		return "", false
+	}
+	v := e.value
+	for v != "" && (v[0] == '!' || v[0] == '&') {
+		end := strings.IndexAny(v, " \t")
+		if end < 0 {
+			return "", false
+		}
+		v = strings.TrimLeft(v[end:], " \t")
+	}
+	// yamlEntry trims a trailing ',' and blanks, which no closing quote is.
+	if rest, cut := strings.CutPrefix(v, `"`); cut && !stringCloses(rest, `"`) {
+		return `"`, true
+	}
+	return "", false
+}
+
+// stringCloses reports whether s, text inside a string closed by delim,
+// holds that delimiter. In a basic string (""" or ") a '\' escapes the byte
+// after it; a literal string (three single quotes) has no escapes. It reads s once.
+func stringCloses(s, delim string) bool {
+	if delim == `'''` {
+		return strings.Contains(s, delim)
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' {
+			i++
+			continue
+		}
+		if strings.HasPrefix(s[i:], delim) {
+			return true
+		}
+	}
+	return false
 }
 
 // keyValueCarries reports whether v, the value after a JSON, YAML or TOML
@@ -904,6 +971,11 @@ type pemScan struct {
 	inValue     bool
 	valueIndent int
 	valueSeq    bool
+	// inString: the lines after a credential key whose value opens a string
+	// that the key line does not close (password = """, password: "a, #991)
+	// hold its value through the line that holds closer, the delimiter.
+	inString bool
+	closer   string
 }
 
 // stdoutWithheld reports whether Stdout withholds line, and moves the PEM
@@ -931,8 +1003,14 @@ func (sc *pemScan) stdoutWithheld(line string) bool {
 			sc.inKey = lastBegin > lastEnd
 		}
 	}
+	if sc.inString {
+		// The string's own text: withheld through the line that closes it.
+		withheld = true
+		sc.inString = !stringCloses(line, sc.closer)
+	}
 	if withheld {
-		// An empty line inside a block carries nothing to withhold.
+		// An empty line inside a block or a string carries nothing to
+		// withhold.
 		return line != ""
 	}
 	if sc.inValue {
@@ -948,7 +1026,21 @@ func (sc *pemScan) stdoutWithheld(line string) bool {
 	}
 	shape := stdoutShape(line, sc.deliverable)
 	sc.openValue(line)
+	sc.openString(line)
 	return shape
+}
+
+// openString starts a credential string on the lines after line when line is
+// a stringOpener, checked as it is and, when it holds an ESC, with its escape
+// sequences stripped.
+func (sc *pemScan) openString(line string) {
+	d, ok := stringOpener(line, sc.deliverable)
+	if !ok && strings.IndexByte(line, 0x1b) >= 0 {
+		d, ok = stringOpener(stripEscapes(line), sc.deliverable)
+	}
+	if ok {
+		sc.inString, sc.closer = true, d
+	}
 }
 
 // openValue starts a YAML credential value on the lines after line when line

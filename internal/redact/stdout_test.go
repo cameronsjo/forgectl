@@ -614,6 +614,74 @@ func TestStdout_YAMLValueOnNextLine(t *testing.T) {
 	}
 }
 
+// TestStdout_MultiLineString: a credential key whose value opens a string
+// that does not close on the key's line holds the credential on the lines
+// after it (#991): a TOML multi-line basic ("""…""") or literal (three single quotes)
+// string, or a YAML double-quoted scalar. Every line through the one that
+// closes the string is withheld; an empty line inside one carries nothing and
+// stays empty; with no closing delimiter the rest of the text is withheld.
+// Text and Stdout agree on every case.
+//
+// Mutations that turn it red: drop openString from stdoutWithheld (the lines
+// after every opener show); drop the inString arm (the same); drop the
+// stripEscapes retry in openString (the colored key's value shows); read
+// '\' as no escape in a basic string (SEKRIT2 after the escaped """ shows,
+// and the YAML escaped-quote row's "more" line shows); read '\' as an escape
+// in a literal string (the line after a backslash and the closer is withheld); skip the escaped
+// '\' itself (the line after a\\""" is withheld); search for the closer from
+// the opener rather than past it (password = """ closes on its own line,
+// so SEKRIT shows); drop the YAML arm (the YAML rows show) or its node
+// property skip (the !!str row shows); open on any key (the description
+// row is withheld) or ignore Stdout's descriptor exemption (token_type's
+// string is withheld by Stdout); drop Stdout's scan from Text (the
+// token_type-then-password case: Text keeps SEKRIT, which Stdout withholds).
+func TestStdout_MultiLineString(t *testing.T) {
+	m := Marker
+	for _, c := range []struct{ in, want string }{
+		{"password = \"\"\"\n  SEKRIT\n  more\"\"\"\nafter", m + "\n" + m + "\n" + m + "\nafter"},
+		{"token = '''\nSEKRIT\n'''\nafter", m + "\n" + m + "\n" + m + "\nafter"},
+		{"password = \"\"\"SEKRIT\nmore\n\"\"\"", m + "\n" + m + "\n" + m},
+		{"  \"api_key\" = \"\"\"\nSEKRIT\n\"\"\"\nafter", m + "\n" + m + "\n" + m + "\nafter"},
+		{"password = \"\"\"\nSEKRIT\n\nmore\n\"\"\"\nafter", m + "\n" + m + "\n\n" + m + "\n" + m + "\nafter"},
+		{"password = \"\"\"\nSEK\\\"\"\"RIT\nSEKRIT2\n\"\"\"\nafter", m + "\n" + m + "\n" + m + "\n" + m + "\nafter"},
+		{"password = \"\"\"\na\\\\\"\"\"\nafter", m + "\n" + m + "\nafter"},
+		{"token = '''\na\\'''\nafter", m + "\n" + m + "\nafter"},
+		{"password = \"\"\"x\"\"\"\nafter", m + "\nafter"},
+		{"password = \"\"\"\nSEKRIT\nmore", m + "\n" + m + "\n" + m},
+		{"password = \"\"\"\r\nSEKRIT\r\n\"\"\"\r\nafter", m + "\n" + m + "\n" + m + "\nafter"},
+		{"\x1b[1mpassword\x1b[0m = \"\"\"\nSEKRIT\n\"\"\"\nafter", m + "\n" + m + "\n" + m + "\nafter"},
+		{"private_key = '''\n-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n'''\nafter", m + "\n" + m + "\n" + m + "\n" + m + "\n" + m + "\nafter"},
+		{"password: \"a\n  SEKRIT\"\nafter", m + "\n" + m + "\nafter"},
+		{"  - token: \"a\n    SEK\\\"RIT\n    more\"\nafter", m + "\n" + m + "\n" + m + "\nafter"},
+		{"password: \"a\\\\\"\nafter", m + "\nafter"},
+		{"password: \"abc\"\nafter", m + "\nafter"},
+		{"password: !!str \"a\n  SEKRIT\"\nafter", m + "\n" + m + "\nafter"},
+		{"password: \"a\n  b\n  c", m + "\n" + m + "\n" + m},
+		{"description = \"\"\"\ntext\n\"\"\"", "description = \"\"\"\ntext\n\"\"\""},
+		{"summary: \"a\n  text\"", "summary: \"a\n  text\""},
+	} {
+		if got := Stdout(c.in); got != c.want {
+			t.Errorf("Stdout(%q) = %q, want %q", c.in, got, c.want)
+		}
+		if got := Text(c.in); got != c.want {
+			t.Errorf("Text(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// A descriptor key opens no string in Stdout; Text, with no exemptions,
+	// withholds through the closer.
+	in := "token_type = \"\"\"\nbearer\n\"\"\"\nafter"
+	if got := Stdout(in); got != in {
+		t.Errorf("Stdout(%q) = %q, want it kept", in, got)
+	}
+	if got, want := Text(in), m+"\n"+m+"\n"+m+"\nafter"; got != want {
+		t.Errorf("Text(%q) = %q, want %q", in, got, want)
+	}
+	// Text reads the second line as the descriptor's string closing, Stdout
+	// as a key opening one. Text must still withhold every line Stdout does.
+	checkStdoutWithinText(t, "token_type = \"\"\"\npassword = \"\"\"\nSEKRIT\n\"\"\"")
+	checkStdoutWithinText(t, "token_type:\n  a\n  password: \"x\nSEKRIT\"")
+}
+
 // descriptorRows are a key per keyDescriptors entry, each a credential word
 // then the descriptor, with a value that carries something: Stdout keeps
 // each (#983 item 3) and Text withholds it.
@@ -722,6 +790,18 @@ func adversarialStdout(n int) []string {
 		strings.Repeat("password= \"x\"\n", n/14),
 		strings.Repeat("a_secret_id: x\n", n/15),
 		"token" + strings.Repeat("_secret", n/7) + "_id: x",
+		// #991: an unclosed multi-line string over many lines, many short
+		// ones, an opener line of escapes, a YAML scalar of backslashes, and
+		// YAML openers each closed by the next.
+		"password = \"\"\"\n" + strings.Repeat("a\n", n/2),
+		strings.Repeat("password = \"\"\"\nx\n\"\"\"\n", n/22),
+		"password = \"\"\"" + strings.Repeat("\\\"", n/2),
+		"password: \"" + strings.Repeat("\\", n),
+		strings.Repeat("token: \"a\n", n/10),
+		"token = '''\n" + strings.Repeat("''", n/2),
+		"password = \"\"\"" + strings.Repeat("\"\"a", n/3),
+		"password = \"\"\"\n" + strings.Repeat("\"\"a", n/3),
+		"password: \"" + strings.Repeat("a", n),
 	}
 }
 
