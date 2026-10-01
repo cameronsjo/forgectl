@@ -11,8 +11,11 @@
 // burners on four cores, that pushed linear ratios of 8 past 100. So the
 // runs are timed in process CPU time, which waiting on a runqueue does not
 // add to, and fall back to the wall clock only where CPU time cannot be read.
-// A base side under Floor is refused, since its ratio is noise; a caller
-// whose base is cheaper than that passes both sides through Amortize first.
+// A base side under Floor makes the ratio noise, so Linear and Within then
+// run both sides more times alike, which leaves the ratio unchanged, and
+// measure again; only a base still under Floor at maxScale repetitions is
+// refused. A caller whose base is cheaper than Floor still passes both sides
+// through Amortize first, so the first measurement is usually the last.
 // Only tests import this package.
 //
 // Linear reads the whole test process's CPU time, not the calling
@@ -27,6 +30,7 @@
 package perftest
 
 import (
+	"fmt"
 	"math"
 	"runtime"
 	"testing"
@@ -40,13 +44,23 @@ const Runs = 5
 // a ratio is noise: process CPU time is accounted in scheduler ticks on some
 // kernels (up to 4 ms), and a run that short can read as a fraction of its
 // true cost, which inflates the ratio's small side and lets quadratic work
-// pass (forgectl#964). 5 ms is a little over one such tick; a test whose base
-// side measures less must do more work, not relax the floor.
+// pass (forgectl#964). 5 ms is a little over one such tick. A base side that
+// measures less is repeated until it does not (scaled), and the floor itself
+// is never relaxed: the ratio is only judged on samples above it.
 const Floor = 5 * time.Millisecond
 
 // maxReps bounds Amortize's repeat count, so work that costs nothing at all
 // fails Floor instead of looping a million times.
 const maxReps = 1000
+
+// maxScale bounds how many times Linear and Within repeat both sides, in all,
+// to bring a base side under Floor up to it. A base that Amortize sized can
+// still measure under Floor: Amortize stops at the first of its runs that
+// clears the target, and a cold first run (caches, page faults, a CPU still
+// clocking up) can clear it while every later run does not, which is what
+// failed macOS CI on fast runners (forgectl#919). Work that costs nothing at
+// all still fails Floor once this is reached.
+const maxScale = 1024
 
 // Ceiling is Linear's absolute backstop on one large run: a regression slow
 // enough that timing more pairs is a waste. The ratio is the assertion; a
@@ -56,21 +70,29 @@ const Ceiling = time.Minute
 // Linear fails t unless large, which does k times the input of small, runs
 // in less than k²/2 times small's time. Linear work puts the ratio near k and
 // quadratic near k², so with k of at least 4 the limit leaves a factor of two
-// or more on each side. It also fails t if one large run exceeds Ceiling, and
-// refuses, with t.Fatalf, a small side that measures under Floor.
+// or more on each side. A small side under Floor is scaled up first (see
+// scaled). It also fails t if one large run exceeds Ceiling, and refuses,
+// with t.Fatalf, a small side that still measures under Floor at maxScale
+// repetitions.
 func Linear(t testing.TB, what string, k int, small, large func()) {
+	t.Helper()
+	linear(t, what, k, small, large, timed)
+}
+
+// linear is Linear timing each run with measure.
+func linear(t testing.TB, what string, k int, small, large func(), measure func(func()) (time.Duration, bool)) {
 	t.Helper()
 	if k < 4 {
 		t.Fatalf("perftest.Linear: k = %d, want at least 4 so linear and quadratic are apart", k)
 	}
 	limit := float64(k*k) / 2
-	s, l, clock := fastest(Runs, limit, Ceiling, timed, small, large)
+	s, l, clock, reps := scaled(limit, measure, small, large)
 	ratio := float64(l) / float64(max(s, 1))
-	t.Logf("%s: %v at n, %v at %d·n in %s, ratio %.1f (limit %.0f)", what, s, l, k, clock, ratio, limit)
+	t.Logf("%s: %v at n, %v at %d·n in %s%s, ratio %.1f (limit %.0f)", what, s, l, k, clock, repeated(reps), ratio, limit)
 	if l > Ceiling {
 		t.Errorf("%s: one run at %d·n cost %v, over the %v backstop", what, k, l, Ceiling)
 	} else if s < Floor {
-		t.Fatalf("%s: the %v run at n is under the %v floor, so its ratio is noise; do more work at n", what, s, Floor)
+		t.Fatalf("%s: the %v run at n is under the %v floor even repeated %d times, so its ratio is noise; do more work at n", what, s, Floor, reps)
 	} else if ratio > limit {
 		t.Errorf("%s: %d·n cost %v against %v at n, a ratio of %.1f over the %.0f limit; want linear time (linear is about %d, quadratic about %d)",
 			what, k, l, s, ratio, limit, k, k*k)
@@ -80,21 +102,28 @@ func Linear(t testing.TB, what string, k int, small, large func()) {
 // Within fails t unless subject runs in less than limit times base's time,
 // timed as Linear times its runs. It is for a bound that is not a growth
 // rate: a capped operation on an input past its cap against the same
-// input the operation never had to do the capped work on. It also fails t
-// if one subject run exceeds Ceiling, and refuses, with t.Fatalf, a base that
-// measures under Floor.
+// input the operation never had to do the capped work on. A base under
+// Floor is scaled up first, as Linear's small side is. It also fails t if one
+// subject run exceeds Ceiling, and refuses, with t.Fatalf, a base that still
+// measures under Floor at maxScale repetitions.
 func Within(t testing.TB, what string, limit float64, base, subject func()) {
+	t.Helper()
+	within(t, what, limit, base, subject, timed)
+}
+
+// within is Within timing each run with measure.
+func within(t testing.TB, what string, limit float64, base, subject func(), measure func(func()) (time.Duration, bool)) {
 	t.Helper()
 	if limit < 2 {
 		t.Fatalf("perftest.Within: limit = %v, want at least 2 so noise on the base side cannot fail it", limit)
 	}
-	b, s, clock := fastest(Runs, limit, Ceiling, timed, base, subject)
+	b, s, clock, reps := scaled(limit, measure, base, subject)
 	ratio := float64(s) / float64(max(b, 1))
-	t.Logf("%s: %v against a base of %v in %s, ratio %.1f (limit %.0f)", what, s, b, clock, ratio, limit)
+	t.Logf("%s: %v against a base of %v in %s%s, ratio %.1f (limit %.0f)", what, s, b, clock, repeated(reps), ratio, limit)
 	if s > Ceiling {
 		t.Errorf("%s: one run cost %v, over the %v backstop", what, s, Ceiling)
 	} else if b < Floor {
-		t.Fatalf("%s: the base run of %v is under the %v floor, so its ratio is noise; do more work in the base", what, b, Floor)
+		t.Fatalf("%s: the base run of %v is under the %v floor even repeated %d times, so its ratio is noise; do more work in the base", what, b, Floor, reps)
 	} else if ratio > limit {
 		t.Errorf("%s: cost %v against a base of %v, a ratio of %.1f over the %.0f limit", what, s, b, ratio, limit)
 	}
@@ -109,6 +138,44 @@ func Within(t testing.TB, what string, limit float64, base, subject func()) {
 func Amortize(small, large func()) (func(), func()) {
 	reps := repsFor(small, 2*Floor, timed)
 	return repeat(reps, small), repeat(reps, large)
+}
+
+// scaled times small and large as fastest does, and while the fastest small
+// run is under Floor, repeats both sides the same number of times and times
+// them again, until it is not or another step would take the two past
+// maxScale repetitions in all. It returns fastest's results for the last measurement and the
+// repetition count they were taken at. Each step aims small at twice Floor,
+// as Amortize does, from what the last measurement read; a reading of zero,
+// under the clock's tick, doubles. Repeating both sides alike leaves their
+// ratio what the caller asked for, so a fast host gets a longer measurement,
+// never a different assertion. A large run over Ceiling ends the scaling: the
+// backstop has already failed.
+func scaled(limit float64, measure func(func()) (time.Duration, bool), small, large func()) (fastSmall, fastLarge time.Duration, clock string, reps int) {
+	reps = 1
+	for {
+		fastSmall, fastLarge, clock = fastest(Runs, limit, Ceiling, measure, small, large)
+		if fastSmall >= Floor || fastLarge > Ceiling {
+			return fastSmall, fastLarge, clock, reps
+		}
+		step := 2
+		if fastSmall > 0 {
+			step = max(step, int((int64(2*Floor)+int64(fastSmall)-1)/int64(fastSmall)))
+		}
+		if step = min(step, maxScale/reps); step < 2 {
+			return fastSmall, fastLarge, clock, reps
+		}
+		small, large = repeat(step, small), repeat(step, large)
+		reps *= step
+	}
+}
+
+// repeated is the log line's note of how many times scaled repeated both
+// sides, empty when it did not.
+func repeated(reps int) string {
+	if reps <= 1 {
+		return ""
+	}
+	return fmt.Sprintf(", both sides repeated %d times to clear the floor", reps)
 }
 
 // repsFor is how many runs of f cost at least target, from the fastest
