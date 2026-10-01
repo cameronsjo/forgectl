@@ -412,6 +412,13 @@ func TestService_StopsListeningAtTheFirstPeer(t *testing.T) {
 // state through a different mechanism — so deleting the deadline entirely left
 // the suite green and sixty seconds slower. This runs with an uncancellable
 // context, so only the deadline can end it.
+//
+// The deadline error is the evidence that the deadline ended it; the wait is
+// only a hang bound, far above the 100 ms budget, so host load cannot fail it
+// (forgectl#919; a 5 s elapsed check rode inside it).
+//
+// Mutation: drop the listener.SetDeadline call in handshake, and the launch
+// does not return within the hang bound.
 func TestService_TheAcceptDeadlineBoundsAManagerThatNeverTypes(t *testing.T) {
 	adapter, service := internalFixture(t)
 
@@ -430,7 +437,6 @@ func TestService_TheAcceptDeadlineBoundsAManagerThatNeverTypes(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	start := time.Now()
 	go func() {
 		_, err := service.Launch(context.Background(), internalRequest(t))
 		done <- err
@@ -441,10 +447,10 @@ func TestService_TheAcceptDeadlineBoundsAManagerThatNeverTypes(t *testing.T) {
 		if err == nil {
 			t.Fatal("a launch nothing connected to reported success")
 		}
-		if elapsed := time.Since(start); elapsed > 5*time.Second {
-			t.Errorf("the launch took %v against a %v accept budget", elapsed, acceptTimeout)
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Errorf("err = %v, want the accept deadline (os.ErrDeadlineExceeded) to have ended the launch", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(20 * time.Second):
 		t.Fatal("the accept deadline never fired; a manager that never types would hang " +
 			"the command indefinitely")
 	}

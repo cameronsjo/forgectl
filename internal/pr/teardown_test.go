@@ -600,12 +600,14 @@ func assertParkedNotDiscarded(t *testing.T, c *Client, path, ws string, err erro
 	if bc.Phase != PhaseNeedsRepair || !strings.HasPrefix(bc.RepairReason, "window kill timed out (tmux unresponsive); review window pr-") {
 		t.Errorf("record = phase %q reason %q, want needs-repair with the timeout reason naming the window", bc.Phase, bc.RepairReason)
 	}
-	start := time.Now()
-	if lerr := c.withLifecycleLock(context.Background(), "probe", func() error { return nil }); lerr != nil {
-		t.Fatalf("lifecycle lock still held after teardown: %v", lerr)
-	}
-	if d := time.Since(start); d > time.Second {
-		t.Errorf("re-acquiring the lock took %v", d)
+	// The probe's context is already cancelled. withLifecycleLock tries the
+	// lock once before it ever waits, and a wait ends on the cancelled
+	// context, so success proves the lock was free at the first try, with no
+	// wall-clock bound for host load to fail (forgectl#919).
+	probe, cancel := context.WithCancel(context.Background())
+	cancel()
+	if lerr := c.withLifecycleLock(probe, "probe", func() error { return nil }); lerr != nil {
+		t.Fatalf("lifecycle lock not free at once after teardown: %v", lerr)
 	}
 }
 
@@ -689,12 +691,36 @@ func TestTeardown_HungTmuxOnALegacyRecordConvertsAndParksIt(t *testing.T) {
 // sleeping grandchild that inherits the output pipes. CommandContext's SIGKILL
 // only reaches the script, so without exec's WaitDelay Wait blocks until the
 // grandchild exits — long past the budget, with the lock held.
+//
+// The grandchild sleeps a minute, killed when the test ends, and Teardown must
+// return inside a 20 s hang bound: far above the budget plus WaitDelay, so
+// host load cannot fail it, and far below the grandchild's lifetime
+// (forgectl#919; a 3 s bound against a 6 s grandchild was load-sensitive).
+//
+// Mutation: drop cmd.WaitDelay in exec.OSRunner.Run and Teardown waits out
+// the grandchild's minute, past the hang bound.
 func TestTeardown_RealTmuxGrandchildHoldingThePipesIsBounded(t *testing.T) {
 	dir := t.TempDir()
-	script := "#!/bin/sh\nsleep 6 &\nwait\n"
+	pidFile := filepath.Join(dir, "grandchild.pid")
+	script := fmt.Sprintf("#!/bin/sh\nsleep 60 &\necho $! >> %q\nwait\n", pidFile)
 	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o700); err != nil { //nolint:gosec // test-owned script
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		b, err := os.ReadFile(filepath.Clean(pidFile))
+		if err != nil {
+			return
+		}
+		for _, field := range strings.Fields(string(b)) {
+			var pid int
+			if _, err := fmt.Sscan(field, &pid); err != nil {
+				continue
+			}
+			if p, err := os.FindProcess(pid); err == nil {
+				_ = p.Kill()
+			}
+		}
+	})
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	old := lockedTmuxBudget
 	lockedTmuxBudget = 300 * time.Millisecond
@@ -707,11 +733,13 @@ func TestTeardown_RealTmuxGrandchildHoldingThePipesIsBounded(t *testing.T) {
 	ws := fakeWorkspace(t)
 	path := seedPhaseRecord(t, c, ref, PhasePrepared, ws)
 
-	start := time.Now()
-	err := c.Teardown(context.Background(), path)
-	// budget + WaitDelay (500 ms) + slack; the grandchild sleeps 6 s.
-	if d := time.Since(start); d > 3*time.Second {
-		t.Errorf("Teardown took %v: a grandchild holding the pipes defeated the tmux budget", d)
+	done := make(chan error, 1)
+	go func() { done <- c.Teardown(context.Background(), path) }()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("Teardown did not return within 20s: a grandchild holding the pipes defeated the tmux budget")
 	}
 	assertParkedNotDiscarded(t, c, path, ws, err)
 }
