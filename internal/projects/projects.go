@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/redact"
@@ -282,7 +283,7 @@ func newWithRoot(run exec.Runner, resolve func() (string, error), opts ...Option
 	}
 	if !c.gitPinned {
 		c.gitPinned = true
-		if path, err := c.lookPath("git"); err == nil {
+		if path, err := c.lookPath(gitenv.Bin); err == nil {
 			if abs, err := filepath.Abs(path); err == nil {
 				c.gitBin = abs
 			}
@@ -569,7 +570,7 @@ func (c *Client) localRepos(ctx context.Context) ([]Repo, error) {
 		// which would misattribute it to an ancestor repo's origin (and then
 		// dedup it away). Skip the spawn entirely for that case.
 		if p.Status.State != StatusNotRepo {
-			url, err := c.run.Run(ctx, "git", "-C", p.Dir, "remote", "get-url", "origin")
+			url, err := gitenv.Run(ctx, c.run, gitenv.Local, "-C", p.Dir, "remote", "get-url", "origin")
 			if err == nil {
 				url = strings.TrimSpace(url)
 				if host, owner, name := parseRemoteURL(url, c.effectiveGitHubHost()); name != "" {
@@ -972,7 +973,7 @@ func (c *Client) otherPlacements(r Repo, dest string) []string {
 // resolves to r's (host, owner, name) — i.e. dir really is r, not a same-named
 // repo from a different host.
 func (c *Client) originMatches(ctx context.Context, dir string, r Repo) bool {
-	url, err := c.run.Run(ctx, "git", "-C", dir, "remote", "get-url", "origin")
+	url, err := gitenv.Run(ctx, c.run, gitenv.Local, "-C", dir, "remote", "get-url", "origin")
 	if err != nil {
 		return false
 	}

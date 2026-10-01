@@ -47,6 +47,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 )
 
 // initGitRepo makes dir a real git repo (git init + optional dirty file) via
@@ -83,6 +84,7 @@ func resolvedPath(t *testing.T, path string) string {
 func fakeGitRunner(statusByDir map[string]string) *exec.FakeRunner {
 	return &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			if name != "git" {
 				return "", nil
 			}

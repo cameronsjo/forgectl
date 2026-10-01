@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 )
 
 // v2Hash is a stand-in object name for porcelain-v2 fixtures. The parser must
@@ -86,6 +88,15 @@ func (r *ctxRunner) Run(ctx context.Context, name string, args ...string) (strin
 	return r.fn(ctx, name, args)
 }
 
+// RunWithEnvFiltered is the mode gitenv runs git through; it records the
+// call like Run, with its environment.
+func (r *ctxRunner) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error) {
+	r.mu.Lock()
+	r.calls = append(r.calls, exec.Call{Name: name, Args: args, Env: env, UnsetEnv: unset})
+	r.mu.Unlock()
+	return r.fn(ctx, name, args)
+}
+
 func (r *ctxRunner) Calls() []exec.Call {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -98,13 +109,14 @@ func (r *ctxRunner) Calls() []exec.Call {
 func countGitSubcommands(calls []exec.Call, dir string) map[string]int {
 	counts := map[string]int{}
 	for _, c := range calls {
-		if c.Name != "git" || len(c.Args) < 3 || c.Args[0] != "-C" {
+		args := gitenvtest.Strip(c.Args)
+		if c.Name != "git" || len(args) < 3 || args[0] != "-C" {
 			continue
 		}
-		if dir != "" && c.Args[1] != dir {
+		if dir != "" && args[1] != dir {
 			continue
 		}
-		counts[c.Args[2]]++
+		counts[args[2]]++
 	}
 	return counts
 }
@@ -224,7 +236,7 @@ func TestGitStatus_UsesOnePorcelainV2BranchProbe(t *testing.T) {
 	if len(fake.Calls) != 1 {
 		t.Fatalf("git calls = %d (%v), want exactly 1", len(fake.Calls), fake.Calls)
 	}
-	wantArgs := []string{"-C", repo, "status", "--porcelain=v2", "--branch"}
+	wantArgs := append(gitenv.Args(gitenv.Local), "-C", repo, "status", "--porcelain=v2", "--branch")
 	if fake.Calls[0].Name != "git" || !reflect.DeepEqual(fake.Calls[0].Args, wantArgs) {
 		t.Errorf("argv = %s %v, want git %v", fake.Calls[0].Name, fake.Calls[0].Args, wantArgs)
 	}
@@ -290,7 +302,7 @@ func TestGitStatus_CombinedCommandFailureIsUnknownWithoutFallback(t *testing.T) 
 			if len(calls) != 1 {
 				t.Fatalf("git calls = %d (%v), want exactly 1 attempted probe", len(calls), calls)
 			}
-			wantArgs := []string{"-C", repo, "status", "--porcelain=v2", "--branch"}
+			wantArgs := append(gitenv.Args(gitenv.Local), "-C", repo, "status", "--porcelain=v2", "--branch")
 			if !reflect.DeepEqual(calls[0].Args, wantArgs) {
 				t.Errorf("argv = %v, want %v", calls[0].Args, wantArgs)
 			}

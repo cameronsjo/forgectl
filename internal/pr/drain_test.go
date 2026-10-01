@@ -48,6 +48,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 )
 
 // drainLaunchRunner fakes gh (pr view always resolves a valid head), git
@@ -58,6 +59,7 @@ func drainLaunchRunner(failOn map[int]error) *exec.FakeRunner {
 	created := false
 	call := 0
 	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		switch {
 		case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
 			return `{"headRefName":"feature","headRefOid":"abc123",` +
@@ -478,6 +480,7 @@ func drainWindowExistsRunner(t *testing.T, ref Ref) (*exec.FakeRunner, *int) {
 	opened := false
 	row := strings.Join([]string{"123", "456", "@9", "$1", "forgectl", "1", name, "1", "1"}, "\x1f")
 	run := &exec.FakeRunner{RunFunc: func(cmd string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		switch {
 		case cmd == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
 			return `{"headRefName":"feature","headRefOid":"abc123",` +
@@ -687,6 +690,7 @@ func TestDrain_QueuedLocalRecordIsRefusedAtClaim(t *testing.T) {
 	launches := 0
 	inner := run.RunFunc
 	run.RunFunc = func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if name == "git" && len(args) > 0 && args[0] == "clone" {
 			launches++
 		}

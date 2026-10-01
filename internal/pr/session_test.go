@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 )
 
 const ghViewJSON = `{"headRefName":"feature-x","headRefOid":"deadbeef","headRepositoryOwner":{"login":"contributor"},"headRepository":{"name":"forgectl"}}`
@@ -195,7 +196,7 @@ func TestPrepare_RealDispatch(t *testing.T) {
 	if !ok {
 		t.Fatal("no git call")
 	}
-	if git.Args[0] != "clone" || !contains(git.Args, "--branch") || !contains(git.Args, "feature-x") || !contains(git.Args, "--") {
+	if gitenvtest.Strip(git.Args)[0] != "clone" || !contains(git.Args, "--branch") || !contains(git.Args, "feature-x") || !contains(git.Args, "--") {
 		t.Errorf("git clone args missing --branch/headRef/--: %v", git.Args)
 	}
 	if !contains(git.Args, "https://github.com/contributor/forgectl") {
@@ -268,6 +269,7 @@ func TestPrepare_IncompleteRefRefused(t *testing.T) {
 func TestSandboxAndQuarantine_SandboxFailureWrapped(t *testing.T) {
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			if name == "git" && contains(args, "worktree") {
 				return "", errors.New("boom")
 			}
@@ -299,6 +301,7 @@ func TestSandboxAndQuarantine_QuarantineFailureTearsDownWorkspace(t *testing.T) 
 	var capturedDir string
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			if name == "git" && contains(args, "worktree") {
 				for i, a := range args {
 					if a == "--" && i+1 < len(args) {

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
@@ -80,7 +81,7 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 	}
 	slog.Debug("Preparing local clean-room review.", "path", absPath, "dryRun", opts.DryRun)
 
-	headRef, err := c.run.Run(ctx, "git", "-C", absPath, "rev-parse", "--abbrev-ref", "HEAD")
+	headRef, err := gitenv.Run(ctx, c.run, gitenv.Local, "-C", absPath, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return Session{}, fmt.Errorf("resolve local HEAD branch: %w", err)
 	}
@@ -90,7 +91,7 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 	// name can never name different commits. See PrepareLocalOpts.HeadOid.
 	headOid := opts.HeadOid
 	if headOid == "" {
-		headOid, err = c.run.Run(ctx, "git", "-C", absPath, "rev-parse", "HEAD")
+		headOid, err = gitenv.Run(ctx, c.run, gitenv.Local, "-C", absPath, "rev-parse", "HEAD")
 		if err != nil {
 			return Session{}, fmt.Errorf("resolve local HEAD commit: %w", err)
 		}

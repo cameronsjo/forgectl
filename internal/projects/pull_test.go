@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 )
 
 // pullFixture wires a *Client whose git calls are keyed by the full repo dir:
@@ -18,6 +19,7 @@ import (
 // overridden via ahead.
 func pullFixture(records map[string][]string, pullOut map[string]string, pullErr map[string]error, ahead map[string]int) *exec.FakeRunner {
 	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if name != "git" || len(args) < 3 || args[0] != "-C" {
 			return "", nil
 		}
@@ -103,6 +105,7 @@ func TestPullAll_ClassifiesEachRepo(t *testing.T) {
 
 	// No pull call was recorded for either dirty repo.
 	for _, call := range fake.Calls {
+		call.Args = gitenvtest.Strip(call.Args)
 		if call.Name != "git" || len(call.Args) < 3 || call.Args[2] != "pull" {
 			continue
 		}
@@ -118,6 +121,7 @@ func TestPullAll_StatusAndPullUseTheSamePinnedGitBinary(t *testing.T) {
 	mkGitDir(t, tmp, "repo")
 	const pinnedGit = "/known/bin/git"
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if name != pinnedGit {
 			t.Fatalf("command binary = %q, want pinned %q", name, pinnedGit)
 		}
@@ -172,7 +176,7 @@ func TestPullAll_SkipsNonGitDir(t *testing.T) {
 		t.Fatalf("PullAll = %+v, want only 'realrepo' (the non-git scratch dir must be skipped)", results)
 	}
 	for _, call := range fake.Calls {
-		if call.Name == "git" && len(call.Args) >= 3 && call.Args[2] == "pull" && call.Args[1] == scratch {
+		if args := gitenvtest.Strip(call.Args); call.Name == "git" && len(args) >= 3 && args[2] == "pull" && args[1] == scratch {
 			t.Errorf("pull ran for a non-git dir: %v", call.Args)
 		}
 	}
@@ -215,6 +219,7 @@ func TestPullAll_SkipsUnknownStatus(t *testing.T) {
 	brokenDir := filepath.Join(tmp, "brokenstatus")
 
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if name != "git" || len(args) < 3 || args[0] != "-C" {
 			return "", nil
 		}
@@ -237,7 +242,7 @@ func TestPullAll_SkipsUnknownStatus(t *testing.T) {
 	}
 
 	for _, call := range fake.Calls {
-		if call.Name == "git" && len(call.Args) >= 3 && call.Args[2] == "pull" && call.Args[1] == brokenDir {
+		if args := gitenvtest.Strip(call.Args); call.Name == "git" && len(args) >= 3 && args[2] == "pull" && args[1] == brokenDir {
 			t.Errorf("pull ran for a repo with unknown status: %v", call.Args)
 		}
 	}
@@ -264,6 +269,7 @@ func TestPullAll_StatusProcessAndSafetyBudget(t *testing.T) {
 	}
 
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if name != "git" || len(args) < 3 || args[0] != "-C" {
 			return "", nil
 		}

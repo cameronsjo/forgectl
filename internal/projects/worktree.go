@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -102,10 +103,10 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 
 	// A bare clone's default refspec fetches only the cloned branch; widen it so
 	// `fetch origin` populates every remote-tracking branch that worktree add needs.
-	if _, err := c.run.Run(ctx, "git", "-C", bareDir, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+	if _, err := gitenv.Run(ctx, c.run, gitenv.Local, "-C", bareDir, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
 		return "", fmt.Errorf("configuring fetch refspec for %s: %w", termsafe.QuotePath(bareDir), termsafe.Error(err))
 	}
-	if _, err := c.run.Run(ctx, "git", "-C", bareDir, "fetch", "origin"); err != nil {
+	if _, err := gitenv.Run(ctx, c.run, gitenv.Transport, "-C", bareDir, "fetch", "origin"); err != nil {
 		// Categorical (#658): git relays the remote's sideband ("remote: …")
 		// on stderr, which is server-chosen text.
 		slog.Error("Failed to fetch origin.", "dest", bareDir, "error", err)
@@ -124,10 +125,10 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 	}
 
 	worktreeDir := filepath.Join(base, branch)
-	if _, err := c.run.Run(ctx, "git", "-C", bareDir, "worktree", "add", worktreeDir, branch); err != nil {
+	if _, err := gitenv.Run(ctx, c.run, gitenv.Local, "-C", bareDir, "worktree", "add", worktreeDir, branch); err != nil {
 		// The branch may exist only on the remote — create a local branch tracking
 		// origin/<branch> instead.
-		if _, ferr := c.run.Run(ctx, "git", "-C", bareDir, "worktree", "add", worktreeDir, "origin/"+branch, "-b", branch); ferr != nil {
+		if _, ferr := gitenv.Run(ctx, c.run, gitenv.Local, "-C", bareDir, "worktree", "add", worktreeDir, "origin/"+branch, "-b", branch); ferr != nil {
 			slog.Error("Failed to add worktree.", "dest", worktreeDir, "branch", branch, "error", ferr)
 			// Categorical (#658): branch may be remote-derived (see above).
 			// bareDir is forgectl-composed and named, as for the fetch.
@@ -144,10 +145,8 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 // `HEAD branch:` line of `git remote show origin`, falling back to "main" when
 // the command fails, the line is absent, or the remote HEAD is "(unknown)" (a
 // bare repo just cloned from a non-standard or headless remote).
-func defaultBranch(ctx context.Context, run interface {
-	Run(context.Context, string, ...string) (string, error)
-}, bareDir string) string {
-	out, err := run.Run(ctx, "git", "-C", bareDir, "remote", "show", "origin")
+func defaultBranch(ctx context.Context, run gitenv.Runner, bareDir string) string {
+	out, err := gitenv.Run(ctx, run, gitenv.Transport, "-C", bareDir, "remote", "show", "origin")
 	if err == nil {
 		for _, line := range strings.Split(out, "\n") {
 			line = strings.TrimSpace(line)
