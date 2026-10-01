@@ -95,6 +95,29 @@ var stdoutKept = []string{
 	" src/token=x.go | 1 +",
 	" src/password=reset.go | 12 ++++++------",
 	" assets/token=logo.png | Bin 0 -> 1234 bytes",
+	// #983: a diffstat row whose path ends in an extension, a pass= count
+	// beside a fail= one, an empty TOML or Go value, a comparison, and the
+	// deliverable false positives item 3 lists (Text still withholds them).
+	" docs/password=reset.md | 3 ++-",
+	"PASS=3 FAIL=0",
+	`password = ""`,
+	`token := ""`,
+	"token == x",
+	"token: expired",
+	"password: required",
+	"auth: required",
+	"token_expiry: 3600",
+	`"token_type": "bearer"`,
+	"password_policy: strict",
+	"tokenType: bearer",
+	"Signature: valid",
+	"credential.helper: osxkeychain",
+	"credentials: ~/.aws/credentials",
+	"use --token to pass it",
+	// docker pull.
+	"docker.io/library/node:22@sha256:" + strings.Repeat("0f", 32),
+	"Digest: sha256:" + strings.Repeat("0f", 32),
+	"Status: Downloaded newer image for node:22",
 }
 
 // stdoutWithheld are lines Stdout must withhold, one per shape, each carrying
@@ -187,6 +210,7 @@ var stdoutWithheld = []string{
 	"bearer abc123defghij",
 	"PASSWORD=ok horse battery",
 	"pass=1234",
+	"pass=1234 fail=0",
 	"Cookie: none; sid=SEKRIT",
 	"> Cookie: none; sid=SEKRIT",
 	"> Cookie: none SEKRIT",
@@ -194,6 +218,49 @@ var stdoutWithheld = []string{
 	"auth: ok SEKRIT",
 	" src/app.go | 1 + GITHUB_TOKEN=SEKRIT",
 	"GITHUB_TOKEN=SEKRIT src/app.go | 1 +",
+	// #983 item 1: a diffstat-shaped line whose path is no file path, or
+	// whose credential NAME= value is a directory or has no extension; a
+	// lowercase scheme word before a run that decodes as user:pass or runs 16
+	// bytes, and the scheme in capitals; a count that is no pass= beside a
+	// fail=; a key whose value is a count.
+	"PASSWORD=hunter2 | 3",
+	" GITHUB_TOKEN=abc | 1 +",
+	" src/GITHUB_TOKEN=abc/x.go | 1 +",
+	" src/GITHUB_TOKEN=SEKRIT | 2 +-",
+	"basic dXNlcjpwYXNz",
+	"bearer abcdefghijklmnop",
+	"BEARER abcdefghij",
+	"BASIC abcdefghijkl",
+	"password=123",
+	"pass=1",
+	"pass=12 skip=0",
+	"DB_PASS=12 fail=0",
+	`"auth": 1`,
+	"auth: 1",
+	// #983 item 2: a Python dict key, TOML and Go assignments, and a token
+	// split by an OSC 8 hyperlink (ESC \ or BEL terminated).
+	"{'token': 'abc'}",
+	"{'password': 'SEKRIT', 'user': 'me'}",
+	`password = "x"`,
+	"token = 'abcdef'",
+	`  api_key = "SEKRIT"`,
+	`"token" = "SEKRIT"`,
+	`token := "abc"`,
+	"\tsecret := SEKRIT",
+	"ghp_" + strings.Repeat("A", 18) + "\x1b]8;;\x1b\\" + strings.Repeat("A", 18),
+	"ghp_" + strings.Repeat("A", 18) + "\x1b]8;;https://example.com\x07" + strings.Repeat("A", 18),
+	// #983 item 3 and 4 edges that stay withheld in Stdout: a status word
+	// that is not the whole value, a descriptor that is not the name's last
+	// segment, a path outside the known roots or holding a blank, a flag
+	// followed by a value, a digest that is not 64 hex, userinfo beside a
+	// digest.
+	"token: expired SEKRIT",
+	"token_type_secret: SEKRIT",
+	"credentials: /SEKRIT/x",
+	"credentials: ~/x SEKRIT",
+	"use --token SEKRIT",
+	"user:SEKRIT@sha256:abc",
+	"https://u:SEKRIT@host/x@sha256:" + strings.Repeat("0f", 32),
 }
 
 // TestStdout: every stdoutKept line survives, every stdoutWithheld line reads
@@ -211,6 +278,26 @@ var stdoutWithheld = []string{
 // (the NAME=value rows show), or its empty-value skip (GITHUB_TOKEN= is
 // withheld).
 //
+// For #983: make diffstatPath return true (PASSWORD=hunter2 | 3 shows) or
+// drop its fileNameWithExtension check (src/GITHUB_TOKEN=abc/x.go shows);
+// drop BEARER or BASIC from schemeAt's exact spellings (the capitals rows
+// show); drop bearer's 16-byte arm (bearer abcdefghijklmnop shows) or make
+// basicCredential false (basic dXNlcjpwYXNz shows); let benignValue accept a
+// count again (password=123 shows), or drop benignAssignment's fail= context
+// (pass=1 shows) or its pass name (DB_PASS=12 fail=0 shows); accept only '"'
+// in jsonKeyIn (the dict rows show); drop assignKey (the TOML and Go rows),
+// its ":=" arm (the Go rows), its "==" guard (token == x is withheld) or its
+// spacing rule (pass=1 fail=0 skip=2 is withheld); drop stripEscapes' OSC arm
+// (the hyperlink rows show); drop withoutDigestRefs (the docker row is
+// withheld) or digestRef's 64-byte check (user:SEKRIT@sha256:abc shows);
+// drop keyStatusValues (token: expired is withheld) or accept any word in it
+// (token: expired SEKRIT shows); drop keyNameCarries' descriptor check
+// (token_type rows are withheld) or read the first segment
+// (token_type_secret shows); drop pathValue (the ~/.aws row is withheld) or
+// accept any '/' start (credentials: /SEKRIT/x shows); drop flagProse (use
+// --token to pass it is withheld) or accept any word (use --token SEKRIT
+// shows).
+//
 // For #974: drop jsonKeyIn (the JSON rows show) or yamlKey (the YAML rows);
 // drop any keyValueCarries empty case (its kept row is withheld); drop
 // credentialHeaderName from isCredentialHeader (X-Auth-Token shows); drop
@@ -218,12 +305,12 @@ var stdoutWithheld = []string{
 // token with --token is withheld); drop stdoutJWT (the JWT rows show); drop
 // the glcbt- entry; drop the raw-'/' userinfo alternative (the git row
 // shows) or its port arm (the registry:4873 row is withheld); drop the
-// stripCSI pass (the split ghp_ row shows) or the as-is pass
+// stripEscapes pass (the split ghp_ row shows) or the as-is pass
 // (GITHUB_TOKEN=ESC[31m shows); make schemeAt ignore case-exactness
 // (Basic authentication disabled shows) or the digit check (basic
 // dXNlc…= shows); let benignAssignment accept any following word
-// (PASSWORD=ok horse battery shows) or benignValue any digit count
-// (pass=1234 shows); drop headerIn's textEnd bound (Cookie: none;
+// (PASSWORD=ok horse battery shows) or isCount any digit count
+// (pass=1234 fail=0 shows); drop headerIn's textEnd bound (Cookie: none;
 // sid=SEKRIT shows); drop the diffstat anchors (the src/app.go row shows).
 func TestStdout(t *testing.T) {
 	for _, line := range stdoutKept {
@@ -385,6 +472,20 @@ var stdoutExempt = []string{
 	" src/token=x.go | 1 +",
 	" src/password=reset.go | 12 ++++++------",
 	" assets/token=logo.png | Bin 0 -> 1234 bytes",
+	// #983 items 3 and 4.
+	"PASS=3 FAIL=0",
+	"token: expired",
+	"password: required",
+	"auth: required",
+	"token_expiry: 3600",
+	`"token_type": "bearer"`,
+	"password_policy: strict",
+	"tokenType: bearer",
+	"Signature: valid",
+	"credential.helper: osxkeychain",
+	"credentials: ~/.aws/credentials",
+	"use --token to pass it",
+	"docker.io/library/node:22@sha256:" + strings.Repeat("0f", 32),
 }
 
 // TestText_KeepsWithholdingStdoutExemptions: Stdout's exemptions for
@@ -395,8 +496,10 @@ var stdoutExempt = []string{
 // Mutations that turn it red: make Text's pemScan deliverable (the basic
 // and bearer prose rows come through Text, since its word rule does not see
 // them); drop the deliverable guard in front of any one exemption
-// (schemeAt's, benignAssignment's, benignRest's, diffstatRow's), and its
-// rows come through the Text-mode check.
+// (schemeAt's, benignAssignment's, benignRest's, diffstatRow's, and #983's
+// keyStatusValues/pathValue in keyValueCarries, keyNameCarries'
+// descriptors, flagValueIn's flagProse, userinfoIn's withoutDigestRefs), and
+// its rows come through the Text-mode check.
 func TestText_KeepsWithholdingStdoutExemptions(t *testing.T) {
 	for _, line := range stdoutExempt {
 		if got := Stdout(line); got != line {
@@ -439,6 +542,53 @@ func TestText_KeepsEmptyCredentialKeys(t *testing.T) {
 	}
 }
 
+// TestStdout_YAMLValueOnNextLine: a YAML credential key with nothing after
+// its ':', or a block scalar's indicator, holds its value on the lines after
+// it (#983). Those lines are withheld while they are indented past the key,
+// or start a sequence entry at the key's indentation under a key with no
+// "- " before it; a blank line keeps the value going and stays as it is; the
+// first line at the key's indentation or less ends it. Text and Stdout agree
+// on every case.
+//
+// Mutations that turn it red: drop openValue from stdoutWithheld (every
+// value line shows); compare indent >= valueIndent (the next key, "other:",
+// is withheld); drop the valueSeq arm (the "- a" rows under password: show);
+// set valueSeq for a dashed key too (the "- other" sibling is withheld); end
+// the value on a blank line (the line after it shows); drop the stripEscapes
+// retry in openValue (the colored key's value shows); open on any key
+// (token_type: under Stdout withholds its next line, where Text alone
+// should).
+func TestStdout_YAMLValueOnNextLine(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"password: |\n  SEKRIT\n  more\nother: 1", "password: |\n" + Marker + "\n" + Marker + "\nother: 1"},
+		{"password: >-\n    SEKRIT\nnext", "password: >-\n" + Marker + "\nnext"},
+		{"password:\n  SEKRIT\nother: x", "password:\n" + Marker + "\nother: x"},
+		{"  token:\n    SEKRIT\n  other: x", "  token:\n" + Marker + "\n  other: x"},
+		{"password:\n- SEKRIT\n- two\nnext", "password:\n" + Marker + "\n" + Marker + "\nnext"},
+		{"- password:\n  SEKRIT\n- other", "- password:\n" + Marker + "\n- other"},
+		{"password: |\n  SEKRIT\n\n  more\nx", "password: |\n" + Marker + "\n\n" + Marker + "\nx"},
+		{"\x1b[1mpassword\x1b[0m:\n  SEKRIT", "\x1b[1mpassword\x1b[0m:\n" + Marker},
+		{"password:\nnext: 1", "password:\nnext: 1"},
+		{"password: x\n  SEKRIT", Marker + "\n  SEKRIT"},
+	} {
+		if got := Stdout(c.in); got != c.want {
+			t.Errorf("Stdout(%q) = %q, want %q", c.in, got, c.want)
+		}
+		if got := Text(c.in); got != c.want {
+			t.Errorf("Text(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// A descriptor key (#983 item 3) opens no value in Stdout; Text, with no
+	// exemptions, withholds the value line.
+	in := "token_type:\n  bearer"
+	if got := Stdout(in); got != in {
+		t.Errorf("Stdout(%q) = %q, want it kept", in, got)
+	}
+	if got := Text(in); got != "token_type:\n"+Marker {
+		t.Errorf("Text(%q) = %q, want the value line withheld", in, got)
+	}
+}
+
 // adversarialStdout are inputs built to cost a regex engine more than a
 // pass: a URL marker with no '@', a run of token prefixes each one byte
 // short, a long run of '@', a PEM armor run, and a NAME= run; and for #974's
@@ -478,6 +628,28 @@ func adversarialStdout(n int) []string {
 		strings.Repeat("\x1b[0m", n/4) + "x",
 		"password: |" + strings.Repeat("-", n),
 		" " + strings.Repeat("a", n) + " | 1 +",
+		// #983: unterminated and terminated OSC runs, single-quoted keys,
+		// TOML and Go assignments with long blank runs, YAML values on the
+		// next lines, basic runs to decode, digest words, flag prose,
+		// diffstat paths of many NAME= segments, a pass= run beside one
+		// fail=, descriptor keys, and a long path value.
+		strings.Repeat("\x1b]", n/2),
+		"\x1b]" + strings.Repeat("a", n) + "\x1b[0m",
+		strings.Repeat("\x1b]8;;\x07x", n/6),
+		strings.Repeat("{'token':''}", n/12),
+		"token" + strings.Repeat(" ", n) + "= x",
+		"token :=" + strings.Repeat(" ", n),
+		strings.Repeat("password:\n  x\n", n/14),
+		"password:\n" + strings.Repeat("  hunter2\n", n/10),
+		"basic " + strings.Repeat("dXNl", n/4),
+		strings.Repeat("basic abcdefghijkl ", n/19),
+		strings.Repeat("a:1@sha256:"+strings.Repeat("0f", 32)+" ", n/76),
+		"a:1@sha256:" + strings.Repeat("a", n),
+		strings.Repeat("--token to ", n/11),
+		" " + strings.Repeat("a/token=", n/8) + " | 1 +",
+		strings.Repeat("pass=1 ", n/7) + "fail=0",
+		strings.Repeat(`"token_type": `, n/14),
+		"credentials: ~/" + strings.Repeat("a", n),
 	}
 }
 
