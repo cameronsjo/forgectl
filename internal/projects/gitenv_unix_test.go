@@ -38,3 +38,25 @@ func TestGitStatusNeverLazyFetches(t *testing.T) {
 		t.Errorf("gitStatus = %+v, want %q: the refused fetch leaves HEAD unreadable", got, StatusUnknown)
 	}
 }
+
+// The projects status probe re-hashes stat-dirty files through the filter
+// drivers the repository names, a clean filter and a dotted-name process
+// filter here; neither runs (#977).
+// Mutation: run gitStatus's status through gitenv.RunBin under Local instead
+// of gitenv.RunUnfiltered: the canary runs.
+func TestGitStatusRunsNoFilterDriver(t *testing.T) {
+	gitenvtest.NewFilterCanary(t).AssertLive(t)
+	canary := gitenvtest.NewFilterCanary(t)
+	bin, err := osexec.LookPath(gitenv.Bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := gitStatus(context.Background(), exec.OSRunner{}, bin, canary.Dir)
+	if canary.Ran(t) {
+		t.Fatal("the projects status probe ran a filter driver the repository defines")
+	}
+	if got.State != StatusOK || got.Modified != 0 {
+		t.Errorf("gitStatus = %+v, want a clean %q: the files match their blobs", got, StatusOK)
+	}
+}

@@ -77,9 +77,14 @@ package gitenv
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
+
+	fexec "github.com/cameronsjo/forgectl/internal/exec"
 )
 
 // Profile selects how git is hardened for one call. The zero value is Local.
@@ -233,6 +238,96 @@ func filter(p Profile, environ []string) (map[string]string, []string) {
 		overrides[pin[0]] = pin[1]
 	}
 	return overrides, unset
+}
+
+// filterDriverKeys matches every configuration key that names a filter
+// driver's program (gitattributes(5)): filter.<driver>.clean, .smudge and
+// .process. The driver name is a config subsection, so it may itself hold
+// dots; it is parsed from the right.
+const filterDriverKeys = `^filter\..*\.(clean|smudge|process)$`
+
+// filterDriverVars are the variables filterDriverKeys matches, in the order
+// RunUnfiltered blanks them.
+var filterDriverVars = []string{"clean", "smudge", "process"}
+
+// RunUnfiltered runs git with args in dir under Local, as RunBin would, with
+// every filter driver git's configuration defines switched off
+// (cameronsjo/forgectl#977). It is for a call that can run a filter on the
+// working tree and needs none: status, whose racy or stat-dirty entries are
+// re-hashed through the clean filter (or the process filter) that
+// .gitattributes names. Local cannot stop that by itself: no option turns
+// filters off, and the repository's own .gitattributes and .git/config
+// select and define them.
+//
+// So it costs one more git process: `git config --get-regexp` lists the
+// drivers first, under Local, and the call then carries
+// `-c filter.<name>.clean= -c filter.<name>.smudge= -c filter.<name>.process=`
+// for each name found, which outranks every configuration file. A driver
+// with filter.<name>.required set then fails the call instead of running,
+// which the callers read as an unknown state, never a clean one. The
+// operator's own drivers, git-lfs's among them, are switched off too.
+//
+// It fails closed: when the listing fails, or names a driver that -c cannot
+// override (a name holding '=', where git splits a -c argument), the call is
+// not run and the error says why. dir "" lists and runs in the current
+// directory. A submodule's own drivers are not listed (see the package doc).
+func RunUnfiltered(ctx context.Context, r Runner, bin, dir string, args ...string) (string, error) {
+	var at []string
+	if dir != "" {
+		at = []string{"-C", dir}
+	}
+	out, err := RunBin(ctx, r, bin, Local, append(slices.Clone(at), "config", "-z", "--name-only", "--get-regexp", filterDriverKeys)...)
+	if err != nil {
+		// git config exits 1, printing nothing, when no key matches.
+		var ce *fexec.CommandError
+		if !errors.As(err, &ce) || ce.ExitCode != 1 || ce.Output != "" {
+			return "", fmt.Errorf("list the filter drivers git could run: %w", err)
+		}
+		out = ""
+	}
+	names, err := filterDriverNames(out)
+	if err != nil {
+		return "", err
+	}
+	off := make([]string, 0, 2*len(filterDriverVars)*len(names)+len(at)+len(args))
+	for _, name := range names {
+		for _, v := range filterDriverVars {
+			off = append(off, "-c", "filter."+name+"."+v+"=")
+		}
+	}
+	return RunBin(ctx, r, bin, Local, append(append(off, at...), args...)...)
+}
+
+// errUnexpectedFilterKey is returned for listing output that is not a
+// NUL-separated list of filter driver keys.
+var errUnexpectedFilterKey = errors.New("git config listed a key that names no filter driver; refusing to run unfiltered")
+
+// errUnoverridableFilter is returned for a driver name -c cannot override.
+var errUnoverridableFilter = errors.New("a filter driver's name holds '=' or a newline, which git -c cannot override; refusing to run with it live")
+
+// filterDriverNames parses `git config -z --name-only --get-regexp
+// filterDriverKeys` output into the sorted, distinct driver names.
+func filterDriverNames(out string) ([]string, error) {
+	var names []string
+	for _, key := range strings.Split(out, "\x00") {
+		if key == "" {
+			continue
+		}
+		rest, ok := strings.CutPrefix(key, "filter.")
+		dot := strings.LastIndexByte(rest, '.')
+		if !ok || dot < 0 || !slices.Contains(filterDriverVars, rest[dot+1:]) {
+			return nil, errUnexpectedFilterKey
+		}
+		name := rest[:dot]
+		if strings.ContainsAny(name, "=\n") {
+			return nil, errUnoverridableFilter
+		}
+		if !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names, nil
 }
 
 // Command builds an *exec.Cmd running git with args under p, for a caller

@@ -131,3 +131,23 @@ func TestCommandCarriesTheProfile(t *testing.T) {
 		t.Errorf("env was not Local's: %v", cmd.Env)
 	}
 }
+
+// Mutations: take the name from the left (a.b.clean names "a"); drop the
+// dedup (lfs twice); accept any suffix (filter.x.required passes).
+func TestFilterDriverNames(t *testing.T) {
+	got, err := filterDriverNames("filter.lfs.clean\x00filter.lfs.process\x00filter.a.b.clean\x00filter..smudge\x00filter.Q\"x\\y.clean\x00")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"", "Q\"x\\y", "a.b", "lfs"}; !slices.Equal(got, want) {
+		t.Errorf("names = %q, want %q", got, want)
+	}
+	if got, err := filterDriverNames(""); err != nil || len(got) != 0 {
+		t.Errorf("empty listing = %q, %v; want none", got, err)
+	}
+	for _, bad := range []string{"filter.x.required", "core.fsmonitor", "filter.clean", "filter.a=b.clean", "status line\n"} {
+		if _, err := filterDriverNames(bad + "\x00"); err == nil {
+			t.Errorf("filterDriverNames(%q) accepted it", bad)
+		}
+	}
+}
