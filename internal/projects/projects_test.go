@@ -499,9 +499,10 @@ func TestDiscover_NonGitDir_StatusIsNotRepo(t *testing.T) {
 }
 
 // TestInventory_StatusProcessBudget pins forgectl#216 end to end: a full
-// Inventory row costs exactly three git processes per repository — the
-// filter-driver listing that keeps the status probe from running a
-// repository's filter (#977), one status probe, and one origin lookup —
+// Inventory row costs exactly four git processes per repository without
+// submodules — the filter-driver and submodule listings that keep the status
+// probe from running a repository's filter (#977), one status probe, and one
+// origin lookup —
 // whether the tree is clean or dirty. Before the porcelain-v2 collapse a
 // clean row cost a further process, because learning the ahead count needed a
 // second `rev-list` walk.
@@ -577,8 +578,8 @@ func TestInventory_StatusProcessBudget(t *testing.T) {
 			if counts["remote"] != 1 {
 				t.Errorf("remote get-url calls = %d, want exactly 1", counts["remote"])
 			}
-			if counts["config"] != 1 {
-				t.Errorf("filter listings = %d, want exactly 1", counts["config"])
+			if counts["config"] != 1 || counts["ls-files"] != 1 {
+				t.Errorf("filter-driver and submodule listings = %d and %d, want exactly 1 each", counts["config"], counts["ls-files"])
 			}
 			if counts["rev-list"] != 0 {
 				t.Errorf("rev-list calls = %d, want 0", counts["rev-list"])
@@ -587,8 +588,8 @@ func TestInventory_StatusProcessBudget(t *testing.T) {
 			for _, n := range counts {
 				total += n
 			}
-			if total != 3 {
-				t.Errorf("git calls for %s = %d (%v), want exactly 3", repo, total, counts)
+			if total != 4 {
+				t.Errorf("git calls for %s = %d (%v), want exactly 4", repo, total, counts)
 			}
 		})
 	}

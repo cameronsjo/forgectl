@@ -70,10 +70,12 @@
 //     whenever git re-hashes the file, which status does for any stat-dirty
 //     entry, and so does worktree remove's dirty check. No option turns
 //     filters off, and the repository's own config can define them. A call
-//     that needs no filter uses RunUnfiltered, which lists the drivers and
-//     blanks each one by name (#977); the projects status probe and clean's
-//     dirty check do. It reads the superproject's config only: status runs a
-//     child git in each submodule, whose own drivers it does not list.
+//     that needs no filter uses RunUnfiltered, which lists the drivers the
+//     repository and each of its submodules define and blanks each one by
+//     name (#977); the projects status probe, clean's dirty check and
+//     branch prune's worktree remove do. A driver that only the operator's
+//     global or system config defines stays live where git can tell scopes
+//     apart (git 2.26 and later).
 //
 //   - The operator's own filters on checkout. worktree add runs smudge
 //     filters, git-lfs's among them, which may fetch objects themselves.
@@ -104,8 +106,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -269,6 +273,45 @@ func Run(ctx context.Context, r Runner, p Profile, args ...string) (string, erro
 	return RunBin(ctx, r, Bin, p, args...)
 }
 
+// RunRefusing is Run with each transport in refuse refused whatever the
+// operator's configuration or environment allows: the call carries
+// `-c protocol.<name>.allow=never` for each, and under Transport an
+// inherited GIT_ALLOW_PROTOCOL loses them from its list. git honours that
+// variable ahead of every protocol.allow setting, so without the second step
+// an operator's GIT_ALLOW_PROTOCOL naming ext would admit an ext:: URL past
+// the first (measured on git 2.43). The rest of the operator's list stays,
+// so the result never allows a transport it did not. Local needs neither
+// step: its GIT_ALLOW_PROTOCOL is pinned empty, which refuses them all.
+func RunRefusing(ctx context.Context, r Runner, p Profile, refuse []string, args ...string) (string, error) {
+	overrides, unset := filter(p, os.Environ())
+	if v, ok := os.LookupEnv(allowProtocolVar); ok && p == Transport {
+		if overrides == nil {
+			overrides = map[string]string{}
+		}
+		overrides[allowProtocolVar] = withoutProtocols(v, refuse)
+	}
+	pre := Args(p)
+	for _, name := range refuse {
+		pre = append(pre, "-c", "protocol."+name+".allow=never")
+	}
+	return r.RunWithEnvFiltered(ctx, overrides, unset, Bin, append(pre, args...)...)
+}
+
+// allowProtocolVar is git's transport allowlist variable.
+const allowProtocolVar = "GIT_ALLOW_PROTOCOL"
+
+// withoutProtocols is the colon-separated GIT_ALLOW_PROTOCOL list allowed
+// without the names in refuse. git matches a name exactly.
+func withoutProtocols(allowed string, refuse []string) string {
+	var kept []string
+	for _, name := range strings.Split(allowed, ":") {
+		if !slices.Contains(refuse, name) {
+			kept = append(kept, name)
+		}
+	}
+	return strings.Join(kept, ":")
+}
+
 // RunBin is Run with the git executable named: internal/projects runs the
 // absolute path it resolved once at construction.
 func RunBin(ctx context.Context, r Runner, bin string, p Profile, args ...string) (string, error) {
@@ -305,8 +348,14 @@ const filterDriverKeys = `^filter\..*\.(clean|smudge|process)$`
 // RunUnfiltered blanks them.
 var filterDriverVars = []string{"clean", "smudge", "process"}
 
+// maxSubmoduleDepth is how deeply nested a submodule RunUnfiltered follows
+// before it refuses the call. git sets no bound of its own; a deeper tree, or
+// a submodule path that loops back through a symlink, fails closed rather
+// than walking without end.
+const maxSubmoduleDepth = 32
+
 // RunUnfiltered runs git with args in dir under Local, as RunBin would, with
-// every filter driver git's configuration defines switched off
+// every filter driver that repository configuration defines switched off
 // (cameronsjo/forgectl#977). It is for a call that can run a filter on the
 // working tree and needs none: status, whose racy or stat-dirty entries are
 // re-hashed through the clean filter (or the process filter) that
@@ -314,36 +363,83 @@ var filterDriverVars = []string{"clean", "smudge", "process"}
 // filters off, and the repository's own .gitattributes and .git/config
 // select and define them.
 //
-// So it costs one more git process: `git config --get-regexp` lists the
-// drivers first, under Local, and the call then carries
+// So it lists the drivers first, under Local, with `git config
+// --get-regexp`, and the call then carries
 // `-c filter.<name>.clean= -c filter.<name>.smudge= -c filter.<name>.process=`
 // for each name found, which outranks every configuration file. A driver
 // with filter.<name>.required set then fails the call instead of running,
-// which the callers read as an unknown state, never a clean one. The
-// operator's own drivers, git-lfs's among them, are switched off too.
+// which the callers read as an unknown state, never a clean one.
 //
-// It fails closed: when the listing fails, or names a driver that -c cannot
-// override (a name holding '=', where git splits a -c argument), the call is
-// not run and the error says why. dir "" lists and runs in the current
-// directory. A submodule's own drivers are not listed (see the package doc).
+// The listing covers dir's repository and every populated submodule under
+// it, nested ones included, found through `git ls-files --stage`: status runs
+// a child git in each submodule, which reads that submodule's own config,
+// and the -c options reach those children, because git passes its command
+// line config on to a submodule's git (measured on git 2.43). A repository
+// with no submodule costs two git processes ahead of the call; each
+// populated submodule costs two more.
+//
+// Only drivers that local, worktree or command scope defines are blanked
+// (git config --show-scope, git 2.26 and later). A driver that global or
+// system configuration alone defines is the operator's own, git-lfs's among
+// them, and stays live, as the rest of the operator's configuration does
+// under Local; a repository can still route its files through it, which runs
+// the operator's program, not the repository's. A name the repository also
+// defines is blanked in every scope. On a git without --show-scope, or a
+// scoped listing it cannot parse, every listed driver is blanked.
+//
+// It fails closed: when a listing fails, names a driver that -c cannot
+// override (a name holding '=', where git splits a -c argument, or a
+// newline), or lists anything else it does not expect, the call is not run
+// and the error says why. dir "" lists and runs in the current directory.
 func RunUnfiltered(ctx context.Context, r Runner, bin, dir string, args ...string) (string, error) {
-	var at []string
-	if dir != "" {
-		at = []string{"-C", dir}
+	return RunUnfilteredAlso(ctx, r, bin, dir, nil, args...)
+}
+
+// RunUnfilteredAlso is RunUnfiltered for a call that reaches working trees
+// besides dir's. worktree remove is one: its dirty check runs status in the
+// working tree it removes, under that worktree's own config.worktree, which
+// a listing in dir does not read (measured on git 2.43). The drivers of each
+// repository in also, and of its submodules, are blanked as well. A path in
+// also that does not exist is skipped: git runs no filter in a working tree
+// that is not there, and worktree remove still prunes its record.
+func RunUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []string, args ...string) (string, error) {
+	type repo struct {
+		dir   string
+		depth int
 	}
-	out, err := RunBin(ctx, r, bin, Local, append(slices.Clone(at), "config", "-z", "--name-only", "--get-regexp", filterDriverKeys)...)
-	if err != nil {
-		// git config exits 1, printing nothing, when no key matches.
-		var ce *fexec.CommandError
-		if !errors.As(err, &ce) || ce.ExitCode != 1 || ce.Output != "" {
-			return "", fmt.Errorf("list the filter drivers git could run: %w", err)
+	queue := []repo{{dir: dir}}
+	for _, d := range also {
+		if _, err := os.Lstat(d); errors.Is(err, fs.ErrNotExist) {
+			continue
 		}
-		out = ""
+		queue = append(queue, repo{dir: d})
 	}
-	names, err := filterDriverNames(out)
-	if err != nil {
-		return "", err
+	var names []string
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		found, err := listFilterDrivers(ctx, r, bin, cur.dir)
+		if err != nil {
+			return "", err
+		}
+		for _, name := range found {
+			if !slices.Contains(names, name) {
+				names = append(names, name)
+			}
+		}
+		subs, err := populatedSubmodules(ctx, r, bin, cur.dir)
+		if err != nil {
+			return "", err
+		}
+		if len(subs) > 0 && cur.depth >= maxSubmoduleDepth {
+			return "", errSubmoduleDepth
+		}
+		for _, sub := range subs {
+			queue = append(queue, repo{dir: sub, depth: cur.depth + 1})
+		}
 	}
+	slices.Sort(names)
+	at := atDir(dir)
 	off := make([]string, 0, 2*len(filterDriverVars)*len(names)+len(at)+len(args))
 	for _, name := range names {
 		for _, v := range filterDriverVars {
@@ -353,12 +449,130 @@ func RunUnfiltered(ctx context.Context, r Runner, bin, dir string, args ...strin
 	return RunBin(ctx, r, bin, Local, append(append(off, at...), args...)...)
 }
 
+// atDir is the -C option that points git at dir, or none for "".
+func atDir(dir string) []string {
+	if dir == "" {
+		return nil
+	}
+	return []string{"-C", dir}
+}
+
+// noMatch reports whether err is git config's answer to a listing that
+// matched nothing: exit 1, printing nothing.
+func noMatch(err error) bool {
+	var ce *fexec.CommandError
+	return errors.As(err, &ce) && ce.ExitCode == 1 && ce.Output == ""
+}
+
+// listFilterDrivers returns the drivers in dir's repository configuration
+// that RunUnfiltered blanks: those a local, worktree or command scope
+// defines, or, when git cannot say which scope a key came from, every one.
+func listFilterDrivers(ctx context.Context, r Runner, bin, dir string) ([]string, error) {
+	out, err := RunBin(ctx, r, bin, Local, append(atDir(dir), "config", "-z", "--show-scope", "--name-only", "--get-regexp", filterDriverKeys)...)
+	switch {
+	case err == nil:
+	case noMatch(err):
+		return nil, nil
+	default:
+		// A git before 2.26 refuses --show-scope (exit 129). Any other
+		// failure, the unscoped listing meets as well, and fails closed.
+		return listAllFilterDrivers(ctx, r, bin, dir)
+	}
+	names, err := scopedFilterDriverNames(out)
+	if errors.Is(err, errScopeUnparsed) {
+		return listAllFilterDrivers(ctx, r, bin, dir)
+	}
+	return names, err
+}
+
+// listAllFilterDrivers returns every driver dir's configuration defines, in
+// any scope.
+func listAllFilterDrivers(ctx context.Context, r Runner, bin, dir string) ([]string, error) {
+	out, err := RunBin(ctx, r, bin, Local, append(atDir(dir), "config", "-z", "--name-only", "--get-regexp", filterDriverKeys)...)
+	if err != nil {
+		if !noMatch(err) {
+			return nil, fmt.Errorf("list the filter drivers git could run: %w", err)
+		}
+		out = ""
+	}
+	return filterDriverNames(out)
+}
+
+// populatedSubmodules returns the working tree of every submodule in dir's
+// index that status would enter: a gitlink entry whose path holds a .git,
+// as a directory or a gitfile.
+func populatedSubmodules(ctx context.Context, r Runner, bin, dir string) ([]string, error) {
+	// ":/" covers the whole tree when dir is below its top, as status does.
+	out, err := RunBin(ctx, r, bin, Local, append(atDir(dir), "ls-files", "-z", "--stage", "--", ":/")...)
+	if err != nil {
+		return nil, fmt.Errorf("list the submodules git status would enter: %w", err)
+	}
+	var subs []string
+	for _, entry := range strings.Split(out, "\x00") {
+		if entry == "" {
+			continue
+		}
+		meta, p, ok := strings.Cut(entry, "\t")
+		if !ok || p == "" {
+			return nil, errUnexpectedIndexEntry
+		}
+		if !strings.HasPrefix(meta, "160000 ") {
+			continue
+		}
+		sub := filepath.Join(dir, filepath.FromSlash(p))
+		populated, err := holdsGit(sub)
+		if err != nil {
+			return nil, err
+		}
+		if populated {
+			subs = append(subs, sub)
+		}
+	}
+	return subs, nil
+}
+
+// holdsGit reports whether the directory sub holds a .git entry, which is
+// what git checks before it runs status in a submodule. A sub that is
+// missing or not a directory holds none. Any other error is returned.
+func holdsGit(sub string) (bool, error) {
+	fi, err := os.Stat(sub)
+	if errors.Is(err, fs.ErrNotExist) || (err == nil && !fi.IsDir()) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect a submodule's working tree: %w", err)
+	}
+	if _, err := os.Lstat(filepath.Join(sub, ".git")); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect a submodule's working tree: %w", err)
+	}
+	return true, nil
+}
+
 // errUnexpectedFilterKey is returned for listing output that is not a
 // NUL-separated list of filter driver keys.
 var errUnexpectedFilterKey = errors.New("git config listed a key that names no filter driver; refusing to run unfiltered")
 
 // errUnoverridableFilter is returned for a driver name -c cannot override.
 var errUnoverridableFilter = errors.New("a filter driver's name holds '=' or a newline, which git -c cannot override; refusing to run with it live")
+
+// errScopeUnparsed is returned for a scoped listing that is not pairs of
+// scope and key; RunUnfiltered then blanks every driver instead.
+var errScopeUnparsed = errors.New("git config's scoped listing is not scope and key pairs")
+
+// errUnexpectedIndexEntry is returned for ls-files output that is not
+// NUL-separated "mode object stage<TAB>path" entries.
+var errUnexpectedIndexEntry = errors.New("git ls-files listed an entry it should not; refusing to run unfiltered")
+
+// errSubmoduleDepth is returned for submodules nested past
+// maxSubmoduleDepth.
+var errSubmoduleDepth = errors.New("submodules nest too deeply to list their filter drivers; refusing to run unfiltered")
+
+// operatorScopes are the scopes whose drivers RunUnfiltered leaves live: the
+// operator's own configuration, which no repository writes.
+var operatorScopes = []string{"global", "system"}
 
 // filterDriverNames parses `git config -z --name-only --get-regexp
 // filterDriverKeys` output into the sorted, distinct driver names.
@@ -368,14 +582,9 @@ func filterDriverNames(out string) ([]string, error) {
 		if key == "" {
 			continue
 		}
-		rest, ok := strings.CutPrefix(key, "filter.")
-		dot := strings.LastIndexByte(rest, '.')
-		if !ok || dot < 0 || !slices.Contains(filterDriverVars, rest[dot+1:]) {
-			return nil, errUnexpectedFilterKey
-		}
-		name := rest[:dot]
-		if strings.ContainsAny(name, "=\n") {
-			return nil, errUnoverridableFilter
+		name, err := filterDriverName(key)
+		if err != nil {
+			return nil, err
 		}
 		if !slices.Contains(names, name) {
 			names = append(names, name)
@@ -383,6 +592,49 @@ func filterDriverNames(out string) ([]string, error) {
 	}
 	slices.Sort(names)
 	return names, nil
+}
+
+// scopedFilterDriverNames parses `git config -z --show-scope --name-only
+// --get-regexp filterDriverKeys` output, NUL-separated scope and key pairs,
+// into the sorted, distinct names of the drivers a scope outside
+// operatorScopes defines. Every key is checked, whatever its scope.
+func scopedFilterDriverNames(out string) ([]string, error) {
+	if out == "" {
+		return nil, nil
+	}
+	fields := strings.Split(strings.TrimSuffix(out, "\x00"), "\x00")
+	if len(fields)%2 != 0 {
+		return nil, errScopeUnparsed
+	}
+	var names []string
+	for i := 0; i < len(fields); i += 2 {
+		scope, key := fields[i], fields[i+1]
+		name, err := filterDriverName(key)
+		if err != nil {
+			return nil, err
+		}
+		if slices.Contains(operatorScopes, scope) || slices.Contains(names, name) {
+			continue
+		}
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names, nil
+}
+
+// filterDriverName is the driver name in a filter driver key, parsed from
+// the right, since the name may itself hold dots.
+func filterDriverName(key string) (string, error) {
+	rest, ok := strings.CutPrefix(key, "filter.")
+	dot := strings.LastIndexByte(rest, '.')
+	if !ok || dot < 0 || !slices.Contains(filterDriverVars, rest[dot+1:]) {
+		return "", errUnexpectedFilterKey
+	}
+	name := rest[:dot]
+	if strings.ContainsAny(name, "=\n") {
+		return "", errUnoverridableFilter
+	}
+	return name, nil
 }
 
 // Command builds an *exec.Cmd running git with args under p, for a caller

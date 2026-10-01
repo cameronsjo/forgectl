@@ -64,14 +64,29 @@ func Strip(args []string) []string {
 }
 
 // FilterListing reports whether args, a git argv as a fake Runner records it,
-// are gitenv.RunUnfiltered's listing of the filter drivers: `[-C dir] config
-// -z --name-only --get-regexp ^filter...`.
+// are one of gitenv.RunUnfiltered's listings ahead of its call: the filter
+// drivers, `[-C dir] config -z [--show-scope] --name-only --get-regexp
+// ^filter...`, or the submodules, `[-C dir] ls-files -z --stage -- :/`.
 func FilterListing(args []string) bool {
+	return driverListing(args) || submoduleListing(args)
+}
+
+// atStripped returns args without a leading profile and -C dir.
+func atStripped(args []string) []string {
 	args = Strip(args)
 	if len(args) >= 2 && args[0] == "-C" {
 		args = args[2:]
 	}
-	return len(args) == 5 && args[0] == "config" && args[3] == "--get-regexp" && strings.HasPrefix(args[4], `^filter\.`)
+	return args
+}
+
+func driverListing(args []string) bool {
+	args = atStripped(args)
+	return len(args) >= 5 && args[0] == "config" && args[len(args)-2] == "--get-regexp" && strings.HasPrefix(args[len(args)-1], `^filter\.`)
+}
+
+func submoduleListing(args []string) bool {
+	return slices.Equal(atStripped(args), []string{"ls-files", "-z", "--stage", "--", ":/"})
 }
 
 // ErrNoFilterDrivers is what git returns for a filter listing that matches
@@ -80,14 +95,23 @@ func ErrNoFilterDrivers(name string, args []string) error {
 	return &fexec.CommandError{Name: name, Args: args, ExitCode: 1, Err: errors.New("exit status 1")}
 }
 
-// NoFilters wraps a fake Runner's RunFunc so a filter listing is answered as
-// git answers it for a repository that defines no filter driver, and every
-// other call reaches fn. gitenv.RunUnfiltered then runs the caller's argv
-// unchanged.
+// AnswerListing answers a FilterListing as git does for a repository with no
+// filter driver and no submodule: the driver listing exits 1 with no output,
+// and the submodule listing prints nothing.
+func AnswerListing(name string, args []string) (string, error) {
+	if driverListing(args) {
+		return "", ErrNoFilterDrivers(name, args)
+	}
+	return "", nil
+}
+
+// NoFilters wraps a fake Runner's RunFunc so RunUnfiltered's listings are
+// answered as AnswerListing answers them, and every other call reaches fn.
+// gitenv.RunUnfiltered then runs the caller's argv unchanged.
 func NoFilters(fn func(name string, args []string) (string, error)) func(name string, args []string) (string, error) {
 	return func(name string, args []string) (string, error) {
 		if FilterListing(args) {
-			return "", ErrNoFilterDrivers(name, args)
+			return AnswerListing(name, args)
 		}
 		return fn(name, args)
 	}
@@ -251,4 +275,74 @@ func (c FilterCanary) AssertLive(t testing.TB) {
 	if !c.Ran(t) {
 		t.Fatal("a Local git status ran no filter driver; the fixture cannot fire, so a passing test would prove nothing")
 	}
+}
+
+// NewSubmoduleFilterCanary builds a FilterCanary whose own configuration
+// defines no filter driver, holding a populated submodule "s" that holds a
+// populated submodule "n". Each submodule's own .git/config defines a clean
+// filter that fires the canary on its stat-dirty x.txt: "sub" in s, and
+// "nested" in n. Status in the superproject runs a child git in each
+// submodule, which runs that submodule's driver (#977). The submodules are
+// embedded repositories added as gitlinks, with no .gitmodules: git status
+// enters them all the same (measured on git 2.43). Unix only.
+func NewSubmoduleFilterCanary(t testing.TB) FilterCanary {
+	t.Helper()
+	RequireGit(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("the filter canary's drivers are sh commands")
+	}
+	dir := t.TempDir()
+	c := FilterCanary{Dir: filepath.Join(dir, "repo"), Path: filepath.Join(dir, "canary")}
+	sub := filepath.Join(c.Dir, "s")
+	nested := filepath.Join(sub, "n")
+	if err := os.MkdirAll(nested, 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	repos := []struct{ dir, driver string }{{nested, "nested"}, {sub, "sub"}, {c.Dir, ""}}
+	for _, r := range repos {
+		Git(t, r.dir, "init", "-q", "-b", "main")
+		if r.driver != "" {
+			if err := os.WriteFile(filepath.Join(r.dir, "x.txt"), []byte("payload\n"), 0o600); err != nil {
+				t.Fatalf("WriteFile x.txt: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(r.dir, ".gitattributes"), []byte("x.txt filter="+r.driver+"\n"), 0o600); err != nil {
+				t.Fatalf("WriteFile .gitattributes: %v", err)
+			}
+		}
+		Git(t, r.dir, "add", ".")
+		Git(t, r.dir, "commit", "-q", "--allow-empty", "-m", "control")
+	}
+	fire := "touch '" + c.Path + "'; cat"
+	later := time.Now().Add(time.Hour)
+	for _, r := range repos[:2] {
+		Git(t, r.dir, "config", "filter."+r.driver+".clean", fire)
+		if err := os.Chtimes(filepath.Join(r.dir, "x.txt"), later, later); err != nil {
+			t.Fatalf("Chtimes: %v", err)
+		}
+	}
+	return c
+}
+
+// NewOperatorFilterCanary builds a FilterCanary and gives the process an
+// operator configuration (GIT_CONFIG_GLOBAL, restored by t.Setenv) defining
+// two clean filters that create the file at the returned path: "op", which
+// only the operator defines, on o.txt; and "both", on b.txt, which the
+// repository's own config defines too, firing the repository's canary. Both
+// files are stat-dirty. Unix only.
+func NewOperatorFilterCanary(t testing.TB) (FilterCanary, string) {
+	t.Helper()
+	c := NewFilterCanary(t, [2]string{"o.txt", "op"}, [2]string{"b.txt", "both"})
+	// NewFilterCanary defined "op" in the repository too; the operator's
+	// global config is to be its only definition.
+	Git(t, c.Dir, "config", "--unset", "filter.op.clean")
+	operator := filepath.Join(filepath.Dir(c.Dir), "operator-canary")
+	global := filepath.Join(filepath.Dir(c.Dir), "gitconfig")
+	fire := "touch '" + operator + "'; cat"
+	// Quoted: an unquoted ';' would start a comment in a config file.
+	conf := "[filter \"op\"]\n\tclean = \"" + fire + "\"\n[filter \"both\"]\n\tclean = \"" + fire + "\"\n"
+	if err := os.WriteFile(global, []byte(conf), 0o600); err != nil {
+		t.Fatalf("WriteFile global config: %v", err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	return c, operator
 }
