@@ -11,6 +11,7 @@ package pr
 // PRs (Classification: concurrent enumeration on the Inventory model)
 //   [x] Happy: three queries union + dedup by Ref.String(), sorted by (slug, number)
 //   [x] Unhappy: a degraded query becomes a note, not a failure
+//   [x] Invariant: notes follow query order, not completion order (PRs and Dash)
 //
 // PrepareMany (Classification: the load-bearing concurrency)
 //   [x] Invariant: two same-repo PRs never run their git checkout concurrently
@@ -646,5 +647,76 @@ func TestCheckAgentForReview_ForgedLocalRefStillRefused(t *testing.T) {
 	if err := CheckAgentForReview("codex", effective); err == nil {
 		t.Error("CheckAgentForReview(codex) accepted a remote ref owned by \"local\"; " +
 			"the Codex reviewer must still be refused against a remote head")
+	}
+}
+
+// reversedFailures is a gh fake whose @me searches all fail, finishing in
+// the reverse of order: each flag waits until every flag after it in order
+// has started, then a little longer, so a fan-out that keeps notes in
+// completion order sees them backwards. The wait only shapes the red side;
+// the fixed order the tests assert does not depend on any timing.
+func reversedFailures(t *testing.T, order ...string) *exec.FakeRunner {
+	t.Helper()
+	started := make(map[string]chan struct{}, len(order))
+	for _, f := range order {
+		started[f] = make(chan struct{})
+	}
+	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name != "gh" {
+			return "[]", nil
+		}
+		flag := searchWhoFlag(args)
+		ch, ok := started[flag]
+		if !ok {
+			return "[]", nil
+		}
+		close(ch)
+		for i, f := range order {
+			if f != flag {
+				continue
+			}
+			for _, later := range order[i+1:] {
+				select {
+				case <-started[later]:
+				case <-time.After(5 * time.Second):
+					t.Errorf("query %s never started", later)
+				}
+			}
+			time.Sleep(time.Duration(len(order)-1-i) * 20 * time.Millisecond)
+		}
+		return "", errors.New("gh: not authenticated")
+	}}
+}
+
+// TestPRs_NotesFollowQueryOrder: notes come out in query order, whatever
+// order the queries finish in, so `pr ls` and --json read the same on every
+// run (forgectl#997 item 1).
+//
+// Mutation that turns it red: append each note as its result is received.
+func TestPRs_NotesFollowQueryOrder(t *testing.T) {
+	client := New(reversedFailures(t, "--author", "--assignee", "--review-requested"))
+	_, notes, err := client.PRs(context.Background())
+	if err != nil {
+		t.Fatalf("PRs: %v", err)
+	}
+	want := []string{"authored: query failed", "assigned: query failed", "review-requested: query failed"}
+	if strings.Join(notes, "|") != strings.Join(want, "|") {
+		t.Errorf("notes = %q, want %q", notes, want)
+	}
+}
+
+// TestDash_NotesFollowSectionOrder is the Dash twin: awaiting-you, then
+// your-open.
+//
+// Mutation that turns it red: append each note as its result is received.
+func TestDash_NotesFollowSectionOrder(t *testing.T) {
+	client := New(reversedFailures(t, "--review-requested", "--author"), WithSessionsDir(t.TempDir()))
+	_, notes, err := client.Dash(context.Background())
+	if err != nil {
+		t.Fatalf("Dash: %v", err)
+	}
+	want := []string{"awaiting-you: query failed", "your-open: query failed"}
+	if strings.Join(notes, "|") != strings.Join(want, "|") {
+		t.Errorf("notes = %q, want %q", notes, want)
 	}
 }

@@ -4,9 +4,10 @@
 // ships (projects discovery, the `pr dash` sections, the clean dry-run scan,
 // the bench health card). What this package adds is the containment rule:
 // every section runs under its own deadline, and a section that errors, runs
-// out of time, or panics on the source's own goroutine degrades to a
-// per-section failure instead of failing the command. (A goroutine the source
-// starts itself is outside that recover; its panic still ends the process.)
+// out of time, or panics (or calls runtime.Goexit) on the source's own
+// goroutine degrades to a per-section failure instead of failing the
+// command. (A goroutine the source starts itself is outside that recover;
+// its panic still ends the process.)
 package status
 
 import (
@@ -64,6 +65,11 @@ type Source[T any] func(ctx context.Context) (T, []string, error)
 // any value from any depth. Only its Go type reaches the debug log.
 var errPanicked = errors.New("source panicked")
 
+// errNoResult is the categorical text for a source whose goroutine ended
+// without returning or panicking: runtime.Goexit, which runs deferred calls
+// but leaves recover with nothing to report.
+var errNoResult = errors.New("source exited without a result")
+
 // outcome carries a source's return values across the goroutine boundary.
 // ctxErr is the section context's state the moment the source returned,
 // captured on the source's own goroutine: whether the result beat the
@@ -116,13 +122,22 @@ func CollectTracked[T any](ctx context.Context, timeout time.Duration, src Sourc
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		returned := false
+		// Every way the goroutine can end sends exactly one outcome, so
+		// Collect never waits on a source that will never send: a return
+		// sends below, and a panic or a runtime.Goexit sends here.
 		defer func() {
 			if p := recover(); p != nil {
 				slog.Debug("Status section source panicked.", "type", fmt.Sprintf("%T", p))
 				r.send(ctx, outcome[T]{err: errPanicked})
+				return
+			}
+			if !returned {
+				r.send(ctx, outcome[T]{err: errNoResult})
 			}
 		}()
 		data, notes, err := src(ctx)
+		returned = true
 		r.send(ctx, outcome[T]{data: data, notes: notes, err: err})
 	}()
 
