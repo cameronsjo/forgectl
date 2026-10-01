@@ -109,7 +109,9 @@ func TestDecodeResult(t *testing.T) {
 
 // Mutation, one per rule: delete the rule from CheckOperand and its row goes
 // red (drop the utf8.ValidString case and the invalid rows do; drop the
-// IsInvisibleRune half and the invisible rows do); raise MaxOperandLen and "65 bytes" does (the limit is pinned as a
+// IsInvisibleRune half and the invisible rows do; drop a rune from
+// operandJoiners and its accepted label goes red, widen the list to every
+// Cf rune and the zero width space row does); raise MaxOperandLen and "65 bytes" does (the limit is pinned as a
 // number, not only relative to the constant).
 func TestCheckOperand(t *testing.T) {
 	for name, s := range map[string]string{
@@ -132,17 +134,24 @@ func TestCheckOperand(t *testing.T) {
 		"byte order mark":      "\ufeffw1",
 		"line separator":       "w1\u2028",
 		"paragraph separator":  "w1\u2029",
-		"variation selector":   "w1\ufe0f",
+		"variation selector 1": "w1\ufe00",
 		"hangul filler":        "w1\u3164",
 		"braille blank":        "w1\u2800",
 		"invalid utf-8":        "w1\xff",
 		"truncated multi-byte": "w1\xe2\x80",
+		"word joiner":          "w\u20601",
+		"left-to-right mark":   "w1\u200e",
+		"tag character":        "w1\U000E0041",
 	} {
 		if err := CheckOperand(s); err == nil {
 			t.Errorf("%s accepted", name)
 		}
 	}
-	for _, s := range []string{"w1", "w1:t3", "w7D:t17", "label with spaces", "fleet", "v1.2", strings.Repeat("a", MaxOperandLen), "caf\u00e9", "cafe\u0301", "\u6f22\u5b57", "fire \U0001F525"} {
+	for _, s := range []string{"w1", "w1:t3", "w7D:t17", "label with spaces", "fleet", "v1.2", strings.Repeat("a", MaxOperandLen), "caf\u00e9", "cafe\u0301", "\u6f22\u5b57", "fire \U0001F525",
+		// The joiners and emoji/text presentation selectors that real labels
+		// carry stay accepted (#999 fix round): VS16 emoji, a ZWJ emoji
+		// sequence, ZWJ inside Sinhala, ZWNJ inside Persian, and VS15.
+		"\u2764\ufe0f", "\U0001F468\u200d\U0001F4BB", "\u0dc1\u0dca\u200d\u0dbb\u0dd3", "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645", "\u2764\ufe0e"} {
 		if err := CheckOperand(s); err != nil {
 			t.Errorf("%q refused: %v", s, err)
 		}

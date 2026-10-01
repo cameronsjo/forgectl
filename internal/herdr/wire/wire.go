@@ -153,7 +153,9 @@ func checkFoldedKeys(raw []byte, t reflect.Type) error {
 
 // jsonFieldNames is the set of exact JSON names encoding/json gives t's
 // exported, non-embedded fields: the tag's name, or the field's own name when
-// the tag gives none. A field tagged "-" has none.
+// the tag gives none. A field tagged "-" has none. Not covered: an embedded
+// struct's promoted fields are skipped, so a folded key for one passes
+// unchecked; no T decoded here embeds one.
 func jsonFieldNames(t reflect.Type) map[string]bool {
 	names := make(map[string]bool, t.NumField())
 	for f := range t.Fields() {
@@ -183,9 +185,9 @@ const MaxOperandLen = 64
 // can come from the environment or a config file, so the caller decides
 // whether and how to show it.
 var (
-	ErrEmptyOperand   = errors.New("is empty")
-	ErrFlagOperand    = errors.New("starts with '-'")
-	ErrLongOperand    = fmt.Errorf("is over %d bytes", MaxOperandLen)
+	ErrEmptyOperand     = errors.New("is empty")
+	ErrFlagOperand      = errors.New("starts with '-'")
+	ErrLongOperand      = fmt.Errorf("is over %d bytes", MaxOperandLen)
 	ErrControlOperand   = errors.New("has a control character")
 	ErrInvisibleOperand = errors.New("has an invisible character")
 	ErrEncodingOperand  = errors.New("is not valid UTF-8")
@@ -193,11 +195,12 @@ var (
 
 // CheckOperand reports whether s is safe as one herdr operand: non-empty, not
 // read as a flag (no leading '-'), at most MaxOperandLen bytes, valid UTF-8,
-// and free of control, bidi and invisible characters. The rune rules are the
-// hub picker's (termsafe.IsUnsafeTerminalRune and termsafe.IsInvisibleRune,
-// #946/#967, #999): no rune reaches an argv as anything but data, but a label
-// carrying a bidi override or a zero-width rune would reach herdr's UI, or
-// look like a different label than it is. It is the floor every operand
+// and free of control, bidi and invisible characters. The rune rules start
+// from the hub picker's (termsafe.IsUnsafeTerminalRune and
+// termsafe.IsInvisibleRune, #946/#967, #999) and admit operandJoiners on top:
+// no rune reaches an argv as anything but data, but a label carrying a bidi
+// override or a zero-width space would reach herdr's UI, or look like a
+// different label than it is. It is the floor every operand
 // meets; a caller with a narrower shape (a session name's charset) checks that
 // on top. It applies no charset itself, because ids carry ':' and labels carry
 // spaces.
@@ -213,8 +216,23 @@ func CheckOperand(s string) error {
 		return ErrEncodingOperand
 	case strings.IndexFunc(s, termsafe.IsUnsafeTerminalRune) >= 0:
 		return ErrControlOperand
-	case strings.IndexFunc(s, termsafe.IsInvisibleRune) >= 0:
+	case strings.IndexFunc(s, refusedInvisible) >= 0:
 		return ErrInvisibleOperand
 	}
 	return nil
+}
+
+// operandJoiners are the invisible runes a real herdr label carries, so
+// CheckOperand admits them though the hub picker refuses them. ZWJ (U+200D)
+// builds emoji sequences (man, ZWJ, laptop) and Indic conjuncts (Sinhala
+// "shri"); ZWNJ (U+200C) is ordinary Persian and Indic spelling; VS15 and
+// VS16 (U+FE0E, U+FE0F) choose text or emoji presentation (a red heart with
+// VS16). Refusing them would leave an existing workspace with such a label
+// impossible to target. None is a bidi control. The list lives here, not in
+// termsafe, so the picker's predicate is unchanged.
+var operandJoiners = map[rune]bool{'\u200c': true, '\u200d': true, '\ufe0e': true, '\ufe0f': true}
+
+// refusedInvisible is termsafe.IsInvisibleRune less operandJoiners.
+func refusedInvisible(r rune) bool {
+	return termsafe.IsInvisibleRune(r) && !operandJoiners[r]
 }

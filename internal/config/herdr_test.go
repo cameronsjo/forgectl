@@ -198,3 +198,21 @@ func TestValidatePath_ChecksHerdrOrganize(t *testing.T) {
 		t.Errorf("ValidatePath = %v, want the workspace_order error (doctor must see it)", err)
 	}
 }
+
+// TestHerdrOrganize_JoinedLabelsPass: labels that real herdr workspaces carry
+// (VS16 emoji, a ZWJ emoji sequence, ZWJ inside Sinhala) pass Validate on
+// every path, so an existing workspace with one can still be targeted.
+//
+// Mutation: drop U+200D or U+FE0F from wire.operandJoiners and its rows go red.
+func TestHerdrOrganize_JoinedLabelsPass(t *testing.T) {
+	for _, label := range []string{"❤️ home", "\U0001F468‍\U0001F4BB dev", "ශ්‍රී"} {
+		cfg := HerdrOrganizeConfig{
+			Default:        label,
+			Rules:          []HerdrOrganizeRule{{Glob: "a", Workspace: label}},
+			WorkspaceOrder: []string{label},
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("%q refused: %v", label, err)
+		}
+	}
+}
