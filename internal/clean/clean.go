@@ -292,33 +292,37 @@ func (c *Client) ApplyReport(ctx context.Context, resolvedRoot string, report Re
 	result := Result{}
 	// Memoized per project root: a project with several matched targets
 	// (e.g. node_modules AND dist) only needs one `git status` call, not one
-	// per target.
-	dirtyCache := make(map[string]bool)
+	// per target. The value is the skip reason, "" for a clean tree.
+	skipCache := make(map[string]string)
 
 	for _, t := range report.Targets {
 		item := Item{Target: t}
 		result.TotalScanned += t.Size
 
 		if !opts.Force && t.ProjectRoot != "" {
-			dirty, cached := dirtyCache[t.ProjectRoot]
+			reason, cached := skipCache[t.ProjectRoot]
 			if !cached {
 				d, derr := gitDirty(ctx, c.run, t.ProjectRoot)
-				if derr != nil {
+				switch {
+				case derr != nil:
 					// Safety guarantee #3, fail-safe direction: unable to
 					// CONFIRM the tree is clean is treated as dirty, not as
 					// clean. A `git status` failure (missing git binary,
-					// corrupt repo, permissions) must never silently
-					// downgrade to "safe to delete".
+					// corrupt repo, permissions, a repository git blocks on
+					// past its deadline) must never silently downgrade to
+					// "safe to delete". The reason says the state is unknown
+					// rather than claiming it is dirty (#1005).
 					slog.Warn("Could not confirm git tree is clean; skipping conservatively.",
 						"project", t.ProjectRoot, "target", t.Path, "error", derr)
-					d = true
+					reason = unknownTreeSkipReason
+				case d:
+					reason = dirtyTreeSkipReason
 				}
-				dirtyCache[t.ProjectRoot] = d
-				dirty = d
+				skipCache[t.ProjectRoot] = reason
 			}
-			if dirty {
+			if reason != "" {
 				item.Skipped = true
-				item.SkipReason = "dirty/uncommitted git tree (pass --force to override)"
+				item.SkipReason = reason
 				result.Items = append(result.Items, item)
 				continue
 			}
@@ -413,6 +417,13 @@ func containsGitComponent(target string) bool {
 	return false
 }
 
+// dirtyTreeSkipReason and unknownTreeSkipReason are why ApplyReport skips a
+// target: its project's git status reported changes, or could not be read.
+const (
+	dirtyTreeSkipReason   = "dirty/uncommitted git tree (pass --force to override)"
+	unknownTreeSkipReason = "git tree state unknown: git status failed or timed out (pass --force to override)"
+)
+
 // gitDirty runs `git status --porcelain` in dir and reports whether the
 // working tree has any uncommitted changes (modified, staged, or untracked
 // files) — safety guarantee #3. Mirrors internal/projects' gitStatus shape
@@ -423,7 +434,7 @@ func containsGitComponent(target string) bool {
 func gitDirty(ctx context.Context, run exec.Runner, dir string) (bool, error) {
 	// Unfiltered (#977): status would otherwise run the clean filter the
 	// repository names on a stat-dirty file. A listing failure is an error,
-	// which ApplyReport reads as dirty.
+	// which ApplyReport skips as unknown.
 	out, err := gitenv.RunUnfiltered(ctx, run, gitenv.Bin, dir, "status", "--porcelain")
 	if err != nil {
 		return false, fmt.Errorf("git status --porcelain in %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))

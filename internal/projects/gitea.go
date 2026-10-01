@@ -98,12 +98,12 @@ func cloneFromGitea(ctx context.Context, run gitenv.Runner, sshURL, dest string)
 	slog.Debug("Preparing to clone over SSH.", "dest", dest)
 	// The URL is server-controlled (it comes from the repo-list output), and git's
 	// ext::/fd:: smart transports execute arbitrary commands — so a malicious or
-	// MITM'd list source could smuggle `ext::sh -c …` into a clone. Disable those
+	// MITM'd list source could smuggle `ext::sh -c …` into a clone. Refuse those
 	// transports, and end options with `--` so a "-"-leading URL can't be read as
-	// a flag.
-	if _, err := gitenv.Run(ctx, run, gitenv.Transport,
-		"-c", "protocol.ext.allow=never",
-		"-c", "protocol.fd.allow=never",
+	// a flag. RunRefusing carries `-c protocol.<name>.allow=never` for each and
+	// drops them from an inherited GIT_ALLOW_PROTOCOL, which git honours ahead
+	// of every -c (#987).
+	if _, err := gitenv.RunRefusing(ctx, run, gitenv.Transport, []string{"ext", "fd"},
 		"clone", "--", sshURL, dest); err != nil {
 		slog.Error("Failed to clone over SSH.", "dest", dest, "error", err)
 		// Categorical (#658): sshURL is server-supplied, and git's stderr
@@ -125,9 +125,7 @@ func cloneBareFromURL(ctx context.Context, run gitenv.Runner, sshURL, dest strin
 		return fmt.Errorf("cannot bare-clone over SSH: empty URL")
 	}
 	slog.Debug("Preparing to bare-clone over SSH.", "dest", dest)
-	if _, err := gitenv.Run(ctx, run, gitenv.Transport,
-		"-c", "protocol.ext.allow=never",
-		"-c", "protocol.fd.allow=never",
+	if _, err := gitenv.RunRefusing(ctx, run, gitenv.Transport, []string{"ext", "fd"},
 		"clone", "--bare", "--", sshURL, dest); err != nil {
 		slog.Error("Failed to bare-clone over SSH.", "dest", dest, "error", err)
 		// Categorical (#658), as cloneFromGitea.

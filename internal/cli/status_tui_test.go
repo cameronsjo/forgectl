@@ -40,7 +40,7 @@ func (c *cockpitRecorder) runtime() statusTUIRuntime {
 			}
 			return tui.Action{}, nil
 		},
-		runVerb: func(_ *cobra.Command, argv []string) error {
+		runVerb: func(_ *cobra.Command, _ theme.Theme, argv []string) error {
 			c.ran = append(c.ran, argv)
 			return nil
 		},
@@ -247,12 +247,12 @@ func TestCockpitSnapshot_Rows(t *testing.T) {
 }
 
 // TestStatusTUI_AFailingChosenVerbIsRenderedOnce drives the production
-// runVerb (deferStatusVerb) through execDispatch and fang with a verb that
+// runVerb (deferHubVerb) through execDispatch and fang with a verb that
 // fails. The chosen verb must run after status's own fang frame has
 // returned: run from inside status's RunE, the inner fang renders the error
 // and the outer renders it again.
 //
-// Mutation that turns it red: make deferStatusVerb call runHubVerb directly.
+// Mutation that turns it red: make deferHubVerb call runHubVerb directly.
 func TestStatusTUI_AFailingChosenVerbIsRenderedOnce(t *testing.T) {
 	rt := productionStatusTUIRuntime()
 	rt.stdinIsTerminal = func(io.Reader) bool { return true }
@@ -283,14 +283,35 @@ func TestStatusTUI_AFailingChosenVerbIsRenderedOnce(t *testing.T) {
 	}
 }
 
-// TestDeferStatusVerb_OffTheDispatchPathPrintsTheInvocation: with no
-// deferred-verb slot in the context, nothing runs.
-func TestDeferStatusVerb_OffTheDispatchPathPrintsTheInvocation(t *testing.T) {
+// TestDeferHubVerb_OffTheDispatchPathPrintsTheInvocation: with no
+// deferred-verb slot in the context, nothing runs, and the invocation is
+// echoed the way the hub echoes one it runs: through tui.DisplayArgv, so an
+// argument with a space reads as one quoted argument (forgectl#1003 item 3).
+//
+// Mutation that turns it red: print through hubDollarLine, which joins the
+// elements plainly.
+func TestDeferHubVerb_OffTheDispatchPathPrintsTheInvocation(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	var stderr bytes.Buffer
 	cmd.SetErr(&stderr)
-	if err := deferStatusVerb(cmd, []string{"pr", "o/r#1"}); err != nil {
+	argv := []string{"pr", "o/r#1 two"}
+	if err := deferHubVerb(cmd, theme.Theme{}, argv); err != nil {
+		t.Fatal(err)
+	}
+	const want = "$ forgectl pr 'o/r#1 two'"
+	if !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want the quoted invocation %q", stderr.String(), want)
+	}
+}
+
+// TestDeferHubVerb_ACommandNeverExecutedPrintsTheInvocation: a root that was
+// never executed has no context at all; deferring must fall back, not panic.
+func TestDeferHubVerb_ACommandNeverExecutedPrintsTheInvocation(t *testing.T) {
+	cmd := &cobra.Command{}
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	if err := deferHubVerb(cmd, theme.Theme{}, []string{"pr", "o/r#1"}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(stderr.String(), "$ forgectl pr o/r#1") {

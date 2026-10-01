@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -241,5 +242,41 @@ func TestCollectTracked_DoneClosesAfterAPanic(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("done never closed after the source panicked")
+	}
+}
+
+// TestCollect_ASourceThatExitsItsGoroutineFailsAtOnce: runtime.Goexit ends
+// the source's goroutine without a return and without a panic, so it sends
+// nothing. With no timeout and no parent deadline, a Collect that waited for
+// a send would wait forever (forgectl#997 item 2). The wait is only a hang
+// bound.
+//
+// Mutation that turns it red: drop the deferred "exited without a result"
+// send, and Collect never returns within the bound.
+func TestCollect_ASourceThatExitsItsGoroutineFailsAtOnce(t *testing.T) {
+	type tracked struct {
+		s    Section[payload]
+		done <-chan struct{}
+	}
+	got := make(chan tracked, 1)
+	go func() {
+		s, done := CollectTracked(t.Context(), 0, func(context.Context) (payload, []string, error) {
+			runtime.Goexit()
+			return payload{}, nil, nil
+		})
+		got <- tracked{s, done}
+	}()
+	select {
+	case r := <-got:
+		if r.s.State != StateFailed || r.s.Error != "source exited without a result" || r.s.Data != nil {
+			t.Fatalf("section = %+v, want failed \"source exited without a result\"", r.s)
+		}
+		select {
+		case <-r.done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("done never closed after the source exited")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Collect blocked on a source that exited its goroutine")
 	}
 }
