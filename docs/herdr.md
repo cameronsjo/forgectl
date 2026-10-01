@@ -30,7 +30,7 @@
 
 ## Shared wire decoding
 
-`internal/herdr/wire` is the one reader of herdr's reply envelopes, shared by this client and `internal/surface/herdradapter`: the error envelope (`DecodeError`), the `result` envelope (`DecodeResult`, where a missing or null `result` fails closed), and the operand floor (`CheckOperand`: non-empty, no leading `-`, at most 64 bytes, no control characters). Ids and labels are checked against that floor. A session name also has to fit its own `[A-Za-z0-9._-]` charset. Both packages' tests run against the captured fixtures in `internal/herdr/testdata`, including the `changed_*_envelope.json` pair, so a change to herdr's envelope shows up in both.
+`internal/herdr/wire` is the one reader of herdr's reply envelopes, shared by this client and `internal/surface/herdradapter`: the error envelope (`DecodeError`), the `result` envelope (`DecodeResult`, where a missing or null `result` fails closed), and the operand floor (`CheckOperand`: non-empty, no leading `-`, at most 64 bytes, no control characters). `CheckOperand` checks the client's ids and labels, the adapter's session name (which also has to fit its own `[A-Za-z0-9._-]` charset), and the `[herdr.organize]` labels in config, so a dry run cannot promise a move the client then refuses. The adapter's workspace, tab, and pane ids go through `backend.validHerdrID` instead, which is stricter (printable ASCII only). Both packages' tests run against the captured fixtures in `internal/herdr/testdata`, including the `changed_*_envelope.json` pair, so a change to herdr's envelope shows up in both.
 
 ## Ids move
 

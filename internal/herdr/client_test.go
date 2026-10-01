@@ -333,3 +333,18 @@ func TestReadTurnsAnExitZeroErrorEnvelopeIntoAnError(t *testing.T) {
 		t.Errorf("err = %v, want *Error workspace_not_found", err)
 	}
 }
+
+// TestReplyWithResultAndErrorReadsAsTheError pins read's order: the error
+// envelope is checked before the result, so a reply carrying both fails closed
+// as herdr's refusal rather than decoding the result.
+//
+// Mutation: move the refusal check in read after wire.DecodeResult (returning
+// the result when it decodes) and this goes red.
+func TestReplyWithResultAndErrorReadsAsTheError(t *testing.T) {
+	out := `{"id":"x","result":{"panes":[{"pane_id":"w1:p1"}]},"error":{"code":"pane_not_found","message":"m"}}`
+	panes, err := New(runnerFor(out, nil)).Panes(context.Background())
+	var he *Error
+	if !errors.As(err, &he) || he.Code != "pane_not_found" {
+		t.Errorf("Panes = %v, %v; want *Error pane_not_found", panes, err)
+	}
+}
