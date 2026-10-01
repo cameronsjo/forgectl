@@ -32,7 +32,7 @@ var uncappedRecordTextAllowlist = map[string]struct {
 	writes int
 	reason string
 }{
-	"record.go:checkParkHeadroom": {2, "measures a record with both free-text fields at breadcrumbTextMaxBytes of encoded JSON; " +
+	"record.go:workspaceRoom": {2, "measures a record with both free-text fields at breadcrumbTextMaxBytes of encoded JSON; " +
 		"the record is encoded to count its bytes and is never written"},
 }
 
@@ -105,7 +105,11 @@ func TestRecordTextFieldsAreCappedAtTheSource(t *testing.T) {
 // missed; accept a parameter without reading its call sites, and the
 // uncapped caller is missed; match a capper call by name alone, and the
 // shadowing local is missed; drop the escaped-function check, and the
-// parameter of a function used as a value is missed.
+// parameter of a function used as a value is missed; key the verdict
+// cache by variable alone, and msg, capped for Error, reads as capped for
+// LastError; drop the interface-dispatch check, and impl.put's parameter
+// is vouched for by its one direct caller; cache an in-cycle verdict, and b
+// reads as capped after a's root write turned out uncapped.
 func TestRecordTextWritesResolvesThroughTypes(t *testing.T) {
 	const src = `package p
 
@@ -176,6 +180,36 @@ func escapedFunc(it *item) { paramEscapes(it, "lit"); f := paramEscapes; _ = f }
 func paramEscapes(it *item, why string) { it.Error = why } // BAD escapes
 
 func closure(it *item) { func(why string) { it.Error = why }("lit") } // BAD closure-param
+
+type rec struct {
+	Error     string
+	LastError string
+}
+
+func capperSet(r *rec) {
+	msg := recordText("x")
+	r.Error = msg
+	r.LastError = msg // BAD capper-set
+}
+
+type sink interface{ put(it *item, why string) }
+
+type impl struct{}
+
+func (impl) put(it *item, why string) { it.Error = why } // BAD interface
+
+func viaIface(s sink, it *item, err error) { s.put(it, err.Error()) }
+
+func direct(it *item) { impl{}.put(it, "lit") }
+
+func cycle(it *item, err error) {
+	a := recordText("x")
+	b := a
+	a = b
+	a = err.Error()
+	it.Error = a // BAD cycle-root
+	it.Error = b // BAD cycle-member
+}
 `
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "p.go", src, parser.ParseComments|parser.SkipObjectResolution)
@@ -251,7 +285,7 @@ func recordTextWrites(fset *token.FileSet, files []*ast.File) (uncapped []record
 		return []recordTextFinding{{fn: "type-check produced no package"}}, 0
 	}
 
-	r := &capResolver{info: info, pkg: pkg, writes: map[*types.Var][]ast.Expr{}, params: map[*types.Var]paramSite{}, calls: map[*types.Func][]*ast.CallExpr{}, escaped: map[*types.Func]bool{}, state: map[*types.Var]int{}}
+	r := &capResolver{info: info, pkg: pkg, writes: map[*types.Var][]ast.Expr{}, params: map[*types.Var]paramSite{}, calls: map[*types.Func][]*ast.CallExpr{}, escaped: map[*types.Func]bool{}, ifaceMethods: map[string]bool{"Error": true}, state: map[stateKey]int{}}
 	r.index(files)
 
 	fn := ""
@@ -364,7 +398,24 @@ type capResolver struct {
 	params  map[*types.Var]paramSite
 	calls   map[*types.Func][]*ast.CallExpr
 	escaped map[*types.Func]bool
-	state   map[*types.Var]int // 1 resolving, 2 capped, 3 not
+	// ifaceMethods are the method names some interface the pin can see
+	// declares, or some call dispatches through an interface: a method of
+	// that name can be reached by a call that names the interface's method,
+	// not it, so its call sites are not all in calls.
+	ifaceMethods map[string]bool
+	// state is the settled verdict for a variable under one capper set
+	// (stateKey): a value capped for Error by recordText is not capped for
+	// LastError, which takes breadcrumbText alone.
+	state map[stateKey]int // 1 resolving, 2 capped, 3 not
+	// tentative counts the in-cycle verdicts assumed so far; a capped
+	// verdict that rests on one is not settled, so it is not cached.
+	tentative int
+}
+
+// stateKey is a variable and the capper set it is resolved against.
+type stateKey struct {
+	v       *types.Var
+	cappers string
 }
 
 func (r *capResolver) index(files []*ast.File) {
@@ -430,6 +481,15 @@ func (r *capResolver) index(files []*ast.File) {
 			case *ast.CallExpr:
 				if fn := r.funcOf(n.Fun); fn != nil {
 					r.calls[fn] = append(r.calls[fn], n)
+					if recv := fn.Signature().Recv(); recv != nil && types.IsInterface(recv.Type()) {
+						r.ifaceMethods[fn.Name()] = true
+					}
+				}
+			case *ast.InterfaceType:
+				if it, ok := r.info.Types[n].Type.(*types.Interface); ok {
+					for i := range it.NumMethods() {
+						r.ifaceMethods[it.Method(i).Name()] = true
+					}
 				}
 			}
 			return true
@@ -521,16 +581,21 @@ func (r *capResolver) capped(e ast.Expr, cappers []string) bool {
 // while its own writes are being resolved (x = x) adds nothing, so it counts
 // as capped there; its other writes still decide.
 func (r *capResolver) cappedVar(v *types.Var, cappers []string) bool {
-	switch r.state[v] {
-	case 1, 2:
+	key := stateKey{v, strings.Join(cappers, ",")}
+	switch r.state[key] {
+	case 1:
+		r.tentative++
+		return true
+	case 2:
 		return true
 	case 3:
 		return false
 	}
-	r.state[v] = 1
+	r.state[key] = 1
+	before := r.tentative
 	ok := true
 	if site, isParam := r.params[v]; isParam {
-		if r.escaped[site.fn] || len(r.calls[site.fn]) == 0 {
+		if r.escaped[site.fn] || len(r.calls[site.fn]) == 0 || r.dispatchedByInterface(site.fn) {
 			ok = false
 		}
 		for _, call := range r.calls[site.fn] {
@@ -551,12 +616,25 @@ func (r *capResolver) cappedVar(v *types.Var, cappers []string) bool {
 		}
 		ok = r.capped(w, cappers)
 	}
-	if ok {
-		r.state[v] = 2
-	} else {
-		r.state[v] = 3
+	switch {
+	case !ok:
+		// A false verdict is settled whatever was assumed: an assumption
+		// only ever makes a value read as capped.
+		r.state[key] = 3
+	case r.tentative > before:
+		// Capped only on an in-cycle assumption that its root may yet
+		// overturn; resolve it afresh next time.
+		delete(r.state, key)
+	default:
+		r.state[key] = 2
 	}
 	return ok
+}
+
+// dispatchedByInterface reports whether fn is a method an interface call
+// can reach (ifaceMethods), whose callers are not all in calls.
+func (r *capResolver) dispatchedByInterface(fn *types.Func) bool {
+	return fn.Signature().Recv() != nil && r.ifaceMethods[fn.Name()]
 }
 
 func isLocal(v *types.Var, pkg *types.Package) bool {

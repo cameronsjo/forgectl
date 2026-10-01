@@ -192,20 +192,7 @@ var widestWindowID = strings.Join([]string{
 // the one structured field forgectl does not choose: it sits under $TMPDIR,
 // and encoding/json writes each '<', '>' or '&' in it as six bytes.
 func checkParkHeadroom(bc Breadcrumb) error {
-	widest := bc
-	widest.Phase = PhaseNeedsRepair
-	widest.Revision = math.MaxInt64
-	widest.Attempts = math.MaxInt64
-	widest.WindowID = widestWindowID
-	widest.RepairReason = strings.Repeat("r", breadcrumbTextMaxBytes)
-	widest.LastError = strings.Repeat("e", breadcrumbTextMaxBytes)
-	widest.LastAttempt = time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.UTC)
-	_, err := encodeBreadcrumb(widest)
-	if !errors.Is(err, errBreadcrumbRecordTooLarge) {
-		return err
-	}
-	widest.Workspace = ""
-	rest, err := encodeBreadcrumb(widest)
+	room, err := workspaceRoom(bc)
 	if err != nil {
 		return err
 	}
@@ -214,11 +201,34 @@ func checkParkHeadroom(bc Breadcrumb) error {
 	if err != nil {
 		return fmt.Errorf("measure the workspace path: %w", err)
 	}
-	// Categorical: the path is not echoed, only its size and the room left.
-	return fmt.Errorf("the clean-room workspace path is too long to record: it takes %d bytes in a session record, "+
-		"which has room for %d once the other fields are at their largest; "+
-		"set TMPDIR to a shorter directory (each '<', '>' or '&' in it counts six bytes)",
-		len(quoted)-2, maxBreadcrumbRecordBytes-len(rest))
+	if n := len(quoted) - 2; n > room {
+		// Categorical: the path is not echoed, only its size and the room left.
+		return fmt.Errorf("the clean-room workspace path is too long to record: it takes %d bytes in a session record, "+
+			"which has room for %d once the other fields are at their largest; "+
+			"set TMPDIR to a shorter directory (each '<', '>' or '&' in it counts six bytes)",
+			n, room)
+	}
+	return nil
+}
+
+// workspaceRoom is how many encoded bytes bc's workspace may take and still
+// leave the record parkable: maxBreadcrumbRecordBytes less the record with
+// an empty workspace and every field a park sets at its widest.
+func workspaceRoom(bc Breadcrumb) (int, error) {
+	widest := bc
+	widest.Workspace = ""
+	widest.Phase = PhaseNeedsRepair
+	widest.Revision = math.MaxInt64
+	widest.Attempts = math.MaxInt64
+	widest.WindowID = widestWindowID
+	widest.RepairReason = strings.Repeat("r", breadcrumbTextMaxBytes)
+	widest.LastError = strings.Repeat("e", breadcrumbTextMaxBytes)
+	widest.LastAttempt = time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.UTC)
+	rest, err := encodeBreadcrumb(widest)
+	if err != nil {
+		return 0, err
+	}
+	return maxBreadcrumbRecordBytes - len(rest), nil
 }
 
 // writeRecordAtomic replaces dir/name with data so that a crash at any point

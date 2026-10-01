@@ -2,23 +2,51 @@ package pr
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-// escapeDenseTempDir is a $TMPDIR of 1200 '<', in components under any file
-// system's NAME_MAX. encoding/json writes each '<' as the six bytes <,
-// so a workspace under it takes about 7 KiB of a breadcrumb record: the
-// prepared record fits, and a park that adds a repair reason does not.
-func escapeDenseTempDir(t *testing.T) string {
+// macOS's limits, the tightest of the platforms CI runs: PATH_MAX 1024 and
+// NAME_MAX 255.
+const (
+	fixturePathMax = 1024
+	fixtureNameMax = 255
+	// fixtureInnerPath is the longest path Prepare creates under $TMPDIR:
+	// the workspace dir and the allowlist inside it, digits at their widest.
+	fixtureInnerPath = "/forgectl-workflow-18446744073709551615/.claude/settings.local.json"
+)
+
+// budgetTempDir is a $TMPDIR that holds n copies of fill, in components of
+// at most 200 bytes, under a fresh dir in the current $TMPDIR (not
+// t.TempDir(), whose test-named path would spend a tenth of PATH_MAX). It
+// fails the test, rather than skipping, when Prepare's deepest path under it
+// would pass PATH_MAX or a component NAME_MAX, so the fixture cannot quietly
+// stop being creatable.
+func budgetTempDir(t *testing.T, fill byte, n int) string {
 	t.Helper()
-	dir := t.TempDir()
-	for range 6 {
-		dir = filepath.Join(dir, strings.Repeat("<", 200))
+	dir, err := os.MkdirTemp("", "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	for n > 0 {
+		k := min(n, 200)
+		dir = filepath.Join(dir, strings.Repeat(string(fill), k))
+		n -= k
+	}
+	if l := len(dir) + len(fixtureInnerPath); l >= fixturePathMax {
+		t.Fatalf("fixture path would be %d bytes, past PATH_MAX %d; shorten it", l, fixturePathMax)
+	}
+	for _, c := range strings.Split(dir, string(filepath.Separator)) {
+		if len(c) > fixtureNameMax {
+			t.Fatalf("fixture component is %d bytes, past NAME_MAX %d", len(c), fixtureNameMax)
+		}
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -26,21 +54,69 @@ func escapeDenseTempDir(t *testing.T) string {
 	return dir
 }
 
+// overflowingTempDir is a $TMPDIR of just enough '<' that a workspace under
+// it takes more than the record's room, as workspaceRoom computes it for the
+// record Prepare writes. encoding/json writes each '<' as six bytes, so
+// about 800 of them overflow while the path stays far under macOS's
+// PATH_MAX. It also returns the '<' count, for a plain control of the same
+// length.
+func overflowingTempDir(t *testing.T) (string, int) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("'<' is not a valid character in a Windows file name")
+	}
+	// An empty provenance is the shortest the record can hold, so this room
+	// is at least the real one, and a dir that overflows it overflows that.
+	room, err := workspaceRoom(Breadcrumb{
+		Ref: "cameronsjo/forgectl#42", Host: "github.com", Agent: "claude",
+		CreatedAt: time.Now().UTC(), Version: breadcrumbVersion, Phase: PhasePrepared, Revision: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// budgetTempDir's root is longer than os.TempDir(), so this n is enough.
+	n := (room-len(os.TempDir()))/6 + 1
+	dir := budgetTempDir(t, '<', n)
+	enc, err := json.Marshal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(enc)-2 <= room {
+		t.Fatalf("fixture encodes to %d bytes, within the %d-byte room; it would not exercise the refusal", len(enc)-2, room)
+	}
+	return dir, n
+}
+
 // TestPrepare_RefusesAWorkspaceItCouldNotPark is #974 item 7. Before the
 // fix, Prepare wrote the record under an escape-dense $TMPDIR, and the first
 // park (markNeedsRepair with an error text at its byte cap) overflowed
 // maxBreadcrumbRecordBytes, leaving the record stuck in its phase. Prepare
 // now refuses it, names the budget, writes no record, and tears the
-// workspace down.
+// workspace down. The control is a plain $TMPDIR of the same length, which
+// Prepare accepts and a park still fits.
 //
 // Mutation that turns it red: drop the checkParkHeadroom call from
 // recordPrepared's unreserved branch.
 func TestPrepare_RefusesAWorkspaceItCouldNotPark(t *testing.T) {
-	tmp := escapeDenseTempDir(t)
+	tmp, n := overflowingTempDir(t)
+	ref := Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}
+
+	t.Run("plain control", func(t *testing.T) {
+		t.Setenv("TMPDIR", budgetTempDir(t, 'w', n))
+		c := testClient(t, ghViewRunner())
+		sess, err := c.Prepare(context.Background(), ref, PrepareOpts{Agent: "claude"})
+		if err != nil {
+			t.Fatalf("Prepare refused a plain workspace of the same length: %v", err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(sess.Workspace) })
+		if err := c.markNeedsRepair(context.Background(), sess.Path, strings.Repeat("<", 5000)); err != nil {
+			t.Fatalf("park of the accepted plain workspace: %v", err)
+		}
+	})
+
 	t.Setenv("TMPDIR", tmp)
 	c := testClient(t, ghViewRunner())
-
-	sess, err := c.Prepare(context.Background(), Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}, PrepareOpts{Agent: "claude"})
+	sess, err := c.Prepare(context.Background(), ref, PrepareOpts{Agent: "claude"})
 	if err == nil {
 		t.Cleanup(func() { _ = os.RemoveAll(sess.Workspace) })
 		if perr := c.markNeedsRepair(context.Background(), sess.Path, strings.Repeat("<", 5000)); perr != nil {
@@ -69,7 +145,8 @@ func TestPrepare_RefusesAWorkspaceItCouldNotPark(t *testing.T) {
 // Mutation that turns it red: drop the checkParkHeadroom call from
 // recordPrepared's transition.
 func TestPrepare_ReservedRecordRefusesAWorkspaceItCouldNotPark(t *testing.T) {
-	t.Setenv("TMPDIR", escapeDenseTempDir(t))
+	tmp, _ := overflowingTempDir(t)
+	t.Setenv("TMPDIR", tmp)
 	c := testClient(t, ghViewRunner())
 	ref := Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}
 	path := seedPhaseRecord(t, c, ref, PhasePreparing, "")
