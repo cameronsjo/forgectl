@@ -156,13 +156,20 @@ a FIFO, and anything that is not a regular file once opened is refused.
 | `scanner-config` | `.gitleaks.toml` and `.gitleaksignore`. A repo can use either to hide findings from a scanner, so their presence is reported. |
 
 A symlink whose name matches is reported as type `symlink` and is never read or
-followed, whatever it points at. A FIFO or device named like a `.pem` or `.key`
-is not read and not listed.
+followed, whatever it points at. A symlinked `*.pem` or `*.key` is therefore an
+unverified key: the check never looked behind the link, so certbot's `live/`
+directory, whose `cert.pem` and `chain.pem` are links, reports each one. A FIFO
+or device named like a `.pem` or `.key` is not read and not listed.
 
-Whether a file is tracked or ignored comes from one `git ls-files -z -t --cached
---others --exclude-standard` call per repo (batched for long path lists), run
-through forgectl's hardened git profile, with every path a `:(literal)`
-pathspec. **A `.env` file git ignores is counted (`ignored_env_files`), not
+Whether a file is tracked or ignored comes from two `git ls-files` calls per repo
+(batched for long path lists), run through forgectl's hardened git profile,
+with every path a `:(literal)` pathspec: `-z -t --cached --others
+--exclude-standard` lists the tracked and the untracked-unignored paths, and
+`-z --others --ignored --exclude-standard` lists the ignored ones. A path in
+neither list (git never lists a FIFO) is `git-unknown`, not ignored. Each
+repo's calls share a 30-second deadline that kills git's process group, so a
+FIFO `.gitignore` or `.git/index`, which git would wait on forever, makes the
+repo `git-unknown` instead of hanging the scan. **A `.env` file git ignores is counted (`ignored_env_files`), not
 listed**: that is the normal development pattern. A key is listed whether or
 not it is ignored.
 
@@ -171,7 +178,7 @@ not it is ignored.
 | `tracked` | git tracks the file, so it is in the repo's history. |
 | `unignored` | An untracked `.env` that no ignore rule covers: `git add .` would commit it. |
 | `outside-repo` | A `.env` outside any git working tree. |
-| `git-unknown` | git could not report on the repo (not a usable repository, `safe.directory`, no git). The file is listed rather than assumed ignored. |
+| `git-unknown` | git could not report on the file: the repo is not usable (`safe.directory`, no git), the call hit its 30-second deadline, or git listed the path in none of its lists (a FIFO). The file is listed rather than assumed ignored. |
 | `vendored` | Inside a dependency directory (the same list `audit injection` uses). |
 | `loose` | Readable or writable by group or others (`mode & 0o077`, the rule ssh applies to a private key). Set for `env` and `key` regular files on unix only; Windows permission bits are synthesized. |
 | `foreign-owner` | A key owned by a uid other than the one running the scan (unix). |
@@ -197,8 +204,9 @@ when it passes:
 
 ```text
 gitleaks dir --config <tmp>/cfg.toml --gitleaks-ignore-path <tmp>
-  --report-format json --report-path <tmp>/report.json --redact --exit-code 0
-  --no-banner --log-level error --max-target-megabytes 5 -- <repo>
+  --report-format json --report-path <tmp>/report.json --redact
+  --ignore-gitleaks-allow --exit-code 0 --no-banner --log-level error
+  --max-target-megabytes 5 -- <repo>
 ```
 
 - `<tmp>` is a fresh 0700 temp directory, removed afterwards. `cfg.toml` holds
@@ -208,6 +216,13 @@ gitleaks dir --config <tmp>/cfg.toml --gitleaks-ignore-path <tmp>
   are removed from gitleaks' environment.
 - `--gitleaks-ignore-path` points at the temp directory, so the
   `.gitleaksignore` of whatever directory you run forgectl from is not read.
+- `--ignore-gitleaks-allow` (in gitleaks since 8.19.0) means a
+  `gitleaks:allow` comment in a scanned file suppresses nothing.
+- A repo whose root `.gitleaksignore` or `.gitleaks.toml` is not a regular
+  file (a FIFO, a device, a symlink) is not given to gitleaks: gitleaks opens a
+  root `.gitleaksignore` unconditionally, and a FIFO there would hold the pass
+  until its deadline. It is listed in `repos_skipped` with the reason
+  `scanner_config_not_regular`, and the verb exits 1.
 - Only `dir` mode runs. History is not scanned: `gitleaks git` would run git
   without forgectl's hardening. Symlinks are not followed (no
   `--follow-symlinks`). Files over 5 MB are skipped.
@@ -215,17 +230,27 @@ gitleaks dir --config <tmp>/cfg.toml --gitleaks-ignore-path <tmp>
   `Fingerprint`. `Secret`, `Match` and `Line` are never decoded, and every
   text row also passes through forgectl's credential redaction as a
   backstop. A report is read up to 32 MiB, and at most 10,000 findings are kept
-  across the pass (`truncated`). A finding whose `File` is not inside the repo
+  across the pass (`truncated`), counted after a nested repo's duplicates are
+  dropped. A finding whose `File` is not inside the repo
   it was reported for is dropped and counted in `findings_rejected`. A finding
   in a nested repo, which its parent's scan also reports, is listed once,
   under the innermost repo.
 
-**Limits.** gitleaks covers files inside git working trees only, not the rest
-of the projects root. A scanned repo can still hide a finding from it: gitleaks
-always reads the repo's own `.gitleaksignore`, and honors a `gitleaks:allow`
-comment on the line. The native scan reports every `.gitleaksignore` and
-`.gitleaks.toml` (`scanner-config`) so that hiding is visible. History is not
-scanned.
+**Limits.**
+
+- gitleaks covers files inside git working trees only, not the rest of the
+  projects root.
+- A scanned repo can still hide a finding by fingerprint: gitleaks always reads
+  the repo's own root `.gitleaksignore`, and no flag turns that off. The native
+  scan reports every `.gitleaksignore` and `.gitleaks.toml` (`scanner-config`)
+  so that hiding is visible.
+- gitleaks skips a file it cannot read and still reports the pass as `ran`.
+- History is not scanned.
+- The 4 KiB check sees only a header in a file's first 4 KiB, so it misses a
+  private key placed after a long certificate chain in the same `.pem`. It
+  matches `PRIVATE KEY-----`, so a PGP `PRIVATE KEY BLOCK` is not recognized.
+- A symlinked `*.pem` or `*.key` is listed as a key without being checked (see
+  above).
 
 `forgectl doctor` has a `gitleaks` row from the same resolver: skipped when
 gitleaks is absent or found only through a relative `PATH` entry, a warning
@@ -265,6 +290,7 @@ OK with its version otherwise.
     "repos_scanned": 42,
     "repos_failed": 0,
     "findings_rejected": 0,
+    "repos_skipped": [],
     "truncated": false,
     "findings": [
       {
@@ -286,7 +312,8 @@ OK with its version otherwise.
 - `gitleaks.status` is `ran`, `failed`, or `timed_out` when gitleaks ran;
   `absent`, `refused`, `too_old`, or `version_failed` when it was found
   wanting; `off` under `--gitleaks=off`. `reason` explains `refused`
-  (`relative_path` or `under_scan_root`).
+  (`relative_path` or `under_scan_root`). `repos_skipped` lists
+  `{"repo","reason"}` for each repo not given to gitleaks.
 - `capped_by`, `truncated` and `depth_skipped` mean what they do for
   `audit injection`; the findings cap counts native findings before ignored
   `.env` files are dropped.
@@ -295,9 +322,9 @@ OK with its version otherwise.
 ### Exit codes
 
 `0` when the scan ran, whatever it found. `1` when the projects root cannot be
-resolved or opened; when gitleaks was found but failed, timed out, or its
-`gitleaks version` failed (under `auto` as well: the scan you asked for did not
-complete); or under `--gitleaks=require` when gitleaks did not run. Absent,
+resolved or opened; when gitleaks was found but failed, timed out, skipped a
+repo, or its `gitleaks version` failed (under `auto` as well: the scan you
+asked for did not complete); or under `--gitleaks=require` when gitleaks did not run. Absent,
 refused or too old under `auto` exits `0`: the scan is the native-only one
 `auto` promises, and the first line says so. `2` for a bad `--gitleaks` or
 `--gitleaks-timeout` value. Under `--json` the report is still written to

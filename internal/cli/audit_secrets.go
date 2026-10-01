@@ -37,6 +37,9 @@ type auditSecretsDeps struct {
 	// runner runs git (through gitenv) and gitleaks.
 	runner   exec.Runner
 	lookPath func(string) (string, error)
+	// gitStatusTimeout bounds each repo's git status; zero means
+	// gitstate.DefaultTimeout. Tests shorten it.
+	gitStatusTimeout time.Duration
 }
 
 // gitleaksOutcome is the gitleaks half of the report, whatever happened.
@@ -80,9 +83,14 @@ projects root), each repo's working tree is also scanned with ` + "`gitleaks dir
 under forgectl's own config. History is not scanned. Every output states
 what gitleaks did.
 
+A repo whose root .gitleaksignore or .gitleaks.toml is not a regular file is
+not given to gitleaks (gitleaks would block opening a FIFO there); the output
+lists it as skipped.
+
 Exit codes: 0 when the scan ran, whatever it found; 1 when the projects root
-cannot be opened, when gitleaks was found but failed or timed out, or when
---gitleaks=require and gitleaks did not run; 2 for a bad flag value.`,
+cannot be opened, when gitleaks was found but failed, timed out, skipped a
+repo, or its ` + "`gitleaks version`" + ` failed, or when --gitleaks=require and
+gitleaks did not run; 2 for a bad flag value.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			switch mode {
@@ -102,14 +110,18 @@ cannot be opened, when gitleaks was found but failed or timed out, or when
 				return err
 			}
 			ctx := cmd.Context()
-			report.ApplyGitStatus(gitstate.Func(ctx, d.runner))
+			gitTimeout := d.gitStatusTimeout
+			if gitTimeout <= 0 {
+				gitTimeout = gitstate.DefaultTimeout
+			}
+			report.ApplyGitStatus(gitstate.FuncWithTimeout(ctx, d.runner, gitTimeout))
 
 			out := gitleaksOutcome{mode: mode, status: gitleaksStatusOff, timeout: timeout, result: gitleaks.Result{Findings: []gitleaks.Finding{}}}
 			if mode != gitleaksOff {
 				out.binary = gitleaks.Resolve(ctx, d.lookPath, d.runner, report.Root)
 				out.status = out.binary.State
 				if out.binary.State == gitleaks.StateAvailable {
-					out.result = gitleaks.Scan(ctx, d.runner, out.binary.Path, report.Repos, timeout)
+					out.result = gitleaks.Scan(ctx, d.runner, out.binary.Path, report.Repos, gitleaksSkips(report), timeout)
 					out.status = out.result.Status
 				}
 			}
@@ -125,7 +137,7 @@ cannot be opened, when gitleaks was found but failed or timed out, or when
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false,
-		`emit {"root","repos_scanned","entries_scanned","unreadable_dirs","unreadable_files","ignored_env_files","git_status_failed_repos","truncated","capped_by","depth_skipped","findings":[{"path","repo","kind","type","flags"}],"gitleaks":{"mode","status","reason","version","min_version","path","repos_scanned","repos_failed","findings_rejected","truncated","findings":[{"path","repo","rule","line","fingerprint"}]}} to stdout`)
+		`emit {"root","repos_scanned","entries_scanned","unreadable_dirs","unreadable_files","ignored_env_files","git_status_failed_repos","truncated","capped_by","depth_skipped","findings":[{"path","repo","kind","type","flags"}],"gitleaks":{"mode","status","reason","version","min_version","path","repos_scanned","repos_failed","findings_rejected","repos_skipped":[{"repo","reason"}],"truncated","findings":[{"path","repo","rule","line","fingerprint"}]}} to stdout`)
 	cmd.Flags().StringVar(&mode, "gitleaks", gitleaksAuto, "run gitleaks: auto (when installed), off, or require (fail without it)")
 	cmd.Flags().DurationVar(&timeout, "gitleaks-timeout", gitleaks.DefaultTimeout, "deadline for the whole gitleaks pass")
 	return cmd
@@ -137,7 +149,12 @@ cannot be opened, when gitleaks was found but failed or timed out, or when
 // native-only scan auto promises, and the output says so.
 func gitleaksVerdict(o gitleaksOutcome) error {
 	switch o.status {
-	case gitleaks.StatusRan, gitleaksStatusOff:
+	case gitleaks.StatusRan:
+		if n := len(o.result.Skipped); n > 0 {
+			return fmt.Errorf("audit secrets: gitleaks skipped %d repos whose scanner config is not a regular file", n)
+		}
+		return nil
+	case gitleaksStatusOff:
 		return nil
 	case gitleaks.StatusFailed:
 		return fmt.Errorf("audit secrets: gitleaks failed in %d of %d repos", o.result.ReposFailed, o.result.ReposFailed+o.result.ReposScanned)
@@ -184,6 +201,9 @@ func gitleaksStatusLine(o gitleaksOutcome) string {
 		if o.result.Truncated {
 			line += fmt.Sprintf(" (stopped at the %d-finding cap)", gitleaks.MaxFindings)
 		}
+		if n := len(o.result.Skipped); n > 0 {
+			line += fmt.Sprintf("; SKIPPED %d repos whose scanner config is not a regular file", n)
+		}
 		return line
 	case gitleaks.StatusFailed:
 		return fmt.Sprintf("gitleaks %s: FAILED in %d of %d repos; %d findings from the rest", o.binary.Version,
@@ -193,6 +213,20 @@ func gitleaksStatusLine(o gitleaksOutcome) string {
 			o.timeout, len(o.result.Findings), o.result.ReposScanned)
 	}
 	return "gitleaks: not run, " + gitleaksSkipReason(o) + "; native checks only"
+}
+
+// gitleaksSkips names the repos the gitleaks pass must not scan: those whose
+// root .gitleaksignore or .gitleaks.toml the walk found to be something
+// other than a regular file. gitleaks opens a root .gitleaksignore
+// unconditionally, and opening a FIFO blocks until a writer appears.
+func gitleaksSkips(r audit.SecretsReport) map[string]string {
+	skip := map[string]string{}
+	for _, f := range r.Findings {
+		if f.Kind == audit.KindScannerConfig && f.Repo != "" && filepath.Dir(f.Path) == f.Repo && f.Type != audit.TypeFile {
+			skip[f.Repo] = gitleaks.SkipScannerConfigNotRegular
+		}
+	}
+	return skip
 }
 
 // auditSecretsJSON is the --json wire shape. Additive changes only
@@ -221,17 +255,23 @@ type auditSecretRowJSON struct {
 }
 
 type auditGitleaksBlockJSON struct {
-	Mode             string                 `json:"mode"`
-	Status           string                 `json:"status"`
-	Reason           string                 `json:"reason"`
-	Version          string                 `json:"version"`
-	MinVersion       string                 `json:"min_version"`
-	Path             string                 `json:"path"`
-	ReposScanned     int                    `json:"repos_scanned"`
-	ReposFailed      int                    `json:"repos_failed"`
-	FindingsRejected int                    `json:"findings_rejected"`
-	Truncated        bool                   `json:"truncated"`
-	Findings         []auditGitleaksRowJSON `json:"findings"`
+	Mode             string                  `json:"mode"`
+	Status           string                  `json:"status"`
+	Reason           string                  `json:"reason"`
+	Version          string                  `json:"version"`
+	MinVersion       string                  `json:"min_version"`
+	Path             string                  `json:"path"`
+	ReposScanned     int                     `json:"repos_scanned"`
+	ReposFailed      int                     `json:"repos_failed"`
+	FindingsRejected int                     `json:"findings_rejected"`
+	ReposSkipped     []auditGitleaksSkipJSON `json:"repos_skipped"`
+	Truncated        bool                    `json:"truncated"`
+	Findings         []auditGitleaksRowJSON  `json:"findings"`
+}
+
+type auditGitleaksSkipJSON struct {
+	Repo   string `json:"repo"`
+	Reason string `json:"reason"`
 }
 
 type auditGitleaksRowJSON struct {
@@ -265,6 +305,7 @@ func writeAuditSecretsJSON(w io.Writer, r audit.SecretsReport, o gitleaksOutcome
 			ReposScanned:     o.result.ReposScanned,
 			ReposFailed:      o.result.ReposFailed,
 			FindingsRejected: o.result.Rejected,
+			ReposSkipped:     make([]auditGitleaksSkipJSON, 0, len(o.result.Skipped)),
 			Truncated:        o.result.Truncated,
 			Findings:         make([]auditGitleaksRowJSON, 0, len(o.result.Findings)),
 		},
@@ -278,6 +319,9 @@ func writeAuditSecretsJSON(w io.Writer, r audit.SecretsReport, o gitleaksOutcome
 			row.Flags = []string{}
 		}
 		out.Findings = append(out.Findings, row)
+	}
+	for _, sk := range o.result.Skipped {
+		out.Gitleaks.ReposSkipped = append(out.Gitleaks.ReposSkipped, auditGitleaksSkipJSON{Repo: sk.Repo, Reason: sk.Reason})
 	}
 	for _, f := range o.result.Findings {
 		out.Gitleaks.Findings = append(out.Gitleaks.Findings, auditGitleaksRowJSON{
@@ -322,6 +366,9 @@ func writeAuditSecretsText(w io.Writer, r audit.SecretsReport, o gitleaksOutcome
 				f := o.result.Findings[i]
 				return fmt.Sprintf("  %s:%d  %s", auditShowPath(rel), f.StartLine, safeLabel(f.RuleID))
 			})
+	}
+	for _, sk := range o.result.Skipped {
+		auditLine(w, "note: gitleaks skipped "+auditShowPath(sk.Repo)+": its root .gitleaksignore or .gitleaks.toml is not a regular file")
 	}
 	if o.result.Rejected > 0 {
 		auditLine(w, fmt.Sprintf("note: %d gitleaks findings named a file outside the repo scanned and were dropped", o.result.Rejected))

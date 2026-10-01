@@ -343,12 +343,14 @@ func TestScanSecrets_FindingsCap(t *testing.T) {
 // are flagged, an untracked .env no rule ignores is flagged unignored, an
 // ignored .env is counted and dropped, an ignored key stays listed, a repo
 // git cannot answer for keeps its findings flagged git-unknown, scanner
-// config is never asked about, one call is made per repo, and flags come
-// out in their fixed order.
+// config is never asked about, a path git lists nowhere is git-unknown
+// (never assumed ignored), one call is made per repo, and flags come out in
+// their fixed order.
 //
 // Mutations that turn it red: drop an ignored key as well (the key row
 // disappears); treat a status error as "all ignored" (the b/.env row
-// disappears); skip the case-folded lookup (.ENV reads ignored).
+// disappears); skip the case-folded lookup (.ENV reads unknown); read an
+// unlisted path as ignored (key.pem loses git-unknown).
 func TestApplyGitStatus(t *testing.T) {
 	r := SecretsReport{Findings: []SecretFinding{
 		{Path: "/p/a/.env", Repo: "/p/a", Kind: KindEnv, Flags: []string{FlagLoose}, repoRel: ".env"},
@@ -368,10 +370,11 @@ func TestApplyGitStatus(t *testing.T) {
 			return nil, errors.New("git failed")
 		}
 		return map[string]GitState{
-			".env":      GitTracked,
-			"sub/.env":  GitUntracked,
-			"id_rsa":    GitTracked,
-			".env.prod": GitTracked, // the index's spelling of .ENV.prod
+			".env":       GitTracked,
+			".env.local": GitIgnored,
+			"sub/.env":   GitUntracked,
+			"id_rsa":     GitTracked,
+			".env.prod":  GitTracked, // the index's spelling of .ENV.prod
 		}, nil
 	})
 	if len(calls) != 2 || !slices.Equal(calls["/p/a"], []string{".env", ".env.local", "sub/.env", ".ENV.prod", "id_rsa", "key.pem"}) {
@@ -382,7 +385,7 @@ func TestApplyGitStatus(t *testing.T) {
 		"/p/a/sub/.env":       {FlagUnignored, FlagVendored},
 		"/p/a/.ENV.prod":      {FlagTracked},
 		"/p/a/id_rsa":         {FlagTracked, FlagLoose},
-		"/p/a/key.pem":        {},
+		"/p/a/key.pem":        {FlagGitUnknown}, // git listed it nowhere
 		"/p/a/.gitleaks.toml": {},
 		"/p/b/.env":           {FlagGitUnknown},
 		"/p/loose/.env":       {FlagOutsideRepo},

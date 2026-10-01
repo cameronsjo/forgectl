@@ -27,8 +27,9 @@ const auditCanary = "ghp_AUDITc4n4ryC4N4RYc4n4ryC4N4RYc4n4" //nolint:gosec // G1
 // stand-in outside the root.
 type secretsFixture struct {
 	root, repo, bin string
-	// tracked lists repo-relative paths git reports as tracked.
-	tracked []string
+	// tracked, untracked and ignored list repo-relative paths as git reports
+	// them.
+	tracked, untracked, ignored []string
 }
 
 func newSecretsFixture(t *testing.T) secretsFixture {
@@ -57,7 +58,8 @@ func newSecretsFixture(t *testing.T) secretsFixture {
 	if err := os.WriteFile(bin, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return secretsFixture{root: root, repo: repo, bin: bin, tracked: []string{".env"}}
+	return secretsFixture{root: root, repo: repo, bin: bin,
+		tracked: []string{".env"}, untracked: []string{"deploy/id_rsa"}, ignored: []string{".env.local"}}
 }
 
 // gitleaksReport renders one finding per file, each with the canary in
@@ -84,10 +86,17 @@ func secretsRunner(t *testing.T, fx secretsFixture, onGitleaks func(args []strin
 		switch name {
 		case gitenv.Bin:
 			var out strings.Builder
+			ignoredCall := slices.Contains(args, "--ignored")
 			for _, a := range args {
 				rel, ok := strings.CutPrefix(a, ":(literal)")
-				if ok && slices.Contains(fx.tracked, rel) {
+				switch {
+				case !ok:
+				case ignoredCall && slices.Contains(fx.ignored, rel):
+					out.WriteString(rel + "\x00")
+				case !ignoredCall && slices.Contains(fx.tracked, rel):
 					out.WriteString("H " + rel + "\x00")
+				case !ignoredCall && slices.Contains(fx.untracked, rel):
+					out.WriteString("? " + rel + "\x00")
 				}
 			}
 			return out.String(), nil
@@ -160,7 +169,7 @@ func TestAuditSecrets_JSONShape(t *testing.T) {
 		t.Errorf("ignored_env_files = %v, want the ignored .env.local counted", got["ignored_env_files"])
 	}
 	gl, _ := got["gitleaks"].(map[string]any)
-	if keys := auditSortedKeys(gl); keys != "findings,findings_rejected,min_version,mode,path,reason,repos_failed,repos_scanned,status,truncated,version" {
+	if keys := auditSortedKeys(gl); keys != "findings,findings_rejected,min_version,mode,path,reason,repos_failed,repos_scanned,repos_skipped,status,truncated,version" {
 		t.Errorf("gitleaks keys = %s", keys)
 	}
 	if gl["status"] != "ran" || gl["mode"] != "auto" || gl["version"] != "8.30.1" || gl["min_version"] != gitleaks.MinVersion || gl["path"] != fx.bin {
@@ -339,4 +348,16 @@ func TestAuditSecrets_MissingRootFails(t *testing.T) {
 		t.Errorf("err = %v, want exit 1", err)
 	}
 
+}
+
+// TestAuditSecrets_HelpNamesEveryExit1: the --help exit-code text names
+// every exit-1 cause, version_failed and a skipped repo included.
+func TestAuditSecrets_HelpNamesEveryExit1(t *testing.T) {
+	long := newAuditSecretsCmd(auditSecretsDeps{}).Long
+	_, exits, _ := strings.Cut(long, "Exit codes:")
+	for _, want := range []string{"failed", "timed out", "skipped", "`gitleaks version`", "--gitleaks=require"} {
+		if !strings.Contains(exits, want) {
+			t.Errorf("exit-code help lacks %q:\n%s", want, exits)
+		}
+	}
 }

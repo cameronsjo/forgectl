@@ -2,8 +2,10 @@
 // secrets` (forgectl#14, lane 2) and resolves the binary for it and for
 // doctor's row.
 //
-// gitleaks runs over a working tree the operator did not write, so every
-// knob a repo or the environment could turn is pinned here:
+// gitleaks runs over a working tree the operator did not write, so each
+// knob a repo or the environment could turn is pinned here, except one that
+// cannot be (the repo's own .gitleaksignore, below), which is surfaced
+// instead:
 //
 //   - the binary is an absolute path from PATH, never one PATH found through
 //     a relative entry (exec.ErrDot) and never one inside the scan root,
@@ -13,10 +15,16 @@
 //   - forgectl passes its own --config ([extend] useDefault = true), which
 //     gitleaks reads ahead of a scanned repo's .gitleaks.toml, and removes
 //     GITLEAKS_CONFIG and GITLEAKS_CONFIG_TOML from the environment;
+//   - --ignore-gitleaks-allow, so a `gitleaks:allow` comment in a scanned
+//     file suppresses nothing;
 //   - --gitleaks-ignore-path points at forgectl's private temp dir, so the
 //     .gitleaksignore of whatever directory forgectl runs from is not read.
-//     A scanned repo's own .gitleaksignore is still read (gitleaks loads it
-//     unconditionally), which the native scan reports as scanner config;
+//     A scanned repo's own root .gitleaksignore cannot be switched off:
+//     gitleaks loads it unconditionally, so a repo can still hide a finding
+//     by fingerprint. The native scan reports every .gitleaksignore as
+//     scanner-config, so that hiding is visible, and a repo whose root
+//     .gitleaksignore or .gitleaks.toml is not a regular file is not scanned
+//     at all (Skip), since gitleaks would block opening a FIFO there;
 //   - --redact, and a report decoded through a struct that holds only the
 //     rule, file, line and fingerprint, so no secret text is ever decoded;
 //   - a deadline over the whole pass, with the process group killed on it.

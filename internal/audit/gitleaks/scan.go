@@ -57,13 +57,18 @@ type Result struct {
 	// Rejected counts findings whose file did not lie inside the repo they
 	// were reported for, which are dropped rather than shown.
 	Rejected int
-	// Truncated is set when MaxFindings stopped the pass.
+	// Truncated is set when MaxFindings stopped the pass. The cap counts
+	// distinct findings, after a nested repo's copies are dropped.
 	Truncated bool
+	// Skipped lists the repos the pass did not scan, and why.
+	Skipped []Skip
 }
 
 // Args is the argv for one repo's scan. tmp is forgectl's private temp dir:
 // it holds the config and the report, and is the .gitleaksignore path, so
 // the .gitleaksignore of the directory forgectl runs from is not read.
+// --ignore-gitleaks-allow (in gitleaks since 8.19.0) makes a scanned file's
+// own `gitleaks:allow` comments suppress nothing.
 func Args(repo, tmp string) []string {
 	return []string{
 		"dir",
@@ -72,6 +77,7 @@ func Args(repo, tmp string) []string {
 		"--report-format", "json",
 		"--report-path", filepath.Join(tmp, reportName),
 		"--redact",
+		"--ignore-gitleaks-allow",
 		"--exit-code", "0",
 		"--no-banner",
 		"--log-level", "error",
@@ -81,13 +87,31 @@ func Args(repo, tmp string) []string {
 	}
 }
 
+// Skip is a repo the pass did not scan, and why.
+type Skip struct {
+	Repo   string
+	Reason string
+}
+
+// SkipScannerConfigNotRegular: the repo's root .gitleaksignore or
+// .gitleaks.toml is not a regular file. gitleaks opens a root
+// .gitleaksignore unconditionally, and a FIFO there would hold the pass
+// until its deadline.
+const SkipScannerConfigNotRegular = "scanner_config_not_regular"
+
 // Scan runs `gitleaks dir` over each repo in turn under one deadline and
-// returns what it found. bin is a StateAvailable Binary's Path.
-func Scan(ctx context.Context, r Runner, bin string, repos []string, timeout time.Duration) Result {
-	res := Result{Status: StatusRan, Findings: []Finding{}}
+// returns what it found. bin is a StateAvailable Binary's Path. A repo in
+// skip is not scanned and is reported in Result.Skipped with its reason.
+func Scan(ctx context.Context, r Runner, bin string, repos []string, skip map[string]string, timeout time.Duration) Result {
+	res := Result{Status: StatusRan, Findings: []Finding{}, Skipped: []Skip{}}
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
+	sorted := make([]string, 0, len(repos))
+	for _, repo := range repos {
+		sorted = append(sorted, filepath.Clean(repo))
+	}
+	sort.Strings(sorted)
 	tmp, cleanup, err := newWorkDir()
 	if err != nil {
 		res.Status = StatusFailed
@@ -98,11 +122,18 @@ func Scan(ctx context.Context, r Runner, bin string, repos []string, timeout tim
 	ctx, cancel := context.WithTimeout(fexec.WithProcessGroup(ctx), timeout)
 	defer cancel()
 
-	sorted := append([]string(nil), repos...)
-	sort.Strings(sorted)
+	type key struct {
+		file, rule string
+		line       int
+	}
+	seen := map[key]bool{}
 	var all []Finding
+scan:
 	for _, repo := range sorted {
-		repo = filepath.Clean(repo)
+		if reason, ok := skip[repo]; ok {
+			res.Skipped = append(res.Skipped, Skip{Repo: repo, Reason: reason})
+			continue
+		}
 		removeReport(tmp)
 		_, runErr := r.RunWithEnvFiltered(ctx, nil, UnsetEnv(), bin, Args(repo, tmp)...)
 		if ctx.Err() != nil {
@@ -113,18 +144,29 @@ func Scan(ctx context.Context, r Runner, bin string, repos []string, timeout tim
 			res.ReposFailed++
 			continue
 		}
-		found, truncated, err := readReport(tmp, MaxFindings-len(all))
+		found, truncated, err := readReport(tmp, MaxFindings)
 		if err != nil {
 			res.ReposFailed++
 			continue
 		}
 		res.ReposScanned++
+		// A nested repo's findings come back from each enclosing repo's scan
+		// too; a copy is dropped here, before it can count against the cap.
 		for _, w := range found {
 			f, ok := accept(w, repo)
 			if !ok {
 				res.Rejected++
 				continue
 			}
+			k := key{f.File, f.RuleID, f.StartLine}
+			if seen[k] {
+				continue
+			}
+			if len(all) >= MaxFindings {
+				res.Truncated = true
+				break scan
+			}
+			seen[k] = true
 			all = append(all, f)
 		}
 		if truncated {
@@ -136,7 +178,7 @@ func Scan(ctx context.Context, r Runner, bin string, repos []string, timeout tim
 	if res.Status == StatusRan && res.ReposFailed > 0 {
 		res.Status = StatusFailed
 	}
-	res.Findings = dedupe(all, sorted)
+	res.Findings = attribute(all, sorted)
 	return res
 }
 
@@ -155,21 +197,12 @@ func accept(w wireFinding, repo string) (Finding, bool) {
 	return Finding{Repo: repo, File: file, RuleID: w.RuleID, StartLine: w.StartLine, Fingerprint: w.Fingerprint}, true
 }
 
-// dedupe drops the copies a nested repo's findings get from each enclosing
-// repo's scan, attributing each to the innermost scanned repo holding it.
-func dedupe(all []Finding, repos []string) []Finding {
-	type key struct {
-		file, rule string
-		line       int
-	}
-	seen := map[key]bool{}
-	out := []Finding{}
+// attribute files each finding under the innermost scanned repo holding
+// it (a nested repo's finding may have come from its parent's scan) and
+// sorts them.
+func attribute(all []Finding, repos []string) []Finding {
+	out := make([]Finding, 0, len(all))
 	for _, f := range all {
-		k := key{f.File, f.RuleID, f.StartLine}
-		if seen[k] {
-			continue
-		}
-		seen[k] = true
 		f.Repo = innermost(f.File, f.Repo, repos)
 		out = append(out, f)
 	}

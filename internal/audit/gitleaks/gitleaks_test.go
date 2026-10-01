@@ -73,9 +73,9 @@ func writingRunner(t *testing.T, report func(repo string) string) *fexec.FakeRun
 // ignore path, a redacted JSON report into the temp dir, exit 0 on leaks,
 // and the repo after "--". Never `git` mode, never --follow-symlinks.
 //
-// Mutations that turn it red: drop --config, --redact or
-// --gitleaks-ignore-path; switch "dir" to "git" or "detect"; add
-// --follow-symlinks.
+// Mutations that turn it red: drop --config, --redact,
+// --ignore-gitleaks-allow or --gitleaks-ignore-path; switch "dir" to "git"
+// or "detect"; add --follow-symlinks.
 func TestArgs_Golden(t *testing.T) {
 	got := Args("/p/repo", "/tmp/w")
 	want := []string{
@@ -85,6 +85,7 @@ func TestArgs_Golden(t *testing.T) {
 		"--report-format", "json",
 		"--report-path", filepath.Join("/tmp/w", "report.json"),
 		"--redact",
+		"--ignore-gitleaks-allow",
 		"--exit-code", "0",
 		"--no-banner",
 		"--log-level", "error",
@@ -133,7 +134,7 @@ func TestScan_EnvAndTempHygiene(t *testing.T) {
 		}
 		return "", os.WriteFile(filepath.Clean(argValue(t, args, "--report-path")), []byte("[]"), 0o600)
 	}}
-	res := Scan(context.Background(), fr, "/opt/bin/gitleaks", []string{"/p/a", "/p/b"}, time.Minute)
+	res := Scan(context.Background(), fr, "/opt/bin/gitleaks", []string{"/p/a", "/p/b"}, nil, time.Minute)
 	if res.Status != StatusRan || res.ReposScanned != 2 {
 		t.Errorf("result = %+v, want ran over 2 repos", res)
 	}
@@ -161,7 +162,7 @@ func TestScan_EnvAndTempHygiene(t *testing.T) {
 // wireFinding and copy it onto Finding.
 func TestScan_CanaryNeverDecoded(t *testing.T) {
 	fr := writingRunner(t, func(repo string) string { return reportJSON(t, filepath.Join(repo, "conf.txt")) })
-	res := Scan(context.Background(), fr, "/bin/gitleaks", []string{"/p/a"}, time.Minute)
+	res := Scan(context.Background(), fr, "/bin/gitleaks", []string{"/p/a"}, nil, time.Minute)
 	if len(res.Findings) != 1 {
 		t.Fatalf("findings = %+v, want 1", res.Findings)
 	}
@@ -188,7 +189,7 @@ func TestScan_RejectsFilesOutsideTheRepo(t *testing.T) {
 			repo,
 		)
 	})
-	res := Scan(context.Background(), fr, "/bin/gitleaks", []string{"/p/a"}, time.Minute)
+	res := Scan(context.Background(), fr, "/bin/gitleaks", []string{"/p/a"}, nil, time.Minute)
 	if len(res.Findings) != 1 || res.Findings[0].File != "/p/a/ok.txt" || res.Rejected != 5 {
 		t.Errorf("findings=%+v rejected=%d, want only ok.txt and 5 rejected", res.Findings, res.Rejected)
 	}
@@ -199,7 +200,7 @@ func TestScan_RejectsFilesOutsideTheRepo(t *testing.T) {
 func TestScan_NestedReposDeduped(t *testing.T) {
 	inner := "/p/a/libs/b"
 	fr := writingRunner(t, func(string) string { return reportJSON(t, inner+"/k.txt") })
-	res := Scan(context.Background(), fr, "/bin/gitleaks", []string{"/p/a", inner}, time.Minute)
+	res := Scan(context.Background(), fr, "/bin/gitleaks", []string{"/p/a", inner}, nil, time.Minute)
 	if len(res.Findings) != 1 || res.Findings[0].Repo != inner {
 		t.Errorf("findings = %+v, want one, attributed to %s", res.Findings, inner)
 	}
@@ -222,7 +223,7 @@ func TestScan_Failures(t *testing.T) {
 		}
 		return "", os.WriteFile(rp, []byte(reportJSON(t, repo+"/x")), 0o600)
 	}}
-	res := Scan(context.Background(), fr, "/bin/gitleaks", []string{"/p/exit", "/p/good", "/p/noreport", "/p/garbage"}, time.Minute)
+	res := Scan(context.Background(), fr, "/bin/gitleaks", []string{"/p/exit", "/p/good", "/p/noreport", "/p/garbage"}, nil, time.Minute)
 	if res.Status != StatusFailed || res.ReposFailed != 3 || res.ReposScanned != 1 || len(res.Findings) != 1 {
 		t.Errorf("result = %+v, want failed, 3 failed, 1 scanned, 1 finding", res)
 	}
@@ -246,7 +247,7 @@ func (r *ctxRunner) RunWithEnvFiltered(ctx context.Context, _ map[string]string,
 func TestScan_TimeoutStopsThePass(t *testing.T) {
 	r := &ctxRunner{}
 	start := time.Now()
-	res := Scan(context.Background(), r, "/bin/gitleaks", []string{"/p/a", "/p/b", "/p/c"}, 50*time.Millisecond)
+	res := Scan(context.Background(), r, "/bin/gitleaks", []string{"/p/a", "/p/b", "/p/c"}, nil, 50*time.Millisecond)
 	if res.Status != StatusTimedOut || r.calls != 1 {
 		t.Errorf("status=%s calls=%d, want timed_out after one call", res.Status, r.calls)
 	}
@@ -310,7 +311,7 @@ func TestScan_FindingsCapTruncates(t *testing.T) {
 	}
 	body := reportJSON(t, files...)
 	fr := writingRunner(t, func(string) string { return body })
-	res := Scan(context.Background(), fr, "/bin/gitleaks", []string{"/p/a", "/p/b"}, time.Minute)
+	res := Scan(context.Background(), fr, "/bin/gitleaks", []string{"/p/a", "/p/b"}, nil, time.Minute)
 	if !res.Truncated || len(res.Findings) != MaxFindings || len(fr.Calls) != 1 {
 		t.Errorf("truncated=%v findings=%d calls=%d, want true, %d, 1", res.Truncated, len(res.Findings), len(fr.Calls), MaxFindings)
 	}
@@ -401,8 +402,9 @@ func TestResolve_States(t *testing.T) {
 }
 
 // TestScan_LiveGitleaks runs a real gitleaks, when one at MinVersion or later
-// is on PATH, against a repo holding a token and a catch-all .gitleaks.toml
-// allowlist: forgectl's --config must keep the finding visible.
+// is on PATH, against a repo holding a token behind a gitleaks:allow comment
+// and a catch-all .gitleaks.toml allowlist: forgectl's --config and
+// --ignore-gitleaks-allow must keep the finding visible.
 func TestScan_LiveGitleaks(t *testing.T) {
 	b := Resolve(context.Background(), exec.LookPath, fexec.OSRunner{}, "")
 	if b.State != StateAvailable {
@@ -412,14 +414,56 @@ func TestScan_LiveGitleaks(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, ".gitleaks.toml"), []byte("[allowlist]\npaths = ['''.*''']\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(repo, "conf.txt"), []byte("token = "+canary+"\n"), 0o600); err != nil {
+	// The gitleaks:allow comment must not hide it: forgectl passes
+	// --ignore-gitleaks-allow.
+	if err := os.WriteFile(filepath.Join(repo, "conf.txt"), []byte("token = "+canary+" # gitleaks:allow\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	res := Scan(context.Background(), fexec.OSRunner{}, b.Path, []string{repo}, time.Minute)
+	res := Scan(context.Background(), fexec.OSRunner{}, b.Path, []string{repo}, nil, time.Minute)
 	if res.Status != StatusRan || len(res.Findings) == 0 {
 		t.Fatalf("result = %+v, want the planted token found despite the repo's allowlist", res)
 	}
 	if strings.Contains(fmt.Sprintf("%#v", res), canary) {
 		t.Error("the canary reached a decoded value")
+	}
+}
+
+// TestScan_DedupeBeforeTheCap: a nested repo's findings, reported again by
+// its parent's scan, count once against MaxFindings, so a pass whose
+// distinct findings fit the cap is not truncated.
+//
+// Mutation that turns it red: append before checking seen (or count every
+// accepted finding against the cap).
+func TestScan_DedupeBeforeTheCap(t *testing.T) {
+	inner := "/p/a/libs/b"
+	files := make([]string, MaxFindings)
+	for i := range files {
+		files[i] = fmt.Sprintf("%s/f%d", inner, i)
+	}
+	body := reportJSON(t, files...)
+	fr := writingRunner(t, func(string) string { return body })
+	res := Scan(context.Background(), fr, "/bin/gitleaks", []string{"/p/a", inner}, nil, time.Minute)
+	if res.Truncated || len(res.Findings) != MaxFindings || len(fr.Calls) != 2 {
+		t.Errorf("truncated=%v findings=%d calls=%d, want false, %d, 2", res.Truncated, len(res.Findings), len(fr.Calls), MaxFindings)
+	}
+	for _, f := range res.Findings[:3] {
+		if f.Repo != inner {
+			t.Errorf("finding %s attributed to %s, want %s", f.File, f.Repo, inner)
+		}
+	}
+}
+
+// TestScan_SkipsListedRepos: a repo in the skip map is never handed to
+// gitleaks and is reported with its reason; the rest still run.
+//
+// Mutation that turns it red: ignore the skip map.
+func TestScan_SkipsListedRepos(t *testing.T) {
+	fr := writingRunner(t, func(string) string { return "[]" })
+	res := Scan(context.Background(), fr, "/bin/gitleaks", []string{"/p/a", "/p/fifo"}, map[string]string{"/p/fifo": SkipScannerConfigNotRegular}, time.Minute)
+	if len(fr.Calls) != 1 || fr.Calls[0].Args[len(fr.Calls[0].Args)-1] != "/p/a" {
+		t.Errorf("calls = %+v, want only /p/a scanned", fr.Calls)
+	}
+	if len(res.Skipped) != 1 || res.Skipped[0] != (Skip{Repo: "/p/fifo", Reason: SkipScannerConfigNotRegular}) || res.Status != StatusRan || res.ReposScanned != 1 {
+		t.Errorf("result = %+v", res)
 	}
 }

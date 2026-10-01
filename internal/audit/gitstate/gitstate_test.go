@@ -28,34 +28,47 @@ func TestStatus_Argv(t *testing.T) {
 	if _, err := Status(context.Background(), fr, "/p/repo", []string{".env", "a/*[x]/.env"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(fr.Calls) != 1 {
-		t.Fatalf("calls = %d, want 1", len(fr.Calls))
+	if len(fr.Calls) != 2 {
+		t.Fatalf("calls = %d, want 2 (the listing and the ignored set)", len(fr.Calls))
 	}
-	c := fr.Calls[0]
-	want := append(gitenv.Args(gitenv.Local), "-C", "/p/repo",
-		"ls-files", "-z", "-t", "--cached", "--others", "--exclude-standard", "--",
-		":(literal).env", ":(literal)a/*[x]/.env")
-	if c.Name != gitenv.Bin || !slices.Equal(c.Args, want) {
-		t.Errorf("argv = %s %q\nwant  %s %q", c.Name, c.Args, gitenv.Bin, want)
+	specs := []string{":(literal).env", ":(literal)a/*[x]/.env"}
+	wants := [][]string{
+		append(append(gitenv.Args(gitenv.Local), "-C", "/p/repo",
+			"ls-files", "-z", "-t", "--cached", "--others", "--exclude-standard", "--"), specs...),
+		append(append(gitenv.Args(gitenv.Local), "-C", "/p/repo",
+			"ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--"), specs...),
 	}
-	if v, ok := c.Env["GIT_ALLOW_PROTOCOL"]; !ok || v != "" {
-		t.Errorf("env = %v, want gitenv.Local's GIT_ALLOW_PROTOCOL= pin", c.Env)
+	for i, c := range fr.Calls {
+		if c.Name != gitenv.Bin || !slices.Equal(c.Args, wants[i]) {
+			t.Errorf("call %d argv = %s %q\nwant  %s %q", i, c.Name, c.Args, gitenv.Bin, wants[i])
+		}
+		if v, ok := c.Env["GIT_ALLOW_PROTOCOL"]; !ok || v != "" {
+			t.Errorf("call %d env = %v, want gitenv.Local's GIT_ALLOW_PROTOCOL= pin", i, c.Env)
+		}
 	}
 }
 
 // TestStatus_ParsesTags: "H" (and any other index tag) is tracked, "?" is
-// untracked, and an omitted path is ignored. A name holding a newline or a
-// space survives the -z split.
+// untracked, a path the ignored listing names is ignored, and a path no
+// listing names is absent (unknown), never assumed ignored. A name holding a
+// newline or a space survives the -z split.
+//
+// Mutation that turns it red: fill every unlisted path in as GitIgnored.
 func TestStatus_ParsesTags(t *testing.T) {
 	out := "H .env\x00? sub/.env\x00C mod/.env\x00? odd\nname/.env\x00H both\x00? both\x00"
-	fr := &fexec.FakeRunner{RunFunc: func(string, []string) (string, error) { return out, nil }}
-	got, err := Status(context.Background(), fr, "/r", []string{".env", "sub/.env", "mod/.env", "odd\nname/.env", "both", "gone"})
+	fr := &fexec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		if slices.Contains(args, "--ignored") {
+			return "ign/.env\x00both\x00", nil
+		}
+		return out, nil
+	}}
+	got, err := Status(context.Background(), fr, "/r", []string{".env", "sub/.env", "mod/.env", "odd\nname/.env", "both", "ign/.env", "gone"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]audit.GitState{
 		".env": audit.GitTracked, "sub/.env": audit.GitUntracked, "mod/.env": audit.GitTracked,
-		"odd\nname/.env": audit.GitUntracked, "both": audit.GitTracked,
+		"odd\nname/.env": audit.GitUntracked, "both": audit.GitTracked, "ign/.env": audit.GitIgnored,
 	}
 	if len(got) != len(want) {
 		t.Errorf("got %v, want %v", got, want)
@@ -79,6 +92,9 @@ func TestStatus_Batches(t *testing.T) {
 	rels = append(rels, strings.Repeat("x", maxBatchBytes)+"/.env") // rides alone
 	var asked []string
 	fr := &fexec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		if slices.Contains(args, "--ignored") {
+			return "", nil
+		}
 		i := slices.Index(args, "--")
 		n := 0
 		for _, a := range args[i+1:] {
@@ -93,7 +109,7 @@ func TestStatus_Batches(t *testing.T) {
 	if _, err := Status(context.Background(), fr, "/r", rels); err != nil {
 		t.Fatal(err)
 	}
-	if len(fr.Calls) < 4 || !slices.Equal(asked, rels) {
+	if len(fr.Calls) < 8 || !slices.Equal(asked, rels) {
 		t.Errorf("calls=%d, asked %d paths in order? %v; want every path once across >=4 batches", len(fr.Calls), len(asked), slices.Equal(asked, rels))
 	}
 
@@ -151,9 +167,9 @@ func TestStatus_LiveGit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]audit.GitState{".env": audit.GitTracked, "new/.env": audit.GitUntracked, "g/[a]/.env": audit.GitUntracked}
+	want := map[string]audit.GitState{".env": audit.GitTracked, ".env.local": audit.GitIgnored, "new/.env": audit.GitUntracked, "g/[a]/.env": audit.GitUntracked}
 	if len(got) != len(want) {
-		t.Errorf("got %v, want %v (.env.local ignored, g/a/.env never asked)", got, want)
+		t.Errorf("got %v, want %v (g/a/.env never asked)", got, want)
 	}
 	for k, v := range want {
 		if got[k] != v {

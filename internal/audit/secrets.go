@@ -20,7 +20,7 @@ import (
 //
 // Whether a file is tracked or ignored is git's to say, and this package
 // runs nothing: ApplyGitStatus takes the answer from a caller-supplied
-// GitStatusFunc (internal/audit/gitstate runs the one hardened
+// GitStatusFunc (internal/audit/gitstate runs the hardened
 // `git ls-files` per repo).
 
 // Secret finding kinds. The wire values are part of the --json contract.
@@ -45,7 +45,8 @@ const (
 	// FlagOutsideRepo: a .env outside any git working tree.
 	FlagOutsideRepo = "outside-repo"
 	// FlagGitUnknown: git could not say whether the file is tracked or
-	// ignored, so it is listed rather than assumed ignored.
+	// ignored (the call failed or timed out, or git listed the path nowhere,
+	// as it does a FIFO), so it is listed rather than assumed ignored.
 	FlagGitUnknown = "git-unknown"
 	// FlagVendored: inside a dependency directory.
 	FlagVendored = "vendored"
@@ -319,17 +320,21 @@ const (
 )
 
 // GitStatusFunc answers, for the slash-separated paths rels relative to the
-// working tree repo, which are tracked and which are untracked but not
-// ignored. A path it does not mention is ignored. An error means git could
-// not answer for any of them.
+// working tree repo, which are tracked, which are untracked but not ignored,
+// and which are ignored. A path it does not mention is unknown (git lists a
+// FIFO in none of its lists), never assumed ignored. An error means git
+// could not answer for any of them.
 type GitStatusFunc func(repo string, rels []string) (map[string]GitState, error)
+
+// gitStateRank orders answers by how strongly they put a file on the list.
+var gitStateRank = map[GitState]int{GitIgnored: 0, GitUntracked: 1, GitTracked: 2}
 
 // ApplyGitStatus asks status about every finding inside a repo, once per
 // repo, and applies the answer: tracked files are flagged; an untracked
 // .env no rule ignores is flagged unignored; an ignored .env is dropped from
-// the list and counted in IgnoredEnv. A repo status cannot answer for keeps
-// its findings, flagged git-unknown, since assuming them ignored would hide
-// them.
+// the list and counted in IgnoredEnv. A repo status cannot answer for, and
+// a path git lists nowhere, keep their findings flagged git-unknown, since
+// assuming them ignored would hide them.
 func (r *SecretsReport) ApplyGitStatus(status GitStatusFunc) {
 	byRepo := map[string][]int{}
 	var repos []string
@@ -359,9 +364,11 @@ func (r *SecretsReport) ApplyGitStatus(status GitStatusFunc) {
 		}
 		// git spells a path as its index does; on a case-insensitive
 		// filesystem that can differ in case from the name the walk saw.
+		// Where folding merges two answers, the one that lists the file
+		// wins: tracked over untracked over ignored.
 		folded := make(map[string]GitState, len(states))
 		for p, st := range states {
-			if _, ok := folded[asciiLower(p)]; !ok || st == GitTracked {
+			if prev, ok := folded[asciiLower(p)]; !ok || gitStateRank[st] > gitStateRank[prev] {
 				folded[asciiLower(p)] = st
 			}
 		}
@@ -372,7 +379,8 @@ func (r *SecretsReport) ApplyGitStatus(status GitStatusFunc) {
 				st, ok = folded[asciiLower(f.repoRel)]
 			}
 			if !ok {
-				st = GitIgnored
+				f.Flags = append(f.Flags, FlagGitUnknown)
+				continue
 			}
 			switch {
 			case st == GitTracked:
