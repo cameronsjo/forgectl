@@ -205,7 +205,7 @@ func TestErrorMessageIsRedacted(t *testing.T) {
 // or a future reader of the field showed herdr's text. They are stored
 // redacted now; a line without a credential shape survives.
 //
-// Mutation that turns it red: store env.Error.Message raw in parseEnvelope
+// Mutation that turns it red: store r.Message raw in refusal
 // (the Message row), or mr.Reason raw in MoveTab (the Reason row).
 func TestErrorFieldsHoldRedactedText(t *testing.T) {
 	const secret = "SEKRIT-herdr-941" //nolint:gosec // G101: a fake credential the test plants

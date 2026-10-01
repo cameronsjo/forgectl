@@ -100,7 +100,7 @@ type statusCleanJSON struct {
 
 // newStatusCmd builds `forgectl status` over the shipped read paths.
 func newStatusCmd(deps module.Deps) *cobra.Command {
-	return newStatusCmdForSources(defaultStatusSources(deps), deps.Theme)
+	return newStatusCmdWith(defaultStatusSources(deps), deps.Theme, productionStatusTUIRuntime())
 }
 
 // defaultStatusSources wires each section to the read path its own verb
@@ -143,11 +143,18 @@ func defaultStatusSources(deps module.Deps) statusSources {
 	}
 }
 
-// newStatusCmdForSources is the test seam.
+// newStatusCmdForSources is the test seam for the report paths. --tui runs
+// through the production terminal checks, which refuse under go test.
 func newStatusCmdForSources(src statusSources, th theme.Theme) *cobra.Command {
+	return newStatusCmdWith(src, th, productionStatusTUIRuntime())
+}
+
+// newStatusCmdWith builds the command over src and the cockpit runtime rt.
+func newStatusCmdWith(src statusSources, th theme.Theme, rt statusTUIRuntime) *cobra.Command {
 	var (
 		asJSON  bool
 		strict  bool
+		asTUI   bool
 		timeout time.Duration
 	)
 	cmd := &cobra.Command{
@@ -168,15 +175,27 @@ the command. --strict exits 1 after the report when any section is not ok.
   forgectl status                  the overview
   forgectl status --json           every section, every row, for scripts
   forgectl status --json --strict  same, but exit 1 when a section degraded or failed
-  forgectl status --timeout 5s     give each section five seconds`,
+  forgectl status --timeout 5s     give each section five seconds
+  forgectl status --tui            the cockpit: the same sections, refreshing in place
+
+--tui needs a terminal on stdin and stdout. git refreshes itself every
+minute; prs, clean and bench refresh when you press r or R.`,
 		Args: cobra.NoArgs,
 		// Mirrors projects list: --strict fails AFTER the report is written,
 		// and cobra's usage text must never follow it onto stdout.
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Checked here, not with cobra's flag groups: a flag-group error is
+			// raised outside the sites the --json stderr contract wraps.
+			if asTUI && (asJSON || strict) {
+				return errors.New("--tui is the interactive cockpit; it cannot be combined with --json or --strict")
+			}
 			if timeout <= 0 {
 				return errors.New("invalid --timeout: must be greater than zero")
+			}
+			if asTUI {
+				return runStatusCockpit(cmd, src, th, rt, timeout)
 			}
 			report := collectStatus(cmd.Context(), src, timeout)
 			if asJSON {
@@ -197,6 +216,7 @@ the command. --strict exits 1 after the report when any section is not ok.
 		`emit {"git":S,"prs":S,"clean":S,"bench":S} to stdout, each S {"state":"ok|degraded|failed","error":...,"notes":[...],"data":...}; data is null only when state is failed`)
 	cmd.Flags().BoolVar(&strict, "strict", false, "exit 1 when any section is degraded or failed (the report is still written)")
 	cmd.Flags().DurationVar(&timeout, "timeout", statusDefaultTimeout, "deadline for each section; a section that misses it is reported as failed")
+	cmd.Flags().BoolVar(&asTUI, "tui", false, "open the cockpit: the sections on one screen, refreshing in place (needs a terminal)")
 	return cmd
 }
 
@@ -260,35 +280,93 @@ func newStatusClean(root string, preview cleanpkg.Result) statusCleanJSON {
 	}
 }
 
+// statusSectionView is one section as both human views show it: the text
+// overview (renderStatus) and the cockpit (status --tui). Headline is the
+// sentence after the label, computed once here so the two views cannot drift
+// apart; it is "failed: <error>" for a section with no data.
+type statusSectionView struct {
+	Label    string
+	State    status.State
+	Error    string
+	Notes    []string
+	HasData  bool
+	Headline string
+}
+
+// The four sections in report order, as indexes into statusSectionViews.
+const (
+	statusIdxGit = iota
+	statusIdxPRs
+	statusIdxClean
+	statusIdxBench
+	statusSectionCount
+)
+
+// statusSectionLabels names the sections in report order. The cockpit labels
+// its sections from here before any of them has loaded.
+var statusSectionLabels = [statusSectionCount]string{
+	statusIdxGit:   "git",
+	statusIdxPRs:   "prs",
+	statusIdxClean: "clean",
+	statusIdxBench: "bench",
+}
+
+// statusSectionViews folds the report into its four section views, in the
+// order both human views print them. A section with no data is failed
+// whatever its state says.
+func statusSectionViews(r statusReportJSON) [statusSectionCount]statusSectionView {
+	views := [statusSectionCount]statusSectionView{
+		statusIdxGit:   statusView(statusSectionLabels[statusIdxGit], r.Git.State, r.Git.Error, r.Git.Notes, r.Git.Data != nil),
+		statusIdxPRs:   statusView(statusSectionLabels[statusIdxPRs], r.PRs.State, r.PRs.Error, r.PRs.Notes, r.PRs.Data != nil),
+		statusIdxClean: statusView(statusSectionLabels[statusIdxClean], r.Clean.State, r.Clean.Error, r.Clean.Notes, r.Clean.Data != nil),
+		statusIdxBench: statusView(statusSectionLabels[statusIdxBench], r.Bench.State, r.Bench.Error, r.Bench.Notes, r.Bench.Data != nil),
+	}
+	if r.Git.Data != nil {
+		views[statusIdxGit].Headline = statusGitHeadline(*r.Git.Data)
+	}
+	if r.PRs.Data != nil {
+		views[statusIdxPRs].Headline = statusPRsHeadline(*r.PRs.Data)
+	}
+	if r.Clean.Data != nil {
+		views[statusIdxClean].Headline = statusCleanHeadline(*r.Clean.Data)
+	}
+	if r.Bench.Data != nil {
+		views[statusIdxBench].Headline = statusBenchHeadline(*r.Bench.Data)
+	}
+	return views
+}
+
+// statusView builds one section view without its headline; a failed one gets
+// its "failed: <error>" headline here.
+func statusView(label string, state status.State, errText string, notes []string, hasData bool) statusSectionView {
+	v := statusSectionView{Label: label, State: state, Error: errText, Notes: notes, HasData: hasData}
+	if !hasData || (state != status.StateOK && state != status.StateDegraded) {
+		v.State = status.StateFailed
+		v.HasData = false
+		v.Headline = "failed: " + errText
+	}
+	return v
+}
+
 // renderStatus writes the human overview: one glyph-led headline per
 // section, then a few indented detail rows. Every value that came from a
 // filesystem, a subprocess or a server is escaped and capped here; notes and
 // errors were escaped and capped by status.Collect.
 func renderStatus(out io.Writer, r statusReportJSON, marks theme.Marks) {
-	renderStatusSection(out, marks, "git", r.Git.State, r.Git.Data != nil, r.Git.Error, r.Git.Notes, func() {
-		renderStatusGit(out, *r.Git.Data)
-	})
-	renderStatusSection(out, marks, "prs", r.PRs.State, r.PRs.Data != nil, r.PRs.Error, r.PRs.Notes, func() {
-		renderStatusPRs(out, *r.PRs.Data)
-	})
-	renderStatusSection(out, marks, "clean", r.Clean.State, r.Clean.Data != nil, r.Clean.Error, r.Clean.Notes, func() {
-		renderStatusClean(out, *r.Clean.Data)
-	})
-	renderStatusSection(out, marks, "bench", r.Bench.State, r.Bench.Data != nil, r.Bench.Error, r.Bench.Notes, func() {
-		renderStatusBench(out, *r.Bench.Data, marks)
-	})
+	views := statusSectionViews(r)
+	renderStatusSection(out, marks, views[statusIdxGit], func() { renderStatusGit(out, *r.Git.Data) })
+	renderStatusSection(out, marks, views[statusIdxPRs], func() { renderStatusPRs(out, *r.PRs.Data) })
+	renderStatusSection(out, marks, views[statusIdxClean], func() {})
+	renderStatusSection(out, marks, views[statusIdxBench], func() { renderStatusBench(out, *r.Bench.Data, marks) })
 }
 
-// renderStatusSection prints a section's glyph and label, then either its
-// failure or its body followed by its degradation notes. body is only called
-// when hasData, so it may dereference Data; a section with no data prints as
-// failed whatever its state says.
-func renderStatusSection(out io.Writer, marks theme.Marks, label string, state status.State, hasData bool, errText string, notes []string, body func()) {
-	if !hasData {
-		state = status.StateFailed
-	}
+// renderStatusSection prints a section's glyph, label and headline, then
+// either nothing more (a failed section) or its detail rows followed by its
+// degradation notes. rows is only called when the section has data, so it may
+// dereference Data.
+func renderStatusSection(out io.Writer, marks theme.Marks, v statusSectionView, rows func()) {
 	var glyph string
-	switch state {
+	switch v.State {
 	case status.StateOK:
 		glyph = marks.OK
 	case status.StateDegraded:
@@ -296,23 +374,48 @@ func renderStatusSection(out io.Writer, marks theme.Marks, label string, state s
 	default:
 		glyph = marks.Fail
 	}
-	_, _ = fmt.Fprintf(out, "%s %-5s  ", glyph, label)
-	if state != status.StateOK && state != status.StateDegraded {
-		_, _ = fmt.Fprintf(out, "failed: %s\n", errText)
+	_, _ = fmt.Fprintf(out, "%s %-5s  %s\n", glyph, v.Label, v.Headline)
+	if !v.HasData {
 		return
 	}
-	body()
-	for _, n := range notes {
+	rows()
+	for _, n := range v.Notes {
 		_, _ = fmt.Fprintf(out, "    note: %s\n", n)
 	}
 }
 
-// renderStatusGit prints the project counts and the projects that need
+// statusGitHeadline is the git section's headline: the project counts.
+func statusGitHeadline(g statusGitJSON) string {
+	return fmt.Sprintf("%d project(s) under %s: %d clean, %d dirty, %d ahead, %d unknown",
+		g.Total, termsafe.QuotePath(g.Root), g.Clean, g.Dirty, g.Ahead, g.Unknown)
+}
+
+// statusPRsHeadline is the prs section's headline: the three dash counts.
+func statusPRsHeadline(d prDashJSON) string {
+	return fmt.Sprintf("%d active review(s), %d awaiting you, %d open by you",
+		len(d.ActiveReviews), len(d.AwaitingYou), len(d.YourOpen))
+}
+
+// statusCleanHeadline is the clean section's headline: the dry-run total.
+func statusCleanHeadline(c statusCleanJSON) string {
+	return fmt.Sprintf("%s reclaimable across %d target(s), %d skipped, under %s",
+		formatBytes(c.TotalReclaimableBytes), c.Reclaimable, c.Skipped, termsafe.QuotePath(c.Root))
+}
+
+// statusBenchHeadline is the bench section's headline: each component's
+// state.
+func statusBenchHeadline(b bench.Report) string {
+	parts := make([]string, 0, 2)
+	for _, c := range []bench.Component{b.Hearth, b.Chronicle} {
+		parts = append(parts, termsafe.SafeLineMax(c.Name, statusNameMaxRunes)+" "+termsafe.SafeLineMax(string(c.State), statusNameMaxRunes))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// renderStatusGit prints, under the counts headline, the projects that need
 // attention: dirty, ahead, or unreadable. Clean trees and plain directories
 // are counted, not listed.
 func renderStatusGit(out io.Writer, g statusGitJSON) {
-	_, _ = fmt.Fprintf(out, "%d project(s) under %s: %d clean, %d dirty, %d ahead, %d unknown\n",
-		g.Total, termsafe.QuotePath(g.Root), g.Clean, g.Dirty, g.Ahead, g.Unknown)
 	shown, hidden := 0, 0
 	for _, p := range g.Projects {
 		label := ""
@@ -339,10 +442,8 @@ func renderStatusGit(out io.Writer, g statusGitJSON) {
 	}
 }
 
-// renderStatusPRs prints the three dash counts and the PRs awaiting you.
+// renderStatusPRs prints the PRs awaiting you under the prs headline.
 func renderStatusPRs(out io.Writer, d prDashJSON) {
-	_, _ = fmt.Fprintf(out, "%d active review(s), %d awaiting you, %d open by you\n",
-		len(d.ActiveReviews), len(d.AwaitingYou), len(d.YourOpen))
 	for i, p := range d.AwaitingYou {
 		if i == statusPRRowsMax {
 			_, _ = fmt.Fprintf(out, "    … %d more (pr dash)\n", len(d.AwaitingYou)-i)
@@ -353,21 +454,10 @@ func renderStatusPRs(out io.Writer, d prDashJSON) {
 	}
 }
 
-// renderStatusClean prints the dry-run reclaim total.
-func renderStatusClean(out io.Writer, c statusCleanJSON) {
-	_, _ = fmt.Fprintf(out, "%s reclaimable across %d target(s), %d skipped, under %s\n",
-		formatBytes(c.TotalReclaimableBytes), c.Reclaimable, c.Skipped, termsafe.QuotePath(c.Root))
-}
-
-// renderStatusBench prints each component's state, then a reason line for
-// each one that is not ok, with the glyph vocabulary `bench status` uses.
-// Probe details stay in bench status.
+// renderStatusBench prints a reason line for each component that is not ok,
+// under the headline that names every component's state, with the glyph
+// vocabulary `bench status` uses. Probe details stay in bench status.
 func renderStatusBench(out io.Writer, b bench.Report, marks theme.Marks) {
-	parts := make([]string, 0, 2)
-	for _, c := range []bench.Component{b.Hearth, b.Chronicle} {
-		parts = append(parts, termsafe.SafeLineMax(c.Name, statusNameMaxRunes)+" "+termsafe.SafeLineMax(string(c.State), statusNameMaxRunes))
-	}
-	_, _ = fmt.Fprintln(out, strings.Join(parts, ", "))
 	for _, c := range []bench.Component{b.Hearth, b.Chronicle} {
 		if c.State == bench.StateOK {
 			continue

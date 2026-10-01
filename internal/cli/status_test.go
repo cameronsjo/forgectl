@@ -548,3 +548,45 @@ func TestStatus_DefaultCleanSourceFailsOnAnUnscannableRoot(t *testing.T) {
 		})
 	}
 }
+
+// statusTextHeadlines renders r as the text view and returns each section
+// line's text after its glyph and label, in report order.
+func statusTextHeadlines(t *testing.T, r statusReportJSON) []string {
+	t.Helper()
+	var buf bytes.Buffer
+	renderStatus(&buf, r, theme.Theme{}.Marks())
+	var got []string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if line == "" || strings.HasPrefix(line, " ") {
+			continue
+		}
+		_, rest, ok := strings.Cut(line, " ")
+		if !ok || len(rest) < 7 {
+			t.Fatalf("section line %q has no label column", line)
+		}
+		got = append(got, rest[7:])
+	}
+	return got
+}
+
+// TestStatusText_HeadlinesComeFromTheSharedViews pins the text view to the
+// shared headline functions the cockpit also renders, for ok, degraded and
+// failed sections alike.
+func TestStatusText_HeadlinesComeFromTheSharedViews(t *testing.T) {
+	for name, src := range map[string]statusSources{"ok": okStatusSources(), "failing": failingStatusSources(t)} {
+		r := collectStatus(context.Background(), src, 50*time.Millisecond)
+		views := statusSectionViews(r)
+		got := statusTextHeadlines(t, r)
+		if len(got) != len(views) {
+			t.Fatalf("%s: text view printed %d section lines, want %d: %q", name, len(got), len(views), got)
+		}
+		for i, v := range views {
+			if v.Headline == "" {
+				t.Errorf("%s: %s has an empty headline", name, v.Label)
+			}
+			if got[i] != v.Headline {
+				t.Errorf("%s: %s text headline = %q, shared view = %q", name, v.Label, got[i], v.Headline)
+			}
+		}
+	}
+}
