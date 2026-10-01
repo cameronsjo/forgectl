@@ -51,9 +51,10 @@ func TestScanBlockIDs_LinearInSegments(t *testing.T) {
 		t.Fatalf("scanBodyFor (baseline): %v", err)
 	}
 	var ids []string
-	perftest.Linear(t, "scanBlockIDs", k,
+	smallRun, largeRun := perftest.Amortize(
 		func() { _ = scanBlockIDs(small, smallScan.masked, smallScan.hidden) },
 		func() { ids = scanBlockIDs(body, scan.masked, scan.hidden) })
+	perftest.Linear(t, "scanBlockIDs", k, smallRun, largeRun)
 	if len(ids) != 1 || ids[0] != "b" {
 		t.Errorf("scanBlockIDs = %v, want [b]", ids)
 	}

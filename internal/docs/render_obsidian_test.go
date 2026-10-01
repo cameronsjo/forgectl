@@ -308,7 +308,8 @@ func TestRenderVault_LongEqualsRunIsLinear(t *testing.T) {
 					_ = markdownVaultPlain.Parser().Parse(text.NewReader(src), parser.WithContext(newParseContext()))
 				}
 			}
-			perftest.Linear(t, "parsing a "+c+" run", k, parse(n/k), parse(n))
+			small, large := perftest.Amortize(parse(n/k), parse(n))
+			perftest.Linear(t, "parsing a "+c+" run", k, small, large)
 		})
 	}
 }

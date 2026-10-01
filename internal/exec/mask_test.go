@@ -286,7 +286,8 @@ func TestMaskText_LongValueWithNoMatchIsNearLinear(t *testing.T) {
 			}
 		}
 	}
-	perftest.Linear(t, "text with no match", k, run(1), run(k))
+	small, large := perftest.Amortize(run(1), run(k))
+	perftest.Linear(t, "text with no match", k, small, large)
 }
 
 // TestOSRunner_MaskedAssignments_FailureStdoutMaskedInOutput pins #664: a
@@ -523,7 +524,8 @@ func TestMaskText_SelfOverlappingLongValueIsLinear(t *testing.T) {
 			}
 		}
 	}
-	perftest.Linear(t, "text matching at every byte", k, run(1), run(k))
+	small, large := perftest.Amortize(run(1), run(k))
+	perftest.Linear(t, "text matching at every byte", k, small, large)
 }
 
 // TestEachMatch_FindsEveryOverlappingOccurrence checks eachMatch against a

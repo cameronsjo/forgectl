@@ -502,12 +502,15 @@ func TestStdout_LinearOnAdversarialInput(t *testing.T) {
 	const n, k = 1 << 20, 4
 	small, large := adversarialStdout(n/k), adversarialStdout(n)
 	for i := range small {
-		perftest.Linear(t, "Stdout on adversarial input "+strconv.Itoa(i), k,
+		// Amortize: the cheapest inputs cost under Floor alone.
+		smallRun, largeRun := perftest.Amortize(
 			func() { _ = Stdout(small[i]) },
 			func() { _ = Stdout(large[i]) })
-		perftest.Linear(t, "Text on adversarial input "+strconv.Itoa(i), k,
+		perftest.Linear(t, "Stdout on adversarial input "+strconv.Itoa(i), k, smallRun, largeRun)
+		textSmall, textLarge := perftest.Amortize(
 			func() { _ = Text(small[i]) },
 			func() { _ = Text(large[i]) })
+		perftest.Linear(t, "Text on adversarial input "+strconv.Itoa(i), k, textSmall, textLarge)
 	}
 }
 

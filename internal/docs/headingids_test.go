@@ -118,7 +118,8 @@ func TestRender_DuplicateHeadings_LinearTime(t *testing.T) {
 			}
 		}
 	}
-	perftest.Linear(t, fmt.Sprintf("%d duplicate headings", n), k, work(n/k), work(n))
+	small, large := perftest.Amortize(work(n/k), work(n))
+	perftest.Linear(t, fmt.Sprintf("%d duplicate headings", n), k, small, large)
 }
 
 // TestRender_DuplicateHeadings_IDsUnchanged pins, through the real render
