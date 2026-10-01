@@ -174,6 +174,11 @@ arguments for a menu over every command group.`,
 	// leaf verb outside the registry, alongside --version.
 	root.AddCommand(newVersionCmd())
 
+	// `menu` prints the hub's contents without a TTY (forgectl#730 item 5).
+	// Outside the registry like version: it describes the hub, so it has no
+	// hub tier and no row of its own.
+	root.AddCommand(newMenuCmd(deps))
+
 	// The editor `env set --sops` points sops at — forgectl re-invoking
 	// itself. Registered outside the registry because it is not a verb anyone
 	// runs: it is half of an internal protocol, and its own guards (not its

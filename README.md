@@ -68,6 +68,7 @@ deep-dive get a link here.
 ```sh
 forgectl                   # open TUI menu (thumb mode)
 forgectl --help            # list every command group (non-interactive entrypoint)
+forgectl menu --json       # the menu's contents as data, no TTY needed (see docs/commands/menu.md)
 forgectl tmux ls           # list sessions
 forgectl tmux pick [name]  # connect/smart-create via sesh (no name → list)
 forgectl tmux kill <name>  # kill a session (--others keeps only it)

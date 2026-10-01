@@ -1,0 +1,129 @@
+{
+  "header": {
+    "project": "forgectl",
+    "branch": "main",
+    "tmux_sessions": 3,
+    "reviews": {
+      "running": 1,
+      "queued": 2
+    }
+  },
+  "first_run": false,
+  "pinned": [
+    {
+      "command": "docs",
+      "argv": [
+        "docs"
+      ],
+      "description": "read project docs",
+      "usage": "forgectl docs",
+      "needs_args": false,
+      "leaves": [
+        {
+          "command": "docs list",
+          "argv": [
+            "docs",
+            "list"
+          ],
+          "description": "list the indexed docs",
+          "usage": "forgectl docs list [dir|file ...]",
+          "needs_args": false,
+          "leaves": []
+        },
+        {
+          "command": "docs read",
+          "argv": [
+            "docs",
+            "read"
+          ],
+          "description": "read one doc",
+          "usage": "forgectl docs read <file>",
+          "needs_args": true,
+          "leaves": []
+        }
+      ]
+    },
+    {
+      "command": "pr",
+      "argv": [
+        "pr"
+      ],
+      "description": "review a pull request",
+      "usage": "forgectl pr <ref>",
+      "needs_args": true,
+      "leaves": [
+        {
+          "command": "pr findings",
+          "argv": [
+            "pr",
+            "findings"
+          ],
+          "description": "list or reclaim findings",
+          "usage": "forgectl pr findings",
+          "needs_args": false,
+          "leaves": [
+            {
+              "command": "pr findings list",
+              "argv": [
+                "pr",
+                "findings",
+                "list"
+              ],
+              "description": "list findings directories",
+              "usage": "forgectl pr findings list",
+              "needs_args": false,
+              "leaves": []
+            }
+          ]
+        },
+        {
+          "command": "pr prs",
+          "argv": [
+            "pr",
+            "prs"
+          ],
+          "description": "list open PRs",
+          "usage": "forgectl pr prs",
+          "needs_args": false,
+          "leaves": []
+        },
+        {
+          "command": "pr reviewed",
+          "argv": [
+            "pr",
+            "reviewed"
+          ],
+          "description": "mark a PR reviewed",
+          "usage": "forgectl pr reviewed [<ref>]",
+          "needs_args": false,
+          "leaves": []
+        }
+      ]
+    }
+  ],
+  "recent": [
+    {
+      "command": "pr prs",
+      "argv": [
+        "pr",
+        "prs"
+      ],
+      "description": "list open PRs",
+      "usage": "forgectl pr prs",
+      "needs_args": false,
+      "leaves": []
+    }
+  ],
+  "commands": [
+    {
+      "command": "doctor",
+      "argv": [
+        "doctor"
+      ],
+      "description": "check the install",
+      "usage": "forgectl doctor",
+      "needs_args": false,
+      "leaves": []
+    }
+  ]
+}

@@ -27,62 +27,80 @@ const (
 	hubRecentWindow = 200
 )
 
-// buildHub derives the hub's rows from the live cobra tree (ADR-0005
-// addendum): no new manifest field, no Menu hook. Each row's Name/Short come
-// straight off root's constructed children; tier and registry order are read
-// back off the hubTierAnnotation and hubOrderAnnotation root.go stamped onto
-// each command at construction — buildHub deliberately never calls
+// hubSections is the hub's content before layout (forgectl#730): whether the
+// first-run row shows, the pinned modules in hubPinned order, the recent rows,
+// and every remaining module in registry order. buildHub lays it out for the
+// TUI and `menu` reports it, so the two cannot disagree about what the hub
+// holds.
+type hubSections struct {
+	firstRun bool
+	pinned   []tui.HubEntry
+	recent   []tui.HubEntry
+	rest     []tui.HubEntry
+}
+
+// collectHubSections derives the hub's sections from the live cobra tree
+// (ADR-0005 addendum): no new manifest field, no Menu hook. Each row's
+// Name/Short come straight off root's constructed children; tier and registry
+// order are read back off the hubTierAnnotation and hubOrderAnnotation root.go
+// stamped onto each command at construction — it deliberately never calls
 // allModules() itself, because a module.Manifest.New closure that did (tmux's
 // hub row needs the hub) would create a package initialization cycle back
 // through tmuxModule's own var initializer.
-//
-// Row order (forgectl#730): an optional first-run row when configPresent is
-// false; the pinned commands (hubPinned) in their fixed order; a "recent"
-// divider and one row per recent command when there are any; then an "all
-// commands (N)" divider over every remaining module in registry order.
-func buildHub(root *cobra.Command, configPresent bool, recent []*cobra.Command) []tui.HubEntry {
-	var entries []tui.HubEntry
-	if !configPresent {
-		entries = append(entries, tui.HubEntry{
-			Name:  "init",
-			Short: "first run: set up forgectl — creates config.toml (init)",
-			Core:  true,
-		})
-	}
-
+func collectHubSections(root *cobra.Command, configPresent bool, recent []*cobra.Command) hubSections {
+	sec := hubSections{firstRun: !configPresent}
 	modules := hubModules(root)
 	byName := make(map[string]*cobra.Command, len(modules))
 	for _, child := range modules {
 		byName[child.Name()] = child
 	}
-
 	pinned := make(map[string]bool, len(hubPinned))
 	for _, name := range hubPinned {
 		if child, ok := byName[name]; ok {
-			entries = append(entries, moduleEntry(child))
+			sec.pinned = append(sec.pinned, moduleEntry(child))
 			pinned[name] = true
 		}
 	}
-
-	if len(recent) > 0 {
-		entries = append(entries, tui.HubEntry{Name: "recent", Heading: true})
-		for _, cmd := range recent {
-			entries = append(entries, recentEntry(cmd))
-		}
+	for _, cmd := range recent {
+		sec.recent = append(sec.recent, recentEntry(cmd))
 	}
-
-	var rest []tui.HubEntry
 	for _, child := range modules {
 		if !pinned[child.Name()] {
-			rest = append(rest, moduleEntry(child))
+			sec.rest = append(sec.rest, moduleEntry(child))
 		}
 	}
-	if len(rest) > 0 {
-		entries = append(entries, tui.HubEntry{Name: "all commands (" + strconv.Itoa(len(rest)) + ")", Heading: true})
-		entries = append(entries, rest...)
+	return sec
+}
+
+// buildHub lays out the hub's rows (collectHubSections) for the TUI: an
+// optional first-run row when configPresent is false; the pinned commands
+// (hubPinned) in their fixed order; a "recent" divider and one row per recent
+// command when there are any; then an "all commands (N)" divider over every
+// remaining module in registry order.
+func buildHub(root *cobra.Command, configPresent bool, recent []*cobra.Command) []tui.HubEntry {
+	sec := collectHubSections(root, configPresent, recent)
+	var entries []tui.HubEntry
+	if sec.firstRun {
+		entries = append(entries, tui.HubEntry{
+			Name:  "init",
+			Short: hubInitShort,
+			Core:  true,
+		})
+	}
+	entries = append(entries, sec.pinned...)
+	if len(sec.recent) > 0 {
+		entries = append(entries, tui.HubEntry{Name: "recent", Heading: true})
+		entries = append(entries, sec.recent...)
+	}
+	if len(sec.rest) > 0 {
+		entries = append(entries, tui.HubEntry{Name: "all commands (" + strconv.Itoa(len(sec.rest)) + ")", Heading: true})
+		entries = append(entries, sec.rest...)
 	}
 	return entries
 }
+
+// hubInitShort is the first-run row's description.
+const hubInitShort = "first run: set up forgectl — creates config.toml (init)"
 
 // hubModules returns root's registered modules — both tiers — in registry
 // order. A command with no tier annotation (version, a hidden helper) is not
