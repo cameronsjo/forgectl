@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/herdr/wire"
 )
 
 func fixture(t *testing.T, name string) string {
@@ -199,13 +200,13 @@ func TestCheckIDRefusesUnsafeOperands(t *testing.T) {
 		"newline":     "w1:t1\nw1:t2",
 		"nul":         "w1\x00",
 		"tab char":    "w1\t",
-		"over length": strings.Repeat("a", maxIDLen+1),
+		"over length": strings.Repeat("a", wire.MaxOperandLen+1),
 	} {
 		if err := checkID("id", id); err == nil {
 			t.Errorf("%s accepted", name)
 		}
 	}
-	for _, id := range []string{"w1", "w1:t3", "w7D:t17", "label with spaces", strings.Repeat("a", maxIDLen)} {
+	for _, id := range []string{"w1", "w1:t3", "w7D:t17", "label with spaces", strings.Repeat("a", wire.MaxOperandLen)} {
 		if err := checkID("id", id); err != nil {
 			t.Errorf("%q refused: %v", id, err)
 		}
@@ -297,5 +298,38 @@ func TestFixturesContainNoLiveValues(t *testing.T) {
 				t.Errorf("%s matches live-value shape %s: %q", e.Name(), re, m)
 			}
 		}
+	}
+}
+
+// TestChangedEnvelopeFixturesFailClosed runs the client against the shared
+// changed-envelope fixtures; the adapter's tests run the same files (#722).
+//
+// Mutation: make wire.DecodeError accept a code-less envelope and the refusal
+// row goes red. The listing row is held by two layers (wire.ErrNoResult, then
+// need's missing-member check); it goes red only when both are removed, and
+// TestDecodeResult and TestDecodeEdgeCases pin each layer alone.
+func TestChangedEnvelopeFixturesFailClosed(t *testing.T) {
+	ctx := context.Background()
+	if ws, err := New(runnerFor(fixture(t, "changed_result_envelope.json"), nil)).Workspaces(ctx); err == nil {
+		t.Errorf("a renamed result envelope read as %d workspaces", len(ws))
+	}
+	ce := &exec.CommandError{Name: Binary, ExitCode: 1, Stderr: fixture(t, "changed_error_envelope.json")}
+	_, err := New(runnerFor("", ce)).Workspaces(ctx)
+	var he *Error
+	if errors.As(err, &he) {
+		t.Errorf("a code-less error envelope became *Error %+v", he)
+	}
+	if !errors.As(err, &ce) {
+		t.Errorf("err = %v, want the wrapped *exec.CommandError", err)
+	}
+}
+
+// TestReadTurnsAnExitZeroErrorEnvelopeIntoAnError: a decoded call whose reply
+// is herdr's error envelope reports herdr's code rather than "no result".
+func TestReadTurnsAnExitZeroErrorEnvelopeIntoAnError(t *testing.T) {
+	_, err := New(runnerFor(fixture(t, "err_workspace_not_found.json"), nil)).Tabs(context.Background(), "w1")
+	var he *Error
+	if !errors.As(err, &he) || he.Code != "workspace_not_found" {
+		t.Errorf("err = %v, want *Error workspace_not_found", err)
 	}
 }

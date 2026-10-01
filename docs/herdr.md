@@ -15,6 +15,7 @@
 | What happens | What the client returns |
 |---|---|
 | herdr fails (exit 1, JSON on stderr) | `*herdr.Error{Code, Message}`; match on `Code` (`workspace_not_found`, `pane_not_found`, `server_not_running`, ...). It unwraps to the `*exec.CommandError` |
+| herdr exits 0 but its reply is the error envelope | the same `*herdr.Error`, unwrapping to nil because no command failed. This holds for every call that reads its reply, including `MoveWorkspace`, `FocusWorkspace`, and `FocusTab` |
 | stderr is truncated, has log lines before the JSON, or is not JSON | the wrapped `*exec.CommandError` (never an `*Error` with an empty code) |
 | the child was killed or timed out (exit -1), even with an error object on stderr | the wrapped `*exec.CommandError`, never an `*Error`. The runner reports a kill as `signal: killed`, not as `context.DeadlineExceeded`, so tell a timeout by checking `ctx.Err()` |
 | `tab move` exits 0 with `move_result.changed=false` | `*herdr.Declined{Reason}`, for example `last_tab_in_workspace` |
@@ -23,9 +24,13 @@
 
 `pane read` is the one call that prints raw text on success, so `ReadPane` returns stdout without decoding it. `exec.Runner` trims trailing newlines, so trailing blank terminal rows are not preserved. The text is whatever another pane displays: it can hold secrets typed or printed there, and terminal control sequences, so do not log it or render it to a terminal unfiltered.
 
-`Error.Error()` and `Declined.Error()` drop control characters from herdr's text, because herdr can echo pane-controlled values (labels, titles) in a message. The `Code` and `Message` fields stay as herdr sent them.
+`Error.Error()` and `Declined.Error()` escape control characters in herdr's text, because herdr can echo pane-controlled values (labels, titles) in a message. `Code` stays as herdr sent it; `Message` and `Reason` are stored redacted.
 
-`MoveWorkspace`, `FocusWorkspace`, and `FocusTab` do not decode herdr's reply. If herdr declines one quietly the way `tab move` does, the client cannot report it.
+`MoveWorkspace`, `FocusWorkspace`, and `FocusTab` read only herdr's error envelope from a successful exit: no success reply for them has been captured. If herdr declines one quietly the way `tab move` does (`changed:false`), the client cannot report it yet.
+
+## Shared wire decoding
+
+`internal/herdr/wire` is the one reader of herdr's reply envelopes, shared by this client and `internal/surface/herdradapter`: the error envelope (`DecodeError`), the `result` envelope (`DecodeResult`, where a missing or null `result` fails closed), and the operand floor (`CheckOperand`: non-empty, no leading `-`, at most 64 bytes, no control characters). Ids and labels are checked against that floor. A session name also has to fit its own `[A-Za-z0-9._-]` charset. Both packages' tests run against the captured fixtures in `internal/herdr/testdata`, including the `changed_*_envelope.json` pair, so a change to herdr's envelope shows up in both.
 
 ## Ids move
 

@@ -1,12 +1,12 @@
 package herdr
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/herdr/wire"
 	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -17,9 +17,10 @@ import (
 const exitFailure = 1
 
 // Error is herdr's structured refusal: {"error":{"code","message"}} on stderr
-// with exit 1. Code is herdr's own vocabulary (workspace_not_found,
-// server_not_running, ...); match on it, not on Message. It unwraps to the
-// *[exec.CommandError] it came from.
+// with exit 1, or the same envelope as an exit-0 reply. Code is herdr's own
+// vocabulary (workspace_not_found, server_not_running, ...); match on it, not
+// on Message. It unwraps to the *[exec.CommandError] it came from, or to nil
+// for an exit-0 reply, where no command failed.
 type Error struct {
 	Code    string
 	Message string
@@ -67,7 +68,7 @@ func (e *Error) Unwrap() error { return e.cause }
 func classify(args []string, err error) error {
 	var ce *exec.CommandError
 	if errors.As(err, &ce) && ce.ExitCode == exitFailure && ce.StderrDropped == 0 {
-		if e := parseEnvelope(ce.Stderr); e != nil {
+		if e := refusal([]byte(ce.Stderr)); e != nil {
 			e.cause = ce
 			return e
 		}
@@ -83,25 +84,17 @@ func argvText(args []string) string {
 	return strings.Join(redact.Args(args), " ")
 }
 
-// parseEnvelope returns the *Error in a stderr stream that is exactly one
-// herdr error object, or nil. Log lines before the JSON, a second object, or
-// an envelope without a code all return nil.
+// refusal returns the *Error in a stream that is exactly one herdr error
+// object, by [wire.DecodeError], or nil. Log lines before the JSON, a second
+// object, or an envelope without a code all return nil.
 //
 // Message is stored redacted (redact.Text, #941), not only rendered so: the
 // field is exported, and %#v or a future reader would otherwise show herdr's
 // raw text. Error() still redacts it, which is a no-op on redacted text.
-func parseEnvelope(stderr string) *Error {
-	var env struct {
-		Error *struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(stderr)), &env); err != nil {
+func refusal(raw []byte) *Error {
+	r, ok := wire.DecodeError(raw)
+	if !ok {
 		return nil
 	}
-	if env.Error == nil || env.Error.Code == "" {
-		return nil
-	}
-	return &Error{Code: env.Error.Code, Message: redact.Text(env.Error.Message)}
+	return &Error{Code: r.Code, Message: redact.Text(r.Message)}
 }
