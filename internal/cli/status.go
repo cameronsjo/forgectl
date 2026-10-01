@@ -100,7 +100,11 @@ type statusCleanJSON struct {
 
 // newStatusCmd builds `forgectl status` over the shipped read paths.
 func newStatusCmd(deps module.Deps) *cobra.Command {
-	return newStatusCmdForSources(defaultStatusSources(deps), deps.Theme)
+	rt := productionStatusTUIRuntime()
+	rt.runVerb = func(cmd *cobra.Command, argv []string) error {
+		return runHubVerb(cmd.Context(), deps, cmd.Root(), argv, deps.Theme)
+	}
+	return newStatusCmdWith(defaultStatusSources(deps), deps.Theme, rt)
 }
 
 // defaultStatusSources wires each section to the read path its own verb
@@ -143,11 +147,18 @@ func defaultStatusSources(deps module.Deps) statusSources {
 	}
 }
 
-// newStatusCmdForSources is the test seam.
+// newStatusCmdForSources is the test seam for the report paths. --tui runs
+// through the production terminal checks, which refuse under go test.
 func newStatusCmdForSources(src statusSources, th theme.Theme) *cobra.Command {
+	return newStatusCmdWith(src, th, productionStatusTUIRuntime())
+}
+
+// newStatusCmdWith builds the command over src and the cockpit runtime rt.
+func newStatusCmdWith(src statusSources, th theme.Theme, rt statusTUIRuntime) *cobra.Command {
 	var (
 		asJSON  bool
 		strict  bool
+		asTUI   bool
 		timeout time.Duration
 	)
 	cmd := &cobra.Command{
@@ -168,15 +179,27 @@ the command. --strict exits 1 after the report when any section is not ok.
   forgectl status                  the overview
   forgectl status --json           every section, every row, for scripts
   forgectl status --json --strict  same, but exit 1 when a section degraded or failed
-  forgectl status --timeout 5s     give each section five seconds`,
+  forgectl status --timeout 5s     give each section five seconds
+  forgectl status --tui            the cockpit: the same sections, refreshing in place
+
+--tui needs a terminal on stdin and stdout. git refreshes itself every
+minute; prs, clean and bench refresh when you press r or R.`,
 		Args: cobra.NoArgs,
 		// Mirrors projects list: --strict fails AFTER the report is written,
 		// and cobra's usage text must never follow it onto stdout.
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Checked here, not with cobra's flag groups: a flag-group error is
+			// raised outside the sites the --json stderr contract wraps.
+			if asTUI && (asJSON || strict) {
+				return errors.New("--tui is the interactive cockpit; it cannot be combined with --json or --strict")
+			}
 			if timeout <= 0 {
 				return errors.New("invalid --timeout: must be greater than zero")
+			}
+			if asTUI {
+				return runStatusCockpit(cmd, src, th, rt, timeout)
 			}
 			report := collectStatus(cmd.Context(), src, timeout)
 			if asJSON {
@@ -197,6 +220,7 @@ the command. --strict exits 1 after the report when any section is not ok.
 		`emit {"git":S,"prs":S,"clean":S,"bench":S} to stdout, each S {"state":"ok|degraded|failed","error":...,"notes":[...],"data":...}; data is null only when state is failed`)
 	cmd.Flags().BoolVar(&strict, "strict", false, "exit 1 when any section is degraded or failed (the report is still written)")
 	cmd.Flags().DurationVar(&timeout, "timeout", statusDefaultTimeout, "deadline for each section; a section that misses it is reported as failed")
+	cmd.Flags().BoolVar(&asTUI, "tui", false, "open the cockpit: the sections on one screen, refreshing in place (needs a terminal)")
 	return cmd
 }
 
