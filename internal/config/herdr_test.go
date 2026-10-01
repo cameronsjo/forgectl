@@ -116,6 +116,21 @@ func TestHerdrOrganize_Validate(t *testing.T) {
 			want: `workspace_order entry #2 "-x": a label must not start with '-'`,
 		},
 		{
+			name: "default over the herdr operand limit",
+			cfg:  HerdrOrganizeConfig{Default: strings.Repeat("d", 65), Rules: []HerdrOrganizeRule{{Glob: "a", Workspace: "w"}}},
+			want: "[herdr.organize] default " + `"` + strings.Repeat("d", 65) + `"` + ": a label is over 64 bytes",
+		},
+		{
+			name: "rule workspace over the herdr operand limit",
+			cfg:  HerdrOrganizeConfig{Default: "d", Rules: []HerdrOrganizeRule{{Glob: "a", Workspace: strings.Repeat("w", 65)}}},
+			want: `#1 (glob "a"): workspace "` + strings.Repeat("w", 65) + `": a label is over 64 bytes`,
+		},
+		{
+			name: "order label over the herdr operand limit",
+			cfg:  HerdrOrganizeConfig{WorkspaceOrder: []string{"ok", strings.Repeat("o", 65)}},
+			want: `workspace_order entry #2 "` + strings.Repeat("o", 65) + `": a label is over 64 bytes`,
+		},
+		{
 			name: "empty order label",
 			cfg:  HerdrOrganizeConfig{WorkspaceOrder: []string{"a", " "}},
 			want: "workspace_order entry #2 is empty",
@@ -128,6 +143,27 @@ func TestHerdrOrganize_Validate(t *testing.T) {
 				t.Errorf("Validate() = %v, want an error containing %q", err, tt.want)
 			}
 		})
+	}
+}
+
+// TestHerdrOrganize_LabelLimitMatchesTheClient: a label the herdr client
+// would refuse mid-apply (wire.CheckOperand, 64 bytes) is refused by Validate,
+// so the dry run cannot promise a move --apply then fails; a label at the
+// limit passes on every path that carries one.
+//
+// Mutation: make checkLabel skip wire.CheckOperand's length rule (or raise
+// wire.MaxOperandLen) and the 65-byte rows of TestHerdrOrganize_Validate go
+// red; lower it and the 64-byte rows here do.
+func TestHerdrOrganize_LabelLimitMatchesTheClient(t *testing.T) {
+	at := func(c byte) string { return strings.Repeat(string(c), 64) }
+	for name, cfg := range map[string]HerdrOrganizeConfig{
+		"default":         {Default: at('d'), Rules: []HerdrOrganizeRule{{Glob: "a", Workspace: "w"}}},
+		"rule workspace":  {Default: "d", Rules: []HerdrOrganizeRule{{Glob: "a", Workspace: at('w')}}},
+		"workspace_order": {WorkspaceOrder: []string{"ok", at('o')}},
+	} {
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("%s: a 64-byte label was refused: %v", name, err)
+		}
 	}
 }
 

@@ -37,7 +37,7 @@ workspace = "forge"
 ```
 
 - `glob` follows shell rules: `*` matches any run of characters including `/`, `?` matches one, `[abc]`, `[a-c]` and `[!x]` match a class, and everything else is literal. Matching is case-sensitive.
-- `workspace` names a workspace by label. An existing workspace with that label is used (the lowest-numbered one when labels repeat, with a warning). A label with no workspace is created.
+- `workspace` names a workspace by label. An existing workspace with that label is used (the lowest-numbered one when labels repeat, with a warning). A label with no workspace is created; it must be at most 64 bytes, not start with `-`, and carry no control characters.
 - `workspace_order` lists labels left to right. A label with no workspace is skipped. A workspace it does not list keeps its relative order after the listed ones. A label listed twice is a config error.
 
 ### Reading the report
