@@ -1,4 +1,12 @@
-package redact
+package redact_test
+
+// This file is a frozen copy of internal/redact's redact.go and stdout.go at
+// 7ab2ad8, the main commit before #991, #992 and #996, with each exported
+// name renamed to mainNAME and the declarations Text and Stdout never reach
+// removed; nothing else is changed. TestText_WithholdsSupersetOfMain
+// runs it against the live package: whatever main withheld, the live Text
+// and Stdout must still withhold. Do not edit it to match the live code; it
+// is the baseline, not a second implementation.
 
 import (
 	"bytes"
@@ -7,16 +15,359 @@ import (
 	"strings"
 )
 
-// Stdout returns a child's stdout, when that stdout is itself what the
+// mainMarker replaces a withheld word of free text (mainText).
+const mainMarker = "[redacted]"
+
+// mainArgMarker replaces a withheld argv element or repository argument (mainArg).
+const mainArgMarker = "[redacted-arg]"
+
+// mainUserArgMarker replaces a user-written argv value or positional (mainUserArgs).
+const mainUserArgMarker = "[user-arg]"
+
+// stdoutToken is one credential format mainStdout withholds: its issued prefix
+// and how many token bytes (in charset) must follow it, the issuer's minimum.
+type stdoutToken struct {
+	prefix  string
+	min     int
+	charset func(byte) bool
+}
+
+// stdoutTokens are the credential formats mainStdout withholds, each at its
+// issuer's minimum length after the prefix: GitHub classic (36) and
+// fine-grained (82, matched from 22), GitLab personal, pipeline-trigger and
+// CI job (20), OpenAI and Anthropic (sk-, sk-proj-, sk-ant-: 20 and up), Stripe
+// secret and restricted keys, Slack (xoxb- and its siblings), AWS access key
+// ids (16 after AKIA or ASIA), npm (36), Google API keys (35), Hugging Face
+// (34), PyPI (50 and up; issued tokens run past 150) and Shopify (32 hex).
+// They are the formats tokenPrefixes names for a flag name, which is
+// matched case-insensitively there; here the case is the issued one, so a
+// word such as Sk- or AKIAshort in a child's prose is kept. Each is matched
+// only at the start of a word (tokenAt), so task-… is not read as sk-…. The
+// length is checked in code, not as a counted repeat: [A-Za-z0-9]{36}
+// compiles to 36 copies of the class, and a regexp that size cost mainStdout
+// about 400ns a byte on ordinary text.
+var stdoutTokens = []stdoutToken{
+	{"ghp_", 36, isAlnum}, {"gho_", 36, isAlnum}, {"ghu_", 36, isAlnum}, {"ghs_", 36, isAlnum}, {"ghr_", 36, isAlnum},
+	{"github_pat_", 22, isTokenByte},
+	{"glpat-", 20, isTokenByte}, {"glptt-", 20, isTokenByte}, {"glcbt-", 20, isTokenByte},
+	{"sk-", 20, isTokenByte},
+	{"sk_live_", 16, isAlnum}, {"sk_test_", 16, isAlnum}, {"rk_live_", 16, isAlnum}, {"rk_test_", 16, isAlnum},
+	{"AKIA", 16, isUpperDigit}, {"ASIA", 16, isUpperDigit},
+	{"npm_", 36, isAlnum},
+	{"AIza", 35, isTokenByte},
+	{"hf_", 34, isAlnum},
+	{"pypi-", 50, isTokenByte},
+	{"shpat_", 32, isHex},
+}
+
+// mainArg returns one argv element (or a repository argument) as it may be
+// written down:
+//
+//   - verbatim when it is mainPlain;
+//   - as "host/owner/repo" when it is exactly one of mainRepo's shapes;
+//   - otherwise mainArgMarker, whole.
+func mainArg(s string) string {
+	if mainPlain(s) {
+		return s
+	}
+	if r, ok := mainRepo(s); ok {
+		return r
+	}
+	return mainArgMarker
+}
+
+// argWord renders one element for mainArgs, and reports whether the element
+// after it is a credential value to withhold.
+func argWord(a string) (string, bool) {
+	if strings.HasPrefix(a, "-") {
+		name, value, joined := strings.Cut(a, "=")
+		if !mainPlain(name) {
+			return mainArgMarker, false
+		}
+		if !joined {
+			// -H is curl's and gh's header flag; glued (-HAuthorization:…)
+			// the value is the rest of the element.
+			if a == "-H" {
+				return a, true
+			}
+			if strings.HasPrefix(a, "-H") {
+				return mainArgMarker, false
+			}
+			return a, credentialName(name)
+		}
+		if credentialName(name) {
+			return withheldValue(name, value), false
+		}
+		// --config=http.extraHeader=… carries a KEY=VALUE of its own.
+		if v, _ := argWord(value); v != value {
+			if v == mainArgMarker {
+				return mainArgMarker, false
+			}
+			return name + "=" + v, false
+		}
+		return a, false
+	}
+	if key, value, ok := strings.Cut(a, "="); ok && credentialName(key) {
+		if !mainPlain(key) {
+			return mainArgMarker, false
+		}
+		return withheldValue(key, value), false
+	}
+	// An HTTP credential in the element itself, or a later assignment, as in
+	// a query string passed as a plain argument
+	// (repos?per_page=1&access_token=…): withhold it all.
+	if credentialValue(a) || credentialKeyIn(a) {
+		return mainArgMarker, false
+	}
+	// The scheme word of a header split across elements ("Bearer", TOKEN).
+	if strings.EqualFold(a, "bearer") {
+		return a, true
+	}
+	// A config key on its own (git config http.extraHeader VALUE): its last
+	// dotted segment must read as a credential, so a file name such as
+	// token.txt does not swallow the next element.
+	if i := strings.LastIndexByte(a, '.'); i >= 0 && !strings.Contains(a, "=") && credentialName(a[i+1:]) {
+		return mainArg(a), true
+	}
+	return mainArg(a), false
+}
+
+// withheldValue shows key=mainArgMarker, leaving an already-rendered value as it
+// is so mainArgs is idempotent over exec's masked KEY=[redacted] entries.
+func withheldValue(key, value string) string {
+	if isMarker(value) {
+		return key + "=" + value
+	}
+	return key + "=" + mainArgMarker
+}
+
+// credentialFragments are the substrings that make a flag or config key name
+// credential-bearing, matched against the name lowercased with '-' and '_'
+// removed. "header" matches only as the name's end (--header,
+// http.extraHeader, --proxy-header), so kubectl's boolean --no-headers does
+// not swallow the next element.
+var credentialFragments = []string{
+	"password", "passwd", "passphrase", "token", "secret", "apikey", "accesskey",
+	"privatekey", "credential", "authorization", "bearer", "cookie", "signature",
+}
+
+// credentialSegments are the short words that make a name credential-bearing
+// only as a whole segment between '-', '_' or '.': --auth, NPM_AUTH, GH_PAT,
+// SSH_KEY, but not --author or --keymap.
+var credentialSegments = map[string]bool{
+	"auth": true, "pass": true, "pw": true, "pwd": true, "pat": true, "key": true, "sig": true,
+}
+
+var nameSeparators = strings.NewReplacer("-", "", "_", "")
+
+// credentialName reports whether a flag or config key name reads as one that
+// carries a credential value.
+func credentialName(name string) bool {
+	l := strings.ToLower(strings.TrimLeft(name, "-"))
+	for _, seg := range strings.FieldsFunc(l, func(r rune) bool { return r == '-' || r == '_' || r == '.' }) {
+		if credentialSegments[seg] {
+			return true
+		}
+	}
+	n := nameSeparators.Replace(l)
+	if strings.HasSuffix(n, "header") {
+		return true
+	}
+	for _, f := range credentialFragments {
+		if strings.Contains(n, f) {
+			return true
+		}
+	}
+	return false
+}
+
+// credentialKeyIn reports whether any NAME=… in s has a credential name,
+// NAME being the run of name bytes ([A-Za-z0-9._-]) right before an '='. Each
+// scan back stops at the previous '=', so the cost is linear in s.
+func credentialKeyIn(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '=' {
+			continue
+		}
+		j := i
+		for j > 0 && isNameByte(s[j-1]) {
+			j--
+		}
+		if j < i && credentialName(s[j:i]) {
+			return true
+		}
+	}
+	return false
+}
+
+func isNameByte(c byte) bool {
+	return c == '.' || c == '_' || c == '-' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+// credentialValue reports whether s itself is an HTTP credential: it carries
+// an Authorization (or Proxy-Authorization) header, starts with the Bearer or
+// Basic scheme, or is a header ("Name: value", or the bare "Name:" of a
+// split one) whose hyphenated name reads as a credential (Private-Token:,
+// X-Api-Key:), or Cookie.
+func credentialValue(s string) bool {
+	l := strings.ToLower(strings.TrimSpace(s))
+	if strings.Contains(l, "authorization:") || strings.HasPrefix(l, "bearer ") || strings.HasPrefix(l, "basic ") {
+		return true
+	}
+	name, _, ok := strings.Cut(l, ":")
+	return ok && credentialHeaderName(name)
+}
+
+// credentialHeaderName reports whether name, lowercased, is an HTTP header
+// name that carries a credential: Cookie, or a hyphenated name credentialName
+// accepts (Private-Token, X-Api-Key, X-Auth-Token, X-GitHub-Token,
+// Proxy-Authorization). A header name is letters, digits and '-'. It must
+// hold a '-' or be Cookie, so that prose such as "invalid token: expired" in
+// a child's stderr is not read as a header. mainText (credentialValue) and mainStdout
+// (headerIn) share it, so their header lists cannot drift (#974).
+func credentialHeaderName(name string) bool {
+	if name == "" || strings.Trim(name, "abcdefghijklmnopqrstuvwxyz0123456789-") != "" {
+		return false
+	}
+	return (strings.Contains(name, "-") || name == "cookie") && credentialName(name)
+}
+
+// mainText returns free text (a child's stderr, an error message) with every
+// line that holds a withheld word replaced whole by mainMarker; the line breaks
+// survive, and a line with nothing withheld is kept as is. A word is
+// withheld when it is not mainPlain, when mainArgs would withhold it
+// (Authorization:, http.extraHeader=…), or when mainArgs would withhold the word
+// after it (--token, -H, Bearer, http.extraHeader).
+//
+// The unit is the line, not the word (#749). Words are split on whitespace,
+// and a credential can hold a space: git sends nothing for
+// "http:///U: TOK @h" (curl rejects it), but its error echoes the URL, and a
+// per-word rule withheld "http:///U:" and "@h" while "TOK" stayed. Widening
+// to the neighbouring words only moves the problem to a credential with two
+// spaces. The line is the boundary the credential cannot cross: git refuses
+// a URL holding a newline before it sends anything, and a header value
+// cannot hold one either. The cost is the diagnostic text sharing a line with
+// a withheld word.
+//
+// mainText also withholds every line mainStdout does (#952), a PEM private-key
+// block's lines included, so it is always the stronger of the two: it runs
+// mainStdout's shapes without the exemptions mainStdout alone makes for deliverable
+// output (#974, pemScan.deliverable).
+func mainText(s string) string {
+	var sc pemScan
+	return withholdLines(s, func(line string) bool {
+		// Both run on every line: the PEM state must see each one.
+		stdout := sc.stdoutWithheld(line)
+		return lineWithheld(line) || stdout
+	})
+}
+
+// lineWithheld reports whether any whitespace-separated word of line is one
+// mainText withholds.
+func lineWithheld(line string) bool {
+	for _, w := range strings.FieldsFunc(line, isSpace) {
+		if repoWord(w) {
+			continue
+		}
+		if !mainPlain(w) {
+			return true
+		}
+		if r, next := argWord(w); r != w || next {
+			return true
+		}
+	}
+	return false
+}
+
+// repoWord reports whether a word of free text is exactly one of mainRepo's
+// shapes once the quotes and punctuation git's messages put around a URL are
+// trimmed: fatal: repository 'https://github.com/o/r/' not found. mainRepo has no
+// userinfo, query or other slack, and the trim removes only quote and
+// punctuation bytes from the ends plus one trailing '/', so nothing else can
+// ride along in the word.
+func repoWord(w string) bool {
+	w = strings.TrimLeft(w, "'\"`(<[")
+	w = strings.TrimRight(w, "'\"`)>],.:;")
+	w = strings.TrimSuffix(w, "/")
+	_, ok := mainRepo(w)
+	return ok
+}
+
+// mainPlain reports whether s can be written down as is: it holds no "://" and
+// no "::" (a URL, or git's transport-helper form http::…), and no '@' other
+// than in a shape that cannot carry userinfo. With no ':' in s (so no
+// scp-like host:path), an '@' that starts s has no userinfo before it (a tmux
+// window id @8, gh's @me), and one followed by '{' is git's reflog syntax
+// (@{upstream}, main@{u}), whose "{…}" is no host.
+func mainPlain(s string) bool {
+	if strings.Contains(s, "://") || strings.Contains(s, "::") {
+		return false
+	}
+	if !strings.Contains(s, "@") {
+		return true
+	}
+	if strings.Contains(s, ":") {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] == '@' && i > 0 && (i+1 == len(s) || s[i+1] != '{') {
+			return false
+		}
+	}
+	return true
+}
+
+// Positive parses for mainRepo. repoHostPattern is a DNS-style hostname with no
+// '@', ':', '[' or '%'. repoPartPattern is one owner or repo path segment.
+const (
+	repoHostPattern = `([A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?)`
+	repoPartPattern = `([A-Za-z0-9._-]{1,100})`
+)
+
+// repoShapes are the only forms mainRepo renders, each anchored at both ends:
+// https with no userinfo, ssh as the git user with an optional port, and
+// scp-like as the git user.
+var repoShapes = []*regexp.Regexp{
+	regexp.MustCompile(`^https://` + repoHostPattern + `/` + repoPartPattern + `/` + repoPartPattern + `$`),
+	regexp.MustCompile(`^ssh://git@` + repoHostPattern + `(?::[0-9]{1,5})?/` + repoPartPattern + `/` + repoPartPattern + `$`),
+	regexp.MustCompile(`^git@` + repoHostPattern + `:` + repoPartPattern + `/` + repoPartPattern + `$`),
+}
+
+// mainRepo renders a remote repository locator as "host/owner/repo" when it is
+// exactly one of https://host/owner/repo, ssh://git@host[:port]/owner/repo or
+// git@host:owner/repo, rebuilt from the captured fields only, with a
+// trailing ".git" dropped. Anything else (userinfo, a query, a fragment,
+// "::", percent-escapes, backslashes, whitespace, bracketed IPv6, odd slash
+// counts, a third segment, every other scheme) is not a match.
+func mainRepo(s string) (string, bool) {
+	for _, shape := range repoShapes {
+		if m := shape.FindStringSubmatch(s); m != nil {
+			return m[1] + "/" + m[2] + "/" + strings.TrimSuffix(m[3], ".git"), true
+		}
+	}
+	return "", false
+}
+
+func isSpace(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\v' || r == '\f'
+}
+
+// isMarker reports whether s is one of the placeholders this package or exec
+// renders in place of a withheld value.
+func isMarker(s string) bool {
+	return s == mainMarker || s == mainArgMarker || s == mainUserArgMarker
+}
+
+// mainStdout returns a child's stdout, when that stdout is itself what the
 // caller shows (npm outdated's rows, brew's upgrade lines), with every line
-// that holds a credential shape replaced whole by Marker (#952). The line
+// that holds a credential shape replaced whole by mainMarker (#952). The line
 // breaks survive, and every other line is kept as is.
 //
-// It is narrower than Text on purpose. Text withholds any line holding a
-// word that is not Plain, so an '@' is enough: npm's node_modules/@scope
+// It is narrower than mainText on purpose. mainText withholds any line holding a
+// word that is not mainPlain, so an '@' is enough: npm's node_modules/@scope
 // rows and brew's python@3.12 read [redacted], which is a fair cost for a
 // failure's diagnostic text and none for output that is the deliverable.
-// Stdout withholds only a line that matches one of these shapes:
+// mainStdout withholds only a line that matches one of these shapes:
 //
 //   - URL userinfo: a scheme, any run of ':' and '/', then userinfo and '@'
 //     (https://u:p@host, http:///U:P@h, http::http://U:P@h, and the
@@ -27,7 +378,7 @@ import (
 //     host:port/path@… (the part after ':' starts with digits and a '/');
 //   - an HTTP credential header (Authorization:, Proxy-Authorization:,
 //     Private-Token:, X-Api-Key:, Cookie:, Set-Cookie:, and every name
-//     credentialHeaderName accepts, as Text does: X-Auth-Token:,
+//     credentialHeaderName accepts, as mainText does: X-Auth-Token:,
 //     X-GitHub-Token:), or the Bearer scheme with 8 or more token bytes, or
 //     Basic with 12 or more base64 bytes;
 //   - a token with a known issued prefix at its issued minimum length and a
@@ -35,29 +386,21 @@ import (
 //     beside tokenPrefixes), and a JWT (stdoutJWT);
 //   - a NAME=value whose NAME reads as a credential (credentialName):
 //     GITHUB_TOKEN=…, --password=…; the flag with its value after a space
-//     (--password abc), as Text does; a JSON "NAME": value (or Python's
+//     (--password abc), as mainText does; a JSON "NAME": value (or Python's
 //     'NAME': value) anywhere in the line, and a YAML NAME: value, a TOML
 //     NAME = value or a Go NAME := value as the line's key (#974, #983),
-//     the last two after a const, var, let or export keyword too, and a
-//     NAME: value inside a YAML flow mapping ({password: x}, flowKeyIn,
-//     #996), unless the value is empty (keyValueCarries); and the lines after a
+//     unless the value is empty (keyValueCarries); and the lines after a
 //     YAML NAME: whose value starts on the next line (password: |), while
-//     they are indented past it (pemScan.inValue, #983); and the lines after
-//     a credential key whose value opens a string the key line does not
-//     close (a TOML """ or ''' string, a YAML double-quoted scalar), through
-//     the line that closes it or, with none, the end of the text: an opener
-//     with no closer fails closed (pemScan.inString, #991);
+//     they are indented past it (pemScan.inValue, #983);
 //   - a PEM private-key block, from its BEGIN line through its END line. A
 //     block with no END is withheld to the end of the text. An empty line
 //     inside one carries nothing and stays empty.
 //
-// A line holding an ANSI escape is checked as it is, again with its CSI and
-// OSC sequences stripped (stripEscapes), and in further views (escapeViews,
-// #996), so a token split by a color code or an OSC 8 hyperlink, or inside a
-// DCS or APC string, is seen the way a terminal shows it (#974, #983). It is
-// withheld when any view holds a shape, so a view only adds.
+// A line holding an ANSI escape is checked as it is and again with its CSI
+// and OSC sequences stripped (stripEscapes), so a token split by a color code
+// or an OSC 8 hyperlink is seen the way a terminal shows it (#974, #983).
 //
-// Stdout makes exemptions Text does not, for false positives on output
+// mainStdout makes exemptions mainText does not, for false positives on output
 // that is the deliverable (#974, #983, pemScan.deliverable):
 //
 //   - basic or bearer in prose: a scheme word not spelled Basic, BASIC,
@@ -75,27 +418,26 @@ import (
 //     flagProse);
 //   - a git diffstat row whose path is a file path, which skips the
 //     NAME=value shape alone ( src/token=x.go | 1 +, diffstatPath);
-//   - a container image pinned by digest, with a repository path, which is
-//     no userinfo (docker.io/library/node:22@sha256:…, withoutDigestRefs,
-//     #992).
+//   - a container image pinned by digest, which is no userinfo
+//     (docker.io/library/node:22@sha256:…, withoutDigestRefs).
 
-// The unit is the line, for the reason Text gives: a credential can hold a
+// The unit is the line, for the reason mainText gives: a credential can hold a
 // space, and the line is the boundary it cannot cross. Nothing inside a line
 // is masked.
 //
-// Text withholds every line Stdout does (Text is lineWithheld or
-// stdoutWithheld), so a caller comparing a Text copy against a Stdout copy
-// of the same text compares like with like on every line Stdout touches.
-// Stdout keeps Marker as it is, so it is idempotent. Callers redact first,
+// mainText withholds every line mainStdout does (mainText is lineWithheld or
+// stdoutWithheld), so a caller comparing a mainText copy against a mainStdout copy
+// of the same text compares like with like on every line mainStdout touches.
+// mainStdout keeps mainMarker as it is, so it is idempotent. Callers redact first,
 // then escape (termsafe), then cap: a cap that cut a line first could split
 // a credential shape so that neither half matches.
-func Stdout(s string) string {
+func mainStdout(s string) string {
 	sc := pemScan{deliverable: true}
 	return withholdLines(s, sc.stdoutWithheld)
 }
 
 // withholdLines returns s with every line withheld reports true for replaced
-// by Marker, calling withheld once per line in order (a pemScan carries
+// by mainMarker, calling withheld once per line in order (a pemScan carries
 // state from one line to the next). It copies only when a line changes.
 func withholdLines(s string, withheld func(line string) bool) string {
 	var b strings.Builder
@@ -108,7 +450,7 @@ func withholdLines(s string, withheld func(line string) bool) string {
 				b.Grow(len(s))
 				b.WriteString(s[:len(s)-len(rest)])
 			}
-			b.WriteString(Marker)
+			b.WriteString(mainMarker)
 		} else if changed {
 			b.WriteString(line)
 		}
@@ -153,11 +495,10 @@ var stdoutJWT = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{7,}\.[A-Za-z0-9_-]{4,}\.`
 // Authorization: and Set-Cookie: match through authorization and cookie.
 var stdoutHeaders = []string{"authorization", "private-token", "x-api-key", "cookie"}
 
-// stdoutShape reports whether line holds one of Stdout's single-line shapes,
+// stdoutShape reports whether line holds one of mainStdout's single-line shapes,
 // as it is or, when it holds an ESC, with its CSI and OSC sequences stripped
-// (stripEscapes: a token split by a color code or an OSC 8 hyperlink) or in
-// any of escapeViews' views (#996). All are checked, so each view can only
-// add a match. deliverable makes Stdout's exemptions
+// (a token split by a color code or an OSC 8 hyperlink). Both are checked,
+// so stripping can only add a match. deliverable makes mainStdout's exemptions
 // (pemScan.deliverable).
 func stdoutShape(line string, deliverable bool) bool {
 	if lineShape(line, deliverable) {
@@ -166,23 +507,14 @@ func stdoutShape(line string, deliverable bool) bool {
 	if strings.IndexByte(line, 0x1b) < 0 {
 		return false
 	}
-	if lineShape(stripEscapes(line), deliverable) {
-		return true
-	}
-	for _, v := range escapeViews(line) {
-		if lineShape(v, deliverable) {
-			return true
-		}
-	}
-	return false
+	return lineShape(stripEscapes(line), deliverable)
 }
 
-// lineShape reports whether line holds one of Stdout's single-line shapes.
+// lineShape reports whether line holds one of mainStdout's single-line shapes.
 // Each check is linear in line: RE2 is, headerIn, jsonKeyIn and
 // credentialAssignment scan back no further than the previous ':' or '=',
 // and forward over a bounded value or a run the next check does not re-read;
-// yamlKey, assignKey, flagValueIn and withoutDigestRefs read the line once,
-// and flowKeyIn once bar its bounded scans back and its disjoint values;
+// yamlKey, assignKey, flagValueIn and withoutDigestRefs read the line once;
 // and the word-start scan reads at most a fixed number of bytes at each
 // position (runAtLeast), bar a scheme word's whitespace and run, which end
 // before the next scheme word starts.
@@ -190,8 +522,7 @@ func lineShape(line string, deliverable bool) bool {
 	// Every URL, header and key shape holds a ':'.
 	if colon := strings.IndexByte(line, ':'); colon >= 0 {
 		if userinfoIn(line, deliverable) ||
-			headerIn(line, colon, deliverable) || jsonKeyIn(line, colon, deliverable) || yamlKey(line, deliverable) ||
-			strings.IndexByte(line, '{') >= 0 && flowKeyIn(line, deliverable) {
+			headerIn(line, colon, deliverable) || jsonKeyIn(line, colon, deliverable) || yamlKey(line, deliverable) {
 			return true
 		}
 	}
@@ -227,8 +558,7 @@ func userinfoIn(line string, deliverable bool) bool {
 
 // withoutDigestRefs returns line with every whitespace-separated word that
 // is an image reference pinned by digest replaced by a space: a name of
-// letters, digits, '.', '_', '/', ':' and '-' (no "://" or "::") holding a
-// '/' (digestRef), one '@',
+// letters, digits, '.', '_', '/', ':' and '-' (no "://" or "::"), one '@',
 // then "sha256:" and exactly 64 lowercase hex digits ending the word. It
 // reads line once.
 func withoutDigestRefs(line string) string {
@@ -254,16 +584,10 @@ func withoutDigestRefs(line string) string {
 }
 
 // digestRef reports whether w is name@sha256:<64 lowercase hex>, the name
-// as withoutDigestRefs describes it, with a repository path (a '/'). A name
-// with no '/' (user:pass@sha256:…, or node:22@sha256:…) cannot be told from
-// userinfo and is no digest ref (#992); docker digests in tool output carry
-// a repository path.
+// as withoutDigestRefs describes it.
 func digestRef(w string) bool {
 	name, digest, ok := strings.Cut(w, "@sha256:")
 	if !ok || name == "" || len(digest) != 64 || strings.Contains(name, "://") || strings.Contains(name, "::") {
-		return false
-	}
-	if strings.IndexByte(name, '/') < 0 {
 		return false
 	}
 	for i := 0; i < len(name); i++ {
@@ -315,107 +639,6 @@ func stripEscapes(line string) string {
 		i++
 	}
 	return b.String()
-}
-
-// escapeViews returns the views of line, which holds an ESC, that Stdout
-// checks beside line as it is and beside stripEscapes, main's view (#996).
-// Each only adds a view, and a line is withheld when any view holds a shape,
-// so no view can cost a line another one withholds:
-//
-//   - every escape sequence removed (escapeStripAll): stripEscapes' CSI and
-//     OSC, the strings DCS (ESC 'P'), SOS (ESC 'X'), PM (ESC '^') and APC
-//     (ESC '_') through BEL or ESC '\', and every other escape, ESC then
-//     intermediate bytes 0x20-0x2f and one final byte 0x30-0x7e (tput sgr0's
-//     ESC '(' 'B', ESC '7', ESC '#' '8');
-//   - each CSI or other escape replaced by a space ahead of its kept final
-//     byte, and each string by a space (escapeKeepFinal): how the text reads
-//     when a crafted CSI's final byte is a token's first letter (ESC '[' '1'
-//     then ghp_…: the terminal shows hp_…, and the bytes written down still
-//     hold ghp_…);
-//   - each string introducer and terminator (BEL, ESC '\') replaced by a
-//     space, the string's body kept, and every CSI and other escape removed
-//     (escapeStringBodies): a token inside a DCS, APC or OSC body (tmux's
-//     passthrough, ESC 'P' tmux; …), or after a lone ESC '\'.
-func escapeViews(line string) []string {
-	return []string{escapeView(line, escapeStripAll), escapeView(line, escapeKeepFinal), escapeView(line, escapeStringBodies)}
-}
-
-// escapeMode picks one of escapeViews' views.
-type escapeMode int
-
-const (
-	escapeStripAll escapeMode = iota
-	escapeKeepFinal
-	escapeStringBodies
-)
-
-// escapeView returns one of escapeViews' views of line. Once a string finds
-// no terminator, none after it can, so the search for one runs at most once
-// past each byte and the cost stays linear; escapeStringBodies searches for
-// none.
-func escapeView(line string, mode escapeMode) string {
-	var b strings.Builder
-	b.Grow(len(line))
-	stringMayEnd := true
-	for i := 0; i < len(line); {
-		c := line[i]
-		if mode == escapeStringBodies && c == 0x07 {
-			b.WriteByte(' ')
-			i++
-			continue
-		}
-		if c != 0x1b || i+1 >= len(line) {
-			b.WriteByte(c)
-			i++
-			continue
-		}
-		end, str := -1, false
-		switch line[i+1] {
-		case '[':
-			end = csiEnd(line, i+2)
-		case ']', 'P', 'X', '^', '_', '\\':
-			str = true
-			switch {
-			case mode == escapeStringBodies:
-				end = i + 2 // the introducer or terminator alone
-			case line[i+1] == '\\':
-				end = i + 2 // a lone string terminator
-			case stringMayEnd:
-				if end = oscEnd(line, i+2); end < 0 {
-					stringMayEnd = false
-				}
-			}
-		default:
-			end = escEnd(line, i+1)
-		}
-		if end < 0 {
-			b.WriteByte(c)
-			i++
-			continue
-		}
-		switch {
-		case str && mode != escapeStripAll:
-			b.WriteByte(' ')
-		case !str && mode == escapeKeepFinal:
-			b.WriteByte(' ')
-			end-- // the final byte is written as text next
-		}
-		i = end
-	}
-	return b.String()
-}
-
-// escEnd returns the index just past the final byte of an escape sequence
-// whose intermediate bytes start at from, or -1 when none completes it.
-func escEnd(line string, from int) int {
-	j := from
-	for j < len(line) && line[j] >= 0x20 && line[j] <= 0x2f {
-		j++
-	}
-	if j >= len(line) || line[j] < 0x30 || line[j] > 0x7e {
-		return -1
-	}
-	return j + 1
 }
 
 // csiEnd returns the index just past the final byte of a CSI sequence whose
@@ -532,120 +755,6 @@ func jsonKeyIn(line string, from int, deliverable bool) bool {
 		}
 	}
 	return false
-}
-
-// flowKeyIn reports whether line holds a YAML flow mapping entry whose key
-// reads as a credential and whose value carries something (keyValueCarries):
-// config: {password: hunter2, user: me}, - {token: x} (#996). The key is a
-// run of name bytes right before a ':', inside a '{' the line has not closed,
-// with only blanks between it and the '{' or ',' before it; the value runs
-// from the ':' to the next ',' or '}'. A quoted key is jsonKeyIn's. Each scan
-// back stops at the byte before the key. A value ends at the ',' the next
-// key at its depth needs, and one that runs past a nested key's '{' holds
-// that '{', so it carries and the scan returns: the values read are disjoint
-// and the cost is linear in line.
-//
-// A '{' or '}' inside a quoted value ({note: "}", password: x}) does not
-// count toward the depth: a quote that starts a value (after the blanks that
-// follow a '{', ',', ':' or '[', or at the line's start) and is closed later
-// on the line hides the braces up to its close. The keys inside it are still
-// read, so a quote can only keep the depth where it was. A search that finds
-// a close resumes past it; one that finds none leaves no later quote of its
-// kind that starts a value (each double quote after it is escaped, so a
-// backslash comes before it, and no single quote is left), so the searches
-// read each byte at most once.
-//
-// When deliverable, a value of undefined or a mask of '*' bytes ({token:
-// undefined}, {Token: ***}) carries nothing either (flowValueCarries).
-func flowKeyIn(line string, deliverable bool) bool {
-	depth := 0
-	quoteEnd := -1 // braces before it are inside a quoted value
-	for i := 0; i < len(line); i++ {
-		c := line[i]
-		if i < quoteEnd {
-			if c == '{' || c == '}' {
-				continue
-			}
-		} else if (c == '"' || c == '\'') && quoteStartsValue(line, i) {
-			if end := quoteClose(line, i); end >= 0 {
-				quoteEnd = end
-			}
-			continue
-		}
-		switch c {
-		case '{':
-			depth++
-			continue
-		case '}':
-			depth = max(depth-1, 0)
-			continue
-		case ':':
-		default:
-			continue
-		}
-		if depth == 0 {
-			continue
-		}
-		j := i
-		for j > 0 && isNameByte(line[j-1]) {
-			j--
-		}
-		if j == i {
-			continue
-		}
-		k := j
-		for k > 0 && (line[k-1] == ' ' || line[k-1] == '\t') {
-			k--
-		}
-		if k == 0 || line[k-1] != '{' && line[k-1] != ',' || !keyNameCarries(line[j:i], deliverable) {
-			continue
-		}
-		end := i + 1
-		for end < len(line) && line[end] != ',' && line[end] != '}' {
-			end++
-		}
-		if flowValueCarries(strings.Trim(line[i+1:end], " \t\r"), deliverable) {
-			return true
-		}
-	}
-	return false
-}
-
-// flowValueCarries is keyValueCarries for a flow mapping's value, which, when
-// deliverable, also reads undefined (a JavaScript object printed by
-// node: { code: 'E401', token: undefined }) and a mask of one or more '*'
-// bytes as carrying nothing. They are flowKeyIn's alone, so no shape main
-// already had keeps a line it withheld.
-func flowValueCarries(v string, deliverable bool) bool {
-	if deliverable && (v == "undefined" || v != "" && strings.Trim(v, "*") == "") {
-		return false
-	}
-	return keyValueCarries(v, deliverable)
-}
-
-// quoteStartsValue reports whether the quote at line[i] starts a value: it is
-// at the line's start, or the byte before it, past blanks, is '{', ',', ':'
-// or '['. An apostrophe inside a word (don't) starts nothing.
-func quoteStartsValue(line string, i int) bool {
-	for i > 0 && (line[i-1] == ' ' || line[i-1] == '\t') {
-		i--
-	}
-	return i == 0 || strings.IndexByte("{,:[", line[i-1]) >= 0
-}
-
-// quoteClose returns the index of the quote that closes the one at line[i],
-// or -1 when none does. In double quotes a '\' escapes the byte after it.
-func quoteClose(line string, i int) int {
-	q := line[i]
-	for j := i + 1; j < len(line); j++ {
-		switch {
-		case q == '"' && line[j] == '\\':
-			j++
-		case line[j] == q:
-			return j
-		}
-	}
-	return -1
 }
 
 // maxShortValue bounds how far a value is read to decide it carries
@@ -782,36 +891,13 @@ func openerValue(v string) string {
 // assignKey reports whether line is an assignment, as the line's key, whose
 // name reads as a credential and whose value carries something
 // (keyValueCarries): TOML's password = "x" and token = '…', and Go's
-// token := "abc" (#983), and each after a declaration keyword (const
-// token = "x", #996). The name is name bytes, optionally quoted, after the
-// line's indentation and any declaration keyword (assignEntry); then ":=",
-// or '=' (not "==") with blanks or a closing
+// token := "abc" (#983). The name is name bytes, optionally quoted, after the
+// line's indentation; then ":=", or '=' (not "==") with blanks or a closing
 // quote before it or a blank after it (password= "x"), since a bare
 // NAME=value is credentialAssignment's, with its own exemptions. It reads
 // line once.
 func assignKey(line string, deliverable bool) bool {
-	name, value, ok := assignEntry(line, false)
-	if !ok || !keyNameCarries(name, deliverable) {
-		return false
-	}
-	return keyValueCarries(strings.TrimRight(value, " \t\r,;"), deliverable)
-}
-
-// assignEntry parses line as assignKey's assignment and returns its name and
-// its value with the leading blanks trimmed. The name may follow a
-// declaration: export, then const, var or let, each with blanks after it
-// (const token = "x", export const apiKey = "x", #996). bare accepts an '='
-// with no blank around it too (password=""", which a string opener allows and
-// assignKey leaves to credentialAssignment). It reads line once.
-func assignEntry(line string, bare bool) (name, value string, ok bool) {
 	s := strings.TrimLeft(line, " \t")
-	s = cutKeyword(s, "export")
-	for _, kw := range declKeywords {
-		if rest := cutKeyword(s, kw); len(rest) < len(s) {
-			s = rest
-			break
-		}
-	}
 	quote := byte(0)
 	if s != "" && (s[0] == '"' || s[0] == '\'') {
 		quote, s = s[0], s[1:]
@@ -821,12 +907,12 @@ func assignEntry(line string, bare bool) (name, value string, ok bool) {
 		n++
 	}
 	if n == 0 {
-		return "", "", false
+		return false
 	}
-	name, s = s[:n], s[n:]
+	name, s := s[:n], s[n:]
 	if quote != 0 {
 		if s == "" || s[0] != quote {
-			return "", "", false
+			return false
 		}
 		s = s[1:]
 	}
@@ -835,86 +921,15 @@ func assignEntry(line string, bare bool) (name, value string, ok bool) {
 	switch {
 	case strings.HasPrefix(op, ":="):
 		op = op[2:]
-	case (spaced || bare) && strings.HasPrefix(op, "=") && !strings.HasPrefix(op, "=="):
+	case spaced && strings.HasPrefix(op, "=") && !strings.HasPrefix(op, "=="):
 		op = op[1:]
 	default:
-		return "", "", false
+		return false
 	}
-	return name, strings.TrimLeft(op, " \t"), true
-}
-
-// declKeywords are the Go and JavaScript declaration keywords assignEntry
-// reads past before a name.
-var declKeywords = []string{"const", "var", "let"}
-
-// cutKeyword returns s without a leading kw and the blanks after it, or s as
-// it is when kw is not followed by a blank (constant is no const).
-func cutKeyword(s, kw string) string {
-	rest, ok := strings.CutPrefix(s, kw)
-	if !ok || rest == "" || rest[0] != ' ' && rest[0] != '\t' {
-		return s
+	if !keyNameCarries(name, deliverable) {
+		return false
 	}
-	return strings.TrimLeft(rest, " \t")
-}
-
-// stringOpener reports whether line is a credential key whose value opens a
-// string that does not close on the line (#991): a TOML or Python assignment
-// (assignEntry, with or without blanks around the '=': password=""") whose
-// value starts a multi-line basic string (""") or a literal one (three single
-// quotes), or a YAML entry (yamlEntry) whose value, past its node
-// properties, starts a double-quoted scalar. It returns the delimiter that
-// closes the string; the scan withholds through the line that holds it, or
-// with none to the end of the text (fail closed). It reads line a fixed
-// number of times.
-func stringOpener(line string, deliverable bool) (string, bool) {
-	if name, v, ok := assignEntry(line, true); ok {
-		for _, d := range []string{`"""`, `'''`} {
-			if rest, cut := strings.CutPrefix(v, d); cut {
-				if !keyNameCarries(name, deliverable) || stringCloses(rest, d) {
-					return "", false
-				}
-				return d, true
-			}
-		}
-		return "", false
-	}
-	e, ok := yamlEntry(line)
-	if !ok || !keyNameCarries(e.name, deliverable) {
-		return "", false
-	}
-	v := e.value
-	for v != "" && (v[0] == '!' || v[0] == '&') {
-		end := strings.IndexAny(v, " \t")
-		if end < 0 {
-			return "", false
-		}
-		v = strings.TrimLeft(v[end:], " \t")
-	}
-	// yamlEntry trims a trailing ',' and blanks, which no closing quote is.
-	if rest, cut := strings.CutPrefix(v, `"`); cut && !stringCloses(rest, `"`) {
-		return `"`, true
-	}
-	return "", false
-}
-
-// stringCloses reports whether s, text inside a string closed by delim,
-// holds that delimiter. In a basic string (""" or ") a '\' escapes the byte
-// after it; a literal string (three single quotes) has no escapes. It reads s
-// once.
-func stringCloses(s, delim string) bool {
-	if delim == `'''` {
-		return strings.Contains(s, delim)
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\\' {
-			i++
-			continue
-		}
-		if strings.HasPrefix(s[i:], delim) {
-			return true
-		}
-	}
-	return false
+	return keyValueCarries(strings.TrimRight(strings.TrimLeft(op, " \t"), " \t\r,;"), deliverable)
 }
 
 // keyValueCarries reports whether v, the value after a JSON, YAML or TOML
@@ -943,7 +958,7 @@ func keyValueCarries(v string, deliverable bool) bool {
 	return true
 }
 
-// keyStatusValues are the words beyond benignValues that Stdout reads as no
+// keyStatusValues are the words beyond benignValues that mainStdout reads as no
 // credential when one is a key's whole value (token: expired,
 // password: required, #983). Only a key's value takes them: a NAME=value is
 // an assignment, and its value may be a word.
@@ -1026,7 +1041,7 @@ func lastNameSegment(name string) string {
 // flagValueIn reports whether a whitespace-separated word of line is a flag
 // whose name reads as a credential (--password, --token, -api-key) with no
 // '=' and another word after it on the line: the value in the space form,
-// which Text withholds through argWord. When deliverable, a following word
+// which mainText withholds through argWord. When deliverable, a following word
 // that is a common English word (flagProse: use --token to pass it, #983) is
 // prose, not a value.
 func flagValueIn(line string, deliverable bool) bool {
@@ -1071,7 +1086,7 @@ var flagProse = map[string]bool{
 
 func isSpaceByte(c byte) bool { return strings.IndexByte(" \t\r\v\f", c) >= 0 }
 
-// benignValues are the status words Stdout reads as no credential when one
+// benignValues are the status words mainStdout reads as no credential when one
 // is a credential name's whole value (auth=ok, Cookie: none, #974).
 var benignValues = map[string]bool{
 	"ok": true, "true": true, "false": true, "yes": true, "no": true, "on": true, "off": true,
@@ -1227,9 +1242,9 @@ var (
 // pemScan carries state from one line to the next: whether the line being
 // scanned sits inside a PEM private-key block that an earlier line opened,
 // or inside the value of a YAML credential key that starts on the next line
-// (inValue, #983); and whether it scans for Stdout (deliverable) or for Text.
-// Stdout makes the exemptions for deliverable output that Text does not
-// (#974); every exemption only keeps a line the other mode withholds, so Text
+// (inValue, #983); and whether it scans for mainStdout (deliverable) or for mainText.
+// mainStdout makes the exemptions for deliverable output that mainText does not
+// (#974); every exemption only keeps a line the other mode withholds, so mainText
 // withholds a superset.
 type pemScan struct {
 	inKey, deliverable bool
@@ -1240,48 +1255,17 @@ type pemScan struct {
 	inValue     bool
 	valueIndent int
 	valueSeq    bool
-	// inString: the lines after a credential key whose value opens a string
-	// that the key line does not close (password = """, password: "a, #991)
-	// hold its value through the line that holds closer, the delimiter.
-	inString bool
-	closer   string
 }
 
-// stdoutWithheld reports whether Stdout withholds line, and moves the scan's
-// state past it. It runs two machines side by side and withholds what either
-// does, so the string machine (#991) only adds to what main's machines
-// withheld and cannot change their state:
-//
-//   - main's PEM and YAML-value machines (keyWithheld), exactly as before
-//     #991;
-//   - the string machine: a line inside a credential string is withheld,
-//     unless it is empty, through the line that closes it; with no closer,
-//     to the end of the text (fail closed). Every line outside one is checked
-//     for an opener (openString).
-//
-// It reads each line a fixed number of times, so the cost stays linear in the
+// stdoutWithheld reports whether mainStdout withholds line, and moves the PEM
+// and YAML-value state past it. A line inside a block, or one that opens or
+// closes one, is withheld, unless it is empty. After the line the scan is
+// inside a block when its last armor line is a BEGIN; a line with no armor
+// leaves the state as it was. A line inside a YAML credential value is
+// withheld unless it is blank; the first line that is not ends the value. It
+// reads each line a fixed number of times, so the cost stays linear in the
 // text.
 func (sc *pemScan) stdoutWithheld(line string) bool {
-	inString := sc.inString
-	if inString {
-		sc.inString = !sc.stringEnds(line)
-	}
-	withheld := sc.keyWithheld(line)
-	if inString {
-		return withheld || line != ""
-	}
-	sc.openString(line)
-	return withheld
-}
-
-// keyWithheld is main's scan of one line: the PEM block state and the YAML
-// value on the next lines. A line inside a block, or one that opens or closes
-// one, is withheld, unless it is empty. After the line the scan is inside a
-// block when its last armor line is a BEGIN; a line with no armor leaves the
-// state as it was. A line inside a YAML credential value is withheld unless
-// it is blank; the first line that is not ends the value. Any other line is
-// withheld when it holds one of Stdout's shapes (stdoutShape).
-func (sc *pemScan) keyWithheld(line string) bool {
 	withheld := sc.inKey
 	if strings.Contains(line, "-----") {
 		begins := pemBegin.FindAllStringIndex(line, -1)
@@ -1316,42 +1300,6 @@ func (sc *pemScan) keyWithheld(line string) bool {
 	shape := stdoutShape(line, sc.deliverable)
 	sc.openValue(line)
 	return shape
-}
-
-// stringEnds reports whether line, inside a credential string, closes it: the
-// closer is found in line as it is and, when line holds an ESC, in every view
-// of it with its escape sequences stripped (escapeViews), so an escape cannot
-// make a closer appear or hide one and end the string early.
-func (sc *pemScan) stringEnds(line string) bool {
-	if !stringCloses(line, sc.closer) {
-		return false
-	}
-	if strings.IndexByte(line, 0x1b) < 0 {
-		return true
-	}
-	for _, v := range escapeViews(line) {
-		if !stringCloses(v, sc.closer) {
-			return false
-		}
-	}
-	return true
-}
-
-// openString starts a credential string on the lines after line when line,
-// as it is or in any view with its escape sequences stripped (escapeViews),
-// is a stringOpener.
-func (sc *pemScan) openString(line string) {
-	d, ok := stringOpener(line, sc.deliverable)
-	if !ok && strings.IndexByte(line, 0x1b) >= 0 {
-		for _, v := range escapeViews(line) {
-			if d, ok = stringOpener(v, sc.deliverable); ok {
-				break
-			}
-		}
-	}
-	if ok {
-		sc.inString, sc.closer = true, d
-	}
 }
 
 // openValue starts a YAML credential value on the lines after line when line
