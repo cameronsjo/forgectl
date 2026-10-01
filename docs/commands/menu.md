@@ -60,7 +60,7 @@ Each `row` has this shape:
 - **`argv`** is what to run after `forgectl`.
 - **`description`** is the command's one-line help text.
 - **`usage`** is the full invocation, with its argument placeholders, such as `forgectl pr <ref>` or `forgectl docs list [dir|file ...]`.
-- **`needs_args`** is `true` when `usage` names a required positional (`<…>` outside any `[…]`). Running `argv` alone is then a usage error, so append the argument yourself. Optional positionals appear in `usage` but do not set `needs_args`.
+- **`needs_args`** is `true` when running `argv` alone is a usage error, so you must append the argument yourself. That is the case when `usage` names a required positional (`<…>` outside any `[…]`), and also when the command's own argument check refuses no arguments. When it is `false`, the bare `argv` passes the argument check. Optional positionals appear in `usage` but do not set `needs_args`.
 - **`leaves`** holds the subverbs the hub's drill-down shows, nested to any depth. A leaf is an array and is never `null`.
 
 Some rows behave differently in the TTY hub: the `tmux` row opens the session jumper there, and the `status` row opens the cockpit. Those are screens, not commands, so `argv` here is just the command path. Arguments that the hub's picker would offer, such as project names, are not listed. `forgectl projects list --json` lists the projects.

@@ -39,10 +39,11 @@ Nothing is run. --json emits the same content as one document.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			sec, header := gatherMenu(cmd.Context(), deps, cmd.Root())
+			doc := menuDocument(cmd.Root(), sec, header)
 			if asJSON {
-				return menuEncoder(cmd.OutOrStdout()).Encode(menuDocument(sec, header))
+				return menuEncoder(cmd.OutOrStdout()).Encode(doc)
 			}
-			return writeMenuText(cmd.OutOrStdout(), menuDocument(sec, header), header)
+			return writeMenuText(cmd.OutOrStdout(), doc, header)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"header","first_run","pinned","recent","commands"} to stdout (see docs/commands/menu.md)`)
@@ -109,8 +110,10 @@ type menuRowJSON struct {
 	Leaves      []menuRowJSON `json:"leaves"`
 }
 
-// menuDocument converts the hub's sections and header to the wire shape.
-func menuDocument(sec hubSections, header tui.HubHeader) menuJSON {
+// menuDocument converts the hub's sections and header to the wire shape. Each
+// row is resolved back to its command in root, the source of truth for
+// needs_args (menuNeedsArgs).
+func menuDocument(root *cobra.Command, sec hubSections, header tui.HubHeader) menuJSON {
 	doc := menuJSON{
 		Header:   menuHeader(header),
 		FirstRun: sec.firstRun,
@@ -119,13 +122,13 @@ func menuDocument(sec hubSections, header tui.HubHeader) menuJSON {
 		Commands: []menuRowJSON{},
 	}
 	for _, e := range sec.pinned {
-		doc.Pinned = append(doc.Pinned, menuModuleRow(e))
+		doc.Pinned = append(doc.Pinned, menuModuleRow(root, e))
 	}
 	for _, e := range sec.recent {
-		doc.Recent = append(doc.Recent, menuRecentRow(e))
+		doc.Recent = append(doc.Recent, menuRecentRow(root, e))
 	}
 	for _, e := range sec.rest {
-		doc.Commands = append(doc.Commands, menuModuleRow(e))
+		doc.Commands = append(doc.Commands, menuModuleRow(root, e))
 	}
 	return doc
 }
@@ -151,20 +154,20 @@ func menuHeader(h tui.HubHeader) menuHeaderJSON {
 }
 
 // menuModuleRow is a module row: its own path is its name.
-func menuModuleRow(e tui.HubEntry) menuRowJSON {
+func menuModuleRow(root *cobra.Command, e tui.HubEntry) menuRowJSON {
 	argv := []string{e.Name}
 	return menuRowJSON{
 		Command:     e.Name,
 		Argv:        argv,
 		Description: e.Short,
 		Usage:       menuUsage(nil, e.Use),
-		NeedsArgs:   usageRequiresArg(e.Use),
-		Leaves:      menuLeaves(argv, e.Leaves),
+		NeedsArgs:   menuNeedsArgs(menuCommand(root, argv)),
+		Leaves:      menuLeaves(root, argv, e.Leaves),
 	}
 }
 
 // menuRecentRow is a recent row: a resolved command path, never history text.
-func menuRecentRow(e tui.HubEntry) menuRowJSON {
+func menuRecentRow(root *cobra.Command, e tui.HubEntry) menuRowJSON {
 	argv := append([]string(nil), e.Argv...)
 	var parents []string
 	if len(argv) > 0 {
@@ -175,7 +178,7 @@ func menuRecentRow(e tui.HubEntry) menuRowJSON {
 		Argv:        argv,
 		Description: e.Short,
 		Usage:       menuUsage(parents, e.Use),
-		NeedsArgs:   usageRequiresArg(e.Use),
+		NeedsArgs:   menuNeedsArgs(menuCommand(root, argv)),
 		Leaves:      []menuRowJSON{},
 	}
 }
@@ -183,7 +186,7 @@ func menuRecentRow(e tui.HubEntry) menuRowJSON {
 // menuLeaves converts a drill-down list under prefix. The synthetic self leaf
 // is not a subverb — it is the parent's own invocation, which the parent row's
 // Usage already says — so it is left out.
-func menuLeaves(prefix []string, leaves []tui.HubLeaf) []menuRowJSON {
+func menuLeaves(root *cobra.Command, prefix []string, leaves []tui.HubLeaf) []menuRowJSON {
 	out := []menuRowJSON{}
 	for _, l := range leaves {
 		if l.Self {
@@ -195,18 +198,59 @@ func menuLeaves(prefix []string, leaves []tui.HubLeaf) []menuRowJSON {
 			Argv:        argv,
 			Description: l.Short,
 			Usage:       menuUsage(prefix, l.Use),
-			NeedsArgs:   usageRequiresArg(l.Use),
-			Leaves:      menuLeaves(argv, l.Leaves),
+			NeedsArgs:   menuNeedsArgs(menuCommand(root, argv)),
+			Leaves:      menuLeaves(root, argv, l.Leaves),
 		})
 	}
 	return out
 }
 
+// menuCommand resolves a row's argv to its command by exact name, one level at
+// a time — never cobra's Find, which strips flags and tries prefixes. nil when
+// the path names no command (a row is always built from one, so this is a
+// should-not-happen fallback that menuNeedsArgs treats as "no argument").
+func menuCommand(root *cobra.Command, argv []string) *cobra.Command {
+	cur := root
+	for _, name := range argv {
+		var next *cobra.Command
+		for _, c := range cur.Commands() {
+			if c.Name() == name {
+				next = c
+				break
+			}
+		}
+		if next == nil {
+			return nil
+		}
+		cur = next
+	}
+	if cur == root {
+		return nil
+	}
+	return cur
+}
+
+// menuNeedsArgs is a row's needs_args: running its argv alone is a usage
+// error. Either its Use names a required <…> positional, or its own Args
+// validator refuses no arguments — the second catches a placeholder spelled
+// some other way (env set KEY was, until forgectl#730's review), so the field
+// never tells an agent a bare argv runs when cobra would refuse it.
+//
+// cmd.Args is called with no arguments and a command whose flags were never
+// parsed. A --json verb's Args is installJSONErrorContract's wrapper, which
+// writes a failure object only when that command's --json parsed true; it
+// never has here, so the call writes nothing.
+func menuNeedsArgs(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	return usageRequiresArg(cmd.Use) || (cmd.Args != nil && cmd.Args(cmd, nil) != nil)
+}
+
 // usageRequiresArg reports whether a Use line names a required positional: a
 // <…> group that is not inside an optional [...] one. `pr <ref>` and
 // `projects worktree <query> [branch]` require one; `docs list [dir|file ...]`
-// and `pr reviewed [<ref>]` do not. That is needs_args: whether running the
-// row's argv alone is a usage error, not whether it can take an argument.
+// and `pr reviewed [<ref>]` do not. It is the Use half of menuNeedsArgs.
 func usageRequiresArg(use string) bool {
 	_, rest, _ := strings.Cut(use, " ")
 	depth := 0

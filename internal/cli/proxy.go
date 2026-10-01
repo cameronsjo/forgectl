@@ -203,7 +203,7 @@ func variableState(set bool) string {
 
 func newProxyUseCmd(deps module.Deps) *cobra.Command {
 	return &cobra.Command{
-		Use:   "use NAME",
+		Use:   "use <NAME>",
 		Short: "Emit exports/unsets for one configured profile",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

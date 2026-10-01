@@ -108,8 +108,7 @@ const hubInitShort = "first run: set up forgectl — creates config.toml (init)"
 func hubModules(root *cobra.Command) []*cobra.Command {
 	var out []*cobra.Command
 	for _, child := range root.Commands() {
-		switch child.Annotations[hubTierAnnotation] {
-		case hubTierCore, hubTierExtension:
+		if isHubModule(child) {
 			out = append(out, child)
 		}
 	}
@@ -117,6 +116,24 @@ func hubModules(root *cobra.Command) []*cobra.Command {
 		return hubOrder(out[i]) < hubOrder(out[j])
 	})
 	return out
+}
+
+// isHubModule reports whether a root child is a registered module (either
+// tier), the only commands the hub has rows for.
+func isHubModule(cmd *cobra.Command) bool {
+	switch cmd.Annotations[hubTierAnnotation] {
+	case hubTierCore, hubTierExtension:
+		return true
+	}
+	return false
+}
+
+// topLevel is cmd's ancestor directly under root (cmd itself at depth one).
+func topLevel(root, cmd *cobra.Command) *cobra.Command {
+	for cmd.HasParent() && cmd.Parent() != root {
+		cmd = cmd.Parent()
+	}
+	return cmd
 }
 
 // moduleEntry is one module's hub row.
@@ -209,7 +226,8 @@ func buildLeaves(cmd *cobra.Command) []tui.HubLeaf {
 // (forgectl#730 item 2): among the newest hubRecentWindow lines that invoke
 // forgectl, by how often each command path appears, ties going to the most
 // recent. Only the command path resolved against root's registered tree is
-// kept — never the line's arguments or any other history text — so nothing
+// kept, and only under a registered module (menu and version are not hub
+// rows) — never the line's arguments or any other history text — so nothing
 // the history file holds reaches the screen. A pinned module's bare
 // invocation is left out: it already has a row.
 func recentCommands(root *cobra.Command, entries []history.Entry, limit int) []*cobra.Command {
@@ -235,6 +253,9 @@ func recentCommands(root *cobra.Command, entries []history.Entry, limit int) []*
 		}
 		if cmd.Parent() == root && pinned[cmd.Name()] {
 			continue
+		}
+		if !isHubModule(topLevel(root, cmd)) {
+			continue // menu, version: host plumbing, never a hub row
 		}
 		t := byPath[cmd]
 		if t == nil {

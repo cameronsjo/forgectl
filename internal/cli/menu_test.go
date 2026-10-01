@@ -30,7 +30,9 @@ func menuFixtureRoot() *cobra.Command {
 		return &cobra.Command{Use: use, Short: short, RunE: noop}
 	}
 	docs := &cobra.Command{Use: "docs", Short: "read project docs"}
-	docs.AddCommand(leaf("list [dir|file ...]", "list the indexed docs"), leaf("read <file>", "read one doc"))
+	// pin's placeholder is bare uppercase, so only its Args says it needs one.
+	pin := &cobra.Command{Use: "pin NAME", Short: "pin a doc", Args: cobra.ExactArgs(1), RunE: noop}
+	docs.AddCommand(leaf("list [dir|file ...]", "list the indexed docs"), leaf("read <file>", "read one doc"), pin)
 	pr := leaf("pr <ref>", "review a pull request")
 	findings := &cobra.Command{Use: "findings", Short: "list or reclaim findings"}
 	findings.AddCommand(leaf("list", "list findings directories"))
@@ -55,7 +57,7 @@ func menuFixtureDoc(t *testing.T) (menuJSON, tui.HubHeader) {
 		t.Fatal(err)
 	}
 	header := tui.HubHeader{Project: "forgectl", Branch: "main", HasTmux: true, TmuxSessions: 3, HasReviews: true, ReviewsRunning: 1, ReviewsQueued: 2}
-	return menuDocument(collectHubSections(root, true, []*cobra.Command{prs}), header), header
+	return menuDocument(root, collectHubSections(root, true, []*cobra.Command{prs}), header), header
 }
 
 // TestMenu_Golden pins `menu --json` and `menu`'s text form over the fixture
@@ -64,8 +66,9 @@ func menuFixtureDoc(t *testing.T) (menuJSON, tui.HubHeader) {
 //
 // Mutations that turn it red: stop skipping the synthetic self leaf in
 // menuLeaves (pr gains a "pr pr" leaf); count an optional <…> in
-// usageRequiresArg (reviewed's needs_args flips); drop the nested
-// menuLeaves call (findings loses its list leaf).
+// usageRequiresArg (reviewed's needs_args flips); drop the Args clause from
+// menuNeedsArgs (pin NAME's needs_args flips); drop the nested menuLeaves
+// call (findings loses its list leaf).
 func TestMenu_Golden(t *testing.T) {
 	doc, header := menuFixtureDoc(t)
 	var js bytes.Buffer
@@ -214,7 +217,7 @@ func TestMenuJSON_LiveTree(t *testing.T) {
 		}
 	}
 
-	checked := 0
+	checked, argsRefused := 0, 0
 	var walk func(rows []menuRowJSON)
 	walk = func(rows []menuRowJSON) {
 		for _, r := range rows {
@@ -227,8 +230,20 @@ func TestMenuJSON_LiveTree(t *testing.T) {
 			if r.Description != cmd.Short {
 				t.Errorf("row %q: description %q, want its Short %q", r.Command, r.Description, cmd.Short)
 			}
-			if r.NeedsArgs != usageRequiresArg(cmd.Use) {
+			if r.NeedsArgs != menuNeedsArgs(cmd) {
 				t.Errorf("row %q: needs_args %v for Use %q", r.Command, r.NeedsArgs, cmd.Use)
+			}
+			// The contract an agent relies on: needs_args false means the
+			// bare argv passes the command's own argument check.
+			if cmd.Args != nil && cmd.Args(cmd, nil) != nil {
+				argsRefused++
+				if !r.NeedsArgs {
+					t.Errorf("row %q: needs_args false, but its Args refuses the bare argv", r.Command)
+				}
+			}
+			// And the usage line says so, so the hub's parentTakesArg agrees.
+			if r.NeedsArgs && !parentTakesArg(cmd) {
+				t.Errorf("row %q needs an argument its Use %q does not name", r.Command, cmd.Use)
 			}
 			if r.Leaves == nil {
 				t.Errorf("row %q: leaves is null, want []", r.Command)
@@ -241,6 +256,9 @@ func TestMenuJSON_LiveTree(t *testing.T) {
 	walk(doc.Commands)
 	if checked < 50 {
 		t.Errorf("walked only %d rows; the tree walk is broken", checked)
+	}
+	if argsRefused < 3 {
+		t.Errorf("only %d rows refuse a bare argv; env set/get and proxy use alone are 3", argsRefused)
 	}
 
 	for _, c := range runner.Calls {

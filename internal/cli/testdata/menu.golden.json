@@ -31,6 +31,17 @@
           "leaves": []
         },
         {
+          "command": "docs pin",
+          "argv": [
+            "docs",
+            "pin"
+          ],
+          "description": "pin a doc",
+          "usage": "forgectl docs pin NAME",
+          "needs_args": true,
+          "leaves": []
+        },
+        {
           "command": "docs read",
           "argv": [
             "docs",
