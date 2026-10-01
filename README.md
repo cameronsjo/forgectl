@@ -55,7 +55,7 @@ deep-dive get a link here.
 | `ghostty` | Theme + keybind reporting, parsed live from the ghostty CLI | Usage below |
 | `pip` | Comment- and whitespace-preserving `pip.conf` editor | Usage below |
 | `quarantine` | Reversibly hide AI-instruction files (`CLAUDE.md`, `AGENTS.md`, …) from a workspace | Usage below |
-| `audit` | Read-only posture scans: inventory every agent-instruction file under the projects root | [audit](docs/commands/audit.md) |
+| `audit` | Read-only posture scans: inventory every agent-instruction file, and find stray `.env` files, private keys and committed secrets, under the projects root | [audit](docs/commands/audit.md) |
 | `review` | Cross-project work inventory: open issues and PRs across your repos; `review releases` is the release radar | [projects and review](docs/commands/projects-and-review.md) |
 | `preflight` | Align enabled plugins to the skill catalog's core-tier default set | Usage below |
 | `update` | Weekly package-manager + OS maintenance, independently-scoped steps | Usage below |
@@ -318,6 +318,8 @@ forgectl quarantine status               # show which targets are hidden
 # audit — read-only posture scans across the projects root (see docs/commands/audit.md)
 forgectl audit injection                 # list every agent-instruction file, with anomaly flags
 forgectl audit injection --json          # the same, machine-readable
+forgectl audit secrets                   # stray .env files, private keys, gitleaks findings
+forgectl audit secrets --json            # the same, machine-readable
 
 # review — cross-project work inventory: open issues and PRs across your repos
 forgectl review                          # unified table (reviewed rows dimmed)

@@ -27,3 +27,17 @@ func TestDirOpenFlags_RefusesNonDirectoryWithoutBlocking(t *testing.T) {
 		t.Error("dirOpenFlags opens for writing; the scan is read-only")
 	}
 }
+
+// TestFileOpenFlags_ReadOnlyNonBlocking pins the sniff's open: read-only,
+// and never blocking on a FIFO swapped in after the Lstat.
+//
+// Mutation that turns it red: drop syscall.O_NONBLOCK from fileOpenFlags in
+// rootops_unix.go, or add os.O_RDWR.
+func TestFileOpenFlags_ReadOnlyNonBlocking(t *testing.T) {
+	if fileOpenFlags&syscall.O_NONBLOCK == 0 {
+		t.Error("fileOpenFlags lacks O_NONBLOCK: a FIFO swapped in mid-scan could block the sniff")
+	}
+	if fileOpenFlags&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC|os.O_APPEND) != 0 {
+		t.Error("fileOpenFlags can write or create; the scan is read-only")
+	}
+}

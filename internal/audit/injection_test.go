@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -480,13 +481,16 @@ var auditImports = map[string]bool{
 	"path":                             true,
 	"path/filepath":                    true,
 	"sort":                             true,
+	"strings":                          true,
 	"time":                             true,
 	modulePath + "internal/quarantine": true,
 	modulePath + "internal/termsafe":   true,
 }
 
 // rootopsImports are the imports only the rootops files may add.
-var rootopsImports = map[string]bool{"os": true, "syscall": true}
+// bytes and io serve the capped sniff (sniffRoot), the package's one
+// content read.
+var rootopsImports = map[string]bool{"os": true, "syscall": true, "bytes": true, "io": true}
 
 // internalAllowed names every function and package-level variable the
 // package may use from another internal package. Each one does no
@@ -512,6 +516,30 @@ type confinementUses struct {
 	bad          []string
 	allowedOS    int
 	internalUses int
+	// contentReads names the function ("file.go:Func") of every call that
+	// reads a file's bytes, once per call.
+	contentReads []string
+}
+
+// contentReadFuncs are the io functions that read bytes from a reader.
+var contentReadFuncs = map[string]bool{
+	"ReadFull": true, "ReadAll": true, "ReadAtLeast": true,
+	"Copy": true, "CopyN": true, "CopyBuffer": true,
+}
+
+// contentReadMethods are the os and io methods that read bytes.
+var contentReadMethods = map[string]bool{"Read": true, "ReadAt": true, "ReadFrom": true, "WriteTo": true}
+
+// enclosingFunc names the top-level function holding pos, as "file.go:Func".
+func enclosingFunc(fset *token.FileSet, files []*ast.File, pos token.Pos) string {
+	for _, f := range files {
+		for _, d := range f.Decls {
+			if fd, ok := d.(*ast.FuncDecl); ok && fd.Pos() <= pos && pos <= fd.End() {
+				return filepath.Base(fset.Position(f.Pos()).Filename) + ":" + fd.Name.Name
+			}
+		}
+	}
+	return filepath.Base(fset.Position(pos).Filename) + ":?"
 }
 
 // unconfinedUses type-checks files and returns every use of a filesystem
@@ -572,6 +600,11 @@ func unconfinedUses(t *testing.T, fset *token.FileSet, files []*ast.File) confin
 		}
 		sig, _ := fn.Type().(*types.Signature)
 		method := sig != nil && sig.Recv() != nil
+		if (!method && pkg == "io" && contentReadFuncs[fn.Name()]) ||
+			(method && (pkg == "os" || pkg == "io") && contentReadMethods[fn.Name()]) ||
+			(!method && pkg == "os" && fn.Name() == "ReadFile") {
+			out.contentReads = append(out.contentReads, enclosingFunc(fset, files, id.Pos()))
+		}
 		var banned bool
 		switch {
 		case !method && (pkg == "os" || pkg == "syscall" || pkg == "io/fs"):
@@ -695,6 +728,13 @@ func TestAuditSource_NoUnconfinedFilesystemCalls(t *testing.T) {
 	}
 	if uses.internalUses == 0 {
 		t.Fatal("resolved no internal-package function use; the internal-helper check is vacuous")
+	}
+	// The secret scan's sniff is the package's one content read, and it is
+	// capped (TestScanSecrets_SniffIsCapped). Any other read of a file's
+	// bytes, anywhere in the package, rootops included, fails here.
+	// Mutation that turns it red: add an io.ReadAll(f) to rootOps' names.
+	if !slices.Equal(uses.contentReads, []string{"rootops.go:sniffRoot"}) {
+		t.Errorf("content reads = %v, want exactly one, in rootops.go:sniffRoot", uses.contentReads)
 	}
 }
 
