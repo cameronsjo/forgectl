@@ -116,6 +116,9 @@ var stdoutKept = []string{
 	"use --token to pass it",
 	// docker pull.
 	"docker.io/library/node:22@sha256:" + strings.Repeat("0f", 32),
+	// #992: a repository path, after a registry host with a port.
+	"registry.local:5000/team/app:1.2@sha256:" + strings.Repeat("0f", 32),
+	"ghcr.io/o/app:v1@sha256:" + strings.Repeat("0f", 32),
 	"Digest: sha256:" + strings.Repeat("0f", 32),
 	"Status: Downloaded newer image for node:22",
 }
@@ -272,6 +275,10 @@ var stdoutWithheld = []string{
 	`password= "hunter2"`,
 	"token= 'abc'",
 	"https://u:SEKRIT@host/x@sha256:" + strings.Repeat("0f", 32),
+	// #992: a scheme-less digest word with no repository path cannot be
+	// told from user:pass, so it is withheld.
+	"user:SEKRIT@sha256:" + strings.Repeat("0f", 32),
+	"node:22@sha256:" + strings.Repeat("0f", 32),
 }
 
 // TestStdout: every stdoutKept line survives, every stdoutWithheld line reads
@@ -300,7 +307,8 @@ var stdoutWithheld = []string{
 // its ":=" arm (the Go rows), its "==" guard (token == x is withheld) or its
 // spacing rule (pass=1 fail=0 skip=2 is withheld); drop stripEscapes' OSC arm
 // (the hyperlink rows show); drop withoutDigestRefs (the docker row is
-// withheld) or digestRef's 64-byte check (user:SEKRIT@sha256:abc shows);
+// withheld) or digestRef's 64-byte check (user:SEKRIT@sha256:abc shows),
+// or its repository-path check (#992: user:SEKRIT@sha256:<64 hex> shows);
 // drop keyStatusValues (token: expired is withheld) or accept any word in it
 // (token: expired SEKRIT shows); drop keyNameCarries' descriptor check
 // (token_type rows are withheld) or read the first segment
@@ -802,6 +810,9 @@ func adversarialStdout(n int) []string {
 		"password = \"\"\"" + strings.Repeat("\"\"a", n/3),
 		"password = \"\"\"\n" + strings.Repeat("\"\"a", n/3),
 		"password: \"" + strings.Repeat("a", n),
+		// #992: digest words with a repository path, and one long name.
+		strings.Repeat("r/a:1@sha256:"+strings.Repeat("0f", 32)+" ", n/78),
+		"a:1" + strings.Repeat("x", n) + "/b@sha256:" + strings.Repeat("0f", 32),
 	}
 }
 

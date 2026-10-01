@@ -71,8 +71,9 @@ import (
 //     flagProse);
 //   - a git diffstat row whose path is a file path, which skips the
 //     NAME=value shape alone ( src/token=x.go | 1 +, diffstatPath);
-//   - a container image pinned by digest, which is no userinfo
-//     (docker.io/library/node:22@sha256:…, withoutDigestRefs).
+//   - a container image pinned by digest, with a repository path, which is
+//     no userinfo (docker.io/library/node:22@sha256:…, withoutDigestRefs,
+//     #992).
 
 // The unit is the line, for the reason Text gives: a credential can hold a
 // space, and the line is the boundary it cannot cross. Nothing inside a line
@@ -211,7 +212,8 @@ func userinfoIn(line string, deliverable bool) bool {
 
 // withoutDigestRefs returns line with every whitespace-separated word that
 // is an image reference pinned by digest replaced by a space: a name of
-// letters, digits, '.', '_', '/', ':' and '-' (no "://" or "::"), one '@',
+// letters, digits, '.', '_', '/', ':' and '-' (no "://" or "::") holding a
+// '/' (digestRef), one '@',
 // then "sha256:" and exactly 64 lowercase hex digits ending the word. It
 // reads line once.
 func withoutDigestRefs(line string) string {
@@ -237,10 +239,16 @@ func withoutDigestRefs(line string) string {
 }
 
 // digestRef reports whether w is name@sha256:<64 lowercase hex>, the name
-// as withoutDigestRefs describes it.
+// as withoutDigestRefs describes it, with a repository path (a '/'). A name
+// with no '/' (user:pass@sha256:…, or node:22@sha256:…) cannot be told from
+// userinfo and is no digest ref (#992); docker digests in tool output carry
+// a repository path.
 func digestRef(w string) bool {
 	name, digest, ok := strings.Cut(w, "@sha256:")
 	if !ok || name == "" || len(digest) != 64 || strings.Contains(name, "://") || strings.Contains(name, "::") {
+		return false
+	}
+	if strings.IndexByte(name, '/') < 0 {
 		return false
 	}
 	for i := 0; i < len(name); i++ {
