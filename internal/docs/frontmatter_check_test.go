@@ -237,7 +237,8 @@ func TestFrontmatter_SuperlinearYAMLCostsLikePlainKeys(t *testing.T) {
 		if len(tc.shape) > maxFrontmatterBytes || len(base) > maxFrontmatterBytes {
 			t.Fatalf("%s: a block is over the cap (%d, %d bytes); the test would time the cap", tc.name, len(tc.shape), len(base))
 		}
-		perftest.Within(t, "frontmatter with "+tc.name, 4, frontmatterWork(doc(base), reps), frontmatterWork(doc(tc.shape), reps))
+		baseRun, shapeRun := perftest.Amortize(frontmatterWork(doc(base), reps), frontmatterWork(doc(tc.shape), reps))
+		perftest.Within(t, "frontmatter with "+tc.name, 4, baseRun, shapeRun)
 	}
 }
 
@@ -272,6 +273,7 @@ func TestFrontmatter_SuperlinearTOMLPastItsCapIsNotDecoded(t *testing.T) {
 		if len(tc.shape) <= maxTOMLFrontmatterBytes || len(tc.shape) > maxFrontmatterBytes {
 			t.Fatalf("%s: %d bytes is not between the TOML cap and the 16 KiB cap", tc.name, len(tc.shape))
 		}
-		perftest.Within(t, "frontmatter with "+tc.name, 4, frontmatterWork(doc(base), reps), frontmatterWork(doc(tc.shape), reps))
+		baseRun, shapeRun := perftest.Amortize(frontmatterWork(doc(base), reps), frontmatterWork(doc(tc.shape), reps))
+		perftest.Within(t, "frontmatter with "+tc.name, 4, baseRun, shapeRun)
 	}
 }

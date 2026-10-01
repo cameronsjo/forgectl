@@ -433,7 +433,7 @@ func handleDoc(store *Store) http.HandlerFunc {
 		// in after the check can redirect the read.
 		f, _, err := idx.Open(root, rest)
 		if err != nil {
-			slog.Debug("docs: request did not resolve to a servable file.", "root", root, "rest", rest, "error", err)
+			slog.Debug("docs: request did not resolve to a servable file.", "root", termsafe.SafePathMax(root, 0), "rest", termsafe.SafePathMax(rest, 0), "error", err)
 			http.NotFound(w, r)
 			return
 		}
@@ -454,7 +454,7 @@ func handleDoc(store *Store) http.HandlerFunc {
 			// render something misleading. The notice names the doc as
 			// root/rel only, never absPath, and links no raw file (the server
 			// has no raw-file route).
-			slog.Debug("docs: document exceeds render cap; served a notice.", "root", root, "rest", rest, "limit", renderCapBytes)
+			slog.Debug("docs: document exceeds render cap; served a notice.", "root", termsafe.SafePathMax(root, 0), "rest", termsafe.SafePathMax(rest, 0), "limit", renderCapBytes)
 			renderShell(w, idx, pageContext{
 				CurrentRoot: root,
 				CurrentRel:  rest,
@@ -486,7 +486,7 @@ func handleDoc(store *Store) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			slog.Error("docs: markdown render failed.", "root", root, "rest", rest, "error", err)
+			slog.Error("docs: markdown render failed.", "root", termsafe.SafePathMax(root, 0), "rest", termsafe.SafePathMax(rest, 0), "error", err)
 			http.Error(w, "render failed", http.StatusInternalServerError)
 			return
 		}
