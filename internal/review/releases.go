@@ -17,12 +17,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
 	"time"
 
-	"gopkg.in/yaml.v3"
+	"github.com/cameronsjo/forgectl/internal/yamlsafe"
 )
 
 // Registry classes (ADR-0044 (e)).
@@ -151,21 +152,63 @@ func TagMatches(pattern, tag string) bool {
 
 // LoadRegistry reads and validates the registry at path.
 func LoadRegistry(path string) (Registry, error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: the operator names the registry file (--registry or env)
+	f, err := os.Open(path) //nolint:gosec // G304: the operator names the registry file (--registry or env)
+	if err != nil {
+		return Registry{}, fmt.Errorf("read registry: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	// One byte past the cap is enough for ParseRegistry to refuse the file,
+	// so a huge one is never read whole.
+	raw, err := io.ReadAll(io.LimitReader(f, maxRegistryBytes+1))
 	if err != nil {
 		return Registry{}, fmt.Errorf("read registry: %w", err)
 	}
 	return ParseRegistry(raw)
 }
 
+// maxRegistryBytes is the largest registry ParseRegistry reads (#959). An
+// entry runs about 190 bytes, so 256 KiB holds about 1,300 repos, against
+// 21 today.
+const maxRegistryBytes = 256 << 10
+
+// maxRegistryMappingKeys is the most keys any mapping in the registry may
+// have. An entry has 8 and the top level 2 or 3. yaml.v3's struct decode
+// compares every key of a mapping with every later key, and does it again
+// each time an alias to that mapping expands, so 256 KiB of keys in one
+// mapping took 4.5 s to decode. At 64 the whole file stays cheap, aliases
+// included.
+const maxRegistryMappingKeys = 64
+
 // ParseRegistry decodes and validates registry YAML. Any invalid entry fails
 // the whole registry: a radar that silently skipped a malformed row would
 // report "no stalls" for a repo it never looked at.
+//
+// The file is parsed into a node first, and yamlsafe.CheckTree refuses, in
+// linear time, what the struct decode would spend superlinear time on (a
+// repeated key, a merge key, a mapping over maxRegistryMappingKeys) before
+// that decode runs (#959).
 func ParseRegistry(raw []byte) (Registry, error) {
-	var reg Registry
-	if err := yaml.Unmarshal(raw, &reg); err != nil {
+	doc, err := yamlsafe.Parse(raw, maxRegistryBytes)
+	if errors.Is(err, yamlsafe.ErrTooLarge) {
+		return Registry{}, fmt.Errorf("registry is larger than the %d KiB limit", maxRegistryBytes>>10)
+	}
+	if err != nil {
 		return Registry{}, fmt.Errorf("parse registry: %w", err)
 	}
+	var reg Registry
+	if root := yamlsafe.Root(doc); root != nil {
+		if err := yamlsafe.CheckTree(root, maxRegistryMappingKeys); err != nil {
+			return Registry{}, fmt.Errorf("parse registry: %w", err)
+		}
+		if err := doc.Decode(&reg); err != nil {
+			return Registry{}, fmt.Errorf("parse registry: %w", err)
+		}
+	}
+	return validateRegistry(reg)
+}
+
+// validateRegistry checks a decoded registry's version and entries.
+func validateRegistry(reg Registry) (Registry, error) {
 	if reg.Version != 1 {
 		return Registry{}, fmt.Errorf("registry version %d, want 1", reg.Version)
 	}

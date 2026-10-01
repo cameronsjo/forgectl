@@ -14,6 +14,7 @@ import (
 	execpkg "github.com/cameronsjo/forgectl/internal/exec"
 	sopspkg "github.com/cameronsjo/forgectl/internal/sops"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/yamlsafe"
 )
 
 // The fixed file names inside the work directory. Only the directory's path
@@ -186,8 +187,10 @@ func runSopsEdit(tempPath string) error {
 	// Parse what we are about to hand back. sops answers an unparseable
 	// document by re-invoking its editor, forever; refusing here converts
 	// that into one clean failure with the encrypted file untouched.
-	var probe map[string]any
-	if err := yaml.Unmarshal(edited, &probe); err != nil {
+	if err := checkYAMLMapping(edited, sopspkg.MaxRewrittenBytes); err != nil {
+		if errors.Is(err, yamlsafe.ErrTooLarge) {
+			return fmt.Errorf("the edited document is larger than %d MiB; refusing to hand it back", sopspkg.MaxRewrittenBytes>>20)
+		}
 		return errors.New("the edited document does not parse as YAML; refusing to hand it back")
 	}
 
@@ -247,12 +250,34 @@ func readEditorTarget(path string) ([]byte, error) {
 	}
 
 	// A mapping at the root is what sops' decrypted buffer always is, and what
-	// SetScalar needs in order to mean anything.
-	var probe map[string]any
-	if err := yaml.Unmarshal(doc, &probe); err != nil || probe == nil {
+	// SetScalar needs in order to mean anything. The decrypted buffer is
+	// smaller than the ciphertext the driver already held to
+	// MaxDocumentBytes.
+	if err := checkYAMLMapping(doc, sopspkg.MaxDocumentBytes); err != nil {
+		if errors.Is(err, yamlsafe.ErrTooLarge) {
+			return nil, fmt.Errorf("the document to edit is larger than %d MiB; refusing", sopspkg.MaxDocumentBytes>>20)
+		}
 		return nil, errors.New("the document to edit is not a YAML mapping; refusing")
 	}
 	return doc, nil
+}
+
+// checkYAMLMapping reports whether doc, at most maxBytes, is one YAML
+// document whose top level is a mapping and that a decode into a map would
+// accept (#959). It used to be that decode, into map[string]any, which is
+// quadratic in a mapping's keys; this parses into a node and runs the
+// linear yamlsafe.CheckTree, which also refuses a merge key. Over the cap,
+// the error wraps yamlsafe.ErrTooLarge.
+func checkYAMLMapping(doc []byte, maxBytes int) error {
+	parsed, err := yamlsafe.Parse(doc, maxBytes)
+	if err != nil {
+		return err
+	}
+	root := yamlsafe.Root(parsed)
+	if root == nil || root.Kind != yaml.MappingNode {
+		return errors.New("the top level is not a mapping")
+	}
+	return yamlsafe.CheckTree(root, 0)
 }
 
 // checkSopsNonce requires the environment's nonce to equal the one in the

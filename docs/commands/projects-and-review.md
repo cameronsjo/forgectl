@@ -208,7 +208,9 @@ row, so a read failure never passes as healthy.
 Inputs:
 
 - Registry: `--registry`, else `$FORGECTL_RELEASE_REGISTRY`, else
-  `~/Projects/cadence-ecosystem/docs/release-rhythm.yaml`.
+  `~/Projects/cadence-ecosystem/docs/release-rhythm.yaml`. A registry over
+  256 KiB, with a repeated or merge (`<<`) key, or with a mapping of more
+  than 64 keys is refused.
 - Canonical gate hash: `--gate-sha256`, else `$FORGECTL_GATE_SHA256`, else the
   sha256 of `../scripts/release/ship-gate.sh` beside the registry. With none of
   those, every `release-pr` row reads `unknown`.

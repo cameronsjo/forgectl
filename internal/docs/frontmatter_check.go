@@ -2,6 +2,8 @@ package docs
 
 import (
 	"gopkg.in/yaml.v3"
+
+	"github.com/cameronsjo/forgectl/internal/yamlsafe"
 )
 
 // This file holds the checks that keep a frontmatter block's decode linear
@@ -16,8 +18,9 @@ import (
 // (4.8 s for the page); it also expands merge keys and aliases, so
 // `<<: [*b, *b, …]` over one large anchor took 420 ms. So no consumer
 // decodes the block into a map: yamlFrontmatterRoot refuses the block
-// shapes that decode refused, with one linear walk of the node tree, and
-// every consumer reads the node.
+// shapes that decode refused, with one linear walk of the node tree
+// (yamlsafe.CheckTree, shared with the sops and registry readers since
+// #959), and every consumer reads the node.
 //
 // TOML is decoded only to show the page's properties block, once, but
 // BurntSushi/toml is quadratic in the segments of a dotted key (5.7 s of
@@ -54,91 +57,10 @@ func yamlFrontmatterRoot(block []byte) (*yaml.Node, bool) {
 	case root.Kind != yaml.MappingNode:
 		return nil, false
 	}
-	if !yamlTreeDecodable(root) {
+	if yamlsafe.CheckTree(root, 0) != nil {
 		return nil, false
 	}
 	return root, true
-}
-
-// yamlTreeDecodable walks the tree under root once, without following
-// aliases, and reports whether a map decode would accept it (see
-// yamlFrontmatterRoot). Each node is visited once and each mapping's keys
-// go through one set, so the walk is linear in the block.
-func yamlTreeDecodable(root *yaml.Node) bool {
-	type frame struct {
-		n    *yaml.Node
-		exit bool
-	}
-	onPath := make(map[*yaml.Node]bool)
-	stack := []frame{{n: root}}
-	for len(stack) > 0 {
-		f := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		if f.exit {
-			delete(onPath, f.n)
-			continue
-		}
-		n := f.n
-		switch n.Kind {
-		case yaml.AliasNode:
-			// An alias to a node that contains it never finishes
-			// expanding; the decode refuses it, and so does this.
-			if n.Alias == nil || onPath[n.Alias] {
-				return false
-			}
-			continue
-		case yaml.ScalarNode:
-			if n.Style&yaml.TaggedStyle != 0 {
-				var v any
-				if n.Decode(&v) != nil {
-					return false
-				}
-			}
-			continue
-		case yaml.MappingNode:
-			if !yamlKeysDecodable(n) {
-				return false
-			}
-		}
-		onPath[n] = true
-		stack = append(stack, frame{n: n, exit: true})
-		for _, c := range n.Content {
-			stack = append(stack, frame{n: c})
-		}
-	}
-	return true
-}
-
-// yamlKeysDecodable reports whether a mapping's keys are unique (by the
-// decoder's own test: same kind and same value), free of merge keys, and
-// all scalars or aliases of scalars.
-func yamlKeysDecodable(m *yaml.Node) bool {
-	type key struct {
-		kind  yaml.Kind
-		value string
-	}
-	seen := make(map[key]bool, len(m.Content)/2)
-	for i := 0; i < len(m.Content); i += 2 {
-		k := m.Content[i]
-		switch k.Kind {
-		case yaml.ScalarNode:
-			if k.Value == "<<" && k.ShortTag() == "!!merge" {
-				return false
-			}
-		case yaml.AliasNode:
-			if k.Alias == nil || k.Alias.Kind != yaml.ScalarNode {
-				return false
-			}
-		default:
-			return false
-		}
-		kk := key{k.Kind, k.Value}
-		if seen[kk] {
-			return false
-		}
-		seen[kk] = true
-	}
-	return true
 }
 
 // maxTOMLFrontmatterBytes is the largest +++ block splitFrontmatter
