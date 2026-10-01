@@ -76,6 +76,15 @@ type walker struct {
 	// walk enters it, with the tree's own entry names, before any entry is
 	// visited or counted against a cap.
 	onRepo func(dir string, names []string)
+	// repoNames, when set, reports a name onRepo needs to see, so a listing
+	// the cap bounds keeps it whatever it sorts as.
+	repoNames func(name string) bool
+}
+
+// keepName reports the names a bounded listing keeps beyond its sorted
+// prefix: .git, which marks a working tree, and any name onRepo checks.
+func (w *walker) keepName(name string) bool {
+	return name == ".git" || (w.repoNames != nil && w.repoNames(name))
 }
 
 // run walks the whole tree. It errors only when the root itself cannot be
@@ -95,16 +104,18 @@ func (w *walker) run() error {
 func (w *walker) walk(dir string, segs []string, repo string, vendored bool, depth int) error {
 	// One name past what the cap has left is enough to trip it: the loop
 	// below counts every name, so a directory longer than that stops the
-	// walk inside this listing, and its tail is never read (#994). Such a
-	// walk is reported truncated; the names it visited before stopping, and
-	// the .git check below, cover only the listed part, in the OS's listing
-	// order rather than sort order. The +1 saturates rather than wrap when the cap is math.MaxInt.
+	// walk inside this listing, and the listing holds no more names than
+	// that, plus the kept ones below (#994). It is the sorted prefix a whole read would give, so a capped
+	// walk visits the entries it always did. .git and the names onRepo
+	// checks are kept whatever they sort as, so neither the repo nor its
+	// scanner config is missed. The +1 saturates rather than wrap when the
+	// cap is math.MaxInt.
 	left := w.maxEntries - w.stats.Entries
 	limit := left + 1
 	if limit < left {
 		limit = left
 	}
-	names, err := w.ops.names(dir, limit)
+	names, err := w.ops.names(dir, limit, w.keepName)
 	if err != nil {
 		if dir == "." {
 			return fmt.Errorf("read audit root %s: %w", termsafe.QuotePath(w.root), termsafe.Error(err))
