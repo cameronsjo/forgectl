@@ -28,10 +28,12 @@ import (
 const helperModeEnv = "FORGECTL_SENSITIVE_HELPER_MODE"
 
 // helperPidDirEnv names a directory where every helper process, descendants
-// included, records its pid as an empty file named for it. helperRunner's
-// cleanup kills them all, so a helper that sleeps (sleep:60s, spawn:30s's
-// grandchild, partialmark) never outlives its test, whether the test passed
-// or its hang bound fired.
+// included, records its pid as an empty file named for it, and (on unix)
+// holds an exclusive flock on that file for its whole life. helperRunner's
+// cleanup kills every helper still holding its lock, so a helper that sleeps
+// (sleep:60s, spawn:30s's grandchild, partialmark) never outlives its test,
+// whether the test passed or its hang bound fired, and a pid the OS has since
+// reused for an unrelated process is never signalled (#1009).
 const helperPidDirEnv = "FORGECTL_SENSITIVE_HELPER_PIDDIR"
 
 func TestMain(m *testing.M) {
@@ -43,7 +45,7 @@ func TestMain(m *testing.M) {
 
 func helperMain(mode string) int {
 	if dir := os.Getenv(helperPidDirEnv); dir != "" {
-		_ = os.WriteFile(filepath.Join(filepath.Clean(dir), strconv.Itoa(os.Getpid())), nil, 0o600) //nolint:gosec // G703: a directory the test itself passes
+		recordHelperPid(filepath.Clean(dir))
 	}
 	verb, arg, _ := strings.Cut(mode, ":")
 	switch verb {
@@ -192,8 +194,11 @@ func helperRunner(t *testing.T, mode string, retire time.Duration, extra ...stri
 	return &OSSensitiveRunner{env: env, retireBound: retire}, self
 }
 
-// killHelpers kills every helper that recorded its pid in dir. A helper that
-// already exited is not an error: Kill then fails and is ignored.
+// killHelpers kills every helper that recorded its pid in dir and is still
+// alive. A pid file whose lock nobody holds belongs to a helper that already
+// exited, and its pid may since name an unrelated process, so it is skipped
+// (helperLockHeld). A helper that exits between the check and the kill is not
+// an error: Kill then fails and is ignored.
 func killHelpers(dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -202,6 +207,9 @@ func killHelpers(dir string) {
 	for _, e := range entries {
 		pid, err := strconv.Atoi(e.Name())
 		if err != nil {
+			continue
+		}
+		if !helperLockHeld(filepath.Join(dir, e.Name())) {
 			continue
 		}
 		if p, err := os.FindProcess(pid); err == nil {

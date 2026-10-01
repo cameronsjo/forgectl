@@ -99,9 +99,9 @@ func linear(t testing.TB, what string, k int, small, large func(), measure func(
 	ratio := float64(l) / float64(max(s, 1))
 	t.Logf("%s: %v at n, %v at %d·n in %s%s, ratio %.1f (limit %.0f)", what, s, l, k, clock, repeated(reps), ratio, limit)
 	if l > Ceiling {
-		t.Errorf("%s: one run at %d·n, repeated %d times, cost %v, over the %v backstop", what, k, reps, l, Ceiling)
+		t.Errorf("%s: one run at %d·n%s, cost %v, over the %v backstop", what, k, repeatNote(",", reps), l, Ceiling)
 	} else if s < Floor {
-		t.Fatalf("%s: the %v run at n (against %v at %d·n) is under the %v floor even repeated %d times, so its ratio is noise; do more work at n", what, s, l, k, Floor, reps)
+		t.Fatalf("%s: the %v run at n (against %v at %d·n) is under the %v floor%s, so its ratio is noise; do more work at n", what, s, l, k, Floor, repeatNote(" even", reps))
 	} else if ratio > limit {
 		t.Errorf("%s: %d·n cost %v against %v at n, a ratio of %.1f over the %.0f limit; want linear time (linear is about %d, quadratic about %d)",
 			what, k, l, s, ratio, limit, k, k*k)
@@ -130,9 +130,9 @@ func within(t testing.TB, what string, limit float64, base, subject func(), meas
 	ratio := float64(s) / float64(max(b, 1))
 	t.Logf("%s: %v against a base of %v in %s%s, ratio %.1f (limit %.0f)", what, s, b, clock, repeated(reps), ratio, limit)
 	if s > Ceiling {
-		t.Errorf("%s: one run, repeated %d times, cost %v, over the %v backstop", what, reps, s, Ceiling)
+		t.Errorf("%s: one run%s, cost %v, over the %v backstop", what, repeatNote(",", reps), s, Ceiling)
 	} else if b < Floor {
-		t.Fatalf("%s: the base run of %v (against %v for the subject) is under the %v floor even repeated %d times, so its ratio is noise; do more work in the base", what, b, s, Floor, reps)
+		t.Fatalf("%s: the base run of %v (against %v for the subject) is under the %v floor%s, so its ratio is noise; do more work in the base", what, b, s, Floor, repeatNote(" even", reps))
 	} else if ratio > limit {
 		t.Errorf("%s: cost %v against a base of %v, a ratio of %.1f over the %.0f limit", what, s, b, ratio, limit)
 	}
@@ -192,6 +192,17 @@ func repeated(reps int) string {
 		return ""
 	}
 	return fmt.Sprintf(", both sides repeated %d times to clear the floor", reps)
+}
+
+// repeatNote is a refusal's note of how many times scaled repeated both
+// sides, after lead (", repeated 16 times" or " even repeated 16 times"),
+// and empty when scaled returned at its first step: "repeated 1 times" says
+// nothing true (#1009).
+func repeatNote(lead string, reps int) string {
+	if reps <= 1 {
+		return ""
+	}
+	return fmt.Sprintf("%s repeated %d times", lead, reps)
 }
 
 // repsFor is how many runs of f cost at least target, from the fastest
