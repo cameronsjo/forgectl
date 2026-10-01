@@ -69,7 +69,9 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 		}
 		slog.Debug("Sandboxing local repo via git worktree.", "repo", shownRepo, "ref", useRef)
 		// -- ends option parsing so a crafted dir/ref can't inject a flag.
-		if _, err := gitenv.Run(ctx, run, gitenv.Transport, "-C", repo, "worktree", "add", "--", dir, useRef); err != nil {
+		// A partial clone's checkout may lazy-fetch from its promisor
+		// remote, so ext:: and fd:: are refused here as at the clone below.
+		if _, err := gitenv.RunRefusing(ctx, run, gitenv.Transport, []string{"ext", "fd"}, "-C", repo, "worktree", "add", "--", dir, useRef); err != nil {
 			slog.Error("Failed to create git worktree.", "repo", shownRepo, "sandbox", dir, "ref", useRef, "exit_code", exitCode(err))
 			discardSandbox(ctx, run, dir)
 			// Categorical (#711), as the clone leg: git's stderr is not echoed.

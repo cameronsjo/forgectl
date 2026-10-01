@@ -64,7 +64,9 @@ func TestSandbox_LocalRepo_WorktreeAdd(t *testing.T) {
 	if call.Name != "git" {
 		t.Errorf("call.Name = %q, want git", call.Name)
 	}
-	want := append(gitenv.Args(gitenv.Transport), "-C", repoDir, "worktree", "add", "--", dir, "main")
+	// ext:: and fd:: are refused, as at the clone: the checkout may
+	// lazy-fetch from a partial clone's promisor remote (#987).
+	want := append(gitenv.Args(gitenv.Transport), "-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never", "-C", repoDir, "worktree", "add", "--", dir, "main")
 	if len(call.Args) != len(want) {
 		t.Fatalf("args = %v, want %v", call.Args, want)
 	}

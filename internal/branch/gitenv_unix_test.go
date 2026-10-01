@@ -112,3 +112,24 @@ func TestDeleteLocalRemovesAWorktreeRunningNoFilterDriver(t *testing.T) {
 		t.Errorf("the worktree %s is still there: %v", wt, err)
 	}
 }
+
+// #1005: prune refuses, cleanly and at once, to remove a worktree whose
+// repository's HEAD is a FIFO, on which git's dirty check would block. The
+// branch stays: neither the remove nor the branch delete runs.
+// Mutation: drop gitenv's HEAD mode check: the remove and the branch delete
+// both run.
+func TestDeleteLocalRefusesAWorktreeWithAFIFOHead(t *testing.T) {
+	gitDir := filepath.Join(gitenvtest.FIFOHeadRepo(t), ".git")
+	wt := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &exec.FakeRunner{RunFunc: gitenvtest.NoFilters(func(string, []string) (string, error) { return "", nil })}
+	err := New(fake).deleteLocal(context.Background(), Info{Name: "w", LocalExists: true, MergedOnServer: true, WorktreePath: wt})
+	if err == nil {
+		t.Error("deleteLocal removed a worktree whose HEAD is a FIFO")
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("git ran %d time(s): %+v", len(fake.Calls), fake.Calls)
+	}
+}
