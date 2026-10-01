@@ -1,7 +1,8 @@
-//go:build unix && !aix && !illumos && !solaris
+//go:build unix && !illumos && !solaris
 
-// aix, illumos and solaris are unix but have no syscall.Mkfifo, so this file
-// would not compile there. rootops_flags_test.go still pins both flags on them.
+// illumos and solaris are unix but have no syscall.Mkfifo, so this file would
+// not compile there. rootops_flags_test.go still pins both flags on them.
+// (aix lacks it too, but forgectl does not build for aix: forgectl#956.)
 
 package audit
 

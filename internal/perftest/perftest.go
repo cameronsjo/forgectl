@@ -58,9 +58,18 @@ const maxReps = 1000
 // still measure under Floor: Amortize stops at the first of its runs that
 // clears the target, and a cold first run (caches, page faults, a CPU still
 // clocking up) can clear it while every later run does not, which is what
-// failed macOS CI on fast runners (forgectl#919). Work that costs nothing at
-// all still fails Floor once this is reached.
+// failed macOS CI on fast runners (forgectl#919). Scaling also stops early
+// at scaleBudget, so this is reached only when the large side is cheap too;
+// either way a base still under Floor then fails Floor.
 const maxScale = 1024
+
+// scaleBudget bounds one large run once scaled has repeated it: a step never
+// takes the large side past it. A large side that healthy work scales up
+// costs about the ratio times 2·Floor, well under this; one that would pass
+// it is either already far over any limit or paired with a small side that
+// costs next to nothing (a regression that made it free), and either way the
+// floor refusal is reached in seconds instead of after a million large runs.
+const scaleBudget = 2 * time.Second
 
 // Ceiling is Linear's absolute backstop on one large run: a regression slow
 // enough that timing more pairs is a waste. The ratio is the assertion; a
@@ -90,9 +99,9 @@ func linear(t testing.TB, what string, k int, small, large func(), measure func(
 	ratio := float64(l) / float64(max(s, 1))
 	t.Logf("%s: %v at n, %v at %d·n in %s%s, ratio %.1f (limit %.0f)", what, s, l, k, clock, repeated(reps), ratio, limit)
 	if l > Ceiling {
-		t.Errorf("%s: one run at %d·n cost %v, over the %v backstop", what, k, l, Ceiling)
+		t.Errorf("%s: one run at %d·n, repeated %d times, cost %v, over the %v backstop", what, k, reps, l, Ceiling)
 	} else if s < Floor {
-		t.Fatalf("%s: the %v run at n is under the %v floor even repeated %d times, so its ratio is noise; do more work at n", what, s, Floor, reps)
+		t.Fatalf("%s: the %v run at n (against %v at %d·n) is under the %v floor even repeated %d times, so its ratio is noise; do more work at n", what, s, l, k, Floor, reps)
 	} else if ratio > limit {
 		t.Errorf("%s: %d·n cost %v against %v at n, a ratio of %.1f over the %.0f limit; want linear time (linear is about %d, quadratic about %d)",
 			what, k, l, s, ratio, limit, k, k*k)
@@ -121,9 +130,9 @@ func within(t testing.TB, what string, limit float64, base, subject func(), meas
 	ratio := float64(s) / float64(max(b, 1))
 	t.Logf("%s: %v against a base of %v in %s%s, ratio %.1f (limit %.0f)", what, s, b, clock, repeated(reps), ratio, limit)
 	if s > Ceiling {
-		t.Errorf("%s: one run cost %v, over the %v backstop", what, s, Ceiling)
+		t.Errorf("%s: one run, repeated %d times, cost %v, over the %v backstop", what, reps, s, Ceiling)
 	} else if b < Floor {
-		t.Fatalf("%s: the base run of %v is under the %v floor even repeated %d times, so its ratio is noise; do more work in the base", what, b, Floor, reps)
+		t.Fatalf("%s: the base run of %v (against %v for the subject) is under the %v floor even repeated %d times, so its ratio is noise; do more work in the base", what, b, s, Floor, reps)
 	} else if ratio > limit {
 		t.Errorf("%s: cost %v against a base of %v, a ratio of %.1f over the %.0f limit", what, s, b, ratio, limit)
 	}
@@ -149,7 +158,10 @@ func Amortize(small, large func()) (func(), func()) {
 // under the clock's tick, doubles. Repeating both sides alike leaves their
 // ratio what the caller asked for, so a fast host gets a longer measurement,
 // never a different assertion. A large run over Ceiling ends the scaling: the
-// backstop has already failed.
+// backstop has already failed. No step takes one large run past scaleBudget,
+// and a step that could not double without doing so ends the scaling too, so
+// a small side that costs nothing fails Floor in seconds whatever the large
+// side costs.
 func scaled(limit float64, measure func(func()) (time.Duration, bool), small, large func()) (fastSmall, fastLarge time.Duration, clock string, reps int) {
 	reps = 1
 	for {
@@ -161,7 +173,11 @@ func scaled(limit float64, measure func(func()) (time.Duration, bool), small, la
 		if fastSmall > 0 {
 			step = max(step, int((int64(2*Floor)+int64(fastSmall)-1)/int64(fastSmall)))
 		}
-		if step = min(step, maxScale/reps); step < 2 {
+		step = min(step, maxScale/reps)
+		if fastLarge > 0 {
+			step = min(step, int(scaleBudget/fastLarge))
+		}
+		if step < 2 {
 			return fastSmall, fastLarge, clock, reps
 		}
 		small, large = repeat(step, small), repeat(step, large)

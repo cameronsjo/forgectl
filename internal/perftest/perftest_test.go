@@ -143,6 +143,7 @@ func TestLinear_ScalesUpASmallSide(t *testing.T) {
 type counter struct {
 	ticks int
 	runs  int
+	spent time.Duration // every measured run's fake time, summed
 }
 
 func (c *counter) side(units int) func() { return func() { c.ticks += units } }
@@ -151,7 +152,9 @@ func (c *counter) measure(f func()) (time.Duration, bool) {
 	c.ticks = 0
 	c.runs++
 	f()
-	return time.Duration(c.ticks) * time.Millisecond, true
+	d := time.Duration(c.ticks) * time.Millisecond
+	c.spent += d
+	return d, true
 }
 
 // runFake calls linear with c's clock against a fakeTB.
@@ -204,6 +207,30 @@ func TestLinear_ScaledFakeClock(t *testing.T) {
 		if c.runs > 2*Runs*11 {
 			t.Errorf("%s: %d measurements, want the scale-up bounded", tc.name, c.runs)
 		}
+	}
+}
+
+// TestLinear_FreeSmallSideFailsFloorPromptly: a regression that makes the
+// small side free, against a large side that still costs 100 ms, scales only
+// until one large run would pass scaleBudget (a zero reading doubles: 2, 4,
+// 8, 16 repetitions, at 1.6 s a large run), then fails Floor with the
+// floor's own message. Before the budget it jumped to maxScale and ran the
+// large side about a million times, failing the Ceiling instead after
+// minutes (#1004 review).
+// Mutation: drop the scaleBudget cap in scaled and the step goes to 1024,
+// the message names 1024 repetitions, and the fake time spent passes ten
+// minutes.
+func TestLinear_FreeSmallSideFailsFloorPromptly(t *testing.T) {
+	c := &counter{}
+	f := runFake(c, 8, 0, 100)
+	if len(f.fatals) != 1 || !strings.Contains(f.fatals[0], "floor even repeated 16 times") {
+		t.Errorf("fatals = %q, want one floor refusal after 16 repetitions", f.fatals)
+	}
+	if len(f.errors) != 0 {
+		t.Errorf("errors = %q, want none: the floor refuses, not the Ceiling", f.errors)
+	}
+	if c.runs > 2*Runs*5 || c.spent > 30*time.Second {
+		t.Errorf("%d measurements costing %v of fake time, want at most %d and 30s", c.runs, c.spent, 2*Runs*5)
 	}
 }
 
