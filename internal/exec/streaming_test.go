@@ -157,18 +157,19 @@ func TestOSRunner_RunStreaming_SlowConsumerWithoutCancelGetsEveryByte(t *testing
 	}
 }
 
+// The 10s limit is the whole timing check: it is a hang bound, and the child
+// waits on nothing, so a working call returns in milliseconds. A tighter
+// wall-clock bound only added a way for host load to fail it (forgectl#919).
+//
 // Mutation: drop p.closeChildEnds() after Start and the parent's own copy of
 // the stdout write end keeps the pipe open forever, so the call hangs past
 // the 10s limit.
 func TestOSRunner_RunStreaming_ClosedStdoutEarlyExitReturnsPromptly(t *testing.T) {
 	var stdout, stderr syncBuffer
-	elapsed, err := runStreamingBounded(t.Context(), t, 10*time.Second, &stdout, &stderr, "sh", "-c", `echo partial; exec >&-; echo why >&2; exit 3`)
+	_, err := runStreamingBounded(t.Context(), t, 10*time.Second, &stdout, &stderr, "sh", "-c", `echo partial; exec >&-; echo why >&2; exit 3`)
 	var cmdErr *CommandError
 	if !errors.As(err, &cmdErr) || cmdErr.ExitCode != 3 {
 		t.Fatalf("error = %v, want *CommandError with ExitCode 3", err)
-	}
-	if elapsed > 2*time.Second {
-		t.Fatalf("returned after %v; an early-closed stdout must not wait on anything", elapsed)
 	}
 	if stdout.String() != "partial\n" || stderr.String() != "why\n" {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())

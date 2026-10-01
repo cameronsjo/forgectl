@@ -120,18 +120,147 @@ func TestLinear_FailsQuadraticWork(t *testing.T) {
 	}
 }
 
-// TestLinear_RefusesSmallSide: a small side under Floor is refused, not
-// judged, because a ratio on a sub-tick sample is noise (forgectl#964). The
-// large side is kept to the same size so only the floor can fail it.
-// Mutation: dropping the s < Floor check turns this red (a ratio error or
-// nothing at all is reported instead).
-func TestLinear_RefusesSmallSide(t *testing.T) {
+// TestLinear_ScalesUpASmallSide: a real small side under Floor is repeated
+// until it clears it, and the ratio is then judged as usual, so a fast host
+// passes linear work instead of failing on the floor (forgectl#919). The
+// log line says the sides were repeated.
+// Mutation: in scaled, return after the first measurement whatever it read
+// (the pre-#919 behaviour) and this is refused on the floor.
+func TestLinear_ScalesUpASmallSide(t *testing.T) {
 	f := run(8, busy(Floor/10), busy(8*Floor/10))
-	if len(f.fatals) != 1 || !strings.Contains(f.fatals[0], "floor") {
-		t.Errorf("fatals = %q, want one naming the floor", f.fatals)
+	if len(f.errors)+len(f.fatals) != 0 {
+		t.Errorf("a sub-floor small side was not scaled up: errors %q, fatals %q", f.errors, f.fatals)
+	}
+	if len(f.logs) != 1 || !strings.Contains(f.logs[0], "repeated") {
+		t.Errorf("logs = %q, want one line saying the sides were repeated", f.logs)
+	}
+}
+
+// counter is a fake clock for scaled: each side adds its cost in units to
+// ticks when it runs, and measure reads a run's ticks as that many
+// milliseconds of CPU time. A side under Floor therefore costs exactly its
+// units times the repetitions scaled wraps it in.
+type counter struct {
+	ticks int
+	runs  int
+	spent time.Duration // every measured run's fake time, summed
+}
+
+func (c *counter) side(units int) func() { return func() { c.ticks += units } }
+
+func (c *counter) measure(f func()) (time.Duration, bool) {
+	c.ticks = 0
+	c.runs++
+	f()
+	d := time.Duration(c.ticks) * time.Millisecond
+	c.spent += d
+	return d, true
+}
+
+// runFake calls linear with c's clock against a fakeTB.
+func runFake(c *counter, k, small, large int) *fakeTB {
+	f := &fakeTB{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		linear(f, "fake", k, c.side(small), c.side(large), c.measure)
+	}()
+	<-done
+	return f
+}
+
+// TestLinear_ScaledFakeClock pins the scale-up on a fake clock, where the
+// cost of each side is exact. A 1 ms small side (under the 5 ms Floor) is
+// repeated to twice Floor in one step, and then linear work passes and
+// quadratic work fails as it would have at that size; work that costs
+// nothing is refused on the floor once maxScale is reached, after a bounded
+// number of measurements.
+// Mutations: in scaled, return after the first measurement (the linear and
+// quadratic rows are refused on the floor); repeat only the small side (the
+// quadratic row passes); drop the maxScale bound (the zero-cost row never
+// returns).
+func TestLinear_ScaledFakeClock(t *testing.T) {
+	const k = 8
+	for _, tc := range []struct {
+		name         string
+		small, large int
+		wantError    string
+		wantFatal    string
+		wantLog      string
+	}{
+		{name: "linear", small: 1, large: k, wantLog: "repeated 10 times"},
+		{name: "quadratic", small: 1, large: k * k, wantError: "want linear time", wantLog: "repeated 10 times"},
+		{name: "costs nothing", small: 0, large: 0, wantFatal: "even repeated 1024 times"},
+	} {
+		c := &counter{}
+		f := runFake(c, k, tc.small, tc.large)
+		if got := strings.Join(f.errors, "; "); (tc.wantError == "") != (got == "") || !strings.Contains(got, tc.wantError) {
+			t.Errorf("%s: errors = %q, want %q", tc.name, f.errors, tc.wantError)
+		}
+		if got := strings.Join(f.fatals, "; "); (tc.wantFatal == "") != (got == "") || !strings.Contains(got, tc.wantFatal) {
+			t.Errorf("%s: fatals = %q, want %q", tc.name, f.fatals, tc.wantFatal)
+		}
+		if tc.wantLog != "" && (len(f.logs) != 1 || !strings.Contains(f.logs[0], tc.wantLog)) {
+			t.Errorf("%s: logs = %q, want one line containing %q", tc.name, f.logs, tc.wantLog)
+		}
+		// Ten doublings reach maxScale; each measurement is at most Runs pairs.
+		if c.runs > 2*Runs*11 {
+			t.Errorf("%s: %d measurements, want the scale-up bounded", tc.name, c.runs)
+		}
+	}
+}
+
+// TestLinear_FreeSmallSideFailsFloorPromptly: a regression that makes the
+// small side free, against a large side that still costs 100 ms, scales only
+// until one large run would pass scaleBudget (a zero reading doubles: 2, 4,
+// 8, 16 repetitions, at 1.6 s a large run), then fails Floor with the
+// floor's own message. Before the budget it jumped to maxScale and ran the
+// large side about a million times, failing the Ceiling instead after
+// minutes (#1004 review).
+// Mutation: drop the scaleBudget cap in scaled and the step goes to 1024,
+// the message names 1024 repetitions, and the fake time spent passes ten
+// minutes.
+func TestLinear_FreeSmallSideFailsFloorPromptly(t *testing.T) {
+	c := &counter{}
+	f := runFake(c, 8, 0, 100)
+	if len(f.fatals) != 1 || !strings.Contains(f.fatals[0], "floor even repeated 16 times") {
+		t.Errorf("fatals = %q, want one floor refusal after 16 repetitions", f.fatals)
 	}
 	if len(f.errors) != 0 {
-		t.Errorf("errors = %q, want none: the floor refuses before the ratio is judged", f.errors)
+		t.Errorf("errors = %q, want none: the floor refuses, not the Ceiling", f.errors)
+	}
+	if c.runs > 2*Runs*5 || c.spent > 30*time.Second {
+		t.Errorf("%d measurements costing %v of fake time, want at most %d and 30s", c.runs, c.spent, 2*Runs*5)
+	}
+}
+
+// TestWithin_ScaledFakeClock: Within scales a sub-floor base as Linear does,
+// and still fails a subject over its limit after scaling.
+// Mutation: calling fastest directly in within (no scaled) turns both rows
+// red on the floor.
+func TestWithin_ScaledFakeClock(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		base, subject int
+		wantError     string
+	}{
+		{name: "within the limit", base: 2, subject: 3},
+		{name: "over the limit", base: 2, subject: 16, wantError: "over the 4 limit"},
+	} {
+		c := &counter{}
+		f := &fakeTB{}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			within(f, "fake", 4, c.side(tc.base), c.side(tc.subject), c.measure)
+		}()
+		<-done
+		if len(f.fatals) != 0 {
+			t.Errorf("%s: fatals = %q, want the base scaled past the floor", tc.name, f.fatals)
+		}
+		if got := strings.Join(f.errors, "; "); (tc.wantError == "") != (got == "") || !strings.Contains(got, tc.wantError) {
+			t.Errorf("%s: errors = %q, want %q", tc.name, f.errors, tc.wantError)
+		}
 	}
 }
 
@@ -184,11 +313,18 @@ func TestWithin_RefusesSmallLimit(t *testing.T) {
 	}
 }
 
-// TestWithin_RefusesSmallBase: Within refuses a base under Floor as Linear
-// refuses a small side.
+// TestWithin_RefusesSmallBase: Within refuses a base still under Floor at
+// maxScale repetitions, as Linear refuses a small side.
 // Mutation: dropping the b < Floor check turns this red.
 func TestWithin_RefusesSmallBase(t *testing.T) {
-	f := runWithin(4, busy(Floor/10), busy(Floor/10))
+	c := &counter{}
+	f := &fakeTB{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		within(f, "fake", 4, c.side(0), c.side(0), c.measure)
+	}()
+	<-done
 	if len(f.fatals) != 1 || !strings.Contains(f.fatals[0], "floor") {
 		t.Errorf("fatals = %q, want one naming the floor", f.fatals)
 	}

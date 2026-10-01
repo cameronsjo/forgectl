@@ -93,16 +93,30 @@ func TestCollect_PanicIsContained(t *testing.T) {
 	}
 }
 
+// TestCollect_AbandonsASourceThatIgnoresItsDeadline: the source blocks until
+// the test ends, so a Collect that waited for it would never return. The
+// timeout error is the evidence that the deadline ended it; the wait is only
+// a hang bound, far above the 20 ms deadline, so host load cannot fail it
+// (forgectl#919: the old bound was an elapsed check after the call, which a
+// real hang never reached).
+//
+// Mutation: make Collect wait for the source's result instead of selecting
+// on the deadline, and the call does not return within the hang bound.
 func TestCollect_AbandonsASourceThatIgnoresItsDeadline(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	start := time.Now()
-	s := Collect(t.Context(), 20*time.Millisecond, func(context.Context) (payload, []string, error) {
-		<-release // ignores ctx, like the clean walk
-		return payload{N: 1}, nil, nil
-	})
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("Collect waited %s for a source past its deadline", elapsed)
+	done := make(chan Section[payload], 1)
+	go func() {
+		done <- Collect(t.Context(), 20*time.Millisecond, func(context.Context) (payload, []string, error) {
+			<-release // ignores ctx, like the clean walk
+			return payload{N: 1}, nil, nil
+		})
+	}()
+	var s Section[payload]
+	select {
+	case s = <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("Collect did not return within 20s for a source past its deadline")
 	}
 	if s.State != StateFailed || s.Error != "timed out after 20ms" || s.Data != nil {
 		t.Fatalf("section = %+v, want failed \"timed out after 20ms\"", s)

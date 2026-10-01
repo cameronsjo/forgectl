@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/perftest"
@@ -485,20 +484,28 @@ func TestMaskText_DifferentialAgainstMain(t *testing.T) {
 // to left. The rescan-until-stable loop needed one full pass per link (26 s
 // for a 64 KiB tail on the issue's machine, 3.9 s here at 24 KiB); the
 // worklist re-checks only the matches beside newly covered bytes. The whole
-// stream must still end up covered.
+// stream must still end up covered. The check is a ratio in CPU time
+// (perftest.Linear, forgectl#919): a cascade of 21000 links against one an
+// eighth as long, in place of a 2 s wall-clock bound that host load alone
+// could fail.
 //
-// Mutation: make drain rescan every short pattern over the whole stream until
-// nothing changes (the old fixpoint) and this takes tens of seconds.
+// Mutation: make cover rescan every short pattern over the whole stream until
+// nothing changes (the old fixpoint) in place of drain, and the eight-times
+// cascade costs about 68 times as much (measured; limit 32). Unmutated it
+// measured 5.0 idle and 6.0 to 9.0 under 8 CPU burners on 4 cores.
 func TestMaskText_ShortCascadeIsLinear(t *testing.T) {
+	const links, k = 21000, 8
 	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"K=:ab:a"}))
-	s := strings.Repeat(":ab", 21000) + ":a"
-	start := time.Now()
-	if got := m.text(s); got != Redacted {
-		t.Fatalf("the cascade did not cover the stream: %.40q…", got)
+	run := func(links int) func() {
+		s := strings.Repeat(":ab", links) + ":a"
+		return func() {
+			if got := m.text(s); got != Redacted {
+				t.Fatalf("the cascade did not cover the stream: %.40q…", got)
+			}
+		}
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("text took %v on a %d-byte cascade; want milliseconds", elapsed, len(s))
-	}
+	small, large := perftest.Amortize(run(links/k), run(links))
+	perftest.Linear(t, "text on a short-value cascade", k, small, large)
 }
 
 // TestMaskText_SelfOverlappingLongValueIsLinear pins #708 item 2: an "a…a"
@@ -666,21 +673,38 @@ func TestStraddleLen_MatchesTheSuffixProbe(t *testing.T) {
 // quadratic in that value's length, times one round per byte of the 64 KiB
 // tail: 24.8 s for a 4 KiB value before the fix.
 //
-// Mutation: delete the maxStraddleRounds cap and this takes about 90 s; keep
-// the cap but restore the HasPrefix probe loop in place of suffixPrefix and
-// it takes about 20 s (0.2 s as written).
+// The cost is a ratio in CPU time (perftest.Within, forgectl#919), in place
+// of a 3 s wall-clock bound that host load alone could fail: straddleLen on
+// an 8 KiB tail against a tail of exactly maxStraddleRounds bytes, which runs
+// as many rounds and so the same scans of each value, with almost no tail
+// for a round to search. Measured 1.0 to 1.7 idle and 1.0 to 1.8 under 8 CPU
+// burners on 4 cores, against a limit of 8.
+//
+// Mutations: delete the maxStraddleRounds cap, and the 8 KiB tail runs 128
+// times the rounds (ratio 157); keep the cap but restore the HasPrefix probe
+// loop in place of suffixPrefix, and each round probes 8 KiB of suffix
+// lengths where the base's probe at most 64 (ratio over 2000, and the base,
+// which no longer scans the 128 KiB value, falls under perftest.Floor).
 func TestStraddleLen_OneByteRoundsAreBounded(t *testing.T) {
 	m := maskFrom(WithMaskedAssignments(context.Background(), []string{"A=cb", "K=" + strings.Repeat("b", 128<<10-2) + "c"}))
-	tb := &tailBuffer{limit: maxStderrTail}
-	_, _ = tb.Write([]byte("zz" + strings.Repeat("b", 2*maxStderrTail)))
-	start := time.Now()
-	got, dropped := maskedTail(tb, m)
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
-		t.Errorf("maskedTail took %v; want well under a second", elapsed)
+	straddle := func(s string) func() {
+		return func() {
+			if n := m.straddleLen(s); n != len(s) {
+				t.Fatalf("straddleLen dropped %d of a %d-byte tail of b; want all of it", n, len(s))
+			}
+		}
 	}
+	base, subject := perftest.Amortize(straddle(strings.Repeat("b", maxStraddleRounds)), straddle(strings.Repeat("b", 8<<10)))
+	perftest.Within(t, "straddleLen on a tail past the round cap", 8, base, subject)
+	if t.Failed() {
+		return // a regression the ratio caught makes the full tail below take minutes
+	}
+
 	// Past the cap the rest of the tail is dropped: every byte is gone and
 	// counted.
-	if got != "" || dropped != int64(2+2*maxStderrTail) {
+	tb := &tailBuffer{limit: maxStderrTail}
+	_, _ = tb.Write([]byte("zz" + strings.Repeat("b", 2*maxStderrTail)))
+	if got, dropped := maskedTail(tb, m); got != "" || dropped != int64(2+2*maxStderrTail) {
 		t.Errorf("got %.20q, dropped %d; want empty, %d", got, dropped, 2+2*maxStderrTail)
 	}
 }

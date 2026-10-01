@@ -18,12 +18,11 @@ import (
 
 // buildConstraintAllowed is the allowlist of production files, relative to
 // the module root, that may carry a build constraint no guard configuration
-// satisfies. It is nearly empty: every production file builds on some guard
-// platform today (forgectl#897) bar the entries below, and a new entry must
-// name why the file needs code no guard type-checks.
-var buildConstraintAllowed = map[string]string{
-	"internal/config/lock_aix.go": "aix-only fail-closed lock stub (forgectl#930): x/sys/unix has no Flock on aix, aix is not a shipped target or a guard platform, and the file holds no exec, secret or guard-relevant code, only two functions that return an error",
-}
+// satisfies. It is empty: every production file builds on some guard
+// platform today (forgectl#897; the one exception, an aix-only lock stub,
+// went with aix support in forgectl#956), and a new entry must name why the
+// file needs code no guard type-checks.
+var buildConstraintAllowed = map[string]string{}
 
 // unixGOOS is go/build's unix set: the GOOS values the "unix" build tag
 // matches. guardConfigTags reads it only for the platforms in guardPlatforms.
