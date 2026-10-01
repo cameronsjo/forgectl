@@ -299,6 +299,10 @@ var (
 		"NPM_TOKEN=SEKRITD",
 		"-----BEGIN PRIVATE KEY-----\nMIIESEKRITE\n-----END PRIVATE KEY-----",
 		"sk-ant-api03-SEKRITF" + strings.Repeat("b", 20),
+		// #974: a JSON credential key, a header Text already caught, a JWT.
+		`  "token": "SEKRITG",`,
+		"X-Auth-Token: SEKRITH",
+		"eyJhbGciOiJIUzI1NiJ9.eyJTRUtSSVRJIjoxfQ.SEKRITI",
 	}
 	stdoutKept952 = []string{
 		"@anthropic-ai/claude-code   2.1.42  2.1.286  2.1.286  node_modules/@anthropic-ai/claude-code  global",
