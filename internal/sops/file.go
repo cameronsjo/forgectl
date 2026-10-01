@@ -43,7 +43,7 @@ var errRefusedShape = errors.New("the file's YAML is refused")
 var errTooLarge = fmt.Errorf("the file is larger than %d MiB, the limit for a SOPS document", MaxDocumentBytes>>20)
 
 // CheckSize refuses a document over MaxDocumentBytes, so a caller can say
-// that, not "not a SOPS document", before IsSOPSFile.
+// that, not "not a SOPS document", before isSOPSFile.
 func CheckSize(data []byte) error {
 	if len(data) > MaxDocumentBytes {
 		return errTooLarge
@@ -126,7 +126,7 @@ func keepKeys(m *yaml.Node, names ...string) (*yaml.Node, error) {
 	return &kept, nil
 }
 
-// IsSOPSFile reports whether data parses as YAML and carries a top-level
+// isSOPSFile reports whether data parses as YAML and carries a top-level
 // `sops:` mapping.
 //
 // It is a NARROWING check, never the whole gate: the caller also requires the
@@ -138,12 +138,17 @@ func keepKeys(m *yaml.Node, names ...string) (*yaml.Node, error) {
 //
 // A document over MaxDocumentBytes, or one with a merge key at its top level,
 // is not one (see CheckSize and keepKeys).
-func IsSOPSFile(data []byte) bool {
+//
+// It is a parity helper, kept for tests only: production reads a document
+// once, through ReadDocument, and the tests hold this single-purpose form and
+// ReadDocument to the same answers. It is unexported so no production caller
+// can come to depend on a second path that drifts from ReadDocument (#1006).
+func isSOPSFile(data []byte) bool {
 	doc, err := parseTop(data)
 	return err == nil && isSOPSDoc(doc)
 }
 
-// isSOPSDoc is IsSOPSFile over a document parseTop returned.
+// isSOPSDoc is isSOPSFile over a document parseTop returned.
 func isSOPSDoc(doc *yaml.Node) bool {
 	var probe map[string]yaml.Node
 	if err := doc.Decode(&probe); err != nil {
@@ -157,7 +162,7 @@ func isSOPSDoc(doc *yaml.Node) bool {
 // as YAML or has no top-level sops: mapping.
 var ErrNotSOPSDocument = errors.New("it has no top-level sops: block, so it is not a SOPS document")
 
-// ReadDocument is CheckSize, IsSOPSFile and ReadPlaintextRules over one
+// ReadDocument is CheckSize, isSOPSFile and readPlaintextRules over one
 // parse of data, for a caller that needs all three: the size refusal, then
 // ErrNotSOPSDocument, then the rules or their refusal. A merge key or a
 // repeated key at the top level or in the sops: block is refused by name
@@ -234,7 +239,7 @@ type PlaintextRules struct {
 	unencryptedRegex  *regexp.Regexp
 }
 
-// ReadPlaintextRules extracts the encryption rules from a document's sops
+// readPlaintextRules extracts the encryption rules from a document's sops
 // metadata.
 //
 // # Why this check exists at all
@@ -256,7 +261,10 @@ type PlaintextRules struct {
 // own keys are decoded (keepKeys), so the decode costs the same however
 // many keys the rest of the file has. A merge key in either mapping is
 // refused.
-func ReadPlaintextRules(data []byte) (PlaintextRules, error) {
+//
+// Like isSOPSFile, it is a parity helper kept for tests only; production
+// reads the rules through ReadDocument (#1006).
+func readPlaintextRules(data []byte) (PlaintextRules, error) {
 	meta, err := readMetadata(data)
 	if err != nil {
 		return PlaintextRules{}, err

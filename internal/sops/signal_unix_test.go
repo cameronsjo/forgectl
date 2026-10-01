@@ -47,8 +47,8 @@ const signalChildEnv = "FORGECTL_SOPS_SIGNAL_CHILD"
 // edit call with the value staged and the target untouched.
 const signalChildModeEnv = "FORGECTL_SOPS_SIGNAL_CHILD_MODE"
 
-// A SOPS-shaped document with no real ciphertext: IsSOPSFile and
-// ReadPlaintextRules are all setLocked asks of it before staging.
+// A SOPS-shaped document with no real ciphertext: isSOPSFile and
+// readPlaintextRules are all setLocked asks of it before staging.
 const signalFixture = "a: b\nsops:\n    unencrypted_suffix: _unencrypted\n"
 
 // parkingRunner stands in for sops. It announces that the value is staged,

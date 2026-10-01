@@ -10,6 +10,7 @@ import (
 	"go/types"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path"
@@ -451,11 +452,11 @@ func TestScanInjection_UnreadableCounted(t *testing.T) {
 	defer func() { _ = r.Close() }()
 	ops := rootOps(r)
 	names := ops.names
-	ops.names = func(dir string) ([]string, error) {
+	ops.names = func(dir string, limit int, keep func(string) bool) ([]string, error) {
 		if dir == "r/locked" {
 			return nil, fs.ErrPermission
 		}
-		return names(dir)
+		return names(dir, limit, keep)
 	}
 	rep, err := scanWith(root, ops, Options{})
 	if err != nil {
@@ -984,5 +985,115 @@ func TestScanInjection_LstatFailureCounted(t *testing.T) {
 	}
 	if rep.Unreadable != 1 || len(rep.Findings) != 1 {
 		t.Errorf("unreadable=%d findings=%d, want 1/1", rep.Unreadable, len(rep.Findings))
+	}
+}
+
+// TestRootOps_NamesStopsAtTheLimit: a bounded listing holds the limit
+// smallest names, sorted, plus any name keep asks for, so a directory with
+// millions of entries is never held whole before the entry cap applies
+// (#994) and a capped walk still sees the sorted prefix a whole read gives;
+// a limit past the end returns every name, across more than one batch.
+//
+// Mutations: list with Readdirnames(-1) and the limit-5 read returns all the
+// names; stop at the first limit names read and the limit-5 read is not the
+// five smallest (the files are made largest-first); drop the keep branch and
+// the kept name is missing.
+func TestRootOps_NamesStopsAtTheLimit(t *testing.T) {
+	root := t.TempDir()
+	const n = dirReadBatch + 44
+	for i := n - 1; i >= 0; i-- {
+		mkfile(t, root, fmt.Sprintf("d/f%04d", i))
+	}
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	ops := rootOps(r)
+	got, err := ops.names("d", 5, nil)
+	if want := []string{"f0000", "f0001", "f0002", "f0003", "f0004"}; err != nil || !slices.Equal(got, want) {
+		t.Errorf("names(limit 5) = %v, %v; want %v", got, err, want)
+	}
+	last := fmt.Sprintf("f%04d", n-1)
+	got, err = ops.names("d", 5, func(s string) bool { return s == last })
+	if err != nil || len(got) != 6 || got[5] != last {
+		t.Errorf("names(limit 5, keep %s) = %v, %v; want the five smallest and %s", last, got, err, last)
+	}
+	all, err := ops.names("d", n+10, nil)
+	if err != nil || len(all) != n || !slices.IsSorted(all) {
+		t.Errorf("names(limit %d) = %d names (sorted %v), %v; want all %d, sorted", n+10, len(all), slices.IsSorted(all), err, n)
+	}
+}
+
+// TestWalk_ListsNoMoreThanTheCapAllows: the walker asks each listing for at
+// most one name past the entries the cap has left, so the cap bounds what a
+// listing holds in memory, not the largest directory.
+//
+// Mutation: pass a limit far past the cap (or ignore the limit in rootOps) and
+// the 20-entry directory is listed whole; drop readNames' final trim and
+// it is too.
+func TestWalk_ListsNoMoreThanTheCapAllows(t *testing.T) {
+	root := t.TempDir()
+	repo := mkrepo(t, root, "r")
+	// 20 names: more than the limit, fewer than the twice-the-limit point
+	// where readNames trims mid-read, so only its final trim bounds them.
+	for i := range 20 {
+		mkfile(t, repo, fmt.Sprintf("big/f%03d", i))
+	}
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	ops := rootOps(r)
+	names := ops.names
+	most := 0
+	ops.names = func(dir string, limit int, keep func(string) bool) ([]string, error) {
+		got, err := names(dir, limit, keep)
+		most = max(most, len(got))
+		return got, err
+	}
+	rep, err := scanWith(root, ops, Options{MaxEntries: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.Truncated || most > 11 {
+		t.Errorf("truncated=%v, largest listing %d names; want truncated and at most MaxEntries+1", rep.Truncated, most)
+	}
+}
+
+// TestWalk_MaxIntCapStillListsEverything: the walker's one-past-the-cap limit
+// saturates instead of wrapping, so a cap of math.MaxInt lists the tree
+// rather than listing nothing.
+//
+// Mutation: drop the saturation in walk and the +1 wraps negative, the root
+// lists no names, and the finding is missed.
+func TestWalk_MaxIntCapStillListsEverything(t *testing.T) {
+	root := t.TempDir()
+	repo := mkrepo(t, root, "r")
+	mkfile(t, repo, "AGENTS.md")
+	if r := scan(t, Options{Root: root, MaxEntries: math.MaxInt}); len(r.Findings) != 1 || r.Truncated {
+		t.Errorf("findings=%d truncated=%v, want 1/false", len(r.Findings), r.Truncated)
+	}
+}
+
+// TestWalk_CappedListingKeepsMainsPrefix is the #1013 review probe: a repo
+// holding AGENTS.md and 600 other files, scanned at MaxEntries=50, reports
+// the AGENTS.md finding, as it did when every directory was read whole. The
+// walk still visits a capped directory's names in sorted order, so a bounded
+// listing must hold the smallest names, not whichever the OS listed first.
+//
+// Mutation: make readNames stop at the first limit names it reads (the
+// pre-review shape) and the finding, and the repo, are lost.
+func TestWalk_CappedListingKeepsMainsPrefix(t *testing.T) {
+	root := t.TempDir()
+	repo := mkrepo(t, root, "r")
+	mkfile(t, repo, "AGENTS.md")
+	for i := range 600 {
+		mkfile(t, repo, fmt.Sprintf("f%03d", i))
+	}
+	r := scan(t, Options{Root: root, MaxEntries: 50})
+	if !r.Truncated || len(r.Findings) != 1 || r.Repos != 1 {
+		t.Errorf("truncated=%v findings=%d repos=%d, want true/1/1", r.Truncated, len(r.Findings), r.Repos)
 	}
 }

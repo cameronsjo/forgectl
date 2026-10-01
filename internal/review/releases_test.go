@@ -123,6 +123,36 @@ func TestParseRegistry_Unhappy(t *testing.T) {
 	}
 }
 
+// TestParseRegistry_ErrorsQuoteNoDocumentText: a YAML failure names its kind
+// and line and never the document's text. yaml.v3's own errors quote the
+// start of a value (cannot unmarshal !!str `SECRET...`) and anchor names,
+// so ParseRegistry does not pass them through (#1006).
+//
+// Mutation: return fmt.Errorf("parse registry: %w", err) at either yaml.v3
+// site and the SECRET rows go red; drop the line extraction and the line
+// rows do.
+func TestParseRegistry_ErrorsQuoteNoDocumentText(t *testing.T) {
+	cases := []struct {
+		name, raw, want string
+	}{
+		{"syntax", "version: 1\nrepos:\n  - repo: [unclosed SECRET\n", "parse registry: line 2: not valid YAML"},
+		{"bad escape", "version: 1\nrepos: \"SECRET\\qESC\"\n", "parse registry: line 2: not valid YAML"},
+		{"unknown anchor", "version: 1\nrepos: *SECRET\n", "parse registry: not valid YAML"},
+		{"wrong type", "version: SECRETVALUE\nrepos: []\n", "parse registry: line 1: a value has the wrong type"},
+		{"wrong types", "version: SECRET1\nrepos:\n  - repo: [SECRET2]\n", "parse registry: line 1: a value has the wrong type (and 1 more)"},
+	}
+	for _, c := range cases {
+		_, err := ParseRegistry([]byte(c.raw))
+		if err == nil {
+			t.Errorf("%s: accepted", c.name)
+			continue
+		}
+		if strings.Contains(err.Error(), "SECRET") || err.Error() != c.want {
+			t.Errorf("%s: err = %q, want %q", c.name, err, c.want)
+		}
+	}
+}
+
 func TestTagMatches(t *testing.T) {
 	cases := []struct {
 		pattern, tag string
