@@ -676,7 +676,8 @@ func TestBalanceDeep_Linear(t *testing.T) {
 			}
 		}
 	}
-	perftest.Linear(t, "balanceDeep", k, balance(n/k), balance(n))
+	small, large := perftest.Amortize(balance(n/k), balance(n))
+	perftest.Linear(t, "balanceDeep", k, small, large)
 }
 
 // straySVGSpellings is every SVG-only name the policy allows, in the three

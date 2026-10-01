@@ -803,9 +803,10 @@ func TestError_JoinOfManyOverlongPathsIsLinear(t *testing.T) {
 	_, small := joinOfOverlongPaths(n / k)
 	errs, err := joinOfOverlongPaths(n)
 	var got string
-	perftest.Linear(t, "Error of a Join of over-cap path errors", k,
+	smallRun, largeRun := perftest.Amortize(
 		func() { _ = Error(small).Error() },
 		func() { got = Error(err).Error() })
+	perftest.Linear(t, "Error of a Join of over-cap path errors", k, smallRun, largeRun)
 	for _, i := range []int{0, n / 2, n - 1} {
 		if !strings.Contains(got, Error(errs[i]).Error()) {
 			t.Errorf("error %d was not capped in the joined message", i)

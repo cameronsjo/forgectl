@@ -135,5 +135,6 @@ func TestSplitFrontmatter_OverCapSkipsTheDecode(t *testing.T) {
 			}
 		}
 	}
-	perftest.Within(t, "splitFrontmatter past the cap", 4, split(unterminated), split(overCap))
+	base, subject := perftest.Amortize(split(unterminated), split(overCap))
+	perftest.Within(t, "splitFrontmatter past the cap", 4, base, subject)
 }

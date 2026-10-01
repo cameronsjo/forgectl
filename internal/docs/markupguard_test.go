@@ -115,9 +115,10 @@ func TestMarkupGuard_RenderAndScanAreBounded(t *testing.T) {
 					}
 				}
 			}
-			perftest.Linear(t, "render and scan", k,
+			small, large := perftest.Amortize(
 				renderAndScan(guardTrigger(tc.pre, tc.unit, size/k), "small.md"),
 				renderAndScan(guardTrigger(tc.pre, tc.unit, size), "large.md"))
+			perftest.Linear(t, "render and scan", k, small, large)
 		})
 	}
 }
@@ -372,7 +373,8 @@ func TestMarkupGuard_ReprosAreBounded(t *testing.T) {
 	for name, src := range large {
 		for _, kind := range []RootKind{RootDocs, RootVault} {
 			t.Run(fmt.Sprintf("%s/kind %v", name, kind), func(t *testing.T) {
-				perftest.Linear(t, "render and scan", k, renderAndScan(t, small[name], kind), renderAndScan(t, src, kind))
+				smallRun, largeRun := perftest.Amortize(renderAndScan(t, small[name], kind), renderAndScan(t, src, kind))
+				perftest.Linear(t, "render and scan", k, smallRun, largeRun)
 			})
 		}
 	}
@@ -486,5 +488,6 @@ func TestScanDoc_GuardedDocIsTitleOnly(t *testing.T) {
 			}
 		}
 	}
-	perftest.Linear(t, "vaultLineTitle", k, title(256<<10/k), title(256<<10))
+	smallRun, largeRun := perftest.Amortize(title(256<<10/k), title(256<<10))
+	perftest.Linear(t, "vaultLineTitle", k, smallRun, largeRun)
 }

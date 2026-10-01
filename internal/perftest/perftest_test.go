@@ -47,20 +47,33 @@ func run(k int, small, large func()) *fakeTB {
 // sink keeps busy's loop from being optimized away.
 var sink uint64
 
-// busy spends CPU time in proportion to n.
-func busy(n int) func() {
+// busy spends d of the clock Linear times with: process CPU time where it
+// can be read, wall time where not. Spinning to a time rather than for an
+// iteration count keeps the self-tests above Floor on any host, fast or slow.
+func busy(d time.Duration) func() {
 	return func() {
+		cpuStart, cpuOK := cpuTime()
+		wallStart := time.Now()
 		x := sink
-		for range n {
-			x = x*6364136223846793005 + 1442695040888963407
+		for {
+			for range 1000 {
+				x = x*6364136223846793005 + 1442695040888963407
+			}
+			if cpuNow, ok := cpuTime(); cpuOK && ok {
+				if cpuNow-cpuStart >= d {
+					break
+				}
+			} else if time.Since(wallStart) >= d {
+				break
+			}
 		}
 		sink = x
 	}
 }
 
-// busyUnit is about a millisecond of busy work, so a small side is well
-// above timer resolution.
-const busyUnit = 1_000_000
+// busyUnit is twice Floor: far enough above it that the small side of every
+// self-test clears the floor, close enough that the self-tests stay quick.
+const busyUnit = 2 * Floor
 
 // TestLinear_RefusesSmallK: a k under 4 puts linear and quadratic too close
 // to tell apart, so Linear refuses it before timing anything.
@@ -95,13 +108,30 @@ func TestLinear_PassesLinearWork(t *testing.T) {
 }
 
 // TestLinear_FailsQuadraticWork: large doing k² times small's work fails.
+// The small side is busyUnit, twice Floor (forgectl#964: at a quarter of
+// that the test passed quadratic work on CI).
 // Mutation: comparing the ratio against k*k instead of k*k/2 turns this red
 // (the quadratic ratio sits at the limit and passes).
 func TestLinear_FailsQuadraticWork(t *testing.T) {
-	const k = 8
-	f := run(k, busy(busyUnit/4), busy(k*k*busyUnit/4))
+	const k = 6
+	f := run(k, busy(busyUnit), busy(k*k*busyUnit))
 	if len(f.errors) != 1 || !strings.Contains(f.errors[0], "want linear time") {
 		t.Errorf("errors = %q, want one ratio failure", f.errors)
+	}
+}
+
+// TestLinear_RefusesSmallSide: a small side under Floor is refused, not
+// judged, because a ratio on a sub-tick sample is noise (forgectl#964). The
+// large side is kept to the same size so only the floor can fail it.
+// Mutation: dropping the s < Floor check turns this red (a ratio error or
+// nothing at all is reported instead).
+func TestLinear_RefusesSmallSide(t *testing.T) {
+	f := run(8, busy(Floor/10), busy(8*Floor/10))
+	if len(f.fatals) != 1 || !strings.Contains(f.fatals[0], "floor") {
+		t.Errorf("fatals = %q, want one naming the floor", f.fatals)
+	}
+	if len(f.errors) != 0 {
+		t.Errorf("errors = %q, want none: the floor refuses before the ratio is judged", f.errors)
 	}
 }
 
@@ -151,6 +181,65 @@ func TestWithin_RefusesSmallLimit(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Errorf("base and subject ran %d times, want 0 after the refusal", calls)
+	}
+}
+
+// TestWithin_RefusesSmallBase: Within refuses a base under Floor as Linear
+// refuses a small side.
+// Mutation: dropping the b < Floor check turns this red.
+func TestWithin_RefusesSmallBase(t *testing.T) {
+	f := runWithin(4, busy(Floor/10), busy(Floor/10))
+	if len(f.fatals) != 1 || !strings.Contains(f.fatals[0], "floor") {
+		t.Errorf("fatals = %q, want one naming the floor", f.fatals)
+	}
+}
+
+// TestRepsFor: the count that brings the fastest of up to three runs to the
+// target, one when a run already gets there, and never past maxReps.
+// Mutations: using the last run instead of the fastest turns the first row
+// red; dropping the early return turns the second red (extra runs); dropping
+// the maxReps cap turns the third red.
+func TestRepsFor(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		runs     []time.Duration
+		wantReps int
+		wantRuns int
+	}{
+		{"fastest of three", []time.Duration{4 * time.Millisecond, 2 * time.Millisecond, 3 * time.Millisecond}, 5, 3},
+		{"already long enough", []time.Duration{10 * time.Millisecond, time.Millisecond}, 1, 1},
+		{"capped", []time.Duration{time.Nanosecond}, maxReps, 3},
+		{"zero-cost run", []time.Duration{0}, maxReps, 3},
+	} {
+		n := 0
+		measure := func(func()) (time.Duration, bool) {
+			d := tc.runs[min(n, len(tc.runs)-1)]
+			n++
+			return d, true
+		}
+		if got := repsFor(func() {}, 10*time.Millisecond, measure); got != tc.wantReps || n != tc.wantRuns {
+			t.Errorf("%s: reps %d after %d runs, want %d after %d", tc.name, got, n, tc.wantReps, tc.wantRuns)
+		}
+	}
+}
+
+// TestAmortize_RepeatsBothSidesAlike: a small side far under 2·Floor is
+// repeated until it clears it, and the large side runs the same number of
+// times per call, so the ratio is the one the test asked for.
+// Mutations: repeating only the small side turns the count check red;
+// returning small unrepeated turns the clock check red.
+func TestAmortize_RepeatsBothSidesAlike(t *testing.T) {
+	smallCalls, largeCalls := 0, 0
+	spin := busy(Floor / 10)
+	small, large := Amortize(func() { smallCalls++; spin() }, func() { largeCalls++; spin() })
+	smallCalls, largeCalls = 0, 0
+	d, _ := timed(small)
+	large()
+	if smallCalls < 2 || smallCalls != largeCalls {
+		t.Errorf("small ran %d times and large %d, want the same count of at least 2", smallCalls, largeCalls)
+	}
+	if d < Floor {
+		t.Errorf("amortized small side costs %v, want at least the %v floor", d, Floor)
 	}
 }
 
