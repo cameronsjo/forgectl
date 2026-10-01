@@ -32,6 +32,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 	"github.com/cameronsjo/forgectl/internal/pr"
 )
 
@@ -42,6 +43,7 @@ func prLocalFakeRunner() *exec.FakeRunner {
 	created := false
 	return &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			if name == "tmux" && len(args) > 0 {
 				switch args[0] {
 				case "list-sessions":
@@ -138,7 +140,7 @@ func TestPrLocalCmd_DryRun_ThreadsPositionalPathArg(t *testing.T) {
 	if !ok {
 		t.Fatal("expected at least one git rev-parse call")
 	}
-	if len(call.Args) < 2 || call.Args[1] != wantPath {
+	if args := gitenvtest.Strip(call.Args); len(args) < 2 || args[1] != wantPath {
 		t.Errorf("git -C arg = %v, want -C %q (the positional path, absolute-resolved)", call.Args, wantPath)
 	}
 }
@@ -413,6 +415,7 @@ func TestPrLocalCmd_CodexWithoutOperatorAuthored_RefusesBeforeReserving(t *testi
 func movingHeadRunner(oids []string) func(string, []string) (string, error) {
 	call := 0
 	return func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if name == "git" && len(args) >= 3 && args[2] == "rev-parse" {
 			for _, a := range args {
 				if a == "--abbrev-ref" {
@@ -483,6 +486,7 @@ func TestPrLocalCmd_PrepareFailureParksTheReservation(t *testing.T) {
 	reviewTempRoot(t)
 	ledger := newTmuxLedger("forgectl")
 	fake := ledger.runnerWith(func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if name == "git" && len(args) >= 3 && args[2] == "rev-parse" {
 			for _, a := range args {
 				if a == "--abbrev-ref" {

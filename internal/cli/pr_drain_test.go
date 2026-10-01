@@ -30,6 +30,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 	"github.com/cameronsjo/forgectl/internal/pr"
 )
 
@@ -40,6 +41,7 @@ func prDrainRunner(failOn map[int]error) *exec.FakeRunner {
 	created := false
 	call := 0
 	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		switch {
 		case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
 			return `{"headRefName":"feature","headRefOid":"abc123",` +

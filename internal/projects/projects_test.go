@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 )
 
@@ -44,6 +45,7 @@ func inventoryRunFunc(tmp string) func(string, []string) (string, error) {
 		"cameron\tnewgt\tsource\tssh://git@git.sjo.lol:222/cameron/newgt.git\n"
 
 	return func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		switch name {
 		case "gh":
 			// With no [projects].owners configured, the inventory asks
@@ -314,6 +316,7 @@ func TestClone_RejectsUnsafeHostOrOwner(t *testing.T) {
 // originGitea answers `git remote get-url origin` with the gitea homeclaw URL —
 // used to stand up an existing checkout at the collision path.
 func originGitea(name string, args []string) (string, error) {
+	args = gitenvtest.Strip(args)
 	if len(args) >= 5 && args[2] == "remote" && args[3] == "get-url" {
 		return "ssh://git@git.sjo.lol:222/cameron/homeclaw.git", nil
 	}
@@ -357,6 +360,7 @@ func TestClone_ExistingCanonicalDestWrongOriginErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if len(args) >= 5 && args[2] == "remote" && args[3] == "get-url" {
 			return "ssh://git@git.sjo.lol:222/cameron/somethingelse.git", nil
 		}
@@ -529,6 +533,7 @@ func TestInventory_StatusProcessBudget(t *testing.T) {
 			repo := filepath.Join(tmp, "forgectl")
 
 			fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				args = gitenvtest.Strip(args)
 				switch name {
 				case "gh":
 					if len(args) >= 2 && args[0] == "api" && args[1] == "user" {
@@ -608,6 +613,7 @@ func TestLocalRepos_NonRepo_SpawnsNoRemoteLookup(t *testing.T) {
 	}
 
 	for _, call := range fake.Calls {
+		call.Args = gitenvtest.Strip(call.Args)
 		if call.Name != "git" || len(call.Args) < 2 {
 			continue
 		}
@@ -642,6 +648,7 @@ func TestLocalRepos_SSHURLNeverCarriesAPassword(t *testing.T) {
 		tmp := t.TempDir()
 		mkGitDir(t, tmp, "r")
 		fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			if name == "git" && len(args) >= 5 && args[2] == "remote" && args[3] == "get-url" {
 				return tc.origin + "\n", nil
 			}
@@ -1216,6 +1223,7 @@ func TestClone_DuplicateAcrossLayoutsIsANoOp(t *testing.T) {
 				t.Fatal(err)
 			}
 			fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				args = gitenvtest.Strip(args)
 				if name == "git" && len(args) >= 4 && args[2] == "remote" {
 					return origin, nil
 				}
@@ -1264,6 +1272,7 @@ func TestClone_DifferentRepoAtOtherLayoutDoesNotSuppress(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if name == "git" && len(args) >= 4 && args[2] == "remote" {
 			return "git@github.com:someone-else/forgectl.git", nil
 		}
@@ -1428,6 +1437,7 @@ func TestClone_OverrideWingStillFindsTheConfiguredWing(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if name == "git" && len(args) >= 4 && args[2] == "remote" {
 			return "git@github.com:cameronsjo/forgectl.git", nil
 		}
@@ -1471,6 +1481,7 @@ func TestClone_ProbeDoesNotWalkUpToAnAncestorRepo(t *testing.T) {
 	// A runner that answers every `remote get-url` with the matching origin —
 	// i.e. the worst case, an ancestor repo that really is this repo.
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if name == "git" && len(args) >= 4 && args[2] == "remote" {
 			return "git@github.com:cameronsjo/forgectl.git", nil
 		}

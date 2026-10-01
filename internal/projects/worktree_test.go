@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 )
 
@@ -26,6 +27,7 @@ import (
 //     origin/<branch> -b <branch> fallback path.
 func worktreeRunFunc(headBranch string, failFirstAdd bool) func(string, []string) (string, error) {
 	return func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		joined := strings.Join(args, " ")
 		switch name {
 		case "gh":

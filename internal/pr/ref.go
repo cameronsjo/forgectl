@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -300,7 +301,7 @@ func (c *Client) resolveOrigin(ctx context.Context) (host, owner, repo string, e
 	// Every error below is categorical (#562). The origin URL can embed a
 	// credential (https://user:TOKEN@host/...), and the subprocess errors
 	// carry gh's and git's stderr verbatim, so none of that text is echoed.
-	url, gitErr := c.run.Run(ctx, "git", "remote", "get-url", "origin")
+	url, gitErr := gitenv.Run(ctx, c.run, gitenv.Local, "remote", "get-url", "origin")
 	if gitErr != nil {
 		return "", "", "", errors.New("could not resolve the origin repository: gh repo view failed and git has no readable origin remote")
 	}
