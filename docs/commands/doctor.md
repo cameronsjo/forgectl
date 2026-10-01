@@ -42,7 +42,7 @@ forgectl doctor --json \
 `jq -e` sets its exit status from the last output (`false` gives `1`). Note the
 pipe: the shell reports `jq`'s status, not `doctor`'s, which is what you want
 here. Check names are the ones in the `name` field of the output (`claude`,
-`config`, `log path`, `tmux`, `ghostty`, `cmux`, `mdroll`, `sops`, `gh`,
+`config`, `log path`, `tmux`, `ghostty`, `cmux`, `mdroll`, `sops`, `gitleaks`, `gh`,
 `hearth`, `chronicle`, `trust store`, `forgectl version`, and others); run
 `forgectl doctor --json | jq -r '.checks[].name'` to see the current list. A
 name that no check carries matches nothing, so the `all(...)` passes vacuously:

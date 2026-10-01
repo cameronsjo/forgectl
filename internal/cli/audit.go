@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	osexec "os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -19,15 +20,15 @@ import (
 
 // auditModule declares the read-only posture-scan extension (ADR-0005,
 // forgectl#14): no config section, no alias surface. `audit` is a pure
-// grouping parent so each scan is its own leaf with its own --json shape;
-// the secret-hygiene scan lands beside `injection` without changing it.
+// grouping parent so each scan is its own leaf with its own --json shape:
+// `injection` and `secrets`.
 var auditModule = module.Manifest{
 	Name: "audit",
 	Tier: module.TierExtension,
 	New:  newAuditCmd,
 }
 
-func newAuditCmd(module.Deps) *cobra.Command {
+func newAuditCmd(deps module.Deps) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "audit",
 		Short: "Read-only security posture scans across the projects root",
@@ -35,9 +36,12 @@ func newAuditCmd(module.Deps) *cobra.Command {
 projects root ($PROJECTS_DIR, else ~/Projects). Every scan is read-only.
 
   forgectl audit injection          list every agent-instruction carrier
-  forgectl audit injection --json   the same, machine-readable`,
+  forgectl audit injection --json   the same, machine-readable
+  forgectl audit secrets            stray .env files, private keys, gitleaks findings
+  forgectl audit secrets --json     the same, machine-readable`,
 	}
 	cmd.AddCommand(newAuditInjectionCmd(projects.ResolveRoot, time.Now))
+	cmd.AddCommand(newAuditSecretsCmd(auditSecretsDeps{resolveRoot: projects.ResolveRoot, runner: deps.Runner, lookPath: osexec.LookPath}))
 	return cmd
 }
 
