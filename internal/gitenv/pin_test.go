@@ -151,7 +151,10 @@ type finding struct {
 //     gitConstantAllowlist, so `name := "git"` ahead of a Run is caught
 //     where its use would not be;
 //   - a use of gitenv.Transport outside transportAllowlist, or over its
-//     count.
+//     count;
+//   - a git call under gitenv.Transport that does not refuse ext:: and fd::
+//     (gitenv.Run, RunBin or Command under it, or RunRefusing or
+//     RunBinRefusing whose list is not a literal naming both), #987.
 //
 // Mutations that turn it red: `c.run.Run(ctx, "git", "status")` anywhere in
 // internal/; `run.Run(ctx, gitBin, ...)` in projects' gitStatus;
@@ -230,6 +233,8 @@ func verdicts(all []finding) []string {
 			out = append(out, fmt.Sprintf("%s (%s) hands the git executable to another program, which runs it without internal/gitenv", f.pos, f.fn))
 		case "shell-script":
 			scripts[f.fn]++
+		case "unrefused-transport":
+			out = append(out, fmt.Sprintf("%s (%s) runs git under gitenv.Transport without refusing ext:: and fd::; call gitenv.RunRefusing or RunBinRefusing with []string{\"ext\", \"fd\"} (#987)", f.pos, f.fn))
 		}
 	}
 	check := func(kind string, counts map[string]int, allow map[string]struct {
@@ -286,6 +291,9 @@ func scan(fset *token.FileSet, pkgPath, rel string, files []*ast.File) []finding
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
 					return true
+				}
+				if unrefusedTransport(info, call) {
+					out = append(out, finding{pos: fset.Position(call.Pos()).String(), fn: fn, kind: "unrefused-transport"})
 				}
 				id := calleeIdent(call.Fun)
 				if id == nil {
@@ -355,6 +363,61 @@ func scan(fset *token.FileSet, pkgPath, rel string, files []*ast.File) []finding
 		}
 	}
 	return out
+}
+
+// transportProfileArg is, for each gitenv function that takes a Profile, the
+// index of the Profile argument and of the refused-transport list (-1 for
+// none).
+var transportProfileArg = map[string][2]int{
+	"Run":            {2, -1},
+	"RunBin":         {3, -1},
+	"Command":        {1, -1},
+	"RunRefusing":    {2, 3},
+	"RunBinRefusing": {3, 4},
+}
+
+// refusedTransports are the transports every Transport call refuses (#987):
+// ext:: runs a command the URL names and fd:: reads a descriptor it names.
+var refusedTransports = []string{"ext", "fd"}
+
+// unrefusedTransport reports whether call runs git under gitenv.Transport
+// without refusing every one of refusedTransports: gitenv.Run, RunBin or
+// Command under Transport, or RunRefusing or RunBinRefusing under Transport
+// whose list is not a literal naming them all. A remote, or a repository's
+// own config, can name an ext:: URL and allow it; only the refusal outranks
+// both.
+func unrefusedTransport(info *types.Info, call *ast.CallExpr) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pos, ok := transportProfileArg[sel.Sel.Name]
+	if !ok || !isGitenvSel(info, sel, sel.Sel.Name) || pos[0] >= len(call.Args) {
+		return false
+	}
+	profile, ok := call.Args[pos[0]].(*ast.SelectorExpr)
+	if !ok || !isGitenvTransport(info, profile) {
+		return false
+	}
+	if pos[1] < 0 || pos[1] >= len(call.Args) {
+		return true
+	}
+	lit, ok := call.Args[pos[1]].(*ast.CompositeLit)
+	if !ok {
+		return true
+	}
+	var named []string
+	for _, el := range lit.Elts {
+		if v, ok := constString(info, el); ok {
+			named = append(named, v)
+		}
+	}
+	for _, name := range refusedTransports {
+		if !slices.Contains(named, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // namesGit reports whether arg, an executable name, is git's: a constant
@@ -679,7 +742,9 @@ func productionDirs(root string) ([]string, error) {
 // constant in passesGit reset found (inSlice's gitenv.Bin is missed);
 // match only absolute paths (dotSlash); check spreads only in a shell
 // (sudoSpread); treat a constant slice literal as unreadable (fineFive is
-// flagged).
+// flagged). For #987's: make unrefusedTransport return false (transport,
+// refusesNone, refusesExtOnly, commandTransport go unflagged), or true
+// (refusesBoth is flagged).
 func TestPinFlagsEveryBypass(t *testing.T) {
 	src := `package p
 
@@ -705,6 +770,10 @@ func viaConst(ctx context.Context) { _ = exec.CommandContext(ctx, gitName, "stat
 func viaVar(ctx context.Context, r runner) { name := "git"; _, _ = r.Run(ctx, name) }
 func filtered(ctx context.Context, r runner) { _, _ = r.RunWithEnvFiltered(ctx, nil, nil, "git") }
 func transport(ctx context.Context, r runner) { _, _ = gitenv.Run(ctx, r, gitenv.Transport, "fetch") }
+func refusesBoth(ctx context.Context, r runner) { _, _ = gitenv.RunRefusing(ctx, r, gitenv.Transport, []string{"ext", "fd"}, "fetch") }
+func refusesNone(ctx context.Context, r runner) { _, _ = gitenv.RunBinRefusing(ctx, r, "/usr/bin/x", gitenv.Transport, nil, "fetch") }
+func refusesExtOnly(ctx context.Context, r runner) { _, _ = gitenv.RunRefusing(ctx, r, gitenv.Transport, []string{"ext"}, "fetch") }
+func commandTransport(ctx context.Context) { _ = gitenv.Command(ctx, gitenv.Transport, "fetch") }
 func fine(ctx context.Context, r runner) { _, _ = gitenv.Run(ctx, r, gitenv.Local, "status"); _, _ = r.Run(ctx, "gh", "repo") }
 func looked(ctx context.Context, r runner) { p, _ := exec.LookPath(gitenv.Bin); abs, _ := filepath.Abs(p); _, _ = r.Run(ctx, abs, "status") }
 func lookedVar(ctx context.Context, r runner) { var p, _ = exec.LookPath(gitenv.Bin); _, _ = r.RunWithEnvFiltered(ctx, nil, nil, p) }
@@ -741,20 +810,25 @@ func fineToo(ctx context.Context, r runner) { p, _ := exec.LookPath("tmux"); _, 
 		got[fd.fn] = append(got[fd.fn], fd.kind)
 	}
 	want := map[string][]string{
-		"p/p.go:const":      {"constant"},
-		"p/p.go:literal":    {"exec"},
-		"p/p.go:absolute":   {"exec"},
-		"p/p.go:pinned":     {"exec"},
-		"p/p.go:viaConst":   {"exec"},
-		"p/p.go:viaVar":     {"constant"},
-		"p/p.go:filtered":   {"exec"},
-		"p/p.go:transport":  {"transport"},
-		"p/p.go:looked":     {"exec"},
-		"p/p.go:lookedVar":  {"exec"},
-		"p/p.go:shell":      {"exec"},
-		"p/p.go:shellExe":   {"exec"},
-		"p/p.go:ghClone":    {"gh-git"},
-		"p/p.go:ghCheckout": {"gh-git"},
+		"p/p.go:const":     {"constant"},
+		"p/p.go:literal":   {"exec"},
+		"p/p.go:absolute":  {"exec"},
+		"p/p.go:pinned":    {"exec"},
+		"p/p.go:viaConst":  {"exec"},
+		"p/p.go:viaVar":    {"constant"},
+		"p/p.go:filtered":  {"exec"},
+		"p/p.go:transport": {"unrefused-transport", "transport"},
+		// #987: a Transport call that does not refuse ext:: and fd::.
+		"p/p.go:refusesBoth":      {"transport"},
+		"p/p.go:refusesNone":      {"unrefused-transport", "transport"},
+		"p/p.go:refusesExtOnly":   {"unrefused-transport", "transport"},
+		"p/p.go:commandTransport": {"unrefused-transport", "transport"},
+		"p/p.go:looked":           {"exec"},
+		"p/p.go:lookedVar":        {"exec"},
+		"p/p.go:shell":            {"exec"},
+		"p/p.go:shellExe":         {"exec"},
+		"p/p.go:ghClone":          {"gh-git"},
+		"p/p.go:ghCheckout":       {"gh-git"},
 		// #985 nit: the git executable handed to a wrapper, and a shell
 		// script the pin cannot read.
 		"p/p.go:envBin":       {"git-arg"},
@@ -784,6 +858,9 @@ func fineToo(ctx context.Context, r runner) { p, _ := exec.LookPath("tmux"); _, 
 	}
 	if msgs := verdicts([]finding{{pos: "x", fn: "p/p.go:transport", kind: "transport"}}); len(msgs) == 0 {
 		t.Error("an unlisted gitenv.Transport use produced no verdict")
+	}
+	if msgs := verdicts([]finding{{pos: "x", fn: "p/p.go:refusesNone", kind: "unrefused-transport"}}); len(msgs) == 0 {
+		t.Error("a Transport call that refuses neither ext:: nor fd:: produced no verdict")
 	}
 	if msgs := verdicts([]finding{{pos: "x", fn: "p/p.go:envBin", kind: "git-arg"}}); len(msgs) == 0 {
 		t.Error("the git executable handed to a wrapper produced no verdict")

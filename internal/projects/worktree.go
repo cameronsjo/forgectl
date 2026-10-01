@@ -106,7 +106,9 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 	if _, err := gitenv.Run(ctx, c.run, gitenv.Local, "-C", bareDir, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
 		return "", fmt.Errorf("configuring fetch refspec for %s: %w", termsafe.QuotePath(bareDir), termsafe.Error(err))
 	}
-	if _, err := gitenv.Run(ctx, c.run, gitenv.Transport, "-C", bareDir, "fetch", "origin"); err != nil {
+	// ext:: and fd:: stay refused, as at the clone: origin is the URL the
+	// repo list served (#987).
+	if _, err := gitenv.RunRefusing(ctx, c.run, gitenv.Transport, []string{"ext", "fd"}, "-C", bareDir, "fetch", "origin"); err != nil {
 		// Categorical (#658): git relays the remote's sideband ("remote: …")
 		// on stderr, which is server-chosen text.
 		slog.Error("Failed to fetch origin.", "dest", bareDir, "error", err)
@@ -146,7 +148,8 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 // the command fails, the line is absent, or the remote HEAD is "(unknown)" (a
 // bare repo just cloned from a non-standard or headless remote).
 func defaultBranch(ctx context.Context, run gitenv.Runner, bareDir string) string {
-	out, err := gitenv.Run(ctx, run, gitenv.Transport, "-C", bareDir, "remote", "show", "origin")
+	// ext:: and fd:: stay refused, as at the clone and the fetch (#987).
+	out, err := gitenv.RunRefusing(ctx, run, gitenv.Transport, []string{"ext", "fd"}, "-C", bareDir, "remote", "show", "origin")
 	if err == nil {
 		for _, line := range strings.Split(out, "\n") {
 			line = strings.TrimSpace(line)

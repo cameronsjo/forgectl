@@ -99,7 +99,9 @@
 // change that: core.fsmonitor=false, and the repository-locating variables
 // removed, so an exported GIT_DIR cannot redirect a push or a fetch into
 // another repository. Every Transport use in production is allowlisted with
-// its reason in the pin.
+// its reason in the pin, and goes through RunRefusing or RunBinRefusing
+// with ext and fd refused (#987): a served URL, or a repository's own config
+// that names an ext:: remote and allows it, would otherwise run a command.
 package gitenv
 
 import (
@@ -284,6 +286,12 @@ func Run(ctx context.Context, r Runner, p Profile, args ...string) (string, erro
 // so the result never allows a transport it did not. Local needs neither
 // step: its GIT_ALLOW_PROTOCOL is pinned empty, which refuses them all.
 func RunRefusing(ctx context.Context, r Runner, p Profile, refuse []string, args ...string) (string, error) {
+	return RunBinRefusing(ctx, r, Bin, p, refuse, args...)
+}
+
+// RunBinRefusing is RunRefusing with the git executable named, as RunBin is
+// Run's: internal/projects pulls through the absolute path it resolved.
+func RunBinRefusing(ctx context.Context, r Runner, bin string, p Profile, refuse []string, args ...string) (string, error) {
 	overrides, unset := filter(p, os.Environ())
 	if v, ok := os.LookupEnv(allowProtocolVar); ok && p == Transport {
 		if overrides == nil {
@@ -295,7 +303,7 @@ func RunRefusing(ctx context.Context, r Runner, p Profile, refuse []string, args
 	for _, name := range refuse {
 		pre = append(pre, "-c", "protocol."+name+".allow=never")
 	}
-	return r.RunWithEnvFiltered(ctx, overrides, unset, Bin, append(pre, args...)...)
+	return r.RunWithEnvFiltered(ctx, overrides, unset, bin, append(pre, args...)...)
 }
 
 // allowProtocolVar is git's transport allowlist variable.

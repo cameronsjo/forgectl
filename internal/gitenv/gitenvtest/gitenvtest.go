@@ -29,6 +29,28 @@ func RequireGit(t testing.TB) string {
 	return path
 }
 
+// OperatorAllowsExt points git at a global config that admits the ext::
+// transport, as an operator's own protocol.ext.allow=always would, and clears
+// the variables that would refuse or replace it before a call sees it. It
+// skips t when git is not on PATH.
+func OperatorAllowsExt(t testing.TB) {
+	t.Helper()
+	RequireGit(t)
+	for _, key := range []string{"GIT_ALLOW_PROTOCOL", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"} {
+		t.Setenv(key, "")
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(global, []byte("[protocol \"ext\"]\n\tallow = always\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("TMPDIR", t.TempDir())
+}
+
 // WithoutLazyFetchPin models a git older than 2.44, which ignores
 // GIT_NO_LAZY_FETCH: it puts first on PATH a git that removes that variable
 // and runs the real git. Every other pin reaches git unchanged, so
@@ -49,18 +71,62 @@ func WithoutLazyFetchPin(t testing.TB) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// Strip returns args without a leading gitenv profile's options, for a fake
-// Runner that answers on git's subcommand. args is returned unchanged when it
-// does not begin with one. That a call carries its profile is gitenv's tests'
-// and TestProductionGitGoesThroughGitenv's to prove, not every fake's.
+// Strip returns args without a leading gitenv profile's options, and
+// without the `-c protocol.<name>.allow=never` pairs gitenv.RunRefusing adds
+// after them, for a fake Runner that answers on git's subcommand. args is
+// returned unchanged when it does not begin with a profile's options. That a
+// call carries its profile and its refusals is gitenv's tests' and the
+// callers' own to prove, not every fake's.
 func Strip(args []string) []string {
+	rest, _ := split(args)
+	return rest
+}
+
+// Refuses reports whether args, as a fake Runner records them, carry
+// gitenv.RunRefusing's `-c protocol.<name>.allow=never` for every name in
+// names, between the profile's options and the call's own arguments.
+func Refuses(args []string, names ...string) bool {
+	_, refused := split(args)
+	for _, name := range names {
+		if !slices.Contains(refused, name) {
+			return false
+		}
+	}
+	return true
+}
+
+// split returns args without a leading profile's options and the refusals
+// after them, and the names those refusals refuse. args is returned
+// unchanged when it does not begin with a profile's options.
+func split(args []string) ([]string, []string) {
 	for _, p := range []gitenv.Profile{gitenv.Local, gitenv.Transport} {
 		prefix := gitenv.Args(p)
 		if len(args) >= len(prefix) && slices.Equal(args[:len(prefix)], prefix) {
-			return args[len(prefix):]
+			rest := args[len(prefix):]
+			var refused []string
+			for len(rest) >= 2 && rest[0] == "-c" {
+				name, ok := refusal(rest[1])
+				if !ok {
+					break
+				}
+				refused = append(refused, name)
+				rest = rest[2:]
+			}
+			return rest, refused
 		}
 	}
-	return args
+	return args, nil
+}
+
+// refusal returns the transport a `protocol.<name>.allow=never` option, as
+// gitenv.RunRefusing adds for each transport it refuses, names.
+func refusal(v string) (string, bool) {
+	name, ok := strings.CutPrefix(v, "protocol.")
+	if !ok {
+		return "", false
+	}
+	name, ok = strings.CutSuffix(name, ".allow=never")
+	return name, ok && name != "" && !strings.ContainsAny(name, ".=")
 }
 
 // FilterListing reports whether args, a git argv as a fake Runner records it,

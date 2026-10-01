@@ -326,7 +326,10 @@ func (c *Client) deleteLocal(ctx context.Context, info Info) error {
 // server-side via the SINGULAR ref endpoint — gotcha #4.
 func (c *Client) deleteRemote(ctx context.Context, remoteName string, info Info) error {
 	slog.Debug("Preparing to delete remote branch.", "remote", remoteName, "branch", info.Name)
-	if _, err := gitenv.Run(ctx, c.run, gitenv.Transport, "push", remoteName, "--delete", "--", info.Name); err != nil {
+	// The repository's config may name an ext:: or fd:: remote and allow
+	// it; refuse both, as every Transport call that reaches a remote does
+	// (#987).
+	if _, err := gitenv.RunRefusing(ctx, c.run, gitenv.Transport, []string{"ext", "fd"}, "push", remoteName, "--delete", "--", info.Name); err != nil {
 		slog.Error("Failed to delete remote branch.", "remote", remoteName, "branch", info.Name, "error", err)
 		// Categorical cause (#658): git relays the remote's sideband
 		// ("remote: …") on stderr, which is server-chosen text.
