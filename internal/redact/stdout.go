@@ -38,7 +38,9 @@ import (
 //     (--password abc), as Text does; a JSON "NAME": value (or Python's
 //     'NAME': value) anywhere in the line, and a YAML NAME: value, a TOML
 //     NAME = value or a Go NAME := value as the line's key (#974, #983),
-//     unless the value is empty (keyValueCarries); and the lines after a
+//     the last two after a const, var, let or export keyword too, and a
+//     NAME: value inside a YAML flow mapping ({password: x}, flowKeyIn,
+//     #996), unless the value is empty (keyValueCarries); and the lines after a
 //     YAML NAME: whose value starts on the next line (password: |), while
 //     they are indented past it (pemScan.inValue, #983); and the lines after
 //     a credential key whose value opens a string the key line does not
@@ -49,9 +51,10 @@ import (
 //     block with no END is withheld to the end of the text. An empty line
 //     inside one carries nothing and stays empty.
 //
-// A line holding an ANSI escape is checked as it is and again with its CSI
-// and OSC sequences stripped (stripEscapes), so a token split by a color code
-// or an OSC 8 hyperlink is seen the way a terminal shows it (#974, #983).
+// A line holding an ANSI escape is checked as it is and again with its
+// escape sequences stripped (stripEscapes), so a token split by a color code
+// or an OSC 8 hyperlink is seen the way a terminal shows it (#974, #983,
+// #996).
 //
 // Stdout makes exemptions Text does not, for false positives on output
 // that is the deliverable (#974, #983, pemScan.deliverable):
@@ -150,8 +153,9 @@ var stdoutJWT = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{7,}\.[A-Za-z0-9_-]{4,}\.`
 var stdoutHeaders = []string{"authorization", "private-token", "x-api-key", "cookie"}
 
 // stdoutShape reports whether line holds one of Stdout's single-line shapes,
-// as it is or, when it holds an ESC, with its CSI and OSC sequences stripped
-// (a token split by a color code or an OSC 8 hyperlink). Both are checked,
+// as it is or, when it holds an ESC, with its escape sequences stripped (a
+// token split by a color code or an OSC 8 hyperlink) and again with each
+// replaced by a space ahead of its final byte (escapesOut). All are checked,
 // so stripping can only add a match. deliverable makes Stdout's exemptions
 // (pemScan.deliverable).
 func stdoutShape(line string, deliverable bool) bool {
@@ -161,14 +165,15 @@ func stdoutShape(line string, deliverable bool) bool {
 	if strings.IndexByte(line, 0x1b) < 0 {
 		return false
 	}
-	return lineShape(stripEscapes(line), deliverable)
+	return lineShape(stripEscapes(line), deliverable) || lineShape(escapesOut(line, true), deliverable)
 }
 
 // lineShape reports whether line holds one of Stdout's single-line shapes.
 // Each check is linear in line: RE2 is, headerIn, jsonKeyIn and
 // credentialAssignment scan back no further than the previous ':' or '=',
 // and forward over a bounded value or a run the next check does not re-read;
-// yamlKey, assignKey, flagValueIn and withoutDigestRefs read the line once;
+// yamlKey, assignKey, flagValueIn and withoutDigestRefs read the line once,
+// and flowKeyIn once bar its bounded scans back and its disjoint values;
 // and the word-start scan reads at most a fixed number of bytes at each
 // position (runAtLeast), bar a scheme word's whitespace and run, which end
 // before the next scheme word starts.
@@ -176,7 +181,8 @@ func lineShape(line string, deliverable bool) bool {
 	// Every URL, header and key shape holds a ':'.
 	if colon := strings.IndexByte(line, ':'); colon >= 0 {
 		if userinfoIn(line, deliverable) ||
-			headerIn(line, colon, deliverable) || jsonKeyIn(line, colon, deliverable) || yamlKey(line, deliverable) {
+			headerIn(line, colon, deliverable) || jsonKeyIn(line, colon, deliverable) || yamlKey(line, deliverable) ||
+			strings.IndexByte(line, '{') >= 0 && flowKeyIn(line, deliverable) {
 			return true
 		}
 	}
@@ -264,42 +270,77 @@ func digestRef(w string) bool {
 	return true
 }
 
-// stripEscapes returns line without its ANSI CSI sequences (ESC '[',
-// parameter bytes 0x30-0x3f, intermediate bytes 0x20-0x2f and one final byte
-// 0x40-0x7e; SGR color codes are the common case) and its OSC sequences (ESC
-// ']' through BEL or ESC '\'; an OSC 8 hyperlink is the common case, #983). An
-// ESC that starts no complete sequence is kept. Once an OSC finds no
-// terminator, none after it can, so the search for one runs at most once
-// past each byte and the cost stays linear.
-func stripEscapes(line string) string {
+// stripEscapes returns line without its ANSI escape sequences, so a token
+// split by one is seen whole (#974, #983, #996): CSI (ESC '[', parameter
+// bytes 0x30-0x3f, intermediate bytes 0x20-0x2f and one final byte
+// 0x40-0x7e; SGR color codes are the common case); the strings OSC (ESC ']',
+// an OSC 8 hyperlink is the common case), DCS (ESC 'P'), SOS (ESC 'X'), PM
+// (ESC '^') and APC (ESC '_'), each through BEL or ESC '\'; and every other
+// escape, ESC then intermediate bytes 0x20-0x2f and one final byte 0x30-0x7e
+// (tput sgr0's ESC '(' 'B', ESC '7', ESC '#' '8'). An ESC that starts no
+// complete sequence is kept. Once a string finds no terminator, none after
+// it can, so the search for one runs at most once past each byte and the
+// cost stays linear.
+func stripEscapes(line string) string { return escapesOut(line, false) }
+
+// escapesOut is stripEscapes; with keepFinal, each CSI or other escape
+// sequence is replaced by a space and its final byte kept, and each string
+// by a space. That is how the text reads when a crafted CSI's final byte is
+// a token's first letter (ESC '[' '1' then ghp_…: the terminal shows hp_…,
+// and the bytes written down still hold ghp_…, #996), which neither the
+// line as it is (the '1' runs into the 'g') nor stripEscapes (the 'g' is
+// gone) shows as a token at a word start.
+func escapesOut(line string, keepFinal bool) string {
 	var b strings.Builder
 	b.Grow(len(line))
-	oscMayEnd := true
+	stringMayEnd := true
 	for i := 0; i < len(line); {
 		if line[i] != 0x1b || i+1 >= len(line) {
 			b.WriteByte(line[i])
 			i++
 			continue
 		}
+		end, str := -1, false
 		switch line[i+1] {
 		case '[':
-			if end := csiEnd(line, i+2); end >= 0 {
-				i = end
-				continue
-			}
-		case ']':
-			if oscMayEnd {
-				if end := oscEnd(line, i+2); end >= 0 {
-					i = end
-					continue
+			end = csiEnd(line, i+2)
+		case ']', 'P', 'X', '^', '_':
+			str = true
+			if stringMayEnd {
+				if end = oscEnd(line, i+2); end < 0 {
+					stringMayEnd = false
 				}
-				oscMayEnd = false
+			}
+		default:
+			end = escEnd(line, i+1)
+		}
+		if end < 0 {
+			b.WriteByte(line[i])
+			i++
+			continue
+		}
+		if keepFinal {
+			b.WriteByte(' ')
+			if !str {
+				end-- // the final byte is written as text next
 			}
 		}
-		b.WriteByte(line[i])
-		i++
+		i = end
 	}
 	return b.String()
+}
+
+// escEnd returns the index just past the final byte of an escape sequence
+// whose intermediate bytes start at from, or -1 when none completes it.
+func escEnd(line string, from int) int {
+	j := from
+	for j < len(line) && line[j] >= 0x20 && line[j] <= 0x2f {
+		j++
+	}
+	if j >= len(line) || line[j] < 0x30 || line[j] > 0x7e {
+		return -1
+	}
+	return j + 1
 }
 
 // csiEnd returns the index just past the final byte of a CSI sequence whose
@@ -412,6 +453,58 @@ func jsonKeyIn(line string, from int, deliverable bool) bool {
 		}
 		v, short := shortJSONValue(line[i+1:])
 		if !short || keyValueCarries(v, deliverable) {
+			return true
+		}
+	}
+	return false
+}
+
+// flowKeyIn reports whether line holds a YAML flow mapping entry whose key
+// reads as a credential and whose value carries something (keyValueCarries):
+// config: {password: hunter2, user: me}, - {token: x} (#996). The key is a
+// run of name bytes right before a ':', inside a '{' the line has not closed,
+// with only blanks between it and the '{' or ',' before it; the value runs
+// from the ':' to the next ',' or '}'. A quoted key is jsonKeyIn's. Each scan
+// back stops at the byte before the key. A value ends at the ',' the next
+// key at its depth needs, and one that runs past a nested key's '{' holds
+// that '{', so it carries and the scan returns: the values read are disjoint
+// and the cost is linear in line.
+func flowKeyIn(line string, deliverable bool) bool {
+	depth := 0
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '{':
+			depth++
+			continue
+		case '}':
+			depth = max(depth-1, 0)
+			continue
+		case ':':
+		default:
+			continue
+		}
+		if depth == 0 {
+			continue
+		}
+		j := i
+		for j > 0 && isNameByte(line[j-1]) {
+			j--
+		}
+		if j == i {
+			continue
+		}
+		k := j
+		for k > 0 && (line[k-1] == ' ' || line[k-1] == '\t') {
+			k--
+		}
+		if k == 0 || line[k-1] != '{' && line[k-1] != ',' || !keyNameCarries(line[j:i], deliverable) {
+			continue
+		}
+		end := i + 1
+		for end < len(line) && line[end] != ',' && line[end] != '}' {
+			end++
+		}
+		if keyValueCarries(strings.Trim(line[i+1:end], " \t\r"), deliverable) {
 			return true
 		}
 	}
@@ -552,8 +645,10 @@ func openerValue(v string) string {
 // assignKey reports whether line is an assignment, as the line's key, whose
 // name reads as a credential and whose value carries something
 // (keyValueCarries): TOML's password = "x" and token = '…', and Go's
-// token := "abc" (#983). The name is name bytes, optionally quoted, after the
-// line's indentation; then ":=", or '=' (not "==") with blanks or a closing
+// token := "abc" (#983), and each after a declaration keyword (const
+// token = "x", #996). The name is name bytes, optionally quoted, after the
+// line's indentation and any declaration keyword (assignEntry); then ":=",
+// or '=' (not "==") with blanks or a closing
 // quote before it or a blank after it (password= "x"), since a bare
 // NAME=value is credentialAssignment's, with its own exemptions. It reads
 // line once.
@@ -566,9 +661,18 @@ func assignKey(line string, deliverable bool) bool {
 }
 
 // assignEntry parses line as assignKey's assignment and returns its name and
-// its value with the leading blanks trimmed. It reads line once.
+// its value with the leading blanks trimmed. The name may follow a
+// declaration: export, then const, var or let, each with blanks after it
+// (const token = "x", export const apiKey = "x", #996). It reads line once.
 func assignEntry(line string) (name, value string, ok bool) {
 	s := strings.TrimLeft(line, " \t")
+	s = cutKeyword(s, "export")
+	for _, kw := range declKeywords {
+		if rest := cutKeyword(s, kw); len(rest) < len(s) {
+			s = rest
+			break
+		}
+	}
 	quote := byte(0)
 	if s != "" && (s[0] == '"' || s[0] == '\'') {
 		quote, s = s[0], s[1:]
@@ -598,6 +702,20 @@ func assignEntry(line string) (name, value string, ok bool) {
 		return "", "", false
 	}
 	return name, strings.TrimLeft(op, " \t"), true
+}
+
+// declKeywords are the Go and JavaScript declaration keywords assignEntry
+// reads past before a name.
+var declKeywords = []string{"const", "var", "let"}
+
+// cutKeyword returns s without a leading kw and the blanks after it, or s as
+// it is when kw is not followed by a blank (constant is no const).
+func cutKeyword(s, kw string) string {
+	rest, ok := strings.CutPrefix(s, kw)
+	if !ok || rest == "" || rest[0] != ' ' && rest[0] != '\t' {
+		return s
+	}
+	return strings.TrimLeft(rest, " \t")
 }
 
 // stringOpener reports whether line is a credential key whose value opens a

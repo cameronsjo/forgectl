@@ -121,6 +121,17 @@ var stdoutKept = []string{
 	"ghcr.io/o/app:v1@sha256:" + strings.Repeat("0f", 32),
 	"Digest: sha256:" + strings.Repeat("0f", 32),
 	"Status: Downloaded newer image for node:22",
+	// #996: a flow mapping with no credential key or an empty value, a
+	// credential key after a ',' outside any '{', a word that only starts
+	// like a declaration keyword, and escapes around plain text.
+	"config: {user: me, region: us-east-1}",
+	"{password: null, user: me}",
+	"- {token: '', name: x}",
+	"ran {job}, password: incorrect",
+	"constant token = abc",
+	"constkey = abc",
+	"\x1b(B\x1b[mplain text\x1b7 and \x1b#8more",
+	"\x1bPq#0;2\x1b\\done",
 }
 
 // stdoutWithheld are lines Stdout must withhold, one per shape, each carrying
@@ -279,6 +290,31 @@ var stdoutWithheld = []string{
 	// told from user:pass, so it is withheld.
 	"user:SEKRIT@sha256:" + strings.Repeat("0f", 32),
 	"node:22@sha256:" + strings.Repeat("0f", 32),
+	// #996 item 1: a credential key inside a YAML flow mapping, first,
+	// after a ',', nested, in a sequence entry, with no blank after ':'.
+	"config: {password: SEKRIT, user: me}",
+	"config: {user: me, api_key: SEKRIT}",
+	"outer: {inner: {token: SEKRIT}}",
+	"- {secret: SEKRIT}",
+	"{password:SEKRIT}",
+	// #996 item 2: a token straight after a non-CSI/OSC escape (tput sgr0's
+	// ESC ( B, an Fp ESC 7, an nF ESC # 8), one split by a DCS or APC
+	// string or an nF escape, and one whose first letter a crafted CSI's
+	// final byte takes.
+	"\x1b(B\x1b[mghp_" + strings.Repeat("A1", 18),
+	"\x1b7ghp_" + strings.Repeat("A1", 18),
+	"\x1b#8ghp_" + strings.Repeat("A1", 18),
+	"ghp_" + strings.Repeat("A", 18) + "\x1bPq#0\x1b\\" + strings.Repeat("A", 18),
+	"ghp_" + strings.Repeat("A", 18) + "\x1b_x\a" + strings.Repeat("A", 18),
+	"ghp_" + strings.Repeat("A", 18) + "\x1b(B" + strings.Repeat("A", 18),
+	"\x1b[1ghp_" + strings.Repeat("A1", 18),
+	// #996 item 3: a declaration keyword before the assignment.
+	`const token = "SEKRIT"`,
+	`var password = "SEKRIT"`,
+	"let secret = SEKRIT",
+	`export const apiKey = "SEKRIT"`,
+	"  export token = SEKRIT",
+	"\tvar\tpassword := SEKRIT",
 }
 
 // TestStdout: every stdoutKept line survives, every stdoutWithheld line reads
@@ -331,6 +367,18 @@ var stdoutWithheld = []string{
 // (PASSWORD=ok horse battery shows) or isCount any digit count
 // (pass=1234 fail=0 shows); drop headerIn's textEnd bound (Cookie: none;
 // sid=SEKRIT shows); drop the diffstat anchors (the src/app.go row shows).
+//
+// For #996: drop flowKeyIn (the flow-mapping rows show), its depth check
+// (ran {job}, password: incorrect is withheld), its ',' before a key (the
+// api_key-after-user row shows) or its keyValueCarries check ({password:
+// null, …} is withheld), or read keys without Stdout's descriptor exemption
+// ({token_type: bearer} is withheld); drop the declaration keywords (the
+// const/var/let rows show) or the export one (export const apiKey shows),
+// or the blank required after one (constkey = abc is withheld); drop
+// escEnd (tput sgr0's ESC ( B row shows) or its intermediate bytes (the
+// same), the DCS/SOS/PM/APC string arm (the DCS- and APC-split rows show),
+// or escapesOut's keep-final pass or its kept final byte (the crafted
+// ESC [ 1 g row shows).
 func TestStdout(t *testing.T) {
 	for _, line := range stdoutKept {
 		if got := Stdout(line); got != line {
@@ -505,6 +553,9 @@ var stdoutExempt = []string{
 	"credentials: ~/.aws/credentials",
 	"use --token to pass it",
 	"docker.io/library/node:22@sha256:" + strings.Repeat("0f", 32),
+	// #996: a descriptor key in a flow mapping and after a declaration.
+	"{token_type: bearer}",
+	`const tokenType = "bearer"`,
 }
 
 // TestText_KeepsWithholdingStdoutExemptions: Stdout's exemptions for
@@ -813,6 +864,23 @@ func adversarialStdout(n int) []string {
 		// #992: digest words with a repository path, and one long name.
 		strings.Repeat("r/a:1@sha256:"+strings.Repeat("0f", 32)+" ", n/78),
 		"a:1" + strings.Repeat("x", n) + "/b@sha256:" + strings.Repeat("0f", 32),
+		// #996: nested and long flow mappings, a run of keys with no value,
+		// non-CSI/OSC escapes and unterminated DCS and APC strings, crafted
+		// CSI finals, and runs of declaration keywords and blanks.
+		strings.Repeat("{password: ", n/11),
+		"{" + strings.Repeat("password: x,", n/12),
+		"{" + strings.Repeat("a: ", n/3),
+		"{" + strings.Repeat(" ", n) + "token:",
+		strings.Repeat("}{", n/2) + "a:",
+		strings.Repeat("\x1b(", n/2),
+		strings.Repeat("\x1b(B", n/3),
+		"\x1b" + strings.Repeat(" ", n),
+		strings.Repeat("\x1bP", n/2),
+		"\x1b_" + strings.Repeat("a", n),
+		strings.Repeat("\x1b[1g", n/4) + "x",
+		strings.Repeat("export ", n/7),
+		"const" + strings.Repeat(" ", n) + "token = x",
+		"export" + strings.Repeat("\t", n) + "let token = x",
 	}
 }
 
