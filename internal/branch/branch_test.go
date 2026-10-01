@@ -371,10 +371,18 @@ func TestPrune_WorktreeRemovedBeforeLocalBranchDelete(t *testing.T) {
 		t.Fatalf("expected a successful delete, got %+v", results)
 	}
 
-	if len(fake.Calls) != 2 {
-		t.Fatalf("expected exactly 2 Runner calls (worktree remove, branch -D), got %d: %+v", len(fake.Calls), fake.Calls)
+	// RunUnfiltered's filter-driver and submodule listings (#977) precede
+	// the remove; the order under test is between the two calls Prune makes.
+	var calls []exec.Call
+	for _, c := range fake.Calls {
+		if !gitenvtest.FilterListing(c.Args) {
+			calls = append(calls, c)
+		}
 	}
-	first, second := fake.Calls[0], fake.Calls[1]
+	if len(calls) != 2 {
+		t.Fatalf("expected exactly 2 Runner calls besides the listings (worktree remove, branch -D), got %d: %+v", len(calls), fake.Calls)
+	}
+	first, second := calls[0], calls[1]
 	first.Args, second.Args = gitenvtest.Strip(first.Args), gitenvtest.Strip(second.Args)
 	if first.Name != "git" || first.Args[0] != "worktree" || first.Args[1] != "remove" {
 		t.Errorf("call[0] = %+v, want `git worktree remove`", first)

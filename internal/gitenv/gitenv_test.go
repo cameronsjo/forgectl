@@ -1,6 +1,7 @@
 package gitenv
 
 import (
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -176,5 +177,45 @@ func TestEnvScrubIgnoresCaseWhereTheOSDoes(t *testing.T) {
 	caseInsensitiveEnv = false
 	if got := Env(Local, in); !slices.Contains(got, `git_dir=C:\o\.git`) {
 		t.Errorf("Env(Local) on a case-sensitive OS dropped git_dir, another variable: %v", got)
+	}
+}
+
+// RunRefusing drops the refused names from an inherited GIT_ALLOW_PROTOCOL
+// under Transport, keeping the operator's others in order, and adds no
+// variable when none is inherited. Local's empty pin stays as it is.
+// Mutations: pass the inherited value through (ext and fd stay); drop the
+// variable (https:file are lost, and so is the operator's narrowing);
+// apply it under Local too (the empty pin is replaced).
+func TestRunRefusingKeepsTheOperatorsOtherTransports(t *testing.T) {
+	refuse := []string{"ext", "fd"}
+	run := func(p Profile) exec.Call {
+		t.Helper()
+		f := &exec.FakeRunner{}
+		if _, err := RunRefusing(t.Context(), f, p, refuse, "clone", "--", "u", "d"); err != nil {
+			t.Fatal(err)
+		}
+		return f.Calls[0]
+	}
+	t.Setenv("GIT_ALLOW_PROTOCOL", "ext:https:fd:file:ext")
+	got := run(Transport)
+	if v, ok := got.Env["GIT_ALLOW_PROTOCOL"]; !ok || v != "https:file" {
+		t.Errorf("Transport GIT_ALLOW_PROTOCOL = %q (set %v), want https:file", v, ok)
+	}
+	want := append(Args(Transport), "-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never", "clone", "--", "u", "d")
+	if !slices.Equal(got.Args, want) {
+		t.Errorf("argv = %v, want %v", got.Args, want)
+	}
+	if v := run(Local).Env["GIT_ALLOW_PROTOCOL"]; v != "" {
+		t.Errorf("Local GIT_ALLOW_PROTOCOL = %q, want the empty pin", v)
+	}
+	t.Setenv("GIT_ALLOW_PROTOCOL", "ext")
+	if v, ok := run(Transport).Env["GIT_ALLOW_PROTOCOL"]; !ok || v != "" {
+		t.Errorf("an inherited list naming only ext became %q (set %v), want set and empty", v, ok)
+	}
+	if err := os.Unsetenv("GIT_ALLOW_PROTOCOL"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := run(Transport).Env["GIT_ALLOW_PROTOCOL"]; ok {
+		t.Error("RunRefusing set GIT_ALLOW_PROTOCOL where none was inherited")
 	}
 }
