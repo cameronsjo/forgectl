@@ -5,6 +5,7 @@ package projects
 import (
 	"context"
 	osexec "os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -82,4 +83,27 @@ func TestGitStatusOfAFIFOHeadIsUnknownAtOnce(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the projects status probe did not return: git is blocked on the FIFO HEAD")
 	}
+}
+
+// Review of #1008: the inventory leaves a repository whose HEAD is a FIFO
+// unattributed at once, rather than waiting out the 30-second deadline on
+// its `remote get-url`, and originMatches refuses one without asking git.
+// Mutation: drop the gitenv.Blocks check in localRepos or in originMatches:
+// a get-url runs.
+func TestInventorySkipsTheOriginLookupOfARepoGitBlocksOn(t *testing.T) {
+	dir := gitenvtest.FIFOHeadRepo(t)
+	root := filepath.Dir(dir)
+	r := &deadlineRunner{FakeRunner: &exec.FakeRunner{RunFunc: gitenvtest.NoFilters(func(string, []string) (string, error) { return "", nil })}}
+	c := newWithRoot(r, func() (string, error) { return root, nil })
+	repos, err := c.localRepos(context.Background())
+	if err != nil {
+		t.Fatalf("localRepos: %v", err)
+	}
+	if len(repos) != 1 || repos[0].Status.State != StatusUnknown {
+		t.Errorf("repos = %+v, want the one repository, %q", repos, StatusUnknown)
+	}
+	if c.originMatches(context.Background(), dir, Repo{Host: "github.com", Owner: "o", Name: "n"}) {
+		t.Error("originMatches matched a repository git blocks on")
+	}
+	r.assertBounded(t, 0)
 }

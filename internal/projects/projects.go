@@ -569,7 +569,9 @@ func (c *Client) localRepos(ctx context.Context) ([]Repo, error) {
 		// A non-repo has no origin of its own — `git -C` walks up to find one,
 		// which would misattribute it to an ancestor repo's origin (and then
 		// dedup it away). Skip the spawn entirely for that case.
-		if p.Status.State != StatusNotRepo {
+		// A repository git would block on (a FIFO HEAD) is left
+		// unattributed at once rather than after the deadline (#1005).
+		if p.Status.State != StatusNotRepo && !gitenv.Blocks(p.Dir) {
 			// Bounded (#1005): a FIFO HEAD blocks get-url as it does status.
 			bctx, cancel := gitenv.Bounded(ctx)
 			url, err := gitenv.Run(bctx, c.run, gitenv.Local, "-C", p.Dir, "remote", "get-url", "origin")
@@ -977,7 +979,11 @@ func (c *Client) otherPlacements(r Repo, dest string) []string {
 // repo from a different host.
 func (c *Client) originMatches(ctx context.Context, dir string, r Repo) bool {
 	// Bounded (#1005): dir may be any checkout already at the placement, and
-	// a FIFO HEAD there blocks get-url for good.
+	// a FIFO HEAD there blocks get-url for good; one Blocks sees is refused
+	// at once.
+	if gitenv.Blocks(dir) {
+		return false
+	}
 	ctx, cancel := gitenv.Bounded(ctx)
 	defer cancel()
 	url, err := gitenv.Run(ctx, c.run, gitenv.Local, "-C", dir, "remote", "get-url", "origin")

@@ -368,13 +368,19 @@ const maxSubmoduleDepth = 32
 const maxUnfilteredRepos = 256
 
 // repoDeadline bounds one RunUnfiltered call, its listings included, and
-// each call made under Bounded (#1005). git itself blocks for good on a repository whose HEAD, or a loose
-// ref it reads, is a FIFO: plain `git status` hangs there (measured on git
-// 2.43), and so do the listings. 30 seconds is an order of magnitude above a
-// status of a large working tree on a cold cache, which takes seconds, so a
-// real repository never meets it, while a planted one costs one bounded
-// wait per repository rather than a hung command. It is a variable only so
-// a test can shorten it.
+// each call made under Bounded (#1005). git itself blocks for good on a
+// repository whose HEAD, or a loose ref it reads, is a FIFO: plain `git
+// status` hangs there (measured on git 2.43), and so do the listings. 30
+// seconds is an order of magnitude above a status of a large working tree on
+// a cold cache, which takes seconds, so a real repository never meets it,
+// while a planted one costs one bounded wait per repository rather than a
+// hung command.
+//
+// branch prune's `worktree remove` runs under it too, the deletion as well
+// as its dirty check. Meeting the deadline there is safe: the remove is
+// killed part way, prune keeps the branch (it deletes the branch only after
+// a remove that succeeded), and a re-run finishes the remove. It is a
+// variable only so a test can shorten it.
 var repoDeadline = 30 * time.Second
 
 // Bounded returns ctx bounded by repoDeadline, under which each git a
@@ -382,9 +388,20 @@ var repoDeadline = 30 * time.Second
 // whole. It is for a non-interactive Local call in a repository forgectl
 // did not make, where a FIFO HEAD or ref would block git for good: the
 // projects inventory's `remote get-url`, for one. The caller defers cancel.
+//
+// A git in its own group no longer gets the terminal's Ctrl-C, which goes
+// to the foreground group only, so Bounded passes it on (interruptible): a
+// terminating signal that reaches forgectl while the context is live
+// cancels it, which kills the git's group, and cancel then re-raises the
+// signal, so forgectl stops as it did when git shared its group rather
+// than carrying on to the next repository.
 func Bounded(ctx context.Context) (context.Context, context.CancelFunc) {
 	dctx, cancel := context.WithTimeout(ctx, repoDeadline)
-	return fexec.WithProcessGroup(dctx), cancel
+	ictx, stop := interruptible(dctx)
+	return fexec.WithProcessGroup(ictx), func() {
+		stop()
+		cancel()
+	}
 }
 
 // RunUnfiltered runs git with args in dir under Local, as RunBin would, with
@@ -457,7 +474,7 @@ func RunUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []st
 	defer cancel()
 	out, err := runUnfilteredAlso(dctx, r, bin, dir, also, args...)
 	if err != nil && ctx.Err() == nil && errors.Is(dctx.Err(), context.DeadlineExceeded) {
-		return "", fmt.Errorf("%w (%s)", errUnfilteredDeadline, repoDeadline)
+		return "", fmt.Errorf("%w within %s", errUnfilteredDeadline, repoDeadline)
 	}
 	return out, err
 }
@@ -605,6 +622,17 @@ func populatedSubmodules(ctx context.Context, r Runner, bin, dir string) ([]subm
 	return subs, nil
 }
 
+// Blocks reports whether git would block for good, or read without end, on
+// dir's repository as gitDirKey sees it: a .git that is neither a directory
+// nor a regular file, or a HEAD that is neither a regular file nor a
+// symbolic link (#1005). A caller about to run a Bounded git there skips it
+// instead of waiting out repoDeadline. It reads no more than RunUnfiltered's
+// own check does, and is false when dir holds no .git.
+func Blocks(dir string) bool {
+	_, err := gitDirKey(dir)
+	return errors.Is(err, errGitfileNotRegular) || errors.Is(err, errHeadNotRegular)
+}
+
 // maxGitfileBytes bounds a gitfile read: "gitdir: " and a path.
 const maxGitfileBytes = 64 << 10
 
@@ -697,7 +725,7 @@ var errHeadNotRegular = errors.New("a repository's HEAD is neither a regular fil
 
 // errUnfilteredDeadline is returned when repoDeadline ends a RunUnfiltered
 // call.
-var errUnfilteredDeadline = errors.New("git did not finish in time; a repository may hold a file git blocks on")
+var errUnfilteredDeadline = errors.New("git did not finish")
 
 // errUnexpectedFilterKey is returned for listing output that is not a
 // NUL-separated list of filter driver keys.

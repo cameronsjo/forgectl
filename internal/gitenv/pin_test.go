@@ -234,7 +234,11 @@ func verdicts(all []finding) []string {
 		case "shell-script":
 			scripts[f.fn]++
 		case "unrefused-transport":
-			out = append(out, fmt.Sprintf("%s (%s) runs git under gitenv.Transport without refusing ext:: and fd::; call gitenv.RunRefusing or RunBinRefusing with []string{\"ext\", \"fd\"} (#987)", f.pos, f.fn))
+			out = append(out, fmt.Sprintf("%s (%s) uses gitenv.Transport, or something that can stand for it, outside a RunRefusing or RunBinRefusing call refusing []string{\"ext\", \"fd\"}; pass gitenv.Transport there directly (#987)", f.pos, f.fn))
+		case "unset-transport":
+			if _, ok := ghGitAllowlist[f.fn]; !ok {
+				out = append(out, fmt.Sprintf("%s (%s) passes gitenv.Transport to gitenv.Unset outside ghGitAllowlist; only gh's git needs Transport's removals (#987)", f.pos, f.fn))
+			}
 		}
 	}
 	check := func(kind string, counts map[string]int, allow map[string]struct {
@@ -291,9 +295,6 @@ func scan(fset *token.FileSet, pkgPath, rel string, files []*ast.File) []finding
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
 					return true
-				}
-				if unrefusedTransport(info, call) {
-					out = append(out, finding{pos: fset.Position(call.Pos()).String(), fn: fn, kind: "unrefused-transport"})
 				}
 				id := calleeIdent(call.Fun)
 				if id == nil {
@@ -353,11 +354,22 @@ func scan(fset *token.FileSet, pkgPath, rel string, files []*ast.File) []finding
 				}
 				return true
 			})
+			tu := transportUses(info, decl)
+			for _, e := range tu.opaque {
+				out = append(out, finding{pos: fset.Position(e.Pos()).String(), fn: fn, kind: "unrefused-transport"})
+			}
 			ast.Inspect(decl, func(n ast.Node) bool {
 				switch e := n.(type) {
 				case *ast.SelectorExpr:
 					if isGitenvTransport(info, e) {
 						out = append(out, finding{pos: fset.Position(e.Pos()).String(), fn: fn, kind: "transport"})
+						switch {
+						case tu.refused[e]:
+						case tu.unset[e]:
+							out = append(out, finding{pos: fset.Position(e.Pos()).String(), fn: fn, kind: "unset-transport"})
+						default:
+							out = append(out, finding{pos: fset.Position(e.Pos()).String(), fn: fn, kind: "unrefused-transport"})
+						}
 					}
 				case ast.Expr:
 					if execName[e] {
@@ -375,46 +387,102 @@ func scan(fset *token.FileSet, pkgPath, rel string, files []*ast.File) []finding
 	return out
 }
 
-// transportProfileArg is, for each gitenv function that takes a Profile, the
-// index of the Profile argument and of the refused-transport list (-1 for
-// none).
-var transportProfileArg = map[string][2]int{
+// profileArg is, for each gitenv function that takes a Profile, the index
+// of the Profile argument and of the refused-transport list (-1 for none).
+var profileArg = map[string][2]int{
 	"Run":            {2, -1},
 	"RunBin":         {3, -1},
 	"Command":        {1, -1},
 	"RunRefusing":    {2, 3},
 	"RunBinRefusing": {3, 4},
+	"Args":           {0, -1},
+	"Env":            {0, -1},
+	"Unset":          {0, -1},
 }
 
 // refusedTransports are the transports every Transport call refuses (#987):
 // ext:: runs a command the URL names and fd:: reads a descriptor it names.
 var refusedTransports = []string{"ext", "fd"}
 
-// unrefusedTransport reports whether call runs git under gitenv.Transport
-// without refusing every one of refusedTransports: gitenv.Run, RunBin or
-// Command under Transport, or RunRefusing or RunBinRefusing under Transport
-// whose list is not a literal naming them all. A remote, or a repository's
-// own config, can name an ext:: URL and allow it; only the refusal outranks
-// both.
-func unrefusedTransport(info *types.Info, call *ast.CallExpr) bool {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
+// transportUse sorts one declaration's references to gitenv.Transport.
+type transportUse struct {
+	// refused holds each that is the Profile argument of a RunRefusing or
+	// RunBinRefusing whose list is a literal naming every refusedTransports.
+	refused map[*ast.SelectorExpr]bool
+	// unset holds each that is gitenv.Unset's argument, which hands gh's
+	// environment the removals and runs no git itself (ghGitAllowlist).
+	unset map[*ast.SelectorExpr]bool
+	// opaque holds what can stand for Transport unseen: a Profile argument
+	// that is neither gitenv.Local nor gitenv.Transport (a variable, a
+	// literal 1), a conversion to gitenv.Profile, and a profile-taking
+	// gitenv function used as a value.
+	opaque []ast.Expr
+}
+
+// transportUses finds decl's Transport references and what could stand for
+// one. Every other reference to gitenv.Transport is a Transport git call
+// that does not refuse ext:: and fd:: (#987): a remote, or a repository's
+// own config, can name an ext:: URL and allow it, and only the refusal
+// outranks both. The rule is an allowlist of shapes, so a Transport carried
+// by a variable, a function value or a conversion is flagged where it is
+// spelled.
+func transportUses(info *types.Info, decl ast.Decl) transportUse {
+	tu := transportUse{refused: map[*ast.SelectorExpr]bool{}, unset: map[*ast.SelectorExpr]bool{}}
+	callee := map[*ast.SelectorExpr]bool{}
+	ast.Inspect(decl, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		callee[sel] = true
+		if isGitenvSel(info, sel, "Profile") {
+			tu.opaque = append(tu.opaque, call)
+			return true
+		}
+		pos, ok := profileArg[sel.Sel.Name]
+		if !ok || !isGitenvSel(info, sel, sel.Sel.Name) || pos[0] >= len(call.Args) {
+			return true
+		}
+		profile, ok := call.Args[pos[0]].(*ast.SelectorExpr)
+		if !ok || !(isGitenvTransport(info, profile) || isGitenvSel(info, profile, "Local")) {
+			tu.opaque = append(tu.opaque, call.Args[pos[0]])
+			return true
+		}
+		if !isGitenvTransport(info, profile) {
+			return true
+		}
+		if sel.Sel.Name == "Unset" {
+			tu.unset[profile] = true
+			return true
+		}
+		if pos[1] >= 0 && pos[1] < len(call.Args) && namesEvery(info, call.Args[pos[1]], refusedTransports) {
+			tu.refused[profile] = true
+		}
+		return true
+	})
+	ast.Inspect(decl, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok || callee[sel] {
+			return true
+		}
+		if _, takes := profileArg[sel.Sel.Name]; takes && isGitenvSel(info, sel, sel.Sel.Name) {
+			tu.opaque = append(tu.opaque, sel)
+		}
+		return true
+	})
+	return tu
+}
+
+// namesEvery reports whether e is a slice literal whose constant elements
+// include every one of names.
+func namesEvery(info *types.Info, e ast.Expr, names []string) bool {
+	lit, ok := e.(*ast.CompositeLit)
 	if !ok {
 		return false
-	}
-	pos, ok := transportProfileArg[sel.Sel.Name]
-	if !ok || !isGitenvSel(info, sel, sel.Sel.Name) || pos[0] >= len(call.Args) {
-		return false
-	}
-	profile, ok := call.Args[pos[0]].(*ast.SelectorExpr)
-	if !ok || !isGitenvTransport(info, profile) {
-		return false
-	}
-	if pos[1] < 0 || pos[1] >= len(call.Args) {
-		return true
-	}
-	lit, ok := call.Args[pos[1]].(*ast.CompositeLit)
-	if !ok {
-		return true
 	}
 	var named []string
 	for _, el := range lit.Elts {
@@ -422,12 +490,12 @@ func unrefusedTransport(info *types.Info, call *ast.CallExpr) bool {
 			named = append(named, v)
 		}
 	}
-	for _, name := range refusedTransports {
+	for _, name := range names {
 		if !slices.Contains(named, name) {
-			return true
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // namesGit reports whether arg, an executable name, is git's: a constant
@@ -752,9 +820,13 @@ func productionDirs(root string) ([]string, error) {
 // constant in passesGit reset found (inSlice's gitenv.Bin is missed);
 // match only absolute paths (dotSlash); check spreads only in a shell
 // (sudoSpread); treat a constant slice literal as unreadable (fineFive is
-// flagged). For #987's: make unrefusedTransport return false (transport,
-// refusesNone, refusesExtOnly, commandTransport go unflagged), or true
-// (refusesBoth is flagged). For #1005's: read a constant slice literal
+// flagged). For #987's: treat every Transport reference as refused
+// (transport, refusesNone, refusesExtOnly, commandTransport, viaFuncValue
+// lose a finding); skip the namesEvery check (refusesExtOnly, refusesNone go
+// unflagged); drop the opaque Profile-argument case (transportViaVar, viaConversion);
+// drop the function-value pass (viaFuncValue); drop the conversion case
+// (viaConversion); let unset-transport pass everywhere (unsetOutside's
+// verdict is missing). For #1005's: read a constant slice literal
 // spread as one argument rather than its elements (spreadScript,
 // sudoSpreadScript, ghSpread go unflagged).
 func TestPinFlagsEveryBypass(t *testing.T) {
@@ -786,6 +858,10 @@ func refusesBoth(ctx context.Context, r runner) { _, _ = gitenv.RunRefusing(ctx,
 func refusesNone(ctx context.Context, r runner) { _, _ = gitenv.RunBinRefusing(ctx, r, "/usr/bin/x", gitenv.Transport, nil, "fetch") }
 func refusesExtOnly(ctx context.Context, r runner) { _, _ = gitenv.RunRefusing(ctx, r, gitenv.Transport, []string{"ext"}, "fetch") }
 func commandTransport(ctx context.Context) { _ = gitenv.Command(ctx, gitenv.Transport, "fetch") }
+func transportViaVar(ctx context.Context, r runner) { p := gitenv.Transport; _, _ = gitenv.Run(ctx, r, p, "fetch") }
+func viaFuncValue(ctx context.Context, r runner) { run := gitenv.Run; _, _ = run(ctx, r, gitenv.Transport, "fetch") }
+func viaConversion(ctx context.Context, r runner) { _, _ = gitenv.Run(ctx, r, gitenv.Profile(1), "fetch") }
+func unsetOutside() { _ = gitenv.Unset(gitenv.Transport, nil) }
 func fine(ctx context.Context, r runner) { _, _ = gitenv.Run(ctx, r, gitenv.Local, "status"); _, _ = r.Run(ctx, "gh", "repo") }
 func looked(ctx context.Context, r runner) { p, _ := exec.LookPath(gitenv.Bin); abs, _ := filepath.Abs(p); _, _ = r.Run(ctx, abs, "status") }
 func lookedVar(ctx context.Context, r runner) { var p, _ = exec.LookPath(gitenv.Bin); _, _ = r.RunWithEnvFiltered(ctx, nil, nil, p) }
@@ -832,18 +908,24 @@ func fineToo(ctx context.Context, r runner) { p, _ := exec.LookPath("tmux"); _, 
 		"p/p.go:viaConst":  {"exec"},
 		"p/p.go:viaVar":    {"constant"},
 		"p/p.go:filtered":  {"exec"},
-		"p/p.go:transport": {"unrefused-transport", "transport"},
+		"p/p.go:transport": {"transport", "unrefused-transport"},
 		// #987: a Transport call that does not refuse ext:: and fd::.
 		"p/p.go:refusesBoth":      {"transport"},
-		"p/p.go:refusesNone":      {"unrefused-transport", "transport"},
-		"p/p.go:refusesExtOnly":   {"unrefused-transport", "transport"},
-		"p/p.go:commandTransport": {"unrefused-transport", "transport"},
-		"p/p.go:looked":           {"exec"},
-		"p/p.go:lookedVar":        {"exec"},
-		"p/p.go:shell":            {"exec"},
-		"p/p.go:shellExe":         {"exec"},
-		"p/p.go:ghClone":          {"gh-git"},
-		"p/p.go:ghCheckout":       {"gh-git"},
+		"p/p.go:refusesNone":      {"transport", "unrefused-transport"},
+		"p/p.go:refusesExtOnly":   {"transport", "unrefused-transport"},
+		"p/p.go:commandTransport": {"transport", "unrefused-transport"},
+		// Review of #1008: Transport reached through a variable, a function
+		// value or a conversion, and Transport's removals outside gh.
+		"p/p.go:transportViaVar": {"unrefused-transport", "transport", "unrefused-transport"},
+		"p/p.go:viaFuncValue":    {"unrefused-transport", "transport", "unrefused-transport"},
+		"p/p.go:viaConversion":   {"unrefused-transport", "unrefused-transport"},
+		"p/p.go:unsetOutside":    {"transport", "unset-transport"},
+		"p/p.go:looked":          {"exec"},
+		"p/p.go:lookedVar":       {"exec"},
+		"p/p.go:shell":           {"exec"},
+		"p/p.go:shellExe":        {"exec"},
+		"p/p.go:ghClone":         {"gh-git"},
+		"p/p.go:ghCheckout":      {"gh-git"},
 		// #985 nit: the git executable handed to a wrapper, and a shell
 		// script the pin cannot read.
 		"p/p.go:envBin":       {"git-arg"},
@@ -879,8 +961,16 @@ func fineToo(ctx context.Context, r runner) { p, _ := exec.LookPath("tmux"); _, 
 	if msgs := verdicts([]finding{{pos: "x", fn: "p/p.go:transport", kind: "transport"}}); len(msgs) == 0 {
 		t.Error("an unlisted gitenv.Transport use produced no verdict")
 	}
-	if msgs := verdicts([]finding{{pos: "x", fn: "p/p.go:refusesNone", kind: "unrefused-transport"}}); len(msgs) == 0 {
+	if msgs := verdicts([]finding{{pos: "x", fn: "p/p.go:refusesNone", kind: "unrefused-transport"}}); !slices.ContainsFunc(msgs, func(m string) bool { return strings.HasPrefix(m, "x (p/p.go:refusesNone) uses gitenv.Transport") }) {
 		t.Error("a Transport call that refuses neither ext:: nor fd:: produced no verdict")
+	}
+	if msgs := verdicts([]finding{{pos: "x", fn: "p/p.go:unsetOutside", kind: "unset-transport"}}); !slices.ContainsFunc(msgs, func(m string) bool {
+		return strings.HasPrefix(m, "x (p/p.go:unsetOutside) passes gitenv.Transport to gitenv.Unset")
+	}) {
+		t.Error("gitenv.Unset(Transport) outside ghGitAllowlist produced no verdict")
+	}
+	if msgs := verdicts([]finding{{pos: "x", fn: "internal/projects/github.go:cloneRepo", kind: "unset-transport"}, {pos: "x", fn: "internal/projects/github.go:cloneRepo", kind: "transport"}, {pos: "x", fn: "internal/projects/github.go:cloneRepo", kind: "gh-git"}}); slices.ContainsFunc(msgs, func(m string) bool { return strings.Contains(m, "gitenv.Unset") }) {
+		t.Errorf("gitenv.Unset(Transport) inside ghGitAllowlist was refused: %v", msgs)
 	}
 	if msgs := verdicts([]finding{{pos: "x", fn: "p/p.go:envBin", kind: "git-arg"}}); len(msgs) == 0 {
 		t.Error("the git executable handed to a wrapper produced no verdict")
