@@ -128,6 +128,11 @@ type HubEntry struct {
 	Argv      []string
 	NeedsArgs bool
 	Heading   bool
+	// NoPicker keeps the argument picker off this row even when its Use
+	// names one positional the picker could supply: the argument fills
+	// another CLI's subcommand slot (internal/cli's hub-no-picker
+	// annotation), so the row prints its invocation instead.
+	NoPicker bool
 }
 
 // HubLeaf is one runnable verb inside a HubEntry's drill-down list. NeedsArgs
@@ -149,6 +154,8 @@ type HubLeaf struct {
 	NeedsArgs bool
 	Self      bool
 	Leaves    []HubLeaf
+	// NoPicker is HubEntry.NoPicker for a leaf.
+	NoPicker bool
 }
 
 // RunOptions configures Run. Hub is the full ordered row set buildHub
@@ -568,7 +575,7 @@ func (m model) activate() (tea.Model, tea.Cmd) {
 				m.action = Action{Kind: ActionRunVerb, Argv: append([]string(nil), entry.Argv...)}
 				return m, tea.Quit
 			}
-			if m.openPicker(entry.Argv, entry.Use, nil) {
+			if m.openPicker(entry.Argv, entry.Use, entry.NoPicker, nil) {
 				return m, nil
 			}
 			usage := append(append([]string(nil), entry.Argv[:len(entry.Argv)-1]...), strings.Fields(entry.Use)...)
@@ -595,7 +602,7 @@ func (m model) activate() (tea.Model, tea.Cmd) {
 			// The module itself needs one argument (pr <ref>): ask for it
 			// here, with its subcommands one row away in the picker.
 			browse := entry
-			m.openPicker([]string{entry.Name}, entry.Use, &browse)
+			m.openPicker([]string{entry.Name}, entry.Use, entry.NoPicker, &browse)
 			return m, nil
 		}
 		if len(entry.Leaves) == 0 {
@@ -615,7 +622,7 @@ func (m model) activate() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if leaf.NeedsArgs {
-			if m.openPicker(leafArgv(m.leavesPath, leaf), leaf.Use, nil) {
+			if m.openPicker(leafArgv(m.leavesPath, leaf), leaf.Use, leaf.NoPicker, nil) {
 				return m, nil
 			}
 			m.action = Action{Kind: ActionShowInvocation, Argv: strings.Fields(usageLine(m.leavesPath, leaf))}

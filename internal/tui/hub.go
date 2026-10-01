@@ -248,8 +248,12 @@ func PickerSpec(use string) (placeholder string, optional bool, ok bool) {
 
 // moduleNeedsArg reports whether a module row's own command requires exactly
 // one argument the picker can supply (pr <ref>). Enter on such a row opens the
-// picker rather than the drill-down list.
+// picker rather than the drill-down list. A row that opted out of the picker
+// (NoPicker) drills into its leaves instead, where its own invocation prints.
 func moduleNeedsArg(e HubEntry) bool {
+	if e.NoPicker {
+		return false
+	}
 	_, optional, ok := pickerSpec(e.Use)
 	return ok && !optional
 }
@@ -601,8 +605,12 @@ func (m model) submitPicker() (tea.Model, tea.Cmd) {
 
 // openPicker opens the argument picker in place for a command whose argv
 // before the argument is prefix. It reports false when use does not describe
-// a single argument the picker can supply.
-func (m *model) openPicker(prefix []string, use string, browse *HubEntry) bool {
+// a single argument the picker can supply, or when the row opted out of the
+// picker (noPicker: its argument is another CLI's subcommand).
+func (m *model) openPicker(prefix []string, use string, noPicker bool, browse *HubEntry) bool {
+	if noPicker {
+		return false
+	}
 	placeholder, optional, ok := pickerSpec(use)
 	if !ok {
 		return false

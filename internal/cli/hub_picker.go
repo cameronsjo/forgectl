@@ -14,9 +14,14 @@ import (
 // different command than the row names. Categorical: it never echoes the value.
 var errPickerSubcommand = errors.New("that value names a subcommand; pick it from the list instead")
 
+// errPickerOptedOut is the picker's refusal for a command carrying
+// hubNoPickerAnnotation: its argument is another CLI's subcommand, so no
+// typed value is offered there at all.
+var errPickerOptedOut = errors.New("this command takes no value from the picker; finish it by hand")
+
 // hubPickerArgv builds the hub picker's argv against the live command tree
 // (forgectl#730 review). tui.PickerArgv validates the value as one element;
-// this adds the two things only the tree knows:
+// this adds the three things only the tree knows:
 //
 //   - Refusal by resolution. runHubVerb re-dispatches the argv exactly as a
 //     typed command, so a value equal to a child's name or alias would run
@@ -25,18 +30,27 @@ var errPickerSubcommand = errors.New("that value names a subcommand; pick it fro
 //     dispatch resolves it (hubDispatchTarget: the launch intercept, then
 //     cobra's own Find) and refused unless it lands on the row's command.
 //     No list of names is kept here, so a future subcommand is covered.
+//   - Refusal by opt-out. A command carrying hubNoPickerAnnotation passes
+//     its argument into another CLI's subcommand slot; its rows never open
+//     the picker (NoPicker), and the builder refuses it in case one does.
 //   - A "--" before the value where the command's flag parsing honors it, so
 //     cobra stops looking for subcommands and flags at the value even if the
 //     resolution check were ever wrong.
 func hubPickerArgv(root *cobra.Command) tui.ArgvBuilder {
 	return func(prefix []string, arg string, optional bool) ([]string, error) {
 		argv, err := tui.PickerArgv(prefix, arg, optional)
-		if err != nil || arg == "" {
-			return argv, err
+		if err != nil {
+			return nil, err
 		}
 		want := hubDispatchRoute(root, prefix)
 		if want.cmd == nil || !slices.Equal(commandArgv(want.cmd), prefix) {
 			return nil, errors.New("this command is not in the command tree")
+		}
+		if hasNoPickerAnnotation(want.cmd) {
+			return nil, errPickerOptedOut
+		}
+		if arg == "" {
+			return argv, nil
 		}
 		if hubDispatchRoute(root, argv) != want {
 			return nil, errPickerSubcommand

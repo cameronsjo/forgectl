@@ -104,11 +104,12 @@ func hubModules(root *cobra.Command) []*cobra.Command {
 // moduleEntry is one module's hub row.
 func moduleEntry(child *cobra.Command) tui.HubEntry {
 	return tui.HubEntry{
-		Name:   child.Name(),
-		Short:  child.Short,
-		Core:   child.Annotations[hubTierAnnotation] == hubTierCore,
-		Use:    child.Use,
-		Leaves: buildLeaves(child),
+		Name:     child.Name(),
+		Short:    child.Short,
+		Core:     child.Annotations[hubTierAnnotation] == hubTierCore,
+		Use:      child.Use,
+		Leaves:   buildLeaves(child),
+		NoPicker: hasNoPickerAnnotation(child),
 	}
 }
 
@@ -122,6 +123,7 @@ func recentEntry(cmd *cobra.Command) tui.HubEntry {
 		Use:       cmd.Use,
 		Argv:      argv,
 		NeedsArgs: parentTakesArg(cmd),
+		NoPicker:  hasNoPickerAnnotation(cmd),
 	}
 }
 
@@ -163,7 +165,7 @@ func hubOrder(cmd *cobra.Command) int {
 func buildLeaves(cmd *cobra.Command) []tui.HubLeaf {
 	var leaves []tui.HubLeaf
 	if parentTakesArg(cmd) {
-		leaves = append(leaves, tui.HubLeaf{Name: cmd.Name(), Short: cmd.Short, Use: cmd.Use, NeedsArgs: true, Self: true})
+		leaves = append(leaves, tui.HubLeaf{Name: cmd.Name(), Short: cmd.Short, Use: cmd.Use, NeedsArgs: true, Self: true, NoPicker: hasNoPickerAnnotation(cmd)})
 	}
 	for _, sub := range cmd.Commands() {
 		if !sub.IsAvailableCommand() {
@@ -179,6 +181,7 @@ func buildLeaves(cmd *cobra.Command) []tui.HubLeaf {
 			Use:       sub.Use,
 			NeedsArgs: len(nested) == 0 && parentTakesArg(sub),
 			Leaves:    nested,
+			NoPicker:  hasNoPickerAnnotation(sub),
 		})
 	}
 	return leaves

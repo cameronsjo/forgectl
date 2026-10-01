@@ -46,6 +46,36 @@ const (
 	hubTierExtension   = "extension"
 )
 
+// hubNoPickerAnnotation is set by a command whose positional argument goes
+// into another CLI's subcommand slot, so a typed value is never "just an
+// argument" there: the hub must not offer its inline picker for it
+// (forgectl#730). Its value says why; its presence is what counts. The hub
+// rows built for such a command carry NoPicker and print the invocation
+// instead, and hubPickerArgv refuses the command as a backstop.
+//
+// The variadic rule in tui.pickerSpec already keeps the picker off a command
+// that takes a whole argv (launch); this annotation covers the one-positional
+// shape that rule cannot see.
+const hubNoPickerAnnotation = "forgectl:hub-no-picker"
+
+// hasNoPickerAnnotation reports whether cmd opted out of the hub picker.
+func hasNoPickerAnnotation(cmd *cobra.Command) bool {
+	_, ok := cmd.Annotations[hubNoPickerAnnotation]
+	return ok
+}
+
+// stampHubAnnotations records a module's registry position and tier on its
+// command for buildHub. It merges into the constructor's own annotations
+// rather than replacing them, so a module root keeps any it set itself
+// (hubNoPickerAnnotation among them).
+func stampHubAnnotations(cmd *cobra.Command, order int, tier string) {
+	if cmd.Annotations == nil {
+		cmd.Annotations = map[string]string{}
+	}
+	cmd.Annotations[hubOrderAnnotation] = strconv.Itoa(order)
+	cmd.Annotations[hubTierAnnotation] = tier
+}
+
 // structuredTerminalError is composed only from trusted layout and fields
 // sanitized at their trust boundary. termsafeErrorHandler recognizes this
 // exact private type so it can preserve those newlines; every other error still
@@ -135,10 +165,7 @@ arguments for a menu over every command group.`,
 			tier = hubTierExtension
 			cmd.GroupID = moreGroupID
 		}
-		cmd.Annotations = map[string]string{
-			hubOrderAnnotation: strconv.Itoa(i),
-			hubTierAnnotation:  tier,
-		}
+		stampHubAnnotations(cmd, i, tier)
 		root.AddCommand(cmd)
 	}
 
