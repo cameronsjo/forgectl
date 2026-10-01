@@ -30,7 +30,7 @@ func TestRootOps_FIFONeverBlocks(t *testing.T) {
 	ops := rootOps(r)
 	done := make(chan error, 1)
 	go func() {
-		_, err := ops.names("swapped")
+		_, err := ops.names("swapped", 1)
 		done <- err
 	}()
 	select {

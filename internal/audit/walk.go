@@ -93,7 +93,18 @@ func (w *walker) run() error {
 // root itself. depth is dir's own depth, the root being 0: with maxDepth N
 // the walk lists directories at depths 0 through N-1.
 func (w *walker) walk(dir string, segs []string, repo string, vendored bool, depth int) error {
-	names, err := w.ops.names(dir)
+	// One name past what the cap has left is enough to trip it: the loop
+	// below counts every name, so a directory longer than that stops the
+	// walk inside this listing, and its tail is never read (#994). Such a
+	// walk is reported truncated; the names it visited before stopping, and
+	// the .git check below, cover only the listed part, in the OS's listing
+	// order rather than sort order. The +1 saturates rather than wrap when the cap is math.MaxInt.
+	left := w.maxEntries - w.stats.Entries
+	limit := left + 1
+	if limit < left {
+		limit = left
+	}
+	names, err := w.ops.names(dir, limit)
 	if err != nil {
 		if dir == "." {
 			return fmt.Errorf("read audit root %s: %w", termsafe.QuotePath(w.root), termsafe.Error(err))

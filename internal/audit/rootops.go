@@ -21,8 +21,11 @@ import (
 // an *os.Root; a test binds a failing or counting double to prove no
 // metadata arrives any other way.
 type fsOps struct {
-	// names lists a directory's entry names, with no per-entry stat.
-	names func(dir string) ([]string, error)
+	// names lists at most limit of a directory's entry names, with no
+	// per-entry stat. A directory with more than limit entries returns
+	// limit of them, in the order the OS lists them, and is never read
+	// whole (#994).
+	names func(dir string, limit int) ([]string, error)
 	// lstat describes an entry without following a final symlink.
 	lstat func(name string) (fs.FileInfo, error)
 	// stat follows a symlink, but only within the root; a target outside it
@@ -64,7 +67,7 @@ func openRootOps(abs string) (fsOps, func(), error) {
 
 func rootOps(r *os.Root) fsOps {
 	return fsOps{
-		names: func(dir string) ([]string, error) {
+		names: func(dir string, limit int) ([]string, error) {
 			// dirOpenFlags carries O_DIRECTORY|O_NONBLOCK where the platform has
 			// them: a directory swapped for a FIFO between the parent's lstat
 			// and this open fails fast instead of blocking for a writer.
@@ -73,12 +76,34 @@ func rootOps(r *os.Root) fsOps {
 				return nil, err
 			}
 			defer func() { _ = f.Close() }()
-			return f.Readdirnames(-1)
+			return readNames(f, limit)
 		},
 		lstat: r.Lstat,
 		stat:  r.Stat,
 		sniff: func(name string) (bool, error) { return sniffRoot(r, name) },
 	}
+}
+
+// dirReadBatch is the most names one Readdirnames call asks for. readNames
+// never asks for more than its limit has left, so it holds no name past the
+// limit.
+const dirReadBatch = 256
+
+// readNames reads at most limit names from the directory f, in batches of at
+// most dirReadBatch, and stops at the limit or the end of the directory.
+func readNames(f *os.File, limit int) ([]string, error) {
+	var out []string
+	for len(out) < limit {
+		batch, err := f.Readdirnames(min(dirReadBatch, limit-len(out)))
+		out = append(out, batch...)
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // sniffRoot is fsOps.sniff over r. The open carries O_NONBLOCK where the
