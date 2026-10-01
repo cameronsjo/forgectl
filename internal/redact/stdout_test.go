@@ -260,6 +260,17 @@ var stdoutWithheld = []string{
 	"credentials: ~/x SEKRIT",
 	"use --token SEKRIT",
 	"user:SEKRIT@sha256:abc",
+	// #990 review: Vault AppRole's secret_id is a bearer secret, not the id
+	// of one, as a JSON, YAML or TOML key, in camel case, after another word;
+	// and a TOML assignment with its blank after the '=' alone.
+	`"secret_id": "6a174c20-f6de-a53c-74d2-6018fcceff64",`,
+	"secret_id: 6a174c20-f6de-a53c-74d2-6018fcceff64",
+	`secret_id = "6a174c20-f6de-a53c-74d2-6018fcceff64"`,
+	"secretId: SEKRIT",
+	"SECRET_ID: SEKRIT",
+	"client_secret_id: SEKRIT",
+	`password= "hunter2"`,
+	"token= 'abc'",
 	"https://u:SEKRIT@host/x@sha256:" + strings.Repeat("0f", 32),
 }
 
@@ -553,7 +564,11 @@ func TestText_KeepsEmptyCredentialKeys(t *testing.T) {
 // Mutations that turn it red: drop openValue from stdoutWithheld (every
 // value line shows); compare indent >= valueIndent (the next key, "other:",
 // is withheld); drop the valueSeq arm (the "- a" rows under password: show);
-// set valueSeq for a dashed key too (the "- other" sibling is withheld); end
+// accept no '\r' after the ':' (the CRLF value shows); drop openerValue
+// (the # db, !!binary, &pw rows' values show), or its '#' arm (# db), or
+// its property loop (!!binary, &pw), or read a '#' with no blank before it
+// as a comment (|#x's next line is withheld); set valueSeq for a dashed key
+// too (the "- other" sibling is withheld); end
 // the value on a blank line (the line after it shows); drop the stripEscapes
 // retry in openValue (the colored key's value shows); open on any key
 // (token_type: under Stdout withholds its next line, where Text alone
@@ -570,6 +585,16 @@ func TestStdout_YAMLValueOnNextLine(t *testing.T) {
 		{"\x1b[1mpassword\x1b[0m:\n  SEKRIT", "\x1b[1mpassword\x1b[0m:\n" + Marker},
 		{"password:\nnext: 1", "password:\nnext: 1"},
 		{"password: x\n  SEKRIT", Marker + "\n  SEKRIT"},
+		// #990 review: a CRLF line, and a value whose node properties or
+		// comment set aside leave it empty or a block indicator. The key line
+		// itself is withheld when its value as written carries something.
+		{"password:\r\n  SEKRIT\r\nx", "password:\r\n" + Marker + "\nx"},
+		{"password: # db\n  SEKRIT\nx", Marker + "\n" + Marker + "\nx"},
+		{"password: !!binary |\n  SEKRIT\nx", Marker + "\n" + Marker + "\nx"},
+		{"password: &pw\n  SEKRIT\nx", Marker + "\n" + Marker + "\nx"},
+		{"password: !secret &pw | # c\n  SEKRIT\nx", Marker + "\n" + Marker + "\nx"},
+		{"password: !secret\n  SEKRIT\nx", Marker + "\n" + Marker + "\nx"},
+		{"password: |#x\n  SEKRIT", Marker + "\n  SEKRIT"},
 	} {
 		if got := Stdout(c.in); got != c.want {
 			t.Errorf("Stdout(%q) = %q, want %q", c.in, got, c.want)
@@ -586,6 +611,45 @@ func TestStdout_YAMLValueOnNextLine(t *testing.T) {
 	}
 	if got := Text(in); got != "token_type:\n"+Marker {
 		t.Errorf("Text(%q) = %q, want the value line withheld", in, got)
+	}
+}
+
+// descriptorRows are a key per keyDescriptors entry, each a credential word
+// then the descriptor, with a value that carries something: Stdout keeps
+// each (#983 item 3) and Text withholds it.
+var descriptorRows = map[string]string{
+	"type": "token_type: abc", "expiry": "token_expiry: abc", "expires": "token_expires: abc",
+	"expiration": "password_expiration: abc", "policy": "password_policy: abc", "helper": "credential.helper: abc",
+	"ttl": "token_ttl: abc", "url": "auth_url: abc", "uri": "token_uri: abc", "endpoint": "token_endpoint: abc",
+	"file": "password_file: abc", "path": "secret_path: abc", "id": "key_id: abc", "name": "secret_name: abc",
+	"scope": "token_scope: abc", "scopes": "tokenScopes: abc", "length": "password_length: abc",
+	"format": "key_format: abc", "prefix": "token_prefix: abc",
+}
+
+// TestStdout_KeyDescriptors: every keyDescriptors entry has a descriptorRows
+// row, which Stdout keeps and Text withholds, and every row names an entry,
+// so adding or dropping a descriptor turns it red.
+//
+// Mutations that turn it red: drop any one keyDescriptors entry (its row is
+// withheld); add one (no row names it); drop the secret exception in
+// keyNameCarries (the secret_id rows in stdoutWithheld show).
+func TestStdout_KeyDescriptors(t *testing.T) {
+	for d := range keyDescriptors {
+		if _, ok := descriptorRows[d]; !ok {
+			t.Errorf("keyDescriptors has %q and descriptorRows has no row for it", d)
+		}
+	}
+	for d, line := range descriptorRows {
+		if !keyDescriptors[d] {
+			t.Errorf("descriptorRows has %q, which keyDescriptors does not", d)
+		}
+		if got := Stdout(line); got != line {
+			t.Errorf("Stdout(%q) = %q, want it kept", line, got)
+		}
+		if got := Text(line); got != Marker {
+			t.Errorf("Text(%q) = %q, want %q", line, got, Marker)
+		}
+		checkStdoutWithinText(t, line)
 	}
 }
 
@@ -650,6 +714,14 @@ func adversarialStdout(n int) []string {
 		strings.Repeat("pass=1 ", n/7) + "fail=0",
 		strings.Repeat(`"token_type": `, n/14),
 		"credentials: ~/" + strings.Repeat("a", n),
+		// #990 review: node properties and comment runs in an opener's value,
+		// a "= " assignment, and descriptor names with many segments.
+		strings.Repeat("password: !a &b # c\n  x\n", n/22),
+		"password: " + strings.Repeat("!a ", n/3),
+		"password: " + strings.Repeat("a#", n/2),
+		strings.Repeat("password= \"x\"\n", n/14),
+		strings.Repeat("a_secret_id: x\n", n/15),
+		"token" + strings.Repeat("_secret", n/7) + "_id: x",
 	}
 }
 

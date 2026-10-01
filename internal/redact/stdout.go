@@ -462,8 +462,8 @@ type yamlKeyEntry struct {
 
 // yamlEntry parses line as a YAML mapping entry: optional indentation, an
 // optional "- ", the key as name bytes (optionally quoted), optional spaces,
-// then a ':' that ends the line or is followed by whitespace. It reads line
-// once.
+// then a ':' that ends the line or is followed by whitespace (a CRLF line's
+// '\r' included). It reads line once.
 func yamlEntry(line string) (yamlKeyEntry, bool) {
 	var e yamlKeyEntry
 	s := strings.TrimLeft(line, " \t")
@@ -490,7 +490,7 @@ func yamlEntry(line string) (yamlKeyEntry, bool) {
 		s = s[1:]
 	}
 	s = strings.TrimLeft(s, " \t")
-	if s == "" || s[0] != ':' || len(s) > 1 && s[1] != ' ' && s[1] != '\t' {
+	if s == "" || s[0] != ':' || len(s) > 1 && s[1] != ' ' && s[1] != '\t' && s[1] != '\r' {
 		return e, false
 	}
 	e.value = strings.TrimRight(strings.TrimLeft(s[1:], " \t"), " \t\r,")
@@ -499,18 +499,42 @@ func yamlEntry(line string) (yamlKeyEntry, bool) {
 
 // valueOpener reports whether line is a YAML credential key whose value
 // starts on the next line: nothing after the ':', or a block scalar's
-// indicator ('|' or '>' with its chomping and indent). It returns the entry,
-// whose indentation bounds the lines that hold the value (pemScan).
+// indicator ('|' or '>' with its chomping and indent), once its node
+// properties and a comment are set aside (openerValue: password: # db,
+// password: !!binary |, password: &pw). It returns the entry, whose
+// indentation bounds the lines that hold the value (pemScan). The key line
+// itself is yamlKey's, which reads its value as written, so a line such as
+// password: &pw is still withheld on its own.
 func valueOpener(line string, deliverable bool) (yamlKeyEntry, bool) {
 	e, ok := yamlEntry(line)
 	if !ok || !keyNameCarries(e.name, deliverable) {
 		return e, false
 	}
-	v := e.value
+	v := openerValue(e.value)
 	if v == "" || (v[0] == '|' || v[0] == '>') && strings.Trim(v[1:], "+-0123456789") == "" {
 		return e, true
 	}
 	return e, false
+}
+
+// openerValue returns v, a YAML value as yamlEntry trims it, without its
+// leading node properties (a !tag or an &anchor, each ending at a blank) and
+// without a comment ('#' at its start or after a blank, to the end). It
+// reads v once.
+func openerValue(v string) string {
+	for v != "" && (v[0] == '!' || v[0] == '&') {
+		end := strings.IndexAny(v, " \t")
+		if end < 0 {
+			return ""
+		}
+		v = strings.TrimLeft(v[end:], " \t")
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] == '#' && (i == 0 || v[i-1] == ' ' || v[i-1] == '\t') {
+			return strings.TrimRight(v[:i], " \t")
+		}
+	}
+	return v
 }
 
 // assignKey reports whether line is an assignment, as the line's key, whose
@@ -518,8 +542,9 @@ func valueOpener(line string, deliverable bool) (yamlKeyEntry, bool) {
 // (keyValueCarries): TOML's password = "x" and token = '…', and Go's
 // token := "abc" (#983). The name is name bytes, optionally quoted, after the
 // line's indentation; then ":=", or '=' (not "==") with blanks or a closing
-// quote before it, since a bare NAME=value is credentialAssignment's, with its
-// own exemptions. It reads line once.
+// quote before it or a blank after it (password= "x"), since a bare
+// NAME=value is credentialAssignment's, with its own exemptions. It reads
+// line once.
 func assignKey(line string, deliverable bool) bool {
 	s := strings.TrimLeft(line, " \t")
 	quote := byte(0)
@@ -541,7 +566,7 @@ func assignKey(line string, deliverable bool) bool {
 		s = s[1:]
 	}
 	op := strings.TrimLeft(s, " \t")
-	spaced := quote != 0 || len(op) < len(s)
+	spaced := quote != 0 || len(op) < len(s) || len(op) > 1 && (op[1] == ' ' || op[1] == '\t')
 	switch {
 	case strings.HasPrefix(op, ":="):
 		op = op[2:]
@@ -623,7 +648,8 @@ func pathValue(v string) bool {
 // (after '-', '_' or '.', or a lower-to-upper case change) is a descriptor
 // (keyDescriptors: token_type, token_expiry, password_policy,
 // credential.helper, #983) names something about a credential, not one, and
-// does not.
+// does not; except secret_id (secretId, SECRET_ID), which is Vault AppRole's
+// bearer secret, not the id of one.
 func keyNameCarries(name string, deliverable bool) bool {
 	if !credentialName(name) {
 		return false
@@ -632,11 +658,17 @@ func keyNameCarries(name string, deliverable bool) bool {
 		return true
 	}
 	seg := lastNameSegment(name)
-	return len(seg) == len(name) || !keyDescriptors[strings.ToLower(seg)]
+	if len(seg) == len(name) || !keyDescriptors[strings.ToLower(seg)] {
+		return true
+	}
+	rest := strings.TrimRight(name[:len(name)-len(seg)], "-_.")
+	return strings.EqualFold(seg, "id") && rest != "" && strings.EqualFold(lastNameSegment(rest), "secret")
 }
 
 // keyDescriptors are the last name segments that describe a credential
-// rather than hold one.
+// rather than hold one. Each pairs with a credential word without naming a
+// secret (token_id, key_id, secret_name, private_key_file), bar secret_id,
+// which keyNameCarries keeps a credential.
 var keyDescriptors = map[string]bool{
 	"type": true, "expiry": true, "expires": true, "expiration": true, "policy": true, "helper": true,
 	"ttl": true, "url": true, "uri": true, "endpoint": true, "file": true, "path": true, "id": true,
