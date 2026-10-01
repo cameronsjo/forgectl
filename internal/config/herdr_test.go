@@ -205,7 +205,7 @@ func TestValidatePath_ChecksHerdrOrganize(t *testing.T) {
 //
 // Mutation: drop U+200D or U+FE0F from wire.operandJoiners and its rows go red.
 func TestHerdrOrganize_JoinedLabelsPass(t *testing.T) {
-	for _, label := range []string{"❤️ home", "\U0001F468‍\U0001F4BB dev", "ශ්‍රී"} {
+	for _, label := range []string{"\u2764\ufe0f home", "\U0001F468\u200d\U0001F4BB dev", "\u0dc1\u0dca\u200d\u0dbb\u0dd3"} {
 		cfg := HerdrOrganizeConfig{
 			Default:        label,
 			Rules:          []HerdrOrganizeRule{{Glob: "a", Workspace: label}},
