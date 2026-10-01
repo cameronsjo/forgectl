@@ -64,7 +64,7 @@ func TestBoundedPassesCtrlCToTheGitsGroup(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(stuckGitScript), 0o700); err != nil { //nolint:gosec // G306: an executable stub
 		t.Fatal(err)
 	}
-	cmd := osexec.Command(os.Args[0], "-test.run=^TestBoundedHelper$") //nolint:gosec // G204: the test binary itself
+	cmd := osexec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestBoundedHelper$") //nolint:gosec // G204: the test binary itself
 	cmd.Env = append(os.Environ(), boundedHelperEnv+"="+dir)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)

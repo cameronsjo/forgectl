@@ -448,7 +448,7 @@ func transportUses(info *types.Info, decl ast.Decl) transportUse {
 			return true
 		}
 		profile, ok := call.Args[pos[0]].(*ast.SelectorExpr)
-		if !ok || !(isGitenvTransport(info, profile) || isGitenvSel(info, profile, "Local")) {
+		if !ok || (!isGitenvTransport(info, profile) && !isGitenvSel(info, profile, "Local")) {
 			tu.opaque = append(tu.opaque, call.Args[pos[0]])
 			return true
 		}
