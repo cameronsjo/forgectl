@@ -313,6 +313,16 @@ func scan(fset *token.FileSet, pkgPath, rel string, files []*ast.File) []finding
 				// A wrapper (sudo, env, nice) may start the shell: sudo sh -c.
 				inShell := shells[base]
 				rest := call.Args[pos+1:]
+				// A spread of a literal of constant strings is read as its
+				// strings passed one by one (#1005): sh []string{"-c",
+				// "git status"}... runs that script.
+				var spread ast.Expr
+				if call.Ellipsis.IsValid() && len(rest) > 0 {
+					spread = rest[len(rest)-1]
+					if lit, ok := spread.(*ast.CompositeLit); ok && constStrings(info, lit) {
+						rest = append(slices.Clip(rest[:len(rest)-1]), lit.Elts...)
+					}
+				}
 				for i, a := range rest {
 					if passesGit(info, a, looked) {
 						out = append(out, finding{pos: fset.Position(a.Pos()).String(), fn: fn, kind: "git-arg"})
@@ -338,8 +348,8 @@ func scan(fset *token.FileSet, pkgPath, rel string, files []*ast.File) []finding
 				// (sh args..., sudo args...) may hold any script, or git
 				// itself; the pin cannot read them unless the slice is a
 				// literal of constant strings.
-				if (inShell || wrappers[base]) && call.Ellipsis.IsValid() && len(rest) > 0 && !constStrings(info, rest[len(rest)-1]) {
-					out = append(out, finding{pos: fset.Position(rest[len(rest)-1].Pos()).String(), fn: fn, kind: "shell-script"})
+				if (inShell || wrappers[base]) && spread != nil && !constStrings(info, spread) {
+					out = append(out, finding{pos: fset.Position(spread.Pos()).String(), fn: fn, kind: "shell-script"})
 				}
 				return true
 			})
@@ -744,7 +754,9 @@ func productionDirs(root string) ([]string, error) {
 // (sudoSpread); treat a constant slice literal as unreadable (fineFive is
 // flagged). For #987's: make unrefusedTransport return false (transport,
 // refusesNone, refusesExtOnly, commandTransport go unflagged), or true
-// (refusesBoth is flagged).
+// (refusesBoth is flagged). For #1005's: read a constant slice literal
+// spread as one argument rather than its elements (spreadScript,
+// sudoSpreadScript, ghSpread go unflagged).
 func TestPinFlagsEveryBypass(t *testing.T) {
 	src := `package p
 
@@ -795,6 +807,9 @@ func spread(args []string) { _ = exec.Command("sh", args...) }
 func dotSlash(ctx context.Context, r runner) { _, _ = r.Run(ctx, "nice", "./git", "status") }
 func sudoSpread(ctx context.Context, r runner, args []string) { _, _ = r.Run(ctx, "sudo", args...) }
 func fineFive(ctx context.Context, r runner) { _ = exec.Command("sh", []string{"-c", "true"}...); _, _ = r.Run(ctx, "env", []string{"A=1", "true"}...) }
+func spreadScript() { _ = exec.Command("sh", []string{"-c", "git status"}...) }
+func sudoSpreadScript(ctx context.Context, r runner) { _, _ = r.Run(ctx, "sudo", []string{"sh", "-c", "git pull"}...) }
+func ghSpread(ctx context.Context, r runner) { _, _ = r.Run(ctx, "gh", []string{"repo", "clone", "o/r"}...) }
 func inSlice(ctx context.Context, r runner) { _, _ = r.Run(ctx, "nice", append([]string{gitenv.Bin}, "status")...) }
 func fineFour(ctx context.Context, r runner, args []string) { _, _ = r.Run(ctx, "gh", "api", "repos/o/r/git"); _, _ = r.Run(ctx, "tmux", args...); _, _ = r.Run(ctx, "bash", "-lc", "true") }
 func fineThree(ctx context.Context, r runner, arg, github string) { _, _ = r.Run(ctx, "sh", "-c", "echo hi", "_", arg); _, _ = r.Run(ctx, "gh", "api", "repos/o/r/git/refs"); _, _ = r.Run(ctx, "tmux", "send-keys", github); _, _ = r.Run(ctx, "sh", "-e", "-c", "true") }
@@ -845,6 +860,11 @@ func fineToo(ctx context.Context, r runner) { p, _ := exec.LookPath("tmux"); _, 
 		"p/p.go:inSlice":      {"git-arg"},
 		"p/p.go:dotSlash":     {"git-arg"},
 		"p/p.go:sudoSpread":   {"shell-script"},
+		// #1005 item 2: a constant slice literal spread is read element by
+		// element, as if its strings were passed one by one.
+		"p/p.go:spreadScript":     {"exec"},
+		"p/p.go:sudoSpreadScript": {"exec"},
+		"p/p.go:ghSpread":         {"gh-git"},
 	}
 	for fn, kinds := range want {
 		if strings.Join(got[fn], ",") != strings.Join(kinds, ",") {

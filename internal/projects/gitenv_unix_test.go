@@ -6,6 +6,7 @@ import (
 	"context"
 	osexec "os/exec"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/gitenv"
@@ -58,5 +59,27 @@ func TestGitStatusRunsNoFilterDriver(t *testing.T) {
 	}
 	if got.State != StatusOK || got.Modified != 0 {
 		t.Errorf("gitStatus = %+v, want a clean %q: the files match their blobs", got, StatusOK)
+	}
+}
+
+// #1005: a repository whose HEAD is a FIFO, on which git itself blocks,
+// reads as unknown, and promptly: the probe never starts git there.
+// Mutation: drop gitenv's HEAD mode check: git runs, blocks until the
+// 30-second deadline, and the 10-second bound fails the test.
+func TestGitStatusOfAFIFOHeadIsUnknownAtOnce(t *testing.T) {
+	dir := gitenvtest.FIFOHeadRepo(t)
+	bin, err := osexec.LookPath(gitenv.Bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan GitStatus, 1)
+	go func() { done <- gitStatus(t.Context(), exec.OSRunner{}, bin, dir) }()
+	select {
+	case got := <-done:
+		if got.State != StatusUnknown {
+			t.Errorf("gitStatus = %+v, want %q", got, StatusUnknown)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the projects status probe did not return: git is blocked on the FIFO HEAD")
 	}
 }

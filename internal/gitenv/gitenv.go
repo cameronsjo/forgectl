@@ -116,6 +116,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"time"
 
 	fexec "github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -366,6 +367,16 @@ const maxSubmoduleDepth = 32
 // before it refuses the call. Each costs two git processes.
 const maxUnfilteredRepos = 256
 
+// unfilteredDeadline bounds one RunUnfiltered call, its listings included
+// (#1005). git itself blocks for good on a repository whose HEAD, or a loose
+// ref it reads, is a FIFO: plain `git status` hangs there (measured on git
+// 2.43), and so do the listings. 30 seconds is an order of magnitude above a
+// status of a large working tree on a cold cache, which takes seconds, so a
+// real repository never meets it, while a planted one costs one bounded
+// wait per repository rather than a hung command. It is a variable only so
+// a test can shorten it.
+var unfilteredDeadline = 30 * time.Second
+
 // RunUnfiltered runs git with args in dir under Local, as RunBin would, with
 // every filter driver git's configuration defines switched off
 // (cameronsjo/forgectl#977). It is for a call that can run a filter on the
@@ -407,8 +418,16 @@ const maxUnfilteredRepos = 256
 //   - any repository's .git, dir's own included, is neither a directory nor
 //     a regular file: a FIFO or a device, whose read could block or never
 //     end;
+//   - any repository's HEAD is neither a regular file nor a symbolic link:
+//     a FIFO there blocks git itself;
 //   - two paths reach one repository, submodules nest past
 //     maxSubmoduleDepth, or the walk passes maxUnfilteredRepos.
+//
+// The whole call, listings included, runs under unfilteredDeadline, each git
+// in a process group of its own that the deadline kills whole, and it fails
+// with errUnfilteredDeadline when the deadline ends it: a FIFO that git
+// reads, which the checks above do not see (a loose ref's), blocks it for
+// good.
 //
 // dir "" lists and runs in the current directory.
 func RunUnfiltered(ctx context.Context, r Runner, bin, dir string, args ...string) (string, error) {
@@ -423,6 +442,19 @@ func RunUnfiltered(ctx context.Context, r Runner, bin, dir string, args ...strin
 // also that does not exist is skipped: git runs no filter in a working tree
 // that is not there, and worktree remove still prunes its record.
 func RunUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []string, args ...string) (string, error) {
+	dctx, cancel := context.WithTimeout(ctx, unfilteredDeadline)
+	defer cancel()
+	// Status and worktree remove are non-interactive, so each git may leave
+	// the terminal's process group; at the deadline its whole group dies.
+	out, err := runUnfilteredAlso(fexec.WithProcessGroup(dctx), r, bin, dir, also, args...)
+	if err != nil && ctx.Err() == nil && errors.Is(dctx.Err(), context.DeadlineExceeded) {
+		return "", fmt.Errorf("%w (%s)", errUnfilteredDeadline, unfilteredDeadline)
+	}
+	return out, err
+}
+
+// runUnfilteredAlso is RunUnfilteredAlso without its deadline.
+func runUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []string, args ...string) (string, error) {
 	type repo struct {
 		dir   string
 		depth int
@@ -438,11 +470,12 @@ func RunUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []st
 	// submodule that leads back to one of them is refused as a revisit. One
 	// that cannot be is left to git: dir may be a subdirectory of its
 	// working tree, or a worktree whose layout the listing need not model.
-	// A .git that is neither a directory nor a regular file is refused.
+	// A .git that is neither a directory nor a regular file is refused, and
+	// so is a HEAD that is neither a regular file nor a symbolic link.
 	visited := map[string]bool{}
 	for _, q := range queue {
 		key, err := gitDirKey(q.dir)
-		if errors.Is(err, errGitfileNotRegular) {
+		if errors.Is(err, errGitfileNotRegular) || errors.Is(err, errHeadNotRegular) {
 			return "", err
 		}
 		if err == nil && key != "" {
@@ -571,9 +604,11 @@ const maxGitfileBytes = 64 << 10
 // at. It returns "" when sub holds no .git. It returns errSubmoduleSymlink
 // when .git is a symbolic link, errGitfileNotRegular when .git is neither a
 // directory nor a regular file (a FIFO or a device, whose read could block
-// or never end; git's own read_gitfile refuses them too), and
-// errInvalidSubmoduleGit when .git names no repository (no HEAD in it). It
-// never reads more than maxGitfileBytes.
+// or never end; git's own read_gitfile refuses them too),
+// errInvalidSubmoduleGit when .git names no repository (no HEAD in it), and
+// errHeadNotRegular when that HEAD is neither a regular file nor a symbolic
+// link (a FIFO there blocks git itself). It never reads more than
+// maxGitfileBytes.
 func gitDirKey(sub string) (string, error) {
 	dotGit := filepath.Join(sub, ".git")
 	fi, err := os.Lstat(dotGit)
@@ -603,8 +638,12 @@ func gitDirKey(sub string) (string, error) {
 		return "", errInvalidSubmoduleGit
 	}
 	// The gitfile names any path it likes; only its HEAD is checked.
-	if _, err := os.Lstat(filepath.Join(resolved, "HEAD")); err != nil { //nolint:gosec // G703: a gitfile may point anywhere, as git allows; this only checks for a HEAD there
+	head, err := os.Lstat(filepath.Join(resolved, "HEAD")) //nolint:gosec // G703: a gitfile may point anywhere, as git allows; this only checks for a HEAD there
+	if err != nil {
 		return "", errInvalidSubmoduleGit
+	}
+	if !head.Mode().IsRegular() && head.Mode()&fs.ModeSymlink == 0 {
+		return "", errHeadNotRegular
 	}
 	return resolved, nil
 }
@@ -642,6 +681,14 @@ func readGitfile(path string) (string, error) {
 // errGitfileNotRegular is returned for a .git that is neither a directory
 // nor a regular file.
 var errGitfileNotRegular = errors.New("a repository's .git is neither a directory nor a regular file; refusing to run unfiltered")
+
+// errHeadNotRegular is returned for a repository whose HEAD is neither a
+// regular file nor a symbolic link.
+var errHeadNotRegular = errors.New("a repository's HEAD is neither a regular file nor a symbolic link; refusing to run git there")
+
+// errUnfilteredDeadline is returned when unfilteredDeadline ends a
+// RunUnfiltered call.
+var errUnfilteredDeadline = errors.New("git did not finish in time; a repository may hold a file git blocks on")
 
 // errUnexpectedFilterKey is returned for listing output that is not a
 // NUL-separated list of filter driver keys.
