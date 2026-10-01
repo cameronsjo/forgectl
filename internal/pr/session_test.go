@@ -196,7 +196,8 @@ func TestPrepare_RealDispatch(t *testing.T) {
 	if !ok {
 		t.Fatal("no git call")
 	}
-	if gitenvtest.Strip(git.Args)[0] != "clone" || !contains(git.Args, "--branch") || !contains(git.Args, "feature-x") || !contains(git.Args, "--") {
+	// The sandbox clone refuses ext:: and fd:: ahead of the subcommand (#978).
+	if a := gitenvtest.Strip(git.Args); len(a) < 5 || strings.Join(a[:5], " ") != "-c protocol.ext.allow=never -c protocol.fd.allow=never clone" || !contains(git.Args, "--branch") || !contains(git.Args, "feature-x") || !contains(git.Args, "--") {
 		t.Errorf("git clone args missing --branch/headRef/--: %v", git.Args)
 	}
 	if !contains(git.Args, "https://github.com/contributor/forgectl") {

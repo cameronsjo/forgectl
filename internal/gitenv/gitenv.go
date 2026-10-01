@@ -5,16 +5,19 @@
 // live there. Some of that config can make git run a program or reach the
 // network on a call that means neither. So every git invocation goes through
 // a Profile, and TestProductionGitGoesThroughGitenv fails when production
-// code runs git any other way.
+// code runs git any other way. The one exception is git that gh runs for
+// `gh repo clone`, which the pin allowlists by name (ghGitAllowlist); gh's
+// environment loses what Transport removes (Unset).
 //
 // # Local
 //
 // Local, the zero Profile, is for every call that needs no fetch or push:
 // rev-parse, remote get-url, status, for-each-ref, and the local writes
-// (config, branch -D, worktree add from a complete clone). It pins off each
-// way such a call can be made to run a program or reach the network, rather
-// than trusting the repository not to ask. It is the stash check's hardening
-// from #938, extracted unchanged:
+// (config, branch -D, worktree add from a complete clone). It pins off the
+// ways below that such a call can be made to run a program or reach the
+// network, rather than trusting the repository not to ask. It is the stash
+// check's hardening from #938, extracted unchanged. It does not pin off every
+// way: see "What Local leaves running".
 //
 //   - lazy fetch. In a partial clone (a promisor remote), reading a missing
 //     object fetches it, which runs the transport, and with it
@@ -58,9 +61,31 @@
 //
 // User-level config, global and system, is kept: it is the operator's own,
 // and dropping it would drop safe.directory, which turns a repository the
-// operator marked safe into a failed call. Hooks are not switched off: the
-// Local calls that can run one (branch -D's reference-transaction, worktree
-// add's post-checkout) run it in the operator's own repository.
+// operator marked safe into a failed call.
+//
+// # What Local leaves running
+//
+//   - Filter drivers. A file that .gitattributes (or .git/info/attributes)
+//     routes through filter.<name>.clean or .process runs that program
+//     whenever git re-hashes the file, which status does for any stat-dirty
+//     entry, and so does worktree remove's dirty check. No option turns
+//     filters off, and the repository's own config can define them. A call
+//     that needs no filter uses RunUnfiltered, which lists the drivers and
+//     blanks each one by name (#977); the projects status probe and clean's
+//     dirty check do. It reads the superproject's config only: status runs a
+//     child git in each submodule, whose own drivers it does not list.
+//
+//   - The operator's own filters on checkout. worktree add runs smudge
+//     filters, git-lfs's among them, which may fetch objects themselves.
+//     Measured on git 2.43 with git-lfs 3.4.1: a worktree add under Local
+//     from a bare clone without the LFS objects fetched them from a file://
+//     remote, through git-lfs's own transfer, and checked the real content
+//     out. Not measured: an https remote whose credentials only an
+//     interactive prompt supplies, which GIT_TERMINAL_PROMPT=0 would refuse.
+//
+//   - Hooks. The Local calls that can run one (branch -D's
+//     reference-transaction, worktree add's post-checkout) run it in the
+//     operator's own repository.
 //
 // # Transport
 //
@@ -81,6 +106,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -165,10 +191,30 @@ func Args(p Profile) []string {
 	return append([]string(nil), localArgs...)
 }
 
+// caseInsensitiveEnv is whether environment variable names compare without
+// regard to case, as on Windows, where git_dir and GIT_DIR are one variable.
+// It is a variable only so a test on another platform can model Windows.
+var caseInsensitiveEnv = runtime.GOOS == "windows"
+
+// sameVar reports whether the environment variable names a and b name one
+// variable on this platform.
+func sameVar(a, b string) bool {
+	if caseInsensitiveEnv {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+// hasVarPrefix reports whether the environment variable name key begins with
+// prefix, compared as sameVar compares names.
+func hasVarPrefix(key, prefix string) bool {
+	return len(key) >= len(prefix) && sameVar(key[:len(prefix)], prefix)
+}
+
 // removed reports whether p removes key from the inherited environment.
 func removed(p Profile, key string) bool {
 	for _, k := range repositoryVars {
-		if key == k {
+		if sameVar(key, k) {
 			return true
 		}
 	}
@@ -176,16 +222,25 @@ func removed(p Profile, key string) bool {
 		return false
 	}
 	for _, k := range localOnlyVars {
-		if key == k {
+		if sameVar(key, k) {
 			return true
 		}
 	}
 	for _, pin := range localPins {
-		if key == pin[0] {
+		if sameVar(key, pin[0]) {
 			return true
 		}
 	}
-	return strings.HasPrefix(key, "GIT_CONFIG_KEY_") || strings.HasPrefix(key, "GIT_CONFIG_VALUE_")
+	return hasVarPrefix(key, "GIT_CONFIG_KEY_") || hasVarPrefix(key, "GIT_CONFIG_VALUE_")
+}
+
+// Unset returns the variables in environ that p removes, as a Runner's
+// removals. A caller that starts a program which itself runs git, rather
+// than git directly, passes Unset(Transport, os.Environ()) so an exported
+// GIT_WORK_TREE or GIT_INDEX_FILE cannot redirect that program's git.
+func Unset(p Profile, environ []string) []string {
+	_, unset := filter(p, environ)
+	return unset
 }
 
 // Env returns environ as p runs git with it: the scrubbed variables removed,
