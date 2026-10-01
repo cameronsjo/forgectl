@@ -367,15 +367,25 @@ const maxSubmoduleDepth = 32
 // before it refuses the call. Each costs two git processes.
 const maxUnfilteredRepos = 256
 
-// unfilteredDeadline bounds one RunUnfiltered call, its listings included
-// (#1005). git itself blocks for good on a repository whose HEAD, or a loose
+// repoDeadline bounds one RunUnfiltered call, its listings included, and
+// each call made under Bounded (#1005). git itself blocks for good on a repository whose HEAD, or a loose
 // ref it reads, is a FIFO: plain `git status` hangs there (measured on git
 // 2.43), and so do the listings. 30 seconds is an order of magnitude above a
 // status of a large working tree on a cold cache, which takes seconds, so a
 // real repository never meets it, while a planted one costs one bounded
 // wait per repository rather than a hung command. It is a variable only so
 // a test can shorten it.
-var unfilteredDeadline = 30 * time.Second
+var repoDeadline = 30 * time.Second
+
+// Bounded returns ctx bounded by repoDeadline, under which each git a
+// Runner starts runs in a process group of its own that the deadline kills
+// whole. It is for a non-interactive Local call in a repository forgectl
+// did not make, where a FIFO HEAD or ref would block git for good: the
+// projects inventory's `remote get-url`, for one. The caller defers cancel.
+func Bounded(ctx context.Context) (context.Context, context.CancelFunc) {
+	dctx, cancel := context.WithTimeout(ctx, repoDeadline)
+	return fexec.WithProcessGroup(dctx), cancel
+}
 
 // RunUnfiltered runs git with args in dir under Local, as RunBin would, with
 // every filter driver git's configuration defines switched off
@@ -423,9 +433,8 @@ var unfilteredDeadline = 30 * time.Second
 //   - two paths reach one repository, submodules nest past
 //     maxSubmoduleDepth, or the walk passes maxUnfilteredRepos.
 //
-// The whole call, listings included, runs under unfilteredDeadline, each git
-// in a process group of its own that the deadline kills whole, and it fails
-// with errUnfilteredDeadline when the deadline ends it: a FIFO that git
+// The whole call, listings included, runs under Bounded, and it fails with
+// errUnfilteredDeadline when repoDeadline ends it: a FIFO that git
 // reads, which the checks above do not see (a loose ref's), blocks it for
 // good.
 //
@@ -442,13 +451,13 @@ func RunUnfiltered(ctx context.Context, r Runner, bin, dir string, args ...strin
 // also that does not exist is skipped: git runs no filter in a working tree
 // that is not there, and worktree remove still prunes its record.
 func RunUnfilteredAlso(ctx context.Context, r Runner, bin, dir string, also []string, args ...string) (string, error) {
-	dctx, cancel := context.WithTimeout(ctx, unfilteredDeadline)
-	defer cancel()
 	// Status and worktree remove are non-interactive, so each git may leave
 	// the terminal's process group; at the deadline its whole group dies.
-	out, err := runUnfilteredAlso(fexec.WithProcessGroup(dctx), r, bin, dir, also, args...)
+	dctx, cancel := Bounded(ctx)
+	defer cancel()
+	out, err := runUnfilteredAlso(dctx, r, bin, dir, also, args...)
 	if err != nil && ctx.Err() == nil && errors.Is(dctx.Err(), context.DeadlineExceeded) {
-		return "", fmt.Errorf("%w (%s)", errUnfilteredDeadline, unfilteredDeadline)
+		return "", fmt.Errorf("%w (%s)", errUnfilteredDeadline, repoDeadline)
 	}
 	return out, err
 }
@@ -686,8 +695,8 @@ var errGitfileNotRegular = errors.New("a repository's .git is neither a director
 // regular file nor a symbolic link.
 var errHeadNotRegular = errors.New("a repository's HEAD is neither a regular file nor a symbolic link; refusing to run git there")
 
-// errUnfilteredDeadline is returned when unfilteredDeadline ends a
-// RunUnfiltered call.
+// errUnfilteredDeadline is returned when repoDeadline ends a RunUnfiltered
+// call.
 var errUnfilteredDeadline = errors.New("git did not finish in time; a repository may hold a file git blocks on")
 
 // errUnexpectedFilterKey is returned for listing output that is not a

@@ -13,9 +13,9 @@ var (
 	ErrUnfilteredDeadline = errUnfilteredDeadline
 )
 
-// SetUnfilteredDeadline shortens RunUnfiltered's deadline for t.
-func SetUnfilteredDeadline(t interface{ Cleanup(func()) }, d time.Duration) {
-	old := unfilteredDeadline
-	unfilteredDeadline = d
-	t.Cleanup(func() { unfilteredDeadline = old })
+// SetRepoDeadline shortens repoDeadline for t.
+func SetRepoDeadline(t interface{ Cleanup(func()) }, d time.Duration) {
+	old := repoDeadline
+	repoDeadline = d
+	t.Cleanup(func() { repoDeadline = old })
 }

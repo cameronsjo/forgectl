@@ -186,7 +186,7 @@ func TestRunUnfilteredAcceptsASymlinkHead(t *testing.T) {
 // context in RunUnfilteredAlso: the call blocks and the bound fails the test.
 func TestRunUnfilteredDeadlineEndsAGitThatBlocks(t *testing.T) {
 	gitenvtest.RequireGit(t)
-	gitenv.SetUnfilteredDeadline(t, time.Second)
+	gitenv.SetRepoDeadline(t, time.Second)
 	dir := t.TempDir()
 	gitenvtest.Git(t, dir, "init", "-q", "-b", "main")
 	gitenvtest.Git(t, dir, "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "--allow-empty", "-m", "c")
@@ -209,7 +209,7 @@ func TestRunUnfilteredDeadlineEndsAGitThatBlocks(t *testing.T) {
 // Mutation: drop fexec.WithProcessGroup in RunUnfilteredAlso: only the
 // direct child is killed, and the sleep is still running.
 func TestRunUnfilteredDeadlineKillsTheProcessGroup(t *testing.T) {
-	gitenv.SetUnfilteredDeadline(t, time.Second)
+	gitenv.SetRepoDeadline(t, time.Second)
 	pidFile := filepath.Join(t.TempDir(), "pid")
 	bin := filepath.Join(t.TempDir(), "git")
 	script := "#!/bin/sh\ncase \"$*\" in\n*--get-regexp*) exit 1 ;;\n*ls-files*) exit 0 ;;\nesac\nsleep 300 &\necho $! > '" + pidFile + "'\nwait\n"

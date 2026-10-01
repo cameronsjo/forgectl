@@ -570,7 +570,10 @@ func (c *Client) localRepos(ctx context.Context) ([]Repo, error) {
 		// which would misattribute it to an ancestor repo's origin (and then
 		// dedup it away). Skip the spawn entirely for that case.
 		if p.Status.State != StatusNotRepo {
-			url, err := gitenv.Run(ctx, c.run, gitenv.Local, "-C", p.Dir, "remote", "get-url", "origin")
+			// Bounded (#1005): a FIFO HEAD blocks get-url as it does status.
+			bctx, cancel := gitenv.Bounded(ctx)
+			url, err := gitenv.Run(bctx, c.run, gitenv.Local, "-C", p.Dir, "remote", "get-url", "origin")
+			cancel()
 			if err == nil {
 				url = strings.TrimSpace(url)
 				if host, owner, name := parseRemoteURL(url, c.effectiveGitHubHost()); name != "" {
@@ -973,6 +976,10 @@ func (c *Client) otherPlacements(r Repo, dest string) []string {
 // resolves to r's (host, owner, name) — i.e. dir really is r, not a same-named
 // repo from a different host.
 func (c *Client) originMatches(ctx context.Context, dir string, r Repo) bool {
+	// Bounded (#1005): dir may be any checkout already at the placement, and
+	// a FIFO HEAD there blocks get-url for good.
+	ctx, cancel := gitenv.Bounded(ctx)
+	defer cancel()
 	url, err := gitenv.Run(ctx, c.run, gitenv.Local, "-C", dir, "remote", "get-url", "origin")
 	if err != nil {
 		return false
