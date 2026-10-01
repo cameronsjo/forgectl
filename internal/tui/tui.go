@@ -584,6 +584,13 @@ func (m model) activate() (tea.Model, tea.Cmd) {
 			m.mode = menuMode
 			return m, nil
 		}
+		if entry.Name == "status" {
+			// status's hub row opens the cockpit (forgectl#13 lane 2), as
+			// tmux's opens its jumper: the overview is a screen to stay on,
+			// not a report to print and exit.
+			m.action = Action{Kind: ActionRunVerb, Argv: statusCockpitArgv()}
+			return m, tea.Quit
+		}
 		if moduleNeedsArg(entry) {
 			// The module itself needs one argument (pr <ref>): ask for it
 			// here, with its subcommands one row away in the picker.
@@ -984,6 +991,8 @@ func (m model) selectedDollar() string {
 			argv = append(append([]string(nil), e.Argv[:len(e.Argv)-1]...), strings.Fields(e.Use)...)
 		case e.Name == "tmux":
 			argv, exact = []string{e.Name}, true
+		case e.Name == "status":
+			argv, exact = statusCockpitArgv(), true
 		case moduleNeedsArg(e):
 			argv = strings.Fields(e.Use)
 		case len(e.Leaves) == 0:

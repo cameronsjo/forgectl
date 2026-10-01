@@ -1,0 +1,30 @@
+[38;2;176;149;224m#[m  [1;38;2;219;187;111mforgectl status[m[38;2;90;122;138m  ·  git 2m ago · prs 2m ago · clean 2m ago · bench 2m ago[m          
+[38;2;74;138;94m✓[m [1;38;2;219;187;111mgit  [m  [38;2;232;230;225m3 project(s) under "/p": 1 clean, 1 dirty, 1 ahead, 0 unknown[m                
+    [38;2;232;230;225malpha[m                     [38;2;90;122;138m[clean][m                                                 
+  [38;2;219;187;111m> [m[1;38;2;219;187;111mbeta[m                      [38;2;90;122;138m[2 modified][m                                            
+    [38;2;232;230;225mgamma[m                     [38;2;90;122;138m[1 ahead][m                                               
+[38;2;196;128;138m![m [38;2;232;230;225mprs  [m  [38;2;232;230;225m0 active review(s), 2 awaiting you, 1 open by you[m                            
+    [38;2;196;128;138mnote: your-open: query failed[m                                                     
+    [38;2;232;230;225mo/r#1[m                     [38;2;90;122;138mawaiting you · fix the thing[m                            
+    [38;2;232;230;225mo/r#2[m                     [38;2;90;122;138mawaiting you · add the other[m                            
+[38;2;90;122;138m    … 1 more (tab to this section)[m                                                    
+[38;2;230;168;162m✗[m [38;2;232;230;225mclean[m  [1;38;2;230;168;162mfailed: timed out after 20s[m                                                  
+[38;2;74;138;94m✓[m [38;2;232;230;225mbench[m  [38;2;232;230;225mhearth ok, chronicle unavailable[m                                             
+    [38;2;232;230;225mhearth[m                    [38;2;90;122;138mok — up[m                                                 
+    [38;2;232;230;225mchronicle[m                 [38;2;90;122;138munavailable — down[m                                      
+                                                                                      
+                                                                                      
+                                                                                      
+                                                                                      
+                                                                                      
+                                                                                      
+                                                                                      
+                                                                                      
+                                                                                      
+                                                                                      
+                                                                                      
+                                                                                      
+                                                                                      
+                                                                                      
+                                                                                      
+[38;2;90;122;138m↑↓/jk move · tab section · enter open · r refresh · R all · / filter · ? help · q quit[m

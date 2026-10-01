@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -64,63 +65,116 @@ type Source[T any] func(ctx context.Context) (T, []string, error)
 var errPanicked = errors.New("source panicked")
 
 // outcome carries a source's return values across the goroutine boundary.
+// ctxErr is the section context's state the moment the source returned,
+// captured on the source's own goroutine: whether the result beat the
+// deadline is a fact about when the source finished, not about when Collect
+// got round to reading the channel.
 type outcome[T any] struct {
-	data  T
-	notes []string
-	err   error
+	data   T
+	notes  []string
+	err    error
+	ctxErr error
 }
 
 // Collect runs src under a deadline of timeout and folds its outcome into a
 // Section. It never returns an error, and a panic on the source's own
 // goroutine becomes a failed section rather than a crash.
 //
-// A section whose context has ended by the time its result arrives is failed
+// A section whose context had ended by the time its source returned is failed
 // with the deadline, whatever the source returned. The shipped sources turn
 // cancellation into ordinary-looking data (an "unknown" tree, a target
 // skipped as dirty, "docker compose unavailable"), so a result produced after
 // the deadline cannot be told apart from a real answer and is never reported
-// as one.
+// as one. A source that returned before the deadline is judged on what it
+// returned, even when Collect reads it after the deadline has passed.
 //
 // The source runs on its own goroutine so a source that ignores its context
 // (the clean walk takes none) is abandoned at the deadline instead of holding
-// the whole report. The abandoned goroutine keeps running until it returns,
-// which for a one-shot CLI process means at most until exit; its result lands
-// in a buffered channel nobody reads, so it never blocks.
+// the whole report. The abandoned goroutine keeps running until it returns;
+// its result lands in a buffered channel nobody reads, so it never blocks.
+// A caller that runs Collect repeatedly (the cockpit) uses CollectTracked to
+// learn when that goroutine has actually returned.
 //
 // timeout < 1 means no deadline beyond ctx's own.
 func Collect[T any](ctx context.Context, timeout time.Duration, src Source[T]) Section[T] {
+	s, _ := CollectTracked(ctx, timeout, src)
+	return s
+}
+
+// CollectTracked is Collect, plus a channel that is closed once the source's
+// goroutine has returned. Collect gives up on a source at its deadline, but
+// the goroutine runs on until the source returns; a long-running caller that
+// starts the same source again before then would pile up abandoned
+// goroutines. Such a caller treats the section as busy until done is closed.
+func CollectTracked[T any](ctx context.Context, timeout time.Duration, src Source[T]) (Section[T], <-chan struct{}) {
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	ch := make(chan outcome[T], 1)
+	r := &result[T]{ch: make(chan outcome[T], 1)}
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		defer func() {
-			if r := recover(); r != nil {
-				slog.Debug("Status section source panicked.", "type", fmt.Sprintf("%T", r))
-				ch <- outcome[T]{err: errPanicked}
+			if p := recover(); p != nil {
+				slog.Debug("Status section source panicked.", "type", fmt.Sprintf("%T", p))
+				r.send(ctx, outcome[T]{err: errPanicked})
 			}
 		}()
 		data, notes, err := src(ctx)
-		ch <- outcome[T]{data: data, notes: notes, err: err}
+		r.send(ctx, outcome[T]{data: data, notes: notes, err: err})
 	}()
 
 	select {
-	case o := <-ch:
-		return fold(o, ctx.Err(), timeout)
+	case o := <-r.ch:
+		return fold(o, timeout), done
 	case <-ctx.Done():
-		return failed[T](deadlineError(ctx.Err(), timeout))
+		return r.settle(ctx.Err(), timeout), done
 	}
 }
 
-// fold turns a returned outcome into a Section. ctxErr is the section
-// context's state when the result arrived. Once it is set, the section failed
-// on its deadline whatever the source returned, error or data: data read
-// under a cancelled context is not an answer (see Collect).
-func fold[T any](o outcome[T], ctxErr error, timeout time.Duration) Section[T] {
-	if ctxErr != nil {
+// result is the one-slot handoff between a source's goroutine and Collect.
+// mu makes "read the context, then send" one step as far as settle can see,
+// which is what closes the race at the deadline: if settle finds the slot
+// empty, the source had not yet read its context, and when it does it will
+// find the context ended.
+type result[T any] struct {
+	mu sync.Mutex
+	ch chan outcome[T]
+}
+
+// send stamps o with the context's state at the moment the source returned
+// and hands it over. ch has room for the one send, so it never blocks.
+func (r *result[T]) send(ctx context.Context, o outcome[T]) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	o.ctxErr = ctx.Err()
+	r.ch <- o
+}
+
+// settle decides a section whose context ended while Collect was waiting.
+// When both the result and the deadline are ready, select picks between them
+// at random, so a source that returned just before its deadline could lose
+// the draw; settle takes a result already handed over first, and fold judges
+// it on the context state captured when the source returned.
+func (r *result[T]) settle(ctxErr error, timeout time.Duration) Section[T] {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	select {
+	case o := <-r.ch:
+		return fold(o, timeout)
+	default:
 		return failed[T](deadlineError(ctxErr, timeout))
+	}
+}
+
+// fold turns a returned outcome into a Section. Once o.ctxErr is set, the
+// section failed on its deadline whatever the source returned, error or
+// data: data read under a cancelled context is not an answer (see Collect).
+func fold[T any](o outcome[T], timeout time.Duration) Section[T] {
+	if o.ctxErr != nil {
+		return failed[T](deadlineError(o.ctxErr, timeout))
 	}
 	if o.err != nil {
 		return failed[T](o.err)

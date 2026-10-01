@@ -7,6 +7,7 @@ forgectl status                          # one glyph-led line per section, a few
 forgectl status --json                   # every section and row, for scripts
 forgectl status --json --strict          # same, but exit 1 when any section degraded or failed
 forgectl status --timeout 5s             # give each section five seconds (default 20s)
+forgectl status --tui                    # the cockpit: the same sections on one screen, refreshing in place
 ```
 
 `forgectl status` puts four read paths that already ship into one view. It changes nothing.
@@ -22,7 +23,7 @@ forgectl status --timeout 5s             # give each section five seconds (defau
 
 ## Failure containment
 
-The sections run concurrently, and each has its own deadline, set with `--timeout` (default 20s). A section fails when its source returns an error, panics on the goroutine that runs it, or misses the deadline. A result that arrives after the deadline counts as missing it, even when the source returned data, because sources read under a cancelled context can report ordinary-looking data such as an `unknown` tree. A failed section is reported as failed, and the other sections still report. A failed section never fails the command.
+The sections run concurrently, and each has its own deadline, set with `--timeout` (default 20s). A section fails when its source returns an error, panics on the goroutine that runs it, or misses the deadline. A source that returns after the deadline counts as missing it, even when it returned data, because sources read under a cancelled context can report ordinary-looking data such as an `unknown` tree. A source that returned before the deadline is judged on what it returned, however late the report reads it. A failed section is reported as failed, and the other sections still report. A failed section never fails the command.
 
 `status` exits 0 whatever the sections report, like `bench status` and `pr dash`. With `--strict`, it writes the full report and then exits 1 when any section is not `ok`, like `projects list --strict`. Under `--json`, that exit adds nothing to stderr, because the report on stdout is the verdict ([json-contract.md](../json-contract.md)). A `--timeout` of zero or less is refused before any source runs (exit 1).
 
@@ -84,3 +85,51 @@ The glyph is the section's `state`: `✓` ok, `!` degraded, `✗` failed. Colour
 Each list says how many rows it hid. Every name, title, path and reason is escaped for the terminal and capped. The JSON report carries every row in full.
 
 The human view can change between releases. Scripts should read `--json`, whose shape only grows (ADR-0008).
+
+## Cockpit (`--tui`)
+
+`forgectl status --tui` shows the same four sections on one screen and refreshes them in place. The hub's `status` row opens it. The cockpit itself only reads. The one key that leads to an action is `enter` on a PR row: it quits the cockpit and hands off to `forgectl pr <ref>`, which starts a review.
+
+```text
+#  forgectl status  ·  git 2m ago · prs 2m ago · clean 2m ago · bench 2m ago
+✓ git    3 project(s) under "/p": 1 clean, 1 dirty, 1 ahead, 0 unknown
+    alpha                     [clean]
+  > beta                      [2 modified]
+    gamma                     [1 ahead]
+! prs    0 active review(s), 2 awaiting you, 1 open by you
+    note: your-open: query failed
+    o/r#1                     awaiting you · fix the thing
+    o/r#2                     awaiting you · add the other
+    … 1 more (tab to this section)
+✗ clean  failed: timed out after 20s
+✓ bench  hearth ok, chronicle unavailable
+    hearth                    ok — up
+    chronicle                 unavailable — down
+
+↑↓/jk move · tab section · enter open · r refresh · R all · / filter · ? help · q quit
+```
+
+- **Header.** Each section's age since its last result, `refreshing…` while a refresh runs, or `loading…` before the first result.
+- **Sections.** Each section has the same glyph and headline as the text view, which come from the same functions. The focused section lists all of its rows and scrolls. The others show their first two rows.
+  - `git` lists every local clone with its state. Plain directories are counted, not listed.
+  - `prs` lists the PRs awaiting you, then your open PRs, then your active reviews.
+  - `bench` lists each component with its reason.
+  - `clean` has only its headline. `clean --json` lists the targets.
+- **Keys.**
+
+  | Key | Does |
+  | --- | --- |
+  | `↑` `↓` `j` `k` | Move in the focused section. |
+  | `tab` `shift+tab` | Next or previous section. |
+  | `enter` | On a PR row, quits and runs `forgectl pr <ref>`, which starts a review. The argv is built and checked the way the hub's picker builds it, and it runs after the cockpit has exited, as a hub-chosen command does. On a project row, it says focus is not available yet. |
+  | `/` | Filters every section's rows on the text they show (name, state, title). `enter` keeps the filter, and `esc` clears it. |
+  | `r` | Refreshes the focused section. |
+  | `R` | Refreshes every section. |
+  | `?` | Shows the key help. |
+  | `q` `esc` `ctrl+c` | Quit. `esc` clears an active filter first. |
+
+- **Refresh.** Opening the cockpit runs one full collection. After that, only `git` refreshes itself, every 60s; it reads local clones and makes no network call. `prs` (which calls `gh`), `clean` and `bench` refresh only when you press `r` or `R`. A section refreshes at most once every 15s, and only one refresh per section runs at a time. A section whose source is still running after its `--timeout` shows as failed, but stays `refreshing…`, and refuses another refresh, until that source has actually returned.
+
+`--tui` needs a terminal on both stdin and stdout. Without one, it exits 1 and points at `--json`. It can't be combined with `--json` or `--strict`. `--timeout` still bounds each section. Every name, title, path, note and error is escaped for the terminal and capped.
+
+Unlike the hub, the cockpit has no `1`–`9` keys. Its rows carry no visible numbers, and a digit on a PR row would start a review on a row nobody saw numbered.
