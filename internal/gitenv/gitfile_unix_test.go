@@ -31,7 +31,7 @@ func specialGit(t *testing.T, dir, kind string) {
 			t.Skipf("mkfifo: %v", err)
 		}
 	case "chardev":
-		if err := unix.Mknod(p, unix.S_IFCHR|0o600, int(unix.Mkdev(1, 5))); err != nil { //nolint:gosec // G115: device numbers 1,5 fit
+		if err := mknodZero(p); err != nil {
 			t.Skipf("mknod /dev/zero's device: %v", err)
 		}
 	}
