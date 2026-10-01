@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.24.0](https://github.com/cameronsjo/forgectl/compare/v0.23.0...v0.24.0) (2026-09-30)
+
+
+### Features
+
+* **status:** add `forgectl status [--json]`, a read-only overview of local git state, the pr dash sections, the clean preview total and bench health; each section runs under its own deadline (--timeout, default 20s), a section that misses its deadline is reported failed even when its source returned data, a failed source degrades only its own section, and --strict exits 1 when any section is not ok ([a72fb65](https://github.com/cameronsjo/forgectl/commit/a72fb6512431fda73c5e8fbbf7d0c92ddbba75cd))
+
+
+### Bug Fixes
+
+* **cli:** cap `docs list` titles at 256 runes and `sessions` runbook paths at 512 in text output (paths now print quoted, cut in the middle); `--json` is unchanged ([8b773d3](https://github.com/cameronsjo/forgectl/commit/8b773d36b9c741b8a3b8a0b558affa1aafc63520))
+* **docs:** live reload no longer fires for files outside the root reached through a directory swapped for a symlink (kqueue) ([5178c43](https://github.com/cameronsjo/forgectl/commit/5178c43d2125aad1b455622658a12a2a6f3bf759))
+* **docs:** live-reload a vault's attachment set under docs serve, so adding or deleting an image or PDF updates attachment wikilinks without waiting for a note to change ([d396a86](https://github.com/cameronsjo/forgectl/commit/d396a867b6103872fa16b31231ff2c8638bcd1ef))
+* **docs:** resolve vault wikilinks and embeds to existing attachments (images, PDFs) the way Obsidian does, so the reader marks them as attachments instead of broken links and `docs check` stops reporting them ([d396a86](https://github.com/cameronsjo/forgectl/commit/d396a867b6103872fa16b31231ff2c8638bcd1ef))
+* **launch:** a prompt launch with stdout piped or redirected no longer passes `--allow-dangerously-skip-permissions`; it keeps the profile's permission mode, model, effort and add-dirs ([456324e](https://github.com/cameronsjo/forgectl/commit/456324e1ea28b6a1c245afe3c8e990ec1a09e77d))
+* **launch:** with stdout piped or redirected, a bare `forgectl launch`, `launch agents`, and `forgectl resume` no longer pass `--allow-dangerously-skip-permissions`; each keeps the rest of the profile's posture, and a flag you type yourself still passes ([8fba0b5](https://github.com/cameronsjo/forgectl/commit/8fba0b5c4ebc935e67f870172f9b3dded42434c4))
+* **sessions:** cap every runbook and session text field in sessions search/why/last and sync text output (--json keeps them whole), and show a fixed stand-in for a clean/prune failure whose error text cannot be cut safely ([18620b0](https://github.com/cameronsjo/forgectl/commit/18620b0508b790eb75483bebe8151ff2d62b10d2))
+
 ## [0.23.0](https://github.com/cameronsjo/forgectl/compare/v0.22.0...v0.23.0) (2026-09-30)
 
 
