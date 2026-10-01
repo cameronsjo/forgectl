@@ -473,7 +473,22 @@ func newSilentCodedError(code int) error {
 // need the tty (attach / sesh connect / a hub-selected verb) run here, after
 // Bubble Tea has released the terminal.
 func runAction(ctx context.Context, deps module.Deps, root *cobra.Command, client *tmux.Client, opts tui.RunOptions) error {
-	act, err := tui.Run(ctx, client, opts)
+	return runActionWith(ctx, client, opts, tui.Run, func(argv []string) error {
+		return runHubVerb(ctx, deps, root, argv, opts.Theme)
+	})
+}
+
+// hubRunner opens the hub and returns the action chosen in it; tui.Run in
+// production. It is a parameter so a caller's handling of the chosen action
+// can be tested without a terminal.
+type hubRunner func(ctx context.Context, client *tmux.Client, opts tui.RunOptions) (tui.Action, error)
+
+// runActionWith is runAction with the hub and the hand-off of a chosen verb
+// supplied by the caller. Outside fang (the bare-invoke route) runVerb runs
+// the verb at once; under fang (`forgectl tmux`) it defers it to
+// execDispatch, so the verb never nests a second fang frame in the first.
+func runActionWith(ctx context.Context, client *tmux.Client, opts tui.RunOptions, run hubRunner, runVerb func(argv []string) error) error {
+	act, err := run(ctx, client, opts)
 	if err != nil {
 		slog.Error("Failed to run TUI.", "error", err)
 		return err
@@ -483,7 +498,7 @@ func runAction(ctx context.Context, deps module.Deps, root *cobra.Command, clien
 		slog.Debug("TUI exited with no action.")
 		return nil
 	case tui.ActionRunVerb:
-		return runHubVerb(ctx, deps, root, act.Argv, opts.Theme)
+		return runVerb(act.Argv)
 	case tui.ActionShowInvocation:
 		fmt.Fprintln(os.Stderr, hubDollarLine(opts.Theme, act.Argv))
 		return nil
@@ -549,6 +564,19 @@ func deferVerb(ctx context.Context, argv []string) bool {
 	}
 	slot.argv = append([]string(nil), argv...)
 	return true
+}
+
+// deferHubVerb is how a command running under fang hands on a verb the
+// operator chose in its TUI: into the deferred-verb slot, so execDispatch runs
+// it once this command's fang frame has returned and a failing verb is
+// rendered once, by its own dispatch. Off that path it runs nothing and
+// prints the invocation instead.
+func deferHubVerb(cmd *cobra.Command, th theme.Theme, argv []string) error {
+	if deferVerb(cmd.Context(), argv) {
+		return nil
+	}
+	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), hubRunLine(th, argv))
+	return nil
 }
 
 // execDispatch is execCommand plus the deferred-verb slot: when the command
