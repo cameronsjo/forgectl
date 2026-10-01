@@ -45,6 +45,10 @@ func TestDecodeError(t *testing.T) {
 		"empty":                  ``,
 		"not json":               `not json`,
 		"renamed code (fixture)": string(fixture(t, "changed_error_envelope.json")),
+		"upper-case envelope":    `{"ERROR":{"CODE":"c"}}`,
+		"title-case error key":   `{"Error":{"code":"c"}}`,
+		"upper-case code key":    `{"error":{"CODE":"c"}}`,
+		"message not a string":   `{"error":{"code":"c","message":5}}`,
 	} {
 		if got, ok := DecodeError([]byte(raw)); ok {
 			t.Errorf("%s: read as refusal %+v", name, got)
@@ -52,6 +56,14 @@ func TestDecodeError(t *testing.T) {
 	}
 	if got, ok := DecodeError([]byte("  {\"error\":{\"code\":\"c\"}}\n")); !ok || got.Code != "c" {
 		t.Errorf("surrounding whitespace: %+v, %v", got, ok)
+	}
+	// A case-folded "MESSAGE" is not herdr's message: the exact key wins and a
+	// folded one is never read in its place.
+	if got, ok := DecodeError([]byte(`{"error":{"code":"c","message":"m","MESSAGE":"spoof"}}`)); !ok || got.Message != "m" {
+		t.Errorf("folded message key: %+v, %v", got, ok)
+	}
+	if got, ok := DecodeError([]byte(`{"error":{"code":"c","MESSAGE":"spoof"}}`)); !ok || got.Message != "" {
+		t.Errorf("only a folded message key: %+v, %v", got, ok)
 	}
 }
 
@@ -72,6 +84,8 @@ func TestDecodeResult(t *testing.T) {
 		"result null":              `{"id":"x","result":null}`,
 		"an error envelope":        `{"error":{"code":"c"}}`,
 		"renamed result (fixture)": string(fixture(t, "changed_result_envelope.json")),
+		"title-case result key":    `{"id":"x","Result":{"workspaces":[]}}`,
+		"upper-case result key":    `{"id":"x","RESULT":{"workspaces":[]}}`,
 	} {
 		if _, err := DecodeResult[list]([]byte(raw)); !errors.Is(err, ErrNoResult) {
 			t.Errorf("%s: err = %v, want ErrNoResult", name, err)
@@ -81,6 +95,11 @@ func TestDecodeResult(t *testing.T) {
 		"not json":      `not json`,
 		"empty":         ``,
 		"result scalar": `{"result":3}`,
+		// A member of T matched only by case folding is a renamed key, not the
+		// member: it must not read as present.
+		"title-case member":  `{"result":{"Workspaces":[{"workspace_id":"w1"}]}}`,
+		"folded beside real": `{"result":{"workspaces":[],"WORKSPACES":[{"workspace_id":"w1"}]}}`,
+		"long-s fold":        `{"result":{"workſpaces":[{"workspace_id":"w1"}]}}`,
 	} {
 		if _, err := DecodeResult[list]([]byte(raw)); err == nil || errors.Is(err, ErrNoResult) {
 			t.Errorf("%s: err = %v, want a decode error", name, err)
@@ -89,7 +108,8 @@ func TestDecodeResult(t *testing.T) {
 }
 
 // Mutation, one per rule: delete the rule from CheckOperand and its row goes
-// red; raise MaxOperandLen and "65 bytes" does (the limit is pinned as a
+// red (drop the utf8.ValidString case and the invalid rows do; drop the
+// IsInvisibleRune half and the invisible rows do); raise MaxOperandLen and "65 bytes" does (the limit is pinned as a
 // number, not only relative to the constant).
 func TestCheckOperand(t *testing.T) {
 	for name, s := range map[string]string{
@@ -103,12 +123,26 @@ func TestCheckOperand(t *testing.T) {
 		"c1 control":  "w1\u0085",
 		"over length": strings.Repeat("a", MaxOperandLen+1),
 		"65 bytes":    strings.Repeat("a", 65),
+		// The rest are what the hub picker refuses too (#946/#967, #999):
+		// a bidi override, invisible format runes, separators, and bytes that
+		// are not UTF-8.
+		"bidi override":        "w1\u202e",
+		"zero width space":     "w\u200b1",
+		"soft hyphen":          "w\u00ad1",
+		"byte order mark":      "\ufeffw1",
+		"line separator":       "w1\u2028",
+		"paragraph separator":  "w1\u2029",
+		"variation selector":   "w1\ufe0f",
+		"hangul filler":        "w1\u3164",
+		"braille blank":        "w1\u2800",
+		"invalid utf-8":        "w1\xff",
+		"truncated multi-byte": "w1\xe2\x80",
 	} {
 		if err := CheckOperand(s); err == nil {
 			t.Errorf("%s accepted", name)
 		}
 	}
-	for _, s := range []string{"w1", "w1:t3", "w7D:t17", "label with spaces", "fleet", "v1.2", strings.Repeat("a", MaxOperandLen)} {
+	for _, s := range []string{"w1", "w1:t3", "w7D:t17", "label with spaces", "fleet", "v1.2", strings.Repeat("a", MaxOperandLen), "caf\u00e9", "cafe\u0301", "\u6f22\u5b57", "fire \U0001F525"} {
 		if err := CheckOperand(s); err != nil {
 			t.Errorf("%q refused: %v", s, err)
 		}

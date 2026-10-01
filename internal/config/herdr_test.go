@@ -111,6 +111,26 @@ func TestHerdrOrganize_Validate(t *testing.T) {
 			want: "a label must not contain control characters",
 		},
 		{
+			name: "rule workspace with a bidi override",
+			cfg:  HerdrOrganizeConfig{Default: "d", Rules: []HerdrOrganizeRule{{Glob: "a", Workspace: "w\u202e"}}},
+			want: "a label must not contain control characters",
+		},
+		{
+			name: "default with a zero width space",
+			cfg:  HerdrOrganizeConfig{Default: "d\u200b", Rules: []HerdrOrganizeRule{{Glob: "a", Workspace: "w"}}},
+			want: "a label must not contain invisible characters or invalid UTF-8",
+		},
+		{
+			name: "order label with a line separator",
+			cfg:  HerdrOrganizeConfig{WorkspaceOrder: []string{"ok", "o\u2028"}},
+			want: "workspace_order entry #2",
+		},
+		{
+			name: "order label that is not UTF-8",
+			cfg:  HerdrOrganizeConfig{WorkspaceOrder: []string{"o\xff"}},
+			want: "a label must not contain invisible characters or invalid UTF-8",
+		},
+		{
 			name: "order label starting with a dash",
 			cfg:  HerdrOrganizeConfig{WorkspaceOrder: []string{"ok", "-x"}},
 			want: `workspace_order entry #2 "-x": a label must not start with '-'`,
