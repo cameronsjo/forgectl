@@ -29,8 +29,8 @@ type statusTUIRuntime struct {
 	stdinIsTerminal  func(io.Reader) bool
 	stdoutIsTerminal func(io.Writer) bool
 	run              func(ctx context.Context, opts tui.CockpitOptions) (tui.Action, error)
-	// runVerb runs a deferred hub-style argv after the cockpit has released
-	// the terminal. nil prints the invocation instead of running it.
+	// runVerb hands the argv the operator chose to whatever runs it once
+	// the cockpit has released the terminal.
 	runVerb func(cmd *cobra.Command, argv []string) error
 }
 
@@ -39,7 +39,20 @@ func productionStatusTUIRuntime() statusTUIRuntime {
 		stdinIsTerminal:  docsReadInputIsTerminal,
 		stdoutIsTerminal: docsReadOutputIsTerminal,
 		run:              tui.RunCockpit,
+		runVerb:          deferStatusVerb,
 	}
+}
+
+// deferStatusVerb hands argv back to execDispatch, which runs it after this
+// command and its fang frame have returned, so a failing `pr <ref>` is
+// rendered once, by its own dispatch. Off that path (a status reached some
+// other way) it prints the invocation and runs nothing.
+func deferStatusVerb(cmd *cobra.Command, argv []string) error {
+	if deferVerb(cmd.Context(), argv) {
+		return nil
+	}
+	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), hubDollarLine(theme.Theme{}, argv))
+	return nil
 }
 
 // runStatusCockpit opens the cockpit over src, then performs the action the
@@ -57,10 +70,6 @@ func runStatusCockpit(cmd *cobra.Command, src statusSources, th theme.Theme, rt 
 		return err
 	}
 	if act.Kind != tui.ActionRunVerb || len(act.Argv) == 0 {
-		return nil
-	}
-	if rt.runVerb == nil {
-		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), hubRunLine(th, act.Argv))
 		return nil
 	}
 	return rt.runVerb(cmd, act.Argv)

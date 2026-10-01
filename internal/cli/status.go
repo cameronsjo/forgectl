@@ -100,11 +100,7 @@ type statusCleanJSON struct {
 
 // newStatusCmd builds `forgectl status` over the shipped read paths.
 func newStatusCmd(deps module.Deps) *cobra.Command {
-	rt := productionStatusTUIRuntime()
-	rt.runVerb = func(cmd *cobra.Command, argv []string) error {
-		return runHubVerb(cmd.Context(), deps, cmd.Root(), argv, deps.Theme)
-	}
-	return newStatusCmdWith(defaultStatusSources(deps), deps.Theme, rt)
+	return newStatusCmdWith(defaultStatusSources(deps), deps.Theme, productionStatusTUIRuntime())
 }
 
 // defaultStatusSources wires each section to the read path its own verb

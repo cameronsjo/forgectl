@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"go/build"
 	"path"
 	"path/filepath"
@@ -369,17 +370,54 @@ func TestCockpit_EnterOnAProjectRowOnlySaysFocusIsNotAvailable(t *testing.T) {
 	}
 }
 
-func TestCockpit_NumberKeyOpensThatRow(t *testing.T) {
+// TestCockpit_DigitsOpenNothing: rows carry no visible numbers, so a digit
+// must not open (and on a PR row, start a review on) an unnumbered row.
+func TestCockpit_DigitsOpenNothing(t *testing.T) {
 	m, _ := openCockpit(t, cockpitFixture(), nil)
-	m, _ = pressCockpit(m, keyCode(tea.KeyTab))
-	m, cmd := pressCockpit(m, key("3"))
-	if !isQuit(cmd) || strings.Join(m.action.Argv, " ") != "pr o/r#3" {
-		t.Errorf("3 on prs: action = %+v, want RunVerb [pr o/r#3]", m.action)
+	m, _ = pressCockpit(m, keyCode(tea.KeyTab)) // prs
+	for _, d := range "123456789" {
+		var cmd tea.Cmd
+		m, cmd = pressCockpit(m, key(string(d)))
+		if cmd != nil || m.action.Kind != ActionNone {
+			t.Errorf("%c on prs: cmd=%v action=%+v, want nothing", d, cmd != nil, m.action)
+		}
 	}
-	m, _ = openCockpit(t, cockpitFixture(), nil)
-	m, _ = pressCockpit(m, keyCode(tea.KeyTab))
-	if m, cmd = pressCockpit(m, key("9")); cmd != nil || m.action.Kind != ActionNone {
-		t.Errorf("9 past the last row did something: %+v", m.action)
+}
+
+// TestCockpit_ScrollFollowsTheCursorInUpdate: the offset moves in Update, so
+// a model that has never been drawn still keeps its cursor in view, and View
+// leaves the model alone.
+func TestCockpit_ScrollFollowsTheCursorInUpdate(t *testing.T) {
+	fakes := cockpitFixture()
+	for i := range 40 {
+		fakes[0].sec.Rows = append(fakes[0].sec.Rows, CockpitRow{Kind: CockpitRowProject, Label: fmt.Sprintf("p%02d", i)})
+	}
+	m, _ := openCockpit(t, fakes, nil)
+	for range 35 {
+		m, _ = pressCockpit(m, key("j"))
+	}
+	s := m.secs[0]
+	room := m.focusRoom()
+	if s.offset == 0 || s.cursor < s.offset || s.cursor >= s.offset+room {
+		t.Fatalf("cursor %d, offset %d, room %d: Update did not scroll the cursor into view", s.cursor, s.offset, room)
+	}
+	before := s.offset
+	view := m.View().Content
+	if m.secs[0].offset != before {
+		t.Error("View moved the scroll offset")
+	}
+	var plain bytes.Buffer
+	if _, err := theme.Default().Writer(&plain, []string{"NO_COLOR=1"}).Write([]byte(view)); err != nil {
+		t.Fatal(err)
+	}
+	if want := "> " + m.visibleRows(0)[s.cursor].Label; !strings.Contains(plain.String(), want) {
+		t.Errorf("the selected row %q is not drawn:\n%s", want, plain.String())
+	}
+	for range 40 {
+		m, _ = pressCockpit(m, key("k"))
+	}
+	if m.secs[0].offset != 0 {
+		t.Errorf("offset = %d after moving back to the top, want 0", m.secs[0].offset)
 	}
 }
 
@@ -420,6 +458,11 @@ func TestCockpit_FilterNarrowsRowsAndEscClearsIt(t *testing.T) {
 	if rows := m.visibleRows(0); len(rows) != 1 || rows[0].Label != "beta" {
 		t.Fatalf("filtered git rows = %+v, want only beta", rows)
 	}
+	m.filter = []rune("/p/")
+	if rows := m.visibleRows(0); len(rows) != 0 {
+		t.Fatalf("a filter matching only the hidden path kept rows %+v; it must match drawn fields only", rows)
+	}
+	m.filter = []rune("bet")
 	m, cmd := pressCockpit(m, key("q")) // typed into the filter, not a quit
 	if isQuit(cmd) {
 		t.Fatal("q while filtering quit")
@@ -468,7 +511,7 @@ func TestCockpit_QuitKeys(t *testing.T) {
 // cockpit's own: none may run an action, quit, or start a load. The cockpit
 // is read-only; a stray d, x or K does nothing.
 func TestCockpit_NoKeyMutatesAnything(t *testing.T) {
-	own := "jkrR?/q123456789"
+	own := "jkrR?/q"
 	for c := rune('!'); c <= '~'; c++ {
 		if strings.ContainsRune(own, c) {
 			continue

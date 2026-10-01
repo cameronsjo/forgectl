@@ -88,7 +88,7 @@ The human view can change between releases. Scripts should read `--json`, whose 
 
 ## Cockpit (`--tui`)
 
-`forgectl status --tui` shows the same four sections on one screen and refreshes them in place. The hub's `status` row opens it. It is read-only like the rest of `status`: no key in it changes anything.
+`forgectl status --tui` shows the same four sections on one screen and refreshes them in place. The hub's `status` row opens it. The cockpit itself only reads. The one key that leads to an action is `enter` on a PR row: it quits the cockpit and hands off to `forgectl pr <ref>`, which starts a review.
 
 ```text
 #  forgectl status  ·  git 2m ago · prs 2m ago · clean 2m ago · bench 2m ago
@@ -121,9 +121,8 @@ The human view can change between releases. Scripts should read `--json`, whose 
   | --- | --- |
   | `↑` `↓` `j` `k` | Move in the focused section. |
   | `tab` `shift+tab` | Next or previous section. |
-  | `enter` | On a PR row, quits and runs `forgectl pr <ref>`, built and checked the way the hub's picker builds it. On a project row, it says focus is not available yet. |
-  | `1`–`9` | Opens that row of the focused section, as `enter` does. |
-  | `/` | Filters every section's rows. `enter` keeps the filter, and `esc` clears it. |
+  | `enter` | On a PR row, quits and runs `forgectl pr <ref>`, which starts a review. The argv is built and checked the way the hub's picker builds it, and it runs after the cockpit has exited, as a hub-chosen command does. On a project row, it says focus is not available yet. |
+  | `/` | Filters every section's rows on the text they show (name, state, title). `enter` keeps the filter, and `esc` clears it. |
   | `r` | Refreshes the focused section. |
   | `R` | Refreshes every section. |
   | `?` | Shows the key help. |
@@ -132,3 +131,5 @@ The human view can change between releases. Scripts should read `--json`, whose 
 - **Refresh.** Opening the cockpit runs one full collection. After that, only `git` refreshes itself, every 60s; it reads local clones and makes no network call. `prs` (which calls `gh`), `clean` and `bench` refresh only when you press `r` or `R`. A section refreshes at most once every 15s, and only one refresh per section runs at a time. A section whose source is still running after its `--timeout` shows as failed, but stays `refreshing…`, and refuses another refresh, until that source has actually returned.
 
 `--tui` needs a terminal on both stdin and stdout. Without one, it exits 1 and points at `--json`. It can't be combined with `--json` or `--strict`. `--timeout` still bounds each section. Every name, title, path, note and error is escaped for the terminal and capped.
+
+Unlike the hub, the cockpit has no `1`–`9` keys. Its rows carry no visible numbers, and a digit on a PR row would start a review on a row nobody saw numbered.

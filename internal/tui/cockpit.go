@@ -263,7 +263,55 @@ func (m cockpitModel) refresh(i int) (tea.Cmd, string) {
 	}, ""
 }
 
+// Update handles msg, then scrolls the focused section so its cursor is in
+// view. Scrolling lives here rather than in View so View only reads the
+// model.
 func (m cockpitModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	out, cmd := m.update(msg)
+	next := out.(cockpitModel)
+	next.scrollToCursor()
+	return next, cmd
+}
+
+// bodyHeight is how many lines the sections (or the help) get: the window
+// less the header line and the two footer lines.
+func (m cockpitModel) bodyHeight() int {
+	return max(m.height-1-2, 3)
+}
+
+// focusRoom is how many row lines the focused section gets: whatever the
+// other sections and its own title and notes leave of the body.
+func (m cockpitModel) focusRoom() int {
+	used := 0
+	for i := range m.secs {
+		if i == m.focus {
+			used += 1 + len(m.secs[i].snap.Notes)
+			continue
+		}
+		used += len(m.collapsedView(i))
+	}
+	return max(m.bodyHeight()-used, 1)
+}
+
+// scrollToCursor moves the focused section's window so its cursor shows.
+func (m *cockpitModel) scrollToCursor() {
+	if m.focus < 0 || m.focus >= len(m.secs) {
+		return
+	}
+	s := &m.secs[m.focus]
+	room := m.focusRoom()
+	if s.cursor < s.offset {
+		s.offset = s.cursor
+	}
+	if s.cursor >= s.offset+room {
+		s.offset = s.cursor - room + 1
+	}
+	if s.offset < 0 {
+		s.offset = 0
+	}
+}
+
+func (m cockpitModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch t := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = t.Width, t.Height
@@ -402,17 +450,9 @@ func (m cockpitModel) updateKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "R":
 		return m.refreshAll()
 	}
-	if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
-		if len(m.secs) == 0 {
-			return m, nil
-		}
-		rows := m.visibleRows(m.focus)
-		idx := m.secs[m.focus].offset + int(key[0]-'1')
-		if idx < len(rows) {
-			m.secs[m.focus].cursor = idx
-			return m.activate()
-		}
-	}
+	// No 1-9 here, unlike the hub: rows carry no visible numbers, and on a
+	// PR row a digit would start a review on a row the operator never saw
+	// numbered.
 	return m, nil
 }
 
@@ -480,7 +520,9 @@ func (m cockpitModel) visibleRows(i int) []CockpitRow {
 	needle := strings.ToLower(string(m.filter))
 	var out []CockpitRow
 	for _, r := range rows {
-		hay := strings.ToLower(r.Label + "\x00" + r.Detail + "\x00" + r.Path + "\x00" + r.Ref)
+		// Only the fields a row draws: a match on a hidden path or ref would
+		// show a row with nothing on screen explaining why it matched.
+		hay := strings.ToLower(r.Label + "\x00" + r.Detail)
 		if strings.Contains(hay, needle) {
 			out = append(out, r)
 		}
@@ -548,15 +590,12 @@ func (m cockpitModel) activate() (tea.Model, tea.Cmd) {
 func (m cockpitModel) View() tea.View {
 	header := m.headerView()
 	footer := m.footerView()
-	bodyHeight := m.height - 1 - 2
-	if bodyHeight < 3 {
-		bodyHeight = 3
-	}
+	bodyHeight := m.bodyHeight()
 	var body []string
 	if m.help {
 		body = m.helpLines()
 	} else {
-		body = m.sectionLines(bodyHeight)
+		body = m.sectionLines()
 	}
 	if len(body) > bodyHeight {
 		body = body[:bodyHeight]
@@ -613,23 +652,10 @@ func (m cockpitModel) glyphFor(st CockpitState) string {
 }
 
 // sectionLines lays out every section in order. The focused one gets every
-// line the others leave free for its rows and scrolls within them; the
-// others show their first cockpitCollapsedRows rows.
-func (m cockpitModel) sectionLines(height int) []string {
-	// Lines every unfocused section takes, and the focused section's fixed
-	// lines (title, notes, "more" marker).
-	used := 0
-	for i := range m.secs {
-		if i == m.focus {
-			used += 1 + len(m.secs[i].snap.Notes)
-			continue
-		}
-		used += m.collapsedLines(i)
-	}
-	free := height - used
-	if free < 1 {
-		free = 1
-	}
+// line the others leave free for its rows (focusRoom), from the offset
+// Update set; the others show their first cockpitCollapsedRows rows.
+func (m cockpitModel) sectionLines() []string {
+	free := m.focusRoom()
 	var lines []string
 	for i := range m.secs {
 		if i == m.focus {
@@ -669,10 +695,6 @@ func (m cockpitModel) noteLines(i int) []string {
 	return out
 }
 
-func (m cockpitModel) collapsedLines(i int) int {
-	return len(m.collapsedView(i))
-}
-
 func (m cockpitModel) collapsedView(i int) []string {
 	lines := []string{m.titleLine(i)}
 	lines = append(lines, m.noteLines(i)...)
@@ -686,24 +708,18 @@ func (m cockpitModel) collapsedView(i int) []string {
 	return lines
 }
 
-// focusedLines draws the focused section with room rows of list, scrolling
-// so the cursor stays in view.
-func (m *cockpitModel) focusedLines(i, room int) []string {
+// focusedLines draws the focused section's rows from its offset, at most
+// room of them. It reads the model only; Update keeps the offset in step.
+func (m cockpitModel) focusedLines(i, room int) []string {
 	lines := []string{m.titleLine(i)}
 	lines = append(lines, m.noteLines(i)...)
 	rows := m.visibleRows(i)
-	s := &m.secs[i]
+	s := m.secs[i]
 	if len(rows) == 0 {
 		if len(m.filter) > 0 && len(s.snap.Rows) > 0 {
 			lines = append(lines, m.styles.Muted.Render("    (no rows match the filter)"))
 		}
 		return lines
-	}
-	if s.cursor < s.offset {
-		s.offset = s.cursor
-	}
-	if s.cursor >= s.offset+room {
-		s.offset = s.cursor - room + 1
 	}
 	for j := s.offset; j < len(rows) && j < s.offset+room; j++ {
 		lines = append(lines, m.rowLine(rows[j], j == s.cursor))
@@ -729,8 +745,7 @@ func (m cockpitModel) helpLines() []string {
 	rows := [][2]string{
 		{"↑↓ j k", "move in the focused section"},
 		{"tab ⇧tab", "next / previous section"},
-		{"enter", "open: a PR runs forgectl pr <ref>; a project will focus its terminal (not yet)"},
-		{"1-9", "open that row of the focused section"},
+		{"enter", "on a PR: quit and run forgectl pr <ref>, which starts a review"},
 		{"/", "filter every section's rows; enter keeps it, esc clears it"},
 		{"r", "refresh the focused section"},
 		{"R", "refresh every section"},
@@ -743,7 +758,7 @@ func (m cockpitModel) helpLines() []string {
 	}
 	lines = append(lines, "",
 		s.Muted.Render("git refreshes itself every minute; prs, clean and bench refresh only when you ask."),
-		s.Muted.Render("A section refreshes at most once every 15s, one refresh at a time. Nothing here changes anything."))
+		s.Muted.Render("A section refreshes at most once every 15s, one refresh at a time. Only enter on a PR acts: it hands off to pr <ref>."))
 	return lines
 }
 

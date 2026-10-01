@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/bench"
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tui"
@@ -242,5 +243,57 @@ func TestCockpitSnapshot_Rows(t *testing.T) {
 	}
 	if c := snap.Sections[statusIdxClean]; len(c.Rows) != 0 || c.Headline == "" {
 		t.Errorf("clean = %+v, want a headline and no rows", c)
+	}
+}
+
+// TestStatusTUI_AFailingChosenVerbIsRenderedOnce drives the production
+// runVerb (deferStatusVerb) through execDispatch and fang with a verb that
+// fails. The chosen verb must run after status's own fang frame has
+// returned: run from inside status's RunE, the inner fang renders the error
+// and the outer renders it again.
+//
+// Mutation that turns it red: make deferStatusVerb call runHubVerb directly.
+func TestStatusTUI_AFailingChosenVerbIsRenderedOnce(t *testing.T) {
+	rt := productionStatusTUIRuntime()
+	rt.stdinIsTerminal = func(io.Reader) bool { return true }
+	rt.stdoutIsTerminal = func(io.Writer) bool { return true }
+	rt.run = func(context.Context, tui.CockpitOptions) (tui.Action, error) {
+		return tui.Action{Kind: tui.ActionRunVerb, Argv: []string{"boom"}}, nil
+	}
+	root := &cobra.Command{Use: "forgectl", SilenceUsage: true}
+	root.AddCommand(newStatusCmdWith(okStatusSources(), theme.Theme{}, rt))
+	ran := 0
+	root.AddCommand(&cobra.Command{Use: "boom", RunE: func(*cobra.Command, []string) error {
+		ran++
+		return WithExitCode(errors.New("boom failed"), 3)
+	}})
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+
+	err := execDispatch(context.Background(), module.Deps{}, root, []string{"status", "--tui"}, theme.Theme{})
+	if ran != 1 {
+		t.Fatalf("the chosen verb ran %d times, want 1", ran)
+	}
+	if got := ExitCode(err); got != 3 {
+		t.Errorf("exit code = %d (err %v), want the verb's own 3", got, err)
+	}
+	if n := strings.Count(strings.ToLower(stderr.String()), "boom failed"); n != 1 {
+		t.Errorf("the verb's error was rendered %d times, want once:\n%s", n, stderr.String())
+	}
+}
+
+// TestDeferStatusVerb_OffTheDispatchPathPrintsTheInvocation: with no
+// deferred-verb slot in the context, nothing runs.
+func TestDeferStatusVerb_OffTheDispatchPathPrintsTheInvocation(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	if err := deferStatusVerb(cmd, []string{"pr", "o/r#1"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "$ forgectl pr o/r#1") {
+		t.Errorf("stderr = %q, want the invocation", stderr.String())
 	}
 }
