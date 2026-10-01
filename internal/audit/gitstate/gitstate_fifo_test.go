@@ -4,6 +4,7 @@ package gitstate
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,13 +48,10 @@ func TestStatus_UntrackedFIFOIsUnknown(t *testing.T) {
 	}
 }
 
-// TestFuncWithTimeout_FIFOGitignoreReturns: a FIFO .gitignore makes
-// `ls-files --exclude-standard` wait forever for a writer. The per-repo
-// deadline must end the call with an error, promptly.
-//
-// Mutation that turns it red: call Status with the caller's ctx instead of
-// the deadline's (the test then hangs to its own 30s watchdog).
-func TestFuncWithTimeout_FIFOGitignoreReturns(t *testing.T) {
+// fifoGitignoreRepo is a working tree whose .gitignore is a FIFO, which
+// makes `ls-files --exclude-standard` wait forever for a writer.
+func fifoGitignoreRepo(t *testing.T) string {
+	t.Helper()
 	repo := liveRepo(t)
 	if err := syscall.Mkfifo(filepath.Join(repo, ".gitignore"), 0o600); err != nil {
 		t.Skipf("mkfifo: %v", err)
@@ -61,30 +59,58 @@ func TestFuncWithTimeout_FIFOGitignoreReturns(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	status := FuncWithTimeout(context.Background(), fexec.OSRunner{}, 300*time.Millisecond)
+	return repo
+}
+
+// callWithin runs status over repo and fails the test past limit.
+func callWithin(t *testing.T, status audit.GitStatusFunc, repo string, limit time.Duration) (map[string]audit.GitState, error) {
+	t.Helper()
 	type result struct {
 		m   map[string]audit.GitState
 		err error
 	}
 	done := make(chan result, 1)
-	start := time.Now()
 	go func() {
 		m, err := status(repo, []string{".env"})
 		done <- result{m, err}
 	}()
 	select {
 	case r := <-done:
-		if r.err == nil {
-			t.Errorf("status = %v with no error; a hung git must read as unanswered", r.m)
-		}
-		if d := time.Since(start); d > 10*time.Second {
-			t.Errorf("returned after %s; the deadline did not bound it", d)
-		}
-	case <-time.After(30 * time.Second):
-		// Unblock the stuck reader so git can exit.
+		return r.m, r.err
+	case <-time.After(limit):
 		if f, err := os.OpenFile(filepath.Clean(filepath.Join(repo, ".gitignore")), os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
 			_ = f.Close()
 		}
-		t.Fatal("git status over a FIFO .gitignore hung past the per-repo deadline")
+		t.Fatalf("git status over a FIFO .gitignore ran past %s", limit)
+		return nil, nil
+	}
+}
+
+// TestFunc_PerRepoSliceEndsAFIFOHang: with budget to spare, the per-repo
+// cap ends the hung call with git's error, not ErrBudgetExhausted.
+//
+// Mutation that turns it red: drop the per-repo WithTimeout in Func.
+func TestFunc_PerRepoSliceEndsAFIFOHang(t *testing.T) {
+	repo := fifoGitignoreRepo(t)
+	_, err := callWithin(t, Func(context.Background(), fexec.OSRunner{}, 300*time.Millisecond), repo, 20*time.Second)
+	if err == nil || errors.Is(err, audit.ErrBudgetExhausted) {
+		t.Errorf("err = %v, want git's own failure", err)
+	}
+}
+
+// TestFunc_BudgetCutsTheSlice: the slice is min(per-repo cap, what is left
+// of the budget), and a call the budget's deadline ends reads as
+// ErrBudgetExhausted.
+func TestFunc_BudgetCutsTheSlice(t *testing.T) {
+	repo := fifoGitignoreRepo(t)
+	budget, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := callWithin(t, Func(budget, fexec.OSRunner{}, time.Hour), repo, 20*time.Second)
+	if !errors.Is(err, audit.ErrBudgetExhausted) {
+		t.Errorf("err = %v, want ErrBudgetExhausted", err)
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("took %s; the budget did not cut the hour-long slice", d)
 	}
 }

@@ -4,6 +4,7 @@ package audit
 
 import (
 	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 	"syscall"
@@ -60,5 +61,34 @@ func TestScanSecrets_ForeignOwner(t *testing.T) {
 	}
 	if slices.Contains(got[filepath.Join(root, "theirs/.env")].Flags, FlagForeignOwner) {
 		t.Error("foreign-owner is a key flag; a .env carried it")
+	}
+}
+
+// TestScanSecrets_UnsafeScannerConfig: a repo whose root .gitleaksignore is a
+// FIFO, or whose root .gitleaks.toml is a symlink, is listed in
+// UnsafeScannerConfig; a regular file and a nested one are not.
+//
+// Mutation that turns it red: drop the onRepo hook from scanSecretsWith.
+func TestScanSecrets_UnsafeScannerConfig(t *testing.T) {
+	root := t.TempDir()
+	fifo := mkrepo(t, root, "fifo")
+	link := mkrepo(t, root, "link")
+	plain := mkrepo(t, root, "plain")
+	if err := syscall.Mkfifo(filepath.Join(fifo, ".gitleaksignore"), 0o600); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+	if err := os.Symlink("/dev/null", filepath.Join(link, ".gitleaks.toml")); err != nil {
+		t.Fatal(err)
+	}
+	writeMode(t, plain, ".gitleaksignore", "", 0o600)
+	if err := os.MkdirAll(filepath.Join(plain, "sub"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(plain, "sub", ".gitleaksignore"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := scanSecrets(t, root)
+	if !slices.Equal(r.UnsafeScannerConfig, []string{fifo, link}) {
+		t.Errorf("unsafe = %v, want [%s %s]", r.UnsafeScannerConfig, fifo, link)
 	}
 }

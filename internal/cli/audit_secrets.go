@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -37,10 +38,15 @@ type auditSecretsDeps struct {
 	// runner runs git (through gitenv) and gitleaks.
 	runner   exec.Runner
 	lookPath func(string) (string, error)
-	// gitStatusTimeout bounds each repo's git status; zero means
-	// gitstate.DefaultTimeout. Tests shorten it.
-	gitStatusTimeout time.Duration
+	// gitRepoTimeout and gitleaksRepoTimeout cap one repo's slice of the
+	// scan budget; zero means gitstate.RepoTimeout and gitleaks.RepoTimeout.
+	// Tests shorten them.
+	gitRepoTimeout, gitleaksRepoTimeout time.Duration
 }
+
+// defaultScanBudget is --timeout's default: the deadline for every child
+// process the verb starts, git and gitleaks together.
+const defaultScanBudget = 10 * time.Minute
 
 // gitleaksOutcome is the gitleaks half of the report, whatever happened.
 type gitleaksOutcome struct {
@@ -87,10 +93,15 @@ A repo whose root .gitleaksignore or .gitleaks.toml is not a regular file is
 not given to gitleaks (gitleaks would block opening a FIFO there); the output
 lists it as skipped.
 
+--timeout (default 10m) is one budget for every git and gitleaks process the
+scan starts. Each repo's git status gets at most 30s of it and each repo's
+gitleaks run at most 5m; once it is spent, the remaining repos are marked
+(git-unknown, gitleaks budget_exhausted) without starting anything.
+
 Exit codes: 0 when the scan ran, whatever it found; 1 when the projects root
-cannot be opened, when gitleaks was found but failed, timed out, skipped a
-repo, or its ` + "`gitleaks version`" + ` failed, or when --gitleaks=require and
-gitleaks did not run; 2 for a bad flag value.`,
+cannot be opened, when the scan budget ran out, when gitleaks was found but
+failed, timed out, skipped a repo, or its ` + "`gitleaks version`" + ` failed, or
+when --gitleaks=require and gitleaks did not run; 2 for a bad flag value.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			switch mode {
@@ -99,7 +110,7 @@ gitleaks did not run; 2 for a bad flag value.`,
 				return WithExitCode(fmt.Errorf("--gitleaks must be auto, off or require, not %s", termsafe.QuoteTextMax(mode, labelMaxRunes)), 2)
 			}
 			if timeout <= 0 {
-				return WithExitCode(errors.New("--gitleaks-timeout must be positive"), 2)
+				return WithExitCode(errors.New("--timeout must be positive"), 2)
 			}
 			root, err := d.resolveRoot()
 			if err != nil {
@@ -109,20 +120,28 @@ gitleaks did not run; 2 for a bad flag value.`,
 			if err != nil {
 				return err
 			}
-			ctx := cmd.Context()
-			gitTimeout := d.gitStatusTimeout
-			if gitTimeout <= 0 {
-				gitTimeout = gitstate.DefaultTimeout
-			}
-			report.ApplyGitStatus(gitstate.FuncWithTimeout(ctx, d.runner, gitTimeout))
+			// One budget for every child process the verb starts: each repo's
+			// git status and each repo's gitleaks run takes a slice of it,
+			// min(its own cap, what is left), and once it is spent nothing
+			// more is started.
+			budget, cancel := context.WithTimeout(cmd.Context(), timeout)
+			defer cancel()
+			report.ApplyGitStatus(gitstate.Func(budget, d.runner, d.gitRepoTimeout))
 
-			out := gitleaksOutcome{mode: mode, status: gitleaksStatusOff, timeout: timeout, result: gitleaks.Result{Findings: []gitleaks.Finding{}}}
+			out := gitleaksOutcome{mode: mode, status: gitleaksStatusOff, timeout: timeout, result: gitleaks.Result{Findings: []gitleaks.Finding{}, Skipped: []gitleaks.Skip{}}}
 			if mode != gitleaksOff {
-				out.binary = gitleaks.Resolve(ctx, d.lookPath, d.runner, report.Root)
-				out.status = out.binary.State
-				if out.binary.State == gitleaks.StateAvailable {
-					out.result = gitleaks.Scan(ctx, d.runner, out.binary.Path, report.Repos, gitleaksSkips(report), timeout)
-					out.status = out.result.Status
+				if budget.Err() != nil {
+					out.status = gitleaks.StatusTimedOut
+					for _, repo := range report.Repos {
+						out.result.Skipped = append(out.result.Skipped, gitleaks.Skip{Repo: repo, Reason: gitleaks.SkipBudgetExhausted})
+					}
+				} else {
+					out.binary = gitleaks.Resolve(budget, d.lookPath, d.runner, report.Root)
+					out.status = out.binary.State
+					if out.binary.State == gitleaks.StateAvailable {
+						out.result = gitleaks.Scan(budget, d.runner, out.binary.Path, report.Repos, gitleaksSkips(report), d.gitleaksRepoTimeout)
+						out.status = out.result.Status
+					}
 				}
 			}
 
@@ -133,24 +152,50 @@ gitleaks did not run; 2 for a bad flag value.`,
 			} else {
 				writeAuditSecretsText(cmd.OutOrStdout(), report, out)
 			}
-			return jsonVerdict(gitleaksVerdict(out), asJSON)
+			return jsonVerdict(auditSecretsVerdict(report, out), asJSON)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false,
-		`emit {"root","repos_scanned","entries_scanned","unreadable_dirs","unreadable_files","ignored_env_files","git_status_failed_repos","truncated","capped_by","depth_skipped","findings":[{"path","repo","kind","type","flags"}],"gitleaks":{"mode","status","reason","version","min_version","path","repos_scanned","repos_failed","findings_rejected","repos_skipped":[{"repo","reason"}],"truncated","findings":[{"path","repo","rule","line","fingerprint"}]}} to stdout`)
+		`emit {"root","repos_scanned","entries_scanned","unreadable_dirs","unreadable_files","ignored_env_files","git_status_failed_repos","git_status_budget_exhausted_repos","timeout","truncated","capped_by","depth_skipped","findings":[{"path","repo","kind","type","flags"}],"gitleaks":{"mode","status","reason","version","min_version","path","repos_scanned","repos_failed","repos_timed_out","findings_rejected","repos_skipped":[{"repo","reason"}],"truncated","findings":[{"path","repo","rule","line","fingerprint"}]}} to stdout`)
 	cmd.Flags().StringVar(&mode, "gitleaks", gitleaksAuto, "run gitleaks: auto (when installed), off, or require (fail without it)")
-	cmd.Flags().DurationVar(&timeout, "gitleaks-timeout", gitleaks.DefaultTimeout, "deadline for the whole gitleaks pass")
+	cmd.Flags().DurationVar(&timeout, "timeout", defaultScanBudget, "scan budget: one deadline for every git and gitleaks process the scan starts")
 	return cmd
 }
 
-// gitleaksVerdict is the exit decision. A gitleaks that was found but failed
+// auditSecretsVerdict is the exit decision: the budget running out before
+// git status answered for every repo is a partial result (ADR-0008 rule 3)
+// whatever gitleaks did; otherwise gitleaksVerdict decides.
+func auditSecretsVerdict(r audit.SecretsReport, o gitleaksOutcome) error {
+	gl := gitleaksVerdict(o)
+	if r.GitBudgetExhausted == 0 {
+		return gl
+	}
+	msg := fmt.Sprintf("audit secrets: the %s scan budget ran out before git status answered for %d repos", o.timeout, r.GitBudgetExhausted)
+	if gl != nil {
+		msg += "; " + strings.TrimPrefix(gl.Error(), "audit secrets: ")
+	}
+	return errors.New(msg)
+}
+
+// skippedFor counts the repos the pass skipped for reason.
+func skippedFor(res gitleaks.Result, reason string) int {
+	n := 0
+	for _, sk := range res.Skipped {
+		if sk.Reason == reason {
+			n++
+		}
+	}
+	return n
+}
+
+// gitleaksVerdict is the gitleaks half of the exit decision. A gitleaks that was found but failed
 // fails the verb under auto too (ADR-0008 rule 3): the scan the operator
 // asked for did not complete. Absent, refused or too old under auto is the
 // native-only scan auto promises, and the output says so.
 func gitleaksVerdict(o gitleaksOutcome) error {
 	switch o.status {
 	case gitleaks.StatusRan:
-		if n := len(o.result.Skipped); n > 0 {
+		if n := skippedFor(o.result, gitleaks.SkipScannerConfigNotRegular); n > 0 {
 			return fmt.Errorf("audit secrets: gitleaks skipped %d repos whose scanner config is not a regular file", n)
 		}
 		return nil
@@ -159,7 +204,7 @@ func gitleaksVerdict(o gitleaksOutcome) error {
 	case gitleaks.StatusFailed:
 		return fmt.Errorf("audit secrets: gitleaks failed in %d of %d repos", o.result.ReposFailed, o.result.ReposFailed+o.result.ReposScanned)
 	case gitleaks.StatusTimedOut:
-		return fmt.Errorf("audit secrets: gitleaks timed out after %s", o.timeout)
+		return fmt.Errorf("audit secrets: the %s scan budget ran out; gitleaks skipped %d repos", o.timeout, skippedFor(o.result, gitleaks.SkipBudgetExhausted))
 	case gitleaks.StateVersionFailed:
 		return errors.New("audit secrets: gitleaks was found, but `gitleaks version` failed")
 	}
@@ -195,36 +240,42 @@ func gitleaksSkipReason(o gitleaksOutcome) string {
 // gitleaksStatusLine is the one line every text output carries about
 // gitleaks (ADR-0008 rule 4: no hidden mode).
 func gitleaksStatusLine(o gitleaksOutcome) string {
+	name := "gitleaks"
+	if o.binary.Version != "" {
+		name += " " + o.binary.Version
+	}
+	var line string
 	switch o.status {
 	case gitleaks.StatusRan:
-		line := fmt.Sprintf("gitleaks %s: ran over %d repos, %d findings", o.binary.Version, o.result.ReposScanned, len(o.result.Findings))
-		if o.result.Truncated {
-			line += fmt.Sprintf(" (stopped at the %d-finding cap)", gitleaks.MaxFindings)
-		}
-		if n := len(o.result.Skipped); n > 0 {
-			line += fmt.Sprintf("; SKIPPED %d repos whose scanner config is not a regular file", n)
-		}
-		return line
+		line = fmt.Sprintf("%s: ran over %d repos, %d findings", name, o.result.ReposScanned, len(o.result.Findings))
 	case gitleaks.StatusFailed:
-		return fmt.Sprintf("gitleaks %s: FAILED in %d of %d repos; %d findings from the rest", o.binary.Version,
-			o.result.ReposFailed, o.result.ReposFailed+o.result.ReposScanned, len(o.result.Findings))
+		line = fmt.Sprintf("%s: FAILED in %d of %d repos (%d over their own time cap); %d findings from the rest", name,
+			o.result.ReposFailed, o.result.ReposFailed+o.result.ReposScanned, o.result.ReposTimedOut, len(o.result.Findings))
 	case gitleaks.StatusTimedOut:
-		return fmt.Sprintf("gitleaks %s: TIMED OUT after %s; %d findings from the %d repos it finished", o.binary.Version,
-			o.timeout, len(o.result.Findings), o.result.ReposScanned)
+		line = fmt.Sprintf("%s: TIMED OUT: the %s scan budget ran out and %d repos were skipped; %d findings from the %d repos it finished", name,
+			o.timeout, skippedFor(o.result, gitleaks.SkipBudgetExhausted), len(o.result.Findings), o.result.ReposScanned)
+	default:
+		return "gitleaks: not run, " + gitleaksSkipReason(o) + "; native checks only"
 	}
-	return "gitleaks: not run, " + gitleaksSkipReason(o) + "; native checks only"
+	if o.result.Truncated {
+		line += fmt.Sprintf(" (stopped at the %d-finding cap)", gitleaks.MaxFindings)
+	}
+	if n := skippedFor(o.result, gitleaks.SkipScannerConfigNotRegular); n > 0 {
+		line += fmt.Sprintf("; SKIPPED %d repos whose scanner config is not a regular file", n)
+	}
+	return line
 }
 
 // gitleaksSkips names the repos the gitleaks pass must not scan: those whose
-// root .gitleaksignore or .gitleaks.toml the walk found to be something
-// other than a regular file. gitleaks opens a root .gitleaksignore
-// unconditionally, and opening a FIFO blocks until a writer appears.
+// root .gitleaksignore or .gitleaks.toml is not a regular file. gitleaks
+// opens a root .gitleaksignore unconditionally, and opening a FIFO blocks
+// until a writer appears. The set comes from the walk's own check as it
+// entered each repo (SecretsReport.UnsafeScannerConfig), not from the
+// findings list, so the findings cap cannot hide one.
 func gitleaksSkips(r audit.SecretsReport) map[string]string {
-	skip := map[string]string{}
-	for _, f := range r.Findings {
-		if f.Kind == audit.KindScannerConfig && f.Repo != "" && filepath.Dir(f.Path) == f.Repo && f.Type != audit.TypeFile {
-			skip[f.Repo] = gitleaks.SkipScannerConfigNotRegular
-		}
+	skip := make(map[string]string, len(r.UnsafeScannerConfig))
+	for _, repo := range r.UnsafeScannerConfig {
+		skip[repo] = gitleaks.SkipScannerConfigNotRegular
 	}
 	return skip
 }
@@ -239,6 +290,8 @@ type auditSecretsJSON struct {
 	UnreadableFiles int                    `json:"unreadable_files"`
 	IgnoredEnv      int                    `json:"ignored_env_files"`
 	GitFailed       int                    `json:"git_status_failed_repos"`
+	GitBudget       int                    `json:"git_status_budget_exhausted_repos"`
+	Timeout         string                 `json:"timeout"`
 	Truncated       bool                   `json:"truncated"`
 	CappedBy        []string               `json:"capped_by"`
 	DepthSkipped    int                    `json:"depth_skipped"`
@@ -263,6 +316,7 @@ type auditGitleaksBlockJSON struct {
 	Path             string                  `json:"path"`
 	ReposScanned     int                     `json:"repos_scanned"`
 	ReposFailed      int                     `json:"repos_failed"`
+	ReposTimedOut    int                     `json:"repos_timed_out"`
 	FindingsRejected int                     `json:"findings_rejected"`
 	ReposSkipped     []auditGitleaksSkipJSON `json:"repos_skipped"`
 	Truncated        bool                    `json:"truncated"`
@@ -291,6 +345,8 @@ func writeAuditSecretsJSON(w io.Writer, r audit.SecretsReport, o gitleaksOutcome
 		UnreadableFiles: r.UnreadableFiles,
 		IgnoredEnv:      r.IgnoredEnv,
 		GitFailed:       r.GitStatusFailed,
+		GitBudget:       r.GitBudgetExhausted,
+		Timeout:         o.timeout.String(),
 		Truncated:       r.Truncated,
 		CappedBy:        r.CappedBy,
 		DepthSkipped:    r.DepthSkipped,
@@ -304,6 +360,7 @@ func writeAuditSecretsJSON(w io.Writer, r audit.SecretsReport, o gitleaksOutcome
 			Path:             o.binary.Path,
 			ReposScanned:     o.result.ReposScanned,
 			ReposFailed:      o.result.ReposFailed,
+			ReposTimedOut:    o.result.ReposTimedOut,
 			FindingsRejected: o.result.Rejected,
 			ReposSkipped:     make([]auditGitleaksSkipJSON, 0, len(o.result.Skipped)),
 			Truncated:        o.result.Truncated,
@@ -372,6 +429,9 @@ func writeAuditSecretsText(w io.Writer, r audit.SecretsReport, o gitleaksOutcome
 	}
 	if o.result.Rejected > 0 {
 		auditLine(w, fmt.Sprintf("note: %d gitleaks findings named a file outside the repo scanned and were dropped", o.result.Rejected))
+	}
+	if r.GitBudgetExhausted > 0 {
+		auditLine(w, fmt.Sprintf("note: the %s scan budget ran out before git status answered for %d repos; their findings are flagged git-unknown", o.timeout, r.GitBudgetExhausted))
 	}
 	if r.GitStatusFailed > 0 {
 		auditLine(w, fmt.Sprintf("note: git could not report tracked/ignored state in %d repos; their findings are flagged git-unknown", r.GitStatusFailed))

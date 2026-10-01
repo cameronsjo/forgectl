@@ -72,6 +72,10 @@ type walker struct {
 	maxDepth   int
 	stats      *walkStats
 	visit      func(e entry) (claimed bool, err error)
+	// onRepo, when set, is called once for each git working tree as the
+	// walk enters it, with the tree's own entry names, before any entry is
+	// visited or counted against a cap.
+	onRepo func(dir string, names []string)
 }
 
 // run walks the whole tree. It errors only when the root itself cannot be
@@ -102,6 +106,9 @@ func (w *walker) walk(dir string, segs []string, repo string, vendored bool, dep
 		if name == ".git" {
 			repo = dir
 			w.stats.Repos = append(w.stats.Repos, dir)
+			if w.onRepo != nil {
+				w.onRepo(dir, names)
+			}
 			break
 		}
 	}

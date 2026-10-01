@@ -241,18 +241,53 @@ func (r *ctxRunner) RunWithEnvFiltered(ctx context.Context, _ map[string]string,
 	return "", ctx.Err()
 }
 
-// TestScan_TimeoutStopsThePass: the deadline covers the whole pass: once it
-// passes, the pass is timed_out and no further repo is started. Mutation
-// that turns it red: give each repo its own fresh deadline.
-func TestScan_TimeoutStopsThePass(t *testing.T) {
+// TestScan_BudgetStopsThePass: ctx is the scan budget. Once it is spent the
+// pass is timed_out, the repo it cut short and every later one are skipped
+// with SkipBudgetExhausted, and no further gitleaks is started.
+//
+// Mutation that turns it red: give each repo a fresh context.Background()
+// slice instead of a slice of the budget.
+func TestScan_BudgetStopsThePass(t *testing.T) {
 	r := &ctxRunner{}
+	budget, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
 	start := time.Now()
-	res := Scan(context.Background(), r, "/bin/gitleaks", []string{"/p/a", "/p/b", "/p/c"}, nil, 50*time.Millisecond)
+	res := Scan(budget, r, "/bin/gitleaks", []string{"/p/a", "/p/b", "/p/c"}, nil, time.Minute)
 	if res.Status != StatusTimedOut || r.calls != 1 {
 		t.Errorf("status=%s calls=%d, want timed_out after one call", res.Status, r.calls)
 	}
-	if time.Since(start) > 5*time.Second {
-		t.Error("the deadline did not bound the pass")
+	want := []Skip{{"/p/a", SkipBudgetExhausted}, {"/p/b", SkipBudgetExhausted}, {"/p/c", SkipBudgetExhausted}}
+	if !slices.Equal(res.Skipped, want) {
+		t.Errorf("skipped = %v, want every repo budget_exhausted", res.Skipped)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("the budget did not bound the pass: %s", d)
+	}
+}
+
+// TestScan_PerRepoSliceBoundsOneRepo: a repo that overruns its own slice is
+// failed and counted timed out, and the next repo still gets its turn, so
+// one repo cannot spend the budget the rest need.
+//
+// Mutation that turns it red: run each repo under the budget alone (the
+// first then holds the whole minute and the test's watchdog fires).
+func TestScan_PerRepoSliceBoundsOneRepo(t *testing.T) {
+	r := &ctxRunner{}
+	start := time.Now()
+	done := make(chan Result, 1)
+	go func() {
+		done <- Scan(context.Background(), r, "/bin/gitleaks", []string{"/p/a", "/p/b", "/p/c"}, nil, 50*time.Millisecond)
+	}()
+	select {
+	case res := <-done:
+		if res.Status != StatusFailed || r.calls != 3 || res.ReposTimedOut != 3 || res.ReposFailed != 3 || len(res.Skipped) != 0 {
+			t.Errorf("result = %+v calls=%d, want failed with 3 per-repo timeouts", res, r.calls)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("a repo overran its slice")
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("took %s, want about 3 slices", d)
 	}
 }
 

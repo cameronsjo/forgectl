@@ -38,7 +38,8 @@ var ignoredArgs = []string{"ls-files", "-z", "--others", "--ignored", "--exclude
 
 // DefaultTimeout bounds one repo's status, every batch together. A FIFO
 // .gitignore or .git/index makes ls-files wait forever for a writer; the
-// deadline kills git's process group and the repo reads as unanswered.
+// deadline kills git's process group and the repo reads as unanswered. The
+// scan's overall budget (Func's ctx) bounds all repos together.
 const DefaultTimeout = 30 * time.Second
 
 // Status runs git ls-files in repo over rels and returns each path git
@@ -72,19 +73,31 @@ func Status(ctx context.Context, r gitenv.Runner, repo string, rels []string) (m
 	return out, nil
 }
 
-// Func binds Status to a context and runner as an audit.GitStatusFunc, each
-// repo under its own DefaultTimeout.
-func Func(ctx context.Context, r gitenv.Runner) audit.GitStatusFunc {
-	return FuncWithTimeout(ctx, r, DefaultTimeout)
-}
+// RepoTimeout caps one repo's status, every batch together.
+const RepoTimeout = DefaultTimeout
 
-// FuncWithTimeout is Func with the per-repo deadline named. Each repo's
-// calls run in a process group of their own, killed whole at the deadline.
-func FuncWithTimeout(ctx context.Context, r gitenv.Runner, timeout time.Duration) audit.GitStatusFunc {
+// Func binds Status to a budget context and runner as an
+// audit.GitStatusFunc. ctx carries the whole scan's budget (its deadline);
+// each repo gets a slice of it, min(perRepo, what is left), in a process
+// group of its own, killed whole when the slice ends. Once the budget is
+// spent, a repo is answered with audit.ErrBudgetExhausted and no git is
+// started; a call the budget's own deadline cut short is answered the same
+// way. A repo that only overran perRepo gets git's error.
+func Func(ctx context.Context, r gitenv.Runner, perRepo time.Duration) audit.GitStatusFunc {
+	if perRepo <= 0 {
+		perRepo = RepoTimeout
+	}
 	return func(repo string, rels []string) (map[string]audit.GitState, error) {
-		rctx, cancel := context.WithTimeout(fexec.WithProcessGroup(ctx), timeout)
+		if ctx.Err() != nil {
+			return nil, audit.ErrBudgetExhausted
+		}
+		rctx, cancel := context.WithTimeout(fexec.WithProcessGroup(ctx), perRepo)
 		defer cancel()
-		return Status(rctx, r, repo, rels)
+		states, err := Status(rctx, r, repo, rels)
+		if err != nil && ctx.Err() != nil {
+			return nil, audit.ErrBudgetExhausted
+		}
+		return states, err
 	}
 }
 

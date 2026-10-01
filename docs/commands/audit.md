@@ -139,7 +139,7 @@ in `--json`, always say what gitleaks did.
 forgectl audit secrets                       # native checks, plus gitleaks when installed
 forgectl audit secrets --gitleaks=off        # native checks only
 forgectl audit secrets --gitleaks=require    # fail unless gitleaks ran
-forgectl audit secrets --gitleaks-timeout=2m # deadline for the whole gitleaks pass (default 10m)
+forgectl audit secrets --timeout=2m         # one budget for every git and gitleaks process (default 10m)
 ```
 
 ### Native checks
@@ -167,9 +167,10 @@ with every path a `:(literal)` pathspec: `-z -t --cached --others
 --exclude-standard` lists the tracked and the untracked-unignored paths, and
 `-z --others --ignored --exclude-standard` lists the ignored ones. A path in
 neither list (git never lists a FIFO) is `git-unknown`, not ignored. Each
-repo's calls share a 30-second deadline that kills git's process group, so a
-FIFO `.gitignore` or `.git/index`, which git would wait on forever, makes the
-repo `git-unknown` instead of hanging the scan. **A `.env` file git ignores is counted (`ignored_env_files`), not
+repo's calls get a slice of the scan budget (see [Scan budget](#scan-budget)),
+at most 30 seconds, and the slice's end kills git's process group, so a FIFO
+`.gitignore` or `.git/index`, which git would wait on forever, makes the repo
+`git-unknown` instead of hanging the scan. **A `.env` file git ignores is counted (`ignored_env_files`), not
 listed**: that is the normal development pattern. A key is listed whether or
 not it is ignored.
 
@@ -178,7 +179,7 @@ not it is ignored.
 | `tracked` | git tracks the file, so it is in the repo's history. |
 | `unignored` | An untracked `.env` that no ignore rule covers: `git add .` would commit it. |
 | `outside-repo` | A `.env` outside any git working tree. |
-| `git-unknown` | git could not report on the file: the repo is not usable (`safe.directory`, no git), the call hit its 30-second deadline, or git listed the path in none of its lists (a FIFO). The file is listed rather than assumed ignored. |
+| `git-unknown` | git could not report on the file: the repo is not usable (`safe.directory`, no git), the call ran out its slice of the scan budget or the budget was already spent, or git listed the path in none of its lists (a FIFO). The file is listed rather than assumed ignored. |
 | `vendored` | Inside a dependency directory (the same list `audit injection` uses). |
 | `loose` | Readable or writable by group or others (`mode & 0o077`, the rule ssh applies to a private key). Set for `env` and `key` regular files on unix only; Windows permission bits are synthesized. |
 | `foreign-owner` | A key owned by a uid other than the one running the scan (unix). |
@@ -198,9 +199,9 @@ A `*.pem` or `*.key` file that cannot be opened is counted in
 - version 8.19.0 or later, read from `gitleaks version`. 8.19.0 introduced the
   `dir` subcommand. A version forgectl cannot read counts as too old.
 
-It runs once per repo the walk found, in path order, under one deadline for
-the whole pass (`--gitleaks-timeout`, default 10m) that kills the process group
-when it passes:
+It runs once per repo the walk found, in path order, each run under its slice
+of the scan budget (at most 5 minutes), which kills its process group when it
+ends:
 
 ```text
 gitleaks dir --config <tmp>/cfg.toml --gitleaks-ignore-path <tmp>
@@ -220,9 +221,14 @@ gitleaks dir --config <tmp>/cfg.toml --gitleaks-ignore-path <tmp>
   `gitleaks:allow` comment in a scanned file suppresses nothing.
 - A repo whose root `.gitleaksignore` or `.gitleaks.toml` is not a regular
   file (a FIFO, a device, a symlink) is not given to gitleaks: gitleaks opens a
-  root `.gitleaksignore` unconditionally, and a FIFO there would hold the pass
-  until its deadline. It is listed in `repos_skipped` with the reason
-  `scanner_config_not_regular`, and the verb exits 1.
+  root `.gitleaksignore` unconditionally, and a FIFO there would hold the run
+  until its slice ends. `.gitleaks.toml` is not read while forgectl passes
+  `--config`, and triggers the skip anyway, for symmetry and in case that ever
+  changes. The check is an Lstat made as the walk enters each repo, outside the
+  findings cap, so a cut-short list cannot hide one. The repo is listed in
+  `repos_skipped` with the reason `scanner_config_not_regular`, and the verb
+  exits 1. Repos the walk never reached (an entries or findings cap stopped
+  it) are not scanned by gitleaks at all; `truncated` says so.
 - Only `dir` mode runs. History is not scanned: `gitleaks git` would run git
   without forgectl's hardening. Symlinks are not followed (no
   `--follow-symlinks`). Files over 5 MB are skipped.
@@ -236,7 +242,27 @@ gitleaks dir --config <tmp>/cfg.toml --gitleaks-ignore-path <tmp>
   in a nested repo, which its parent's scan also reports, is listed once,
   under the innermost repo.
 
-**Limits.**
+### Scan budget
+
+`--timeout` (default 10m) is one deadline for every child process the scan
+starts: each repo's `git ls-files` calls and each repo's gitleaks run, and
+`gitleaks version`. The native walk starts no process and is bounded by its
+caps instead. Each repo's work gets a slice of the budget: the smaller of its
+own cap (30 seconds for git, 5 minutes for gitleaks) and what is left, so one
+repo cannot spend the time the others need. Once the budget is spent nothing
+more is started:
+
+- the remaining repos' findings are flagged `git-unknown`, counted in
+  `git_status_budget_exhausted_repos` (with any repo whose git call the budget
+  cut short), and named in a text note;
+- gitleaks reports `timed_out`, and every repo it did not finish is in
+  `repos_skipped` with the reason `budget_exhausted`.
+
+Either one is a partial result, and the verb exits 1. A gitleaks run that only
+overruns its own 5-minute cap fails that repo (`repos_timed_out`, counted in
+`repos_failed`), and the next repo still runs.
+
+### Limits
 
 - gitleaks covers files inside git working trees only, not the rest of the
   projects root.
@@ -268,6 +294,8 @@ OK with its version otherwise.
   "unreadable_files": 0,
   "ignored_env_files": 17,
   "git_status_failed_repos": 0,
+  "git_status_budget_exhausted_repos": 0,
+  "timeout": "10m0s",
   "truncated": false,
   "capped_by": [],
   "depth_skipped": 0,
@@ -289,6 +317,7 @@ OK with its version otherwise.
     "path": "/opt/homebrew/bin/gitleaks",
     "repos_scanned": 42,
     "repos_failed": 0,
+    "repos_timed_out": 0,
     "findings_rejected": 0,
     "repos_skipped": [],
     "truncated": false,
@@ -313,7 +342,9 @@ OK with its version otherwise.
   `absent`, `refused`, `too_old`, or `version_failed` when it was found
   wanting; `off` under `--gitleaks=off`. `reason` explains `refused`
   (`relative_path` or `under_scan_root`). `repos_skipped` lists
-  `{"repo","reason"}` for each repo not given to gitleaks.
+  `{"repo","reason"}` for each repo gitleaks did not scan
+  (`scanner_config_not_regular` or `budget_exhausted`).
+- `timeout` is the scan budget the run had, as a Go duration.
 - `capped_by`, `truncated` and `depth_skipped` mean what they do for
   `audit injection`; the findings cap counts native findings before ignored
   `.env` files are dropped.
@@ -322,10 +353,11 @@ OK with its version otherwise.
 ### Exit codes
 
 `0` when the scan ran, whatever it found. `1` when the projects root cannot be
-resolved or opened; when gitleaks was found but failed, timed out, skipped a
-repo, or its `gitleaks version` failed (under `auto` as well: the scan you
+resolved or opened; when the scan budget ran out before git status or gitleaks
+finished every repo; when gitleaks was found but failed, skipped a repo, or
+its `gitleaks version` failed (under `auto` as well: the scan you
 asked for did not complete); or under `--gitleaks=require` when gitleaks did not run. Absent,
 refused or too old under `auto` exits `0`: the scan is the native-only one
 `auto` promises, and the first line says so. `2` for a bad `--gitleaks` or
-`--gitleaks-timeout` value. Under `--json` the report is still written to
+`--timeout` value. Under `--json` the report is still written to
 stdout when the exit is `1`.

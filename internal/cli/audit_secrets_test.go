@@ -151,7 +151,7 @@ func TestAuditSecrets_JSONShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 		t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout)
 	}
-	if keys := auditSortedKeys(got); keys != "capped_by,depth_skipped,entries_scanned,findings,git_status_failed_repos,gitleaks,ignored_env_files,repos_scanned,root,truncated,unreadable_dirs,unreadable_files" {
+	if keys := auditSortedKeys(got); keys != "capped_by,depth_skipped,entries_scanned,findings,git_status_budget_exhausted_repos,git_status_failed_repos,gitleaks,ignored_env_files,repos_scanned,root,timeout,truncated,unreadable_dirs,unreadable_files" {
 		t.Errorf("report keys = %s", keys)
 	}
 	findings, _ := got["findings"].([]any)
@@ -169,7 +169,7 @@ func TestAuditSecrets_JSONShape(t *testing.T) {
 		t.Errorf("ignored_env_files = %v, want the ignored .env.local counted", got["ignored_env_files"])
 	}
 	gl, _ := got["gitleaks"].(map[string]any)
-	if keys := auditSortedKeys(gl); keys != "findings,findings_rejected,min_version,mode,path,reason,repos_failed,repos_scanned,repos_skipped,status,truncated,version" {
+	if keys := auditSortedKeys(gl); keys != "findings,findings_rejected,min_version,mode,path,reason,repos_failed,repos_scanned,repos_skipped,repos_timed_out,status,truncated,version" {
 		t.Errorf("gitleaks keys = %s", keys)
 	}
 	if gl["status"] != "ran" || gl["mode"] != "auto" || gl["version"] != "8.30.1" || gl["min_version"] != gitleaks.MinVersion || gl["path"] != fx.bin {
@@ -292,7 +292,7 @@ func TestAuditSecrets_ExitCodesAndStatus(t *testing.T) {
 		{"auto absent", func() exec.Runner { return secretsRunner(t, fx, nil) }, absentLookPath, nil, 0, "absent", "gitleaks: not run, gitleaks was not found on PATH; native checks only"},
 		{"require absent", func() exec.Runner { return secretsRunner(t, fx, nil) }, absentLookPath, []string{"--gitleaks=require"}, 1, "absent", "gitleaks: not run"},
 		{"auto failed", func() exec.Runner { return secretsRunner(t, fx, failing) }, nil, nil, 1, "failed", "gitleaks 8.30.1: FAILED in 1 of 1 repos"},
-		{"auto timed out", func() exec.Runner { return blockingRunner{secretsRunner(t, fx, nil), fx.bin} }, nil, []string{"--gitleaks-timeout=50ms"}, 1, "timed_out", "gitleaks 8.30.1: TIMED OUT after 50ms"},
+		{"auto timed out", func() exec.Runner { return blockingRunner{secretsRunner(t, fx, nil), fx.bin} }, nil, []string{"--timeout=50ms"}, 1, "timed_out", "gitleaks 8.30.1: TIMED OUT: the 50ms scan budget ran out"},
 		{"off", func() exec.Runner { return secretsRunner(t, fx, nil) }, func(string) (string, error) {
 			t.Error("--gitleaks=off looked gitleaks up")
 			return "", errors.New("no")
@@ -331,7 +331,7 @@ func TestAuditSecrets_ExitCodesAndStatus(t *testing.T) {
 // TestAuditSecrets_BadFlags exit 2.
 func TestAuditSecrets_BadFlags(t *testing.T) {
 	fx := newSecretsFixture(t)
-	for _, args := range [][]string{{"--gitleaks=maybe"}, {"--gitleaks-timeout=0s"}, {"--gitleaks-timeout=-1m"}} {
+	for _, args := range [][]string{{"--gitleaks=maybe"}, {"--timeout=0s"}, {"--timeout=-1m"}} {
 		_, _, err := runAuditSecrets(t, fx, secretsRunner(t, fx, nil), nil, args...)
 		if err == nil || ExitCode(err) != 2 {
 			t.Errorf("%v: err %v, want exit 2", args, err)
@@ -355,7 +355,7 @@ func TestAuditSecrets_MissingRootFails(t *testing.T) {
 func TestAuditSecrets_HelpNamesEveryExit1(t *testing.T) {
 	long := newAuditSecretsCmd(auditSecretsDeps{}).Long
 	_, exits, _ := strings.Cut(long, "Exit codes:")
-	for _, want := range []string{"failed", "timed out", "skipped", "`gitleaks version`", "--gitleaks=require"} {
+	for _, want := range []string{"budget ran out", "failed", "timed out", "skipped", "`gitleaks version`", "--gitleaks=require"} {
 		if !strings.Contains(exits, want) {
 			t.Errorf("exit-code help lacks %q:\n%s", want, exits)
 		}

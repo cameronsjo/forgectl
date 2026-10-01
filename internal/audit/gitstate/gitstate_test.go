@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/audit"
 	fexec "github.com/cameronsjo/forgectl/internal/exec"
@@ -175,5 +176,21 @@ func TestStatus_LiveGit(t *testing.T) {
 		if got[k] != v {
 			t.Errorf("%q = %v, want %v", k, got[k], v)
 		}
+	}
+}
+
+// TestFunc_SpentBudgetStartsNothing: once the budget is spent, a repo is
+// answered ErrBudgetExhausted and no git is started.
+//
+// Mutation that turns it red: drop the ctx.Err() check at the top of Func.
+func TestFunc_SpentBudgetStartsNothing(t *testing.T) {
+	budget, cancel := context.WithCancel(context.Background())
+	cancel()
+	fr := &fexec.FakeRunner{}
+	if _, err := Func(budget, fr, time.Minute)("/r", []string{".env"}); !errors.Is(err, audit.ErrBudgetExhausted) {
+		t.Errorf("err = %v, want ErrBudgetExhausted", err)
+	}
+	if len(fr.Calls) != 0 {
+		t.Errorf("started %d git calls on a spent budget", len(fr.Calls))
 	}
 }

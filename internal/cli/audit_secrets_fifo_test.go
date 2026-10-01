@@ -3,8 +3,10 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -19,66 +21,115 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
-// TestAuditSecrets_FIFOGitignoreDoesNotHang runs the real git against a repo
-// whose .gitignore is a FIFO, which makes `ls-files --exclude-standard`
-// wait forever. The per-repo deadline (shortened through the seam) must end
-// it, and the repo's findings read git-unknown.
+// gitRealRunner runs git for real and answers gitleaks through fake.
+type gitRealRunner struct {
+	exec.OSRunner
+	fake *exec.FakeRunner
+	bin  string
+}
+
+func (g gitRealRunner) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error) {
+	if name == g.bin {
+		return g.fake.RunWithEnvFiltered(ctx, env, unset, name, args...)
+	}
+	return g.OSRunner.RunWithEnvFiltered(ctx, env, unset, name, args...)
+}
+
+// TestAuditSecrets_OneBudgetBoundsFIFORepos: N repos whose .gitignore is a
+// FIFO each hang git until their slice ends. With 300ms slices and a 1s
+// budget, the whole verb takes about the budget, the repos past it are
+// marked budget-exhausted without git starting, gitleaks is skipped
+// budget_exhausted for every repo without running, and the exit is 1.
 //
-// Mutation that turns it red: drop the deadline in gitstate.FuncWithTimeout.
-func TestAuditSecrets_FIFOGitignoreDoesNotHang(t *testing.T) {
+// Mutations that turn it red: give each repo a slice of
+// context.Background() instead of the budget (the run then takes N slices);
+// drop the budget verdict (exit 0).
+func TestAuditSecrets_OneBudgetBoundsFIFORepos(t *testing.T) {
 	if _, err := osexec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
 	}
+	const repos = 8
 	root := t.TempDir()
-	repo := filepath.Join(root, "r")
-	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o750); err != nil {
+	for i := 0; i < repos; i++ {
+		repo := filepath.Join(root, fmt.Sprintf("r%d", i))
+		init := osexec.Command("git", "init", "-q", repo) //nolint:gosec,noctx // G204: test setup running git with fixed arguments
+		if out, err := init.CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v\n%s", err, out)
+		}
+		if err := syscall.Mkfifo(filepath.Join(repo, ".gitignore"), 0o600); err != nil {
+			t.Skipf("mkfifo: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bin := filepath.Join(t.TempDir(), "gitleaks")
+	if err := os.WriteFile(bin, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	init := osexec.Command("git", "-C", repo, "init", "-q") //nolint:gosec,noctx // G204: test setup running git with fixed arguments
-	if out, err := init.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-	if err := syscall.Mkfifo(filepath.Join(repo, ".gitignore"), 0o600); err != nil {
-		t.Skipf("mkfifo: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	fake := &exec.FakeRunner{}
 	cmd := newAuditSecretsCmd(auditSecretsDeps{
-		resolveRoot:      func() (string, error) { return root, nil },
-		runner:           exec.OSRunner{},
-		lookPath:         absentLookPath,
-		gitStatusTimeout: 300 * time.Millisecond,
+		resolveRoot:    func() (string, error) { return root, nil },
+		runner:         gitRealRunner{fake: fake, bin: bin},
+		lookPath:       func(string) (string, error) { return bin, nil },
+		gitRepoTimeout: 300 * time.Millisecond,
 	})
 	var out strings.Builder
 	cmd.SetOut(&out)
 	cmd.SetErr(new(strings.Builder))
-	cmd.SetArgs([]string{"--json", "--gitleaks=off"})
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	cmd.SetArgs([]string{"--json", "--timeout=1s"})
 	done := make(chan error, 1)
+	start := time.Now()
 	go func() { done <- cmd.Execute() }()
+	var err error
 	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(30 * time.Second):
-		if f, err := os.OpenFile(filepath.Clean(filepath.Join(repo, ".gitignore")), os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
-			_ = f.Close()
-		}
-		t.Fatal("audit secrets hung on a FIFO .gitignore")
+	case err = <-done:
+	case <-time.After(60 * time.Second):
+		t.Fatal("audit secrets ran far past its 1s budget")
+	}
+	elapsed := time.Since(start)
+	if elapsed < 900*time.Millisecond || elapsed > 6*time.Second {
+		t.Errorf("took %s, want about the 1s budget", elapsed)
+	}
+	if err == nil || ExitCode(err) != 1 {
+		t.Errorf("err = %v, want exit 1 for a partial result", err)
 	}
 	var got struct {
-		GitFailed int `json:"git_status_failed_repos"`
+		GitFailed int    `json:"git_status_failed_repos"`
+		GitBudget int    `json:"git_status_budget_exhausted_repos"`
+		Timeout   string `json:"timeout"`
 		Findings  []struct {
-			Path  string   `json:"path"`
 			Flags []string `json:"flags"`
 		} `json:"findings"`
+		Gitleaks struct {
+			Status  string `json:"status"`
+			Skipped []struct {
+				Repo, Reason string
+			} `json:"repos_skipped"`
+		} `json:"gitleaks"`
 	}
 	if err := json.Unmarshal([]byte(out.String()), &got); err != nil {
-		t.Fatal(err)
+		t.Fatalf("%v\n%s", err, out.String())
 	}
-	if got.GitFailed != 1 || len(got.Findings) != 1 || !slices.Contains(got.Findings[0].Flags, audit.FlagGitUnknown) {
-		t.Errorf("report = %+v, want the .env listed git-unknown and one failed repo", got)
+	if got.GitFailed != repos || got.GitBudget < repos-4 || got.Timeout != "1s" {
+		t.Errorf("git failed=%d budget-exhausted=%d timeout=%q; want all %d failed, most past the budget", got.GitFailed, got.GitBudget, got.Timeout, repos)
+	}
+	for _, f := range got.Findings {
+		if !slices.Contains(f.Flags, audit.FlagGitUnknown) {
+			t.Errorf("finding flags %v, want git-unknown", f.Flags)
+		}
+	}
+	if got.Gitleaks.Status != gitleaks.StatusTimedOut || len(got.Gitleaks.Skipped) != repos {
+		t.Errorf("gitleaks = %+v, want timed_out with every repo skipped", got.Gitleaks)
+	}
+	for _, sk := range got.Gitleaks.Skipped {
+		if sk.Reason != gitleaks.SkipBudgetExhausted {
+			t.Errorf("skip reason %q, want budget_exhausted", sk.Reason)
+		}
+	}
+	if len(fake.Calls) != 0 {
+		t.Errorf("gitleaks was started %d times on a spent budget", len(fake.Calls))
 	}
 }
 
@@ -121,5 +172,33 @@ func TestAuditSecrets_SkipsRepoWithFIFOScannerConfig(t *testing.T) {
 	if got.Gitleaks.Status != gitleaks.StatusRan || len(got.Gitleaks.Skipped) != 1 ||
 		got.Gitleaks.Skipped[0].Repo != fx.repo || got.Gitleaks.Skipped[0].Reason != gitleaks.SkipScannerConfigNotRegular {
 		t.Errorf("gitleaks block = %+v", got.Gitleaks)
+	}
+}
+
+// TestAuditSecrets_UnsafeScannerConfigPastTheFindingsCap: the skip set comes
+// from the walk's own check as it enters a repo, so a FIFO .gitleaksignore
+// the walk never visited (the findings cap stopped it first) still keeps
+// the repo from gitleaks.
+//
+// Mutation that turns it red: build gitleaksSkips from the findings list.
+func TestAuditSecrets_UnsafeScannerConfigPastTheFindingsCap(t *testing.T) {
+	fx := newSecretsFixture(t)
+	if err := os.Remove(filepath.Join(fx.repo, ".gitleaks.toml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(fx.repo, ".gitleaksignore"), 0o600); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+	report, err := audit.ScanSecrets(audit.SecretsOptions{Root: fx.root, MaxFindings: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range report.Findings {
+		if f.Kind == audit.KindScannerConfig {
+			t.Fatalf("the cap let the scanner config through (%+v); the test needs it cut", f)
+		}
+	}
+	if skip := gitleaksSkips(report); skip[fx.repo] != gitleaks.SkipScannerConfigNotRegular {
+		t.Errorf("skips = %v, want %s skipped", skip, fx.repo)
 	}
 }

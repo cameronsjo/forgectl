@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"path"
@@ -165,9 +166,17 @@ type SecretsReport struct {
 	// GitStatusFailed counts repos git could not answer for; their findings
 	// carry FlagGitUnknown.
 	GitStatusFailed int
-	Truncated       bool
-	CappedBy        []string
-	DepthSkipped    int
+	// GitBudgetExhausted counts the repos among GitStatusFailed that the
+	// scan budget ran out on, before or during their git call.
+	GitBudgetExhausted int
+	// UnsafeScannerConfig lists, absolute and sorted, every repo whose root
+	// .gitleaksignore or .gitleaks.toml is not a regular file. It is checked
+	// as the walk enters each repo, outside the findings cap, so a repo the
+	// gitleaks pass must not open is known even when the list was cut short.
+	UnsafeScannerConfig []string
+	Truncated           bool
+	CappedBy            []string
+	DepthSkipped        int
 	// The caps this scan ran with, after defaults.
 	MaxEntries, MaxFindings, MaxDepth int
 }
@@ -212,15 +221,16 @@ func ScanSecrets(opts SecretsOptions) (SecretsReport, error) {
 func scanSecretsWith(root string, ops fsOps, so SecretsOptions, euid int) (SecretsReport, error) {
 	opts := Options{MaxEntries: so.MaxEntries, MaxFindings: so.MaxFindings, MaxDepth: so.MaxDepth}.withDefaults()
 	report := SecretsReport{
-		Root: root, Findings: []SecretFinding{}, Repos: []string{}, CappedBy: []string{},
+		Root: root, Findings: []SecretFinding{}, Repos: []string{}, CappedBy: []string{}, UnsafeScannerConfig: []string{},
 		MaxEntries: opts.MaxEntries, MaxFindings: opts.MaxFindings, MaxDepth: opts.MaxDepth,
 	}
 	stats := &walkStats{CappedBy: []string{}}
 	s := &secretScanner{root: root, ops: ops, opts: opts, euid: euid, report: &report, stats: stats}
-	w := &walker{ops: ops, root: root, maxEntries: opts.MaxEntries, maxDepth: opts.MaxDepth, stats: stats, visit: s.visit}
+	w := &walker{ops: ops, root: root, maxEntries: opts.MaxEntries, maxDepth: opts.MaxDepth, stats: stats, visit: s.visit, onRepo: s.checkScannerConfig}
 	if err := w.run(); err != nil {
 		return SecretsReport{}, err
 	}
+	sort.Strings(report.UnsafeScannerConfig)
 	for _, repo := range stats.Repos {
 		report.Repos = append(report.Repos, filepath.Join(root, filepath.FromSlash(repo)))
 	}
@@ -236,6 +246,24 @@ func scanSecretsWith(root string, ops fsOps, so SecretsOptions, euid int) (Secre
 
 func sortSecretFindings(list []SecretFinding) {
 	sort.Slice(list, func(i, j int) bool { return list[i].Path < list[j].Path })
+}
+
+// checkScannerConfig Lstats a repo's root scanner config as the walk enters
+// the repo. gitleaks opens a root .gitleaksignore unconditionally (and, were
+// --config ever dropped, .gitleaks.toml), so anything there but a regular
+// file (a FIFO would block the open) keeps the repo from the gitleaks pass.
+// An entry that cannot be Lstat'd cannot be judged and counts as unsafe.
+func (s *secretScanner) checkScannerConfig(dir string, names []string) {
+	for _, name := range names {
+		if !scannerConfigNames[asciiLower(name)] {
+			continue
+		}
+		info, err := s.ops.lstat(path.Join(dir, name))
+		if err != nil || !info.Mode().IsRegular() {
+			s.report.UnsafeScannerConfig = append(s.report.UnsafeScannerConfig, filepath.Join(s.root, filepath.FromSlash(dir)))
+			return
+		}
+	}
 }
 
 // visit classifies one entry. Directories are never findings (a Python
@@ -326,6 +354,11 @@ const (
 // could not answer for any of them.
 type GitStatusFunc func(repo string, rels []string) (map[string]GitState, error)
 
+// ErrBudgetExhausted is what a GitStatusFunc returns, alone or wrapped, for
+// a repo the scan's budget ran out on: either no time was left to start git,
+// or the budget's deadline ended the call.
+var ErrBudgetExhausted = errors.New("scan budget exhausted")
+
 // gitStateRank orders answers by how strongly they put a file on the list.
 var gitStateRank = map[GitState]int{GitIgnored: 0, GitUntracked: 1, GitTracked: 2}
 
@@ -357,6 +390,9 @@ func (r *SecretsReport) ApplyGitStatus(status GitStatusFunc) {
 		states, err := status(repo, rels)
 		if err != nil {
 			r.GitStatusFailed++
+			if errors.Is(err, ErrBudgetExhausted) {
+				r.GitBudgetExhausted++
+			}
 			for _, i := range idx {
 				r.Findings[i].Flags = append(r.Findings[i].Flags, FlagGitUnknown)
 			}

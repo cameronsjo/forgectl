@@ -11,8 +11,10 @@ import (
 	fexec "github.com/cameronsjo/forgectl/internal/exec"
 )
 
-// DefaultTimeout bounds the whole gitleaks pass, every repo together.
-const DefaultTimeout = 10 * time.Minute
+// RepoTimeout caps one repo's scan. The scan budget (Scan's ctx) bounds the
+// whole pass; each repo gets min(RepoTimeout, what is left of it), so one
+// repo cannot spend the budget the rest need.
+const RepoTimeout = 5 * time.Minute
 
 // MaxFindings caps the findings kept across the whole pass.
 const MaxFindings = 10_000
@@ -32,7 +34,8 @@ const (
 	// StatusFailed: at least one repo's scan failed or its report could not
 	// be read.
 	StatusFailed = "failed"
-	// StatusTimedOut: the deadline ended the pass.
+	// StatusTimedOut: the scan budget ran out before every repo was scanned;
+	// the rest are in Skipped with SkipBudgetExhausted.
 	StatusTimedOut = "timed_out"
 )
 
@@ -52,8 +55,11 @@ type Finding struct {
 type Result struct {
 	Status       string
 	ReposScanned int
-	ReposFailed  int
-	Findings     []Finding
+	// ReposFailed counts repos whose scan failed, ReposTimedOut among them.
+	ReposFailed int
+	// ReposTimedOut counts repos that overran their own RepoTimeout slice.
+	ReposTimedOut int
+	Findings      []Finding
 	// Rejected counts findings whose file did not lie inside the repo they
 	// were reported for, which are dropped rather than shown.
 	Rejected int
@@ -99,13 +105,20 @@ type Skip struct {
 // until its deadline.
 const SkipScannerConfigNotRegular = "scanner_config_not_regular"
 
-// Scan runs `gitleaks dir` over each repo in turn under one deadline and
-// returns what it found. bin is a StateAvailable Binary's Path. A repo in
-// skip is not scanned and is reported in Result.Skipped with its reason.
-func Scan(ctx context.Context, r Runner, bin string, repos []string, skip map[string]string, timeout time.Duration) Result {
+// SkipBudgetExhausted: the scan budget ran out before this repo's scan
+// finished; if it had started, its process group was killed.
+const SkipBudgetExhausted = "budget_exhausted"
+
+// Scan runs `gitleaks dir` over each repo in turn and returns what it
+// found. bin is a StateAvailable Binary's Path. ctx carries the scan budget:
+// each repo runs under min(perRepo, what is left of it) in a process group
+// of its own, and once it is spent the remaining repos are skipped with
+// SkipBudgetExhausted without starting anything. A repo in skip is not
+// scanned and is reported in Result.Skipped with its reason.
+func Scan(ctx context.Context, r Runner, bin string, repos []string, skip map[string]string, perRepo time.Duration) Result {
 	res := Result{Status: StatusRan, Findings: []Finding{}, Skipped: []Skip{}}
-	if timeout <= 0 {
-		timeout = DefaultTimeout
+	if perRepo <= 0 {
+		perRepo = RepoTimeout
 	}
 	sorted := make([]string, 0, len(repos))
 	for _, repo := range repos {
@@ -119,9 +132,6 @@ func Scan(ctx context.Context, r Runner, bin string, repos []string, skip map[st
 	}
 	defer cleanup()
 
-	ctx, cancel := context.WithTimeout(fexec.WithProcessGroup(ctx), timeout)
-	defer cancel()
-
 	type key struct {
 		file, rule string
 		line       int
@@ -134,13 +144,26 @@ scan:
 			res.Skipped = append(res.Skipped, Skip{Repo: repo, Reason: reason})
 			continue
 		}
-		removeReport(tmp)
-		_, runErr := r.RunWithEnvFiltered(ctx, nil, UnsetEnv(), bin, Args(repo, tmp)...)
 		if ctx.Err() != nil {
+			res.Skipped = append(res.Skipped, Skip{Repo: repo, Reason: SkipBudgetExhausted})
 			res.Status = StatusTimedOut
-			break
+			continue
 		}
-		if runErr != nil {
+		removeReport(tmp)
+		rctx, cancel := context.WithTimeout(fexec.WithProcessGroup(ctx), perRepo)
+		_, runErr := r.RunWithEnvFiltered(rctx, nil, UnsetEnv(), bin, Args(repo, tmp)...)
+		repoTimedOut := rctx.Err() != nil
+		cancel()
+		switch {
+		case ctx.Err() != nil:
+			res.Skipped = append(res.Skipped, Skip{Repo: repo, Reason: SkipBudgetExhausted})
+			res.Status = StatusTimedOut
+			continue
+		case repoTimedOut:
+			res.ReposFailed++
+			res.ReposTimedOut++
+			continue
+		case runErr != nil:
 			res.ReposFailed++
 			continue
 		}
