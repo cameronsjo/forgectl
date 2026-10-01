@@ -2,7 +2,7 @@ package sops
 
 // Test plan for the #959 bounds on file.go and driver.go
 //
-//   [x] Happy: IsSOPSFile and ReadPlaintextRules read every document in the
+//   [x] Happy: isSOPSFile and readPlaintextRules read every document in the
 //       corpus exactly as a decode of the whole document did
 //   [x] Sad: a merge key at the top level or in the sops: block is refused
 //       rather than expanded
@@ -25,7 +25,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/perftest"
 )
 
-// isSOPSFileWhole is IsSOPSFile before #959: a decode of the whole document.
+// isSOPSFileWhole is isSOPSFile before #959: a decode of the whole document.
 func isSOPSFileWhole(data []byte) bool {
 	var probe map[string]yaml.Node
 	if err := yaml.Unmarshal(data, &probe); err != nil {
@@ -35,7 +35,7 @@ func isSOPSFileWhole(data []byte) bool {
 	return ok && node.Kind == yaml.MappingNode
 }
 
-// readMetadataWhole is ReadPlaintextRules' decode before #959.
+// readMetadataWhole is readPlaintextRules' decode before #959.
 func readMetadataWhole(data []byte) (metadata, error) {
 	var meta metadata
 	err := yaml.Unmarshal(data, &meta)
@@ -89,8 +89,8 @@ var boundCorpus = []string{
 func TestBoundedReadersMatchTheWholeDecode(t *testing.T) {
 	for _, doc := range boundCorpus {
 		data := []byte(doc)
-		if got, want := IsSOPSFile(data), isSOPSFileWhole(data); got != want {
-			t.Errorf("IsSOPSFile(%q) = %v, the whole decode said %v", doc, got, want)
+		if got, want := isSOPSFile(data), isSOPSFileWhole(data); got != want {
+			t.Errorf("isSOPSFile(%q) = %v, the whole decode said %v", doc, got, want)
 		}
 		got, gotErr := readMetadata(data)
 		want, wantErr := readMetadataWhole(data)
@@ -117,12 +117,12 @@ func TestBoundedReadersRefuseMergeKeys(t *testing.T) {
 		"base: &b {sops: {mac: m}}\n<<: *b\n",
 		"rules: &r {unencrypted_regex: '^x'}\nsops:\n  <<: *r\n  mac: m\n",
 	} {
-		if _, err := ReadPlaintextRules([]byte(doc)); err == nil || !strings.Contains(err.Error(), "merge key") {
-			t.Errorf("ReadPlaintextRules(%q) err = %v, want a merge-key refusal", doc, err)
+		if _, err := readPlaintextRules([]byte(doc)); err == nil || !strings.Contains(err.Error(), "merge key") {
+			t.Errorf("readPlaintextRules(%q) err = %v, want a merge-key refusal", doc, err)
 		}
 	}
-	if IsSOPSFile([]byte("base: &b {sops: {mac: m}}\n<<: *b\n")) {
-		t.Error("IsSOPSFile accepted a sops: block merged into the top level")
+	if isSOPSFile([]byte("base: &b {sops: {mac: m}}\n<<: *b\n")) {
+		t.Error("isSOPSFile accepted a sops: block merged into the top level")
 	}
 }
 
@@ -137,8 +137,8 @@ func padTo(t *testing.T, n int) []byte {
 }
 
 // TestReadersRefuseADocumentOverTheCap: at MaxDocumentBytes the document
-// is read; one byte more and CheckSize and ReadPlaintextRules name the
-// limit, and IsSOPSFile says no. The file is never cut short.
+// is read; one byte more and CheckSize and readPlaintextRules name the
+// limit, and isSOPSFile says no. The file is never cut short.
 //
 // Mutations that turn it red: drop CheckSize from parseTop (the over-cap
 // document is read); compare with >= in CheckSize (the at-cap one is
@@ -148,22 +148,22 @@ func TestReadersRefuseADocumentOverTheCap(t *testing.T) {
 	if err := CheckSize(at); err != nil {
 		t.Fatalf("CheckSize at the cap: %v", err)
 	}
-	if !IsSOPSFile(at) {
-		t.Fatal("IsSOPSFile refused a document at the cap")
+	if !isSOPSFile(at) {
+		t.Fatal("isSOPSFile refused a document at the cap")
 	}
-	if _, err := ReadPlaintextRules(at); err != nil {
-		t.Fatalf("ReadPlaintextRules at the cap: %v", err)
+	if _, err := readPlaintextRules(at); err != nil {
+		t.Fatalf("readPlaintextRules at the cap: %v", err)
 	}
 
 	over := padTo(t, MaxDocumentBytes+1)
 	if err := CheckSize(over); err == nil || !strings.Contains(err.Error(), "larger than 4 MiB") {
 		t.Errorf("CheckSize one byte over: %v, want the limit named", err)
 	}
-	if IsSOPSFile(over) {
-		t.Error("IsSOPSFile accepted a document over the cap")
+	if isSOPSFile(over) {
+		t.Error("isSOPSFile accepted a document over the cap")
 	}
-	if _, err := ReadPlaintextRules(over); err == nil || !strings.Contains(err.Error(), "larger than 4 MiB") {
-		t.Errorf("ReadPlaintextRules one byte over: %v, want the limit named", err)
+	if _, err := readPlaintextRules(over); err == nil || !strings.Contains(err.Error(), "larger than 4 MiB") {
+		t.Errorf("readPlaintextRules one byte over: %v, want the limit named", err)
 	}
 }
 
@@ -210,8 +210,8 @@ func TestReadersCostLikeKeysOutOfReach(t *testing.T) {
 	work := func(doc []byte) func() {
 		return func() {
 			for range reps {
-				_ = IsSOPSFile(doc)
-				_, _ = ReadPlaintextRules(doc)
+				_ = isSOPSFile(doc)
+				_, _ = readPlaintextRules(doc)
 			}
 		}
 	}
@@ -245,7 +245,7 @@ func TestSOPSBlockKeysMatchTheStruct(t *testing.T) {
 // YAML and unparseable YAML are ErrNotSOPSDocument; a merge key in the top
 // level is refused by name; a sops file whose values use `<<: *defaults`
 // deep down is read, since only the top level and the sops: block are
-// decoded; and the rules match ReadPlaintextRules'.
+// decoded; and the rules match readPlaintextRules'.
 //
 // Mutations that turn it red: drop the errRefusedShape branch (the merge
 // row reads as not a SOPS document); drop the isSOPSDoc check (plain YAML
@@ -268,11 +268,11 @@ func TestReadDocumentParsesOnceAndRefusesInOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a sops file with merge keys in its values: %v", err)
 	}
-	want, err := ReadPlaintextRules([]byte(values))
+	want, err := readPlaintextRules([]byte(values))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.unencryptedRegex.String() != want.unencryptedRegex.String() || got.unencryptedRegex.String() != "^public$" {
-		t.Errorf("ReadDocument's rules = %+v, ReadPlaintextRules' = %+v", got, want)
+		t.Errorf("ReadDocument's rules = %+v, readPlaintextRules' = %+v", got, want)
 	}
 }

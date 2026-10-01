@@ -13,7 +13,7 @@ import (
 )
 
 // TestSetValueRefusesAnOversizedFileByName: SetValue refuses a file over
-// MaxDocumentBytes as too large, before IsSOPSFile would call it "not a SOPS
+// MaxDocumentBytes as too large, before isSOPSFile would call it "not a SOPS
 // document", and before sops runs. A stand-in sops on PATH only has to
 // exist; the refusal comes first.
 //
