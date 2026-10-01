@@ -9,10 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	fexec "github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/gitenv"
 )
 
@@ -58,6 +61,36 @@ func Strip(args []string) []string {
 		}
 	}
 	return args
+}
+
+// FilterListing reports whether args, a git argv as a fake Runner records it,
+// are gitenv.RunUnfiltered's listing of the filter drivers: `[-C dir] config
+// -z --name-only --get-regexp ^filter...`.
+func FilterListing(args []string) bool {
+	args = Strip(args)
+	if len(args) >= 2 && args[0] == "-C" {
+		args = args[2:]
+	}
+	return len(args) == 5 && args[0] == "config" && args[3] == "--get-regexp" && strings.HasPrefix(args[4], `^filter\.`)
+}
+
+// ErrNoFilterDrivers is what git returns for a filter listing that matches
+// nothing: exit status 1 and no output.
+func ErrNoFilterDrivers(name string, args []string) error {
+	return &fexec.CommandError{Name: name, Args: args, ExitCode: 1, Err: errors.New("exit status 1")}
+}
+
+// NoFilters wraps a fake Runner's RunFunc so a filter listing is answered as
+// git answers it for a repository that defines no filter driver, and every
+// other call reaches fn. gitenv.RunUnfiltered then runs the caller's argv
+// unchanged.
+func NoFilters(fn func(name string, args []string) (string, error)) func(name string, args []string) (string, error) {
+	return func(name string, args []string) (string, error) {
+		if FilterListing(args) {
+			return "", ErrNoFilterDrivers(name, args)
+		}
+		return fn(name, args)
+	}
 }
 
 // Git runs git with args in dir for fixture setup, under gitenv's Transport
@@ -142,5 +175,80 @@ func (c Canary) AssertLive(t testing.TB) {
 	_ = cmd.Run()
 	if !c.Ran(t) {
 		t.Fatal("an unhardened git did not run the canary; the fixture cannot fire, so a passing test would prove nothing")
+	}
+}
+
+// FilterCanary is a repository whose .gitattributes route two committed
+// files through filter drivers its own .git/config defines, each of which
+// creates the file at Path when git runs it: "evil", a clean filter, on
+// x.txt, and "dot.ted", a process filter whose name holds a dot, on y.txt.
+// Both files are stat-dirty, so any status re-hashes them through their
+// drivers (#977).
+type FilterCanary struct {
+	Dir  string
+	Path string
+}
+
+// NewFilterCanary builds a FilterCanary repository; extra are further
+// "name=driver" .gitattributes entries, as path and driver name, each
+// defined as a clean filter that fires the same canary. Unix only: the
+// drivers are shell commands.
+func NewFilterCanary(t testing.TB, extra ...[2]string) FilterCanary {
+	t.Helper()
+	RequireGit(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("the filter canary's drivers are sh commands")
+	}
+	dir := t.TempDir()
+	c := FilterCanary{Dir: filepath.Join(dir, "repo"), Path: filepath.Join(dir, "canary")}
+	if err := os.Mkdir(c.Dir, 0o750); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	files := [][2]string{{"x.txt", "evil"}, {"y.txt", "dot.ted"}}
+	files = append(files, extra...)
+	var attrs strings.Builder
+	for _, f := range files {
+		attrs.WriteString(f[0] + " filter=" + f[1] + "\n")
+		if err := os.WriteFile(filepath.Join(c.Dir, f[0]), []byte("payload\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile %s: %v", f[0], err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(c.Dir, ".gitattributes"), []byte(attrs.String()), 0o600); err != nil {
+		t.Fatalf("WriteFile .gitattributes: %v", err)
+	}
+	Git(t, c.Dir, "init", "-q", "-b", "main")
+	Git(t, c.Dir, "add", ".")
+	Git(t, c.Dir, "commit", "-q", "-m", "control")
+	// The drivers are defined only after the commit, so committing ran none.
+	fire := "touch '" + c.Path + "'"
+	Git(t, c.Dir, "config", "filter.evil.clean", fire+"; cat")
+	Git(t, c.Dir, "config", "filter.dot.ted.process", fire+"; exit 1")
+	for _, f := range extra {
+		Git(t, c.Dir, "config", "filter."+f[1]+".clean", fire+"; cat")
+	}
+	later := time.Now().Add(time.Hour)
+	for _, f := range files {
+		if err := os.Chtimes(filepath.Join(c.Dir, f[0]), later, later); err != nil {
+			t.Fatalf("Chtimes %s: %v", f[0], err)
+		}
+	}
+	return c
+}
+
+// Ran reports whether any of the canary's drivers ran.
+func (c FilterCanary) Ran(t testing.TB) bool {
+	t.Helper()
+	return Canary{Path: c.Path}.Ran(t)
+}
+
+// AssertLive proves the fixture can fire: a git status with Local's options
+// and environment but no filter overrides runs a driver. A test that asserts
+// the canary never ran calls this first, on a second FilterCanary.
+func (c FilterCanary) AssertLive(t testing.TB) {
+	t.Helper()
+	cmd := gitenv.Command(t.Context(), gitenv.Local, "-C", c.Dir, "status", "--porcelain")
+	_ = cmd.Run()
+	if !c.Ran(t) {
+		t.Fatal("a Local git status ran no filter driver; the fixture cannot fire, so a passing test would prove nothing")
 	}
 }

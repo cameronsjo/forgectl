@@ -51,7 +51,7 @@ func guardConfigTags(c guardConfig) map[string]bool {
 	if c.cgo {
 		tags["cgo"] = true
 	}
-	ctx := guardContext(c.p)
+	ctx := guardContext(c.p, c.cgo)
 	for _, tag := range slices.Concat(build.Default.ReleaseTags, ctx.ToolTags) {
 		tags[tag] = true
 	}
@@ -232,7 +232,7 @@ func fileBuildConstraint(fset *token.FileSet, path string, src []byte) (constrai
 // fileBuildConstraint's.
 func nameMatches(t *testing.T, p guardPlatform, dir, name string) bool {
 	t.Helper()
-	ctx := guardContext(p)
+	ctx := guardContext(p, false)
 	ctx.OpenFile = func(string) (io.ReadCloser, error) {
 		return io.NopCloser(strings.NewReader("package p\n")), nil
 	}

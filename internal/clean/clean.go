@@ -421,7 +421,10 @@ func containsGitComponent(target string) bool {
 // (Modified/Untracked/Ahead counts) this package doesn't need — clean only
 // ever needs a clean/dirty boolean.
 func gitDirty(ctx context.Context, run exec.Runner, dir string) (bool, error) {
-	out, err := gitenv.Run(ctx, run, gitenv.Local, "-C", dir, "status", "--porcelain")
+	// Unfiltered (#977): status would otherwise run the clean filter the
+	// repository names on a stat-dirty file. A listing failure is an error,
+	// which ApplyReport reads as dirty.
+	out, err := gitenv.RunUnfiltered(ctx, run, gitenv.Bin, dir, "status", "--porcelain")
 	if err != nil {
 		return false, fmt.Errorf("git status --porcelain in %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}

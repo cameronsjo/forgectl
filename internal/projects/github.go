@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -136,9 +138,16 @@ func githubListOrg(ctx context.Context, run exec.Runner, org, host string) ([]Re
 // mislabel a table row — it leaves a checkout that originMatches then disagrees
 // with on every later run. Taking exec.Runner (not a bare Run-only interface)
 // is what lets the wrap live in here, where no future caller can forget it.
+//
+// gh runs `git clone` itself, outside internal/gitenv, so gh's environment
+// loses what gitenv's Transport profile removes (#978): an exported
+// GIT_WORK_TREE or GIT_INDEX_FILE, which git clone honours, would otherwise
+// put the checkout or its index somewhere other than dest. core.fsmonitor is
+// not pinned off here as Transport pins it: gh forwards arguments after `--`
+// to `git clone`, whose -c writes them into the new repository's config.
 func cloneRepo(ctx context.Context, run exec.Runner, name, dest, host string) error {
 	slog.Debug("Preparing to clone from GitHub.", "repo", name, "dest", dest)
-	_, err := githubauth.Runner(run, host).Run(ctx, "gh", "repo", "clone", name, dest)
+	_, err := githubauth.Runner(run, host).RunWithEnvFiltered(ctx, nil, gitenv.Unset(gitenv.Transport, os.Environ()), "gh", "repo", "clone", name, dest)
 	if err != nil {
 		slog.Error("Failed to clone from GitHub.", "repo", name, "dest", dest, "error", err)
 		// Categorical (#658): gh's stderr is host-chosen text. The caller
@@ -153,10 +162,11 @@ func cloneRepo(ctx context.Context, run exec.Runner, name, dest, host string) er
 // the underlying git clone (gh passes post-`--` args straight through). It keeps
 // gh's credential handling for github.com, same as cloneRepo — the worktree
 // layout's bare-clone step — and the same in-function host pin, for the same
-// reason: a bare clone persists to disk too.
+// reason: a bare clone persists to disk too. It scrubs gh's environment as
+// cloneRepo does, for the same reason.
 func cloneBareRepo(ctx context.Context, run exec.Runner, name, dest, host string) error {
 	slog.Debug("Preparing to bare-clone from GitHub.", "repo", name, "dest", dest)
-	_, err := githubauth.Runner(run, host).Run(ctx, "gh", "repo", "clone", name, dest, "--", "--bare")
+	_, err := githubauth.Runner(run, host).RunWithEnvFiltered(ctx, nil, gitenv.Unset(gitenv.Transport, os.Environ()), "gh", "repo", "clone", name, dest, "--", "--bare")
 	if err != nil {
 		slog.Error("Failed to bare-clone from GitHub.", "repo", name, "dest", dest, "error", err)
 		// Categorical (#658), as cloneRepo.

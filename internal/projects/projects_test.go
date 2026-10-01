@@ -499,10 +499,12 @@ func TestDiscover_NonGitDir_StatusIsNotRepo(t *testing.T) {
 }
 
 // TestInventory_StatusProcessBudget pins forgectl#216 end to end: a full
-// Inventory row costs exactly two git processes per repository — one status
-// probe and one origin lookup — whether the tree is clean or dirty. Before
-// the porcelain-v2 collapse a clean row cost three, because learning the
-// ahead count needed a second `rev-list` walk.
+// Inventory row costs exactly three git processes per repository — the
+// filter-driver listing that keeps the status probe from running a
+// repository's filter (#977), one status probe, and one origin lookup —
+// whether the tree is clean or dirty. Before the porcelain-v2 collapse a
+// clean row cost a further process, because learning the ahead count needed a
+// second `rev-list` walk.
 //
 // Calls are filtered by binary, repo dir, and subcommand rather than by slice
 // index: Inventory fans the status phase and the origin phase out across
@@ -532,7 +534,7 @@ func TestInventory_StatusProcessBudget(t *testing.T) {
 			mkGitDir(t, tmp, "forgectl")
 			repo := filepath.Join(tmp, "forgectl")
 
-			fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+			fake := &exec.FakeRunner{RunFunc: gitenvtest.NoFilters(func(name string, args []string) (string, error) {
 				args = gitenvtest.Strip(args)
 				switch name {
 				case "gh":
@@ -549,7 +551,7 @@ func TestInventory_StatusProcessBudget(t *testing.T) {
 					return tc.statusOut, nil
 				}
 				return "", nil
-			}}
+			})}
 			c := &Client{Dir: tmp, run: fake, gitBin: "git"}
 
 			repos, notes, err := c.Inventory(context.Background())
@@ -575,6 +577,9 @@ func TestInventory_StatusProcessBudget(t *testing.T) {
 			if counts["remote"] != 1 {
 				t.Errorf("remote get-url calls = %d, want exactly 1", counts["remote"])
 			}
+			if counts["config"] != 1 {
+				t.Errorf("filter listings = %d, want exactly 1", counts["config"])
+			}
 			if counts["rev-list"] != 0 {
 				t.Errorf("rev-list calls = %d, want 0", counts["rev-list"])
 			}
@@ -582,8 +587,8 @@ func TestInventory_StatusProcessBudget(t *testing.T) {
 			for _, n := range counts {
 				total += n
 			}
-			if total != 2 {
-				t.Errorf("git calls for %s = %d (%v), want exactly 2", repo, total, counts)
+			if total != 3 {
+				t.Errorf("git calls for %s = %d (%v), want exactly 3", repo, total, counts)
 			}
 		})
 	}

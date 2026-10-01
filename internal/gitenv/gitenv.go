@@ -5,16 +5,19 @@
 // live there. Some of that config can make git run a program or reach the
 // network on a call that means neither. So every git invocation goes through
 // a Profile, and TestProductionGitGoesThroughGitenv fails when production
-// code runs git any other way.
+// code runs git any other way. The one exception is git that gh runs for
+// `gh repo clone`, which the pin allowlists by name (ghGitAllowlist); gh's
+// environment loses what Transport removes (Unset).
 //
 // # Local
 //
 // Local, the zero Profile, is for every call that needs no fetch or push:
 // rev-parse, remote get-url, status, for-each-ref, and the local writes
-// (config, branch -D, worktree add from a complete clone). It pins off each
-// way such a call can be made to run a program or reach the network, rather
-// than trusting the repository not to ask. It is the stash check's hardening
-// from #938, extracted unchanged:
+// (config, branch -D, worktree add from a complete clone). It pins off the
+// ways below that such a call can be made to run a program or reach the
+// network, rather than trusting the repository not to ask. It is the stash
+// check's hardening from #938, extracted unchanged. It does not pin off every
+// way: see "What Local leaves running".
 //
 //   - lazy fetch. In a partial clone (a promisor remote), reading a missing
 //     object fetches it, which runs the transport, and with it
@@ -58,9 +61,31 @@
 //
 // User-level config, global and system, is kept: it is the operator's own,
 // and dropping it would drop safe.directory, which turns a repository the
-// operator marked safe into a failed call. Hooks are not switched off: the
-// Local calls that can run one (branch -D's reference-transaction, worktree
-// add's post-checkout) run it in the operator's own repository.
+// operator marked safe into a failed call.
+//
+// # What Local leaves running
+//
+//   - Filter drivers. A file that .gitattributes (or .git/info/attributes)
+//     routes through filter.<name>.clean or .process runs that program
+//     whenever git re-hashes the file, which status does for any stat-dirty
+//     entry, and so does worktree remove's dirty check. No option turns
+//     filters off, and the repository's own config can define them. A call
+//     that needs no filter uses RunUnfiltered, which lists the drivers and
+//     blanks each one by name (#977); the projects status probe and clean's
+//     dirty check do. It reads the superproject's config only: status runs a
+//     child git in each submodule, whose own drivers it does not list.
+//
+//   - The operator's own filters on checkout. worktree add runs smudge
+//     filters, git-lfs's among them, which may fetch objects themselves.
+//     Measured on git 2.43 with git-lfs 3.4.1: a worktree add under Local
+//     from a bare clone without the LFS objects fetched them from a file://
+//     remote, through git-lfs's own transfer, and checked the real content
+//     out. Not measured: an https remote whose credentials only an
+//     interactive prompt supplies, which GIT_TERMINAL_PROMPT=0 would refuse.
+//
+//   - Hooks. The Local calls that can run one (branch -D's
+//     reference-transaction, worktree add's post-checkout) run it in the
+//     operator's own repository.
 //
 // # Transport
 //
@@ -77,9 +102,15 @@ package gitenv
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
+	"slices"
 	"strings"
+
+	fexec "github.com/cameronsjo/forgectl/internal/exec"
 )
 
 // Profile selects how git is hardened for one call. The zero value is Local.
@@ -160,10 +191,30 @@ func Args(p Profile) []string {
 	return append([]string(nil), localArgs...)
 }
 
+// caseInsensitiveEnv is whether environment variable names compare without
+// regard to case, as on Windows, where git_dir and GIT_DIR are one variable.
+// It is a variable only so a test on another platform can model Windows.
+var caseInsensitiveEnv = runtime.GOOS == "windows"
+
+// sameVar reports whether the environment variable names a and b name one
+// variable on this platform.
+func sameVar(a, b string) bool {
+	if caseInsensitiveEnv {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+// hasVarPrefix reports whether the environment variable name key begins with
+// prefix, compared as sameVar compares names.
+func hasVarPrefix(key, prefix string) bool {
+	return len(key) >= len(prefix) && sameVar(key[:len(prefix)], prefix)
+}
+
 // removed reports whether p removes key from the inherited environment.
 func removed(p Profile, key string) bool {
 	for _, k := range repositoryVars {
-		if key == k {
+		if sameVar(key, k) {
 			return true
 		}
 	}
@@ -171,16 +222,25 @@ func removed(p Profile, key string) bool {
 		return false
 	}
 	for _, k := range localOnlyVars {
-		if key == k {
+		if sameVar(key, k) {
 			return true
 		}
 	}
 	for _, pin := range localPins {
-		if key == pin[0] {
+		if sameVar(key, pin[0]) {
 			return true
 		}
 	}
-	return strings.HasPrefix(key, "GIT_CONFIG_KEY_") || strings.HasPrefix(key, "GIT_CONFIG_VALUE_")
+	return hasVarPrefix(key, "GIT_CONFIG_KEY_") || hasVarPrefix(key, "GIT_CONFIG_VALUE_")
+}
+
+// Unset returns the variables in environ that p removes, as a Runner's
+// removals. A caller that starts a program which itself runs git, rather
+// than git directly, passes Unset(Transport, os.Environ()) so an exported
+// GIT_WORK_TREE or GIT_INDEX_FILE cannot redirect that program's git.
+func Unset(p Profile, environ []string) []string {
+	_, unset := filter(p, environ)
+	return unset
 }
 
 // Env returns environ as p runs git with it: the scrubbed variables removed,
@@ -233,6 +293,96 @@ func filter(p Profile, environ []string) (map[string]string, []string) {
 		overrides[pin[0]] = pin[1]
 	}
 	return overrides, unset
+}
+
+// filterDriverKeys matches every configuration key that names a filter
+// driver's program (gitattributes(5)): filter.<driver>.clean, .smudge and
+// .process. The driver name is a config subsection, so it may itself hold
+// dots; it is parsed from the right.
+const filterDriverKeys = `^filter\..*\.(clean|smudge|process)$`
+
+// filterDriverVars are the variables filterDriverKeys matches, in the order
+// RunUnfiltered blanks them.
+var filterDriverVars = []string{"clean", "smudge", "process"}
+
+// RunUnfiltered runs git with args in dir under Local, as RunBin would, with
+// every filter driver git's configuration defines switched off
+// (cameronsjo/forgectl#977). It is for a call that can run a filter on the
+// working tree and needs none: status, whose racy or stat-dirty entries are
+// re-hashed through the clean filter (or the process filter) that
+// .gitattributes names. Local cannot stop that by itself: no option turns
+// filters off, and the repository's own .gitattributes and .git/config
+// select and define them.
+//
+// So it costs one more git process: `git config --get-regexp` lists the
+// drivers first, under Local, and the call then carries
+// `-c filter.<name>.clean= -c filter.<name>.smudge= -c filter.<name>.process=`
+// for each name found, which outranks every configuration file. A driver
+// with filter.<name>.required set then fails the call instead of running,
+// which the callers read as an unknown state, never a clean one. The
+// operator's own drivers, git-lfs's among them, are switched off too.
+//
+// It fails closed: when the listing fails, or names a driver that -c cannot
+// override (a name holding '=', where git splits a -c argument), the call is
+// not run and the error says why. dir "" lists and runs in the current
+// directory. A submodule's own drivers are not listed (see the package doc).
+func RunUnfiltered(ctx context.Context, r Runner, bin, dir string, args ...string) (string, error) {
+	var at []string
+	if dir != "" {
+		at = []string{"-C", dir}
+	}
+	out, err := RunBin(ctx, r, bin, Local, append(slices.Clone(at), "config", "-z", "--name-only", "--get-regexp", filterDriverKeys)...)
+	if err != nil {
+		// git config exits 1, printing nothing, when no key matches.
+		var ce *fexec.CommandError
+		if !errors.As(err, &ce) || ce.ExitCode != 1 || ce.Output != "" {
+			return "", fmt.Errorf("list the filter drivers git could run: %w", err)
+		}
+		out = ""
+	}
+	names, err := filterDriverNames(out)
+	if err != nil {
+		return "", err
+	}
+	off := make([]string, 0, 2*len(filterDriverVars)*len(names)+len(at)+len(args))
+	for _, name := range names {
+		for _, v := range filterDriverVars {
+			off = append(off, "-c", "filter."+name+"."+v+"=")
+		}
+	}
+	return RunBin(ctx, r, bin, Local, append(append(off, at...), args...)...)
+}
+
+// errUnexpectedFilterKey is returned for listing output that is not a
+// NUL-separated list of filter driver keys.
+var errUnexpectedFilterKey = errors.New("git config listed a key that names no filter driver; refusing to run unfiltered")
+
+// errUnoverridableFilter is returned for a driver name -c cannot override.
+var errUnoverridableFilter = errors.New("a filter driver's name holds '=' or a newline, which git -c cannot override; refusing to run with it live")
+
+// filterDriverNames parses `git config -z --name-only --get-regexp
+// filterDriverKeys` output into the sorted, distinct driver names.
+func filterDriverNames(out string) ([]string, error) {
+	var names []string
+	for _, key := range strings.Split(out, "\x00") {
+		if key == "" {
+			continue
+		}
+		rest, ok := strings.CutPrefix(key, "filter.")
+		dot := strings.LastIndexByte(rest, '.')
+		if !ok || dot < 0 || !slices.Contains(filterDriverVars, rest[dot+1:]) {
+			return nil, errUnexpectedFilterKey
+		}
+		name := rest[:dot]
+		if strings.ContainsAny(name, "=\n") {
+			return nil, errUnoverridableFilter
+		}
+		if !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names, nil
 }
 
 // Command builds an *exec.Cmd running git with args under p, for a caller
