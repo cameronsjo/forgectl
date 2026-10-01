@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/herdr/wire"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/sockstat"
 )
@@ -592,36 +593,28 @@ type createdWorkspace struct {
 	PaneID      string
 }
 
-type createReply struct {
-	Result struct {
-		Workspace struct {
-			WorkspaceID string `json:"workspace_id"`
-		} `json:"workspace"`
-		Tab struct {
-			TabID string `json:"tab_id"`
-		} `json:"tab"`
-		RootPane struct {
-			PaneID string `json:"pane_id"`
-		} `json:"root_pane"`
-	} `json:"result"`
+// createResult and listResult are the "result" members of herdr's
+// {"id","result"} replies, which wire.DecodeResult unwraps; the envelope itself
+// is decoded in one place for this adapter and internal/herdr (#722).
+type createResult struct {
+	Workspace struct {
+		WorkspaceID string `json:"workspace_id"`
+	} `json:"workspace"`
+	Tab struct {
+		TabID string `json:"tab_id"`
+	} `json:"tab"`
+	RootPane struct {
+		PaneID string `json:"pane_id"`
+	} `json:"root_pane"`
 }
 
-type listReply struct {
-	Result struct {
-		Workspaces []struct {
-			WorkspaceID string `json:"workspace_id"`
-			Label       string `json:"label"`
-		} `json:"workspaces"`
-	} `json:"result"`
-}
-
-// errorReply is herdr's refusal envelope. The CODE is the field worth reading —
-// it is machine-readable and stable in a way the message is not, which is the
-// thing the cmux adapter had to approximate with a substring match on prose.
-type errorReply struct {
-	Error struct {
-		Code string `json:"code"`
-	} `json:"error"`
+// listResult's list is a pointer so a missing or null member is told apart
+// from an empty listing: absence is what a false empty reads as.
+type listResult struct {
+	Workspaces *[]struct {
+		WorkspaceID string `json:"workspace_id"`
+		Label       string `json:"label"`
+	} `json:"workspaces"`
 }
 
 // parseSessions reads the session roster, keyed by exact name.
@@ -658,14 +651,17 @@ func parseCreated(out exec.BoundedOutput) (createdWorkspace, error) {
 	if !complete {
 		return createdWorkspace{}, errors.New("the herdr create reply was truncated")
 	}
-	var reply createReply
-	if err := json.Unmarshal(raw, &reply); err != nil {
+	reply, err := wire.DecodeResult[createResult](raw)
+	switch {
+	case errors.Is(err, wire.ErrNoResult):
+		return createdWorkspace{}, errors.New("the herdr create reply had no result")
+	case err != nil:
 		return createdWorkspace{}, errors.New("the herdr create reply was not readable JSON")
 	}
 	out2 := createdWorkspace{
-		WorkspaceID: reply.Result.Workspace.WorkspaceID,
-		TabID:       reply.Result.Tab.TabID,
-		PaneID:      reply.Result.RootPane.PaneID,
+		WorkspaceID: reply.Workspace.WorkspaceID,
+		TabID:       reply.Tab.TabID,
+		PaneID:      reply.RootPane.PaneID,
 	}
 	if out2.WorkspaceID == "" || out2.TabID == "" || out2.PaneID == "" {
 		return createdWorkspace{}, errors.New("the herdr create reply named no complete workspace identity")
@@ -680,7 +676,9 @@ func parseCreated(out exec.BoundedOutput) (createdWorkspace, error) {
 // A reply we could not read is not an empty reply; the completeness flag is
 // checked as well as the JSON parse, because a document that happened to be
 // valid at its truncation point would otherwise present as a SHORTER listing,
-// which is exactly a false absence.
+// which is exactly a false absence. For the same reason a reply with no
+// "result", or a result with no "workspaces" member, is refused rather than
+// read as an empty listing (#722): that is the shape of a renamed envelope.
 //
 // internal/tmux and the cmux adapter DROP an unusable row and refuse only when
 // every row is unusable, and they are right to: a tmux session name is chosen by
@@ -700,12 +698,17 @@ func parseWorkspaceList(out exec.BoundedOutput) (map[string]workspaceRow, error)
 	if !complete {
 		return nil, errors.New("the herdr workspace listing was truncated")
 	}
-	var reply listReply
-	if err := json.Unmarshal(raw, &reply); err != nil {
+	reply, err := wire.DecodeResult[listResult](raw)
+	switch {
+	case errors.Is(err, wire.ErrNoResult):
+		return nil, errors.New("the herdr workspace listing had no result")
+	case err != nil:
 		return nil, errors.New("the herdr workspace listing was not readable JSON")
+	case reply.Workspaces == nil:
+		return nil, errors.New("the herdr workspace listing had no workspaces member")
 	}
-	rows := make(map[string]workspaceRow, len(reply.Result.Workspaces))
-	for _, w := range reply.Result.Workspaces {
+	rows := make(map[string]workspaceRow, len(*reply.Workspaces))
+	for _, w := range *reply.Workspaces {
 		if _, err := backend.NewHerdrIdentity(w.WorkspaceID, "", ""); err != nil {
 			return nil, errors.New("a row of the herdr workspace listing was not usable")
 		}
@@ -714,19 +717,21 @@ func parseWorkspaceList(out exec.BoundedOutput) (map[string]workspaceRow, error)
 	return rows, nil
 }
 
-// errorCode reads herdr's structured refusal code, or "" when the stream is not
-// one. Matching the code rather than the message is what makes a reworded
-// diagnostic harmless.
+// errorCode reads herdr's structured refusal code through wire.DecodeError, or
+// "" when the stream is not one. The CODE is the field worth reading — it is
+// machine-readable and stable in a way the message is not, which is the thing
+// the cmux adapter had to approximate with a substring match on prose; matching
+// it is what makes a reworded diagnostic harmless.
 func errorCode(out exec.BoundedOutput) string {
 	raw, complete := out.CopyBytesForParse()
 	if !complete {
 		return ""
 	}
-	var reply errorReply
-	if err := json.Unmarshal(raw, &reply); err != nil {
+	r, ok := wire.DecodeError(raw)
+	if !ok {
 		return ""
 	}
-	return reply.Error.Code
+	return r.Code
 }
 
 // classifyRunError maps a runner error onto the closed failure vocabulary.

@@ -1,0 +1,18 @@
+{
+  "id": "cli:workspace:list",
+  "data": {
+    "type": "workspace_list",
+    "workspaces": [
+      {
+        "active_tab_id": "w1:t1",
+        "agent_status": "working",
+        "focused": true,
+        "label": "label-1",
+        "number": 1,
+        "pane_count": 8,
+        "tab_count": 4,
+        "workspace_id": "w1"
+      }
+    ]
+  }
+}
