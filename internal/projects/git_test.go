@@ -233,9 +233,10 @@ func TestGitStatus_UsesOnePorcelainV2BranchProbe(t *testing.T) {
 		t.Errorf("gitStatus = %+v, want %+v", got, want)
 	}
 
-	// The filter-driver listing ahead of it is #977's, and its own process.
-	if len(fake.Calls) != 2 || !gitenvtest.FilterListing(fake.Calls[0].Args) {
-		t.Fatalf("git calls = %d (%v), want the filter listing and one status probe", len(fake.Calls), fake.Calls)
+	// The filter-driver and submodule listings ahead of it are #977's, each
+	// its own process.
+	if len(fake.Calls) != 3 || !gitenvtest.FilterListing(fake.Calls[0].Args) || !gitenvtest.FilterListing(fake.Calls[1].Args) {
+		t.Fatalf("git calls = %d (%v), want the two listings and one status probe", len(fake.Calls), fake.Calls)
 	}
 	probes := withoutListings(fake.Calls)
 	wantArgs := append(gitenv.Args(gitenv.Local), "-C", repo, "status", "--porcelain=v2", "--branch")
@@ -296,7 +297,7 @@ func TestGitStatus_CombinedCommandFailureIsUnknownWithoutFallback(t *testing.T) 
 			defer cancel()
 			run := &ctxRunner{fn: func(ctx context.Context, name string, args []string) (string, error) {
 				if gitenvtest.FilterListing(args) {
-					return "", gitenvtest.ErrNoFilterDrivers(name, args)
+					return gitenvtest.AnswerListing(name, args)
 				}
 				return tc.fn(ctx, name, args)
 			}}

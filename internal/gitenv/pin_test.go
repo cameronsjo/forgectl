@@ -71,6 +71,16 @@ var ghGitAllowlist = map[string]struct {
 	"internal/projects/github.go:cloneBareRepo": {1, "as cloneRepo, for the bare clone"},
 }
 
+// shellScriptAllowlist is every function that may start a shell with a
+// script that is not a constant, which the pin cannot read for git, with the
+// exact count and the reason.
+var shellScriptAllowlist = map[string]struct {
+	uses   int
+	reason string
+}{
+	"internal/bless/bless.go:InstallAnchor": {1, "anchorInstallScript is a package var built at init from the AnchorPath constant and filepath.Dir of it, so it is not a Go constant; it runs mkdir, chown, chmod and printf, and no git"},
+}
+
 // ghGitSubcommands are the gh arguments that make gh run git: repo clone,
 // repo fork --clone, gist clone, pr checkout, repo sync.
 var ghGitSubcommands = map[string]bool{"clone": true, "--clone": true, "checkout": true, "sync": true}
@@ -98,6 +108,14 @@ var execNamePos = map[string]int{
 	"RunStreaming":        4,
 }
 
+// scriptFlags are the shell options whose next argument is the script:
+// sh -c, cmd /c and /k, PowerShell -Command and -EncodedCommand.
+var scriptFlags = map[string]bool{"-c": true, "/c": true, "/C": true, "/k": true, "/K": true, "-Command": true, "-command": true, "-EncodedCommand": true}
+
+// gitBinName matches the name of a variable, field or method that holds the
+// git executable: gitBin, c.gitBinary(), gitExe.
+var gitBinName = regexp.MustCompile(`(?i)^git_?(bin|binary|exe)$`)
+
 // gitLike matches the source of a non-constant executable name that is git's
 // by its own name: gitBin, c.gitBinary(), gitPath.
 var gitLike = regexp.MustCompile(`(?i)git`)
@@ -120,8 +138,13 @@ type finding struct {
 //   - a process start whose executable is held in a variable that an
 //     exec.LookPath of git (or anything derived from it) set in the same
 //     function, whatever the variable is called;
-//   - a shell (sh, bash, cmd, …) started with a constant script that runs
-//     git as a word (`sh -c "git status"`);
+//   - a shell (sh, bash, cmd, …), started directly or behind a wrapper
+//     (`sudo sh -c`), with a constant script that runs git as a word
+//     (`sh -c "git status"`), or with a script that is not a constant,
+//     outside shellScriptAllowlist;
+//   - a process start that hands the git executable (gitenv.Bin, a git
+//     path, gitBin, a LookPath of git) to the program it starts as an
+//     argument: `env X=1 git`, `sh -c 'exec "$0"' git`;
 //   - gh started with a subcommand that runs git itself (clone, checkout,
 //     sync) outside ghGitAllowlist, or over its count;
 //   - any other constant expression equal to "git" outside
@@ -192,7 +215,7 @@ func TestProductionGitGoesThroughGitenv(t *testing.T) {
 // verdicts turns findings into failure messages against the allowlists.
 func verdicts(all []finding) []string {
 	var out []string
-	constants, transports, ghGits := map[string]int{}, map[string]int{}, map[string]int{}
+	constants, transports, ghGits, scripts := map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}
 	for _, f := range all {
 		switch f.kind {
 		case "exec":
@@ -203,6 +226,10 @@ func verdicts(all []finding) []string {
 			transports[f.fn]++
 		case "gh-git":
 			ghGits[f.fn]++
+		case "git-arg":
+			out = append(out, fmt.Sprintf("%s (%s) hands the git executable to another program, which runs it without internal/gitenv", f.pos, f.fn))
+		case "shell-script":
+			scripts[f.fn]++
 		}
 	}
 	check := func(kind string, counts map[string]int, allow map[string]struct {
@@ -235,6 +262,7 @@ func verdicts(all []finding) []string {
 	}
 	check("constant \"git\"", constants, gitConstantAllowlist, "name git through gitenv.Run, which runs gitenv.Bin")
 	check("gitenv.Transport", transports, transportAllowlist, "use gitenv.Local unless the call reaches a remote, and then allowlist it with the reason")
+	check("shell-script", scripts, shellScriptAllowlist, "a shell given a script the pin cannot read may run git; pass a constant script, or allowlist it with the reason")
 	check("gh-runs-git", ghGits, ghGitAllowlist, "gh runs git outside internal/gitenv; remove gitenv.Unset(gitenv.Transport, os.Environ()) from its environment and allowlist it with the reason")
 	sort.Strings(out)
 	return out
@@ -274,17 +302,36 @@ func scan(fset *token.FileSet, pkgPath, rel string, files []*ast.File) []finding
 					return true
 				}
 				base := constBase(info, arg)
-				for _, a := range call.Args[pos+1:] {
+				// A wrapper (sudo, env, nice) may start the shell: sudo sh -c.
+				inShell := shells[base]
+				rest := call.Args[pos+1:]
+				for i, a := range rest {
+					if passesGit(info, a, looked) {
+						out = append(out, finding{pos: fset.Position(a.Pos()).String(), fn: fn, kind: "git-arg"})
+						return true
+					}
 					v, ok := constString(info, a)
 					switch {
 					case !ok:
-					case shells[base] && gitWord.MatchString(v):
+					case !inShell && shells[constBase(info, a)]:
+						inShell = true
+					case inShell && isScriptFlag(v) && i+1 < len(rest) && !isConstString(info, rest[i+1]):
+						out = append(out, finding{pos: fset.Position(rest[i+1].Pos()).String(), fn: fn, kind: "shell-script"})
+						return true
+					case inShell && gitWord.MatchString(v):
 						out = append(out, finding{pos: fset.Position(a.Pos()).String(), fn: fn, kind: "exec"})
 						return true
 					case (base == "gh" || base == "gh.exe") && ghGitSubcommands[v]:
 						out = append(out, finding{pos: fset.Position(a.Pos()).String(), fn: fn, kind: "gh-git"})
 						return true
 					}
+				}
+				// A shell's or a wrapper's arguments spread from a slice
+				// (sh args..., sudo args...) may hold any script, or git
+				// itself; the pin cannot read them unless the slice is a
+				// literal of constant strings.
+				if (inShell || wrappers[base]) && call.Ellipsis.IsValid() && len(rest) > 0 && !constStrings(info, rest[len(rest)-1]) {
+					out = append(out, finding{pos: fset.Position(rest[len(rest)-1].Pos()).String(), fn: fn, kind: "shell-script"})
 				}
 				return true
 			})
@@ -325,6 +372,92 @@ func namesGit(info *types.Info, arg ast.Expr) bool {
 		return true
 	})
 	return gitLike.MatchString(strings.Join(names, " "))
+}
+
+// passesGit reports whether e, an argument after the executable, holds the
+// git executable: gitenv.Bin, a constant whose base name is git, a name
+// gitBinName matches, or a variable a LookPath of git set (looked). A
+// wrapper (env, nice, xargs, a shell's "$0") given it runs git outside
+// internal/gitenv.
+func passesGit(info *types.Info, e ast.Expr, looked map[types.Object]bool) bool {
+	if mentions(info, e, looked) {
+		return true
+	}
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch x := n.(type) {
+		case *ast.SelectorExpr:
+			found = isGitenvSel(info, x, "Bin") || gitBinName.MatchString(x.Sel.Name)
+		case *ast.Ident:
+			found = gitBinName.MatchString(x.Name)
+		case ast.Expr:
+			if v, ok := constString(info, x); ok {
+				found = isGitExecutable(v)
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// absPath matches an absolute path: /usr/bin/git, C:\Git\git.exe, \\host\git.
+var absPath = regexp.MustCompile(`^(/|[A-Za-z]:[\\/]|\\\\)`)
+
+// isGitExecutable reports whether the argument v names the git executable:
+// git or git.exe alone, or an absolute or ./- or ../-relative path ending in
+// one. A bare relative path whose last segment is git, as in `gh api
+// repos/o/r/git`, does not.
+func isGitExecutable(v string) bool {
+	isGit := func(s string) bool { return s == "git" || strings.EqualFold(s, "git.exe") }
+	if isGit(v) {
+		return true
+	}
+	slashed := strings.ReplaceAll(v, `\`, "/")
+	explicit := absPath.MatchString(v) || strings.HasPrefix(slashed, "./") || strings.HasPrefix(slashed, "../")
+	return explicit && isGit(path.Base(slashed))
+}
+
+// bundledScriptFlag matches a shell option bundle that holds c, whose next
+// argument is then the script: -lc, -ec, -xec.
+var bundledScriptFlag = regexp.MustCompile(`^-[A-Za-z]*c[A-Za-z]*$`)
+
+// isScriptFlag reports whether v is a shell option whose next argument is
+// the script.
+func isScriptFlag(v string) bool {
+	return scriptFlags[v] || bundledScriptFlag.MatchString(v)
+}
+
+// wrappers are executables that run their arguments as another command:
+// sudo git, env X=1 git, nice git. A spread through one is flagged as a
+// shell's is. A wrapper outside this list, or one reached through a
+// non-constant name, is not seen.
+var wrappers = map[string]bool{"sudo": true, "doas": true, "env": true, "nice": true, "nohup": true, "timeout": true, "xargs": true, "setsid": true, "stdbuf": true, "ionice": true, "chrt": true, "taskset": true, "time": true, "command": true, "exec": true, "busybox": true}
+
+// constStrings reports whether e is a constant string, or a slice literal
+// whose elements all are: []string{"-c", "true"}.
+func constStrings(info *types.Info, e ast.Expr) bool {
+	if isConstString(info, e) {
+		return true
+	}
+	lit, ok := e.(*ast.CompositeLit)
+	if !ok {
+		return false
+	}
+	for _, el := range lit.Elts {
+		if !isConstString(info, el) {
+			return false
+		}
+	}
+	return true
+}
+
+// isConstString reports whether e is a constant string.
+func isConstString(info *types.Info, e ast.Expr) bool {
+	_, ok := constString(info, e)
+	return ok
 }
 
 // constString is e's value when e is a constant string.
@@ -427,7 +560,12 @@ func mentions(info *types.Info, e ast.Expr, marked map[types.Object]bool) bool {
 
 // isGitenvTransport reports whether sel is gitenv.Transport.
 func isGitenvTransport(info *types.Info, sel *ast.SelectorExpr) bool {
-	if sel.Sel.Name != "Transport" {
+	return isGitenvSel(info, sel, "Transport")
+}
+
+// isGitenvSel reports whether sel is gitenv.<name>.
+func isGitenvSel(info *types.Info, sel *ast.SelectorExpr, name string) bool {
+	if sel.Sel.Name != name {
 		return false
 	}
 	x, ok := sel.X.(*ast.Ident)
@@ -533,6 +671,15 @@ func productionDirs(root string) ([]string, error) {
 // the "constant" or "transport" case in scan: a case here goes unflagged.
 // For #978's rows: make lookedUpGit return nothing (looked, lookedVar), drop
 // the shells case (shell, shellExe), or the gh case (ghClone, ghCheckout).
+// For #985's: make passesGit return false (envBin through binArg); drop the
+// scriptFlags case (shellVar, sudoShellVar, cmdVar); start inShell only at
+// a shell executable (sudoShellVar, sudoShellGit); match scriptFlags only
+// (bundled); drop the spread check (spread); match a constant git by
+// path.Base alone (fineFour's `repos/o/r/git` is flagged); let a later
+// constant in passesGit reset found (inSlice's gitenv.Bin is missed);
+// match only absolute paths (dotSlash); check spreads only in a shell
+// (sudoSpread); treat a constant slice literal as unreadable (fineFive is
+// flagged).
 func TestPinFlagsEveryBypass(t *testing.T) {
 	src := `package p
 
@@ -565,6 +712,23 @@ func shell(ctx context.Context, r runner) { _, _ = r.Run(ctx, "sh", "-c", "cd /x
 func shellExe(ctx context.Context) { _ = exec.CommandContext(ctx, "/bin/bash", "-c", "git fetch") }
 func ghClone(ctx context.Context, r runner) { _, _ = r.Run(ctx, "gh", "repo", "clone", "o/r") }
 func ghCheckout(ctx context.Context, r runner) { _, _ = r.RunWithEnvFiltered(ctx, nil, nil, "gh", "pr", "checkout", "1") }
+func envBin(ctx context.Context, r runner) { _, _ = r.Run(ctx, "env", "GIT_DIR=x", gitenv.Bin, "status") }
+func dollarZero(ctx context.Context) { _ = exec.CommandContext(ctx, "sh", "-c", "exec \"$0\" status", gitenv.Bin) }
+func xargsPath(ctx context.Context, r runner) { _, _ = r.Run(ctx, "xargs", "/usr/bin/git") }
+func lookedArg(ctx context.Context, r runner) { p, _ := exec.LookPath(gitenv.Bin); _, _ = r.Run(ctx, "nice", p, "status") }
+func binArg(ctx context.Context, r runner, gitBin string) { _, _ = r.Run(ctx, "nice", "-n5", gitBin) }
+func shellVar(ctx context.Context, r runner, script string) { _, _ = r.Run(ctx, "sh", "-c", script) }
+func sudoShellVar(ctx context.Context, r runner, script string) { _, _ = r.Run(ctx, "/usr/bin/sudo", "/bin/sh", "-c", script) }
+func cmdVar(script string) { _ = exec.Command("cmd.exe", "/c", script) }
+func sudoShellGit(ctx context.Context, r runner) { _, _ = r.Run(ctx, "sudo", "bash", "-c", "git pull") }
+func bundled(ctx context.Context, r runner, script string) { _, _ = r.Run(ctx, "bash", "-lc", script) }
+func spread(args []string) { _ = exec.Command("sh", args...) }
+func dotSlash(ctx context.Context, r runner) { _, _ = r.Run(ctx, "nice", "./git", "status") }
+func sudoSpread(ctx context.Context, r runner, args []string) { _, _ = r.Run(ctx, "sudo", args...) }
+func fineFive(ctx context.Context, r runner) { _ = exec.Command("sh", []string{"-c", "true"}...); _, _ = r.Run(ctx, "env", []string{"A=1", "true"}...) }
+func inSlice(ctx context.Context, r runner) { _, _ = r.Run(ctx, "nice", append([]string{gitenv.Bin}, "status")...) }
+func fineFour(ctx context.Context, r runner, args []string) { _, _ = r.Run(ctx, "gh", "api", "repos/o/r/git"); _, _ = r.Run(ctx, "tmux", args...); _, _ = r.Run(ctx, "bash", "-lc", "true") }
+func fineThree(ctx context.Context, r runner, arg, github string) { _, _ = r.Run(ctx, "sh", "-c", "echo hi", "_", arg); _, _ = r.Run(ctx, "gh", "api", "repos/o/r/git/refs"); _, _ = r.Run(ctx, "tmux", "send-keys", github); _, _ = r.Run(ctx, "sh", "-e", "-c", "true") }
 func fineToo(ctx context.Context, r runner) { p, _ := exec.LookPath("tmux"); _, _ = r.Run(ctx, p); _, _ = r.Run(ctx, "sh", "-c", "echo github digit"); _, _ = r.Run(ctx, "gh", "pr", "view") }
 `
 	fset := token.NewFileSet()
@@ -591,6 +755,22 @@ func fineToo(ctx context.Context, r runner) { p, _ := exec.LookPath("tmux"); _, 
 		"p/p.go:shellExe":   {"exec"},
 		"p/p.go:ghClone":    {"gh-git"},
 		"p/p.go:ghCheckout": {"gh-git"},
+		// #985 nit: the git executable handed to a wrapper, and a shell
+		// script the pin cannot read.
+		"p/p.go:envBin":       {"git-arg"},
+		"p/p.go:dollarZero":   {"git-arg"},
+		"p/p.go:xargsPath":    {"git-arg"},
+		"p/p.go:lookedArg":    {"git-arg"},
+		"p/p.go:binArg":       {"git-arg"},
+		"p/p.go:shellVar":     {"shell-script"},
+		"p/p.go:sudoShellVar": {"shell-script"},
+		"p/p.go:cmdVar":       {"shell-script"},
+		"p/p.go:sudoShellGit": {"exec"},
+		"p/p.go:bundled":      {"shell-script"},
+		"p/p.go:spread":       {"shell-script"},
+		"p/p.go:inSlice":      {"git-arg"},
+		"p/p.go:dotSlash":     {"git-arg"},
+		"p/p.go:sudoSpread":   {"shell-script"},
 	}
 	for fn, kinds := range want {
 		if strings.Join(got[fn], ",") != strings.Join(kinds, ",") {
@@ -604,6 +784,12 @@ func fineToo(ctx context.Context, r runner) { p, _ := exec.LookPath("tmux"); _, 
 	}
 	if msgs := verdicts([]finding{{pos: "x", fn: "p/p.go:transport", kind: "transport"}}); len(msgs) == 0 {
 		t.Error("an unlisted gitenv.Transport use produced no verdict")
+	}
+	if msgs := verdicts([]finding{{pos: "x", fn: "p/p.go:envBin", kind: "git-arg"}}); len(msgs) == 0 {
+		t.Error("the git executable handed to a wrapper produced no verdict")
+	}
+	if msgs := verdicts([]finding{{pos: "x", fn: "p/p.go:shellVar", kind: "shell-script"}}); !slices.ContainsFunc(msgs, func(m string) bool { return strings.HasPrefix(m, "p/p.go:shellVar: 1 shell-script") }) {
+		t.Errorf("an unlisted non-constant shell script produced no verdict: %v", msgs)
 	}
 	if msgs := verdicts([]finding{{pos: "x", fn: "p/p.go:ghClone", kind: "gh-git"}}); !slices.ContainsFunc(msgs, func(m string) bool { return strings.HasPrefix(m, "p/p.go:ghClone: 1 gh-runs-git") }) {
 		t.Errorf("an unlisted gh git subcommand produced no verdict: %v", msgs)

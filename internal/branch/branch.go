@@ -293,7 +293,12 @@ func (c *Client) Prune(ctx context.Context, items []Classification, opts PruneOp
 func (c *Client) deleteLocal(ctx context.Context, info Info) error {
 	if info.WorktreePath != "" {
 		slog.Debug("Preparing to remove worktree before deleting branch.", "branch", info.Name, "worktree", info.WorktreePath)
-		if _, err := gitenv.Run(ctx, c.run, gitenv.Local, "worktree", "remove", "--", info.WorktreePath); err != nil {
+		// Unfiltered (#977): worktree remove's dirty check runs status in the
+		// worktree, which re-hashes a stat-dirty file through the filter
+		// driver its config names, the worktree's own config.worktree
+		// included. A listing failure refuses the remove, and the branch
+		// stays.
+		if _, err := gitenv.RunUnfilteredAlso(ctx, c.run, gitenv.Bin, "", []string{info.WorktreePath}, "worktree", "remove", "--", info.WorktreePath); err != nil {
 			slog.Error("Failed to remove worktree.", "branch", info.Name, "worktree", info.WorktreePath, "error", err)
 			// Categorical cause (#717): git's stderr is not echoed; the path
 			// and name are quoted so a control or bidi rune stays inert.
