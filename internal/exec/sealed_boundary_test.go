@@ -103,8 +103,8 @@ func TestSealedIsUnimportableOutsideExec(t *testing.T) {
 // `var _, _ = startSealed(&OSSensitiveRunner{}, validated.Command{}, nil,
 // nil)`.
 func TestSealedStartHasOneCaller(t *testing.T) {
-	for _, p := range guardPlatforms {
-		c := checkExecFor(t, p)
+	for _, p := range guardConfigs {
+		c := checkExec(t, p)
 		start, ok := c.sealed.Scope().Lookup("Start").(*types.Func)
 		if !ok {
 			t.Fatalf("[%s] sealed declares no Start func; the rule would check nothing", p)
@@ -138,8 +138,8 @@ func TestSealedStartHasOneCaller(t *testing.T) {
 // validated.New(sealed.New("/bin/sh"), nil, nil, false)`; inside validated,
 // `zzNew = validated.New` with a package var zzNew of its type.
 func TestValidatedNewHasOneCaller(t *testing.T) {
-	for _, p := range guardPlatforms {
-		c := checkExecFor(t, p)
+	for _, p := range guardConfigs {
+		c := checkExec(t, p)
 		newFn, ok := c.validated.Scope().Lookup("New").(*types.Func)
 		if !ok {
 			t.Fatalf("[%s] validated declares no New func; the rule would check nothing", p)
@@ -172,8 +172,8 @@ func TestValidatedNewHasOneCaller(t *testing.T) {
 // package var zzEsc; add `zzEscV = startSealed` with a package var zzEscV of
 // its type.
 func TestValidateDominatesStartSealed(t *testing.T) {
-	for _, p := range guardPlatforms {
-		for _, f := range startSealedCallFindings(checkExecFor(t, p)) {
+	for _, p := range guardConfigs {
+		for _, f := range startSealedCallFindings(checkExec(t, p)) {
 			t.Errorf("[%s] %s", p, f)
 		}
 	}
