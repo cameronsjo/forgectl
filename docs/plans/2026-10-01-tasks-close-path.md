@@ -273,7 +273,7 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
 
 **Dispatch:** Serial (after Task 2) · fresh Opus subagent · **Report:** `[REPORT_PATH]`
 
-- [ ] Failing tests first:
+- [x] Failing tests first:
   - (a) open task: exactly one POST; its body has `done` true; the description equals the old one, a blank line, and a trailer matching `^closed-by: \S.* via forgectl tasks (mcp|done) \S+ — .+$`; every other key is semantically equal to the pre-read
   - (b) already done: zero writes, `AlreadyDone` true, `EvidenceRecorded` false
   - (c) pre-read fails: zero writes
@@ -286,11 +286,11 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
   - (j) POST times out: `ErrNotConfirmed` with the "may have been applied" wording, not unreachable
   - (k) `404` on the pre-read: `ErrNotFound`, worded "no task N, or this credential cannot see it"
   - (l) read-back differs in a key outside the expected list: `ChangedKeys` names it
-- [ ] Run — expect RED
-- [ ] Implement. Empty description: the trailer alone, no leading blank line.
-- [ ] Run — expect GREEN
-- [ ] Stage each break and restore: ignore the pre-read's error and write anyway → (c) red; build the body from `tasks.Task` → (a) red; drop the trailer append → (a) red; drop the read-back → (i) red
-- [ ] Commit: `feat(tasks): close a task through the credentialed client`
+- [x] Run — expect RED
+- [x] Implement. Empty description: the trailer alone, no leading blank line.
+- [x] Run — expect GREEN
+- [x] Stage each break and restore: ignore the pre-read's error and write anyway → (c) red; build the body from `tasks.Task` → (a) red; drop the trailer append → (a) red; drop the read-back → (i) red
+- [x] Commit: `feat(tasks): close a task through the credentialed client`
 
 ### Task 4 — MCP `complete_task`
 
@@ -451,6 +451,7 @@ Day 1 is the first day Tasks 8, 9, and 10 are all live.
 
 ## Deviations
 
+- 2026-10-02, Task 3: one sentinel beyond the spec, `ErrWriteRefused`, marks an update that was sent and answered with a refusal. Task 4 needs it to tell a refused write from a failed pre-read. `CloseResult` also gains `UnnamedChanges` from the review amendments. The code lives in new files `complete.go` and `trailer.go`, not in `write.go`. `EvidenceRecorded` compares the read-back's literal last line, which is unverified until the probe shows how the server stores a description.
 - 2026-10-02, D1-D9: ruled by the executing session under the operator's delegation, not by the operator on the plan PR. Recorded under "Ruling".
 - 2026-10-02, Task 1: `feat/tasks-close-path` branches from the plan branch, not from `origin/main`, so the plan document rides on the build PR and each task's tick lands in the commit that does the work. PR 1023 holds the plan and the ruling; PR 1026 carries both and supersedes it when merged.
 - 2026-10-02, Task 1 review: the plan's own ordering was wrong. Task 2 stored a write credential before the D9 host rule existed, which Task 8 forbids. Task 2 now uses a scratch token under a throwaway entry name. The review also reversed one panel decline: the CLI now appends a close record to a local file (no reader verb), because a stderr line does not outlive the session.

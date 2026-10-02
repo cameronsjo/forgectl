@@ -37,6 +37,11 @@ const Redacted = "[redacted]"
 // instance) without any code change.
 const DefaultKeychainService = "vikunja-readonly"
 
+// SecurityBinary is the keychain tool, by absolute path. A bare name resolves
+// through PATH, and a PATH entry ahead of /usr/bin could then supply a
+// different token to this client.
+const SecurityBinary = "/usr/bin/security"
+
 // keychainTimeout bounds the `security find-generic-password` call. It is
 // generous relative to a keychain read that succeeds instantly, because the
 // case it exists for is one that never returns: a locked keychain or an ACL
@@ -208,7 +213,7 @@ func ReadTokenFile(path string) (Token, error) {
 }
 
 // ReadToken reads service's value from the macOS login keychain via
-// `security find-generic-password -s <service> -w`. The value travels on
+// `/usr/bin/security find-generic-password -s <service> -w`. The value travels on
 // the child's stdout, never on argv — service is a fixed, non-secret
 // identifier, and runner.Run's own argv logging therefore never touches the
 // credential. The returned Token's payload is revealed exactly once, into
@@ -221,7 +226,7 @@ func ReadToken(ctx context.Context, runner exec.Runner, service string) (Token, 
 	ctx, cancel := context.WithTimeout(ctx, keychainTimeout)
 	defer cancel()
 
-	out, err := runner.Run(ctx, "security", "find-generic-password", "-s", service, "-w")
+	out, err := runner.Run(ctx, SecurityBinary, "find-generic-password", "-s", service, "-w")
 	if err != nil {
 		// err is DELIBERATELY dropped rather than wrapped. exec.CommandError
 		// retains the child's stdout in its exported Output field, and this
