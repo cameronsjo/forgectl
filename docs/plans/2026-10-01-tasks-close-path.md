@@ -4,11 +4,11 @@ model: "claude-opus-5-5"
 harness: "claude-code 2.1.287"
 machine: "cf6e768835c7"
 approved_session_id: "c70b336a-7809-4bea-90a6-42015e71e281"
-status: planned
-next: "operator rules on D1-D9 on the plan PR → Task 1 setup + pre-build security review → Task 2 live probe (needs his go) → Tasks 3-7 build → Task 8 ship → Tasks 9-10 deploy and wire → Task 11 day-1 reading, day-14 reading on the date recorded there"
-branch: plan/tasks-close-path
-pr: "https://github.com/cameronsjo/forgectl/pull/1023"
-updated: 2026-10-01
+status: in-progress
+next: "Tasks 3-7 build on feat/tasks-close-path (draft PR 1026). The live probe (Task 2) is written and not run: the operator stores a bot write credential, then the probe runs before the build PR is flipped ready. Then Task 8 ship (operator merges) → Tasks 9-10 → Task 11."
+branch: feat/tasks-close-path
+pr: "https://github.com/cameronsjo/forgectl/pull/1026"
+updated: 2026-10-02
 date: 2026-10-01
 ---
 
@@ -181,9 +181,9 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
 **Dispatch:** In-context for setup; the review is the dedicated security-review agent on Opus, or the built-in security review command or an Opus reviewer handed the files if that agent type does not resolve · **Report:** `[REPORT_PATH]`
 
 - [x] Record the ruling on D1-D9 in this plan; amend any task the ruling changes
-- [ ] Create `feat/tasks-close-path` in its own worktree from `origin/main`; open the draft build PR titled `feat(tasks): close a board task from the CLI and MCP`
-- [ ] File three issues: Task 9 on the deployment repo, Task 10 on `cameronsjo/cadence`, and D3's triage on `cameronsjo/forgectl`
-- [ ] File one forgectl issue for inherited gaps this plan does not fix: the HTTP container stays healthy with a dead token; `create_task` and `add_comment` log nothing; `SaveCache` is not atomic
+- [x] Create `feat/tasks-close-path` in its own worktree from `origin/main`; open the draft build PR titled `feat(tasks): close a board task from the CLI and MCP`
+- [x] File three issues: Task 9 on the deployment repo, Task 10 on `cameronsjo/cadence`, and D3's triage on `cameronsjo/forgectl` Filed: cameronsjo/homelab#1220 (Task 9), cameronsjo/cadence#1570 (Task 10), cameronsjo/forgectl#1024 (D3 triage).
+- [x] File one forgectl issue for inherited gaps this plan does not fix: the HTTP container stays healthy with a dead token; `create_task` and `add_comment` log nothing; `SaveCache` is not atomic Filed: cameronsjo/forgectl#1025.
 - [ ] Security review of the control as it stands, whole files: `docs/adr/0009-credentialed-http-client-posture.md`, `internal/tasks/token.go`, `client.go`, `write.go`, `mcp.go`, `structured.go`, `hostpin.go`, `errors.go`, `types.go`, `cache.go`, `internal/cli/tasks.go`, `internal/cli/tasks_mcp.go`, `internal/config/config.go` (`SetupLogger`), `scripts/mcp-stdio-smoke.sh`. It must answer, among its own questions, where `--host` can send a keychain credential (D9).
 - [ ] Fold Critical and Important findings into Tasks 2-6. The review finishes before Task 2's first live write.
 
@@ -198,7 +198,7 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
 **Dispatch:** In-context, Opus, with the operator's go — it writes to the live board · **Report:** —
 
 - [ ] Operator: store the probe's bot credential first, under Constraint 12.
-- [ ] Write the probe as a Go test that reads the token through `tasks.ReadToken` and builds its client with `tasks.NewClient`, so host pinning applies. It fails if `HTTPS_PROXY` or `HTTP_PROXY` is set. It runs in two phases selected by a flag, creates tasks titled with a fixed marker, makes a fixed number of writes, stops on any unexpected status, and prints every id it created on every exit path. Phase `update` refuses any id whose pre-read title lacks the marker. Raw saves go outside the worktree.
+- [x] Write the probe as a Go test that reads the token through `tasks.ReadToken` and builds its client with `tasks.NewClient`, so host pinning applies. It fails if `HTTPS_PROXY` or `HTTP_PROXY` is set. It runs in two phases selected by a flag, creates tasks titled with a fixed marker, makes a fixed number of writes, stops on any unexpected status, and prints every id it created on every exit path. Phase `update` refuses any id whose pre-read title lacks the marker. Raw saves go outside the worktree.
 - [ ] Phase `create`: one GET must pass first. Create scratch task A with a description, priority, and due date, and scratch task B with a repeat interval. Assert each landed in the intended project.
 - [ ] Operator, in the web UI: add a label, an assignee, and a reminder to A, and move it one column.
 - [ ] Phase `update`: save A's raw JSON. POST the full raw object with `done` true and a trailer appended. Save the raw read-back. Record every key that differs, any key the server refused, and whether any server-set field names the identity that made the update.
@@ -211,6 +211,8 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
 
 **Stop conditions:** the update is refused after a passing read (the credential lacks update scope: the operator's change); or the update alters a key outside done state, timestamps, column, and description (D4 changes, return to the operator).
 
+**Status 2026-10-02: written, not run.** The login keychain on the build machine has no write entry, and storing a bot credential is the operator's step (Constraint 12). The probe compiles under its tag, refuses an output directory inside the worktree, and stops at the token read. Every unticked step above is still owed, and the build PR stays draft until they are done. The fixtures in `internal/tasks/testdata/` are written by hand from Vikunja's documented task shape; the probe writes sanitized replacements.
+
 ### Task 3 — `Client.CompleteTask`
 
 **Files:**
@@ -218,7 +220,7 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
 - Test: `internal/tasks/write_test.go`, `internal/tasks/no_env_token_test.go`
 
 **Interfaces:**
-- Consumes: Task 2's two key lists and fixtures
+- Consumes: Task 2's two key lists and fixtures. **Assumed until the probe runs:** echoed-key removal list: empty (the full raw object is echoed). Expected-to-change keys: `done`, `done_at`, `updated`, `description`, `bucket_id`, `position`, `kanban_position`.
 - Produces:
   - `type CloseRequest struct { TaskID int; Closer, Surface, Evidence string; Now time.Time }`
   - `type CloseResult struct { ID, ProjectID int; Title string; AlreadyDone, EvidenceRecorded, Confirmed bool; ChangedKeys []string }`
@@ -405,6 +407,10 @@ Day 1 is the first day Tasks 8, 9, and 10 are all live.
 - Through the gateway after Task 9: the granted consumer lists and can call `complete_task`; a read-only consumer is refused.
 
 ## Deviations
+
+- 2026-10-02, D1-D9: ruled by the executing session under the operator's delegation, not by the operator on the plan PR. Recorded under "Ruling".
+- 2026-10-02, Task 1: `feat/tasks-close-path` branches from the plan branch, not from `origin/main`, so the plan document rides on the build PR and each task's tick lands in the commit that does the work. PR 1023 holds the plan and the ruling; PR 1026 carries both and supersedes it when merged.
+- 2026-10-02, Task 2: the probe is written and not run, because no write credential is stored. Task 3 builds on assumed key lists (recorded in its Interfaces block) and hand-written fixtures. D4's condition is therefore unmet: no `reopen` verb is built, and the probe must confirm that before the ready flip.
 
 - 2026-10-01, Task 0: the redaction scan flagged seven lines that named session-tooling identifiers and one absolute local path. Each was reworded to describe the step (the redaction scan, the dedicated security-review agent, the pre-PR polish pass, a repo-relative path). No step changed meaning.
 
