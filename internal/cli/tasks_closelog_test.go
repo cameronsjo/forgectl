@@ -37,8 +37,13 @@ func TestTasksVerbs_ARefusedHostWithALineBreakIsOneLine(t *testing.T) {
 			if len(refusals) != 1 {
 				t.Fatalf("want one refusal line, got %d:\n%q", len(refusals), log)
 			}
-			if refusals[0]["host"] != host {
-				t.Errorf("host = %q, want it as given: %q", refusals[0]["host"], host)
+			// A host with a line break is not a plain hostname, so the line
+			// carries the marker and none of the text.
+			if refusals[0]["host"] != "[not a plain hostname]" {
+				t.Errorf("host = %q, want the marker for a value that is not a plain hostname", refusals[0]["host"])
+			}
+			if strings.Contains(log, "second line") || strings.Contains(log, "forged") {
+				t.Errorf("text typed after --host reached the close log: %q", log)
 			}
 			if refusals[0]["verb"] != "ls" {
 				t.Errorf("verb = %v, want ls: the host reached another field", refusals[0]["verb"])

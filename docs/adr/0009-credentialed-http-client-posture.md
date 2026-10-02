@@ -342,13 +342,16 @@ A refusal is recorded: one line in the close-record file names the verb, the
 host that was asked for, and the keychain entry's name. Without it the attempt
 would be blocked and then forgotten, and text on the board that told an agent
 to send a credential elsewhere would still be there for the next agent. `done`
-applies the rule before it checks its other arguments, so a refused host is
-recorded even when the command is wrong in another way too. A user and
-password before an `@` in the host, or a token shape anywhere in it, are
-replaced before the line is written. If the file cannot be written the
+applies the rule before it checks its own arguments, so a refused host is
+recorded even when the evidence or the id is also wrong. A command the
+argument parser itself rejects — no id, an unknown flag — never reaches the
+rule and leaves no line. The line keeps the host only when it is a plain
+hostname; anything else is written as a fixed marker, because a URL can hold
+a password or a token in more places than a filter can name. The refusal on
+stderr still shows the value as typed. If the file cannot be written the
 refusal stands, and one line on stderr says the record is missing. The lines
 are not bounded in number: a caller that loops on a refused host grows the
-file by one short line per call.
+file by one line per call.
 
 Three limits, stated. The config path follows the user's home directory, and a
 process that can write that file can add a host. This turns a one-command
@@ -463,13 +466,14 @@ alters more than this section says, `reopen` is owed.
   (§12 to §17). The operator delegated the ruling to the session that built
   it, and the merge of that build is his confirmation of it. The verb does not
   create, delete, move, or retitle; each of those is still a separate decision.
-  Two security reviews bound it: one of the control as it stood before the
-  build, whose findings shaped §12 to §16, and one of the finished build.
+  Security reviews bound it, before the build and after it; the first one's
+  findings shaped §12 to §16.
   The first was an automated security review (Claude Opus) of the control at
   commit `5e6055f`: 1 Critical, 9 Important. The second, of the build at
   `92c2427`, found no path that sends a keychain token off the allowed hosts
   and no new path for the token into any output: 0 Critical, 3 Important. The
-  third, of the fixes at `5458a4c`: 0 Critical, 0 Important. Every Critical
+  third, of the fixes at `5458a4c`, and a fourth, of the last changes at
+  `00f6831`: 0 Critical, 0 Important each. Every Critical
   and Important is fixed in code or stated above as a limit, except one that
   cannot be closed by review: **the live probe has not run** (§17). No human
   has reviewed this build.

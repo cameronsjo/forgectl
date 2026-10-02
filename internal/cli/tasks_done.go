@@ -93,7 +93,7 @@ no update writes no record.
 
 One call that sends no update still leaves a line in that file: a --host
 refused with exit 4. The line holds the time, "event":"host_refused", the
-verb, the host as given, and the keychain entry's name. It goes to the file
+verb, the host when it is a plain hostname, and the keychain entry's name. It goes to the file
 only; stderr carries the refusal itself.
 
 EXIT CODES

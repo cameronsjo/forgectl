@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 )
 
 // decodeRefusalLine checks that out is exactly one line holding one JSON
@@ -101,8 +100,9 @@ func TestWriteHostRefusalRecord_TheHostCannotLeaveItsField(t *testing.T) {
 			if got["credential"] != "vikunja-readonly" || got["event"] != "host_refused" {
 				t.Errorf("the host changed another field: %v", got)
 			}
-			if utf8.ValidString(host) && got["host"] != host {
-				t.Errorf("host = %q, want it as given: %q", got["host"], host)
+			// None of these is a plain hostname, so none of it is kept.
+			if got["host"] != hostNotRecorded {
+				t.Errorf("host = %q, want %q for a value that is not a plain hostname", got["host"], hostNotRecorded)
 			}
 			if strings.ContainsAny(out.String(), "\x1b\r") || strings.ContainsRune(out.String(), 0x2028) {
 				t.Errorf("a control or a line separator reached the line raw: %q", out.String())
@@ -111,34 +111,41 @@ func TestWriteHostRefusalRecord_TheHostCannotLeaveItsField(t *testing.T) {
 	}
 }
 
-func TestWriteHostRefusalRecord_CapsTheHost(t *testing.T) {
-	if maxRecordedHostRunes != 253 {
-		t.Fatalf("maxRecordedHostRunes = %d, want 253", maxRecordedHostRunes)
-	}
-	for name, host := range map[string]string{
-		"ASCII":      strings.Repeat("a", 5000),
-		"multi-byte": strings.Repeat("é", 5000),
+// The record keeps a plain hostname and nothing else. A URL can hold a user, a
+// password, or a token in its userinfo, its path, or its query, in any
+// encoding, so a value that is not a plain hostname is not kept in any part.
+func TestWriteHostRefusalRecord_KeepsOnlyAPlainHostname(t *testing.T) {
+	token := "tk_" + strings.Repeat("ab12", 10)
+	secret := "hunter2secret"
+	for name, tc := range map[string]struct{ host, want string }{
+		"a plain host":           {"other.example", "other.example"},
+		"userinfo":               {"https://bot:" + secret + "@tasks.example/", hostNotRecorded},
+		"password after the at":  {"tasks.example@bot:" + secret, hostNotRecorded},
+		"a query string":         {"tasks.example?token=" + secret, hostNotRecorded},
+		"a path":                 {"tasks.example/" + secret, hostNotRecorded},
+		"a port":                 {"tasks.example:8443", hostNotRecorded},
+		"percent-encoded":        {"bot%3A" + secret + "%40tasks.example", hostNotRecorded},
+		"a token":                {"tasks.example/" + token, hostNotRecorded},
+		"a token as a host name": {token, hostNotRecorded},
+		"a very long value":      {strings.Repeat("a", 5000), hostNotRecorded},
+		"multi-byte":             {strings.Repeat("é", 300), hostNotRecorded},
+		"empty":                  {"", hostNotRecorded},
 	} {
-		var out bytes.Buffer
-		if err := WriteHostRefusalRecord(&out, HostRefusalRecord{Verb: "ls", Host: host}); err != nil {
+		var buf bytes.Buffer
+		rec := HostRefusalRecord{Verb: "ls", Host: tc.host, Credential: "vikunja-readonly"} //nolint:gosec // G101: Credential holds a keychain entry's name, not a credential
+		if err := WriteHostRefusalRecord(&buf, rec); err != nil {
 			t.Fatalf("%s: WriteHostRefusalRecord: %v", name, err)
 		}
-		got, _ := decodeRefusalLine(t, out.String())["host"].(string)
-		if n := utf8.RuneCountInString(got); n != maxRecordedHostRunes {
-			t.Errorf("%s: host is %d runes, want it cut to %d", name, n, maxRecordedHostRunes)
+		raw := buf.String()
+		if strings.Contains(raw, secret) || strings.Contains(raw, token) {
+			t.Errorf("%s: the line kept a credential: %s", name, raw)
 		}
-		if !strings.HasPrefix(host, got) {
-			t.Errorf("%s: the cut host is not the front of the one given: %q", name, got)
+		if got := decodeRefusalLine(t, raw)["host"]; got != tc.want {
+			t.Errorf("%s: host = %q, want %q", name, got, tc.want)
 		}
-	}
-
-	var out bytes.Buffer
-	exact := strings.Repeat("a", maxRecordedHostRunes)
-	if err := WriteHostRefusalRecord(&out, HostRefusalRecord{Verb: "ls", Host: exact}); err != nil {
-		t.Fatalf("WriteHostRefusalRecord: %v", err)
-	}
-	if got := decodeRefusalLine(t, out.String())["host"]; got != exact {
-		t.Errorf("a host at the cap was changed: %q", got)
+		if len(raw) > 512 {
+			t.Errorf("%s: the line is %d bytes; a refusal line is bounded", name, len(raw))
+		}
 	}
 }
 
@@ -179,37 +186,6 @@ func TestWriteHostRefusalRecord_ReportsAWriterItCouldNotUse(t *testing.T) {
 	// what keeps two processes' lines from interleaving.
 	if sink.wrote != 1 {
 		t.Errorf("the line was written in %d call(s), want one", sink.wrote)
-	}
-}
-
-// A refused --host is free text, and a URL with a user and password is the
-// common wrong value. The line must still say where the credential was asked
-// to go, without keeping the password.
-func TestWriteHostRefusalRecord_DropsACredentialTypedIntoTheHost(t *testing.T) {
-	token := "tk_" + strings.Repeat("ab12", 10)
-	for name, tc := range map[string]struct{ host, wantHost, absent string }{
-		"userinfo":       {"https://bot:hunter2secret@tasks.example/", "[redacted]@tasks.example/", "hunter2secret"},
-		"a token":        {"tasks.example/" + token, "[redacted]", token},
-		"a plain host":   {"other.example", "other.example", "[redacted]"},
-		"two at signs":   {"a:b@c:d@tasks.example", "[redacted]@tasks.example", "c:d"},
-		"token and user": {token + "@tasks.example", "[redacted]", token},
-	} {
-		var buf bytes.Buffer
-		err := WriteHostRefusalRecord(&buf, HostRefusalRecord{Verb: "ls", Host: tc.host, Credential: "vikunja-readonly"}) //nolint:gosec // G101: Credential holds a keychain entry's name, not a credential
-		if err != nil {
-			t.Fatalf("%s: WriteHostRefusalRecord: %v", name, err)
-		}
-		raw := buf.String()
-		if strings.Contains(raw, tc.absent) {
-			t.Errorf("%s: the line kept %q: %s", name, tc.absent, raw)
-		}
-		var got map[string]any
-		if err := json.Unmarshal([]byte(raw), &got); err != nil {
-			t.Fatalf("%s: the line is not JSON: %v", name, err)
-		}
-		if got["host"] != tc.wantHost {
-			t.Errorf("%s: host = %q, want %q", name, got["host"], tc.wantHost)
-		}
 	}
 }
 

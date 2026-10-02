@@ -103,10 +103,10 @@ The file is created with mode `0600`. forgectl refuses to append to it when the 
 `tasks-closes.jsonl` holds one other kind of line. When a `tasks` verb that would read the keychain (`ls`, `show`, `ready`, `done`, or `mcp` over stdio) is refused by the host rule and exits `4`, forgectl appends one line to the file:
 
 ```json
-{"time":"2026-01-02T03:04:05Z","event":"host_refused","verb":"ls","host":"<host as given>","credential":"vikunja-readonly"}
+{"time":"2026-01-02T03:04:05Z","event":"host_refused","verb":"ls","host":"other.example","credential":"vikunja-readonly"}
 ```
 
-`event` is always `host_refused`; a close record has no `event` key, which is how a reader tells the two apart. `verb` is the `tasks` subcommand. `host` is the value given to `--host`, cut to 253 characters, with a user and password before an `@` replaced by `[redacted]` and a value holding a token shape replaced whole. `credential` is the name of the keychain entry the verb would have read, or `""` when that name is not a valid service name. No token is in the line: the keychain has not been read when the rule refuses.
+`event` is always `host_refused`; a close record has no `event` key, which is how a reader tells the two apart. `verb` is the `tasks` subcommand. `host` is the value given to `--host` when it is a plain hostname (letters, digits, `.` and `-`), and the fixed text `[not a plain hostname]` for anything else, so a URL, a password, or a token typed there is never written. `credential` is the name of the keychain entry the verb would have read, or `""` when that name is not a valid service name. No token is in the line: the keychain has not been read when the rule refuses.
 
 This line goes to the file only. stderr carries the refusal itself, as the error text or, under `--json`, as the failure object with code `failed`. If the line cannot be appended, the exit code is still `4` and stderr gets one plain line that says so, before the failure object.
 

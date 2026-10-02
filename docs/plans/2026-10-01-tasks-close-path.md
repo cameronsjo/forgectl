@@ -5,7 +5,7 @@ harness: "claude-code 2.1.287"
 machine: "cf6e768835c7"
 approved_session_id: "c70b336a-7809-4bea-90a6-42015e71e281"
 status: in-flight
-next: "Tasks 3-7 build on feat/tasks-close-path (draft PR 1026). The live probe (Task 2) is written and not run: the operator stores a bot write credential, then the probe runs before the build PR is flipped ready. Then Task 8 ship (operator merges) → Tasks 9-10 → Task 11."
+next: "Operator: mint a short-expiry scratch bot token, store it under forgectl-liveprobe-scratch, give the go for the live probe (Task 2). Then a session runs both probe phases, replaces the fixtures, records the results in Task 2 and ADR 0009 §17, and flips draft PR 1026 ready. Then Task 8 (operator merges; the merge starts a release) → Tasks 9-10 → Task 11."
 branch: feat/tasks-close-path
 pr: "https://github.com/cameronsjo/forgectl/pull/1026"
 updated: 2026-10-02
@@ -364,12 +364,13 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
 
 **Dispatch:** the dedicated security-review agent on Opus over the file list in Task 1 plus the new files, whole files; fallback as in Task 1 · **Report:** `[REPORT_PATH]`
 
-- [ ] Security review; fold findings. No ready flip with a Critical or Important open.
-- [ ] `git fetch`, then `go test ./...` and `golangci-lint run` with `gh`, `tmux`, and `codex` stripped from `PATH`
-- [ ] `vulncheck` is green at the PR head
-- [ ] Run the redaction scan over the PR body and the fixtures
-- [ ] Run the pre-PR polish pass; fold findings
-- [ ] Record the review in the ADR's Consequences; flip the build PR ready. Its body closes #1022.
+- [x] Security review; fold findings. No ready flip with a Critical or Important open. Four passes: before the build (1 Critical, 9 Important), of the build at `92c2427` (0 Critical, 3 Important), of the fixes at `5458a4c` (0 and 0), of the last changes at `00f6831` (0 and 0). One code review of the build: 0 Critical, 2 Important. One Important stays open and blocks the flip: the live probe has not run.
+- [x] `git fetch`, then `go test ./...` and `golangci-lint run` with `gh`, `tmux`, and `codex` stripped from `PATH`. Every package this build touches passes and lint reports 0 issues. `TestStatus_LiveGit` fails on the build machine because of its global gitignore, on `origin/main` as well.
+- [x] `vulncheck` is green at the PR head
+- [x] Run the redaction scan over the PR body and the fixtures
+- [x] Run the pre-PR polish pass; fold findings
+- [x] Record the review in the ADR's Consequences.
+- [ ] Flip the build PR ready. Its body closes #1022. **Not done, on purpose:** Task 2's live steps are owed first, and the flip and the merge are the operator's.
 
 ### Task 8 — Ship to the installed binary
 
@@ -451,6 +452,7 @@ Day 1 is the first day Tasks 8, 9, and 10 are all live.
 
 ## Deviations
 
+- 2026-10-02, Task 7: the build PR stays draft. The reviews added scope the plan did not have: a line in the close-record file for every host refusal, a check that the close-record file is a regular owner-only file, a refusal in the client constructor for a file token with no pin list, and `forgectl config` reporting an invalid value apart from a parse error. Declined, with the reason in ADR 0009: making `--closer` required (default flags do not tell two harnesses apart; the wiring issue tells sessions to pass it), a read-back after a refused update, an attempt line written before the update, and a credential detector for shapes other than the board's own token. The PR title stays `feat(tasks):` as Constraint 9 has it, though the host rule changes behavior for anyone using `--host` with an unlisted host; the PR body lists the behavior changes.
 - 2026-10-02, Task 5: the hostname grammar lives in `internal/config`, because config validates the list at load and cannot import the tasks package. One bad `allowed_hosts` entry fails config load for every command, as any other invalid config value does. `--json` failures with no closer code (host refused, unreachable, a malformed keychain entry) use `failed`. `docs/configuration.md` also documents the key. A closer name that holds anything shaped like a token now falls back to the surface default. The plan's own `status:` moved to `in-flight`: the repo's plan index accepts only its closed vocabulary, and `planned` and `in-progress` are outside it.
 - 2026-10-02, Task 6: the ADR gains a new amendment section, §12 to §17, with short pointers from the sections it changes, in place of rewriting §1 to §11 in place. The index row's status also moves from Draft to Accepted, which the ADR itself has said since 2026-09-08.
 - 2026-10-02, Task 4: the cap counts updates sent, not only confirmed closes, because a refused or unconfirmed update was still sent to the board. `NewMCPServer` takes an `MCPConfig` struct (default client name, record writer, credential source name, host). A ninth tool-error code, `failed`, covers what the eight named codes do not: unreachable, host refused, a pre-read that is not a task. A 403 on the update maps to `unauthorized`, since the client treats 401 and 403 alike. The code lives in new files `mcp_complete.go` and `closerecord.go`. Smoke run 2026-10-02 against the live board under the read-only entry: `VERDICT: PASS — stdio transport, seven tools, credential alive and read-only, complete_task pre-read in place`. That run also measured one of Task 2's unknowns: a nonexistent task id answers 404.

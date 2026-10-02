@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -149,27 +150,23 @@ func WriteCloseRecord(w io.Writer, rec CloseRecord) error {
 	return nil
 }
 
-// redactedInRecord stands in a record for text that looked like a credential.
-const redactedInRecord = "[redacted]"
+// hostNotRecorded stands in a refusal line for a host that is not a plain
+// hostname.
+const hostNotRecorded = "[not a plain hostname]"
 
-// recordedHost is the host a refusal line carries: the text that was asked
-// for, cut to maxRecordedHostRunes, with anything that may be a credential
-// taken out first.
+// recordedHost is the host a record carries: the name itself when it is a
+// plain hostname, and hostNotRecorded for anything else.
 //
-// A refused host is free text from a command line, and a URL is the common
-// wrong value. A URL can carry a user and a password before an '@', so
-// everything up to the last '@' is replaced; and a value holding a token
-// shape is replaced whole. What is left still says where the credential was
-// asked to go, which is the point of the line.
+// A refused --host is free text from a command line, and the common wrong
+// value is a URL, which can hold a user, a password, a token in its path or
+// its query, in any encoding. No list of shapes to remove from such a value is
+// complete, so nothing of it is kept. A plain hostname is letters, digits, '.'
+// and '-' and cannot carry any of those, and it is the value an operator
+// needs: the name a credential was asked to go to. A plain hostname is at most
+// 253 bytes, so the field is bounded as well.
 func recordedHost(host string) string {
-	if evidenceTokenRe.MatchString(host) {
-		return redactedInRecord
-	}
-	if at := strings.LastIndexByte(host, '@'); at >= 0 {
-		host = redactedInRecord + host[at:]
-	}
-	if runes := []rune(host); len(runes) > maxRecordedHostRunes {
-		host = string(runes[:maxRecordedHostRunes])
+	if !config.PlainHostname(host) || evidenceTokenRe.MatchString(host) {
+		return hostNotRecorded
 	}
 	return host
 }
@@ -190,11 +187,6 @@ func recordedCredentialSource(name string) string {
 // has no `event` key, so a reader of the close log tells the two kinds of line
 // apart by whether the key is there.
 const HostRefusalEvent = "host_refused"
-
-// maxRecordedHostRunes caps the host a refusal line carries. It is the
-// longest name DNS allows, so a real hostname is never cut, and a refused
-// value of any length adds at most one bounded line to the file.
-const maxRecordedHostRunes = 253
 
 // HostRefusalRecord is one refusal of the allowed-host rule: a `tasks` verb
 // was asked to read a keychain credential for a host that credential may not
@@ -230,8 +222,8 @@ type hostRefusalLine struct {
 
 // WriteHostRefusalRecord writes rec to w as one line of JSON.
 //
-// The host is caller text and is written through recordedHost: what was asked
-// for is the point of the record, and a password or token in it is not. It goes
+// The host is caller text and is written through recordedHost, which keeps a
+// plain hostname and nothing else. It goes
 // through termsafe.JSONEncoder like every other field, so a line break, a
 // control, or an invisible character in it is written as an escape and cannot
 // start a second line or add a field.
