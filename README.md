@@ -320,8 +320,8 @@ forgectl tasks done 42 --evidence "…" --write-keychain-service X   # read the 
 #   refused with exit 4 before the keychain is read, on ls, show, ready, done, and mcp over stdio:
 #     [tasks]
 #     allowed_hosts = ["<hostname>"]   # plain hostnames only: no port, user, path, or IP address
-#   a refused host also appends one line to tasks-closes.jsonl ("event":"host_refused", with the verb, the host as
-#   given, and the keychain entry's name), so the refusal outlives the terminal that showed it.
+#   a refused host also appends one line to tasks-closes.jsonl ("event":"host_refused", with the verb, the host when it
+#   is a plain hostname, and the keychain entry's name), so the refusal outlives the terminal that showed it.
 #   an unknown verb (forgectl tasks nosuchverb) exits 1
 
 # ghostty — theme + keybind reporting, parsed live from the ghostty CLI
