@@ -184,7 +184,8 @@ func clampLimit(n int) int {
 // without a reserve a caller who sized their description exactly to the limit
 // is refused by CreateTask with a rune count they did not author — an error
 // that describes the server's own addition and reads as a caller mistake.
-// The trailer is a fixed ~60 runes plus a client name callerName caps at 100.
+// The trailer is a fixed ~60 runes plus a client name sanitizeCloser caps at
+// 100.
 const maxTrailerRunes = 200
 
 // createDescription appends the provenance trailer every create_task write
@@ -192,13 +193,20 @@ const maxTrailerRunes = 200
 // per agent is that a row can be traced back to the call that made it — the
 // trailer is what lets an operator go from a task in the UI to a gateway log
 // line without a second lookup.
-func createDescription(description, client string) string {
-	trailer := fmt.Sprintf("created-by: %s via forgectl tasks mcp %s",
-		sanitizeBoardText(client), time.Now().UTC().Format(time.RFC3339))
-	if strings.TrimSpace(description) == "" {
-		return trailer
+//
+// The client name goes through trailerLine, and so through sanitizeCloser.
+// sanitizeBoardText is the wrong tool for it: that one keeps newlines by
+// design, and a client name holding one wrote a second line into the
+// description that could itself read as a trailer.
+func createDescription(description, client string) (string, error) {
+	trailer, err := trailerLine(trailerCreatedBy, client, SurfaceMCP, time.Now(), "")
+	if err != nil {
+		return "", err
 	}
-	return description + "\n\n" + trailer
+	if strings.TrimSpace(description) == "" {
+		return trailer, nil
+	}
+	return description + "\n\n" + trailer, nil
 }
 
 // toolError renders a handler failure as a TOOL error (IsError) rather than a
@@ -273,7 +281,7 @@ type (
 //
 // It is untrusted — a client declares whatever it likes — which is exactly why
 // it belongs in a provenance trailer rather than in an authorization decision,
-// and why createDescription sanitizes it. A row's real attribution is the bot
+// and why trailerLine sanitizes it. A row's real attribution is the bot
 // identity the token belongs to; this narrows it further when it can.
 func callerName(req *mcp.CallToolRequest, fallback string) string {
 	if req == nil || req.Session == nil {
@@ -514,8 +522,11 @@ func NewMCPServer(client *Client, defaultClientName string) *mcp.Server {
 			return toolError("create_task: refusing to write to project %d because the pre-read of that project failed: %v",
 				in.ProjectID, err), nil, nil
 		}
-		created, err := client.CreateTask(ctx, in.ProjectID, in.Title,
-			createDescription(in.Description, callerName(req, defaultClientName)))
+		description, err := createDescription(in.Description, callerName(req, defaultClientName))
+		if err != nil {
+			return toolError("create_task: %v", err), nil, nil
+		}
+		created, err := client.CreateTask(ctx, in.ProjectID, in.Title, description)
 		if err != nil {
 			return toolError("create_task: %v", err), nil, nil
 		}

@@ -219,11 +219,17 @@ func resolveHost(ctx context.Context, host string) ([]net.IP, error) {
 	return ips, nil
 }
 
-// defaultGateway shells out to `route -n get default` (macOS) and parses the
+// routeBinary is macOS's route(8), by absolute path. Its answer decides
+// whether a private address is trusted with the bearer token, so which binary
+// answers must not depend on PATH: a `route` earlier on PATH that prints the
+// homelab gateway would switch the private-range arm on from any network.
+const routeBinary = "/sbin/route"
+
+// defaultGateway runs `/sbin/route -n get default` (macOS) and parses the
 // gateway line. Best-effort: an error or unparseable output yields "", which
 // classifyIP treats as "not the homelab" (fail closed on the RFC1918 branch).
 func defaultGateway(ctx context.Context, runner exec.Runner) string {
-	out, err := runner.Run(ctx, "route", "-n", "get", "default")
+	out, err := runner.Run(ctx, routeBinary, "-n", "get", "default")
 	if err != nil {
 		return ""
 	}

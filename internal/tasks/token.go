@@ -1,7 +1,9 @@
-// Package tasks is a read-only client for a Vikunja instance (tasks.sjo.lol),
-// a local cache of what it returns, and the pure `ready` ranking logic layered
-// on top. It is a plain library per internal/module's doc comment — only
-// internal/cli wires it to a command surface.
+// Package tasks is a credentialed client for a Vikunja instance
+// (tasks.sjo.lol), a local cache of what it reads, and the pure `ready`
+// ranking logic layered on top. It reads, creates tasks and comments, and
+// marks a task done; whether any write succeeds is decided by the token's
+// scope, not here. It is a plain library per internal/module's doc comment —
+// only internal/cli wires it to a command surface.
 //
 // Every exported type that could carry the bearer token renders "[redacted]"
 // from String, GoString, Format, LogValue, and MarshalJSON, mirroring

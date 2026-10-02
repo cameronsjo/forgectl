@@ -369,14 +369,21 @@ func TestCreateTask_RefusesWhenThePreReadFails(t *testing.T) {
 }
 
 func TestCreateDescription_AppendsTheCreatedByTrailer(t *testing.T) {
-	desc := createDescription("a note", "hermes")
+	desc, err := createDescription("a note", "hermes")
+	if err != nil {
+		t.Fatalf("createDescription: %v", err)
+	}
 	if !strings.Contains(desc, "created-by: hermes") {
 		t.Fatalf("description does not carry the created-by trailer: %q", desc)
 	}
 	if !strings.Contains(desc, "a note") {
 		t.Fatalf("the trailer replaced the caller's description: %q", desc)
 	}
-	if bare := createDescription("", "hermes"); !strings.HasPrefix(bare, "created-by: hermes") {
+	bare, err := createDescription("", "hermes")
+	if err != nil {
+		t.Fatalf("createDescription: %v", err)
+	}
+	if !strings.HasPrefix(bare, "created-by: hermes") {
 		t.Fatalf("an empty description should be just the trailer, got %q", bare)
 	}
 }
