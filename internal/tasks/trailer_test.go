@@ -304,3 +304,21 @@ func TestCreateDescription_EmptyClientFallsBack(t *testing.T) {
 		t.Errorf("description %q, want the surface default as the client name", desc)
 	}
 }
+
+// The 100-rune cut can shorten a longer last word to exactly "via". A name
+// ending in that word would write a trailer its own grammar rejects, and a
+// retry would then stack a second trailer instead of replacing the first.
+func TestSanitizeCloser_TheCutNeverLeavesATrailingVia(t *testing.T) {
+	name := strings.Repeat("a", 96) + " viaduct"
+	got := sanitizeCloser(name, "fallback")
+	if got == "via" || strings.HasSuffix(got, " via") {
+		t.Fatalf("closer %q ends in the field separator word", got)
+	}
+	line, err := trailerLine(trailerClosedBy, name, SurfaceDone, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), "owner/repo#1")
+	if err != nil {
+		t.Fatalf("trailerLine: %v", err)
+	}
+	if _, ok := parseClosingTrailer(line); !ok {
+		t.Errorf("the trailer this client wrote does not match its own grammar: %q", line)
+	}
+}

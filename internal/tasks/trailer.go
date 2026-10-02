@@ -175,6 +175,12 @@ func sanitizeCloser(closer, fallback string) string {
 	// Every kept rune is one byte, so a byte cut is a rune cut.
 	if len(name) > maxCloserRunes {
 		name = strings.TrimRight(name[:maxCloserRunes], " ")
+		// The cut can shorten a longer last word to exactly "via", which the
+		// word filter above has already passed. Only the last word can be
+		// affected, so only the end is rechecked.
+		for name == "via" || strings.HasSuffix(name, " via") {
+			name = strings.TrimRight(strings.TrimSuffix(name, "via"), " ")
+		}
 	}
 	if name == "" {
 		return fallback
