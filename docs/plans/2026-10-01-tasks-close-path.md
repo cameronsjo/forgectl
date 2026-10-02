@@ -7,7 +7,7 @@ approved_session_id: "c70b336a-7809-4bea-90a6-42015e71e281"
 status: planned
 next: "operator rules on D1-D9 on the plan PR → Task 1 setup + pre-build security review → Task 2 live probe (needs his go) → Tasks 3-7 build → Task 8 ship → Tasks 9-10 deploy and wire → Task 11 day-1 reading, day-14 reading on the date recorded there"
 branch: plan/tasks-close-path
-pr: "—"
+pr: "https://github.com/cameronsjo/forgectl/pull/1023"
 updated: 2026-10-01
 date: 2026-10-01
 ---
@@ -164,9 +164,9 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
 - [x] `git worktree add` from `origin/main` on `plan/tasks-close-path`
 - [x] Copy this plan in; set `approved_session_id`
 - [x] Run the redaction scan over the plan and the PR body
-- [ ] Commit, `push -u`, open a draft PR that references #1022 with no closing keyword
-- [ ] Write `.claude/intros/2026-10-01-tasks-close-path.status.md` in the primary checkout (gitignored, never committed): PR URL, D1-D9 with recommendations, and the fact that gateway clients cannot close until Task 9
-- [ ] Stop. Nothing below runs until the operator rules on the PR.
+- [x] Commit, `push -u`, open a draft PR that references #1022 with no closing keyword
+- [x] Write `.claude/intros/2026-10-01-tasks-close-path.status.md` in the primary checkout (gitignored, never committed): PR URL, D1-D9 with recommendations, and the fact that gateway clients cannot close until Task 9
+- [x] Stop. Nothing below runs until the operator rules on the PR.
 
 ### Task 1 — Setup and pre-build security review
 
