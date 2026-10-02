@@ -4,7 +4,7 @@ model: "claude-opus-5-5"
 harness: "claude-code 2.1.287"
 machine: "cf6e768835c7"
 approved_session_id: "c70b336a-7809-4bea-90a6-42015e71e281"
-status: in-progress
+status: in-flight
 next: "Tasks 3-7 build on feat/tasks-close-path (draft PR 1026). The live probe (Task 2) is written and not run: the operator stores a bot write credential, then the probe runs before the build PR is flipped ready. Then Task 8 ship (operator merges) → Tasks 9-10 → Task 11."
 branch: feat/tasks-close-path
 pr: "https://github.com/cameronsjo/forgectl/pull/1026"
@@ -324,7 +324,7 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
 
 **Dispatch:** Serial (after Task 4; same package) · fresh Opus subagent · **Report:** `[REPORT_PATH]`
 
-- [ ] Failing tests:
+- [x] Failing tests:
   - flags are validated before any keychain read; a missing `--evidence` exits 1 naming the flag; an id that is not a positive integer exits 1 with "numeric id, without #"
   - `--keychain-service` passed to `done` is refused
   - an absent write entry exits 1 with code `credential_missing`; the message names `--write-keychain-service`, shows `security add-generic-password -s <name> -a "$USER" -w` with the trailing `-w` and no value, and says this is operator setup. The entry name is printed in that line only when it matches `^[A-Za-z0-9._-]{1,64}$`; a name containing `;` or a space prints a placeholder.
@@ -336,10 +336,10 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
   - `forgectl tasks nosuchverb` exits 1 naming the unknown verb
   - `--closer` defaults to `cli`, is bounded and sanitized
   - one close-record line per successful close on stderr, emitted under the default config
-- [ ] Implement
-- [ ] Update the parent `tasks` help: the `done` line and the second credential
-- [ ] Grep the repo for "six tools", "read-only", "never updates", and "no write verbs"; fix each stale statement
-- [ ] Commit: `feat(tasks): tasks done closes a board task`
+- [x] Implement
+- [x] Update the parent `tasks` help: the `done` line and the second credential
+- [x] Grep the repo for "six tools", "read-only", "never updates", and "no write verbs"; fix each stale statement
+- [x] Commit: `feat(tasks): tasks done closes a board task`
 
 ### Task 6 — ADR 0009 amendment
 
@@ -347,16 +347,16 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
 
 **Dispatch:** In-context · **Report:** —
 
-- [ ] Title no longer says read-only by grant
-- [ ] §1 and §2: the second keychain entry and no fallback
-- [ ] §6: superseded for `done`
-- [ ] §8: three write tools, the pre-read on update, the shared sanitizer. The trailer is provenance only: any writer can edit it. Name the durable record per surface: the gateway and container log on HTTP, the session's own output on CLI and stdio. The closer name the container sees may be the gateway's, not the end consumer's.
-- [ ] §3: the D9 host rule and why a write credential made it necessary; Constraint 12
-- [ ] §8a: an agent can now change existing rows; the close cap and what it does not bound
-- [ ] §11: the listener now exposes an update
-- [ ] §12: the CLI write verb, the raw round trip, the accepted lost update, the repeating-task refusal, what a wrong close costs and who undoes it
-- [ ] Consequences: record the write-verb decision and, after Task 7, who reviewed it and at which commit
-- [ ] Commit: `docs(adr): record the tasks close verb in ADR 0009`
+- [x] Title no longer says read-only by grant
+- [x] §1 and §2: the second keychain entry and no fallback
+- [x] §6: superseded for `done`
+- [x] §8: three write tools, the pre-read on update, the shared sanitizer. The trailer is provenance only: any writer can edit it. Name the durable record per surface: the gateway and container log on HTTP, the session's own output on CLI and stdio. The closer name the container sees may be the gateway's, not the end consumer's.
+- [x] §3: the D9 host rule and why a write credential made it necessary; Constraint 12
+- [x] §8a: an agent can now change existing rows; the close cap and what it does not bound
+- [x] §11: the listener now exposes an update
+- [x] §12: the CLI write verb, the raw round trip, the accepted lost update, the repeating-task refusal, what a wrong close costs and who undoes it
+- [x] Consequences: record the write-verb decision and, after Task 7, who reviewed it and at which commit
+- [x] Commit: `docs(adr): record the tasks close verb in ADR 0009`
 
 ### Task 7 — Review before the PR is ready
 
@@ -451,6 +451,8 @@ Day 1 is the first day Tasks 8, 9, and 10 are all live.
 
 ## Deviations
 
+- 2026-10-02, Task 5: the hostname grammar lives in `internal/config`, because config validates the list at load and cannot import the tasks package. One bad `allowed_hosts` entry fails config load for every command, as any other invalid config value does. `--json` failures with no closer code (host refused, unreachable, a malformed keychain entry) use `failed`. `docs/configuration.md` also documents the key. A closer name that holds anything shaped like a token now falls back to the surface default. The plan's own `status:` moved to `in-flight`: the repo's plan index accepts only its closed vocabulary, and `planned` and `in-progress` are outside it.
+- 2026-10-02, Task 6: the ADR gains a new amendment section, §12 to §17, with short pointers from the sections it changes, in place of rewriting §1 to §11 in place. The index row's status also moves from Draft to Accepted, which the ADR itself has said since 2026-09-08.
 - 2026-10-02, Task 4: the cap counts updates sent, not only confirmed closes, because a refused or unconfirmed update was still sent to the board. `NewMCPServer` takes an `MCPConfig` struct (default client name, record writer, credential source name, host). A ninth tool-error code, `failed`, covers what the eight named codes do not: unreachable, host refused, a pre-read that is not a task. A 403 on the update maps to `unauthorized`, since the client treats 401 and 403 alike. The code lives in new files `mcp_complete.go` and `closerecord.go`. Smoke run 2026-10-02 against the live board under the read-only entry: `VERDICT: PASS — stdio transport, seven tools, credential alive and read-only, complete_task pre-read in place`. That run also measured one of Task 2's unknowns: a nonexistent task id answers 404.
 - 2026-10-02, Task 3: one sentinel beyond the spec, `ErrWriteRefused`, marks an update that was sent and answered with a refusal. Task 4 needs it to tell a refused write from a failed pre-read. `CloseResult` also gains `UnnamedChanges` from the review amendments. The code lives in new files `complete.go` and `trailer.go`, not in `write.go`. `EvidenceRecorded` compares the read-back's literal last line, which is unverified until the probe shows how the server stores a description.
 - 2026-10-02, D1-D9: ruled by the executing session under the operator's delegation, not by the operator on the plan PR. Recorded under "Ruling".

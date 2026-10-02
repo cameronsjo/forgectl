@@ -158,8 +158,14 @@ func defaultCloser(surface string) (string, error) {
 // and the rest of the line, and a name that kept it would read as a shorter
 // name followed by forged fields.
 //
-// A name with nothing left becomes fallback.
+// A name with nothing left becomes fallback. So does a name that holds
+// anything shaped like an API token: the allowlist would drop the underscore
+// and keep the hex, and the hex is the credential. The test is on the name as
+// declared, before the allowlist can break the shape it looks for.
 func sanitizeCloser(closer, fallback string) string {
+	if evidenceTokenRe.MatchString(closer) {
+		return fallback
+	}
 	var kept strings.Builder
 	for _, r := range closer {
 		if isCloserRune(r) {

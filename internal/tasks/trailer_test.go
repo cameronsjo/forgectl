@@ -322,3 +322,18 @@ func TestSanitizeCloser_TheCutNeverLeavesATrailingVia(t *testing.T) {
 		t.Errorf("the trailer this client wrote does not match its own grammar: %q", line)
 	}
 }
+
+// A closer is written to the board and to the close record. A name that holds
+// a token must not carry its hex there, with or without the underscore.
+func TestSanitizeCloser_ANameHoldingATokenFallsBack(t *testing.T) {
+	hex := strings.Repeat("ab12", 10)
+	for _, name := range []string{"tk_" + hex, "agent tk_" + hex + " x"} {
+		got := sanitizeCloser(name, "fallback")
+		if got != "fallback" {
+			t.Errorf("sanitizeCloser(%q) = %q, want the fallback", name, got)
+		}
+		if strings.Contains(got, hex) {
+			t.Errorf("the closer kept the token's hex: %q", got)
+		}
+	}
+}
