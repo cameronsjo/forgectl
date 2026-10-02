@@ -62,6 +62,12 @@ Approving this plan in the session publishes it as a draft PR (Task 0) and nothi
 - **D8 — The write-verb decision itself.** ADR 0009 calls a write verb a separate decision with a separate review. Recommended: ruling on this PR is that decision, and the review is Task 1's pre-build pass plus Task 7.
 - **D9 — Where a keychain credential may be sent.** Today `--host` on any `tasks` verb sends the keychain token to whatever host is named, and the host pin accepts any public address on TLS. That is tolerable for a read-only token and not for a write token on the same machine. Recommended: a keychain credential goes only to the default host or a host listed in the user's config file; any other `--host` is refused with exit 4 on every `tasks` verb. This adds a small config key and changes behavior for anyone pointing the CLI at their own instance by flag alone.
 
+### Ruling (2026-10-02)
+
+The operator delegated the ruling to the executing session ("use your best judgement: decide every open item"), with merges withheld. Under that delegation every recommendation above is taken as written: D1 (a), (b), and (c); D2 no go when the finisher is recorded; D3 one triage pass after the closer ships; D4 no `reopen`, conditional on the Task 2 probe; D5 each harness closes with its own bot; D6 a separate gateway rule; D7 a cap of 10; D8 this ruling is the write-verb decision; D9 the host rule is built.
+
+The operator can overturn any of these before he merges the build PR. The merge is his, and it is the go to release.
+
 ## Loop
 
 | Thing created | Opened by (surfaces) | Closed by (surfaces) | Who closes |
@@ -174,7 +180,7 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
 
 **Dispatch:** In-context for setup; the review is the dedicated security-review agent on Opus, or the built-in security review command or an Opus reviewer handed the files if that agent type does not resolve · **Report:** `[REPORT_PATH]`
 
-- [ ] Record the ruling on D1-D9 in this plan; amend any task the ruling changes
+- [x] Record the ruling on D1-D9 in this plan; amend any task the ruling changes
 - [ ] Create `feat/tasks-close-path` in its own worktree from `origin/main`; open the draft build PR titled `feat(tasks): close a board task from the CLI and MCP`
 - [ ] File three issues: Task 9 on the deployment repo, Task 10 on `cameronsjo/cadence`, and D3's triage on `cameronsjo/forgectl`
 - [ ] File one forgectl issue for inherited gaps this plan does not fix: the HTTP container stays healthy with a dead token; `create_task` and `add_comment` log nothing; `SaveCache` is not atomic
