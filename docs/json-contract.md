@@ -106,7 +106,7 @@ The file is created with mode `0600`. forgectl refuses to append to it when the 
 {"time":"2026-01-02T03:04:05Z","event":"host_refused","verb":"ls","host":"<host as given>","credential":"vikunja-readonly"}
 ```
 
-`event` is always `host_refused`; a close record has no `event` key, which is how a reader tells the two apart. `verb` is the `tasks` subcommand. `host` is the value given to `--host`, cut to 253 characters, with any control or invisible character written as a JSON escape. `credential` is the name of the keychain entry the verb would have read, or `""` when that name is not a valid service name. No token is in the line: the keychain has not been read when the rule refuses.
+`event` is always `host_refused`; a close record has no `event` key, which is how a reader tells the two apart. `verb` is the `tasks` subcommand. `host` is the value given to `--host`, cut to 253 characters, with a user and password before an `@` replaced by `[redacted]` and a value holding a token shape replaced whole. `credential` is the name of the keychain entry the verb would have read, or `""` when that name is not a valid service name. No token is in the line: the keychain has not been read when the rule refuses.
 
 This line goes to the file only. stderr carries the refusal itself, as the error text or, under `--json`, as the failure object with code `failed`. If the line cannot be appended, the exit code is still `4` and stderr gets one plain line that says so, before the failure object.
 

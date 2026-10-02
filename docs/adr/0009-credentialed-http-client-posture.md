@@ -283,13 +283,22 @@ Three outcomes are refusals by decision:
   refused.** The description is never cut to make room, and a close is never
   sent without its record.
 
-The read-back decides the outcome, not the update's own response. A proxy can
-answer `200` for a write the server never applied. When the update was sent
-and nothing read afterwards shows the task done, the result is "not
-confirmed", worded so the caller reads the task before retrying. That error
-deliberately carries neither `ErrUnreachable` nor `ErrUnauthorized`: one may be
-answered from cache and the other means a dead credential, and neither is true
-of a write whose outcome is unknown.
+After an accepted update, the read-back decides the outcome, not the update's
+own response. A proxy can answer `200` for a write the server never applied.
+When the update was sent and nothing read afterwards shows the task done, the
+result is "not confirmed", worded so the caller reads the task before
+retrying. That error deliberately carries neither `ErrUnreachable` nor
+`ErrUnauthorized`: one may be answered from cache and the other means a dead
+credential, and neither is true of a write whose outcome is unknown.
+
+Two edges of that rule, stated. An update answered with a `3xx` or `4xx` is
+reported as refused and the task as unchanged, with no read-back: the status
+is taken at its word there, so a proxy that answered `4xx` for a request the
+server applied would produce a false "unchanged". And every other failure of
+the update — a `5xx`, a timeout, and also a connection that was never made —
+is reported as not confirmed. For a connection that was never made that is
+the cautious answer, not the exact one. The one failure reported as not sent
+is a dial the address pin refused, which keeps its own exit code.
 
 **A lost update is accepted.** An edit made in the web UI between the pre-read
 and the update is overwritten. The window is two requests wide. Two sessions
@@ -329,11 +338,26 @@ cannot. A host is a plain hostname, compared lower-cased and exactly, against
 the default host and the `allowed_hosts` list in the `[tasks]` section of the
 user's config file. No repository-local or project config file can add one.
 
-Two limits, stated: the config path follows the user's home directory, and a
+A refusal is recorded: one line in the close-record file names the verb, the
+host that was asked for, and the keychain entry's name. Without it the attempt
+would be blocked and then forgotten, and text on the board that told an agent
+to send a credential elsewhere would still be there for the next agent. `done`
+applies the rule before it checks its other arguments, so a refused host is
+recorded even when the command is wrong in another way too. A user and
+password before an `@` in the host, or a token shape anywhere in it, are
+replaced before the line is written. If the file cannot be written the
+refusal stands, and one line on stderr says the record is missing. The lines
+are not bounded in number: a caller that loops on a refused host grows the
+file by one short line per call.
+
+Three limits, stated. The config path follows the user's home directory, and a
 process that can write that file can add a host. This turns a one-command
 exfiltration into a two-step one. **It is not a boundary against a process
 running as the user** — the same argument this ADR makes against a
-configurable gateway.
+configurable gateway. And the list is one list for every keychain entry: a
+host listed for any reason can be sent whichever keychain token a command
+names, the write token included. With the default empty list a keychain token
+only ever reaches the default host.
 
 `mcp --http` is outside this rule. It reads `--token-file`, has no user config
 in a container, and stays bounded by the required `--pin-ip` list (§9), which
@@ -347,12 +371,16 @@ through one sanitizer, which the `created-by:` trailer now shares. The closer
 is reduced to an allowlist that holds neither `:` nor `—`, with the word `via`
 dropped, so a name cannot spell out trailer fields of its own. Evidence is
 refused, not repaired, when it is not one line of visible text, is over its
-limit, or holds anything shaped like an API token.
+limit, or holds a Vikunja API token (`tk_` and hex). That check knows one token
+shape. A key or header of any other kind pasted into evidence is written to
+the board, so evidence must never hold a credential. The CLI help says so; the
+MCP tool's description does not, and the guidance agents follow has to.
 
 The description is editable by anyone the project is shared with. So a
 `closed-by:` line already on a task is never a reason to skip writing this
-call's line: a matching last line is replaced. That keeps a retry from
-stacking trailers without letting planted text stand in for the record.
+call's line: a matching last line is replaced, with or without a line break
+after it. That keeps a retry from stacking trailers without letting planted
+text stand in for the record.
 
 Because the trailer can be rewritten, each surface has a record that is not on
 the board:
@@ -369,13 +397,22 @@ It names the task, the closer, the evidence, the credential's source (never
 the token), and the outcome. It does not go through the global logger, which
 discards everything unless `log_level` is set. The close-record file sits in
 the forgectl config directory; the same user can erase it, and it outlives the
-session, which stderr does not.
+session, which stderr does not. The line is written when the call returns, so
+a process killed between the update and the return has sent an update and
+left no line. The file is refused when it is a symlink, is not a regular file,
+or is readable by group or other; the record then goes to stderr only and the
+caller is told. That check guards against an accident, not against a process
+running as the user.
 
 On the HTTP transport the closer the container sees may be the gateway's
 client name, not the end consumer's. The gateway log is what names the
-consumer. On the CLI the closer is self-declared and defaults to `cli`; the
-credential source in the record is what distinguishes two harnesses on one
-machine.
+consumer. On the CLI the closer is self-declared and defaults to `cli`, and
+the credential source in the record is the keychain entry's name, which
+defaults to the same entry for every caller. **So with default flags, two
+harnesses on one machine write identical records and close as the same bot
+user.** A harness that wants to be told apart names itself with `--closer`,
+and the operator who wants the board to tell them apart gives each harness its
+own bot and its own entry.
 
 **16. An agent can now change an existing row, and the cap is a brake.**
 §8a's argument covered rows an agent adds. `complete_task` changes rows that
@@ -389,8 +426,11 @@ counted in one shared bucket.
 The cap counts updates sent, so a refused or unconfirmed update spends a slot
 and an already-done task does not. It is a brake, not a boundary: a client
 that opens a new session gets a new budget, and on a gateway that holds one
-upstream session for every consumer the ten are shared. What a credential may
-close at all is decided by the projects its bot user is shared.
+upstream session for every consumer the ten are shared. A slot is held from
+before the pre-read, so more than ten calls in flight at once can be refused
+before ten updates were sent. The CLI verb has no brake at all: each call is
+its own process. What a credential may close at all is decided by the projects
+its bot user is shared.
 
 **17. What a wrong close costs, and who undoes it.** A close changes the done
 state, its timestamps, the board column, and the description's last line.
@@ -426,7 +466,13 @@ alters more than this section says, `reopen` is owed.
   Two security reviews bound it: one of the control as it stood before the
   build, whose findings shaped §12 to §16, and one of the finished build.
   The first was an automated security review (Claude Opus) of the control at
-  commit `5e6055f`.
+  commit `5e6055f`: 1 Critical, 9 Important. The second, of the build at
+  `92c2427`, found no path that sends a keychain token off the allowed hosts
+  and no new path for the token into any output: 0 Critical, 3 Important. The
+  third, of the fixes at `5458a4c`: 0 Critical, 0 Important. Every Critical
+  and Important is fixed in code or stated above as a limit, except one that
+  cannot be closed by review: **the live probe has not run** (§17). No human
+  has reviewed this build.
 
 Settled 2026-09-08, flipping this ADR from Draft to Accepted:
 

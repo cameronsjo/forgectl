@@ -1582,8 +1582,18 @@ func TestPrintTaskDetail_ShowsTheLastLineOfALongDescription(t *testing.T) {
 			t.Errorf("the last line is missing: %q", out)
 		}
 		long := render(t, body+"\n"+strings.Repeat("z", 5000))
-		if n := strings.Count(long, "z"); n > 300 {
-			t.Errorf("a long last line was printed in full (%d characters)", n)
+		if n := strings.Count(long, "z"); n > closingLineShowMaxRunes {
+			t.Errorf("a long last line was printed past its cap (%d characters)", n)
+		}
+	})
+
+	// A trailer at its limits is about 460 characters. The line exists to show
+	// it, so it must come through whole.
+	t.Run("a trailer at its limits is shown whole", func(t *testing.T) {
+		full := "closed-by: " + strings.Repeat("c", 100) + " via forgectl tasks done 2026-01-02T03:04:05Z — " + strings.Repeat("e", 300)
+		out := render(t, body+"\n\n"+full)
+		if !strings.Contains(out, label+full+"\n") {
+			t.Errorf("the closing line was cut:\n%s", out)
 		}
 	})
 

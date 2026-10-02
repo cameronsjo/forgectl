@@ -264,7 +264,7 @@ func printTaskDetail(out io.Writer, t tasks.Task) error {
 		// who closed the task and why.
 		if descriptionWasCut(t.Description, shown) {
 			if _, err := fmt.Fprintf(out, "description last line (the description above is truncated): %s\n",
-				safeTitle(lastDescriptionLine(t.Description))); err != nil {
+				termsafe.SafeLineMax(lastDescriptionLine(t.Description), closingLineShowMaxRunes)); err != nil {
 				return err
 			}
 		}
@@ -311,6 +311,12 @@ const descriptionProbeMaxRunes = 4096
 func descriptionWasCut(description, shown string) bool {
 	return shown != termsafe.SafeLineMax(description, descriptionProbeMaxRunes)
 }
+
+// closingLineShowMaxRunes caps the last line `show` prints for a truncated
+// description. A full closed-by trailer is a closer of up to 100 characters,
+// evidence of up to 300, and about 60 of fixed text; the title cap would cut
+// the evidence off the one line this exists to show.
+const closingLineShowMaxRunes = 600
 
 // lastDescriptionLine is the description's last line, not counting line breaks
 // after it: the line a closed-by trailer occupies.

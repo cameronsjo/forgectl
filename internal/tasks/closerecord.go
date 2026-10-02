@@ -137,8 +137,8 @@ func WriteCloseRecord(w io.Writer, rec CloseRecord) error {
 		Surface:    rec.Surface,
 		Closer:     sanitizeCloser(rec.Closer, fallback),
 		Evidence:   evidence,
-		Credential: rec.Credential,
-		Host:       rec.Host,
+		Credential: recordedCredentialSource(rec.Credential),
+		Host:       recordedHost(rec.Host),
 		Outcome:    rec.Outcome,
 	}); err != nil {
 		return fmt.Errorf("tasks: close record: encode: %w", err)
@@ -147,6 +147,43 @@ func WriteCloseRecord(w io.Writer, rec CloseRecord) error {
 		return fmt.Errorf("tasks: close record: write: %w", err)
 	}
 	return nil
+}
+
+// redactedInRecord stands in a record for text that looked like a credential.
+const redactedInRecord = "[redacted]"
+
+// recordedHost is the host a refusal line carries: the text that was asked
+// for, cut to maxRecordedHostRunes, with anything that may be a credential
+// taken out first.
+//
+// A refused host is free text from a command line, and a URL is the common
+// wrong value. A URL can carry a user and a password before an '@', so
+// everything up to the last '@' is replaced; and a value holding a token
+// shape is replaced whole. What is left still says where the credential was
+// asked to go, which is the point of the line.
+func recordedHost(host string) string {
+	if evidenceTokenRe.MatchString(host) {
+		return redactedInRecord
+	}
+	if at := strings.LastIndexByte(host, '@'); at >= 0 {
+		host = redactedInRecord + host[at:]
+	}
+	if runes := []rune(host); len(runes) > maxRecordedHostRunes {
+		host = string(runes[:maxRecordedHostRunes])
+	}
+	return host
+}
+
+// recordedCredentialSource is the credential source a record carries: a
+// keychain service name, or CredentialSourceTokenFile. Anything else is
+// arbitrary text typed after a flag and is written as the empty string, and
+// so is a name that is itself shaped like a token: the allowed characters of
+// a service name are enough to spell one.
+func recordedCredentialSource(name string) string {
+	if !ValidKeychainService(name) || evidenceTokenRe.MatchString(name) {
+		return ""
+	}
+	return name
 }
 
 // HostRefusalEvent is the `event` value of a host-refusal line. A close record
@@ -193,16 +230,13 @@ type hostRefusalLine struct {
 
 // WriteHostRefusalRecord writes rec to w as one line of JSON.
 //
-// The host is caller text and is written as given, cut to
-// maxRecordedHostRunes: what was asked for is the point of the record. It goes
+// The host is caller text and is written through recordedHost: what was asked
+// for is the point of the record, and a password or token in it is not. It goes
 // through termsafe.JSONEncoder like every other field, so a line break, a
 // control, or an invisible character in it is written as an escape and cannot
 // start a second line or add a field.
 //
-// Credential is written only when it is a keychain service name
-// (ValidKeychainService) and is the empty string otherwise. A value that fails
-// that check is arbitrary text typed after a flag, and this file is not the
-// place for it.
+// Credential is written through recordedCredentialSource.
 //
 // The whole line is built before the first byte is written and handed to w in
 // one Write.
@@ -214,14 +248,8 @@ func WriteHostRefusalRecord(w io.Writer, rec HostRefusalRecord) error {
 	if when.IsZero() {
 		when = time.Now()
 	}
-	host := rec.Host
-	if runes := []rune(host); len(runes) > maxRecordedHostRunes {
-		host = string(runes[:maxRecordedHostRunes])
-	}
-	credential := ""
-	if ValidKeychainService(rec.Credential) {
-		credential = rec.Credential
-	}
+	host := recordedHost(rec.Host)
+	credential := recordedCredentialSource(rec.Credential)
 
 	var line bytes.Buffer
 	if err := termsafe.JSONEncoder(&line).Encode(hostRefusalLine{

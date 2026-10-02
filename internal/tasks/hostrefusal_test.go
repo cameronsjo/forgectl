@@ -181,3 +181,61 @@ func TestWriteHostRefusalRecord_ReportsAWriterItCouldNotUse(t *testing.T) {
 		t.Errorf("the line was written in %d call(s), want one", sink.wrote)
 	}
 }
+
+// A refused --host is free text, and a URL with a user and password is the
+// common wrong value. The line must still say where the credential was asked
+// to go, without keeping the password.
+func TestWriteHostRefusalRecord_DropsACredentialTypedIntoTheHost(t *testing.T) {
+	token := "tk_" + strings.Repeat("ab12", 10)
+	for name, tc := range map[string]struct{ host, wantHost, absent string }{
+		"userinfo":       {"https://bot:hunter2secret@tasks.example/", "[redacted]@tasks.example/", "hunter2secret"},
+		"a token":        {"tasks.example/" + token, "[redacted]", token},
+		"a plain host":   {"other.example", "other.example", "[redacted]"},
+		"two at signs":   {"a:b@c:d@tasks.example", "[redacted]@tasks.example", "c:d"},
+		"token and user": {token + "@tasks.example", "[redacted]", token},
+	} {
+		var buf bytes.Buffer
+		err := WriteHostRefusalRecord(&buf, HostRefusalRecord{Verb: "ls", Host: tc.host, Credential: "vikunja-readonly"}) //nolint:gosec // G101: Credential holds a keychain entry's name, not a credential
+		if err != nil {
+			t.Fatalf("%s: WriteHostRefusalRecord: %v", name, err)
+		}
+		raw := buf.String()
+		if strings.Contains(raw, tc.absent) {
+			t.Errorf("%s: the line kept %q: %s", name, tc.absent, raw)
+		}
+		var got map[string]any
+		if err := json.Unmarshal([]byte(raw), &got); err != nil {
+			t.Fatalf("%s: the line is not JSON: %v", name, err)
+		}
+		if got["host"] != tc.wantHost {
+			t.Errorf("%s: host = %q, want %q", name, got["host"], tc.wantHost)
+		}
+	}
+}
+
+// The characters a keychain service name allows are enough to spell a token,
+// so a name shaped like one is written as the empty string in both records.
+func TestRecords_BlankATokenShapedCredentialSource(t *testing.T) {
+	token := "tk_" + strings.Repeat("ab12", 10)
+
+	var refusal bytes.Buffer
+	if err := WriteHostRefusalRecord(&refusal, HostRefusalRecord{Verb: "ls", Host: "other.example", Credential: token}); err != nil {
+		t.Fatalf("WriteHostRefusalRecord: %v", err)
+	}
+	var closed bytes.Buffer
+	err := WriteCloseRecord(&closed, CloseRecord{
+		TaskID: 1, Surface: SurfaceDone, Closer: "cli", Evidence: "owner/repo#1",
+		Credential: token, Host: "tasks.example", Outcome: CloseOutcomeClosed,
+	})
+	if err != nil {
+		t.Fatalf("WriteCloseRecord: %v", err)
+	}
+	for name, raw := range map[string]string{"refusal": refusal.String(), "close": closed.String()} {
+		if strings.Contains(raw, token) {
+			t.Errorf("%s record kept the token-shaped name: %s", name, raw)
+		}
+		if !strings.Contains(raw, `"credential":""`) {
+			t.Errorf("%s record does not blank the credential source: %s", name, raw)
+		}
+	}
+}

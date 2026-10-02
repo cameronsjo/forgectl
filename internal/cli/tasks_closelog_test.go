@@ -285,3 +285,27 @@ func TestTasksDone_ASymlinkedCloseLogGetsNoRecord(t *testing.T) {
 		t.Errorf("the record was written through the symlink: %q (%v)", got, readErr)
 	}
 }
+
+// `done` applies the host rule before it checks its other arguments. Checked
+// after them, a command with an unlisted host and one other mistake would exit
+// on the mistake and leave no record that a credential was asked to go
+// elsewhere.
+func TestTasksDone_ARefusedHostIsRecordedEvenWhenAnotherArgumentIsWrong(t *testing.T) {
+	for name, args := range map[string][]string{
+		"no evidence": {"done", "1", "--host", "other.example"},
+		"a bad id":    {"done", "abc", "--host", "other.example", "--evidence", "owner/repo#1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig := newDoneRig(t, doneTask(nil))
+			_, _, err := rig.run(args...)
+			if got := ExitCode(err); got != exitTasksHostRefused {
+				t.Fatalf("ExitCode = %d, want %d: %v", got, exitTasksHostRefused, err)
+			}
+			refusals := rig.refusalLines()
+			if len(refusals) != 1 || refusals[0]["verb"] != "done" || refusals[0]["host"] != "other.example" {
+				t.Errorf("refusal lines = %v, want one for done and other.example", refusals)
+			}
+			requireNoSubprocess(t, rig.runner, "a refused host on done")
+		})
+	}
+}

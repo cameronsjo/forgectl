@@ -126,11 +126,22 @@ EXIT CODES
 
 // runTasksDone closes one task.
 //
-// The order is the control. Everything the caller typed is checked first; the
-// host rule and the keychain read come after; the request comes last. A call
-// that will be refused for its own arguments never reads the write credential.
+// The order is the control. The host rule comes first, then everything else
+// the caller typed, then the keychain read, then the request. A call that will
+// be refused for its own arguments never reads the write credential.
+//
+// The host rule is first because its refusal is recorded. Checked after the
+// arguments, a command with an unlisted host and one other mistake would exit
+// on the mistake and leave no trace that a credential was asked to go
+// elsewhere. readTasksKeychainToken applies the rule again before the read; by
+// then it cannot refuse, so it records nothing twice.
 func runTasksDone(cmd *cobra.Command, deps module.Deps, in tasksDoneInput) error {
 	ctx := cmd.Context()
+
+	if err := tasks.CheckAllowedHost(in.host, deps.Cfg.Tasks.AllowedHosts); err != nil {
+		recordTasksHostRefusal(cmd, in.writeService, in.host)
+		return jsonFailure(cmd, WithExitCode(err, exitTasksHostRefused), in.asJSON, jsonCodeFailed)
+	}
 
 	id, err := checkTasksDoneArgs(cmd, in)
 	if err != nil {

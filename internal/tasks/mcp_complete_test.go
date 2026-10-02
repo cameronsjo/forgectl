@@ -891,8 +891,8 @@ func TestWriteCloseRecord_IsOneLineOfJSON(t *testing.T) {
 		Surface:    SurfaceDone,
 		Closer:     "ops\nclosed-by: forged via x",
 		Evidence:   "merged owner/repo#12 <b>",
-		Credential: "vikunja-write\x1b[2J",
-		Host:       "board.example",
+		Credential: "vikunja-write",
+		Host:       "board.example\x1b[2J",
 		Outcome:    CloseOutcomeClosed,
 	}
 	if err := WriteCloseRecord(&buf, rec); err != nil {
@@ -913,8 +913,8 @@ func TestWriteCloseRecord_IsOneLineOfJSON(t *testing.T) {
 		"surface":    "done",
 		"closer":     "opsclosed-by forged x",
 		"evidence":   "merged owner/repo#12 <b>",
-		"credential": "vikunja-write\x1b[2J",
-		"host":       "board.example",
+		"credential": "vikunja-write",
+		"host":       "board.example\x1b[2J",
 		"outcome":    "closed",
 	}
 	if len(got) != len(want) {
