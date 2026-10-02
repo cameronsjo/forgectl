@@ -64,10 +64,19 @@ func newTasksMCPCmd(deps module.Deps, host, keychainService *string) *cobra.Comm
   forgectl tasks mcp --http :3000 \
       --token-file /run/secrets/token      streamable HTTP (a container)
 
-Six tools: list_projects, list_tasks, get_task, ready_tasks, create_task,
-add_comment. What any of them can actually do is decided by the credential's
-own grant, not by this flag surface — a read-only token gets a tool error on
-create_task, and that error is evidence only because the reads pass.
+Seven tools: list_projects, list_tasks, get_task, ready_tasks, create_task,
+add_comment, complete_task. What any of them can actually do is decided by the
+credential's own grant, not by this flag surface — a read-only token gets a
+tool error on create_task, and on complete_task for any task that is still
+open, and that error is evidence only because the reads pass.
+
+complete_task marks one task done and appends a closed-by line to its
+description. It sends a limited number of updates per MCP session and refuses
+the rest; a new session starts a new count. Each call that sends an update,
+and each call refused by that limit, writes one JSON close record line to
+stderr: time, task and project id, closer, evidence, the credential's source
+name, the host, and the outcome. Never the token. The line does not depend on
+log_level. On stdio, stdout is the protocol stream and carries no record.
 
 Board text is UNTRUSTED. Every title, description, and comment this server
 returns is wrapped in a per-response <board-text-NONCE> fence, and any
@@ -165,12 +174,10 @@ func runTasksMCP(
 	// port and only then discovers its token file is unreadable is a container
 	// that reports healthy and answers every tool call with an auth failure.
 	var token tasks.Token
-	clientName := "forgectl (stdio)"
 	if httpAddr == "" {
 		token, err = tasks.ReadToken(ctx, deps.Runner, keychainService)
 	} else {
 		token, err = tasks.ReadTokenFile(tokenFile)
-		clientName = "forgectl (http)"
 	}
 	if err != nil {
 		return tasksExitError(err)
@@ -188,7 +195,7 @@ func runTasksMCP(
 		return tasksExitError(err)
 	}
 
-	server := tasks.NewMCPServer(client, clientName)
+	server := tasks.NewMCPServer(client, mcpServerConfig(cmd, httpAddr, keychainService, host))
 	if httpAddr == "" {
 		// stdout is the transport on stdio. Anything written there that is
 		// not a JSON-RPC frame corrupts the session, which is why nothing in
@@ -196,6 +203,33 @@ func runTasksMCP(
 		return server.Run(ctx, &mcp.StdioTransport{})
 	}
 	return serveMCPHTTP(cmd, server, httpAddr)
+}
+
+// mcpServerConfig is what the server is told about its own launch: the
+// fallback client name for a trailer, where close records go, and the two
+// facts a record carries about the credential — its source's name and the
+// host it is sent to.
+//
+// Records go to stderr on both transports. On stdio that is the only stream
+// left: stdout is the JSON-RPC transport, and a record written there would
+// corrupt the session it describes. In a container, stderr is the log.
+//
+// The credential source is a NAME, never the credential. On stdio it is the
+// keychain service the token was read from. On HTTP it is the fixed word for
+// a mounted file: --keychain-service still holds its default there, and it
+// names an entry this transport never read.
+func mcpServerConfig(cmd *cobra.Command, httpAddr, keychainService, host string) tasks.MCPConfig {
+	cfg := tasks.MCPConfig{
+		DefaultClientName: "forgectl (stdio)",
+		Records:           cmd.ErrOrStderr(),
+		CredentialSource:  keychainService,
+		Host:              host,
+	}
+	if httpAddr != "" {
+		cfg.DefaultClientName = "forgectl (http)"
+		cfg.CredentialSource = tasks.CredentialSourceTokenFile
+	}
+	return cfg
 }
 
 func serveMCPHTTP(cmd *cobra.Command, server *mcp.Server, addr string) error {

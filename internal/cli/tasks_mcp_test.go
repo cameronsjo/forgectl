@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net"
@@ -15,6 +16,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
+
+	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/tasks"
 )
 
 // TestValidateMCPFlags_HTTPRequiresATokenFile is the refusal the container
@@ -284,5 +288,76 @@ func TestListenCause_DropsTheAddress(t *testing.T) {
 		if got := listenCause(err).Error(); strings.Contains(got, "SECRETTOK") {
 			t.Errorf("listenCause(%v) = %q, echoes the address", err, got)
 		}
+	}
+}
+
+// TestMCPServerConfig_RecordsGoToStderr: on stdio, stdout is the JSON-RPC
+// transport, so a close record written there would corrupt the session it
+// reports on. The record writer is the command's stderr on both transports.
+func TestMCPServerConfig_RecordsGoToStderr(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	for _, httpAddr := range []string{"", ":3000"} {
+		stdout.Reset()
+		stderr.Reset()
+		cfg := mcpServerConfig(cmd, httpAddr, "some-entry", "board.example")
+		rec := tasks.CloseRecord{TaskID: 1, Surface: tasks.SurfaceMCP, Evidence: "x", Outcome: tasks.CloseOutcomeClosed}
+		if err := tasks.WriteCloseRecord(cfg.Records, rec); err != nil {
+			t.Fatalf("--http %q: WriteCloseRecord: %v", httpAddr, err)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("--http %q: a close record reached stdout: %s", httpAddr, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), `"outcome":"closed"`) {
+			t.Errorf("--http %q: the close record did not reach stderr: %q", httpAddr, stderr.String())
+		}
+	}
+}
+
+// TestMCPServerConfig_NamesTheCredentialSourceNotTheCredential: a record says
+// where the token came from — the keychain entry's name on stdio, the fixed
+// word for a mounted file on HTTP — and the host it was sent to.
+func TestMCPServerConfig_NamesTheCredentialSourceNotTheCredential(t *testing.T) {
+	cmd := &cobra.Command{}
+
+	stdio := mcpServerConfig(cmd, "", "some-entry", "board.example")
+	if stdio.CredentialSource != "some-entry" || stdio.Host != "board.example" || stdio.DefaultClientName != "forgectl (stdio)" {
+		t.Errorf("stdio config = %+v, want the keychain service name, the host, and the stdio client name", stdio)
+	}
+
+	// The keychain service flag has a default, so it is non-empty on HTTP
+	// too. It names an entry the HTTP transport never read.
+	overHTTP := mcpServerConfig(cmd, ":3000", "some-entry", "board.example")
+	if tasks.CredentialSourceTokenFile != "token-file" {
+		t.Errorf("CredentialSourceTokenFile = %q, want the literal token-file", tasks.CredentialSourceTokenFile)
+	}
+	if overHTTP.CredentialSource != tasks.CredentialSourceTokenFile {
+		t.Errorf("http credential source = %q, want %q", overHTTP.CredentialSource, tasks.CredentialSourceTokenFile)
+	}
+	if overHTTP.Host != "board.example" || overHTTP.DefaultClientName != "forgectl (http)" {
+		t.Errorf("http config = %+v, want the host and the http client name", overHTTP)
+	}
+}
+
+// TestTasksMCPHelp_NamesAllSevenTools: the help is where an operator learns
+// what the server exposes before granting it a credential.
+func TestTasksMCPHelp_NamesAllSevenTools(t *testing.T) {
+	host, service := "board.example", "some-entry"
+	long := newTasksMCPCmd(module.Deps{}, &host, &service).Long
+	if !strings.Contains(long, "Seven tools") || strings.Contains(long, "Six tools") {
+		t.Errorf("the help does not count seven tools:\n%s", long)
+	}
+	for _, tool := range []string{
+		"list_projects", "list_tasks", "get_task", "ready_tasks", "create_task", "add_comment", "complete_task",
+	} {
+		if !strings.Contains(long, tool) {
+			t.Errorf("the help does not name %s", tool)
+		}
+	}
+	if !strings.Contains(long, "stderr") || !strings.Contains(long, "close record") {
+		t.Errorf("the help does not say where close records go:\n%s", long)
 	}
 }
