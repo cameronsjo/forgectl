@@ -17,7 +17,12 @@ package tasks
 // scratch task A in the web UI and moved it one column:
 //
 //	go test -tags liveprobe -run TestLiveProbe -count=1 -v . \
-//	  -liveprobe.phase=update -liveprobe.a=<id> -liveprobe.b=<id> -liveprobe.out=<abs dir>
+//	  -liveprobe.phase=update -liveprobe.a=<id> -liveprobe.b=<id> \
+//	  -liveprobe.c=<id> -liveprobe.d=<id> -liveprobe.out=<abs dir>
+//
+// The token is a short-expiry scratch bot token stored under the keychain
+// service "forgectl-liveprobe-scratch". Delete that entry and revoke the token
+// when the probe is finished. The probe talks only to the default host.
 //
 // The token is read through ReadToken and the client is built by NewClient, so
 // host pinning, the TLS floor, and the redirect refusal all apply. Raw
@@ -50,21 +55,29 @@ const probeMarker = "[forgectl-liveprobe]"
 // Fixed write budgets. A probe that loops is a probe that can flood a shared
 // board; each phase makes exactly this many writes or stops.
 const (
-	probeCreateWrites = 2
-	probeUpdateWrites = 2
+	probeCreateWrites = 4
+	probeUpdateWrites = 4
 )
+
+// probeDefaultService is deliberately NOT the name the `done` verb reads. The
+// probe runs before the host rule (ADR 0009 §3, D9) is installed, and until
+// then any `tasks` verb will send a named keychain entry to any public host.
+// The probe's token is a short-expiry scratch token under this throwaway
+// name, removed and revoked when the probe is finished.
+const probeDefaultService = "forgectl-liveprobe-scratch"
 
 // probeRepeatSeconds is scratch task B's repeat interval: one day.
 const probeRepeatSeconds = 86400
 
 var (
 	probePhase    = flag.String("liveprobe.phase", "", "create or update")
-	probeService  = flag.String("liveprobe.keychain-service", "vikunja-write", "login keychain service holding a bot-user write token")
-	probeHost     = flag.String("liveprobe.host", DefaultHost, "Vikunja API host")
+	probeService  = flag.String("liveprobe.keychain-service", probeDefaultService, "login keychain service holding a short-expiry scratch bot token")
 	probeProject  = flag.Int("liveprobe.project", 0, "project id to create the scratch tasks in (create phase)")
 	probeOut      = flag.String("liveprobe.out", "", "absolute directory OUTSIDE the repository for raw saves")
 	probeA        = flag.Int("liveprobe.a", 0, "scratch task A's id (update phase)")
 	probeB        = flag.Int("liveprobe.b", 0, "scratch task B's id (update phase)")
+	probeC        = flag.Int("liveprobe.c", 0, "scratch task C's id (update phase)")
+	probeD        = flag.Int("liveprobe.d", 0, "scratch task D's id (update phase)")
 	probeMissing  = flag.Int("liveprobe.missing-id", 999999999, "an id that does not exist")
 	probeForeign  = flag.Int("liveprobe.foreign-id", 0, "optional: a task id in a project this credential is not shared")
 	probeFixtures = flag.Bool("liveprobe.fixtures", true, "also write sanitized fixtures beside the raw saves")
@@ -94,7 +107,8 @@ func TestLiveProbe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read token: %v", err)
 	}
-	client, err := NewClient(ctx, runner, *probeHost, token)
+	// No host flag: the probe only ever talks to the default host.
+	client, err := NewClient(ctx, runner, DefaultHost, token)
 	if err != nil {
 		t.Fatalf("build client: %v", err)
 	}
@@ -199,6 +213,18 @@ func (p *probe) phaseCreate(ctx context.Context) {
 			"due_date":     due,
 			"repeat_after": probeRepeatSeconds,
 		}},
+		{"C", map[string]any{
+			"title":       probeMarker + " C " + stamp,
+			"description": "Scratch task C (repeat_mode set, repeat_after zero) for the forgectl update probe. Safe to delete.",
+			"due_date":    due,
+			"repeat_mode": 1,
+		}},
+		{"D", map[string]any{
+			"title":       probeMarker + " D " + stamp,
+			"description": "Scratch task D (minimal-body update) for the forgectl update probe. Safe to delete.",
+			"priority":    2,
+			"due_date":    due,
+		}},
 	}
 	for _, spec := range specs {
 		body, err := p.write(ctx, http.MethodPut, fmt.Sprintf("/projects/%d/tasks", *probeProject), spec.payload)
@@ -222,8 +248,8 @@ func (p *probe) phaseCreate(ctx context.Context) {
 
 func (p *probe) phaseUpdate(ctx context.Context) {
 	t := p.t
-	if *probeA <= 0 || *probeB <= 0 {
-		t.Fatal("-liveprobe.a and -liveprobe.b are required for the update phase")
+	if *probeA <= 0 || *probeB <= 0 || *probeC <= 0 || *probeD <= 0 {
+		t.Fatal("-liveprobe.a, -liveprobe.b, -liveprobe.c, and -liveprobe.d are required for the update phase")
 	}
 
 	// Task A: the full raw object, echoed back with done and description
@@ -234,7 +260,11 @@ func (p *probe) phaseUpdate(ctx context.Context) {
 		time.Now().UTC().Format(time.RFC3339))
 	sent := cloneRaw(before)
 	sent["done"] = json.RawMessage("true")
-	sent["description"] = mustJSON(t, appendTrailer(rawString(before["description"]), trailer))
+	description, ok := strictString(before["description"])
+	if !ok {
+		t.Fatalf("task %d's description is not a JSON string: refusing to build an update from it", *probeA)
+	}
+	sent["description"] = mustJSON(t, appendTrailer(description, trailer))
 	respBody, err := p.write(ctx, http.MethodPost, fmt.Sprintf("/tasks/%d", *probeA), sent)
 	if err != nil {
 		t.Fatalf("RESULT update A refused after a passing read, stopping: %v", err)
@@ -263,6 +293,38 @@ func (p *probe) phaseUpdate(ctx context.Context) {
 	t.Logf("RESULT B (repeating) done after update: %s", string(afterB["done"]))
 	t.Logf("RESULT B changed keys: %v", changedKeys(beforeB, afterB))
 
+	// Task C: repeat_mode set with repeat_after zero. A refusal keyed on
+	// repeat_after alone would miss this one.
+	beforeC := p.readMarked(ctx, *probeC)
+	p.saveRaw("task-C-before.json", beforeC)
+	t.Logf("RESULT C repeat fields before: repeat_after=%s repeat_mode=%s",
+		string(beforeC["repeat_after"]), string(beforeC["repeat_mode"]))
+	sentC := cloneRaw(beforeC)
+	sentC["done"] = json.RawMessage("true")
+	if _, err := p.write(ctx, http.MethodPost, fmt.Sprintf("/tasks/%d", *probeC), sentC); err != nil {
+		t.Fatalf("RESULT update C refused, stopping: %v", err)
+	}
+	afterC := p.readRaw(ctx, *probeC)
+	p.saveRaw("task-C-after.json", afterC)
+	t.Logf("RESULT C (repeat_mode) done after update: %s", string(afterC["done"]))
+	t.Logf("RESULT C changed keys: %v", changedKeys(beforeC, afterC))
+
+	// Task D: a MINIMAL body, done and description only. Every other key that
+	// changes here is one the server reset because it was left out — the
+	// reason CompleteTask echoes the whole object.
+	beforeD := p.readMarked(ctx, *probeD)
+	p.saveRaw("task-D-before.json", beforeD)
+	minimal := map[string]json.RawMessage{
+		"done":        json.RawMessage("true"),
+		"description": beforeD["description"],
+	}
+	if _, err := p.write(ctx, http.MethodPost, fmt.Sprintf("/tasks/%d", *probeD), minimal); err != nil {
+		t.Fatalf("RESULT minimal-body update of D refused, stopping: %v", err)
+	}
+	afterD := p.readRaw(ctx, *probeD)
+	p.saveRaw("task-D-after.json", afterD)
+	t.Logf("RESULT D keys reset by a minimal body: %v", changedKeys(beforeD, afterD))
+
 	// Statuses for the two reads CompleteTask must tell apart.
 	_, err = p.client.get(ctx, fmt.Sprintf("/tasks/%d", *probeMissing), nil)
 	t.Logf("RESULT read of nonexistent id %d: %s", *probeMissing, classify(err))
@@ -286,7 +348,8 @@ func (p *probe) phaseUpdate(ctx context.Context) {
 func (p *probe) readMarked(ctx context.Context, id int) map[string]json.RawMessage {
 	p.t.Helper()
 	raw := p.readRaw(ctx, id)
-	if !strings.Contains(rawString(raw["title"]), probeMarker) {
+	title, ok := strictString(raw["title"])
+	if !ok || !strings.Contains(title, probeMarker) {
 		p.t.Fatalf("task %d's title lacks %q: refusing to update a task this probe did not create", id, probeMarker)
 	}
 	return raw
@@ -345,6 +408,18 @@ func cloneRaw(in map[string]json.RawMessage) map[string]json.RawMessage {
 	return out
 }
 
+// strictString decodes raw as a JSON string and reports whether it was one. A
+// caller building a WRITE from the value must use this, not rawString: a
+// description that is not a string must stop the update, never read as empty.
+func strictString(raw json.RawMessage) (string, bool) {
+	var s string
+	if len(raw) == 0 || json.Unmarshal(raw, &s) != nil {
+		return "", false
+	}
+	return s, true
+}
+
+// rawString is the lenient form, for logging and comparison only.
 func rawString(raw json.RawMessage) string {
 	var s string
 	if err := json.Unmarshal(raw, &s); err != nil {

@@ -151,6 +151,49 @@ Every task obeys these. Sources: ADR 0009 and the existing `internal/tasks` code
 12. The entry `done` reads holds a bot-user token scoped to task read and update and shared only the projects that bot may close in. It is never a token minted on the operator's own account. Any same-user process can read a keychain entry, so the token's scope and share are the boundary, not this binary's checks.
 13. Skill text never tells a session to read the keychain entry directly.
 
+## Pre-build security review — amendments (2026-10-02)
+
+Task 1's review returned 1 Critical, 9 Important, and 12 Nit findings. Every Critical and Important is taken. Where a line below conflicts with a task's own text, this section wins.
+
+**Task 2 (C1, I4):**
+
+- A write credential must not sit in the keychain before the D9 host rule is installed: until then any `tasks` verb sends a named keychain entry to any public host with a valid certificate. The probe therefore uses a short-expiry scratch bot token under the entry `forgectl-liveprobe-scratch`, never the entry `done` reads, and has no host flag. The operator deletes the entry and revokes the token as the probe's last step.
+- The probe gains scratch task C (`repeat_mode` set, `repeat_after` zero) and scratch task D, which is updated with a minimal body of `done` and `description` only to measure which keys the server resets. Four writes per phase.
+
+**Task 3 (I1, I2, I3, I4, I5, N1, N2, N8):**
+
+- Pre-read shape is checked, and any failure is zero writes: the body is a JSON object of at most `maxCloseBodyBytes`; `id` is a number equal to the requested id; `done` is a JSON boolean; `description` is a string, absent, or null; `repeat_after` and `repeat_mode` are each absent or a number, and a non-zero value in either is `ErrRepeatingTask`. Values stay `json.RawMessage` end to end and are never decoded through `any`.
+- The retry rule changes. A matching `closed-by:` line is never a reason to skip the trailer, because that text is writable by anyone who can edit the task. If the description's last line matches the strict trailer grammar, that one line is removed and this call's trailer is appended. `EvidenceRecorded` is true only when this call's line is the last line of the read-back.
+- The trailer sanitizer refuses evidence that is not valid UTF-8 or that holds any rune where `termsafe.IsUnsafeTerminalRune`, `termsafe.IsInvisibleRune`, or `!unicode.IsGraphic` is true. That covers CR, LF, tab, U+000B, U+000C, U+0085, U+2028, U+2029, bidi overrides, and zero-width characters. Evidence is also refused when it contains `tk_` followed by 20 or more hex characters anywhere in the text.
+- The closer is reduced to the allowlist `[A-Za-z0-9._()/@ -]`, capped at 100 runes, with every occurrence of ` via ` collapsed so a closer cannot forge the trailer's own fields. The `created-by:` trailer uses the same closer sanitizer.
+- `CloseResult.ChangedKeys` names a key only when it matches `^[a-z_]{1,40}$` and is in the known task key set; any other difference is counted in `CloseResult.UnnamedChanges int`.
+- One expected-to-change list, in code and in the fixtures' notes: `done`, `done_at`, `updated`, `description`, `bucket_id`, `position`.
+- A test pins the production transport: `CheckRedirect` returns `http.ErrUseLastResponse`, `Proxy` is nil, the TLS floor is 1.2, `InsecureSkipVerify` is false, and `RootCAs` is nil. Each is staged broken once.
+- `security` and `route` are run by absolute path (`/usr/bin/security`, `/sbin/route`). `AssertVikunja` sends its `/info` request without the Authorization header. `no_env_token_test.go` also covers `structured.go`, `hostpin.go`, and `cache.go`.
+
+**Task 4 (I5, I6, I7, I8, N7):**
+
+- The cap is keyed on the MCP session under a mutex. A nil session is one shared bucket, never "no cap". A slot is reserved before the POST and released when no POST was sent. An already-done task does not count.
+- A close record is one JSON line on the record writer for every call that sent a POST, with `outcome` of `closed`, `not_confirmed`, `write_refused`, or `unauthorized`, and one for every cap refusal with `outcome` `close_cap`. Fields: UTC time, task id, project id, surface, closer, evidence, credential source name, host, outcome. Never the token. It does not go through the global logger.
+- Tool text names changed keys only from `ChangedKeys`, and otherwise gives the count.
+- The smoke check asserts the exact code `complete_task: not_found:` and is labelled as proof that the tool is registered and its pre-read gates the write. It is not a scope check: a missing id answers the same under any credential. The scope proof is Task 3 test (d) and Task 9's read-only consumer check.
+- `get_task` shows a description's last line separately, inside the fence, when the description was truncated, so a reader sees the closing trailer.
+
+**Task 5 (I6, I9, N3, N4):**
+
+- The host rule has two enforcement points. `ReadToken` takes the allowed host set and the returned token remembers it, so `NewClient` refuses to build a client that would send a keychain token to any other host, whoever calls it. The CLI also checks before any keychain read, through one function every `tasks` verb calls, and a test walks the verb list and asserts exit 4 with zero keychain reads.
+- A host is a plain hostname: letters, digits, `.`, and `-`; no port, userinfo, path, trailing dot, or IP literal. Comparison is lower-cased and exact against the default host and the config list. Config entries are validated at load.
+- `mcp` over stdio is covered. `mcp --http` reads `--token-file`, which carries no host restriction of its own, and stays governed by the required `--pin-ip` list.
+- The CLI appends each close record to a file under the forgectl config directory as well as writing it to stderr. The file is independent of `log_level`. The same user can erase it; it outlives the session, which stderr does not. There is no reader verb.
+- `--closer` stays self-declared with the default `cli`, and the help says so. It does not read a harness session variable: this package reads no environment variable by design.
+- A keychain service name outside `^[A-Za-z0-9._-]{1,64}$` is refused before the keychain read, on every verb. `tasks show` prints a relation kind through the same sanitizer as a title.
+
+**Task 6:** §3 records that the read token had the any-public-host exposure from the start and that D9 is not a boundary against a process running as the user, which can edit the config file. §3b states that TLS as the control depends on the system trust store. §8 names, per surface, which record is authoritative and who can alter it.
+
+**Task 9:** the deployment issue also measures whether the gateway holds one upstream session or one per consumer, because that decides what the cap of 10 bounds.
+
+**Not built here, added to cameronsjo/forgectl#1025:** a failed cache write is logged through a logger that discards by default; a mistyped `log_level` turns logging off silently; `create_task` and `add_comment` have no session cap; transport error text reaches an MCP client unfenced.
+
 ## Orchestrator
 
 **Driver:** opus — security posture: a forgectl surface gains a write call and a second credential source
@@ -184,8 +227,8 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
 - [x] Create `feat/tasks-close-path` in its own worktree from `origin/main`; open the draft build PR titled `feat(tasks): close a board task from the CLI and MCP`
 - [x] File three issues: Task 9 on the deployment repo, Task 10 on `cameronsjo/cadence`, and D3's triage on `cameronsjo/forgectl` Filed: cameronsjo/homelab#1220 (Task 9), cameronsjo/cadence#1570 (Task 10), cameronsjo/forgectl#1024 (D3 triage).
 - [x] File one forgectl issue for inherited gaps this plan does not fix: the HTTP container stays healthy with a dead token; `create_task` and `add_comment` log nothing; `SaveCache` is not atomic Filed: cameronsjo/forgectl#1025.
-- [ ] Security review of the control as it stands, whole files: `docs/adr/0009-credentialed-http-client-posture.md`, `internal/tasks/token.go`, `client.go`, `write.go`, `mcp.go`, `structured.go`, `hostpin.go`, `errors.go`, `types.go`, `cache.go`, `internal/cli/tasks.go`, `internal/cli/tasks_mcp.go`, `internal/config/config.go` (`SetupLogger`), `scripts/mcp-stdio-smoke.sh`. It must answer, among its own questions, where `--host` can send a keychain credential (D9).
-- [ ] Fold Critical and Important findings into Tasks 2-6. The review finishes before Task 2's first live write.
+- [x] Security review of the control as it stands, whole files: `docs/adr/0009-credentialed-http-client-posture.md`, `internal/tasks/token.go`, `client.go`, `write.go`, `mcp.go`, `structured.go`, `hostpin.go`, `errors.go`, `types.go`, `cache.go`, `internal/cli/tasks.go`, `internal/cli/tasks_mcp.go`, `internal/config/config.go` (`SetupLogger`), `scripts/mcp-stdio-smoke.sh`. It must answer, among its own questions, where `--host` can send a keychain credential (D9).
+- [x] Fold Critical and Important findings into Tasks 2-6. The review finishes before Task 2's first live write. Folded as "Pre-build security review — amendments".
 
 ### Task 2 — Probe update behavior on the real board
 
@@ -197,7 +240,7 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
 
 **Dispatch:** In-context, Opus, with the operator's go — it writes to the live board · **Report:** —
 
-- [ ] Operator: store the probe's bot credential first, under Constraint 12.
+- [ ] Operator: mint a short-expiry scratch bot token and store it under `forgectl-liveprobe-scratch`, under Constraint 12. Not the entry `done` reads. Delete the entry and revoke the token when the probe is finished.
 - [x] Write the probe as a Go test that reads the token through `tasks.ReadToken` and builds its client with `tasks.NewClient`, so host pinning applies. It fails if `HTTPS_PROXY` or `HTTP_PROXY` is set. It runs in two phases selected by a flag, creates tasks titled with a fixed marker, makes a fixed number of writes, stops on any unexpected status, and prints every id it created on every exit path. Phase `update` refuses any id whose pre-read title lacks the marker. Raw saves go outside the worktree.
 - [ ] Phase `create`: one GET must pass first. Create scratch task A with a description, priority, and due date, and scratch task B with a repeat interval. Assert each landed in the intended project.
 - [ ] Operator, in the web UI: add a label, an assignee, and a reminder to A, and move it one column.
@@ -220,7 +263,7 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
 - Test: `internal/tasks/write_test.go`, `internal/tasks/no_env_token_test.go`
 
 **Interfaces:**
-- Consumes: Task 2's two key lists and fixtures. **Assumed until the probe runs:** echoed-key removal list: empty (the full raw object is echoed). Expected-to-change keys: `done`, `done_at`, `updated`, `description`, `bucket_id`, `position`, `kanban_position`.
+- Consumes: Task 2's two key lists and fixtures. **Assumed until the probe runs:** echoed-key removal list: empty (the full raw object is echoed). Expected-to-change keys: `done`, `done_at`, `updated`, `description`, `bucket_id`, `position`.
 - Produces:
   - `type CloseRequest struct { TaskID int; Closer, Surface, Evidence string; Now time.Time }`
   - `type CloseResult struct { ID, ProjectID int; Title string; AlreadyDone, EvidenceRecorded, Confirmed bool; ChangedKeys []string }`
@@ -410,6 +453,7 @@ Day 1 is the first day Tasks 8, 9, and 10 are all live.
 
 - 2026-10-02, D1-D9: ruled by the executing session under the operator's delegation, not by the operator on the plan PR. Recorded under "Ruling".
 - 2026-10-02, Task 1: `feat/tasks-close-path` branches from the plan branch, not from `origin/main`, so the plan document rides on the build PR and each task's tick lands in the commit that does the work. PR 1023 holds the plan and the ruling; PR 1026 carries both and supersedes it when merged.
+- 2026-10-02, Task 1 review: the plan's own ordering was wrong. Task 2 stored a write credential before the D9 host rule existed, which Task 8 forbids. Task 2 now uses a scratch token under a throwaway entry name. The review also reversed one panel decline: the CLI now appends a close record to a local file (no reader verb), because a stderr line does not outlive the session.
 - 2026-10-02, Task 2: the probe is written and not run, because no write credential is stored. Task 3 builds on assumed key lists (recorded in its Interfaces block) and hand-written fixtures. D4's condition is therefore unmet: no `reopen` verb is built, and the probe must confirm that before the ready flip.
 
 - 2026-10-01, Task 0: the redaction scan flagged seven lines that named session-tooling identifiers and one absolute local path. Each was reworded to describe the step (the redaction scan, the dedicated security-review agent, the pre-PR polish pass, a repo-relative path). No step changed meaning.
