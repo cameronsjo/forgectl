@@ -139,8 +139,12 @@ func WriteCloseRecord(w io.Writer, rec CloseRecord) error {
 		Closer:     sanitizeCloser(rec.Closer, fallback),
 		Evidence:   evidence,
 		Credential: recordedCredentialSource(rec.Credential),
-		Host:       recordedHost(rec.Host),
-		Outcome:    rec.Outcome,
+		// The host of a close is operator configuration, already used to reach
+		// the board, and on the HTTP transport it may be an address or a
+		// service name. It is written as it is; recordedHost is for the
+		// refused, caller-typed host of a refusal line.
+		Host:    rec.Host,
+		Outcome: rec.Outcome,
 	}); err != nil {
 		return fmt.Errorf("tasks: close record: encode: %w", err)
 	}
@@ -154,16 +158,19 @@ func WriteCloseRecord(w io.Writer, rec CloseRecord) error {
 // hostname.
 const hostNotRecorded = "[not a plain hostname]"
 
-// recordedHost is the host a record carries: the name itself when it is a
-// plain hostname, and hostNotRecorded for anything else.
+// recordedHost is the host a refusal line carries: the name itself when it is
+// a plain hostname, and hostNotRecorded for anything else.
 //
 // A refused --host is free text from a command line, and the common wrong
 // value is a URL, which can hold a user, a password, a token in its path or
 // its query, in any encoding. No list of shapes to remove from such a value is
 // complete, so nothing of it is kept. A plain hostname is letters, digits, '.'
-// and '-' and cannot carry any of those, and it is the value an operator
-// needs: the name a credential was asked to go to. A plain hostname is at most
-// 253 bytes, so the field is bounded as well.
+// and '-', which rules out every URL part, and it is the value an operator
+// needs: the name a credential was asked to go to. It is at most 253 bytes, so
+// the field is bounded as well.
+//
+// This is not a credential filter. A secret typed as the whole value, with
+// only those characters in it, is a plain hostname and is written.
 func recordedHost(host string) string {
 	if !config.PlainHostname(host) || evidenceTokenRe.MatchString(host) {
 		return hostNotRecorded
@@ -204,7 +211,8 @@ type HostRefusalRecord struct {
 	// Verb is the `tasks` subcommand that was refused: ls, show, ready, done,
 	// or mcp. It is the command's own name, never caller text.
 	Verb string
-	// Host is the host that was asked for, as given.
+	// Host is the host that was asked for. WriteHostRefusalRecord keeps it only
+	// when it is a plain hostname.
 	Host string
 	// Credential is the name of the keychain entry the verb would have read.
 	Credential string

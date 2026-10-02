@@ -472,8 +472,8 @@ alters more than this section says, `reopen` is owed.
   commit `5e6055f`: 1 Critical, 9 Important. The second, of the build at
   `92c2427`, found no path that sends a keychain token off the allowed hosts
   and no new path for the token into any output: 0 Critical, 3 Important. The
-  third, of the fixes at `5458a4c`, and a fourth, of the last changes at
-  `00f6831`: 0 Critical, 0 Important each. Every Critical
+  later passes, of the fixes at `5458a4c`, `00f6831`, and `6cf8e4c`, found 0
+  Critical and 0 Important each. Every Critical
   and Important is fixed in code or stated above as a limit, except one that
   cannot be closed by review: **the live probe has not run** (§17). No human
   has reviewed this build.

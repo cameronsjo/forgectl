@@ -215,3 +215,27 @@ func TestRecords_BlankATokenShapedCredentialSource(t *testing.T) {
 		}
 	}
 }
+
+// A close record's host is operator configuration that was already used to
+// reach the board. On the HTTP transport it can be an address or a service
+// name with an underscore, neither of which is a plain hostname, and the
+// record must still say which board was written to.
+func TestWriteCloseRecord_KeepsTheHostOfARealClose(t *testing.T) {
+	for _, host := range []string{"tasks.example", "10.0.0.5", "vikunja_api"} {
+		var buf bytes.Buffer
+		err := WriteCloseRecord(&buf, CloseRecord{
+			TaskID: 1, Surface: SurfaceMCP, Closer: "agent", Evidence: "owner/repo#1",
+			Credential: CredentialSourceTokenFile, Host: host, Outcome: CloseOutcomeClosed,
+		})
+		if err != nil {
+			t.Fatalf("%s: WriteCloseRecord: %v", host, err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+			t.Fatalf("%s: the line is not JSON: %v", host, err)
+		}
+		if got["host"] != host {
+			t.Errorf("host = %q, want %q", got["host"], host)
+		}
+	}
+}
