@@ -96,6 +96,20 @@ So under `--json`, a failure after the update was sent puts two things on stderr
 
 If the record cannot be appended to the file, the close still stands and the exit code does not change. stderr gets one more plain line that says so. The stdio MCP server appends its `complete_task` records to the same file, with `surface` `mcp`; over HTTP the server writes them to stderr only.
 
+The file is created with mode `0600`. forgectl refuses to append to it when the path is a symlink or anything else that is not a regular file, or when its mode lets group or other read or write it. The record then goes to stderr only, with the same plain line.
+
+### The host refusal line
+
+`tasks-closes.jsonl` holds one other kind of line. When a `tasks` verb that would read the keychain (`ls`, `show`, `ready`, `done`, or `mcp` over stdio) is refused by the host rule and exits `4`, forgectl appends one line to the file:
+
+```json
+{"time":"2026-01-02T03:04:05Z","event":"host_refused","verb":"ls","host":"<host as given>","credential":"vikunja-readonly"}
+```
+
+`event` is always `host_refused`; a close record has no `event` key, which is how a reader tells the two apart. `verb` is the `tasks` subcommand. `host` is the value given to `--host`, cut to 253 characters, with any control or invisible character written as a JSON escape. `credential` is the name of the keychain entry the verb would have read, or `""` when that name is not a valid service name. No token is in the line: the keychain has not been read when the rule refuses.
+
+This line goes to the file only. stderr carries the refusal itself, as the error text or, under `--json`, as the failure object with code `failed`. If the line cannot be appended, the exit code is still `4` and stderr gets one plain line that says so, before the failure object.
+
 ## Enforcement
 
 `newRoot` installs the contract on every command that declares `--json` (`installJSONErrorContract` in `internal/cli/json_errors.go`), so a new verb inherits it without extra wiring. A verb that writes a verdict and then exits non-zero calls `jsonVerdict` to exit silently.

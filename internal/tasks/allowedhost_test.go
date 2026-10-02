@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -256,10 +257,77 @@ func TestNewClient_ATokenFileTokenHasNoHostRule(t *testing.T) {
 		}
 	}
 
+	// Built with a pin list, as this transport always is: a token-file token
+	// with no list is refused outright (see the test below). Both loopback
+	// addresses are listed so that whichever one "localhost" resolves to
+	// first is in the list and reaches the loopback refusal.
 	var calls []string
-	_, err = NewClient(context.Background(), keychainRunner(&calls), "localhost", token)
+	pins := []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")}
+	_, err = NewClientWithPins(context.Background(), keychainRunner(&calls), "localhost", token, pins)
 	if err == nil || strings.Contains(err.Error(), AllowedHostsConfigKey) || !strings.Contains(err.Error(), "loopback") {
-		t.Fatalf("NewClient = %v, want the pin's loopback refusal and not the host rule's", err)
+		t.Fatalf("NewClientWithPins = %v, want the pin's loopback refusal and not the host rule's", err)
+	}
+}
+
+// TestNewClient_RefusesAnUnboundTokenWithNoPins: a token that did not come
+// from the keychain carries no host list, so the pin list is the only thing
+// that bounds where it goes. The command that reads a token file requires the
+// list; the constructor refuses too, so a caller added later that forgets the
+// list does not get a client that sends the token to any public address.
+func TestNewClient_RefusesAnUnboundTokenWithNoPins(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte(fakeToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	token, err := ReadTokenFile(path)
+	if err != nil {
+		t.Fatalf("ReadTokenFile: %v", err)
+	}
+	ctx := context.Background()
+	var calls []string
+	runner := keychainRunner(&calls)
+
+	// "192.168.1.102" is an address the pin would otherwise accept, so the
+	// refusal here can only be the constructor's own.
+	for name, build := range map[string]func() (*Client, error){
+		"NewClient":                      func() (*Client, error) { return NewClient(ctx, runner, "192.168.1.102", token) },
+		"NewClientWithPins, nil list":    func() (*Client, error) { return NewClientWithPins(ctx, runner, "192.168.1.102", token, nil) },
+		"NewClientWithPins, empty list":  func() (*Client, error) { return NewClientWithPins(ctx, runner, "192.168.1.102", token, []net.IP{}) },
+		"NewClient, a public-looking IP": func() (*Client, error) { return NewClient(ctx, runner, "203.0.113.7", token) },
+	} {
+		client, err := build()
+		if client != nil {
+			t.Fatalf("%s built a client for a token with no host list and no pin list", name)
+		}
+		if !errors.Is(err, ErrHostRefused) {
+			t.Fatalf("%s = %v, want ErrHostRefused", name, err)
+		}
+		if !strings.Contains(err.Error(), "--pin-ip") {
+			t.Errorf("%s: the refusal %q does not name --pin-ip", name, err)
+		}
+		if strings.Contains(err.Error(), fakeToken) {
+			t.Errorf("%s: the refusal carries the token", name)
+		}
+	}
+	if len(calls) != 0 {
+		t.Errorf("the constructor ran %v before refusing; this refusal needs no lookup", calls)
+	}
+
+	// The same token with a list is not refused by this rule: it gets as far
+	// as the pin, which asks for the gateway and admits the listed address.
+	gateway := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return "", nil }}
+	client, err := NewClientWithPins(ctx, gateway, "192.168.1.102", token, []net.IP{net.ParseIP("192.168.1.102")})
+	if err != nil || client == nil {
+		t.Fatalf("NewClientWithPins with the address listed = %v, want a client", err)
+	}
+
+	// A keychain token needs no list: its host list is the bound.
+	bound, err := ReadToken(ctx, keychainRunner(nil), DefaultKeychainService, []string{"localhost"})
+	if err != nil {
+		t.Fatalf("ReadToken: %v", err)
+	}
+	if _, err := NewClient(ctx, keychainRunner(nil), "localhost", bound); err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Errorf("NewClient with a keychain token and no pin list = %v, want it past this rule and refused by the pin for loopback", err)
 	}
 }
 

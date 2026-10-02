@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -104,9 +105,13 @@ func TestNewClient_InstallsThePinnedDialer(t *testing.T) {
 	}
 }
 
-// productionClient builds a Client through NewClient, the constructor every
-// credentialed caller uses, so the assertions below are about the transport
-// the bearer token actually travels on.
+// productionClient builds a Client through NewClientWithPins, the constructor
+// every credentialed caller ends in (NewClient calls it), so the assertions
+// below are about the transport the bearer token actually travels on.
+//
+// The token here is not a keychain token, so it has no host list and the
+// constructor requires a pin list for it. The one address the host resolves
+// to is listed.
 func productionClient(t *testing.T) *Client {
 	t.Helper()
 	runner := &exec.FakeRunner{
@@ -118,9 +123,11 @@ func productionClient(t *testing.T) *Client {
 		},
 	}
 	// An IP literal resolves to itself, so this needs no DNS.
-	c, err := NewClient(context.Background(), runner, "192.168.1.102", newToken("tk_"+strings.Repeat("a", 40)))
+	const address = "192.168.1.102"
+	c, err := NewClientWithPins(context.Background(), runner, address,
+		newToken("tk_"+strings.Repeat("a", 40)), []net.IP{net.ParseIP(address)})
 	if err != nil {
-		t.Fatalf("NewClient = %v, want nil", err)
+		t.Fatalf("NewClientWithPins = %v, want nil", err)
 	}
 	return c
 }

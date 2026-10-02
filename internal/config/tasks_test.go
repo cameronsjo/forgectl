@@ -188,9 +188,39 @@ func TestDescribe_ReportsABadAllowedHost(t *testing.T) {
 	if err := os.WriteFile(path, []byte(badTasksHostsTOML), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	cfg, rep := describeFile(path)
+	if rep.InvalidErr == nil || !strings.Contains(rep.InvalidErr.Error(), "[tasks].allowed_hosts[1]") {
+		t.Errorf("InvalidErr = %v, want an error naming the key", rep.InvalidErr)
+	}
+	// The file parsed. Reporting the refusal as a decode error would send the
+	// operator looking for a syntax error that is not there.
+	if rep.DecodeErr != nil {
+		t.Errorf("DecodeErr = %v for a file that parsed in full, want nil", rep.DecodeErr)
+	}
+	if !rep.IsRefused("tasks.allowed_hosts") {
+		t.Errorf("Refused = %v, want the allowed_hosts key", rep.Refused)
+	}
+	if rep.IsRefused("tasks") || rep.IsRefused("") || rep.IsRefused("net.probe_host") {
+		t.Errorf("Refused = %v matches a key that was not refused", rep.Refused)
+	}
+	// The report shows what the file says, so the operator can see the entry
+	// to fix; that the loader took none of it is what Refused is for.
+	if len(cfg.Tasks.AllowedHosts) != 2 || !rep.IsSet("tasks.allowed_hosts") {
+		t.Errorf("AllowedHosts = %q (set %v), want the file's own two entries", cfg.Tasks.AllowedHosts, rep.IsSet("tasks.allowed_hosts"))
+	}
+}
+
+func TestDescribe_AGoodAllowedHostIsNotRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[tasks]\nallowed_hosts = [\"board.example\"]\nmisspelled = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	_, rep := describeFile(path)
-	if rep.DecodeErr == nil || !strings.Contains(rep.DecodeErr.Error(), "[tasks].allowed_hosts[1]") {
-		t.Errorf("DecodeErr = %v, want an error naming the key", rep.DecodeErr)
+	if rep.InvalidErr != nil || rep.DecodeErr != nil || len(rep.Refused) != 0 || rep.IsRefused("tasks.allowed_hosts") {
+		t.Errorf("report = %+v, want a clean file with nothing refused", rep)
+	}
+	if len(rep.Unrecognized) != 1 || rep.Unrecognized[0] != "tasks.misspelled" {
+		t.Errorf("Unrecognized = %v, want the one misspelled key", rep.Unrecognized)
 	}
 }
 

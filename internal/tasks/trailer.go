@@ -159,9 +159,12 @@ func defaultCloser(surface string) (string, error) {
 // name followed by forged fields.
 //
 // A name with nothing left becomes fallback. So does a name that holds
-// anything shaped like an API token: the allowlist would drop the underscore
-// and keep the hex, and the hex is the credential. The test is on the name as
-// declared, before the allowlist can break the shape it looks for.
+// anything shaped like an API token, and the name is tested for one twice. The
+// allowlist keeps '_', so it does not break a token up; it can put one
+// together. A token declared with a line break, a ':' or an invisible
+// character in the middle of it is not token-shaped as declared, and dropping
+// that one character joins the pieces back into a whole token. So the test
+// runs on the name as declared and again on the name about to be returned.
 func sanitizeCloser(closer, fallback string) string {
 	if evidenceTokenRe.MatchString(closer) {
 		return fallback
@@ -192,7 +195,7 @@ func sanitizeCloser(closer, fallback string) string {
 			name = strings.TrimRight(strings.TrimSuffix(name, "via"), " ")
 		}
 	}
-	if name == "" {
+	if name == "" || evidenceTokenRe.MatchString(name) {
 		return fallback
 	}
 	return name

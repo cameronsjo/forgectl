@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -90,15 +91,20 @@ and the outcome (closed, not_confirmed, write_refused, or unauthorized).
 Never the token. The record does not depend on log_level. A call that sends
 no update writes no record.
 
+One call that sends no update still leaves a line in that file: a --host
+refused with exit 4. The line holds the time, "event":"host_refused", the
+verb, the host as given, and the keychain entry's name. It goes to the file
+only; stderr carries the refusal itself.
+
 EXIT CODES
 
   0  the task is done: closed by this call, or already done
   1  anything else, including a task that was not found, a repeating task,
-     an update the server refused, an update whose outcome is unknown
-     (not_confirmed: read the task before retrying), a missing write
-     credential, and a bad argument
+     an update the server refused for a reason other than the credential,
+     an update whose outcome is unknown (not_confirmed: read the task
+     before retrying), a missing write credential, and a bad argument
   2  the instance could not be reached
-  3  the server rejected the credential
+  3  the server rejected the credential, on the first read or on the update
   4  the host is not one a keychain credential may be sent to`,
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
@@ -131,7 +137,7 @@ func runTasksDone(cmd *cobra.Command, deps module.Deps, in tasksDoneInput) error
 		return jsonFailure(cmd, WithExitCode(err, 1), in.asJSON, jsonCodeUsage)
 	}
 
-	token, err := readTasksKeychainToken(ctx, deps.Runner, tasksWriteKeychainFlag, in.writeService, in.host, deps.Cfg.Tasks.AllowedHosts)
+	token, err := readTasksKeychainToken(cmd, deps.Runner, tasksWriteKeychainFlag, in.writeService, in.host, deps.Cfg.Tasks.AllowedHosts)
 	if err != nil {
 		if errors.Is(err, tasks.ErrTokenNotFound) {
 			// No fallback to the read entry, on purpose: that token was
@@ -338,12 +344,18 @@ func (f recordFanOut) Write(p []byte) (int, error) {
 //
 // One record is one Write of one short line on a descriptor opened O_APPEND,
 // so two processes closing tasks at once do not interleave their lines.
+//
+// A file already at the path is looked at before it is opened; see
+// checkCloseLogFile.
 type closeLogWriter struct{}
 
 func (closeLogWriter) Write(p []byte) (n int, err error) {
 	path, err := config.TasksCloseLogPath()
 	if err != nil {
 		return 0, fmt.Errorf("the close log path could not be resolved: %w", termsafe.Error(err))
+	}
+	if err := checkCloseLogFile(path); err != nil {
+		return 0, err
 	}
 	f, err := config.OpenAppendFile(path)
 	if err != nil {
@@ -357,4 +369,40 @@ func (closeLogWriter) Write(p []byte) (n int, err error) {
 		return n, fmt.Errorf("append to the close log %s: %w", safePath(path), termsafe.Error(err))
 	}
 	return n, nil
+}
+
+// closeLogOpenBits are the permission bits the close log must not carry: any
+// access for group or other. The file is created 0600.
+const closeLogOpenBits os.FileMode = 0o077
+
+// checkCloseLogFile refuses to append to what is at path unless it is absent
+// or a regular file only its owner can read and write.
+//
+// A record holds the evidence text as it was typed and the name of a keychain
+// entry. Appending through a symlink would write those into whatever file the
+// link names, and appending to a file that group or other can read publishes
+// them to every account on the machine. Neither is repaired here: the lines
+// already in a wide-open file were readable, and the operator should find out,
+// which a silent chmod would prevent.
+//
+// The path is tested with Lstat, so a symlink is refused whatever it points
+// at, including nothing.
+//
+// debt: the check and the open are two steps, so a file swapped in between them is appended to unseen; this stops an accident (a log left as a symlink or with a wide mode), not an attacker running as the same user, who can write the file directly. Open with O_NOFOLLOW and check the descriptor instead if this file ever has to hold against one.
+func checkCloseLogFile(path string) error {
+	info, err := os.Lstat(path) //nolint:gosec // G703: the path is config.TasksCloseLogPath, the user config directory and a fixed file name; no caller text is in it
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("the close log %s could not be inspected, so nothing was appended to it: %w", safePath(path), termsafe.Error(err))
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("the close log %s is not a regular file (%s), so nothing was appended to it", safePath(path), info.Mode().Type())
+	}
+	if mode := info.Mode().Perm(); mode&closeLogOpenBits != 0 {
+		return fmt.Errorf("the close log %s is mode %04o, which lets group or other use it, so nothing was appended to it; it must be 0600",
+			safePath(path), mode)
+	}
+	return nil
 }

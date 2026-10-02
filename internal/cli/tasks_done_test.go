@@ -14,11 +14,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -226,6 +228,37 @@ func keychainReads(runner *exec.FakeRunner) []string {
 	return services
 }
 
+// requireNoSubprocess fails when the runner was asked to run anything at all.
+// A refusal that comes before the keychain read must come before every
+// subprocess: a test that only looks for calls named tasks.SecurityBinary
+// passes when the token is read through any other name.
+func requireNoSubprocess(t *testing.T, runner *exec.FakeRunner, when string) {
+	t.Helper()
+	for _, call := range runner.Calls {
+		t.Errorf("%s: a subprocess was run: %s %v", when, call.Name, call.Args)
+	}
+}
+
+// refusalLines decodes every line of the close log and returns the host
+// refusals among them. Any line that is not one JSON object fails the test.
+func (r *doneRig) refusalLines() []map[string]any {
+	r.t.Helper()
+	var refusals []map[string]any
+	for _, line := range strings.Split(strings.TrimSuffix(r.closeLog(), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			r.t.Fatalf("a close log line is not one JSON object: %v\n%q", err, line)
+		}
+		if rec["event"] == tasks.HostRefusalEvent {
+			refusals = append(refusals, rec)
+		}
+	}
+	return refusals
+}
+
 func (r *doneRig) run(args ...string) (stdout, stderr string, err error) {
 	r.t.Helper()
 	return runTasksCmd(r.t, r.deps, args...)
@@ -330,6 +363,7 @@ func TestTasksDone_ValidatesEverythingBeforeAnyKeychainRead(t *testing.T) {
 				if reads := keychainReads(rig.runner); len(reads) != 0 {
 					t.Errorf("the keychain was read (%v) before the arguments were refused", reads)
 				}
+				requireNoSubprocess(t, rig.runner, "a call refused on its arguments")
 				if gets, posts := rig.board.requests(); gets+posts != 0 {
 					t.Errorf("%d GET and %d POST were made for a call refused on its arguments", gets, posts)
 				}
@@ -347,7 +381,18 @@ func TestTasksDone_ValidatesEverythingBeforeAnyKeychainRead(t *testing.T) {
 						t.Errorf("a refusal echoes the token-shaped evidence: %q", surface)
 					}
 				}
-				if log := rig.closeLog(); log != "" {
+				// A refused host is the one refusal that leaves a line behind,
+				// and that line is not a close record: nothing was closed.
+				log := rig.closeLog()
+				if tc.wantExit == exitTasksHostRefused {
+					if refusals := rig.refusalLines(); len(refusals) != 1 || strings.Count(log, "\n") != 1 {
+						t.Errorf("a refused host left %d refusal line(s) in a close log of %d line(s), want one of one: %s",
+							len(refusals), strings.Count(log, "\n"), log)
+					}
+				} else if log != "" {
+					t.Errorf("a call refused on its arguments wrote to the close log: %s", log)
+				}
+				if strings.Contains(log, `"outcome"`) {
 					t.Errorf("a refused call wrote a close record: %s", log)
 				}
 			})
@@ -1169,6 +1214,72 @@ func TestTasks_UnknownVerbExitsOneAndNamesIt(t *testing.T) {
 	}
 }
 
+// A mistyped verb is answered with the verb it is closest to. Without a
+// minimum distance set on the `tasks` command, cobra suggests only verbs the
+// typo is a prefix of, so `don` got a suggestion and `dne` did not.
+func TestTasks_AMistypedVerbSuggestsTheNearestOne(t *testing.T) {
+	isolateTasksConfigDir(t)
+	runner := &exec.FakeRunner{}
+	deps := module.Deps{Runner: runner, Theme: theme.Default()}
+
+	for typo, want := range map[string]string{"dne": "done", "doen": "done", "raedy": "ready", "sohw": "show"} {
+		_, _, err := runTasksCmd(t, deps, typo)
+		if got := ExitCode(err); got != 1 {
+			t.Errorf("`tasks %s`: ExitCode = %d, want 1", typo, got)
+		}
+		if err == nil || !strings.Contains(err.Error(), "Did you mean this?") {
+			t.Errorf("`tasks %s` = %v, want a suggestion", typo, err)
+			continue
+		}
+		_, suggested, _ := strings.Cut(err.Error(), "Did you mean this?")
+		if !slices.Contains(strings.Fields(suggested), want) {
+			t.Errorf("`tasks %s` suggested %q, want %s among them", typo, strings.TrimSpace(suggested), want)
+		}
+	}
+
+	// A word near no verb gets no suggestion, and nothing is run either way.
+	_, _, err := runTasksCmd(t, deps, "nosuchverb")
+	if err == nil || strings.Contains(err.Error(), "Did you mean") {
+		t.Errorf("`tasks nosuchverb` = %v, want no suggestion", err)
+	}
+	requireNoSubprocess(t, runner, "an unknown verb")
+}
+
+// The exit-code table in the help has to agree with docs/json-contract.md: a
+// credential the server rejects on the update exits 3, like one rejected on
+// the first read, and only the other refusals of an update exit 1.
+func TestTasksDoneHelp_ExitCodesAndTheCloseLog(t *testing.T) {
+	host := tasks.DefaultHost
+	long := strings.Join(strings.Fields(newTasksDoneCmd(module.Deps{}, &host).Long), " ")
+	for _, want := range []string{
+		"an update the server refused for a reason other than the credential",
+		"3 the server rejected the credential, on the first read or on the update",
+		`"event":"host_refused"`,
+		"It goes to the file only",
+	} {
+		if !strings.Contains(long, want) {
+			t.Errorf("the done help does not say %q", want)
+		}
+	}
+	if strings.Contains(long, "an update the server refused, an update") {
+		t.Error("the done help still puts every refused update under exit 1")
+	}
+
+	contract, err := os.ReadFile(filepath.Join("..", "..", "docs", "json-contract.md"))
+	if err != nil {
+		t.Fatalf("read the JSON contract: %v", err)
+	}
+	for _, want := range []string{
+		"| `unauthorized` | 3 | The server rejected the credential, on the first read or on the update.",
+		"| `write_refused` | 1 |",
+		`"event":"host_refused"`,
+	} {
+		if !strings.Contains(string(contract), want) {
+			t.Errorf("docs/json-contract.md no longer says %q, so the help's exit codes have nothing to agree with", want)
+		}
+	}
+}
+
 // tasksVerbDrive says how the verb walk runs one `tasks` subcommand. Every
 // subcommand must have an entry: a verb the walk does not know is a verb whose
 // keychain use nobody has looked at.
@@ -1212,7 +1323,7 @@ func TestTasksVerbs_AnUnlistedHostIsRefusedBeforeAnyKeychainRead(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			rig := newDoneRig(t, doneTask(nil))
 			args := append(slices.Clone(drive.args), "--host", "other.example")
-			stdout, _, err := rig.run(args...)
+			stdout, stderr, err := rig.run(args...)
 			if err == nil {
 				t.Fatalf("`tasks %s --host other.example` succeeded", strings.Join(drive.args, " "))
 			}
@@ -1228,16 +1339,42 @@ func TestTasksVerbs_AnUnlistedHostIsRefusedBeforeAnyKeychainRead(t *testing.T) {
 			if reads := keychainReads(rig.runner); len(reads) != 0 {
 				t.Errorf("the keychain was read %d time(s) (%v) for a host the credential may not go to", len(reads), reads)
 			}
-			for _, call := range rig.runner.Calls {
-				if call.Name == tasks.SecurityBinary {
-					t.Errorf("%s was run: %v", tasks.SecurityBinary, call.Args)
-				}
-			}
+			requireNoSubprocess(t, rig.runner, "a refused host")
 			if gets, posts := rig.board.requests(); gets+posts != 0 {
 				t.Errorf("%d request(s) were made", gets+posts)
 			}
 			if strings.Contains(stdout, "stale cached task") {
 				t.Error("a refused host was answered from cache")
+			}
+
+			// The refusal is recorded: one line in the close log, and nothing
+			// else there. stderr carries the refusal itself and not the line.
+			log := rig.closeLog()
+			refusals := rig.refusalLines()
+			if len(refusals) != 1 || strings.Count(log, "\n") != 1 {
+				t.Fatalf("the close log holds %d refusal line(s) in %d line(s), want exactly one:\n%s",
+					len(refusals), strings.Count(log, "\n"), log)
+			}
+			wantCredential := tasks.DefaultKeychainService
+			if name == "done" {
+				wantCredential = tasks.DefaultWriteKeychainService
+			}
+			stamp, _ := refusals[0]["time"].(string)
+			if _, err := time.Parse(time.RFC3339, stamp); err != nil || !strings.HasSuffix(stamp, "Z") {
+				t.Errorf("time = %q, want a UTC RFC3339 time", stamp)
+			}
+			delete(refusals[0], "time")
+			want := map[string]any{
+				"event":      "host_refused",
+				"verb":       name,
+				"host":       "other.example",
+				"credential": wantCredential,
+			}
+			if !reflect.DeepEqual(refusals[0], want) {
+				t.Errorf("refusal line = %v, want %v plus its time", refusals[0], want)
+			}
+			if strings.Contains(stderr, tasks.HostRefusalEvent) || strings.Contains(stdout, tasks.HostRefusalEvent) {
+				t.Errorf("the refusal line was printed; it belongs in the file only:\nstdout %q\nstderr %q", stdout, stderr)
 			}
 		})
 	}
@@ -1310,6 +1447,7 @@ func TestTasksVerbs_ABadKeychainServiceNameIsRefusedBeforeTheRead(t *testing.T) 
 			if reads := keychainReads(rig.runner); len(reads) != 0 {
 				t.Errorf("the keychain was read with a refused service name: %v", reads)
 			}
+			requireNoSubprocess(t, rig.runner, "a refused service name")
 			if !strings.Contains(err.Error(), "keychain-service") {
 				t.Errorf("the refusal %q does not name the flag", err)
 			}
@@ -1340,6 +1478,14 @@ func TestTasksMCP_HTTPIsNotSubjectToTheHostRule(t *testing.T) {
 	}
 	if reads := keychainReads(rig.runner); len(reads) != 0 {
 		t.Errorf("the HTTP transport read the keychain: %v", reads)
+	}
+	// The pin asks for the default gateway, and that is the only subprocess
+	// this path may run. Matching on the keychain tool's name alone would miss
+	// a read made through any other one.
+	for _, call := range rig.runner.Calls {
+		if call.Name != "/sbin/route" {
+			t.Errorf("the HTTP transport ran %s %v; the gateway lookup is the only subprocess it may run", call.Name, call.Args)
+		}
 	}
 }
 
@@ -1394,6 +1540,90 @@ func TestPrintTaskDetail_SanitizesARelationKind(t *testing.T) {
 	if !strings.Contains(out.String(), "#2") {
 		t.Errorf("the relation row is missing: %q", out.String())
 	}
+}
+
+// The description is cut from the end, and the end is where the closed-by
+// line is. A long description must still show who closed the task and why.
+func TestPrintTaskDetail_ShowsTheLastLineOfALongDescription(t *testing.T) {
+	trailer := "closed-by: hermes via forgectl tasks done 2026-01-02T03:04:05Z — merged owner/repo#12"
+	body := strings.Repeat("d", 2000)
+
+	render := func(t *testing.T, description string) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := printTaskDetail(&out, tasks.Task{ID: 1, Title: "t", Description: description}); err != nil {
+			t.Fatalf("printTaskDetail: %v", err)
+		}
+		return out.String()
+	}
+	const label = "description last line (the description above is truncated): "
+
+	t.Run("a long description", func(t *testing.T) {
+		for name, tail := range map[string]string{"no trailing break": "", "a trailing line feed": "\n", "trailing CRLF": "\r\n"} {
+			out := render(t, body+"\n\n"+trailer+tail)
+			if strings.Count(out, trailer) != 1 {
+				t.Fatalf("%s: the output shows the closing line %d time(s), want once:\n%s", name, strings.Count(out, trailer), out)
+			}
+			if !strings.Contains(out, "\n"+label+trailer+"\n") {
+				t.Errorf("%s: the closing line is not on its own labelled line:\n%s", name, out)
+			}
+			if !strings.Contains(out, "truncated]\n"+label) {
+				t.Errorf("%s: the labelled line does not follow the cut description:\n%s", name, out)
+			}
+		}
+	})
+
+	t.Run("the last line is board text", func(t *testing.T) {
+		out := render(t, body+"\nlast \x1b[2Jline")
+		if strings.ContainsRune(out, 0x1b) {
+			t.Errorf("the last line reached the terminal with its escape sequence intact: %q", out)
+		}
+		if !strings.Contains(out, label+"last ") {
+			t.Errorf("the last line is missing: %q", out)
+		}
+		long := render(t, body+"\n"+strings.Repeat("z", 5000))
+		if n := strings.Count(long, "z"); n > 300 {
+			t.Errorf("a long last line was printed in full (%d characters)", n)
+		}
+	})
+
+	t.Run("a short description is unchanged", func(t *testing.T) {
+		out := render(t, "what the task is about\n\n"+trailer)
+		if strings.Contains(out, "last line") {
+			t.Errorf("a description shown whole got a last-line row:\n%s", out)
+		}
+		if want := "#1  t  [open]\n\nwhat the task is about\\n\\n" + trailer + "\n"; out != want {
+			t.Errorf("output = %q, want %q", out, want)
+		}
+	})
+
+	t.Run("a description at the limit is shown whole", func(t *testing.T) {
+		out := render(t, strings.Repeat("d", textMaxRunes))
+		if strings.Contains(out, "last line") || strings.Contains(out, "truncated") {
+			t.Errorf("a description that fits was treated as cut:\n%s", out)
+		}
+	})
+
+	// The cap counts what is printed, and a control character prints as
+	// several runes. Whether the description was cut is not a question about
+	// its own length.
+	t.Run("the cut is measured on what is printed", func(t *testing.T) {
+		for name, description := range map[string]string{
+			"one rune over the limit":      strings.Repeat("d", textMaxRunes) + "\nend",
+			"far over the limit":           strings.Repeat("d", 20_000) + "\nend",
+			"short, and mostly escapes":    strings.Repeat("\x1b", textMaxRunes/2) + "\nend",
+			"over the limit, CRLF between": strings.Repeat("d", textMaxRunes) + "\r\nend\r\n",
+		} {
+			out := render(t, description)
+			if !strings.HasSuffix(out, label+"end\n") {
+				t.Errorf("%s: the last line is not shown on its labelled line: %q", name, out[max(0, len(out)-120):])
+			}
+		}
+		if descriptionProbeMaxRunes <= textMaxRunes {
+			t.Errorf("descriptionProbeMaxRunes = %d must be larger than textMaxRunes = %d, or no description is ever seen as cut",
+				descriptionProbeMaxRunes, textMaxRunes)
+		}
+	})
 }
 
 func TestTasksHelp_DescribesDoneAndTheSecondCredential(t *testing.T) {

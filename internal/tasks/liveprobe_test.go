@@ -59,11 +59,12 @@ const (
 	probeUpdateWrites = 4
 )
 
-// probeDefaultService is deliberately NOT the name the `done` verb reads. The
-// probe runs before the host rule (ADR 0009 §3, D9) is installed, and until
-// then any `tasks` verb will send a named keychain entry to any public host.
-// The probe's token is a short-expiry scratch token under this throwaway
-// name, removed and revoked when the probe is finished.
+// probeDefaultService is deliberately NOT the entry the `done` verb reads. The
+// probe writes to a live board, so it gets a credential of its own: a
+// short-expiry scratch token, stored under this throwaway name and never under
+// the write entry. A probe run can then neither use nor expose the token that
+// closes real tasks, and when the probe is finished its entry is deleted and
+// its token revoked without touching anything else.
 const probeDefaultService = "forgectl-liveprobe-scratch"
 
 // probeRepeatSeconds is scratch task B's repeat interval: one day.
@@ -101,6 +102,12 @@ func TestLiveProbe(t *testing.T) {
 	}
 	outDir := probeOutDir(t)
 
+	// The name is an argument to the keychain tool and is printed in the
+	// end-of-run cleanup line, so it is held to the same grammar the verbs use.
+	if err := CheckKeychainService(*probeService); err != nil {
+		t.Fatalf("-liveprobe.keychain-service: %v", err)
+	}
+
 	ctx := context.Background()
 	runner := exec.OSRunner{}
 	token, err := ReadToken(ctx, runner, *probeService, nil)
@@ -116,6 +123,9 @@ func TestLiveProbe(t *testing.T) {
 	p := &probe{t: t, client: client, outDir: outDir}
 	t.Cleanup(func() {
 		t.Logf("PROBE IDS CREATED THIS RUN: %v (delete them in the web UI when the probe is finished)", p.created)
+		t.Logf("WHEN THE PROBE IS FINISHED: delete the keychain entry %q (security delete-generic-password -s %s) "+
+			"and revoke its token in the web UI. The token can write to the board until it is revoked or expires.",
+			*probeService, *probeService)
 	})
 
 	switch *probePhase {
@@ -606,10 +616,14 @@ func syntheticString(key, val string) string {
 	case "title":
 		return "Synthetic task title"
 	case "description":
+		// The two fixtures stand in for a task before and after a close made
+		// by the close tests' own request, so the closed one must end with
+		// exactly the trailer that request writes. The probe's own trailer
+		// names another closer and surface and would not match it.
 		if strings.Contains(val, "closed-by: ") {
-			return "Synthetic description.\n\nclosed-by: synthetic via forgectl tasks liveprobe 2026-01-02T03:04:05Z — synthetic evidence"
+			return syntheticClosedDescription
 		}
-		return "Synthetic description."
+		return syntheticOpenDescription
 	case "identifier":
 		return "SYN-1"
 	case "hex_color":

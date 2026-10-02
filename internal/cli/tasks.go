@@ -115,6 +115,10 @@ age when it does. ` + "`done`" + ` never reads or writes the cache.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
+	// The root's own setting; it is per command and not inherited. At cobra's
+	// default of zero a mistyped verb is matched by prefix only, so `don`
+	// names `done` and `dne` names nothing.
+	cmd.SuggestionsMinimumDistance = 2
 	cmd.PersistentFlags().StringVar(&host, "host", tasks.DefaultHost,
 		"Vikunja API host; a keychain credential goes only to the default or a host under [tasks] allowed_hosts")
 	cmd.PersistentFlags().StringVar(&keychainService, "keychain-service", tasks.DefaultKeychainService,
@@ -163,7 +167,7 @@ func newTasksLsCmd(deps module.Deps, host, keychainService *string) *cobra.Comma
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			snap, fromCache, err := loadTasksSnapshot(cmd.Context(), deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
+			snap, fromCache, err := loadTasksSnapshot(cmd, deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
 			if err != nil {
 				return tasksExitError(err)
 			}
@@ -211,7 +215,7 @@ func newTasksShowCmd(deps module.Deps, host, keychainService *string) *cobra.Com
 			if err != nil {
 				return WithExitCode(fmt.Errorf("tasks show: %q is not a task id", args[0]), 1)
 			}
-			snap, fromCache, err := loadTasksSnapshot(cmd.Context(), deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
+			snap, fromCache, err := loadTasksSnapshot(cmd, deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
 			if err != nil {
 				return tasksExitError(err)
 			}
@@ -251,8 +255,18 @@ func printTaskDetail(out io.Writer, t tasks.Task) error {
 		return err
 	}
 	if t.Description != "" {
-		if _, err := fmt.Fprintf(out, "\n%s\n", safeText(t.Description)); err != nil {
+		shown := safeText(t.Description)
+		if _, err := fmt.Fprintf(out, "\n%s\n", shown); err != nil {
 			return err
+		}
+		// safeText cuts from the end, and the end is where a closed-by line
+		// sits: a reader of a long description would see everything except
+		// who closed the task and why.
+		if descriptionWasCut(t.Description, shown) {
+			if _, err := fmt.Fprintf(out, "description last line (the description above is truncated): %s\n",
+				safeTitle(lastDescriptionLine(t.Description))); err != nil {
+				return err
+			}
 		}
 	}
 	if len(t.RelatedTasks) == 0 {
@@ -282,6 +296,29 @@ func printTaskDetail(out io.Writer, t tasks.Task) error {
 	return nil
 }
 
+// descriptionProbeMaxRunes is the cap descriptionWasCut renders under. It only
+// has to be larger than safeText's own.
+const descriptionProbeMaxRunes = 4096
+
+// descriptionWasCut reports whether shown, the safeText rendering of
+// description, left any of it out.
+//
+// The description's length does not answer that: the cap counts runes of
+// escaped output, so a short description full of control characters is cut
+// and a long plain one at the cap is not. Rendering it again under a larger
+// cap does. A description that fits under safeText's cap renders the same
+// under any larger one; one that was cut renders longer, or cut further on.
+func descriptionWasCut(description, shown string) bool {
+	return shown != termsafe.SafeLineMax(description, descriptionProbeMaxRunes)
+}
+
+// lastDescriptionLine is the description's last line, not counting line breaks
+// after it: the line a closed-by trailer occupies.
+func lastDescriptionLine(description string) string {
+	description = strings.TrimRight(description, "\r\n")
+	return description[strings.LastIndexByte(description, '\n')+1:]
+}
+
 func newTasksReadyCmd(deps module.Deps, host, keychainService *string) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
@@ -295,7 +332,7 @@ dependency store.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			snap, fromCache, err := loadTasksSnapshot(cmd.Context(), deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
+			snap, fromCache, err := loadTasksSnapshot(cmd, deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
 			if err != nil {
 				return tasksExitError(err)
 			}
@@ -358,16 +395,46 @@ func checkTasksKeychainUse(flag, service, host string, allowedHosts []string) er
 // credential goes through it (ls, show, ready, done, and mcp over stdio), so
 // the check cannot be left out of one of them; a verb walk in the tests pins
 // that for verbs added later.
+//
+// cmd is the verb being run. It supplies the context, and the name and stderr
+// a refused host is recorded under.
 func readTasksKeychainToken(
-	ctx context.Context,
+	cmd *cobra.Command,
 	runner exec.Runner,
 	flag, service, host string,
 	allowedHosts []string,
 ) (tasks.Token, error) {
 	if err := checkTasksKeychainUse(flag, service, host, allowedHosts); err != nil {
+		if tasks.IsHostRefused(err) {
+			recordTasksHostRefusal(cmd, service, host)
+		}
 		return tasks.Token{}, err
 	}
-	return tasks.ReadToken(ctx, runner, service, allowedHosts)
+	return tasks.ReadToken(cmd.Context(), runner, service, allowedHosts)
+}
+
+// recordTasksHostRefusal appends one line to the close log for a verb the host
+// rule refused.
+//
+// The refusal itself is the returned error, which reaches stderr with exit 4.
+// That is gone when the terminal or the agent session that ran the command is,
+// and a host that came from text on the board is exactly the case an operator
+// needs to hear about afterwards. So the line goes to the file, and only to
+// the file: stderr already says what happened.
+//
+// It cannot change the outcome. A line that could not be appended is reported
+// in one plain line on stderr, and the refusal is returned as it was.
+func recordTasksHostRefusal(cmd *cobra.Command, service, host string) {
+	err := tasks.WriteHostRefusalRecord(closeLogWriter{}, tasks.HostRefusalRecord{
+		Time:       time.Now(),
+		Verb:       cmd.Name(),
+		Host:       host,
+		Credential: service,
+	})
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "forgectl: tasks: the refusal of this host could not be recorded in the close log: %s\n", //nolint:errcheck // stderr is the only place left to say so
+			safeText(err.Error()))
+	}
 }
 
 // loadTasksSnapshot reads the token, builds a client (which host-pins
@@ -376,12 +443,13 @@ func readTasksKeychainToken(
 // on an auth rejection, which must fail loudly rather than silently serve
 // data that may no longer be current.
 func loadTasksSnapshot(
-	ctx context.Context,
+	cmd *cobra.Command,
 	runner exec.Runner,
 	host, keychainService string,
 	allowedHosts []string,
 ) (tasks.Snapshot, bool, error) {
-	token, err := readTasksKeychainToken(ctx, runner, tasksKeychainFlag, keychainService, host, allowedHosts)
+	ctx := cmd.Context()
+	token, err := readTasksKeychainToken(cmd, runner, tasksKeychainFlag, keychainService, host, allowedHosts)
 	if err != nil {
 		return tasks.Snapshot{}, false, err
 	}

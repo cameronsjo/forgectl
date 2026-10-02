@@ -468,6 +468,86 @@ func TestConfig_DecodeErrorSurfaces(t *testing.T) {
 	}
 }
 
+// TestConfig_AnInvalidValueIsNotADecodeError: a file that parses and holds an
+// allowed_hosts entry the loader refuses is not a file that failed to decode.
+// The report must say which it is, and must not show the refused list as a
+// value in effect: the loader holds an empty list.
+func TestConfig_AnInvalidValueIsNotADecodeError(t *testing.T) {
+	const body = "[net]\nprobe_host = \"example.com\"\n\n[tasks]\nallowed_hosts = [\"ok.example\", \"bad.example:443\"]\n"
+
+	out := runConfig(t, body)
+	for _, wrong := range []string{"decode error", "values below reflect only what parsed before the error"} {
+		if strings.Contains(out, wrong) {
+			t.Errorf("the output says %q about a file that parsed in full:\n%s", wrong, out)
+		}
+	}
+	if !strings.Contains(out, "! validation error: [tasks].allowed_hosts[1]") {
+		t.Errorf("the output does not report the refused value as a validation error:\n%s", out)
+	}
+	var row string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "tasks.allowed_hosts") && strings.HasPrefix(line, "  tasks.") {
+			row = line
+		}
+	}
+	if row == "" {
+		t.Fatalf("no tasks.allowed_hosts row:\n%s", out)
+	}
+	if strings.Contains(row, "(set)") || strings.Contains(row, "(default)") {
+		t.Errorf("the refused list is shown as a value in effect: %q", row)
+	}
+	if !strings.HasSuffix(row, "(refused — not loaded)") {
+		t.Errorf("the row does not say the list was refused: %q", row)
+	}
+	if !strings.Contains(row, "bad.example:443") {
+		t.Errorf("the row does not show the entry to fix: %q", row)
+	}
+	// A key the validation did not touch keeps its ordinary marker.
+	if !regexp.MustCompile(`(?m)^  net\.probe_host\s+example\.com\s+\(set\)$`).MatchString(out) {
+		t.Errorf("an unrelated key lost its (set) marker:\n%s", out)
+	}
+
+	doc, raw := runConfigJSONRaw(t, body)
+	if doc.DecodeError != "" {
+		t.Errorf("decode_error = %q for a file that parsed, want it absent", doc.DecodeError)
+	}
+	var extra struct {
+		ValidationError string `json:"validation_error"`
+		Entries         []struct {
+			Key     string `json:"key"`
+			Set     bool   `json:"set"`
+			Refused bool   `json:"refused"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal([]byte(raw), &extra); err != nil {
+		t.Fatalf("decode --json output: %v", err)
+	}
+	if !strings.Contains(extra.ValidationError, "[tasks].allowed_hosts[1]") {
+		t.Errorf("validation_error = %q, want the refusal naming the key", extra.ValidationError)
+	}
+	refused := 0
+	for _, entry := range extra.Entries {
+		if entry.Refused {
+			refused++
+			if entry.Key != "tasks.allowed_hosts" {
+				t.Errorf("%s is marked refused", entry.Key)
+			}
+		}
+	}
+	if refused != 1 {
+		t.Errorf("%d entries are marked refused, want the one allowed_hosts key", refused)
+	}
+
+	// A clean file carries neither field.
+	_, clean := runConfigJSONRaw(t, "[tasks]\nallowed_hosts = [\"ok.example\"]\n")
+	if strings.Contains(clean, "validation_error") || strings.Contains(clean, `"refused"`) {
+		t.Errorf("a valid file's report carries a validation field:\n%s", clean)
+	}
+	if text := runConfig(t, "[tasks]\nallowed_hosts = [\"ok.example\"]\n"); strings.Contains(text, "validation error") || strings.Contains(text, "(refused") {
+		t.Errorf("a valid file is reported as refused:\n%s", text)
+	}
+}
+
 // TestConfig_MissingFileIsNotAnError pins the tolerant posture: no config file
 // is the normal defaults-only state, not a failure.
 func TestConfig_MissingFileIsNotAnError(t *testing.T) {

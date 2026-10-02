@@ -429,8 +429,17 @@ func TestCompleteTaskTool_TheEleventhCloseInASessionIsRefused(t *testing.T) {
 	if !isErr || !strings.HasPrefix(text, "complete_task: close_cap: ") {
 		t.Fatalf("close 11 = %q (error %v), want the close_cap tool error", text, isErr)
 	}
-	if !strings.Contains(text, "10") || !strings.Contains(text, "new session") || !strings.Contains(text, "operator") {
-		t.Errorf("the refusal does not state the limit and the two ways on: %q", text)
+	if !strings.Contains(text, "new session") || !strings.Contains(text, "operator") {
+		t.Errorf("the refusal does not state the two ways on: %q", text)
+	}
+	// A slot is held from before the pre-read, so a call can be refused while
+	// earlier ones are still running and may yet send nothing. The text says
+	// what the count is of, and does not claim ten updates were sent.
+	if !strings.Contains(text, "this session has 10 task updates sent or in flight, which is its limit") {
+		t.Errorf("the refusal does not say the count is of updates sent or in flight: %q", text)
+	}
+	if strings.Contains(text, "has sent its limit") {
+		t.Errorf("the refusal claims every counted update was sent: %q", text)
 	}
 	requests, posts := rig.board.counts()
 	if requests != requestsBefore || posts != postsBefore {

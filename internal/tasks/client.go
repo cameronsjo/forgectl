@@ -70,6 +70,10 @@ func NewClient(ctx context.Context, runner exec.Runner, host string, token Token
 // list is an intersection with the base policy, not a fallback — see
 // classifyIPWithPins. A nil or empty list is exactly NewClient.
 //
+// A token from ReadTokenFile is refused with an empty list (ErrHostRefused):
+// such a token has no host list of its own, and the pin list is what bounds
+// it. A keychain token may be built with no list; its host list is the bound.
+//
 // It exists as a second constructor rather than a changed NewClient signature
 // because `forgectl tasks ls|show|ready` and the board hook call NewClient and
 // have no list to pass; a widened signature would make every one of them state
@@ -83,6 +87,15 @@ func NewClientWithPins(ctx context.Context, runner exec.Runner, host string, tok
 	// keychain; this is the copy that holds when a caller forgot to.
 	if err := token.checkHost(host); err != nil {
 		return nil, err
+	}
+	// A token that did not come from the keychain has no host list, so
+	// checkHost above let it through to any host. Its one bound is the pin
+	// list, and with no list the pin admits every public address. The command
+	// that reads a token file requires the list; this is the copy that holds
+	// for a caller that does not.
+	if !token.hostBound && len(pins) == 0 {
+		return nil, fmt.Errorf("%w: the token was not read from the keychain, so it carries no host list, and the --pin-ip list is empty: "+
+			"nothing would bound where it is sent. Give at least one --pin-ip address", ErrHostRefused)
 	}
 	vetted, gateway, err := checkHostPinning(ctx, runner, host, pins)
 	if err != nil {

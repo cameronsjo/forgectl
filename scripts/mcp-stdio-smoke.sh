@@ -95,7 +95,8 @@ fail() {
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
-# Two of the seven tools write, and this script calls both. Step 4 files a task
+# Three of the seven tools write (create_task, add_comment, complete_task), and
+# this script calls two of them; it never calls add_comment. Step 4 files a task
 # and asserts a 401, so a WRITE credential would leave a real row on the shared
 # board that the writer profile cannot delete. Step 5 calls complete_task on an
 # id chosen not to exist, so it changes nothing under any credential — unless
@@ -111,7 +112,7 @@ trap 'rm -rf "$WORKDIR"' EXIT
 case "$KEYCHAIN_SERVICE" in
 *readonly* | *read-only* | *ro) ;;
 *)
-	echo "${RED}REFUSING${RESET} keychain service '$KEYCHAIN_SERVICE': this smoke test calls both write tools — it files a task and asserts it is REFUSED, and it asks to close a task id that should not exist." >&2
+	echo "${RED}REFUSING${RESET} keychain service '$KEYCHAIN_SERVICE': this smoke test calls two of the three write tools — it files a task and asserts it is REFUSED, and it asks to close a task id that should not exist." >&2
 	echo "Against a write credential the create SUCCEEDS — the assertion fails and a real task is left on the board." >&2
 	echo "Re-run with a read-only entry, or use the container transport for write testing." >&2
 	echo "(This is a name check, not a permission check — it catches the obvious mistake, not a mislabelled entry.)" >&2

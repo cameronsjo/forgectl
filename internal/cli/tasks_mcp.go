@@ -187,7 +187,7 @@ func runTasksMCP(
 	if httpAddr == "" {
 		// The stdio transport reads the keychain, so the allowed-host rule
 		// applies, and is checked before the read.
-		token, err = readTasksKeychainToken(ctx, deps.Runner, tasksKeychainFlag, keychainService, host, deps.Cfg.Tasks.AllowedHosts)
+		token, err = readTasksKeychainToken(cmd, deps.Runner, tasksKeychainFlag, keychainService, host, deps.Cfg.Tasks.AllowedHosts)
 	} else {
 		// The HTTP transport is NOT subject to the allowed-host rule. Its
 		// token comes from a mounted file, in a container that has no user

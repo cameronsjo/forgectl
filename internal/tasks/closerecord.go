@@ -148,3 +148,93 @@ func WriteCloseRecord(w io.Writer, rec CloseRecord) error {
 	}
 	return nil
 }
+
+// HostRefusalEvent is the `event` value of a host-refusal line. A close record
+// has no `event` key, so a reader of the close log tells the two kinds of line
+// apart by whether the key is there.
+const HostRefusalEvent = "host_refused"
+
+// maxRecordedHostRunes caps the host a refusal line carries. It is the
+// longest name DNS allows, so a real hostname is never cut, and a refused
+// value of any length adds at most one bounded line to the file.
+const maxRecordedHostRunes = 253
+
+// HostRefusalRecord is one refusal of the allowed-host rule: a `tasks` verb
+// was asked to read a keychain credential for a host that credential may not
+// be sent to, and stopped before the read.
+//
+// It is kept because the refusal is otherwise only an exit code and a line on
+// stderr. When the host came from text an agent read on the board, both are
+// gone with the agent's session, and the operator never learns that something
+// tried to send a keychain token elsewhere.
+//
+// It holds no token. None has been read when the rule refuses.
+type HostRefusalRecord struct {
+	// Time is when the verb was refused. The zero value means now.
+	Time time.Time
+	// Verb is the `tasks` subcommand that was refused: ls, show, ready, done,
+	// or mcp. It is the command's own name, never caller text.
+	Verb string
+	// Host is the host that was asked for, as given.
+	Host string
+	// Credential is the name of the keychain entry the verb would have read.
+	Credential string
+}
+
+// hostRefusalLine is the record as written, in reading order: when, what
+// happened, to which verb, for which host, with which entry.
+type hostRefusalLine struct {
+	Time       string `json:"time"`
+	Event      string `json:"event"`
+	Verb       string `json:"verb"`
+	Host       string `json:"host"`
+	Credential string `json:"credential"`
+}
+
+// WriteHostRefusalRecord writes rec to w as one line of JSON.
+//
+// The host is caller text and is written as given, cut to
+// maxRecordedHostRunes: what was asked for is the point of the record. It goes
+// through termsafe.JSONEncoder like every other field, so a line break, a
+// control, or an invisible character in it is written as an escape and cannot
+// start a second line or add a field.
+//
+// Credential is written only when it is a keychain service name
+// (ValidKeychainService) and is the empty string otherwise. A value that fails
+// that check is arbitrary text typed after a flag, and this file is not the
+// place for it.
+//
+// The whole line is built before the first byte is written and handed to w in
+// one Write.
+func WriteHostRefusalRecord(w io.Writer, rec HostRefusalRecord) error {
+	if w == nil {
+		return errors.New("tasks: host refusal record: no record writer is configured")
+	}
+	when := rec.Time
+	if when.IsZero() {
+		when = time.Now()
+	}
+	host := rec.Host
+	if runes := []rune(host); len(runes) > maxRecordedHostRunes {
+		host = string(runes[:maxRecordedHostRunes])
+	}
+	credential := ""
+	if ValidKeychainService(rec.Credential) {
+		credential = rec.Credential
+	}
+
+	var line bytes.Buffer
+	if err := termsafe.JSONEncoder(&line).Encode(hostRefusalLine{
+		Time:       when.UTC().Format(time.RFC3339),
+		Event:      HostRefusalEvent,
+		Verb:       rec.Verb,
+		Host:       host,
+		Credential: credential,
+	}); err != nil {
+		return fmt.Errorf("tasks: host refusal record: encode: %w", err)
+	}
+	if _, err := w.Write(line.Bytes()); err != nil {
+		return fmt.Errorf("tasks: host refusal record: write: %w", err)
+	}
+	return nil
+}

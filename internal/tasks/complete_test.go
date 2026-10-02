@@ -191,6 +191,46 @@ func closeReq() CloseRequest {
 // description in task-update-after.json.
 const syntheticTrailer = "closed-by: synthetic via forgectl tasks mcp 2026-01-02T03:04:05Z — synthetic evidence"
 
+// syntheticOpenDescription and syntheticClosedDescription are the description
+// in task-update-before.json and in task-update-after.json. The live probe's
+// fixture sanitizer writes these same two values, so fixtures it produces can
+// replace the checked-in pair without a close test changing its answer.
+const (
+	syntheticOpenDescription   = "Synthetic description."
+	syntheticClosedDescription = syntheticOpenDescription + "\n\n" + syntheticTrailer
+)
+
+// The fixture pair is a task before and after the close closeReq describes.
+// Three things have to agree for that to hold: the fixtures, the constants the
+// probe's sanitizer writes, and what this client produces for that request.
+func TestCloseFixtures_AreTheCloseTheTestsRequest(t *testing.T) {
+	if got := descriptionOf(t, closeFixture(t, "task-update-before.json")); got != syntheticOpenDescription {
+		t.Errorf("task-update-before.json description = %q, want %q", got, syntheticOpenDescription)
+	}
+	if got := descriptionOf(t, closeFixture(t, "task-update-after.json")); got != syntheticClosedDescription {
+		t.Errorf("task-update-after.json description = %q, want %q", got, syntheticClosedDescription)
+	}
+
+	req := closeReq()
+	trailer, err := trailerLine(trailerClosedBy, req.Closer, req.Surface, req.Now, req.Evidence)
+	if err != nil {
+		t.Fatalf("trailerLine: %v", err)
+	}
+	if trailer != syntheticTrailer {
+		t.Errorf("closeReq writes the trailer %q, want %q", trailer, syntheticTrailer)
+	}
+	sent, err := closeDescription(syntheticOpenDescription, trailer)
+	if err != nil {
+		t.Fatalf("closeDescription: %v", err)
+	}
+	if sent != syntheticClosedDescription {
+		t.Errorf("a close of the open fixture sends %q, want %q", sent, syntheticClosedDescription)
+	}
+	if closingLine(syntheticClosedDescription) != trailer {
+		t.Errorf("the closed description does not end with the trailer closeReq writes: %q", syntheticClosedDescription)
+	}
+}
+
 var trailerShape = regexp.MustCompile(`^closed-by: \S.* via forgectl tasks (mcp|done) \S+ — .+$`)
 
 // (a) An open task gets exactly one POST, and that POST is the object the
@@ -852,16 +892,105 @@ func TestCompleteTask_ReplacesAPlantedTrailer(t *testing.T) {
 	})
 }
 
+// Line breaks after the last line do not make another line. A server or an
+// editor that stores a description with a break at its end has not added
+// text, and a strict trailer followed only by breaks is still the closing
+// line: it is replaced, so a retry cannot stack a second trailer under it.
+func TestCompleteTask_ReplacesATrailerFollowedByLineBreaks(t *testing.T) {
+	before := closeFixture(t, "task-update-before.json")
+	strict := "closed-by: someone via forgectl tasks done 2020-01-01T00:00:00Z — earlier"
+	for name, tail := range map[string]string{
+		"a line feed":           "\n",
+		"a carriage return":     "\r",
+		"CRLF":                  "\r\n",
+		"several of each":       "\n\r\n\r\n",
+		"CRLF between and last": "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			description := "notes\n\n" + strict + tail
+			if name == "CRLF between and last" {
+				description = "notes\r\n\r\n" + strict + "\r\n"
+			}
+			stub, client := newCloseStub(t, withKey(t, before, "description", jsonString(t, description)))
+			// A server that stores the description, adds the same break to its
+			// end, and leaves the task open: the next call is a retry.
+			stub.onPost = func(body []byte) (int, []byte) {
+				stored := jsonString(t, descriptionOf(t, body)+tail)
+				return http.StatusOK, withKey(t, withKey(t, body, "description", stored), "done", "false")
+			}
+
+			if _, err := client.CompleteTask(context.Background(), closeReq()); !errors.Is(err, ErrNotConfirmed) {
+				t.Fatalf("CompleteTask = %v, want errors.Is(ErrNotConfirmed)", err)
+			}
+			if got, want := descriptionOf(t, stub.body(0)), "notes\n\n"+syntheticTrailer; got != want {
+				t.Errorf("sent description %q, want the earlier trailer replaced: %q", got, want)
+			}
+
+			retry := closeReq()
+			retry.Now = retry.Now.Add(time.Minute)
+			if _, err := client.CompleteTask(context.Background(), retry); !errors.Is(err, ErrNotConfirmed) {
+				t.Fatalf("retry = %v, want errors.Is(ErrNotConfirmed)", err)
+			}
+			got := descriptionOf(t, stub.body(1))
+			if n := strings.Count(got, "closed-by:"); n != 1 {
+				t.Fatalf("the retry left %d trailers, want exactly 1: %q", n, got)
+			}
+			if !strings.HasSuffix(got, "2026-01-02T03:05:05Z — synthetic evidence") {
+				t.Errorf("the one trailer left is not the retry's: %q", got)
+			}
+		})
+	}
+}
+
+// The read-back is compared the same way: a description that is this call's
+// trailer with line breaks after it has the evidence recorded. Reporting it as
+// missing would send the caller to re-close a task whose record is there.
+func TestCompleteTask_EvidenceIsRecordedWhenTheReadBackEndsWithLineBreaks(t *testing.T) {
+	before := closeFixture(t, "task-update-before.json")
+	for name, tail := range map[string]string{"a line feed": "\n", "a carriage return": "\r", "CRLF": "\r\n"} {
+		t.Run(name, func(t *testing.T) {
+			stub, client := newCloseStub(t, before)
+			stub.onPost = func(body []byte) (int, []byte) {
+				return http.StatusOK, withKey(t, body, "description", jsonString(t, descriptionOf(t, body)+tail))
+			}
+			res, err := client.CompleteTask(context.Background(), closeReq())
+			if err != nil {
+				t.Fatalf("CompleteTask: %v", err)
+			}
+			if !res.Confirmed || !res.EvidenceRecorded {
+				t.Errorf("result %+v, want the close confirmed and the evidence recorded", res)
+			}
+		})
+	}
+
+	t.Run("another trailer followed by a line break is still not this call's", func(t *testing.T) {
+		planted := "closed-by: someone-else via forgectl tasks done 2020-01-01T00:00:00Z — synthetic evidence"
+		stub, client := newCloseStub(t, before)
+		stub.onPost = func(body []byte) (int, []byte) {
+			return http.StatusOK, withKey(t, body, "description", jsonString(t, "Synthetic description.\n\n"+planted+"\n"))
+		}
+		res, err := client.CompleteTask(context.Background(), closeReq())
+		if err != nil {
+			t.Fatalf("CompleteTask: %v", err)
+		}
+		if res.EvidenceRecorded {
+			t.Error("EvidenceRecorded = true though the read-back's closing line is not this call's trailer")
+		}
+	})
+}
+
 // Only a last line in the strict grammar is removed. Anything looser is the
-// author's text and stays.
+// author's text and stays. A line wrapped in markup is one of those: the
+// board's editor can leave one, and this client does not parse markup to look
+// inside it.
 func TestCompleteTask_KeepsLinesThatAreNotAStrictTrailer(t *testing.T) {
 	before := closeFixture(t, "task-update-before.json")
 	strict := "closed-by: someone via forgectl tasks done 2020-01-01T00:00:00Z — earlier"
 	rows := map[string]string{
 		"a loose closed-by line":         "notes\n\nclosed-by: me",
 		"a strict line that is not last": strict + "\n\nreopened: it broke again",
-		"a strict line then a newline":   "notes\n\n" + strict + "\n",
 		"a quoted strict line":           "notes\n\n> " + strict,
+		"a strict line in markup":        "<p>notes</p>\n<p>" + strict + "</p>",
 	}
 	for name, description := range rows {
 		t.Run(name, func(t *testing.T) {

@@ -20,6 +20,10 @@ type TasksConfig struct {
 	AllowedHosts []string `toml:"allowed_hosts"`
 }
 
+// tasksAllowedHostsKey is the dotted key of AllowedHosts, as Report names a
+// key: the one Validate can refuse.
+const tasksAllowedHostsKey = "tasks.allowed_hosts"
+
 // IsZero reports whether the [tasks] section was absent or empty.
 func (tc TasksConfig) IsZero() bool {
 	return len(tc.AllowedHosts) == 0
@@ -122,9 +126,10 @@ func numericLabel(label string) bool {
 
 // TasksCloseLogPath returns the file `forgectl tasks done` and the stdio MCP
 // server append close records to: <os.UserConfigDir()>/forgectl/
-// tasks-closes.jsonl, beside TasksCachePath. One JSON object per line, each a
-// call that sent an update to the board (or, from the MCP server, one refused
-// by its per-session limit).
+// tasks-closes.jsonl, beside TasksCachePath. One JSON object per line. Most
+// are close records: a call that sent an update to the board (or, from the MCP
+// server, one refused by its per-session limit). The rest are host refusals: a
+// `tasks` verb stopped by the allowed-host rule before it read the keychain.
 //
 // It is written whatever log_level is, and is not one of the daily log files:
 // nothing prunes it. It holds no credential — a record names where the token

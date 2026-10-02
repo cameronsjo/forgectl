@@ -327,7 +327,24 @@ func TestSanitizeCloser_TheCutNeverLeavesATrailingVia(t *testing.T) {
 // a token must not carry its hex there, with or without the underscore.
 func TestSanitizeCloser_ANameHoldingATokenFallsBack(t *testing.T) {
 	hex := strings.Repeat("ab12", 10)
-	for _, name := range []string{"tk_" + hex, "agent tk_" + hex + " x"} {
+	for _, name := range []string{
+		"tk_" + hex,
+		"agent tk_" + hex + " x",
+		// A token broken up by a character the allowlist drops. Dropping it
+		// joins the pieces back into a whole token, after the name as declared
+		// has already passed.
+		"tk_ab12ab12ab\n12ab12ab12ab12ab12ab12ab12ab12",
+		"tk_:" + hex,
+		"tk_" + string(rune(0x200b)) + hex,
+	} {
+		if strings.Count(strings.Map(func(r rune) rune {
+			if isCloserRune(r) {
+				return r
+			}
+			return -1
+		}, name), hex) != 1 {
+			t.Fatalf("the row %q does not hold the 40 hex digits once the allowlist has run, so it would not reach the check", name)
+		}
 		got := sanitizeCloser(name, "fallback")
 		if got != "fallback" {
 			t.Errorf("sanitizeCloser(%q) = %q, want the fallback", name, got)

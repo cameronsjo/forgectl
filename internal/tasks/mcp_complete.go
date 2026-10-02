@@ -200,8 +200,11 @@ func (h *closeTool) handle(ctx context.Context, req *mcp.CallToolRequest, in com
 	if !h.budget.reserve(session) {
 		rec.Outcome = CloseOutcomeCap
 		recorded := h.record(rec)
+		// "Sent or in flight", not "sent": a slot is taken before the pre-read
+		// and given back only when the call turns out to send nothing, so
+		// calls that overlap can fill the budget before ten updates have left.
 		return closeError("close_cap", "%s", withRecordNote(fmt.Sprintf(
-			"this session has sent its limit of %d task updates, so task %d was not read or changed. "+
+			"this session has %d task updates sent or in flight, which is its limit, so task %d was not read or changed. "+
 				"Report it as still open; closing it needs a new session or the operator.",
 			maxClosesPerSession, in.TaskID), recorded)), nil, nil
 	}

@@ -106,8 +106,8 @@ type CloseResult struct {
 	// written, so EvidenceRecorded and Confirmed are false.
 	AlreadyDone bool
 	// EvidenceRecorded is true only when the read-back's description ends
-	// with the trailer this call wrote. A trailer already on the task never
-	// sets it.
+	// with the trailer this call wrote, line breaks after it aside. A trailer
+	// already on the task never sets it.
 	EvidenceRecorded bool
 	// Confirmed is true when this call's update was sent and the read-back
 	// says the task is done.
@@ -213,7 +213,7 @@ func (c *Client) CompleteTask(ctx context.Context, req CloseRequest) (CloseResul
 		return result, notConfirmed(req.TaskID, "the update was accepted and the read-back shows the task still open", nil)
 	}
 	result.Confirmed = true
-	result.EvidenceRecorded = lastLine(after.description) == trailer
+	result.EvidenceRecorded = closingLine(after.description) == trailer
 	result.ChangedKeys, result.UnnamedChanges = unexpectedChanges(before.raw, after.raw)
 	return result, nil
 }
@@ -419,15 +419,36 @@ func closeDescription(existing, trailer string) (string, error) {
 	return out, nil
 }
 
-// withoutClosingTrailer removes description's last line when it is a strict
-// closed-by trailer, along with the line breaks that separated it from the
-// text above. Any other description is returned unchanged.
+// withoutClosingTrailer removes description's closing line when it is a strict
+// closed-by trailer, along with the line breaks around it. Any other
+// description is returned unchanged.
+//
+// Only a line that is the strict grammar from its first byte to its last is
+// recognised. A trailer inside markup (`<p>closed-by: …</p>`) is not: telling
+// a trailer from text that quotes one would mean parsing the board's markup,
+// and a line left in place costs a second trailer, not a wrong record.
 func withoutClosingTrailer(description string) string {
-	last := lastLine(description)
+	body := withoutTrailingBreaks(description)
+	last := lastLine(body)
 	if _, ok := parseClosingTrailer(last); !ok {
 		return description
 	}
-	return strings.TrimRight(strings.TrimSuffix(description, last), "\r\n")
+	return withoutTrailingBreaks(strings.TrimSuffix(body, last))
+}
+
+// closingLine is the last line of a description, not counting line breaks
+// after it. A server or an editor that stores a description with a break at
+// its end has added no text, so "…<trailer>\n" closes with that trailer. Both
+// the replace-on-retry rule and EvidenceRecorded read the description through
+// this, so the two cannot disagree about which line is last.
+func closingLine(description string) string {
+	return lastLine(withoutTrailingBreaks(description))
+}
+
+// withoutTrailingBreaks drops every carriage return and line feed at the end
+// of s.
+func withoutTrailingBreaks(s string) string {
+	return strings.TrimRight(s, "\r\n")
 }
 
 // lastLine is the text after the final line feed, or all of s when it has
