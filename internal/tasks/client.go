@@ -38,27 +38,30 @@ const pageSize = 50
 // mechanism.
 const requestTimeout = 10 * time.Second
 
-// Client is a credentialed Vikunja API client. It issues GETs, plus the two
-// CREATING PUTs in write.go (CreateTask, AddComment). It never updates and
-// never deletes: there is no POST or DELETE helper, so no method here can
-// reach one.
+// Client is a credentialed Vikunja API client. It issues GETs, the two
+// CREATING PUTs in write.go (CreateTask, AddComment), and one UPDATING POST
+// (CompleteTask in complete.go, which changes `done` and `description` on a
+// task it has just read). It never deletes: there is no DELETE helper, so no
+// method here can reach one.
 //
-// It is no longer read-only, and the distinction matters for anyone reasoning
-// about blast radius. Whether a write SUCCEEDS is not decided here at all — it
-// is decided by the token's scope and the bot user's project permission, two
-// gates outside this process (ADR 0009 §8). A read-only credential gets a 401
-// from these same methods, which is the intended shape, not a failure.
+// It can change existing rows, and the distinction matters for anyone
+// reasoning about blast radius. Whether a write SUCCEEDS is not decided here
+// at all — it is decided by the token's scope and the bot user's project
+// permission, two gates outside this process (ADR 0009 §8). A read-only
+// credential gets a 401 from these same methods, which is the intended shape,
+// not a failure.
 type Client struct {
 	baseURL    string
 	token      Token
 	httpClient *http.Client
 }
 
-// NewClient builds a Client for host, after refusing to proceed if host
-// resolves anywhere the bearer token must not go (see checkHostPinning).
-// token is read once by the caller via ReadToken and handed in already
-// validated; NewClient does not read the keychain itself, so a caller can
-// unit-test client construction without one.
+// NewClient builds a Client for host, after refusing to proceed if host is
+// one this token may not be sent to (Token.checkHost) or resolves anywhere
+// the bearer token must not go (see checkHostPinning). token is read once by
+// the caller via ReadToken and handed in already validated; NewClient does
+// not read the keychain itself, so a caller can unit-test client construction
+// without one.
 func NewClient(ctx context.Context, runner exec.Runner, host string, token Token) (*Client, error) {
 	return NewClientWithPins(ctx, runner, host, token, nil)
 }
@@ -66,6 +69,10 @@ func NewClient(ctx context.Context, runner exec.Runner, host string, token Token
 // NewClientWithPins is NewClient under an explicit `--pin-ip` allow list. The
 // list is an intersection with the base policy, not a fallback — see
 // classifyIPWithPins. A nil or empty list is exactly NewClient.
+//
+// A token from ReadTokenFile is refused with an empty list (ErrHostRefused):
+// such a token has no host list of its own, and the pin list is what bounds
+// it. A keychain token may be built with no list; its host list is the bound.
 //
 // It exists as a second constructor rather than a changed NewClient signature
 // because `forgectl tasks ls|show|ready` and the board hook call NewClient and
@@ -75,6 +82,21 @@ func NewClientWithPins(ctx context.Context, runner exec.Runner, host string, tok
 	if !token.Present() {
 		return nil, fmt.Errorf("tasks: no token supplied")
 	}
+	// Before the name is resolved: a host the token may not go to is refused
+	// without a lookup. A command checks this too, before it reads the
+	// keychain; this is the copy that holds when a caller forgot to.
+	if err := token.checkHost(host); err != nil {
+		return nil, err
+	}
+	// A token that did not come from the keychain has no host list, so
+	// checkHost above let it through to any host. Its one bound is the pin
+	// list, and with no list the pin admits every public address. The command
+	// that reads a token file requires the list; this is the copy that holds
+	// for a caller that does not.
+	if !token.hostBound && len(pins) == 0 {
+		return nil, fmt.Errorf("%w: the token was not read from the keychain, so it carries no host list, and the --pin-ip list is empty: "+
+			"nothing would bound where it is sent. Give at least one --pin-ip address", ErrHostRefused)
+	}
 	vetted, gateway, err := checkHostPinning(ctx, runner, host, pins)
 	if err != nil {
 		return nil, err
@@ -83,8 +105,9 @@ func NewClientWithPins(ctx context.Context, runner exec.Runner, host string, tok
 		baseURL: "https://" + host + "/api/v1",
 		token:   token,
 		httpClient: &http.Client{
-			// A read-only API client has no reason to follow a redirect,
-			// and following one is a way to lose the credential: Go strips
+			// This client calls one API on one host and has no reason to
+			// follow a redirect, and following one is a way to lose the
+			// credential: Go strips
 			// Authorization only when the redirect leaves the original
 			// host, and that comparison is on host:port and ignores the
 			// SCHEME — so https -> http on the same canonical address keeps
@@ -139,9 +162,44 @@ func (c *Client) get(ctx context.Context, path string, query url.Values) ([]byte
 	return c.do(ctx, http.MethodGet, path, query, nil, "")
 }
 
+// authMode says whether a request carries the bearer token. The zero value
+// is anonymous on purpose: a call site that forgets to choose sends no
+// credential and fails with a 401, instead of sending one it did not mean to.
+type authMode int
+
+const (
+	anonymous authMode = iota
+	bearer
+)
+
+// statusError is a response status that is neither success nor an auth
+// rejection. It renders exactly as the ErrUnexpectedStatus wrap it replaced
+// and still satisfies errors.Is(err, ErrUnexpectedStatus); what it adds is the
+// code as a value, so a caller that must tell a 404 from a 500 reads a field
+// instead of parsing a message.
+type statusError struct {
+	path string
+	code int
+}
+
+func (e statusError) Error() string {
+	return fmt.Sprintf("%s: %s -> %d", ErrUnexpectedStatus.Error(), e.path, e.code)
+}
+
+func (e statusError) Unwrap() error { return ErrUnexpectedStatus }
+
+// statusIs reports whether err is a response with exactly this status code.
+func statusIs(err error, code int) bool {
+	var status statusError
+	return errors.As(err, &status) && status.code == code
+}
+
 // do is the one credentialed request path: deadline, auth header, redirect
 // refusal, the host-pin escape hatch, the bounded read, and the status
-// assertion — for every verb.
+// assertion — for every verb. It is send with the bearer token, and every
+// method that talks to the API goes through it; the single anonymous request
+// this client makes (AssertVikunja's probe) calls send directly, so there is
+// still one request path and exactly one place that sets the header.
 //
 // It exists because get and put were near-identical and had already drifted
 // apart in two places (the response cap and the 401 message) with nothing
@@ -157,6 +215,21 @@ func (c *Client) get(ctx context.Context, path string, query url.Values) ([]byte
 //     indistinguishable here.
 func (c *Client) do(
 	ctx context.Context,
+	method, path string,
+	query url.Values,
+	payload any,
+	unauthorizedNote string,
+) ([]byte, error) {
+	return c.send(ctx, bearer, method, path, query, payload, unauthorizedNote)
+}
+
+// send is the request path under do. auth is the only thing that differs
+// between a credentialed request and an anonymous one: the deadline, the
+// redirect refusal, the pinned dial, the bounded read, and the status
+// assertion apply to both.
+func (c *Client) send(
+	ctx context.Context,
+	auth authMode,
 	method, path string,
 	query url.Values,
 	payload any,
@@ -184,7 +257,9 @@ func (c *Client) do(
 	if err != nil {
 		return nil, fmt.Errorf("tasks: build request: %w", err)
 	}
-	req.Header.Set("Authorization", c.token.Header())
+	if auth == bearer {
+		req.Header.Set("Authorization", c.token.Header())
+	}
 	req.Header.Set("Accept", "application/json")
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -216,7 +291,7 @@ func (c *Client) do(
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		return nil, fmt.Errorf("%w: %s -> %d%s", ErrUnauthorized, path, resp.StatusCode, unauthorizedNote)
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
-		return nil, fmt.Errorf("%w: %s -> %d", ErrUnexpectedStatus, path, resp.StatusCode)
+		return nil, statusError{path: path, code: resp.StatusCode}
 	}
 	if readErr != nil {
 		// Transport text, the same class as the dial error above (#810).

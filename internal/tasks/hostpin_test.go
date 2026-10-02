@@ -66,7 +66,7 @@ func TestCheckHostPinning_RefusesLoopbackResolution(t *testing.T) {
 func TestCheckHostPinning_AllowsHomelabLANWithMatchingGateway(t *testing.T) {
 	runner := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
-			if name == "route" {
+			if name == "/sbin/route" {
 				return "   route to: default\ngateway: 192.168.1.1\n   interface: en0\n", nil
 			}
 			return "", nil
@@ -90,7 +90,7 @@ func TestCheckHostPinning_AllowsHomelabLANWithMatchingGateway(t *testing.T) {
 func TestCheckHostPinning_RefusesRFC1918OffHomelab(t *testing.T) {
 	runner := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
-			if name == "route" {
+			if name == "/sbin/route" {
 				return "gateway: 10.0.0.1\n", nil
 			}
 			return "", nil

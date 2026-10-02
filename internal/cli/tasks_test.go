@@ -41,7 +41,7 @@ func withFakeTasksBackend(t *testing.T, handler http.Handler) (*httptest.Server,
 
 	runner := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
-			if name == "security" {
+			if name == tasks.SecurityBinary {
 				return tasksTestFakeToken, nil
 			}
 			return "", nil
@@ -229,7 +229,7 @@ func TestTasksLs_Unreachable_FallsBackToCacheWithAgeStated(t *testing.T) {
 	t.Cleanup(func() { newTasksClient = orig })
 
 	runner := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
-		if name == "security" {
+		if name == tasks.SecurityBinary {
 			return tasksTestFakeToken, nil
 		}
 		return "", nil
@@ -292,7 +292,7 @@ func TestTasksLs_HostRefused_DoesNotFallBackToCacheAndExitsFour(t *testing.T) {
 
 	runner := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
-			if name == "security" {
+			if name == tasks.SecurityBinary {
 				return tasksTestFakeToken, nil
 			}
 			return "", nil

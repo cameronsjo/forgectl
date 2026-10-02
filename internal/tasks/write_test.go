@@ -190,6 +190,42 @@ func TestAssertVikunja_AcceptsARealInfoResponse(t *testing.T) {
 	}
 }
 
+// TestAssertVikunja_SendsNoCredential pins the order of the two questions the
+// probe sits between. It runs to find out whether the host is a Vikunja API at
+// all, so the bearer token must not be on the request that asks: a host that
+// turns out to be something else has by then already been handed it. /info is
+// a public route and needs no credential.
+func TestAssertVikunja_SendsNoCredential(t *testing.T) {
+	var (
+		gotAuth string
+		hadAuth bool
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, hadAuth = r.Header["Authorization"]
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"version": "v2.5.0"}`))
+	}))
+	defer srv.Close()
+
+	client := NewClientForTesting(srv.URL, newToken(fakeToken))
+	if err := client.AssertVikunja(context.Background()); err != nil {
+		t.Fatalf("AssertVikunja = %v, want nil", err)
+	}
+	if hadAuth || gotAuth != "" {
+		t.Fatalf("the /info probe carried an Authorization header (%d bytes)", len(gotAuth))
+	}
+
+	// The same client still authenticates everything else. Without this half
+	// the test passes on a client that never sends the header at all.
+	if _, err := client.FetchTask(context.Background(), 1); err != nil {
+		t.Fatalf("FetchTask: %v", err)
+	}
+	if gotAuth != "Bearer "+fakeToken {
+		t.Fatal("a task read after the probe did not carry the bearer token")
+	}
+}
+
 // TestDecodeErrors_AreCategorical pins #761: a response that does not decode
 // is refused with fixed text. A *json.SyntaxError quotes a character of the
 // server's body, so the message must not carry it, while errors.Is still

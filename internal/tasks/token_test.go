@@ -19,7 +19,7 @@ func TestReadToken_NeverAppearsInArgv(t *testing.T) {
 			return fakeToken + "\n", nil
 		},
 	}
-	tok, err := ReadToken(context.Background(), runner, DefaultKeychainService)
+	tok, err := ReadToken(context.Background(), runner, DefaultKeychainService, nil)
 	if err != nil {
 		t.Fatalf("ReadToken: %v", err)
 	}
@@ -35,11 +35,39 @@ func TestReadToken_NeverAppearsInArgv(t *testing.T) {
 	}
 }
 
+// The keychain tool is named by absolute path, and the path is written out
+// here and not taken from the constant. A test that compares against
+// SecurityBinary stays green when the constant is changed back to a bare
+// name, which PATH then resolves, and a directory ahead of /usr/bin could
+// supply the token this client sends.
+func TestReadToken_RunsTheKeychainToolByItsAbsolutePath(t *testing.T) {
+	const want = "/usr/bin/security"
+	if SecurityBinary != want {
+		t.Fatalf("SecurityBinary = %q, want the literal %q", SecurityBinary, want)
+	}
+	runner := &exec.FakeRunner{
+		RunFunc: func(string, []string) (string, error) { return fakeToken + "\n", nil },
+	}
+	if _, err := ReadToken(context.Background(), runner, "some-entry", nil); err != nil {
+		t.Fatalf("ReadToken: %v", err)
+	}
+	if len(runner.Calls) != 1 {
+		t.Fatalf("ReadToken ran %d subprocess(es), want exactly one: %v", len(runner.Calls), runner.Calls)
+	}
+	call := runner.Calls[0]
+	if call.Name != want {
+		t.Errorf("ReadToken ran %q, want %q", call.Name, want)
+	}
+	if got, wantArgs := strings.Join(call.Args, " "), "find-generic-password -s some-entry -w"; got != wantArgs {
+		t.Errorf("ReadToken ran it with %q, want %q", got, wantArgs)
+	}
+}
+
 func TestReadToken_RejectsMalformedValue(t *testing.T) {
 	runner := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) { return "not-a-real-token", nil },
 	}
-	_, err := ReadToken(context.Background(), runner, DefaultKeychainService)
+	_, err := ReadToken(context.Background(), runner, DefaultKeychainService, nil)
 	if !errors.Is(err, ErrTokenMalformed) {
 		t.Fatalf("ReadToken(malformed) = %v, want errors.Is(ErrTokenMalformed)", err)
 	}
@@ -51,7 +79,7 @@ func TestReadToken_NotFound(t *testing.T) {
 			return "", fmt.Errorf("security: item not found")
 		},
 	}
-	_, err := ReadToken(context.Background(), runner, DefaultKeychainService)
+	_, err := ReadToken(context.Background(), runner, DefaultKeychainService, nil)
 	if !errors.Is(err, ErrTokenNotFound) {
 		t.Fatalf("ReadToken(not found) = %v, want errors.Is(ErrTokenNotFound)", err)
 	}
@@ -104,7 +132,7 @@ func TestReadToken_ServiceEchoIsCapped(t *testing.T) {
 	long := "\x1b[2J" + strings.Repeat("A", 500)
 	for name, out := range map[string]string{"not found": "", "malformed": "not-a-real-token"} {
 		runner := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return out, nil }}
-		_, err := ReadToken(context.Background(), runner, long)
+		_, err := ReadToken(context.Background(), runner, long, nil)
 		if err == nil {
 			t.Fatalf("%s: ReadToken succeeded", name)
 		}

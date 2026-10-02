@@ -67,6 +67,10 @@ type configEntry struct {
 	Group string `json:"group"`
 	Value any    `json:"value"`
 	Set   bool   `json:"set"`
+	// Refused means the file sets this key to a value the loader did not load
+	// (config.Report.Refused). Value is what the file says, and it is not in
+	// effect.
+	Refused bool `json:"refused,omitempty"`
 	// Redacted means Value is NOT the stored value — it was withheld. Two
 	// things set it: a redactedKeys hit (Value is the placeholder) and a
 	// non-empty map leaf (Value is the key set, values dropped).
@@ -116,14 +120,17 @@ type launchResolvedView struct {
 // configReport is the --json document. It is the stable surface: the human
 // rendering is free to reflow, this is not.
 type configReport struct {
-	Path           string             `json:"path"`
-	Found          bool               `json:"found"`
-	PathError      string             `json:"path_error,omitempty"`
-	DecodeError    string             `json:"decode_error,omitempty"`
-	Unrecognized   []string           `json:"unrecognized"`
-	Entries        []configEntry      `json:"entries"`
-	HostResolved   hostResolvedView   `json:"host_resolved"`
-	LaunchResolved launchResolvedView `json:"launch_resolved"`
+	Path        string `json:"path"`
+	Found       bool   `json:"found"`
+	PathError   string `json:"path_error,omitempty"`
+	DecodeError string `json:"decode_error,omitempty"`
+	// ValidationError is a value the loader refuses in a file that parsed. It
+	// is its own key so a consumer does not read it as a parse failure.
+	ValidationError string             `json:"validation_error,omitempty"`
+	Unrecognized    []string           `json:"unrecognized"`
+	Entries         []configEntry      `json:"entries"`
+	HostResolved    hostResolvedView   `json:"host_resolved"`
+	LaunchResolved  launchResolvedView `json:"launch_resolved"`
 }
 
 func newConfigCmd(module.Deps) *cobra.Command {
@@ -213,6 +220,7 @@ func walkStruct(v reflect.Value, prefix string, rep config.Report, out *[]config
 			Group:   prefix,
 			Value:   value,
 			Set:     rep.IsSet(key),
+			Refused: rep.IsRefused(key),
 			display: display,
 		}
 		switch {
@@ -467,6 +475,12 @@ func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, h
 		_, _ = fmt.Fprintf(out, "  ! decode error: %s\n", safeText(rep.DecodeErr.Error()))
 		fmt.Fprintf(out, "  ! values below reflect only what parsed before the error\n")
 	}
+	if rep.InvalidErr != nil {
+		// Worded apart from a decode error on purpose: this file parsed, every
+		// value below is what it says, and what is wrong is one value.
+		_, _ = fmt.Fprintf(out, "  ! validation error: %s\n", safeText(rep.InvalidErr.Error()))
+		_, _ = fmt.Fprintf(out, "  ! the file parsed, and commands refuse it until this value is fixed; a key marked %s below was not loaded\n", provenanceRefused)
+	}
 	fmt.Fprintln(out)
 
 	// The host scalars lead: walkStruct emits every leaf of a level before
@@ -546,14 +560,22 @@ func renderConfigText(out io.Writer, entries []configEntry, rep config.Report, h
 // Only display is escaped. The key is code-authored — it comes from the struct
 // tags walkStruct reads — so escaping it would be escaping our own text.
 func writeEntry(out io.Writer, e configEntry) {
-	_, _ = fmt.Fprintf(out, "  %-34s %-28s %s\n", e.Key, safeText(e.display), provenance(e.Set))
+	_, _ = fmt.Fprintf(out, "  %-34s %-28s %s\n", e.Key, safeText(e.display), provenance(e))
 }
+
+// provenanceRefused marks a key the file sets to a value the loader refused.
+// "(set)" would say the value is in effect, and it is not.
+const provenanceRefused = "(refused — not loaded)"
 
 // provenance renders the set/default marker that distinguishes "the file asked
 // for this" from "this is a built-in fallback" — the distinction the whole
-// command turns on.
-func provenance(set bool) string {
-	if set {
+// command turns on — and the third case, a value the file asked for and the
+// loader refused.
+func provenance(e configEntry) string {
+	switch {
+	case e.Refused:
+		return provenanceRefused
+	case e.Set:
 		return "(set)"
 	}
 	return "(default)"
@@ -577,6 +599,9 @@ func emitConfigJSON(out io.Writer, entries []configEntry, rep config.Report, hos
 	}
 	if rep.DecodeErr != nil {
 		doc.DecodeError = rep.DecodeErr.Error()
+	}
+	if rep.InvalidErr != nil {
+		doc.ValidationError = rep.InvalidErr.Error()
 	}
 	enc := termsafe.JSONEncoder(out)
 	enc.SetIndent("", "  ")

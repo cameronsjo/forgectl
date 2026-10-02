@@ -108,6 +108,8 @@ const logKeepDays = 7
 //	[[herdr.organize.rule]]
 //	glob      = "*/Projects/forge/* :: *"  # matched against "<cwd> :: <title>"
 //	workspace = "forge"
+//	[tasks]              # forgectl tasks — where a keychain credential may be sent
+//	allowed_hosts = []               # hosts allowed besides the built-in default; plain hostnames only
 type Config struct {
 	NoIcons   bool            `toml:"no_icons"`
 	LogLevel  string          `toml:"log_level"`
@@ -130,6 +132,7 @@ type Config struct {
 	Theme     ThemeConfig     `toml:"theme"`
 	Herdr     HerdrConfig     `toml:"herdr"`
 	Resume    ResumeConfig    `toml:"resume"`
+	Tasks     TasksConfig     `toml:"tasks"`
 	launchSet bool
 	// resumeUnknown lists the undecoded keys under [resume], so
 	// ResumeConfig.Validate can name a misspelled hook key instead of
@@ -1142,9 +1145,12 @@ func LoadPath(path string) Config {
 		slog.Warn("Failed to decode config file; using built-in defaults for unreadable sections.",
 			"path", termsafe.QuotePath(path), "error", termsafe.SafeLineMax(err.Error(), logErrMaxRunes))
 		cfg.decodeDegraded = true
-		if decodeErr != nil {
+		switch {
+		case isTasksConfigError(decodeErr):
+			cfg.decodeErr = describeInvalidError(path, decodeErr)
+		case decodeErr != nil:
 			cfg.decodeErr = describeDecodeError(path, decodeErr)
-		} else {
+		default:
 			cfg.decodeErr = describeReadError(path, err)
 		}
 	}
@@ -1178,6 +1184,13 @@ func describeDecodeError(path string, err error) error {
 	return fmt.Errorf("config file %s does not parse: %w", termsafe.QuotePath(path), tomlerr.Scrub(err))
 }
 
+// describeInvalidError words a config file that parses and holds a value the
+// loader refuses. Calling that file one that "does not parse" would send the
+// operator looking for a syntax error that is not there.
+func describeInvalidError(path string, err error) error {
+	return fmt.Errorf("config file %s is not valid: %w", termsafe.QuotePath(path), err)
+}
+
 // logErrMaxRunes caps an error text config logs (#934): internal/cli's
 // textMaxRunes, room for a decode error naming a path and a key.
 const logErrMaxRunes = 1280
@@ -1209,7 +1222,19 @@ func DecodeStrict(data []byte) (Config, error) {
 			cfg.resumeUnknown = append(cfg.resumeUnknown, k.String())
 		}
 	}
-	return cfg, tomlerr.Scrub(err)
+	if err != nil {
+		return cfg, tomlerr.Scrub(err)
+	}
+	// [tasks] is checked here, at decode, and not left to the command that
+	// uses it: the list decides where a keychain credential may be sent, and
+	// every reader of this file must see the same refusal. The list is
+	// dropped with the error, so a caller that goes on with this Config
+	// anyway holds one that allows the default host only.
+	if err := cfg.Tasks.Validate(); err != nil {
+		cfg.Tasks = TasksConfig{}
+		return cfg, err
+	}
+	return cfg, nil
 }
 
 // Validate decodes the config file and checks the sections that carry semantic
@@ -1226,7 +1251,8 @@ func Validate() error {
 
 // ValidatePath strictly decodes the already-resolved config path, then asks
 // each section that owns a semantic rule to check itself — [docs], [proxy],
-// [herdr.organize], [resume], and [theme]. A missing file remains valid and selects built-in defaults.
+// [herdr.organize], [resume], and [theme]. [tasks] is checked by the decode
+// itself. A missing file remains valid and selects built-in defaults.
 //
 // The semantic half is the point for `launch doctor`: a config can decode
 // cleanly and still be one every launch path refuses, and a doctor that only

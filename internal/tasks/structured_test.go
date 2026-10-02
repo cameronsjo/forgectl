@@ -182,18 +182,23 @@ func TestReadTools_ErrorResultCarriesNoStructuredContent(t *testing.T) {
 	}
 }
 
-// TestReadTools_DeclareAnOutputSchema: the read tools declare what their
-// structuredContent holds, and the write tools declare nothing — they return
-// text only.
+// TestTools_DeclareAnOutputSchema: every tool that returns structuredContent
+// declares what it holds. add_comment declares nothing — it returns text only.
 //
-// Mutation: drop OutputSchema from ready_tasks.
-func TestReadTools_DeclareAnOutputSchema(t *testing.T) {
+// Mutation: drop OutputSchema from ready_tasks, or from complete_task.
+func TestTools_DeclareAnOutputSchema(t *testing.T) {
 	cs := connectToStub(t)
 	res, err := cs.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	withSchema := map[string]bool{"list_projects": true, "list_tasks": true, "get_task": true, "ready_tasks": true}
+	withSchema := map[string]bool{
+		"list_projects": true, "list_tasks": true, "get_task": true, "ready_tasks": true,
+		"create_task": true, "complete_task": true,
+	}
+	// The two write tools' outputs hold numbers and booleans only, so they
+	// have no done_at to pin and must have no string property at all.
+	noStrings := map[string]bool{"list_projects": true, "create_task": true, "complete_task": true}
 	for _, tool := range res.Tools {
 		if got := tool.OutputSchema != nil; got != withSchema[tool.Name] {
 			t.Errorf("tool %q: has output schema = %v, want %v", tool.Name, got, withSchema[tool.Name])
@@ -217,8 +222,11 @@ func TestReadTools_DeclareAnOutputSchema(t *testing.T) {
 		}
 		// done_at is pinned to the one shape structuredTime emits, so the
 		// SDK's own output validation refuses anything else.
-		if tool.Name != "list_projects" && !strings.Contains(string(raw), `"pattern":"^[0-9]{4}-`) {
+		if !noStrings[tool.Name] && !strings.Contains(string(raw), `"pattern":"^[0-9]{4}-`) {
 			t.Errorf("tool %q output schema does not pin done_at to a pattern: %s", tool.Name, raw)
+		}
+		if noStrings[tool.Name] && len(stringProperties(schema)) != 0 {
+			t.Errorf("tool %q output schema has a string property, and its output is numbers and booleans only: %s", tool.Name, raw)
 		}
 	}
 }
@@ -348,5 +356,78 @@ func TestStructuredVetted(t *testing.T) {
 	badKind.Relations = []relationRef{{Kind: injectionMarker, ID: 2}}
 	if structuredVetted(badKind) {
 		t.Fatal("a relation kind outside the enum was accepted")
+	}
+}
+
+// TestWriteTools_StructuredContentIsNumbersAndBooleans: create_task and
+// complete_task return ids and flags outside the fence, and nothing else. The
+// title they act on is board text; it stays in the fenced text content.
+//
+// Mutation: add `Title string` to completeTaskOutput and set it from the
+// close result — structuredResult then refuses the call.
+func TestWriteTools_StructuredContentIsNumbersAndBooleans(t *testing.T) {
+	cs := connectToStub(t)
+	calls := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"create_task", map[string]any{"project_id": 1, "title": "ship it"}, `{"id":99,"project_id":1}`},
+		{"complete_task", map[string]any{"task_id": 100, "evidence": "merged owner/repo#12"},
+			`{"already_done":false,"done":true,"evidence_recorded":true,"id":100,"project_id":1}`},
+		{"complete_task", map[string]any{"task_id": 21, "evidence": "merged owner/repo#12"},
+			`{"already_done":true,"done":true,"evidence_recorded":false,"id":21,"project_id":2}`},
+	}
+	for _, c := range calls {
+		res, raw := callStructured(t, cs, c.name, c.args)
+		if res.IsError {
+			t.Fatalf("%s returned a tool error", c.name)
+		}
+		if raw == nil {
+			t.Fatalf("%s returned no structuredContent", c.name)
+		}
+		var decoded any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		canonical, err := json.Marshal(decoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(canonical) != c.want {
+			t.Errorf("%s structuredContent = %s, want %s", c.name, canonical, c.want)
+		}
+		var strs []string
+		collectStrings(decoded, &strs)
+		if len(strs) != 0 {
+			t.Errorf("%s structuredContent carries string values %q", c.name, strs)
+		}
+	}
+}
+
+// TestWriteToolOutputs_PassThePackageVetting: the write tools' output types go
+// through the same gate as the read tools' and pass it in every state.
+func TestWriteToolOutputs_PassThePackageVetting(t *testing.T) {
+	for _, out := range []any{
+		createTaskOutput{ID: 99, ProjectID: 1},
+		completeTaskOutput{ID: 100, ProjectID: 1, Done: true, EvidenceRecorded: true},
+		completeTaskOutput{ID: 21, ProjectID: 2, Done: true, AlreadyDone: true},
+	} {
+		if !structuredVetted(out) {
+			t.Errorf("%+v was refused by structuredVetted", out)
+		}
+	}
+}
+
+// TestWriteTools_ErrorResultCarriesNoStructuredContent: a refused close must
+// not ship a zero-valued structure, which reads as "task 0, not done".
+func TestWriteTools_ErrorResultCarriesNoStructuredContent(t *testing.T) {
+	cs := connectToStub(t)
+	res, raw := callStructured(t, cs, "complete_task", map[string]any{"task_id": 404, "evidence": "merged owner/repo#12"})
+	if !res.IsError {
+		t.Fatal("complete_task on a missing task did not return a tool error")
+	}
+	if raw != nil {
+		t.Fatalf("error result carries structuredContent: %s", raw)
 	}
 }

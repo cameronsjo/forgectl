@@ -18,6 +18,7 @@ Being built now.
 - [forgectl docs fix-up — Artificer 0.25 upgrade + full docs slate](2026-08-31-docs-fix-up-artificer-025-and-full-slate.md)
 - [forgectl TUI — one lipgloss, an Artificer theme for the whole binary, and a hub menu](2026-09-05-tui-theme-and-hub.md)
 - [Review-autonomy spine — design](2026-09-11-review-autonomy-spine-design.md)
+- [A close path for board tasks (cameronsjo/forgectl#1022)](2026-10-01-tasks-close-path.md)
 
 ## Proposed
 
