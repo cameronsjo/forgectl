@@ -40,6 +40,7 @@ func TestTokenHasNoEnvironmentSource(t *testing.T) {
 		"token.go", "client.go", "write.go", "mcp.go",
 		"structured.go", "hostpin.go", "cache.go",
 		"complete.go", "trailer.go", "mcp_complete.go", "closerecord.go",
+		"allowedhost.go",
 	} {
 		if !slices.Contains(files, must) {
 			t.Errorf("%s is not among the sources this test read: %v", must, files)

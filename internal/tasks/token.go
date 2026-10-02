@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -62,14 +63,36 @@ var tokenShape = regexp.MustCompile(`^tk_[0-9a-fA-F]{40,}$`)
 // Token is an opaque bearer credential. The payload lives behind a closure,
 // not a plain string field, and the redacting methods below cover the Token's
 // own formatting. Header() is the only way to read the value.
+//
+// A token read from the keychain also carries where it may be sent: see
+// checkHost. That travels with the credential, not with the code that read
+// it, so a caller that builds a client without asking first is still refused.
 type Token struct {
 	reveal func() string
+	// hostBound is true for a keychain token. hosts is then the list it was
+	// read under; the default host is always allowed besides.
+	hostBound bool
+	hosts     []string
 }
 
 // newToken wraps v. Unexported: the only way to mint a Token from outside
-// this package is ReadToken, so a caller can never construct one from a
-// string literal that skips shape validation.
+// this package is ReadToken or ReadTokenFile, so a caller can never construct
+// one from a string literal that skips shape validation. The token it returns
+// has no host restriction; ReadToken adds one.
 func newToken(v string) Token { return Token{reveal: func() string { return v }} }
+
+// checkHost reports whether this token may be sent to host.
+//
+// A keychain token may go to the default host and to the hosts it was read
+// under (CheckAllowedHost). A token from a mounted file carries no such list:
+// that transport runs in a container with a required address pin list, and
+// has no user config file to hold one.
+func (t Token) checkHost(host string) error {
+	if !t.hostBound {
+		return nil
+	}
+	return CheckAllowedHost(host, t.hosts)
+}
 
 // Present reports whether a token was actually read (as opposed to the zero
 // Token, which a caller might hold before ReadToken ever runs).
@@ -218,7 +241,11 @@ func ReadTokenFile(path string) (Token, error) {
 // identifier, and runner.Run's own argv logging therefore never touches the
 // credential. The returned Token's payload is revealed exactly once, into
 // this closure; nothing above this function ever sees the raw string.
-func ReadToken(ctx context.Context, runner exec.Runner, service string) (Token, error) {
+//
+// hosts is the user's allowed-host list (CheckAllowedHost). The returned
+// token remembers it, and NewClient refuses to build a client that would send
+// the token to any other host. Nil means the default host only.
+func ReadToken(ctx context.Context, runner exec.Runner, service string, hosts []string) (Token, error) {
 	// Bounded on purpose. A locked keychain, or an item whose ACL demands
 	// interactive confirmation, makes `security` block on a GUI prompt with
 	// no deadline of its own — so an unbounded call here hangs the command
@@ -247,5 +274,10 @@ func ReadToken(ctx context.Context, runner exec.Runner, service string) (Token, 
 		// value itself is still a credential.
 		return Token{}, fmt.Errorf("%w: service %s", ErrTokenMalformed, termsafe.QuoteArgMax(service, 0))
 	}
-	return newToken(value), nil
+	token := newToken(value)
+	token.hostBound = true
+	// Copied: the list is the caller's slice, and it now decides where this
+	// credential may go for as long as the token lives.
+	token.hosts = slices.Clone(hosts)
+	return token, nil
 }

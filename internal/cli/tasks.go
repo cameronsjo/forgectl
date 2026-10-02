@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -38,14 +39,18 @@ const (
 )
 
 // tasksModule declares the tasks extension (ADR-0005): a credentialed Vikunja
-// client, a local cache, three read verbs (ls/show/ready), and an MCP server
-// over the same client (mcp). It claims no config section — host, keychain
-// service, and the mcp transport flags are flags/env, not persisted
-// preferences, so there is nothing here for the config registry to own.
+// client, a local cache, three read verbs (ls/show/ready), one write verb
+// (done), and an MCP server over the same client (mcp). It owns the [tasks]
+// config section, which holds one thing: the hosts, besides the default, that
+// a keychain credential may be sent to. That is in the config file and not a
+// flag because a flag is supplied by whoever runs the command, and the list
+// is the operator's. Host, keychain service names, and the mcp transport
+// stay flags.
 var tasksModule = module.Manifest{
-	Name: "tasks",
-	Tier: module.TierExtension,
-	New:  newTasksCmd,
+	Name:      "tasks",
+	Tier:      module.TierExtension,
+	ConfigKey: "tasks",
+	New:       newTasksCmd,
 }
 
 func newTasksCmd(deps module.Deps) *cobra.Command {
@@ -53,39 +58,73 @@ func newTasksCmd(deps module.Deps) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "tasks",
-		Short: "Browse a Vikunja task board, or serve it as an MCP server",
+		Short: "Browse a Vikunja task board, close a task, or serve the board as an MCP server",
 		Long: `tasks is a client for a Vikunja instance: a local cache of what it returns,
-three read verbs over that data, and an MCP server over the same client.
+three read verbs over that data, one verb that closes a task, and an MCP
+server over the same client.
 
   forgectl tasks ls             list open tasks
   forgectl tasks show <id>      one task, its detail and its relations
   forgectl tasks ready          open tasks with no active "blocked" relation,
                                  ranked by Vikunja's own position field
+  forgectl tasks done <id>      mark one task done and record who closed it
+                                 and why (--evidence is required)
   forgectl tasks mcp            serve the board to an MCP client (stdio, or
                                  streamable HTTP with --http)
 
-The three read verbs issue GETs only. ` + "`mcp`" + ` also exposes create_task and
-add_comment — but what any tool can actually do is decided by the credential's
-own grant, not by this binary.
+ls, show and ready issue GETs only. ` + "`done`" + ` reads one task and sends one
+update to it. ` + "`mcp`" + ` exposes four read tools and three write tools:
+create_task, add_comment and complete_task. What any of them can actually do
+is decided by the credential's own grant, not by this binary.
+
+TWO CREDENTIALS
+
+  --keychain-service        the entry ls, show, ready and ` + "`mcp`" + ` over stdio
+                            read (default ` + tasks.DefaultKeychainService + `)
+  --write-keychain-service  the entry ` + "`done`" + ` reads (default ` + tasks.DefaultWriteKeychainService + `)
+
+` + "`done`" + ` reads only its own entry. It never falls back to the read entry, and
+it refuses --keychain-service, so a token stored for reading is not sent on a
+write. A service name is 1 to 64 letters, digits, '.', '_' or '-'.
 
 The bearer token is read fresh on every run — from the macOS login keychain
-(service name below) for every verb here, EXCEPT ` + "`mcp --http`" + `, which has no
-keychain to read and takes ` + "`--token-file`" + ` instead. There is no
-environment-variable source on either path. The token never touches argv, a log
-line, an error string, or the local cache.
+for every verb here, EXCEPT ` + "`mcp --http`" + `, which has no keychain to read and
+takes ` + "`--token-file`" + ` instead. There is no environment-variable source on
+either path. The token never touches argv, a log line, an error string, the
+local cache, or a close record.
 
-A revoked token fails loudly; it never falls back to stale cache data. A
-network failure MAY fall back to cache, and states the cache's age when it
-does.`,
+WHERE A KEYCHAIN CREDENTIAL MAY GO
+
+A keychain credential is sent only to ` + tasks.DefaultHost + `, or to a host listed
+in the forgectl config file:
+
+  [tasks]
+  allowed_hosts = ["<hostname>"]
+
+Any other --host is refused with exit 4, before the keychain is read. An entry
+is a plain hostname: no port, user, path, or IP address.
+
+A revoked token fails loudly; it never falls back to stale cache data. On the
+read verbs a network failure MAY fall back to cache, and states the cache's
+age when it does. ` + "`done`" + ` never reads or writes the cache.`,
+		// The validator and the help runner are the root's own. Without them a
+		// parent with subcommands answers an unknown verb with its help and
+		// exit 0, which a script reads as success.
+		Args:          safeRootArgs,
+		RunE:          showRootHelp,
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
-	cmd.PersistentFlags().StringVar(&host, "host", tasks.DefaultHost, "Vikunja API host")
+	cmd.PersistentFlags().StringVar(&host, "host", tasks.DefaultHost,
+		"Vikunja API host; a keychain credential goes only to the default or a host under [tasks] allowed_hosts")
 	cmd.PersistentFlags().StringVar(&keychainService, "keychain-service", tasks.DefaultKeychainService,
-		"login keychain service name holding the bearer token")
+		"login keychain service name holding the read token (ls, show, ready, mcp over stdio)")
 
 	cmd.AddCommand(
 		newTasksLsCmd(deps, &host, &keychainService),
 		newTasksShowCmd(deps, &host, &keychainService),
 		newTasksReadyCmd(deps, &host, &keychainService),
+		newTasksDoneCmd(deps, &host),
 		newTasksMCPCmd(deps, &host, &keychainService),
 	)
 	return cmd
@@ -124,7 +163,7 @@ func newTasksLsCmd(deps module.Deps, host, keychainService *string) *cobra.Comma
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			snap, fromCache, err := loadTasksSnapshot(cmd.Context(), deps.Runner, *host, *keychainService)
+			snap, fromCache, err := loadTasksSnapshot(cmd.Context(), deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
 			if err != nil {
 				return tasksExitError(err)
 			}
@@ -172,7 +211,7 @@ func newTasksShowCmd(deps module.Deps, host, keychainService *string) *cobra.Com
 			if err != nil {
 				return WithExitCode(fmt.Errorf("tasks show: %q is not a task id", args[0]), 1)
 			}
-			snap, fromCache, err := loadTasksSnapshot(cmd.Context(), deps.Runner, *host, *keychainService)
+			snap, fromCache, err := loadTasksSnapshot(cmd.Context(), deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
 			if err != nil {
 				return tasksExitError(err)
 			}
@@ -233,7 +272,9 @@ func printTaskDetail(out io.Writer, t tasks.Task) error {
 			if rel.Done {
 				relStatus = "done"
 			}
-			if _, err := fmt.Fprintf(out, "  %-12s #%d  %s  [%s]\n", kind, rel.ID, safeTitle(rel.Title), relStatus); err != nil {
+			// The kind is a key of the server's related_tasks object:
+			// board text, like the title beside it.
+			if _, err := fmt.Fprintf(out, "  %-12s #%d  %s  [%s]\n", safeTitle(kind), rel.ID, safeTitle(rel.Title), relStatus); err != nil {
 				return err
 			}
 		}
@@ -254,7 +295,7 @@ dependency store.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			snap, fromCache, err := loadTasksSnapshot(cmd.Context(), deps.Runner, *host, *keychainService)
+			snap, fromCache, err := loadTasksSnapshot(cmd.Context(), deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
 			if err != nil {
 				return tasksExitError(err)
 			}
@@ -287,13 +328,60 @@ dependency store.`,
 // instance or any real network access.
 var newTasksClient = tasks.NewClient
 
+// tasksKeychainFlag and tasksWriteKeychainFlag are the two flags that name a
+// keychain entry, as a refusal about one spells it.
+const (
+	tasksKeychainFlag      = "--keychain-service"
+	tasksWriteKeychainFlag = "--write-keychain-service"
+)
+
+// checkTasksKeychainUse is what must hold before a `tasks` verb reads a
+// keychain credential: the host is one the credential may go to, and the
+// service name is one this client will hand to the keychain tool.
+//
+// The host is checked here, before the read, so that a credential the command
+// will not send is never read into the process. tasks.NewClient checks it
+// again when the client is built; that copy is the backstop for a caller that
+// skips this one, and it runs after the read.
+func checkTasksKeychainUse(flag, service, host string, allowedHosts []string) error {
+	if err := tasks.CheckAllowedHost(host, allowedHosts); err != nil {
+		return WithExitCode(err, exitTasksHostRefused)
+	}
+	if err := tasks.CheckKeychainService(service); err != nil {
+		return WithExitCode(fmt.Errorf("tasks: %s: %s", flag, strings.TrimPrefix(err.Error(), "tasks: ")), 1)
+	}
+	return nil
+}
+
+// readTasksKeychainToken is the one way a `tasks` verb reads the keychain:
+// checkTasksKeychainUse, then the read. Every verb that takes a keychain
+// credential goes through it (ls, show, ready, done, and mcp over stdio), so
+// the check cannot be left out of one of them; a verb walk in the tests pins
+// that for verbs added later.
+func readTasksKeychainToken(
+	ctx context.Context,
+	runner exec.Runner,
+	flag, service, host string,
+	allowedHosts []string,
+) (tasks.Token, error) {
+	if err := checkTasksKeychainUse(flag, service, host, allowedHosts); err != nil {
+		return tasks.Token{}, err
+	}
+	return tasks.ReadToken(ctx, runner, service, allowedHosts)
+}
+
 // loadTasksSnapshot reads the token, builds a client (which host-pins
 // before ever sending it), fetches a fresh Snapshot, and caches it. On a
 // network failure ONLY it falls back to a locally cached Snapshot — never
 // on an auth rejection, which must fail loudly rather than silently serve
 // data that may no longer be current.
-func loadTasksSnapshot(ctx context.Context, runner exec.Runner, host, keychainService string) (tasks.Snapshot, bool, error) {
-	token, err := tasks.ReadToken(ctx, runner, keychainService)
+func loadTasksSnapshot(
+	ctx context.Context,
+	runner exec.Runner,
+	host, keychainService string,
+	allowedHosts []string,
+) (tasks.Snapshot, bool, error) {
+	token, err := readTasksKeychainToken(ctx, runner, tasksKeychainFlag, keychainService, host, allowedHosts)
 	if err != nil {
 		return tasks.Snapshot{}, false, err
 	}

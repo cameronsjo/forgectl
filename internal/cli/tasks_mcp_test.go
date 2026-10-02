@@ -295,6 +295,9 @@ func TestListenCause_DropsTheAddress(t *testing.T) {
 // transport, so a close record written there would corrupt the session it
 // reports on. The record writer is the command's stderr on both transports.
 func TestMCPServerConfig_RecordsGoToStderr(t *testing.T) {
+	// The stdio config also appends to the close log, which must land under
+	// the test's own config directory.
+	isolateTasksConfigDir(t)
 	var stdout, stderr bytes.Buffer
 	cmd := &cobra.Command{}
 	cmd.SetOut(&stdout)

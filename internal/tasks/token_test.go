@@ -19,7 +19,7 @@ func TestReadToken_NeverAppearsInArgv(t *testing.T) {
 			return fakeToken + "\n", nil
 		},
 	}
-	tok, err := ReadToken(context.Background(), runner, DefaultKeychainService)
+	tok, err := ReadToken(context.Background(), runner, DefaultKeychainService, nil)
 	if err != nil {
 		t.Fatalf("ReadToken: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestReadToken_RejectsMalformedValue(t *testing.T) {
 	runner := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) { return "not-a-real-token", nil },
 	}
-	_, err := ReadToken(context.Background(), runner, DefaultKeychainService)
+	_, err := ReadToken(context.Background(), runner, DefaultKeychainService, nil)
 	if !errors.Is(err, ErrTokenMalformed) {
 		t.Fatalf("ReadToken(malformed) = %v, want errors.Is(ErrTokenMalformed)", err)
 	}
@@ -51,7 +51,7 @@ func TestReadToken_NotFound(t *testing.T) {
 			return "", fmt.Errorf("security: item not found")
 		},
 	}
-	_, err := ReadToken(context.Background(), runner, DefaultKeychainService)
+	_, err := ReadToken(context.Background(), runner, DefaultKeychainService, nil)
 	if !errors.Is(err, ErrTokenNotFound) {
 		t.Fatalf("ReadToken(not found) = %v, want errors.Is(ErrTokenNotFound)", err)
 	}
@@ -104,7 +104,7 @@ func TestReadToken_ServiceEchoIsCapped(t *testing.T) {
 	long := "\x1b[2J" + strings.Repeat("A", 500)
 	for name, out := range map[string]string{"not found": "", "malformed": "not-a-real-token"} {
 		runner := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return out, nil }}
-		_, err := ReadToken(context.Background(), runner, long)
+		_, err := ReadToken(context.Background(), runner, long, nil)
 		if err == nil {
 			t.Fatalf("%s: ReadToken succeeded", name)
 		}

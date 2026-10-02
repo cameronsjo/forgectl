@@ -42,6 +42,10 @@ const (
 	defaultCloserDone = "cli"
 )
 
+// DefaultDoneCloser is the closer `forgectl tasks done` names when its caller
+// declares none: the same name an empty declaration falls back to.
+const DefaultDoneCloser = defaultCloserDone
+
 // maxEvidenceRunes and maxCloserRunes bound the two caller-supplied fields.
 // Evidence names a merged PR or a command and its result; 300 characters holds
 // either, and is short enough that the line stays readable in the web UI.
@@ -194,6 +198,15 @@ func isCloserRune(r rune) bool {
 		return true
 	}
 	return strings.ContainsRune("._()/@ -", r)
+}
+
+// ValidateEvidence reports why evidence would be refused as a closed-by
+// trailer's evidence field, or nil. It is the check a close makes itself; a
+// caller runs it first to refuse a bad argument before it reads a credential.
+// The refusal never repeats the evidence.
+func ValidateEvidence(evidence string) error {
+	_, err := sanitizeEvidence(evidence)
+	return err
 }
 
 // sanitizeEvidence validates the evidence field and returns it ready to

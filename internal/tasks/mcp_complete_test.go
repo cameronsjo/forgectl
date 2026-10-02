@@ -996,7 +996,7 @@ func TestWriteCloseRecord_ZeroTimeBecomesNow(t *testing.T) {
 
 // ---- classification -----------------------------------------------------
 
-// closeErrorCode and closeOutcome are the two decisions the handler makes
+// CloseErrorCode and CloseOutcome are the two decisions the handler makes
 // about a finished call. They are tested as values because two of the cases —
 // a host refusal on the update, and an error carrying no sentinel at all —
 // cannot be produced through the stub board.
@@ -1026,13 +1026,13 @@ func TestCloseErrorCodeAndOutcome(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.err != nil {
-				if got := closeErrorCode(tc.err); got != tc.code {
-					t.Errorf("closeErrorCode = %q, want %q", got, tc.code)
+				if got := CloseErrorCode(tc.err); got != tc.code {
+					t.Errorf("CloseErrorCode = %q, want %q", got, tc.code)
 				}
 			}
-			outcome, sent := closeOutcome(tc.result, tc.err)
+			outcome, sent := CloseOutcome(tc.result, tc.err)
 			if outcome != tc.outcome || sent != tc.sent {
-				t.Errorf("closeOutcome = (%q, %v), want (%q, %v)", outcome, sent, tc.outcome, tc.sent)
+				t.Errorf("CloseOutcome = (%q, %v), want (%q, %v)", outcome, sent, tc.outcome, tc.sent)
 			}
 		})
 	}

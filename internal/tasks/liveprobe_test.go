@@ -103,7 +103,7 @@ func TestLiveProbe(t *testing.T) {
 
 	ctx := context.Background()
 	runner := exec.OSRunner{}
-	token, err := ReadToken(ctx, runner, *probeService)
+	token, err := ReadToken(ctx, runner, *probeService, nil)
 	if err != nil {
 		t.Fatalf("read token: %v", err)
 	}

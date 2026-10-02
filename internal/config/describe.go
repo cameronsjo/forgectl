@@ -35,7 +35,8 @@ type Report struct {
 	// Found reports whether a file exists at Path.
 	Found bool
 	// DecodeErr is the parse error from a file that exists but is malformed,
-	// or the worded read error from one that exists but cannot be read.
+	// the worded read error from one that exists but cannot be read, or the
+	// [tasks] value the loader refuses in a file that parsed.
 	// The Config returned alongside holds whatever decoded before the error —
 	// the same partial value Load returns after logging its warning.
 	DecodeErr error
@@ -103,6 +104,9 @@ func describeFile(path string) (Config, Report) {
 		for _, k := range meta.Undecoded() {
 			rep.Unrecognized = append(rep.Unrecognized, k.String())
 		}
+		// The loader refuses this file, so the report says why. The decode
+		// itself finished, which is why the unrecognized keys above stand.
+		rep.DecodeErr = cfg.Tasks.Validate()
 	}
 	return cfg, rep
 }

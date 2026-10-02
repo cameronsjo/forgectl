@@ -56,11 +56,12 @@ type Client struct {
 	httpClient *http.Client
 }
 
-// NewClient builds a Client for host, after refusing to proceed if host
-// resolves anywhere the bearer token must not go (see checkHostPinning).
-// token is read once by the caller via ReadToken and handed in already
-// validated; NewClient does not read the keychain itself, so a caller can
-// unit-test client construction without one.
+// NewClient builds a Client for host, after refusing to proceed if host is
+// one this token may not be sent to (Token.checkHost) or resolves anywhere
+// the bearer token must not go (see checkHostPinning). token is read once by
+// the caller via ReadToken and handed in already validated; NewClient does
+// not read the keychain itself, so a caller can unit-test client construction
+// without one.
 func NewClient(ctx context.Context, runner exec.Runner, host string, token Token) (*Client, error) {
 	return NewClientWithPins(ctx, runner, host, token, nil)
 }
@@ -76,6 +77,12 @@ func NewClient(ctx context.Context, runner exec.Runner, host string, token Token
 func NewClientWithPins(ctx context.Context, runner exec.Runner, host string, token Token, pins []net.IP) (*Client, error) {
 	if !token.Present() {
 		return nil, fmt.Errorf("tasks: no token supplied")
+	}
+	// Before the name is resolved: a host the token may not go to is refused
+	// without a lookup. A command checks this too, before it reads the
+	// keychain; this is the copy that holds when a caller forgot to.
+	if err := token.checkHost(host); err != nil {
+		return nil, err
 	}
 	vetted, gateway, err := checkHostPinning(ctx, runner, host, pins)
 	if err != nil {

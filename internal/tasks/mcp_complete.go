@@ -214,7 +214,7 @@ func (h *closeTool) handle(ctx context.Context, req *mcp.CallToolRequest, in com
 		Now:      now,
 	})
 
-	outcome, sent := closeOutcome(result, err)
+	outcome, sent := CloseOutcome(result, err)
 	recorded := true
 	if sent {
 		rec.ProjectID = result.ProjectID
@@ -225,7 +225,7 @@ func (h *closeTool) handle(ctx context.Context, req *mcp.CallToolRequest, in com
 	}
 
 	if err != nil {
-		return closeError(closeErrorCode(err), "%s", withRecordNote(err.Error(), recorded)), nil, nil
+		return closeError(CloseErrorCode(err), "%s", withRecordNote(err.Error(), recorded)), nil, nil
 	}
 	return structuredResult(toolText(withRecordNote(closeSuccessText(f, result), recorded)), completeTaskOutput{
 		ID:               result.ID,
@@ -245,13 +245,14 @@ func (h *closeTool) record(rec CloseRecord) bool {
 	return WriteCloseRecord(h.cfg.Records, rec) == nil
 }
 
-// closeOutcome reads a finished CompleteTask call: whether an update was
-// sent, and if so the record outcome for it.
+// CloseOutcome reads a finished CompleteTask call: whether an update was
+// sent, and if so the record outcome for it. Every surface that closes a task
+// uses it to decide whether a close record is owed.
 //
 // An update was sent exactly when the call confirmed a close, or failed with
 // ErrNotConfirmed or ErrWriteRefused. Every other failure — and an
 // already-done task — stopped before the update.
-func closeOutcome(result CloseResult, err error) (outcome string, sent bool) {
+func CloseOutcome(result CloseResult, err error) (outcome string, sent bool) {
 	switch {
 	case err == nil && result.Confirmed:
 		return CloseOutcomeClosed, true
@@ -267,17 +268,18 @@ func closeOutcome(result CloseResult, err error) (outcome string, sent bool) {
 	return "", false
 }
 
-// closeErrorCode maps a CompleteTask failure to the code a tool error leads
-// with.
+// CloseErrorCode maps a CompleteTask failure to its code: what a tool error
+// leads with, and the `code` of the CLI's --json failure object. One mapping,
+// so the two surfaces cannot name the same failure differently.
 //
 // ErrNotConfirmed is tested first because it is the one a caller must not
 // mistake for anything else: the update may have landed. `unauthorized`
 // covers both a refused update and a refused pre-read, on a 401 or a 403; in
 // both the credential is the thing to change, and the error text says which
 // it was. `write_refused` is any other refusal of the update. `failed` is
-// everything this server has no more exact word for: the instance was
+// everything this client has no more exact word for: the instance was
 // unreachable, the host was refused, or the answer was not a task.
-func closeErrorCode(err error) string {
+func CloseErrorCode(err error) string {
 	switch {
 	case errors.Is(err, ErrNotConfirmed):
 		return "not_confirmed"
