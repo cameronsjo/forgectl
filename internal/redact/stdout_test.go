@@ -116,8 +116,23 @@ var stdoutKept = []string{
 	"use --token to pass it",
 	// docker pull.
 	"docker.io/library/node:22@sha256:" + strings.Repeat("0f", 32),
+	// #992: a repository path, after a registry host with a port.
+	"registry.local:5000/team/app:1.2@sha256:" + strings.Repeat("0f", 32),
+	"ghcr.io/o/app:v1@sha256:" + strings.Repeat("0f", 32),
 	"Digest: sha256:" + strings.Repeat("0f", 32),
 	"Status: Downloaded newer image for node:22",
+	// #996: a flow mapping with no credential key or an empty value, a
+	// credential key after a ',' outside any '{', a word that only starts
+	// like a declaration keyword, and escapes around plain text.
+	"config: {user: me, region: us-east-1}",
+	"{password: null, user: me}",
+	"{ token: null, user: 'me' }",
+	"- {token: '', name: x}",
+	"ran {job}, password: incorrect",
+	"constant token = abc",
+	"constkey = abc",
+	"\x1b(B\x1b[mplain text\x1b7 and \x1b#8more",
+	"\x1bPq#0;2\x1b\\done",
 }
 
 // stdoutWithheld are lines Stdout must withhold, one per shape, each carrying
@@ -272,6 +287,47 @@ var stdoutWithheld = []string{
 	`password= "hunter2"`,
 	"token= 'abc'",
 	"https://u:SEKRIT@host/x@sha256:" + strings.Repeat("0f", 32),
+	// #992: a scheme-less digest word with no repository path cannot be
+	// told from user:pass, so it is withheld.
+	"user:SEKRIT@sha256:" + strings.Repeat("0f", 32),
+	"node:22@sha256:" + strings.Repeat("0f", 32),
+	// #996 item 1: a credential key inside a YAML flow mapping, first,
+	// after a ',', nested, in a sequence entry, with no blank after ':'.
+	"config: {password: SEKRIT, user: me}",
+	"config: {user: me, api_key: SEKRIT}",
+	"outer: {inner: {token: SEKRIT}}",
+	"- {secret: SEKRIT}",
+	"{password:SEKRIT}",
+	// Gate 2: a '}' inside a quoted value does not close the mapping.
+	`{note: "}", password: SEKRIT}`,
+	"{note: '}', token: SEKRIT}",
+	"it's {password: SEKRIT} isn't it",
+	// #996 item 2: a token straight after a non-CSI/OSC escape (tput sgr0's
+	// ESC ( B, an Fp ESC 7, an nF ESC # 8), one split by a DCS or APC
+	// string or an nF escape, and one whose first letter a crafted CSI's
+	// final byte takes.
+	"\x1b(B\x1b[mghp_" + strings.Repeat("A1", 18),
+	"\x1b7ghp_" + strings.Repeat("A1", 18),
+	"\x1b#8ghp_" + strings.Repeat("A1", 18),
+	"ghp_" + strings.Repeat("A", 18) + "\x1bPq#0\x1b\\" + strings.Repeat("A", 18),
+	"ghp_" + strings.Repeat("A", 18) + "\x1b_x\a" + strings.Repeat("A", 18),
+	"ghp_" + strings.Repeat("A", 18) + "\x1b(B" + strings.Repeat("A", 18),
+	"\x1b[1ghp_" + strings.Repeat("A1", 18),
+	// #996 Gate 2: a colored token inside a DCS or APC string body (tmux's
+	// passthrough doubles each ESC), or after a lone ESC '\', which main
+	// withheld; and one inside an OSC body, which it did not.
+	"\x1bPtmux;\x1b\x1b[1mghp_" + strings.Repeat("A1", 18) + "\x1b\x1b[0m\x1b\\",
+	"\x1b_ \x1b[1mghp_" + strings.Repeat("A1", 18) + "\x1b[0m\a",
+	"\x1bP \x1b[1mghp_" + strings.Repeat("A1", 18) + "\x1b[0m\x1b\\",
+	"see\x1b\\\x1b[32mghp_" + strings.Repeat("A1", 18),
+	"\x1b] \x1b[1mghp_" + strings.Repeat("A1", 18) + "\a",
+	// #996 item 3: a declaration keyword before the assignment.
+	`const token = "SEKRIT"`,
+	`var password = "SEKRIT"`,
+	"let secret = SEKRIT",
+	`export const apiKey = "SEKRIT"`,
+	"  export token = SEKRIT",
+	"\tvar\tpassword := SEKRIT",
 }
 
 // TestStdout: every stdoutKept line survives, every stdoutWithheld line reads
@@ -300,7 +356,8 @@ var stdoutWithheld = []string{
 // its ":=" arm (the Go rows), its "==" guard (token == x is withheld) or its
 // spacing rule (pass=1 fail=0 skip=2 is withheld); drop stripEscapes' OSC arm
 // (the hyperlink rows show); drop withoutDigestRefs (the docker row is
-// withheld) or digestRef's 64-byte check (user:SEKRIT@sha256:abc shows);
+// withheld) or digestRef's 64-byte check (user:SEKRIT@sha256:abc shows),
+// or its repository-path check (#992: user:SEKRIT@sha256:<64 hex> shows);
 // drop keyStatusValues (token: expired is withheld) or accept any word in it
 // (token: expired SEKRIT shows); drop keyNameCarries' descriptor check
 // (token_type rows are withheld) or read the first segment
@@ -323,6 +380,24 @@ var stdoutWithheld = []string{
 // (PASSWORD=ok horse battery shows) or isCount any digit count
 // (pass=1234 fail=0 shows); drop headerIn's textEnd bound (Cookie: none;
 // sid=SEKRIT shows); drop the diffstat anchors (the src/app.go row shows).
+//
+// For #996: drop flowKeyIn (the flow-mapping rows show), its depth check
+// (ran {job}, password: incorrect is withheld), its ',' before a key (the
+// api_key-after-user row shows) or its keyValueCarries check ({password:
+// null, …} is withheld), or read keys without Stdout's descriptor exemption
+// ({token_type: bearer} is withheld); drop the declaration keywords (the
+// const/var/let rows show) or the export one (export const apiKey shows),
+// or the blank required after one (constkey = abc is withheld); drop
+// escEnd (tput sgr0's ESC ( B row shows) or its intermediate bytes (the
+// same), the DCS/SOS/PM/APC string arm (the DCS- and APC-split rows show),
+// or escapeView's keep-final pass or its kept final byte (the crafted
+// ESC [ 1 g row shows).
+//
+// For #996's Gate 2: drop the string-body view from escapeViews (the OSC
+// body row shows); check the full strip in place of main's stripEscapes
+// (TestText_WithholdsSupersetOfMain fails); let a quoted value's braces count
+// toward flowKeyIn's depth (the {note: "}"} rows show) or let any quote
+// start one (it's {password: …} isn't shows).
 func TestStdout(t *testing.T) {
 	for _, line := range stdoutKept {
 		if got := Stdout(line); got != line {
@@ -497,6 +572,12 @@ var stdoutExempt = []string{
 	"credentials: ~/.aws/credentials",
 	"use --token to pass it",
 	"docker.io/library/node:22@sha256:" + strings.Repeat("0f", 32),
+	// #996: a descriptor key in a flow mapping and after a declaration; and
+	// (Gate 2) a flow value of undefined, as node prints an object, or a mask.
+	"{token_type: bearer}",
+	"{ code: 'E401', token: undefined }",
+	"{Name:foo, Token:***}",
+	`const tokenType = "bearer"`,
 }
 
 // TestText_KeepsWithholdingStdoutExemptions: Stdout's exemptions for
@@ -614,6 +695,88 @@ func TestStdout_YAMLValueOnNextLine(t *testing.T) {
 	}
 }
 
+// TestStdout_MultiLineString: a credential key whose value opens a string
+// that does not close on the key's line holds the credential on the lines
+// after it (#991): a TOML multi-line basic ("""…""") or literal (three single quotes)
+// string, or a YAML double-quoted scalar. Every line through the one that
+// closes the string is withheld; an empty line inside one carries nothing and
+// stays empty; with no closing delimiter the rest of the text is withheld.
+// Text and Stdout agree on every case.
+//
+// Mutations that turn it red: drop openString from stdoutWithheld (the lines
+// after every opener show); drop the inString arm (the same); drop the
+// stripEscapes retry in openString (the colored key's value shows); read
+// '\' as no escape in a basic string (SEKRIT2 after the escaped """ shows,
+// and the YAML escaped-quote row's "more" line shows); read '\' as an escape
+// in a literal string (the line after a backslash and the closer is withheld); skip the escaped
+// '\' itself (the line after a\\""" is withheld); search for the closer from
+// the opener rather than past it (password = """ closes on its own line,
+// so SEKRIT shows); drop the YAML arm (the YAML rows show) or its node
+// property skip (the !!str row shows); open on any key (the description
+// row is withheld) or ignore Stdout's descriptor exemption (token_type's
+// string is withheld by Stdout); drop Stdout's scan from Text (the
+// token_type-then-password case: Text keeps SEKRIT, which Stdout withholds);
+// accept no bare '=' before the delimiter (password=""" shows SEKRIT); end the
+// string on a closer the line as it is shows but its escape-stripped views do
+// not (the OSC-body closer row's SEKRIT2 shows).
+func TestStdout_MultiLineString(t *testing.T) {
+	m := Marker
+	for _, c := range []struct{ in, want string }{
+		{"password = \"\"\"\n  SEKRIT\n  more\"\"\"\nafter", m + "\n" + m + "\n" + m + "\nafter"},
+		{"token = '''\nSEKRIT\n'''\nafter", m + "\n" + m + "\n" + m + "\nafter"},
+		{"password = \"\"\"SEKRIT\nmore\n\"\"\"", m + "\n" + m + "\n" + m},
+		{"  \"api_key\" = \"\"\"\nSEKRIT\n\"\"\"\nafter", m + "\n" + m + "\n" + m + "\nafter"},
+		{"password = \"\"\"\nSEKRIT\n\nmore\n\"\"\"\nafter", m + "\n" + m + "\n\n" + m + "\n" + m + "\nafter"},
+		{"password = \"\"\"\nSEK\\\"\"\"RIT\nSEKRIT2\n\"\"\"\nafter", m + "\n" + m + "\n" + m + "\n" + m + "\nafter"},
+		{"password = \"\"\"\na\\\\\"\"\"\nafter", m + "\n" + m + "\nafter"},
+		{"token = '''\na\\'''\nafter", m + "\n" + m + "\nafter"},
+		{"password = \"\"\"x\"\"\"\nafter", m + "\nafter"},
+		{"password = \"\"\"\nSEKRIT\nmore", m + "\n" + m + "\n" + m},
+		{"password = \"\"\"\r\nSEKRIT\r\n\"\"\"\r\nafter", m + "\n" + m + "\n" + m + "\nafter"},
+		{"\x1b[1mpassword\x1b[0m = \"\"\"\nSEKRIT\n\"\"\"\nafter", m + "\n" + m + "\n" + m + "\nafter"},
+		{"private_key = '''\n-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n'''\nafter", m + "\n" + m + "\n" + m + "\n" + m + "\n" + m + "\nafter"},
+		{"password: \"a\n  SEKRIT\"\nafter", m + "\n" + m + "\nafter"},
+		{"  - token: \"a\n    SEK\\\"RIT\n    more\"\nafter", m + "\n" + m + "\n" + m + "\nafter"},
+		{"password: \"a\\\\\"\nafter", m + "\nafter"},
+		{"password: \"abc\"\nafter", m + "\nafter"},
+		{"password: !!str \"a\n  SEKRIT\"\nafter", m + "\n" + m + "\nafter"},
+		{"password: \"a\n  b\n  c", m + "\n" + m + "\n" + m},
+		// Gate 2: no blank around the '=' (valid TOML), or one before it
+		// only, and Python's PASSWORD = """ spelled bare.
+		{"password=\"\"\"\nSEKRIT\n\"\"\"\nafter", m + "\n" + m + "\n" + m + "\nafter"},
+		{"password='''\nSEKRIT\n'''\nafter", m + "\n" + m + "\n" + m + "\nafter"},
+		{"password =\"\"\"\nSEKRIT\n\"\"\"\nafter", m + "\n" + m + "\n" + m + "\nafter"},
+		{"PASSWORD=\"\"\"\nSEKRIT\n\"\"\"\nafter", m + "\n" + m + "\n" + m + "\nafter"},
+		// Gate 2: a closer seen only as the line is written, inside an OSC
+		// body a terminal does not show, does not end the string; nor does
+		// one seen only once the escapes are stripped.
+		{"password = \"\"\"\n\x1b]8;;\"\"\"\aSEKRIT\nSEKRIT2\n\"\"\"\nafter", m + "\n" + m + "\n" + m + "\n" + m + "\nafter"},
+		{"password = \"\"\"\nSEKRIT\"\"\x1b[0m\"\nSEKRIT2\n\"\"\"\nafter", m + "\n" + m + "\n" + m + "\n" + m + "\nafter"},
+		{"description = \"\"\"\ntext\n\"\"\"", "description = \"\"\"\ntext\n\"\"\""},
+		{"summary: \"a\n  text\"", "summary: \"a\n  text\""},
+	} {
+		if got := Stdout(c.in); got != c.want {
+			t.Errorf("Stdout(%q) = %q, want %q", c.in, got, c.want)
+		}
+		if got := Text(c.in); got != c.want {
+			t.Errorf("Text(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// A descriptor key opens no string in Stdout; Text, with no exemptions,
+	// withholds through the closer.
+	in := "token_type = \"\"\"\nbearer\n\"\"\"\nafter"
+	if got := Stdout(in); got != in {
+		t.Errorf("Stdout(%q) = %q, want it kept", in, got)
+	}
+	if got, want := Text(in), m+"\n"+m+"\n"+m+"\nafter"; got != want {
+		t.Errorf("Text(%q) = %q, want %q", in, got, want)
+	}
+	// Text reads the second line as the descriptor's string closing, Stdout
+	// as a key opening one. Text must still withhold every line Stdout does.
+	checkStdoutWithinText(t, "token_type = \"\"\"\npassword = \"\"\"\nSEKRIT\n\"\"\"")
+	checkStdoutWithinText(t, "token_type:\n  a\n  password: \"x\nSEKRIT\"")
+}
+
 // descriptorRows are a key per keyDescriptors entry, each a credential word
 // then the descriptor, with a value that carries something: Stdout keeps
 // each (#983 item 3) and Text withholds it.
@@ -722,6 +885,49 @@ func adversarialStdout(n int) []string {
 		strings.Repeat("password= \"x\"\n", n/14),
 		strings.Repeat("a_secret_id: x\n", n/15),
 		"token" + strings.Repeat("_secret", n/7) + "_id: x",
+		// #991: an unclosed multi-line string over many lines, many short
+		// ones, an opener line of escapes, a YAML scalar of backslashes, and
+		// YAML openers each closed by the next.
+		"password = \"\"\"\n" + strings.Repeat("a\n", n/2),
+		strings.Repeat("password = \"\"\"\nx\n\"\"\"\n", n/22),
+		"password = \"\"\"" + strings.Repeat("\\\"", n/2),
+		"password: \"" + strings.Repeat("\\", n),
+		strings.Repeat("token: \"a\n", n/10),
+		"token = '''\n" + strings.Repeat("''", n/2),
+		"password = \"\"\"" + strings.Repeat("\"\"a", n/3),
+		"password = \"\"\"\n" + strings.Repeat("\"\"a", n/3),
+		"password: \"" + strings.Repeat("a", n),
+		// #992: digest words with a repository path, and one long name.
+		strings.Repeat("r/a:1@sha256:"+strings.Repeat("0f", 32)+" ", n/78),
+		"a:1" + strings.Repeat("x", n) + "/b@sha256:" + strings.Repeat("0f", 32),
+		// #996: nested and long flow mappings, a run of keys with no value,
+		// non-CSI/OSC escapes and unterminated DCS and APC strings, crafted
+		// CSI finals, and runs of declaration keywords and blanks.
+		strings.Repeat("{password: ", n/11),
+		"{" + strings.Repeat("password: x,", n/12),
+		"{" + strings.Repeat("a: ", n/3),
+		"{" + strings.Repeat(" ", n) + "token:",
+		strings.Repeat("}{", n/2) + "a:",
+		strings.Repeat("\x1b(", n/2),
+		strings.Repeat("\x1b(B", n/3),
+		"\x1b" + strings.Repeat(" ", n),
+		strings.Repeat("\x1bP", n/2),
+		"\x1b_" + strings.Repeat("a", n),
+		strings.Repeat("\x1b[1g", n/4) + "x",
+		strings.Repeat("export ", n/7),
+		"const" + strings.Repeat(" ", n) + "token = x",
+		"export" + strings.Repeat("\t", n) + "let token = x",
+		// Gate 2: unclosed quotes that each start a value in a flow
+		// mapping, blank runs before quotes, and quoted values holding
+		// braces; escape strings, lone terminators and BELs for the string
+		// body view; and closers split by escapes inside a string.
+		"{a:" + strings.Repeat(",\"", n/2),
+		"{a:" + strings.Repeat(", '", n/3),
+		"{" + strings.Repeat(" ", n) + "\"",
+		strings.Repeat("{a: \"}\", ", n/8),
+		strings.Repeat("\x1bP\x1b[1m", n/6),
+		strings.Repeat("\x1b\\\a", n/3),
+		"password = \"\"\"\n" + strings.Repeat("\"\x1b[0m\"\"\n", n/8),
 	}
 }
 
