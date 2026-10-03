@@ -317,7 +317,7 @@ func newEnvSetCmd(client *envpkg.Client, sopsClient sopsSetter, clip *clippkg.Cl
 	var useSops bool
 
 	cmd := &cobra.Command{
-		Use:   "set KEY",
+		Use:   "set <KEY>",
 		Short: "Set KEY's value — piped stdin, a no-echo prompt, or --clipboard; never argv",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -515,7 +515,7 @@ func newEnvGetCmd(client *envpkg.Client, file *string, anyFile *bool, th theme.T
 	var clipboard bool
 
 	cmd := &cobra.Command{
-		Use:   "get KEY",
+		Use:   "get <KEY>",
 		Short: "Copy KEY's value to the clipboard — requires --clipboard; no print path exists",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
