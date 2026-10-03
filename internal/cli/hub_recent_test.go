@@ -119,3 +119,20 @@ func TestRecentCommands_PinnedModulesStayOut(t *testing.T) {
 		t.Errorf("recentCommands = %v, want only [doctor]: pinned modules have rows already", got)
 	}
 }
+
+// TestRecentCommands_NonModuleVerbsStayOut pins that a root child with no hub
+// tier — menu, version — never fills the recent section, however often it
+// ran: it is host plumbing, not a hub row. Mutation that turns it red: drop
+// the tier check in recentCommands.
+func TestRecentCommands_NonModuleVerbsStayOut(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	entries := historyOf(
+		"forgectl pr prs",
+		"forgectl menu", "forgectl menu --json", "forgectl menu",
+		"forgectl version", "forgectl version", "forgectl version --json",
+	)
+	got := cmdPaths(recentCommands(root, entries, 3))
+	if strings.Join(got, "|") != "pr prs" {
+		t.Errorf("recentCommands = %v, want only [pr prs]", got)
+	}
+}

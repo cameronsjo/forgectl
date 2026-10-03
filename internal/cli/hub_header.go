@@ -310,11 +310,11 @@ func hubArgSources() map[string]tui.ArgSource {
 	}
 }
 
-// hubRunOptions assembles everything the hub screen shows: its rows, its
-// header, and its picker sources. The shell-history read that ranks the
-// recent section runs beside the header sources under the same budget; if
-// it has not finished by then, the hub opens without a recent section.
-func hubRunOptions(ctx context.Context, deps module.Deps, root *cobra.Command, client *tmux.Client) tui.RunOptions {
+// hubState reads the hub's local state: its header, and the shell history that
+// ranks the recent section. The history read runs beside the header sources
+// under the same budget; if it has not finished by then, entries is nil and
+// the hub has no recent section. The TUI hub and `menu` both read through it.
+func hubState(ctx context.Context, deps module.Deps, client *tmux.Client) (tui.HubHeader, []history.Entry) {
 	deadline := time.Now().Add(hubHeaderBudget)
 	historyDone := make(chan []history.Entry, 1)
 	go func() { historyDone <- readShellHistory() }()
@@ -329,7 +329,13 @@ func hubRunOptions(ctx context.Context, deps module.Deps, root *cobra.Command, c
 	case <-timer.C:
 		slog.Debug("Hub opened without a recent section; shell history took longer than the budget.")
 	}
+	return header, entries
+}
 
+// hubRunOptions assembles everything the hub screen shows: its rows, its
+// header, and its picker sources.
+func hubRunOptions(ctx context.Context, deps module.Deps, root *cobra.Command, client *tmux.Client) tui.RunOptions {
+	header, entries := hubState(ctx, deps, client)
 	return tui.RunOptions{
 		Hub:        buildHub(root, configFilePresent(), recentCommands(root, entries, hubRecentLimit)),
 		Header:     header,

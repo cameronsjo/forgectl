@@ -1,0 +1,18 @@
+forgectl · forgectl @ main · 3 tmux · 1 review running, 2 queued
+
+pinned
+  forgectl docs  read project docs
+    forgectl docs list [dir|file ...]  list the indexed docs
+    forgectl docs pin NAME  pin a doc
+    forgectl docs read <file>  read one doc
+  forgectl pr <ref>  review a pull request
+    forgectl pr findings  list or reclaim findings
+      forgectl pr findings list  list findings directories
+    forgectl pr prs  list open PRs
+    forgectl pr reviewed [<ref>]  mark a PR reviewed
+
+recent
+  forgectl pr prs  list open PRs
+
+all commands (1)
+  forgectl doctor  check the install
