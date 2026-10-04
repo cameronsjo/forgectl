@@ -15,8 +15,9 @@ import (
 // group that owns the terminal; a pane is idle when it equals shell.
 func processInfoJSON(foreground, shell int, names ...string) []byte {
 	type proc struct {
-		Name string `json:"name"`
-		PID  int    `json:"pid"`
+		Name string   `json:"name"`
+		PID  int      `json:"pid"`
+		Argv []string `json:"argv"`
 	}
 	procs := make([]proc, 0, len(names))
 	for i, n := range names {
@@ -24,7 +25,7 @@ func processInfoJSON(foreground, shell int, names ...string) []byte {
 		if i > 0 {
 			pid = foreground + i
 		}
-		procs = append(procs, proc{Name: n, PID: pid})
+		procs = append(procs, proc{Name: n, PID: pid, Argv: []string{"-" + n}})
 	}
 	raw, err := json.Marshal(map[string]any{
 		"result": map[string]any{
@@ -116,6 +117,7 @@ func TestAnUnreadableProcessInfoFailsClosed(t *testing.T) {
 				return stdout(body), nil
 			})
 			a := newTestAdapter(t, run, nil)
+			a.idleInterval = 0
 			spec, _ := newSpec(t)
 
 			res := a.Start(context.Background(), spec)
@@ -199,10 +201,7 @@ func TestARootPaneRunAsAnAgentNeverReceivesTheBootstrap(t *testing.T) {
 
 func TestALoginShellLeaderIsIdle(t *testing.T) {
 	info := processInfo{ForegroundGroup: 7, ShellPID: 7}
-	info.Processes = append(info.Processes, struct {
-		Name string `json:"name"`
-		PID  int    `json:"pid"`
-	}{Name: "-zsh", PID: 7})
+	info.Processes = append(info.Processes, paneProcess{Name: "-zsh", PID: 7, Argv: []string{"-zsh"}})
 	if !info.idle() {
 		t.Error("a login shell (-zsh) leading its own pane is not idle")
 	}
@@ -255,5 +254,77 @@ func TestAShellWrapperRunningAnAgentNeverReceivesTheBootstrap(t *testing.T) {
 	}
 	if !strings.Contains(warnings.String(), `"claude"`) {
 		t.Errorf("warning %q does not name the agent behind the wrapper", warnings.String())
+	}
+}
+
+// TestAShellWrapperStillSettingUpNeverReceivesTheBootstrap is the third-pass
+// security finding: before `bash -lc 'source env.sh; claude'` starts its agent,
+// the shell is alone in the foreground. It never reads the pane, so a typed
+// line would wait for the agent. Its argv says so.
+func TestAShellWrapperStillSettingUpNeverReceivesTheBootstrap(t *testing.T) {
+	body := []byte(`{"result":{"process_info":{"foreground_process_group_id":4242,"shell_pid":4242,` +
+		`"foreground_processes":[{"name":"bash","pid":4242,"argv":["bash","-lc","source env.sh; claude"]}]}}}`)
+	run := newRunner().on(exec.KindHerdrPaneInspect, func() (exec.SensitiveResult, error) {
+		return stdout(body), nil
+	})
+	a := newTestAdapter(t, run, nil)
+	a.idleInterval = 0
+	spec, _ := newSpec(t)
+
+	res := a.Start(context.Background(), spec)
+
+	if bootstrapSent(run) {
+		t.Fatal("the bootstrap was typed into a shell running a command string")
+	}
+	if causeClass(res) != backend.FailureTargetBusy {
+		t.Errorf("class = %v, want FailureTargetBusy", causeClass(res))
+	}
+}
+
+func TestInteractiveArgv(t *testing.T) {
+	for _, tc := range []struct {
+		argv []string
+		want bool
+	}{
+		{[]string{"-zsh"}, true},
+		{[]string{"zsh"}, true},
+		{[]string{"bash", "-l"}, true},
+		{[]string{"zsh", "-i", "--login"}, true},
+		{nil, false},
+		{[]string{"bash", "-c", "claude"}, false},
+		{[]string{"bash", "-lc", "claude"}, false},
+		{[]string{"zsh", "-ic", "claude"}, false},
+		{[]string{"fish", "--command", "claude"}, false},
+		{[]string{"fish", "--command=claude"}, false},
+		{[]string{"sh", "script.sh"}, false},
+		{[]string{"sh", "-"}, false},
+		{[]string{"sh", "--", "script.sh"}, false},
+	} {
+		if got := interactiveArgv(tc.argv); got != tc.want {
+			t.Errorf("interactiveArgv(%q) = %v, want %v", tc.argv, got, tc.want)
+		}
+	}
+}
+
+// TestAShellThatStartsLateStillReceivesTheBootstrap: a pane whose shell has
+// not started reports no shell pid; that is re-read, not refused.
+func TestAShellThatStartsLateStillReceivesTheBootstrap(t *testing.T) {
+	reads := 0
+	run := newRunner().on(exec.KindHerdrPaneInspect, func() (exec.SensitiveResult, error) {
+		reads++
+		if reads == 1 {
+			return stdout(processInfoJSON(0, 0)), nil
+		}
+		return stdout(processInfoJSON(4242, 4242, "zsh")), nil
+	})
+	a := newTestAdapter(t, run, nil)
+	a.idleInterval = 0
+	spec, _ := newSpec(t)
+
+	if res := a.Start(context.Background(), spec); res.Failed() {
+		t.Fatalf("a late shell failed the launch: %v", causeClass(res))
+	}
+	if !bootstrapSent(run) {
+		t.Fatal("the bootstrap was not sent once the shell appeared")
 	}
 }

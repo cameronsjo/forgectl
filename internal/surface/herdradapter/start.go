@@ -200,6 +200,10 @@ func (a *Adapter) rootPaneIdle(ctx context.Context, pane string) *backend.StartC
 			return nil
 		}
 	}
+	if info.ShellPID <= 0 || info.ForegroundGroup <= 0 {
+		cause := backend.NewStartCause(backend.FailureMalformedResponse, errNoShell)
+		return &cause
+	}
 	// The process name comes from herdr and ultimately from whatever runs in
 	// the pane, so it is quoted for the terminal. Only the name: the full
 	// command line can carry arguments the operator never meant to print.
@@ -225,12 +229,17 @@ var ErrRootPaneBusy = errors.New("herdradapter: the root pane is not an idle she
 
 // processInfo is the part of `pane process-info` this package reads.
 type processInfo struct {
-	ForegroundGroup int `json:"foreground_process_group_id"`
-	ShellPID        int `json:"shell_pid"`
-	Processes       []struct {
-		Name string `json:"name"`
-		PID  int    `json:"pid"`
-	} `json:"foreground_processes"`
+	ForegroundGroup int           `json:"foreground_process_group_id"`
+	ShellPID        int           `json:"shell_pid"`
+	Processes       []paneProcess `json:"foreground_processes"`
+}
+
+// paneProcess is one foreground process. Argv is what tells an interactive
+// shell from one running a command string.
+type paneProcess struct {
+	Name string   `json:"name"`
+	PID  int      `json:"pid"`
+	Argv []string `json:"argv"`
 }
 
 // knownShells are the process names an idle root pane may show. herdr's
@@ -260,7 +269,8 @@ func (p processInfo) idle() bool {
 	for _, proc := range p.Processes {
 		if proc.PID == p.ShellPID {
 			// A login shell can show as "-zsh".
-			leaderIsShell = slices.Contains(knownShells, strings.TrimPrefix(filepath.Base(proc.Name), "-"))
+			leaderIsShell = slices.Contains(knownShells, strings.TrimPrefix(filepath.Base(proc.Name), "-")) &&
+				interactiveArgv(proc.Argv)
 		}
 	}
 	return leaderIsShell
@@ -304,11 +314,18 @@ func parseProcessInfo(out exec.BoundedOutput) (processInfo, error) {
 		return processInfo{}, errors.New("the herdr process-info reply was not readable JSON")
 	}
 	info := reply.Result.ProcessInfo
-	if info == nil || info.ShellPID <= 0 || info.ForegroundGroup <= 0 {
-		return processInfo{}, errors.New("the herdr process-info reply named no shell or foreground group")
+	if info == nil {
+		return processInfo{}, errors.New("the herdr process-info reply had no process_info")
 	}
+	// A zero shell pid or foreground group is a pane whose shell has not
+	// started yet. It is not idle (idle refuses it) and it is re-read; only a
+	// pane still without a shell when the reads run out is refused as
+	// malformed.
 	return *info, nil
 }
+
+// errNoShell reports a pane that never showed a shell within the re-reads.
+var errNoShell = errors.New("the herdr process-info reply named no shell or foreground group")
 
 // reconcile runs EXACTLY ONE listing to settle whether the create landed.
 //
@@ -921,4 +938,32 @@ func (a *Adapter) classifyRunError(err error, res exec.SensitiveResult) backend.
 		return backend.NewStartCause(backend.FailureIncompatible, err)
 	}
 	return backend.NewStartCause(backend.FailureUnavailable, err)
+}
+
+// interactiveArgv reports a shell started to read commands from its terminal:
+// argv present, and every argument after the program name a flag that does not
+// take a command string. `bash -lc '...; claude'` sits at its own setup with
+// only the shell in the foreground, but it never reads the pane; a line typed
+// there waits in the terminal buffer for the agent the string starts. A
+// missing argv cannot be judged and is not interactive.
+func interactiveArgv(argv []string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	for _, arg := range argv[1:] {
+		switch {
+		case arg == "-" || arg == "--" || !strings.HasPrefix(arg, "-"):
+			// A script operand, stdin marker or end of options: the shell runs
+			// something other than the terminal.
+			return false
+		case strings.HasPrefix(arg, "--"):
+			if arg == "--command" || strings.HasPrefix(arg, "--command=") {
+				return false
+			}
+		case strings.ContainsRune(arg[1:], 'c'):
+			// A short-flag cluster carrying -c, as in -c, -lc or -ic.
+			return false
+		}
+	}
+	return true
 }
