@@ -37,7 +37,10 @@ type RestartRequest struct {
 	// a stop and its relaunch. A caller that already owns signals leaves it off.
 	HandleSignals bool
 
-	Lookup    func() PaneLookup
+	Lookup func() PaneLookup
+	// Panes reads herdr's pane list, which finds each session's pane by its
+	// session id; Lookup's environment value is the fallback.
+	Panes     func(ctx context.Context) ([]HerdrPane, error)
 	Binary    func() (string, error)
 	Env       func(forgectl string) (RestartEnv, error)
 	Ancestors func() map[int]bool
@@ -89,7 +92,16 @@ func RestartOutdated(ctx context.Context, req RestartRequest) (RestartResult, er
 	if err != nil {
 		return RestartResult{}, err
 	}
-	plan := SkipAncestors(PlanRestart(list, req.Only), req.Ancestors())
+	// One pane list per run, read before planning. A pane moves only when the
+	// herdr server restarts; one restarting mid-run makes the pane checks
+	// refuse or wait, as they would for any stale id, so re-reading the list
+	// every poll would buy nothing for the extra calls.
+	var ambiguous map[string][]string
+	if len(list) > 0 {
+		panes, listErr := req.Panes(ctx)
+		list, ambiguous = resolvePanes(list, panes, listErr)
+	}
+	plan := SkipAncestors(SkipAmbiguousPanes(PlanRestart(list, req.Only), ambiguous), req.Ancestors())
 
 	if req.DryRun {
 		env, err := req.Env("")
@@ -143,6 +155,9 @@ func RestartOutdated(ctx context.Context, req RestartRequest) (RestartResult, er
 func (r *RestartRequest) fill() {
 	if r.Lookup == nil {
 		r.Lookup = PaneFor
+	}
+	if r.Panes == nil {
+		r.Panes = SystemRestartEnv{runner: r.Runner, herdr: r.HerdrBin}.ListPanes
 	}
 	if r.Binary == nil {
 		r.Binary = RelaunchBinary
@@ -227,7 +242,7 @@ func PreviewPlan(ctx context.Context, env RestartEnv, plan []RestartPlanItem) []
 			default:
 				line.Action, line.Detail = "refuse", c.Reason+"; by hand: "+ManualResume(item.SessionID)
 			}
-			line.Detail += fmt.Sprintf(" (pane %s, pid %d)", item.Session.Pane, item.Session.Pid)
+			line.Detail += fmt.Sprintf(" (pane %s, pid %d)", paneLabel(item.Session), item.Session.Pid)
 		}
 		lines = append(lines, line)
 	}

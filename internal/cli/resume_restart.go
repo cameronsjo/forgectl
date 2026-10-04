@@ -31,6 +31,16 @@ installed claude: it stops each one and resumes it in the same herdr pane with
 ` + "`forgectl resume <id>`" + `, so the configured launch profile and cwd apply and the
 conversation comes back. --outdated is required; it is the only selector today.
 
+Each session's pane is found by session id: one ` + "`herdr pane list`" + ` per run, and
+the pane herdr labels "claude" with that session id is the one checked and
+relaunched into. The process's HERDR_PANE_ID is the fallback, used when no
+pane carries the session or the list call fails. A herdr server restart
+renumbers every pane, so a long-running session's HERDR_PANE_ID can name a
+pane that no longer exists. A pane that differs from the environment's shows
+as "pane <found> (found by session; env said <old>)". A session herdr labels
+in two panes is refused. The label alone is never trusted: check 3 below
+still runs against the found pane.
+
   forgectl resume restart --outdated --dry-run        show the plan, touch nothing
   forgectl resume restart --outdated                  restart all, waiting for each to be idle
   forgectl resume restart --outdated --session <id>   restart only that session (repeatable)
@@ -55,10 +65,11 @@ before the signal:
 
 Failing 2 or 4 waits and re-checks every few seconds, up to --timeout (default
 30m). Failing 1 or 3 is reported and never signalled; a herdr error other than
-"pane not found" waits instead. A session with no herdr pane in its
-environment, whose version cannot be compared, or that this run is itself
-running inside (its pid is an ancestor of this process, as when an agent's
-shell tool runs the command) is reported and left alone.
+"pane not found" waits instead. A session with no herdr pane (none found by
+session and none in its environment), whose version cannot be compared, or
+that this run is itself running inside (its pid is an ancestor of this
+process, as when an agent's shell tool runs the command) is reported and left
+alone.
 
 Keystrokes typed into a session in the instant between the last screen read
 and the signal cannot be seen and are lost with the process; the window is a

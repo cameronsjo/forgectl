@@ -312,7 +312,7 @@ func attemptRestart(ctx context.Context, env RestartEnv, s OutdatedSession, opts
 // corrupt it. shellPID is the pane's shell as the last pre-stop check saw it;
 // the relaunch goes only to a pane still owned by that shell.
 func restartNow(ctx context.Context, env RestartEnv, s OutdatedSession, shellPID int, opts RestartOptions) RestartEvent {
-	opts.Progress(RestartEvent{SessionID: s.SessionID, State: StateRestarting, Detail: fmt.Sprintf("stopping pid %d in pane %s", s.Pid, s.Pane)})
+	opts.Progress(RestartEvent{SessionID: s.SessionID, State: StateRestarting, Detail: fmt.Sprintf("stopping pid %d in pane %s", s.Pid, paneLabel(s))})
 	manual := ManualResume(s.SessionID)
 	fail := func(format string, a ...any) RestartEvent {
 		return RestartEvent{SessionID: s.SessionID, State: StateFailed, Detail: fmt.Sprintf(format, a...), Manual: manual}
