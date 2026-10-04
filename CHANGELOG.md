@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.25.0](https://github.com/cameronsjo/forgectl/compare/v0.24.0...v0.25.0) (2026-10-04)
+
+
+### Features
+
+* **hub:** add the `forgectl:hub-no-picker` command annotation, which keeps the hub's inline argument picker off a command whose argument is another CLI's subcommand ([ef2512b](https://github.com/cameronsjo/forgectl/commit/ef2512b5d45ec8fb5c17b7e925eb05e0271f4115))
+* **menu:** add `forgectl menu` and `menu --json`, the bare-forgectl hub's status line, pinned, recent and every command as text or one JSON document, with no TTY ([ef2512b](https://github.com/cameronsjo/forgectl/commit/ef2512b5d45ec8fb5c17b7e925eb05e0271f4115))
+* **review:** flag releasable commits with no release PR and a stuck release workflow ([#1034](https://github.com/cameronsjo/forgectl/issues/1034)) ([82390a0](https://github.com/cameronsjo/forgectl/commit/82390a0fbbffb616f40bad7985ab30cbbe22ba4d))
+* **tasks:** close a board task from the CLI and MCP ([#1026](https://github.com/cameronsjo/forgectl/issues/1026)) ([ce4bfca](https://github.com/cameronsjo/forgectl/commit/ce4bfca959a8717aafbee4cee0f5e7e4036ca932))
+
+
+### Bug Fixes
+
+* **redact:** stop Stdout keeping a scheme-less user:pass@sha256 word; a digest ref must carry a repository path ([#992](https://github.com/cameronsjo/forgectl/issues/992)) ([1a4998b](https://github.com/cameronsjo/forgectl/commit/1a4998b2808867da51181e201b48274757389dbc))
+* **redact:** withhold credentials in YAML flow mappings, after non-CSI/OSC escapes and inside escape strings, and after const/var/let/export declarations ([#996](https://github.com/cameronsjo/forgectl/issues/996)) ([1a4998b](https://github.com/cameronsjo/forgectl/commit/1a4998b2808867da51181e201b48274757389dbc))
+* **redact:** withhold the lines inside a TOML multi-line string or YAML double-quoted scalar that a credential key opens, through its closing delimiter ([#991](https://github.com/cameronsjo/forgectl/issues/991)) ([1a4998b](https://github.com/cameronsjo/forgectl/commit/1a4998b2808867da51181e201b48274757389dbc))
+* **resume:** a restart that waits on or fails at a herdr pane, or cannot read a session's process identity, now says what the helper returned, so the update watcher's log records why a run waited ([a4b64cc](https://github.com/cameronsjo/forgectl/commit/a4b64cc6979f0e4308e4d07ffdc04e3b4be047aa))
+
 ## [0.24.0](https://github.com/cameronsjo/forgectl/compare/v0.23.0...v0.24.0) (2026-09-30)
 
 
