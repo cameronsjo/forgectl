@@ -1,9 +1,9 @@
 ---
-status: proposed
+status: approved
 branch: plan/herdr-coordinator
 approved_in: let-s-level-up-our-eager-owl
-approved_session_id: 3af13e43-fcc9-4812-a361-71b08655a291
-next: Cameron reviews the revised plan on forgectl#536; on approval, execute T1
+approved_session_id: 95a2c916-a3c7-4bd0-9c2b-be2a99c294e0
+next: T0 security review of the T0 file list, then T1 (start with the trust-inheritance check)
 ---
 
 # forgectl: a coordinator over herdr worker panes
