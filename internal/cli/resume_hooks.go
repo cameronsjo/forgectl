@@ -22,6 +22,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/notify"
 	"github.com/cameronsjo/forgectl/internal/resume"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -309,7 +310,10 @@ func hookRestart(deps module.Deps, out io.Writer, harness string) resume.Restart
 			Runner:   deps.Runner,
 			HerdrBin: herdr,
 			Options:  resume.RestartOptions{Timeout: timeout},
-			Progress: func(ev resume.RestartEvent) { printRestartEvent(out, ev) },
+			Progress: func(ev resume.RestartEvent) {
+				printRestartEvent(out, ev)
+				notifyRestartFailure(ctx, deps, ev)
+			},
 		}
 		if restartOverride != nil {
 			restartOverride(&req)
@@ -851,4 +855,28 @@ func hooksDoctorRow(configured int, longest time.Duration, cfgErr error, f hooks
 		return doctor.StateWarn, prefix + fmt.Sprintf("hook %s for %s ended %s — see `forgectl resume hooks status`", safeLabel(f.LastRun.Hook), safeLabel(f.LastRun.New), safeLabel(f.LastRun.Outcome))
 	}
 	return doctor.StateOK, prefix + describeAgent(st)
+}
+
+// hookNotify posts a desktop notification; a seam so tests can record the
+// call instead of running osascript.
+var hookNotify = func(ctx context.Context, deps module.Deps, title, body string) error {
+	return notify.New(deps.Runner).Notify(ctx, title, body)
+}
+
+// notifyRestartFailure tells the operator about a session the watcher could
+// not restart. The watcher runs with nobody watching its log, and a failed
+// restart can leave a session stopped: on 2026-10-04 a relaunch whose
+// `herdr pane run` hung left one down until someone read watcher.log. The
+// notification names the session and the command that resumes it.
+func notifyRestartFailure(ctx context.Context, deps module.Deps, ev resume.RestartEvent) {
+	if ev.State != resume.StateFailed {
+		return
+	}
+	body := ev.Detail
+	if ev.Manual != "" {
+		body = "Run: " + ev.Manual + " — " + ev.Detail
+	}
+	// A notification is a courtesy on top of the log line already written; a
+	// failure to post it must not change the run's outcome.
+	_ = hookNotify(ctx, deps, "forgectl: a session was not restarted", body)
 }

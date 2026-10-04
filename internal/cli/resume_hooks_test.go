@@ -492,3 +492,43 @@ func TestResumeHooksRejectsTopLevelOnUpdate(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// A restart the watcher could not finish posts a notification naming the
+// by-hand command; a resumed or waiting session posts nothing.
+func TestResumeHooksRestartFailureNotifies(t *testing.T) {
+	env := &cliRestartEnv{relaunchErr: errors.New("herdr call timed out")}
+	restartFixture(t, env)
+	var posted []string
+	prev := hookNotify
+	hookNotify = func(_ context.Context, _ module.Deps, title, body string) error {
+		posted = append(posted, title+" | "+body)
+		return nil
+	}
+	t.Cleanup(func() { hookNotify = prev })
+	f := newHooksFixture(t)
+	cfg := "[[resume.on_update]]\nharness = \"claude\"\naction = \"restart\"\n"
+	f.version = "2.1.99"
+	if _, err := f.run(t, cfg, "run"); err != nil {
+		t.Fatal(err)
+	}
+	f.version = "2.1.100"
+	if _, err := f.run(t, cfg, "run"); err == nil {
+		t.Fatal("a failed relaunch must make the run incomplete")
+	}
+	if len(posted) != 1 || !strings.Contains(posted[0], "not restarted") || !strings.Contains(posted[0], "Run: forgectl resume ") {
+		t.Fatalf("notifications = %q; want one naming the by-hand command", posted)
+	}
+}
+
+func TestNotifyRestartFailureIgnoresOtherStates(t *testing.T) {
+	called := 0
+	prev := hookNotify
+	hookNotify = func(context.Context, module.Deps, string, string) error { called++; return nil }
+	t.Cleanup(func() { hookNotify = prev })
+	for _, st := range []resume.RestartState{resume.StateResumed, resume.StateWaiting, resume.StateSkipped, resume.StateLeft} {
+		notifyRestartFailure(context.Background(), module.Deps{}, resume.RestartEvent{State: st})
+	}
+	if called != 0 {
+		t.Fatalf("posted %d notifications for non-failed states", called)
+	}
+}
