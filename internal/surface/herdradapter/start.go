@@ -239,24 +239,42 @@ type processInfo struct {
 // its own foreground with the agent as leader. The name check refuses that.
 var knownShells = []string{"sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "nu", "xonsh", "elvish", "pwsh"}
 
-// idle reports a pane whose foreground belongs to its own process, and that
-// process is a shell. A leader missing from the listing is not idle.
+// idle reports a pane whose foreground group is its own process alone, and
+// that process is a shell. A leader missing from the listing is not idle.
+//
+// "Alone" is what refuses a wrapper: `bash -lc 'source env.sh; claude'` has no
+// job control, so the agent runs as a child inside the shell's own group, led
+// by a shell name. A prompt hook (direnv, starship) is also a child in that
+// group, but only for a moment; rootPaneIdle re-reads the pane, so a hook
+// delays the launch while an agent child refuses it.
 func (p processInfo) idle() bool {
 	if p.ShellPID <= 0 || p.ForegroundGroup != p.ShellPID {
 		return false
 	}
+	leaderIsShell := false
+	for _, proc := range p.Processes {
+		if proc.PID != p.ShellPID {
+			return false
+		}
+	}
 	for _, proc := range p.Processes {
 		if proc.PID == p.ShellPID {
 			// A login shell can show as "-zsh".
-			return slices.Contains(knownShells, strings.TrimPrefix(filepath.Base(proc.Name), "-"))
+			leaderIsShell = slices.Contains(knownShells, strings.TrimPrefix(filepath.Base(proc.Name), "-"))
 		}
 	}
-	return false
+	return leaderIsShell
 }
 
-// foregroundName names the process leading the foreground group, or the
-// first listed process when the leader is not listed.
+// foregroundName names what holds the pane: the first process that is not
+// the shell when there is one (an agent behind a shell wrapper), else the
+// group leader, else the first listed process.
 func (p processInfo) foregroundName() string {
+	for _, proc := range p.Processes {
+		if proc.PID != p.ShellPID && proc.PID != p.ForegroundGroup {
+			return proc.Name
+		}
+	}
 	for _, proc := range p.Processes {
 		if proc.PID == p.ForegroundGroup {
 			return proc.Name

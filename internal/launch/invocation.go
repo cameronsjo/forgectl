@@ -160,6 +160,10 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 		return Profile{}, fmt.Errorf("%w: %s has no permission or sandbox flag forgectl can pass", ErrWorkerPosture, p.Harness)
 	}
 	p.AllowDanger = false
+	// A worker edits its own worktree. Extra directories from the repo profile
+	// would let acceptEdits or workspace-write reach past it, so they are dropped
+	// until the worker profile (T5) decides otherwise.
+	p.AddDir = nil
 	return p, nil
 }
 

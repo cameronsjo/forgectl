@@ -163,6 +163,19 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 		}
 	})
 
+	t.Run("repo add_dir is dropped", func(t *testing.T) {
+		built, err := BuildInvocation(InvocationRequest{
+			Config: config.LaunchConfig{Defaults: config.LaunchDefaults{AddDir: []string{"/elsewhere"}}},
+			CWD:    target, Worker: true, Resolve: bin,
+		})
+		if err != nil {
+			t.Fatalf("BuildInvocation: %v", err)
+		}
+		if slices.Contains(built.Invocation.Args, "--add-dir") {
+			t.Errorf("worker argv %q reaches past its worktree", built.Invocation.Args)
+		}
+	})
+
 	for name, lc := range map[string]config.LaunchConfig{
 		"pi from the repo profile": {Projects: []config.LaunchProject{{Match: target, Harness: "pi"}}},
 		"bypassPermissions":        {Defaults: config.LaunchDefaults{PermissionMode: "bypassPermissions"}},

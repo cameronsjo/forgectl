@@ -47,13 +47,11 @@ func bootstrapSent(run *scriptedRunner) bool {
 	return sent
 }
 
-// TestAnIdleRootPaneReceivesTheBootstrap pins the shape measured on herdr
-// 0.9.1: a fresh pane lists prompt-hook children (env, direnv) inside the
-// shell's own process group. That is still idle, and refusing it would fail
-// every launch from a shell with prompt hooks.
+// TestAnIdleRootPaneReceivesTheBootstrap: a pane whose foreground group is the
+// shell alone is idle, and the inspection targets the pane the create reported.
 func TestAnIdleRootPaneReceivesTheBootstrap(t *testing.T) {
 	run := newRunner().on(exec.KindHerdrPaneInspect, func() (exec.SensitiveResult, error) {
-		return stdout(processInfoJSON(4242, 4242, "zsh", "direnv")), nil
+		return stdout(processInfoJSON(4242, 4242, "zsh")), nil
 	})
 	a := newTestAdapter(t, run, nil)
 	spec, _ := newSpec(t)
@@ -207,5 +205,55 @@ func TestALoginShellLeaderIsIdle(t *testing.T) {
 	}{Name: "-zsh", PID: 7})
 	if !info.idle() {
 		t.Error("a login shell (-zsh) leading its own pane is not idle")
+	}
+}
+
+// TestAPromptHookChildDelaysButDoesNotRefuse pins the shape measured on herdr
+// 0.9.1: a fresh pane briefly lists prompt-hook children (env, direnv) inside
+// the shell's own process group. The re-read waits them out.
+func TestAPromptHookChildDelaysButDoesNotRefuse(t *testing.T) {
+	reads := 0
+	run := newRunner().on(exec.KindHerdrPaneInspect, func() (exec.SensitiveResult, error) {
+		reads++
+		if reads == 1 {
+			return stdout(processInfoJSON(4242, 4242, "zsh", "direnv")), nil
+		}
+		return stdout(processInfoJSON(4242, 4242, "zsh")), nil
+	})
+	a := newTestAdapter(t, run, nil)
+	a.idleInterval = 0
+	spec, _ := newSpec(t)
+
+	if res := a.Start(context.Background(), spec); res.Failed() {
+		t.Fatalf("a hook child that cleared failed the launch: %v", causeClass(res))
+	}
+	if !bootstrapSent(run) {
+		t.Fatal("the bootstrap was not sent once the hook finished")
+	}
+}
+
+// TestAShellWrapperRunningAnAgentNeverReceivesTheBootstrap is the second-pass
+// security finding: `bash -lc 'source env.sh; claude'` has no job control, so
+// the agent is a child inside the shell's own group, led by a shell name. It
+// never clears, so the launch is refused and the warning names the agent.
+func TestAShellWrapperRunningAnAgentNeverReceivesTheBootstrap(t *testing.T) {
+	run := newRunner().on(exec.KindHerdrPaneInspect, func() (exec.SensitiveResult, error) {
+		return stdout(processInfoJSON(4242, 4242, "bash", "claude")), nil
+	})
+	var warnings bytes.Buffer
+	a := newTestAdapter(t, run, nil, WithWarnings(&warnings))
+	a.idleInterval = 0
+	spec, _ := newSpec(t)
+
+	res := a.Start(context.Background(), spec)
+
+	if bootstrapSent(run) {
+		t.Fatal("the bootstrap was typed into a shell wrapper running an agent")
+	}
+	if causeClass(res) != backend.FailureTargetBusy {
+		t.Errorf("class = %v, want FailureTargetBusy", causeClass(res))
+	}
+	if !strings.Contains(warnings.String(), `"claude"`) {
+		t.Errorf("warning %q does not name the agent behind the wrapper", warnings.String())
 	}
 }
