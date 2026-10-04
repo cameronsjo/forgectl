@@ -357,7 +357,7 @@ func restartNow(ctx context.Context, env RestartEnv, s OutdatedSession, shellPID
 	}
 	if !waitUntil(opts, opts.ReadyWait, paneReady) {
 		if paneErr != nil {
-			return fail("stopped, but herdr can no longer show pane %s; not relaunched", s.Pane)
+			return fail("stopped, but herdr can no longer show pane %s (%s); not relaunched", s.Pane, clipDetail(paneErr.Error()))
 		}
 		return fail("stopped, but pane %s's own shell did not take the foreground back within %s; not relaunched", s.Pane, opts.ReadyWait)
 	}

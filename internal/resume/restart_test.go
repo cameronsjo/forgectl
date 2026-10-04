@@ -1,6 +1,7 @@
 package resume
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
 // Screens are built from the layout measured on Claude Code 2.1.283/2.1.285
@@ -173,7 +176,7 @@ func TestEvaluate(t *testing.T) {
 		{"pid reused by another session", func(_ *OutdatedSession, o *Observation) { o.Entry.SessionID = "ffff0000" }, Refused, "another session"},
 		{"no procStart recorded", func(s *OutdatedSession, o *Observation) { s.ProcStart, o.Entry.ProcStart = "", "" }, Refused, "no procStart"},
 		{"procStart changed", func(_ *OutdatedSession, o *Observation) { o.Entry.ProcStart = "Wed Sep 30 02:00:00 2026" }, Refused, "start time changed"},
-		{"identity unreadable", func(_ *OutdatedSession, o *Observation) { o.ProcErr = errors.New("EPERM") }, Refused, "could not read"},
+		{"identity unreadable", func(_ *OutdatedSession, o *Observation) { o.ProcErr = errors.New("EPERM") }, Refused, "start time (EPERM)"},
 		{"pid reused by a non-claude process", func(_ *OutdatedSession, o *Observation) { o.Proc.ExecPath = "/bin/sleep" }, Refused, "not running a claude binary"},
 		{"pid reused by a claude that has not written its file yet", func(_ *OutdatedSession, o *Observation) { o.Proc.Start = o.Proc.Start.Add(time.Minute) }, Refused, "different time"},
 		{"procStart unparseable", func(s *OutdatedSession, o *Observation) { s.ProcStart, o.Entry.ProcStart = "garbage", "garbage" }, Refused, "does not parse"},
@@ -462,8 +465,33 @@ func TestClipDetail(t *testing.T) {
 	if got := clipDetail("herdr pane get:\n  {\"error\":  \"x\"}"); got != `herdr pane get: {"error": "x"}` {
 		t.Errorf("not flattened: %q", got)
 	}
-	long := strings.Repeat("é", detailLimit+50)
-	if got := []rune(clipDetail(long)); len(got) != detailLimit+1 || got[detailLimit] != '…' {
-		t.Errorf("clipped to %d runes, want %d plus an ellipsis", len(got), detailLimit)
+	long := strings.Repeat("a", detailHead) + strings.Repeat("é", detailLimit) + "THE CAUSE"
+	got := clipDetail(long)
+	if r := []rune(got); len(r) != detailLimit {
+		t.Errorf("clipped to %d runes, want %d", len(r), detailLimit)
+	}
+	if !strings.HasPrefix(got, strings.Repeat("a", detailHead)+"…") || !strings.HasSuffix(got, "THE CAUSE") {
+		t.Errorf("did not keep head and tail: %q", got)
+	}
+}
+
+// The detail a waiting restart prints comes from SystemRestartEnv.Pane, whose
+// failures are *exec.CommandError: herdr's stderr may appear, its stdout (pane
+// JSON, other processes' argv and cwd) must not.
+func TestCheckPaneDetailOmitsHerdrStdout(t *testing.T) {
+	run := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) {
+		return "", &exec.CommandError{Name: "herdr", Args: []string{"pane", "get", testPane}, Output: "STDOUT-MARKER argv secret", Stderr: "server busy", Err: errors.New("exit status 2")}
+	}}
+	env, err := NewSystemRestartEnv(Paths{}, run, "/x/forgectl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, paneErr := env.Pane(context.Background(), testPane)
+	if paneErr == nil {
+		t.Fatal("want a pane error")
+	}
+	c, ok := checkPane(OutdatedSession{Pane: testPane}, Observation{PaneErr: paneErr})
+	if ok || c.Readiness != NotYet || !strings.Contains(c.Reason, "server busy") || strings.Contains(c.Reason, "STDOUT-MARKER") {
+		t.Fatalf("reason = %q (readiness %v)", c.Reason, c.Readiness)
 	}
 }
