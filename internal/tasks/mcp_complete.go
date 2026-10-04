@@ -42,7 +42,11 @@ const completeTaskDescription = "Mark one task done and record who closed it and
 // fit, the request was malformed — spends nothing.
 const maxClosesPerSession = 10
 
-// closeBudget counts sent updates per MCP session.
+// sessionBudget counts sent writes per MCP session, up to a limit. One budget
+// counts complete_task's updates (maxClosesPerSession); another, shared by
+// create_task and add_comment, counts the rows and comments they add
+// (maxBoardWritesPerSession). The two are separate so a session that has
+// filed its tasks can still close them, and the other way round.
 //
 // The key is the session's pointer, and the nil key is a real bucket: a call
 // that arrives with no session is counted there, together with every other
@@ -57,26 +61,32 @@ const maxClosesPerSession = 10
 // one entry per session the server currently has, plus the nil bucket, and a
 // server that runs for months does not accumulate ended sessions. The nil
 // bucket is never dropped: it is not a session and does not end.
-type closeBudget struct {
-	mu   sync.Mutex
-	used map[*mcp.ServerSession]int
+type sessionBudget struct {
+	mu    sync.Mutex
+	limit int
+	used  map[*mcp.ServerSession]int
 	// live lists the sessions the server currently holds. Nil means the
 	// caller has no server to ask, and nothing is ever dropped.
 	live func() iter.Seq[*mcp.ServerSession]
 }
 
-func newCloseBudget(live func() iter.Seq[*mcp.ServerSession]) *closeBudget {
-	return &closeBudget{used: make(map[*mcp.ServerSession]int), live: live}
+func newSessionBudget(limit int, live func() iter.Seq[*mcp.ServerSession]) *sessionBudget {
+	return &sessionBudget{limit: limit, used: make(map[*mcp.ServerSession]int), live: live}
+}
+
+// newCloseBudget is the complete_task budget.
+func newCloseBudget(live func() iter.Seq[*mcp.ServerSession]) *sessionBudget {
+	return newSessionBudget(maxClosesPerSession, live)
 }
 
 // reserve takes one slot for session and reports whether there was one. The
 // check and the increment are one step under the lock: two calls that both
 // read "nine used" must not both proceed.
-func (b *closeBudget) reserve(session *mcp.ServerSession) bool {
+func (b *sessionBudget) reserve(session *mcp.ServerSession) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	used, known := b.used[session]
-	if used >= maxClosesPerSession {
+	if used >= b.limit {
 		return false
 	}
 	if !known {
@@ -87,7 +97,7 @@ func (b *closeBudget) reserve(session *mcp.ServerSession) bool {
 }
 
 // release returns a slot taken by a call that turned out to send nothing.
-func (b *closeBudget) release(session *mcp.ServerSession) {
+func (b *sessionBudget) release(session *mcp.ServerSession) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.used[session] <= 1 {
@@ -99,7 +109,7 @@ func (b *closeBudget) release(session *mcp.ServerSession) {
 
 // dropEnded removes every entry whose session the server no longer holds.
 // The caller holds b.mu.
-func (b *closeBudget) dropEnded() {
+func (b *sessionBudget) dropEnded() {
 	if b.live == nil {
 		return
 	}
@@ -123,7 +133,7 @@ func (b *closeBudget) dropEnded() {
 type closeTool struct {
 	client *Client
 	cfg    MCPConfig
-	budget *closeBudget
+	budget *sessionBudget
 
 	recordMu sync.Mutex
 }
@@ -141,10 +151,15 @@ const closeRecordFailed = "The close record for this call could not be written."
 // withRecordNote returns text, with closeRecordFailed as its own last line
 // when the record was not written.
 func withRecordNote(text string, recorded bool) string {
+	return withNote(text, closeRecordFailed, recorded)
+}
+
+// withNote returns text, with note as its own last line unless recorded.
+func withNote(text, note string, recorded bool) string {
 	if recorded {
 		return text
 	}
-	return strings.TrimRight(text, "\n") + "\n" + closeRecordFailed + "\n"
+	return strings.TrimRight(text, "\n") + "\n" + note + "\n"
 }
 
 // closeError is a complete_task failure. Every one starts with the tool name

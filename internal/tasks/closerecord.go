@@ -154,6 +154,143 @@ func WriteCloseRecord(w io.Writer, rec CloseRecord) error {
 	return nil
 }
 
+// The events of a board-write line, one per MCP write tool that adds a row.
+// The event is what separates these lines from the others in the close log: a
+// close record has no `event` key, and a host refusal's is HostRefusalEvent.
+const (
+	// BoardWriteEventTaskCreated: a create_task call.
+	BoardWriteEventTaskCreated = "task_created"
+	// BoardWriteEventCommentAdded: an add_comment call.
+	BoardWriteEventCommentAdded = "comment_added"
+)
+
+// boardWriteTools names the tool behind each event. The tool is written from
+// this table and never taken from the caller, so a line's event and tool
+// cannot disagree.
+var boardWriteTools = map[string]string{
+	BoardWriteEventTaskCreated:  "create_task",
+	BoardWriteEventCommentAdded: "add_comment",
+}
+
+// The outcomes a board-write line can carry. Four describe a write that was
+// sent; the fifth a call the session's write cap refused before anything was
+// read or sent.
+const (
+	// BoardWriteOutcomeWritten: the write was sent and the board answered
+	// with the row it made.
+	BoardWriteOutcomeWritten = "written"
+	// BoardWriteOutcomeWriteRefused: the write was sent and the board refused
+	// it with a status other than 401 or 403.
+	BoardWriteOutcomeWriteRefused = "write_refused"
+	// BoardWriteOutcomeUnauthorized: the write was sent and refused with 401
+	// or 403 by a credential that had just read the target.
+	BoardWriteOutcomeUnauthorized = "unauthorized"
+	// BoardWriteOutcomeNotConfirmed: the write may have been sent, and no
+	// answer this client could read says whether it landed.
+	BoardWriteOutcomeNotConfirmed = "not_confirmed"
+	// BoardWriteOutcomeCap: the session's write cap refused the call. Nothing
+	// was read, so the line's project id is zero.
+	BoardWriteOutcomeCap = "cap"
+)
+
+var boardWriteOutcomes = []string{
+	BoardWriteOutcomeWritten, BoardWriteOutcomeWriteRefused, BoardWriteOutcomeUnauthorized,
+	BoardWriteOutcomeNotConfirmed, BoardWriteOutcomeCap,
+}
+
+// BoardWriteRecord is one create_task or add_comment call that sent a write,
+// or was refused by the session's write cap.
+//
+// It exists for the reason a close record does: the created-by trailer on a
+// task is board text anyone the project is shared with can edit, a comment
+// carries no trailer at all, and a refused write leaves nothing on the board.
+//
+// It holds ids and names only. The title, description, and comment text are
+// caller text for the board, and a record has no need of them; leaving them
+// out keeps a planted instruction or a pasted secret off the operator's log.
+// It is never handed the token.
+type BoardWriteRecord struct {
+	// Time is when the call was made. The zero value means now.
+	Time time.Time
+	// Event is one of the BoardWriteEvent constants. The tool is derived from
+	// it.
+	Event string
+	// TaskID is the task the write made or commented on: the created task's
+	// id, zero when no created id was read back, or the task commented on.
+	// ProjectID is the project written to, and zero when nothing was read.
+	TaskID, ProjectID int
+	// Caller is the name the MCP client declared, as declared.
+	// WriteBoardWriteRecord reduces it the way a trailer does.
+	Caller string
+	// Credential and Host say which credential source was used against which
+	// instance, as in a close record.
+	Credential, Host string
+	// Outcome is one of the BoardWriteOutcome constants.
+	Outcome string
+}
+
+// boardWriteLine is the record as written, in reading order: when, what
+// happened through which tool, to what, by whom, with what, and how it ended.
+type boardWriteLine struct {
+	Time       string `json:"time"`
+	Event      string `json:"event"`
+	Tool       string `json:"tool"`
+	TaskID     int    `json:"task_id"`
+	ProjectID  int    `json:"project_id"`
+	Caller     string `json:"caller"`
+	Credential string `json:"credential"`
+	Host       string `json:"host"`
+	Outcome    string `json:"outcome"`
+}
+
+// WriteBoardWriteRecord writes rec to w as one line of JSON, through
+// termsafe.JSONEncoder, in one Write. Like WriteCloseRecord it goes to w and
+// nowhere else, never through slog, so the line exists under the default
+// config.
+//
+// The caller name goes through the trailer's sanitizer with the MCP fallback,
+// so the line and the created-by trailer name the caller identically, and a
+// name shaped like a token is not written. The credential source goes through
+// recordedCredentialSource. The host is operator configuration and is written
+// as it is, as in a close record.
+//
+// An unknown event or outcome is refused before anything is written.
+func WriteBoardWriteRecord(w io.Writer, rec BoardWriteRecord) error {
+	if w == nil {
+		return errors.New("tasks: board write record: no record writer is configured")
+	}
+	tool, ok := boardWriteTools[rec.Event]
+	if !ok {
+		return fmt.Errorf("tasks: board write record: unknown event %s", termsafe.QuoteArgMax(rec.Event, 0))
+	}
+	if !slices.Contains(boardWriteOutcomes, rec.Outcome) {
+		return fmt.Errorf("tasks: board write record: unknown outcome %s", termsafe.QuoteArgMax(rec.Outcome, 0))
+	}
+	when := rec.Time
+	if when.IsZero() {
+		when = time.Now()
+	}
+
+	var line bytes.Buffer
+	if err := termsafe.JSONEncoder(&line).Encode(boardWriteLine{
+		Time:       when.UTC().Format(time.RFC3339),
+		Event:      rec.Event,
+		Tool:       tool,
+		TaskID:     rec.TaskID,
+		ProjectID:  rec.ProjectID,
+		Caller:     sanitizeCloser(rec.Caller, defaultCloserMCP),
+		Credential: recordedCredentialSource(rec.Credential),
+		Host:       rec.Host,
+		Outcome:    rec.Outcome,
+	}); err != nil {
+		return fmt.Errorf("tasks: board write record: encode: %w", err)
+	}
+	if _, err := w.Write(line.Bytes()); err != nil {
+		return fmt.Errorf("tasks: board write record: write: %w", err)
+	}
+	return nil
+}
+
 // hostNotRecorded stands in a refusal line for a host that is not a plain
 // hostname.
 const hostNotRecorded = "[not a plain hostname]"

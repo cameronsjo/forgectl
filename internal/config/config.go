@@ -1146,7 +1146,7 @@ func LoadPath(path string) Config {
 			"path", termsafe.QuotePath(path), "error", termsafe.SafeLineMax(err.Error(), logErrMaxRunes))
 		cfg.decodeDegraded = true
 		switch {
-		case isTasksConfigError(decodeErr):
+		case isInvalidValueError(decodeErr):
 			cfg.decodeErr = describeInvalidError(path, decodeErr)
 		case decodeErr != nil:
 			cfg.decodeErr = describeDecodeError(path, decodeErr)
@@ -1230,11 +1230,27 @@ func DecodeStrict(data []byte) (Config, error) {
 	// every reader of this file must see the same refusal. The list is
 	// dropped with the error, so a caller that goes on with this Config
 	// anyway holds one that allows the default host only.
+	//
+	// log_level is checked here for the same reason the list is: a value the
+	// logger does not know would otherwise turn logging off, which is what
+	// "off" does, and nothing would say so. It is dropped with the error, so a
+	// caller that goes on with this Config has logging off — what the value
+	// did before it was checked, and nothing louder.
+	//
+	// Both are checked, and both dropped, before either error is returned, so
+	// a file with two refused values carries neither into the Config.
+	var invalid error
 	if err := cfg.Tasks.Validate(); err != nil {
 		cfg.Tasks = TasksConfig{}
-		return cfg, err
+		invalid = err
 	}
-	return cfg, nil
+	if err := validateLogLevel(cfg.LogLevel); err != nil {
+		cfg.LogLevel = ""
+		if invalid == nil {
+			invalid = err
+		}
+	}
+	return cfg, invalid
 }
 
 // Validate decodes the config file and checks the sections that carry semantic
@@ -1251,8 +1267,8 @@ func Validate() error {
 
 // ValidatePath strictly decodes the already-resolved config path, then asks
 // each section that owns a semantic rule to check itself — [docs], [proxy],
-// [herdr.organize], [resume], and [theme]. [tasks] is checked by the decode
-// itself. A missing file remains valid and selects built-in defaults.
+// [herdr.organize], [resume], and [theme]. [tasks] and log_level are checked
+// by the decode itself. A missing file remains valid and selects built-in defaults.
 //
 // The semantic half is the point for `launch doctor`: a config can decode
 // cleanly and still be one every launch path refuses, and a doctor that only
@@ -1317,8 +1333,28 @@ func ResolvedLogPath(logFile string) string {
 	}
 }
 
+// logLevelKey is the dotted key of LogLevel, as Report names a key.
+const logLevelKey = "log_level"
+
+// validateLogLevel refuses a log_level the logger would not act on. It accepts
+// exactly what SetupLogger has always acted on — the names parseLevel knows —
+// and the ways of saying off: absent, empty, blank, or "off". Case and
+// surrounding space are ignored, as they are by parseLevel.
+func validateLogLevel(s string) error {
+	if _, ok := parseLevel(s); ok {
+		return nil
+	}
+	if level := strings.ToLower(strings.TrimSpace(s)); level == "" || level == "off" {
+		return nil
+	}
+	return invalidValueError{message: fmt.Sprintf(
+		"log_level = %s: must be one of off, debug, info, warn, warning, or error; leave it out for off",
+		quoteConfigValue(s))}
+}
+
 // parseLevel maps a level name to slog.Level. Returns (level, true) for known
-// names; (0, false) for "off" or anything unrecognised.
+// names; (0, false) for "off". Any other value is refused at decode
+// (validateLogLevel), so it does not reach here from a loaded config.
 func parseLevel(s string) (slog.Level, bool) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "debug":

@@ -323,6 +323,9 @@ forgectl tasks done 42 --evidence "…" --write-keychain-service X   # read the 
 #   a refused host also appends one line to tasks-closes.jsonl ("event":"host_refused", with the verb, the host when it
 #   is a plain hostname, and the keychain entry's name), so the refusal outlives the terminal that showed it.
 #   an unknown verb (forgectl tasks nosuchverb) exits 1
+forgectl tasks mcp --http :3000 --ping   # container healthcheck: initialize, have the server read the board once, end the session
+#   exit codes: 0 healthy · 2 the listener did not answer · 3 the server is up and the board refused its credential ·
+#   1 anything else, including a server whose read of the board failed for another reason. It prints only "ok".
 
 # ghostty — theme + keybind reporting, parsed live from the ghostty CLI
 forgectl ghostty themes                  # custom themes, active one marked

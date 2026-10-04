@@ -474,7 +474,7 @@ func loadTasksSnapshot(
 		return tasks.Snapshot{}, false, err
 	}
 	snap.FetchedAt = time.Now().UTC()
-	cacheSnapshot(ctx, snap)
+	cacheSnapshot(ctx, cmd.ErrOrStderr(), snap)
 	return snap, false, nil
 }
 
@@ -482,20 +482,34 @@ func loadTasksSnapshot(
 // write failure must not fail the command — the data is already in hand —
 // but it must not be silent either: an unwritable cache dir means the NEXT
 // network outage has no fallback, and the operator would otherwise learn
-// that only during the outage. So the failure is logged rather than
-// discarded, which is also what keeps this out of the `_ =` shape the Go
-// rules forbid.
-func cacheSnapshot(ctx context.Context, snap tasks.Snapshot) {
+// that only during the outage.
+//
+// So the failure is one plain line on the command's stderr. The slog call
+// alone is not enough: with log_level unset the global logger discards
+// everything, so under the default config a warning sent only there is never
+// seen. The slog call stays for an operator who has turned logging on and
+// reads the log file rather than the terminal.
+func cacheSnapshot(ctx context.Context, stderr io.Writer, snap tasks.Snapshot) {
 	path, err := config.TasksCachePath()
 	if err != nil {
 		slog.WarnContext(ctx, "Could not resolve the tasks cache path, skipping the cache write. A later network outage will have no fallback data.",
 			"error", err)
+		reportCacheWriteFailure(stderr, err)
 		return
 	}
 	if err := tasks.SaveCache(path, snap); err != nil {
 		slog.WarnContext(ctx, "Failed to write the tasks cache. The command succeeded, but a later network outage will have no fallback data.",
 			"path", path, "error", err)
+		reportCacheWriteFailure(stderr, err)
 	}
+}
+
+// reportCacheWriteFailure is cacheSnapshot's line on stderr. The error names
+// at most the cache path and an OS reason; it goes through safeText like every
+// other error text this package prints.
+func reportCacheWriteFailure(stderr io.Writer, err error) {
+	fmt.Fprintf(stderr, "forgectl: tasks: the local cache could not be written, so a later network outage will have no fallback data: %s\n", //nolint:errcheck // stderr is the only place left to say so
+		safeText(err.Error()))
 }
 
 // mayServeCache decides whether err is the kind of failure a stale cache may

@@ -671,3 +671,23 @@ func TestConfig_HomeNoteWhenHomeIsUnresolved(t *testing.T) {
 		t.Errorf("--json launch_resolved.home_note is empty:\n%s", js.String())
 	}
 }
+
+// TestConfig_AMistypedLogLevelIsAValidationError: a log_level the logger does
+// not know used to turn logging off without a word. `forgectl config` reports
+// it the way it reports a refused allowed_hosts entry: the file parsed, one
+// value is wrong, and the row says it was not loaded.
+func TestConfig_AMistypedLogLevelIsAValidationError(t *testing.T) {
+	out := runConfig(t, "log_level = \"degub\"\n")
+	if !strings.Contains(out, "! validation error: log_level = \"degub\"") {
+		t.Errorf("the output does not report the mistyped level as a validation error:\n%s", out)
+	}
+	if strings.Contains(out, "decode error") {
+		t.Errorf("the output calls a file that parsed in full a decode error:\n%s", out)
+	}
+	if !regexp.MustCompile(`(?m)^  log_level\s+degub\s+\(refused — not loaded\)$`).MatchString(out) {
+		t.Errorf("the log_level row does not say the value was refused:\n%s", out)
+	}
+	if text := runConfig(t, "log_level = \"debug\"\n"); strings.Contains(text, "validation error") || strings.Contains(text, "(refused") {
+		t.Errorf("a known level is reported as refused:\n%s", text)
+	}
+}

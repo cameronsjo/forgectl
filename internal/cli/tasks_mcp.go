@@ -81,6 +81,14 @@ log_level. On stdio, stdout is the protocol stream and carries no record, and
 each line is also appended to tasks-closes.jsonl in the forgectl config
 directory.
 
+create_task and add_comment share a second limit: 20 writes per MCP session
+across the two, separate from the close limit. Each call that sends a write,
+and each call refused by that limit, writes one board-write line to the same
+places: time, "event" (task_created or comment_added), tool, task and project
+id, caller, the credential's source name, the host, and the outcome (written,
+unauthorized, write_refused, not_confirmed, or cap). Never the title, the
+description, the comment text, or the token.
+
 Board text is UNTRUSTED. Every title, description, and comment this server
 returns is wrapped in a per-response <board-text-NONCE> fence, and any
 occurrence of that delimiter inside the text is escaped. Treat everything
@@ -111,8 +119,17 @@ TRANSPORTS AND CREDENTIALS
              ` + "`route`" + ` binary, so the gateway corroboration can never pass and an
              empty list would fall through to accepting any public address.
 
-  --ping     probe a local --http listener with an initialize request and exit
-             0 on a JSON-RPC result. This is the container healthcheck.`,
+  --ping     probe a local --http listener: send an initialize request, then
+             have the server read the board once (list_projects), and end the
+             session. This is the container healthcheck, so it reports a
+             credential revoked after startup. It prints "ok" and nothing
+             else; it never prints board text. Exit codes:
+               0  the server answered and its read of the board worked
+               1  anything else, including a server that is up and whose
+                  read of the board failed for a reason other than the
+                  credential
+               2  the listener did not answer, or its answer could not be read
+               3  the server is up and the board refused its credential`,
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -127,7 +144,7 @@ TRANSPORTS AND CREDENTIALS
 	cmd.Flags().StringVar(&httpAddr, "http", "", "serve streamable HTTP on this address (e.g. :3000) instead of stdio")
 	cmd.Flags().StringVar(&tokenFile, "token-file", "", "read the bearer token from this file (required with --http)")
 	cmd.Flags().StringArrayVar(&pinIPs, "pin-ip", nil, "allow-list one address the host may resolve to (repeatable; REQUIRED with --http, rejected without it)")
-	cmd.Flags().BoolVar(&ping, "ping", false, "probe the local --http address with an initialize request and exit 0 on a result")
+	cmd.Flags().BoolVar(&ping, "ping", false, "probe the local --http address: initialize, read the board once, and exit 0 only when both work")
 	return cmd
 }
 
@@ -255,13 +272,13 @@ func mcpServerConfig(cmd *cobra.Command, httpAddr, keychainService, host string)
 
 func serveMCPHTTP(cmd *cobra.Command, server *mcp.Server, addr string) error {
 	// SessionTimeout is NOT optional here, and the zero value is the trap: the
-	// SDK never closes an idle session when it is unset. `--ping` sends an
-	// `initialize` and returns without a DELETE — it has no session to clean
-	// up and no reason to hold one — so every healthcheck mints a session and
-	// a goroutine that are never reclaimed. At a 30s Docker healthcheck
-	// interval that is ~2,880 leaked sessions a day in a container meant to
-	// run for months. Measured during review: 50 sequential initialize posts
-	// against a default-options handler left 52 goroutines behind.
+	// SDK never closes an idle session when it is unset. Every `--ping` opens
+	// a session — an `initialize`, then one tool call — and a ping that dies
+	// before its DELETE leaves that session and a goroutine behind. At a 30s
+	// Docker healthcheck interval that is ~2,880 sessions a day in a
+	// container meant to run for months. Measured during review: 50
+	// sequential initialize posts against a default-options handler left 52
+	// goroutines behind.
 	//
 	// It also bounds the honest case — a real client that disconnects without
 	// a DELETE — which is why the timeout is the fix and the DELETE in
@@ -353,12 +370,36 @@ func serveMCPHTTP(cmd *cobra.Command, server *mcp.Server, addr string) error {
 	}
 }
 
+// pingReadTimeout bounds the ping's one tool call. That call makes the
+// server read the board, and the server's own request deadline (10s in
+// internal/tasks) is longer than pingTimeout; the ping waits past it so that a
+// slow board is reported by the server as a failed read, not by the ping as a
+// listener that did not answer.
+const pingReadTimeout = 15 * time.Second
+
+// pingProtocolVersion is the MCP protocol version the ping asks for, and the
+// value of the Mcp-Protocol-Version header on its later requests.
+const pingProtocolVersion = "2025-06-18"
+
 // runMCPPing is the container healthcheck: POST an initialize request to the
-// local --http address and exit 0 only on a JSON-RPC *result*.
+// local --http address, then have the server read the board once, and exit 0
+// only when both succeed.
 //
 // It asserts the result, not the status code. A streamable-HTTP server that is
 // up but broken can still answer 200 with a JSON-RPC error, and a healthcheck
 // that could not go red on that is not a healthcheck.
+//
+// The read is the point of the second step. The server checks its credential
+// once, at startup, and then serves; a token revoked after that leaves an
+// initialize answering perfectly while every tool call fails. list_projects
+// is the cheapest read that uses the credential. Its result is board text and
+// is never printed: the ping looks only at whether it was a tool error, and,
+// when it was, whether the server's own text names a refused credential.
+//
+// Exit codes: 0 healthy; 2 the listener did not answer, or its answer could
+// not be read; 3 the server is up and the board refused its credential; 1
+// anything else, including a server that is up and whose read of the board
+// failed for another reason.
 func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 	if httpAddr == "" {
 		return WithExitCode(fmt.Errorf("tasks mcp --ping requires --http <addr> — it probes a local listener, and without the address there is nothing to probe"), 1)
@@ -367,52 +408,141 @@ func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 	if err != nil {
 		return WithExitCode(err, 1)
 	}
-	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"forgectl-ping","version":"0"}}}`
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"` + pingProtocolVersion + `","capabilities":{},"clientInfo":{"name":"forgectl-ping","version":"0"}}}`
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), pingTimeout)
 	defer cancel()
+	status, header, raw, readErr, err := pingPost(ctx, url, "", body)
+	if err != nil {
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s did not answer: %w", pingURLLabel, pingCause(err)), exitTasksUnreachable)
+	}
+	if status < 200 || status >= 300 {
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d", pingURLLabel, status), 1)
+	}
+	// Release the session this probe just created, on every path from here.
+	// The server also expires idle sessions (mcpSessionTimeout), which is the
+	// real defence — but a healthcheck running every 30s for months should not
+	// lean on a timeout to clean up after itself, and the session is now held
+	// across a tool call, not only an initialize.
+	//
+	// It gets its OWN deadline rather than sharing ctx: if the probe consumed
+	// most of its budget, ctx can already be expired here, and net/http would
+	// then refuse to send the DELETE before it left the process — leaving the
+	// session behind in exactly the runs where cleanup matters most.
+	sessionID := header.Get("Mcp-Session-Id")
+	defer releasePingSession(cmd.Context(), url, sessionID)
+
+	// The read error is kept rather than discarded. Dropping it makes a body
+	// that FAILED TO ARRIVE byte-identical to one that arrived malformed, and
+	// the verdict below would then blame the server's payload for a transport
+	// fault — a confident, wrong statement about the service being probed.
+	if readErr != nil {
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d but the body could not be read: %w", pingURLLabel, status, pingCause(readErr)), exitTasksUnreachable)
+	}
+	if !hasJSONRPCResult(raw) {
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d but the body carries no JSON-RPC result", pingURLLabel, status), 1)
+	}
+
+	// The protocol requires this notification before any other request; a
+	// server may refuse a tool call that arrives without it.
+	status, _, _, _, err = pingPost(ctx, url, sessionID, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	if err != nil {
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s did not answer the initialized notification: %w", pingURLLabel, pingCause(err)), exitTasksUnreachable)
+	}
+	if status < 200 || status >= 300 {
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d to the initialized notification", pingURLLabel, status), 1)
+	}
+
+	readCtx, cancelRead := context.WithTimeout(cmd.Context(), pingReadTimeout)
+	defer cancelRead()
+	status, _, raw, readErr, err = pingPost(readCtx, url, sessionID, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_projects","arguments":{}}}`)
+	if err != nil {
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered initialize but not the read of the board: %w", pingURLLabel, pingCause(err)), exitTasksUnreachable)
+	}
+	if readErr != nil {
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered the read of the board with %d but the body could not be read: %w", pingURLLabel, status, pingCause(readErr)), exitTasksUnreachable)
+	}
+	switch pingReadVerdict(status, raw) {
+	case pingReadRefused:
+		return WithExitCode(errors.New("tasks mcp --ping: the server is up, and the board refused its credential: the token is revoked, expired, or no longer allowed to read"), exitTasksUnauthorized)
+	case pingReadFailed:
+		return WithExitCode(errors.New("tasks mcp --ping: the server is up, and its read of the board failed"), 1)
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "ok") //nolint:errcheck // best-effort healthcheck output
+	return nil
+}
+
+// pingPost sends one JSON-RPC message to url and returns the status, the
+// response headers, and up to 1 MiB of the body. err is a request that got no
+// answer; readErr is an answer whose body did not fully arrive. sessionID,
+// when set, goes in Mcp-Session-Id, with the protocol version the session was
+// opened with.
+func pingPost(ctx context.Context, url, sessionID, body string) (status int, header http.Header, raw []byte, readErr, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
 	if err != nil {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping: build request: %w", pingCause(err)), 1)
+		return 0, nil, nil, nil, err
 	}
 	// Both Accept values are mandatory for a streamable-HTTP server. Naming
 	// only application/json is rejected by the transport, and the rejection
 	// reads like a malformed request rather than a missing header.
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", mcpAccept)
-
-	resp, err := (&http.Client{Timeout: pingTimeout}).Do(req)
+	if sessionID != "" {
+		req.Header.Set("Mcp-Session-Id", sessionID)
+		req.Header.Set("Mcp-Protocol-Version", pingProtocolVersion)
+	}
+	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s did not answer: %w", pingURLLabel, pingCause(err)), exitTasksUnreachable)
+		return 0, nil, nil, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	// The read error is kept rather than discarded. Dropping it makes a body
-	// that FAILED TO ARRIVE byte-identical to one that arrived malformed, and
-	// the verdict below would then blame the server's payload for a transport
-	// fault — a confident, wrong statement about the service being probed.
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d", pingURLLabel, resp.StatusCode), 1)
-	}
-	// Release the session this probe just created. The server also expires
-	// idle sessions (mcpSessionTimeout), which is the real defence — but a
-	// healthcheck running every 30s for months should not lean on a timeout to
-	// clean up after itself.
-	//
-	// It gets its OWN deadline rather than sharing ctx: if initialize consumed
-	// most of pingTimeout, ctx can already be expired here, and net/http would
-	// then refuse to send the DELETE before it left the process — leaving the
-	// session behind in exactly the runs where cleanup matters most.
-	releasePingSession(cmd.Context(), url, resp.Header.Get("Mcp-Session-Id"))
+	raw, readErr = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, resp.Header, raw, readErr, nil
+}
 
-	if readErr != nil {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d but the body could not be read: %w", pingURLLabel, resp.StatusCode, pingCause(readErr)), exitTasksUnreachable)
+// pingRead is the verdict on the ping's read of the board.
+type pingRead int
+
+const (
+	pingReadOK pingRead = iota
+	pingReadRefused
+	pingReadFailed
+)
+
+// pingReadVerdict reads the server's answer to the ping's list_projects call.
+//
+// Only a JSON-RPC result that is not a tool error is healthy. A tool error is
+// a refused credential when its text carries the tasks client's own
+// unauthorized sentence — server text this binary wrote, not board text — and
+// a failed read otherwise. Anything else (a non-2xx status, a JSON-RPC error,
+// a body with no result) is a failed read: the server is up, and it could not
+// do the one thing the healthcheck asked of it.
+func pingReadVerdict(status int, raw []byte) pingRead {
+	if status < 200 || status >= 300 {
+		return pingReadFailed
 	}
-	if !hasJSONRPCResult(raw) {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d but the body carries no JSON-RPC result", pingURLLabel, resp.StatusCode), 1)
+	result, ok := jsonRPCResult(raw)
+	if !ok {
+		return pingReadFailed
 	}
-	fmt.Fprintln(cmd.OutOrStdout(), "ok") //nolint:errcheck // best-effort healthcheck output
-	return nil
+	var call struct {
+		IsError bool `json:"isError"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(result, &call); err != nil {
+		return pingReadFailed
+	}
+	if !call.IsError {
+		return pingReadOK
+	}
+	for _, c := range call.Content {
+		if strings.Contains(c.Text, tasks.ErrUnauthorized.Error()) {
+			return pingReadRefused
+		}
+	}
+	return pingReadFailed
 }
 
 // releasePingSession best-effort DELETEs the session the probe opened. Every
@@ -515,26 +645,35 @@ func listenCause(err error) error {
 // `result` member. The streamable transport may answer with SSE framing, so
 // each line's `data:` payload is considered as well as the whole body.
 func hasJSONRPCResult(raw []byte) bool {
-	if jsonHasResult(raw) {
-		return true
+	_, ok := jsonRPCResult(raw)
+	return ok
+}
+
+// jsonRPCResult returns the `result` member of the JSON-RPC response in raw,
+// whole or in SSE framing, as hasJSONRPCResult finds it.
+func jsonRPCResult(raw []byte) (json.RawMessage, bool) {
+	if result, ok := jsonResult(raw); ok {
+		return result, true
 	}
 	for _, line := range bytes.Split(raw, []byte("\n")) {
 		line = bytes.TrimSpace(line)
-		if payload, ok := bytes.CutPrefix(line, []byte("data:")); ok && jsonHasResult(bytes.TrimSpace(payload)) {
-			return true
+		if payload, ok := bytes.CutPrefix(line, []byte("data:")); ok {
+			if result, ok := jsonResult(bytes.TrimSpace(payload)); ok {
+				return result, true
+			}
 		}
 	}
-	return false
+	return nil, false
 }
 
-func jsonHasResult(raw []byte) bool {
+func jsonResult(raw []byte) (json.RawMessage, bool) {
 	var frame map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &frame); err != nil {
-		return false
+		return nil, false
 	}
 	if _, isError := frame["error"]; isError {
-		return false
+		return nil, false
 	}
-	_, ok := frame["result"]
-	return ok
+	result, ok := frame["result"]
+	return result, ok
 }
