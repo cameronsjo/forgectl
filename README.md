@@ -68,6 +68,7 @@ deep-dive get a link here.
 ```sh
 forgectl                   # open TUI menu (thumb mode)
 forgectl --help            # list every command group (non-interactive entrypoint)
+forgectl menu --json       # the menu's contents as data, no TTY needed (see docs/commands/menu.md)
 forgectl tmux ls           # list sessions
 forgectl tmux pick [name]  # connect/smart-create via sesh (no name → list)
 forgectl tmux kill <name>  # kill a session (--others keeps only it)
@@ -354,6 +355,12 @@ forgectl review --kind issue             # issues only (or: pr)
 forgectl review mark owner/repo#42       # mark an item reviewed
 forgectl review releases                 # release radar: last release, waiting release PR, ship-gate reason, stalls
 forgectl review releases --json --fail-on-stall  # the nightly check: exit 1 on any stalled or unknown repo
+                                          #   two stall reasons watch the release machinery of release-pr repos:
+                                          #   no-release-pr: a feat/fix/perf/`!`/BREAKING CHANGE commit is >24h old,
+                                          #     unreleased, and no release PR is open (chore/ci/docs-only never stalls)
+                                          #   release-workflow-stuck: the release-PR workflow has a run waiting,
+                                          #     queued, or pending >1h (release-please.yml; prepare-release.yml for
+                                          #     cadence-hooks; override with `release_workflow:` in the registry entry)
 
 # update — weekly package-manager + OS maintenance, independently-scoped steps
 forgectl update check                    # report-only for every step (brew/softwareupdate/go/npm), no mutation —

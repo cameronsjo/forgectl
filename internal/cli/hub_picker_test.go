@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -186,5 +187,94 @@ func TestHubPicker_NoPickerRowFeedsTheHarness(t *testing.T) {
 				t.Errorf("recent launch row would open the picker: %+v", e)
 			}
 		}
+	}
+}
+
+// optOutRoot is a minimal tree for the hub-no-picker annotation: wrap's own
+// positional and its pass subverb both name another CLI's subcommand and
+// carry the annotation; plain is the same shape without it.
+func optOutRoot() *cobra.Command {
+	root := &cobra.Command{Use: "forgectl"}
+	noop := func(*cobra.Command, []string) error { return nil }
+	wrap := &cobra.Command{
+		Use:         "wrap <sub>",
+		Short:       "wrap another CLI",
+		Args:        cobra.MaximumNArgs(1),
+		RunE:        noop,
+		Annotations: map[string]string{hubNoPickerAnnotation: "the argument is the wrapped CLI's subcommand"},
+	}
+	wrap.AddCommand(
+		&cobra.Command{
+			Use: "pass <sub>", Short: "pass one subcommand through", Args: cobra.ExactArgs(1), RunE: noop,
+			Annotations: map[string]string{hubNoPickerAnnotation: "the argument is the wrapped CLI's subcommand"},
+		},
+		&cobra.Command{Use: "plain <name>", Short: "take a plain value", Args: cobra.ExactArgs(1), RunE: noop},
+	)
+	root.AddCommand(wrap)
+	return root
+}
+
+// TestHubPicker_NoPickerAnnotationIsRefused pins the hub-no-picker opt-out
+// (forgectl#730): a command carrying the annotation is refused by the
+// tree-aware argv builder, and every hub row built for it is marked NoPicker
+// so the picker never opens; the unannotated sibling is unaffected.
+//
+// Mutations that turn it red: drop the hasNoPickerAnnotation check from
+// hubPickerArgv (the builder accepts wrap and pass), or move it below the
+// empty-value return (an empty value runs them bare); set NoPicker false in
+// moduleEntry, buildLeaves (self or sub leaf) or recentEntry.
+func TestHubPicker_NoPickerAnnotationIsRefused(t *testing.T) {
+	root := optOutRoot()
+	build := hubPickerArgv(root)
+	for _, prefix := range [][]string{{"wrap"}, {"wrap", "pass"}} {
+		if argv, err := build(prefix, "zz-value", false); !errors.Is(err, errPickerOptedOut) {
+			t.Errorf("builder for %q: argv %q err %v, want errPickerOptedOut", prefix, argv, err)
+		}
+		// An empty optional value is refused too: it would run the
+		// command bare from a picker that should never have opened.
+		if argv, err := build(prefix, "", true); !errors.Is(err, errPickerOptedOut) {
+			t.Errorf("builder for %q with an empty value: argv %q err %v, want errPickerOptedOut", prefix, argv, err)
+		}
+	}
+	argv, err := build([]string{"wrap", "plain"}, "zz-value", false)
+	if err != nil || !slices.Equal(argv, []string{"wrap", "plain", "--", "zz-value"}) {
+		t.Errorf("builder for the unannotated sibling: argv %q err %v", argv, err)
+	}
+
+	wrap := findChild(root, "wrap")
+	entry := moduleEntry(wrap)
+	if !entry.NoPicker {
+		t.Error("the annotated module row is not marked NoPicker")
+	}
+	got := map[string]bool{}
+	for _, l := range entry.Leaves {
+		got[l.Name] = l.NoPicker
+	}
+	if want := map[string]bool{"wrap": true, "pass": true, "plain": false}; !maps.Equal(got, want) {
+		t.Errorf("leaf NoPicker = %v, want %v", got, want)
+	}
+	if !recentEntry(findChild(wrap, "pass")).NoPicker {
+		t.Error("the annotated recent row is not marked NoPicker")
+	}
+	if recentEntry(findChild(wrap, "plain")).NoPicker {
+		t.Error("the unannotated recent row is marked NoPicker")
+	}
+}
+
+// TestStampHubAnnotations_KeepsTheConstructorsOwn pins that newRoot's hub
+// annotations merge into a module's own rather than replacing them, so a
+// module root can carry hub-no-picker. Mutation that turns it red: assign a
+// fresh map in stampHubAnnotations.
+func TestStampHubAnnotations_KeepsTheConstructorsOwn(t *testing.T) {
+	cmd := &cobra.Command{Use: "wrap <sub>", Annotations: map[string]string{hubNoPickerAnnotation: "reason"}}
+	stampHubAnnotations(cmd, 4, hubTierCore)
+	want := map[string]string{hubNoPickerAnnotation: "reason", hubOrderAnnotation: "4", hubTierAnnotation: hubTierCore}
+	if !maps.Equal(cmd.Annotations, want) {
+		t.Errorf("annotations = %v, want %v", cmd.Annotations, want)
+	}
+	bare := &cobra.Command{Use: "bare"}
+	stampHubAnnotations(bare, 0, hubTierExtension)
+	if bare.Annotations[hubTierAnnotation] != hubTierExtension {
+		t.Errorf("a command with no annotations was not stamped: %v", bare.Annotations)
 	}
 }

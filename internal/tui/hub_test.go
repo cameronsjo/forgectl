@@ -501,3 +501,76 @@ func TestHub_NumberKeyOnDividerMovesToNextRow(t *testing.T) {
 		t.Errorf("cursor = %+v, want the row after the divider", m.l.SelectedItem())
 	}
 }
+
+// optOutHubModel is a hub whose every argument-taking row carries NoPicker
+// (the forgectl:hub-no-picker annotation): a module row, its leaves, and a
+// recent row. Beside each sits an otherwise identical row without it.
+func optOutHubModel() model {
+	hub := []HubEntry{
+		{Name: "wrap", Short: "wraps a CLI", Core: true, Use: "wrap <sub>", NoPicker: true, Leaves: []HubLeaf{
+			{Name: "wrap", Short: "wraps a CLI", Use: "wrap <sub>", NeedsArgs: true, Self: true, NoPicker: true},
+			{Name: "pass", Short: "passes one through", Use: "pass <sub>", NeedsArgs: true, NoPicker: true},
+			{Name: "plain", Short: "takes a plain value", Use: "plain <name>", NeedsArgs: true},
+		}},
+		{Name: "recent", Heading: true},
+		{Name: "wrap pass", Short: "passes one through", Use: "pass <sub>", Argv: []string{"wrap", "pass"}, NeedsArgs: true, NoPicker: true},
+		{Name: "wrap plain", Short: "takes a plain value", Use: "plain <name>", Argv: []string{"wrap", "plain"}, NeedsArgs: true},
+	}
+	return sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{Hub: hub, NoIcons: true, Theme: theme.Default()}), 80, 30)
+}
+
+// TestPicker_NoPickerRowsShowTheInvocation pins the opt-out: a row, leaf or
+// recent row marked NoPicker never opens the picker, even though its Use names
+// one positional the picker could otherwise supply; it prints the invocation
+// to finish by hand. The unmarked twin of each still opens the picker.
+//
+// Mutations that turn it red: drop the noPicker check from openPicker (the
+// leaf and recent rows open it); drop the NoPicker check from moduleNeedsArg
+// (the module row opens it).
+func TestPicker_NoPickerRowsShowTheInvocation(t *testing.T) {
+	// Module row: drills into its leaves instead of opening the picker.
+	m := optOutHubModel()
+	m, _ = press(m, tea.KeyEnter)
+	if m.picker != nil {
+		t.Fatal("enter on an opted-out module row opened the picker")
+	}
+	if m.mode != leavesMode {
+		t.Fatalf("an opted-out module row should drill into its leaves, mode = %v", m.mode)
+	}
+	// Its synthetic self leaf and an opted-out leaf print the invocation.
+	for _, down := range []int{0, 1} {
+		m := optOutHubModel()
+		m, _ = press(m, tea.KeyEnter)
+		for range down {
+			m, _ = press(m, tea.KeyDown)
+		}
+		m, _ = press(m, tea.KeyEnter)
+		if m.picker != nil || m.action.Kind != ActionShowInvocation {
+			t.Errorf("opted-out leaf %d: picker=%v action=%+v, want the invocation", down, m.picker != nil, m.action)
+		}
+	}
+	// Control: the unmarked leaf beside them opens the picker.
+	m = optOutHubModel()
+	m, _ = press(m, tea.KeyEnter)
+	m, _ = press(m, tea.KeyDown)
+	m, _ = press(m, tea.KeyDown)
+	m, _ = press(m, tea.KeyEnter)
+	if m.picker == nil {
+		t.Error("an unmarked leaf no longer opens the picker")
+	}
+
+	// Recent rows: the opted-out one prints its invocation, its twin picks.
+	m = optOutHubModel()
+	m, _ = press(m, tea.KeyDown)
+	m, _ = press(m, tea.KeyEnter)
+	if m.picker != nil || m.action.Kind != ActionShowInvocation {
+		t.Errorf("opted-out recent row: picker=%v action=%+v, want the invocation", m.picker != nil, m.action)
+	}
+	m = optOutHubModel()
+	m, _ = press(m, tea.KeyDown)
+	m, _ = press(m, tea.KeyDown)
+	m, _ = press(m, tea.KeyEnter)
+	if m.picker == nil {
+		t.Error("an unmarked recent row no longer opens the picker")
+	}
+}

@@ -432,13 +432,19 @@ func credentialHeaderName(name string) bool {
 // Text also withholds every line Stdout does (#952), a PEM private-key
 // block's lines included, so it is always the stronger of the two: it runs
 // Stdout's shapes without the exemptions Stdout alone makes for deliverable
-// output (#974, pemScan.deliverable).
+// output (#974, pemScan.deliverable). It also runs Stdout's own scan beside
+// that one: the two scans' multi-line states can part ways (Text reads a line
+// as the end of a descriptor key's string, Stdout as a key that opens one,
+// #991), so Text withholds what either withholds rather than lean on an
+// argument that each Stdout state sits inside a Text one.
 func Text(s string) string {
 	var sc pemScan
+	stdout := pemScan{deliverable: true}
 	return withholdLines(s, func(line string) bool {
-		// Both run on every line: the PEM state must see each one.
-		stdout := sc.stdoutWithheld(line)
-		return lineWithheld(line) || stdout
+		// All run on every line: each scan's state must see each one.
+		text := sc.stdoutWithheld(line)
+		deliverable := stdout.stdoutWithheld(line)
+		return lineWithheld(line) || text || deliverable
 	})
 }
 

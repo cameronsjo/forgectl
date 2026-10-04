@@ -261,6 +261,9 @@ func TestRunRestart_PaneProblemsAfterTheStopFailLoudly(t *testing.T) {
 			if env.relaunched != 0 {
 				t.Error("relaunched into a pane that was not ready")
 			}
+			if name == "pane vanished" && !strings.Contains(final.Detail, "(pane_not_found)") {
+				t.Errorf("detail %q does not say what herdr returned", final.Detail)
+			}
 		})
 	}
 }

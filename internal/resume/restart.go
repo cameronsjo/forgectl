@@ -249,7 +249,7 @@ func checkIdentity(want OutdatedSession, obs Observation) (Check, bool) {
 	case obs.Entry.ProcStart != want.ProcStart:
 		return refuse("pid %d's recorded start time changed (pid reused?)", want.Pid)
 	case obs.ProcErr != nil:
-		return refuse("could not read pid %d's executable and start time", want.Pid)
+		return refuse("could not read pid %d's executable and start time (%s)", want.Pid, clipDetail(obs.ProcErr.Error()))
 	case !IsClaudeExec(obs.Proc.ExecPath):
 		return refuse("pid %d is not running a claude binary", want.Pid)
 	}
@@ -274,8 +274,12 @@ func checkPane(want OutdatedSession, obs Observation) (Check, bool) {
 		return Check{Refused, fmt.Sprintf("pane %s no longer exists", want.Pane)}, false
 	case obs.PaneErr != nil:
 		// Any other failure (herdr not answering, a timeout) is not evidence
-		// about the pane, so it waits rather than refusing for good.
-		return Check{NotYet, fmt.Sprintf("herdr could not show pane %s; retrying", want.Pane)}, false
+		// about the pane, so it waits rather than refusing for good. herdr's
+		// own error goes into the message: the watcher log is the only record
+		// of why a run waited, and it was unrecoverable without it. From
+		// SystemRestartEnv.Pane that error carries herdr's stderr (redacted)
+		// and never its stdout; TestCheckPaneDetailOmitsHerdrStdout pins it.
+		return Check{NotYet, fmt.Sprintf("herdr could not show pane %s (%s); retrying", want.Pane, clipDetail(obs.PaneErr.Error()))}, false
 	case obs.Pane.Agent != "claude" || obs.Pane.AgentSession != want.SessionID:
 		return Check{Refused, fmt.Sprintf("pane %s's herdr label names a different session (nested session?)", want.Pane)}, false
 	case !slices.Contains(obs.Pane.ForegroundPIDs, want.Pid):
@@ -396,3 +400,24 @@ func isRule(line string) bool {
 // hex and dashes, bounded, never flag-shaped. It gates every id that reaches a
 // path or an argv.
 func ValidSessionID(id string) bool { return validSessionID(id) }
+
+// detailLimit caps how much of a helper's error text a check message carries,
+// so one verbose failure cannot flood the progress line or the watcher log.
+const detailLimit = 200
+
+// detailHead is how much of the start a clipped detail keeps. The start names
+// the failing command; the end usually holds the cause (a panic's last line,
+// a final JSON error), so most of the budget goes to the end.
+const detailHead = 60
+
+// clipDetail flattens an error to one line and, past detailLimit runes, keeps
+// its first detailHead runes and its end, joined by an ellipsis.
+func clipDetail(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) <= detailLimit {
+		return s
+	}
+	tail := detailLimit - detailHead - 1
+	return string(r[:detailHead]) + "…" + string(r[len(r)-tail:])
+}
