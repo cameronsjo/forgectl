@@ -299,6 +299,11 @@ func TestInteractiveArgv(t *testing.T) {
 		{[]string{"sh", "script.sh"}, false},
 		{[]string{"sh", "-"}, false},
 		{[]string{"sh", "--", "script.sh"}, false},
+		{[]string{"fish", "-Cread"}, false},
+		{[]string{"fish", "--init-command=claude"}, false},
+		{[]string{"nu", "--commands=claude"}, false},
+		{[]string{"pwsh", "-Command:claude"}, false},
+		{[]string{"zsh", "-o", "vi"}, false},
 	} {
 		if got := interactiveArgv(tc.argv); got != tc.want {
 			t.Errorf("interactiveArgv(%q) = %v, want %v", tc.argv, got, tc.want)

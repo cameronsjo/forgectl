@@ -111,9 +111,11 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 	// The root pane must be an idle shell before anything is typed into it. A
 	// layout plugin can start an agent in a new workspace's root pane, and
 	// `pane run` would then submit the bootstrap line, nonce included, to that
-	// agent as a prompt. This is check-then-type, so it narrows that window
-	// rather than closing it; the refusal is what matters when the pane was
-	// taken before the check.
+	// agent as a prompt. The check reads process state only. It refuses a pane
+	// already taken, but it does not prove the shell has reached its prompt:
+	// typed input waits in the terminal queue for whatever reads it next, and a
+	// shell still loading its rc files passes. A prompt-ready signal is
+	// forgectl#1051; binding the handshake to the pane is forgectl#1041.
 	if cause := a.rootPaneIdle(ctx, created.PaneID); cause != nil {
 		return backend.NewRefKnownWithCause(ref, *cause)
 	}
@@ -951,19 +953,15 @@ func interactiveArgv(argv []string) bool {
 		return false
 	}
 	for _, arg := range argv[1:] {
-		switch {
-		case arg == "-" || arg == "--" || !strings.HasPrefix(arg, "-"):
-			// A script operand, stdin marker or end of options: the shell runs
-			// something other than the terminal.
-			return false
-		case strings.HasPrefix(arg, "--"):
-			if arg == "--command" || strings.HasPrefix(arg, "--command=") {
-				return false
-			}
-		case strings.ContainsRune(arg[1:], 'c'):
-			// A short-flag cluster carrying -c, as in -c, -lc or -ic.
+		if !slices.Contains(interactiveShellFlags, arg) {
 			return false
 		}
 	}
 	return true
 }
+
+// interactiveShellFlags are the only arguments an idle shell may carry. Every
+// other flag is refused, because shells disagree on which ones take a command
+// string (bash -c, fish -C and --init-command, nu --commands, pwsh -Command)
+// and a list of the dangerous ones is never finished.
+var interactiveShellFlags = []string{"-l", "-i", "-il", "-li", "--login", "--interactive"}
