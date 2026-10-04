@@ -77,7 +77,15 @@ terminal manager, and starts the harness inside it.
 The target is a project name or a path. A bare name is looked up beneath the
 projects root and must match exactly — an ambiguous name is refused rather than
 guessed at, because guessing means opening a session in the wrong repository.
-A path may be anywhere, because naming it is the choice being made explicitly.`,
+A path may be anywhere, because naming it is the choice being made explicitly.
+
+With --worktree <branch> (herdr only, --name required) the launch starts a
+coordinator worker instead: a git worktree at <repo>/.claude/worktrees/<name>,
+created with repository hooks disabled, and a row in the worker ledger under
+$XDG_STATE_HOME/forgectl/surface. Workers refuse pi, bypassPermissions and
+danger-full-access, and never get --allow-dangerously-skip-permissions.
+
+  forgectl surface launch . --surface herdr --worktree feat/x --name x --harness codex`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSurfaceLaunch(cmd, deps, surfaceLaunchOptions{
@@ -272,7 +280,8 @@ func validPaneIdentity(v string) bool {
 // the LAUNCHER runs in, and the trampoline replaces the new pane's environment
 // with this one, so a worker started from a herdr pane would report its agent
 // state, and receive anything addressed to "its" pane, on the launcher's pane.
-// The trampoline puts back the new pane's own values (paneIdentityEnv).
+// For a herdr launch, which marks its invocation (markHerdrPane), the
+// trampoline puts back the new pane's own values (paneIdentityEnv).
 func surfaceLaunchEnvironment(base []string) []string {
 	out := make([]string, 0, len(base))
 	for _, entry := range base {

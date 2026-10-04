@@ -148,6 +148,8 @@ forgectl resume snapshot --quiet   # same, silent — the form a Stop hook uses
 # surface — start a harness inside a terminal manager without exposing its invocation
 forgectl surface launch <target> --surface tmux           # tmux, cmux, or herdr — always explicit, never a default
 forgectl surface launch . --surface tmux --name review     # override the display name (defaults to the target dir's name)
+forgectl surface launch . --surface tmux --harness codex   # run codex here instead of the profile's harness (claude or codex)
+forgectl surface launch . --surface herdr --worktree feat/x --name x   # coordinator worker: own worktree under .claude/worktrees/x, own herdr workspace, ledger row
 
 # recipe — run small built-in workbench recipes (alias: r)
 forgectl recipe afk                       # run /go:afk on the current Herdr agent, then /compact it
