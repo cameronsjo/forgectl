@@ -62,7 +62,10 @@ are listed in a footer.
 A repo is stalled when its nightly toggle is on and it has no ship run in 26h,
 when the same non-quiet gate reason (not go, no-pr, or paused) shows on its
 last 2 scheduled runs, when the last run reports half-shipped, when an
-endpoint trails the release by more than 24h, or when its gate copy drifted.
+endpoint trails the release by more than 24h, when its gate copy drifted, when
+a feat, fix, perf, breaking commit has waited over 24h with no release PR open
+(no-release-pr), or when the release-PR workflow has a run waiting, queued, or
+pending for over 1h (release-workflow-stuck).
 A paused repo (toggle not on) is shown but not judged on its beat. A repo
 whose reads failed is unknown, and the failure is named.
 

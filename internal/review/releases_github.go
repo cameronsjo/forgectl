@@ -174,6 +174,7 @@ func collectRepo(ctx context.Context, api APIGetter, e RegistryEntry) RepoFacts 
 	c.unreleased()
 	if e.Class == ClassReleasePR {
 		c.releasePRs()
+		c.releaseWorkflowRuns()
 		c.gateCopy()
 	}
 	name := ToggleName(e.Class)
@@ -313,12 +314,17 @@ type ghCompare struct {
 	AheadBy *int `json:"ahead_by"`
 	Commits []struct {
 		Commit struct {
+			Message   string `json:"message"`
 			Committer struct {
 				Date time.Time `json:"date"`
 			} `json:"committer"`
 		} `json:"commit"`
 	} `json:"commits"`
 }
+
+// maxCompareCommits is the page size of the compare read. Past it the list is
+// partial (the API lists oldest first, so the newest commits are the ones cut).
+const maxCompareCommits = 100
 
 // unreleased counts branch commits since the last release. The compare API
 // lists commits oldest first, so commits[0] is the oldest uncut one.
@@ -331,7 +337,7 @@ func (c *collector) unreleased() {
 		base = c.f.LastRelease.SHA
 	}
 	var cmp ghCompare
-	if err := c.getJSON(fmt.Sprintf("repos/%s/compare/%s...%s", c.slug, base, c.e.Branch), &cmp); err != nil {
+	if err := c.getJSON(fmt.Sprintf("repos/%s/compare/%s...%s?per_page=%d", c.slug, base, c.e.Branch, maxCompareCommits), &cmp); err != nil {
 		c.fail("compare", err)
 		return
 	}
@@ -344,6 +350,21 @@ func (c *collector) unreleased() {
 	if n > 0 && len(cmp.Commits) > 0 {
 		t := cmp.Commits[0].Commit.Committer.Date
 		c.f.OldestUnreleasedAt = &t
+	}
+	if c.e.Class == ClassReleasePR {
+		c.unreleasedLog(&cmp, n)
+	}
+}
+
+// unreleasedLog keeps the unreleased commits for the releasable rule. When
+// the page is shorter than the count and shows nothing releasable, the unseen
+// newer commits could be releasable, so the row fails closed.
+func (c *collector) unreleasedLog(cmp *ghCompare, n int) {
+	for _, cm := range cmp.Commits {
+		c.f.UnreleasedCommits = append(c.f.UnreleasedCommits, NewCommitFact(cm.Commit.Message, cm.Commit.Committer.Date))
+	}
+	if _, _, ok := releasableSummary(c.f.UnreleasedCommits); !ok && len(cmp.Commits) < n {
+		c.f.Errors = append(c.f.Errors, fmt.Sprintf("compare: read %d of %d unreleased commits, none releasable", len(cmp.Commits), n))
 	}
 }
 
@@ -370,6 +391,33 @@ func (c *collector) releasePRs() {
 		}
 		c.f.ReleasePRs = append(c.f.ReleasePRs, PRFact{Number: p.Number, CreatedAt: p.CreatedAt})
 	}
+}
+
+// releaseWorkflowRuns keeps the release-PR workflow's runs that have not
+// completed. A 404 on an unnamed default workflow means the repo has no such
+// workflow, so there is nothing to be stuck; on a workflow the registry named
+// it is a failed read.
+func (c *collector) releaseWorkflowRuns() {
+	wf, explicit := ReleaseWorkflowFile(c.e)
+	// One read per status: a stuck run is old, so on a busy branch it falls
+	// off a newest-100 page of all runs.
+	for status := range stuckStatuses {
+		var resp struct {
+			WorkflowRuns []ghRun `json:"workflow_runs"`
+		}
+		err := c.getJSON(fmt.Sprintf("repos/%s/actions/workflows/%s/runs?status=%s&per_page=100&exclude_pull_requests=true", c.slug, path.Base(wf), status), &resp)
+		switch {
+		case errors.Is(err, ErrAPINotFound) && !explicit:
+			return
+		case err != nil:
+			c.fail("release workflow runs", err)
+			return
+		}
+		for _, r := range resp.WorkflowRuns {
+			c.f.PendingReleaseRuns = append(c.f.PendingReleaseRuns, RunFact{ID: r.ID, Event: r.Event, Status: r.Status, CreatedAt: r.CreatedAt})
+		}
+	}
+	sort.Slice(c.f.PendingReleaseRuns, func(i, j int) bool { return c.f.PendingReleaseRuns[i].ID < c.f.PendingReleaseRuns[j].ID })
 }
 
 // gateCopy hashes the vendored gate on the branch.
