@@ -20,9 +20,12 @@ package tasks
 //	  -liveprobe.phase=update -liveprobe.a=<id> -liveprobe.b=<id> \
 //	  -liveprobe.c=<id> -liveprobe.d=<id> -liveprobe.out=<abs dir>
 //
-// The token is a short-expiry scratch bot token stored under the keychain
-// service "forgectl-liveprobe-scratch". Delete that entry and revoke the token
-// when the probe is finished. The probe talks only to the default host.
+// By default the token is a short-expiry scratch bot token stored under the
+// keychain service "forgectl-liveprobe-scratch"; delete that entry and revoke
+// the token when the probe is finished. On a machine whose installed forgectl
+// carries the allowed-host rule, the probe may instead read the `done` verb's
+// own entry with -liveprobe.keychain-service=vikunja-write. The probe talks
+// only to the default host.
 //
 // The token is read through ReadToken and the client is built by NewClient, so
 // host pinning, the TLS floor, and the redirect refusal all apply. Raw
@@ -59,12 +62,13 @@ const (
 	probeUpdateWrites = 4
 )
 
-// probeDefaultService is deliberately NOT the entry the `done` verb reads. The
-// probe writes to a live board, so it gets a credential of its own: a
-// short-expiry scratch token, stored under this throwaway name and never under
-// the write entry. A probe run can then neither use nor expose the token that
-// closes real tasks, and when the probe is finished its entry is deleted and
-// its token revoked without touching anything else.
+// probeDefaultService is deliberately NOT the entry the `done` verb reads. A
+// write token must not sit in the keychain on a machine whose installed
+// forgectl predates the allowed-host rule: such a binary sends a named keychain
+// entry to any host a command line names. A probe run before that upgrade uses
+// a short-expiry scratch token under this throwaway name, deleted and revoked
+// when the probe is finished. After the upgrade, the write entry is safe to
+// name with -liveprobe.keychain-service.
 const probeDefaultService = "forgectl-liveprobe-scratch"
 
 // probeRepeatSeconds is scratch task B's repeat interval: one day.
