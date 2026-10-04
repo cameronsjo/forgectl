@@ -50,11 +50,11 @@ func installHook(t *testing.T, top string) string {
 	t.Helper()
 	marker := filepath.Join(t.TempDir(), "hook-ran")
 	hook := filepath.Join(top, ".git", "hooks", "post-checkout")
-	if err := os.MkdirAll(filepath.Dir(hook), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(hook), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	// #nosec G306 -- a hook must be executable to be a valid control.
-	if err := os.WriteFile(hook, []byte("#!/bin/sh\ntouch '"+marker+"'\n"), 0o755); err != nil {
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\ntouch '"+marker+"'\n"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	return marker
@@ -121,7 +121,7 @@ func TestAddWorktreeRefusesASymlinkedClaudeDir(t *testing.T) {
 			top := gitRepo(t)
 			outside := t.TempDir()
 			link := filepath.Join(top, linked)
-			if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(link), 0o750); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.Symlink(outside, link); err != nil {
@@ -144,7 +144,7 @@ func TestAddWorktreeRefusesASymlinkedClaudeDir(t *testing.T) {
 // directory a previous worker may still hold work in.
 func TestAddWorktreeRefusesAnExistingPath(t *testing.T) {
 	top := gitRepo(t)
-	if err := os.MkdirAll(WorktreePath(top, "w4"), 0o755); err != nil {
+	if err := os.MkdirAll(WorktreePath(top, "w4"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := AddWorktree(context.Background(), fexec.OSRunner{}, top, "w4", "feat/w4"); err == nil {

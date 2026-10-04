@@ -105,6 +105,7 @@ func decodeLedger(data []byte, repo, session string) (ledgerFile, error) {
 }
 
 func encodeLedger(f ledgerFile) ([]byte, error) {
+	// termsafe:allow-raw-json private 0600 ledger file read back by forgectl, never written to a terminal
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return nil, err

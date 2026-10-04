@@ -141,10 +141,12 @@ func TestLedgerRefusesAnotherReposFile(t *testing.T) {
 	dir := filepath.Join(state, "forgectl", "surface")
 	src := filepath.Join(dir, ledgerKey("/repo/one", "default")+".json")
 	dst := filepath.Join(dir, ledgerKey("/repo/two", "default")+".json")
+	//nolint:gosec // G304: reading back a ledger file this test just wrote under its own temp dir
 	raw, err := os.ReadFile(src)
 	if err != nil {
 		t.Fatal(err)
 	}
+	//nolint:gosec // G703: dst is built from this test's temp dir and a hash, not from input
 	if err := os.WriteFile(dst, raw, ledgerFileMode); err != nil {
 		t.Fatal(err)
 	}

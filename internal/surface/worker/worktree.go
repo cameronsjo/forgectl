@@ -42,11 +42,11 @@ func RepoTop(ctx context.Context, run GitRunner, dir string) (string, error) {
 	if !filepath.IsAbs(top) {
 		return "", fmt.Errorf("worker: git reported a non-absolute top level for %s", dir)
 	}
-	real, err := filepath.EvalSymlinks(top)
+	resolved, err := filepath.EvalSymlinks(top)
 	if err != nil {
 		return "", fmt.Errorf("worker: resolve repo top: %w", err)
 	}
-	return real, nil
+	return resolved, nil
 }
 
 // WorktreePath is where the worker named name gets its worktree.
@@ -102,18 +102,18 @@ func AddWorktree(ctx context.Context, run GitRunner, top, name, branch string) (
 		return Worktree{}, fmt.Errorf("worker: git worktree add: %w", err)
 	}
 
-	real, err := filepath.EvalSymlinks(path)
+	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return Worktree{}, fmt.Errorf("worker: resolve created worktree: %w", err)
 	}
-	if filepath.Dir(real) != filepath.Dir(path) {
-		return Worktree{}, fmt.Errorf("%w: the worktree resolved to %s, outside %s", ErrUnsafeWorktreeRoot, real, filepath.Dir(path))
+	if filepath.Dir(resolved) != filepath.Dir(path) {
+		return Worktree{}, fmt.Errorf("%w: the worktree resolved to %s, outside %s", ErrUnsafeWorktreeRoot, resolved, filepath.Dir(path))
 	}
-	base, err := run.Run(ctx, "git", "-C", real, "rev-parse", "HEAD")
+	base, err := run.Run(ctx, "git", "-C", resolved, "rev-parse", "HEAD")
 	if err != nil {
 		return Worktree{}, fmt.Errorf("worker: read worktree HEAD: %w", err)
 	}
-	return Worktree{Path: real, Branch: branch, Base: strings.TrimSpace(base)}, nil
+	return Worktree{Path: resolved, Branch: branch, Base: strings.TrimSpace(base)}, nil
 }
 
 // ensureWorktreeRoot creates <top>/.claude/worktrees, refusing any component
@@ -125,7 +125,7 @@ func ensureWorktreeRoot(top string) error {
 		info, err := os.Lstat(dir)
 		switch {
 		case errors.Is(err, os.ErrNotExist):
-			if err := os.Mkdir(dir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+			if err := os.Mkdir(dir, 0o750); err != nil && !errors.Is(err, os.ErrExist) {
 				return fmt.Errorf("worker: create %s: %w", dir, err)
 			}
 			// Re-check: a racing creator could have put a symlink there.
