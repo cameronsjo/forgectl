@@ -92,7 +92,7 @@ Every `tasks done` call that sends an update writes one line of JSON to stderr a
 
 `outcome` is `closed`, `not_confirmed`, `write_refused`, or `unauthorized`. `credential` is the name of the keychain entry the token was read from, never the token. `closer` is the name the caller declared; nothing verifies it.
 
-So under `--json`, a failure after the update was sent puts two things on stderr: the record line first, then the failure object. The record is always exactly one line that starts with `{"time":`, and the failure object is everything after it. A success puts the record on stderr and the result on stdout.
+So under `--json`, a failure after the update was sent puts the record line on stderr first and the failure object last. The record is always exactly one line that starts with `{"time":`. The failure object is the last line of stderr. Any plain line between the two is a note that the record could not be appended to the file. A success puts the record, and any such note, on stderr and the result on stdout.
 
 If the record cannot be appended to the file, the close still stands and the exit code does not change. stderr gets one more plain line that says so. The stdio MCP server appends its `complete_task` records to the same file, with `surface` `mcp`; over HTTP the server writes them to stderr only.
 

@@ -127,9 +127,16 @@ func TestLiveProbe(t *testing.T) {
 	p := &probe{t: t, client: client, outDir: outDir}
 	t.Cleanup(func() {
 		t.Logf("PROBE IDS CREATED THIS RUN: %v (delete them in the web UI when the probe is finished)", p.created)
-		t.Logf("WHEN THE PROBE IS FINISHED: delete the keychain entry %q (security delete-generic-password -s %s) "+
-			"and revoke its token in the web UI. The token can write to the board until it is revoked or expires.",
-			*probeService, *probeService)
+		// Only the throwaway entry is the probe's to destroy. Run against
+		// another entry, such as the write entry the done verb reads next,
+		// the same advice would take out the credential real closes need.
+		if *probeService == probeDefaultService {
+			t.Logf("WHEN THE PROBE IS FINISHED: delete the keychain entry %q (security delete-generic-password -s %s) "+
+				"and revoke its token in the web UI. The token can write to the board until it is revoked or expires.",
+				*probeService, *probeService)
+		} else {
+			t.Logf("KEEP the keychain entry %q: it is not the probe's own scratch entry.", *probeService)
+		}
 	})
 
 	switch *probePhase {
@@ -167,7 +174,9 @@ func probeOutDir(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("relate %q to the module root: %v", out, err)
 	}
-	if rel == "." || !strings.HasPrefix(rel, "..") {
+	// Outside means the first path element is "..". A prefix test on the
+	// string would also pass a directory inside the module named "..raw".
+	if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		t.Fatalf("-liveprobe.out %q is inside the repository; raw saves carry real user objects and must live outside it", out)
 	}
 	return out
