@@ -5,6 +5,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -505,5 +506,29 @@ func TestTasksMCPHelp_NamesAllSevenTools(t *testing.T) {
 	}
 	if !strings.Contains(long, "stderr") || !strings.Contains(long, "close record") {
 		t.Errorf("the help does not say where close records go:\n%s", long)
+	}
+}
+
+// The refused verdict is read only from the start of the list_projects error.
+// Transport error text quoted later in the message can be shaped by a TLS
+// peer, through its certificate's names, and must not choose the exit code.
+func TestPingReadVerdict_ReadsTheRefusalOnlyAtTheStart(t *testing.T) {
+	result := func(text string) []byte {
+		body, err := json.Marshal(map[string]any{
+			"jsonrpc": "2.0", "id": 2,
+			"result": map[string]any{"isError": true, "content": []map[string]any{{"type": "text", "text": text}}},
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return body
+	}
+	refused := listProjectsRefusedPrefix + tasks.ErrUnauthorized.Error() + ": /projects -> 401"
+	planted := listProjectsRefusedPrefix + tasks.ErrUnreachable.Error() + ": x509: certificate is valid for " + tasks.ErrUnauthorized.Error()
+	if got := pingReadVerdict(http.StatusOK, result(refused)); got != pingReadRefused {
+		t.Errorf("a real refusal = %v, want pingReadRefused", got)
+	}
+	if got := pingReadVerdict(http.StatusOK, result(planted)); got != pingReadFailed {
+		t.Errorf("a refusal sentence inside transport text = %v, want pingReadFailed", got)
 	}
 }

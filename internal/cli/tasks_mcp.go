@@ -537,13 +537,21 @@ func pingReadVerdict(status int, raw []byte) pingRead {
 	if !call.IsError {
 		return pingReadOK
 	}
+	// Anchored on the exact text list_projects writes for an auth failure. A
+	// substring match would also fire on transport error text quoted later in
+	// the same message, which a TLS peer can shape through its certificate.
+	refused := listProjectsRefusedPrefix + tasks.ErrUnauthorized.Error()
 	for _, c := range call.Content {
-		if strings.Contains(c.Text, tasks.ErrUnauthorized.Error()) {
+		if strings.HasPrefix(c.Text, refused) {
 			return pingReadRefused
 		}
 	}
 	return pingReadFailed
 }
+
+// listProjectsRefusedPrefix is how the list_projects tool error begins. The ping
+// reads the refusal sentence only straight after it.
+const listProjectsRefusedPrefix = "could not list projects: "
 
 // releasePingSession best-effort DELETEs the session the probe opened. Every
 // failure here is ignored on purpose: this is tidy-up, and a healthcheck that
