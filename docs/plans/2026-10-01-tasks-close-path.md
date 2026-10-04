@@ -364,7 +364,7 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
 
 **Dispatch:** the dedicated security-review agent on Opus over the file list in Task 1 plus the new files, whole files; fallback as in Task 1 · **Report:** `[REPORT_PATH]`
 
-- [x] Security review; fold findings. No ready flip with a Critical or Important open. Four passes: before the build (1 Critical, 9 Important), of the build at `92c2427` (0 Critical, 3 Important), of the fixes at `5458a4c` (0 and 0), of the last changes at `00f6831` (0 and 0). One code review of the build: 0 Critical, 2 Important. One Important stays open and blocks the flip: the live probe has not run.
+- [x] Security review; fold findings. No ready flip with a Critical or Important open. Five passes: before the build (1 Critical, 9 Important), of the build at `92c2427` (0 Critical, 3 Important), of the fixes at `5458a4c` (0 and 0), of the changes at `00f6831` (0 and 0), and of the host-field change at `6cf8e4c` (0 and 0). One code review of the build: 0 Critical, 2 Important. One Important stays open and blocks the flip: the live probe has not run.
 - [x] `git fetch`, then `go test ./...` and `golangci-lint run` with `gh`, `tmux`, and `codex` stripped from `PATH`. Every package this build touches passes and lint reports 0 issues. `TestStatus_LiveGit` fails on the build machine because of its global gitignore, on `origin/main` as well.
 - [x] `vulncheck` is green at the PR head
 - [x] Run the redaction scan over the PR body and the fixtures
