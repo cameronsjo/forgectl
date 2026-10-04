@@ -876,7 +876,11 @@ func notifyRestartFailure(ctx context.Context, deps module.Deps, ev resume.Resta
 	if ev.Manual != "" {
 		body = "Run: " + ev.Manual + " — " + ev.Detail
 	}
-	// A notification is a courtesy on top of the log line already written; a
-	// failure to post it must not change the run's outcome.
-	_ = hookNotify(ctx, deps, "forgectl: a session was not restarted", body)
+	// Detached from the run's context: a failure during a SIGTERM shutdown
+	// (launchctl bootout, a reinstall, logout) is the one most likely to leave
+	// a session stopped, and a cancelled context would stop osascript before
+	// it started. notify's own timeout still bounds the call. A notification
+	// is a courtesy on top of the log line already written, so a failure to
+	// post it must not change the run's outcome.
+	_ = hookNotify(context.WithoutCancel(ctx), deps, "forgectl: a session was not restarted", body)
 }

@@ -515,7 +515,7 @@ func TestResumeHooksRestartFailureNotifies(t *testing.T) {
 	if _, err := f.run(t, cfg, "run"); err == nil {
 		t.Fatal("a failed relaunch must make the run incomplete")
 	}
-	if len(posted) != 1 || !strings.Contains(posted[0], "not restarted") || !strings.Contains(posted[0], "Run: forgectl resume ") {
+	if len(posted) != 1 || !strings.Contains(posted[0], "not restarted") || !strings.Contains(posted[0], "Run: forgectl resume ") || !strings.Contains(posted[0], "herdr call timed out") {
 		t.Fatalf("notifications = %q; want one naming the by-hand command", posted)
 	}
 }
@@ -525,10 +525,25 @@ func TestNotifyRestartFailureIgnoresOtherStates(t *testing.T) {
 	prev := hookNotify
 	hookNotify = func(context.Context, module.Deps, string, string) error { called++; return nil }
 	t.Cleanup(func() { hookNotify = prev })
-	for _, st := range []resume.RestartState{resume.StateResumed, resume.StateWaiting, resume.StateSkipped, resume.StateLeft} {
+	for _, st := range []resume.RestartState{resume.StateRestarting, resume.StateResumed, resume.StateWaiting, resume.StateSkipped, resume.StateLeft, resume.StatePaneGone} {
 		notifyRestartFailure(context.Background(), module.Deps{}, resume.RestartEvent{State: st})
 	}
 	if called != 0 {
 		t.Fatalf("posted %d notifications for non-failed states", called)
+	}
+}
+
+// A failure reported while the run is shutting down (its context cancelled by
+// SIGTERM) must still reach the notifier with a live context.
+func TestNotifyRestartFailureSurvivesACancelledRun(t *testing.T) {
+	var live bool
+	prev := hookNotify
+	hookNotify = func(ctx context.Context, _ module.Deps, _, _ string) error { live = ctx.Err() == nil; return nil }
+	t.Cleanup(func() { hookNotify = prev })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	notifyRestartFailure(ctx, module.Deps{}, resume.RestartEvent{State: resume.StateFailed, Manual: "forgectl resume x", Detail: "d"})
+	if !live {
+		t.Fatal("the notifier got a cancelled context; osascript would never start")
 	}
 }
