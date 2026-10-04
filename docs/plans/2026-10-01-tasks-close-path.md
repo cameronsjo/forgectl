@@ -5,7 +5,7 @@ harness: "claude-code 2.1.287"
 machine: "cf6e768835c7"
 approved_session_id: "c70b336a-7809-4bea-90a6-42015e71e281"
 status: in-flight
-next: "Operator merges PR 1026 (starts a release), runs forgectl upgrade, mints and stores the vikunja-write bot token. Then a session runs the live probe against that entry before any real close (Task 2, reordered after Task 8), replaces the fixtures, records results in Task 2 and ADR 0009 §17. Then PR 1035, Tasks 9-10, Task 11."
+next: "PR 1026 merged as ce4bfca. Release-please opens the release PR; the nightly ship workflow (11:00 UTC) tags and publishes it, or a session dispatches ship.yml with the operator's go. Then the operator runs forgectl upgrade and stores the vikunja-write token; a session runs the live probe on that entry before any real close. PR 1035 and cadence PR 1581 follow."
 branch: feat/tasks-close-path
 pr: "https://github.com/cameronsjo/forgectl/pull/1026"
 updated: 2026-10-04
@@ -378,7 +378,7 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
 
 Merging the build PR starts a release within 24 hours, because the nightly ship runs unattended. The go to merge is the go to release.
 
-- [ ] **Operator, or a session with his go:** merge. Check: PR state `MERGED`, #1022 `CLOSED`.
+- [x] **Operator, or a session with his go:** merge. Check: PR state `MERGED`, #1022 `CLOSED`. Merged 2026-10-04 by the session on the operator's "merge it", squash commit `ce4bfca`; #1022 closed.
 - [ ] **release-please:** opens the release PR. Check: it is open, and the run log has no "untagged, merged release PRs outstanding".
 - [ ] **Ship workflow:** nightly at 11:00 UTC, or `gh workflow run ship.yml -R cameronsjo/forgectl -f dry_run=false` with the operator's go. Never merge the release PR by hand. Check: the run succeeded and `git ls-remote --tags origin` shows the tag.
 - [ ] **Session:** the cask is at the new version; record the container image digest the release run reports, for Task 9.
