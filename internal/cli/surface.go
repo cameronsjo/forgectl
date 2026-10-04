@@ -82,8 +82,10 @@ A path may be anywhere, because naming it is the choice being made explicitly.
 With --worktree <branch> (herdr only, --name required) the launch starts a
 coordinator worker instead: a git worktree at <repo>/.claude/worktrees/<name>,
 created with repository hooks disabled, and a row in the worker ledger under
-$XDG_STATE_HOME/forgectl/surface. Workers refuse pi, bypassPermissions and
-danger-full-access, and never get --allow-dangerously-skip-permissions.
+$XDG_STATE_HOME/forgectl/surface. Workers allow only claude plan, default or
+acceptEdits, or codex read-only or workspace-write with untrusted or
+on-request approvals; pi and anything looser are refused, and workers never
+get --allow-dangerously-skip-permissions.
 
   forgectl surface launch . --surface herdr --worktree feat/x --name x --harness codex`,
 		Args: cobra.MaximumNArgs(1),

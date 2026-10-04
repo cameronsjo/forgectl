@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 )
@@ -120,23 +121,43 @@ var (
 	ErrWorkerPosture = errors.New("launch: this posture is not allowed for a worker")
 )
 
+// Worker posture allowlists. They are the plan's v1 worker posture and
+// everything stricter: a claude worker whose shell commands still prompt, and
+// a codex worker that can write only its workspace and asks before anything
+// else. Anything not listed is refused, so a mode Claude Code or Codex adds
+// later is refused until someone decides it is safe for an unattended worker.
+var (
+	workerPermissionModes = []string{"plan", "default", "acceptEdits"}
+	workerSandboxes       = []string{"read-only", "workspace-write"}
+	workerApprovals       = []string{"untrusted", "on-request"}
+)
+
 // applyWorkerFloor is the worker posture until the worker profile (T5) lands.
 //
-// Workers run unattended in panes the operator is not watching, so three
-// things the matched profile may allow are not allowed here. pi is refused
+// Workers run unattended in panes the operator is not watching. pi is refused
 // whichever way it was chosen, because forgectl can pass it no permission or
-// sandbox flag. A repo that explicitly asks for bypassPermissions or
-// danger-full-access is refused rather than quietly narrowed, so the operator
-// sees the conflict. allow_danger is turned off rather than refused: it is on
-// by default, and refusing it would refuse every worker on a default config.
+// sandbox flag. A posture outside the allowlists above is refused rather than
+// quietly narrowed, so the operator sees the conflict. allow_danger is turned
+// off rather than refused: it is on by default, and refusing it would refuse
+// every worker on a default config.
 func applyWorkerFloor(p Profile) (Profile, error) {
-	switch {
-	case p.Harness == "pi":
-		return Profile{}, fmt.Errorf("%w: pi has no permission or sandbox flag forgectl can pass", ErrWorkerPosture)
-	case p.Harness == "claude" && p.PermissionMode == "bypassPermissions":
-		return Profile{}, fmt.Errorf("%w: permission_mode bypassPermissions", ErrWorkerPosture)
-	case p.Harness == "codex" && p.Sandbox == "danger-full-access":
-		return Profile{}, fmt.Errorf("%w: sandbox danger-full-access", ErrWorkerPosture)
+	switch p.Harness {
+	case "claude":
+		if !oneOf(p.PermissionMode, workerPermissionModes...) {
+			return Profile{}, fmt.Errorf("%w: permission_mode %q (workers allow %s)",
+				ErrWorkerPosture, p.PermissionMode, strings.Join(workerPermissionModes, ", "))
+		}
+	case "codex":
+		if !oneOf(p.Sandbox, workerSandboxes...) {
+			return Profile{}, fmt.Errorf("%w: sandbox %q (workers allow %s)",
+				ErrWorkerPosture, p.Sandbox, strings.Join(workerSandboxes, ", "))
+		}
+		if !oneOf(p.ApprovalPolicy, workerApprovals...) {
+			return Profile{}, fmt.Errorf("%w: approval_policy %q (workers allow %s)",
+				ErrWorkerPosture, p.ApprovalPolicy, strings.Join(workerApprovals, ", "))
+		}
+	default:
+		return Profile{}, fmt.Errorf("%w: %s has no permission or sandbox flag forgectl can pass", ErrWorkerPosture, p.Harness)
 	}
 	p.AllowDanger = false
 	return p, nil

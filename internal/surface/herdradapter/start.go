@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -231,8 +233,25 @@ type processInfo struct {
 	} `json:"foreground_processes"`
 }
 
+// knownShells are the process names an idle root pane may show. herdr's
+// shell_pid is the pane's direct child, whatever binary that is, so a pane a
+// layout started an agent in directly, or a shell that exec'd into one, owns
+// its own foreground with the agent as leader. The name check refuses that.
+var knownShells = []string{"sh", "bash", "zsh", "fish", "dash", "ksh", "mksh", "tcsh", "csh", "nu", "xonsh", "elvish", "pwsh"}
+
+// idle reports a pane whose foreground belongs to its own process, and that
+// process is a shell. A leader missing from the listing is not idle.
 func (p processInfo) idle() bool {
-	return p.ShellPID > 0 && p.ForegroundGroup == p.ShellPID
+	if p.ShellPID <= 0 || p.ForegroundGroup != p.ShellPID {
+		return false
+	}
+	for _, proc := range p.Processes {
+		if proc.PID == p.ShellPID {
+			// A login shell can show as "-zsh".
+			return slices.Contains(knownShells, strings.TrimPrefix(filepath.Base(proc.Name), "-"))
+		}
+	}
+	return false
 }
 
 // foregroundName names the process leading the foreground group, or the

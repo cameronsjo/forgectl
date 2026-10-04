@@ -167,6 +167,10 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 		"pi from the repo profile": {Projects: []config.LaunchProject{{Match: target, Harness: "pi"}}},
 		"bypassPermissions":        {Defaults: config.LaunchDefaults{PermissionMode: "bypassPermissions"}},
 		"danger-full-access":       {Defaults: config.LaunchDefaults{Harness: "codex", Sandbox: "danger-full-access"}},
+		"claude auto mode":         {Defaults: config.LaunchDefaults{PermissionMode: "auto"}},
+		"claude dontAsk":           {Defaults: config.LaunchDefaults{PermissionMode: "dontAsk"}},
+		"claude unknown mode":      {Defaults: config.LaunchDefaults{PermissionMode: "acceptEdit"}},
+		"codex never asks":         {Defaults: config.LaunchDefaults{Harness: "codex", Sandbox: "workspace-write", ApprovalPolicy: "never"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := BuildInvocation(InvocationRequest{Config: lc, CWD: target, Worker: true, Resolve: bin})

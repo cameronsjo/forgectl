@@ -169,3 +169,43 @@ func TestATransientlyBusyRootPaneStillReceivesTheBootstrap(t *testing.T) {
 		t.Errorf("inspected %d times, want 2", reads)
 	}
 }
+
+// TestARootPaneRunAsAnAgentNeverReceivesTheBootstrap is the polish security
+// finding: herdr's shell_pid is the pane's direct child, whatever it is. An
+// agent started directly in the pane leads its own foreground group, so the
+// group check alone reads it as idle; the shell-name check refuses it.
+func TestARootPaneRunAsAnAgentNeverReceivesTheBootstrap(t *testing.T) {
+	for name, body := range map[string][]byte{
+		"agent is the pane's process": processInfoJSON(4242, 4242, "claude"),
+		"leader not listed":           processInfoJSON(4242, 4242),
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := newRunner().on(exec.KindHerdrPaneInspect, func() (exec.SensitiveResult, error) {
+				return stdout(body), nil
+			})
+			a := newTestAdapter(t, run, nil)
+			a.idleInterval = 0
+			spec, _ := newSpec(t)
+
+			res := a.Start(context.Background(), spec)
+
+			if bootstrapSent(run) {
+				t.Fatal("the bootstrap was typed into a pane whose leader is not a shell")
+			}
+			if causeClass(res) != backend.FailureTargetBusy {
+				t.Errorf("class = %v, want FailureTargetBusy", causeClass(res))
+			}
+		})
+	}
+}
+
+func TestALoginShellLeaderIsIdle(t *testing.T) {
+	info := processInfo{ForegroundGroup: 7, ShellPID: 7}
+	info.Processes = append(info.Processes, struct {
+		Name string `json:"name"`
+		PID  int    `json:"pid"`
+	}{Name: "-zsh", PID: 7})
+	if !info.idle() {
+		t.Error("a login shell (-zsh) leading its own pane is not idle")
+	}
+}

@@ -1,9 +1,9 @@
 ---
-status: approved
+status: in-progress
 branch: plan/herdr-coordinator
 approved_in: let-s-level-up-our-eager-owl
 approved_session_id: 95a2c916-a3c7-4bd0-9c2b-be2a99c294e0
-next: T0 security review of the T0 file list, then T1 (start with the trust-inheritance check)
+next: T2 (per-harness readiness predicates and surface ready); T0 and T1 are on PR #536 for Cameron's review
 ---
 
 # forgectl: a coordinator over herdr worker panes
@@ -62,17 +62,17 @@ Only `surface launch` exists today (`internal/cli/surface.go:57`); every other v
 
 forgectl's ownership marker lives in the herdr workspace label, and `Close` acts on whole workspaces (`internal/surface/herdradapter/start.go:38-54`, `close.go:37-54`). v1 keeps that model: each worker gets its own forgectl-created workspace, and `close` closes that workspace. The adapter types the bootstrap into the workspace's root pane (`start.go:106-131`). T1 confirms the root pane is an idle shell before typing, and fails naming the pane's command if anything else holds it (the herdr-plus layout case). No pane splitting in v1.
 
-`--name` is the ledger key and is carried in the ownership label. herdr's create accepts only `label` (`start.go:38-43`), so the sidebar shows the ownership label, not a free-form display name.
+`--name` is the ledger key. It is not carried in the ownership label: `Close`, `Probe` and reconcile match that label exactly against the tag alone, and adding the name would weaken the match (see Deviations). herdr's create accepts only `label` (`start.go:38-43`), so the sidebar shows the ownership label, not the worker name; forgectl#1047 shows the name through `workspace report-metadata` instead.
 
 ### Worktrees
 
 `projects.Worktree` makes a fresh bare clone and refuses an existing directory (`internal/projects/worktree.go:47`), so T1 adds a helper that runs `git -c core.hooksPath=/dev/null worktree add` against the existing checkout. Disabling hooks stops a fetched branch from running its own `post-checkout` hook (husky, `.githooks`) before any trust dialog. Worktrees go under `<repo>/.claude/worktrees/<name>`, which keeps the cwd inside the repo so the repo's launch profile still matches by path prefix (`profile.go:149`).
 
-That location depends on Claude Code not inheriting folder trust from the already-trusted repo above it. T1 checks this first: launch claude in a new worktree under a trusted repo and confirm the trust dialog appears. If it does not, worktrees move outside the repo and T1 adds an explicit profile match for them.
+That location depends on Claude Code not inheriting folder trust from the already-trusted repo above it. T1 checked this first. Claude Code 2.1.289 does inherit trust from any trusted ancestor, so a worktree under a trusted repo gets no dialog. Worktrees stay under `<repo>/.claude/worktrees/` by Cameron's decision (see Deviations): the folder-trust dialog is not a control for workers, and `core.hooksPath=/dev/null` on `worktree add` plus the T0 review are.
 
 ### Ledger
 
-- **Location:** `$XDG_STATE_HOME/forgectl/surface/` (default `~/.local/state/forgectl/surface/`), created with the symlink refusal that usage data already uses (`internal/config/usage_base.go:42-73`). Ledger files are mode 0600.
+- **Location:** `$XDG_STATE_HOME/forgectl/surface/` (default `~/.local/state/forgectl/surface/`), pinned by descriptor with `privdir` and opened with `openat` and `O_NOFOLLOW`, then checked for owner, type, link count and entry identity, as the usage store does (`internal/launch/usage_file_unix.go`; `usage_base.go` only resolves the base). The file name is a hash of the key. Ledger files are mode 0600 in a 0700 directory.
 - **Key:** the repo's top-level path plus the herdr session name. Not the coordinator's session id: `/clear` starts a new id, and the old workers would drop out of `list` while their workspaces and worktrees live on.
 - **Row:** name, harness, branch, worktree path, started-at, and the encoded `backend.Ref` (`backend/ref.go:151-156`, `:655-674`). `close` and `list` act through `Adapter.Close` and `Adapter.Probe`, which need the full `Ref` (server incarnation and ownership tag), not raw pane or workspace ids.
 - **Write order:** `launch` writes a `pending` row before `git worktree add`, then fills it in after each step (worktree, workspace, harness). A launch that fails partway leaves a row that names what it created, so `list --orphans` can find it.
@@ -92,11 +92,11 @@ Known blocking screens in v1: the folder-trust dialog, Claude Code's plan-approv
 
 Per-harness predicates live in data (TOML), not code, so a new screen is a config row. They load only from forgectl's own config directory, never from the worktree or repo, so a branch cannot mark its trust dialog as ready. A harness with no predicate table fails `ready`.
 
-`brief` must never answer a dialog. In Claude Code's trust and permission dialogs, Enter picks the highlighted "Yes", and a dialog can appear between any check and the send. So `brief` sends in two steps: it types the text without Enter, reads the screen back to confirm the text sits in the harness's input box with no dialog showing, and only then sends Enter as a separate call. It then requires a `working` state within 5 seconds.
+`brief` must never answer a dialog. In Claude Code's permission dialogs Enter picks the highlighted "Yes" (2.1.289's trust dialog highlights "No, exit", which Enter would still answer), and a dialog can appear between any check and the send. So `brief` sends in two steps: it types the text without Enter, reads the screen back to confirm the text sits in the harness's input box with no dialog showing, and only then sends Enter as a separate call. It then requires a `working` state within 5 seconds.
 
 Each brief carries a random per-brief marker and asks the worker to end with `REPORT <marker>: …`. `read --report` takes only text after the last echo of the brief, so it cannot match the brief's own instruction. The coordinator verifies against git (`git -C <worktree> status`, `git log`), never the report alone. The existing `herdr-orchestrator` skill's untrusted-worker rules apply unchanged.
 
-T2 and T3 list every herdr CLI call each verb makes (screen read, text send, Enter, status) and add a sensitive-runner exec kind for each (`internal/exec/sensitive.go:101-148`); none exists in the adapter today, and `pane run` currently reuses `KindHerdrCreate` (`start.go:106`). Sending text is a new write capability, so it gets its own kind, separate from screen reads, and is allowed only against a `Ref` whose ownership tag matches a ledger row. It can never reach the operator's own panes or a workspace forgectl did not create.
+T2 and T3 list every herdr CLI call each verb makes (screen read, text send, Enter, status) and add a sensitive-runner exec kind for each (`internal/exec/sensitive.go:101-148`). T1 added `herdr.pane-inspect` and gave `pane run` its own `herdr.bootstrap` kind. Exec kinds are labels only; nothing in the sensitive runner decides on them. So "a text send is allowed only against a `Ref` whose ownership tag matches a ledger row" is an adapter check T3 writes (ownership via `locate`, pane belongs to the workspace, ledger match), not a property of the kind. That check stops forgectl from typing into the operator's own panes or a workspace it did not create. It does not stop a worker that drives herdr directly over the socket every pane can reach.
 
 ## Closing a worker without losing work
 
@@ -131,8 +131,8 @@ No pre-trust. Claude Code's folder-trust dialog guards repo-supplied hooks, MCP 
 
 ## Tasks
 
-- [ ] T0: security review of the code these tasks extend, before T1: `internal/surface/herdradapter/{start,close,herdradapter}.go`, `internal/exec/sensitive.go`, `internal/launch/{profile,launch,invocation}.go`, `internal/config/usage_base.go`. Repeat it over the T2, T3, and T5 diffs before T7.
-- [ ] T1: `surface launch --worktree --harness --name`: harness override on `InvocationRequest`, `git worktree add` helper under `<repo>/.claude/worktrees/`, one owned workspace per worker with an idle-root-pane check, pending-then-filled ledger rows. First, the trust-inheritance check under Worktrees.
+- [x] T0: security review of the code these tasks extend, before T1: `internal/surface/herdradapter/{start,close,herdradapter}.go`, `internal/exec/sensitive.go`, `internal/launch/{profile,launch,invocation}.go`, `internal/config/usage_base.go`. Repeat it over the T2, T3, and T5 diffs before T7.
+- [x] T1: `surface launch --worktree --harness --name`: harness override on `InvocationRequest`, `git worktree add` helper under `<repo>/.claude/worktrees/`, one owned workspace per worker with an idle-root-pane check, pending-then-filled ledger rows. First, the trust-inheritance check under Worktrees.
 - [ ] T2: per-harness readiness predicates (TOML) and `surface ready`, with fixtures from the trial screens and every blocking screen listed above; name the herdr calls and add their exec kinds.
 - [ ] T3: `brief` (type without Enter, read back, then Enter, then confirm `working`), `wait`, `read --report` with per-brief markers.
 - [ ] T4: `list` (three-state reconcile, `--orphans`) and `close` (the four removal checks, never deletes the branch, refuses on `unreadable`).
@@ -151,6 +151,17 @@ No pre-trust. Claude Code's folder-trust dialog guards repo-supplied hooks, MCP 
 - Posture negative control: a repo profile stricter than the worker profile stays strict under `--harness`.
 - Partial launch: a failure injected after `git worktree add` leaves a ledger row that `list --orphans` shows.
 - Acceptance: T7. Every worker either returns a `REPORT` line or is reported by `ready`/`wait` with the specific blocking screen, never a false "ready".
+
+## Deviations
+
+- **Folder trust is not a control for workers (T1, Cameron's decision 2026-10-04).** The trust-inheritance check ran on sjomba with Claude Code 2.1.289. A never-seen worktree under the trusted `forgectl` repo opened with no trust dialog; a `/tmp` directory under a profile that does not trust `/` showed the dialog, so the probe could see it. The main profile's `~/.claude.json` trusts `/`, so on that profile the dialog never fires anywhere and moving worktrees outside the repo (the plan's fallback) would change nothing. Worktrees stay under `<repo>/.claude/worktrees/`; `~/.claude.json` is not edited. The controls are `git -c core.hooksPath=/dev/null` on `worktree add` and the T0 review. Removing the `/` trust is Cameron's separate call. That hooks setting stops git hooks only; the branch's own `.claude/settings.json` hooks, `.mcp.json` servers and `CLAUDE.md` still load in an unattended worker, which forgectl#1050 tracks.
+- **`--name` is not in the ownership label (T1).** The label is the exact-match ownership marker for `Close`, `Probe` and reconcile (`RecoveryTag.OwnershipName`, "the tag and nothing else"). The name-to-workspace mapping is the ledger's job; the sidebar name is forgectl#1047.
+- **Interim worker posture floor (T1, from T0 finding I5/M1).** Until T5, a worker launch (`InvocationRequest.Worker`) allows only the plan's v1 posture and stricter: claude `plan`, `default` or `acceptEdits`; codex `read-only` or `workspace-write` with `untrusted` or `on-request` approvals. pi and anything else are refused, and `allow_danger` is turned off. The first cut was a denylist (`bypassPermissions`, `danger-full-access`); polish security review showed `auto`, `dontAsk` and codex `never` passing it. T5 replaces it with the stricter-of merge; the ranking it needs is forgectl#1043.
+- **Pane-identity env fix (T1, from T0 finding I1).** Every surface launch strips the launcher's `HERDR_PANE_ID`, `HERDR_TAB_ID` and `HERDR_WORKSPACE_ID`; a herdr launch marks its invocation and the trampoline adds back the new pane's own values. tmux and cmux have the same leak for their own variables: forgectl#1044.
+- **New failure class `target-busy` (T1).** The idle-root-pane check refuses a busy pane with `FailureTargetBusy` and keeps the ref so the workspace is closed. The check re-reads the pane for about 1.5 s, because a prompt hook can briefly hold the foreground (1 sample in 75 on herdr 0.9.1). The leader of the foreground group must also be a known shell, because herdr's `shell_pid` is the pane's direct child whatever it is. It is check-then-type; binding the handshake peer to the pane is forgectl#1041.
+- **Ledger details (T1).** RepoTop resolves a linked worktree to its main checkout, so all launches in a repo share one ledger. A failed row that created nothing (no worktree, ref or recovery tag) does not hold its name. The file check is a copy of the usage store's; one shared helper is forgectl#1048.
+- **T0 findings filed rather than fixed in T1:** forgectl#1041 (handshake peer to pane), #1042 (profile `match` through a symlink falls back to defaults), #1043 (validate and rank posture fields for T5), #1044 (tmux/cmux pane env), #1045 (herdr workspace id reuse before T4's `close`), #1046 (`brief` must refuse control characters, for T3). Polish found #1048 (shared file check) and #1049 (`projects worktree` runs repo hooks).
+- **T1 verification beyond the plan's list.** A live `surface launch --worktree` against herdr 0.9.1, with a stub harness, showed the worktree, the ledger row (0600, hashed name, full `Ref`), the worker seeing its own `HERDR_PANE_ID` rather than the launcher's, no danger flag in the argv, and a second launch under the same name refused.
 
 ## Panel
 
