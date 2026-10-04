@@ -563,6 +563,15 @@ func NewMCPServer(client *Client, cfg MCPConfig) *mcp.Server {
 		Description:  completeTaskDescription,
 	}, newCloseTool(client, cfg, server.Sessions).handle)
 
+	// The one tool that changes a row that already exists. Its handler keeps
+	// state between calls (the per-session budget), so it is a value and not
+	// a closure; server.Sessions is how the budget learns a session ended.
+	mcp.AddTool(server, &mcp.Tool{
+		Name:         "complete_task",
+		OutputSchema: outputSchema[completeTaskOutput](),
+		Description:  completeTaskDescription,
+	}, newCloseTool(client, cfg, server.Sessions).handle)
+
 	return server
 }
 
