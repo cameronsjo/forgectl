@@ -429,8 +429,8 @@ func TestCompleteTaskTool_TheEleventhCloseInASessionIsRefused(t *testing.T) {
 	if !isErr || !strings.HasPrefix(text, "complete_task: close_cap: ") {
 		t.Fatalf("close 11 = %q (error %v), want the close_cap tool error", text, isErr)
 	}
-	if !strings.Contains(text, "new session") || !strings.Contains(text, "operator") {
-		t.Errorf("the refusal does not state the two ways on: %q", text)
+	if strings.Contains(text, "new session") || !strings.Contains(text, "operator") {
+		t.Errorf("the refusal must hand the call to the operator and must not suggest a new session, which is the way around the cap: %q", text)
 	}
 	// A slot is held from before the pre-read, so a call can be refused while
 	// earlier ones are still running and may yet send nothing. The text says

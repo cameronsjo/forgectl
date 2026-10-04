@@ -408,8 +408,8 @@ func TestBoardWrites_TheCapIsSharedAndHolds(t *testing.T) {
 		if !isErr || !strings.HasPrefix(text, call.tool+": write_cap: ") {
 			t.Fatalf("%s past the cap = %q (error %v), want the write_cap tool error", call.tool, text, isErr)
 		}
-		if !strings.Contains(text, "new session") || !strings.Contains(text, "operator") {
-			t.Errorf("the refusal does not say how to go on: %q", text)
+		if strings.Contains(text, "new session") || !strings.Contains(text, "operator") {
+			t.Errorf("the refusal must hand the call to the operator and must not suggest a new session, which is the way around the cap: %q", text)
 		}
 	}
 	if n := rig.board.putCount(); n != maxBoardWritesPerSession {

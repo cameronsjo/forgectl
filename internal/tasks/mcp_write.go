@@ -87,8 +87,8 @@ func boardWriteOutcome(err error) (outcome string, sent bool) {
 // branch on the code without reading the prose.
 func capRefusal(tool, what string, recorded bool) *mcp.CallToolResult {
 	return toolError("%s: write_cap: %s", tool, withNote(fmt.Sprintf(
-		"this session has %d board writes sent or in flight across create_task and add_comment, which is its limit, so %s was not read or written. "+
-			"Writing it needs a new session or the operator.",
+		"this session has %d board writes sent or in flight across create_task and add_comment, which is its limit, so %s. "+
+			"Writing it is now the operator's call.",
 		maxBoardWritesPerSession, what), writeRecordFailed, recorded))
 }
 

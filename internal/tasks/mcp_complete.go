@@ -220,7 +220,7 @@ func (h *closeTool) handle(ctx context.Context, req *mcp.CallToolRequest, in com
 		// calls that overlap can fill the budget before ten updates have left.
 		return closeError("close_cap", "%s", withRecordNote(fmt.Sprintf(
 			"this session has %d task updates sent or in flight, which is its limit, so task %d was not read or changed. "+
-				"Report it as still open; closing it needs a new session or the operator.",
+				"Report it as still open; closing it is now the operator's.",
 			maxClosesPerSession, in.TaskID), recorded)), nil, nil
 	}
 
