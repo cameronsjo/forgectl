@@ -212,6 +212,28 @@ func TestResumeHooksRestartAction(t *testing.T) {
 	}
 }
 
+// A session whose herdr pane cannot be found makes the restart hook
+// incomplete, so the watcher's bounded retries come back for it.
+func TestResumeHooksRestartRetriesAGonePane(t *testing.T) {
+	env := &cliRestartEnv{pane: "w0:p999", gone: map[string]bool{"w0:p999": true}}
+	restartFixture(t, env)
+	f := newHooksFixture(t)
+	cfg := "[[resume.on_update]]\nharness = \"claude\"\naction = \"restart\"\n"
+	f.version = "2.1.99"
+	if _, err := f.run(t, cfg, "run"); err != nil {
+		t.Fatal(err)
+	}
+	f.version = "2.1.100"
+	out, err := f.run(t, cfg, "run")
+	if err == nil || env.terminated != 0 || !strings.Contains(out, "pane-gone") {
+		t.Fatalf("err %v terminated %d\n%s", err, env.terminated, out)
+	}
+	st, _, lerr := resume.FileHookStore{Dir: f.state}.Load("claude")
+	if lerr != nil || len(st.Pending) == 0 {
+		t.Fatalf("state %+v, %v; want the restart pending for a retry", st, lerr)
+	}
+}
+
 func TestResumeHooksDryRunWritesNothing(t *testing.T) {
 	f := newHooksFixture(t)
 	out, err := f.run(t, commandHookTOML, "run", "--dry-run")

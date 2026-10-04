@@ -38,6 +38,9 @@ type PaneResolution struct {
 	// environment's differing claim, or the pane-list failure that forced the
 	// fallback. It is display text and never decides anything.
 	Note string
+	// ListProblem is the pane-list failure (paneListProblem) when the list
+	// could not be used; "" otherwise.
+	ListProblem string
 	// Ambiguous lists every pane herdr reports holding the session when there
 	// is more than one. A run refuses such a session: which pane it runs in is
 	// unknown.
@@ -49,13 +52,18 @@ type PaneResolution struct {
 //
 //   - exactly one claude pane names the session: use it;
 //   - more than one does: ambiguous (a nested session relabelling its
-//     parent's pane looks like this);
+//     parent's pane looks like this). herdr clears a pane's agent_session
+//     when its claude exits, even on SIGKILL (measured 2026-10-04, herdr
+//     0.9.1), so an exited session leaves no stale claim behind; the claim
+//     that lingers is a nested child's label on a parent still running, and
+//     that stays ambiguous until the parent exits;
 //   - none does, or the list failed: fall back to the environment's claim,
 //     today's behavior, and let the per-session checks decide.
 func ResolvePane(sessionID, envPane string, panes []HerdrPane, listErr error) PaneResolution {
 	r := PaneResolution{Pane: envPane}
 	if listErr != nil {
-		r.Note = "from its environment; herdr pane list failed (" + clipDetail(listErr.Error()) + ")"
+		r.ListProblem = paneListProblem(listErr)
+		r.Note = r.ListProblem + "; from its environment"
 		return r
 	}
 	var claims []string
@@ -87,7 +95,7 @@ func resolvePanes(list []OutdatedSession, panes []HerdrPane, listErr error) ([]O
 	ambiguous := map[string][]string{}
 	for i, s := range list {
 		r := ResolvePane(s.SessionID, s.Pane, panes, listErr)
-		s.Pane, s.PaneNote = r.Pane, r.Note
+		s.Pane, s.PaneNote, s.PaneListProblem = r.Pane, r.Note, r.ListProblem
 		if len(r.Ambiguous) > 0 {
 			ambiguous[s.SessionID] = r.Ambiguous
 		}
@@ -103,12 +111,31 @@ func SkipAmbiguousPanes(plan []RestartPlanItem, ambiguous map[string][]string) [
 	for i, item := range plan {
 		if panes := ambiguous[item.SessionID]; len(panes) > 0 && item.Action != ActionSkip {
 			item.Action = ActionSkip
-			item.Reason = fmt.Sprintf("herdr reports it in %d panes (%s), so which one it runs in is unknown (nested session?); quit it, then run %s",
-				len(panes), strings.Join(panes, ", "), ManualResume(item.SessionID))
+			item.Reason = ambiguousReason(panes) + "; quit it, then run " + ManualResume(item.SessionID)
 		}
 		out[i] = item
 	}
 	return out
+}
+
+// ambiguousReason says why a session herdr reports in several panes is
+// refused.
+func ambiguousReason(panes []string) string {
+	return fmt.Sprintf("herdr reports it in %d panes (%s), so which one it runs in is unknown (nested session?)", len(panes), strings.Join(panes, ", "))
+}
+
+// errPaneListRejected marks a pane list herdr returned but this run refuses to
+// use, as distinct from a call that failed.
+var errPaneListRejected = errors.New("herdr's pane list was rejected")
+
+// paneListProblem renders a pane-list error for the operator: "rejected" when
+// herdr answered with a list this run will not use, "failed" when the call
+// itself did not succeed.
+func paneListProblem(err error) string {
+	if errors.Is(err, errPaneListRejected) {
+		return clipDetail(err.Error())
+	}
+	return "herdr pane list failed (" + clipDetail(err.Error()) + ")"
 }
 
 // paneLabel is a session's pane for a progress or preview line, with the
@@ -125,9 +152,11 @@ func (e SystemRestartEnv) ListPanes(ctx context.Context) ([]HerdrPane, error) {
 	if e.runner == nil {
 		return nil, errors.New("no command runner")
 	}
+	// Not wrapped: a failed call's error already names the command, and
+	// paneListProblem adds the rest.
 	out, err := e.runHerdr(ctx, "pane", "list")
 	if err != nil {
-		return nil, fmt.Errorf("herdr pane list: %w", err)
+		return nil, err
 	}
 	return parsePaneList(out)
 }
@@ -150,15 +179,15 @@ func parsePaneList(out string) ([]HerdrPane, error) {
 		} `json:"result"`
 	}
 	if err := json.Unmarshal([]byte(out), &reply); err != nil {
-		return nil, errors.New("herdr pane list: reply is not JSON")
+		return nil, fmt.Errorf("%w: the reply is not JSON", errPaneListRejected)
 	}
 	if reply.Result.Panes == nil {
-		return nil, errors.New("herdr pane list: reply has no panes")
+		return nil, fmt.Errorf("%w: the reply has no panes", errPaneListRejected)
 	}
 	panes := make([]HerdrPane, 0, len(*reply.Result.Panes))
 	for _, p := range *reply.Result.Panes {
 		if checkPaneArg(p.PaneID) != nil {
-			return nil, errors.New("herdr pane list: reply has a pane id that is not a plain operand")
+			return nil, fmt.Errorf("%w: it has a pane id that is not a plain operand", errPaneListRejected)
 		}
 		hp := HerdrPane{ID: p.PaneID}
 		if as := p.AgentSession; as != nil {

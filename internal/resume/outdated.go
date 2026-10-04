@@ -94,6 +94,9 @@ type OutdatedSession struct {
 	// PaneNote is set only by a restart run's pane resolution: display text
 	// saying where Pane came from when that is not simply the environment.
 	PaneNote string
+	// PaneListProblem is set only by a restart run's pane resolution, when
+	// herdr's pane list could not be used: what went wrong with it.
+	PaneListProblem string
 	// ProcStart is the registry's recorded process start time, kept so a later
 	// restart can tell this process from a successor that reused its pid.
 	ProcStart string

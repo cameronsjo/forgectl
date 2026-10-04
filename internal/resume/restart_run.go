@@ -51,6 +51,15 @@ const (
 	// StateLeft: the timeout or a cancel ended the run while the session was
 	// still waiting. It was never signalled and is still running.
 	StateLeft RestartState = "left"
+	// StatePaneGone: herdr has no pane by the session's id, and re-reading
+	// herdr's pane list found it in no other. It was never signalled. Unlike
+	// the other refusals it counts as incomplete, so the update watcher's
+	// bounded retries come back for it: a pane can reappear under a new id
+	// once herdr's hooks relabel it.
+	StatePaneGone RestartState = "pane-gone"
+	// StateNote is a run-level line with no session, such as herdr's pane list
+	// failing. It is never a final state.
+	StateNote RestartState = "note"
 )
 
 // RestartEvent is one progress line: a session entering a state.
@@ -84,6 +93,9 @@ type RestartOptions struct {
 	Now      func() time.Time
 	Sleep    func(ctx context.Context, d time.Duration) error
 	Progress func(RestartEvent)
+	// Panes re-reads herdr's pane list, at most once per session per run,
+	// when herdr reports the session's pane gone; nil never re-reads.
+	Panes func(ctx context.Context) ([]HerdrPane, error)
 }
 
 // Defaults for RestartOptions' bounded waits. StopWait: a SIGTERM'd claude
@@ -174,15 +186,19 @@ func RunRestart(ctx context.Context, env RestartEnv, plan []RestartPlanItem, opt
 
 	waiting := map[string]string{} // session id -> last reported wait reason
 	prepared := map[string]bool{}  // session id -> Prepare already succeeded
+	relisted := map[string]bool{}  // session id -> pane list already re-read for it
 	deadline := opts.Now().Add(opts.Timeout)
 	for len(pending) > 0 {
 		var still []RestartPlanItem
-		for _, item := range pending {
+		for i := range pending {
+			// A pointer, so a pane found by re-reading herdr's list sticks for
+			// the session's later rounds.
+			item := &pending[i]
 			if ctx.Err() != nil {
-				still = append(still, item)
+				still = append(still, *item)
 				continue
 			}
-			ev, done := attemptRestart(ctx, env, item.Session, opts, prepared)
+			ev, done := attemptRestart(ctx, env, &item.Session, opts, prepared, relisted)
 			if done {
 				finish(ev)
 				continue
@@ -191,7 +207,7 @@ func RunRestart(ctx context.Context, env RestartEnv, plan []RestartPlanItem, opt
 				waiting[item.SessionID] = ev.Detail
 				opts.Progress(ev)
 			}
-			still = append(still, item)
+			still = append(still, *item)
 		}
 		pending = still
 		if len(pending) == 0 {
@@ -265,23 +281,28 @@ func Preview(ctx context.Context, env RestartEnv, s OutdatedSession) Check {
 const reasonCancelled = "cancelled during a check"
 
 // attemptRestart evaluates a session and, when it is ready, restarts it. It
-// reports done=false only for a session that should be checked again.
-func attemptRestart(ctx context.Context, env RestartEnv, s OutdatedSession, opts RestartOptions, prepared map[string]bool) (RestartEvent, bool) {
+// reports done=false only for a session that should be checked again. A pane
+// found by re-reading herdr's list is written back into s.
+func attemptRestart(ctx context.Context, env RestartEnv, s *OutdatedSession, opts RestartOptions, prepared, relisted map[string]bool) (RestartEvent, bool) {
 	waitFor := func(reason string) (RestartEvent, bool) {
 		return RestartEvent{SessionID: s.SessionID, State: StateWaiting, Detail: reason}, false
 	}
-	verdict := func(c Check) (RestartEvent, bool) {
+	verdict := func(c Check, gone bool) (RestartEvent, bool) {
 		if c.Readiness == Refused {
-			return RestartEvent{SessionID: s.SessionID, State: StateSkipped, Detail: c.Reason, Manual: ManualResume(s.SessionID)}, true
+			state := StateSkipped
+			if gone {
+				state = StatePaneGone
+			}
+			return RestartEvent{SessionID: s.SessionID, State: state, Detail: c.Reason, Manual: ManualResume(s.SessionID)}, true
 		}
 		return waitFor(c.Reason)
 	}
-	obs := observe(ctx, env, s)
+	obs, c, gone := checkSession(ctx, env, s, opts, relisted)
 	if ctx.Err() != nil {
 		return waitFor(reasonCancelled)
 	}
-	if c := Evaluate(s, obs); c.Readiness != Ready {
-		return verdict(c)
+	if c.Readiness != Ready {
+		return verdict(c, gone)
 	}
 	// Prepared once per session, when it first reads ready, so a long wait
 	// does not snapshot every poll; then checked again, so the last check is
@@ -296,14 +317,50 @@ func attemptRestart(ctx context.Context, env RestartEnv, s OutdatedSession, opts
 		}
 		prepared[s.SessionID] = true
 	}
-	obs = observe(ctx, env, s)
+	obs, c, gone = checkSession(ctx, env, s, opts, relisted)
 	if ctx.Err() != nil {
 		return waitFor(reasonCancelled)
 	}
-	if c := Evaluate(s, obs); c.Readiness != Ready {
-		return verdict(c)
+	if c.Readiness != Ready {
+		return verdict(c, gone)
 	}
-	return restartNow(ctx, env, s, obs.Pane.ShellPID, opts), true
+	return restartNow(ctx, env, *s, obs.Pane.ShellPID, opts), true
+}
+
+// checkSession observes and evaluates s once. When herdr reports s's pane
+// gone, it re-reads herdr's pane list — once per session per run, bounded like
+// every herdr call — and, if exactly one other pane now holds the session,
+// moves s there and checks again, so every check still runs against the pane
+// it would act on. gone reports a refusal that is still "pane not found".
+func checkSession(ctx context.Context, env RestartEnv, s *OutdatedSession, opts RestartOptions, relisted map[string]bool) (Observation, Check, bool) {
+	obs := observe(ctx, env, *s)
+	c := Evaluate(*s, obs)
+	paneGone := func() bool { return c.Readiness == Refused && errors.Is(obs.PaneErr, ErrPaneGone) }
+	if !paneGone() || ctx.Err() != nil {
+		return obs, c, paneGone()
+	}
+	if opts.Panes == nil || relisted[s.SessionID] {
+		return obs, c, true
+	}
+	relisted[s.SessionID] = true
+	panes, err := opts.Panes(ctx)
+	if err != nil {
+		c.Reason += "; re-reading the pane list: " + paneListProblem(err)
+		return obs, c, true
+	}
+	old := s.Pane
+	r := ResolvePane(s.SessionID, old, panes, nil)
+	switch {
+	case len(r.Ambiguous) > 0:
+		return obs, Check{Refused, ambiguousReason(r.Ambiguous)}, false
+	case r.Pane == old:
+		c.Reason += "; herdr's pane list shows the session in no other pane"
+		return obs, c, true
+	}
+	s.Pane, s.PaneNote = r.Pane, "found by session after pane "+old+" was gone"
+	obs = observe(ctx, env, *s)
+	c = Evaluate(*s, obs)
+	return obs, c, paneGone()
 }
 
 // restartNow stops a session that just passed the predicate and resumes it in
