@@ -1,0 +1,141 @@
+package herdradapter
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/surface/backend"
+)
+
+// processInfoJSON is a `pane process-info` reply. foreground is the process
+// group that owns the terminal; a pane is idle when it equals shell.
+func processInfoJSON(foreground, shell int, names ...string) []byte {
+	type proc struct {
+		Name string `json:"name"`
+		PID  int    `json:"pid"`
+	}
+	procs := make([]proc, 0, len(names))
+	for i, n := range names {
+		pid := foreground
+		if i > 0 {
+			pid = foreground + i
+		}
+		procs = append(procs, proc{Name: n, PID: pid})
+	}
+	raw, err := json.Marshal(map[string]any{
+		"result": map[string]any{
+			"type": "pane_process_info",
+			"process_info": map[string]any{
+				"foreground_process_group_id": foreground,
+				"shell_pid":                   shell,
+				"foreground_processes":        procs,
+			},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return raw
+}
+
+func bootstrapSent(run *scriptedRunner) bool {
+	_, sent := commandOfKind(run.calls(), exec.KindHerdrBootstrap)
+	return sent
+}
+
+// TestAnIdleRootPaneReceivesTheBootstrap pins the shape measured on herdr
+// 0.9.1: a fresh pane lists prompt-hook children (env, direnv) inside the
+// shell's own process group. That is still idle, and refusing it would fail
+// every launch from a shell with prompt hooks.
+func TestAnIdleRootPaneReceivesTheBootstrap(t *testing.T) {
+	run := newRunner().on(exec.KindHerdrPaneInspect, func() (exec.SensitiveResult, error) {
+		return stdout(processInfoJSON(4242, 4242, "zsh", "direnv")), nil
+	})
+	a := newTestAdapter(t, run, nil)
+	spec, _ := newSpec(t)
+
+	res := a.Start(context.Background(), spec)
+
+	if res.Failed() {
+		t.Fatalf("an idle root pane failed the launch: %v", causeClass(res))
+	}
+	if !bootstrapSent(run) {
+		t.Fatal("the bootstrap was not sent to an idle root pane")
+	}
+	inspect, ok := commandOfKind(run.calls(), exec.KindHerdrPaneInspect)
+	if !ok {
+		t.Fatal("no pane inspection ran before the bootstrap")
+	}
+	if !hasArg(inspect, exec.Opaque(paneA)) {
+		t.Error("the inspection did not target the pane the create reported")
+	}
+}
+
+// TestABusyRootPaneNeverReceivesTheBootstrap is the trial's herdr-plus case:
+// a layout started an agent in the root pane. The bootstrap — socket path and
+// nonce — must not be typed there, the result must still carry the ref so the
+// workspace is closed, and the operator must be told what holds the pane.
+func TestABusyRootPaneNeverReceivesTheBootstrap(t *testing.T) {
+	run := newRunner().on(exec.KindHerdrPaneInspect, func() (exec.SensitiveResult, error) {
+		return stdout(processInfoJSON(5000, 4242, "claude")), nil
+	})
+	var warnings bytes.Buffer
+	a := newTestAdapter(t, run, nil, WithWarnings(&warnings))
+	spec, _ := newSpec(t)
+
+	res := a.Start(context.Background(), spec)
+
+	if bootstrapSent(run) {
+		t.Fatal("the bootstrap was typed into a pane an agent holds")
+	}
+	if _, ok := res.Ref(); !ok {
+		t.Fatal("a busy root pane left no reference; the workspace would be stranded")
+	}
+	if causeClass(res) != backend.FailureTargetBusy {
+		t.Errorf("class = %v, want FailureTargetBusy", causeClass(res))
+	}
+	if !strings.Contains(warnings.String(), `"claude"`) {
+		t.Errorf("warning %q does not name the process holding the pane", warnings.String())
+	}
+}
+
+// TestAnUnreadableProcessInfoFailsClosed: a reply the adapter cannot judge is
+// not an idle pane.
+func TestAnUnreadableProcessInfoFailsClosed(t *testing.T) {
+	for name, body := range map[string][]byte{
+		"not json":     []byte("zsh"),
+		"no shell pid": processInfoJSON(4242, 0, "zsh"),
+		"no fg group":  processInfoJSON(0, 4242),
+		"empty result": []byte(`{"result":{}}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := newRunner().on(exec.KindHerdrPaneInspect, func() (exec.SensitiveResult, error) {
+				return stdout(body), nil
+			})
+			a := newTestAdapter(t, run, nil)
+			spec, _ := newSpec(t)
+
+			res := a.Start(context.Background(), spec)
+
+			if bootstrapSent(run) {
+				t.Fatal("the bootstrap was sent after an unreadable inspection")
+			}
+			if causeClass(res) != backend.FailureMalformedResponse {
+				t.Errorf("class = %v, want FailureMalformedResponse", causeClass(res))
+			}
+		})
+	}
+}
+
+func hasArg(cmd exec.SensitiveCommand, want exec.Arg) bool {
+	for _, arg := range cmd.Args {
+		if arg.Equal(want) {
+			return true
+		}
+	}
+	return false
+}

@@ -11,6 +11,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/sockstat"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Output caps. stdoutCap is written as the seam's ceiling rather than the
@@ -103,7 +104,17 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 	// the service would have nothing to close. RefKnown-with-cause is the
 	// contract's answer — the launch failed AND we know exactly what to clean
 	// up.
-	if runRes, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHerdrCreate,
+	//
+	// The root pane must be an idle shell before anything is typed into it. A
+	// layout plugin can start an agent in a new workspace's root pane, and
+	// `pane run` would then submit the bootstrap line, nonce included, to that
+	// agent as a prompt. This is check-then-type, so it narrows that window
+	// rather than closing it; the refusal is what matters when the pane was
+	// taken before the check.
+	if cause := a.rootPaneIdle(ctx, created.PaneID); cause != nil {
+		return backend.NewRefKnownWithCause(ref, *cause)
+	}
+	if runRes, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHerdrBootstrap,
 		exec.MustFixed("pane"),
 		// `pane run` sends the text and Enter in one call. The protocol has no
 		// run method — it is a client-side composition of send_text and
@@ -146,6 +157,99 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 	// no output either way. Only the authenticated exec_started frame commits
 	// the launch, which is the service's job and not this adapter's.
 	return backend.NewRefKnown(ref)
+}
+
+// rootPaneIdle reports nil when pane's foreground belongs to its own shell.
+//
+// "Idle" is the shell owning the terminal's foreground process group. It is
+// not "the shell is the only process listed": prompt hooks (direnv, env) run
+// as short-lived children inside the shell's own group, and a fresh pane shows
+// them for a moment. A job the shell starts — an agent, an editor — gets a
+// process group of its own and takes the foreground, which is the case this
+// refuses.
+func (a *Adapter) rootPaneIdle(ctx context.Context, pane string) *backend.StartCause {
+	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHerdrPaneInspect,
+		exec.MustFixed("pane"),
+		exec.MustFixed("process-info"),
+		exec.MustFixed("--pane"),
+		exec.Opaque(pane),
+	))
+	if runErr != nil {
+		cause := a.classifyRunError(runErr, res)
+		return &cause
+	}
+	info, err := parseProcessInfo(res.Stdout)
+	if err != nil {
+		cause := backend.NewStartCause(backend.FailureMalformedResponse, err)
+		return &cause
+	}
+	if info.idle() {
+		return nil
+	}
+	// The process name comes from herdr and ultimately from whatever runs in
+	// the pane, so it is quoted for the terminal. Only the name: the full
+	// command line can carry arguments the operator never meant to print.
+	_, _ = fmt.Fprintf(a.warnings,
+		"herdr: the new workspace's root pane is running %s, not an idle shell; forgectl will not type into it\n",
+		termsafe.QuoteText(termsafe.SafeLineMax(info.foregroundName(), 64)))
+	cause := backend.NewStartCause(backend.FailureTargetBusy, ErrRootPaneBusy)
+	return &cause
+}
+
+// ErrRootPaneBusy reports a root pane that something other than its shell
+// holds.
+var ErrRootPaneBusy = errors.New("herdradapter: the root pane is not an idle shell")
+
+// processInfo is the part of `pane process-info` this package reads.
+type processInfo struct {
+	ForegroundGroup int `json:"foreground_process_group_id"`
+	ShellPID        int `json:"shell_pid"`
+	Processes       []struct {
+		Name string `json:"name"`
+		PID  int    `json:"pid"`
+	} `json:"foreground_processes"`
+}
+
+func (p processInfo) idle() bool {
+	return p.ShellPID > 0 && p.ForegroundGroup == p.ShellPID
+}
+
+// foregroundName names the process leading the foreground group, or the
+// first listed process when the leader is not listed.
+func (p processInfo) foregroundName() string {
+	for _, proc := range p.Processes {
+		if proc.PID == p.ForegroundGroup {
+			return proc.Name
+		}
+	}
+	if len(p.Processes) > 0 {
+		return p.Processes[0].Name
+	}
+	return "an unknown process"
+}
+
+type processInfoReply struct {
+	Result struct {
+		ProcessInfo *processInfo `json:"process_info"`
+	} `json:"result"`
+}
+
+// parseProcessInfo fails closed: a reply without a shell pid or a foreground
+// group is one this adapter cannot judge, and an unjudged pane is not idle.
+func parseProcessInfo(out exec.BoundedOutput) (processInfo, error) {
+	raw, complete := out.CopyBytesForParse()
+	if !complete {
+		return processInfo{}, errors.New("the herdr process-info reply was truncated")
+	}
+	var reply processInfoReply
+	if err := json.Unmarshal(raw, &reply); err != nil {
+		return processInfo{}, errors.New("the herdr process-info reply was not readable JSON")
+	}
+	info := reply.Result.ProcessInfo
+	if info == nil || info.ShellPID <= 0 || info.ForegroundGroup <= 0 {
+		return processInfo{}, errors.New("the herdr process-info reply named no shell or foreground group")
+	}
+	return *info, nil
 }
 
 // reconcile runs EXACTLY ONE listing to settle whether the create landed.

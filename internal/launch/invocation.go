@@ -99,6 +99,38 @@ type InvocationRequest struct {
 	// wins over a removal, because it is the operator naming a value explicitly.
 	UnsetEnv []string
 	Resolve  BinaryResolver
+	// Harness, when set, replaces the harness of the profile matched by CWD.
+	// Only claude and codex are accepted: pi has no permission or sandbox flag
+	// forgectl can pass, so an override to it would start an agent with no
+	// posture at all. Posture fields are never touched by the override — the
+	// matched profile's permission mode, allow_danger, approval policy and
+	// sandbox all stay — so naming a harness cannot loosen a strict repo.
+	Harness string
+}
+
+// ErrHarnessOverride reports a --harness value outside the overridable set.
+var ErrHarnessOverride = errors.New("launch: harness override must be claude or codex")
+
+// applyHarnessOverride switches p to harness while keeping every posture field.
+//
+// The model is the one field that does not carry across: a model chosen for
+// the profile's own harness means nothing (or the wrong thing) to another, so a
+// switch takes the target harness's built-in model and re-derives effort from
+// it. An override naming the profile's own harness changes nothing at all.
+func applyHarnessOverride(p Profile, harness string) (Profile, error) {
+	if harness == "" {
+		return p, nil
+	}
+	if harness != "claude" && harness != "codex" {
+		return Profile{}, ErrHarnessOverride
+	}
+	if harness == p.Harness {
+		return p, nil
+	}
+	p.Harness = harness
+	p.Model = builtinModelForHarness(harness)
+	p.Effort = EffortForModel(p.Model)
+	return p, nil
 }
 
 // BuiltInvocation is the invocation plus the two things the caller needs to
@@ -129,7 +161,10 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		return BuiltInvocation{}, ErrNoBinaryResolver
 	}
 
-	profile := Resolve(req.Config, req.CWD)
+	profile, err := applyHarnessOverride(Resolve(req.Config, req.CWD), req.Harness)
+	if err != nil {
+		return BuiltInvocation{}, err
+	}
 	if err := profile.Validate(); err != nil {
 		return BuiltInvocation{}, err
 	}

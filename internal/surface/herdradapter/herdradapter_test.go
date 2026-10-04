@@ -131,7 +131,6 @@ type scriptedRunner struct {
 	fake     exec.FakeSensitiveRunner
 	reply    map[exec.CommandKind]func() (exec.SensitiveResult, error)
 	sessions func() (exec.SensitiveResult, error)
-	create   int
 }
 
 func newRunner() *scriptedRunner {
@@ -144,14 +143,6 @@ func newRunner() *scriptedRunner {
 			return stdout(defaultSessions()), nil
 		}
 		if fn, ok := r.reply[cmd.Kind]; ok {
-			// The create kind covers BOTH the workspace create and the pane run,
-			// so a scripted reply must not answer the run with a create body.
-			if cmd.Kind == exec.KindHerdrCreate {
-				r.create++
-				if r.create > 1 {
-					return exec.SensitiveResult{}, nil
-				}
-			}
 			return fn()
 		}
 		switch cmd.Kind {
@@ -160,11 +151,9 @@ func newRunner() *scriptedRunner {
 		case exec.KindHerdrSnapshot, exec.KindHerdrReconcile, exec.KindHerdrProbe:
 			return stdout(listJSON()), nil
 		case exec.KindHerdrCreate:
-			r.create++
-			if r.create > 1 {
-				return exec.SensitiveResult{}, nil // the pane run
-			}
 			return stdout(createJSON(wsA, tabA, paneA)), nil
+		case exec.KindHerdrPaneInspect:
+			return stdout(processInfoJSON(4242, 4242, "zsh")), nil
 		default:
 			return exec.SensitiveResult{}, nil
 		}
@@ -472,7 +461,7 @@ func TestTheBootstrapIsRunInTheCreatedPane(t *testing.T) {
 
 	var runCmd *exec.SensitiveCommand
 	for _, c := range run.calls() {
-		if c.Kind != exec.KindHerdrCreate {
+		if c.Kind != exec.KindHerdrBootstrap {
 			continue
 		}
 		for _, arg := range c.Args {
@@ -570,31 +559,9 @@ func TestAForeignRootPaneNeverReceivesTheBootstrap(t *testing.T) {
 // here is what to clean up.
 func TestACreateThatSucceedsAndAPaneRunThatFailsStillYieldsARef(t *testing.T) {
 	run := newRunner()
-	// Driven through RunFunc directly rather than through run.on, because the
-	// create KIND covers both the workspace create and the pane run and the
-	// scripted path suppresses the second. An earlier version installed a
-	// run.on closure here as well and then replaced RunFunc wholesale, so the
-	// closure never ran — dead setup that reads as live, and a reader tuning it
-	// would have been tuning nothing.
-	calls := 0
-	run.fake.RunFunc = func(cmd exec.SensitiveCommand) (exec.SensitiveResult, error) {
-		if cmd.Kind == exec.KindHerdrReadiness && isSessionList(cmd) {
-			return stdout(defaultSessions()), nil
-		}
-		switch cmd.Kind {
-		case exec.KindHerdrReadiness:
-			return stdout(goodStatus()), nil
-		case exec.KindHerdrSnapshot:
-			return stdout(listJSON()), nil
-		case exec.KindHerdrCreate:
-			calls++
-			if calls == 1 {
-				return stdout(createJSON(wsA, tabA, paneA)), nil
-			}
-			return exec.SensitiveResult{}, exec.SensitiveErrorForTest(exec.KindHerdrCreate, exec.OutcomeExit)
-		}
-		return exec.SensitiveResult{}, nil
-	}
+	run.on(exec.KindHerdrBootstrap, func() (exec.SensitiveResult, error) {
+		return exec.SensitiveResult{}, exec.SensitiveErrorForTest(exec.KindHerdrBootstrap, exec.OutcomeExit)
+	})
 	a := newTestAdapter(t, run, nil)
 	spec, _ := newSpec(t)
 
@@ -1736,29 +1703,13 @@ func TestAFailedReconciliationChoosesByFailureClass(t *testing.T) {
 // herdr's code is most worth having. A permission problem became "check whether
 // herdr is up".
 func TestThePaneRunFailureCarriesHerdrsErrorCode(t *testing.T) {
-	calls := 0
 	run := newRunner()
-	run.fake.RunFunc = func(cmd exec.SensitiveCommand) (exec.SensitiveResult, error) {
-		if cmd.Kind == exec.KindHerdrReadiness && isSessionList(cmd) {
-			return stdout(defaultSessions()), nil
-		}
-		switch cmd.Kind {
-		case exec.KindHerdrReadiness:
-			return stdout(goodStatus()), nil
-		case exec.KindHerdrSnapshot:
-			return stdout(listJSON()), nil
-		case exec.KindHerdrCreate:
-			calls++
-			if calls == 1 {
-				return stdout(createJSON(wsA, tabA, paneA)), nil
-			}
-			return exec.SensitiveResult{
-					Stderr: exec.BoundedOutputForTest(errorJSON("permission_denied"), exec.OutputComplete),
-				},
-				exec.SensitiveErrorForTest(exec.KindHerdrCreate, exec.OutcomeExit)
-		}
-		return exec.SensitiveResult{}, nil
-	}
+	run.on(exec.KindHerdrBootstrap, func() (exec.SensitiveResult, error) {
+		return exec.SensitiveResult{
+				Stderr: exec.BoundedOutputForTest(errorJSON("permission_denied"), exec.OutputComplete),
+			},
+			exec.SensitiveErrorForTest(exec.KindHerdrBootstrap, exec.OutcomeExit)
+	})
 	a := newTestAdapter(t, run, nil)
 	spec, _ := newSpec(t)
 
