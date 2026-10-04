@@ -5,7 +5,7 @@ harness: "claude-code 2.1.287"
 machine: "cf6e768835c7"
 approved_session_id: "c70b336a-7809-4bea-90a6-42015e71e281"
 status: in-flight
-next: "PR 1026 merged as ce4bfca. Release-please opens the release PR; the nightly ship workflow (11:00 UTC) tags and publishes it, or a session dispatches ship.yml with the operator's go. Then the operator runs forgectl upgrade and stores the vikunja-write token; a session runs the live probe on that entry before any real close. PR 1035 and cadence PR 1581 follow."
+next: "v0.25.0 is released and installed on this machine. Operator: forgectl upgrade on the other working machine, then mint and store the vikunja-write bot token. Then a session runs the live probe with -liveprobe.keychain-service=vikunja-write before any real close. Then PR 1035, cadence PR 1581, homelab#1220."
 branch: feat/tasks-close-path
 pr: "https://github.com/cameronsjo/forgectl/pull/1026"
 updated: 2026-10-04
@@ -379,10 +379,10 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
 Merging the build PR starts a release within 24 hours, because the nightly ship runs unattended. The go to merge is the go to release.
 
 - [x] **Operator, or a session with his go:** merge. Check: PR state `MERGED`, #1022 `CLOSED`. Merged 2026-10-04 by the session on the operator's "merge it", squash commit `ce4bfca`; #1022 closed.
-- [ ] **release-please:** opens the release PR. Check: it is open, and the run log has no "untagged, merged release PRs outstanding".
-- [ ] **Ship workflow:** nightly at 11:00 UTC, or `gh workflow run ship.yml -R cameronsjo/forgectl -f dry_run=false` with the operator's go. Never merge the release PR by hand. Check: the run succeeded and `git ls-remote --tags origin` shows the tag.
-- [ ] **Session:** the cask is at the new version; record the container image digest the release run reports, for Task 9.
-- [ ] **Session here, operator on the other working machine:** `forgectl upgrade`. Check: `forgectl --version` equals the tag, and `forgectl tasks done --help | grep -q -- --evidence` exits 0.
+- [x] **release-please:** opens the release PR. Check: it is open, and the run log has no "untagged, merged release PRs outstanding".
+- [x] **Ship workflow:** nightly at 11:00 UTC, or `gh workflow run ship.yml -R cameronsjo/forgectl -f dry_run=false` with the operator's go. Never merge the release PR by hand. Check: the run succeeded and `git ls-remote --tags origin` shows the tag.
+- [x] **Session:** the cask is at the new version; record the container image digest the release run reports, for Task 9. v0.25.0, image `ghcr.io/cameronsjo/forgectl:v0.25.0@sha256:8046a4b5adf92714520c1abb9991d4c03b285c92c3af3bd6782eea77131fa6a9`, recorded on cameronsjo/homelab#1220.
+- [ ] **Session here, operator on the other working machine:** `forgectl upgrade`. Done on this machine 2026-10-04 (0.25.0, `tasks done --help` lists `--evidence`); the other working machine is owed. Check: `forgectl --version` equals the tag, and `forgectl tasks done --help | grep -q -- --evidence` exits 0.
 - [ ] **Operator, each working machine, only after the upgrade:** store the closing bot's credential (Constraint 12) under the entry `done` reads. The upgraded binary carries the D9 host refusal; a write credential does not go on a machine before it. Check, without revealing it: `security find-generic-password -s vikunja-write` exits 0.
 - [ ] **Session:** close one finished task with `forgectl tasks done <id> --evidence <merged PR> --json`, with the probe's raw read saved before and after. Check: `closed`, the trailer is the last line, and no key differs outside Task 2's expected list. If one does, stop, reopen in the web UI, and report.
 
