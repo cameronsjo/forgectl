@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
@@ -168,23 +169,34 @@ func (a *Adapter) Start(ctx context.Context, spec backend.StartSpec) backend.Sta
 // process group of its own and takes the foreground, which is the case this
 // refuses.
 func (a *Adapter) rootPaneIdle(ctx context.Context, pane string) *backend.StartCause {
-	res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHerdrPaneInspect,
-		exec.MustFixed("pane"),
-		exec.MustFixed("process-info"),
-		exec.MustFixed("--pane"),
-		exec.Opaque(pane),
-	))
-	if runErr != nil {
-		cause := a.classifyRunError(runErr, res)
-		return &cause
-	}
-	info, err := parseProcessInfo(res.Stdout)
-	if err != nil {
-		cause := backend.NewStartCause(backend.FailureMalformedResponse, err)
-		return &cause
-	}
-	if info.idle() {
-		return nil
+	var info processInfo
+	for attempt := 0; attempt < idleAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				cause := backend.NewStartCause(backend.FailureCanceled, ctx.Err())
+				return &cause
+			case <-time.After(a.idleInterval):
+			}
+		}
+		res, runErr := a.run.RunSensitive(ctx, a.command(exec.KindHerdrPaneInspect,
+			exec.MustFixed("pane"),
+			exec.MustFixed("process-info"),
+			exec.MustFixed("--pane"),
+			exec.Opaque(pane),
+		))
+		if runErr != nil {
+			cause := a.classifyRunError(runErr, res)
+			return &cause
+		}
+		var err error
+		if info, err = parseProcessInfo(res.Stdout); err != nil {
+			cause := backend.NewStartCause(backend.FailureMalformedResponse, err)
+			return &cause
+		}
+		if info.idle() {
+			return nil
+		}
 	}
 	// The process name comes from herdr and ultimately from whatever runs in
 	// the pane, so it is quoted for the terminal. Only the name: the full
@@ -195,6 +207,15 @@ func (a *Adapter) rootPaneIdle(ctx context.Context, pane string) *backend.StartC
 	cause := backend.NewStartCause(backend.FailureTargetBusy, ErrRootPaneBusy)
 	return &cause
 }
+
+// idleAttempts and defaultIdleInterval bound the wait for a busy root pane:
+// about 1.5 s. A shell's prompt hooks can briefly hold the foreground as a job
+// of their own (measured: 1 sample in 75 on herdr 0.9.1), and that clears
+// within one interval; an agent a layout started does not.
+const (
+	idleAttempts        = 10
+	defaultIdleInterval = 150 * time.Millisecond
+)
 
 // ErrRootPaneBusy reports a root pane that something other than its shell
 // holds.

@@ -60,6 +60,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
@@ -108,6 +109,8 @@ type Adapter struct {
 	// directory check cannot perturb socket fingerprinting or launch outcomes.
 	statSocketDir func(string) (os.FileInfo, error)
 	warnings      io.Writer
+	// idleInterval is the wait between root-pane inspections.
+	idleInterval time.Duration
 }
 
 // Option configures an Adapter at construction.
@@ -181,6 +184,7 @@ func New(run exec.SensitiveRunner, herdrPath string, getenv func(string) string,
 		selfUID:       os.Geteuid,
 		statSocketDir: os.Stat,
 		warnings:      io.Discard,
+		idleInterval:  defaultIdleInterval,
 	}
 	for _, opt := range opts {
 		opt(a)

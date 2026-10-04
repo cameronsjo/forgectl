@@ -113,16 +113,27 @@ func encodeLedger(f ledgerFile) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
-// insertRow adds row, refusing a name that is already present in any stage.
-// A failed launch keeps its row on purpose: it names a worktree that may
-// still hold work.
+// insertRow adds row, refusing a name that is already present, with one
+// exception. A failed launch keeps its row on purpose when it names a
+// worktree, a workspace, or a recovery tag, because those may still hold work.
+// A failed row that names none of them created nothing, so a retry under the
+// same name replaces it.
 func insertRow(rows []Row, row Row) ([]Row, error) {
-	for _, r := range rows {
-		if r.Name == row.Name {
+	for i, r := range rows {
+		if r.Name != row.Name {
+			continue
+		}
+		if !createdNothing(r) {
 			return nil, ErrNameTaken
 		}
+		rows[i] = row
+		return rows, nil
 	}
 	return append(rows, row), nil
+}
+
+func createdNothing(r Row) bool {
+	return r.Stage == StageFailed && r.Worktree == "" && len(r.Ref) == 0 && r.Recovery == ""
 }
 
 // updateRow applies fn to the row named name.

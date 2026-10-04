@@ -168,22 +168,16 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 		return WithExitCode(termsafe.Error(err), 2)
 	}
 
-	built, err := launch.BuildInvocation(launch.InvocationRequest{
-		Config:      deps.Cfg.Launch,
-		CWD:         target,
-		Args:        nil,
-		BaseEnv:     surfaceLaunchEnvironment(os.Environ()),
-		InjectedEnv: injected,
-		UnsetEnv:    unset,
-		Resolve:     launch.ResolveBinary,
-		Harness:     opts.Harness,
-	})
+	built, err := launch.BuildInvocation(surfaceInvocationRequest(deps, target, injected, unset, opts.Harness))
 	if err != nil {
 		return err
 	}
 
 	service := surface.NewService(adapter, surface.Policy{AllowPATHBinary: opts.AllowPATH}, "")
 
+	if opts.Backend == "herdr" {
+		built.Invocation.Env = markHerdrPane(built.Invocation.Env)
+	}
 	req := surface.NewLaunchRequest(displayNameFor(opts.DisplayName, target), built.Invocation)
 	req.Self = self
 
@@ -210,7 +204,18 @@ var herdrPaneIdentityEnv = []string{"HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORK
 // short ("w83:p5"); anything longer is not one.
 const maxPaneIdentityLen = 64
 
-// paneIdentityEnv appends the trampoline's own herdr pane identity to env.
+// herdrPaneMarkerEnv marks an invocation the herdr backend delivered. Only
+// then is the trampoline inside a pane herdr opened: a tmux or cmux pane can
+// carry stale HERDR_* values inherited from whatever started its server.
+const herdrPaneMarkerEnv = "FORGECTL_SURFACE_HERDR_PANE"
+
+// markHerdrPane adds the herdr marker to an invocation's environment.
+func markHerdrPane(env []string) []string {
+	return append(slices.Clone(env), herdrPaneMarkerEnv+"=1")
+}
+
+// paneIdentityEnv removes the herdr marker from env and, only when it was
+// there, appends the trampoline's own herdr pane identity.
 //
 // The trampoline runs inside the new pane, so getenv here answers with that
 // pane's ids, which herdr set when it opened it. Only these three keys cross,
@@ -218,7 +223,18 @@ const maxPaneIdentityLen = 64
 // shape of a herdr id, so nothing else of the trampoline's environment reaches
 // the harness.
 func paneIdentityEnv(env []string, getenv func(string) string) []string {
-	out := env
+	marked := false
+	out := make([]string, 0, len(env)+len(herdrPaneIdentityEnv))
+	for _, e := range env {
+		if k, _, _ := strings.Cut(e, "="); k == herdrPaneMarkerEnv {
+			marked = true
+			continue
+		}
+		out = append(out, e)
+	}
+	if !marked {
+		return out
+	}
 	for _, key := range herdrPaneIdentityEnv {
 		value := getenv(key)
 		if !validPaneIdentity(value) || slices.ContainsFunc(env, func(e string) bool {
@@ -276,4 +292,20 @@ func displayNameFor(explicit, target string) string {
 		return explicit
 	}
 	return filepath.Base(target)
+}
+
+// surfaceInvocationRequest is the one place a surface launch, ordinary or
+// worker, builds its invocation request. Keeping both paths on it means an
+// environment or resolver change cannot reach one kind of surface and not the
+// other.
+func surfaceInvocationRequest(deps module.Deps, cwd string, injected map[string]string, unset []string, harness string) launch.InvocationRequest {
+	return launch.InvocationRequest{
+		Config:      deps.Cfg.Launch,
+		CWD:         cwd,
+		BaseEnv:     surfaceLaunchEnvironment(os.Environ()),
+		InjectedEnv: injected,
+		UnsetEnv:    unset,
+		Resolve:     launch.ResolveBinary,
+		Harness:     harness,
+	}
 }

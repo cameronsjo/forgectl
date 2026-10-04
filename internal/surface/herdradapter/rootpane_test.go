@@ -85,6 +85,7 @@ func TestABusyRootPaneNeverReceivesTheBootstrap(t *testing.T) {
 	})
 	var warnings bytes.Buffer
 	a := newTestAdapter(t, run, nil, WithWarnings(&warnings))
+	a.idleInterval = 0
 	spec, _ := newSpec(t)
 
 	res := a.Start(context.Background(), spec)
@@ -138,4 +139,33 @@ func hasArg(cmd exec.SensitiveCommand, want exec.Arg) bool {
 		}
 	}
 	return false
+}
+
+// TestATransientlyBusyRootPaneStillReceivesTheBootstrap: a prompt hook can
+// hold the foreground for a moment as a job of its own. The check re-reads
+// the pane, so that does not refuse a healthy launch.
+func TestATransientlyBusyRootPaneStillReceivesTheBootstrap(t *testing.T) {
+	reads := 0
+	run := newRunner().on(exec.KindHerdrPaneInspect, func() (exec.SensitiveResult, error) {
+		reads++
+		if reads == 1 {
+			return stdout(processInfoJSON(5000, 4242, "grep")), nil
+		}
+		return stdout(processInfoJSON(4242, 4242, "zsh")), nil
+	})
+	a := newTestAdapter(t, run, nil)
+	a.idleInterval = 0
+	spec, _ := newSpec(t)
+
+	res := a.Start(context.Background(), spec)
+
+	if res.Failed() {
+		t.Fatalf("a pane busy for one read failed the launch: %v", causeClass(res))
+	}
+	if !bootstrapSent(run) {
+		t.Fatal("the bootstrap was not sent once the pane went idle")
+	}
+	if reads != 2 {
+		t.Errorf("inspected %d times, want 2", reads)
+	}
 }

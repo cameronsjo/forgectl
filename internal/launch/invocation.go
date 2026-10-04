@@ -102,9 +102,11 @@ type InvocationRequest struct {
 	// Harness, when set, replaces the harness of the profile matched by CWD.
 	// Only claude and codex are accepted: pi has no permission or sandbox flag
 	// forgectl can pass, so an override to it would start an agent with no
-	// posture at all. Posture fields are never touched by the override — the
-	// matched profile's permission mode, allow_danger, approval policy and
-	// sandbox all stay — so naming a harness cannot loosen a strict repo.
+	// posture at all. The override changes no posture field: the matched
+	// profile's permission mode, allow_danger, approval policy and sandbox all
+	// stay. Those fields are per harness, so a repo block that set only claude
+	// fields gives a codex override the codex values from [launch.defaults];
+	// the worker profile (T5) is what compares the two.
 	Harness string
 	// Worker marks a coordinator's worker launch. It applies a floor under
 	// the resolved posture; see applyWorkerFloor.

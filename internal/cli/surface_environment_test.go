@@ -71,21 +71,38 @@ func TestPaneIdentityEnv(t *testing.T) {
 		"HERDR_WORKSPACE_ID": "w90",
 		"SECRET":             "must-not-cross",
 	}
-	got := paneIdentityEnv([]string{"PATH=/bin"}, func(k string) string { return own[k] })
+	got := paneIdentityEnv(markHerdrPane([]string{"PATH=/bin"}), func(k string) string { return own[k] })
 	want := []string{"PATH=/bin", "HERDR_PANE_ID=w90:p1", "HERDR_TAB_ID=w90:t1", "HERDR_WORKSPACE_ID=w90"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("env = %q, want %q", got, want)
 	}
 
-	got = paneIdentityEnv([]string{"HERDR_PANE_ID=set"}, func(k string) string { return own[k] })
+	got = paneIdentityEnv(markHerdrPane([]string{"HERDR_PANE_ID=set"}), func(k string) string { return own[k] })
 	if got[0] != "HERDR_PANE_ID=set" || slices.Contains(got, "HERDR_PANE_ID=w90:p1") {
 		t.Errorf("an invocation's own value was overridden: %q", got)
 	}
 
 	for _, bad := range []string{"", "w1;rm", "w1\x1b[0m", strings.Repeat("a", 65)} {
-		got := paneIdentityEnv(nil, func(string) string { return bad })
+		got := paneIdentityEnv(markHerdrPane(nil), func(string) string { return bad })
 		if len(got) != 0 {
 			t.Errorf("value %q crossed: %q", bad, got)
+		}
+	}
+}
+
+// TestPaneIdentityEnv_OnlyForHerdr is the polish finding behind the marker: a
+// tmux or cmux pane can inherit stale HERDR_* values from whatever started its
+// server, so without the herdr backend's mark nothing crosses — and the mark
+// itself never reaches the harness.
+func TestPaneIdentityEnv_OnlyForHerdr(t *testing.T) {
+	stale := func(string) string { return "w1:p9" }
+	if got := paneIdentityEnv([]string{"PATH=/bin"}, stale); !slices.Equal(got, []string{"PATH=/bin"}) {
+		t.Errorf("an unmarked invocation gained pane ids: %q", got)
+	}
+	got := paneIdentityEnv(markHerdrPane([]string{"PATH=/bin"}), stale)
+	for _, e := range got {
+		if strings.HasPrefix(e, herdrPaneMarkerEnv+"=") {
+			t.Errorf("the marker reached the harness: %q", got)
 		}
 	}
 }

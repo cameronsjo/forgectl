@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -94,9 +93,13 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 	if err != nil {
 		return fail(err)
 	}
+	// From here the worker is running, so a failure is bookkeeping only and
+	// the live ref goes back with it; recording StageFailed would orphan the
+	// workspace.
 	encoded, err := ref.MarshalJSON()
 	if err != nil {
-		return fail(fmt.Errorf("encode the worker's surface reference: %w", err))
+		return workerLaunched{ref: ref, worktree: wt.Path},
+			fmt.Errorf("the worker started but its surface reference could not be recorded: %w", err)
 	}
 	if err := led.Update(name, func(r *worker.Row) {
 		r.Stage = worker.StageLaunched
@@ -161,18 +164,12 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 			return worker.AddWorktree(ctx, deps.Runner, top, opts.DisplayName, opts.Worktree)
 		},
 		build: func(cwd string) (launch.BuiltInvocation, error) {
-			return launch.BuildInvocation(launch.InvocationRequest{
-				Config:      deps.Cfg.Launch,
-				CWD:         cwd,
-				BaseEnv:     surfaceLaunchEnvironment(os.Environ()),
-				InjectedEnv: injected,
-				UnsetEnv:    unset,
-				Resolve:     launch.ResolveBinary,
-				Harness:     opts.Harness,
-				Worker:      true,
-			})
+			req := surfaceInvocationRequest(deps, cwd, injected, unset, opts.Harness)
+			req.Worker = true
+			return launch.BuildInvocation(req)
 		},
 		launch: func(ctx context.Context, inv launch.Invocation) (backend.Ref, error) {
+			inv.Env = markHerdrPane(inv.Env)
 			req := surface.NewLaunchRequest(opts.DisplayName, inv)
 			req.Self = self
 			result, err := service.Launch(ctx, req)

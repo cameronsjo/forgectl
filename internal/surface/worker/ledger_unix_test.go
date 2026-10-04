@@ -75,7 +75,10 @@ func TestLedgerBeginRefusesATakenName(t *testing.T) {
 	if err := l.Begin(Row{Name: "w1", Branch: "a"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := l.Update("w1", func(r *Row) { r.Stage = StageFailed }); err != nil {
+	if err := l.Update("w1", func(r *Row) {
+		r.Stage = StageFailed
+		r.Worktree = "/repo/one/.claude/worktrees/w1"
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := l.Begin(Row{Name: "w1", Branch: "b"}); !errors.Is(err, ErrNameTaken) {
@@ -165,5 +168,44 @@ func TestLedgerRowsOnAnAbsentLedgerIsEmpty(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
 		t.Error("reading an absent ledger created its directory")
+	}
+}
+
+// TestLedgerBeginReusesAFailedRowThatCreatedNothing: a launch that failed
+// before git created anything leaves a row with nothing to protect, so a
+// retry under the same name is allowed rather than stranded.
+func TestLedgerBeginReusesAFailedRowThatCreatedNothing(t *testing.T) {
+	l, _ := testLedger(t)
+	if err := l.Begin(Row{Name: "w1", Branch: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Update("w1", func(r *Row) { r.Stage = StageFailed; r.Failure = "branch busy" }); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Begin(Row{Name: "w1", Branch: "b"}); err != nil {
+		t.Fatalf("retry after a failure that created nothing: %v", err)
+	}
+	rows, err := l.Rows()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Branch != "b" || rows[0].Stage != StagePending {
+		t.Errorf("rows = %+v, want the retry's pending row only", rows)
+	}
+}
+
+// TestLedgerRefusesAHardlinkedFile: a second name for the ledger's inode means
+// a write here also writes somewhere forgectl was never pointed at.
+func TestLedgerRefusesAHardlinkedFile(t *testing.T) {
+	l, dir := testLedger(t)
+	if err := l.Begin(Row{Name: "w1", Branch: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	data := filepath.Join(dir, ledgerKey("/repo/one", "default")+".json")
+	if err := os.Link(data, filepath.Join(t.TempDir(), "other-name")); err != nil {
+		t.Skipf("cannot hardlink across these dirs: %v", err)
+	}
+	if _, err := l.Rows(); !errors.Is(err, ErrLedgerUnreadable) {
+		t.Errorf("Rows on a hardlinked ledger: err = %v, want ErrLedgerUnreadable", err)
 	}
 }

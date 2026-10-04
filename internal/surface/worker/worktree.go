@@ -31,14 +31,28 @@ var ErrUnsafeWorktreeRoot = errors.New("worker: worktree root is unsafe")
 // worktreeDirs is the path below the repo top where worker worktrees live.
 var worktreeDirs = []string{".claude", "worktrees"}
 
-// RepoTop returns the top level of the git checkout containing dir, with
-// symlinks resolved, so every later path check compares real paths.
+// RepoTop returns the main checkout's top level for the git repo containing
+// dir, with symlinks resolved, so every later path check compares real paths.
+//
+// From inside a linked worktree (a worker's own, say) --show-toplevel names
+// that worktree. Using it would key a second ledger, so name collisions with
+// the main checkout's workers would go unseen, and would nest new worktrees
+// inside the worker's. When the common git dir is a `.git` directory, its
+// parent is the main checkout, and that is the top. A bare-repo layout has no
+// main checkout, so it keeps the worktree's own top.
 func RepoTop(ctx context.Context, run GitRunner, dir string) (string, error) {
 	out, err := run.Run(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", fmt.Errorf("worker: %s is not inside a git checkout: %w", dir, err)
 	}
 	top := strings.TrimSpace(out)
+	common, err := run.Run(ctx, "git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", fmt.Errorf("worker: read the common git dir of %s: %w", dir, err)
+	}
+	if common = strings.TrimSpace(common); filepath.Base(common) == ".git" {
+		top = filepath.Dir(common)
+	}
 	if !filepath.IsAbs(top) {
 		return "", fmt.Errorf("worker: git reported a non-absolute top level for %s", dir)
 	}

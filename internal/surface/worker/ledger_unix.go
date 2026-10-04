@@ -137,9 +137,8 @@ func writeAt(dir int, tmp, name string, data []byte) error {
 	return nil
 }
 
-// openVerified opens name under dir without following a symlink and refuses
-// anything that is not a regular, single-link file owned by this user. A file
-// found with a broader mode is narrowed only after those checks pass.
+// openVerified opens name under dir without following a symlink, then refuses
+// it unless verifyLedgerFile passes.
 func openVerified(dir int, name string, flags int) (*os.File, error) {
 	fd, err := unix.Openat(dir, name, flags|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, ledgerFileMode)
 	switch {
@@ -147,31 +146,55 @@ func openVerified(dir int, name string, flags int) (*os.File, error) {
 		return nil, os.ErrNotExist
 	case errors.Is(err, unix.ELOOP):
 		return nil, fmt.Errorf("%w: %s is a symlink", ErrLedgerUnreadable, name)
+	case errors.Is(err, unix.ENXIO), errors.Is(err, unix.EISDIR), errors.Is(err, unix.ENOTDIR):
+		return nil, fmt.Errorf("%w: %s is not a regular file", ErrLedgerUnreadable, name)
 	case err != nil:
 		return nil, fmt.Errorf("%w: open %s: %w", ErrLedgerUnreadable, name, err)
 	}
 	f := os.NewFile(uintptr(fd), name)
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		f.Close() //nolint:errcheck,gosec // refusing
-		return nil, fmt.Errorf("%w: stat %s: %w", ErrLedgerUnreadable, name, err)
-	}
-	switch {
-	case st.Mode&unix.S_IFMT != unix.S_IFREG:
-		f.Close() //nolint:errcheck,gosec // refusing
-		return nil, fmt.Errorf("%w: %s is not a regular file", ErrLedgerUnreadable, name)
-	case int(st.Uid) != os.Geteuid():
-		f.Close() //nolint:errcheck,gosec // refusing
-		return nil, fmt.Errorf("%w: %s is owned by another user", ErrLedgerUnreadable, name)
-	case st.Nlink != 1:
-		f.Close() //nolint:errcheck,gosec // refusing
-		return nil, fmt.Errorf("%w: %s is hardlinked", ErrLedgerUnreadable, name)
-	}
-	if st.Mode&0o7777 != ledgerFileMode {
-		if err := unix.Fchmod(fd, ledgerFileMode); err != nil {
-			f.Close() //nolint:errcheck,gosec // refusing
-			return nil, fmt.Errorf("%w: restrict %s: %w", ErrLedgerUnreadable, name, err)
-		}
+	if err := verifyLedgerFile(dir, name, fd); err != nil {
+		f.Close() //nolint:errcheck,gosec // refusing; nothing was written
+		return nil, err
 	}
 	return f, nil
+}
+
+// verifyLedgerFile proves the open file is a regular, single-link file owned
+// by this user and is the same object the directory entry names, then narrows
+// its mode and checks nothing changed while it did.
+func verifyLedgerFile(dir int, name string, fd int) error {
+	var pinned unix.Stat_t
+	if err := unix.Fstat(fd, &pinned); err != nil {
+		return fmt.Errorf("%w: stat %s: %w", ErrLedgerUnreadable, name, err)
+	}
+	switch {
+	case pinned.Mode&unix.S_IFMT != unix.S_IFREG:
+		return fmt.Errorf("%w: %s is not a regular file", ErrLedgerUnreadable, name)
+	case int(pinned.Uid) != os.Geteuid():
+		return fmt.Errorf("%w: %s is owned by another user", ErrLedgerUnreadable, name)
+	case pinned.Nlink != 1:
+		return fmt.Errorf("%w: %s is hardlinked", ErrLedgerUnreadable, name)
+	}
+	var named unix.Stat_t
+	if err := unix.Fstatat(dir, name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return fmt.Errorf("%w: stat %s entry: %w", ErrLedgerUnreadable, name, err)
+	}
+	if named.Dev != pinned.Dev || named.Ino != pinned.Ino {
+		return fmt.Errorf("%w: %s entry does not match the opened file", ErrLedgerUnreadable, name)
+	}
+	if pinned.Mode&0o7777 == ledgerFileMode {
+		return nil
+	}
+	if err := unix.Fchmod(fd, ledgerFileMode); err != nil {
+		return fmt.Errorf("%w: restrict %s: %w", ErrLedgerUnreadable, name, err)
+	}
+	var rechecked unix.Stat_t
+	if err := unix.Fstat(fd, &rechecked); err != nil {
+		return fmt.Errorf("%w: re-stat %s: %w", ErrLedgerUnreadable, name, err)
+	}
+	if rechecked.Dev != pinned.Dev || rechecked.Ino != pinned.Ino || rechecked.Nlink != 1 ||
+		rechecked.Mode&0o7777 != ledgerFileMode || int(rechecked.Uid) != os.Geteuid() {
+		return fmt.Errorf("%w: %s changed identity while being restricted", ErrLedgerUnreadable, name)
+	}
+	return nil
 }

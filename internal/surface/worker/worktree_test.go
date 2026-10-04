@@ -177,3 +177,21 @@ func TestAddWorktreeRefusesBadNamesAndBranches(t *testing.T) {
 		t.Error("a refused call still created .claude")
 	}
 }
+
+// TestRepoTopFromAWorkerWorktreeIsTheMainCheckout: a launch run from inside a
+// worker's worktree must key the same ledger and use the same worktree root
+// as one run from the main checkout.
+func TestRepoTopFromAWorkerWorktreeIsTheMainCheckout(t *testing.T) {
+	top := gitRepo(t)
+	wt, err := AddWorktree(context.Background(), fexec.OSRunner{}, top, "w5", "feat/w5")
+	if err != nil {
+		t.Fatalf("AddWorktree: %v", err)
+	}
+	got, err := RepoTop(context.Background(), fexec.OSRunner{}, wt.Path)
+	if err != nil {
+		t.Fatalf("RepoTop: %v", err)
+	}
+	if got != top {
+		t.Errorf("RepoTop from the worker worktree = %q, want the main checkout %q", got, top)
+	}
+}

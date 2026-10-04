@@ -106,7 +106,7 @@ const (
 	KindHerdrCleanup
 	// KindHerdrPaneInspect reads a pane's foreground process before anything is
 	// typed into it. KindHerdrBootstrap is the `pane run` that types the
-	// trampoline line; it was labelled KindHerdrCreate before the two split.
+	// trampoline line into a pane the inspection found idle.
 	KindHerdrPaneInspect
 	KindHerdrBootstrap
 
