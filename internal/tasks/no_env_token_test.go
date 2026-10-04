@@ -2,6 +2,8 @@ package tasks
 
 import (
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -17,9 +19,35 @@ import (
 // invisible until someone read the file.
 //
 // A sentence in an ADR is not a control. This is.
+//
+// It reads every non-test source file in the package, not a list of names. A
+// list covers the files that existed when it was written, and the file most
+// likely to gain an environment read is the one added after.
 func TestTokenHasNoEnvironmentSource(t *testing.T) {
-	for _, file := range []string{"token.go", "client.go", "write.go", "mcp.go"} {
-		src, err := os.ReadFile(file) //nolint:gosec // G304: `file` is a literal from the loop above, not external input
+	all, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("list package sources: %v", err)
+	}
+	var files []string
+	for _, file := range all {
+		if !strings.HasSuffix(file, "_test.go") {
+			files = append(files, file)
+		}
+	}
+	// A glob that matched nothing, or ran in the wrong directory, would pass
+	// with zero files read. These are the files that hold or send the token.
+	for _, must := range []string{
+		"token.go", "client.go", "write.go", "mcp.go",
+		"structured.go", "hostpin.go", "cache.go",
+		"complete.go", "trailer.go", "mcp_complete.go", "closerecord.go",
+		"allowedhost.go",
+	} {
+		if !slices.Contains(files, must) {
+			t.Errorf("%s is not among the sources this test read: %v", must, files)
+		}
+	}
+	for _, file := range files {
+		src, err := os.ReadFile(file) //nolint:gosec // G304: `file` is a name the glob above returned from the package directory, not external input
 		if err != nil {
 			t.Fatalf("read %s: %v", file, err)
 		}

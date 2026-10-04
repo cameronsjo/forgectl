@@ -2,8 +2,10 @@ package tasks
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -96,26 +98,87 @@ func TestClient_SendsBearerHeaderNotArgv(t *testing.T) {
 // DialContext, which is the one observable proof the pin is on the path the
 // bearer token actually takes.
 func TestNewClient_InstallsThePinnedDialer(t *testing.T) {
+	tr := productionTransport(t, productionClient(t))
+	if tr.DialContext == nil {
+		t.Fatal("transport has no DialContext — the host pin is not on the request path, " +
+			"so http.Transport will resolve the hostname itself and the pin constrains nothing")
+	}
+}
+
+// productionClient builds a Client through NewClientWithPins, the constructor
+// every credentialed caller ends in (NewClient calls it), so the assertions
+// below are about the transport the bearer token actually travels on.
+//
+// The token here is not a keychain token, so it has no host list and the
+// constructor requires a pin list for it. The one address the host resolves
+// to is listed.
+func productionClient(t *testing.T) *Client {
+	t.Helper()
 	runner := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
-			if name == "route" {
+			if name == "/sbin/route" {
 				return "gateway: " + HomelabGateway + "\n", nil
 			}
 			return "", nil
 		},
 	}
 	// An IP literal resolves to itself, so this needs no DNS.
-	c, err := NewClient(context.Background(), runner, "192.168.1.102", newToken("tk_"+strings.Repeat("a", 40)))
+	const address = "192.168.1.102"
+	c, err := NewClientWithPins(context.Background(), runner, address,
+		newToken("tk_"+strings.Repeat("a", 40)), []net.IP{net.ParseIP(address)})
 	if err != nil {
-		t.Fatalf("NewClient = %v, want nil", err)
+		t.Fatalf("NewClientWithPins = %v, want nil", err)
 	}
+	return c
+}
+
+func productionTransport(t *testing.T, c *Client) *http.Transport {
+	t.Helper()
 	tr, ok := c.httpClient.Transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("transport is %T, want *http.Transport", c.httpClient.Transport)
 	}
-	if tr.DialContext == nil {
-		t.Fatal("transport has no DialContext — the host pin is not on the request path, " +
-			"so http.Transport will resolve the hostname itself and the pin constrains nothing")
+	return tr
+}
+
+// TestNewClient_PinsTheTransport asserts the settings that keep the bearer
+// token on one TLS connection to the vetted address. Each is a default or a
+// one-line field, so each can be changed by an edit that breaks no request:
+// the client keeps working and the token starts taking another route.
+func TestNewClient_PinsTheTransport(t *testing.T) {
+	c := productionClient(t)
+	tr := productionTransport(t, c)
+
+	// A followed redirect can carry the Authorization header to a cleartext
+	// URL on the same host.
+	if c.httpClient.CheckRedirect == nil {
+		t.Fatal("CheckRedirect is nil, so the client follows redirects")
+	}
+	if err := c.httpClient.CheckRedirect(nil, nil); !errors.Is(err, http.ErrUseLastResponse) {
+		t.Errorf("CheckRedirect = %v, want http.ErrUseLastResponse", err)
+	}
+	// A proxy receives the CONNECT and, for a cleartext URL, the header. The
+	// pinned dialer would dial the vetted address either way, so only this
+	// field shows a proxy was configured.
+	if tr.Proxy != nil {
+		t.Error("Transport.Proxy is set — the client would route through HTTPS_PROXY or HTTP_PROXY")
+	}
+	cfg := tr.TLSClientConfig
+	if cfg == nil {
+		t.Fatal("Transport.TLSClientConfig is nil, so the TLS floor is the library default")
+	}
+	if cfg.MinVersion < tls.VersionTLS12 {
+		t.Errorf("TLS MinVersion = %#x, want at least TLS 1.2 (%#x)", cfg.MinVersion, tls.VersionTLS12)
+	}
+	// Certificate verification is the only control on the tailnet and public
+	// arms of the host pin.
+	if cfg.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify is true — a wrong server would receive the token")
+	}
+	// A private root set would let whoever supplied it mint a certificate for
+	// the host. nil means the system trust store.
+	if cfg.RootCAs != nil {
+		t.Error("RootCAs is set, so the client trusts something other than the system store")
 	}
 }
 

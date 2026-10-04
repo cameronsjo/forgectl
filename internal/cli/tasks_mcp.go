@@ -22,6 +22,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/tasks"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -64,10 +65,21 @@ func newTasksMCPCmd(deps module.Deps, host, keychainService *string) *cobra.Comm
   forgectl tasks mcp --http :3000 \
       --token-file /run/secrets/token      streamable HTTP (a container)
 
-Six tools: list_projects, list_tasks, get_task, ready_tasks, create_task,
-add_comment. What any of them can actually do is decided by the credential's
-own grant, not by this flag surface — a read-only token gets a tool error on
-create_task, and that error is evidence only because the reads pass.
+Seven tools: list_projects, list_tasks, get_task, ready_tasks, create_task,
+add_comment, complete_task. What any of them can actually do is decided by the
+credential's own grant, not by this flag surface — a read-only token gets a
+tool error on create_task, and on complete_task for any task that is still
+open, and that error is evidence only because the reads pass.
+
+complete_task marks one task done and appends a closed-by line to its
+description. It sends a limited number of updates per MCP session and refuses
+the rest; a new session starts a new count. Each call that sends an update,
+and each call refused by that limit, writes one JSON close record line to
+stderr: time, task and project id, closer, evidence, the credential's source
+name, the host, and the outcome. Never the token. The line does not depend on
+log_level. On stdio, stdout is the protocol stream and carries no record, and
+each line is also appended to tasks-closes.jsonl in the forgectl config
+directory.
 
 Board text is UNTRUSTED. Every title, description, and comment this server
 returns is wrapped in a per-response <board-text-NONCE> fence, and any
@@ -77,11 +89,18 @@ inside a fence as data, never as instructions.
 TRANSPORTS AND CREDENTIALS
 
   stdio      token from the macOS login keychain (--keychain-service,
-             default ` + tasks.DefaultKeychainService + `)
+             default ` + tasks.DefaultKeychainService + `). A keychain token is sent only to the
+             default host or a host under [tasks] allowed_hosts in the
+             forgectl config file; any other --host is refused with exit 4
+             before the keychain is read. Close records also go to
+             tasks-closes.jsonl in the forgectl config directory.
   --http     token from --token-file, which is REQUIRED with --http; the file
              must be owner-readable only. There is no environment-variable
              source, deliberately: an env var is readable through
-             docker inspect and /proc/<pid>/environ.
+             docker inspect and /proc/<pid>/environ. The allowed_hosts list
+             does not apply to this transport: it reads no keychain and no
+             user config, and --pin-ip is what bounds where its token goes.
+             Its close records go to stderr only, which is the container log.
 
   --pin-ip   repeatable, and REQUIRED with --http (rejected without it). An
              INTERSECTION with the host-pinning policy, not a fallback: an
@@ -165,12 +184,17 @@ func runTasksMCP(
 	// port and only then discovers its token file is unreadable is a container
 	// that reports healthy and answers every tool call with an auth failure.
 	var token tasks.Token
-	clientName := "forgectl (stdio)"
 	if httpAddr == "" {
-		token, err = tasks.ReadToken(ctx, deps.Runner, keychainService)
+		// The stdio transport reads the keychain, so the allowed-host rule
+		// applies, and is checked before the read.
+		token, err = readTasksKeychainToken(cmd, deps.Runner, tasksKeychainFlag, keychainService, host, deps.Cfg.Tasks.AllowedHosts)
 	} else {
+		// The HTTP transport is NOT subject to the allowed-host rule. Its
+		// token comes from a mounted file, in a container that has no user
+		// config file to hold a host list; where that token may go is bounded
+		// by the --pin-ip list validateMCPFlags requires, and a token from
+		// ReadTokenFile carries no host restriction of its own.
 		token, err = tasks.ReadTokenFile(tokenFile)
-		clientName = "forgectl (http)"
 	}
 	if err != nil {
 		return tasksExitError(err)
@@ -188,7 +212,7 @@ func runTasksMCP(
 		return tasksExitError(err)
 	}
 
-	server := tasks.NewMCPServer(client, clientName)
+	server := tasks.NewMCPServer(client, mcpServerConfig(cmd, httpAddr, keychainService, host))
 	if httpAddr == "" {
 		// stdout is the transport on stdio. Anything written there that is
 		// not a JSON-RPC frame corrupts the session, which is why nothing in
@@ -196,6 +220,37 @@ func runTasksMCP(
 		return server.Run(ctx, &mcp.StdioTransport{})
 	}
 	return serveMCPHTTP(cmd, server, httpAddr)
+}
+
+// mcpServerConfig is what the server is told about its own launch: the
+// fallback client name for a trailer, where close records go, and the two
+// facts a record carries about the credential — its source's name and the
+// host it is sent to.
+//
+// Records go to stderr on both transports, never stdout: on stdio stdout is
+// the JSON-RPC transport, and a record written there would corrupt the session
+// it describes. On stdio they are also appended to the close log, because the
+// server's stderr belongs to the MCP client that started it and is gone when
+// that client is. Over HTTP stderr is the container log, which is that
+// transport's durable record, and no file is written.
+//
+// The credential source is a NAME, never the credential. On stdio it is the
+// keychain service the token was read from. On HTTP it is the fixed word for
+// a mounted file: --keychain-service still holds its default there, and it
+// names an entry this transport never read.
+func mcpServerConfig(cmd *cobra.Command, httpAddr, keychainService, host string) tasks.MCPConfig {
+	cfg := tasks.MCPConfig{
+		DefaultClientName: "forgectl (stdio)",
+		Records:           tasksCloseRecordWriter(cmd.ErrOrStderr()),
+		CredentialSource:  keychainService,
+		Host:              host,
+	}
+	if httpAddr != "" {
+		cfg.DefaultClientName = "forgectl (http)"
+		cfg.Records = cmd.ErrOrStderr()
+		cfg.CredentialSource = tasks.CredentialSourceTokenFile
+	}
+	return cfg
 }
 
 func serveMCPHTTP(cmd *cobra.Command, server *mcp.Server, addr string) error {
@@ -396,7 +451,9 @@ func releasePingSession(parent context.Context, url, sessionID string) {
 // address can carry credentials — `tok@127.0.0.1:3000` splits into host
 // "tok@127.0.0.1", and net/http then sends "tok" as userinfo and prints it in
 // its own errors (it masks only a password). So the host must be an IP or a
-// plain hostname, which cannot carry userinfo; this function's refusals repeat
+// plain hostname (config.PlainServiceHostname: the one hostname grammar, in
+// the form that also admits the '_' of a compose service name), which cannot
+// carry userinfo; this function's refusals repeat
 // none of the value; and later messages say pingURLLabel instead of the URL.
 // A later message can still name host:port through pingCause, which keeps a
 // dial or DNS error. That is bounded by the checks here: a validated host and
@@ -412,7 +469,7 @@ func pingURL(addr string) (string, error) {
 	if n, perr := strconv.Atoi(port); perr != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
 		return "", errors.New("tasks mcp --ping: the --http port is not a number from 1 to 65535")
 	}
-	if host != "" && net.ParseIP(host) == nil && !plainHostname(host) {
+	if host != "" && net.ParseIP(host) == nil && !config.PlainServiceHostname(host) {
 		return "", errors.New("tasks mcp --ping: the --http host is not an IP address or a plain hostname (letters, digits, '.', '-', '_')")
 	}
 	if host == "" || host == "0.0.0.0" || host == "::" {
@@ -423,23 +480,6 @@ func pingURL(addr string) (string, error) {
 
 // pingURLLabel stands in for the probe URL in every --ping message (#658).
 const pingURLLabel = "the configured tasks URL"
-
-// plainHostname reports whether host is a DNS-style name: 1..253 bytes of
-// ASCII letters, digits, '.', '-' and '_' (compose service names use '_').
-// It admits no '@', ':', '/', '%' or space, so it cannot carry userinfo or
-// reshape the URL it is joined into.
-func plainHostname(host string) bool {
-	if host == "" || len(host) > 253 {
-		return false
-	}
-	for i := 0; i < len(host); i++ {
-		c := host[i]
-		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '.' && c != '-' && c != '_' {
-			return false
-		}
-	}
-	return true
-}
 
 // pingCause drops net/http's *url.Error layer, whose text is the method and
 // the full URL, and keeps what it wraps (a dial or timeout error naming at

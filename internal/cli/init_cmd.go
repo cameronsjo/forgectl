@@ -271,6 +271,24 @@ const resumeScaffold = `
 # timeout_seconds = 0  # 0 = default: command 300 (then its process group is killed); restart 1800 (bounds only the wait for idle)
 `
 
+// tasksScaffold is the [tasks] section. The header is ACTIVE so the section
+// exists and `forgectl init` does not re-append it, and the one key stays
+// commented with an empty list: the built-in host needs no entry, and a host
+// written here would be one more place every machine sends a keychain
+// credential.
+//
+// The second comment is there because the list is one list, not one per
+// keychain entry. A host added so a read token can reach it can be sent the
+// write token by the same rule, and the place to say so is where the host is
+// typed.
+const tasksScaffold = `
+# ── tasks: where a keychain credential may be sent (forgectl tasks) ─────────
+[tasks]
+# allowed_hosts = [] # hostnames allowed besides the built-in default; plain hostnames only (no port, user, path, or IP)
+# The list applies to EVERY keychain entry, the write entry included: a listed
+# host can be sent whichever keychain token a command names.
+`
+
 // initSection is one scaffoldable block: a config.toml section (or, for the
 // empty name, the host-scalar preamble) plus its annotated template.
 type initSection struct {
@@ -311,6 +329,7 @@ var initSections = []initSection{
 	{"theme", "theme", themeScaffold},
 	{"herdr", "herdr", herdrScaffold},
 	{"resume", "resume", resumeScaffold},
+	{"tasks", "tasks", tasksScaffold},
 }
 
 // initModule declares the full-scaffold convenience extension (ADR-0005). It

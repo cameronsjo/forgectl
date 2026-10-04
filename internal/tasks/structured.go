@@ -11,7 +11,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Structured output for the read tools.
+// Structured output for the read tools, and for the two write tools that
+// return an id a caller acts on next (create_task, complete_task).
 //
 // structuredContent sits OUTSIDE the board-text fence: a client hands it to
 // the model as plain JSON, with no frame saying "this is data". So it carries
@@ -77,6 +78,21 @@ type (
 		HasDescription bool          `json:"has_description" jsonschema:"whether the task has a description (the text is in the fenced text content)"`
 		Relations      []relationRef `json:"relations" jsonschema:"relations with a recognised kind, sorted by kind then id"`
 	}
+
+	// The write tools' outputs are numbers and booleans only. The title each
+	// one acts on is board text and stays in the fenced text content, so
+	// neither struct has a string field for structuredResult to vet.
+	createTaskOutput struct {
+		ID        int `json:"id" jsonschema:"the id of the task that was created; the id complete_task takes"`
+		ProjectID int `json:"project_id" jsonschema:"the id of the project the task was filed in"`
+	}
+	completeTaskOutput struct {
+		ID               int  `json:"id" jsonschema:"the task id"`
+		ProjectID        int  `json:"project_id" jsonschema:"the id of the project the task is in"`
+		Done             bool `json:"done" jsonschema:"true when the task is done after this call, whether this call closed it or it already was"`
+		AlreadyDone      bool `json:"already_done" jsonschema:"true when the task was done before this call, so nothing was written"`
+		EvidenceRecorded bool `json:"evidence_recorded" jsonschema:"true when the read-back description ends with the closed-by line this call wrote"`
+	}
 )
 
 // doneAtPattern is the only shape structuredTime emits.
@@ -102,12 +118,12 @@ const structuredRejected = "structured output rejected: a field failed server-si
 // structuredResult still refuses the output without echoing the value.
 var keepRelationKind = isRelationKind
 
-// structuredResult is the last gate before a read tool returns. Every string
-// VALUE in out must be a known relation kind or a canonical done_at timestamp
-// — the only strings the output structs are meant to carry. Anything else
-// means a filter was bypassed, and the whole result is replaced by a fixed
-// tool error: never the value, and never the SDK's schema error, which would
-// quote it.
+// structuredResult is the last gate before a tool returns structuredContent.
+// Every string VALUE in out must be a known relation kind or a canonical
+// done_at timestamp — the only strings the output structs are meant to carry.
+// Anything else means a filter was bypassed, and the whole result is replaced
+// by a fixed tool error: never the value, and never the SDK's schema error,
+// which would quote it.
 func structuredResult(res *mcp.CallToolResult, out any) (*mcp.CallToolResult, any, error) {
 	if !structuredVetted(out) {
 		return toolError("%s", structuredRejected), nil, nil
