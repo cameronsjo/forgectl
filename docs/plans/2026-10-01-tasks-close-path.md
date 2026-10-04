@@ -5,10 +5,10 @@ harness: "claude-code 2.1.287"
 machine: "cf6e768835c7"
 approved_session_id: "c70b336a-7809-4bea-90a6-42015e71e281"
 status: in-flight
-next: "Operator: mint a short-expiry scratch bot token, store it under forgectl-liveprobe-scratch, give the go for the live probe (Task 2). Then a session runs both probe phases, replaces the fixtures, records the results in Task 2 and ADR 0009 §17, and flips draft PR 1026 ready. Then Task 8 (operator merges; the merge starts a release) → Tasks 9-10 → Task 11."
+next: "Operator merges PR 1026 (starts a release), runs forgectl upgrade, mints and stores the vikunja-write bot token. Then a session runs the live probe against that entry before any real close (Task 2, reordered after Task 8), replaces the fixtures, records results in Task 2 and ADR 0009 §17. Then PR 1035, Tasks 9-10, Task 11."
 branch: feat/tasks-close-path
 pr: "https://github.com/cameronsjo/forgectl/pull/1026"
-updated: 2026-10-02
+updated: 2026-10-04
 date: 2026-10-01
 ---
 
@@ -364,7 +364,7 @@ Each dispatched task works in the worktree Task 1 creates and replies per its `R
 
 **Dispatch:** the dedicated security-review agent on Opus over the file list in Task 1 plus the new files, whole files; fallback as in Task 1 · **Report:** `[REPORT_PATH]`
 
-- [x] Security review; fold findings. No ready flip with a Critical or Important open. Four passes: before the build (1 Critical, 9 Important), of the build at `92c2427` (0 Critical, 3 Important), of the fixes at `5458a4c` (0 and 0), of the last changes at `00f6831` (0 and 0). One code review of the build: 0 Critical, 2 Important. One Important stays open and blocks the flip: the live probe has not run.
+- [x] Security review; fold findings. No ready flip with a Critical or Important open. Five passes: before the build (1 Critical, 9 Important), of the build at `92c2427` (0 Critical, 3 Important), of the fixes at `5458a4c` (0 and 0), of the changes at `00f6831` (0 and 0), and of the host-field change at `6cf8e4c` (0 and 0). One code review of the build: 0 Critical, 2 Important. One Important stays open and blocks the flip: the live probe has not run.
 - [x] `git fetch`, then `go test ./...` and `golangci-lint run` with `gh`, `tmux`, and `codex` stripped from `PATH`. Every package this build touches passes and lint reports 0 issues. `TestStatus_LiveGit` fails on the build machine because of its global gitignore, on `origin/main` as well.
 - [x] `vulncheck` is green at the PR head
 - [x] Run the redaction scan over the PR body and the fixtures
@@ -452,6 +452,7 @@ Day 1 is the first day Tasks 8, 9, and 10 are all live.
 
 ## Deviations
 
+- 2026-10-04, Task 2 and Task 8: the operator chose to merge before the live probe, with one token instead of two. The scratch token existed only because a write token in the keychain was unsafe before the host rule shipped; once the upgraded binary is installed, the probe runs against the `vikunja-write` entry (`-liveprobe.keychain-service=vikunja-write`) before any real close. Cost: a release ships before the server's update behavior is measured. Nothing can close a task until that entry is stored, and the probe runs right after it. The ready flip no longer waits on the probe.
 - 2026-10-02, Task 7: the build PR stays draft. The reviews added scope the plan did not have: a line in the close-record file for every host refusal, a check that the close-record file is a regular owner-only file, a refusal in the client constructor for a file token with no pin list, and `forgectl config` reporting an invalid value apart from a parse error. Declined, with the reason in ADR 0009: making `--closer` required (default flags do not tell two harnesses apart; the wiring issue tells sessions to pass it), a read-back after a refused update, an attempt line written before the update, and a credential detector for shapes other than the board's own token. The PR title stays `feat(tasks):` as Constraint 9 has it, though the host rule changes behavior for anyone using `--host` with an unlisted host; the PR body lists the behavior changes.
 - 2026-10-02, Task 5: the hostname grammar lives in `internal/config`, because config validates the list at load and cannot import the tasks package. One bad `allowed_hosts` entry fails config load for every command, as any other invalid config value does. `--json` failures with no closer code (host refused, unreachable, a malformed keychain entry) use `failed`. `docs/configuration.md` also documents the key. A closer name that holds anything shaped like a token now falls back to the surface default. The plan's own `status:` moved to `in-flight`: the repo's plan index accepts only its closed vocabulary, and `planned` and `in-progress` are outside it.
 - 2026-10-02, Task 6: the ADR gains a new amendment section, §12 to §17, with short pointers from the sections it changes, in place of rewriting §1 to §11 in place. The index row's status also moves from Draft to Accepted, which the ADR itself has said since 2026-09-08.

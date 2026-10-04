@@ -20,9 +20,12 @@ package tasks
 //	  -liveprobe.phase=update -liveprobe.a=<id> -liveprobe.b=<id> \
 //	  -liveprobe.c=<id> -liveprobe.d=<id> -liveprobe.out=<abs dir>
 //
-// The token is a short-expiry scratch bot token stored under the keychain
-// service "forgectl-liveprobe-scratch". Delete that entry and revoke the token
-// when the probe is finished. The probe talks only to the default host.
+// By default the token is a short-expiry scratch bot token stored under the
+// keychain service "forgectl-liveprobe-scratch"; delete that entry and revoke
+// the token when the probe is finished. On a machine whose installed forgectl
+// carries the allowed-host rule, the probe may instead read the `done` verb's
+// own entry with -liveprobe.keychain-service=vikunja-write. The probe talks
+// only to the default host.
 //
 // The token is read through ReadToken and the client is built by NewClient, so
 // host pinning, the TLS floor, and the redirect refusal all apply. Raw
@@ -59,12 +62,13 @@ const (
 	probeUpdateWrites = 4
 )
 
-// probeDefaultService is deliberately NOT the entry the `done` verb reads. The
-// probe writes to a live board, so it gets a credential of its own: a
-// short-expiry scratch token, stored under this throwaway name and never under
-// the write entry. A probe run can then neither use nor expose the token that
-// closes real tasks, and when the probe is finished its entry is deleted and
-// its token revoked without touching anything else.
+// probeDefaultService is deliberately NOT the entry the `done` verb reads. A
+// write token must not sit in the keychain on a machine whose installed
+// forgectl predates the allowed-host rule: such a binary sends a named keychain
+// entry to any host a command line names. A probe run before that upgrade uses
+// a short-expiry scratch token under this throwaway name, deleted and revoked
+// when the probe is finished. After the upgrade, the write entry is safe to
+// name with -liveprobe.keychain-service.
 const probeDefaultService = "forgectl-liveprobe-scratch"
 
 // probeRepeatSeconds is scratch task B's repeat interval: one day.
@@ -123,9 +127,16 @@ func TestLiveProbe(t *testing.T) {
 	p := &probe{t: t, client: client, outDir: outDir}
 	t.Cleanup(func() {
 		t.Logf("PROBE IDS CREATED THIS RUN: %v (delete them in the web UI when the probe is finished)", p.created)
-		t.Logf("WHEN THE PROBE IS FINISHED: delete the keychain entry %q (security delete-generic-password -s %s) "+
-			"and revoke its token in the web UI. The token can write to the board until it is revoked or expires.",
-			*probeService, *probeService)
+		// Only the throwaway entry is the probe's to destroy. Run against
+		// another entry, such as the write entry the done verb reads next,
+		// the same advice would take out the credential real closes need.
+		if *probeService == probeDefaultService {
+			t.Logf("WHEN THE PROBE IS FINISHED: delete the keychain entry %q (security delete-generic-password -s %s) "+
+				"and revoke its token in the web UI. The token can write to the board until it is revoked or expires.",
+				*probeService, *probeService)
+		} else {
+			t.Logf("KEEP the keychain entry %q: it is not the probe's own scratch entry.", *probeService)
+		}
 	})
 
 	switch *probePhase {
@@ -163,7 +174,9 @@ func probeOutDir(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("relate %q to the module root: %v", out, err)
 	}
-	if rel == "." || !strings.HasPrefix(rel, "..") {
+	// Outside means the first path element is "..". A prefix test on the
+	// string would also pass a directory inside the module named "..raw".
+	if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		t.Fatalf("-liveprobe.out %q is inside the repository; raw saves carry real user objects and must live outside it", out)
 	}
 	return out
