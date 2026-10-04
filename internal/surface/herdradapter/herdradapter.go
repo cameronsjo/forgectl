@@ -247,6 +247,10 @@ func checkSocketPath(socket string) error {
 // Kind reports the backend this adapter drives.
 func (a *Adapter) Kind() backend.Kind { return backend.KindHerdr }
 
+// Session is the herdr session this adapter is pinned to. The worker ledger keys
+// on it, so workers in two sessions of one repo do not share rows.
+func (a *Adapter) Session() string { return a.session }
+
 // pinned prefixes an argv with this adapter's session pin. Every command goes
 // through it, so there is one spelling of `--session` and no call site can issue
 // an unpinned command by forgetting it.

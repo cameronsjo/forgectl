@@ -106,10 +106,39 @@ type InvocationRequest struct {
 	// matched profile's permission mode, allow_danger, approval policy and
 	// sandbox all stay — so naming a harness cannot loosen a strict repo.
 	Harness string
+	// Worker marks a coordinator's worker launch. It applies a floor under
+	// the resolved posture; see applyWorkerFloor.
+	Worker bool
 }
 
-// ErrHarnessOverride reports a --harness value outside the overridable set.
-var ErrHarnessOverride = errors.New("launch: harness override must be claude or codex")
+var (
+	// ErrHarnessOverride reports a --harness value outside the overridable set.
+	ErrHarnessOverride = errors.New("launch: harness override must be claude or codex")
+	// ErrWorkerPosture reports a resolved posture a worker may not start with.
+	ErrWorkerPosture = errors.New("launch: this posture is not allowed for a worker")
+)
+
+// applyWorkerFloor is the worker posture until the worker profile (T5) lands.
+//
+// Workers run unattended in panes the operator is not watching, so three
+// things the matched profile may allow are not allowed here. pi is refused
+// whichever way it was chosen, because forgectl can pass it no permission or
+// sandbox flag. A repo that explicitly asks for bypassPermissions or
+// danger-full-access is refused rather than quietly narrowed, so the operator
+// sees the conflict. allow_danger is turned off rather than refused: it is on
+// by default, and refusing it would refuse every worker on a default config.
+func applyWorkerFloor(p Profile) (Profile, error) {
+	switch {
+	case p.Harness == "pi":
+		return Profile{}, fmt.Errorf("%w: pi has no permission or sandbox flag forgectl can pass", ErrWorkerPosture)
+	case p.Harness == "claude" && p.PermissionMode == "bypassPermissions":
+		return Profile{}, fmt.Errorf("%w: permission_mode bypassPermissions", ErrWorkerPosture)
+	case p.Harness == "codex" && p.Sandbox == "danger-full-access":
+		return Profile{}, fmt.Errorf("%w: sandbox danger-full-access", ErrWorkerPosture)
+	}
+	p.AllowDanger = false
+	return p, nil
+}
 
 // applyHarnessOverride switches p to harness while keeping every posture field.
 //
@@ -167,6 +196,11 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 	}
 	if err := profile.Validate(); err != nil {
 		return BuiltInvocation{}, err
+	}
+	if req.Worker {
+		if profile, err = applyWorkerFloor(profile); err != nil {
+			return BuiltInvocation{}, err
+		}
 	}
 
 	args := cloneStrings(req.Args)

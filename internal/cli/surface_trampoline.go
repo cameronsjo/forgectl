@@ -9,6 +9,7 @@ import (
 	osexec "os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"syscall"
 
 	"github.com/cameronsjo/forgectl/internal/surface"
@@ -243,6 +244,10 @@ func harnessCommand(inv surface.Invocation) (*osexec.Cmd, error) {
 	if cmd.Env == nil {
 		cmd.Env = []string{}
 	}
+	// The one exception to "never inherit": the new pane's own herdr ids. The
+	// launcher strips its ids (surfaceLaunchEnvironment), so without these the
+	// harness would not know which pane it is in. Only the three keys cross.
+	cmd.Env = paneIdentityEnv(slices.Clone(cmd.Env), os.Getenv)
 
 	// The harness is an interactive session and this process is standing in for
 	// it inside the manager's pane, so it inherits the terminal wholesale.

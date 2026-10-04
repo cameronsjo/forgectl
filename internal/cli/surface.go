@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -63,6 +64,8 @@ func newSurfaceLaunchCmd(deps module.Deps) *cobra.Command {
 		backendName string
 		displayName string
 		allowPATH   bool
+		worktree    string
+		harness     string
 	)
 
 	cmd := &cobra.Command{
@@ -82,6 +85,8 @@ A path may be anywhere, because naming it is the choice being made explicitly.`,
 				Backend:     backendName,
 				DisplayName: displayName,
 				AllowPATH:   allowPATH,
+				Worktree:    worktree,
+				Harness:     harness,
 			})
 		},
 	}
@@ -98,6 +103,10 @@ A path may be anywhere, because naming it is the choice being made explicitly.`,
 		"display name for the surface (defaults to the target's directory name)")
 	cmd.Flags().BoolVar(&allowPATH, "allow-path-binary", false,
 		"accept a harness found by searching $PATH rather than named in config")
+	cmd.Flags().StringVar(&worktree, "worktree", "",
+		"start a worker on this branch in its own git worktree under <repo>/.claude/worktrees/<name> (herdr only; --name required)")
+	cmd.Flags().StringVar(&harness, "harness", "",
+		"run this harness instead of the one the directory's launch profile names (claude or codex)")
 
 	return cmd
 }
@@ -109,6 +118,8 @@ type surfaceLaunchOptions struct {
 	Backend     string
 	DisplayName string
 	AllowPATH   bool
+	Worktree    string
+	Harness     string
 }
 
 func firstArg(args []string) string {
@@ -128,6 +139,10 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	if opts.Backend == "" {
 		return WithExitCode(fmt.Errorf(
 			"--surface is required and has no default; pass --surface tmux"), 2)
+	}
+
+	if opts.Worktree != "" {
+		return runWorkerLaunch(cmd, deps, opts)
 	}
 
 	adapter, err := surfaceAdapterForWithWarnings(opts.Backend, cmd.ErrOrStderr())
@@ -161,6 +176,7 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 		InjectedEnv: injected,
 		UnsetEnv:    unset,
 		Resolve:     launch.ResolveBinary,
+		Harness:     opts.Harness,
 	})
 	if err != nil {
 		return err
@@ -185,16 +201,67 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 
 const claudeCodeChildSessionEnv = "CLAUDE_CODE_CHILD_SESSION"
 
+// herdrPaneIdentityEnv are the variables herdr sets to name the pane a process
+// runs in. HERDR_SOCKET_PATH is not among them: it names the server, which the
+// launcher and the new pane share.
+var herdrPaneIdentityEnv = []string{"HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"}
+
+// maxPaneIdentityLen bounds a herdr id carried into a harness. herdr's ids are
+// short ("w83:p5"); anything longer is not one.
+const maxPaneIdentityLen = 64
+
+// paneIdentityEnv appends the trampoline's own herdr pane identity to env.
+//
+// The trampoline runs inside the new pane, so getenv here answers with that
+// pane's ids, which herdr set when it opened it. Only these three keys cross,
+// only when env does not already name them, and only when the value has the
+// shape of a herdr id, so nothing else of the trampoline's environment reaches
+// the harness.
+func paneIdentityEnv(env []string, getenv func(string) string) []string {
+	out := env
+	for _, key := range herdrPaneIdentityEnv {
+		value := getenv(key)
+		if !validPaneIdentity(value) || slices.ContainsFunc(env, func(e string) bool {
+			k, _, _ := strings.Cut(e, "=")
+			return k == key
+		}) {
+			continue
+		}
+		out = append(out, key+"="+value)
+	}
+	return out
+}
+
+func validPaneIdentity(v string) bool {
+	if v == "" || len(v) > maxPaneIdentityLen {
+		return false
+	}
+	for _, r := range v {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == ':', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // surfaceLaunchEnvironment removes the Claude marker that describes a child
 // process of the current session. A newly created surface is an independently
 // resumable workspace, so forwarding the marker would misclassify the harness
 // and silently disable its transcript. This policy belongs at the surface
 // boundary: ordinary in-place launches continue to inherit the marker.
+//
+// The herdr pane-identity variables go for the same reason. They name the pane
+// the LAUNCHER runs in, and the trampoline replaces the new pane's environment
+// with this one, so a worker started from a herdr pane would report its agent
+// state, and receive anything addressed to "its" pane, on the launcher's pane.
+// The trampoline puts back the new pane's own values (paneIdentityEnv).
 func surfaceLaunchEnvironment(base []string) []string {
 	out := make([]string, 0, len(base))
 	for _, entry := range base {
 		key, _, _ := strings.Cut(entry, "=")
-		if key == claudeCodeChildSessionEnv {
+		if key == claudeCodeChildSessionEnv || slices.Contains(herdrPaneIdentityEnv, key) {
 			continue
 		}
 		out = append(out, entry)

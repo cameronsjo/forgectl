@@ -141,3 +141,51 @@ func containsPair(args []string, flag, value string) bool {
 	}
 	return false
 }
+
+// TestBuildInvocation_WorkerFloor pins the T1 worker posture: pi refused from
+// the profile as well as the flag, the danger flag forced off on a default
+// config, and an explicit bypass or full-access sandbox refused.
+func TestBuildInvocation_WorkerFloor(t *testing.T) {
+	target := projectDir(t)
+	bin := fixedResolver(ResolvedBinary{Path: "/stub/harness", Source: BinaryPATH})
+	allow := true
+
+	t.Run("default config drops the danger flag", func(t *testing.T) {
+		built, err := BuildInvocation(InvocationRequest{
+			Config: config.LaunchConfig{Defaults: config.LaunchDefaults{AllowDanger: &allow}},
+			CWD:    target, Worker: true, Resolve: bin,
+		})
+		if err != nil {
+			t.Fatalf("BuildInvocation: %v", err)
+		}
+		if slices.Contains(built.Invocation.Args, "--allow-dangerously-skip-permissions") {
+			t.Errorf("worker argv %q carries the danger flag", built.Invocation.Args)
+		}
+	})
+
+	for name, lc := range map[string]config.LaunchConfig{
+		"pi from the repo profile": {Projects: []config.LaunchProject{{Match: target, Harness: "pi"}}},
+		"bypassPermissions":        {Defaults: config.LaunchDefaults{PermissionMode: "bypassPermissions"}},
+		"danger-full-access":       {Defaults: config.LaunchDefaults{Harness: "codex", Sandbox: "danger-full-access"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := BuildInvocation(InvocationRequest{Config: lc, CWD: target, Worker: true, Resolve: bin})
+			if !errors.Is(err, ErrWorkerPosture) {
+				t.Fatalf("err = %v, want ErrWorkerPosture", err)
+			}
+		})
+	}
+
+	t.Run("non-worker launch is unchanged", func(t *testing.T) {
+		built, err := BuildInvocation(InvocationRequest{
+			Config: config.LaunchConfig{Defaults: config.LaunchDefaults{AllowDanger: &allow}},
+			CWD:    target, Resolve: bin,
+		})
+		if err != nil {
+			t.Fatalf("BuildInvocation: %v", err)
+		}
+		if !slices.Contains(built.Invocation.Args, "--allow-dangerously-skip-permissions") {
+			t.Errorf("an ordinary launch lost its configured danger flag: %q", built.Invocation.Args)
+		}
+	})
+}
