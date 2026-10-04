@@ -185,7 +185,7 @@ func TestEvaluate(t *testing.T) {
 
 		// Check 3: the pane. Every failure refuses.
 		{"pane vanished", func(_ *OutdatedSession, o *Observation) { o.PaneErr = fmt.Errorf("pane w7P:p1: %w", ErrPaneGone) }, Refused, "no longer exists"},
-		{"herdr not answering", func(_ *OutdatedSession, o *Observation) { o.PaneErr = errors.New("connection refused") }, NotYet, "retrying"},
+		{"herdr not answering", func(_ *OutdatedSession, o *Observation) { o.PaneErr = errors.New("connection refused") }, NotYet, "(connection refused); retrying"},
 		{"pane labelled with another session", func(_ *OutdatedSession, o *Observation) { o.Pane.AgentSession = "ffff0000" }, Refused, "different session"},
 		{"pane runs another agent", func(_ *OutdatedSession, o *Observation) { o.Pane.Agent = "codex" }, Refused, "different session"},
 		{"pid not the pane's foreground (nested)", func(_ *OutdatedSession, o *Observation) { o.Pane.ForegroundPIDs = []int{12345} }, Refused, "not pane"},
@@ -455,5 +455,15 @@ func TestPickRelaunchBinary(t *testing.T) {
 	}
 	if got, err := pickRelaunchBinary("", errors.New("unsupported"), look); err != nil || got != "/opt/homebrew/bin/forgectl" {
 		t.Errorf("os.Executable failure: %q, %v", got, err)
+	}
+}
+
+func TestClipDetail(t *testing.T) {
+	if got := clipDetail("herdr pane get:\n  {\"error\":  \"x\"}"); got != `herdr pane get: {"error": "x"}` {
+		t.Errorf("not flattened: %q", got)
+	}
+	long := strings.Repeat("é", detailLimit+50)
+	if got := []rune(clipDetail(long)); len(got) != detailLimit+1 || got[detailLimit] != '…' {
+		t.Errorf("clipped to %d runes, want %d plus an ellipsis", len(got), detailLimit)
 	}
 }
