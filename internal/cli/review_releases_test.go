@@ -54,8 +54,8 @@ var radarNow = time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 
 func healthyRadarAPI() mapAPI {
 	return mapAPI{
-		"repos/cameronsjo/artificer/releases?per_page=100":  `[{"tag_name":"v0.27.0","published_at":"2026-09-27T16:09:57Z"}]`,
-		"repos/cameronsjo/artificer/compare/v0.27.0...main": `{"ahead_by":0,"commits":[]}`,
+		"repos/cameronsjo/artificer/releases?per_page=100":               `[{"tag_name":"v0.27.0","published_at":"2026-09-27T16:09:57Z"}]`,
+		"repos/cameronsjo/artificer/compare/v0.27.0...main?per_page=100": `{"ahead_by":0,"commits":[]}`,
 	}
 }
 

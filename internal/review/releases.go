@@ -90,6 +90,9 @@ type RegistryEntry struct {
 	HumanGates []string   `yaml:"human_gates" json:"human_gates"`
 	Endpoints  []Endpoint `yaml:"endpoints" json:"endpoints"`
 	Upstream   string     `yaml:"upstream" json:"upstream,omitempty"`
+	// ReleaseWorkflow is the workflow that opens the release PR (release-pr
+	// only; optional). Unset means DefaultReleaseWorkflow.
+	ReleaseWorkflow string `yaml:"release_workflow,omitempty" json:"release_workflow,omitempty"`
 }
 
 // Endpoint is a downstream channel that must catch up to each release.
@@ -297,6 +300,9 @@ func validateEntry(e RegistryEntry) error {
 	if needsEntry && !reRegWorkflow.MatchString(e.Entrypoint) {
 		return fmt.Errorf("%s: %s needs an entrypoint under .github/workflows/", e.Repo, e.Class)
 	}
+	if e.ReleaseWorkflow != "" && (e.Class != ClassReleasePR || !reRegWorkflow.MatchString(e.ReleaseWorkflow)) {
+		return fmt.Errorf("%s: release_workflow needs a release-pr repo and a path under .github/workflows/", e.Repo)
+	}
 	if !needsEntry && e.Entrypoint != "" {
 		return fmt.Errorf("%s: %s has no entrypoint", e.Repo, e.Class)
 	}
@@ -332,6 +338,10 @@ type RepoFacts struct {
 	Unreleased *int `json:"unreleased,omitempty"`
 	// OldestUnreleasedAt is the committer date of the oldest of those.
 	OldestUnreleasedAt *time.Time `json:"oldest_unreleased_at,omitempty"`
+	// UnreleasedCommits are the unreleased commits (release-pr only), oldest
+	// first, read for the releasable rule. Collection reports an error rather
+	// than a partial list when the unseen tail could change the verdict.
+	UnreleasedCommits []CommitFact `json:"unreleased_log,omitempty"`
 	// ReleasePRs are the open release PRs (title shape of ship-gate.sh).
 	ReleasePRs []PRFact `json:"release_prs,omitempty"`
 	// Toggle is the class's nightly toggle variable; nil when the class has
@@ -340,6 +350,9 @@ type RepoFacts struct {
 	// Runs are the entrypoint's recent runs, newest first. Reason is filled
 	// for the newest run and the two newest scheduled runs.
 	Runs []RunFact `json:"runs,omitempty"`
+	// PendingReleaseRuns are the release-PR workflow's runs that have not
+	// completed (release-pr only).
+	PendingReleaseRuns []RunFact `json:"pending_release_runs,omitempty"`
 	// Endpoints mirrors the registry's endpoints with the version found.
 	Endpoints []EndpointFact `json:"endpoints,omitempty"`
 	// GateCopySHA256 is the sha256 of .github/scripts/ship-gate.sh on the
@@ -547,6 +560,14 @@ func Derive(e RegistryEntry, f RepoFacts, canonicalGate string, now time.Time) R
 	// A half-shipped release is broken whether or not the beat is on.
 	if row.LastRun != nil && row.LastRun.Reason == "half-shipped" {
 		row.Stalls = append(row.Stalls, "last ship run reports half-shipped")
+	}
+
+	// The release machinery itself: releasable commits with no release PR, and
+	// a release-PR workflow run that never started.
+	if e.Class == ClassReleasePR {
+		row.Stalls = append(row.Stalls, noReleasePRStall(f, now)...)
+		wf, _ := ReleaseWorkflowFile(e)
+		row.Stalls = append(row.Stalls, releaseWorkflowStall(wf, f.PendingReleaseRuns, now)...)
 	}
 
 	// Endpoint lag: every endpoint must carry the last release within 24h.

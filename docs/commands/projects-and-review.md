@@ -194,8 +194,24 @@ A repo is **stalled** when:
 - its toggle is `on` and its last 2 scheduled runs report the same reason other
   than `go`, `no-pr`, or `paused` (`uploaded` and `no-change` for testflight);
 - its last run reports `half-shipped`;
-- an endpoint still trails a release more than 24h old; or
-- its gate copy is missing or its hash differs from the canonical one.
+- an endpoint still trails a release more than 24h old;
+- its gate copy is missing or its hash differs from the canonical one;
+- `no-release-pr` (`release-pr` repos, toggle on or off): the unreleased commits
+  include a releasable one, no release PR is open, and the oldest releasable
+  commit is more than 24h old; or
+- `release-workflow-stuck` (`release-pr` repos, toggle on or off): a run of the
+  release-PR workflow has been `waiting`, `queued`, or `pending` for more than 1h.
+
+Releasable means a commit whose subject type is `feat`, `fix`, or `perf`, whose
+type or scope carries a `!` (`feat!:`, `refactor(api)!:`), or whose body has a
+`BREAKING CHANGE:` footer. A set of only `chore`, `ci`, `docs`, `test`,
+`refactor`, `style`, or `build` commits never stalls. The release-PR workflow is
+the registry entry's optional `release_workflow` (a path under
+`.github/workflows/`), read-only; without it the radar reads `release-please.yml`,
+or `prepare-release.yml` for `cadence-hooks`. A default workflow the repo lacks
+is skipped; one the registry names must exist. When the compare read lists fewer
+commits than the branch is ahead by (100 per read) and none of them is
+releasable, the newer ones are unseen and the row is `unknown`.
 
 A repo whose toggle is not `on` is `paused`: shown, not judged on its beat. A
 repo with any failed read is `unknown`, and the failed read is named (for
