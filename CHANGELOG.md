@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.26.0](https://github.com/cameronsjo/forgectl/compare/v0.25.0...v0.26.0) (2026-10-05)
+
+
+### Features
+
+* **surface:** `surface launch --harness` runs claude or codex instead of the profile's harness ([9798fd5](https://github.com/cameronsjo/forgectl/commit/9798fd5470ee15bd9464235e552fde36443d2f6d))
+* **surface:** `surface launch --worktree` starts a coordinator worker in its own git worktree and herdr workspace ([9798fd5](https://github.com/cameronsjo/forgectl/commit/9798fd5470ee15bd9464235e552fde36443d2f6d))
+
+
+### Bug Fixes
+
+* **launch:** match Claude Code 2.1.289's subcommand and flag lists (purge added; project and --client-data-url removed) ([8760a0c](https://github.com/cameronsjo/forgectl/commit/8760a0c67786fbfd71897d82e6f24a5163141966))
+* **launch:** match Claude Code 2.1.289's subcommand and flag lists (purge added; project and --client-data-url removed) ([c3458ef](https://github.com/cameronsjo/forgectl/commit/c3458eff69d5bd6b7507c3d338dcd16aece04512))
+* **launch:** match Claude Code 2.1.289's subcommand and flag lists (purge added; project and --client-data-url removed) ([6d76520](https://github.com/cameronsjo/forgectl/commit/6d76520879d89f3c07433db55f711e3a0ddd4f29))
+* **launch:** match Claude Code 2.1.289's subcommand and flag lists (purge added; project and --client-data-url removed) ([40bb3a2](https://github.com/cameronsjo/forgectl/commit/40bb3a29dcf8f0c9a8dc31a552a213662cf1ad7f))
+* **launch:** match Claude Code 2.1.289's subcommand and flag lists (purge added; project and --client-data-url removed) ([9e7c0c6](https://github.com/cameronsjo/forgectl/commit/9e7c0c640cc3c3e047da129388032bd857a43369))
+* **launch:** match Claude Code 2.1.289's subcommand and flag lists (purge added; project and --client-data-url removed) ([0c53497](https://github.com/cameronsjo/forgectl/commit/0c5349759ab2f4b8634b7404ea2f6f92bedc971d))
+* **launch:** match Claude Code 2.1.289's subcommand and flag lists (purge added; project and --client-data-url removed) ([b853b34](https://github.com/cameronsjo/forgectl/commit/b853b34f7b895a95810d55caf956c3ffeb1c4e12))
+* **projects:** clone the repository a pasted browser URL names (any GitHub route, GitLab /-/, Gitea /src and friends) ([8760a0c](https://github.com/cameronsjo/forgectl/commit/8760a0c67786fbfd71897d82e6f24a5163141966))
+* **projects:** clone the repository a pasted browser URL names (any GitHub route, GitLab /-/, Gitea /src and friends) ([c3458ef](https://github.com/cameronsjo/forgectl/commit/c3458eff69d5bd6b7507c3d338dcd16aece04512))
+* **projects:** clone the repository a pasted browser URL names (any GitHub route, GitLab /-/, Gitea /src and friends) ([6d76520](https://github.com/cameronsjo/forgectl/commit/6d76520879d89f3c07433db55f711e3a0ddd4f29))
+* **projects:** clone the repository a pasted browser URL names (any GitHub route, GitLab /-/, Gitea /src and friends) ([40bb3a2](https://github.com/cameronsjo/forgectl/commit/40bb3a29dcf8f0c9a8dc31a552a213662cf1ad7f))
+* **projects:** clone the repository a pasted browser URL names (any GitHub route, GitLab /-/, Gitea /src and friends) ([9e7c0c6](https://github.com/cameronsjo/forgectl/commit/9e7c0c640cc3c3e047da129388032bd857a43369))
+* **projects:** clone the repository a pasted browser URL names (any GitHub route, GitLab /-/, Gitea /src and friends) ([0c53497](https://github.com/cameronsjo/forgectl/commit/0c5349759ab2f4b8634b7404ea2f6f92bedc971d))
+* **projects:** clone the repository a pasted browser URL names (any GitHub route, GitLab /-/, Gitea /src and friends) ([b853b34](https://github.com/cameronsjo/forgectl/commit/b853b34f7b895a95810d55caf956c3ffeb1c4e12))
+* **resume:** `resume restart --outdated` finds each session's herdr pane by session id through `herdr pane list` (the process's `HERDR_PANE_ID` is the fallback), so sessions started before a herdr restart are restarted instead of refused; a pane that disappears mid-run is looked up again, and one that stays gone counts as incomplete so the update watcher retries it; a session the watcher could not restart posts a macOS notification with the command that resumes it ([7c036e4](https://github.com/cameronsjo/forgectl/commit/7c036e4a3abfcef8488f1f0945cb08897e5286e9))
+* **surface:** a surface started from a herdr pane no longer reports its agent state on the launcher's pane ([9798fd5](https://github.com/cameronsjo/forgectl/commit/9798fd5470ee15bd9464235e552fde36443d2f6d))
+* **surface:** herdr launches refuse to type into a root pane that is not an idle interactive shell ([9798fd5](https://github.com/cameronsjo/forgectl/commit/9798fd5470ee15bd9464235e552fde36443d2f6d))
+* **tasks:** close the gaps in the older write path ([#1035](https://github.com/cameronsjo/forgectl/issues/1035)) ([df4928e](https://github.com/cameronsjo/forgectl/commit/df4928e8b8f5d9909e4e728cf75cb1ab67f3e55d))
+
 ## [0.25.0](https://github.com/cameronsjo/forgectl/compare/v0.24.0...v0.25.0) (2026-10-04)
 
 
