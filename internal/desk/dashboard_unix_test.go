@@ -551,6 +551,22 @@ func TestAClaimedManifestNeverRunsAsAScript(t *testing.T) {
 			if _, err := os.Stat(d.EventsPath(c.Name)); err == nil {
 				t.Error("a run began")
 			}
+			if path != "supervise" {
+				return
+			}
+			// The refusal leaves a trace: both files leave running/, and the
+			// meta says why.
+			if entries, _ := os.ReadDir(filepath.Join(d.Path(), DirRunning)); len(entries) != 0 {
+				t.Errorf("running/ = %v, want empty", entries)
+			}
+			for _, f := range []string{c.Name + ".sh", c.Name + ".manifest"} {
+				if _, err := os.Lstat(filepath.Join(d.Path(), DirSkipped, f)); err != nil {
+					t.Errorf("skipped/%s: %v", f, err)
+				}
+			}
+			if m, _, err := d.readMeta(DirSkipped, c.Name); err != nil || !strings.HasPrefix(m.SkipReason, "supervisor: ") || !strings.Contains(m.SkipReason, "holds both") {
+				t.Errorf("skipped meta = %+v, %v", m, err)
+			}
 		})
 	}
 }

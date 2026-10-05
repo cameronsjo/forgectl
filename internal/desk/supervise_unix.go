@@ -154,9 +154,19 @@ func (d *Desk) supervise(name, sha string, want Kind) (int, error) {
 	// The hash binds the bytes, not how they run: findKind prefers .sh, so
 	// the bytes of an approved manifest must not run as bash, nor the reverse.
 	if d.exists(path.Join(DirRunning, name+KindScript.Ext())) && d.exists(path.Join(DirRunning, name+KindBatch.Ext())) {
-		// Which file is the claimed item is unknowable here, so neither is
-		// moved; once this supervisor exits the item reads as lost.
-		return 2, fmt.Errorf("%w: running/ holds both %s.sh and %s.manifest", ErrRefused, describe(name), describe(name))
+		// Which file is the claimed item is unknowable here, so both go to
+		// skipped/: the found one with the meta and the reason, then the
+		// other, once skipUnstarted has moved the first (it leaves an item a
+		// live process owns alone).
+		cause := fmt.Errorf("%w: running/ holds both %s.sh and %s.manifest", ErrRefused, describe(name), describe(name))
+		rc, err := failed(cause)
+		other := name + KindBatch.Ext()
+		if !d.exists(path.Join(DirRunning, name+kind.Ext())) {
+			if merr := d.root.Rename(path.Join(DirRunning, other), path.Join(DirSkipped, other)); merr != nil && !isNotExist(merr) {
+				err = errors.Join(err, fmt.Errorf("desk: move %s to skipped/: %w", describe(other), merr))
+			}
+		}
+		return rc, err
 	}
 	if kind != want || (meta.Kind != "" && meta.Kind != kind) {
 		return failed(fmt.Errorf("%w: %s was approved as a %q and queued as a %q, but running/ holds a %s",
