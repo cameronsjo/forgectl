@@ -93,6 +93,7 @@ var uncappedAllowlist = map[string]struct {
 	"internal/resume/hooks.go:outputTail":                   {1, "escapes under its own input cap (hookTailRunes, keeping the tail); SafeLine is the escaping step, not the sink"},
 	"internal/tui/hub.go:capSafe":                           {1, "per-rune escape pieces under capSafe's own maxRunes cap: one rune in, one escape out"},
 	"internal/tui/hub.go:tailSafe":                          {1, "per-rune escape pieces under tailSafe's own maxRunes cap: one rune in, one escape out"},
+	"internal/tui/desk_model_unix.go:pagerLines":            {1, "the v pager shows the bytes y runs; a cut would hide part of them (the review behind M5). Input is bounded by Record (1 MiB) and LogTail (256 KiB), and lines are soft-wrapped, never cut"},
 	"internal/tui/hub.go:displayToken":                      {3, "the \"$ forgectl …\" echo (DisplayArgv) shows exactly the argv that will run (#782's rule); a cut would hide part of what runs"},
 	"internal/pr/repair.go:cappedRecordBytes":               {1, "escapes under its own byte cap (maxAuditRecordBytes, applied before and after); SafeLine is the escaping step, not the sink"},
 
