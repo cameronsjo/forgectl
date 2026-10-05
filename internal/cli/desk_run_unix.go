@@ -158,7 +158,7 @@ func runForeground(d *desk.Desk, name, sha string, tio IO) (rc int, err error) {
 		}
 	}
 	rc = foregroundExit(cmd.ProcessState)
-	interrupted = interrupted || killedByInterrupt(cmd.ProcessState)
+	interrupted = interrupted || killedByInterrupt(rc)
 	// Nothing the item started may keep the terminal, or outlive a run
 	// recorded as ended.
 	d.EndGroup(pgid)
@@ -229,19 +229,15 @@ func waitKey(tty int) error {
 	return err
 }
 
-// killedByInterrupt reports an item killed by a signal the terminal or the
+// killedByInterrupt reports an item stopped by a signal the terminal or the
 // operator sends to stop it: INT (Ctrl-C reaches the item's group, not the
-// desk), TERM, HUP or QUIT.
-func killedByInterrupt(ps *os.ProcessState) bool {
-	if ps == nil {
-		return false
-	}
-	ws, ok := ps.Sys().(syscall.WaitStatus)
-	if !ok || !ws.Signaled() {
-		return false
-	}
-	switch ws.Signal() {
-	case unix.SIGINT, unix.SIGTERM, unix.SIGHUP, unix.SIGQUIT:
+// desk), TERM, HUP or QUIT. rc is foregroundExit's code, 128 plus the
+// signal for a signal death. The same code from a normal exit counts too:
+// bash can exit with it, rather than die by the signal, when the signal
+// killed the command it was running (seen under load in tests).
+func killedByInterrupt(rc int) bool {
+	switch rc - 128 {
+	case int(unix.SIGINT), int(unix.SIGTERM), int(unix.SIGHUP), int(unix.SIGQUIT):
 		return true
 	}
 	return false

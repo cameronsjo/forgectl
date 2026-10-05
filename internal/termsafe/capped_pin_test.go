@@ -99,9 +99,9 @@ var uncappedAllowlist = map[string]struct {
 	// Review before trust (#782) in the desk approve modal: the operator
 	// approves the item's bytes by hash, so its body shows every byte,
 	// escaped line by line and never cut.
-	"internal/runview/source_desk_unix.go:queueItem":         {1, "escapes each line of the approve modal's body; the operator approves every byte by hash, so a line is never cut"},
-	"internal/runview/source.go:MarkLine":                    {1, "SafeLine only as a per-rune predicate (does escaping change this rune?) for the approve modal's body marks; it prints nothing"},
-	"internal/tui/desk_modal_unix.go:deskModel.confirmLines": {1, "draws the approve modal's body; the operator approves every byte by hash, so a line is never cut"},
+	"internal/runview/source_desk_unix.go:deskSource.QueueBody": {1, "escapes each line of the approve modal's body; the operator approves every byte by hash, so a line is never cut"},
+	"internal/runview/source.go:MarkLine":                       {1, "SafeLine only as a per-rune predicate (does escaping change this rune?) for the approve modal's body marks; it prints nothing"},
+	"internal/tui/desk_modal_unix.go:deskModel.confirmLines":    {1, "draws the approve modal's body; the operator approves every byte by hash, so a line is never cut"},
 
 	// Review before trust (#782) in pr repair: the confirmation prompts, and
 	// the non-TTY refusals that name what --yes would approve or what the

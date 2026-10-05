@@ -65,7 +65,7 @@ func TestAReleaseCountsAsAKeyEvent(t *testing.T) {
 	next, _ := m.Update(tea.KeyReleaseMsg{Code: 'j', Text: "j"})
 	m = next.(deskModel)
 	c.add(100 * time.Millisecond)
-	m = pressDesk(t, m, key("y"))
+	_ = pressDesk(t, m, key("y"))
 	if n, _, _ := rec.counts(); n != 0 {
 		t.Fatal("a y 100 ms after a key release approved")
 	}
@@ -108,7 +108,7 @@ func TestKeysTypedAheadNeverApprove(t *testing.T) {
 				t.Fatal("the dialog did not open once the body was read")
 			}
 			c.add(3 * time.Millisecond)
-			m = pressDesk(t, m, key("y"))
+			_ = pressDesk(t, m, key("y"))
 			if n, _, _ := rec.counts(); n != 0 {
 				t.Fatal("keys typed before the body was read approved")
 			}

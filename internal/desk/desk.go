@@ -177,7 +177,7 @@ func ParseHeaders(data []byte) Headers {
 	var seenWhat, seenWhy, seenTTY bool
 	// Line by line without splitting: a scan reads every pending item, and a
 	// slice per line of a megabyte of newlines is far larger than the item.
-	for rest := data; len(rest) > 0 && !(seenWhat && seenWhy && seenTTY); {
+	for rest := data; len(rest) > 0 && (!seenWhat || !seenWhy || !seenTTY); {
 		raw := rest
 		if i := bytes.IndexByte(rest, '\n'); i >= 0 {
 			raw, rest = rest[:i], rest[i+1:]

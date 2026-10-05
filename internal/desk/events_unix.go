@@ -308,13 +308,25 @@ func (w *Watcher) stateOnce() (WatchState, int, error) {
 		if err != nil {
 			return WatchWaiting, 0, err
 		}
+		// A dead owner is lost only if the item is still where it was judged:
+		// an owner that moves it on (a supervisor skipping what it cannot
+		// run) and exits reads as dead once it is gone.
+		stillHere := func() bool {
+			_, err := d.findKind(DirRunning, w.name)
+			return err == nil
+		}
 		switch {
 		case meta.PID == 0 && d.claimLost(w.name, kind, meta):
+			if !stillHere() {
+				return WatchWaiting, 0, ErrNotFound
+			}
 			return WatchLost, meta.ClaimPID, nil // the claimer died before a run began
 		case meta.PID == 0:
 			return WatchWaiting, 0, nil
 		case processAlive(meta.PID, meta.PIDStart):
 			return WatchRunning, meta.PID, nil
+		case !stillHere():
+			return WatchWaiting, 0, ErrNotFound
 		}
 		return WatchLost, meta.PID, nil
 	}
