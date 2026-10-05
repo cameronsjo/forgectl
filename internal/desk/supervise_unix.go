@@ -29,7 +29,8 @@ var supervisorArgv = func(dir, name string) ([]string, error) {
 
 // Launch starts the detached supervisor that runs a claimed item, and
 // returns its pid. TTY items are refused: they run in the desk's own
-// foreground (see [Desk.BeginRun]).
+// foreground (see [Desk.BeginRun]). When the supervisor cannot be started
+// the item is released to skipped/ (SkipLaunchFailed).
 //
 // The supervisor must outlive the desk, so it is started with no parent
 // context and in a session of its own (Setsid): closing the desk's pane
@@ -52,14 +53,15 @@ func (d *Desk) Launch(name string) (int, error) {
 	}
 	argv, err := supervisorArgv(d.path, name)
 	if err != nil {
-		return 0, err
+		return 0, errors.Join(err, d.Release(name, SkipLaunchFailed))
 	}
 	// context.Background on purpose: no caller's lifetime may end this run.
 	cmd := exec.CommandContext(context.Background(), argv[0], argv[1:]...) //nolint:gosec // G204: re-executing this binary's own hidden subcommand
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil // /dev/null
 	if err := cmd.Start(); err != nil {
-		return 0, fmt.Errorf("desk: start supervisor for %s: %w", describe(name), err)
+		// Nothing owns the claim now: end it where the operator sees it.
+		return 0, errors.Join(fmt.Errorf("desk: start supervisor for %s: %w", describe(name), err), d.Release(name, SkipLaunchFailed))
 	}
 	pid := cmd.Process.Pid
 	// Reap it whenever it ends, so a long-lived desk never holds a zombie

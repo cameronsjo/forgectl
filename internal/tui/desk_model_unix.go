@@ -75,6 +75,7 @@ type deskBackend interface {
 	BeginRun(name string, pid int, fields ...string) (*desk.Run, error)
 	Skip(name, reason string) error
 	Unskip(name string) error
+	Release(name, reason string) error
 	BatchStatus(name string) ([]desk.StepStatus, error)
 	Record(name string) ([]byte, desk.Kind, error)
 	LogTail(name string, maxBytes int64) ([]byte, bool, error)
@@ -838,8 +839,10 @@ type ttyRun struct {
 func newTTYRun(d deskBackend, c *desk.Claimed, rcPath string, argv func(logPath, rcPath string) []string) (*ttyRun, error) {
 	run, err := d.BeginRun(c.Name, os.Getpid())
 	if err != nil {
+		// The claim has no owner: end it in skipped/ rather than leave it
+		// in running/ until the claim grace calls it lost.
 		_ = os.Remove(rcPath)
-		return nil, err
+		return nil, errors.Join(err, d.Release(c.Name, desk.SkipLaunchFailed))
 	}
 	a := argv(d.LogPath(c.Name), rcPath)
 	cmd := osexec.CommandContext(context.Background(), a[0], a[1:]...) //nolint:gosec // G204: script(1) and bash at fixed paths; the item arrives on fd 3

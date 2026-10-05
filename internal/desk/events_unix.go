@@ -205,6 +205,8 @@ func (w *Watcher) state() (WatchState, int, error) {
 			return WatchWaiting, 0, err
 		}
 		switch {
+		case meta.PID == 0 && d.ownerless(w.name, meta):
+			return WatchLost, 0, nil
 		case meta.PID == 0:
 			return WatchWaiting, 0, nil
 		case processAlive(meta.PID, meta.PIDStart):

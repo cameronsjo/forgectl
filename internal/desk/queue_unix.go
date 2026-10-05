@@ -179,13 +179,32 @@ func (d *Desk) runningItem(name string, kind Kind) Item {
 }
 
 // lost reports a running item whose owner process is gone without writing
-// RUN-END. An item with no owner recorded yet is still starting.
+// RUN-END, or a claim that never got an owner within ClaimGrace.
 func (d *Desk) lost(name string, meta Meta) bool {
-	if meta.PID == 0 || processAlive(meta.PID, meta.PIDStart) {
+	if meta.PID == 0 {
+		return d.ownerless(name, meta)
+	}
+	if processAlive(meta.PID, meta.PIDStart) {
 		return false
 	}
 	ended, _ := d.hasRunEnd(name)
 	return !ended
+}
+
+// ownerless reports a running item with no owner recorded whose claim is
+// older than ClaimGrace. The claim time is meta's claimed_at, or for a
+// claim made before that field existed, the running/ file's mtime (Claim
+// writes that file last).
+func (d *Desk) ownerless(name string, meta Meta) bool {
+	var at time.Time
+	if meta.ClaimedAt != nil {
+		at = *meta.ClaimedAt
+	} else if kind, err := d.findKind(DirRunning, name); err == nil {
+		if fi, err := d.root.Lstat(path.Join(DirRunning, name+kind.Ext())); err == nil {
+			at = fi.ModTime()
+		}
+	}
+	return !at.IsZero() && d.now().Sub(at) > ClaimGrace
 }
 
 // doneItems lists history: one item per done/<name>.log, except names still

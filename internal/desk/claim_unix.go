@@ -142,6 +142,11 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 		_ = d.root.Remove(tmp)
 		return nil, fmt.Errorf("desk: stage %s: %w", describe(name), err)
 	}
+	claimed := d.now().UTC()
+	meta.ClaimedAt = &claimed
+	if err := d.writeMeta(DirRunning, name, meta); err != nil {
+		return nil, errors.Join(err, d.Release(name, SkipLaunchFailed))
+	}
 	return &Claimed{
 		Name: name, Kind: kind, SHA256: sum, Content: data, Headers: ParseHeaders(data),
 		RecordPath: d.abs(path.Join(DirRunning, file)),
@@ -246,6 +251,32 @@ func (d *Desk) appendExit(name string, rc int) error {
 	}
 	if werr != nil {
 		return fmt.Errorf("desk: write EXIT for %s: %w", describe(name), werr)
+	}
+	return nil
+}
+
+// Release moves a claimed item whose run never began (no owner recorded) to
+// skipped/ with reason, so a failed launch ends somewhere the operator sees
+// it and nothing runs it later. It refuses an item that has an owner: that
+// run ends through Finish, or as lost.
+func (d *Desk) Release(name, reason string) error {
+	kind, err := d.findKind(DirRunning, name)
+	if err != nil {
+		return err
+	}
+	meta, _, err := d.readMeta(DirRunning, name)
+	if err != nil {
+		return err
+	}
+	if meta.PID != 0 {
+		return fmt.Errorf("desk: %s has an owner (pid %d); only a run that never began can be released", describe(name), meta.PID)
+	}
+	meta.Kind, meta.SkipReason = kind, reason
+	if err := d.writeMeta(DirRunning, name, meta); err != nil {
+		return err
+	}
+	if err := d.move(name, kind, DirRunning, DirSkipped); err != nil {
+		return fmt.Errorf("desk: release %s: %w", describe(name), err)
 	}
 	return nil
 }

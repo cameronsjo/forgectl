@@ -658,3 +658,30 @@ func TestTTYRunPassesFD3(t *testing.T) {
 func newCmd(a []string) *osexec.Cmd {
 	return osexec.CommandContext(context.Background(), a[0], a[1:]...) //nolint:gosec // G204: ttyArgv's fixed argv
 }
+
+// TestTTYRun_BeginRunRefusalReleasesTheClaim: a reused number (done/ already
+// holds the name) makes BeginRun refuse after Claim succeeded. The claim
+// must end in skipped/ (launch-failed), not sit ownerless in running/.
+func TestTTYRun_BeginRunRefusalReleasesTheClaim(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-console.sh", ttyScript("console"))
+	if err := os.WriteFile(filepath.Join(h.d.Path(), desk.DirDone, "01-console.log"), []byte("EXIT=0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.scan()
+	h.selectItem("01-console")
+	h.press("y")
+	if got := h.where("01-console"); got != desk.DirSkipped {
+		t.Fatalf("01-console is in %s, want skipped", got)
+	}
+	snap, err := h.d.Scan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Skipped) != 1 || snap.Skipped[0].Meta.SkipReason != desk.SkipLaunchFailed {
+		t.Fatalf("skipped = %+v, want one launch-failed item", snap.Skipped)
+	}
+	if !strings.Contains(ansi.Strip(h.m.footer()), "done/ already holds") {
+		t.Errorf("footer should say why: %q", ansi.Strip(h.m.footer()))
+	}
+}

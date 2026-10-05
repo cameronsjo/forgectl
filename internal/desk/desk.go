@@ -66,6 +66,12 @@ const (
 	extBatchDir = ".d"
 )
 
+// ClaimGrace is how long a claimed item may sit in running/ with no owner
+// recorded before it counts as lost. A healthy run records its owner within
+// moments of the claim; past this, the claimant died or failed between the
+// claim and BeginRun, and only Skip(name, SkipLost) moves the item on.
+const ClaimGrace = 60 * time.Second
+
 // StaleAfter is how long an item may wait before the queue flags it stale.
 // Nothing removes a stale item; the operator skips it.
 const StaleAfter = 24 * time.Hour
@@ -80,6 +86,9 @@ const (
 	SkipOperator = "operator"
 	SkipLost     = "lost"
 	SkipReused   = "name-reused"
+	// SkipLaunchFailed is a claimed item whose run never began: its
+	// supervisor did not start, or BeginRun refused it.
+	SkipLaunchFailed = "launch-failed"
 )
 
 // Errors callers branch on.
@@ -276,6 +285,9 @@ type Meta struct {
 	// ExitCode is the run's rc, recorded at Finish. It outranks the log's
 	// EXIT= line, which a leftover process could append to after the run.
 	ExitCode *int `json:"exit_code,omitempty"`
+	// ClaimedAt is when a desk claimed the item into running/. A run with no
+	// owner (PID 0) longer than ClaimGrace after it is lost.
+	ClaimedAt *time.Time `json:"claimed_at,omitempty"`
 	// PID and PIDStart identify the process that owns a run: the supervisor,
 	// or the desk itself for a TTY item. PIDStart is the process start time
 	// in a platform-specific unit, so a reused pid does not read as alive.
