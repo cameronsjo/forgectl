@@ -30,6 +30,10 @@ const (
 	EventRunLost   = "RUN-LOST"
 )
 
+// maxEventsBytes caps what hasRunEnd reads of an events file. A batch writes
+// a few lines per step, so this is far past any real run.
+const maxEventsBytes = 16 << 20
+
 // EventLog appends event lines to done/<name>.events. Safe for concurrent use.
 type EventLog struct {
 	mu sync.Mutex
@@ -60,7 +64,7 @@ func (e *EventLog) Close() error { return e.f.Close() }
 // hasRunEnd reports whether done/<name>.events holds a RUN-END line, and
 // whether the file exists at all.
 func (d *Desk) hasRunEnd(name string) (ended, exists bool) {
-	data, err := d.root.ReadFile(path.Join(DirDone, name+extEvents))
+	data, err := d.readRegular(path.Join(DirDone, name+extEvents), maxEventsBytes)
 	if err != nil {
 		return false, false
 	}
@@ -153,7 +157,7 @@ func (w *Watcher) Poll() ([]string, WatchState, error) {
 }
 
 func (w *Watcher) read() (lines []string, ended bool, err error) {
-	f, err := w.d.root.Open(path.Join(DirDone, w.name+extEvents))
+	f, err := w.d.openRegular(path.Join(DirDone, w.name+extEvents))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, false, nil
 	}
@@ -205,14 +209,12 @@ func (w *Watcher) state() (WatchState, int, error) {
 			return WatchWaiting, 0, err
 		}
 		switch {
-		case meta.PID == 0 && d.ownerless(w.name, meta):
-			return WatchLost, 0, nil
+		case d.lost(w.name, meta):
+			return WatchLost, meta.PID, nil
 		case meta.PID == 0:
 			return WatchWaiting, 0, nil
-		case processAlive(meta.PID, meta.PIDStart):
-			return WatchRunning, meta.PID, nil
 		}
-		return WatchLost, meta.PID, nil
+		return WatchRunning, meta.PID, nil
 	}
 	if d.exists(path.Join(DirDone, w.name+extLog)) {
 		if _, exists := d.hasRunEnd(w.name); !exists {

@@ -102,6 +102,15 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 		return nil, fmt.Errorf("%w: %s: the hash on screen is not the hash it was queued with", ErrChanged, describe(name))
 	}
 
+	// claimed_at goes into the meta before the rename, so the moment the item
+	// is in running/ its meta (once it follows) says when the claim began. A
+	// running item whose meta has not followed yet is a claim in progress.
+	claimed := d.now().UTC()
+	meta.ClaimedAt = &claimed
+	if err := d.writeMeta(DirPending, name, meta); err != nil {
+		return nil, err
+	}
+
 	file := name + kind.Ext()
 	if err := d.root.Rename(path.Join(DirPending, file), path.Join(DirRunning, file)); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -142,16 +151,15 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 		_ = d.root.Remove(tmp)
 		return nil, fmt.Errorf("desk: stage %s: %w", describe(name), err)
 	}
-	claimed := d.now().UTC()
-	meta.ClaimedAt = &claimed
-	if err := d.writeMeta(DirRunning, name, meta); err != nil {
-		return nil, errors.Join(err, d.Release(name, SkipLaunchFailed))
-	}
 	return &Claimed{
 		Name: name, Kind: kind, SHA256: sum, Content: data, Headers: ParseHeaders(data),
 		RecordPath: d.abs(path.Join(DirRunning, file)),
 	}, nil
 }
+
+// beforeRunStart runs after BeginRun has written the owner's pid and before
+// it writes RUN-START. Tests replace it to fail that step.
+var beforeRunStart = func(string) error { return nil }
 
 // Run is a started run: the item is in running/, its owner recorded in meta,
 // and RUN-START written.
@@ -161,13 +169,29 @@ type Run struct {
 	Meta   Meta
 	Events *EventLog
 	d      *Desk
+	lock   *ownerLock
 }
 
 // BeginRun records pid as the owner of a claimed item (the supervisor, or the
 // desk itself for a TTY item run in its foreground), with its start time so a
 // reused pid never reads as alive, and writes RUN-START. fields are appended
 // to the RUN-START line (a batch adds steps= and jobs=).
-func (d *Desk) BeginRun(name string, pid int, fields ...string) (*Run, error) {
+//
+// The caller becomes the owner: BeginRun takes the owner lock (see
+// owner_unix.go) and the Run holds it until Finish, so nothing can skip or
+// release the item while the run is live. On failure nothing is left
+// claiming ownership: the lock is dropped and a pid already written to meta
+// is cleared, so the item can be released.
+func (d *Desk) BeginRun(name string, pid int, fields ...string) (run *Run, err error) {
+	lock, err := d.lockOwner(name)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			lock.release(true)
+		}
+	}()
 	kind, err := d.findKind(DirRunning, name)
 	if err != nil {
 		return nil, fmt.Errorf("desk: begin %s: %w", describe(name), err)
@@ -181,14 +205,20 @@ func (d *Desk) BeginRun(name string, pid int, fields ...string) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
+	unowned := meta
 	now := d.now().UTC()
 	meta.Kind, meta.StartedAt, meta.PID, meta.PIDStart = kind, &now, pid, ownStart(pid)
 	if err := d.writeMeta(DirRunning, name, meta); err != nil {
 		return nil, err
 	}
+	// From here a failure must take the pid back out of meta.
+	undo := func(cause error) error { return errors.Join(cause, d.writeMeta(DirRunning, name, unowned)) }
+	if err := beforeRunStart(name); err != nil {
+		return nil, undo(err)
+	}
 	ev, err := d.openEvents(name)
 	if err != nil {
-		return nil, err
+		return nil, undo(err)
 	}
 	line := fmt.Sprintf("%s id=%s pid=%d", EventRunStart, name, pid)
 	if len(fields) > 0 {
@@ -196,9 +226,9 @@ func (d *Desk) BeginRun(name string, pid int, fields ...string) (*Run, error) {
 	}
 	if err := ev.Emit(line); err != nil {
 		_ = ev.Close()
-		return nil, fmt.Errorf("desk: write RUN-START for %s: %w", describe(name), err)
+		return nil, undo(fmt.Errorf("desk: write RUN-START for %s: %w", describe(name), err))
 	}
-	return &Run{Name: name, Kind: kind, Meta: meta, Events: ev, d: d}, nil
+	return &Run{Name: name, Kind: kind, Meta: meta, Events: ev, d: d, lock: lock}, nil
 }
 
 // Finish ends a run: it stamps ended_at, appends EXIT=<rc> as the log's last
@@ -226,6 +256,10 @@ func (r *Run) Finish(rc int, reason string, fields ...string) error {
 	}
 	if err := r.Events.Emit(line); err != nil {
 		errs = append(errs, fmt.Errorf("desk: write RUN-END for %s: %w", describe(r.Name), err))
+	}
+	if r.lock != nil {
+		r.lock.release(true)
+		r.lock = nil
 	}
 	return errors.Join(errs...)
 }
@@ -264,6 +298,14 @@ func (d *Desk) Release(name, reason string) error {
 	if err != nil {
 		return err
 	}
+	lock, held, err := d.tryLockOwner(name)
+	if err != nil {
+		return err
+	}
+	if held {
+		return fmt.Errorf("desk: %s has an owner (its lock is held); only a run that never began can be released", describe(name))
+	}
+	defer lock.release(true)
 	meta, _, err := d.readMeta(DirRunning, name)
 	if err != nil {
 		return err
@@ -283,7 +325,9 @@ func (d *Desk) Release(name, reason string) error {
 
 // Skip moves a pending item to skipped/ with reason. A lost running item
 // (owner dead, no RUN-END) may be skipped too, which is how a lost run leaves
-// running/.
+// running/; it is always recorded as SkipLost, whatever reason says, since a
+// run that began must never be re-armed. Skip takes the owner lock first and
+// refuses while a live owner holds it.
 func (d *Desk) Skip(name, reason string) error {
 	from := DirPending
 	kind, err := d.findKind(DirPending, name)
@@ -291,14 +335,22 @@ func (d *Desk) Skip(name, reason string) error {
 		if kind, err = d.findKind(DirRunning, name); err != nil {
 			return err
 		}
+		lock, held, err := d.tryLockOwner(name)
+		if err != nil {
+			return err
+		}
+		if held {
+			return fmt.Errorf("desk: %s is running (its owner holds the lock); only a lost run can be skipped", describe(name))
+		}
+		defer lock.release(true)
 		meta, _, err := d.readMeta(DirRunning, name)
 		if err != nil {
 			return err
 		}
-		if !d.lost(name, meta) {
+		if !d.lostUnlocked(name, meta) {
 			return fmt.Errorf("desk: %s is running; only a lost run can be skipped", describe(name))
 		}
-		from = DirRunning
+		from, reason = DirRunning, SkipLost
 	} else if err != nil {
 		return err
 	}

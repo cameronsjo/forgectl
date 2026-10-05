@@ -259,6 +259,55 @@ func (d *Desk) readItem(sub, file string) (data []byte, mtime time.Time, err err
 
 func metaName(sub, name string) string { return path.Join(sub, name+extMeta) }
 
+// openRegular opens a root-relative path for reading, refusing anything but
+// a regular file without ever blocking or following a final symlink: the
+// name is Lstat'ed, opened O_NONBLOCK (so a FIFO planted at it cannot hang
+// the open), and the open file must be that same regular file. os.Root keeps
+// every component inside the desk but follows a final symlink that stays in
+// it; the Lstat/SameFile pair refuses that too. A missing file reads as
+// fs.ErrNotExist; anything else that is not a regular file is ErrRefused.
+func (d *Desk) openRegular(p string) (*os.File, error) {
+	before, err := d.root.Lstat(p)
+	if err != nil {
+		return nil, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %s is not a regular file", ErrRefused, describe(p))
+	}
+	f, err := d.root.OpenFile(p, os.O_RDONLY|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	after, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: %s changed while it was opened", ErrRefused, describe(p))
+	}
+	return f, nil
+}
+
+// readRegular reads a regular file through openRegular, refusing one larger
+// than limit.
+func (d *Desk) readRegular(p string, limit int64) ([]byte, error) {
+	f, err := d.openRegular(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck // read-only
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%w: %s is larger than %d bytes", ErrRefused, describe(p), limit)
+	}
+	return data, nil
+}
+
 // readMeta reads <sub>/<name>.meta.json; ok is false when there is none.
 func (d *Desk) readMeta(sub, name string) (m Meta, ok bool, err error) {
 	p := metaName(sub, name)
@@ -271,7 +320,7 @@ func (d *Desk) readMeta(sub, name string) (m Meta, ok bool, err error) {
 	case !fi.Mode().IsRegular() || fi.Size() > maxMetaBytes:
 		return Meta{}, false, fmt.Errorf("desk: %s is not a meta file; refusing", describe(p))
 	}
-	data, err := d.root.ReadFile(p)
+	data, err := d.readRegular(p, maxMetaBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		return Meta{}, false, nil
 	}
@@ -402,7 +451,7 @@ func (d *Desk) EventsPath(name string) string { return d.abs(path.Join(DirDone, 
 // lastLine returns the final line of a log (without its newline), reading at
 // most the last 4 KiB.
 func (d *Desk) lastLine(p string) (string, error) {
-	f, err := d.root.Open(p)
+	f, err := d.openRegular(p)
 	if err != nil {
 		return "", err
 	}

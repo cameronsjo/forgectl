@@ -43,12 +43,14 @@ func (d *Desk) Launch(name string) (int, error) {
 		return 0, fmt.Errorf("desk: launch %s: claim it first: %w", describe(name), err)
 	}
 	if kind == KindScript {
-		data, err := d.root.ReadFile(path.Join(DirRunning, name+extScript))
+		data, err := d.readRegular(path.Join(DirRunning, name+extScript), maxItemBytes)
 		if err != nil {
 			return 0, fmt.Errorf("desk: launch %s: %w", describe(name), err)
 		}
 		if ParseHeaders(data).TTY {
-			return 0, fmt.Errorf("desk: %s is a TTY item; it runs in the desk's foreground, not detached", describe(name))
+			// A caller that should have run it in its own foreground: end the
+			// claim rather than leave it ownerless until the grace runs out.
+			return 0, errors.Join(fmt.Errorf("desk: %s is a TTY item; it runs in the desk's foreground, not detached", describe(name)), d.Release(name, SkipLaunchFailed))
 		}
 	}
 	argv, err := supervisorArgv(d.path, name)
@@ -137,6 +139,17 @@ func (d *Desk) doneTaken(name string) bool {
 		}
 	}
 	return false
+}
+
+// CreateLog creates done/<name>.log through the pinned root, exclusively:
+// it fails when the log already exists, so a second run, or a symlink planted
+// at the name, never has its target truncated. The caller writes the run's
+// output to it (a TTY run hands it to script(1) as /dev/fd/4).
+func (d *Desk) CreateLog(name string) (*os.File, error) {
+	if !ValidName(name) {
+		return nil, fmt.Errorf("desk: %q is not an item name (NN-name)", describe(name))
+	}
+	return d.createLog(name)
 }
 
 func (d *Desk) createLog(name string) (*os.File, error) {
