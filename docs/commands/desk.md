@@ -3,12 +3,12 @@
 > Part of [forgectl](../../README.md) — see the [command roster](../../README.md#command-groups).
 
 ```sh
-forgectl desk                                  # full-screen dashboard: the desk queue and the desk's runs
-forgectl desk --spec ~/pipeline.toml           # add the runs a run spec describes (repeatable)
-forgectl desk --no-icons                       # ASCII glyphs instead of icon glyphs
-forgectl desk runs --json                      # every run from every source, as JSON (no TTY needed)
-forgectl desk show 07-build                    # one run's flow as plain text
-forgectl desk show 07-build --at 120 --json    # the run's state after its first 120 events
+forgectl desk                                                       # full-screen dashboard: the desk queue and the desk's runs
+forgectl desk --spec ~/pipeline.toml                                # add the runs a run spec describes (repeatable)
+forgectl desk --no-icons                                            # ASCII glyphs instead of icon glyphs
+forgectl desk runs --json                                           # every run from every source, as JSON (no TTY needed)
+forgectl desk show 07-build                                         # one run's flow as plain text
+forgectl desk show 07-build --at 120 --json                         # the run's state after its first 120 events
 forgectl desk show nightly --from pipeline --spec ~/pipeline.toml   # pick the source when two sources hold a run of that name
 ```
 
@@ -21,7 +21,7 @@ Runs come from three kinds of **source**:
 
 - **The desk**, always present. Its items and batches are runs. The desk directory is `$DESK_DIR`, else `$CLAUDE_DESK_DIR`, else `$XDG_STATE_HOME/forgectl/desk`, else `~/.local/state/forgectl/desk`.
 - **A JSONL event log** for each run directory that a run spec matches. Pass the spec with `--spec`.
-- **A summary-only JSON result** that a run spec matches and that has no run directory of the same name.
+- **A summary-only JSON result** that a run spec matches and that has no run directory of the same name. A summary is written once its run is over, so a summary-only run reads `ended`.
 
 The desk is Unix-only. Design and trust model: [ADR-0010](../adr/0010-desk-run-sources.md) (desk run sources and the approval queue).
 
@@ -56,6 +56,7 @@ Every state has a glyph, an ASCII fallback for `--no-icons`, and a word. Colour 
 | running / live | `◐` (spins) | `*` | `running` / `live` |
 | closed / ended ok | `✓` | `+` | `done` / `ok` |
 | failed / exit not 0 | `✗` | `x` | `failed` / the exit code |
+| interrupted (a step still running when its run ended) | `⊘` | `/` | `interrupted` |
 | rejected | `↺` | `r` | `rej N/M` |
 | resumed | `⟲` | `~` | `resumed` |
 | stale | `!` | `!` | `stale` |
@@ -144,7 +145,7 @@ Only `y` confirms, and only when the key is not a repeat, at least 400 ms have p
 - **A background item** is claimed with the full hash shown in the modal and handed to a detached supervisor. If the start fails after the claim, the item moves to `skipped/` with reason `launch-failed`.
 - **A `# TTY: yes` item** runs in this terminal. The dashboard closes, the item runs in the foreground with its signals forwarded, and the command prints `ran <name>: exit N (<meaning>) — press any key`. The dashboard then reopens on that run with your view restored.
 
-`s` skips a waiting or `lost` item and the footer shows `skipped <name> · u to undo`. `u` undoes only an operator skip. An item skipped as `changed` cannot be re-armed, because its hash is fixed when it is queued: queue it again to run it.
+`s` skips a waiting or `lost` item. For a waiting item the footer shows `skipped <name> · u to undo`; for a `lost` item it shows `skipped <name>`. `u` re-arms only an item skipped with reason `operator` that was never claimed. A skipped `lost` item was claimed, so `u` cannot undo it. An item skipped as `changed` cannot be re-armed either, because its hash is fixed when it is queued. Queue either one again to run it.
 
 ## States
 
@@ -325,7 +326,7 @@ Each key is an exit code written as canonical decimal text from `"0"` to `"255"`
 - Each file is read from the start, up to 32 MiB. Past that the run is marked `partial`.
 - A line over 64 KiB is dropped and counted. A run keeps at most 50 000 events; the rest are counted. A pattern lists at most 500 matches, newest first.
 - A file whose identity changes, or that shrinks, is read again from the start.
-- JSON values: strings and integers that fit in 64 bits are kept. Floats, nested values, booleans and nulls are dropped from the event and counted. When a key repeats, the first one wins.
+- JSON values: strings, integers that fit in 64 bits, and booleans are kept; a boolean is kept as the text `true` or `false`. Floats, nested values and nulls are dropped from the event and counted. When a key repeats, the first one wins.
 - Every string from a file is escaped and capped at 256 characters before it reaches the screen.
 
 ## Agent verbs

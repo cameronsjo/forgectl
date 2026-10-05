@@ -29,7 +29,7 @@ A **source** lists runs and loads each run's changes from a cursor. There are th
 |---|---|---|
 | desk | Queued, running, finished and skipped items. A script is a one-step run; a batch's steps and edges come from its manifest | `NewDeskSource`, always present |
 | JSONL log | One run per directory that a run spec's `runs` pattern matches | `NewSpecSource`, one per `--spec` |
-| summary | A summary JSON file that a spec's `summaries` pattern matches and that has no run directory | the same spec source |
+| summary | A summary JSON file that a spec's `summaries` pattern matches and that has no run directory. It reads `ended`: a summary is written once its run is over | the same spec source |
 
 Every run, whatever its source, is folded into one `RunState`: steps with edges, a gate (a reject loop), checks, an exit code with its meaning, restarts, a live state, and counts of what was dropped. A pure reducer does the folding (`Fold(spec, defs, events, now)`). Replay is the same reducer over a prefix of the events (`Folder.At(i)`, served from a checkpoint every 1 000 events), so replay has no second code path. A desk run folds with a spec built in code (`DeskSpec()`), which maps the desk's own event keys (`STEP-START`, `STEP-END`, `STEP-FAIL`, `RUN-END`) to the same actions.
 
@@ -52,7 +52,7 @@ The spec is trusted operator config. The run root and everything under it are no
 - Every path below the root is opened one component at a time with `O_NOFOLLOW` from the previous descriptor, so a symlinked run directory, intermediate directory, or log is refused, and no gap exists between a check and an open. Only real directories and regular files are accepted.
 - `LoadSpec` rejects absolute patterns, `..`, `:`, `?`, `[`, and more than one `*`. Run and summary names must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$`. Nothing outside the spec's named paths is opened.
 - Reads are capped: 32 MiB per file (past that the run is `partial`), 64 KiB per line, 50 000 events per run, and 500 matches per pattern. A changed file identity or a shrink resets the cursor.
-- JSON keeps strings and integers that fit in 64 bits; anything else is dropped from the event and counted.
+- JSON keeps strings, integers that fit in 64 bits, and booleans (as the text `true` or `false`); anything else is dropped from the event and counted.
 - Every string from a file is escaped at ingest (`termsafe.SafeLineMax`, 256 characters) before any view sees it. The confirm modal's body is the one exception: it escapes each line with no length cap, so the operator sees every byte that will run.
 
 ### Threat model: accidents, not a same-uid agent
@@ -85,7 +85,7 @@ The hash covers the item's own bytes, not the scripts a batch step calls or anyt
 Approved items run as the operator, with the operator's environment, from `$HOME`:
 
 - **The working directory is `$HOME`** for the supervisor, the script, every batch step, and the foreground runner, so an item never inherits whatever directory the desk was started in.
-- **The environment is the operator's minus bash startup hooks** (`ChildEnv`): `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `GLOBIGNORE`, and every `BASH_FUNC_*` key are removed. Each of these makes bash run code other than the approved bytes before or instead of them, or changes what the script's own lines do. Everything else, including credentials in the environment, passes through: the item is the operator's own command.
+- **The environment is the operator's minus bash startup hooks** (`ChildEnv`): `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `GLOBIGNORE`, `PS4`, and every `BASH_FUNC_*` key are removed. Each of these makes bash run code other than the approved bytes before or instead of them, or changes what the script's own lines do. Everything else, including credentials in the environment, passes through: the item is the operator's own command.
 - **Foreground (`# TTY: yes`) items are claimed by the CLI, not the dashboard.** The dashboard closes, and the CLI claims the item, records itself as the run's owner, and runs it with the terminal in the foreground, forwarding `INT`, `TERM`, `HUP` and `QUIT` to the item's process group. It then records the exit and reopens the dashboard.
 
 ### ADR-0008 conformance

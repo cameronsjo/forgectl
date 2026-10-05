@@ -112,9 +112,11 @@ type (
 		err       error
 		abandoned bool
 	}
-	// deskVerbMsg is how a skip or unskip ended.
+	// deskVerbMsg is how a skip or unskip ended. lost is set when the
+	// item skipped was lost: it was claimed, so Unskip refuses it.
 	deskVerbMsg struct {
 		verb, name string
+		lost       bool
 		err        error
 	}
 	deskReplayTickMsg struct{ gen int }
@@ -498,7 +500,7 @@ func (m deskModel) queueVerb(verb string) (deskModel, tea.Cmd) {
 		m.footer = st.Muted.Render("no desk to act on")
 		return m, nil
 	}
-	v, raw := m.verbs, it.Name
+	v, raw, lost := m.verbs, it.Name, it.State == string(desk.StateLost)
 	return m, func() tea.Msg {
 		var err error
 		if verb == "skip" {
@@ -506,7 +508,7 @@ func (m deskModel) queueVerb(verb string) (deskModel, tea.Cmd) {
 		} else {
 			err = v.Unskip(raw)
 		}
-		return deskVerbMsg{verb: verb, name: raw, err: err}
+		return deskVerbMsg{verb: verb, name: raw, lost: lost, err: err}
 	}
 }
 
@@ -529,6 +531,8 @@ func (m deskModel) onVerb(msg deskVerbMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case msg.err != nil:
 		m.footer = st.Danger.Render(m.glyph.Failed + " " + msg.verb + " " + name + ": " + capSafe(msg.err.Error(), 200))
+	case msg.verb == "skip" && msg.lost:
+		m.footer = st.Muted.Render(m.glyph.Skipped + " skipped " + name)
 	case msg.verb == "skip":
 		m.footer = st.Muted.Render(m.glyph.Skipped + " skipped " + name + " · u to undo")
 	default:

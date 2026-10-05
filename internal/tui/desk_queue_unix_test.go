@@ -623,3 +623,36 @@ func TestSkipAndUnskip(t *testing.T) {
 		t.Fatalf("skips = %q", rec.skips)
 	}
 }
+
+// skipOnlyVerbs accepts every Skip and records the name; the other verbs
+// are not reached.
+type skipOnlyVerbs struct {
+	deskVerbs
+	skips []string
+}
+
+func (s *skipOnlyVerbs) Skip(name, _ string) error {
+	s.skips = append(s.skips, name)
+	return nil
+}
+
+// TestSkipLostOffersNoUndo: a lost item was claimed, so Unskip refuses it,
+// and the footer after s does not offer u.
+func TestSkipLostOffersNoUndo(t *testing.T) {
+	src := &fakeDeskSource{name: "desk", items: []runview.QueueItem{{Name: "0006-sweep", Kind: "batch", State: "lost", What: "sweep"}}}
+	m := openDesk(t, optsFor(src), 120, 30)
+	if m.sideShows() != viewQueue {
+		m = pressDesk(t, m, key("6"))
+	}
+	verbs := &skipOnlyVerbs{}
+	m.verbs = verbs
+	m = pressDesk(t, m, key("s"))
+	if len(verbs.skips) != 1 || verbs.skips[0] != "0006-sweep" {
+		t.Fatalf("skips = %q, want the lost item", verbs.skips)
+	}
+	out := screen(t, m)
+	mustContain(t, "skip lost", out, "skipped 0006-sweep")
+	if strings.Contains(out, "u to undo") {
+		t.Errorf("skipping a lost item offers u to undo:\n%s", out)
+	}
+}

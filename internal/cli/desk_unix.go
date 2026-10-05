@@ -135,7 +135,7 @@ func (rt deskRuntime) dashboard(ctx context.Context, deps module.Deps, srcs *des
 				return nil
 			}
 			// The run never began, so nothing printed its line or waited.
-			_, _ = fmt.Fprintf(os.Stderr, "\ncould not run %s: %s — press any key\n", termsafe.SafeLine(run.Name), termsafe.SafeLine(err.Error()))
+			_, _ = fmt.Fprintf(os.Stderr, "\ncould not run %s: %s — press any key\n", safeLabel(run.Name), safeText(err.Error()))
 			if errors.Is(rt.waitKey(), ErrPaneGone) {
 				return nil
 			}
@@ -204,7 +204,7 @@ func openSpecSource(p string, names map[string]bool) (runview.Source, error) {
 		return nil, fmt.Errorf("%w %s: %w", runview.ErrSpec, termsafe.QuotePath(p), err)
 	}
 	if names[src.Name()] {
-		return nil, fmt.Errorf("%w %s: name: %s is already the name of another source", runview.ErrSpec, termsafe.QuotePath(p), termsafe.QuoteText(src.Name()))
+		return nil, fmt.Errorf("%w %s: name: %s is already the name of another source", runview.ErrSpec, termsafe.QuotePath(p), termsafe.QuoteTextMax(src.Name(), labelMaxRunes))
 	}
 	return src, nil
 }
@@ -214,7 +214,7 @@ type deskFailure struct{ err error }
 
 // String is the failure as one line of text.
 func (f deskFailure) String() string {
-	return "desk: " + termsafe.SafeLine(f.err.Error())
+	return "desk: " + safeText(f.err.Error())
 }
 
 // deskRun is one run loaded in full for the agent verbs.
@@ -490,9 +490,9 @@ func writeDeskRunsText(w io.Writer, runs []*deskRun, now time.Time, noIcons bool
 	names := make([]string, len(runs))
 	width := 0
 	for i, r := range runs {
-		names[i] = termsafe.SafeLine(r.ref.Name)
+		names[i] = safeLabel(r.ref.Name)
 		if count[r.ref.Name] > 1 {
-			names[i] += "@" + termsafe.SafeLine(r.ref.Source)
+			names[i] += "@" + safeLabel(r.ref.Source)
 		}
 		width = max(width, len([]rune(names[i])))
 	}
@@ -564,7 +564,7 @@ Reading the desk scans it, and a scan changes the queue (see desk runs --help).`
 				var in []string
 				for _, src := range sources {
 					if slices.ContainsFunc(runs, func(r *deskRun) bool { return r.src == src }) {
-						in = append(in, termsafe.SafeLine(src.Name()))
+						in = append(in, safeLabel(src.Name()))
 					}
 				}
 				return joinFailures(WithExitCode(fmt.Errorf("run %s is in sources %s; pass --from", termsafe.QuoteArgMax(name, 0), joinAnd(in)), 2), failed)
@@ -691,12 +691,12 @@ func writeDeskShowText(w io.Writer, r *deskRun, events int, replay bool, noIcons
 	if r.live == runview.LiveEnded {
 		word = "ended"
 	}
-	head := termsafe.SafeLine(r.ref.Source) + "/" + termsafe.SafeLine(r.ref.Name) + " · " + word
+	head := safeLabel(r.ref.Source) + "/" + safeLabel(r.ref.Name) + " · " + word
 	if s.Exit != nil {
 		head += " · exit " + strconv.Itoa(*s.Exit)
 	}
 	if s.ExitMeaning != "" {
-		head += " (" + termsafe.SafeLine(s.ExitMeaning) + ")"
+		head += " (" + safeText(s.ExitMeaning) + ")"
 	}
 	if replay {
 		head += fmt.Sprintf(" · replay %d/%d", events, r.folder.Len())
@@ -705,7 +705,7 @@ func writeDeskShowText(w io.Writer, r *deskRun, events int, replay bool, noIcons
 
 	idW := 0
 	for _, st := range s.Steps {
-		idW = max(idW, len([]rune(termsafe.SafeLine(st.ID))))
+		idW = max(idW, len([]rune(safeLabel(st.ID))))
 	}
 	after := stepPredecessors(s)
 	for i, st := range s.Steps {
@@ -727,11 +727,11 @@ func writeDeskShowText(w io.Writer, r *deskRun, events int, replay bool, noIcons
 		if p := after[st.ID]; !isChainLink(s, i, p) {
 			safe := make([]string, len(p))
 			for k, id := range p {
-				safe[k] = termsafe.SafeLine(id)
+				safe[k] = safeLabel(id)
 			}
 			parts = append(parts, "after "+strings.Join(safe, ", "))
 		}
-		_, _ = fmt.Fprintf(w, "  %s %-*s  %s\n", g.stepMark(st.Status), idW, termsafe.SafeLine(st.ID), strings.Join(parts, " · "))
+		_, _ = fmt.Fprintf(w, "  %s %-*s  %s\n", g.stepMark(st.Status), idW, safeLabel(st.ID), strings.Join(parts, " · "))
 	}
 	for _, c := range s.Checks {
 		label := c.Label
@@ -745,7 +745,7 @@ func writeDeskShowText(w io.Writer, r *deskRun, events int, replay bool, noIcons
 				verdict = "passed"
 			}
 		}
-		_, _ = fmt.Fprintf(w, "  check %s: %s\n", termsafe.SafeLine(label), verdict)
+		_, _ = fmt.Fprintf(w, "  check %s: %s\n", safeTitle(label), verdict)
 	}
 	foot := []string{plural(events, "event", "events")}
 	for _, c := range []struct {
@@ -765,7 +765,7 @@ func writeDeskShowText(w io.Writer, r *deskRun, events int, replay bool, noIcons
 		foot = append(foot, "partial: over 32 MiB cap")
 	}
 	if r.delta.Err != nil {
-		foot = append(foot, "note: "+termsafe.SafeLine(r.delta.Err.Error()))
+		foot = append(foot, "note: "+safeText(r.delta.Err.Error()))
 	}
 	_, _ = fmt.Fprintln(w, strings.Join(foot, " · "))
 }

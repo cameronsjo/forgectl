@@ -19,7 +19,6 @@ import (
 	"golang.org/x/term"
 
 	"github.com/cameronsjo/forgectl/internal/desk"
-	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // ErrPaneGone means the terminal went away during a foreground run: the run
@@ -78,7 +77,7 @@ func runForeground(d *desk.Desk, name, sha string, tio IO) (rc int, err error) {
 	}
 	afterForegroundClaim(claimed)
 	if claimed.SHA256 != sha {
-		return 2, errors.Join(fmt.Errorf("desk: the claim for %s does not carry the approved hash", termsafe.SafeLine(name)),
+		return 2, errors.Join(fmt.Errorf("desk: the claim for %s does not carry the approved hash", safeLabel(name)),
 			d.Abandon(name, launchFailed))
 	}
 	run, err := d.BeginRun(name, os.Getpid())
@@ -112,7 +111,7 @@ func runForeground(d *desk.Desk, name, sha string, tio IO) (rc int, err error) {
 	startErr := cmd.Start()
 	release() // the child holds its own copy of the read end
 	if startErr != nil {
-		_, _ = fmt.Fprintf(errOut(tio), "desk: could not start %s: %v\n", termsafe.SafeLine(name), startErr)
+		_, _ = fmt.Fprintf(errOut(tio), "desk: could not start %s: %v\n", safeLabel(name), startErr)
 		return 127, run.Finish(127, "failed")
 	}
 	pgid := cmd.Process.Pid
@@ -169,7 +168,7 @@ func runForeground(d *desk.Desk, name, sha string, tio IO) (rc int, err error) {
 		out = tio.Stdout
 	}
 	if out != nil {
-		_, _ = fmt.Fprintf(out, "\nran %s: exit %d (%s) — press any key\n", termsafe.SafeLine(name), rc, exitMeaning(rc, interrupted))
+		_, _ = fmt.Fprintf(out, "\nran %s: exit %d (%s) — press any key\n", safeLabel(name), rc, exitMeaning(rc, interrupted))
 	}
 	if tio.TTY >= 0 {
 		wait := tio.WaitKey

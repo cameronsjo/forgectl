@@ -96,6 +96,13 @@ var uncappedAllowlist = map[string]struct {
 	"internal/tui/hub.go:displayToken":                      {3, "the \"$ forgectl …\" echo (DisplayArgv) shows exactly the argv that will run (#782's rule); a cut would hide part of what runs"},
 	"internal/pr/repair.go:cappedRecordBytes":               {1, "escapes under its own byte cap (maxAuditRecordBytes, applied before and after); SafeLine is the escaping step, not the sink"},
 
+	// Review before trust (#782) in the desk approve modal: the operator
+	// approves the item's bytes by hash, so its body shows every byte,
+	// escaped line by line and never cut.
+	"internal/runview/source_desk_unix.go:queueItem":         {1, "escapes each line of the approve modal's body; the operator approves every byte by hash, so a line is never cut"},
+	"internal/runview/source.go:MarkLine":                    {1, "SafeLine only as a per-rune predicate (does escaping change this rune?) for the approve modal's body marks; it prints nothing"},
+	"internal/tui/desk_modal_unix.go:deskModel.confirmLines": {1, "draws the approve modal's body; the operator approves every byte by hash, so a line is never cut"},
+
 	// Review before trust (#782) in pr repair: the confirmation prompts, and
 	// the non-TTY refusals that name what --yes would approve or what the
 	// operator must inspect by hand, show the path or ref whole.
