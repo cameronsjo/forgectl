@@ -103,11 +103,15 @@ func (s WatchState) String() string {
 	return "unknown(" + strconv.Itoa(int(s)) + ")"
 }
 
-// Watcher limits. A poll reads at most maxPollBytes of new events, and an
-// event line longer than maxEventLine is dropped and counted, never held.
+// Watcher limits. Only the first maxEventBytes of an events file are read;
+// past that the watcher reports Capped. A poll reads at most maxPollBytes and
+// returns at most maxPollLines lines; the rest come on later polls. An event
+// line longer than maxEventLine is dropped and counted, never held.
 const (
-	maxPollBytes = 32 << 20
-	maxEventLine = 64 << 10
+	maxEventBytes = 32 << 20
+	maxPollBytes  = 4 << 20
+	maxPollLines  = 50000
+	maxEventLine  = 64 << 10
 )
 
 // Watcher follows one item's event lines.
@@ -127,6 +131,9 @@ type Watcher struct {
 	// dropping: the current line already passed maxEventLine; discard up to
 	// its newline.
 	dropping bool
+	// more: the last read stopped at a poll limit with lines still unread
+	// inside the cap. capped: the file is past maxEventBytes.
+	more, capped bool
 }
 
 // NewWatcher follows name's events, not returning the first skip lines (the
@@ -149,12 +156,19 @@ func (w *Watcher) Seen() int { return w.seen }
 // counted in Seen but not returned.
 func (w *Watcher) Dropped() int { return w.dropped }
 
+// Capped reports an events file past 32 MiB. Only its first 32 MiB are read;
+// the lines after that are never returned.
+func (w *Watcher) Capped() bool { return w.capped }
+
 // Poll returns the event lines that arrived since the last poll and how the
-// run stands. When the run is lost, the last line returned is
-// "RUN-LOST id=<name> pid=<pid>". One poll reads at most 32 MiB of new
-// events; the next poll continues from there.
+// run stands. One poll returns at most 50,000 lines from at most 4 MiB of the
+// file; the next poll continues from there. When the run is lost, the poll
+// that returns the last line inside the 32 MiB cap ends with
+// "RUN-LOST id=<name> pid=<pid>"; until then a lost run's polls return its
+// lines without it. A finished run reads as ended on every poll, including
+// one from a watcher resumed past its RUN-END.
 func (w *Watcher) Poll() ([]string, WatchState, error) {
-	lines, ended, _, err := w.read()
+	lines, ended, err := w.read(maxPollLines)
 	if err != nil || ended {
 		return lines, WatchEnded, err
 	}
@@ -162,55 +176,66 @@ func (w *Watcher) Poll() ([]string, WatchState, error) {
 	if err != nil {
 		return lines, state, err
 	}
-	if state == WatchLost {
-		// The owner may have written RUN-END and exited between the read and
-		// the liveness check: read to the end once more before calling it
-		// lost. Nothing is writing the file now, so this ends.
-		for more := true; more; {
-			var next []string
-			next, ended, more, err = w.read()
-			lines = append(lines, next...)
-			if err != nil || ended {
-				return lines, WatchEnded, err
-			}
+	if (state == WatchEnded || state == WatchLost) && !w.more {
+		// The owner may have written its last lines, RUN-END included, and
+		// exited between the read and the liveness check: read once more
+		// before judging. Nothing is writing the file now.
+		next, ended, err := w.read(maxPollLines - len(lines))
+		lines = append(lines, next...)
+		if err != nil || ended {
+			return lines, WatchEnded, err
 		}
+	}
+	if state == WatchLost && !w.more {
 		lines = append(lines, fmt.Sprintf("%s id=%s pid=%d", EventRunLost, w.name, pid))
 	}
 	return lines, state, nil
 }
 
-// read returns the complete lines added since the last read. more is true
-// when it stopped at maxPollBytes with more of the file unread.
-func (w *Watcher) read() (lines []string, ended, more bool, err error) {
+// read returns at most budget of the complete lines added since the last
+// read, and sets w.more when it stopped at budget or maxPollBytes with lines
+// unread inside the cap. ended is set when it returned RUN-END.
+func (w *Watcher) read(budget int) (lines []string, ended bool, err error) {
+	w.more = false
 	f, st, err := w.d.openRegular(DirDone, w.name+extEvents)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, false, false, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return nil, false, false, fmt.Errorf("desk: open events for %s: %w", describe(w.name), err)
+		return nil, false, fmt.Errorf("desk: open events for %s: %w", describe(w.name), err)
 	}
 	defer f.Close() //nolint:errcheck // read-only
 
 	dev, ino := uint64(st.Dev), uint64(st.Ino) //nolint:gosec,unconvert // G115: Dev is int32 on darwin; only compared for equality
 	if w.opened && (dev != w.dev || ino != w.ino || st.Size < w.off) {
-		w.off, w.partial, w.dropping, w.seen, w.skip = 0, nil, false, 0, 0
+		w.off, w.partial, w.dropping, w.seen, w.skip, w.capped = 0, nil, false, 0, 0, false
 	}
 	w.dev, w.ino, w.opened = dev, ino, true
-	n := min(st.Size-w.off, maxPollBytes)
+	w.capped = w.capped || st.Size > maxEventBytes
+	limit := min(st.Size, maxEventBytes)
+	n := min(limit-w.off, maxPollBytes)
 	if n <= 0 {
-		return nil, false, false, nil
+		return nil, false, nil
 	}
 	buf := make([]byte, n)
 	got, err := f.ReadAt(buf, w.off)
 	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, false, false, err
+		return nil, false, err
 	}
+	base := w.off
 	w.off += int64(got)
-	more = w.off < st.Size
+	w.more = w.off < limit
 	for data := buf[:got]; len(data) > 0; {
 		i := bytes.IndexByte(data, '\n')
 		if i < 0 {
 			w.hold(data)
+			break
+		}
+		if len(lines) >= budget {
+			// Give back this line and everything after it: the next read
+			// starts here. A held partial line is only ever the start of the
+			// buffer's first line, so it still lines up.
+			w.off, w.more = base+int64(got-len(data)), true
 			break
 		}
 		line := data[:i]
@@ -229,10 +254,11 @@ func (w *Watcher) read() (lines []string, ended, more bool, err error) {
 		}
 		lines = append(lines, text)
 		if strings.HasPrefix(text, EventRunEnd+" ") {
-			return lines, true, false, nil
+			w.more = false
+			return lines, true, nil
 		}
 	}
-	return lines, false, more, nil
+	return lines, false, nil
 }
 
 // hold keeps the start of a line whose newline has not arrived, up to
@@ -248,8 +274,9 @@ func (w *Watcher) hold(data []byte) {
 	w.partial = append(w.partial, data...)
 }
 
-// state locates the item and judges its owner. It is only reached when no
-// RUN-END has been read.
+// state locates the item and judges its owner. It is reached when this
+// watcher has not read RUN-END, which may still be in the file: past the
+// cap, or before the skip a resumed watcher was given.
 func (w *Watcher) state() (WatchState, int, error) {
 	d := w.d
 	if _, err := d.findKind(DirPending, w.name); err == nil {
@@ -274,8 +301,9 @@ func (w *Watcher) state() (WatchState, int, error) {
 		return WatchLost, meta.PID, nil
 	}
 	if d.exists(path.Join(DirDone, w.name+extLog)) {
-		if _, exists := d.hasRunEnd(w.name); !exists {
-			return WatchEnded, 0, nil // legacy: no events were ever written
+		// No events file is a legacy item, which never wrote any.
+		if ended, exists := d.hasRunEnd(w.name); !exists || ended {
+			return WatchEnded, 0, nil
 		}
 		meta, _, _ := d.readMeta(DirDone, w.name)
 		return WatchLost, meta.PID, nil
@@ -284,8 +312,9 @@ func (w *Watcher) state() (WatchState, int, error) {
 }
 
 // Watch polls name's events every interval, calling emit for each line, until
-// the run ends, is lost or skipped, or ctx is done. It returns the final state
-// and the number of lines seen (the resume point).
+// the run ends, is lost or skipped and its lines are all read, or ctx is
+// done. It returns the final state and the number of lines seen (the resume
+// point).
 func (d *Desk) Watch(ctx context.Context, name string, skip int, interval time.Duration, emit func(string)) (WatchState, int, error) {
 	w, err := d.NewWatcher(name, skip)
 	if err != nil {
@@ -298,8 +327,15 @@ func (d *Desk) Watch(ctx context.Context, name string, skip int, interval time.D
 		for _, l := range lines {
 			emit(l)
 		}
-		if err != nil || state == WatchEnded || state == WatchLost || state == WatchSkipped {
+		final := state == WatchEnded || state == WatchLost || state == WatchSkipped
+		if err != nil || (final && !w.more) {
 			return state, w.Seen(), err
+		}
+		if w.more {
+			if err := ctx.Err(); err != nil {
+				return state, w.Seen(), err
+			}
+			continue // lines are waiting; no reason to sleep
 		}
 		select {
 		case <-ctx.Done():

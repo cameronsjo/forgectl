@@ -81,7 +81,7 @@ func TestParseEventRejectsWhatTheDeskNeverWrites(t *testing.T) {
 func TestScrubEnvDropsBashStartupHooks(t *testing.T) {
 	in := []string{
 		"PATH=/usr/bin", "HOME=/h", "BASH_ENV=/tmp/x", "ENV=/tmp/y", "SHELLOPTS=xtrace", "BASHOPTS=extglob",
-		"CDPATH=/tmp", "GLOBIGNORE=*", "BASH_FUNC_ls%%=() { true; }", "BASH_FUNC_cd()=() { true; }",
+		"CDPATH=/tmp", "GLOBIGNORE=*", "PS4=$(touch /tmp/m)+ ", "BASH_FUNC_ls%%=() { true; }", "BASH_FUNC_cd()=() { true; }",
 		"MY_BASH_ENV=kept", "ENVIRONMENT=kept", "NOEQUALS",
 	}
 	got := scrubEnv(in)

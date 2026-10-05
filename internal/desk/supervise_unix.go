@@ -97,12 +97,13 @@ func (d *Desk) Launch(c *Claimed) (int, error) {
 }
 
 // recordOwner writes pid as a just-started supervisor's owner of a claimed
-// item, unless an owner is already recorded. The supervisor's own BeginRun
-// may write meta at the same moment; whichever lands last, PID is the same
-// process, and Finish rewrites the whole meta from the run's copy.
+// item, unless an owner is already recorded or a run has begun. The
+// supervisor's own BeginRun may write meta at the same moment; whichever
+// lands last, PID is the same process, and Finish rewrites the whole meta
+// from the run's copy.
 func (d *Desk) recordOwner(name string, pid int) error {
 	meta, ok, err := d.readMeta(DirRunning, name)
-	if err != nil || !ok || meta.PID != 0 {
+	if err != nil || !ok || meta.PID != 0 || meta.StartedAt != nil {
 		return err
 	}
 	meta.PID, meta.PIDStart = pid, ownStart(pid)
@@ -145,6 +146,13 @@ func (d *Desk) supervise(name, sha string, want Kind) (int, error) {
 	if err != nil {
 		return 2, err
 	}
+	// Claim stamps the approved hash, and the queued kind is the approved
+	// kind. A supervisor told another hash or kind was not started for this
+	// claim, so it refuses without touching the item: the desk that claimed
+	// it still launches it, or gives it back.
+	if sha != meta.ApprovedSHA256 || (meta.Kind != "" && meta.Kind != want) {
+		return 2, fmt.Errorf("%w: %s: this supervisor's approval does not name this claim", ErrRefused, describe(name))
+	}
 	notStarted := func(reason string, cause error) (int, error) {
 		return 2, d.skipUnstarted(name, kind, reason, cause)
 	}
@@ -168,7 +176,7 @@ func (d *Desk) supervise(name, sha string, want Kind) (int, error) {
 		}
 		return rc, err
 	}
-	if kind != want || (meta.Kind != "" && meta.Kind != kind) {
+	if kind != want {
 		return failed(fmt.Errorf("%w: %s was approved as a %q and queued as a %q, but running/ holds a %s",
 			ErrRefused, describe(name), termsafe.SafeLineMax(string(want), 16), meta.Kind, kind))
 	}
@@ -178,6 +186,8 @@ func (d *Desk) supervise(name, sha string, want Kind) (int, error) {
 	}
 	// The bytes must be the ones the operator approved, not only the ones the
 	// meta names: anything that can write the desk can rewrite both together.
+	// sha is the stamped hash (checked above), so a mismatch here means the
+	// bytes changed.
 	if sum := SHA256Hex(data); sum != meta.SHA256 || sum != sha {
 		return notStarted(SkipChanged, fmt.Errorf("%w: %s is not the item that was approved", ErrChanged, describe(name)))
 	}

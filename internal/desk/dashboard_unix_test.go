@@ -271,23 +271,245 @@ func TestWatcherDropsAndCountsAnOverlongLine(t *testing.T) {
 	}
 }
 
-// One poll reads at most 32 MiB; the rest arrives on the next.
-func TestWatcherReadsAtMost32MiBPerPoll(t *testing.T) {
+// bigLine is one event line of about 1 KiB, for the size caps.
+var bigLine = "STEP-WARN id=a msg=" + strings.Repeat("y", 1000) + "\n"
+
+// One poll reads at most maxPollBytes, and the file is read only up to its
+// first 32 MiB: the polls together return exactly the lines inside the cap,
+// and Capped reports the rest.
+func TestWatcherReadsInChunksAndStopsAtTheFileCap(t *testing.T) {
 	d := openDesk(t)
-	c := queue(t, d, "x.sh", "true\n")
-	line := "STEP-WARN id=a msg=" + strings.Repeat("y", 1000) + "\n"
-	n := maxPollBytes/len(line) + 2000
-	appendEvents(t, d, c.Name, strings.Repeat(line, n))
+	c := queue(t, d, "x.sh", "true\n") // claimer alive: the run keeps waiting
+	inCap := maxEventBytes / len(bigLine)
+	appendEvents(t, d, c.Name, strings.Repeat(bigLine, inCap+2000))
 	w, err := d.NewWatcher(c.Name, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	first := len(pollLines(t, w))
-	if first >= n || first < maxPollBytes/len(line)-1 {
-		t.Fatalf("first poll returned %d of %d lines; want about 32 MiB worth", first, n)
+	if first > maxPollBytes/len(bigLine) || first < maxPollBytes/len(bigLine)-1 {
+		t.Fatalf("first poll returned %d lines; want about %d (one %d-byte chunk)", first, maxPollBytes/len(bigLine), maxPollBytes)
 	}
-	if second := len(pollLines(t, w)); first+second != n {
-		t.Errorf("polls returned %d + %d lines, want %d", first, second, n)
+	total := first
+	for range 2 * maxEventBytes / maxPollBytes {
+		total += len(pollLines(t, w))
+	}
+	if total != inCap || !w.Capped() {
+		t.Errorf("polls returned %d lines, capped %v; want the %d lines inside 32 MiB, capped", total, w.Capped(), inCap)
+	}
+}
+
+func TestASmallEventsFileIsNotCapped(t *testing.T) {
+	d := openDesk(t)
+	c := queue(t, d, "x.sh", "true\n")
+	appendEvents(t, d, c.Name, bigLine)
+	w, err := d.NewWatcher(c.Name, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := pollLines(t, w); len(got) != 1 || w.Capped() {
+		t.Errorf("poll = %d lines, capped %v; want 1, not capped", len(got), w.Capped())
+	}
+}
+
+// One poll returns at most maxPollLines lines; the rest come on the next.
+func TestAPollReturnsAtMostMaxPollLines(t *testing.T) {
+	d := openDesk(t)
+	c := queue(t, d, "x.sh", "true\n")
+	appendEvents(t, d, c.Name, strings.Repeat("STEP-WARN id=a msg=w\n", maxPollLines+10))
+	w, err := d.NewWatcher(c.Name, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(pollLines(t, w)); got != maxPollLines {
+		t.Fatalf("first poll = %d lines, want %d", got, maxPollLines)
+	}
+	if got := len(pollLines(t, w)); got != 10 || w.Seen() != maxPollLines+10 {
+		t.Errorf("second poll = %d lines, seen %d; want 10, seen %d", got, w.Seen(), maxPollLines+10)
+	}
+}
+
+// ownerDied records a dead process as the owner of a claimed item, so the
+// run reads as lost.
+func ownerDied(t *testing.T, d *Desk, name string) int {
+	t.Helper()
+	pid, start := deadProcess(t)
+	m, _, err := d.readMeta(DirRunning, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.PID, m.PIDStart = pid, start
+	if err := d.writeMeta(DirRunning, name, m); err != nil {
+		t.Fatal(err)
+	}
+	return pid
+}
+
+// A lost run's events are read in the same chunks as a live run's: the first
+// poll stops after one chunk, and RUN-LOST comes only once the lines inside
+// the cap have all been returned.
+func TestALostRunPastTheCapIsReadInChunks(t *testing.T) {
+	d := openDesk(t)
+	c := queue(t, d, "x.sh", "true\n")
+	inCap := maxEventBytes / len(bigLine)
+	appendEvents(t, d, c.Name, strings.Repeat(bigLine, inCap+2000))
+	pid := ownerDied(t, d, c.Name)
+	lost := fmt.Sprintf("RUN-LOST id=%s pid=%d", c.Name, pid)
+
+	w, err := d.NewWatcher(c.Name, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines, state, err := w.Poll()
+	if err != nil || state != WatchLost || len(lines) > maxPollBytes/len(bigLine) || slices.Contains(lines, lost) {
+		t.Fatalf("first poll = %d lines, %s, %v; want at most one chunk, lost, no RUN-LOST yet", len(lines), state, err)
+	}
+	total := len(lines)
+	for range 2 * maxEventBytes / maxPollBytes {
+		lines, state, err = w.Poll()
+		if err != nil || state != WatchLost {
+			t.Fatalf("poll = %s, %v", state, err)
+		}
+		if n := len(lines); n > 0 && lines[n-1] == lost {
+			total += n - 1
+			break
+		}
+		total += len(lines)
+	}
+	if total != inCap || !w.Capped() {
+		t.Errorf("lost run returned %d lines before RUN-LOST, capped %v; want %d, capped", total, w.Capped(), inCap)
+	}
+
+	// Watch keeps polling until the lines are drained, then stops on lost.
+	var got []string
+	state, _, err = d.Watch(t.Context(), c.Name, 0, time.Hour, func(l string) { got = append(got, l) })
+	if err != nil || state != WatchLost || len(got) != inCap+1 || got[len(got)-1] != lost {
+		t.Errorf("Watch = %s, %v, %d lines; want lost, %d lines ending in RUN-LOST", state, err, len(got), inCap+1)
+	}
+}
+
+// A finished run reads as ended on every poll after the one that returned
+// RUN-END, and a watcher resumed past RUN-END reads it as ended too.
+func TestAFinishedRunStaysEnded(t *testing.T) {
+	d := openDesk(t)
+	c := queue(t, d, "x.sh", "true\n")
+	run, err := d.BeginRun(c.Name, os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Finish(0, "ok"); err != nil {
+		t.Fatal(err)
+	}
+	w, err := d.NewWatcher(c.Name, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines, state, err := w.Poll(); err != nil || state != WatchEnded || len(lines) != 2 {
+		t.Fatalf("first poll = %q, %s, %v", lines, state, err)
+	}
+	for i := range 2 {
+		if lines, state, err := w.Poll(); err != nil || state != WatchEnded || lines != nil {
+			t.Errorf("poll %d after the end = %q, %s, %v; want nothing, ended", i+2, lines, state, err)
+		}
+	}
+	resumed, err := d.NewWatcher(c.Name, w.Seen())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines, state, err := resumed.Poll(); err != nil || state != WatchEnded || lines != nil {
+		t.Errorf("resumed poll = %q, %s, %v; want nothing, ended", lines, state, err)
+	}
+}
+
+// A supervisor whose --sha or --kind is not the one the claim was stamped
+// with leaves the claim exactly as it was: it is not this supervisor's to
+// run or to skip. The desk's own Launch then runs it.
+func TestASupervisorForAnotherApprovalLeavesTheClaimAlone(t *testing.T) {
+	d := openDesk(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	c := queue(t, d, "x.sh", "touch "+marker+"\n")
+	metaPath := filepath.Join(d.Path(), DirRunning, c.Name+".meta.json")
+	before := readFile(t, metaPath)
+	for _, tc := range []struct {
+		name string
+		sha  string
+		kind Kind
+	}{
+		{"wrong sha", strings.Repeat("0", 64), c.Kind},
+		{"wrong kind", c.SHA256, KindBatch},
+	} {
+		if rc, err := d.supervise(c.Name, tc.sha, tc.kind); rc != 2 || !errors.Is(err, ErrRefused) {
+			t.Fatalf("%s: supervise = %d, %v; want 2, ErrRefused", tc.name, rc, err)
+		}
+		if s := scan(t, d); len(s.Running) != 1 || s.Skipped != nil {
+			t.Fatalf("%s: running %v skipped %+v; want the claim left in running/", tc.name, s.Running, s.Skipped)
+		}
+		if after := readFile(t, metaPath); after != before {
+			t.Fatalf("%s: meta changed: %s -> %s", tc.name, before, after)
+		}
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the item ran under a supervisor it was not approved for")
+	}
+	if _, err := d.Launch(c); err != nil {
+		t.Fatalf("Launch after the stray supervisors: %v", err)
+	}
+	if lines, state := watchUntil(t, d, c.Name, 20*time.Second); state != WatchEnded || lines[len(lines)-1] != "RUN-END rc=0 reason=ok" {
+		t.Fatalf("state %s, events %q", state, lines)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("the approved run did not run: %v", err)
+	}
+}
+
+// Skip of a lost running item checks the owner again after its move, the
+// way Abandon does: a run that recorded a live owner in between goes back to
+// running/.
+func TestSkipPutsBackARunThatGainedAnOwnerDuringTheMove(t *testing.T) {
+	d := openDesk(t)
+	c := queue(t, d, "x.sh", "true\n")
+	m, _, err := d.readMeta(DirRunning, c.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What the move carries when BeginRun lands between Skip's check and it.
+	m.PID, m.PIDStart = os.Getpid(), ownStart(os.Getpid())
+	if err := d.writeMeta(DirRunning, c.Name, m); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.move(c.Name, c.Kind, DirRunning, DirSkipped); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.markSkipped(c.Name, c.Kind, DirRunning, SkipLost); !errors.Is(err, ErrClaimed) {
+		t.Fatalf("markSkipped = %v, want ErrClaimed", err)
+	}
+	if s := scan(t, d); len(s.Running) != 1 || s.Skipped != nil || s.Running[0].Meta.SkipReason != "" {
+		t.Errorf("running %+v skipped %+v; want the run back in running/ with no skip reason", s.Running, s.Skipped)
+	}
+}
+
+func TestParseEpochRefusesTimesNoPlatformCanHold(t *testing.T) {
+	for _, s := range []string{"NaN", "Inf", "-Inf", "1e13", "-1e13", "9.3e18", "x"} {
+		if got, err := parseEpoch(s); err == nil {
+			t.Errorf("parseEpoch(%q) = %v; want an error", s, got)
+		}
+	}
+	if got, err := parseEpoch("1700000000.250"); err != nil || !got.Equal(time.Unix(1700000000, 250e6)) {
+		t.Errorf("parseEpoch = %v, %v", got, err)
+	}
+}
+
+// An item with an owner or a claimer on record was skipped by the desk, not
+// the operator, even when a lost meta write cleared its reason; it is not
+// re-armed.
+func TestUnskipRefusesAnItemThatWasClaimed(t *testing.T) {
+	d := openDesk(t)
+	c := queue(t, d, "x.sh", "true\n")
+	if err := d.move(c.Name, c.Kind, DirRunning, DirSkipped); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Unskip(c.Name); err == nil || !strings.Contains(err.Error(), "cannot be re-armed") {
+		t.Errorf("Unskip = %v, want a refusal", err)
 	}
 }
 

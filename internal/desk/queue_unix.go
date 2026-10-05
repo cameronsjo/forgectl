@@ -384,7 +384,9 @@ func parseEpoch(s string) (time.Time, error) {
 		return time.Time{}, nil
 	}
 	secs, err := strconv.ParseFloat(s, 64)
-	if err != nil || math.IsNaN(secs) || math.IsInf(secs, 0) {
+	// Past ±1e12 s (about 31,700 years) int64(whole) below would depend on
+	// the platform.
+	if err != nil || math.IsNaN(secs) || math.Abs(secs) > 1e12 {
 		return time.Time{}, fmt.Errorf("bad time %q", describe(s))
 	}
 	whole, frac := math.Modf(secs)

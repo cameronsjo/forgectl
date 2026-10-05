@@ -287,7 +287,8 @@ func (d *Desk) appendExit(name string, rc int) error {
 
 // Skip moves a pending item to skipped/ with reason. A lost running item
 // (owner dead, no RUN-END) may be skipped too, which is how a lost run leaves
-// running/.
+// running/. Like [Desk.Abandon], it moves first and records the reason
+// after, so a run that begins as it is skipped is seen (see markSkipped).
 func (d *Desk) Skip(name, reason string) error {
 	from := DirPending
 	kind, err := d.findKind(DirPending, name)
@@ -306,21 +307,32 @@ func (d *Desk) Skip(name, reason string) error {
 	} else if err != nil {
 		return err
 	}
-	meta, _, err := d.readMeta(from, name)
-	if err != nil {
-		return err
-	}
-	meta.Kind, meta.SkipReason = kind, reason
-	if err := d.writeMeta(from, name, meta); err != nil {
-		return err
-	}
 	if err := d.move(name, kind, from, DirSkipped); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return ErrClaimed
 		}
 		return fmt.Errorf("desk: skip %s: %w", describe(name), err)
 	}
-	return nil
+	return d.markSkipped(name, kind, from, reason)
+}
+
+// markSkipped records reason on an item Skip just moved from `from` to
+// skipped/. A running item was judged lost before the move, but a slow
+// supervisor's BeginRun may have recorded itself as owner since: when the
+// moved meta names a live owner, the item goes back to running/ and
+// markSkipped returns ErrClaimed. An owner that records itself after the
+// move finds the item gone (see [Desk.BeginRun]).
+func (d *Desk) markSkipped(name string, kind Kind, from, reason string) error {
+	meta, _, err := d.readMeta(DirSkipped, name)
+	if from == DirRunning && (err != nil || (meta.PID != 0 && processAlive(meta.PID, meta.PIDStart))) {
+		back := d.move(name, kind, DirSkipped, DirRunning)
+		return errors.Join(fmt.Errorf("%w: %s began running as it was skipped", ErrClaimed, describe(name)), err, back)
+	}
+	if err != nil {
+		return err
+	}
+	meta.Kind, meta.SkipReason = kind, reason
+	return d.writeMeta(DirSkipped, name, meta)
 }
 
 // Abandon gives back a claim this process made but never started a run for:
@@ -355,7 +367,9 @@ func (d *Desk) Abandon(name, reason string) error {
 }
 
 // Unskip returns an operator-skipped item to pending/. An item skipped
-// because it changed, was refused, or was lost cannot be re-armed.
+// because it changed, was refused, or was lost cannot be re-armed, nor can
+// one that was ever claimed: the desk skipped that one, and a meta write that
+// raced the skip may have cleared its reason.
 func (d *Desk) Unskip(name string) error {
 	kind, err := d.findKind(DirSkipped, name)
 	if err != nil {
@@ -367,6 +381,9 @@ func (d *Desk) Unskip(name string) error {
 	}
 	if meta.SkipReason != "" && meta.SkipReason != SkipOperator {
 		return fmt.Errorf("desk: %s was skipped (%s) and cannot be re-armed; queue a new item", describe(name), meta.SkipReason)
+	}
+	if meta.ClaimPID != 0 || meta.PID != 0 {
+		return fmt.Errorf("desk: %s was claimed before it was skipped and cannot be re-armed; queue a new item", describe(name))
 	}
 	meta.SkipReason = ""
 	if err := d.writeMeta(DirSkipped, name, meta); err != nil {
