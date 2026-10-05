@@ -111,3 +111,55 @@ func TestReadSummaryRefusesABadStepID(t *testing.T) {
 		t.Errorf("ReadSummary of a good summary: %v", err)
 	}
 }
+
+// plantBeforeRunStart writes files into done/ at the moment between
+// BeginRun's done/ check and its events file: another run of the same name
+// arriving in that window.
+func plantBeforeRunStart(t *testing.T, d *Desk, files map[string]string) {
+	t.Helper()
+	prev := beforeRunStart
+	beforeRunStart = func(string) error {
+		for name, body := range files {
+			writeFile(t, filepath.Join(d.Path(), DirDone, name), body, 0o600)
+		}
+		return nil
+	}
+	t.Cleanup(func() { beforeRunStart = prev })
+}
+
+// Another run's events file appearing in that window: BeginRun refuses
+// before writing anything, and the other run's events are untouched.
+func TestBeginRunNeverWritesIntoAnotherRunsEvents(t *testing.T) {
+	d := openDesk(t)
+	c := queue(t, d, "race.sh", "true\n")
+	theirs := "RUN-START id=" + c.Name + " pid=1\nRUN-END rc=0 reason=ok\n"
+	plantBeforeRunStart(t, d, map[string]string{c.Name + ".events": theirs})
+	if _, err := d.BeginRun(c.Name, os.Getpid()); !errors.Is(err, ErrRefused) {
+		t.Fatalf("BeginRun = %v, want ErrRefused", err)
+	}
+	if got := readFile(t, d.EventsPath(c.Name)); got != theirs {
+		t.Errorf("the other run's events were written: %q", got)
+	}
+}
+
+// Another run's log appearing in that window: the supervisor abandons the
+// run as name-reused, removes the events file it created, and leaves the
+// other run's log alone.
+func TestAbandonLeavesNoEventsInDone(t *testing.T) {
+	d := openDesk(t)
+	c := queue(t, d, "race.sh", "true\n")
+	plantBeforeRunStart(t, d, map[string]string{c.Name + ".log": "theirs\nEXIT=0\n"})
+	if rc, err := d.supervise(c.Name); rc != 2 || err == nil {
+		t.Fatalf("supervise = %d, %v; want 2 and the log's EEXIST", rc, err)
+	}
+	if got := readFile(t, d.LogPath(c.Name)); got != "theirs\nEXIT=0\n" {
+		t.Errorf("the other run's log was written: %q", got)
+	}
+	if _, err := os.Stat(d.EventsPath(c.Name)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the abandoned run left done/%s.events: %v", c.Name, err)
+	}
+	m, ok, err := d.readMeta(DirSkipped, c.Name)
+	if err != nil || !ok || m.SkipReason != SkipReused {
+		t.Errorf("skipped meta = %+v, %v, %v; want name-reused", m, ok, err)
+	}
+}

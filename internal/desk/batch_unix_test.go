@@ -243,6 +243,7 @@ use after=token -- env | grep "^OUT_"; echo "again $OUT_token_tok"; printf "s3cr
 
 // A timeout signals the step's whole process group: the shell and the
 // background sleep it started both die.
+// In a container it needs a zombie reaper (docker run --init).
 func TestBatchTimeoutKillsTheStepsWholeGroup(t *testing.T) {
 	t.Parallel()
 	o := runBatch(t, "t timeout=1 -- echo $$ > \"$RUN_BATCH_DIR/t.pid\"; sleep 30 & wait\n", BatchOptions{}, nil)

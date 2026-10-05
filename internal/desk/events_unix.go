@@ -40,12 +40,29 @@ type EventLog struct {
 	f  *os.File
 }
 
+// openEvents creates done/<name>.events for a run, exclusively: an events
+// file that already exists belongs to another run of that name, and this
+// run must never write into it. The error then wraps fs.ErrExist.
 func (d *Desk) openEvents(name string) (*EventLog, error) {
-	f, err := d.root.OpenFile(path.Join(DirDone, name+extEvents), os.O_WRONLY|os.O_CREATE|os.O_APPEND, fileMode)
+	f, err := d.root.OpenFile(path.Join(DirDone, name+extEvents), os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_APPEND, fileMode)
 	if err != nil {
-		return nil, fmt.Errorf("desk: open events for %s: %w", describe(name), err)
+		return nil, fmt.Errorf("desk: create events for %s: %w", describe(name), err)
 	}
 	return &EventLog{f: f}, nil
+}
+
+// discard closes the log and removes its file, which this run created
+// exclusively, unless the path now names another file.
+func (e *EventLog) discard(d *Desk, name string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	mine, serr := e.f.Stat()
+	cerr := e.f.Close()
+	p := path.Join(DirDone, name+extEvents)
+	if named, err := d.root.Lstat(p); serr == nil && err == nil && os.SameFile(mine, named) {
+		return errors.Join(cerr, d.root.Remove(p))
+	}
+	return cerr
 }
 
 // Emit appends one line. A newline inside line is replaced, so one call is
