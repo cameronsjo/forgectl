@@ -1,0 +1,66 @@
+# Readiness predicates for coordinator workers (`forgectl surface ready`).
+#
+# A harness is ready only when no blocking screen matches, herdr's agent
+# status agrees, and the harness's own input prompt is visible. A blocking
+# match is the safe direction (the worker waits), so blocking patterns are
+# broad. A prompt match is the risky direction (forgectl will type into the
+# pane), so prompt patterns are strict.
+#
+# Patterns are Go RE2 regexps matched against the pane's visible text. Every
+# pattern carries (?m) when it anchors on line starts or ends.
+#
+# Screens marked "captured" come from Claude Code 2.1.289, Codex 0.160.0, and
+# npm on herdr 0.9.1 (testdata/). Screens marked "uncaptured" are written from
+# the 2026-09-28 trial notes and have no fixture yet.
+
+version = 1
+
+# Blocking screens that can appear under any harness.
+[[blocking]]
+name = "npm install prompt"
+any = ['(?m)^Ok to proceed\? \(y\)']  # captured
+
+[[blocking]]
+name = "y/N prompt"
+any = ['(?mi)[\[(]y/n[\])]\s*:?\s*$']
+
+[[blocking]]
+name = "model loading"
+any = ['(?i)\bloading model\b']  # uncaptured
+
+[[blocking]]
+name = "version picker"
+any = ['(?i)\bselect (a )?version\b']  # uncaptured
+
+[harness.claude]
+agent = "claude"
+# The input box: a rule line, the `❯` line, a rule line. The bare `❯` of a
+# starship shell prompt has no rules around it, and a menu's `❯ 1.` is caught
+# as blocking first. Claude Code 2.1.289 puts a no-break space (U+00A0), not
+# a space, between `❯` and typed text.
+prompt = '(?m)^─{20,}\n❯(?:[ \x{00A0}](.*))?\n─{20,}$'
+
+[[harness.claude.blocking]]
+name = "folder-trust dialog"
+any = ['Is this a project you created or one you trust\?', '(?m)^\s*(?:❯ )?Yes, I trust this folder\s*$']  # captured
+
+[[harness.claude.blocking]]
+name = "plan-approval dialog"
+any = ['Claude has written up a plan and is ready to execute', '(?m)^\s*Ready to code\?\s*$']  # captured
+
+[[harness.claude.blocking]]
+name = "permission prompt"
+any = ['(?m)^\s*Do you want to (proceed|make this edit|create)', '(?m)^\s*Esc to cancel · Tab to amend']  # captured
+
+[[harness.claude.blocking]]
+name = "selection menu"
+any = ['(?m)^\s*❯ \d+\. ']  # captured (every numbered menu: permission, plan approval)
+
+[harness.codex]
+agent = "codex"
+# The composer line followed by the model/context footer.
+prompt = '(?m)^› (.*)\n\s+\S.*· Context \d+% left'
+
+[[harness.codex.blocking]]
+name = "approval prompt"
+any = ['(?i)would you like to run the following command', '(?i)\ballow command\b']  # uncaptured
