@@ -118,8 +118,18 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 		}
 		return nil, fmt.Errorf("desk: claim %s: %w", describe(name), err)
 	}
-	if err := d.root.Rename(metaName(DirPending, name), metaName(DirRunning, name)); err != nil {
-		return nil, fmt.Errorf("desk: claim %s meta: %w", describe(name), err)
+	if err := claimMeta(d, name); err != nil {
+		// The item is in running/ and nothing will own it: without its meta it
+		// would read as a claim in progress for ever. Give running/ the meta
+		// this claim already holds and release the item, so it ends in
+		// skipped/ (launch-failed) where the operator sees it and nothing
+		// runs it. The orphaned pending meta goes too.
+		werr := d.writeMeta(DirRunning, name, meta)
+		rerr := d.Release(name, SkipLaunchFailed)
+		if rerr == nil {
+			_ = d.root.Remove(metaName(DirPending, name))
+		}
+		return nil, errors.Join(fmt.Errorf("desk: claim %s meta: %w", describe(name), err), werr, rerr)
 	}
 
 	data, _, err := d.readItem(DirRunning, file)
@@ -155,6 +165,12 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 		Name: name, Kind: kind, SHA256: sum, Content: data, Headers: ParseHeaders(data),
 		RecordPath: d.abs(path.Join(DirRunning, file)),
 	}, nil
+}
+
+// claimMeta moves a claimed item's meta into running/. Tests replace it to
+// fail that step.
+var claimMeta = func(d *Desk, name string) error {
+	return d.root.Rename(metaName(DirPending, name), metaName(DirRunning, name))
 }
 
 // beforeRunStart runs after BeginRun has written the owner's pid and before
@@ -298,7 +314,7 @@ func (d *Desk) Release(name, reason string) error {
 	if err != nil {
 		return err
 	}
-	lock, held, err := d.tryLockOwner(name)
+	lock, held, err := d.tryLockOwnerSettled(name)
 	if err != nil {
 		return err
 	}
@@ -358,7 +374,7 @@ func (d *Desk) skip(name, reason, note string) (string, error) {
 		if kind, err = d.findKind(DirRunning, name); err != nil {
 			return "", err
 		}
-		lock, held, err := d.tryLockOwner(name)
+		lock, held, err := d.tryLockOwnerSettled(name)
 		if err != nil {
 			return "", err
 		}
