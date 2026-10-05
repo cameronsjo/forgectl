@@ -11,6 +11,7 @@ import (
 var (
 	errNoProcess            = errors.New("desk: no such process")
 	errProcStartUnsupported = errors.New("desk: process start time is not available on this platform")
+	errProcUnreadable       = errors.New("desk: process start time is not readable")
 )
 
 // processAlive reports whether pid is still the process that recorded start.
@@ -26,7 +27,9 @@ func processAlive(pid int, start int64) bool {
 	}
 	got, zombie, err := procStart(pid)
 	switch {
-	case errors.Is(err, errProcStartUnsupported):
+	case errors.Is(err, errProcStartUnsupported), errors.Is(err, errProcUnreadable):
+		// Signal 0 found the pid and nothing more can be learned: alive. A
+		// live run read as dead could be skipped while it runs.
 		return true
 	case err != nil:
 		return false

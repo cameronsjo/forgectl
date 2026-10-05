@@ -66,8 +66,14 @@ type BatchOptions struct {
 	// Event receives each event line (STEP-START, STEP-END, STEP-SKIP,
 	// STEP-WARN). It may be nil.
 	Event func(line string)
-	// Env is the steps' base environment; nil means os.Environ().
+	// Env is the steps' base environment; nil means [ChildEnv].
 	Env []string
+	// WorkDir is the steps' working directory; "" means [HomeDir].
+	WorkDir string
+	// EventDir is Dir as STEP-END's log= field names it: the desk writes it
+	// relative to the desk dir, so the field never holds a space from the
+	// desk's own path. "" means Dir.
+	EventDir string
 	// Grace overrides DefaultGrace.
 	Grace time.Duration
 }
@@ -151,7 +157,10 @@ func NewBatch(m *Manifest, opts BatchOptions) *Batch {
 		opts.Log = io.Discard
 	}
 	if opts.Env == nil {
-		opts.Env = os.Environ()
+		opts.Env = ChildEnv()
+	}
+	if opts.EventDir == "" {
+		opts.EventDir = opts.Dir
 	}
 	b := &Batch{
 		m: m, opts: opts, steps: filepath.Join(opts.Dir, "steps"),
@@ -180,6 +189,13 @@ func (b *Batch) Run() (res BatchResult) {
 			res = b.internalError(fmt.Errorf("panic: %v", p))
 		}
 	}()
+	if b.opts.WorkDir == "" {
+		home, err := HomeDir()
+		if err != nil {
+			return b.internalError(err)
+		}
+		b.opts.WorkDir = home
+	}
 	if err := os.Mkdir(b.steps, dirMode); err != nil {
 		return b.internalError(err)
 	}
@@ -297,7 +313,7 @@ func (b *Batch) launch(s Step) error {
 	// A step is its own process group, so a timeout or Ctrl-C reaches
 	// everything it started, not only its shell.
 	cmd := exec.Command("/bin/bash", "-c", s.Command) //nolint:gosec,noctx // G204: the approved manifest's command is the payload; the runner owns the step's lifetime through its process group, not a context
-	cmd.Stdin, cmd.Stdout, cmd.Stderr, cmd.Env = nil, w, w, env
+	cmd.Stdin, cmd.Stdout, cmd.Stderr, cmd.Env, cmd.Dir = nil, w, w, env, b.opts.WorkDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	startErr := cmd.Start()
 	_ = w.Close() // the child holds the write end now; EOF comes when every holder exits
@@ -516,10 +532,15 @@ func exitCode(ps *os.ProcessState) int {
 }
 
 func (b *Batch) logRef(s Step) string {
+	return b.logIn(s, b.opts.Dir)
+}
+
+// logIn is a step's log path under the run dir dir, or "private".
+func (b *Batch) logIn(s Step, dir string) string {
 	if s.Private {
 		return "private" // the raw log holds the secrets; reading it is the operator's call
 	}
-	return filepath.Join(b.steps, s.ID+".log")
+	return filepath.Join(dir, "steps", s.ID+".log")
 }
 
 func (b *Batch) endStep(s Step, rc int, reason string) {
@@ -536,7 +557,7 @@ func (b *Batch) endStep(s Step, rc int, reason string) {
 	b.finished++
 	dur := b.t1[id].Sub(b.t0[id]).Seconds()
 	b.event(fmt.Sprintf("%s id=%s rc=%d dur=%.1f reason=%s outputs=%s log=%s",
-		EventStepEnd, id, rc, dur, reason, strings.Join(b.outKeys[id], ","), b.logRef(s)))
+		EventStepEnd, id, rc, dur, reason, strings.Join(b.outKeys[id], ","), b.logIn(s, b.opts.EventDir)))
 	if reason == stepFailed || reason == "timeout" {
 		b.skipDependents()
 		if b.opts.FailFast && !b.stopping {

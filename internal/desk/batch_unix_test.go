@@ -54,6 +54,9 @@ func runBatch(t *testing.T, text string, opts BatchOptions, during func(*Batch, 
 	var log bytes.Buffer
 	var events []string
 	opts.ID, opts.Dir, opts.Log = "t", dir, &log
+	if opts.WorkDir == "" {
+		opts.WorkDir = t.TempDir() // tests run in parallel; none may depend on $HOME
+	}
 	opts.Event = func(l string) { events = append(events, l) }
 	b := NewBatch(m, opts)
 	done := make(chan BatchResult, 1)

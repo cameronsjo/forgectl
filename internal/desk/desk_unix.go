@@ -257,26 +257,86 @@ func (d *Desk) readItem(sub, file string) (data []byte, mtime time.Time, err err
 	return data, fi.ModTime().UTC(), nil
 }
 
+// openRegular opens the root-relative file sub/file for reading through the
+// pinned descriptor. Every component is opened O_NOFOLLOW, so a symlink is
+// refused rather than followed, and O_NONBLOCK keeps a FIFO planted at the
+// name from blocking the open; the result must be a regular file. A missing
+// file matches fs.ErrNotExist; a refused one matches ErrRefused.
+//
+// Unlike readItem it accepts a file with more than one link: what it reads is
+// shown or parsed, never run.
+func (d *Desk) openRegular(sub, file string) (*os.File, unix.Stat_t, error) {
+	var st unix.Stat_t
+	dfd, owned := d.fd, false
+	defer func() {
+		if owned {
+			_ = unix.Close(dfd)
+		}
+	}()
+	for _, dir := range strings.Split(sub, "/") {
+		next, err := unix.Openat(dfd, dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return nil, st, fmt.Errorf("desk: open %s/: %w", describe(sub), err)
+		}
+		if owned {
+			_ = unix.Close(dfd)
+		}
+		dfd, owned = next, true
+	}
+	p := path.Join(sub, file)
+	fd, err := unix.Openat(dfd, file, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	switch {
+	case errors.Is(err, unix.ELOOP), errors.Is(err, unix.EMLINK):
+		return nil, st, fmt.Errorf("desk: %s: %w", describe(p), &refusal{"a symlink"})
+	case err != nil:
+		return nil, st, fmt.Errorf("desk: open %s: %w", describe(p), err)
+	}
+	if err := unix.Fstat(fd, &st); err != nil {
+		_ = unix.Close(fd)
+		return nil, st, fmt.Errorf("desk: stat %s: %w", describe(p), err)
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		_ = unix.Close(fd)
+		return nil, st, fmt.Errorf("desk: %s: %w", describe(p), &refusal{"not a regular file"})
+	}
+	return os.NewFile(uintptr(fd), p), st, nil
+}
+
+// readCapped reads the regular file sub/file (see [Desk.openRegular]),
+// refusing one larger than limit rather than truncating it.
+func (d *Desk) readCapped(sub, file string, limit int64) ([]byte, error) {
+	f, st, err := d.openRegular(sub, file)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck // read-only descriptor
+	tooBig := fmt.Errorf("desk: %s: %w", describe(f.Name()), &refusal{fmt.Sprintf("larger than %d bytes", limit)})
+	if st.Size > limit {
+		return nil, tooBig
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("desk: read %s: %w", describe(f.Name()), err)
+	}
+	if int64(len(data)) > limit {
+		return nil, tooBig
+	}
+	return data, nil
+}
+
 func metaName(sub, name string) string { return path.Join(sub, name+extMeta) }
 
 // readMeta reads <sub>/<name>.meta.json; ok is false when there is none.
 func (d *Desk) readMeta(sub, name string) (m Meta, ok bool, err error) {
 	p := metaName(sub, name)
-	fi, err := d.root.Lstat(p)
+	data, err := d.readCapped(sub, name+extMeta, maxMetaBytes)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return Meta{}, false, nil
+	case errors.Is(err, ErrRefused):
+		return Meta{}, false, fmt.Errorf("desk: %s is not a meta file; refusing: %w", describe(p), err)
 	case err != nil:
-		return Meta{}, false, fmt.Errorf("desk: stat %s: %w", describe(p), err)
-	case !fi.Mode().IsRegular() || fi.Size() > maxMetaBytes:
-		return Meta{}, false, fmt.Errorf("desk: %s is not a meta file; refusing", describe(p))
-	}
-	data, err := d.root.ReadFile(p)
-	if errors.Is(err, fs.ErrNotExist) {
-		return Meta{}, false, nil
-	}
-	if err != nil {
-		return Meta{}, false, fmt.Errorf("desk: read %s: %w", describe(p), err)
+		return Meta{}, false, err
 	}
 	if err := json.Unmarshal(data, &m); err != nil {
 		return Meta{}, false, fmt.Errorf("desk: parse %s: %w", describe(p), err)
@@ -399,22 +459,32 @@ func (d *Desk) LogPath(name string) string { return d.abs(path.Join(DirDone, nam
 // EventsPath is the absolute path of an item's done/<name>.events.
 func (d *Desk) EventsPath(name string) string { return d.abs(path.Join(DirDone, name+extEvents)) }
 
-// lastLine returns the final line of a log (without its newline), reading at
-// most the last 4 KiB.
-func (d *Desk) lastLine(p string) (string, error) {
-	f, err := d.root.Open(p)
+// tailBytes is how much of a log or events file is read to find its last
+// line: the line that matters (EXIT=, RUN-END) is always written last.
+const tailBytes = 4096
+
+// readTail returns at most the last tailBytes of the regular file sub/file,
+// and whether it starts at the beginning of the file.
+func (d *Desk) readTail(sub, file string) ([]byte, bool, error) {
+	f, st, err := d.openRegular(sub, file)
 	if err != nil {
-		return "", err
+		return nil, false, err
 	}
-	defer f.Close() //nolint:errcheck // read-only
-	fi, err := f.Stat()
+	defer f.Close() //nolint:errcheck // read-only descriptor
+	off := max(st.Size-tailBytes, 0)
+	buf := make([]byte, st.Size-off)
+	n, err := f.ReadAt(buf, off)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, false, err
+	}
+	return buf[:n], off == 0, nil
+}
+
+// lastLine returns the final line of done/<name>.log (without its newline),
+// reading at most the last 4 KiB.
+func (d *Desk) lastLine(name string) (string, error) {
+	buf, _, err := d.readTail(DirDone, name+extLog)
 	if err != nil {
-		return "", err
-	}
-	const tail = 4096
-	off := max(fi.Size()-tail, 0)
-	buf := make([]byte, fi.Size()-off)
-	if _, err := f.ReadAt(buf, off); err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}
 	buf = bytes.TrimSuffix(buf, []byte("\n"))

@@ -38,6 +38,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -134,7 +135,12 @@ func kindOfFile(file string) (name string, kind Kind, ok bool) {
 var (
 	nameRe = regexp.MustCompile(`^[0-9]+-[A-Za-z0-9][A-Za-z0-9._-]{0,95}$`)
 	stemRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	shaRe  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
+
+// validSHA reports whether s is a full lowercase hex sha256, as [SHA256Hex]
+// writes it. An approval names the whole hash: never empty, never a prefix.
+func validSHA(s string) bool { return shaRe.MatchString(s) }
 
 // ValidName reports whether name is a protocol item name: "NN-stem".
 func ValidName(name string) bool {
@@ -264,6 +270,44 @@ func ResolveDir(getenv func(string) string, home string) (string, error) {
 	return filepath.Join(home, ".local", "state", "forgectl", "desk"), nil
 }
 
+// childEnvDrop names the variables [ChildEnv] removes. Each makes bash run
+// code other than the approved bytes (BASH_ENV and ENV name a file it runs
+// first), or changes how the script's own lines behave.
+var childEnvDrop = map[string]bool{
+	"BASH_ENV": true, "ENV": true, "SHELLOPTS": true, "BASHOPTS": true, "CDPATH": true, "GLOBIGNORE": true,
+}
+
+// ChildEnv is the environment an approved item runs with: the operator's own,
+// minus bash's startup hooks. That is os.Environ() without BASH_ENV, ENV,
+// SHELLOPTS, BASHOPTS, CDPATH, GLOBIGNORE and every exported function
+// (BASH_FUNC_*), which would replace a command the script calls.
+func ChildEnv() []string { return scrubEnv(os.Environ()) }
+
+func scrubEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		key, _, _ := strings.Cut(kv, "=")
+		if childEnvDrop[key] || strings.HasPrefix(key, "BASH_FUNC_") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+// HomeDir is the working directory an approved item starts in: the
+// operator's home, so an item never inherits the desk's own cwd.
+func HomeDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("desk: an item starts in the home directory, and there is none: %w", err)
+	}
+	if !filepath.IsAbs(home) {
+		return "", fmt.Errorf("desk: an item starts in the home directory, and $HOME (%s) is not absolute", describe(home))
+	}
+	return home, nil
+}
+
 // Meta is an item's sidecar, <name>.meta.json. Times are UTC. A legacy item
 // has none; see [Item] for the fallbacks.
 type Meta struct {
@@ -281,6 +325,15 @@ type Meta struct {
 	// in a platform-specific unit, so a reused pid does not read as alive.
 	PID      int   `json:"pid,omitempty"`
 	PIDStart int64 `json:"pid_start,omitempty"`
+	// ClaimPID and ClaimStart identify the process that claimed the item
+	// (start time in the same unit as PIDStart), ClaimedAt when, and
+	// ApprovedSHA256 the hash it approved. While PID is still 0 they decide
+	// whether the claim is alive or lost. Any same-uid process can write
+	// them; they are the record of the approval, not proof of it.
+	ClaimPID       int        `json:"claim_pid,omitempty"`
+	ClaimStart     int64      `json:"claim_start,omitempty"`
+	ClaimedAt      *time.Time `json:"claimed_at,omitempty"`
+	ApprovedSHA256 string     `json:"approved_sha256,omitempty"`
 }
 
 // State is where an item stands.

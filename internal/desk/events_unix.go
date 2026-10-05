@@ -17,27 +17,17 @@ import (
 	"time"
 )
 
-// Event line prefixes, the batch event vocabulary. Only the desk writes
-// done/<name>.events; step output never reaches it, so a step cannot print a
-// line that ends the run for a watcher.
-const (
-	EventRunStart  = "RUN-START"
-	EventStepStart = "STEP-START"
-	EventStepEnd   = "STEP-END"
-	EventStepSkip  = "STEP-SKIP"
-	EventStepWarn  = "STEP-WARN"
-	EventRunEnd    = "RUN-END"
-	EventRunLost   = "RUN-LOST"
-)
-
 // EventLog appends event lines to done/<name>.events. Safe for concurrent use.
 type EventLog struct {
 	mu sync.Mutex
 	f  *os.File
 }
 
+// openEvents creates done/<name>.events. It must not exist yet: an events
+// file planted ahead of the run, already holding RUN-END, would make a
+// watcher report the run as ended before it starts.
 func (d *Desk) openEvents(name string) (*EventLog, error) {
-	f, err := d.root.OpenFile(path.Join(DirDone, name+extEvents), os.O_WRONLY|os.O_CREATE|os.O_APPEND, fileMode)
+	f, err := d.root.OpenFile(path.Join(DirDone, name+extEvents), os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_APPEND, fileMode)
 	if err != nil {
 		return nil, fmt.Errorf("desk: open events for %s: %w", describe(name), err)
 	}
@@ -57,14 +47,21 @@ func (e *EventLog) Emit(line string) error {
 // Close closes the log.
 func (e *EventLog) Close() error { return e.f.Close() }
 
-// hasRunEnd reports whether done/<name>.events holds a RUN-END line, and
-// whether the file exists at all.
+// hasRunEnd reports whether done/<name>.events ends with a RUN-END line, and
+// whether the file exists at all. RUN-END is written last, so only the last
+// 4 KiB are read.
 func (d *Desk) hasRunEnd(name string) (ended, exists bool) {
-	data, err := d.root.ReadFile(path.Join(DirDone, name+extEvents))
-	if err != nil {
+	buf, whole, err := d.readTail(DirDone, name+extEvents)
+	if errors.Is(err, fs.ErrNotExist) {
 		return false, false
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	if err != nil {
+		return false, true
+	}
+	if !whole { // the tail starts mid-line; that fragment is not a line start
+		_, buf, _ = bytes.Cut(buf, []byte("\n"))
+	}
+	for _, line := range strings.Split(string(buf), "\n") {
 		if strings.HasPrefix(line, EventRunEnd+" ") {
 			return true, true
 		}
@@ -76,13 +73,15 @@ func (d *Desk) hasRunEnd(name string) (ended, exists bool) {
 type WatchState int
 
 const (
-	// WatchWaiting: the item is pending, or claimed with no owner recorded yet.
+	// WatchWaiting: the item is pending, or claimed by a live claimer with no
+	// owner recorded yet.
 	WatchWaiting WatchState = iota
 	// WatchRunning: the owner process is alive.
 	WatchRunning
 	// WatchEnded: RUN-END was read (or a legacy done item, which has no events).
 	WatchEnded
-	// WatchLost: the owner is gone and there is no RUN-END; Poll emitted RUN-LOST.
+	// WatchLost: the owner (or, before a run began, the claimer) is gone and
+	// there is no RUN-END; Poll emitted RUN-LOST.
 	WatchLost
 	// WatchSkipped: the item was skipped (operator, or changed) and will not run.
 	WatchSkipped
@@ -104,14 +103,30 @@ func (s WatchState) String() string {
 	return "unknown(" + strconv.Itoa(int(s)) + ")"
 }
 
+// Watcher limits. A poll reads at most maxPollBytes of new events, and an
+// event line longer than maxEventLine is dropped and counted, never held.
+const (
+	maxPollBytes = 32 << 20
+	maxEventLine = 64 << 10
+)
+
 // Watcher follows one item's event lines.
 type Watcher struct {
-	d       *Desk
-	name    string
-	skip    int
-	seen    int
-	off     int64
-	partial []byte
+	d    *Desk
+	name string
+	skip int
+	seen int
+	// dropped counts lines longer than maxEventLine, which were not returned.
+	dropped int
+	// off is how far the file has been read; dev and ino identify it, so a
+	// replaced or truncated file starts the read over.
+	off      int64
+	dev, ino uint64
+	opened   bool
+	partial  []byte
+	// dropping: the current line already passed maxEventLine; discard up to
+	// its newline.
+	dropping bool
 }
 
 // NewWatcher follows name's events, not returning the first skip lines (the
@@ -123,15 +138,23 @@ func (d *Desk) NewWatcher(name string, skip int) (*Watcher, error) {
 	return &Watcher{d: d, name: name, skip: max(skip, 0)}, nil
 }
 
-// Seen is how many complete event lines have been read so far, including
-// skipped ones; pass it as skip to resume.
+// Seen is how many complete event lines have been read from the current
+// events file, including skipped and dropped ones; pass it as skip to
+// resume. When the file is replaced (a new device or inode) or shrinks, the
+// watcher starts over on the new file: Seen restarts at 0, and the original
+// skip no longer applies, since it counted lines of the old file.
 func (w *Watcher) Seen() int { return w.seen }
+
+// Dropped is how many event lines were longer than 64 KiB and so were
+// counted in Seen but not returned.
+func (w *Watcher) Dropped() int { return w.dropped }
 
 // Poll returns the event lines that arrived since the last poll and how the
 // run stands. When the run is lost, the last line returned is
-// "RUN-LOST id=<name> pid=<pid>".
+// "RUN-LOST id=<name> pid=<pid>". One poll reads at most 32 MiB of new
+// events; the next poll continues from there.
 func (w *Watcher) Poll() ([]string, WatchState, error) {
-	lines, ended, err := w.read()
+	lines, ended, _, err := w.read()
 	if err != nil || ended {
 		return lines, WatchEnded, err
 	}
@@ -141,52 +164,88 @@ func (w *Watcher) Poll() ([]string, WatchState, error) {
 	}
 	if state == WatchLost {
 		// The owner may have written RUN-END and exited between the read and
-		// the liveness check: read once more before calling it lost.
-		more, ended, err := w.read()
-		lines = append(lines, more...)
-		if err != nil || ended {
-			return lines, WatchEnded, err
+		// the liveness check: read to the end once more before calling it
+		// lost. Nothing is writing the file now, so this ends.
+		for more := true; more; {
+			var next []string
+			next, ended, more, err = w.read()
+			lines = append(lines, next...)
+			if err != nil || ended {
+				return lines, WatchEnded, err
+			}
 		}
 		lines = append(lines, fmt.Sprintf("%s id=%s pid=%d", EventRunLost, w.name, pid))
 	}
 	return lines, state, nil
 }
 
-func (w *Watcher) read() (lines []string, ended bool, err error) {
-	f, err := w.d.root.Open(path.Join(DirDone, w.name+extEvents))
+// read returns the complete lines added since the last read. more is true
+// when it stopped at maxPollBytes with more of the file unread.
+func (w *Watcher) read() (lines []string, ended, more bool, err error) {
+	f, st, err := w.d.openRegular(DirDone, w.name+extEvents)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, false, nil
+		return nil, false, false, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("desk: open events for %s: %w", describe(w.name), err)
+		return nil, false, false, fmt.Errorf("desk: open events for %s: %w", describe(w.name), err)
 	}
 	defer f.Close() //nolint:errcheck // read-only
-	if _, err := f.Seek(w.off, io.SeekStart); err != nil {
-		return nil, false, err
+
+	dev, ino := uint64(st.Dev), uint64(st.Ino) //nolint:gosec,unconvert // G115: Dev is int32 on darwin; only compared for equality
+	if w.opened && (dev != w.dev || ino != w.ino || st.Size < w.off) {
+		w.off, w.partial, w.dropping, w.seen, w.skip = 0, nil, false, 0, 0
 	}
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return nil, false, err
+	w.dev, w.ino, w.opened = dev, ino, true
+	n := min(st.Size-w.off, maxPollBytes)
+	if n <= 0 {
+		return nil, false, false, nil
 	}
-	w.off += int64(len(data))
-	data = append(w.partial, data...)
-	cut := bytes.LastIndexByte(data, '\n')
-	if cut < 0 {
-		w.partial = data
-		return nil, false, nil
+	buf := make([]byte, n)
+	got, err := f.ReadAt(buf, w.off)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, false, false, err
 	}
-	w.partial = append([]byte(nil), data[cut+1:]...)
-	for _, line := range strings.Split(string(data[:cut]), "\n") {
+	w.off += int64(got)
+	more = w.off < st.Size
+	for data := buf[:got]; len(data) > 0; {
+		i := bytes.IndexByte(data, '\n')
+		if i < 0 {
+			w.hold(data)
+			break
+		}
+		line := data[:i]
+		data = data[i+1:]
+		if w.dropping || len(w.partial)+len(line) > maxEventLine {
+			w.partial, w.dropping = nil, false
+			w.seen++
+			w.dropped++
+			continue
+		}
+		text := string(w.partial) + string(line)
+		w.partial = nil
 		w.seen++
 		if w.seen <= w.skip {
 			continue
 		}
-		lines = append(lines, line)
-		if strings.HasPrefix(line, EventRunEnd+" ") {
-			return lines, true, nil
+		lines = append(lines, text)
+		if strings.HasPrefix(text, EventRunEnd+" ") {
+			return lines, true, false, nil
 		}
 	}
-	return lines, false, nil
+	return lines, false, more, nil
+}
+
+// hold keeps the start of a line whose newline has not arrived, up to
+// maxEventLine; past that the line is dropped once its newline comes.
+func (w *Watcher) hold(data []byte) {
+	if w.dropping {
+		return
+	}
+	if len(w.partial)+len(data) > maxEventLine {
+		w.partial, w.dropping = nil, true
+		return
+	}
+	w.partial = append(w.partial, data...)
 }
 
 // state locates the item and judges its owner. It is only reached when no
@@ -199,12 +258,14 @@ func (w *Watcher) state() (WatchState, int, error) {
 	if _, err := d.findKind(DirSkipped, w.name); err == nil {
 		return WatchSkipped, 0, nil
 	}
-	if _, err := d.findKind(DirRunning, w.name); err == nil {
+	if kind, err := d.findKind(DirRunning, w.name); err == nil {
 		meta, _, err := d.readMeta(DirRunning, w.name)
 		if err != nil {
 			return WatchWaiting, 0, err
 		}
 		switch {
+		case meta.PID == 0 && d.claimLost(w.name, kind, meta):
+			return WatchLost, meta.ClaimPID, nil // the claimer died before a run began
 		case meta.PID == 0:
 			return WatchWaiting, 0, nil
 		case processAlive(meta.PID, meta.PIDStart):

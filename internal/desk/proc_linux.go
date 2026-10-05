@@ -14,11 +14,13 @@ import (
 )
 
 // procStart returns pid's start time in clock ticks since boot (field 22 of
-// /proc/<pid>/stat), and whether it is a zombie.
+// /proc/<pid>/stat), and whether it is a zombie. A stat file that cannot be
+// read (hidepid, a restricted /proc) is errProcUnreadable, not errNoProcess:
+// processAlive only asks after signal 0 found the pid.
 func procStart(pid int) (start int64, zombie bool, err error) {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
-		return 0, false, errNoProcess
+		return 0, false, errProcUnreadable
 	}
 	// The command name sits in parentheses and may itself hold spaces or
 	// parentheses, so fields are counted from the LAST ')'.

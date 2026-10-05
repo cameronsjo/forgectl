@@ -75,15 +75,24 @@ func (c *Claimed) AttachScript(cmd *exec.Cmd) (release func(), err error) {
 
 // Claim moves a pending item to running/ and checks it is unchanged.
 //
-// The rename from pending/ into running/ is the claim: when two desks share a
-// directory, the loser's rename finds nothing and Claim returns ErrClaimed
-// without touching anything. The winner then reads the item once (O_NOFOLLOW,
-// a regular file with one link), compares the full sha256 with the hash fixed
-// when the item was queued (and with wantSHA, the hash on screen, when given),
-// and writes those exact bytes to a fresh file that replaces the claimed one
-// as the record. Run Claimed.Content (through [Claimed.AttachScript]), not the file.
+// wantSHA is the full hash the operator approved, the one on screen; Claim
+// refuses anything but 64 lowercase hex digits, so an approval never names an
+// empty or partial hash. The rename from pending/ into running/ is the claim:
+// when two desks share a directory, the loser's rename finds nothing and
+// Claim returns ErrClaimed without touching anything. The winner stamps the
+// meta with itself as the claimer and the approved hash, then reads the item
+// once (O_NOFOLLOW, a regular file with one link), compares the full sha256
+// with the hash fixed when the item was queued and with wantSHA, and writes
+// those exact bytes to a fresh file that replaces the claimed one as the
+// record. Run Claimed.Content (through [Claimed.AttachScript]), not the file.
 // An item whose bytes changed moves to skipped/ and Claim returns ErrChanged.
+//
+// Until a run records its owner, the stamp is what tells a live claim from
+// one whose claimer died; see [Desk.Abandon] for giving a claim back.
 func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
+	if !validSHA(wantSHA) {
+		return nil, fmt.Errorf("%w: %s: an approval names the full 64-hex-digit sha256", ErrRefused, describe(name))
+	}
 	kind, err := d.findKind(DirPending, name)
 	if errors.Is(err, ErrNotFound) {
 		return nil, ErrClaimed
@@ -98,7 +107,12 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 	if !ok || meta.SHA256 == "" {
 		return nil, fmt.Errorf("%w: %s has no recorded hash yet; scan the desk first", ErrRefused, describe(name))
 	}
-	if wantSHA != "" && wantSHA != meta.SHA256 {
+	if meta.Kind != "" && meta.Kind != kind {
+		// findKind prefers .sh: a script with the bytes of a reviewed manifest
+		// must not run as bash.
+		return nil, fmt.Errorf("%w: %s was queued as a %s, but the file found is a %s", ErrRefused, describe(name), meta.Kind, kind)
+	}
+	if wantSHA != meta.SHA256 {
 		return nil, fmt.Errorf("%w: %s: the hash on screen is not the hash it was queued with", ErrChanged, describe(name))
 	}
 
@@ -111,6 +125,13 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 	}
 	if err := d.root.Rename(metaName(DirPending, name), metaName(DirRunning, name)); err != nil {
 		return nil, fmt.Errorf("desk: claim %s meta: %w", describe(name), err)
+	}
+	// Stamp the claim at once: until it is written, the item's age is all
+	// that tells a stuck claim from a live one.
+	pid, now := os.Getpid(), d.now().UTC()
+	meta.ClaimPID, meta.ClaimStart, meta.ClaimedAt, meta.ApprovedSHA256 = pid, ownStart(pid), &now, wantSHA
+	if err := d.writeMeta(DirRunning, name, meta); err != nil {
+		return nil, err
 	}
 
 	data, _, err := d.readItem(DirRunning, file)
@@ -162,6 +183,10 @@ type Run struct {
 // desk itself for a TTY item run in its foreground), with its start time so a
 // reused pid never reads as alive, and writes RUN-START. fields are appended
 // to the RUN-START line (a batch adds steps= and jobs=).
+//
+// After the owner is written, the item must still be in running/: [Desk.Abandon]
+// renames first and checks the moved meta after, so either it sees this owner
+// and puts the item back, or this check sees the item gone and nothing runs.
 func (d *Desk) BeginRun(name string, pid int, fields ...string) (*Run, error) {
 	kind, err := d.findKind(DirRunning, name)
 	if err != nil {
@@ -172,18 +197,28 @@ func (d *Desk) BeginRun(name string, pid int, fields ...string) (*Run, error) {
 		// truncate, another run's log and events.
 		return nil, fmt.Errorf("%w: done/ already holds %s", ErrRefused, describe(name))
 	}
-	meta, _, err := d.readMeta(DirRunning, name)
+	ev, err := d.openEvents(name)
 	if err != nil {
 		return nil, err
+	}
+	fail := func(err error) (*Run, error) {
+		_ = ev.Close()
+		_ = d.root.Remove(path.Join(DirDone, name+extEvents)) // created above, exclusively
+		return nil, err
+	}
+	meta, _, err := d.readMeta(DirRunning, name)
+	if err != nil {
+		return fail(err)
 	}
 	now := d.now().UTC()
 	meta.Kind, meta.StartedAt, meta.PID, meta.PIDStart = kind, &now, pid, ownStart(pid)
 	if err := d.writeMeta(DirRunning, name, meta); err != nil {
-		return nil, err
+		return fail(err)
 	}
-	ev, err := d.openEvents(name)
-	if err != nil {
-		return nil, err
+	if !d.exists(path.Join(DirRunning, name+kind.Ext())) {
+		// The meta just written may be left behind in running/ with no item;
+		// scans ignore it. Removing it could race Abandon moving it back.
+		return fail(fmt.Errorf("%w: %s left running/ as its run began", ErrClaimed, describe(name)))
 	}
 	line := fmt.Sprintf("%s id=%s pid=%d", EventRunStart, name, pid)
 	if len(fields) > 0 {
@@ -264,7 +299,7 @@ func (d *Desk) Skip(name, reason string) error {
 		if err != nil {
 			return err
 		}
-		if !d.lost(name, meta) {
+		if !d.lost(name, kind, meta) {
 			return fmt.Errorf("desk: %s is running; only a lost run can be skipped", describe(name))
 		}
 		from = DirRunning
@@ -286,6 +321,37 @@ func (d *Desk) Skip(name, reason string) error {
 		return fmt.Errorf("desk: skip %s: %w", describe(name), err)
 	}
 	return nil
+}
+
+// Abandon gives back a claim this process made but never started a run for:
+// it moves the running item to skipped/ with reason. It is how a desk cleans
+// up when anything between a successful [Desk.Claim] and a successful
+// [Desk.Launch] or [Desk.BeginRun] fails.
+//
+// It renames first and checks after: the moved meta must still have no owner
+// (PID 0) and name this process, pid and start time, as the claimer. A
+// supervisor that recorded itself before the rename is seen here, and one
+// that records itself after finds the item gone (see [Desk.BeginRun]).
+// Otherwise the item goes back to running/ and Abandon returns ErrClaimed.
+func (d *Desk) Abandon(name, reason string) error {
+	kind, err := d.findKind(DirRunning, name)
+	if err != nil {
+		return err
+	}
+	if err := d.move(name, kind, DirRunning, DirSkipped); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return ErrClaimed
+		}
+		return fmt.Errorf("desk: abandon %s: %w", describe(name), err)
+	}
+	meta, _, err := d.readMeta(DirSkipped, name)
+	pid := os.Getpid()
+	if err != nil || meta.PID != 0 || meta.ClaimPID != pid || meta.ClaimStart != ownStart(pid) {
+		back := d.move(name, kind, DirSkipped, DirRunning)
+		return errors.Join(fmt.Errorf("%w: %s has an owner, or another claimer", ErrClaimed, describe(name)), err, back)
+	}
+	meta.Kind, meta.SkipReason = kind, reason
+	return d.writeMeta(DirSkipped, name, meta)
 }
 
 // Unskip returns an operator-skipped item to pending/. An item skipped
