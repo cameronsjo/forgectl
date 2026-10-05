@@ -598,3 +598,56 @@ func TestPruneRemovesOnlyOldProtocolEntries(t *testing.T) {
 		t.Error("Prune(0) should refuse")
 	}
 }
+
+// One item with a mode its owner cannot read must not stop the desk: Open
+// succeeds, and the item is refused rather than run.
+func TestAnUnreadableItemIsRefusedAndDoesNotBlockOpen(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-000 file")
+	}
+	dir := filepath.Join(t.TempDir(), "desk")
+	d, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = d.Close()
+	locked := filepath.Join(dir, DirPending, "03-locked.sh")
+	writeFile(t, locked, script, 0o000)
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o600) })
+
+	d, err = Open(dir)
+	if err != nil {
+		t.Fatalf("Open with a mode-000 item: %v", err)
+	}
+	defer d.Close() //nolint:errcheck // test
+	if got := perm(t, locked); got != 0o000 {
+		t.Errorf("mode %o; an unreadable file is left as it is", got)
+	}
+	s := scan(t, d)
+	if len(s.Pending) != 1 || s.Pending[0].State != StateRefused || s.Pending[0].Refusal != "not readable" {
+		t.Fatalf("pending = %+v, want refused (not readable)", s.Pending)
+	}
+	if _, err := d.Claim("03-locked", ""); !errors.Is(err, ErrRefused) {
+		t.Errorf("Claim = %v, want ErrRefused", err)
+	}
+}
+
+func TestOpenNamesTheModeAnUnreadableProtocolDirNeeds(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-000 directory")
+	}
+	dir := filepath.Join(t.TempDir(), "desk")
+	d, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = d.Close()
+	done := filepath.Join(dir, DirDone)
+	if err := os.Chmod(done, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(done, 0o700) }) //nolint:gosec // G302: restores the protocol dir mode so TempDir cleanup can remove it
+	if _, err := Open(dir); err == nil || !strings.Contains(err.Error(), "mode 0700") {
+		t.Fatalf("Open = %v, want an error naming mode 0700", err)
+	}
+}

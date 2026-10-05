@@ -154,11 +154,6 @@ func (d *Desk) superviseScript(name string, data []byte, sigs <-chan os.Signal) 
 	if err != nil {
 		return 2, errors.Join(err, run.Finish(2, "internal"))
 	}
-	script, err := ScriptPipe(data)
-	if err != nil {
-		_ = logF.Close()
-		return 2, errors.Join(err, run.Finish(2, "internal"))
-	}
 	// bash reads the verified bytes from a pipe on fd 3, never from
 	// running/<name>.sh: that file is the record of what ran, and a write to
 	// it (or a rename over it) after the hash check cannot reach the run.
@@ -166,10 +161,14 @@ func (d *Desk) superviseScript(name string, data []byte, sigs <-chan os.Signal) 
 	// script started. stdin is /dev/null: a detached item never prompts.
 	cmd := exec.CommandContext(context.Background(), "/bin/bash", ScriptFDPath) //nolint:gosec // G204: constant argv; the script arrives on fd 3
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, logF, logF
-	cmd.ExtraFiles = []*os.File{script}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	release, err := AttachScript(cmd, data)
+	if err != nil {
+		_ = logF.Close()
+		return 2, errors.Join(err, run.Finish(2, "internal"))
+	}
 	startErr := cmd.Start()
-	_ = script.Close() // the child holds its own copy of the read end
+	release() // the child holds its own copy of the read end
 	if startErr != nil {
 		_, _ = fmt.Fprintf(logF, "desk: could not start: %v\n", startErr)
 		_ = logF.Close()
@@ -217,18 +216,22 @@ func (d *Desk) superviseScript(name string, data []byte, sigs <-chan os.Signal) 
 
 // endGroup sends SIGTERM to a finished script's process group if anything
 // is left in it, and SIGKILL to whatever survives the grace period.
+//
+// Every signal that matters is preceded by a signal-0 probe, and the moment a
+// probe finds the group empty it is never signalled again: its pgid may then
+// belong to a new group.
 func (d *Desk) endGroup(pgid int) {
 	if !signalGroup(pgid, 0) || !signalGroup(pgid, unix.SIGTERM) {
 		return
 	}
 	deadline := time.Now().Add(d.grace)
 	for time.Now().Before(deadline) {
+		time.Sleep(batchTick)
 		if !signalGroup(pgid, 0) {
 			return
 		}
-		time.Sleep(batchTick)
 	}
-	signalGroup(pgid, unix.SIGKILL)
+	signalGroup(pgid, unix.SIGKILL) // the last probe, just above, found it alive
 }
 
 func (d *Desk) superviseBatch(name string, data []byte, sigs <-chan os.Signal) (int, error) {

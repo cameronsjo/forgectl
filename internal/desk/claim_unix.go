@@ -7,14 +7,15 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"strconv"
 	"strings"
 )
 
 // Claimed is an item this desk won and verified. Content is exactly the
-// verified bytes, and Content is what runs: hand it to bash through
-// [Claimed.Script] on fd 3 and run [ScriptFDPath].
+// verified bytes, and Content is what runs: hand it to bash with
+// [Claimed.AttachScript] and run [ScriptFDPath].
 //
 // RecordPath is running/<name>.sh, a copy of the same bytes kept as the
 // record of what ran. Never execute it by name: anything that can write the
@@ -29,30 +30,47 @@ type Claimed struct {
 	Headers
 }
 
-// ScriptFDPath is the script operand for bash when the script arrives on
-// fd 3 (exec.Cmd.ExtraFiles[0]). Under it, $0 and BASH_SOURCE are
-// "/dev/fd/3", not the item's path: a script that locates sibling files
-// from $0 finds nothing, as it found nothing useful in running/ before.
+// ScriptFDPath is the script operand for bash once [AttachScript] has set up
+// the command. Under it, $0 and BASH_SOURCE are "/dev/fd/3", not the item's
+// path: a script that locates sibling files from $0 finds nothing, as it
+// found nothing useful in running/ before.
 const ScriptFDPath = "/dev/fd/3"
 
-// Script returns the read end of a pipe that yields Content and then EOF,
-// for exec.Cmd.ExtraFiles[0]. Close it after the command starts.
-func (c *Claimed) Script() (*os.File, error) { return ScriptPipe(c.Content) }
+// scriptPrelude is the desk's own first line, sent through the pipe ahead of
+// the verified bytes. bash reads the script through its own descriptor (fd
+// 255, close-on-exec) and leaves the inherited fd 3 open, so every child would
+// inherit the pipe; one that read it (`cmd <&3`) would silently swallow the
+// rest of the script. Closing fd 3 first means no child ever holds it. It is
+// not part of the item: the hash and the running/ record cover the item's own
+// bytes only. The cost is that LINENO in the script reads one higher than the
+// line in the item.
+const scriptPrelude = "exec 3<&-\n"
 
-// ScriptPipe returns the read end of a pipe fed with data from a goroutine.
-// A pipe cannot be rewritten or appended to by anyone holding a path, so the
-// bytes bash reads are the bytes passed in. If the reader stops early, the
-// write fails with EPIPE and the goroutine ends.
-func ScriptPipe(data []byte) (*os.File, error) {
+// AttachScript makes data the script bash reads at [ScriptFDPath]: it puts
+// the read end of a pipe, fed with the prelude and then data, in
+// cmd.ExtraFiles[0], which is fd 3 in the child. It refuses a cmd that already
+// carries extra files, since ScriptFDPath names fd 3 and nothing else. Call
+// release after cmd.Start, started or not, to drop the parent's copy.
+func AttachScript(cmd *exec.Cmd, data []byte) (release func(), err error) {
+	if len(cmd.ExtraFiles) != 0 {
+		return nil, errors.New("desk: AttachScript needs a command with no other extra files (the script must be fd 3)")
+	}
 	r, w, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("desk: script pipe: %w", err)
 	}
+	payload := append([]byte(scriptPrelude), data...)
 	go func() {
-		_, _ = w.Write(data) // EPIPE only when the reader quit early; nothing to report
+		_, _ = w.Write(payload) // EPIPE only when the reader quit early; nothing to report
 		_ = w.Close()
 	}()
-	return r, nil
+	cmd.ExtraFiles = []*os.File{r}
+	return func() { _ = r.Close() }, nil
+}
+
+// AttachScript is [AttachScript] with the claimed item's verified bytes.
+func (c *Claimed) AttachScript(cmd *exec.Cmd) (release func(), err error) {
+	return AttachScript(cmd, c.Content)
 }
 
 // Claim moves a pending item to running/ and checks it is unchanged.
@@ -63,7 +81,7 @@ func ScriptPipe(data []byte) (*os.File, error) {
 // a regular file with one link), compares the full sha256 with the hash fixed
 // when the item was queued (and with wantSHA, the hash on screen, when given),
 // and writes those exact bytes to a fresh file that replaces the claimed one
-// as the record. Run Claimed.Content (through [Claimed.Script]), not the file.
+// as the record. Run Claimed.Content (through [Claimed.AttachScript]), not the file.
 // An item whose bytes changed moves to skipped/ and Claim returns ErrChanged.
 func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 	kind, err := d.findKind(DirPending, name)

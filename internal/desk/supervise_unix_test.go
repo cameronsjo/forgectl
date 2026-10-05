@@ -527,3 +527,45 @@ func TestSupervisorSecondSignalKillsAtOnce(t *testing.T) {
 		t.Errorf("the second signal waited %v; it should kill at once", waited)
 	}
 }
+
+// A child that reads the inherited fd 3 cannot swallow the rest of the
+// script: the desk's first line closes fd 3 before any item line runs.
+func TestAChildReadingFD3CannotSkipScriptLines(t *testing.T) {
+	d := openDesk(t)
+	body := "echo \"line=$LINENO\"\nhead -c 40 <&3 >/dev/null 2>&1 || echo fd3-closed\necho after-child\necho tail-line\n"
+	c := queue(t, d, "drain.sh", body)
+	if _, err := d.Launch(c.Name); err != nil {
+		t.Fatal(err)
+	}
+	if _, state := watchUntil(t, d, c.Name, 20*time.Second); state != WatchEnded {
+		t.Fatalf("state = %s", state)
+	}
+	log := readFile(t, d.LogPath(c.Name))
+	for _, want := range []string{"after-child\n", "tail-line\nEXIT=0\n", "fd3-closed\n"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("log lacks %q: %q", want, log)
+		}
+	}
+	// LINENO counts the desk's prelude line: one higher than the echo's line
+	// in the item (Add put the header lines first).
+	itemLine := slices.Index(strings.Split(string(c.Content), "\n"), `echo "line=$LINENO"`) + 1
+	if want := fmt.Sprintf("line=%d\n", itemLine+1); itemLine < 1 || !strings.HasPrefix(log, want) {
+		t.Errorf("log = %q, want it to start %q", log, want)
+	}
+	// The record and the hash cover the item's own bytes, not the prelude.
+	rec := readFile(t, filepath.Join(d.Path(), DirDone, c.Name+".sh"))
+	if rec != string(c.Content) || strings.Contains(rec, scriptPrelude) || SHA256Hex([]byte(rec)) != c.SHA256 {
+		t.Errorf("record = %q", rec)
+	}
+}
+
+func TestAttachScriptRefusesACommandWithOtherExtraFiles(t *testing.T) {
+	cmd := exec.CommandContext(t.Context(), "/bin/bash", ScriptFDPath)
+	cmd.ExtraFiles = []*os.File{os.Stdin}
+	if _, err := AttachScript(cmd, []byte("true\n")); err == nil {
+		t.Fatal("want a refusal: the script would not be fd 3")
+	}
+	if len(cmd.ExtraFiles) != 1 || cmd.ExtraFiles[0] != os.Stdin {
+		t.Error("a refused AttachScript changed the command")
+	}
+}

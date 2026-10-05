@@ -137,6 +137,8 @@ func (d *Desk) tightenDir(sub string) error {
 	switch {
 	case errors.Is(err, unix.ELOOP), errors.Is(err, unix.ENOTDIR), errors.Is(err, unix.EMLINK):
 		return fmt.Errorf("desk: %s/ is not a directory; refusing", sub)
+	case errors.Is(err, unix.EACCES):
+		return fmt.Errorf("desk: %s/ is not readable by its owner; it needs mode 0700 (chmod 700 %s)", sub, describe(d.abs(sub)))
 	case err != nil:
 		return fmt.Errorf("desk: open %s/: %w", sub, err)
 	}
@@ -153,8 +155,12 @@ func (d *Desk) tightenDir(sub string) error {
 			continue
 		}
 		ffd, err := unix.Openat(sfd, e.Name(), unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
-		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EMLINK) {
-			continue // vanished, or swapped for a symlink, since the listing
+		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EMLINK) || errors.Is(err, unix.EACCES) {
+			// Vanished or swapped for a symlink since the listing, or a mode
+			// its owner cannot read (000, 0200). Left as it is: readItem
+			// refuses an item it cannot read, so it never runs, and one odd
+			// file must not stop every desk command.
+			continue
 		}
 		if err != nil {
 			return fmt.Errorf("desk: open %s/%s: %w", sub, describe(e.Name()), err)
@@ -218,6 +224,8 @@ func (d *Desk) readItem(sub, file string) (data []byte, mtime time.Time, err err
 	case errors.Is(err, unix.ELOOP), errors.Is(err, unix.EMLINK):
 		// EMLINK is FreeBSD's answer to O_NOFOLLOW on a symlink.
 		return nil, time.Time{}, &refusal{"a symlink"}
+	case errors.Is(err, unix.EACCES):
+		return nil, time.Time{}, &refusal{"not readable"}
 	case err != nil:
 		return nil, time.Time{}, fmt.Errorf("desk: open %s/%s: %w", sub, describe(file), err)
 	}

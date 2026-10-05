@@ -695,16 +695,29 @@ func (b *Batch) finalize(rc int, reason string) BatchResult {
 
 // internalError stops every running group, then reports rc 2: the batch's
 // own failure must still end the run cleanly for its watcher.
+//
+// A group already found empty is never signalled again (its pgid may be
+// reused), and every group is probed before each real signal.
 func (b *Batch) internalError(cause error) BatchResult {
+	live := func(r *stepRun) bool {
+		if !r.groupGone && !signalGroup(r.pgid, 0) {
+			r.groupGone = true
+		}
+		return !r.groupGone
+	}
 	for _, r := range b.running {
-		signalGroup(r.pgid, unix.SIGTERM)
+		if live(r) {
+			signalGroup(r.pgid, unix.SIGTERM)
+		}
 	}
 	deadline := time.Now().Add(b.opts.Grace)
-	for time.Now().Before(deadline) && slices.ContainsFunc(b.runningInOrder(), func(r *stepRun) bool { return signalGroup(r.pgid, 0) }) {
+	for time.Now().Before(deadline) && slices.ContainsFunc(b.runningInOrder(), live) {
 		time.Sleep(batchTick)
 	}
 	for _, r := range b.running {
-		signalGroup(r.pgid, unix.SIGKILL)
+		if live(r) {
+			signalGroup(r.pgid, unix.SIGKILL)
+		}
 	}
 	b.log("run-batch: internal error: " + cause.Error())
 	ok, failed, skipped := b.counts()
