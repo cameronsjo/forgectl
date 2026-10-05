@@ -1,0 +1,248 @@
+// SPDX-License-Identifier: Apache-2.0 WITH Commons-Clause
+
+//go:build unix
+
+package cli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"golang.org/x/sys/unix"
+	"golang.org/x/term"
+
+	"github.com/cameronsjo/forgectl/internal/desk"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
+)
+
+// ErrPaneGone means the terminal went away during a foreground run: the run
+// was finished and recorded, and there is no screen to go back to.
+var ErrPaneGone = errors.New("desk: the terminal is gone")
+
+// IO is the terminal a foreground run uses.
+//
+// Stdin, Stdout and Stderr are the item's; nil is /dev/null. Out is where the
+// closing "ran …" line goes; nil means Stdout.
+//
+// TTY is the controlling terminal's descriptor, or -1 for none. Only with a
+// terminal does the item's process group get the terminal's foreground, does
+// the desk take the foreground back after it, and does the closing line wait
+// for a key.
+//
+// Signals, when set, replaces the INT, TERM, HUP and QUIT subscription; each
+// value is forwarded to the item's process group. Grace is how long the group
+// gets after the first forwarded signal before SIGKILL; zero means
+// desk.DefaultGrace. SetForeground and WaitKey replace the terminal
+// operations; nil means the real ones.
+type IO struct {
+	Stdin          io.Reader
+	Stdout, Stderr io.Writer
+	Out            io.Writer
+	TTY            int
+	Signals        <-chan os.Signal
+	Grace          time.Duration
+	SetForeground  func(tty, pgid int) error
+	WaitKey        func() error
+}
+
+// afterForegroundClaim runs once a foreground claim has succeeded, before the
+// run begins. Tests use it to rewrite the record under a claimed item.
+var afterForegroundClaim = func(*desk.Claimed) {}
+
+// runForeground runs the queued TTY item name, approved with the full hash
+// sha, in this terminal, and returns its exit code.
+//
+// It claims the item with sha, records this process as the run's owner, and
+// runs the claimed bytes through bash on fd 3, never the file in running/, in
+// a process group of its own that gets the terminal's foreground. INT, TERM,
+// HUP and QUIT are forwarded to that group, with SIGKILL after the grace
+// period. When the item ends it takes the terminal back, finishes the run
+// (ok, failed or interrupted), and prints the result. A claim that cannot
+// start a run is given back as skipped:launch-failed. A terminal that answers
+// EIO is a closed pane: the run is finished and ErrPaneGone returned.
+func runForeground(d *desk.Desk, name, sha string, tio IO) (rc int, err error) {
+	home, err := desk.HomeDir()
+	if err != nil {
+		return 2, err
+	}
+	claimed, err := d.Claim(name, sha)
+	if err != nil {
+		return 2, err
+	}
+	afterForegroundClaim(claimed)
+	if claimed.SHA256 != sha {
+		return 2, errors.Join(fmt.Errorf("desk: the claim for %s does not carry the approved hash", termsafe.SafeLine(name)),
+			d.Abandon(name, launchFailed))
+	}
+	run, err := d.BeginRun(name, os.Getpid())
+	if err != nil {
+		return 2, errors.Join(err, d.Abandon(name, launchFailed))
+	}
+
+	// The operand matters: with none, bash would read the terminal instead
+	// of fd 3.
+	cmd := exec.CommandContext(context.Background(), "/bin/bash", desk.ScriptFDPath) //nolint:gosec // G204: constant argv; the script arrives on fd 3
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = tio.Stdin, tio.Stdout, tio.Stderr
+	cmd.Dir, cmd.Env = home, desk.ChildEnv()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if tio.TTY >= 0 {
+		// Ctty is this process's descriptor for the terminal: Go makes the
+		// child's group the foreground before it execs.
+		cmd.SysProcAttr.Foreground, cmd.SysProcAttr.Ctty = true, tio.TTY
+	}
+	release, err := claimed.AttachScript(cmd)
+	if err != nil {
+		return 2, errors.Join(err, run.Finish(2, "internal"))
+	}
+
+	sigs := tio.Signals
+	if sigs == nil {
+		ch := make(chan os.Signal, 4)
+		signal.Notify(ch, unix.SIGINT, unix.SIGTERM, unix.SIGHUP, unix.SIGQUIT)
+		defer signal.Stop(ch)
+		sigs = ch
+	}
+	startErr := cmd.Start()
+	release() // the child holds its own copy of the read end
+	if startErr != nil {
+		_, _ = fmt.Fprintf(errOut(tio), "desk: could not start %s: %v\n", termsafe.SafeLine(name), startErr)
+		return 127, run.Finish(127, "failed")
+	}
+	pgid := cmd.Process.Pid
+	waited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait() // the status is read from cmd.ProcessState below
+		close(waited)
+	}()
+	grace := tio.Grace
+	if grace <= 0 {
+		grace = desk.DefaultGrace
+	}
+	interrupted := false
+	var kill <-chan time.Time
+	for running := true; running; {
+		select {
+		case s := <-sigs:
+			sig, ok := s.(syscall.Signal)
+			if !ok {
+				sig = unix.SIGTERM
+			}
+			_ = unix.Kill(-pgid, sig)
+			if !interrupted {
+				interrupted = true
+				kill = time.After(grace)
+			}
+		case <-kill:
+			_ = unix.Kill(-pgid, unix.SIGKILL)
+		case <-waited:
+			running = false
+		}
+	}
+	rc = foregroundExit(cmd.ProcessState)
+
+	gone := false
+	if tio.TTY >= 0 {
+		gone = errors.Is(takeTerminal(tio), unix.EIO)
+	}
+	reason := "ok"
+	switch {
+	case interrupted:
+		reason = "interrupted"
+	case rc != 0:
+		reason = "failed"
+	}
+	if err := run.Finish(rc, reason); err != nil {
+		return rc, err
+	}
+	if gone {
+		return rc, ErrPaneGone
+	}
+	out := tio.Out
+	if out == nil {
+		out = tio.Stdout
+	}
+	if out != nil {
+		_, _ = fmt.Fprintf(out, "\nran %s: exit %d (%s) — press any key\n", termsafe.SafeLine(name), rc, exitMeaning(rc, interrupted))
+	}
+	if tio.TTY >= 0 {
+		wait := tio.WaitKey
+		if wait == nil {
+			wait = func() error { return waitKey(tio.TTY) }
+		}
+		if err := wait(); errors.Is(err, unix.EIO) {
+			return rc, ErrPaneGone
+		}
+	}
+	return rc, nil
+}
+
+// launchFailed is the skip reason for a claim whose run never started.
+const launchFailed = "launch-failed"
+
+func errOut(tio IO) io.Writer {
+	if tio.Stderr != nil {
+		return tio.Stderr
+	}
+	return io.Discard
+}
+
+// takeTerminal gives the terminal's foreground back to this process's group.
+// A background group that calls tcsetpgrp is sent SIGTTOU, which stops it, so
+// the signal is ignored around the call.
+func takeTerminal(tio IO) error {
+	set := tio.SetForeground
+	if set == nil {
+		set = func(tty, pgid int) error { return unix.IoctlSetPointerInt(tty, unix.TIOCSPGRP, pgid) }
+	}
+	signal.Ignore(unix.SIGTTOU)
+	defer signal.Reset(unix.SIGTTOU)
+	return set(tio.TTY, unix.Getpgrp())
+}
+
+// waitKey reads one key from the terminal, in raw mode so any key counts.
+func waitKey(tty int) error {
+	old, err := term.MakeRaw(tty)
+	if err != nil {
+		return err
+	}
+	defer term.Restore(tty, old) //nolint:errcheck // best effort: the dashboard sets its own mode next
+	var b [1]byte
+	_, err = unix.Read(tty, b[:])
+	return err
+}
+
+// foregroundExit is the item's exit code: a signal death is 128 plus the
+// signal, as a shell reports it.
+func foregroundExit(ps *os.ProcessState) int {
+	if ps == nil {
+		return 1
+	}
+	if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		return 128 + int(ws.Signal())
+	}
+	return ps.ExitCode()
+}
+
+// exitMeaning is a word for an exit code.
+func exitMeaning(rc int, interrupted bool) string {
+	switch {
+	case rc == 0:
+		return "ok"
+	case interrupted:
+		return "interrupted"
+	case rc == 126:
+		return "could not execute"
+	case rc == 127:
+		return "command not found"
+	case rc > 128 && rc < 128+65:
+		return "killed by " + unix.SignalName(syscall.Signal(rc-128))
+	}
+	return "failed"
+}

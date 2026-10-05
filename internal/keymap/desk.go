@@ -19,6 +19,7 @@ type Desk struct {
 	StepBack, StepFw key.Binding
 	Autoplay         key.Binding
 	Approve          key.Binding
+	Confirm, Cancel  key.Binding
 	Skip, Unskip     key.Binding
 	Filter           key.Binding
 	Refresh          key.Binding
@@ -48,6 +49,8 @@ func NewDesk() Desk {
 		StepFw:     key.NewBinding(key.WithKeys("right"), key.WithHelp("→", "step forward")),
 		Autoplay:   key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "autoplay")),
 		Approve:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "approve")),
+		Confirm:    key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "approve (in the approve dialog)")),
+		Cancel:     key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "cancel")),
 		Skip:       key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "skip")),
 		Unskip:     key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "unskip")),
 		Filter:     key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
@@ -65,7 +68,7 @@ func NewDesk() Desk {
 func (k Desk) All() []key.Binding {
 	return []key.Binding{
 		k.PrevRun, k.NextRun, k.Switcher, k.Views, k.NextPane, k.Up, k.Down, k.Top, k.Bottom,
-		k.Open, k.Replay, k.StepBack, k.StepFw, k.Autoplay, k.Approve, k.Skip, k.Unskip,
+		k.Open, k.Replay, k.StepBack, k.StepFw, k.Autoplay, k.Approve, k.Confirm, k.Cancel, k.Skip, k.Unskip,
 		k.Filter, k.Refresh, k.RefreshAll, k.Mouse, k.Help, k.Back, k.Quit, k.ForceQuit,
 	}
 }
@@ -82,6 +85,12 @@ const (
 	DeskFilter
 	// DeskHelp is the help screen.
 	DeskHelp
+	// DeskConfirm is the approve dialog.
+	DeskConfirm
+	// DeskModal is a read dialog: a step, an event, or the run switcher.
+	DeskModal
+	// DeskReplay is a replay of the selected run.
+	DeskReplay
 )
 
 // DeskHelpMap adapts the bindings to bubbles/help for one mode.
@@ -101,6 +110,12 @@ func (h DeskHelpMap) ShortHelp() []key.Binding {
 		}
 	case DeskHelp:
 		return []key.Binding{k.Help, k.Quit}
+	case DeskConfirm:
+		return []key.Binding{k.Confirm, k.Cancel, k.Back, k.Down, k.Bottom}
+	case DeskModal:
+		return []key.Binding{k.Up, k.Open, k.Back, k.Top, k.Bottom}
+	case DeskReplay:
+		return []key.Binding{k.StepBack, k.StepFw, k.Autoplay, k.Top, k.Bottom, k.Replay, k.Back}
 	case DeskQueue:
 		return []key.Binding{k.Up, k.Approve, k.Skip, k.Unskip, k.Views, k.Refresh, k.Help, k.Quit}
 	default:
@@ -115,7 +130,7 @@ func (h DeskHelpMap) FullHelp() [][]key.Binding {
 		{k.PrevRun, k.NextRun, k.Switcher, k.Views, k.NextPane},
 		{k.Up, k.Down, k.Top, k.Bottom, k.Open},
 		{k.Replay, k.StepBack, k.StepFw, k.Autoplay},
-		{k.Approve, k.Skip, k.Unskip, k.Filter},
+		{k.Approve, k.Confirm, k.Cancel, k.Skip, k.Unskip, k.Filter},
 		{k.Refresh, k.RefreshAll, k.Mouse, k.Help, k.Back, k.Quit, k.ForceQuit},
 	}
 }

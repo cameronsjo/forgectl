@@ -23,16 +23,17 @@ type DeskSourceFailure struct {
 
 // DeskOptions configures RunDesk.
 //
-// Sources are the run sources to list. A source that has a method
-// `Spec() *runview.Spec` supplies the spec its runs fold with; otherwise Specs,
-// keyed by the source's Name, does. Desk runs always fold with
-// runview.DeskSpec. A log run with no spec shows its events without step state.
+// Sources are the run sources to list. A source that is a
+// runview.SpecProvider supplies the spec its runs fold with. Desk runs always
+// fold with runview.DeskSpec. A log run with no spec shows its events without
+// step state. The first source backed by a desk is the one the queue verbs
+// act on.
 //
-// Now is the clock; nil means time.Now. Restore, when set, puts the view back
-// where a previous RunDesk left it.
+// Now is the clock; nil means time.Now. It also times the approve modal's
+// delay. Restore, when set, puts the view back where a previous RunDesk left
+// it.
 type DeskOptions struct {
 	Sources []runview.Source
-	Specs   map[string]*runview.Spec
 	Failed  []DeskSourceFailure
 	Theme   theme.Theme
 	NoIcons bool

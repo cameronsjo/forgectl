@@ -29,7 +29,7 @@ func TestDeskKeysAreUniqueAndDocumented(t *testing.T) {
 			seen[k] = i
 		}
 	}
-	for _, want := range []string{"[", "]", "<", ">", "o", "1", "6", "tab", "up", "down", "j", "k", "g", "G", "enter", "p", "left", "right", "space", "a", "s", "u", "/", "r", "R", "m", "?", "esc", "q", "ctrl+c"} {
+	for _, want := range []string{"[", "]", "<", ">", "o", "1", "6", "tab", "up", "down", "j", "k", "g", "G", "enter", "p", "left", "right", "space", "a", "y", "n", "s", "u", "/", "r", "R", "m", "?", "esc", "q", "ctrl+c"} {
 		if _, ok := seen[want]; !ok {
 			t.Errorf("key %q from the key table is not bound", want)
 		}
@@ -41,7 +41,7 @@ func TestDeskKeysAreUniqueAndDocumented(t *testing.T) {
 func TestDeskHelpListsOnlyBoundKeys(t *testing.T) {
 	keys := NewDesk()
 	all := keys.All()
-	modes := []DeskMode{DeskBrowse, DeskQueue, DeskFilter, DeskHelp}
+	modes := []DeskMode{DeskBrowse, DeskQueue, DeskFilter, DeskHelp, DeskConfirm, DeskModal, DeskReplay}
 	short := map[DeskMode][]string{}
 	for _, mode := range modes {
 		h := DeskHelpMap{Keys: keys, Mode: mode}

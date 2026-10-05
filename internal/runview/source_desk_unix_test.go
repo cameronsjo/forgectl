@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -262,6 +263,41 @@ func TestAQueueItemWhoseHashDoesNotMatchCannotBeApproved(t *testing.T) {
 	bad := queueItem(desk.Item{Name: "01-a", State: desk.StateWaiting, Content: content, Meta: desk.Meta{SHA256: strings.Repeat("0", 64)}})
 	if bad.SHA256 != "" || bad.Refusal == "" {
 		t.Errorf("mismatched item: SHA256 %q, refusal %q; want empty and a reason", bad.SHA256, bad.Refusal)
+	}
+}
+
+// The approve modal's counts come from the raw bytes: an invisible rune that
+// SafeLine draws as is, a look-alike letter, and an escaped control are each
+// counted on their own line, and the size is the content's.
+func TestAQueueItemMarksTheLinesThatHideSomething(t *testing.T) {
+	content := []byte("ls\u3164 -la\nс at\nprintf '\x1b[2J'\nplain\n")
+	it := queueItem(desk.Item{Name: "01-a", State: desk.StateWaiting, Content: content, Meta: desk.Meta{SHA256: desk.SHA256Hex(content)}})
+	want := []LineMarks{
+		{Invisible: 1, NonASCII: 1},
+		{NonASCII: 1},
+		{Escaped: 1},
+		{},
+	}
+	if it.Bytes != len(content) {
+		t.Errorf("Bytes = %d, want %d", it.Bytes, len(content))
+	}
+	if !slices.Equal(it.Marks, want) {
+		t.Errorf("Marks = %+v, want %+v", it.Marks, want)
+	}
+	if len(it.Marks) != len(it.Body) {
+		t.Errorf("%d marks for %d body lines", len(it.Marks), len(it.Body))
+	}
+	// SafeLine leaves U+3164 as is; only the count flags it.
+	if !strings.ContainsRune(it.Body[0], '\u3164') {
+		t.Errorf("body line 0 = %q", it.Body[0])
+	}
+}
+
+func TestADeskSourceProvidesItsDesk(t *testing.T) {
+	d := openDesk(t)
+	p, ok := NewDeskSource(d).(DeskProvider)
+	if !ok || p.Desk() != d {
+		t.Fatalf("the desk source does not hand back its desk: %v", ok)
 	}
 }
 

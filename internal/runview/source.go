@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
@@ -137,13 +138,52 @@ type StepTiming struct {
 // empty SHA256 means the item cannot be approved. Refusal says why an item
 // cannot be approved (the desk refused it, or its hash did not match).
 // Body is the item's lines through termsafe.SafeLine, uncapped, for a
-// pending item only.
+// pending item only. Bytes is the size of the content Body was made from,
+// and Marks has one entry per Body line, counted from the raw bytes before
+// they were escaped.
 type QueueItem struct {
 	Name, Kind, State, What, Why, SkipReason, SHA256 string
 	TTY, Stale                                       bool
 	Body                                             []string
 	Exit                                             *int
 	Refusal                                          string
+	Bytes                                            int
+	Marks                                            []LineMarks
+}
+
+// LineMarks counts the runes on one raw line that do not read as what they
+// are. Escaped runes are those termsafe.SafeLine does not draw as
+// themselves. Invisible runes (termsafe.IsInvisibleRune) can be drawn and
+// still look like nothing, so a command name can hide one. NonASCII counts
+// every rune past U+007F, since a look-alike letter is one of them.
+type LineMarks struct {
+	Escaped, Invisible, NonASCII int
+}
+
+// Any reports whether the line holds a rune worth a second look.
+func (l LineMarks) Any() bool { return l.Escaped+l.Invisible+l.NonASCII > 0 }
+
+// MarkLine counts line's runes. An invalid byte counts as escaped, since
+// SafeLine draws it as U+FFFD.
+func MarkLine(line string) LineMarks {
+	var m LineMarks
+	for i := 0; i < len(line); {
+		r, size := utf8.DecodeRuneInString(line[i:])
+		i += size
+		if r < utf8.RuneSelf && r >= ' ' && r != 0x7f {
+			continue
+		}
+		if r >= utf8.RuneSelf || r == utf8.RuneError {
+			m.NonASCII++
+		}
+		if termsafe.IsInvisibleRune(r) {
+			m.Invisible++
+		}
+		if (r == utf8.RuneError && size == 1) || termsafe.SafeLine(string(r)) != string(r) {
+			m.Escaped++
+		}
+	}
+	return m
 }
 
 // Source lists runs and loads them incrementally.
@@ -151,6 +191,12 @@ type Source interface {
 	Name() string
 	List() ([]RunRef, error)
 	Load(ref RunRef, cur *Cursor) (Delta, error)
+}
+
+// SpecProvider is a Source whose runs fold with a spec: the spec source. A
+// source without one shows its events with no step state.
+type SpecProvider interface {
+	Spec() *Spec
 }
 
 // QueueSource is a Source that also has a queue: the desk. Queue scans it,

@@ -15,6 +15,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/cameronsjo/forgectl/internal/desk"
 	"github.com/cameronsjo/forgectl/internal/runview"
 )
 
@@ -114,12 +115,10 @@ func (m deskModel) noRunsLines() []string {
 
 // specOf is a log source's spec, or nil.
 func (m deskModel) specOf(src runview.Source) *runview.Spec {
-	if s, ok := src.(interface{ Spec() *runview.Spec }); ok {
-		if sp := s.Spec(); sp != nil {
-			return sp
-		}
+	if s, ok := src.(runview.SpecProvider); ok {
+		return s.Spec()
 	}
-	return m.specs[src.Name()]
+	return nil
 }
 
 // --- run list ---
@@ -627,6 +626,10 @@ func (m deskModel) queueReason(it runview.QueueItem) string {
 	switch {
 	case it.Refusal != "":
 		return st.Danger.Render("cannot approve: " + capSafe(it.Refusal, 240))
+	case it.SkipReason == desk.SkipOperator:
+		return st.Muted.Render("skipped by the operator · u to undo")
+	case it.SkipReason == desk.SkipChanged, it.SkipReason == deskLaunchFailed, it.SkipReason == desk.SkipLost:
+		return st.Muted.Render("skipped: " + skipHint(it.SkipReason))
 	case it.SkipReason != "":
 		return st.Muted.Render("skipped: " + capSafe(it.SkipReason, 240))
 	case it.Why != "":

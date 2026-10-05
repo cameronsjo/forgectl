@@ -472,14 +472,15 @@ func TestKeys(t *testing.T) {
 	if got := pressDesk(t, next, key("<")).selected; got != m.selected {
 		t.Error("< is not the same as [")
 	}
-	// a, s and u point at the queue outside it, and are no-ops inside.
+	// a, s and u point at the queue outside it. Inside it, none of these keys
+	// selects another run or hands the caller an action by itself.
 	mustContain(t, "approve outside the queue", screen(t, pressDesk(t, m, key("a"))), "approve is in the queue (6)")
 	q := pressDesk(t, m, key("6"))
 	for _, k := range []string{"a", "s", "u", "o", "p"} {
 		before := q.selected
 		q2 := pressDesk(t, q, key(k))
 		if q2.selected != before || q2.action != nil {
-			t.Errorf("%s did something it should not yet", k)
+			t.Errorf("%s changed the selection or set an action", k)
 		}
 	}
 	// q and ctrl+c quit.
@@ -668,8 +669,8 @@ func TestSourcesNeedNotBeComparable(t *testing.T) {
 	}
 }
 
-// speclessSource hides its wrapped source's Spec method, as a source built
-// from a spec file does: the dashboard has to be given the spec.
+// speclessSource hides its wrapped source's Spec method, so the dashboard has
+// no spec to fold its runs with.
 type speclessSource struct{ f *fakeDeskSource }
 
 func (s speclessSource) Name() string                    { return s.f.Name() }
@@ -678,29 +679,21 @@ func (s speclessSource) Load(r runview.RunRef, c *runview.Cursor) (runview.Delta
 	return s.f.Load(r, c)
 }
 
-func TestASourceWithoutSpecIsFoldedWithTheSpecsOption(t *testing.T) {
-	build := func() (speclessSource, DeskOptions) {
-		f, _ := deskFixture()
-		src := speclessSource{f: f}
-		return src, DeskOptions{Sources: []runview.Source{src}, Theme: theme.Default()}
-	}
-
-	_, opts := build()
-	opts.Specs = map[string]*runview.Spec{"pipeline": deskSpec()}
-	out := screen(t, openDesk(t, opts, 120, 30))
-	mustContain(t, "with Specs", out, "rej 2/3", "gate: accepted?")
+func TestARunFoldsWithItsSourcesSpec(t *testing.T) {
+	// A SpecProvider source: step state and the gate are drawn.
+	f, _ := deskFixture()
+	out := screen(t, openDesk(t, optsFor(f), 120, 30))
+	mustContain(t, "with a spec", out, "rej 2/3", "gate: accepted?")
 
 	// Without the spec the events still show, but no step state is drawn.
-	_, opts = build()
-	out = screen(t, openDesk(t, opts, 120, 30))
-	mustContain(t, "without Specs", out, "no steps defined for this run")
+	f, _ = deskFixture()
+	out = screen(t, openDesk(t, optsFor(speclessSource{f: f}), 120, 30))
+	mustContain(t, "without a spec", out, "no steps defined for this run")
 	if strings.Contains(out, "rej 2/3") {
 		t.Error("the gate text appeared without a spec")
 	}
 
 	// The no-runs line names the source's pattern only when it has the spec.
-	empty := speclessSource{f: &fakeDeskSource{name: "pipeline", spec: deskSpec()}}
-	mustContain(t, "pattern", screen(t, openDesk(t, DeskOptions{
-		Sources: []runview.Source{empty}, Specs: map[string]*runview.Spec{"pipeline": deskSpec()}, Theme: theme.Default(),
-	}, 120, 30)), "no runs match runs/*")
+	mustContain(t, "pattern", screen(t, openDesk(t, optsFor(&fakeDeskSource{name: "pipeline", spec: deskSpec()}), 120, 30)),
+		"no runs match runs/*")
 }

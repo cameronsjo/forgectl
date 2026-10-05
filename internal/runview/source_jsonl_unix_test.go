@@ -185,6 +185,20 @@ func TestTheRootMustBeSetAndAbsolute(t *testing.T) {
 	}
 }
 
+// The spec source hands back the spec its runs fold with.
+func TestASpecSourceProvidesItsSpec(t *testing.T) {
+	spec := loadExample(t)
+	t.Setenv("PIPELINE_ROOT", t.TempDir())
+	src, err := NewSpecSource(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := src.(SpecProvider)
+	if !ok || p.Spec() != spec {
+		t.Fatalf("the spec source does not provide its spec: %v", ok)
+	}
+}
+
 // Every string a Delta carries is inert, whichever field the hostile text
 // arrived in.
 func TestHostileLogTextIsInert(t *testing.T) {

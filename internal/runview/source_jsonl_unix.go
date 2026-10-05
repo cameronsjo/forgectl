@@ -175,6 +175,9 @@ func NewSpecSource(spec *Spec) (Source, error) {
 
 func (s *specSource) Name() string { return clean(s.spec.Name) }
 
+// Spec is the spec the source's runs fold with.
+func (s *specSource) Spec() *Spec { return s.spec }
+
 // List returns every run dir and every summary with no run dir, newest
 // first. A run dir with a summary of the same name has HasSummary set.
 func (s *specSource) List() ([]RunRef, error) {

@@ -125,6 +125,18 @@ func (m deskModel) smallView() string {
 	return m.fit(lines)
 }
 
+// fitLines pads or cuts lines to the window's height, so a dialog can be
+// drawn over any row.
+func (m deskModel) fitLines(lines []string) []string {
+	if len(lines) > m.height {
+		lines = lines[:m.height]
+	}
+	for len(lines) < m.height {
+		lines = append(lines, "")
+	}
+	return lines
+}
+
 // fit makes lines exactly the window's size: padded or cut to height, each
 // line cut to width.
 func (m deskModel) fit(lines []string) string {
@@ -152,7 +164,7 @@ func (m deskModel) frame0() string {
 		lines = append(lines, strings.Split(m.panesView(l), "\n")...)
 	}
 	lines = append(lines, strings.Split(m.footerView(), "\n")...)
-	return m.fit(lines)
+	return m.fit(m.overlayModal(m.fitLines(lines)))
 }
 
 // panesView joins the panes the layout shows.
@@ -297,6 +309,9 @@ func (m deskModel) headerView() string {
 		}
 		parts = append(parts, s.Warn.Render(chip))
 	}
+	if c := m.replayChip(); c != "" {
+		parts = append(parts, s.Accent.Render(c))
+	}
 	if n := len(m.failedSources()); n > 0 {
 		parts = append(parts, s.Danger.Render(fmt.Sprintf("%d source failed", n)))
 	}
@@ -372,7 +387,13 @@ func (m deskModel) footerView() string {
 		first = m.styles.Muted.Render("filter: " + capSafe(string(m.filter), cockpitFilterMax) + " (esc clears)")
 	}
 	mode := keymap.DeskBrowse
-	switch {
+	switch md := m.topModal(); {
+	case md != nil && md.kind == modalConfirm:
+		mode = keymap.DeskConfirm
+	case md != nil:
+		mode = keymap.DeskModal
+	case m.replay != nil:
+		mode = keymap.DeskReplay
 	case m.showHelp:
 		mode = keymap.DeskHelp
 	case m.filtering:

@@ -40,6 +40,15 @@ func NewDeskSource(d *desk.Desk) Source { return &deskSource{d: d} }
 
 func (s *deskSource) Name() string { return "desk" }
 
+// DeskProvider is a Source backed by a desk, which the dashboard's queue
+// verbs act on.
+type DeskProvider interface {
+	Desk() *desk.Desk
+}
+
+// Desk is the desk the source reads.
+func (s *deskSource) Desk() *desk.Desk { return s.d }
+
 func (s *deskSource) scan() (*desk.Snapshot, error) {
 	snap, err := s.d.Scan()
 	if err != nil {
@@ -120,9 +129,11 @@ func queueItem(it desk.Item) QueueItem {
 		} else if q.Refusal == "" {
 			q.Refusal = "its bytes do not match the hash recorded when it was queued"
 		}
+		q.Bytes = len(it.Content)
 		body := strings.TrimSuffix(string(it.Content), "\n")
 		for _, line := range strings.Split(body, "\n") {
 			q.Body = append(q.Body, termsafe.SafeLine(line))
+			q.Marks = append(q.Marks, MarkLine(line))
 		}
 	}
 	return q

@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/cameronsjo/forgectl/internal/runview"
 	"github.com/cameronsjo/forgectl/internal/termsafe/termsafetest"
 	"github.com/cameronsjo/forgectl/internal/theme"
@@ -72,7 +74,8 @@ func hostileDeskOptions() DeskOptions {
 			h("beta-run-7"): {{Err: fmt.Errorf("open: %w: %s", errors.New("denied"), h("detail")), Dropped: 2}},
 		},
 		items: []runview.QueueItem{
-			{Name: h("0007-a"), Kind: h("script"), State: "waiting", What: h("do a thing"), Why: h("because"), SHA256: "x"},
+			{Name: h("0007-a"), Kind: h("script"), State: "waiting", What: h("do a thing"), Why: h("because"), SHA256: strings.Repeat("c", 64),
+				Body: []string{h("echo body"), "ls\u3164 -la"}, Marks: []runview.LineMarks{{Escaped: 3}, {Invisible: 1, NonASCII: 1}}},
 			{Name: h("0008-b"), Kind: h("batch"), State: h("odd"), What: h("another"), Refusal: h("hash differs"), Stale: true, TTY: true},
 			{Name: h("0009-c"), Kind: "script", State: "skipped", What: h("skipped one"), SkipReason: h("not needed")},
 		},
@@ -121,6 +124,15 @@ func deskScreens(t *testing.T, opts func() DeskOptions, check func(name, out str
 			check(name+" view "+v+" run 2", m2.View().Content)
 		}
 		check(name+" help", pressDesk(t, m, key("?")).View().Content)
+		// Every dialog, over the same hostile text.
+		check(name+" approve dialog", pressDesk(t, pressDesk(t, m, key("6")), key("a")).View().Content)
+		check(name+" step dialog", pressDesk(t, pressDesk(t, m, key("1")), namedKey(tea.KeyEnter)).View().Content)
+		ev := pressDesk(t, pressDesk(t, m, key("2")), namedKey(tea.KeyEnter))
+		check(name+" event dialog", ev.View().Content)
+		sw := pressDesk(t, m, key("o"))
+		check(name+" switcher", sw.View().Content)
+		check(name+" switcher filter", pressDesk(t, pressDesk(t, sw, key("/")), key("a")).View().Content)
+		check(name+" replay", pressDesk(t, pressDesk(t, m, key("1")), key("p")).View().Content)
 		f := pressDesk(t, m, key("/"))
 		f = pressDesk(t, f, key("a"))
 		check(name+" filter", f.View().Content)
@@ -150,6 +162,25 @@ func TestDeskHostileTextIsDrawnEscaped(t *testing.T) {
 	}
 	if out := pressDesk(t, m, key("?")).View().Content; !strings.Contains(out, escaped) {
 		t.Errorf("help never drew the escaped hostile text\n%s", out)
+	}
+	// Each dialog draws the hostile text too, so the matrix's dialog screens
+	// are not vacuous; the approve dialog also spells out the invisible rune.
+	dialogs := map[string]deskModel{
+		"approve": pressDesk(t, pressDesk(t, m, key("6")), key("a")),
+		"step":    pressDesk(t, pressDesk(t, m, key("1")), namedKey(tea.KeyEnter)),
+		"event":   pressDesk(t, pressDesk(t, m, key("2")), namedKey(tea.KeyEnter)),
+		"switch":  pressDesk(t, m, key("o")),
+	}
+	for name, d := range dialogs {
+		if len(d.modals) == 0 {
+			t.Errorf("the %s dialog did not open", name)
+		}
+		if out := d.View().Content; !strings.Contains(out, escaped) {
+			t.Errorf("the %s dialog never drew the escaped hostile text\n%s", name, out)
+		}
+	}
+	if out := dialogs["approve"].View().Content; !strings.Contains(out, `\u3164`) {
+		t.Errorf("the approve dialog did not spell out the invisible rune\n%s", out)
 	}
 	e := openDesk(t, hostileErrorOptions(), 160, 50)
 	if out := e.View().Content; !strings.Contains(out, escaped) {

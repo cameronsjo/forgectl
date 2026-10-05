@@ -17,9 +17,19 @@ import (
 // every harness in this package's integration tests.
 var builtBinPath string
 
+// testHelperMains lets a test file turn this binary into a helper process
+// that a test re-executes: the first hook that claims the process runs in
+// place of the tests (and of the build below).
+var testHelperMains []func() (code int, ok bool)
+
 // TestMain builds the forgectl binary once for the package's integration
 // tests, rather than paying a `go build` per test case.
 func TestMain(m *testing.M) {
+	for _, helper := range testHelperMains {
+		if code, ok := helper(); ok {
+			os.Exit(code)
+		}
+	}
 	dir, err := os.MkdirTemp("", "forgectl-integration-*")
 	if err != nil {
 		panic("create temp bin dir: " + err.Error())

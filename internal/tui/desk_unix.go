@@ -126,7 +126,6 @@ type deskModel struct {
 	help   help.Model
 
 	sources []runview.Source
-	specs   map[string]*runview.Spec
 	failed  []DeskSourceFailure
 	now     func() time.Time
 	// schedule arms the next tick; tests replace it so a model driven by hand
@@ -162,6 +161,15 @@ type deskModel struct {
 	hooks     deskHooks
 	action    DeskAction
 	listTop   int
+
+	// The dialogs, the queue verbs and replay (desk_modal_unix.go).
+	modals []deskModal
+	verbs  deskVerbs
+	reopen string // a queue item whose approve dialog re-opens after the next list
+	replay *deskReplay
+	// replayTick arms the next autoplay step; tests replace it, as with
+	// schedule.
+	replayTick func(gen int) tea.Cmd
 }
 
 // Messages.
@@ -219,7 +227,6 @@ func newDeskModel(ctx context.Context, opts DeskOptions) deskModel {
 		keys:     keymap.NewDesk(),
 		help:     help.New(),
 		sources:  opts.Sources,
-		specs:    opts.Specs,
 		failed:   opts.Failed,
 		now:      now,
 		runs:     map[deskRunKey]*deskRun{},
@@ -232,6 +239,11 @@ func newDeskModel(ctx context.Context, opts DeskOptions) deskModel {
 		schedule: func() tea.Cmd {
 			return tea.Tick(deskTickEvery, func(time.Time) tea.Msg { return deskTickMsg{} })
 		},
+		replayTick: func(gen int) tea.Cmd {
+			return tea.Tick(replayEvery, func(time.Time) tea.Msg { return deskReplayTickMsg{gen: gen} })
+		},
+		hooks: deskModelHooks(),
+		verbs: verbsOf(opts.Sources),
 	}
 	m.follow[viewFlow], m.follow[viewEvents] = true, true
 	m.applyHelpStyles()
@@ -322,7 +334,9 @@ func (m deskModel) loadCmd(e *deskRun) tea.Cmd {
 func (m deskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	out, cmd := m.update(msg)
 	next := out.(deskModel)
+	next.syncReplay()
 	next.syncScroll()
+	next.syncModal()
 	return next, cmd
 }
 
@@ -350,12 +364,30 @@ func (m deskModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.typeFilter(t.Content)
 		}
 		return m, nil
+	case deskApproveMsg:
+		return m.onApprove(t)
+	case deskVerbMsg:
+		return m.onVerb(t)
+	case deskReplayTickMsg:
+		return m.onReplayTick(t)
 	case tea.KeyPressMsg:
 		return m.onKey(t)
 	case tea.MouseClickMsg:
+		if len(m.modals) > 0 {
+			return m.onModalClick(t.Mouse())
+		}
 		return m.onClick(t.Mouse())
 	case tea.MouseWheelMsg:
+		if len(m.modals) > 0 {
+			return m.onModalWheel(t.Mouse()), nil
+		}
 		return m.onWheel(t.Mouse()), nil
+	}
+	// The switcher's list filters in a command of its own.
+	if md := m.topModal(); md != nil && md.kind == modalSwitcher {
+		var cmd tea.Cmd
+		md.list, cmd = md.list.Update(msg)
+		return m, cmd
 	}
 	return m, nil
 }
@@ -363,7 +395,7 @@ func (m deskModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m deskModel) onTick() (tea.Model, tea.Cmd) {
 	m.frame++
 	cmds := []tea.Cmd{m.schedule()}
-	if e := m.sel(); e != nil && e.loaded {
+	if e := m.selLive(); e != nil && e.loaded {
 		if c := m.loadCmd(e); c != nil {
 			cmds = append(cmds, c)
 		}
@@ -419,6 +451,7 @@ func (m deskModel) onList(msg deskListMsg) (tea.Model, tea.Cmd) {
 	if !m.hasSel {
 		m.chooseInitial()
 	}
+	m.recheckConfirm()
 
 	var cmds []tea.Cmd
 	started := 0
@@ -457,12 +490,7 @@ func (m deskModel) specFor(src runview.Source, ref runview.RunRef) *runview.Spec
 	if ref.Kind == runview.KindDesk {
 		return runview.DeskSpec()
 	}
-	if s, ok := src.(interface{ Spec() *runview.Spec }); ok {
-		if sp := s.Spec(); sp != nil {
-			return sp
-		}
-	}
-	if sp := m.specs[src.Name()]; sp != nil {
+	if sp := m.specOf(src); sp != nil {
 		return sp
 	}
 	return &runview.Spec{}
@@ -606,8 +634,17 @@ func (m deskModel) liveState(e *deskRun, now time.Time) runview.LiveState {
 	return s
 }
 
-// sel is the selected run, or nil.
+// sel is the selected run as the dashboard draws it, or nil: while replay is
+// on, the state after the replay's first i events.
 func (m deskModel) sel() *deskRun {
+	if r := m.replay; r != nil && r.view != nil && m.hasSel && r.key == m.selected {
+		return r.view
+	}
+	return m.selLive()
+}
+
+// selLive is the selected run itself, the one loads go into, or nil.
+func (m deskModel) selLive() *deskRun {
 	if !m.hasSel {
 		return nil
 	}
@@ -638,6 +675,7 @@ func (m deskModel) lostItems() int {
 // selectKey selects a run and resets the per-run view state.
 func (m *deskModel) selectKey(k deskRunKey) {
 	m.selected, m.hasSel = k, true
+	m.replay = nil
 	for v := range m.top {
 		m.top[v], m.cur[v] = 0, 0
 	}
@@ -689,6 +727,15 @@ func (m deskModel) onKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	m.footer = ""
+	switch {
+	case len(m.modals) > 0:
+		return m.onModalKey(k)
+	case m.replay != nil && !m.filtering && !m.showHelp:
+		// The filter prompt and help own their keys while open.
+		if next, cmd, ok := m.onReplayKey(k); ok {
+			return next, cmd
+		}
+	}
 	switch {
 	case m.showHelp:
 		return m.onHelpKey(k)
@@ -895,7 +942,7 @@ func (m deskModel) stepRun(delta int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.selectKey(order[i])
-	return m, m.loadCmd(m.sel())
+	return m, m.loadCmd(m.selLive())
 }
 
 // move is a down or up key in the focused pane.
@@ -982,7 +1029,7 @@ func (m *deskModel) jump(bottom bool) {
 
 // refreshSelected reloads the selected run, at most once every deskRefreshGap.
 func (m deskModel) refreshSelected() (tea.Model, tea.Cmd) {
-	e := m.sel()
+	e := m.selLive()
 	if e == nil {
 		return m, nil
 	}
@@ -1023,7 +1070,7 @@ func (m deskModel) refreshAll() (tea.Model, tea.Cmd) {
 	m.listBusy = true
 	m.footer = m.styles.Muted.Render("refreshing everything…")
 	cmds := []tea.Cmd{m.listCmd()}
-	if c := m.loadCmd(m.sel()); c != nil {
+	if c := m.loadCmd(m.selLive()); c != nil {
 		cmds = append(cmds, c)
 	}
 	return m, tea.Batch(cmds...)
@@ -1106,7 +1153,7 @@ func (m deskModel) onClick(ms tea.Mouse) (tea.Model, tea.Cmd) {
 		i := m.listTop + line
 		if i >= 0 && i < len(order) && order[i] != m.selected {
 			m.selectKey(order[i])
-			return m, m.loadCmd(m.sel())
+			return m, m.loadCmd(m.selLive())
 		}
 		return m, nil
 	}
