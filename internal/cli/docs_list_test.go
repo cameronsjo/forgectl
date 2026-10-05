@@ -243,6 +243,19 @@ func TestDocsListCmd_Limit_JSONShape_ParsesAsThreeElementArray(t *testing.T) {
 	}
 }
 
+// expiredContext returns a context whose deadline has already passed, for the
+// deadline tests (#1039). `--timeout 1ns` alone is not expired on arrival:
+// WithTimeout cancels at creation only if the deadline has passed by the time
+// it checks, and otherwise waits for its timer, so the walk could finish
+// first under load. A parent already past its deadline makes the command's
+// derived context done before the walk starts, with context.DeadlineExceeded.
+func expiredContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	t.Cleanup(cancel)
+	return ctx
+}
+
 func TestDocsListCmd_Deadline_JSON_EmptyStdoutOneStderrObjectExit2(t *testing.T) {
 	dir := writeDocsListFixture(t, 5)
 
@@ -252,7 +265,7 @@ func TestDocsListCmd_Deadline_JSON_EmptyStdoutOneStderrObjectExit2(t *testing.T)
 	cmd.SetErr(&stderr)
 	cmd.SetArgs([]string{"--json", "--timeout", "1ns", dir})
 
-	err := cmd.ExecuteContext(context.Background())
+	err := cmd.ExecuteContext(expiredContext(t))
 	if err == nil {
 		t.Fatal("expected a deadline error, got nil")
 	}
@@ -288,8 +301,8 @@ func TestDocsListCmd_Deadline_JSON_EmptyStdoutOneStderrObjectExit2(t *testing.T)
 }
 
 // The "indexing <root> …" progress line must not precede the deadline's JSON
-// error object under --json (#672). The timer races the walk, so the run is
-// repeated: the line, if emitted, lands in at least one iteration.
+// error object under --json (#672). The progress timer races the walk, so the
+// run is repeated: the line, if emitted, lands in at least one iteration.
 func TestDocsListCmd_Deadline_JSON_ProgressLineNeverPrecedesObject(t *testing.T) {
 	orig := docsListProgressDelay
 	docsListProgressDelay = time.Nanosecond
@@ -302,7 +315,7 @@ func TestDocsListCmd_Deadline_JSON_ProgressLineNeverPrecedesObject(t *testing.T)
 		cmd.SetOut(&stdout)
 		cmd.SetErr(&stderr)
 		cmd.SetArgs([]string{"--json", "--timeout", "1ns", dir})
-		if err := cmd.ExecuteContext(context.Background()); err == nil {
+		if err := cmd.ExecuteContext(expiredContext(t)); err == nil {
 			t.Fatal("expected a deadline error, got nil")
 		}
 		dec := json.NewDecoder(strings.NewReader(stderr.String()))
@@ -322,7 +335,7 @@ func TestDocsListCmd_Deadline_Human_NamesRootExit2(t *testing.T) {
 	cmd.SetErr(&stderr)
 	cmd.SetArgs([]string{"--timeout", "1ns", dir})
 
-	err := cmd.ExecuteContext(context.Background())
+	err := cmd.ExecuteContext(expiredContext(t))
 	if err == nil {
 		t.Fatal("expected a deadline error, got nil")
 	}

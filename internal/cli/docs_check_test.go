@@ -273,7 +273,7 @@ func TestDocsCheckCmd_DeadlineEncodeFailureNamesCheck(t *testing.T) {
 	cmd.SetErr(failingWriter{err: errWriteFailed})
 	cmd.SetArgs([]string{"--json", "--timeout", "1ns", dir})
 
-	err := cmd.ExecuteContext(context.Background())
+	err := cmd.ExecuteContext(expiredContext(t))
 	if err == nil {
 		t.Fatal("expected a deadline error, got nil")
 	}
