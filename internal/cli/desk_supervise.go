@@ -12,25 +12,6 @@ import (
 	"github.com/cameronsjo/forgectl/internal/desk"
 )
 
-// newDeskPlumbingCmd is the hidden `desk` parent that carries `_supervise`
-// until the desk module (the dashboard and its visible verbs) registers
-// `desk` through the module registry; that change moves `_supervise` under
-// the module's command and deletes this one.
-func newDeskPlumbingCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:          "desk",
-		Short:        "Internal: desk plumbing; not for direct use",
-		Hidden:       true,
-		SilenceUsage: true,
-		Args:         cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
-			return errors.New("the desk dashboard is not available in this build")
-		},
-	}
-	cmd.AddCommand(newDeskSuperviseCmd())
-	return cmd
-}
-
 // newDeskSuperviseCmd builds `desk _supervise --sha SHA --kind KIND NAME`:
 // the detached process that owns one claimed item's run. The desk starts it
 // in a session of its own (desk.Launch), so it outlives the desk's pane. It

@@ -185,11 +185,6 @@ arguments for a menu over every command group.`,
 	// Hidden flag) are what make it safe to expose at all.
 	root.AddCommand(newSopsEditCmd())
 
-	// The desk supervisor: forgectl re-invoking itself, detached, to own one
-	// queued item's run. Hidden and outside the registry for the same reason
-	// as __sops-edit; the desk module takes it over when it lands.
-	root.AddCommand(newDeskPlumbingCmd())
-
 	// Last, so it sees every verb: under --json no failure renders fang's
 	// human error frame (forgectl#862, json_errors.go).
 	installJSONErrorContract(root)

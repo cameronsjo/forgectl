@@ -9,7 +9,7 @@ forgectl desk --no-icons                       # ASCII glyphs instead of icon gl
 forgectl desk runs --json                      # every run from every source, as JSON (no TTY needed)
 forgectl desk show 07-build                    # one run's flow as plain text
 forgectl desk show 07-build --at 120 --json    # the run's state after its first 120 events
-forgectl desk show nightly --from pipeline     # pick the source when two sources hold a run of that name
+forgectl desk show nightly --from pipeline --spec ~/pipeline.toml   # pick the source when two sources hold a run of that name
 ```
 
 `forgectl desk` has two jobs:
@@ -330,7 +330,7 @@ Each key is an exit code written as canonical decimal text from `"0"` to `"255"`
 
 ## Agent verbs
 
-The dashboard needs a terminal. These two verbs give the same information without one ([ADR-0008](../adr/0008-agent-contract.md), the agent contract). Both read the desk directory and every `--spec` passed, and neither opens a screen.
+The dashboard needs a terminal. These two verbs give the same information without one ([ADR-0008](../adr/0008-agent-contract.md), the agent contract). Both read the desk directory and every `--spec` passed, and neither opens a screen. `--spec` can be given to `desk` or to either verb.
 
 **They change the queue.** Listing the desk runs its scan, and the scan does two things: it fixes the hash of an item that was dropped into `pending/` by hand and not hashed yet, and it moves an item whose bytes changed since its hash was fixed to `skipped/` with reason `changed`. The dashboard's list reload does the same.
 
@@ -354,12 +354,12 @@ Lists every run from every source. Without `--json` it prints one run row per li
 
 - **`source`**: the source name: a spec's `name`, or `desk`.
 - **`kind`**: `log`, `summary`, or `desk`.
-- **`live`**: `live`, `ended`, or `stale` for a spec run; `waiting`, `running`, `ended`, `lost`, or `skipped` for a desk run.
-- **`updated`**: the time of the run's last change, in RFC 3339.
+- **`live`**: `live`, `ended`, or `stale` for a spec run; `running`, `ended`, `lost`, or `skipped` for a desk run. A desk item still waiting for approval is in the queue, not a run, so it is not listed.
+- **`updated`**: the time of the run's last change, in RFC 3339, or `null` when it is not known.
 - **`exit`**: the exit code, or `null` before the run ends.
 - **`partial`**: `true` when a file hit the 32 MiB cap.
 
-### `desk show <run> [--from SOURCE] [--at N] [--json]`
+### `desk show <run> [--spec FILE]... [--from SOURCE] [--at N] [--json]`
 
 Prints one run. Without `--json` it prints the compact flow as plain text. With `--json` it prints the run's folded state and its counts:
 
@@ -386,16 +386,22 @@ Prints one run. Without `--json` it prints the compact flow as plain text. With 
 ```
 
 - **`--from SOURCE`** picks the source when two sources hold a run with that name. Without it, a shared name exits 2 with `run "x" is in sources a and b; pass --from`.
-- **`--at N`** replays: the state after the first `N` events, the same state the dashboard's replay shows at event `N`.
+- **`--at N`** replays: the state after the first `N` events, the same state the dashboard's replay shows at event `N`. An `N` past the last event shows the whole run.
+- Every time (`start`, `end`, `restarts`, `last_event`) is RFC 3339 in UTC, or `null` when it is not known: a step that has not started, or a desk event, which carries no time of its own.
 
 Both `--json` verbs escape control characters in every string. A failure before any output follows the [`--json` stderr contract](../json-contract.md).
+
+A source that cannot be read (a spec that fails to load, or one whose root variable is unset) does not stop the others. Each verb prints what did load on stdout, names each failed source on stderr with its path and the TOML key, and exits 1.
 
 ## Exit codes
 
 | Code | When |
 |---:|---|
-| 0 | The dashboard was quit, or the verb printed its result |
+| 0 | The dashboard was quit, or the verb printed its result and every source was read |
 | 1 | `desk` was run without a terminal on stdin or stdout. It prints `desk needs a terminal on stdin and stdout; use "desk runs --json" or "desk show <run> --json"` |
-| 2 | `desk show` was given a run name that two sources hold, without `--from` |
+| 1 | `desk runs` or `desk show` could not read a source; what did load is still printed |
+| 1 | `desk show` was given a run that no source holds: `no run named "x"` |
+| 2 | `desk show` was given a run name that two sources hold, without `--from`: `run "x" is in sources a and b; pass --from` |
+| 2 | `desk show --from` named no source, or `--at` was negative |
 
-A spec that fails to load does not stop the other sources: the dashboard shows the `1 source failed` chip, and the other sources' runs still load.
+A spec that fails to load does not stop the other sources: the dashboard shows the `1 source failed` chip, and the other sources' runs still load. Running an approved item in the terminal does not change the dashboard's exit code.

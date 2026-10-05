@@ -38,6 +38,7 @@ deep-dive get a link here.
 | `resume` | Get back into a Claude Code session after a terminal restart | [resume](docs/commands/resume.md) |
 | `surface` | Start a harness inside a terminal manager (tmux/cmux/herdr) without exposing its invocation | Usage below |
 | `herdr` | Helpers for the herdr terminal multiplexer: group tabs into workspaces by rule | [herdr](docs/commands/herdr.md) |
+| `desk` | Approval queue and run viewer: approve staged scripts and batches, watch multi-step runs (Unix only) | [desk](docs/commands/desk.md) |
 | `tasks` | Browse a Vikunja task board, close a task, or serve the board as an MCP server | Usage below |
 | `recipe` | Run small built-in workbench recipes (alias: `r`) | [recipe](docs/commands/recipe.md) |
 | `workflow` | Run declarative workflows composing forgectl's other verbs (alias: `flow`) | Usage below |
@@ -293,6 +294,12 @@ forgectl theme preview                   # render each role so you can see it
 forgectl herdr organize                  # report how tabs would be grouped into workspaces and ordered
 forgectl herdr organize --explain        # also show which rule caught each tab
 forgectl herdr organize --apply          # make the moves; restores focus; needs the cameronsjo/herdr fork
+
+# desk — approval queue and run viewer (Unix only; see docs/commands/desk.md)
+forgectl desk                            # full-screen dashboard; needs a terminal on stdin and stdout
+forgectl desk --spec ~/pipeline.toml     # add the runs a run spec describes (repeatable; experimental format)
+forgectl desk runs --json                # every run from every source, as one JSON array
+forgectl desk show <run> --json          # one run's state; --at N replays, --from SOURCE picks the source
 
 # tasks — Vikunja task board: three read verbs over a local cache, one verb that closes a task, and an MCP server
 # one-time setup: store a READ-ONLY API token in the login keychain (prompts for the value)

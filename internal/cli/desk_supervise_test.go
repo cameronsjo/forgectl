@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/cameronsjo/forgectl/internal/module"
 )
 
 // `_supervise` runs an item only against the hash and kind the operator
@@ -18,7 +20,7 @@ func TestDeskSuperviseRequiresTheApprovedSHAAndKind(t *testing.T) {
 		"kind": {"--sha", sha, "01-x"},
 	} {
 		t.Run(flag, func(t *testing.T) {
-			cmd := newDeskPlumbingCmd()
+			cmd := newDeskCmd(module.Deps{})
 			cmd.SetOut(io.Discard)
 			cmd.SetErr(io.Discard)
 			cmd.SetArgs(append([]string{"_supervise", "--dir", filepath.Join(t.TempDir(), "desk")}, args...))

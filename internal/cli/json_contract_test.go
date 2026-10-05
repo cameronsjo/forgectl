@@ -24,6 +24,7 @@ import (
 var jsonContractExempt = map[string]string{
 	"bench open":             "opens a hearth or grafana UI in the browser; nothing to report (`bench status --json` reports the services)",
 	"bench up":               "brings the bench services up; the exit code is the outcome and `bench status --json` reports the result",
+	"desk":                   "a bare `desk` opens the full-screen dashboard and refuses without a terminal; `desk runs --json` and `desk show --json` report its state",
 	"docker build":           "runs a build and streams docker's own output; the exit code is the outcome",
 	"docker run":             "runs the image with the terminal wired through; the container's output is the payload",
 	"docker shell":           "opens an interactive shell in the image; nothing to report",
