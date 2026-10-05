@@ -14,11 +14,11 @@ import (
 // Codex 0.160.0) and sanitized of paths, hostnames, and session ids.
 func fixture(t *testing.T, name string) Screen {
 	t.Helper()
-	text, err := os.ReadFile(filepath.Join("testdata", name+".screen"))
+	text, err := os.ReadFile(filepath.Join("testdata", name+".screen")) //nolint:gosec // G304: name is a literal at every call site
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(filepath.Join("testdata", name+".status.json"))
+	raw, err := os.ReadFile(filepath.Join("testdata", name+".status.json")) //nolint:gosec // G304: name is a literal at every call site
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestLoad(t *testing.T) {
 		if err := os.WriteFile(p, []byte(good), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Chmod(p, 0o620); err != nil {
+		if err := os.Chmod(p, 0o620); err != nil { //nolint:gosec // G302: the test needs a group-writable file to prove Load refuses it
 			t.Fatal(err)
 		}
 		if _, err := Load(p); !errors.Is(err, ErrTable) {

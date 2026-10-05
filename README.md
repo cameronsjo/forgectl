@@ -169,6 +169,7 @@ forgectl surface launch <target> --surface tmux           # tmux, cmux, or herdr
 forgectl surface launch . --surface tmux --name review     # override the display name (defaults to the target dir's name)
 forgectl surface launch . --surface tmux --harness codex   # run codex here instead of the profile's harness (claude or codex)
 forgectl surface launch . --surface herdr --worktree feat/x --name x   # coordinator worker: own worktree under .claude/worktrees/x, own herdr workspace, ledger row
+forgectl surface ready x --json    # wait until worker x is at its input prompt; exit 1 naming any blocking dialog (never answers one)
 
 # recipe — run small built-in workbench recipes (alias: r)
 forgectl recipe afk                       # run /go:afk on the current Herdr agent, then /compact it

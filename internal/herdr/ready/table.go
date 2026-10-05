@@ -97,7 +97,7 @@ func Load(path string) (*Table, error) {
 	if info.Size() > maxTableBytes {
 		return nil, fmt.Errorf("%w: %s is %d bytes, the limit is %d", ErrTable, path, info.Size(), maxTableBytes)
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is forgectl's own config-dir override, Lstat-checked above as a regular, non-group-writable file
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s: %w", ErrTable, path, err)
 	}
