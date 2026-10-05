@@ -100,7 +100,7 @@ The file is created with mode `0600`. forgectl refuses to append to it when the 
 
 ### The host refusal line
 
-`tasks-closes.jsonl` holds one other kind of line. When a `tasks` verb that would read the keychain (`ls`, `show`, `ready`, `done`, or `mcp` over stdio) is refused by the host rule and exits `4`, forgectl appends one line to the file:
+`tasks-closes.jsonl` holds two other kinds of line: this one, and the MCP server's board-write line below. When a `tasks` verb that would read the keychain (`ls`, `show`, `ready`, `done`, or `mcp` over stdio) is refused by the host rule and exits `4`, forgectl appends one line to the file:
 
 ```json
 {"time":"2026-01-02T03:04:05Z","event":"host_refused","verb":"ls","host":"other.example","credential":"vikunja-readonly"}
@@ -109,6 +109,22 @@ The file is created with mode `0600`. forgectl refuses to append to it when the 
 `event` is always `host_refused`; a close record has no `event` key, which is how a reader tells the two apart. `verb` is the `tasks` subcommand. `host` is the value given to `--host` when it is a plain hostname (letters, digits, `.` and `-`), and the fixed text `[not a plain hostname]` for anything else, so no part of a URL typed there is written. It is not a credential filter: a secret typed as the whole value, made only of those characters, is written. `credential` is the name of the keychain entry the verb would have read, or `""` when that name is not a valid service name. No token is in the line: the keychain has not been read when the rule refuses.
 
 This line goes to the file only. stderr carries the refusal itself, as the error text or, under `--json`, as the failure object with code `failed`. If the line cannot be appended, the exit code is still `4` and stderr gets one plain line that says so, before the failure object.
+
+### The board-write line
+
+The MCP server writes one more kind of line, for its two tools that add to the board. Each `create_task` or `add_comment` call that sends a write, and each one refused by the session's write limit, writes one line where the server writes its close records: stderr, and on stdio `tasks-closes.jsonl` too. A call that sends nothing (a blank title, a body over the limit, a failed pre-read) writes no line.
+
+```json
+{"time":"2026-01-02T03:04:05Z","event":"task_created","tool":"create_task","task_id":901,"project_id":1,"caller":"hermes","credential":"vikunja-readonly","host":"<host>","outcome":"written"}
+```
+
+`event` is `task_created` or `comment_added`, and `tool` is the tool behind it; the `event` key and its value are how a reader tells this line from a close record (no `event` key) and a host refusal (`host_refused`). `task_id` is the created task, `0` when no created id was read back, or the task commented on. `project_id` is the project written to, `0` when nothing was read. `caller` is the name the MCP client declared at `initialize`, reduced the way the created-by trailer reduces it; nothing verifies it. `credential` is the token's source name, never the token.
+
+`outcome` is `written`, `unauthorized` (the board answered 401 or 403), `write_refused` (any other refusal), `not_confirmed` (no answer this client could read says whether the write landed), or `cap`. The line never carries the title, the description, or the comment text.
+
+The write limit is 20 per MCP session, across `create_task` and `add_comment` together, and it is separate from the `complete_task` limit. A call past it is a tool error starting `create_task: write_cap:` or `add_comment: write_cap:`, sends nothing, and writes a line with outcome `cap`. A write that was sent spends a slot whatever its outcome; a call that sends nothing spends none.
+
+If the line cannot be written, the tool result says so on its last line, and a write that landed is still reported as written.
 
 ## Enforcement
 

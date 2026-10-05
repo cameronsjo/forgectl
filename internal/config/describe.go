@@ -41,7 +41,9 @@ type Report struct {
 	// the same partial value Load returns after logging its warning.
 	DecodeErr error
 	// InvalidErr is a value the loader refuses in a file that parsed in full:
-	// a [tasks] allowed_hosts entry that is not a plain hostname. It is not a
+	// a [tasks] allowed_hosts entry that is not a plain hostname, or a
+	// log_level the logger does not know. When both are wrong it is the
+	// first, and Refused names both keys. It is not a
 	// DecodeErr, because nothing failed to decode: every key in the file was
 	// read, and calling that a parse failure sends the operator looking for a
 	// syntax error that is not there. Commands refuse the file all the same.
@@ -126,7 +128,13 @@ func describeFile(path string) (Config, Report) {
 		// why this is not recorded as a decode error.
 		if err := cfg.Tasks.Validate(); err != nil {
 			rep.InvalidErr = err
-			rep.Refused = []string{tasksAllowedHostsKey}
+			rep.Refused = append(rep.Refused, tasksAllowedHostsKey)
+		}
+		if err := validateLogLevel(cfg.LogLevel); err != nil {
+			if rep.InvalidErr == nil {
+				rep.InvalidErr = err
+			}
+			rep.Refused = append(rep.Refused, logLevelKey)
 		}
 	}
 	return cfg, rep

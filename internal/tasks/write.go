@@ -77,11 +77,8 @@ func (c *Client) CreateTask(ctx context.Context, projectID int, title, descripti
 		return Task{}, fmt.Errorf("tasks: create: project_id must be a positive project id, got %d", projectID)
 	}
 	title = strings.TrimSpace(title)
-	if title == "" {
-		return Task{}, fmt.Errorf("tasks: create: title is required and must not be blank")
-	}
-	if n := len([]rune(title)); n > maxTitleRunes {
-		return Task{}, fmt.Errorf("tasks: create: title is %d characters, over the %d limit", n, maxTitleRunes)
+	if err := checkTitle(title); err != nil {
+		return Task{}, err
 	}
 	if n := len([]rune(description)); n > maxDescriptionSendRunes {
 		return Task{}, fmt.Errorf("tasks: create: description is %d characters, over the %d limit", n, maxDescriptionSendRunes)
@@ -102,17 +99,40 @@ func (c *Client) CreateTask(ctx context.Context, projectID int, title, descripti
 	return created, nil
 }
 
+// checkTitle is CreateTask's local refusal of a title, given trimmed. It is
+// its own function so the MCP handler can make the same check before it takes
+// a slot of the session's write cap: a call refused here sends nothing, and
+// the handler must know that without reading CreateTask's error.
+func checkTitle(title string) error {
+	if title == "" {
+		return fmt.Errorf("tasks: create: title is required and must not be blank")
+	}
+	if n := len([]rune(title)); n > maxTitleRunes {
+		return fmt.Errorf("tasks: create: title is %d characters, over the %d limit", n, maxTitleRunes)
+	}
+	return nil
+}
+
+// checkComment is AddComment's local refusal of a body, given trimmed, split
+// out for the same reason as checkTitle.
+func checkComment(comment string) error {
+	if comment == "" {
+		return fmt.Errorf("tasks: comment: body is required and must not be blank")
+	}
+	if n := len([]rune(comment)); n > maxCommentRunes {
+		return fmt.Errorf("tasks: comment: body is %d characters, over the %d limit", n, maxCommentRunes)
+	}
+	return nil
+}
+
 // AddComment posts a comment on taskID via PUT /tasks/{id}/comments.
 func (c *Client) AddComment(ctx context.Context, taskID int, comment string) (Comment, error) {
 	if taskID <= 0 {
 		return Comment{}, fmt.Errorf("tasks: comment: task_id must be a positive task id, got %d", taskID)
 	}
 	comment = strings.TrimSpace(comment)
-	if comment == "" {
-		return Comment{}, fmt.Errorf("tasks: comment: body is required and must not be blank")
-	}
-	if n := len([]rune(comment)); n > maxCommentRunes {
-		return Comment{}, fmt.Errorf("tasks: comment: body is %d characters, over the %d limit", n, maxCommentRunes)
+	if err := checkComment(comment); err != nil {
+		return Comment{}, err
 	}
 
 	body, err := c.put(ctx, fmt.Sprintf("/tasks/%d/comments", taskID), map[string]any{"comment": comment})

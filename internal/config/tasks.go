@@ -29,18 +29,19 @@ func (tc TasksConfig) IsZero() bool {
 	return len(tc.AllowedHosts) == 0
 }
 
-// tasksConfigError is a [tasks] value that decoded and is not valid. It is a
-// type of its own so the loader can word the file as invalid, and not as one
+// invalidValueError is a config value that decoded and is not valid: a
+// [tasks] allowed_hosts entry, or a log_level the logger does not know. It is
+// a type of its own so the loader can word the file as invalid, and not as one
 // that does not parse.
-type tasksConfigError struct {
+type invalidValueError struct {
 	message string
 }
 
-func (e tasksConfigError) Error() string { return e.message }
+func (e invalidValueError) Error() string { return e.message }
 
-// isTasksConfigError reports whether err is a refused [tasks] value.
-func isTasksConfigError(err error) bool {
-	var refused tasksConfigError
+// isInvalidValueError reports whether err is a refused config value.
+func isInvalidValueError(err error) bool {
+	var refused invalidValueError
 	return errors.As(err, &refused)
 }
 
@@ -51,7 +52,7 @@ func isTasksConfigError(err error) bool {
 func (tc TasksConfig) Validate() error {
 	for i, host := range tc.AllowedHosts {
 		if !PlainHostname(host) {
-			return tasksConfigError{message: fmt.Sprintf(
+			return invalidValueError{message: fmt.Sprintf(
 				"[tasks].allowed_hosts[%d] = %s: must be a plain hostname (letters, digits, '.' and '-'), "+
 					"with no port, user, path, trailing dot, empty label, or IP address",
 				i, quoteConfigValue(host))}
@@ -128,8 +129,10 @@ func numericLabel(label string) bool {
 // server append close records to: <os.UserConfigDir()>/forgectl/
 // tasks-closes.jsonl, beside TasksCachePath. One JSON object per line. Most
 // are close records: a call that sent an update to the board (or, from the MCP
-// server, one refused by its per-session limit). The rest are host refusals: a
-// `tasks` verb stopped by the allowed-host rule before it read the keychain.
+// server, one refused by its per-session limit). The stdio MCP server also
+// writes a board-write line for each create_task or add_comment write, and
+// the rest are host refusals: a `tasks` verb stopped by the allowed-host rule
+// before it read the keychain.
 //
 // It is written whatever log_level is, and is not one of the daily log files:
 // nothing prunes it. It holds no credential — a record names where the token
