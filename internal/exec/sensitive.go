@@ -112,6 +112,10 @@ const (
 	// trampoline line into a pane the inspection found idle.
 	KindHerdrPaneInspect
 	KindHerdrBootstrap
+	// KindHerdrNotify is `notification show`: a desktop notification whose
+	// title and body are item names and WHAT text, which is why it routes
+	// through this seam rather than the argv-logging Runner.
+	KindHerdrNotify
 	// KindHerdrScreenRead and KindHerdrPaneStatus are `surface ready`'s two
 	// reads of a worker's root pane: its visible text and herdr's agent status.
 	KindHerdrScreenRead
@@ -161,6 +165,7 @@ var kindNames = [kindCount]string{
 	KindHerdrCleanup:     "herdr.cleanup",
 	KindHerdrPaneInspect: "herdr.pane-inspect",
 	KindHerdrBootstrap:   "herdr.bootstrap",
+	KindHerdrNotify:      "herdr.notification-show",
 	KindHerdrScreenRead:  "herdr.screen-read",
 	KindHerdrPaneStatus:  "herdr.pane-status",
 

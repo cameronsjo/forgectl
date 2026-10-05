@@ -28,6 +28,7 @@ const KindCmuxSnapshot CommandKind
 const KindHerdrBootstrap CommandKind
 const KindHerdrCleanup CommandKind
 const KindHerdrCreate CommandKind
+const KindHerdrNotify CommandKind
 const KindHerdrPaneInspect CommandKind
 const KindHerdrPaneStatus CommandKind
 const KindHerdrProbe CommandKind
