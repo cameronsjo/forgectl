@@ -241,9 +241,10 @@ func TestShell_CarriesTheHooksItsScriptsUse(t *testing.T) {
 	for _, want := range []string{
 		`<a class="skip-link" href="#doc-main">`, // skip link and its target
 		`<main id="doc-main"`,
-		`id="live-status"`, // reload.js marks it when the stream gives up
+		`id="live-status"`,      // ARIA/anchor id; scripts use the data-fc hook below
+		`data-fc="live-status"`, // reload.js marks it when the stream gives up
 		`class="live-status__text"`,
-		`class="doc-body"`, // reload.js puts the missing-doc banner here
+		`data-fc="doc-body"`, // reload.js puts the missing-doc banner here
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("shell is missing %q", want)

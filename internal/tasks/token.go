@@ -1,7 +1,9 @@
-// Package tasks is a read-only client for a Vikunja instance (tasks.sjo.lol),
-// a local cache of what it returns, and the pure `ready` ranking logic layered
-// on top. It is a plain library per internal/module's doc comment — only
-// internal/cli wires it to a command surface.
+// Package tasks is a credentialed client for a Vikunja instance
+// (tasks.sjo.lol), a local cache of what it reads, and the pure `ready`
+// ranking logic layered on top. It reads, creates tasks and comments, and
+// marks a task done; whether any write succeeds is decided by the token's
+// scope, not here. It is a plain library per internal/module's doc comment —
+// only internal/cli wires it to a command surface.
 //
 // Every exported type that could carry the bearer token renders "[redacted]"
 // from String, GoString, Format, LogValue, and MarshalJSON, mirroring
@@ -16,6 +18,7 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -35,6 +38,11 @@ const Redacted = "[redacted]"
 // instance) without any code change.
 const DefaultKeychainService = "vikunja-readonly"
 
+// SecurityBinary is the keychain tool, by absolute path. A bare name resolves
+// through PATH, and a PATH entry ahead of /usr/bin could then supply a
+// different token to this client.
+const SecurityBinary = "/usr/bin/security"
+
 // keychainTimeout bounds the `security find-generic-password` call. It is
 // generous relative to a keychain read that succeeds instantly, because the
 // case it exists for is one that never returns: a locked keychain or an ACL
@@ -52,23 +60,39 @@ const keychainTimeout = 15 * time.Second
 // spelled differently.
 var tokenShape = regexp.MustCompile(`^tk_[0-9a-fA-F]{40,}$`)
 
-// Token is an opaque bearer credential. The payload lives behind a closure —
-// not a plain string field — for the same reason internal/exec.SecretArg's
-// does: fmt, slog's TextHandler, and encoding/json all reach a value through
-// reflection only when it is NOT held behind an unexported field of a struct
-// with no redacting method set of its own, and a func value has nothing for
-// reflection to print but an address. Holding this type in an EXPORTED field
-// of another struct with no Format/MarshalJSON of its own would still print
-// verbatim under %+v — callers must hold a Token privately or route it
-// through Header(), never expose it on a public struct field.
+// Token is an opaque bearer credential. The payload lives behind a closure,
+// not a plain string field, and the redacting methods below cover the Token's
+// own formatting. Header() is the only way to read the value.
+//
+// A token read from the keychain also carries where it may be sent: see
+// checkHost. That travels with the credential, not with the code that read
+// it, so a caller that builds a client without asking first is still refused.
 type Token struct {
 	reveal func() string
+	// hostBound is true for a keychain token. hosts is then the list it was
+	// read under; the default host is always allowed besides.
+	hostBound bool
+	hosts     []string
 }
 
 // newToken wraps v. Unexported: the only way to mint a Token from outside
-// this package is ReadToken, so a caller can never construct one from a
-// string literal that skips shape validation.
+// this package is ReadToken or ReadTokenFile, so a caller can never construct
+// one from a string literal that skips shape validation. The token it returns
+// has no host restriction; ReadToken adds one.
 func newToken(v string) Token { return Token{reveal: func() string { return v }} }
+
+// checkHost reports whether this token may be sent to host.
+//
+// A keychain token may go to the default host and to the hosts it was read
+// under (CheckAllowedHost). A token from a mounted file carries no such list:
+// that transport runs in a container with a required address pin list, and
+// has no user config file to hold one.
+func (t Token) checkHost(host string) error {
+	if !t.hostBound {
+		return nil
+	}
+	return CheckAllowedHost(host, t.hosts)
+}
 
 // Present reports whether a token was actually read (as opposed to the zero
 // Token, which a caller might hold before ReadToken ever runs).
@@ -212,12 +236,16 @@ func ReadTokenFile(path string) (Token, error) {
 }
 
 // ReadToken reads service's value from the macOS login keychain via
-// `security find-generic-password -s <service> -w`. The value travels on
+// `/usr/bin/security find-generic-password -s <service> -w`. The value travels on
 // the child's stdout, never on argv — service is a fixed, non-secret
 // identifier, and runner.Run's own argv logging therefore never touches the
 // credential. The returned Token's payload is revealed exactly once, into
 // this closure; nothing above this function ever sees the raw string.
-func ReadToken(ctx context.Context, runner exec.Runner, service string) (Token, error) {
+//
+// hosts is the user's allowed-host list (CheckAllowedHost). The returned
+// token remembers it, and NewClient refuses to build a client that would send
+// the token to any other host. Nil means the default host only.
+func ReadToken(ctx context.Context, runner exec.Runner, service string, hosts []string) (Token, error) {
 	// Bounded on purpose. A locked keychain, or an item whose ACL demands
 	// interactive confirmation, makes `security` block on a GUI prompt with
 	// no deadline of its own — so an unbounded call here hangs the command
@@ -225,25 +253,31 @@ func ReadToken(ctx context.Context, runner exec.Runner, service string) (Token, 
 	ctx, cancel := context.WithTimeout(ctx, keychainTimeout)
 	defer cancel()
 
-	out, err := runner.Run(ctx, "security", "find-generic-password", "-s", service, "-w")
+	out, err := runner.Run(ctx, SecurityBinary, "find-generic-password", "-s", service, "-w")
 	if err != nil {
 		// err is DELIBERATELY dropped rather than wrapped. exec.CommandError
 		// retains the child's stdout in its exported Output field, and this
 		// child's stdout is the bearer token — a nonzero exit does not mean
 		// stdout was empty. Wrapping it to "improve the error context" would
-		// put the credential into any error string, log line, or %+v that
-		// ever renders this error. Do not add %w here.
-		return Token{}, fmt.Errorf("%w: service %q", ErrTokenNotFound, service)
+		// put it where any code that holds the returned error, directly or
+		// through errors.As, can read or dump it, so the error is dropped
+		// whole and never wrapped, logged or rendered. Do not add %w here.
+		return Token{}, fmt.Errorf("%w: service %s", ErrTokenNotFound, termsafe.QuoteArgMax(service, 0))
 	}
 	value := strings.TrimSpace(out)
 	if value == "" {
-		return Token{}, fmt.Errorf("%w: service %q", ErrTokenNotFound, service)
+		return Token{}, fmt.Errorf("%w: service %s", ErrTokenNotFound, termsafe.QuoteArgMax(service, 0))
 	}
 	if !tokenShape.MatchString(value) {
 		// Names the service but never the value — an operator running two
 		// instances needs to know WHICH entry is bad, and the malformed
 		// value itself is still a credential.
-		return Token{}, fmt.Errorf("%w: service %q", ErrTokenMalformed, service)
+		return Token{}, fmt.Errorf("%w: service %s", ErrTokenMalformed, termsafe.QuoteArgMax(service, 0))
 	}
-	return newToken(value), nil
+	token := newToken(value)
+	token.hostBound = true
+	// Copied: the list is the caller's slice, and it now decides where this
+	// credential may go for as long as the token lives.
+	token.hosts = slices.Clone(hosts)
+	return token, nil
 }

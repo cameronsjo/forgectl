@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # Plan: cross-project review dashboard (`forgectl review`)
 
 ## Provenance

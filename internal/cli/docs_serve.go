@@ -50,26 +50,29 @@ func newDocsServeCmd(deps module.Deps) *cobra.Command {
 		Short: "Index and serve markdown docs over loopback HTTP",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Exit contract, as docs check/list: 2 the server could not be
+			// set up (bad root, bad config, index failure, bad flag).
 			roots, err := resolveDocsRoots(args, deps.Cfg.Docs)
 			if err != nil {
-				return err
+				return WithExitCode(err, 2)
 			}
 			opts, err := docsIndexOptions(deps.Cfg.Docs)
 			if err != nil {
-				return err
+				return WithExitCode(err, 2)
 			}
 			idx, err := docspkg.NewIndexWithOptions(roots, opts)
 			if err != nil {
-				return err
+				return WithExitCode(err, 2)
 			}
+			noteSkippedPaths(cmd.ErrOrStderr(), idx)
 			return runDocsServe(cmd, deps, idx, addr, openFlag, tokenFile)
 		},
 	}
-	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+	cmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
 		if err != nil && err.Error() == "unknown flag: --token" {
-			return errors.New("--token was removed because command-line values are visible to other processes; use --token-file instead")
+			err = errors.New("--token was removed because command-line values are visible to other processes; use --token-file instead")
 		}
-		return err
+		return docsFlagError("docs serve")(cmd, err)
 	})
 	cmd.Flags().StringVar(&addr, "addr", "", "bind address (default: [docs].addr, else 127.0.0.1 with a random port)")
 	cmd.Flags().BoolVar(&openFlag, "open", false, "open the system browser once the server is listening")
@@ -267,6 +270,32 @@ func runDocsServeWithRuntime(
 	tokenFile string,
 	rt docsServeRuntime,
 ) error {
+	var openURL func(addr string) string
+	if openFlag {
+		openURL = docsIndexURL
+	}
+	return runDocsServeOpening(cmd, deps, idx, addrFlag, openURL, tokenFile, rt)
+}
+
+// docsIndexURL is the page `docs serve --open` points the browser at: the
+// reader's index on the bound address.
+func docsIndexURL(addr string) string {
+	return docspkg.ServerInfo{Addr: addr}.BaseURL()
+}
+
+// runDocsServeOpening is runDocsServeWithRuntime with the browser target spelled
+// out: openURL maps the bound address onto the page to open, and nil opens
+// nothing. `docs serve --open` passes the index; `docs read`'s fallback passes
+// the one document it resolved.
+func runDocsServeOpening(
+	cmd *cobra.Command,
+	deps module.Deps,
+	idx *docspkg.Index,
+	addrFlag string,
+	openURL func(addr string) string,
+	tokenFile string,
+	rt docsServeRuntime,
+) error {
 	out := cmd.OutOrStdout()
 	errOut := cmd.ErrOrStderr()
 
@@ -277,15 +306,17 @@ func runDocsServeWithRuntime(
 	if bindAddr == "" {
 		bindAddr = httpsrv.LoopbackAddr
 	}
+	// Failures up to and including the bind are "could not run" (exit 2, see
+	// docs_errors.go); once the listener exists, a failure is the server's own.
 	resolvedToken, err := resolveDocsToken(tokenFile, bindAddr)
 	if err != nil {
-		return err
+		return WithExitCode(err, 2)
 	}
 	token := resolvedToken.value
 
 	ln, err := rt.listen(bindAddr)
 	if err != nil {
-		return fmt.Errorf("bind %s: %w", bindAddr, err)
+		return WithExitCode(fmt.Errorf("bind %s: %w", bindAddr, err), 2)
 	}
 	defer ln.Close() //nolint:errcheck // best-effort; Shutdown below already closes it on the success path
 
@@ -331,7 +362,7 @@ func runDocsServeWithRuntime(
 			// half-started server: nothing is listening and nothing was published.
 			events.Close()
 			ln.Close() //nolint:errcheck // returning a failure; best-effort release
-			return errDocsServeGeneration
+			return WithExitCode(errDocsServeGeneration, 2)
 		}
 		serversDir, initialInfo, eligible = dir, info, true
 		generation.Store(info.Generation)
@@ -419,7 +450,7 @@ func runDocsServeWithRuntime(
 		outcome, publishErr := session.publish(ctx, initialInfo)
 		lease = outcome.lease
 		if publishErr != nil {
-			return abortDocsServeStartup(rt, srv, events, &background, lease, errOut, publishErr)
+			return abortDocsServeStartup(rt, srv, events, &background, lease, errOut, WithExitCode(publishErr, 2))
 		}
 		if outcome.primary != nil {
 			return finishDocsServeStartup(rt, srv, events, &background, lease, errOut, *outcome.primary)
@@ -453,7 +484,7 @@ func runDocsServeWithRuntime(
 		fmt.Fprintln(out, "  live reload: on")
 	}
 
-	if openFlag {
+	if openURL != nil {
 		// Don't open a tab that is guaranteed to 401. A browser navigation cannot
 		// carry an Authorization header, so on a token-protected server --open
 		// would reliably produce an unauthorized page and leave the operator
@@ -462,7 +493,7 @@ func runDocsServeWithRuntime(
 		// verbs consistent rather than correct in one place only.
 		if token != "" {
 			fmt.Fprintln(errOut, "note: not opening a browser — this server requires a bearer token, which a browser navigation cannot supply")
-		} else if openErr := docspkg.OpenBrowser(ctx, deps.Runner, url); openErr != nil {
+		} else if openErr := docspkg.OpenBrowser(ctx, deps.Runner, openURL(ln.Addr().String())); openErr != nil {
 			warnDocsServe(errOut, "warning: failed to open browser: %v", openErr)
 		}
 	}

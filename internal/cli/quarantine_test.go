@@ -17,12 +17,16 @@ package cli
 //
 // newQuarantineStatusCmd (Classification: API handler / cobra command)
 //   [x] Happy: status reports present/quarantined/absent per target
+//   [x] Happy: --json emits one {target,state,path,quarantined_path} row per target
+//   [x] Edge: the --json writer encodes an empty row set as [], never null
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -457,6 +461,69 @@ func TestQuarantineStatus_NoPhantomNestedRowUnderCoveredRoot(t *testing.T) {
 	for _, want := range []string{".claude: present", filepath.ToSlash(filepath.Join("packages", "api", "CLAUDE.md")) + ": present"} {
 		if !strings.Contains(filepath.ToSlash(body), want) {
 			t.Fatalf("status missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestQuarantineStatusCmd_JSON(t *testing.T) {
+	root := t.TempDir()
+	writeQuarantineFixture(t, filepath.Join(root, "CLAUDE.md"), "x")
+	writeQuarantineFixture(t, filepath.Join(root, "_AGENTS.md"), "x")
+
+	cmd := newQuarantineCmd(newQuarantineTestClient())
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"status", "--json", "--root", root, "--targets", "CLAUDE.md", "--targets", "AGENTS.md", "--targets", "missing.md"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if errOut.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", errOut.String())
+	}
+	var raw []map[string]json.RawMessage
+	if err := json.Unmarshal(out.Bytes(), &raw); err != nil {
+		t.Fatalf("stdout is not a JSON array of objects: %v\n%s", err, out.String())
+	}
+	wantKeys := []string{"path", "quarantined_path", "state", "target"}
+	for i, row := range raw {
+		keys := make([]string, 0, len(row))
+		for k := range row {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		if strings.Join(keys, ",") != strings.Join(wantKeys, ",") {
+			t.Errorf("row %d keys = %v, want %v", i, keys, wantKeys)
+		}
+	}
+	var rows []quarantineStatusRowJSON
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	want := []quarantineStatusRowJSON{
+		{Target: "CLAUDE.md", State: "present", Path: filepath.Join(root, "CLAUDE.md"), QuarantinedPath: filepath.Join(root, "_CLAUDE.md")},
+		{Target: "AGENTS.md", State: "quarantined", Path: filepath.Join(root, "AGENTS.md"), QuarantinedPath: filepath.Join(root, "_AGENTS.md")},
+		{Target: "missing.md", State: "absent", Path: filepath.Join(root, "missing.md"), QuarantinedPath: filepath.Join(root, "_missing.md")},
+	}
+	if len(rows) != len(want) {
+		t.Fatalf("rows = %+v, want %+v", rows, want)
+	}
+	for i := range want {
+		if rows[i] != want[i] {
+			t.Errorf("row %d = %+v, want %+v", i, rows[i], want[i])
+		}
+	}
+}
+
+func TestWriteQuarantineStatusJSON_EmptyIsArray(t *testing.T) {
+	for _, rows := range [][]quarantineStatusRowJSON{nil, {}} {
+		var out bytes.Buffer
+		if err := writeQuarantineStatusJSON(&out, rows); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if got := strings.TrimSpace(out.String()); got != "[]" {
+			t.Errorf("empty rows encoded as %q, want []", got)
 		}
 	}
 }

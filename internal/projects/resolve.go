@@ -87,7 +87,11 @@ func (c *Client) ResolveTarget(target string) (string, error) {
 	}
 
 	if looksLikePath(target) {
-		return canonicalDir(expandHome(target))
+		path, err := expandHome(target)
+		if err != nil {
+			return "", err
+		}
+		return canonicalDir(path)
 	}
 	return c.resolveByName(target)
 }
@@ -104,18 +108,27 @@ func looksLikePath(target string) bool {
 // would type it in a shell. Only a leading bare ~ or ~/: ~user is deliberately
 // unsupported, because resolving another account's home is not something a
 // launch should be doing.
-func expandHome(p string) string {
+//
+// A failed home lookup is an error, not a pass-through: returning "~/x"
+// unchanged would let canonicalDir resolve it against the working directory,
+// naming a different directory than the one the operator typed.
+func expandHome(p string) (string, error) {
+	return expandHomeWith(p, os.UserHomeDir)
+}
+
+// expandHomeWith is expandHome with the home lookup injected.
+func expandHomeWith(p string, userHome func() (string, error)) (string, error) {
 	if p != "~" && !strings.HasPrefix(p, "~"+string(filepath.Separator)) {
-		return p
+		return p, nil
 	}
-	home, err := os.UserHomeDir()
+	home, err := userHome()
 	if err != nil {
-		return p
+		return "", fmt.Errorf("%w: expanding ~: %w", ErrTargetUnusable, termsafe.Error(err))
 	}
 	if p == "~" {
-		return home
+		return home, nil
 	}
-	return filepath.Join(home, p[2:])
+	return filepath.Join(home, p[2:]), nil
 }
 
 // canonicalDir makes a path absolute, resolves symlinks, and proves it is a
@@ -148,6 +161,9 @@ func canonicalDir(path string) (string, error) {
 // resolveByName searches the root for exactly one directory with this name.
 func (c *Client) resolveByName(name string) (string, error) {
 	if c.Dir == "" {
+		if c.rootErr != nil {
+			return "", fmt.Errorf("%w: %w", ErrTargetNotFound, termsafe.Error(c.rootErr))
+		}
 		return "", fmt.Errorf("%w: no project root is configured", ErrTargetNotFound)
 	}
 

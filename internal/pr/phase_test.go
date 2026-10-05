@@ -506,3 +506,31 @@ func TestPrepareMany_ReservesUnderOneHoldAndNotAcrossTheClones(t *testing.T) {
 		}
 	}
 }
+
+func TestKnownPhases_RosterIsSaneAndAgreesWithValid(t *testing.T) {
+	roster := KnownPhases()
+	if len(roster) == 0 {
+		t.Fatal("KnownPhases() is empty")
+	}
+	seen := map[Phase]bool{}
+	for _, p := range roster {
+		if p == "" || p == anyPhase {
+			t.Errorf("roster contains the empty/wildcard phase %q", p)
+		}
+		if seen[p] {
+			t.Errorf("roster lists %q twice", p)
+		}
+		seen[p] = true
+		if !p.valid() {
+			t.Errorf("roster phase %q is not valid()", p)
+		}
+	}
+	if Phase("bogus").valid() {
+		t.Error("an unknown phase reads as valid")
+	}
+	// A caller mutating the returned slice must not corrupt the roster.
+	roster[0] = "mutated"
+	if KnownPhases()[0] == "mutated" || Phase("mutated").valid() {
+		t.Error("KnownPhases() exposes the backing roster")
+	}
+}

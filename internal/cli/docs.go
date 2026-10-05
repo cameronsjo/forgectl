@@ -33,19 +33,29 @@ workbench — no terminal-specific rendering, no popping between windows.
   forgectl docs serve --open             also open the system browser
   forgectl docs open [path]              point the browser at a doc on the
                                          already-running reader
+  forgectl docs read <file>              read one doc in the terminal with
+                                         mdroll, or in the HTML reader
   forgectl docs list [dir|file ...]      list the indexed docs, no server
   forgectl docs list --json              machine-readable output for scripts
+  forgectl docs check [dir|file ...]     report broken links, broken anchors,
+                                         and orphan pages; no server
+  forgectl docs check --json             the same report for scripts
+  forgectl docs search <query> [--json]  full-text search the indexed docs
+                                         (ripgrep backend)
 
 Diagrams render in the page: a fenced code block tagged mermaid becomes a live
 diagram themed from the same Artificer tokens as the rest of the reader, and
 both those and inline SVG pan and zoom (drag to pan, modifier-scroll or
 click-then-scroll to zoom, double-click or 0 to reset).
 
-With no arguments, both verbs index cwd, ./docs (if present), and
-$CADENCE_FIELD_REPORTS_DIR (if set), plus any extra roots configured in the
-[docs] section of config.toml (macOS: ~/Library/Application
-Support/forgectl/config.toml). Naming directories or files on the command
-line replaces that default set entirely.
+serve, list, and check index cwd, ./docs (if present), and
+$CADENCE_FIELD_REPORTS_DIR (if set) when given no arguments, plus any extra
+roots configured in the [docs] section of config.toml (macOS:
+~/Library/Application Support/forgectl/config.toml). Naming directories or
+files on the command line replaces that default set entirely. read and search
+take no roots: they always use that default set. docs check exits 0 when
+clean, 1 when it found problems (the full report is on stdout), and 2 when it
+could not run.
 
 The server binds loopback-only by default and rejects any request whose
 Host header isn't 127.0.0.1/localhost/::1 — DNS rebinding defense, not just
@@ -60,7 +70,10 @@ navigation cannot attach an Authorization header.`,
 	cmd.AddCommand(
 		newDocsServeCmd(deps),
 		newDocsOpenCmd(deps),
+		newDocsReadCmd(deps),
 		newDocsListCmd(deps),
+		newDocsCheckCmd(deps),
+		newDocsSearchCmd(deps),
 	)
 	return cmd
 }

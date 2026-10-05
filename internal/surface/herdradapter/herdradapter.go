@@ -59,10 +59,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/herdr/wire"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 )
 
@@ -208,18 +208,13 @@ func resolveSession(getenv func(string) string) (string, backend.ServerSource, e
 	return defaultSession, backend.HerdrDefaultSessionServer(), nil
 }
 
-// maxSessionNameLen bounds a session name. herdr's own names are short; the cap
-// exists so an operator's environment cannot put an unbounded string on a
-// command line.
-const maxSessionNameLen = 64
-
-// validSessionName keeps the pin to a shape that is unambiguously one operand.
+// validSessionName keeps the pin to a shape that is unambiguously one operand:
+// the floor every herdr operand meets (wire.CheckOperand, shared with
+// internal/herdr, #722), then a session name's own narrower charset. The error
+// never echoes the name, which comes from the environment.
 func validSessionName(name string) error {
-	if len(name) > maxSessionNameLen {
-		return fmt.Errorf("%w: session name exceeds %d bytes", ErrResolveSession, maxSessionNameLen)
-	}
-	if strings.HasPrefix(name, "-") {
-		return fmt.Errorf("%w: session name may not begin with a dash", ErrResolveSession)
+	if err := wire.CheckOperand(name); err != nil {
+		return fmt.Errorf("%w: session name %w", ErrResolveSession, err)
 	}
 	for _, r := range name {
 		switch {

@@ -56,7 +56,7 @@ func TestResolveWings_FailsClosed(t *testing.T) {
 			name:    "one repo in two wings",
 			host:    "github.com",
 			wings:   []Wing{{Name: "a", Repos: []string{"o/r"}}, {Name: "b", Repos: []string{"O/R"}}},
-			wantErr: "already claimed by wing",
+			wantErr: "already claimed by entry 1",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -68,6 +68,28 @@ func TestResolveWings_FailsClosed(t *testing.T) {
 				t.Errorf("error = %q, want it to mention %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestResolveWings_CollisionNamesEntryNotWing: a repo claimed twice is
+// reported by entry number. The earlier wing's name is config text and is
+// never echoed (#658), and the number must point at the entry that actually
+// claimed the repo, not merely the first entry in the table.
+func TestResolveWings_CollisionNamesEntryNotWing(t *testing.T) {
+	_, err := ResolveWings("github.com", []Wing{
+		{Name: "unrelated", Repos: []string{"x/y"}},
+		{Name: "wingmarker", Repos: []string{"o/r"}},
+		{Name: "other", Repos: []string{"o/r"}},
+	})
+	if err == nil {
+		t.Fatal("want an error for a repo in two wings")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "entry 3 claims a repo already claimed by entry 2") {
+		t.Errorf("error = %q, want it to name entries 3 and 2", msg)
+	}
+	if strings.Contains(msg, "wingmarker") {
+		t.Errorf("error = %q echoes the config wing name", msg)
 	}
 }
 

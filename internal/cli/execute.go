@@ -46,6 +46,30 @@ var isInteractiveTTY = func() bool {
 
 func interactiveTTY(stdinTTY, stdoutTTY bool) bool { return stdinTTY && stdoutTTY }
 
+// fangTrustsProbe reports whether to believe the background fang detected.
+// Fang v1.0.0 probes only when os.Stdout is a TTY (and otherwise passes a
+// hard-coded light placeholder), so both halves are required: fang actually
+// probed, and forgectl's own policy allows a probe in this environment
+// (stdin TTY, NO_COLOR unset, TERM not screen*/tmux*). Package-level so tests
+// can pin either answer. It reads os.Stdout, not root.OutOrStdout(): fang
+// checks os.Stdout even when SetOut redirects its writer.
+var fangTrustsProbe = func() bool {
+	return fangTrustsProbeFor(
+		cterm.IsTerminal(os.Stdout.Fd()),
+		theme.Env{
+			StdinTTY:  term.IsTerminal(int(os.Stdin.Fd())),
+			StdoutTTY: term.IsTerminal(int(os.Stdout.Fd())),
+			Term:      os.Getenv("TERM"),
+			NoColor:   os.Getenv("NO_COLOR") != "",
+		},
+	)
+}
+
+// fangTrustsProbeFor is the pure decision behind fangTrustsProbe.
+func fangTrustsProbeFor(fangProbed bool, env theme.Env) bool {
+	return fangProbed && theme.ShouldProbe(theme.ModeAuto, env)
+}
+
 // The startup steps Execute runs, behind package-level seams so the entry
 // tests can replace each with a fail-if-called sentinel. That is how the
 // ordering guarantee is asserted rather than merely read: `surface _exec` must
@@ -102,7 +126,7 @@ func Execute(ctx context.Context) error {
 		// second line beneath them is noise on every failed claude run. Its
 		// exit code still propagates; only the message is dropped.
 		if err != nil && !errors.Is(err, errHarnessExit) {
-			fmt.Fprintln(os.Stderr, termsafe.SafeLine(err.Error()))
+			fmt.Fprintln(os.Stderr, safeText(err.Error()))
 		}
 		return err
 	}
@@ -111,18 +135,33 @@ func Execute(ctx context.Context) error {
 	// they are not reachable from a call site.
 	normalizeColorEnv()
 
+	// Both steps below return before fang exists and before the config gate,
+	// so a failure here reports itself through preFangFailure: its own line,
+	// or under --json the verb's one failure object. The tree does not exist
+	// yet, so preFangFailure builds one over default config only when argv
+	// mentions --json and it must find the verb. CaptureEnvSnapshot fails on an
+	// environment the operator controls — $HOME unset, or a relative
+	// $XDG_CONFIG_HOME (os.UserConfigDir refuses one) — and a hook verb must
+	// not fail the turn over it, the same exemption the config gate makes
+	// (#738). The hook then runs on built-in defaults with no legacy boundary;
+	// every other verb stops here, as before.
+	var legacyBoundary *config.LegacyMigrationBoundary
+	defaultRoot := func() *cobra.Command { return buildRoot(productionDeps(config.Config{}, nil)) }
 	env, err := captureEnvSnapshot()
 	if err != nil {
-		return err
+		if args := normalizeArgs(processArgs()); !invokesHookVerb(args) {
+			return preFangFailure(defaultRoot, args, err)
+		}
+	} else {
+		legacyBoundary, err = prepareLegacyBoundary(env, config.NativeMigrationFS())
+		if err != nil {
+			return preFangFailure(defaultRoot, normalizeArgs(processArgs()), err)
+		}
+		defer legacyBoundary.Close() //nolint:errcheck
 	}
-	legacyBoundary, err := prepareLegacyBoundary(env, config.NativeMigrationFS())
-	if err != nil {
-		return err
-	}
-	defer legacyBoundary.Close() //nolint:errcheck
 
 	var cfg config.Config
-	if !errors.Is(legacyBoundary.Refusal, config.ErrLegacyPathControl) {
+	if legacyBoundary != nil && !errors.Is(legacyBoundary.Refusal, config.ErrLegacyPathControl) {
 		cfg = config.LoadPath(legacyBoundary.ConfigPath)
 	}
 	closer := setupLogger(cfg)
@@ -137,6 +176,14 @@ func Execute(ctx context.Context) error {
 	tmuxClient := tmux.New(exec.OSRunner{})
 	root := buildRoot(deps)
 	args := normalizeArgs(processArgs())
+	// The gate's exempt-verb lookup gets the built root. Only
+	// preFangFailure's --json lookup uses the default-config tree: a module
+	// built over a config that failed to decode can stand in a stub without
+	// its flags (projects does), which would hide the verb's --json.
+	if err := configParseGate(cfg, root, args); err != nil {
+		return preFangFailure(defaultRoot, args, WithExitCode(err, 2))
+	}
+	builtRoot := func() *cobra.Command { return root }
 
 	// The launcher intercept runs before TUI/fang routing: `forgectl launch …`
 	// (and its `cl` alias) must reach claude byte-clean for builder/agents
@@ -149,11 +196,13 @@ func Execute(ctx context.Context) error {
 			// This path bypasses fang, which is what prints styled errors for
 			// the normal command tree. Print here so an intercept error (e.g. a
 			// bad FORGECTL_CLAUDE_BIN from ClaudePath) doesn't exit non-zero with
-			// empty stderr — mirrors claunch's original main().
+			// empty stderr — mirrors claunch's original main(). The launch
+			// command declares no --json (everything after it is the
+			// harness's), so this line stays plain even with --json in argv.
 			if err != nil {
-				fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(err.Error()))
+				return preFangFailure(builtRoot, args, err)
 			}
-			return err
+			return nil
 		}
 	}
 
@@ -166,11 +215,8 @@ func Execute(ctx context.Context) error {
 	switch decideRoute(root, args, isInteractiveTTY()) {
 	case routeTUI:
 		slog.Debug("Launching TUI.", "no_icons", noIcons)
-		opts := tui.RunOptions{
-			Hub:     buildHub(root, configFilePresent()),
-			NoIcons: noIcons,
-			Theme:   deps.Theme,
-		}
+		opts := hubRunOptions(ctx, deps, root, tmuxClient)
+		opts.NoIcons = noIcons
 		return runAction(ctx, deps, root, tmuxClient, opts)
 	case routeHeadlessMenu:
 		// Route through Cobra/fang instead of the TUI: an unrecognized
@@ -189,7 +235,7 @@ func Execute(ctx context.Context) error {
 		return errHeadlessMenuRoute
 	default:
 		logDispatch("Dispatching to command verb.", root, args)
-		return execCommand(ctx, root, args, deps.Theme)
+		return execDispatch(ctx, deps, root, args, deps.Theme)
 	}
 }
 
@@ -272,7 +318,12 @@ func fangOptions(version, commit string, th theme.Theme) []fang.Option {
 		// fang renders --help, --version and every error frame, so without
 		// this the most-seen surface in the binary is the only one not drawing
 		// from the palette.
-		fang.WithColorSchemeFunc(th.Fang()),
+		// fang v1.0.0 has no option to skip its terminal-background query
+		// (mustColorscheme, theme.go:115-118, runs on any stdout TTY, so an OSC
+		// 11 and DA1 request are sent even where theme.ShouldProbe refuses). We
+		// only ignore the answer here. Documented in docs/configuration.md;
+		// blocked on an upstream opt-out (#546).
+		fang.WithColorSchemeFunc(th.Fang(fangTrustsProbe())),
 	}
 }
 
@@ -298,34 +349,55 @@ func termsafeErrorHandler(w io.Writer, styles fang.Styles, err error) {
 		renderStructuredTerminalError(w, styles, structured)
 		return
 	}
-	// env check --json (forgectl#481) has already written its one JSON
-	// object to stderr by the time it returns this — fang's error frame
-	// must render nothing on top of it, or the agent-facing "exactly one
-	// object" contract breaks.
+	// A --json verb has already written its verdict to stdout, or its one
+	// failure object to stderr, by the time it returns this (forgectl#481,
+	// #862; json_errors.go) — fang's error frame must render nothing on top
+	// of it, or the agent-facing contract breaks.
 	if _, ok := err.(*silentCodedError); ok {
 		return
 	}
 	safe := termsafe.Error(err)
-	if leadsWithPath(safe.Error()) {
+	if leadsWithLiteral(safe.Error()) {
 		renderPathLeadingError(w, styles, safe)
 		return
 	}
 	fang.DefaultErrorHandler(w, styles, safe)
 }
 
-// leadsWithPath reports whether msg's first word looks like a filesystem
-// path — one fang's ErrorText style would title-case via its
-// titleFirstWord transform, corrupting exactly the byte-identical spelling
-// a caller typed or compares against (env_test.go's --json path field,
-// this file's own path-preserving tests). Both error surfaces
-// (termsafeErrorHandler and renderStructuredTerminalError) route a
-// path-leading message through UnsetTransform() instead of fang's default.
-func leadsWithPath(msg string) bool {
+// leadsWithLiteral reports whether msg's first word is a literal token that
+// fang's ErrorText style would corrupt by title-casing it (its
+// titleFirstWord transform) — a spelling a caller typed or compares against
+// byte-for-byte (env_test.go's --json path field, this file's own
+// path-preserving tests). Both error surfaces (termsafeErrorHandler and
+// renderStructuredTerminalError) route such a message through
+// UnsetTransform() instead of fang's default.
+//
+// It is deliberately broader than "is a path" (forgectl#858), and matches a
+// first word that:
+//   - opens with a double quote — a quoted literal, which is how
+//     termsafe.QuotePath and QuoteText render a path (#847): `".sops.yaml"
+//     not found` must not become `".Sops.yaml" not found`;
+//   - contains "/" or starts with "." — a path or dotfile;
+//   - starts with "-" — a flag token: title-casing "--limit must be at least
+//     1" yields "--Limit", a flag that does not exist (forgectl#670);
+//   - has an interior dot, after trimming a trailing ":", "," or ";" — a bare
+//     file name ("secrets.yaml not found"), but equally any dotted word such
+//     as a version ("v1.2") or "e.g.". Leaving those uncapitalized is neutral
+//     or better, since title-casing a dotted token rarely produces a real
+//     spelling. A word that only ends in a dot ("Failed.") is not matched.
+func leadsWithLiteral(msg string) bool {
 	first, _, _ := strings.Cut(msg, " ")
 	if first == "" {
 		return false
 	}
-	return strings.Contains(first, "/") || strings.HasPrefix(first, ".")
+	if strings.HasPrefix(first, `"`) {
+		return true
+	}
+	first = strings.TrimRight(first, ":,;")
+	if dot := strings.Index(first, "."); dot > 0 && dot < len(first)-1 {
+		return true
+	}
+	return strings.Contains(first, "/") || strings.HasPrefix(first, ".") || strings.HasPrefix(first, "-")
 }
 
 // renderPathLeadingError mirrors fang.DefaultErrorHandler (help.go) except
@@ -336,7 +408,7 @@ func leadsWithPath(msg string) bool {
 //
 // This deliberately omits DefaultErrorHandler's trailing "Try --help for
 // usage" block (its isUsageError check): today no message can satisfy both
-// leadsWithPath and isUsageError, because isUsageError only matches one of
+// leadsWithLiteral and isUsageError, because isUsageError only matches one of
 // five fixed cobra/pflag prefixes ("unknown flag:", "flag needs an
 // argument:", …), none of which is a path. That's an invariant of the
 // CURRENT set of prefixes and this hand-copy, not something the compiler
@@ -364,7 +436,7 @@ func renderPathLeadingError(w io.Writer, styles fang.Styles, err error) {
 func renderStructuredTerminalError(w io.Writer, styles fang.Styles, err *structuredTerminalError) {
 	_, _ = fmt.Fprintln(w, styles.ErrorHeader.String())
 	headline := styles.ErrorText
-	if leadsWithPath(err.headline) {
+	if leadsWithLiteral(err.headline) {
 		headline = headline.UnsetTransform()
 	}
 	_, _ = fmt.Fprintln(w, headline.Render(err.headline+"."))
@@ -401,7 +473,22 @@ func newSilentCodedError(code int) error {
 // need the tty (attach / sesh connect / a hub-selected verb) run here, after
 // Bubble Tea has released the terminal.
 func runAction(ctx context.Context, deps module.Deps, root *cobra.Command, client *tmux.Client, opts tui.RunOptions) error {
-	act, err := tui.Run(ctx, client, opts)
+	return runActionWith(ctx, client, opts, tui.Run, func(argv []string) error {
+		return runHubVerb(ctx, deps, root, argv, opts.Theme)
+	})
+}
+
+// hubRunner opens the hub and returns the action chosen in it; tui.Run in
+// production. It is a parameter so a caller's handling of the chosen action
+// can be tested without a terminal.
+type hubRunner func(ctx context.Context, client *tmux.Client, opts tui.RunOptions) (tui.Action, error)
+
+// runActionWith is runAction with the hub and the hand-off of a chosen verb
+// supplied by the caller. Outside fang (the bare-invoke route) runVerb runs
+// the verb at once; under fang (`forgectl tmux`) it defers it to
+// execDispatch, so the verb never nests a second fang frame in the first.
+func runActionWith(ctx context.Context, client *tmux.Client, opts tui.RunOptions, run hubRunner, runVerb func(argv []string) error) error {
+	act, err := run(ctx, client, opts)
 	if err != nil {
 		slog.Error("Failed to run TUI.", "error", err)
 		return err
@@ -411,7 +498,7 @@ func runAction(ctx context.Context, deps module.Deps, root *cobra.Command, clien
 		slog.Debug("TUI exited with no action.")
 		return nil
 	case tui.ActionRunVerb:
-		return runHubVerb(ctx, deps, root, act.Argv, opts.Theme)
+		return runVerb(act.Argv)
 	case tui.ActionShowInvocation:
 		fmt.Fprintln(os.Stderr, hubDollarLine(opts.Theme, act.Argv))
 		return nil
@@ -422,20 +509,30 @@ func runAction(ctx context.Context, deps module.Deps, root *cobra.Command, clien
 
 // hubDollarLine renders a hub-selected invocation's echo line — the "$ "
 // prefix is always present (the signal under NO_COLOR); the rest is muted
-// when the theme is styled.
+// when the theme is styled. It is the placeholder form ActionShowInvocation
+// prints ("pr <ref>"): Use-line text this binary compiled in, joined plainly
+// so a placeholder reads as a placeholder rather than as a quoted argument.
 func hubDollarLine(th theme.Theme, argv []string) string {
-	return th.Styles().Muted.Render("$ " + meta.AppName + " " + strings.Join(argv, " "))
+	return th.Styles().Muted.Render(safeText("$ " + meta.AppName + " " + strings.Join(argv, " ")))
+}
+
+// hubRunLine is the echo line for an argv the hub is about to run. That argv
+// can carry one operator-typed picker argument, so it renders through
+// tui.DisplayArgv, which quotes that element and escapes anything
+// terminal-unsafe — the line shows exactly the elements that run.
+func hubRunLine(th theme.Theme, argv []string) string {
+	return th.Styles().Muted.Render("$ " + meta.AppName + " " + tui.DisplayArgv(argv))
 }
 
 // runHubVerb re-enters the same argv dispatch pipeline a typed command
 // takes: launchIntercept and the extension rungs both apply to a
 // hub-selected `launch` exactly as they do to a typed one.
 func runHubVerb(ctx context.Context, deps module.Deps, root *cobra.Command, argv []string, th theme.Theme) error {
-	fmt.Fprintln(os.Stderr, hubDollarLine(th, argv))
+	fmt.Fprintln(os.Stderr, hubRunLine(th, argv))
 	if rest, ok := launchIntercept(argv); ok {
 		if handled, err := runLaunch(deps, rest); handled {
 			if err != nil {
-				fmt.Fprintln(os.Stderr, meta.AppName+": "+termsafe.SafeLine(err.Error()))
+				fmt.Fprintln(os.Stderr, meta.AppName+": "+safeText(err.Error()))
 			}
 			return err
 		}
@@ -443,7 +540,73 @@ func runHubVerb(ctx context.Context, deps module.Deps, root *cobra.Command, argv
 	if handled, err := tryExtensionRungs(root, argv, defaultExternalCommandRuntime()); handled {
 		return err
 	}
-	return execCommand(ctx, root, argv, th)
+	return execDispatch(ctx, deps, root, argv, th)
+}
+
+// deferredVerb is the slot a command running under fang fills when it wants
+// another command run after it returns: `status --tui` hands back the
+// `pr <ref>` chosen in the cockpit this way, and `forgectl tmux` a verb chosen
+// in the hub. Running that command from inside
+// the first one's RunE would nest a second fang.Execute in the first — the
+// inner fang renders a failure and the outer renders it again, and root's
+// persistent pre-run runs twice. execDispatch runs it after fang has returned
+// instead, the way the hub's own actions run (runAction, outside fang).
+type deferredVerb struct{ argv []string }
+
+type deferredVerbKey struct{}
+
+// deferVerb records argv in the context's deferred-verb slot. It reports
+// false when the command is not running under execDispatch, and the caller
+// then falls back to printing the invocation.
+//
+// ctx must be the root command's context, which cobra's ExecuteContext sets
+// afresh on every dispatch. A subcommand's own context is set only while it
+// is still nil, so a second dispatch of the same subcommand in one process
+// would hand back the first dispatch's spent slot, and the verb would be
+// dropped without a word (forgectl#1003).
+func deferVerb(ctx context.Context, argv []string) bool {
+	if ctx == nil {
+		return false
+	}
+	slot, ok := ctx.Value(deferredVerbKey{}).(*deferredVerb)
+	if !ok || slot == nil {
+		return false
+	}
+	slot.argv = append([]string(nil), argv...)
+	return true
+}
+
+// deferHubVerb is how a command running under fang hands on a verb the
+// operator chose in its TUI: into the deferred-verb slot, so execDispatch runs
+// it once this command's fang frame has returned and a failing verb is
+// rendered once, by its own dispatch. Off that path it runs nothing and
+// prints the invocation instead.
+func deferHubVerb(cmd *cobra.Command, th theme.Theme, argv []string) error {
+	if deferVerb(cmd.Root().Context(), argv) {
+		return nil
+	}
+	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), hubRunLine(th, argv))
+	return nil
+}
+
+// execDispatch is execCommand plus the deferred-verb slot: when the command
+// it ran succeeded and left an argv in the slot, that argv runs next, through
+// runHubVerb, after fang has returned.
+func execDispatch(ctx context.Context, deps module.Deps, root *cobra.Command, args []string, th theme.Theme) error {
+	slot := &deferredVerb{}
+	if err := execCommand(context.WithValue(ctx, deferredVerbKey{}, slot), root, args, th); err != nil {
+		return err
+	}
+	if slot.argv == nil {
+		return nil
+	}
+	// A dispatch whose context ended while the command ran never starts the
+	// verb it deferred.
+	if err := ctx.Err(); err != nil {
+		_, _ = fmt.Fprintln(root.ErrOrStderr(), meta.AppName+": not running "+tui.DisplayArgv(slot.argv)+": "+safeText(err.Error()))
+		return err
+	}
+	return runHubVerb(ctx, deps, root, slot.argv, th)
 }
 
 // dispatchAction routes a TUI action to the appropriate client call. Separated
@@ -458,7 +621,7 @@ func dispatchAction(ctx context.Context, client *tmux.Client, act tui.Action) er
 		return client.AttachWindow(ctx, act.Window)
 	case tui.ActionPick:
 		slog.Debug("Dispatching pick action.", "candidate", act.Pick)
-		return client.Pick(ctx, act.Pick)
+		return seshPick(ctx, client, act.Pick)
 	case tui.ActionLast:
 		slog.Debug("Dispatching last session action.")
 		return client.LastSession(ctx)

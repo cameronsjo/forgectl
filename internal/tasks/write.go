@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // maxTitleRunes and maxCommentRunes bound what this client will SEND. The
@@ -49,6 +51,19 @@ func (c *Client) put(ctx context.Context, path string, payload any) ([]byte, err
 	return c.do(ctx, http.MethodPut, path, nil, payload, unauthorizedOnWrite)
 }
 
+// post performs one bounded, redacting POST against path with a JSON body,
+// through Client.do like every other verb. POST is Vikunja's UPDATE: it
+// changes a row that already exists, which put never does.
+//
+// Its one caller is CompleteTask, and it is unexported so that stays a
+// decision: an update reaches the board only behind that method's pre-read,
+// shape checks, and read-back. The 401/403 note is empty because the caller
+// has just read the same task with the same credential, so it can say
+// something more exact than unauthorizedOnWrite does.
+func (c *Client) post(ctx context.Context, path string, payload any) ([]byte, error) {
+	return c.do(ctx, http.MethodPost, path, nil, payload, "")
+}
+
 // CreateTask creates a task in projectID via PUT /projects/{id}/tasks and
 // returns the created task as the server reports it.
 //
@@ -82,7 +97,7 @@ func (c *Client) CreateTask(ctx context.Context, projectID int, title, descripti
 	}
 	var created Task
 	if err := json.Unmarshal(body, &created); err != nil {
-		return Task{}, fmt.Errorf("%w: create in project %d: decode response: %v", ErrUnexpectedStatus, projectID, err)
+		return Task{}, malformedJSON(fmt.Sprintf("create in project %d: decode response", projectID), err)
 	}
 	return created, nil
 }
@@ -106,7 +121,7 @@ func (c *Client) AddComment(ctx context.Context, taskID int, comment string) (Co
 	}
 	var created Comment
 	if err := json.Unmarshal(body, &created); err != nil {
-		return Comment{}, fmt.Errorf("%w: comment on task %d: decode response: %v", ErrUnexpectedStatus, taskID, err)
+		return Comment{}, malformedJSON(fmt.Sprintf("comment on task %d: decode response", taskID), err)
 	}
 	return created, nil
 }
@@ -122,7 +137,7 @@ func (c *Client) FetchTask(ctx context.Context, taskID int) (Task, error) {
 	}
 	var task Task
 	if err := json.Unmarshal(body, &task); err != nil {
-		return Task{}, fmt.Errorf("%w: task %d: decode response: %v", ErrUnexpectedStatus, taskID, err)
+		return Task{}, malformedJSON(fmt.Sprintf("task %d: decode response", taskID), err)
 	}
 	return task, nil
 }
@@ -141,7 +156,7 @@ func (c *Client) FetchProject(ctx context.Context, projectID int) (Project, erro
 	}
 	var project Project
 	if err := json.Unmarshal(body, &project); err != nil {
-		return Project{}, fmt.Errorf("%w: project %d: decode response: %v", ErrUnexpectedStatus, projectID, err)
+		return Project{}, malformedJSON(fmt.Sprintf("project %d: decode response", projectID), err)
 	}
 	return project, nil
 }
@@ -159,8 +174,13 @@ func (c *Client) FetchProject(ctx context.Context, projectID int) (Project, erro
 // It is called at startup, before the server accepts a single tool call, so
 // the operator learns from a refusal to start rather than from an agent's
 // confusing tool error an hour later.
+//
+// The request carries no Authorization header. This is the question "is this
+// host a Vikunja API at all", and a host that turns out not to be one must not
+// already have been handed the bearer token by the request that asked. /info
+// is a public route.
 func (c *Client) AssertVikunja(ctx context.Context) error {
-	body, err := c.get(ctx, "/info", nil)
+	body, err := c.send(ctx, anonymous, http.MethodGet, "/info", nil, nil, "")
 	if err != nil {
 		return err
 	}
@@ -168,12 +188,12 @@ func (c *Client) AssertVikunja(ctx context.Context) error {
 		Version string `json:"version"`
 	}
 	if err := json.Unmarshal(body, &info); err != nil {
-		return fmt.Errorf("%w: %s/info did not return JSON with a version field — this host is answering with something that is not the Vikunja API",
-			ErrUnexpectedStatus, c.baseURL)
+		return fmt.Errorf("%w: %s did not return JSON with a version field — this host is answering with something that is not the Vikunja API",
+			ErrUnexpectedStatus, termsafe.QuoteArgMax(c.baseURL+"/info", 0))
 	}
 	if strings.TrimSpace(info.Version) == "" {
-		return fmt.Errorf("%w: %s/info returned JSON with no version field — this host is answering with something that is not the Vikunja API",
-			ErrUnexpectedStatus, c.baseURL)
+		return fmt.Errorf("%w: %s returned JSON with no version field — this host is answering with something that is not the Vikunja API",
+			ErrUnexpectedStatus, termsafe.QuoteArgMax(c.baseURL+"/info", 0))
 	}
 	return nil
 }

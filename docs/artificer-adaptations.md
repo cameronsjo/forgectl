@@ -52,3 +52,43 @@ feedback issue filed upstream.
 - **Why necessary:** `.surface-document *` set the prose face on chroma's token `<span>`s, so code-block columns drifted; and `.search` drew two nested accent rings on keyboard focus.
 - **Upstream fix:** `cameronsjo/artificer-design-system` branch `claude/forgectl-docs-serve-ux-7kcvjz`, commit `ba42053`, with a Playwright regression guard. Unreleased as of 0.26.0.
 - **Retire when:** the vendored Artificer version includes that commit. Delete the two template rules marked "A6" and the `.doc-body pre` font rule.
+
+## A7 — `mark` and `.tag` styles for Obsidian vault flavour
+
+- **Dated:** 2026-09-29 · app @ pre-1.0 · Artificer @ 0.25.0
+- **What diverges:** the docs shell template styles `.doc-body mark` (a highlight wash from `--attention`) and `.doc-body .tag` (a pill-shaped mono chip on `--accent` and `--border`) for the `==highlight==` and `#tag` syntax vault roots render (forgectl#444).
+- **Why necessary:** Artificer has no highlight or inline-tag primitive. Its `.chip` is the nearest, but it carries hover and `aria-pressed` states and a 44px touch min-height, which would break a line of prose.
+- **Upstream issue:** none filed yet. Candidate for an upstream inline-tag and highlight primitive.
+- **Retire when:** the vendored Artificer ships an inline tag and highlight treatment. Delete the two template rules under "Obsidian inline flavour" and adopt the upstream classes.
+
+## A8 — non-interactive `.status-chip` for the properties block
+
+- **Dated:** 2026-09-29 · app @ pre-1.0 · Artificer @ 0.25.0
+- **What diverges:** the properties block renders the frontmatter `status` value as `<span class="status-chip">`, styled by one template rule, and not as Artificer's `.chip`.
+- **Why necessary:** `.chip` is an interactive control. It sets `cursor: pointer`, a border and hover states, and under `@media (pointer: coarse)` a `min-height` and `min-width` of 44px. Measured at 375px with touch, the status label rendered 44px tall. It is a static label, not a control. The local rule keeps `.chip`'s look: the 1px `--border` border, `--font-interface` at weight 500, `white-space: nowrap`, with the tinted accent fill the properties block already used.
+- **Upstream issue:** none filed. Candidate for a non-interactive label primitive; `.badge` is the nearest but is solid-filled.
+- **Retire when:** the vendored Artificer ships a non-interactive label primitive with this tinted look. Delete the `.status-chip` rule and adopt the upstream class.
+
+## A9 — `.callout.note` restates the inherited body size and colour
+
+- **Dated:** 2026-09-29 · app @ pre-1.0 · Artificer @ 0.25.0
+- **What diverges:** the docs shell template sets `font-size: inherit; color: inherit` on `.callout.note`.
+- **Why necessary:** the callout tier class `note` collides with Artificer's global `.note` rule (`artificer.css:385`: `color: var(--fg-secondary); font-size: var(--t-label-sm-size)`). Note-tier callout body text measured 11.4px against 15.2px for the other tiers.
+- **Upstream issue:** none filed. Artificer's `.note` is unscoped, so any consumer class named `note` inherits it.
+- **Retire when:** Artificer scopes `.note`, or the callout tier class is renamed. Delete the two declarations.
+
+## A10 — `.wikilink-miss` style for unresolved vault wikilinks
+
+- **Dated:** 2026-09-29 · app @ pre-1.0 · Artificer @ 0.25.0
+- **What diverges:** the docs shell template styles `.doc-body .wikilink-miss` (a dashed underline in `--urgent-text`) for a vault `[[wikilink]]` that did not resolve, and gives the `span` form a help cursor for its hover reason (forgectl#444).
+- **Why necessary:** Artificer has no broken-link primitive. A miss has to read as different from a working link at a glance, and a plain link colour would hide it.
+- **Upstream issue:** none filed yet. Candidate for an upstream broken-link treatment.
+- **Retire when:** the vendored Artificer ships a broken-link style. Delete the two template rules marked "A10" and adopt the upstream class.
+
+## A11 — KaTeX output inherits its own face
+
+- **Dated:** 2026-09-29 · app @ pre-1.0 · Artificer @ 0.25.0
+- **What diverges:** the docs shell template sets `.katex * { font-family: inherit; }` (forgectl#587).
+- **Why necessary:** the same `.surface-document *` rule as A6. KaTeX sets `KaTeX_Main` on `.katex` and lets digits, operators and upright text inherit it, but the universal selector overrode the inheritance, so those glyphs drew in the body face beside italic variables in `KaTeX_Math`. Measured in Chromium: every digit in rendered math computed to `"iA Writer Quattro V", …` before the rule and to `KaTeX_Main` after it.
+- **Upstream issue:** none filed. The A6 upstream fix covers `pre` and `code` only.
+- **Retire when:** Artificer stops setting the prose face through a universal selector inside `.surface-document`. Delete the rule marked "A11".

@@ -33,6 +33,7 @@ func newPrDrainCmd(client *pr.Client, cfg config.Config) *cobra.Command {
 		interval time.Duration
 		dryRun   bool
 		asJSON   bool
+		noNotify bool
 	)
 	cmd := &cobra.Command{
 		Use:   "drain",
@@ -47,6 +48,7 @@ forever, and 'forgectl pr repair' is what settles it.
   forgectl pr drain --watch         keep draining every --interval (default 60s)
   forgectl pr drain --dry-run       print what a pass would launch, create nothing
   forgectl pr drain --json          emit the pass report as JSON
+  forgectl pr drain --no-notify     launch without the macOS notification
 
 A drainer killed mid-pass leaves 'preparing' or 'launching' records, which
 occupy their slots until 'forgectl pr repair' settles them — the next pass
@@ -56,7 +58,12 @@ Exit code for a single pass (the default): 0 when the queue was empty or
 every launch succeeded; 1 when the cap or a record could not be read, or any
 launch in the pass failed. --watch runs until canceled and exits non-zero
 only after three consecutive whole-pass refusals; a per-record failure is
-logged and the loop continues.`,
+logged and the loop continues.
+
+On macOS each successful launch posts a desktop notification (title "Review
+started", body the owner/repo#N ref). Nothing is sent on --dry-run, for a
+failed launch, or on other platforms, and a notification that fails to send is
+logged and never changes the exit code.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if watch && once && cmd.Flags().Changed("once") {
@@ -68,7 +75,7 @@ logged and the loop continues.`,
 			if interval <= 0 {
 				interval = defaultDrainInterval
 			}
-			opts := pr.DrainOpts{DryRun: dryRun}
+			opts := pr.DrainOpts{DryRun: dryRun, NoNotify: noNotify}
 			if !watch {
 				report, err := client.Drain(cmd.Context(), cfg, opts)
 				if err != nil {
@@ -78,7 +85,8 @@ logged and the loop continues.`,
 				if err := writeDrainReport(cmd.OutOrStdout(), report, asJSON, dryRun, 0); err != nil {
 					return err
 				}
-				return drainExitCode(report)
+				// Under --json the pass report is the verdict (forgectl#862).
+				return jsonVerdict(drainExitCode(report), asJSON)
 			}
 			return runDrainWatch(cmd, client, cfg, opts, interval, asJSON, dryRun)
 		},
@@ -88,6 +96,7 @@ logged and the loop continues.`,
 	cmd.Flags().DurationVar(&interval, "interval", defaultDrainInterval, "how often --watch drains (requires --watch)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what a pass would launch and create nothing")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the pass report as JSON")
+	cmd.Flags().BoolVar(&noNotify, "no-notify", false, "do not send a desktop notification when a queued review launches (macOS only)")
 	return cmd
 }
 
@@ -117,8 +126,8 @@ func runDrainWatch(cmd *cobra.Command, client *pr.Client, cfg config.Config, opt
 		if report.Refusal != "" {
 			consecutiveRefusals++
 			if consecutiveRefusals >= drainWatchRefusalLimit {
-				return WithExitCode(fmt.Errorf(
-					"drain refused %d consecutive passes, last: %s", consecutiveRefusals, safeTerm(report.Refusal)), 1)
+				return jsonVerdict(WithExitCode(fmt.Errorf(
+					"drain refused %d consecutive passes, last: %s", consecutiveRefusals, safeText(report.Refusal)), 1), asJSON)
 			}
 		} else {
 			consecutiveRefusals = 0
@@ -154,7 +163,7 @@ func writeDrainJSON(out io.Writer, report pr.DrainReport) error {
 // zero on a single pass, where there is no next one.
 func writeDrainHuman(out io.Writer, report pr.DrainReport, dryRun bool, next time.Duration) {
 	if report.Refusal != "" {
-		_, _ = fmt.Fprintf(out, "pass=%d refused: %s\n", report.Pass, safeTerm(report.Refusal))
+		_, _ = fmt.Fprintf(out, "pass=%d refused: %s\n", report.Pass, safeText(report.Refusal))
 		return
 	}
 	if dryRun {
@@ -169,7 +178,7 @@ func writeDrainHuman(out io.Writer, report pr.DrainReport, dryRun bool, next tim
 			if it.Outcome == "refused" {
 				continue
 			}
-			refs = append(refs, it.Ref)
+			refs = append(refs, safeTitle(it.Ref))
 		}
 		if len(refs) == 0 {
 			_, _ = fmt.Fprintf(out, "%d queued, %d free — would launch nothing\n", report.Queued, report.Free)
@@ -194,7 +203,7 @@ func writeDrainHuman(out io.Writer, report pr.DrainReport, dryRun bool, next tim
 		if it.Outcome == "launched" {
 			continue
 		}
-		_, _ = fmt.Fprintf(out, "  %s: %s -> %s: %s\n", it.Ref, it.FromPhase, it.ToPhase, safeTerm(it.Error))
+		_, _ = fmt.Fprintf(out, "  %s: %s -> %s: %s\n", safeTitle(it.Ref), safeLabel(it.FromPhase), safeLabel(it.ToPhase), safeText(it.Error))
 	}
 }
 
@@ -206,7 +215,7 @@ func writeDrainRefusedItems(out io.Writer, report pr.DrainReport) {
 		if it.Outcome != "refused" {
 			continue
 		}
-		_, _ = fmt.Fprintf(out, "  %s: refused: %s\n", it.Ref, safeTerm(it.Error))
+		_, _ = fmt.Fprintf(out, "  %s: refused: %s\n", safeTitle(it.Ref), safeText(it.Error))
 	}
 }
 
@@ -215,7 +224,7 @@ func writeDrainRefusedItems(out io.Writer, report pr.DrainReport) {
 // this" contract `pr repair`'s inspect exit code follows.
 func drainExitCode(report pr.DrainReport) error {
 	if report.Refusal != "" {
-		return WithExitCode(fmt.Errorf("drain pass refused: %s", safeTerm(report.Refusal)), 1)
+		return WithExitCode(fmt.Errorf("drain pass refused: %s", safeText(report.Refusal)), 1)
 	}
 	if report.Failed > 0 {
 		return WithExitCode(fmt.Errorf("%d review(s) failed to launch this pass", report.Failed), 1)

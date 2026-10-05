@@ -18,14 +18,21 @@ package exec
 //
 // FakeRunner.RunWithEnvFiltered (Classification: test double)
 //   [x] Happy: both overrides and removals are observable on the recorded Call
+//
+// CommandError.Error (Classification: error formatting)
+//   [x] Unhappy: a nil Err with empty Stderr formats the exit code, no panic
 
 import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOSRunner_RunStreaming_ConnectsStreamsWithoutBuffering(t *testing.T) {
@@ -246,5 +253,169 @@ func TestFakeRunner_RunWithInput_UsesRunFunc(t *testing.T) {
 	}
 	if out != "canned output" {
 		t.Errorf("RunWithInput output = %q, want %q", out, "canned output")
+	}
+}
+
+func TestCommandError_NilErrEmptyStderr_DoesNotPanic(t *testing.T) {
+	e := &CommandError{Name: "rg", Args: []string{"-n"}, ExitCode: 2}
+	if got, want := e.Error(), "rg -n: exit 2"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+// TestOSRunner_ExitZeroWithADescendantHoldingThePipesSucceeds: a child that
+// exits 0 while a backgrounded grandchild still holds its stderr (git over ssh
+// ControlPersist does this) succeeded. pipeWaitDelay must stop Run waiting on
+// the pipe without turning that success into exec.ErrWaitDelay.
+//
+// The grandchild sleeps a minute and Run must return inside a 20 s hang
+// bound, far above pipeWaitDelay, so host load cannot fail it, and far below
+// the grandchild's lifetime (forgectl#919; a 1.5 s bound failed under load).
+// The test kills the grandchild when it ends.
+//
+// Mutation: drop cmd.WaitDelay in OSRunner.Run and Run waits out the
+// grandchild's minute, past the hang bound.
+func TestOSRunner_ExitZeroWithADescendantHoldingThePipesSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "holder")
+	pidFile := filepath.Join(dir, "grandchild.pid")
+	body := fmt.Sprintf("#!/bin/sh\necho ok\nsleep 60 >/dev/null &\necho $! > %q\nexit 0\n", pidFile)
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil { //nolint:gosec // test-owned script
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		b, err := os.ReadFile(filepath.Clean(pidFile))
+		if err != nil {
+			return
+		}
+		var pid int
+		if _, err := fmt.Sscan(string(b), &pid); err != nil {
+			return
+		}
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = p.Kill()
+		}
+	})
+	type result struct {
+		out string
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := OSRunner{}.Run(context.Background(), script)
+		done <- result{out, err}
+	}()
+	var r result
+	select {
+	case r = <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("Run did not return within 20s; it waited on the descendant's pipe")
+	}
+	if r.err != nil {
+		t.Fatalf("a child that exited 0 must succeed, got %v", r.err)
+	}
+	if r.out != "ok" {
+		t.Errorf("out = %q, want %q", r.out, "ok")
+	}
+}
+
+// TestOSRunner_OverflowStillFailsClosedWhenTheChildExitsZeroWithHeldPipes: the
+// WaitDelay forgiveness must never excuse an over-ceiling stdout. The child
+// writes past the ceiling, backgrounds a pipe holder, and exits 0; the result
+// must be ErrOutputTooLarge with no output, not a clean success.
+func TestOSRunner_OverflowStillFailsClosedWhenTheChildExitsZeroWithHeldPipes(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "overflow")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 0123456789ABCDEF\nsleep 5 >/dev/null &\nexit 0\n"), 0o700); err != nil { //nolint:gosec // test-owned script
+		t.Fatal(err)
+	}
+	out, err := OSRunner{stdoutCeiling: 8}.Run(context.Background(), script)
+	if !errors.Is(err, ErrOutputTooLarge) {
+		t.Fatalf("err = %v (out %q), want ErrOutputTooLarge", err, out)
+	}
+	if out != "" {
+		t.Errorf("out = %q, want no partial output", out)
+	}
+}
+
+// TestWithoutOutput_ClearsOutputKeepsTheRest: a top-level *CommandError comes
+// back as a copy with Output cleared and the original untouched; one wrapped
+// deeper is cleared in place so the chain, and errors.Is through it, survive.
+//
+// Mutation: return err unchanged from WithoutOutput and the Output checks
+// fail; clear the top-level case in place instead of copying and the
+// "original" check fails; drop the Unwrap() []error case in clearOutputs and
+// the joined check fails.
+func TestWithoutOutput_ClearsOutputKeepsTheRest(t *testing.T) {
+	sentinel := errors.New("exit status 3")
+	orig := &CommandError{Name: "pbpaste", Stderr: "why", Output: "secret", ExitCode: 3, Err: sentinel}
+	got := WithoutOutput(orig)
+	var ce *CommandError
+	if !errors.As(got, &ce) || ce.Output != "" || ce.Stderr != "why" || ce.ExitCode != 3 || !errors.Is(got, sentinel) {
+		t.Fatalf("top-level: got %+v", ce)
+	}
+	if orig.Output != "secret" {
+		t.Errorf("top-level: the original was modified; want a copy")
+	}
+
+	inner := &CommandError{Name: "pbpaste", Output: "secret", ExitCode: 3, Err: sentinel}
+	wrapped := fmt.Errorf("paste: %w", inner)
+	got = WithoutOutput(wrapped)
+	if !errors.As(got, &ce) || ce.Output != "" || !errors.Is(got, sentinel) || got.Error() != wrapped.Error() {
+		t.Fatalf("nested: got %v, Output %q", got, ce.Output)
+	}
+
+	a := &CommandError{Name: "a", Output: "secret-a", Err: sentinel}
+	b := &CommandError{Name: "b", Output: "secret-b", Err: sentinel}
+	joined := fmt.Errorf("both: %w", errors.Join(a, fmt.Errorf("b: %w", b)))
+	if got = WithoutOutput(joined); a.Output != "" || b.Output != "" || !errors.Is(got, sentinel) {
+		t.Errorf("joined: Output a %q, b %q; want every *CommandError in the tree cleared", a.Output, b.Output)
+	}
+
+	if WithoutOutput(nil) != nil || !errors.Is(WithoutOutput(sentinel), sentinel) {
+		t.Errorf("an error with no *CommandError must pass through unchanged")
+	}
+}
+
+// TestWithoutOutput_LeavesADirectlyNestedOriginalAlone pins #708 item 3: a
+// *CommandError wrapped directly in another's Err is copied too, so the
+// original chain keeps its Output.
+//
+// Mutation: clear cp.Err in place (clearOutputs(cp.Err)) instead of copying
+// it, and inner.Output is emptied in the caller's original.
+func TestWithoutOutput_LeavesADirectlyNestedOriginalAlone(t *testing.T) {
+	sentinel := errors.New("exit status 3")
+	inner := &CommandError{Name: "in", Output: "secret-in", Err: sentinel}
+	outer := &CommandError{Name: "out", Output: "secret-out", Err: inner}
+	got := WithoutOutput(outer)
+	if outer.Output != "secret-out" || inner.Output != "secret-in" {
+		t.Errorf("original modified: outer %q, inner %q", outer.Output, inner.Output)
+	}
+	var cleared []string
+	for e := got; e != nil; e = errors.Unwrap(e) {
+		if ce, ok := e.(*CommandError); ok {
+			cleared = append(cleared, ce.Name+"="+ce.Output)
+		}
+	}
+	if len(cleared) != 2 || cleared[0] != "out=" || cleared[1] != "in=" {
+		t.Errorf("copy chain: %v, want both Outputs cleared", cleared)
+	}
+	if !errors.Is(got, sentinel) {
+		t.Error("the copy must still reach the sentinel")
+	}
+}
+
+// TestHomebrewNoAutoUpdateReturnsAFreshMap: each call hands back its own map,
+// so a caller that mutates what it got (or merges onto it) cannot change what
+// any other brew caller sends (forgectl#851).
+//
+// Mutation that turns it red: return one package-level map from every call
+// (the second call sees the first call's rewrite).
+func TestHomebrewNoAutoUpdateReturnsAFreshMap(t *testing.T) {
+	first := HomebrewNoAutoUpdate()
+	first["HOMEBREW_NO_AUTO_UPDATE"] = "0"
+	first["EXTRA"] = "x"
+	second := HomebrewNoAutoUpdate()
+	if len(second) != 1 || second["HOMEBREW_NO_AUTO_UPDATE"] != "1" {
+		t.Errorf("HomebrewNoAutoUpdate() = %v after a caller mutated an earlier result, want only HOMEBREW_NO_AUTO_UPDATE=1", second)
 	}
 }

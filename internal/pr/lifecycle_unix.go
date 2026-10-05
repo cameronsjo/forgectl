@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -45,6 +46,29 @@ func (e *lockBusyError) Error() string {
 		e.waited.Round(time.Millisecond), termsafe.QuotePath(e.path), holder)
 }
 
+// maxLockHolderBytes bounds the holder text a timeout reads back. The body
+// this package writes is one short line (pid, verb, time, host), so anything
+// longer is not a body forgectl wrote and only its prefix is worth showing.
+const maxLockHolderBytes = 512
+
+// readLockHolder reads the holder body for a timeout's diagnostic from f, the
+// descriptor withLifecycleLock already opened with O_NOFOLLOW and Fstat'ed as
+// a regular file (forgectl#621). It never reopens the lock by path: a path
+// swapped since the open for a symlink to /dev/zero or for a FIFO would feed a
+// by-path read an endless stream or block it, and either stalls a caller that
+// is only trying to report that the lock is busy. The read is bounded by
+// maxLockHolderBytes, and a read error yields "" (holder unknown).
+func readLockHolder(f *os.File) string {
+	buf := make([]byte, maxLockHolderBytes)
+	n, err := f.ReadAt(buf, 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return ""
+	}
+	// Trimmed before the escape, so the body's own trailing newline is
+	// dropped rather than rendered as a literal "\n".
+	return termsafe.SafeLineMax(strings.TrimSpace(string(buf[:n])), maxLockHolderBytes)
+}
+
 // withLifecycleLock runs fn while holding the exclusive lifecycle lock for
 // this client's sessions dir.
 //
@@ -56,13 +80,53 @@ func (e *lockBusyError) Error() string {
 //     split into a locked shell and an unlocked *Locked core, and a composite
 //     verb (repair, drain, cleanup) takes the lock ONCE and calls the cores.
 //   - SHORT HOLDS ONLY. The lock covers record reads and writes and the
-//     admission decision. It is never held across a clone, a gh call, or a
-//     tmux new-window; the phase record is what bridges those.
+//     admission decision. It is never held across network work (a clone, a gh
+//     call) or a tmux new-window; the phase record is what bridges those.
+//     ONE CARVE-OUT: an audited destructive verb may remove a local directory
+//     under the hold — teardown's sandbox removal and `pr findings cleanup`
+//     both do — because its intent row, the removal, and its completion row
+//     must be atomic with respect to `pr repair --prune`, which compacts the
+//     audit log by rename under this lock. The carve-out covers local removal
+//     only; it never licenses the network or dispatch work above.
+//     SECOND CARVE-OUT: tmux, bounded rather than excluded. Every tmux call
+//     made under the hold is bounded by a lockedTmuxBudget (tmuxbudget.go), so
+//     a hung tmux server holds the lock for the budget plus exec's
+//     pipeWaitDelay (500 ms) per site, not indefinitely. The sites are
+//     teardown's window kill (killReviewWindow, through resolveReviewWindow),
+//     reached from `pr teardown`, from `pr cleanup` (where each teardown gets
+//     a full budget and the first actual timeout skips the remaining live
+//     sessions), and from `pr repair --rollback` and `--forget-if-absent`;
+//     the occupancy read (reviewWindowSnapshot) in
+//     admit, reserve, PrepareMany's batch reserve, and drain's claim; the
+//     liveness read (WindowsLive, WindowLive) in `pr repair`'s inspect,
+//     undecodable set-aside, rollback and forget arms and in `pr repair
+//     --prune`'s screenLiveWindows; and `pr repair --adopt-window`'s
+//     resolveReviewWindow.
+//     Each fails closed on a timeout: an unreadable window list is "a window
+//     may exist", so admission refuses, repair and prune refuse, and teardown
+//     parks the record in needs-repair and removes nothing. The kill cannot
+//     move out from under the lock: the window is found by the review's name,
+//     so after release a new admission of the same ref could create a
+//     same-named window and the kill would hit it. The local removal that
+//     follows a kill (restore renames, os.RemoveAll) is os work with no
+//     subprocess and no context, so it is bounded by neither; that is why it
+//     is a carve-out rather than a budget. A tmux new-window is still never
+//     issued under the hold.
 //   - BOUNDED WAIT. flock has no timeout, so acquisition polls LOCK_NB every
 //     lockPollInterval up to c.lockWait and then returns *lockBusyError.
 //   - KERNEL RELEASE. Closing the descriptor releases the lock, including on
 //     process death, so a crashed holder never wedges the next caller. The
 //     holder body left in the file is diagnostic text, never a liveness claim.
+//   - ADVISORY, SAME-UID. flock binds only processes that ask for it. The audit
+//     log's append (last-byte separator check, write, and a short-write
+//     rollback Truncate) is atomic only against holders of this lock; a
+//     same-uid writer that skips it can interleave with the check, and a
+//     rollback can then truncate that writer's bytes. That is an accepted
+//     residual, not a gap to close: the writer already owns the 0700 dir and
+//     every record and log in it, so it can forge or delete any row directly
+//     and the lock was never a defense against it. The log's file-type check
+//     (a FIFO or symlink is refused) covers the cases that could hang or
+//     redirect the appender. (forgectl#570)
 //
 // Two hosts sharing one $HOME (NFS, a synced volume) share this directory,
 // and flock over NFS is advisory at best. Out of scope; stated so it is on the
@@ -104,6 +168,9 @@ func (c *Client) withLifecycleLock(ctx context.Context, verb string, fn func() e
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("lifecycle lock %s is not a regular file; refusing", termsafe.QuotePath(lockPath))
 	}
+	if c.afterLockOpen != nil {
+		c.afterLockOpen()
+	}
 
 	wait := c.lockWait
 	if wait <= 0 {
@@ -119,8 +186,7 @@ func (c *Client) withLifecycleLock(ctx context.Context, verb string, fn func() e
 			return fmt.Errorf("lock %s: %w", termsafe.QuotePath(lockPath), err)
 		}
 		if time.Now().After(deadline) {
-			body, _ := os.ReadFile(lockPath) //nolint:gosec // our own lock file, diagnostic text only
-			return &lockBusyError{path: lockPath, holder: strings.TrimSpace(termsafe.SafeLine(string(body))), waited: wait}
+			return &lockBusyError{path: lockPath, holder: readLockHolder(f), waited: wait}
 		}
 		select {
 		case <-ctx.Done():

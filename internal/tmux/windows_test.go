@@ -257,7 +257,7 @@ func lastSessionRunner(lastAttached []string, sessions []string) *exec.FakeRunne
 }
 
 func lastAttachedRow(ts, pid, start, id, name string) string {
-	return strings.Join([]string{ts, pid, start, id, name}, sep)
+	return strings.Join([]string{pid, start, ts, id, name}, sep)
 }
 
 func TestLastSession_OutsideAllZeroTimestamps(t *testing.T) {
@@ -323,5 +323,47 @@ func TestLastSession_OutsideRefusesWhenWinnerVanished(t *testing.T) {
 		if len(call.Args) > 0 && call.Args[0] != "list-sessions" {
 			t.Fatalf("ran %v after the winner vanished, want only listings", call.Args)
 		}
+	}
+}
+
+// TestResolveWindowExact_RefusesDuplicateNames is forgectl#656. tmux accepts a
+// second window with a name already in use inside the same session, so an
+// exact-name resolution that returned the first match would let listing order
+// pick which window a teardown kills. Two matches under the session refuse with
+// ErrAmbiguousWindow; a same-named window under ANOTHER session is not a
+// duplicate and still resolves to the one in ours.
+func TestResolveWindowExact_RefusesDuplicateNames(t *testing.T) {
+	row := func(id, sessionID, name string) string {
+		return strings.Join([]string{"123", "456", id, sessionID, "forge", "0", name, "0", "1"}, FieldSep)
+	}
+	session := SessionIdentity{
+		Generation: ServerGeneration{Selector: ServerSelector{TmpDir: "/tmp"}, PID: "123", StartTime: "456"},
+		ID:         "$1",
+		Name:       "forge",
+	}
+	for _, tc := range []struct {
+		name    string
+		rows    []string
+		wantErr error
+		wantID  string
+	}{
+		{"two in the session", []string{row("@5", "$1", "pr-o-r-1"), row("@6", "$1", "pr-o-r-1")}, ErrAmbiguousWindow, ""},
+		{"one here, one elsewhere", []string{row("@5", "$9", "pr-o-r-1"), row("@6", "$1", "pr-o-r-1")}, nil, "@6"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := strings.Join(tc.rows, "\n")
+			c := New(&exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return out, nil }})
+			identityEnv(c, "", "/tmp")
+			got, err := c.ResolveWindowExact(context.Background(), session, "pr-o-r-1")
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("err = %v (window %+v), want %v", err, got, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got.ID != tc.wantID {
+				t.Fatalf("got %+v, %v; want window %s", got, err, tc.wantID)
+			}
+		})
 	}
 }

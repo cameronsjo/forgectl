@@ -80,7 +80,7 @@ func TestCopyValue_MissingKey_Errors(t *testing.T) {
 	if strings.Contains(err.Error(), repo) {
 		t.Errorf("error %q leaked the absolute repo path %q", err.Error(), repo)
 	}
-	if !strings.Contains(err.Error(), ".env ") {
+	if !strings.Contains(err.Error(), `".env" `) {
 		t.Errorf("error %q, want the repo-relative name %q", err.Error(), ".env")
 	}
 }
@@ -99,8 +99,8 @@ func TestCopyValue_MissingFile_ErrorsWithRepoRelativePath(t *testing.T) {
 	if strings.Contains(err.Error(), repo) {
 		t.Errorf("error %q leaked the absolute repo path %q", err.Error(), repo)
 	}
-	if !strings.Contains(err.Error(), "env file .env not found") {
-		t.Errorf("error = %q, want %q", err.Error(), "env file .env not found")
+	if !strings.Contains(err.Error(), `env file ".env" not found`) {
+		t.Errorf("error = %q, want %q", err.Error(), `env file ".env" not found`)
 	}
 }
 
@@ -197,5 +197,39 @@ func TestSetFromClipboard_InvalidKey_NeverTouchesClipboard(t *testing.T) {
 	}
 	if len(fake.Calls) != 0 {
 		t.Errorf("clipboard was touched %d times, want 0 (invalid key must fail before pbpaste)", len(fake.Calls))
+	}
+}
+
+// TestSetValue_RefusesCarriageReturn pins #566(c): a \r inside a value is
+// refused on a new write, names no value in the error, and leaves the file
+// untouched. A trailing CRLF pair is the producing command's line ending and
+// still strips cleanly.
+func TestSetValue_RefusesCarriageReturn(t *testing.T) {
+	repo := t.TempDir()
+	initGitRepo(t, repo)
+	client := NewClient(clip.New(&exec.FakeRunner{}, clip.WithGOOS("darwin")))
+	target := mustTarget(t, ".env", repo)
+	const secret = "s3cr3t\rTAIL"
+
+	_, err := client.SetValue(target, "KEY", secret)
+	if err == nil {
+		t.Fatal("SetValue with an interior \\r succeeded; want a refusal")
+	}
+	if strings.Contains(err.Error(), "s3cr3t") || strings.Contains(err.Error(), "TAIL") {
+		t.Errorf("error echoes the value: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(repo, ".env")); !os.IsNotExist(statErr) {
+		t.Errorf(".env exists after a refused write (stat err = %v)", statErr)
+	}
+
+	if _, err := client.SetValue(target, "KEY", "plain\r\n"); err != nil {
+		t.Fatalf("a trailing CRLF must still strip and write: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Clean(filepath.Join(repo, ".env")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "KEY=plain\n"; string(got) != want {
+		t.Errorf("file = %q, want %q", got, want)
 	}
 }

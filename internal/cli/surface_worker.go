@@ -164,7 +164,7 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 			return worker.AddWorktree(ctx, deps.Runner, top, opts.DisplayName, opts.Worktree)
 		},
 		build: func(cwd string) (launch.BuiltInvocation, error) {
-			req := surfaceInvocationRequest(deps, cwd, injected, unset, opts.Harness)
+			req := surfaceInvocationRequest(deps.Cfg.Launch, cwd, injected, unset, opts.Harness)
 			req.Worker = true
 			return launch.BuildInvocation(req)
 		},
@@ -185,9 +185,9 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	}
 
 	out := cmd.OutOrStdout()
-	if _, err := fmt.Fprintln(out, termsafe.SafeLine(launched.ref.String())); err != nil {
+	if _, err := fmt.Fprintln(out, safeTitle(launched.ref.String())); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintln(out, termsafe.QuotePath(launched.worktree))
+	_, err = fmt.Fprintln(out, safePath(launched.worktree))
 	return err
 }

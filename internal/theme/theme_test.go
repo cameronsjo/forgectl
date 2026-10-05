@@ -206,7 +206,7 @@ func TestTheme_ZeroValueMatchesDefault(t *testing.T) {
 	if zero.Huh().Theme(true) == nil || zero.Huh().Theme(false) == nil {
 		t.Error("Huh() returned a nil-rendering theme on the zero value")
 	}
-	if zero.Fang()(nil) != def.Fang()(nil) {
+	if zero.Fang(true)(nil) != def.Fang(true)(nil) {
 		t.Error("Fang() differs between zero value and Default()")
 	}
 	// list.Styles and fang.ColorScheme are not comparable with == reliably in

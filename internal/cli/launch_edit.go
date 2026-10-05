@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 func newLaunchEditCmd() *cobra.Command {
@@ -23,7 +24,7 @@ func newLaunchEditCmd() *cobra.Command {
 				return err
 			}
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-				return fmt.Errorf("create config directory: %w", err)
+				return fmt.Errorf("create config directory: %w", termsafe.Error(err))
 			}
 			name, args := editorCommand(os.Getenv("EDITOR"), path)
 			ed := exec.Command(name, args...)

@@ -3,6 +3,7 @@ package pr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
@@ -79,7 +81,7 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 	}
 	slog.Debug("Preparing local clean-room review.", "path", absPath, "dryRun", opts.DryRun)
 
-	headRef, err := c.run.Run(ctx, "git", "-C", absPath, "rev-parse", "--abbrev-ref", "HEAD")
+	headRef, err := gitenv.Run(ctx, c.run, gitenv.Local, "-C", absPath, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return Session{}, fmt.Errorf("resolve local HEAD branch: %w", err)
 	}
@@ -89,7 +91,7 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 	// name can never name different commits. See PrepareLocalOpts.HeadOid.
 	headOid := opts.HeadOid
 	if headOid == "" {
-		headOid, err = c.run.Run(ctx, "git", "-C", absPath, "rev-parse", "HEAD")
+		headOid, err = gitenv.Run(ctx, c.run, gitenv.Local, "-C", absPath, "rev-parse", "HEAD")
 		if err != nil {
 			return Session{}, fmt.Errorf("resolve local HEAD commit: %w", err)
 		}
@@ -206,6 +208,20 @@ func (c *Client) PrepareLocal(ctx context.Context, path string, opts PrepareLoca
 	sess.Path = bcPath
 	sess.CreatedAt = createdAt
 
+	// The owner marker is written only now that the record exists
+	// (forgectl#558): a marker naming a record that is not there yet reads as
+	// stale, and a cleanup in that window would remove this dir. Until the
+	// marker is published the dir is unmarked, which cleanup refuses. The
+	// publish is atomic (writeFindingsMarker), so a failed or interrupted
+	// write leaves the dir unmarked, never holding an empty or partial marker
+	// that would read as stale. That is why a failure is logged rather than
+	// fatal: the review itself is unaffected, and the dir errs toward being
+	// kept.
+	if err := c.writeFindingsMarker(findingsDir, bcPath); err != nil {
+		slog.Warn("Could not write the findings dir's owner marker; `pr findings cleanup` will refuse this dir.",
+			"findings", findingsDir, "error", err)
+	}
+
 	slog.Info("Successfully prepared local clean-room review.", "ref", ref.String(), "workspace", workspace, "findings", findingsDir)
 	return sess, nil
 }
@@ -311,14 +327,18 @@ func (c *Client) recordedWorkspaceFor(real string) (string, bool) {
 		return "", false
 	}
 	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+		// Only a regular file can be a record forgectl wrote; a FIFO named like
+		// one would block a plain read forever (forgectl#621), so it is skipped
+		// before any open, as listLocked does, and the read itself goes
+		// through the one FIFO-safe record reader.
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" || !e.Type().IsRegular() {
 			continue
 		}
 		path := filepath.Join(c.sessionsDir, e.Name())
 		if !sandbox.WithinWorkspace(c.sessionsDir, path) {
 			continue // same location guard loadBreadcrumb applies first
 		}
-		data, err := os.ReadFile(path) //nolint:gosec // location-validated above
+		data, err := readRecordFile(path)
 		if err != nil {
 			continue
 		}
@@ -351,7 +371,27 @@ func cleanRoomError(absPath, workspace string) error {
 // own error should shadow it.
 func (c *Client) teardownLocalArtifacts(ctx context.Context, workspace, findingsDir string) {
 	_ = sandbox.Teardown(ctx, c.run, workspace)
-	_ = os.RemoveAll(findingsDir)
+	if err := c.removeOwnFindingsDir(findingsDir); err != nil {
+		slog.Warn("Could not remove the findings dir of a failed local review.", "findings", findingsDir, "error", safeErrString(err))
+	}
+}
+
+// removeOwnFindingsDir removes findingsDir, the dir PrepareLocal just made
+// under the store, through a handle on the store rather than by path
+// (forgectl#685, the #644 defect class). It refuses anything that is not a
+// findings dir directly under the store, so no spelling of findingsDir can
+// reach outside it, and os.Root unlinks a final-component symlink rather than
+// following it.
+func (c *Client) removeOwnFindingsDir(findingsDir string) error {
+	if !isFindingsStoreChild(c.findingsDir, findingsDir) {
+		return errors.New("not a findings dir directly under the findings store; left in place")
+	}
+	store, err := c.openFindingsStore()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = store.Close() }()
+	return store.RemoveAll(filepath.Base(filepath.Clean(findingsDir)))
 }
 
 // unparseableHexSentinel is the fallback Number for newLocalRef when hexPart

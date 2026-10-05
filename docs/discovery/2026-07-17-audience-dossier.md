@@ -1,4 +1,5 @@
 ---
+orphan_ok: true
 title: "Audience Dossier: forgectl"
 tags: [discovery, audience-dossier]
 created: 2026-07-17

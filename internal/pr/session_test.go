@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 )
 
 const ghViewJSON = `{"headRefName":"feature-x","headRefOid":"deadbeef","headRepositoryOwner":{"login":"contributor"},"headRepository":{"name":"forgectl"}}`
@@ -55,13 +56,49 @@ func findCall(calls []exec.Call, name string) (exec.Call, bool) {
 	return exec.Call{}, false
 }
 
-// findCallVerb finds the first call to name whose first arg (the tmux
-// subcommand) equals verb — for asserting on one specific call among
-// several to the same binary, e.g. new-window after ensureSession's own
-// has-session check.
+// tmuxVerb names the tmux command an argv runs. tmux.KillWindow sends its kill
+// wrapped in a generation guard (forgectl#756): an if-shell whose then-branch
+// is the kill-window, so that argv reads as kill-window here. Keying on
+// args[0] alone would make every "no kill ran" assertion in this package pass
+// vacuously against the guarded form. Leading global options (the -S pin, -u)
+// are skipped, as its twin in internal/tmux does, so a pinned argv reads as
+// its command too.
+func tmuxVerb(args []string) string {
+	args = exec.TmuxSubcommand(args)
+	if len(args) == 0 {
+		return ""
+	}
+	if args[0] == "if-shell" && len(args) >= 6 {
+		verb, _, _ := strings.Cut(args[5], " ")
+		return verb
+	}
+	return args[0]
+}
+
+// TestTmuxVerbSeesThroughPinAndGuard pins the helper every "no kill ran"
+// assertion in this package rests on. Mutation that turns it red: drop the
+// -S skip, and a pinned guarded kill reads as "-S"; drop the -u skip, and a
+// kill carrying internal/tmux's -u (forgectl#840) reads as "-u".
+func TestTmuxVerbSeesThroughPinAndGuard(t *testing.T) {
+	guarded := []string{"if-shell", "-F", "-t", "@1", "#{==:#{pid}/#{start_time},1/2}", "kill-window -t @1", "display-message -p x"}
+	for _, args := range [][]string{
+		guarded,
+		append([]string{"-S", "/tmp/s"}, guarded...),
+		append([]string{"-u"}, guarded...),
+		append([]string{"-S", "/tmp/s", "-u"}, guarded...),
+	} {
+		if got := tmuxVerb(args); got != "kill-window" {
+			t.Errorf("tmuxVerb(%v) = %q, want kill-window", args, got)
+		}
+	}
+}
+
+// findCallVerb finds the first call to name whose tmux command (tmuxVerb)
+// equals verb — for asserting on one specific call among several to the same
+// binary, e.g. new-window after ensureSession's own has-session check.
 func findCallVerb(calls []exec.Call, name, verb string) (exec.Call, bool) {
 	for _, c := range calls {
-		if c.Name == name && len(c.Args) > 0 && c.Args[0] == verb {
+		if c.Name == name && tmuxVerb(c.Args) == verb {
 			return c, true
 		}
 	}
@@ -149,7 +186,7 @@ func TestPrepare_RealDispatch(t *testing.T) {
 	if !ok {
 		t.Fatal("no gh call")
 	}
-	wantGh := []string{"pr", "view", "42", "--repo", "cameronsjo/forgectl", "--json", "headRefName,headRefOid,headRepositoryOwner,headRepository"}
+	wantGh := []string{"pr", "view", "42", "--repo", "github.com/cameronsjo/forgectl", "--json", "headRefName,headRefOid,headRepositoryOwner,headRepository"}
 	if !equalArgs(gh.Args, wantGh) {
 		t.Errorf("gh args = %v, want %v", gh.Args, wantGh)
 	}
@@ -159,7 +196,8 @@ func TestPrepare_RealDispatch(t *testing.T) {
 	if !ok {
 		t.Fatal("no git call")
 	}
-	if git.Args[0] != "clone" || !contains(git.Args, "--branch") || !contains(git.Args, "feature-x") || !contains(git.Args, "--") {
+	// The sandbox clone refuses ext:: and fd:: ahead of the subcommand (#978).
+	if a := gitenvtest.Strip(git.Args); !gitenvtest.Refuses(git.Args, "ext", "fd") || len(a) == 0 || a[0] != "clone" || !contains(git.Args, "--branch") || !contains(git.Args, "feature-x") || !contains(git.Args, "--") {
 		t.Errorf("git clone args missing --branch/headRef/--: %v", git.Args)
 	}
 	if !contains(git.Args, "https://github.com/contributor/forgectl") {
@@ -232,6 +270,7 @@ func TestPrepare_IncompleteRefRefused(t *testing.T) {
 func TestSandboxAndQuarantine_SandboxFailureWrapped(t *testing.T) {
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			if name == "git" && contains(args, "worktree") {
 				return "", errors.New("boom")
 			}
@@ -263,6 +302,7 @@ func TestSandboxAndQuarantine_QuarantineFailureTearsDownWorkspace(t *testing.T) 
 	var capturedDir string
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			if name == "git" && contains(args, "worktree") {
 				for i, a := range args {
 					if a == "--" && i+1 < len(args) {

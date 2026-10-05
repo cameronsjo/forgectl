@@ -19,12 +19,32 @@ forgectl pr attach <breadcrumb>          # jump to a review window (also: open <
 forgectl pr queue                        # list reviews waiting for the drainer, oldest first
 forgectl pr drain                        # launch queued reviews as concurrency-cap slots free up
 forgectl pr keys                         # tmux cheatsheet for driving a review
+forgectl pr findings list                # list durable findings dirs from local reviews
+forgectl pr findings cleanup             # dry-run: findings dirs older than 30 days (--apply to delete)
 ```
 
 When both stdin and stdout are terminals, `pr pick` keeps its existing picker.
 Headless `pr pick` emits sanitized `owner/repo#N` rows and exits 1; each
 printed ref is directly usable with `forgectl pr <ref>`, while `pr prs --json`
 remains the stable inventory.
+
+`pr prs` and `pr dash` search as `@me` on the configured `[github] host`
+(github.com by default), whatever `GH_HOST` says in the surrounding shell.
+Every PR is then viewed, cloned, and reviewed on its own host, named
+explicitly: the configured host for a typed `owner/repo#N` or a listed row, a
+pasted URL's host, or the checkout remote's host for a bare `N`. See
+[the host pin](projects-and-review.md) for the rule.
+
+Any of these gh calls that goes to a host other than github.com ignores
+`GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, and
+`GITHUB_ENTERPRISE_TOKEN`. The rule follows the host the call goes to, not
+`[github] host`: a pasted URL or a checkout remote on a GitHub Enterprise host
+needs `gh auth login --hostname <host>` for that host, even when
+`[github] host` is github.com.
+
+`forgectl branch` verifies a remote delete on the host in the remote's URL. A
+GitHub Enterprise remote over plain `http` or on a nonstandard https port is
+reported as unverifiable rather than checked against another host.
 
 The `[pr]` section configures `forgectl pr` independently of whatever repo a review happens to land in:
 
@@ -49,21 +69,31 @@ cameronsjo/forgectl#41   2026-08-04T09:10:02Z  …/forgectl/pr-sessions/camerons
 cameronsjo/forgectl#39   2026-08-03T16:41:55Z  …/forgectl/pr-sessions/cameronsjo-forgectl-39-….json   workspace missing
 ```
 
-The status is field 4 and the recorded phase is field 5, both appended rather than inserted, so the breadcrumb stays field 3 for anything already parsing this output. Status is what tmux *observes* right now; phase is what the session record *says* (`-` on a record written before phases existed). A disagreement between the two is what `pr repair` settles. `pr list --json` carries the same `phase` key.
+The status is field 4 and the recorded phase is field 5, both appended rather than inserted, so the breadcrumb stays field 3 for anything already parsing this output. Status is what tmux *observes* right now; phase is what the session record *says* (`-` on a record written before phases existed). A disagreement between the two is what `pr repair` settles. `pr list --json` carries the same `phase` key. The reason is field 6, appended the same way: for a `needs-repair` row it is why the session needs repair, capped exactly as `pr dash` shows it (200 characters, then a truncation marker) with tabs and newlines flattened, so it is visible without running `pr repair`; on every other row the field is empty (the row ends in a tab). `--json` carries the same text as `repair_reason` on every row (`""` unless the record is needs-repair), the same key and shape `pr dash --json` uses. `pr repair --json` still has the full untruncated reason.
 
 **Session records are versioned as of this release.** A record written with a phase carries `version: 2`, and an older forgectl cannot read it: `pr teardown` refuses such a record loudly, but `pr list` on an older build skips it and prints fewer rows with exit 0 and no message. Upgrade rather than downgrade; there is no migration back. A current build does the opposite for records *it* cannot read (a torn file, or a record from a newer build): `pr list` still exits 0 and prints `N record(s) could not be read` on stderr, and any command that counts records to make a decision refuses instead of proceeding on a short count. `scripts/verify-v2-list-surfaces-unreadable.sh` re-proves that behaviour against a built binary.
 
 A breadcrumb's filename is the one field here that is read off disk rather than parsed, so a name carrying terminal control or bidi characters is escaped as a Go-quoted literal instead of being printed raw. The escaping is conditional: an ordinary path prints verbatim, so field 3 remains exactly the argument `pr teardown` takes. `pr dash` quotes the path unconditionally — it is a human view, not a parsing target.
 
-`live` means the review window still exists. `window gone` means the agent is no longer running — a rejected `model` is one cause, but so is a finished review or a window you closed yourself; either way the session is stale and `pr teardown <breadcrumb>` reclaims it. `?` means tmux itself could not be read, which says nothing about any individual window; the command still succeeds.
+`live` means the review window still exists. `window gone` means the agent is no longer running — a rejected `model` is one cause, but so is a finished review or a window you closed yourself; either way the session is stale and `pr teardown <breadcrumb>` reclaims it. `no tmux server` means the tmux server has exited and left its socket behind: no window is live, but forgectl will not call the review gone on that evidence alone, so check that its agent is not still running before you tear it down. `?` means tmux itself could not be read, which says nothing about any individual window; the command still succeeds.
 
 `workspace missing` means the clean-room directory itself is gone — usually because you deleted it by hand, or the OS reclaimed its temp root. The breadcrumb outlived what it described. `pr teardown <breadcrumb>` removes the leftover record: on this branch it unlinks the breadcrumb and **nothing else** — no workspace removal, no quarantine restore, no tmux, no git — because there is nothing left to tear down. `pr cleanup <YYYY-MM-DD>` sweeps these up by date alongside live sessions.
 
 These rows are also why a stale-only `pr list` makes no tmux calls at all: a missing workspace's window is not a question worth asking, and only live rows are batched into the liveness read.
 
-`pr teardown` and `pr cleanup` write an intent line to `<sessions dir>/repair.jsonl` before they remove anything and complete it afterwards — the same pair `pr repair --apply` writes, for the same reason: once the record is gone, that line is the only thing left naming the clean room. `forgectl pr repair --history` shows all three verbs.
+`pr teardown` and `pr cleanup` write an intent line to `<sessions dir>/repair.jsonl` before they remove anything and complete it afterwards — the same pair `pr repair --apply` writes, for the same reason: once the record is gone, that line is the only thing left naming the clean room. `pr findings cleanup --apply` writes the same pair for each findings dir it removes ([below](#findings-from-local-reviews)). `forgectl pr history` shows all four verbs.
 
 Teardown refuses rather than guesses. It re-checks the breadcrumb's identity and exact contents, and re-confirms the workspace is still absent, immediately before unlinking; anything that changed underneath it — the file rewritten, replaced, or swapped for a symlink, the workspace reappearing — is a refusal that leaves the record in place. A record whose workspace exists but is not a forgectl sandbox is neither live nor cleanly missing, so it is left alone entirely: `pr list` skips it and teardown refuses it. That state means something unexpected wrote to the session-state dir, and deleting it on a guess would destroy the evidence. A refusal writes no audit line at all, because nothing happened; a teardown that started and then hit drift completes its line as `failed`, so a line with no completion beside it still means only one thing — a removal that died mid-way.
+
+Teardown kills the review window first, while it still holds the pr lifecycle lock, on purpose: the window is found by the review's name, so releasing the lock first would let a fresh launch of the same PR create a same-named window that the kill then takes out. The tmux work (find the review session, find the window, revalidate it, kill it) shares one 3-second budget, plus up to half a second for a child that outlives its parent and keeps the output pipes open. A healthy tmux answers in milliseconds, and the bound keeps a wedged tmux server from holding the lock: other `pr` verbs wait up to 10 seconds for it. Every other tmux read made under the lock has the same bound: the review-slot count behind `pr <ref>`, `pr pick` and `pr drain`, the window checks in `pr repair` and `pr repair --prune`, and the window lookup in `pr repair --adopt-window`. `pr attach` doesn't take the lock, but its window lookup gets the same bound, so a wedged tmux can't leave it waiting. When tmux doesn't answer in time, each one treats the window as possibly still running, the same as when tmux can't be read at all, so it refuses rather than guessing.
+
+If two windows in the review session carry the review's name (tmux allows duplicate names), teardown doesn't pick one to kill. It kills none of them, parks the record in `needs-repair`, and keeps the workspace. Close the window that isn't the review, then run `pr teardown` again. `pr repair --adopt-window` refuses in the same case, and `pr attach` refuses too.
+
+**When the budget runs out, teardown removes nothing.** It cannot tell whether the window still exists, and window names depend only on owner, repo and PR number, so discarding the record could leave a live window that a later review of the same PR collides with. Instead it parks the record in `needs-repair` with a reason that starts `window kill timed out (tmux unresponsive)` and names the window that may still be running (its name, plus its `@N` id when tmux answered long enough to report one), keeps the workspace, exits non-zero, and prints a note on stderr. Once tmux responds, run `pr teardown` again, or settle it with `pr repair`.
+
+**A tmux read or kill that fails for any other reason also removes nothing.** Teardown treats the window as gone only when tmux gives a clean answer: the review session doesn't exist, it has no window with the review's name, or (at the kill step) the window has vanished or the tmux server restarted since it was found. A window that closes in the instant between that last check and the kill counts as vanished only when `kill-window` answers exactly `can't find window: @N` for that window's own id **and** a re-read of the server shows the same tmux server still answering. If a different server answers, that counts as a restart. If no server answers or the re-read fails, or `kill-window` returns any other error, the record is still parked. If tmux answers with an error instead at either step (a server it can't read, a socket that doesn't match the pin, output it can't parse, a window that moved to another session, a `kill-window` that failed), teardown parks the record in `needs-repair` with a reason that starts `review window state could not be read from tmux` and names the window, keeps the workspace, and exits non-zero with the cause.
+
+`pr cleanup` holds the lock for its whole sweep. Each session's tmux work gets its own 3-second bound, so a slow but responsive tmux never cuts a sweep short. Once one of them actually times out, the rest of the live sessions are skipped and left untouched, so a wedged tmux holds the lock for one timeout, not one per session. Stale sessions and sessions with no workspace don't need tmux, so they are still cleaned up. On stderr, `pr cleanup` prints one line for each session it didn't remove, worded for that session (timed out and parked, timed out and not parked, window state unreadable, skipped, or failed), and the error gives the number removed and the number not removed. It exits non-zero if any session wasn't removed. A record written before phases existed accepts no other phase change, so when teardown has to park one it first converts it to the current record format, with the same review, workspace and creation time, and then `pr repair` can settle it like any other parked record. The restore and workspace removal that follow a successful kill are local file operations with no such bound.
 
 ## Phases, and settling a session that got stuck
 
@@ -135,6 +165,7 @@ forgectl pr drain                 # one pass, then exit (the default)
 forgectl pr drain --watch         # keep draining every --interval (default 60s)
 forgectl pr drain --dry-run       # print what a pass would launch, create nothing
 forgectl pr drain --json          # emit the pass report as JSON
+forgectl pr drain --no-notify     # launch without the macOS notification
 ```
 
 Every pass prints one line, because a default install discards the `slog` handler and a `--watch` operator needs to see it happening without one:
@@ -144,6 +175,8 @@ pass=3 free=2 queued=5 launching=1 launched=2 failed=0 next=1m0s
 ```
 
 `--dry-run` prints `N queued, M free — would launch owner/repo#41, owner/repo#42` instead, and claims, prepares, and launches nothing.
+
+**Each successful launch posts a macOS notification**, titled `Review started` with the `owner/repo#N` ref as its body, so a `--watch` drainer running in a background pane still tells you when a review is ready to look at. Nothing is sent on `--dry-run`, for a launch that failed, or on any platform but macOS, and `--no-notify` turns it off for the pass. A notification that fails to send is logged at warn level and never changes the pass report or the exit code: the review launched either way. The title and body reach `osascript` as positional arguments, never as script text.
 
 **A launch failure is retried, not fatal.** It records `attempts`, `lastError`, and `lastAttemptAt` on the record and returns it to `queued` for a later pass to try again. At **3** failed attempts the record is parked in `needs-repair` with a reason naming the count and the last error (`drain: 3 attempts, last: …`), and no further pass claims it — `forgectl pr repair` is what settles it from there.
 
@@ -185,7 +218,7 @@ forgectl pr repair <breadcrumb> --apply --forget-if-absent   # remove only a rec
 
 Every refusal happens **before** the intent row is written. A row with no completion beside it is the signal that a rollback died mid-delete, so a refused mutation that wrote one would forge exactly that signal and send someone hunting a directory nothing ever touched.
 
-Every destructive session verb — `pr teardown`, `pr cleanup`, and every `pr repair --apply` — writes a line to `<sessions dir>/repair.jsonl` **before** it mutates anything and completes that line afterwards. That ordering is what makes a half-finished rollback recoverable: once the record is gone, the intent row is the only thing left naming the clean room on disk. `forgectl pr repair --history [--json]` reads it back, and each row carries a `verb` column saying which command wrote it (`-` on a row written before that column existed — never read as a repair). The file keeps the name `repair.jsonl` so existing trails stay readable.
+Every destructive session verb — `pr teardown`, `pr cleanup`, `pr findings cleanup --apply`, and every `pr repair --apply` — writes a line to `<sessions dir>/repair.jsonl` **before** it mutates anything and completes that line afterwards. That ordering is what makes a half-finished rollback recoverable: once the record is gone, the intent row is the only thing left naming the clean room on disk. `forgectl pr history [--json]` reads it back (`forgectl pr repair --history` is the same view under its older spelling and stays as an alias), and each row carries a `verb` column saying which command wrote it (`-` on a row written before that column existed — never read as a repair). The file keeps the name `repair.jsonl` so existing trails stay readable. The trail is a record of what the tools did, not a tamper-proof one: appends are serialised by the lifecycle lock, which is advisory, so a process of the same user that writes to `repair.jsonl` without taking it can interleave with an append (and a rolled-back short write can cut its bytes). That writer already owns the whole 0700 sessions directory and can forge or delete any row directly, so this is documented as an accepted residual rather than guarded against. `pr history` shows the newest 2000 rows and says on stderr how many older rows it left out; a line over 8 KiB is skipped rather than failing the read. `--json` prints a bare array of rows, and every note stays on stderr, so the array keeps its shape. When rows were omitted, a second stderr note says how many of them are intents with no completion anywhere in the log — a mutation that died mid-way, and the one row type `--prune` keeps at any age — rendered "at least N" if the count hit its tracking cap (10,000). Only decodable rows are counted; an undecodable line stays in the skipped count and is never attributed. Read `repair.jsonl` directly to find them. A `findings-cleanup` row names no session: its `record_path` is the findings dir it removed, its detail is that dir's size, and its ref is empty.
 
 `--prune` compacts that log, and **what it keeps unconditionally is the point**. It drops one thing only: an intent row with an `applied` or `failed` completion beside it, both older than `--log-retention`. Everything else survives at any age — an **unpaired intent** (that is the signal a repair died mid-delete, and its workspace field is the only pointer left to a possibly-orphaned clean room), a line that **does not parse** (nothing may drop what it cannot read, and it is preserved byte for byte), a row carrying **no timestamp** (no age was established, so no retention decision exists) and every row sharing its id, and a pair **straddling the cutoff**, which is kept whole so a completion can never outlive the intent it settles.
 
@@ -208,3 +241,24 @@ This capability check runs before any clean room or breadcrumb exists, so a refu
 When verification reports a review gone, recovery is the ordinary stale-session path — `forgectl pr list` to see which breadcrumbs lost their window, then `forgectl pr teardown <breadcrumb>` on each. When tmux could not be read at all, the command says exactly that instead of naming any review gone; an unreadable server is not evidence of a dead window.
 
 `--no-verify` skips the eight-second wait and the window check, and nothing else. It is not an escape from the tmux floor, the capability check, the concurrency cap, or identity capture — it only trades post-dispatch confirmation for an immediate return.
+
+## Findings from local reviews
+
+A `forgectl pr local` review leaves one durable deliverable behind: a `forgectl-findings-<random>` directory under the findings store, outside the disposable clean room. `pr findings` is the reclaim path for that store.
+
+```sh
+forgectl pr findings list [--json]                              # one row per findings dir: path, modified time, size
+forgectl pr findings cleanup [--older-than 720h]                # dry-run: what would be removed
+forgectl pr findings cleanup [--older-than 720h] --json         # {"paths":[...],"count":N}; refused with --apply
+forgectl pr findings cleanup [--older-than 720h] --apply        # remove them, after a confirmation prompt
+```
+
+`cleanup` is a dry run unless `--apply` is given. `--older-than` defaults to 720h (30 days) and refuses a negative value; `0` means every findings dir. It only ever considers plain directories directly under the findings store: a symlink or a stray file there is left alone, and it never touches a review workspace or a live session.
+
+Before it considers anything, `cleanup` checks the store itself, at the directory a symlinked store resolves to: it must be owned by you and must not be group- or world-writable, because anyone else who can write there could plant or swap the dirs cleanup would judge and remove. A store that fails either check stops the run with one error that does not print the store's path; `chmod go-w` on the store fixes the mode case. `list` makes the same check and refuses the same way, and so does the owner marker `pr local` writes into a new findings dir: that dir is then left unmarked, which cleanup keeps. A store that exists but cannot be opened also stops the run with one error, and a store that does not exist yet has nothing to clean.
+
+A findings dir whose review is still running is never offered, even at `--older-than 0`. `pr local` writes a `.forgectl-owner` marker into each findings dir it creates, and the marker names the review's session record. While that record exists the dir is kept, and once the record is gone (after `pr teardown`, `pr cleanup`, or a repair that removed it) the dir becomes reclaimable. A marker that is oversized, a FIFO or other non-regular file, or a complete line that names no session record counts as stale. A findings dir with no marker, with an empty marker or one cut off before its final newline, or with a marker that exists but cannot be opened (a symlink, a permission error, an I/O or file-descriptor failure) is skipped, and each run prints one warning with the count of such dirs; a marker that fails to open also gets its own warning naming the error. That covers a dir made by a forgectl from before the marker existed, a review that is still starting up, and a marker write that failed. Remove an unmarked dir by hand once you know no review is using it.
+
+Two leftovers are fail-safe rather than swept. A `.forgectl-owner.tmp` left by a crash mid-write is never read and never swept on its own, and the dir it sits in reads as unmarked and is kept. The marker is published with a hard link, so on a filesystem without hard links every findings dir stays unmarked and is kept.
+
+`--apply` scans once and removes exactly the set it showed you. Each dir is re-checked at removal time — it must still exist, still be a plain directory, still open through the findings store as that same directory, and still have no live owner — and one that stopped qualifying is skipped with a logged note and no audit row, because nothing happened to it. Each removal takes the pr lifecycle lock and writes the same intent-then-completion pair to `<sessions dir>/repair.jsonl` that `pr teardown` does, with verb `findings-cleanup`, so `forgectl pr history` shows it. The run stops at the first error — a busy lock, an audit row that could not be written (that dir is left in place), or a failed removal — and leaves every dir after it untouched. Dirs removed before the error stay removed, and each has its completed pair in the log.

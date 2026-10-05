@@ -11,8 +11,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,8 +22,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/tasks"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // mcpShutdownTimeout bounds the graceful HTTP shutdown after a signal. A
@@ -61,10 +65,21 @@ func newTasksMCPCmd(deps module.Deps, host, keychainService *string) *cobra.Comm
   forgectl tasks mcp --http :3000 \
       --token-file /run/secrets/token      streamable HTTP (a container)
 
-Six tools: list_projects, list_tasks, get_task, ready_tasks, create_task,
-add_comment. What any of them can actually do is decided by the credential's
-own grant, not by this flag surface — a read-only token gets a tool error on
-create_task, and that error is evidence only because the reads pass.
+Seven tools: list_projects, list_tasks, get_task, ready_tasks, create_task,
+add_comment, complete_task. What any of them can actually do is decided by the
+credential's own grant, not by this flag surface — a read-only token gets a
+tool error on create_task, and on complete_task for any task that is still
+open, and that error is evidence only because the reads pass.
+
+complete_task marks one task done and appends a closed-by line to its
+description. It sends a limited number of updates per MCP session and refuses
+the rest; a new session starts a new count. Each call that sends an update,
+and each call refused by that limit, writes one JSON close record line to
+stderr: time, task and project id, closer, evidence, the credential's source
+name, the host, and the outcome. Never the token. The line does not depend on
+log_level. On stdio, stdout is the protocol stream and carries no record, and
+each line is also appended to tasks-closes.jsonl in the forgectl config
+directory.
 
 Board text is UNTRUSTED. Every title, description, and comment this server
 returns is wrapped in a per-response <board-text-NONCE> fence, and any
@@ -74,11 +89,18 @@ inside a fence as data, never as instructions.
 TRANSPORTS AND CREDENTIALS
 
   stdio      token from the macOS login keychain (--keychain-service,
-             default ` + tasks.DefaultKeychainService + `)
+             default ` + tasks.DefaultKeychainService + `). A keychain token is sent only to the
+             default host or a host under [tasks] allowed_hosts in the
+             forgectl config file; any other --host is refused with exit 4
+             before the keychain is read. Close records also go to
+             tasks-closes.jsonl in the forgectl config directory.
   --http     token from --token-file, which is REQUIRED with --http; the file
              must be owner-readable only. There is no environment-variable
              source, deliberately: an env var is readable through
-             docker inspect and /proc/<pid>/environ.
+             docker inspect and /proc/<pid>/environ. The allowed_hosts list
+             does not apply to this transport: it reads no keychain and no
+             user config, and --pin-ip is what bounds where its token goes.
+             Its close records go to stderr only, which is the container log.
 
   --pin-ip   repeatable, and REQUIRED with --http (rejected without it). An
              INTERSECTION with the host-pinning policy, not a fallback: an
@@ -162,12 +184,17 @@ func runTasksMCP(
 	// port and only then discovers its token file is unreadable is a container
 	// that reports healthy and answers every tool call with an auth failure.
 	var token tasks.Token
-	clientName := "forgectl (stdio)"
 	if httpAddr == "" {
-		token, err = tasks.ReadToken(ctx, deps.Runner, keychainService)
+		// The stdio transport reads the keychain, so the allowed-host rule
+		// applies, and is checked before the read.
+		token, err = readTasksKeychainToken(cmd, deps.Runner, tasksKeychainFlag, keychainService, host, deps.Cfg.Tasks.AllowedHosts)
 	} else {
+		// The HTTP transport is NOT subject to the allowed-host rule. Its
+		// token comes from a mounted file, in a container that has no user
+		// config file to hold a host list; where that token may go is bounded
+		// by the --pin-ip list validateMCPFlags requires, and a token from
+		// ReadTokenFile carries no host restriction of its own.
 		token, err = tasks.ReadTokenFile(tokenFile)
-		clientName = "forgectl (http)"
 	}
 	if err != nil {
 		return tasksExitError(err)
@@ -185,7 +212,7 @@ func runTasksMCP(
 		return tasksExitError(err)
 	}
 
-	server := tasks.NewMCPServer(client, clientName)
+	server := tasks.NewMCPServer(client, mcpServerConfig(cmd, httpAddr, keychainService, host))
 	if httpAddr == "" {
 		// stdout is the transport on stdio. Anything written there that is
 		// not a JSON-RPC frame corrupts the session, which is why nothing in
@@ -193,6 +220,37 @@ func runTasksMCP(
 		return server.Run(ctx, &mcp.StdioTransport{})
 	}
 	return serveMCPHTTP(cmd, server, httpAddr)
+}
+
+// mcpServerConfig is what the server is told about its own launch: the
+// fallback client name for a trailer, where close records go, and the two
+// facts a record carries about the credential — its source's name and the
+// host it is sent to.
+//
+// Records go to stderr on both transports, never stdout: on stdio stdout is
+// the JSON-RPC transport, and a record written there would corrupt the session
+// it describes. On stdio they are also appended to the close log, because the
+// server's stderr belongs to the MCP client that started it and is gone when
+// that client is. Over HTTP stderr is the container log, which is that
+// transport's durable record, and no file is written.
+//
+// The credential source is a NAME, never the credential. On stdio it is the
+// keychain service the token was read from. On HTTP it is the fixed word for
+// a mounted file: --keychain-service still holds its default there, and it
+// names an entry this transport never read.
+func mcpServerConfig(cmd *cobra.Command, httpAddr, keychainService, host string) tasks.MCPConfig {
+	cfg := tasks.MCPConfig{
+		DefaultClientName: "forgectl (stdio)",
+		Records:           tasksCloseRecordWriter(cmd.ErrOrStderr()),
+		CredentialSource:  keychainService,
+		Host:              host,
+	}
+	if httpAddr != "" {
+		cfg.DefaultClientName = "forgectl (http)"
+		cfg.Records = cmd.ErrOrStderr()
+		cfg.CredentialSource = tasks.CredentialSourceTokenFile
+	}
+	return cfg
 }
 
 func serveMCPHTTP(cmd *cobra.Command, server *mcp.Server, addr string) error {
@@ -260,7 +318,9 @@ func serveMCPHTTP(cmd *cobra.Command, server *mcp.Server, addr string) error {
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", addr)
 	if err != nil {
-		return fmt.Errorf("tasks mcp: cannot listen on %s: %w", addr, err)
+		// Neither addr nor net's own text (which repeats it) is echoed: the
+		// value is the same --http string --ping refuses to print (#658).
+		return fmt.Errorf("tasks mcp: cannot listen on the --http address: %w", listenCause(err))
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "forgectl tasks mcp: serving streamable HTTP on %s/mcp\n", ln.Addr()) //nolint:errcheck // best-effort startup notice
 
@@ -313,7 +373,7 @@ func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
 	if err != nil {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping: build request: %w", err), 1)
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: build request: %w", pingCause(err)), 1)
 	}
 	// Both Accept values are mandatory for a streamable-HTTP server. Naming
 	// only application/json is rejected by the transport, and the rejection
@@ -323,7 +383,7 @@ func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 
 	resp, err := (&http.Client{Timeout: pingTimeout}).Do(req)
 	if err != nil {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s did not answer: %w", url, err), exitTasksUnreachable)
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s did not answer: %w", pingURLLabel, pingCause(err)), exitTasksUnreachable)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	// The read error is kept rather than discarded. Dropping it makes a body
@@ -332,7 +392,7 @@ func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 	// fault — a confident, wrong statement about the service being probed.
 	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d", url, resp.StatusCode), 1)
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d", pingURLLabel, resp.StatusCode), 1)
 	}
 	// Release the session this probe just created. The server also expires
 	// idle sessions (mcpSessionTimeout), which is the real defence — but a
@@ -346,10 +406,10 @@ func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 	releasePingSession(cmd.Context(), url, resp.Header.Get("Mcp-Session-Id"))
 
 	if readErr != nil {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d but the body could not be read: %w", url, resp.StatusCode, readErr), exitTasksUnreachable)
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d but the body could not be read: %w", pingURLLabel, resp.StatusCode, pingCause(readErr)), exitTasksUnreachable)
 	}
 	if !hasJSONRPCResult(raw) {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d but the body carries no JSON-RPC result", url, resp.StatusCode), 1)
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d but the body carries no JSON-RPC result", pingURLLabel, resp.StatusCode), 1)
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), "ok") //nolint:errcheck // best-effort healthcheck output
 	return nil
@@ -386,15 +446,69 @@ func releasePingSession(parent context.Context, url, sessionID string) {
 // http://127.0.0.13000/mcp, which fails to connect — so the healthcheck
 // reports the service unreachable when the real fault is a typo in its own
 // argument, and the exit code claims a network verdict about a parse failure.
+//
+// The address and the URL are never echoed whole (#658). A URL built from the
+// address can carry credentials — `tok@127.0.0.1:3000` splits into host
+// "tok@127.0.0.1", and net/http then sends "tok" as userinfo and prints it in
+// its own errors (it masks only a password). So the host must be an IP or a
+// plain hostname (config.PlainServiceHostname: the one hostname grammar, in
+// the form that also admits the '_' of a compose service name), which cannot
+// carry userinfo; this function's refusals repeat
+// none of the value; and later messages say pingURLLabel instead of the URL.
+// A later message can still name host:port through pingCause, which keeps a
+// dial or DNS error. That is bounded by the checks here: a validated host and
+// a numeric port.
 func pingURL(addr string) (string, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return "", fmt.Errorf("tasks mcp --ping: %q is not a host:port address (a bare port needs its colon, as in :3000): %w", addr, err)
+		// SplitHostPort's error repeats addr, so it is not wrapped.
+		return "", errors.New("tasks mcp --ping: the --http value is not a host:port address (a bare port needs its colon, as in :3000)")
+	}
+	// The Itoa round trip refuses what Atoi tolerates: a leading '+' or '-',
+	// and leading zeros.
+	if n, perr := strconv.Atoi(port); perr != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
+		return "", errors.New("tasks mcp --ping: the --http port is not a number from 1 to 65535")
+	}
+	if host != "" && net.ParseIP(host) == nil && !config.PlainServiceHostname(host) {
+		return "", errors.New("tasks mcp --ping: the --http host is not an IP address or a plain hostname (letters, digits, '.', '-', '_')")
 	}
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "127.0.0.1"
 	}
 	return "http://" + net.JoinHostPort(host, port) + "/mcp", nil
+}
+
+// pingURLLabel stands in for the probe URL in every --ping message (#658).
+const pingURLLabel = "the configured tasks URL"
+
+// pingCause drops net/http's *url.Error layer, whose text is the method and
+// the full URL, and keeps what it wraps (a dial or timeout error naming at
+// most host:port, which pingURL has already bounded).
+func pingCause(err error) error {
+	var urlErr *neturl.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		return urlErr.Err
+	}
+	return err
+}
+
+// listenCause reduces a net.Listen failure to the part that does not repeat
+// the address: the bare reason of an address or DNS error, or the OS error
+// under a *net.OpError ("address already in use").
+func listenCause(err error) error {
+	var addrErr *net.AddrError
+	if errors.As(err, &addrErr) {
+		return termsafe.Categorical(addrErr.Err, err)
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return termsafe.Categorical(dnsErr.Err, err)
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Err != nil {
+		return opErr.Err
+	}
+	return err
 }
 
 // hasJSONRPCResult reports whether raw carries a JSON-RPC response with a

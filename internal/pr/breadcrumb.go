@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -34,8 +35,16 @@ var (
 // LoadBreadcrumb validates both its LOCATION and its CONTENT before any caller
 // touches Workspace.
 type Breadcrumb struct {
-	Workspace string    `json:"workspace"`
-	Ref       string    `json:"ref"` // canonical "owner/repo#N"
+	Workspace string `json:"workspace"`
+	Ref       string `json:"ref"` // canonical "owner/repo#N"
+	// Host persists Ref.Host, which the "owner/repo#N" form cannot carry
+	// (#413). Every remote record this build writes names its host
+	// concretely, so a later [github] host change cannot move an existing
+	// session's view or post to another forge. A record WITHOUT it — written
+	// before records carried a host, or a local session — means the
+	// configured [github] host at the time it is read. Omitted when empty so
+	// such a record stays byte-identical on rewrite.
+	Host      string    `json:"host,omitempty"`
 	Agent     string    `json:"agent"`
 	CreatedAt time.Time `json:"createdAt"`
 	// Local persists Ref.local, which Ref's own string form cannot carry.
@@ -337,15 +346,11 @@ func loadBreadcrumbRecord(path, sessionsDir string) (Breadcrumb, []byte, error) 
 		return Breadcrumb{}, nil, fmt.Errorf("breadcrumb %s is not inside the forgectl session-state dir", termsafe.QuotePath(path))
 	}
 
-	// (2) CONTENT — only now read and decode. LimitReader bounds the allocation
-	// before parsing rather than discovering an oversized record after ReadFile
-	// has already buffered it all.
-	file, err := os.Open(path) //nolint:gosec // path was location-validated above
-	if err != nil {
-		return Breadcrumb{}, nil, fmt.Errorf("read breadcrumb %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
-	}
-	defer func() { _ = file.Close() }()
-	data, err := readBreadcrumbBytes(file)
+	// (2) CONTENT — only now read and decode, through the one record reader:
+	// O_NOFOLLOW|O_NONBLOCK and a regular-file Fstat, so a FIFO named like a
+	// record cannot block this open under the lifecycle lock (forgectl#621),
+	// and a size bound applied before parsing rather than after buffering.
+	data, err := readRecordFile(path)
 	if err != nil {
 		return Breadcrumb{}, nil, fmt.Errorf("read breadcrumb %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
@@ -442,14 +447,19 @@ func validateBreadcrumbRecord(bc Breadcrumb) error {
 	}
 	ref, err := ParseRef(bc.Ref)
 	if err != nil {
-		return fmt.Errorf("malformed ref %q: %w", bc.Ref, err)
+		// Categorical (#562): bc.Ref is read from disk and never echoed.
+		return errors.New("malformed ref")
 	}
 	// A bare number parses (ParseRef's third form) but leaves Owner/Repo empty,
 	// which would yield a Session whose Slug() is "/" and make the locality
 	// cross-check below read an empty Owner. A breadcrumb always records a
 	// resolved ref, so require one.
 	if !ref.Complete() {
-		return fmt.Errorf("ref %q is not a complete owner/repo#N reference", bc.Ref)
+		return errors.New("ref is not a complete owner/repo#N reference")
+	}
+	if bc.Host != "" && (bc.Local || !ValidHostSegment(bc.Host)) {
+		// Categorical (#562): the value is read from disk and never echoed.
+		return errors.New("record host is not a valid GitHub hostname for this session")
 	}
 	// CROSS-REPRESENTATION CHECK. Locality is recorded twice — as the Local
 	// flag (authoritative) and as the ref's display owner — and the only
@@ -464,8 +474,8 @@ func validateBreadcrumbRecord(bc Breadcrumb) error {
 	// pre-upgrade local breadcrumb written before the flag existed.
 	if bc.Local && ref.Owner != localOwnerSentinel {
 		return fmt.Errorf(
-			"breadcrumb claims a local session but its ref names owner %q, not %q",
-			ref.Owner, localOwnerSentinel,
+			"breadcrumb claims a local session but its ref names an owner other than %q",
+			localOwnerSentinel,
 		)
 	}
 	if bc.CreatedAt.IsZero() {
@@ -474,7 +484,8 @@ func validateBreadcrumbRecord(bc Breadcrumb) error {
 	// The pathname shape is a RECORD property (it constrains what the string
 	// can ever mean); whether that path exists is an actionability question.
 	if bc.Workspace != "" && !filepath.IsAbs(bc.Workspace) {
-		return fmt.Errorf("workspace %q must be an absolute path", bc.Workspace)
+		// Categorical (#658): bc.Workspace is read from disk.
+		return errors.New("workspace must be an absolute path")
 	}
 	return nil
 }
@@ -499,7 +510,8 @@ func validateLifecycleFields(bc Breadcrumb) error {
 		return fmt.Errorf("version %d record has no phase", breadcrumbVersion)
 	}
 	if !bc.Phase.valid() {
-		return fmt.Errorf("unknown phase %q", string(bc.Phase))
+		// Categorical (#658): bc.Phase is read from disk.
+		return errors.New("unknown phase")
 	}
 	if bc.Revision < 1 {
 		return fmt.Errorf("version %d record has no revision", breadcrumbVersion)
@@ -511,7 +523,8 @@ func validateLifecycleFields(bc Breadcrumb) error {
 		return fmt.Errorf("windowId is only valid on an active record (phase is %q)", string(bc.Phase))
 	}
 	if bc.WindowID != "" && !validWindowID(bc.WindowID) {
-		return fmt.Errorf("windowId %q is not a generation-qualified window identity", bc.WindowID)
+		// Categorical (#658): bc.WindowID is read from disk.
+		return errors.New("windowId is not a generation-qualified window identity")
 	}
 	if bc.Phase == PhaseNeedsRepair && bc.RepairReason == "" {
 		return fmt.Errorf("needs-repair record has no repairReason")
@@ -580,22 +593,48 @@ func validWindowID(id string) bool {
 // session-state dir under $HOME — same-uid arbitrary write — an actor who
 // can delete the target outright without forgectl.
 func validateWorkspace(workspace string) error {
+	ws := quoteWorkspace(workspace)
 	if !filepath.IsAbs(workspace) {
-		return fmt.Errorf("workspace %q must be an absolute path", workspace)
+		return fmt.Errorf("workspace %s must be an absolute path", ws)
 	}
 	info, err := fsStat(workspace)
 	if err != nil {
-		return fmt.Errorf("workspace %q does not exist: %w", workspace, err)
+		return fmt.Errorf("workspace %s does not exist: %w", ws, pathErrCause(err))
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("workspace %q is not a directory", workspace)
+		return fmt.Errorf("workspace %s is not a directory", ws)
 	}
 	resolved, err := fsEvalSymlinks(workspace)
 	if err != nil {
-		return fmt.Errorf("workspace %q could not be resolved: %w", workspace, err)
+		return fmt.Errorf("workspace %s could not be resolved: %w", ws, pathErrCause(err))
 	}
 	if !strings.HasPrefix(filepath.Base(resolved), sandboxPrefix) {
-		return fmt.Errorf("workspace %q lacks the %q sandbox prefix", workspace, sandboxPrefix)
+		return fmt.Errorf("workspace %s lacks the %q sandbox prefix", ws, sandboxPrefix)
 	}
 	return nil
+}
+
+// workspaceEchoMaxRunes caps a workspace path echoed in an error (#706). The
+// path comes from a breadcrumb on disk, so it is bounded rather than trusted;
+// it is still echoed because on the teardown path it is the one pointer to
+// what was refused. The budget is well above termsafe.ArgEchoMaxRunes because
+// a macOS $TMPDIR sandbox path alone runs to about 80 runes.
+const workspaceEchoMaxRunes = 256
+
+// quoteWorkspace is the echo form of a recorded workspace path: quoted with
+// control characters escaped, and capped at workspaceEchoMaxRunes.
+func quoteWorkspace(path string) string {
+	return termsafe.QuoteArgMax(path, workspaceEchoMaxRunes)
+}
+
+// pathErrCause strips a *fs.PathError down to its underlying cause, so an
+// error that already names the workspace (capped) does not render the raw path
+// a second time through the PathError's own text. errors.Is disposition on the
+// cause (fs.ErrNotExist, fs.ErrPermission) is unchanged.
+func pathErrCause(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	return err
 }

@@ -123,17 +123,22 @@ interactively when no sshUrl is available.`,
 func cloneOrg(ctx context.Context, client *projects.Client, cmd *cobra.Command, org string, dryRun bool) error {
 	repos, err := client.ListOrg(ctx, org)
 	if err != nil {
-		return fmt.Errorf("listing %s's GitHub repos: %w", org, err)
+		// org is the --org argv, echoed capped and quoted (#562); it reaches
+		// here unvalidated when ListOrg is what rejected it.
+		return fmt.Errorf("listing %s's GitHub repos: %w", termsafe.QuoteArgMax(org, termsafe.ArgEchoMaxRunes), err)
 	}
 	if len(repos) == 0 {
-		return fmt.Errorf("no repos found for GitHub user/org %q", org)
+		return fmt.Errorf("no repos found for GitHub user/org %s", termsafe.QuoteArgMax(org, termsafe.ArgEchoMaxRunes))
 	}
 	var failed int
 	for _, r := range repos {
 		if err := cloneOnly(ctx, client, cmd, r, "", dryRun); err != nil {
 			// Best-effort diagnostic write, same as every stderr note here.
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "error: %s/%s: %v\n",
-				termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), err)
+			// err goes through termsafe and safeText too: this line bypasses the root
+			// error handler, so nothing else would escape a path or cause
+			// that carries a control (#658).
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "error: %s/%s: %s\n",
+				safeTitle(r.Owner), safeTitle(r.Name), safeText(termsafe.Error(err).Error()))
 			failed++
 		}
 	}
@@ -166,7 +171,7 @@ func cloneOnly(ctx context.Context, client *projects.Client, cmd *cobra.Command,
 	if r.Cloned {
 		// Best-effort diagnostic write, same as every stderr note here.
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%s/%s already on disk at %s\n",
-			termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), termsafe.QuotePath(r.LocalPath))
+			safeTitle(r.Owner), safeTitle(r.Name), termsafe.QuotePath(r.LocalPath))
 		// The one stdout line is the scriptable contract; a failed write there is
 
 		// the caller's pipe closing, not something this command can act on.
@@ -189,7 +194,7 @@ func cloneOnly(ctx context.Context, client *projects.Client, cmd *cobra.Command,
 	}
 	// Best-effort diagnostic write, same as every stderr note here.
 	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s/%s from %s…\n",
-		termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), termsafe.SafeLine(r.Host))
+		safeTitle(r.Owner), safeTitle(r.Name), safeTitle(r.Host))
 	dest, err := client.CloneInto(ctx, r, wing)
 	if err != nil {
 		return err

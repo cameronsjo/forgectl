@@ -37,6 +37,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	osexec "os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -429,6 +430,105 @@ func TestListCmd_DegradationNotes_AppearOnStderrNotStdout(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "note:") {
 		t.Errorf("degradation notes missing from stderr: %q", stderr.String())
+	}
+}
+
+// degradedGitHubRunFunc fails every gh call (a degraded GitHub host) while tea
+// serves one Gitea row.
+func degradedGitHubRunFunc(name string, args []string) (string, error) {
+	switch name {
+	case "gh":
+		return "", errors.New("gh: not authenticated")
+	case "tea":
+		return "owner\tname\ttype\tssh\n" +
+			"cameron\thomeclaw\tsource\tssh://git@git.example.test:222/cameron/homeclaw.git\n", nil
+	}
+	return "", nil
+}
+
+// TestListCmd_Strict_DegradedHostExitsOneAfterWritingOutput is the #413
+// degradation signal: with --strict, a partial inventory exits 1, and the rows
+// that did load are still on stdout as a valid JSON array.
+func TestListCmd_Strict_DegradedHostExitsOneAfterWritingOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"json", []string{"--json", "--strict"}},
+		{"table", []string{"--strict"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := listFixture(t, degradedGitHubRunFunc)
+			cmd := newProjectsListCmd(client)
+			var stdout, stderr bytes.Buffer
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			cmd.SetArgs(tc.args)
+
+			err := cmd.ExecuteContext(context.Background())
+			if err == nil {
+				t.Fatal("--strict with a degraded host returned nil, want an error")
+			}
+			if got := ExitCode(err); got != 1 {
+				t.Fatalf("ExitCode = %d, want 1", got)
+			}
+			if !strings.Contains(stdout.String(), "homeclaw") {
+				t.Fatalf("stdout = %q, want the rows that did load written before the exit", stdout.String())
+			}
+			if tc.name == "json" {
+				var repos []projects.Repo
+				if err := json.Unmarshal(stdout.Bytes(), &repos); err != nil {
+					t.Fatalf("stdout is not valid JSON under --strict: %v", err)
+				}
+			}
+		})
+	}
+}
+
+// TestListCmd_Strict_CleanInventoryExitsZero: --strict is silent when no host
+// degraded, and the default (no --strict) stays exit 0 on a degraded host.
+func TestListCmd_Strict_CleanInventoryExitsZero(t *testing.T) {
+	ghJSON := `[{"name":"forgectl","sshUrl":"git@github.com:cameronsjo/forgectl.git","isPrivate":false}]`
+	client := listFixture(t, twoHostRunFunc(ghJSON, "owner\tname\ttype\tssh\n"))
+	cmd := newProjectsListCmd(client)
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--json", "--strict"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("--strict on a clean inventory: %v", err)
+	}
+
+	client = listFixture(t, degradedGitHubRunFunc)
+	cmd = newProjectsListCmd(client)
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("default (no --strict) on a degraded host: %v, want exit 0 unchanged", err)
+	}
+}
+
+// TestListCmd_Strict_TeaNotInstalledIsNotDegradation: with no tea binary the
+// Gitea source is simply not set up, so it adds no note and --strict exits 0.
+// A tea that runs and fails is still a degradation (covered above).
+func TestListCmd_Strict_TeaNotInstalledIsNotDegradation(t *testing.T) {
+	ghJSON := `[{"name":"forgectl","sshUrl":"git@github.com:cameronsjo/forgectl.git","isPrivate":false}]`
+	client := listFixture(t, func(name string, args []string) (string, error) {
+		if name == "tea" {
+			return "", &exec.CommandError{Name: "tea", Err: &osexec.Error{Name: "tea", Err: osexec.ErrNotFound}}
+		}
+		return twoHostRunFunc(ghJSON, "")(name, args)
+	})
+	cmd := newProjectsListCmd(client)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--json", "--strict"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("--strict with tea not installed: %v (stderr %q)", err, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "note:") {
+		t.Fatalf("tea not installed produced a note: %q", stderr.String())
 	}
 }
 

@@ -45,15 +45,18 @@ server and the operator always knows where it came from.
   forgectl docs open docs/plans/thing.md   open one doc
   forgectl docs open --print-url thing.md  print the URL instead of opening it
 `,
-		Args: cobra.MaximumNArgs(1),
+		Args: docsArgs("docs open", cobra.MaximumNArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var target string
 			if len(args) == 1 {
 				target = args[0]
 			}
-			return runDocsOpen(cmd, deps, target, printOnly)
+			// open has no work half-done to report: every failure is "could
+			// not open" (exit 2, docs_errors.go).
+			return docsFail(cmd, "docs open", "", runDocsOpen(cmd, deps, target, printOnly), 2, false)
 		},
 	}
+	cmd.SetFlagErrorFunc(docsFlagError("docs open"))
 	cmd.Flags().BoolVar(&printOnly, "print-url", false, "print the resolved URL instead of opening a browser")
 	return cmd
 }
@@ -130,7 +133,7 @@ func runDocsOpen(cmd *cobra.Command, deps module.Deps, target string, printOnly 
 func resolveOpenTarget(ctx context.Context, server docspkg.DiscoveredServer, target string) (string, error) {
 	abs, err := filepath.Abs(target)
 	if err != nil {
-		return "", fmt.Errorf("resolve %s: %w", termsafe.QuotePath(target), err)
+		return "", fmt.Errorf("resolve %s: %w", termsafe.QuotePath(target), termsafe.Error(err))
 	}
 
 	root, rel, err := docspkg.LocateDoc(ctx, server, abs)

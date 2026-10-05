@@ -34,6 +34,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -497,5 +498,181 @@ func TestModifiedLabel(t *testing.T) {
 	}
 	if got := modifiedLabel(time.Date(2026, 9, 24, 23, 0, 0, 0, time.Local), now); got != "2026-09-24" {
 		t.Errorf("earlier day: got %q", got)
+	}
+}
+
+func TestServer_VaultRootRendersFlavor(t *testing.T) {
+	vault := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	docs := t.TempDir()
+	const body = "# Note\n\nsome ==x== text\n"
+	for _, dir := range []string{vault, docs} {
+		if err := os.WriteFile(filepath.Join(dir, "note.md"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	idx, err := NewIndex([]string{vault, docs})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	h := testHandler(idx)
+
+	for _, r := range idx.Roots() {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/doc/"+r.Label+"/note.md", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d", r.Label, rec.Code)
+		}
+		hasMark := strings.Contains(rec.Body.String(), "<mark>x</mark>")
+		if want := r.Kind == RootVault; hasMark != want {
+			t.Errorf("root %s (kind %v): <mark> present = %v, want %v", r.Label, r.Kind, hasMark, want)
+		}
+	}
+	kinds := map[RootKind]int{}
+	for _, r := range idx.Roots() {
+		kinds[r.Kind]++
+	}
+	if kinds[RootVault] != 1 || kinds[RootDocs] != 1 {
+		t.Fatalf("fixture did not build one vault and one docs root: %v", kinds)
+	}
+}
+
+// TestServer_VaultCommentTextStaysOutOfChrome: comment text must not reach
+// the page through the chrome built from the index and the heading ids —
+// <title>, the sidenav, heading ids, and outline hrefs — not only the body.
+func TestServer_VaultCommentTextStaysOutOfChrome(t *testing.T) {
+	vault := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	const body = "# Meeting %%private%%\n\n## Plan %%secret%%\n\ntext\n\n### Deep %%hush%% end\n\nmore\n"
+	if err := os.WriteFile(filepath.Join(vault, "note.md"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := NewIndex([]string{vault})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	h := testHandler(idx)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/doc/"+idx.Roots()[0].Label+"/note.md", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	page := rec.Body.String()
+	for _, leak := range []string{"private", "secret", "hush", "%%"} {
+		if strings.Contains(page, leak) {
+			t.Errorf("comment text %q reached the page", leak)
+		}
+	}
+	for _, want := range []string{"<title>Meeting", `id="plan"`, `href="#plan"`, `id="deep-`, `href="#deep-`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page missing %q", want)
+		}
+	}
+}
+
+// TestServer_VaultWikilinksResolve: a vault page served by the reader has
+// its wikilinks resolved against the served index, from the page's own doc.
+func TestServer_VaultWikilinksResolve(t *testing.T) {
+	h := testHandler(newLinksTestIndex(t))
+	get := func(path string) string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s: status %d", path, rec.Code)
+		}
+		return rec.Body.String()
+	}
+	page := get("/doc/vault/index.md")
+	for _, want := range []string{
+		`href="/doc/vault/notes/orphan.md"`,
+		`href="/doc/vault/notes/beta.md" rel="nofollow">Beta Note</a>`,
+		`href="/doc/vault/notes/anchors.md#some-heading"`,
+		`href="/doc/vault/notes/anchors.md#sub"`,
+		`href="/doc/vault/notes/deep/Alpha.md"`,
+		`title="Broken link (outside-root)"`,
+		"![[notes/anchors]]",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("index.md missing %q", want)
+		}
+	}
+	if strings.Contains(page, "Broken link (unresolved)") {
+		t.Error("index.md rendered without its resolver")
+	}
+	if page := get("/doc/vault/notes/linker.md"); !strings.Contains(page, `href="/doc/vault/notes/Alpha.md"`) {
+		t.Error("linker.md does not link its alias to notes/Alpha.md")
+	}
+}
+
+// Test plan for the render cap (#565)
+//   [x] Unhappy: a doc of renderCapBytes+1 gets the notice, not the body
+//   [x] Happy: a doc of exactly renderCapBytes still renders
+//   [x] Unhappy: the notice names root/rel and the read hint, and leaks no
+//       absolute path and no raw-file link
+
+func serveDocOfSize(t *testing.T, size int) (body, absDir, label string) {
+	t.Helper()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "big.md"), padToSize("# Big Doc\n\nBODYSENTINEL\n\n", size))
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	label = idx.Roots()[0].Label
+	rec := httptest.NewRecorder()
+	testHandler(idx).ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/doc/"+label+"/big.md", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	return rec.Body.String(), dir, label
+}
+
+func TestServer_DocOverRenderCap_ServesNoticeNotBody(t *testing.T) {
+	body, _, _ := serveDocOfSize(t, renderCapBytes+1)
+	if strings.Contains(body, "BODYSENTINEL") {
+		t.Error("over-cap doc body was rendered")
+	}
+	if !strings.Contains(body, "does not render it") {
+		t.Errorf("notice missing from page")
+	}
+}
+
+func TestServer_DocAtRenderCap_StillRenders(t *testing.T) {
+	body, _, _ := serveDocOfSize(t, renderCapBytes)
+	if !strings.Contains(body, "BODYSENTINEL") {
+		t.Error("doc of exactly renderCapBytes did not render")
+	}
+	if strings.Contains(body, "does not render it") {
+		t.Error("doc of exactly renderCapBytes got the notice")
+	}
+}
+
+func TestServer_RenderCapNotice_NamesRootRelAndLeaksNothing(t *testing.T) {
+	body, dir, label := serveDocOfSize(t, renderCapBytes+1)
+	if want := "forgectl docs read " + label + "/big.md"; !strings.Contains(body, want) {
+		t.Errorf("notice missing hint %q", want)
+	}
+	if strings.Contains(body, dir) {
+		t.Errorf("notice leaked the absolute path %q", dir)
+	}
+	start := strings.Index(body, "This document is over")
+	end := strings.Index(body, "in a terminal with")
+	if start < 0 || end < start {
+		t.Fatal("could not locate the notice in the page")
+	}
+	if strings.Contains(body[start:end], "<a ") {
+		t.Error("notice must not link a raw file")
+	}
+}
+
+func TestTooLargeNoticeHTML_EscapesThePath(t *testing.T) {
+	got := tooLargeNoticeHTML(`root/<img src=x onerror=1>.md`)
+	if strings.Contains(got, "<img") {
+		t.Errorf("path was not escaped: %s", got)
 	}
 }

@@ -11,6 +11,7 @@ package pr
 // PRs (Classification: concurrent enumeration on the Inventory model)
 //   [x] Happy: three queries union + dedup by Ref.String(), sorted by (slug, number)
 //   [x] Unhappy: a degraded query becomes a note, not a failure
+//   [x] Invariant: notes follow query order, not completion order (PRs and Dash)
 //
 // PrepareMany (Classification: the load-bearing concurrency)
 //   [x] Invariant: two same-repo PRs never run their git checkout concurrently
@@ -30,6 +31,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 )
 
 // searchRow renders one gh-search-prs JSON object for the given slug/number.
@@ -246,10 +248,62 @@ func TestDash_QueriesCarryExplicitLimitAndTruncationNote(t *testing.T) {
 	}
 }
 
+// TestSearchRunner_CarriesEveryAtMeSearch pins the #413 search pin inside the
+// package: every @me `gh search prs` leg behind PRs and Dash runs on the
+// runner WithGitHubHost's pin returns for the configured host (internal/cli
+// passes githubauth.Runner), and none reaches the unpinned base runner.
+func TestSearchRunner_CarriesEveryAtMeSearch(t *testing.T) {
+	isSearch := func(name string, args []string) bool {
+		return name == "gh" && len(args) >= 2 && args[0] == "search" && args[1] == "prs"
+	}
+	base := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if isSearch(name, args) {
+			return "", errors.New("search reached the unpinned base runner")
+		}
+		return "", nil
+	}}
+	search := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "[" + searchRow("cameronsjo/forgectl", 1) + "]", nil
+	}}
+	var mu sync.Mutex
+	var pinnedTo []string
+	client := New(base, WithSessionsDir(t.TempDir()), WithGitHubHost("ghe.example.test", func(host string) exec.Runner {
+		mu.Lock()
+		defer mu.Unlock()
+		pinnedTo = append(pinnedTo, host)
+		return search
+	}))
+
+	_, prsNotes, err := client.PRs(context.Background())
+	if err != nil {
+		t.Fatalf("PRs: %v", err)
+	}
+	_, dashNotes, err := client.Dash(context.Background())
+	if err != nil {
+		t.Fatalf("Dash: %v", err)
+	}
+	if notes := append(prsNotes, dashNotes...); len(notes) != 0 {
+		t.Fatalf("degradation notes = %v, want none (a search reached the base runner)", notes)
+	}
+	for _, call := range base.Calls {
+		if isSearch(call.Name, call.Args) {
+			t.Fatalf("base runner saw a search: %v", call.Args)
+		}
+	}
+	if got, want := len(search.Calls), 5; got != want {
+		t.Fatalf("search runner calls = %d, want %d (three PRs legs + two Dash legs)", got, want)
+	}
+	for _, h := range pinnedTo {
+		if h != "ghe.example.test" {
+			t.Fatalf("a search was pinned to %q, want the configured host", h)
+		}
+	}
+}
+
 // prNoteLeaks are the fragments a degradation note must never carry out of a
 // failed `gh` invocation: the CSI "erase display"/"cursor home" pair, and the
 // instructional prose a hostile host would want on the operator's screen. The
-// gh leg in internal/pr is NOT host-pinned, so the responding host need not be
+// search leg is pinned to the configured [github] host, which need not be
 // github.com — a GitHub Enterprise host, an intercepting proxy, or any gh
 // extension in the operator's config authors this text.
 var prNoteLeaks = []string{"\x1b", "evil.test", "expired"}
@@ -383,6 +437,7 @@ func TestPrepareMany_SameRepoSerialized(t *testing.T) {
 	var maxSeen int
 
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		switch {
 		case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
 			// Return a valid head so Prepare proceeds to the clone step.
@@ -445,6 +500,7 @@ func cloneSlug(args []string) string {
 // staggered per-repo sleep scrambles completion order.
 func TestPrepareMany_InputOrder(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		switch {
 		case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
 			return `{"headRefName":"feature","headRefOid":"abc123",` +
@@ -513,7 +569,7 @@ func TestPrepareMany_PerItemErrorCaptured(t *testing.T) {
 	}
 	var parked SessionSummary
 	for _, s := range summaries {
-		if s.Ref() == refs[1] {
+		if s.Ref().sameIdentity(refs[1]) {
 			parked = s
 		}
 	}
@@ -591,5 +647,76 @@ func TestCheckAgentForReview_ForgedLocalRefStillRefused(t *testing.T) {
 	if err := CheckAgentForReview("codex", effective); err == nil {
 		t.Error("CheckAgentForReview(codex) accepted a remote ref owned by \"local\"; " +
 			"the Codex reviewer must still be refused against a remote head")
+	}
+}
+
+// reversedFailures is a gh fake whose @me searches all fail, finishing in
+// the reverse of order: each flag waits until every flag after it in order
+// has started, then a little longer, so a fan-out that keeps notes in
+// completion order sees them backwards. The wait only shapes the red side;
+// the fixed order the tests assert does not depend on any timing.
+func reversedFailures(t *testing.T, order ...string) *exec.FakeRunner {
+	t.Helper()
+	started := make(map[string]chan struct{}, len(order))
+	for _, f := range order {
+		started[f] = make(chan struct{})
+	}
+	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name != "gh" {
+			return "[]", nil
+		}
+		flag := searchWhoFlag(args)
+		ch, ok := started[flag]
+		if !ok {
+			return "[]", nil
+		}
+		close(ch)
+		for i, f := range order {
+			if f != flag {
+				continue
+			}
+			for _, later := range order[i+1:] {
+				select {
+				case <-started[later]:
+				case <-time.After(5 * time.Second):
+					t.Errorf("query %s never started", later)
+				}
+			}
+			time.Sleep(time.Duration(len(order)-1-i) * 20 * time.Millisecond)
+		}
+		return "", errors.New("gh: not authenticated")
+	}}
+}
+
+// TestPRs_NotesFollowQueryOrder: notes come out in query order, whatever
+// order the queries finish in, so `pr ls` and --json read the same on every
+// run (forgectl#997 item 1).
+//
+// Mutation that turns it red: append each note as its result is received.
+func TestPRs_NotesFollowQueryOrder(t *testing.T) {
+	client := New(reversedFailures(t, "--author", "--assignee", "--review-requested"))
+	_, notes, err := client.PRs(context.Background())
+	if err != nil {
+		t.Fatalf("PRs: %v", err)
+	}
+	want := []string{"authored: query failed", "assigned: query failed", "review-requested: query failed"}
+	if strings.Join(notes, "|") != strings.Join(want, "|") {
+		t.Errorf("notes = %q, want %q", notes, want)
+	}
+}
+
+// TestDash_NotesFollowSectionOrder is the Dash twin: awaiting-you, then
+// your-open.
+//
+// Mutation that turns it red: append each note as its result is received.
+func TestDash_NotesFollowSectionOrder(t *testing.T) {
+	client := New(reversedFailures(t, "--review-requested", "--author"), WithSessionsDir(t.TempDir()))
+	_, notes, err := client.Dash(context.Background())
+	if err != nil {
+		t.Fatalf("Dash: %v", err)
+	}
+	want := []string{"awaiting-you: query failed", "your-open: query failed"}
+	if strings.Join(notes, "|") != strings.Join(want, "|") {
+		t.Errorf("notes = %q, want %q", notes, want)
 	}
 }

@@ -233,8 +233,160 @@ func TestRenderSessions_MarksUnclassifiedWorkspace(t *testing.T) {
 // silently rendering it as live.
 func TestSessionStatus_UnclassifiedMatchesTheDash(t *testing.T) {
 	var zero pr.SessionSummary
-	if got := sessionStatus(nil, zero, true); got != workspaceUnclassifiedStatus {
+	if got := sessionStatus(nil, zero, tmuxReadable); got != workspaceUnclassifiedStatus {
 		t.Errorf("sessionStatus(unclassified) = %q, want %q", got, workspaceUnclassifiedStatus)
+	}
+}
+
+// TestSessionSinks_AgreeAcrossWorkspaceAndPhase pins #505: `pr list` (status
+// and phase columns), `pr dash` (row suffix and phase note), and the dash JSON
+// workspace field all read the same summary, so they must agree on every
+// workspace state x phase cell — including the no-workspace states, which two
+// sinks once rendered differently. Each cell is one real record loaded through
+// Client.List, plus the constructible-only unclassified summary.
+func TestSessionSinks_AgreeAcrossWorkspaceAndPhase(t *testing.T) {
+	type cell struct {
+		name  string
+		mode  string // "live", "missing", "none", "unclassified"
+		phase pr.Phase
+		seed  func(t *testing.T) pr.SessionSummary
+	}
+	allPhases := pr.KnownPhases()
+	// Validation refuses a workspace-less record in these phases.
+	needsWorkspace := map[pr.Phase]bool{
+		pr.PhasePrepared: true, pr.PhaseLaunching: true, pr.PhaseActive: true,
+	}
+
+	var cells []cell
+	for i, phase := range allPhases {
+		for _, mode := range []string{"live", "missing", "none"} {
+			if mode == "none" && needsWorkspace[phase] {
+				continue
+			}
+			ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 100 + i}
+			cells = append(cells, cell{
+				name:  "ws=" + mode + "/phase=" + string(phase),
+				mode:  mode,
+				phase: phase,
+				seed: func(t *testing.T) pr.SessionSummary {
+					rec := phasedRecord{
+						ref:            ref,
+						phase:          phase,
+						withWorkspace:  mode == "live",
+						staleWorkspace: mode == "missing",
+					}
+					if phase == pr.PhaseNeedsRepair {
+						rec.repairReason = "some diagnostic"
+					}
+					return seedPhasedSummaries(t, t.TempDir(), []phasedRecord{rec})[0]
+				},
+			})
+		}
+	}
+	for _, mode := range []string{"live", "missing"} {
+		ref := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 200}
+		cells = append(cells, cell{
+			name: "ws=" + mode + "/phase=legacy",
+			mode: mode,
+			seed: func(t *testing.T) pr.SessionSummary {
+				var live, stale []pr.Ref
+				if mode == "live" {
+					live = []pr.Ref{ref}
+				} else {
+					stale = []pr.Ref{ref}
+				}
+				return seedSummaries(t, t.TempDir(), live, stale)[0]
+			},
+		})
+	}
+	cells = append(cells, cell{
+		name: "ws=unclassified/phase=legacy",
+		mode: "unclassified",
+		seed: func(*testing.T) pr.SessionSummary { return pr.SessionSummary{} },
+	})
+	// The literal 18 is deliberate: the phase loop above now follows
+	// pr.KnownPhases(), so adding a phase grows the matrix and trips this guard
+	// until a human confirms the new phase's cells and updates the number.
+	if len(cells) != 18 {
+		t.Fatalf("matrix has %d cells, want 18 (15 phased + 2 legacy + 1 unclassified); a phase or mode was added without updating this test", len(cells))
+	}
+
+	for _, c := range cells {
+		t.Run(c.name, func(t *testing.T) {
+			s := c.seed(t)
+
+			// The seeded summary must be in the state the cell claims, or the
+			// assertions below would be checking a different cell.
+			preds := map[string]bool{
+				"live":         s.IsWorkspaceLive(),
+				"missing":      s.IsWorkspaceMissing(),
+				"none":         s.IsWorkspaceNone(),
+				"unclassified": !s.IsWorkspaceLive() && !s.IsWorkspaceMissing() && !s.IsWorkspaceNone(),
+			}
+			for mode, holds := range preds {
+				if holds != (mode == c.mode) {
+					t.Fatalf("precondition: predicate %q = %v for a cell seeded as %q", mode, holds, c.mode)
+				}
+			}
+
+			st := sessionStatus(map[pr.Ref]bool{s.Ref(): true}, s, tmuxReadable)
+			pl := phaseLabel(s)
+			ws := workspaceState(s)
+			var buf bytes.Buffer
+			renderSessions(&buf, []pr.SessionSummary{s})
+			dash := buf.String()
+
+			missingMark := "(" + workspaceMissingStatus + ")"
+			if got := st == workspaceMissingStatus; got != strings.Contains(dash, missingMark) || got != (ws == "missing") {
+				t.Errorf("missing disagreement: list status %q, dash %q, json workspace %q", st, dash, ws)
+			}
+			if got := st == workspaceUnclassifiedStatus; got != strings.Contains(dash, workspaceUnclassifiedStatus) || got != (ws == "unclassified") {
+				t.Errorf("unclassified disagreement: list status %q, dash %q, json workspace %q", st, dash, ws)
+			}
+
+			switch ws {
+			case "none":
+				if st != string(s.Phase()) {
+					t.Errorf("no-workspace status = %q, want the phase %q", st, s.Phase())
+				}
+				for _, label := range []string{workspaceMissingStatus, workspaceUnclassifiedStatus} {
+					if strings.Contains(st, label) || strings.Contains(dash, label) {
+						t.Errorf("no-workspace row must not carry %q: status %q, dash %q", label, st, dash)
+					}
+				}
+			case "live":
+				if st != "live" {
+					t.Errorf("live status = %q, want %q", st, "live")
+				}
+				// The row's "(<age> ago)" is not a suffix; only text after it is.
+				_, tail, ok := strings.Cut(dash, " ago)")
+				if !ok {
+					t.Fatalf("dash row has no age: %q", dash)
+				}
+				if strings.Contains(tail, "(") {
+					t.Errorf("a live row must carry no workspace suffix: %q", dash)
+				}
+			}
+
+			flagged := c.phase != "" && c.phase != pr.PhaseActive
+			switch {
+			case flagged:
+				if !strings.Contains(dash, "["+string(c.phase)) || pl != string(c.phase) {
+					t.Errorf("phase %q: dash %q, phase column %q", c.phase, dash, pl)
+				}
+			default:
+				if strings.Contains(dash, "[") {
+					t.Errorf("phase %q must add no bracket note: %q", c.phase, dash)
+				}
+				want := "active"
+				if c.phase == "" {
+					want = "-"
+				}
+				if pl != want {
+					t.Errorf("phase column = %q, want %q", pl, want)
+				}
+			}
+		})
 	}
 }
 
@@ -360,12 +512,15 @@ func TestDashCmd_DegradationNotesOnStderr(t *testing.T) {
 // phasedRecord describes one v2 lifecycle breadcrumb for seedPhasedSummaries.
 // It only carries the choices validateBreadcrumbRecord actually enforces:
 // queued, preparing, and needs-repair may omit a workspace; every other phase
-// requires one. Only an active record needs a windowId.
+// requires one. Only an active record needs a windowId. staleWorkspace writes
+// the record with a workspace path and then removes that directory, the #212
+// state: the record names a workspace that no longer exists.
 type phasedRecord struct {
-	ref           pr.Ref
-	phase         pr.Phase
-	repairReason  string
-	withWorkspace bool
+	ref            pr.Ref
+	phase          pr.Phase
+	repairReason   string
+	withWorkspace  bool
+	staleWorkspace bool
 }
 
 // seedPhasedSummaries writes v2 records directly to sessionsDir — version 2,
@@ -387,13 +542,17 @@ func seedPhasedSummaries(t *testing.T, sessionsDir string, recs []phasedRecord) 
 		if rec.repairReason != "" {
 			body["repairReason"] = rec.repairReason
 		}
-		if rec.withWorkspace {
+		var staleDir string
+		if rec.withWorkspace || rec.staleWorkspace {
 			ws, err := os.MkdirTemp("", "forgectl-workflow-test-*")
 			if err != nil {
 				t.Fatalf("seed workspace: %v", err)
 			}
 			t.Cleanup(func() { _ = os.RemoveAll(ws) })
 			body["workspace"] = ws
+			if rec.staleWorkspace {
+				staleDir = ws
+			}
 		}
 		if rec.phase == pr.PhaseActive {
 			body["windowId"] = fmt.Sprintf("123\x1f456\x1f@%d", i+1)
@@ -405,6 +564,11 @@ func seedPhasedSummaries(t *testing.T, sessionsDir string, recs []phasedRecord) 
 		name := fmt.Sprintf("%s-%s-%d-%d.json", rec.ref.Owner, rec.ref.Repo, rec.ref.Number, time.Now().UnixNano()+int64(i))
 		if err := os.WriteFile(filepath.Join(sessionsDir, name), append(data, '\n'), 0o600); err != nil {
 			t.Fatalf("seed phased breadcrumb: %v", err)
+		}
+		if staleDir != "" {
+			if err := os.RemoveAll(staleDir); err != nil {
+				t.Fatalf("stale the workspace: %v", err)
+			}
 		}
 	}
 
@@ -554,10 +718,7 @@ func TestDashRenderSessions_LegacyFixture_NoPhaseNote(t *testing.T) {
 // about — including one a future build might add to the switch's default arm
 // — must render by name rather than reading as a healthy review.
 func TestDashPhaseNote_EveryPhaseExceptActiveYieldsANote(t *testing.T) {
-	allPhases := []pr.Phase{
-		pr.PhaseQueued, pr.PhasePreparing, pr.PhasePrepared,
-		pr.PhaseLaunching, pr.PhaseActive, pr.PhaseNeedsRepair,
-	}
+	allPhases := pr.KnownPhases()
 	for i, phase := range allPhases {
 		rec := phasedRecord{
 			ref:   pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 20 + i},

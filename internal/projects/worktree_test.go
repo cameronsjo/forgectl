@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 )
 
@@ -25,6 +27,7 @@ import (
 //     origin/<branch> -b <branch> fallback path.
 func worktreeRunFunc(headBranch string, failFirstAdd bool) func(string, []string) (string, error) {
 	return func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		joined := strings.Join(args, " ")
 		switch name {
 		case "gh":
@@ -44,7 +47,9 @@ func worktreeRunFunc(headBranch string, failFirstAdd bool) func(string, []string
 				return "* remote origin\n  Fetch URL: git@example.com:x/y.git\n", nil
 			case strings.Contains(joined, "worktree add"):
 				// The fallback form carries "-b"; the first attempt does not.
-				if failFirstAdd && !strings.Contains(joined, "-b") {
+				// Matched as a whole argv element: a substring test also
+				// matched a TMPDIR containing "-b" (forgectl#806).
+				if failFirstAdd && !slices.Contains(args, "-b") {
 					return "", errors.New("fatal: invalid reference: branch")
 				}
 				return "", nil

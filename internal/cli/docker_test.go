@@ -29,6 +29,7 @@ import (
 
 	dockerpkg "github.com/cameronsjo/forgectl/internal/docker"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 )
 
 // dockerFixture builds a *docker.Client wired for CLI tests: a temp
@@ -38,6 +39,7 @@ func dockerFixture(t *testing.T) (*dockerpkg.Client, *exec.FakeRunner) {
 	t.Helper()
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
+			args = gitenvtest.Strip(args)
 			if name != "git" || len(args) < 4 {
 				return "", nil
 			}
@@ -108,6 +110,7 @@ func TestDockerBuildCmd_IncompleteGitMetadataHasExactOutput(t *testing.T) {
 			contextDir: "/workspace/sub context",
 			secretPath: "/private/build/Repo Root",
 			run: func(name string, args []string) (string, error) {
+				args = gitenvtest.Strip(args)
 				if name != "git" || len(args) < 4 {
 					return "", nil
 				}

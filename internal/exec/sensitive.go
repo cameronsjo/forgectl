@@ -25,16 +25,19 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/cameronsjo/forgectl/internal/exec/internal/sealed"
+	"github.com/cameronsjo/forgectl/internal/exec/internal/validated"
+	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
 // Redacted is the single fixed public representation of every opaque value in
 // this file. It is what %v, %+v, %#v, %q, slog, JSON, and text marshaling all
 // produce, so no rendering path has a payload-revealing branch to find.
-const Redacted = "[redacted]"
+const Redacted = redact.Marker
 
 // MaxOutputBytes is the runner-owned hard ceiling on each captured stream.
 // A caller-supplied cap may only narrow it; a cap above this refuses before
@@ -117,8 +120,9 @@ const (
 	// the ordinary path cannot satisfy: sops' stderr quotes the offending
 	// line of the document it failed to parse, and that line is
 	// `key: '<the secret>'`. Runner's runAndWrap logs stderr at Error level —
-	// which survives any configured log level and can be pointed at a file on
-	// disk — and retains it on *CommandError, which fang renders. Here,
+	// recorded at every enabled log_level (log_level defaults to off), and it
+	// can be pointed at a file on disk — and retains it on *CommandError,
+	// which fang renders. Here,
 	// nothing logged or returned can render a payload, and both streams are
 	// capped so the measured 8.4 MB of sops re-invocation stderr cannot grow
 	// the heap.
@@ -183,31 +187,34 @@ func redactedJSON() ([]byte, error) { return []byte(strconv.Quote(Redacted)), ni
 
 // SecretArg is an opaque command path or environment value.
 //
-// The payload is held in a closure, not a string field, and that is the whole
-// containment mechanism rather than a stylistic choice. fmt consults a value's
-// Formatter, Stringer, or GoStringer only when reflect.Value.CanInterface()
-// reports true, which is false for anything reached through an *unexported*
-// field. So a plain string payload here would be printed verbatim by %v, %+v,
-// and %#v of any struct that holds this type in an unexported field — the
-// natural shape for an adapter client — and slog's TextHandler, which
-// production installs, renders a non-TextMarshaler value with exactly
-// fmt.Sprintf("%+v", v). A func value prints as an address under every verb at
-// every depth, so reflection has nothing to reach.
+// The payload lives in a sealed.Value (internal/exec/internal/sealed), and
+// that package is the only code that can read it: this one cannot either
+// (forgectl#854). sealed.Value holds the payload in a closure, not a string
+// field, and that is the containment mechanism against rendering rather than a
+// stylistic choice. fmt consults a value's Formatter, Stringer, or GoStringer
+// only when reflect.Value.CanInterface() reports true, which is false for
+// anything reached through an *unexported* field. So a plain string payload
+// would be printed verbatim by %v, %+v, and %#v of any struct that holds this
+// type in an unexported field — the natural shape for an adapter client — and
+// slog's TextHandler, which production installs, renders a non-TextMarshaler
+// value with exactly fmt.Sprintf("%+v", v). A func value prints as an address
+// under every verb at every depth, so fmt's reflection has nothing to print.
 //
 // The cost is that this type is no longer comparable with ==; use Equal.
 //
-// Every constructor here closes over an immutable string, so reveal is pure
-// and repeatable. That is load-bearing, not incidental: validate reveals to
-// check the path and the argv, and buildCmd reveals again to fill exec.Cmd.
-// A constructor accepting a caller-supplied func would make that pair a
-// time-of-check/time-of-use gap while looking like a natural extension.
+// Every constructor here seals an immutable string, so a reveal is pure and
+// repeatable. That is load-bearing, not incidental: validate checks the path
+// and the argv through sealed's predicates, and sealed.Start reveals again to
+// start the process. A constructor accepting a caller-supplied
+// func would make that pair a time-of-check/time-of-use gap while looking like
+// a natural extension.
 type SecretArg struct {
-	reveal func() string
+	v sealed.Value
 }
 
 // Secret wraps a dynamic value — a path, a socket, a nonce, a prompt — so it
 // can travel through adapters without any of them being able to render it.
-func Secret(v string) SecretArg { return SecretArg{reveal: func() string { return v }} }
+func Secret(v string) SecretArg { return SecretArg{v: sealed.New(v)} }
 
 func (SecretArg) String() string                { return Redacted }
 func (SecretArg) GoString() string              { return Redacted }
@@ -220,38 +227,26 @@ func (SecretArg) MarshalText() ([]byte, error)  { return []byte(Redacted), nil }
 // which the closure payload makes unavailable. Note this is a confirmation
 // oracle by construction — a caller who guesses a value can confirm it — which
 // is the same trade == offered and is what makes adapter fakes assertable.
-func (s SecretArg) Equal(other SecretArg) bool {
-	if s.reveal == nil || other.reveal == nil {
-		return s.reveal == nil && other.reveal == nil
-	}
-	return s.reveal() == other.reveal()
-}
+func (s SecretArg) Equal(other SecretArg) bool { return s.v.Equal(other.v) }
 
-func (s SecretArg) set() bool { return s.reveal != nil }
-
-func (s SecretArg) present() bool { return s.reveal != nil && s.reveal() != "" }
-
-// argKind separates the three argv element classes the seam recognizes.
-type argKind uint8
+// argKind separates the three argv element classes the seam recognizes. It is
+// validated.ArgKind, which New checks, so the two cannot drift.
+type argKind = validated.ArgKind
 
 const (
-	argUnset argKind = iota
-	// argFixed is a backend constant, validated at construction.
-	argFixed
-	// argOpaque is a dynamic value, accepted as-is because a real path or
-	// prompt may contain anything.
-	argOpaque
-	// argEndOfOptions is the literal "--" separator.
-	argEndOfOptions
+	argUnset        = validated.ArgUnset
+	argFixed        = validated.ArgFixed
+	argOpaque       = validated.ArgOpaque
+	argEndOfOptions = validated.ArgEndOfOptions
 )
 
-// Arg is one argv element. Its payload is a closure for the same reason
+// Arg is one argv element. Its payload is a sealed.Value for the same reason
 // SecretArg's is; see that type's comment. Both fixed and opaque arguments
 // render redacted — the runner logs argument counts, never argument text, so
 // there is no rendering difference for a reader to exploit.
 type Arg struct {
-	reveal func() string
-	kind   argKind
+	v    sealed.Value
+	kind argKind
 }
 
 // fixed builds an argv element from a backend constant such as "new-session"
@@ -275,7 +270,7 @@ func fixed(v string) (Arg, error) {
 			return Arg{}, fmt.Errorf("%w: fixed argument contains a control character", ErrInvalidCommand)
 		}
 	}
-	return Arg{reveal: func() string { return v }, kind: argFixed}, nil
+	return Arg{v: sealed.New(v), kind: argFixed}, nil
 }
 
 // constantArg is the parameter type of MustFixed, and it is what makes "only a
@@ -316,7 +311,7 @@ func MustFixed(v constantArg) Arg {
 // a flag, so validate refuses it unless an EndOfOptions separator precedes it.
 // That check lives in the seam rather than in each adapter because the seam's
 // own redaction is what would make the resulting argv hard to diagnose.
-func Opaque(v string) Arg { return Arg{reveal: func() string { return v }, kind: argOpaque} }
+func Opaque(v string) Arg { return Arg{v: sealed.New(v), kind: argOpaque} }
 
 // EndOfOptions is the literal "--" separator. Its scope is everything after
 // it: once present, no later opaque argument is checked for a leading dash, so
@@ -324,7 +319,7 @@ func Opaque(v string) Arg { return Arg{reveal: func() string { return v }, kind:
 // honours "--" at the specific subcommand is the caller's assertion — the seam
 // cannot check it, and a second separator reaches the argv as a literal operand.
 func EndOfOptions() Arg {
-	return Arg{reveal: func() string { return "--" }, kind: argEndOfOptions}
+	return Arg{v: sealed.New("--"), kind: argEndOfOptions}
 }
 
 func (Arg) String() string                { return Redacted }
@@ -336,13 +331,7 @@ func (Arg) MarshalText() ([]byte, error)  { return []byte(Redacted), nil }
 
 // Equal compares two arguments without revealing either; see SecretArg.Equal.
 func (a Arg) Equal(other Arg) bool {
-	if a.kind != other.kind {
-		return false
-	}
-	if a.reveal == nil || other.reveal == nil {
-		return a.reveal == nil && other.reveal == nil
-	}
-	return a.reveal() == other.reveal()
+	return a.kind == other.kind && a.v.Equal(other.v)
 }
 
 // Secret reports whether this argument was built from a dynamic value rather
@@ -350,7 +339,7 @@ func (a Arg) Equal(other Arg) bool {
 // payload.
 func (a Arg) Secret() bool { return a.kind == argOpaque }
 
-func (a Arg) set() bool { return a.reveal != nil && a.kind != argUnset }
+func (a Arg) set() bool { return a.v.Set() && a.kind != argUnset }
 
 // Environment keys the seam is allowed to touch. There is no constructor that
 // takes a key, so an unknown key is unrepresentable rather than rejected.
@@ -370,6 +359,12 @@ const (
 	// travels; the secret itself never enters an environment, which is
 	// readable from /proc on Linux for the lifetime of the process.
 	envKeySopsEditor = "EDITOR"
+
+	// envKeySopsTmpdir is where sops puts the decrypted copy of the WHOLE
+	// document that its editor edits. It is not part of the editor protocol:
+	// it confines that copy to forgectl's work directory. See
+	// ReplaceSopsTmpdir.
+	envKeySopsTmpdir = validated.KeySopsTmpdir
 )
 
 // The sops editor protocol's variable names, EXPORTED so the reading side
@@ -387,15 +382,15 @@ const (
 	EnvSopsNonce   = "FORGECTL_SOPS_NONCE"
 )
 
-type envOp uint8
+// envOp is validated.EnvOp, which New checks, so the two cannot drift.
+type envOp = validated.EnvOp
 
 const (
-	envOpUnspecified envOp = iota
-	envOpReplace
-	envOpUnset
+	envOpReplace = validated.EnvOpReplace
+	envOpUnset   = validated.EnvOpUnset
 )
 
-// EnvMutation is one permitted change to the inherited environment. The four
+// EnvMutation is one permitted change to the inherited environment. The
 // constructors below are the entire vocabulary: a mutation naming any other
 // key, or carrying a value on an unset, cannot be constructed at all. Every
 // other inherited entry — including a backend CLI's own authentication
@@ -449,6 +444,21 @@ func ReplaceSopsEditor(command string) EnvMutation {
 	return EnvMutation{key: envKeySopsEditor, value: Secret(command), op: envOpReplace}
 }
 
+// ReplaceSopsTmpdir points sops' temp directory at path, which the driver
+// sets to its own work directory.
+//
+// `sops edit` decrypts the whole document into a file under os.TempDir while
+// its editor runs. Measured on 3.13.3 (cameronsjo/forgectl#560): SIGINT and
+// SIGTERM make sops remove it, but SIGHUP and SIGQUIT leave it, plaintext and
+// whole, and SIGHUP is what closing the terminal sends to forgectl and sops
+// alike. Inside the work directory, the plaintext guard removes it on those
+// signals, and after an uncatchable one the leftover scan refuses on the
+// directory that holds it. os.TempDir reads TMPDIR on unix only, so this
+// confines nothing on Windows.
+func ReplaceSopsTmpdir(path string) EnvMutation {
+	return EnvMutation{key: envKeySopsTmpdir, value: Secret(path), op: envOpReplace}
+}
+
 // ReplaceSopsWorkdir names the private directory holding the value file, the
 // nonce, the result, and the invocation counter.
 func ReplaceSopsWorkdir(path string) EnvMutation {
@@ -485,23 +495,6 @@ func (EnvMutation) MarshalText() ([]byte, error)  { return []byte(Redacted), nil
 // Equal compares two mutations without revealing either value.
 func (m EnvMutation) Equal(other EnvMutation) bool {
 	return m.key == other.key && m.op == other.op && m.value.Equal(other.value)
-}
-
-// valid requires a replacement value to be non-empty, not merely present. Most
-// CLIs treat an empty environment value as unset, so an empty pin would
-// silently reopen the auto-discovery window the mutation exists to close —
-// while looking like a successful pin in logs that record only the count.
-func (m EnvMutation) valid() bool {
-	switch m.op {
-	case envOpReplace:
-		return m.key != "" && m.value.present()
-	case envOpUnset:
-		return m.key != "" && !m.value.set()
-	case envOpUnspecified:
-		return false
-	default:
-		return false
-	}
 }
 
 // SensitiveCommand is one bounded, redacting invocation. Path and every Args
@@ -579,56 +572,54 @@ func (c SensitiveCommand) Equal(other SensitiveCommand) bool {
 	return true
 }
 
-// validate refuses before process start. Every message here is static text: a
-// validation failure must not become the rendering path that reveals what was
-// wrong with the value. It reveals the path only to test filepath.IsAbs, and
-// the argv only to test a leading dash; neither result reaches a message.
+// toValidated is m as validated.New checks it.
+func (m EnvMutation) toValidated() validated.Env {
+	return validated.Env{Key: m.key, Value: m.value.v, Op: m.op}
+}
+
+// validate refuses before process start; see validated.
 func (c SensitiveCommand) validate() error {
+	_, err := c.validated()
+	return err
+}
+
+// validated checks c and returns the part that reaches a process (its path,
+// argv and environment mutations) as a validated.Command, the only thing
+// startSealed accepts. The checks on that part run in validated.New, over a
+// copy it takes first, so the command started is the command checked, by
+// construction: a write to c's Args or Env backing arrays afterwards cannot
+// reach it, and no code here can build a Command any other way
+// (forgectl#888). The kind, capture mode and caps, which shape how the runner
+// reads the process rather than what the process gets, are checked here.
+//
+// Every message is static text: a validation failure must not become the
+// rendering path that reveals what was wrong with the value.
+func (c SensitiveCommand) validated() (validated.Command, error) {
 	if !c.Kind.Valid() {
-		return errors.New("command kind is not a known operation")
-	}
-	if !c.Path.present() {
-		return errors.New("command path is empty")
+		return validated.Command{}, errors.New("command kind is not a known operation")
 	}
 	if !c.StdoutMode.valid() {
-		return errors.New("stdout capture mode is not supported")
+		return validated.Command{}, errors.New("stdout capture mode is not supported")
 	}
-	// An absolute path is required so the binary is chosen by the caller and
-	// not by exec.LookPath, which reads the live process PATH rather than the
-	// runner's captured environment — the one decision where the snapshot
-	// would otherwise not apply.
-	if !filepath.IsAbs(c.Path.reveal()) {
-		return errors.New("command path is not absolute")
+	args := make([]validated.Arg, len(c.Args))
+	for i, a := range c.Args {
+		args[i] = validated.Arg{Value: a.v, Kind: a.kind}
 	}
-	seenEndOfOptions := false
-	for i := range c.Args {
-		a := c.Args[i]
-		if !a.set() {
-			return fmt.Errorf("argument %d was never constructed", i)
-		}
-		if a.kind == argEndOfOptions {
-			seenEndOfOptions = true
-			continue
-		}
-		if a.kind == argOpaque && !seenEndOfOptions && strings.HasPrefix(a.reveal(), "-") {
-			return fmt.Errorf("dynamic argument %d begins with a dash and no end-of-options separator precedes it", i)
-		}
+	env := make([]validated.Env, len(c.Env))
+	for i, m := range c.Env {
+		env[i] = m.toValidated()
 	}
-	seen := make(map[string]struct{}, len(c.Env))
-	for i := range c.Env {
-		m := c.Env[i]
-		if !m.valid() {
-			return fmt.Errorf("environment mutation %d is not a permitted operation", i)
-		}
-		if _, dup := seen[m.key]; dup {
-			return fmt.Errorf("environment mutation %d duplicates an earlier key", i)
-		}
-		seen[m.key] = struct{}{}
+	cmd, err := validated.New(c.Path.v, args, env, c.Kind == KindSopsEdit)
+	if err != nil {
+		return validated.Command{}, err
 	}
 	if err := validCap("stdout", c.StdoutCap); err != nil {
-		return err
+		return validated.Command{}, err
 	}
-	return validCap("stderr", c.StderrCap)
+	if err := validCap("stderr", c.StderrCap); err != nil {
+		return validated.Command{}, err
+	}
+	return cmd, nil
 }
 
 func validCap(stream string, limit int64) error {
@@ -641,15 +632,27 @@ func validCap(stream string, limit int64) error {
 	return nil
 }
 
-// outputBuf holds captured bytes behind a pointer so that a BoundedOutput
-// reached through an unexported field renders as an address rather than as the
-// decimal byte dump reflection would otherwise produce. Same containment
-// reasoning as SecretArg's closure.
+// outputBuf holds captured bytes behind a pointer, and the bytes themselves
+// behind a closure, so that a BoundedOutput reached through an unexported
+// field renders as an address rather than as the decimal byte dump
+// reflection would otherwise produce. Same containment reasoning as
+// SecretArg's closure.
 //
-// Both the type and the field are unexported, so no importer can reach them.
-// Inside this package they can: %#v on a bare *outputBuf dumps the bytes, so
-// never hand one to slog or fmt directly — log the BoundedOutput.
-type outputBuf struct{ data []byte }
+// The closure is also what keeps the bytes from reflect's plain-data readers
+// (forgectl#897): Value.Bytes, Index and Uint read an unexported []byte field
+// without the read-only check, so a field would hand the bytes to any code
+// holding a BoundedOutput, past CopyBytesForParse. A func value's captures are
+// no field reflect can walk into. read is called only by CopyBytesForParse
+// (TestOnlyCopyBytesForParseReadsOutput); Len reads n.
+type outputBuf struct {
+	n    int
+	read func() []byte
+}
+
+// newOutputBuf seals data, which must not be modified afterwards.
+func newOutputBuf(data []byte) *outputBuf {
+	return &outputBuf{n: len(data), read: func() []byte { return data }}
+}
 
 // BoundedOutput owns at most one stream's cap worth of bytes. It renders as
 // byte-count metadata everywhere, and hands out its bytes only through
@@ -673,7 +676,7 @@ func (b BoundedOutput) Len() int {
 	if b.buf == nil {
 		return 0
 	}
-	return len(b.buf.data)
+	return b.buf.n
 }
 
 // Complete reports whether the stream was read to EOF within its cap. False
@@ -695,7 +698,7 @@ func (b BoundedOutput) Complete() bool { return !b.overflow && !b.forced }
 func (b BoundedOutput) CopyBytesForParse() (data []byte, complete bool) {
 	out := make([]byte, b.Len())
 	if b.buf != nil {
-		copy(out, b.buf.data)
+		copy(out, b.buf.read())
 	}
 	return out, b.Complete()
 }

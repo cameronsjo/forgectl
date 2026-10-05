@@ -23,7 +23,8 @@ func newPrDashCmd(client *pr.Client, th theme.Theme) *cobra.Command {
 
 // newPrDashCmdForClient is the test seam (mirrors newNetCmdForClient).
 func newPrDashCmdForClient(client *pr.Client, reviewedPath string, th theme.Theme) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "dash",
 		Short: "Dashboard: active reviews, PRs awaiting you, and your open PRs",
 		Long: `dash shows three sections: the clean-room reviews you have in flight
@@ -35,9 +36,14 @@ Rows you've marked reviewed are dimmed (new activity auto-un-dims them).`,
 			if err != nil {
 				return err
 			}
+			// Notes stay on stderr under --json too: stdout carries only the
+			// document, and a degraded leg still shows as an empty array.
 			renderDegradationNotes(cmd, notes)
 
-			store := pr.LoadReviewed(reviewedPath)
+			store := pr.LoadReviewed(reviewedPath, pr.WithDefaultHost(client.GitHubHost()))
+			if asJSON {
+				return writePrDashJSON(cmd.OutOrStdout(), dash, store)
+			}
 			out := th.Writer(cmd.OutOrStdout(), os.Environ())
 			errOut := cmd.ErrOrStderr()
 			styles := th.Styles()
@@ -55,6 +61,77 @@ Rows you've marked reviewed are dimmed (new activity auto-un-dims them).`,
 			_, _ = fmt.Fprintln(out, styles.Accent.Render("your open PRs"))
 			return renderPRTable(out, errOut, dash.YourOpen, store, styles.Muted)
 		},
+	}
+	cmd.Flags().BoolVar(&asJSON, "json", false,
+		`emit {"active_reviews":[{"ref":...,"created_at":...,"path":...,"workspace":...,"phase":...,"repair_reason":...}],"awaiting_you":[...],"your_open":[...]} to stdout; PR rows match pr prs --json`)
+	return cmd
+}
+
+// prDashJSON is the --json wire shape for `pr dash`: the three sections the
+// human view prints, in the same order. The two PR sections reuse the
+// `pr prs --json` row so a script reads one PR shape everywhere.
+type prDashJSON struct {
+	ActiveReviews []prDashReviewJSON `json:"active_reviews"`
+	AwaitingYou   []prRowJSON        `json:"awaiting_you"`
+	YourOpen      []prRowJSON        `json:"your_open"`
+}
+
+// prDashReviewJSON is one active-review row. Workspace names the same
+// three-way state renderSessions marks — "live", "missing", "none" (queued,
+// preparing, or needs-repair) — plus "unclassified", which the human view prints as an
+// internal error rather than letting it read as healthy.
+type prDashReviewJSON struct {
+	Ref          string `json:"ref"`
+	CreatedAt    string `json:"created_at"`
+	Path         string `json:"path"`
+	Workspace    string `json:"workspace"`
+	Phase        string `json:"phase"`
+	RepairReason string `json:"repair_reason"`
+}
+
+// writePrDashJSON encodes the dashboard through the sanctioned termsafe seam.
+// Every section encodes [] when empty, never null. The repair reason carries
+// the same cap the human row applies, so a runaway reason cannot flood a
+// transcript through the machine path either.
+func writePrDashJSON(w io.Writer, dash pr.Dashboard, store *pr.ReviewedStore) error {
+	enc := termsafe.JSONEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(buildPrDashJSON(dash, store))
+}
+
+// buildPrDashJSON builds the `pr dash --json` document. `status --json`
+// embeds the same value as its prs section, so the two cannot drift.
+func buildPrDashJSON(dash pr.Dashboard, store *pr.ReviewedStore) prDashJSON {
+	reviews := make([]prDashReviewJSON, 0, len(dash.ActiveReviews))
+	for _, s := range dash.ActiveReviews {
+		reviews = append(reviews, prDashReviewJSON{
+			Ref:          s.Ref().String(),
+			CreatedAt:    s.CreatedAt().Format(time.RFC3339),
+			Path:         s.Path(),
+			Workspace:    workspaceState(s),
+			Phase:        string(s.Phase()),
+			RepairReason: repairReasonLine(s.RepairReason()),
+		})
+	}
+	return prDashJSON{
+		ActiveReviews: reviews,
+		AwaitingYou:   prRowsJSON(dash.AwaitingYou, store),
+		YourOpen:      prRowsJSON(dash.YourOpen, store),
+	}
+}
+
+// workspaceState names a summary's workspace availability for the JSON row,
+// on the same fail-closed switch renderSessions uses.
+func workspaceState(s pr.SessionSummary) string {
+	switch {
+	case s.IsWorkspaceNone():
+		return "none"
+	case s.IsWorkspaceMissing():
+		return "missing"
+	case s.IsWorkspaceLive():
+		return "live"
+	default:
+		return "unclassified"
 	}
 }
 
@@ -77,7 +154,7 @@ func renderSessions(out io.Writer, summaries []pr.SessionSummary) {
 		suffix := ""
 		switch {
 		case s.IsWorkspaceNone():
-			// queued or preparing: no workspace by design. The phase note below
+			// queued, preparing, or needs-repair: no workspace by design. The phase note below
 			// carries it; "workspace missing" is the word for damage.
 		case s.IsWorkspaceMissing():
 			suffix = "  (" + workspaceMissingStatus + ")"

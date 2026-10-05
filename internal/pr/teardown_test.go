@@ -14,6 +14,8 @@ package pr
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -23,6 +25,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/quarantine"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // seedSession writes a real workspace + breadcrumb and returns the breadcrumb
@@ -62,9 +65,13 @@ func TestTeardown_AcceptsMember(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected a tmux kill-window call; got %+v", fake.Calls)
 	}
-	// The native window id, resolved under the review session and revalidated
-	// immediately before the kill.
-	if want := []string{"kill-window", "-t", "@5"}; !equalArgs(call.Args, want) {
+	// The native window id, resolved under the review session, revalidated
+	// immediately before the kill, and killed only if the server answering is
+	// still the generation captured at resolve (forgectl#756).
+	if want := []string{
+		"if-shell", "-F", "-t", "@5", "#{==:#{pid}/#{start_time},123/456}",
+		"kill-window -t @5", `display-message -p "forgectl-generation-mismatch #{pid}/#{start_time}"`,
+	}; !equalArgs(call.Args, want) {
 		t.Errorf("tmux args = %v, want %v", call.Args, want)
 	}
 }
@@ -155,7 +162,7 @@ func TestTeardown_LiveOrderRemovesBreadcrumbLast(t *testing.T) {
 	inner := server.RunFunc
 	fake := &exec.FakeRunner{}
 	fake.RunFunc = func(name string, args []string) (string, error) {
-		if name == "tmux" && len(args) > 0 && args[0] == "kill-window" {
+		if name == "tmux" && tmuxVerb(args) == "kill-window" {
 			_, err := os.Stat(bcPath)
 			breadcrumbAtTmux = err == nil
 		}
@@ -256,7 +263,7 @@ func TestCleanup_DateScoped(t *testing.T) {
 	pToday, _ := seedSession(t, c, Ref{Owner: "o", Repo: "r", Number: 1}, today)
 	pOther, _ := seedSession(t, c, Ref{Owner: "o", Repo: "r", Number: 2}, other)
 
-	if err := c.Cleanup(context.Background(), "2026-07-08"); err != nil {
+	if _, err := c.Cleanup(context.Background(), "2026-07-08"); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
 	if _, err := os.Stat(pToday); !os.IsNotExist(err) {
@@ -472,7 +479,7 @@ func TestCleanup_WritesOneRowPairPerRecord(t *testing.T) {
 	seedSession(t, c, Ref{Owner: "o", Repo: "r", Number: 32}, day)
 	pOther, _ := seedSession(t, c, Ref{Owner: "o", Repo: "r", Number: 33}, other)
 
-	if err := c.Cleanup(context.Background(), "2026-07-08"); err != nil {
+	if _, err := c.Cleanup(context.Background(), "2026-07-08"); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
 	if _, err := os.Stat(pOther); err != nil {
@@ -557,5 +564,443 @@ func TestTeardown_AuditLogIsNotEnumerated(t *testing.T) {
 	}
 	if _, err := c.reserve(context.Background(), Ref{Owner: "o", Repo: "r", Number: 52}, 4, PrepareOpts{Agent: "claude"}); err != nil {
 		t.Errorf("reserve refuses with the audit log present: %v", err)
+	}
+}
+
+// hangingTmux is a Runner whose tmux calls block until their context is done,
+// the way a wedged tmux server does. blockVerb picks which subcommand hangs;
+// "" hangs every one. Everything else delegates to the wrapped fake.
+type hangingTmux struct {
+	*exec.FakeRunner
+	blockVerb string
+}
+
+func (h *hangingTmux) Run(ctx context.Context, name string, args ...string) (string, error) {
+	if name == "tmux" && len(args) > 0 && (h.blockVerb == "" || tmuxVerb(args) == h.blockVerb) {
+		_, _ = h.FakeRunner.Run(ctx, name, args...) // only the call ledger matters
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	return h.FakeRunner.Run(ctx, name, args...)
+}
+
+// assertParkedNotDiscarded checks the fail-closed outcome of a teardown whose
+// tmux never answered: the error says so, the record is still there parked in
+// needs-repair with the exact reason, the workspace is untouched, and the lock
+// is free again.
+func assertParkedNotDiscarded(t *testing.T, c *Client, path, ws string, err error) {
+	t.Helper()
+	if !errors.Is(err, ErrWindowKillTimedOut) {
+		t.Fatalf("Teardown err = %v, want ErrWindowKillTimedOut", err)
+	}
+	if _, serr := os.Stat(ws); serr != nil {
+		t.Errorf("the workspace must be kept while the window state is unknown: %v", serr)
+	}
+	bc := readRecord(t, path)
+	if bc.Phase != PhaseNeedsRepair || !strings.HasPrefix(bc.RepairReason, "window kill timed out (tmux unresponsive); review window pr-") {
+		t.Errorf("record = phase %q reason %q, want needs-repair with the timeout reason naming the window", bc.Phase, bc.RepairReason)
+	}
+	// The probe's context is already cancelled. withLifecycleLock tries the
+	// lock once before it ever waits, and a wait ends on the cancelled
+	// context, so success proves the lock was free at the first try, with no
+	// wall-clock bound for host load to fail (forgectl#919).
+	probe, cancel := context.WithCancel(context.Background())
+	cancel()
+	if lerr := c.withLifecycleLock(probe, "probe", func() error { return nil }); lerr != nil {
+		t.Fatalf("lifecycle lock not free at once after teardown: %v", lerr)
+	}
+}
+
+// TestTeardown_HungTmuxParksTheRecordAndReleasesTheLock is forgectl#556. The
+// tmux kill stays under the lifecycle lock, so a wedged tmux must be cut off by
+// lockedTmuxBudget, and because the window's state is then unknown the
+// teardown fails closed: it parks the record in needs-repair and removes
+// nothing, rather than discarding a record whose window may still be live.
+func TestTeardown_HungTmuxParksTheRecordAndReleasesTheLock(t *testing.T) {
+	old := lockedTmuxBudget
+	lockedTmuxBudget = 100 * time.Millisecond
+	t.Cleanup(func() { lockedTmuxBudget = old })
+
+	for _, tc := range []struct{ name, hang string }{
+		{"resolution hangs", ""},
+		{"only the kill hangs", "kill-window"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ref := Ref{Owner: "o", Repo: "r", Number: 21}
+			h := &hangingTmux{FakeRunner: reviewServer(mustWindowName(t, ref)), blockVerb: tc.hang}
+			c := New(h, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+				WithApprover(func(string) (bool, error) { return false, nil }),
+				WithTTYCheck(func() bool { return false }))
+			ws := fakeWorkspace(t)
+			path := seedPhaseRecord(t, c, ref, PhasePrepared, ws)
+
+			done := make(chan error, 1)
+			go func() { done <- c.Teardown(context.Background(), path) }()
+			select {
+			case err := <-done:
+				assertParkedNotDiscarded(t, c, path, ws, err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("Teardown is still blocked on tmux; the lock would be held indefinitely")
+			}
+			if _, ok := findCallVerb(h.Calls, "tmux", firstNonEmpty(tc.hang, "list-sessions")); !ok {
+				t.Errorf("the hanging tmux call was never issued; the test did not exercise the bound: %+v", h.Calls)
+			}
+		})
+	}
+}
+
+// TestTeardown_HungTmuxOnALegacyRecordConvertsAndParksIt is forgectl#696. A
+// record with no version accepts no phase transition, so before the fix a
+// timeout left it exactly as it was, with no repair path — only an error
+// naming the window. The park now converts it in place to a v2 needs-repair
+// record, keeping every field it carried, so `pr repair` can settle it.
+func TestTeardown_HungTmuxOnALegacyRecordConvertsAndParksIt(t *testing.T) {
+	old := lockedTmuxBudget
+	lockedTmuxBudget = 100 * time.Millisecond
+	t.Cleanup(func() { lockedTmuxBudget = old })
+	ref := Ref{Owner: "o", Repo: "r", Number: 24}
+	h := &hangingTmux{FakeRunner: reviewServer(mustWindowName(t, ref))}
+	c := New(h, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+		WithApprover(func(string) (bool, error) { return false, nil }),
+		WithTTYCheck(func() bool { return false }))
+	path, _ := seedSession(t, c, ref, time.Now().UTC()) // legacy: no version
+	before := readRecord(t, path)
+	if before.Version != 0 {
+		t.Fatalf("seeded record has version %d, want a legacy record", before.Version)
+	}
+
+	err := c.Teardown(context.Background(), path)
+	if errors.Is(err, ErrRecordNotParked) {
+		t.Fatalf("err = %v: the legacy record should have been converted and parked", err)
+	}
+	after := readRecord(t, path)
+	if after.Version != breadcrumbVersion || after.Revision != 1 {
+		t.Errorf("record = version %d revision %d, want version %d revision 1",
+			after.Version, after.Revision, breadcrumbVersion)
+	}
+	if after.Ref != before.Ref || after.Workspace != before.Workspace || !after.CreatedAt.Equal(before.CreatedAt) {
+		t.Errorf("conversion changed the record's identity: before %+v, after %+v", before, after)
+	}
+	// The shared assertion: ErrWindowKillTimedOut, needs-repair with the
+	// timeout reason, workspace kept, lock free.
+	assertParkedNotDiscarded(t, c, path, before.Workspace, err)
+}
+
+// TestTeardown_RealTmuxGrandchildHoldingThePipesIsBounded reproduces the
+// reviewer's case with a REAL exec.OSRunner: a `tmux` whose script forks a
+// sleeping grandchild that inherits the output pipes. CommandContext's SIGKILL
+// only reaches the script, so without exec's WaitDelay Wait blocks until the
+// grandchild exits — long past the budget, with the lock held.
+//
+// The grandchild sleeps a minute, killed when the test ends, and Teardown must
+// return inside a 20 s hang bound: far above the budget plus WaitDelay, so
+// host load cannot fail it, and far below the grandchild's lifetime
+// (forgectl#919; a 3 s bound against a 6 s grandchild was load-sensitive).
+//
+// Mutation: drop cmd.WaitDelay in exec.OSRunner.Run and Teardown waits out
+// the grandchild's minute, past the hang bound.
+func TestTeardown_RealTmuxGrandchildHoldingThePipesIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "grandchild.pid")
+	script := fmt.Sprintf("#!/bin/sh\nsleep 60 &\necho $! >> %q\nwait\n", pidFile)
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o700); err != nil { //nolint:gosec // test-owned script
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		b, err := os.ReadFile(filepath.Clean(pidFile))
+		if err != nil {
+			return
+		}
+		for _, field := range strings.Fields(string(b)) {
+			var pid int
+			if _, err := fmt.Sscan(field, &pid); err != nil {
+				continue
+			}
+			if p, err := os.FindProcess(pid); err == nil {
+				_ = p.Kill()
+			}
+		}
+	})
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	old := lockedTmuxBudget
+	lockedTmuxBudget = 300 * time.Millisecond
+	t.Cleanup(func() { lockedTmuxBudget = old })
+
+	ref := Ref{Owner: "o", Repo: "r", Number: 23}
+	c := New(exec.OSRunner{}, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+		WithApprover(func(string) (bool, error) { return false, nil }),
+		WithTTYCheck(func() bool { return false }))
+	ws := fakeWorkspace(t)
+	path := seedPhaseRecord(t, c, ref, PhasePrepared, ws)
+
+	done := make(chan error, 1)
+	go func() { done <- c.Teardown(context.Background(), path) }()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("Teardown did not return within 20s: a grandchild holding the pipes defeated the tmux budget")
+	}
+	assertParkedNotDiscarded(t, c, path, ws, err)
+}
+
+// windowReadServer is reviewServer with list-windows replaced: it answers
+// with out and err, so a test can stage a window read that fails WITHOUT
+// timing out, or a clean listing that simply lacks the review's window.
+func windowReadServer(out string, err error) *exec.FakeRunner {
+	base := reviewServer()
+	inner := base.RunFunc
+	base.RunFunc = func(name string, args []string) (string, error) {
+		if name == "tmux" && len(args) > 0 && args[0] == "list-windows" {
+			return out, err
+		}
+		return inner(name, args)
+	}
+	return base
+}
+
+// TestTeardown_UnreadableWindowStateFailsClosed is forgectl#702. A window read
+// that fails for any reason other than a timeout — an unreadable server, rows
+// that do not parse — does not say the window is gone, so the teardown must
+// park the record and remove nothing, exactly as a timeout does.
+func TestTeardown_UnreadableWindowStateFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		out   string
+		err   error
+		cause error
+	}{
+		{"unreadable server", "", errors.New("tmux: permission denied"), tmux.ErrServerUnreadable},
+		{"unparseable rows", "not a window row", nil, tmux.ErrUnreadableFields},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ref := Ref{Owner: "o", Repo: "r", Number: 25}
+			fake := windowReadServer(tc.out, tc.err)
+			c := New(fake, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+				WithApprover(func(string) (bool, error) { return false, nil }),
+				WithTTYCheck(func() bool { return false }))
+			ws := fakeWorkspace(t)
+			path := seedPhaseRecord(t, c, ref, PhasePrepared, ws)
+
+			err := c.Teardown(context.Background(), path)
+			if !errors.Is(err, ErrWindowStateUnreadable) || !errors.Is(err, tc.cause) {
+				t.Fatalf("Teardown err = %v, want ErrWindowStateUnreadable wrapping %v", err, tc.cause)
+			}
+			if errors.Is(err, ErrRecordNotParked) {
+				t.Fatalf("a v2 record must be parked: %v", err)
+			}
+			if _, serr := os.Stat(ws); serr != nil {
+				t.Errorf("the workspace must be kept while the window state is unknown: %v", serr)
+			}
+			bc := readRecord(t, path)
+			if bc.Phase != PhaseNeedsRepair || !strings.HasPrefix(bc.RepairReason, windowUnreadableReason+"; review window pr-") {
+				t.Errorf("record = phase %q reason %q, want needs-repair with the unreadable reason naming the window",
+					bc.Phase, bc.RepairReason)
+			}
+			if _, ok := findCallVerb(fake.Calls, "tmux", "kill-window"); ok {
+				t.Error("nothing may be killed when the window state is unknown")
+			}
+		})
+	}
+}
+
+// TestTeardown_ConfirmedAbsentWindowStillTearsDown is the other half of #702:
+// the fix must not turn a genuine "no such window" into a refusal. A clean
+// listing without the review's window, and a server with no review session at
+// all, are answers, and the teardown proceeds.
+func TestTeardown_ConfirmedAbsentWindowStillTearsDown(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fake *exec.FakeRunner
+	}{
+		{"window not in the listing", windowReadServer("", nil)},
+		{"no review session", &exec.FakeRunner{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ref := Ref{Owner: "o", Repo: "r", Number: 26}
+			c := New(tc.fake, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+				WithApprover(func(string) (bool, error) { return false, nil }),
+				WithTTYCheck(func() bool { return false }))
+			ws := fakeWorkspace(t)
+			path := seedPhaseRecord(t, c, ref, PhasePrepared, ws)
+
+			if err := c.Teardown(context.Background(), path); err != nil {
+				t.Fatalf("Teardown with the window confirmed absent: %v", err)
+			}
+			if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+				t.Errorf("the record should be removed: %v", serr)
+			}
+		})
+	}
+}
+
+// killStepServer is reviewServer(name) whose SECOND list-windows (KillWindow's
+// revalidation) answers with secondOut/secondErr, and whose kill-window
+// answers with killErr. The first list-windows — the resolve — is the normal
+// listing, so the window is found and the failure lands on the kill step.
+func killStepServer(name, secondOut string, secondErr, killErr error) *exec.FakeRunner {
+	base := reviewServer(name)
+	inner := base.RunFunc
+	lists := 0
+	base.RunFunc = func(bin string, args []string) (string, error) {
+		if bin == "tmux" && len(args) > 0 {
+			switch tmuxVerb(args) {
+			case "list-windows":
+				lists++
+				if lists > 1 {
+					return secondOut, secondErr
+				}
+			case "kill-window":
+				return "", killErr
+			}
+		}
+		return inner(bin, args)
+	}
+	return base
+}
+
+// TestTeardown_KillStepFailureFailsClosed is the kill-step half of
+// forgectl#702: once the window is resolved, KillWindow re-reads the list and
+// then kills. A non-timeout failure at either point leaves the window possibly
+// live, so the teardown parks and removes nothing, like a resolve failure.
+func TestTeardown_KillStepFailureFailsClosed(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "r", Number: 27}
+	name := mustWindowName(t, ref)
+	row := strings.Join([]string{"123", "456", "@5", "$1", "forgectl", "0", name, "0", "1"}, "\x1f")
+	reparented := strings.Join([]string{"123", "456", "@5", "$2", "elsewhere", "0", name, "0", "1"}, "\x1f")
+	for _, tc := range []struct {
+		name       string
+		secondOut  string
+		secondErr  error
+		killErr    error
+		wantKilled bool
+	}{
+		{"revalidation list unreadable", "", errors.New("tmux: permission denied"), nil, false},
+		{"kill-window fails", row, nil, errors.New("tmux: kill-window exited 1"), true},
+		// A window moved to another session keeps its @id; revalidation
+		// refuses it (ErrWrongParent), and that is not "gone" (#746).
+		{"reparented before the kill", reparented, nil, nil, false},
+		// kill-window's "can't find window" for an id other than the one
+		// passed is not tmux's gone answer for ours (#746).
+		{"kill-window names another id", row, nil, &exec.CommandError{
+			Name: "tmux", Stderr: "can't find window: @55", ExitCode: 1, Err: errors.New("exit status 1"),
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := killStepServer(name, tc.secondOut, tc.secondErr, tc.killErr)
+			c := New(fake, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+				WithApprover(func(string) (bool, error) { return false, nil }),
+				WithTTYCheck(func() bool { return false }))
+			ws := fakeWorkspace(t)
+			path := seedPhaseRecord(t, c, ref, PhasePrepared, ws)
+
+			err := c.Teardown(context.Background(), path)
+			if !errors.Is(err, ErrWindowStateUnreadable) || errors.Is(err, ErrRecordNotParked) {
+				t.Fatalf("Teardown err = %v, want ErrWindowStateUnreadable with the record parked", err)
+			}
+			if _, serr := os.Stat(ws); serr != nil {
+				t.Errorf("the workspace must be kept while the window may be live: %v", serr)
+			}
+			bc := readRecord(t, path)
+			if bc.Phase != PhaseNeedsRepair || !strings.Contains(bc.RepairReason, "(@5) may still be running") {
+				t.Errorf("record = phase %q reason %q, want needs-repair naming the window and its id", bc.Phase, bc.RepairReason)
+			}
+			if _, ok := findCallVerb(fake.Calls, "tmux", "kill-window"); ok != tc.wantKilled {
+				t.Errorf("kill-window issued = %v, want %v", ok, tc.wantKilled)
+			}
+		})
+	}
+}
+
+// TestTeardown_KillStepCantFindWindowStillTearsDown is forgectl#746: the
+// window dies after revalidation and before kill-window, and tmux answers
+// exactly "can't find window: @5" for the id it was passed. That is gone, not
+// unreadable, so the teardown proceeds instead of parking a spurious
+// needs-repair.
+//
+// Mutation that turns it red: remove the windowGoneAtKillStderr branch in
+// tmux.KillWindow — the kill failure then parks the record.
+func TestTeardown_KillStepCantFindWindowStillTearsDown(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "r", Number: 29}
+	name := mustWindowName(t, ref)
+	row := strings.Join([]string{"123", "456", "@5", "$1", "forgectl", "0", name, "0", "1"}, "\x1f")
+	gone := &exec.CommandError{Name: "tmux", Stderr: "can't find window: @5", ExitCode: 1, Err: errors.New("exit status 1")}
+	fake := killStepServer(name, row, nil, gone)
+	c := New(fake, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+		WithApprover(func(string) (bool, error) { return false, nil }),
+		WithTTYCheck(func() bool { return false }))
+	ws := fakeWorkspace(t)
+	path := seedPhaseRecord(t, c, ref, PhasePrepared, ws)
+
+	if err := c.Teardown(context.Background(), path); err != nil {
+		t.Fatalf("Teardown with the window gone at kill-window: %v", err)
+	}
+	if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+		t.Errorf("the record should be removed: %v", serr)
+	}
+	if _, ok := findCallVerb(fake.Calls, "tmux", "kill-window"); !ok {
+		t.Error("the test must reach kill-window, or it exercised the revalidation instead")
+	}
+}
+
+// TestWindowGoneAtKill_OnlyAbsenceAndGenerationAreGone pins the kill-step
+// classifier directly (#746): ErrWrongParent and ErrSelectorChanged, as
+// KillWindow wraps them, leave the window possibly live.
+//
+// Mutation that turns it red: add tmux.ErrWrongParent (or
+// tmux.ErrSelectorChanged) to windowGoneAtKill.
+func TestWindowGoneAtKill_OnlyAbsenceAndGenerationAreGone(t *testing.T) {
+	wrap := func(err error) error { return fmt.Errorf("kill window %q: %w", "pr-o-r-1", err) }
+	for _, tc := range []struct {
+		err  error
+		gone bool
+	}{
+		{wrap(tmux.ErrObjectGone), true},
+		{wrap(tmux.ErrGenerationChanged), true},
+		{wrap(tmux.ErrSessionNotFound), true},
+		{wrap(tmux.ErrWrongParent), false},
+		{wrap(tmux.ErrSelectorChanged), false},
+		{wrap(tmux.ErrServerUnreadable), false},
+		{errors.New("tmux: kill-window exited 1"), false},
+	} {
+		if got := windowGoneAtKill(tc.err); got != tc.gone {
+			t.Errorf("windowGoneAtKill(%v) = %v, want %v", tc.err, got, tc.gone)
+		}
+	}
+}
+
+// TestTeardown_KillStepGoneStillTearsDown is its control: a window that
+// vanished between resolve and kill (ErrObjectGone), or a server that
+// restarted in between (ErrGenerationChanged, which took the window with it),
+// is gone, and the teardown proceeds.
+func TestTeardown_KillStepGoneStillTearsDown(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "r", Number: 28}
+	name := mustWindowName(t, ref)
+	restarted := strings.Join([]string{"999", "888", "@1", "$1", "forgectl", "0", name, "0", "1"}, "\x1f")
+	for _, tc := range []struct {
+		name      string
+		secondOut string
+	}{
+		{"window vanished", ""},
+		{"server restarted", restarted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := killStepServer(name, tc.secondOut, nil, nil)
+			c := New(fake, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+				WithApprover(func(string) (bool, error) { return false, nil }),
+				WithTTYCheck(func() bool { return false }))
+			ws := fakeWorkspace(t)
+			path := seedPhaseRecord(t, c, ref, PhasePrepared, ws)
+
+			if err := c.Teardown(context.Background(), path); err != nil {
+				t.Fatalf("Teardown with the window gone at kill time: %v", err)
+			}
+			if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+				t.Errorf("the record should be removed: %v", serr)
+			}
+			if _, ok := findCallVerb(fake.Calls, "tmux", "kill-window"); ok {
+				t.Error("no kill-window may be issued for a window revalidation found gone")
+			}
+		})
 	}
 }

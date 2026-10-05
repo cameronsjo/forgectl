@@ -24,6 +24,18 @@ const reviewPrompt = "Review this pull request as a clean-room reviewer. " +
 	"(Critical / Important / Nit) with file:line and a concrete fix. " +
 	"Do NOT post, comment, merge, or push anything — output the review only."
 
+// remoteReviewPrompt is reviewPrompt plus the exact gh commands the agent's
+// allow-list permits (prGhReadCommands). Those rules are exact matches, so an
+// agent left to guess a spelling — a bare `gh pr view`, a reordered flag —
+// is refused every time; naming them is what keeps the review able to read
+// the PR's metadata at all.
+func remoteReviewPrompt(host string, ref Ref) string {
+	cmds := prGhReadCommands(host, ref)
+	return reviewPrompt + " To read the pull request's description, comments, diff, or checks, " +
+		"run these gh commands exactly as written; no other gh invocation is permitted: `" +
+		strings.Join(cmds, "`, `") + "`."
+}
+
 // Dispatch is the generation-qualified identity returned by one successful
 // detached review launch. WindowID is opaque outside this package.
 type Dispatch struct {
@@ -141,6 +153,13 @@ func (c *Client) ensureSession(ctx context.Context) (tmux.SessionIdentity, error
 // predate native ids and carry none, and an id persisted across a tmux server
 // restart would name a different window anyway. What the breadcrumb supplies is
 // the NAME to look for; the identity is rebuilt from the live server every time.
+//
+// It adds NO deadline of its own: a caller under the lifecycle lock passes a
+// ctx already bounded by its tmuxBudget (killReviewWindow, and `pr repair
+// --adopt-window` through boundedTmux), so the bound covers the resolve AND
+// whatever the caller does with the window as one unit. `pr attach` runs
+// outside the lock and passes its own ctx. Two windows with the name refuse
+// with tmux.ErrAmbiguousWindow rather than resolving to either.
 func (c *Client) resolveReviewWindow(ctx context.Context, ref Ref) (tmux.WindowIdentity, error) {
 	name, err := ReviewWindowName(ref)
 	if err != nil {
@@ -361,7 +380,10 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("resolve codex binary: %w", err)
 	}
-	resolved := launch.Resolve(cfg.Launch, sess.Workspace)
+	resolved, err := launch.Resolve(cfg.Launch, sess.Workspace)
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("resolve launch profile: %w", err)
+	}
 	profile := launch.Profile{
 		Harness:        "codex",
 		ApprovalPolicy: "never",
@@ -414,7 +436,7 @@ func (c *Client) launchCodex(ctx context.Context, sess Session, cfg config.Confi
 	command := append([]string{codexPath}, codexArgs...)
 	// Same environment as the Claude half — see the note there. Two reviewers
 	// reaching the network by different paths would be a posture nobody chose.
-	windowEnv, err := c.resolveWindowEnv()
+	windowEnv, err := c.reviewWindowEnv(sess)
 	if err != nil {
 		return Dispatch{}, err
 	}
@@ -473,7 +495,10 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// plan mode. Inheriting a permissive config (AllowDanger, a bypass permission
 	// mode) would let the review agent ignore the deny-by-default workspace
 	// allowlist — the whole clean-room control. Force the safe posture here.
-	profile := launch.Resolve(cfg.Launch, sess.Workspace)
+	profile, err := launch.Resolve(cfg.Launch, sess.Workspace)
+	if err != nil {
+		return Dispatch{}, fmt.Errorf("resolve launch profile: %w", err)
+	}
 	profile.AllowDanger = false
 	profile.PermissionMode = "plan"
 	// Refuse every DISCOVERED MCP configuration. The workspace is a third
@@ -568,13 +593,19 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 		return Dispatch{}, fmt.Errorf("clean-room review profile invalid: %w", err)
 	}
 
-	prompt := reviewPrompt
+	var prompt string
 	if sess.Ref.IsLocal() {
 		// Grant --add-dir for the escape-hatch findings dir. Without this, the
 		// permission-scoped Write(<dir>/**) allowlist rule is moot — Claude Code
 		// won't expose a path outside the launch cwd at all.
 		profile.AddDir = append(profile.AddDir, sess.FindingsDir)
 		prompt = localReviewPrompt(sess.FindingsDir, true)
+	} else {
+		host, _, err := c.prHost(sess.Ref)
+		if err != nil {
+			return Dispatch{}, err
+		}
+		prompt = remoteReviewPrompt(host, sess.Ref)
 	}
 	claudeArgs := launch.BuilderArgs(profile, []string{"-p", prompt})
 
@@ -598,7 +629,9 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 	// its first request, and this file's own comment above names that failure
 	// mode: an empty pane and no error anywhere. Resolving here rather than at
 	// construction keeps a bad [proxy] launch_profile from failing `pr list`.
-	windowEnv, err := c.resolveWindowEnv()
+	// It also empties the gh token variables the review cannot need, and on a
+	// host other than github.com pins GH_HOST (reviewWindowEnv, forgectl#673).
+	windowEnv, err := c.reviewWindowEnv(sess)
 	if err != nil {
 		return Dispatch{}, err
 	}
@@ -616,6 +649,8 @@ func (c *Client) launchInline(ctx context.Context, sess Session, cfg config.Conf
 // textually the sole reachable post path, and it is unreachable unless approve
 // returns true. In headless / non-interactive mode the gate is not shown at
 // all: the review is staged (returned as not-posted), never auto-posted.
+// A review that carries a GitHub token shape is refused before either path,
+// staging or the gate (scanReviewForTokens, forgectl#681).
 //
 // A local (offline) review session is refused outright: there is no PR to
 // post to, and sess.Ref.Slug() for a local session resolves to the synthetic
@@ -652,6 +687,14 @@ func (c *Client) PostReview(ctx context.Context, sess Session, review string, he
 	if sess.Ref.IsLocal() {
 		return false, fmt.Errorf("cannot post a review for a local session %q: there is no PR to post to", sess.Ref.String())
 	}
+	// Before the gate, so a human is never asked to approve a post that
+	// carries a token shape (forgectl#681), and before the headless return,
+	// so a staged review carrying one is refused the same way rather than
+	// staged silently for a later post. The refusal never echoes the match.
+	if err := scanReviewForTokens(review); err != nil {
+		slog.Warn("Refusing a drafted review that carries a GitHub token shape.", "ref", sess.Ref.String())
+		return false, err
+	}
 	if headless || !c.isTTY() {
 		slog.Info("Non-interactive/headless: staging review, not posting.", "ref", sess.Ref.String())
 		return false, nil
@@ -668,9 +711,17 @@ func (c *Client) PostReview(ctx context.Context, sess Session, review string, he
 
 	// --- Past this point, and ONLY past this point, a post argv reaches the
 	// Runner. No other code path in this package invokes `gh pr review`. ---
-	if _, err := c.run.Run(ctx, "gh", "pr", "review", fmt.Sprintf("%d", sess.Ref.Number),
-		"--repo", sess.Ref.Slug(), "--comment", "--body", review); err != nil {
-		return false, fmt.Errorf("post review: %w", err)
+	// Host explicit, as in viewPR: the post goes to the host the session was
+	// prepared against, never to gh's default host (#413).
+	host, run, err := c.prHost(sess.Ref)
+	if err != nil {
+		return false, err
+	}
+	if _, err := run.Run(ctx, "gh", "pr", "review", fmt.Sprintf("%d", sess.Ref.Number),
+		"--repo", host+"/"+sess.Ref.Slug(), "--comment", "--body", review); err != nil {
+		// Categorical (#658): gh's stderr is host-chosen text.
+		slog.Error("Failed to post review.", "ref", sess.Ref.String(), "error", err)
+		return false, termsafe.Categorical("post review: gh pr review failed", err)
 	}
 	slog.Info("Posted approved review.", "ref", sess.Ref.String())
 	return true, nil

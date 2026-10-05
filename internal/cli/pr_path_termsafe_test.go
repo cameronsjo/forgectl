@@ -124,8 +124,8 @@ func TestPrList_LeavesAnOrdinaryPathVerbatim(t *testing.T) {
 	}
 
 	fields := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\t")
-	if len(fields) != 5 {
-		t.Fatalf("want 5 tab-separated fields, got %d: %q", len(fields), stdout.String())
+	if len(fields) != 6 {
+		t.Fatalf("want 6 tab-separated fields, got %d: %q", len(fields), stdout.String())
 	}
 	if fields[2] != summaries[0].Path() {
 		t.Errorf("field 3 = %q, want the raw breadcrumb path %q — this is what `pr teardown` is fed",

@@ -82,7 +82,13 @@ toolset (git, claude, tmux) — orchestration as data, not one-off scripts.
 
 Workflow files live in <config-dir>/workflows/<name>.workflow.toml — the same
 base as config.toml (macOS: ~/Library/Application Support/forgectl, Linux:
-~/.config/forgectl) — or fall back to a shipped built-in of the same name.`,
+~/.config/forgectl) — or fall back to a shipped built-in of the same name.
+
+--dry-run prints every step's fields in full, a run step's args included: it
+is the review of a file you are about to trust, so it hides nothing the file
+would run. A real run's logs and errors show a run step's args as flag names
+only. Keep credentials out of a workflow's args, and out of a dry run's
+captured output.`,
 	}
 	cmd.AddCommand(
 		newWorkflowRunCmd(deps),
@@ -366,7 +372,7 @@ func newWorkflowStatusCmd() *cobra.Command {
 			// what keeps the next field added here from being the exception.
 			// Under --json the termsafe seam is termsafe.JSONEncoder instead, so
 			// the raw (unescaped) strings go straight into the payload built below.
-			name := termsafe.SafeLine(args[0])
+			name := safeLabel(args[0])
 			out := cmd.OutOrStdout()
 
 			state, ok, err := workflow.LoadState(args[0])
@@ -403,15 +409,15 @@ func newWorkflowStatusCmd() *cobra.Command {
 				})
 			}
 
-			fmt.Fprintf(out, "%s — run %s\n", termsafe.SafeLine(state.Workflow), termsafe.SafeLine(state.RunID))
-			fmt.Fprintf(out, "  started: %s\n", termsafe.SafeLine(state.StartedAt))
-			fmt.Fprintf(out, "  updated: %s\n", termsafe.SafeLine(state.UpdatedAt))
+			_, _ = fmt.Fprintf(out, "%s — run %s\n", safeLabel(state.Workflow), safeLabel(state.RunID))
+			_, _ = fmt.Fprintf(out, "  started: %s\n", safeLabel(state.StartedAt))
+			_, _ = fmt.Fprintf(out, "  updated: %s\n", safeLabel(state.UpdatedAt))
 			if len(state.Steps) == 0 {
 				fmt.Fprintln(out, "  no steps checkpointed complete")
 			} else {
 				fmt.Fprintf(out, "  %d step(s) complete:\n", len(state.Steps))
 				for _, s := range state.Steps {
-					fmt.Fprintf(out, "    %d. %-10s done %s\n", s.Index+1, termsafe.SafeLine(s.Uses), termsafe.SafeLine(s.CompletedAt))
+					_, _ = fmt.Fprintf(out, "    %d. %-10s done %s\n", s.Index+1, termsafe.SafeLineMax(s.Uses, termsafe.ArgEchoMaxRunes), safeLabel(s.CompletedAt))
 				}
 			}
 
@@ -422,7 +428,7 @@ func newWorkflowStatusCmd() *cobra.Command {
 			// stdout with the rest of it. What it must share with the shared
 			// sink is the termsafe boundary, and it does.
 			if note != "" {
-				_, _ = fmt.Fprintf(out, "  note: %s\n", termsafe.SafeLine(note))
+				_, _ = fmt.Fprintf(out, "  note: %s\n", safeText(note))
 			}
 			return nil
 		},
@@ -451,7 +457,7 @@ func workflowStatusNote(rawName, safeName string, state workflow.RunState) strin
 		// wrapped *os.PathError cannot reinsert the raw path its own Error
 		// method would print. The result is already terminal-safe, so both
 		// the human and --json callers use it as-is with no further escaping.
-		return fmt.Sprintf("could not load the current definition of %s (%v) — resume is unavailable until it loads", safeName, termsafe.Error(err))
+		return fmt.Sprintf("could not load the current definition of %s (%s) — resume is unavailable until it loads", safeName, safeText(termsafe.Error(err).Error()))
 	}
 	if workflow.DefinitionHash(src.Data) != state.DefinitionHash {
 		return fmt.Sprintf("%s has changed since this run (any edit to the file invalidates every checkpoint) — resume will be refused; run it fresh", safeName)
@@ -476,6 +482,13 @@ func parseParams(raw []string) (map[string]string, error) {
 // printPlan renders a resolved Plan for --dry-run: the step sequence a user
 // reviews before trusting a workflow, with zero side effects.
 //
+// A run step's args print in full, unlike every Runner rendering, which shows
+// them as flag names only (exec.WithOpaqueArgs, #749). That is deliberate
+// (#782): this is the review that decides whether to bless the file, so
+// withholding args here would let a hostile file hide exactly the argv it
+// is asking to be trusted with. The output goes to the invoking user's
+// stdout and to no log. The command help says so.
+//
 // Every field here comes from the workflow file, which ADR-0006/0007 treat as
 // attacker-writable — and this is the surface where that matters most, because
 // --dry-run is the review a user performs to decide whether to bless the file,
@@ -486,11 +499,13 @@ func printPlan(out io.Writer, plan workflow.Plan) {
 	fmt.Fprintf(out, "workflow %s@%s — %d step(s):\n",
 		termsafe.SafeLine(plan.Name), termsafe.SafeLine(plan.Version), len(plan.Steps))
 	for i, s := range plan.Steps {
-		fmt.Fprintf(out, "  %d. %s\n", i+1, termsafe.SafeLine(s.Uses))
+		// Capped (#778): --dry-run skips the registry check, so uses is
+		// unvetted file text of any length; a verb name never needs more.
+		_, _ = fmt.Fprintf(out, "  %d. %s\n", i+1, termsafe.SafeLineMax(s.Uses, termsafe.ArgEchoMaxRunes))
 		printField(out, "repo", s.Repo)
 		printField(out, "ref", s.Ref)
 		if len(s.Globs) > 0 {
-			fmt.Fprintf(out, "     globs: %s\n", termsafe.SafeLine(strings.Join(s.Globs, ", ")))
+			_, _ = fmt.Fprintf(out, "     globs: %s\n", strings.Join(quoteEach(s.Globs), ", "))
 		}
 		printField(out, "skill", s.Skill)
 		printField(out, "posture", s.Posture)
@@ -499,17 +514,36 @@ func printPlan(out io.Writer, plan workflow.Plan) {
 		printField(out, "to", s.To)
 		printField(out, "cmd", s.Cmd)
 		if len(s.Args) > 0 {
-			fmt.Fprintf(out, "     args: %s\n", termsafe.SafeLine(strings.Join(s.Args, " ")))
+			_, _ = fmt.Fprintf(out, "     args: %s\n", strings.Join(quoteEach(s.Args), " "))
 		}
 	}
 }
 
+// quoteEach quotes every element of a list field for the --dry-run review
+// (#816): args, joined with spaces, and globs, joined with ", ". Joining the
+// raw elements made ["a b"] and ["a","b"] print identically (and ["a, b"]
+// and ["a","b"] for globs), so a hostile file could show the reviewer a
+// different split from the one it runs. Each element is quoted with
+// QuoteText, which also escapes every control and format rune, and is NOT
+// capped: the review prints the file in full (#782), and a cut would hide
+// exactly the tail of what the file asks to be trusted with.
+func quoteEach(items []string) []string {
+	quoted := make([]string, len(items))
+	for i, item := range items {
+		quoted[i] = termsafe.QuoteText(item)
+	}
+	return quoted
+}
+
 // printField writes one non-empty plan-step field as an indented line. The
 // escaping lives here rather than at each call site so a field added to
-// printPlan's list cannot be the one that ships raw.
+// printPlan's list cannot be the one that ships raw. It is escaped and NOT
+// capped (#782, #927 review): the dry run is the review of a file about to
+// be trusted, and a cut would let a hostile file push the tail of a cmd,
+// repo or ref behind the truncation marker.
 func printField(out io.Writer, name, value string) {
 	if value == "" {
 		return
 	}
-	fmt.Fprintf(out, "     %s: %s\n", name, termsafe.SafeLine(value))
+	_, _ = fmt.Fprintf(out, "     %s: %s\n", name, termsafe.SafeLine(value))
 }

@@ -191,7 +191,7 @@ func hubTestModel() model {
 		{Name: "tmux", Short: "sessions, windows, tree", Core: true},
 		{Name: "doctor", Short: "health check", Core: false},
 		{Name: "pr", Short: "review a PR", Core: true, Leaves: []HubLeaf{
-			{Name: "pr", Short: "review a PR", Use: "pr <ref>", NeedsArgs: true},
+			{Name: "pr", Short: "review a PR", Use: "pr <ref>", NeedsArgs: true, Self: true},
 			{Name: "list", Short: "list sessions", Use: "list"},
 		}},
 	}
@@ -265,10 +265,10 @@ func TestHub_LeaflessEntryRunsDirectly(t *testing.T) {
 	}
 }
 
-// TestHub_NeedsArgsLeafShowsInvocationWithoutRunning pins the pr <ref>
-// contract: selecting it quits with ActionShowInvocation and the
-// placeholder still in the Argv, never ActionRunVerb.
-func TestHub_NeedsArgsLeafShowsInvocationWithoutRunning(t *testing.T) {
+// TestHub_NeedsArgsLeafOpensPickerWithoutRunning pins the pr <ref> contract
+// (forgectl#730 item 4): selecting a leaf that needs one argument opens the
+// picker in place and runs nothing until a value is chosen.
+func TestHub_NeedsArgsLeafOpensPickerWithoutRunning(t *testing.T) {
 	m := hubTestModel()
 	out, _ := m.Update(key("3")) // pr row -> leavesMode
 	m = out.(model)
@@ -277,14 +277,14 @@ func TestHub_NeedsArgsLeafShowsInvocationWithoutRunning(t *testing.T) {
 	}
 	out, cmd := m.Update(key("1")) // pr's own NeedsArgs leaf
 	m = out.(model)
-	if m.action.Kind != ActionShowInvocation {
-		t.Fatalf("expected ActionShowInvocation, got %+v", m.action)
+	if m.picker == nil {
+		t.Fatal("expected the argument picker to open")
 	}
-	if got := strings.Join(m.action.Argv, " "); got != "pr <ref>" {
-		t.Errorf("Argv joined = %q, want %q", got, "pr <ref>")
+	if m.action.Kind != ActionNone || cmd != nil {
+		t.Errorf("opening the picker ran something: %+v", m.action)
 	}
-	if cmd == nil {
-		t.Error("a NeedsArgs leaf should still quit (back to the shell)")
+	if got := strings.Join(m.picker.prefix, " "); got != "pr" || m.picker.placeholder != "<ref>" {
+		t.Errorf("picker prefix/placeholder = %q/%q, want pr/<ref>", got, m.picker.placeholder)
 	}
 }
 
@@ -364,5 +364,133 @@ func TestMenuDigitBeyondFilteredRowsIsIgnored(t *testing.T) {
 	m = out.(model)
 	if m.action.Kind != 0 || m.mode != menuMode {
 		t.Errorf("digit 3 with one visible row: action = %+v, mode = %v; want no action, still in the menu", m.action, m.mode)
+	}
+}
+
+// nestedHubModel is hubTestModel's pr with a nested group, reviewed, whose
+// own leaves are one runnable verb and one that needs an argument (#916).
+func nestedHubModel() model {
+	hub := []HubEntry{
+		{Name: "pr", Short: "review a PR", Core: true, Leaves: []HubLeaf{
+			{Name: "pr", Short: "review a PR", Use: "pr <ref>", NeedsArgs: true, Self: true},
+			{Name: "list", Short: "list sessions", Use: "list"},
+			{Name: "reviewed", Short: "manage marks", Use: "reviewed", Leaves: []HubLeaf{
+				{Name: "mark", Short: "mark a PR", Use: "mark <ref>", NeedsArgs: true},
+				{Name: "sync", Short: "prune marks", Use: "sync"},
+			}},
+		}},
+	}
+	return sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{Hub: hub, Theme: theme.Default()}), 80, 24)
+}
+
+// TestHub_NestedGroupOpensItsLeaves pins #916: selecting a group leaf opens
+// its subcommands instead of running the group, and a verb inside it runs
+// with the whole path as argv.
+func TestHub_NestedGroupOpensItsLeaves(t *testing.T) {
+	m := nestedHubModel()
+	out, _ := m.Update(key("1")) // pr row -> leavesMode
+	m = out.(model)
+	out, cmd := m.Update(key("3")) // the reviewed group
+	m = out.(model)
+	if m.action.Kind != ActionNone || cmd != nil {
+		t.Fatalf("selecting a group ran something: %+v", m.action)
+	}
+	if m.mode != leavesMode || strings.Join(m.leavesPath, " ") != "pr reviewed" {
+		t.Fatalf("group did not open: mode=%v path=%q", m.mode, m.leavesPath)
+	}
+	if got := m.selectedDollar(); !strings.Contains(got, "pr reviewed mark <ref>") {
+		t.Errorf("dollar line = %q, want the nested usage", got)
+	}
+	out, cmd = m.Update(key("2")) // sync
+	m = out.(model)
+	if m.action.Kind != ActionRunVerb || strings.Join(m.action.Argv, " ") != "pr reviewed sync" || cmd == nil {
+		t.Errorf("nested verb = %+v, want ActionRunVerb [pr reviewed sync]", m.action)
+	}
+}
+
+// TestHub_NestedNeedsArgsLeafOpensPicker pins the picker prefix for an
+// argument-taking verb inside a nested group.
+func TestHub_NestedNeedsArgsLeafOpensPicker(t *testing.T) {
+	m := nestedHubModel()
+	out, _ := m.Update(key("1"))
+	m = out.(model)
+	out, _ = m.Update(key("3"))
+	m = out.(model)
+	out, cmd := m.Update(key("1")) // mark <ref>
+	m = out.(model)
+	if m.picker == nil || cmd != nil {
+		t.Fatalf("mark did not open the picker: picker=%v action=%+v", m.picker != nil, m.action)
+	}
+	if got := strings.Join(m.picker.prefix, " "); got != "pr reviewed mark" || m.picker.placeholder != "<ref>" {
+		t.Errorf("picker prefix/placeholder = %q/%q, want pr reviewed mark/<ref>", got, m.picker.placeholder)
+	}
+}
+
+// TestHub_NestedGroupEscClimbsOneLevel pins esc inside a nested group: back
+// to the list it was opened from with the group still selected, then to the
+// hub.
+func TestHub_NestedGroupEscClimbsOneLevel(t *testing.T) {
+	m := nestedHubModel()
+	out, _ := m.Update(key("1"))
+	m = out.(model)
+	out, _ = m.Update(key("3"))
+	m = out.(model)
+	out, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = out.(model)
+	if cmd != nil || m.mode != leavesMode || strings.Join(m.leavesPath, " ") != "pr" {
+		t.Fatalf("esc from a nested group: mode=%v path=%q quit=%v", m.mode, m.leavesPath, cmd != nil)
+	}
+	if it, ok := m.l.SelectedItem().(leafItem); !ok || it.leaf.Name != "reviewed" {
+		t.Errorf("cursor after esc = %+v, want the reviewed row", m.l.SelectedItem())
+	}
+	if got := m.selectedDollar(); !strings.Contains(got, "pr reviewed <subcommand>") {
+		t.Errorf("dollar line on a group row = %q, want pr reviewed <subcommand>", got)
+	}
+	out, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = out.(model)
+	if m.mode != hubMode {
+		t.Errorf("second esc: mode=%v, want hubMode", m.mode)
+	}
+}
+
+// TestHub_ChildNamedLikeItsParent pins #948: the synthetic self leaf is told
+// apart from a real subcommand by its Self flag, not by name. Under pr, the
+// self leaf runs `pr <ref>` while a real child group also named "pr" opens,
+// and its own verb runs as pr pr run; esc climbs back onto that group's row,
+// not onto the self leaf that shares its name.
+func TestHub_ChildNamedLikeItsParent(t *testing.T) {
+	self := HubLeaf{Name: "pr", Use: "pr <ref>", NeedsArgs: true, Self: true}
+	child := HubLeaf{Name: "pr", Use: "pr", Leaves: []HubLeaf{{Name: "run", Use: "run"}}}
+	if got := strings.Join(leafArgv([]string{"pr"}, self), " "); got != "pr" {
+		t.Errorf("leafArgv(self) = %q, want pr", got)
+	}
+	if got := strings.Join(leafArgv([]string{"pr"}, child), " "); got != "pr pr" {
+		t.Errorf("leafArgv(child named pr) = %q, want pr pr", got)
+	}
+
+	hub := []HubEntry{{Name: "pr", Short: "review a PR", Core: true, Leaves: []HubLeaf{self, child}}}
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{Hub: hub, Theme: theme.Default()}), 80, 24)
+	out, _ := m.Update(key("1"))
+	m = out.(model)
+	out, _ = m.Update(key("2")) // the child group named pr
+	m = out.(model)
+	if strings.Join(m.leavesPath, " ") != "pr pr" {
+		t.Fatalf("child group did not open: path=%q", m.leavesPath)
+	}
+	out, _ = m.Update(key("1")) // run
+	m = out.(model)
+	if m.action.Kind != ActionRunVerb || strings.Join(m.action.Argv, " ") != "pr pr run" {
+		t.Errorf("nested verb = %+v, want ActionRunVerb [pr pr run]", m.action)
+	}
+
+	m = sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{Hub: hub, Theme: theme.Default()}), 80, 24)
+	out, _ = m.Update(key("1"))
+	m = out.(model)
+	out, _ = m.Update(key("2"))
+	m = out.(model)
+	out, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = out.(model)
+	if it, ok := m.l.SelectedItem().(leafItem); !ok || it.leaf.Self || len(it.leaf.Leaves) == 0 {
+		t.Errorf("cursor after esc = %+v, want the child group's row", m.l.SelectedItem())
 	}
 }

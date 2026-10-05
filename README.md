@@ -1,11 +1,11 @@
 # forgectl
 
-Personal dev-experience CLI for a headless macOS workbench driven over SSH — from laptops, phones, and Termius. What began as a tmux helper (superseding the ad-hoc bash `s` script; smart session-naming stays with `sesh`) has grown into the **workbench forge**: 31 composable command-group modules (see the table below) with a declarative workflow DSL as the composition layer.
+Personal dev-experience CLI for a headless macOS workbench driven over SSH — from laptops, phones, and Termius. What began as a tmux helper (superseding the ad-hoc bash `s` script; smart session-naming stays with `sesh`) has grown into the **workbench forge**: composable command-group modules (see the table below) with a declarative workflow DSL as the composition layer.
 
 Built for two hands and one thumb:
 
 - **Power mode** — typed verbs (`forgectl tmux ls`, `forgectl tmux pick`). Full keyboard, full control.
-- **Thumb mode** — bare `forgectl` opens a hub over every command group: the six daily verbs plus a filterable "all commands" row over the rest, with the old tmux jumper preserved as one row. Number-key select. Narrow-screen. Forgiving input. Works fine in Termius over mosh.
+- **Thumb mode** — bare `forgectl` opens a hub over every command group: a status line (project and branch, tmux sessions, PR reviews), the five pinned daily verbs, your most-used recent commands, then every other command, with the old tmux jumper preserved as one row. A command that needs an argument asks for it in place, with a picker where one exists, and shows the exact `$ forgectl …` line before it runs. Number-key select. Narrow-screen. Forgiving input. Works fine in Termius over mosh.
 
 ## Install
 
@@ -13,7 +13,7 @@ Built for two hands and one thumb:
 brew install cameronsjo/tap/forgectl
 ```
 
-Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against whichever Gitea instance `tea` is logged into, and `review` when `[review.gitea]` is enabled), `kubectl` (`k8s logs`), `docker` (`bench status`/`up`, `docker build/run/shell`, and `clean --docker`), `npm`/`pnpm`/`pip`/`go`/`brew` (`clean --caches` — each is independently opt-in and skipped, not required, when absent). `update`'s roster shares that same `brew`/`go`/`npm` dependency (`softwareupdate` is a macOS built-in) — each step is independently scoped, so a missing tool fails only its own step, never the others.
+Requires `sesh` on `$PATH` for `tmux pick`/`tmux ls` (session smarts — path discovery, named sessions, zoxide integration). Optional, per feature: `gh` (`pr`, `review`, `projects`), `tea` (`projects` against whichever Gitea instance `tea` is logged into, and `review` when `[review.gitea]` is enabled), `kubectl` (`k8s logs`), `docker` (`bench status`/`up`, `docker build/run/shell`, and `clean --docker`), `npm`/`pnpm`/`pip`/`go`/`brew` (`clean --caches` — each is independently opt-in and skipped, not required, when absent), [`mdroll`](https://github.com/tokuhirom/mdroll) (`docs read` in the terminal; without it, `docs read` opens the HTML reader, or with no terminal prints the doc's path). `update`'s roster shares that same `brew`/`go`/`npm` dependency (`softwareupdate` is a macOS built-in) — each step is independently scoped, so a missing tool fails only its own step, never the others.
 
 Commands that actually launch a PR review — `forgectl pr <ref>`, `forgectl pr local`, and `forgectl pr pick` once admission establishes there is at least one ref to prepare — require **tmux 2.2 or newer**, for the dispatch-identity reasons in [docs/commands/pr.md](docs/commands/pr.md). Read-only PR commands, any `--dry-run`, `--queue`, and empty, all-reviewed, or cap-full selections do not acquire that floor.
 
@@ -21,7 +21,7 @@ Reading a local clone's git state — `projects list`, `projects pick`, the proj
 
 ## Command groups
 
-29 command groups, at a glance. `forgectl --help` lists them from the binary
+The command groups at a glance. `forgectl --help` lists them from the binary
 itself; this table is the scannable index — full verbs and flags for every
 group are in the `## Usage` roster below, and the groups with a dedicated
 deep-dive get a link here.
@@ -31,11 +31,14 @@ deep-dive get a link here.
 | `tmux` | List/pick/kill/rename tmux sessions, delegating smart naming to `sesh` | Usage below |
 | `config` | Show every config section, per-key set/default (alias: `cfg`) | Usage below |
 | `init` | Scaffold every `config.toml` section with commented, sensibly-defaulted templates | Usage below |
+| `status` | Read-only overview: local git state, PRs, reclaimable space, bench health | [status](docs/commands/status.md) |
 | `projects` | Cross-host project inventory: local clones + GitHub + Gitea (alias: `proj`) | [projects and review](docs/commands/projects-and-review.md) |
 | `pr` | Clean-room pull-request review, the flagship review family | [pr](docs/commands/pr.md) |
 | `launch` | Per-project Claude Code / Codex CLI / Pi launcher (alias: `cl`) | [launch](docs/commands/launch.md) |
 | `resume` | Get back into a Claude Code session after a terminal restart | [resume](docs/commands/resume.md) |
 | `surface` | Start a harness inside a terminal manager (tmux/cmux/herdr) without exposing its invocation | Usage below |
+| `herdr` | Helpers for the herdr terminal multiplexer: group tabs into workspaces by rule | [herdr](docs/commands/herdr.md) |
+| `tasks` | Browse a Vikunja task board, close a task, or serve the board as an MCP server | Usage below |
 | `recipe` | Run small built-in workbench recipes (alias: `r`) | [recipe](docs/commands/recipe.md) |
 | `workflow` | Run declarative workflows composing forgectl's other verbs (alias: `flow`) | Usage below |
 | `bench` | Discover, health-check, and wire the local dev bench (hearth, chronicle) | [bench](docs/commands/bench.md) |
@@ -48,10 +51,12 @@ deep-dive get a link here.
 | `net` | Check cached reachability of the configured probe endpoint | Usage below |
 | `proxy` | Apply a named proxy profile to the current shell, or to every launched harness | [proxy](docs/commands/proxy.md) |
 | `k8s` | Safely stream ordinary kubectl logs, plus bounded namespace/exec/inspect helpers | [k8s](docs/commands/k8s.md) |
+| `theme` | Inspect the resolved colour theme | Usage below |
 | `ghostty` | Theme + keybind reporting, parsed live from the ghostty CLI | Usage below |
 | `pip` | Comment- and whitespace-preserving `pip.conf` editor | Usage below |
 | `quarantine` | Reversibly hide AI-instruction files (`CLAUDE.md`, `AGENTS.md`, …) from a workspace | Usage below |
-| `review` | Cross-project work inventory: open issues and PRs across your repos | [projects and review](docs/commands/projects-and-review.md) |
+| `audit` | Read-only posture scans: inventory every agent-instruction file, and find stray `.env` files, private keys and committed secrets, under the projects root | [audit](docs/commands/audit.md) |
+| `review` | Cross-project work inventory: open issues and PRs across your repos; `review releases` is the release radar | [projects and review](docs/commands/projects-and-review.md) |
 | `preflight` | Align enabled plugins to the skill catalog's core-tier default set | Usage below |
 | `update` | Weekly package-manager + OS maintenance, independently-scoped steps | Usage below |
 | `doctor` | Ecosystem health check: claude, tmux/ghostty/cmux, gh auth, config, the bench, the trust store | Usage below |
@@ -63,6 +68,7 @@ deep-dive get a link here.
 ```sh
 forgectl                   # open TUI menu (thumb mode)
 forgectl --help            # list every command group (non-interactive entrypoint)
+forgectl menu --json       # the menu's contents as data, no TTY needed (see docs/commands/menu.md)
 forgectl tmux ls           # list sessions
 forgectl tmux pick [name]  # connect/smart-create via sesh (no name → list)
 forgectl tmux kill <name>  # kill a session (--others keeps only it)
@@ -79,6 +85,12 @@ forgectl init               # append (or, for the host-scalar preamble, prepend)
                              #   section's template iff that section is absent —
                              #   never overwrites or reflows what's already there
 
+# status — read-only overview across the workbench: local git state, the pr dash
+#   sections, the clean dry-run total, and bench health (see docs/commands/status.md)
+forgectl status                          # one glyph-led line per section, a few detail rows
+forgectl status --json                   # every section and row; a failed source is a per-section error
+forgectl status --json --strict          # same, but exit 1 when any section degraded or failed
+
 # projects — cross-host project inventory (alias: proj)
 forgectl projects list [query]           # list all projects: local clones + your GitHub repos + your Gitea repos
 forgectl projects list --json            # machine-readable JSON (safe to pipe; degradation notes go to stderr)
@@ -90,6 +102,7 @@ forgectl projects clone [query]          # picker with both descriptors TTY; oth
 forgectl projects clone --dry-run <target>  # print where it would land and exit, touching nothing
 forgectl projects clone --wing mcp <target> # override the [[projects.wings]] table for this clone
 forgectl projects worktree <query> [branch] # same ambiguity contract as clone; use sshUrl from list --json
+forgectl projects pull-all --json          # [{"name","status"}]; exits 1 when any pull failed, as without --json
 
 # pr — clean-room pull-request review (the flagship review family)
 forgectl pr <ref>                        # prepare + launch an isolated, deny-by-default review (owner/repo#N, a PR URL, or a bare N)
@@ -140,10 +153,16 @@ forgectl resume                    # pick from recent sessions across every repo
 forgectl resume forgectl           # filter by repo, name, cwd, or id; one hit resumes it, several list the candidates
 forgectl resume --fork             # branch a new session off the transcript — the only way into a still-running one
 forgectl resume --dry-run forge    # resolve and print the cwd + claude argv, exec nothing (never prompts)
-forgectl resume ls                 # list without acting (the only subcommand that returns)
+forgectl resume ls                 # list without acting (every subcommand returns; only bare `resume` execs)
 forgectl resume ls --json          # machine-readable JSON (safe to pipe; counts go to stderr; see `resume ls --help` for the field table)
 forgectl resume snapshot           # capture what a live session's exit would destroy
 forgectl resume snapshot --quiet   # same, silent — the form a Stop hook uses
+forgectl resume outdated           # list live sessions running an older claude than the one installed (read-only)
+forgectl resume outdated --json    # stable JSON array for scripts; see `resume outdated --help` for the field table
+forgectl resume restart --outdated # stop + resume those sessions in their herdr panes once each is idle (--dry-run: plan only)
+forgectl resume hooks run          # fire the [[resume.on_update]] hooks if claude changed version (--dry-run: show what would fire)
+forgectl resume hooks install      # install the launchd watcher that runs the hooks when claude updates (macOS)
+forgectl resume hooks status       # watcher installed/loaded, recorded versions, last hook runs (--json)
 
 # surface — start a harness inside a terminal manager without exposing its invocation
 forgectl surface launch <target> --surface tmux           # tmux, cmux, or herdr — always explicit, never a default
@@ -183,6 +202,7 @@ forgectl bench open [target]              # open a bench UI (hearth | grafana; d
 forgectl sessions sync --dry-run          # read + count the local JSONL WAL; no DB connection
 forgectl sessions sync                    # idempotent upsert into the concordance + rebuild the runbook index
 forgectl sessions sync --full             # bypass the lastMessageId watermark, re-upsert everything
+forgectl sessions sync --json             # the completeness receipt as JSON (missing ids as an array); a MISSING session still exits non-zero
 forgectl sessions search "<query>"        # full-text search the concordance's runbook index from any machine
 forgectl sessions why "<path|topic>"      # recent sessions whose runbooks explain a path or topic, newest first
 forgectl sessions last <repo>             # the newest session in a repo + the artifacts it left behind
@@ -192,7 +212,9 @@ forgectl env keys [--file .env]                             # list KEY names onl
 forgectl env set KEY [--file .env] [--clipboard]             # value from piped stdin, no-echo prompt, or clipboard — never argv
 forgectl env get KEY --clipboard [--file .env]               # value to clipboard only; no print path exists
 forgectl env check [--file .env] [--example .env.example]    # missing/extra keys, names only (see docs/commands/env.md for exit codes)
-forgectl env redact [--file .env]                            # print file with values masked ****
+#   --json: verdict {"missing":[...],"extra":[...]} on stdout; any failure is one {"error","code","path"} object on stderr
+#   (code file_not_found → exit 2, check_failed → exit 1; see docs/commands/env.md)
+forgectl env redact [--file .env]                            # print file with values and comments masked ****
 #   --file must name an env file (.env, .env.*, *.env); --any-file overrides, TTY-confirmed only
 forgectl env set a.b.key --sops [--file secrets.sops.yaml]   # one key into a SOPS-encrypted YAML file
 #   --sops takes a dotted path, defaults to secrets.sops.yaml at the repo root, and
@@ -207,12 +229,14 @@ forgectl env set a.b.key --sops [--file secrets.sops.yaml]   # one key into a SO
 forgectl branch                          # dry-run report: local + remote branches, classified against
                                           #   server-side PR truth (safe-to-delete | blocked | needs-attention)
 forgectl branch --include-gone           # also surface upstream-gone branches with no server-confirmed merge
+forgectl branch --json                   # the dry-run classification as JSON; refused with --apply
 forgectl branch --apply                  # DESTRUCTIVE: delete everything classified safe-to-delete,
                                           #   after a confirmation prompt
 
 # clean — reclaim dep/build directories under a project root (alias: cln)
 forgectl clean                           # dry-run report against ~/Projects (node_modules, .venv, target, …)
 forgectl clean --type node               # only one type: node|python|go|build
+forgectl clean --json                    # dry-run targets + reclaimable bytes as JSON; refused with --apply/--caches/--docker
 forgectl clean --apply                   # DESTRUCTIVE: delete everything reclaimable, after a confirmation
                                           #   prompt (skips dirty git trees unless --force)
 forgectl clean --caches --apply          # DESTRUCTIVE, opt-in: also clear detected package-manager
@@ -233,7 +257,10 @@ forgectl docker shell                    # open a shell in the built (or --tag) 
 forgectl docs serve [dir|file ...]       # render + serve, loopback-only (DNS-rebinding-safe)
 forgectl docs serve --open               # also open the system browser
 forgectl docs open [path]                # point the browser at a doc on the already-running reader
+forgectl docs read <file>                # read one doc in the terminal with mdroll, else in the HTML reader
 forgectl docs list [dir|file ...]        # list the indexed docs, no server (--json for scripting)
+forgectl docs check [dir|file ...]       # broken links, broken anchors, orphan pages (exit 1 on error findings, 0 when only informational; --json)
+forgectl docs search <query> [--json]    # full-text search the indexed docs (ripgrep, or opt-in qmd)
 
 # net — check cached reachability of the configured probe endpoint
 forgectl net                             # show the cached (or freshly probed) answer
@@ -262,7 +289,12 @@ forgectl theme show                      # resolved hex per role, provenance, co
 forgectl theme show --json               # the same, machine-readable
 forgectl theme preview                   # render each role so you can see it
 
-# tasks — read-only Vikunja task browser, local cache, no write verbs
+# herdr — helpers for the herdr terminal multiplexer (run from a herdr pane)
+forgectl herdr organize                  # report how tabs would be grouped into workspaces and ordered
+forgectl herdr organize --explain        # also show which rule caught each tab
+forgectl herdr organize --apply          # make the moves; restores focus; needs the cameronsjo/herdr fork
+
+# tasks — Vikunja task board: three read verbs over a local cache, one verb that closes a task, and an MCP server
 # one-time setup: store a READ-ONLY API token in the login keychain (prompts for the value)
 #   security add-generic-password -s vikunja-readonly -a "$USER" -w
 forgectl tasks ls                        # list open tasks
@@ -270,6 +302,30 @@ forgectl tasks ls --json                 # the same, machine-readable
 forgectl tasks show 42                   # one task, its detail and its relations
 forgectl tasks ready                     # open tasks with no active "blocked" relation, by position
 forgectl tasks ls --keychain-service X   # read the token from a different keychain item
+# done — mark one task done and append a closed-by line (who, when, the evidence) to its description
+# operator setup, once: store a WRITE token under its own entry, apart from the read one (prompts for the value)
+#   security add-generic-password -s vikunja-write -a "$USER" -w
+forgectl tasks done 42 --evidence "merged owner/repo#12"  # 42 is the numeric id, without #; --evidence is required: one line, 300 characters at most
+forgectl tasks done 42 --evidence "…" --closer NAME       # who is closing it; self-declared, not verified (default: cli)
+forgectl tasks done 42 --evidence "…" --json              # {"id","project_id","title","done","already_done","evidence_recorded"} on stdout
+forgectl tasks done 42 --evidence "…" --write-keychain-service X   # read the write token from a different keychain item
+#   done reads only the write entry: it never falls back to the read one, and it refuses --keychain-service.
+#   It reads the task, sends one update, and reads the task again. An already-done task is reported and nothing is written.
+#   It never reads or writes the cache.
+#   exit codes: 0 done (closed by this call, or already done) · 2 unreachable · 3 the server rejected the credential ·
+#   4 the host is refused · 1 anything else
+#   --json failure: one {"error","code","path"} object on stderr. code is not_found, repeating_task, trailer_too_long,
+#   not_confirmed (the update may have been applied: read the task before retrying), write_refused, unauthorized (exit 3),
+#   credential_missing, usage_error, or failed (see docs/json-contract.md)
+#   close record: every call that sends an update writes one JSON line to stderr and appends the same line to
+#   tasks-closes.jsonl in the config dir, whatever log_level is. It names the keychain entry, never the token.
+#   hosts: a keychain token is sent only to the default host, or to one listed in config.toml. Any other --host is
+#   refused with exit 4 before the keychain is read, on ls, show, ready, done, and mcp over stdio:
+#     [tasks]
+#     allowed_hosts = ["<hostname>"]   # plain hostnames only: no port, user, path, or IP address
+#   a refused host also appends one line to tasks-closes.jsonl ("event":"host_refused", with the verb, the host when it
+#   is a plain hostname, and the keychain entry's name), so the refusal outlives the terminal that showed it.
+#   an unknown verb (forgectl tasks nosuchverb) exits 1
 
 # ghostty — theme + keybind reporting, parsed live from the ghostty CLI
 forgectl ghostty themes                  # custom themes, active one marked
@@ -286,10 +342,24 @@ forgectl quarantine                      # hide the default targets in cwd (same
 forgectl quarantine restore              # rename quarantined targets back
 forgectl quarantine status               # show which targets are hidden
 
+# audit — read-only posture scans across the projects root (see docs/commands/audit.md)
+forgectl audit injection                 # list every agent-instruction file, with anomaly flags
+forgectl audit injection --json          # the same, machine-readable
+forgectl audit secrets                   # stray .env files, private keys, gitleaks findings
+forgectl audit secrets --json            # the same, machine-readable
+
 # review — cross-project work inventory: open issues and PRs across your repos
 forgectl review                          # unified table (reviewed rows dimmed)
 forgectl review --kind issue             # issues only (or: pr)
 forgectl review mark owner/repo#42       # mark an item reviewed
+forgectl review releases                 # release radar: last release, waiting release PR, ship-gate reason, stalls
+forgectl review releases --json --fail-on-stall  # the nightly check: exit 1 on any stalled or unknown repo
+                                          #   two stall reasons watch the release machinery of release-pr repos:
+                                          #   no-release-pr: a feat/fix/perf/`!`/BREAKING CHANGE commit is >24h old,
+                                          #     unreleased, and no release PR is open (chore/ci/docs-only never stalls)
+                                          #   release-workflow-stuck: the release-PR workflow has a run waiting,
+                                          #     queued, or pending >1h (release-please.yml; prepare-release.yml for
+                                          #     cadence-hooks; override with `release_workflow:` in the registry entry)
 
 # update — weekly package-manager + OS maintenance, independently-scoped steps
 forgectl update check                    # report-only for every step (brew/softwareupdate/go/npm), no mutation —
@@ -406,9 +476,11 @@ forgectl pr prs / dash / pick
 
 **Session names are matched exactly.** Every command that names a session — `tmux kill`, `tmux rename`, `projects open`, the TUI's actions — compares your argument to the session list with plain string equality, then acts on the session's native tmux id. tmux's own `-t` resolution does not run, so an abbreviation no longer finds a session: with only `forge-review` running, `forgectl tmux kill forge` reports `no such session: forge` instead of killing `forge-review`. Names containing spaces, punctuation, `*`, or a leading `=` work fine, because none of them are interpreted. If you relied on abbreviating, type the full name (`forgectl tmux ls` lists them). The one exception is `tmux pick`, which hands the name to `sesh connect` — matching there is sesh's smart naming, by design, and is unaffected by this.
 
+**Run forgectl under a UTF-8 locale.** tmux stores a non-ASCII session name correctly whatever the locale, but outside tmux under `LANG=C` it lists that name with `_` in place of each non-ASCII character (`café` lists as `caf_`). Exact matching then misses the session, so a second `projects open` on such a directory tries to create it again and fails with tmux's `duplicate session: caf_`. Set `LANG` or `LC_ALL` to a UTF-8 locale. Inside tmux this does not apply: any `TMUX` value, even an empty one, makes tmux list names in UTF-8. forgectl creates every session with `.` and `:` in its name mapped to `_`, and looks sessions up the same way. tmux 3.7a and later keep those characters as typed, so a session you created by hand as `my.proj` is not found by forgectl's `my_proj` lookup and is not reused.
+
 `projects` builds a unified inventory across local clones, GitHub, and whichever Gitea instance `tea` is logged into. A project that isn't checked out locally shows as `[uncloned]`; picking it clones from the right host before opening the tmux session. `list --json` emits structured records to stdout — degradation notes (e.g. a host that's unreachable) go to stderr so the pipe stays clean.
 
-`workflow` is the composition layer — a declarative TOML step list forgectl parses, plans, and executes through the same seams the hand-run verbs use. `--dry-run` prints the fully resolved plan without running a step. `--resume` picks a failed run back up from its first incomplete step, skipping the checkpointed steps whose inputs haven't changed, and `workflow status <name>` shows that checkpoint state; a resume re-verifies the blessing and refuses to replay across an edited definition. It also refuses when a step still to run needs an export that only a skipped step produced — a step's outputs aren't reconstructed from the sidecar, so those workflows must be run fresh. User workflows live in `workflows/` under the config dir (paths below), overriding shipped built-ins of the same name.
+`workflow` is the composition layer — a declarative TOML step list forgectl parses, plans, and executes through the same seams the hand-run verbs use. `--dry-run` prints the fully resolved plan without running a step. A `run` step's stdout is drained and discarded, never captured, so a step may print any amount; a command that never stops printing is drained until it exits or the step's context ends. `--resume` picks a failed run back up from its first incomplete step, skipping the checkpointed steps whose inputs haven't changed, and `workflow status <name>` shows that checkpoint state; a resume re-verifies the blessing and refuses to replay across an edited definition. It also refuses when a step still to run needs an export that only a skipped step produced — a step's outputs aren't reconstructed from the sidecar, so those workflows must be run fresh. User workflows live in `workflows/` under the config dir (paths below), overriding shipped built-ins of the same name.
 
 A user workflow must be **blessed** before `workflow run` will execute it. `forgectl workflow bless <name>` signs the file's exact bytes behind a Touch ID (or account-password) presence ceremony, writing a `*.blessing` sidecar next to it; one changed byte invalidates the signature, so re-bless after every edit — that is the point. Built-in workflows are compiled into the binary and never need blessing.
 
@@ -428,7 +500,7 @@ configuration even though VS Code settings are not quarantined wholesale.
 
 ## Configuration
 
-Optional; forgectl runs with sensible defaults and no config file. Host-level settings (`no_icons`, `log_level`, `log_file`), per-command config sections (`[launch]`, `[pr]`, `[proxy]`, `[projects]`, `[review]`, `[github]`, `[bench]`, `[docs]`), and logging behavior are documented in [docs/configuration.md](docs/configuration.md).
+Optional; forgectl runs with sensible defaults and no config file. Host-level settings (`no_icons`, `log_level`, `log_file`), per-command config sections (`[launch]`, `[pr]`, `[proxy]`, `[projects]`, `[review]`, `[github]`, `[bench]`, `[docs]`, `[tasks]`), and logging behavior are documented in [docs/configuration.md](docs/configuration.md).
 
 ## License
 

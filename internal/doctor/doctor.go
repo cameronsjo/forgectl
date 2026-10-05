@@ -16,18 +16,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"log/slog"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
 	"strings"
 
+	"github.com/cameronsjo/forgectl/internal/audit/gitleaks"
 	"github.com/cameronsjo/forgectl/internal/bench"
 	"github.com/cameronsjo/forgectl/internal/bless"
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/launch"
+	"github.com/cameronsjo/forgectl/internal/projects"
+	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/resume"
 	"github.com/cameronsjo/forgectl/internal/selfupdate"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // State is a check's resolved health — a small closed vocabulary, mirroring
@@ -84,23 +91,34 @@ type Deps struct {
 	Runner       exec.Runner
 	LookPath     func(string) (string, error)
 	TrustedStore func() (bless.Store, error)
-	Prober       bench.Prober
+	// TrustStorePath resolves where the trust store would live. It lets the
+	// trust check tell a machine that never set up blessed workflows (no
+	// anchor, no store) from one whose store exists but has lost its anchor.
+	// Nil means unknown, and an absent anchor then reads as a failure.
+	TrustStorePath func() (string, error)
+	Prober         bench.Prober
 	// ResumePaths resolves the session-record locations `forgectl resume`
 	// reads. Seamed so the task-dialect check can run against a fixture
 	// tree rather than the machine's real ~/.claude.
 	ResumePaths func() (resume.Paths, error)
+	// ProjectsRoot resolves the root `forgectl audit secrets` scans, so the
+	// gitleaks row refuses a binary inside it as the scan does. Nil skips
+	// that check.
+	ProjectsRoot func() (string, error)
 }
 
 // NewDeps wires Deps with production seams: os/exec.LookPath, the real
 // bless.Verifier's trust-store read, and bench's real HTTP prober.
 func NewDeps(cfg config.Config, runner exec.Runner) Deps {
 	return Deps{
-		Cfg:          cfg,
-		Runner:       runner,
-		LookPath:     osexec.LookPath,
-		TrustedStore: bless.NewVerifier().TrustedStore,
-		Prober:       bench.NewHTTPProber(),
-		ResumePaths:  resume.DefaultPaths,
+		Cfg:            cfg,
+		Runner:         runner,
+		LookPath:       osexec.LookPath,
+		TrustedStore:   bless.NewVerifier().TrustedStore,
+		TrustStorePath: config.TrustStorePath,
+		Prober:         bench.NewHTTPProber(),
+		ResumePaths:    resume.DefaultPaths,
+		ProjectsRoot:   projects.ResolveRoot,
 	}
 }
 
@@ -117,7 +135,9 @@ func Run(ctx context.Context, d Deps) Report {
 	checks = append(checks, checkBinary(d, "tmux", "tmux not found on PATH — install with `brew install tmux`"))
 	checks = append(checks, checkBinary(d, "ghostty", "ghostty not found on PATH — install from https://ghostty.org"))
 	checks = append(checks, checkBinary(d, "cmux", "cmux not found on PATH — see https://github.com/cameronsjo/cmux"))
+	checks = append(checks, checkMdroll(d))
 	checks = append(checks, checkSops(ctx, d))
+	checks = append(checks, checkGitleaks(ctx, d))
 	checks = append(checks, checkGh(ctx, d))
 	checks = append(checks, benchChecks(ctx, d)...)
 	checks = append(checks, checkTrustStore(d))
@@ -131,11 +151,15 @@ func Run(ctx context.Context, d Deps) Report {
 // launch doctor` already reports on (env override, configured binary_path,
 // PATH) — rather than re-deriving PATH resolution here.
 func checkClaude(d Deps) Check {
-	if p, err := launch.ClaudePath(d.Cfg.Launch.Defaults); err == nil {
+	p, err := launch.ClaudePath(d.Cfg.Launch.Defaults)
+	if err == nil {
 		return Check{Name: "claude", State: StateOK, Detail: p}
-	} else {
-		return Check{Name: "claude", State: StateFail, Detail: err.Error(), Hint: "install claude, or set [launch.defaults].binary_path / $FORGECTL_CLAUDE_BIN"}
 	}
+	// Categorical (#716): err renders a path from the environment or config
+	// and a wrapped filesystem error. The report and --json say which way it
+	// failed; the log keeps the rest.
+	slog.Warn("claude binary could not be resolved.", "error", err)
+	return Check{Name: "claude", State: StateFail, Detail: "claude binary not found or not usable", Hint: "install claude, or set [launch.defaults].binary_path / $FORGECTL_CLAUDE_BIN"}
 }
 
 // checkConfig reuses config.Validate() — the exact parse `forgectl launch
@@ -144,7 +168,7 @@ func checkClaude(d Deps) Check {
 func checkConfig(d Deps) Check {
 	path, pathErr := config.ConfigPath()
 	if err := config.Validate(); err != nil {
-		return Check{Name: "config", State: StateFail, Detail: err.Error(), Hint: "fix the malformed config.toml (see the parse error above)"}
+		return Check{Name: "config", State: StateFail, Detail: err.Error(), Hint: "fix config.toml so it can be read and parsed (see the error above)"}
 	}
 	if pathErr != nil {
 		return Check{Name: "config", State: StateWarn, Detail: pathErr.Error(), Hint: "config directory could not be resolved"}
@@ -185,19 +209,65 @@ func checkBinary(d Deps, name, hint string) Check {
 	return Check{Name: name, State: StateWarn, Detail: name + " not found on PATH", Hint: hint}
 }
 
-// checkGh reports whether the gh CLI is authenticated, via `gh auth status`
-// (report-only — never mutates). Absence of gh itself is folded into the
-// same check rather than a separate binary probe, since an unauthenticated
-// or missing gh means the same thing to every forgectl verb that shells out
-// to it (pr, projects, branch, review): none of them will work.
+// checkMdroll reports whether the optional mdroll terminal reader resolves on
+// PATH. It is shaped like checkBinary, but a missing mdroll is StateSkip rather
+// than StateWarn: `forgectl docs read` falls back to the HTML reader without
+// it, so a machine that never installs it has nothing to fix.
+//
+// A hit only through a relative PATH entry (exec.ErrDot) is reported as its
+// own case: `docs read` refuses to run it, so reporting it as OK would be
+// wrong, and reporting it as absent would send the operator to install a
+// binary they already have.
+func checkMdroll(d Deps) Check {
+	p, err := d.LookPath("mdroll")
+	if err == nil {
+		return Check{Name: "mdroll", State: StateOK, Detail: p}
+	}
+	if errors.Is(err, osexec.ErrDot) {
+		return Check{
+			Name:   "mdroll",
+			State:  StateSkip,
+			Detail: "mdroll found only via a relative PATH entry; ignoring",
+			Hint:   "put mdroll's directory on PATH as an absolute path",
+		}
+	}
+	return Check{
+		Name:   "mdroll",
+		State:  StateSkip,
+		Detail: "not found on PATH — optional; `forgectl docs read` falls back to the HTML reader",
+		Hint:   "install from https://github.com/tokuhirom/mdroll to read docs in the terminal",
+	}
+}
+
+// checkGh reports whether the gh CLI is authenticated to the configured
+// [github] host, via `gh auth status --hostname <host>` (report-only — never
+// mutates). Absence of gh itself is folded into the same check rather than a
+// separate binary probe, since an unauthenticated or missing gh means the
+// same thing to every forgectl verb that shells out to it (pr, projects,
+// branch, review): none of them will work.
+//
+// The question is host-scoped, so it runs through githubauth.Runner (#413): an
+// ambient GH_HOST cannot answer it for a host nobody configured, and on a
+// non-default host the ambient token variables are removed, so doctor reports
+// the hosts.yml credential the pinned inventory will actually use. A host that
+// fails validation is reported categorically — the rejected config value is
+// never rendered.
 func checkGh(ctx context.Context, d Deps) Check {
 	if _, err := d.LookPath("gh"); err != nil {
 		return Check{Name: "gh", State: StateFail, Detail: "gh not found on PATH", Hint: "install with `brew install gh`"}
 	}
-	if _, err := d.Runner.Run(ctx, "gh", "auth", "status"); err != nil {
-		return Check{Name: "gh", State: StateFail, Detail: err.Error(), Hint: "run `gh auth login`"}
+	host, err := githubauth.ResolveHost(d.Cfg.Github.Host)
+	if err != nil {
+		return Check{Name: "gh", State: StateFail, Detail: "configured [github] host failed validation", Hint: "set [github] host to a lowercase dns name with no port or scheme, or remove it for github.com"}
 	}
-	return Check{Name: "gh", State: StateOK, Detail: "authenticated"}
+	if _, err := githubauth.Runner(d.Runner, host).Run(ctx, "gh", "auth", "status", "--hostname", host); err != nil {
+		// Categorical (#658): err is gh's stderr, text the host and any gh
+		// extension choose. SafeLine at the report bounds its runes, not
+		// its content, so it goes to the log instead.
+		slog.Warn("gh auth status failed.", "host", host, "error", err)
+		return Check{Name: "gh", State: StateFail, Detail: "gh auth status failed for " + host, Hint: "run `gh auth login --hostname " + host + "`"}
+	}
+	return Check{Name: "gh", State: StateOK, Detail: "authenticated to " + host}
 }
 
 // checkSops reports the sops VERSION, not merely its presence.
@@ -222,17 +292,60 @@ func checkSops(ctx context.Context, d Deps) Check {
 	}
 	out, err := d.Runner.Run(ctx, "sops", "--version", "--disable-version-check")
 	if err != nil {
-		return Check{Name: "sops", State: StateFail, Detail: err.Error(), Hint: "reinstall with `brew reinstall sops`"}
+		// Categorical (#716): err is sops's argv and stderr.
+		slog.Warn("sops --version failed.", "error", err)
+		return Check{Name: "sops", State: StateFail, Detail: "sops --version failed", Hint: "reinstall with `brew reinstall sops`"}
 	}
-	return Check{Name: "sops", State: StateOK, Detail: firstLine(out)}
+	// The Detail carries the version number parsed out of the first line, never
+	// the line itself: sops can append an update notice, and whatever else it
+	// prints is the tool's text, not ours (#716).
+	line, _, _ := strings.Cut(out, "\n")
+	if vs := selfupdate.FindVersions(line); len(vs) > 0 {
+		return Check{Name: "sops", State: StateOK, Detail: "sops " + vs[0]}
+	}
+	slog.Warn("sops --version printed no recognizable version.", "output", termsafe.SafeLineMax(redact.Stdout(line), 200))
+	return Check{Name: "sops", State: StateOK, Detail: "sops present; version not recognized"}
 }
 
-// firstLine trims a command's output to its first line. `sops --version` can
-// append an update notice, and a multi-line Detail breaks the report's
-// one-check-per-line shape.
-func firstLine(s string) string {
-	line, _, _ := strings.Cut(s, "\n")
-	return strings.TrimSpace(line)
+// checkGitleaks reports the gitleaks `forgectl audit secrets` would run,
+// through the same resolver the scan uses (gitleaks.Resolve), so the row and
+// the scan cannot disagree about which binary counts. gitleaks is optional:
+// absent is StateSkip, since the scan's native checks run without it. A
+// binary the scan would refuse or cannot use is StateWarn, because the
+// operator installed it and the scan will not run it.
+func checkGitleaks(ctx context.Context, d Deps) Check {
+	root := ""
+	if d.ProjectsRoot != nil {
+		if r, err := d.ProjectsRoot(); err == nil {
+			root = r
+		}
+	}
+	b := gitleaks.Resolve(ctx, d.LookPath, d.Runner, root)
+	const name = "gitleaks"
+	switch b.State {
+	case gitleaks.StateAvailable:
+		return Check{Name: name, State: StateOK, Detail: "gitleaks " + b.Version}
+	case gitleaks.StateRefused:
+		if b.Reason == gitleaks.ReasonUnderScanRoot {
+			return Check{Name: name, State: StateWarn,
+				Detail: "the gitleaks on PATH lies inside the projects root; `audit secrets` will not run it",
+				Hint:   "install gitleaks outside the projects root (`brew install gitleaks`)"}
+		}
+		return Check{Name: name, State: StateSkip,
+			Detail: "gitleaks found only via a relative PATH entry; ignoring",
+			Hint:   "put gitleaks' directory on PATH as an absolute path"}
+	case gitleaks.StateTooOld:
+		detail := "gitleaks printed no recognizable version; `audit secrets` needs " + gitleaks.MinVersion + " or later"
+		if b.Version != "" {
+			detail = "gitleaks " + b.Version + " is older than " + gitleaks.MinVersion + "; `audit secrets` will not run it"
+		}
+		return Check{Name: name, State: StateWarn, Detail: detail, Hint: "upgrade with `brew upgrade gitleaks`"}
+	case gitleaks.StateVersionFailed:
+		return Check{Name: name, State: StateWarn, Detail: "gitleaks version failed", Hint: "reinstall with `brew reinstall gitleaks`"}
+	}
+	return Check{Name: name, State: StateSkip,
+		Detail: "not found on PATH — optional; `forgectl audit secrets` runs its native checks without it",
+		Hint:   "install with `brew install gitleaks` to add a gitleaks pass to audit secrets"}
 }
 
 // benchChecks folds bench.Status's hearth and chronicle components into doctor
@@ -269,6 +382,8 @@ func fromBenchComponent(c bench.Component) Check {
 // checkTrustStore reports whether the workflow-blessing trust store is
 // present and verifies under the compiled-in anchor (internal/bless).
 //
+// A machine with neither anchor nor store (never set up blessed workflows) is
+// StateSkip too, so doctor's exit code is not 1 on every fresh install.
 // A genuinely ABSENT store (bless.ErrTrustStoreMissing) is StateSkip, not
 // StateFail — trust/blessing is opt-in infrastructure for `workflow bless`
 // users, not every forgectl install. Any OTHER TrustedStore error —
@@ -289,10 +404,42 @@ func checkTrustStore(d Deps) Check {
 	case err == nil:
 		return Check{Name: "trust store", State: StateOK, Detail: fmt.Sprintf("verified, %d enrolled key(s)", len(store.Keys))}
 	case errors.Is(err, bless.ErrTrustStoreMissing):
-		return Check{Name: "trust store", State: StateSkip, Detail: err.Error(), Hint: "run `forgectl workflow bless` to enroll a signing key, if you use blessed workflows"}
+		return Check{Name: "trust store", State: StateSkip, Detail: "trust store not found", Hint: "run `forgectl workflow bless` to enroll a signing key, if you use blessed workflows"}
+	case errors.Is(err, bless.ErrNoAnchor) && errors.Is(err, fs.ErrNotExist) && trustStoreAbsent(d):
+		// No anchor AND no store: blessed workflows were never set up here, so
+		// there is nothing to verify (forgectl#635). Any other anchor failure
+		// — present but not root-owned, group/world-writable, unparseable — or
+		// a store that exists without its anchor falls through to fail.
+		return Check{Name: "trust store", State: StateSkip, Detail: "blessed workflows not set up (no trust anchor, no trust store)", Hint: "run `forgectl workflow bless` to set up blessed workflows, if you use them"}
 	default:
-		return Check{Name: "trust store", State: StateFail, Detail: err.Error(), Hint: "the trust store or its root of trust failed to verify — see `forgectl workflow trust list` and bless/verify.go's error taxonomy"}
+		// Categorical (#716): err renders key ids, paths and decoder text read
+		// from the store and anchor files on disk. The sentinel names which
+		// root of trust failed; the log keeps the rest.
+		slog.Warn("Trust store failed to verify.", "error", err)
+		detail := "trust store could not be read or verified"
+		switch {
+		case errors.Is(err, bless.ErrNoAnchor):
+			detail = "trust anchor is missing or not root-owned"
+		case errors.Is(err, bless.ErrTrustStoreInvalid):
+			detail = "trust store failed to verify under the anchor"
+		}
+		return Check{Name: "trust store", State: StateFail, Detail: detail, Hint: "the trust store or its root of trust failed to verify — see `forgectl workflow trust list` and bless/verify.go's error taxonomy"}
 	}
+}
+
+// trustStoreAbsent reports whether the trust store file is confirmed absent.
+// Anything else, including an unresolvable path or a nil seam, is "not
+// confirmed": the caller keeps its failure rather than guess.
+func trustStoreAbsent(d Deps) bool {
+	if d.TrustStorePath == nil {
+		return false
+	}
+	path, err := d.TrustStorePath()
+	if err != nil {
+		return false
+	}
+	_, statErr := os.Lstat(filepath.Clean(path))
+	return errors.Is(statErr, fs.ErrNotExist)
 }
 
 // checkResumeTasks is the tripwire for `forgectl resume`'s one version
@@ -338,12 +485,13 @@ func checkResumeTasks(d Deps) Check {
 	case drift.Drifted():
 		return Check{
 			Name: name, State: StateWarn,
-			// %q, not %s: drift.Dir is a raw directory name off disk, where
+			// Quoted, not %s: drift.Dir is a raw directory name off disk, where
 			// every byte but '/' and NUL is legal. Quoting at construction
 			// preserves the directory boundaries in both human output (which
 			// also crosses SafeLine) and JSON output (which preserves values
-			// while escaping its syntax).
-			Detail: fmt.Sprintf("restore writes the %q dialect, but every task directory on disk is %q (newest: %q)", drift.Restores, drift.Newest, drift.Dir),
+			// while escaping its syntax), and QuoteArgMax bounds its length
+			// (#716). Restores and Newest are resume's fixed dialect names.
+			Detail: fmt.Sprintf("restore writes the %q dialect, but every task directory on disk is %q (newest: %s)", drift.Restores, drift.Newest, termsafe.QuoteArgMax(drift.Dir, 0)),
 			Hint:   "Claude Code appears to have changed how it names task directories — `forgectl resume` would restore tasks where nothing reads them; please file this at github.com/cameronsjo/forgectl",
 		}
 	default:
@@ -365,10 +513,13 @@ func checkForgectlVersion(ctx context.Context, d Deps) Check {
 	}
 	outdated, detail, err := selfupdate.CheckOutdated(ctx, d.Runner)
 	if err != nil {
-		return Check{Name: "forgectl version", State: StateWarn, Detail: err.Error(), Hint: "check network access to the Homebrew tap"}
+		// Categorical (#716): err is brew's argv and stderr, which relays
+		// what the tap's server and git transport send.
+		slog.Warn("brew outdated failed.", "error", err)
+		return Check{Name: "forgectl version", State: StateWarn, Detail: "brew outdated failed", Hint: "check network access to the Homebrew tap"}
 	}
 	if outdated {
-		return Check{Name: "forgectl version", State: StateWarn, Detail: detail, Hint: "run `forgectl upgrade`"}
+		return Check{Name: "forgectl version", State: StateWarn, Detail: selfupdate.OutdatedDetail(detail), Hint: "run `forgectl upgrade`"}
 	}
 	return Check{Name: "forgectl version", State: StateOK, Detail: "up to date"}
 }

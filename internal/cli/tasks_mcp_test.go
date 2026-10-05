@@ -3,8 +3,10 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -14,6 +16,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
+
+	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/tasks"
 )
 
 // TestValidateMCPFlags_HTTPRequiresATokenFile is the refusal the container
@@ -214,5 +219,148 @@ func TestHasJSONRPCResult_RejectsAnErrorFrame(t *testing.T) {
 		if got := hasJSONRPCResult([]byte(body)); got != want {
 			t.Errorf("hasJSONRPCResult(%q) = %v, want %v", body, got, want)
 		}
+	}
+}
+
+// TestPingURL_NeverEchoesTheAddress: a --http value can carry credentials
+// (tok@127.0.0.1:3000 splits into host "tok@127.0.0.1", which net/http sends
+// as userinfo and prints unmasked), so pingURL refuses any host that is not an
+// IP or a plain hostname, and no refusal repeats the value (#658).
+func TestPingURL_NeverEchoesTheAddress(t *testing.T) {
+	for _, addr := range []string{
+		"SECRETTOK@127.0.0.1:3000",
+		"user:SECRETTOK@127.0.0.1:3000",
+		"SECRETTOK",
+		"127.0.0.1:SECRETTOK",
+		"SECRETTOK\x1b[2J:3000",
+		"[SECRETTOK%eth0]:3000",
+		"127.0.0.1:0",
+		"127.0.0.1:+3000",
+		"127.0.0.1:03000",
+	} {
+		got, err := pingURL(addr)
+		if err == nil {
+			t.Errorf("pingURL(%q) = %q with no error, want a refusal", addr, got)
+			continue
+		}
+		if strings.Contains(err.Error(), "SECRETTOK") || strings.Contains(err.Error(), "\x1b") {
+			t.Errorf("pingURL(%q) error %q echoes the address", addr, err)
+		}
+	}
+	if got, err := pingURL("tasks-mcp_1.internal:3000"); err != nil || got != "http://tasks-mcp_1.internal:3000/mcp" {
+		t.Errorf("pingURL(plain hostname) = %q, %v; want it accepted", got, err)
+	}
+}
+
+// TestRunMCPPing_UnreachableDoesNotEchoTheURL: net/http's *url.Error renders
+// the whole URL; the ping message names it only as pingURLLabel.
+func TestRunMCPPing_UnreachableDoesNotEchoTheURL(t *testing.T) {
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close() // nothing listens here now
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(io.Discard)
+	err = runMCPPing(cmd, addr)
+	if err == nil {
+		t.Fatal("--ping against a closed port = nil, want a failure")
+	}
+	if strings.Contains(err.Error(), "http://") || strings.Contains(err.Error(), "/mcp") {
+		t.Errorf("error %q echoes the probe URL", err)
+	}
+	if !strings.Contains(err.Error(), pingURLLabel) {
+		t.Errorf("error %q, want it to name %q", err, pingURLLabel)
+	}
+}
+
+// TestListenCause_DropsTheAddress: net's listen errors repeat the address,
+// which is the same --http value --ping refuses to print.
+func TestListenCause_DropsTheAddress(t *testing.T) {
+	for _, addr := range []string{"SECRETTOK:1:2", "[SECRETTOK:1"} {
+		_, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", addr)
+		if err == nil {
+			t.Fatalf("listen %q succeeded, want a failure", addr)
+		}
+		if got := listenCause(err).Error(); strings.Contains(got, "SECRETTOK") {
+			t.Errorf("listenCause(%v) = %q, echoes the address", err, got)
+		}
+	}
+}
+
+// TestMCPServerConfig_RecordsGoToStderr: on stdio, stdout is the JSON-RPC
+// transport, so a close record written there would corrupt the session it
+// reports on. The record writer is the command's stderr on both transports.
+func TestMCPServerConfig_RecordsGoToStderr(t *testing.T) {
+	// The stdio config also appends to the close log, which must land under
+	// the test's own config directory.
+	isolateTasksConfigDir(t)
+	var stdout, stderr bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+
+	for _, httpAddr := range []string{"", ":3000"} {
+		stdout.Reset()
+		stderr.Reset()
+		cfg := mcpServerConfig(cmd, httpAddr, "some-entry", "board.example")
+		rec := tasks.CloseRecord{TaskID: 1, Surface: tasks.SurfaceMCP, Evidence: "x", Outcome: tasks.CloseOutcomeClosed}
+		if err := tasks.WriteCloseRecord(cfg.Records, rec); err != nil {
+			t.Fatalf("--http %q: WriteCloseRecord: %v", httpAddr, err)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("--http %q: a close record reached stdout: %s", httpAddr, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), `"outcome":"closed"`) {
+			t.Errorf("--http %q: the close record did not reach stderr: %q", httpAddr, stderr.String())
+		}
+	}
+}
+
+// TestMCPServerConfig_NamesTheCredentialSourceNotTheCredential: a record says
+// where the token came from — the keychain entry's name on stdio, the fixed
+// word for a mounted file on HTTP — and the host it was sent to.
+func TestMCPServerConfig_NamesTheCredentialSourceNotTheCredential(t *testing.T) {
+	cmd := &cobra.Command{}
+
+	stdio := mcpServerConfig(cmd, "", "some-entry", "board.example")
+	if stdio.CredentialSource != "some-entry" || stdio.Host != "board.example" || stdio.DefaultClientName != "forgectl (stdio)" {
+		t.Errorf("stdio config = %+v, want the keychain service name, the host, and the stdio client name", stdio)
+	}
+
+	// The keychain service flag has a default, so it is non-empty on HTTP
+	// too. It names an entry the HTTP transport never read.
+	overHTTP := mcpServerConfig(cmd, ":3000", "some-entry", "board.example")
+	if tasks.CredentialSourceTokenFile != "token-file" {
+		t.Errorf("CredentialSourceTokenFile = %q, want the literal token-file", tasks.CredentialSourceTokenFile)
+	}
+	if overHTTP.CredentialSource != tasks.CredentialSourceTokenFile {
+		t.Errorf("http credential source = %q, want %q", overHTTP.CredentialSource, tasks.CredentialSourceTokenFile)
+	}
+	if overHTTP.Host != "board.example" || overHTTP.DefaultClientName != "forgectl (http)" {
+		t.Errorf("http config = %+v, want the host and the http client name", overHTTP)
+	}
+}
+
+// TestTasksMCPHelp_NamesAllSevenTools: the help is where an operator learns
+// what the server exposes before granting it a credential.
+func TestTasksMCPHelp_NamesAllSevenTools(t *testing.T) {
+	host, service := "board.example", "some-entry"
+	long := newTasksMCPCmd(module.Deps{}, &host, &service).Long
+	if !strings.Contains(long, "Seven tools") || strings.Contains(long, "Six tools") {
+		t.Errorf("the help does not count seven tools:\n%s", long)
+	}
+	for _, tool := range []string{
+		"list_projects", "list_tasks", "get_task", "ready_tasks", "create_task", "add_comment", "complete_task",
+	} {
+		if !strings.Contains(long, tool) {
+			t.Errorf("the help does not name %s", tool)
+		}
+	}
+	if !strings.Contains(long, "stderr") || !strings.Contains(long, "close record") {
+		t.Errorf("the help does not say where close records go:\n%s", long)
 	}
 }

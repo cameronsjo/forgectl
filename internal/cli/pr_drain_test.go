@@ -15,6 +15,7 @@ package cli
 //   [x] A real pass launches a queued ref and prints the pass=... line, exit 0
 //   [x] A launch failure exits 1 and names the failed count
 //   [x] --json emits the report object
+//   [x] --no-notify parses, and reaches Drain: a real launch sends nothing
 
 import (
 	"bytes"
@@ -23,11 +24,13 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 	"github.com/cameronsjo/forgectl/internal/pr"
 )
 
@@ -38,6 +41,7 @@ func prDrainRunner(failOn map[int]error) *exec.FakeRunner {
 	created := false
 	call := 0
 	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		switch {
 		case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
 			return `{"headRefName":"feature","headRefOid":"abc123",` +
@@ -265,5 +269,63 @@ func TestPrDrain_JSONEmitsReportObject(t *testing.T) {
 	}
 	if report.Launched != 1 {
 		t.Errorf("report.Launched = %d, want 1", report.Launched)
+	}
+}
+
+// countingNotifier counts Notify calls; the drain wiring test asserts on it.
+type countingNotifier struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (c *countingNotifier) Notify(context.Context, string, string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.n++
+	return nil
+}
+
+func (c *countingNotifier) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+func TestPrDrain_NoNotifyFlagParses(t *testing.T) {
+	t.Run("empty queue", func(t *testing.T) {
+		client, _ := drainCmdClient(t, prDrainRunner(nil))
+		if _, _, err := runPrDrain(t, client, config.Config{}, "--no-notify"); err != nil {
+			t.Fatalf("pr drain --no-notify: %v", err)
+		}
+	})
+	// The flag must reach DrainOpts, not just parse: a real launch under
+	// --no-notify sends nothing, where the same launch without it sends one.
+	for _, tc := range []struct {
+		name string
+		args []string
+		want int
+	}{
+		{name: "launch with --no-notify", args: []string{"--no-notify"}, want: 0},
+		{name: "launch without it", args: nil, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeClaudeBin(t)
+			dir := t.TempDir()
+			n := &countingNotifier{}
+			client := pr.New(prDrainRunner(nil), pr.WithSessionsDir(dir), pr.WithFindingsDir(t.TempDir()),
+				pr.WithTmuxSession("forgectl"), pr.WithTTYCheck(func() bool { return false }), pr.WithNotifier(n))
+			seedQueuedFixture(t, dir, pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 1}, time.Now().UTC())
+
+			stdout, _, err := runPrDrain(t, client, config.Config{}, tc.args...)
+			if err != nil {
+				t.Fatalf("pr drain %v: %v", tc.args, err)
+			}
+			if !strings.Contains(stdout, "launched=1") {
+				t.Fatalf("stdout = %q, want launched=1", stdout)
+			}
+			if got := n.count(); got != tc.want {
+				t.Errorf("notifications = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }

@@ -44,5 +44,8 @@ func allModules() []module.Manifest {
 		k8sModule,
 		themeModule,
 		tasksModule,
+		herdrModule,
+		auditModule,
+		statusModule,
 	}
 }

@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="/assets/artificer.css"/>
 <link rel="stylesheet" href="/assets/chroma.css"/>
 <link rel="stylesheet" href="/assets/diagram.css"/>
+<link rel="stylesheet" href="/assets/katex/katex.min.css"/>
 <style>
 /* ═══ Docs reader shell — ported from the design reference (shell-reference.html,
    docs/plans/2026-09-01-docs-reader-v2.md). Template-owned, not vendored.
@@ -54,6 +55,9 @@ main.surface-document { max-width: 820px; }
    columns of a highlighted block stopped lining up. Fixed upstream after
    Artificer 0.26.0 (docs/artificer-adaptations.md A6). */
 .doc-body pre, .doc-body pre *, .doc-body code * { font-family: var(--font-mono); }
+/* A document past the markup guard is shown as its source (markupguard.go);
+   wrap it, since its lines can be a megabyte long. */
+.doc-body pre.doc-plain-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* A plain quote: a quiet rule on the left. Callouts are blockquotes too and
    carry their own tier styling below. */
 .doc-body blockquote:not(.callout) {
@@ -63,7 +67,8 @@ main.surface-document { max-width: 820px; }
 
 /* ── Properties frontmatter (render.go emits post-sanitizer, escaped fragments) ── */
 .props {
-  background: color-mix(in oklch, var(--bg-raised) 60%, transparent);
+  --props-tint: color-mix(in oklch, var(--bg-raised) 60%, transparent);
+  background: var(--props-tint);
   border: 1px solid var(--border); border-radius: var(--radius-md);
   margin: 0 0 24px; font-family: var(--font-mono); font-size: 13px; overflow: hidden;
 }
@@ -72,15 +77,30 @@ main.surface-document { max-width: 820px; }
 .props-row .k { flex: 0 0 110px; display: flex; align-items: center; gap: 6px; color: var(--fg-secondary); font-size: 12px; padding-top: 3px; }
 .props-row .k svg { color: var(--fg-disabled); flex-shrink: 0; width: 11px; height: 11px; stroke: currentColor; fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .props-row .v { flex: 1; min-width: 0; color: var(--fg); display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding-top: 1px; }
-.props-row .v .chip { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; background: color-mix(in oklch, var(--accent-fill) 14%, transparent); color: var(--accent); font-size: 11px; }
+/* Status chip: deliberately NOT Artificer's .chip, which is interactive
+   (cursor: pointer, hover, and a 44px min-size under pointer: coarse). The
+   value is a static label, so it gets none of that. */
+.props-row .v .status-chip { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; background: color-mix(in oklch, var(--accent-fill) 14%, transparent); color: var(--accent); font-size: 11px; border: 1px solid var(--border); font-family: var(--font-interface); font-weight: 500; white-space: nowrap; }
 .props-row .v.dt { font-variant-numeric: tabular-nums; }
+/* OKF trust badges (properties block + status bar). Deliberately NOT
+   Artificer's .chip: that class is interactive (cursor, hover, aria-pressed,
+   a 44px min-height under pointer: coarse), and a badge is a label. The text
+   carries the meaning, so the tier colour is never the only signal. Colours
+   are Artificer's solid .badge--attention / .badge--urgent pairs: the 14%
+   tint the status chip uses left light-theme --attention text at 3.9:1 on
+   the properties block, under AA for 11px text. */
+.trust-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; font-size: 11px; line-height: 1.4; font-family: var(--font-mono); }
+.trust-badge--stale { background: var(--attention-fill); color: var(--on-attention); }
+.trust-badge--deprecated { background: var(--urgent-fill); color: var(--on-urgent); }
 
 /* ── Callouts (GFM > [!NOTE] etc; tiers: note→accent, warning→attention, danger→urgent, tip→success) ── */
 .callout { border-left: 2px solid var(--steel); background: color-mix(in oklch, var(--steel) 10%, transparent); padding: 12px 16px; border-radius: 0 var(--radius-md) var(--radius-md) 0; margin: 16px 0; }
-.callout.note { border-left-color: var(--accent); background: color-mix(in oklch, var(--accent) 8%, transparent); }
-.callout.warning { border-left-color: var(--attention); background: color-mix(in oklch, var(--attention) 8%, transparent); }
-.callout.danger { border-left-color: var(--urgent); background: color-mix(in oklch, var(--urgent) 8%, transparent); }
-.callout.tip { border-left-color: var(--success); background: color-mix(in oklch, var(--success) 8%, transparent); }
+/* Artificer's global .note (a footnote-scale label rule) also matches the
+   note-tier class; restore the size and colour the other tiers inherit. */
+.callout.note { --callout-tint: color-mix(in oklch, var(--accent) 8%, transparent); font-size: inherit; color: inherit; border-left-color: var(--accent); background: var(--callout-tint); }
+.callout.warning { --callout-tint: color-mix(in oklch, var(--attention) 8%, transparent); border-left-color: var(--attention); background: var(--callout-tint); }
+.callout.danger { --callout-tint: color-mix(in oklch, var(--urgent) 8%, transparent); border-left-color: var(--urgent); background: var(--callout-tint); }
+.callout.tip { --callout-tint: color-mix(in oklch, var(--success) 8%, transparent); border-left-color: var(--success); background: var(--callout-tint); }
 .callout-title { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-weight: 700; font-size: 13px; letter-spacing: 0.04em; color: var(--accent); }
 .callout.warning .callout-title { color: var(--attention); }
 .callout.danger .callout-title { color: var(--urgent); }
@@ -89,6 +109,27 @@ main.surface-document { max-width: 820px; }
 /* Body copy stays native <p> siblings of the title (blockquote semantics kept);
    these rules restate the reference's .callout-body treatment. */
 .callout > p { color: var(--fg); margin: 6px 0 0; line-height: 1.6; font-size: 0.95em; }
+
+/* ── Obsidian inline flavour (vault roots only: ==highlight==, #tag) ──
+   .tag is deliberately not Artificer's .chip: that carries hover/pressed
+   states and a 44px touch min-height that would break a line of prose. */
+.doc-body mark { background: color-mix(in oklch, var(--attention) 28%, transparent); color: inherit; padding: 0 2px; border-radius: var(--radius-sm); }
+.doc-body .tag { font-family: var(--font-mono); font-size: .85em; color: var(--accent); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; white-space: nowrap; unicode-bidi: isolate; }
+/* A10: a [[wikilink]] that did not resolve. A span (no note) gets the help
+   cursor for its hover reason; an anchor (note found, heading or block
+   missing) keeps the pointer, since it still opens the note. */
+.doc-body .wikilink-miss { color: var(--urgent-text); text-decoration: underline dashed; }
+.doc-body span.wikilink-miss { cursor: help; }
+/* A [[wikilink]] to an attachment (an image, a PDF) that exists but that the
+   reader cannot show yet (forgectl#709): muted text, not a link and not a
+   broken one; the help cursor surfaces its hover title. */
+.doc-body .wikilink-attachment { color: var(--fg-secondary); text-decoration: underline dotted; cursor: help; }
+/* A11: Artificer's `.surface-document *` sets the prose face on every KaTeX
+   span, so digits and operators, which KaTeX leaves to inherit KaTeX_Main from
+   .katex, drew in the body font. `.katex *` ties that specificity and wins by
+   coming later, and still loses to KaTeX's own `.katex .mathnormal`-style
+   rules, so the per-glyph faces KaTeX sets stay as they are. */
+.katex * { font-family: inherit; }
 
 /* ── Outline pane ── */
 .outline { border-left: 1px solid var(--border); padding: var(--s-md) 0; font-family: var(--font-mono); overflow-y: auto; }
@@ -112,6 +153,7 @@ main.surface-document { max-width: 820px; }
 .statusbar { display: flex; align-items: stretch; border-top: 1px solid var(--border); background: var(--bg); font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 11px; color: var(--fg-secondary); }
 .status-item { padding: 5px 12px; display: flex; align-items: center; gap: 6px; border-right: 1px solid var(--border); }
 .status-item:last-child { border-right: none; }
+.status-item.words { white-space: nowrap; }
 .status-spacer { flex: 1; }
 .live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); }
 /* reload.js sets this when the live-reload stream gives up. The text changes
@@ -161,7 +203,7 @@ main.surface-document { max-width: 820px; }
 .doc-body input[type="checkbox"] { accent-color: var(--accent); transform: translateY(1px); }
 
 /* ── Layout: grid + narrow screens ── */
-#shell { height: 100vh; display: flex; flex-direction: column; background: var(--bg); }
+[data-fc="shell"] { height: 100vh; display: flex; flex-direction: column; background: var(--bg); }
 .nav-toggle { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; background: none; border: 0; border-radius: var(--radius-sm); color: var(--fg-secondary); cursor: pointer; flex: none; }
 .nav-toggle:hover { color: var(--fg); background: var(--bg-raised); }
 .nav-toggle svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
@@ -189,11 +231,41 @@ main.surface-document { max-width: 820px; }
 .home .table .num { white-space: nowrap; }
 .docs-nav .sidenav { border-radius: 0; border: 0; flex: 1; overflow-y: auto; }
 main.surface-document { padding: var(--s-xl); overflow-y: auto; min-height: 0; }
+/* The doc pane is the containing block, and the paint clip, for everything a
+   doc renders (forgectl#745). A doc can wear Artificer's position:absolute
+   classes (.tooltip is z-index 1000, white-space: nowrap), and with no
+   positioned ancestor they anchored to the page: a .tooltip--bottom sat under
+   the status bar and made the whole page scroll, a long .tooltip ran across
+   the outline column. contain: paint also contains position:fixed. It sits
+   on <main>, the pane's scroll container, not on .doc-body: clipping
+   .doc-body cut off wide tables and display math that scroll <main>
+   sideways today. Sticky table heads and the pan/zoom viewport are
+   unchanged (measured). */
+main.surface-document { position: relative; contain: paint; }
+/* Four pieces of chrome live inside the doc pane, so that clip cannot keep a
+   doc off them (forgectl#759): the narrow-width outline, the skip-content
+   banner and the properties block (render.go puts both above the doc), and
+   the missing-doc banner (reload.js prepends it). A doc's .tooltip (z-index
+   var(--z-popover)) anchored to a positioned wrapper just below any of them
+   (.phase, .has-tooltip, .grain) painted over it. Each gets its own
+   stacking context one step above --z-popover, and an opaque base under its
+   tint so nothing shows through; the missing-doc banner's background is
+   already opaque (.banner--attention mixes into --bg-raised). The two
+   data attributes are the server's own, never a doc's: the sanitizer strips
+   every data-* attribute from a doc, and mermaid-init.js scrubs them from
+   rendered diagrams. A fifth reader-injected element, the mermaid .embed
+   card (mermaid-init.js wrapEmbeds), is deliberately NOT elevated: it wraps
+   the doc's own diagram in the doc's flow, so it stacks as doc content, and
+   a doc tooltip over its bar spoofs nothing but a "reset" button. */
+.outline-inline, [data-forgectl-notice], [data-forgectl-props], [data-fc="doc-missing"] { position: relative; z-index: calc(var(--z-popover) + 1); isolation: isolate; }
+.outline-inline { background: var(--bg); }
+[data-forgectl-notice].callout.warning { background: linear-gradient(var(--callout-tint), var(--callout-tint)), var(--bg); }
+.props[data-forgectl-props] { background: linear-gradient(var(--props-tint), var(--props-tint)), var(--bg); }
 /* The document pane scrolls, so with no link in view the browser makes the
    pane itself the keyboard stop. Give it the house ring, inset so the grid's
    edges don't clip it. */
 main.surface-document:focus-visible { outline: var(--focus-width) solid var(--accent); outline-offset: var(--focus-offset-inset); }
-#drawer-scrim { display: none; }
+[data-fc="drawer-scrim"] { display: none; }
 @media (min-width: 901px) {
   [data-nav="closed"] .docs-nav { display: none; }
   [data-nav="closed"] .content-grid { grid-template-columns: minmax(0, 1fr) 220px; }
@@ -215,12 +287,23 @@ main.surface-document:focus-visible { outline: var(--focus-width) solid var(--ac
     transform: translateX(-100%); transition: transform 200ms var(--ease);
   }
   [data-nav="open"] .docs-nav { transform: none; }
-  [data-nav="open"] #drawer-scrim { display: block; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); z-index: var(--z-overlay); }
+  [data-nav="open"] [data-fc="drawer-scrim"] { display: block; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); z-index: var(--z-overlay); }
   main.surface-document { padding: var(--s-md); }
 }
 @media (prefers-reduced-motion: reduce) { .docs-nav { transition: none; } }
 @media (max-width: 640px) {
   .status-item.opt { display: none; }
+}
+/* One line at phone width. A stale or deprecated badge beside "serving · host:port"
+   wrapped the bar to ~45px at 375px. Drop the host (the title tooltip keeps the
+   full text) and forbid wrapping. */
+.live-status, .live-status__text { white-space: nowrap; }
+/* The disconnected message is long; let it ellipsize (its title carries it all)
+   rather than push the bar wider than the viewport. */
+.live-status { min-width: 0; }
+.live-status__text { overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 480px) {
+  .live-status__host { display: none; }
 }
 </style>
 <script src="/assets/artificer-theme.js" defer></script>
@@ -228,18 +311,22 @@ main.surface-document:focus-visible { outline: var(--focus-width) solid var(--ac
 <script src="/assets/artificer-tree.js" defer></script>
 <script src="/assets/sidenav-filter.js" defer></script>
 <script src="/assets/nav-toggle.js" defer></script>
+<script src="/assets/copy.js" defer></script>
 <!-- mermaid must be parsed before its init script runs; both are deferred, and
      deferred scripts execute in document order, so this ordering is the
      dependency declaration. -->
 <script src="/assets/mermaid.min.js" defer></script>
 <script src="/assets/mermaid-init.js" defer></script>
 <script src="/assets/svg-panzoom.js" defer></script>
+<!-- Same ordering rule for KaTeX and its init script. -->
+<script src="/assets/katex/katex.min.js" defer></script>
+<script src="/assets/math-init.js" defer></script>
 </head>
 <body>
 <a class="skip-link" href="#doc-main">Skip to content</a>
-<div id="shell" class="surface-tool" data-nav="auto">
+<div id="shell" data-fc="shell" class="surface-tool" data-nav="auto">
   <header class="appbar appbar--static" style="flex: none">
-    <button class="nav-toggle" id="nav-toggle" aria-label="Toggle sidebar" aria-expanded="true" aria-controls="docs-nav"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></button>
+    <button class="nav-toggle" id="nav-toggle" data-fc="nav-toggle" aria-label="Toggle sidebar" aria-expanded="true" aria-controls="docs-nav"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></button>
     <a class="appbar__brand wordmark" href="/">forgectl docs</a>
     <div class="appbar__spacer"></div>
     <div class="appbar__actions">
@@ -247,15 +334,15 @@ main.surface-document:focus-visible { outline: var(--focus-width) solid var(--ac
     </div>
   </header>
   <div class="content-grid{{if not .Outline}} content-grid--no-outline{{end}}">
-    <div id="drawer-scrim"></div>
-    <aside class="docs-nav" id="docs-nav">
+    <div id="drawer-scrim" data-fc="drawer-scrim"></div>
+    <aside class="docs-nav" id="docs-nav" data-fc="docs-nav">
       <div class="search">
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
         <label class="sr-only" for="doc-filter">Filter docs</label>
-        <input id="doc-filter" type="search" placeholder="Filter docs…" autocomplete="off"/>
+        <input id="doc-filter" data-fc="doc-filter" type="search" placeholder="Filter docs…" autocomplete="off"/>
       </div>
-      <p class="note sidenav-empty" id="filter-empty" role="status" hidden></p>
-      <nav class="sidenav" aria-label="Indexed docs">
+      <p class="note sidenav-empty" id="filter-empty" data-fc="filter-empty" role="status" hidden></p>
+      <nav class="sidenav" data-fc="sidenav" aria-label="Indexed docs">
         {{range .Groups}}
         <div class="sidenav__group">{{.Root}}</div>
         {{if .Tree}}
@@ -268,11 +355,11 @@ main.surface-document:focus-visible { outline: var(--focus-width) solid var(--ac
         {{end}}
       </nav>
     </aside>
-    <main id="doc-main" class="surface-document container container--lg">
+    <main id="doc-main" class="surface-document container container--lg" data-fc="doc-main">
       {{if .Outline}}
-      <details class="outline-inline"><summary>On this page</summary><nav aria-label="On this page">{{template "outlineItems" .Outline}}</nav></details>
+      <details class="outline-inline" data-fc="outline-inline"><summary>On this page</summary><nav aria-label="On this page">{{template "outlineItems" .Outline}}</nav></details>
       {{end}}
-      <div class="doc-body">
+      <div class="doc-body" data-fc="doc-body">
       {{if .Content}}{{.Content}}{{else if .Home}}{{if .Home.Recent}}
       <div class="home">
         <h1>Indexed docs</h1>
@@ -298,18 +385,20 @@ main.surface-document:focus-visible { outline: var(--focus-width) solid var(--ac
       </div>
     </main>
     {{if .Outline}}
-    <aside class="outline" aria-label="On this page">
+    <aside class="outline" data-fc="outline" aria-label="On this page">
       <div class="outline-h">On this page</div>
       {{template "outlineItems" .Outline}}
     </aside>
     {{end}}
   </div>
-  <footer class="statusbar" style="flex: none">
-    <div class="status-item" id="live-status" role="status"><span class="live-dot" aria-hidden="true"></span><span class="live-status__text">serving · {{.Host}}</span></div>
+  <footer class="statusbar" data-fc="statusbar" style="flex: none">
+    <div class="status-item live-status" id="live-status" data-fc="live-status" role="status" title="serving · {{.Host}}"><span class="live-dot" aria-hidden="true"></span><span class="live-status__text">serving<span class="live-status__host"> · {{.Host}}</span></span></div>
     {{if .DocPath}}<div class="status-item opt">{{.DocPath}}</div>{{end}}
+    {{if .Trust.Deprecated}}<div class="status-item"><span class="trust-badge trust-badge--deprecated">deprecated</span></div>{{end}}
+    {{if .Trust.Stale}}<div class="status-item"><span class="trust-badge trust-badge--stale" title="stale since {{.Trust.StaleAfter}}">stale</span></div>{{end}}
     <div class="status-spacer"></div>
     <div class="status-item opt">{{.DocCount}} {{if eq .DocCount 1}}doc{{else}}docs{{end}} indexed</div>
-    {{if .Words}}<div class="status-item">{{.Words}} words · {{.Minutes}} min</div>{{end}}
+    {{if .Words}}<div class="status-item words">{{.Words}} words · {{.Minutes}} min</div>{{end}}
   </footer>
 </div>
 </body>

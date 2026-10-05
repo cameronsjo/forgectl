@@ -1,27 +1,36 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/doctor"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Config, th theme.Theme) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check harness availability and launch config validity",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			out := th.Writer(cmd.OutOrStdout(), os.Environ())
-			marks := th.Marks()
+			// Under --json the checks are collected rather than printed, and
+			// stdout is the raw writer, never th.Writer: a machine payload
+			// must not pass through the colour writer (doctor.go's split).
+			rec := &launchDoctorRecorder{marks: th.Marks(), asJSON: asJSON}
+			if !asJSON {
+				rec.out = th.Writer(cmd.OutOrStdout(), os.Environ())
+			}
 			healthy := true
 
 			// Same rule as launchExec: the opt-in is whatever config.toml
@@ -33,13 +42,24 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 
 			lc, src := resolveLaunchConfig(boundary, cfg, effFrom)
 
-			profile := launch.DefaultsProfile(lc)
+			// On a home failure DefaultsProfile still returns the usable
+			// defaults, so the harness check below validates those rather
+			// than a zero Profile that would add a misleading second failure.
+			profile, homeErr := launch.DefaultsProfile(lc)
 			if cwd, err := os.Getwd(); err == nil {
-				profile = launch.Resolve(lc, cwd)
+				if resolved, err := launch.Resolve(lc, cwd); err == nil {
+					profile = resolved
+				} else if homeErr == nil {
+					homeErr = err
+				}
+			}
+			if homeErr != nil {
+				healthy = false
+				rec.add("profile", doctor.StateFail, "launch profile cannot be resolved: "+safeText(homeErr.Error()))
 			}
 			if err := profile.Validate(); err != nil {
 				healthy = false
-				_, _ = fmt.Fprintf(out, "%s launch profile invalid: %s\n", marks.Fail, termsafe.SafeLine(err.Error()))
+				rec.add("profile", doctor.StateFail, "launch profile invalid: "+safeText(err.Error()))
 			}
 			// [pr] effort is validated separately because it never enters the
 			// resolved [launch] profile above — it is applied inside the review
@@ -51,16 +71,16 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 			if cfg.Pr.Effort != "" {
 				if err := (launch.Profile{Harness: "claude", Effort: cfg.Pr.Effort}).Validate(); err != nil {
 					healthy = false
-					_, _ = fmt.Fprintf(out, "%s [pr] config invalid: %s\n", marks.Fail, termsafe.SafeLine(err.Error()))
+					rec.add("pr_config", doctor.StateFail, "[pr] config invalid: "+safeText(err.Error()))
 				}
 			}
 			resolvedBinary, binaryErr := launch.ResolveBinary(profile.Harness, lc.Defaults)
 			binaryPath := resolvedBinary.Path
 			if binaryErr == nil {
-				_, _ = fmt.Fprintf(out, "%s %s found: %s\n", marks.OK, termsafe.SafeLine(profile.Harness), termsafe.QuotePath(binaryPath))
+				rec.add("harness", doctor.StateOK, safeLabel(profile.Harness)+" found: "+termsafe.QuotePath(binaryPath))
 			} else {
 				healthy = false
-				_, _ = fmt.Fprintf(out, "%s %s\n", marks.Fail, termsafe.SafeLine(binaryErr.Error()))
+				rec.add("harness", doctor.StateFail, safeText(binaryErr.Error()))
 			}
 
 			configPath := ""
@@ -79,12 +99,12 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 			// notice on the default arm silently dropped it for the exact
 			// input class #417 is about (#418 review).
 			if notice != "" {
-				_, _ = fmt.Fprintf(out, "%s %s\n", marks.Warn, termsafe.SafeLine(notice))
+				rec.add("legacy_migration", doctor.StateWarn, safeText(notice))
 			}
 			switch {
 			case parseErr != nil:
 				healthy = false
-				_, _ = fmt.Fprintf(out, "%s config failed to parse: %s\n", marks.Fail, termsafe.SafeLine(parseErr.Error()))
+				rec.add("config", doctor.StateFail, "config failed to parse: "+safeText(parseErr.Error()))
 			case !cfg.HasLaunchSection() && lc.IsZero():
 				var legacyErr error
 				if boundary != nil && boundary.Status != config.BoundaryNoSource {
@@ -92,48 +112,131 @@ func newLaunchDoctorCmd(boundary *config.LegacyMigrationBoundary, cfg config.Con
 				}
 				if legacyErr != nil {
 					healthy = false
-					_, _ = fmt.Fprintf(out, "%s legacy claunch config failed to parse: %s\n", marks.Fail, termsafe.SafeLine(legacyErr.Error()))
+					rec.add("config", doctor.StateFail, "legacy claunch config failed to parse: "+safeText(legacyErr.Error()))
 				} else {
-					_, _ = fmt.Fprintf(out, "%s no launch profiles configured — using built-in defaults (run `forgectl launch init`)\n", marks.Warn)
+					rec.add("config", doctor.StateWarn, "no launch profiles configured — using built-in defaults (run `forgectl launch init`)")
 				}
 				// #417: name a config file in the legacy directory that
 				// forgectl cannot migrate, so "no profiles configured" does
 				// not read as "nothing is there".
 				if sibling := boundary.UnmigratableSiblingPath(); sibling != "" {
-					_, _ = fmt.Fprintf(out, "%s %s is present but forgectl cannot migrate it — it migrates the historical claunch.conf format only\n",
-						marks.Warn, termsafe.QuotePath(sibling))
+					rec.add("config", doctor.StateWarn, termsafe.QuotePath(sibling)+
+						" is present but forgectl cannot migrate it — it migrates the historical claunch.conf format only")
 				}
 			default:
-				_, _ = fmt.Fprintf(out, "%s launch config: %s (%d project profile(s))\n", marks.OK, termsafe.QuotePath(src), len(lc.Projects))
+				rec.add("config", doctor.StateOK, fmt.Sprintf("launch config: %s (%d project profile(s))", termsafe.QuotePath(src), len(lc.Projects)))
 			}
 
-			if !reportUsageStats(out, usageEnabled, marks) {
+			if !rec.usageStats(usageEnabled) {
 				healthy = false
 			}
 
 			// Bench telemetry injection is informational, not a health signal —
 			// off is a valid choice (a machine with no local collector).
 			if cfg.Bench.Telemetry {
-				_, _ = fmt.Fprintf(out, "%s telemetry: on → %s (%s)\n", marks.OK,
-					termsafe.SafeLine(endpointForDisplay(cfg.Bench.ResolvedOTLPEndpoint())), termsafe.SafeLine(cfg.Bench.ResolvedOTLPProtocol()))
+				rec.add("telemetry", doctor.StateOK, "telemetry: on → "+
+					safeText(endpointForDisplay(cfg.Bench.ResolvedOTLPEndpoint()))+" ("+safeLabel(cfg.Bench.ResolvedOTLPProtocol())+")")
 			} else {
-				_, _ = fmt.Fprintf(out, "%s telemetry: off (enable with [bench].telemetry = true)\n", marks.Warn)
+				rec.add("telemetry", doctor.StateWarn, "telemetry: off (enable with [bench].telemetry = true)")
 			}
 
 			// The same check `forgectl pr` runs before it opens a review window,
 			// so doctor is never green for a config pr would refuse. The
 			// refusal names the setting, never its value.
 			if _, err := injectedWindowEnv(cfg); err != nil {
-				_, _ = fmt.Fprintf(out, "%s review-window environment: %s\n", marks.Fail, termsafe.SafeLine(err.Error()))
+				rec.add("review_window_env", doctor.StateFail, "review-window environment: "+safeText(err.Error()))
 				healthy = false
 			}
 
+			// The update-hooks watcher is optional, so this row warns and
+			// never fails the doctor. It reads only: a plist stat,
+			// `launchctl print`, and forgectl's own hook state files.
+			if hooksGOOS == "darwin" {
+				ctx := cmd.Context()
+				if ctx == nil {
+					ctx = context.Background()
+				}
+				cfgHooks, cfgErr := cfg.ResumeHooks()
+				facts, probeErr := hooksDoctorProbe(ctx)
+				state, detail := hooksDoctorRow(len(cfgHooks), hooksLongestTimeout(cfgHooks), cfgErr, facts, probeErr)
+				rec.add("update_hooks", state, detail)
+			}
+
+			if asJSON {
+				if err := writeLaunchDoctorJSON(cmd.OutOrStdout(), rec.checks, healthy); err != nil {
+					return err
+				}
+			}
 			if !healthy {
-				return fmt.Errorf("doctor found problems")
+				// Under --json the checks on stdout are the verdict
+				// (forgectl#862).
+				return jsonVerdict(fmt.Errorf("doctor found problems"), asJSON)
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false,
+		`emit {"checks":[{"name":...,"state":"ok|warn|fail","detail":...}],"healthy":...} to stdout`)
+	return cmd
+}
+
+// launchDoctorCheckJSON is one `launch doctor --json` check — the same line
+// the human output prints, split into the check it belongs to, its state (the
+// glyph, as doctor.State's ok/warn/fail vocabulary), and its text. Detail is
+// the human line verbatim, so every redaction the terminal applies — the OTLP
+// endpoint's hidden query and userinfo via endpointForDisplay, key names never
+// values — applies here by construction; there is no second rendering to
+// drift. Name is one of profile, pr_config, harness, legacy_migration, config,
+// usage_stats, telemetry, review_window_env, update_hooks, and may repeat.
+type launchDoctorCheckJSON struct {
+	Name   string `json:"name"`
+	State  string `json:"state"`
+	Detail string `json:"detail"`
+}
+
+// launchDoctorJSON is `launch doctor --json`'s stdout wire shape, mirroring
+// `forgectl doctor --json` (doctorReportJSON). Healthy is false exactly when
+// the command exits non-zero.
+type launchDoctorJSON struct {
+	Checks  []launchDoctorCheckJSON `json:"checks"`
+	Healthy bool                    `json:"healthy"`
+}
+
+// writeLaunchDoctorJSON encodes the collected checks through the sanctioned
+// termsafe seam. An empty check list encodes [], never null.
+func writeLaunchDoctorJSON(w io.Writer, checks []launchDoctorCheckJSON, healthy bool) error {
+	if checks == nil {
+		checks = []launchDoctorCheckJSON{}
+	}
+	enc := termsafe.JSONEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(launchDoctorJSON{Checks: checks, Healthy: healthy})
+}
+
+// launchDoctorRecorder is the one sink every doctor line goes through: on the
+// human path it prints "<mark> <detail>" immediately, byte-identical to the
+// output before --json existed; under --json it collects the line instead.
+type launchDoctorRecorder struct {
+	out    io.Writer
+	marks  theme.Marks
+	asJSON bool
+	checks []launchDoctorCheckJSON
+}
+
+func (r *launchDoctorRecorder) add(name string, state doctor.State, detail string) {
+	if r.asJSON {
+		r.checks = append(r.checks, launchDoctorCheckJSON{Name: name, State: string(state), Detail: detail})
+		return
+	}
+	_, _ = fmt.Fprintf(r.out, "%s %s\n", doctorMark(state, r.marks), detail)
+}
+
+// usageStats runs the usage-statistics check through the recorder, so both
+// paths get the same lines from one source.
+func (r *launchDoctorRecorder) usageStats(enabled bool) bool {
+	return collectUsageStats(enabled, func(state doctor.State, detail string) {
+		r.add("usage_stats", state, detail)
+	})
 }
 
 // endpointForDisplay hides the parts of an endpoint that carry secrets before

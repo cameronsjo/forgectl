@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -220,48 +221,32 @@ func assertNoSentinel(t *testing.T, phase string, renderings map[string]string, 
 	}
 }
 
-// TestSensitiveCommand_RevealReachesExecCmd is the mirror of the leak test.
+// TestSensitiveCommand_RevealReachesTheChild is the mirror of the leak test.
 // Without it, a seam that dropped every value on the floor would pass the
-// assertions above. This is the only test anywhere that sees a revealed value,
-// and it lives in internal/exec because no other package can reach the seam.
-func TestSensitiveCommand_RevealReachesExecCmd(t *testing.T) {
-	path := "/nonexistent/" + pathSentinel
-
-	runner := &OSSensitiveRunner{env: []string{"PATH=/usr/bin", "CMUX_SOCKET_PATH=stale", "TMUX=/tmp/old,1,2"}}
-	built := runner.buildCmd(SensitiveCommand{
-		Kind:      KindTmuxCreate,
-		Path:      Secret(path),
-		Args:      []Arg{Opaque(arg0Sentinel), MustFixed("-t"), Opaque(arg1Sentinel)},
-		Env:       []EnvMutation{ReplaceCmuxSocketPath(envSentinel), UnsetTmux()},
-		StdoutCap: 1024,
-		StderrCap: 1024,
-	})
-
-	if built.Path != path {
-		t.Errorf("exec.Cmd.Path = %q, want %q", built.Path, path)
+// assertions above. It runs the real runner against this test binary in its
+// argv mode, so the path and every argument are read back from the child
+// process itself, in order: internal/exec never holds them in plaintext
+// (forgectl#854), so the child is the only place they can be observed. The
+// environment's counterpart is TestRunSensitive_EnvironmentPolicyIsAppliedToTheRealChild.
+//
+// Mutations that turn it red: reverse argv in sealed's command; drop the
+// last argument there.
+func TestSensitiveCommand_RevealReachesTheChild(t *testing.T) {
+	runner, self := helperRunner(t, "argv", defaultRetireBound)
+	cmd := helperCommand(KindTmuxCreate, self, 8192)
+	cmd.Args = []Arg{Opaque(arg0Sentinel), MustFixed("-t"), Opaque(arg1Sentinel), EndOfOptions(), Opaque("-dashed operand")}
+	res, err := runner.RunSensitive(context.Background(), cmd)
+	if err != nil {
+		t.Fatalf("RunSensitive: %v", err)
 	}
-	want := []string{path, arg0Sentinel, "-t", arg1Sentinel}
-	if len(built.Args) != len(want) {
-		t.Fatalf("exec.Cmd.Args = %q, want %q", built.Args, want)
+	data, complete := res.Stdout.CopyBytesForParse()
+	if !complete {
+		t.Fatal("argv probe output was truncated")
 	}
-	for i := range want {
-		if built.Args[i] != want[i] {
-			t.Errorf("exec.Cmd.Args[%d] = %q, want %q", i, built.Args[i], want[i])
-		}
-	}
-
-	env := strings.Join(built.Env, "\n")
-	if !strings.Contains(env, "CMUX_SOCKET_PATH="+envSentinel) {
-		t.Errorf("replacement env value did not reach exec.Cmd.Env: %q", built.Env)
-	}
-	if strings.Contains(env, "CMUX_SOCKET_PATH=stale") {
-		t.Errorf("stale inherited entry survived the replacement: %q", built.Env)
-	}
-	if strings.Contains(env, "TMUX=") {
-		t.Errorf("UnsetTmux did not remove the inherited TMUX: %q", built.Env)
-	}
-	if !strings.Contains(env, "PATH=/usr/bin") {
-		t.Errorf("unrelated inherited entry was not preserved byte-exact: %q", built.Env)
+	got := strings.Split(string(data), "\x00")
+	want := []string{self, arg0Sentinel, "-t", arg1Sentinel, "--", "-dashed operand"}
+	if !slices.Equal(got, want) {
+		t.Errorf("child argv = %q, want %q", got, want)
 	}
 }
 
@@ -403,6 +388,16 @@ func TestSensitiveCommand_ValidateRefusesBeforeStart(t *testing.T) {
 		"stdout cap over ceil": func(c *SensitiveCommand) { c.StdoutCap = MaxOutputBytes + 1 },
 		"zero stderr cap":      func(c *SensitiveCommand) { c.StderrCap = 0 },
 		"stderr cap over ceil": func(c *SensitiveCommand) { c.StderrCap = MaxOutputBytes + 1 },
+		// TMPDIR belongs to the sops edit alone, and only as an absolute path.
+		"sops tmpdir on another kind": func(c *SensitiveCommand) { c.Env = []EnvMutation{ReplaceSopsTmpdir("/work/dir")} },
+		"sops tmpdir relative": func(c *SensitiveCommand) {
+			c.Kind = KindSopsEdit
+			c.Env = []EnvMutation{ReplaceSopsTmpdir("work/dir")}
+		},
+		"sops tmpdir on the extract": func(c *SensitiveCommand) {
+			c.Kind = KindSopsExtract
+			c.Env = []EnvMutation{ReplaceSopsTmpdir("/work/dir")}
+		},
 	}
 
 	runner := NewOSSensitiveRunner()
@@ -436,6 +431,15 @@ func TestSensitiveCommand_ValidateRefusesBeforeStart(t *testing.T) {
 	escaped.Args = []Arg{MustFixed("send-keys"), EndOfOptions(), Opaque("-rf")}
 	if err := escaped.validate(); err != nil {
 		t.Errorf("an end-of-options separator did not release the dash refusal: %v", err)
+	}
+
+	// The same mutation on the one call it exists for, with an absolute path,
+	// is accepted.
+	edit := base()
+	edit.Kind = KindSopsEdit
+	edit.Env = []EnvMutation{ReplaceSopsTmpdir("/work/dir")}
+	if err := edit.validate(); err != nil {
+		t.Errorf("an absolute TMPDIR on the sops edit was refused: %v", err)
 	}
 
 	// A cap at the ceiling, and one narrower than it, are both legitimate.

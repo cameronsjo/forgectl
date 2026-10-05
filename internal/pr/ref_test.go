@@ -4,7 +4,7 @@ package pr
 //
 // ParseRef (Classification: hostile-input validation)
 //   [x] Accept: owner/repo#N
-//   [x] Accept: full github.com PR URL (with and without trailing slash)
+//   [x] Accept: full https PR URL on any valid host, host carried on the Ref
 //   [x] Accept: bare N → Ref{Number:N}, Owner/Repo empty (incomplete)
 //   [x] Accept: owner/repo charset edge (dots, underscores, hyphens)
 //   [x] Reject: foo#bar (non-numeric N)
@@ -26,6 +26,7 @@ package pr
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -38,8 +39,11 @@ func TestParseRef_Accept(t *testing.T) {
 		want Ref
 	}{
 		{"slug", "cameronsjo/forgectl#42", Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}},
-		{"url", "https://github.com/cameronsjo/forgectl/pull/7", Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 7}},
-		{"url trailing slash", "https://github.com/cameronsjo/forgectl/pull/7/", Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 7}},
+		{"url", "https://github.com/cameronsjo/forgectl/pull/7", Ref{Host: "github.com", Owner: "cameronsjo", Repo: "forgectl", Number: 7}},
+		{"url trailing slash", "https://github.com/cameronsjo/forgectl/pull/7/", Ref{Host: "github.com", Owner: "cameronsjo", Repo: "forgectl", Number: 7}},
+		// A PR URL carries its own host, which the gh calls then name
+		// explicitly (#413); it is lowercased and must pass ValidHostSegment.
+		{"url enterprise host", "https://GHE.Example.test/o/r/pull/1", Ref{Host: "ghe.example.test", Owner: "o", Repo: "r", Number: 1}},
 		{"bare", "42", Ref{Number: 42}},
 		{"charset", "a.b_c-d/e.f_g-h#1", Ref{Owner: "a.b_c-d", Repo: "e.f_g-h", Number: 1}},
 		{"trim whitespace", "  cameronsjo/forgectl#42  ", Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}},
@@ -71,7 +75,11 @@ func TestParseRef_Reject(t *testing.T) {
 		{"space injection", "a/b#1 --upload-pack=x"},
 		{"url extra segments", "https://github.com/o/r/pull/1/extra"},
 		{"url wrong path", "https://github.com/o/r/issues/1"},
-		{"url non-github host", "https://evil.com/o/r/pull/1"},
+		{"url host with port", "https://ghe.example.test:8443/o/r/pull/1"},
+		{"url host with userinfo", "https://x:y@ghe.example.test/o/r/pull/1"},
+		{"url option-like host", "https://-ghe.example.test/o/r/pull/1"},
+		{"url oversized host", "https://" + strings.Repeat("a", MaxHostSegmentBytes+1) + "/o/r/pull/1"},
+		{"url http scheme", "http://github.com/o/r/pull/1"},
 		{"oversized N", "999999999999999999999999999999"},
 		{"zero", "0"},
 		{"empty", ""},
@@ -128,7 +136,7 @@ func FuzzParseRef(f *testing.F) {
 		rt, err := ParseRef(ref.String())
 		if err != nil {
 			t.Errorf("ParseRef(%q).String()=%q failed to re-parse: %v", s, ref.String(), err)
-		} else if rt != ref {
+		} else if !rt.sameIdentity(ref) {
 			t.Errorf("round-trip mismatch: %+v -> %q -> %+v", ref, ref.String(), rt)
 		}
 	})
@@ -153,7 +161,7 @@ func TestResolveRef_BareViaGh(t *testing.T) {
 	fake := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
 			if name == "gh" {
-				return "cameronsjo/forgectl", nil
+				return "https://GHE.example.test/cameronsjo/forgectl", nil
 			}
 			return "", errors.New("unexpected call")
 		},
@@ -163,7 +171,8 @@ func TestResolveRef_BareViaGh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveRef: %v", err)
 	}
-	want := Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}
+	// The host is the checkout's remote host, not [github] host (#413).
+	want := Ref{Host: "ghe.example.test", Owner: "cameronsjo", Repo: "forgectl", Number: 42}
 	if got != want {
 		t.Errorf("ResolveRef = %+v, want %+v", got, want)
 	}
@@ -186,7 +195,7 @@ func TestResolveRef_BareViaGitFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveRef: %v", err)
 	}
-	want := Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 42}
+	want := Ref{Host: "github.com", Owner: "cameronsjo", Repo: "forgectl", Number: 42}
 	if got != want {
 		t.Errorf("ResolveRef = %+v, want %+v", got, want)
 	}
@@ -200,13 +209,13 @@ func TestResolveRef_BadOriginRejected(t *testing.T) {
 	// regex alone (which admits both).
 	cases := []struct {
 		name   string
-		origin string // as returned by `gh repo view` (slug form)
+		origin string // as returned by `gh repo view --json url`
 	}{
-		{"shell metachars", "owner/repo;rm -rf"},
-		{"leading dash owner", "-x/repo"}, // via a git@github.com:-x/repo.git origin
-		{"leading dash repo", "owner/-x"}, // symmetric: a repo component
-		{"dotdot owner", "../repo"},       // via a https://github.com/../repo.git origin
-		{"dotdot repo", "owner/.."},       // symmetric
+		{"shell metachars", "https://github.com/owner/repo;rm -rf"},
+		{"leading dash owner", "https://github.com/-x/repo"},
+		{"leading dash repo", "https://github.com/owner/-x"},
+		{"dotdot owner", "https://github.com/../repo"},
+		{"dotdot repo", "https://github.com/owner/.."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -252,7 +261,7 @@ func TestResolveRef_LocalOwnerResolves(t *testing.T) {
 		fake := &exec.FakeRunner{
 			RunFunc: func(name string, args []string) (string, error) {
 				if name == "gh" {
-					return "local/somerepo", nil
+					return "https://github.com/local/somerepo", nil
 				}
 				return "", errors.New("unexpected call")
 			},
@@ -294,7 +303,7 @@ func TestLocalSentinel_OnlyNewLocalRefMarksLocal(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s rejected a real owner named %q: %v", tc.name, localOwnerSentinel, err)
 			}
-			if expect := (Ref{Owner: "local", Repo: "abc1234", Number: 1}); got != expect {
+			if expect := (Ref{Owner: "local", Repo: "abc1234", Number: 1}); !got.sameIdentity(expect) {
 				t.Errorf("%s = %+v, want %+v", tc.name, got, expect)
 			}
 			if got.IsLocal() {

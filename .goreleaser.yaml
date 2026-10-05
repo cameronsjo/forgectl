@@ -74,7 +74,10 @@ archives:
       - README*
       - CHANGELOG*
       # The binary embeds the Artificer web fonts (docs serve), and their SIL
-      # OFL requires the license to travel with them.
+      # OFL requires the license to travel with them. KaTeX's MIT notice
+      # (KaTeX-MIT.txt, math rendering) and mermaid's (Mermaid-MIT.txt,
+      # diagrams) sit in the same directory for the same reason and ride this
+      # entry.
       - src: internal/docs/assets/font-licenses/*
         dst: font-licenses
 

@@ -64,12 +64,19 @@ func TestAttach_Success(t *testing.T) {
 	if !ok {
 		t.Fatal("no select-window call")
 	}
-	want := []string{"select-window", "-t", "@5"}
+	// forgectl#805: the select is generation-guarded on the captured Run path,
+	// so a server replaced after the resolve answers with the mismatch marker
+	// rather than selecting its own @5. Mutation that turns it red: send
+	// SelectWindow's bare select-window through RunInteractive again.
+	want := []string{
+		"if-shell", "-F", "-t", "@5", "#{==:#{pid}/#{start_time},123/456}",
+		"select-window -t @5", `display-message -p "forgectl-generation-mismatch #{pid}/#{start_time}"`,
+	}
 	if !equalArgs(call.Args, want) {
 		t.Errorf("tmux args = %v, want %v", call.Args, want)
 	}
-	if !call.Interactive {
-		t.Error("Attach should dispatch through the interactive path")
+	if call.Interactive {
+		t.Error("the guarded select must run on the captured path, where its answer can be read")
 	}
 }
 
@@ -124,6 +131,56 @@ func TestAttach_MissingWindow_Hints(t *testing.T) {
 	}
 	if !errors.Is(err, tmux.ErrObjectGone) {
 		t.Errorf("error = %q, want it to wrap tmux.ErrObjectGone", err.Error())
+	}
+}
+
+// TestAttach_HungTmuxIsBounded is forgectl#712 item 2: Attach is outside the
+// lifecycle lock, but a wedged tmux must still not leave `pr attach` waiting
+// until Ctrl-C. The window lookup is bounded and says tmux did not answer.
+func TestAttach_HungTmuxIsBounded(t *testing.T) {
+	old := lockedTmuxBudget
+	lockedTmuxBudget = 100 * time.Millisecond
+	t.Cleanup(func() { lockedTmuxBudget = old })
+	ref := Ref{Owner: "o", Repo: "r", Number: 7}
+	h := &hangingTmux{FakeRunner: reviewServer(mustWindowName(t, ref)), blockVerb: "list-sessions"}
+	c := New(h, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+		WithApprover(func(string) (bool, error) { return false, nil }),
+		WithTTYCheck(func() bool { return false }))
+	path, _ := seedSession(t, c, ref, time.Now().UTC())
+
+	done := make(chan error, 1)
+	go func() { done <- c.Attach(context.Background(), path) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "tmux did not answer") {
+			t.Fatalf("Attach err = %v, want the tmux-did-not-answer refusal", err)
+		}
+		if strings.Contains(err.Error(), "predate a forgectl upgrade") {
+			t.Errorf("Attach err = %q reads as a missing window", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Attach is still blocked on tmux; the resolve is not bounded")
+	}
+	if _, ok := findCallVerb(h.Calls, "tmux", "select-window"); ok {
+		t.Error("nothing may be selected when the lookup timed out")
+	}
+}
+
+// TestAttach_UnreadableWindowListIsNotAMissingWindow: an unreadable window
+// list must not be worded as a missing window (the "predate a forgectl
+// upgrade" hint), since the window may well be there.
+func TestAttach_UnreadableWindowListIsNotAMissingWindow(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "r", Number: 7}
+	fake := windowReadServer("", errors.New("tmux: permission denied"))
+	c := testClient(t, fake)
+	path, _ := seedSession(t, c, ref, time.Now().UTC())
+
+	err := c.Attach(context.Background(), path)
+	if err == nil || !strings.Contains(err.Error(), "could not say whether it exists") {
+		t.Fatalf("Attach err = %v, want the unreadable wording", err)
+	}
+	if strings.Contains(err.Error(), "predate a forgectl upgrade") {
+		t.Errorf("Attach err = %q reads as a missing window", err)
 	}
 }
 

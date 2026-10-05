@@ -562,8 +562,13 @@ func (d *Document) lineNumber(idx int) int {
 }
 
 // Redacted renders the Document with every value masked: a fixed 4-char
-// "****", no length hint, quotes dropped. Comments, blanks, and ordering
-// are reproduced verbatim; a malformed line is masked in its ENTIRETY (see
+// "****", no length hint, quotes dropped. Every comment is masked too —
+// a "#" line and a quoted value's trailing comment alike render as their
+// leading whitespace plus a fixed commentMask (see maskComment), because a
+// dotenv comment routinely carries a secret (a commented-out old key, a
+// "# prod token: …" note). Blanks and ordering are reproduced verbatim, so
+// the output stays line-for-line aligned with the source (a multiline pair
+// excepted, below); a malformed line is masked in its ENTIRETY (see
 // redactMalformed for why "preserve everything before the first '='" isn't
 // safe). A multiline quoted pair collapses to ONE "KEY=****" line — its
 // continuation lines never print. Each rendered line ends in its OWN
@@ -584,6 +589,8 @@ func (d *Document) Redacted() []byte {
 			rendered = redactPair(l)
 		case KindMalformed:
 			rendered = redactMalformed(l)
+		case KindComment:
+			rendered = maskComment(l.Raw[0])
 		default:
 			rendered = l.Raw[0]
 		}
@@ -595,11 +602,11 @@ func (d *Document) Redacted() []byte {
 	return b.Bytes()
 }
 
-// redactPair renders a single "KEY=****" (or "export KEY=****") line. The
-// original trailing text is kept ONLY when the value was quoted — an
-// unquoted value has no comment boundary, so any trailing "#…" was already
-// folded into Value (and is masked along with it, by never being re-
-// emitted here at all).
+// redactPair renders a single "KEY=****" (or "export KEY=****") line. A
+// trailing comment survives ONLY when the value was quoted, and then only
+// as its masked shape (maskComment) — never its text. An unquoted value has
+// no comment boundary, so any trailing "#…" was already folded into Value
+// (and is masked along with it, by never being re-emitted here at all).
 func redactPair(l Line) string {
 	var b strings.Builder
 	if l.Export {
@@ -608,9 +615,27 @@ func redactPair(l Line) string {
 	b.WriteString(l.Key)
 	b.WriteString("=****")
 	if l.Quote != 0 && l.Inline != "" {
-		b.WriteString(l.Inline)
+		b.WriteString(maskComment(l.Inline))
 	}
 	return b.String()
+}
+
+// commentMask replaces the text of every comment Redacted renders. It is
+// fixed, so it carries neither the comment's content nor its length.
+const commentMask = "# ****"
+
+// maskComment renders s — a whole "#" comment line, or the trailer after a
+// quoted value's closing quote — as its leading spaces and tabs followed by
+// commentMask. A trailer that is only whitespace (parseLine's one other
+// accepted trailer shape) has no comment and passes through unchanged.
+// Anything else is masked regardless of shape: the whitespace prefix is the
+// only byte run that ever survives.
+func maskComment(s string) string {
+	body := strings.TrimLeft(s, " \t")
+	if body == "" {
+		return s
+	}
+	return s[:len(s)-len(body)] + commentMask
 }
 
 // redactMalformed masks a malformed line (or, for an unterminated quoted
@@ -630,9 +655,12 @@ func redactPair(l Line) string {
 // over-masking only costs legibility — and KindMalformed is exactly where
 // hand-mangled input lands, which is redact's primary audience. A blank
 // line never reaches here (Parse classifies it KindBlank), but the check is
-// kept explicit rather than assumed.
+// kept explicit rather than assumed — and it uses Parse's own blank rule
+// (spaces and tabs only). strings.TrimSpace would also treat VT, FF, NBSP
+// and NEL as blank and echo them verbatim, the one place a source byte other
+// than a space or tab could reach redact's output.
 func redactMalformed(l Line) string {
-	if strings.TrimSpace(l.Raw[0]) == "" {
+	if strings.TrimLeft(l.Raw[0], " \t") == "" {
 		return l.Raw[0]
 	}
 	return "****"
@@ -661,6 +689,16 @@ func encode(export bool, key, value string) string {
 // FIRST, then '"', then '$', then newline→"\n" — escaping in any other
 // order double-escapes (e.g. escaping '"' before '\\' would re-escape the
 // backslash the quote-escape just introduced).
+//
+// A carriage return is deliberately NOT escaped. A '\r' is written raw,
+// inside whichever quotes the rules above pick, and this package's parser
+// round-trips it (Parse
+// splits on '\n' only). It is not escaped because decodeQuotedBody has no
+// `\r` case, so adding one would change the meaning of double-quoted `\r`
+// already on disk. python-dotenv reading from a file normalizes a raw '\r'
+// to '\n'. No escape is added (it would change the meaning of existing
+// double-quoted `\r` on disk); instead `env set` refuses a \r in a NEW value
+// (commitSet), and docs/commands/env.md lists the consumer caveats (#566).
 func encodeValue(value string) string {
 	if bareValueRE.MatchString(value) {
 		return value

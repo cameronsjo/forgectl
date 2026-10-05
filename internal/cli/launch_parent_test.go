@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -125,4 +126,50 @@ func TestEnsureConfigParentDurable_AncestorParentSyncFailureStopsAtExactResidue(
 	if _, err := os.Lstat(filepath.Join(root, "a", "b")); !os.IsNotExist(err) {
 		t.Fatalf("later directory exists: %v", err)
 	}
+}
+
+// TestEnsureConfigParentDurable_QuotesHostileAncestor pins forgectl#855: the
+// config path is built from $XDG_CONFIG_HOME or the home directory, so an
+// ancestor's name reaches these errors from the environment. Each names it
+// quoted, with every control and format rune escaped, and keeps the cause on
+// the chain.
+//
+// Mutation that turns it red: print dir raw in the "create config directory"
+// error, or current raw in the "not a directory" error.
+func TestEnsureConfigParentDurable_QuotesHostileAncestor(t *testing.T) {
+	const hostile = "ev\u202eil\u009b31m"
+	check := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("ensureConfigParentDurable() = nil, want an error")
+		}
+		if strings.ContainsAny(err.Error(), "\u202e\u009b") {
+			t.Errorf("error carries a raw bidi/control rune: %q", err)
+		}
+		if !strings.Contains(err.Error(), `ev\u202eil\u009b31m"`) {
+			t.Errorf("error = %q, want the escaped, quoted ancestor", err)
+		}
+	}
+
+	t.Run("mkdir fails", func(t *testing.T) {
+		root := t.TempDir()
+		ops := nativeConfigParentOps()
+		ops.mkdir = func(path string, _ os.FileMode) error {
+			return &os.PathError{Op: "mkdir", Path: path, Err: fs.ErrPermission}
+		}
+		_, err := ensureConfigParentDurable(filepath.Join(root, hostile, "config.toml"), ops)
+		check(t, err)
+		if !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("error = %v, want the mkdir cause on the chain", err)
+		}
+	})
+
+	t.Run("ancestor is a file", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, hostile), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := ensureConfigParentDurable(filepath.Join(root, hostile, "config.toml"), nativeConfigParentOps())
+		check(t, err)
+	})
 }

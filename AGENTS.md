@@ -48,7 +48,8 @@ Gotchas agent sessions have hit here. Each one cost a CI cycle or a debugging de
 
 - `internal/docs/assets/*.js` has no test harness and CI never runs it. Verify
   a change with a Playwright script against a running `docs serve`, and say so
-  in the PR.
+  in the PR. `scripts/verify-math-render.mjs` is the committed one for
+  `math-init.js`; run it after any math or KaTeX change.
 - Load pages with `waitUntil: 'load'`, never `'networkidle'`. The live-reload
   SSE stream never goes idle.
 - The reader scrolls inside `main.surface-document`, not `window`, so
@@ -61,6 +62,11 @@ Gotchas agent sessions have hit here. Each one cost a CI cycle or a debugging de
 - In claude.ai cloud sessions, import Playwright from
   `$(npm root -g)/playwright/index.mjs` and launch Chromium with
   `executablePath: '/opt/pw-browsers/chromium'`.
+
+- Bumping bluemonday: re-verify `unclosedSkipContent`
+  (`internal/docs/skipcontent.go`) against bluemonday's `sanitize.go`. It
+  replays that loop's skip-content state machine, and the tests only catch
+  drift in the skip set and the replay's inputs, not in the loop itself.
 
 ### Vendored Artificer
 

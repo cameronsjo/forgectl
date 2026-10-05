@@ -7,12 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 )
 
-// GitRunner is the slice of exec.Runner the worktree helper uses.
-type GitRunner interface {
-	Run(ctx context.Context, name string, args ...string) (string, error)
-}
+// GitRunner is the slice of exec.Runner the worktree helper uses. Every git
+// call goes through gitenv under its Local profile, which pins the hardening
+// every forgectl git call carries; AddWorktree adds core.hooksPath on top.
+type GitRunner = gitenv.Runner
 
 // Worktree is what AddWorktree created.
 type Worktree struct {
@@ -41,12 +43,12 @@ var worktreeDirs = []string{".claude", "worktrees"}
 // parent is the main checkout, and that is the top. A bare-repo layout has no
 // main checkout, so it keeps the worktree's own top.
 func RepoTop(ctx context.Context, run GitRunner, dir string) (string, error) {
-	out, err := run.Run(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel")
+	out, err := gitenv.Run(ctx, run, gitenv.Local, "-C", dir, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", fmt.Errorf("worker: %s is not inside a git checkout: %w", dir, err)
 	}
 	top := strings.TrimSpace(out)
-	common, err := run.Run(ctx, "git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	common, err := gitenv.Run(ctx, run, gitenv.Local, "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
 		return "", fmt.Errorf("worker: read the common git dir of %s: %w", dir, err)
 	}
@@ -90,7 +92,7 @@ func AddWorktree(ctx context.Context, run GitRunner, top, name, branch string) (
 	if err := precheckBranch(branch); err != nil {
 		return Worktree{}, err
 	}
-	if _, err := run.Run(ctx, "git", "check-ref-format", "--branch", branch); err != nil {
+	if _, err := gitenv.Run(ctx, run, gitenv.Local, "check-ref-format", "--branch", branch); err != nil {
 		return Worktree{}, fmt.Errorf("%w: git check-ref-format refused it", ErrInvalidBranch)
 	}
 	if err := ensureWorktreeRoot(top); err != nil {
@@ -112,7 +114,7 @@ func AddWorktree(ctx context.Context, run GitRunner, top, name, branch string) (
 	default:
 		add = append(add, "-b", branch, "--", path, "HEAD")
 	}
-	if _, err := run.Run(ctx, "git", add...); err != nil {
+	if _, err := gitenv.Run(ctx, run, gitenv.Local, add...); err != nil {
 		return Worktree{}, fmt.Errorf("worker: git worktree add: %w", err)
 	}
 
@@ -123,7 +125,7 @@ func AddWorktree(ctx context.Context, run GitRunner, top, name, branch string) (
 	if filepath.Dir(resolved) != filepath.Dir(path) {
 		return Worktree{}, fmt.Errorf("%w: the worktree resolved to %s, outside %s", ErrUnsafeWorktreeRoot, resolved, filepath.Dir(path))
 	}
-	base, err := run.Run(ctx, "git", "-C", resolved, "rev-parse", "HEAD")
+	base, err := gitenv.Run(ctx, run, gitenv.Local, "-C", resolved, "rev-parse", "HEAD")
 	if err != nil {
 		return Worktree{}, fmt.Errorf("worker: read worktree HEAD: %w", err)
 	}
@@ -161,6 +163,6 @@ func ensureWorktreeRoot(top string) error {
 }
 
 func refExists(ctx context.Context, run GitRunner, top, ref string) bool {
-	_, err := run.Run(ctx, "git", "-C", top, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	_, err := gitenv.Run(ctx, run, gitenv.Local, "-C", top, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
 	return err == nil
 }

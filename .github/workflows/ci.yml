@@ -7,8 +7,18 @@ on:
   pull_request:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A push run gets a group of its own commit, so no later push can cancel it
+  # (not even as a queued run). release.yml's verify job waits for the main
+  # push run of the tagged commit to succeed; a cancelled run would block the
+  # release until someone re-ran CI by hand. PR runs still supersede each
+  # other.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Least privilege for every job: they only check out, build and test. A job
+# that needs more declares its own block (lint already does).
+permissions:
+  contents: read
 
 jobs:
   build-test:
@@ -25,6 +35,10 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26'
+          # go.mod requires go1.26.8 and setup-go exports GOTOOLCHAIN=local, so
+          # a runner image with an older 1.26 cached would fail every job.
+          # Release and Vulncheck resolve the newest patch the same way.
+          check-latest: true
 
       - name: Install tmux
         # internal/tmux's *Isolated tests measure tmux's real -t target grammar
@@ -42,6 +56,15 @@ jobs:
         # install normally completes in seconds, so this is generous.
         timeout-minutes: 3
         run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Install ripgrep
+        # internal/docs' TestSearchRealRg runs `docs search`'s real rg against
+        # the two measured escapes (a RIPGREP_CONFIG_PATH turning on --follow,
+        # a query parsed as an rg flag). It skips without rg, so without this
+        # step it would never run here. The apt index is already fresh from
+        # the tmux step; bounded for the same reason that step is.
+        timeout-minutes: 3
+        run: sudo apt-get install -y ripgrep
 
       - name: Install sops and age
         # internal/sops' integration tests drive the real sops binary: they
@@ -86,6 +109,22 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Vet (GOOS=windows)
+        # Windows is not a release target, but the tree is kept compiling
+        # there (#803, #810), and a unix-only syscall in an untagged test file
+        # breaks that with no other job noticing. Vet type-checks test files
+        # too, which `go build` does not.
+        env:
+          GOOS: windows
+        run: go vet ./...
+
+      - name: Vet (GOOS=freebsd)
+        # FreeBSD is the unix that is neither linux nor darwin, so it catches
+        # a test that leans on a platform-specific fixture (#825).
+        env:
+          GOOS: freebsd
+        run: go vet ./...
+
       - name: Test
         # Each FORGECTL_REQUIRE_* turns a tool-absent skip into a failure: on a
         # runner where these tests are meant to run, a skip and a pass must not
@@ -95,6 +134,7 @@ jobs:
         env:
           FORGECTL_REQUIRE_TMUX: '1'
           FORGECTL_REQUIRE_SOPS_INTEGRATION: '1'
+          FORGECTL_REQUIRE_RG: '1'
         run: go test ./...
 
       - name: Real-sops integration tests (named)
@@ -149,6 +189,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26'
+          check-latest: true
 
       - name: Lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
@@ -174,6 +215,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26'
+          check-latest: true
 
       - name: Install tmux
         # Same reason as the ubuntu job: the *Isolated tmux-grammar tests skip
@@ -191,6 +233,12 @@ jobs:
         # brew genuinely can take longer when the formula is not in the image.
         timeout-minutes: 5
         run: brew list tmux || brew install tmux
+
+      - name: Install ripgrep
+        # Same reason as the ubuntu job: TestSearchRealRg skips without rg.
+        # `brew list ||` and the bound follow the tmux step above.
+        timeout-minutes: 5
+        run: brew list ripgrep || brew install ripgrep
 
       - name: Install sops and age
         # Darwin is where sops' behaviour was measured — the exit status for an
@@ -239,6 +287,7 @@ jobs:
         env:
           FORGECTL_REQUIRE_TMUX: '1'
           FORGECTL_REQUIRE_SOPS_INTEGRATION: '1'
+          FORGECTL_REQUIRE_RG: '1'
         run: go test -v ./...
 
   helper:

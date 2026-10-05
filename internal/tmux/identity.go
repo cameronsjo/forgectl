@@ -180,6 +180,11 @@ var (
 	// exactly. It is deliberately NOT satisfied by a prefix or glob sibling:
 	// that fallback is forgectl#237.
 	ErrSessionNotFound = errors.New("no tmux session with that exact name")
+	// ErrAmbiguousWindow reports that more than one window in a session carries
+	// the requested name exactly. tmux permits duplicate window names inside a
+	// session, so picking the first would act on a window chosen by listing
+	// order rather than by identity.
+	ErrAmbiguousWindow = errors.New("more than one tmux window with that exact name")
 	// ErrNoServer reports that no tmux server is running on the socket THIS
 	// client selects — the default one derived from the environment, or the
 	// pinned one when the client carries a socket. It is the one classification
@@ -208,6 +213,29 @@ var (
 	// an unrecognized tmux error. Callers must refuse rather than fall back to
 	// the default server.
 	ErrServerUnreadable = errors.New("tmux server state could not be read")
+	// ErrServerExited reports a socket file whose server is proven gone: the
+	// file is a socket and a connect to it was refused, so nothing listens
+	// there (forgectl#786). tmux 3.4 leaves its socket behind on every clean
+	// exit. It always arrives wrapped together with ErrServerUnreadable, so
+	// every caller that does not opt in keeps failing closed — which is what
+	// a kill-time or teardown "gone" verdict needs, because a refused connect
+	// proves no server listens NOW, not that a crashed server's panes died
+	// with it (#765). Listings shown to an operator (DisplaySessionListing,
+	// DisplayWindowListing), EnsureSession's create, and CheckGenerationCapability
+	// opt in and read it as "no server".
+	//
+	// Its text carries the remediation (forgectl#805), because the refusals
+	// that wrap it otherwise leave the operator with no next step: a new
+	// session on the leftover socket replaces it with a live server (tmux
+	// 3.4's client unlinks a refused socket before starting one). The
+	// "nothing that ran under it" clause is the #765 caveat — only the
+	// operator can know that no pane process outlived the server.
+	ErrServerExited = errors.New("the tmux server has exited (its socket file remains, and nothing listens on it); " +
+		"once nothing that ran under it is still running, start any tmux session to clear the socket, then retry")
+	// ErrUnsafeOperand reports an operator-supplied value that cannot be
+	// passed through tmux's command parser byte for byte, so it is refused
+	// before any command runs (quoteCommandOperand).
+	ErrUnsafeOperand = errors.New("value cannot be passed to tmux safely")
 )
 
 // currentSelector reads the live server selection. Compared against a captured
@@ -237,6 +265,30 @@ func (c *Client) SessionIdentity(s Session) SessionIdentity {
 // WindowIdentity binds a listed window row to the current server selection.
 func (c *Client) WindowIdentity(w Window) WindowIdentity {
 	return w.Identity(c.currentSelector())
+}
+
+// exitedSocketError names the leftover socket of an exited server inside a
+// serverStateError chain.
+type exitedSocketError struct{ path string }
+
+// Error is the "socket <path>" text the chain always carried, quoted because
+// the path can derive from $TMUX_TMPDIR and reaches a terminal.
+func (e exitedSocketError) Error() string {
+	return "socket " + termsafe.QuotePath(e.path)
+}
+
+// ExitedSocketPath returns the socket file an exited server left behind, when
+// err carries one (an ErrServerExited verdict). A message that rewords that
+// verdict uses it to keep the path: an operator running more than one server
+// needs to know which socket to clear (forgectl#815). The path is returned
+// raw, unescaped: it can derive from $TMUX_TMPDIR, so a caller printing it
+// must quote it (termsafe.QuotePath) before it reaches a terminal.
+func ExitedSocketPath(err error) (string, bool) {
+	var exited exitedSocketError
+	if errors.As(err, &exited) {
+		return exited.path, true
+	}
+	return "", false
 }
 
 // serverStateError maps a failed tmux command onto a typed server-state error,
@@ -269,6 +321,17 @@ func (c *Client) serverStateError(ctx context.Context, args []string, err error)
 		return fmt.Errorf("%w (socket %s)", ErrUnpinnedCommand, termsafe.QuotePath(c.socket))
 	case serverSocketDirMissing:
 		return fmt.Errorf("%w: %s", ErrSocketDirMissing, termsafe.QuotePath(filepath.Dir(failure.SocketPath)))
+	case serverDeadSocket:
+		// BOTH sentinels: ErrServerUnreadable keeps every existing caller
+		// failing closed, and ErrServerExited is what an opted-in listing or
+		// create reads as "no server".
+		// The socket leads so the remediation ErrServerExited ends on is not
+		// separated from the state it describes.
+		// The socket rides as a typed error so a caller that rewords the
+		// verdict can still name which socket to clear (ExitedSocketPath);
+		// its text is exactly the "socket <path>" this line always carried.
+		return fmt.Errorf("%w (%w): %w: %w",
+			ErrServerUnreadable, exitedSocketError{path: failure.SocketPath}, ErrServerExited, err)
 	default:
 		cause := failure.Cause
 		if cause == nil {
@@ -328,6 +391,14 @@ func (c *Client) RevalidateSession(ctx context.Context, want SessionIdentity) (S
 
 // RevalidateWindow proves a captured window still exists on the same server
 // incarnation AND still belongs to the session it was captured under.
+//
+// "Belongs to" means ANY row carrying the id sits under the captured session,
+// not the first one. `link-window` puts one window into several sessions, and
+// `list-windows -a` then prints it once per session with the same @id, so the
+// captured parent can be the second row. Refusing on the first foreign row
+// would call a linked window reparented when it is still exactly where it was
+// captured (forgectl#762). ErrWrongParent is reserved for an id whose rows
+// ALL name some other session.
 func (c *Client) RevalidateWindow(ctx context.Context, want WindowIdentity) (WindowIdentity, error) {
 	if err := c.preflight(want.Generation, want.ID, ValidateWindowID); err != nil {
 		return WindowIdentity{}, err
@@ -339,6 +410,7 @@ func (c *Client) RevalidateWindow(ctx context.Context, want WindowIdentity) (Win
 	if err != nil {
 		return WindowIdentity{}, err
 	}
+	foreignParent := ""
 	for _, w := range windows {
 		if !want.Generation.matches(w.ServerPID, w.ServerStart) {
 			return WindowIdentity{}, generationDrift(want.Generation, w.ServerPID, w.ServerStart)
@@ -347,11 +419,17 @@ func (c *Client) RevalidateWindow(ctx context.Context, want WindowIdentity) (Win
 			continue
 		}
 		if w.SessionID != want.SessionID {
-			return WindowIdentity{}, fmt.Errorf(
-				"%w: window %s was under session %s at capture and is now under %s",
-				ErrWrongParent, w.ID, want.SessionID, w.SessionID)
+			if foreignParent == "" {
+				foreignParent = w.SessionID
+			}
+			continue
 		}
 		return WindowIdentity{Generation: want.Generation, ID: w.ID, SessionID: w.SessionID, Name: w.Name}, nil
+	}
+	if foreignParent != "" {
+		return WindowIdentity{}, fmt.Errorf(
+			"%w: window %s was under session %s at capture and is now under %s",
+			ErrWrongParent, want.ID, want.SessionID, foreignParent)
 	}
 	return WindowIdentity{}, fmt.Errorf("%w: window %s (%q)", ErrObjectGone, want.ID, want.Name)
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 	"github.com/cameronsjo/forgectl/internal/projects"
 )
 
@@ -44,6 +46,7 @@ func pullCmdFixture(t *testing.T, names []string, statusRecords, pullOut map[str
 	}
 	t.Setenv("PROJECTS_DIR", tmp)
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if name != testProjectsGitBinary || len(args) < 3 || args[0] != "-C" {
 			return "", nil
 		}
@@ -132,5 +135,53 @@ func TestPullAllCmd_DirArg_PassedThrough(t *testing.T) {
 	err := cmd.ExecuteContext(context.Background())
 	if err == nil {
 		t.Fatal("expected an error for a nonexistent dir argument, got nil")
+	}
+}
+
+func TestPullAllCmd_JSON_RowsAndExitCodeUnchanged(t *testing.T) {
+	client := pullCmdFixture(t, []string{"ok", "broken"}, nil,
+		map[string]string{"ok": "Already up to date."},
+		map[string]error{"broken": errors.New("conflict")})
+	cmd := newProjectsPullAllCmd(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--json"})
+	cmd.SilenceUsage = true // cobra prints usage to OutOrStderr, which SetOut redirects
+
+	err := cmd.ExecuteContext(context.Background())
+	// Under --json the rows are the verdict, so the exit is silent
+	// (forgectl#862) but still 1.
+	if _, ok := err.(*silentCodedError); !ok || ExitCode(err) != 1 {
+		t.Fatalf("error = %T %v; --json must keep the aggregate failure exit, silently", err, err)
+	}
+	var rows []map[string]string
+	if jerr := json.Unmarshal(stdout.Bytes(), &rows); jerr != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", jerr, stdout.String())
+	}
+	got := map[string]string{}
+	for _, r := range rows {
+		got[r["name"]] = r["status"]
+	}
+	if len(rows) != 2 || got["ok"] != "up-to-date" || got["broken"] != "failed" {
+		t.Errorf("rows = %v", rows)
+	}
+	if strings.Contains(stdout.String(), "✗") {
+		t.Errorf("human glyph leaked into --json output: %q", stdout.String())
+	}
+}
+
+func TestPullAllCmd_JSON_EmptyIsArray(t *testing.T) {
+	client := pullCmdFixture(t, nil, nil, nil, nil)
+	cmd := newProjectsPullAllCmd(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "[]" {
+		t.Errorf("stdout = %q, want []", got)
 	}
 }

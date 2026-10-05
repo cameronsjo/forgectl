@@ -25,9 +25,9 @@ func confirm(th theme.Theme, prompt string) (bool, error) {
 
 // confirmFn is confirm, exposed as a package-level var so tests can
 // substitute a fake — huh.NewConfirm().Run() requires a real tty, which is
-// exactly what a test doesn't have. Only clean.go's three call sites go
-// through this var so far — branch.go, pr_findings.go, and tmux_kill.go
-// still call confirm() directly, and their own apply⇒confirm⇒delete paths
+// exactly what a test doesn't have. clean.go's three call sites and
+// pr_findings.go's cleanup go through this var so far — branch.go and
+// tmux_kill.go still call confirm() directly, and their own apply⇒confirm⇒delete paths
 // are exactly as untestable as clean's was. Migrating them is a real
 // follow-up (a five-file refactor, not this fix), but it's out of scope
 // for forgectl#165 — this var exists to make clean_test.go's

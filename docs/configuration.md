@@ -7,6 +7,8 @@ Optional. forgectl runs with sensible defaults and no config file. To persist pr
 - macOS: `~/Library/Application Support/forgectl/config.toml`
 - Linux: `~/.config/forgectl/config.toml`
 
+A `config.toml` that exists but does not parse is an error, not a fallback to defaults: every command exits `2` and names the file, line and column. So is one that exists but can't be read, such as a file you lack permission to read, a directory, or a FIFO: the error names the file and the reason. Only an absent file selects the defaults. `forgectl config` (alias `cfg`), `doctor`, `launch edit` and `launch doctor`, plus help, version and completion, still run so you can find and fix the file. So does `resume snapshot`, which runs from a Stop hook and always exits 0. `init` does not: it refuses to rewrite a file it cannot parse.
+
 User workflow files share the same base: `<config dir>/workflows/<name>.workflow.toml`.
 
 ```toml
@@ -38,7 +40,7 @@ With `log_file = ""` (the default target once a level is set), forgectl writes t
 Several command groups own their own config section, documented alongside that command:
 
 - [`env`](commands/env.md) — safe `.env` management
-- [`resume`](commands/resume.md) — session resume across repos
+- [`resume`](commands/resume.md) — session resume across repos; `[[resume.on_update]]`, the hooks fired when claude updates
 - [`launch`](commands/launch.md) — `[launch]`, per-project Claude Code / Codex / Pi profiles
 - [`pr`](commands/pr.md) — `[pr]`, the clean-room reviewer's own posture
 - [`proxy`](commands/proxy.md) — `[proxy.profiles]`, named profiles; `launch_profile` applies one to every launch
@@ -47,6 +49,8 @@ Several command groups own their own config section, documented alongside that c
 - [`k8s`](commands/k8s.md) — bounded, terminal-safe log streaming
 - [`docs`](commands/docs.md) — `[docs]`, local markdown reader
 - [`theme`](commands/theme.md) — `[theme]`, `[theme.colors]`, the palette every styled surface draws from
+- [`herdr`](commands/herdr.md) — `[herdr.organize]`, the rules that group herdr tabs into workspaces
+- `tasks` — `[tasks]`, `allowed_hosts`: the hosts, besides the built-in default, that a keychain credential may be sent to. The list applies to every keychain entry, the write entry included: a listed host can be sent whichever keychain token a command names. See [the `tasks done` contract](json-contract.md#tasks-done). An entry that is not a plain hostname makes the file invalid, and every command refuses it the way it refuses a file that does not parse
 
 ## Theme
 
@@ -70,6 +74,18 @@ safe: both stdin and stdout must be a real TTY, `NO_COLOR` must be unset, and
 query, so **everything renders dark inside tmux** regardless of the terminal
 behind it. On a light terminal inside tmux, set `mode = "light"` explicitly —
 that is the case auto-detection cannot see.
+
+**Help and errors still query the terminal.** The policy above governs
+forgectl's own detection. `--help`, `--version` and error output are rendered by
+[fang](https://github.com/charmbracelet/fang) v1.0.0, which asks the terminal
+for its background (an OSC 11 query plus a DA1 request) whenever stdout is a
+TTY. It does this even where forgectl's policy refuses to probe: inside
+tmux/screen, with `NO_COLOR` set, or with a forced `[theme] mode`. forgectl
+ignores the answer in those cases (it resolves the palette from `mode` or the
+dark default instead), so the colours are right; only the query itself is sent.
+Measured cost is under 50 ms and no hang has been reproduced. Piped output never
+queries. There is no fang option to turn the query off, so this is accepted
+until upstream adds one (tracked in #546).
 
 A bad `[theme]` never stops the binary starting: it is reported by `doctor` and
 `launch doctor`, and the default palette is used. Run `forgectl theme show` to

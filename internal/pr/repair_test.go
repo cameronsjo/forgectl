@@ -35,6 +35,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // repairRunner fakes tmux list-windows plus the session identity probes an
@@ -80,7 +81,7 @@ func mutatingTmuxCalls(calls []exec.Call) []exec.Call {
 		if c.Name != "tmux" || len(c.Args) == 0 {
 			continue
 		}
-		switch c.Args[0] {
+		switch tmuxVerb(c.Args) {
 		case "new-window", "kill-window", "select-window", "rename-window", "move-window", "new-session":
 			out = append(out, c)
 		}
@@ -144,6 +145,10 @@ func TestRepairAdoptWindow_RefusesWhenNoWindowCarriesTheName(t *testing.T) {
 	_, err := c.Repair(context.Background(), RepairOpts{Record: path, Apply: true, AdoptWindow: true})
 	if err == nil {
 		t.Fatal("expected a refusal: no window carries the derived name")
+	}
+	// A clean absence must read as one, not as tmux failing to answer (#712).
+	if !strings.Contains(err.Error(), "no window named") || strings.Contains(err.Error(), "tmux did not answer") {
+		t.Errorf("refusal = %q, want the missing-window wording", err)
 	}
 	if got := readRecord(t, path).Phase; got != PhaseLaunching {
 		t.Errorf("a refusal mutated the record: phase = %q", got)
@@ -383,7 +388,7 @@ func TestRepairAndCleanup_CompleteWithoutALockTimeout(t *testing.T) {
 	if _, err := c.Repair(context.Background(), RepairOpts{Record: path, Apply: true, Rollback: true, Yes: true}); err != nil {
 		t.Fatalf("repair --rollback deadlocked or failed: %v", err)
 	}
-	if err := c.Cleanup(context.Background(), time.Now().UTC().Format("2006-01-02")); err != nil {
+	if _, err := c.Cleanup(context.Background(), time.Now().UTC().Format("2006-01-02")); err != nil {
 		t.Fatalf("cleanup deadlocked or failed: %v", err)
 	}
 }
@@ -536,6 +541,28 @@ func TestRollbackPrompt_ClampsControlBytes(t *testing.T) {
 	got := rollbackPrompt(Ref{Owner: "o", Repo: "r", Number: 1}, bc)
 	if strings.Contains(got, "\x1b") {
 		t.Errorf("prompt carries a raw escape byte: %q", got)
+	}
+}
+
+// TestApprovalPromptsShowPathsWhole pins the #838 review nit: QuotePath caps
+// a long path with a middle cut, and a path the operator is asked to approve
+// deleting or moving must never have its middle cut out. Each prompt must carry
+// the whole quoted path.
+//
+// Mutation: switch any of rollbackPrompt, setAsidePrompt, or prunePrompt back
+// to termsafe.QuotePath (or member.displayPath) and its row fails.
+func TestApprovalPromptsShowPathsWhole(t *testing.T) {
+	long := "/" + strings.Repeat("w", 2*termsafe.PathEchoMaxRunes) + "/forgectl-workflow-x"
+	whole := termsafe.QuoteText(long)
+	for name, got := range map[string]string{
+		"rollback": rollbackPrompt(Ref{Owner: "o", Repo: "r", Number: 1}, Breadcrumb{Workspace: long, Ref: "o/r#1"}),
+		"set-aside": setAsidePrompt(breadcrumbMember{path: long, displayPath: termsafe.QuotePath(long)},
+			errors.New("bad"), true),
+		"prune": prunePrompt(1, 1, long),
+	} {
+		if !strings.Contains(got, whole) {
+			t.Errorf("%s prompt cut the %d-rune path it asks approval for (%d bytes shown)", name, len(long), len(got))
+		}
 	}
 }
 
@@ -1155,4 +1182,58 @@ func TestRepairSetAside_ARefLessRecordProceedsAndSaysTheCheckDidNotRun(t *testin
 		t.Errorf("prompt %q does not say the liveness check could not run", prompted)
 	}
 	assertSetAside(t, c, bad, raw)
+}
+
+// TestRepairAdoptWindow_TimeoutSaysTmuxDidNotAnswer is forgectl#712 item 1: a
+// bounded resolve that times out must refuse as "tmux did not answer", not
+// fall into the "no window named … exists" wording that describes a clean
+// absence. The deadline is read before the bound is released, since releasing
+// it cancels the context either way.
+func TestRepairAdoptWindow_TimeoutSaysTmuxDidNotAnswer(t *testing.T) {
+	old := lockedTmuxBudget
+	lockedTmuxBudget = 100 * time.Millisecond
+	t.Cleanup(func() { lockedTmuxBudget = old })
+	ref := Ref{Owner: "o", Repo: "r", Number: 1}
+	name := mustWindowName(t, ref)
+	fake := repairRunner(nil, sessionWinRow("forgectl", "$1", name))
+	h := &hangingTmux{FakeRunner: fake, blockVerb: "list-sessions"}
+	c := New(h, WithSessionsDir(t.TempDir()), WithFindingsDir(t.TempDir()),
+		WithTmuxSession("forgectl"), WithLockWait(2*time.Second),
+		WithTTYCheck(func() bool { return false }))
+	path := seedPhaseRecord(t, c, ref, PhaseLaunching, fakeWorkspace(t))
+
+	report, err := c.Repair(context.Background(), RepairOpts{Record: path, Apply: true, AdoptWindow: true})
+	if err == nil {
+		t.Fatal("expected a refusal: tmux never answered the window lookup")
+	}
+	if !strings.Contains(err.Error(), "tmux did not answer") || strings.Contains(err.Error(), "no window named") {
+		t.Errorf("refusal = %q, want the tmux-did-not-answer wording, not the missing-window one", err)
+	}
+	if len(report.Items) != 1 || report.Items[0].Outcome != repairOutcomeRefused {
+		t.Errorf("items = %+v, want one item with outcome %q", report.Items, repairOutcomeRefused)
+	}
+	if got := readRecord(t, path).Phase; got != PhaseLaunching {
+		t.Errorf("a refusal mutated the record: phase = %q", got)
+	}
+}
+
+// TestRepairAdoptWindow_UnreadableListIsNotAMissingWindow: an adopt whose
+// window lookup fails without a clean answer must not claim the window is
+// missing — an unreadable list is not an absent window.
+func TestRepairAdoptWindow_UnreadableListIsNotAMissingWindow(t *testing.T) {
+	ref := Ref{Owner: "o", Repo: "r", Number: 1}
+	fake := repairRunner(errors.New("tmux: permission denied"))
+	c := repairClient(t, fake)
+	path := seedPhaseRecord(t, c, ref, PhaseLaunching, fakeWorkspace(t))
+
+	_, err := c.Repair(context.Background(), RepairOpts{Record: path, Apply: true, AdoptWindow: true})
+	if err == nil {
+		t.Fatal("expected a refusal: the window list could not be read")
+	}
+	if !strings.Contains(err.Error(), "could not say whether") || strings.Contains(err.Error(), "no window named") {
+		t.Errorf("refusal = %q, want the unreadable wording, not the missing-window one", err)
+	}
+	if got := readRecord(t, path).Phase; got != PhaseLaunching {
+		t.Errorf("a refusal mutated the record: phase = %q", got)
+	}
 }

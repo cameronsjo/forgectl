@@ -17,6 +17,8 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv"
+	"github.com/cameronsjo/forgectl/internal/redact"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
@@ -211,6 +213,9 @@ func (c *Client) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 	} else {
 		args = append(args, "-t", dev)
 	}
+	// ExtraArgs are the user's, so the Runner renders them as flag names
+	// only (#749): a --build-arg NPM_TOKEN=… must not reach the log.
+	ctx = exec.WithOpaqueArgs(ctx, len(args), len(opts.ExtraArgs))
 	args = append(args, opts.ExtraArgs...)
 	args = append(args, "--", contextDir)
 
@@ -283,6 +288,9 @@ func (c *Client) Run(ctx context.Context, opts RunOptions) error {
 	slog.Debug("Preparing to run docker container.", "tag", tag)
 
 	args := append([]string{"run", "--rm", "-it", tag}, opts.Args...)
+	// The container's args are the user's; the Runner renders them as flag
+	// names only (#749).
+	ctx = exec.WithOpaqueArgs(ctx, 4, len(opts.Args))
 	if err := c.run.RunInteractive(ctx, "docker", args...); err != nil {
 		slog.Error("Failed to run docker container.", "tag", tag, "error", err)
 		return fmt.Errorf("docker run: %w", err)
@@ -316,12 +324,16 @@ func (c *Client) Shell(ctx context.Context, opts ShellOptions) error {
 		return err
 	}
 
-	slog.Debug("Preparing to open docker shell.", "tag", tag, "shell", shellCmd)
+	// The shell command is the user's, so it renders as [user-arg] here and
+	// in the Runner's log (#749).
+	shownShell := redact.UserArgs([]string{shellCmd})[0]
+	ctx = exec.WithOpaqueArgs(ctx, 4, 1)
+	slog.Debug("Preparing to open docker shell.", "tag", tag, "shell", shownShell)
 	if err := c.run.RunInteractive(ctx, "docker", "run", "--rm", "-it", tag, shellCmd); err != nil {
-		slog.Error("Failed to open docker shell.", "tag", tag, "shell", shellCmd, "error", err)
+		slog.Error("Failed to open docker shell.", "tag", tag, "shell", shownShell, "error", err)
 		return fmt.Errorf("docker run (shell): %w", err)
 	}
-	slog.Info("Successfully opened docker shell.", "tag", tag, "shell", shellCmd)
+	slog.Info("Successfully opened docker shell.", "tag", tag, "shell", shownShell)
 	return nil
 }
 
@@ -353,7 +365,7 @@ func (c *Client) resolveTag(explicit string) (string, error) {
 // returned for callers to use. Build uses a partial repo for stable naming,
 // but requires all three fields before emitting immutable tags or git labels.
 func (c *Client) gitInfo(ctx context.Context, dir string) (repo, branch, sha string, err error) {
-	top, topErr := c.run.Run(ctx, "git", "-C", dir, "rev-parse", "--show-toplevel")
+	top, topErr := gitenv.Run(ctx, c.run, gitenv.Local, "-C", dir, "rev-parse", "--show-toplevel")
 	if topErr != nil {
 		err = fmt.Errorf("resolve git repo root: %w", topErr)
 	} else {
@@ -365,7 +377,7 @@ func (c *Client) gitInfo(ctx context.Context, dir string) (repo, branch, sha str
 		}
 	}
 
-	branchOut, branchErr := c.run.Run(ctx, "git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD")
+	branchOut, branchErr := gitenv.Run(ctx, c.run, gitenv.Local, "-C", dir, "rev-parse", "--abbrev-ref", "HEAD")
 	if branchErr != nil {
 		if err == nil {
 			err = fmt.Errorf("resolve git branch: %w", branchErr)
@@ -381,7 +393,7 @@ func (c *Client) gitInfo(ctx context.Context, dir string) (repo, branch, sha str
 		}
 	}
 
-	shaOut, shaErr := c.run.Run(ctx, "git", "-C", dir, "rev-parse", "--short", "HEAD")
+	shaOut, shaErr := gitenv.Run(ctx, c.run, gitenv.Local, "-C", dir, "rev-parse", "--short", "HEAD")
 	if shaErr != nil {
 		if err == nil {
 			err = fmt.Errorf("resolve git sha: %w", shaErr)

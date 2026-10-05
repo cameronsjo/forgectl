@@ -30,6 +30,8 @@ import (
 	"log/slog"
 	"os"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // LedgerRow is one line of sessions.jsonl or commits.jsonl — the superset of
@@ -75,7 +77,7 @@ func ReadLedger(path string) (rows []LedgerRow, skipped int, err error) {
 		return nil, 0, nil
 	}
 	if err != nil {
-		return nil, 0, fmt.Errorf("open ledger %s: %w", path, err)
+		return nil, 0, fmt.Errorf("open ledger %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	defer f.Close()
 
@@ -95,7 +97,7 @@ func ReadLedger(path string) (rows []LedgerRow, skipped int, err error) {
 		rows = append(rows, row)
 	}
 	if scanErr := sc.Err(); scanErr != nil {
-		return nil, skipped, fmt.Errorf("scan ledger %s: %w", path, scanErr)
+		return nil, skipped, fmt.Errorf("scan ledger %s: %w", termsafe.QuotePath(path), termsafe.Error(scanErr))
 	}
 	if skipped > 0 {
 		slog.Warn("Ledger contained unparseable lines, skipped them.", "path", path, "skipped", skipped, "parsed", len(rows))

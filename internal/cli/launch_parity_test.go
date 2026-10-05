@@ -188,7 +188,8 @@ func TestParity_ClaudeOrdinaryLaunch(t *testing.T) {
 
 	wantArgv := []string{
 		"--permission-mode", "plan",
-		"--allow-dangerously-skip-permissions",
+		// no --allow-dangerously-skip-permissions: the harness's stdout is a
+		// pipe, and a piped run withholds it (forgectl#899)
 		"--ide", "--exclude-dynamic-system-prompt-sections",
 		"--model", "sonnet",
 		"--effort", "high",
@@ -306,17 +307,18 @@ func TestParity_PiOrdinaryLaunch(t *testing.T) {
 // this branch prints no banner at all.
 func TestParity_ClaudeBuilderLaunch(t *testing.T) {
 	h := newParityHarness(t, parityClaudeConfig)
-	stdout, stderr := h.run(t, "-p", "summarize this")
+	stdout, stderr := h.run(t, "summarize this")
 
 	_, gotArgv, _ := h.recorded(t)
 
 	assertArgv(t, gotArgv, []string{
 		"--permission-mode", "plan",
-		"--allow-dangerously-skip-permissions",
+		// no --allow-dangerously-skip-permissions: the harness's stdout is a
+		// pipe, and a piped builder run withholds it (forgectl#812)
+		"--add-dir", "/tmp/parity-shared",
 		"--model", "sonnet",
 		"--effort", "high",
-		"--add-dir", "/tmp/parity-shared",
-		"-p", "summarize this",
+		"summarize this",
 	})
 
 	if stderr != "" {

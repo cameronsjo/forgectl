@@ -7,7 +7,8 @@ package pr
 //   [x] An unparseable name yields no time, so the caller lists and keeps it
 // parseRetention (Classification: pure, operator-supplied window)
 //   [x] <N>d and every time.ParseDuration form; zero and negative refuse
-// classifyRepairRows (Classification: pure, what compaction may drop)
+// compactLines (Classification: what compaction may drop, through both
+//   streaming passes — scanRepairLog and copyKept)
 //   [x] A settled pair past the cutoff drops
 //   [x] An UNPAIRED intent is kept at any age — it is the dangling signal
 //   [x] An unparseable line is kept — nothing may drop what it cannot read
@@ -20,8 +21,12 @@ package pr
 //   [x] The intent row precedes the unlink and carries the record's bytes
 //   [x] A failed intent row removes nothing
 //   [x] A byte mismatch against the pinned re-read refuses
+//   [x] A same-bytes copy swapped in after the Lstat is refused on identity,
+//       at the pin read and at the removal re-read (#791)
 //   [x] A compaction rename failure leaves the old log intact and readable
 //   [x] Compaction's own intent row survives into the new file
+//   [x] An over-long line compacts and survives byte-identical, in place (#544)
+//   [x] A '\r' before the newline survives compaction, parsed or not
 //   [x] Nothing removable exits 0 off a TTY without --yes
 //   [x] --dry-run off a TTY without --yes touches nothing
 
@@ -31,6 +36,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -142,7 +148,27 @@ func rowLine(t *testing.T, id, outcome string, ts time.Time) []byte {
 	return bytes.TrimSuffix(data, []byte("\n"))
 }
 
-func TestClassifyRepairRows(t *testing.T) {
+// compactLines runs lines through both streaming passes and splits the
+// copy back into lines, so the classification cases below exercise exactly
+// the code a compaction runs.
+func compactLines(t *testing.T, lines [][]byte, cutoff time.Time) ([][]byte, int) {
+	t.Helper()
+	var data []byte
+	for _, line := range lines {
+		data = append(append(data, line...), '\n')
+	}
+	out, kept, dropped := streamCompact(t, data, cutoff)
+	keep := [][]byte{}
+	if len(out) > 0 {
+		keep = bytes.Split(bytes.TrimSuffix(out, []byte("\n")), []byte("\n"))
+	}
+	if len(keep) != kept {
+		t.Fatalf("pass one planned %d kept, the copy holds %d", kept, len(keep))
+	}
+	return keep, dropped
+}
+
+func TestCompactionKeepsAndDrops(t *testing.T) {
 	now := fixedTime()
 	cutoff := now.Add(-24 * time.Hour)
 	old := now.Add(-48 * time.Hour)
@@ -153,7 +179,7 @@ func TestClassifyRepairRows(t *testing.T) {
 			rowLine(t, "aaa", repairOutcomeIntent, old),
 			rowLine(t, "aaa", repairOutcomeApplied, old),
 		}
-		keep, dropped := classifyRepairRows(lines, cutoff)
+		keep, dropped := compactLines(t, lines, cutoff)
 		if dropped != 2 || len(keep) != 0 {
 			t.Fatalf("dropped = %d, kept = %d, want the whole settled pair dropped", dropped, len(keep))
 		}
@@ -164,7 +190,7 @@ func TestClassifyRepairRows(t *testing.T) {
 			rowLine(t, "bbb", repairOutcomeIntent, old),
 			rowLine(t, "bbb", repairOutcomeFailed, old),
 		}
-		keep, dropped := classifyRepairRows(lines, cutoff)
+		keep, dropped := compactLines(t, lines, cutoff)
 		if dropped != 2 || len(keep) != 0 {
 			t.Fatalf("dropped = %d, kept = %d, want a failed pair dropped too", dropped, len(keep))
 		}
@@ -172,7 +198,7 @@ func TestClassifyRepairRows(t *testing.T) {
 
 	t.Run("an unpaired intent is kept at any age", func(t *testing.T) {
 		lines := [][]byte{rowLine(t, "ccc", repairOutcomeIntent, old)}
-		keep, dropped := classifyRepairRows(lines, cutoff)
+		keep, dropped := compactLines(t, lines, cutoff)
 		if dropped != 0 || len(keep) != 1 {
 			t.Fatalf("dropped = %d, kept = %d — a dangling intent is the only pointer left to a clean room",
 				dropped, len(keep))
@@ -181,7 +207,7 @@ func TestClassifyRepairRows(t *testing.T) {
 
 	t.Run("an unparseable line is kept", func(t *testing.T) {
 		lines := [][]byte{[]byte("{not json"), rowLine(t, "ddd", repairOutcomeIntent, old), rowLine(t, "ddd", repairOutcomeApplied, old)}
-		keep, dropped := classifyRepairRows(lines, cutoff)
+		keep, dropped := compactLines(t, lines, cutoff)
 		if dropped != 2 {
 			t.Fatalf("dropped = %d, want only the settled pair", dropped)
 		}
@@ -195,7 +221,7 @@ func TestClassifyRepairRows(t *testing.T) {
 			rowLine(t, "eee", repairOutcomeIntent, time.Time{}),
 			rowLine(t, "eee", repairOutcomeApplied, time.Time{}),
 		}
-		keep, dropped := classifyRepairRows(lines, cutoff)
+		keep, dropped := compactLines(t, lines, cutoff)
 		if dropped != 0 || len(keep) != 2 {
 			t.Fatalf("dropped = %d, kept = %d — no age could be established, so nothing may drop", dropped, len(keep))
 		}
@@ -206,7 +232,7 @@ func TestClassifyRepairRows(t *testing.T) {
 			rowLine(t, "fff", repairOutcomeIntent, recent),
 			rowLine(t, "fff", repairOutcomeApplied, recent),
 		}
-		keep, dropped := classifyRepairRows(lines, cutoff)
+		keep, dropped := compactLines(t, lines, cutoff)
 		if dropped != 0 || len(keep) != 2 {
 			t.Fatalf("dropped = %d, kept = %d, want an in-window pair kept", dropped, len(keep))
 		}
@@ -217,7 +243,7 @@ func TestClassifyRepairRows(t *testing.T) {
 			rowLine(t, "ggg", repairOutcomeIntent, old),
 			rowLine(t, "ggg", repairOutcomeApplied, recent),
 		}
-		keep, dropped := classifyRepairRows(lines, cutoff)
+		keep, dropped := compactLines(t, lines, cutoff)
 		if dropped != 0 || len(keep) != 2 {
 			t.Fatalf("dropped = %d, kept = %d, want the whole pair kept", dropped, len(keep))
 		}
@@ -225,7 +251,7 @@ func TestClassifyRepairRows(t *testing.T) {
 
 	t.Run("a row with no id is kept", func(t *testing.T) {
 		lines := [][]byte{rowLine(t, "", repairOutcomeApplied, old)}
-		keep, dropped := classifyRepairRows(lines, cutoff)
+		keep, dropped := compactLines(t, lines, cutoff)
 		if dropped != 0 || len(keep) != 1 {
 			t.Fatalf("dropped = %d, kept = %d — an id-less row can be paired with nothing", dropped, len(keep))
 		}
@@ -454,6 +480,9 @@ func TestPrune_AnUnreadableWindowListRefusesOnlyRefBearingItems(t *testing.T) {
 		t.Errorf("outcome for the ref-bearing file = %q, want %q — an unreadable list is not an absent window",
 			got, pruneOutcomeRefused)
 	}
+	if got := byPath[withRef].Reason; !strings.Contains(got, "could not be read") {
+		t.Errorf("reason for the ref-bearing file = %q, want the generic unreadable-list text", got)
+	}
 	if _, serr := os.Stat(withRef); serr != nil {
 		t.Errorf("a refused item was removed: %v", serr)
 	}
@@ -472,7 +501,10 @@ func TestPrune_AByteMismatchAgainstThePinnedRereadRefuses(t *testing.T) {
 	path := seedAside(t, c, "o-r-1-1.json", 60*24*time.Hour, []byte("{not json"))
 
 	original := readAsideBytes
-	readAsideBytes = func(*os.Root, string) ([]byte, error) { return []byte("{different"), nil }
+	readAsideBytes = func(root *os.Root, name string) ([]byte, fs.FileInfo, error) {
+		_, info, err := original(root, name)
+		return []byte("{different"), info, err
+	}
 	t.Cleanup(func() { readAsideBytes = original })
 
 	report, err := c.Prune(context.Background(), defaultPruneOpts())
@@ -484,6 +516,78 @@ func TestPrune_AByteMismatchAgainstThePinnedRereadRefuses(t *testing.T) {
 	}
 	if _, serr := os.Stat(path); serr != nil {
 		t.Errorf("a file that changed under the sweep was removed anyway: %v", serr)
+	}
+}
+
+// swapAsideForCopy installs beforeAsideRead so that its nth call replaces the
+// set-aside file with a same-bytes copy: a new inode, the same name and bytes.
+// Call 1 is pinAsideCandidate's read, call 2 removeAsideFile's re-read.
+func swapAsideForCopy(t *testing.T, c *Client, nth int) {
+	t.Helper()
+	calls := 0
+	original := beforeAsideRead
+	t.Cleanup(func() { beforeAsideRead = original })
+	beforeAsideRead = func(name string) {
+		calls++
+		if calls != nth {
+			return
+		}
+		path := filepath.Join(c.SessionsDir(), name)
+		data, err := os.ReadFile(filepath.Clean(path))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		// Written beside the original and renamed over it, so the copy's inode
+		// is allocated while the original's is still in use and cannot reuse
+		// its number.
+		copyPath := path + ".copy"
+		if err := os.WriteFile(copyPath, data, 0o600); err != nil { //nolint:gosec // G703: a name beside the test's own seeded set-aside file
+			t.Error(err)
+		}
+		if err := os.Rename(copyPath, path); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+// A same-bytes copy swapped in between a set-aside file's Lstat and its read
+// is refused before its bytes, which match, could approve it (#791). At the
+// pin the refusal is the item's (refused); at the removal it lands after the
+// intent row (failed). Either way the copy stays on disk.
+//
+// Mutations that turn it red: drop the os.SameFile(readInfo, info) check in
+// pinAsideCandidate (the pin case pins the copy, and the removal's own Lstat
+// then refuses it as failed, not refused); or drop the os.SameFile(readInfo,
+// cand.info) check in removeAsideFile (the removal case removes the copy).
+func TestPrune_ASameBytesCopySwappedInAfterTheLstatIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		nth  int
+		want string
+	}{
+		{"at the pin read", 1, pruneOutcomeRefused},
+		{"at the removal re-read", 2, pruneOutcomeFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := pruneClient(t, repairRunner(nil))
+			path := seedAside(t, c, "o-r-1-1.json", 60*24*time.Hour, []byte("{not json"))
+			swapAsideForCopy(t, c, tc.nth)
+
+			report, err := c.Prune(context.Background(), defaultPruneOpts())
+			if err != nil {
+				t.Fatalf("Prune: %v", err)
+			}
+			if len(report.Items) != 1 || report.Items[0].Outcome != tc.want {
+				t.Fatalf("items = %+v, want one %q item", report.Items, tc.want)
+			}
+			if !strings.Contains(report.Items[0].Error, "changed identity") {
+				t.Errorf("error = %q, want the identity refusal", report.Items[0].Error)
+			}
+			if _, serr := os.Stat(path); serr != nil {
+				t.Errorf("the swapped-in copy was removed: %v", serr)
+			}
+		})
 	}
 }
 
@@ -586,6 +690,151 @@ func TestPrune_ACompactionRenameFailureLeavesTheOldLogIntact(t *testing.T) {
 		if strings.Contains(e.Name(), ".tmp-") {
 			t.Errorf("a temp log was left behind: %s", e.Name())
 		}
+	}
+}
+
+// appendRawLogLine writes line plus a newline straight onto the audit log,
+// bypassing appendRepairRowLocked's 8 KiB cap: an over-long line only ever
+// comes from a hand edit or a foreign writer, so the test plays that writer.
+func appendRawLogLine(t *testing.T, c *Client, line []byte) {
+	t.Helper()
+	f, err := os.OpenFile(c.repairLogPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // the test's own t.TempDir
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(append(bytes.Clone(line), '\n')); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPrune_CompactionCarriesAnOverLongLineThroughByteIdentical is
+// forgectl#544: one line over maxRepairLogLineBytes used to fail the whole
+// read, so --prune refused on every run from then on and the log grew without
+// limit. The line must neither block compaction nor be dropped by it — and
+// that holds even when the line happens to decode as a settled, expired row,
+// because no reader ever shows it, so no reader could have settled it.
+func TestPrune_CompactionCarriesAnOverLongLineThroughByteIdentical(t *testing.T) {
+	junk := func(*testing.T) []byte { return bytes.Repeat([]byte("x"), 9000) }
+	settledIntent := func(t *testing.T) []byte {
+		t.Helper()
+		row := RepairRow{
+			TS: time.Now().UTC().Add(-200 * 24 * time.Hour), ID: "big0000000000c",
+			Mode: RepairModeRollback, Outcome: repairOutcomeIntent, RecordPath: "/tmp/x.json",
+			Detail: "d",
+		}
+		base, err := json.Marshal(row)
+		if err != nil {
+			t.Fatal(err)
+		}
+		row.Detail = strings.Repeat("d", 1+9000-len(base))
+		line, err := json.Marshal(row)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(line) != 9000 {
+			t.Fatalf("fixture line is %d bytes, want 9000", len(line))
+		}
+		return line
+	}
+
+	for _, tc := range []struct {
+		name string
+		line func(*testing.T) []byte
+	}{
+		{"an unparseable line", junk},
+		{"a line that decodes as a settled expired intent", settledIntent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := pruneClient(t, repairRunner(nil))
+			big := tc.line(t)
+			seedSettledPair(t, c, "old00000000000a", 200*24*time.Hour)
+			appendRawLogLine(t, c, big)
+			seedSettledPair(t, c, "new00000000000b", time.Hour)
+			// The expired completion the over-long intent would pair with:
+			// were the big line parsed, the two would drop together.
+			if err := c.appendRepairRowLocked(RepairRow{
+				TS: time.Now().UTC().Add(-200 * 24 * time.Hour), ID: "big0000000000c",
+				Mode: RepairModeRollback, Outcome: repairOutcomeApplied, RecordPath: "/tmp/x.json",
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			report, err := c.Prune(context.Background(), defaultPruneOpts())
+			if err != nil {
+				t.Fatalf("Prune: %v", err)
+			}
+			if report.Log.Outcome != pruneOutcomeCompacted {
+				t.Fatalf("log outcome = %q (error %q), want %q", report.Log.Outcome, report.Log.Error, pruneOutcomeCompacted)
+			}
+			if report.Log.Dropped != 2 {
+				t.Errorf("dropped = %d, want only the settled pair past the window", report.Log.Dropped)
+			}
+			after, err := os.ReadFile(c.repairLogPath()) //nolint:gosec // the test's own t.TempDir
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := bytes.Split(bytes.TrimSuffix(after, []byte("\n")), []byte("\n"))
+			at := -1
+			for i, l := range lines {
+				if bytes.Equal(l, big) {
+					at = i
+				}
+			}
+			if at != 0 {
+				t.Fatalf("the over-long line is at index %d of the compacted log, want 0 (first, byte-identical) — log:\n%.300q",
+					at, after)
+			}
+			if bytes.Contains(after, []byte("old00000000000a")) {
+				t.Error("the settled pair past the window survived compaction")
+			}
+			if !bytes.Contains(lines[1], []byte("new00000000000b")) {
+				t.Errorf("the row after the over-long line moved: line 1 = %.200q", lines[1])
+			}
+		})
+	}
+}
+
+// TestPrune_CompactionKeepsACarriageReturnBeforeTheNewline pins the byte-level
+// half of "preserved byte for byte": a '\r' before a line's '\n' is content the
+// rewriter must carry through, on a line it cannot parse and on a row it keeps.
+// bufio.Scanner's line splitter strips it, which is how the pre-#544 reader
+// rewrote a CRLF line as LF.
+func TestPrune_CompactionKeepsACarriageReturnBeforeTheNewline(t *testing.T) {
+	c := pruneClient(t, repairRunner(nil))
+	unparseable := []byte("{not json\r")
+	kept, err := json.Marshal(RepairRow{
+		TS: time.Now().UTC().Add(-time.Hour), ID: "crlf000000000d",
+		Mode: RepairModeRollback, Outcome: repairOutcomeIntent, RecordPath: "/tmp/x.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept = append(kept, '\r')
+
+	seedSettledPair(t, c, "old00000000000a", 200*24*time.Hour)
+	appendRawLogLine(t, c, unparseable)
+	appendRawLogLine(t, c, kept)
+
+	report, err := c.Prune(context.Background(), defaultPruneOpts())
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if report.Log.Outcome != pruneOutcomeCompacted || report.Log.Dropped != 2 {
+		t.Fatalf("log outcome = %q, dropped = %d (error %q), want %q dropping the settled pair",
+			report.Log.Outcome, report.Log.Dropped, report.Log.Error, pruneOutcomeCompacted)
+	}
+	after, err := os.ReadFile(c.repairLogPath()) //nolint:gosec // the test's own t.TempDir
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append(append(bytes.Clone(unparseable), '\n'), append(bytes.Clone(kept), '\n')...)
+	if !bytes.HasPrefix(after, want) {
+		t.Fatalf("the CRLF lines did not survive compaction byte-identical and in order:\nwant prefix %q\ngot         %q",
+			want, after)
 	}
 }
 

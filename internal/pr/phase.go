@@ -36,14 +36,30 @@ const (
 	PhaseNeedsRepair Phase = "needs-repair"
 )
 
-// valid reports whether p is one of the six phases this build knows. An
-// unknown phase on a version-2 record is refused at validation rather than
+// knownPhases is the roster of phases this build knows, in lifecycle order.
+// It is the single source of truth: valid() and KnownPhases() both read it, so
+// a phase added here is recognised everywhere without a second list to update.
+var knownPhases = [...]Phase{
+	PhaseQueued, PhasePreparing, PhasePrepared, PhaseLaunching, PhaseActive, PhaseNeedsRepair,
+}
+
+// KnownPhases returns every phase this build knows, in lifecycle order. Each
+// call returns a fresh slice, so a caller cannot mutate the roster. Tests
+// range over it instead of hand-listing phases, so a newly added phase is
+// covered rather than silently skipped.
+func KnownPhases() []Phase {
+	return append([]Phase(nil), knownPhases[:]...)
+}
+
+// valid reports whether p is one of the phases this build knows (knownPhases).
+// An unknown phase on a version-2 record is refused at validation rather than
 // mapped to anything, because a phase this build cannot name is one it cannot
 // reason about.
 func (p Phase) valid() bool {
-	switch p {
-	case PhaseQueued, PhasePreparing, PhasePrepared, PhaseLaunching, PhaseActive, PhaseNeedsRepair:
-		return true
+	for _, k := range knownPhases {
+		if p == k {
+			return true
+		}
 	}
 	return false
 }
@@ -71,8 +87,9 @@ const anyPhase Phase = ""
 
 // errLegacyRecordNoTransition refuses to move a record that predates phases.
 // A legacy record carries no revision, so there is nothing to compare and
-// write against; the two ways out are `pr teardown` and
-// `pr repair --adopt-window`, which converts it.
+// write against; the ways out are `pr teardown` (which converts it to a v2
+// needs-repair record when it has to park it, forgectl#696) and
+// `pr repair --adopt-window`, which converts it to active.
 var errLegacyRecordNoTransition = errors.New(
 	"this is a legacy session record with no phase; it accepts no transition — " +
 		"settle it with 'forgectl pr repair <breadcrumb> --apply --adopt-window' or discard it with 'forgectl pr teardown <breadcrumb>'")
@@ -128,7 +145,11 @@ func (c *Client) transitionOnce(path string, from, to Phase, mut func(*Breadcrum
 		return err
 	}
 	if bc.Version != breadcrumbVersion {
-		slog.Error("Refusing a phase transition on a record with no version.",
+		// Debug, not Error: the refusal is returned, and the caller decides
+		// whether it is a failure — a teardown park converts the legacy record
+		// instead (forgectl#696), and logging an ERROR first would misreport a
+		// park that succeeded.
+		slog.Debug("Refusing a phase transition on a record with no version.",
 			"path", path, "to", string(to))
 		return fmt.Errorf("%s: %w", termsafe.QuotePath(path), errLegacyRecordNoTransition)
 	}
@@ -206,7 +227,7 @@ func (c *Client) markNeedsRepair(ctx context.Context, path, reason string) error
 // markNeedsRepairLocked is markNeedsRepair's core for a lock holder.
 func (c *Client) markNeedsRepairLocked(path, reason string) error {
 	return c.transitionLocked(path, anyPhase, PhaseNeedsRepair, func(bc *Breadcrumb) error {
-		bc.RepairReason = termsafe.SafeLine(reason)
+		bc.RepairReason = breadcrumbText(reason)
 		bc.WindowID = ""
 		return nil
 	})

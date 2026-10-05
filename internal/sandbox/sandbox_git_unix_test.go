@@ -1,0 +1,98 @@
+//go:build unix
+
+package sandbox
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
+)
+
+// #978 item 1: a workflow-supplied ext:: URL cannot run its command through
+// the sandbox clone, even where the operator's own config admits ext::.
+// The control clones the same URL with the options the sandbox clone carried
+// before, and its command runs.
+// Mutation: drop "-c protocol.ext.allow=never" from the clone's argv: the
+// canary runs.
+func TestSandbox_CloneRefusesExtEvenWhenTheOperatorAllowsIt(t *testing.T) {
+	gitenvtest.OperatorAllowsExt(t)
+	control := filepath.Join(t.TempDir(), "control")
+	ctl := gitenv.Command(t.Context(), gitenv.Transport, "clone", "--", "ext::sh -c touch% "+control, filepath.Join(t.TempDir(), "c"))
+	_ = ctl.Run()
+	if _, err := os.Stat(control); err != nil {
+		t.Fatalf("the control clone ran no ext:: command (%v); the fixture cannot fire", err)
+	}
+
+	canary := filepath.Join(t.TempDir(), "canary")
+	if _, err := Sandbox(context.Background(), exec.OSRunner{}, "ext::sh -c touch% "+canary, "", true); err == nil {
+		t.Error("the sandbox clone of an ext:: URL succeeded")
+	}
+	if _, err := os.Stat(canary); err == nil {
+		t.Fatal("the sandbox clone ran the ext:: URL's command")
+	}
+}
+
+// The refusal leaves a local path cloneable: alwaysClone of a local
+// repository still clones it.
+func TestSandbox_AlwaysCloneOfALocalPathStillWorks(t *testing.T) {
+	gitenvtest.OperatorAllowsExt(t)
+	src := filepath.Join(t.TempDir(), "src")
+	if err := os.Mkdir(src, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	gitenvtest.Git(t, src, "init", "-q", "-b", "main")
+	gitenvtest.Git(t, src, "commit", "-q", "--allow-empty", "-m", "c")
+
+	dir, err := Sandbox(context.Background(), exec.OSRunner{}, src, "main", true)
+	if err != nil {
+		t.Fatalf("alwaysClone of a local path: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if got := gitenvtest.Git(t, dir, "log", "-1", "--format=%s"); got != "c" {
+		t.Errorf("cloned HEAD subject = %q, want c", got)
+	}
+}
+
+// #985 nit: an inherited GIT_ALLOW_PROTOCOL naming ext, which git honours
+// ahead of every protocol.allow setting, -c included, cannot admit a
+// workflow's ext:: URL either. The control runs the clone the sandbox ran
+// before, -c options and all, and its command runs. A local path still
+// clones, since the operator's list keeps file.
+// Mutation: clone through gitenv.Run with the -c options, as before (the
+// canary runs); or drop GIT_ALLOW_PROTOCOL instead of filtering it (no
+// failure here, but TestRunRefusingKeepsTheOperatorsOtherTransports fails).
+func TestSandbox_CloneRefusesExtThatGitAllowProtocolAdmits(t *testing.T) {
+	gitenvtest.OperatorAllowsExt(t)
+	t.Setenv("GIT_ALLOW_PROTOCOL", "ext:file")
+	control := filepath.Join(t.TempDir(), "control")
+	ctl := gitenv.Command(t.Context(), gitenv.Transport, "-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never", "clone", "--", "ext::sh -c touch% "+control, filepath.Join(t.TempDir(), "c"))
+	_ = ctl.Run()
+	if _, err := os.Stat(control); err != nil {
+		t.Fatalf("the control clone ran no ext:: command (%v); the fixture cannot fire", err)
+	}
+
+	canary := filepath.Join(t.TempDir(), "canary")
+	if _, err := Sandbox(context.Background(), exec.OSRunner{}, "ext::sh -c touch% "+canary, "", true); err == nil {
+		t.Error("the sandbox clone of an ext:: URL succeeded")
+	}
+	if _, err := os.Stat(canary); err == nil {
+		t.Fatal("the sandbox clone ran the ext:: URL's command")
+	}
+
+	src := filepath.Join(t.TempDir(), "src")
+	if err := os.Mkdir(src, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	gitenvtest.Git(t, src, "init", "-q", "-b", "main")
+	gitenvtest.Git(t, src, "commit", "-q", "--allow-empty", "-m", "c")
+	dir, err := Sandbox(context.Background(), exec.OSRunner{}, src, "main", true)
+	if err != nil {
+		t.Fatalf("alwaysClone of a local path under GIT_ALLOW_PROTOCOL=ext:file: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+}

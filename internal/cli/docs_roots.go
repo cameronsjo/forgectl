@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	docspkg "github.com/cameronsjo/forgectl/internal/docs"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // cadenceFieldReportsEnv names the environment variable forgectl#93's
@@ -26,9 +28,14 @@ func resolveDocsRoots(args []string, cfg config.DocsConfig) ([]string, error) {
 		return args, nil
 	}
 
+	cfg, err := expandDocsConfig(cfg, os.UserHomeDir)
+	if err != nil {
+		return nil, err
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, fmt.Errorf("resolve cwd: %w", err)
+		return nil, fmt.Errorf("resolve cwd: %w", termsafe.Error(err))
 	}
 	roots := []string{cwd}
 
@@ -43,6 +50,41 @@ func resolveDocsRoots(args []string, cfg config.DocsConfig) ([]string, error) {
 	return dedupPaths(roots), nil
 }
 
+// expandDocsConfig expands a leading ~ in [docs].roots and the root_kinds
+// keys to the home directory. The home is looked up (through userHome) only
+// when some entry starts with ~ or ~/, so a config of absolute paths never
+// depends on it. When such an entry exists and the lookup fails it returns an
+// error rather than the literal ~/... path, which would resolve against the
+// working directory and index the wrong tree; config's resolveDir fails
+// closed the same way. Positional args are never expanded: the shell already
+// did.
+func expandDocsConfig(cfg config.DocsConfig, userHome func() (string, error)) (config.DocsConfig, error) {
+	if !docsConfigUsesHome(cfg) {
+		return cfg, nil
+	}
+	home, err := userHome()
+	if err != nil {
+		return config.DocsConfig{}, fmt.Errorf("[docs]: a path starts with ~ but the home directory cannot be resolved: %w", termsafe.Error(err))
+	}
+	return cfg.ExpandHome(home)
+}
+
+// docsConfigUsesHome reports whether any [docs].roots entry or root_kinds key
+// is "~" or starts with "~/" — the only spellings ExpandHome rewrites.
+func docsConfigUsesHome(cfg config.DocsConfig) bool {
+	for _, r := range cfg.Roots {
+		if r == "~" || strings.HasPrefix(r, "~/") {
+			return true
+		}
+	}
+	for k := range cfg.RootKinds {
+		if k == "~" || strings.HasPrefix(k, "~/") {
+			return true
+		}
+	}
+	return false
+}
+
 // docsIndexOptions converts a [docs] section's root_kinds map into the
 // docs.IndexOptions NewIndexWithOptions consumes, after config.DocsConfig's
 // own Validate has rejected any value outside "docs" | "vault". Keys pass
@@ -50,6 +92,10 @@ func resolveDocsRoots(args []string, cfg config.DocsConfig) ([]string, error) {
 // path, so a config file may spell a root relatively.
 func docsIndexOptions(cfg config.DocsConfig) (docspkg.IndexOptions, error) {
 	if err := cfg.Validate(); err != nil {
+		return docspkg.IndexOptions{}, err
+	}
+	cfg, err := expandDocsConfig(cfg, os.UserHomeDir)
+	if err != nil {
 		return docspkg.IndexOptions{}, err
 	}
 	if len(cfg.RootKinds) == 0 {

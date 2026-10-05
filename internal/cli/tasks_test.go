@@ -41,7 +41,7 @@ func withFakeTasksBackend(t *testing.T, handler http.Handler) (*httptest.Server,
 
 	runner := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
-			if name == "security" {
+			if name == tasks.SecurityBinary {
 				return tasksTestFakeToken, nil
 			}
 			return "", nil
@@ -136,7 +136,7 @@ func captureProcessStd(t *testing.T, fn func()) (stdout, stderr string) {
 // and os.Stderr, the returned error's string, and the on-disk cache file —
 // is grepped for the literal. None may contain it.
 func TestTasksCommands_TokenNeverLeaks(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateTasksConfigDir(t)
 	_, runner := withFakeTasksBackend(t, fakeVikunjaHandler(t))
 	deps := module.Deps{Runner: runner, Theme: theme.Default()}
 
@@ -170,7 +170,7 @@ func TestTasksCommands_TokenNeverLeaks(t *testing.T) {
 }
 
 func TestTasksLs_Unauthorized_DoesNotFallBackToCache(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateTasksConfigDir(t)
 
 	// Seed a cache file so a wrongful fallback would be observable.
 	cachePath, err := config.TasksCachePath()
@@ -204,7 +204,7 @@ func TestTasksLs_Unauthorized_DoesNotFallBackToCache(t *testing.T) {
 }
 
 func TestTasksLs_Unreachable_FallsBackToCacheWithAgeStated(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateTasksConfigDir(t)
 
 	cachePath, err := config.TasksCachePath()
 	if err != nil {
@@ -229,7 +229,7 @@ func TestTasksLs_Unreachable_FallsBackToCacheWithAgeStated(t *testing.T) {
 	t.Cleanup(func() { newTasksClient = orig })
 
 	runner := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
-		if name == "security" {
+		if name == tasks.SecurityBinary {
 			return tasksTestFakeToken, nil
 		}
 		return "", nil
@@ -249,7 +249,7 @@ func TestTasksLs_Unreachable_FallsBackToCacheWithAgeStated(t *testing.T) {
 }
 
 func TestTasksReady_ExcludesActiveBlocker_EndToEnd(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateTasksConfigDir(t)
 	_, runner := withFakeTasksBackend(t, fakeVikunjaHandler(t))
 	deps := module.Deps{Runner: runner, Theme: theme.Default()}
 
@@ -275,7 +275,7 @@ func TestTasksReady_ExcludesActiveBlocker_EndToEnd(t *testing.T) {
 // credential presented as a successful run: strictly worse than losing the
 // exit code, and invisible.
 func TestTasksLs_HostRefused_DoesNotFallBackToCacheAndExitsFour(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateTasksConfigDir(t)
 
 	// Seed a cache so a wrongful fallback is observable rather than inferred.
 	cachePath, err := config.TasksCachePath()
@@ -292,7 +292,7 @@ func TestTasksLs_HostRefused_DoesNotFallBackToCacheAndExitsFour(t *testing.T) {
 
 	runner := &exec.FakeRunner{
 		RunFunc: func(name string, args []string) (string, error) {
-			if name == "security" {
+			if name == tasks.SecurityBinary {
 				return tasksTestFakeToken, nil
 			}
 			return "", nil

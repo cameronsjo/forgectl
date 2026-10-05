@@ -28,8 +28,10 @@ package docs
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -211,9 +213,11 @@ func TestIndex_Resolve_Traversal_Rejected(t *testing.T) {
 	}
 	label := idx.Roots()[0].Label
 
-	_, err = idx.Resolve(label, "../../../../etc/passwd")
-	if !errors.Is(err, ErrOutsideRoot) {
-		t.Errorf("Resolve traversal: err = %v, want ErrOutsideRoot", err)
+	// The ../ run is clamped at the root, so this names <root>/etc/passwd,
+	// which does not exist: ErrNotFound, never the real /etc/passwd.
+	got, err := idx.Resolve(label, "../../../../etc/passwd")
+	if !errors.Is(err, ErrNotFound) || got != "" {
+		t.Errorf("Resolve traversal = %q, %v, want \"\", ErrNotFound", got, err)
 	}
 }
 
@@ -314,5 +318,205 @@ func TestIndex_Resolve_DisallowedExtension_Rejected(t *testing.T) {
 	_, err = idx.Resolve(label, "secret.env")
 	if !errors.Is(err, ErrDisallowedExt) {
 		t.Errorf("Resolve disallowed ext: err = %v, want ErrDisallowedExt", err)
+	}
+}
+
+// Test plan for walk tolerance (#568)
+//   [x] Unhappy: an unreadable subdirectory is skipped with a warning; siblings still index
+//   [x] Unhappy: an unreadable root itself still fails the build
+//   Not covered: a file vanishing between readdir and stat (d.Info error) —
+//   a race with no deterministic trigger; the branch is a two-line skip.
+
+func TestNewIndex_UnreadableSubdir_SkippedSiblingsIndexed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory modes")
+	}
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ok.md"), "# Ok\n")
+	locked := filepath.Join(dir, "locked")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(locked, "hidden.md"), "# Hidden\n")
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) }) //nolint:gosec // G302: a directory needs 0700; 0600 makes it non-traversable
+
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatalf("NewIndex must survive an unreadable subdirectory: %v", err)
+	}
+	if got := len(idx.List()); got != 1 {
+		t.Errorf("indexed %d docs, want 1 (ok.md only)", got)
+	}
+}
+
+func TestNewIndex_UnreadableRoot_StillErrors(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory modes")
+	}
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ok.md"), "# Ok\n")
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // G302: a directory needs 0700; 0600 makes it non-traversable
+
+	if _, err := NewIndex([]string{dir}); err == nil {
+		t.Fatal("an unreadable root must fail the build")
+	}
+}
+
+// Test plan for the skip ledger and walk seam (#568)
+//   [x] Unhappy: an injected subdirectory error and a vanished entry are
+//       recorded on the Index and the siblings still index (runs as root)
+//   [x] Unhappy: an injected error on the root itself still fails the build
+//   [x] Unhappy: a d.Info() failure on an existing file is recorded, not fatal
+//   [x] Happy: a clean walk records nothing
+//   [x] Unhappy: Check reports the skipped paths in CheckReport.Skipped
+
+// stubEntry is a fs.DirEntry with scriptable Info, for the walk seam.
+type stubEntry struct {
+	name    string
+	dir     bool
+	infoErr error
+}
+
+func (e stubEntry) Name() string { return e.name }
+func (e stubEntry) IsDir() bool  { return e.dir }
+func (e stubEntry) Type() fs.FileMode {
+	if e.dir {
+		return fs.ModeDir
+	}
+	return 0
+}
+func (e stubEntry) Info() (fs.FileInfo, error) { return nil, e.infoErr }
+
+func withWalk(t *testing.T, w func(rt *os.Root, root string, fn walkFunc) error) {
+	t.Helper()
+	prev := walkDir
+	walkDir = w
+	t.Cleanup(func() { walkDir = prev })
+}
+
+func TestNewIndex_InjectedWalkErrors_RecordedAndSiblingsIndexed(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ok.md"), "# Ok\n")
+	withWalk(t, func(rt *os.Root, root string, fn walkFunc) error {
+		if err := walkHeld(rt, root, fn); err != nil {
+			return err
+		}
+		locked := filepath.Join(root, "locked")
+		_ = fn(locked, rt, stubEntry{name: "locked", dir: true}, &fs.PathError{Op: "open", Path: locked, Err: fs.ErrPermission})
+		// A file the walk listed that is gone by the time it is opened.
+		gone := filepath.Join(root, "gone.md")
+		_ = fn(gone, rt, stubEntry{name: "gone.md", infoErr: &fs.PathError{Op: "lstat", Path: gone, Err: fs.ErrNotExist}}, nil)
+		return nil
+	})
+
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatalf("NewIndex must survive skipped paths: %v", err)
+	}
+	if got := len(idx.List()); got != 1 {
+		t.Errorf("indexed %d docs, want 1", got)
+	}
+	got := idx.Skipped()
+	if len(got) != 2 || got[0].Rel != "locked" || got[1].Rel != "gone.md" {
+		t.Fatalf("Skipped() = %+v, want locked then gone.md", got)
+	}
+	if got[0].Root != idx.Roots()[0].Label || got[0].Reason == "" {
+		t.Errorf("skipped entry lacks root label or reason: %+v", got[0])
+	}
+	// Reasons are the bare cause: the absolute path in the *fs.PathError
+	// (and in the lstat error for gone.md) must not leak into them.
+	if got[0].Reason != fs.ErrPermission.Error() {
+		t.Errorf("locked reason = %q, want %q", got[0].Reason, fs.ErrPermission.Error())
+	}
+	if strings.Contains(got[1].Reason, "/") {
+		t.Errorf("gone.md reason = %q, want no path", got[1].Reason)
+	}
+}
+
+func TestNewIndex_InjectedRootError_StillFatal(t *testing.T) {
+	dir := t.TempDir()
+	withWalk(t, func(rt *os.Root, root string, fn walkFunc) error {
+		return fn(root, nil, nil, fs.ErrPermission)
+	})
+	if _, err := NewIndex([]string{dir}); err == nil {
+		t.Fatal("an error on the root itself must fail the build")
+	}
+}
+
+func TestNewIndex_InfoFailure_RecordedNotFatal(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "real.md"), "# Real\n")
+	withWalk(t, func(rt *os.Root, root string, fn walkFunc) error {
+		return fn(filepath.Join(root, "real.md"), rt, stubEntry{name: "real.md", infoErr: fs.ErrNotExist}, nil)
+	})
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	if len(idx.Skipped()) != 1 || len(idx.List()) != 0 {
+		t.Errorf("skipped=%+v docs=%d, want one skip and no docs", idx.Skipped(), len(idx.List()))
+	}
+}
+
+func TestNewIndex_CleanWalk_RecordsNothing(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ok.md"), "# Ok\n")
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(idx.Skipped()) != 0 {
+		t.Errorf("Skipped() = %+v, want none", idx.Skipped())
+	}
+}
+
+func TestCheck_ReportsSkippedPaths(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ok.md"), "# Ok\n")
+	withWalk(t, func(rt *os.Root, root string, fn walkFunc) error {
+		if err := walkHeld(rt, root, fn); err != nil {
+			return err
+		}
+		_ = fn(filepath.Join(root, "locked"), rt, stubEntry{name: "locked", dir: true}, fs.ErrPermission)
+		return nil
+	})
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := idx.Check()
+	if len(rep.Skipped) != 1 || rep.Skipped[0].Rel != "locked" {
+		t.Errorf("CheckReport.Skipped = %+v, want [locked]", rep.Skipped)
+	}
+}
+
+func TestCheck_SkipUnderVaultRootIsReported(t *testing.T) {
+	vault := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(vault, "n.md"), "# N\n")
+	withWalk(t, func(rt *os.Root, root string, fn walkFunc) error {
+		if err := walkHeld(rt, root, fn); err != nil {
+			return err
+		}
+		_ = fn(filepath.Join(root, "locked"), rt, stubEntry{name: "locked", dir: true}, fs.ErrPermission)
+		return nil
+	})
+	idx, err := NewIndex([]string{vault})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(idx.Skipped()) != 1 {
+		t.Fatalf("index should still record the skip: %+v", idx.Skipped())
+	}
+	if rep := idx.Check(); len(rep.Skipped) != 1 || rep.Skipped[0].Rel != "locked" {
+		t.Errorf("a vault root is checked, so its skip must reach the report: %+v", rep.Skipped)
 	}
 }

@@ -35,6 +35,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
@@ -392,7 +393,7 @@ func TestLaunchPicked_CapQueuesTruncatedRemainder(t *testing.T) {
 	queuedRef := pr.Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 3}
 	found := false
 	for _, s := range summaries {
-		if s.Ref() == queuedRef {
+		if s.Ref().String() == queuedRef.String() {
 			found = true
 			if s.Phase() != pr.PhaseQueued {
 				t.Errorf("queued remainder phase = %q, want %q", s.Phase(), pr.PhaseQueued)
@@ -467,7 +468,7 @@ func TestLaunchPicked_UnreadableWindowCount_RefusesBatch(t *testing.T) {
 		t.Errorf("unreadable count must launch nothing; windows=%v", windows)
 	}
 	for _, c := range fake.Calls {
-		if c.Name == "git" && len(c.Args) > 0 && c.Args[0] == "clone" {
+		if args := gitenvtest.Strip(c.Args); c.Name == "git" && len(args) > 0 && args[0] == "clone" {
 			t.Errorf("unreadable count must refuse BEFORE any prepare/clone; saw git clone call: %+v", c)
 		}
 	}

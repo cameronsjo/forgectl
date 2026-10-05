@@ -1,3 +1,7 @@
+---
+status: current
+---
+
 # forgectl — Roadmap (2026-09-05)
 
 ## Context
@@ -57,7 +61,7 @@ Five items out of 28. Everything else has a workaround — usually "a human does
 | #192 | Notify when the drainer auto-launches | #473 | ~ |
 | #32 | `pr poll` — the auto-review daemon | #192 | ~ |
 | #444 | Render Obsidian-flavored markdown (docs spine) | #443 (done) | |
-| #445 | `docs check` — broken links and orphans | #444 | |
+| #445 | `docs check` — broken links and orphans | #443 (done) | corrected 2026-09-29: was listed as #444; the check needs only the resolver #443 shipped |
 | #446 | Full-text search via qmd, rg fallback | — | |
 | #447 | `docs read` via mdroll | — | |
 | #448 | Preview fidelity — reload, KaTeX, details, rich copy | — | |

@@ -122,3 +122,34 @@ func TestShell_RecentGroupStaysFlat(t *testing.T) {
 		t.Errorf("Recent group lost its filterable links:\n%s", recentBlock)
 	}
 }
+
+func TestShell_HrefsEscapeReservedFilenameChars(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "plain.md"), "# Plain\n")
+	writeFile(t, filepath.Join(dir, "a#b.md"), "# Hash\n")
+	writeFile(t, filepath.Join(dir, "a?b.md"), "# Query\n")
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	label := idx.Roots()[0].Label
+	h := testHandler(idx)
+
+	pages := map[string]string{
+		"sidenav": getBody(t, h, "/doc/"+label+"/plain.md"),
+		"home":    getBody(t, h, "/"),
+	}
+	for name, body := range pages {
+		for _, want := range []string{
+			`href="/doc/` + label + `/a%23b.md"`,
+			`href="/doc/` + label + `/a%3Fb.md"`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s missing %q in body:\n%s", name, want, body)
+			}
+		}
+		if strings.Contains(body, `/a#b.md"`) || strings.Contains(body, `/a?b.md"`) {
+			t.Errorf("%s carries an unescaped reserved char in an href", name)
+		}
+	}
+}

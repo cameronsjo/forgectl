@@ -20,17 +20,20 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 		Short: "Print the resolved launch profile for the current directory",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cwd, err := os.Getwd()
+			cwd, err := launchWorkingDirectory()
 			if err != nil {
-				return termsafe.Error(fmt.Errorf("determine working directory: %w", err))
+				return err
 			}
 			effLaunch, notice, effFrom := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
 			if notice != "" && !asJSON {
-				fmt.Fprintln(cmd.ErrOrStderr(), "forgectl: "+termsafe.SafeLine(notice))
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "forgectl: "+safeText(notice))
 			}
 			cfg.Launch = effLaunch
 			lc, src := resolveLaunchConfig(boundary, cfg, effFrom)
-			profile := launch.Resolve(lc, cwd)
+			profile, err := launch.Resolve(lc, cwd)
+			if err != nil {
+				return WithExitCode(termsafe.Error(err), 2)
+			}
 			// The injected block is not part of the profile, so without this
 			// `which` reports a posture that omits variables the launch will
 			// carry — and a bad [proxy] launch_profile printed as a clean
@@ -189,5 +192,21 @@ func printLaunchProfile(w io.Writer, th theme.Theme, p launch.Profile, cwd, conf
 // renderSafe establishes the ordering invariant for styled terminal output:
 // untrusted text is escaped first, then the trusted renderer may add ANSI.
 func renderSafe(render func(...string) string, untrusted string) string {
-	return render(termsafe.SafeLine(untrusted))
+	return render(safeText(untrusted))
+}
+
+// launchGetwd is os.Getwd, a variable only so a test can make it fail.
+var launchGetwd = os.Getwd
+
+// launchWorkingDirectory is the working directory `launch` and `launch which`
+// resolve a profile for. Its *PathError goes through termsafe.Error BEFORE the
+// wrap (#832): termsafe.Error reconstructs and caps the path only for a
+// *PathError that is the error itself, so wrapping first rendered the path
+// escaped but at full length.
+func launchWorkingDirectory() (string, error) {
+	cwd, err := launchGetwd()
+	if err != nil {
+		return "", fmt.Errorf("determine working directory: %w", termsafe.Error(err))
+	}
+	return cwd, nil
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -74,5 +75,23 @@ func TestVersion_VerbMatchesFlagThroughFang(t *testing.T) {
 	// shared constant.
 	if verbOut != flagOut {
 		t.Errorf("version verb ⇄ --version parity broken: %q vs %q", verbOut, flagOut)
+	}
+}
+
+func TestVersionCmd_JSON(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	root.Version = "1.2.3 (abcdef0)"
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetArgs([]string{"version", "--json"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("root.Execute() error = %v", err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, buf.String())
+	}
+	if got["name"] != "forgectl" || got["version"] != "1.2.3 (abcdef0)" {
+		t.Errorf("version --json = %v", got)
 	}
 }

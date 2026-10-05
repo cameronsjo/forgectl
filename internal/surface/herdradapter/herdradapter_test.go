@@ -1,4 +1,9 @@
+//go:build unix
+
 package herdradapter
+
+// The fake FileInfo carries a *syscall.Stat_t, the socket identity the
+// adapter proves on unix; the adapter has no such proof elsewhere (#810).
 
 import (
 	"bytes"
@@ -13,6 +18,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/herdr/wire"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 )
 
@@ -1300,7 +1306,7 @@ func TestResolveSessionRecordsTheChainThatChoseIt(t *testing.T) {
 func TestResolveSessionRefusesANameThatIsNotOneOperand(t *testing.T) {
 	bad := []string{
 		"-fleet", "--session", "fleet name", "fleet\tname", "fleet\nname",
-		"fleet;rm", "fleet/../other", strings.Repeat("f", maxSessionNameLen+1), "fleet\x1b[2J",
+		"fleet;rm", "fleet/../other", strings.Repeat("f", wire.MaxOperandLen+1), "fleet\x1b[2J",
 	}
 	for _, name := range bad {
 		t.Run(name, func(t *testing.T) {

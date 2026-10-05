@@ -3,6 +3,8 @@ package projects
 import (
 	"context"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 )
 
 // PullStatus classifies the outcome of pulling one project.
@@ -81,7 +83,12 @@ func (c *Client) PullAll(ctx context.Context, dir string) ([]PullResult, error) 
 			results = append(results, PullResult{Name: p.Name, Dir: p.Dir, Status: PullSkippedDirty})
 			continue
 		}
-		out, err := c.run.Run(ctx, c.gitBinary(), "-C", p.Dir, "pull", "--rebase")
+		// The checkout's own config may name an ext:: or fd:: remote and
+		// allow it with protocol.<name>.allow=always, which then runs the
+		// remote's command (measured on git 2.43). RunBinRefusing's -c
+		// outranks that, and its GIT_ALLOW_PROTOCOL filter outranks an
+		// inherited list that names them (#987).
+		out, err := gitenv.RunBinRefusing(ctx, c.run, c.gitBinary(), gitenv.Transport, []string{"ext", "fd"}, "-C", p.Dir, "pull", "--rebase")
 		results = append(results, PullResult{Name: p.Name, Dir: p.Dir, Status: classifyPull(out, err), Err: err})
 	}
 	return results, nil

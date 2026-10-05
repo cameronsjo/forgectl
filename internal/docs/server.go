@@ -1,14 +1,16 @@
 package docs
 
 import (
+	"embed"
 	"fmt"
+	"html"
 	"html/template"
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,13 +58,16 @@ const locatePath = "/api/locate"
 //     short-circuits on a real `globalThis` before ever constructing anything
 //     in any browser this reader targets. Nothing here needs eval, so nobody
 //     should add 'unsafe-eval' back "just in case" — the correct response to a
-//     CSP eval violation is to find what started evaluating code.
+//     CSP eval violation is to find what started evaluating code. The
+//     vendored KaTeX bundle has no eval and no Function constructor at all.
 //   - style-src 'self' 'unsafe-inline' — FORCED, from two independent
 //     directions, which is why neither can be fixed away alone. The shell
 //     template carries layout style= attributes, and mermaid injects a <style>
 //     element per rendered diagram with theme-computed CSS: it exposes no nonce
 //     hook, and the content varies with the Artificer tokens, so no hash is
-//     knowable ahead of the render. Note what this does NOT reopen: the classic
+//     knowable ahead of the render. KaTeX output leans on it as well: every
+//     rendered formula carries style= attributes for its measured heights and
+//     offsets. Note what this does NOT reopen: the classic
 //     CSS-based exfiltration (a selector whose background-image URL leaks what
 //     it matched) is closed by img-src 'self', not by style-src.
 //   - img-src 'self' data: — the one behavior CHANGE in this policy. A doc
@@ -201,7 +206,13 @@ func NewHandler(store *Store, events *Broker) http.Handler {
 	mux.HandleFunc("GET /assets/diagram.css", serveStaticCSS(diagramCSS))
 	// artificer.css names its fonts as url('assets/fonts/…') relative to
 	// itself, which resolves to this doubled path.
-	mux.HandleFunc("GET /assets/assets/fonts/{name}", serveFont)
+	mux.HandleFunc("GET /assets/assets/fonts/{name}", serveWoff2(artificerFonts, "assets/artificer/assets/fonts/"))
+	mux.HandleFunc("GET /assets/katex/katex.min.js", serveStaticJS(katexJS))
+	mux.HandleFunc("GET /assets/katex/katex.min.css", serveStaticCSS(katexCSS))
+	// katex.min.css names its fonts as url(fonts/…), relative to itself.
+	mux.HandleFunc("GET /assets/katex/fonts/{name}", serveWoff2(katexFonts, "assets/katex/fonts/"))
+	mux.HandleFunc("GET /assets/math-init.js", serveStaticJS(mathInitJS))
+	mux.HandleFunc("GET /assets/copy.js", serveStaticJS(copyJS))
 
 	mux.HandleFunc("GET "+eventsPath, handleEvents(events))
 	mux.HandleFunc("GET "+locatePath, handleLocate(store))
@@ -314,25 +325,29 @@ func serveStaticCSS(body []byte) http.HandlerFunc {
 	}
 }
 
-// serveFont serves one vendored woff2 by file name. {name} is a single path
-// segment, and embed.FS refuses any name that is not a file in that one
-// directory, so there is no traversal to guard beyond the suffix check.
-func serveFont(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	if !strings.HasSuffix(name, ".woff2") {
-		http.NotFound(w, r)
-		return
+// serveWoff2 serves one vendored woff2 from dir in fonts by file name. {name}
+// is a single path segment, and embed.FS refuses any name that is not a file
+// in that one directory, so there is no traversal to guard beyond the suffix
+// check. Each font set is its own embed.FS holding only *.woff2, so one
+// route cannot reach the other set or any non-font file.
+func serveWoff2(fonts embed.FS, dir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if !strings.HasSuffix(name, ".woff2") {
+			http.NotFound(w, r)
+			return
+		}
+		body, err := fonts.ReadFile(dir + name)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "font/woff2")
+		w.Header().Set("Cache-Control", "no-cache") // same as every other asset here
+		// body is one of the embedded woff2 files, served as font/woff2 with
+		// nosniff from SecurityHeaders: a browser never parses it as HTML.
+		_, _ = w.Write(body) //nolint:gosec // G705: embedded font bytes, not request-derived content
 	}
-	body, err := artificerFonts.ReadFile("assets/artificer/assets/fonts/" + name)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "font/woff2")
-	w.Header().Set("Cache-Control", "no-cache") // same as every other asset here
-	// body is one of the nine embedded woff2 files, served as font/woff2 with
-	// nosniff from SecurityHeaders: a browser never parses it as HTML.
-	_, _ = w.Write(body) //nolint:gosec // G705: embedded font bytes, not request-derived content
 }
 
 func serveStaticJS(body []byte) http.HandlerFunc {
@@ -385,7 +400,7 @@ func buildHome(idx *Index) *homeData {
 	}
 	for _, d := range all[:min(homeRecentCount, len(all))] {
 		home.Recent = append(home.Recent, homeDoc{
-			Href:     "/doc/" + d.RootLabel + "/" + d.RelPath,
+			Href:     docHref(d.RootLabel, d.RelPath),
 			Title:    d.Title,
 			Path:     d.RootLabel + "/" + d.RelPath,
 			Modified: modifiedLabel(d.ModTime, time.Now()),
@@ -411,28 +426,75 @@ func handleDoc(store *Store) http.HandlerFunc {
 		// another.
 		idx := store.Current()
 
-		absPath, err := idx.Resolve(root, rest)
+		// Open, not Resolve then open by path: resolution holds each
+		// directory on the path as its own verified os.Root, and the file is
+		// opened by its single name in the last one and must be the file
+		// the walk approved. So neither a symlink nor a directory swapped
+		// in after the check can redirect the read.
+		f, _, err := idx.Open(root, rest)
 		if err != nil {
-			slog.Debug("docs: request did not resolve to a servable file.", "root", root, "rest", rest, "error", err)
+			slog.Debug("docs: request did not resolve to a servable file.", "root", termsafe.SafePathMax(root, 0), "rest", termsafe.SafePathMax(rest, 0), "error", err)
 			http.NotFound(w, r)
 			return
 		}
 
-		source, err := os.ReadFile(absPath)
+		source, tooLarge, err := readDocCapped(f)
+		_ = f.Close()
 		if err != nil {
 			slog.Warn("docs: resolved path could not be read.", "error", err)
 			http.NotFound(w, r)
 			return
 		}
 
-		rendered, err := RenderDoc(source)
+		doc, found := idx.Find(root, rest)
+		if tooLarge {
+			// 200, not 413 or 404: the doc exists and the server is working
+			// as designed; the reader shell (sidenav, outline chrome) must
+			// still render around the notice. Refuse rather than truncate: a cut through a fence or table would
+			// render something misleading. The notice names the doc as
+			// root/rel only, never absPath, and links no raw file (the server
+			// has no raw-file route).
+			slog.Debug("docs: document exceeds render cap; served a notice.", "root", termsafe.SafePathMax(root, 0), "rest", termsafe.SafePathMax(rest, 0), "limit", renderCapBytes)
+			renderShell(w, idx, pageContext{
+				CurrentRoot: root,
+				CurrentRel:  rest,
+				DocTitle:    doc.Title,
+				Host:        r.Host,
+				Content:     template.HTML(tooLargeNoticeHTML(root + "/" + rest)), //nolint:gosec // fixed markup plus one html.EscapeString'd fragment
+			})
+			return
+		}
+		// The root's kind picks the dialect: a vault root renders the
+		// Obsidian flavour, anything else (or a root this index does not
+		// know) renders plain GFM.
+		kind := RootDocs
+		if rt, ok := idx.rootByLabel(root); ok {
+			kind = rt.Kind
+		}
+		// A vault page's wikilinks resolve against this same index, from
+		// the page's own Doc; an unindexed page has none to resolve from,
+		// so its wikilinks render as unresolved.
+		var from *Doc
+		if found {
+			from = &doc
+		}
+		rendered, err := RenderDocForContext(r.Context(), kind, source, idx, from)
+		if err != nil && r.Context().Err() != nil {
+			// The client went away before the page was ready: nothing to
+			// answer, and nothing went wrong.
+			slog.Debug("docs: request ended before its render.", "root", termsafe.SafePathMax(root, 0), "rest", termsafe.SafePathMax(rest, 0), "error", err)
+			return
+		}
 		if err != nil {
-			slog.Error("docs: markdown render failed.", "root", root, "rest", rest, "error", err)
+			slog.Error("docs: markdown render failed.", "root", termsafe.SafePathMax(root, 0), "rest", termsafe.SafePathMax(rest, 0), "error", err)
 			http.Error(w, "render failed", http.StatusInternalServerError)
 			return
 		}
 
-		doc, _ := idx.Find(root, rest)
+		switch rendered.Notice {
+		case noticeRenderSize, noticeRenderDeadline, noticeRenderBusy:
+			slog.Warn("docs: served the document as source text instead of rendering it.", "path", termsafe.SafePathMax(root+"/"+rest, 0), "reason", rendered.Notice, "bytes", len(source))
+		}
 		renderShell(w, idx, pageContext{
 			CurrentRoot: root,
 			CurrentRel:  rest,
@@ -441,9 +503,42 @@ func handleDoc(store *Store) http.HandlerFunc {
 			Outline:     rendered.Outline,
 			Words:       rendered.Words,
 			Minutes:     rendered.Minutes,
-			Content:     template.HTML(rendered.HTML), //nolint:gosec // body is bluemonday-sanitized in Render; the frontmatter/callout additions are built there from html.EscapeString'd fragments and fixed markup only
+			Content:     template.HTML(rendered.HTML), //nolint:gosec // body is bluemonday-sanitized in render (vault highlight/tag nodes included; wikilink anchors are built from indexed Docs only); the frontmatter/callout additions are built there from html.EscapeString'd fragments and fixed markup only; a document past the markup guard, the render cap or the render deadline is instead html.EscapeString'd source plus fixed markup (sourceTextDoc)
 		})
 	}
+}
+
+// renderCapBytes is the largest document handleDoc renders. It is the index
+// scan's cap on purpose: an over-cap document is indexed by title only, so
+// rendering it in full would show links and anchors the index knows nothing
+// about. The cap bounds memory and the per-request read; it does NOT bound
+// render CPU, since the superlinear parse cases sit far below it. The
+// markup guard (markupguard.go), the smaller render cap maxRenderBytes and
+// the render deadline (renderdeadline.go) bound that.
+const renderCapBytes = maxScanBytes
+
+// readDocCapped reads at most renderCapBytes of f, a doc Index.Open opened.
+// tooLarge reports that the file holds more than that, in which case source
+// is nil.
+func readDocCapped(f io.Reader) (source []byte, tooLarge bool, err error) {
+	// One byte past the cap detects an over-cap file without reading the rest.
+	source, err = io.ReadAll(io.LimitReader(f, renderCapBytes+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if len(source) > renderCapBytes {
+		return nil, true, nil
+	}
+	return source, false, nil
+}
+
+// tooLargeNoticeHTML is the page body for a document over renderCapBytes.
+// docPath is "root/rel" and is escaped here.
+func tooLargeNoticeHTML(docPath string) string {
+	p := html.EscapeString(docPath)
+	return "<p>This document is over " + strconv.Itoa(renderCapBytes>>20) + " MiB, so the reader does not render it.</p>" +
+		"<p><code>" + p + "</code></p>" +
+		"<p>Read it in a terminal with <code>forgectl docs read " + p + "</code>.</p>"
 }
 
 // pageContext is what a request handler fills in before calling
@@ -476,6 +571,9 @@ type shellData struct {
 	Minutes  int
 	// Home is the landing page's content; nil on every doc page.
 	Home *homeData
+	// Trust is the current doc's OKF trust signals (trust.go), badged in
+	// the status bar; zero on the index.
+	Trust trustState
 }
 
 // sidenavGroup renders one labeled section of the sidenav. Exactly one of
@@ -522,6 +620,13 @@ func renderShell(w http.ResponseWriter, idx *Index, ctx pageContext) {
 		Words:    ctx.Words,
 		Minutes:  ctx.Minutes,
 		Home:     ctx.Home,
+	}
+	if ctx.CurrentRoot != "" {
+		// Read from the index, not the render, so the status bar needs no
+		// second frontmatter parse and handleDoc stays untouched.
+		if d, ok := idx.Find(ctx.CurrentRoot, ctx.CurrentRel); ok {
+			data.Trust = evalTrust(d.Status, d.StaleAfter, trustNow())
+		}
 	}
 	if err := shellTemplate.Execute(w, data); err != nil {
 		slog.Error("docs: template execution failed.", "error", err)
@@ -602,7 +707,7 @@ func toLinks(docs []Doc, currentRoot, currentRel string) []sidenavLink {
 
 func toLink(d Doc, currentRoot, currentRel string) sidenavLink {
 	return sidenavLink{
-		Href:       "/doc/" + d.RootLabel + "/" + d.RelPath,
+		Href:       docHref(d.RootLabel, d.RelPath),
 		Title:      d.Title,
 		FilterText: strings.ToLower(d.Title + " " + d.RelPath),
 		Current:    d.RootLabel == currentRoot && d.RelPath == currentRel,

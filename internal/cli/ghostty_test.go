@@ -16,6 +16,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -178,5 +179,48 @@ func TestGhosttyCheatCmd_RendersParsedKeybinds(t *testing.T) {
 	out := stdout.String()
 	if !strings.Contains(out, "escape") || !strings.Contains(out, "end_search") {
 		t.Errorf("expected the parsed keybind in output, got: %q", out)
+	}
+}
+
+func TestGhosttyThemesCmd_JSON(t *testing.T) {
+	client := ghosttyFixture(
+		"artificer-dark (user)\nAdwaita Dark (resources)\n",
+		"",
+		"theme = artificer-dark\n",
+	)
+	cmd := newGhosttyThemesCmd(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--json", "--all"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got []struct {
+		Name   string `json:"name"`
+		Custom bool   `json:"custom"`
+		Active bool   `json:"active"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if len(got) != 2 || got[0].Name != "artificer-dark" || !got[0].Custom || !got[0].Active ||
+		got[1].Name != "Adwaita Dark" || got[1].Custom || got[1].Active {
+		t.Errorf("themes = %+v", got)
+	}
+}
+
+func TestGhosttyThemesCmd_JSONEmptyIsArray(t *testing.T) {
+	client := ghosttyFixture("", "", "")
+	cmd := newGhosttyThemesCmd(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "[]" {
+		t.Errorf("stdout = %q, want []", got)
 	}
 }

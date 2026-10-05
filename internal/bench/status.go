@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/url"
 	osexec "os/exec"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -67,7 +69,16 @@ func Status(ctx context.Context, cfg config.Config, runner exec.Runner, probe Pr
 // no running containers → unavailable; containers up but a probe fails → degraded.
 func checkHearth(ctx context.Context, cfg config.Config, runner exec.Runner, probe Prober) Component {
 	c := Component{Name: "hearth"}
-	if cfg.Bench.ResolvedHearthDir() == "" {
+	hearthDir, herr := cfg.Bench.ResolveHearthDir()
+	if herr != nil {
+		// Categorical: the configured ~ path cannot be placed, so nothing
+		// was probed. Not "not configured": the operator did configure it.
+		slog.Warn("Failed to resolve the hearth directory.", "error", herr)
+		c.State = StateUnavailable
+		c.Reason = "cannot resolve the home directory for [bench].hearth_dir"
+		return c
+	}
+	if hearthDir == "" {
 		c.State = StateNotConfigured
 		c.Reason = "set [bench].hearth_dir or $HEARTH_DIR"
 		return c
@@ -79,8 +90,12 @@ func checkHearth(ctx context.Context, cfg config.Config, runner exec.Runner, pro
 
 	out, err := runner.Run(ctx, "docker", "compose", "-p", hearthProject, "ps", "--all", "--format", "json")
 	if err != nil {
+		// Categorical (#716): err is docker's argv and stderr, text the
+		// daemon and any compose plugin choose. It reaches `bench status`
+		// and doctor's report, so it goes to the log instead.
+		slog.Warn("docker compose ps failed.", "project", hearthProject, "error", err)
 		c.State = StateUnavailable
-		c.Reason = "docker compose unavailable: " + firstLine(err.Error())
+		c.Reason = "docker compose unavailable"
 		return c
 	}
 	total, running, unhealthy, restarting, perr := parseComposePS(out)
@@ -130,7 +145,13 @@ func checkHearth(ctx context.Context, cfg config.Config, runner exec.Runner, pro
 // environment, or a chronicle on PATH) and, on macOS, checks the sync daemon.
 func checkChronicle(ctx context.Context, cfg config.Config, runner exec.Runner) Component {
 	c := Component{Name: "chronicle"}
-	name, args, ok := chronicleStatusCmd(cfg)
+	name, args, ok, derr := chronicleStatusCmd(cfg)
+	if derr != nil {
+		slog.Warn("Failed to resolve the chronicle directory.", "error", derr)
+		c.State = StateUnavailable
+		c.Reason = "cannot resolve the home directory for [bench].chronicle_dir"
+		return c
+	}
 	if !ok {
 		c.State = StateNotConfigured
 		c.Reason = "set [bench].chronicle_dir or $CHRONICLE_DIR (or put chronicle on PATH)"
@@ -139,8 +160,10 @@ func checkChronicle(ctx context.Context, cfg config.Config, runner exec.Runner) 
 
 	out, err := runner.Run(ctx, name, args...)
 	if err != nil {
+		// Categorical (#716): err carries chronicle's stderr.
+		slog.Warn("chronicle status failed.", "error", err)
 		c.State = StateUnavailable
-		c.Reason = "chronicle status failed: " + firstLine(err.Error())
+		c.Reason = "chronicle status failed"
 		return c
 	}
 	var st ChronicleStatus
@@ -151,7 +174,7 @@ func checkChronicle(ctx context.Context, cfg config.Config, runner exec.Runner) 
 	}
 	c.Details = append(c.Details, fmt.Sprintf("sessions: %d, events: %d, files: %d", st.Sessions, st.Events, st.Files))
 	if st.LastSync != nil {
-		c.Details = append(c.Details, "last sync: "+*st.LastSync)
+		c.Details = append(c.Details, "last sync: "+lastSyncDetail(*st.LastSync))
 	} else {
 		c.Details = append(c.Details, "last sync: never")
 	}
@@ -226,15 +249,20 @@ type ChronicleSource struct {
 
 // chronicleStatusCmd resolves how to invoke chronicle: the checkout's uv
 // environment when a dir is configured, else a chronicle on PATH, else none
-// (not-configured). Returns (name, args, resolved).
-func chronicleStatusCmd(cfg config.Config) (string, []string, bool) {
-	if dir := cfg.Bench.ResolvedChronicleDir(); dir != "" {
-		return "uv", []string{"--directory", dir, "run", "chronicle", "status", "--json"}, true
+// (not-configured). Returns (name, args, resolved, err). A configured dir
+// that cannot be resolved returns err and does not fall through to PATH.
+func chronicleStatusCmd(cfg config.Config) (string, []string, bool, error) {
+	dir, err := cfg.Bench.ResolveChronicleDir()
+	if err != nil {
+		return "", nil, false, err
+	}
+	if dir != "" {
+		return "uv", []string{"--directory", dir, "run", "chronicle", "status", "--json"}, true, nil
 	}
 	if _, err := osexec.LookPath("chronicle"); err == nil {
-		return "chronicle", []string{"status", "--json"}, true
+		return "chronicle", []string{"status", "--json"}, true, nil
 	}
-	return "", nil, false
+	return "", nil, false, nil
 }
 
 // composeContainer is the subset of `docker compose ps --format json` we read.
@@ -322,15 +350,6 @@ func recordTCP(ctx context.Context, probe Prober, label, target string, c *Compo
 	return true
 }
 
-// firstLine trims a possibly multi-line error string to its first line so a
-// component reason stays a single tidy line.
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	return strings.TrimSpace(s)
-}
-
 // dockerDataDir is where colima's Lima VM mounts the Docker data volume —
 // disk pressure there, not the host's, is what starves the hearth stack.
 const dockerDataDir = "/var/lib/docker"
@@ -364,4 +383,29 @@ func hearthDiskPercent(ctx context.Context, runner exec.Runner) (int, bool) {
 		return 0, false
 	}
 	return pct, true
+}
+
+// lastSyncLayouts are the ISO-8601 shapes chronicle's `status --json` may
+// write last_sync in, each paired with the layout it renders in. Chronicle
+// reads a TIMESTAMPTZ column (files.last_imported) and writes Python's
+// isoformat, which carries an offset, so RFC 3339 is the shape it emits.
+// An offset-less isoformat names no zone at all: reading it as UTC and
+// printing "Z" would claim a zone the value never stated (#738), so it
+// renders without one.
+var lastSyncLayouts = []struct{ parse, render string }{
+	{time.RFC3339Nano, time.RFC3339},
+	{"2006-01-02T15:04:05.999999999", "2006-01-02T15:04:05"},
+}
+
+// lastSyncDetail renders chronicle's last_sync from the parsed time, never
+// from the JSON text (#716): chronicle's output is another program's text,
+// and `bench status` and doctor print this detail. A value that is not a
+// timestamp reads as a fixed category.
+func lastSyncDetail(raw string) string {
+	for _, layout := range lastSyncLayouts {
+		if t, err := time.Parse(layout.parse, raw); err == nil {
+			return t.Format(layout.render)
+		}
+	}
+	return "unrecognized timestamp"
 }

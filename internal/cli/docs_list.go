@@ -18,7 +18,8 @@ import (
 // telling the operator which root it's still walking — long enough that a
 // normal, fast index never prints it, short enough that a hung or
 // cloud-backed root doesn't read as the command having stalled silently.
-const docsListProgressDelay = 2 * time.Second
+// A var so tests can shrink it to force the progress path.
+var docsListProgressDelay = 2 * time.Second
 
 // newDocsListCmd builds `forgectl docs list [dir|file ...]` — lists the
 // indexed doc set without binding a server.
@@ -33,22 +34,24 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 		Args:  cobra.ArbitraryArgs,
 		// SilenceUsage/SilenceErrors mirror env.go's own setting: a deadline
 		// error under --json has already put its ONE JSON object on stderr
-		// (reportDocsListDeadline); cobra's own "Error: ..." line and usage
+		// (docsFail); cobra's own "Error: ..." line and usage
 		// block would be a second, conflicting write to the same stream.
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Exit contract, as docs check: 0 listed (an empty list included);
+			// 2 the list could not be produced (bad flag, bad root, deadline).
 			if limit < 0 {
-				return fmt.Errorf("--limit must be 0 or a positive count, not %d", limit)
+				return docsFail(cmd, "docs list", "", fmt.Errorf("--limit must be 0 or a positive count, not %d", limit), 2, asJSON)
 			}
 
 			roots, err := resolveDocsRoots(args, deps.Cfg.Docs)
 			if err != nil {
-				return err
+				return docsFail(cmd, "docs list", "", err, 2, asJSON)
 			}
 			opts, err := docsIndexOptions(deps.Cfg.Docs)
 			if err != nil {
-				return err
+				return docsFail(cmd, "docs list", "", err, 2, asJSON)
 			}
 
 			ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
@@ -75,7 +78,13 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 					return
 				}
 				printed = true
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "indexing %s …\n", termsafe.SafeLine(progressRoot))
+				// Under --json stderr is reserved for the one error object
+				// (#649, #672): a slow walk that then hits its deadline would
+				// otherwise put this text line ahead of it.
+				if asJSON {
+					return
+				}
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "indexing %s …\n", safeColumnPath(progressRoot))
 			})
 			defer timer.Stop()
 
@@ -86,21 +95,34 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 			timer.Stop()
 			if err != nil {
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-					return reportDocsListDeadline(cmd, deadlineRoot(err, progressRoot), err, asJSON)
+					return docsFail(cmd, "docs list", deadlineRoot(err, progressRoot), err, 2, asJSON)
 				}
-				return err
+				return docsFail(cmd, "docs list", "", err, 2, asJSON)
+			}
+			// Under --json stderr is reserved for the one error object (#649),
+			// so the note stays out of it. The bare-array output has no room for
+			// the skipped paths either; docs check --json lists them.
+			if !asJSON {
+				noteSkippedPaths(cmd.ErrOrStderr(), idx)
 			}
 
 			docs := idx.List()
 			if limit > 0 && limit < len(docs) {
 				docs = docs[:limit]
 			}
-			return printDocsList(cmd, docs, asJSON)
+			if err := printDocsList(cmd, docs, asJSON); err != nil {
+				// stdout refused the list: under --json stderr gets the docs
+				// integer-code object, keeping the exit code 1 this has always
+				// had, not the generic contract's string-code shape.
+				return docsFail(cmd, "docs list", "", err, 1, asJSON)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
 	cmd.Flags().DurationVar(&timeout, "timeout", 15*time.Second, "walk deadline, e.g. 15s or 2m")
 	cmd.Flags().IntVar(&limit, "limit", 0, "print only the first N entries, after the full walk completes (0 or unset: no limit)")
+	cmd.SetFlagErrorFunc(docsFlagError("docs list"))
 	return cmd
 }
 
@@ -116,32 +138,6 @@ func deadlineRoot(err error, fallback string) string {
 		return deadline.Root
 	}
 	return fallback
-}
-
-// docsListDeadlineJSON is the --json wire shape for a `docs list` deadline
-// failure: stdout stays empty and this is the only thing written to stderr.
-type docsListDeadlineJSON struct {
-	Error string `json:"error"`
-	Code  int    `json:"code"`
-	Root  string `json:"root"`
-}
-
-// reportDocsListDeadline handles a walk that stopped on ctx.Err(): under
-// --json it writes exactly one JSON object to stderr and leaves stdout
-// untouched (printDocsList is never called), then returns a silentCodedError
-// (execute.go) so termsafeErrorHandler renders nothing more; otherwise it lets the normal
-// human-readable error path render walkErr, which already names the root
-// (NewIndexContext). Either way the process exits 2.
-func reportDocsListDeadline(cmd *cobra.Command, root string, walkErr error, asJSON bool) error {
-	if !asJSON {
-		return WithExitCode(walkErr, 2)
-	}
-	obj := docsListDeadlineJSON{Error: walkErr.Error(), Code: 2, Root: root}
-	enc := termsafe.JSONEncoder(cmd.ErrOrStderr())
-	if encErr := enc.Encode(obj); encErr != nil {
-		return WithExitCode(fmt.Errorf("docs list: encode deadline error: %w", encErr), 2)
-	}
-	return newSilentCodedError(2)
 }
 
 // docJSON is the --json wire shape for one entry of `forgectl docs list`.
@@ -168,8 +164,14 @@ func printDocsList(cmd *cobra.Command, docs []docspkg.Doc, asJSON bool) error {
 		fmt.Fprintln(out, "no docs found")
 		return nil
 	}
+	// Every field is escaped: RelPath is a filename and Title is the doc's own
+	// H1, so either can carry a terminal escape sequence (forgectl#598). The
+	// title is also capped (forgectl#894), and so are the root label and the
+	// path (#913): the path unquoted and cut in the middle, so an ordinary row
+	// keeps the %-48s column. --json above carries every field whole.
 	for _, d := range docs {
-		fmt.Fprintf(out, "%-16s %-48s %s\n", d.RootLabel, d.RelPath, d.Title)
+		_, _ = fmt.Fprintf(out, "%-16s %-48s %s\n",
+			safeLabel(d.RootLabel), safeColumnPath(d.RelPath), safeTitle(d.Title))
 	}
 	return nil
 }

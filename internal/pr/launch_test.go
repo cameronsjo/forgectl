@@ -207,7 +207,7 @@ func TestPostReview_ApprovedPosts(t *testing.T) {
 	if last.Name != "gh" {
 		t.Fatalf("expected gh post; got %+v", last)
 	}
-	want := []string{"pr", "review", "9", "--repo", "o/r", "--comment", "--body", "the review body"}
+	want := []string{"pr", "review", "9", "--repo", "github.com/o/r", "--comment", "--body", "the review body"}
 	if !equalArgs(last.Args, want) {
 		t.Errorf("post argv = %v, want %v", last.Args, want)
 	}
@@ -309,7 +309,7 @@ func TestLaunch_InlineDispatch(t *testing.T) {
 	if !contains(call.Args, mustWindowName(t, sess.Ref)) || !contains(call.Args, ws) || !contains(call.Args, claudeBin) {
 		t.Errorf("tmux argv missing window/workspace/claude: %v", call.Args)
 	}
-	if !contains(call.Args, "-p") || !contains(call.Args, reviewPrompt) {
+	if !contains(call.Args, "-p") || !contains(call.Args, remoteReviewPrompt("github.com", sess.Ref)) {
 		t.Errorf("tmux argv missing seeded -p prompt: %v", call.Args)
 	}
 	if !contains(call.Args, "--") {
@@ -402,10 +402,11 @@ func TestLaunch_CarriesTheWindowEnvIntoTmuxArgv(t *testing.T) {
 	}
 }
 
-// TestLaunch_WithoutWindowEnvPassesNoEFlags is the control: the default client
-// must produce the argv it produced before the env resolver existed, or every
-// existing `pr` user's behavior changed.
-func TestLaunch_WithoutWindowEnvPassesNoEFlags(t *testing.T) {
+// TestLaunch_WithoutWindowEnvPassesOnlyTheTokenPin is the control: with no
+// resolver configured, a github.com review's window gets no -e beyond the
+// forgectl#673 pin, which empties the enterprise token pair. Anything more
+// would change every existing `pr` user's window environment.
+func TestLaunch_WithoutWindowEnvPassesOnlyTheTokenPin(t *testing.T) {
 	claudeBin := fakeHarnessBin(t, "claude")
 	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
 
@@ -416,8 +417,18 @@ func TestLaunch_WithoutWindowEnvPassesNoEFlags(t *testing.T) {
 	if _, err := c.Launch(context.Background(), sess, config.Config{}); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	if contains(fake.Last().Args, "-e") {
-		t.Errorf("an -e flag appeared with no resolver configured: %v", fake.Last().Args)
+	args := fake.Last().Args
+	var envs []string
+	for i, a := range args {
+		if a == "--" {
+			break
+		}
+		if a == "-e" && i+1 < len(args) {
+			envs = append(envs, args[i+1])
+		}
+	}
+	if want := []string{"GH_ENTERPRISE_TOKEN=", "GITHUB_ENTERPRISE_TOKEN="}; !slices.Equal(envs, want) {
+		t.Errorf("window -e entries = %v, want exactly %v", envs, want)
 	}
 }
 
@@ -683,7 +694,7 @@ func TestLaunchInline_LocalSessionAddsFindingsDirAndPrompt(t *testing.T) {
 	if !contains(call.Args, localReviewPrompt(findingsDir, true)) {
 		t.Errorf("local session argv missing localReviewPrompt: %v", call.Args)
 	}
-	if contains(call.Args, reviewPrompt) {
+	if slices.ContainsFunc(call.Args, func(a string) bool { return strings.HasPrefix(a, reviewPrompt) }) {
 		t.Errorf("local session must not use the PR reviewPrompt: %v", call.Args)
 	}
 
@@ -699,7 +710,7 @@ func TestLaunchInline_LocalSessionAddsFindingsDirAndPrompt(t *testing.T) {
 	if contains(call2.Args, "--add-dir") {
 		t.Errorf("non-local session argv must not carry --add-dir: %v", call2.Args)
 	}
-	if !contains(call2.Args, reviewPrompt) {
+	if !contains(call2.Args, remoteReviewPrompt("github.com", prSess.Ref)) {
 		t.Errorf("non-local session argv missing reviewPrompt: %v", call2.Args)
 	}
 }

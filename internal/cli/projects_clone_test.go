@@ -31,6 +31,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
@@ -75,6 +76,7 @@ func TestCloneCmd_UniqueQueryMatch_UnclonedRepo_ClonesAndPrintsDest(t *testing.T
 func TestCloneCmd_UniqueQueryMatch_AlreadyCloned_AnnotatesInsteadOfCloning(t *testing.T) {
 	tmp := t.TempDir()
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		switch name {
 		case "gh":
 			return "[]", nil

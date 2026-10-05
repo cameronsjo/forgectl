@@ -165,14 +165,14 @@ filename. Supports .png, .tif/.tiff, .jpg/.jpeg, .gif. macOS only.`,
 func resolveYPath(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("resolve path %q: %w", path, err)
+		return "", fmt.Errorf("resolve path %s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", termsafe.SafeLine(path), err)
+		return "", fmt.Errorf("%s: %w", termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	if info.IsDir() {
-		return "", fmt.Errorf("%s: is a directory, not a file", termsafe.SafeLine(path))
+		return "", fmt.Errorf("%s: is a directory, not a file", termsafe.QuotePath(path))
 	}
 	return abs, nil
 }
@@ -222,7 +222,7 @@ scan, classify, or redact the output.`,
 			if len(args) == 1 {
 				parsed, err := strconv.Atoi(args[0])
 				if err != nil {
-					return fmt.Errorf("count %q is not a number", termsafe.SafeLine(args[0]))
+					return fmt.Errorf("count %q is not a number", safeLabel(args[0]))
 				}
 				count = parsed
 			}

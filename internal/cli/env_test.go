@@ -56,6 +56,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -70,6 +71,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/module"
 	sopspkg "github.com/cameronsjo/forgectl/internal/sops"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -259,6 +261,83 @@ func TestEnvKeysCmd_MissingFile_Errors(t *testing.T) {
 
 	if err := cmd.ExecuteContext(context.Background()); err == nil {
 		t.Fatal("keys against a missing file returned nil error, want a refusal")
+	}
+}
+
+// TestEnvKeysCmd_JSON_NamesOnly pins `env keys --json` (#482): valid JSON
+// carrying exactly the keys/skipped_malformed field set, key names in
+// first-seen order, the malformed count in the payload rather than on stderr,
+// and no value anywhere in the output.
+func TestEnvKeysCmd_JSON_NamesOnly(t *testing.T) {
+	const sentinel = "sk_live_sentinel_value_482"
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte("not-a-line\nA="+sentinel+"\nB=2\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Chdir(repo)
+	logs := captureSlog(t)
+
+	client, _ := envFixture()
+	cmd := newEnvTestCmd(client, theme.Theme{})
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"keys", "--json"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(stdout.Bytes(), &fields); err != nil {
+		t.Fatalf("stdout = %q, not valid JSON: %v", stdout.String(), err)
+	}
+	if len(fields) != 2 || fields["keys"] == nil || fields["skipped_malformed"] == nil {
+		t.Errorf("field set = %v, want exactly keys and skipped_malformed", fields)
+	}
+	var got envKeysJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if strings.Join(got.Keys, ",") != "A,B" {
+		t.Errorf("Keys = %v, want [A B]", got.Keys)
+	}
+	if got.SkippedMalformed != 1 {
+		t.Errorf("SkippedMalformed = %d, want 1", got.SkippedMalformed)
+	}
+	if stderr.String() != "" {
+		t.Errorf("stderr = %q, want empty in --json mode", stderr.String())
+	}
+	assertNoSecretInOutput(t, sentinel, stdout.String(), stderr.String(), logs.String())
+}
+
+func TestEnvKeysCmd_JSON_EmptyFile_EmptyArrayNotNull(t *testing.T) {
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, ".env"), []byte{}, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Chdir(repo)
+
+	client, _ := envFixture()
+	cmd := newEnvTestCmd(client, theme.Theme{})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"keys", "--json"})
+
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var got envKeysJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout = %q, not valid JSON: %v", stdout.String(), err)
+	}
+	if got.Keys == nil || len(got.Keys) != 0 {
+		t.Errorf("Keys = %#v, want a non-nil empty slice", got.Keys)
+	}
+	if !strings.Contains(stdout.String(), `"keys": []`) {
+		t.Errorf("stdout = %q, want keys encoded as []", stdout.String())
 	}
 }
 
@@ -453,6 +532,48 @@ func TestEnvSetCmd_NewFile_0600(t *testing.T) {
 	}
 	if fi.Mode().Perm() != 0o600 {
 		t.Errorf("mode = %o, want 0600", fi.Mode().Perm())
+	}
+}
+
+// TestEnvSetCmd_SuccessLinesQuoteThePath is forgectl#864: the `env set`
+// success line and the tightened notice quote the repo-relative path, so a
+// file name carrying a bidi override or a C1 CSI reaches the terminal escaped.
+// The runes are \u escapes so no literal format character sits in source.
+//
+// Mutation that turns it red: print target.Rel() raw on the set line or the
+// tightened line.
+func TestEnvSetCmd_SuccessLinesQuoteThePath(t *testing.T) {
+	const name = ".env.ev\u202eil\u009b31m"
+	repo := t.TempDir()
+	initEnvGitRepo(t, repo)
+	// Looser than 0600, so the write tightens it and says so.
+	if err := os.WriteFile(filepath.Join(repo, name), []byte("OTHER=1\n"), 0o644); err != nil { //nolint:gosec // G306: the loose mode is the fixture
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Chdir(repo)
+	forceNonTTY(t)
+
+	client, _ := envFixture()
+	cmd := newEnvTestCmd(client, theme.Theme{})
+	var stdout, stderr bytes.Buffer
+	cmd.SetIn(strings.NewReader("value1\n"))
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"set", "KEY", "--file", name})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("env set: %v", err)
+	}
+
+	for sink, want := range map[string]struct{ got, line string }{
+		"stdout": {stdout.String(), `set KEY in ".env.ev\u202eil\u009b31m"`},
+		"stderr": {stderr.String(), `tightened ".env.ev\u202eil\u009b31m" to 0600`},
+	} {
+		if strings.ContainsAny(want.got, "\u202e\u009b") {
+			t.Errorf("%s carries a raw bidi/control rune: %q", sink, want.got)
+		}
+		if !strings.Contains(want.got, want.line) {
+			t.Errorf("%s = %q, want it to contain %q", sink, want.got, want.line)
+		}
 	}
 }
 
@@ -972,6 +1093,65 @@ func TestEnvCheckCmd_JSON_MissingFile_OneStderrObject_ExitTwo(t *testing.T) {
 	}
 	if strings.ContainsRune(stderr.String(), 0x1b) {
 		t.Errorf("stderr contained an ESC byte: %q", stderr.String())
+	}
+}
+
+// TestEnvCheckCmd_MissingFile_HumanQuotesJSONKeepsRaw is the #847 review
+// fix: notFoundCheckError printed the path raw on the human branch while
+// env get and env keys quoted theirs. The human line now quotes it as
+// QuotePath does, and the --json path field keeps the raw value.
+//
+// Mutation that turns it red: pass rel, not termsafe.QuotePath(rel), to the
+// human wording in notFoundCheckError.
+func TestEnvCheckCmd_MissingFile_HumanQuotesJSONKeepsRaw(t *testing.T) {
+	const name = "rlo\u202e.env"
+	for _, tt := range []struct {
+		name, flag, present, wording string
+	}{
+		{"file", "--file", ".env.example", "env file %s not found"},
+		{"example", "--example", ".env", "example file %s not found"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := t.TempDir()
+			initEnvGitRepo(t, repo)
+			if err := os.WriteFile(filepath.Join(repo, tt.present), []byte("A=1\n"), 0o600); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			t.Chdir(repo)
+
+			for _, asJSON := range []bool{false, true} {
+				client, _ := envFixture()
+				cmd := newEnvTestCmd(client, theme.Theme{})
+				var stdout, stderr bytes.Buffer
+				cmd.SetOut(&stdout)
+				cmd.SetErr(&stderr)
+				args := []string{"check", tt.flag, name}
+				if tt.flag == "--example" {
+					args = append(args, "--file", ".env")
+				}
+				if asJSON {
+					args = append(args, "--json")
+				}
+				cmd.SetArgs(args)
+				err := cmd.ExecuteContext(context.Background())
+				if code := ExitCode(err); code != 2 {
+					t.Fatalf("json=%t: ExitCode = %d (err %v), want 2", asJSON, code, err)
+				}
+				if !asJSON {
+					if got, want := err.Error(), fmt.Sprintf(tt.wording, termsafe.QuotePath(name)); got != want {
+						t.Errorf("human error = %q, want %q", got, want)
+					}
+					continue
+				}
+				var got checkErrorJSONWire
+				if decErr := json.NewDecoder(&stderr).Decode(&got); decErr != nil {
+					t.Fatalf("stderr = %q, not valid JSON: %v", stderr.String(), decErr)
+				}
+				if got.Path != name {
+					t.Errorf("--json path = %q, want the raw %q", got.Path, name)
+				}
+			}
+		})
 	}
 }
 

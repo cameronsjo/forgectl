@@ -8,11 +8,18 @@ package pr
 //       readable — the failure that would otherwise cost TWO rows
 //   [x] A sync failure rolls the row back too
 //   [x] A failed truncate is reported alongside the original cause
+//   [x] An unterminated tail gets a separator, so the row stands on its own
+//       line rather than merging into an undecodable one (forgectl#549)
+//   [x] An empty file and a '\n'-terminated one get no separator
+//   [x] A short write that lands only the separator is rolled back whole
+//   [x] An unreadable last byte gets the separator: a blank line is harmless
 
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -30,6 +37,7 @@ type stubLogFile struct {
 	shortBy  int
 	syncErr  error
 	truncErr error
+	readErr  error
 	synced   bool
 }
 
@@ -40,6 +48,20 @@ func (f *stubLogFile) Write(p []byte) (int, error) {
 		f.shortBy = 0
 	}
 	f.data = append(f.data, p[:n]...)
+	return n, nil
+}
+
+func (f *stubLogFile) ReadAt(p []byte, off int64) (int, error) {
+	if f.readErr != nil {
+		return 0, f.readErr
+	}
+	if off < 0 || off >= int64(len(f.data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, f.data[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
 	return n, nil
 }
 
@@ -84,7 +106,7 @@ func TestAppendRepairRow_WritesTheWholeRowAndSyncs(t *testing.T) {
 
 // TestAppendRepairRow_ShortWriteLeavesNoPartialRow is the failure that costs
 // TWO rows, not one: partial bytes left in the file make the NEXT append
-// concatenate onto a truncated line, and readRepairLog drops the merged result
+// concatenate onto a truncated line, and readRepairLogTail drops the merged result
 // as unparseable. On an out-of-space tail that is the intent row naming a clean
 // room — the one line the log exists to preserve.
 func TestAppendRepairRow_ShortWriteLeavesNoPartialRow(t *testing.T) {
@@ -130,6 +152,87 @@ func TestAppendRepairRow_ReportsAFailedRollbackAlongsideTheCause(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "truncate refused") {
 		t.Errorf("err = %q, want it to name the failed rollback too", err)
+	}
+}
+
+// TestAppendRepairRowLocked_AnUnterminatedTailDoesNotSwallowTheRow is
+// forgectl#549: a single stray byte with no newline after it, and the next
+// genuine row merged into it as one undecodable line the reader skipped — a
+// real intent row gone from the history with nothing said.
+func TestAppendRepairRowLocked_AnUnterminatedTailDoesNotSwallowTheRow(t *testing.T) {
+	c := testClient(t, nil)
+	writeRepairLogRaw(t, c, "x")
+	if err := c.appendRepairRowLocked(RepairRow{ID: "real", Outcome: repairOutcomeIntent}); err != nil {
+		t.Fatalf("appendRepairRowLocked: %v", err)
+	}
+	rows, _, skipped, err := c.readRepairLogTail(10)
+	if err != nil {
+		t.Fatalf("readRepairLogTail: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != "real" {
+		t.Fatalf("rows = %+v, want the real row decoded on its own line", rows)
+	}
+	if skipped != 1 {
+		t.Errorf("skipped = %d, want 1: the stray prefix is its own unreadable line", skipped)
+	}
+}
+
+// TestAppendRepairRowLocked_NoSeparatorOnAnEmptyOrTerminatedLog pins the other
+// side: the separator is for an unterminated tail only, so a fresh log starts
+// with its row and a clean one gains no blank line per append.
+func TestAppendRepairRowLocked_NoSeparatorOnAnEmptyOrTerminatedLog(t *testing.T) {
+	for _, seed := range []string{"", repairRowLine(t, RepairRow{ID: "prev"})} {
+		c := testClient(t, nil)
+		writeRepairLogRaw(t, c, seed)
+		if err := c.appendRepairRowLocked(RepairRow{ID: "a", Outcome: repairOutcomeIntent}); err != nil {
+			t.Fatalf("appendRepairRowLocked: %v", err)
+		}
+		row, err := marshalRepairRow(RepairRow{ID: "a", Outcome: repairOutcomeIntent})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(c.repairLogPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := seed + string(row); string(got) != want {
+			t.Errorf("seed %q: file = %q, want %q with no separator", seed, got, want)
+		}
+	}
+}
+
+// TestAppendRepairRow_ASeparatorOnlyShortWriteRollsBackWhole: the separator and
+// the row are one write, so a write that lands the separator alone leaves the
+// file exactly as it was — still unterminated, so the next append separates
+// again rather than trusting a newline that was rolled back.
+func TestAppendRepairRow_ASeparatorOnlyShortWriteRollsBackWhole(t *testing.T) {
+	row := []byte("{\"id\":\"a\"}\n")
+	f := &stubLogFile{data: []byte("x"), shortBy: len(row)}
+	if err := appendRepairRow(f, row); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("err = %v, want io.ErrShortWrite", err)
+	}
+	if string(f.data) != "x" {
+		t.Fatalf("file = %q, want the untouched prefix", f.data)
+	}
+	if err := appendRepairRow(f, row); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if want := "x\n" + string(row); string(f.data) != want {
+		t.Errorf("file = %q, want %q", f.data, want)
+	}
+}
+
+// TestAppendRepairRow_AnUnreadableLastByteGetsTheSeparator: when the tail
+// cannot be checked, a blank line (skipped by every reader) is the safe guess
+// and a merged row is not.
+func TestAppendRepairRow_AnUnreadableLastByteGetsTheSeparator(t *testing.T) {
+	row := []byte("{\"id\":\"a\"}\n")
+	f := &stubLogFile{data: []byte("{\"id\":\"p\"}"), readErr: errors.New("pread refused")}
+	if err := appendRepairRow(f, row); err != nil {
+		t.Fatalf("appendRepairRow: %v", err)
+	}
+	if want := "{\"id\":\"p\"}\n" + string(row); string(f.data) != want {
+		t.Errorf("file = %q, want %q", f.data, want)
 	}
 }
 
@@ -307,5 +410,205 @@ func TestComposeRepairActor_CutsOnARuneBoundary(t *testing.T) {
 	}
 	if strings.ContainsRune(back.Actor, utf8.RuneError) {
 		t.Errorf("actor carries U+FFFD, so json.Marshal rewrote bytes the field was supposed to preserve: %q", back.Actor)
+	}
+}
+
+// readRepairLog is the unbounded read the older tests were written against: the
+// tail reader with a limit nothing reaches.
+func (c *Client) readRepairLog() ([]RepairRow, error) {
+	rows, _, _, err := c.readRepairLogTail(math.MaxInt)
+	return rows, err
+}
+
+func writeRepairLogRaw(t *testing.T, c *Client, content string) {
+	t.Helper()
+	if err := os.WriteFile(c.repairLogPath(), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func repairRowLine(t *testing.T, row RepairRow) string {
+	t.Helper()
+	data, err := json.Marshal(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data) + "\n"
+}
+
+func TestReadRepairLogTail_KeepsTheNewestRowsInOrder(t *testing.T) {
+	c := testClient(t, nil)
+	var log strings.Builder
+	for i := 0; i < 8; i++ {
+		log.WriteString(repairRowLine(t, RepairRow{ID: fmt.Sprintf("r%d", i)}))
+	}
+	writeRepairLogRaw(t, c, log.String())
+
+	rows, omitted, _, err := c.readRepairLogTail(3)
+	if err != nil {
+		t.Fatalf("readRepairLogTail: %v", err)
+	}
+	var ids []string
+	for _, r := range rows {
+		ids = append(ids, r.ID)
+	}
+	if want := []string{"r5", "r6", "r7"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("ids = %v, want the newest three oldest-first %v", ids, want)
+	}
+	if omitted != 5 {
+		t.Errorf("omitted = %d, want 5", omitted)
+	}
+}
+
+func TestReadRepairLogTail_SkipsAnOverLongLineAndKeepsTheRest(t *testing.T) {
+	c := testClient(t, nil)
+	writeRepairLogRaw(t, c, repairRowLine(t, RepairRow{ID: "before"})+
+		strings.Repeat("x", 9000)+"\n"+
+		repairRowLine(t, RepairRow{ID: "after"}))
+
+	rows, omitted, _, err := c.readRepairLogTail(10)
+	if err != nil {
+		t.Fatalf("an over-long line must not fail the read: %v", err)
+	}
+	if len(rows) != 2 || rows[0].ID != "before" || rows[1].ID != "after" {
+		t.Errorf("rows = %+v, want before and after", rows)
+	}
+	if omitted != 0 {
+		t.Errorf("omitted = %d, want 0: a skipped line is not an omitted row", omitted)
+	}
+}
+
+func TestReadRepairLogTail_AcceptsARowAtExactlyTheLineLimit(t *testing.T) {
+	c := testClient(t, nil)
+	row := RepairRow{ID: "big", Detail: "a"}
+	base := repairRowLine(t, row)
+	row.Detail = strings.Repeat("a", 1+maxRepairLogLineBytes-len(base))
+	big := repairRowLine(t, row)
+	if len(big) != maxRepairLogLineBytes {
+		t.Fatalf("fixture line is %d bytes, want exactly %d", len(big), maxRepairLogLineBytes)
+	}
+	writeRepairLogRaw(t, c, big+repairRowLine(t, RepairRow{ID: "next"}))
+
+	rows, _, _, err := c.readRepairLogTail(10)
+	if err != nil {
+		t.Fatalf("readRepairLogTail: %v", err)
+	}
+	if len(rows) != 2 || rows[0].ID != "big" || rows[1].ID != "next" {
+		t.Errorf("rows = %d, want the at-limit row and the next one", len(rows))
+	}
+}
+
+func TestReadRepairLogTail_ReadsAFinalLineWithNoNewline(t *testing.T) {
+	c := testClient(t, nil)
+	writeRepairLogRaw(t, c, repairRowLine(t, RepairRow{ID: "a"})+
+		strings.TrimSuffix(repairRowLine(t, RepairRow{ID: "b"}), "\n"))
+
+	rows, _, _, err := c.readRepairLogTail(10)
+	if err != nil {
+		t.Fatalf("readRepairLogTail: %v", err)
+	}
+	if len(rows) != 2 || rows[1].ID != "b" {
+		t.Errorf("rows = %+v, want the unterminated final row kept", rows)
+	}
+}
+
+func intentRow(id string) RepairRow { return RepairRow{ID: id, Outcome: repairOutcomeIntent} }
+func doneRow(id string) RepairRow   { return RepairRow{ID: id, Outcome: repairOutcomeApplied} }
+
+func seedRows(t *testing.T, c *Client, rows ...RepairRow) {
+	t.Helper()
+	var log strings.Builder
+	for _, r := range rows {
+		log.WriteString(repairRowLine(t, r))
+	}
+	writeRepairLogRaw(t, c, log.String())
+}
+
+// TestScanRepairLogTail_CountsOnlyDisplacedIntentsNoCompletionCloses covers
+// every way a displaced intent can be paired, with a ring of 4 over ten rows.
+// Displaced: U, P (intent), P (completion), S (intent), filler, L (intent).
+// Only U is unpaired: P's completion was displaced too, S's completion is
+// still in the ring at the end, and L's completion arrived after L left it.
+func TestScanRepairLogTail_CountsOnlyDisplacedIntentsNoCompletionCloses(t *testing.T) {
+	c := testClient(t, nil)
+	seedRows(t, c,
+		intentRow("U"), intentRow("P"), doneRow("P"), intentRow("S"), doneRow("f1"),
+		intentRow("L"), doneRow("S"), doneRow("f2"), doneRow("f3"), doneRow("L"))
+
+	tail, err := c.scanRepairLogTail(4, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tail.omitted != 6 {
+		t.Fatalf("omitted = %d, want 6", tail.omitted)
+	}
+	if tail.omittedUnpaired != 1 || tail.unpairedCapped {
+		t.Errorf("omittedUnpaired = %d (capped %v), want exactly 1 (U) and not capped", tail.omittedUnpaired, tail.unpairedCapped)
+	}
+}
+
+// TestScanRepairLogTail_AnIntentStillInTheRingIsNotCounted: an unpaired intent
+// the view still shows is visible already, so it must not be in the omitted
+// count.
+func TestScanRepairLogTail_AnIntentStillInTheRingIsNotCounted(t *testing.T) {
+	c := testClient(t, nil)
+	seedRows(t, c, doneRow("a"), doneRow("b"), intentRow("visible"))
+	tail, err := c.scanRepairLogTail(1, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tail.omitted != 2 || tail.omittedUnpaired != 0 {
+		t.Errorf("omitted=%d unpaired=%d, want 2 and 0", tail.omitted, tail.omittedUnpaired)
+	}
+}
+
+// TestScanRepairLogTail_UnpairedTrackingIsCapped: past the cap the count stops
+// growing and says it is a lower bound, so heap stays bounded.
+func TestScanRepairLogTail_UnpairedTrackingIsCapped(t *testing.T) {
+	c := testClient(t, nil)
+	var rows []RepairRow
+	for i := 0; i < 5; i++ {
+		rows = append(rows, intentRow(fmt.Sprintf("u%d", i)))
+	}
+	rows = append(rows, doneRow("x"))
+	seedRows(t, c, rows...)
+	tail, err := c.scanRepairLogTail(1, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tail.omittedUnpaired != 3 || !tail.unpairedCapped {
+		t.Errorf("omittedUnpaired=%d capped=%v, want 3 and capped", tail.omittedUnpaired, tail.unpairedCapped)
+	}
+}
+
+// TestScanRepairLogTail_UndecodableLinesAreNeverAttributed: a garbled line that
+// merely mentions an intent stays in skipped and adds nothing to the count.
+func TestScanRepairLogTail_UndecodableLinesAreNeverAttributed(t *testing.T) {
+	c := testClient(t, nil)
+	writeRepairLogRaw(t, c, `{"id":"g","outcome":"intent"`+"\n"+repairRowLine(t, doneRow("a"))+repairRowLine(t, doneRow("b")))
+	tail, err := c.scanRepairLogTail(1, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tail.skipped != 1 || tail.omittedUnpaired != 0 {
+		t.Errorf("skipped=%d unpaired=%d, want 1 and 0", tail.skipped, tail.omittedUnpaired)
+	}
+}
+
+// TestRepairHistory_ReportsOmittedUnpairedIntents runs the public path over
+// more than MaxRepairHistoryRows rows.
+func TestRepairHistory_ReportsOmittedUnpairedIntents(t *testing.T) {
+	c := testClient(t, nil)
+	rows := []RepairRow{intentRow("u10")}
+	for i := 0; i < MaxRepairHistoryRows+50; i++ {
+		rows = append(rows, doneRow(fmt.Sprintf("d%d", i)))
+	}
+	seedRows(t, c, rows...)
+	trail, err := c.RepairHistory(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trail.OmittedUnpaired != 1 || trail.OmittedUnpairedCapped || trail.Omitted != 51 {
+		t.Errorf("trail = omitted %d, unpaired %d, capped %v; want 51, 1, false", trail.Omitted, trail.OmittedUnpaired, trail.OmittedUnpairedCapped)
 	}
 }

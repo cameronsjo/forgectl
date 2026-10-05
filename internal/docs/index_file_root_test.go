@@ -7,6 +7,8 @@ package docs
 //   [x] Unhappy: naming one file does NOT grant access to its sibling files
 //   [x] Unhappy: a non-markdown file argument is a hard error
 //   [x] Happy: mixing a directory root and a file root both work in one Index
+//   [x] Edge: a file root over maxScanBytes still indexes (by title only)
+//   [x] Edge: a directory root lists an over-cap doc beside a normal one
 
 import (
 	"errors"
@@ -79,7 +81,7 @@ func TestNewIndex_FileArg_NonMarkdown_Errors(t *testing.T) {
 func TestNewIndex_FileArg_ScansHeadingsAndLinks(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "note.md")
-	writeFile(t, target, "# Note\n\n## A Heading\n\nSee [[other]] and [text](../elsewhere.md).\n")
+	writeFile(t, target, "# Note\n\n## A Heading\n\nSee [other](other.md) and [text](../elsewhere.md).\n")
 
 	idx, err := NewIndex([]string{target})
 	if err != nil {
@@ -121,5 +123,37 @@ func TestNewIndex_MixedDirAndFileRoots(t *testing.T) {
 	}
 	if len(idx.List()) != 2 {
 		t.Fatalf("List() has %d docs, want 2", len(idx.List()))
+	}
+}
+
+func TestNewIndex_SingleFileRootOverCap_Succeeds(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "big.md")
+	writeFile(t, target, padToSize("# Big\n\n[[t]]\n", maxScanBytes+1))
+
+	idx, err := NewIndex([]string{target})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	docs := idx.List()
+	if len(docs) != 1 || docs[0].Title != "Big" {
+		t.Errorf("List() = %+v, want one doc titled Big", docs)
+	}
+}
+
+func TestWalkRoot_OverCapDocListed(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "big.md"), padToSize("# Big\n", maxScanBytes+1))
+	writeFile(t, filepath.Join(dir, "small.md"), "# Small\n")
+
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
+	got := map[string]bool{}
+	for _, d := range idx.docs {
+		got[d.RelPath] = true
+	}
+	if !got["big.md"] || !got["small.md"] || len(idx.docs) != 2 {
+		t.Errorf("docs = %v, want big.md and small.md", got)
 	}
 }

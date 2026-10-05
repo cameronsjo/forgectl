@@ -33,9 +33,14 @@ func TestCreateSessionArgvAndIdentity(t *testing.T) {
 	// A name that is entirely tmux target syntax proves it is passed through as
 	// an operand: if anything ran it through a target builder, this argv would
 	// not survive.
+	//
+	// The ':' is mapped to the '_' tmux stores (forgectl#815), so the argv and
+	// the identity carry "=forge_" — still target syntax a builder would
+	// have rewritten.
 	const hostile = "=forge:"
+	const stored = "=forge_"
 	fake := &internalexec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
-		argsEqual(t, args, createArgs(hostile, "/repo"))
+		argsEqual(t, args, createArgs(stored, "/repo"))
 		return identityOut("123", "456", "$4"), nil
 	}}
 	c := New(fake)
@@ -44,8 +49,8 @@ func TestCreateSessionArgvAndIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	if got.ID != "$4" || got.Name != hostile {
-		t.Fatalf("identity = %+v, want $4 named %q", got, hostile)
+	if got.ID != "$4" || got.Name != stored {
+		t.Fatalf("identity = %+v, want $4 named %q", got, stored)
 	}
 	if got.Generation.PID != "123" || got.Generation.StartTime != "456" {
 		t.Fatalf("generation = %+v, want 123/456 captured from the create itself", got.Generation)
@@ -120,7 +125,8 @@ type scriptedRunner struct {
 }
 
 func (s *scriptedRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
-	if len(args) > 0 && args[0] == "list-sessions" {
+	sub := internalexec.TmuxSubcommand(args)
+	if len(sub) > 0 && sub[0] == "list-sessions" {
 		i := s.lists
 		s.lists++
 		var out string
@@ -134,7 +140,7 @@ func (s *scriptedRunner) Run(ctx context.Context, name string, args ...string) (
 		_, _ = s.FakeRunner.Run(ctx, name, args...)
 		return out, err
 	}
-	if len(args) > 0 && args[0] == "new-session" {
+	if len(sub) > 0 && sub[0] == "new-session" {
 		s.creates++
 		_, _ = s.FakeRunner.Run(ctx, name, args...)
 		return s.createFn(args)
@@ -146,7 +152,10 @@ func TestEnsureSessionStateMachine(t *testing.T) {
 	const name = "forge"
 	present := sessionListRow("123", "456", "$1", name)
 	sibling := sessionListRow("123", "456", "$2", "forge-review")
-	dupErr := commandFailure("tmux", createArgs(name, "/repo"), "duplicate session: "+name+"\n")
+	// scriptedRunner answers the create itself, not through FakeRunner, so this
+	// error must carry the argv as issued, `-u` included (forgectl#840): that
+	// is what a real runner reports and what the duplicate check compares.
+	dupErr := commandFailure("tmux", append([]string{"-u"}, createArgs(name, "/repo")...), "duplicate session: "+name+"\n")
 
 	tests := []struct {
 		label       string

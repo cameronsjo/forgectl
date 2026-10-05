@@ -3,10 +3,10 @@ package update
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
 // Step names — the vocabulary --only matches against and the roster.go
@@ -36,23 +36,12 @@ func DefaultSteps() []Step {
 	}
 }
 
-// homebrewNoAutoUpdate is exec.HomebrewNoAutoUpdate (the shared definition —
-// internal/selfupdate's own brew calls merge the same map, so the two
-// packages can never drift apart on the exact env shape). Without it,
-// `brew outdated` (brewStep's Check, documented as "no mutation, always
-// safe") can fetch and mutate local tap/formula-index state as a side
-// effect the caller never asked for and `update check` never disclosed.
-// Applied to every brew invocation in this step (Check and Apply alike) so
-// the roster's behavior is deterministic regardless of how stale the
-// ambient Homebrew auto-update timestamp happens to be.
-var homebrewNoAutoUpdate = exec.HomebrewNoAutoUpdate
-
 // brewStep: Check and Apply are both scoped to --formula — no cask is listed
 // or upgraded here. One residue: `brew cleanup` takes no --formula/--cask
 // switch, so it still prunes stale cask DOWNLOADS. Old-version deletion stays
 // formula-only, which is what keeps the Cellar-rollback caveat below exact.
 // Check lists outdated
-// formulae (never mutates, HOMEBREW_NO_AUTO_UPDATE pinned — see above);
+// formulae (never mutates, HOMEBREW_NO_AUTO_UPDATE pinned — see below);
 // Apply runs the standard three-command weekly refresh in sequence — update
 // (refresh the formula index), upgrade --formula (install newer formula
 // versions), cleanup (reclaim disk). Destructive: cleanup ALSO removes old
@@ -73,15 +62,23 @@ var homebrewNoAutoUpdate = exec.HomebrewNoAutoUpdate
 // would otherwise show up in every weekly check forever with nothing
 // explaining why `update run --yes` never clears it. Cask upgrades stay a
 // manual `brew upgrade --cask` outside this tool.
+//
+// Every brew invocation here (Check and Apply alike) carries a fresh
+// exec.HomebrewNoAutoUpdate(), the definition internal/selfupdate's brew
+// calls share, so the two packages never drift apart on the env shape.
+// Without it, `brew outdated` (Check, documented as "no mutation, always
+// safe") can fetch and mutate local tap/formula-index state as a side effect
+// the caller never asked for and `update check` never disclosed, depending
+// on how stale the ambient Homebrew auto-update timestamp happens to be.
 func brewStep() Step {
 	return Step{
 		Name:        StepBrew,
 		Destructive: true,
 		Check: func(ctx context.Context, run exec.Runner) (string, error) {
-			return run.RunWithEnv(ctx, homebrewNoAutoUpdate, "brew", "outdated", "--formula")
+			return run.RunWithEnv(ctx, exec.HomebrewNoAutoUpdate(), "brew", "outdated", "--formula")
 		},
 		Apply: func(ctx context.Context, run exec.Runner) (string, error) {
-			return runSequence(ctx, run, homebrewNoAutoUpdate,
+			return runSequence(ctx, run, exec.HomebrewNoAutoUpdate(),
 				[]string{"brew", "update"},
 				[]string{"brew", "upgrade", "--formula"},
 				[]string{"brew", "cleanup"},
@@ -162,7 +159,10 @@ func npmStep() Step {
 			}
 			var cmdErr *exec.CommandError
 			if errors.As(err, &cmdErr) && cmdErr.ExitCode == 1 && strings.TrimSpace(cmdErr.Output) != "" {
-				return cmdErr.Output, nil
+				// The finding is the deliverable, so it is redacted narrowly
+				// (redact.Stdout, #952), not by redact.Text, which withholds
+				// every node_modules/@scope row.
+				return redact.Stdout(cmdErr.Output), nil
 			}
 			return out, err
 		},
@@ -171,6 +171,21 @@ func npmStep() Step {
 		},
 	}
 }
+
+// SequenceError is runSequence's failure: which of its commands failed, and
+// why. Command is the argv this package built (brew update, say), rendered
+// through redact.Args (#782), never subprocess text, so a renderer can name
+// the failed command without rendering Err, which carries the child's stderr
+// (#778). Error() reads "<command>: <err>", the text this failure has always
+// had.
+type SequenceError struct {
+	Command string
+	Err     error
+}
+
+func (e *SequenceError) Error() string { return e.Command + ": " + e.Err.Error() }
+
+func (e *SequenceError) Unwrap() error { return e.Err }
 
 // runSequence runs each argv in order (with env merged onto each
 // invocation's environment), stopping at the first failure. Output from
@@ -181,7 +196,10 @@ func npmStep() Step {
 // Runner.Run's own return value (that's always "" on error, by contract —
 // see exec.OSRunner.Run) — it's recovered from the returned
 // *exec.CommandError's Output field instead, which is where a failed
-// command's captured stdout actually lives.
+// command's captured stdout actually lives. That stdout is redacted
+// (redact.Text) before it joins the output (#941): every renderer of the
+// failure — the transcript file, --json, the debug log — shows it, and a
+// CommandError's Stderr and Err are already redacted wherever they render.
 func runSequence(ctx context.Context, run exec.Runner, env map[string]string, argvs ...[]string) (string, error) {
 	var parts []string
 	for _, argv := range argvs {
@@ -192,9 +210,9 @@ func runSequence(ctx context.Context, run exec.Runner, env map[string]string, ar
 		if err != nil {
 			var cmdErr *exec.CommandError
 			if errors.As(err, &cmdErr) && cmdErr.Output != "" {
-				parts = append(parts, cmdErr.Output)
+				parts = append(parts, redact.Text(cmdErr.Output))
 			}
-			return strings.Join(parts, "\n\n"), fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
+			return strings.Join(parts, "\n\n"), &SequenceError{Command: strings.Join(redact.Args(argv), " "), Err: err}
 		}
 	}
 	return strings.Join(parts, "\n\n"), nil

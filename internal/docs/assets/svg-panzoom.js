@@ -149,15 +149,20 @@
     // Inline SVG authored in the doc, plus whatever mermaid has rendered by
     // now. aria-hidden svgs are excluded: those are the reader's own chrome
     // (property-block and callout icons), and wrapping an 11px icon in a
-    // pan/zoom viewport renders it as a giant bordered capsule.
-    document.querySelectorAll('main svg:not([aria-hidden="true"])').forEach(enhance);
+    // pan/zoom viewport renders it as a giant bordered capsule. KaTeX output is
+    // excluded too: it draws radicals, stretchy arrows and wide accents as
+    // small inline SVGs sized to the formula, and a viewport around one
+    // crops the glyph.
+    document.querySelectorAll('[data-fc="doc-main"] svg:not([aria-hidden="true"])').forEach(function (svg) {
+      if (!svg.closest(".katex")) { enhance(svg); }
+    });
   }
 
   // Mermaid renders asynchronously and replaces pre.mermaid contents, so the
   // SVGs it produces do not exist at DOMContentLoaded. Watch <main> for added
   // SVG rather than guessing at a delay.
   function watchForRenderedDiagrams() {
-    var main = document.querySelector("main");
+    var main = document.querySelector('[data-fc="doc-main"]');
     if (!main) { return; }
     new MutationObserver(function () { enhanceAll(); })
       .observe(main, { childList: true, subtree: true });

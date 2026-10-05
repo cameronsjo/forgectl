@@ -54,7 +54,7 @@ to stdout and exits 1; each printed ref works with forgectl pr <ref>.`,
 				return fmt.Errorf("no open PRs to pick from")
 			}
 
-			store := pr.LoadReviewed(reviewedPath)
+			store := pr.LoadReviewed(reviewedPath, pr.WithDefaultHost(client.GitHubHost()))
 			selected, err := choosePRs(cmd, prs, store, th)
 			if err != nil {
 				return err
@@ -139,7 +139,7 @@ func pickPRs(prs []pr.PR, store *pr.ReviewedStore, th theme.Theme) ([]pr.PR, err
 // the shared terminal boundary; SafeLine leaves ordinary text byte-identical
 // and visibly escapes controls rather than silently erasing evidence of them.
 func prPickerLabel(p pr.PR, store *pr.ReviewedStore, dimStyle lipgloss.Style) string {
-	label := fmt.Sprintf("%s  %s", safeTerm(p.Ref.String()), safeTerm(p.Title))
+	label := fmt.Sprintf("%s  %s", safeTitle(p.Ref.String()), safeTitle(p.Title))
 	if pr.Dimmed(p, store) {
 		label = dimStyle.Render(label + "  (reviewed)")
 	}

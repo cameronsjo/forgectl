@@ -30,8 +30,8 @@ const (
 	// resolves. Only this state may authorize a breadcrumb-only stale unlink.
 	workspaceAvailabilityMissing
 	// workspaceAvailabilityNone means the record legitimately has no
-	// workspace yet — a queued or preparing session, where nothing has been
-	// cloned. It is neither live nor missing: there is nothing to act on and
+	// workspace yet — a queued or preparing session where nothing has been
+	// cloned, or a needs-repair one whose clone failed. It is neither live nor missing: there is nothing to act on and
 	// nothing that went away.
 	workspaceAvailabilityNone
 )
@@ -53,7 +53,7 @@ type workspaceMissingError struct {
 }
 
 func (e *workspaceMissingError) Error() string {
-	return fmt.Sprintf("workspace %q no longer exists", e.path)
+	return fmt.Sprintf("workspace %s no longer exists", quoteWorkspace(e.path))
 }
 
 func (e *workspaceMissingError) Unwrap() error { return e.err }
@@ -97,10 +97,10 @@ var (
 //     authority.
 func classifyWorkspace(path string) (workspaceAvailability, error) {
 	if !filepath.IsAbs(path) {
-		return workspaceAvailabilityInvalid, fmt.Errorf("workspace %q must be an absolute path", path)
+		return workspaceAvailabilityInvalid, fmt.Errorf("workspace %s must be an absolute path", quoteWorkspace(path))
 	}
 	if filepath.Clean(path) != path {
-		return workspaceAvailabilityInvalid, fmt.Errorf("workspace %q is not a clean path", path)
+		return workspaceAvailabilityInvalid, fmt.Errorf("workspace %s is not a clean path", quoteWorkspace(path))
 	}
 
 	_, lerr := fsLstat(path)
@@ -111,7 +111,7 @@ func classifyWorkspace(path string) (workspaceAvailability, error) {
 		}
 		return workspaceAvailabilityLive, nil
 	case !errors.Is(lerr, fs.ErrNotExist):
-		return workspaceAvailabilityInvalid, fmt.Errorf("workspace %q could not be examined: %w", path, lerr)
+		return workspaceAvailabilityInvalid, fmt.Errorf("workspace %s could not be examined: %w", quoteWorkspace(path), pathErrCause(lerr))
 	}
 
 	// The final component is lexically absent. Confirm the absence is a clean
@@ -120,15 +120,15 @@ func classifyWorkspace(path string) (workspaceAvailability, error) {
 	info, err := fsStat(parent)
 	if err != nil {
 		return workspaceAvailabilityInvalid,
-			fmt.Errorf("workspace %q is absent and its parent %q could not be examined: %w", path, parent, err)
+			fmt.Errorf("workspace %s is absent and its parent could not be examined: %w", quoteWorkspace(path), pathErrCause(err))
 	}
 	if !info.IsDir() {
 		return workspaceAvailabilityInvalid,
-			fmt.Errorf("workspace %q is absent and its parent %q is not a directory", path, parent)
+			fmt.Errorf("workspace %s is absent and its parent is not a directory", quoteWorkspace(path))
 	}
 	if _, err := fsEvalSymlinks(parent); err != nil {
 		return workspaceAvailabilityInvalid,
-			fmt.Errorf("workspace %q is absent and its parent %q could not be resolved: %w", path, parent, err)
+			fmt.Errorf("workspace %s is absent and its parent could not be resolved: %w", quoteWorkspace(path), pathErrCause(err))
 	}
 	return workspaceAvailabilityMissing, &workspaceMissingError{path: path, err: lerr}
 }

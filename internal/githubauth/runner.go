@@ -10,6 +10,19 @@
 // path: the host may be configured per deployment ([github] host), but every
 // gh subprocess still has GH_HOST force-set to that validated value, and an
 // ambient GH_HOST never wins.
+//
+// Scope (#413). Host-scoped calls — those with no repository behind them —
+// are pinned to the configured host: the projects/review inventory, the @me
+// searches behind `pr prs` and `pr dash`, and doctor's `gh auth status`.
+// PR-scoped calls in internal/pr (view, review post) are pinned too, but to
+// the PR's OWN host, which internal/pr carries on Ref.Host and also names in
+// `--repo HOST/OWNER/REPO`: gh resolves a two-part --repo against GH_HOST or
+// its default host, never the checkout. Checkout-resolved calls (`gh repo
+// view` for a bare PR number, internal/branch's `gh pr list`) stay OFF this
+// runner: gh takes their repository from the checkout's git remotes and
+// filters those by GH_HOST with no fallback, so a pin would break every
+// checkout whose remote is on another host. internal/branch's `gh api`
+// verification, which infers no host, passes --hostname for its remote's URL.
 package githubauth
 
 import (
@@ -21,6 +34,7 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/pr"
 )
 
 // DefaultHost is the GitHub host forgectl's inventory talks to when no
@@ -42,7 +56,10 @@ const MaxHostBytes = 256
 // This is deliberately stricter than review's reGiteaHost (which allows a
 // port); the user-visible consequence is that a GitHub Enterprise host served
 // on a nonstandard port is unconfigurable.
-var reHost = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`)
+//
+// The pattern is pr.HostnamePattern, so a Ref's host (validated in internal/pr,
+// which this package imports) and a configured host share one charset.
+var reHost = regexp.MustCompile(pr.HostnamePattern)
 
 // ErrUnpinnableGhPath is returned when a `gh` command is routed through a
 // Runner method that cannot carry the host pin. exec.Runner's stdin and
@@ -89,7 +106,7 @@ func ResolveHost(configured string) (string, error) {
 // DROPS directory names over 255 bytes, so such a tree would also be invisible
 // to the launcher. 253 is the DNS name limit, which is the real ceiling for
 // anything that is genuinely a hostname.
-const MaxHostSegmentBytes = 253
+const MaxHostSegmentBytes = pr.MaxHostSegmentBytes
 
 // ValidHostSegment reports whether s is a normalized hostname safe to use
 // verbatim as a filesystem path segment and a store key.
@@ -108,19 +125,20 @@ const MaxHostSegmentBytes = 253
 // leading '.' (a tree invisible to ls), whitespace, ASCII control characters
 // and ANSI escapes, all non-ASCII homoglyphs, and any over-long value.
 func ValidHostSegment(s string) bool {
-	return s != "" && len(s) <= MaxHostSegmentBytes && reHost.MatchString(s)
+	return pr.ValidHostSegment(s)
 }
 
-// tokenEnvVars are the credential variables gh consults for a host. gh sends
-// GH_ENTERPRISE_TOKEN / GITHUB_ENTERPRISE_TOKEN to whatever non-default
-// GH_HOST names, and GH_TOKEN / GITHUB_TOKEN to github.com and *.ghe.com —
-// so once the pin's value is config-steerable, an ambient token plus one
-// hostile config line becomes a credential-redirect primitive. On any
-// non-default host the pinned runner removes all four from the child process
-// environment, forcing gh to the hosts.yml credential stored for that host by
-// `gh auth login --hostname <host>`. This remains the bound on Linux, where
-// XDG_CONFIG_HOME can steer which config file supplied the pinned host.
-var tokenEnvVars = [4]string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}
+// tokenEnvVars are the credential variables gh consults for a host
+// (pr.GHTokenEnvVars, which documents which host each one reaches). Once the
+// pin's value is config-steerable, an ambient token plus one hostile config
+// line becomes a credential-redirect primitive, so on any non-default host the
+// pinned runner removes all four from the child process environment, forcing
+// gh to the hosts.yml credential stored for that host by `gh auth login
+// --hostname <host>`. This remains the bound on Linux, where XDG_CONFIG_HOME
+// can steer which config file supplied the pinned host. Which variables to
+// remove for a host is pr.GHTokenVarsToScrub, the one rule the review window's
+// environment (internal/pr) applies too.
+var tokenEnvVars = pr.GHTokenEnvVars
 
 // pinnedRunner wraps an exec.Runner so every `gh` invocation carries
 // GH_HOST=host, and so any cancellation or deadline failure is converted to a
@@ -178,10 +196,8 @@ func (p pinnedRunner) pinEnv(env map[string]string) map[string]string {
 	for k, v := range env {
 		pinned[k] = v
 	}
-	if p.host != DefaultHost {
-		for _, k := range tokenEnvVars {
-			delete(pinned, k)
-		}
+	for _, k := range pr.GHTokenVarsToScrub(p.host) {
+		delete(pinned, k)
 	}
 	pinned["GH_HOST"] = p.host
 	return pinned
@@ -191,14 +207,15 @@ func (p pinnedRunner) pinEnv(env map[string]string) map[string]string {
 // exactly once. Copying keeps the wrapper from mutating caller-owned slices.
 func (p pinnedRunner) pinUnset(unset []string) []string {
 	pinned := append([]string(nil), unset...)
-	if p.host == DefaultHost {
+	scrub := pr.GHTokenVarsToScrub(p.host)
+	if len(scrub) == 0 {
 		return pinned
 	}
-	seen := make(map[string]struct{}, len(pinned)+len(tokenEnvVars))
+	seen := make(map[string]struct{}, len(pinned)+len(scrub))
 	for _, key := range pinned {
 		seen[key] = struct{}{}
 	}
-	for _, key := range tokenEnvVars {
+	for _, key := range scrub {
 		if _, ok := seen[key]; ok {
 			continue
 		}

@@ -2,6 +2,7 @@ package pr
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,8 +21,8 @@ import (
 )
 
 // repairLogName is the write-ahead intent and audit trail every destructive
-// session verb appends to — `pr repair --apply`, `pr teardown`, and
-// `pr cleanup` — a sibling of the records it describes. The name is historical:
+// session verb appends to — `pr repair --apply`, `pr teardown`, `pr cleanup`,
+// and `pr findings cleanup --apply` — a sibling of the records it describes. The name is historical:
 // it is kept as-is so existing trails stay readable, and each row says which
 // verb wrote it.
 //
@@ -34,6 +35,23 @@ const repairLogName = "repair.jsonl"
 // hand-editable like every other file in a 0700 dir, so the reader treats it
 // as input rather than as its own output.
 const maxRepairLogLineBytes = 8 << 10
+
+// MaxRepairHistoryRows bounds how many rows RepairHistory returns: the newest
+// N are kept and the older ones are counted, not held. The log grows without
+// bound between compactions, and a reader that materializes every row spends
+// heap proportional to the file. At the writer's per-row ceiling this bound is
+// about 16 MiB; a typical row is near 300 B. It is exported so a caller's test
+// can seed past it.
+const MaxRepairHistoryRows = 2000
+
+// maxTrackedEvictedIntents bounds the map readRepairLogTail keeps of intent
+// rows the ring displaced, so counting them costs bounded heap however long the
+// log is. A tracked entry is one ID string (a few dozen bytes), so the cap is
+// well under a megabyte. It is sized far above any plausible count of genuinely
+// unpaired intents — each is a rollback that died mid-way — so reaching it
+// means the log is badly wrong, which is the case the "at least" rendering is
+// for. An unexported var so a test can shrink it.
+var maxTrackedEvictedIntents = 10_000
 
 // maxActorBytes bounds the actor field, whose session-id half comes from the
 // environment. See repairActor for why an unbounded field here is a hazard.
@@ -53,10 +71,20 @@ const (
 // removed the thing, which is a different question from repair's Mode: Mode
 // holds the flag spelling `pr repair --apply` was given, and is empty for every
 // other verb. A new destructive verb adds a constant here and nothing else.
+//
+// A prepare-failure rollback — removing artifacts the SAME call created moments
+// earlier (local.go's teardownLocalArtifacts, session.go's sandboxAndQuarantine
+// teardown-on-failure) — is deliberately not a destructive verb and writes no
+// row: nothing it removes was ever handed to the operator, so there is nothing
+// a trail could help recover.
 const (
 	auditVerbRepair   = "repair"
 	auditVerbTeardown = "teardown"
 	auditVerbCleanup  = "cleanup"
+	// auditVerbFindingsCleanup is `pr findings cleanup --apply`. Its subject is
+	// a findings dir, not a session record: RecordPath names the dir, Detail
+	// carries its size, and Ref, FromPhase, and Workspace stay empty.
+	auditVerbFindingsCleanup = "findings-cleanup"
 	// auditVerbPrune is the housekeeping sweep. It is its own verb rather than a
 	// spelling of repair because it is the only one that UNLINKS: a reader
 	// scanning the trail for what destroyed something needs to tell "a record
@@ -135,9 +163,78 @@ func repairActor() string {
 // input, not a hypothetical.
 func composeRepairActor(name, sessionID string) string {
 	if sessionID != "" {
-		name += " session=" + termsafe.SafeLine(sessionID)
+		name += " session=" + termsafe.SafeLineMax(sessionID, maxActorBytes)
 	}
 	return truncateString(name, maxActorBytes)
+}
+
+// errRepairLogNotRegular is openRepairLogFile's refusal of a log that is not
+// a regular file: a symlink, a FIFO, a device, a directory, a socket. Its text
+// is short because every caller already prefixes "open repair audit log" or
+// "read repair audit log", and the refusal names the path before it.
+var errRepairLogNotRegular = errors.New("not a regular file")
+
+// openRepairLogFile is the ONE way this package opens the repair audit log,
+// for reading and for appending alike (forgectl#614).
+//
+// Every opener runs under the lifecycle lock, so an open or a read that never
+// returns stalls every pr lifecycle verb, not just its own. A FIFO in the
+// log's place blocks a reader forever, and a symlink to /dev/zero feeds one an
+// endless stream; a symlink to a regular file lets the appender write through
+// it and prune's rename replace the link rather than what it points at. So the
+// open refuses a symlink (O_NOFOLLOW) and cannot block (O_NONBLOCK, cleared
+// afterwards), and the open descriptor is then Fstat'ed and refused unless it
+// is a regular file. Checking the descriptor, not the path, means the check
+// and every later read or write describe the same file.
+//
+// A missing log comes back as an error errors.Is matches to fs.ErrNotExist,
+// exactly as os.Open's did, so callers that read a missing log as empty keep
+// doing so.
+//
+// A HARD-LINKED log is accepted: it is a regular file, and a second name for
+// the same inode is indistinguishable from the first. That is a decision, not
+// a gap (the #595 option-(a) reasoning, applied here by forgectl#621): making
+// the link takes write access to the 0700 sessions dir, whose owner can already
+// forge or delete any row directly, and an Nlink>1 refusal would be a heuristic
+// that also fires on legitimate backup and snapshot layouts. The effect of one
+// is bounded: an append lands in the shared inode, and compaction's rename
+// replaces this name only, leaving the other name with the uncompacted file.
+func openRepairLogFile(path string, flag int, perm os.FileMode) (*os.File, error) {
+	f, err := openRepairLogNoFollow(path, flag, perm)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("stat repair audit log: %w", termsafe.Error(err))
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("%s is a %s: %w; refusing it",
+			termsafe.QuotePath(path), fileKind(info.Mode()), errRepairLogNotRegular)
+	}
+	return f, nil
+}
+
+// fileKind names a non-regular file's type for openRepairLogFile's refusal.
+func fileKind(mode os.FileMode) string {
+	switch {
+	case mode&os.ModeNamedPipe != 0:
+		return "named pipe (FIFO)"
+	case mode&os.ModeSymlink != 0:
+		return "symlink"
+	case mode.IsDir():
+		return "directory"
+	case mode&os.ModeCharDevice != 0:
+		return "character device"
+	case mode&os.ModeDevice != 0:
+		return "device"
+	case mode&os.ModeSocket != 0:
+		return "socket"
+	default:
+		return "non-regular file (" + mode.Type().String() + ")"
+	}
 }
 
 // appendRepairRowLocked appends one row, fsynced, to the repair log. The
@@ -156,7 +253,7 @@ func (c *Client) appendRepairRowLocked(row RepairRow) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(c.repairLogPath(), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600) //nolint:gosec // inside the 0700 sessions dir
+	f, err := openRepairLogFile(c.repairLogPath(), os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("open repair audit log: %w", termsafe.Error(err))
 	}
@@ -214,7 +311,7 @@ var boundedRowFields = map[string]string{
 	"ID":         "16 hex characters from randomSuffix",
 	"FromPhase":  "a package constant or repairPhaseUnreadable",
 	"Verb":       "one of the auditVerb constants",
-	"Mode":       "one of the three RepairMode constants",
+	"Mode":       "one of the RepairMode constants, or empty for every verb but repair",
 	"Outcome":    "one of the repairOutcome constants",
 	"RecordNote": "derived here from fixed templates and two decimal ints per clause, ASCII, and recomputed inside the measurement",
 }
@@ -323,11 +420,13 @@ func truncateString(s string, n int) string {
 	return s[:n]
 }
 
-// repairLogFile is the seam appendRepairRow needs: append, roll back a partial
-// append, and flush. Production is *os.File; a test drives a short-writing
-// double through it, which is the only way to reach the truncation branch.
+// repairLogFile is the seam appendRepairRow needs: read the last byte, append,
+// roll back a partial append, and flush. Production is *os.File; a test drives
+// a short-writing double through it, which is the only way to reach the
+// truncation branch.
 type repairLogFile interface {
 	io.Writer
+	io.ReaderAt
 	Seek(offset int64, whence int) (int64, error)
 	Truncate(size int64) error
 	Sync() error
@@ -338,11 +437,21 @@ type repairLogFile interface {
 //
 // A SHORT WRITE MUST NOT SURVIVE. The previous form returned the error but left
 // the partial bytes in place, so the next append concatenated onto a truncated
-// line and readRepairLog dropped the merged result as unparseable — costing BOTH
-// rows. On an out-of-space tail that is the intent row naming a clean room, which
-// is the one line the log exists to preserve. So the offset is captured first and
-// the file is truncated back to it on any failure: the log loses the row it could
-// not write, and nothing else.
+// line and readRepairLogTail dropped the merged result as unparseable — costing
+// BOTH rows. On an out-of-space tail that is the intent row naming a clean room,
+// which is the one line the log exists to preserve. So the offset is captured
+// first and the file is truncated back to it on any failure: the log loses the
+// row it could not write, and nothing else.
+//
+// AN UNTERMINATED TAIL MUST NOT SWALLOW THE ROW. The log is hand-editable, so
+// the file can end mid-line through no fault of this writer — a stray byte, an
+// editor that drops the final newline — and appending straight onto it would
+// merge the row into one undecodable line the reader then skips (forgectl#549).
+// So when the last byte is not '\n' a separator goes first, in the SAME write
+// as the row: a short write of either rolls both back to the captured offset,
+// and the row itself, which marshalRepairRow capped, is unchanged. A last byte
+// that cannot be read gets the separator too — an empty line is skipped by
+// every reader, where a merged one costs a row.
 //
 // It is a var so a test can stage the crash this whole ordering exists for: an
 // append that fails BETWEEN an intent and its completion, leaving the dangling
@@ -358,6 +467,14 @@ var appendRepairRow = func(f repairLogFile, data []byte) error {
 		}
 		return cause
 	}
+	if start > 0 {
+		// io.ReaderAt may pair a full read at the end of the input with io.EOF,
+		// so n, not the error, says whether the byte was read.
+		last := make([]byte, 1)
+		if n, _ := f.ReadAt(last, start-1); n != 1 || last[0] != '\n' {
+			data = append([]byte{'\n'}, data...)
+		}
+	}
 	n, err := f.Write(data)
 	if err != nil {
 		return rollback(fmt.Errorf("append repair audit row: %w", err))
@@ -371,53 +488,187 @@ var appendRepairRow = func(f repairLogFile, data []byte) error {
 	return nil
 }
 
-// readRepairLog returns every row in the log, oldest first. A line that does
-// not decode is skipped with a warning rather than failing the read: the
-// history verb exists to answer "what happened", and one bad line must not
-// take the rest of the record with it.
-func (c *Client) readRepairLog() ([]RepairRow, error) {
-	f, err := os.Open(c.repairLogPath()) //nolint:gosec // inside the 0700 sessions dir
+// repairTail is what one bounded pass over the log yields.
+type repairTail struct {
+	rows []RepairRow
+	// omitted counts older decodable rows displaced by the limit.
+	omitted int
+	// skipped counts lines that did not decode or were over-long.
+	skipped int
+	// omittedUnpaired counts displaced intent rows that no completion row
+	// closes anywhere in the log — the one row type the log exists to keep
+	// visible. It counts decodable rows only: an undecodable line stays in
+	// skipped and is never attributed, since guessing at its content would let
+	// a hand edit steer the count. With unpairedCapped it is a lower bound.
+	omittedUnpaired int
+	// unpairedCapped reports that the tracking map filled, so omittedUnpaired
+	// is "at least" that many.
+	unpairedCapped bool
+}
+
+// readRepairLogTail returns the newest limit decodable rows, oldest first, how
+// many older decodable rows it displaced, and how many lines it skipped. A line
+// that does not decode, or that exceeds maxRepairLogLineBytes, is skipped
+// rather than failing the read: the history verb exists to answer "what
+// happened", and one bad line must not take the rest of the record with it.
+// omitted counts rows displaced by the limit, never skipped lines; skipped is
+// returned rather than only logged, because the warning is discarded at the
+// default log level and a dropped line must not pass in silence.
+//
+// Memory is bounded by limit rows plus one line buffer. The slice is NOT
+// preallocated to limit, because a caller may pass math.MaxInt.
+func (c *Client) readRepairLogTail(limit int) (rows []RepairRow, omitted, skipped int, err error) {
+	t, err := c.scanRepairLogTail(limit, maxTrackedEvictedIntents)
+	return t.rows, t.omitted, t.skipped, err
+}
+
+// scanRepairLogTail is readRepairLogTail plus the count of displaced intents
+// still unpaired. An intent always precedes its completion in the file, and
+// the ring displaces oldest first, so a displaced intent's completion is either
+// still in the ring when the pass ends (checked at the end) or was displaced
+// too (cancelled in displaced, which runs after the intent's own displacement).
+// trackCap bounds the map of displaced intent IDs. Past it a displaced intent is
+// neither tracked nor counted — it is dropped — and unpairedCapped records that
+// the total is therefore only a lower bound.
+func (c *Client) scanRepairLogTail(limit, trackCap int) (tail repairTail, err error) {
+	if limit < 1 {
+		limit = 1
+	}
+	f, err := openRepairLogFile(c.repairLogPath(), os.O_RDONLY, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
+			return repairTail{}, nil
 		}
-		return nil, fmt.Errorf("read repair audit log: %w", termsafe.Error(err))
+		return repairTail{}, fmt.Errorf("read repair audit log: %w", termsafe.Error(err))
 	}
 	defer func() { _ = f.Close() }()
 
 	var rows []RepairRow
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 4096), maxRepairLogLineBytes)
-	skipped := 0
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	var omitted, skipped int
+	unpaired := map[string]struct{}{} // displaced intent IDs with no completion seen yet
+	unpairedNoID := 0                 // displaced intents with no ID: nothing can ever close them
+	capped := false
+	// displaced is called with each row the ring pushes out.
+	displaced := func(r RepairRow) {
+		if r.Outcome != repairOutcomeIntent {
+			// A displaced completion closes the displaced intent it pairs with;
+			// the intent left the ring first, so it is already tracked.
+			delete(unpaired, r.ID)
+			return
+		}
+		if len(unpaired)+unpairedNoID >= trackCap {
+			capped = true
+			return
+		}
+		if r.ID == "" {
+			unpairedNoID++
+			return
+		}
+		unpaired[r.ID] = struct{}{}
+	}
+
+	head := 0 // index of the oldest row once the ring is full
+	keep := func(line []byte) {
+		line = bytes.TrimSuffix(line, []byte("\n"))
 		if len(line) == 0 {
-			continue
+			return
 		}
 		var row RepairRow
 		if err := json.Unmarshal(line, &row); err != nil {
 			skipped++
+			return
+		}
+		if len(rows) < limit {
+			rows = append(rows, row)
+			return
+		}
+		displaced(rows[head])
+		rows[head] = row
+		head = (head + 1) % limit
+		omitted++
+	}
+
+	// The buffer holds exactly one maximum row: marshalRepairRow guarantees a
+	// written row, newline included, is at most maxRepairLogLineBytes.
+	r := bufio.NewReaderSize(f, maxRepairLogLineBytes)
+	for {
+		line, rerr := r.ReadSlice('\n')
+		if errors.Is(rerr, bufio.ErrBufferFull) {
+			// Over-long: drain the remainder of the line without keeping it.
+			for errors.Is(rerr, bufio.ErrBufferFull) {
+				_, rerr = r.ReadSlice('\n')
+			}
+			skipped++
+			if rerr == nil {
+				continue
+			}
+			line = nil
+		}
+		if rerr == nil {
+			keep(line)
 			continue
 		}
-		rows = append(rows, row)
+		if errors.Is(rerr, io.EOF) {
+			keep(line) // a final line with no trailing newline
+			break
+		}
+		return repairTail{}, fmt.Errorf("read repair audit log: %w", rerr)
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read repair audit log: %w", err)
+	if head > 0 {
+		rows = append(rows[head:], rows[:head]...)
+	}
+	// A completion still in the ring closes a displaced intent whose pair
+	// straddled the ring boundary.
+	for _, row := range rows {
+		if row.Outcome != repairOutcomeIntent {
+			delete(unpaired, row.ID)
+		}
 	}
 	if skipped > 0 {
-		slog.Warn("Skipped unreadable rows in the pr repair audit log.", "skipped", skipped, "path", c.repairLogPath())
+		attrs := []any{"skipped", skipped, "path", c.repairLogPath()}
+		if omitted > 0 {
+			attrs = append(attrs, "omitted", omitted)
+		}
+		slog.Warn("Skipped unreadable rows in the pr repair audit log.", attrs...)
 	}
-	return rows, nil
+	return repairTail{
+		rows: rows, omitted: omitted, skipped: skipped,
+		omittedUnpaired: len(unpaired) + unpairedNoID, unpairedCapped: capped,
+	}, nil
 }
 
-// RepairHistory returns the repair audit trail, oldest first, under the
-// lifecycle lock so it never reads a row mid-append.
-func (c *Client) RepairHistory(ctx context.Context) ([]RepairRow, error) {
-	var rows []RepairRow
+// RepairTrail is the bounded result of RepairHistory.
+type RepairTrail struct {
+	// Rows is the newest rows, oldest first.
+	Rows []RepairRow
+	// Omitted counts older decodable rows the bound left out.
+	Omitted int
+	// Skipped counts lines that did not decode or were over-long. They are
+	// still in the file — nothing on the read path drops them — but they are
+	// not in Rows, so a caller must say so rather than show a gapless trail.
+	Skipped int
+	// OmittedUnpaired counts the omitted rows that are intents with no
+	// completion anywhere in the log — rollbacks that died mid-way, whose
+	// workspace field is the only pointer left to a clean room. It is part of
+	// Omitted, never in addition to it.
+	OmittedUnpaired int
+	// OmittedUnpairedCapped means OmittedUnpaired is a lower bound: tracking
+	// hit its cap.
+	OmittedUnpairedCapped bool
+	// Path is the log file, so a caller can say where the rest lives.
+	Path string
+}
+
+// RepairHistory returns the newest MaxRepairHistoryRows rows of the repair
+// audit trail, oldest first, under the lifecycle lock so it never reads a row
+// mid-append. It only reads under the lock; callers print after it returns.
+func (c *Client) RepairHistory(ctx context.Context) (RepairTrail, error) {
+	trail := RepairTrail{Path: c.repairLogPath()}
 	err := c.withLifecycleLock(ctx, "repair-history", func() error {
-		var rerr error
-		rows, rerr = c.readRepairLog()
+		tail, rerr := c.scanRepairLogTail(MaxRepairHistoryRows, maxTrackedEvictedIntents)
+		trail.Rows, trail.Omitted, trail.Skipped = tail.rows, tail.omitted, tail.skipped
+		trail.OmittedUnpaired, trail.OmittedUnpairedCapped = tail.omittedUnpaired, tail.unpairedCapped
 		return rerr
 	})
-	return rows, err
+	return trail, err
 }

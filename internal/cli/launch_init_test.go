@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,18 +144,30 @@ func TestIntegration_LaunchInit_FromClaunch_ImportedProfileDrivesLaunch(t *testi
 	h := newLegacyHarness(t)
 	h.run(t, "init", "--from-claunch")
 
-	h.run(t, "-p", "hi")
+	h.run(t, "hi")
 
 	got := h.recordedArgs(t)
 	want := []string{
 		"--permission-mode", "plan",
-		"--allow-dangerously-skip-permissions",
+		// no --allow-dangerously-skip-permissions: the harness's stdout is a
+		// pipe, and a piped builder run withholds it (forgectl#812)
 		"--model", "sonnet",
 		"--effort", "high", // derived; the legacy file predates the effort key entirely
-		"-p", "hi",
+		"hi",
 	}
 	if !equalArgs(got, want) {
 		t.Errorf("recorded args after import = %v, want %v (imported profile should drive launch identically to the legacy file it replaced)", got, want)
+	}
+
+	// The piped run above no longer shows allow_danger in argv, so read the
+	// imported value off the resolved profile instead.
+	stdout, _ := h.run(t, "which", "--json")
+	var which launchWhichJSON
+	if err := json.Unmarshal([]byte(stdout), &which); err != nil {
+		t.Fatalf("decode `launch which --json`: %v\n%s", err, stdout)
+	}
+	if !which.AllowDanger {
+		t.Errorf("imported profile allow_danger = false, want the legacy file's true")
 	}
 }
 

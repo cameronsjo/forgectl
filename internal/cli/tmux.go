@@ -43,6 +43,12 @@ var tmuxModule = module.Manifest{
 // newTmuxCmd builds the `tmux` parent command. Verbs are attached in their own
 // files (tmux_ls.go, …) so each milestone adds a slice without churn here.
 func newTmuxCmd(deps module.Deps, client *tmux.Client) *cobra.Command {
+	return newTmuxCmdWith(deps, client, tui.Run)
+}
+
+// newTmuxCmdWith is newTmuxCmd with the hub runner supplied, so the hand-off
+// of a verb chosen in the hub can be tested without a terminal.
+func newTmuxCmdWith(deps module.Deps, client *tmux.Client, run hubRunner) *cobra.Command {
 	th := deps.Theme
 	cmd := &cobra.Command{
 		Use:     "tmux",
@@ -61,13 +67,16 @@ func newTmuxCmd(deps module.Deps, client *tmux.Client) *cobra.Command {
 		// threaded through construction.
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			noIcons, _ := cmd.Flags().GetBool("no-icons")
-			opts := tui.RunOptions{
-				Hub:         buildHub(cmd.Root(), configFilePresent()),
-				StartInTmux: true,
-				NoIcons:     noIcons,
-				Theme:       th,
-			}
-			return runAction(cmd.Context(), deps, cmd.Root(), client, opts)
+			opts := hubRunOptions(cmd.Context(), deps, cmd.Root(), client)
+			opts.StartInTmux = true
+			opts.NoIcons = noIcons
+			opts.Theme = th
+			// A verb chosen in the hub is deferred, not run here: this RunE
+			// is inside fang, and the verb's own dispatch is a second fang
+			// frame (forgectl#1000).
+			return runActionWith(cmd.Context(), client, opts, run, func(argv []string) error {
+				return deferHubVerb(cmd, th, argv)
+			})
 		},
 	}
 	cmd.AddCommand(

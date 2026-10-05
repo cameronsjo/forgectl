@@ -87,6 +87,7 @@ func writeJSON(out io.Writer, v any) error {
 
 func newSessionsSyncCmd(cfg config.Config) *cobra.Command {
 	var opts sessions.SyncOptions
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Drain local JSONL + runbook markdown into the concordance (idempotent)",
@@ -123,9 +124,10 @@ the command exits non-zero — a skipped session is never silent.
 			if err != nil {
 				return err
 			}
-			return printReceipt(cmd, receipt)
+			return finishSync(cmd.OutOrStdout(), receipt, asJSON)
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit the completeness receipt as {"sessions_found","sessions_upserted","sessions_unchanged","invalid_rows","commit_rows_dropped","ledger_lines_bad","missing":[ids],"runbooks_found","runbooks_upserted","runbooks_pruned","dry_run","complete"} to stdout; a MISSING session still exits non-zero`)
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "read + transform + count; no DB connection")
 	cmd.Flags().BoolVar(&opts.Full, "full", false, "bypass the lastMessageId watermark and re-upsert every session")
 	cmd.Flags().StringVar(&opts.DSN, "dsn", "", "concordance DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
@@ -136,10 +138,65 @@ the command exits non-zero — a skipped session is never silent.
 	return cmd
 }
 
+// receiptJSON is the `sessions sync --json` shape (additive-only, ADR-0008).
+// Missing is always an array, never null.
+type receiptJSON struct {
+	SessionsFound     int      `json:"sessions_found"`
+	SessionsUpserted  int      `json:"sessions_upserted"`
+	SessionsUnchanged int      `json:"sessions_unchanged"`
+	InvalidRows       int      `json:"invalid_rows"`
+	CommitRowsDropped int      `json:"commit_rows_dropped"`
+	LedgerLinesBad    int      `json:"ledger_lines_bad"`
+	Missing           []string `json:"missing"`
+	RunbooksFound     int      `json:"runbooks_found"`
+	RunbooksUpserted  int      `json:"runbooks_upserted"`
+	RunbooksPruned    int64    `json:"runbooks_pruned"`
+	DryRun            bool     `json:"dry_run"`
+	Complete          bool     `json:"complete"`
+}
+
+func newReceiptJSON(r *sessions.Receipt) receiptJSON {
+	missing := r.Missing
+	if missing == nil {
+		missing = []string{}
+	}
+	return receiptJSON{
+		SessionsFound: r.SessionsFound, SessionsUpserted: r.SessionsUpserted,
+		SessionsUnchanged: r.SessionsUnchanged, InvalidRows: r.InvalidRows,
+		CommitRowsDropped: r.CommitRowsDropped, LedgerLinesBad: r.LedgerLinesBad,
+		Missing: missing, RunbooksFound: r.RunbooksFound,
+		RunbooksUpserted: r.RunbooksUpserted, RunbooksPruned: r.RunbooksPruned,
+		DryRun: r.DryRun, Complete: r.DryRun || r.Complete(),
+	}
+}
+
+// receiptError is the non-zero-exit half of the receipt contract, shared by
+// the human and JSON renderings: a session absent after the flush fails the
+// run. A dry-run makes no connection, so it cannot fail this way.
+func receiptError(r *sessions.Receipt) error {
+	if r.DryRun || r.Complete() {
+		return nil
+	}
+	return fmt.Errorf("reconcile failed: %d local sessions absent from the concordance after flush", len(r.Missing))
+}
+
+// finishSync renders the receipt (JSON or human) and returns the sync's exit
+// error. Both renderings share the tail so the acceptance contract, a
+// MISSING session fails the run, cannot differ between them.
+func finishSync(out io.Writer, r *sessions.Receipt, asJSON bool) error {
+	if asJSON {
+		if err := writeJSON(out, newReceiptJSON(r)); err != nil {
+			return err
+		}
+		// The receipt on stdout is the verdict (forgectl#862).
+		return jsonVerdict(receiptError(r), true)
+	}
+	return printReceipt(out, r)
+}
+
 // printReceipt renders the completeness receipt. MISSING sessions make the
 // command fail loudly — the acceptance contract of the sync.
-func printReceipt(cmd *cobra.Command, r *sessions.Receipt) error {
-	out := cmd.OutOrStdout()
+func printReceipt(out io.Writer, r *sessions.Receipt) error {
 	mode := ""
 	if r.DryRun {
 		mode = " (dry-run: no database connection made)"
@@ -153,9 +210,9 @@ func printReceipt(cmd *cobra.Command, r *sessions.Receipt) error {
 	}
 	if !r.Complete() {
 		for _, id := range r.Missing {
-			fmt.Fprintf(out, "MISSING %s\n", id)
+			_, _ = fmt.Fprintf(out, "MISSING %s\n", safeLabel(id))
 		}
-		return fmt.Errorf("reconcile failed: %d local sessions absent from the concordance after flush", len(r.Missing))
+		return receiptError(r)
 	}
 	fmt.Fprintln(out, "reconciled: every local session is present in the concordance")
 	return nil
@@ -166,6 +223,7 @@ func newSessionsSearchCmd(cfg config.Config) *cobra.Command {
 		dsn     string
 		project string
 		limit   int
+		asJSON  bool
 	)
 	cmd := &cobra.Command{
 		Use:   "search <query>",
@@ -175,13 +233,17 @@ index (title-weighted tsvector; trigram fallback for partial tokens), so any
 machine can find a runbook or field report it did not author.
 
   forgectl sessions search "colima split brain"
-  forgectl sessions search --project cadence "worktree guard"`,
+  forgectl sessions search --project cadence "worktree guard"
+  forgectl sessions search "colima" --json | jq .`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return withConcordance(cmd, dsn, cfg.Sessions, func(concordance *sessions.Concordance) error {
 				hits, err := concordance.SearchRunbooks(cmd.Context(), args[0], project, limit)
 				if err != nil {
 					return err
+				}
+				if asJSON {
+					return writeSearchHitsJSON(cmd.OutOrStdout(), hits)
 				}
 				return printSearchHits(cmd.OutOrStdout(), hits)
 			})
@@ -190,12 +252,44 @@ machine can find a runbook or field report it did not author.
 	cmd.Flags().StringVar(&dsn, "dsn", "", "concordance DSN (default: FORGECTL_SESSIONS_DSN, then [sessions] dsn)")
 	cmd.Flags().StringVar(&project, "project", "", "restrict matches to one project")
 	cmd.Flags().IntVar(&limit, "limit", 10, "maximum hits to return")
+	cmd.Flags().BoolVar(&asJSON, "json", false,
+		`emit [{"path":...,"title":...,"type":...,"project":...,"machine":...,"rank":...,"snippet":...}] to stdout`)
 	return cmd
 }
 
+// searchHitJSON is the stable --json shape for one `sessions search` hit —
+// the same path/title/type/project/machine/snippet the human line shows, plus
+// the rank that orders them. Decoupled from sessions.SearchHit so the CLI
+// contract doesn't drift with the query struct (the whyDTO rule).
+type searchHitJSON struct {
+	Path    string  `json:"path"`
+	Title   string  `json:"title"`
+	Type    string  `json:"type"`
+	Project string  `json:"project"`
+	Machine string  `json:"machine"`
+	Rank    float32 `json:"rank"`
+	Snippet string  `json:"snippet"`
+}
+
+// writeSearchHitsJSON encodes hits as a JSON array. Indexed content is
+// untrusted, and — as for printWhyHits — the JSON path carries it unaltered
+// and lets termsafe.JSONEncoder escape it; SafeLine quoting would corrupt the
+// machine contract. No hits encodes [], never null.
+func writeSearchHitsJSON(out io.Writer, hits []sessions.SearchHit) error {
+	rows := make([]searchHitJSON, 0, len(hits))
+	for _, h := range hits {
+		rows = append(rows, searchHitJSON{
+			Path: h.Path, Title: h.Title, Type: h.Type, Project: h.Project,
+			Machine: h.Machine, Rank: h.Rank, Snippet: h.Snippet,
+		})
+	}
+	return writeJSON(out, rows)
+}
+
 // printSearchHits owns the terminal boundary for concordance search results.
-// Indexed content is untrusted at print time, so every field is quoted before
-// it reaches the operator's shell.
+// Indexed content is untrusted at print time, so every field is escaped and
+// capped (safeLabel, safeTitle, safeSnippet, safePath) before it reaches the
+// operator's shell.
 func printSearchHits(out io.Writer, hits []sessions.SearchHit) error {
 	if len(hits) == 0 {
 		_, err := fmt.Fprintln(out, "no runbooks matched")
@@ -203,8 +297,8 @@ func printSearchHits(out io.Writer, hits []sessions.SearchHit) error {
 	}
 	for _, h := range hits {
 		if _, err := fmt.Fprintf(out, "%s\t%s\t[%s]\t(%s, indexed by %s)\n\t%s\n",
-			safeTerm(h.Path), safeTerm(h.Title), safeTerm(h.Type),
-			safeTerm(h.Project), safeTerm(h.Machine), safeTerm(h.Snippet)); err != nil {
+			safePath(h.Path), safeTitle(h.Title), safeLabel(h.Type),
+			safeLabel(h.Project), safeLabel(h.Machine), safeSnippet(h.Snippet)); err != nil {
 			return err
 		}
 	}
@@ -321,9 +415,9 @@ type whyDTO struct {
 
 // printWhyHits renders `sessions why` results. Concordance-sourced fields are
 // untrusted on both paths, and each path uses the control built for its own
-// sink: the text path quotes through safeTerm, the JSON path carries the stored
-// value unaltered and lets writeJSON's termsafe.JSONEncoder escape it on the way
-// out. Escaping there rather than rewriting is what keeps `--json | jq` handing
+// sink: the text path quotes and caps through the safeLabel family, the JSON
+// path carries the stored value unaltered and lets writeJSON's
+// termsafe.JSONEncoder escape it on the way out. Escaping there rather than rewriting is what keeps `--json | jq` handing
 // back the operator's exact bytes.
 func printWhyHits(cmd *cobra.Command, hits []sessions.WhyHit, asJSON bool) error {
 	out := cmd.OutOrStdout()
@@ -346,11 +440,11 @@ func printWhyHits(cmd *cobra.Command, hits []sessions.WhyHit, asJSON bool) error
 		return nil
 	}
 	for _, h := range hits {
-		fmt.Fprintf(out, "%s\t%s\t[%s]\t%s\n",
-			safeTerm(h.SessionID), humanTs(h.LastTs), safeTerm(h.Project), safeTerm(h.Model))
-		fmt.Fprintf(out, "\t%s · %s\n", safeTerm(h.Type), safeTerm(h.Title))
-		fmt.Fprintf(out, "\t%s\n", safeTerm(h.Path))
-		fmt.Fprintf(out, "\t%s\n", safeTerm(h.Snippet))
+		_, _ = fmt.Fprintf(out, "%s\t%s\t[%s]\t%s\n",
+			safeLabel(h.SessionID), humanTs(h.LastTs), safeLabel(h.Project), safeLabel(h.Model))
+		_, _ = fmt.Fprintf(out, "\t%s · %s\n", safeLabel(h.Type), safeTitle(h.Title))
+		_, _ = fmt.Fprintf(out, "\t%s\n", safePath(h.Path))
+		_, _ = fmt.Fprintf(out, "\t%s\n", safeSnippet(h.Snippet))
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "Found %d sessions\n", len(hits))
 	return nil
@@ -395,25 +489,25 @@ func printLastSession(cmd *cobra.Command, repo string, s *sessions.SessionSummar
 		})
 	}
 	if s == nil {
-		fmt.Fprintf(out, "no sessions recorded for %q\n", safeTerm(repo))
+		_, _ = fmt.Fprintf(out, "no sessions recorded for \"%s\"\n", safeLabel(repo))
 		return nil
 	}
 	committed := "no commits"
 	if s.Committed {
 		committed = "committed"
 	}
-	fmt.Fprintf(out, "%s\t%s\t[%s]\t%s\t%s\n",
-		safeTerm(s.SessionID), humanTs(s.LastTs), safeTerm(s.Project), safeTerm(s.GitBranch), committed)
+	_, _ = fmt.Fprintf(out, "%s\t%s\t[%s]\t%s\t%s\n",
+		safeLabel(s.SessionID), humanTs(s.LastTs), safeLabel(s.Project), safeLabel(s.GitBranch), committed)
 	if s.Model != "" || s.Machine != "" {
-		fmt.Fprintf(out, "\t%s on %s\n", safeTerm(s.Model), safeTerm(s.Machine))
+		_, _ = fmt.Fprintf(out, "\t%s on %s\n", safeLabel(s.Model), safeLabel(s.Machine))
 	}
 	if len(s.Artifacts) == 0 {
-		fmt.Fprintln(out, "\tno field report or handoff recorded")
+		_, _ = fmt.Fprintln(out, "\tno field report or handoff recorded")
 		return nil
 	}
 	for _, a := range s.Artifacts {
-		fmt.Fprintf(out, "\t%s · %s\n\t  %s\n",
-			safeTerm(a.Type), safeTerm(a.Title), safeTerm(a.Path))
+		_, _ = fmt.Fprintf(out, "\t%s · %s\n\t  %s\n",
+			safeLabel(a.Type), safeTitle(a.Title), safePath(a.Path))
 	}
 	return nil
 }
@@ -434,16 +528,4 @@ func humanTs(t *time.Time) string {
 		return s
 	}
 	return "unknown"
-}
-
-// safeTerm is this package's local alias for termsafe.SafeLine: every unsafe or
-// non-graphic rune is visibly quoted, so an untrusted value renders as one inert
-// physical line. The alias keeps this package's call sites reading at their own
-// altitude; internal/termsafe owns the behavior and its fuzz coverage.
-//
-// It is for HUMAN sinks only. A --json surface encodes through
-// termsafe.JSONEncoder, which escapes without rewriting — quoting a value there
-// would corrupt the machine contract.
-func safeTerm(s string) string {
-	return termsafe.SafeLine(s)
 }

@@ -9,11 +9,15 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // breadcrumbVersion is the record schema this build writes when it writes a
@@ -83,16 +87,77 @@ func (osRecordFS) SyncDir(path string) error {
 
 func (osRecordFS) Remove(path string) error { return os.Remove(path) }
 
-func (osRecordFS) ReadFile(path string) ([]byte, error) {
-	f, err := os.Open(path) //nolint:gosec // a path inside the sessions dir
+// errRecordNotRegular is osRecordFS.ReadFile's refusal of a record path that
+// is not a regular file.
+var errRecordNotRegular = errors.New("not a regular file")
+
+// ReadFile reads a session record without following a symlink and without
+// blocking in the open (forgectl#621). Its caller Lstats the path first, but
+// that is a check on the path, not on what the open reaches: a FIFO swapped in
+// between would block a plain open under the lifecycle lock, stalling every pr
+// verb. So the open is O_NOFOLLOW|O_NONBLOCK (openNoFollowNonblock, which
+// clears O_NONBLOCK before returning), and the descriptor is Fstat'ed and
+// refused unless it is a regular file. The read stays size-bounded by
+// readBreadcrumbBytes.
+func (osRecordFS) ReadFile(path string) ([]byte, error) { return readRecordFile(path) }
+
+// readRecordFile is the ONE way this package reads a session record's bytes:
+// the record loader (loadBreadcrumbRecord), the teardown member resolver, and
+// the compare-and-write re-read all come through it. See osRecordFS.ReadFile
+// for why the open is O_NOFOLLOW|O_NONBLOCK with a regular-file Fstat.
+func readRecordFile(path string) ([]byte, error) {
+	f, err := openNoFollowNonblock(filepath.Clean(path), os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, &os.PathError{Op: "read", Path: path, Err: errRecordNotRegular}
+	}
 	return readBreadcrumbBytes(f)
 }
 
 func (osRecordFS) Lstat(path string) (fs.FileInfo, error) { return os.Lstat(path) }
+
+// openRegularInRoot opens name, a single component, through root's pinned
+// descriptor and keeps it only if it is a regular file. It is the root-relative
+// counterpart of readRecordFile (forgectl#621), and it goes through the
+// package's one root-relative opener, openInRootNoFollowNonblock: an openat
+// against root's own descriptor with O_NOFOLLOW, and O_NONBLOCK for the open
+// only. So a symlink is refused even when it stays inside the root, which
+// root.Open would follow, and a FIFO swapped in after a caller's Lstat cannot
+// block the open under the lifecycle lock (forgectl#776).
+//
+// That is the Unix build. Off Unix, openInRootNoFollowNonblock is root's own
+// OpenFile (findings_open_other.go), which DOES follow a symlink that stays
+// inside the root and has no O_NONBLOCK; only the regular-file Fstat and the
+// callers' SameFile check remain. That path is unreachable in practice: every
+// caller runs under withLifecycleLock, which refuses off Unix before any of
+// them is reached, and no shipped binary runs there.
+//
+// It returns the descriptor's own Fstat, so a caller can prove that the file
+// it reads is the one its Lstat checked (os.SameFile), not whatever the name
+// reached by the time of the open.
+func openRegularInRoot(root *os.Root, name string) (*os.File, fs.FileInfo, error) {
+	f, err := openInRootNoFollowNonblock(root, name)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, nil, &os.PathError{Op: "open", Path: name, Err: errRecordNotRegular}
+	}
+	return f, info, nil
+}
 
 // encodeBreadcrumb is the ONE encoder, paired with decodeBreadcrumb: indented
 // JSON, newline-terminated, bounded by maxBreadcrumbRecordBytes.
@@ -107,6 +172,63 @@ func encodeBreadcrumb(bc Breadcrumb) ([]byte, error) {
 		return nil, errBreadcrumbRecordTooLarge
 	}
 	return data, nil
+}
+
+// widestWindowID is the longest WindowID newDispatch writes: a tmux server
+// pid and start time and a window id, each at most a decimal int64.
+var widestWindowID = strings.Join([]string{
+	strconv.Itoa(math.MaxInt64),
+	strconv.Itoa(math.MaxInt64),
+	"@" + strconv.Itoa(math.MaxInt64),
+}, tmux.FieldSep)
+
+// checkParkHeadroom refuses a record that fits now but could overflow
+// maxBreadcrumbRecordBytes later in its life (#974). Prepare writes the
+// record with no free text; a park later adds LastError and RepairReason at
+// up to breadcrumbTextMaxBytes each, and widens the counters, the window id
+// and the attempt time. A write that overflows then fails, and the record
+// cannot leave its phase. So Prepare measures bc at that widest, and refuses
+// here, before the review starts, rather than at the park. The workspace is
+// the one structured field forgectl does not choose: it sits under $TMPDIR,
+// and encoding/json writes each '<', '>' or '&' in it as six bytes.
+func checkParkHeadroom(bc Breadcrumb) error {
+	room, err := workspaceRoom(bc)
+	if err != nil {
+		return err
+	}
+	// termsafe:allow-raw-json measures the workspace's encoded size; nothing is written
+	quoted, err := json.Marshal(bc.Workspace)
+	if err != nil {
+		return fmt.Errorf("measure the workspace path: %w", err)
+	}
+	if n := len(quoted) - 2; n > room {
+		// Categorical: the path is not echoed, only its size and the room left.
+		return fmt.Errorf("the clean-room workspace path is too long to record: it takes %d bytes in a session record, "+
+			"which has room for %d once the other fields are at their largest; "+
+			"set TMPDIR to a shorter directory (each '<', '>' or '&' in it counts six bytes)",
+			n, room)
+	}
+	return nil
+}
+
+// workspaceRoom is how many encoded bytes bc's workspace may take and still
+// leave the record parkable: maxBreadcrumbRecordBytes less the record with
+// an empty workspace and every field a park sets at its widest.
+func workspaceRoom(bc Breadcrumb) (int, error) {
+	widest := bc
+	widest.Workspace = ""
+	widest.Phase = PhaseNeedsRepair
+	widest.Revision = math.MaxInt64
+	widest.Attempts = math.MaxInt64
+	widest.WindowID = widestWindowID
+	widest.RepairReason = strings.Repeat("r", breadcrumbTextMaxBytes)
+	widest.LastError = strings.Repeat("e", breadcrumbTextMaxBytes)
+	widest.LastAttempt = time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.UTC)
+	rest, err := encodeBreadcrumb(widest)
+	if err != nil {
+		return 0, err
+	}
+	return maxBreadcrumbRecordBytes - len(rest), nil
 }
 
 // writeRecordAtomic replaces dir/name with data so that a crash at any point

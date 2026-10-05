@@ -40,10 +40,12 @@ package config
 //   Skipped: one-line method — exercised via openLogWriter("-") and SetupLogger("off").
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -511,8 +513,44 @@ func TestLoad(t *testing.T) {
 			t.Error("Load() with malformed file: DecodeDegraded() = false, want true")
 		}
 		got.decodeDegraded = false
+		got.decodeErr = nil
 		if !reflect.DeepEqual(got, Config{}) {
 			t.Errorf("Load() with malformed file = %+v, want zero-value Config apart from the degraded marker", got)
+		}
+	})
+
+	t.Run("malformed TOML records the file and parse position", func(t *testing.T) {
+		dir := redirectConfigDir(t)
+		cfgDir := filepath.Join(dir, "forgectl")
+		if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte("log_level = \"info\"\nthis = = broken\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		derr := Load().DecodeError()
+		if derr == nil {
+			t.Fatal("DecodeError() = nil for a file that does not parse")
+		}
+		if !strings.Contains(derr.Error(), "config.toml") || !strings.Contains(derr.Error(), "line 2, column") {
+			t.Errorf("DecodeError() = %q, want the file name and a line/column", derr)
+		}
+	})
+
+	t.Run("absent and valid files have no DecodeError", func(t *testing.T) {
+		dir := redirectConfigDir(t)
+		if err := Load().DecodeError(); err != nil {
+			t.Errorf("absent file: DecodeError() = %v, want nil", err)
+		}
+		cfgDir := filepath.Join(dir, "forgectl")
+		if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte("log_level = \"info\"\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		if err := Load().DecodeError(); err != nil {
+			t.Errorf("valid file: DecodeError() = %v, want nil", err)
 		}
 	})
 
@@ -840,5 +878,57 @@ func TestProjectsConfig_WingsDecodeAndPresence(t *testing.T) {
 				t.Errorf("Projects.IsZero() = %v, want %v", got.Projects.IsZero(), tc.zero)
 			}
 		})
+	}
+}
+
+// TestResolveDir_HomeLookupFailsClosed pins that a ~ path whose home lookup
+// fails is an error with no dir, never the literal ~/... (which would resolve
+// against the working directory), and that a path needing no home is
+// unaffected by the failing lookup.
+func TestResolveDir_HomeLookupFailsClosed(t *testing.T) {
+	t.Setenv("HEARTH_DIR", "")
+	failing := func() (string, error) { return "", errors.New("no home") }
+	for _, in := range []string{"~/hearth", "~"} {
+		got, err := resolveDir(in, "HEARTH_DIR", failing)
+		if err == nil || got != "" {
+			t.Errorf("resolveDir(%q) = %q, %v; want \"\" and an error", in, got, err)
+		}
+	}
+	t.Setenv("HEARTH_DIR", "~/from-env")
+	if got, err := resolveDir("", "HEARTH_DIR", failing); err == nil || got != "" {
+		t.Errorf("env ~ path = %q, %v; want \"\" and an error", got, err)
+	}
+	for _, in := range []string{"/abs/hearth", "rel/hearth", "~user/x"} {
+		got, err := resolveDir(in, "HEARTH_DIR", failing)
+		if err != nil || got != in {
+			t.Errorf("resolveDir(%q) = %q, %v; want it unchanged", in, got, err)
+		}
+	}
+	t.Setenv("HEARTH_DIR", "")
+	if got, err := resolveDir("", "HEARTH_DIR", failing); err != nil || got != "" {
+		t.Errorf("unconfigured = %q, %v; want \"\" and nil", got, err)
+	}
+	ok := func() (string, error) { return "/home/u", nil }
+	if got, err := resolveDir("~/hearth", "HEARTH_DIR", ok); err != nil || got != "/home/u/hearth" {
+		t.Errorf("expanded = %q, %v; want /home/u/hearth", got, err)
+	}
+}
+
+// TestBenchConfig_ResolvedDirsFailClosedWithoutHome exercises the public
+// resolvers with HOME genuinely unset (os.UserHomeDir fails on unix).
+func TestBenchConfig_ResolvedDirsFailClosedWithoutHome(t *testing.T) {
+	if runtime.GOOS == "windows" || runtime.GOOS == "plan9" {
+		t.Skip("home lookup does not read $HOME here")
+	}
+	t.Setenv("HOME", "")
+	bc := BenchConfig{HearthDir: "~/h", ChronicleDir: "~/c"}
+	if d, err := bc.ResolveHearthDir(); err == nil || d != "" {
+		t.Errorf("ResolveHearthDir = %q, %v", d, err)
+	}
+	if d, err := bc.ResolveChronicleDir(); err == nil || d != "" {
+		t.Errorf("ResolveChronicleDir = %q, %v", d, err)
+	}
+	if bc.ResolvedHearthDir() != "" || bc.ResolvedChronicleDir() != "" {
+		t.Error("Resolved*Dir must be empty when home is unresolvable")
 	}
 }

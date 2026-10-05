@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -185,5 +187,96 @@ func TestAssertVikunja_AcceptsARealInfoResponse(t *testing.T) {
 	}
 	if gotPath != "/info" {
 		t.Fatalf("AssertVikunja hit %s, want /info", gotPath)
+	}
+}
+
+// TestAssertVikunja_SendsNoCredential pins the order of the two questions the
+// probe sits between. It runs to find out whether the host is a Vikunja API at
+// all, so the bearer token must not be on the request that asks: a host that
+// turns out to be something else has by then already been handed it. /info is
+// a public route and needs no credential.
+func TestAssertVikunja_SendsNoCredential(t *testing.T) {
+	var (
+		gotAuth string
+		hadAuth bool
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, hadAuth = r.Header["Authorization"]
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"version": "v2.5.0"}`))
+	}))
+	defer srv.Close()
+
+	client := NewClientForTesting(srv.URL, newToken(fakeToken))
+	if err := client.AssertVikunja(context.Background()); err != nil {
+		t.Fatalf("AssertVikunja = %v, want nil", err)
+	}
+	if hadAuth || gotAuth != "" {
+		t.Fatalf("the /info probe carried an Authorization header (%d bytes)", len(gotAuth))
+	}
+
+	// The same client still authenticates everything else. Without this half
+	// the test passes on a client that never sends the header at all.
+	if _, err := client.FetchTask(context.Background(), 1); err != nil {
+		t.Fatalf("FetchTask: %v", err)
+	}
+	if gotAuth != "Bearer "+fakeToken {
+		t.Fatal("a task read after the probe did not carry the bearer token")
+	}
+}
+
+// TestDecodeErrors_AreCategorical pins #761: a response that does not decode
+// is refused with fixed text. A *json.SyntaxError quotes a character of the
+// server's body, so the message must not carry it, while errors.Is still
+// reaches ErrUnexpectedStatus and errors.As still reaches the decode error.
+func TestDecodeErrors_AreCategorical(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("Zgarbage"))
+	}))
+	defer srv.Close()
+	c := NewClientForTesting(srv.URL, newToken(fakeToken))
+	ctx := context.Background()
+
+	calls := map[string]func() error{
+		"fetchAllPages": func() error { _, err := fetchAllPages[map[string]any](ctx, c, "/tasks"); return err },
+		"CreateTask":    func() error { _, err := c.CreateTask(ctx, 7, "hello", ""); return err },
+		"AddComment":    func() error { _, err := c.AddComment(ctx, 7, "hello"); return err },
+		"FetchTask":     func() error { _, err := c.FetchTask(ctx, 7); return err },
+		"FetchProject":  func() error { _, err := c.FetchProject(ctx, 7); return err },
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			err := call()
+			if err == nil {
+				t.Fatal("want a decode refusal")
+			}
+			if strings.Contains(err.Error(), "'Z'") || strings.Contains(err.Error(), "invalid character") {
+				t.Errorf("error %q renders the decoder's quote of server text", err)
+			}
+			if !strings.Contains(err.Error(), "malformed JSON") {
+				t.Errorf("error %q, want the categorical malformed-JSON wording", err)
+			}
+			if !errors.Is(err, ErrUnexpectedStatus) {
+				t.Errorf("error %v lost ErrUnexpectedStatus", err)
+			}
+			var syn *json.SyntaxError
+			if !errors.As(err, &syn) {
+				t.Errorf("error %v lost the decode cause", err)
+			}
+		})
+	}
+
+	path := filepath.Join(t.TempDir(), "cache.json")
+	if err := os.WriteFile(path, []byte("Zgarbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadCache(path)
+	if err == nil || strings.Contains(err.Error(), "'Z'") {
+		t.Errorf("LoadCache error %v, want a categorical refusal", err)
+	}
+	var syn *json.SyntaxError
+	if !errors.As(err, &syn) {
+		t.Errorf("LoadCache error %v lost the decode cause", err)
 	}
 }

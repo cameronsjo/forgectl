@@ -174,7 +174,12 @@ func TestPinnedClientPinsEveryCommand(t *testing.T) {
 			t.Errorf("argv %v does not lead with the socket pin -S %s", call.Args, testSocket)
 			continue
 		}
-		seen[call.Args[2]] = true
+		// Every command a pinned client can issue is non-interactive, so each
+		// one carries -u (forgectl#840). FakeRunner strips it from Args.
+		if !call.TmuxUTF8 {
+			t.Errorf("argv %v was issued without -u", call.Args)
+		}
+		seen[tmuxVerb(call.Args)] = true
 	}
 
 	// The mutating verbs are listed explicitly because they are the ones with
@@ -220,7 +225,11 @@ func TestPinnedKillOthersIsPinned(t *testing.T) {
 	}
 	var killAll []string
 	for _, call := range run.Calls {
-		if slices.Contains(call.Args, "-a") && slices.Contains(call.Args, "kill-session") {
+		// The kill is generation-guarded (forgectl#785), so it rides inside
+		// an if-shell command string rather than as bare argv elements.
+		if tmuxVerb(call.Args) == "kill-session" && slices.ContainsFunc(call.Args, func(a string) bool {
+			return strings.HasPrefix(a, "kill-session -a ")
+		}) {
 			killAll = call.Args
 		}
 	}

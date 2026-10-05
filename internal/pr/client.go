@@ -2,6 +2,7 @@ package pr
 
 import (
 	"context"
+	"errors"
 	"os"
 	"time"
 
@@ -24,6 +25,17 @@ const defaultTmuxSession = "forgectl"
 type Client struct {
 	run        exec.Runner
 	tmuxClient *tmux.Client
+
+	// githubHost is the configured [github] host: what an empty Ref.Host
+	// means, and the host the @me searches (which name no repository) run
+	// on. pin returns a runner whose gh subprocesses are pinned to a given
+	// host — internal/cli passes githubauth.Runner, which this package
+	// cannot import (githubauth imports it). Every gh call about a PR runs
+	// on pin(host) AND names that host in --repo, so the pin and the
+	// argument can never disagree (#413). Defaults: defaultGitHubHost and
+	// an identity pin, which only tests rely on.
+	githubHost string
+	pin        func(host string) exec.Runner
 
 	// sessionsDir is the forgectl-owned breadcrumb directory
 	// (config.PrSessionsDir); the breadcrumb location check enforces that a
@@ -49,6 +61,13 @@ type Client struct {
 	// ordering property the crash-safety design rests on, which is otherwise
 	// invisible from outside. Never set in production.
 	onLock func(verb, event string)
+
+	// afterLockOpen, when non-nil, is called once withLifecycleLock has
+	// opened and Fstat'ed the lock file and before it first tries the flock.
+	// It lets an in-package test swap the lock's path after the checked open,
+	// deterministically, to prove the timeout diagnostic reads the descriptor
+	// rather than the path (forgectl#621). Never set in production.
+	afterLockOpen func()
 
 	// findingsDir is the forgectl-owned directory (config.PrFindingsDir) that
 	// holds `forgectl pr local` findings — the deliverable of a local
@@ -106,6 +125,14 @@ type Client struct {
 	// proxy-only network fails at its first request under that default, which
 	// is what this field exists to fix.
 	windowEnv func() ([]string, error)
+
+	// notifier posts the desktop notification the drainer sends when it
+	// launches a queued review. nil — the default — sends nothing. It is an
+	// interface rather than *notify.Client so this package need not import
+	// the notification sink at all; internal/cli wires the real one.
+	notifier interface {
+		Notify(ctx context.Context, title, body string) error
+	}
 }
 
 // resolveWindowEnv is the single reader of windowEnv, so the nil default and
@@ -144,9 +171,56 @@ func WithWindowEnv(resolve func() ([]string, error)) Option {
 	return func(c *Client) { c.windowEnv = resolve }
 }
 
+// WithGitHubHost supplies the configured [github] host and the host-pinning
+// runner factory (see Client.githubHost). host is validated where it is used,
+// so an invalid configured value fails each PR call categorically rather than
+// failing construction for verbs that never reach gh.
+func WithGitHubHost(host string, pin func(host string) exec.Runner) Option {
+	return func(c *Client) { c.githubHost, c.pin = host, pin }
+}
+
+// GitHubHost is the configured [github] host: what an empty Ref.Host means,
+// and the default host the reviewed store reads legacy marks as.
+func (c *Client) GitHubHost() string { return c.githubHost }
+
+// recordHost is the host a new record for ref persists: empty for a local
+// session, which has no forge, and otherwise the concrete host its gh calls
+// use — so the record keeps meaning that host if [github] host later changes.
+// An invalid host is left empty here; the gh call that needs it refuses.
+func (c *Client) recordHost(ref Ref) string {
+	if ref.IsLocal() {
+		return ""
+	}
+	host, _, err := c.prHost(ref)
+	if err != nil {
+		return ""
+	}
+	return host
+}
+
+// prHost returns the host a PR-scoped gh call for ref must use, and a runner
+// pinned to it. An empty Ref.Host means the configured host. The value is
+// re-validated here, at the last point before it becomes argv and GH_HOST,
+// whatever path produced it.
+func (c *Client) prHost(ref Ref) (string, exec.Runner, error) {
+	host := ref.Host
+	if host == "" {
+		host = c.githubHost
+	}
+	if !ValidHostSegment(host) {
+		return "", nil, errors.New("the PR's GitHub host failed validation; check [github] host in config.toml")
+	}
+	return host, c.pin(host), nil
+}
+
 // WithTmuxSession overrides the tmux session review windows are created under.
+//
+// The name is stored as tmux stores it (tmux.StoredSessionName): tmux lists a
+// session created as "x.y" as "x_y", and every comparison below is against a
+// listed name, so a raw "x.y" would never match its own session's windows
+// (forgectl#815).
 func WithTmuxSession(name string) Option {
-	return func(c *Client) { c.tmuxSession = name }
+	return func(c *Client) { c.tmuxSession = tmux.StoredSessionName(name) }
 }
 
 // WithTmuxClient supplies the tmux boundary used by every pr operation. It is
@@ -215,10 +289,20 @@ func WithLockWait(d time.Duration) Option {
 	return func(c *Client) { c.lockWait = d }
 }
 
+// WithNotifier supplies the notifier the drainer calls once per successful
+// launch. nil leaves notifications off, which is the default.
+func WithNotifier(n interface {
+	Notify(ctx context.Context, title, body string) error
+}) Option {
+	return func(c *Client) { c.notifier = n }
+}
+
 // New builds a Client over the given Runner.
 func New(run exec.Runner, opts ...Option) *Client {
 	c := &Client{
 		run:         run,
+		githubHost:  defaultGitHubHost,
+		pin:         func(string) exec.Runner { return run },
 		tmuxClient:  tmux.New(run),
 		tmuxSession: defaultTmuxSession,
 		fs:          osRecordFS{},

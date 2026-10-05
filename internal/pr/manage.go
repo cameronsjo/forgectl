@@ -10,11 +10,12 @@ import (
 	"sort"
 
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // List returns a presentation row for every review session recorded in the
 // session-state dir whose workspace is LIVE, cleanly MISSING, or legitimately
-// NONE (queued/preparing), sorted newest first — and the count of records it
+// NONE (queued/preparing/needs-repair), sorted newest first — and the count of records it
 // could NOT read.
 //
 // Rows are SessionSummary, not Session, because a stale record has no workspace
@@ -72,6 +73,16 @@ func (c *Client) listLocked() ([]SessionSummary, []unreadableRecord, error) {
 			continue
 		}
 		path := filepath.Join(c.sessionsDir, e.Name())
+		// Only a regular file can be a record forgectl wrote (writeRecordAtomic
+		// renames a regular temp into place). A FIFO, socket, device or symlink
+		// named like one is skipped before any open, so it cannot stall the
+		// listing under the lifecycle lock (forgectl#621); the record reader
+		// refuses the same kinds on the descriptor if one is swapped in later.
+		if !e.Type().IsRegular() {
+			slog.Warn("Skipping a pr session entry that is not a regular file.",
+				"path", path, "type", e.Type().String())
+			continue
+		}
 		sum, err := c.loadSummary(path)
 		if err != nil {
 			slog.Warn("Skipping unreadable pr breadcrumb.", "path", path, "error", err)
@@ -110,9 +121,9 @@ func (c *Client) loadSummary(path string) (SessionSummary, error) {
 	if err != nil {
 		return SessionSummary{}, err
 	}
-	// A queued or preparing record has no workspace by design; the validator
-	// has already tied that allowance to exactly those phases, so there is
-	// nothing to classify.
+	// A queued, preparing, or needs-repair record may have no workspace; the
+	// validator has already tied that allowance to those phases
+	// (allowsEmptyWorkspace), so there is nothing to classify.
 	if bc.Workspace == "" {
 		return SessionSummary{ref: ref, path: path, createdAt: bc.CreatedAt,
 			availability: workspaceAvailabilityNone, phase: bc.Phase, repairReason: bc.RepairReason}, nil
@@ -137,11 +148,16 @@ func (c *Client) loadSummary(path string) (SessionSummary, error) {
 func refFromRecord(bc Breadcrumb) (Ref, error) {
 	ref, err := ParseRef(bc.Ref)
 	if err != nil {
-		return Ref{}, fmt.Errorf("breadcrumb ref: %w", err)
+		// Categorical (#562): ParseRef's error echoes its input, and this
+		// input is read from disk.
+		return Ref{}, errors.New("breadcrumb ref is malformed")
 	}
 	if bc.Local {
 		ref = ref.asLocal()
 	}
+	// validateBreadcrumbRecord has already vetted a non-empty host; an empty
+	// one means the configured [github] host (see Breadcrumb.Host).
+	ref.Host = bc.Host
 	return ref, nil
 }
 
@@ -218,7 +234,26 @@ func (c *Client) Attach(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	window, err := c.resolveReviewWindow(ctx, sess.Ref)
+	// Attach runs outside the lifecycle lock, so a hung tmux risks no lock —
+	// but it would leave `pr attach` waiting until Ctrl-C. The resolve gets the
+	// same bound the locked reads use; the select below is the interactive
+	// jump itself and stays on the caller's ctx.
+	tctx, done := boundedTmux(ctx)
+	window, err := c.resolveReviewWindow(tctx, sess.Ref)
+	timedOut := err != nil && (tctx.Err() != nil || errors.Is(err, context.DeadlineExceeded))
+	done()
+	if timedOut {
+		return fmt.Errorf("select review window %q: tmux did not answer within %s; retry once tmux responds: %w",
+			name, lockedTmuxBudget, err)
+	}
+	if errors.Is(err, tmux.ErrAmbiguousWindow) {
+		return fmt.Errorf("select review window %q: %w — more than one window carries this review's name; "+
+			"close the ones that are not the review, then settle the record with 'forgectl pr repair'", name, err)
+	}
+	if err != nil && !windowConfirmedAbsent(err) {
+		return fmt.Errorf("select review window %q: tmux could not say whether it exists, so nothing was selected: %w",
+			name, err)
+	}
 	if err != nil {
 		return fmt.Errorf("select review window %q: %w — the window may predate a "+
 			"forgectl upgrade that renamed review windows; relaunch the review with `pr <ref>`", name, err)

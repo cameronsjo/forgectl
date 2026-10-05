@@ -17,7 +17,9 @@ import (
 var escapedLabelRenderers = map[string]bool{
 	"repoPickerLabel": true,
 	"prPickerLabel":   true,
-	"safeTerm":        true,
+	"safeLabel":       true,
+	"safeTitle":       true,
+	"safeText":        true,
 	"safeCandidate":   true,
 	// Row renderers that apply the boundary to every field they compose. They
 	// are approved as whole renderers because a label built from one is escaped
@@ -41,9 +43,9 @@ var escapedLabelRenderers = map[string]bool{
 // this guard was shown to approve a raw label:
 //
 //   - EVERY dynamic leaf must be approved, not merely one of them. Recursing
-//     into a call's arguments is what lets truncate(safeTerm(x), n) stay
+//     into a call's arguments is what lets truncate(safeText(x), n) stay
 //     approved, but the same recursion approved
-//     fmt.Sprintf("%s %s", safeTerm(a), raw) — and growing a label by one field
+//     fmt.Sprintf("%s %s", safeText(a), raw) — and growing a label by one field
 //     is exactly how a picker row changes.
 //   - Locals are tracked PER FUNCTION, in source order. A file-scoped map is
 //     judged on the last assignment anywhere in the file, and `label` is the
@@ -127,7 +129,7 @@ func checkFuncLabels(t *testing.T, fset *token.FileSet, file string, fn *ast.Fun
 //
 // A function literal gets a COPY of the enclosing map rather than sharing it.
 // Inheriting is right — a closure legitimately uses a label the enclosing scope
-// escaped — but sharing is not: a nested `label := safeTerm(x)` shadows the
+// escaped — but sharing is not: a nested `label := safeText(x)` shadows the
 // outer name, and with one shared map that inner approval leaks out and blesses
 // an outer `label` still holding raw text. Copy-in gives the closure what it can
 // see without letting its shadows escape.

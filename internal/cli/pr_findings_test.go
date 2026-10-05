@@ -19,19 +19,40 @@ package cli
 //       look reclaimable)
 //   [x] Happy: --older-than 0 passes validation (0 is the explicit "reclaim
 //       everything" cutoff, still gated by --apply/confirm like any other)
+//
+// Terminal safety (forgectl#551)
+//   [x] A findings dir named with ESC and a newline reaches no output raw —
+//       not the list rows, not the cleanup preview, not the "reclaimed" line
+//       after --apply (driven through the confirmFn seam) — and each is shown
+//       in its QuotePath-escaped form
 
 import (
 	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
+
+// mkStaleFindingsDir creates a findings dir whose owner marker names a
+// session record that does not exist, the way a finished review leaves it.
+// `pr findings cleanup` refuses a dir with no marker at all (forgectl#558).
+func mkStaleFindingsDir(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, ".forgectl-owner"), []byte("local-gone000-1-1.json\n"), 0o600); err != nil {
+		t.Fatalf("write owner marker: %v", err)
+	}
+}
 
 func TestPrFindingsListCmd_PrintsPaths(t *testing.T) {
 	dir := t.TempDir()
@@ -72,14 +93,12 @@ func TestPrFindingsListCmd_NoFindings(t *testing.T) {
 func TestPrFindingsCleanupCmd_DryRun_ReportsAndDeletesNothing(t *testing.T) {
 	dir := t.TempDir()
 	oldDir := filepath.Join(dir, "forgectl-findings-old")
-	if err := os.MkdirAll(oldDir, 0o700); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
+	mkStaleFindingsDir(t, oldDir)
 	old := time.Now().Add(-48 * time.Hour)
 	if err := os.Chtimes(oldDir, old, old); err != nil {
 		t.Fatalf("Chtimes: %v", err)
 	}
-	client := pr.New(nil, pr.WithFindingsDir(dir))
+	client := pr.New(nil, pr.WithFindingsDir(dir), pr.WithSessionsDir(t.TempDir()))
 
 	cmd := newPrFindingsCmd(client, theme.Theme{})
 	var out bytes.Buffer
@@ -111,10 +130,8 @@ func TestPrFindingsCleanupCmd_NegativeOlderThan_ErrorsWithoutScanning(t *testing
 	// cobra's behavior, not this command's.
 	dir := t.TempDir()
 	oldDir := filepath.Join(dir, "forgectl-findings-old")
-	if err := os.MkdirAll(oldDir, 0o700); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	client := pr.New(nil, pr.WithFindingsDir(dir))
+	mkStaleFindingsDir(t, oldDir)
+	client := pr.New(nil, pr.WithFindingsDir(dir), pr.WithSessionsDir(t.TempDir()))
 
 	cmd := newPrFindingsCmd(client, theme.Theme{})
 	var stdout, stderr bytes.Buffer
@@ -137,10 +154,8 @@ func TestPrFindingsCleanupCmd_NegativeOlderThan_ErrorsWithoutScanning(t *testing
 func TestPrFindingsCleanupCmd_ZeroOlderThan_PassesValidation(t *testing.T) {
 	dir := t.TempDir()
 	oldDir := filepath.Join(dir, "forgectl-findings-old")
-	if err := os.MkdirAll(oldDir, 0o700); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	client := pr.New(nil, pr.WithFindingsDir(dir))
+	mkStaleFindingsDir(t, oldDir)
+	client := pr.New(nil, pr.WithFindingsDir(dir), pr.WithSessionsDir(t.TempDir()))
 
 	cmd := newPrFindingsCmd(client, theme.Theme{})
 	var out bytes.Buffer
@@ -161,7 +176,7 @@ func TestPrFindingsCleanupCmd_NothingToReclaim_ShortCircuitsBeforeConfirm(t *tes
 	// reclaim" branch before ever reaching the confirm() gate — the only way
 	// this test can pass --apply without a tty/huh stub.
 	dir := t.TempDir()
-	client := pr.New(nil, pr.WithFindingsDir(dir))
+	client := pr.New(nil, pr.WithFindingsDir(dir), pr.WithSessionsDir(t.TempDir()))
 
 	cmd := newPrFindingsCmd(client, theme.Theme{})
 	var out bytes.Buffer
@@ -173,5 +188,49 @@ func TestPrFindingsCleanupCmd_NothingToReclaim_ShortCircuitsBeforeConfirm(t *tes
 	}
 	if got := out.String(); got != "nothing to reclaim\n" {
 		t.Errorf("output = %q, want %q", got, "nothing to reclaim\n")
+	}
+}
+
+// TestPrFindingsCmd_ControlCharacterDirNameNeverReachesOutputRaw pins
+// forgectl#551: every findings path printed by `pr findings list` and
+// `pr findings cleanup` (preview and --apply) is a directory name read off
+// disk, so one planted with ESC and a newline must come out escaped. The
+// name keeps the findings prefix so --apply really removes it and the
+// "reclaimed" line is exercised, not skipped.
+func TestPrFindingsCmd_ControlCharacterDirNameNeverReachesOutputRaw(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows filenames cannot hold a newline")
+	}
+	dir := t.TempDir()
+	evil := filepath.Join(dir, "forgectl-findings-\x1b[2J\nforged")
+	mkStaleFindingsDir(t, evil)
+	client := pr.New(nil, pr.WithFindingsDir(dir), pr.WithSessionsDir(t.TempDir()))
+	withConfirmFn(t, func(string) (bool, error) { return true, nil })
+
+	for _, args := range [][]string{
+		{"list"},
+		{"cleanup", "--older-than=0"},
+		{"cleanup", "--older-than=0", "--apply"},
+	} {
+		cmd := newPrFindingsCmd(client, theme.Theme{})
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetArgs(args)
+		if err := cmd.ExecuteContext(context.Background()); err != nil {
+			t.Fatalf("%v: unexpected error: %v", args, err)
+		}
+		body := out.String()
+		if strings.Contains(body, "\x1b") {
+			t.Errorf("%v: output carries a raw ESC; got %q", args, body)
+		}
+		if strings.Contains(body, "\nforged") {
+			t.Errorf("%v: output carries the name's raw newline; got %q", args, body)
+		}
+		if !strings.Contains(body, termsafe.QuotePath(evil)) {
+			t.Errorf("%v: output missing the escaped path %s; got %q", args, termsafe.QuotePath(evil), body)
+		}
+	}
+	if _, err := os.Stat(evil); !os.IsNotExist(err) {
+		t.Errorf("--apply left %q in place (err=%v), want it reclaimed so the reclaimed line was exercised", evil, err)
 	}
 }

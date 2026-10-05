@@ -83,7 +83,23 @@ func TestGenerationCapabilityIsolated(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
+	// A socket nothing listens on is an exited server (forgectl#786): tmux
+	// 3.4 leaves one behind on every exit, and the probe needs a live
+	// server's identity only when one answers. Mutation that turns it red:
+	// drop serverDeadSocket from CheckGenerationCapability's absent arm.
+	if _, err := c.CheckGenerationCapability(ctx); err != nil {
+		t.Fatalf("dead socket capability: %v, want the no-server answer", err)
+	}
+
+	// A non-socket file at the path is not proof of anything, even though
+	// connect() refuses it the same way: it stays a refusal.
+	if err := os.Remove(socketPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(socketPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := c.CheckGenerationCapability(ctx); err == nil {
-		t.Fatal("stale socket capability succeeded, want refusal")
+		t.Fatal("capability over a regular file at the socket path succeeded, want refusal")
 	}
 }

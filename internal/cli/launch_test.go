@@ -564,24 +564,203 @@ func TestIntegration_Launch_NoTelemetryWhenDisabled(t *testing.T) {
 	}
 }
 
+// TestIntegration_Builder_AppliesProfileAndPassesThrough pins the builder argv
+// for a bare prompt. The add-dir sits BEFORE --model: `--add-dir` is variadic,
+// so an add-dir directly ahead of "hi" would hand the prompt to claude as a
+// second directory (`claude -p --add-dir /tmp hi` fails "Input must be
+// provided", Claude Code 2.1.285). Here --effort's value is what precedes the
+// prompt, so claude reads "hi" as the prompt.
 func TestIntegration_Builder_AppliesProfileAndPassesThrough(t *testing.T) {
 	h := newHarness(t)
-	h.run(t, "-p", "hi")
+	h.run(t, "hi")
 
 	got := h.recordedArgs(t)
 	want := []string{
 		"--permission-mode", "plan",
-		"--allow-dangerously-skip-permissions",
+		// no --allow-dangerously-skip-permissions: the harness's stdout is a
+		// pipe, and a piped builder run withholds it (forgectl#812)
+		"--add-dir", h.cwd + "/shared",
 		"--model", "sonnet",
 		"--effort", "high", // derived from sonnet; the fixture sets no effort
-		"--add-dir", h.cwd + "/shared",
-		"-p", "hi",
+		"hi",
 	}
 	if !equalArgs(got, want) {
 		t.Errorf("recorded args = %v, want %v", got, want)
 	}
 	if otel := h.recordedOTEL(t); otel != "otlp" {
 		t.Errorf("OTEL_EXPORTER = %q, want %q", otel, "otlp")
+	}
+}
+
+// TestIntegration_ClaudePassthrough_NoPostureNoBanner pins #676's passthrough
+// end to end. The fixture profile carries an add_dir, which is the case that
+// breaks a subcommand for real: `--add-dir <directories...>` is variadic, so
+// an injected `--add-dir X mcp list` hands claude "mcp" and "list" as
+// directories and it opens a session instead.
+//
+// Mutation that turns it red: drop the IsClaudeSubcommandCall case from
+// selectPosture (argv gains the profile flags), or move
+// PostureClaudePassthrough into EmitBanner's banner case (stderr is non-empty).
+func TestIntegration_ClaudePassthrough_NoPostureNoBanner(t *testing.T) {
+	for _, tc := range []struct{ args, want []string }{
+		{[]string{"mcp", "list"}, []string{"mcp", "list"}},
+		// forgectl takes the first `--`; claude still dispatches `mcp` after
+		// its own, as native `claude -- mcp list` does.
+		{[]string{"--", "--", "mcp", "list"}, []string{"--", "mcp", "list"}},
+		{[]string{"--version"}, []string{"--version"}},
+	} {
+		args, want := tc.args, tc.want
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			h := newHarness(t)
+			stdout, stderr := h.run(t, args...)
+			if got := h.recordedArgs(t); !equalArgs(got, want) {
+				t.Errorf("recorded args = %v, want exactly %v", got, want)
+			}
+			if stderr != "" {
+				t.Errorf("stderr = %q, want empty: a passthrough prints no banner", stderr)
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want empty", stdout)
+			}
+		})
+	}
+}
+
+// TestIntegration_ClaudePrint_PermissionModeOnly pins the print posture end to
+// end: the profile's permission mode, first, and nothing else — no model,
+// effort, add-dir, or allow-danger, and no banner. The fixture profile sets
+// allow_danger and an add_dir, so either leaking in shows up here. Keeping the
+// permission mode is what keeps an unattended `forgectl launch -p` in a
+// posture that cannot write.
+//
+// Mutation that turns it red: route print mode through the byte-clean
+// passthrough (the permission mode disappears), through BuilderArgs (model,
+// add-dir, allow-danger reappear), or banner PostureClaudePrint.
+func TestIntegration_ClaudePrint_PermissionModeOnly(t *testing.T) {
+	for _, args := range [][]string{
+		{"-p", "hi"},
+		{"--output-format=json", "-p", "hi"},
+		{"-p", "hi", "--permission-mode", "acceptEdits"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			h := newHarness(t)
+			stdout, stderr := h.run(t, args...)
+			want := append([]string{"--permission-mode", "plan"}, args...)
+			if got := h.recordedArgs(t); !equalArgs(got, want) {
+				t.Errorf("recorded args = %v, want exactly %v", got, want)
+			}
+			if stderr != "" {
+				t.Errorf("stderr = %q, want empty: print mode prints no banner", stderr)
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want empty", stdout)
+			}
+		})
+	}
+}
+
+// TestIntegration_LeadingSeparatorIsConsumed pins the other half of #676. A
+// leading `--` keeps "which" away from `forgectl launch which` and then never
+// reaches claude; only ONE is consumed, so `-- --` still gives claude its own.
+//
+// Mutation that turns it red: delete the ConsumeLeadingSeparator call in
+// launchExec (claude receives the `--`), or make it strip every leading `--`
+// (the second case loses claude's separator).
+func TestIntegration_LeadingSeparatorIsConsumed(t *testing.T) {
+	profile := func(h *harness) []string {
+		return []string{
+			"--permission-mode", "plan",
+			// Piped stdout: the builder withholds
+			// --allow-dangerously-skip-permissions (forgectl#812).
+			"--add-dir", h.cwd + "/shared",
+			"--model", "sonnet",
+			"--effort", "high",
+		}
+	}
+	tests := []struct {
+		name string
+		args []string
+		want func(h *harness) []string
+	}{
+		{"prompt named like a launch verb", []string{"--", "which"}, func(h *harness) []string {
+			return append(profile(h), "which")
+		}},
+		{"only one separator is forgectl's", []string{"--", "--", "-p"}, func(h *harness) []string {
+			return append(profile(h), "--", "-p")
+		}},
+		{"claude subcommand after the separator", []string{"--", "doctor"}, func(*harness) []string {
+			return []string{"doctor"}
+		}},
+		{"a lone separator is a bare launch", []string{"--"}, func(h *harness) []string {
+			return []string{
+				"--permission-mode", "plan",
+				// Piped stdout: the session posture withholds
+				// --allow-dangerously-skip-permissions too (forgectl#899).
+				"--ide", "--exclude-dynamic-system-prompt-sections",
+				"--model", "sonnet",
+				"--effort", "high",
+				"--add-dir", h.cwd + "/shared",
+			}
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.run(t, tc.args...)
+			if got, want := h.recordedArgs(t), tc.want(h); !equalArgs(got, want) {
+				t.Errorf("recorded args = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestIntegration_LeadingSeparatorIsConsumed_CodexAndPi pins that forgectl's
+// leading `--` is harness-agnostic: Codex and Pi never see it either, and a
+// prompt named like a launch verb reaches them as a prompt.
+//
+// Mutation that turns it red: delete the ConsumeLeadingSeparator call in
+// launchExec (each harness receives the `--`).
+func TestIntegration_LeadingSeparatorIsConsumed_CodexAndPi(t *testing.T) {
+	tests := []struct {
+		name, bin, config string
+		want              []string
+	}{
+		{
+			name: "codex",
+			bin:  "codex",
+			config: `[launch.defaults]
+harness = "codex"
+model = "gpt-5"
+approval_policy = "never"
+sandbox = "read-only"
+`,
+			want: []string{
+				"exec", "--config", `approval_policy="never"`,
+				"--sandbox", "read-only", "--model", "gpt-5", "which",
+			},
+		},
+		{
+			name: "pi",
+			bin:  "pi",
+			config: `[launch.defaults]
+harness = "pi"
+provider = "lm-studio"
+model = "qwen/qwen3-coder-next"
+`,
+			want: []string{"--provider", "lm-studio", "--model", "qwen/qwen3-coder-next", "which"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newBareHarness(t, tc.config)
+			if err := os.WriteFile(filepath.Join(h.binDir, tc.bin), []byte(stubClaude), 0o755); err != nil { //nolint:gosec // G306: the stub must be executable
+				t.Fatalf("write stub %s: %v", tc.bin, err)
+			}
+			h.run(t, "--", "which")
+			if got := h.recordedArgs(t); !equalArgs(got, tc.want) {
+				t.Errorf("%s args = %v, want %v", tc.name, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -642,7 +821,8 @@ func TestIntegration_AgentsInteractive_InjectsSubsetAndBannerToStderr(t *testing
 	want := []string{
 		"agents",
 		"--permission-mode", "plan",
-		"--allow-dangerously-skip-permissions",
+		// no --allow-dangerously-skip-permissions: the harness's stdout is a
+		// pipe, and a piped run withholds it (forgectl#899)
 		"--model", "sonnet",
 		"--effort", "high",
 		"--cwd", "/x",
@@ -679,11 +859,11 @@ func TestIntegration_ClaudeBinOverride(t *testing.T) {
 		env := stripFromPath(h.env, h.binDir)
 		env = append(env, "FORGECTL_CLAUDE_BIN="+filepath.Join(h.binDir, "claude"))
 
-		cmd := exec.Command(h.bin, "launch", "-p", "x")
+		cmd := exec.CommandContext(t.Context(), h.bin, "launch", "x") //nolint:gosec // G204: the test's own built binary with fixed args
 		cmd.Dir = h.cwd
 		cmd.Env = env
 		if err := cmd.Run(); err != nil {
-			t.Fatalf("forgectl launch -p x with FORGECTL_CLAUDE_BIN set: %v", err)
+			t.Fatalf("forgectl launch x with FORGECTL_CLAUDE_BIN set: %v", err)
 		}
 
 		got := h.recordedArgs(t)
@@ -796,7 +976,7 @@ func TestIntegration_LaunchShadow_DoctorAutoMigrates(t *testing.T) {
 // is what now actually reaches claude.
 func TestIntegration_LaunchShadow_ExecAutoMigrates(t *testing.T) {
 	h := newShadowHarness(t)
-	_, stderr := h.run(t, "-p", "hi")
+	_, stderr := h.run(t, "hi")
 
 	if strings.Contains(stderr, "present but ignored") {
 		t.Errorf("stderr = %q, still shows the old recurring warning instead of auto-migrating", stderr)
@@ -807,10 +987,11 @@ func TestIntegration_LaunchShadow_ExecAutoMigrates(t *testing.T) {
 	got := h.recordedArgs(t)
 	want := []string{
 		"--permission-mode", "plan",
-		"--allow-dangerously-skip-permissions",
+		// no --allow-dangerously-skip-permissions: the harness's stdout is a
+		// pipe, and a piped builder run withholds it (forgectl#812)
 		"--model", "sonnet",
 		"--effort", "high", // derived from sonnet — the merged-in project now applies
-		"-p", "hi",
+		"hi",
 	}
 	if !equalArgs(got, want) {
 		t.Errorf("recorded args = %v, want %v (the merged-in project profile, no longer shadowed)", got, want)
@@ -831,7 +1012,7 @@ func TestIntegration_LaunchShadow_DuplicateProjectMatch_NoOverwrite(t *testing.T
 		t.Fatalf("read config.toml before run: %v", err)
 	}
 
-	_, stderr := h.run(t, "-p", "hi")
+	_, stderr := h.run(t, "hi")
 
 	if !strings.Contains(stderr, "fully superseded by config.toml") {
 		t.Errorf("stderr = %q, want the fully-superseded notice (nothing new to merge)", stderr)
@@ -860,10 +1041,11 @@ func TestIntegration_LaunchShadow_DuplicateProjectMatch_NoOverwrite(t *testing.T
 	got := h.recordedArgs(t)
 	want := []string{
 		"--permission-mode", "plan",
-		"--allow-dangerously-skip-permissions",
+		// no --allow-dangerously-skip-permissions: the harness's stdout is a
+		// pipe, and a piped builder run withholds it (forgectl#812)
 		"--model", "opus",
 		"--effort", "medium", // derived from opus, not the legacy sonnet entry
-		"-p", "hi",
+		"hi",
 	}
 	if !equalArgs(got, want) {
 		t.Errorf("recorded args = %v, want %v (config.toml's own project must win)", got, want)
@@ -1405,7 +1587,9 @@ func TestIntegration_CodexExec_PrintsBannerToStderr(t *testing.T) {
 // --allow-dangerously-skip-permissions into an INTERACTIVE session (the
 // scaffold ships allow_danger = true), and once the huh form stopped rendering
 // ahead of syscall.Exec it printed nothing at all. stderr, so a piped stdout
-// stays clean.
+// stays clean. The harness pipes stdout, so the flag itself is withheld here
+// (forgectl#899); TestLaunchExec_StdoutTerminalDecidesAllowDanger pins the
+// terminal side.
 func TestIntegration_BareLaunch_NoPromptAndBanners(t *testing.T) {
 	h := newHarness(t)
 	stdout, stderr := h.run(t)
@@ -1413,7 +1597,8 @@ func TestIntegration_BareLaunch_NoPromptAndBanners(t *testing.T) {
 	got := h.recordedArgs(t)
 	want := []string{
 		"--permission-mode", "plan",
-		"--allow-dangerously-skip-permissions",
+		// no --allow-dangerously-skip-permissions: the harness's stdout is a
+		// pipe, and a piped run withholds it (forgectl#899)
 		"--ide", "--exclude-dynamic-system-prompt-sections",
 		"--model", "sonnet",
 		"--effort", "high",
@@ -1427,8 +1612,11 @@ func TestIntegration_BareLaunch_NoPromptAndBanners(t *testing.T) {
 			t.Errorf("bare launch must start a NEW session; %q is `forgectl resume`'s job: %v", forbidden, got)
 		}
 	}
-	if !strings.Contains(stderr, "--allow-dangerously-skip-permissions") {
+	if !strings.Contains(stderr, "claude --permission-mode plan") {
 		t.Errorf("bare launch must banner its posture to stderr, got %q", stderr)
+	}
+	if strings.Contains(stderr, "--allow-dangerously-skip-permissions") {
+		t.Errorf("a piped bare launch bannered a flag it withheld from argv: %q", stderr)
 	}
 	if !strings.Contains(stderr, "--effort high") {
 		t.Errorf("the banner is the cheapest way to eyeball the resolved effort, got %q", stderr)

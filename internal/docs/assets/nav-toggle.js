@@ -1,5 +1,8 @@
 /* nav-toggle.js — sidebar drawer/collapse toggle. CSP: served asset, no inline.
-   Contract: button#nav-toggle sets data-nav on the shell root (#shell):
+   Contract: the [data-fc="nav-toggle"] button sets data-nav on the shell root
+   ([data-fc="shell"]). Chrome is found by data-fc, never by id: the sanitizer
+   strips data-* from documents, so a doc cannot forge one, but a heading slug
+   or raw-HTML id can collide with any id (forgectl#617):
    wide  (>900px): auto <-> closed  (collapses the nav column)
    narrow(≤900px): auto <-> open    (off-canvas drawer)
    Scrim click and any viewport crossing reset to auto, so a choice made in
@@ -9,10 +12,10 @@
    it reaches the page. (Wide + closed is display:none, which needs nothing.) */
 (function () {
   'use strict';
-  var shell = document.getElementById('shell');
-  var btn = document.getElementById('nav-toggle');
-  var scrim = document.getElementById('drawer-scrim');
-  var nav = document.getElementById('docs-nav');
+  var shell = document.querySelector('[data-fc="shell"]');
+  var btn = document.querySelector('[data-fc="nav-toggle"]');
+  var scrim = document.querySelector('[data-fc="drawer-scrim"]');
+  var nav = document.querySelector('[data-fc="docs-nav"]');
   if (!shell || !btn) return;
   var mq = window.matchMedia('(max-width: 900px)');
   // The system convention (artificer.css): an expand/collapse trigger keeps

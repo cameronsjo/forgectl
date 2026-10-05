@@ -60,10 +60,11 @@ func newLaunchStatsCmd() *cobra.Command {
 			if aggregate.SkippedRows > 0 {
 				// The complete report is already on stdout; this is the only
 				// diagnostic, rendered once by the root error handler. The
-				// command deliberately prints no warning of its own, so a
-				// caller sees exactly one JSON object and one message.
-				return WithExitCode(fmt.Errorf(
-					"usage statistics skipped %d unreadable or unsupported row(s)", aggregate.SkippedRows), 1)
+				// command deliberately prints no warning of its own. Under
+				// --json the exit is silent instead: skipped_rows on stdout
+				// already carries it (forgectl#862).
+				return jsonVerdict(WithExitCode(fmt.Errorf(
+					"usage statistics skipped %d unreadable or unsupported row(s)", aggregate.SkippedRows), 1), asJSON)
 			}
 			return nil
 		},
@@ -98,10 +99,10 @@ func writeUsageHumanReport(out io.Writer, aggregate launch.UsageAggregateV1) err
 		counts map[string]int
 		render func(string) string
 	}{
-		{"harness", aggregate.Counts.Harness, termsafe.SafeLine},
-		{"model", aggregate.Counts.Model, func(key string) string { return termsafe.SafeLine(launch.UsageModelLabel(key)) }},
-		{"session", aggregate.Counts.SessionMode, termsafe.SafeLine},
-		{"posture", aggregate.Counts.Posture, termsafe.SafeLine},
+		{"harness", aggregate.Counts.Harness, safeLabel},
+		{"model", aggregate.Counts.Model, func(key string) string { return safeLabel(launch.UsageModelLabel(key)) }},
+		{"session", aggregate.Counts.SessionMode, safeLabel},
+		{"posture", aggregate.Counts.Posture, safeLabel},
 	} {
 		if len(section.counts) == 0 {
 			continue
@@ -118,5 +119,5 @@ func orNone(value *string) string {
 	if value == nil {
 		return "—"
 	}
-	return termsafe.SafeLine(*value)
+	return safeLabel(*value)
 }

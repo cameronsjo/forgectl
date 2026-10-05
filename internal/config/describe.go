@@ -2,9 +2,12 @@ package config
 
 import (
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/cameronsjo/forgectl/internal/tomlerr"
 )
 
 // Report carries the provenance of one config-file read: where the file was,
@@ -32,10 +35,21 @@ type Report struct {
 	PathErr error
 	// Found reports whether a file exists at Path.
 	Found bool
-	// DecodeErr is the parse error from a file that exists but is malformed.
+	// DecodeErr is the parse error from a file that exists but is malformed,
+	// or the worded read error from one that exists but cannot be read.
 	// The Config returned alongside holds whatever decoded before the error —
 	// the same partial value Load returns after logging its warning.
 	DecodeErr error
+	// InvalidErr is a value the loader refuses in a file that parsed in full:
+	// a [tasks] allowed_hosts entry that is not a plain hostname. It is not a
+	// DecodeErr, because nothing failed to decode: every key in the file was
+	// read, and calling that a parse failure sends the operator looking for a
+	// syntax error that is not there. Commands refuse the file all the same.
+	InvalidErr error
+	// Refused lists the dotted keys InvalidErr is about. The Config returned
+	// alongside still holds what the file says for them, so the operator can
+	// see the entry to fix; the loader itself took none of it.
+	Refused []string
 	// Unrecognized lists dotted keys present in the file that bound to no
 	// struct field: a misspelled key, or a key under the wrong section. It is
 	// deliberately empty when DecodeErr is set — a decode aborts partway, so
@@ -55,6 +69,13 @@ func (r Report) IsSet(dotted string) bool {
 		return false
 	}
 	return r.meta.IsDefined(strings.Split(dotted, ".")...)
+}
+
+// IsRefused reports whether a dotted key holds a value the loader refused
+// (see Refused). A refused key is set in the file and not in effect, which
+// neither "set" nor "default" describes.
+func (r Report) IsRefused(dotted string) bool {
+	return slices.Contains(r.Refused, dotted)
 }
 
 // Describe reads the config file the same way Load does, but returns the
@@ -77,21 +98,35 @@ func Describe() (Config, Report) {
 func describeFile(path string) (Config, Report) {
 	rep := Report{Path: path}
 	var cfg Config
-	meta, err := toml.DecodeFile(path, &cfg)
-	switch {
-	case err == nil:
+	// ReadPath, not toml.DecodeFile: `forgectl config` is a recovery verb the
+	// parse gate lets through, so it must report a file it cannot read rather
+	// than block on a FIFO or render the raw read error (forgectl#684).
+	data, err := ReadPath(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Absent file is the normal defaults-only posture, not an error.
+			return cfg, rep
+		}
 		rep.Found = true
-	case os.IsNotExist(err):
-		// Absent file is the normal defaults-only posture, not an error.
+		rep.DecodeErr = describeReadError(path, err)
 		return cfg, rep
-	default:
-		rep.Found = true
-		rep.DecodeErr = err
+	}
+	meta, err := toml.Decode(string(data), &cfg)
+	rep.Found = true
+	if err != nil {
+		rep.DecodeErr = tomlerr.Scrub(err)
 	}
 	rep.meta = meta
 	if rep.DecodeErr == nil {
 		for _, k := range meta.Undecoded() {
 			rep.Unrecognized = append(rep.Unrecognized, k.String())
+		}
+		// The loader refuses this file, so the report says why. The decode
+		// itself finished, which is why the unrecognized keys above stand and
+		// why this is not recorded as a decode error.
+		if err := cfg.Tasks.Validate(); err != nil {
+			rep.InvalidErr = err
+			rep.Refused = []string{tasksAllowedHostsKey}
 		}
 	}
 	return cfg, rep

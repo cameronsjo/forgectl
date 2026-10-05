@@ -44,10 +44,11 @@ func TestBuildInvocation_HarnessOverrideKeepsRepoPosture(t *testing.T) {
 
 	t.Run("claude repo to codex", func(t *testing.T) {
 		built, err := BuildInvocation(InvocationRequest{
-			Config:  strictRepoConfig(target, "claude", "sonnet"),
-			CWD:     target,
-			Harness: "codex",
-			Resolve: fixedResolver(bin),
+			StdoutTerminal: true,
+			Config:         strictRepoConfig(target, "claude", "sonnet"),
+			CWD:            target,
+			Harness:        "codex",
+			Resolve:        fixedResolver(bin),
 		})
 		if err != nil {
 			t.Fatalf("BuildInvocation: %v", err)
@@ -69,10 +70,11 @@ func TestBuildInvocation_HarnessOverrideKeepsRepoPosture(t *testing.T) {
 
 	t.Run("codex repo to claude", func(t *testing.T) {
 		built, err := BuildInvocation(InvocationRequest{
-			Config:  strictRepoConfig(target, "codex", ""),
-			CWD:     target,
-			Harness: "claude",
-			Resolve: fixedResolver(bin),
+			StdoutTerminal: true,
+			Config:         strictRepoConfig(target, "codex", ""),
+			CWD:            target,
+			Harness:        "claude",
+			Resolve:        fixedResolver(bin),
 		})
 		if err != nil {
 			t.Fatalf("BuildInvocation: %v", err)
@@ -95,10 +97,11 @@ func TestBuildInvocation_HarnessOverrideKeepsRepoPosture(t *testing.T) {
 func TestBuildInvocation_HarnessOverrideSameHarnessKeepsModel(t *testing.T) {
 	target := projectDir(t)
 	built, err := BuildInvocation(InvocationRequest{
-		Config:  strictRepoConfig(target, "claude", "sonnet"),
-		CWD:     target,
-		Harness: "claude",
-		Resolve: fixedResolver(ResolvedBinary{Path: "/stub/claude", Source: BinaryPATH}),
+		StdoutTerminal: true,
+		Config:         strictRepoConfig(target, "claude", "sonnet"),
+		CWD:            target,
+		Harness:        "claude",
+		Resolve:        fixedResolver(ResolvedBinary{Path: "/stub/claude", Source: BinaryPATH}),
 	})
 	if err != nil {
 		t.Fatalf("BuildInvocation: %v", err)
@@ -116,9 +119,10 @@ func TestBuildInvocation_HarnessOverrideRefusesPi(t *testing.T) {
 	for _, harness := range []string{"pi", "bash", "Claude"} {
 		resolved := false
 		_, err := BuildInvocation(InvocationRequest{
-			Config:  strictRepoConfig(target, "claude", ""),
-			CWD:     target,
-			Harness: harness,
+			StdoutTerminal: true,
+			Config:         strictRepoConfig(target, "claude", ""),
+			CWD:            target,
+			Harness:        harness,
 			Resolve: func(string, config.LaunchDefaults) (ResolvedBinary, error) {
 				resolved = true
 				return ResolvedBinary{Path: "/stub/x", Source: BinaryPATH}, nil
@@ -152,8 +156,9 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 
 	t.Run("default config drops the danger flag", func(t *testing.T) {
 		built, err := BuildInvocation(InvocationRequest{
-			Config: config.LaunchConfig{Defaults: config.LaunchDefaults{AllowDanger: &allow}},
-			CWD:    target, Worker: true, Resolve: bin,
+			StdoutTerminal: true,
+			Config:         config.LaunchConfig{Defaults: config.LaunchDefaults{AllowDanger: &allow}},
+			CWD:            target, Worker: true, Resolve: bin,
 		})
 		if err != nil {
 			t.Fatalf("BuildInvocation: %v", err)
@@ -165,8 +170,9 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 
 	t.Run("repo add_dir is dropped", func(t *testing.T) {
 		built, err := BuildInvocation(InvocationRequest{
-			Config: config.LaunchConfig{Defaults: config.LaunchDefaults{AddDir: []string{"/elsewhere"}}},
-			CWD:    target, Worker: true, Resolve: bin,
+			StdoutTerminal: true,
+			Config:         config.LaunchConfig{Defaults: config.LaunchDefaults{AddDir: []string{"/elsewhere"}}},
+			CWD:            target, Worker: true, Resolve: bin,
 		})
 		if err != nil {
 			t.Fatalf("BuildInvocation: %v", err)
@@ -186,7 +192,7 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 		"codex never asks":         {Defaults: config.LaunchDefaults{Harness: "codex", Sandbox: "workspace-write", ApprovalPolicy: "never"}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := BuildInvocation(InvocationRequest{Config: lc, CWD: target, Worker: true, Resolve: bin})
+			_, err := BuildInvocation(InvocationRequest{Config: lc, CWD: target, Worker: true, Resolve: bin, StdoutTerminal: true})
 			if !errors.Is(err, ErrWorkerPosture) {
 				t.Fatalf("err = %v, want ErrWorkerPosture", err)
 			}
@@ -195,8 +201,9 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 
 	t.Run("non-worker launch is unchanged", func(t *testing.T) {
 		built, err := BuildInvocation(InvocationRequest{
-			Config: config.LaunchConfig{Defaults: config.LaunchDefaults{AllowDanger: &allow}},
-			CWD:    target, Resolve: bin,
+			StdoutTerminal: true,
+			Config:         config.LaunchConfig{Defaults: config.LaunchDefaults{AllowDanger: &allow}},
+			CWD:            target, Resolve: bin,
 		})
 		if err != nil {
 			t.Fatalf("BuildInvocation: %v", err)

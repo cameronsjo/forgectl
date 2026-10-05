@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # forgectl `pr local` — offline clean-room review (Phase 2)
 
 ## Context

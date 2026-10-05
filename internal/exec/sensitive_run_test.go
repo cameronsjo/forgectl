@@ -9,10 +9,15 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/exec/internal/sealed"
+	"github.com/cameronsjo/forgectl/internal/exec/internal/validated"
 )
 
 // helperModeEnv turns this test binary into the child process the runner
@@ -22,6 +27,15 @@ import (
 // for real.
 const helperModeEnv = "FORGECTL_SENSITIVE_HELPER_MODE"
 
+// helperPidDirEnv names a directory where every helper process, descendants
+// included, records its pid as an empty file named for it, and (on unix)
+// holds an exclusive flock on that file for its whole life. helperRunner's
+// cleanup kills every helper still holding its lock, so a helper that sleeps
+// (sleep:60s, spawn:30s's grandchild, partialmark) never outlives its test,
+// whether the test passed or its hang bound fired, and a pid the OS has since
+// reused for an unrelated process is never signalled (#1009).
+const helperPidDirEnv = "FORGECTL_SENSITIVE_HELPER_PIDDIR"
+
 func TestMain(m *testing.M) {
 	if mode := os.Getenv(helperModeEnv); mode != "" {
 		os.Exit(helperMain(mode))
@@ -30,6 +44,9 @@ func TestMain(m *testing.M) {
 }
 
 func helperMain(mode string) int {
+	if dir := os.Getenv(helperPidDirEnv); dir != "" {
+		recordHelperPid(filepath.Clean(dir))
+	}
 	verb, arg, _ := strings.Cut(mode, ":")
 	switch verb {
 	case "ok":
@@ -76,6 +93,18 @@ func helperMain(mode string) int {
 		time.Sleep(d)
 		_, _ = fmt.Fprint(os.Stdout, "-REST")
 		return 0
+	case "partialmark":
+		// Write a prefix, then leave durable evidence that it was written,
+		// then stall until killed. The marker lets a test kill the child
+		// once the bytes are in the pipe, without the parent reading them.
+		_, _ = fmt.Fprint(os.Stdout, "PARTIAL")
+		f, err := os.Create(filepath.Clean(arg)) //nolint:gosec // G703: a test fixture path the test itself passes
+		if err != nil {
+			return 95
+		}
+		_ = f.Close()
+		time.Sleep(60 * time.Second)
+		return 0
 	case "selfkill":
 		// Write, then die to a signal this runner did not send — the OOM
 		// killer, a supervisor, or a fault in the CLI itself all look like
@@ -98,6 +127,9 @@ func helperMain(mode string) int {
 			return 95
 		}
 		_ = f.Close()
+		return 0
+	case "argv":
+		_, _ = fmt.Fprint(os.Stdout, strings.Join(os.Args, "\x00"))
 		return 0
 	case "env":
 		for _, key := range strings.Split(arg, ",") {
@@ -155,9 +187,35 @@ func helperRunner(t *testing.T, mode string, retire time.Duration, extra ...stri
 	if err != nil {
 		t.Fatalf("os.Executable: %v", err)
 	}
-	env := append(os.Environ(), helperModeEnv+"="+mode)
+	pidDir := t.TempDir()
+	t.Cleanup(func() { killHelpers(pidDir) })
+	env := append(os.Environ(), helperModeEnv+"="+mode, helperPidDirEnv+"="+pidDir)
 	env = append(env, extra...)
 	return &OSSensitiveRunner{env: env, retireBound: retire}, self
+}
+
+// killHelpers kills every helper that recorded its pid in dir and is still
+// alive. A pid file whose lock nobody holds belongs to a helper that already
+// exited, and its pid may since name an unrelated process, so it is skipped
+// (helperLockHeld). A helper that exits between the check and the kill is not
+// an error: Kill then fails and is ignored.
+func killHelpers(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		if !helperLockHeld(filepath.Join(dir, e.Name())) {
+			continue
+		}
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = p.Kill()
+		}
+	}
 }
 
 func helperCommand(kind CommandKind, path string, caps int64, env ...EnvMutation) SensitiveCommand {
@@ -210,13 +268,20 @@ func TestRunSensitive_ClassifiesNonzeroExitAndKeepsStderr(t *testing.T) {
 	}
 }
 
+// TestRunSensitive_StdoutOverflowKillsAndMarksIncomplete: the overflow kills
+// the producer rather than draining it. The kill shows in the exit status
+// (-1, ended by a signal), not in a wall-clock bound, which host load alone
+// could fail (forgectl#919); the call only has to return inside a generous
+// hang bound.
+//
+// Mutation: drop kill() from both overflow arms (RunSensitive's and
+// awaitOutcome's), and the flood blocks on a pipe nobody reads, so the call
+// does not return within sensitiveHangBound.
 func TestRunSensitive_StdoutOverflowKillsAndMarksIncomplete(t *testing.T) {
 	const limit = 8192
 	runner, self := helperRunner(t, "flood:400000", defaultRetireBound)
 
-	start := time.Now()
-	res, err := runner.RunSensitive(context.Background(), helperCommand(KindTmuxSnapshot, self, limit))
-	elapsed := time.Since(start)
+	res, _, err := runSensitiveWithin(context.Background(), t, runner, helperCommand(KindTmuxSnapshot, self, limit))
 
 	if !errors.Is(err, ErrOutputLimit) {
 		t.Fatalf("err = %v, want ErrOutputLimit", err)
@@ -230,8 +295,42 @@ func TestRunSensitive_StdoutOverflowKillsAndMarksIncomplete(t *testing.T) {
 	if _, complete := res.Stdout.CopyBytesForParse(); complete {
 		t.Error("overflow bytes were offered to a parser as a complete schema")
 	}
-	if elapsed > 3*time.Second {
-		t.Errorf("overflow took %v; the runner should kill rather than drain", elapsed)
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1: the runner should kill the producer rather than drain it", res.ExitCode)
+	}
+}
+
+// sensitiveHangBound is how long a test waits for RunSensitive before calling
+// it hung. It is a hang bound, not a promptness check (forgectl#919): it sits
+// far above any run that works, so host load cannot fail it, and below the
+// 30 s or more that a helper nobody killed or retired runs for, so a missing
+// kill or retirement still fails it. Promptness is shown by what the result
+// says happened instead: an exit status of -1 for a kill, an incomplete
+// stream for a retirement.
+const sensitiveHangBound = 20 * time.Second
+
+// runSensitiveWithin runs sc and fails t if the call has not returned within
+// sensitiveHangBound. It also returns how long the call took, for a test
+// whose subject is the order of two bounds rather than promptness.
+func runSensitiveWithin(ctx context.Context, t *testing.T, runner *OSSensitiveRunner, sc SensitiveCommand) (SensitiveResult, time.Duration, error) {
+	t.Helper()
+	type outcome struct {
+		res     SensitiveResult
+		err     error
+		elapsed time.Duration
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		start := time.Now()
+		res, err := runner.RunSensitive(ctx, sc)
+		done <- outcome{res, err, time.Since(start)}
+	}()
+	select {
+	case o := <-done:
+		return o.res, o.elapsed, o.err
+	case <-time.After(sensitiveHangBound):
+		t.Fatalf("RunSensitive did not return within %v", sensitiveHangBound)
+		return SensitiveResult{}, 0, nil
 	}
 }
 
@@ -338,14 +437,18 @@ func TestRunSensitive_ReadsStreamsConcurrently(t *testing.T) {
 	}
 }
 
+// TestRunSensitive_TimeoutKillsAndClassifies: the deadline kills the child.
+// The kill shows in the exit status (-1), and the call returns inside
+// sensitiveHangBound, where the unkilled helper would sleep 60 s.
+//
+// Mutation: drop kill() from awaitOutcome's ctx.Done arm, and the call waits
+// on the 60 s sleep past sensitiveHangBound.
 func TestRunSensitive_TimeoutKillsAndClassifies(t *testing.T) {
 	runner, self := helperRunner(t, "sleep:60s", defaultRetireBound)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	start := time.Now()
-	_, err := runner.RunSensitive(ctx, helperCommand(KindCmuxCreate, self, 4096))
-	elapsed := time.Since(start)
+	res, _, err := runSensitiveWithin(ctx, t, runner, helperCommand(KindCmuxCreate, self, 4096))
 
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("err = %v, want ErrTimeout", err)
@@ -353,11 +456,16 @@ func TestRunSensitive_TimeoutKillsAndClassifies(t *testing.T) {
 	if errors.Is(err, ErrCanceled) {
 		t.Error("a deadline was reported as a cancellation; the classes must stay distinct")
 	}
-	if elapsed > 3*time.Second {
-		t.Errorf("timeout returned after %v; the process was not killed and reaped promptly", elapsed)
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1: the deadline did not kill the process", res.ExitCode)
 	}
 }
 
+// TestRunSensitive_CancellationKillsAndClassifies: the cancellation kills
+// the child, shown as TestRunSensitive_TimeoutKillsAndClassifies shows it.
+//
+// Mutation: drop kill() from awaitOutcome's ctx.Done arm, and the call waits
+// on the 60 s sleep past sensitiveHangBound.
 func TestRunSensitive_CancellationKillsAndClassifies(t *testing.T) {
 	runner, self := helperRunner(t, "sleep:60s", defaultRetireBound)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -366,9 +474,7 @@ func TestRunSensitive_CancellationKillsAndClassifies(t *testing.T) {
 		cancel()
 	}()
 
-	start := time.Now()
-	_, err := runner.RunSensitive(ctx, helperCommand(KindCmuxCleanup, self, 4096))
-	elapsed := time.Since(start)
+	res, _, err := runSensitiveWithin(ctx, t, runner, helperCommand(KindCmuxCleanup, self, 4096))
 
 	if !errors.Is(err, ErrCanceled) {
 		t.Fatalf("err = %v, want ErrCanceled", err)
@@ -376,8 +482,8 @@ func TestRunSensitive_CancellationKillsAndClassifies(t *testing.T) {
 	if errors.Is(err, ErrTimeout) {
 		t.Error("a cancellation was reported as a timeout; the classes must stay distinct")
 	}
-	if elapsed > 3*time.Second {
-		t.Errorf("cancellation returned after %v", elapsed)
+	if res.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1: the cancellation did not kill the process", res.ExitCode)
 	}
 }
 
@@ -385,13 +491,18 @@ func TestRunSensitive_CancellationKillsAndClassifies(t *testing.T) {
 // separately tested wait bound. The immediate CLI exits at once; a descendant
 // it spawned keeps both pipe write ends open. Without the runner retiring the
 // read ends itself, this call would block for the descendant's whole lifetime.
+// That the runner retired the pipe shows in the incomplete stream, not in a
+// wall-clock bound (forgectl#919): a stream the descendant let go of on its
+// own would end at io.EOF, complete. The call only has to return inside
+// sensitiveHangBound, below the descendant's 30 s.
+//
+// Mutation: in retire, never fire the timer (wait on the readers alone), and
+// the call does not return within sensitiveHangBound.
 func TestRunSensitive_ReturnsWithinBoundWhenDescendantHoldsThePipe(t *testing.T) {
 	const retire = 300 * time.Millisecond
 	runner, self := helperRunner(t, "spawn:30s", retire)
 
-	start := time.Now()
-	res, err := runner.RunSensitive(context.Background(), helperCommand(KindTmuxCreate, self, 4096))
-	elapsed := time.Since(start)
+	res, elapsed, err := runSensitiveWithin(context.Background(), t, runner, helperCommand(KindTmuxCreate, self, 4096))
 
 	// The immediate CLI exited 0, but a descendant held the pipe past the
 	// bound, so the stream is a prefix. That is a successful command, not a
@@ -409,9 +520,6 @@ func TestRunSensitive_ReturnsWithinBoundWhenDescendantHoldsThePipe(t *testing.T)
 	}
 	if res.Stdout.Complete() {
 		t.Error("a force-retired stream reported itself complete")
-	}
-	if elapsed > 3*time.Second {
-		t.Fatalf("returned after %v; the descendant's inherited pipe was never retired", elapsed)
 	}
 	if elapsed < retire {
 		t.Errorf("returned after %v, before the %v retirement bound; the bound is not being applied", elapsed, retire)
@@ -433,26 +541,39 @@ func TestRunSensitive_ReturnsWithinBoundWhenDescendantHoldsThePipe(t *testing.T)
 // the bytes has to be told, because the seam's contract sends them to the
 // completeness flag rather than to the error.
 func TestRunSensitive_KilledProducerLeavesAnIncompletePrefix(t *testing.T) {
-	cases := map[string]func() (context.Context, context.CancelFunc){
-		"deadline": func() (context.Context, context.CancelFunc) {
-			return context.WithTimeout(context.Background(), 200*time.Millisecond)
+	// Each context fires once the PARENT has read the child's prefix, not
+	// after a fixed delay and not when the child reports writing it. A fixed
+	// 200 ms raced the child's startup (#661). A marker file the child wrote
+	// after its prefix still raced, one step later: the kill force-closes the
+	// read ends at once, so a prefix still sitting in the pipe, not yet taken
+	// by a reader the scheduler had not run, was dropped and stdout came back
+	// empty under load (#787). The tap on the runner's stdout reader closes
+	// fired only after those bytes are in the reader's hands. A context whose
+	// deadline is set when it is made cannot wait for an event, so the
+	// deadline case uses a context that reports DeadlineExceeded once fired,
+	// which is all the runner reads of it.
+	cases := map[string]func(fired <-chan struct{}) context.Context{
+		"deadline": func(fired <-chan struct{}) context.Context {
+			return firedContext{Context: context.Background(), done: fired, err: context.DeadlineExceeded}
 		},
-		"cancellation": func() (context.Context, context.CancelFunc) {
+		"cancellation": func(fired <-chan struct{}) context.Context {
 			ctx, cancel := context.WithCancel(context.Background())
 			go func() {
-				time.Sleep(200 * time.Millisecond)
+				<-fired
 				cancel()
 			}()
-			return ctx, func() {}
+			return ctx
 		},
 	}
 
 	for name, mkCtx := range cases {
 		runner, self := helperRunner(t, "partial:60s", defaultRetireBound)
-		ctx, cancel := mkCtx()
+		fired := make(chan struct{})
+		runner.stdoutTap = func(r io.Reader) io.Reader {
+			return &firstBytesTap{r: r, want: len("PARTIAL"), fired: fired}
+		}
 
-		res, err := runner.RunSensitive(ctx, helperCommand(KindTmuxCreate, self, 4096))
-		cancel()
+		res, err := runner.RunSensitive(mkCtx(fired), helperCommand(KindTmuxCreate, self, 4096))
 
 		if err == nil {
 			t.Errorf("%s: expected the kill to be reported", name)
@@ -486,6 +607,46 @@ func TestRunSensitive_KilledProducerLeavesAnIncompletePrefix(t *testing.T) {
 	if string(data) != "PARTIAL-REST" {
 		t.Errorf("control stdout = %q, want the whole stream", data)
 	}
+}
+
+// firedContext is done once fired closes, and from then on reports err. It
+// lets a test end a run with context.DeadlineExceeded at a moment it chooses.
+type firedContext struct {
+	context.Context
+	done <-chan struct{}
+	err  error
+}
+
+func (c firedContext) Done() <-chan struct{} { return c.done }
+
+func (c firedContext) Err() error {
+	select {
+	case <-c.done:
+		return c.err
+	default:
+		return nil
+	}
+}
+
+// firstBytesTap passes reads through and closes fired once want bytes have
+// been returned to the reader, so a test can kill the child at the moment its
+// prefix is in the parent's hands rather than merely in the pipe. Only the one
+// reader goroutine calls Read, so it needs no lock.
+type firstBytesTap struct {
+	r     io.Reader
+	want  int
+	got   int
+	fired chan<- struct{}
+}
+
+func (t *firstBytesTap) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if t.got < t.want {
+		if t.got += n; t.got >= t.want {
+			close(t.fired)
+		}
+	}
+	return n, err
 }
 
 // diedUnderSignal must answer from the process state, not from the exit code.
@@ -727,7 +888,14 @@ func TestReadCapped_MarksANonEOFStopAsIncomplete(t *testing.T) {
 
 // TestBuildEnv_RemovesEveryOccurrenceAndAppendsOnce pins the pure mutation
 // logic, so a failure in the end-to-end test above is attributable to either
-// the policy or the process plumbing rather than to both at once.
+// the policy or the process plumbing rather than to both at once. It pins
+// both halves buildEnv hands sealed.Start in their exact order: the
+// surviving inherited entries byte-exact, and each replacement in mutation
+// order, its value compared sealed. sealed's own command test pins that the
+// replacements land after the inherited entries.
+//
+// Mutations that turn it red: drop only the first occurrence of a mutated
+// key; collect replacements in reverse.
 func TestBuildEnv_RemovesEveryOccurrenceAndAppendsOnce(t *testing.T) {
 	runner := &OSSensitiveRunner{env: []string{
 		"PATH=/usr/bin",
@@ -738,28 +906,111 @@ func TestBuildEnv_RemovesEveryOccurrenceAndAppendsOnce(t *testing.T) {
 		"BAREKEY",
 	}}
 
-	got := runner.buildEnv([]EnvMutation{ReplaceCmuxSocketPath("/resolved"), UnsetTmux()})
-
-	counts := map[string]int{}
-	for _, entry := range got {
-		counts[envKeyOf(entry)]++
+	var muts []validated.Env
+	for _, m := range []EnvMutation{ReplaceCmuxSocketPath("/resolved"), UnsetTmux(), SetCmuxQuiet()} {
+		muts = append(muts, m.toValidated())
 	}
-	if counts["CMUX_SOCKET_PATH"] != 1 {
-		t.Errorf("CMUX_SOCKET_PATH appears %d times, want exactly 1: %q", counts["CMUX_SOCKET_PATH"], got)
+	env, set := runner.buildEnv(muts)
+	if want := []string{"PATH=/usr/bin", "CMUX_AUTH_TOKEN=untouched", "BAREKEY"}; !slices.Equal(env, want) {
+		t.Errorf("inherited env = %q, want %q", env, want)
 	}
-	if counts["TMUX"] != 0 {
-		t.Errorf("TMUX survived the unset: %q", got)
+	wantSet := []sealed.EnvVar{
+		{Key: "CMUX_SOCKET_PATH", Value: sealed.New("/resolved")},
+		{Key: "CMUX_QUIET", Value: sealed.New("1")},
 	}
-	joined := strings.Join(got, "\n")
-	for _, keep := range []string{"PATH=/usr/bin", "CMUX_AUTH_TOKEN=untouched", "BAREKEY", "CMUX_SOCKET_PATH=/resolved"} {
-		if !strings.Contains(joined, keep) {
-			t.Errorf("missing %q in %q", keep, got)
+	if len(set) != len(wantSet) {
+		t.Fatalf("buildEnv returned %d replacements, want %d", len(set), len(wantSet))
+	}
+	for i := range wantSet {
+		if set[i].Key != wantSet[i].Key || !set[i].Value.Equal(wantSet[i].Value) {
+			t.Errorf("replacement %d has key %q, want %q (or its sealed value differs)", i, set[i].Key, wantSet[i].Key)
 		}
 	}
 
 	// The captured environment must not be mutated in place — a second call
 	// with no mutations still sees the original entries.
-	if plain := runner.buildEnv(nil); len(plain) != 6 {
+	if plain, none := runner.buildEnv(nil); len(plain) != 6 || none != nil {
 		t.Errorf("captured environment was mutated: %q", plain)
 	}
+	// An empty captured environment still yields a non-nil env, or the child
+	// would inherit the live process environment.
+	if empty, _ := (&OSSensitiveRunner{}).buildEnv(nil); empty == nil {
+		t.Error("an empty captured environment built a nil env; the child would inherit the live environment")
+	}
+}
+
+// TestRunSensitive_KillDrainsPrefixStillInThePipe pins forgectl#794: a kill
+// must not drop bytes the child had already written but the parent's reader
+// had not yet taken. The child writes its prefix and a marker file, then
+// stalls; the test cancels once the marker exists, and the tap holds the
+// reader back until well after the kill and reap, so the prefix is still in
+// the pipe when retirement begins. The drain window is widened to a minute,
+// past sensitiveHangBound, so the reader's delay sits far inside it.
+//
+// The drain must end at the reader's io.EOF, not at its bound. With the
+// bound a minute long, a run that waited it out does not return within
+// sensitiveHangBound, so that needs no tight wall-clock bound (forgectl#919);
+// nor may retire log that the window expired.
+//
+// Mutations that turn it red: make retire force-close at once when stopped
+// (closeAll before collecting; stdout comes back empty), or set drainBound's
+// result to a nanosecond; make retire sleep out the bound when stopped, or
+// stop collecting stdout when stopped until the bound (neither returns
+// within sensitiveHangBound).
+func TestRunSensitive_KillDrainsPrefixStillInThePipe(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "written")
+	runner, self := helperRunner(t, "partialmark:"+marker, 2*time.Minute)
+	runner.killDrainBound = time.Minute
+	logs := captureLogs(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	killed := make(chan struct{})
+	runner.stdoutTap = func(r io.Reader) io.Reader {
+		return &gatedReader{r: r, gate: killed}
+	}
+	go func() {
+		for {
+			if _, err := os.Stat(marker); err == nil {
+				cancel()
+				// Past the kill and reap, which is when the old code closed
+				// the read end.
+				time.Sleep(200 * time.Millisecond)
+				close(killed)
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	res, _, err := runSensitiveWithin(ctx, t, runner, helperCommand(KindTmuxCreate, self, 4096))
+	if err == nil {
+		t.Fatal("expected the cancellation to be reported")
+	}
+	data, complete := res.Stdout.CopyBytesForParse()
+	if string(data) != "PARTIAL" {
+		t.Errorf("stdout = %q, want the prefix the child wrote before the kill", data)
+	}
+	if complete {
+		t.Error("a killed producer's prefix reported itself complete")
+	}
+	if strings.Contains(logs.String(), "drain window expired") {
+		t.Errorf("the post-kill drain ran out its bound; it should end at the reader's EOF:\n%s", logs)
+	}
+}
+
+// gatedReader blocks its first Read until gate closes, then passes reads
+// through. Only the one reader goroutine calls Read.
+type gatedReader struct {
+	r      io.Reader
+	gate   <-chan struct{}
+	opened bool
+}
+
+func (g *gatedReader) Read(p []byte) (int, error) {
+	if !g.opened {
+		<-g.gate
+		g.opened = true
+	}
+	return g.r.Read(p)
 }
