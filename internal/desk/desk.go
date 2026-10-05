@@ -145,6 +145,13 @@ var (
 	stemRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 )
 
+var sha256Re = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// ValidSHA256 reports whether s is a full sha256 as the desk writes it: 64
+// lowercase hex characters. A meta file is untrusted input; a hash of any
+// other shape is never shown or compared.
+func ValidSHA256(s string) bool { return sha256Re.MatchString(s) }
+
 // ValidName reports whether name is a protocol item name: "NN-stem".
 func ValidName(name string) bool {
 	return nameRe.MatchString(name) && !strings.Contains(name, "..")

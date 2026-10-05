@@ -54,6 +54,10 @@ const (
 	// deskWideMin is the narrowest window that gets the three stat tiles;
 	// below it they collapse to one summary line and the bars shrink.
 	deskWideMin = 72
+	// deskShortHash is how many hex characters of an item's sha256 the focus
+	// panel shows, the same short form `desk status` prints. Display only:
+	// hashes are always compared in full.
+	deskShortHash = 12
 	// deskSparkHours is how many hourly buckets a tile's sparkline covers.
 	deskSparkHours = 24
 	// deskTileRows is a tile's height: its border plus three lines.
@@ -209,15 +213,11 @@ func (f deskFrame) render() string {
 	} else {
 		top = []string{cut(f.summary(st), width)}
 	}
-	footer := f.footer
-	if footer == "" {
-		footer = deskHints(st, width)
-	}
-	footer = cut(footer, width)
+	footer := f.footerLines(st, width)
 
 	avail := 0
 	if f.height > 0 {
-		avail = f.height - 1 - len(top) - 1
+		avail = f.height - 1 - len(top) - len(footer)
 	}
 	queueLines := max(len(rows), 1)
 	if f.height > 0 {
@@ -253,15 +253,35 @@ func (f deskFrame) render() string {
 	lines = append(lines, focus...)
 	lines = append(lines, history...)
 	if f.height > 0 {
-		if len(lines) > f.height-1 {
-			lines = lines[:max(f.height-1, 0)]
+		keep := max(f.height-len(footer), 0)
+		if len(lines) > keep {
+			lines = lines[:keep]
 		}
-		for len(lines) < f.height-1 {
+		for len(lines) < keep {
 			lines = append(lines, "")
 		}
 	}
-	lines = append(lines, footer)
+	lines = append(lines, footer...)
 	return strings.Join(lines, "\n")
+}
+
+// footerLines is the footer cut to the width: the key hints, or the prompt
+// or result the model set. A prompt may span lines (a full hash per item);
+// with a known height it keeps at most half the window, and says how many
+// lines it left out.
+func (f deskFrame) footerLines(st theme.Styles, width int) []string {
+	if f.footer == "" {
+		return []string{cut(deskHints(st, width), width)}
+	}
+	lines := strings.Split(f.footer, "\n")
+	if limit := f.height / 2; f.height > 0 && len(lines) > max(limit, 2) {
+		more := len(lines) - (max(limit, 2) - 1)
+		lines = append(lines[:max(limit, 2)-1], st.Muted.Render(fmt.Sprintf("  … %d more lines; forgectl desk status lists every hash", more)))
+	}
+	for i, l := range lines {
+		lines[i] = cut(l, width)
+	}
+	return lines
 }
 
 // waiting counts the items that can run; tty counts the TTY ones among them.
@@ -714,7 +734,13 @@ func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, curso
 	}
 	r := rows[cursor]
 	it := r.item
-	head := st.Selected.Render(itemLabel(it.Name)) + st.Muted.Render(" · "+f.focusState(r))
+	head := st.Selected.Render(itemLabel(it.Name))
+	if desk.ValidSHA256(it.Meta.SHA256) {
+		// The short hash the agent reports and `desk status` prints; the y
+		// and a prompts show it in full.
+		head += st.Muted.Render(" · sha256 ") + st.Fg.Render(it.Meta.SHA256[:deskShortHash])
+	}
+	head += st.Muted.Render(" · " + f.focusState(r))
 	lines := []string{head}
 	if it.What != "" {
 		lines = append(lines, st.Muted.Render("what  ")+st.Fg.Render(deskText(it.What)))
