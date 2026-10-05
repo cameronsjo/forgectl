@@ -142,7 +142,10 @@ func kindOfFile(file string) (name string, kind Kind, ok bool) {
 
 var (
 	nameRe = regexp.MustCompile(`^[0-9]+-[A-Za-z0-9][A-Za-z0-9._-]{0,95}$`)
-	stemRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	// legacyNameRe is the display-only shape of an old done/ log's name:
+	// "37b-cleanup" or "operator-grow", with no NN- number.
+	legacyNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$`)
+	stemRe       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 )
 
 var sha256Re = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -155,6 +158,13 @@ func ValidSHA256(s string) bool { return sha256Re.MatchString(s) }
 // ValidName reports whether name is a protocol item name: "NN-stem".
 func ValidName(name string) bool {
 	return nameRe.MatchString(name) && !strings.Contains(name, "..")
+}
+
+// legacyName reports a done/ log name that is not a protocol name but is
+// safe to show and to prune: letters, digits, '.', '_', '-', no "..".
+// Display only: nothing runs, skips, claims or watches it.
+func legacyName(name string) bool {
+	return !ValidName(name) && legacyNameRe.MatchString(name) && !strings.Contains(name, "..")
 }
 
 // SplitName returns an item name's number and stem: "17-merge" -> 17, "merge".
@@ -336,6 +346,10 @@ type Item struct {
 	Content []byte
 	// Stale is set on a waiting item older than [StaleAfter].
 	Stale bool
+	// Legacy marks a done item whose name is not a protocol name (no NN-
+	// number): an old log kept for history. It is shown and pruned, never
+	// acted on; every action path checks [ValidName] and refuses it.
+	Legacy bool
 	// Refusal says why a refused item cannot run.
 	Refusal string
 	// ExitCode is a done item's rc: from meta, or for a legacy item the log's

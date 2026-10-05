@@ -608,6 +608,75 @@ func TestDeskStatus_EscapeInSHAIsNeverPrinted(t *testing.T) {
 	}
 }
 
+// A legacy done/: 40 protocol logs with an exit, and four old logs whose
+// names have no NN- number. status and the frame show all 44, the four as no
+// exit recorded; the verbs that act on an item refuse the legacy names.
+func TestDeskLegacyDoneNames(t *testing.T) {
+	dir := newDeskDir(t)
+	openTestDesk(t, dir)
+	done := filepath.Join(dir, desk.DirDone)
+	for i := 1; i <= 40; i++ {
+		if err := os.WriteFile(filepath.Join(done, fmt.Sprintf("%02d-job.log", i)), []byte("EXIT=0\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacy := []string{"07b-cleanup", "operator-grow", "nightly-t4-grow", "host.restart_x"}
+	for _, n := range legacy {
+		if err := os.WriteFile(filepath.Join(done, n+".log"), []byte("ran\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out, _, err := deskRun(t, deskDeps(), "status", "--json")
+	wantExit(t, err, 0)
+	var snap deskStatusJSON
+	if err := json.Unmarshal([]byte(out), &snap); err != nil {
+		t.Fatal(err)
+	}
+	legacyRows := 0
+	for _, it := range snap.Done {
+		if it.Legacy {
+			legacyRows++
+			if it.Number != nil || it.ExitCode != nil {
+				t.Errorf("%s: number %v exit %v, want both null", it.Name, it.Number, it.ExitCode)
+			}
+		}
+	}
+	if len(snap.Done) != 44 || legacyRows != 4 {
+		t.Fatalf("status --json: %d done, %d legacy; want 44 and 4", len(snap.Done), legacyRows)
+	}
+
+	stubDeskEnv(t, map[string]string{"DESK_DIR": dir, "COLUMNS": "100", "LINES": "80"})
+	frame, _, err := deskRun(t, deskDeps(), "--frame")
+	wantExit(t, err, 0)
+	rows := 0 // history rows: "? name … no exit recorded"
+	for _, l := range strings.Split(frame, "\n") {
+		if strings.HasPrefix(l, "│ ? ") && strings.Contains(l, "no exit recorded") {
+			rows++
+		}
+	}
+	if rows != 4 {
+		t.Errorf("history shows %d no-exit rows, want 4:\n%s", rows, frame)
+	}
+	for _, n := range []string{"07b-cleanup", "operator-grow"} {
+		if !strings.Contains(frame, n) {
+			t.Errorf("the frame does not show %s whole:\n%s", n, frame)
+		}
+	}
+
+	for _, args := range [][]string{
+		{"watch", "07b-cleanup"},
+		{"skip", "operator-grow", "--reason", "x"},
+		{"status", "07b-cleanup"},
+		{"_supervise", "operator-grow"},
+	} {
+		_, _, err := deskRun(t, deskDeps(), args...)
+		if err == nil {
+			t.Errorf("%v accepted a legacy name", args)
+		}
+	}
+}
+
 func TestDeskSkip(t *testing.T) {
 	dir := newDeskDir(t)
 	d := openTestDesk(t, dir)

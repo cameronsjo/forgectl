@@ -117,11 +117,11 @@ done     12-probe  age=3h  exit=1  took=18s
 skipped  14-merge-1199  sha256=9be04d1c77a2  reason=operator  by=cli  note="superseded by 17"
 ```
 
-A waiting item older than 24 hours is flagged `stale`. A running item whose owner is gone with no `RUN-END`, or a claimed item that recorded no owner within 60 seconds, shows as `lost`. A legacy done item whose log has no `EXIT=` line shows `no-exit-recorded`. A pending item whose meta file's `sha256` is not 64 lowercase hex characters is `refused`, and that value is never printed. Every text field goes through the terminal-safe filter.
+A waiting item older than 24 hours is flagged `stale`. A running item whose owner is gone with no `RUN-END`, or a claimed item that recorded no owner within 60 seconds, shows as `lost`. A legacy done item whose log has no `EXIT=` line shows `no-exit-recorded`. An old `done/` log whose name has no `NN-` number (`07b-cleanup`, `operator-grow`) still shows, marked `legacy`; `prune` deletes it, and no verb acts on it (`watch`, `skip` and `status NAME` refuse the name). A pending item whose meta file's `sha256` is not 64 lowercase hex characters is `refused`, and that value is never printed. Every text field goes through the terminal-safe filter.
 
 With a name, the item in detail as `key=value` lines: `name`, `state`, `kind`, `what`, `why`, `tty`, the full `sha256`, `added`, `started`, `ended`, `exit`, `skipped_at`, `skip_reason`, `skipped_by` and `skip_note`, the `log` and `events` paths, and for a batch a `summary` line and one `step` line per step. `--json` prints `{item, log, events, record, steps, summary}`; `summary` is the run's `summary.json` once a batch has finished, and `null` before.
 
-Each item in the JSON has `name`, `number`, `kind`, `state`, `what`, `why`, `tty`, `sha256`, `added_at`, `started_at`, `ended_at`, `age_seconds`, `duration_seconds`, `stale`, `exit_code`, `skip_reason`, `skip_note`, `skipped_by`, `skipped_at`, `refusal` and `pid`. Times are UTC. `age_seconds` counts from when the item was added (waiting), started (running) or ended (done).
+Each item in the JSON has `name`, `number` (`null` for a legacy name with no number), `legacy`, `kind`, `state`, `what`, `why`, `tty`, `sha256`, `added_at`, `started_at`, `ended_at`, `age_seconds`, `duration_seconds`, `stale`, `exit_code`, `skip_reason`, `skip_note`, `skipped_by`, `skipped_at`, `refusal` and `pid`. Times are UTC. `age_seconds` counts from when the item was added (waiting), started (running) or ended (done).
 
 Like the dashboard, `status` fixes the hash of a hand-dropped item the first time it sees it, and moves a pending item whose bytes changed to `skipped/`.
 
@@ -165,7 +165,7 @@ Exit codes: 0 laid out, or planned with `--dry-run`; 1 a herdr call failed, and 
 
 ### `forgectl desk prune`
 
-Deletes the protocol files (`.sh`, `.manifest`, `.log`, `.events`, `.meta.json`, `.d/`) of items in `done/` and `skipped/` whose newest file is older than `--days` (default 30). It never touches `pending/`, `running/`, unknown files, symlinks, or the desk root. No other command deletes an item's files; the desk itself removes only its own owner locks and temporary files. `--json` prints `{removed, days}`.
+Deletes the protocol files (`.sh`, `.manifest`, `.log`, `.events`, `.meta.json`, `.d/`) of items in `done/` and `skipped/` whose newest file is older than `--days` (default 30), legacy `done/` logs with no `NN-` number included. It never touches `pending/`, `running/`, unknown files, symlinks, or the desk root. No other command deletes an item's files; the desk itself removes only its own owner locks and temporary files. `--json` prints `{removed, days}`.
 
 Exit codes: 0 pruned (perhaps nothing); 1 a delete failed; 2 `--days` below 1.
 

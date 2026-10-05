@@ -242,7 +242,8 @@ func (d *Desk) doneItems(inRunning map[string]bool) ([]Item, error) {
 	var out []Item
 	for _, e := range entries {
 		name, found := strings.CutSuffix(e.Name(), extLog)
-		if !found || !ValidName(name) || inRunning[name] || !e.Type().IsRegular() {
+		legacy := found && legacyName(name)
+		if !found || (!ValidName(name) && !legacy) || inRunning[name] || !e.Type().IsRegular() {
 			continue
 		}
 		kind := KindScript
@@ -250,6 +251,7 @@ func (d *Desk) doneItems(inRunning map[string]bool) ([]Item, error) {
 			kind = KindBatch
 		}
 		it := newItem(name, kind, StateDone)
+		it.Legacy = legacy
 		it.Meta, _, _ = d.readMeta(DirDone, name)
 		if data, err := d.readRegular(path.Join(DirDone, name+kind.Ext()), maxItemBytes); err == nil {
 			it.Headers = ParseHeaders(data)

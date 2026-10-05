@@ -297,7 +297,8 @@ func readPlanTarget(dirFlag, target string) (label string, data []byte, err erro
 // deskItemJSON is one item in `desk status --json`.
 type deskItemJSON struct {
 	Name            string     `json:"name"`
-	Number          int        `json:"number"`
+	Number          *int       `json:"number"` // null for a legacy name with no NN- number
+	Legacy          bool       `json:"legacy"`
 	Kind            string     `json:"kind"`
 	State           string     `json:"state"`
 	What            string     `json:"what"`
@@ -358,10 +359,14 @@ type deskStepJSON struct {
 // both the text and the JSON form.
 func itemView(it desk.Item, now time.Time) deskItemJSON {
 	v := deskItemJSON{
-		Name: it.Name, Number: it.Number, Kind: string(it.Kind), State: string(it.State),
+		Name: it.Name, Kind: string(it.Kind), State: string(it.State), Legacy: it.Legacy,
 		What: it.What, Why: it.Why, TTY: it.TTY, SHA256: it.Meta.SHA256,
 		AddedAt: it.Meta.AddedAt, Stale: it.Stale, ExitCode: it.ExitCode,
 		SkipReason: it.Meta.SkipReason, SkipNote: it.Meta.SkipNote, SkippedBy: it.Meta.SkippedBy, SkippedAt: it.Meta.SkippedAt, Refusal: it.Refusal, PID: it.Meta.PID,
+	}
+	if it.Number >= 0 {
+		n := it.Number
+		v.Number = &n
 	}
 	if !it.Started.IsZero() {
 		t := it.Started.UTC()
@@ -456,6 +461,9 @@ func statusLine(v deskItemJSON) string {
 	}
 	if v.Stale {
 		parts = append(parts, "stale")
+	}
+	if v.Legacy {
+		parts = append(parts, "legacy")
 	}
 	if v.TTY {
 		parts = append(parts, "tty")

@@ -558,7 +558,9 @@ func rowLook(st theme.Styles, k rowKind) (glyph, label string, style func(...str
 // itemLabel is "17 merge-when-green-1201": the number, a space, the stem.
 func itemLabel(name string) string {
 	num, stem, ok := strings.Cut(name, "-")
-	if !ok {
+	if !ok || num == "" || strings.Trim(num, "0123456789") != "" {
+		// A legacy done/ name with no NN- number ("07b-cleanup",
+		// "operator-grow") is shown whole.
 		return deskText(name)
 	}
 	return deskText(num + " " + stem)
