@@ -293,6 +293,10 @@ func (m deskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastSkip = t.skipped
 		}
 		if t.unskipped {
+			// An undone skip is back in pending/ but is not an arrival.
+			if t.err == nil {
+				m.seen[m.lastSkip] = true
+			}
 			m.lastSkip = ""
 		}
 		m.message = m.resultLine(t.text, t.err)
@@ -453,6 +457,8 @@ func (m deskModel) updateKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.confirm != confirmNone {
 		return m.confirmKey(key)
 	}
+	// A result stays until the next key, then the hints come back.
+	m.message = ""
 	switch key {
 	case "q":
 		return m, tea.Quit

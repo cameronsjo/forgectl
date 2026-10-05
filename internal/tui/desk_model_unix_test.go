@@ -214,6 +214,7 @@ func TestDesk_SkipAsksFirstAndUUndoes(t *testing.T) {
 		t.Errorf("footer = %q", ansi.Strip(h.m.footer()))
 	}
 
+	bellsBefore := h.bells
 	h.press("u")
 	if got := h.where("01-alpha"); got != desk.DirPending {
 		t.Fatalf("after u the item is in %s, want pending", got)
@@ -221,6 +222,13 @@ func TestDesk_SkipAsksFirstAndUUndoes(t *testing.T) {
 	h.press("u")
 	if !strings.Contains(ansi.Strip(h.m.footer()), "nothing to undo") {
 		t.Errorf("a second u should have nothing to undo: %q", ansi.Strip(h.m.footer()))
+	}
+	h.press("j")
+	if h.m.footer() != "" {
+		t.Errorf("the next key should clear the result and bring back the hints: %q", ansi.Strip(h.m.footer()))
+	}
+	if h.bells != bellsBefore {
+		t.Errorf("an undone skip rang %d more bells; it is not an arrival", h.bells-bellsBefore)
 	}
 }
 
