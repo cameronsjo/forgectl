@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "Task 9: verification, polish, live check, patch series"
+next: "Task 9: operator hand check of the foreground path, consumer live check, then the patch series"
 branch: feat/desk-dashboard
 pr: "—"
 updated: 2026-10-05
@@ -343,7 +343,10 @@ These are registered in `internal/keymap` and rendered by `bubbles/help`. The fo
 
 **Steps:**
 
-- [x] `git fetch origin`, then `D=$(git rev-parse refs/remotes/origin/feat/desk-core)`. Record `D` in this plan's `## Learnings`.
+- [x] `git fetch origin`, then `D=$(git rev-parse refs/remotes/origin/feat/desk-core)`. Record `D` in this plan's `- **Task 9 checks at `c181b38`:** `gofmt`, `go vet` on four platforms, `golangci-lint`, and the full `go test ./...` (71 packages) pass. `govulncheck` could not reach its database through the network proxy; `go.mod` and `go.sum` are unchanged since `M`, so the series adds no modules. Two pre-existing timing tests (`TestRestartWedgedHerdrAfterStopIsBounded`, `TestSupervisorEndsLeftoversSoTheyCannotRewriteTheExitCode`) fail now and then under full-suite load and pass alone; `internal/docs` fails 8 watcher tests under `-race` at both `7004ac0` and `HEAD`.
+- **The consumer's run directories were deleted by its own cleanup before the live check,** so the consumer check ran against its summaries and fixture logs built from its event vocabulary, not against real logs.
+
+## Learnings`.
 - [x] Preview the merge in three steps, with quoted, fully qualified refs (`merge-tree --write-tree`, the `--name-only` conflict set, then `git diff --stat` only when the set is empty). A conflict set that isn't empty stops the plan and goes to the operator.
 - [x] Create the worktree on `feat/desk-dashboard` at `D`, then `git merge --no-ff refs/remotes/origin/feat/desk-tui`. Record the merge SHA `M`.
 - [x] Baseline: `go build ./... && go vet ./... && go test ./...`, with each exit status captured to a log. Record the test counts.
@@ -716,15 +719,15 @@ func NewDeskSource(d *desk.Desk) Source
 
 **Steps:**
 
-- [ ] Run each check, capturing its exit status to a log:
+- [x] Run each check, capturing its exit status to a log:
   - `gofmt -l .` prints nothing;
   - `go vet ./...` under `GOOS=darwin`, `linux`, `windows`, and `freebsd`;
   - `go test ./...`, with counts compared to the Task 1 baseline;
   - `golangci-lint run`;
   - `govulncheck ./...`.
 - [ ] Live check against the consumer's real runs. The private copy of this plan, with the appendix, is written to the consumer repo's `docs/plans/` in this step, and the numbers go there only.
-- [ ] Run the polish pass, with diff-based reviewers over `git diff "$M"..HEAD` from the worktree: an Opus security reviewer on Tasks 4, 5, 7, and 8, and a code reviewer on all of them. Apply the findings, then re-run the checks above. Known nit from Task 8b: the queue pane's reason line still offers `u to undo` for a skipped `lost` item (`QueueItem` has no claim flag). Known nits from Task 6: the full flow draws a trailing `▼` after the last step, and the 28-column run list cuts an 11-character name (`alph…un-7`). Known nits from Task 3: the `LoadSpec` read error repeats the file path, and `checkPattern` reports any `:` as \"must be a relative path\".
-- [ ] Run the redaction scan, a manual identifier check, and a token diff against the appendix, over the diff, the messages, and the cover letter.
+- [x] Run the polish pass, with diff-based reviewers over `git diff "$M"..HEAD` from the worktree: an Opus security reviewer on Tasks 4, 5, 7, and 8, and a code reviewer on all of them. Apply the findings, then re-run the checks above. Known nit from Task 8b: the queue pane's reason line still offers `u to undo` for a skipped `lost` item (`QueueItem` has no claim flag). Known nits from Task 6: the full flow draws a trailing `▼` after the last step, and the 28-column run list cuts an 11-character name (`alph…un-7`). Known nits from Task 3: the `LoadSpec` read error repeats the file path, and `checkPattern` reports any `:` as \"must be a relative path\".
+- [x] Run the redaction scan, a manual identifier check, and a token diff against the appendix, over the diff, the messages, and the cover letter.
 - [ ] Write the patches with `git format-patch --cover-letter --base="$D" -o <patches dir> "$D"..HEAD`. The cover letter carries:
   - what, why, and how;
   - `Testing:`;
