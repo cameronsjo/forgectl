@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "Task 6: dashboard TUI layout, flow and panes"
+next: "Task 7: modals, switcher, replay, queue verbs, foreground runs"
 branch: feat/desk-dashboard
 pr: "—"
 updated: 2026-10-05
@@ -573,7 +573,7 @@ func NewDeskSource(d *desk.Desk) Source
 
 **Steps:**
 
-- [ ] Model:
+- [x] Model:
   - a 1 s tick loads the selected run's delta, and the run list reloads every 5 s;
   - each source has its own `Folder`;
   - `Fold` runs only on change;
@@ -581,12 +581,12 @@ func NewDeskSource(d *desk.Desk) Source
   - `WindowSizeMsg` → breakpoints;
   - the background-color probe works as in the cockpit;
   - `View.MouseMode = tea.MouseModeCellMotion` unless `m` turned it off.
-- [ ] Views 1–6 per § Architecture: flow (gate text `rej 2/3` beside the loop), events (tag column, follow mode), timeline (`BarSegments`, restart marks), metrics (`Sparkline`, totals, error count), summary (KV tree), queue (rows by state, reason, stale).
-- [ ] Every state in § States the operator can see, each with its wording.
-- [ ] `a`/`s`/`u` are bound but no-ops here. Task 7 adds their behavior.
-- [ ] Goldens at 60×30, 120×30, 120×50, 160×50, and 40×12 (floor), each with a nocolor variant, plus `--no-icons`.
-- [ ] A hostile-text test scans the rendered output for any ESC sequence that isn't lipgloss SGR (programmatic, not golden-only).
-- [ ] Commit `feat(tui): desk dashboard layout, flow and run panes`.
+- [x] Views 1–6 per § Architecture: flow (gate text `rej 2/3` beside the loop), events (tag column, follow mode), timeline (`BarSegments`, restart marks), metrics (`Sparkline`, totals, error count), summary (KV tree), queue (rows by state, reason, stale).
+- [x] Every state in § States the operator can see, each with its wording.
+- [x] `a`/`s`/`u` are bound but no-ops here. Task 7 adds their behavior.
+- [x] Goldens at 60×30, 120×30, 120×50, 160×50, and 40×12 (floor), each with a nocolor variant, plus `--no-icons`.
+- [x] A hostile-text test scans the rendered output for any ESC sequence that isn't lipgloss SGR (programmatic, not golden-only).
+- [x] Commit `feat(tui): desk dashboard layout, flow and run panes`.
 
 ### Task 7 — Dashboard TUI, part 2: modals, switcher, replay, queue verbs, foreground runs
 
@@ -605,6 +605,7 @@ func NewDeskSource(d *desk.Desk) Source
 
 **Steps:**
 
+- [ ] Add `Spec() *Spec` to the spec source (as an optional interface in `runview`), have the dashboard use it, and remove `DeskOptions.Specs`.
 - [ ] Modals: step, event (nested, `esc` closes one level), and the run switcher (`o`). A click selects, and a second click opens. A click outside closes a read modal, never the confirm modal.
 - [ ] Replay per § Keys.
 - [ ] Confirm modal on `a`:
@@ -703,7 +704,7 @@ func NewDeskSource(d *desk.Desk) Source
   - `golangci-lint run`;
   - `govulncheck ./...`.
 - [ ] Live check against the consumer's real runs. The private copy of this plan, with the appendix, is written to the consumer repo's `docs/plans/` in this step, and the numbers go there only.
-- [ ] Run the polish pass, with diff-based reviewers over `git diff "$M"..HEAD` from the worktree: an Opus security reviewer on Tasks 4, 5, 7, and 8, and a code reviewer on all of them. Apply the findings, then re-run the checks above. Known nits from Task 3: the `LoadSpec` read error repeats the file path, and `checkPattern` reports any `:` as \"must be a relative path\".
+- [ ] Run the polish pass, with diff-based reviewers over `git diff "$M"..HEAD` from the worktree: an Opus security reviewer on Tasks 4, 5, 7, and 8, and a code reviewer on all of them. Apply the findings, then re-run the checks above. Known nits from Task 6: the full flow draws a trailing `▼` after the last step, and the 28-column run list cuts an 11-character name (`alph…un-7`). Known nits from Task 3: the `LoadSpec` read error repeats the file path, and `checkPattern` reports any `:` as \"must be a relative path\".
 - [ ] Run the redaction scan, a manual identifier check, and a token diff against the appendix, over the diff, the messages, and the cover letter.
 - [ ] Write the patches with `git format-patch --cover-letter --base="$D" -o <patches dir> "$D"..HEAD`. The cover letter carries:
   - what, why, and how;
@@ -746,6 +747,14 @@ func NewDeskSource(d *desk.Desk) Source
   - **Additions:** `Cursor.Metrics` and `Cursor.Summary` (per-file position and identity), `Delta.DroppedFields` (values, apart from `Dropped` lines), `Delta.Live`, `Delta.Timing`, `QueueItem.Refusal` (why an item cannot be approved, such as a hash mismatch), the `QueueSource` interface, `ErrRefused`, `ErrRoot`.
   - **Summaries use the same scalar rule,** so floats are dropped. `[log] time` reads RFC 3339 text or integer epoch seconds. Blank lines are skipped and not counted.
   - **"No log yet" is `errors.Is(Err, fs.ErrNotExist)` with no events ever received;** a vanished summary also sets such an `Err`.
+- **Task 6 shipped as `9569d48`.** Choices beyond the plan text:
+  - **The exported types live in a portable `desk_types.go`,** so the non-unix stub exports the same names. `DeskAction` is an interface; nil means none.
+  - **`DeskOptions` gained `Specs` and `Failed`.** `Failed` carries specs that failed to load, for the `1 source failed` chip. Task 7 replaces `Specs` with a `Spec()` method on the spec source, so the CLI cannot forget to pass it.
+  - **The full-flow height rule counts DAG bands, not steps** (`3 + 6·bands + 7`), since a wave shares one band.
+  - **Runs other than the selected one load only when new or when `Updated` moved, at most 12 per list reload.** Staleness is judged at draw time from `LastEvent`.
+  - **In the wide and mid layouts, view 1 focuses the flow and views 2–6 fill the side pane;** `/` filters events in the mid layout.
+  - **A run with no log yet shows `· new`.** Hostile-text tests run with `NoIcons`, because the icon set includes a private-use rune.
+  - **Task 7 seams:** `deskHooks` (`open`, `verb`, `switcher`, `replay`), `deskModel.action`, and the `onKey` order.
 - **M7 is left to the desk-core owner.** The batch runner opens `done/<name>.d` paths by absolute name instead of through the pinned root. Only same-uid code reaches it, so it is consistency hardening outside this series.
 
 ## Learnings
