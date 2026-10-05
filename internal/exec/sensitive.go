@@ -122,6 +122,10 @@ const (
 	KindHerdrPaneSplit
 	KindHerdrPaneRename
 	KindHerdrPaneRun
+	// KindHerdrScreenRead and KindHerdrPaneStatus are `surface ready`'s two
+	// reads of a worker's root pane: its visible text and herdr's agent status.
+	KindHerdrScreenRead
+	KindHerdrPaneStatus
 
 	// KindSopsEdit drives `sops <file>` with forgectl re-invoked as the
 	// editor. KindSopsExtract is the read-back that proves what landed.
@@ -171,6 +175,8 @@ var kindNames = [kindCount]string{
 	KindHerdrPaneSplit:   "herdr.pane-split",
 	KindHerdrPaneRename:  "herdr.pane-rename",
 	KindHerdrPaneRun:     "herdr.pane-run",
+	KindHerdrScreenRead:  "herdr.screen-read",
+	KindHerdrPaneStatus:  "herdr.pane-status",
 
 	KindSopsEdit:    "sops.edit",
 	KindSopsExtract: "sops.extract",

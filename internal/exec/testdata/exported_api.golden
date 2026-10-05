@@ -33,9 +33,11 @@ const KindHerdrPaneInspect CommandKind
 const KindHerdrPaneRename CommandKind
 const KindHerdrPaneRun CommandKind
 const KindHerdrPaneSplit CommandKind
+const KindHerdrPaneStatus CommandKind
 const KindHerdrProbe CommandKind
 const KindHerdrReadiness CommandKind
 const KindHerdrReconcile CommandKind
+const KindHerdrScreenRead CommandKind
 const KindHerdrSnapshot CommandKind
 const KindSopsEdit CommandKind
 const KindSopsExtract CommandKind

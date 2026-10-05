@@ -1,0 +1,102 @@
+# Readiness predicates for coordinator workers (`forgectl surface ready`).
+#
+# These guard against accidents, not a hostile worker. Everything they read
+# can be set from inside the worker's pane: its screen text, and herdr's agent
+# status (any pane can call `herdr pane report-agent`). A worker that wants
+# `ready` to say yes can make it say yes.
+#
+# Patterns are Go RE2 regexps (linear time) matched against the pane's
+# visible text. A pattern carries (?m) when it anchors on line starts or ends.
+#
+# Order of evaluation, per harness:
+#   - prompt_first = true: an input prompt anchored at the bottom of the
+#     screen wins over blocking rows matched above it, because this harness
+#     draws its captured dialogs in place of its input box. Text above the box
+#     is transcript, and blocking patterns would match a past message or a
+#     reply that merely mentions a dialog. Two kinds of blocking row still
+#     apply when the box shows: every row is checked against the footer rows
+#     under the box, and a row with `with_prompt = true` is checked against
+#     the whole screen, for an overlay drawn while the box stays visible.
+#
+# Prompt patterns name two groups: `input` (what is typed in the box) and
+# `footer` (the rows under it).
+#   - prompt_first = false: blocking patterns are checked over the whole
+#     screen first. Use it while the harness's dialogs are uncaptured: a false
+#     "blocked" only makes the coordinator wait.
+#
+# Screens marked "captured" come from Claude Code 2.1.289, Codex 0.160.0, and
+# npm on herdr 0.9.1 (testdata/). Screens marked "uncaptured" are written from
+# the 2026-09-28 trial notes and have no fixture yet.
+
+version = 1
+
+# Blocking screens that can appear under any harness.
+[[blocking]]
+name = "npm install prompt"
+any = ['(?m)^Ok to proceed\? \(y\)']  # captured
+
+[[blocking]]
+name = "y/N prompt"
+any = ['(?mi)[\[(]y/n[\])]\s*:?\s*\z']
+
+[[blocking]]
+name = "model loading"
+any = ['(?i)\bloading model\b']  # uncaptured
+
+[[blocking]]
+name = "version picker"
+any = ['(?i)\bselect (a )?version\b']  # uncaptured
+
+[harness.claude]
+agent = "claude"
+prompt_first = true
+# The input box, then only footer lines to the bottom of the screen. A rule
+# line, `❯`, the input (continuation rows are indented two spaces), a rule
+# line, then up to 12 footer rows that are indented or empty (a taller status
+# line reads as "prompt not visible": the safe direction). Claude Code
+# 2.1.289 puts a no-break space (U+00A0) between `❯` and typed text; past
+# messages in the transcript use a plain space. The bare `❯` of a starship
+# shell prompt has no rule lines around it.
+prompt = '(?m)^─{20,}\n❯(?:[ \x{00A0}](?P<input>.*(?:\n  .*)*))?\n─{20,}(?P<footer>(?:\n(?:  .*)?){0,12})\z'
+
+[[harness.claude.blocking]]
+name = "folder-trust dialog"
+any = ['Is this a project you created or one you trust\?', '(?m)^\s*(?:❯ )?Yes, I trust this folder\s*$']  # captured
+
+[[harness.claude.blocking]]
+name = "plan-approval dialog"
+any = ['Claude has written up a plan and is ready to execute', '(?m)^\s*Ready to code\?\s*$']  # captured
+
+[[harness.claude.blocking]]
+name = "permission prompt"
+any = ['(?m)^\s*Do you want to (proceed|make this edit|create)', '(?m)^\s*Esc to cancel · Tab to amend']  # captured
+
+[[harness.claude.blocking]]
+name = "selection menu"
+# Numbered menus (permission, plan approval), and the footer every Claude
+# dialog shares, so an unrecognized dialog is still named as one.
+any = ['(?m)^\s*❯ \d+\. ', '(?m)^\s*(?:Enter to confirm · )?Esc to cancel']  # captured
+
+[[harness.claude.blocking]]
+name = "session feedback survey"
+# Drawn above the input box with the box still showing; a digit typed into
+# the box answers it, and a follow-up asks to share the transcript.
+with_prompt = true
+any = ['How is Claude doing this session\?', '(?m)^\s*1: Bad\s+2: Fine\s+3: Good']  # uncaptured
+
+[harness.codex]
+agent = "codex"
+prompt_first = false
+# The composer (continuation rows indented two spaces), an optional blank
+# row, the model/context footer, then up to 3 indented or empty rows.
+prompt = '(?m)^› (?P<input>.*(?:\n  .*)*?)\n\n?(?P<footer>  \S.*· Context \d+% left.*(?:\n(?:\s.*)?){0,3})\z'
+# An empty composer shows a placeholder. It is reported as no input.
+placeholder = '^Ask Codex to do anything$'  # captured; Codex rotates others, which read as typed input (the safe direction)
+
+[[harness.codex.blocking]]
+name = "approval prompt"
+any = ['(?i)would you like to run the following command', '(?mi)^[\s│▌]*allow command\b']  # uncaptured
+
+[[harness.codex.blocking]]
+name = "selection menu"
+any = ['(?m)^\s*› \d+\. ']  # uncaptured; a typed "1. " in the composer also reads as blocked, the safe direction
