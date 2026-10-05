@@ -199,6 +199,63 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 		})
 	}
 
+	// forgectl#1060: a plan-mode worker's shell must prompt, not go to the
+	// auto-mode classifier, so every claude worker carries the setting.
+	for _, mode := range workerPermissionModes {
+		t.Run("claude worker in "+mode+" turns off auto mode during plan", func(t *testing.T) {
+			built, err := BuildInvocation(InvocationRequest{
+				StdoutTerminal: true,
+				Config:         config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: mode}},
+				CWD:            target, Worker: true, Resolve: bin,
+			})
+			if err != nil {
+				t.Fatalf("BuildInvocation: %v", err)
+			}
+			if !containsPair(built.Invocation.Args, "--settings", workerClaudeSettings) {
+				t.Errorf("worker argv %q lacks --settings %s", built.Invocation.Args, workerClaudeSettings)
+			}
+		})
+	}
+
+	t.Run("print-mode worker keeps the setting ahead of its prompt", func(t *testing.T) {
+		built, err := BuildInvocation(InvocationRequest{
+			Config: config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: "plan"}},
+			CWD:    target, Worker: true, Resolve: bin, Args: []string{"-p", "--", "hello"},
+		})
+		if err != nil {
+			t.Fatalf("BuildInvocation: %v", err)
+		}
+		args := built.Invocation.Args
+		s, sep := slices.Index(args, "--settings"), slices.Index(args, "--")
+		if s < 0 || sep < 0 || s > sep {
+			t.Errorf("worker argv %q: --settings must sit before the user's --", args)
+		}
+	})
+
+	t.Run("codex worker gets no claude settings", func(t *testing.T) {
+		built, err := BuildInvocation(InvocationRequest{
+			StdoutTerminal: true,
+			Config:         config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "codex", Sandbox: "workspace-write", ApprovalPolicy: "on-request"}},
+			CWD:            target, Worker: true, Resolve: bin,
+		})
+		if err != nil {
+			t.Fatalf("BuildInvocation: %v", err)
+		}
+		if slices.Contains(built.Invocation.Args, "--settings") {
+			t.Errorf("codex worker argv %q carries a claude flag", built.Invocation.Args)
+		}
+	})
+
+	t.Run("non-worker launch has no worker settings", func(t *testing.T) {
+		built, err := BuildInvocation(InvocationRequest{StdoutTerminal: true, CWD: target, Resolve: bin})
+		if err != nil {
+			t.Fatalf("BuildInvocation: %v", err)
+		}
+		if slices.Contains(built.Invocation.Args, workerClaudeSettings) {
+			t.Errorf("an ordinary launch got the worker settings: %q", built.Invocation.Args)
+		}
+	})
+
 	t.Run("non-worker launch is unchanged", func(t *testing.T) {
 		built, err := BuildInvocation(InvocationRequest{
 			StdoutTerminal: true,

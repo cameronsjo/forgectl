@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -177,6 +178,36 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 	return p, nil
 }
 
+// workerClaudeSettings is the inline settings JSON every claude worker gets.
+//
+// useAutoModeDuringPlan defaults to true: when auto mode is available, a
+// plan-mode session sends shell commands to the auto-mode classifier instead
+// of prompting. A worker runs where nobody watches the prompt, so the
+// classifier would be the only check on its shell (forgectl#1060). Off, a
+// plan-mode worker's commands prompt, and the prompt is a blocking screen the
+// coordinator reports.
+const workerClaudeSettings = `{"useAutoModeDuringPlan":false}`
+
+// errNoPermissionMode reports a posture with no --permission-mode pair to
+// anchor the worker settings on. Every claude posture emits one, so this
+// means a posture builder changed shape.
+var errNoPermissionMode = errors.New("launch: worker argv has no --permission-mode to place --settings after")
+
+// withWorkerSettings inserts `--settings <workerClaudeSettings>` right after
+// the posture's --permission-mode pair. That position is ahead of any
+// subcommand-trailing or user args (a user `--` or prompt), and it is never
+// inside a variadic flag's list.
+func withWorkerSettings(args []string) ([]string, error) {
+	i := slices.Index(args, "--permission-mode")
+	if i < 0 || i+1 >= len(args) {
+		return nil, errNoPermissionMode
+	}
+	out := make([]string, 0, len(args)+2)
+	out = append(out, args[:i+2]...)
+	out = append(out, "--settings", workerClaudeSettings)
+	return append(out, args[i+2:]...), nil
+}
+
 // applyHarnessOverride switches p to harness while keeping every posture field.
 //
 // The model is the one field that does not carry across: a model chosen for
@@ -247,6 +278,11 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 	posture, harnessArgs, err := selectPosture(profile, args, req.StdoutTerminal)
 	if err != nil {
 		return BuiltInvocation{}, err
+	}
+	if req.Worker && profile.Harness == "claude" {
+		if harnessArgs, err = withWorkerSettings(harnessArgs); err != nil {
+			return BuiltInvocation{}, err
+		}
 	}
 
 	binary, err := req.Resolve(profile.Harness, req.Config.Defaults)
