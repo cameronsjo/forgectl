@@ -29,6 +29,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -254,6 +255,30 @@ func expiredContext(t *testing.T) context.Context {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	t.Cleanup(cancel)
 	return ctx
+}
+
+// TestDocsListCmd_TimeoutFlagBoundsTheWalk is the deterministic check that
+// --timeout reaches the walk's context, which the expiredContext tests cannot
+// make because their parent is already expired. A negative --timeout puts the
+// derived deadline in the past, so WithTimeout returns it already done with
+// no timer to race; the parent has no deadline, so only the flag can cause the
+// error. Ignoring the flag would leave the 15s default, and the walk would
+// list the fixture and succeed.
+func TestDocsListCmd_TimeoutFlagBoundsTheWalk(t *testing.T) {
+	dir := writeDocsListFixture(t, 5)
+
+	cmd := newDocsListCmd(module.Deps{})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--timeout=-1s", dir})
+
+	err := cmd.ExecuteContext(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded from --timeout", err)
+	}
+	if got := ExitCode(err); got != 2 {
+		t.Errorf("ExitCode(err) = %d, want 2", got)
+	}
 }
 
 func TestDocsListCmd_Deadline_JSON_EmptyStdoutOneStderrObjectExit2(t *testing.T) {

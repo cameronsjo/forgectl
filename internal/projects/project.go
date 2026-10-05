@@ -254,7 +254,7 @@ func ParseCloneTarget(arg, gitHubHost string) (Repo, bool) {
 	if gitHubHost == "" {
 		gitHubHost = githubauth.DefaultHost
 	}
-	arg = trimBrowserRoute(arg)
+	arg = trimBrowserRoute(arg, gitHubHost)
 	if host, owner, name := parseRemoteURL(arg, gitHubHost); name != "" {
 		r := Repo{Host: host, Owner: owner, Name: name}
 		// Only a URL on the configured GitHub host clones through gh, which
@@ -271,26 +271,37 @@ func ParseCloneTarget(arg, gitHubHost string) (Repo, bool) {
 	return Repo{}, false
 }
 
-// browserRouteMarkers are the path segments a forge's web UI puts after a
-// repository's own path: GitHub's /tree, /blob, /commit(s), /pull(s) and
-// /issues, Gitea's /src (its other routes share GitHub's names), and GitLab's
-// /-/ separator, which precedes every one of its routes.
+// browserRouteMarkers are the path segments a non-GitHub forge's web UI puts
+// after a repository's own path: Gitea's /src, and the /tree, /blob,
+// /commit(s), /pull(s) and /issues routes it shares with GitHub. GitLab's /-/
+// separator is handled on its own in trimBrowserRoute.
 var browserRouteMarkers = map[string]bool{
 	"tree": true, "blob": true, "commit": true, "commits": true,
-	"pull": true, "pulls": true, "issues": true, "src": true, "-": true,
+	"pull": true, "pulls": true, "issues": true, "src": true,
 }
 
 // trimBrowserRoute cuts a URL copied from a forge's web UI back to the
 // repository itself, so `https://github.com/owner/repo/tree/main` clones
 // owner/repo rather than parsing as owner "tree", repo "main" (#1027). Only an
 // http(s) URL is touched, and only from the third path segment on, because a
-// repository path is at least owner/repo. It returns the URL with the route,
-// query and fragment dropped, and arg unchanged when there is no route to cut.
+// repository path is at least owner/repo. Where it cuts:
+//
+//   - GitHub (the configured host, or github.com) has no nested namespaces,
+//     so a repository is always the first two segments and everything after
+//     them is a route: /tree, /releases/tag/v1, /actions/runs/1, /wiki, …
+//   - Any other host may nest groups (GitLab's group/subgroup/repo), so a
+//     segment count says nothing. GitLab puts /-/ before every route, so a
+//     "-" segment is the cut and no route word before it is; without one,
+//     the first browserRouteMarkers word is.
+//
+// The result is scheme://host plus the kept segments exactly as they were
+// escaped in arg, with the query and fragment dropped. arg comes back
+// unchanged when there is nothing to cut.
 //
 // It lives here and not in parseRemoteURL, which also reads local origin
 // remotes for de-duplication: a remote URL never carries a browser route, and
 // a GitLab nested-group remote must keep its every segment.
-func trimBrowserRoute(arg string) string {
+func trimBrowserRoute(arg, gitHubHost string) string {
 	raw := strings.TrimSpace(arg)
 	if !strings.HasPrefix(raw, "https://") && !strings.HasPrefix(raw, "http://") {
 		return arg
@@ -299,17 +310,33 @@ func trimBrowserRoute(arg string) string {
 	if err != nil {
 		return arg
 	}
-	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	for i := 2; i < len(parts); i++ {
-		if browserRouteMarkers[parts[i]] {
-			u.Path = "/" + strings.Join(parts[:i], "/")
-			u.RawPath = ""
-			u.RawQuery = ""
-			u.Fragment = ""
-			return u.String()
+	segs := strings.Split(strings.Trim(u.EscapedPath(), "/"), "/")
+	cut := -1
+	host := canonicalHost(u.Hostname(), gitHubHost)
+	switch host {
+	case gitHubHost, githubauth.DefaultHost:
+		if len(segs) > 2 {
+			cut = 2
+		}
+	default:
+		for i := 2; i < len(segs); i++ {
+			if segs[i] == "-" {
+				cut = i
+				break
+			}
+			if cut < 0 && browserRouteMarkers[segs[i]] {
+				cut = i
+			}
 		}
 	}
-	return arg
+	if cut < 0 {
+		return arg
+	}
+	prefix := u.Scheme + "://"
+	if u.User != nil {
+		prefix += u.User.String() + "@"
+	}
+	return prefix + u.Host + "/" + strings.Join(segs[:cut], "/")
 }
 
 // splitOwnerRepo splits a bare "owner/repo" shorthand (no scheme, no host) —

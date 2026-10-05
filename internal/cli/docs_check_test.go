@@ -262,6 +262,27 @@ func TestDocsCheckCmd_StaleAfterExits1(t *testing.T) {
 	}
 }
 
+// TestDocsCheckCmd_TimeoutFlagBoundsTheWalk: as the docs list test of the
+// same name, a negative --timeout under a deadline-free parent must end the
+// walk with context.DeadlineExceeded, with no timer to race.
+func TestDocsCheckCmd_TimeoutFlagBoundsTheWalk(t *testing.T) {
+	dir := t.TempDir()
+	docsCheckWrite(t, filepath.Join(dir, "README.md"), "# R\n")
+
+	cmd := newDocsCheckCmd(module.Deps{})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--timeout=-1s", dir})
+
+	err := cmd.ExecuteContext(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded from --timeout", err)
+	}
+	if got := ExitCode(err); got != 2 {
+		t.Errorf("ExitCode(err) = %d, want 2", got)
+	}
+}
+
 // A deadline whose JSON error object cannot be written names docs check, not
 // docs list, whose helper it shares.
 func TestDocsCheckCmd_DeadlineEncodeFailureNamesCheck(t *testing.T) {

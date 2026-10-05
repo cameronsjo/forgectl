@@ -106,6 +106,22 @@ func TestParseCloneTarget_BrowserURLs(t *testing.T) {
 		{"gitea src", "https://git.sjo.lol/cameron/homeclaw/src/branch/main/README.md", "git.sjo.lol", "cameron", "homeclaw", "https://git.sjo.lol/cameron/homeclaw"},
 		{"gitea pulls", "https://git.sjo.lol/cameron/homeclaw/pulls/7", "git.sjo.lol", "cameron", "homeclaw", "https://git.sjo.lol/cameron/homeclaw"},
 		{"a route word as the repo name is kept", "https://github.com/owner/tree", "github.com", "owner", "tree", ""},
+		{"releases", gh + "/releases/tag/v1.2.3", "github.com", "owner", "repo", ""},
+		{"actions", gh + "/actions/runs/1", "github.com", "owner", "repo", ""},
+		{"wiki", gh + "/wiki/Home", "github.com", "owner", "repo", ""},
+		{"tags", gh + "/tags", "github.com", "owner", "repo", ""},
+		{"branches", gh + "/branches", "github.com", "owner", "repo", ""},
+		{"compare", gh + "/compare/main...feat", "github.com", "owner", "repo", ""},
+		{"discussions", gh + "/discussions/9", "github.com", "owner", "repo", ""},
+		{"security", gh + "/security/advisories", "github.com", "owner", "repo", ""},
+		{"settings", gh + "/settings", "github.com", "owner", "repo", ""},
+		{"raw", gh + "/raw/main/README.md", "github.com", "owner", "repo", ""},
+		{"projects", gh + "/projects/1", "github.com", "owner", "repo", ""},
+		{"milestones", gh + "/milestones", "github.com", "owner", "repo", ""},
+		{"labels", gh + "/labels", "github.com", "owner", "repo", ""},
+		{"gitlab subgroup named like a route, cut at /-/", "https://gitlab.com/a/b/tree/repo/-/tree/main", "gitlab.com", "tree", "repo", "https://gitlab.com/a/b/tree/repo"},
+		{"gitlab subgroups named issues and src, cut at /-/", "https://gitlab.com/a/issues/src/repo/-/issues/2", "gitlab.com", "src", "repo", "https://gitlab.com/a/issues/src/repo"},
+		{"trimmed url keeps the pasted escaping", "https://git.sjo.lol/cameron/home%2Dclaw/src/branch/main", "git.sjo.lol", "cameron", "home-claw", "https://git.sjo.lol/cameron/home%2Dclaw"},
 		{"scp-like remote is not a browser URL", "git@gitlab.com:group/sub/repo.git", "gitlab.com", "sub", "repo", "git@gitlab.com:group/sub/repo.git"},
 	}
 	for _, tc := range tests {
@@ -116,6 +132,11 @@ func TestParseCloneTarget_BrowserURLs(t *testing.T) {
 					tc.arg, r, ok, tc.wantHost, tc.wantOwner, tc.wantName, tc.wantSSHURL)
 			}
 		})
+	}
+
+	// The configured GitHub Enterprise host is GitHub-shaped too.
+	if r, ok := ParseCloneTarget("https://github.example.com/acme/tool/releases/tag/v1", "github.example.com"); !ok || r.Owner != "acme" || r.Name != "tool" || r.SSHURL != "" {
+		t.Errorf("GHE release URL = %+v ok=%v; want acme/tool through gh", r, ok)
 	}
 
 	// The de-duplication path reads origin remotes through parseRemoteURL,
