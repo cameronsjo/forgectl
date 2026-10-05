@@ -254,6 +254,7 @@ func ParseCloneTarget(arg, gitHubHost string) (Repo, bool) {
 	if gitHubHost == "" {
 		gitHubHost = githubauth.DefaultHost
 	}
+	arg = trimBrowserRoute(arg)
 	if host, owner, name := parseRemoteURL(arg, gitHubHost); name != "" {
 		r := Repo{Host: host, Owner: owner, Name: name}
 		// Only a URL on the configured GitHub host clones through gh, which
@@ -268,6 +269,47 @@ func ParseCloneTarget(arg, gitHubHost string) (Repo, bool) {
 		return Repo{Host: gitHubHost, Owner: owner, Name: name}, true
 	}
 	return Repo{}, false
+}
+
+// browserRouteMarkers are the path segments a forge's web UI puts after a
+// repository's own path: GitHub's /tree, /blob, /commit(s), /pull(s) and
+// /issues, Gitea's /src (its other routes share GitHub's names), and GitLab's
+// /-/ separator, which precedes every one of its routes.
+var browserRouteMarkers = map[string]bool{
+	"tree": true, "blob": true, "commit": true, "commits": true,
+	"pull": true, "pulls": true, "issues": true, "src": true, "-": true,
+}
+
+// trimBrowserRoute cuts a URL copied from a forge's web UI back to the
+// repository itself, so `https://github.com/owner/repo/tree/main` clones
+// owner/repo rather than parsing as owner "tree", repo "main" (#1027). Only an
+// http(s) URL is touched, and only from the third path segment on, because a
+// repository path is at least owner/repo. It returns the URL with the route,
+// query and fragment dropped, and arg unchanged when there is no route to cut.
+//
+// It lives here and not in parseRemoteURL, which also reads local origin
+// remotes for de-duplication: a remote URL never carries a browser route, and
+// a GitLab nested-group remote must keep its every segment.
+func trimBrowserRoute(arg string) string {
+	raw := strings.TrimSpace(arg)
+	if !strings.HasPrefix(raw, "https://") && !strings.HasPrefix(raw, "http://") {
+		return arg
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return arg
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	for i := 2; i < len(parts); i++ {
+		if browserRouteMarkers[parts[i]] {
+			u.Path = "/" + strings.Join(parts[:i], "/")
+			u.RawPath = ""
+			u.RawQuery = ""
+			u.Fragment = ""
+			return u.String()
+		}
+	}
+	return arg
 }
 
 // splitOwnerRepo splits a bare "owner/repo" shorthand (no scheme, no host) —

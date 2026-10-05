@@ -74,6 +74,65 @@ func TestParseCloneTarget(t *testing.T) {
 	}
 }
 
+// TestParseCloneTarget_BrowserURLs pins #1027: a URL pasted from a forge's web
+// UI clones the repository it names, not the last two segments of its route.
+// The nested-group rows pin the other half: a GitLab group/subgroup/repo URL
+// with no route, and the same repository's origin remote read by
+// parseRemoteURL for de-duplication, keep the last two segments as before.
+func TestParseCloneTarget_BrowserURLs(t *testing.T) {
+	const gh = "https://github.com/owner/repo"
+	tests := []struct {
+		name, arg                     string
+		wantHost, wantOwner, wantName string
+		wantSSHURL                    string
+	}{
+		{"plain", gh, "github.com", "owner", "repo", ""},
+		{".git suffix", gh + ".git", "github.com", "owner", "repo", ""},
+		{"trailing slash", gh + "/", "github.com", "owner", "repo", ""},
+		{"query", gh + "?tab=readme", "github.com", "owner", "repo", ""},
+		{"tree", gh + "/tree/main", "github.com", "owner", "repo", ""},
+		{"tree with a slashed branch", gh + "/tree/feat/x", "github.com", "owner", "repo", ""},
+		{"blob", gh + "/blob/main/README.md", "github.com", "owner", "repo", ""},
+		{"commit", gh + "/commit/abc123", "github.com", "owner", "repo", ""},
+		{"commits", gh + "/commits/main", "github.com", "owner", "repo", ""},
+		{"pull", gh + "/pull/12", "github.com", "owner", "repo", ""},
+		{"pull files tab", gh + "/pull/12/files", "github.com", "owner", "repo", ""},
+		{"pulls", gh + "/pulls", "github.com", "owner", "repo", ""},
+		{"issues", gh + "/issues/3", "github.com", "owner", "repo", ""},
+		{"issue with fragment", gh + "/issues/3#issuecomment-1", "github.com", "owner", "repo", ""},
+		{"gitlab route", "https://gitlab.com/group/repo/-/tree/main", "gitlab.com", "group", "repo", "https://gitlab.com/group/repo"},
+		{"gitlab nested group route", "https://gitlab.com/group/sub/repo/-/merge_requests/4", "gitlab.com", "sub", "repo", "https://gitlab.com/group/sub/repo"},
+		{"gitlab nested group, no route", "https://gitlab.com/group/sub/repo", "gitlab.com", "sub", "repo", "https://gitlab.com/group/sub/repo"},
+		{"gitea src", "https://git.sjo.lol/cameron/homeclaw/src/branch/main/README.md", "git.sjo.lol", "cameron", "homeclaw", "https://git.sjo.lol/cameron/homeclaw"},
+		{"gitea pulls", "https://git.sjo.lol/cameron/homeclaw/pulls/7", "git.sjo.lol", "cameron", "homeclaw", "https://git.sjo.lol/cameron/homeclaw"},
+		{"a route word as the repo name is kept", "https://github.com/owner/tree", "github.com", "owner", "tree", ""},
+		{"scp-like remote is not a browser URL", "git@gitlab.com:group/sub/repo.git", "gitlab.com", "sub", "repo", "git@gitlab.com:group/sub/repo.git"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r, ok := ParseCloneTarget(tc.arg, githubauth.DefaultHost)
+			if !ok || r.Host != tc.wantHost || r.Owner != tc.wantOwner || r.Name != tc.wantName || r.SSHURL != tc.wantSSHURL {
+				t.Errorf("ParseCloneTarget(%q) = %+v ok=%v; want host=%q owner=%q name=%q sshURL=%q",
+					tc.arg, r, ok, tc.wantHost, tc.wantOwner, tc.wantName, tc.wantSSHURL)
+			}
+		})
+	}
+
+	// The de-duplication path reads origin remotes through parseRemoteURL,
+	// which the fix leaves alone: a nested-group remote keeps its last two
+	// segments, so it still dedups against the clone above.
+	for _, remote := range []string{
+		"git@gitlab.com:group/sub/repo.git",
+		"https://gitlab.com/group/sub/repo.git",
+		"ssh://git@gitlab.com/group/sub/repo.git",
+	} {
+		host, owner, name := parseRemoteURL(remote, githubauth.DefaultHost)
+		if host != "gitlab.com" || owner != "sub" || name != "repo" {
+			t.Errorf("parseRemoteURL(%q) = (%q,%q,%q); want (gitlab.com,sub,repo)", remote, host, owner, name)
+		}
+	}
+}
+
 func TestRepoKey(t *testing.T) {
 	// Same name on two hosts must yield distinct keys (no bare-name collision).
 	gh := Repo{Host: "github.com", Owner: "cameronsjo", Name: "homeclaw"}
