@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -222,6 +223,15 @@ func TestParse_Refusals(t *testing.T) {
 	}
 }
 
+// skipWithoutOverride skips where the override is refused outright: it needs
+// O_NOFOLLOW and an owner check (table_other.go).
+func skipWithoutOverride(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" || runtime.GOOS == "plan9" {
+		t.Skip("predicate overrides are unix-only")
+	}
+}
+
 func TestLoad(t *testing.T) {
 	dir := t.TempDir()
 	good := "version = 1\n[harness.claude]\nagent='claude'\nprompt='(?m)^READY(?P<footer>)$'\n"
@@ -237,6 +247,7 @@ func TestLoad(t *testing.T) {
 	})
 
 	t.Run("override replaces the table whole", func(t *testing.T) {
+		skipWithoutOverride(t)
 		p := filepath.Join(dir, "override.toml")
 		if err := os.WriteFile(p, []byte(good), 0o600); err != nil {
 			t.Fatal(err)
@@ -254,6 +265,7 @@ func TestLoad(t *testing.T) {
 	})
 
 	t.Run("symlink refused", func(t *testing.T) {
+		skipWithoutOverride(t)
 		target := filepath.Join(dir, "target.toml")
 		if err := os.WriteFile(target, []byte(good), 0o600); err != nil {
 			t.Fatal(err)
@@ -268,6 +280,7 @@ func TestLoad(t *testing.T) {
 	})
 
 	t.Run("group-writable refused", func(t *testing.T) {
+		skipWithoutOverride(t)
 		p := filepath.Join(dir, "loose.toml")
 		if err := os.WriteFile(p, []byte(good), 0o600); err != nil {
 			t.Fatal(err)
