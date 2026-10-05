@@ -11,6 +11,8 @@ A `config.toml` that exists but does not parse is an error, not a fallback to de
 
 User workflow files share the same base: `<config dir>/workflows/<name>.workflow.toml`.
 
+`forgectl surface ready` can take its readiness predicates from `<config dir>/surface-ready.toml`. Without that file it uses the table built into the binary (`internal/herdr/ready/predicates.toml`). A file that exists replaces the built-in table whole, so start from a copy of it. It must be a regular file (not a symlink), not writable by group or others, and at most 64 KiB; anything else, or a file that does not parse, is an error rather than a fallback. Predicates are never read from a repo or worktree.
+
 ```toml
 no_icons  = false   # use ASCII markers instead of Nerd Font glyphs
 log_level = "off"   # off | debug | info | warn | error
