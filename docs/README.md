@@ -13,7 +13,7 @@ operated.
   stderr when it exits non-zero, and the failure object's `code` strings.
 - **[`configuration.md`](configuration.md)** — every `config.toml` section,
   key by key, plus logging.
-- **[`herdr.md`](herdr.md)** — the `internal/herdr` client: session and fork requirements, failure shapes, and why ids move.
+- **[`herdr.md`](herdr.md)** — the `internal/herdr` client: session and fork requirements, failure shapes, why ids move, and worker readiness for `surface ready`.
 - **[`artificer-adaptations.md`](artificer-adaptations.md)** — where this repo
   bends the vendored Artificer design system, and why; each entry names the
   upstream issue and the condition that retires it.

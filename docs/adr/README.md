@@ -13,3 +13,5 @@ Records of significant design decisions made in forgectl development.
 | 0007 | [Workflow checkpoint/resume: run-state sidecar](0007-workflow-checkpoint-resume.md) | Accepted | 2026-07-15 |
 | 0008 | [Agent contract: every verb must be drivable without a TTY](0008-agent-contract.md) | Accepted | 2026-08-01 |
 | 0009 | [Credentialed HTTP client posture: keychain-sourced, host-pinned, written to only by separate grant](0009-credentialed-http-client-posture.md) | Accepted | 2026-09-07 |
+| 0010 | [Worker `auto` permission mode: per-machine opt-in behind a hardening floor](0010-worker-auto-permission-mode.md) | Accepted | 2026-10-05 |
+| 0011 | [Worker PR merge policy: a gate check GitHub enforces, off by default](0011-worker-pr-merge-policy.md) | Accepted | 2026-10-05 |

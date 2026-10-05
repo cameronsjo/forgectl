@@ -57,6 +57,7 @@ exists.
 The backend is always explicit. There is no default and no detection.`,
 	}
 	cmd.AddCommand(newSurfaceLaunchCmd(deps))
+	cmd.AddCommand(newSurfaceReadyCmd(deps))
 	return cmd
 }
 
