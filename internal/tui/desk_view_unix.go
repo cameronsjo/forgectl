@@ -554,6 +554,7 @@ func (m deskModel) helpLines(_ int) []string {
 		{g.Running, "running / live", "events are arriving"},
 		{g.Done, "done / ok", "closed, or ended with exit 0"},
 		{g.Failed, "failed / exit N", "failed, or ended with a non-zero exit"},
+		{g.Interrupted, "interrupted", "still running when the run ended"},
 		{g.Rejected, "rej N/M", "the gate sent the step back N of M times"},
 		{g.Resumed, "resumed", "restarted since the step's previous start"},
 		{g.Stale, "stale", "no events within the run's limit"},

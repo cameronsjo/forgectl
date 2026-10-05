@@ -293,6 +293,31 @@ func TestBadSpecShowsAChipAndTheDetailInHelp(t *testing.T) {
 	}
 }
 
+// A step still running when its run ended reads interrupted, with its own
+// mark and word, and the legend names it.
+func TestAnInterruptedStepHasItsOwnMarkAndWord(t *testing.T) {
+	events := numberEvents([]runview.Event{
+		ev(0, "11:50:01", "stage_started", "fetch", "try", "1"),
+		ev(0, "11:51:00", "stage_done", "fetch", "try", "1"),
+		ev(0, "11:51:01", "stage_started", "build", "try", "1"),
+		ev(0, "11:52:00", "run_finished", "", "rc", "1"),
+	})
+	for _, tc := range []struct {
+		name    string
+		noIcons bool
+		mark    string
+	}{{"icons", false, "⊘"}, {"ascii", true, "/"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := oneSource([]runview.RunRef{runRef("cut-run", clockAt(11, 52))}, map[string][]runview.Delta{"cut-run": {{Events: events}}})
+			opts := optsFor(src)
+			opts.NoIcons = tc.noIcons
+			m := pressDesk(t, openDesk(t, opts, 120, 50), key("1"))
+			mustContain(t, "flow", screen(t, m), tc.mark+" build", "interrupted")
+			mustContain(t, "legend", screen(t, pressDesk(t, m, key("?"))), tc.mark+" interrupted", "still running when the run ended")
+		})
+	}
+}
+
 func TestLogStates(t *testing.T) {
 	noLog := fmt.Errorf("open out/events.jsonl: %w", fs.ErrNotExist)
 	cases := []struct {

@@ -365,3 +365,56 @@ func TestARunLostIsDeliveredOnce(t *testing.T) {
 		t.Fatalf("again: live %s, events %v, reset %v", again.Live, names(again.Events), again.Reset)
 	}
 }
+
+// A finished run reads ended on every Load, not lost on the second.
+func TestAFinishedDeskRunStaysEnded(t *testing.T) {
+	d := openDesk(t)
+	name := "09-x"
+	done := filepath.Join(d.Path(), "done")
+	writeFile(t, filepath.Join(done, name+".sh"), "#!/bin/bash\n")
+	writeFile(t, filepath.Join(done, name+".log"), "EXIT=0\n")
+	writeFile(t, filepath.Join(done, name+".events"), "RUN-START id=09-x pid=1\nRUN-END rc=0 reason=ok\n")
+	s := NewDeskSource(d)
+	cur := &Cursor{}
+	for i := range 3 {
+		if dl := loadDesk(t, s, name, cur); dl.Live != LiveEnded || (i > 0 && len(dl.Events) != 0) {
+			t.Fatalf("load %d: live %s, events %v", i+1, dl.Live, names(dl.Events))
+		}
+	}
+}
+
+// An events file past 32 MiB makes the run Partial.
+func TestADeskEventsFilePastTheCapIsPartial(t *testing.T) {
+	d := openDesk(t)
+	name := "10-x"
+	done := filepath.Join(d.Path(), "done")
+	writeFile(t, filepath.Join(done, name+".sh"), "#!/bin/bash\n")
+	writeFile(t, filepath.Join(done, name+".log"), "")
+	line := "STEP-WARN id=script msg=" + strings.Repeat("w", 1000) + "\n"
+	writeFile(t, filepath.Join(done, name+".events"), strings.Repeat(line, maxFileBytes/len(line)+100))
+	s := NewDeskSource(d)
+	if dl := loadDesk(t, s, name, &Cursor{}); !dl.Partial {
+		t.Errorf("Partial = false for an events file past the cap")
+	}
+	small := "11-x"
+	writeFile(t, filepath.Join(done, small+".sh"), "#!/bin/bash\n")
+	writeFile(t, filepath.Join(done, small+".log"), "")
+	writeFile(t, filepath.Join(done, small+".events"), line)
+	if _, err := s.List(); err != nil {
+		t.Fatal(err)
+	}
+	if dl := loadDesk(t, s, small, &Cursor{}); dl.Partial {
+		t.Errorf("Partial = true for a small events file")
+	}
+}
+
+func TestStepDurRefusesNaN(t *testing.T) {
+	for _, v := range []string{"NaN", "-1", "1e10", "x"} {
+		if d, ok := stepDur(v); ok {
+			t.Errorf("stepDur(%q) = %v, ok", v, d)
+		}
+	}
+	if d, ok := stepDur("1.5"); !ok || d != 1500*time.Millisecond {
+		t.Errorf("stepDur(1.5) = %v, %v", d, ok)
+	}
+}

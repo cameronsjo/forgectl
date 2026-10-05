@@ -6,6 +6,7 @@ package runview
 
 import (
 	"errors"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -252,6 +253,7 @@ func (s *deskSource) Load(ref RunRef, cur *Cursor) (Delta, error) {
 		}
 	}
 	d.Dropped = cur.dropped
+	d.Partial = dc.w.Capped()
 	return d, nil
 }
 
@@ -419,7 +421,7 @@ func scriptTiming(it desk.Item) StepTiming {
 // stepDur reads a STEP-END dur= value, seconds with a fraction.
 func stepDur(v string) (time.Duration, bool) {
 	secs, err := strconv.ParseFloat(v, 64)
-	if err != nil || secs < 0 || secs > 1e9 {
+	if err != nil || math.IsNaN(secs) || secs < 0 || secs > 1e9 {
 		return 0, false
 	}
 	return time.Duration(secs * float64(time.Second)), true

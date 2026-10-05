@@ -47,10 +47,14 @@ const (
 	StepRunning StepStatus = "running"
 	StepClosed  StepStatus = "closed"
 	StepFailed  StepStatus = "failed"
+	// StepInterrupted is a step that was still running when the run ended.
+	StepInterrupted StepStatus = "interrupted"
 )
 
 // StepState is a step after the events so far. Resumed reports that a
-// restart happened between this step's latest start and the one before it.
+// restart happened while the step was running, or between its latest start
+// and the one before it. Attempt is the highest attempt any of the step's
+// events carried, or its count of starts.
 type StepState struct {
 	ID, Note   string
 	Status     StepStatus

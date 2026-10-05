@@ -24,7 +24,7 @@ func TestFieldRules(t *testing.T) {
 	f.write(logRel, strings.Join([]string{
 		`{"kind":"stage_started","stage":"fetch","try":2,"big":1152921504606846976,"neg":-5}`,
 		`not json`,
-		`{"kind":"stage_done","stage":"fetch","nested":{"a":[1,2]},"ratio":0.5,"exp":1e3,"huge":9223372036854775808,"ok":true,"none":null,"rc":0}`,
+		`{"kind":"stage_done","stage":"fetch","nested":{"a":[1,2]},"ratio":0.5,"exp":1e3,"huge":9223372036854775808,"ok":true,"no":false,"none":null,"rc":0}`,
 		`{"kind":"first","kind":"second","stage":"build"}`,
 		`{"kind":"stage_done"} {"kind":"extra"}`,
 		`["kind","stage_done"]`,
@@ -44,14 +44,15 @@ func TestFieldRules(t *testing.T) {
 	if d.Events[0].Fields[3].Value != strconv.FormatInt(1<<60, 10) {
 		t.Errorf("2^60 = %s", d.Events[0].Fields[3].Value)
 	}
-	// The nested value, the float, the exponent, the out-of-range integer,
-	// the boolean and the null are dropped from the field; rc stays.
-	want2 := []Field{{"kind", "stage_done"}, {"stage", "fetch"}, {"rc", "0"}}
+	// The nested value, the float, the exponent, the out-of-range integer
+	// and the null are dropped from the field; the booleans stay as text, and
+	// rc stays.
+	want2 := []Field{{"kind", "stage_done"}, {"stage", "fetch"}, {"ok", "true"}, {"no", "false"}, {"rc", "0"}}
 	if !reflect.DeepEqual(d.Events[1].Fields, want2) {
 		t.Errorf("fields = %v, want %v", d.Events[1].Fields, want2)
 	}
-	if d.DroppedFields != 6 {
-		t.Errorf("DroppedFields = %d, want 6", d.DroppedFields)
+	if d.DroppedFields != 5 {
+		t.Errorf("DroppedFields = %d, want 5", d.DroppedFields)
 	}
 	// The first of a repeated key wins.
 	if d.Events[2].Name != "first" || len(d.Events[2].Fields) != 2 {
@@ -80,7 +81,8 @@ func TestEventsMapTheSpecKeys(t *testing.T) {
 		t.Errorf("epoch time = %v", d.Events[1].Time)
 	}
 	s := Fold(f.spec, nil, d.Events, at(60))
-	if st := step(t, s, "fetch"); st.Status != StepRunning || st.Attempt != 3 {
+	// The run ended with fetch still running, so fetch reads interrupted.
+	if st := step(t, s, "fetch"); st.Status != StepInterrupted || st.Attempt != 3 || st.End.Unix() != 1767323050 {
 		t.Errorf("fold: fetch = %+v", st)
 	}
 	if s.Exit == nil || *s.Exit != 0 || s.Live != LiveEnded {
@@ -137,8 +139,9 @@ func TestASummaryStemJoinsItsRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The float and the second "name" are dropped and counted.
 	want := []KV{{"detail.rc", "0"}, {"name", "alpha"}, {"score", "7"}, {"tags[0]", "a"}, {"tags[1]", "b"}}
-	if !reflect.DeepEqual(d.Summary, want) || len(d.Events) != 1 || d.DroppedFields != 1 {
+	if !reflect.DeepEqual(d.Summary, want) || len(d.Events) != 1 || d.DroppedFields != 2 {
 		t.Fatalf("summary %v (want %v), events %d, droppedFields %d", d.Summary, want, len(d.Events), d.DroppedFields)
 	}
 	if d, _ := f.src.Load(got["alpha"], cur); d.Summary != nil {
@@ -148,9 +151,28 @@ func TestASummaryStemJoinsItsRun(t *testing.T) {
 	if d, _ := f.src.Load(got["alpha"], cur); !reflect.DeepEqual(d.Summary, []KV{{"score", "8"}}) {
 		t.Errorf("changed summary = %v", d.Summary)
 	}
+	if d.Live != "" {
+		t.Errorf("a log run's Live = %q; Fold derives it", d.Live)
+	}
+	// A summary is written when a run is over, so a summary-only run is ended.
 	d, err = f.src.Load(got["beta"], &Cursor{})
-	if err != nil || !reflect.DeepEqual(d.Summary, []KV{{"score", "1"}}) || d.Err != nil {
-		t.Errorf("summary-only run: %v, %v, %v", d.Summary, err, d.Err)
+	if err != nil || !reflect.DeepEqual(d.Summary, []KV{{"score", "1"}}) || d.Err != nil || d.Live != LiveEnded {
+		t.Errorf("summary-only run: %v, %v, %v, live %q", d.Summary, err, d.Err, d.Live)
+	}
+}
+
+// Booleans are kept as text. Two leaves whose paths flatten to the same
+// key keep the first and count the other, including two keys that read the
+// same only once cleaned and cut to 256 runes.
+func TestSummaryKeepsBooleansAndCountsKeyCollisions(t *testing.T) {
+	long := strings.Repeat("k", maxFieldRunes)
+	kvs, dropped, err := flattenSummary([]byte(`{"a.b":1,"a":{"b":2},"match":false,"seal":true,"` + long + `x":1,"` + long + `y":2,"none":null}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []KV{{"a.b", "1"}, {clean(long + "x"), "1"}, {"match", "false"}, {"seal", "true"}}
+	if !reflect.DeepEqual(kvs, want) || dropped != 3 {
+		t.Errorf("flattenSummary = %v, dropped %d; want %v, 3 dropped (a.b again, the long key again, null)", kvs, dropped, want)
 	}
 }
 

@@ -244,6 +244,9 @@ func (s *specSource) Load(ref RunRef, cur *Cursor) (Delta, error) {
 	if s.summaries != nil && (ref.HasSummary || ref.Kind == KindSummary) {
 		loadSummary(r.fd, s.summaries.path(ref.Name), cur, &d)
 	}
+	if ref.Kind == KindSummary {
+		d.Live = LiveEnded // a summary is written once its run is over
+	}
 	return d, nil
 }
 

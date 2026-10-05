@@ -139,8 +139,8 @@ func TestFoldRestartMidStepResumesAndClearsExit(t *testing.T) {
 	if s.Exit != nil || s.ExitMeaning != "" {
 		t.Errorf("Exit = %v %q, want cleared by the restart", s.Exit, s.ExitMeaning)
 	}
-	if got := step(t, s, "build"); got.Status != StepRunning || got.Resumed {
-		t.Errorf("build before its next start = %+v, want running, not yet resumed", got)
+	if got := step(t, s, "build"); got.Status != StepRunning || !got.Resumed || !got.End.IsZero() {
+		t.Errorf("build after the restart = %+v, want running again and resumed", got)
 	}
 	if s.Live == LiveEnded {
 		t.Errorf("Live = ended after a later restart")
@@ -152,6 +152,60 @@ func TestFoldRestartMidStepResumesAndClearsExit(t *testing.T) {
 	}
 	if got := step(t, s, "fetch"); got.Status != StepClosed || got.Resumed {
 		t.Errorf("fetch = %+v, want closed and untouched", got)
+	}
+}
+
+// A worker that resumes a step without sending its start again still marks
+// it resumed, and the step's own close still lands.
+func TestFoldRestartResumesARunningStepWithoutANewStart(t *testing.T) {
+	s := fold(t, ev(0, "worker_boot", ""), ev(1, "stage_started", "fetch"), ev(2, "worker_boot", ""), ev(3, "stage_done", "fetch"))
+	if len(s.Restarts) != 1 {
+		t.Errorf("Restarts = %v, want one", s.Restarts)
+	}
+	if got := step(t, s, "fetch"); got.Status != StepClosed || !got.Resumed || got.Attempt != 1 {
+		t.Errorf("fetch = %+v, want closed, resumed, attempt 1", got)
+	}
+	if got := step(t, s, "build"); got.Resumed {
+		t.Errorf("build = %+v; a step that was not running is not resumed", got)
+	}
+}
+
+// The attempt can arrive on any event of the step, not only its start: a
+// worker retrying after a reject sends no new start. The highest one wins.
+func TestFoldAttemptComesFromAnyEventOfTheStep(t *testing.T) {
+	s := fold(t, ev(1, "stage_started", "build", "try", "1"), ev(2, "stage_refused", "build", "try", "1"),
+		ev(3, "worker_note", "build", "try", "2"), ev(4, "stage_refused", "build", "try", "2"))
+	if got := step(t, s, "build"); got.Attempt != 2 || got.Rejects != 2 || got.Status != StepRunning {
+		t.Errorf("after a retry with no start = %+v, want attempt 2, 2 rejects, running", got)
+	}
+	s = fold(t, ev(1, "stage_started", "build"), ev(2, "stage_done", "build", "try", "3"))
+	if got := step(t, s, "build"); got.Attempt != 3 || got.Status != StepClosed {
+		t.Errorf("close carrying try 3 = %+v, want attempt 3, closed", got)
+	}
+	s = fold(t, ev(1, "stage_started", "build", "try", "4"), ev(2, "stage_gave_up", "build", "try", "2"), ev(3, "worker_note", "build", "try", "x"))
+	if got := step(t, s, "build"); got.Attempt != 4 || got.Status != StepFailed {
+		t.Errorf("lower and unusable tries = %+v, want attempt 4 kept, failed", got)
+	}
+	s = fold(t, ev(1, "worker_note", "deploy", "try", "2"))
+	if s.UnknownSteps != 0 {
+		t.Errorf("an unmapped event for an unknown step counted UnknownSteps = %d", s.UnknownSteps)
+	}
+}
+
+// An end with a step still running turns that step interrupted, ended at
+// the end event; a restart after it makes the step running again.
+func TestFoldEndInterruptsARunningStep(t *testing.T) {
+	events := []Event{ev(1, "stage_started", "fetch"), ev(2, "stage_done", "fetch"), ev(3, "stage_started", "build"), ev(4, "run_finished", "", "rc", "1")}
+	s := fold(t, events...)
+	if got := step(t, s, "build"); got.Status != StepInterrupted || !got.End.Equal(at(4)) {
+		t.Errorf("build = %+v, want interrupted, ended at %v", got, at(4))
+	}
+	if got := step(t, s, "fetch"); got.Status != StepClosed {
+		t.Errorf("fetch = %+v, want closed", got)
+	}
+	s = fold(t, append(events, ev(5, "worker_boot", ""), ev(6, "stage_done", "build"))...)
+	if got := step(t, s, "build"); got.Status != StepClosed || !got.Resumed || !got.End.Equal(at(6)) {
+		t.Errorf("build after a restart and its close = %+v, want closed at %v, resumed", got, at(6))
 	}
 }
 
@@ -310,7 +364,7 @@ func TestFoldReturnsIndependentState(t *testing.T) {
 	*a.Exit = 9
 	a.Restarts[0] = t0
 	b := Fold(spec, nil, events, at(5))
-	if b.Steps[0].Status != StepRunning || *b.Exit != 0 || !b.Restarts[0].Equal(at(1)) {
+	if b.Steps[0].Status != StepInterrupted || *b.Exit != 0 || !b.Restarts[0].Equal(at(1)) {
 		t.Errorf("a second Fold saw the first result's edits: %+v", b)
 	}
 	if spec.Steps[0].ID != "fetch" || len(spec.Steps) != 2 {

@@ -151,6 +151,8 @@ func (m deskModel) stepLook(e *deskRun, s runview.StepState) (string, string, li
 		return m.glyph.Done, "done", st.OK
 	case runview.StepFailed:
 		return m.glyph.Failed, "failed", st.Danger
+	case runview.StepInterrupted:
+		return m.glyph.Interrupted, "interrupted", st.Warn
 	}
 	return m.glyph.Pending, "pending", st.Dim
 }
@@ -325,6 +327,8 @@ func (m deskModel) fullBand(e *deskRun, band []int, cur, iw int, now time.Time, 
 			border = st.OK
 		case runview.StepFailed:
 			border = st.Danger
+		case runview.StepInterrupted:
+			border = st.Warn
 		}
 		marker := ""
 		if si == cur {

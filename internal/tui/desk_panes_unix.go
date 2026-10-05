@@ -374,7 +374,7 @@ func (m deskModel) timelineBody(e *deskRun, iw int) deskBody {
 			segs[i] = SegRunning
 		case runview.StepFailed:
 			segs[i] = SegFailed
-		default:
+		default: // pending, and interrupted, which never finished
 			segs[i] = SegWaiting
 		}
 	}

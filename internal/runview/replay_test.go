@@ -43,6 +43,10 @@ func fixtureEvents(n int) []Event {
 		default:
 			e.Name, e.Step = "worker_note", steps[r.IntN(len(steps))]
 		}
+		// A step's other events carry an attempt too, which the fold reads.
+		if e.Step != "" && e.Name != "stage_started" && r.IntN(3) == 0 {
+			e.Fields = []Field{{Key: "try", Value: strconv.Itoa(1 + r.IntN(5))}}
+		}
 		events = append(events, e)
 	}
 	return events

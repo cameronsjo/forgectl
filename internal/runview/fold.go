@@ -27,8 +27,9 @@ type reducer struct {
 	steps  map[string]int   // step id -> index into state.Steps
 	state  RunState
 
-	begun bool // a known step has started; restarts before that are the initial start
-	ended bool // an end event arrived and no counted restart followed it
+	begun   bool      // a known step has started; restarts before that are the initial start
+	ended   bool      // an end event arrived and no counted restart followed it
+	endedAt time.Time // the time of that end event
 	// restartsAtStart is len(state.Restarts) at each step's latest start.
 	restartsAtStart []int
 }
@@ -90,7 +91,11 @@ func (r *reducer) apply(e Event) {
 	for _, i := range r.checks[e.Name] {
 		r.check(i, e)
 	}
-	switch r.spec.On[e.Name] {
+	action := r.spec.On[e.Name]
+	if action != ActionStart {
+		r.attempt(e)
+	}
+	switch action {
 	case ActionStart:
 		if i, ok := r.step(e); ok {
 			r.start(i, e)
@@ -128,13 +133,40 @@ func (r *reducer) step(e Event) (int, bool) {
 	return i, ok
 }
 
+// eventAttempt reads the attempt field of e, when the spec names one and the
+// value is a positive integer.
+func (r *reducer) eventAttempt(e Event) (int, bool) {
+	if r.spec.Log.Attempt == "" {
+		return 0, false
+	}
+	v, ok := e.field(r.spec.Log.Attempt)
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(v)
+	return n, err == nil && n > 0
+}
+
+// attempt raises a started step's attempt to the one a non-start event
+// carries: a worker that retries a step after a reject sends no new start,
+// so the attempt shows up only on the step's other events. The highest seen
+// is kept. A pending step is left alone, so its first start still counts 1.
+// An unknown step is not counted here; the action, if any, counts it.
+func (r *reducer) attempt(e Event) {
+	i, ok := r.steps[e.Step]
+	if !ok || r.state.Steps[i].Status == StepPending {
+		return
+	}
+	if n, ok := r.eventAttempt(e); ok {
+		r.state.Steps[i].Attempt = max(r.state.Steps[i].Attempt, n)
+	}
+}
+
 func (r *reducer) start(i int, e Event) {
 	s := &r.state.Steps[i]
 	attempt := s.Attempt + 1
-	if v, ok := e.field(r.spec.Log.Attempt); ok && r.spec.Log.Attempt != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			attempt = n
-		}
+	if n, ok := r.eventAttempt(e); ok {
+		attempt = n
 	}
 	// Resumed compares against this step's previous start, so a step's first
 	// start is never resumed.
@@ -147,9 +179,16 @@ func (r *reducer) start(i int, e Event) {
 	r.begun = true
 }
 
+// restart counts a restart and marks every running step resumed: a worker
+// may pick a step up again without sending its start.
 func (r *reducer) restart(e Event) {
 	if !r.begun {
 		return // the initial start, not a restart
+	}
+	for i := range r.state.Steps {
+		if r.state.Steps[i].Status == StepRunning {
+			r.state.Steps[i].Resumed = true
+		}
 	}
 	r.state.Restarts = append(r.state.Restarts, e.Time)
 	r.state.Exit = nil
@@ -160,7 +199,7 @@ func (r *reducer) restart(e Event) {
 // end marks the run ended whether or not its exit is usable; a missing,
 // non-integer or out-of-range exit is counted and the previous exit kept.
 func (r *reducer) end(e Event) {
-	r.ended = true
+	r.ended, r.endedAt = true, e.Time
 	v, ok := e.field(r.spec.End.ExitField)
 	if !ok {
 		r.state.BadExits++
@@ -195,8 +234,19 @@ func (r *reducer) check(i int, e Event) {
 
 // finish returns the state as of now. The result shares no memory with the
 // reducer, so a caller may keep or edit it while folding continues.
+//
+// A step still running when the run ended reads interrupted, ended at the
+// end event. Only the result says so: the reducer keeps the step running,
+// so a later restart resumes it and its own close still lands.
 func (r *reducer) finish(now time.Time) RunState {
 	s := r.clone().state
+	if r.ended {
+		for i := range s.Steps {
+			if s.Steps[i].Status == StepRunning {
+				s.Steps[i].Status, s.Steps[i].End = StepInterrupted, r.endedAt
+			}
+		}
+	}
 	switch {
 	case r.ended:
 		s.Live = LiveEnded

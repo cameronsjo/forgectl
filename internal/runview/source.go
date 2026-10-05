@@ -109,10 +109,12 @@ type Delta struct {
 	Err     error
 
 	// DroppedFields counts field values left out of kept lines: floats,
-	// integers outside int64, nested values, booleans and nulls.
+	// integers outside int64, nested values and nulls. For a summary it also
+	// counts a leaf whose key repeats one already kept.
 	DroppedFields int
-	// Live is a desk run's state as the desk sees it; empty for other runs,
-	// whose state Fold derives.
+	// Live is a desk run's state as the desk sees it, and ended for a
+	// summary-only run (a summary is written once a run is over); empty for
+	// a log run, whose state Fold derives.
 	Live LiveState
 	// Timing is a desk batch's per-step state and times from its status
 	// file, or a script's one step from its item. Desk events carry no time
@@ -275,9 +277,9 @@ const (
 )
 
 // scalarFields decodes one line holding one JSON object into its fields, in
-// the order they appear. A string, or an integer that fits in int64, is kept
-// as text; any other value (a float, a larger integer, an object or array, a
-// boolean, null) is left out and counted in dropped. For a repeated key the
+// the order they appear. A string, an integer that fits in int64, or a
+// boolean is kept as text; any other value (a float, a larger integer, an
+// object or array, null) is left out and counted in dropped. For a repeated key the
 // first one decides, whether or not it was kept. ok is false when the line is
 // not exactly one JSON object. Keys and values are raw; the caller cleans them.
 func scalarFields(line []byte) (fields []Field, dropped int, ok bool) {
@@ -323,11 +325,13 @@ func scalarFields(line []byte) (fields []Field, dropped int, ok bool) {
 }
 
 // scalar returns the text of a kept JSON token: a string as is, an integer in
-// int64 range in canonical decimal.
+// int64 range in canonical decimal, a boolean as true or false.
 func scalar(v json.Token) (string, bool) {
 	switch v := v.(type) {
 	case string:
 		return v, true
+	case bool:
+		return strconv.FormatBool(v), true
 	case json.Number:
 		n, err := strconv.ParseInt(v.String(), 10, 64)
 		if err != nil {
@@ -360,8 +364,9 @@ func skipValue(dec *json.Decoder) error {
 
 // flattenSummary decodes a summary document into its leaves, keyed by path,
 // sorted, with the same kept-value rule as scalarFields. A leaf past
-// maxSummaryKeys or deeper than maxSummaryDepth is counted in dropped. Keys
-// and values are cleaned.
+// maxSummaryKeys or deeper than maxSummaryDepth is counted in dropped, and
+// so is a leaf whose cleaned key is one already kept ({"a.b":1,"a":{"b":2}}
+// flattens both to a.b): the first wins. Keys and values are cleaned.
 func flattenSummary(data []byte) (kvs []KV, dropped int, err error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
@@ -375,12 +380,13 @@ func flattenSummary(data []byte) (kvs []KV, dropped int, err error) {
 		d, nested := t.(json.Delim)
 		if !nested {
 			text, keep := scalar(t)
+			key := clean(path)
 			switch {
-			case !keep || len(kvs) >= maxSummaryKeys:
+			case !keep || len(kvs) >= maxSummaryKeys || seen[key]:
 				dropped++
-			case !seen[path]:
-				seen[path] = true
-				kvs = append(kvs, KV{Key: clean(path), Value: clean(text)})
+			default:
+				seen[key] = true
+				kvs = append(kvs, KV{Key: key, Value: clean(text)})
 			}
 			return nil
 		}
