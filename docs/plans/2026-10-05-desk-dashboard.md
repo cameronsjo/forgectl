@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "Task 7: modals, switcher, replay, queue verbs, foreground runs"
+next: "Task 7b (review and dry-run fixes) and Task 8 CLI in parallel"
 branch: feat/desk-dashboard
 pr: "—"
 updated: 2026-10-05
@@ -328,7 +328,7 @@ These are registered in `internal/keymap` and rendered by `bubbles/help`. The fo
 
 > Every task runs in this branch's worktree, and dispatch prompts name that path. Each report goes to a scratch reports dir outside the worktree.
 >
-> Waves: Task 1 → {Task 2, Task 3} → Task 4 → Task 5 → Task 6 → Task 7 → Task 8 → Task 9 → consumer live check.
+> Waves: Task 1 → {Task 2, Task 3} → Task 4 → Task 5 → Task 6 → Task 7 → {Task 7b, Task 8} → Task 9 → consumer live check.
 
 ### Task 1 — Worktree, pinned base, persisted plan
 
@@ -605,10 +605,10 @@ func NewDeskSource(d *desk.Desk) Source
 
 **Steps:**
 
-- [ ] Add `Spec() *Spec` to the spec source (as an optional interface in `runview`), have the dashboard use it, and remove `DeskOptions.Specs`.
-- [ ] Modals: step, event (nested, `esc` closes one level), and the run switcher (`o`). A click selects, and a second click opens. A click outside closes a read modal, never the confirm modal.
-- [ ] Replay per § Keys.
-- [ ] Confirm modal on `a`:
+- [x] Add `Spec() *Spec` to the spec source (as an optional interface in `runview`), have the dashboard use it, and remove `DeskOptions.Specs`.
+- [x] Modals: step, event (nested, `esc` closes one level), and the run switcher (`o`). A click selects, and a second click opens. A click outside closes a read modal, never the confirm modal.
+- [x] Replay per § Keys.
+- [x] Confirm modal on `a`:
   - It freezes a copy of the `QueueItem`.
   - Title: "Run `<name>` now — in the background / in this terminal".
   - It shows kind, WHAT, WHY, and `N lines · M bytes · K escaped runes`.
@@ -617,12 +617,12 @@ func NewDeskSource(d *desk.Desk) Source
   - Footer: `y approve · n/esc cancel`.
   - `y` follows the binding rules in Global Constraints.
   - If a refresh no longer lists the item, or lists a different sha, the modal closes with "changed — re-review".
-- [ ] The `K escaped runes` count (M2) also counts `termsafe.IsInvisibleRune` hits and non-ASCII runes separately, and the lines holding them are marked.
-- [ ] Background item: `Claim(name, frozen.SHA256)` → `Launch(claimed)`. On any error after a successful `Claim` and before a successful `Launch`, call `Abandon(name, "launch-failed")` and show the error. Exception: when `Launch` returns a non-zero pid with its error, the supervisor started and owns the item; do not `Abandon`. Error messages:
+- [x] The `K escaped runes` count (M2) also counts `termsafe.IsInvisibleRune` hits and non-ASCII runes separately, and the lines holding them are marked.
+- [x] Background item: `Claim(name, frozen.SHA256)` → `Launch(claimed)`. On any error after a successful `Claim` and before a successful `Launch`, call `Abandon(name, "launch-failed")` and show the error. Exception: when `Launch` returns a non-zero pid with its error, the supervisor started and owns the item; do not `Abandon`. Error messages:
   - `ErrChanged` from a mismatch: "changed since you opened it", then the modal re-opens on the new bytes.
   - `ErrClaimed`: "another desk claimed it".
   - `ErrRefused`: shown as returned.
-- [ ] TTY item: `RunDesk` returns `DeskRun{Name, SHA}` with no claim. The CLI loop then:
+- [x] TTY item: `RunDesk` returns `DeskRun{Name, SHA}` with no claim. The CLI loop then:
   1. claims with that SHA;
   2. calls `BeginRun(name, os.Getpid())`; an error here calls `Abandon(name, "launch-failed")`;
   3. starts `cmd := exec.Command("/bin/bash", desk.ScriptFDPath)` (I6: with no operand bash would read the terminal) with `claimed.AttachScript(cmd)`, cwd `$HOME`, `desk.ChildEnv()`, and `SysProcAttr{Setpgid, Foreground, Ctty}`;
@@ -632,8 +632,8 @@ func NewDeskSource(d *desk.Desk) Source
   7. calls `Finish(rc, reason)`, with reason `ok`, `failed`, or `interrupted`;
   8. prints `ran <name>: exit N (<meaning>) — press any key`;
   9. re-opens with the restored `DeskViewState` and the new run selected.
-- [ ] Skip and unskip: `s` on a waiting or `lost` item shows the footer `skipped <name> · u to undo`. `u` works only on reason `operator`; any other reason is shown with its hint.
-- [ ] Tests:
+- [x] Skip and unskip: `s` on a waiting or `lost` item shows the footer `skipped <name> · u to undo`. `u` works only on reason `operator`; any other reason is shown with its hint.
+- [x] Tests:
   - an `a`,`y` burst within 400 ms does not claim;
   - `enter` or a click never confirms;
   - the claimed sha is 64 hex chars and equals the frozen copy; a prefix yields `ErrChanged`;
@@ -647,8 +647,27 @@ func NewDeskSource(d *desk.Desk) Source
   - a `Launch` failure moves the item to `skipped:launch-failed`;
   - replay bounds;
   - every key in § Keys.
-- [ ] Before committing, run `git ls-remote origin refs/heads/feat/desk-core` as in Task 5.
-- [ ] Commit `feat(desk): approve, skip and run queued items from the dashboard`.
+- [x] Before committing, run `git ls-remote origin refs/heads/feat/desk-core` as in Task 5.
+- [x] Commit `feat(desk): approve, skip and run queued items from the dashboard`.
+
+### Task 7b — Fixes from the early security review and the consumer dry run
+
+**Files:** `internal/desk/{events_unix,supervise_unix,claim_unix,queue_unix}.go`, `internal/runview/{fold,model,source,source_desk_unix,source_summary_unix}.go`, the TUI glyph and word for the new step status, and their tests.
+
+**Dispatch:** Parallel with Task 8 code, in a side worktree, then cherry-picked · fresh Opus subagent.
+
+**Steps:**
+
+- [ ] **A finished run never reads as `lost`.** `Watcher.state` returns `WatchEnded` when `done/` holds events with `RUN-END`, including on a resumed watcher.
+- [ ] **The 32 MiB cap bounds a lost run's read too.** The lost path in `Poll` stops at the cap and reports the rest on later polls; the desk source sets `Delta.Partial` when the file passes the per-file cap.
+- [ ] **A wrong `--sha` or `--kind` never moves a claimed item.** `supervise` refuses without touching the item when the argv sha differs from the claim stamp's `ApprovedSHA256`; the kind and both-kinds branches likewise refuse in place when the claim stamp says a different kind or sha was approved.
+- [ ] **Minor items from the review that fit:** `Skip` of a running item uses rename-then-check; `PS4` joins the `ChildEnv` strip list; summary key collisions are counted and the first wins.
+- [ ] **Reducer: a restart marks every running step `resumed`.** A resume that never re-sends `start` still shows.
+- [ ] **Reducer: the attempt field is read from any event of that step** (`reject`, `close`, `fail`, unmapped), keeping the highest.
+- [ ] **Reducer: an ended run turns a still-running step into `interrupted`,** a new status with its own glyph and word.
+- [ ] **A summary-only run reads `ended`,** set by the source.
+- [ ] **Booleans in summaries and event fields are kept as `true`/`false` text.**
+- [ ] Commit `fix(desk,runview): finished runs, lost-run caps, resume and attempt tracking`.
 
 ### Task 8 — Module, CLI verbs, docs, ADR
 
@@ -679,8 +698,8 @@ func NewDeskSource(d *desk.Desk) Source
 - [ ] `desk show` prints the compact flow as plain text, or `--json` with the `RunState` plus counts. `--at` replays.
 - [ ] A name shared by two sources exits 2 with `run "x" is in sources a and b; pass --from`. Both `--json` verbs go through `termsafe.JSONEncoder`.
 - [ ] A bad spec fails on its own, with path and key; the other sources still load.
-- [ ] `docs/commands/desk.md` covers: a quickstart; the legend; keys, breakpoints, and states; the spec reference (experimental, neutral example); exit codes; the agent verbs, noting that `Scan` changes the queue.
-- [ ] ADR-0010 covers: the run-source model; the experimental spec; the trust and threat model with the agent deny rules, listing the rule shapes needed (any `forgectl … _supervise` form, an absolute binary path, `env forgectl …`) and stating that `done/` is a record of what ran, not proof of approval; cwd `$HOME` and the operator's environment minus the bash startup hooks; polling, not fsnotify; the alternatives declined.
+- [x] `docs/commands/desk.md` covers: a quickstart; the legend; keys, breakpoints, and states; the spec reference (experimental, neutral example); exit codes; the agent verbs, noting that `Scan` changes the queue.
+- [x] ADR-0010 covers: the run-source model; the experimental spec; the trust and threat model with the agent deny rules, listing the rule shapes needed (any `forgectl … _supervise` form, an absolute binary path, `env forgectl …`) and stating that `done/` is a record of what ran, not proof of approval; cwd `$HOME` and the operator's environment minus the bash startup hooks; polling, not fsnotify; the alternatives declined.
 - [ ] Tests:
   - the non-TTY refusal, including stdin-only and stdout-only cases;
   - the JSON shape;
@@ -755,6 +774,14 @@ func NewDeskSource(d *desk.Desk) Source
   - **In the wide and mid layouts, view 1 focuses the flow and views 2–6 fill the side pane;** `/` filters events in the mid layout.
   - **A run with no log yet shows `· new`.** Hostile-text tests run with `NoIcons`, because the icon set includes a private-use rune.
   - **Task 7 seams:** `deskHooks` (`open`, `verb`, `switcher`, `replay`), `deskModel.action`, and the `onKey` order.
+- **Task 7 shipped as `99ef804`.** Choices beyond the plan text:
+  - **`QueueItem` gained `Bytes` and `Marks`,** so the escaped, invisible and non-ASCII counts (M2) come from the raw bytes, not the escaped body.
+  - **A prefix sha is refused with `ErrRefused`,** not `ErrChanged`, since Task 4 refuses any sha that is not 64 hex digits.
+  - **The dialog re-opens on new bytes only when the item was re-queued with a new hash.** If only the bytes changed, desk-core skips it as `changed`.
+  - **The real-terminal path (`Foreground`, `Ctty`, taking the terminal back) has no automated test,** because the repo has no pty module. It needs a hand check in Task 9.
+  - **`DeskOptions.Specs` is gone;** the dashboard reads `Spec()` from the spec source.
+- **Task 8's docs shipped first as `876e3a7`,** written from the plan before the CLI existed. Task 8's code must match them: `desk runs --json` prints one JSON array; the `desk show --json` shape and the desk directory lookup order are as documented there. `[[steps]] after` is documented though the example does not use it.
+- **An early security review of Tasks 4 and 5 (0 Critical, 3 Important, 5 Minor) and a dry run of the consumer's spec found the gaps Task 7b fixes.** Each Important finding and each reducer gap was checked against the code first. Keeping booleans as text changes the Global Constraints JSON rule: strings, int64 integers, and booleans are kept.
 - **M7 is left to the desk-core owner.** The batch runner opens `done/<name>.d` paths by absolute name instead of through the pinned root. Only same-uid code reaches it, so it is consistency hardening outside this series.
 
 ## Learnings
