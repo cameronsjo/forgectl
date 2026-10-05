@@ -199,6 +199,73 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 		})
 	}
 
+	// forgectl#1060: a plan-mode worker's shell must prompt, not go to the
+	// auto-mode classifier, so every claude worker carries the setting.
+	for _, mode := range workerPermissionModes {
+		t.Run("claude worker in "+mode+" turns off auto mode during plan", func(t *testing.T) {
+			built, err := BuildInvocation(InvocationRequest{
+				StdoutTerminal: true,
+				Config:         config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: mode}},
+				CWD:            target, Worker: true, Resolve: bin,
+			})
+			if err != nil {
+				t.Fatalf("BuildInvocation: %v", err)
+			}
+			// Exactly after the leading --permission-mode pair: anywhere later
+			// could follow a variadic flag and swallow its list.
+			want := []string{"--permission-mode", mode, "--settings", workerClaudeSettings}
+			if args := built.Invocation.Args; len(args) < 4 || !slices.Equal(args[:4], want) {
+				t.Errorf("worker argv %q, want it to start %q", args, want)
+			}
+		})
+	}
+
+	// User args land after the posture, where last-flag-wins would let them
+	// undo the floor, so a worker takes none. A passthrough call (--version,
+	// a subcommand) is refused the same way, with the posture error.
+	for name, args := range map[string][]string{
+		"settings override": {"--settings", `{"useAutoModeDuringPlan":true}`},
+		"mode override":     {"--permission-mode", "bypassPermissions"},
+		"print prompt":      {"-p", "hello"},
+		"version":           {"--version"},
+		"subcommand":        {"agents", "--help"},
+	} {
+		t.Run("worker refuses user args: "+name, func(t *testing.T) {
+			_, err := BuildInvocation(InvocationRequest{
+				StdoutTerminal: true,
+				Config:         config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: "plan"}},
+				CWD:            target, Worker: true, Resolve: bin, Args: args,
+			})
+			if !errors.Is(err, ErrWorkerPosture) {
+				t.Fatalf("err = %v, want ErrWorkerPosture", err)
+			}
+		})
+	}
+
+	t.Run("codex worker gets no claude settings", func(t *testing.T) {
+		built, err := BuildInvocation(InvocationRequest{
+			StdoutTerminal: true,
+			Config:         config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "codex", Sandbox: "workspace-write", ApprovalPolicy: "on-request"}},
+			CWD:            target, Worker: true, Resolve: bin,
+		})
+		if err != nil {
+			t.Fatalf("BuildInvocation: %v", err)
+		}
+		if slices.Contains(built.Invocation.Args, "--settings") {
+			t.Errorf("codex worker argv %q carries a claude flag", built.Invocation.Args)
+		}
+	})
+
+	t.Run("non-worker launch has no worker settings", func(t *testing.T) {
+		built, err := BuildInvocation(InvocationRequest{StdoutTerminal: true, CWD: target, Resolve: bin})
+		if err != nil {
+			t.Fatalf("BuildInvocation: %v", err)
+		}
+		if slices.Contains(built.Invocation.Args, "--settings") {
+			t.Errorf("an ordinary launch got a --settings flag: %q", built.Invocation.Args)
+		}
+	})
+
 	t.Run("non-worker launch is unchanged", func(t *testing.T) {
 		built, err := BuildInvocation(InvocationRequest{
 			StdoutTerminal: true,

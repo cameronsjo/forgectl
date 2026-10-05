@@ -3,7 +3,7 @@ status: in-flight
 branch: plan/herdr-coordinator
 approved_in: let-s-level-up-our-eager-owl
 approved_session_id: 95a2c916-a3c7-4bd0-9c2b-be2a99c294e0
-next: T2 (per-harness readiness predicates and surface ready); forgectl#1051 Option B waits on a herdr call that starts a pane with a command
+next: T2 (per-harness readiness predicates and surface ready); forgectl#1051 Option B waits on a herdr call that starts a pane with a command; foreman amendment adds T8-T10 and moves T5 before T8
 ---
 
 # forgectl: a coordinator over herdr worker panes
@@ -115,7 +115,7 @@ T2 and T3 list every herdr CLI call each verb makes (screen read, text send, Ent
 
 v1 worker posture:
 
-- claude: `permission_mode = "acceptEdits"`, `allow_danger = false`. Edits in the worktree go through; shell commands still prompt, and a prompt is a blocking screen that `ready`/`wait` report.
+- claude: `permission_mode = "acceptEdits"`, `allow_danger = false`. Edits in the worktree go through; shell commands still prompt, and a prompt is a blocking screen that `ready`/`wait` report. **Amended 2026-10-05:** `auto` is also allowed on a machine that opts in, only behind the ADR-0010 hardening floor (T5).
 - codex: `sandbox = "workspace-write"`, approvals on request.
 - A lean context: `Profile` has no field for plugins or rules today, so T5 adds one that points at a worker settings file passed to the harness. The nearest existing control is `StrictMCP` (`profile.go:82-96`).
 
@@ -123,7 +123,10 @@ No pre-trust. Claude Code's folder-trust dialog guards repo-supplied hooks, MCP 
 
 ## Out of scope (refused, per the 2026-07-15 steal/refuse study)
 
-- No standing daemon, PR poller or auto-merge. Merge stays manual.
+- ~~No standing daemon, PR poller or auto-merge. Merge stays manual.~~ **Reversed 2026-10-05 by the foreman amendment** (see Amendment: foreman queue, drain, and merge gate). Each original ground and what answers it:
+  - *Machinery from nowhere* (the herdr-projects plugin's per-session hooks and background poller): the drain is a forgectl verb (`surface drain start|stop|status`), detached, under one global flock, with no session hooks and nothing installed into a harness. Stopping it is one command.
+  - *Edits to other harnesses' config*: still refused. The drain launches workers through `surface launch` and writes only forgectl's own state dir.
+  - *Unreviewed merges*: merge stays off by default. ADR-0011 allows it per machine only, through a gate check that GitHub's ruleset requires by App id, so no worker can merge by any path. The gate needs named required checks, an approver a worker cannot impersonate, and a per-repo path allowlist, all at one head SHA, with every merge and refusal audited.
 - No persistent worker identity across repos or herdr sessions.
 - No cross-machine dispatch in v1 (herdr `--machine` exists; revisit later).
 - No harnesses beyond claude and codex in v1. pi waits until `forgectl launch` can pass it a permission or sandbox posture.
@@ -131,14 +134,31 @@ No pre-trust. Claude Code's folder-trust dialog guards repo-supplied hooks, MCP 
 
 ## Tasks
 
-- [x] T0: security review of the code these tasks extend, before T1: `internal/surface/herdradapter/{start,close,herdradapter}.go`, `internal/exec/sensitive.go`, `internal/launch/{profile,launch,invocation}.go`, `internal/config/usage_base.go`. Repeat it over the T2, T3, and T5 diffs before T7.
+- [x] T0: security review of the code these tasks extend, before T1: `internal/surface/herdradapter/{start,close,herdradapter}.go`, `internal/exec/sensitive.go`, `internal/launch/{profile,launch,invocation}.go`, `internal/config/usage_base.go`. Repeat it over the T2, T3, and T5 diffs before T7. **Amended 2026-10-05:** also repeat it over the T8, T9, and T10 diffs, each before the step that switches its control on.
 - [x] T1: `surface launch --worktree --harness --name`: harness override on `InvocationRequest`, `git worktree add` helper under `<repo>/.claude/worktrees/`, one owned workspace per worker with an idle-root-pane check, pending-then-filled ledger rows. First, the trust-inheritance check under Worktrees.
-- [ ] T2: per-harness readiness predicates (TOML) and `surface ready`, with fixtures from the trial screens and every blocking screen listed above; name the herdr calls and add their exec kinds.
-- [ ] T3: `brief` (type without Enter, read back, then Enter, then confirm `working`), `wait`, `read --report` with per-brief markers.
+- [x] T2: per-harness readiness predicates (TOML) and `surface ready`, with fixtures from the trial screens and every blocking screen listed above; name the herdr calls and add their exec kinds.
+- [ ] T3: `brief` (type without Enter, read back, then Enter, then confirm `working`), `wait`, `read --report` with per-brief markers. **Amended 2026-10-05 (T2 security review I1):** the first brief goes in at launch as the harness's initial-prompt argument through the trampoline socket, so it never travels as keystrokes into a live TUI. `ready` reads only signals the worker can set (its screen, and herdr status any pane can report), so typed briefs after the first are guarded against accidents only, and must not carry an approval.
 - [ ] T4: `list` (three-state reconcile, `--orphans`) and `close` (the four removal checks, never deletes the branch, refuses on `unreadable`).
 - [ ] T5: `--profile worker`: explicit posture per harness, stricter-of merge with the matched profile, worker settings file field, no pre-trust.
 - [ ] T6: coordinator skill: split, dispatch, verify-against-git, report. It extends `herdr-orchestrator`, which lives in the cadence plugin monorepo (`cameronsjo/cadence`), so T6 is a separate PR there after T1–T5 ship.
-- [ ] T7: re-run the trial with claude and codex as the acceptance test, on a named machine and herdr build with matching client and server protocol versions.
+- [ ] T7: re-run the trial with claude and codex as the acceptance test, on a named machine and herdr build with matching client and server protocol versions. **Amended:** extended by the foreman acceptance script (see the amendment section).
+- [ ] T8 (foreman P2): queue and drain. Own plan at pickup.
+- [ ] T9 (foreman P3): intake from GitHub labels and the board. Own plan at pickup.
+- [ ] T10 (foreman P4): verdicts, usage, merge gate, closers. Own plan at pickup.
+
+## Amendment: foreman queue, drain, and merge gate (2026-10-05)
+
+The foreman plan (`cadence-ecosystem` `docs/plans/2026-10-05-foreman-a-herdr-work-queue-cockpit-for-claude-code.md`) builds a `/foreman` pane in Claude Code on top of this plan. forgectl stays the engine: the pane and the coordinator skill call `--json` verbs and own no state. It changes this plan as follows.
+
+- **Order.** T2–T4 run as planned. T5 runs next, before any unattended run of T8, because it carries the `auto` hardening.
+- **T4 addition.** `surface list --json` rows carry `session_id`, `transcript` (`${CLAUDE_CONFIG_DIR:-~/.claude}/projects/<slug(worktree)>/<id>.jsonl`), `pane_id`, `workspace_id`, `branch`, `repo`, `stage`, and `pr`, so usage and PR state can be joined to a worker without a second ledger.
+- **T5 amended (ADR-0010).** Add the hardening floor: only forgectl's settings load (`--setting-sources`, plugins off, `--strict-mcp-config`); forgectl#1050 fixed first; the base commit read from the GitHub API into a forgectl-only ref namespace; a deny-by-default Bash sandbox with `allowUnsandboxedCommands = false`; matching Read/Edit/Write deny rules and WebFetch/WebSearch denied; `useAutoModeDuringPlan = false`; and a short-lived token per worker from a forgectl "worker" GitHub App in place of the keychain `gh` login, revoked on `drain stop` and `close`. The opt-in is refused where the config is chezmoi-managed or the launch context holds Full Disk Access. The mode ranking is forgectl#1043. `auto` stays off until a security review on an Opus-class model has read the file set ADR-0010 names.
+- **T8: queue and drain.** `surface enqueue|dequeue|queue`, `surface drain start|stop|status|events`. One `queue.jsonl` beside the per-repo ledgers; a global drain flock with pid and heartbeat; `queued → claimed` as a compare-and-set under the lock; every step `intent → act → confirm` with a startup reconcile; caps global 3 and 1 per repo. Reuses `internal/pr`'s claim and attempt handling (`drain.go`), or the T8 plan records why it cannot.
+- **T9: intake.** `surface intake gh` (eligible `exec:*` labels from config, marker label `exec:queued`, author allowlist, fenced body) and `surface intake board`. Intake refuses PRs (the issues API returns them), and requires that the eligible label was applied by an identity other than the worker App.
+- **T10: verdicts, usage, merge, closers.** The "merge gate" GitHub App and its `forgectl/merge-gate` check run, with each eligible repo's ruleset requiring it by App id (ADR-0011); `surface status --json` with PR, required checks, approvals, and policy verdict; `surface merge` under ADR-0011; `merge-audit.jsonl` and `surface audit`; close after `MERGED` or a 24h-graced `CLOSED`; `prune` with a daily usage rollup. Live cost comes from a new `cadence-hooks metrics price --transcript` action.
+- **T6 grows** a coordinator mode: split an ask, `surface enqueue --batch` per task, point the operator at `/foreman`. It still ships in `cameronsjo/cadence`.
+- **T7 grows** `scripts/foreman-acceptance.sh` in the meta-repo, with negative cases: a review at an older SHA does not merge, a racing push does not merge, a worker-posted `cadence-review` marker does not merge, a second `drain start` is refused.
+- **herdr package boundary (forgectl#721, agreed).** herdr reads for the drain (agent status hints, pane reads) go through the shared `internal/herdr` client (forgectl#723), with a pinned server passed as a `Runner` that sets `HERDR_SOCKET_PATH`. Starting and closing workers stays in `internal/surface/herdradapter` through the sensitive runner. Readiness predicates live in `internal/herdr/ready`, which T2 creates. An errored herdr read is `unreadable`, never `gone`.
 
 ## Verification
 
@@ -161,6 +181,11 @@ No pre-trust. Claude Code's folder-trust dialog guards repo-supplied hooks, MCP 
 - **New failure class `target-busy` (T1).** The idle-root-pane check refuses a busy pane with `FailureTargetBusy` and keeps the ref so the workspace is closed. The check re-reads the pane for about 1.5 s, because a prompt hook can briefly hold the foreground (1 sample in 75 on herdr 0.9.1). The leader of the foreground group must also be a known shell, because herdr's `shell_pid` is the pane's direct child whatever it is. And the group must hold the shell alone: a wrapper like `bash -lc 'source env.sh; claude'` runs the agent as a child inside the shell's own group, while a prompt hook is a child only for a moment and the re-read waits it out (3 of 3 live launches passed on a shell with starship, atuin and mise hooks). The leader must also be an interactive shell by its argv (no `-c`, no script operand), because a wrapper still sourcing its environment is alone in the foreground but never reads the pane. A pane with no shell yet is re-read, not refused. Across 12 live launches after these rules, 11 passed and 1 failed in the start phase without the busy warning; it did not recur in 6 instrumented runs, and it failed safe (workspace closed, row marked failed). The idle check reads process state only, so it cannot prove the shell has reached its prompt: typed input goes to whatever reads the terminal next, and a shell still loading its rc files passes. The fourth security pass found this; it is a design question for the typed-bootstrap mechanism (which predates T1), tracked as forgectl#1051. Cameron chose Option B on 2026-10-04: herdr starts the trampoline as the pane's command, so nothing is typed; it waits on herdr offering that call, and the idle check is the interim guard. The argv rule is an allowlist of interactive-only flags (`-l`, `-i`, `--login`, `--interactive`). It is check-then-type; binding the handshake peer to the pane is forgectl#1041.
 - **Ledger details (T1).** RepoTop resolves a linked worktree to its main checkout, so all launches in a repo share one ledger. A failed row that created nothing (no worktree, ref or recovery tag) does not hold its name. The file check is a copy of the usage store's; one shared helper is forgectl#1048.
 - **T0 findings filed rather than fixed in T1:** forgectl#1041 (handshake peer to pane), #1042 (profile `match` through a symlink falls back to defaults), #1043 (validate and rank posture fields for T5), #1044 (tmux/cmux pane env), #1045 (herdr workspace id reuse before T4's `close`), #1046 (`brief` must refuse control characters, for T3). Polish found #1048 (shared file check), #1049 (`projects worktree` runs repo hooks), #1050 (branch-supplied Claude Code config in workers) and #1051 (prompt-ready signal before typing the bootstrap).
+- **T2 fixtures are fresh captures, not the trial's (T2).** The trial screens were on the work machine. T2 captured live screens on sjomba with herdr 0.9.1, Claude Code 2.1.289, Codex 0.160.0 and npm: the claude prompt (acceptEdits, plan, text typed), its permission prompt, plan-approval dialog and folder-trust dialog, npm's "Ok to proceed?", an idle shell, and the codex composer. Three blocking screens have no capture and are matched from the trial notes only: codex's approval prompt (the codex model was refused for the account, so no turn ran), model loading, and the version picker. Their rows are marked `uncaptured` in `internal/herdr/ready/predicates.toml`.
+- **Predicates live in `internal/herdr/ready`, embedded, with one override file (T2).** The built-in table is a TOML file compiled into the binary; `<config dir>/forgectl/surface-ready.toml` replaces it whole when present (regular file, not group- or world-writable, 64 KiB cap). Nothing is read from a repo or worktree.
+- **Screen facts the predicates depend on (T2).** Claude Code puts U+00A0, not a space, between `❯` and typed text; starship's shell prompt uses the same `❯` glyph, so the claude predicate requires the input box's rule lines above and below; every Claude menu draws `❯ N.` on its highlighted row, which the predicates treat as blocking. The plan-approval dialog's highlighted option is "Yes, clear context … and bypass permissions", so an Enter there would switch the worker to bypass mode.
+- **`ready` stops at the first blocking screen and retries unreadable reads (T2).** A blocking screen needs the operator, so waiting longer only delays saying so. One failed herdr call says nothing about the worker, so it is retried until the timeout. herdr's `done` counts as ready alongside `idle`: both mean "at its input", and `done` flips to `idle` once anyone views the pane.
+- **T2 live check.** With this build on herdr 0.9.1: a worker launched into an untrusted repo returned `blocked: folder-trust dialog` within 1.2 s (exit 1); after the dialog was answered by hand, `ready` returned `ready` (exit 0). A worker in a repo nested under the trusted forgectl checkout also got the trust dialog, so trust did not pass down to a different git root; T7 should expect the dialog for any repo not trusted on its own.
 - **T1 verification beyond the plan's list.** A live `surface launch --worktree` against herdr 0.9.1, with a stub harness, showed the worktree, the ledger row (0600, hashed name, full `Ref`), the worker seeing its own `HERDR_PANE_ID` rather than the launcher's, no danger flag in the argv, and a second launch under the same name refused.
 
 ## Panel

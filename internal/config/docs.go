@@ -24,3 +24,16 @@ func DocsServersDir() (string, error) {
 	}
 	return filepath.Join(dir, "docs-servers"), nil
 }
+
+// SurfaceReadyPredicatesPath is the optional override for the readiness
+// predicates `forgectl surface ready` uses: <os.UserConfigDir()>/forgectl/
+// surface-ready.toml. It lives in forgectl's own config directory, never a
+// repo or worktree, so a branch cannot mark its own trust dialog as ready.
+// This function only computes the path; the file need not exist.
+func SurfaceReadyPredicatesPath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "surface-ready.toml"), nil
+}

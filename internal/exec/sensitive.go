@@ -116,6 +116,10 @@ const (
 	// title and body are item names and WHAT text, which is why it routes
 	// through this seam rather than the argv-logging Runner.
 	KindHerdrNotify
+	// KindHerdrScreenRead and KindHerdrPaneStatus are `surface ready`'s two
+	// reads of a worker's root pane: its visible text and herdr's agent status.
+	KindHerdrScreenRead
+	KindHerdrPaneStatus
 
 	// KindSopsEdit drives `sops <file>` with forgectl re-invoked as the
 	// editor. KindSopsExtract is the read-back that proves what landed.
@@ -162,6 +166,8 @@ var kindNames = [kindCount]string{
 	KindHerdrPaneInspect: "herdr.pane-inspect",
 	KindHerdrBootstrap:   "herdr.bootstrap",
 	KindHerdrNotify:      "herdr.notification-show",
+	KindHerdrScreenRead:  "herdr.screen-read",
+	KindHerdrPaneStatus:  "herdr.pane-status",
 
 	KindSopsEdit:    "sops.edit",
 	KindSopsExtract: "sops.extract",
