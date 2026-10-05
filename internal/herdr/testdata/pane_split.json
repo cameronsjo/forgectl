@@ -1,0 +1,16 @@
+{
+  "id": "cli:pane:split",
+  "result": {
+    "pane": {
+      "agent_status": "unknown",
+      "cwd": "/Users/example/Projects/repo-1",
+      "focused": false,
+      "pane_id": "w1:p3",
+      "revision": 0,
+      "tab_id": "w1:t1",
+      "terminal_id": "term_3",
+      "workspace_id": "w1"
+    },
+    "type": "pane_info"
+  }
+}

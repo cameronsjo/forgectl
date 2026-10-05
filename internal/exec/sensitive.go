@@ -116,6 +116,12 @@ const (
 	// title and body are item names and WHAT text, which is why it routes
 	// through this seam rather than the argv-logging Runner.
 	KindHerdrNotify
+	// KindHerdrPaneSplit, KindHerdrPaneRename and KindHerdrPaneRun build the desk
+	// layout. pane run types an operator-built command into a pane, and a
+	// split carries a cwd, so these stay off the argv-logging Runner too.
+	KindHerdrPaneSplit
+	KindHerdrPaneRename
+	KindHerdrPaneRun
 
 	// KindSopsEdit drives `sops <file>` with forgectl re-invoked as the
 	// editor. KindSopsExtract is the read-back that proves what landed.
@@ -162,6 +168,9 @@ var kindNames = [kindCount]string{
 	KindHerdrPaneInspect: "herdr.pane-inspect",
 	KindHerdrBootstrap:   "herdr.bootstrap",
 	KindHerdrNotify:      "herdr.notification-show",
+	KindHerdrPaneSplit:   "herdr.pane-split",
+	KindHerdrPaneRename:  "herdr.pane-rename",
+	KindHerdrPaneRun:     "herdr.pane-run",
 
 	KindSopsEdit:    "sops.edit",
 	KindSopsExtract: "sops.extract",
