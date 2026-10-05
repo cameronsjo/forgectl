@@ -73,6 +73,12 @@ func replaceFile(path string, data []byte) (err error) {
 			_ = os.Remove(tmpPath)
 		}
 	}()
+	// CreateTemp asks for 0600 and the umask can take bits away from that,
+	// owner-read included, which would leave a cache this process cannot load.
+	// The mode is set explicitly instead.
+	if err = tmp.Chmod(0o600); err != nil {
+		return err
+	}
 	if _, err = tmp.Write(data); err != nil {
 		return err
 	}

@@ -45,8 +45,8 @@ func TestTasksLs_AFailedCacheWriteIsReportedOnStderr(t *testing.T) {
 		t.Fatalf("stdout = %q, want the fetched tasks", stdout)
 	}
 	lines := strings.Split(strings.TrimRight(stderr, "\n"), "\n")
-	if len(lines) != 1 || !strings.Contains(lines[0], "cache") || !strings.Contains(lines[0], "could not be written") {
-		t.Fatalf("stderr = %q, want one plain line saying the cache could not be written", stderr)
+	if len(lines) != 1 || !strings.Contains(lines[0], "cache") || !strings.Contains(lines[0], "was not cached") {
+		t.Fatalf("stderr = %q, want one plain line saying this snapshot was not cached", stderr)
 	}
 	if strings.Contains(stderr, tasksTestFakeToken) {
 		t.Fatalf("stderr carries the token: %q", stderr)

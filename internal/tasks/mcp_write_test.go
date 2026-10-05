@@ -614,3 +614,30 @@ func TestBoardWriteOutcome(t *testing.T) {
 		}
 	}
 }
+
+// A bad id is the caller's own argument. It is refused before the cap is
+// consulted, so a session at its cap answers with the argument error and
+// writes no cap record for a call that could never have been sent.
+func TestBoardWrites_ABadIdIsRefusedBeforeTheCap(t *testing.T) {
+	rig := newWriteRig(t)
+	cs := connectSession(t, rig.server, "hermes")
+	for range maxBoardWritesPerSession {
+		writeCall(t, cs, "add_comment", commentArgs(42))
+	}
+	recordsAtCap := len(recordLines(t, rig.records.String()))
+	for _, call := range []struct {
+		tool, wantPrefix string
+		args             map[string]any
+	}{
+		{"add_comment", "add_comment: task_id must be a positive task id", commentArgs(0)},
+		{"create_task", "create_task: project_id must be a positive project id", createArgs(-3)},
+	} {
+		text, isErr := writeCall(t, cs, call.tool, call.args)
+		if !isErr || !strings.HasPrefix(text, call.wantPrefix) {
+			t.Errorf("%s with a bad id at the cap = %q (error %v), want %q", call.tool, text, isErr, call.wantPrefix)
+		}
+	}
+	if got := len(recordLines(t, rig.records.String())); got != recordsAtCap {
+		t.Errorf("a refused argument wrote %d record line(s), want none", got-recordsAtCap)
+	}
+}

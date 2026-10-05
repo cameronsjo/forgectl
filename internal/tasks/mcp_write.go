@@ -102,6 +102,9 @@ func (h *boardWriteTool) createTask(ctx context.Context, req *mcp.CallToolReques
 	if errResult != nil {
 		return errResult, nil, nil
 	}
+	if in.ProjectID <= 0 {
+		return toolError("create_task: project_id must be a positive project id, got %d", in.ProjectID), nil, nil
+	}
 	title := strings.TrimSpace(in.Title)
 	if title == "" {
 		return toolError("create_task: title is required and must not be blank"), nil, nil
@@ -175,6 +178,9 @@ func (h *boardWriteTool) addComment(ctx context.Context, req *mcp.CallToolReques
 	}
 	if err := checkComment(body); err != nil {
 		return toolError("add_comment: %s", strings.TrimPrefix(err.Error(), "tasks: comment: ")), nil, nil
+	}
+	if in.TaskID <= 0 {
+		return toolError("add_comment: task_id must be a positive task id, got %d", in.TaskID), nil, nil
 	}
 
 	session := sessionOf(req)

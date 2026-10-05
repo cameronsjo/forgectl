@@ -137,14 +137,16 @@ type pingBoard struct {
 
 func (b *pingBoard) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	b.mu.Lock()
-	b.reads++
-	status := b.status
-	b.mu.Unlock()
 	if r.URL.Path != "/projects" || r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+	// Counted only after the path check, so readCount proves the project
+	// list was read and not merely that some request arrived.
+	b.mu.Lock()
+	b.reads++
+	status := b.status
+	b.mu.Unlock()
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(`{"message":"token invalid"}`))

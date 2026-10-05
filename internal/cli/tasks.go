@@ -498,7 +498,7 @@ func cacheSnapshot(ctx context.Context, stderr io.Writer, snap tasks.Snapshot) {
 		return
 	}
 	if err := tasks.SaveCache(path, snap); err != nil {
-		slog.WarnContext(ctx, "Failed to write the tasks cache. The command succeeded, but a later network outage will have no fallback data.",
+		slog.WarnContext(ctx, "Failed to write the tasks cache. The command succeeded, but this snapshot was not cached; a later network outage falls back to an older cache, if there is one.",
 			"path", path, "error", err)
 		reportCacheWriteFailure(stderr, err)
 	}
@@ -508,7 +508,7 @@ func cacheSnapshot(ctx context.Context, stderr io.Writer, snap tasks.Snapshot) {
 // at most the cache path and an OS reason; it goes through safeText like every
 // other error text this package prints.
 func reportCacheWriteFailure(stderr io.Writer, err error) {
-	fmt.Fprintf(stderr, "forgectl: tasks: the local cache could not be written, so a later network outage will have no fallback data: %s\n", //nolint:errcheck // stderr is the only place left to say so
+	fmt.Fprintf(stderr, "forgectl: tasks: this snapshot was not cached, so a later network outage falls back to an older cache, if there is one: %s\n", //nolint:errcheck // stderr is the only place left to say so
 		safeText(err.Error()))
 }
 
