@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "Task 4: desk-core additions with the Task 2 findings"
+next: "Task 5: jsonl, summary and desk run sources"
 branch: feat/desk-dashboard
 pr: "—"
 updated: 2026-10-05
@@ -457,7 +457,7 @@ func ParseEvent(line string) (ParsedEvent, bool)
 
 **Steps:**
 
-- [ ] Apply the Task 2 findings mapped here (each one checked against the code at `D`):
+- [x] Apply the Task 2 findings mapped here (each one checked against the code at `D`):
   - **Bind the supervisor to the approved sha (I1).** `Launch(name)` becomes `Launch(c *Claimed)`. `supervisorArgv` carries `--sha <c.SHA256>`, and `supervise` refuses unless `SHA256Hex(data)` equals both the argv sha and `meta.SHA256`. `Launch` takes the TTY check from `c.Headers`, so its by-path read goes away.
   - **`Claim` requires a full sha (I2).** It returns `ErrRefused` unless `wantSHA` matches `^[0-9a-f]{64}$`. The existing tests that pass `""` pass the queued sha instead.
   - **`Claim` checks kind (M1).** It refuses when `meta.Kind` is set and differs from the kind it found.
@@ -467,11 +467,11 @@ func ParseEvent(line string) (ParsedEvent, bool)
   - **`openEvents` uses `O_EXCL` (M5).**
   - **The supervisor catches `SIGHUP` instead of ignoring it (M3),** so children start with the default disposition.
   - **A live pid behind an unreadable `/proc` counts as alive (M8).**
-- [ ] Lost detection (I3): a running item with PID 0 is `lost` when its claim stamp names a dead process, or, with no stamp, when the item file's mtime is older than 30 s. A non-zero dead PID stays `lost` as today.
-- [ ] `Abandon(name, reason)` (I3): renames into `skipped/` first, then checks that the moved meta still has PID 0 and that the claimer is this process; otherwise it moves the item back and returns `ErrClaimed`.
-- [ ] Child process setup (I5): `Launch`, `superviseScript`, batch steps, and the foreground path set `cmd.Dir = $HOME` and use `ChildEnv()`, which is `os.Environ()` minus `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `GLOBIGNORE`, and every `BASH_FUNC_*` key. It is also passed as `BatchOptions.Env`.
-- [ ] `ParseEvent` (M9) treats `msg=` as running to the end of the line, and the supervisor writes `log=` relative to the desk dir.
-- [ ] Tests:
+- [x] Lost detection (I3): a running item with PID 0 is `lost` when its claim stamp names a dead process, or, with no stamp, when the item file's mtime is older than 30 s. A non-zero dead PID stays `lost` as today.
+- [x] `Abandon(name, reason)` (I3): renames into `skipped/` first, then checks that the moved meta still has PID 0 and that the claimer is this process; otherwise it moves the item back and returns `ErrClaimed`.
+- [x] Child process setup (I5): `Launch`, `superviseScript`, batch steps, and the foreground path set `cmd.Dir = $HOME` and use `ChildEnv()`, which is `os.Environ()` minus `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `GLOBIGNORE`, and every `BASH_FUNC_*` key. It is also passed as `BatchOptions.Env`.
+- [x] `ParseEvent` (M9) treats `msg=` as running to the end of the line, and the supervisor writes `log=` relative to the desk dir.
+- [x] Tests:
   - the accessors refuse a symlink, a FIFO, a non-regular file, and an oversize file, without blocking;
   - `Abandon` refuses an item with a live pid or another claimer;
   - a PID-0 item with a dead claimer reads as `lost` and can be skipped;
@@ -480,7 +480,7 @@ func ParseEvent(line string) (ParsedEvent, bool)
   - a `BASH_ENV` marker script never runs, and the item's cwd is `$HOME`;
   - `ParseEvent` round-trips every key the supervisor emits;
   - a hostile value stays inside its field.
-- [ ] Commit `feat(desk): manifest, status and event accessors; detect orphaned claims`.
+- [x] Commit `feat(desk): manifest, status and event accessors; detect orphaned claims`.
 
 ### Task 5 — Sources: jsonl, summary, desk
 
@@ -617,7 +617,7 @@ func NewDeskSource(d *desk.Desk) Source
   - `y` follows the binding rules in Global Constraints.
   - If a refresh no longer lists the item, or lists a different sha, the modal closes with "changed — re-review".
 - [ ] The `K escaped runes` count (M2) also counts `termsafe.IsInvisibleRune` hits and non-ASCII runes separately, and the lines holding them are marked.
-- [ ] Background item: `Claim(name, frozen.SHA256)` → `Launch(claimed)`. On any error after a successful `Claim` and before a successful `Launch`, call `Abandon(name, "launch-failed")` and show the error. Error messages:
+- [ ] Background item: `Claim(name, frozen.SHA256)` → `Launch(claimed)`. On any error after a successful `Claim` and before a successful `Launch`, call `Abandon(name, "launch-failed")` and show the error. Exception: when `Launch` returns a non-zero pid with its error, the supervisor started and owns the item; do not `Abandon`. Error messages:
   - `ErrChanged` from a mismatch: "changed since you opened it", then the modal re-opens on the new bytes.
   - `ErrClaimed`: "another desk claimed it".
   - `ErrRefused`: shown as returned.
@@ -671,7 +671,7 @@ func NewDeskSource(d *desk.Desk) Source
 
 **Steps:**
 
-- [ ] Register `deskModule` (`TierExtension`). Move `_supervise` under it, hidden, keeping the exact argv `desk _supervise --dir`. Add a test that `supervisorArgv` (now with `--sha`) resolves to a registered command. Delete the plumbing command. Replace the comment claiming a hand call "grants nothing" with the I7 statement: `done/` records what a supervisor ran, not proof of approval.
+- [ ] Register `deskModule` (`TierExtension`). Move `_supervise` under it, hidden, keeping the exact argv `desk _supervise --dir`. Add a test that `supervisorArgv` (now with the required `--sha` and `--kind`) resolves to a registered command. Delete the plumbing command. Replace the comment claiming a hand call "grants nothing" with the I7 statement: `done/` records what a supervisor ran, not proof of approval.
 - [ ] The non-TTY refusal from Global Constraints (exit 1).
 - [ ] The `desk` command's loop (`RunDesk` → `runForeground` → re-open).
 - [ ] `desk runs` prints a table (run row format) or `--json` objects `{source, name, kind, live, updated, exit, partial}`.
@@ -727,6 +727,16 @@ func NewDeskSource(d *desk.Desk) Source
   - **Children run with cwd `$HOME` and without `BASH_ENV`, `ENV`, `BASH_FUNC_*`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `GLOBIGNORE` (I5).**
   - **Task 7's foreground command gains its `/dev/fd/3` operand (I6).** Without it, bash would open an interactive shell on the operator's terminal.
 - **Task 3 added `[log] attempt`.** The `start` row takes the attempt "from the event", but the example spec named no field for it. The optional key names that field; with it unset, each start adds 1. Task 3 also settled these points, each covered by a test: `check` is not an `[on]` action (checks come only from `[[checks]]`); `after` may name only an earlier step, so the graph has no cycles; `close` applies only to a running step; with no `stale_after` a run is never `stale`. The 2 500-event replay fixture is generated in the test from a fixed seed instead of stored under `testdata/`.
+- **Task 4 shipped as `ad362bb` plus `03b7b8a`.** Choices beyond the plan text:
+  - **The supervisor is bound to the claimed kind as well as the sha.** `_supervise` takes a required `--kind`. It refuses before `BeginRun` when the kind differs from the one found or from `meta.Kind`. It also refuses when both `running/<name>.sh` and `running/<name>.manifest` exist; that case moves nothing, because the supervisor cannot tell which file was claimed, and the item reads as `lost` once the supervisor exits.
+  - **`Launch` can return a pid with an error.** That means the supervisor started but its pid was not written to meta. The caller must not `Abandon` then.
+  - **`BeginRun` was reordered.** It opens the events file with `O_EXCL`, writes the owner, then checks the item is still in `running/`. This closes the gap in `Abandon`'s rename-then-check.
+  - **`skipUnstarted` leaves an item alone** when another live process owns it, or when the meta cannot be read, so a stray `_supervise` cannot pull a live run out of `running/`.
+  - **`BatchOptions` gained `WorkDir` (cwd for steps) and `EventDir` (relative `log=`).** `summary.json` keeps absolute `log` paths.
+  - **The `Event*` constants moved to the portable `event.go`.**
+  - **The `_supervise` comment (I7) was rewritten in Task 4,** since that file was already open. Task 8 still re-parents the command.
+  - **M8 has no test.** It cannot be exercised on darwin; `GOOS=linux go vet` compiles it.
+  - **The package's tests run with a scratch `HOME` and `TMPDIR`** (`TestMain`).
 - **M7 is left to the desk-core owner.** The batch runner opens `done/<name>.d` paths by absolute name instead of through the pinned root. Only same-uid code reaches it, so it is consistency hardening outside this series.
 
 ## Learnings
