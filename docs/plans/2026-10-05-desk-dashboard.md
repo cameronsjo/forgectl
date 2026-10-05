@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "Tasks 2 and 3 in parallel, then Task 4"
+next: "Task 3 finishing, then Task 4 (desk-core additions with the Task 2 findings)"
 branch: feat/desk-dashboard
 pr: "—"
 updated: 2026-10-05
@@ -359,18 +359,18 @@ These are registered in `internal/keymap` and rendered by `bubbles/help`. The fo
 
 **Steps:**
 
-- [ ] Review these files at `D` and `origin/main`, as a whole and not as a diff:
+- [x] Review these files at `D` and `origin/main`, as a whole and not as a diff:
   - `internal/desk/{desk,claim_unix,desk_unix,queue_unix,supervise_unix,events_unix,batch_unix,manifest,prune_unix,redact}.go`
   - `internal/desk/proc_*.go`
   - `internal/cli/desk_supervise.go`
   - `internal/termsafe/{termsafe,json}.go`
-- [ ] Focus on:
+- [x] Focus on:
   - sha binding from display to exec;
   - the PID-0 stuck claim;
   - `Watcher.read` with unbounded `ReadAll`;
   - cwd and environment inheritance;
   - the `_supervise` path the agent can reach.
-- [ ] Map each finding to a Task 4 or Task 7 step, or a `## Deviations` line.
+- [x] Map each finding to a Task 4 or Task 7 step, or a `## Deviations` line.
 
 ### Task 3 — `internal/runview`: model, spec, reducer, replay
 
@@ -446,6 +446,8 @@ func (f *Folder) Len() int
 func (d *Desk) Manifest(name string) (*Manifest, error)        // running|done/<name>.manifest via d.root, capped, regular only
 func (d *Desk) BatchStatus(name string) ([]StatusRow, error)   // done/<name>.d/status.tsv via d.root, capped
 func (d *Desk) Abandon(name, reason string) error              // running item with PID 0 claimed by this process → skipped/
+func (d *Desk) Launch(c *Claimed) (int, error)                 // was Launch(name); passes --sha to the supervisor
+func ChildEnv() []string                                       // os.Environ() minus bash startup hooks
 type ParsedEvent struct{ Key string; Fields map[string]string } // RUN-START, STEP-*, RUN-END, RUN-LOST
 func ParseEvent(line string) (ParsedEvent, bool)
 ```
@@ -454,14 +456,27 @@ func ParseEvent(line string) (ParsedEvent, bool)
 
 **Steps:**
 
-- [ ] Fold in the Task 2 findings mapped here.
-- [ ] Lost detection: a running item with PID 0 whose meta mtime is older than 30 s counts as `lost`. That covers a failed `Launch`, a crash before `BeginRun`, and a CLI crash after the TUI exits.
-- [ ] Bound `Watcher.read` to the same cap.
-- [ ] `Launch` and the foreground path both set cwd to `$HOME`.
+- [ ] Apply the Task 2 findings mapped here (each one checked against the code at `D`):
+  - **Bind the supervisor to the approved sha (I1).** `Launch(name)` becomes `Launch(c *Claimed)`. `supervisorArgv` carries `--sha <c.SHA256>`, and `supervise` refuses unless `SHA256Hex(data)` equals both the argv sha and `meta.SHA256`. `Launch` takes the TTY check from `c.Headers`, so its by-path read goes away.
+  - **`Claim` requires a full sha (I2).** It returns `ErrRefused` unless `wantSHA` matches `^[0-9a-f]{64}$`. The existing tests that pass `""` pass the queued sha instead.
+  - **`Claim` checks kind (M1).** It refuses when `meta.Kind` is set and differs from the kind it found.
+  - **Claim stamp (I3, I7).** `Claim` writes `claim_pid`, `claim_start`, `claimed_at`, and the approved sha into the `running/` meta. `Launch` writes the supervisor's `pid` and `pid_start` into meta right after `cmd.Start`.
+  - **Supervisor start failures leave a trace (I3).** Any `supervise` error before `BeginRun` moves the item to `skipped/` with `skip_reason` `supervisor: <cause>`.
+  - **One capped, non-blocking read helper (I4, M6).** `readCapped(sub, file, max)` opens with `O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC` through the root, `fstat`s for a regular file, and reads through a limit. Use it in `Watcher.read`, `hasRunEnd` (last 4 KiB only), the `ReadFile` sites in `queue_unix.go`, `lastLine`, `fillTimes`, and `readMeta`. `Watcher.read` resets on a dev/ino change or a shrink, reads at most 32 MiB per poll, and drops (and counts) lines over 64 KiB.
+  - **`openEvents` uses `O_EXCL` (M5).**
+  - **The supervisor catches `SIGHUP` instead of ignoring it (M3),** so children start with the default disposition.
+  - **A live pid behind an unreadable `/proc` counts as alive (M8).**
+- [ ] Lost detection (I3): a running item with PID 0 is `lost` when its claim stamp names a dead process, or, with no stamp, when the item file's mtime is older than 30 s. A non-zero dead PID stays `lost` as today.
+- [ ] `Abandon(name, reason)` (I3): renames into `skipped/` first, then checks that the moved meta still has PID 0 and that the claimer is this process; otherwise it moves the item back and returns `ErrClaimed`.
+- [ ] Child process setup (I5): `Launch`, `superviseScript`, batch steps, and the foreground path set `cmd.Dir = $HOME` and use `ChildEnv()`, which is `os.Environ()` minus `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `GLOBIGNORE`, and every `BASH_FUNC_*` key. It is also passed as `BatchOptions.Env`.
+- [ ] `ParseEvent` (M9) treats `msg=` as running to the end of the line, and the supervisor writes `log=` relative to the desk dir.
 - [ ] Tests:
-  - the accessors refuse a symlink, a non-regular file, and an oversize file;
-  - `Abandon` refuses an item with a live pid;
-  - a stale PID-0 item reads as `lost`;
+  - the accessors refuse a symlink, a FIFO, a non-regular file, and an oversize file, without blocking;
+  - `Abandon` refuses an item with a live pid or another claimer;
+  - a PID-0 item with a dead claimer reads as `lost` and can be skipped;
+  - a consistent rewrite of the record and the meta after `Claim` runs nothing on the background path;
+  - `Claim("")` and a 63-char sha are refused;
+  - a `BASH_ENV` marker script never runs, and the item's cwd is `$HOME`;
   - `ParseEvent` round-trips every key the supervisor emits;
   - a hostile value stays inside its field.
 - [ ] Commit `feat(desk): manifest, status and event accessors; detect orphaned claims`.
@@ -600,26 +615,30 @@ func NewDeskSource(d *desk.Desk) Source
   - Footer: `y approve · n/esc cancel`.
   - `y` follows the binding rules in Global Constraints.
   - If a refresh no longer lists the item, or lists a different sha, the modal closes with "changed — re-review".
-- [ ] Background item: `Claim(name, frozen.SHA256)` → `Launch`. On a `Launch` error, call `Abandon(name, "launch-failed")` and show the error. Error messages:
+- [ ] The `K escaped runes` count (M2) also counts `termsafe.IsInvisibleRune` hits and non-ASCII runes separately, and the lines holding them are marked.
+- [ ] Background item: `Claim(name, frozen.SHA256)` → `Launch(claimed)`. On any error after a successful `Claim` and before a successful `Launch`, call `Abandon(name, "launch-failed")` and show the error. Error messages:
   - `ErrChanged` from a mismatch: "changed since you opened it", then the modal re-opens on the new bytes.
   - `ErrClaimed`: "another desk claimed it".
   - `ErrRefused`: shown as returned.
 - [ ] TTY item: `RunDesk` returns `DeskRun{Name, SHA}` with no claim. The CLI loop then:
   1. claims with that SHA;
-  2. calls `BeginRun(name, os.Getpid())`;
-  3. starts `cmd := exec.Command("/bin/bash")` with `claimed.AttachScript(cmd)`, cwd `$HOME`, and `SysProcAttr{Setpgid, Foreground, Ctty}`;
+  2. calls `BeginRun(name, os.Getpid())`; an error here calls `Abandon(name, "launch-failed")`;
+  3. starts `cmd := exec.Command("/bin/bash", desk.ScriptFDPath)` (I6: with no operand bash would read the terminal) with `claimed.AttachScript(cmd)`, cwd `$HOME`, `desk.ChildEnv()`, and `SysProcAttr{Setpgid, Foreground, Ctty}`;
   4. forwards INT, TERM, HUP, and QUIT to `-pgid`;
   5. sends KILL after `DefaultGrace`;
-  6. calls `Finish(rc, reason)`, with reason `ok`, `failed`, or `interrupted`;
-  7. prints `ran <name>: exit N (<meaning>) — press any key`;
-  8. re-opens with the restored `DeskViewState` and the new run selected.
+  6. takes the terminal back with `tcsetpgrp(tty, getpgrp())`, with `SIGTTOU` ignored around the call (M4). `EIO` on the terminal means the pane is gone: call `Finish` and exit;
+  7. calls `Finish(rc, reason)`, with reason `ok`, `failed`, or `interrupted`;
+  8. prints `ran <name>: exit N (<meaning>) — press any key`;
+  9. re-opens with the restored `DeskViewState` and the new run selected.
 - [ ] Skip and unskip: `s` on a waiting or `lost` item shows the footer `skipped <name> · u to undo`. `u` works only on reason `operator`; any other reason is shown with its hint.
 - [ ] Tests:
   - an `a`,`y` burst within 400 ms does not claim;
   - `enter` or a click never confirms;
   - the claimed sha is 64 hex chars and equals the frozen copy; a prefix yields `ErrChanged`;
   - an item edited after the modal opened runs nothing and re-opens the modal;
-  - rewriting `RecordPath` after the claim still runs the original bytes;
+  - rewriting `RecordPath` after the claim still runs the original bytes (foreground); a rewrite of the record and the meta runs nothing (background);
+  - the foreground child's `$0` is `/dev/fd/3` and a marker the item writes exists;
+  - an error after `Claim` and before `Launch` or `BeginRun` leaves the item in `skipped/` with reason `launch-failed`;
   - the child receives a forwarded SIGHUP, and `Finish` is written;
   - a SIGKILLed parent leaves an item that reads as `lost`;
   - a double approve from two models leaves one winner;
@@ -651,7 +670,7 @@ func NewDeskSource(d *desk.Desk) Source
 
 **Steps:**
 
-- [ ] Register `deskModule` (`TierExtension`). Move `_supervise` under it, hidden, keeping the exact argv `desk _supervise --dir`. Add a test that `supervisorArgv` resolves to a registered command. Delete the plumbing command.
+- [ ] Register `deskModule` (`TierExtension`). Move `_supervise` under it, hidden, keeping the exact argv `desk _supervise --dir`. Add a test that `supervisorArgv` (now with `--sha`) resolves to a registered command. Delete the plumbing command. Replace the comment claiming a hand call "grants nothing" with the I7 statement: `done/` records what a supervisor ran, not proof of approval.
 - [ ] The non-TTY refusal from Global Constraints (exit 1).
 - [ ] The `desk` command's loop (`RunDesk` → `runForeground` → re-open).
 - [ ] `desk runs` prints a table (run row format) or `--json` objects `{source, name, kind, live, updated, exit, partial}`.
@@ -659,7 +678,7 @@ func NewDeskSource(d *desk.Desk) Source
 - [ ] A name shared by two sources exits 2 with `run "x" is in sources a and b; pass --from`. Both `--json` verbs go through `termsafe.JSONEncoder`.
 - [ ] A bad spec fails on its own, with path and key; the other sources still load.
 - [ ] `docs/commands/desk.md` covers: a quickstart; the legend; keys, breakpoints, and states; the spec reference (experimental, neutral example); exit codes; the agent verbs, noting that `Scan` changes the queue.
-- [ ] ADR-0010 covers: the run-source model; the experimental spec; the trust and threat model with the agent deny rules; cwd and environment; polling, not fsnotify; the alternatives declined.
+- [ ] ADR-0010 covers: the run-source model; the experimental spec; the trust and threat model with the agent deny rules, listing the rule shapes needed (any `forgectl … _supervise` form, an absolute binary path, `env forgectl …`) and stating that `done/` is a record of what ran, not proof of approval; cwd `$HOME` and the operator's environment minus the bash startup hooks; polling, not fsnotify; the alternatives declined.
 - [ ] Tests:
   - the non-TTY refusal, including stdin-only and stdout-only cases;
   - the JSON shape;
@@ -682,7 +701,7 @@ func NewDeskSource(d *desk.Desk) Source
   - `go test ./...`, with counts compared to the Task 1 baseline;
   - `golangci-lint run`;
   - `govulncheck ./...`.
-- [ ] Live check against the consumer's real runs. The numbers go to the private appendix only.
+- [ ] Live check against the consumer's real runs. The private copy of this plan, with the appendix, is written to the consumer repo's `docs/plans/` in this step, and the numbers go there only.
 - [ ] Run the polish pass, with diff-based reviewers over `git diff "$M"..HEAD` from the worktree: an Opus security reviewer on Tasks 4, 5, 7, and 8, and a code reviewer on all of them. Apply the findings, then re-run the checks above.
 - [ ] Run the redaction scan, a manual identifier check, and a token diff against the appendix, over the diff, the messages, and the cover letter.
 - [ ] Write the patches with `git format-patch --cover-letter --base="$D" -o <patches dir> "$D"..HEAD`. The cover letter carries:
@@ -698,8 +717,15 @@ func NewDeskSource(d *desk.Desk) Source
 ## Deviations
 
 - **desk-tui moved since planning.** `origin/feat/desk-tui` is now `bfbf432`, a merge of `D` into desk-tui. Its only commit not in `D` is still `912de47`, so the series shape is unchanged: patch 1 is `912de47`.
-- **Baseline tests need `GOFLAGS=-buildvcs=false` on this machine.** Three `internal/exec` guards (`TestEveryProductionFileBuildsOnAGuardConfiguration`, `TestNoFileReachesPastTheTypeSystem`, `TestNoCallerCodeReceivesAnOpaquePayload`) shell out to `go list`, whose VCS stamping fails with `signal: broken pipe` under git's fsmonitor in a linked worktree. With stamping off the package passes. Every test run in this plan uses that flag.
+- **Baseline tests need `GOFLAGS=-buildvcs=false` on this machine.** Three `internal/exec` guards (`TestEveryProductionFileBuildsOnAGuardConfiguration`, `TestNoFileReachesPastTheTypeSystem`, `TestNoCallerCodeReceivesAnOpaquePayload`) shell out to `go list`, which fails with `error obtaining VCS status: signal: broken pipe` in this worktree. With VCS stamping off the package passes. The cause was not isolated. Every test run in this plan uses that flag.
 - **Local toolchain is Go 1.27.1;** `go.mod` declares `go 1.26.8`.
+- **Task 2 found 0 Critical, 7 Important, 9 Minor.** The orchestrator checked I1–I6 against the code at `D` before acting on them. All but M7 are now steps in Tasks 4, 7, and 8. The ones that change desk-core's public surface, which the PR #1059 owner should know about when merging:
+  - **`Launch(name)` becomes `Launch(c *Claimed)`, and the supervisor takes `--sha` (I1).** Before this, the background path compared `running/<name>.sh` only with its own meta, so a consistent rewrite of both after `Claim` ran unapproved bytes (a probe confirmed it).
+  - **`Claim` refuses an empty or short `wantSHA` (I2) and a kind mismatch (M1).**
+  - **Meta gains a claim stamp, and `lost` covers PID-0 items whose claimer died (I3).** A claimed item with PID 0 previously could not be skipped (a probe confirmed it).
+  - **Children run with cwd `$HOME` and without `BASH_ENV`, `ENV`, `BASH_FUNC_*`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `GLOBIGNORE` (I5).**
+  - **Task 7's foreground command gains its `/dev/fd/3` operand (I6).** Without it, bash would open an interactive shell on the operator's terminal.
+- **M7 is left to the desk-core owner.** The batch runner opens `done/<name>.d` paths by absolute name instead of through the pinned root. Only same-uid code reaches it, so it is consistency hardening outside this series.
 
 ## Learnings
 
