@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -75,6 +76,26 @@ func (d *Desk) tryLockOwner(name string) (l *ownerLock, held bool, err error) {
 		return nil, false, fmt.Errorf("desk: take the owner lock for %s: %w", describe(name), err)
 	}
 	return &ownerLock{d: d, name: name, f: f}, false, nil
+}
+
+// Retry for tryLockOwnerSettled: a liveness probe (ownerAlive) holds the
+// lock shared for a moment, so one failed try is not a live owner.
+const (
+	ownerLockTries = 5
+	ownerLockWait  = 20 * time.Millisecond
+)
+
+// tryLockOwnerSettled is tryLockOwner retried over a short window: only a
+// lock held on every try counts as held. Skip and Release use it, so a scan's
+// probe landing at the same instant does not refuse them.
+func (d *Desk) tryLockOwnerSettled(name string) (l *ownerLock, held bool, err error) {
+	for try := 1; ; try++ {
+		l, held, err = d.tryLockOwner(name)
+		if err != nil || !held || try == ownerLockTries {
+			return l, held, err
+		}
+		time.Sleep(ownerLockWait)
+	}
 }
 
 // release drops the lock, removing the lock file first (while still holding

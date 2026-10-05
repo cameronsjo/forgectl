@@ -229,3 +229,89 @@ func TestLaunchReleasesARefusedTTYItem(t *testing.T) {
 		t.Fatalf("skip reason %q, want %q", got, SkipLaunchFailed)
 	}
 }
+
+// lostClaim claims an item that never gets an owner and moves the clock past
+// the grace, so it is lost and Skip may move it.
+func lostClaim(t *testing.T, d *Desk) string {
+	t.Helper()
+	name := claimOne(t, d)
+	d.now = func() time.Time { return time.Now().Add(ClaimGrace * 10) }
+	return name
+}
+
+// holdLock holds name's owner lock shared, as ownerAlive's probe does, from
+// another open file, and lets go after hold. It returns once the lock is held.
+func holdLock(t *testing.T, d *Desk, name string, hold time.Duration) {
+	t.Helper()
+	f, err := d.openLock(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_SH); err != nil {
+		t.Fatal(err)
+	}
+	time.AfterFunc(hold, func() { _ = f.Close() })
+	t.Cleanup(func() { _ = f.Close() })
+}
+
+// A probe holding the lock for a moment does not make Skip refuse: Skip
+// retries over a short window and goes ahead once the probe lets go.
+func TestSkipWaitsOutABriefProbe(t *testing.T) {
+	d := openDesk(t)
+	name := lostClaim(t, d)
+	holdLock(t, d, name, 30*time.Millisecond)
+	if err := d.Skip(name, SkipLost); err != nil {
+		t.Fatalf("Skip refused behind a 30ms probe: %v", err)
+	}
+	if got := skipReason(t, d, name); got != SkipLost {
+		t.Fatalf("skip reason %q, want %q", got, SkipLost)
+	}
+}
+
+func TestReleaseWaitsOutABriefProbe(t *testing.T) {
+	d := openDesk(t)
+	name := claimOne(t, d)
+	holdLock(t, d, name, 30*time.Millisecond)
+	if err := d.Release(name, SkipLaunchFailed); err != nil {
+		t.Fatalf("Release refused behind a 30ms probe: %v", err)
+	}
+}
+
+// A lock held for the whole retry window is a live owner: Skip and Release
+// still refuse.
+func TestALockHeldThroughoutStillRefuses(t *testing.T) {
+	d := openDesk(t)
+	name := lostClaim(t, d)
+	holdLock(t, d, name, time.Duration(ownerLockTries+5)*ownerLockWait)
+	if err := d.Skip(name, SkipLost); err == nil || !strings.Contains(err.Error(), "holds the lock") {
+		t.Fatalf("Skip behind a held lock = %v, want a refusal", err)
+	}
+	if err := d.Release(name, SkipLaunchFailed); err == nil || !strings.Contains(err.Error(), "lock is held") {
+		t.Fatalf("Release behind a held lock = %v, want a refusal", err)
+	}
+}
+
+// When the meta cannot follow the item into running/, Claim fails and the
+// item ends in skipped/ (launch-failed) with its hash, not in running/ for
+// ever as a claim in progress; no orphaned meta is left in pending/.
+func TestClaimMetaFailureReleasesTheItem(t *testing.T) {
+	d := openDesk(t)
+	dropPending(t, d, "01-hi.sh", script)
+	scan(t, d)
+	saved := claimMeta
+	t.Cleanup(func() { claimMeta = saved })
+	claimMeta = func(*Desk, string) error { return errors.New("meta rename failed") }
+	if _, err := d.Claim("01-hi", ""); err == nil {
+		t.Fatal("Claim succeeded with its meta left behind")
+	}
+	snap := scan(t, d)
+	if len(snap.Running) != 0 || len(snap.Pending) != 0 {
+		t.Fatalf("running %d, pending %d; want the item in skipped/ only", len(snap.Running), len(snap.Pending))
+	}
+	if len(snap.Skipped) != 1 || snap.Skipped[0].Meta.SkipReason != SkipLaunchFailed || snap.Skipped[0].Meta.SHA256 == "" {
+		t.Fatalf("skipped = %+v, want one launch-failed item with its hash", snap.Skipped)
+	}
+	if _, err := os.Lstat(filepath.Join(d.Path(), DirPending, "01-hi"+extMeta)); err == nil {
+		t.Error("the pending meta was left behind")
+	}
+}
