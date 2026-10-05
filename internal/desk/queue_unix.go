@@ -118,6 +118,10 @@ func (d *Desk) sight(name string, kind Kind, now time.Time) (it Item, gone bool,
 	}
 	sum := SHA256Hex(data)
 	meta, ok, err := d.readMeta(DirPending, name)
+	if errors.As(err, &r) {
+		it.State, it.Refusal = StateRefused, r.reason
+		return it, false, nil
+	}
 	if err != nil {
 		return it, false, err
 	}

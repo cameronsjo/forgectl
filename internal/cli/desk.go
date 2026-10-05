@@ -99,8 +99,8 @@ func newDeskCmd(deps module.Deps) *cobra.Command {
 		Use:   "desk",
 		Short: "Operator queue: scripts Claude stages for you to approve and run",
 		Long: `desk is a queue of scripts Claude will not run itself. Claude stages an item
-with ` + "`desk add`" + `; you read it on the dashboard and press y to run it, or s to
-skip it. Each item's sha256 is fixed when it is queued, and an item whose bytes
+with ` + "`desk add`" + `; you read it on the dashboard and press y to run it (y
+again at a prompt showing its full sha256), or s to skip it. Each item's sha256 is fixed when it is queued, and an item whose bytes
 change afterwards is skipped as "changed" instead of run.
 
   forgectl desk                  the dashboard (needs a terminal)
@@ -117,8 +117,9 @@ The desk directory is --dir, else $DESK_DIR, else $CLAUDE_DESK_DIR, else
 $XDG_STATE_HOME/forgectl/desk (~/.local/state/forgectl/desk). Only its
 pending/, running/, done/ and skipped/ subdirectories are touched.
 
-Dashboard keys: y run, s skip (asks first), u undo a skip, v view the script,
-l the latest log, a run everything on screen (asks first), j/k move, q quit.
+Dashboard keys: y run (asks first, with the full sha256), s skip (asks first),
+u undo a skip, v view the script, l the latest log, a run everything on screen
+(asks first, with each full sha256), j/k move, q quit.
 
 The desk defends against accidents (an item edited after it was queued, an item
 run twice, hostile text in a header); it does not defend against another
@@ -158,12 +159,19 @@ func newDeskAddCmd(dir *string) *cobra.Command {
 		Short: "Queue a script (.sh) or batch manifest (.manifest) for the operator",
 		Long: `add copies FILE into pending/ as the next NN-<name>, with "# WHAT:" and
 "# WHY:" header lines inserted (after a shebang), and fixes its sha256. It
-prints name= and sha256= lines; report the sha256 to the operator, who sees the
-same hash on the dashboard.
+prints name=, kind= and sha256= lines. Report the name and the sha256 to the
+operator: the dashboard's focus panel shows the selected item's first 12 hex
+characters ("17 merge-1201 · sha256 3f1a9c0d2b7e · unchanged since queued
+12m ago"), and y asks again with the full hash before anything runs.
 
-FILE "-" reads the item from stdin; --name then gives its file name
-(deploy.sh, nightly.manifest), whose extension picks the kind. stdin must not be
-a terminal.
+--what and --why are one line of plain text each: a control character
+(newline, CR, ESC, C1) or a bidi control exits 2. The file must not already
+carry a "# WHAT:" or "# WHY:" line.
+
+FILE must be a regular file (a symlink to one is followed); a FIFO or device is
+refused, never read. FILE "-" reads the item from stdin; --name then gives its
+file name (deploy.sh, nightly.manifest), whose extension picks the kind. stdin
+must not be a terminal.
 
 A .manifest is checked like ` + "`desk plan`" + ` before it is queued: a manifest that cannot
 run is refused, and its warnings are printed as warning: lines on stderr.
@@ -171,8 +179,9 @@ run is refused, and its warnings are printed as warning: lines on stderr.
 --tty marks a script that needs the terminal (a password prompt, sudo); it runs
 in the dashboard's own pane. A batch cannot be a TTY item.
 
-Exit codes: 0 queued; 1 refused (unreadable file, bad manifest, name taken);
-2 usage (missing or empty --what/--why, a bad --name).`,
+Exit codes: 0 queued; 1 refused (unreadable or non-regular file, bad
+manifest, no free number); 2 usage (missing, empty or unsafe --what/--why, a
+bad --name).`,
 		Example: `  forgectl desk add ./merge-1201.sh --what "Merge PR 1201 once green" --why "You own merges"
   printf 'echo hi\n' | forgectl desk add - --name hi.sh --what "Say hi" --why "A test"`,
 		Args: cobra.ExactArgs(1),
@@ -188,6 +197,18 @@ Exit codes: 0 queued; 1 refused (unreadable file, bad manifest, name taken);
 	return cmd
 }
 
+// checkFlagText refuses text the desk writes into a script or its meta when
+// it carries a control character (a newline, CR, ESC, C1) or a bidi control:
+// the desk shows it escaped, but cat or an editor would not.
+func checkFlagText(flag, v string) error {
+	for _, r := range v {
+		if termsafe.IsUnsafeTerminalRune(r) {
+			return deskUsage("desk: %s must be one line of plain text (no control or bidi characters)", flag)
+		}
+	}
+	return nil
+}
+
 // checkAddFlags is add's usage check, before anything is read.
 func checkAddFlags(file string, o deskAddOpts) error {
 	if strings.TrimSpace(o.what) == "" {
@@ -195,6 +216,12 @@ func checkAddFlags(file string, o deskAddOpts) error {
 	}
 	if strings.TrimSpace(o.why) == "" {
 		return deskUsage("desk add: --why is required and must not be empty (one line: why it needs the operator)")
+	}
+	if err := checkFlagText("--what", o.what); err != nil {
+		return err
+	}
+	if err := checkFlagText("--why", o.why); err != nil {
+		return err
 	}
 	switch {
 	case file == "-" && o.name == "":
@@ -314,10 +341,11 @@ func newDeskSkipCmd(dir *string) *cobra.Command {
 		Long: `skip moves a waiting item to skipped/ (the dashboard's u can return it), or a
 lost run (its supervisor is gone with no RUN-END) out of running/, which is the
 only way a lost run leaves it; a lost run cannot be re-armed. A live run is
-refused. R is kept as the item's skip_note.
+refused. The --reason text (one line of plain text, at most 200 characters)
+is kept as the item's skip_note, with skipped_by "cli" and the time.
 
 Exit codes: 0 skipped; 1 no such item, or it is running, or another desk took
-it first; 2 usage.`,
+it first; 2 usage (an empty, long or unsafe --reason).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDeskSkip(cmd, *dir, args[0], reason)

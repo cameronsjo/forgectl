@@ -50,22 +50,16 @@ func lookAbs(name string) (string, error) {
 	return filepath.Abs(p)
 }
 
-// selfBinary is how the desk pane names forgectl: "forgectl" when that is
-// what PATH finds (so an upgrade is picked up on the next run), else this
-// binary's absolute path.
-func selfBinary() string {
+// selfBinary is the absolute path of the running forgectl, which the desk
+// pane runs: the pane's own shell may find another build on its PATH, and the
+// desk is the approval screen, so it must be this one. An upgrade replaces
+// the binary at that path.
+func selfBinary() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
-		return "forgectl"
+		return "", fmt.Errorf("locate this forgectl binary: %w", err)
 	}
-	if onPath, err := osexec.LookPath("forgectl"); err == nil {
-		a, errA := filepath.EvalSymlinks(onPath)
-		b, errB := filepath.EvalSymlinks(exe)
-		if errA == nil && errB == nil && a == b {
-			return "forgectl"
-		}
-	}
-	return exe
+	return exe, nil
 }
 
 func newDeskLayoutCmd(deps module.Deps, dir *string) *cobra.Command {
@@ -81,7 +75,10 @@ CMD in a pane below the desk. The new panes are named "desk" and "progress";
 this pane keeps the focus.
 
 CMD is typed into the progress pane's shell as it is, so quote it for a shell.
-The desk pane runs forgectl desk --dir <the resolved desk directory>.
+The desk pane runs this forgectl by its absolute path: <path> desk --dir <the
+resolved desk directory>. herdr names panes only by id, and ids renumber, so
+before each rename and run the pane is found again by its terminal and a read
+confirms the id still holds it; a mismatch stops the layout.
 
 It must run inside a herdr pane (HERDR_ENV=1, with HERDR_PANE_ID set).
 
@@ -137,7 +134,11 @@ func runDeskLayout(cmd *cobra.Command, deps module.Deps, dirFlag, progress strin
 	if err != nil {
 		return deskUsage("desk layout: the desk directory %w", err)
 	}
-	qbin, err := shellQuote(deskSelfBinary())
+	self, err := deskSelfBinary()
+	if err != nil {
+		return fmt.Errorf("desk layout: %w", err)
+	}
+	qbin, err := shellQuote(self)
 	if err != nil {
 		return fmt.Errorf("desk layout: the forgectl path %w", err)
 	}
@@ -179,14 +180,8 @@ func runDeskLayout(cmd *cobra.Command, deps module.Deps, dirFlag, progress strin
 		}
 		panes = append(panes, struct{ terminal, label, command string }{prog.TerminalID, "progress", progress})
 	}
-	// Ids renumber, so each pane is found again by terminal right before
-	// each call that names it.
 	act := func(terminal string, fn func(ctx context.Context, paneID string) error) (string, error) {
-		p, err := client.PaneByTerminal(ctx, terminal)
-		if err != nil {
-			return "", err
-		}
-		return p.PaneID, fn(ctx, p.PaneID)
+		return actOnTerminal(ctx, client, terminal, fn)
 	}
 	for _, p := range panes {
 		if _, err := act(p.terminal, func(ctx context.Context, id string) error {
@@ -207,6 +202,40 @@ func runDeskLayout(cmd *cobra.Command, deps module.Deps, dirFlag, progress strin
 	}
 	w.printf("columns=%d of %d\n", columns, layout.Area.Width)
 	return w.err
+}
+
+// actOnTerminal runs fn against the pane that holds terminal. herdr can only
+// target a pane by id, and ids renumber when a pane in the workspace closes,
+// so the id is found again by terminal right before the call and then
+// confirmed with a read of that id. A mismatch aborts before fn, naming
+// both terminals.
+//
+// A window remains: a pane closing between the confirming read and fn's own
+// herdr call can still renumber the id, and herdr has no terminal-addressed
+// `pane run`. The read after fn reports that case instead of passing it by
+// silently, though by then the command has been typed.
+func actOnTerminal(ctx context.Context, client *herdr.Client, terminal string, fn func(ctx context.Context, paneID string) error) (string, error) {
+	p, err := client.PaneByTerminal(ctx, terminal)
+	if err != nil {
+		return "", err
+	}
+	check := func(when string) error {
+		got, err := client.PaneGet(ctx, p.PaneID)
+		if err != nil {
+			return fmt.Errorf("re-read pane %s %s: %w", p.PaneID, when, err)
+		}
+		if got.TerminalID != terminal {
+			return fmt.Errorf("pane %s holds terminal %s %s, not %s; stopping", p.PaneID, safeLabel(got.TerminalID), when, safeLabel(terminal))
+		}
+		return nil
+	}
+	if err := check("before the call"); err != nil {
+		return "", err
+	}
+	if err := fn(ctx, p.PaneID); err != nil {
+		return p.PaneID, err
+	}
+	return p.PaneID, check("after the call (the command may have reached that terminal)")
 }
 
 // printLayoutPlan is --dry-run: what the layout would do, one key=value line

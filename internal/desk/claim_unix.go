@@ -422,6 +422,10 @@ func (d *Desk) skip(name, reason, note, by string) (string, error) {
 		}
 		defer func() { lock.release(moved) }()
 		meta, ok, err := d.readMeta(DirRunning, name)
+		if errors.Is(err, ErrRefused) {
+			// An unreadable hash: judge it as a run with no owner recorded.
+			meta, ok, err = Meta{}, true, nil
+		}
 		if err != nil {
 			return "", err
 		}
@@ -440,6 +444,11 @@ func (d *Desk) skip(name, reason, note, by string) (string, error) {
 		return "", err
 	}
 	meta, _, err := d.readMeta(from, name)
+	if errors.Is(err, ErrRefused) {
+		// An unreadable hash must not keep the item from being skipped: the
+		// skipped meta starts fresh.
+		meta, err = Meta{}, nil
+	}
 	if err != nil {
 		return "", err
 	}

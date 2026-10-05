@@ -156,16 +156,7 @@ func runDeskAdd(cmd *cobra.Command, dirFlag, file string, o deskAddOpts) error {
 	if err != nil {
 		return err
 	}
-	var warnings []string
-	if a.Kind == desk.KindBatch {
-		// Add validated the manifest; read the queued bytes back for its
-		// warnings, which do not stop it.
-		if data, err := os.ReadFile(a.Path); err == nil { //nolint:gosec // G304: the item Add just wrote under the desk
-			if m, err := desk.LoadManifest(data, a.Name); err == nil {
-				warnings = m.Lint()
-			}
-		}
-	}
+	warnings := a.Warnings
 	if warnings == nil {
 		warnings = []string{}
 	}
@@ -259,17 +250,11 @@ func runDeskPlan(cmd *cobra.Command, dirFlag, target string, asJSON bool) error 
 // readPlanTarget reads a manifest file, or a desk item by name.
 func readPlanTarget(dirFlag, target string) (label string, data []byte, err error) {
 	if strings.HasSuffix(target, ".manifest") || strings.Contains(target, "/") {
-		f, err := os.Open(target) //nolint:gosec // G304: reading the file the caller named is the operation
+		// The core's reader: capped, and a FIFO or device is refused, not
+		// read (a blocking open would hang).
+		data, err := desk.ReadSource(target)
 		if err != nil {
-			return "", nil, fmt.Errorf("desk plan: %w", err)
-		}
-		defer f.Close() //nolint:errcheck // read-only
-		data, err := io.ReadAll(io.LimitReader(f, deskMaxItemBytes+1))
-		if err != nil {
-			return "", nil, fmt.Errorf("desk plan: %w", err)
-		}
-		if len(data) > deskMaxItemBytes {
-			return "", nil, errors.New("desk plan: the file is larger than 1 MiB")
+			return "", nil, err
 		}
 		return filepath.Base(target), data, nil
 	}
@@ -328,6 +313,8 @@ type deskItemJSON struct {
 	ExitCode        *int       `json:"exit_code"`
 	SkipReason      string     `json:"skip_reason"`
 	SkipNote        string     `json:"skip_note"`
+	SkippedBy       string     `json:"skipped_by"`
+	SkippedAt       *time.Time `json:"skipped_at"`
 	Refusal         string     `json:"refusal"`
 	PID             int        `json:"pid"`
 }
@@ -374,7 +361,7 @@ func itemView(it desk.Item, now time.Time) deskItemJSON {
 		Name: it.Name, Number: it.Number, Kind: string(it.Kind), State: string(it.State),
 		What: it.What, Why: it.Why, TTY: it.TTY, SHA256: it.Meta.SHA256,
 		AddedAt: it.Meta.AddedAt, Stale: it.Stale, ExitCode: it.ExitCode,
-		SkipReason: it.Meta.SkipReason, SkipNote: it.Meta.SkipNote, Refusal: it.Refusal, PID: it.Meta.PID,
+		SkipReason: it.Meta.SkipReason, SkipNote: it.Meta.SkipNote, SkippedBy: it.Meta.SkippedBy, SkippedAt: it.Meta.SkippedAt, Refusal: it.Refusal, PID: it.Meta.PID,
 	}
 	if !it.Started.IsZero() {
 		t := it.Started.UTC()
@@ -444,7 +431,7 @@ func runDeskStatus(cmd *cobra.Command, dirFlag, name string, asJSON bool) error 
 		safeText(snap.Dir), len(snap.Pending), len(snap.Running), len(snap.Done), len(snap.Skipped))
 	for _, group := range [][]desk.Item{snap.Pending, snap.Running} {
 		for _, it := range group {
-			w.printf("%s\n", statusLine(itemView(it, now)))
+			w.printf("%s\n", safeText(statusLine(itemView(it, now))))
 		}
 	}
 	for i, it := range snap.Done {
@@ -452,10 +439,10 @@ func runDeskStatus(cmd *cobra.Command, dirFlag, name string, asJSON bool) error 
 			w.printf("… %d older done items (--json lists all)\n", len(snap.Done)-deskStatusDone)
 			break
 		}
-		w.printf("%s\n", statusLine(itemView(it, now)))
+		w.printf("%s\n", safeText(statusLine(itemView(it, now))))
 	}
 	for _, it := range snap.Skipped {
-		w.printf("%s\n", statusLine(itemView(it, now)))
+		w.printf("%s\n", safeText(statusLine(itemView(it, now))))
 	}
 	return w.err
 }
@@ -487,6 +474,9 @@ func statusLine(v deskItemJSON) string {
 	}
 	if v.SkipReason != "" {
 		parts = append(parts, "reason="+termsafe.SafeLineMax(v.SkipReason, deskQuoteMax))
+	}
+	if v.SkippedBy != "" {
+		parts = append(parts, "by="+termsafe.SafeLineMax(v.SkippedBy, deskQuoteMax))
 	}
 	if v.SkipNote != "" {
 		parts = append(parts, "note="+strconv.Quote(termsafe.SafeLineMax(v.SkipNote, deskQuoteMax)))
@@ -558,7 +548,9 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 	}
 	v := res.Item
 	w := &stickyWriter{w: out}
-	kv := func(k, val string) { w.printf("%s=%s\n", k, val) }
+	// Every value goes through safeText, even ones the desk validated:
+	// this is a print site for meta read from disk.
+	kv := func(k, val string) { w.printf("%s=%s\n", k, safeText(val)) }
 	kv("name", v.Name)
 	kv("state", v.State)
 	kv("kind", v.Kind)
@@ -569,7 +561,7 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 	for _, t := range []struct {
 		k string
 		v *time.Time
-	}{{"added", v.AddedAt}, {"started", v.StartedAt}, {"ended", v.EndedAt}} {
+	}{{"added", v.AddedAt}, {"started", v.StartedAt}, {"ended", v.EndedAt}, {"skipped_at", v.SkippedAt}} {
 		if t.v != nil {
 			kv(t.k, t.v.UTC().Format(time.RFC3339))
 		}
@@ -582,7 +574,7 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 	if v.Stale {
 		kv("stale", "true")
 	}
-	for _, f := range []struct{ k, v string }{{"skip_reason", v.SkipReason}, {"skip_note", v.SkipNote}, {"refusal", v.Refusal}} {
+	for _, f := range []struct{ k, v string }{{"skip_reason", v.SkipReason}, {"skipped_by", v.SkippedBy}, {"skip_note", v.SkipNote}, {"refusal", v.Refusal}} {
 		if f.v != "" {
 			kv(f.k, safeText(f.v))
 		}
@@ -608,7 +600,7 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 			if st.Reason != "" {
 				line += " reason=" + safeText(st.Reason)
 			}
-			w.printf("%s\n", line)
+			w.printf("%s\n", safeText(line))
 		}
 		return w.err
 	}
@@ -617,7 +609,7 @@ func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name stri
 		if st.RC != nil {
 			line += " rc=" + strconv.Itoa(*st.RC)
 		}
-		w.printf("%s\n", line)
+		w.printf("%s\n", safeText(line))
 	}
 	return w.err
 }
@@ -642,11 +634,26 @@ func runDeskWatch(cmd *cobra.Command, dirFlag, name string, deadline, skip int) 
 	if err := checkDeskName(name); err != nil {
 		return err
 	}
+	// The resume= line must name the same desk; a --dir that cannot be
+	// written as one shell word is refused now, not dropped from it later.
+	if dirFlag != "" {
+		dir, err := resolveDeskDir(dirFlag)
+		if err != nil {
+			return err
+		}
+		if _, err := shellQuote(dir); err != nil {
+			return deskUsage("desk watch: --dir %w, so a resume= line could not name it", err)
+		}
+	}
 	d, err := openDeskDir(dirFlag)
 	if err != nil {
 		return err
 	}
 	defer d.Close() //nolint:errcheck // read side
+	// A write to a closed stdout must come back as EPIPE, not kill the
+	// process with SIGPIPE before it can say where to resume.
+	signal.Ignore(syscall.SIGPIPE)
+	defer signal.Reset(syscall.SIGPIPE)
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	watchCtx, stopWatch := context.WithCancel(ctx)
@@ -742,11 +749,11 @@ func watchResume(name string, seen, deadline int, dirFlag string) string {
 		s += " --deadline " + strconv.Itoa(deadline)
 	}
 	if dirFlag != "" {
-		if dir, err := resolveDeskDir(dirFlag); err == nil {
-			if q, err := shellQuote(dir); err == nil {
-				s += " --dir " + q
-			}
-		}
+		// runDeskWatch refused a --dir that cannot be quoted before it
+		// started, so neither step fails here.
+		dir, _ := resolveDeskDir(dirFlag)
+		q, _ := shellQuote(dir)
+		s += " --dir " + q
 	}
 	return s
 }
@@ -759,8 +766,11 @@ func runDeskSkip(cmd *cobra.Command, dirFlag, name, reason string) error {
 	if reason == "" {
 		return deskUsage("desk skip: --reason is required and must not be empty")
 	}
-	if strings.ContainsAny(reason, "\r\n") || len([]rune(reason)) > desk.SkipNoteMax {
-		return deskUsage("desk skip: --reason must be one line of at most %d characters", desk.SkipNoteMax)
+	if err := checkFlagText("--reason", reason); err != nil {
+		return err
+	}
+	if len([]rune(reason)) > desk.SkipNoteMax {
+		return deskUsage("desk skip: --reason must be at most %d characters", desk.SkipNoteMax)
 	}
 	d, err := openDeskDir(dirFlag)
 	if err != nil {

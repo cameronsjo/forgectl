@@ -4,7 +4,10 @@ package desk
 
 import (
 	"context"
+	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -70,5 +73,41 @@ func TestSkipNoted(t *testing.T) {
 	}
 	if err := d.Unskip(c.Name); err == nil {
 		t.Error("a lost run was re-armed")
+	}
+}
+
+// A meta whose sha256 is not 64 lowercase hex characters is refused, and the
+// item reads as refused rather than being compared or printed. A skip still
+// works and replaces the bad meta.
+func TestReadMetaRefusesAMalformedHash(t *testing.T) {
+	d := openDesk(t)
+	dropPending(t, d, "01-x.sh", script)
+	writeFile(t, filepath.Join(d.Path(), DirPending, "01-x.meta.json"), `{"sha256":"\u001b]0;T\u0007`+strings.Repeat("a", 50)+`"}`, 0o600)
+	if _, _, err := d.readMeta(DirPending, "01-x"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("readMeta = %v, want ErrRefused", err)
+	}
+	s := scan(t, d)
+	if len(s.Pending) != 1 || s.Pending[0].State != StateRefused || s.Pending[0].Meta.SHA256 != "" {
+		t.Fatalf("pending = %+v, want one refused item with no hash", s.Pending)
+	}
+	if _, err := d.SkipNoted("01-x", "bad meta"); err != nil {
+		t.Fatalf("SkipNoted: %v", err)
+	}
+	m, ok, err := d.readMeta(DirSkipped, "01-x")
+	if err != nil || !ok || m.SkippedBy != SkippedByCLI || m.SkippedAt == nil {
+		t.Errorf("skipped meta = %+v, %v, %v", m, ok, err)
+	}
+}
+
+// ReadSummary refuses a summary.json naming a step that is not a step id.
+func TestReadSummaryRefusesABadStepID(t *testing.T) {
+	d := openDesk(t)
+	writeFile(t, filepath.Join(d.Path(), DirDone, "01-b.d", "summary.json"), `{"id":"01-b","steps":[{"id":"ok1"},{"id":"\u001b[2J"}]}`, 0o600)
+	if _, err := d.ReadSummary("01-b"); !errors.Is(err, ErrRefused) {
+		t.Errorf("ReadSummary = %v, want ErrRefused", err)
+	}
+	writeFile(t, filepath.Join(d.Path(), DirDone, "01-b.d", "summary.json"), `{"id":"01-b","steps":[{"id":"ok1"}]}`, 0o600)
+	if _, err := d.ReadSummary("01-b"); err != nil {
+		t.Errorf("ReadSummary of a good summary: %v", err)
 	}
 }

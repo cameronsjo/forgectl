@@ -27,6 +27,9 @@ type fakeHerdrTab struct {
 	mu        sync.Mutex
 	terminals []string // in creation order; pane i is "w1:p<i+gen>"
 	gen       int
+	// getTerminal, when set, overrides the terminal `pane get` reports for
+	// an id: a pane renumbered between the list and the confirming read.
+	getTerminal func(id string) string
 }
 
 func (f *fakeHerdrTab) paneID(term string) string {
@@ -51,6 +54,18 @@ func (f *fakeHerdrTab) runner(t *testing.T) *exec.FakeRunner {
 	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if len(args) == 3 && args[0] == "pane" && args[1] == "get" {
+			for _, p := range f.panes() {
+				if p.PaneID == args[2] {
+					if f.getTerminal != nil {
+						p.TerminalID = f.getTerminal(p.PaneID)
+					}
+					b, _ := json.Marshal(map[string]any{"id": "x", "result": map[string]any{"pane": p}})
+					return string(b), nil
+				}
+			}
+			return "", fmt.Errorf("no pane %s", args[2])
+		}
 		switch strings.Join(args, " ") {
 		case "pane layout --current":
 			return `{"id":"x","result":{"layout":{"area":{"x":0,"y":0,"width":175,"height":59},"tab_id":"w1:t1","workspace_id":"w1","focused_pane_id":"w1:p0"}}}`, nil
@@ -109,7 +124,7 @@ func stubLayout(t *testing.T, env map[string]string) {
 	deskLookupEnv = func(k string) (string, bool) { v, ok := env[k]; return v, ok }
 	deskHerdrPath = func() (string, error) { return "/opt/test/bin/herdr", nil }
 	deskGetwd = func() (string, error) { return "/work/repo", nil }
-	deskSelfBinary = func() string { return "forgectl" }
+	deskSelfBinary = func() (string, error) { return "/opt/test/bin/forgectl", nil }
 	t.Cleanup(func() { deskLookupEnv, deskHerdrPath, deskGetwd, deskSelfBinary = prevEnv, prevPath, prevWd, prevSelf })
 }
 
@@ -169,7 +184,7 @@ func TestDeskLayout_BuildsThePanes(t *testing.T) {
 			exec.MustFixed("--cwd"), exec.Opaque("/work/repo"), exec.MustFixed("--no-focus")),
 		cmd(exec.KindHerdrPaneRename, exec.MustFixed("rename"), exec.Opaque("w1:p41"), exec.Opaque("desk")),
 		cmd(exec.KindHerdrPaneRename, exec.MustFixed("rename"), exec.Opaque("w1:p42"), exec.Opaque("progress")),
-		cmd(exec.KindHerdrPaneRun, exec.MustFixed("run"), exec.Opaque("w1:p41"), exec.Opaque("forgectl desk --dir '/state/my desk'")),
+		cmd(exec.KindHerdrPaneRun, exec.MustFixed("run"), exec.Opaque("w1:p41"), exec.Opaque("/opt/test/bin/forgectl desk --dir '/state/my desk'")),
 		cmd(exec.KindHerdrPaneRun, exec.MustFixed("run"), exec.Opaque("w1:p42"), exec.Opaque("claude-desk progress")),
 	}
 	for i, w := range wantCalls {
@@ -179,6 +194,27 @@ func TestDeskLayout_BuildsThePanes(t *testing.T) {
 	}
 	if out != "desk=w1:p41\nprogress=w1:p42\ncolumns=67 of 175\n" {
 		t.Errorf("output = %q", out)
+	}
+}
+
+// A pane id that holds another terminal by the time it is read back stops
+// the layout before the command is typed, naming both terminals.
+func TestDeskLayout_StopsWhenTheIDHoldsAnotherTerminal(t *testing.T) {
+	newDeskDir(t)
+	inHerdr(t, "w1:p0")
+	tab := &fakeHerdrTab{terminals: []string{"term_claude"}}
+	tab.getTerminal = func(string) string { return "term_claude" }
+	run := tab.sensitive()
+	deps := module.Deps{Theme: theme.Default(), Runner: tab.runner(t), SensitiveRunner: run}
+	_, _, err := deskRun(t, deps, "layout")
+	wantExit(t, err, 1)
+	if !strings.Contains(err.Error(), "holds terminal term_claude before the call, not term_1") {
+		t.Errorf("err = %v", err)
+	}
+	for _, c := range run.Calls() {
+		if c.Kind == exec.KindHerdrPaneRun || c.Kind == exec.KindHerdrPaneRename {
+			t.Errorf("%s ran against a pane that holds another terminal", c.Kind)
+		}
 	}
 }
 
@@ -226,7 +262,7 @@ split=desk from=current direction=right ratio=0.62
 split=progress from=desk direction=down ratio=0.40
 rename=desk
 rename=progress
-run.desk=forgectl desk --dir '/state/my desk'
+run.desk=/opt/test/bin/forgectl desk --dir '/state/my desk'
 run.progress=claude-desk progress
 columns=67 of 175
 `

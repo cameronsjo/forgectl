@@ -11,7 +11,8 @@ import (
 )
 
 // The desk is built on openat, O_NOFOLLOW, process sessions and groups, so
-// off Unix every verb but `layout` refuses before touching anything.
+// off Unix every verb refuses before touching anything (`layout` through
+// deskSupported, the rest here).
 
 func runDeskDashboard(*cobra.Command, module.Deps, string, bool) error {
 	return errDeskUnsupported()

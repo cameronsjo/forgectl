@@ -330,6 +330,11 @@ func (d *Desk) readMeta(sub, name string) (m Meta, ok bool, err error) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return Meta{}, false, fmt.Errorf("desk: parse %s: %w", describe(p), err)
 	}
+	if m.SHA256 != "" && !ValidSHA256(m.SHA256) {
+		// The hash is printed and compared; one that is not hex could carry
+		// terminal escapes into `desk status`. The item is refused instead.
+		return Meta{}, false, &refusal{reason: "its meta's sha256 is not 64 lowercase hex characters"}
+	}
 	return m, true, nil
 }
 

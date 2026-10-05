@@ -5,11 +5,15 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -449,37 +453,158 @@ func TestDeskWatch_SkippedAndMissing(t *testing.T) {
 	wantExit(t, err, deskExitUsage)
 }
 
-// failAfter accepts n writes, then fails every write like a closed pipe.
-type failAfter struct{ n int }
+// deskWatchHelperEnv makes the test binary run one desk command as a child
+// process, with the real stdout: the args are its JSON value.
+const deskWatchHelperEnv = "FORGECTL_DESK_CLI_HELPER"
 
-func (f *failAfter) Write(p []byte) (int, error) {
-	if f.n <= 0 {
-		return 0, syscall.EPIPE
+func TestDeskCLIHelperProcess(t *testing.T) {
+	raw := os.Getenv(deskWatchHelperEnv)
+	if raw == "" {
+		t.Skip("runs only as a child of a desk CLI test")
 	}
-	f.n--
-	return len(p), nil
+	var args []string
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		t.Fatal(err)
+	}
+	err := deskRunTo(t, deskDeps(), os.Stdout, os.Stderr, args...)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(ExitCode(err))
+	}
+	os.Exit(0)
 }
 
-// A watch whose reader went away stops at once with 141, even though the run
-// it watches is still going, and names the resume point on stderr.
-func TestDeskWatch_StdoutClosedExits141(t *testing.T) {
-	fastWatch(t)
+// A watch whose reader closed the pipe stops at once with 141 and names the
+// resume point on stderr, even though the run it watches is still going.
+// The child writes to a real closed pipe on fd 1, the case where Go would
+// otherwise kill it with SIGPIPE before it said anything.
+func TestDeskWatch_ClosedPipeExits141(t *testing.T) {
 	dir := newDeskDir(t)
 	name, sha := queueItem(t, "live.sh", "true\n")
 	run := startRun(t, openTestDesk(t, dir), name, sha, os.Getpid())
 	t.Cleanup(func() { _ = run.Finish(0, "ok") })
 
-	var errOut bytes.Buffer
-	done := make(chan error, 1)
-	go func() { done <- deskRunTo(t, deskDeps(), &failAfter{}, &errOut, "watch", name) }()
-	select {
-	case err := <-done:
-		wantExit(t, err, deskExitBrokenPipe)
-		if !strings.Contains(err.Error(), "resume with forgectl desk watch "+name+" --skip 0") {
-			t.Errorf("err = %v, want the resume point", err)
+	args, err := json.Marshal([]string{"watch", "--dir", dir, name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	cmd := osexec.CommandContext(ctx, os.Args[0], "-test.run=^TestDeskCLIHelperProcess$") //nolint:gosec // G204: the test binary itself
+	cmd.Env = append(os.Environ(), deskWatchHelperEnv+"="+string(args))
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	first, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil || !strings.HasPrefix(first, "RUN-START id="+name) {
+		t.Fatalf("first line %q, %v", first, err)
+	}
+	if err := stdout.Close(); err != nil { // the monitor goes away
+		t.Fatal(err)
+	}
+	if err := run.Events.Emit("STEP-WARN id=x msg=after the reader left"); err != nil {
+		t.Fatal(err)
+	}
+	err = cmd.Wait()
+	var ee *osexec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("wait = %v, want an exit status", err)
+	}
+	if got := ee.ExitCode(); got != deskExitBrokenPipe {
+		t.Fatalf("exit = %d (%v), want %d; stderr %q", got, ee, deskExitBrokenPipe, stderr.String())
+	}
+	if want := "resume with forgectl desk watch " + name + " --skip 1"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+// A FIFO given to add or plan is refused at once, never read (a blocking
+// read would hang the agent's tool call).
+func TestDeskAddAndPlanRefuseAFIFO(t *testing.T) {
+	newDeskDir(t)
+	tmp := t.TempDir()
+	for _, f := range []string{"pipe.sh", "pipe.manifest"} {
+		if err := syscall.Mkfifo(filepath.Join(tmp, f), 0o600); err != nil {
+			t.Fatal(err)
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("watch kept running after stdout closed")
+	}
+	for _, args := range [][]string{
+		{"add", filepath.Join(tmp, "pipe.sh"), "--what", "w", "--why", "y"},
+		{"plan", filepath.Join(tmp, "pipe.manifest")},
+	} {
+		done := make(chan error, 1)
+		go func() { _, _, err := deskRun(t, deskDeps(), args...); done <- err }()
+		select {
+		case err := <-done:
+			wantExit(t, err, 1)
+			if !errors.Is(err, desk.ErrRefused) {
+				t.Errorf("%v: err = %v, want ErrRefused", args, err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%v hung on a FIFO", args)
+		}
+	}
+}
+
+// Text that becomes a script header or a skip note is plain: a control or
+// bidi character exits 2, CR included.
+func TestDeskFlagTextRefusesControls(t *testing.T) {
+	newDeskDir(t)
+	src := writeTemp(t, "x.sh", "true\n")
+	for _, bad := range []string{"a\x1b[31mred", "a\rb", "a\nb", "a\u0085b", "a\u202eb"} {
+		_, _, err := deskRun(t, deskDeps(), "add", src, "--what", bad, "--why", "y")
+		wantExit(t, err, deskExitUsage)
+		_, _, err = deskRun(t, deskDeps(), "add", src, "--what", "w", "--why", bad)
+		wantExit(t, err, deskExitUsage)
+	}
+	name, _ := queueItem(t, "s.sh", "true\n")
+	_, _, err := deskRun(t, deskDeps(), "skip", name, "--reason", "x\x1b]0;t\a")
+	wantExit(t, err, deskExitUsage)
+}
+
+// A --dir that cannot be one shell word is refused before the watch starts,
+// rather than dropped from the resume= line.
+func TestDeskWatch_RefusesADirItCannotResume(t *testing.T) {
+	stubDeskEnv(t, map[string]string{})
+	_, _, err := deskRun(t, deskDeps(), "watch", "01-x", "--dir", filepath.Join(t.TempDir(), "desk\x01e"), "--deadline", "1")
+	wantExit(t, err, deskExitUsage)
+	if !strings.Contains(err.Error(), "resume= line") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// The review's probe: a meta file whose sha256 carries a terminal escape.
+// readMeta refuses it, so `desk status` never prints it, in the list or the
+// detail, whether the item is pending or skipped.
+func TestDeskStatus_EscapeInSHAIsNeverPrinted(t *testing.T) {
+	dir := newDeskDir(t)
+	openTestDesk(t, dir) // lay out the protocol dirs
+	hostile := `{"sha256":"\u001b]0;PWNED\u0007` + strings.Repeat("a", 40) + `","kind":"script"}`
+	for _, sub := range []string{desk.DirPending, desk.DirSkipped} {
+		name := map[string]string{desk.DirPending: "01-evil", desk.DirSkipped: "02-evil"}[sub]
+		if err := os.WriteFile(filepath.Join(dir, sub, name+".sh"), []byte("# WHAT: x\n# WHY: y\ntrue\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, sub, name+".meta.json"), []byte(hostile), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range [][]string{{"status"}, {"status", "01-evil"}, {"status", "02-evil"}, {"status", "--json"}} {
+		out, _, err := deskRun(t, deskDeps(), args...)
+		wantExit(t, err, 0)
+		if strings.ContainsAny(out, "\x1b\a") || strings.Contains(out, "PWNED") {
+			t.Errorf("%v printed the hostile hash: %q", args, out)
+		}
+	}
+	out, _, _ := deskRun(t, deskDeps(), "status", "01-evil")
+	if !strings.Contains(out, "state=refused\n") || !strings.Contains(out, "refusal=its meta's sha256 is not 64 lowercase hex characters\n") {
+		t.Errorf("the item with the hostile meta should read as refused: %q", out)
 	}
 }
 
@@ -512,7 +637,7 @@ func TestDeskSkip(t *testing.T) {
 
 	out, _, err = deskRun(t, deskDeps(), "status", waiting)
 	wantExit(t, err, 0)
-	if !strings.Contains(out, "skip_reason=operator\nskip_note=superseded by 03\n") {
+	if !strings.Contains(out, "skip_reason=operator\nskipped_by=cli\nskip_note=superseded by 03\n") || !strings.Contains(out, "\nskipped_at=") {
 		t.Errorf("detail = %q", out)
 	}
 }

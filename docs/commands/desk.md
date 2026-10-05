@@ -1,6 +1,6 @@
 # desk
 
-An operator queue for scripts an agent stages but will not run itself. The agent queues an item with `forgectl desk add`; a person reads it on the dashboard and presses `y` to run it or `s` to skip it. Each item's sha256 is fixed when it is queued, and an item whose bytes change afterwards is skipped as `changed` instead of run.
+An operator queue for scripts an agent stages but will not run itself. The agent queues an item with `forgectl desk add`; a person reads it on the dashboard and presses `y` to run it (and `y` again at a prompt showing the full sha256) or `s` to skip it. Each item's sha256 is fixed when it is queued, and an item whose bytes change afterwards is skipped as `changed` instead of run.
 
 What the desk protects against, and what it does not, is [ADR-0012](../adr/0012-desk-threat-model.md) (defend against accidents, not against a same-uid process).
 
@@ -34,7 +34,7 @@ forgectl desk prune --days 30                   # delete done/ and skipped/ item
 
    It prints `name=`, `kind=` and `sha256=` lines.
 
-2. Report the name and the full sha256 to the person. The dashboard shows the same hash, so they can confirm that what they approve is what you described.
+2. Report the name and the full sha256 to the person. The dashboard's focus panel shows the selected item's first 12 hex characters (`17 merge-1201 · sha256 3f1a9c0d2b7e · unchanged since queued 12m ago`), and `y` asks again with the full hash before it runs anything, so they can confirm that what they approve is what you described.
 
 3. Watch the run under a monitor. `watch` waits while the item is pending, prints each event line, and exits with the run's outcome:
 
@@ -50,16 +50,16 @@ forgectl desk prune --days 30                   # delete done/ and skipped/ item
 
 ### `forgectl desk`
 
-The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with a bar per item, a focus panel showing the selected item's WHAT, WHY and first script lines, and the history of finished runs.
+The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with a bar per item, a focus panel showing the selected item's short sha256, WHAT, WHY and first script lines, and the history of finished runs.
 
 | Key | Action |
 |---|---|
-| `y` | run the selected item (a TTY item runs in this pane; anything else runs detached) |
+| `y` | run the selected item: asks first, showing its full sha256, and `y` again runs it (a TTY item runs in this pane; anything else runs detached) |
 | `s` | skip the selected item; asks first |
 | `u` | undo the last skip |
 | `v` | view the selected item's script |
 | `l` | view the latest log |
-| `a` | run every waiting item on screen, except TTY and changed items; asks first, and runs exactly the names and hashes shown |
+| `a` | run every waiting item on screen, except TTY and changed items; asks first, listing each item with its full sha256, and runs exactly those names and hashes |
 | `j` / `k` | move |
 | `q` | quit; detached runs keep running |
 
@@ -71,19 +71,21 @@ The dashboard rings the terminal bell when an item arrives, and again every 5 mi
 
 | Flag | Meaning |
 |---|---|
-| `--what TEXT` | what the script does, one line; required and non-empty |
-| `--why TEXT` | why it needs a person, one line; required and non-empty |
+| `--what TEXT` | what the script does, one line of plain text; required and non-empty |
+| `--why TEXT` | why it needs a person, one line of plain text; required and non-empty |
 | `--tty` | the script needs a terminal (a password prompt, `sudo`); it runs in the dashboard's own pane |
 | `--name FILE` | the file name for an item read from stdin (`<file>` is `-`), such as `deploy.sh` |
 | `--json` | print `{name, kind, sha256, path, warnings}` |
 
-The kind comes from the extension: `.sh` is a script, `.manifest` is a batch. The name is the next free `NN-` plus the file's base name. `# WHAT:`, `# WHY:` and (with `--tty`) `# TTY: yes` lines are inserted after a shebang before the hash is taken. A file that already carries one of those lines refuses the matching flag.
+The kind comes from the extension: `.sh` is a script, `.manifest` is a batch. The name is the next free `NN-` plus the file's base name. `# WHAT:`, `# WHY:` and (with `--tty`) `# TTY: yes` lines are inserted after a shebang before the hash is taken. `--what` and `--why` are required, so the file must not already carry a `# WHAT:` or `# WHY:` line: `add` refuses the duplicate. Neither may hold a control character (a newline, CR, ESC, or a C1 code) or a bidi control; they are written into the script, where `cat` and editors would show them raw.
 
 A `.manifest` is planned before it is queued: one that cannot run is refused, and its warnings are printed as `warning:` lines on stderr. A batch cannot be a TTY item.
 
 When `<file>` is `-`, stdin is read (at most 1 MiB) and must not be a terminal.
 
-Exit codes: 0 queued; 1 refused (an unreadable file, a manifest that cannot run, no free number); 2 a usage error (a missing or empty `--what` or `--why`, `--name` misused).
+`<file>` must be a regular file (a symlink to one is followed); a FIFO or device is refused at once, never read.
+
+Exit codes: 0 queued; 1 refused (an unreadable or non-regular file, a manifest that cannot run, no free number); 2 a usage error (a missing or empty `--what` or `--why`, a control or bidi character in either, `--name` misused).
 
 ### `forgectl desk plan <name|file>`
 
@@ -99,24 +101,27 @@ warning: gamma uses OUT_beta_key but beta is not an ancestor
 
 `--json` prints `{name, sha256, steps: [{id, after, timeout, private}], waves, order, warnings}`.
 
-Exit codes: 0 the manifest can run, with or without warnings; 1 it cannot, it is a script, or the item was not found; 2 a usage error.
+A file must be a regular file, as for `add`.
+
+Exit codes: 0 the manifest can run, with or without warnings; 1 it cannot, it is a script, it is not a regular file, or the item was not found; 2 a usage error.
 
 ### `forgectl desk status [name]`
 
 Without a name, one line per item: waiting and running items first, then the 20 most recent done items, then skipped items. `--json` lists every item under `pending`, `running`, `done` and `skipped`, plus `dir` and `taken`.
 
 ```text
-desk /home/me/.local/state/forgectl/desk: 1 waiting, 0 running, 2 done, 0 skipped
+desk /home/me/.local/state/forgectl/desk: 1 waiting, 0 running, 2 done, 1 skipped
 waiting  17-merge-1201  age=12m  sha256=3f1a9c0d2b7e  what="Merge PR 1201 once checks are green"
 done     16-cleanup  age=1h  exit=0  took=41s
 done     12-probe  age=3h  exit=1  took=18s
+skipped  14-merge-1199  sha256=9be04d1c77a2  reason=operator  by=cli  note="superseded by 17"
 ```
 
-A waiting item older than 24 hours is flagged `stale`. A running item whose owner is gone with no `RUN-END`, or a claimed item that recorded no owner within 60 seconds, shows as `lost`. A legacy done item whose log has no `EXIT=` line shows `no-exit-recorded`.
+A waiting item older than 24 hours is flagged `stale`. A running item whose owner is gone with no `RUN-END`, or a claimed item that recorded no owner within 60 seconds, shows as `lost`. A legacy done item whose log has no `EXIT=` line shows `no-exit-recorded`. A pending item whose meta file's `sha256` is not 64 lowercase hex characters is `refused`, and that value is never printed. Every text field goes through the terminal-safe filter.
 
-With a name, the item in detail as `key=value` lines: `name`, `state`, `kind`, `what`, `why`, `tty`, the full `sha256`, `added`, `started`, `ended`, `exit`, `skip_reason` and `skip_note`, the `log` and `events` paths, and for a batch a `summary` line and one `step` line per step. `--json` prints `{item, log, events, record, steps, summary}`; `summary` is the run's `summary.json` once a batch has finished, and `null` before.
+With a name, the item in detail as `key=value` lines: `name`, `state`, `kind`, `what`, `why`, `tty`, the full `sha256`, `added`, `started`, `ended`, `exit`, `skipped_at`, `skip_reason`, `skipped_by` and `skip_note`, the `log` and `events` paths, and for a batch a `summary` line and one `step` line per step. `--json` prints `{item, log, events, record, steps, summary}`; `summary` is the run's `summary.json` once a batch has finished, and `null` before.
 
-Each item in the JSON has `name`, `number`, `kind`, `state`, `what`, `why`, `tty`, `sha256`, `added_at`, `started_at`, `ended_at`, `age_seconds`, `duration_seconds`, `stale`, `exit_code`, `skip_reason`, `skip_note`, `refusal` and `pid`. Times are UTC. `age_seconds` counts from when the item was added (waiting), started (running) or ended (done).
+Each item in the JSON has `name`, `number`, `kind`, `state`, `what`, `why`, `tty`, `sha256`, `added_at`, `started_at`, `ended_at`, `age_seconds`, `duration_seconds`, `stale`, `exit_code`, `skip_reason`, `skip_note`, `skipped_by`, `skipped_at`, `refusal` and `pid`. Times are UTC. `age_seconds` counts from when the item was added (waiting), started (running) or ended (done).
 
 Like the dashboard, `status` fixes the hash of a hand-dropped item the first time it sees it, and moves a pending item whose bytes changed to `skipped/`.
 
@@ -142,7 +147,7 @@ Prints the item's event lines as they arrive and exits when the run does. It rea
 
 ### `forgectl desk skip <name> --reason <text>`
 
-Moves a waiting item to `skipped/` (`reason=operator`; the dashboard's `u` can bring it back), or a lost run out of `running/` (`reason=lost`; it cannot be re-armed). This is the only way a lost run leaves `running/`. A live run is refused. The `--reason` text, one line of at most 200 characters, is kept as the item's `skip_note`.
+Moves a waiting item to `skipped/` (`reason=operator`; the dashboard's `u` can bring it back), or a lost run out of `running/` (`reason=lost`; it cannot be re-armed). This is the only way a lost run leaves `running/`. A live run is refused. The `--reason` text, one line of plain text (no control or bidi characters) of at most 200 characters, is kept as the item's `skip_note`, with `skipped_by: cli` and the time as `skipped_at`; `status` shows `by=cli`. A skip from the dashboard records `skipped_by: dashboard`.
 
 Exit codes: 0 skipped; 1 no such item, the item is running, or another desk claimed it first; 2 a usage error.
 
@@ -151,8 +156,8 @@ Exit codes: 0 skipped; 1 no such item, the item is running, or another desk clai
 Splits the current herdr tab around this pane: the desk on the right, about `--width` columns wide (default 66), and with `--progress CMD`, `CMD` in a pane below the desk. The new panes are named `desk` and `progress`, and this pane keeps the focus.
 
 - herdr's `--ratio` is the share the original pane keeps, so the ratio is `1 - width/tab width`, clamped to 0.45–0.8. The progress pane is split off the desk with the desk keeping 40%.
-- The desk pane runs `forgectl desk --dir <the resolved desk directory>`, shell-quoted. `CMD` is typed into the progress pane's shell as given, so quote it for a shell. Both must be one line.
-- Each pane is found again by its terminal id right before each call that names it, because herdr renumbers pane ids.
+- The desk pane runs this forgectl by its absolute path, `<path> desk --dir <the resolved desk directory>`, shell-quoted, so the pane's own `PATH` cannot pick another build. `CMD` is typed into the progress pane's shell as given, so quote it for a shell. Both must be one line.
+- herdr names a pane only by id, and ids renumber when a pane closes. So before each `rename` and `run` the pane is found again by its terminal id, and a read of that id confirms it still holds that terminal; on a mismatch the layout stops, naming both terminals. A pane closing in the moment between that read and the call can still renumber the id; a read after the call reports it, though by then the command has been typed.
 - It prints `desk=<pane id>`, `progress=<pane id>`, and `columns=<n> of <tab width>`.
 - `--dry-run` reads the tab's width and prints the plan without changing anything: one `split=`, `rename=` and `run.<pane>=` line per call it would make, then `columns=`. Run it first to see what the layout will do.
 
@@ -160,7 +165,7 @@ Exit codes: 0 laid out, or planned with `--dry-run`; 1 a herdr call failed, and 
 
 ### `forgectl desk prune`
 
-Deletes the protocol files (`.sh`, `.manifest`, `.log`, `.events`, `.meta.json`, `.d/`) of items in `done/` and `skipped/` whose newest file is older than `--days` (default 30). It never touches `pending/`, `running/`, unknown files, symlinks, or the desk root. Nothing else deletes desk files. `--json` prints `{removed, days}`.
+Deletes the protocol files (`.sh`, `.manifest`, `.log`, `.events`, `.meta.json`, `.d/`) of items in `done/` and `skipped/` whose newest file is older than `--days` (default 30). It never touches `pending/`, `running/`, unknown files, symlinks, or the desk root. No other command deletes an item's files; the desk itself removes only its own owner locks and temporary files. `--json` prints `{removed, days}`.
 
 Exit codes: 0 pruned (perhaps nothing); 1 a delete failed; 2 `--days` below 1.
 
@@ -219,9 +224,9 @@ The batch ends with rc 0 (every step ok), 1 (a step failed), 2 (the batch could 
 
 ### Metadata
 
-`NN-name.meta.json` holds `added_at`, `sha256`, `kind`, `skip_reason`, `skip_note`, `claimed_at`, `started_at`, `ended_at`, `exit_code`, and the owning process's `pid` and `pid_start`. A legacy item with none falls back to its log's times and its log's `EXIT=` line.
+`NN-name.meta.json` holds `added_at`, `sha256` (64 lowercase hex characters, or the item is refused), `kind`, `skip_reason`, `skip_note`, `skipped_by`, `skipped_at`, `claimed_at`, `started_at`, `ended_at`, `exit_code`, and the owning process's `pid` and `pid_start`. A legacy item with none falls back to its log's times and its log's `EXIT=` line.
 
-`skip_reason` is `operator` (skipped by a person; can be undone), `changed` (its bytes changed after it was queued), `lost` (its run's owner died), `launch-failed` (it was claimed but its run never began), `name-reused` (its number was already in `done/`), or `refused: …` (not a regular file with one link). Only `operator` can be undone.
+`skip_reason` is `operator` (skipped at the dashboard or with `desk skip`; `skipped_by` says which; can be undone), `changed` (its bytes changed after it was queued), `lost` (its run's owner died), `launch-failed` (it was claimed but its run never began), `name-reused` (its number was already in `done/`), or `refused: …` (not a regular file with one link). Only `operator` can be undone.
 
 ### Events
 

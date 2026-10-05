@@ -42,6 +42,13 @@ func (d *Desk) ReadSummary(name string) (*Summary, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("desk: read summary for %s: %w", describe(name), err)
 	}
+	// Step ids are printed by `desk status`; one that is not a manifest step
+	// id is not something the runner wrote.
+	for _, st := range s.Steps {
+		if !stepIDRe.MatchString(st.ID) {
+			return nil, fmt.Errorf("%w: the summary for %s names a step %q that is not a step id", ErrRefused, describe(name), describe(st.ID))
+		}
+	}
 	return &s, nil
 }
 
