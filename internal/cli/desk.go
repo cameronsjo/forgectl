@@ -99,9 +99,10 @@ func newDeskCmd(deps module.Deps) *cobra.Command {
 		Use:   "desk",
 		Short: "Operator queue: scripts Claude stages for you to approve and run",
 		Long: `desk is a queue of scripts Claude will not run itself. Claude stages an item
-with ` + "`desk add`" + `; you read it on the dashboard and press y to run it (y
-again at a prompt showing its full sha256), or s to skip it. Each item's sha256 is fixed when it is queued, and an item whose bytes
-change afterwards is skipped as "changed" instead of run.
+with ` + "`desk add`" + `; you read it on the dashboard, check its short sha256
+against the one Claude reported, and press y to run it, or s to skip it. Each
+item's sha256 is fixed when it is queued, and an item whose bytes change
+afterwards is skipped as "changed" instead of run.
 
   forgectl desk                  the dashboard (needs a terminal)
   forgectl desk --frame          one frame to stdout, sized by $COLUMNS/$LINES
@@ -117,9 +118,9 @@ The desk directory is --dir, else $DESK_DIR, else $CLAUDE_DESK_DIR, else
 $XDG_STATE_HOME/forgectl/desk (~/.local/state/forgectl/desk). Only its
 pending/, running/, done/ and skipped/ subdirectories are touched.
 
-Dashboard keys: y run (asks first, with the full sha256), s skip (asks first),
-u undo a skip, v view the script, l the latest log, a run everything on screen
-(asks first, with each full sha256), j/k move, q quit.
+Dashboard keys: y run, s skip (asks first), u undo a skip, v view the script,
+l the latest log, a run everything on screen (asks first, listing each full
+sha256), j/k move, q quit.
 
 The desk defends against accidents (an item edited after it was queued, an item
 run twice, hostile text in a header); it does not defend against another
@@ -162,7 +163,8 @@ func newDeskAddCmd(dir *string) *cobra.Command {
 prints name=, kind= and sha256= lines. Report the name and the sha256 to the
 operator: the dashboard's focus panel shows the selected item's first 12 hex
 characters ("17 merge-1201 · sha256 3f1a9c0d2b7e · unchanged since queued
-12m ago"), and y asks again with the full hash before anything runs.
+12m ago") for the operator to match before pressing y; a, which runs several
+items, asks first and lists each with its full hash.
 
 --what and --why are one line of plain text each: a control character
 (newline, CR, ESC, C1) or a bidi control exits 2. The file must not already

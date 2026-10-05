@@ -1,6 +1,6 @@
 # desk
 
-An operator queue for scripts an agent stages but will not run itself. The agent queues an item with `forgectl desk add`; a person reads it on the dashboard and presses `y` to run it (and `y` again at a prompt showing the full sha256) or `s` to skip it. Each item's sha256 is fixed when it is queued, and an item whose bytes change afterwards is skipped as `changed` instead of run.
+An operator queue for scripts an agent stages but will not run itself. The agent queues an item with `forgectl desk add`; a person reads it on the dashboard and checks the short sha256 in the focus panel and presses `y` to run it, or `s` to skip it. Each item's sha256 is fixed when it is queued, and an item whose bytes change afterwards is skipped as `changed` instead of run.
 
 What the desk protects against, and what it does not, is [ADR-0012](../adr/0012-desk-threat-model.md) (defend against accidents, not against a same-uid process).
 
@@ -34,7 +34,7 @@ forgectl desk prune --days 30                   # delete done/ and skipped/ item
 
    It prints `name=`, `kind=` and `sha256=` lines.
 
-2. Report the name and the full sha256 to the person. The dashboard's focus panel shows the selected item's first 12 hex characters (`17 merge-1201 · sha256 3f1a9c0d2b7e · unchanged since queued 12m ago`), and `y` asks again with the full hash before it runs anything, so they can confirm that what they approve is what you described.
+2. Report the name and the full sha256 to the person. The dashboard's focus panel shows the selected item's first 12 hex characters (`17 merge-1201 · sha256 3f1a9c0d2b7e · unchanged since queued 12m ago`), so they can confirm that what they approve is what you described before pressing `y`. `a`, which runs several items, asks first and lists each with its full hash.
 
 3. Watch the run under a monitor. `watch` waits while the item is pending, prints each event line, and exits with the run's outcome:
 
@@ -54,7 +54,7 @@ The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with 
 
 | Key | Action |
 |---|---|
-| `y` | run the selected item: asks first, showing its full sha256, and `y` again runs it (a TTY item runs in this pane; anything else runs detached) |
+| `y` | run the selected item at once (a TTY item runs in this pane; anything else runs detached); check its short sha256 in the focus panel first |
 | `s` | skip the selected item; asks first |
 | `u` | undo the last skip |
 | `v` | view the selected item's script |

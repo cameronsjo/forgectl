@@ -112,7 +112,6 @@ const (
 	confirmNone confirmKind = iota
 	confirmSkip
 	confirmAll
-	confirmRun
 )
 
 // deskPager is the v / l viewer: inert lines and a scroll offset.
@@ -529,10 +528,10 @@ func (m deskModel) run() (tea.Model, tea.Cmd) {
 		m.message = st.Warn.Render(safeMessage(itemLabel(r.item.Name) + " is " + rowLabel(r.kind) + "; only a waiting item runs"))
 		return m, nil
 	}
-	// y asks first, showing the full hash, so the operator can match it to
-	// the one the agent reported before anything runs.
-	m.confirm, m.targets = confirmRun, []target{{name: r.item.Name, sha: r.item.Meta.SHA256, tty: r.item.TTY}}
-	return m, nil
+	// One key, as the old desk had: the focus panel's short hash is what the
+	// operator matches to the agent's report. a, which runs many, confirms.
+	m.busy = true
+	return m.start(target{name: r.item.Name, sha: r.item.Meta.SHA256, tty: r.item.TTY})
 }
 
 // start runs one confirmed item at the hash that was on screen.
@@ -608,8 +607,6 @@ func (m deskModel) confirmKey(key string) (tea.Model, tea.Cmd) {
 	m.busy = true
 	d := m.d
 	switch kind {
-	case confirmRun:
-		return m.start(ts[0])
 	case confirmSkip:
 		name, lost := ts[0].name, ts[0].lost
 		return m, func() tea.Msg {
@@ -838,7 +835,7 @@ func (m deskModel) frameWidth() int {
 	return max(m.width, 40)
 }
 
-// hashLines renders a full sha256 for a confirm prompt: "sha256 <64 hex>"
+// hashLines renders a full sha256 for the a prompt: "sha256 <64 hex>"
 // on one line when it fits, else wrapped in two halves, so the whole hash is
 // always on screen. A hash that is not 64 hex characters is never drawn.
 func hashLines(st theme.Styles, sha string, width int) []string {
@@ -859,10 +856,6 @@ func (m deskModel) footer() string {
 	switch m.confirm {
 	case confirmSkip:
 		return " " + st.Warn.Render("skip "+itemLabel(m.targets[0].name)+"?") + st.Muted.Render("  y skip · any other key cancels")
-	case confirmRun:
-		t := m.targets[0]
-		lines := []string{" " + st.Warn.Render("run "+itemLabel(t.name)+"?") + st.Muted.Render("  y run · any other key cancels")}
-		return strings.Join(append(lines, hashLines(st, t.sha, m.frameWidth())...), "\n")
 	case confirmAll:
 		lines := []string{" " + st.Warn.Render(fmt.Sprintf("run these %d?", len(m.targets))) + st.Muted.Render("  y run · any other key cancels")}
 		for _, t := range m.targets {

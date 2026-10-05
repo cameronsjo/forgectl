@@ -165,7 +165,7 @@ func TestDesk_YRunsTheSelectedItemDetached(t *testing.T) {
 	h := newDeskHarness(t)
 	h.drop("01-alpha.sh", plainScript("alpha"))
 	h.scan()
-	h.press("y", "y")
+	h.press("y")
 	if !slices.Equal(h.backend.launched, []string{"01-alpha"}) {
 		t.Fatalf("launched %v, want [01-alpha]", h.backend.launched)
 	}
@@ -177,32 +177,45 @@ func TestDesk_YRunsTheSelectedItemDetached(t *testing.T) {
 	}
 }
 
-// y asks first and shows the item's full sha256, so the operator can match
-// it to the hash the agent reported; any other key runs nothing.
-func TestDesk_YAsksWithTheFullHash(t *testing.T) {
+// a, which runs several items at once, asks first and lists each with its
+// full sha256; at a narrow width each hash wraps but stays whole.
+func TestDesk_AConfirmsWithFullHashes(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-alpha.sh", plainScript("alpha"))
+	h.drop("02-beta.sh", plainScript("beta"))
+	h.scan()
+	var shas []string
+	for _, r := range h.m.rows {
+		if !desk.ValidSHA256(r.item.Meta.SHA256) {
+			t.Fatalf("no hash on %s: %q", r.item.Name, r.item.Meta.SHA256)
+		}
+		shas = append(shas, r.item.Meta.SHA256)
+	}
+	for _, width := range []int{120, 50} {
+		h.m.width = width
+		h.press("a")
+		prompt := ansi.Strip(h.m.footer())
+		flat := strings.NewReplacer(" ", "", "\n", "").Replace(prompt)
+		for _, sha := range shas {
+			if !strings.Contains(flat, sha) {
+				t.Errorf("width %d: the a prompt lacks the full hash %s: %q", width, sha, prompt)
+			}
+		}
+		h.press("n")
+	}
+	if len(h.backend.launched) != 0 {
+		t.Errorf("a declined a ran %v", h.backend.launched)
+	}
+}
+
+// y runs at once, with one key: the focus panel's short hash is the check.
+func TestDesk_YRunsWithOneKey(t *testing.T) {
 	h := newDeskHarness(t)
 	h.drop("01-alpha.sh", plainScript("alpha"))
 	h.scan()
-	sha := h.m.rows[0].item.Meta.SHA256
-	if !desk.ValidSHA256(sha) {
-		t.Fatalf("no hash on the row: %q", sha)
-	}
 	h.press("y")
-	if len(h.backend.launched) != 0 || h.m.confirm != confirmRun {
-		t.Fatalf("y ran without asking (launched %v)", h.backend.launched)
-	}
-	if prompt := ansi.Strip(h.m.footer()); !strings.Contains(prompt, "run 01 alpha?") || !strings.Contains(prompt, "sha256 "+sha) {
-		t.Errorf("prompt lacks the full hash: %q", prompt)
-	}
-	h.press("n")
-	if len(h.backend.launched) != 0 {
-		t.Errorf("a declined y ran %v", h.backend.launched)
-	}
-	// Narrow: the hash wraps, but every character stays on screen.
-	h.m.width = 50
-	h.press("y")
-	if prompt := strings.ReplaceAll(ansi.Strip(h.m.footer()), " ", ""); !strings.Contains(strings.ReplaceAll(prompt, "\n", ""), sha) {
-		t.Errorf("at 50 columns the prompt lost part of the hash: %q", prompt)
+	if h.m.confirm != confirmNone || !slices.Equal(h.backend.launched, []string{"01-alpha"}) {
+		t.Fatalf("y did not run at once: confirm %v launched %v", h.m.confirm, h.backend.launched)
 	}
 }
 
@@ -211,7 +224,7 @@ func TestDesk_YRefusesAnItemThatChangedSinceItWasShown(t *testing.T) {
 	h.drop("01-alpha.sh", plainScript("alpha"))
 	h.scan()
 	h.drop("01-alpha.sh", plainScript("alpha edited"))
-	h.press("y", "y")
+	h.press("y")
 	if len(h.backend.launched) != 0 {
 		t.Fatalf("launched %v; a changed item must not run", h.backend.launched)
 	}
@@ -569,7 +582,6 @@ func TestRunDesk_RefusesWithoutATerminal(t *testing.T) {
 func runTTY(t *testing.T, h *deskHarness, name string) (int, string) {
 	t.Helper()
 	h.selectItem(name)
-	h.press("y") // the prompt with the full hash
 	out, cmd := h.m.Update(key("y"))
 	h.m = out.(deskModel)
 	if cmd == nil {
@@ -723,7 +735,7 @@ func TestTTYRun_LogIsCreatedExclusively(t *testing.T) {
 	h.m.ttyArgv = func(string) []string { t.Fatal("script(1) was started"); return nil }
 	backend := &symlinkOnBegin{fakeLaunch: h.backend, link: filepath.Join(h.d.Path(), desk.DirDone, "01-console.log"), target: target}
 	h.m.d = backend
-	h.press("y", "y")
+	h.press("y")
 	if data, _ := os.ReadFile(target); string(data) != "keep me\n" { //nolint:gosec // G304: a path under t.TempDir
 		t.Fatalf("the symlink's target was written: %q", data)
 	}
@@ -777,7 +789,7 @@ func TestTTYRun_BeginRunRefusalReleasesTheClaim(t *testing.T) {
 	}
 	h.scan()
 	h.selectItem("01-console")
-	h.press("y", "y")
+	h.press("y")
 	if got := h.where("01-console"); got != desk.DirSkipped {
 		t.Fatalf("01-console is in %s, want skipped", got)
 	}
@@ -799,7 +811,7 @@ func TestDesk_SkippingALostRunIsFinal(t *testing.T) {
 	h := newDeskHarness(t)
 	h.drop("01-alpha.sh", plainScript("alpha"))
 	h.scan()
-	h.press("y", "y") // claimed; the fake Launch starts no owner
+	h.press("y") // claimed; the fake Launch starts no owner
 	// Age the claim past the grace: the claim's owner never came.
 	metaPath := filepath.Join(h.d.Path(), desk.DirRunning, "01-alpha.meta.json")
 	data, err := os.ReadFile(metaPath) //nolint:gosec // G304: a path under t.TempDir
