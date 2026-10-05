@@ -120,6 +120,34 @@ func startRun(t *testing.T, d *desk.Desk, name, sha string, pid int) *desk.Run {
 	return run
 }
 
+// markLost claims name and records a dead process as its owner, the way a
+// supervisor that was killed leaves it: no lock held, no RUN-END.
+func markLost(t *testing.T, d *desk.Desk, dir, name, sha string) {
+	t.Helper()
+	if _, err := d.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Claim(name, sha); err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	p := filepath.Join(dir, desk.DirRunning, name+".meta.json")
+	data, err := os.ReadFile(p) //nolint:gosec // G304: a test desk under t.TempDir
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m desk.Meta
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	m.PID = deadPID(t)
+	if data, err = json.Marshal(m); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func deadPID(t *testing.T) int {
 	t.Helper()
 	p, err := os.StartProcess("/bin/sh", []string{"sh", "-c", "exit 0"}, &os.ProcAttr{})
@@ -362,8 +390,7 @@ func TestDeskWatch_RunLostExits1(t *testing.T) {
 	fastWatch(t)
 	dir := newDeskDir(t)
 	name, sha := queueItem(t, "lost.sh", "true\n")
-	pid := deadPID(t)
-	startRun(t, openTestDesk(t, dir), name, sha, pid)
+	markLost(t, openTestDesk(t, dir), dir, name, sha)
 	out, _, err := deskRun(t, deskDeps(), "watch", name)
 	wantExit(t, err, 1)
 	if !strings.Contains(out, "RUN-LOST id="+name) {
@@ -415,7 +442,7 @@ func TestDeskSkip(t *testing.T) {
 	}
 
 	lost, lostSHA := queueItem(t, "l.sh", "true\n")
-	startRun(t, d, lost, lostSHA, deadPID(t))
+	markLost(t, d, dir, lost, lostSHA)
 	out, _, err = deskRun(t, deskDeps(), "skip", lost, "--reason", "supervisor died")
 	wantExit(t, err, 0)
 	if out != "skipped="+lost+" reason=lost\n" {

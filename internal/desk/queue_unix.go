@@ -70,7 +70,7 @@ func (d *Desk) Scan() (*Snapshot, error) {
 		}
 		it := newItem(name, kind, StateSkipped)
 		it.Meta, _, _ = d.readMeta(DirSkipped, name)
-		if data, err := d.root.ReadFile(path.Join(DirSkipped, e.Name())); err == nil && len(data) <= maxItemBytes {
+		if data, err := d.readRegular(path.Join(DirSkipped, e.Name()), maxItemBytes); err == nil {
 			it.Headers = ParseHeaders(data)
 		}
 		snap.Skipped = append(snap.Skipped, it)
@@ -166,7 +166,7 @@ func (d *Desk) skipChanged(from, name string, kind Kind, meta Meta) error {
 func (d *Desk) runningItem(name string, kind Kind) Item {
 	it := newItem(name, kind, StateRunning)
 	it.Meta, _, _ = d.readMeta(DirRunning, name)
-	if data, err := d.root.ReadFile(path.Join(DirRunning, name+kind.Ext())); err == nil && len(data) <= maxItemBytes {
+	if data, err := d.readRegular(path.Join(DirRunning, name+kind.Ext()), maxItemBytes); err == nil {
 		it.Headers = ParseHeaders(data)
 	}
 	if it.Meta.StartedAt != nil {
@@ -179,13 +179,46 @@ func (d *Desk) runningItem(name string, kind Kind) Item {
 }
 
 // lost reports a running item whose owner process is gone without writing
-// RUN-END. An item with no owner recorded yet is still starting.
+// RUN-END, or a claim that never got an owner within ClaimGrace. A held
+// owner lock is a live owner, whatever the pid or the clock says.
 func (d *Desk) lost(name string, meta Meta) bool {
-	if meta.PID == 0 || processAlive(meta.PID, meta.PIDStart) {
+	if d.ownerAlive(name) {
+		return false
+	}
+	return d.lostUnlocked(name, meta)
+}
+
+// lostUnlocked is lost for a caller that already holds the owner lock (or
+// has just seen it free).
+func (d *Desk) lostUnlocked(name string, meta Meta) bool {
+	if meta.PID == 0 {
+		return d.ownerless(name, meta)
+	}
+	if processAlive(meta.PID, meta.PIDStart) {
 		return false
 	}
 	ended, _ := d.hasRunEnd(name)
 	return !ended
+}
+
+// ownerless reports a running item with no owner recorded whose claim is
+// older than ClaimGrace. The claim time is meta's claimed_at, or for a
+// claim made before that field existed, the running/ file's mtime (Claim
+// writes that file last). A running item with no meta yet (no hash) is a
+// claim in progress, never lost: Claim moves the item before its meta.
+func (d *Desk) ownerless(name string, meta Meta) bool {
+	if meta.SHA256 == "" {
+		return false
+	}
+	var at time.Time
+	if meta.ClaimedAt != nil {
+		at = *meta.ClaimedAt
+	} else if kind, err := d.findKind(DirRunning, name); err == nil {
+		if fi, err := d.root.Lstat(path.Join(DirRunning, name+kind.Ext())); err == nil {
+			at = fi.ModTime()
+		}
+	}
+	return !at.IsZero() && d.now().Sub(at) > ClaimGrace
 }
 
 // doneItems lists history: one item per done/<name>.log, except names still
@@ -207,7 +240,7 @@ func (d *Desk) doneItems(inRunning map[string]bool) ([]Item, error) {
 		}
 		it := newItem(name, kind, StateDone)
 		it.Meta, _, _ = d.readMeta(DirDone, name)
-		if data, err := d.root.ReadFile(path.Join(DirDone, name+kind.Ext())); err == nil && len(data) <= maxItemBytes {
+		if data, err := d.readRegular(path.Join(DirDone, name+kind.Ext()), maxItemBytes); err == nil {
 			it.Headers = ParseHeaders(data)
 		}
 		logPath := path.Join(DirDone, e.Name())
@@ -238,7 +271,7 @@ func (d *Desk) fillTimes(it *Item, logPath string) {
 	if !it.Started.IsZero() && !it.Ended.IsZero() {
 		return
 	}
-	f, err := d.root.Open(logPath)
+	f, err := d.openRegular(logPath)
 	if err != nil {
 		return
 	}

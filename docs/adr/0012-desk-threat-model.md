@@ -45,7 +45,7 @@ A batch manifest step marked `private` keeps its output out of the combined log,
 
 A detached run is owned by a hidden `forgectl desk _supervise <name>`, started in a session of its own so it outlives the desk's pane. The supervisor records its `pid` and `pid_start` (the process start time) in the item's `.meta.json`; liveness checks compare both, so a reused pid never reads as alive.
 
-A run whose owner is gone with no `RUN-END` event is **lost**. The queue shows it as `lost`, and `desk watch` prints `RUN-LOST` and exits 1. Nothing clears it automatically: `forgectl desk skip <name> --reason …` moves it out of `running/`, and a lost run cannot be re-armed.
+The owner also holds a lock on the item for the life of the run, so nothing can skip a live run. A run whose owner is gone with no `RUN-END` event, or a claimed item that recorded no owner within 60 seconds, is **lost**. The queue shows it as `lost`, and `desk watch` prints `RUN-LOST` and exits 1. Nothing clears it automatically: `forgectl desk skip <name> --reason …` moves it out of `running/`, and a lost run cannot be re-armed.
 
 ### Nothing is deleted on its own
 

@@ -29,7 +29,8 @@ var supervisorArgv = func(dir, name string) ([]string, error) {
 
 // Launch starts the detached supervisor that runs a claimed item, and
 // returns its pid. TTY items are refused: they run in the desk's own
-// foreground (see [Desk.BeginRun]).
+// foreground (see [Desk.BeginRun]). When the supervisor cannot be started
+// the item is released to skipped/ (SkipLaunchFailed).
 //
 // The supervisor must outlive the desk, so it is started with no parent
 // context and in a session of its own (Setsid): closing the desk's pane
@@ -42,24 +43,27 @@ func (d *Desk) Launch(name string) (int, error) {
 		return 0, fmt.Errorf("desk: launch %s: claim it first: %w", describe(name), err)
 	}
 	if kind == KindScript {
-		data, err := d.root.ReadFile(path.Join(DirRunning, name+extScript))
+		data, err := d.readRegular(path.Join(DirRunning, name+extScript), maxItemBytes)
 		if err != nil {
 			return 0, fmt.Errorf("desk: launch %s: %w", describe(name), err)
 		}
 		if ParseHeaders(data).TTY {
-			return 0, fmt.Errorf("desk: %s is a TTY item; it runs in the desk's foreground, not detached", describe(name))
+			// A caller that should have run it in its own foreground: end the
+			// claim rather than leave it ownerless until the grace runs out.
+			return 0, errors.Join(fmt.Errorf("desk: %s is a TTY item; it runs in the desk's foreground, not detached", describe(name)), d.Release(name, SkipLaunchFailed))
 		}
 	}
 	argv, err := supervisorArgv(d.path, name)
 	if err != nil {
-		return 0, err
+		return 0, errors.Join(err, d.Release(name, SkipLaunchFailed))
 	}
 	// context.Background on purpose: no caller's lifetime may end this run.
 	cmd := exec.CommandContext(context.Background(), argv[0], argv[1:]...) //nolint:gosec // G204: re-executing this binary's own hidden subcommand
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil // /dev/null
 	if err := cmd.Start(); err != nil {
-		return 0, fmt.Errorf("desk: start supervisor for %s: %w", describe(name), err)
+		// Nothing owns the claim now: end it where the operator sees it.
+		return 0, errors.Join(fmt.Errorf("desk: start supervisor for %s: %w", describe(name), err), d.Release(name, SkipLaunchFailed))
 	}
 	pid := cmd.Process.Pid
 	// Reap it whenever it ends, so a long-lived desk never holds a zombie
@@ -135,6 +139,17 @@ func (d *Desk) doneTaken(name string) bool {
 		}
 	}
 	return false
+}
+
+// CreateLog creates done/<name>.log through the pinned root, exclusively:
+// it fails when the log already exists, so a second run, or a symlink planted
+// at the name, never has its target truncated. The caller writes the run's
+// output to it (a TTY run hands it to script(1) as /dev/fd/4).
+func (d *Desk) CreateLog(name string) (*os.File, error) {
+	if !ValidName(name) {
+		return nil, fmt.Errorf("desk: %q is not an item name (NN-name)", describe(name))
+	}
+	return d.createLog(name)
 }
 
 func (d *Desk) createLog(name string) (*os.File, error) {

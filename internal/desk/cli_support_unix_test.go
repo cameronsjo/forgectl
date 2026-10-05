@@ -60,8 +60,9 @@ func TestSkipNoted(t *testing.T) {
 		t.Fatalf("after unskip: pending %+v", s.Pending)
 	}
 
+	// A lost run: claimed, owner recorded, owner dead, no lock held.
 	c := queue(t, d, "lost.sh", "echo hi\n")
-	if _, err := d.BeginRun(c.Name, deadPID(t)); err != nil {
+	if err := d.writeMeta(DirRunning, c.Name, Meta{SHA256: c.SHA256, PID: deadPID(t)}); err != nil {
 		t.Fatal(err)
 	}
 	if reason, err := d.SkipNoted(c.Name, "supervisor died"); err != nil || reason != SkipLost {
@@ -70,17 +71,4 @@ func TestSkipNoted(t *testing.T) {
 	if err := d.Unskip(c.Name); err == nil {
 		t.Error("a lost run was re-armed")
 	}
-}
-
-// deadPID is the pid of a process that has exited and been reaped.
-func deadPID(t *testing.T) int {
-	t.Helper()
-	p, err := os.StartProcess("/bin/sh", []string{"sh", "-c", "exit 0"}, &os.ProcAttr{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := p.Wait(); err != nil {
-		t.Fatal(err)
-	}
-	return p.Pid
 }

@@ -5,11 +5,13 @@ package tui
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -618,16 +620,24 @@ func TestTTYRun_RunsTheVerifiedBytesNotTheRecord(t *testing.T) {
 	}
 }
 
-// TestTTYRunPassesFD3 is the platform check for ttyArgv: script(1) must hand
-// fd 3 through to bash, or a TTY item runs nothing. It runs the real
-// script(1) on the platform under test.
+// TestTTYRunPassesFD3 is the platform check for ttyArgv: script(1) must
+// hand fd 3 through to bash, or a TTY item runs nothing, and must write its
+// typescript to fd 4, the log the desk created exclusively through its root.
+// It runs the real script(1) on the platform under test.
 func TestTTYRunPassesFD3(t *testing.T) {
 	if _, err := os.Stat("/usr/bin/script"); err != nil {
 		t.Skip("no /usr/bin/script on this machine")
 	}
 	dir := t.TempDir()
 	logPath, rcPath := filepath.Join(dir, "log"), filepath.Join(dir, "rc")
-	a := ttyArgv(logPath, rcPath)
+	logF, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_APPEND, 0o600) //nolint:gosec // G304: a path under t.TempDir
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := ttyArgv(rcPath)
+	if !slices.Contains(a, ttyLogFD) {
+		t.Fatalf("argv %q does not give script(1) the log on fd 4", a)
+	}
 	cmd := newCmd(a)
 	devnull, err := os.Open(os.DevNull)
 	if err != nil {
@@ -639,8 +649,10 @@ func TestTTYRunPassesFD3(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cmd.ExtraFiles = append(cmd.ExtraFiles, logF)
 	err = cmd.Start()
 	release()
+	_ = logF.Close()
 	if err != nil {
 		t.Fatalf("start %v: %v", a, err)
 	}
@@ -648,13 +660,179 @@ func TestTTYRunPassesFD3(t *testing.T) {
 	logData, _ := os.ReadFile(logPath) //nolint:gosec // G304: a path under t.TempDir
 	rcData, _ := os.ReadFile(rcPath)   //nolint:gosec // G304: a path under t.TempDir
 	if !strings.Contains(string(logData), "fd3-reached-bash") {
-		t.Fatalf("bash never read fd 3 through script(1)\nargv %q\nlog %q", a, logData)
+		t.Fatalf("the log on fd 4 lacks the script's output: bash did not read fd 3, or script(1) did not write fd 4\nargv %q\nlog %q", a, logData)
 	}
 	if strings.TrimSpace(string(rcData)) != "3" {
 		t.Fatalf("rc file = %q, want 3", rcData)
 	}
 }
 
+// TestTTYRun_LogIsCreatedExclusively: a log already at done/<name>.log (a
+// planted symlink, or another run's) stops the run before script(1) starts,
+// rather than script(1) truncating whatever it names.
+func TestTTYRun_LogIsCreatedExclusively(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-console.sh", ttyScript("console"))
+	h.scan()
+	h.selectItem("01-console")
+	target := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(target, []byte("keep me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// BeginRun's doneTaken check passes; the symlink lands between it and the
+	// log's creation, the window the review described.
+	h.m.ttyArgv = func(string) []string { t.Fatal("script(1) was started"); return nil }
+	backend := &symlinkOnBegin{fakeLaunch: h.backend, link: filepath.Join(h.d.Path(), desk.DirDone, "01-console.log"), target: target}
+	h.m.d = backend
+	h.press("y")
+	if data, _ := os.ReadFile(target); string(data) != "keep me\n" { //nolint:gosec // G304: a path under t.TempDir
+		t.Fatalf("the symlink's target was written: %q", data)
+	}
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "create log for 01-console") {
+		t.Errorf("footer should report the refused log: %q", footer)
+	}
+}
+
+// symlinkOnBegin plants a symlink at the log path right after BeginRun.
+type symlinkOnBegin struct {
+	*fakeLaunch
+	link, target string
+}
+
+func (s *symlinkOnBegin) BeginRun(name string, pid int, fields ...string) (*desk.Run, error) {
+	run, err := s.fakeLaunch.BeginRun(name, pid, fields...)
+	if err == nil {
+		if lerr := os.Symlink(s.target, s.link); lerr != nil {
+			panic(lerr)
+		}
+	}
+	return run, err
+}
+
 func newCmd(a []string) *osexec.Cmd {
 	return osexec.CommandContext(context.Background(), a[0], a[1:]...) //nolint:gosec // G204: ttyArgv's fixed argv
+}
+
+// TestTTYRun_BeginRunRefusalReleasesTheClaim: a reused number (done/ already
+// holds the name) makes BeginRun refuse after Claim succeeded. The claim
+// must end in skipped/ (launch-failed), not sit ownerless in running/.
+func TestTTYRun_BeginRunRefusalReleasesTheClaim(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-console.sh", ttyScript("console"))
+	if err := os.WriteFile(filepath.Join(h.d.Path(), desk.DirDone, "01-console.log"), []byte("EXIT=0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.scan()
+	h.selectItem("01-console")
+	h.press("y")
+	if got := h.where("01-console"); got != desk.DirSkipped {
+		t.Fatalf("01-console is in %s, want skipped", got)
+	}
+	snap, err := h.d.Scan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Skipped) != 1 || snap.Skipped[0].Meta.SkipReason != desk.SkipLaunchFailed {
+		t.Fatalf("skipped = %+v, want one launch-failed item", snap.Skipped)
+	}
+	if !strings.Contains(ansi.Strip(h.m.footer()), "done/ already holds") {
+		t.Errorf("footer should say why: %q", ansi.Strip(h.m.footer()))
+	}
+}
+
+// TestDesk_SkippingALostRunIsFinal: s on a lost row records the run as lost,
+// and u cannot bring it back to pending/.
+func TestDesk_SkippingALostRunIsFinal(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-alpha.sh", plainScript("alpha"))
+	h.scan()
+	h.press("y") // claimed; the fake Launch starts no owner
+	// Age the claim past the grace: the claim's owner never came.
+	metaPath := filepath.Join(h.d.Path(), desk.DirRunning, "01-alpha.meta.json")
+	data, err := os.ReadFile(metaPath) //nolint:gosec // G304: a path under t.TempDir
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta desk.Meta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	meta.ClaimedAt = &old
+	if data, err = json.Marshal(meta); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metaPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.scan()
+	h.selectItem("01-alpha")
+	if r, _ := h.m.selected(); r.kind != rowLost {
+		t.Fatalf("row kind %d, want lost", r.kind)
+	}
+	h.press("s", "y")
+	if got := h.where("01-alpha"); got != desk.DirSkipped {
+		t.Fatalf("01-alpha is in %s, want skipped", got)
+	}
+	h.press("u")
+	if got := h.where("01-alpha"); got != desk.DirSkipped {
+		t.Fatalf("u re-armed a lost run: it is in %s", got)
+	}
+	snap, err := h.d.Scan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Skipped[0].Meta.SkipReason != desk.SkipLost {
+		t.Errorf("skip reason %q, want %q", snap.Skipped[0].Meta.SkipReason, desk.SkipLost)
+	}
+}
+
+// TestDesk_PagerShowsALongLineWhole: v soft-wraps a line wider than the
+// window; every character of it is on screen.
+func TestDesk_PagerShowsALongLineWhole(t *testing.T) {
+	h := newDeskHarness(t)
+	h.m.width, h.m.height = 80, 30
+	var b strings.Builder
+	for i := 0; b.Len() < 290; i++ {
+		b.WriteString("seg" + strconv.Itoa(i) + "-")
+	}
+	long := "echo " + b.String() + "END-OF-LINE"
+	if len(long) < 300 {
+		t.Fatalf("fixture line is %d columns", len(long))
+	}
+	h.drop("01-long.sh", "# WHAT: long\n# WHY: a test\n"+long+"\n")
+	h.scan()
+	h.press("v")
+	view := ansi.Strip(h.m.View().Content)
+	var joined strings.Builder
+	for _, row := range strings.Split(view, "\n") {
+		if ansi.StringWidth(row) > 80 {
+			t.Errorf("a row is wider than the window: %q", row)
+		}
+		joined.WriteString(strings.TrimPrefix(row, pagerWrapMark))
+	}
+	if !strings.Contains(joined.String(), long) {
+		t.Fatalf("the long line is not fully on screen:\n%s", view)
+	}
+}
+
+// hangingScan never answers a scan, like a read blocked on a FIFO.
+type hangingScan struct{ *fakeLaunch }
+
+func (hangingScan) Scan() (*desk.Snapshot, error) { select {} }
+
+// TestDesk_HungScanReportsAndRetries: a scan that never answers is reported
+// as an error, and the scan flag clears so the next tick scans again.
+func TestDesk_HungScanReportsAndRetries(t *testing.T) {
+	h := newDeskHarness(t)
+	h.m.d = hangingScan{h.backend}
+	h.m.scanTimeout = 50 * time.Millisecond
+	h.m.scanning = true
+	h.drive(h.m.scanCmd())
+	if h.m.scanning {
+		t.Fatal("a timed-out scan left the scanning flag set; no scan would run again")
+	}
+	if !strings.Contains(ansi.Strip(h.m.footer()), "did not finish") {
+		t.Fatalf("footer = %q", ansi.Strip(h.m.footer()))
+	}
 }

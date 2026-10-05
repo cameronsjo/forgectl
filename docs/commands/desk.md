@@ -111,7 +111,7 @@ done     16-cleanup  age=1h  exit=0  took=41s
 done     12-probe  age=3h  exit=1  took=18s
 ```
 
-A waiting item older than 24 hours is flagged `stale`. A running item whose supervisor is gone with no `RUN-END` shows as `lost`. A legacy done item whose log has no `EXIT=` line shows `no-exit-recorded`.
+A waiting item older than 24 hours is flagged `stale`. A running item whose owner is gone with no `RUN-END`, or a claimed item that recorded no owner within 60 seconds, shows as `lost`. A legacy done item whose log has no `EXIT=` line shows `no-exit-recorded`.
 
 With a name, the item in detail as `key=value` lines: `name`, `state`, `kind`, `what`, `why`, `tty`, the full `sha256`, `added`, `started`, `ended`, `exit`, `skip_reason` and `skip_note`, the `log` and `events` paths, and for a batch a `summary` line and one `step` line per step. `--json` prints `{item, log, events, record, steps, summary}`; `summary` is the run's `summary.json` once a batch has finished, and `null` before.
 
@@ -172,6 +172,7 @@ The desk directory is `--dir`, else `$DESK_DIR`, else `$CLAUDE_DESK_DIR`, else `
 | `pending/NN-name.sh` | a script waiting for approval |
 | `pending/NN-name.manifest` | a batch waiting for approval |
 | `running/NN-name.sh` or `.manifest` | the verified copy of what is running |
+| `running/NN-name.lock` | the owner lock, held by the process running the item |
 | `done/NN-name.sh` or `.manifest` | what ran |
 | `done/NN-name.log` | the run's output; the last line is `EXIT=<rc>` |
 | `done/NN-name.events` | the run's event lines |
@@ -215,9 +216,9 @@ The batch ends with rc 0 (every step ok), 1 (a step failed), 2 (the batch could 
 
 ### Metadata
 
-`NN-name.meta.json` holds `added_at`, `sha256`, `kind`, `skip_reason`, `skip_note`, `started_at`, `ended_at`, `exit_code`, and the owning process's `pid` and `pid_start`. A legacy item with none falls back to its log's times and its log's `EXIT=` line.
+`NN-name.meta.json` holds `added_at`, `sha256`, `kind`, `skip_reason`, `skip_note`, `claimed_at`, `started_at`, `ended_at`, `exit_code`, and the owning process's `pid` and `pid_start`. A legacy item with none falls back to its log's times and its log's `EXIT=` line.
 
-`skip_reason` is `operator` (skipped by a person; can be undone), `changed` (its bytes changed after it was queued), `lost` (its run's owner died), `name-reused` (its number was already in `done/`), or `refused: …` (not a regular file with one link). Only `operator` can be undone.
+`skip_reason` is `operator` (skipped by a person; can be undone), `changed` (its bytes changed after it was queued), `lost` (its run's owner died), `launch-failed` (it was claimed but its run never began), `name-reused` (its number was already in `done/`), or `refused: …` (not a regular file with one link). Only `operator` can be undone.
 
 ### Events
 

@@ -69,7 +69,7 @@ func (d *Desk) LogTail(name string, maxBytes int64) (data []byte, cut bool, err 
 	if !ValidName(name) {
 		return nil, false, fmt.Errorf("desk: %q is not an item name (NN-name)", describe(name))
 	}
-	f, err := d.root.Open(path.Join(DirDone, name+extLog))
+	f, err := d.openRegular(path.Join(DirDone, name+extLog))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, false, ErrNotFound
 	}
@@ -81,31 +81,16 @@ func (d *Desk) LogTail(name string, maxBytes int64) (data []byte, cut bool, err 
 	if err != nil {
 		return nil, false, err
 	}
-	if !fi.Mode().IsRegular() {
-		return nil, false, fmt.Errorf("%w: the log for %s is not a regular file", ErrRefused, describe(name))
-	}
 	off := max(fi.Size()-maxBytes, 0)
 	data, err = io.ReadAll(io.NewSectionReader(f, off, fi.Size()-off))
 	return data, off > 0, err
 }
 
-// readCapped reads a regular file below the root, refusing one larger than
-// limit.
+// readCapped is readRegular with a missing file reported as ErrNotFound.
 func (d *Desk) readCapped(p string, limit int64) ([]byte, error) {
-	f, err := d.root.Open(p)
+	data, err := d.readRegular(p, limit)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, ErrNotFound
 	}
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close() //nolint:errcheck // read-only
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() || fi.Size() > limit {
-		return nil, fmt.Errorf("%w: %s is not a regular file under %d bytes", ErrRefused, describe(p), limit)
-	}
-	return io.ReadAll(io.LimitReader(f, limit))
+	return data, err
 }

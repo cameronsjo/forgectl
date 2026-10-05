@@ -57,6 +57,8 @@ const (
 	deskLogTail = 256 << 10
 	// deskNotifyTimeout bounds one notification call.
 	deskNotifyTimeout = 5 * time.Second
+	// deskScanTimeout bounds one queue scan.
+	deskScanTimeout = 10 * time.Second
 	// deskMessageMax caps a result line, which can quote an error.
 	deskMessageMax = 400
 	// deskNotifyMaxRunes caps a notification body: herdr's own cap
@@ -75,10 +77,11 @@ type deskBackend interface {
 	BeginRun(name string, pid int, fields ...string) (*desk.Run, error)
 	Skip(name, reason string) error
 	Unskip(name string) error
+	Release(name, reason string) error
+	CreateLog(name string) (*os.File, error)
 	BatchStatus(name string) ([]desk.StepStatus, error)
 	Record(name string) ([]byte, desk.Kind, error)
 	LogTail(name string, maxBytes int64) ([]byte, bool, error)
-	LogPath(name string) string
 }
 
 // RunDesk drives the desk dashboard until the operator quits. It refuses
@@ -93,9 +96,11 @@ func RunDesk(ctx context.Context, d *desk.Desk, opts DeskOptions) error {
 	return err
 }
 
-// target is an item as it was on screen: its name and the hash shown.
+// target is an item as it was on screen: its name and the hash shown. lost
+// marks a lost run: skipping it is final, so u never re-arms it.
 type target struct {
 	name, sha string
+	lost      bool
 }
 
 // confirmKind is what a pending y/n prompt will do.
@@ -123,6 +128,8 @@ type deskModel struct {
 	now     func() time.Time
 	started time.Time
 	poll    time.Duration
+	// scanTimeout bounds one scan (deskScanTimeout; tests shorten it).
+	scanTimeout time.Duration
 
 	width, height int
 
@@ -147,7 +154,7 @@ type deskModel struct {
 
 	notify func(ctx context.Context, title, body string) error
 	// ttyArgv builds the foreground command for a TTY item; tests replace it.
-	ttyArgv func(logPath, rcPath string) []string
+	ttyArgv func(rcPath string) []string
 }
 
 func newDeskModel(ctx context.Context, d deskBackend, opts DeskOptions) deskModel {
@@ -168,15 +175,16 @@ func newDeskModel(ctx context.Context, d deskBackend, opts DeskOptions) deskMode
 	}
 	th := opts.Theme
 	m := deskModel{
-		ctx:     ctx,
-		d:       d,
-		opts:    opts,
-		theme:   th,
-		now:     time.Now,
-		poll:    poll,
-		notify:  notify,
-		ttyArgv: ttyArgv,
-		seen:    map[string]bool{},
+		ctx:         ctx,
+		d:           d,
+		opts:        opts,
+		theme:       th,
+		now:         time.Now,
+		poll:        poll,
+		scanTimeout: deskScanTimeout,
+		notify:      notify,
+		ttyArgv:     ttyArgv,
+		seen:        map[string]bool{},
 	}
 	m.started = m.now()
 	m.frame = DeskFrameOptions{
@@ -240,7 +248,25 @@ func (m deskModel) tick() tea.Cmd {
 }
 
 // scanCmd reads the queue, plus the step states and records of running items.
+// A scan that has not answered within deskScanTimeout is reported as an
+// error so the next tick scans again: a hung read must not freeze the queue
+// behind a clock that still ticks. (The readers refuse FIFOs, so a hang is
+// not expected; this is the backstop.)
 func (m deskModel) scanCmd() tea.Cmd {
+	scan, limit := m.scanOnce(), m.scanTimeout
+	return func() tea.Msg {
+		got := make(chan tea.Msg, 1)
+		go func() { got <- scan() }()
+		select {
+		case msg := <-got:
+			return msg
+		case <-time.After(limit):
+			return deskScanMsg{err: fmt.Errorf("desk: the scan did not finish in %s; retrying", limit)}
+		}
+	}
+}
+
+func (m deskModel) scanOnce() func() tea.Msg {
 	d := m.d
 	return func() tea.Msg {
 		snap, err := d.Scan()
@@ -501,7 +527,7 @@ func (m deskModel) run() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.busy = true
-	t := target{r.item.Name, r.item.Meta.SHA256}
+	t := target{name: r.item.Name, sha: r.item.Meta.SHA256}
 	if r.item.TTY {
 		m.message = ""
 		return m, m.startTTY(t)
@@ -538,7 +564,7 @@ func (m deskModel) askSkip() (tea.Model, tea.Cmd) {
 		m.message = m.styles().Warn.Render(safeMessage(itemLabel(r.item.Name) + " is " + rowLabel(r.kind) + "; there is nothing to skip"))
 		return m, nil
 	}
-	m.confirm, m.targets = confirmSkip, []target{{r.item.Name, r.item.Meta.SHA256}}
+	m.confirm, m.targets = confirmSkip, []target{{r.item.Name, r.item.Meta.SHA256, r.kind == rowLost}}
 	return m, nil
 }
 
@@ -552,7 +578,7 @@ func (m deskModel) askAll() (tea.Model, tea.Cmd) {
 	var ts []target
 	for _, r := range m.rows {
 		if r.runnable() && !r.item.TTY {
-			ts = append(ts, target{r.item.Name, r.item.Meta.SHA256})
+			ts = append(ts, target{name: r.item.Name, sha: r.item.Meta.SHA256})
 		}
 	}
 	if len(ts) == 0 {
@@ -574,8 +600,16 @@ func (m deskModel) confirmKey(key string) (tea.Model, tea.Cmd) {
 	d := m.d
 	switch kind {
 	case confirmSkip:
-		name := ts[0].name
+		name, lost := ts[0].name, ts[0].lost
 		return m, func() tea.Msg {
+			if lost {
+				// A run that began is skipped as lost (Skip records SkipLost
+				// for anything leaving running/) and is never offered to u.
+				if err := d.Skip(name, desk.SkipLost); err != nil {
+					return deskResultMsg{err: err}
+				}
+				return deskResultMsg{text: "skipped lost run " + itemLabel(name) + "; queue a new item to run it again"}
+			}
 			if err := d.Skip(name, desk.SkipOperator); err != nil {
 				return deskResultMsg{err: err}
 			}
@@ -686,7 +720,11 @@ func (m deskModel) log() tea.Cmd {
 // pagerLines splits text into inert lines. A log is terminal output: its
 // SGR and cursor sequences are dropped, and a line a carriage return
 // rewrote shows only its last version, as the terminal showed it.
-// Whatever is left still goes through deskText.
+//
+// Every line is escaped whole, with no rune cap: v promises the bytes y runs,
+// and a cut would hide part of them. Lines are soft-wrapped to the window
+// when drawn (pagerRows), never cut. Input is already bounded (a record is
+// at most 1 MiB, a log tail 256 KiB).
 func pagerLines(text string, isLog bool) []string {
 	raw := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
 	out := make([]string, len(raw))
@@ -698,15 +736,40 @@ func pagerLines(text string, isLog bool) []string {
 			}
 			l = strings.TrimRight(l, "\r")
 		}
-		out[i] = deskText(l)
+		out[i] = termsafe.SafeLine(strings.ReplaceAll(l, "\t", "    "))
 	}
 	return out
+}
+
+// pagerWrapMark starts a soft-wrapped continuation row.
+const pagerWrapMark = "↳ "
+
+// pagerRows soft-wraps the pager's lines to width. A line that fits is one
+// row; a longer one continues on rows that start with pagerWrapMark. The
+// lines are already escaped, and an escape is plain text, so wrapping can
+// split one across rows but never makes it live.
+func pagerRows(lines []string, width int) []string {
+	width = max(width, 8)
+	var rows []string
+	for _, l := range lines {
+		if ansi.StringWidth(l) <= width {
+			rows = append(rows, l)
+			continue
+		}
+		first := ansi.Truncate(l, width, "")
+		rows = append(rows, first)
+		rest := strings.Split(ansi.Hardwrap(ansi.TruncateLeft(l, ansi.StringWidth(first), ""), width-ansi.StringWidth(pagerWrapMark), true), "\n")
+		for _, r := range rest {
+			rows = append(rows, pagerWrapMark+r)
+		}
+	}
+	return rows
 }
 
 func (m *deskModel) pagerKey(key string) {
 	p := m.pager
 	page := max(m.height-2, 1)
-	last := max(len(p.lines)-page, 0)
+	last := max(len(pagerRows(p.lines, m.width))-page, 0)
 	switch key {
 	case "q", "esc", "v", "l":
 		m.pager = nil
@@ -780,10 +843,11 @@ func (m deskModel) pagerView(width, height int) string {
 	st := m.styles()
 	p := m.pager
 	rows := max(height-2, 1)
-	pos := fmt.Sprintf("%d-%d/%d", min(p.offset+1, len(p.lines)), min(p.offset+rows, len(p.lines)), len(p.lines))
+	all := pagerRows(p.lines, width)
+	pos := fmt.Sprintf("%d-%d/%d", min(p.offset+1, len(all)), min(p.offset+rows, len(all)), len(all))
 	lines := []string{cut(st.Header.Render(p.title)+st.Muted.Render("  "+pos), width)}
-	for i := p.offset; i < len(p.lines) && i < p.offset+rows; i++ {
-		lines = append(lines, cut(p.lines[i], width))
+	for i := p.offset; i < len(all) && i < p.offset+rows; i++ {
+		lines = append(lines, all[i])
 	}
 	for len(lines) < height-1 {
 		lines = append(lines, "")
@@ -833,31 +897,58 @@ type ttyRun struct {
 	run     *desk.Run
 	cmd     *osexec.Cmd
 	rcPath  string
+	// log is done/<name>.log, created exclusively through the pinned root
+	// and handed to script(1) as fd 4 (ttyLogFD): script never resolves a
+	// path into the desk, so a symlink or a renamed desk cannot redirect it.
+	log *os.File
 }
 
-func newTTYRun(d deskBackend, c *desk.Claimed, rcPath string, argv func(logPath, rcPath string) []string) (*ttyRun, error) {
+// ttyLogFD is the log operand script(1) gets: the log the desk created, on
+// fd 4, after the script on fd 3.
+const ttyLogFD = "/dev/fd/4"
+
+func newTTYRun(d deskBackend, c *desk.Claimed, rcPath string, argv func(rcPath string) []string) (*ttyRun, error) {
 	run, err := d.BeginRun(c.Name, os.Getpid())
 	if err != nil {
+		// The claim has no owner: end it in skipped/ rather than leave it
+		// in running/ until the claim grace calls it lost.
 		_ = os.Remove(rcPath)
-		return nil, err
+		return nil, errors.Join(err, d.Release(c.Name, desk.SkipLaunchFailed))
 	}
-	a := argv(d.LogPath(c.Name), rcPath)
+	logF, err := d.CreateLog(c.Name)
+	if err != nil {
+		// The run has begun (RUN-START is written): end it, as the
+		// supervisor does when its log cannot be created.
+		_ = os.Remove(rcPath)
+		return nil, errors.Join(err, run.Finish(2, "internal"))
+	}
+	a := argv(rcPath)
 	cmd := osexec.CommandContext(context.Background(), a[0], a[1:]...) //nolint:gosec // G204: script(1) and bash at fixed paths; the item arrives on fd 3
-	return &ttyRun{claimed: c, run: run, cmd: cmd, rcPath: rcPath}, nil
+	return &ttyRun{claimed: c, run: run, cmd: cmd, rcPath: rcPath, log: logF}, nil
 }
 
 // Run starts the command with the verified bytes on fd 3 and waits for it.
 func (r *ttyRun) Run() error {
+	defer r.closeLog()
 	release, err := r.claimed.AttachScript(r.cmd)
 	if err != nil {
 		return err
 	}
+	r.cmd.ExtraFiles = append(r.cmd.ExtraFiles, r.log) // fd 4, after the script on fd 3
 	err = r.cmd.Start()
 	release()
+	r.closeLog() // the child holds its own copy
 	if err != nil {
 		return err
 	}
 	return r.cmd.Wait()
+}
+
+func (r *ttyRun) closeLog() {
+	if r.log != nil {
+		_ = r.log.Close()
+		r.log = nil
+	}
 }
 
 func (r *ttyRun) SetStdin(in io.Reader) {
@@ -881,6 +972,7 @@ func (r *ttyRun) SetStderr(out io.Writer) {
 // finish reads the rc the wrapper wrote and records the end of the run.
 // runErr is what Run returned: a command that never started is rc 127.
 func (r *ttyRun) finish(runErr error) (int, error) {
+	r.closeLog()              // Run may never have been called
 	defer os.Remove(r.rcPath) //nolint:errcheck // a leftover temp file is harmless
 	rc := 2
 	var startErr *osexec.Error
