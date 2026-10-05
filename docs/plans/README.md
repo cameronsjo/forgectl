@@ -20,6 +20,7 @@ Being built now.
 - [Review-autonomy spine — design](2026-09-11-review-autonomy-spine-design.md)
 - [forgectl: a coordinator over herdr worker panes](2026-09-28-forgectl-herdr-coordinator.md)
 - [A close path for board tasks (cameronsjo/forgectl#1022)](2026-10-01-tasks-close-path.md)
+- [Desk dashboard: run viewer and approval queue for `forgectl desk`](2026-10-05-desk-dashboard.md)
 
 ## Proposed
 
