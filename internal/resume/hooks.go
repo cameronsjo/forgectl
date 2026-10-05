@@ -291,7 +291,7 @@ func (hr hookRunner) runHook(ctx context.Context, h HookSpec, d Decision) HookRu
 			rec.Outcome, rec.Detail = OutcomeFailed, termsafe.SafeLineMax(err.Error(), hookTailRunes)
 		case res.Incomplete():
 			rec.Outcome, rec.Exit = OutcomeIncomplete, 1
-			rec.Detail = fmt.Sprintf("%d session(s) restarted or skipped, %d failed, %d left waiting", len(res.Finals)-res.Failed-res.Left, res.Failed, res.Left)
+			rec.Detail = fmt.Sprintf("%d session(s) restarted or skipped, %d failed, %d left waiting, %d with no herdr pane", len(res.Finals)-res.Failed-res.Left-res.PaneGone, res.Failed, res.Left, res.PaneGone)
 		default:
 			rec.Outcome, rec.Exit = OutcomeOK, 0
 			rec.Detail = fmt.Sprintf("%d session(s) restarted or skipped", len(res.Finals))

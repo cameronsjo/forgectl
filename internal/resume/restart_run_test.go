@@ -211,8 +211,14 @@ func TestRunRestart_RefusalsNeverSignal(t *testing.T) {
 			env := newFakeEnv()
 			mutate(env)
 			final, _ := runOne(t, context.Background(), env, nil)
-			if final.State != StateSkipped || final.Manual != ManualResume(testSID) {
-				t.Errorf("final = %+v; want skipped with the by-hand command", final)
+			// A vanished pane is the one refusal that counts as incomplete,
+			// so the watcher retries it (StatePaneGone).
+			want := StateSkipped
+			if name == "vanished pane" {
+				want = StatePaneGone
+			}
+			if final.State != want || final.Manual != ManualResume(testSID) {
+				t.Errorf("final = %+v; want %s with the by-hand command", final, want)
 			}
 			if env.terminated != 0 || env.relaunched != 0 || env.prepared != 0 {
 				t.Errorf("terminated=%d relaunched=%d prepared=%d; a refusal touches nothing", env.terminated, env.relaunched, env.prepared)

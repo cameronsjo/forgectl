@@ -212,6 +212,28 @@ func TestResumeHooksRestartAction(t *testing.T) {
 	}
 }
 
+// A session whose herdr pane cannot be found makes the restart hook
+// incomplete, so the watcher's bounded retries come back for it.
+func TestResumeHooksRestartRetriesAGonePane(t *testing.T) {
+	env := &cliRestartEnv{pane: "w0:p999", gone: map[string]bool{"w0:p999": true}}
+	restartFixture(t, env)
+	f := newHooksFixture(t)
+	cfg := "[[resume.on_update]]\nharness = \"claude\"\naction = \"restart\"\n"
+	f.version = "2.1.99"
+	if _, err := f.run(t, cfg, "run"); err != nil {
+		t.Fatal(err)
+	}
+	f.version = "2.1.100"
+	out, err := f.run(t, cfg, "run")
+	if err == nil || env.terminated != 0 || !strings.Contains(out, "pane-gone") {
+		t.Fatalf("err %v terminated %d\n%s", err, env.terminated, out)
+	}
+	st, _, lerr := resume.FileHookStore{Dir: f.state}.Load("claude")
+	if lerr != nil || len(st.Pending) == 0 {
+		t.Fatalf("state %+v, %v; want the restart pending for a retry", st, lerr)
+	}
+}
+
 func TestResumeHooksDryRunWritesNothing(t *testing.T) {
 	f := newHooksFixture(t)
 	out, err := f.run(t, commandHookTOML, "run", "--dry-run")
@@ -468,5 +490,60 @@ func TestResumeHooksRejectsTopLevelOnUpdate(t *testing.T) {
 	_, err := f.run(t, "[[on_update]]\nharness = \"claude\"\naction = \"restart\"\n", "run")
 	if err == nil || !strings.Contains(err.Error(), "[[resume.on_update]]") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// A restart the watcher could not finish posts a notification naming the
+// by-hand command; a resumed or waiting session posts nothing.
+func TestResumeHooksRestartFailureNotifies(t *testing.T) {
+	env := &cliRestartEnv{relaunchErr: errors.New("herdr call timed out")}
+	restartFixture(t, env)
+	var posted []string
+	prev := hookNotify
+	hookNotify = func(_ context.Context, _ module.Deps, title, body string) error {
+		posted = append(posted, title+" | "+body)
+		return nil
+	}
+	t.Cleanup(func() { hookNotify = prev })
+	f := newHooksFixture(t)
+	cfg := "[[resume.on_update]]\nharness = \"claude\"\naction = \"restart\"\n"
+	f.version = "2.1.99"
+	if _, err := f.run(t, cfg, "run"); err != nil {
+		t.Fatal(err)
+	}
+	f.version = "2.1.100"
+	if _, err := f.run(t, cfg, "run"); err == nil {
+		t.Fatal("a failed relaunch must make the run incomplete")
+	}
+	if len(posted) != 1 || !strings.Contains(posted[0], "not restarted") || !strings.Contains(posted[0], "Run: forgectl resume ") || !strings.Contains(posted[0], "herdr call timed out") {
+		t.Fatalf("notifications = %q; want one naming the by-hand command", posted)
+	}
+}
+
+func TestNotifyRestartFailureIgnoresOtherStates(t *testing.T) {
+	called := 0
+	prev := hookNotify
+	hookNotify = func(context.Context, module.Deps, string, string) error { called++; return nil }
+	t.Cleanup(func() { hookNotify = prev })
+	for _, st := range []resume.RestartState{resume.StateRestarting, resume.StateResumed, resume.StateWaiting, resume.StateSkipped, resume.StateLeft, resume.StatePaneGone} {
+		notifyRestartFailure(context.Background(), module.Deps{}, resume.RestartEvent{State: st})
+	}
+	if called != 0 {
+		t.Fatalf("posted %d notifications for non-failed states", called)
+	}
+}
+
+// A failure reported while the run is shutting down (its context cancelled by
+// SIGTERM) must still reach the notifier with a live context.
+func TestNotifyRestartFailureSurvivesACancelledRun(t *testing.T) {
+	var live bool
+	prev := hookNotify
+	hookNotify = func(ctx context.Context, _ module.Deps, _, _ string) error { live = ctx.Err() == nil; return nil }
+	t.Cleanup(func() { hookNotify = prev })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	notifyRestartFailure(ctx, module.Deps{}, resume.RestartEvent{State: resume.StateFailed, Manual: "forgectl resume x", Detail: "d"})
+	if !live {
+		t.Fatal("the notifier got a cancelled context; osascript would never start")
 	}
 }

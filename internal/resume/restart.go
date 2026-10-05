@@ -148,8 +148,12 @@ func planOne(s OutdatedSession) RestartPlanItem {
 		item.Action = ActionSkip
 		item.Reason = "its recorded version cannot be compared, so nothing proves it outdated"
 	case s.Pane == "":
+		why := "none found by session and none in its environment"
+		if s.PaneListProblem != "" {
+			why = s.PaneListProblem + " and none in its environment"
+		}
 		item.Action = ActionManual
-		item.Reason = "no herdr pane in its environment, so there is nowhere to relaunch it; quit it, then run " + ManualResume(s.SessionID)
+		item.Reason = "no herdr pane (" + why + "), so there is nowhere to relaunch it; quit it, then run " + ManualResume(s.SessionID)
 	case s.Busy:
 		item.Action = ActionRestart
 		item.Reason = fmt.Sprintf("waits: status is %q, restarts once it is idle", s.Status)

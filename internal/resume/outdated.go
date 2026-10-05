@@ -88,8 +88,15 @@ type OutdatedSession struct {
 	VersionUnparseable bool
 	// Pane is the HERDR_PANE_ID the session's process carries in its environment,
 	// empty when unknown. It is a claim, not a verified pane: a nested claude
-	// inherits its parent's id.
+	// inherits its parent's id. A restart run replaces it with the pane herdr
+	// reports holding the session, when there is exactly one (ResolvePane).
 	Pane string
+	// PaneNote is set only by a restart run's pane resolution: display text
+	// saying where Pane came from when that is not simply the environment.
+	PaneNote string
+	// PaneListProblem is set only by a restart run's pane resolution, when
+	// herdr's pane list could not be used: what went wrong with it.
+	PaneListProblem string
 	// ProcStart is the registry's recorded process start time, kept so a later
 	// restart can tell this process from a successor that reused its pid.
 	ProcStart string

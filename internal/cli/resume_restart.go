@@ -31,6 +31,19 @@ installed claude: it stops each one and resumes it in the same herdr pane with
 ` + "`forgectl resume <id>`" + `, so the configured launch profile and cwd apply and the
 conversation comes back. --outdated is required; it is the only selector today.
 
+Each session's pane is found by session id: one ` + "`herdr pane list`" + ` per run, and
+the pane herdr labels "claude" with that session id is the one checked and
+relaunched into. The process's HERDR_PANE_ID is the fallback, used when no
+pane carries the session or the list fails or is rejected; a "note" line then
+says so. A herdr server restart renumbers every pane, so a long-running
+session's HERDR_PANE_ID can name a pane that no longer exists. A pane that
+differs from the environment's shows as "pane <found> (found by session; env
+said <old>)". A session herdr labels in two panes is refused. When herdr
+answers "pane not found" for a session, the list is read once more for that
+session, and if another pane now holds it the checks continue there. The
+label alone is never trusted: check 3 below still runs against the found
+pane.
+
   forgectl resume restart --outdated --dry-run        show the plan, touch nothing
   forgectl resume restart --outdated                  restart all, waiting for each to be idle
   forgectl resume restart --outdated --session <id>   restart only that session (repeatable)
@@ -55,10 +68,11 @@ before the signal:
 
 Failing 2 or 4 waits and re-checks every few seconds, up to --timeout (default
 30m). Failing 1 or 3 is reported and never signalled; a herdr error other than
-"pane not found" waits instead. A session with no herdr pane in its
-environment, whose version cannot be compared, or that this run is itself
-running inside (its pid is an ancestor of this process, as when an agent's
-shell tool runs the command) is reported and left alone.
+"pane not found" waits instead. A session with no herdr pane (none found by
+session and none in its environment), whose version cannot be compared, or
+that this run is itself running inside (its pid is an ancestor of this
+process, as when an agent's shell tool runs the command) is reported and left
+alone.
 
 Keystrokes typed into a session in the instant between the last screen read
 and the signal cannot be seen and are lost with the process; the window is a
@@ -98,14 +112,17 @@ register, and reports it resumed if it does or reports delivery as unknown
 (check the pane before resuming by hand) if it does not.
 
 Output is one line per session per state change: waiting (with the reason),
-restarting, resumed, skipped, failed, and left (still waiting at the timeout
-or Ctrl-C; never signalled). --dry-run prints each session's planned action
+restarting, resumed, skipped, failed, left (still waiting at the timeout or
+Ctrl-C; never signalled), and pane-gone (herdr has no pane for it, even after
+reading the list again; never signalled), plus a run-level note when herdr's
+pane list cannot be used. --dry-run prints each session's planned action
 and what the checks say right now, using reads only.
 
 Exit 0 when every selected session was resumed or skipped with a reason
 (skips are the safety checks working, not errors). Exit 1 when a stop or
-relaunch failed, or the timeout or Ctrl-C left sessions waiting. Exit 2 on
-bad usage.`,
+relaunch failed, the timeout or Ctrl-C left sessions waiting, or a session's
+pane could not be found (it can reappear under a new id, so the update
+watcher retries it). Exit 2 on bad usage.`,
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -166,7 +183,7 @@ func runResumeRestart(ctx context.Context, out io.Writer, deps module.Deps, only
 		return err
 	}
 	if res.Incomplete() {
-		return WithExitCode(fmt.Errorf("%d session(s) failed, %d left waiting — each is listed above with the command to resume it by hand", res.Failed, res.Left), 1)
+		return WithExitCode(fmt.Errorf("%d session(s) failed, %d left waiting, %d with no herdr pane — each is listed above with the command to resume it by hand", res.Failed, res.Left, res.PaneGone), 1)
 	}
 	return nil
 }
@@ -175,6 +192,10 @@ func runResumeRestart(ctx context.Context, out io.Writer, deps module.Deps, only
 // registry- or herdr-derived text, so the whole line goes through safeText.
 func printRestartEvent(out io.Writer, ev resume.RestartEvent) {
 	line := fmt.Sprintf("%-10s %s  %s", ev.State, ev.SessionID, ev.Detail)
+	if ev.SessionID == "" {
+		// A run-level line (StateNote) names no session.
+		line = fmt.Sprintf("%-10s %s", ev.State, ev.Detail)
+	}
 	if ev.Manual != "" {
 		line += "; by hand: " + ev.Manual
 	}
