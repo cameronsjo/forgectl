@@ -23,6 +23,7 @@
 package termsafe
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -215,6 +216,19 @@ func jsonEscapesASCII(c byte) bool {
 	return c == '"' || c == '\\' || c == '<' || c == '>' || c == '&'
 }
 
+// invalidByteJSONBytes is how many bytes encoding/json writes for one invalid
+// UTF-8 byte between the quotes. It is measured rather than hardcoded because
+// it changed: Go 1.26 writes the six-byte escape \ufffd, and Go 1.27 writes
+// U+FFFD's three raw bytes.
+var invalidByteJSONBytes = func() int {
+	// termsafe:allow-raw-json measures the encoder's width, never output
+	b, err := json.Marshal("\xff")
+	if err != nil {
+		return len(`\ufffd`)
+	}
+	return len(b) - 2
+}()
+
 // jsonStringBytes is how many bytes encoding/json's default (HTML-escaping)
 // string encoder writes for s between the quotes.
 func jsonStringBytes(s string) int {
@@ -231,9 +245,10 @@ func jsonStringBytes(s string) int {
 		case r < 0x20 || r == '<' || r == '>' || r == '&' || r == '\u2028' || r == '\u2029':
 			n += 6
 		case r == utf8.RuneError && width == 1:
-			// An invalid byte is written as \ufffd; a valid U+FFFD as
+			// An invalid byte is written as a replacement character,
+			// whose width depends on the Go release; a valid U+FFFD is
 			// its three bytes, which the default arm counts.
-			n += 6
+			n += invalidByteJSONBytes
 		default:
 			n += utf8.RuneLen(r)
 		}

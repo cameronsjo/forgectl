@@ -23,6 +23,7 @@ func liveRepo(t *testing.T) string {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
 	}
+	isolateGitConfig(t)
 	repo := t.TempDir()
 	cmd := exec.Command("git", "-C", repo, "init", "-q") //nolint:gosec,noctx // G204: test setup running git with fixed arguments
 	cmd.Env = gitenv.Env(gitenv.Local, os.Environ())
