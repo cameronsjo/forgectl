@@ -205,7 +205,11 @@ func (d *Desk) BeginRun(name string, pid int, fields ...string) (run *Run, err e
 	}
 	defer func() {
 		if err != nil {
-			lock.release(true)
+			// The item is still here, or gone because someone moved it (and
+			// removed the lock file); only in the second case is ours a
+			// stray to remove.
+			_, ferr := d.findKind(DirRunning, name)
+			lock.release(ferr != nil)
 		}
 	}()
 	kind, err := d.findKind(DirRunning, name)
@@ -280,6 +284,29 @@ func (r *Run) Finish(rc int, reason string, fields ...string) error {
 	return errors.Join(errs...)
 }
 
+// Abandon ends a run that began but cannot go on because its name is taken
+// in done/ (the log already exists): the item moves to skipped/ with reason,
+// and nothing in done/ is touched, unlike Finish, which would append to that
+// log and rename over that record. The events file this run opened is left
+// with its RUN-START; watch reports the item skipped.
+func (r *Run) Abandon(reason string) error {
+	d := r.d
+	_ = r.Events.Close()
+	r.Meta.PID, r.Meta.PIDStart, r.Meta.SkipReason = 0, 0, reason
+	errs := []error{d.writeMeta(DirRunning, r.Name, r.Meta)}
+	if err := d.move(r.Name, r.Kind, DirRunning, DirSkipped); err != nil {
+		errs = append(errs, fmt.Errorf("desk: move %s to skipped/: %w", describe(r.Name), err))
+	} else if r.lock != nil {
+		r.lock.release(true)
+		r.lock = nil
+	}
+	if r.lock != nil {
+		r.lock.release(false)
+		r.lock = nil
+	}
+	return errors.Join(errs...)
+}
+
 // appendExit appends EXIT=<rc> to done/<name>.log on a line of its own, even
 // when the output before it did not end in a newline.
 func (d *Desk) appendExit(name string, rc int) error {
@@ -321,7 +348,8 @@ func (d *Desk) Release(name, reason string) error {
 	if held {
 		return fmt.Errorf("desk: %s has an owner (its lock is held); only a run that never began can be released", describe(name))
 	}
-	defer lock.release(true)
+	moved := false
+	defer func() { lock.release(moved) }()
 	meta, _, err := d.readMeta(DirRunning, name)
 	if err != nil {
 		return err
@@ -336,6 +364,7 @@ func (d *Desk) Release(name, reason string) error {
 	if err := d.move(name, kind, DirRunning, DirSkipped); err != nil {
 		return fmt.Errorf("desk: release %s: %w", describe(name), err)
 	}
+	moved = true
 	return nil
 }
 
@@ -346,6 +375,8 @@ func (d *Desk) Release(name, reason string) error {
 // refuses while a live owner holds it.
 func (d *Desk) Skip(name, reason string) error {
 	from := DirPending
+	var moved, staleMeta bool
+	var carried Meta
 	kind, err := d.findKind(DirPending, name)
 	if errors.Is(err, ErrNotFound) {
 		if kind, err = d.findKind(DirRunning, name); err != nil {
@@ -358,21 +389,31 @@ func (d *Desk) Skip(name, reason string) error {
 		if held {
 			return fmt.Errorf("desk: %s is running (its owner holds the lock); only a lost run can be skipped", describe(name))
 		}
-		defer lock.release(true)
-		meta, _, err := d.readMeta(DirRunning, name)
+		defer func() { lock.release(moved) }()
+		meta, ok, err := d.readMeta(DirRunning, name)
 		if err != nil {
 			return err
+		}
+		if !ok {
+			// A claim that died between its two renames: its meta is still
+			// in pending/. Carry it over and clear it from pending/.
+			if meta, staleMeta, err = d.readMeta(DirPending, name); err != nil {
+				return err
+			}
 		}
 		if !d.lostUnlocked(name, meta) {
 			return fmt.Errorf("desk: %s is running; only a lost run can be skipped", describe(name))
 		}
-		from, reason = DirRunning, SkipLost
+		from, reason, carried = DirRunning, SkipLost, meta
 	} else if err != nil {
 		return err
 	}
 	meta, _, err := d.readMeta(from, name)
 	if err != nil {
 		return err
+	}
+	if staleMeta {
+		meta = carried
 	}
 	meta.Kind, meta.SkipReason = kind, reason
 	if err := d.writeMeta(from, name, meta); err != nil {
@@ -383,6 +424,10 @@ func (d *Desk) Skip(name, reason string) error {
 			return ErrClaimed
 		}
 		return fmt.Errorf("desk: skip %s: %w", describe(name), err)
+	}
+	moved = from == DirRunning
+	if staleMeta {
+		_ = d.root.Remove(metaName(DirPending, name)) // carried over to skipped/ above
 	}
 	return nil
 }

@@ -47,35 +47,52 @@ func (d *Desk) openLock(name string) (*os.File, error) {
 	return f, nil
 }
 
+// lockStale bounds how often a lock is retaken because the file it locked was
+// unlinked or replaced while the taker waited.
+const lockStale = 10
+
 // lockOwner takes the owner lock, waiting for a Skip or Release that holds
 // it to finish.
 func (d *Desk) lockOwner(name string) (*ownerLock, error) {
-	f, err := d.openLock(name)
-	if err != nil {
-		return nil, err
-	}
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("desk: take the owner lock for %s: %w", describe(name), err)
-	}
-	return &ownerLock{d: d, name: name, f: f}, nil
+	return d.takeLock(name, unix.LOCK_EX)
 }
 
 // tryLockOwner takes the owner lock without waiting. held is true, with no
 // lock returned, when another open file holds it: a live owner.
 func (d *Desk) tryLockOwner(name string) (l *ownerLock, held bool, err error) {
-	f, err := d.openLock(name)
-	if err != nil {
-		return nil, false, err
+	l, err = d.takeLock(name, unix.LOCK_EX|unix.LOCK_NB)
+	if errors.Is(err, unix.EWOULDBLOCK) {
+		return nil, true, nil
 	}
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		_ = f.Close()
-		if errors.Is(err, unix.EWOULDBLOCK) {
-			return nil, true, nil
+	return l, false, err
+}
+
+// takeLock opens the lock file and flocks it with how. A lock is only a lock
+// while the path still names the file it was taken on: a holder that
+// unlinked the file while this taker waited leaves it locking an inode no
+// other process can find. So after the flock the open file must be the file
+// at the path (os.SameFile); if not, it is closed and taken again.
+func (d *Desk) takeLock(name string, how int) (*ownerLock, error) {
+	for range lockStale {
+		f, err := d.openLock(name)
+		if err != nil {
+			return nil, err
 		}
-		return nil, false, fmt.Errorf("desk: take the owner lock for %s: %w", describe(name), err)
+		if err := unix.Flock(int(f.Fd()), how); err != nil {
+			_ = f.Close()
+			if errors.Is(err, unix.EWOULDBLOCK) {
+				return nil, err
+			}
+			return nil, fmt.Errorf("desk: take the owner lock for %s: %w", describe(name), err)
+		}
+		locked, ferr := f.Stat()
+		named, lerr := d.root.Lstat(lockName(name))
+		if ferr == nil && lerr == nil && os.SameFile(locked, named) {
+			return &ownerLock{d: d, name: name, f: f}, nil
+		}
+		_ = f.Close() // the file was unlinked or replaced while we waited
 	}
-	return &ownerLock{d: d, name: name, f: f}, false, nil
+	return nil, fmt.Errorf("desk: the owner lock for %s kept changing; try again", describe(name))
 }
 
 // Retry for tryLockOwnerSettled: a liveness probe (ownerAlive) holds the
@@ -99,7 +116,9 @@ func (d *Desk) tryLockOwnerSettled(name string) (l *ownerLock, held bool, err er
 }
 
 // release drops the lock, removing the lock file first (while still holding
-// it) when remove is set.
+// it) when remove is set. Remove only once the item has left running/ (Finish,
+// or a Skip or Release that moved it): a waiter may be blocked on this very
+// file, and takeLock makes it retake the lock on whatever the path names.
 func (l *ownerLock) release(remove bool) {
 	if remove {
 		_ = l.d.root.Remove(lockName(l.name)) // already gone is fine

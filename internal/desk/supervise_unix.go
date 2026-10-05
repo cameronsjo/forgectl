@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -166,6 +167,11 @@ func (d *Desk) superviseScript(name string, data []byte, sigs <-chan os.Signal) 
 		return 2, err
 	}
 	logF, err := d.createLog(name)
+	if errors.Is(err, fs.ErrExist) {
+		// Another run's log took the name after BeginRun's check: end this
+		// one in skipped/ and leave that record alone.
+		return 2, errors.Join(err, run.Abandon(SkipReused))
+	}
 	if err != nil {
 		return 2, errors.Join(err, run.Finish(2, "internal"))
 	}
@@ -261,6 +267,9 @@ func (d *Desk) superviseBatch(name string, data []byte, sigs <-chan os.Signal) (
 	}
 	nothing := BatchResult{RC: 2}.Fields()
 	logF, err := d.createLog(name)
+	if errors.Is(err, fs.ErrExist) {
+		return 2, errors.Join(err, run.Abandon(SkipReused))
+	}
 	if err != nil {
 		return 2, errors.Join(err, run.Finish(2, "internal", nothing...))
 	}
