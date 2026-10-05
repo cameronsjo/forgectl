@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	osexec "os/exec"
 	"strconv"
@@ -916,6 +917,12 @@ func newTTYRun(d deskBackend, c *desk.Claimed, rcPath string, argv func(rcPath s
 		return nil, errors.Join(err, d.Release(c.Name, desk.SkipLaunchFailed))
 	}
 	logF, err := d.CreateLog(c.Name)
+	if errors.Is(err, fs.ErrExist) {
+		// Another run's log took the name after BeginRun's check: end this
+		// run in skipped/ (name-reused) and leave that record alone.
+		_ = os.Remove(rcPath)
+		return nil, errors.Join(err, run.Abandon(desk.SkipReused))
+	}
 	if err != nil {
 		// The run has begun (RUN-START is written): end it, as the
 		// supervisor does when its log cannot be created.
@@ -998,5 +1005,9 @@ func (r *ttyRun) finish(runErr error) (int, error) {
 }
 
 // ttyWrapper runs the script and writes its status to the rc file:
-// $1 is bash, $2 the script operand (desk.ScriptFDPath), $3 the rc file.
-const ttyWrapper = `"$1" "$2"; echo $? > "$3"`
+// $1 is bash, $2 the script operand (desk.ScriptFDPath), $3 the rc file. It
+// first closes fd 4, the log script(1) was handed: script holds its own
+// descriptor on the log, and the item and anything it starts must not hold
+// a writable one on the done/ record. (fd 3 is closed by the desk's prelude
+// inside the script itself.)
+const ttyWrapper = `exec 4>&-; "$1" "$2"; echo $? > "$3"`

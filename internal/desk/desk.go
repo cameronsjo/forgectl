@@ -282,7 +282,13 @@ type Meta struct {
 	SkipReason string     `json:"skip_reason,omitempty"`
 	// SkipNote is the operator's own one-line reason, from `desk skip
 	// --reason`. Untrusted text: render it through termsafe.
-	SkipNote  string     `json:"skip_note,omitempty"`
+	SkipNote string `json:"skip_note,omitempty"`
+	// SkippedBy is who skipped the item: "dashboard" or "cli" (see
+	// SkippedByDashboard). Empty for a skip the desk made itself (changed,
+	// refused, name-reused) and for skips before the field existed.
+	SkippedBy string `json:"skipped_by,omitempty"`
+	// SkippedAt is when a dashboard or CLI skip happened (UTC).
+	SkippedAt *time.Time `json:"skipped_at,omitempty"`
 	StartedAt *time.Time `json:"started_at,omitempty"`
 	EndedAt   *time.Time `json:"ended_at,omitempty"`
 	// ExitCode is the run's rc, recorded at Finish. It outranks the log's

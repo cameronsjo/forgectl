@@ -315,3 +315,138 @@ func TestClaimMetaFailureReleasesTheItem(t *testing.T) {
 		t.Error("the pending meta was left behind")
 	}
 }
+
+// P1 from the re-review: a holder unlinks the lock file while BeginRun waits
+// on it. BeginRun must not end up holding a lock on a nameless inode; it
+// retakes the lock on the file the path names, so the run stays visible as a
+// live owner.
+func TestBeginRunRetakesALockUnlinkedWhileItWaited(t *testing.T) {
+	d := openDesk(t)
+	name := claimOne(t, d)
+	l, held, err := d.tryLockOwner(name)
+	if err != nil || held {
+		t.Fatalf("tryLockOwner: held=%v err=%v", held, err)
+	}
+	got := make(chan *Run, 1)
+	go func() {
+		run, err := d.BeginRun(name, os.Getpid())
+		if err != nil {
+			t.Errorf("BeginRun: %v", err)
+		}
+		got <- run
+	}()
+	time.Sleep(100 * time.Millisecond) // BeginRun is now blocked on the lock
+	l.release(true)                    // unlink while it waits
+	run := <-got
+	if run == nil {
+		t.FailNow()
+	}
+	t.Cleanup(func() { _ = run.Finish(0, "ok") })
+	if !d.ownerAlive(name) {
+		t.Fatal("the live run's lock is invisible: it locked an unlinked file")
+	}
+	if _, held, _ := d.tryLockOwner(name); !held {
+		t.Fatal("a second taker got the lock while the run was live")
+	}
+	d.now = func() time.Time { return time.Now().Add(ClaimGrace * 10) }
+	if err := d.Skip(name, SkipLost); err == nil {
+		t.Fatal("Skip moved a live run")
+	}
+}
+
+// A Skip that refuses leaves the lock file where it is: removing it would
+// strand a BeginRun waiting on that file (P1).
+func TestARefusedSkipKeepsTheLockFile(t *testing.T) {
+	d := openDesk(t)
+	name := claimOne(t, d) // inside the grace: Skip refuses
+	f, err := d.openLock(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := f.Stat()
+	_ = f.Close()
+	if err := d.Skip(name, SkipLost); err == nil {
+		t.Fatal("Skip moved a claim inside the grace")
+	}
+	after, err := d.root.Lstat(lockName(name))
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("a refused Skip removed or replaced the lock file (err %v)", err)
+	}
+}
+
+// R3: a Claim that died between its two renames leaves the item in running/
+// with its meta, and that meta's claimed_at, still in pending/. Past the
+// grace it is lost; Skip moves it with that meta and clears pending/.
+func TestClaimDiedBetweenRenamesIsLostAfterTheGrace(t *testing.T) {
+	d := openDesk(t)
+	start := time.Now()
+	d.now = func() time.Time { return start }
+	saved := claimMeta
+	t.Cleanup(func() { claimMeta = saved })
+	claimMeta = func(*Desk, string) error { return nil } // the claimant dies before moving the meta
+	name := claimOne(t, d)
+	if _, err := os.Lstat(filepath.Join(d.Path(), DirPending, name+extMeta)); err != nil {
+		t.Fatalf("the fixture needs the meta left in pending/: %v", err)
+	}
+
+	d.now = func() time.Time { return start.Add(ClaimGrace - time.Second) }
+	if got := scan(t, d).Running[0].State; got != StateRunning {
+		t.Fatalf("inside the grace: %s, want running", got)
+	}
+	d.now = func() time.Time { return start.Add(ClaimGrace + time.Second) }
+	if got := scan(t, d).Running[0].State; got != StateLost {
+		t.Fatalf("past the grace: %s, want lost", got)
+	}
+	if err := d.Skip(name, SkipLost); err != nil {
+		t.Fatalf("Skip: %v", err)
+	}
+	snap := scan(t, d)
+	if len(snap.Skipped) != 1 || snap.Skipped[0].Meta.SkipReason != SkipLost || snap.Skipped[0].Meta.SHA256 == "" {
+		t.Fatalf("skipped = %+v, want the item with its carried meta, as lost", snap.Skipped)
+	}
+	if _, err := os.Lstat(filepath.Join(d.Path(), DirPending, name+extMeta)); err == nil {
+		t.Fatal("the stale pending meta was left behind")
+	}
+}
+
+// R5: a log that appears at done/<name>.log after BeginRun's check (another
+// run's) ends this run in skipped/ as name-reused. The other run's log and
+// record are untouched, and the item cannot be re-armed.
+func TestSuperviseLeavesAnotherRunsLogAlone(t *testing.T) {
+	for _, tc := range []struct{ file, body string }{
+		{"01-hi.sh", script},
+		{"01-hi.manifest", "# WHAT: x\n# WHY: y\na -- true\n"},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			d := openDesk(t)
+			dropPending(t, d, tc.file, tc.body)
+			scan(t, d)
+			if _, err := d.Claim("01-hi", ""); err != nil {
+				t.Fatal(err)
+			}
+			logPath := filepath.Join(d.Path(), DirDone, "01-hi.log")
+			recordPath := filepath.Join(d.Path(), DirDone, tc.file)
+			saved := beforeRunStart
+			t.Cleanup(func() { beforeRunStart = saved })
+			beforeRunStart = func(string) error {
+				writeFile(t, logPath, "other run\n", 0o600)
+				writeFile(t, recordPath, "other record\n", 0o600)
+				return nil
+			}
+			if rc, err := d.supervise("01-hi"); err == nil || rc != 2 {
+				t.Fatalf("supervise = %d, %v; want 2 and an error", rc, err)
+			}
+			for p, want := range map[string]string{logPath: "other run\n", recordPath: "other record\n"} {
+				if data, _ := os.ReadFile(p); string(data) != want { //nolint:gosec // G304: a path under t.TempDir
+					t.Errorf("%s = %q, want it untouched (%q)", filepath.Base(p), data, want)
+				}
+			}
+			if got := skipReason(t, d, "01-hi"); got != SkipReused {
+				t.Fatalf("skip reason %q, want %q", got, SkipReused)
+			}
+			if err := d.Unskip("01-hi"); err == nil {
+				t.Fatal("a name-reused item was re-armed")
+			}
+		})
+	}
+}

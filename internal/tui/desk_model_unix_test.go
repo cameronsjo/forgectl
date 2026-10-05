@@ -645,7 +645,12 @@ func TestTTYRunPassesFD3(t *testing.T) {
 	}
 	defer devnull.Close() //nolint:errcheck // read-only
 	cmd.Stdin = devnull
-	release, err := desk.AttachScript(cmd, []byte("echo fd3-reached-bash\nexit 3\n"))
+	// The item checks fd 4 (the log) is closed, and a child tries to write
+	// into it; neither may reach the log except through script(1).
+	release, err := desk.AttachScript(cmd, []byte("echo fd3-reached-bash\n"+
+		"if [ -e /dev/fd/4 ]; then echo FD4-OPEN-IN-ITEM; else echo fd4-closed-in-item; fi\n"+
+		"/bin/sh -c 'echo CHILD-WROTE-FD4 >&4' 2>/dev/null || true\n"+
+		"exit 3\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -664,6 +669,9 @@ func TestTTYRunPassesFD3(t *testing.T) {
 	}
 	if strings.TrimSpace(string(rcData)) != "3" {
 		t.Fatalf("rc file = %q, want 3", rcData)
+	}
+	if !strings.Contains(string(logData), "fd4-closed-in-item") || strings.Contains(string(logData), "FD4-OPEN-IN-ITEM") || strings.Contains(string(logData), "CHILD-WROTE-FD4") {
+		t.Fatalf("fd 4 (the log) reached the item or its child:\n%s", logData)
 	}
 }
 
@@ -690,6 +698,20 @@ func TestTTYRun_LogIsCreatedExclusively(t *testing.T) {
 	}
 	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "create log for 01-console") {
 		t.Errorf("footer should report the refused log: %q", footer)
+	}
+	// The run ends in skipped/ as name-reused; done/ keeps what is there.
+	snap, err := h.d.Scan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Skipped) != 1 || snap.Skipped[0].Meta.SkipReason != desk.SkipReused {
+		t.Fatalf("skipped = %+v, want 01-console as name-reused", snap.Skipped)
+	}
+	if fi, err := os.Lstat(backend.link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the planted log entry was touched: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(h.d.Path(), desk.DirDone, "01-console.sh")); err == nil {
+		t.Fatal("the run's record was moved into done/")
 	}
 }
 

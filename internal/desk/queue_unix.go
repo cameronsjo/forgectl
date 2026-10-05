@@ -205,10 +205,17 @@ func (d *Desk) lostUnlocked(name string, meta Meta) bool {
 // older than ClaimGrace. The claim time is meta's claimed_at, or for a
 // claim made before that field existed, the running/ file's mtime (Claim
 // writes that file last). A running item with no meta yet (no hash) is a
-// claim in progress, never lost: Claim moves the item before its meta.
+// claim in progress: Claim moves the item before its meta, and writes
+// claimed_at into the pending meta before either move. That pending meta
+// times the claim, so a claim that died between the two moves is lost after
+// the grace too. With no meta anywhere the item is never lost.
 func (d *Desk) ownerless(name string, meta Meta) bool {
 	if meta.SHA256 == "" {
-		return false
+		pending, ok, err := d.readMeta(DirPending, name)
+		if err != nil || !ok || pending.ClaimedAt == nil {
+			return false
+		}
+		meta = pending
 	}
 	var at time.Time
 	if meta.ClaimedAt != nil {
