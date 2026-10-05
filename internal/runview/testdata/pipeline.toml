@@ -1,0 +1,54 @@
+# A synthetic run spec in the neutral example vocabulary.
+name = "pipeline"
+root_env = "PIPELINE_ROOT"
+runs = "runs/*"
+summaries = "results/*.summary.json"
+
+[log]
+path = "out/events.jsonl"
+time = "at"
+event = "kind"
+step = "stage"
+attempt = "try"
+show = ["stage", "try", "rc", "err"]
+
+[[steps]]
+id = "fetch"
+note = "pull the inputs"
+[[steps]]
+id = "build"
+note = "compile and package"
+
+[gate]
+label = "accepted?"
+max_rejects = 3
+
+[on]
+stage_started = "start"
+stage_done = "close"
+stage_refused = "reject"
+stage_gave_up = "fail"
+worker_boot = "restart"
+run_finished = "end"
+
+[end]
+exit_field = "rc"
+
+[[checks]]
+id = "audit"
+event = "audit_result"
+field = "rc"
+label = "audit ok?"
+fail_exit = 3
+
+[exits]
+"0" = "finished, audit passed"
+"3" = "audit rejected"
+
+[metrics]
+path = "out/usage.jsonl"
+sum = ["in", "out"]
+error_when = { status = "error" }
+
+[live]
+stale_after = "10m"
