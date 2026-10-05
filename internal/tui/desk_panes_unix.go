@@ -560,6 +560,10 @@ func (m deskModel) queueBody(iw int) deskBody {
 	for _, err := range m.queueErrs {
 		lines = append(lines, st.Danger.Render("cannot read the queue: "+capSafe(errText(err), 240)))
 	}
+	if m.unread > 0 {
+		lines = append(lines, st.Warn.Render(fmt.Sprintf("%d more pending not shown: one scan reads %d items or %d MiB; approve or skip some to see the rest",
+			m.unread, desk.ScanPendingMax, desk.ScanPendingBytes>>20)))
+	}
 	if len(items) == 0 {
 		if !m.listed {
 			return textBodyFrom([]string{st.Muted.Render("loading runs…")})
@@ -626,6 +630,8 @@ func (m deskModel) queueReason(it runview.QueueItem) string {
 	switch {
 	case it.Refusal != "":
 		return st.Danger.Render("cannot approve: " + capSafe(it.Refusal, 240))
+	case it.SkipReason == desk.SkipOperator && it.Claimed:
+		return st.Muted.Render("skipped by the operator after it was claimed — re-queue to run it")
 	case it.SkipReason == desk.SkipOperator:
 		return st.Muted.Render("skipped by the operator · u to undo")
 	case it.SkipReason == desk.SkipChanged, it.SkipReason == deskLaunchFailed, it.SkipReason == desk.SkipLost:

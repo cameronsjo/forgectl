@@ -113,6 +113,10 @@ func (m deskModel) View() tea.View {
 	}
 	v := tea.NewView(content)
 	v.AltScreen = true
+	// Event types let a terminal that supports them mark a held key as a
+	// repeat, which the approve dialog refuses (it also refuses a y that
+	// follows another key too closely, on any terminal).
+	v.KeyboardEnhancements.ReportEventTypes = true
 	if !m.mouseOff {
 		v.MouseMode = tea.MouseModeCellMotion
 	}

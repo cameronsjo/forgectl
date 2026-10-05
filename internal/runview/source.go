@@ -27,12 +27,15 @@ const (
 
 // RunRef names one run of a source. Updated is the newest modification time
 // the source saw for it. HasSummary is set on a log run whose name also has
-// a summary file.
+// a summary file. Live is a desk run's state as the listing scan saw it
+// (empty for a log run), so a caller can tell that a run it does not reload
+// changed state, as when its supervisor died.
 type RunRef struct {
 	Source, Name string
 	Kind         RunKind
 	Updated      time.Time
 	HasSummary   bool
+	Live         LiveState
 }
 
 // Metric is one line of a run's metrics file: the integer values of the
@@ -86,7 +89,7 @@ type Cursor struct {
 // last Load: the caller discards every Event and Metric it holds for the run,
 // and this Delta carries the run again from its first line.
 //
-// Defs, Items and Timing are complete each time they are set. Summary is nil
+// Defs and Timing are complete each time they are set. Summary is nil
 // when the summary file did not change since the last Load, and the complete
 // flattened summary (possibly empty) when it did.
 //
@@ -102,7 +105,6 @@ type Delta struct {
 	Metrics []Metric
 	Summary []KV
 	Defs    []StepDef
-	Items   []QueueItem
 	Dropped int
 	Partial bool
 	Reset   bool
@@ -135,22 +137,33 @@ type StepTiming struct {
 // QueueItem is the sanitized copy of a desk item that the queue view and the
 // approve modal show.
 //
-// SHA256 is the full 64-hex hash of the bytes in Body, and is set only when
+// SHA256 is the full 64-hex hash of the item's bytes, and is set only when
 // the item's recorded hash equals the hash of the content the scan read; an
 // empty SHA256 means the item cannot be approved. Refusal says why an item
 // cannot be approved (the desk refused it, or its hash did not match).
-// Body is the item's lines through termsafe.SafeLine, uncapped, for a
-// pending item only. Bytes is the size of the content Body was made from,
-// and Marks has one entry per Body line, counted from the raw bytes before
-// they were escaped.
+// Bytes is the size of that content. Claimed is set for an item that was
+// claimed at some point, which Unskip refuses to re-arm.
+//
+// Body and Marks are set only by QueueSource.QueueBody, for the one item the
+// approve modal opens on: Body is the item's lines through termsafe.SafeLine,
+// uncapped, and Marks has one entry per Body line, counted from the raw
+// bytes before they were escaped. Queue leaves both empty, so a queue of
+// large items costs no more than their names.
 type QueueItem struct {
 	Name, Kind, State, What, Why, SkipReason, SHA256 string
-	TTY, Stale                                       bool
+	TTY, Stale, Claimed                              bool
 	Body                                             []string
 	Exit                                             *int
 	Refusal                                          string
 	Bytes                                            int
 	Marks                                            []LineMarks
+}
+
+// QueueList is one Queue result: the items, and how many pending items the
+// scan left unread because they fell past its caps.
+type QueueList struct {
+	Items  []QueueItem
+	Unread int
 }
 
 // LineMarks counts the runes on one raw line that do not read as what they
@@ -202,10 +215,13 @@ type SpecProvider interface {
 }
 
 // QueueSource is a Source that also has a queue: the desk. Queue scans it,
-// so the queue view works when no run exists yet.
+// so the queue view works when no run exists yet. QueueBody reads one
+// pending item again for review: its Body and Marks as well, from bytes that
+// must still hash to sha (an error wrapping desk.ErrChanged otherwise).
 type QueueSource interface {
 	Source
-	Queue() ([]QueueItem, error)
+	Queue() (QueueList, error)
+	QueueBody(name, sha string) (QueueItem, error)
 }
 
 // Errors a caller branches on.

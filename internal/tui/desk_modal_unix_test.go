@@ -123,8 +123,9 @@ func TestAClickSelectsAndASecondClickOpens(t *testing.T) {
 // TestAClickOutsideNeverClosesTheApproveDialog, while one outside a read
 // dialog does.
 func TestAClickOutsideNeverClosesTheApproveDialog(t *testing.T) {
-	m := openDesk(t, goldenDeskOptions(false), 120, 30)
-	m.items[0].SHA256 = strings.Repeat("d", 64)
+	opts := goldenDeskOptions(false)
+	opts.Sources[1].(*fakeDeskSource).items[0].SHA256 = strings.Repeat("d", 64)
+	m := openDesk(t, opts, 120, 30)
 	m = pressDesk(t, m, key("6"))
 	m = pressDesk(t, m, key("a"))
 	if modalKindOf(m) != modalConfirm {

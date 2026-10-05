@@ -249,6 +249,19 @@ func TestHostileLogTextIsInert(t *testing.T) {
 }
 
 // assertDeltaInert checks every string reachable from d.
+// assertItemsInert checks every string of every queue item, body included.
+func assertItemsInert(t *testing.T, items ...QueueItem) {
+	t.Helper()
+	for _, it := range items {
+		for _, s := range []string{it.Name, it.Kind, it.State, it.What, it.Why, it.SkipReason, it.SHA256, it.Refusal} {
+			termsafetest.AssertInert(t, "item", s)
+		}
+		for _, l := range it.Body {
+			termsafetest.AssertInert(t, "item body", l)
+		}
+	}
+}
+
 func assertDeltaInert(t *testing.T, d Delta) {
 	t.Helper()
 	check := func(label, s string) { termsafetest.AssertInert(t, label, s) }
@@ -274,14 +287,6 @@ func assertDeltaInert(t *testing.T, d Delta) {
 		check("def note", def.Note)
 		for _, a := range def.After {
 			check("def after", a)
-		}
-	}
-	for _, it := range d.Items {
-		for _, s := range []string{it.Name, it.Kind, it.State, it.What, it.Why, it.SkipReason, it.SHA256, it.Refusal} {
-			check("item", s)
-		}
-		for _, l := range it.Body {
-			check("item body", l)
 		}
 	}
 	for _, tm := range d.Timing {

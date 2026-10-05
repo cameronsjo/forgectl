@@ -253,11 +253,12 @@ func TestADeskEventsFileReplacedResets(t *testing.T) {
 	}
 }
 
-// queueItem copies a hash only when it is the hash of the bytes shown.
+// queueItem copies a hash only when it is the hash of the bytes read, and
+// never the body: that is QueueBody's.
 func TestAQueueItemWhoseHashDoesNotMatchCannotBeApproved(t *testing.T) {
 	content := []byte("#!/bin/bash\n# WHAT: w\n# WHY: y\ntrue\n")
 	good := queueItem(desk.Item{Name: "01-a", State: desk.StateWaiting, Content: content, Meta: desk.Meta{SHA256: desk.SHA256Hex(content)}})
-	if good.SHA256 != desk.SHA256Hex(content) || good.Refusal != "" || len(good.Body) != 4 {
+	if good.SHA256 != desk.SHA256Hex(content) || good.Refusal != "" || good.Bytes != len(content) || good.Body != nil || good.Marks != nil {
 		t.Errorf("matching item: %+v", good)
 	}
 	bad := queueItem(desk.Item{Name: "01-a", State: desk.StateWaiting, Content: content, Meta: desk.Meta{SHA256: strings.Repeat("0", 64)}})
@@ -271,7 +272,7 @@ func TestAQueueItemWhoseHashDoesNotMatchCannotBeApproved(t *testing.T) {
 // counted on their own line, and the size is the content's.
 func TestAQueueItemMarksTheLinesThatHideSomething(t *testing.T) {
 	content := []byte("ls\u3164 -la\nс at\nprintf '\x1b[2J'\nplain\n")
-	it := queueItem(desk.Item{Name: "01-a", State: desk.StateWaiting, Content: content, Meta: desk.Meta{SHA256: desk.SHA256Hex(content)}})
+	it := queueBody(t, content)
 	want := []LineMarks{
 		{Invisible: 1, NonASCII: 1},
 		{NonASCII: 1},
@@ -329,22 +330,45 @@ func TestHostileDeskTextIsInert(t *testing.T) {
 	}, "\n")+"\n")
 
 	s := NewDeskSource(d).(QueueSource)
-	items, err := s.Queue()
+	q, err := s.Queue()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 2 || items[0].SHA256 == "" || len(items[0].Body) != 4 || items[1].SkipReason == "" {
+	items := q.Items
+	if len(items) != 2 || items[0].SHA256 == "" || items[1].SkipReason == "" {
 		t.Fatalf("items = %+v", items)
+	}
+	body, err := s.QueueBody(items[0].Name, items[0].SHA256)
+	if err != nil || len(body.Body) != 4 {
+		t.Fatalf("QueueBody = %+v, %v", body, err)
 	}
 	if _, err := s.List(); err != nil {
 		t.Fatal(err)
 	}
 	dl := loadDesk(t, s, name, &Cursor{})
-	if len(dl.Events) != 5 || len(dl.Items) != 2 || len(dl.Timing) != 1 || len(dl.Defs) != 1 {
-		t.Fatalf("delta: events %d items %d timing %d defs %d", len(dl.Events), len(dl.Items), len(dl.Timing), len(dl.Defs))
+	if len(dl.Events) != 5 || len(dl.Timing) != 1 || len(dl.Defs) != 1 {
+		t.Fatalf("delta: events %d timing %d defs %d", len(dl.Events), len(dl.Timing), len(dl.Defs))
 	}
 	assertDeltaInert(t, dl)
-	assertDeltaInert(t, Delta{Items: items})
+	assertItemsInert(t, append(items, body)...)
+}
+
+// queueBody queues content in a fresh desk and reads it back through
+// QueueBody.
+func queueBody(t *testing.T, content []byte) QueueItem {
+	t.Helper()
+	d := openDesk(t)
+	writeFile(t, filepath.Join(d.Path(), "pending", "01-a.sh"), string(content))
+	s := NewDeskSource(d).(QueueSource)
+	q, err := s.Queue()
+	if err != nil || len(q.Items) != 1 {
+		t.Fatalf("Queue = %+v, %v", q, err)
+	}
+	it, err := s.QueueBody(q.Items[0].Name, q.Items[0].SHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return it
 }
 
 // Poll adds RUN-LOST on every poll of a lost run; the source delivers it once.

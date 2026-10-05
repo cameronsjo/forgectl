@@ -12,6 +12,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/cameronsjo/forgectl/internal/desk"
 	"github.com/cameronsjo/forgectl/internal/runview"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
@@ -23,15 +24,18 @@ var deskNow = time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 // a run pops that run's next Delta; once they are used up a Load returns an
 // empty one.
 type fakeDeskSource struct {
-	mu      sync.Mutex
-	name    string
-	spec    *runview.Spec
-	refs    []runview.RunRef
-	deltas  map[string][]runview.Delta
-	items   []runview.QueueItem
-	listErr error
-	loads   map[string]int
-	curs    map[string]*runview.Cursor
+	mu       sync.Mutex
+	name     string
+	spec     *runview.Spec
+	refs     []runview.RunRef
+	deltas   map[string][]runview.Delta
+	items    []runview.QueueItem
+	listErr  error
+	unread   int
+	queueErr error
+	bodies   int // QueueBody calls
+	loads    map[string]int
+	curs     map[string]*runview.Cursor
 }
 
 func (f *fakeDeskSource) Name() string { return f.name }
@@ -47,10 +51,37 @@ func (f *fakeDeskSource) List() ([]runview.RunRef, error) {
 	return append([]runview.RunRef(nil), f.refs...), nil
 }
 
-func (f *fakeDeskSource) Queue() ([]runview.QueueItem, error) {
+// Queue lists the items without their bodies, as the desk source does.
+func (f *fakeDeskSource) Queue() (runview.QueueList, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]runview.QueueItem(nil), f.items...), nil
+	if f.queueErr != nil {
+		return runview.QueueList{}, f.queueErr
+	}
+	out := runview.QueueList{Unread: f.unread}
+	for _, it := range f.items {
+		it.Body, it.Marks = nil, nil
+		out.Items = append(out.Items, it)
+	}
+	return out, nil
+}
+
+var _ runview.QueueSource = (*fakeDeskSource)(nil)
+
+// QueueBody is the item with its body, when its hash is still sha.
+func (f *fakeDeskSource) QueueBody(name, sha string) (runview.QueueItem, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bodies++
+	for _, it := range f.items {
+		if it.Name == name {
+			if it.SHA256 != sha {
+				return runview.QueueItem{}, desk.ErrChanged
+			}
+			return it, nil
+		}
+	}
+	return runview.QueueItem{}, desk.ErrNotFound
 }
 
 func (f *fakeDeskSource) Load(ref runview.RunRef, cur *runview.Cursor) (runview.Delta, error) {

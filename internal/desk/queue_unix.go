@@ -17,6 +17,15 @@ import (
 
 var exitLineRe = regexp.MustCompile(`^EXIT=(-?[0-9]{1,9})$`)
 
+// The caps on what one Scan reads from pending/: at most ScanPendingMax items
+// and ScanPendingBytes of their content, in name order. Each item is read in
+// full to check its hash, so without them a scan's memory grows with the
+// queue. Items past either cap are counted in Snapshot.PendingUnread.
+const (
+	ScanPendingMax   = 200
+	ScanPendingBytes = 64 << 20
+)
+
 // Scan reads the queue. It is not read-only, by design: it fixes the hash of
 // a hand-dropped pending item the first time it sees it, and moves a pending
 // item whose bytes changed since then to skipped/ (skip_reason "changed").
@@ -28,11 +37,25 @@ func (d *Desk) Scan() (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	read, budget := 0, int64(ScanPendingBytes)
 	for _, e := range pending {
 		name, kind, ok := kindOfFile(e.Name())
 		if !ok {
 			continue
 		}
+		size := int64(maxItemBytes)
+		if fi, err := e.Info(); err == nil {
+			size = min(fi.Size(), maxItemBytes)
+		}
+		if read >= ScanPendingMax || size > budget {
+			// Past the caps the item is not read, so neither is its hash fixed
+			// nor its change noticed; a later scan, once earlier items have
+			// left pending/, reads it.
+			snap.PendingUnread++
+			continue
+		}
+		read++
+		budget -= size
 		it, gone, err := d.sight(name, kind, now)
 		if err != nil {
 			return nil, err
@@ -147,6 +170,38 @@ func (d *Desk) sight(name string, kind Kind, now time.Time) (it Item, gone bool,
 	it.Meta, it.Content, it.Headers = meta, data, ParseHeaders(data)
 	it.Stale = meta.AddedAt != nil && now.Sub(*meta.AddedAt) > StaleAfter
 	return it, false, nil
+}
+
+// PendingItem reads one pending item again, for an operator about to review
+// it: its bytes, headers and meta. Unlike Scan it changes nothing. It refuses
+// an item with no recorded hash yet, or whose meta names another kind, and
+// returns ErrChanged when the bytes no longer hash to wantSHA or to the
+// recorded hash.
+func (d *Desk) PendingItem(name, wantSHA string) (Item, error) {
+	kind, err := d.findKind(DirPending, name)
+	if err != nil {
+		return Item{}, err
+	}
+	it := newItem(name, kind, StateWaiting)
+	data, _, err := d.readItem(DirPending, name+kind.Ext())
+	if err != nil {
+		return Item{}, err
+	}
+	meta, ok, err := d.readMeta(DirPending, name)
+	switch {
+	case err != nil:
+		return Item{}, err
+	case !ok || meta.SHA256 == "":
+		return Item{}, fmt.Errorf("%w: %s has no recorded hash yet; scan the desk first", ErrRefused, describe(name))
+	case meta.Kind != "" && meta.Kind != kind:
+		return Item{}, fmt.Errorf("%w: %s was queued as a %s, but the file found is a %s", ErrRefused, describe(name), meta.Kind, kind)
+	}
+	if sum := SHA256Hex(data); sum != meta.SHA256 || sum != wantSHA {
+		return Item{}, fmt.Errorf("%w: %s", ErrChanged, describe(name))
+	}
+	it.Meta, it.Content, it.Headers = meta, data, ParseHeaders(data)
+	it.Stale = meta.AddedAt != nil && d.now().UTC().Sub(*meta.AddedAt) > StaleAfter
+	return it, nil
 }
 
 // skipChanged moves an item whose bytes no longer match its hash to

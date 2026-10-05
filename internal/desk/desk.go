@@ -170,8 +170,19 @@ type Headers struct {
 func ParseHeaders(data []byte) Headers {
 	var h Headers
 	var seenWhat, seenWhy, seenTTY bool
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSuffix(line, "\r")
+	// Line by line without splitting: a scan reads every pending item, and a
+	// slice per line of a megabyte of newlines is far larger than the item.
+	for rest := data; len(rest) > 0 && !(seenWhat && seenWhy && seenTTY); {
+		raw := rest
+		if i := bytes.IndexByte(rest, '\n'); i >= 0 {
+			raw, rest = rest[:i], rest[i+1:]
+		} else {
+			rest = nil
+		}
+		if !bytes.HasPrefix(raw, []byte("# ")) {
+			continue
+		}
+		line := strings.TrimSuffix(string(raw), "\r")
 		key, value, ok := headerLine(line)
 		if !ok {
 			continue
@@ -378,9 +389,12 @@ type Snapshot struct {
 	Dir     string
 	Taken   time.Time
 	Pending []Item
-	Running []Item
-	Done    []Item
-	Skipped []Item
+	// PendingUnread counts the pending items this scan did not read because
+	// they fell past the scan's caps (ScanPendingMax, ScanPendingBytes).
+	PendingUnread int
+	Running       []Item
+	Done          []Item
+	Skipped       []Item
 }
 
 // encodeJSON renders v indented, through the terminal-safe encoder: meta and

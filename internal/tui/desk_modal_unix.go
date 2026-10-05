@@ -32,15 +32,26 @@ import (
 // The approve dialog is the operator's approval control. It works on a copy
 // of the queue item frozen when it opened, and hands Claim that copy's full
 // hash and nothing else. Only a y key press confirms, and only once the
-// dialog has been open confirmDelay by the model's clock and the body has
-// been seen to its last line: enter, clicks, held-key repeats and keys typed
-// ahead never do.
+// dialog has been open confirmDelay by the model's clock, the body has been
+// seen to its last line and confirmDelay has passed since, and the y came at
+// least keyGapMin after the key event before it: enter, clicks, held-key
+// repeats and keys typed ahead never do.
+//
+// The body is read in a command when a is pressed (QueueSource.QueueBody),
+// so the dialog opens only once its bytes are in hand: keys typed after a
+// reach the queue view, not the dialog.
 
 const (
-	// confirmDelay is how long the approve dialog must be open before y
-	// counts, so a y typed straight after a (or buffered with it) cannot
-	// approve what the operator has not seen.
+	// confirmDelay is how long the approve dialog must be open, and how long
+	// since its last line first came on screen, before y counts, so a y typed
+	// straight after a or G (or buffered with them) cannot approve what the
+	// operator has not seen.
 	confirmDelay = 400 * time.Millisecond
+	// keyGapMin is how long a y must follow the key event before it. A
+	// terminal's autorepeat sends a held y every 30 to 50 ms, and keys typed
+	// ahead arrive back to back; neither leaves this gap. It holds on every
+	// terminal, including those that never report a key as a repeat.
+	keyGapMin = 250 * time.Millisecond
 	// replayEvery paces autoplay at four events a second.
 	replayEvery = 250 * time.Millisecond
 
@@ -78,9 +89,14 @@ type deskModal struct {
 	// modalConfirm.
 	item     runview.QueueItem // the frozen copy; nothing replaces it
 	openedAt time.Time
-	seenEnd  bool // the body's last line has been on screen
-	busy     bool // a claim is in flight
+	seenEnd  bool      // the body's last line has been on screen
+	endAt    time.Time // when seenEnd was first set
+	busy     bool      // a claim is in flight
 	note     string
+	// lines is the body as last laid out, for linesKey (hash, width and
+	// style generation): a frame that changes none of them reuses it.
+	lines    []string
+	linesKey string
 }
 
 // deskVerbs is what the queue verbs need from the desk. *desk.Desk has these
@@ -112,14 +128,23 @@ type (
 		err       error
 		abandoned bool
 	}
-	// deskVerbMsg is how a skip or unskip ended. lost is set when the
-	// item skipped was lost: it was claimed, so Unskip refuses it.
+	// deskVerbMsg is how a skip or unskip ended. claimed is set when the
+	// item skipped had been claimed (a lost run is), so Unskip refuses it.
 	deskVerbMsg struct {
 		verb, name string
-		lost       bool
+		claimed    bool
 		err        error
 	}
 	deskReplayTickMsg struct{ gen int }
+	// deskBodyMsg is a queue item read again, body and all, for the approve
+	// dialog. reopen is set when it re-opens after a claim found the item
+	// changed.
+	deskBodyMsg struct {
+		name   string
+		item   runview.QueueItem
+		err    error
+		reopen bool
+	}
 )
 
 // verbsOf is the first source's desk, as queue verbs.
@@ -194,13 +219,24 @@ func (m *deskModel) syncModal() {
 		md.list.SetSize(w, h)
 		return
 	}
-	lines, _ := m.modalLines(md, w)
 	md.vp.SetWidth(w)
 	md.vp.SetHeight(h)
-	md.vp.SetContentLines(lines)
+	if md.kind == modalConfirm {
+		// The approve body can run to a megabyte: it is escaped, wrapped and
+		// styled once per hash, width and theme, not on every message.
+		if key := fmt.Sprintf("%s/%d/%d", md.item.SHA256, w, m.styleGen); key != md.linesKey {
+			md.lines, md.linesKey = m.confirmLines(md, w), key
+			md.vp.SetContentLines(md.lines)
+		}
+	} else {
+		lines, _ := m.modalLines(md, w)
+		md.vp.SetContentLines(lines)
+	}
 	md.vp.SetYOffset(md.vp.YOffset()) // clamp after a resize or new content
-	if md.kind == modalConfirm && m.layout().kind != layoutSmall && md.vp.AtBottom() {
-		md.seenEnd = true
+	if md.kind == modalConfirm && !md.seenEnd && m.layout().kind != layoutSmall && md.vp.AtBottom() {
+		// The delay starts over here, on the clock as it reads after the
+		// layout: the end must stay reachable for confirmDelay before y.
+		md.seenEnd, md.endAt = true, m.now()
 	}
 }
 
@@ -314,18 +350,25 @@ func (m deskModel) onConfirmKey(md *deskModal, k tea.KeyPressMsg) (tea.Model, te
 // confirm is a y in the approve dialog. It approves only when every binding
 // rule holds; otherwise it says which one did not.
 func (m deskModel) confirm(md *deskModal, k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	now := m.now()
 	switch {
 	case k.IsRepeat || k.Mod != 0 || k.String() != "y":
 		return m, nil // a held key, or y with a modifier, never approves
+	case m.keyGap < keyGapMin:
+		md.note = "too fast: press y once, on its own"
+		return m, nil
 	case md.busy:
 		return m, nil
 	case m.layout().kind == layoutSmall:
 		return m, nil // the dialog is not on screen
-	case m.now().Sub(md.openedAt) < confirmDelay:
+	case now.Sub(md.openedAt) < confirmDelay:
 		md.note = "too soon: y counts once the dialog has been open a moment"
 		return m, nil
 	case !md.seenEnd:
 		md.note = "read it to the end first (↓ or G)"
+		return m, nil
+	case now.Sub(md.endAt) < confirmDelay:
+		md.note = "too soon: y counts a moment after the end is on screen"
 		return m, nil
 	}
 	it := md.item
@@ -344,7 +387,7 @@ func (m deskModel) confirm(md *deskModal, k tea.KeyPressMsg) (tea.Model, tea.Cmd
 		return m, nil
 	}
 	md.busy, md.note = true, "starting…"
-	return m, approveCmd(m.verbs, it.Name, it.SHA256)
+	return m, approveCmd(m.verbs, it.Name, it.SHA256, desk.Kind(it.Kind))
 }
 
 // cannotApprove says why it cannot be approved, or "".
@@ -364,16 +407,19 @@ func cannotApprove(it runview.QueueItem) string {
 // fails after the claim and before the supervisor starts gives the claim back
 // as skipped:launch-failed. A Launch that returns a pid with its error
 // started the supervisor, which owns the item from then on.
-func approveCmd(v deskVerbs, name, sha string) tea.Cmd {
+func approveCmd(v deskVerbs, name, sha string, kind desk.Kind) tea.Cmd {
 	return func() tea.Msg {
 		c, err := v.Claim(name, sha)
 		if err != nil {
 			return deskApproveMsg{name: name, sha: sha, err: err}
 		}
 		var pid int
-		if c == nil || c.SHA256 != sha {
+		switch {
+		case c == nil || c.SHA256 != sha:
 			err = fmt.Errorf("desk: the claim for %s does not carry the approved hash", name)
-		} else {
+		case c.Kind != kind:
+			err = fmt.Errorf("desk: %s was approved as a %s, but the claim is a %s", name, kind, c.Kind)
+		default:
 			pid, err = v.Launch(c)
 		}
 		if err == nil || pid != 0 {
@@ -423,9 +469,9 @@ func (m deskModel) relist() (tea.Model, tea.Cmd) {
 }
 
 // recheckConfirm closes the approve dialog when the refreshed queue no longer
-// lists its item as it was frozen, and re-opens one asked for after a claim
-// found the item changed.
-func (m *deskModel) recheckConfirm() {
+// lists its item as it was frozen, and starts re-reading one asked for after
+// a claim found the item changed.
+func (m *deskModel) recheckConfirm() tea.Cmd {
 	if md := m.topModal(); md != nil && md.kind == modalConfirm && !md.busy {
 		it, ok := m.queueItem(md.item.Name)
 		if !ok || it.SHA256 != md.item.SHA256 || it.State != md.item.State || it.Refusal != md.item.Refusal {
@@ -436,10 +482,55 @@ func (m *deskModel) recheckConfirm() {
 	if name := m.reopen; name != "" {
 		m.reopen = ""
 		if it, ok := m.queueItem(name); ok && cannotApprove(it) == "" && m.topModal() == nil {
-			m.openConfirm(it)
-			m.footer = m.styles.Warn.Render("! " + capSafe(name, 48) + " changed since you opened it; this is the new content")
+			return m.bodyCmd(it, true)
 		}
 	}
+	return nil
+}
+
+// bodyCmd reads it again, body and all, from the source that queues it.
+func (m deskModel) bodyCmd(it runview.QueueItem, reopen bool) tea.Cmd {
+	qs := m.itemSrc[it.Name]
+	if qs == nil {
+		return nil
+	}
+	name, sha := it.Name, it.SHA256
+	return func() tea.Msg {
+		got, err := qs.QueueBody(name, sha)
+		return deskBodyMsg{name: name, item: got, err: err, reopen: reopen}
+	}
+}
+
+// onBody opens the approve dialog on an item read again, when the queue
+// still lists it as it was read and nothing else is open.
+func (m deskModel) onBody(msg deskBodyMsg) (tea.Model, tea.Cmd) {
+	st := m.styles
+	name := capSafe(msg.name, 48)
+	if msg.err != nil {
+		if errors.Is(msg.err, desk.ErrChanged) {
+			m.footer = st.Warn.Render("! " + name + " changed since it was listed — re-review")
+		} else {
+			m.footer = st.Danger.Render(m.glyph.Failed + " cannot read " + name + ": " + capSafe(msg.err.Error(), 200))
+		}
+		return m.relist()
+	}
+	if m.topModal() != nil || m.layout().kind == layoutSmall {
+		return m, nil
+	}
+	listed, ok := m.queueItem(msg.name)
+	switch {
+	case !ok || listed.SHA256 != msg.item.SHA256 || listed.State != msg.item.State:
+		m.footer = st.Warn.Render("! " + name + " changed — re-review")
+		return m.relist()
+	case cannotApprove(msg.item) != "":
+		m.footer = st.Danger.Render(m.glyph.Failed + " " + name + ": " + cannotApprove(msg.item))
+		return m, nil
+	}
+	m.openConfirm(msg.item)
+	if msg.reopen {
+		m.footer = st.Warn.Render("! " + name + " changed since you opened it; this is the new content")
+	}
+	return m, nil
 }
 
 func (m deskModel) queueItem(name string) (runview.QueueItem, bool) {
@@ -479,8 +570,8 @@ func (m deskModel) queueVerb(verb string) (deskModel, tea.Cmd) {
 		if m.layout().kind == layoutSmall {
 			return m, nil
 		}
-		m.openConfirm(it)
-		return m, nil
+		m.footer = st.Muted.Render("reading " + name + "…")
+		return m, m.bodyCmd(it, false)
 	case "skip":
 		if it.State != string(desk.StateWaiting) && it.State != string(desk.StateLost) {
 			m.footer = st.Muted.Render("only a waiting or lost item can be skipped")
@@ -495,12 +586,16 @@ func (m deskModel) queueVerb(verb string) (deskModel, tea.Cmd) {
 			m.footer = st.Warn.Render("! " + name + ": " + skipHint(it.SkipReason))
 			return m, nil
 		}
+		if it.Claimed {
+			m.footer = st.Warn.Render("! " + name + ": claimed before it was skipped — re-queue to run it")
+			return m, nil
+		}
 	}
 	if m.verbs == nil {
 		m.footer = st.Muted.Render("no desk to act on")
 		return m, nil
 	}
-	v, raw, lost := m.verbs, it.Name, it.State == string(desk.StateLost)
+	v, raw, claimed := m.verbs, it.Name, it.Claimed || it.State == string(desk.StateLost)
 	return m, func() tea.Msg {
 		var err error
 		if verb == "skip" {
@@ -508,7 +603,7 @@ func (m deskModel) queueVerb(verb string) (deskModel, tea.Cmd) {
 		} else {
 			err = v.Unskip(raw)
 		}
-		return deskVerbMsg{verb: verb, name: raw, lost: lost, err: err}
+		return deskVerbMsg{verb: verb, name: raw, claimed: claimed, err: err}
 	}
 }
 
@@ -531,7 +626,7 @@ func (m deskModel) onVerb(msg deskVerbMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case msg.err != nil:
 		m.footer = st.Danger.Render(m.glyph.Failed + " " + msg.verb + " " + name + ": " + capSafe(msg.err.Error(), 200))
-	case msg.verb == "skip" && msg.lost:
+	case msg.verb == "skip" && msg.claimed:
 		m.footer = st.Muted.Render(m.glyph.Skipped + " skipped " + name)
 	case msg.verb == "skip":
 		m.footer = st.Muted.Render(m.glyph.Skipped + " skipped " + name + " · u to undo")

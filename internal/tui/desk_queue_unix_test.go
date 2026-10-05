@@ -159,7 +159,8 @@ func confirmOpen(m deskModel) bool {
 
 // TestAYBurstWithinTheDelayClaimsNothing: a and y typed together, or y
 // before the dialog has been open 400 ms by the model's clock, approves
-// nothing. The same y after the delay does, which shows the test can go red.
+// nothing. A y after the delay, on its own, does, which shows the test can
+// go red.
 func TestAYBurstWithinTheDelayClaimsNothing(t *testing.T) {
 	d, added := queueDesk(t, false, "echo hi\n")
 	c := newClock()
@@ -182,7 +183,7 @@ func TestAYBurstWithinTheDelayClaimsNothing(t *testing.T) {
 		t.Fatalf("the item left pending/: %+v", s)
 	}
 
-	c.add(2 * time.Millisecond)
+	c.add(keyGapMin)
 	m = pressDesk(t, m, key("y"))
 	if n, l, _ := rec.counts(); n != 1 || l != 1 {
 		t.Fatalf("y after the delay: %d claims, %d launches; want 1 and 1", n, l)
@@ -220,6 +221,8 @@ func TestOnlyAPlainYPressApproves(t *testing.T) {
 		tea.KeyPressMsg{Code: 'Y', Text: "Y"},
 	}
 	for i, in := range inputs {
+		// Each input on its own, so only what it is can refuse it.
+		c.add(time.Second)
 		next, cmd := m.Update(in)
 		m = pumpDesk(t, next.(deskModel), cmd)
 		if n, _, _ := rec.counts(); n != 0 {
@@ -229,6 +232,7 @@ func TestOnlyAPlainYPressApproves(t *testing.T) {
 			t.Fatalf("input %d (%T %+v) closed the approve dialog", i, in, in)
 		}
 	}
+	c.add(time.Second)
 	_ = pressDesk(t, m, key("y"))
 	if n, _, _ := rec.counts(); n != 1 {
 		t.Fatalf("a plain y after the inputs: %d claims, want 1", n)
@@ -257,6 +261,7 @@ func TestALongItemMustBeReadToTheEnd(t *testing.T) {
 	mustContain(t, "note", screen(t, m), "read it to the end first")
 
 	m = pressDesk(t, m, key("j"))
+	c.add(time.Second)
 	m = pressDesk(t, m, key("y"))
 	if n, _, _ := rec.counts(); n != 0 {
 		t.Fatal("y approved after one line of scrolling")
@@ -264,6 +269,7 @@ func TestALongItemMustBeReadToTheEnd(t *testing.T) {
 	m = pressDesk(t, m, key("G"))
 	mustContain(t, "at the end", screen(t, m), "end of item")
 	m = pressDesk(t, m, key("g")) // back to the top: the end has been seen
+	c.add(time.Second)
 	_ = pressDesk(t, m, key("y"))
 	if n, _, _ := rec.counts(); n != 1 {
 		t.Fatalf("y after reading to the end: %d claims, want 1", n)

@@ -24,6 +24,9 @@ type deskSource struct {
 
 	mu   sync.Mutex
 	snap *desk.Snapshot // the latest scan; Load reads kinds and items from it
+	// listed is the scan List just took, handed to the next Queue so a list
+	// reload (List, then Queue) scans the desk once.
+	listed *desk.Snapshot
 }
 
 // deskCursor is a desk run's read state, kept in Cursor.desk.
@@ -68,10 +71,13 @@ func (s *deskSource) List() ([]RunRef, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.mu.Lock()
+	s.listed = snap
+	s.mu.Unlock()
 	var refs []RunRef
 	for _, group := range [][]desk.Item{snap.Running, snap.Done, snap.Skipped} {
 		for _, it := range group {
-			refs = append(refs, RunRef{Source: s.Name(), Name: clean(it.Name), Kind: KindDesk, Updated: itemUpdated(it, snap.Taken)})
+			refs = append(refs, RunRef{Source: s.Name(), Name: clean(it.Name), Kind: KindDesk, Updated: itemUpdated(it, snap.Taken), Live: liveOfItem(it.State)})
 		}
 	}
 	slices.SortFunc(refs, func(a, b RunRef) int {
@@ -92,33 +98,38 @@ func itemUpdated(it desk.Item, fallback time.Time) time.Time {
 	return fallback
 }
 
-// Queue scans the desk and returns its pending, running and skipped items.
-func (s *deskSource) Queue() ([]QueueItem, error) {
-	snap, err := s.scan()
-	if err != nil {
-		return nil, err
-	}
-	return queueItems(snap), nil
-}
-
-func queueItems(snap *desk.Snapshot) []QueueItem {
-	out := []QueueItem{}
-	for _, group := range [][]desk.Item{snap.Pending, snap.Running, snap.Skipped} {
-		for _, it := range group {
-			out = append(out, queueItem(it))
+// Queue returns the desk's pending, running and skipped items, without their
+// bodies (see QueueBody). It uses the scan the List just before it took, or
+// scans the desk itself.
+func (s *deskSource) Queue() (QueueList, error) {
+	s.mu.Lock()
+	snap := s.listed
+	s.listed = nil
+	s.mu.Unlock()
+	if snap == nil {
+		var err error
+		if snap, err = s.scan(); err != nil {
+			return QueueList{}, err
 		}
 	}
-	return out
+	out := QueueList{Items: []QueueItem{}, Unread: snap.PendingUnread}
+	for _, group := range [][]desk.Item{snap.Pending, snap.Running, snap.Skipped} {
+		for _, it := range group {
+			out.Items = append(out.Items, queueItem(it))
+		}
+	}
+	return out, nil
 }
 
-// queueItem is the sanitized copy of it. SHA256 is set only when the hash
-// recorded in meta is the hash of the bytes this scan read; otherwise it is
-// empty and Refusal says the item cannot be approved.
+// queueItem is the sanitized copy of it, without its body. SHA256 is set only
+// when the hash recorded in meta is the hash of the bytes this scan read;
+// otherwise it is empty and Refusal says the item cannot be approved.
 func queueItem(it desk.Item) QueueItem {
 	q := QueueItem{
 		Name: clean(it.Name), Kind: clean(string(it.Kind)), State: clean(string(it.State)),
 		What: clean(it.What), Why: clean(it.Why), SkipReason: clean(it.Meta.SkipReason),
 		TTY: it.TTY, Stale: it.Stale, Refusal: clean(it.Refusal),
+		Claimed: it.Meta.ClaimPID != 0 || it.Meta.PID != 0,
 	}
 	if it.ExitCode != nil {
 		rc := *it.ExitCode
@@ -131,13 +142,28 @@ func queueItem(it desk.Item) QueueItem {
 			q.Refusal = "its bytes do not match the hash recorded when it was queued"
 		}
 		q.Bytes = len(it.Content)
-		body := strings.TrimSuffix(string(it.Content), "\n")
-		for _, line := range strings.Split(body, "\n") {
-			q.Body = append(q.Body, termsafe.SafeLine(line))
-			q.Marks = append(q.Marks, MarkLine(line))
-		}
 	}
 	return q
+}
+
+// QueueBody reads the pending item name again, for the approve dialog: its
+// metadata as Queue has it, and its Body and Marks, from bytes that still
+// hash to sha. Nothing else in the desk is read.
+func (s *deskSource) QueueBody(name, sha string) (QueueItem, error) {
+	it, err := s.d.PendingItem(name, sha)
+	if err != nil {
+		return QueueItem{}, cleanErr(err)
+	}
+	q := queueItem(it)
+	body := strings.TrimSuffix(string(it.Content), "\n")
+	lines := strings.Split(body, "\n")
+	q.Body = make([]string, 0, len(lines))
+	q.Marks = make([]LineMarks, 0, len(lines))
+	for _, line := range lines {
+		q.Body = append(q.Body, termsafe.SafeLine(line))
+		q.Marks = append(q.Marks, MarkLine(line))
+	}
+	return q, nil
 }
 
 // item finds name in the latest scan, scanning again when it is not there.
@@ -166,8 +192,7 @@ func (s *deskSource) item(name string) (desk.Item, *desk.Snapshot, error) {
 }
 
 // Load polls the run's events. A batch's Defs come from its manifest (After
-// gives the edges), a script is one step, ScriptStep. Items is the queue as
-// of the latest List or Queue.
+// gives the edges), a script is one step, ScriptStep.
 func (s *deskSource) Load(ref RunRef, cur *Cursor) (Delta, error) {
 	if !desk.ValidName(ref.Name) {
 		return Delta{}, errors.New("desk: not an item name: " + clean(ref.Name))
@@ -175,7 +200,7 @@ func (s *deskSource) Load(ref RunRef, cur *Cursor) (Delta, error) {
 	if cur == nil {
 		cur = &Cursor{}
 	}
-	it, snap, err := s.item(ref.Name)
+	it, _, err := s.item(ref.Name)
 	if err != nil {
 		return Delta{}, cleanErr(err)
 	}
@@ -189,7 +214,7 @@ func (s *deskSource) Load(ref RunRef, cur *Cursor) (Delta, error) {
 		cur.desk = dc
 	}
 
-	d := Delta{Items: queueItems(snap)}
+	var d Delta
 	if it.Kind == desk.KindBatch {
 		if dc.manifest == nil {
 			if m, err := s.d.Manifest(ref.Name); err == nil {

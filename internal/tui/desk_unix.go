@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"reflect"
 	"slices"
@@ -141,6 +142,8 @@ type deskModel struct {
 	lastList  time.Time
 	listErrs  map[string]error // by source name, from the latest list
 	items     []runview.QueueItem
+	unread    int                            // pending items the latest scan left unread past its caps
+	itemSrc   map[string]runview.QueueSource // the source that queues each item, by name
 	queueErrs []error
 	restore   *DeskViewState
 	selected  deskRunKey
@@ -167,6 +170,18 @@ type deskModel struct {
 	verbs  deskVerbs
 	reopen string // a queue item whose approve dialog re-opens after the next list
 	replay *deskReplay
+	// initialized is set once the first list has picked the opening view and
+	// run; later lists never move the operator off what they picked.
+	initialized bool
+	// styleGen counts theme changes; laid-out dialog bodies keyed on it are
+	// redrawn in the new colours.
+	styleGen int
+	// lastKeyAt is when the latest key event arrived, and keyGap how long
+	// before it the one ahead of it did (zero for the first). The approve
+	// dialog reads keyGap: a y that follows another key too closely is a
+	// held or typed-ahead key, never a deliberate press.
+	lastKeyAt time.Time
+	keyGap    time.Duration
 	// replayTick arms the next autoplay step; tests replace it, as with
 	// schedule.
 	replayTick func(gen int) tea.Cmd
@@ -193,6 +208,7 @@ type deskSourceList struct {
 	refs     []runview.RunRef
 	err      error
 	items    []runview.QueueItem
+	unread   int
 	hasQueue bool
 	queueErr error
 }
@@ -308,7 +324,8 @@ func (m deskModel) listCmd() tea.Cmd {
 			l.refs, l.err = src.List()
 			if qs, ok := src.(runview.QueueSource); ok {
 				l.hasQueue = true
-				l.items, l.queueErr = qs.Queue()
+				q, err := qs.Queue()
+				l.items, l.unread, l.queueErr = q.Items, q.Unread, err
 			}
 			out = append(out, l)
 		}
@@ -350,6 +367,7 @@ func (m deskModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.theme.Mode() == theme.ModeAuto {
 			m.theme = m.theme.WithDark(t.IsDark())
 			m.styles = m.theme.Styles()
+			m.styleGen++
 			m.applyHelpStyles()
 		}
 		return m, nil
@@ -371,7 +389,15 @@ func (m deskModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case deskReplayTickMsg:
 		return m.onReplayTick(t)
 	case tea.KeyPressMsg:
+		m.stampKey()
 		return m.onKey(t)
+	case tea.KeyReleaseMsg:
+		// Reported only when the terminal sends event types. A release is
+		// still a key event: a y right after one is not a fresh press.
+		m.stampKey()
+		return m, nil
+	case deskBodyMsg:
+		return m.onBody(t)
 	case tea.MouseClickMsg:
 		if len(m.modals) > 0 {
 			return m.onModalClick(t.Mouse())
@@ -390,6 +416,16 @@ func (m deskModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+// stampKey records a key event's arrival on the model's clock.
+func (m *deskModel) stampKey() {
+	now := m.now()
+	m.keyGap = time.Duration(math.MaxInt64) // the first key follows nothing
+	if !m.lastKeyAt.IsZero() {
+		m.keyGap = now.Sub(m.lastKeyAt)
+	}
+	m.lastKeyAt = now
 }
 
 func (m deskModel) onTick() (tea.Model, tea.Cmd) {
@@ -416,13 +452,22 @@ func (m deskModel) onList(msg deskListMsg) (tea.Model, tea.Cmd) {
 	m.listed = true
 	m.listErrs = map[string]error{}
 	m.queueErrs = nil
-	m.items = nil
+	var items []runview.QueueItem
+	unread, itemSrc := 0, map[string]runview.QueueSource{}
 	for _, l := range msg.lists {
 		if l.err != nil {
 			m.listErrs[l.name] = l.err
 		}
 		if l.hasQueue {
-			m.items = append(m.items, l.items...)
+			items = append(items, l.items...)
+			unread += l.unread
+			if qs, ok := l.src.(runview.QueueSource); ok {
+				for _, it := range l.items {
+					if _, seen := itemSrc[it.Name]; !seen {
+						itemSrc[it.Name] = qs
+					}
+				}
+			}
 			if l.queueErr != nil {
 				m.queueErrs = append(m.queueErrs, l.queueErr)
 			}
@@ -447,13 +492,24 @@ func (m deskModel) onList(msg deskListMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
-	m.sortRuns()
-	if !m.hasSel {
-		m.chooseInitial()
+	// A queue that could not be read keeps the items it last listed, so one
+	// failed scan neither empties the queue nor closes the dialog over it.
+	if len(m.queueErrs) == 0 {
+		m.items, m.unread, m.itemSrc = items, unread, itemSrc
 	}
-	m.recheckConfirm()
-
+	m.sortRuns()
+	switch {
+	case !m.initialized:
+		m.chooseInitial()
+		m.initialized = true
+	case !m.hasSel && len(m.order) > 0:
+		m.selectKey(m.order[0])
+	}
 	var cmds []tea.Cmd
+	if len(m.queueErrs) == 0 {
+		cmds = append(cmds, m.recheckConfirm())
+	}
+
 	started := 0
 	for _, k := range m.order {
 		e := m.runs[k]
@@ -464,7 +520,10 @@ func (m deskModel) onList(msg deskListMsg) (tea.Model, tea.Cmd) {
 		if !isSel && started >= deskPrefetch {
 			continue
 		}
-		if !e.loaded || e.ref.Updated.After(e.loadedAt) || e.loadedAt.IsZero() {
+		// A desk run's listed state moves without its Updated time when its
+		// supervisor dies, so a state the run does not show yet reloads it.
+		moved := e.loaded && e.ref.Live != "" && e.ref.Live != e.live
+		if !e.loaded || e.ref.Updated.After(e.loadedAt) || e.loadedAt.IsZero() || moved {
 			if c := m.loadCmd(e); c != nil {
 				cmds = append(cmds, c)
 				if !isSel {
