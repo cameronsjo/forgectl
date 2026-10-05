@@ -211,7 +211,9 @@ func (d *Desk) doneItems(inRunning map[string]bool) ([]Item, error) {
 			it.Headers = ParseHeaders(data)
 		}
 		logPath := path.Join(DirDone, e.Name())
-		if line, err := d.lastLine(logPath); err == nil {
+		if it.Meta.ExitCode != nil {
+			it.ExitCode = it.Meta.ExitCode
+		} else if line, err := d.lastLine(logPath); err == nil { // legacy: no rc in meta
 			if m := exitLineRe.FindStringSubmatch(line); m != nil {
 				rc, _ := strconv.Atoi(m[1])
 				it.ExitCode = &rc

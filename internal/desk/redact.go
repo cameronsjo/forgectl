@@ -8,8 +8,8 @@ import (
 	"unicode/utf8"
 )
 
-// Output normalization and the private-step redaction table, ported from
-// run-and-watch. This is NOT internal/redact: that package masks URL and
+// Output normalization and the private-step redaction table of the batch
+// manifest format. This is NOT internal/redact: that package masks URL and
 // credential shapes, while this one replaces the exact values a `private`
 // step wrote to STEP_OUT. Redaction reduces exposure; it is not a guarantee —
 // a value printed split across lines, encoded, or transformed gets through.

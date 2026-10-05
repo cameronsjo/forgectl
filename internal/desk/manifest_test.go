@@ -8,8 +8,7 @@ import (
 	"testing"
 )
 
-// Ported from run-and-watch's tests/test_rw.py (ParseTest, GraphTest,
-// LintTest, DigestTest, nearest_failed).
+// Manifest grammar, planner, lint, and hash.
 
 func parse(t *testing.T, text string) *Manifest {
 	t.Helper()

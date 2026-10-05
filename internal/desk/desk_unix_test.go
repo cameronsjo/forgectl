@@ -294,14 +294,14 @@ func TestClaimWritesTheVerifiedBytesToAFreshFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	after, err := os.Stat(c.Path)
+	after, err := os.Stat(c.RecordPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if os.SameFile(before, after) {
 		t.Error("running/ holds the queued inode, not a fresh copy")
 	}
-	data, _ := os.ReadFile(c.Path)
+	data, _ := os.ReadFile(c.RecordPath)
 	if SHA256Hex(data) != added.SHA256 || c.SHA256 != added.SHA256 {
 		t.Error("the running copy is not the verified bytes")
 	}

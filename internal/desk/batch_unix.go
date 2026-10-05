@@ -21,7 +21,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Batch timing, from run-and-watch.
+// Batch timing.
 const (
 	// DefaultJobs caps parallel steps.
 	DefaultJobs = 4
@@ -127,6 +127,9 @@ type stepRun struct {
 	killedAt  time.Time
 	timedOut  bool
 	cancelled bool
+	// groupGone: a signal found the group empty. Its pgid may be reused from
+	// then on, so the group is never signalled again.
+	groupGone bool
 }
 
 type stepMsg struct {
@@ -423,11 +426,11 @@ func (b *Batch) check(now time.Time) error {
 		if r.termAt.IsZero() && (r.timedOut || r.cancelled || orphaned) {
 			r.termAt = now
 			if !signalGroup(r.pgid, unix.SIGTERM) {
-				r.killedAt = now // the group is already empty: nothing to wait for
+				r.killedAt, r.groupGone = now, true // the group is already empty: nothing to wait for
 			}
 		}
 		if !r.termAt.IsZero() && r.killedAt.IsZero() && !signalGroup(r.pgid, 0) {
-			r.killedAt = now // the group died from TERM; only an escaped child is left
+			r.killedAt, r.groupGone = now, true // the group died from TERM; only an escaped child is left
 		}
 		if !r.termAt.IsZero() && r.killedAt.IsZero() && (now.Sub(r.termAt) >= b.opts.Grace || b.signals.Load() >= 2) {
 			r.killedAt = now
@@ -467,7 +470,7 @@ func (b *Batch) closeHeld(r *stepRun) {
 func (b *Batch) finish(r *stepRun) error {
 	id := r.step.ID
 	delete(b.running, id)
-	if !r.termAt.IsZero() { // nothing in the group may outlive its STEP-END
+	if !r.termAt.IsZero() && !r.groupGone { // nothing in the group may outlive its STEP-END
 		signalGroup(r.pgid, unix.SIGKILL)
 	}
 	_ = r.logF.Close()

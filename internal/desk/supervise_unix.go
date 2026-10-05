@@ -123,7 +123,7 @@ func (d *Desk) supervise(name string) (int, error) {
 	if kind == KindBatch {
 		return d.superviseBatch(name, data, sigs)
 	}
-	return d.superviseScript(name, sigs)
+	return d.superviseScript(name, data, sigs)
 }
 
 // doneTaken reports a name whose done/ entries already exist (a reused
@@ -145,7 +145,7 @@ func (d *Desk) createLog(name string) (*os.File, error) {
 	return f, nil
 }
 
-func (d *Desk) superviseScript(name string, sigs <-chan os.Signal) (int, error) {
+func (d *Desk) superviseScript(name string, data []byte, sigs <-chan os.Signal) (int, error) {
 	run, err := d.BeginRun(name, os.Getpid())
 	if err != nil {
 		return 2, err
@@ -154,16 +154,28 @@ func (d *Desk) superviseScript(name string, sigs <-chan os.Signal) (int, error) 
 	if err != nil {
 		return 2, errors.Join(err, run.Finish(2, "internal"))
 	}
+	script, err := ScriptPipe(data)
+	if err != nil {
+		_ = logF.Close()
+		return 2, errors.Join(err, run.Finish(2, "internal"))
+	}
+	// bash reads the verified bytes from a pipe on fd 3, never from
+	// running/<name>.sh: that file is the record of what ran, and a write to
+	// it (or a rename over it) after the hash check cannot reach the run.
 	// Its own process group, so a forwarded signal reaches everything the
 	// script started. stdin is /dev/null: a detached item never prompts.
-	cmd := exec.CommandContext(context.Background(), "/bin/bash", d.abs(path.Join(DirRunning, name+extScript))) //nolint:gosec // G204: the verified copy of the approved item
+	cmd := exec.CommandContext(context.Background(), "/bin/bash", ScriptFDPath) //nolint:gosec // G204: constant argv; the script arrives on fd 3
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, logF, logF
+	cmd.ExtraFiles = []*os.File{script}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		_, _ = fmt.Fprintf(logF, "desk: could not start: %v\n", err)
+	startErr := cmd.Start()
+	_ = script.Close() // the child holds its own copy of the read end
+	if startErr != nil {
+		_, _ = fmt.Fprintf(logF, "desk: could not start: %v\n", startErr)
 		_ = logF.Close()
 		return 127, run.Finish(127, stepFailed)
 	}
+	pgid := cmd.Process.Pid
 	waited := make(chan struct{})
 	go func() {
 		_ = cmd.Wait() // the status is read from cmd.ProcessState below
@@ -174,15 +186,23 @@ func (d *Desk) superviseScript(name string, sigs <-chan os.Signal) (int, error) 
 	for running := true; running; {
 		select {
 		case <-sigs:
+			if interrupted {
+				// A second signal does not re-arm the grace period; it ends it.
+				signalGroup(pgid, unix.SIGKILL)
+				continue
+			}
 			interrupted = true
-			_ = unix.Kill(-cmd.Process.Pid, unix.SIGTERM)
+			signalGroup(pgid, unix.SIGTERM)
 			kill = time.After(DefaultGrace)
 		case <-kill:
-			_ = unix.Kill(-cmd.Process.Pid, unix.SIGKILL)
+			signalGroup(pgid, unix.SIGKILL)
 		case <-waited:
 			running = false
 		}
 	}
+	// Nothing the script started may outlive its run: a leftover writing to
+	// the log after EXIT would muddle the record.
+	d.endGroup(pgid)
 	_ = logF.Close()
 	rc := exitCode(cmd.ProcessState)
 	reason := stepOK
@@ -193,6 +213,22 @@ func (d *Desk) superviseScript(name string, sigs <-chan os.Signal) (int, error) 
 		reason = stepFailed
 	}
 	return rc, run.Finish(rc, reason)
+}
+
+// endGroup sends SIGTERM to a finished script's process group if anything
+// is left in it, and SIGKILL to whatever survives the grace period.
+func (d *Desk) endGroup(pgid int) {
+	if !signalGroup(pgid, 0) || !signalGroup(pgid, unix.SIGTERM) {
+		return
+	}
+	deadline := time.Now().Add(d.grace)
+	for time.Now().Before(deadline) {
+		if !signalGroup(pgid, 0) {
+			return
+		}
+		time.Sleep(batchTick)
+	}
+	signalGroup(pgid, unix.SIGKILL)
 }
 
 func (d *Desk) superviseBatch(name string, data []byte, sigs <-chan os.Signal) (int, error) {

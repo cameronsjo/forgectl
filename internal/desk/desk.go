@@ -7,7 +7,7 @@
 // package touches:
 //
 //	pending/NN-name.sh        a script, with "# WHAT:", "# WHY:" and optional "# TTY: yes" lines
-//	pending/NN-name.manifest  a batch (run-and-watch grammar); the kind comes from the extension
+//	pending/NN-name.manifest  a batch manifest; the kind comes from the extension
 //	running/<name>.sh|.manifest
 //	done/<name>.sh + done/<name>.log   the log's last line is EXIT=<rc>
 //	done/<name>.manifest + .log + .d/  a finished batch
@@ -21,9 +21,10 @@
 // An item's sha256 is fixed once: at [Desk.Add], or the first time a desk
 // sees a hand-dropped item. If its bytes change after that it moves to
 // skipped/ with skip_reason "changed" and cannot be re-armed. A run reads the
-// bytes once, checks the full hash, writes those exact bytes to a fresh file
-// in running/, and runs that file. The hash covers the item's own bytes only,
-// not anything the script sources, calls, or downloads.
+// bytes once and checks the full hash. It keeps those exact bytes in a fresh
+// file in running/ as the record, and bash reads the same bytes from a pipe,
+// never from that file. The hash covers the item's own bytes only, not
+// anything the script sources, calls, or downloads.
 //
 // # Threat model
 //
@@ -272,6 +273,9 @@ type Meta struct {
 	SkipReason string     `json:"skip_reason,omitempty"`
 	StartedAt  *time.Time `json:"started_at,omitempty"`
 	EndedAt    *time.Time `json:"ended_at,omitempty"`
+	// ExitCode is the run's rc, recorded at Finish. It outranks the log's
+	// EXIT= line, which a leftover process could append to after the run.
+	ExitCode *int `json:"exit_code,omitempty"`
 	// PID and PIDStart identify the process that owns a run: the supervisor,
 	// or the desk itself for a TTY item. PIDStart is the process start time
 	// in a platform-specific unit, so a reused pid does not read as alive.
@@ -306,7 +310,8 @@ type Item struct {
 	Stale bool
 	// Refusal says why a refused item cannot run.
 	Refusal string
-	// ExitCode is a done item's EXIT=<rc>; nil means no exit was recorded.
+	// ExitCode is a done item's rc: from meta, or for a legacy item the log's
+	// last line, EXIT=<rc>. nil means no exit was recorded.
 	ExitCode *int
 	// Started and Ended come from meta, or for a legacy item from the log's
 	// birth and modification times. Zero means unknown.

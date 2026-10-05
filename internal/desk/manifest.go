@@ -172,7 +172,7 @@ func parseStepLine(text, name string, lineno int) (Step, error) {
 		if f := strings.Fields(text); len(f) > 0 {
 			first = f[0]
 		}
-		return Step{}, manifestErr("%s: step %s: missing ' -- ' between the step and its command", where, first)
+		return Step{}, manifestErr("%s: step %s: missing ' -- ' between the step and its command", where, describe(first))
 	}
 	tokens := strings.Fields(head)
 	if len(tokens) == 0 {
@@ -180,7 +180,7 @@ func parseStepLine(text, name string, lineno int) (Step, error) {
 	}
 	id, opts := tokens[0], tokens[1:]
 	if !stepIDRe.MatchString(id) {
-		return Step{}, manifestErr("%s: step %s: bad step id (ids match %s)", where, id, stepIDRe)
+		return Step{}, manifestErr("%s: step %s: bad step id (ids match %s)", where, describe(id), stepIDRe)
 	}
 	if strings.TrimSpace(command) == "" {
 		return Step{}, manifestErr("%s: step %s: empty command", where, id)

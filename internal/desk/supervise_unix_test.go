@@ -201,7 +201,7 @@ func TestSupervisorRefusesARunningCopyThatChanged(t *testing.T) {
 	d := openDesk(t)
 	marker := filepath.Join(t.TempDir(), "ran")
 	c := queue(t, d, "x.sh", "echo fine\n")
-	writeFile(t, c.Path, "touch "+marker+"\n", 0o600)
+	writeFile(t, c.RecordPath, "touch "+marker+"\n", 0o600)
 	if rc, err := d.supervise(c.Name); rc != 2 || !errors.Is(err, ErrChanged) {
 		t.Fatalf("supervise = %d, %v; want ErrChanged", rc, err)
 	}
@@ -416,5 +416,114 @@ func waitFor(t *testing.T, limit time.Duration, cond func() bool) {
 			t.Fatalf("condition not met in %v", limit)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// The run reads the verified bytes from a pipe, not running/<name>.sh: a
+// line the item appends to its own running copy never executes.
+func TestSupervisorDoesNotRunBytesWrittenToTheRunningCopy(t *testing.T) {
+	d := openDesk(t)
+	record := filepath.Join(d.Path(), DirRunning, "01-inject.sh")
+	c := queue(t, d, "inject.sh", "echo first\necho \"zero=$0\"\necho 'echo INJECTED' >> "+record+"\necho last\n")
+	if c.Name != "01-inject" {
+		t.Fatalf("name = %s; the test predicts 01-inject", c.Name)
+	}
+	if _, err := d.Launch(c.Name); err != nil {
+		t.Fatal(err)
+	}
+	if _, state := watchUntil(t, d, c.Name, 20*time.Second); state != WatchEnded {
+		t.Fatalf("state = %s", state)
+	}
+	log := readFile(t, d.LogPath(c.Name))
+	if strings.Contains(log, "INJECTED\n") {
+		t.Errorf("a line appended to the running copy executed: %q", log)
+	}
+	if !strings.Contains(log, "first\n") || !strings.Contains(log, "last\nEXIT=0\n") {
+		t.Errorf("log = %q", log)
+	}
+	if !strings.Contains(log, "zero="+ScriptFDPath+"\n") {
+		t.Errorf("$0 is not %s: %q", ScriptFDPath, log)
+	}
+}
+
+// A process the script left behind is stopped when the script exits, so it
+// cannot append a late EXIT= line, and the rc comes from meta regardless.
+func TestSupervisorEndsLeftoversSoTheyCannotRewriteTheExitCode(t *testing.T) {
+	d := openDesk(t)
+	c := queue(t, d, "leaky.sh", "(sleep 1; echo EXIT=0) &\necho failing\nexit 1\n")
+	if _, err := d.Launch(c.Name); err != nil {
+		t.Fatal(err)
+	}
+	if _, state := watchUntil(t, d, c.Name, 20*time.Second); state != WatchEnded {
+		t.Fatalf("state = %s", state)
+	}
+	time.Sleep(1500 * time.Millisecond) // past the leftover's write, had it lived
+	if log := readFile(t, d.LogPath(c.Name)); !strings.HasSuffix(log, "failing\nEXIT=1\n") {
+		t.Errorf("the leftover wrote after the run ended: %q", log)
+	}
+	s := scan(t, d)
+	if len(s.Done) != 1 || s.Done[0].ExitCode == nil || *s.Done[0].ExitCode != 1 {
+		t.Errorf("history rc = %v, want 1", s.Done)
+	}
+}
+
+// The rc recorded in meta outranks the log's last line; the line is only the
+// fallback for a legacy item with no rc in meta.
+func TestHistoryReadsTheExitCodeFromMetaFirst(t *testing.T) {
+	d := openDesk(t)
+	c := queue(t, d, "x.sh", "exit 1\n")
+	run, err := d.BeginRun(c.Name, os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, d.LogPath(c.Name), "out\n", 0o600)
+	if err := run.Finish(1, stepFailed); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(d.LogPath(c.Name), os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString("EXIT=0\n") // a late writer
+	_ = f.Close()
+	s := scan(t, d)
+	if len(s.Done) != 1 || s.Done[0].ExitCode == nil || *s.Done[0].ExitCode != 1 {
+		t.Fatalf("history rc = %+v, want 1 from meta", s.Done)
+	}
+	if s.Done[0].Meta.ExitCode == nil || *s.Done[0].Meta.ExitCode != 1 {
+		t.Errorf("meta rc = %v", s.Done[0].Meta.ExitCode)
+	}
+}
+
+// A second signal ends the grace period instead of re-arming it: a script
+// that ignores SIGTERM is killed at once.
+func TestSupervisorSecondSignalKillsAtOnce(t *testing.T) {
+	d := openDesk(t)
+	pidFile := filepath.Join(t.TempDir(), "script.pid")
+	c := queue(t, d, "stubborn.sh", "trap '' TERM\necho $$ > "+pidFile+"\nsleep 30\n")
+	t.Cleanup(func() {
+		if pid, err := strconv.Atoi(strings.TrimSpace(readFileOr(pidFile))); err == nil {
+			_ = unix.Kill(-pid, unix.SIGKILL)
+		}
+	})
+	pid, err := d.Launch(c.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 10*time.Second, func() bool { return readFileOr(pidFile) != "" })
+	if err := unix.Kill(pid, unix.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	start := time.Now()
+	if err := unix.Kill(pid, unix.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	lines, state := watchUntil(t, d, c.Name, 20*time.Second)
+	if state != WatchEnded || !strings.HasSuffix(lines[len(lines)-1], "reason=interrupted") {
+		t.Fatalf("state %s, events %q", state, lines)
+	}
+	if waited := time.Since(start); waited > 3*time.Second {
+		t.Errorf("the second signal waited %v; it should kill at once", waited)
 	}
 }

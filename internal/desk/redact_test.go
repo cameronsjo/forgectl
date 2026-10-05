@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// Ported from run-and-watch's OutputHandlingTest.
+// Output normalization, redaction, and STEP_OUT parsing.
 
 func TestNormalizeStripsEscapesAndControls(t *testing.T) {
 	for in, want := range map[string]string{

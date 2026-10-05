@@ -12,15 +12,47 @@ import (
 	"strings"
 )
 
-// Claimed is an item this desk won and verified. Path holds exactly the
-// verified bytes, in a file this desk wrote; run that file and nothing else.
+// Claimed is an item this desk won and verified. Content is exactly the
+// verified bytes, and Content is what runs: hand it to bash through
+// [Claimed.Script] on fd 3 and run [ScriptFDPath].
+//
+// RecordPath is running/<name>.sh, a copy of the same bytes kept as the
+// record of what ran. Never execute it by name: anything that can write the
+// desk can change that file, or rename another over it, after the hash
+// check, and bash reads a script file while it runs.
 type Claimed struct {
-	Name    string
-	Kind    Kind
-	SHA256  string
-	Path    string
-	Content []byte
+	Name       string
+	Kind       Kind
+	SHA256     string
+	RecordPath string
+	Content    []byte
 	Headers
+}
+
+// ScriptFDPath is the script operand for bash when the script arrives on
+// fd 3 (exec.Cmd.ExtraFiles[0]). Under it, $0 and BASH_SOURCE are
+// "/dev/fd/3", not the item's path: a script that locates sibling files
+// from $0 finds nothing, as it found nothing useful in running/ before.
+const ScriptFDPath = "/dev/fd/3"
+
+// Script returns the read end of a pipe that yields Content and then EOF,
+// for exec.Cmd.ExtraFiles[0]. Close it after the command starts.
+func (c *Claimed) Script() (*os.File, error) { return ScriptPipe(c.Content) }
+
+// ScriptPipe returns the read end of a pipe fed with data from a goroutine.
+// A pipe cannot be rewritten or appended to by anyone holding a path, so the
+// bytes bash reads are the bytes passed in. If the reader stops early, the
+// write fails with EPIPE and the goroutine ends.
+func ScriptPipe(data []byte) (*os.File, error) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("desk: script pipe: %w", err)
+	}
+	go func() {
+		_, _ = w.Write(data) // EPIPE only when the reader quit early; nothing to report
+		_ = w.Close()
+	}()
+	return r, nil
 }
 
 // Claim moves a pending item to running/ and checks it is unchanged.
@@ -30,7 +62,8 @@ type Claimed struct {
 // without touching anything. The winner then reads the item once (O_NOFOLLOW,
 // a regular file with one link), compares the full sha256 with the hash fixed
 // when the item was queued (and with wantSHA, the hash on screen, when given),
-// and writes those exact bytes to a fresh file that replaces the claimed one.
+// and writes those exact bytes to a fresh file that replaces the claimed one
+// as the record. Run Claimed.Content (through [Claimed.Script]), not the file.
 // An item whose bytes changed moves to skipped/ and Claim returns ErrChanged.
 func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 	kind, err := d.findKind(DirPending, name)
@@ -79,8 +112,10 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 		return nil, fmt.Errorf("%w: %s", ErrChanged, describe(name))
 	}
 	// Replace the claimed inode with one only this desk has written, holding
-	// exactly the bytes just verified. Whoever wrote the original may still
-	// hold it open; they cannot reach the copy that runs.
+	// exactly the bytes just verified, as the record of what runs. Whoever
+	// held the original open can no longer write the record through it. The
+	// run itself reads Content through a pipe, so even a later write to the
+	// record by name never reaches a running script.
 	tmp, err := d.writeTemp(DirRunning, name, data)
 	if err != nil {
 		return nil, err
@@ -91,7 +126,7 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 	}
 	return &Claimed{
 		Name: name, Kind: kind, SHA256: sum, Content: data, Headers: ParseHeaders(data),
-		Path: d.abs(path.Join(DirRunning, file)),
+		RecordPath: d.abs(path.Join(DirRunning, file)),
 	}, nil
 }
 
@@ -151,7 +186,7 @@ func (r *Run) Finish(rc int, reason string, fields ...string) error {
 	d := r.d
 	defer r.Events.Close() //nolint:errcheck // the RUN-END write below reports its own failure
 	now := d.now().UTC()
-	r.Meta.EndedAt = &now
+	r.Meta.EndedAt, r.Meta.ExitCode = &now, &rc
 	var errs []error
 	if err := d.writeMeta(DirRunning, r.Name, r.Meta); err != nil {
 		errs = append(errs, err)

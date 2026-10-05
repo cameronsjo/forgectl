@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-// Event line prefixes, the run-and-watch vocabulary. Only the desk writes
+// Event line prefixes, the batch event vocabulary. Only the desk writes
 // done/<name>.events; step output never reaches it, so a step cannot print a
 // line that ends the run for a watcher.
 const (

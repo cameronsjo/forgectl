@@ -37,6 +37,9 @@ type Desk struct {
 	fd   int // pinned descriptor on the desk directory, from privdir
 	root *os.Root
 	now  func() time.Time
+	// grace is how long a finished script's leftover processes get between
+	// SIGTERM and SIGKILL.
+	grace time.Duration
 }
 
 // Open pins the desk directory at path, creating it when absent, and migrates
@@ -67,7 +70,7 @@ func Open(dir string) (*Desk, error) {
 		_ = unix.Close(fd)
 		return nil, fmt.Errorf("desk: open %s: %w", describe(dir), err)
 	}
-	d := &Desk{path: dir, fd: fd, root: root, now: time.Now}
+	d := &Desk{path: dir, fd: fd, root: root, now: time.Now, grace: DefaultGrace}
 	if err := d.bindRoot(); err != nil {
 		_ = d.Close()
 		return nil, err
@@ -116,43 +119,69 @@ func (d *Desk) Path() string { return d.path }
 
 func (d *Desk) migrate() error {
 	for _, sub := range protocolDirs {
-		fi, err := d.root.Lstat(sub)
-		switch {
-		case errors.Is(err, fs.ErrNotExist):
-			if err := d.root.Mkdir(sub, dirMode); err != nil && !errors.Is(err, fs.ErrExist) {
-				return fmt.Errorf("desk: create %s/: %w", sub, err)
-			}
-			continue
-		case err != nil:
-			return fmt.Errorf("desk: stat %s/: %w", sub, err)
-		case fi.Mode()&fs.ModeSymlink != 0 || !fi.IsDir():
-			return fmt.Errorf("desk: %s/ is not a directory; refusing", sub)
+		if err := d.root.Mkdir(sub, dirMode); err != nil && !errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("desk: create %s/: %w", sub, err)
 		}
-		if fi.Mode().Perm() != dirMode {
-			if err := d.root.Chmod(sub, dirMode); err != nil {
-				return fmt.Errorf("desk: tighten %s/: %w", sub, err)
-			}
-		}
-		entries, err := d.list(sub)
-		if err != nil {
+		if err := d.tightenDir(sub); err != nil {
 			return err
-		}
-		for _, e := range entries {
-			if !e.Type().IsRegular() {
-				continue
-			}
-			info, err := e.Info()
-			if err != nil {
-				continue // vanished since the listing
-			}
-			if info.Mode().Perm() != fileMode {
-				if err := d.root.Chmod(path.Join(sub, e.Name()), fileMode); err != nil && !errors.Is(err, fs.ErrNotExist) {
-					return fmt.Errorf("desk: tighten %s/%s: %w", sub, describe(e.Name()), err)
-				}
-			}
 		}
 	}
 	return nil
+}
+
+// tightenDir narrows one protocol dir to 0700 and its regular files to 0600.
+// Every chmod goes through a descriptor opened O_NOFOLLOW against the pinned
+// desk, so a symlink swapped in after the listing is refused, never followed.
+func (d *Desk) tightenDir(sub string) error {
+	sfd, err := unix.Openat(d.fd, sub, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	switch {
+	case errors.Is(err, unix.ELOOP), errors.Is(err, unix.ENOTDIR), errors.Is(err, unix.EMLINK):
+		return fmt.Errorf("desk: %s/ is not a directory; refusing", sub)
+	case err != nil:
+		return fmt.Errorf("desk: open %s/: %w", sub, err)
+	}
+	defer unix.Close(sfd) //nolint:errcheck // read-only descriptor
+	if err := fchmodTo(sfd, dirMode); err != nil {
+		return fmt.Errorf("desk: tighten %s/: %w", sub, err)
+	}
+	entries, err := d.list(sub)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		ffd, err := unix.Openat(sfd, e.Name(), unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EMLINK) {
+			continue // vanished, or swapped for a symlink, since the listing
+		}
+		if err != nil {
+			return fmt.Errorf("desk: open %s/%s: %w", sub, describe(e.Name()), err)
+		}
+		var st unix.Stat_t
+		err = unix.Fstat(ffd, &st)
+		if err == nil && st.Mode&unix.S_IFMT == unix.S_IFREG {
+			err = fchmodTo(ffd, fileMode)
+		}
+		_ = unix.Close(ffd)
+		if err != nil {
+			return fmt.Errorf("desk: tighten %s/%s: %w", sub, describe(e.Name()), err)
+		}
+	}
+	return nil
+}
+
+// fchmodTo sets fd's permission bits to mode when they differ.
+func fchmodTo(fd int, mode fs.FileMode) error {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return err
+	}
+	if uint32(st.Mode)&0o7777 == uint32(mode) { // all twelve bits, so a stray setgid is cleared too
+		return nil
+	}
+	return unix.Fchmod(fd, uint32(mode))
 }
 
 // list reads a protocol subdirectory, sorted by name.

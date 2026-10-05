@@ -18,7 +18,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Ported from run-and-watch's tests/blocks-batch.sh and blocks-batch2.sh.
+// Batch runner behavior: order, parallelism, failure, outputs, redaction,
+// timeouts, fail-fast, interrupt.
 
 type batchOut struct {
 	res    BatchResult
