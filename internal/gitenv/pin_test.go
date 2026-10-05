@@ -78,7 +78,8 @@ var shellScriptAllowlist = map[string]struct {
 	uses   int
 	reason string
 }{
-	"internal/bless/bless.go:InstallAnchor": {1, "anchorInstallScript is a package var built at init from the AnchorPath constant and filepath.Dir of it, so it is not a Go constant; it runs mkdir, chown, chmod and printf, and no git"},
+	"internal/bless/bless.go:InstallAnchor":    {1, "anchorInstallScript is a package var built at init from the AnchorPath constant and filepath.Dir of it, so it is not a Go constant; it runs mkdir, chown, chmod and printf, and no git"},
+	"internal/desk/batch_unix.go:Batch.launch": {1, "runs one step of a desk batch manifest verbatim: the command is the payload the operator approved by sha256, not forgectl's own use of git, so it may run git exactly as the operator would by hand"},
 }
 
 // ghGitSubcommands are the gh arguments that make gh run git: repo clone,
