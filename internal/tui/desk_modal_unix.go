@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -57,14 +56,7 @@ const (
 
 	modalMinW = 36
 	modalMinH = 8
-
-	// deskLaunchFailed is the skip reason for a claim whose run never
-	// started.
-	deskLaunchFailed = "launch-failed"
 )
-
-// shaRe is what a hash the dialog may approve looks like.
-var shaRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type modalKind int
 
@@ -397,7 +389,7 @@ func cannotApprove(it runview.QueueItem) string {
 		return "cannot approve: " + capSafe(it.Refusal, 240)
 	case it.State != string(desk.StateWaiting):
 		return "cannot approve: it is " + capSafe(it.State, 16) + ", not waiting"
-	case !shaRe.MatchString(it.SHA256):
+	case !desk.ValidSHA(it.SHA256):
 		return "cannot approve: it has no full recorded hash"
 	}
 	return ""
@@ -425,7 +417,7 @@ func approveCmd(v deskVerbs, name, sha string, kind desk.Kind) tea.Cmd {
 		if err == nil || pid != 0 {
 			return deskApproveMsg{name: name, sha: sha, pid: pid, err: err}
 		}
-		aerr := v.Abandon(name, deskLaunchFailed)
+		aerr := v.Abandon(name, desk.SkipLaunchFailed)
 		return deskApproveMsg{name: name, sha: sha, err: errors.Join(err, aerr), abandoned: aerr == nil}
 	}
 }
@@ -452,7 +444,7 @@ func (m deskModel) onApprove(msg deskApproveMsg) (tea.Model, tea.Cmd) {
 	default:
 		text := m.glyph.Failed + " could not run " + name + ": " + capSafe(msg.err.Error(), 200)
 		if msg.abandoned {
-			text += " · moved to skipped: " + deskLaunchFailed
+			text += " · moved to skipped: " + desk.SkipLaunchFailed
 		}
 		m.footer = st.Danger.Render(text)
 	}
@@ -612,7 +604,7 @@ func skipHint(reason string) string {
 	switch reason {
 	case desk.SkipChanged:
 		return "changed — re-queue to run it"
-	case deskLaunchFailed:
+	case desk.SkipLaunchFailed:
 		return "launch failed — re-queue to run it"
 	case desk.SkipLost:
 		return "lost — re-queue to run it"

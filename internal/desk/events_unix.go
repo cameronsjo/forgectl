@@ -274,17 +274,35 @@ func (w *Watcher) hold(data []byte) {
 	w.partial = append(w.partial, data...)
 }
 
+// stateTries is how many times state looks for an item before it reports
+// ErrNotFound.
+const stateTries = 3
+
 // state locates the item and judges its owner. It is reached when this
 // watcher has not read RUN-END, which may still be in the file: past the
 // cap, or before the skip a resumed watcher was given.
+//
+// The directories are read one after another, and an item can move between
+// two of them (running/ to skipped/, skipped/ back to pending/) after the
+// first is read and before the second is. Every move is one rename, so an
+// item is always somewhere: one that is found nowhere was moving, and is
+// looked for again.
 func (w *Watcher) state() (WatchState, int, error) {
+	for try := 1; ; try++ {
+		st, pid, err := w.stateOnce()
+		if !errors.Is(err, ErrNotFound) || try == stateTries {
+			return st, pid, err
+		}
+	}
+}
+
+func (w *Watcher) stateOnce() (WatchState, int, error) {
 	d := w.d
 	if _, err := d.findKind(DirPending, w.name); err == nil {
 		return WatchWaiting, 0, nil
 	}
-	if _, err := d.findKind(DirSkipped, w.name); err == nil {
-		return WatchSkipped, 0, nil
-	}
+	// running/ before skipped/: the moves out of running/ (to skipped/ or
+	// done/) then always find the item in the later directory.
 	if kind, err := d.findKind(DirRunning, w.name); err == nil {
 		meta, _, err := d.readMeta(DirRunning, w.name)
 		if err != nil {
@@ -299,6 +317,9 @@ func (w *Watcher) state() (WatchState, int, error) {
 			return WatchRunning, meta.PID, nil
 		}
 		return WatchLost, meta.PID, nil
+	}
+	if _, err := d.findKind(DirSkipped, w.name); err == nil {
+		return WatchSkipped, 0, nil
 	}
 	if d.exists(path.Join(DirDone, w.name+extLog)) {
 		// No events file is a legacy item, which never wrote any.

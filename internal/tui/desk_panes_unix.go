@@ -634,7 +634,7 @@ func (m deskModel) queueReason(it runview.QueueItem) string {
 		return st.Muted.Render("skipped by the operator after it was claimed — re-queue to run it")
 	case it.SkipReason == desk.SkipOperator:
 		return st.Muted.Render("skipped by the operator · u to undo")
-	case it.SkipReason == desk.SkipChanged, it.SkipReason == deskLaunchFailed, it.SkipReason == desk.SkipLost:
+	case it.SkipReason == desk.SkipChanged, it.SkipReason == desk.SkipLaunchFailed, it.SkipReason == desk.SkipLost:
 		return st.Muted.Render("skipped: " + skipHint(it.SkipReason))
 	case it.SkipReason != "":
 		return st.Muted.Render("skipped: " + capSafe(it.SkipReason, 240))

@@ -64,7 +64,7 @@ func (d *Desk) Launch(c *Claimed) (int, error) {
 	if kind != c.Kind {
 		return 0, fmt.Errorf("desk: launch %s: running/ holds a %s, but the claim is for a %s", describe(c.Name), kind, c.Kind)
 	}
-	if !validSHA(c.SHA256) {
+	if !ValidSHA(c.SHA256) {
 		return 0, fmt.Errorf("%w: launch %s: the claim carries no full sha256", ErrRefused, describe(c.Name))
 	}
 	if c.Kind == KindScript && c.TTY {
@@ -226,12 +226,27 @@ func (d *Desk) supervise(name, sha string, want Kind) (int, error) {
 // with reason, so a failed start leaves a trace: the supervisor's own stderr
 // is /dev/null. An item another process owns is left alone, so a stray
 // `_supervise` cannot take a live run out of running/.
+//
+// So is a claim with no owner yet whose claimer is alive and did not start
+// this supervisor: a TTY item claimed for the desk's own foreground, which
+// a `_supervise` given its stamped sha would otherwise move to skipped/
+// before the desk's BeginRun. Launch starts the real supervisor as the
+// claimer's child, so its parent is the claimer, or the claimer has died.
+// Every refusal after the stamp check comes through here.
 func (d *Desk) skipUnstarted(name string, kind Kind, reason string, cause error) error {
-	meta, _, err := d.readMeta(DirRunning, name)
+	meta, ok, err := d.readMeta(DirRunning, name)
 	if err != nil {
 		return errors.Join(cause, err)
 	}
+	if !ok {
+		// Gone from running/ (an Abandon moved it): writing a meta here
+		// would leave a stray one behind.
+		return cause
+	}
 	if meta.PID != 0 && meta.PID != os.Getpid() {
+		return cause
+	}
+	if meta.PID == 0 && !claimerLetGo(meta) {
 		return cause
 	}
 	meta.Kind, meta.SkipReason = kind, reason
@@ -242,6 +257,17 @@ func (d *Desk) skipUnstarted(name string, kind Kind, reason string, cause error)
 		return errors.Join(cause, fmt.Errorf("desk: move %s to skipped/: %w", describe(name), err))
 	}
 	return cause
+}
+
+// claimerLetGo reports whether this process may move a claim with no owner:
+// it is the claimer, the claimer's child, or the claimer is gone.
+func claimerLetGo(meta Meta) bool {
+	switch c := meta.ClaimPID; {
+	case c == 0, c == os.Getpid(), c == os.Getppid():
+		return true
+	default:
+		return !processAlive(c, meta.ClaimStart)
+	}
 }
 
 // doneTaken reports a name whose done/ entries already exist (a reused
@@ -317,7 +343,7 @@ func (d *Desk) superviseScript(run *Run, data []byte, home string, sigs <-chan o
 	}
 	// Nothing the script started may outlive its run: a leftover writing to
 	// the log after EXIT would muddle the record.
-	d.endGroup(pgid)
+	d.EndGroup(pgid)
 	_ = logF.Close()
 	rc := exitCode(cmd.ProcessState)
 	reason := stepOK
@@ -330,13 +356,13 @@ func (d *Desk) superviseScript(run *Run, data []byte, home string, sigs <-chan o
 	return rc, run.Finish(rc, reason)
 }
 
-// endGroup sends SIGTERM to a finished script's process group if anything
+// EndGroup sends SIGTERM to a finished script's process group if anything
 // is left in it, and SIGKILL to whatever survives the grace period.
 //
 // Every signal that matters is preceded by a signal-0 probe, and the moment a
 // probe finds the group empty it is never signalled again: its pgid may then
 // belong to a new group.
-func (d *Desk) endGroup(pgid int) {
+func (d *Desk) EndGroup(pgid int) {
 	if !signalGroup(pgid, 0) || !signalGroup(pgid, unix.SIGTERM) {
 		return
 	}

@@ -81,6 +81,11 @@ const (
 	SkipOperator = "operator"
 	SkipLost     = "lost"
 	SkipReused   = "name-reused"
+	// SkipLaunchFailed is a claim whose run never started; the desk gave it
+	// back (Abandon).
+	SkipLaunchFailed = "launch-failed"
+	// SkipClaimFailed is a claim that failed after it was stamped.
+	SkipClaimFailed = "claim-failed"
 )
 
 // Errors callers branch on.
@@ -138,9 +143,9 @@ var (
 	shaRe  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
-// validSHA reports whether s is a full lowercase hex sha256, as [SHA256Hex]
+// ValidSHA reports whether s is a full lowercase hex sha256, as [SHA256Hex]
 // writes it. An approval names the whole hash: never empty, never a prefix.
-func validSHA(s string) bool { return shaRe.MatchString(s) }
+func ValidSHA(s string) bool { return shaRe.MatchString(s) }
 
 // ValidName reports whether name is a protocol item name: "NN-stem".
 func ValidName(name string) bool {

@@ -62,10 +62,16 @@ var afterForegroundClaim = func(*desk.Claimed) {}
 // runs the claimed bytes through bash on fd 3, never the file in running/, in
 // a process group of its own that gets the terminal's foreground. INT, TERM,
 // HUP and QUIT are forwarded to that group, with SIGKILL after the grace
-// period. When the item ends it takes the terminal back, finishes the run
-// (ok, failed or interrupted), and prints the result. A claim that cannot
-// start a run is given back as skipped:launch-failed. A terminal that answers
-// EIO is a closed pane: the run is finished and ErrPaneGone returned.
+// period. SIGTSTP, SIGTTIN and SIGTTOU are ignored in the item's group (an
+// ignored signal stays ignored across exec): Ctrl-Z would otherwise stop the
+// group while the desk waits for it, with no terminal to resume it from.
+// When the item ends, anything it left in its group is ended, the desk takes
+// the terminal back, finishes the run (ok, failed, or interrupted for a
+// forwarded signal or an item killed by INT, TERM, HUP or QUIT), and prints
+// the result. A claim that cannot start a run is given back as
+// skipped:launch-failed, and an item that cannot start is an error. A
+// terminal that cannot be taken back is a closed pane: the run is finished
+// and an error matching ErrPaneGone returned.
 func runForeground(d *desk.Desk, name, sha string, tio IO) (rc int, err error) {
 	home, err := desk.HomeDir()
 	if err != nil {
@@ -76,13 +82,17 @@ func runForeground(d *desk.Desk, name, sha string, tio IO) (rc int, err error) {
 		return 2, err
 	}
 	afterForegroundClaim(claimed)
-	if claimed.SHA256 != sha {
+	switch {
+	case claimed.SHA256 != sha:
 		return 2, errors.Join(fmt.Errorf("desk: the claim for %s does not carry the approved hash", safeLabel(name)),
-			d.Abandon(name, launchFailed))
+			d.Abandon(name, desk.SkipLaunchFailed))
+	case claimed.Kind != desk.KindScript || !claimed.TTY:
+		return 2, errors.Join(fmt.Errorf("desk: %s is not a TTY script; it does not run in this terminal", safeLabel(name)),
+			d.Abandon(name, desk.SkipLaunchFailed))
 	}
 	run, err := d.BeginRun(name, os.Getpid())
 	if err != nil {
-		return 2, errors.Join(err, d.Abandon(name, launchFailed))
+		return 2, errors.Join(err, d.Abandon(name, desk.SkipLaunchFailed))
 	}
 
 	// The operand matters: with none, bash would read the terminal instead
@@ -108,11 +118,14 @@ func runForeground(d *desk.Desk, name, sha string, tio IO) (rc int, err error) {
 		defer signal.Stop(ch)
 		sigs = ch
 	}
+	// The child inherits these as ignored; the desk resets its own at once.
+	stops := []os.Signal{unix.SIGTSTP, unix.SIGTTIN, unix.SIGTTOU}
+	signal.Ignore(stops...)
 	startErr := cmd.Start()
+	signal.Reset(stops...)
 	release() // the child holds its own copy of the read end
 	if startErr != nil {
-		_, _ = fmt.Fprintf(errOut(tio), "desk: could not start %s: %v\n", safeLabel(name), startErr)
-		return 127, run.Finish(127, "failed")
+		return 127, errors.Join(fmt.Errorf("desk: could not start %s: %w", safeLabel(name), startErr), run.Finish(127, "failed"))
 	}
 	pgid := cmd.Process.Pid
 	waited := make(chan struct{})
@@ -145,10 +158,14 @@ func runForeground(d *desk.Desk, name, sha string, tio IO) (rc int, err error) {
 		}
 	}
 	rc = foregroundExit(cmd.ProcessState)
+	interrupted = interrupted || killedByInterrupt(cmd.ProcessState)
+	// Nothing the item started may keep the terminal, or outlive a run
+	// recorded as ended.
+	d.EndGroup(pgid)
 
-	gone := false
+	var termErr error
 	if tio.TTY >= 0 {
-		gone = errors.Is(takeTerminal(tio), unix.EIO)
+		termErr = takeTerminal(tio)
 	}
 	reason := "ok"
 	switch {
@@ -160,8 +177,13 @@ func runForeground(d *desk.Desk, name, sha string, tio IO) (rc int, err error) {
 	if err := run.Finish(rc, reason); err != nil {
 		return rc, err
 	}
-	if gone {
+	switch {
+	case errors.Is(termErr, unix.EIO):
 		return rc, ErrPaneGone
+	case termErr != nil:
+		// Without the foreground the desk cannot read or draw the terminal:
+		// a background group that tries is stopped.
+		return rc, fmt.Errorf("%w: could not take the terminal back: %w", ErrPaneGone, termErr)
 	}
 	out := tio.Out
 	if out == nil {
@@ -180,16 +202,6 @@ func runForeground(d *desk.Desk, name, sha string, tio IO) (rc int, err error) {
 		}
 	}
 	return rc, nil
-}
-
-// launchFailed is the skip reason for a claim whose run never started.
-const launchFailed = "launch-failed"
-
-func errOut(tio IO) io.Writer {
-	if tio.Stderr != nil {
-		return tio.Stderr
-	}
-	return io.Discard
 }
 
 // takeTerminal gives the terminal's foreground back to this process's group.
@@ -215,6 +227,24 @@ func waitKey(tty int) error {
 	var b [1]byte
 	_, err = unix.Read(tty, b[:])
 	return err
+}
+
+// killedByInterrupt reports an item killed by a signal the terminal or the
+// operator sends to stop it: INT (Ctrl-C reaches the item's group, not the
+// desk), TERM, HUP or QUIT.
+func killedByInterrupt(ps *os.ProcessState) bool {
+	if ps == nil {
+		return false
+	}
+	ws, ok := ps.Sys().(syscall.WaitStatus)
+	if !ok || !ws.Signaled() {
+		return false
+	}
+	switch ws.Signal() {
+	case unix.SIGINT, unix.SIGTERM, unix.SIGHUP, unix.SIGQUIT:
+		return true
+	}
+	return false
 }
 
 // foregroundExit is the item's exit code: a signal death is 128 plus the

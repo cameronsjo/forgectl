@@ -132,10 +132,14 @@ func (rt deskRuntime) dashboard(ctx context.Context, deps module.Deps, srcs *des
 		}
 		if err := rt.foreground(srcs.desk, run.Name, run.SHA); err != nil {
 			if errors.Is(err, ErrPaneGone) {
+				if err != ErrPaneGone { //nolint:errorlint // only a bare ErrPaneGone has nothing more to say
+					_, _ = fmt.Fprintln(os.Stderr, safeText(err.Error()))
+				}
 				return nil
 			}
-			// The run never began, so nothing printed its line or waited.
-			_, _ = fmt.Fprintf(os.Stderr, "\ncould not run %s: %s — press any key\n", safeLabel(run.Name), safeText(err.Error()))
+			// The run did not start, or its end could not be recorded: no
+			// closing line was printed and nothing waited for a key.
+			_, _ = fmt.Fprintf(os.Stderr, "\ndesk: %s: %s — press any key\n", safeLabel(run.Name), safeText(err.Error()))
 			if errors.Is(rt.waitKey(), ErrPaneGone) {
 				return nil
 			}

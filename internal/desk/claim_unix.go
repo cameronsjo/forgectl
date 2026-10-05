@@ -90,7 +90,7 @@ func (c *Claimed) AttachScript(cmd *exec.Cmd) (release func(), err error) {
 // Until a run records its owner, the stamp is what tells a live claim from
 // one whose claimer died; see [Desk.Abandon] for giving a claim back.
 func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
-	if !validSHA(wantSHA) {
+	if !ValidSHA(wantSHA) {
 		return nil, fmt.Errorf("%w: %s: an approval names the full 64-hex-digit sha256", ErrRefused, describe(name))
 	}
 	kind, err := d.findKind(DirPending, name)
@@ -133,6 +133,12 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 	if err := d.writeMeta(DirRunning, name, meta); err != nil {
 		return nil, err
 	}
+	// From here the claim is stamped with this process: a failure that
+	// leaves it in running/ gives it back, or it reads as running until
+	// this desk exits and nothing can skip it.
+	giveBack := func(err error) (*Claimed, error) {
+		return nil, errors.Join(err, d.Abandon(name, SkipClaimFailed))
+	}
 
 	data, _, err := d.readItem(DirRunning, file)
 	var r *refusal
@@ -141,7 +147,7 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 		return nil, errors.Join(err, d.writeMeta(DirRunning, name, meta), d.move(name, kind, DirRunning, DirSkipped))
 	}
 	if err != nil {
-		return nil, err
+		return giveBack(err)
 	}
 	sum := SHA256Hex(data)
 	if sum != meta.SHA256 {
@@ -155,18 +161,24 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 	// held the original open can no longer write the record through it. The
 	// run itself reads Content through a pipe, so even a later write to the
 	// record by name never reaches a running script.
-	tmp, err := d.writeTemp(DirRunning, name, data)
+	tmp, err := stageRecord(d, name, data)
 	if err != nil {
-		return nil, err
+		return giveBack(err)
 	}
 	if err := d.root.Rename(tmp, path.Join(DirRunning, file)); err != nil {
 		_ = d.root.Remove(tmp)
-		return nil, fmt.Errorf("desk: stage %s: %w", describe(name), err)
+		return giveBack(fmt.Errorf("desk: stage %s: %w", describe(name), err))
 	}
 	return &Claimed{
 		Name: name, Kind: kind, SHA256: sum, Content: data, Headers: ParseHeaders(data),
 		RecordPath: d.abs(path.Join(DirRunning, file)),
 	}, nil
+}
+
+// stageRecord writes the verified bytes to a temp file in running/, which
+// Claim renames over the claimed item. Tests replace it to fail the write.
+var stageRecord = func(d *Desk, name string, data []byte) (string, error) {
+	return d.writeTemp(DirRunning, name, data)
 }
 
 // Run is a started run: the item is in running/, its owner recorded in meta,
