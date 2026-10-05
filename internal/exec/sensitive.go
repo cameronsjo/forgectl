@@ -107,6 +107,11 @@ const (
 	KindHerdrReconcile
 	KindHerdrProbe
 	KindHerdrCleanup
+	// KindHerdrPaneInspect reads a pane's foreground process before anything is
+	// typed into it. KindHerdrBootstrap is the `pane run` that types the
+	// trampoline line into a pane the inspection found idle.
+	KindHerdrPaneInspect
+	KindHerdrBootstrap
 
 	// KindSopsEdit drives `sops <file>` with forgectl re-invoked as the
 	// editor. KindSopsExtract is the read-back that proves what landed.
@@ -144,12 +149,14 @@ var kindNames = [kindCount]string{
 	KindCmuxProbe:     "cmux.probe",
 	KindCmuxCleanup:   "cmux.cleanup",
 
-	KindHerdrReadiness: "herdr.readiness",
-	KindHerdrSnapshot:  "herdr.snapshot",
-	KindHerdrCreate:    "herdr.create",
-	KindHerdrReconcile: "herdr.reconcile",
-	KindHerdrProbe:     "herdr.probe",
-	KindHerdrCleanup:   "herdr.cleanup",
+	KindHerdrReadiness:   "herdr.readiness",
+	KindHerdrSnapshot:    "herdr.snapshot",
+	KindHerdrCreate:      "herdr.create",
+	KindHerdrReconcile:   "herdr.reconcile",
+	KindHerdrProbe:       "herdr.probe",
+	KindHerdrCleanup:     "herdr.cleanup",
+	KindHerdrPaneInspect: "herdr.pane-inspect",
+	KindHerdrBootstrap:   "herdr.bootstrap",
 
 	KindSopsEdit:    "sops.edit",
 	KindSopsExtract: "sops.extract",

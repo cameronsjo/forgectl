@@ -59,6 +59,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/herdr/wire"
@@ -108,6 +109,8 @@ type Adapter struct {
 	// directory check cannot perturb socket fingerprinting or launch outcomes.
 	statSocketDir func(string) (os.FileInfo, error)
 	warnings      io.Writer
+	// idleInterval is the wait between root-pane inspections.
+	idleInterval time.Duration
 }
 
 // Option configures an Adapter at construction.
@@ -181,6 +184,7 @@ func New(run exec.SensitiveRunner, herdrPath string, getenv func(string) string,
 		selfUID:       os.Geteuid,
 		statSocketDir: os.Stat,
 		warnings:      io.Discard,
+		idleInterval:  defaultIdleInterval,
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -241,6 +245,10 @@ func checkSocketPath(socket string) error {
 
 // Kind reports the backend this adapter drives.
 func (a *Adapter) Kind() backend.Kind { return backend.KindHerdr }
+
+// Session is the herdr session this adapter is pinned to. The worker ledger keys
+// on it, so workers in two sessions of one repo do not share rows.
+func (a *Adapter) Session() string { return a.session }
 
 // pinned prefixes an argv with this adapter's session pin. Every command goes
 // through it, so there is one spelling of `--session` and no call site can issue

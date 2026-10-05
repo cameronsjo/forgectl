@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -64,6 +65,8 @@ func newSurfaceLaunchCmd(deps module.Deps) *cobra.Command {
 		backendName string
 		displayName string
 		allowPATH   bool
+		worktree    string
+		harness     string
 	)
 
 	cmd := &cobra.Command{
@@ -75,7 +78,17 @@ terminal manager, and starts the harness inside it.
 The target is a project name or a path. A bare name is looked up beneath the
 projects root and must match exactly — an ambiguous name is refused rather than
 guessed at, because guessing means opening a session in the wrong repository.
-A path may be anywhere, because naming it is the choice being made explicitly.`,
+A path may be anywhere, because naming it is the choice being made explicitly.
+
+With --worktree <branch> (herdr only, --name required) the launch starts a
+coordinator worker instead: a git worktree at <repo>/.claude/worktrees/<name>,
+created with repository hooks disabled, and a row in the worker ledger under
+$XDG_STATE_HOME/forgectl/surface. Workers allow only claude plan, default or
+acceptEdits, or codex read-only or workspace-write with untrusted or
+on-request approvals; pi and anything looser are refused, and workers never
+get --allow-dangerously-skip-permissions.
+
+  forgectl surface launch . --surface herdr --worktree feat/x --name x --harness codex`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSurfaceLaunch(cmd, deps, surfaceLaunchOptions{
@@ -83,6 +96,8 @@ A path may be anywhere, because naming it is the choice being made explicitly.`,
 				Backend:     backendName,
 				DisplayName: displayName,
 				AllowPATH:   allowPATH,
+				Worktree:    worktree,
+				Harness:     harness,
 			})
 		},
 	}
@@ -99,6 +114,10 @@ A path may be anywhere, because naming it is the choice being made explicitly.`,
 		"display name for the surface (defaults to the target's directory name)")
 	cmd.Flags().BoolVar(&allowPATH, "allow-path-binary", false,
 		"accept a harness found by searching $PATH rather than named in config")
+	cmd.Flags().StringVar(&worktree, "worktree", "",
+		"start a worker on this branch in its own git worktree under <repo>/.claude/worktrees/<name> (herdr only; --name required)")
+	cmd.Flags().StringVar(&harness, "harness", "",
+		"run this harness instead of the one the directory's launch profile names (claude or codex)")
 
 	return cmd
 }
@@ -110,6 +129,8 @@ type surfaceLaunchOptions struct {
 	Backend     string
 	DisplayName string
 	AllowPATH   bool
+	Worktree    string
+	Harness     string
 }
 
 func firstArg(args []string) string {
@@ -129,6 +150,10 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	if opts.Backend == "" {
 		return WithExitCode(fmt.Errorf(
 			"--surface is required and has no default; pass --surface tmux"), 2)
+	}
+
+	if opts.Worktree != "" {
+		return runWorkerLaunch(cmd, deps, opts)
 	}
 
 	adapter, err := surfaceAdapterForWithWarnings(opts.Backend, cmd.ErrOrStderr())
@@ -154,13 +179,16 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 		return WithExitCode(termsafe.Error(err), 2)
 	}
 
-	built, err := launch.BuildInvocation(surfaceInvocationRequest(deps.Cfg.Launch, target, injected, unset))
+	built, err := launch.BuildInvocation(surfaceInvocationRequest(deps.Cfg.Launch, target, injected, unset, opts.Harness))
 	if err != nil {
 		return err
 	}
 
 	service := surface.NewService(adapter, surface.Policy{AllowPATHBinary: opts.AllowPATH}, "")
 
+	if opts.Backend == "herdr" {
+		built.Invocation.Env = markHerdrPane(built.Invocation.Env)
+	}
 	req := surface.NewLaunchRequest(displayNameFor(opts.DisplayName, target), built.Invocation)
 	req.Self = self
 
@@ -178,16 +206,90 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 
 const claudeCodeChildSessionEnv = "CLAUDE_CODE_CHILD_SESSION"
 
+// herdrPaneIdentityEnv are the variables herdr sets to name the pane a process
+// runs in. HERDR_SOCKET_PATH is not among them: it names the server, which the
+// launcher and the new pane share.
+var herdrPaneIdentityEnv = []string{"HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"}
+
+// maxPaneIdentityLen bounds a herdr id carried into a harness. herdr's ids are
+// short ("w83:p5"); anything longer is not one.
+const maxPaneIdentityLen = 64
+
+// herdrPaneMarkerEnv marks an invocation the herdr backend delivered. Only
+// then is the trampoline inside a pane herdr opened: a tmux or cmux pane can
+// carry stale HERDR_* values inherited from whatever started its server.
+const herdrPaneMarkerEnv = "FORGECTL_SURFACE_HERDR_PANE"
+
+// markHerdrPane adds the herdr marker to an invocation's environment.
+func markHerdrPane(env []string) []string {
+	return append(slices.Clone(env), herdrPaneMarkerEnv+"=1")
+}
+
+// paneIdentityEnv removes the herdr marker from env and, only when it was
+// there, appends the trampoline's own herdr pane identity.
+//
+// The trampoline runs inside the new pane, so getenv here answers with that
+// pane's ids, which herdr set when it opened it. Only these three keys cross,
+// only when env does not already name them, and only when the value has the
+// shape of a herdr id, so nothing else of the trampoline's environment reaches
+// the harness.
+func paneIdentityEnv(env []string, getenv func(string) string) []string {
+	marked := false
+	out := make([]string, 0, len(env)+len(herdrPaneIdentityEnv))
+	for _, e := range env {
+		if k, _, _ := strings.Cut(e, "="); k == herdrPaneMarkerEnv {
+			marked = true
+			continue
+		}
+		out = append(out, e)
+	}
+	if !marked {
+		return out
+	}
+	for _, key := range herdrPaneIdentityEnv {
+		value := getenv(key)
+		if !validPaneIdentity(value) || slices.ContainsFunc(env, func(e string) bool {
+			k, _, _ := strings.Cut(e, "=")
+			return k == key
+		}) {
+			continue
+		}
+		out = append(out, key+"="+value)
+	}
+	return out
+}
+
+func validPaneIdentity(v string) bool {
+	if v == "" || len(v) > maxPaneIdentityLen {
+		return false
+	}
+	for _, r := range v {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == ':', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // surfaceLaunchEnvironment removes the Claude marker that describes a child
 // process of the current session. A newly created surface is an independently
 // resumable workspace, so forwarding the marker would misclassify the harness
 // and silently disable its transcript. This policy belongs at the surface
 // boundary: ordinary in-place launches continue to inherit the marker.
+//
+// The herdr pane-identity variables go for the same reason. They name the pane
+// the LAUNCHER runs in, and the trampoline replaces the new pane's environment
+// with this one, so a worker started from a herdr pane would report its agent
+// state, and receive anything addressed to "its" pane, on the launcher's pane.
+// For a herdr launch, which marks its invocation (markHerdrPane), the
+// trampoline puts back the new pane's own values (paneIdentityEnv).
 func surfaceLaunchEnvironment(base []string) []string {
 	out := make([]string, 0, len(base))
 	for _, entry := range base {
 		key, _, _ := strings.Cut(entry, "=")
-		if key == claudeCodeChildSessionEnv {
+		if key == claudeCodeChildSessionEnv || slices.Contains(herdrPaneIdentityEnv, key) {
 			continue
 		}
 		out = append(out, entry)
@@ -204,21 +306,25 @@ func displayNameFor(explicit, target string) string {
 	return filepath.Base(target)
 }
 
-// surfaceInvocationRequest is the harness request `forgectl surface launch`
-// builds. The harness runs in a fresh terminal pane, so its stdout IS a
-// terminal, and StdoutTerminal says so explicitly (#816): the zero value
-// means "not a terminal", which lets `--output-format` alone select the print
-// posture (forgectl#795). With no args that choice never arises today, but a
-// later args field must not inherit a non-TTY default for a TTY pane.
-func surfaceInvocationRequest(cfg config.LaunchConfig, target string, injected map[string]string, unset []string) launch.InvocationRequest {
+// surfaceInvocationRequest is the one place a surface launch, ordinary or
+// worker, builds its invocation request, so an environment or resolver
+// change cannot reach one kind of surface and not the other.
+//
+// The harness runs in a fresh terminal pane, so its stdout IS a terminal,
+// and StdoutTerminal says so explicitly (#816): the zero value means "not a
+// terminal", which lets `--output-format` alone select the print posture
+// (forgectl#795). With no args that choice never arises today, but a later
+// args field must not inherit a non-TTY default for a TTY pane.
+func surfaceInvocationRequest(cfg config.LaunchConfig, cwd string, injected map[string]string, unset []string, harness string) launch.InvocationRequest {
 	return launch.InvocationRequest{
 		Config:         cfg,
-		CWD:            target,
+		CWD:            cwd,
 		Args:           nil,
 		BaseEnv:        surfaceLaunchEnvironment(os.Environ()),
 		InjectedEnv:    injected,
 		UnsetEnv:       unset,
 		Resolve:        launch.ResolveBinary,
+		Harness:        harness,
 		StdoutTerminal: true,
 	}
 }
