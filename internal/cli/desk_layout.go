@@ -71,6 +71,7 @@ func selfBinary() string {
 func newDeskLayoutCmd(deps module.Deps, dir *string) *cobra.Command {
 	var progress string
 	var width int
+	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "layout",
 		Short: "Split the herdr tab: this pane left, the desk right, CMD below it",
@@ -84,7 +85,11 @@ The desk pane runs forgectl desk --dir <the resolved desk directory>.
 
 It must run inside a herdr pane (HERDR_ENV=1, with HERDR_PANE_ID set).
 
-Exit codes: 0 laid out; 1 a herdr call failed (the panes made so far stay);
+--dry-run reads the tab's width and prints the plan (the splits and their
+ratios, the renames, and the command each pane would run) without changing
+anything.
+
+Exit codes: 0 laid out (or planned, with --dry-run); 1 a herdr call failed (the panes made so far stay);
 2 usage, or not in a herdr pane.`,
 		Example: `  forgectl desk layout --progress 'claude-desk progress' --width 70`,
 		Args:    cobra.NoArgs,
@@ -92,11 +97,12 @@ Exit codes: 0 laid out; 1 a herdr call failed (the panes made so far stay);
 			if width < deskLayoutMinWidth || width > deskLayoutMaxWidth {
 				return deskUsage("desk layout: --width must be between %d and %d", deskLayoutMinWidth, deskLayoutMaxWidth)
 			}
-			return runDeskLayout(cmd, deps, *dir, progress, width)
+			return runDeskLayout(cmd, deps, *dir, progress, width, dryRun)
 		},
 	}
 	cmd.Flags().StringVar(&progress, "progress", "", "a shell command to run in a pane below the desk")
 	cmd.Flags().IntVar(&width, "width", deskLayoutWidth, "about how many columns the desk's column gets")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the planned splits, renames and commands, and change nothing (it still reads the tab's width)")
 	return cmd
 }
 
@@ -108,7 +114,7 @@ func deskSplitRatio(total, want int) float64 {
 	return math.Round(r*100) / 100
 }
 
-func runDeskLayout(cmd *cobra.Command, deps module.Deps, dirFlag, progress string, width int) error {
+func runDeskLayout(cmd *cobra.Command, deps module.Deps, dirFlag, progress string, width int, dryRun bool) error {
 	if !deskSupported {
 		return errDeskUnsupported()
 	}
@@ -153,6 +159,10 @@ func runDeskLayout(cmd *cobra.Command, deps module.Deps, dirFlag, progress strin
 		return fmt.Errorf("desk layout: read the tab's width: %w", err)
 	}
 	ratio := deskSplitRatio(layout.Area.Width, width)
+	columns := int(math.Round(float64(layout.Area.Width) * (1 - ratio)))
+	if dryRun {
+		return printLayoutPlan(cmd, ratio, columns, layout.Area.Width, deskCommand, progress)
+	}
 	deskPane, err := herdr.PaneSplit(ctx, run, herdrPath, herdr.Split{Direction: herdr.SplitRight, Ratio: ratio, CWD: cwd})
 	if err != nil {
 		return fmt.Errorf("desk layout: split off the desk pane: %w", err)
@@ -195,7 +205,29 @@ func runDeskLayout(cmd *cobra.Command, deps module.Deps, dirFlag, progress strin
 		}
 		w.printf("%s=%s\n", p.label, id)
 	}
-	w.printf("columns=%d of %d\n", int(math.Round(float64(layout.Area.Width)*(1-ratio))), layout.Area.Width)
+	w.printf("columns=%d of %d\n", columns, layout.Area.Width)
+	return w.err
+}
+
+// printLayoutPlan is --dry-run: what the layout would do, one key=value line
+// per herdr call, and nothing changed. The commands are operator-built text,
+// so they are printed terminal-safe.
+func printLayoutPlan(cmd *cobra.Command, ratio float64, columns, total int, deskCommand, progress string) error {
+	w := &stickyWriter{w: cmd.OutOrStdout()}
+	w.printf("dry-run: no pane is split, renamed or started\n")
+	w.printf("split=desk from=current direction=right ratio=%.2f\n", ratio)
+	if progress != "" {
+		w.printf("split=progress from=desk direction=down ratio=%.2f\n", deskProgressRatio)
+	}
+	w.printf("rename=desk\n")
+	if progress != "" {
+		w.printf("rename=progress\n")
+	}
+	w.printf("run.desk=%s\n", safeText(deskCommand))
+	if progress != "" {
+		w.printf("run.progress=%s\n", safeText(progress))
+	}
+	w.printf("columns=%d of %d\n", columns, total)
 	return w.err
 }
 

@@ -8,12 +8,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -29,19 +31,37 @@ import (
 // stderr and the error (ExitCode(err) is the process exit code).
 func deskRun(t *testing.T, deps module.Deps, args ...string) (string, string, error) {
 	t.Helper()
+	var out, errOut bytes.Buffer
+	err := deskRunTo(t, deps, &out, &errOut, args...)
+	return out.String(), errOut.String(), err
+}
+
+// deskRunTo is deskRun with the writers given. It never lets a test reach a
+// real herdr: both runners must be fakes, and the herdr session variables a
+// test process may inherit from a herdr pane are blanked, so a layout test
+// that forgets its stub is refused rather than splitting a live tab.
+func deskRunTo(t *testing.T, deps module.Deps, out, errOut io.Writer, args ...string) error {
+	t.Helper()
 	if deps.Runner == nil {
 		deps.Runner = &exec.FakeRunner{}
 	}
 	if deps.SensitiveRunner == nil {
 		deps.SensitiveRunner = &exec.FakeSensitiveRunner{}
 	}
+	if _, ok := deps.Runner.(*exec.FakeRunner); !ok {
+		t.Fatalf("desk tests must use exec.FakeRunner, got %T", deps.Runner)
+	}
+	if _, ok := deps.SensitiveRunner.(*exec.FakeSensitiveRunner); !ok {
+		t.Fatalf("desk tests must use exec.FakeSensitiveRunner, got %T", deps.SensitiveRunner)
+	}
+	for _, k := range []string{"HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID"} {
+		t.Setenv(k, "")
+	}
 	cmd := newDeskCmd(deps)
-	var out, errOut bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&errOut)
+	cmd.SetOut(out)
+	cmd.SetErr(errOut)
 	cmd.SetArgs(args)
-	err := cmd.ExecuteContext(t.Context())
-	return out.String(), errOut.String(), err
+	return cmd.ExecuteContext(t.Context())
 }
 
 func deskDeps() module.Deps { return module.Deps{Theme: theme.Default()} }
@@ -427,6 +447,40 @@ func TestDeskWatch_SkippedAndMissing(t *testing.T) {
 	wantExit(t, err, deskExitUsage)
 	_, _, err = deskRun(t, deskDeps(), "watch", name, "--deadline", "-1")
 	wantExit(t, err, deskExitUsage)
+}
+
+// failAfter accepts n writes, then fails every write like a closed pipe.
+type failAfter struct{ n int }
+
+func (f *failAfter) Write(p []byte) (int, error) {
+	if f.n <= 0 {
+		return 0, syscall.EPIPE
+	}
+	f.n--
+	return len(p), nil
+}
+
+// A watch whose reader went away stops at once with 141, even though the run
+// it watches is still going, and names the resume point on stderr.
+func TestDeskWatch_StdoutClosedExits141(t *testing.T) {
+	fastWatch(t)
+	dir := newDeskDir(t)
+	name, sha := queueItem(t, "live.sh", "true\n")
+	run := startRun(t, openTestDesk(t, dir), name, sha, os.Getpid())
+	t.Cleanup(func() { _ = run.Finish(0, "ok") })
+
+	var errOut bytes.Buffer
+	done := make(chan error, 1)
+	go func() { done <- deskRunTo(t, deskDeps(), &failAfter{}, &errOut, "watch", name) }()
+	select {
+	case err := <-done:
+		wantExit(t, err, deskExitBrokenPipe)
+		if !strings.Contains(err.Error(), "resume with forgectl desk watch "+name+" --skip 0") {
+			t.Errorf("err = %v, want the resume point", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("watch kept running after stdout closed")
+	}
 }
 
 func TestDeskSkip(t *testing.T) {

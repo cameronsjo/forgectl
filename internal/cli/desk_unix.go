@@ -649,22 +649,37 @@ func runDeskWatch(cmd *cobra.Command, dirFlag, name string, deadline, skip int) 
 	defer d.Close() //nolint:errcheck // read side
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	watchCtx := ctx
+	watchCtx, stopWatch := context.WithCancel(ctx)
+	defer stopWatch()
 	if deadline > 0 {
 		var cancel context.CancelFunc
-		watchCtx, cancel = context.WithTimeout(ctx, time.Duration(deadline)*time.Second)
+		watchCtx, cancel = context.WithTimeout(watchCtx, time.Duration(deadline)*time.Second)
 		defer cancel()
 	}
 	w := &stickyWriter{w: cmd.OutOrStdout()}
 	var rc *int
+	printed := 0
 	emit := func(line string) {
+		if w.err != nil {
+			return
+		}
 		w.printf("%s\n", safeText(line))
+		if w.err != nil {
+			// Nobody is reading: stop now rather than watch a run for no one.
+			stopWatch()
+			return
+		}
+		printed++
 		if v, ok := runEndRC(line); ok {
 			rc = &v
 		}
 	}
 	state, seen, err := d.Watch(watchCtx, name, skip, deskWatchInterval, emit)
 	switch {
+	case w.err != nil:
+		// stdout is gone, so the resume point goes in the error, on stderr.
+		return WithExitCode(fmt.Errorf("desk watch: stdout closed (%w); resume with %s",
+			w.err, watchResume(name, skip+printed, deadline, dirFlag)), deskExitBrokenPipe)
 	case errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil:
 		w.printf("resume=%s\n", watchResume(name, seen, deadline, dirFlag))
 		return WithExitCode(fmt.Errorf("desk watch: %s did not finish within %ds", name, deadline), deskExitTempFail)

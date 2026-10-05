@@ -14,6 +14,7 @@ forgectl desk status 17-fix --json              # one item in detail, as JSON
 forgectl desk watch 17-fix --deadline 540       # stream its events; exit with the run's outcome
 forgectl desk skip 17-fix --reason "superseded" # skip a waiting item, or clear a lost run
 forgectl desk layout --progress 'CMD'           # herdr split: this pane left, the desk right, CMD below
+forgectl desk layout --dry-run                  # print the planned splits and commands; change nothing
 forgectl desk prune --days 30                   # delete done/ and skipped/ items older than 30 days
 ```
 
@@ -137,6 +138,7 @@ Prints the item's event lines as they arrive and exits when the run does. It rea
 | 2 | a usage error |
 | 75 | the deadline passed first; the last line is `resume=forgectl desk watch NAME --skip N` (plus `--deadline` and `--dir` when they were given) |
 | 130 | interrupted; the last line is the same `resume=` line |
+| 141 | stdout closed (a write failed, as when the monitor reading it went away); the watch stops at once, and the error on stderr names the `resume` command |
 
 ### `forgectl desk skip <name> --reason <text>`
 
@@ -152,8 +154,9 @@ Splits the current herdr tab around this pane: the desk on the right, about `--w
 - The desk pane runs `forgectl desk --dir <the resolved desk directory>`, shell-quoted. `CMD` is typed into the progress pane's shell as given, so quote it for a shell. Both must be one line.
 - Each pane is found again by its terminal id right before each call that names it, because herdr renumbers pane ids.
 - It prints `desk=<pane id>`, `progress=<pane id>`, and `columns=<n> of <tab width>`.
+- `--dry-run` reads the tab's width and prints the plan without changing anything: one `split=`, `rename=` and `run.<pane>=` line per call it would make, then `columns=`. Run it first to see what the layout will do.
 
-Exit codes: 0 laid out; 1 a herdr call failed, and the panes made so far stay; 2 a usage error, or not in a herdr pane.
+Exit codes: 0 laid out, or planned with `--dry-run`; 1 a herdr call failed, and the panes made so far stay; 2 a usage error, or not in a herdr pane.
 
 ### `forgectl desk prune`
 

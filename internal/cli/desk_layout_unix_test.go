@@ -203,6 +203,50 @@ func TestDeskLayout_WithoutProgressAndBadFlags(t *testing.T) {
 	}
 }
 
+// --dry-run reads the tab width and changes nothing.
+func TestDeskLayout_DryRunChangesNothing(t *testing.T) {
+	newDeskDir(t)
+	inHerdr(t, "w1:p0")
+	tab := &fakeHerdrTab{terminals: []string{"term_claude"}}
+	run := tab.sensitive()
+	reads := tab.runner(t)
+	deps := module.Deps{Theme: theme.Default(), Runner: reads, SensitiveRunner: run}
+	out, _, err := deskRun(t, deps, "layout", "--dry-run", "--dir", "/state/my desk", "--progress", "claude-desk progress")
+	wantExit(t, err, 0)
+	if n := len(run.Calls()); n != 0 {
+		t.Fatalf("--dry-run made %d mutating herdr calls", n)
+	}
+	for _, c := range reads.Calls {
+		if strings.Join(c.Args, " ") != "pane layout --current" {
+			t.Errorf("--dry-run ran herdr %v", c.Args)
+		}
+	}
+	want := `dry-run: no pane is split, renamed or started
+split=desk from=current direction=right ratio=0.62
+split=progress from=desk direction=down ratio=0.40
+rename=desk
+rename=progress
+run.desk=forgectl desk --dir '/state/my desk'
+run.progress=claude-desk progress
+columns=67 of 175
+`
+	if out != want {
+		t.Errorf("output =\n%s\nwant\n%s", out, want)
+	}
+}
+
+// The harness itself refuses a layout that reached for the real session:
+// without the stub, the blanked HERDR_* variables fail the session check.
+func TestDeskLayout_HarnessCannotReachARealHerdr(t *testing.T) {
+	newDeskDir(t)
+	run := &exec.FakeSensitiveRunner{}
+	_, _, err := deskRun(t, module.Deps{Theme: theme.Default(), SensitiveRunner: run}, "layout")
+	wantExit(t, err, deskExitUsage)
+	if len(run.Calls()) != 0 {
+		t.Error("an unstubbed layout reached herdr")
+	}
+}
+
 func TestDeskSplitRatio(t *testing.T) {
 	for _, tc := range []struct {
 		total, want int

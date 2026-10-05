@@ -37,6 +37,9 @@ const (
 	deskExitTempFail = 75
 	// deskExitInterrupted: `desk watch` was interrupted by a signal.
 	deskExitInterrupted = 130
+	// deskExitBrokenPipe: `desk watch` could not write to stdout (its reader
+	// went away), 128+SIGPIPE as a shell reports a process killed by it.
+	deskExitBrokenPipe = 141
 	// deskQuoteMax caps an argument quoted back in an error.
 	deskQuoteMax = 120
 )
@@ -284,6 +287,8 @@ Exit codes:
       resume=forgectl desk watch NAME --skip N ...
       which picks up after the N lines already printed
  130  interrupted
+ 141  stdout closed (a write failed); the watch stops at once and the
+      resume= command is in the error on stderr
 
 --skip N leaves out the first N event lines, the resume point a previous
 watch printed.`,
