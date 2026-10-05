@@ -65,7 +65,7 @@ func TestWaitReady(t *testing.T) {
 	t.Run("polls until the prompt shows", func(t *testing.T) {
 		l, calls := scriptedLoop([]func() (ready.Screen, error){screen("loading"), screen("loading"), screen("ready")}, byText, time.Minute)
 		r := waitReady(ctx, l)
-		if r.State != string(ready.StateReady) || *calls != 3 {
+		if r.State != ready.StateReady || *calls != 3 {
 			t.Fatalf("result %+v after %d reads, want ready after 3", r, *calls)
 		}
 		if r.WaitedMS != 2000 {
@@ -76,7 +76,7 @@ func TestWaitReady(t *testing.T) {
 	t.Run("a blocking screen ends the wait at once", func(t *testing.T) {
 		l, calls := scriptedLoop([]func() (ready.Screen, error){screen("dialog"), screen("ready")}, byText, time.Minute)
 		r := waitReady(ctx, l)
-		if r.State != string(ready.StateBlocked) || r.Blocking != "folder-trust dialog" || *calls != 1 {
+		if r.State != ready.StateBlocked || r.Blocking != "folder-trust dialog" || *calls != 1 {
 			t.Fatalf("result %+v after %d reads, want blocked on the first read", r, *calls)
 		}
 	})
@@ -84,7 +84,7 @@ func TestWaitReady(t *testing.T) {
 	t.Run("not ready at the timeout says so and why", func(t *testing.T) {
 		l, _ := scriptedLoop([]func() (ready.Screen, error){screen("loading")}, byText, 5*time.Second)
 		r := waitReady(ctx, l)
-		if r.State != string(ready.StateNotReady) || !strings.Contains(r.Reason, "not ready after 5s") ||
+		if r.State != ready.StateNotReady || !strings.Contains(r.Reason, "not ready after 5s") ||
 			!strings.Contains(r.Reason, "prompt is not visible") {
 			t.Fatalf("result %+v", r)
 		}
@@ -101,7 +101,7 @@ func TestWaitReady(t *testing.T) {
 	t.Run("an unreadable pane is retried, never read as gone", func(t *testing.T) {
 		unreadable := failRead(errors.Join(herdradapter.ErrScreenUnreadable, errors.New("protocol mismatch")))
 		l, calls := scriptedLoop([]func() (ready.Screen, error){unreadable, unreadable, screen("ready")}, byText, time.Minute)
-		if r := waitReady(ctx, l); r.State != string(ready.StateReady) || *calls != 3 {
+		if r := waitReady(ctx, l); r.State != ready.StateReady || *calls != 3 {
 			t.Fatalf("result %+v after %d reads, want ready after 3", r, *calls)
 		}
 	})
@@ -118,25 +118,31 @@ func TestWaitReady(t *testing.T) {
 		l, _ := scriptedLoop([]func() (ready.Screen, error){screen("loading")}, byText, time.Minute)
 		l.sleep = func(context.Context, time.Duration) error { return context.Canceled }
 		r := waitReady(ctx, l)
-		if r.State != string(ready.StateNotReady) || !strings.Contains(r.Reason, "canceled") {
+		if r.State != ready.StateNotReady || !strings.Contains(r.Reason, "canceled") {
 			t.Fatalf("result %+v", r)
 		}
 	})
 }
 
 func TestReportReadyExitCodes(t *testing.T) {
-	for _, state := range []string{string(ready.StateBlocked), string(ready.StateNotReady), readyStateGone, readyStateUnreadable} {
-		t.Run(state, func(t *testing.T) {
+	for _, state := range []ready.State{ready.StateBlocked, ready.StateNotReady, readyStateGone, readyStateUnreadable} {
+		t.Run(string(state), func(t *testing.T) {
 			cmd := newSurfaceReadyCmd(module.Deps{Runner: &exec.FakeRunner{}})
 			err := reportReady(cmd, readyResult{Name: "w", State: state, Reason: "why"}, true)
 			if code := ExitCode(err); code != 1 {
 				t.Fatalf("exit %d (%v), want 1", code, err)
 			}
+			// The JSON verdict on stdout is the whole answer; no second error
+			// object may follow on stderr (docs/json-contract.md).
+			var silent *silentCodedError
+			if !errors.As(err, &silent) {
+				t.Errorf("--json failure %T would print an error object to stderr", err)
+			}
 		})
 	}
 	t.Run("ready exits 0", func(t *testing.T) {
 		cmd := newSurfaceReadyCmd(module.Deps{Runner: &exec.FakeRunner{}})
-		if err := reportReady(cmd, readyResult{Name: "w", State: string(ready.StateReady)}, false); err != nil {
+		if err := reportReady(cmd, readyResult{Name: "w", State: ready.StateReady}, false); err != nil {
 			t.Fatalf("err = %v", err)
 		}
 	})

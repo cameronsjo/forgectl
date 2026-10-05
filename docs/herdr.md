@@ -51,3 +51,11 @@ HERDR_LIVE=1 go test ./internal/herdr/ -run TestLiveSession -v
 ```
 
 That test is read-only.
+
+## Worker readiness
+
+`internal/herdr/ready` decides whether a coordinator worker's harness is at its input prompt, for `forgectl surface ready`. It is a pure function of three inputs: the pane's visible text, the agent herdr detects in the pane, and herdr's `agent_status`. A harness is ready only when no blocking screen matches, herdr names the expected agent as `idle` or `done`, and the harness's own prompt pattern matches. herdr's status alone is a hint: it reports `blocked` at an idle prompt and `done` until someone views the pane.
+
+The predicates are TOML (`internal/herdr/ready/predicates.toml`), compiled into the binary and replaceable by `<config dir>/surface-ready.toml` (see [configuration.md](configuration.md)). Blocking patterns are broad, because a false match only makes the worker wait. Prompt patterns are strict, because a false match lets forgectl type into a dialog. The fixtures in `internal/herdr/ready/testdata` are live captures from Claude Code 2.1.289, Codex 0.160.0 and npm on herdr 0.9.1; rows the TOML marks `uncaptured` have no fixture yet.
+
+Reading the worker's pane is not this package's job. `internal/surface/herdradapter`'s `WorkerScreen` does it on the pinned server, through the sensitive runner (`herdr.screen-read` and `herdr.pane-status`), and only for a pane forgectl owns: the workspace must carry forgectl's ownership marker, the pane must be the root pane its create response named, and `pane get` must place that pane in that workspace. A workspace that is provably absent returns `ErrWorkerGone`; any other failure returns `ErrScreenUnreadable`, which is never a verdict about the worker.

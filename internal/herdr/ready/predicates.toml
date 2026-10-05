@@ -1,13 +1,21 @@
 # Readiness predicates for coordinator workers (`forgectl surface ready`).
 #
-# A harness is ready only when no blocking screen matches, herdr's agent
-# status agrees, and the harness's own input prompt is visible. A blocking
-# match is the safe direction (the worker waits), so blocking patterns are
-# broad. A prompt match is the risky direction (forgectl will type into the
-# pane), so prompt patterns are strict.
+# These guard against accidents, not a hostile worker. Everything they read
+# can be set from inside the worker's pane: its screen text, and herdr's agent
+# status (any pane can call `herdr pane report-agent`). A worker that wants
+# `ready` to say yes can make it say yes.
 #
-# Patterns are Go RE2 regexps matched against the pane's visible text. Every
-# pattern carries (?m) when it anchors on line starts or ends.
+# Patterns are Go RE2 regexps (linear time) matched against the pane's
+# visible text. A pattern carries (?m) when it anchors on line starts or ends.
+#
+# Order of evaluation, per harness:
+#   - prompt_first = true: an input prompt anchored at the bottom of the
+#     screen wins, because this harness draws every dialog in place of its
+#     input box. Text above the box is transcript, and blocking patterns would
+#     match a past message or a reply that merely mentions a dialog.
+#   - prompt_first = false: blocking patterns are checked over the whole
+#     screen first. Use it while the harness's dialogs are uncaptured: a false
+#     "blocked" only makes the coordinator wait.
 #
 # Screens marked "captured" come from Claude Code 2.1.289, Codex 0.160.0, and
 # npm on herdr 0.9.1 (testdata/). Screens marked "uncaptured" are written from
@@ -22,7 +30,7 @@ any = ['(?m)^Ok to proceed\? \(y\)']  # captured
 
 [[blocking]]
 name = "y/N prompt"
-any = ['(?mi)[\[(]y/n[\])]\s*:?\s*$']
+any = ['(?mi)[\[(]y/n[\])]\s*:?\s*\z']
 
 [[blocking]]
 name = "model loading"
@@ -34,11 +42,14 @@ any = ['(?i)\bselect (a )?version\b']  # uncaptured
 
 [harness.claude]
 agent = "claude"
-# The input box: a rule line, the `❯` line, a rule line. The bare `❯` of a
-# starship shell prompt has no rules around it, and a menu's `❯ 1.` is caught
-# as blocking first. Claude Code 2.1.289 puts a no-break space (U+00A0), not
-# a space, between `❯` and typed text.
-prompt = '(?m)^─{20,}\n❯(?:[ \x{00A0}](.*))?\n─{20,}$'
+prompt_first = true
+# The input box, then only footer lines to the bottom of the screen. A rule
+# line, `❯`, the input (continuation rows are indented two spaces), a rule
+# line, then up to 8 footer rows that are indented or empty. Claude Code
+# 2.1.289 puts a no-break space (U+00A0) between `❯` and typed text; past
+# messages in the transcript use a plain space. The bare `❯` of a starship
+# shell prompt has no rule lines around it.
+prompt = '(?m)^─{20,}\n❯(?:[ \x{00A0}](.*(?:\n  .*)*))?\n─{20,}(?:\n(?:  .*)?){0,8}\z'
 
 [[harness.claude.blocking]]
 name = "folder-trust dialog"
@@ -54,13 +65,23 @@ any = ['(?m)^\s*Do you want to (proceed|make this edit|create)', '(?m)^\s*Esc to
 
 [[harness.claude.blocking]]
 name = "selection menu"
-any = ['(?m)^\s*❯ \d+\. ']  # captured (every numbered menu: permission, plan approval)
+# Numbered menus (permission, plan approval), and the footer every Claude
+# dialog shares, so an unrecognized dialog is still named as one.
+any = ['(?m)^\s*❯ \d+\. ', '(?m)^\s*(?:Enter to confirm · )?Esc to cancel']  # captured
 
 [harness.codex]
 agent = "codex"
-# The composer line followed by the model/context footer.
-prompt = '(?m)^› (.*)\n\s+\S.*· Context \d+% left'
+prompt_first = false
+# The composer (continuation rows indented two spaces), an optional blank
+# row, the model/context footer, then up to 3 indented or empty rows.
+prompt = '(?m)^› (.*(?:\n  .*)*?)\n\n?  \S.*· Context \d+% left.*(?:\n(?:\s.*)?){0,3}\z'
+# An empty composer shows a placeholder. It is reported as no input.
+placeholder = '^Ask Codex to do anything$'  # captured; Codex rotates others, which read as typed input (the safe direction)
 
 [[harness.codex.blocking]]
 name = "approval prompt"
-any = ['(?i)would you like to run the following command', '(?i)\ballow command\b']  # uncaptured
+any = ['(?mi)^\s*would you like to run the following command', '(?mi)^\s*allow command\b']  # uncaptured
+
+[[harness.codex.blocking]]
+name = "selection menu"
+any = ['(?m)^\s*› \d+\. ']  # uncaptured; a typed "1. " in the composer also reads as blocked, the safe direction

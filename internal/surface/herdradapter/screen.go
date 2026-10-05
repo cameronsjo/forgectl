@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/herdr"
 	"github.com/cameronsjo/forgectl/internal/herdr/ready"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 )
@@ -80,14 +81,11 @@ func (a *Adapter) WorkerScreen(ctx context.Context, ref backend.Ref) (ready.Scre
 	return status, nil
 }
 
+// paneGetReply is `pane get`'s envelope around the shared herdr pane type, so
+// the adapter and internal/herdr decode one wire shape.
 type paneGetReply struct {
 	Result *struct {
-		Pane *struct {
-			PaneID      string  `json:"pane_id"`
-			WorkspaceID string  `json:"workspace_id"`
-			Agent       *string `json:"agent"`
-			AgentStatus string  `json:"agent_status"`
-		} `json:"pane"`
+		Pane *herdr.Pane `json:"pane"`
 	} `json:"result"`
 }
 
@@ -119,9 +117,5 @@ func (a *Adapter) paneStatus(ctx context.Context, pane, ws string) (ready.Screen
 		return ready.Screen{}, fmt.Errorf("%w: asked for pane %q in %q, herdr answered for %q in %q",
 			ErrScreenUnreadable, pane, ws, p.PaneID, p.WorkspaceID)
 	}
-	s := ready.Screen{Status: p.AgentStatus}
-	if p.Agent != nil {
-		s.Agent = *p.Agent
-	}
-	return s, nil
+	return ready.Screen{Agent: p.Agent, Status: p.AgentStatus}, nil
 }

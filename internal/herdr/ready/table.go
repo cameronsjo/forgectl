@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"regexp"
@@ -32,9 +33,11 @@ type Table struct {
 }
 
 type harness struct {
-	agent    string
-	prompt   *regexp.Regexp
-	blocking []screen
+	agent       string
+	prompt      *regexp.Regexp
+	promptFirst bool
+	placeholder *regexp.Regexp
+	blocking    []screen
 }
 
 type screen struct {
@@ -57,9 +60,11 @@ type fileScreen struct {
 }
 
 type fileHarness struct {
-	Agent    string       `toml:"agent"`
-	Prompt   string       `toml:"prompt"`
-	Blocking []fileScreen `toml:"blocking"`
+	Agent       string       `toml:"agent"`
+	Prompt      string       `toml:"prompt"`
+	PromptFirst bool         `toml:"prompt_first"`
+	Placeholder string       `toml:"placeholder"`
+	Blocking    []fileScreen `toml:"blocking"`
 }
 
 type fileTable struct {
@@ -97,9 +102,26 @@ func Load(path string) (*Table, error) {
 	if info.Size() > maxTableBytes {
 		return nil, fmt.Errorf("%w: %s is %d bytes, the limit is %d", ErrTable, path, info.Size(), maxTableBytes)
 	}
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path is forgectl's own config-dir override, Lstat-checked above as a regular, non-group-writable file
+	f, err := os.Open(path) //nolint:gosec // G304: path is forgectl's own config-dir override, Lstat-checked above as a regular, non-group-writable file
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s: %w", ErrTable, path, err)
+	}
+	defer func() { _ = f.Close() }() // read-only; a close error loses nothing
+	// The open follows symlinks, so prove it opened the file Lstat checked: a
+	// swap between the two would otherwise read whatever the link points at.
+	opened, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrTable, path, err)
+	}
+	if !os.SameFile(info, opened) {
+		return nil, fmt.Errorf("%w: %s changed between check and open", ErrTable, path)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxTableBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrTable, path, err)
+	}
+	if len(data) > maxTableBytes {
+		return nil, fmt.Errorf("%w: %s grew past %d bytes while being read", ErrTable, path, maxTableBytes)
 	}
 	t, err := Parse(data)
 	if err != nil {
@@ -155,7 +177,13 @@ func Parse(data []byte) (*Table, error) {
 		if err != nil {
 			return nil, err
 		}
-		t.harnesses[name] = harness{agent: fh.Agent, prompt: prompt, blocking: blocking}
+		h := harness{agent: fh.Agent, prompt: prompt, promptFirst: fh.PromptFirst, blocking: blocking}
+		if fh.Placeholder != "" {
+			if h.placeholder, err = regexp.Compile(fh.Placeholder); err != nil {
+				return nil, fmt.Errorf("%w: harness %q placeholder: %w", ErrTable, name, err)
+			}
+		}
+		t.harnesses[name] = h
 	}
 	return t, nil
 }

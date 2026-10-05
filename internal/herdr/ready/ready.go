@@ -7,9 +7,18 @@
 // showing, herdr names the expected agent as idle or done, and the harness's
 // own input prompt is visible. The decision is a pure function of its inputs;
 // reading the pane is the caller's job.
+//
+// This guards against accidents, not a hostile worker. All three signals can
+// be set from inside the worker's pane: the screen is whatever the pane draws,
+// and any pane can report its own herdr agent status. A caller that must not
+// be steered by the worker (a first brief, an approval) needs a channel the
+// worker cannot draw on.
 package ready
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Screen is one observation of a worker's pane.
 type Screen struct {
@@ -58,42 +67,76 @@ func (v Verdict) Ready() bool { return v.State == StateReady }
 // flips to idle when anyone views the pane.
 var statusReady = map[string]bool{"idle": true, "done": true}
 
+// Has reports whether the table has predicates for harness. A harness it
+// does not know can never become ready, so a caller checks this before
+// waiting rather than polling a fixed failure.
+func (t *Table) Has(harness string) bool {
+	_, ok := t.harnesses[harness]
+	return ok
+}
+
 // Evaluate decides readiness for harness from one screen.
 //
-// Order matters. Blocking screens are checked first, so a dialog drawn over a
-// prompt is never read as the prompt. herdr's status is checked before the
-// prompt pattern, so a disagreement is reported as such rather than hidden
-// behind a pattern match.
+// For a prompt_first harness, an input prompt anchored at the bottom of the
+// screen wins: that harness draws every dialog in place of its input box, so
+// text above the box is transcript and blocking patterns there would match a
+// past message. Otherwise blocking screens are checked first, over the whole
+// screen. Either way herdr's agent and status must agree before a visible
+// prompt counts, and a disagreement is reported rather than hidden.
 func (t *Table) Evaluate(harness string, s Screen) Verdict {
 	h, ok := t.harnesses[harness]
 	if !ok {
 		return Verdict{State: StateNotReady, Reason: fmt.Sprintf("no readiness predicates for harness %q", harness)}
 	}
+	input, prompted := h.matchPrompt(s.Text)
+	if !h.promptFirst || !prompted {
+		if b, ok := t.blockingFor(h, s.Text); ok {
+			return Verdict{State: StateBlocked, Blocking: b, Reason: "showing the " + b}
+		}
+	}
+	if !prompted {
+		return Verdict{State: StateNotReady, Reason: "the " + harness + " input prompt is not visible"}
+	}
+	if s.Agent != h.agent {
+		return Verdict{State: StateNotReady, Reason: fmt.Sprintf("the %s input prompt is visible, but herdr detects agent %q in the pane, want %q", harness, s.Agent, h.agent)}
+	}
+	if !statusReady[s.Status] {
+		return Verdict{State: StateNotReady, Reason: fmt.Sprintf("the %s input prompt is visible, but herdr reports agent status %q, want idle or done", harness, s.Status)}
+	}
+	return Verdict{State: StateReady, Input: input}
+}
+
+// blockingFor returns the first blocking screen that matches, the harness's
+// own before the shared ones.
+func (t *Table) blockingFor(h harness, text string) (string, bool) {
 	for _, b := range h.blocking {
-		if b.matches(s.Text) {
-			return Verdict{State: StateBlocked, Blocking: b.name, Reason: "showing the " + b.name}
+		if b.matches(text) {
+			return b.name, true
 		}
 	}
 	for _, b := range t.blocking {
-		if b.matches(s.Text) {
-			return Verdict{State: StateBlocked, Blocking: b.name, Reason: "showing the " + b.name}
+		if b.matches(text) {
+			return b.name, true
 		}
 	}
-	if s.Agent != h.agent {
-		return Verdict{State: StateNotReady, Reason: fmt.Sprintf("herdr detects agent %q in the pane, want %q", s.Agent, h.agent)}
+	return "", false
+}
+
+// matchPrompt finds the input prompt and returns what is typed in it. The
+// patterns anchor at the end of the screen, so there is at most one match.
+// Wrapped input rows are joined with single spaces, and a placeholder the
+// harness shows in an empty box reads as no input.
+func (h harness) matchPrompt(text string) (string, bool) {
+	m := h.prompt.FindStringSubmatch(text)
+	if m == nil {
+		return "", false
 	}
-	if !statusReady[s.Status] {
-		return Verdict{State: StateNotReady, Reason: fmt.Sprintf("herdr reports agent status %q, want idle or done", s.Status)}
+	if len(m) < 2 {
+		return "", true
 	}
-	m := h.prompt.FindAllStringSubmatch(s.Text, -1)
-	if len(m) == 0 {
-		return Verdict{State: StateNotReady, Reason: "the " + harness + " input prompt is not visible"}
+	input := strings.Join(strings.Fields(m[1]), " ")
+	if h.placeholder != nil && h.placeholder.MatchString(input) {
+		input = ""
 	}
-	// The last match is the live input box; earlier ones are scrollback.
-	last := m[len(m)-1]
-	input := ""
-	if len(last) > 1 {
-		input = last[1]
-	}
-	return Verdict{State: StateReady, Input: input}
+	return input, true
 }

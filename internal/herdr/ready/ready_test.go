@@ -66,10 +66,17 @@ func TestEvaluate_CapturedScreens(t *testing.T) {
 		{"npm-ok-to-proceed", "codex", StateBlocked, "npm install prompt", ""},
 		{"shell-idle", "claude", StateNotReady, "", ""},
 		{"shell-idle", "codex", StateNotReady, "", ""},
-		{"codex-ready", "codex", StateReady, "", "Ask Codex to do anything"},
+		// The placeholder in an empty composer is not input.
+		{"codex-ready", "codex", StateReady, "", ""},
 		{"codex-typed-unsent", "codex", StateReady, "", "Run exactly this shell command once and nothing else: mkdir -p /tmp/fxcap/codex-made"},
 		// The turn failed on a model error and Codex is back at its composer.
-		{"codex-model-error", "codex", StateReady, "", "Ask Codex to do anything"},
+		{"codex-model-error", "codex", StateReady, "", ""},
+		// Input that wraps inside the box is joined back into one line.
+		{"claude-typed-wrapped", "claude", StateReady, "", "1. Read the README first. This line is deliberately long so that it wraps inside the input box of the terminal user interface and continues onto a second visual row, and then onto a third row as well to be sure."},
+		{"codex-typed-wrapped", "codex", StateReady, "", "This codex composer line is deliberately long so that it wraps onto a second visual row inside the composer area of the codex terminal interface, and then a third. Adding more words here so that the composer definitely has to wrap to another row now."},
+		// A past message starting "1." is transcript, not a menu: the input
+		// box at the bottom of the screen wins for claude.
+		{"claude-idle-numbered-history", "claude", StateReady, "", ""},
 		// A claude screen is never a ready codex, and the reverse.
 		{"claude-ready-acceptedits", "codex", StateNotReady, "", ""},
 		{"codex-ready", "claude", StateNotReady, "", ""},
@@ -121,6 +128,31 @@ func TestEvaluate_DialogOverPromptIsBlocked(t *testing.T) {
 	s.Text += "\n Do you want to proceed?\n ❯ 1. Yes\n   2. No"
 	if v := tab.Evaluate("claude", s); v.State != StateBlocked {
 		t.Fatalf("verdict %+v, want blocked", v)
+	}
+}
+
+// TestEvaluate_TranscriptAboveThePromptIsNotADialog: a claude reply that
+// mentions a dialog's wording sits above the input box. The box at the
+// bottom wins; the words are transcript.
+func TestEvaluate_TranscriptAboveThePromptIsNotADialog(t *testing.T) {
+	tab := defaultTable(t)
+	s := fixture(t, "claude-idle-numbered-history")
+	box := strings.Index(s.Text, "\n─")
+	s.Text = s.Text[:box] + "\n  Do you want to proceed with option A? [y/N]\n  Esc to cancel · Tab to amend" + s.Text[box:]
+	if v := tab.Evaluate("claude", s); !v.Ready() {
+		t.Fatalf("verdict %+v, want ready", v)
+	}
+}
+
+// TestEvaluate_TextBelowThePromptIsNotFooter: the box must sit at the bottom
+// with only footer rows under it. Unindented text below means something is
+// drawn under the box, so the box is not the live input.
+func TestEvaluate_TextBelowThePromptIsNotFooter(t *testing.T) {
+	tab := defaultTable(t)
+	s := fixture(t, "claude-ready-acceptedits")
+	s.Text += "\nsomething drawn below the input box"
+	if v := tab.Evaluate("claude", s); v.Ready() {
+		t.Fatalf("verdict %+v, want not ready", v)
 	}
 }
 

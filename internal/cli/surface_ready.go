@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/herdr/ready"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/projects"
+	"github.com/cameronsjo/forgectl/internal/resume"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
@@ -30,20 +30,20 @@ const (
 // readyResult is what `surface ready --json` prints. Additive changes only
 // (ADR-0008 rule 2).
 type readyResult struct {
-	Name     string `json:"name"`
-	Harness  string `json:"harness"`
-	State    string `json:"state"`
-	Blocking string `json:"blocking,omitempty"`
-	Reason   string `json:"reason,omitempty"`
-	Input    string `json:"input,omitempty"`
-	WaitedMS int64  `json:"waited_ms"`
+	Name     string      `json:"name"`
+	Harness  string      `json:"harness"`
+	State    ready.State `json:"state"`
+	Blocking string      `json:"blocking,omitempty"`
+	Reason   string      `json:"reason,omitempty"`
+	Input    string      `json:"input,omitempty"`
+	WaitedMS int64       `json:"waited_ms"`
 }
 
 // readyStateGone and readyStateUnreadable extend ready.State for outcomes the
 // predicates never see: the workspace is gone, or herdr could not be read.
 const (
-	readyStateGone       = "gone"
-	readyStateUnreadable = "unreadable"
+	readyStateGone       ready.State = "gone"
+	readyStateUnreadable ready.State = "unreadable"
 )
 
 type readyOptions struct {
@@ -64,7 +64,8 @@ func newSurfaceReadyCmd(deps module.Deps) *cobra.Command {
 A worker counts as ready only when three signals agree: no known blocking
 screen is showing, herdr detects the expected agent as idle or done, and the
 harness's own input prompt is visible. herdr's status alone is a hint, never
-proof.
+proof. All three can be set from inside the worker's pane, so ready guards
+against accidents, not against a worker trying to look ready.
 
 ready never answers a dialog. A blocking screen (folder-trust dialog,
 plan-approval dialog, permission prompt, npm's "Ok to proceed?") ends the wait
@@ -75,6 +76,8 @@ Predicates are built in, and can be replaced by
 worktree.
 
 Exit 0: ready. Exit 1: blocked, gone, unreadable, or not ready by --timeout.
+Exit 2: a usage or setup error (no such worker, a ledger or predicate file
+that cannot be used, a harness with no predicates).
 
   forgectl surface ready fix-login
   forgectl surface ready fix-login --timeout 5m --json`,
@@ -118,7 +121,7 @@ func runSurfaceReady(cmd *cobra.Command, deps module.Deps, opts readyOptions) er
 	}
 	led, err := worker.Open(top, herdr.Session())
 	if err != nil {
-		return err
+		return WithExitCode(err, 2)
 	}
 	row, ref, err := launchedWorker(led, opts.Name)
 	if err != nil {
@@ -127,18 +130,25 @@ func runSurfaceReady(cmd *cobra.Command, deps module.Deps, opts readyOptions) er
 
 	path, err := config.SurfaceReadyPredicatesPath()
 	if err != nil {
-		return err
+		return WithExitCode(err, 2)
 	}
 	table, err := ready.Load(path)
 	if err != nil {
-		return termsafe.Error(err)
+		return WithExitCode(termsafe.Error(err), 2)
+	}
+	if !table.Has(row.Harness) {
+		return WithExitCode(fmt.Errorf("no readiness predicates for harness %q (built-in table, or %s)", row.Harness, path), 2)
 	}
 
+	// The deadline bounds the herdr calls too: a wedged server that accepts
+	// the socket and never answers must end as unreadable, not hang.
+	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
+	defer cancel()
 	res := waitReady(ctx, readyLoop{
 		read:     func(ctx context.Context) (ready.Screen, error) { return herdr.WorkerScreen(ctx, ref) },
 		evaluate: func(s ready.Screen) ready.Verdict { return table.Evaluate(row.Harness, s) },
 		now:      time.Now,
-		sleep:    sleepCtx,
+		sleep:    resume.SleepContext,
 		timeout:  opts.Timeout,
 		interval: opts.Interval,
 	})
@@ -199,7 +209,7 @@ func waitReady(ctx context.Context, l readyLoop) readyResult {
 			last = readyResult{State: readyStateUnreadable, Reason: termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen)}
 		default:
 			v := l.evaluate(s)
-			last = readyResult{State: string(v.State), Blocking: v.Blocking, Reason: v.Reason, Input: v.Input}
+			last = readyResult{State: v.State, Blocking: v.Blocking, Reason: v.Reason, Input: v.Input}
 			if v.State == ready.StateReady || v.State == ready.StateBlocked {
 				return finish(last, start, l.now())
 			}
@@ -220,39 +230,26 @@ func finish(r readyResult, start, end time.Time) readyResult {
 	return r
 }
 
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
-}
-
 // reportReady prints the result and returns exit 1 for anything but ready.
-// The input text comes from another pane's screen, so it is printed through
-// termsafe and only in JSON, where it is a quoted string.
+//
+// With --json the verdict on stdout is the whole answer, so a non-ready result
+// exits 1 with no second error object on stderr (docs/json-contract.md).
+// writeJSON escapes every string field for the terminal: the reason and input
+// can carry text from another pane's screen.
 func reportReady(cmd *cobra.Command, r readyResult, asJSON bool) error {
 	out := cmd.OutOrStdout()
 	if asJSON {
-		r.Input = termsafe.SafeLineMax(r.Input, 200)
-		// termsafe:allow-raw-json every string field passed through termsafe or is a fixed token
-		data, err := json.Marshal(r)
-		if err != nil {
+		if err := writeJSON(out, r); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(out, string(data)); err != nil {
-			return err
+		if r.State == ready.StateReady {
+			return nil
 		}
-	} else if r.State == string(ready.StateReady) {
-		if _, err := fmt.Fprintf(out, "%s: ready\n", r.Name); err != nil {
-			return err
-		}
+		return newSilentCodedError(1)
 	}
-	if r.State == string(ready.StateReady) {
-		return nil
+	if r.State == ready.StateReady {
+		_, err := fmt.Fprintf(out, "%s: ready\n", r.Name)
+		return err
 	}
 	return WithExitCode(fmt.Errorf("worker %s is %s: %s", r.Name, r.State, termsafe.SafeLineMax(r.Reason, 300)), 1)
 }
