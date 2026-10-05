@@ -237,6 +237,10 @@ func (d *Desk) BeginRun(name string, pid int, fields ...string) (run *Run, err e
 		return nil, undo(err)
 	}
 	ev, err := d.openEvents(name)
+	if errors.Is(err, fs.ErrExist) {
+		// Another run of this name wrote its events after the check above.
+		return nil, undo(fmt.Errorf("%w: done/ already holds events for %s", ErrRefused, describe(name)))
+	}
 	if err != nil {
 		return nil, undo(err)
 	}
@@ -286,14 +290,16 @@ func (r *Run) Finish(rc int, reason string, fields ...string) error {
 
 // Abandon ends a run that began but cannot go on because its name is taken
 // in done/ (the log already exists): the item moves to skipped/ with reason,
-// and nothing in done/ is touched, unlike Finish, which would append to that
-// log and rename over that record. The events file this run opened is left
-// with its RUN-START; watch reports the item skipped.
+// and nothing of another run's in done/ is touched, unlike Finish, which
+// would append to that log and rename over that record. The events file this
+// run created (exclusively, in BeginRun) is removed with its RUN-START, so
+// the done/ entries left are the other run's alone; watch reports the item
+// skipped.
 func (r *Run) Abandon(reason string) error {
 	d := r.d
-	_ = r.Events.Close()
+	discardErr := r.Events.discard(d, r.Name)
 	r.Meta.PID, r.Meta.PIDStart, r.Meta.SkipReason = 0, 0, reason
-	errs := []error{d.writeMeta(DirRunning, r.Name, r.Meta)}
+	errs := []error{discardErr, d.writeMeta(DirRunning, r.Name, r.Meta)}
 	if err := d.move(r.Name, r.Kind, DirRunning, DirSkipped); err != nil {
 		errs = append(errs, fmt.Errorf("desk: move %s to skipped/: %w", describe(r.Name), err))
 	} else if r.lock != nil {
@@ -368,68 +374,110 @@ func (d *Desk) Release(name, reason string) error {
 	return nil
 }
 
+// Who skipped an item, recorded in meta as skipped_by.
+const (
+	SkippedByDashboard = "dashboard"
+	SkippedByCLI       = "cli"
+)
+
 // Skip moves a pending item to skipped/ with reason. A lost running item
 // (owner dead, no RUN-END) may be skipped too, which is how a lost run leaves
 // running/; it is always recorded as SkipLost, whatever reason says, since a
 // run that began must never be re-armed. Skip takes the owner lock first and
-// refuses while a live owner holds it.
+// refuses while a live owner holds it. Skip is the dashboard's skip: it
+// records skipped_by "dashboard". `desk skip` uses [Desk.SkipNoted].
 func (d *Desk) Skip(name, reason string) error {
+	_, err := d.skip(name, reason, "", SkippedByDashboard)
+	return err
+}
+
+// SkipNoteMax caps a skip note.
+const SkipNoteMax = 200
+
+// SkipNoted is the CLI's skip: [Desk.Skip] with [SkipOperator], recording
+// skipped_by "cli". A pending item is recorded as operator, which
+// [Desk.Unskip] can re-arm, and a lost run as [SkipLost], which it cannot.
+// note, the one-line reason, is kept in meta as skip_note. It returns the
+// reason recorded.
+func (d *Desk) SkipNoted(name, note string) (string, error) {
+	if strings.ContainsAny(note, "\r\n") {
+		return "", errors.New("desk: a skip note must be one line")
+	}
+	if len([]rune(note)) > SkipNoteMax {
+		return "", fmt.Errorf("desk: a skip note must be at most %d characters", SkipNoteMax)
+	}
+	return d.skip(name, SkipOperator, note, SkippedByCLI)
+}
+
+// skip is Skip with a note and an actor; it returns the reason recorded.
+func (d *Desk) skip(name, reason, note, by string) (string, error) {
 	from := DirPending
 	var moved, staleMeta bool
 	var carried Meta
 	kind, err := d.findKind(DirPending, name)
 	if errors.Is(err, ErrNotFound) {
 		if kind, err = d.findKind(DirRunning, name); err != nil {
-			return err
+			return "", err
 		}
 		lock, held, err := d.tryLockOwnerSettled(name)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if held {
-			return fmt.Errorf("desk: %s is running (its owner holds the lock); only a lost run can be skipped", describe(name))
+			return "", fmt.Errorf("desk: %s is running (its owner holds the lock); only a lost run can be skipped", describe(name))
 		}
 		defer func() { lock.release(moved) }()
 		meta, ok, err := d.readMeta(DirRunning, name)
+		if errors.Is(err, ErrRefused) {
+			// An unreadable hash: judge it as a run with no owner recorded.
+			meta, ok, err = Meta{}, true, nil
+		}
 		if err != nil {
-			return err
+			return "", err
 		}
 		if !ok {
 			// A claim that died between its two renames: its meta is still
 			// in pending/. Carry it over and clear it from pending/.
 			if meta, staleMeta, err = d.readMeta(DirPending, name); err != nil {
-				return err
+				return "", err
 			}
 		}
 		if !d.lostUnlocked(name, meta) {
-			return fmt.Errorf("desk: %s is running; only a lost run can be skipped", describe(name))
+			return "", fmt.Errorf("desk: %s is running; only a lost run can be skipped", describe(name))
 		}
 		from, reason, carried = DirRunning, SkipLost, meta
 	} else if err != nil {
-		return err
+		return "", err
 	}
 	meta, _, err := d.readMeta(from, name)
+	if errors.Is(err, ErrRefused) {
+		// An unreadable hash must not keep the item from being skipped: the
+		// skipped meta starts fresh.
+		meta, err = Meta{}, nil
+	}
 	if err != nil {
-		return err
+		return "", err
 	}
 	if staleMeta {
 		meta = carried
 	}
-	meta.Kind, meta.SkipReason = kind, reason
+	now := d.now().UTC()
+	meta.Kind, meta.SkipReason, meta.SkipNote = kind, reason, note
+	meta.SkippedBy, meta.SkippedAt = by, &now
 	if err := d.writeMeta(from, name, meta); err != nil {
-		return err
+		return "", err
 	}
 	if err := d.move(name, kind, from, DirSkipped); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return ErrClaimed
+			return "", ErrClaimed
 		}
-		return fmt.Errorf("desk: skip %s: %w", describe(name), err)
+		return "", fmt.Errorf("desk: skip %s: %w", describe(name), err)
 	}
 	moved = from == DirRunning
 	if staleMeta {
 		_ = d.root.Remove(metaName(DirPending, name)) // carried over to skipped/ above
 	}
-	return nil
+	return reason, nil
 }
 
 // Unskip returns an operator-skipped item to pending/. An item skipped
@@ -446,7 +494,7 @@ func (d *Desk) Unskip(name string) error {
 	if meta.SkipReason != "" && meta.SkipReason != SkipOperator {
 		return fmt.Errorf("desk: %s was skipped (%s) and cannot be re-armed; queue a new item", describe(name), meta.SkipReason)
 	}
-	meta.SkipReason = ""
+	meta.SkipReason, meta.SkipNote, meta.SkippedBy, meta.SkippedAt = "", "", "", nil
 	if err := d.writeMeta(DirSkipped, name, meta); err != nil {
 		return err
 	}

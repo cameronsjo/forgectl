@@ -118,6 +118,10 @@ func (d *Desk) sight(name string, kind Kind, now time.Time) (it Item, gone bool,
 	}
 	sum := SHA256Hex(data)
 	meta, ok, err := d.readMeta(DirPending, name)
+	if errors.As(err, &r) {
+		it.State, it.Refusal = StateRefused, r.reason
+		return it, false, nil
+	}
 	if err != nil {
 		return it, false, err
 	}
@@ -238,7 +242,8 @@ func (d *Desk) doneItems(inRunning map[string]bool) ([]Item, error) {
 	var out []Item
 	for _, e := range entries {
 		name, found := strings.CutSuffix(e.Name(), extLog)
-		if !found || !ValidName(name) || inRunning[name] || !e.Type().IsRegular() {
+		legacy := found && legacyName(name)
+		if !found || (!ValidName(name) && !legacy) || inRunning[name] || !e.Type().IsRegular() {
 			continue
 		}
 		kind := KindScript
@@ -246,6 +251,7 @@ func (d *Desk) doneItems(inRunning map[string]bool) ([]Item, error) {
 			kind = KindBatch
 		}
 		it := newItem(name, kind, StateDone)
+		it.Legacy = legacy
 		it.Meta, _, _ = d.readMeta(DirDone, name)
 		if data, err := d.readRegular(path.Join(DirDone, name+kind.Ext()), maxItemBytes); err == nil {
 			it.Headers = ParseHeaders(data)

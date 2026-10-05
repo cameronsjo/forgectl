@@ -47,5 +47,6 @@ func allModules() []module.Manifest {
 		herdrModule,
 		auditModule,
 		statusModule,
+		deskModule,
 	}
 }

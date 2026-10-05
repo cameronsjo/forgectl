@@ -11,6 +11,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 // beforeLink runs between the name check and the link; tests plant a file
@@ -26,6 +28,9 @@ type Added struct {
 	Kind   Kind
 	SHA256 string
 	Path   string
+	// Warnings are a batch manifest's planner warnings (see Manifest.Lint),
+	// which do not stop it from being queued. nil for a script.
+	Warnings []string
 }
 
 // Add enqueues the file at src. The kind comes from its extension (.sh or
@@ -55,7 +60,7 @@ func (d *Desk) Add(src, what, why string, tty bool) (Added, error) {
 	if !stemRe.MatchString(stem) || strings.Contains(stem, "..") {
 		return Added{}, fmt.Errorf("desk: %q is not a usable item name (letters, digits, '.', '_', '-'; at most 64)", describe(stem))
 	}
-	data, err := readSource(src)
+	data, err := ReadSource(src)
 	if err != nil {
 		return Added{}, err
 	}
@@ -63,10 +68,13 @@ func (d *Desk) Add(src, what, why string, tty bool) (Added, error) {
 	if err != nil {
 		return Added{}, err
 	}
+	var warnings []string
 	if kind == KindBatch {
-		if _, err := LoadManifest(body, base); err != nil {
+		m, err := LoadManifest(body, base)
+		if err != nil {
 			return Added{}, err
 		}
+		warnings = m.Lint()
 	}
 	sum := SHA256Hex(body)
 	tmp, err := d.writeTemp(DirPending, "add", body)
@@ -97,18 +105,27 @@ func (d *Desk) Add(src, what, why string, tty bool) (Added, error) {
 		if err := d.writeMeta(DirPending, name, Meta{AddedAt: &now, SHA256: sum, Kind: kind}); err != nil {
 			return Added{}, err
 		}
-		return Added{Name: name, Kind: kind, SHA256: sum, Path: d.abs(path.Join(DirPending, name+kind.Ext()))}, nil
+		return Added{Name: name, Kind: kind, SHA256: sum, Path: d.abs(path.Join(DirPending, name+kind.Ext())), Warnings: warnings}, nil
 	}
 	return Added{}, errors.New("desk: no free item number; is something else writing pending/?")
 }
 
-// readSource reads the file Claude asked to enqueue, capped like an item.
-func readSource(src string) ([]byte, error) {
-	f, err := os.Open(src) //nolint:gosec // G304: reading the file the caller named is the operation
+// ReadSource reads the file Claude asked to enqueue, capped like an item.
+//
+// It refuses anything but a regular file, after opening it O_NONBLOCK so a
+// FIFO cannot hang the caller. A symlink is followed: the bytes are copied
+// and hashed, so where they came from does not matter.
+func ReadSource(src string) ([]byte, error) {
+	f, err := os.OpenFile(src, os.O_RDONLY|unix.O_NONBLOCK, 0) //nolint:gosec // G304: reading the file the caller named is the operation
 	if err != nil {
 		return nil, fmt.Errorf("desk: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // read-only
+	if fi, err := f.Stat(); err != nil {
+		return nil, fmt.Errorf("desk: stat %s: %w", describe(src), err)
+	} else if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %s is not a regular file", ErrRefused, describe(src))
+	}
 	data, err := io.ReadAll(io.LimitReader(f, maxItemBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("desk: read %s: %w", describe(src), err)

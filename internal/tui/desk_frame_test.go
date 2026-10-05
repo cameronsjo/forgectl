@@ -69,17 +69,17 @@ func busySnapshot() (*desk.Snapshot, DeskFrameOptions) {
 	merge := item("17-merge-feature-branch", desk.KindScript, desk.StateWaiting)
 	merge.Headers = desk.ParseHeaders([]byte(busyScript))
 	merge.Content = []byte(busyScript)
-	merge.Meta = desk.Meta{AddedAt: agoPtr(12 * time.Minute), SHA256: "aa"}
+	merge.Meta = desk.Meta{AddedAt: agoPtr(12 * time.Minute), SHA256: desk.SHA256Hex([]byte("merge"))}
 
 	tty := item("18-refresh-credentials", desk.KindScript, desk.StateWaiting)
 	tty.Content = []byte("#!/bin/bash\n# WHAT: Refresh the sudo ticket\n# WHY: The next step needs root\n# TTY: yes\nsudo -v\n")
 	tty.Headers = desk.ParseHeaders(tty.Content)
-	tty.Meta = desk.Meta{AddedAt: agoPtr(5 * time.Minute), SHA256: "bb"}
+	tty.Meta = desk.Meta{AddedAt: agoPtr(5 * time.Minute), SHA256: desk.SHA256Hex([]byte("tty"))}
 
 	stale := item("19-old-cleanup", desk.KindScript, desk.StateWaiting)
 	stale.Content = []byte("# WHAT: Clear old caches\n# WHY: Disk is filling\nrm -rf ./cache\n")
 	stale.Headers = desk.ParseHeaders(stale.Content)
-	stale.Meta = desk.Meta{AddedAt: agoPtr(30 * time.Hour), SHA256: "cc"}
+	stale.Meta = desk.Meta{AddedAt: agoPtr(30 * time.Hour), SHA256: desk.SHA256Hex([]byte("stale"))}
 	stale.Stale = true
 
 	batch := item("16-nightly-batch", desk.KindBatch, desk.StateRunning)
@@ -330,6 +330,23 @@ func TestDeskFrame_FocusShowsBatchStepsInWaveOrder(t *testing.T) {
 	short := ansi.Strip(deskFrame{snap: snap, width: 120, now: deskNow, opts: opts, cursor: cursor}.render())
 	if !strings.Contains(short, "… 4 more steps · v to view") || strings.Contains(short, "┆ 5 ◌ publish") {
 		t.Errorf("short focus should list three steps and count the rest:\n%s", short)
+	}
+}
+
+// The focus panel shows the selected item's short hash, the one `desk add`
+// prints and the agent reports, so the operator can match the two. A hash
+// that is not 64 hex characters is never drawn.
+func TestDeskFrame_FocusShowsTheHashPrefix(t *testing.T) {
+	snap, opts := busySnapshot()
+	sha := snap.Pending[0].Meta.SHA256
+	out := ansi.Strip(RenderDeskFrame(snap, 120, 40, deskNow, opts))
+	if !strings.Contains(out, snap.Pending[0].Name[3:]+" · sha256 "+sha[:12]+" · unchanged since queued") {
+		t.Errorf("the focus head lacks the hash prefix %s:\n%s", sha[:12], out)
+	}
+	snap.Pending[0].Meta.SHA256 = "\x1b]0;PWNED\a" + sha[:50]
+	out = RenderDeskFrame(snap, 120, 40, deskNow, opts)
+	if strings.Contains(out, "PWNED") || strings.Contains(ansi.Strip(out), "sha256 ") {
+		t.Errorf("a malformed hash was drawn:\n%s", out)
 	}
 }
 

@@ -102,6 +102,7 @@ func RunDesk(ctx context.Context, d *desk.Desk, opts DeskOptions) error {
 type target struct {
 	name, sha string
 	lost      bool
+	tty       bool // runs in this pane (y only; a never includes one)
 }
 
 // confirmKind is what a pending y/n prompt will do.
@@ -527,9 +528,15 @@ func (m deskModel) run() (tea.Model, tea.Cmd) {
 		m.message = st.Warn.Render(safeMessage(itemLabel(r.item.Name) + " is " + rowLabel(r.kind) + "; only a waiting item runs"))
 		return m, nil
 	}
+	// One key, as the old desk had: the focus panel's short hash is what the
+	// operator matches to the agent's report. a, which runs many, confirms.
 	m.busy = true
-	t := target{name: r.item.Name, sha: r.item.Meta.SHA256}
-	if r.item.TTY {
+	return m.start(target{name: r.item.Name, sha: r.item.Meta.SHA256, tty: r.item.TTY})
+}
+
+// start runs one confirmed item at the hash that was on screen.
+func (m deskModel) start(t target) (tea.Model, tea.Cmd) {
+	if t.tty {
 		m.message = ""
 		return m, m.startTTY(t)
 	}
@@ -565,7 +572,7 @@ func (m deskModel) askSkip() (tea.Model, tea.Cmd) {
 		m.message = m.styles().Warn.Render(safeMessage(itemLabel(r.item.Name) + " is " + rowLabel(r.kind) + "; there is nothing to skip"))
 		return m, nil
 	}
-	m.confirm, m.targets = confirmSkip, []target{{r.item.Name, r.item.Meta.SHA256, r.kind == rowLost}}
+	m.confirm, m.targets = confirmSkip, []target{{name: r.item.Name, sha: r.item.Meta.SHA256, lost: r.kind == rowLost}}
 	return m, nil
 }
 
@@ -820,6 +827,29 @@ func (m deskModel) View() tea.View {
 	return v
 }
 
+// frameWidth is the width the frame is drawn at.
+func (m deskModel) frameWidth() int {
+	if m.width <= 0 {
+		return 80
+	}
+	return max(m.width, 40)
+}
+
+// hashLines renders a full sha256 for the a prompt: "sha256 <64 hex>"
+// on one line when it fits, else wrapped in two halves, so the whole hash is
+// always on screen. A hash that is not 64 hex characters is never drawn.
+func hashLines(st theme.Styles, sha string, width int) []string {
+	if !desk.ValidSHA256(sha) {
+		return []string{"    " + st.Danger.Render("no valid hash recorded")}
+	}
+	const label = "    sha256 "
+	if len(label)+len(sha) <= width {
+		return []string{st.Muted.Render(label) + st.Fg.Render(sha)}
+	}
+	pad := strings.Repeat(" ", len(label))
+	return []string{st.Muted.Render(label) + st.Fg.Render(sha[:32]), pad + st.Fg.Render(sha[32:])}
+}
+
 // footer is the prompt, or the last result; "" leaves the key hints.
 func (m deskModel) footer() string {
 	st := m.styles()
@@ -827,12 +857,12 @@ func (m deskModel) footer() string {
 	case confirmSkip:
 		return " " + st.Warn.Render("skip "+itemLabel(m.targets[0].name)+"?") + st.Muted.Render("  y skip · any other key cancels")
 	case confirmAll:
-		names := make([]string, len(m.targets))
-		for i, t := range m.targets {
-			names[i] = itemLabel(t.name)
+		lines := []string{" " + st.Warn.Render(fmt.Sprintf("run these %d?", len(m.targets))) + st.Muted.Render("  y run · any other key cancels")}
+		for _, t := range m.targets {
+			lines = append(lines, "  "+st.Fg.Render(itemLabel(t.name)))
+			lines = append(lines, hashLines(st, t.sha, m.frameWidth())...)
 		}
-		return " " + st.Warn.Render(fmt.Sprintf("run %d: %s?", len(m.targets), strings.Join(names, ", "))) +
-			st.Muted.Render("  y run · any other key cancels")
+		return strings.Join(lines, "\n")
 	}
 	if m.message != "" {
 		return " " + m.message

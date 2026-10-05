@@ -44,7 +44,7 @@ func (d *Desk) Prune(days int) (int, error) {
 		groups := map[string][]fs.DirEntry{}
 		var order []string
 		for _, e := range entries {
-			name, ok := protocolEntry(e)
+			name, ok := protocolEntry(e, sub == DirDone)
 			if !ok || live[name] {
 				continue
 			}
@@ -82,15 +82,16 @@ func (d *Desk) Prune(days int) (int, error) {
 }
 
 // protocolEntry returns the item name an entry belongs to, or ok=false for
-// anything that is not a protocol entry.
-func protocolEntry(e fs.DirEntry) (string, bool) {
+// anything that is not a protocol entry. In done/ (legacy true) an old log's
+// display-only name counts too, so prune clears what history shows.
+func protocolEntry(e fs.DirEntry, legacy bool) (string, bool) {
 	t := e.Type()
 	if strings.HasPrefix(e.Name(), ".") || t&fs.ModeSymlink != 0 {
 		return "", false
 	}
 	for _, suffix := range protocolSuffixes {
 		name, found := strings.CutSuffix(e.Name(), suffix)
-		if !found || !ValidName(name) {
+		if !found || (!ValidName(name) && (!legacy || !legacyName(name))) {
 			continue
 		}
 		if (suffix == extBatchDir) != t.IsDir() || (!t.IsDir() && !t.IsRegular()) {

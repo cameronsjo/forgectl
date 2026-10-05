@@ -3,6 +3,7 @@
 package desk
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,30 @@ func (d *Desk) BatchStatus(name string) ([]StepStatus, error) {
 		return nil, err
 	}
 	return ParseStatusTSV(data), nil
+}
+
+// ReadSummary reads a finished batch's done/<name>.d/summary.json. A batch
+// that has not finished has none: that is ErrNotFound.
+func (d *Desk) ReadSummary(name string) (*Summary, error) {
+	if !ValidName(name) {
+		return nil, fmt.Errorf("desk: %q is not an item name (NN-name)", describe(name))
+	}
+	data, err := d.readCapped(path.Join(DirDone, name+extBatchDir, "summary.json"), maxMetaBytes)
+	if err != nil {
+		return nil, err
+	}
+	var s Summary
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, fmt.Errorf("desk: read summary for %s: %w", describe(name), err)
+	}
+	// Step ids are printed by `desk status`; one that is not a manifest step
+	// id is not something the runner wrote.
+	for _, st := range s.Steps {
+		if !stepIDRe.MatchString(st.ID) {
+			return nil, fmt.Errorf("%w: the summary for %s names a step %q that is not a step id", ErrRefused, describe(name), describe(st.ID))
+		}
+	}
+	return &s, nil
 }
 
 // Record returns the bytes of an item that is no longer pending: running/ is

@@ -30,6 +30,9 @@ const KindHerdrCleanup CommandKind
 const KindHerdrCreate CommandKind
 const KindHerdrNotify CommandKind
 const KindHerdrPaneInspect CommandKind
+const KindHerdrPaneRename CommandKind
+const KindHerdrPaneRun CommandKind
+const KindHerdrPaneSplit CommandKind
 const KindHerdrPaneStatus CommandKind
 const KindHerdrProbe CommandKind
 const KindHerdrReadiness CommandKind

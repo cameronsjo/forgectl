@@ -15,7 +15,7 @@ desk ● · forgectl 0.0.0-test · host-a · ~/.local/state/forgectl/desk       
 │   ! changed  13 rotate-keys                         ░░░░░░░░░░░░░░░░  changed                                        │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ focus ───────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ 17 merge-feature-branch · unchanged since queued 12m ago                                                             │
+│ 17 merge-feature-branch · sha256 283128acef14 · unchanged since queued 12m ago                                       │
 │ what  Merge the feature branch once checks pass                                                                      │
 │ why   The review is done; merges are yours                                                                           │
 │ ┆ set -euo pipefail                                                                                                  │

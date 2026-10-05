@@ -116,6 +116,12 @@ const (
 	// title and body are item names and WHAT text, which is why it routes
 	// through this seam rather than the argv-logging Runner.
 	KindHerdrNotify
+	// KindHerdrPaneSplit, KindHerdrPaneRename and KindHerdrPaneRun build the desk
+	// layout. pane run types an operator-built command into a pane, and a
+	// split carries a cwd, so these stay off the argv-logging Runner too.
+	KindHerdrPaneSplit
+	KindHerdrPaneRename
+	KindHerdrPaneRun
 	// KindHerdrScreenRead and KindHerdrPaneStatus are `surface ready`'s two
 	// reads of a worker's root pane: its visible text and herdr's agent status.
 	KindHerdrScreenRead
@@ -166,6 +172,9 @@ var kindNames = [kindCount]string{
 	KindHerdrPaneInspect: "herdr.pane-inspect",
 	KindHerdrBootstrap:   "herdr.bootstrap",
 	KindHerdrNotify:      "herdr.notification-show",
+	KindHerdrPaneSplit:   "herdr.pane-split",
+	KindHerdrPaneRename:  "herdr.pane-rename",
+	KindHerdrPaneRun:     "herdr.pane-run",
 	KindHerdrScreenRead:  "herdr.screen-read",
 	KindHerdrPaneStatus:  "herdr.pane-status",
 

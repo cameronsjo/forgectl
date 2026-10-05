@@ -38,6 +38,7 @@ deep-dive get a link here.
 | `resume` | Get back into a Claude Code session after a terminal restart | [resume](docs/commands/resume.md) |
 | `surface` | Start a harness inside a terminal manager (tmux/cmux/herdr) without exposing its invocation | Usage below |
 | `herdr` | Helpers for the herdr terminal multiplexer: group tabs into workspaces by rule | [herdr](docs/commands/herdr.md) |
+| `desk` | Operator queue: scripts Claude stages, you approve and run from a dashboard, each checked against the hash it was queued with | [desk](docs/commands/desk.md) |
 | `tasks` | Browse a Vikunja task board, close a task, or serve the board as an MCP server | Usage below |
 | `recipe` | Run small built-in workbench recipes (alias: `r`) | [recipe](docs/commands/recipe.md) |
 | `workflow` | Run declarative workflows composing forgectl's other verbs (alias: `flow`) | Usage below |
@@ -294,6 +295,13 @@ forgectl theme preview                   # render each role so you can see it
 forgectl herdr organize                  # report how tabs would be grouped into workspaces and ordered
 forgectl herdr organize --explain        # also show which rule caught each tab
 forgectl herdr organize --apply          # make the moves; restores focus; needs the cameronsjo/herdr fork
+
+# desk — an operator queue for scripts Claude stages but will not run (Unix only)
+forgectl desk                            # the dashboard: y run, s skip, v view, l log, q quit
+forgectl desk add ./fix.sh --what "..." --why "..."   # queue an item; prints name= and sha256=
+forgectl desk watch 17-fix --deadline 540  # stream its events; exit 0/1 with the run, 75 at the deadline
+forgectl desk status --json              # the queue as JSON
+forgectl desk layout --progress 'CMD'    # herdr split: this pane left, the desk right, CMD below it
 
 # tasks — Vikunja task board: three read verbs over a local cache, one verb that closes a task, and an MCP server
 # one-time setup: store a READ-ONLY API token in the login keychain (prompts for the value)

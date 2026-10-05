@@ -177,6 +177,48 @@ func TestDesk_YRunsTheSelectedItemDetached(t *testing.T) {
 	}
 }
 
+// a, which runs several items at once, asks first and lists each with its
+// full sha256; at a narrow width each hash wraps but stays whole.
+func TestDesk_AConfirmsWithFullHashes(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-alpha.sh", plainScript("alpha"))
+	h.drop("02-beta.sh", plainScript("beta"))
+	h.scan()
+	var shas []string
+	for _, r := range h.m.rows {
+		if !desk.ValidSHA256(r.item.Meta.SHA256) {
+			t.Fatalf("no hash on %s: %q", r.item.Name, r.item.Meta.SHA256)
+		}
+		shas = append(shas, r.item.Meta.SHA256)
+	}
+	for _, width := range []int{120, 50} {
+		h.m.width = width
+		h.press("a")
+		prompt := ansi.Strip(h.m.footer())
+		flat := strings.NewReplacer(" ", "", "\n", "").Replace(prompt)
+		for _, sha := range shas {
+			if !strings.Contains(flat, sha) {
+				t.Errorf("width %d: the a prompt lacks the full hash %s: %q", width, sha, prompt)
+			}
+		}
+		h.press("n")
+	}
+	if len(h.backend.launched) != 0 {
+		t.Errorf("a declined a ran %v", h.backend.launched)
+	}
+}
+
+// y runs at once, with one key: the focus panel's short hash is the check.
+func TestDesk_YRunsWithOneKey(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-alpha.sh", plainScript("alpha"))
+	h.scan()
+	h.press("y")
+	if h.m.confirm != confirmNone || !slices.Equal(h.backend.launched, []string{"01-alpha"}) {
+		t.Fatalf("y did not run at once: confirm %v launched %v", h.m.confirm, h.backend.launched)
+	}
+}
+
 func TestDesk_YRefusesAnItemThatChangedSinceItWasShown(t *testing.T) {
 	h := newDeskHarness(t)
 	h.drop("01-alpha.sh", plainScript("alpha"))
@@ -248,7 +290,8 @@ func TestDesk_ARunsExactlyWhatWasOnScreen(t *testing.T) {
 
 	h.press("a")
 	prompt := ansi.Strip(h.m.footer())
-	if h.m.confirm != confirmAll || !strings.Contains(prompt, "run 3: 01 alpha, 03 gamma, 04 delta?") {
+	if h.m.confirm != confirmAll || !strings.Contains(prompt, "run these 3?") ||
+		!strings.Contains(prompt, "01 alpha") || strings.Contains(prompt, "02 console") || !strings.Contains(prompt, "04 delta") {
 		t.Fatalf("a should ask about exactly the three non-TTY items; footer = %q", prompt)
 	}
 

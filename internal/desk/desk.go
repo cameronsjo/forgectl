@@ -142,12 +142,29 @@ func kindOfFile(file string) (name string, kind Kind, ok bool) {
 
 var (
 	nameRe = regexp.MustCompile(`^[0-9]+-[A-Za-z0-9][A-Za-z0-9._-]{0,95}$`)
-	stemRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	// legacyNameRe is the display-only shape of an old done/ log's name:
+	// "37b-cleanup" or "operator-grow", with no NN- number.
+	legacyNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$`)
+	stemRe       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 )
+
+var sha256Re = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// ValidSHA256 reports whether s is a full sha256 as the desk writes it: 64
+// lowercase hex characters. A meta file is untrusted input; a hash of any
+// other shape is never shown or compared.
+func ValidSHA256(s string) bool { return sha256Re.MatchString(s) }
 
 // ValidName reports whether name is a protocol item name: "NN-stem".
 func ValidName(name string) bool {
 	return nameRe.MatchString(name) && !strings.Contains(name, "..")
+}
+
+// legacyName reports a done/ log name that is not a protocol name but is
+// safe to show and to prune: letters, digits, '.', '_', '-', no "..".
+// Display only: nothing runs, skips, claims or watches it.
+func legacyName(name string) bool {
+	return !ValidName(name) && legacyNameRe.MatchString(name) && !strings.Contains(name, "..")
 }
 
 // SplitName returns an item name's number and stem: "17-merge" -> 17, "merge".
@@ -280,8 +297,17 @@ type Meta struct {
 	SHA256     string     `json:"sha256,omitempty"`
 	Kind       Kind       `json:"kind,omitempty"`
 	SkipReason string     `json:"skip_reason,omitempty"`
-	StartedAt  *time.Time `json:"started_at,omitempty"`
-	EndedAt    *time.Time `json:"ended_at,omitempty"`
+	// SkipNote is the operator's own one-line reason, from `desk skip
+	// --reason`. Untrusted text: render it through termsafe.
+	SkipNote string `json:"skip_note,omitempty"`
+	// SkippedBy is who skipped the item: "dashboard" or "cli" (see
+	// SkippedByDashboard). Empty for a skip the desk made itself (changed,
+	// refused, name-reused) and for skips before the field existed.
+	SkippedBy string `json:"skipped_by,omitempty"`
+	// SkippedAt is when a dashboard or CLI skip happened (UTC).
+	SkippedAt *time.Time `json:"skipped_at,omitempty"`
+	StartedAt *time.Time `json:"started_at,omitempty"`
+	EndedAt   *time.Time `json:"ended_at,omitempty"`
 	// ExitCode is the run's rc, recorded at Finish. It outranks the log's
 	// EXIT= line, which a leftover process could append to after the run.
 	ExitCode *int `json:"exit_code,omitempty"`
@@ -320,6 +346,10 @@ type Item struct {
 	Content []byte
 	// Stale is set on a waiting item older than [StaleAfter].
 	Stale bool
+	// Legacy marks a done item whose name is not a protocol name (no NN-
+	// number): an old log kept for history. It is shown and pruned, never
+	// acted on; every action path checks [ValidName] and refuses it.
+	Legacy bool
 	// Refusal says why a refused item cannot run.
 	Refusal string
 	// ExitCode is a done item's rc: from meta, or for a legacy item the log's
