@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "Task 5: jsonl, summary and desk run sources"
+next: "Task 6: dashboard TUI layout, flow and panes"
 branch: feat/desk-dashboard
 pr: "—"
 updated: 2026-10-05
@@ -514,27 +514,27 @@ func NewDeskSource(d *desk.Desk) Source
 
 **Steps:**
 
-- [ ] `tail_unix.go`:
+- [x] `tail_unix.go`:
   - open through `os.OpenRoot`;
   - walk each component with `Lstat` and reject any symlink;
   - incremental reads from the cursor;
   - the caps from Global Constraints;
   - a partial last line is held;
   - dev/ino change or a shrink sets `Reset`.
-- [ ] jsonl source:
+- [x] jsonl source:
   - list run dirs, rejecting symlinked dirs and bad names (at most 500);
   - parse with `UseNumber`;
   - apply the field rules, then `SafeLineMax`;
   - sum the metrics;
   - set `Seq` by line order.
-- [ ] Summary source: the name is the `*` capture. A matching run dir gets `HasSummary`. A summary with no run dir is a `summary` run.
-- [ ] Desk source:
+- [x] Summary source: the name is the `*` capture. A matching run dir gets `HasSummary`. A summary with no run dir is a `summary` run.
+- [x] Desk source:
   - `Scan` → `Items`;
   - batch `Defs` from `Manifest` (`After` → edges);
   - events from `Watcher.Poll` → `ParseEvent`;
   - durations from `STEP-END dur=` / `BatchStatus`;
   - a script is a one-step run.
-- [ ] Tests:
+- [x] Tests:
   - `termsafetest.Hostile` fixtures leave no ESC or C0/C1 in any `Delta` string, including `Items`;
   - a symlinked intermediate dir pointing at a fixture secret JSON yields nothing;
   - a symlinked log is refused;
@@ -545,8 +545,8 @@ func NewDeskSource(d *desk.Desk) Source
   - a 2^60 integer is exact;
   - a `*.summary.json` stem joins its run;
   - a desk batch in `t.TempDir()` gives the right DAG and states.
-- [ ] Before committing, run `git ls-remote origin refs/heads/feat/desk-core`. If it differs from `D`, record it as a `## Deviations` line for the merging machine and continue on `D`.
-- [ ] Commit `feat(runview): jsonl, summary and desk run sources`.
+- [x] Before committing, run `git ls-remote origin refs/heads/feat/desk-core`. If it differs from `D`, record it as a `## Deviations` line for the merging machine and continue on `D`.
+- [x] Commit `feat(runview): jsonl, summary and desk run sources`.
 
 ### Task 6 — Dashboard TUI, part 1: layout, flow, panes
 
@@ -737,6 +737,15 @@ func NewDeskSource(d *desk.Desk) Source
   - **The `_supervise` comment (I7) was rewritten in Task 4,** since that file was already open. Task 8 still re-parents the command.
   - **M8 has no test.** It cannot be exercised on darwin; `GOOS=linux go vet` compiles it.
   - **The package's tests run with a scratch `HOME` and `TMPDIR`** (`TestMain`).
+- **Task 5 shipped as `3f8ab0c`.** Choices beyond the plan text:
+  - **The no-symlink rule opens each component with `O_NOFOLLOW` from the previous descriptor** (`O_DIRECTORY` for dirs, `fstat` on the leaf) instead of `Lstat` then open, so there is no window between check and open. `os.OpenRoot` still opens the root.
+  - **`NewDeskSource` has no non-unix stub,** because `desk.Desk` exists only on unix and every caller is unix-only.
+  - **`[log] show` is applied by the renderer (Task 6), not at ingest.** Every kept field stays, in file order.
+  - **Desk events carry no time.** Step times come from a new `Delta.Timing` (`BatchStatus`, else `STEP-END dur=`, else the item's start and end).
+  - **`STEP-END` with a non-zero rc is renamed `STEP-FAIL`,** since `Fold` maps actions by event name only.
+  - **Additions:** `Cursor.Metrics` and `Cursor.Summary` (per-file position and identity), `Delta.DroppedFields` (values, apart from `Dropped` lines), `Delta.Live`, `Delta.Timing`, `QueueItem.Refusal` (why an item cannot be approved, such as a hash mismatch), the `QueueSource` interface, `ErrRefused`, `ErrRoot`.
+  - **Summaries use the same scalar rule,** so floats are dropped. `[log] time` reads RFC 3339 text or integer epoch seconds. Blank lines are skipped and not counted.
+  - **"No log yet" is `errors.Is(Err, fs.ErrNotExist)` with no events ever received;** a vanished summary also sets such an `Err`.
 - **M7 is left to the desk-core owner.** The batch runner opens `done/<name>.d` paths by absolute name instead of through the pinned root. Only same-uid code reaches it, so it is consistency hardening outside this series.
 
 ## Learnings
