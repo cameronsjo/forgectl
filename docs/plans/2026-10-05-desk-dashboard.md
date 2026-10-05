@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "Task 3 finishing, then Task 4 (desk-core additions with the Task 2 findings)"
+next: "Task 4: desk-core additions with the Task 2 findings"
 branch: feat/desk-dashboard
 pr: "—"
 updated: 2026-10-05
@@ -141,6 +141,7 @@ path = "out/events.jsonl"          # relative to the run dir; every component ch
 time = "at"
 event = "kind"
 step = "stage"
+attempt = "try"                    # optional; unset means each start adds 1
 show = ["stage", "try", "rc", "err"]
 
 [[steps]]
@@ -409,7 +410,7 @@ func (f *Folder) Len() int
 
 **Steps:**
 
-- [ ] Write failing tests, one per row of the reducer table:
+- [x] Write failing tests, one per row of the reducer table:
   - `start` on the first step, and `close`;
   - `reject` ×3 with no fail, then `fail`;
   - `restart` before any step (0 restarts), and `restart` mid-step (marks `resumed`, clears `Exit`);
@@ -419,8 +420,8 @@ func (f *Folder) Len() int
   - an unknown step;
   - a linear chain vs `After` edges;
   - each `Live` state against `now`.
-- [ ] Replay: for every i in a 2 500-event fixture, `At(i)` equals `Fold(events[:i])`, with checkpoints crossed.
-- [ ] Spec errors, each naming its TOML key:
+- [x] Replay: for every i in a 2 500-event fixture, `At(i)` equals `Fold(events[:i])`, with checkpoints crossed.
+- [x] Spec errors, each naming its TOML key:
   - an unknown action;
   - a duplicate step id;
   - `max_rejects < 1`;
@@ -428,9 +429,9 @@ func (f *Folder) Len() int
   - an absolute path, `..`, or two `*`;
   - an `exits` key that isn't 0–255;
   - an `error_when` with more than one key.
-- [ ] Run and expect RED. Implement. Run and expect GREEN.
-- [ ] Mutation sweep: delete each action arm, the initial-start rule, and the `Exit` reset in turn. A test goes red for each. Record the results in the report.
-- [ ] Commit `feat(runview): run model, experimental TOML run spec and event reducer`.
+- [x] Run and expect RED. Implement. Run and expect GREEN.
+- [x] Mutation sweep: delete each action arm, the initial-start rule, and the `Exit` reset in turn. A test goes red for each. Record the results in the report.
+- [x] Commit `feat(runview): run model, experimental TOML run spec and event reducer`.
 
 ### Task 4 — desk-core additions for the dashboard
 
@@ -702,7 +703,7 @@ func NewDeskSource(d *desk.Desk) Source
   - `golangci-lint run`;
   - `govulncheck ./...`.
 - [ ] Live check against the consumer's real runs. The private copy of this plan, with the appendix, is written to the consumer repo's `docs/plans/` in this step, and the numbers go there only.
-- [ ] Run the polish pass, with diff-based reviewers over `git diff "$M"..HEAD` from the worktree: an Opus security reviewer on Tasks 4, 5, 7, and 8, and a code reviewer on all of them. Apply the findings, then re-run the checks above.
+- [ ] Run the polish pass, with diff-based reviewers over `git diff "$M"..HEAD` from the worktree: an Opus security reviewer on Tasks 4, 5, 7, and 8, and a code reviewer on all of them. Apply the findings, then re-run the checks above. Known nits from Task 3: the `LoadSpec` read error repeats the file path, and `checkPattern` reports any `:` as \"must be a relative path\".
 - [ ] Run the redaction scan, a manual identifier check, and a token diff against the appendix, over the diff, the messages, and the cover letter.
 - [ ] Write the patches with `git format-patch --cover-letter --base="$D" -o <patches dir> "$D"..HEAD`. The cover letter carries:
   - what, why, and how;
@@ -725,6 +726,7 @@ func NewDeskSource(d *desk.Desk) Source
   - **Meta gains a claim stamp, and `lost` covers PID-0 items whose claimer died (I3).** A claimed item with PID 0 previously could not be skipped (a probe confirmed it).
   - **Children run with cwd `$HOME` and without `BASH_ENV`, `ENV`, `BASH_FUNC_*`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `GLOBIGNORE` (I5).**
   - **Task 7's foreground command gains its `/dev/fd/3` operand (I6).** Without it, bash would open an interactive shell on the operator's terminal.
+- **Task 3 added `[log] attempt`.** The `start` row takes the attempt "from the event", but the example spec named no field for it. The optional key names that field; with it unset, each start adds 1. Task 3 also settled these points, each covered by a test: `check` is not an `[on]` action (checks come only from `[[checks]]`); `after` may name only an earlier step, so the graph has no cycles; `close` applies only to a running step; with no `stale_after` a run is never `stale`. The 2 500-event replay fixture is generated in the test from a fixed seed instead of stored under `testdata/`.
 - **M7 is left to the desk-core owner.** The batch runner opens `done/<name>.d` paths by absolute name instead of through the pinned root. Only same-uid code reaches it, so it is consistency hardening outside this series.
 
 ## Learnings
