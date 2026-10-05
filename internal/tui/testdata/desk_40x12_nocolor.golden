@@ -1,0 +1,12 @@
+ forgectl desk  ·  queue: 2 waiting · l
+[1 flow] 2 3 4 5 6
+╭ flow ────────────────────────────────╮
+│ alpha-run-7  ◐ live · 12s ago        │
+│  │ ✓ fetch done     59s              │
+│  │   pull the inputs                 │
+│ >│ ◐ build running  1m   try 3 · ↺ … │
+│  │   compile and package             │
+│  │ · test  pending                   │
+╰──────────────────────────────────────╯
+
+[ < prev run • 1-6 view • tab next pane 

@@ -1,0 +1,30 @@
+ forgectl desk  ·  ‹ 2/5 beta-run-7 ✓ ok 4m ›  ·  queue: 2 waiting · lost: 1
+╭ flow ──────────────────────────────────────────────────────╮╭ > queue ─┤ 2 3 4 5 [6 queue] ├─────────────────────────╮
+│ beta-run-7  ✓ ok · exit 0 — finished, audit passed         ││ waiting (2)                                            │
+│ >│ ✓ fetch done     29s                                    ││ > · waiting  0007-refresh       script refresh the ca… │
+│  │   pull the inputs                                       ││     why: nightly refresh                               │
+│  │ ✓ build done     19s                                    ││   · waiting  0008-prune         script prune old outp… │
+│  │   compile and package                                   ││     cannot approve: recorded hash does not match the … │
+│  │ ✓ test  done     8s                                     ││ lost (1)                                               │
+│  │   run the suites                                        ││   ? lost     0006-sweep         batch sweep the scrat… │
+│  │ ✓ ship  done                                            ││ skipped (1)                                            │
+│      publish the result                                    ││   – skipped  0004-report        script send the report │
+│ gate: accepted? · up to 3 rejects                          ││     skipped: superseded by 0007                        │
+│ ✓ passed  audit ok?                                        ││                                                        │
+│ ✓ exit 0 — finished, audit passed                          ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+╰────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────╯
+
+↑/k up • a approve • s skip • u unskip • 1-6 view • r refresh run • ? help • q quit

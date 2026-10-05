@@ -22,9 +22,33 @@ type glyphSet struct {
 	Kill     string
 	Rename   string
 	Cheat    string
+
+	// Run-state marks for the desk dashboard. Each is paired with a word on
+	// screen, so colour is never the only carrier. Spin holds the running
+	// mark's animation frames, one rune each.
+	Pending  string
+	Running  string
+	Done     string
+	Failed   string
+	Rejected string
+	Resumed  string
+	Stale    string
+	Lost     string
+	Skipped  string
+	Spin     string
 }
 
 var iconGlyphs = glyphSet{
+	Pending:  "·",
+	Running:  "◐",
+	Done:     "✓",
+	Failed:   "✗",
+	Rejected: "↺",
+	Resumed:  "⟲",
+	Stale:    "!",
+	Lost:     "?",
+	Skipped:  "–",
+	Spin:     "◐◓◑◒",
 	Forge:    "", // nf-fa-bolt — the forge spark
 	Session:  "", // nf-fa-terminal
 	Window:   "", // nf-fa-window_maximize
@@ -40,6 +64,16 @@ var iconGlyphs = glyphSet{
 }
 
 var asciiGlyphs = glyphSet{
+	Pending:  ".",
+	Running:  "*",
+	Done:     "+",
+	Failed:   "x",
+	Rejected: "r",
+	Resumed:  "~",
+	Stale:    "!",
+	Lost:     "?",
+	Skipped:  "-",
+	Spin:     "*",
 	Forge:    "#",
 	Session:  "s",
 	Window:   "w",

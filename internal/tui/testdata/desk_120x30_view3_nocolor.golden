@@ -1,0 +1,30 @@
+ forgectl desk  ·  ‹ 2/5 beta-run-7 ✓ ok 4m ›  ·  queue: 2 waiting · lost: 1
+╭ flow ──────────────────────────────────────────────────────╮╭ > timeline ─┤ 2 [3 timeline] 4 5 6 ├───────────────────╮
+│ beta-run-7  ✓ ok · exit 0 — finished, audit passed         ││ ██████████████████████████████████████████████████████ │
+│ >│ ✓ fetch done     29s                                    ││                                                        │
+│  │   pull the inputs                                       ││ ✓ fetch ███████████████████████████ done     29s       │
+│  │ ✓ build done     19s                                    ││ ✓ build ██████████████████░░░░░░░░░ done     19s       │
+│  │   compile and package                                   ││ ✓ test  ███████░░░░░░░░░░░░░░░░░░░░ done     8s        │
+│  │ ✓ test  done     8s                                     ││ ✓ ship  ░░░░░░░░░░░░░░░░░░░░░░░░░░░ done               │
+│  │   run the suites                                        ││                                                        │
+│  │ ✓ ship  done                                            ││                                                        │
+│      publish the result                                    ││                                                        │
+│ gate: accepted? · up to 3 rejects                          ││                                                        │
+│ ✓ passed  audit ok?                                        ││                                                        │
+│ ✓ exit 0 — finished, audit passed                          ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+│                                                            ││                                                        │
+╰────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────╯
+
+[ < prev run • 1-6 view • tab next pane • ↑/k up • / filter • r refresh run • ? help • q quit
