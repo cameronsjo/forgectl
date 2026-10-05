@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "Task 7b (review and dry-run fixes) and Task 8 CLI in parallel"
+next: "Task 9: verification, polish, live check, patch series"
 branch: feat/desk-dashboard
 pr: "—"
 updated: 2026-10-05
@@ -658,16 +658,16 @@ func NewDeskSource(d *desk.Desk) Source
 
 **Steps:**
 
-- [ ] **A finished run never reads as `lost`.** `Watcher.state` returns `WatchEnded` when `done/` holds events with `RUN-END`, including on a resumed watcher.
-- [ ] **The 32 MiB cap bounds a lost run's read too.** The lost path in `Poll` stops at the cap and reports the rest on later polls; the desk source sets `Delta.Partial` when the file passes the per-file cap.
-- [ ] **A wrong `--sha` or `--kind` never moves a claimed item.** `supervise` refuses without touching the item when the argv sha differs from the claim stamp's `ApprovedSHA256`; the kind and both-kinds branches likewise refuse in place when the claim stamp says a different kind or sha was approved.
-- [ ] **Minor items from the review that fit:** `Skip` of a running item uses rename-then-check; `PS4` joins the `ChildEnv` strip list; summary key collisions are counted and the first wins.
-- [ ] **Reducer: a restart marks every running step `resumed`.** A resume that never re-sends `start` still shows.
-- [ ] **Reducer: the attempt field is read from any event of that step** (`reject`, `close`, `fail`, unmapped), keeping the highest.
-- [ ] **Reducer: an ended run turns a still-running step into `interrupted`,** a new status with its own glyph and word.
-- [ ] **A summary-only run reads `ended`,** set by the source.
-- [ ] **Booleans in summaries and event fields are kept as `true`/`false` text.**
-- [ ] Commit `fix(desk,runview): finished runs, lost-run caps, resume and attempt tracking`.
+- [x] **A finished run never reads as `lost`.** `Watcher.state` returns `WatchEnded` when `done/` holds events with `RUN-END`, including on a resumed watcher.
+- [x] **The 32 MiB cap bounds a lost run's read too.** The lost path in `Poll` stops at the cap and reports the rest on later polls; the desk source sets `Delta.Partial` when the file passes the per-file cap.
+- [x] **A wrong `--sha` or `--kind` never moves a claimed item.** `supervise` refuses without touching the item when the argv sha differs from the claim stamp's `ApprovedSHA256`; the kind and both-kinds branches likewise refuse in place when the claim stamp says a different kind or sha was approved.
+- [x] **Minor items from the review that fit:** `Skip` of a running item uses rename-then-check; `PS4` joins the `ChildEnv` strip list; summary key collisions are counted and the first wins.
+- [x] **Reducer: a restart marks every running step `resumed`.** A resume that never re-sends `start` still shows.
+- [x] **Reducer: the attempt field is read from any event of that step** (`reject`, `close`, `fail`, unmapped), keeping the highest.
+- [x] **Reducer: an ended run turns a still-running step into `interrupted`,** a new status with its own glyph and word.
+- [x] **A summary-only run reads `ended`,** set by the source.
+- [x] **Booleans in summaries and event fields are kept as `true`/`false` text.**
+- [x] Commit `fix(desk,runview): finished runs, lost-run caps, resume and attempt tracking`.
 
 ### Task 8 — Module, CLI verbs, docs, ADR
 
@@ -691,22 +691,22 @@ func NewDeskSource(d *desk.Desk) Source
 
 **Steps:**
 
-- [ ] Register `deskModule` (`TierExtension`). Move `_supervise` under it, hidden, keeping the exact argv `desk _supervise --dir`. Add a test that `supervisorArgv` (now with the required `--sha` and `--kind`) resolves to a registered command. Delete the plumbing command. Replace the comment claiming a hand call "grants nothing" with the I7 statement: `done/` records what a supervisor ran, not proof of approval.
-- [ ] The non-TTY refusal from Global Constraints (exit 1).
-- [ ] The `desk` command's loop (`RunDesk` → `runForeground` → re-open).
-- [ ] `desk runs` prints a table (run row format) or `--json` objects `{source, name, kind, live, updated, exit, partial}`.
-- [ ] `desk show` prints the compact flow as plain text, or `--json` with the `RunState` plus counts. `--at` replays.
-- [ ] A name shared by two sources exits 2 with `run "x" is in sources a and b; pass --from`. Both `--json` verbs go through `termsafe.JSONEncoder`.
-- [ ] A bad spec fails on its own, with path and key; the other sources still load.
+- [x] Register `deskModule` (`TierExtension`). Move `_supervise` under it, hidden, keeping the exact argv `desk _supervise --dir`. Add a test that `supervisorArgv` (now with the required `--sha` and `--kind`) resolves to a registered command. Delete the plumbing command. Replace the comment claiming a hand call "grants nothing" with the I7 statement: `done/` records what a supervisor ran, not proof of approval.
+- [x] The non-TTY refusal from Global Constraints (exit 1).
+- [x] The `desk` command's loop (`RunDesk` → `runForeground` → re-open).
+- [x] `desk runs` prints a table (run row format) or `--json` objects `{source, name, kind, live, updated, exit, partial}`.
+- [x] `desk show` prints the compact flow as plain text, or `--json` with the `RunState` plus counts. `--at` replays.
+- [x] A name shared by two sources exits 2 with `run "x" is in sources a and b; pass --from`. Both `--json` verbs go through `termsafe.JSONEncoder`.
+- [x] A bad spec fails on its own, with path and key; the other sources still load.
 - [x] `docs/commands/desk.md` covers: a quickstart; the legend; keys, breakpoints, and states; the spec reference (experimental, neutral example); exit codes; the agent verbs, noting that `Scan` changes the queue.
 - [x] ADR-0010 covers: the run-source model; the experimental spec; the trust and threat model with the agent deny rules, listing the rule shapes needed (any `forgectl … _supervise` form, an absolute binary path, `env forgectl …`) and stating that `done/` is a record of what ran, not proof of approval; cwd `$HOME` and the operator's environment minus the bash startup hooks; polling, not fsnotify; the alternatives declined.
-- [ ] Tests:
+- [x] Tests:
   - the non-TTY refusal, including stdin-only and stdout-only cases;
   - the JSON shape;
   - an ambiguous name;
   - an isolated bad spec;
   - `GOOS=windows go vet ./...` stays clean (stubs).
-- [ ] Commit `feat(desk): register the desk module with runs and show verbs`.
+- [x] Commit `feat(desk): register the desk module with runs and show verbs`.
 
 ### Task 9 — Verification, polish, patch series
 
@@ -723,7 +723,7 @@ func NewDeskSource(d *desk.Desk) Source
   - `golangci-lint run`;
   - `govulncheck ./...`.
 - [ ] Live check against the consumer's real runs. The private copy of this plan, with the appendix, is written to the consumer repo's `docs/plans/` in this step, and the numbers go there only.
-- [ ] Run the polish pass, with diff-based reviewers over `git diff "$M"..HEAD` from the worktree: an Opus security reviewer on Tasks 4, 5, 7, and 8, and a code reviewer on all of them. Apply the findings, then re-run the checks above. Known nits from Task 6: the full flow draws a trailing `▼` after the last step, and the 28-column run list cuts an 11-character name (`alph…un-7`). Known nits from Task 3: the `LoadSpec` read error repeats the file path, and `checkPattern` reports any `:` as \"must be a relative path\".
+- [ ] Run the polish pass, with diff-based reviewers over `git diff "$M"..HEAD` from the worktree: an Opus security reviewer on Tasks 4, 5, 7, and 8, and a code reviewer on all of them. Apply the findings, then re-run the checks above. Known nit from Task 8b: the queue pane's reason line still offers `u to undo` for a skipped `lost` item (`QueueItem` has no claim flag). Known nits from Task 6: the full flow draws a trailing `▼` after the last step, and the 28-column run list cuts an 11-character name (`alph…un-7`). Known nits from Task 3: the `LoadSpec` read error repeats the file path, and `checkPattern` reports any `:` as \"must be a relative path\".
 - [ ] Run the redaction scan, a manual identifier check, and a token diff against the appendix, over the diff, the messages, and the cover letter.
 - [ ] Write the patches with `git format-patch --cover-letter --base="$D" -o <patches dir> "$D"..HEAD`. The cover letter carries:
   - what, why, and how;
@@ -782,6 +782,9 @@ func NewDeskSource(d *desk.Desk) Source
   - **`DeskOptions.Specs` is gone;** the dashboard reads `Spec()` from the spec source.
 - **Task 8's docs shipped first as `876e3a7`,** written from the plan before the CLI existed. Task 8's code must match them: `desk runs --json` prints one JSON array; the `desk show --json` shape and the desk directory lookup order are as documented there. `[[steps]] after` is documented though the example does not use it.
 - **An early security review of Tasks 4 and 5 (0 Critical, 3 Important, 5 Minor) and a dry run of the consumer's spec found the gaps Task 7b fixes.** Each Important finding and each reducer gap was checked against the code first. Keeping booleans as text changes the Global Constraints JSON rule: strings, int64 integers, and booleans are kept.
+- **Task 7b shipped as `e5791b2` and `e3685e9`** (cherry-picked from a side worktree). Beyond its steps: the watcher reads at most 4 MiB and 50 000 lines per poll and 32 MiB per file in total; `interrupted` is computed when the state is returned, so a later restart still resumes the step; `recordOwner` leaves a begun run alone and `Unskip` refuses any item that was ever claimed; `PS4` joins the stripped variables. Left: using ctime instead of mtime for unstamped claims (per-OS stat code), and a compare-and-swap in `writeMeta`.
+- **Task 8's code shipped as `8aa1238`.** `--spec` is a persistent flag on `desk`, so `show` sees spec runs. Exit 1 means a source failed or a run is unknown; exit 2 means an ambiguous name, a bad `--from`, or a negative `--at`. A spec whose name duplicates another source's fails on its own. `desk runs` lists running, done and skipped items, not waiting ones. Desk-run step times are `null` in `show --json`. The non-TTY line is printed directly, because the CLI's error renderer rewords returned errors.
+- **Task 8b (`a460959`) fixed a module-wide guard no task had run.** `TestTextPrintersUseCappedHelpers` failed on the new CLI printers; they now use the capped helpers. The approve body (`queueItem`, `MarkLine`, `confirmLines`) is allowlisted with its reason, because the operator must see every byte they approve. It also brought `desk.md` and ADR-0010 up to date with Task 7b.
 - **M7 is left to the desk-core owner.** The batch runner opens `done/<name>.d` paths by absolute name instead of through the pinned root. Only same-uid code reaches it, so it is consistency hardening outside this series.
 
 ## Learnings
