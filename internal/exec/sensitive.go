@@ -112,6 +112,10 @@ const (
 	// trampoline line into a pane the inspection found idle.
 	KindHerdrPaneInspect
 	KindHerdrBootstrap
+	// KindHerdrNotify is `notification show`: a desktop notification whose
+	// title and body are item names and WHAT text, which is why it routes
+	// through this seam rather than the argv-logging Runner.
+	KindHerdrNotify
 
 	// KindSopsEdit drives `sops <file>` with forgectl re-invoked as the
 	// editor. KindSopsExtract is the read-back that proves what landed.
@@ -157,6 +161,7 @@ var kindNames = [kindCount]string{
 	KindHerdrCleanup:     "herdr.cleanup",
 	KindHerdrPaneInspect: "herdr.pane-inspect",
 	KindHerdrBootstrap:   "herdr.bootstrap",
+	KindHerdrNotify:      "herdr.notification-show",
 
 	KindSopsEdit:    "sops.edit",
 	KindSopsExtract: "sops.extract",
