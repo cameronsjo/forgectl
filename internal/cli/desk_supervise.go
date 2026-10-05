@@ -31,20 +31,21 @@ func newDeskPlumbingCmd() *cobra.Command {
 	return cmd
 }
 
-// newDeskSuperviseCmd builds `desk _supervise --sha SHA NAME`: the detached
-// process that owns one claimed item's run. The desk starts it in a session
-// of its own (desk.Launch), so it outlives the desk's pane. It runs only an
-// item already in running/ whose bytes hash to --sha, the hash the operator
-// approved, and to the hash fixed at queue time.
+// newDeskSuperviseCmd builds `desk _supervise --sha SHA --kind KIND NAME`:
+// the detached process that owns one claimed item's run. The desk starts it
+// in a session of its own (desk.Launch), so it outlives the desk's pane. It
+// runs only an item already in running/ whose bytes hash to --sha, the hash
+// the operator approved, and to the hash fixed at queue time, and that is
+// still the --kind it was approved as.
 //
 // Invoking it by hand is not harmless: the run it records in done/ looks
 // exactly like an approved one. done/ records what a supervisor ran, not
 // proof of approval; the agent deny rules on this command are the control.
 // Hidden is presentation, not a control.
 func newDeskSuperviseCmd() *cobra.Command {
-	var dir, sha string
+	var dir, sha, kind string
 	cmd := &cobra.Command{
-		Use:          "_supervise --sha SHA NAME",
+		Use:          "_supervise --sha SHA --kind KIND NAME",
 		Short:        "Internal: run one claimed desk item to completion",
 		Hidden:       true,
 		SilenceUsage: true,
@@ -60,7 +61,7 @@ func newDeskSuperviseCmd() *cobra.Command {
 				}
 				dir = resolved
 			}
-			if rc := desk.RunSupervisor(dir, args[0], sha); rc != 0 {
+			if rc := desk.RunSupervisor(dir, args[0], sha, kind); rc != 0 {
 				return WithExitCode(fmt.Errorf("desk item finished with exit %d", rc), rc)
 			}
 			return nil
@@ -68,6 +69,9 @@ func newDeskSuperviseCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&dir, "dir", "", "desk directory (default: $DESK_DIR, $CLAUDE_DESK_DIR, then the XDG state dir)")
 	cmd.Flags().StringVar(&sha, "sha", "", "the approved item's full sha256; the item runs only if its bytes still match")
-	_ = cmd.MarkFlagRequired("sha") // fails only for a flag that does not exist, and it is defined above
+	cmd.Flags().StringVar(&kind, "kind", "", "the approved item's kind, script or batch; the item runs only as that kind")
+	for _, f := range []string{"sha", "kind"} {
+		_ = cmd.MarkFlagRequired(f) // fails only for a flag that does not exist, and both are defined above
+	}
 	return cmd
 }

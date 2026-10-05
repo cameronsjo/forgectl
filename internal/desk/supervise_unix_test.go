@@ -32,11 +32,11 @@ const parentHelper = "desk-test-parent"
 // nothing a test item does lands in the real home directory. Helper
 // re-executions inherit them.
 func TestMain(m *testing.M) {
-	supervisorArgv = func(dir, name, sha string) ([]string, error) {
-		return []string{os.Args[0], "desk", "_supervise", "--dir", dir, "--sha", sha, name}, nil
+	supervisorArgv = func(dir, name, sha string, kind Kind) ([]string, error) {
+		return []string{os.Args[0], "desk", "_supervise", "--dir", dir, "--sha", sha, "--kind", string(kind), name}, nil
 	}
-	if len(os.Args) == 8 && os.Args[1] == "desk" && os.Args[2] == "_supervise" && os.Args[3] == "--dir" && os.Args[5] == "--sha" {
-		os.Exit(RunSupervisor(os.Args[4], os.Args[7], os.Args[6]))
+	if len(os.Args) == 10 && os.Args[1] == "desk" && os.Args[2] == "_supervise" && os.Args[3] == "--dir" && os.Args[5] == "--sha" && os.Args[7] == "--kind" {
+		os.Exit(RunSupervisor(os.Args[4], os.Args[9], os.Args[6], os.Args[8]))
 	}
 	if len(os.Args) == 5 && os.Args[1] == parentHelper {
 		os.Exit(parentMain(os.Args[2], os.Args[3], os.Args[4]))
@@ -217,7 +217,7 @@ func TestLaunchRefusesATTYItem(t *testing.T) {
 	if _, err := d.Launch(c); err == nil || !strings.Contains(err.Error(), "TTY") {
 		t.Fatalf("Launch = %v, want a TTY refusal", err)
 	}
-	if rc, err := d.supervise(a.Name, a.SHA256); rc != 2 || err == nil {
+	if rc, err := d.supervise(a.Name, a.SHA256, KindScript); rc != 2 || err == nil {
 		t.Errorf("supervise = %d, %v; want a refusal", rc, err)
 	}
 	// The refusal leaves a trace: the supervisor's stderr is /dev/null.
@@ -233,7 +233,7 @@ func TestSupervisorRefusesARunningCopyThatChanged(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "ran")
 	c := queue(t, d, "x.sh", "echo fine\n")
 	writeFile(t, c.RecordPath, "touch "+marker+"\n", 0o600)
-	if rc, err := d.supervise(c.Name, c.SHA256); rc != 2 || !errors.Is(err, ErrChanged) {
+	if rc, err := d.supervise(c.Name, c.SHA256, c.Kind); rc != 2 || !errors.Is(err, ErrChanged) {
 		t.Fatalf("supervise = %d, %v; want ErrChanged", rc, err)
 	}
 	if _, err := os.Stat(marker); err == nil {

@@ -21,12 +21,12 @@ import (
 
 // supervisorArgv is the command line that runs `forgectl desk _supervise`.
 // Tests replace it to re-execute the test binary.
-var supervisorArgv = func(dir, name, sha string) ([]string, error) {
+var supervisorArgv = func(dir, name, sha string, kind Kind) ([]string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("desk: locate the forgectl binary: %w", err)
 	}
-	return []string{exe, "desk", "_supervise", "--dir", dir, "--sha", sha, name}, nil
+	return []string{exe, "desk", "_supervise", "--dir", dir, "--sha", sha, "--kind", string(kind), name}, nil
 }
 
 // skipCauseMax caps the cause recorded in skip_reason when a supervisor
@@ -37,8 +37,9 @@ const skipCauseMax = 256
 // returns its pid. TTY items are refused: they run in the desk's own
 // foreground (see [Desk.BeginRun]).
 //
-// The supervisor is handed the approved hash, c.SHA256, and runs the item
-// only if running/ still holds exactly those bytes. It starts in the home
+// The supervisor is handed the approved hash and kind, c.SHA256 and c.Kind,
+// and runs the item only if running/ still holds exactly those bytes, as that
+// kind. It starts in the home
 // directory with [ChildEnv], and Launch records its pid in meta at once, so
 // a supervisor that dies before its run begins leaves the item lost, not
 // waiting forever.
@@ -73,7 +74,7 @@ func (d *Desk) Launch(c *Claimed) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	argv, err := supervisorArgv(d.path, c.Name, c.SHA256)
+	argv, err := supervisorArgv(d.path, c.Name, c.SHA256, c.Kind)
 	if err != nil {
 		return 0, err
 	}
@@ -110,9 +111,10 @@ func (d *Desk) recordOwner(name string, pid int) error {
 
 // RunSupervisor is `forgectl desk _supervise`: it runs one claimed item in
 // running/ to completion and returns the process exit code (the item's rc, or
-// 2 when the supervisor itself could not run it). sha is the hash the
-// operator approved; the item runs only if its bytes still hash to it.
-func RunSupervisor(dir, name, sha string) int {
+// 2 when the supervisor itself could not run it). sha and kind are the hash
+// and kind the operator approved; the item runs only if its bytes still hash
+// to sha and it is still that kind ("script" or "batch").
+func RunSupervisor(dir, name, sha, kind string) int {
 	// Caught and discarded, not ignored: an ignored signal stays ignored
 	// across exec, so every script would start deaf to SIGHUP, while a caught
 	// one is reset to the default there. Notify never blocks on a full
@@ -124,7 +126,7 @@ func RunSupervisor(dir, name, sha string) int {
 		return 2
 	}
 	defer d.Close() //nolint:errcheck // exiting
-	rc, err := d.supervise(name, sha)
+	rc, err := d.supervise(name, sha, Kind(kind))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "desk _supervise:", err)
 		if rc == 0 {
@@ -134,7 +136,7 @@ func RunSupervisor(dir, name, sha string) int {
 	return rc
 }
 
-func (d *Desk) supervise(name, sha string) (int, error) {
+func (d *Desk) supervise(name, sha string, want Kind) (int, error) {
 	kind, err := d.findKind(DirRunning, name)
 	if err != nil {
 		return 2, err
@@ -148,6 +150,17 @@ func (d *Desk) supervise(name, sha string) (int, error) {
 	}
 	failed := func(cause error) (int, error) {
 		return notStarted("supervisor: "+termsafe.SafeLineMax(cause.Error(), skipCauseMax), cause)
+	}
+	// The hash binds the bytes, not how they run: findKind prefers .sh, so
+	// the bytes of an approved manifest must not run as bash, nor the reverse.
+	if d.exists(path.Join(DirRunning, name+KindScript.Ext())) && d.exists(path.Join(DirRunning, name+KindBatch.Ext())) {
+		// Which file is the claimed item is unknowable here, so neither is
+		// moved; once this supervisor exits the item reads as lost.
+		return 2, fmt.Errorf("%w: running/ holds both %s.sh and %s.manifest", ErrRefused, describe(name), describe(name))
+	}
+	if kind != want || (meta.Kind != "" && meta.Kind != kind) {
+		return failed(fmt.Errorf("%w: %s was approved as a %q and queued as a %q, but running/ holds a %s",
+			ErrRefused, describe(name), termsafe.SafeLineMax(string(want), 16), meta.Kind, kind))
 	}
 	data, _, err := d.readItem(DirRunning, name+kind.Ext())
 	if err != nil {

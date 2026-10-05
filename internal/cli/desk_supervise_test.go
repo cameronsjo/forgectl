@@ -9,15 +9,23 @@ import (
 	"testing"
 )
 
-// `_supervise` runs an item only against the hash the operator approved, so
-// the command refuses to start without --sha.
-func TestDeskSuperviseRequiresTheApprovedSHA(t *testing.T) {
-	cmd := newDeskPlumbingCmd()
-	cmd.SetOut(io.Discard)
-	cmd.SetErr(io.Discard)
-	cmd.SetArgs([]string{"_supervise", "--dir", filepath.Join(t.TempDir(), "desk"), "01-x"})
-	err := cmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), `"sha"`) {
-		t.Fatalf("Execute = %v, want a missing --sha error", err)
+// `_supervise` runs an item only against the hash and kind the operator
+// approved, so the command refuses to start without --sha or --kind.
+func TestDeskSuperviseRequiresTheApprovedSHAAndKind(t *testing.T) {
+	sha := strings.Repeat("0", 64)
+	for flag, args := range map[string][]string{
+		"sha":  {"--kind", "script", "01-x"},
+		"kind": {"--sha", sha, "01-x"},
+	} {
+		t.Run(flag, func(t *testing.T) {
+			cmd := newDeskPlumbingCmd()
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SetArgs(append([]string{"_supervise", "--dir", filepath.Join(t.TempDir(), "desk")}, args...))
+			err := cmd.Execute()
+			if err == nil || !strings.Contains(err.Error(), `"`+flag+`"`) {
+				t.Fatalf("Execute = %v, want a missing --%s error", err, flag)
+			}
+		})
 	}
 }

@@ -498,7 +498,7 @@ func TestARewriteOfRecordAndMetaAfterClaimRunsNothing(t *testing.T) {
 				if _, state := watchUntil(t, d, c.Name, 20*time.Second); state != WatchSkipped {
 					t.Fatalf("state = %s, want skipped", state)
 				}
-			} else if rc, err := d.supervise(c.Name, c.SHA256); rc != 2 || !errors.Is(err, ErrChanged) {
+			} else if rc, err := d.supervise(c.Name, c.SHA256, c.Kind); rc != 2 || !errors.Is(err, ErrChanged) {
 				t.Fatalf("supervise = %d, %v; want ErrChanged", rc, err)
 			}
 			if _, err := os.Stat(marker); err == nil {
@@ -508,6 +508,75 @@ func TestARewriteOfRecordAndMetaAfterClaimRunsNothing(t *testing.T) {
 				t.Errorf("skipped = %+v", s.Skipped)
 			}
 		})
+	}
+}
+
+// The hash binds the bytes and the kind binds how they run. A claimed
+// manifest with an identical-bytes .sh dropped beside it in running/ runs
+// nothing: the bytes are written so that run as bash they would create a
+// marker, and run as a batch they would create another.
+func TestAClaimedManifestNeverRunsAsAScript(t *testing.T) {
+	for _, path := range []string{"launch", "supervise"} {
+		t.Run(path, func(t *testing.T) {
+			d := openDesk(t)
+			dir := t.TempDir()
+			asBash, asBatch := filepath.Join(dir, "ran-as-bash"), filepath.Join(dir, "ran-as-batch")
+			// As a manifest: step "touch" runs a missing command, step "a"
+			// touches asBatch. As bash: `touch -- asBash`, then `a`, not found.
+			src := filepath.Join(t.TempDir(), "two.manifest")
+			writeFile(t, src, "touch -- "+asBash+"\na -- touch "+asBatch+"\n", 0o600)
+			a, err := d.Add(src, "a batch", "kind binding", false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scan(t, d)
+			c, err := d.Claim(a.Name, a.SHA256)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(d.Path(), DirRunning, c.Name+".sh"), string(c.Content), 0o600)
+			if path == "launch" {
+				if _, err := d.Launch(c); err == nil {
+					t.Fatal("Launch started a supervisor for a claim whose kind running/ no longer holds alone")
+				}
+			} else if rc, err := d.supervise(c.Name, c.SHA256, c.Kind); rc != 2 || !errors.Is(err, ErrRefused) {
+				t.Fatalf("supervise = %d, %v; want ErrRefused", rc, err)
+			}
+			time.Sleep(200 * time.Millisecond) // a step or script, had one started, has touched its marker by now
+			for _, m := range []string{asBash, asBatch} {
+				if _, err := os.Stat(m); err == nil {
+					t.Errorf("%s exists: the item ran", filepath.Base(m))
+				}
+			}
+			if _, err := os.Stat(d.EventsPath(c.Name)); err == nil {
+				t.Error("a run began")
+			}
+		})
+	}
+}
+
+// The argv kind alone is enough to refuse: a script approved as a script
+// does not run when the supervisor is told it is a batch, nor the reverse.
+func TestSuperviseRefusesAKindOtherThanTheApprovedOne(t *testing.T) {
+	d := openDesk(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	c := queue(t, d, "x.sh", "touch "+marker+"\n")
+	m, _, err := d.readMeta(DirRunning, c.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Kind = "" // so only the argv kind can catch it
+	if err := d.writeMeta(DirRunning, c.Name, m); err != nil {
+		t.Fatal(err)
+	}
+	if rc, err := d.supervise(c.Name, c.SHA256, KindBatch); rc != 2 || !errors.Is(err, ErrRefused) {
+		t.Fatalf("supervise = %d, %v; want ErrRefused", rc, err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("the item ran")
+	}
+	if s := scan(t, d); len(s.Skipped) != 1 || !strings.HasPrefix(s.Skipped[0].Meta.SkipReason, "supervisor: ") {
+		t.Errorf("skipped = %+v, want a supervisor: skip reason", s.Skipped)
 	}
 }
 
