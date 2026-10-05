@@ -173,6 +173,13 @@ delta after=gamma -- echo never
 	if s := scan(t, d); len(s.Done) != 1 || s.Done[0].Kind != KindBatch || *s.Done[0].ExitCode != 1 {
 		t.Errorf("history = %+v", s.Done)
 	}
+	sum, err := d.ReadSummary(a.Name)
+	if err != nil {
+		t.Fatalf("ReadSummary: %v", err)
+	}
+	if sum.RC != 1 || sum.OK != 2 || sum.Failed != 1 || sum.Skipped != 1 || len(sum.Steps) != 4 || sum.Steps[2].ID != "gamma" {
+		t.Errorf("summary = %+v", sum)
+	}
 }
 
 func TestLaunchRefusesATTYItem(t *testing.T) {

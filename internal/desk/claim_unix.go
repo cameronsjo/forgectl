@@ -254,6 +254,36 @@ func (d *Desk) appendExit(name string, rc int) error {
 // (owner dead, no RUN-END) may be skipped too, which is how a lost run leaves
 // running/.
 func (d *Desk) Skip(name, reason string) error {
+	return d.skip(name, func(string) string { return reason }, "")
+}
+
+// SkipNoteMax caps a skip note.
+const SkipNoteMax = 200
+
+// SkipNoted skips name as [Desk.Skip] does, with the reason chosen by where
+// the item is: [SkipOperator] for a pending item, which [Desk.Unskip] can
+// re-arm, and [SkipLost] for a lost run, which it cannot. note, the
+// operator's one-line reason, is kept in meta as skip_note. It returns the
+// reason recorded.
+func (d *Desk) SkipNoted(name, note string) (string, error) {
+	if strings.ContainsAny(note, "\r\n") {
+		return "", errors.New("desk: a skip note must be one line")
+	}
+	if len([]rune(note)) > SkipNoteMax {
+		return "", fmt.Errorf("desk: a skip note must be at most %d characters", SkipNoteMax)
+	}
+	var chosen string
+	err := d.skip(name, func(from string) string {
+		chosen = SkipOperator
+		if from == DirRunning {
+			chosen = SkipLost
+		}
+		return chosen
+	}, note)
+	return chosen, err
+}
+
+func (d *Desk) skip(name string, reasonFor func(from string) string, note string) error {
 	from := DirPending
 	kind, err := d.findKind(DirPending, name)
 	if errors.Is(err, ErrNotFound) {
@@ -275,7 +305,7 @@ func (d *Desk) Skip(name, reason string) error {
 	if err != nil {
 		return err
 	}
-	meta.Kind, meta.SkipReason = kind, reason
+	meta.Kind, meta.SkipReason, meta.SkipNote = kind, reasonFor(from), note
 	if err := d.writeMeta(from, name, meta); err != nil {
 		return err
 	}
@@ -302,7 +332,7 @@ func (d *Desk) Unskip(name string) error {
 	if meta.SkipReason != "" && meta.SkipReason != SkipOperator {
 		return fmt.Errorf("desk: %s was skipped (%s) and cannot be re-armed; queue a new item", describe(name), meta.SkipReason)
 	}
-	meta.SkipReason = ""
+	meta.SkipReason, meta.SkipNote = "", ""
 	if err := d.writeMeta(DirSkipped, name, meta); err != nil {
 		return err
 	}

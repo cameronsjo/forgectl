@@ -271,8 +271,11 @@ type Meta struct {
 	SHA256     string     `json:"sha256,omitempty"`
 	Kind       Kind       `json:"kind,omitempty"`
 	SkipReason string     `json:"skip_reason,omitempty"`
-	StartedAt  *time.Time `json:"started_at,omitempty"`
-	EndedAt    *time.Time `json:"ended_at,omitempty"`
+	// SkipNote is the operator's own one-line reason, from `desk skip
+	// --reason`. Untrusted text: render it through termsafe.
+	SkipNote  string     `json:"skip_note,omitempty"`
+	StartedAt *time.Time `json:"started_at,omitempty"`
+	EndedAt   *time.Time `json:"ended_at,omitempty"`
 	// ExitCode is the run's rc, recorded at Finish. It outranks the log's
 	// EXIT= line, which a leftover process could append to after the run.
 	ExitCode *int `json:"exit_code,omitempty"`

@@ -178,11 +178,13 @@ func (w *Watcher) read() (lines []string, ended bool, err error) {
 	w.partial = append([]byte(nil), data[cut+1:]...)
 	for _, line := range strings.Split(string(data[:cut]), "\n") {
 		w.seen++
-		if w.seen <= w.skip {
-			continue
+		end := strings.HasPrefix(line, EventRunEnd+" ")
+		if w.seen > w.skip {
+			lines = append(lines, line)
 		}
-		lines = append(lines, line)
-		if strings.HasPrefix(line, EventRunEnd+" ") {
+		// A RUN-END inside the skipped lines still ends the run: a resume
+		// point past it must not read as a lost run.
+		if end {
 			return lines, true, nil
 		}
 	}
