@@ -830,7 +830,7 @@ func (m deskModel) stepLines(md *deskModal, w int) ([]string, []int) {
 		rej = fmt.Sprintf("%d/%d", s.Rejects, mx)
 	}
 	add(st.Muted.Render("attempt ") + st.Fg.Render(strconv.Itoa(s.Attempt)) + st.Muted.Render(" · rejects ") + st.Fg.Render(rej) +
-		st.Muted.Render(" · duration ") + st.Fg.Render(ageShort(m.stepDur(e, *s, now))))
+		st.Muted.Render(" · duration ") + st.Fg.Render(runview.Age(m.stepDur(e, *s, now))))
 	if s.Resumed {
 		add(st.Warn.Render(m.glyph.Resumed + " resumed after a restart"))
 	}

@@ -125,36 +125,9 @@ func (m deskModel) stepDur(e *deskRun, s runview.StepState, now time.Time) time.
 	return s.End.Sub(s.Start)
 }
 
-// timingState is the desk's own word for a step ("skipped", "cancelled"), or "".
-func timingState(e *deskRun, id string) string {
-	for _, t := range e.timing {
-		if t.Step == id {
-			return t.State
-		}
-	}
-	return ""
-}
-
 // stepLook is a step's mark, word and style.
 func (m deskModel) stepLook(e *deskRun, s runview.StepState) (string, string, lipgloss.Style) {
-	st := m.styles
-	switch ts := timingState(e, s.ID); {
-	case ts == "skipped" && s.Status == runview.StepPending:
-		return m.glyph.Skipped, "skipped", st.Dim
-	case ts == "cancelled" && s.Status != runview.StepClosed:
-		return m.glyph.Skipped, "cancelled", st.Dim
-	}
-	switch s.Status {
-	case runview.StepRunning:
-		return m.spin(), "running", st.Active
-	case runview.StepClosed:
-		return m.glyph.Done, "done", st.OK
-	case runview.StepFailed:
-		return m.glyph.Failed, "failed", st.Danger
-	case runview.StepInterrupted:
-		return m.glyph.Interrupted, "interrupted", st.Warn
-	}
-	return m.glyph.Pending, "pending", st.Dim
+	return m.drawMark(runview.StepMark(m.glyph.Glyphs, s.Status, runview.RunnerState(e.timing, s.ID)))
 }
 
 // spin is the running mark for the current frame.
@@ -198,6 +171,7 @@ func (m deskModel) flowBody(iw, ih int) deskBody {
 
 	var lines []string
 	var lineStep []int
+	lineBand := map[int]int{} // a box line of the full form -> its band
 	push := func(step int, ls ...string) {
 		for _, l := range ls {
 			lines = append(lines, l)
@@ -236,10 +210,16 @@ func (m deskModel) flowBody(iw, ih int) deskBody {
 
 	for bi, band := range bands {
 		if full {
+			first := len(lines)
 			m.fullBand(e, band, cur, iw, now, &lines, &lineStep, stepLine)
-			// The connector to what comes next.
-			center := m.bandCenter(len(band), iw)
-			push(-1, strings.Repeat(" ", center)+st.Dim.Render("│"), strings.Repeat(" ", center)+st.Dim.Render("▼"))
+			for i := first; i < len(lines); i++ {
+				lineBand[i] = bi
+			}
+			if bi < len(bands)-1 {
+				// The connector to the next band.
+				center := m.bandCenter(len(band), iw)
+				push(-1, strings.Repeat(" ", center)+st.Dim.Render("│"), strings.Repeat(" ", center)+st.Dim.Render("▼"))
+			}
 			continue
 		}
 		for pos, si := range band {
@@ -259,7 +239,7 @@ func (m deskModel) flowBody(iw, ih int) deskBody {
 			if si == cur {
 				marker = ">"
 			}
-			dur := ageShort(m.stepDur(e, s, now))
+			dur := runview.Age(m.stepDur(e, s, now))
 			flags := strings.Join(m.stepFlags(e, s), " · ")
 			row := marker + st.Dim.Render(gutter) + " " + sty.Render(gl) + " " +
 				st.Fg.Render(padTo(midCut(capSafe(s.ID, 64), idW), idW)) + " " + sty.Render(padTo(w, 9)) +
@@ -285,6 +265,22 @@ func (m deskModel) flowBody(iw, ih int) deskBody {
 		rowOfLine: func(i int) (int, bool) {
 			r := lineStep[i]
 			return r, r >= 0
+		},
+		// In the full form a wave's boxes sit side by side on the same lines:
+		// the column picks the box.
+		rowAt: func(i, col int) (int, bool) {
+			bi, ok := lineBand[i]
+			if !ok {
+				r := lineStep[i]
+				return r, r >= 0
+			}
+			band := bands[bi]
+			total, each := m.boxWidths(len(band), iw)
+			off := col - max((iw-total)/2, 0)
+			if off < 0 || off >= total || off%(each+1) == each {
+				return 0, false // the margin, or the gap between two boxes
+			}
+			return band[off/(each+1)], true
 		},
 		rows:       len(steps),
 		cursorLine: stepLine[cur],
@@ -337,7 +333,7 @@ func (m deskModel) fullBand(e *deskRun, band []int, cur, iw int, now time.Time, 
 		}
 		title := marker + sty.Render(gl) + " " + st.Fg.Render(capSafe(s.ID, 48))
 		status := w
-		if d := ageShort(m.stepDur(e, s, now)); d != "" {
+		if d := runview.Age(m.stepDur(e, s, now)); d != "" {
 			status += " " + d
 		}
 		if flags := m.stepFlags(e, s); len(flags) > 0 {
@@ -487,30 +483,14 @@ func (m deskModel) notices(e *deskRun, now time.Time) []string {
 	case runview.LiveStale:
 		since := "never"
 		if !e.state.LastEvent.IsZero() {
-			since = ageShort(now.Sub(e.state.LastEvent))
+			since = runview.Age(now.Sub(e.state.LastEvent))
 		}
-		out = append(out, st.Warn.Render(fmt.Sprintf("stale: no events for %s (limit %s)", since, ageShort(e.spec.Live.StaleAfter))))
+		out = append(out, st.Warn.Render(fmt.Sprintf("stale: no events for %s (limit %s)", since, runview.Age(e.spec.Live.StaleAfter))))
 	}
 	if e.note != "" && now.Before(e.noteUntil) {
 		out = append(out, st.Muted.Render(capSafe(e.note, 96)))
 	}
 	return out
-}
-
-// ageShort is a duration in one unit: 12s, 4m, 3h, 2d. Zero and negative
-// durations are empty.
-func ageShort(d time.Duration) string {
-	switch {
-	case d <= 0:
-		return ""
-	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d/time.Second))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d/time.Minute))
-	case d < 48*time.Hour:
-		return fmt.Sprintf("%dh", int(d/time.Hour))
-	}
-	return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
 }
 
 // midCut shortens s to w runes by cutting out its middle, so a suffix such as

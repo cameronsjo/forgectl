@@ -32,7 +32,7 @@ const (
 )
 
 const (
-	deskListW = 28
+	deskListW = 30
 	deskFlowW = 62
 
 	// deskTooSmall is shown below the minimum size.
@@ -257,13 +257,13 @@ type tabSegment struct {
 // fits the width, else the shown view's name and the other numbers.
 func (m deskModel) tabSegments() []tabSegment {
 	full := make([]tabSegment, 0, viewCount)
-	total := viewCount - 1
+	total := viewCount - 1 + 2 // the spaces between, and the shown one's brackets
 	for v := viewFlow; v <= viewCount; v++ {
 		t := fmt.Sprintf("%d %s", v, deskViewNames[v])
 		full = append(full, tabSegment{v, t})
-		total += len(t) + 2 // the brackets of the shown one
+		total += len(t)
 	}
-	if total-2 <= m.width {
+	if total <= m.width {
 		return full
 	}
 	out := make([]tabSegment, 0, viewCount)
@@ -316,8 +316,11 @@ func (m deskModel) headerView() string {
 	if c := m.replayChip(); c != "" {
 		parts = append(parts, s.Accent.Render(c))
 	}
-	if n := len(m.failedSources()); n > 0 {
-		parts = append(parts, s.Danger.Render(fmt.Sprintf("%d source failed", n)))
+	switch n := len(m.failedSources()); {
+	case n == 1:
+		parts = append(parts, s.Danger.Render("1 source failed"))
+	case n > 1:
+		parts = append(parts, s.Danger.Render(fmt.Sprintf("%d sources failed", n)))
 	}
 	if e := m.sel(); e != nil {
 		if c := m.ingestChip(e); c != "" {
@@ -481,41 +484,46 @@ func (m *deskModel) settle(v int) {
 // rowCount is the number of selectable rows in view v.
 func (m deskModel) rowCount(v int) int { return m.bodyFor(v).rows }
 
-// rowAtLine maps a line of view v to its selectable row.
-func (m deskModel) rowAtLine(v, line int) (int, bool) {
+// rowAtLine maps a line and column of view v to its selectable row.
+func (m deskModel) rowAtLine(v, line, col int) (int, bool) {
 	b := m.bodyFor(v)
 	if b.rowOfLine == nil || line < 0 || line >= b.n {
 		return 0, false
 	}
+	if b.rowAt != nil {
+		return b.rowAt(line, col)
+	}
 	return b.rowOfLine(line)
 }
 
-// hit maps a screen cell to the pane it is in and the line inside that pane.
-func (m deskModel) hit(x, y int) (pane, line int, ok bool) {
+// hit maps a screen cell to the pane it is in, and the line and column
+// inside that pane's content (past its border and padding).
+func (m deskModel) hit(x, y int) (pane, line, col int, ok bool) {
 	l := m.layout()
 	if l.kind == layoutSmall || m.showHelp {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	line = y - l.y0 - 1
 	if line < 0 || line >= l.panelH-2 || x < 0 || x >= m.width {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
+	const inset = 2 // a pane's border and padding
 	switch l.kind {
 	case layoutSingle:
-		return paneFlow, line, true
+		return paneFlow, line, x - inset, true
 	case layoutMid:
 		if x < l.flowW {
-			return paneFlow, line, true
+			return paneFlow, line, x - inset, true
 		}
-		return paneSide, line, true
+		return paneSide, line, x - l.flowW - inset, true
 	}
 	switch {
 	case x < l.listW:
-		return paneList, line, true
+		return paneList, line, x - inset, true
 	case x < l.listW+l.flowW:
-		return paneFlow, line, true
+		return paneFlow, line, x - l.listW - inset, true
 	}
-	return paneSide, line, true
+	return paneSide, line, x - l.listW - l.flowW - inset, true
 }
 
 // --- help ---

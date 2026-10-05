@@ -5,6 +5,7 @@ package runview
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"regexp"
 	"strconv"
@@ -149,6 +150,11 @@ type rawSpec struct {
 func LoadSpec(path string) (*Spec, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: the operator names their own spec file; it is trusted config
 	if err != nil {
+		// The message names path once: a PathError would name it again.
+		var pe *fs.PathError
+		if errors.As(err, &pe) {
+			err = pe.Err
+		}
 		return nil, fmt.Errorf("%w %s: %w", ErrSpec, termsafe.QuotePath(path), termsafe.Error(err))
 	}
 	var raw rawSpec
@@ -178,12 +184,14 @@ func (raw *rawSpec) validate(hasGate bool) (spec *Spec, key, problem string) {
 			return nil, req.key, "required"
 		}
 	}
+	// runs and summaries match one '*'; the log and metrics paths are
+	// opened as written, so a '*' in them would never match a file.
 	for _, p := range []struct {
 		key, value string
-		stars      int // -1: at most one
+		stars      int
 	}{
 		{"runs", raw.Runs, 1}, {"summaries", raw.Summaries, 1},
-		{"log.path", raw.Log.Path, -1}, {"metrics.path", raw.Metrics.Path, -1},
+		{"log.path", raw.Log.Path, 0}, {"metrics.path", raw.Metrics.Path, 0},
 	} {
 		if p.value == "" {
 			continue
@@ -295,12 +303,15 @@ func (raw *rawSpec) validate(hasGate bool) (spec *Spec, key, problem string) {
 }
 
 // checkPattern vets a path pattern the sources will resolve under the run
-// root. Both separators count, so a pattern means the same on every OS.
-// stars is the exact number of '*' required, or -1 for at most one.
+// root. Both separators count, so a pattern means the same on every OS, and
+// ':' is refused anywhere, since a drive letter or a stream name would
+// reach past the root. stars is the exact number of '*' required.
 func checkPattern(p string, stars int) string {
 	switch {
-	case strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`) || strings.Contains(p, ":"):
+	case strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`) || driveRe.MatchString(p):
 		return "must be a relative path"
+	case strings.Contains(p, ":"):
+		return "must not contain ':'"
 	case strings.ContainsAny(p, "?["):
 		return "only '*' is allowed as a wildcard"
 	}
@@ -309,15 +320,17 @@ func checkPattern(p string, stars int) string {
 			return "must not contain '..'"
 		}
 	}
-	n := strings.Count(p, "*")
-	if stars < 0 && n > 1 {
-		return "must contain at most one '*'"
-	}
-	if stars > 0 && n != stars {
+	switch n := strings.Count(p, "*"); {
+	case stars == 0 && n > 0:
+		return "is opened as written and must not contain '*'"
+	case stars > 0 && n != stars:
 		return "must contain exactly one '*'"
 	}
 	return ""
 }
+
+// driveRe is a pattern that starts with a drive letter, such as C:.
+var driveRe = regexp.MustCompile(`^[A-Za-z]:`)
 
 // parseExit parses an [exits] key. Only the canonical decimal form counts,
 // so "03" and "+3" are not silently read as 3.

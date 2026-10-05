@@ -1,5 +1,5 @@
  forgectl desk  ·  queue: 2 waiting · lost: 1
-[1 flow] 2 3 4 5 6
+[1 flow] 2 events 3 timeline 4 metrics 5 summary 6 queue
 ╭ flow ────────────────────────────────────────────────────╮
 │ alpha-run-7  ◐ live · 12s ago                            │
 │  │ ✓ fetch done     59s                                  │

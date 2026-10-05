@@ -124,6 +124,9 @@ func TestLoadSpecErrorsNameFileAndKey(t *testing.T) {
 		{"dotdot log path", `path = "out/events.jsonl"`, `path = "../out/events.jsonl"`, "log.path"},
 		{"absolute log path", `path = "out/events.jsonl"`, `path = "/out/events.jsonl"`, "log.path"},
 		{"two stars log path", `path = "out/events.jsonl"`, `path = "out/*/*.jsonl"`, "log.path"},
+		{"one star log path", `path = "out/events.jsonl"`, `path = "out/*.jsonl"`, "must not contain '*'"},
+		{"one star metrics path", `path = "out/usage.jsonl"`, `path = "out/*.jsonl"`, "metrics.path"},
+		{"colon in a log path", `path = "out/events.jsonl"`, `path = "out/events.jsonl:alt"`, "log.path: must not contain ':'"},
 		{"dotdot metrics path", `path = "out/usage.jsonl"`, `path = "out/../../usage.jsonl"`, "metrics.path"},
 		{"backslash dotdot metrics path", `path = "out/usage.jsonl"`, `path = 'out\..\usage.jsonl'`, "metrics.path"},
 		{"exits key over 255", `"3" = "audit rejected"`, `"256" = "audit rejected"`, `exits."256"`},
@@ -181,5 +184,22 @@ func TestLoadSpecMissingFileNamesFile(t *testing.T) {
 	_, err := LoadSpec(path)
 	if err == nil || !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), path) {
 		t.Fatalf("LoadSpec = %v, want a not-exist error naming %s", err, path)
+	}
+	if n := strings.Count(err.Error(), "absent.toml"); n != 1 {
+		t.Errorf("the error names the file %d times: %v", n, err)
+	}
+}
+
+// A drive letter reads as an absolute path; any other ':' is named as such.
+func TestCheckPatternNamesTheColon(t *testing.T) {
+	for p, want := range map[string]string{
+		"C:runs/*":   "must be a relative path",
+		"runs:x/*":   "must not contain ':'",
+		"runs/*":     "",
+		"out/a.json": "must contain exactly one '*'",
+	} {
+		if got := checkPattern(p, 1); got != want {
+			t.Errorf("checkPattern(%q) = %q, want %q", p, got, want)
+		}
 	}
 }

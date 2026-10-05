@@ -100,7 +100,7 @@ The terminal's width picks the layout:
 
 | Columns | Layout |
 |---|---|
-| 150 or more | run list (28 columns) │ flow (62) │ side view |
+| 150 or more | run list (30 columns) │ flow (62) │ side view |
 | 100–149 | a run strip in the header (`‹ 3/10 beta-… ◐ live 12s ›`); flow (62) │ side view |
 | 40–99 | one pane, with a tab strip `1 flow 2 events 3 timeline 4 metrics 5 summary 6 queue` |
 | under 40, or under 12 rows | `terminal too small (needs 40×12) — resize or press q` |
@@ -128,7 +128,7 @@ The footer lists the keys that apply in the current mode. `?` shows all of them 
 | `r` · `R` | Refresh the selected run · refresh everything. Refreshes are at least 15 s apart; the footer says when one is declined |
 | `m` | Mouse capture on or off. With it on, hold Shift and drag to select text |
 | `esc` | Close one level: modal, then replay, then filter |
-| `q` | Close a modal, or quit. Quitting leaves running jobs running |
+| `q` | Close a modal, or quit. Quitting leaves running jobs running; the footer says so (`q quit; jobs keep running`) |
 | `ctrl+c` | Quit |
 
 ### Approving an item
@@ -140,12 +140,25 @@ The footer lists the keys that apply in the current mode. `?` shows all of them 
 - the body, undimmed, with line numbers, wrapped and scrollable, and an `N more lines ↓` hint;
 - for a batch, `hash covers the manifest's lines, not the scripts it calls`.
 
-Only `y` confirms, and only when the key is not a repeat, at least 400 ms have passed since the modal opened, and the body has been scrolled to the end (or fits on screen). `enter`, a click, and keys typed before the modal opened never confirm. `n` or `esc` cancels. If a refresh no longer lists the item, or lists it with a different hash, the modal closes with `changed — re-review`.
+`a` reads the item again before the modal opens, and the modal opens only if its bytes still have the hash the queue listed. Keys typed while it reads go to the queue view, not the modal.
 
-- **A background item** is claimed with the full hash shown in the modal and handed to a detached supervisor. If the start fails after the claim, the item moves to `skipped/` with reason `launch-failed`.
+Only `y` confirms, and only when all of these hold:
+
+- the key is not a repeat (the dashboard asks the terminal to report repeats; not every terminal does);
+- it arrives at least 250 ms after the key event before it, so a held `y` or keys typed together never confirm, on any terminal;
+- at least 400 ms have passed since the modal opened;
+- the body has been scrolled to the end (or fits on screen), and at least 400 ms have passed since its last line first came on screen.
+
+`enter` and a click never confirm. `n` or `esc` cancels. If a refresh no longer lists the item, or lists it with a different hash, the modal closes with `changed — re-review`. A refresh that cannot read the queue keeps the items it listed last and leaves the modal open.
+
+- **A background item** is claimed with the full hash shown in the modal and handed to a detached supervisor. If the claim fails after it was recorded, the item moves to `skipped/` with reason `claim-failed`; if the start fails after the claim, with reason `launch-failed`.
 - **A `# TTY: yes` item** runs in this terminal. The dashboard closes, the item runs in the foreground with its signals forwarded, and the command prints `ran <name>: exit N (<meaning>) — press any key`. The dashboard then reopens on that run with your view restored.
+  - Ctrl-Z does nothing to the item: `SIGTSTP`, `SIGTTIN` and `SIGTTOU` are ignored in its process group, because a stopped group would leave the desk waiting with no terminal to resume it from.
+  - Ctrl-C reaches the item, not the desk. An item killed by `INT`, `TERM`, `HUP` or `QUIT` is recorded as `interrupted`.
+  - When the item exits, anything it left running in its process group is ended (`SIGTERM`, then `SIGKILL` after the grace period) before the run is recorded.
+  - An item that cannot start prints `desk: <name>: <cause> — press any key` and waits. If the desk cannot take the terminal back, it records the run and exits.
 
-`s` skips a waiting or `lost` item. For a waiting item the footer shows `skipped <name> · u to undo`; for a `lost` item it shows `skipped <name>`. `u` re-arms only an item skipped with reason `operator` that was never claimed. A skipped `lost` item was claimed, so `u` cannot undo it. An item skipped as `changed` cannot be re-armed either, because its hash is fixed when it is queued. Queue either one again to run it.
+`s` skips a waiting or `lost` item. For a waiting item the footer shows `skipped <name> · u to undo`; for a `lost` item it shows `skipped <name>`. `u` re-arms only an item skipped with reason `operator` that was never claimed. A skipped `lost` item was claimed, so `u` cannot undo it, and the queue does not offer it. An item skipped as `changed` cannot be re-armed either, because its hash is fixed when it is queued. Queue either one again to run it.
 
 ## States
 
@@ -240,7 +253,7 @@ stale_after = "10m"
 | `runs` | yes | A pattern with exactly one `*`. Each match is one run directory. A match must be a real directory, not a symlink |
 | `summaries` | no | A pattern with exactly one `*`. The text the `*` matched is the run name. A summary whose name matches a run directory joins that run; one with no run directory is a summary-only run |
 
-**Patterns** (`runs`, `summaries`, `log.path`, `metrics.path`) are relative paths. A pattern must not start with `/` or `\`, contain `:`, contain a `..` component, or use `?` or `[`. `*` is the only wildcard. A run or summary name is the text `*` matched, and it must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$`; other names are not listed.
+**Patterns** (`runs`, `summaries`, `log.path`, `metrics.path`) are relative paths. A pattern must not start with `/` or `\`, contain `:`, contain a `..` component, or use `?` or `[`. `*` is the only wildcard, and only `runs` and `summaries` take one: `log.path` and `metrics.path` are opened as written, so they may not contain `*`. A run or summary name is the text `*` matched, and it must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$`; other names are not listed.
 
 ### `[log]`
 
@@ -335,6 +348,8 @@ The dashboard needs a terminal. These two verbs give the same information withou
 
 **They change the queue.** Listing the desk runs its scan, and the scan does two things: it fixes the hash of an item that was dropped into `pending/` by hand and not hashed yet, and it moves an item whose bytes changed since its hash was fixed to `skipped/` with reason `changed`. The dashboard's list reload does the same.
 
+One scan reads at most 200 pending items and 64 MiB of their content, in name order. Items past either cap are not read, so their hashes are not fixed yet; the queue view counts them (`N more pending not shown`), and a later scan reads them once earlier items leave `pending/`.
+
 ### `desk runs [--spec FILE]... [--json]`
 
 Lists every run from every source. Without `--json` it prints one run row per line, in the dashboard's order. With `--json` it prints one JSON array:
@@ -355,7 +370,7 @@ Lists every run from every source. Without `--json` it prints one run row per li
 
 - **`source`**: the source name: a spec's `name`, or `desk`.
 - **`kind`**: `log`, `summary`, or `desk`.
-- **`live`**: `live`, `ended`, or `stale` for a spec run; `running`, `ended`, `lost`, or `skipped` for a desk run. A desk item still waiting for approval is in the queue, not a run, so it is not listed.
+- **`live`**: `live`, `ended`, or `stale` for a spec run; `waiting`, `running`, `ended`, `lost`, or `skipped` for a desk run. `waiting` is an item claimed whose run has not begun yet. A desk item still waiting for approval is in the queue, not a run, so it is not listed.
 - **`updated`**: the time of the run's last change, in RFC 3339, or `null` when it is not known.
 - **`exit`**: the exit code, or `null` before the run ends.
 - **`partial`**: `true` when a file hit the 32 MiB cap.
@@ -387,7 +402,7 @@ Prints one run. Without `--json` it prints the compact flow as plain text. With 
 ```
 
 - **`--from SOURCE`** picks the source when two sources hold a run with that name. Without it, a shared name exits 2 with `run "x" is in sources a and b; pass --from`.
-- **`--at N`** replays: the state after the first `N` events, the same state the dashboard's replay shows at event `N`. An `N` past the last event shows the whole run.
+- **`--at N`** replays: the state after the first `N` events, the same state the dashboard's replay shows at event `N`. For a desk run that means the state the events give, not the desk's word for the run now: a finished run replayed at `0` is not `ended`. An `N` past the last event shows the whole run.
 - Every time (`start`, `end`, `restarts`, `last_event`) is RFC 3339 in UTC, or `null` when it is not known: a step that has not started, or a desk event, which carries no time of its own.
 
 Both `--json` verbs escape control characters in every string. A failure before any output follows the [`--json` stderr contract](../json-contract.md).

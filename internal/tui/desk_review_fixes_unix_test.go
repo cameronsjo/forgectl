@@ -113,3 +113,71 @@ func TestAClaimedSkipOffersNoUndo(t *testing.T) {
 	m = pressDesk(t, m, key("u"))
 	mustContain(t, "footer", screen(t, m), "claimed before it was skipped")
 }
+
+// TestAClickPicksTheBoxUnderIt: in the full flow form a wave's boxes share
+// lines, so the column decides which step a click selects, and a second click
+// on that box opens it.
+func TestAClickPicksTheBoxUnderIt(t *testing.T) {
+	src := &fakeDeskSource{name: "desk", refs: []runview.RunRef{{Source: "desk", Name: "01-wave", Kind: runview.KindDesk, Updated: deskNow}},
+		deltas: map[string][]runview.Delta{"01-wave": {{
+			Defs: []runview.StepDef{{ID: "root"}, {ID: "left-step", After: []string{"root"}}, {ID: "right-step", After: []string{"root"}}},
+			Live: runview.LiveRunning,
+		}}}}
+	m := openDesk(t, optsFor(src), 160, 50)
+	lines := strings.Split(screen(t, m), "\n")
+	x, y := -1, -1
+	for i, l := range lines {
+		if c := strings.Index(l, "right-step"); c >= 0 && strings.Contains(l, "left-step") {
+			x, y = len([]rune(l[:c])), i
+			break
+		}
+	}
+	if y < 0 {
+		t.Fatalf("no line shows both boxes:\n%s", strings.Join(lines, "\n"))
+	}
+	m = send(t, m, click(x, y))
+	if m.cur[viewFlow] != 2 {
+		t.Fatalf("a click on the right box selected step %d, want 2", m.cur[viewFlow])
+	}
+	m = send(t, m, click(x, y))
+	if md := m.topModal(); md == nil || md.kind != modalStep || md.step != "right-step" {
+		t.Fatalf("a second click opened %+v, want the right step", md)
+	}
+}
+
+// TestTheTabStripShowsEveryNameWhenItFits: the full strip with the shown
+// view's brackets is 56 columns; at 56 it is drawn whole.
+func TestTheTabStripShowsEveryNameWhenItFits(t *testing.T) {
+	m := openDesk(t, optsFor(oneSource(nil, nil)), 56, 20)
+	if segs := m.tabSegments(); segs[1].text != "2 events" {
+		t.Fatalf("at 56 columns the strip is %+v", segs)
+	}
+	m = openDesk(t, optsFor(oneSource(nil, nil)), 55, 20)
+	if segs := m.tabSegments(); segs[1].text != "2" {
+		t.Fatalf("at 55 columns the strip is %+v", segs)
+	}
+}
+
+// TestAResetEndsTheReplayOfThatRun: the replay counted the replaced log's
+// events, so a reset of the replayed run ends it.
+func TestAResetEndsTheReplayOfThatRun(t *testing.T) {
+	src := oneSource([]runview.RunRef{runRef("r", deskNow)}, map[string][]runview.Delta{
+		"r": {{Events: []runview.Event{{Seq: 1, Name: "stage_started", Step: "fetch"}}}, {Reset: true}},
+	})
+	m := openDesk(t, optsFor(src), 120, 30)
+	m = pressDesk(t, m, key("p"))
+	if m.replay == nil {
+		t.Fatal("p did not start a replay")
+	}
+	m = pressDesk(t, m, key("r"))
+	if m.replay != nil {
+		t.Fatal("the replay outlived a reset of its run")
+	}
+}
+
+// TestTwoFailedSourcesArePlural.
+func TestTwoFailedSourcesArePlural(t *testing.T) {
+	opts := optsFor(oneSource(nil, nil))
+	opts.Failed = []DeskSourceFailure{{Name: "a", Err: errors.New("x")}, {Name: "b", Err: errors.New("y")}}
+	mustContain(t, "header", screen(t, openDesk(t, opts, 120, 30)), "2 sources failed")
+}

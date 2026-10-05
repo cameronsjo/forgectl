@@ -1,50 +1,50 @@
  forgectl desk  ·  queue: 2 waiting · lost: 1
-╭ runs ─┤ 5 ├──────────────╮╭ > flow ────────────────────────────────────────────────────╮╭ events ─┤ [2 events] 3 4 5 6 ├─────────────────────────────────────╮
-│ >◐ live    alph…un-7 12s ││ alpha-run-7  pipeline                                      ││  11:50:00 rst              worker_boot                             │
-│  ✓ ok      beta…un-7 4m  ││ ◐ live · 12s ago                                           ││  11:50:01 start fetch      stage_started try=1                     │
-│  ✗ 3       gamm…un-7 1h  ││                                                            ││  11:51:00 ok    fetch      stage_done try=1                        │
-│  ! stale   nigh…y-b3 2h  ││        ╭ ✓ fetch ─────────────────────────────────╮        ││  11:51:01 start build      stage_started try=1                     │
-│  ? lost    batch-04  3h  ││        │ pull the inputs                          │        ││  11:55:00 rej   build      stage_refused try=1 rc=1 err=lint       │
-│                          ││        │ done 59s                                 │        ││  11:55:30 start build      stage_started try=2                     │
-│                          ││        ╰──────────────────────────────────────────╯        ││  11:58:00 rej   build      stage_refused try=2 rc=1 err=lint       │
-│                          ││                              │                             ││  11:58:30 start build      stage_started try=3                     │
-│                          ││                              ▼                             ││ >11:59:48 ·                heartbeat                               │
-│                          ││        ╭ > ◐ build ───────────────────────────────╮        ││                                                                    │
-│                          ││        │ compile and package                      │        ││                                                                    │
-│                          ││        │ running 1m · try 3 · ↺ rej 2/3           │        ││                                                                    │
-│                          ││        ╰──────────────────────────────────────────╯        ││                                                                    │
-│                          ││                              │                             ││                                                                    │
-│                          ││                              ▼                             ││                                                                    │
-│                          ││        ╭ · test ──────────────────────────────────╮        ││                                                                    │
-│                          ││        │ run the suites                           │        ││                                                                    │
-│                          ││        │ pending                                  │        ││                                                                    │
-│                          ││        ╰──────────────────────────────────────────╯        ││                                                                    │
-│                          ││                              │                             ││                                                                    │
-│                          ││                              ▼                             ││                                                                    │
-│                          ││        ╭ · ship ──────────────────────────────────╮        ││                                                                    │
-│                          ││        │ publish the result                       │        ││                                                                    │
-│                          ││        │ pending                                  │        ││                                                                    │
-│                          ││        ╰──────────────────────────────────────────╯        ││                                                                    │
-│                          ││                              │                             ││                                                                    │
-│                          ││                              ▼                             ││                                                                    │
-│                          ││                                                            ││                                                                    │
-│                          ││ gate: accepted? · up to 3 rejects                          ││                                                                    │
-│                          ││ · pending audit ok?                                        ││                                                                    │
-│                          ││ · not finished                                             ││                                                                    │
-│                          ││                                                            ││                                                                    │
-│                          ││                                                            ││                                                                    │
-│                          ││                                                            ││                                                                    │
-│                          ││                                                            ││                                                                    │
-│                          ││                                                            ││                                                                    │
-│                          ││                                                            ││                                                                    │
-│                          ││                                                            ││                                                                    │
-│                          ││                                                            ││                                                                    │
-│                          ││                                                            ││                                                                    │
-│                          ││                                                            ││                                                                    │
-│                          ││                                                            ││                                                                    │
-│                          ││                                                            ││                                                                    │
-│                          ││                                                            ││                                                                    │
-│                          ││                                                            ││                                                                    │
-╰──────────────────────────╯╰────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
+╭ runs ─┤ 5 ├────────────────╮╭ > flow ────────────────────────────────────────────────────╮╭ events ─┤ [2 events] 3 4 5 6 ├───────────────────────────────────╮
+│ >◐ live    alpha-run-7 12s ││ alpha-run-7  pipeline                                      ││  11:50:00 rst              worker_boot                           │
+│  ✓ ok      beta-run-7  4m  ││ ◐ live · 12s ago                                           ││  11:50:01 start fetch      stage_started try=1                   │
+│  ✗ 3       gamma-run-7 1h  ││                                                            ││  11:51:00 ok    fetch      stage_done try=1                      │
+│  ! stale   nightly-b3  2h  ││        ╭ ✓ fetch ─────────────────────────────────╮        ││  11:51:01 start build      stage_started try=1                   │
+│  ? lost    batch-04    3h  ││        │ pull the inputs                          │        ││  11:55:00 rej   build      stage_refused try=1 rc=1 err=lint     │
+│                            ││        │ done 59s                                 │        ││  11:55:30 start build      stage_started try=2                   │
+│                            ││        ╰──────────────────────────────────────────╯        ││  11:58:00 rej   build      stage_refused try=2 rc=1 err=lint     │
+│                            ││                              │                             ││  11:58:30 start build      stage_started try=3                   │
+│                            ││                              ▼                             ││ >11:59:48 ·                heartbeat                             │
+│                            ││        ╭ > ◐ build ───────────────────────────────╮        ││                                                                  │
+│                            ││        │ compile and package                      │        ││                                                                  │
+│                            ││        │ running 1m · try 3 · ↺ rej 2/3           │        ││                                                                  │
+│                            ││        ╰──────────────────────────────────────────╯        ││                                                                  │
+│                            ││                              │                             ││                                                                  │
+│                            ││                              ▼                             ││                                                                  │
+│                            ││        ╭ · test ──────────────────────────────────╮        ││                                                                  │
+│                            ││        │ run the suites                           │        ││                                                                  │
+│                            ││        │ pending                                  │        ││                                                                  │
+│                            ││        ╰──────────────────────────────────────────╯        ││                                                                  │
+│                            ││                              │                             ││                                                                  │
+│                            ││                              ▼                             ││                                                                  │
+│                            ││        ╭ · ship ──────────────────────────────────╮        ││                                                                  │
+│                            ││        │ publish the result                       │        ││                                                                  │
+│                            ││        │ pending                                  │        ││                                                                  │
+│                            ││        ╰──────────────────────────────────────────╯        ││                                                                  │
+│                            ││                                                            ││                                                                  │
+│                            ││ gate: accepted? · up to 3 rejects                          ││                                                                  │
+│                            ││ · pending audit ok?                                        ││                                                                  │
+│                            ││ · not finished                                             ││                                                                  │
+│                            ││                                                            ││                                                                  │
+│                            ││                                                            ││                                                                  │
+│                            ││                                                            ││                                                                  │
+│                            ││                                                            ││                                                                  │
+│                            ││                                                            ││                                                                  │
+│                            ││                                                            ││                                                                  │
+│                            ││                                                            ││                                                                  │
+│                            ││                                                            ││                                                                  │
+│                            ││                                                            ││                                                                  │
+│                            ││                                                            ││                                                                  │
+│                            ││                                                            ││                                                                  │
+│                            ││                                                            ││                                                                  │
+│                            ││                                                            ││                                                                  │
+│                            ││                                                            ││                                                                  │
+│                            ││                                                            ││                                                                  │
+│                            ││                                                            ││                                                                  │
+╰────────────────────────────╯╰────────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────╯
 
-[ < prev run • 1-6 view • tab next pane • ↑/k up • / filter • r refresh run • ? help • q quit
+[ < prev run • 1-6 view • tab next pane • ↑/k up • / filter • r refresh run • ? help • q quit; jobs keep running

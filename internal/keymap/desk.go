@@ -59,7 +59,7 @@ func NewDesk() Desk {
 		Mouse:      key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "mouse on/off")),
 		Help:       key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Back:       key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-		Quit:       key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
+		Quit:       key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit; jobs keep running")),
 		ForceQuit:  key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
 	}
 }

@@ -268,16 +268,18 @@ func loadDeskRun(src runview.Source, ref runview.RunRef, now time.Time) (*deskRu
 	r.delta = d
 	r.folder = runview.NewFolder(r.spec, d.Defs)
 	r.folder.Append(d.Events...)
-	r.at(r.folder.Len(), now)
+	r.at(r.folder.Len(), now, false)
 	return r, nil
 }
 
 // at folds the run to its first i events. A desk run's state is the desk's
-// own word; any other run's is the fold's, which judges staleness at now.
-func (r *deskRun) at(i int, now time.Time) {
+// own word; any other run's is the fold's, which judges staleness at now. A
+// replay (--at) is the fold's alone, as the dashboard's replay shows it:
+// the desk's word is the run's state now, not at event i.
+func (r *deskRun) at(i int, now time.Time, replay bool) {
 	r.state = r.folder.At(i, now)
 	r.live = r.state.Live
-	if r.delta.Live != "" {
+	if r.delta.Live != "" && !replay {
 		r.live = r.delta.Live
 	}
 }
@@ -310,21 +312,10 @@ func listDeskRuns(sources []runview.Source, now time.Time, only func(runview.Run
 			runs = append(runs, r)
 		}
 	}
-	slices.SortStableFunc(runs, func(a, b *deskRun) int {
-		if la, lb := a.isLive(), b.isLive(); la != lb {
-			if la {
-				return -1
-			}
-			return 1
-		}
-		if ta, tb := a.activity(), b.activity(); !ta.Equal(tb) {
-			if ta.After(tb) {
-				return -1
-			}
-			return 1
-		}
-		return strings.Compare(a.ref.Name+"\x00"+a.ref.Source, b.ref.Name+"\x00"+b.ref.Source)
-	})
+	order := func(r *deskRun) runview.RunOrder {
+		return runview.RunOrder{Live: r.isLive(), Activity: r.activity(), Name: r.ref.Name, Source: r.ref.Source}
+	}
+	slices.SortStableFunc(runs, func(a, b *deskRun) int { return runview.CompareRuns(order(a), order(b)) })
 	return runs, failed
 }
 
@@ -442,51 +433,17 @@ func jsonTime(t time.Time) *string {
 	return &s
 }
 
-// deskGlyphs is the run and step legend of docs/commands/desk.md, with its
-// ASCII fallback for --no-icons.
-type deskGlyphs struct{ pending, running, done, failed, stale, lost, skipped string }
-
-func pickDeskGlyphs(noIcons bool) deskGlyphs {
-	if noIcons {
-		return deskGlyphs{".", "*", "+", "x", "!", "?", "-"}
-	}
-	return deskGlyphs{"·", "◐", "✓", "✗", "!", "?", "–"}
-}
-
-// look is a run's mark and word, as the dashboard's run row shows them.
-func (g deskGlyphs) look(r *deskRun) (string, string) {
-	switch r.live {
-	case runview.LiveLive:
-		return g.running, "live"
-	case runview.LiveRunning:
-		return g.running, "running"
-	case runview.LiveEnded:
-		switch {
-		case r.state.Exit == nil:
-			return g.pending, "ended"
-		case *r.state.Exit == 0:
-			return g.done, "ok"
-		}
-		return g.failed, strconv.Itoa(*r.state.Exit)
-	case runview.LiveStale:
-		if errors.Is(r.delta.Err, os.ErrNotExist) && len(r.delta.Events) == 0 {
-			return g.pending, "new"
-		}
-		return g.stale, "stale"
-	case runview.LiveLost:
-		return g.lost, "lost"
-	case runview.LiveWaiting:
-		return g.pending, "waiting"
-	case runview.LiveSkipped:
-		return g.skipped, "skipped"
-	}
-	return g.pending, "pending"
+// look is a run's mark and word, as the dashboard's run row shows them
+// (runview's shared legend; --no-icons picks its ASCII marks).
+func look(g runview.Glyphs, r *deskRun) (string, string) {
+	mk := runview.RunMark(g, r.live, r.state.Exit, errors.Is(r.delta.Err, os.ErrNotExist) && len(r.delta.Events) == 0)
+	return mk.Glyph, mk.Word
 }
 
 // writeDeskRunsText prints one run row per line: mark, word, name and the
 // time since the last event. A name two sources share carries @source.
 func writeDeskRunsText(w io.Writer, runs []*deskRun, now time.Time, noIcons bool) {
-	g := pickDeskGlyphs(noIcons)
+	g := runview.PickGlyphs(noIcons)
 	count := map[string]int{}
 	for _, r := range runs {
 		count[r.ref.Name]++
@@ -501,27 +458,14 @@ func writeDeskRunsText(w io.Writer, runs []*deskRun, now time.Time, noIcons bool
 		width = max(width, len([]rune(names[i])))
 	}
 	for i, r := range runs {
-		mark, word := g.look(r)
+		mark, word := look(g, r)
 		age := ""
 		if a := r.activity(); !a.IsZero() {
-			age = deskAge(now.Sub(a))
+			age = runview.Age(now.Sub(a))
 		}
 		line := fmt.Sprintf("%s %-7s %-*s %s", mark, word, width, names[i], age)
 		_, _ = fmt.Fprintln(w, strings.TrimRight(line, " "))
 	}
-}
-
-// deskAge is a short duration: 12s, 4m, 1h, 3d.
-func deskAge(d time.Duration) string {
-	switch d = max(d, 0); {
-	case d < time.Minute:
-		return strconv.Itoa(int(d/time.Second)) + "s"
-	case d < time.Hour:
-		return strconv.Itoa(int(d/time.Minute)) + "m"
-	case d < 48*time.Hour:
-		return strconv.Itoa(int(d/time.Hour)) + "h"
-	}
-	return strconv.Itoa(int(d/(24*time.Hour))) + "d"
 }
 
 // --- desk show ---
@@ -577,7 +521,7 @@ Reading the desk scans it, and a scan changes the queue (see desk runs --help).`
 			events := r.folder.Len()
 			if cmd.Flags().Changed("at") {
 				events = min(at, r.folder.Len())
-				r.at(events, now)
+				r.at(events, now, true)
 			}
 			out := cmd.OutOrStdout()
 			if asJSON {
@@ -689,9 +633,9 @@ func writeDeskShowJSON(w io.Writer, r *deskRun, events int) error {
 // writeDeskShowText prints the compact flow: a header line, one line per
 // step, the checks, and what was left out.
 func writeDeskShowText(w io.Writer, r *deskRun, events int, replay bool, noIcons bool) {
-	g := pickDeskGlyphs(noIcons)
+	g := runview.PickGlyphs(noIcons)
 	s := r.state
-	_, word := g.look(r)
+	_, word := look(g, r)
 	if r.live == runview.LiveEnded {
 		word = "ended"
 	}
@@ -735,7 +679,8 @@ func writeDeskShowText(w io.Writer, r *deskRun, events int, replay bool, noIcons
 			}
 			parts = append(parts, "after "+strings.Join(safe, ", "))
 		}
-		_, _ = fmt.Fprintf(w, "  %s %-*s  %s\n", g.stepMark(st.Status), idW, safeLabel(st.ID), strings.Join(parts, " · "))
+		mark := runview.StepMark(g, st.Status, runview.RunnerState(r.delta.Timing, st.ID))
+		_, _ = fmt.Fprintf(w, "  %s %-*s  %s\n", mark.Glyph, idW, safeLabel(st.ID), strings.Join(parts, " · "))
 	}
 	for _, c := range s.Checks {
 		label := c.Label
@@ -772,18 +717,6 @@ func writeDeskShowText(w io.Writer, r *deskRun, events int, replay bool, noIcons
 		foot = append(foot, "note: "+safeText(r.delta.Err.Error()))
 	}
 	_, _ = fmt.Fprintln(w, strings.Join(foot, " · "))
-}
-
-func (g deskGlyphs) stepMark(st runview.StepStatus) string {
-	switch st {
-	case runview.StepRunning:
-		return g.running
-	case runview.StepClosed:
-		return g.done
-	case runview.StepFailed:
-		return g.failed
-	}
-	return g.pending
 }
 
 // stepPredecessors maps each step to the steps it follows.

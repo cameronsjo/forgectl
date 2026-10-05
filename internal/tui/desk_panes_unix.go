@@ -25,9 +25,13 @@ import (
 // deskBody is a pane's content before it is cut to the pane's height: n lines,
 // some of them rows the cursor can sit on.
 type deskBody struct {
-	n          int
-	line       func(i int) string
-	rowOfLine  func(i int) (int, bool) // nil when no line is selectable
+	n         int
+	line      func(i int) string
+	rowOfLine func(i int) (int, bool) // nil when no line is selectable
+	// rowAt maps a line and a column inside the pane to its row, for a body
+	// that sets rows side by side (the flow's boxes in a wave); nil means
+	// rowOfLine decides from the line alone.
+	rowAt      func(i, col int) (int, bool)
 	rows       int
 	cursorLine int // first line of the cursor row, or -1
 	cursorH    int // lines in the cursor row
@@ -135,33 +139,33 @@ func (m deskModel) runLook(e *deskRun, now time.Time) (string, string, lipgloss.
 	case !e.loaded:
 		return g.Pending, "loading", st.Dim
 	}
-	live := m.liveState(e, now)
-	switch live {
-	case runview.LiveLive:
-		return m.spin(), "live", st.Active
-	case runview.LiveRunning:
-		return m.spin(), "running", st.Active
-	case runview.LiveEnded:
-		switch {
-		case e.state.Exit == nil:
-			return g.Pending, "ended", st.Muted
-		case *e.state.Exit == 0:
-			return g.Done, "ok", st.OK
-		}
-		return g.Failed, strconv.Itoa(*e.state.Exit), st.Danger
-	case runview.LiveStale:
-		if errNoLog(e.err) && !e.everEvents {
-			return g.Pending, "new", st.Dim
-		}
-		return g.Stale, "stale", st.Warn
-	case runview.LiveLost:
-		return g.Lost, "lost", st.Danger
-	case runview.LiveWaiting:
-		return g.Pending, "waiting", st.Dim
-	case runview.LiveSkipped:
-		return g.Skipped, "skipped", st.Dim
+	return m.drawMark(runview.RunMark(g.Glyphs, m.liveState(e, now), e.state.Exit, errNoLog(e.err) && !e.everEvents))
+}
+
+// drawMark is a shared mark in this theme: the running mark spins.
+func (m deskModel) drawMark(mk runview.Mark) (string, string, lipgloss.Style) {
+	g := mk.Glyph
+	if g == m.glyph.Running {
+		g = m.spin()
 	}
-	return g.Pending, "pending", st.Dim
+	return g, mk.Word, m.toneStyle(mk.Tone)
+}
+
+func (m deskModel) toneStyle(t runview.Tone) lipgloss.Style {
+	st := m.styles
+	switch t {
+	case runview.ToneMuted:
+		return st.Muted
+	case runview.ToneActive:
+		return st.Active
+	case runview.ToneOK:
+		return st.OK
+	case runview.ToneDanger:
+		return st.Danger
+	case runview.ToneWarn:
+		return st.Warn
+	}
+	return st.Dim
 }
 
 func (m deskModel) runWord(e *deskRun, now time.Time) string {
@@ -175,7 +179,7 @@ func (m deskModel) runAge(e *deskRun, now time.Time) string {
 	if a.IsZero() {
 		return ""
 	}
-	return ageShort(now.Sub(a))
+	return runview.Age(now.Sub(a))
 }
 
 // listLines draws the run list from the scroll offset.
@@ -427,7 +431,7 @@ func (m deskModel) timelineBody(e *deskRun, iw int) deskBody {
 			frac = float64(durs[i]) / float64(longest)
 		}
 		lines = append(lines, sty.Render(gl)+" "+st.Fg.Render(padTo(midCut(capSafe(s.ID, 64), idW), idW))+" "+
-			BarSolid(st, barW, frac)+" "+sty.Render(padTo(word, 9))+st.Muted.Render(ageShort(durs[i])))
+			BarSolid(st, barW, frac)+" "+sty.Render(padTo(word, 9))+st.Muted.Render(runview.Age(durs[i])))
 	}
 	return textBodyFrom(lines)
 }

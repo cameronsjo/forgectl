@@ -204,7 +204,7 @@ stale_after = "10m"
 
 | Columns | Layout |
 |---|---|
-| ≥ 150 | run list (28) │ flow (62) │ side view |
+| ≥ 150 | run list (30) │ flow (62) │ side view |
 | 100–149 | run strip `‹ 3/10 beta-… ◐ live 12s ›` in the header; flow (62) │ side view |
 | 40–99 | single pane; a tab strip `1 flow 2 events 3 timeline 4 metrics 5 summary 6 queue` shows the active view |
 | < 40 or < 12 rows | "terminal too small (needs 40×12) — resize or press q" |
@@ -303,7 +303,7 @@ These are registered in `internal/keymap` and rendered by `bubbles/help`. The fo
   - JSON: `UseNumber` is on; strings and integers that fit in int64 are kept; anything else is dropped from the field and counted. For a duplicate key, the first one wins.
 - **Approval binding.**
   - `Claim` always gets the full 64-hex sha of the frozen `Item` the modal opened with. It is never empty and never a prefix.
-  - Only a non-repeat `y` keypress confirms. It is accepted at least 400 ms after the modal opens and after the body has been scrolled to the end (or fits on screen). `enter`, clicks, and keys buffered earlier never confirm.
+  - Only a non-repeat `y` keypress confirms. It is accepted at least 250 ms after the key event before it, at least 400 ms after the modal opens, and at least 400 ms after the body's end first came on screen (scrolled to the end, or it fits). `enter`, clicks, and keys buffered earlier never confirm.
   - Items run only by `AttachScript`, never by path.
 - **Threat model** (in ADR-0010):
   - The desk guards against accidents, not against a same-uid agent.
@@ -785,6 +785,13 @@ func NewDeskSource(d *desk.Desk) Source
 - **Task 7b shipped as `e5791b2` and `e3685e9`** (cherry-picked from a side worktree). Beyond its steps: the watcher reads at most 4 MiB and 50 000 lines per poll and 32 MiB per file in total; `interrupted` is computed when the state is returned, so a later restart still resumes the step; `recordOwner` leaves a begun run alone and `Unskip` refuses any item that was ever claimed; `PS4` joins the stripped variables. Left: using ctime instead of mtime for unstamped claims (per-OS stat code), and a compare-and-swap in `writeMeta`.
 - **Task 8's code shipped as `8aa1238`.** `--spec` is a persistent flag on `desk`, so `show` sees spec runs. Exit 1 means a source failed or a run is unknown; exit 2 means an ambiguous name, a bad `--from`, or a negative `--at`. A spec whose name duplicates another source's fails on its own. `desk runs` lists running, done and skipped items, not waiting ones. Desk-run step times are `null` in `show --json`. The non-TTY line is printed directly, because the CLI's error renderer rewords returned errors.
 - **Task 8b (`a460959`) fixed a module-wide guard no task had run.** `TestTextPrintersUseCappedHelpers` failed on the new CLI printers; they now use the capped helpers. The approve body (`queueItem`, `MarkLine`, `confirmLines`) is allowlisted with its reason, because the operator must see every byte they approve. It also brought `desk.md` and ADR-0010 up to date with Task 7b.
+- **Task 9's review fixes changed the approval control and two layouts.** The final security review (0 Critical, 3 Important, 8 Minor) and code review (1 Critical, 7 Important) were checked against the code first. Beyond their text:
+  - **The dashboard asks for key event types, and a `y` within 250 ms of any key event is refused.** Most terminals never mark a held key as a repeat, so the repeat rule alone could not hold. The confirm delay also restarts when the body's end first comes on screen.
+  - **`Queue()` returns metadata only; `QueueSource.QueueBody` reads the one item the modal opens on** (`desk.PendingItem`, re-verified against the listed sha). `Body` and `Marks` are empty in `Queue()`, and `Delta.Items` is gone. `QueueItem` gains `Claimed`, `RunRef` gains `Live`, and `Queue()` returns a `QueueList` with the count a scan left unread.
+  - **One scan reads at most 200 pending items and 64 MiB** (`desk.ScanPendingMax`, `desk.ScanPendingBytes`). `ParseHeaders` no longer splits the whole item.
+  - **The run list is 30 columns, not 28,** so an 11-character name fits. The `q` hint reads `quit; jobs keep running`.
+  - **The run and step legend, the age format and the run order live in `runview` (`look.go`),** used by both the TUI and `desk show`/`desk runs`.
+  - **`log.path` and `metrics.path` take no `*`;** the sources open them as written.
 - **M7 is left to the desk-core owner.** The batch runner opens `done/<name>.d` paths by absolute name instead of through the pinned root. Only same-uid code reaches it, so it is consistency hardening outside this series.
 
 ## Learnings

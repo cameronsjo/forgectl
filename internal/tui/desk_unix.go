@@ -602,6 +602,10 @@ func (m *deskModel) apply(e *deskRun, d runview.Delta) {
 		if e.key == m.selected {
 			m.pausedAt = 0
 		}
+		if m.replay != nil && m.replay.key == e.key {
+			// The replay counted events of the log that was replaced.
+			m.replay = nil
+		}
 		changed = true
 	}
 	if d.Defs != nil && !reflect.DeepEqual(d.Defs, e.defs) {
@@ -627,7 +631,7 @@ func (m *deskModel) apply(e *deskRun, d runview.Delta) {
 		e.live = d.Live
 	}
 	e.err, e.dropped, e.fields, e.partial = d.Err, d.Dropped, d.DroppedFields, d.Partial
-	if changed || !e.loaded || e.state.Steps == nil {
+	if changed || e.state.Steps == nil {
 		e.state = e.folder.At(e.folder.Len(), m.now())
 	}
 }
@@ -639,22 +643,11 @@ func (m *deskModel) sortRuns() {
 		m.order = append(m.order, k)
 	}
 	now := m.now()
-	slices.SortFunc(m.order, func(a, b deskRunKey) int {
-		ea, eb := m.runs[a], m.runs[b]
-		if la, lb := m.isLive(ea, now), m.isLive(eb, now); la != lb {
-			if la {
-				return -1
-			}
-			return 1
-		}
-		if ta, tb := ea.activity(), eb.activity(); !ta.Equal(tb) {
-			if ta.After(tb) {
-				return -1
-			}
-			return 1
-		}
-		return strings.Compare(a.name+"\x00"+a.source, b.name+"\x00"+b.source)
-	})
+	order := func(k deskRunKey) runview.RunOrder {
+		e := m.runs[k]
+		return runview.RunOrder{Live: m.isLive(e, now), Activity: e.activity(), Name: k.name, Source: k.source}
+	}
+	slices.SortFunc(m.order, func(a, b deskRunKey) int { return runview.CompareRuns(order(a), order(b)) })
 }
 
 // activity is when the run last did anything: its last event, else the time
@@ -1138,7 +1131,7 @@ func (m deskModel) refreshAll() (tea.Model, tea.Cmd) {
 // --- mouse ---
 
 func (m deskModel) onWheel(ms tea.Mouse) deskModel {
-	pane, _, ok := m.hit(ms.X, ms.Y)
+	pane, _, _, ok := m.hit(ms.X, ms.Y)
 	if !ok {
 		return m
 	}
@@ -1201,7 +1194,7 @@ func (m deskModel) onClick(ms tea.Mouse) (tea.Model, tea.Cmd) {
 		m.setView(v)
 		return m, nil
 	}
-	pane, line, ok := m.hit(ms.X, ms.Y)
+	pane, line, col, ok := m.hit(ms.X, ms.Y)
 	if !ok {
 		return m, nil
 	}
@@ -1216,7 +1209,7 @@ func (m deskModel) onClick(ms tea.Mouse) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	row, ok := m.rowAtLine(v, m.top[v]+line)
+	row, ok := m.rowAtLine(v, m.top[v]+line, col)
 	if !ok {
 		return m, nil
 	}

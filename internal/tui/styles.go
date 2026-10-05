@@ -4,6 +4,8 @@ package tui
 
 import (
 	"os"
+
+	"github.com/cameronsjo/forgectl/internal/runview"
 )
 
 // glyphSet is the icon vocabulary. iconGlyphs uses Nerd Font glyphs (the
@@ -23,73 +25,41 @@ type glyphSet struct {
 	Rename   string
 	Cheat    string
 
-	// Run-state marks for the desk dashboard. Each is paired with a word on
-	// screen, so colour is never the only carrier. Interrupted marks a step
-	// still running when its run ended. Spin holds the running mark's
-	// animation frames, one rune each.
-	Pending     string
-	Running     string
-	Done        string
-	Failed      string
-	Interrupted string
-	Rejected    string
-	Resumed     string
-	Stale       string
-	Lost        string
-	Skipped     string
-	Spin        string
+	// Run-state marks for the desk dashboard: the legend runview shares with
+	// the desk's text output.
+	runview.Glyphs
 }
 
 var iconGlyphs = glyphSet{
-	Pending:     "·",
-	Running:     "◐",
-	Done:        "✓",
-	Failed:      "✗",
-	Interrupted: "⊘",
-	Rejected:    "↺",
-	Resumed:     "⟲",
-	Stale:       "!",
-	Lost:        "?",
-	Skipped:     "–",
-	Spin:        "◐◓◑◒",
-	Forge:       "", // nf-fa-bolt — the forge spark
-	Session:     "", // nf-fa-terminal
-	Window:      "", // nf-fa-window_maximize
-	Pane:        "", // nf-fa-columns
-	Attached:    "●",
-	Detached:    "○",
-	Pick:        "", // nf-fa-arrow_circle_right
-	Tree:        "", // nf-fa-sitemap
-	Last:        "", // nf-fa-undo
-	Kill:        "", // nf-fa-trash
-	Rename:      "", // nf-fa-pencil
-	Cheat:       "", // nf-fa-book
+	Glyphs:   runview.IconGlyphs,
+	Forge:    "", // nf-fa-bolt — the forge spark
+	Session:  "", // nf-fa-terminal
+	Window:   "", // nf-fa-window_maximize
+	Pane:     "", // nf-fa-columns
+	Attached: "●",
+	Detached: "○",
+	Pick:     "", // nf-fa-arrow_circle_right
+	Tree:     "", // nf-fa-sitemap
+	Last:     "", // nf-fa-undo
+	Kill:     "", // nf-fa-trash
+	Rename:   "", // nf-fa-pencil
+	Cheat:    "", // nf-fa-book
 }
 
 var asciiGlyphs = glyphSet{
-	Pending:     ".",
-	Running:     "*",
-	Done:        "+",
-	Failed:      "x",
-	Interrupted: "/",
-	Rejected:    "r",
-	Resumed:     "~",
-	Stale:       "!",
-	Lost:        "?",
-	Skipped:     "-",
-	Spin:        "*",
-	Forge:       "#",
-	Session:     "s",
-	Window:      "w",
-	Pane:        "p",
-	Attached:    "*",
-	Detached:    " ",
-	Pick:        ">",
-	Tree:        "T",
-	Last:        "-",
-	Kill:        "x",
-	Rename:      "r",
-	Cheat:       "?",
+	Glyphs:   runview.ASCIIGlyphs,
+	Forge:    "#",
+	Session:  "s",
+	Window:   "w",
+	Pane:     "p",
+	Attached: "*",
+	Detached: " ",
+	Pick:     ">",
+	Tree:     "T",
+	Last:     "-",
+	Kill:     "x",
+	Rename:   "r",
+	Cheat:    "?",
 }
 
 // pickGlyphs returns the active glyph set, honoring an explicit --no-icons
