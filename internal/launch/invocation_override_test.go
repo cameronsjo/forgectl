@@ -211,26 +211,36 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 			if err != nil {
 				t.Fatalf("BuildInvocation: %v", err)
 			}
-			if !containsPair(built.Invocation.Args, "--settings", workerClaudeSettings) {
-				t.Errorf("worker argv %q lacks --settings %s", built.Invocation.Args, workerClaudeSettings)
+			// Exactly after the leading --permission-mode pair: anywhere later
+			// could follow a variadic flag and swallow its list.
+			want := []string{"--permission-mode", mode, "--settings", workerClaudeSettings}
+			if args := built.Invocation.Args; len(args) < 4 || !slices.Equal(args[:4], want) {
+				t.Errorf("worker argv %q, want it to start %q", args, want)
 			}
 		})
 	}
 
-	t.Run("print-mode worker keeps the setting ahead of its prompt", func(t *testing.T) {
-		built, err := BuildInvocation(InvocationRequest{
-			Config: config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: "plan"}},
-			CWD:    target, Worker: true, Resolve: bin, Args: []string{"-p", "--", "hello"},
+	// User args land after the posture, where last-flag-wins would let them
+	// undo the floor, so a worker takes none. A passthrough call (--version,
+	// a subcommand) is refused the same way, with the posture error.
+	for name, args := range map[string][]string{
+		"settings override": {"--settings", `{"useAutoModeDuringPlan":true}`},
+		"mode override":     {"--permission-mode", "bypassPermissions"},
+		"print prompt":      {"-p", "hello"},
+		"version":           {"--version"},
+		"subcommand":        {"agents", "--help"},
+	} {
+		t.Run("worker refuses user args: "+name, func(t *testing.T) {
+			_, err := BuildInvocation(InvocationRequest{
+				StdoutTerminal: true,
+				Config:         config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: "plan"}},
+				CWD:            target, Worker: true, Resolve: bin, Args: args,
+			})
+			if !errors.Is(err, ErrWorkerPosture) {
+				t.Fatalf("err = %v, want ErrWorkerPosture", err)
+			}
 		})
-		if err != nil {
-			t.Fatalf("BuildInvocation: %v", err)
-		}
-		args := built.Invocation.Args
-		s, sep := slices.Index(args, "--settings"), slices.Index(args, "--")
-		if s < 0 || sep < 0 || s > sep {
-			t.Errorf("worker argv %q: --settings must sit before the user's --", args)
-		}
-	})
+	}
 
 	t.Run("codex worker gets no claude settings", func(t *testing.T) {
 		built, err := BuildInvocation(InvocationRequest{
@@ -251,8 +261,8 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BuildInvocation: %v", err)
 		}
-		if slices.Contains(built.Invocation.Args, workerClaudeSettings) {
-			t.Errorf("an ordinary launch got the worker settings: %q", built.Invocation.Args)
+		if slices.Contains(built.Invocation.Args, "--settings") {
+			t.Errorf("an ordinary launch got a --settings flag: %q", built.Invocation.Args)
 		}
 	})
 

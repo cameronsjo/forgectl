@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"slices"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -186,26 +185,30 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 // classifier would be the only check on its shell (forgectl#1060). Off, a
 // plan-mode worker's commands prompt, and the prompt is a blocking screen the
 // coordinator reports.
+//
+// This is the only --settings a worker gets. Claude Code's handling of a
+// repeated --settings flag is unverified, so a second source (T5's worker
+// settings file) must merge its keys into this one value, not add a flag.
 const workerClaudeSettings = `{"useAutoModeDuringPlan":false}`
 
-// errNoPermissionMode reports a posture with no --permission-mode pair to
-// anchor the worker settings on. Every claude posture emits one, so this
-// means a posture builder changed shape.
-var errNoPermissionMode = errors.New("launch: worker argv has no --permission-mode to place --settings after")
-
 // withWorkerSettings inserts `--settings <workerClaudeSettings>` right after
-// the posture's --permission-mode pair. That position is ahead of any
-// subcommand-trailing or user args (a user `--` or prompt), and it is never
-// inside a variadic flag's list.
+// the posture's leading --permission-mode pair.
+//
+// A worker takes no harness args (BuildInvocation refuses them), so its
+// posture is always the session posture, which starts with that pair. The
+// anchor is therefore index 0 and nowhere else: matching the first
+// --permission-mode anywhere could anchor on a user token in a passthrough
+// argv. Any other shape means a posture builder changed, and the launch is
+// refused rather than started without the setting.
 func withWorkerSettings(args []string) ([]string, error) {
-	i := slices.Index(args, "--permission-mode")
-	if i < 0 || i+1 >= len(args) {
-		return nil, errNoPermissionMode
+	if len(args) < 2 || args[0] != "--permission-mode" {
+		return nil, fmt.Errorf("%w: worker argv %q does not start with --permission-mode, so --settings has no anchor",
+			ErrWorkerPosture, args)
 	}
 	out := make([]string, 0, len(args)+2)
-	out = append(out, args[:i+2]...)
+	out = append(out, args[:2]...)
 	out = append(out, "--settings", workerClaudeSettings)
-	return append(out, args[i+2:]...), nil
+	return append(out, args[2:]...), nil
 }
 
 // applyHarnessOverride switches p to harness while keeping every posture field.
@@ -269,6 +272,12 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		return BuiltInvocation{}, err
 	}
 	if req.Worker {
+		// A user arg lands after the posture, where Claude Code's last-flag-wins
+		// parsing would let `--permission-mode` or `--settings` undo the floor.
+		// The coordinator starts workers with no args, so refuse any.
+		if len(req.Args) > 0 {
+			return BuiltInvocation{}, fmt.Errorf("%w: workers take no harness args, got %q", ErrWorkerPosture, req.Args)
+		}
 		if profile, err = applyWorkerFloor(profile); err != nil {
 			return BuiltInvocation{}, err
 		}
