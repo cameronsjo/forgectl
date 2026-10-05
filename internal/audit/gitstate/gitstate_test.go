@@ -134,6 +134,7 @@ func TestStatus_LiveGit(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
 	}
+	isolateGitConfig(t)
 	repo := t.TempDir()
 	run := func(args ...string) {
 		t.Helper()
@@ -177,6 +178,18 @@ func TestStatus_LiveGit(t *testing.T) {
 			t.Errorf("%q = %v, want %v", k, got[k], v)
 		}
 	}
+}
+
+// isolateGitConfig keeps a live-git test independent of the developer's git
+// configuration. GIT_CONFIG_GLOBAL alone is not enough: git also reads
+// $XDG_CONFIG_HOME/git/ignore (core.excludesFile's default), so a machine that
+// ignores .env there refuses the test's `git add .env` and reports the
+// untracked .env files as ignored.
+func isolateGitConfig(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 }
 
 // TestFunc_SpentBudgetStartsNothing: once the budget is spent, a repo is
