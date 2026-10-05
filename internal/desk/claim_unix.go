@@ -66,9 +66,7 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 	var r *refusal
 	if errors.As(err, &r) {
 		meta.SkipReason = "refused: " + r.reason
-		_ = d.writeMeta(DirRunning, name, meta)
-		_ = d.move(name, kind, DirRunning, DirSkipped)
-		return nil, err
+		return nil, errors.Join(err, d.writeMeta(DirRunning, name, meta), d.move(name, kind, DirRunning, DirSkipped))
 	}
 	if err != nil {
 		return nil, err
@@ -115,6 +113,11 @@ func (d *Desk) BeginRun(name string, pid int, fields ...string) (*Run, error) {
 	kind, err := d.findKind(DirRunning, name)
 	if err != nil {
 		return nil, fmt.Errorf("desk: begin %s: %w", describe(name), err)
+	}
+	if d.doneTaken(name) {
+		// A reused number: the run would append to, or script(1) would
+		// truncate, another run's log and events.
+		return nil, fmt.Errorf("%w: done/ already holds %s", ErrRefused, describe(name))
 	}
 	meta, _, err := d.readMeta(DirRunning, name)
 	if err != nil {

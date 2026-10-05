@@ -199,9 +199,9 @@ func headerLine(line string) (key, value string, ok bool) {
 // after a leading shebang (or at the top). A header the body already carries
 // may not be given again; the result must carry both WHAT and WHY.
 func insertHeaders(body []byte, kind Kind, what, why string, tty bool) ([]byte, error) {
-	for label, v := range map[string]string{"--what": what, "--why": why} {
-		if strings.ContainsAny(v, "\r\n") {
-			return nil, fmt.Errorf("desk: %s must be one line", label)
+	for _, f := range [...]struct{ label, v string }{{"--what", what}, {"--why", why}} {
+		if strings.ContainsAny(f.v, "\r\n") {
+			return nil, fmt.Errorf("desk: %s must be one line", f.label)
 		}
 	}
 	if tty && kind != KindScript {

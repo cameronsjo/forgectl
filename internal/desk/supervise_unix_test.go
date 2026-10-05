@@ -331,6 +331,23 @@ func TestForegroundRunRecordsLikeADetachedOne(t *testing.T) {
 	}
 }
 
+// A reused number must not run over an older run's history: BeginRun (the
+// foreground path) refuses, and the old log is untouched.
+func TestBeginRunRefusesANameDoneAlreadyHolds(t *testing.T) {
+	d := openDesk(t)
+	c := queue(t, d, "x.sh", "echo x\n")
+	writeFile(t, d.LogPath(c.Name), "an older run\nEXIT=0\n", 0o600)
+	if _, err := d.BeginRun(c.Name, os.Getpid()); !errors.Is(err, ErrRefused) {
+		t.Fatalf("BeginRun = %v, want ErrRefused", err)
+	}
+	if got := readFile(t, d.LogPath(c.Name)); got != "an older run\nEXIT=0\n" {
+		t.Errorf("old log changed: %q", got)
+	}
+	if _, err := os.Stat(d.EventsPath(c.Name)); err == nil {
+		t.Error("an events file was created for the reused name")
+	}
+}
+
 func TestWatchResumesFromSkip(t *testing.T) {
 	d := openDesk(t)
 	c := queue(t, d, "x.sh", "true\n")
