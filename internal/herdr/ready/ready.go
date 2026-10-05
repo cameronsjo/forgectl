@@ -88,11 +88,21 @@ func (t *Table) Evaluate(harness string, s Screen) Verdict {
 	if !ok {
 		return Verdict{State: StateNotReady, Reason: fmt.Sprintf("no readiness predicates for harness %q", harness)}
 	}
-	input, prompted := h.matchPrompt(s.Text)
-	if !h.promptFirst || !prompted {
-		if b, ok := t.blockingFor(h, s.Text); ok {
-			return Verdict{State: StateBlocked, Blocking: b, Reason: "showing the " + b}
+	p, prompted := h.matchPrompt(s.Text)
+	var b string
+	var blocked bool
+	switch {
+	case !h.promptFirst || !prompted:
+		b, blocked = t.blockingFor(h, s.Text, false)
+	default:
+		// The box shows. Rows under it are footer, where no dialog row should
+		// ever match; an overlay that keeps the box visible needs with_prompt.
+		if b, blocked = t.blockingFor(h, p.footer, false); !blocked {
+			b, blocked = t.blockingFor(h, s.Text, true)
 		}
+	}
+	if blocked {
+		return Verdict{State: StateBlocked, Blocking: b, Reason: "showing the " + b}
 	}
 	if !prompted {
 		return Verdict{State: StateNotReady, Reason: "the " + harness + " input prompt is not visible"}
@@ -103,40 +113,50 @@ func (t *Table) Evaluate(harness string, s Screen) Verdict {
 	if !statusReady[s.Status] {
 		return Verdict{State: StateNotReady, Reason: fmt.Sprintf("the %s input prompt is visible, but herdr reports agent status %q, want idle or done", harness, s.Status)}
 	}
-	return Verdict{State: StateReady, Input: input}
+	return Verdict{State: StateReady, Input: p.input}
 }
 
-// blockingFor returns the first blocking screen that matches, the harness's
-// own before the shared ones.
-func (t *Table) blockingFor(h harness, text string) (string, bool) {
-	for _, b := range h.blocking {
-		if b.matches(text) {
-			return b.name, true
-		}
-	}
-	for _, b := range t.blocking {
-		if b.matches(text) {
-			return b.name, true
+// blockingFor returns the first blocking screen that matches text, the
+// harness's own before the shared ones. With onlyWithPrompt it considers only
+// rows marked with_prompt.
+func (t *Table) blockingFor(h harness, text string, onlyWithPrompt bool) (string, bool) {
+	for _, rows := range [][]screen{h.blocking, t.blocking} {
+		for _, b := range rows {
+			if onlyWithPrompt && !b.withPrompt {
+				continue
+			}
+			if b.matches(text) {
+				return b.name, true
+			}
 		}
 	}
 	return "", false
 }
 
-// matchPrompt finds the input prompt and returns what is typed in it. The
-// patterns anchor at the end of the screen, so there is at most one match.
-// Wrapped input rows are joined with single spaces, and a placeholder the
-// harness shows in an empty box reads as no input.
-func (h harness) matchPrompt(text string) (string, bool) {
+// promptMatch is one match of a harness's prompt pattern.
+type promptMatch struct {
+	input  string
+	footer string
+}
+
+// matchPrompt finds the input prompt, what is typed in it, and the footer
+// rows under it. The patterns anchor at the end of the screen, so there is at
+// most one match. Wrapped input rows are joined with single spaces, and a
+// placeholder the harness shows in an empty box reads as no input.
+func (h harness) matchPrompt(text string) (promptMatch, bool) {
 	m := h.prompt.FindStringSubmatch(text)
 	if m == nil {
-		return "", false
+		return promptMatch{}, false
 	}
-	if len(m) < 2 {
-		return "", true
+	var p promptMatch
+	if i := h.prompt.SubexpIndex("input"); i >= 0 {
+		p.input = strings.Join(strings.Fields(m[i]), " ")
 	}
-	input := strings.Join(strings.Fields(m[1]), " ")
-	if h.placeholder != nil && h.placeholder.MatchString(input) {
-		input = ""
+	if i := h.prompt.SubexpIndex("footer"); i >= 0 {
+		p.footer = m[i]
 	}
-	return input, true
+	if h.placeholder != nil && h.placeholder.MatchString(p.input) {
+		p.input = ""
+	}
+	return p, true
 }

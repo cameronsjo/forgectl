@@ -142,7 +142,9 @@ func runSurfaceReady(cmd *cobra.Command, deps module.Deps, opts readyOptions) er
 
 	// The deadline bounds the herdr calls too: a wedged server that accepts
 	// the socket and never answers must end as unreadable, not hang.
-	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
+	// One interval of slack, so the loop's own timeout check (which knows the
+	// last verdict) normally ends the wait before the deadline cuts a read.
+	ctx, cancel := context.WithTimeout(ctx, opts.Timeout+opts.Interval)
 	defer cancel()
 	res := waitReady(ctx, readyLoop{
 		read:     func(ctx context.Context) (ready.Screen, error) { return herdr.WorkerScreen(ctx, ref) },
@@ -205,6 +207,11 @@ func waitReady(ctx context.Context, l readyLoop) readyResult {
 		switch {
 		case errors.Is(err, herdradapter.ErrWorkerGone):
 			return finish(readyResult{State: readyStateGone, Reason: "the worker's herdr workspace is gone"}, start, l.now())
+		case err != nil && ctx.Err() != nil && last.State != "":
+			// The deadline cut this read short. The last real verdict says
+			// more than the cancellation does.
+			last.Reason = fmt.Sprintf("not ready after %s: %s", l.timeout, last.Reason)
+			return finish(last, start, l.now())
 		case err != nil:
 			last = readyResult{State: readyStateUnreadable, Reason: termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen)}
 		default:

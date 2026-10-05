@@ -43,6 +43,9 @@ type harness struct {
 type screen struct {
 	name string
 	any  []*regexp.Regexp
+	// withPrompt marks an overlay drawn while the input box stays visible,
+	// so it is checked even when a prompt_first harness shows its box.
+	withPrompt bool
 }
 
 func (s screen) matches(text string) bool {
@@ -55,8 +58,9 @@ func (s screen) matches(text string) bool {
 }
 
 type fileScreen struct {
-	Name string   `toml:"name"`
-	Any  []string `toml:"any"`
+	Name       string   `toml:"name"`
+	Any        []string `toml:"any"`
+	WithPrompt bool     `toml:"with_prompt"`
 }
 
 type fileHarness struct {
@@ -84,50 +88,45 @@ func Default() (*Table, error) {
 // branch cannot mark its own trust dialog as ready.
 //
 // The file replaces the built-in table whole. It must be a regular file (not
-// a symlink), not writable by group or others, and at most 64 KiB.
+// a symlink), owned by this user, not writable by group or others, and at
+// most 64 KiB. Every check runs on the opened file, so a swap after the
+// existence check cannot change what is read.
 func Load(path string) (*Table, error) {
-	info, err := os.Lstat(path)
-	if errors.Is(err, fs.ErrNotExist) {
+	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
 		return Default()
 	}
+	f, _, err := openOverride(path)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s: %w", ErrTable, path, err)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%w: %s is not a regular file (mode %s)", ErrTable, path, info.Mode().Type())
-	}
-	if info.Mode().Perm()&0o022 != 0 {
-		return nil, fmt.Errorf("%w: %s is writable by group or others (mode %s); chmod go-w it", ErrTable, path, info.Mode().Perm())
-	}
-	if info.Size() > maxTableBytes {
-		return nil, fmt.Errorf("%w: %s is %d bytes, the limit is %d", ErrTable, path, info.Size(), maxTableBytes)
-	}
-	f, err := os.Open(path) //nolint:gosec // G304: path is forgectl's own config-dir override, Lstat-checked above as a regular, non-group-writable file
-	if err != nil {
-		return nil, fmt.Errorf("%w: %s: %w", ErrTable, path, err)
+		return nil, err
 	}
 	defer func() { _ = f.Close() }() // read-only; a close error loses nothing
-	// The open follows symlinks, so prove it opened the file Lstat checked: a
-	// swap between the two would otherwise read whatever the link points at.
-	opened, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("%w: %s: %w", ErrTable, path, err)
-	}
-	if !os.SameFile(info, opened) {
-		return nil, fmt.Errorf("%w: %s changed between check and open", ErrTable, path)
-	}
 	data, err := io.ReadAll(io.LimitReader(f, maxTableBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s: %w", ErrTable, path, err)
 	}
 	if len(data) > maxTableBytes {
-		return nil, fmt.Errorf("%w: %s grew past %d bytes while being read", ErrTable, path, maxTableBytes)
+		return nil, fmt.Errorf("%w: %s is larger than %d bytes", ErrTable, path, maxTableBytes)
 	}
 	t, err := Parse(data)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return t, nil
+}
+
+// checkOverride refuses an opened override that is not a regular file, is
+// writable by group or others, or is over the size limit.
+func checkOverride(path string, info os.FileInfo) error {
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: %s is not a regular file (mode %s)", ErrTable, path, info.Mode().Type())
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%w: %s is writable by group or others (mode %s); chmod go-w it", ErrTable, path, info.Mode().Perm())
+	}
+	if info.Size() > maxTableBytes {
+		return fmt.Errorf("%w: %s is %d bytes, the limit is %d", ErrTable, path, info.Size(), maxTableBytes)
+	}
+	return nil
 }
 
 // Parse compiles a predicate table. It refuses an unknown version, unknown
@@ -173,6 +172,9 @@ func Parse(data []byte) (*Table, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%w: harness %q prompt: %w", ErrTable, name, err)
 		}
+		if prompt.SubexpIndex("footer") < 0 {
+			return nil, fmt.Errorf("%w: harness %q prompt has no (?P<footer>...) group", ErrTable, name)
+		}
 		blocking, err := compileScreens("harness."+name+".blocking", fh.Blocking)
 		if err != nil {
 			return nil, err
@@ -197,7 +199,7 @@ func compileScreens(where string, in []fileScreen) ([]screen, error) {
 		if len(s.Any) == 0 {
 			return nil, fmt.Errorf("%w: %s %q has no patterns", ErrTable, where, s.Name)
 		}
-		sc := screen{name: s.Name, any: make([]*regexp.Regexp, 0, len(s.Any))}
+		sc := screen{name: s.Name, any: make([]*regexp.Regexp, 0, len(s.Any)), withPrompt: s.WithPrompt}
 		for _, p := range s.Any {
 			re, err := regexp.Compile(p)
 			if err != nil {

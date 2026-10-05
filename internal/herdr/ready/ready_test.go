@@ -144,6 +144,32 @@ func TestEvaluate_TranscriptAboveThePromptIsNotADialog(t *testing.T) {
 	}
 }
 
+// TestEvaluate_OverlayWithTheBoxVisibleIsBlocked: a with_prompt row applies
+// even when a prompt_first harness shows its input box, for an overlay drawn
+// above the box (Claude's session feedback survey; a digit typed into the
+// box answers it).
+func TestEvaluate_OverlayWithTheBoxVisibleIsBlocked(t *testing.T) {
+	tab := defaultTable(t)
+	s := fixture(t, "claude-ready-acceptedits")
+	box := strings.Index(s.Text, "\n─")
+	s.Text = s.Text[:box] + "\n● How is Claude doing this session? (optional)\n  1: Bad    2: Fine   3: Good   0: Dismiss" + s.Text[box:]
+	v := tab.Evaluate("claude", s)
+	if v.State != StateBlocked || v.Blocking != "session feedback survey" {
+		t.Fatalf("verdict %+v, want blocked by the survey", v)
+	}
+}
+
+// TestEvaluate_DialogRowInTheFooterIsBlocked: every blocking row is checked
+// against the rows under the box, where no dialog text belongs.
+func TestEvaluate_DialogRowInTheFooterIsBlocked(t *testing.T) {
+	tab := defaultTable(t)
+	s := fixture(t, "claude-ready-acceptedits")
+	s.Text += "\n  Esc to cancel · Tab to amend"
+	if v := tab.Evaluate("claude", s); v.State != StateBlocked {
+		t.Fatalf("verdict %+v, want blocked", v)
+	}
+}
+
 // TestEvaluate_TextBelowThePromptIsNotFooter: the box must sit at the bottom
 // with only footer rows under it. Unindented text below means something is
 // drawn under the box, so the box is not the live input.
@@ -185,7 +211,8 @@ func TestParse_Refusals(t *testing.T) {
 		"bad prompt":     "version = 1\n[harness.claude]\nagent='claude'\nprompt='('\n",
 		"nameless block": "version = 1\n[[blocking]]\nany=['x']\n[harness.claude]\nagent='claude'\nprompt='x'\n",
 		"empty block":    "version = 1\n[[blocking]]\nname='x'\n[harness.claude]\nagent='claude'\nprompt='x'\n",
-		"bad block":      "version = 1\n[[blocking]]\nname='x'\nany=['(']\n[harness.claude]\nagent='claude'\nprompt='x'\n",
+		"bad block":      "version = 1\n[[blocking]]\nname='x'\nany=['(']\n[harness.claude]\nagent='claude'\nprompt='x(?P<footer>)'\n",
+		"no footer":      "version = 1\n[harness.claude]\nagent='claude'\nprompt='x'\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Parse([]byte(src)); !errors.Is(err, ErrTable) {
@@ -197,7 +224,7 @@ func TestParse_Refusals(t *testing.T) {
 
 func TestLoad(t *testing.T) {
 	dir := t.TempDir()
-	good := "version = 1\n[harness.claude]\nagent='claude'\nprompt='(?m)^READY$'\n"
+	good := "version = 1\n[harness.claude]\nagent='claude'\nprompt='(?m)^READY(?P<footer>)$'\n"
 
 	t.Run("missing file uses the built-in table", func(t *testing.T) {
 		tab, err := Load(filepath.Join(dir, "absent.toml"))

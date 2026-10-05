@@ -114,6 +114,19 @@ func TestWaitReady(t *testing.T) {
 		}
 	})
 
+	t.Run("a deadline cutting a read keeps the last real verdict", func(t *testing.T) {
+		dctx, cancel := context.WithCancel(ctx)
+		reads := []func() (ready.Screen, error){
+			screen("loading"),
+			func() (ready.Screen, error) { cancel(); return ready.Screen{}, context.DeadlineExceeded },
+		}
+		l, _ := scriptedLoop(reads, byText, time.Minute)
+		r := waitReady(dctx, l)
+		if r.State != ready.StateNotReady || !strings.Contains(r.Reason, "prompt is not visible") {
+			t.Fatalf("result %+v, want the last not-ready verdict", r)
+		}
+	})
+
 	t.Run("cancellation stops the wait", func(t *testing.T) {
 		l, _ := scriptedLoop([]func() (ready.Screen, error){screen("loading")}, byText, time.Minute)
 		l.sleep = func(context.Context, time.Duration) error { return context.Canceled }
