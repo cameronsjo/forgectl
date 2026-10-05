@@ -1,6 +1,6 @@
 # 0011. Worker PR merge policy: a gate check GitHub enforces, off by default
 
-**Status: Proposed**
+**Status: Accepted**
 
 Date: 2026-10-05
 
@@ -52,7 +52,7 @@ Three facts shape the design, each checked against live GitHub on 2026-10-05:
 ## Consequences
 
 - No identity but the gate App can make a worker PR mergeable, and the gate App's key never enters a sandbox. A worker cannot approve or merge its own PR by any path.
-- Setup grows: two GitHub Apps (worker and gate), and a ruleset change per eligible repo. The ruleset change also stops the operator merging a non-worker PR there without the gate, so eligible repos need a bypass for the operator's own PRs or a gate path for them; the T10 plan picks one.
+- Setup grows: two GitHub Apps (worker and gate), and a ruleset change per eligible repo. The ruleset change also stops the operator merging a non-worker PR there without the gate, so each eligible repo's ruleset gives the Admin repository role a `pull_request`-mode bypass, matching the existing `cameronsjo/cadence` ruleset. Only the operator holds that role; neither App does, and forgectl never uses the bypass. A coordinator session on the operator's identity could use it, which is the same exposure as today.
 - Passing checks prove only that the PR's own tests and lint passed. The path allowlist is what keeps a worker away from the files those checks are configured by.
 - The gate depends on CodeRabbit reviewing. When it is rate-limited or uninstalled, PRs wait for the operator.
 - Every merge decision can be explained after the fact from the gate check's output, with the local log as a second copy.

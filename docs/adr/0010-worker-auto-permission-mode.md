@@ -1,6 +1,6 @@
 # 0010. Worker `auto` permission mode: per-machine opt-in behind a hardening floor
 
-**Status: Proposed**
+**Status: Accepted**
 
 Date: 2026-10-05
 
