@@ -169,6 +169,11 @@ func (s *deskSource) Load(ref RunRef, cur *Cursor) (Delta, error) {
 			it = fresh
 		}
 	}
+	// The skip reason comes from the item as read now: one the scan saw
+	// still pending reads changed once the rescan finds why it was skipped.
+	if d.Live == LiveSkipped || d.Live == LiveChanged {
+		d.Live = skippedLive(it)
+	}
 	if it.Kind != desk.KindBatch {
 		d.Timing = []StepTiming{scriptTiming(it)}
 	}

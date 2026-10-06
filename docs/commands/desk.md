@@ -59,7 +59,7 @@ Quit and restart every open dashboard after you upgrade forgectl. A dashboard st
 
 ### `forgectl desk`
 
-The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with a bar per item, a focus panel showing the selected item's short sha256, WHAT and WHY (wrapped, up to four lines each; `desk status NAME` shows them whole) and, under a "script" label, its first script lines, and the history of finished runs. A lost run's panel says it may have partly run and that `s` clears it and `l` shows what it printed; a changed item's panel shows the hash it was queued at and the hash it has now. and the history of finished runs. A short window gives up the tiles, then the summary line, the queue rows, the history and the script preview before the focus panel's hash, WHAT and WHY; below that minimum (about 40x10) the dashboard says how many rows or columns it needs.
+The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with a bar per item, a focus panel showing the selected item's short sha256, WHAT and WHY (wrapped, up to four lines each; `desk status NAME` shows them whole) and, under a "script" label, its first script lines, and the history of finished runs. A lost run's panel says it may have partly run and that `s` clears it and `l` shows what it printed; a changed item's panel shows the hash it was queued at and the hash it has now (a short window leaves the note out; `y`, `s` and `u` say the same in the footer). A short window gives up the tiles, then the summary line, the queue rows, the history and the script preview before the focus panel's hash, WHAT and WHY; below that minimum (about 40x10) the dashboard says how many rows or columns it needs.
 
 | Key | Action |
 |---|---|

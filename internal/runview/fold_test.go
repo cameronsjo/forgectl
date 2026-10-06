@@ -314,3 +314,11 @@ func TestFoldLostRunInterruptsItsStep(t *testing.T) {
 		t.Errorf("RUN-END then RUN-LOST: Live %s Exit %v", s.Live, s.Exit)
 	}
 }
+
+// A RUN-END after a RUN-LOST wins: the owner was slow, not gone.
+func TestFoldRunEndAfterLostReadsEnded(t *testing.T) {
+	s := fold(ev(1, "STEP-START", "fetch"), ev(5, "RUN-LOST", ""), ev(9, "RUN-END", "", "rc", "1"))
+	if s.Live != LiveEnded || s.Exit == nil || *s.Exit != 1 {
+		t.Errorf("RUN-LOST then RUN-END: Live %s Exit %v, want ended with exit 1", s.Live, s.Exit)
+	}
+}

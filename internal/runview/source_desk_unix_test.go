@@ -595,3 +595,27 @@ func TestDeskChangedItemReadsChanged(t *testing.T) {
 		t.Errorf("RunMark(changed) = %+v", mk)
 	}
 }
+
+// A run the source's last scan saw as pending, then skipped as changed by
+// another reader of the desk, loads as changed, not skipped: the word comes
+// from the item as read after the rescan.
+func TestDeskChangedAfterAStaleScanReadsChanged(t *testing.T) {
+	d := openDesk(t)
+	src := filepath.Join(t.TempDir(), "s3.sh")
+	writeFile(t, src, "#!/bin/bash\necho s3\n")
+	a, err := d.Add(src, "print", "a test", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewDeskSource(d)
+	if _, err := s.List(); err != nil { // caches the item as pending
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(d.Path(), desk.DirPending, a.Name+".sh"), "#!/bin/bash\necho s3 edited\n")
+	if _, err := d.Scan(); err != nil { // another reader moves it to skipped/
+		t.Fatal(err)
+	}
+	if dl := loadDesk(t, s, a.Name, &Cursor{}); dl.Live != LiveChanged {
+		t.Errorf("Load Live = %s, want changed", dl.Live)
+	}
+}

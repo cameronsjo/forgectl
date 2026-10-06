@@ -55,10 +55,9 @@ type deskRunView struct {
 	loaded  bool
 	// gone is set once the run is no longer in the desk, so it is not polled.
 	gone bool
-	// want is the run r was pressed on; notice says when the view shows
-	// another one instead.
-	want, notice string
-	err          error
+	// want is the run r was pressed on.
+	want string
+	err  error
 }
 
 // deskRunLoadMsg is one load of the run view's run. refs is set when the load
@@ -100,17 +99,23 @@ func (v *deskRunView) live(s runview.RunState) runview.LiveState {
 	return s.Live
 }
 
+// runEnded reports a run that is over, however it ended; a run the desk no
+// longer has is not one of them, since it may have been running.
+func runEnded(live runview.LiveState) bool {
+	switch live {
+	case runview.LiveEnded, runview.LiveSkipped, runview.LiveChanged, runview.LiveLost:
+		return true
+	}
+	return false
+}
+
 // polls reports whether the run can still change, so the view reloads it on
 // each tick.
 func (v *deskRunView) polls() bool {
 	if v.gone {
 		return false
 	}
-	switch v.delta.Live {
-	case runview.LiveEnded, runview.LiveSkipped, runview.LiveChanged, runview.LiveLost:
-		return false
-	}
-	return true
+	return !runEnded(v.delta.Live)
 }
 
 // openRunView opens the run view on the selected item's run, or on the
@@ -180,7 +185,11 @@ func (m deskModel) applyRunLoad(t deskRunLoadMsg) (tea.Model, tea.Cmd) {
 		v.refs = t.refs
 		v.idx = slices.IndexFunc(t.refs, func(r runview.RunRef) bool { return r.Name == t.ref.Name })
 		if v.want != "" && t.ref.Name != v.want {
-			v.notice = "the selected item has no run; showing the newest"
+			// The selected item has no run (gone since the dashboard's scan):
+			// say so rather than show another item's run as its own (#1106).
+			m.rv = nil
+			m.message = m.styles().Muted.Render(safeMessage(itemLabel(v.want) + " has no run to show"))
+			return m, nil
 		}
 		if len(t.refs) == 0 {
 			v.err = fmt.Errorf("no runs yet: nothing has started")
@@ -377,7 +386,7 @@ func (v *deskRunView) render(st theme.Styles, width, height int) string {
 	}
 
 	head := st.Header.Render("run")
-	finished := v.loaded && !v.polls()
+	finished := v.loaded && runEnded(v.delta.Live)
 	if ref.Name != "" {
 		head += " " + st.Fg.Render(itemLabel(ref.Name))
 		if ref.Kind == runview.KindLog {
@@ -423,9 +432,6 @@ func (v *deskRunView) render(st theme.Styles, width, height int) string {
 		}
 		if v.err != nil {
 			rule += " · " + safeMessage(v.err.Error())
-		}
-		if v.notice != "" {
-			rule += " · " + v.notice
 		}
 		lines = append(lines, cut(st.Muted.Render(" "+rule), width))
 		events := runEvents(st, v.folder, v.at, width, max(body-len(flow), 1))

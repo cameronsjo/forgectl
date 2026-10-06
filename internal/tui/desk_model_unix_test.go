@@ -814,30 +814,7 @@ func TestDesk_SkippingALostRunIsFinal(t *testing.T) {
 	h := newDeskHarness(t)
 	h.drop("01-alpha.sh", plainScript("alpha"))
 	h.scan()
-	h.press("y") // claimed; the fake Launch starts no owner
-	// Age the claim past the grace: the claim's owner never came.
-	metaPath := filepath.Join(h.d.Path(), desk.DirRunning, "01-alpha.meta.json")
-	data, err := os.ReadFile(metaPath) //nolint:gosec // G304: a path under t.TempDir
-	if err != nil {
-		t.Fatal(err)
-	}
-	var meta desk.Meta
-	if err := json.Unmarshal(data, &meta); err != nil {
-		t.Fatal(err)
-	}
-	old := time.Now().Add(-time.Hour)
-	meta.ClaimedAt = &old
-	if data, err = json.Marshal(meta); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(metaPath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	h.scan()
-	h.selectItem("01-alpha")
-	if r, _ := h.m.selected(); r.kind != rowLost {
-		t.Fatalf("row kind %d, want lost", r.kind)
-	}
+	makeLost(t, h, "01-alpha")
 	h.press("s", "y")
 	if got := h.where("01-alpha"); got != desk.DirSkipped {
 		t.Fatalf("01-alpha is in %s, want skipped", got)

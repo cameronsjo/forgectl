@@ -477,3 +477,36 @@ func TestRunViewLostAndChanged(t *testing.T) {
 		t.Errorf("changed run view:\n%s", out)
 	}
 }
+
+// A run the desk no longer has is not "finished": one that vanished while
+// running keeps the live replay wording.
+func TestRunViewGoneRunIsNotFinished(t *testing.T) {
+	st := theme.Default().Styles()
+	ref := runview.RunRef{Source: "desk", Name: "01-a", Kind: runview.KindDesk}
+	defs := []runview.StepDef{{ID: runview.ScriptStep}}
+	f := newRunFolder(ref, defs, []runview.Event{{Name: "RUN-START", Seq: 1}, {Name: "STEP-START", Step: runview.ScriptStep, Seq: 2}})
+	v := &deskRunView{refs: []runview.RunRef{ref}, folder: f, defs: defs, delta: runview.Delta{Live: runview.LiveRunning}, loaded: true, gone: true, at: 1}
+	out := ansi.Strip(v.render(st, 80, 20))
+	if strings.Contains(out, "G end") || strings.Contains(out, "start/end") || !strings.Contains(out, "replay 1/2 · G live") {
+		t.Errorf("a vanished running run reads finished:\n%s", out)
+	}
+}
+
+// A load that cannot find the selected item's run closes the view and says
+// so; it never shows another item's run as this one's.
+func TestRunViewSelectedRunGoneSaysSo(t *testing.T) {
+	h := runHarness(t)
+	name, _ := stageRun(t, h, "a.sh", "echo a\n", nil, 0)
+	h.selectItem(name)
+	h.m.runGen++
+	h.m.rv = &deskRunView{gen: h.m.runGen, want: "09-gone", follow: true, loading: true}
+	other := runview.RunRef{Source: "desk", Name: name, Kind: runview.KindDesk}
+	out, _ := h.m.Update(deskRunLoadMsg{gen: h.m.runGen, refs: []runview.RunRef{other}, ref: other, cur: &runview.Cursor{}})
+	h.m = out.(deskModel)
+	if h.m.rv != nil {
+		t.Fatalf("the view opened %s for a selected item with no run", name)
+	}
+	if !strings.Contains(ansi.Strip(h.m.footer()), "09 gone has no run to show") {
+		t.Errorf("footer = %q", ansi.Strip(h.m.footer()))
+	}
+}

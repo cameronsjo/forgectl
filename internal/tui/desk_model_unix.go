@@ -673,9 +673,9 @@ func notRunnable(r queueRow) string {
 	label := itemLabel(r.item.Name)
 	switch r.kind {
 	case rowLost:
-		return label + " was lost mid-run and may have partly run · s clears it · l shows what it printed"
+		return label + " was lost mid-run and may have partly run · " + lostNext
 	case rowChanged:
-		return label + " changed after it was queued and did not run · ask Claude to queue it again"
+		return label + " changed after it was queued and did not run · " + changedNext
 	}
 	return label + " is " + rowLabel(r.kind) + "; only a waiting item runs"
 }
@@ -928,7 +928,7 @@ func (m deskModel) undo() (tea.Model, tea.Cmd) {
 		text := "nothing to undo"
 		if r, ok := m.selected(); ok && r.kind == rowChanged {
 			// The desk skipped it, not the operator, and it cannot be re-armed.
-			text = "nothing to undo: " + itemLabel(r.item.Name) + " changed after it was queued and cannot run · ask Claude to queue it again"
+			text = "nothing to undo: " + itemLabel(r.item.Name) + " changed after it was queued and cannot run · " + changedNext
 		}
 		m.message = m.styles().Muted.Render(safeMessage(text))
 		return m, nil

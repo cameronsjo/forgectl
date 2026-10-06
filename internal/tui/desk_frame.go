@@ -882,8 +882,10 @@ func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, curso
 	head += st.Muted.Render(" · " + f.focusState(r))
 	lines := []string{head}
 	// A lost or changed item says what happened and what to do next, wrapped
-	// under the head so the next step is never the part cut off.
-	if note := stateNote(r); note != "" {
+	// under the head so the next step is never the part cut off. The smallest
+	// panel (body 0) leaves it out: it is not what y needs, and y, s and u
+	// say the same in the footer.
+	if note := stateNote(r); note != "" && body > 0 {
 		for _, l := range strings.Split(ansi.Wrap(note, max(width-4, 10), ""), "\n") {
 			lines = append(lines, st.Warn.Render(strings.TrimRight(l, " ")))
 		}
@@ -987,23 +989,31 @@ func (f deskFrame) focusState(r queueRow) string {
 	return outcome + " · ended " + agoLabel(f.now, it.Ended)
 }
 
+// The next step for a lost run and a changed item, shared by the focus
+// panel, y's reply and u's reply so the three cannot drift apart.
+const (
+	lostNext    = "s clears it · l shows what it printed"
+	changedNext = "ask Claude to queue it again"
+)
+
 // stateNote is what happened to a lost or changed item and what to do next,
 // in plain words; "" for every other row. Both hashes of a changed item are
-// shown only when they are valid sha256 values.
+// shown only when they are valid sha256 values, and the second only when it
+// differs from the first.
 func stateNote(r queueRow) string {
 	switch r.kind {
 	case rowLost:
-		return "the desk stopped watching it mid-run, so it may have partly run · s clears it · l shows what it printed"
+		return "the desk stopped watching it mid-run, so it may have partly run · " + lostNext
 	case rowChanged:
 		m := r.item.Meta
 		hashes := "its bytes changed after it was queued"
 		if desk.ValidSHA256(m.SHA256) {
-			hashes = "queued " + m.SHA256[:deskShortHash]
-			if desk.ValidSHA256(m.ChangedSHA256) {
-				hashes += ", now " + m.ChangedSHA256[:deskShortHash]
+			hashes = "queued " + m.SHA256[:deskShortHash] + ", since changed"
+			if desk.ValidSHA256(m.ChangedSHA256) && m.ChangedSHA256 != m.SHA256 {
+				hashes = "queued " + m.SHA256[:deskShortHash] + ", now " + m.ChangedSHA256[:deskShortHash]
 			}
 		}
-		return hashes + " · not run, moved to skipped · ask Claude to queue it again"
+		return hashes + " · not run, moved to skipped · " + changedNext
 	}
 	return ""
 }

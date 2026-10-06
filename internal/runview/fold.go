@@ -139,7 +139,8 @@ func (r *reducer) step(e Event) (int, bool) {
 // end marks the run ended whether or not its exit is usable; a missing,
 // non-integer or out-of-range exit is counted and the previous exit kept.
 func (r *reducer) end(e Event) {
-	r.ended, r.endedAt = true, e.Time
+	// A RUN-END after a RUN-LOST wins: the owner was slow, not gone.
+	r.ended, r.lost, r.endedAt = true, false, e.Time
 	v, ok := e.field(r.spec.ExitField)
 	if !ok {
 		r.state.BadExits++
