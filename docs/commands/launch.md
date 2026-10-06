@@ -211,6 +211,19 @@ A captured legacy name disappearing while a process waits for the writer lock is
 
 New config and backup files are owner-only and no broader than `0600`; a restrictive umask may narrow them further, and an existing config mode such as `0400`, `0200`, or `0000` is not broadened. Every cooperating launch/top-level init writer shares the same Unix sibling lock and atomic replacement path. Secure legacy mutation and directory-durability claims apply to Unix builds (the shipped Darwin/Linux targets); non-Unix builds refuse automatic and explicit legacy mutation before writer activity. Their developer-only normal init may make a replacement visible, but reports that directory durability and cross-process serialization are unavailable.
 
+### Worker posture: `[launch.worker]`
+
+A coordinator worker (`forgectl surface launch --worktree`) does not take its posture from `[launch.defaults]`. Those are your interactive defaults, and their built-in `plan` would leave every worker unable to write. Each worker posture field comes from `[launch.worker]`, or the built-in worker value when it is unset. When the matched `[[launch.project]]` block sets the same field itself, the worker takes the stricter of the two:
+
+```toml
+[launch.worker]
+permission_mode = "acceptEdits"   # claude workers; built-in value acceptEdits
+sandbox         = "workspace-write" # codex workers; built-in value workspace-write
+approval_policy = "on-request"    # codex workers; built-in value on-request
+```
+
+A repo block can only make a worker stricter. Its `plan` wins over `acceptEdits`, and its `bypassPermissions` loses to it. A worker floor then caps every field: `acceptEdits`, `workspace-write` and `on-request` at most. So `auto`, `dontAsk`, `bypassPermissions`, `danger-full-access` and `never` are refused for workers, wherever they are set. A value the floor does not rank is refused too.
+
 > Absorbed from the standalone `claunch` tool. A `claunch='forgectl launch'` shell alias preserves the old muscle memory.
 
 ## Local launch statistics

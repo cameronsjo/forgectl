@@ -186,11 +186,12 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 
 	for name, lc := range map[string]config.LaunchConfig{
 		"pi from the repo profile": {Projects: []config.LaunchProject{{Match: target, Harness: "pi"}}},
-		"bypassPermissions":        {Defaults: config.LaunchDefaults{PermissionMode: "bypassPermissions"}},
-		"danger-full-access":       {Defaults: config.LaunchDefaults{Harness: "codex", Sandbox: "danger-full-access"}},
-		"claude auto mode":         {Defaults: config.LaunchDefaults{PermissionMode: "auto"}},
-		"claude dontAsk":           {Defaults: config.LaunchDefaults{PermissionMode: "dontAsk"}},
-		"codex never asks":         {Defaults: config.LaunchDefaults{Harness: "codex", Sandbox: "workspace-write", ApprovalPolicy: "never"}},
+		"bypassPermissions":        {Worker: config.LaunchWorker{PermissionMode: "bypassPermissions"}},
+		"danger-full-access":       {Defaults: config.LaunchDefaults{Harness: "codex"}, Worker: config.LaunchWorker{Sandbox: "danger-full-access"}},
+		"claude auto mode":         {Worker: config.LaunchWorker{PermissionMode: "auto"}},
+		"claude dontAsk":           {Worker: config.LaunchWorker{PermissionMode: "dontAsk"}},
+		"codex never asks":         {Defaults: config.LaunchDefaults{Harness: "codex"}, Worker: config.LaunchWorker{ApprovalPolicy: "never"}},
+		"unknown worker mode":      {Worker: config.LaunchWorker{PermissionMode: "acceptEdit"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := BuildInvocation(InvocationRequest{Config: lc, CWD: target, Worker: true, Resolve: bin, StdoutTerminal: true})
@@ -206,7 +207,7 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 		t.Run("claude worker in "+mode+" turns off auto mode during plan", func(t *testing.T) {
 			built, err := BuildInvocation(InvocationRequest{
 				StdoutTerminal: true,
-				Config:         config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: mode}},
+				Config:         config.LaunchConfig{Worker: config.LaunchWorker{PermissionMode: mode}},
 				CWD:            target, Worker: true, Resolve: bin,
 			})
 			if err != nil {

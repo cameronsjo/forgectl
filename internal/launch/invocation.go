@@ -406,6 +406,13 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		if len(req.Args) > 0 {
 			return BuiltInvocation{}, fmt.Errorf("%w: workers take no harness args, got %q", ErrWorkerPosture, req.Args)
 		}
+		proj, err := MatchedProject(req.Config, req.CWD)
+		if err != nil {
+			return BuiltInvocation{}, err
+		}
+		if profile, err = applyWorkerProfile(profile, req.Config.Worker, proj); err != nil {
+			return BuiltInvocation{}, fmt.Errorf("%w: %w", ErrWorkerPosture, err)
+		}
 		if profile, err = applyWorkerFloor(profile); err != nil {
 			return BuiltInvocation{}, err
 		}

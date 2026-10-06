@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -80,4 +81,58 @@ func (r postureRank) atMost(v, limit string) bool {
 	lv, ok := r.level(v)
 	ll, lok := r.level(limit)
 	return ok && lok && lv <= ll
+}
+
+// stricter returns the stricter of a and b. When either is unranked it
+// returns "" with an error naming it, so the result is unusable without the
+// error: an unranked value can never win, and neither can its partner by
+// default.
+func (r postureRank) stricter(a, b string) (string, error) {
+	if err := r.check(a); err != nil {
+		return "", err
+	}
+	if err := r.check(b); err != nil {
+		return "", err
+	}
+	la, _ := r.level(a)
+	lb, _ := r.level(b)
+	if lb < la {
+		return b, nil
+	}
+	return a, nil
+}
+
+// applyWorkerProfile sets p's posture to the worker's: for each field, the
+// worker profile's value ([launch.worker], else the built-in worker value),
+// or the stricter of that and the matched project block's own value when the
+// block sets one. [launch.defaults] does not bind a worker: it is the
+// operator's interactive posture, and its built-in plan would leave every
+// worker unable to write. The worker floor caps the result afterwards.
+func applyWorkerProfile(p Profile, w config.LaunchWorker, proj *config.LaunchProject) (Profile, error) {
+	pick := func(r postureRank, worker, builtin, project string) (string, error) {
+		v := firstNonEmpty(worker, builtin)
+		if project == "" {
+			return v, r.check(v)
+		}
+		return r.stricter(v, project)
+	}
+	var pm, sb, ap string
+	if proj != nil {
+		pm, sb, ap = proj.PermissionMode, proj.Sandbox, proj.ApprovalPolicy
+	}
+	// Each field is read only for the harness that takes it, so a codex value
+	// in a claude repo's block cannot refuse a claude worker.
+	var err error
+	switch p.Harness {
+	case "claude":
+		p.PermissionMode, err = pick(claudePermissionRank, w.PermissionMode, workerMaxPermissionMode, pm)
+	case "codex":
+		if p.Sandbox, err = pick(codexSandboxRank, w.Sandbox, workerMaxSandbox, sb); err == nil {
+			p.ApprovalPolicy, err = pick(codexApprovalRank, w.ApprovalPolicy, workerMaxApproval, ap)
+		}
+	}
+	if err != nil {
+		return Profile{}, fmt.Errorf("worker profile: %w", err)
+	}
+	return p, nil
 }

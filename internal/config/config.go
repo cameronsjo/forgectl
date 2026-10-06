@@ -195,6 +195,9 @@ func (c Config) HasHerdrOrganizeSection() bool {
 type LaunchConfig struct {
 	Defaults LaunchDefaults  `toml:"defaults"`
 	Projects []LaunchProject `toml:"project"`
+	// Worker is [launch.worker]: the posture a coordinator's worker starts
+	// with (`surface launch --worktree`). See LaunchWorker.
+	Worker LaunchWorker `toml:"worker"`
 
 	// UsageStats is the informed opt-in for local launch statistics (#240).
 	// Absent and explicit false are both disabled, and nothing but an operator
@@ -202,6 +205,17 @@ type LaunchConfig struct {
 	// variable, init, doctor, or stats path ever writes true here. See
 	// internal/launch/usage.go for exactly what a recorded row contains.
 	UsageStats bool `toml:"usage_stats"`
+}
+
+// LaunchWorker is [launch.worker]: a worker's posture. Each field left empty
+// takes the built-in worker value (acceptEdits, workspace-write, on-request).
+// A worker takes, field by field, the stricter of this and the matched
+// [[launch.project]] block's own value; [launch.defaults] is the interactive
+// posture and does not bind workers. The worker floor still caps the result.
+type LaunchWorker struct {
+	PermissionMode string `toml:"permission_mode"`
+	Sandbox        string `toml:"sandbox"`
+	ApprovalPolicy string `toml:"approval_policy"`
 }
 
 // LaunchDefaults is [launch.defaults]: the base posture applied when no project
@@ -254,7 +268,7 @@ type LaunchProject struct {
 // either route — the difference is which code path carries it, and that is
 // worth stating here because the opt-in reads like it should be inert.
 func (lc LaunchConfig) IsZero() bool {
-	return len(lc.Projects) == 0 && lc.Defaults.isZero() && !lc.UsageStats
+	return len(lc.Projects) == 0 && lc.Defaults.isZero() && lc.Worker == (LaunchWorker{}) && !lc.UsageStats
 }
 
 // WorkflowConfig is the [workflow] section: extra strip-list entries the
