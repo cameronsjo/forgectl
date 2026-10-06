@@ -204,7 +204,7 @@ func TestLogFieldRules(t *testing.T) {
 	}, "\n") + "\n")
 	d := f.load(&Cursor{})
 
-	if got := names(d.Events); got != "[1:a 3:b 4:first]" {
+	if got := names(d.Events); got != "[1:a 2:b 3:first]" { // Seq numbers events, not lines
 		t.Fatalf("events %s", got)
 	}
 	want0 := []Field{{"event", "a"}, {"step", "fetch"}, {"try", "2"}, {"big", "1152921504606846976"}, {"neg", "-5"}}
@@ -236,8 +236,8 @@ func TestLogCountsAreTotalsAcrossLoads(t *testing.T) {
 		t.Fatalf("first: dropped %d fields %d", d.Dropped, d.DroppedFields)
 	}
 	f.appendTo("junk2\n" + `{"event":"b","y":null}` + "\n")
-	if d := f.load(cur); d.Dropped != 2 || d.DroppedFields != 2 || names(d.Events) != "[4:b]" {
-		t.Fatalf("second: dropped %d fields %d events %v; want running totals and Seq 4", d.Dropped, d.DroppedFields, names(d.Events))
+	if d := f.load(cur); d.Dropped != 2 || d.DroppedFields != 2 || names(d.Events) != "[2:b]" {
+		t.Fatalf("second: dropped %d fields %d events %v; want running totals and Seq 2 (the second event)", d.Dropped, d.DroppedFields, names(d.Events))
 	}
 }
 
@@ -278,7 +278,7 @@ func TestLogLineOver64KiBIsDroppedAndCounted(t *testing.T) {
 	f := newLogFixture(t)
 	f.write(logLine("boot", "") + long + logLine("end", ""))
 	d := f.load(&Cursor{})
-	if names(d.Events) != "[1:boot 3:end]" || d.Dropped != 1 {
+	if names(d.Events) != "[1:boot 2:end]" || d.Dropped != 1 {
 		t.Fatalf("events %v, dropped %d; want the long line 2 dropped", names(d.Events), d.Dropped)
 	}
 
@@ -296,7 +296,7 @@ func TestLogLineOver64KiBIsDroppedAndCounted(t *testing.T) {
 	f2.appendTo(long[66000:])
 	f2.appendTo(logLine("end", ""))
 	d = f2.load(cur)
-	if names(d.Events) != "[2:end]" || d.Dropped != 1 || len(cur.held) != 0 || cur.dropping {
+	if names(d.Events) != "[1:end]" || d.Dropped != 1 || len(cur.held) != 0 || cur.dropping {
 		t.Fatalf("events %v, dropped %d, held %d, dropping %v", names(d.Events), d.Dropped, len(cur.held), cur.dropping)
 	}
 }

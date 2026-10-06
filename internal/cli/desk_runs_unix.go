@@ -153,8 +153,8 @@ func runDeskRuns(cmd *cobra.Command, dirFlag string, log deskLogOpts, asJSON boo
 				failed = append(failed, fmt.Errorf("desk: cannot load %s/%s: %w", src.Name(), ref.Name, err))
 				continue
 			}
-			if r.delta.Err != nil {
-				failed = append(failed, fmt.Errorf("desk: %s/%s was read in part: %w", src.Name(), ref.Name, r.delta.Err))
+			if err := r.readInPart(); err != nil {
+				failed = append(failed, fmt.Errorf("desk: %s/%s was read in part: %w", src.Name(), ref.Name, err))
 			}
 			runs = append(runs, r)
 		}
@@ -296,8 +296,8 @@ func runDeskShow(cmd *cobra.Command, dirFlag, name string, log deskLogOpts, o de
 	}
 	// A run read in part is shown, then exits 1: a partial result is not
 	// success (ADR-0008). The note is in the output already.
-	if r.delta.Err != nil {
-		return jsonVerdict(WithExitCode(fmt.Errorf("desk show: %s was read in part", safeLabel(r.ref.Name)), 1), o.asJSON)
+	if err := r.readInPart(); err != nil {
+		return jsonVerdict(WithExitCode(fmt.Errorf("desk show: %s was read in part: %w", safeLabel(r.ref.Name), err), 1), o.asJSON)
 	}
 	return nil
 }
@@ -511,4 +511,19 @@ func isChainLink(s runview.RunState, i int, before []string) bool {
 		return len(before) == 0
 	}
 	return len(before) == 1 && before[0] == s.Steps[i-1].ID
+}
+
+// errPastCap is a log larger than the read cap: the part past it was not read.
+var errPastCap = errors.New("past the 32 MiB cap")
+
+// readInPart is why the run was read only in part, or nil: a read error, or a
+// log past the cap. Either is a partial result, which exits 1 (ADR-0008).
+func (r *loadedRun) readInPart() error {
+	switch {
+	case r.delta.Err != nil:
+		return r.delta.Err
+	case r.delta.Partial:
+		return errPastCap
+	}
+	return nil
 }
