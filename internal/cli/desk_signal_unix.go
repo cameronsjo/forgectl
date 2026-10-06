@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -26,7 +27,7 @@ import (
 
 // deskSignalTimeout bounds each signal call. A signal is a courtesy: a hung
 // herdr or osascript must not hold up a queue operation.
-const deskSignalTimeout = 2 * time.Second
+const deskSignalTimeout = time.Second
 
 // deskSignalBodyMax caps the notification body, matching herdr.NotificationMaxRunes.
 const deskSignalBodyMax = 200
@@ -111,12 +112,15 @@ func (s deskSignal) queued(ctx context.Context, d *desk.Desk, a desk.Added, what
 	}
 	if path, ok := s.herdrPath(); ok && herdr.CheckSession(deskLookupEnv) == nil {
 		c, cancel := context.WithTimeout(ctx, deskSignalTimeout)
-		defer cancel()
-		if err := herdr.NotificationShow(c, s.deps.SensitiveRunner, path, herdr.Notification{Title: title, Body: body, Sound: herdr.SoundRequest}); err != nil {
+		err := herdr.NotificationShow(c, s.deps.SensitiveRunner, path, herdr.Notification{Title: title, Body: body, Sound: herdr.SoundRequest})
+		cancel()
+		if err != nil {
 			herdrFailed = true
 			failed = append(failed, signalFailure("herdr signal", "notify_herdr", err))
 		}
 		if pane, ok := deskLookupEnv("HERDR_PANE_ID"); ok && pane != "" {
+			c, cancel := context.WithTimeout(ctx, deskSignalTimeout)
+			defer cancel()
 			if err := herdr.PaneReportBlocked(c, s.deps.SensitiveRunner, path, pane, title+": "+body); err != nil {
 				if !herdrFailed {
 					failed = append(failed, signalFailure("herdr signal", "notify_herdr", err))
@@ -130,20 +134,23 @@ func (s deskSignal) queued(ctx context.Context, d *desk.Desk, a desk.Added, what
 // signalFailure words one failed signal: what failed, that the item is queued
 // anyway, and which setting turns it off. The cause is the runner's own text.
 func signalFailure(what, setting string, err error) string {
-	return fmt.Sprintf("%s failed (%s); the item is queued. Turn it off with [desk] %s = false", what, shortCause(err), setting)
+	return fmt.Sprintf("%s failed (%s); the item is queued. Turn it off with [desk] %s = false", what, failureHint(setting, err), setting)
 }
 
-// shortCause is the innermost error's text: the reason, without the command
-// line and wrappers around it.
-func shortCause(err error) string {
-	for {
-		next := errors.Unwrap(err)
-		if next == nil {
-			break
+// failureHint says what to try. The sensitive runner withholds the tool's own
+// stderr, and a runner error is only an exit status, so this names the likely
+// fix instead of echoing text the operator cannot act on.
+func failureHint(setting string, err error) string {
+	switch setting {
+	case "notify_macos":
+		return "osascript did not post it; check System Settings > Notifications"
+	default:
+		var he *herdr.Error
+		if errors.As(err, &he) {
+			return termsafe.SafeLineMax(he.Error(), deskSignalErrMax)
 		}
-		err = next
+		return "herdr exited with an error; run herdr by hand to see why"
 	}
-	return termsafe.SafeLineMax(err.Error(), deskSignalErrMax)
 }
 
 // cleanupPath is where herdr is for clearing a signal already raised. It does
@@ -166,40 +173,33 @@ func (s deskSignal) cleanupPath() (string, bool) {
 // state back. Failures are dropped; the state is a courtesy and herdr may be
 // gone. A failed scan changes nothing: a signal is never cleared on a guess.
 func (s deskSignal) attach(d *desk.Desk) {
-	d.OnLeavePending(func(m desk.Meta) {
-		if m.SignalPane == "" {
+	// A herdr that hangs costs one timeout per process, not one per item: after
+	// a failed call this desk handle stops calling it. The hooks run on the
+	// claim path, so a "run all" must not wait on a dead herdr N times.
+	var gaveUp atomic.Bool
+	refresh := func(m desk.Meta, releaseWhenNone bool) {
+		if m.SignalPane == "" || gaveUp.Load() {
 			return
 		}
 		path, ok := s.cleanupPath()
 		if !ok {
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), deskSignalTimeout)
-		defer cancel()
 		total, left, err := waitingFrom(d, m.SignalPane)
 		if err != nil {
 			return
 		}
-		if left == 0 {
-			_ = herdr.PaneReleaseDesk(ctx, s.deps.SensitiveRunner, path, m.SignalPane)
-			return
-		}
-		_ = herdr.PaneReportBlocked(ctx, s.deps.SensitiveRunner, path, m.SignalPane, fmt.Sprintf("forgectl desk: %d waiting", total))
-	})
-	d.OnReturnPending(func(m desk.Meta) {
-		if m.SignalPane == "" {
-			return
-		}
-		path, ok := s.cleanupPath()
-		if !ok {
-			return
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), deskSignalTimeout)
 		defer cancel()
-		total, _, err := waitingFrom(d, m.SignalPane)
-		if err != nil {
-			return
+		if releaseWhenNone && left == 0 {
+			err = herdr.PaneReleaseDesk(ctx, s.deps.SensitiveRunner, path, m.SignalPane)
+		} else {
+			err = herdr.PaneReportBlocked(ctx, s.deps.SensitiveRunner, path, m.SignalPane, fmt.Sprintf("forgectl desk: %d waiting", total))
 		}
-		_ = herdr.PaneReportBlocked(ctx, s.deps.SensitiveRunner, path, m.SignalPane, fmt.Sprintf("forgectl desk: %d waiting", total))
-	})
+		if err != nil {
+			gaveUp.Store(true)
+		}
+	}
+	d.OnLeavePending(func(m desk.Meta) { refresh(m, true) })
+	d.OnReturnPending(func(m desk.Meta) { refresh(m, false) })
 }

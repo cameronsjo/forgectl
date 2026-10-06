@@ -181,10 +181,10 @@ file name (deploy.sh, nightly.manifest), whose extension picks the kind. stdin
 must not be a terminal.
 
 When an item is queued, add tells the operator: a herdr notification and the
-queuing pane's needs-you state (inside herdr) and a macOS notification
-(macOS only). A
-failed signal is a warning: line and never fails the add; [desk] notify_herdr
-and notify_macos in config.toml turn each off.
+queuing pane's needs-you state (inside herdr), and a macOS notification
+(macOS only). A failed signal prints "warning: operator signal failed:" and
+never fails the add; [desk] notify_herdr and notify_macos in config.toml turn
+each off. Any desk verb that skips a changed item also clears that pane's state.
 
 A .manifest is checked like ` + "`desk plan`" + ` before it is queued: a manifest that cannot
 run is refused, and its warnings are printed as warning: lines on stderr.

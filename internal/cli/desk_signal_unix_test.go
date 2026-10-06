@@ -5,11 +5,14 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/desk"
@@ -24,23 +27,22 @@ type signalRig struct {
 	runner *exec.FakeRunner
 	herdr  *exec.FakeSensitiveRunner
 	deps   module.Deps
+	mac    int // macOS notifications requested
 }
 
-func newSignalRig(cfg config.DeskConfig) *signalRig {
+// newSignalRig stubs the macOS notification seam: the real client is a no-op
+// off darwin, so counting its osascript calls would pass or fail by host.
+func newSignalRig(t *testing.T, cfg config.DeskConfig) *signalRig {
+	t.Helper()
 	r := &signalRig{runner: &exec.FakeRunner{}, herdr: &exec.FakeSensitiveRunner{}}
+	prev := deskMacNotify
+	deskMacNotify = func(context.Context, module.Deps, string, string) error { r.mac++; return nil }
+	t.Cleanup(func() { deskMacNotify = prev })
 	r.deps = module.Deps{Theme: theme.Default(), Cfg: config.Config{Desk: cfg}, Runner: r.runner, SensitiveRunner: r.herdr}
 	return r
 }
 
-func (r *signalRig) osascript() int {
-	n := 0
-	for _, c := range r.runner.Calls {
-		if c.Name == "osascript" {
-			n++
-		}
-	}
-	return n
-}
+func (r *signalRig) osascript() int { return r.mac }
 
 func (r *signalRig) kinds() string {
 	var ks []string
@@ -94,7 +96,7 @@ func queuedPane(t *testing.T, dir string) []string {
 func TestDeskAdd_SignalsTheOperator(t *testing.T) {
 	dir := newDeskDir(t)
 	inHerdr(t, "w1:p9")
-	rig := newSignalRig(config.DeskConfig{})
+	rig := newSignalRig(t, config.DeskConfig{})
 	if _, err := addItem(t, rig, "merge"); err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +129,7 @@ func TestDeskAdd_SettingsTurnEachSignalOff(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := newDeskDir(t)
 			inHerdr(t, "w1:p9")
-			rig := newSignalRig(tc.cfg)
+			rig := newSignalRig(t, tc.cfg)
 			if _, err := addItem(t, rig, "merge"); err != nil {
 				t.Fatal(err)
 			}
@@ -146,7 +148,7 @@ func TestDeskAdd_SettingsTurnEachSignalOff(t *testing.T) {
 func TestDeskAdd_OutsideHerdrOnlyNotifiesMacOS(t *testing.T) {
 	newDeskDir(t)
 	stubLayout(t, map[string]string{})
-	rig := newSignalRig(config.DeskConfig{})
+	rig := newSignalRig(t, config.DeskConfig{})
 	if _, err := addItem(t, rig, "merge"); err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +160,7 @@ func TestDeskAdd_OutsideHerdrOnlyNotifiesMacOS(t *testing.T) {
 func TestDeskAdd_AFailedSignalIsAWarningNotAFailedAdd(t *testing.T) {
 	dir := newDeskDir(t)
 	inHerdr(t, "w1:p9")
-	rig := newSignalRig(config.DeskConfig{})
+	rig := newSignalRig(t, config.DeskConfig{})
 	rig.herdr.RunFunc = func(exec.SensitiveCommand) (exec.SensitiveResult, error) {
 		return exec.SensitiveResult{}, errors.New("herdr is down")
 	}
@@ -177,7 +179,7 @@ func TestDeskAdd_AFailedSignalIsAWarningNotAFailedAdd(t *testing.T) {
 func TestDeskSkip_ClearsThePaneStateWhenTheLastItemLeaves(t *testing.T) {
 	newDeskDir(t)
 	inHerdr(t, "w1:p9")
-	rig := newSignalRig(config.DeskConfig{})
+	rig := newSignalRig(t, config.DeskConfig{})
 	for _, n := range []string{"one", "two"} {
 		if _, err := addItem(t, rig, n); err != nil {
 			t.Fatal(err)
@@ -204,7 +206,7 @@ func TestDeskSkip_ClearsThePaneStateWhenTheLastItemLeaves(t *testing.T) {
 func TestDeskSkip_LeavesAnItemWithNoSignalAlone(t *testing.T) {
 	newDeskDir(t)
 	stubLayout(t, map[string]string{})
-	rig := newSignalRig(config.DeskConfig{})
+	rig := newSignalRig(t, config.DeskConfig{})
 	if _, err := addItem(t, rig, "one"); err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +221,7 @@ func TestDeskSkip_LeavesAnItemWithNoSignalAlone(t *testing.T) {
 func TestDeskAdd_JSONCarriesTheSignalFailure(t *testing.T) {
 	newDeskDir(t)
 	inHerdr(t, "w1:p9")
-	rig := newSignalRig(config.DeskConfig{})
+	rig := newSignalRig(t, config.DeskConfig{})
 	rig.herdr.RunFunc = func(exec.SensitiveCommand) (exec.SensitiveResult, error) {
 		return exec.SensitiveResult{}, errors.New("herdr is down")
 	}
@@ -234,7 +236,7 @@ func TestDeskAdd_JSONCarriesTheSignalFailure(t *testing.T) {
 // item releases that pane only, and counts only that pane's items.
 func TestDeskSkip_ReleasesOnlyTheItemsOwnPane(t *testing.T) {
 	newDeskDir(t)
-	rig := newSignalRig(config.DeskConfig{})
+	rig := newSignalRig(t, config.DeskConfig{})
 	for _, it := range []struct{ pane, name string }{{"w1:p1", "a"}, {"w1:p2", "b"}, {"", "c"}} {
 		if it.pane == "" {
 			stubLayout(t, map[string]string{})
@@ -260,7 +262,7 @@ func TestDeskSkip_ReleasesOnlyTheItemsOwnPane(t *testing.T) {
 func TestDeskSkip_ClearsEvenWhenTheSettingIsNowOff(t *testing.T) {
 	newDeskDir(t)
 	inHerdr(t, "w1:p9")
-	rig := newSignalRig(config.DeskConfig{})
+	rig := newSignalRig(t, config.DeskConfig{})
 	if _, err := addItem(t, rig, "one"); err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +284,7 @@ func TestDeskVerbsThatScanClearAChangedItemsPane(t *testing.T) {
 		t.Run(verb[0], func(t *testing.T) {
 			dir := newDeskDir(t)
 			inHerdr(t, "w1:p9")
-			rig := newSignalRig(config.DeskConfig{})
+			rig := newSignalRig(t, config.DeskConfig{})
 			if _, err := addItem(t, rig, "one"); err != nil {
 				t.Fatal(err)
 			}
@@ -303,7 +305,7 @@ func TestDeskVerbsThatScanClearAChangedItemsPane(t *testing.T) {
 func TestDeskAdd_FailureWarningIsOneLinePerSetting(t *testing.T) {
 	newDeskDir(t)
 	inHerdr(t, "w1:p9")
-	rig := newSignalRig(config.DeskConfig{})
+	rig := newSignalRig(t, config.DeskConfig{})
 	rig.herdr.RunFunc = func(exec.SensitiveCommand) (exec.SensitiveResult, error) {
 		return exec.SensitiveResult{}, errors.New("herdr is down")
 	}
@@ -311,5 +313,80 @@ func TestDeskAdd_FailureWarningIsOneLinePerSetting(t *testing.T) {
 	wantExit(t, err, 0)
 	if n := strings.Count(errOut, "notify_herdr = false"); n != 1 {
 		t.Errorf("%d herdr warning lines, want 1:\n%s", n, errOut)
+	}
+}
+
+// The claim and unskip wirings, pinned where they are made: a desk opened the
+// way every verb opens it, driven through Claim, Skip and Unskip.
+func TestOpenDeskDirFor_ClearsOnClaimAndReraisesOnUnskip(t *testing.T) {
+	dir := newDeskDir(t)
+	inHerdr(t, "w1:p9")
+	rig := newSignalRig(t, config.DeskConfig{})
+	for _, n := range []string{"one", "two"} {
+		if _, err := addItem(t, rig, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d, err := openDeskDirFor(&cobra.Command{}, rig.deps, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close() //nolint:errcheck // test
+	snap, err := d.Scan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := len(rig.herdr.Calls())
+
+	if err := d.Skip("01-one", desk.SkipOperator); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Unskip("01-one"); err != nil {
+		t.Fatal(err)
+	}
+	calls := rig.herdr.Calls()[before:]
+	if len(calls) != 2 || !calls[0].Equal(blockedCmd("w1:p9", "forgectl desk: 1 waiting")) || !calls[1].Equal(blockedCmd("w1:p9", "forgectl desk: 2 waiting")) {
+		t.Fatalf("skip then unskip: %d calls, want the count refreshed to 1 then back to 2", len(calls))
+	}
+
+	before = len(rig.herdr.Calls())
+	for _, it := range snap.Pending {
+		if _, err := d.Claim(it.Name, it.Meta.SHA256); err != nil {
+			t.Fatal(err)
+		}
+	}
+	calls = rig.herdr.Calls()[before:]
+	if len(calls) != 2 || !calls[1].Equal(releaseCmd("w1:p9")) {
+		t.Fatalf("claiming both items: %d calls, want a refresh then the release of w1:p9", len(calls))
+	}
+}
+
+// One failed herdr call stops the rest for this process, so a dead herdr does
+// not add a timeout to every claim of a "run all".
+func TestOpenDeskDirFor_StopsCallingAHerdrThatFailed(t *testing.T) {
+	dir := newDeskDir(t)
+	inHerdr(t, "w1:p9")
+	rig := newSignalRig(t, config.DeskConfig{})
+	for _, n := range []string{"one", "two", "three"} {
+		if _, err := addItem(t, rig, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d, err := openDeskDirFor(&cobra.Command{}, rig.deps, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close() //nolint:errcheck // test
+	rig.herdr.RunFunc = func(exec.SensitiveCommand) (exec.SensitiveResult, error) {
+		return exec.SensitiveResult{}, errors.New("herdr is down")
+	}
+	before := len(rig.herdr.Calls())
+	for _, n := range []string{"01-one", "02-two"} {
+		if err := d.Skip(n, desk.SkipOperator); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := len(rig.herdr.Calls()) - before; n != 1 {
+		t.Errorf("%d herdr calls after a failure, want 1 (the failed one)", n)
 	}
 }
