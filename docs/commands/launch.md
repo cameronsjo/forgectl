@@ -30,11 +30,11 @@ tasks. Claude remains the compatibility default.
 harness         = "claude"   # or "codex" / "pi"
 model           = "opus"     # remove or replace for Codex/Pi
 # effort        = "medium"   # low|medium|high|xhigh|max; unset = derived from model
-permission_mode = "plan"     # Claude starts in plan
+permission_mode = "plan"     # Claude starts in plan; plan|default|manual|acceptEdits|auto|dontAsk|bypassPermissions, anything else is refused
 allow_danger    = true       # adds --allow-dangerously-skip-permissions (reachable, not on)
 # binary_path   = ""         # explicit claude path; $FORGECTL_CLAUDE_BIN overrides this
 # Codex settings when harness = "codex":
-# approval_policy   = "on-request"
+# approval_policy   = "on-request"   # on-request|never (Codex 0.160 refuses "untrusted")
 # sandbox           = "read-only"   # launch always starts non-writing; opt up to "workspace-write"
 # codex_binary_path = ""      # $FORGECTL_CODEX_BIN overrides this
 # Pi settings when harness = "pi":

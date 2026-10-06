@@ -141,16 +141,27 @@ var (
 	ErrWorkerPosture = errors.New("launch: this posture is not allowed for a worker")
 )
 
-// Worker posture allowlists. They are the plan's v1 worker posture and
-// everything stricter: a claude worker whose shell commands still prompt, and
-// a codex worker that can write only its workspace and asks before anything
-// else. Anything not listed is refused, so a mode Claude Code or Codex adds
-// later is refused until someone decides it is safe for an unattended worker.
-var (
-	workerPermissionModes = []string{"plan", "default", "acceptEdits"}
-	workerSandboxes       = []string{"read-only", "workspace-write"}
-	workerApprovals       = []string{"untrusted", "on-request"}
+// Worker posture caps. A worker may take each cap or anything stricter (the
+// rank tables in posture.go): a claude worker whose shell commands still
+// prompt, and a codex worker that can write only its workspace and asks
+// before anything else. A value the tables do not rank is refused, so a mode
+// Claude Code or Codex adds later is refused until someone ranks it.
+const (
+	workerMaxPermissionMode = "acceptEdits"
+	workerMaxSandbox        = "workspace-write"
+	workerMaxApproval       = "on-request"
 )
+
+// allowedUpTo lists r's values no looser than limit, for an error message.
+func allowedUpTo(r postureRank, limit string) string {
+	var out []string
+	for _, v := range r.known() {
+		if r.atMost(v, limit) {
+			out = append(out, v)
+		}
+	}
+	return strings.Join(out, ", ")
+}
 
 // applyWorkerFloor is the worker posture until the worker profile (T5) lands.
 //
@@ -163,18 +174,18 @@ var (
 func applyWorkerFloor(p Profile) (Profile, error) {
 	switch p.Harness {
 	case "claude":
-		if !oneOf(p.PermissionMode, workerPermissionModes...) {
+		if !claudePermissionRank.atMost(p.PermissionMode, workerMaxPermissionMode) {
 			return Profile{}, fmt.Errorf("%w: permission_mode %q (workers allow %s)",
-				ErrWorkerPosture, p.PermissionMode, strings.Join(workerPermissionModes, ", "))
+				ErrWorkerPosture, p.PermissionMode, allowedUpTo(claudePermissionRank, workerMaxPermissionMode))
 		}
 	case "codex":
-		if !oneOf(p.Sandbox, workerSandboxes...) {
+		if !codexSandboxRank.atMost(p.Sandbox, workerMaxSandbox) {
 			return Profile{}, fmt.Errorf("%w: sandbox %q (workers allow %s)",
-				ErrWorkerPosture, p.Sandbox, strings.Join(workerSandboxes, ", "))
+				ErrWorkerPosture, p.Sandbox, allowedUpTo(codexSandboxRank, workerMaxSandbox))
 		}
-		if !oneOf(p.ApprovalPolicy, workerApprovals...) {
+		if !codexApprovalRank.atMost(p.ApprovalPolicy, workerMaxApproval) {
 			return Profile{}, fmt.Errorf("%w: approval_policy %q (workers allow %s)",
-				ErrWorkerPosture, p.ApprovalPolicy, strings.Join(workerApprovals, ", "))
+				ErrWorkerPosture, p.ApprovalPolicy, allowedUpTo(codexApprovalRank, workerMaxApproval))
 		}
 	default:
 		return Profile{}, fmt.Errorf("%w: %s has no permission or sandbox flag forgectl can pass", ErrWorkerPosture, p.Harness)
