@@ -71,5 +71,5 @@ The dashboard polls the selected run, as the rest of the desk does. Nothing here
 - `desk runs [--json]` and `desk show <name> [--json]` are new verbs with additive-only JSON (ADR-0008).
 - The dashboard gains a run view: the flow, the event timeline and replay for one run. It lands in its own change after the verbs.
 - `internal/desk` gains `ParseEvent`, a portable parser for the event lines the desk writes, where `msg=` and `log=` take the rest of the line.
-- A JSONL log shows no step state. That is a known limit, not a bug: closing it needs a home consumer and a change to this ADR.
+- A JSONL log shows no step state. That is a known limit, not a bug: closing it needs a tool in use that writes such logs, and a change to this ADR.
 - Reading the desk scans it, and a scan changes the queue as `desk status` does (ADR-0012).
