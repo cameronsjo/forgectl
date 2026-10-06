@@ -67,6 +67,7 @@ The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with 
 | `u` | undo the last skip |
 | `v` | view the selected item's script |
 | `l` | view the latest log |
+| `r` | open the run view on the selected run (or the newest): its steps as a flow, the event timeline, and replay. `←`/`→` step through events, `[`/`]` move 10, `g`/`G` jump to the start or back to live, `space` plays, `n`/`p` switch runs, `q` closes |
 | `a` | run every waiting item on screen, except TTY and changed items; asks first, listing each item with its full sha256, and runs exactly those names and hashes |
 | `j` / `k` | move |
 | `q` | quit; detached runs keep running |

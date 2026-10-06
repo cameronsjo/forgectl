@@ -21,6 +21,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/desk"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/herdr"
+	"github.com/cameronsjo/forgectl/internal/runview"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
@@ -46,6 +47,9 @@ type DeskOptions struct {
 	Notify func(ctx context.Context, title, body string) error
 	// Poll is how often the desk re-reads the queue; 0 means deskPollEvery.
 	Poll time.Duration
+	// Runs is where the run view (r) reads runs from; RunDesk sets the
+	// desk itself. nil leaves the run view off.
+	Runs runview.Source
 }
 
 const (
@@ -93,6 +97,9 @@ func RunDesk(ctx context.Context, d *desk.Desk, opts DeskOptions) error {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if opts.Runs == nil {
+		opts.Runs = runview.NewDeskSource(d)
+	}
 	_, err := tea.NewProgram(newDeskModel(ctx, d, opts), tea.WithContext(ctx)).Run()
 	return err
 }
@@ -148,6 +155,12 @@ type deskModel struct {
 	busy     bool     // an action is in flight
 
 	pager *deskPager
+	// rv is the open run view (r), reading runs from runs.
+	rv   *deskRunView
+	runs runview.Source
+	// runGen numbers each run view and run switch, so a load or tick for a
+	// view that was closed or switched never lands in the next one.
+	runGen int
 
 	// seen is the waiting set at the last scan, for arrival bells.
 	seen     map[string]bool
@@ -185,6 +198,7 @@ func newDeskModel(ctx context.Context, d deskBackend, opts DeskOptions) deskMode
 		poll:        poll,
 		scanTimeout: deskScanTimeout,
 		notify:      notify,
+		runs:        opts.Runs,
 		ttyArgv:     ttyArgv,
 		seen:        map[string]bool{},
 	}
@@ -303,6 +317,9 @@ func (m deskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case deskTickMsg:
 		cmds := []tea.Cmd{m.tick()}
+		if c := m.pollRun(); c != nil {
+			cmds = append(cmds, c)
+		}
 		if !m.scanning {
 			m.scanning = true
 			cmds = append(cmds, m.scanCmd())
@@ -353,6 +370,10 @@ func (m deskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.pager = t.pager
 		return m, nil
+	case deskRunLoadMsg:
+		return m.applyRunLoad(t)
+	case deskRunPlayMsg:
+		return m.playStep(t)
 	case tea.KeyPressMsg:
 		return m.updateKey(t)
 	}
@@ -482,6 +503,9 @@ func (m deskModel) updateKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.pagerKey(key)
 		return m, nil
 	}
+	if m.rv != nil {
+		return m.runViewKey(key)
+	}
 	if m.confirm != confirmNone {
 		return m.confirmKey(key)
 	}
@@ -512,6 +536,8 @@ func (m deskModel) updateKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.view()
 	case "l":
 		return m, m.log()
+	case "r":
+		return m.openRunView()
 	}
 	return m, nil
 }
@@ -807,6 +833,8 @@ func (m deskModel) View() tea.View {
 	var content string
 	if m.pager != nil {
 		content = m.pagerView(width, height)
+	} else if m.rv != nil {
+		content = m.rv.render(m.styles(), width, height)
 	} else {
 		th := m.theme
 		opts := m.frame
