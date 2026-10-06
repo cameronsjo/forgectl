@@ -88,6 +88,12 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 	if err != nil {
 		return fail(err)
 	}
+	// A worker must be built as one: that is what applies the posture floor,
+	// the isolation argv and the environment allowlist. A build step that
+	// skipped it would launch a worker with the launcher's posture and env.
+	if !built.Worker {
+		return fail(errors.New("forgectl: the worker invocation was not built as a worker launch"))
+	}
 	if err := led.Update(name, func(r *worker.Row) {
 		r.Harness = built.Invocation.Harness
 		if built.SessionID != "" {
