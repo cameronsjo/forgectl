@@ -360,6 +360,10 @@ type BuiltInvocation struct {
 	Posture    Posture
 	// SessionID is the --session-id the argv carries, or "".
 	SessionID string
+	// Worker reports that the request was a worker launch, so the worker
+	// floor, the claude isolation argv and the environment allowlist applied.
+	// Only BuildInvocation sets it.
+	Worker bool
 }
 
 // ErrNoBinaryResolver reports a request with no resolver. Refusing beats
@@ -463,6 +467,7 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		Profile:   profile,
 		Posture:   posture,
 		SessionID: req.SessionID,
+		Worker:    req.Worker,
 	}, nil
 }
 
