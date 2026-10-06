@@ -234,15 +234,24 @@ const workerClaudeSettings = `{"useAutoModeDuringPlan":false,"permissions":{"den
 //     ~/.claude.json, not a settings layer, so the flags above leave it on: a
 //     live worker still listed the claude-in-chrome MCP server, which drives
 //     the operator's browser.
+//   - `--safe-mode` also stops the operator's project auto-memory loading
+//     (MEMORY.md under ~/.claude/projects), which a live worker loaded
+//     without it. Every session writes that memory and the operator's own
+//     later sessions read it.
+//     It keeps the --settings deny rules (measured), and sets
+//     CLAUDE_CODE_DISABLE_CLAUDE_MDS, which covers CLAUDE.md files that
+//     load lazily from subdirectories (read from the binary, not measured).
 //
-// CLAUDE.md is not covered: it is memory, not settings, and claudeMdExcludes
-// is read only from the settings layers this turns off. The branch's
-// CLAUDE.md still loads; checking it against a trusted base is forgectl#1061.
+// CLAUDE.md: a live interactive worker with these flags loaded no CLAUDE.md
+// or AGENTS.md at any level, a branch-committed one included. `claude -p`
+// did load the cwd's CLAUDE.md under the same flags, so the result holds for
+// the interactive sessions workers run, not for print mode.
 func workerClaudeIsolation() []string {
 	return []string{
 		"--setting-sources", "",
 		"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
 		"--no-chrome",
+		"--safe-mode",
 	}
 }
 

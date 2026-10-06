@@ -202,14 +202,14 @@ func pickRepo(repos []projects.Repo, th theme.Theme) (projects.Repo, error) {
 		byKey[key] = r
 	}
 	var chosen string
-	err := huh.NewForm(
+	err := keymap.Suspendable(huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Projects — enter to pick, esc to cancel").
 				Options(opts...).
 				Value(&chosen),
 		),
-	).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh()).Run()
+	)).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh()).Run()
 	if err != nil {
 		return projects.Repo{}, err
 	}
