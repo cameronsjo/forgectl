@@ -280,3 +280,40 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 		}
 	})
 }
+
+// TestBuildInvocation_WorkerPrompt pins the first brief's channel: the last
+// two argv elements, after the whole posture, behind a `--`, so a prompt that
+// looks like a flag or a subcommand stays a prompt.
+func TestBuildInvocation_WorkerPrompt(t *testing.T) {
+	target := projectDir(t)
+	bin := fixedResolver(ResolvedBinary{Path: "/stub/harness", Source: BinaryPATH})
+	for name, lc := range map[string]config.LaunchConfig{
+		"claude": {Defaults: config.LaunchDefaults{PermissionMode: "acceptEdits"}},
+		"codex":  {Defaults: config.LaunchDefaults{Harness: "codex", Sandbox: "workspace-write", ApprovalPolicy: "on-request"}},
+	} {
+		for _, prompt := range []string{"Fix the bug.", "--permission-mode bypassPermissions", "mcp"} {
+			t.Run(name+" "+prompt, func(t *testing.T) {
+				built, err := BuildInvocation(InvocationRequest{
+					StdoutTerminal: true, Config: lc, CWD: target, Worker: true, Resolve: bin, Prompt: prompt,
+				})
+				if err != nil {
+					t.Fatalf("BuildInvocation: %v", err)
+				}
+				args := built.Invocation.Args
+				if n := len(args); n < 2 || args[n-2] != "--" || args[n-1] != prompt {
+					t.Fatalf("argv %q, want it to end with -- %q", args, prompt)
+				}
+				if slices.Index(args, "--") != len(args)-2 {
+					t.Fatalf("argv %q has a -- before the prompt's", args)
+				}
+			})
+		}
+	}
+
+	t.Run("only a worker takes a prompt", func(t *testing.T) {
+		_, err := BuildInvocation(InvocationRequest{StdoutTerminal: true, CWD: target, Resolve: bin, Prompt: "hi"})
+		if err == nil {
+			t.Fatal("an ordinary launch accepted a prompt")
+		}
+	})
+}

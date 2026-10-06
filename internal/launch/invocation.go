@@ -115,6 +115,11 @@ type InvocationRequest struct {
 	// Worker marks a coordinator's worker launch. It applies a floor under
 	// the resolved posture; see applyWorkerFloor.
 	Worker bool
+	// Prompt is a worker's first brief. It goes last in the argv, after a
+	// `--`, so the harness starts its first turn with it and no keystroke is
+	// typed into its TUI. Only a worker takes one; the caller validates its
+	// text (worker.CheckBrief).
+	Prompt string
 	// StdoutTerminal reports whether the harness's stdout (forgectl's own,
 	// since launch execs it) is a terminal. It decides whether
 	// `--output-format` alone selects the print posture (IsClaudePrintMode,
@@ -271,6 +276,9 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 	if err := profile.Validate(); err != nil {
 		return BuiltInvocation{}, err
 	}
+	if req.Prompt != "" && !req.Worker {
+		return BuiltInvocation{}, errors.New("launch: only a worker launch takes a prompt")
+	}
 	if req.Worker {
 		// A user arg lands after the posture, where Claude Code's last-flag-wins
 		// parsing would let `--permission-mode` or `--settings` undo the floor.
@@ -292,6 +300,13 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		if harnessArgs, err = withWorkerSettings(harnessArgs); err != nil {
 			return BuiltInvocation{}, err
 		}
+	}
+	if req.Prompt != "" {
+		// The `--` ends option parsing in both harnesses, so a prompt that
+		// starts with '-' or names a subcommand (`mcp`, `update`) stays the
+		// prompt. Measured: Claude Code 2.1.289 answered `-- mcp` as a prompt,
+		// and Codex 0.160.0 took `-- --help` as one.
+		harnessArgs = append(harnessArgs, "--", req.Prompt)
 	}
 
 	binary, err := req.Resolve(profile.Harness, req.Config.Defaults)

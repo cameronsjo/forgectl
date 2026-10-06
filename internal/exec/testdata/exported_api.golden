@@ -38,6 +38,8 @@ const KindHerdrProbe CommandKind
 const KindHerdrReadiness CommandKind
 const KindHerdrReconcile CommandKind
 const KindHerdrScreenRead CommandKind
+const KindHerdrSendKeys CommandKind
+const KindHerdrSendText CommandKind
 const KindHerdrSnapshot CommandKind
 const KindSopsEdit CommandKind
 const KindSopsExtract CommandKind

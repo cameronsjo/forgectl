@@ -47,6 +47,10 @@ type Row struct {
 	Recovery string `json:"recovery,omitempty"`
 	// Failure is the error a failed step reported.
 	Failure string `json:"failure,omitempty"`
+	// Brief is the last brief recorded for the worker, or nil before one.
+	// It is written before the brief is sent, so a send that dies partway
+	// still leaves the marker its report will carry.
+	Brief *Brief `json:"brief,omitempty"`
 }
 
 // ledgerVersion is the on-disk format version. A file with another version is
