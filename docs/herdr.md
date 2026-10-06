@@ -74,6 +74,20 @@ Every brief carries a random 12-character marker, recorded in the ledger row bef
 
 `surface wait` does not compare screen text for stability, because a harness's status line and any mod drawing above the prompt change every second. It needs the ready verdict to hold for `--settle`, plus one of: a `working` status seen during the wait, the report on screen, or `--quiet` at the prompt.
 
+## What a claude worker loads
+
+A claude worker gets only forgectl's settings (ADR-0010, forgectl#1050). Its argv carries:
+
+- **`--setting-sources ""`:** no user, project or local settings load. The branch's `.claude/settings.json` hooks do not run, and the operator's plugins, hooks and skills do not load. Only Claude Code's built-in plugins, skills and agents remain.
+- **`--strict-mcp-config` with an empty `--mcp-config`:** no MCP server loads. That covers the branch's `.mcp.json`, the operator's servers, and plugin servers, a herdr-driving one included.
+- **`--no-chrome`:** turns off Claude in Chrome. It is enabled from `~/.claude.json`, so the flags above leave it on.
+- **No `--ide`:** the worker does not connect to the operator's editor.
+- **`--settings`:** sets `useAutoModeDuringPlan: false` (forgectl#1060) and denies `SendMessage` and `RemoteTrigger`. Without the deny, a worker could message another Claude session on the machine, the coordinator included, or start a cloud session.
+
+These were measured live on Claude Code 2.1.289. Every case was checked with `claude -p` in a repo carrying a hook, an MCP server and a skill. In an interactive herdr worker, with these flags it listed no MCP server, and its tool list held neither denied tool.
+
+The branch's `CLAUDE.md` still loads. It is memory, not settings, and `claudeMdExcludes` is read only from the settings layers this turns off. Checking it against a trusted base is forgectl#1061. A codex worker gets none of this yet.
+
 ## Listing and closing workers
 
 `surface list` probes each ledger row's workspace through `Adapter.Probe`, the same lookup `Close` uses: the server incarnation must match the reference, the listing must be complete, and the workspace must carry forgectl's ownership marker. A workspace missing from that listing is `gone`. Any herdr error is `unreadable`, and so is an identity mismatch: after a herdr restart, or when a workspace id now names a workspace without forgectl's marker, nothing proves forgectl's own workspace gone. `--orphans` keeps the rows `close` should act on: a `gone` workspace, or any stage other than `launched` (`failed`, `closed`, or a launch stopped at `pending` or `worktree`). A launch at `pending` or `worktree` for less than ten minutes may still be running, so it is never an orphan, and `close` refuses it.

@@ -214,9 +214,12 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 			}
 			// Exactly after the leading --permission-mode pair: anywhere later
 			// could follow a variadic flag and swallow its list.
-			want := []string{"--permission-mode", mode, "--settings", workerClaudeSettings}
-			if args := built.Invocation.Args; len(args) < 4 || !slices.Equal(args[:4], want) {
+			want := append(append([]string{"--permission-mode", mode}, workerClaudeIsolation...), "--settings", workerClaudeSettings)
+			if args := built.Invocation.Args; len(args) < len(want) || !slices.Equal(args[:len(want)], want) {
 				t.Errorf("worker argv %q, want it to start %q", args, want)
+			}
+			if slices.Contains(built.Invocation.Args, "--ide") {
+				t.Errorf("worker argv %q connects to the operator's IDE", built.Invocation.Args)
 			}
 		})
 	}

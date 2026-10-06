@@ -195,13 +195,45 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 // plan-mode worker's commands prompt, and the prompt is a blocking screen the
 // coordinator reports.
 //
+// SendMessage reaches every other Claude session on the machine, the
+// coordinator included, and RemoteTrigger starts cloud sessions. A worker
+// following planted instructions could ask a session with more authority to
+// act for it, so both are denied.
+//
 // This is the only --settings a worker gets. Claude Code's handling of a
 // repeated --settings flag is unverified, so a second source (T5's worker
 // settings file) must merge its keys into this one value, not add a flag.
-const workerClaudeSettings = `{"useAutoModeDuringPlan":false}`
+const workerClaudeSettings = `{"useAutoModeDuringPlan":false,"permissions":{"deny":["SendMessage","RemoteTrigger"]}}`
 
-// withWorkerSettings inserts `--settings <workerClaudeSettings>` right after
-// the posture's leading --permission-mode pair.
+// workerClaudeIsolation is the argv that keeps everything but forgectl's own
+// settings out of a claude worker (ADR-0010, forgectl#1050). Measured on
+// Claude Code 2.1.289 with `claude -p` in a repo whose branch carried a
+// SessionStart hook, a .mcp.json server and a skill:
+//
+//   - `--setting-sources ""` loads no user, project or local settings: the
+//     branch's hooks do not run, and the operator's plugins, hooks and
+//     skills do not load. Only Claude Code's built-in plugins, skills and
+//     agents remain, and --settings still applies.
+//   - `--strict-mcp-config` with an empty `--mcp-config` loads no MCP server:
+//     not the branch's .mcp.json, not the operator's, and not a plugin's
+//     (a herdr-driving one included).
+//   - `--no-chrome` turns off Claude in Chrome. It is enabled from
+//     ~/.claude.json, not a settings layer, so the flags above leave it on: a
+//     live worker still listed the claude-in-chrome MCP server, which drives
+//     the operator's browser.
+//
+// CLAUDE.md is not covered: it is memory, not settings, and claudeMdExcludes
+// is read only from the settings layers this turns off. The branch's
+// CLAUDE.md still loads; checking it against a trusted base is forgectl#1061.
+var workerClaudeIsolation = []string{
+	"--setting-sources", "",
+	"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
+	"--no-chrome",
+}
+
+// withWorkerSettings inserts workerClaudeIsolation and
+// `--settings <workerClaudeSettings>` right after the posture's leading
+// --permission-mode pair.
 //
 // A worker takes no harness args (BuildInvocation refuses them), so its
 // posture is always the session posture, which starts with that pair. The
@@ -214,10 +246,18 @@ func withWorkerSettings(args []string) ([]string, error) {
 		return nil, fmt.Errorf("%w: worker argv %q does not start with --permission-mode, so --settings has no anchor",
 			ErrWorkerPosture, args)
 	}
-	out := make([]string, 0, len(args)+2)
+	out := make([]string, 0, len(args)+len(workerClaudeIsolation)+2)
 	out = append(out, args[:2]...)
+	out = append(out, workerClaudeIsolation...)
 	out = append(out, "--settings", workerClaudeSettings)
-	return append(out, args[2:]...), nil
+	// --ide connects to the operator's editor and its MCP tools (which can
+	// run code there); a worker has no editor of its own, so it is dropped.
+	for _, a := range args[2:] {
+		if a != "--ide" {
+			out = append(out, a)
+		}
+	}
+	return out, nil
 }
 
 // validSessionID reports whether id is a lowercase 8-4-4-4-12 hex UUID, the
