@@ -103,6 +103,15 @@ func processArgs() []string {
 // opening the TUI (bare invoke or an external-command miss — the thumb-mode
 // affordance) or handing off to fang for styled help/errors/version.
 func Execute(ctx context.Context) error {
+	userCancelled.Store(false)
+	err := execute(ctx)
+	if err == nil && userCancelled.Load() {
+		return newSilentCodedError(ExitCancelled)
+	}
+	return err
+}
+
+func execute(ctx context.Context) error {
 	// FIRST, ahead of every line below. A `surface _exec` re-entry carries a
 	// private socket path and a one-use rendezvous nonce in argv, and every
 	// statement after this one either does work that invocation does not need
@@ -301,6 +310,7 @@ func productionDeps(cfg config.Config, boundary *config.LegacyMigrationBoundary)
 // headless-menu-route paths in Execute; the only difference between them is
 // where fang writes output, which the caller sets via root.SetOut first.
 func execCommand(ctx context.Context, root *cobra.Command, args []string, th theme.Theme) error {
+	withCancelHandling(root)
 	root.SetArgs(args)
 	return fang.Execute(ctx, root, fangOptions(meta.Version, meta.Commit, th)...)
 }

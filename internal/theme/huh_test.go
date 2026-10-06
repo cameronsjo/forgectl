@@ -1,6 +1,12 @@
 package theme
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
+)
 
 // TestHuh_IgnoresItsArgument pins the deliberate behavior: huh v2 never
 // requests the background for a standalone form, so the isDark argument
@@ -55,3 +61,26 @@ func TestHuh_ZeroValueRendersWithoutPanicking(t *testing.T) {
 		t.Fatal("Huh() on the zero Theme returned nil")
 	}
 }
+
+// TestHuh_ButtonFocusSurvivesNoColor pins that the focused confirm button is
+// marked in the text itself. NO_COLOR strips the fill and a plain capture has
+// no attributes, so colour alone left the selected button invisible (#1103).
+// Both buttons must render the same width, or the row shifts on every toggle.
+func TestHuh_ButtonFocusSurvivesNoColor(t *testing.T) {
+	s := New(Options{}, true).Huh().Theme(true)
+
+	focused := s.Focused.FocusedButton.Render("Yes")
+	blurred := s.Focused.BlurredButton.Render("Yes")
+
+	if !strings.Contains(stripANSI(focused), "> Yes") {
+		t.Errorf("focused button = %q, want a leading \"> \" marker", stripANSI(focused))
+	}
+	if strings.Contains(stripANSI(blurred), ">") {
+		t.Errorf("blurred button = %q, must not carry the marker", stripANSI(blurred))
+	}
+	if lipgloss.Width(focused) != lipgloss.Width(blurred) {
+		t.Errorf("focused width %d != blurred width %d; the row would shift", lipgloss.Width(focused), lipgloss.Width(blurred))
+	}
+}
+
+func stripANSI(s string) string { return ansi.Strip(s) }

@@ -222,8 +222,7 @@ func runCleanDirs(cmd *cobra.Command, client *cleanpkg.Client, opts cleanpkg.Cle
 		return err
 	}
 	if !ok {
-		_, _ = fmt.Fprintln(out, "cancelled")
-		return nil
+		return noteCancelled(out)
 	}
 
 	result, err := client.ApplyReport(ctx, resolvedRoot, report, opts)
@@ -294,8 +293,7 @@ func runCleanCaches(cmd *cobra.Command, client *cleanpkg.Client, apply bool, th 
 		return err
 	}
 	if !ok {
-		_, _ = fmt.Fprintln(out, "cancelled")
-		return nil
+		return noteCancelled(out)
 	}
 
 	result := client.PruneCaches(ctx, items)
@@ -410,8 +408,7 @@ func runCleanDocker(cmd *cobra.Command, client *cleanpkg.Client, apply bool, th 
 		return err
 	}
 	if !ok {
-		_, _ = fmt.Fprintln(out, "cancelled")
-		return nil
+		return noteCancelled(out)
 	}
 
 	result := client.PruneDocker(ctx, items)

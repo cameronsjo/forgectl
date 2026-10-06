@@ -144,8 +144,7 @@ func runBranch(cmd *cobra.Command, client *branchpkg.Client, opts branchRunOptio
 		return err
 	}
 	if !ok {
-		fmt.Fprintln(out, "cancelled")
-		return nil
+		return noteCancelled(out)
 	}
 
 	results := client.Prune(ctx, report.SafeToDelete, branchpkg.PruneOptions{
