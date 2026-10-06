@@ -5,6 +5,7 @@
 package tui
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -353,6 +354,9 @@ func TestRunViewResetClampsTheReplayPoint(t *testing.T) {
 	if h.m.rv.at != 2 || h.m.rv.folder.Len() != 2 {
 		t.Errorf("after a reset to 2 events: at %d of %d, want 2 of 2", h.m.rv.at, h.m.rv.folder.Len())
 	}
+	if !h.m.rv.follow {
+		t.Error("a replay clamped to the tip should follow the run again")
+	}
 }
 
 // A run that leaves the desk while its view is open stops being polled.
@@ -413,7 +417,31 @@ func TestRunHintsKeepQClose(t *testing.T) {
 func TestRunViewRetriesAnEmptyListing(t *testing.T) {
 	h := runHarness(t)
 	h.send("r")
-	if c := h.m.pollRun(); c == nil {
+	retry := h.m.pollRun()
+	if retry == nil {
 		t.Fatal("a view with no runs yet is not retried")
+	}
+	name, _ := stageRun(t, h, "late.sh", "echo late\n", nil, 0) // the run starts before the retry lists
+	h.drive(retry)
+	if !h.m.rv.loaded || h.m.rv.ref().Name != name {
+		t.Errorf("the retry did not pick up the run that started: loaded %v ref %q", h.m.rv.loaded, h.m.rv.ref().Name)
+	}
+}
+
+// After n or p, a failed first load retries the run shown, not the newest.
+func TestRunViewRetriesTheRunShownAfterASwitch(t *testing.T) {
+	h := runHarness(t)
+	first, _ := stageRun(t, h, "one.sh", "echo one\n", nil, 0)
+	second, _ := stageRun(t, h, "two.sh", "echo two\n", nil, 0)
+	h.selectItem(second)
+	h.send("r")
+	out, _ := h.m.Update(key("n")) // switch to first; its load is not run
+	h.m = out.(deskModel)
+	v := h.m.rv
+	out, _ = h.m.Update(deskRunLoadMsg{gen: v.gen, ref: v.ref(), err: errors.New("disk hiccup")})
+	h.m = out.(deskModel)
+	h.drive(h.m.pollRun())
+	if got := h.m.rv.ref().Name; got != first || !h.m.rv.loaded {
+		t.Errorf("the retry showed %q (loaded %v), want %s", got, h.m.rv.loaded, first)
 	}
 }

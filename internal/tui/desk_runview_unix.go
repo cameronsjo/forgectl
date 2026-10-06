@@ -236,9 +236,14 @@ func (m deskModel) pollRun() tea.Cmd {
 		if v.err == nil {
 			return nil // the first load is still on its way
 		}
-		// The first load failed, or found no runs: list again, since a run
-		// may have started.
 		v.loading = true
+		if ref := v.ref(); ref.Name != "" {
+			// The first load of a known run failed: try that run again, from
+			// the start, rather than jump to another.
+			return loadRunCmd(m.runs, v.gen, "", ref, nil)
+		}
+		// The listing failed or found no runs: list again, since a run may
+		// have started.
 		return loadRunCmd(m.runs, v.gen, v.want, runview.RunRef{}, nil)
 	}
 	v.loading = true
