@@ -96,6 +96,11 @@ type Profile struct {
 	// Claude-only. Codex has no equivalent flag and launchCodex builds a fresh
 	// Profile that never sets this, so it cannot silently no-op there.
 	StrictMCP bool
+
+	// Detached omits `--ide`, so the session connects to no editor and none of
+	// its MCP tools (which can run code there). Set by the worker floor alone,
+	// and not surfaced in config: a worker has no editor of its own.
+	Detached bool
 }
 
 // Built-in fallbacks applied when a value is set neither by a project nor by
