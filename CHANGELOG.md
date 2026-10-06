@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.29.0](https://github.com/cameronsjo/forgectl/compare/v0.28.0...v0.29.0) (2026-10-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* **desk:** items start in the home directory, not the desk's cwd, with bash's startup and behaviour variables (BASH_ENV, PS4, POSIXLY_CORRECT, exported functions and more) removed, and with SIGHUP at its default
+* **desk:** a run is bound to the approved sha256 and kind: Claim needs the full hash, `desk _supervise` takes required --sha and --kind and refuses a malformed hash or a missing meta, and a manifest never runs as a TTY script; open desks must be restarted after upgrading
+
+### Bug Fixes
+
+* **desk:** a run is bound to the approved sha256 and kind: Claim needs the full hash, `desk _supervise` takes required --sha and --kind and refuses a malformed hash or a missing meta, and a manifest never runs as a TTY script; open desks must be restarted after upgrading ([68c0ff1](https://github.com/cameronsjo/forgectl/commit/68c0ff18a53879b7f3d322f6d994b4aa0ed9ae72))
+* **desk:** items start in the home directory, not the desk's cwd, with bash's startup and behaviour variables (BASH_ENV, PS4, POSIXLY_CORRECT, exported functions and more) removed, and with SIGHUP at its default ([68c0ff1](https://github.com/cameronsjo/forgectl/commit/68c0ff18a53879b7f3d322f6d994b4aa0ed9ae72))
+
 ## [0.28.0](https://github.com/cameronsjo/forgectl/compare/v0.27.0...v0.28.0) (2026-10-06)
 
 
