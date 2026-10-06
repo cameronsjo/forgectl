@@ -5,11 +5,15 @@ package cli
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/surface"
@@ -205,5 +209,36 @@ func TestWorkerLaunchRecordsTheSession(t *testing.T) {
 	row := onlyRow(t, led)
 	if row.SessionID != id || row.Transcript != worker.TranscriptPath([]string{"HOME=/h"}, testRepoTop+"/.claude/worktrees/w1", id) || row.Transcript == "" {
 		t.Fatalf("row = %+v", row)
+	}
+}
+
+// TestBuildWorkerInvocationIsolates pins the call site that turns the worker
+// floor on: from surfaceInvocationRequest, as runWorkerLaunch builds it, a
+// worker gets the isolation argv, a session id, and none of the launcher's
+// handles. Dropping req.Worker, or the call through it, turns this red.
+func TestBuildWorkerInvocationIsolates(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_MESSAGING_TOKEN", "coordinator-token")
+	t.Setenv("HERDR_SOCKET_PATH", "/tmp/herdr.sock")
+	cwd, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: "acceptEdits"}}
+	req := surfaceInvocationRequest(cfg, cwd, nil, nil, "claude")
+	req.Resolve = func(string, config.LaunchDefaults) (launch.ResolvedBinary, error) {
+		return launch.ResolvedBinary{Path: "/stub/claude", Source: launch.BinaryPATH}, nil
+	}
+	const id = "0f8e2c1a-3b4d-4e5f-8a6b-7c8d9e0f1a2b"
+	built, err := buildWorkerInvocation(req, "Fix it.", func() (string, error) { return id, nil })
+	if err != nil {
+		t.Fatalf("buildWorkerInvocation: %v", err)
+	}
+	if !slices.Contains(built.Invocation.Args, "--setting-sources") || built.SessionID != id {
+		t.Fatalf("argv %q, session %q: not a worker build", built.Invocation.Args, built.SessionID)
+	}
+	for _, e := range built.Invocation.Env {
+		if strings.HasPrefix(e, "CLAUDE_CODE_MESSAGING_TOKEN=") || strings.HasPrefix(e, "HERDR_SOCKET_PATH=") {
+			t.Fatalf("worker env kept the launcher's handle %s", e)
+		}
 	}
 }

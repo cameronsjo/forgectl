@@ -223,6 +223,7 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 				"--setting-sources", "",
 				"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
 				"--no-chrome",
+				"--safe-mode",
 				"--settings", `{"useAutoModeDuringPlan":false,"permissions":{"deny":["SendMessage","RemoteTrigger"]}}`,
 			}
 			if args := built.Invocation.Args; len(args) < len(want) || !slices.Equal(args[:len(want)], want) {
