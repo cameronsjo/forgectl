@@ -106,17 +106,17 @@ func TestARewriteOfRecordAndMetaAfterClaimRunsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
-	for deadline := time.Now().Add(20 * time.Second); processAlive(pid, 0); {
-		if time.Now().After(deadline) {
-			t.Fatal("the supervisor did not exit")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitFor(t, 20*time.Second, func() bool { return !processAlive(pid, 0) })
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("the rewritten record ran")
 	}
 	if _, err := os.Stat(d.LogPath(c.Name)); err == nil {
 		t.Error("a run began for the rewritten record")
+	}
+	// Refused in place, not skipped as changed: the bytes do hash to the
+	// rewritten meta, so only the approved-hash check can stop the run.
+	if s := scan(t, d); len(s.Running) != 1 || len(s.Skipped) != 0 {
+		t.Fatalf("running %d, skipped %d; want the claim refused in place", len(s.Running), len(s.Skipped))
 	}
 }
 
@@ -186,14 +186,7 @@ func TestTheSupervisorStartsInHomeWithACleanEnvironment(t *testing.T) {
 		t.Fatalf("Launch: %v", err)
 	}
 	cwdPath := filepath.Join(out, "cwd")
-	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(20 * time.Millisecond) {
-		if _, err := os.Stat(cwdPath); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the stand-in supervisor never ran")
-		}
-	}
+	waitFor(t, 20*time.Second, func() bool { _, err := os.Stat(cwdPath); return err == nil })
 	if got := strings.TrimSpace(readFile(t, cwdPath)); got != home {
 		t.Errorf("supervisor cwd %q, want %q", got, home)
 	}
@@ -224,10 +217,10 @@ func TestADetachedItemStartsWithSIGHUPAtItsDefault(t *testing.T) {
 
 func TestScrubEnvDropsBashStartupHooks(t *testing.T) {
 	in := []string{
-		"PATH=/bin", "HOME=/h", "BASH_ENV=/x", "ENV=/y", "SHELLOPTS=xtrace", "BASHOPTS=extglob",
+		"PATH=/bin", "HOME=/h", "BASH_ENV=/x", "ENV=production", "SHELLOPTS=xtrace", "BASHOPTS=extglob",
 		"CDPATH=/c", "GLOBIGNORE=*", "PS4=$(id)", "BASH_FUNC_ls%%=() { :; }", "GH_TOKEN=keep", "PS1=keep",
 	}
-	want := []string{"PATH=/bin", "HOME=/h", "GH_TOKEN=keep", "PS1=keep"}
+	want := []string{"PATH=/bin", "HOME=/h", "ENV=production", "GH_TOKEN=keep", "PS1=keep"}
 	if got := scrubEnv(in); !slices.Equal(got, want) {
 		t.Fatalf("scrubEnv = %q, want %q", got, want)
 	}

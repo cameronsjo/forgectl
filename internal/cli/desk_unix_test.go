@@ -668,7 +668,7 @@ func TestDeskLegacyDoneNames(t *testing.T) {
 		{"watch", "07b-cleanup"},
 		{"skip", "operator-grow", "--reason", "x"},
 		{"status", "07b-cleanup"},
-		{"_supervise", "operator-grow"},
+		{"_supervise", "--sha", strings.Repeat("0", 64), "--kind", "script", "operator-grow"},
 	} {
 		_, _, err := deskRun(t, deskDeps(), args...)
 		if err == nil {
