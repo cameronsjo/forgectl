@@ -152,7 +152,9 @@ func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchPr
 		if defaults == "" {
 			return
 		}
-		if s, err := r.stricter(defaults, got); err == nil && s != got && s == defaults {
+		// Strictly stricter by rank: default and manual share a level, and a
+		// tie is no change for the operator to hear about.
+		if r.atMost(defaults, got) && !r.atMost(got, defaults) {
 			notes = append(notes, fmt.Sprintf("[launch.defaults] %s = %q is stricter than the worker's %q, and does not bind workers; set [launch.worker] %s to keep it",
 				field, defaults, got, field))
 		}

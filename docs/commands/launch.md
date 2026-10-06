@@ -224,7 +224,7 @@ approval_policy = "on-request"    # codex workers; built-in value on-request
 
 To keep workers read-only, set `permission_mode = "plan"` in `[launch.worker]`. When an explicit `[launch.defaults]` value is stricter than what a worker gets, the worker launch prints a note naming it.
 
-A repo block can only make a worker stricter. Its `plan` wins over `acceptEdits`, and its `bypassPermissions` loses to it. A worker floor then caps every field at `acceptEdits`, `workspace-write` and `on-request`. Setting `auto`, `dontAsk`, `bypassPermissions`, `danger-full-access` or `never` in `[launch.worker]` refuses the launch. The same values in a project block are not refused, but they lose to the stricter worker value. Any value the tables do not rank is refused.
+A repo block can only make a worker stricter. Its `plan` wins over `acceptEdits`, and its `bypassPermissions` loses to it. A worker floor then caps every field at `acceptEdits`, `workspace-write` and `on-request`. Setting `auto`, `dontAsk`, `bypassPermissions`, `danger-full-access` or `never` in `[launch.worker]` refuses the launch. The same values in a project block are not refused, but they lose to the stricter worker value. A value the tables do not rank is refused wherever a worker reads it: in `[launch.worker]`, and in a project block field for the worker's harness.
 
 > Absorbed from the standalone `claunch` tool. A `claunch='forgectl launch'` shell alias preserves the old muscle memory.
 

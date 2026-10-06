@@ -161,6 +161,10 @@ func TestWorkerProfileChecksAndNotes(t *testing.T) {
 		if err != nil || len(built.Notes) != 0 {
 			t.Fatalf("a worker that keeps plan still got notes %q, %v", built.Notes, err)
 		}
+		built, err = build(config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: "manual"}, Worker: config.LaunchWorker{PermissionMode: "default"}}, "")
+		if err != nil || len(built.Notes) != 0 {
+			t.Fatalf("an equally strict default got notes %q, %v", built.Notes, err)
+		}
 	})
 
 	t.Run("--harness codex reads a claude block's own codex fields", func(t *testing.T) {
