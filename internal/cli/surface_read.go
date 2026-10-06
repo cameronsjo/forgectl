@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -19,6 +21,7 @@ import (
 
 const (
 	defaultReadLines = 40
+	readTimeout      = 30 * time.Second
 	maxReadLines     = 200
 	// maxReadLineRunes bounds one printed screen row.
 	maxReadLineRunes = 400
@@ -90,7 +93,11 @@ func runSurfaceRead(cmd *cobra.Command, deps module.Deps, opts readOptions) erro
 	if opts.Report && w.row.Brief == nil {
 		return WithExitCode(fmt.Errorf("worker %s has no recorded brief, so no report to look for", w.row.Name), 2)
 	}
-	s, err := w.read(cmd.Context())
+	// A wedged herdr server that accepts the socket and never answers must
+	// end as unreadable, not hang.
+	ctx, cancel := context.WithTimeout(cmd.Context(), readTimeout)
+	defer cancel()
+	s, err := w.read(ctx)
 	if err != nil {
 		reason := "the worker's pane could not be read"
 		if errors.Is(err, herdradapter.ErrWorkerGone) {

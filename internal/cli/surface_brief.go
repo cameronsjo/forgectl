@@ -90,8 +90,9 @@ message with a REPORT line naming it; read it with surface read --report.
 A typed brief is one line of at most 600 characters with the report
 instruction: Claude Code turns longer typed text into a paste placeholder,
 and a newline would be Enter. Put a long brief in a file in the worktree and
-brief the worker to read it. @file reads the brief from a file; a brief that
-starts with @ or - must come through a file or the launch.
+brief the worker to read it. @file reads the brief from a file. A typed brief
+may not start with - / ! # ? @ or &, which herdr reads as an option or the
+harness reads as a mode or menu.
 
 Exit 0: sent and working. Exit 1: refused (not at its prompt, a dialog, text
 already in the input box, a read-back that did not match) or unconfirmed.
@@ -140,17 +141,14 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 		typeText: func(ctx context.Context, s string) error { return w.herdr.TypeText(ctx, w.ref, s) },
 		enter:    func(ctx context.Context) error { return w.herdr.PressEnter(ctx, w.ref) },
 		record: func(b worker.Brief) (int, error) {
-			count := 0
 			err := w.led.Update(w.row.Name, func(r *worker.Row) {
+				b.Count = 1
 				if r.Brief != nil {
 					b.Count = r.Brief.Count + 1
-				} else {
-					b.Count = 1
 				}
-				count = b.Count
 				r.Brief = &b
 			})
-			return count, err
+			return b.Count, err
 		},
 		now:      time.Now,
 		sleep:    resume.SleepContext,
@@ -299,6 +297,14 @@ func readBriefArg(arg string) (string, error) {
 	if !ok {
 		return arg, nil
 	}
+	// Stat before open: opening a FIFO blocks until a writer appears.
+	before, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("brief file: %w", err)
+	}
+	if !before.Mode().IsRegular() {
+		return "", fmt.Errorf("brief file %s is not a regular file", termsafe.QuotePath(path))
+	}
 	f, err := os.Open(path) //nolint:gosec // G304: the operator names the brief file
 	if err != nil {
 		return "", fmt.Errorf("brief file: %w", err)
@@ -308,8 +314,8 @@ func readBriefArg(arg string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("brief file: %w", err)
 	}
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("brief file %s is not a regular file", termsafe.QuotePath(path))
+	if !os.SameFile(before, info) {
+		return "", fmt.Errorf("brief file %s changed while it was opened", termsafe.QuotePath(path))
 	}
 	data, err := io.ReadAll(io.LimitReader(f, worker.MaxLaunchBrief+1))
 	if err != nil {

@@ -107,6 +107,7 @@ func TestWorkerWrites(t *testing.T) {
 	t.Run("types the text into the owned root pane without Enter", func(t *testing.T) {
 		a, run, ref := startClean(t)
 		run.reply1(exec.KindHerdrProbe, listJSON([2]string{wsA, ref.OwnershipName()}))
+		run.reply1(exec.KindHerdrPaneStatus, paneGetJSON(paneA, wsA, "claude", "idle"))
 		if err := a.TypeText(ctx, ref, "run the tests"); err != nil {
 			t.Fatalf("TypeText: %v", err)
 		}
@@ -125,6 +126,7 @@ func TestWorkerWrites(t *testing.T) {
 	t.Run("presses Enter in the owned root pane", func(t *testing.T) {
 		a, run, ref := startClean(t)
 		run.reply1(exec.KindHerdrProbe, listJSON([2]string{wsA, ref.OwnershipName()}))
+		run.reply1(exec.KindHerdrPaneStatus, paneGetJSON(paneA, wsA, "claude", "idle"))
 		if err := a.PressEnter(ctx, ref); err != nil {
 			t.Fatalf("PressEnter: %v", err)
 		}
@@ -150,6 +152,19 @@ func TestWorkerWrites(t *testing.T) {
 				}
 			}
 		})
+		t.Run(name+" writes nothing when herdr places the pane elsewhere", func(t *testing.T) {
+			a, run, ref := startClean(t)
+			run.reply1(exec.KindHerdrProbe, listJSON([2]string{wsA, ref.OwnershipName()}))
+			run.reply1(exec.KindHerdrPaneStatus, paneGetJSON(paneA, "w9", "claude", "idle"))
+			if err := write(a, ctx, ref); !errors.Is(err, ErrScreenUnreadable) {
+				t.Fatalf("err = %v, want ErrScreenUnreadable", err)
+			}
+			for _, k := range []exec.CommandKind{exec.KindHerdrSendText, exec.KindHerdrSendKeys} {
+				if _, ok := commandOfKind(run.calls(), k); ok {
+					t.Errorf("%s was sent to a pane herdr places in another workspace", k)
+				}
+			}
+		})
 		t.Run(name+" on a gone workspace is ErrWorkerGone", func(t *testing.T) {
 			a, run, ref := startClean(t)
 			run.reply1(exec.KindHerdrProbe, listJSON())
@@ -162,6 +177,7 @@ func TestWorkerWrites(t *testing.T) {
 	t.Run("a failed send is ErrSendFailed", func(t *testing.T) {
 		a, run, ref := startClean(t)
 		run.reply1(exec.KindHerdrProbe, listJSON([2]string{wsA, ref.OwnershipName()}))
+		run.reply1(exec.KindHerdrPaneStatus, paneGetJSON(paneA, wsA, "claude", "idle"))
 		run.on(exec.KindHerdrSendText, func() (exec.SensitiveResult, error) {
 			return exec.SensitiveResult{}, exec.SensitiveErrorForTest(exec.KindHerdrSendText, exec.OutcomeExit)
 		})

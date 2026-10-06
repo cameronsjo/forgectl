@@ -170,7 +170,14 @@ func waitSettled(ctx context.Context, l waitLoop) waitResult {
 			if v.State == ready.StateBlocked {
 				return finishWait(last, start, l.now())
 			}
-			if v.Ready() {
+			if v.Ready() && v.Input != "" {
+				// Text left in the input box (a refused brief) is not a
+				// settled turn: no turn will run until someone sends or
+				// clears it.
+				last.State = ready.StateNotReady
+				last.Reason = "the input box holds unsent text; send or clear it in the worker's pane"
+				readySince = time.Time{}
+			} else if v.Ready() {
 				now := l.now()
 				if readySince.IsZero() {
 					readySince = now
@@ -186,6 +193,11 @@ func waitSettled(ctx context.Context, l waitLoop) waitResult {
 			}
 		}
 		if l.now().Sub(start)+l.interval > l.timeout {
+			if last.State == ready.StateReady {
+				// At the prompt but not settled: never report "ready" on a
+				// failed wait.
+				last.State = ready.StateNotReady
+			}
 			last.Reason = fmt.Sprintf("not settled after %s: %s", l.timeout, last.Reason)
 			return finishWait(last, start, l.now())
 		}

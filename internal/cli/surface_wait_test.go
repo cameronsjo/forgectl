@@ -93,6 +93,23 @@ func TestWaitSettled(t *testing.T) {
 		}
 	})
 
+	t.Run("unsent text in the input box never settles", func(t *testing.T) {
+		l, _ := scriptedWait([]ready.Screen{working, {Status: "idle", Text: "unsent"}}, nil, "")
+		inner := l.evaluate
+		l.evaluate = func(s ready.Screen) ready.Verdict {
+			v := inner(s)
+			if s.Text == "unsent" {
+				v.Input = "half a brief"
+			}
+			return v
+		}
+		l.timeout = time.Minute
+		r := waitSettled(ctx, l)
+		if r.State == readyStateSettled || r.State == ready.StateReady {
+			t.Fatalf("result %+v: settled or reported ready with text left in the box", r)
+		}
+	})
+
 	t.Run("a dialog ends the wait at once", func(t *testing.T) {
 		l, calls := scriptedWait([]ready.Screen{working, {Text: "dialog"}}, nil, "")
 		r := waitSettled(ctx, l)

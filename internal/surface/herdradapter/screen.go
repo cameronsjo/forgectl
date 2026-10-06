@@ -90,6 +90,20 @@ func (a *Adapter) ownedPane(ctx context.Context, ref backend.Ref) (pane, ws stri
 	return pane, ws, nil
 }
 
+// writablePane is ownedPane plus herdr's own record of the pane, the same
+// three checks a read makes: herdr must still place the pane in the owned
+// workspace before anything is typed into it.
+func (a *Adapter) writablePane(ctx context.Context, ref backend.Ref) (string, error) {
+	pane, ws, err := a.ownedPane(ctx, ref)
+	if err != nil {
+		return "", err
+	}
+	if _, err := a.paneStatus(ctx, pane, ws); err != nil {
+		return "", err
+	}
+	return pane, nil
+}
+
 // ErrSendFailed reports a write to a worker's pane that herdr did not
 // confirm. Whether any of it reached the pane is unknown.
 var ErrSendFailed = errors.New("herdr: the send to the worker's pane failed")
@@ -103,7 +117,7 @@ var ErrSendFailed = errors.New("herdr: the send to the worker's pane failed")
 // operand, and worker.CheckBrief refuses it earlier with a clearer message.
 // The text travels sealed: no log or error renders it.
 func (a *Adapter) TypeText(ctx context.Context, ref backend.Ref, text string) error {
-	pane, _, err := a.ownedPane(ctx, ref)
+	pane, err := a.writablePane(ctx, ref)
 	if err != nil {
 		return err
 	}
@@ -122,7 +136,7 @@ func (a *Adapter) TypeText(ctx context.Context, ref backend.Ref, text string) er
 // PressEnter sends one Enter key to a worker's root pane, after the same
 // ownership check as TypeText.
 func (a *Adapter) PressEnter(ctx context.Context, ref backend.Ref) error {
-	pane, _, err := a.ownedPane(ctx, ref)
+	pane, err := a.writablePane(ctx, ref)
 	if err != nil {
 		return err
 	}

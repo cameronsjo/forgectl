@@ -52,6 +52,9 @@ const (
 	ViaTyped  = "typed"
 )
 
+// typedLeadRefused are the first characters a typed brief may not have.
+const typedLeadRefused = "/!#?@&"
+
 // ErrInvalidBrief reports brief text refused before it reaches a worker.
 var ErrInvalidBrief = errors.New("worker: brief is not usable")
 
@@ -86,7 +89,8 @@ func validMarker(m string) bool {
 // a newline typed into a harness's input box is Enter, which would submit a
 // partial brief, or answer a dialog that appeared mid-send (forgectl#1046).
 // A typed brief also may not start with '-', which herdr's send-text would
-// read as an option, and is capped at MaxTypedBrief with its instruction.
+// read as an option, or with a character that opens a harness mode or menu
+// (typedLeadRefused), and is capped at MaxTypedBrief with its instruction.
 func CheckBrief(text, via string) error {
 	if !utf8.ValidString(text) {
 		return fmt.Errorf("%w: not valid UTF-8", ErrInvalidBrief)
@@ -115,6 +119,13 @@ func CheckBrief(text, via string) error {
 	case ViaTyped:
 		if strings.HasPrefix(text, "-") {
 			return fmt.Errorf("%w: a typed brief cannot start with '-'", ErrInvalidBrief)
+		}
+		// A leading '/' opens a slash-command menu, where Enter would run the
+		// highlighted command; '!' switches Claude Code to bash mode; '#',
+		// '?', '@' and '&' each open a mode or a picker in one harness or the
+		// other. None of them is how a brief starts.
+		if strings.ContainsRune(typedLeadRefused, rune(text[0])) {
+			return fmt.Errorf("%w: a typed brief cannot start with %q, which opens a harness mode or menu", ErrInvalidBrief, text[0])
 		}
 		if n := utf8.RuneCountInString(Compose(text, strings.Repeat("0", 2*markerBytes), via)); n > MaxTypedBrief {
 			return fmt.Errorf("%w: %d characters with the report instruction, limit %d (Claude Code collapses longer typed text into a paste placeholder)",
