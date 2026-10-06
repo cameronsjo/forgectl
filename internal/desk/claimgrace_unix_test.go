@@ -12,12 +12,19 @@ import (
 // claimOne queues and claims one plain item, returning its name.
 func claimOne(t *testing.T, d *Desk) string {
 	t.Helper()
+	return claimOneC(t, d).Name
+}
+
+// claimOneC is claimOne returning the claim, for a caller that launches it.
+func claimOneC(t *testing.T, d *Desk) *Claimed {
+	t.Helper()
 	dropPending(t, d, "01-hi.sh", script)
 	scan(t, d)
-	if _, err := d.Claim("01-hi", ""); err != nil {
+	c, err := d.Claim("01-hi", queuedSHA(t, d, "01-hi"))
+	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	return "01-hi"
+	return c
 }
 
 func skipReason(t *testing.T, d *Desk, name string) string {
@@ -35,13 +42,14 @@ func skipReason(t *testing.T, d *Desk, name string) string {
 // claim to skipped/ (launch-failed) at once, and it can never be re-armed.
 func TestLaunchFailureReleasesTheClaim(t *testing.T) {
 	d := openDesk(t)
-	name := claimOne(t, d)
+	c := claimOneC(t, d)
+	name := c.Name
 	saved := supervisorArgv
 	t.Cleanup(func() { supervisorArgv = saved })
-	supervisorArgv = func(string, string) ([]string, error) {
+	supervisorArgv = func(string, string, string, Kind) ([]string, error) {
 		return []string{"/nonexistent/forgectl-supervisor"}, nil
 	}
-	if _, err := d.Launch(name); err == nil {
+	if _, err := d.Launch(c); err == nil {
 		t.Fatal("Launch of a missing supervisor succeeded")
 	}
 	if got := skipReason(t, d, name); got != SkipLaunchFailed {
@@ -54,11 +62,12 @@ func TestLaunchFailureReleasesTheClaim(t *testing.T) {
 
 func TestLaunchArgvFailureReleasesTheClaim(t *testing.T) {
 	d := openDesk(t)
-	name := claimOne(t, d)
+	c := claimOneC(t, d)
+	name := c.Name
 	saved := supervisorArgv
 	t.Cleanup(func() { supervisorArgv = saved })
-	supervisorArgv = func(string, string) ([]string, error) { return nil, errors.New("no binary") }
-	if _, err := d.Launch(name); err == nil {
+	supervisorArgv = func(string, string, string, Kind) ([]string, error) { return nil, errors.New("no binary") }
+	if _, err := d.Launch(c); err == nil {
 		t.Fatal("Launch succeeded with no supervisor argv")
 	}
 	if got := skipReason(t, d, name); got != SkipLaunchFailed {

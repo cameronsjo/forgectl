@@ -821,12 +821,12 @@ func runDeskPrune(cmd *cobra.Command, dirFlag string, days int, asJSON bool) err
 	return err
 }
 
-func runDeskSupervise(dirFlag, name string) error {
+func runDeskSupervise(dirFlag, name, sha, kind string) error {
 	dir, err := resolveDeskDir(dirFlag)
 	if err != nil {
 		return err
 	}
-	if rc := desk.RunSupervisor(dir, name); rc != 0 {
+	if rc := desk.RunSupervisor(dir, name, sha, kind); rc != 0 {
 		return WithExitCode(fmt.Errorf("desk item finished with exit %d", rc), rc)
 	}
 	return nil

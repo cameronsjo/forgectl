@@ -27,26 +27,51 @@ const parentHelper = "desk-test-parent"
 
 // TestMain lets the test binary stand in for forgectl: `desk _supervise`
 // runs the real supervisor, and parentHelper plays the desk.
+//
+// Items start in $HOME, so the whole run gets a scratch HOME and TMPDIR:
+// nothing a test item does lands in the real home directory. Helper
+// re-executions inherit them.
 func TestMain(m *testing.M) {
-	supervisorArgv = func(dir, name string) ([]string, error) {
-		return []string{os.Args[0], "desk", "_supervise", "--dir", dir, name}, nil
+	supervisorArgv = func(dir, name, sha string, kind Kind) ([]string, error) {
+		return []string{os.Args[0], "desk", "_supervise", "--dir", dir, "--sha", sha, "--kind", string(kind), name}, nil
 	}
-	if len(os.Args) == 6 && os.Args[1] == "desk" && os.Args[2] == "_supervise" && os.Args[3] == "--dir" {
-		os.Exit(RunSupervisor(os.Args[4], os.Args[5]))
+	if len(os.Args) == 10 && os.Args[1] == "desk" && os.Args[2] == "_supervise" && os.Args[3] == "--dir" && os.Args[5] == "--sha" && os.Args[7] == "--kind" {
+		os.Exit(RunSupervisor(os.Args[4], os.Args[9], os.Args[6], os.Args[8]))
 	}
-	if len(os.Args) == 4 && os.Args[1] == parentHelper {
-		os.Exit(parentMain(os.Args[2], os.Args[3]))
+	if len(os.Args) == 5 && os.Args[1] == parentHelper {
+		os.Exit(parentMain(os.Args[2], os.Args[3], os.Args[4]))
 	}
-	os.Exit(m.Run())
+	os.Exit(runWithScratchHome(m))
 }
 
-func parentMain(dir, name string) int {
+func runWithScratchHome(m *testing.M) int {
+	scratch, err := os.MkdirTemp("", "desk-test-home-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "scratch home:", err)
+		return 2
+	}
+	defer os.RemoveAll(scratch) //nolint:errcheck // best effort
+	home, tmp := filepath.Join(scratch, "home"), filepath.Join(scratch, "tmp")
+	for _, dir := range []string{home, tmp} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			fmt.Fprintln(os.Stderr, "scratch home:", err)
+			return 2
+		}
+	}
+	if err := errors.Join(os.Setenv("HOME", home), os.Setenv("TMPDIR", tmp)); err != nil {
+		fmt.Fprintln(os.Stderr, "scratch home:", err)
+		return 2
+	}
+	return m.Run()
+}
+
+func parentMain(dir, name, sha string) int {
 	d, err := Open(dir)
 	if err != nil {
 		fmt.Println("error", err)
 		return 2
 	}
-	pid, err := d.Launch(name)
+	pid, err := d.Launch(&Claimed{Name: name, Kind: KindScript, SHA256: sha})
 	if err != nil {
 		fmt.Println("error", err)
 		return 2
@@ -93,7 +118,7 @@ func readFile(t *testing.T, p string) string {
 func TestSupervisorRunsAScriptDetached(t *testing.T) {
 	d := openDesk(t)
 	c := queue(t, d, "hello.sh", "echo out; echo err >&2; [ -t 0 ] && echo HAS-TTY; exit 3\n")
-	pid, err := d.Launch(c.Name)
+	pid, err := d.Launch(c)
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
@@ -140,10 +165,11 @@ delta after=gamma -- echo never
 		t.Fatalf("Add: %v", err)
 	}
 	scan(t, d)
-	if _, err := d.Claim(a.Name, a.SHA256); err != nil {
+	c, err := d.Claim(a.Name, a.SHA256)
+	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	if _, err := d.Launch(a.Name); err != nil {
+	if _, err := d.Launch(c); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
 	lines, state := watchUntil(t, d, a.Name, 20*time.Second)
@@ -191,13 +217,14 @@ func TestLaunchRefusesATTYItem(t *testing.T) {
 		t.Fatal(err)
 	}
 	scan(t, d)
-	if _, err := d.Claim(a.Name, ""); err != nil {
+	c, err := d.Claim(a.Name, a.SHA256)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.Launch(a.Name); err == nil || !strings.Contains(err.Error(), "TTY") {
+	if _, err := d.Launch(c); err == nil || !strings.Contains(err.Error(), "TTY") {
 		t.Fatalf("Launch = %v, want a TTY refusal", err)
 	}
-	if rc, err := d.supervise(a.Name); rc != 2 || err == nil {
+	if rc, err := d.supervise(a.Name, a.SHA256, KindScript); rc != 2 || err == nil {
 		t.Errorf("supervise = %d, %v; want a refusal", rc, err)
 	}
 }
@@ -209,7 +236,7 @@ func TestSupervisorRefusesARunningCopyThatChanged(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "ran")
 	c := queue(t, d, "x.sh", "echo fine\n")
 	writeFile(t, c.RecordPath, "touch "+marker+"\n", 0o600)
-	if rc, err := d.supervise(c.Name); rc != 2 || !errors.Is(err, ErrChanged) {
+	if rc, err := d.supervise(c.Name, c.SHA256, c.Kind); rc != 2 || !errors.Is(err, ErrChanged) {
 		t.Fatalf("supervise = %d, %v; want ErrChanged", rc, err)
 	}
 	if _, err := os.Stat(marker); err == nil {
@@ -234,7 +261,7 @@ func TestSupervisorSurvivesItsParentExiting(t *testing.T) {
 		}
 	})
 
-	parent := exec.CommandContext(t.Context(), os.Args[0], parentHelper, d.Path(), c.Name) //nolint:gosec // G204: the test binary itself
+	parent := exec.CommandContext(t.Context(), os.Args[0], parentHelper, d.Path(), c.Name, c.SHA256) //nolint:gosec // G204: the test binary itself
 	parent.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	out, err := parent.StdoutPipe()
 	if err != nil {
@@ -276,7 +303,7 @@ func TestWatchReportsRunLost(t *testing.T) {
 			_ = unix.Kill(-pid, unix.SIGKILL)
 		}
 	})
-	pid, err := d.Launch(c.Name)
+	pid, err := d.Launch(c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +462,7 @@ func TestSupervisorDoesNotRunBytesWrittenToTheRunningCopy(t *testing.T) {
 	if c.Name != "01-inject" {
 		t.Fatalf("name = %s; the test predicts 01-inject", c.Name)
 	}
-	if _, err := d.Launch(c.Name); err != nil {
+	if _, err := d.Launch(c); err != nil {
 		t.Fatal(err)
 	}
 	if _, state := watchUntil(t, d, c.Name, 20*time.Second); state != WatchEnded {
@@ -458,7 +485,7 @@ func TestSupervisorDoesNotRunBytesWrittenToTheRunningCopy(t *testing.T) {
 func TestSupervisorEndsLeftoversSoTheyCannotRewriteTheExitCode(t *testing.T) {
 	d := openDesk(t)
 	c := queue(t, d, "leaky.sh", "(sleep 1; echo EXIT=0) &\necho failing\nexit 1\n")
-	if _, err := d.Launch(c.Name); err != nil {
+	if _, err := d.Launch(c); err != nil {
 		t.Fatal(err)
 	}
 	if _, state := watchUntil(t, d, c.Name, 20*time.Second); state != WatchEnded {
@@ -513,7 +540,7 @@ func TestSupervisorSecondSignalKillsAtOnce(t *testing.T) {
 			_ = unix.Kill(-pid, unix.SIGKILL)
 		}
 	})
-	pid, err := d.Launch(c.Name)
+	pid, err := d.Launch(c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,7 +568,7 @@ func TestAChildReadingFD3CannotSkipScriptLines(t *testing.T) {
 	d := openDesk(t)
 	body := "echo \"line=$LINENO\"\nhead -c 40 <&3 >/dev/null 2>&1 || echo fd3-closed\necho after-child\necho tail-line\n"
 	c := queue(t, d, "drain.sh", body)
-	if _, err := d.Launch(c.Name); err != nil {
+	if _, err := d.Launch(c); err != nil {
 		t.Fatal(err)
 	}
 	if _, state := watchUntil(t, d, c.Name, 20*time.Second); state != WatchEnded {

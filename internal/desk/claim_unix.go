@@ -79,11 +79,18 @@ func (c *Claimed) AttachScript(cmd *exec.Cmd) (release func(), err error) {
 // directory, the loser's rename finds nothing and Claim returns ErrClaimed
 // without touching anything. The winner then reads the item once (O_NOFOLLOW,
 // a regular file with one link), compares the full sha256 with the hash fixed
-// when the item was queued (and with wantSHA, the hash on screen, when given),
-// and writes those exact bytes to a fresh file that replaces the claimed one
-// as the record. Run Claimed.Content (through [Claimed.AttachScript]), not the file.
+// when the item was queued and with wantSHA, the hash on screen, and writes
+// those exact bytes to a fresh file that replaces the claimed one as the
+// record. Run Claimed.Content (through [Claimed.AttachScript]), not the file.
 // An item whose bytes changed moves to skipped/ and Claim returns ErrChanged.
+//
+// wantSHA must be 64 lowercase hex digits: an approval names the whole hash,
+// never an empty one or a prefix. An item whose file is not the kind it was
+// queued as is refused.
 func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
+	if !ValidSHA256(wantSHA) {
+		return nil, fmt.Errorf("%w: %s: an approval names the full 64-hex-digit sha256", ErrRefused, describe(name))
+	}
 	kind, err := d.findKind(DirPending, name)
 	if errors.Is(err, ErrNotFound) {
 		return nil, ErrClaimed
@@ -98,7 +105,12 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 	if !ok || meta.SHA256 == "" {
 		return nil, fmt.Errorf("%w: %s has no recorded hash yet; scan the desk first", ErrRefused, describe(name))
 	}
-	if wantSHA != "" && wantSHA != meta.SHA256 {
+	if meta.Kind != "" && meta.Kind != kind {
+		// findKind prefers .sh: a script with the bytes of a reviewed manifest
+		// must not run as bash.
+		return nil, fmt.Errorf("%w: %s was queued as a %s, but the file found is a %s", ErrRefused, describe(name), meta.Kind, kind)
+	}
+	if wantSHA != meta.SHA256 {
 		return nil, fmt.Errorf("%w: %s: the hash on screen is not the hash it was queued with", ErrChanged, describe(name))
 	}
 

@@ -66,8 +66,11 @@ type BatchOptions struct {
 	// Event receives each event line (STEP-START, STEP-END, STEP-SKIP,
 	// STEP-WARN). It may be nil.
 	Event func(line string)
-	// Env is the steps' base environment; nil means os.Environ().
+	// Env is the steps' base environment; nil means [ChildEnv].
 	Env []string
+	// WorkDir is the steps' working directory; "" means the runner's own.
+	// The desk passes [HomeDir].
+	WorkDir string
 	// Grace overrides DefaultGrace.
 	Grace time.Duration
 }
@@ -151,7 +154,7 @@ func NewBatch(m *Manifest, opts BatchOptions) *Batch {
 		opts.Log = io.Discard
 	}
 	if opts.Env == nil {
-		opts.Env = os.Environ()
+		opts.Env = ChildEnv()
 	}
 	b := &Batch{
 		m: m, opts: opts, steps: filepath.Join(opts.Dir, "steps"),
@@ -297,7 +300,7 @@ func (b *Batch) launch(s Step) error {
 	// A step is its own process group, so a timeout or Ctrl-C reaches
 	// everything it started, not only its shell.
 	cmd := exec.Command("/bin/bash", "-c", s.Command) //nolint:gosec,noctx // G204: the approved manifest's command is the payload; the runner owns the step's lifetime through its process group, not a context
-	cmd.Stdin, cmd.Stdout, cmd.Stderr, cmd.Env = nil, w, w, env
+	cmd.Stdin, cmd.Stdout, cmd.Stderr, cmd.Env, cmd.Dir = nil, w, w, env, b.opts.WorkDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	startErr := cmd.Start()
 	_ = w.Close() // the child holds the write end now; EOF comes when every holder exits
