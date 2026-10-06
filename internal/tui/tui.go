@@ -470,6 +470,13 @@ func (m *model) applySize() {
 	if body < 3 {
 		body = 3
 	}
+	// bubbles sizes a page by reserving the pager's height as it is now: two
+	// lines when the list is already paged, one when it is not. A list first
+	// sized while paged (every list is, at height 0) then stays paged at a
+	// height that fits it on one page. Reset to one page, size, and size
+	// again so the second pass reserves what the first pass decided.
+	m.l.Paginator.SetTotalPages(1)
+	m.l.SetSize(m.width, body)
 	m.l.SetSize(m.width, body)
 	m.tree.SetWidth(m.width)
 	m.tree.SetHeight(body)
@@ -496,6 +503,9 @@ func (m *model) fitTopScreen() {
 	}
 	name := m.selectedName()
 	m.l.SetItems(hubItems(entries))
+	m.l.Paginator.SetTotalPages(1)
+	m.l.SetSize(m.l.Width(), m.l.Height())
+	m.l.SetSize(m.l.Width(), m.l.Height())
 	m.l.Select(0)
 	m.selectRow(name)
 }

@@ -604,3 +604,18 @@ func TestHubEscKeepsTheRow(t *testing.T) {
 		t.Errorf("esc from the tmux screen: mode=%v cursor=%q, want tmux", m.mode, got)
 	}
 }
+
+// TestHubEveryAreaOnPageOneFrom16Rows sweeps the heights the menu doc
+// promises: from 16 rows up, every area is on the first page and no pager
+// shows, whether or not the recent rows fit.
+func TestHubEveryAreaOnPageOneFrom16Rows(t *testing.T) {
+	for _, w := range []int{40, 80} {
+		for h := 16; h <= 30; h++ {
+			got := frameText(frameModel(w, h))
+			if !strings.Contains(got, "9 setup") || strings.Contains(got, "1/") {
+				t.Errorf("at %dx%d setup is not on page one:\n%s", w, h, got)
+			}
+			assertFrameFits(t, got, w, h)
+		}
+	}
+}
