@@ -91,6 +91,8 @@ func TestHubFrames(t *testing.T) {
 		{"hub_80x24_cursor_on_sessions", 80, 24, []tea.KeyPressMsg{keyCode(tea.KeyDown), keyCode(tea.KeyDown), keyCode(tea.KeyDown), keyCode(tea.KeyDown)}},
 		{"hub_80x20_short", 80, 20, nil},
 		{"hub_100x18_short", 100, 18, nil},
+		{"hub_80x16_short", 80, 16, nil},
+		{"hub_80x12_paged", 80, 12, nil},
 		{"hub_80x24_docs_subcommands", 80, 24, []tea.KeyPressMsg{key("1")}},
 	}
 	for _, c := range cases {
@@ -271,14 +273,14 @@ func TestHubRowsDrawBeforeASize(t *testing.T) {
 }
 
 // TestHubTmuxMenuGetsTheFullHeight pins that leaving the hub for the tmux
-// jumper gives back the rows the hub's detail block took.
+// jumper sizes the list for the jumper's own chrome, not the hub's detail
+// block.
 func TestHubTmuxMenuGetsTheFullHeight(t *testing.T) {
 	m := frameModel(80, 24)
-	hubHeight := m.l.Height()
 	out, _ := m.Update(key("4")) // tmux
 	m = out.(model)
-	if m.mode != menuMode || m.l.Height() != hubHeight+hubDetailLines {
-		t.Errorf("tmux menu: mode=%v list height %d, want menuMode with %d", m.mode, m.l.Height(), hubHeight+hubDetailLines)
+	if want := 24 - 4; m.mode != menuMode || m.l.Height() != want {
+		t.Errorf("tmux menu: mode=%v list height %d, want menuMode with %d", m.mode, m.l.Height(), want)
 	}
 }
 
@@ -286,7 +288,7 @@ func TestHubTmuxMenuGetsTheFullHeight(t *testing.T) {
 // top-screen row does not fit, the recent rows and their divider go, and the
 // pinned rows and every area stay on screen with their keys.
 func TestHubShortTerminalKeepsTheAreas(t *testing.T) {
-	for _, h := range []int{18, 20} {
+	for _, h := range []int{16, 18, 20} {
 		m := frameModel(80, h)
 		got := frameText(m)
 		if strings.Contains(got, "recent") || strings.Contains(got, "tasks ready") {
@@ -335,7 +337,7 @@ func TestHubSearchSaysWhenNothingMatches(t *testing.T) {
 	}
 	m.l.SetFilterText("zzzx")
 	got := ansi.Strip(m.detailView())
-	if !strings.Contains(got, `nothing matches "zzzx" in every command`) {
+	if !strings.Contains(got, `no command matches "zzzx" · esc clears`) {
 		t.Errorf("empty search detail = %q", got)
 	}
 }
@@ -346,5 +348,107 @@ func TestHubLeafRowsShowTheirDescription(t *testing.T) {
 	it := leafItem{leaf: HubLeaf{Name: "attach", Short: "Jump to a review window", Use: "attach <breadcrumb>", NeedsArgs: true}}
 	if got := ansi.Strip(it.render(0, false, false, 80, 10, asciiGlyphs, theme.Default().Styles())); !strings.Contains(got, "Jump to a review window") || strings.Contains(got, "<breadcrumb>") {
 		t.Errorf("leaf row = %q, want its description and not its usage", got)
+	}
+}
+
+// TestHubEnterHintNamesWhatEnterDoes pins the footer's enter hint against
+// what enter does to the selected row: "enter run" on a row that runs a
+// command, "enter open" on one that opens a list or the argument picker.
+func TestHubEnterHintNamesWhatEnterDoes(t *testing.T) {
+	m := frameModel(80, 24)
+	if got := m.enterHint(); got != "enter open" { // docs: subcommands
+		t.Errorf("on docs: %q, want enter open", got)
+	}
+	m, _ = press(m, tea.KeyDown) // pr: argument picker
+	if got := m.enterHint(); got != "enter open" {
+		t.Errorf("on pr: %q, want enter open", got)
+	}
+	m.selectRow("desk") // a recent row runs
+	if got := m.enterHint(); got != "enter run" {
+		t.Errorf("on the recent desk row: %q, want enter run", got)
+	}
+	m, _ = press(m, '9') // setup area: doctor runs
+	if got := m.enterHint(); got != "enter run" {
+		t.Errorf("on doctor: %q, want enter run", got)
+	}
+	if !strings.Contains(ansi.Strip(m.footerView()), "enter run") {
+		t.Errorf("footer on doctor = %q, want enter run", ansi.Strip(m.footerView()))
+	}
+}
+
+// TestHubShortTerminalPagesByNumber pins the paged hub below 16 rows: the
+// page is named in text, not by a colored dot.
+func TestHubShortTerminalPagesByNumber(t *testing.T) {
+	got := frameText(frameModel(80, 12))
+	if !strings.Contains(got, "1/") || strings.Contains(got, "•") {
+		t.Errorf("paged hub at 80x12 does not name its page:\n%s", got)
+	}
+}
+
+// TestHubCursorStaysOnTheAreaRow pins row identity on short terminals: esc
+// from an area, and a resize with the cursor on an area row, keep the cursor
+// on that area (the drawn label carries a "›" the row's name does not).
+func TestHubCursorStaysOnTheAreaRow(t *testing.T) {
+	onRepos := func(m model) bool {
+		it, ok := m.l.SelectedItem().(hubItem)
+		return ok && it.entry.Name == "repos"
+	}
+	m := frameModel(80, 18)
+	m, _ = press(m, '7')
+	m, _ = press(m, tea.KeyEscape)
+	if m.mode != hubMode || !onRepos(m) {
+		t.Errorf("esc from repos at 80x18: cursor %+v, want repos", m.l.SelectedItem())
+	}
+
+	m = frameModel(80, 30)
+	m.selectRow("repos")
+	out, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 18})
+	if m = out.(model); !onRepos(m) {
+		t.Errorf("resize to 80x18 on repos: cursor %+v, want repos", m.l.SelectedItem())
+	}
+}
+
+// TestHubFilterPromptBelongsToItsScreen pins that the list's prompt is set
+// for each screen's own "/": a hub search leaves no "Search all:" behind on
+// the tmux screens.
+func TestHubFilterPromptBelongsToItsScreen(t *testing.T) {
+	m := frameModel(80, 24)
+	m = typeInto(m, "/")
+	m, _ = press(m, tea.KeyEscape)
+	m, _ = press(m, '4') // tmux
+	if m.mode != menuMode {
+		t.Fatalf("4 did not open the tmux screen: mode=%v", m.mode)
+	}
+	m = typeInto(m, "/")
+	if got := m.l.FilterInput.Prompt; got != filterPrompt {
+		t.Errorf("tmux screen prompt after a hub search = %q, want %q", got, filterPrompt)
+	}
+}
+
+// TestTopEntries pins the order rows give way on a short terminal: recent
+// rows and their divider first, then the other dividers, never a keyed row.
+func TestTopEntries(t *testing.T) {
+	names := func(es []HubEntry) string {
+		var out []string
+		for _, e := range es {
+			out = append(out, e.Name)
+		}
+		return strings.Join(out, ",")
+	}
+	all := frameHub()
+	cases := []struct {
+		rows int
+		want string
+	}{
+		{0, names(all)},
+		{len(all), names(all)},
+		{10, "docs,pr,projects,tmux,sessions,areas · 8 commands,agents,repos,shell,setup"},
+		{9, "docs,pr,projects,tmux,sessions,agents,repos,shell,setup"},
+		{4, "docs,pr,projects,tmux,sessions,agents,repos,shell,setup"},
+	}
+	for _, c := range cases {
+		if got := names(topEntries(all, c.rows)); got != c.want {
+			t.Errorf("topEntries(rows=%d) = %s, want %s", c.rows, got, c.want)
+		}
 	}
 }

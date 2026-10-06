@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/paginator"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
@@ -304,6 +305,9 @@ func newModel(ctx context.Context, client *tmux.Client, opts RunOptions) model {
 	l.SetShowStatusBar(false)
 	l.SetShowHelp(false)
 	l.SetShowPagination(true)
+	// Page numbers, not dots: the current dot differs only by color, which a
+	// monochrome terminal or a screen reader does not show.
+	l.Paginator.Type = paginator.Arabic
 	l.SetFilteringEnabled(true)
 
 	m := model{
@@ -449,7 +453,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) applySize() {
-	body := m.height - 4 - m.extraChromeLines()
+	// The hub screens draw exactly a header, the list, the detail lines, and
+	// a footer (plus a status line when one is set); the other screens keep
+	// two lines of slack.
+	chrome := 4
+	if m.hubScreen() {
+		chrome = 2
+		if m.status != "" {
+			chrome++
+		}
+	}
+	body := m.height - chrome - m.extraChromeLines()
 	if body < 3 {
 		body = 3
 	}
@@ -474,15 +488,16 @@ func (m *model) fitTopScreen() {
 	if len(entries) == len(m.l.Items()) {
 		return
 	}
-	name, _ := m.selectedText()
+	name := m.selectedName()
 	m.l.SetItems(hubItems(entries))
 	m.l.Select(0)
 	m.selectRow(name)
 }
 
-// topEntries is hub without its recent rows (Argv set) and the divider over
-// them when all of hub does not fit in rows lines; rows <= 0 (no size yet)
-// keeps everything.
+// topEntries fits hub into rows lines: when all of it does not fit, the
+// recent rows (Argv set) and the divider over them go; when the rest still
+// does not fit, the dividers go too, leaving the keyed rows. rows <= 0 (no
+// size yet) keeps everything.
 func topEntries(hub []HubEntry, rows int) []HubEntry {
 	if rows <= 0 || len(hub) <= rows {
 		return hub
@@ -494,7 +509,16 @@ func topEntries(hub []HubEntry, rows int) []HubEntry {
 		}
 		out = append(out, e)
 	}
-	return out
+	if len(out) <= rows {
+		return out
+	}
+	keyed := out[:0:0]
+	for _, e := range out {
+		if !e.Heading {
+			keyed = append(keyed, e)
+		}
+	}
+	return keyed
 }
 
 // refreshDelegate rebuilds the row delegate for the list's current items and
@@ -587,11 +611,18 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	key := km.String()
-	if key == "/" && m.hubScreen() && m.l.FilterState() == list.Unfiltered {
-		m.l.FilterInput.Prompt = "Filter " + m.title + ": "
-		if m.mode == hubMode {
+	if key == "/" && m.l.FilterState() == list.Unfiltered {
+		// The list is shared by every screen, so each "/" sets the prompt
+		// for the screen it opens on: the hub's top screen searches every
+		// command, an area or subcommand list names what it filters, and
+		// every other screen keeps the plain prompt.
+		m.l.FilterInput.Prompt = filterPrompt
+		switch {
+		case m.mode == hubMode:
 			m.flattenHub()
 			m.l.FilterInput.Prompt = "Search all: "
+		case m.hubScreen():
+			m.l.FilterInput.Prompt = "Filter " + fitWords(m.title, hubFilterTitleMax) + ": "
 		}
 	}
 	if key == "esc" && m.l.FilterState() == list.FilterApplied && m.hubScreen() {
@@ -720,7 +751,7 @@ func (m model) activate() (tea.Model, tea.Cmd) {
 			m.openArea(entry)
 			return m, nil
 		}
-		if m.mode == hubMode && entry.Argv == nil {
+		if m.mode == hubMode && m.hubFlat && entry.Argv == nil {
 			// A command reached through the search-all list belongs to an
 			// area; esc from its subcommands goes back there. A recent row
 			// (Argv set) is never an area's member, whatever its name.
@@ -979,7 +1010,7 @@ func (m *model) unflattenHub() {
 	if m.mode != hubMode || !m.hubFlat || m.l.FilterState() != list.Unfiltered {
 		return
 	}
-	name, _ := m.selectedText()
+	name := m.selectedName()
 	m.hubFlat = false
 	m.setList(hubItems(m.hub))
 	m.fitTopScreen()
@@ -1021,6 +1052,7 @@ func (m *model) leaveGroup() {
 // showLeaves shows leaves as the drill-down list at m.leavesPath.
 func (m *model) showLeaves(leaves []HubLeaf) {
 	m.status = ""
+	m.hubFlat = false
 	m.title = strings.Join(m.leavesPath, " ")
 	if m.area != nil {
 		m.title = m.area.Name + " › " + m.title
@@ -1319,12 +1351,59 @@ func (m model) detailView() string {
 // searched, where, and how to get out. The filter text is the operator's own
 // typing, so it is escaped and capped like any free text.
 func (m model) noMatchLine() string {
-	scope := "every command"
+	query := capSafe(m.l.FilterValue(), hubHeaderValueMax)
+	msg := fmt.Sprintf("no command matches %q · esc clears", query)
 	if m.mode != hubMode {
-		scope = m.title + " (esc, then / on the hub searches every command)"
+		msg = fmt.Sprintf("nothing in %s matches %q · esc, then / on the hub searches all", m.title, query)
 	}
-	msg := fmt.Sprintf("nothing matches %q in %s · esc clears", capSafe(m.l.FilterValue(), hubHeaderValueMax), scope)
 	return m.styles.Muted.Render(fitLine(msg, m.l.Width()))
+}
+
+// enterHint is the footer's enter hint for the selected row: "enter run"
+// when enter runs a command, "enter open" when it opens a list, a screen, or
+// the argument picker. It follows activate's branches.
+func (m model) enterHint() string {
+	runs := false
+	switch it := m.l.SelectedItem().(type) {
+	case hubItem:
+		e := it.entry
+		switch {
+		case e.Heading, e.Members != nil, e.Name == "tmux" && e.Argv == nil:
+		case e.Argv != nil:
+			runs = !e.NeedsArgs
+		case e.Name == "status":
+			runs = true
+		default:
+			runs = !moduleNeedsArg(e) && len(e.Leaves) == 0
+		}
+	case leafItem:
+		runs = len(it.leaf.Leaves) == 0 && !it.leaf.NeedsArgs
+	}
+	if runs {
+		return "enter run"
+	}
+	return "enter open"
+}
+
+// filterPrompt is the list's plain filter prompt, and hubFilterTitleMax caps
+// the screen title an area or subcommand list's prompt names.
+const (
+	filterPrompt      = "Filter: "
+	hubFilterTitleMax = 20
+)
+
+// selectedName is the selected hub or leaf row's name — its identity, which
+// selectRow matches — or "" for a divider or no selection.
+func (m model) selectedName() string {
+	switch it := m.l.SelectedItem().(type) {
+	case hubItem:
+		if !it.entry.Heading {
+			return it.entry.Name
+		}
+	case leafItem:
+		return it.leaf.Name
+	}
+	return ""
 }
 
 // selectedText is the selected hub or leaf row's name and description, as
@@ -1413,16 +1492,16 @@ func (m model) footerView() string {
 		hints = []string{"type to filter", "enter done", "esc clear"}
 		prio = []int{2, 0, 1}
 	case m.l.FilterState() == list.FilterApplied && m.hubScreen():
-		hints = []string{"↑↓ move", "1-9 jump", "enter open", "esc clear filter"}
+		hints = []string{"↑↓ move", "1-9 jump", m.enterHint(), "esc clear filter"}
 		prio = []int{3, 2, 0, 1}
 	}
 	if hints == nil {
 		switch m.mode {
 		case hubMode:
-			hints = []string{"↑↓ move", "1-9 open", "enter open", "/ search all", "q/esc quit", "forgectl --help lists every command"}
+			hints = []string{"↑↓ move", "1-9 open", m.enterHint(), "/ search all", "q/esc quit", "forgectl --help lists every command"}
 			prio = []int{4, 2, 3, 0, 1, 5}
 		case areaMode, leavesMode:
-			hints = []string{"↑↓ move", "1-9 jump", "enter open", "/ filter", "q/esc back"}
+			hints = []string{"↑↓ move", "1-9 jump", m.enterHint(), "/ filter", "q/esc back"}
 			prio = []int{4, 2, 3, 0, 1}
 		case menuMode:
 			hints = []string{"1-6 / enter select", "q/esc back"}

@@ -594,7 +594,9 @@ func (m model) submitPicker() (tea.Model, tea.Cmd) {
 	p := m.picker
 	if row, ok := p.current(); ok && row.kind == pickerRowBrowse {
 		entry := *p.browse
+		area := m.area // closePicker clears it; the subcommands still return there
 		m.closePicker()
+		m.area = area
 		m.enterLeaves(entry)
 		return m, nil
 	}

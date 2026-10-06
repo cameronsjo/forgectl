@@ -5,4 +5,4 @@
 $ forgectl doctor
    Check the whole workbench is wired: claude, tmux, ghostty, gh, config, the
    local bench, and forgectl itself
-↑↓ move · 1-9 jump · enter open · / filter · q/esc back
+↑↓ move · 1-9 jump · enter run · / filter · q/esc back

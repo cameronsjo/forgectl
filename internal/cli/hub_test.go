@@ -54,8 +54,8 @@ func hubNames(entries []tui.HubEntry) []string {
 }
 
 // TestBuildHub_PinOrder pins forgectl#730 item 2 and forgectl#1074: the five
-// pinned commands first, in their fixed order, keyed 1-5; then an "all
-// commands (N)" divider whose N counts every module under it; then one area
+// pinned commands first, in their fixed order, keyed 1-5; then an "areas · N
+// commands" divider whose N counts every module under it; then one area
 // row per hubGroups entry, keyed 6-9, whose Members are its modules in the
 // order hubGroups lists them.
 func TestBuildHub_PinOrder(t *testing.T) {

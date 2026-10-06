@@ -18,7 +18,7 @@ On a TTY the hub shows the pinned rows, the recent rows, and one row per area, s
 - **`/`** searches every command, including those inside areas; inside an area it filters that area. When nothing matches, the line under the list says so. `esc` clears the search before it backs out of a screen.
 - **`enter`** opens the selected row. **`q`** or **`esc`** goes back one screen, and quits from the top.
 
-The line under the list shows the exact `$ forgectl …` the selected row runs. When a description is too long for its row, the row cuts it at a word with `…` and the full text appears under that line. On a terminal too short for every row, the recent rows go first, so the pinned rows and the areas stay on screen. Below 20×8 the hub says the terminal is too small instead of drawing, and takes no key but `q` or `esc`, which quit.
+The line under the list shows the exact `$ forgectl …` the selected row runs. When a description is too long for its row, the row cuts it at a word with `…` and the full text appears under that line. On a terminal too short for every row, the recent rows go first, then the section dividers, so at 16 rows or more the pinned rows and the areas stay on screen. Shorter terminals page (the page number shows under the list), and `1`–`9` still reach every keyed row. The footer's enter hint says `enter run` when enter runs a command and `enter open` when it opens a list or asks for an argument. Below 20×8 the hub says the terminal is too small instead of drawing, and takes no key but `q` or `esc`, which quit.
 
 `menu` changes nothing and never runs a row. It needs no TTY and opens no screen. It exits 0.
 
