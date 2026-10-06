@@ -30,10 +30,9 @@ candidate's `sshUrl` from `projects list --json` for an exact target, or rerun
 interactively when it has none. Project display rows are not universal command
 arguments.
 
-`projects` builds a unified inventory across local clones, GitHub, and whichever Gitea instance `tea` is logged into.
+`projects` builds a unified inventory across local clones, GitHub, and whichever Gitea instance `tea` is logged into. A project that isn't checked out locally shows as `[uncloned]`; picking it clones from the right host before opening the tmux session. `list --json` emits structured records to stdout — degradation notes (e.g. a host that's unreachable) go to stderr so the pipe stays clean. A degraded host still exits 0 by default, so a partial inventory reads the same as a small account to a script that only checks the exit code; pass `--strict` to exit 1 whenever any host produced a degradation note. The records that did load are written to stdout first either way. A machine with no `tea` binary has no Gitea source set up, which is not a degradation: it adds no note and does not trip `--strict`. A `tea` that runs and fails still does.
 
 On a terminal, `pick`, `clone`, and `worktree` show `Querying local, GitHub, and Gitea…` while they ask. After 3 seconds it becomes `Still querying… (Ctrl+C cancels)`, and the line is erased before the picker draws or when you cancel. The picker carries any degradation notes in its description instead of printing them around it. With stderr redirected there is no status line, and the notes go to the redirect at once.
- A project that isn't checked out locally shows as `[uncloned]`; picking it clones from the right host before opening the tmux session. `list --json` emits structured records to stdout — degradation notes (e.g. a host that's unreachable) go to stderr so the pipe stays clean. A degraded host still exits 0 by default, so a partial inventory reads the same as a small account to a script that only checks the exit code; pass `--strict` to exit 1 whenever any host produced a degradation note. The records that did load are written to stdout first either way. A machine with no `tea` binary has no Gitea source set up, which is not a degradation: it adds no note and does not trip `--strict`. A `tea` that runs and fails still does.
 
 ## On-disk layout
 

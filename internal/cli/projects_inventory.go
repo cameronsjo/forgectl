@@ -128,7 +128,12 @@ func loadInventory(cmd *cobra.Command, client *projects.Client) ([]projects.Repo
 	// collect erase sequences and the notes would never reach it.
 	stderr := cmd.ErrOrStderr()
 	interactive := isInteractiveTTY() && writerWidth(stderr) > 0
+	return loadInventoryTo(cmd, client, stderr, interactive)
+}
 
+// loadInventoryTo is loadInventory with the terminal decision made by the
+// caller, so a test can drive the interactive branch without a pty.
+func loadInventoryTo(cmd *cobra.Command, client *projects.Client, stderr io.Writer, interactive bool) ([]projects.Repo, *heldNotes, error) {
 	ctx := cmd.Context()
 	if interactive {
 		// Ctrl+C during the wait cancels the query and erases the line; the
@@ -148,7 +153,9 @@ func loadInventory(cmd *cobra.Command, client *projects.Client) ([]projects.Repo
 	})
 	held := &heldNotes{cmd: cmd}
 	if err != nil {
-		if interactive && errors.Is(err, context.Canceled) && cmd.Context().Err() == nil {
+		// Only the signal context ending (the parent still live) is the user
+		// backing out; any other cancellation is the caller's own.
+		if interactive && errors.Is(err, context.Canceled) && ctx.Err() != nil && cmd.Context().Err() == nil {
 			return nil, held, huh.ErrUserAborted
 		}
 		return nil, held, err

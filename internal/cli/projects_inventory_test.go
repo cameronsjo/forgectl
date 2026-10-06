@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -250,5 +252,72 @@ func TestChooseRepo_PickerFailureGivesNotesBack(t *testing.T) {
 	_, _ = chooseRepo(cmd, nil, projectSelectionPick, theme.Theme{}, held)
 	if len(held.notes) != 0 {
 		t.Errorf("after a cancel the user saw the notes; held = %v", held.notes)
+	}
+}
+
+// TestLoadInventoryTo_InteractiveHoldsNotesAndShowsStatus drives the branch the
+// real terminal takes: the notes are held for the picker, not printed, and the
+// status line comes and goes.
+func TestLoadInventoryTo_InteractiveHoldsNotesAndShowsStatus(t *testing.T) {
+	prev := inventoryFn
+	inventoryFn = func(context.Context, *projects.Client) ([]projects.Repo, []string, error) {
+		return []projects.Repo{{Name: "a"}}, []string{"github: host query failed"}, nil
+	}
+	t.Cleanup(func() { inventoryFn = prev })
+
+	var errb bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	all, held, err := loadInventoryTo(cmd, nil, &errb, true)
+	if err != nil || len(all) != 1 {
+		t.Fatalf("loadInventoryTo = %v, %v", all, err)
+	}
+	if !strings.Contains(errb.String(), inventoryStatus) || !strings.HasSuffix(errb.String(), eraseLine) {
+		t.Errorf("stderr = %q, want the status line, then an erase", errb.String())
+	}
+	if strings.Contains(errb.String(), "note:") {
+		t.Errorf("held notes must not print around the picker, got %q", errb.String())
+	}
+	if got := held.take(); len(got) != 1 {
+		t.Errorf("held = %v, want the note", got)
+	}
+}
+
+// TestLoadInventoryTo_CtrlCEndsAsAUserAbort: SIGINT during the wait cancels the
+// query and surfaces as huh.ErrUserAborted, which withCancelHandling turns into
+// `cancelled`, exit 130. Without the mapping the user got `context canceled`
+// and exit 1.
+func TestLoadInventoryTo_CtrlCEndsAsAUserAbort(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	prev := inventoryFn
+	inventoryFn = func(ctx context.Context, _ *projects.Client) ([]projects.Repo, []string, error) {
+		close(started)
+		<-release
+		return nil, nil, nil
+	}
+	t.Cleanup(func() { close(release); inventoryFn = prev })
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var errb bytes.Buffer
+	result := make(chan error, 1)
+	go func() {
+		_, _, err := loadInventoryTo(cmd, nil, &errb, true)
+		result <- err
+	}()
+	// inventoryFn runs only after the signal context is registered, so the
+	// interrupt below is caught and cannot kill the test binary.
+	<-started
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, huh.ErrUserAborted) {
+			t.Fatalf("err = %v, want huh.ErrUserAborted", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("loadInventoryTo did not return after SIGINT")
 	}
 }
