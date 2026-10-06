@@ -264,9 +264,16 @@ func withWorkerSettings(args []string) ([]string, error) {
 // sockets, a computer-use token file), which a worker's Bash could use to
 // act as the coordinator. The profile's own env and forgectl's injected
 // values still apply on top, so a variable a worker needs goes in config.
+//
+// SSH_AUTH_SOCK is a deliberate grant: the operator's remotes push over SSH,
+// so without the agent a worker cannot push its branch. It signs for every
+// host the operator's keys reach, and goes when ADR-0010's per-worker GitHub
+// App token replaces the operator's identity. The CA and config-home paths
+// carry no secret and keep TLS interception and tool config working.
 var workerEnvKeys = []string{
 	"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "COLORTERM",
 	"LANG", "TZ", "TMPDIR", "CLAUDE_CONFIG_DIR", "SSH_AUTH_SOCK",
+	"NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "CODEX_HOME", "XDG_CONFIG_HOME",
 }
 
 // workerBaseEnv keeps the entries of env named in workerEnvKeys, and the
