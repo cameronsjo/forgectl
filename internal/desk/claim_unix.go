@@ -174,7 +174,7 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 		return nil, fmt.Errorf("desk: stage %s: %w", describe(name), err)
 	}
 	return &Claimed{
-		Name: name, Kind: kind, SHA256: sum, Content: data, Headers: ParseHeaders(data),
+		Name: name, Kind: kind, SHA256: sum, Content: data, Headers: HeadersFor(kind, data),
 		RecordPath: d.abs(path.Join(DirRunning, file)),
 	}, nil
 }

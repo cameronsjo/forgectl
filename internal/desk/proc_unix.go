@@ -22,7 +22,9 @@ func processAlive(pid int, start int64) bool {
 	if pid <= 0 {
 		return false
 	}
-	if err := unix.Kill(pid, 0); errors.Is(err, unix.ESRCH) {
+	// EPERM: the pid now belongs to another user. An owner is always this
+	// user (the desk or its supervisor), so that pid was reused.
+	if err := unix.Kill(pid, 0); errors.Is(err, unix.ESRCH) || errors.Is(err, unix.EPERM) {
 		return false
 	}
 	got, zombie, err := procStart(pid)

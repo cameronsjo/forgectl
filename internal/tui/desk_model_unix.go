@@ -940,6 +940,12 @@ type ttyRun struct {
 const ttyLogFD = "/dev/fd/4"
 
 func newTTYRun(d deskBackend, c *desk.Claimed, rcPath string, argv func(rcPath string) []string) (*ttyRun, error) {
+	// Only a script runs in the terminal: bash reads the claimed bytes as a
+	// script, and a manifest's bytes must never reach it that way.
+	if c.Kind != desk.KindScript || !c.TTY {
+		_ = os.Remove(rcPath)
+		return nil, errors.Join(fmt.Errorf("desk: %s is a %s, not a TTY script; it does not run in the terminal", itemLabel(c.Name), c.Kind), d.Release(c.Name, desk.SkipLaunchFailed))
+	}
 	// A TTY item starts where a detached one does: in the home directory,
 	// with the operator's environment minus bash's startup hooks.
 	home, err := desk.HomeDir()
@@ -969,7 +975,7 @@ func newTTYRun(d deskBackend, c *desk.Claimed, rcPath string, argv func(rcPath s
 	}
 	a := argv(rcPath)
 	cmd := osexec.CommandContext(context.Background(), a[0], a[1:]...) //nolint:gosec // G204: script(1) and bash at fixed paths; the item arrives on fd 3
-	cmd.Dir, cmd.Env = home, desk.ChildEnv()
+	cmd.Dir, cmd.Env = home, ttyEnv(desk.ChildEnv())
 	return &ttyRun{claimed: c, run: run, cmd: cmd, rcPath: rcPath, log: logF}, nil
 }
 

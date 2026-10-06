@@ -244,3 +244,68 @@ func TestBatchStepsStartInHome(t *testing.T) {
 		t.Fatalf("log %q; want the step in %s with BASH_ENV removed", log, home)
 	}
 }
+
+// "# TTY: yes" is a script header. A manifest that carries the line is still
+// a batch: it never reads as a TTY item, so nothing routes its bytes to bash
+// in the terminal.
+func TestAManifestsTTYLineIsIgnored(t *testing.T) {
+	d := openDesk(t)
+	dropPending(t, d, "01-m.manifest", "# WHAT: x\n# WHY: y\n# TTY: yes\na -- true\n")
+	if s := scan(t, d); len(s.Pending) != 1 || s.Pending[0].TTY {
+		t.Fatalf("pending = %+v, want one item that is not a TTY item", s.Pending)
+	}
+	c, err := d.Claim("01-m", queuedSHA(t, d, "01-m"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Kind != KindBatch || c.TTY {
+		t.Fatalf("claimed kind=%s tty=%v, want a batch that is not a TTY item", c.Kind, c.TTY)
+	}
+}
+
+// The supervisor checks the kind it finds in running/, not only the kind
+// recorded in meta: a .sh beside an approved manifest, holding its bytes, is
+// found first and must not run as bash.
+func TestSuperviseRefusesAScriptBesideAnApprovedManifest(t *testing.T) {
+	d := openDesk(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	body := "# WHAT: x\n# WHY: y\na -- touch " + marker + "\n"
+	dropPending(t, d, "01-m.manifest", body)
+	scan(t, d)
+	c, err := d.Claim("01-m", queuedSHA(t, d, "01-m"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(d.Path(), DirRunning, "01-m.sh"), body, 0o600)
+	if rc, err := d.supervise(c.Name, c.SHA256, KindBatch); rc != 2 || !errors.Is(err, ErrRefused) {
+		t.Fatalf("supervise = %d, %v; want 2 and ErrRefused", rc, err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the manifest's bytes ran")
+	}
+}
+
+// Launch refuses a claim whose kind is not what running/ holds, and ends the
+// claim rather than start a supervisor for it.
+func TestLaunchRefusesAClaimOfAnotherKind(t *testing.T) {
+	d := openDesk(t)
+	c := claimOneC(t, d)
+	c.Kind = KindBatch
+	if _, err := d.Launch(c); !errors.Is(err, ErrRefused) {
+		t.Fatalf("Launch = %v, want ErrRefused", err)
+	}
+	if got := skipReason(t, d, c.Name); got != SkipLaunchFailed {
+		t.Fatalf("skip reason %q, want %q", got, SkipLaunchFailed)
+	}
+}
+
+// A pid that signal 0 may not touch belongs to another user. An owner is
+// always this user, so such a pid was reused and its owner is dead.
+func TestAnotherUsersPidIsNotAnOwner(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root may signal every pid")
+	}
+	if processAlive(1, 0) {
+		t.Fatal("pid 1, another user's process, reads as a live owner")
+	}
+}

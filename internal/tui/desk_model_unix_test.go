@@ -935,3 +935,42 @@ func TestTTYRunStartsInHomeWithACleanEnvironment(t *testing.T) {
 		t.Errorf("env = %q; want an explicit environment without BASH_ENV", r.cmd.Env)
 	}
 }
+
+// TestAManifestWithATTYLineRunsDetached: "# TTY: yes" in a manifest does
+// not make it a TTY item. y runs it detached, as a batch; script(1) never
+// starts, so bash never reads the manifest as a script.
+func TestAManifestWithATTYLineRunsDetached(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-m.manifest", "# WHAT: x\n# WHY: y\n# TTY: yes\na -- true\n")
+	h.scan()
+	h.selectItem("01-m")
+	h.m.ttyArgv = func(string) []string { t.Fatal("script(1) was started for a manifest"); return nil }
+	h.press("y")
+	if !slices.Contains(h.backend.launched, "01-m") {
+		t.Fatalf("launched = %q, want 01-m started detached", h.backend.launched)
+	}
+}
+
+// TestTTYRunRefusesABatch: the terminal path runs only a TTY script, and
+// ends any other claim in skipped/.
+func TestTTYRunRefusesABatch(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-m.manifest", "# WHAT: x\n# WHY: y\na -- true\n")
+	h.scan()
+	snap, err := h.d.Scan()
+	if err != nil || len(snap.Pending) != 1 {
+		t.Fatalf("scan: %v, %d pending", err, len(snap.Pending))
+	}
+	c, err := h.backend.Claim("01-m", snap.Pending[0].Meta.SHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.TTY = true // as an older reader that trusted the manifest's header would have it
+	rcPath := filepath.Join(t.TempDir(), "rc")
+	if _, err := newTTYRun(h.backend, c, rcPath, func(string) []string { t.Fatal("argv built for a batch"); return nil }); err == nil {
+		t.Fatal("newTTYRun accepted a batch")
+	}
+	if got := h.where("01-m"); got != desk.DirSkipped {
+		t.Fatalf("01-m is in %s, want skipped", got)
+	}
+}

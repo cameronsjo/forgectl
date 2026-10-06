@@ -71,7 +71,7 @@ func (d *Desk) Scan() (*Snapshot, error) {
 		it := newItem(name, kind, StateSkipped)
 		it.Meta, _, _ = d.readMeta(DirSkipped, name)
 		if data, err := d.readRegular(path.Join(DirSkipped, e.Name()), maxItemBytes); err == nil {
-			it.Headers = ParseHeaders(data)
+			it.Headers = HeadersFor(kind, data)
 		}
 		snap.Skipped = append(snap.Skipped, it)
 	}
@@ -149,7 +149,7 @@ func (d *Desk) sight(name string, kind Kind, now time.Time) (it Item, gone bool,
 		}
 		return it, true, nil
 	}
-	it.Meta, it.Content, it.Headers = meta, data, ParseHeaders(data)
+	it.Meta, it.Content, it.Headers = meta, data, HeadersFor(kind, data)
 	it.Stale = meta.AddedAt != nil && now.Sub(*meta.AddedAt) > StaleAfter
 	return it, false, nil
 }
@@ -171,7 +171,7 @@ func (d *Desk) runningItem(name string, kind Kind) Item {
 	it := newItem(name, kind, StateRunning)
 	it.Meta, _, _ = d.readMeta(DirRunning, name)
 	if data, err := d.readRegular(path.Join(DirRunning, name+kind.Ext()), maxItemBytes); err == nil {
-		it.Headers = ParseHeaders(data)
+		it.Headers = HeadersFor(kind, data)
 	}
 	if it.Meta.StartedAt != nil {
 		it.Started = *it.Meta.StartedAt
@@ -254,7 +254,7 @@ func (d *Desk) doneItems(inRunning map[string]bool) ([]Item, error) {
 		it.Legacy = legacy
 		it.Meta, _, _ = d.readMeta(DirDone, name)
 		if data, err := d.readRegular(path.Join(DirDone, name+kind.Ext()), maxItemBytes); err == nil {
-			it.Headers = ParseHeaders(data)
+			it.Headers = HeadersFor(kind, data)
 		}
 		logPath := path.Join(DirDone, e.Name())
 		if it.Meta.ExitCode != nil {
