@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -113,6 +114,8 @@ func (h *deskHarness) press(keys ...string) {
 			msg = tea.KeyPressMsg{Code: tea.KeyUp}
 		case "esc":
 			msg = tea.KeyPressMsg{Code: tea.KeyEscape}
+		case "space":
+			msg = tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
 		default:
 			msg = key(k)
 		}
@@ -972,5 +975,147 @@ func TestTTYRunRefusesABatch(t *testing.T) {
 	}
 	if got := h.where("01-m"); got != desk.DirSkipped {
 		t.Fatalf("01-m is in %s, want skipped", got)
+	}
+}
+
+// TestDesk_YRefusesWhenTheFocusPanelIsNotOnScreen is #1098: in a window too
+// small to show the selected item's sha256, what and why, y runs nothing and
+// says why. The same item runs once the window can show them.
+func TestDesk_YRefusesWhenTheFocusPanelIsNotOnScreen(t *testing.T) {
+	for _, size := range [][2]int{{100, 7}, {80, 9}, {30, 8}} {
+		h := newDeskHarness(t)
+		h.drop("01-s1.sh", plainScript("s1"))
+		h.drop("02-s2.sh", plainScript("s2"))
+		h.scan()
+		h.m.width, h.m.height = size[0], size[1]
+		h.press("y")
+		if len(h.backend.launched) != 0 || h.where("01-s1") != desk.DirPending {
+			t.Fatalf("%dx%d: y ran %v with the focus panel off screen", size[0], size[1], h.backend.launched)
+		}
+		if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "not run: the window is too small to show 01 s1's sha256") {
+			t.Errorf("%dx%d: footer = %q", size[0], size[1], footer)
+		}
+		h.m.width, h.m.height = 80, 10
+		h.press("y")
+		if !slices.Equal(h.backend.launched, []string{"01-s1"}) {
+			t.Errorf("%dx%d then 80x10: launched %v, want [01-s1]", size[0], size[1], h.backend.launched)
+		}
+	}
+}
+
+// The y gate reads the frame View draws: whenever y runs, that frame showed
+// the selected item's short sha256.
+func TestDesk_YRunsOnlyWhatTheViewShows(t *testing.T) {
+	for h := 6; h <= 16; h++ {
+		for _, w := range []int{30, 40, 80} {
+			hn := newDeskHarness(t)
+			hn.drop("01-s1.sh", plainScript("s1"))
+			hn.scan()
+			hn.m.width, hn.m.height = w, h
+			sha := hn.m.rows[0].item.Meta.SHA256
+			view := ansi.Strip(hn.m.View().Content)
+			hn.press("y")
+			ran := len(hn.backend.launched) == 1
+			var visible []string
+			for _, l := range strings.Split(view, "\n") {
+				visible = append(visible, ansi.Truncate(l, w, ""))
+			}
+			if ran && !strings.Contains(strings.Join(visible, "\n"), "sha256 "+sha[:deskShortHash]) {
+				t.Errorf("%dx%d: y ran an item whose hash the view did not show:\n%s", w, h, view)
+			}
+		}
+	}
+}
+
+func dropMany(h *deskHarness, n int) []string {
+	h.t.Helper()
+	var names []string
+	for i := 1; i <= n; i++ {
+		name := fmt.Sprintf("%02d-item%02d", i, i)
+		h.drop(name+".sh", plainScript(name))
+		names = append(names, name)
+	}
+	h.scan()
+	return names
+}
+
+// TestDesk_APagesAndRunsOnlyAfterEveryHashWasShown is #1098's second gap:
+// with 12 items at 100x24 the a prompt cannot fit every hash at once. It
+// pages, y refuses until every page has been on screen, and every full hash
+// appears on some page.
+func TestDesk_APagesAndRunsOnlyAfterEveryHashWasShown(t *testing.T) {
+	h := newDeskHarness(t)
+	names := dropMany(h, 12)
+	h.m.width, h.m.height = 100, 24
+	want := map[string]bool{}
+	for _, r := range h.m.rows {
+		want[r.item.Meta.SHA256] = false
+	}
+
+	h.press("a")
+	if h.m.confirm != confirmAll {
+		t.Fatalf("a did not ask; footer = %q", ansi.Strip(h.m.footer()))
+	}
+	seen := func() {
+		for _, l := range strings.Split(ansi.Strip(h.m.View().Content), "\n") {
+			if f := strings.Fields(l); len(f) == 2 && f[0] == "sha256" {
+				want[f[1]] = true
+			}
+		}
+	}
+	seen()
+	if !strings.Contains(ansi.Strip(h.m.footer()), "page 1/") {
+		t.Fatalf("12 items at 100x24 should page; footer = %q", ansi.Strip(h.m.footer()))
+	}
+	h.press("y")
+	if len(h.backend.launched) != 0 || h.m.confirm != confirmAll {
+		t.Fatalf("y on page 1 ran %v; it must wait for every page", h.backend.launched)
+	}
+	if !strings.Contains(ansi.Strip(h.m.footer()), "y runs once every hash has been shown") {
+		t.Errorf("y on page 1 should say why it did not run: %q", ansi.Strip(h.m.footer()))
+	}
+	for range 10 {
+		h.press("space")
+		seen()
+	}
+	for sha, ok := range want {
+		if !ok {
+			t.Errorf("hash %s never appeared on any page", sha)
+		}
+	}
+	h.press("y")
+	if !slices.Equal(h.backend.launched, names) {
+		t.Fatalf("after every page, launched %v, want %v", h.backend.launched, names)
+	}
+}
+
+// A window too short for even one item's full hash refuses a outright.
+func TestDesk_ARefusesWhenNoHashFits(t *testing.T) {
+	h := newDeskHarness(t)
+	dropMany(h, 2)
+	h.m.width, h.m.height = 100, 4
+	h.press("a")
+	if h.m.confirm != confirmNone || !strings.Contains(ansi.Strip(h.m.footer()), "too small to show a full sha256") {
+		t.Fatalf("a in a 4-line window: confirm %v footer %q", h.m.confirm, ansi.Strip(h.m.footer()))
+	}
+	h.m.width, h.m.height = 6, 40 // too narrow for an 8-character chunk
+	h.press("a")
+	if h.m.confirm != confirmNone {
+		t.Fatalf("a in a 6-column window asked anyway: %q", ansi.Strip(h.m.footer()))
+	}
+}
+
+// Shrinking the window during the a prompt re-pages it; hashes shown before
+// the resize stay shown, and y still waits for the rest.
+func TestDesk_AResizeRepagesWithoutLosingTrack(t *testing.T) {
+	h := newDeskHarness(t)
+	names := dropMany(h, 4)
+	h.m.width, h.m.height = 100, 40
+	h.press("a") // one page: all four shown
+	out, _ := h.m.Update(tea.WindowSizeMsg{Width: 100, Height: 8})
+	h.m = out.(deskModel)
+	h.press("y")
+	if !slices.Equal(h.backend.launched, names) {
+		t.Fatalf("every hash was on screen before the resize; launched %v", h.backend.launched)
 	}
 }

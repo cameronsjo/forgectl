@@ -1,0 +1,8 @@
+desk ● · forgectl 0.0…  up 4h37m · 19:07
+too small: enlarge to 40x10
+╭ queue ─┤ ● 0 running  ◌ 2 waiting ├──╮
+│ ▸ ◌ waiting  01 s1      ░░░░░░░░  n… │
+│   ◌ waiting  02 s2      ░░░░░░░░  n… │
+╰──────────────────────────────────────╯
+
+ y run s skip u undo v view a all l log…

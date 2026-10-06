@@ -151,7 +151,12 @@ type deskModel struct {
 
 	confirm  confirmKind
 	targets  []target // what a confirmed skip or run-all acts on
-	lastSkip string   // what u returns to pending/
+	// page is the a prompt's page; shown marks each target whose full hash
+	// has been on screen. y runs the set only once every one has (#1098).
+	page     int
+	shown    []bool
+	note     string // why the last y in the a prompt did not run, styled
+	lastSkip string // what u returns to pending/
 	busy     bool     // an action is in flight
 
 	pager *deskPager
@@ -309,6 +314,7 @@ func (m deskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch t := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = t.Width, t.Height
+		m.markShown()
 		return m, nil
 	case tea.BackgroundColorMsg:
 		if m.theme.Mode() == theme.ModeAuto {
@@ -555,7 +561,13 @@ func (m deskModel) run() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	// One key, as the old desk had: the focus panel's short hash is what the
-	// operator matches to the agent's report. a, which runs many, confirms.
+	// operator matches to the agent's report. So y acts only when the frame
+	// on screen shows that hash, what and why; a window too small for them
+	// refuses instead (#1098). a, which runs many, confirms.
+	if !m.dashboard().focusShown() {
+		m.message = st.Warn.Render(safeMessage("not run: the window is too small to show " + itemLabel(r.item.Name) + "'s sha256, what and why · enlarge it, or use forgectl desk status"))
+		return m, nil
+	}
 	m.busy = true
 	return m.start(target{name: r.item.Name, sha: r.item.Meta.SHA256, tty: r.item.TTY})
 }
@@ -620,13 +632,119 @@ func (m deskModel) askAll() (tea.Model, tea.Cmd) {
 		m.message = m.styles().Warn.Render("nothing to run: a TTY item runs with y, one at a time")
 		return m, nil
 	}
-	m.confirm, m.targets = confirmAll, ts
+	if allPages(m.styles(), ts, m.screenWidth(), m.screenHeight()) == nil {
+		m.message = m.styles().Warn.Render("not run: the window is too small to show a full sha256 · enlarge it, or run items one at a time with y")
+		return m, nil
+	}
+	m.confirm, m.targets, m.page, m.note = confirmAll, ts, 0, ""
+	m.shown = make([]bool, len(ts))
+	m.markShown()
 	return m, nil
 }
 
+// allPages splits the a prompt's items into pages that fit under its
+// header line in the footer room of a width x height window, each item
+// whole: its name and every line of its full hash. nil means some item does
+// not fit at all, so the prompt cannot show every hash it would run.
+func allPages(st theme.Styles, ts []target, width, height int) [][]int {
+	room := deskPromptRoom(height) - 1
+	var pages [][]int
+	var page []int
+	used := 0
+	for i, t := range ts {
+		block := allBlock(st, t, width)
+		for _, l := range block[1:] { // the hash lines; the label may be cut
+			if ansi.StringWidth(l) > width {
+				return nil
+			}
+		}
+		if len(block) > room {
+			return nil
+		}
+		if used+len(block) > room {
+			pages, page, used = append(pages, page), nil, 0
+		}
+		page, used = append(page, i), used+len(block)
+	}
+	return append(pages, page)
+}
+
+// allBlock is one item in the a prompt: its label, cut to width, then its
+// full sha256.
+func allBlock(st theme.Styles, t target, width int) []string {
+	return append([]string{cut("  "+st.Fg.Render(itemLabel(t.name)), width)}, hashLines(st, t.sha, width)...)
+}
+
+// markShown records the a prompt's current page as shown, at the window
+// size it will be drawn at. A resize re-pages; the page is clamped.
+func (m *deskModel) markShown() {
+	if m.confirm != confirmAll {
+		return
+	}
+	pages := allPages(m.styles(), m.targets, m.screenWidth(), m.screenHeight())
+	if pages == nil {
+		return
+	}
+	m.page = min(max(m.page, 0), len(pages)-1)
+	for _, i := range pages[m.page] {
+		m.shown[i] = true
+	}
+}
+
+// allShown reports whether every target's full hash has been on screen.
+func (m deskModel) allShown() bool {
+	for _, s := range m.shown {
+		if !s {
+			return false
+		}
+	}
+	return len(m.shown) > 0
+}
+
+// screenWidth and screenHeight are the window the frame is drawn in, as
+// View sees it.
+func (m deskModel) screenWidth() int {
+	if m.width <= 0 {
+		return 80
+	}
+	return m.width
+}
+
+func (m deskModel) screenHeight() int {
+	if m.width <= 0 {
+		return 24
+	}
+	return m.height
+}
+
+// allPageKey turns the a prompt's page; it reports false for any other key.
+func (m *deskModel) allPageKey(key string) bool {
+	switch key {
+	case "space", "f", "pgdown", "j", "down":
+		m.page++
+	case "b", "pgup", "k", "up":
+		m.page--
+	default:
+		return false
+	}
+	m.note = ""
+	m.markShown()
+	return true
+}
+
 func (m deskModel) confirmKey(key string) (tea.Model, tea.Cmd) {
+	if m.confirm == confirmAll {
+		if m.allPageKey(key) {
+			return m, nil
+		}
+		if key == "y" && !m.allShown() {
+			// y never runs a hash the operator has not had on screen.
+			m.note = m.styles().Warn.Render("not run: space shows the rest; y runs once every hash has been shown")
+			return m, nil
+		}
+	}
 	kind, ts := m.confirm, m.targets
-	m.confirm, m.targets = confirmNone, nil
+	m.confirm, m.targets, m.shown, m.page, m.note = confirmNone, nil, nil, 0, ""
 	if key != "y" {
 		m.message = m.styles().Muted.Render("cancelled")
 		return m, nil
@@ -836,13 +954,7 @@ func (m deskModel) View() tea.View {
 	} else if m.rv != nil {
 		content = m.rv.render(m.styles(), width, height)
 	} else {
-		th := m.theme
-		opts := m.frame
-		opts.Theme = &th
-		content = deskFrame{
-			snap: m.snap, width: width, height: height, now: m.now(), opts: opts,
-			cursor: m.cursor, footer: m.footer(),
-		}.render()
+		content = m.dashboard().render()
 	}
 	v := tea.NewView(content)
 	v.AltScreen = true
@@ -856,27 +968,45 @@ func (m deskModel) View() tea.View {
 	return v
 }
 
-// frameWidth is the width the frame is drawn at.
-func (m deskModel) frameWidth() int {
-	if m.width <= 0 {
-		return 80
+// dashboard is the frame View draws, so the y gate checks the same layout
+// the operator sees.
+func (m deskModel) dashboard() deskFrame {
+	th := m.theme
+	opts := m.frame
+	opts.Theme = &th
+	return deskFrame{
+		snap: m.snap, width: m.screenWidth(), height: m.screenHeight(), now: m.now(), opts: opts,
+		cursor: m.cursor, footer: m.footer(),
 	}
-	return max(m.width, 40)
 }
 
-// hashLines renders a full sha256 for the a prompt: "sha256 <64 hex>"
-// on one line when it fits, else wrapped in two halves, so the whole hash is
-// always on screen. A hash that is not 64 hex characters is never drawn.
+// hashLines renders a full sha256 for the a prompt: "sha256 <64 hex>" on
+// one line when it fits, else in equal chunks of 32, 16 or 8 characters, one
+// per line, so the whole hash is on screen at width. A window too narrow for
+// 8 gets lines wider than width, which allPages refuses. A hash that is not
+// 64 hex characters is never drawn.
 func hashLines(st theme.Styles, sha string, width int) []string {
 	if !desk.ValidSHA256(sha) {
 		return []string{"    " + st.Danger.Render("no valid hash recorded")}
 	}
 	const label = "    sha256 "
-	if len(label)+len(sha) <= width {
-		return []string{st.Muted.Render(label) + st.Fg.Render(sha)}
+	chunk := 8
+	for _, c := range []int{64, 32, 16} {
+		if len(label)+c <= width {
+			chunk = c
+			break
+		}
 	}
 	pad := strings.Repeat(" ", len(label))
-	return []string{st.Muted.Render(label) + st.Fg.Render(sha[:32]), pad + st.Fg.Render(sha[32:])}
+	var out []string
+	for i := 0; i < len(sha); i += chunk {
+		lead := pad
+		if i == 0 {
+			lead = st.Muted.Render(label)
+		}
+		out = append(out, lead+st.Fg.Render(sha[i:i+chunk]))
+	}
+	return out
 }
 
 // footer is the prompt, or the last result; "" leaves the key hints.
@@ -886,10 +1016,26 @@ func (m deskModel) footer() string {
 	case confirmSkip:
 		return " " + st.Warn.Render("skip "+itemLabel(m.targets[0].name)+"?") + st.Muted.Render("  y skip · any other key cancels")
 	case confirmAll:
-		lines := []string{" " + st.Warn.Render(fmt.Sprintf("run these %d?", len(m.targets))) + st.Muted.Render("  y run · any other key cancels")}
-		for _, t := range m.targets {
-			lines = append(lines, "  "+st.Fg.Render(itemLabel(t.name)))
-			lines = append(lines, hashLines(st, t.sha, m.frameWidth())...)
+		width := m.screenWidth()
+		pages := allPages(st, m.targets, width, m.screenHeight())
+		if pages == nil {
+			// The window shrank below one item since a was pressed.
+			return " " + st.Warn.Render("too small to show every sha256; enlarge the window") + st.Muted.Render(" · any key cancels")
+		}
+		head := " " + st.Warn.Render(fmt.Sprintf("run these %d?", len(m.targets)))
+		switch {
+		case m.note != "":
+			head += "  " + m.note
+		case len(pages) == 1:
+			head += st.Muted.Render("  y run · any other key cancels")
+		case m.allShown():
+			head += st.Muted.Render(fmt.Sprintf("  page %d/%d · y run · space/b page · any other key cancels", m.page+1, len(pages)))
+		default:
+			head += st.Muted.Render(fmt.Sprintf("  page %d/%d · space next page · y runs after every page · any other key cancels", m.page+1, len(pages)))
+		}
+		lines := []string{head}
+		for _, i := range pages[min(m.page, len(pages)-1)] {
+			lines = append(lines, allBlock(st, m.targets[i], width)...)
 		}
 		return strings.Join(lines, "\n")
 	}

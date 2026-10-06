@@ -517,3 +517,108 @@ func TestGoldenDeskFocusWrapNoColor(t *testing.T) {
 		})
 	}
 }
+
+// twoWaitingSnapshot is the #1098 reproduction: two waiting scripts, each
+// with a hash, what and why.
+func twoWaitingSnapshot() (*desk.Snapshot, DeskFrameOptions) {
+	var pending []desk.Item
+	for i, name := range []string{"01-s1", "02-s2"} {
+		it := item(name, desk.KindScript, desk.StateWaiting)
+		it.Content = []byte("#!/bin/bash\n# WHAT: Print step " + name + "\n# WHY: The approval check\necho " + name + "\n")
+		it.Headers = desk.ParseHeaders(it.Content)
+		it.Meta = desk.Meta{AddedAt: agoPtr(time.Duration(i+1) * time.Minute), SHA256: desk.SHA256Hex(it.Content)}
+		pending = append(pending, it)
+	}
+	return &desk.Snapshot{Dir: "/home/op/.local/state/forgectl/desk", Taken: deskNow, Pending: pending}, deskOpts()
+}
+
+// focusOnScreen reports whether a frame shows the selected item's short hash,
+// what and why: the three things the operator approves from.
+func focusOnScreen(frame string, it desk.Item) bool {
+	plain := ansi.Strip(frame)
+	return strings.Contains(plain, "sha256 "+it.Meta.SHA256[:deskShortHash]) &&
+		strings.Contains(plain, "what  "+it.What) && strings.Contains(plain, "why   "+it.Why)
+}
+
+// TestDeskFrame_FocusKeepsItsRowsInShortWindows is #1098: a short window gives
+// up the tiles, the summary and queue rows before the focus panel's hash,
+// what and why. Before the fix the focus panel was the first thing cut.
+func TestDeskFrame_FocusKeepsItsRowsInShortWindows(t *testing.T) {
+	for _, size := range [][2]int{{100, 14}, {100, 12}, {80, 10}, {40, 10}} {
+		snap, opts := twoWaitingSnapshot()
+		f := deskFrame{snap: snap, width: size[0], height: size[1], now: deskNow, opts: opts}
+		out := f.render()
+		if !focusOnScreen(out, snap.Pending[0]) {
+			t.Errorf("%dx%d: the focus panel lost its hash, what or why:\n%s", size[0], size[1], ansi.Strip(out))
+		}
+		if !f.focusShown() {
+			t.Errorf("%dx%d: focusShown is false for a frame that shows the focus panel", size[0], size[1])
+		}
+		if n := len(strings.Split(out, "\n")); n != size[1] {
+			t.Errorf("%dx%d: %d lines", size[0], size[1], n)
+		}
+	}
+}
+
+// Below the smallest layout, or narrower than the frame, the desk says it is
+// too small (T13) and focusShown is false, which is what makes y refuse.
+func TestDeskFrame_TooSmallSaysSoAndIsNotShown(t *testing.T) {
+	for _, size := range [][2]int{{80, 9}, {100, 7}, {30, 8}, {39, 30}} {
+		snap, opts := twoWaitingSnapshot()
+		f := deskFrame{snap: snap, width: size[0], height: size[1], now: deskNow, opts: opts}
+		out := ansi.Strip(f.render())
+		if f.focusShown() {
+			t.Errorf("%dx%d: focusShown is true below the minimum:\n%s", size[0], size[1], out)
+		}
+		if !strings.Contains(out, "too small") {
+			t.Errorf("%dx%d: the frame does not say it is too small:\n%s", size[0], size[1], out)
+		}
+		if n := len(strings.Split(out, "\n")); n != size[1] {
+			t.Errorf("%dx%d: %d lines", size[0], size[1], n)
+		}
+	}
+}
+
+// A long name is cut before the hash is: the head keeps the short sha256 at
+// the narrowest frame.
+func TestDeskFrame_LongNameNeverPushesTheHashOff(t *testing.T) {
+	snap, opts := twoWaitingSnapshot()
+	snap.Pending[0].Name = "01-" + strings.Repeat("a-very-long-item-name-", 4)
+	f := deskFrame{snap: snap, width: 40, height: 20, now: deskNow, opts: opts}
+	if !strings.Contains(ansi.Strip(f.render()), "sha256 "+snap.Pending[0].Meta.SHA256[:deskShortHash]) || !f.focusShown() {
+		t.Errorf("a long name pushed the hash out of the focus head:\n%s", ansi.Strip(f.render()))
+	}
+}
+
+// focusShown follows the selected row, and a row with no valid hash is never
+// shown as approvable.
+func TestDeskFrame_FocusShownNeedsAValidHash(t *testing.T) {
+	snap, opts := twoWaitingSnapshot()
+	snap.Pending[0].Meta.SHA256 = "not-a-hash"
+	f := deskFrame{snap: snap, width: 100, height: 30, now: deskNow, opts: opts}
+	if f.focusShown() {
+		t.Error("a row with no valid hash reads as shown")
+	}
+	f.cursor = 1
+	if !f.focusShown() {
+		t.Error("the second row, with a valid hash, reads as not shown")
+	}
+}
+
+// TestGoldenDeskShort pins the short-window frames from #1098.
+func TestGoldenDeskShort(t *testing.T) {
+	forceTrueColor(t)
+	for _, size := range [][2]int{{100, 14}, {100, 12}, {80, 10}, {30, 8}} {
+		t.Run(fmt.Sprintf("%dx%d", size[0], size[1]), func(t *testing.T) {
+			snap, opts := twoWaitingSnapshot()
+			got := RenderDeskFrame(snap, size[0], size[1], deskNow, opts)
+			assertGolden(t, fmt.Sprintf("desk_short_%dx%d", size[0], size[1]), got)
+			var buf bytes.Buffer
+			wr := theme.Default().Writer(&buf, []string{"NO_COLOR=1", "TERM=xterm-256color"})
+			if _, err := wr.Write([]byte(got)); err != nil {
+				t.Fatal(err)
+			}
+			assertGolden(t, fmt.Sprintf("desk_short_%dx%d_nocolor", size[0], size[1]), buf.String())
+		})
+	}
+}
