@@ -135,3 +135,57 @@ func writeFile(t *testing.T, path, data string) {
 		t.Fatal(err)
 	}
 }
+
+func TestInspectWorktreeEdges(t *testing.T) {
+	ctx := context.Background()
+	run := fexec.OSRunner{}
+
+	t.Run("an unpushed commit on a branch with an upstream", func(t *testing.T) {
+		top := gitRepo(t)
+		wt, err := AddWorktree(ctx, run, top, "w", "feat")
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustGit(t, top, "remote", "add", "origin", top)
+		mustGit(t, wt.Path, "push", "-q", "origin", "HEAD:feat-up")
+		mustGit(t, wt.Path, "branch", "-q", "--set-upstream-to=origin/feat-up")
+		mustGit(t, wt.Path, "commit", "-q", "--allow-empty", "-m", "work")
+		f, err := InspectWorktree(ctx, run, top, "w", wt.Base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f.Upstream != "origin/feat-up" || f.Ahead != 1 {
+			t.Fatalf("facts %+v, want 1 commit ahead of origin/feat-up", f)
+		}
+	})
+
+	t.Run("a base that is not a commit id is unknown, never trusted", func(t *testing.T) {
+		top := gitRepo(t)
+		wt, err := AddWorktree(ctx, run, top, "w", "feat")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, base := range []string{"", "HEAD~1", "--output=/tmp/x", strings.ToUpper(wt.Base), wt.Base + "0"} {
+			f, err := InspectWorktree(ctx, run, top, "w", base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if f.Ahead != -1 {
+				t.Fatalf("base %q gave Ahead %d, want -1", base, f.Ahead)
+			}
+		}
+	})
+
+	t.Run("RemoveWorktree refuses a path not directly under the worktree root", func(t *testing.T) {
+		top := gitRepo(t)
+		for _, p := range []string{
+			filepath.Join(top, ".claude", "worktrees", "w", "sub"),
+			filepath.Join(top, ".claude", "worktrees-x", "w"),
+			top,
+		} {
+			if err := RemoveWorktree(ctx, run, top, p); err == nil {
+				t.Fatalf("RemoveWorktree(%q) was not refused", p)
+			}
+		}
+	})
+}

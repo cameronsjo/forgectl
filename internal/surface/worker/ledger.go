@@ -206,13 +206,45 @@ func (l *Ledger) Update(name string, fn func(*Row)) error {
 	return l.mutate(func(rows []Row) ([]Row, error) { return updateRow(rows, name, fn) })
 }
 
-// Remove deletes the row named name.
-func (l *Ledger) Remove(name string) error {
+// ErrRowChanged reports a conditional change to a row that no longer matches
+// what the caller read: a launch reused the name, or the row moved on.
+var ErrRowChanged = errors.New("worker: the ledger row changed since it was read")
+
+// SameRow reports whether a row is still the one read as was: the same
+// launch (start time) at the same stage. It is the guard close passes to
+// RemoveIf and UpdateIf.
+func SameRow(was Row) func(Row) bool {
+	return func(r Row) bool { return r.StartedAt.Equal(was.StartedAt) && r.Stage == was.Stage }
+}
+
+// RemoveIf deletes the row named name when match accepts it.
+func (l *Ledger) RemoveIf(name string, match func(Row) bool) error {
 	return l.mutate(func(rows []Row) ([]Row, error) {
 		for i := range rows {
-			if rows[i].Name == name {
-				return append(rows[:i:i], rows[i+1:]...), nil
+			if rows[i].Name != name {
+				continue
 			}
+			if !match(rows[i]) {
+				return nil, ErrRowChanged
+			}
+			return append(rows[:i:i], rows[i+1:]...), nil
+		}
+		return nil, ErrNoRow
+	})
+}
+
+// UpdateIf changes the row named name when match accepts it.
+func (l *Ledger) UpdateIf(name string, match func(Row) bool, fn func(*Row)) error {
+	return l.mutate(func(rows []Row) ([]Row, error) {
+		for i := range rows {
+			if rows[i].Name != name {
+				continue
+			}
+			if !match(rows[i]) {
+				return nil, ErrRowChanged
+			}
+			fn(&rows[i])
+			return rows, nil
 		}
 		return nil, ErrNoRow
 	})

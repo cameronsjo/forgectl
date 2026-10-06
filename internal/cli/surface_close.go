@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -17,12 +18,23 @@ import (
 // `surface close <name>` closes a worker's herdr workspace, then removes its
 // worktree only when that provably loses no work. It never deletes the branch.
 
-const closeTimeout = 60 * time.Second
+const (
+	closeTimeout = 60 * time.Second
+	// removeTimeout bounds `git worktree remove` on its own clock, so the
+	// deadline of the steps before it cannot kill git partway through a
+	// deletion and leave a half-removed worktree.
+	removeTimeout = 2 * time.Minute
+	// launchSettleAfter is how long a launch may sit at stage pending or
+	// worktree before list calls it an orphan and close acts on it. A launch
+	// moves past both in seconds; a younger row may be one still running.
+	launchSettleAfter = 10 * time.Minute
+)
 
 // What close did to the workspace.
 const (
 	closeWorkspaceClosed   = "closed"
 	closeWorkspaceGone     = "already-gone"
+	closeWorkspaceEarlier  = "closed-earlier"
 	closeWorkspaceNone     = "none"
 	closeWorkspaceRefused  = "refused"
 	closeWorktreeRemoved   = "removed"
@@ -74,7 +86,9 @@ when all of these hold, and keeps it otherwise, naming each check that failed:
 The branch is never deleted. The worktree path comes from git worktree list,
 never from the ledger. close works on a worker at any stage, so it cleans up
 after a launch that died partway. It refuses, touching nothing, when herdr
-cannot be read or the workspace cannot be proven to be forgectl's.
+cannot be read, when the workspace cannot be proven to be forgectl's, or
+when the row is a launch at pending or worktree less than ten minutes old,
+which may still be running. A row at stage closed skips herdr.
 
 When the workspace is closed and no worktree remains, the ledger row is
 removed. A kept worktree keeps the row at stage "closed"; run close again
@@ -115,17 +129,21 @@ func runSurfaceClose(cmd *cobra.Command, deps module.Deps, opts closeOptions) er
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), closeTimeout)
 	defer cancel()
-	res := closeWorker(ctx, row, opts.KeepWorktree, closeSteps{
+	res := closeWorker(ctx, row, opts.KeepWorktree, time.Now(), closeSteps{
 		close: w.herdr.Close,
 		inspect: func(ctx context.Context) (worker.WorktreeFacts, error) {
 			return worker.InspectWorktree(ctx, deps.Runner, w.top, row.Name, row.Base)
 		},
 		remove: func(ctx context.Context, path string) error {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), removeTimeout)
+			defer cancel()
 			return worker.RemoveWorktree(ctx, deps.Runner, w.top, path)
 		},
-		forget: func() error { return w.led.Remove(row.Name) },
+		// Both act only on the row close read: a launch that reused the name
+		// meanwhile is left alone.
+		forget: func() error { return w.led.RemoveIf(row.Name, worker.SameRow(row)) },
 		markClosed: func() error {
-			return w.led.Update(row.Name, func(r *worker.Row) { r.Stage = worker.StageClosed })
+			return w.led.UpdateIf(row.Name, worker.SameRow(row), func(r *worker.Row) { r.Stage = worker.StageClosed })
 		},
 	})
 	return reportClose(cmd, res, opts.JSON)
@@ -152,14 +170,22 @@ type closeSteps struct {
 
 // closeWorker closes the workspace first, so the harness stops before its
 // worktree is judged, then decides the worktree, then the ledger row.
-func closeWorker(ctx context.Context, row worker.Row, keepWorktree bool, s closeSteps) closeResult {
+func closeWorker(ctx context.Context, row worker.Row, keepWorktree bool, now time.Time, s closeSteps) closeResult {
 	res := closeResult{Name: row.Name, Branch: row.Branch, Worktree: closeWorktreeUntouched}
 	refuse := func(reason string) closeResult {
 		res.Closed, res.Workspace, res.Reason = false, closeWorkspaceRefused, reason
 		return res
 	}
 
+	if launchInFlight(row, now) {
+		return refuse(fmt.Sprintf("its launch may still be running (stage %s, started %s ago); retry after %s", row.Stage, now.Sub(row.StartedAt).Truncate(time.Second), launchSettleAfter))
+	}
+
 	switch {
+	case row.Stage == worker.StageClosed:
+		// An earlier close closed the workspace and kept the worktree. herdr
+		// is not asked again: after a restart it could only refuse.
+		res.Workspace = closeWorkspaceEarlier
 	case len(row.Ref) == 0:
 		res.Workspace = closeWorkspaceNone
 		if row.Recovery != "" {
@@ -215,12 +241,21 @@ func closeWorker(ctx context.Context, row worker.Row, keepWorktree bool, s close
 		}
 		return res
 	}
-	if err := s.forget(); err != nil {
+	if err := s.forget(); err != nil && !errors.Is(err, worker.ErrNoRow) {
 		res.Note = joinNote(res.Note, "the ledger row could not be removed: "+termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen))
 		return res
 	}
 	res.Forgotten = true
 	return res
+}
+
+// launchInFlight reports a row whose launch may still be running: stage
+// pending or worktree, started less than launchSettleAfter ago.
+func launchInFlight(row worker.Row, now time.Time) bool {
+	if row.Stage != worker.StagePending && row.Stage != worker.StageWorktree {
+		return false
+	}
+	return now.Sub(row.StartedAt) < launchSettleAfter
 }
 
 func joinNote(a, b string) string {
@@ -243,10 +278,10 @@ func reportClose(cmd *cobra.Command, r closeResult, asJSON bool) error {
 		return nil
 	}
 	if !r.Closed {
-		return WithExitCode(fmt.Errorf("worker %s: close refused, nothing was touched: %s", r.Name, termsafe.SafeLineMax(r.Reason, 300)), 1)
+		return WithExitCode(fmt.Errorf("worker %s: close refused, nothing was touched: %s", termsafe.SafeLineMax(r.Name, 64), termsafe.SafeLineMax(r.Reason, 300)), 1)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: workspace %s, worktree %s", r.Name, r.Workspace, r.Worktree)
+	fmt.Fprintf(&b, "%s: workspace %s, worktree %s", termsafe.SafeLineMax(r.Name, 64), r.Workspace, r.Worktree)
 	if r.Forgotten {
 		b.WriteString(", ledger row removed")
 	}

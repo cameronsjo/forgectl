@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/resume"
 )
 
 // NewSessionID returns a random version 4 UUID in lowercase, for a claude
@@ -38,16 +40,7 @@ func TranscriptPath(env []string, dir, id string) string {
 		}
 		base = filepath.Join(home, ".claude")
 	}
-	return filepath.Join(base, "projects", projectSlug(dir), id+".jsonl")
-}
-
-func projectSlug(dir string) string {
-	return strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-			return r
-		}
-		return '-'
-	}, dir)
+	return filepath.Join(base, "projects", resume.ProjectSlug(dir), id+".jsonl")
 }
 
 // envValue returns the last value of key in env, as exec does.

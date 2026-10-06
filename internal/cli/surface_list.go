@@ -85,8 +85,10 @@ each checked against herdr: present (its workspace is there and carries
 forgectl's ownership marker), gone, or unreadable. A herdr error is
 unreadable, never gone, and close refuses an unreadable worker.
 
---orphans shows only workers whose workspace is gone or whose launch never
-finished: the rows a coordinator should close.
+--orphans shows only the rows a coordinator should close: those whose
+workspace is gone, and those at any stage other than launched (failed,
+closed, or a launch that stopped at pending or worktree more than ten
+minutes ago). A younger launch may still be running and is never listed.
 
 Exit 0: listed (unreadable workers included). Exit 2: a usage or setup
 error, such as a ledger that cannot be read.
@@ -152,9 +154,10 @@ func runSurfaceList(cmd *cobra.Command, deps module.Deps, opts listOptions) erro
 	if err != nil {
 		return WithExitCode(err, 2)
 	}
+	now := time.Now()
 	res := listResult{Repo: w.top, Session: w.herdr.Session(), Workers: []listRow{}}
 	for _, r := range rows {
-		row := reconcileRow(ctx, w.herdr, r, w.top, listed)
+		row := reconcileRow(ctx, w.herdr, r, w.top, listed, now)
 		if opts.Orphans && !row.Orphan {
 			continue
 		}
@@ -164,7 +167,11 @@ func runSurfaceList(cmd *cobra.Command, deps module.Deps, opts listOptions) erro
 }
 
 // reconcileRow checks one ledger row against herdr and git.
-func reconcileRow(ctx context.Context, probe backend.Prober, r worker.Row, top string, listed map[string]bool) listRow {
+//
+// debt: one Probe per row, each re-reading herdr's readiness and full
+// workspace listing; upgrade to one listing per call when the foreman pane
+// (P6) polls list.
+func reconcileRow(ctx context.Context, probe backend.Prober, r worker.Row, top string, listed map[string]bool, now time.Time) listRow {
 	path := worker.WorktreePath(top, r.Name)
 	row := listRow{
 		Name: r.Name, Harness: r.Harness, Repo: top, Branch: r.Branch, Stage: r.Stage,
@@ -176,7 +183,9 @@ func reconcileRow(ctx context.Context, probe backend.Prober, r worker.Row, top s
 		row.Marker = r.Brief.Marker
 	}
 	row.State, row.Reason = probeWorkspace(ctx, probe, r, &row)
-	row.Orphan = row.State == workerGone || r.Stage != worker.StageLaunched
+	// A launch still inside its settle window is not an orphan yet: close
+	// would refuse it.
+	row.Orphan = !launchInFlight(r, now) && (row.State == workerGone || r.Stage != worker.StageLaunched)
 	return row
 }
 

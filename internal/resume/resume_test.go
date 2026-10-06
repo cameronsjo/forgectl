@@ -89,7 +89,7 @@ func (f *fixture) transcript(id, cwd, branch, title string) {
 		`{"type":"user","gitBranch":"` + branch + `","cwd":"` + cwd + `"}`,
 		`{"type":"ai-title","aiTitle":"` + title + `","sessionId":"` + id + `"}`,
 	}
-	f.write(filepath.Join(f.Paths.projectsDir(), slugify(cwd), id+".jsonl"),
+	f.write(filepath.Join(f.Paths.projectsDir(), ProjectSlug(cwd), id+".jsonl"),
 		strings.Join(lines, "\n")+"\n")
 }
 
@@ -685,7 +685,7 @@ func TestReadTranscript_SurvivesAnOverlongLine(t *testing.T) {
 		`{"type":"user","gitBranch":"feat/after-the-blob"}`,
 		`{"type":"ai-title","aiTitle":"found-after-the-blob","sessionId":"` + id + `"}`,
 	}
-	f.write(filepath.Join(f.Paths.projectsDir(), slugify(cwd), id+".jsonl"),
+	f.write(filepath.Join(f.Paths.projectsDir(), ProjectSlug(cwd), id+".jsonl"),
 		strings.Join(lines, "\n")+"\n")
 
 	branch, title := readTranscript(f.Paths, id, cwd, nil)
@@ -898,8 +898,8 @@ func TestSlugify(t *testing.T) {
 		"/private/tmp/drill-396-proj":                            "-private-tmp-drill-396-proj",
 	}
 	for cwd, want := range cases {
-		if got := slugify(cwd); got != want {
-			t.Errorf("slugify(%q) = %q, want %q", cwd, got, want)
+		if got := ProjectSlug(cwd); got != want {
+			t.Errorf("ProjectSlug(%q) = %q, want %q", cwd, got, want)
 		}
 	}
 }

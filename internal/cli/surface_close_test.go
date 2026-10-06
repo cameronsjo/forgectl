@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
@@ -117,7 +118,7 @@ func TestCloseWorker(t *testing.T) {
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			f := c.fake
-			got := closeWorker(ctx, c.row(t), c.keep, f.steps())
+			got := closeWorker(ctx, c.row(t), c.keep, time.Unix(1e9, 0), f.steps())
 			if got.Closed != c.want.Closed || got.Workspace != c.want.Workspace || got.Worktree != c.want.Worktree || got.Forgotten != c.want.Forgotten {
 				t.Fatalf("result %+v, want %+v", got, c.want)
 			}
@@ -133,8 +134,70 @@ func TestCloseWorker(t *testing.T) {
 	t.Run("a recovery tag is named in a note", func(t *testing.T) {
 		f := fakeClose{facts: cleanFacts}
 		row := worker.Row{Name: "w", Stage: worker.StageFailed, Recovery: "forgectl-abc"}
-		if got := closeWorker(ctx, row, false, f.steps()); !strings.Contains(got.Note, "forgectl-abc") {
+		if got := closeWorker(ctx, row, false, time.Unix(1e9, 0), f.steps()); !strings.Contains(got.Note, "forgectl-abc") {
 			t.Fatalf("note %q does not name the recovery label", got.Note)
+		}
+	})
+}
+
+func TestCloseWorkerGuards(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(1e9, 0)
+
+	t.Run("a launch inside its settle window is refused untouched", func(t *testing.T) {
+		for _, stage := range []worker.Stage{worker.StagePending, worker.StageWorktree} {
+			f := fakeClose{facts: cleanFacts}
+			row := worker.Row{Name: "w", Stage: stage, StartedAt: now.Add(-time.Minute)}
+			got := closeWorker(ctx, row, false, now, f.steps())
+			if got.Closed || len(f.calls) != 0 || !strings.Contains(got.Reason, "may still be running") {
+				t.Fatalf("stage %s: result %+v, calls %q", stage, got, f.calls)
+			}
+		}
+	})
+
+	t.Run("a launch past its settle window is closed", func(t *testing.T) {
+		f := fakeClose{facts: cleanFacts}
+		row := worker.Row{Name: "w", Stage: worker.StageWorktree, StartedAt: now.Add(-launchSettleAfter - time.Second)}
+		if got := closeWorker(ctx, row, false, now, f.steps()); !got.Closed || !got.Forgotten {
+			t.Fatalf("result %+v", got)
+		}
+	})
+
+	t.Run("a row an earlier close kept is retried without herdr", func(t *testing.T) {
+		row := launchedRow(t)
+		row.Stage = worker.StageClosed
+		f := fakeClose{result: backend.NewCloseIdentityMismatch(backend.NewStartCause(backend.FailureIdentityMismatch, errors.New("restarted"))), facts: cleanFacts}
+		got := closeWorker(ctx, row, false, now, f.steps())
+		if !got.Closed || got.Workspace != closeWorkspaceEarlier || strings.Join(f.calls, " ") != "inspect remove forget" {
+			t.Fatalf("result %+v, calls %q", got, f.calls)
+		}
+	})
+
+	t.Run("each refusal names its own cause", func(t *testing.T) {
+		for want, result := range map[string]backend.CloseResult{
+			"herdr restarted":   backend.NewCloseIdentityMismatch(backend.NewStartCause(backend.FailureIdentityMismatch, errors.New("x"))),
+			"could not be read": backend.NewCloseUnreadable(backend.NewStartCause(backend.FailureUnavailable, errors.New("x"))),
+			"did not close":     backend.NewCloseFailed(backend.NewStartCause(backend.FailureUnavailable, errors.New("x"))),
+		} {
+			f := fakeClose{result: result}
+			if got := closeWorker(ctx, launchedRow(t), false, now, f.steps()); got.Closed || !strings.Contains(got.Reason, want) {
+				t.Fatalf("reason %q, want it to contain %q", got.Reason, want)
+			}
+		}
+		row := launchedRow(t)
+		row.Ref = []byte(`{"kind":"nope"}`)
+		f := fakeClose{}
+		if got := closeWorker(ctx, row, false, now, f.steps()); got.Closed || !strings.Contains(got.Reason, "does not decode") || len(f.calls) != 0 {
+			t.Fatalf("result %+v, calls %q", got, f.calls)
+		}
+	})
+
+	t.Run("a row already removed by another close counts as forgotten", func(t *testing.T) {
+		f := fakeClose{result: backend.NewCloseClosed(), facts: cleanFacts}
+		steps := f.steps()
+		steps.forget = func() error { return worker.ErrNoRow }
+		if got := closeWorker(ctx, launchedRow(t), false, now, steps); !got.Forgotten || got.Note != "" {
+			t.Fatalf("result %+v", got)
 		}
 	})
 }

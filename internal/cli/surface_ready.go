@@ -176,20 +176,18 @@ func launchedWorker(led *worker.Ledger, name string) (worker.Row, backend.Ref, e
 	if err != nil {
 		return worker.Row{}, backend.Ref{}, err
 	}
-	for _, r := range rows {
-		if r.Name != name {
-			continue
-		}
-		if r.Stage != worker.StageLaunched {
-			return worker.Row{}, backend.Ref{}, fmt.Errorf("worker %q is at stage %q, want %q", name, r.Stage, worker.StageLaunched)
-		}
-		ref, err := backend.DecodeRef(r.Ref)
-		if err != nil {
-			return worker.Row{}, backend.Ref{}, fmt.Errorf("worker %q: its ledger reference does not decode: %w", name, err)
-		}
-		return r, ref, nil
+	r, ok := findRow(rows, name)
+	if !ok {
+		return worker.Row{}, backend.Ref{}, fmt.Errorf("no worker named %q in this repo's ledger", name)
 	}
-	return worker.Row{}, backend.Ref{}, fmt.Errorf("no worker named %q in this repo's ledger", name)
+	if r.Stage != worker.StageLaunched {
+		return worker.Row{}, backend.Ref{}, fmt.Errorf("worker %q is at stage %q, want %q", name, r.Stage, worker.StageLaunched)
+	}
+	ref, err := backend.DecodeRef(r.Ref)
+	if err != nil {
+		return worker.Row{}, backend.Ref{}, fmt.Errorf("worker %q: its ledger reference does not decode: %w", name, err)
+	}
+	return r, ref, nil
 }
 
 // readyLoop is the wait, with its I/O and clock injected so the decision can

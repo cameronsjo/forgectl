@@ -106,6 +106,9 @@ func InspectWorktree(ctx context.Context, run GitRunner, top, name, base string)
 	if f.Status, err = git("status", "--porcelain", "--ignored"); err != nil {
 		return WorktreeFacts{}, fmt.Errorf("worker: git status in %s: %w", path, err)
 	}
+	// An error from either lookup below is read as "detached" or "no upstream".
+	// Both only add blockers or fall back to the stricter base count, so a
+	// git failure here can keep a worktree but never remove one.
 	if b, err := git("symbolic-ref", "-q", "--short", "HEAD"); err == nil {
 		f.Branch = strings.TrimSpace(b)
 	}

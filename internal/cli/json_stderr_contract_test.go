@@ -158,8 +158,8 @@ func TestJSONStderr_BadFlag_EveryVerb(t *testing.T) {
 	// A floor, so a walker that stopped finding verbs cannot pass vacuously.
 	// The floor is the real count, so losing a verb (or a whole command
 	// group) fails here; raise it when a --json verb lands.
-	if len(paths) < 54 {
-		t.Fatalf("found %d --json verbs, want at least 54: %v", len(paths), paths)
+	if len(paths) < 74 {
+		t.Fatalf("found %d --json verbs, want at least 74: %v", len(paths), paths)
 	}
 	for _, path := range paths {
 		name := strings.Join(path, " ")
