@@ -248,6 +248,10 @@ type model struct {
 
 	action Action
 
+	// filterGen numbers the query as typed: it advances whenever a message
+	// changes the filter text, and tagFilterRuns stamps each filter run
+	// with it, so updateList can tell the newest result from an older one.
+	filterGen int
 	// hub is the full ordered row set from RunOptions.Hub — hubMode's list.
 	hub []HubEntry
 	// scoped is true when the menu was the entry point (`forgectl tmux`), so
@@ -316,6 +320,7 @@ func newModel(ctx context.Context, client *tmux.Client, opts RunOptions) model {
 	// monochrome terminal or a screen reader does not show.
 	l.Paginator.Type = paginator.Arabic
 	l.SetFilteringEnabled(true)
+	l.Filter = rankFilter
 
 	m := model{
 		ctx:     ctx,
@@ -615,9 +620,36 @@ func (m *model) skipHeading(up bool) {
 	}
 }
 
+// updateList runs msg through the list and stamps the filter runs it starts
+// with the query's generation. Every message that can change the query (a key,
+// a paste) goes through here, so a result from an older query can always be
+// told from the current one: updateListMsg drops it (forgectl#1102).
 func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
+	query := m.l.FilterInput.Value()
+	out, cmd := m.updateListMsg(msg)
+	next, ok := out.(model)
+	if !ok {
+		return out, cmd
+	}
+	if next.l.FilterInput.Value() != query {
+		next.filterGen++
+	}
+	return next, tagFilterRuns(cmd, next.filterGen)
+}
+
+func (m model) updateListMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 	km, ok := msg.(tea.KeyPressMsg)
 	if !ok {
+		if run, ok := msg.(filterRun); ok {
+			// Each change to the query starts its own filter run and the runs
+			// finish in any order: the result for "p" can land after the one
+			// for "pr" and replace it. Only the newest query's result is
+			// current; an older one is dropped (forgectl#1102).
+			if run.gen != m.filterGen {
+				return m, nil
+			}
+			msg = run.msg
+		}
 		var cmd tea.Cmd
 		m.l, cmd = m.l.Update(msg)
 		if _, matches := msg.(list.FilterMatchesMsg); matches && m.hubScreen() {
