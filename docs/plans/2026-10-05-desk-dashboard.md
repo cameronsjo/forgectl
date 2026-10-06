@@ -344,6 +344,7 @@ These are registered in `internal/keymap` and rendered by `bubbles/help`. The fo
 **Steps:**
 
 - [x] `git fetch origin`, then `D=$(git rev-parse refs/remotes/origin/feat/desk-core)`. Record `D` in this plan's `- **Task 9 checks at `c181b38`:** `gofmt`, `go vet` on four platforms, `golangci-lint`, and the full `go test ./...` (71 packages) pass. `govulncheck` could not reach its database through the network proxy; `go.mod` and `go.sum` are unchanged since `M`, so the series adds no modules. Two pre-existing timing tests (`TestRestartWedgedHerdrAfterStopIsBounded`, `TestSupervisorEndsLeftoversSoTheyCannotRewriteTheExitCode`) fail now and then under full-suite load and pass alone; `internal/docs` fails 8 watcher tests under `-race` at both `7004ac0` and `HEAD`.
+- **`format-patch --base=D` refuses this branch as it stands,** because desk-tui's `912de47` sits on an older desk-core, not on `D`. The series is built by cherry-picking the 27 non-merge commits of `D..HEAD` in order onto `D`, with every commit's author and committer set to the repo's public noreply identity. The applied series reproduces `HEAD`'s tree exactly, and a gate refuses the output if an employer identifier appears in any patch file, headers included.
 - **The consumer's run directories were deleted by its own cleanup before the live check,** so the consumer check ran against its summaries and fixture logs built from its event vocabulary, not against real logs.
 
 ## Learnings`.
