@@ -59,3 +59,17 @@ That test is read-only.
 The predicates are TOML (`internal/herdr/ready/predicates.toml`), compiled into the binary and replaceable by `<config dir>/surface-ready.toml` (see [configuration.md](configuration.md)). Blocking patterns are broad, because a false match only makes the worker wait. Prompt patterns are strict, because a false match lets forgectl type into a dialog. The fixtures in `internal/herdr/ready/testdata` are live captures from Claude Code 2.1.289, Codex 0.160.0 and npm on herdr 0.9.1; rows the TOML marks `uncaptured` have no fixture yet.
 
 Reading the worker's pane is not this package's job. `internal/surface/herdradapter`'s `WorkerScreen` does it on the pinned server, through the sensitive runner (`herdr.screen-read` and `herdr.pane-status`), and only for a pane forgectl owns: the workspace must carry forgectl's ownership marker, the pane must be the root pane its create response named, and `pane get` must place that pane in that workspace. A workspace that is provably absent returns `ErrWorkerGone`; any other failure returns `ErrScreenUnreadable`, which is never a verdict about the worker.
+
+## Briefs, waits and reports
+
+A worker's first brief goes in at launch. `surface launch --brief` appends it to the harness argv after `--`, and the trampoline socket carries that argv to the pane, so the brief is never typed into a running TUI. Both harnesses treat what follows `--` as the prompt: Claude Code 2.1.289 answered `-- mcp` as a prompt rather than running the `mcp` subcommand, and Codex 0.160.0 took `-- --help` as one.
+
+`surface brief` types the follow-ups. It writes through `TypeText` (`herdr.send-text`) and `PressEnter` (`herdr.send-keys`). Each call re-runs the ownership check `WorkerScreen` uses, so forgectl types only into the root pane of a workspace it owns. Three herdr and Claude Code facts shape it, measured on herdr 0.9.1 and Claude Code 2.1.289:
+
+- `pane send-text` does not honour `--`; it types the `--`. A text starting with `-` types correctly without one. The sensitive runner still refuses such an operand, so `CheckBrief` refuses a typed brief that starts with `-`.
+- Claude Code collapses typed text between 700 and 900 characters into `[Pasted text #N]`, which the read-back cannot compare, so a typed brief is capped at 600 characters with its report instruction.
+- herdr reported `working` within 0.4 s of Enter, and `done` when the turn ended.
+
+Every brief carries a random 12-character marker, recorded in the ledger row before the brief is sent. The brief spells the REPORT line out in words, so its own echo never matches `REPORT <marker>:`. `worker.FindReport` also takes only report lines below the last line that names the marker. A report is still the worker's claim, and the coordinator checks it against git.
+
+`surface wait` does not compare screen text for stability, because a harness's status line and any mod drawing above the prompt change every second. It needs the ready verdict to hold for `--settle`, plus one of: a `working` status seen during the wait, the report on screen, or `--quiet` at the prompt.
