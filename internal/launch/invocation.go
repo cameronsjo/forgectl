@@ -120,6 +120,10 @@ type InvocationRequest struct {
 	// typed into its TUI. Only a worker takes one; the caller validates its
 	// text (worker.CheckBrief).
 	Prompt string
+	// SessionID, when set, is passed to a claude worker as --session-id, so
+	// the coordinator knows which transcript the worker writes. Only a claude
+	// worker takes one; it must be a lowercase UUID.
+	SessionID string
 	// StdoutTerminal reports whether the harness's stdout (forgectl's own,
 	// since launch execs it) is a terminal. It decides whether
 	// `--output-format` alone selects the print posture (IsClaudePrintMode,
@@ -216,6 +220,27 @@ func withWorkerSettings(args []string) ([]string, error) {
 	return append(out, args[2:]...), nil
 }
 
+// validSessionID reports whether id is a lowercase 8-4-4-4-12 hex UUID, the
+// shape Claude Code's --session-id takes and its transcript file is named by.
+func validSessionID(id string) bool {
+	if len(id) != 36 {
+		return false
+	}
+	for i, r := range id {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // applyHarnessOverride switches p to harness while keeping every posture field.
 //
 // The model is the one field that does not carry across: a model chosen for
@@ -244,6 +269,8 @@ type BuiltInvocation struct {
 	Invocation Invocation
 	Profile    Profile
 	Posture    Posture
+	// SessionID is the --session-id the argv carries, or "".
+	SessionID string
 }
 
 // ErrNoBinaryResolver reports a request with no resolver. Refusing beats
@@ -301,6 +328,15 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 			return BuiltInvocation{}, err
 		}
 	}
+	if req.SessionID != "" {
+		if !req.Worker || profile.Harness != "claude" {
+			return BuiltInvocation{}, errors.New("launch: only a claude worker launch takes a session id")
+		}
+		if !validSessionID(req.SessionID) {
+			return BuiltInvocation{}, fmt.Errorf("launch: session id %q is not a lowercase UUID", req.SessionID)
+		}
+		harnessArgs = append(harnessArgs, "--session-id", req.SessionID)
+	}
 	if req.Prompt != "" {
 		// The `--` ends option parsing in both harnesses, so a prompt that
 		// starts with '-' or names a subcommand (`mcp`, `update`) stays the
@@ -332,8 +368,9 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 			Env:     MergeEnv(base, extra),
 			CWD:     req.CWD,
 		},
-		Profile: profile,
-		Posture: posture,
+		Profile:   profile,
+		Posture:   posture,
+		SessionID: req.SessionID,
 	}, nil
 }
 

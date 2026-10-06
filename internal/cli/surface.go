@@ -62,6 +62,8 @@ The backend is always explicit. There is no default and no detection.`,
 	cmd.AddCommand(newSurfaceBriefCmd(deps))
 	cmd.AddCommand(newSurfaceWaitCmd(deps))
 	cmd.AddCommand(newSurfaceReadCmd(deps))
+	cmd.AddCommand(newSurfaceListCmd(deps))
+	cmd.AddCommand(newSurfaceCloseCmd(deps))
 	return cmd
 }
 

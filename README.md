@@ -175,6 +175,8 @@ forgectl surface ready x --json    # wait until worker x is at its input prompt;
 forgectl surface brief x "Now run the tests."   # type a one-line follow-up, read it back, then Enter; exit 1 if anything disagrees
 forgectl surface wait x --json     # wait until worker x's turn settles at its prompt
 forgectl surface read x --report   # the REPORT line for x's last brief (check it against git before trusting it)
+forgectl surface list --orphans    # this repo's workers: present, gone, or unreadable (--json adds session id and transcript path)
+forgectl surface close x           # close x's workspace; remove its worktree only if no work is lost; never deletes the branch
 
 # recipe — run small built-in workbench recipes (alias: r)
 forgectl recipe afk                       # run /go:afk on the current Herdr agent, then /compact it

@@ -3,7 +3,7 @@ status: in-flight
 branch: plan/herdr-coordinator
 approved_in: let-s-level-up-our-eager-owl
 approved_session_id: 95a2c916-a3c7-4bd0-9c2b-be2a99c294e0
-next: T4 (list with the three-state reconcile and --orphans; close with the four removal checks); then T5 before any T8 run; forgectl#1051 Option B waits on a herdr call that starts a pane with a command
+next: T5 (worker profile and the ADR-0010 hardening floor) before any T8 run; forgectl#1077 (close after a herdr restart) before T8 runs unattended; forgectl#1051 Option B waits on a herdr call that starts a pane with a command
 ---
 
 # forgectl: a coordinator over herdr worker panes
@@ -138,7 +138,7 @@ No pre-trust. Claude Code's folder-trust dialog guards repo-supplied hooks, MCP 
 - [x] T1: `surface launch --worktree --harness --name`: harness override on `InvocationRequest`, `git worktree add` helper under `<repo>/.claude/worktrees/`, one owned workspace per worker with an idle-root-pane check, pending-then-filled ledger rows. First, the trust-inheritance check under Worktrees.
 - [x] T2: per-harness readiness predicates (TOML) and `surface ready`, with fixtures from the trial screens and every blocking screen listed above; name the herdr calls and add their exec kinds.
 - [x] T3: `brief` (type without Enter, read back, then Enter, then confirm `working`), `wait`, `read --report` with per-brief markers. **Amended 2026-10-05 (T2 security review I1):** the first brief goes in at launch as the harness's initial-prompt argument through the trampoline socket, so it never travels as keystrokes into a live TUI. `ready` reads only signals the worker can set (its screen, and herdr status any pane can report), so typed briefs after the first are guarded against accidents only, and must not carry an approval.
-- [ ] T4: `list` (three-state reconcile, `--orphans`) and `close` (the four removal checks, never deletes the branch, refuses on `unreadable`).
+- [x] T4: `list` (three-state reconcile, `--orphans`) and `close` (the four removal checks, never deletes the branch, refuses on `unreadable`).
 - [ ] T5: `--profile worker`: explicit posture per harness, stricter-of merge with the matched profile, worker settings file field, no pre-trust.
 - [ ] T6: coordinator skill: split, dispatch, verify-against-git, report. It extends `herdr-orchestrator`, which lives in the cadence plugin monorepo (`cameronsjo/cadence`), so T6 is a separate PR there after T1–T5 ship.
 - [ ] T7: re-run the trial with claude and codex as the acceptance test, on a named machine and herdr build with matching client and server protocol versions. **Amended:** extended by the foreman acceptance script (see the amendment section).
@@ -191,6 +191,11 @@ The foreman plan (`cadence-ecosystem` `docs/plans/2026-10-05-foreman-a-herdr-wor
 - **T3: the report marker cannot come from the echo (T3).** The brief spells the REPORT line out in words, so the echoed brief never matches `REPORT <marker>:`, and `read --report` also skips everything above the last line naming the marker. The marker is written to the ledger row before Enter (or with the pending row, for a launch brief).
 - **T3: wait reads verdict stability, not screen stability (T3).** A harness's status line and any mod drawn above the prompt change every second, so the plan's "screen stable for N seconds" became "ready verdict held for `--settle`", plus a turn seen, the report on screen, or `--quiet` at the prompt.
 - **T3 live check.** With this build on herdr 0.9.1 and Claude Code 2.1.289, a claude worker launched with `--brief` answered with no keystroke typed; `wait` settled in 16 s; `read --report` found the report; a typed `brief` came back `sent` with count 2; the second `wait` saw the turn and `read --report` found the new marker. Two stale ledger rows (`t3-probe` failed, `t3-probe2` launched) remain in sjomba's forgectl ledger for T4's `list --orphans` to show; their workspaces and worktrees were removed by hand.
+- **T4: `pr` is not in `surface list` (T4).** `list` is what the foreman pane polls, and a PR lookup there would call GitHub every few seconds per repo. The PR number and state move to T10's `surface status`, which caches `gh` per head SHA. The other T4 fields (`session_id`, `transcript`, `pane_id`, `workspace_id`, `branch`, `repo`, `stage`) are in.
+- **T4: forgectl picks the claude session id (T4).** A claude worker is launched with a forgectl-generated `--session-id`, and the row records the transcript path computed from the environment the harness got. Codex has no such flag, so a codex row carries neither field.
+- **T4: an identity mismatch is `unreadable`, not `gone` (T4).** That matches `Probe`'s rule that a mismatch is not conclusive. The cost is that rows taken before a herdr restart stay `unreadable` and `close` refuses them; forgectl#1077 tracks telling a restart apart.
+- **T4: a kept worktree keeps the row at a new stage `closed` (T4).** The row is removed only when the workspace is closed or gone and no worktree remains, so a later `close` can retry the removal.
+- **T4 live check.** On sjomba with herdr 0.9.1 and Claude Code 2.1.289: `list --orphans` showed the two T3 rows as `gone` orphans, and `close` removed both. A fresh claude worker listed `present` with its `session_id`, and its transcript file existed at the recorded path with that `sessionId`. `close` with an untracked file kept the worktree and named the check; after the file was removed, a second `close` removed the worktree and the row, and the branch stayed.
 - **T1 verification beyond the plan's list.** A live `surface launch --worktree` against herdr 0.9.1, with a stub harness, showed the worktree, the ledger row (0600, hashed name, full `Ref`), the worker seeing its own `HERDR_PANE_ID` rather than the launcher's, no danger flag in the argv, and a second launch under the same name refused.
 
 ## Panel

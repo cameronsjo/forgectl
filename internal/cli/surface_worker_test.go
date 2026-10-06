@@ -186,3 +186,24 @@ func TestWorkerLaunchRefusesBeforeTouchingAnything(t *testing.T) {
 		})
 	}
 }
+
+// TestWorkerLaunchRecordsTheSession pins the foreman join key: a claude
+// worker's session id and transcript path land in its row.
+func TestWorkerLaunchRecordsTheSession(t *testing.T) {
+	led := testWorkerLedger(t)
+	steps := goodSteps(t)
+	const id = "0f8e2c1a-3b4d-4e5f-8a6b-7c8d9e0f1a2b"
+	steps.build = func(cwd string) (launch.BuiltInvocation, error) {
+		return launch.BuiltInvocation{
+			Invocation: launch.Invocation{Harness: "claude", CWD: cwd, Env: []string{"HOME=/h"}},
+			SessionID:  id,
+		}, nil
+	}
+	if _, err := runWorkerSteps(context.Background(), led, "w1", "feat/w1", steps); err != nil {
+		t.Fatalf("runWorkerSteps: %v", err)
+	}
+	row := onlyRow(t, led)
+	if row.SessionID != id || row.Transcript != worker.TranscriptPath([]string{"HOME=/h"}, testRepoTop+"/.claude/worktrees/w1", id) || row.Transcript == "" {
+		t.Fatalf("row = %+v", row)
+	}
+}

@@ -11,7 +11,6 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/herdr/ready"
 	"github.com/cameronsjo/forgectl/internal/module"
-	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/resume"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
@@ -146,28 +145,11 @@ func openWorker(cmd *cobra.Command, deps module.Deps, repo, name string) (*opene
 	if err := worker.ValidName(name); err != nil {
 		return nil, WithExitCode(fmt.Errorf("name: %w", err), 2)
 	}
-	adapter, err := newHerdrAdapter(cmd.ErrOrStderr())
+	wl, err := openWorkerLedger(cmd, deps, repo)
 	if err != nil {
-		return nil, WithExitCode(err, 2)
+		return nil, err
 	}
-	herdr, ok := adapter.(*herdradapter.Adapter)
-	if !ok {
-		return nil, errors.New("forgectl: the herdr adapter has an unexpected type")
-	}
-
-	ctx := cmd.Context()
-	target, err := projects.New(deps.Runner).ResolveTarget(repo)
-	if err != nil {
-		return nil, WithExitCode(err, 2)
-	}
-	top, err := worker.RepoTop(ctx, deps.Runner, target)
-	if err != nil {
-		return nil, WithExitCode(err, 2)
-	}
-	led, err := worker.Open(top, herdr.Session())
-	if err != nil {
-		return nil, WithExitCode(err, 2)
-	}
+	herdr, led := wl.herdr, wl.led
 	row, ref, err := launchedWorker(led, name)
 	if err != nil {
 		return nil, WithExitCode(err, 2)
