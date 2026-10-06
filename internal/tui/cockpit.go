@@ -556,17 +556,25 @@ func (m *cockpitModel) clampCursor(i int) {
 	}
 }
 
-// activate is enter on the focused section's selected row.
-func (m cockpitModel) activate() (tea.Model, tea.Cmd) {
+// selectedRow is the focused section's row under the cursor.
+func (m cockpitModel) selectedRow() (CockpitRow, bool) {
 	if len(m.secs) == 0 {
-		return m, nil
+		return CockpitRow{}, false
 	}
 	rows := m.visibleRows(m.focus)
 	s := m.secs[m.focus]
 	if s.cursor < 0 || s.cursor >= len(rows) {
+		return CockpitRow{}, false
+	}
+	return rows[s.cursor], true
+}
+
+// activate is enter on the focused section's selected row.
+func (m cockpitModel) activate() (tea.Model, tea.Cmd) {
+	row, ok := m.selectedRow()
+	if !ok {
 		return m, nil
 	}
-	row := rows[s.cursor]
 	switch row.Kind {
 	case CockpitRowPR:
 		argv, err := m.buildArgv([]string{"pr"}, row.Ref, false)
@@ -577,7 +585,7 @@ func (m cockpitModel) activate() (tea.Model, tea.Cmd) {
 		m.action = Action{Kind: ActionRunVerb, Argv: argv}
 		return m, tea.Quit
 	case CockpitRowProject:
-		m.footer = m.styles.Muted.Render("focus not available yet")
+		m.footer = m.styles.Muted.Render("enter opens PR rows; a project row has no action")
 		return m, nil
 	default:
 		m.footer = m.styles.Muted.Render("nothing to open on this row")
@@ -774,12 +782,24 @@ func (m cockpitModel) footerView() string {
 	default:
 		first = m.footer
 	}
-	hint := "↑↓/jk move · tab section · enter open · r refresh · R all · / filter · ? help · q quit"
+	// Hints drop from least to most important until the line fits, so the
+	// quit and help keys are the last to go. enter shows only on a row it
+	// acts on: it opens a PR, and does nothing on a project row (forgectl#1108).
+	enter := ""
+	if row, ok := m.selectedRow(); ok && row.Kind == CockpitRowPR {
+		enter = "enter open"
+	}
+	hints := []string{"↑↓/jk move", "tab section", enter, "r refresh", "R all", "/ filter", "? help", "q quit"}
+	prio := []int{7, 6, 0, 2, 5, 1, 3, 4}
 	switch {
 	case m.help:
-		hint = "? / esc close help · q quit"
+		hints, prio = []string{"? / esc close help", "q quit"}, []int{1, 0}
 	case m.filtering:
-		hint = "type to filter · enter keep · esc clear"
+		hints, prio = []string{"type to filter", "enter keep", "esc clear"}, []int{2, 0, 1}
 	}
-	return first + "\n" + m.styles.Muted.Render(hint)
+	width := m.width
+	if width <= 0 {
+		width = 1 << 16
+	}
+	return first + "\n" + m.styles.Muted.Render(fitHints(width, hints, prio))
 }
