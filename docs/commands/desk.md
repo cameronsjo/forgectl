@@ -58,7 +58,7 @@ Quit and restart every open dashboard after you upgrade forgectl. A dashboard st
 
 ### `forgectl desk`
 
-The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with a bar per item, a focus panel showing the selected item's short sha256, WHAT and WHY (wrapped in full, up to four lines each) and, under a "script" label, its first script lines, and the history of finished runs.
+The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with a bar per item, a focus panel showing the selected item's short sha256, WHAT and WHY (wrapped, up to four lines each; `desk status NAME` shows them whole) and, under a "script" label, its first script lines, and the history of finished runs.
 
 | Key | Action |
 |---|---|
@@ -96,10 +96,10 @@ When `<file>` is `-`, stdin is read (at most 1 MiB) and must not be a terminal.
 
 When an item is queued, `add` tells the operator it is waiting, so a waiting item is never silent while the desk is off screen:
 
-- **herdr** (inside a herdr pane): a herdr notification, and the queuing session's pane in herdr's needs-you (`blocked`) state, reported under the source `forgectl-desk`. The state clears when the item is run or skipped, from the dashboard or `desk skip`. It stays, with its count refreshed, while other items queued from that pane still wait. Outside herdr nothing is sent to it.
+- **herdr** (inside a herdr pane): a herdr notification, and the queuing session's pane in herdr's needs-you (`blocked`) state, reported under the source `forgectl-desk`. The state clears when the item is run, skipped, or skipped as changed, and comes back when `u` re-arms a skipped item. While other items queued from that pane still wait, it stays with the count refreshed. Clearing works even after `notify_herdr` is turned off. Outside herdr nothing is sent to it.
 - **macOS**: a desktop notification (`osascript`); a no-op elsewhere.
 
-A signal that fails is a `warning: operator signal failed:` line on stderr and never fails the add. Turn each off in `config.toml`:
+A signal that fails is a `warning: operator signal failed:` line (in `warnings` with `--json`) and never fails the add; it names the setting that turns it off. Turn each off in `config.toml`:
 
 ```toml
 [desk]

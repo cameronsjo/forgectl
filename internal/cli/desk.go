@@ -180,6 +180,11 @@ refused, never read. FILE "-" reads the item from stdin; --name then gives its
 file name (deploy.sh, nightly.manifest), whose extension picks the kind. stdin
 must not be a terminal.
 
+When an item is queued, add tells the operator: a herdr notification and the
+queuing pane's needs-you state (inside herdr) and a macOS notification. A
+failed signal is a warning: line and never fails the add; [desk] notify_herdr
+and notify_macos in config.toml turn each off.
+
 A .manifest is checked like ` + "`desk plan`" + ` before it is queued: a manifest that cannot
 run is refused, and its warnings are printed as warning: lines on stderr.
 

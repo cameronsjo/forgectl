@@ -519,5 +519,11 @@ func (d *Desk) Unskip(name string) error {
 	if d.exists(path.Join(DirPending, name+kind.Ext())) {
 		return fmt.Errorf("desk: %s is already pending", describe(name))
 	}
-	return d.move(name, kind, DirSkipped, DirPending)
+	if err := d.move(name, kind, DirSkipped, DirPending); err != nil {
+		return err
+	}
+	if d.onReturn != nil {
+		d.onReturn(meta)
+	}
+	return nil
 }

@@ -45,6 +45,7 @@ type Desk struct {
 	// runs when an item leaves pending/ (see SetSignalPane, OnLeavePending).
 	signalPane string
 	onLeave    func(Meta)
+	onReturn   func(Meta)
 }
 
 // SetSignalPane records pane, the herdr pane of the queuing session, in the
@@ -56,6 +57,11 @@ func (d *Desk) SetSignalPane(pane string) { d.signalPane = pane }
 // at queue time gets cleared. fn runs on the caller's goroutine with no desk
 // lock held, and its failures are its own to handle.
 func (d *Desk) OnLeavePending(fn func(Meta)) { d.onLeave = fn }
+
+// OnReturnPending registers fn to run, with the item's meta, after Unskip
+// returns an item to pending/: it is how the signal cleared at the skip is
+// raised again.
+func (d *Desk) OnReturnPending(fn func(Meta)) { d.onReturn = fn }
 
 func (d *Desk) leftPending(m Meta) {
 	if d.onLeave != nil {

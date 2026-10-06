@@ -48,7 +48,7 @@ func (r *signalRig) kinds() string {
 	return strings.Join(ks, " ")
 }
 
-func off() *bool { f := false; return &f }
+func notOn() *bool { f := false; return &f }
 
 func addItem(t *testing.T, rig *signalRig, name string) (string, error) {
 	t.Helper()
@@ -100,7 +100,7 @@ func TestDeskAdd_SignalsTheOperator(t *testing.T) {
 		t.Errorf("herdr calls = %q, want a notification then the pane state", got)
 	}
 	calls := rig.herdr.Calls()
-	if want := blockedCmd("w1:p9", "desk: 1 waiting: 01-merge: do merge"); !calls[1].Equal(want) {
+	if want := blockedCmd("w1:p9", "forgectl desk: 1 waiting: 01-merge: do merge"); !calls[1].Equal(want) {
 		t.Errorf("the pane was not put in the blocked state naming the item")
 	}
 	if rig.osascript() != 1 {
@@ -118,9 +118,9 @@ func TestDeskAdd_SettingsTurnEachSignalOff(t *testing.T) {
 		wantMac   int
 		wantHerdr string
 	}{
-		{"herdr off", config.DeskConfig{NotifyHerdr: off()}, 1, ""},
-		{"macOS off", config.DeskConfig{NotifyMacOS: off()}, 0, "herdr.notification-show herdr.pane-agent"},
-		{"both off", config.DeskConfig{NotifyHerdr: off(), NotifyMacOS: off()}, 0, ""},
+		{"herdr off", config.DeskConfig{NotifyHerdr: notOn()}, 1, ""},
+		{"macOS off", config.DeskConfig{NotifyMacOS: notOn()}, 0, "herdr.notification-show herdr.pane-agent"},
+		{"both off", config.DeskConfig{NotifyHerdr: notOn(), NotifyMacOS: notOn()}, 0, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := newDeskDir(t)
@@ -162,7 +162,7 @@ func TestDeskAdd_AFailedSignalIsAWarningNotAFailedAdd(t *testing.T) {
 	}
 	errOut, err := addItem(t, rig, "merge")
 	wantExit(t, err, 0)
-	if !strings.Contains(errOut, "warning: operator signal failed: herdr notification") {
+	if !strings.Contains(errOut, "warning: operator signal failed: herdr notification failed") {
 		t.Errorf("stderr = %q, want the failed signal named", errOut)
 	}
 	if len(queuedPane(t, dir)) != 1 {
@@ -187,7 +187,7 @@ func TestDeskSkip_ClearsThePaneStateWhenTheLastItemLeaves(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := rig.herdr.Calls()[before:]
-	if len(calls) != 1 || !calls[0].Equal(blockedCmd("w1:p9", "desk: 1 waiting")) {
+	if len(calls) != 1 || !calls[0].Equal(blockedCmd("w1:p9", "forgectl desk: 1 waiting")) {
 		t.Fatalf("skipping one of two: %d calls, want the pane state refreshed to 1 waiting", len(calls))
 	}
 	if _, _, err := deskRun(t, rig.deps, "skip", "02-two", "--reason", "not now"); err != nil {
@@ -211,5 +211,63 @@ func TestDeskSkip_LeavesAnItemWithNoSignalAlone(t *testing.T) {
 	}
 	if rig.kinds() != "" {
 		t.Errorf("herdr calls = %q for an item queued outside herdr", rig.kinds())
+	}
+}
+
+func TestDeskAdd_JSONCarriesTheSignalFailure(t *testing.T) {
+	newDeskDir(t)
+	inHerdr(t, "w1:p9")
+	rig := newSignalRig(config.DeskConfig{})
+	rig.herdr.RunFunc = func(exec.SensitiveCommand) (exec.SensitiveResult, error) {
+		return exec.SensitiveResult{}, errors.New("herdr is down")
+	}
+	out, _, err := deskRun(t, rig.deps, "add", writeTemp(t, "a.sh", "echo a\n"), "--what", "w", "--why", "y", "--json")
+	wantExit(t, err, 0)
+	if !strings.Contains(out, "operator signal failed: herdr notification failed") || !strings.Contains(out, "notify_herdr = false") {
+		t.Errorf("--json output = %s, want the failed signal and its setting in warnings", out)
+	}
+}
+
+// Items from two panes, and one from outside herdr: skipping a pane's last
+// item releases that pane only, and counts only that pane's items.
+func TestDeskSkip_ReleasesOnlyTheItemsOwnPane(t *testing.T) {
+	newDeskDir(t)
+	rig := newSignalRig(config.DeskConfig{})
+	for _, it := range []struct{ pane, name string }{{"w1:p1", "a"}, {"w1:p2", "b"}, {"", "c"}} {
+		if it.pane == "" {
+			stubLayout(t, map[string]string{})
+		} else {
+			inHerdr(t, it.pane)
+		}
+		if _, err := addItem(t, rig, it.name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := len(rig.herdr.Calls())
+	if _, _, err := deskRun(t, rig.deps, "skip", "01-a", "--reason", "x"); err != nil {
+		t.Fatal(err)
+	}
+	calls := rig.herdr.Calls()[before:]
+	if len(calls) != 1 || !calls[0].Equal(releaseCmd("w1:p1")) {
+		t.Fatalf("skipping pane p1's only item: %d calls, want release of w1:p1 (p2 and the outside item still wait)", len(calls))
+	}
+}
+
+// A signal raised while notify_herdr was on is still cleared after it is
+// turned off; otherwise the pane stays blocked for good.
+func TestDeskSkip_ClearsEvenWhenTheSettingIsNowOff(t *testing.T) {
+	newDeskDir(t)
+	inHerdr(t, "w1:p9")
+	rig := newSignalRig(config.DeskConfig{})
+	if _, err := addItem(t, rig, "one"); err != nil {
+		t.Fatal(err)
+	}
+	before := len(rig.herdr.Calls())
+	rig.deps.Cfg.Desk = config.DeskConfig{NotifyHerdr: notOn()}
+	if _, _, err := deskRun(t, rig.deps, "skip", "01-one", "--reason", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if calls := rig.herdr.Calls()[before:]; len(calls) != 1 || !calls[0].Equal(releaseCmd("w1:p9")) {
+		t.Fatalf("%d calls after the skip, want the release", len(calls))
 	}
 }

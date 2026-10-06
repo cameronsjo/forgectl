@@ -472,3 +472,29 @@ func TestGoldenDeskFocusWrap(t *testing.T) {
 		})
 	}
 }
+
+// A WHAT too long for four wrapped lines ends in an ellipsis rather than
+// growing the panel without bound.
+func TestDeskFrame_FocusFieldsStopAtFourLines(t *testing.T) {
+	snap, opts := longHeaderSnapshot()
+	it := &snap.Pending[0]
+	it.What = strings.Repeat("rebuild the mirror index and prune every old release ", 8)
+	it.Content = []byte("#!/bin/bash\n# WHAT: " + it.What + "\necho hi\n")
+	it.Headers = desk.ParseHeaders(it.Content)
+	out := ansi.Strip(RenderDeskFrame(snap, 80, 40, deskNow, opts))
+	whatLines := 0
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "│ what ") || (whatLines > 0 && strings.HasPrefix(l, "│       ") && !strings.Contains(l, "┆")) {
+			whatLines++
+		}
+		if strings.HasPrefix(l, "│ why ") {
+			break
+		}
+	}
+	if whatLines != 4 {
+		t.Errorf("what wrapped to %d lines, want exactly 4:\n%s", whatLines, out)
+	}
+	if !strings.Contains(out, "…") {
+		t.Errorf("a what cut at four lines must end in an ellipsis:\n%s", out)
+	}
+}

@@ -168,15 +168,15 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 		warnings = []string{}
 	}
 	out := cmd.OutOrStdout()
+	for _, f := range signalFailures {
+		warnings = append(warnings, "operator signal failed: "+f)
+	}
 	if o.asJSON {
 		return writeJSON(out, deskAddJSON{Name: a.Name, Kind: string(a.Kind), SHA256: a.SHA256, Path: a.Path, Warnings: warnings})
 	}
 	ew := &stickyWriter{w: cmd.ErrOrStderr()}
 	for _, w := range warnings {
 		ew.printf("warning: %s\n", safeText(w))
-	}
-	for _, f := range signalFailures {
-		ew.printf("warning: operator signal failed: %s\n", safeText(f))
 	}
 	w := &stickyWriter{w: out}
 	w.printf("name=%s\nkind=%s\nsha256=%s\n", a.Name, a.Kind, a.SHA256)
