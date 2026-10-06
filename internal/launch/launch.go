@@ -28,7 +28,10 @@ func SessionArgs(p Profile) []string {
 	if p.AllowDanger {
 		args = append(args, "--allow-dangerously-skip-permissions")
 	}
-	args = append(args, "--ide", "--exclude-dynamic-system-prompt-sections", "--model", p.Model)
+	if !p.Detached {
+		args = append(args, "--ide")
+	}
+	args = append(args, "--exclude-dynamic-system-prompt-sections", "--model", p.Model)
 	args = appendEffort(args, p)
 	for _, d := range p.AddDir {
 		args = append(args, "--add-dir", d)

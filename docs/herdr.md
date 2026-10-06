@@ -74,6 +74,21 @@ Every brief carries a random 12-character marker, recorded in the ledger row bef
 
 `surface wait` does not compare screen text for stability, because a harness's status line and any mod drawing above the prompt change every second. It needs the ready verdict to hold for `--settle`, plus one of: a `working` status seen during the wait, the report on screen, or `--quiet` at the prompt.
 
+## What a claude worker loads
+
+A claude worker gets only forgectl's settings (ADR-0010, forgectl#1050). Its argv carries:
+
+- **`--setting-sources ""`:** no user, project or local settings load. The branch's `.claude/settings.json` hooks do not run, and the operator's plugins, hooks and skills do not load. Only Claude Code's built-in plugins, skills and agents remain.
+- **`--strict-mcp-config` with an empty `--mcp-config`:** no MCP server loads. That covers the branch's `.mcp.json`, the operator's servers, and plugin servers, a herdr-driving one included.
+- **`--no-chrome`:** turns off Claude in Chrome. It is enabled from `~/.claude.json`, so the flags above leave it on.
+- **No `--ide`:** the worker does not ask to connect to the operator's editor.
+- **An environment allowlist:** a worker inherits only `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `COLORTERM`, `LANG`, `LC_*`, `TZ`, `TMPDIR`, `CLAUDE_CONFIG_DIR`, the CA and config-home paths (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `CODEX_HOME`, `XDG_CONFIG_HOME`) and `SSH_AUTH_SOCK`, plus herdr's pane ids. `SSH_AUTH_SOCK` is a deliberate grant: the remotes push over SSH, so it stays until a per-worker GitHub token replaces the operator's identity. When the launcher is a Claude Code session, the rest of its environment carries its user settings' `env` block and its own handles: the cross-session messaging socket and token, and the herdr and cmux sockets. The profile's `env` and forgectl's injected values still apply, so a variable a worker needs goes in config. This removes the handles from the worker's environment, not its access to them: until the sandbox slice, a worker's shell can still find the sockets by path and read another process's environment with `ps -E`. Under the worker modes allowed today, every such shell command prompts.
+- **`--settings`:** sets `useAutoModeDuringPlan: false` (forgectl#1060) and denies `SendMessage` and `RemoteTrigger`. Without the deny, a worker could message another Claude session on the machine, the coordinator included, or start a cloud session.
+
+These are measurements on Claude Code 2.1.289, not tests: a unit test pins the argv, the settings JSON and the environment allowlist, and nothing re-checks the behavior on a Claude Code upgrade. With `claude -p` in a repo carrying a hook, an MCP server, a skill, a subagent that declares an MCP server, and a command, none of them loaded. A live herdr worker listed no MCP server, its tool list held neither denied tool, and its process environment held only the allowlist, forgectl's injected values and the pane ids. The built-in plugins' contents are not checked.
+
+The branch's `CLAUDE.md` still loads. It is memory, not settings, and `claudeMdExcludes` is read only from the settings layers this turns off. Checking it against a trusted base is forgectl#1061. A codex worker gets only the environment allowlist so far (forgectl#1092).
+
 ## Listing and closing workers
 
 `surface list` probes each ledger row's workspace through `Adapter.Probe`, the same lookup `Close` uses: the server incarnation must match the reference, the listing must be complete, and the workspace must carry forgectl's ownership marker. A workspace missing from that listing is `gone`. Any herdr error is `unreadable`, and so is an identity mismatch: after a herdr restart, or when a workspace id now names a workspace without forgectl's marker, nothing proves forgectl's own workspace gone. `--orphans` keeps the rows `close` should act on: a `gone` workspace, or any stage other than `launched` (`failed`, `closed`, or a launch stopped at `pending` or `worktree`). A launch at `pending` or `worktree` for less than ten minutes may still be running, so it is never an orphan, and `close` refuses it.
