@@ -292,7 +292,7 @@ func Run(ctx context.Context, client *tmux.Client, opts RunOptions) (Action, err
 	// Bubble Tea v2 dropped WithAltScreen: the alt screen is a property of the
 	// View the model returns each frame, not a program-construction option.
 	// View() sets AltScreen instead.
-	p := tea.NewProgram(m, tea.WithContext(ctx))
+	p := tea.NewProgram(m, keymap.ProgramOptions(ctx)...)
 	final, err := p.Run()
 	if err != nil {
 		return Action{}, err
