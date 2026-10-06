@@ -3,7 +3,7 @@ status: in-flight
 branch: plan/herdr-coordinator
 approved_in: let-s-level-up-our-eager-owl
 approved_session_id: 95a2c916-a3c7-4bd0-9c2b-be2a99c294e0
-next: T5 (worker profile and the ADR-0010 hardening floor) before any T8 run; forgectl#1077 (close after a herdr restart) before T8 runs unattended; forgectl#1051 Option B waits on a herdr call that starts a pane with a command
+next: T5 (worker profile and the ADR-0010 hardening floor) before any T8 run; forgectl#1077 (close after a herdr restart) and #1079 (hooks on git status; gitfile read) before T8 runs unattended; forgectl#1051 Option B waits on a herdr call that starts a pane with a command
 ---
 
 # forgectl: a coordinator over herdr worker panes
@@ -195,6 +195,8 @@ The foreman plan (`cadence-ecosystem` `docs/plans/2026-10-05-foreman-a-herdr-wor
 - **T4: forgectl picks the claude session id (T4).** A claude worker is launched with a forgectl-generated `--session-id`, and the row records the transcript path computed from the environment the harness got. Codex has no such flag, so a codex row carries neither field.
 - **T4: an identity mismatch is `unreadable`, not `gone` (T4).** That matches `Probe`'s rule that a mismatch is not conclusive. The cost is that rows taken before a herdr restart stay `unreadable` and `close` refuses them; forgectl#1077 tracks telling a restart apart.
 - **T4: a kept worktree keeps the row at a new stage `closed` (T4).** The row is removed only when the workspace is closed or gone and no worktree remains, so a later `close` can retry the removal.
+- **T4: close runs no repository-selected program in the worker's worktree (T4 security review).** The plan named the four removal checks but not how git runs them. The worktree is the worker's to write, so `status` runs through `gitenv.RunUnfiltered` with hooks pinned off, `worktree remove` through `RunUnfilteredAlso`, and close refuses a `.git` that is not a gitfile naming the common git dir's `worktrees/`. The same hook gap in `clean` and `projects`, and two narrower gitfile races, are forgectl#1079.
+- **T4: close refuses a launch less than ten minutes old at `pending` or `worktree` (T4 review).** Such a row may be a launch still running, so `list --orphans` leaves it out too.
 - **T4 live check.** On sjomba with herdr 0.9.1 and Claude Code 2.1.289: `list --orphans` showed the two T3 rows as `gone` orphans, and `close` removed both. A fresh claude worker listed `present` with its `session_id`, and its transcript file existed at the recorded path with that `sessionId`. `close` with an untracked file kept the worktree and named the check; after the file was removed, a second `close` removed the worktree and the row, and the branch stayed.
 - **T1 verification beyond the plan's list.** A live `surface launch --worktree` against herdr 0.9.1, with a stub harness, showed the worktree, the ledger row (0600, hashed name, full `Ref`), the worker seeing its own `HERDR_PANE_ID` rather than the launcher's, no danger flag in the argv, and a second launch under the same name refused.
 
