@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"errors"
+
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/module"
@@ -40,6 +42,13 @@ var tmuxModule = module.Manifest{
 	},
 }
 
+// errTmuxMenuNeedsTerminal is what bare `forgectl tmux` says off a terminal:
+// the menu is a full-screen TUI, and its plain forms are the verbs below it.
+// Without this check Bubble Tea writes alt-screen sequences into a pipe, or
+// fails with a raw /dev/tty error when there is no terminal at all
+// (forgectl#1100).
+var errTmuxMenuNeedsTerminal = errors.New("the tmux menu needs a terminal on stdin and stdout; use tmux ls, tmux pick, or tmux tree for plain output")
+
 // newTmuxCmd builds the `tmux` parent command. Verbs are attached in their own
 // files (tmux_ls.go, …) so each milestone adds a slice without churn here.
 func newTmuxCmd(deps module.Deps, client *tmux.Client) *cobra.Command {
@@ -66,6 +75,9 @@ func newTmuxCmdWith(deps module.Deps, client *tmux.Client, run hubRunner) *cobra
 		// (resolved at run time, once the whole tree exists) rather than
 		// threaded through construction.
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !isInteractiveTTY() {
+				return errTmuxMenuNeedsTerminal
+			}
 			noIcons, _ := cmd.Flags().GetBool("no-icons")
 			opts := hubRunOptions(cmd.Context(), deps, cmd.Root(), client)
 			opts.StartInTmux = true

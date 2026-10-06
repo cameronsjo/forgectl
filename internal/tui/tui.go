@@ -250,6 +250,10 @@ type model struct {
 
 	// hub is the full ordered row set from RunOptions.Hub — hubMode's list.
 	hub []HubEntry
+	// scoped is true when the menu was the entry point (`forgectl tmux`), so
+	// q/esc on it leaves the program instead of backing out to a hub the
+	// user never opened (forgectl#1100).
+	scoped bool
 	// nameCol is the hub lists' name column (hubNameColumn), recomputed
 	// when the list's items or size change.
 	nameCol int
@@ -333,6 +337,7 @@ func newModel(ctx context.Context, client *tmux.Client, opts RunOptions) model {
 	if opts.StartInTmux {
 		m.title = "menu"
 		m.mode = menuMode
+		m.scoped = true
 		m.l.SetItems(m.menuItems())
 		return m
 	}
@@ -695,6 +700,9 @@ func (m model) updateListKey(km tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.toHub()
 			return m, nil
 		case menuMode:
+			if m.scoped {
+				return m, tea.Quit
+			}
 			// The hub is the quit level: a bare invoke's tmux jumper and any
 			// module's leaf list both back out to the hub, not straight to
 			// the shell (Architecture: "q/esc in hubMode quits; in menuMode
@@ -1636,7 +1644,11 @@ func (m model) footerView() string {
 			hints = []string{"↑↓ move", "1-9 jump", m.enterHint(), "/ filter", "q/esc back"}
 			prio = []int{4, 2, 3, 0, 1}
 		case menuMode:
-			hints = []string{"1-6 / enter select", "q/esc back"}
+			back := "q/esc back"
+			if m.scoped {
+				back = "q/esc quit"
+			}
+			hints = []string{"1-6 / enter select", back}
 			prio = []int{0, 1}
 		case sessionsMode:
 			hints = []string{"↑↓ move", "1-9 jump", "enter attach", "k kill", "K kill-others", "r rename", "/ filter", "q/esc back"}
