@@ -15,7 +15,7 @@ import (
 
 // deskGoldenSizes are the window sizes the dashboard's layouts are pinned at:
 // single pane, the mid layout in two heights, the wide layout, and the floor.
-var deskGoldenSizes = [][2]int{{60, 30}, {120, 30}, {120, 50}, {160, 50}, {40, 12}}
+var deskGoldenSizes = [][2]int{{60, 30}, {120, 30}, {120, 50}, {160, 50}, {196, 50}, {40, 12}}
 
 func TestGoldenDesk(t *testing.T) {
 	forceTrueColor(t)

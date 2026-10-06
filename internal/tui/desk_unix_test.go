@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -376,6 +377,61 @@ func TestStaleLostAndGone(t *testing.T) {
 	m.selectKey(deskRunKey{"pipeline", "gamma-run-7"})
 	out := screen(t, m)
 	mustContain(t, "gone", out, "gone", "exit 3", "audit rejected")
+}
+
+// A skipped item is a run; unskipped, it is waiting, which is not a run, so
+// its row leaves the list rather than turning gone.
+func TestUnskippedItemLeavesTheRunList(t *testing.T) {
+	src := oneSource([]runview.RunRef{runRef("0004-report", clockAt(11, 0)), runRef("0005-other", clockAt(10, 0))}, nil)
+	src.items = []runview.QueueItem{{Name: "0004-report", Kind: "script", State: "skipped", SkipReason: "later"}}
+	m := openDesk(t, optsFor(src), 120, 30)
+	k := deskRunKey{"s", "0004-report"}
+	if m.runs[k] == nil {
+		t.Fatal("skipped item is not in the run list")
+	}
+	m.selectKey(k)
+
+	src.mu.Lock()
+	src.refs = slices.DeleteFunc(slices.Clone(src.refs), func(r runview.RunRef) bool { return r.Name == "0004-report" })
+	src.items = []runview.QueueItem{{Name: "0004-report", Kind: "script", State: "waiting"}}
+	src.mu.Unlock()
+	m = relistDesk(t, m)
+	if m.runs[k] != nil || slices.Contains(m.order, k) {
+		t.Errorf("unskipped item still in the run list: %+v", m.runs[k])
+	}
+	if out := screen(t, m); strings.Contains(out, "gone") {
+		t.Errorf("a waiting item shows as gone\n%s", out)
+	}
+
+	// A run whose files vanished, and that is not waiting, stays as gone.
+	src.mu.Lock()
+	src.refs = nil
+	src.items = nil
+	src.mu.Unlock()
+	m = relistDesk(t, m)
+	if e := m.runs[deskRunKey{"s", "0005-other"}]; e == nil || !e.gone {
+		t.Errorf("a vanished run is not marked gone: %+v", e)
+	}
+}
+
+// At 180 columns and up the run list shows an 18-character name whole; below
+// that it keeps its 30 columns and cuts the name.
+func TestWideRunListShowsAnEighteenCharacterName(t *testing.T) {
+	name := "02-skipped-undone1"
+	if len(name) != 18 {
+		t.Fatalf("fixture name is %d characters", len(name))
+	}
+	src := oneSource([]runview.RunRef{runRef(name, clockAt(11, 0))}, nil)
+	for _, c := range []struct {
+		w     int
+		whole bool
+	}{{196, true}, {180, true}, {179, false}, {150, false}} {
+		out := screen(t, openDesk(t, optsFor(src), c.w, 30))
+		// The flow header repeats the name whole; only the list row is cut.
+		if got := regexp.MustCompile(`stale +` + name + ` +1h`).MatchString(out); got != c.whole {
+			t.Errorf("%d columns: name shown whole = %v, want %v\n%s", c.w, got, c.whole, out)
+		}
+	}
 }
 
 func TestRunRowsCarryAGlyphAndAWord(t *testing.T) {

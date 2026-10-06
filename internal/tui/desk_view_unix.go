@@ -33,7 +33,10 @@ const (
 
 const (
 	deskListW = 30
-	deskFlowW = 62
+	// deskListWideW is the run list at 180 columns and up, where a name gets
+	// 19 columns instead of 11.
+	deskListWideW = 38
+	deskFlowW     = 62
 
 	// deskTooSmall is shown below the minimum size.
 	deskTooSmall = "terminal too small (needs 40×12) — resize or press q"
@@ -56,7 +59,11 @@ func (m deskModel) layout() deskLayout {
 		l.kind = layoutSmall
 	case w >= 150:
 		l.kind = layoutWide
-		l.listW, l.flowW, l.sideW = deskListW, deskFlowW, w-deskListW-deskFlowW
+		l.listW, l.flowW = deskListW, deskFlowW
+		if w >= 180 {
+			l.listW = deskListWideW
+		}
+		l.sideW = w - l.listW - l.flowW
 	case w >= 100:
 		l.kind = layoutMid
 		l.flowW, l.sideW = deskFlowW, w-deskFlowW

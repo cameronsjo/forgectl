@@ -204,7 +204,8 @@ stale_after = "10m"
 
 | Columns | Layout |
 |---|---|
-| ≥ 150 | run list (30) │ flow (62) │ side view |
+| 180+ | run list (38) │ flow (62) │ side view |
+| 150–179 | run list (30) │ flow (62) │ side view |
 | 100–149 | run strip `‹ 3/10 beta-… ◐ live 12s ›` in the header; flow (62) │ side view |
 | 40–99 | single pane; a tab strip `1 flow 2 events 3 timeline 4 metrics 5 summary 6 queue` shows the active view |
 | < 40 or < 12 rows | "terminal too small (needs 40×12) — resize or press q" |
@@ -741,6 +742,7 @@ func NewDeskSource(d *desk.Desk) Source
 
 ## Deviations
 
+- **Run list is 38 columns at 180 and up.** At 196 columns the 30-column list cut names to 11 characters (`02-sk…-undo`); 38 columns give 19. The 150–179, 100–149, 40–99 and under-40 layouts are unchanged. A waiting item (skipped, then unskipped) now leaves the run list instead of showing `gone`; `gone` is only for a run whose files vanished.
 - **desk-tui moved since planning.** `origin/feat/desk-tui` is now `bfbf432`, a merge of `D` into desk-tui. Its only commit not in `D` is still `912de47`, so the series shape is unchanged: patch 1 is `912de47`.
 - **Baseline tests need `GOFLAGS=-buildvcs=false` on this machine.** Three `internal/exec` guards (`TestEveryProductionFileBuildsOnAGuardConfiguration`, `TestNoFileReachesPastTheTypeSystem`, `TestNoCallerCodeReceivesAnOpaquePayload`) shell out to `go list`, which fails with `error obtaining VCS status: signal: broken pipe` in this worktree. With VCS stamping off the package passes. The cause was not isolated. Every test run in this plan uses that flag.
 - **Local toolchain is Go 1.27.1;** `go.mod` declares `go 1.26.8`.

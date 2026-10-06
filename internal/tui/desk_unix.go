@@ -486,10 +486,26 @@ func (m deskModel) onList(msg deskListMsg) (tea.Model, tea.Cmd) {
 			}
 			e.ref, e.gone = ref, false
 		}
-		for k, e := range m.runs {
-			if e.idx == l.idx && !seen[k] {
-				e.gone = true
+		// An item back in pending/ (unskipped) is not a run, so its row
+		// leaves the list; only a run whose files vanished is gone.
+		waiting := map[string]bool{}
+		for _, it := range l.items {
+			if it.State == "waiting" || it.State == "refused" {
+				waiting[it.Name] = true
 			}
+		}
+		for k, e := range m.runs {
+			if e.idx != l.idx || seen[k] {
+				continue
+			}
+			if l.hasQueue && waiting[k.name] {
+				delete(m.runs, k)
+				if m.hasSel && m.selected == k {
+					m.hasSel = false
+				}
+				continue
+			}
+			e.gone = true
 		}
 	}
 	// A queue that could not be read keeps the items it last listed, so one

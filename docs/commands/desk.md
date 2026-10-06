@@ -100,7 +100,8 @@ The terminal's width picks the layout:
 
 | Columns | Layout |
 |---|---|
-| 150 or more | run list (30 columns) │ flow (62) │ side view |
+| 180 or more | run list (38 columns) │ flow (62) │ side view |
+| 150–179 | run list (30 columns) │ flow (62) │ side view |
 | 100–149 | a run strip in the header (`‹ 3/10 beta-… ◐ live 12s ›`); flow (62) │ side view |
 | 40–99 | one pane, with a tab strip `1 flow 2 events 3 timeline 4 metrics 5 summary 6 queue` |
 | under 40, or under 12 rows | `terminal too small (needs 40×12) — resize or press q` |
