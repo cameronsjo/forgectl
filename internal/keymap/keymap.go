@@ -1,4 +1,5 @@
-// Package keymap holds the key binding forgectl's huh forms share.
+// Package keymap holds the key bindings and Bubble Tea program setup every
+// forgectl TUI and huh form shares.
 //
 // It is a leaf so both internal/cli and internal/tui can use it: internal/cli
 // imports internal/tui, so the helper cannot live in either.
@@ -10,7 +11,11 @@
 package keymap
 
 import (
+	"context"
+	"os"
+
 	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
 )
 
@@ -40,4 +45,37 @@ func Cancel() *huh.KeyMap {
 	km.Select.SetFilter = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "set filter"), key.WithDisabled())
 	km.MultiSelect.SetFilter = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "set filter"), key.WithDisabled())
 	return km
+}
+
+// SuspendFilter turns Ctrl+Z into tea.SuspendMsg, so the program releases the
+// terminal (leaves the alt screen, shows the cursor, resets paste and keyboard
+// modes), stops the process, and redraws in full after `fg` (forgectl#1101).
+// Bubble Tea v2 does not bind Ctrl+Z on its own: the key reaches the model as
+// an ordinary key press and the screen stays up.
+//
+// It is a program-level filter, not a per-model key case, so a screen added
+// later and the huh forms embedded in a model are covered without each one
+// remembering to handle the key.
+func SuspendFilter(_ tea.Model, msg tea.Msg) tea.Msg {
+	if k, ok := msg.(tea.KeyPressMsg); ok && k.String() == "ctrl+z" {
+		return tea.SuspendMsg{}
+	}
+	return msg
+}
+
+// ProgramOptions is the setup every forgectl tea.Program starts from: the
+// context and the suspend filter. A new program takes these rather than
+// calling tea.NewProgram bare.
+func ProgramOptions(ctx context.Context) []tea.ProgramOption {
+	return []tea.ProgramOption{tea.WithContext(ctx), tea.WithFilter(SuspendFilter)}
+}
+
+// Suspendable makes a huh form suspend on Ctrl+Z, for the one-shot pickers
+// and confirms. Use it instead of calling WithProgramOptions directly:
+// WithProgramOptions REPLACES the form's options (huh v2.0.3 form.go:351),
+// and the default it replaces is tea.WithOutput(os.Stderr), which keeps a
+// picker's frames out of a command substitution or pipe that captures stdout.
+// Setting the output again here keeps that contract.
+func Suspendable(f *huh.Form) *huh.Form {
+	return f.WithProgramOptions(tea.WithFilter(SuspendFilter)).WithOutput(os.Stderr)
 }

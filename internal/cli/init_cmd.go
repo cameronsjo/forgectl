@@ -289,6 +289,13 @@ const tasksScaffold = `
 # host can be sent whichever keychain token a command names.
 `
 
+const deskScaffold = `
+# ── desk: how "forgectl desk add" signals the operator (forgectl desk) ──────
+[desk]
+# notify_herdr = true # herdr notification, and the queuing pane's needs-you state
+# notify_macos = true # macOS notification
+`
+
 // initSection is one scaffoldable block: a config.toml section (or, for the
 // empty name, the host-scalar preamble) plus its annotated template.
 type initSection struct {
@@ -330,6 +337,7 @@ var initSections = []initSection{
 	{"herdr", "herdr", herdrScaffold},
 	{"resume", "resume", resumeScaffold},
 	{"tasks", "tasks", tasksScaffold},
+	{"desk", "desk", deskScaffold},
 }
 
 // initModule declares the full-scaffold convenience extension (ADR-0005). It

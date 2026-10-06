@@ -3,6 +3,7 @@ package cli
 import (
 	"charm.land/huh/v2"
 
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -13,13 +14,13 @@ import (
 // every one of its destructive passes always confirms first.
 func confirm(th theme.Theme, prompt string) (bool, error) {
 	ok := false
-	err := huh.NewConfirm().
-		Title(prompt).
-		Affirmative("Yes").
-		Negative("No").
-		Value(&ok).
-		WithTheme(th.Huh()).
-		Run()
+	err := keymap.Suspendable(huh.NewForm(huh.NewGroup(
+		huh.NewConfirm().
+			Title(prompt).
+			Affirmative("Yes").
+			Negative("No").
+			Value(&ok),
+	))).WithTheme(th.Huh()).Run()
 	return ok, err
 }
 

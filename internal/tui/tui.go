@@ -172,8 +172,8 @@ type HubLeaf struct {
 
 // RunOptions configures Run. Hub is the full ordered row set buildHub
 // produced (cli.buildHub); StartInTmux skips the hub and opens directly in
-// the tmux jumper (menuMode) — bare `forgectl tmux`'s behavior — with the hub
-// still one esc away.
+// the tmux jumper (menuMode) — bare `forgectl tmux`'s behavior. The menu is then
+// the quit level: q/esc leaves the program rather than opening the hub.
 //
 // Header is the hub's status line and ArgSources feeds the argument picker,
 // keyed by the space-joined argv before the argument ("projects clone").
@@ -248,8 +248,16 @@ type model struct {
 
 	action Action
 
+	// filterGen numbers the query as typed: it advances whenever a message
+	// changes the filter text, and tagFilterRuns stamps each filter run
+	// with it, so updateList can tell the newest result from an older one.
+	filterGen int
 	// hub is the full ordered row set from RunOptions.Hub — hubMode's list.
 	hub []HubEntry
+	// scoped is true when the menu was the entry point (`forgectl tmux`), so
+	// q/esc on it leaves the program instead of backing out to a hub the
+	// user never opened (forgectl#1100).
+	scoped bool
 	// nameCol is the hub lists' name column (hubNameColumn), recomputed
 	// when the list's items or size change.
 	nameCol int
@@ -288,7 +296,7 @@ func Run(ctx context.Context, client *tmux.Client, opts RunOptions) (Action, err
 	// Bubble Tea v2 dropped WithAltScreen: the alt screen is a property of the
 	// View the model returns each frame, not a program-construction option.
 	// View() sets AltScreen instead.
-	p := tea.NewProgram(m, tea.WithContext(ctx))
+	p := tea.NewProgram(m, keymap.ProgramOptions(ctx)...)
 	final, err := p.Run()
 	if err != nil {
 		return Action{}, err
@@ -312,6 +320,7 @@ func newModel(ctx context.Context, client *tmux.Client, opts RunOptions) model {
 	// monochrome terminal or a screen reader does not show.
 	l.Paginator.Type = paginator.Arabic
 	l.SetFilteringEnabled(true)
+	l.Filter = rankFilter
 
 	m := model{
 		ctx:     ctx,
@@ -333,6 +342,7 @@ func newModel(ctx context.Context, client *tmux.Client, opts RunOptions) model {
 	if opts.StartInTmux {
 		m.title = "menu"
 		m.mode = menuMode
+		m.scoped = true
 		m.l.SetItems(m.menuItems())
 		return m
 	}
@@ -610,9 +620,36 @@ func (m *model) skipHeading(up bool) {
 	}
 }
 
+// updateList runs msg through the list and stamps the filter runs it starts
+// with the query's generation. Every message that can change the query (a key,
+// a paste) goes through here, so a result from an older query can always be
+// told from the current one: updateListMsg drops it (forgectl#1102).
 func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
+	query := m.l.FilterInput.Value()
+	out, cmd := m.updateListMsg(msg)
+	next, ok := out.(model)
+	if !ok {
+		return out, cmd
+	}
+	if next.l.FilterInput.Value() != query {
+		next.filterGen++
+	}
+	return next, tagFilterRuns(cmd, next.filterGen)
+}
+
+func (m model) updateListMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 	km, ok := msg.(tea.KeyPressMsg)
 	if !ok {
+		if run, ok := msg.(filterRun); ok {
+			// Each change to the query starts its own filter run and the runs
+			// finish in any order: the result for "p" can land after the one
+			// for "pr" and replace it. Only the newest query's result is
+			// current; an older one is dropped (forgectl#1102).
+			if run.gen != m.filterGen {
+				return m, nil
+			}
+			msg = run.msg
+		}
 		var cmd tea.Cmd
 		m.l, cmd = m.l.Update(msg)
 		if _, matches := msg.(list.FilterMatchesMsg); matches && m.hubScreen() {
@@ -695,6 +732,9 @@ func (m model) updateListKey(km tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.toHub()
 			return m, nil
 		case menuMode:
+			if m.scoped {
+				return m, tea.Quit
+			}
 			// The hub is the quit level: a bare invoke's tmux jumper and any
 			// module's leaf list both back out to the hub, not straight to
 			// the shell (Architecture: "q/esc in hubMode quits; in menuMode
@@ -1636,7 +1676,11 @@ func (m model) footerView() string {
 			hints = []string{"↑↓ move", "1-9 jump", m.enterHint(), "/ filter", "q/esc back"}
 			prio = []int{4, 2, 3, 0, 1}
 		case menuMode:
-			hints = []string{"1-6 / enter select", "q/esc back"}
+			back := "q/esc back"
+			if m.scoped {
+				back = "q/esc quit"
+			}
+			hints = []string{"1-6 / enter select", back}
 			prio = []int{0, 1}
 		case sessionsMode:
 			hints = []string{"↑↓ move", "1-9 jump", "enter attach", "k kill", "K kill-others", "r rename", "/ filter", "q/esc back"}

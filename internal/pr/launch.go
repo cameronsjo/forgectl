@@ -9,6 +9,7 @@ import (
 	"charm.land/huh/v2"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -732,7 +733,7 @@ func (c *Client) PostReview(ctx context.Context, sess Session, review string, he
 // interactive form); PostReview only calls it when isTTY reports true.
 func confirmReview(review string, th theme.Theme) (bool, error) {
 	ok := false
-	err := huh.NewForm(
+	err := keymap.Suspendable(huh.NewForm(
 		huh.NewGroup(
 			huh.NewNote().
 				Title("Drafted review — approve before posting?").
@@ -743,6 +744,6 @@ func confirmReview(review string, th theme.Theme) (bool, error) {
 				Negative("Cancel").
 				Value(&ok),
 		),
-	).WithTheme(th.Huh()).Run()
+	)).WithTheme(th.Huh()).Run()
 	return ok, err
 }

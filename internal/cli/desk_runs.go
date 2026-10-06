@@ -5,6 +5,7 @@ package cli
 import (
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/runview"
 )
 
@@ -26,7 +27,7 @@ func (o deskLogOpts) keys() runview.LogKeys {
 	return runview.LogKeys{Event: o.eventKey, Step: o.stepKey, Time: o.time}
 }
 
-func newDeskRunsCmd(dir *string) *cobra.Command {
+func newDeskRunsCmd(dir *string, deps module.Deps) *cobra.Command {
 	var asJSON bool
 	var log deskLogOpts
 	cmd := &cobra.Command{
@@ -51,7 +52,7 @@ listed); 2 usage.`,
 			if err := log.check(cmd, "runs"); err != nil {
 				return err
 			}
-			return runDeskRuns(cmd, *dir, log, asJSON)
+			return runDeskRuns(cmd, deps, *dir, log, asJSON)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false,
@@ -60,7 +61,7 @@ listed); 2 usage.`,
 	return cmd
 }
 
-func newDeskShowCmd(dir *string) *cobra.Command {
+func newDeskShowCmd(dir *string, deps module.Deps) *cobra.Command {
 	var asJSON, events bool
 	var at int
 	var log deskLogOpts
@@ -103,7 +104,7 @@ Exit codes: 0 shown; 1 no such run, or it could not be read; 2 usage.`,
 			if cmd.Flags().Changed("at") {
 				replay = at
 			}
-			return runDeskShow(cmd, *dir, name, log, deskShowOpts{asJSON: asJSON, events: events, at: replay})
+			return runDeskShow(cmd, deps, *dir, name, log, deskShowOpts{asJSON: asJSON, events: events, at: replay})
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false,

@@ -264,7 +264,7 @@ func pickSession(sessions []resume.Session, th theme.Theme, note string) (resume
 		Value(&chosen)
 	km := keymap.Cancel()
 	km.Select.Submit = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "resume"))
-	form := huh.NewForm(huh.NewGroup(sel)).WithKeyMap(km).WithTheme(th.Huh())
+	form := keymap.Suspendable(huh.NewForm(huh.NewGroup(sel))).WithKeyMap(km).WithTheme(th.Huh())
 	// Without a height the list is as tall as the history and the title
 	// scrolls off the top of a short terminal; with one huh scrolls the rows.
 	if h > 0 {

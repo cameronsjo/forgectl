@@ -76,18 +76,19 @@ Every brief carries a random 12-character marker, recorded in the ledger row bef
 
 ## What a claude worker loads
 
-A claude worker gets only forgectl's settings (ADR-0010, forgectl#1050). Its argv carries:
+A claude worker loads only what forgectl gives it (ADR-0010, forgectl#1050). Its argv carries:
 
 - **`--setting-sources ""`:** no user, project or local settings load. The branch's `.claude/settings.json` hooks do not run, and the operator's plugins, hooks and skills do not load. Only Claude Code's built-in plugins, skills and agents remain.
 - **`--strict-mcp-config` with an empty `--mcp-config`:** no MCP server loads. That covers the branch's `.mcp.json`, the operator's servers, and plugin servers, a herdr-driving one included.
 - **`--no-chrome`:** turns off Claude in Chrome. It is enabled from `~/.claude.json`, so the flags above leave it on.
+- **`--safe-mode`:** stops the worker loading the operator's project auto-memory (`MEMORY.md` under `~/.claude/projects`), which every session writes and the operator's later sessions read. It does not stop a write there: that path is outside the worktree, so under the allowed modes a write prompts. It keeps the `--settings` deny rules (measured with `claude -p`: with the deny, neither tool is listed; without it, both are). It also sets `CLAUDE_CODE_SAFE_MODE` and `CLAUDE_CODE_DISABLE_CLAUDE_MDS`, so a `claude` the worker runs from its shell starts in safe mode too.
 - **No `--ide`:** the worker does not ask to connect to the operator's editor.
 - **An environment allowlist:** a worker inherits only `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `COLORTERM`, `LANG`, `LC_*`, `TZ`, `TMPDIR`, `CLAUDE_CONFIG_DIR`, the CA and config-home paths (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `CODEX_HOME`, `XDG_CONFIG_HOME`) and `SSH_AUTH_SOCK`, plus herdr's pane ids. `SSH_AUTH_SOCK` is a deliberate grant: the remotes push over SSH, so it stays until a per-worker GitHub token replaces the operator's identity. When the launcher is a Claude Code session, the rest of its environment carries its user settings' `env` block and its own handles: the cross-session messaging socket and token, and the herdr and cmux sockets. The profile's `env` and forgectl's injected values still apply, so a variable a worker needs goes in config. This removes the handles from the worker's environment, not its access to them: until the sandbox slice, a worker's shell can still find the sockets by path and read another process's environment with `ps -E`. Under the worker modes allowed today, every such shell command prompts.
 - **`--settings`:** sets `useAutoModeDuringPlan: false` (forgectl#1060) and denies `SendMessage` and `RemoteTrigger`. Without the deny, a worker could message another Claude session on the machine, the coordinator included, or start a cloud session.
 
 These are measurements on Claude Code 2.1.289, not tests: a unit test pins the argv, the settings JSON and the environment allowlist, and nothing re-checks the behavior on a Claude Code upgrade. With `claude -p` in a repo carrying a hook, an MCP server, a skill, a subagent that declares an MCP server, and a command, none of them loaded. A live herdr worker listed no MCP server, its tool list held neither denied tool, and its process environment held only the allowlist, forgectl's injected values and the pane ids. The built-in plugins' contents are not checked.
 
-The branch's `CLAUDE.md` still loads. It is memory, not settings, and `claudeMdExcludes` is read only from the settings layers this turns off. Checking it against a trusted base is forgectl#1061. A codex worker gets only the environment allowlist so far (forgectl#1092).
+Instruction files: a live worker on the argv above without `--safe-mode` loaded no `CLAUDE.md` or `AGENTS.md` at any level, including one the branch committed; its `instructions` record listed only the operator's project auto-memory. With `--safe-mode` added, the record was empty. `claude -p` without `--safe-mode` did load the cwd's `CLAUDE.md`. These are session-start records: a `CLAUDE.md` in a subdirectory loads lazily, and is covered only by `CLAUDE_CODE_DISABLE_CLAUDE_MDS`, read from the 2.1.289 binary, not measured. A codex worker gets only the environment allowlist so far (forgectl#1092).
 
 ## Listing and closing workers
 
