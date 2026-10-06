@@ -15,6 +15,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/desk"
 	"github.com/cameronsjo/forgectl/internal/runview"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // runHarness is a desk harness with the run view reading the same desk.
@@ -161,7 +162,7 @@ func TestRunViewPlays(t *testing.T) {
 		t.Fatalf("space from the live tip should play from the start: playing %v at %d", h.m.rv.playing, h.m.rv.at)
 	}
 	for i := 1; i <= 9; i++ {
-		out, _ := h.m.Update(deskRunPlayMsg{gen: h.m.rv.gen})
+		out, _ := h.m.Update(deskRunPlayMsg{gen: h.m.rv.gen, seq: h.m.rv.playSeq})
 		h.m = out.(deskModel)
 		if h.m.rv.at != i {
 			t.Fatalf("play step %d: at %d", i, h.m.rv.at)
@@ -172,7 +173,7 @@ func TestRunViewPlays(t *testing.T) {
 	}
 	// A tick from an earlier view is dropped.
 	h.m.rv.at = 3
-	out, _ = h.m.Update(deskRunPlayMsg{gen: h.m.rv.gen + 1})
+	out, _ = h.m.Update(deskRunPlayMsg{gen: h.m.rv.gen + 1, seq: h.m.rv.playSeq})
 	if out.(deskModel).rv.at != 3 {
 		t.Error("a play tick for another view moved this one")
 	}
@@ -272,5 +273,81 @@ func TestStepDepths(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("depths = %v, want %v", got, want)
 		}
+	}
+}
+
+// A load still on its way when the view closes must not land in the view
+// opened next: each view gets its own generation.
+func TestRunViewDropsALoadFromAClosedView(t *testing.T) {
+	h := runHarness(t)
+	name, _ := stageRun(t, h, "pipe.manifest", pipeManifest, pipeLines, 1)
+	h.selectItem(name)
+	out, stale := h.m.Update(key("r")) // the load is not run yet
+	h.m = out.(deskModel)
+	oldGen := h.m.rv.gen
+	h.send("q")
+	h.send("r")
+	if h.m.rv.gen == oldGen {
+		t.Fatalf("a reopened view reused generation %d", oldGen)
+	}
+	before := h.m.rv.folder.Len()
+	h.drive(stale) // the closed view's load lands now
+	if got := h.m.rv.folder.Len(); got != before {
+		t.Errorf("a closed view's load was applied: %d events, want %d", got, before)
+	}
+}
+
+// Pausing and playing again leaves one tick chain: the paused play's tick is
+// dropped.
+func TestRunViewPauseAndResumeRunsOneChain(t *testing.T) {
+	h := runHarness(t)
+	name, _ := stageRun(t, h, "pipe.manifest", pipeManifest, pipeLines, 1)
+	h.selectItem(name)
+	h.send("r")
+	space := tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
+	out, _ := h.m.Update(space) // play: tick A pending
+	h.m = out.(deskModel)
+	first := h.m.rv.playSeq
+	out, _ = h.m.Update(space) // pause
+	h.m = out.(deskModel)
+	out, _ = h.m.Update(space) // play again: tick B pending
+	h.m = out.(deskModel)
+	at := h.m.rv.at
+	out, _ = h.m.Update(deskRunPlayMsg{gen: h.m.rv.gen, seq: first}) // tick A arrives
+	h.m = out.(deskModel)
+	if h.m.rv.at != at {
+		t.Errorf("the paused play's tick still advanced the replay: at %d, want %d", h.m.rv.at, at)
+	}
+	out, _ = h.m.Update(deskRunPlayMsg{gen: h.m.rv.gen, seq: h.m.rv.playSeq}) // tick B
+	h.m = out.(deskModel)
+	if h.m.rv.at != at+1 {
+		t.Errorf("the current play's tick did not advance: at %d, want %d", h.m.rv.at, at+1)
+	}
+}
+
+// With room for one flow row, the list shows the first step rather than only
+// a count of the rest.
+func TestRunFlowWithOneRowShowsAStep(t *testing.T) {
+	st := theme.Default().Styles()
+	s := runview.Fold(runview.DeskSpec(), []runview.StepDef{{ID: "fetch"}, {ID: "build"}, {ID: "stage"}}, nil)
+	out := runFlow(st, runview.IconGlyphs, s, nil, 12, 1)
+	if len(out) != 1 || !strings.Contains(ansi.Strip(out[0]), "fetch") {
+		t.Errorf("one row of flow = %q, want the first step", out)
+	}
+}
+
+// A reset while replaying keeps the replay point inside the events.
+func TestRunViewResetClampsTheReplayPoint(t *testing.T) {
+	h := runHarness(t)
+	name, _ := stageRun(t, h, "pipe.manifest", pipeManifest, pipeLines, 1)
+	h.selectItem(name)
+	h.send("r")
+	h.send("left") // replay at 8 of 9
+	v := h.m.rv
+	out, _ := h.m.Update(deskRunLoadMsg{gen: v.gen, ref: v.ref(), cur: v.cur, delta: runview.Delta{Reset: true, Defs: v.defs,
+		Events: []runview.Event{{Seq: 1, Name: "RUN-START"}, {Seq: 2, Name: "STEP-START", Step: "fetch"}}}})
+	h.m = out.(deskModel)
+	if h.m.rv.at != 2 || h.m.rv.folder.Len() != 2 {
+		t.Errorf("after a reset to 2 events: at %d of %d, want 2 of 2", h.m.rv.at, h.m.rv.folder.Len())
 	}
 }

@@ -41,7 +41,10 @@ type deskRunView struct {
 	folder *runview.Folder
 	defs   []runview.StepDef
 	delta  runview.Delta // the latest load's defs, timing, live state and counts
-	gen    int           // bumped on every switch, so a stale load is dropped
+	gen    int           // the model's runGen when this view opened, so a stale load is dropped
+	// playSeq changes whenever play starts or stops, so a tick from an
+	// earlier play is dropped and a pause and resume never run two chains.
+	playSeq int
 
 	at      int
 	follow  bool
@@ -63,7 +66,7 @@ type deskRunLoadMsg struct {
 }
 
 // deskRunPlayMsg advances a playing replay by one event.
-type deskRunPlayMsg struct{ gen int }
+type deskRunPlayMsg struct{ gen, seq int }
 
 func (v *deskRunView) ref() runview.RunRef {
 	if v.idx < 0 || v.idx >= len(v.refs) {
@@ -111,7 +114,8 @@ func (m deskModel) openRunView() (tea.Model, tea.Cmd) {
 	if r, ok := m.selected(); ok && r.kind != rowWaiting && r.kind != rowRefused && r.kind != rowChanged {
 		name = r.item.Name
 	}
-	m.rv = &deskRunView{follow: true, loading: true}
+	m.runGen++
+	m.rv = &deskRunView{gen: m.runGen, follow: true, loading: true}
 	return m, loadRunCmd(m.runs, m.rv.gen, name, runview.RunRef{}, nil)
 }
 
@@ -182,6 +186,8 @@ func (m deskModel) applyRunLoad(t deskRunLoadMsg) (tea.Model, tea.Cmd) {
 	if v.follow {
 		v.at = v.folder.Len()
 	}
+	// A reset or a shorter refold can leave a replay point past the events.
+	v.at = min(v.at, v.folder.Len())
 	return m, nil
 }
 
@@ -219,7 +225,8 @@ func (m deskModel) switchRun(step int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	idx := (v.idx + step + len(v.refs)) % len(v.refs)
-	m.rv = &deskRunView{refs: v.refs, idx: idx, gen: v.gen + 1, follow: true, loading: true}
+	m.runGen++
+	m.rv = &deskRunView{refs: v.refs, idx: idx, gen: m.runGen, follow: true, loading: true}
 	return m, loadRunCmd(m.runs, m.rv.gen, "", m.rv.ref(), nil)
 }
 
@@ -232,7 +239,7 @@ func (m deskModel) runViewKey(key string) (tea.Model, tea.Cmd) {
 	seek := func(at int) {
 		v.at = min(max(at, 0), n)
 		v.follow = v.at == n
-		v.playing = false
+		v.stopPlay()
 	}
 	switch key {
 	case "q", "esc", "r":
@@ -251,7 +258,7 @@ func (m deskModel) runViewKey(key string) (tea.Model, tea.Cmd) {
 		seek(n)
 	case "space":
 		if v.playing {
-			v.playing = false
+			v.stopPlay()
 			return m, nil
 		}
 		if n == 0 {
@@ -261,7 +268,8 @@ func (m deskModel) runViewKey(key string) (tea.Model, tea.Cmd) {
 			v.at = 0
 		}
 		v.playing, v.follow = true, false
-		return m, playRunCmd(v.gen)
+		v.playSeq++
+		return m, playRunCmd(v.gen, v.playSeq)
 	case "n":
 		return m.switchRun(1)
 	case "p":
@@ -270,23 +278,32 @@ func (m deskModel) runViewKey(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func playRunCmd(gen int) tea.Cmd {
-	return tea.Tick(deskRunPlayEvery, func(time.Time) tea.Msg { return deskRunPlayMsg{gen: gen} })
+func playRunCmd(gen, seq int) tea.Cmd {
+	return tea.Tick(deskRunPlayEvery, func(time.Time) tea.Msg { return deskRunPlayMsg{gen: gen, seq: seq} })
+}
+
+// stopPlay stops a playing replay; its pending tick no longer matches.
+func (v *deskRunView) stopPlay() {
+	if v.playing {
+		v.playing = false
+		v.playSeq++
+	}
 }
 
 // playStep advances a playing replay one event; at the newest event it stops
 // and follows the run again.
 func (m deskModel) playStep(t deskRunPlayMsg) (tea.Model, tea.Cmd) {
 	v := m.rv
-	if v == nil || t.gen != v.gen || !v.playing || v.folder == nil {
+	if v == nil || t.gen != v.gen || t.seq != v.playSeq || !v.playing || v.folder == nil {
 		return m, nil
 	}
 	v.at++
 	if v.at >= v.folder.Len() {
-		v.at, v.playing, v.follow = v.folder.Len(), false, true
+		v.at, v.follow = v.folder.Len(), true
+		v.stopPlay()
 		return m, nil
 	}
-	return m, playRunCmd(v.gen)
+	return m, playRunCmd(v.gen, v.playSeq)
 }
 
 // runToneStyle maps a mark's tone to the theme's style for it.
@@ -309,7 +326,10 @@ func runToneStyle(st theme.Styles, t runview.Tone) lipgloss.Style {
 // render draws the run view at width x height: a header, the flow, the
 // events around the replay point, and the key hints.
 func (v *deskRunView) render(st theme.Styles, width, height int) string {
-	width, height = max(width, 20), max(height, 6)
+	if width <= 0 {
+		width = 80
+	}
+	height = max(height, 3)
 	g := runview.IconGlyphs
 	ref := v.ref()
 	s := v.state()
@@ -466,7 +486,7 @@ func runFlow(st theme.Styles, g runview.Glyphs, s runview.RunState, timing []run
 	}
 	var out []string
 	for i, st0 := range s.Steps {
-		if len(out) == rows-1 && len(s.Steps)-i > 1 {
+		if rows > 1 && len(out) == rows-1 && len(s.Steps)-i > 1 {
 			out = append(out, st.Muted.Render(fmt.Sprintf(" … %d more steps", len(s.Steps)-i)))
 			break
 		}
@@ -476,6 +496,9 @@ func runFlow(st theme.Styles, g runview.Glyphs, s runview.RunState, timing []run
 			line += st.Dim.Render(" ← " + strings.Join(p, ", "))
 		}
 		out = append(out, cut(line, width))
+		if len(out) == rows {
+			break // one row: the first step, with no room to say how many more
+		}
 	}
 	return out
 }

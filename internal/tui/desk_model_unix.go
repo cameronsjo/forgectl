@@ -158,6 +158,9 @@ type deskModel struct {
 	// rv is the open run view (r), reading runs from runs.
 	rv   *deskRunView
 	runs runview.Source
+	// runGen numbers each run view and run switch, so a load or tick for a
+	// view that was closed or switched never lands in the next one.
+	runGen int
 
 	// seen is the waiting set at the last scan, for arrival bells.
 	seen     map[string]bool
