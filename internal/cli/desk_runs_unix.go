@@ -273,14 +273,16 @@ func runDeskShow(cmd *cobra.Command, dirFlag, name string, log deskLogOpts, o de
 		}
 		ref = refs[0]
 	}
-	r, err := loadRun(src, ref)
-	if errors.Is(err, desk.ErrNotFound) && name != "" {
-		// A name taken from a JSON `path` carries the item's extension.
-		if stem := trimDeskExt(name); stem != "" {
-			ref.Name = stem
-			r, err = loadRun(src, ref)
-		}
+	if name != "" {
+		// A name taken from a JSON path carries the file's extension.
+		ref.Name = resolveName(name, func(n string) bool {
+			probe := ref
+			probe.Name = n
+			_, err := loadRun(src, probe)
+			return !errors.Is(err, desk.ErrNotFound)
+		})
 	}
+	r, err := loadRun(src, ref)
 	if errors.Is(err, desk.ErrNotFound) {
 		return deskNotFound("desk show", "run", name, nil)
 	}

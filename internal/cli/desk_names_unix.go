@@ -12,10 +12,12 @@ import (
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
-// deskItemExts are the file extensions `desk add` strips to make an item's
-// name: `x.sh` becomes `01-x`. The JSON `path` of a queued item still ends in
-// the extension, so a caller that takes its basename holds `01-x.sh`.
-var deskItemExts = []string{".sh", ".manifest"}
+// deskItemExts are the extensions that follow an item's name on disk or in
+// `desk status --json`: `desk add` strips .sh and .manifest to make the name
+// (`x.sh` becomes `01-x`), and the item's log and events files end .log and
+// .events. A caller that takes the basename of any of those paths holds
+// `01-x.sh`, `01-x.log` or `01-x.events`.
+var deskItemExts = []string{".sh", ".manifest", ".log", ".events"}
 
 // trimDeskExt returns name without a trailing item extension, or "" when it
 // has none.
@@ -34,30 +36,36 @@ func snapshotHasItem(snap *desk.Snapshot, name string) bool {
 	return ok
 }
 
-// resolveDeskName maps the name a caller typed to the item's own name
-// (forgectl#1087). A name that matches an item stands as typed. One that does
-// not, but matches once its `.sh` or `.manifest` is dropped, is the file name
-// of an item the caller took from a JSON `path`, so it resolves to the item.
-// A scan failure leaves the name as typed; the verb's own scan reports it.
-func resolveDeskName(d *desk.Desk, name string) string {
+// resolveName maps the name a caller typed to the item's own name
+// (forgectl#1087), and is the one place desk verbs do it. A name that matches
+// an item (has reports it) stands as typed. One that does not, but matches once
+// its extension is dropped, is a file name the caller took from a JSON path, so
+// it resolves to the item. has is only called for a name that has an extension.
+func resolveName(name string, has func(string) bool) string {
 	stem := trimDeskExt(name)
-	if stem == "" {
-		return name
-	}
-	snap, err := d.Scan()
-	if err != nil || snapshotHasItem(snap, name) || !snapshotHasItem(snap, stem) {
+	if stem == "" || has(name) || !has(stem) {
 		return name
 	}
 	return stem
 }
 
+// resolveDeskName is resolveName over a scan of d. A scan failure leaves the
+// name as typed; the verb's own scan reports it.
+func resolveDeskName(d *desk.Desk, name string) string {
+	return resolveName(name, func(n string) bool {
+		snap, err := d.Scan()
+		return err == nil && snapshotHasItem(snap, n)
+	})
+}
+
 // deskNotFound builds a "no <what> named <name>" error that says why the name
-// may be wrong: an item name carries no extension, and the waiting items are
-// listed so the caller can pick one. waiting may be nil.
+// may be wrong: an item name carries no extension (a name that would resolve
+// to an item already has, so there is no stem to suggest), and the waiting
+// items are listed so the caller can pick one. waiting may be nil.
 func deskNotFound(verb, what, name string, waiting []string) error {
 	msg := fmt.Sprintf("%s: no %s named %s", verb, what, termsafe.SafeLineMax(name, deskQuoteMax))
-	if stem := trimDeskExt(name); stem != "" {
-		msg += fmt.Sprintf(" (item names carry no extension; try %s)", termsafe.SafeLineMax(stem, deskQuoteMax))
+	if trimDeskExt(name) != "" {
+		msg += " (item names carry no extension)"
 	}
 	if len(waiting) > 0 {
 		msg += "; waiting: " + strings.Join(waiting, ", ")

@@ -31,10 +31,14 @@ func TestDeskName_FileNameResolvesToTheItem(t *testing.T) {
 		t.Errorf("status output = %q", out)
 	}
 
-	out, _, err = deskRun(t, deskDeps(), "show", doneName+".sh")
-	wantExit(t, err, 0)
-	if !strings.Contains(out, doneName) {
-		t.Errorf("show output = %q, want the run", out)
+	// The log and events paths `desk status --json` prints end in .log and
+	// .events; they name the same item.
+	for _, ext := range []string{".sh", ".log", ".events"} {
+		out, _, err = deskRun(t, deskDeps(), "show", doneName+ext)
+		wantExit(t, err, 0)
+		if !strings.Contains(out, doneName) {
+			t.Errorf("show %s output = %q, want the run", ext, out)
+		}
 	}
 }
 
@@ -53,8 +57,8 @@ func TestDeskName_NotFoundNamesTheFix(t *testing.T) {
 
 	_, _, err = deskRun(t, deskDeps(), "skip", "66-none.sh", "--reason", "x")
 	wantExit(t, err, 1)
-	if !strings.Contains(err.Error(), "item names carry no extension; try 66-none") {
-		t.Errorf("error = %q, want the extension hint", err)
+	if !strings.Contains(err.Error(), "item names carry no extension") || strings.Contains(err.Error(), "try ") {
+		t.Errorf("error = %q, want the extension note and no `try` for a stem that does not exist", err)
 	}
 
 	_, _, err = deskRun(t, deskDeps(), "status", "66-none.sh")
@@ -65,14 +69,14 @@ func TestDeskName_NotFoundNamesTheFix(t *testing.T) {
 
 	_, _, err = deskRun(t, deskDeps(), "show", "66-none.sh")
 	wantExit(t, err, 1)
-	if !strings.Contains(err.Error(), "try 66-none") {
-		t.Errorf("show error = %q, want the extension hint", err)
+	if !strings.Contains(err.Error(), "item names carry no extension") {
+		t.Errorf("show error = %q, want the extension note", err)
 	}
 }
 
 func TestTrimDeskExt(t *testing.T) {
 	for in, want := range map[string]string{
-		"01-x.sh": "01-x", "01-x.manifest": "01-x", "01-x": "", "01-x.sh.sh": "01-x.sh", ".sh": "",
+		"01-x.sh": "01-x", "01-x.manifest": "01-x", "01-x": "", "01-x.sh.sh": "01-x.sh", ".sh": "", "01-x.log": "01-x", "01-x.events": "01-x",
 	} {
 		if got := trimDeskExt(in); got != want {
 			t.Errorf("trimDeskExt(%q) = %q, want %q", in, got, want)

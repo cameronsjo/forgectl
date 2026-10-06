@@ -37,6 +37,7 @@ func TestUsageArgs_NamesTheArgumentAndUsage(t *testing.T) {
 		{"surface brief second argument", []string{"surface", "brief", "w"}, []string{"missing <text|@file>"}},
 		{"tasks done", []string{"tasks", "done"}, []string{"missing <id>"}},
 		{"too many", []string{"desk", "add", "a", "b"}, []string{`unexpected argument "b" after <file>`, "usage: forgectl desk add <file>"}},
+		{"optional positional, too many", []string{"desk", "status", "a", "b"}, []string{"takes at most 1 argument, got 2", "usage: forgectl desk status [name]"}},
 		{"no-argument leaf", []string{"launch", "which", "extra"}, []string{`takes no arguments, got "extra"`, "usage: forgectl launch which"}},
 	}
 	for _, tt := range tests {
@@ -80,6 +81,11 @@ func TestUsageArgs_EveryLeafNamesItsUsage(t *testing.T) {
 			if strings.Contains(err.Error(), "arg(s)") {
 				t.Errorf("%s with %d args: %q carries cobra's count text", c.CommandPath(), len(args), err)
 			}
+			if strings.Contains(err.Error(), "takes no arguments") {
+				if req, opt := usageShape(c.Use); len(req)+len(opt) > 0 {
+					t.Errorf("%s with %d args: %q says no arguments, but its usage line takes %v %v", c.CommandPath(), len(args), err, req, opt)
+				}
+			}
 			if strings.Contains(err.Error(), "wrong number of arguments") {
 				t.Errorf("%s with %d args: %q names no argument; give its Use a <placeholder>", c.CommandPath(), len(args), err)
 			}
@@ -89,6 +95,27 @@ func TestUsageArgs_EveryLeafNamesItsUsage(t *testing.T) {
 		}
 	}
 	walk(root)
+}
+
+func TestUsageShape(t *testing.T) {
+	tests := []struct {
+		use      string
+		req, opt int
+		variadic bool
+	}{
+		{"status [name]", 0, 1, false},
+		{"add <file>", 1, 0, false},
+		{"clone <repo> [dir]", 1, 1, false},
+		{"pick [query...]", 0, 1, true},
+		{"releases [--registry <path>] [--json]", 0, 0, false},
+		{"ls", 0, 0, false},
+	}
+	for _, tt := range tests {
+		req, opt := usageShape(tt.use)
+		if len(req) != tt.req || len(opt) != tt.opt || usageVariadic(tt.use) != tt.variadic {
+			t.Errorf("usageShape(%q) = %v %v variadic=%v, want %d %d %v", tt.use, req, opt, usageVariadic(tt.use), tt.req, tt.opt, tt.variadic)
+		}
+	}
 }
 
 func TestUsagePlaceholders(t *testing.T) {
@@ -106,7 +133,7 @@ func TestUsagePlaceholders(t *testing.T) {
 		{"", nil},
 	}
 	for _, tt := range tests {
-		got := usagePlaceholders(tt.use)
+		got, _ := usageShape(tt.use)
 		if strings.Join(got, ",") != strings.Join(tt.want, ",") {
 			t.Errorf("usagePlaceholders(%q) = %v, want %v", tt.use, got, tt.want)
 		}

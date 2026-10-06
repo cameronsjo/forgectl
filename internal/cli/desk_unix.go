@@ -422,9 +422,7 @@ func runDeskStatus(cmd *cobra.Command, dirFlag, name string, asJSON bool) error 
 	now := deskNow().UTC()
 	out := cmd.OutOrStdout()
 	if name != "" {
-		if stem := trimDeskExt(name); stem != "" && !snapshotHasItem(snap, name) && snapshotHasItem(snap, stem) {
-			name = stem
-		}
+		name = resolveName(name, func(n string) bool { return snapshotHasItem(snap, n) })
 		return printDeskDetail(out, d, snap, name, now, asJSON)
 	}
 	if asJSON {
