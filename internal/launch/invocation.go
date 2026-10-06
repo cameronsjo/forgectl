@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strings"
 
@@ -163,7 +164,8 @@ func allowedUpTo(r postureRank, limit string) string {
 	return strings.Join(out, ", ")
 }
 
-// applyWorkerFloor is the worker posture until the worker profile (T5) lands.
+// applyWorkerFloor caps a worker's posture after the worker profile
+// (applyWorkerProfile) has set it.
 //
 // Workers run unattended in panes the operator is not watching. pi is refused
 // whichever way it was chosen, because forgectl can pass it no permission or
@@ -192,8 +194,7 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 	}
 	p.AllowDanger = false
 	// A worker edits its own worktree. Extra directories from the repo profile
-	// would let acceptEdits or workspace-write reach past it, so they are dropped
-	// until the worker profile (T5) decides otherwise.
+	// would let acceptEdits or workspace-write reach past it, so they are dropped.
 	p.AddDir = nil
 	p.Detached = true
 	return p, nil
@@ -214,8 +215,8 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 // act for it, so both are denied.
 //
 // This is the only --settings a worker gets. Claude Code's handling of a
-// repeated --settings flag is unverified, so a second source (T5's worker
-// settings file) must merge its keys into this one value, not add a flag.
+// repeated --settings flag is unverified, so a second source (the sandbox
+// slice's settings) must merge its keys into this one value, not add a flag.
 const workerClaudeSettings = `{"useAutoModeDuringPlan":false,"permissions":{"deny":["SendMessage","RemoteTrigger"]}}`
 
 // workerClaudeIsolation returns the argv that keeps everything but forgectl's own
@@ -364,6 +365,9 @@ type BuiltInvocation struct {
 	// floor, the claude isolation argv and the environment allowlist applied.
 	// Only BuildInvocation sets it.
 	Worker bool
+	// Notes are posture notices for the operator, one per line: today, an
+	// explicit [launch.defaults] value a worker no longer reads.
+	Notes []string
 }
 
 // ErrNoBinaryResolver reports a request with no resolver. Refusing beats
@@ -386,7 +390,8 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		return BuiltInvocation{}, ErrNoBinaryResolver
 	}
 
-	profile, err := Resolve(req.Config, req.CWD)
+	profile, proj, err := resolveMatched(req.Config, req.CWD, os.UserHomeDir)
+	var notes []string
 	if err != nil {
 		return BuiltInvocation{}, err
 	}
@@ -405,6 +410,9 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		// The coordinator starts workers with no args, so refuse any.
 		if len(req.Args) > 0 {
 			return BuiltInvocation{}, fmt.Errorf("%w: workers take no harness args, got %q", ErrWorkerPosture, req.Args)
+		}
+		if profile, notes, err = applyWorkerProfile(profile, req.Config, proj); err != nil {
+			return BuiltInvocation{}, fmt.Errorf("%w: %w", ErrWorkerPosture, err)
 		}
 		if profile, err = applyWorkerFloor(profile); err != nil {
 			return BuiltInvocation{}, err
@@ -468,6 +476,7 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		Posture:   posture,
 		SessionID: req.SessionID,
 		Worker:    req.Worker,
+		Notes:     notes,
 	}, nil
 }
 

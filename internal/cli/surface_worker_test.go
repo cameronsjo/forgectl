@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"io"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -230,7 +231,7 @@ func TestBuildWorkerInvocationIsolates(t *testing.T) {
 		return launch.ResolvedBinary{Path: "/stub/claude", Source: launch.BinaryPATH}, nil
 	}
 	const id = "0f8e2c1a-3b4d-4e5f-8a6b-7c8d9e0f1a2b"
-	built, err := buildWorkerInvocation(req, "Fix it.", func() (string, error) { return id, nil })
+	built, err := buildWorkerInvocation(req, "Fix it.", func() (string, error) { return id, nil }, io.Discard)
 	if err != nil {
 		t.Fatalf("buildWorkerInvocation: %v", err)
 	}
