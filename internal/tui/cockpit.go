@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"golang.org/x/term"
 
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/meta"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
@@ -185,7 +186,7 @@ func RunCockpit(ctx context.Context, opts CockpitOptions) (Action, error) {
 	// beside the command the cockpit hands back.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	p := tea.NewProgram(newCockpitModel(ctx, opts), tea.WithContext(ctx))
+	p := tea.NewProgram(newCockpitModel(ctx, opts), keymap.ProgramOptions(ctx)...)
 	final, err := p.Run()
 	if err != nil {
 		return Action{}, err

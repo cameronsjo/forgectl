@@ -264,7 +264,7 @@ func pickSession(sessions []resume.Session, th theme.Theme) (resume.Session, err
 				Options(opts...).
 				Value(&chosen),
 		),
-	).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh()).Run()
+	).WithKeyMap(keymap.Cancel()).WithProgramOptions(keymap.Form()).WithTheme(th.Huh()).Run()
 	if err != nil {
 		return resume.Session{}, err
 	}

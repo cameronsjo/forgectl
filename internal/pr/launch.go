@@ -9,6 +9,7 @@ import (
 	"charm.land/huh/v2"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -743,6 +744,6 @@ func confirmReview(review string, th theme.Theme) (bool, error) {
 				Negative("Cancel").
 				Value(&ok),
 		),
-	).WithTheme(th.Huh()).Run()
+	).WithProgramOptions(keymap.Form()).WithTheme(th.Huh()).Run()
 	return ok, err
 }

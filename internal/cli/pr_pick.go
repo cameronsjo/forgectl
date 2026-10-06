@@ -116,7 +116,7 @@ func pickPRs(prs []pr.PR, store *pr.ReviewedStore, th theme.Theme) ([]pr.PR, err
 				Options(opts...).
 				Value(&chosen),
 		),
-	).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh()).Run()
+	).WithKeyMap(keymap.Cancel()).WithProgramOptions(keymap.Form()).WithTheme(th.Huh()).Run()
 	if err != nil {
 		return nil, err
 	}
