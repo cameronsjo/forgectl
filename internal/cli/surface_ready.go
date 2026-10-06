@@ -11,7 +11,6 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/herdr/ready"
 	"github.com/cameronsjo/forgectl/internal/module"
-	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/resume"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
@@ -146,28 +145,11 @@ func openWorker(cmd *cobra.Command, deps module.Deps, repo, name string) (*opene
 	if err := worker.ValidName(name); err != nil {
 		return nil, WithExitCode(fmt.Errorf("name: %w", err), 2)
 	}
-	adapter, err := newHerdrAdapter(cmd.ErrOrStderr())
+	wl, err := openWorkerLedger(cmd, deps, repo)
 	if err != nil {
-		return nil, WithExitCode(err, 2)
+		return nil, err
 	}
-	herdr, ok := adapter.(*herdradapter.Adapter)
-	if !ok {
-		return nil, errors.New("forgectl: the herdr adapter has an unexpected type")
-	}
-
-	ctx := cmd.Context()
-	target, err := projects.New(deps.Runner).ResolveTarget(repo)
-	if err != nil {
-		return nil, WithExitCode(err, 2)
-	}
-	top, err := worker.RepoTop(ctx, deps.Runner, target)
-	if err != nil {
-		return nil, WithExitCode(err, 2)
-	}
-	led, err := worker.Open(top, herdr.Session())
-	if err != nil {
-		return nil, WithExitCode(err, 2)
-	}
+	herdr, led := wl.herdr, wl.led
 	row, ref, err := launchedWorker(led, name)
 	if err != nil {
 		return nil, WithExitCode(err, 2)
@@ -194,20 +176,18 @@ func launchedWorker(led *worker.Ledger, name string) (worker.Row, backend.Ref, e
 	if err != nil {
 		return worker.Row{}, backend.Ref{}, err
 	}
-	for _, r := range rows {
-		if r.Name != name {
-			continue
-		}
-		if r.Stage != worker.StageLaunched {
-			return worker.Row{}, backend.Ref{}, fmt.Errorf("worker %q is at stage %q, want %q", name, r.Stage, worker.StageLaunched)
-		}
-		ref, err := backend.DecodeRef(r.Ref)
-		if err != nil {
-			return worker.Row{}, backend.Ref{}, fmt.Errorf("worker %q: its ledger reference does not decode: %w", name, err)
-		}
-		return r, ref, nil
+	r, ok := findRow(rows, name)
+	if !ok {
+		return worker.Row{}, backend.Ref{}, fmt.Errorf("no worker named %q in this repo's ledger", name)
 	}
-	return worker.Row{}, backend.Ref{}, fmt.Errorf("no worker named %q in this repo's ledger", name)
+	if r.Stage != worker.StageLaunched {
+		return worker.Row{}, backend.Ref{}, fmt.Errorf("worker %q is at stage %q, want %q", name, r.Stage, worker.StageLaunched)
+	}
+	ref, err := backend.DecodeRef(r.Ref)
+	if err != nil {
+		return worker.Row{}, backend.Ref{}, fmt.Errorf("worker %q: its ledger reference does not decode: %w", name, err)
+	}
+	return r, ref, nil
 }
 
 // readyLoop is the wait, with its I/O and clock injected so the decision can

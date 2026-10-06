@@ -3,6 +3,7 @@ package launch
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -316,4 +317,40 @@ func TestBuildInvocation_WorkerPrompt(t *testing.T) {
 			t.Fatal("an ordinary launch accepted a prompt")
 		}
 	})
+}
+
+// TestBuildInvocation_WorkerSessionID pins --session-id: a claude worker gets
+// it before the prompt's `--`; anything else, or a malformed id, is refused.
+func TestBuildInvocation_WorkerSessionID(t *testing.T) {
+	target := projectDir(t)
+	bin := fixedResolver(ResolvedBinary{Path: "/stub/harness", Source: BinaryPATH})
+	claude := config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: "acceptEdits"}}
+	codex := config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "codex", Sandbox: "workspace-write", ApprovalPolicy: "on-request"}}
+	const id = "0f8e2c1a-3b4d-4e5f-8a6b-7c8d9e0f1a2b"
+
+	built, err := BuildInvocation(InvocationRequest{
+		StdoutTerminal: true, Config: claude, CWD: target, Worker: true, Resolve: bin, Prompt: "Fix it.", SessionID: id,
+	})
+	if err != nil {
+		t.Fatalf("BuildInvocation: %v", err)
+	}
+	args := built.Invocation.Args
+	i := slices.Index(args, "--session-id")
+	if i < 0 || i+1 >= len(args) || args[i+1] != id || i > slices.Index(args, "--") {
+		t.Fatalf("argv %q, want --session-id %s before the prompt's --", args, id)
+	}
+
+	refused := map[string]InvocationRequest{
+		"not a worker":   {StdoutTerminal: true, Config: claude, CWD: target, Resolve: bin, SessionID: id},
+		"a codex worker": {StdoutTerminal: true, Config: codex, CWD: target, Worker: true, Resolve: bin, SessionID: id},
+		"uppercase":      {StdoutTerminal: true, Config: claude, CWD: target, Worker: true, Resolve: bin, SessionID: strings.ToUpper(id)},
+		"a flag":         {StdoutTerminal: true, Config: claude, CWD: target, Worker: true, Resolve: bin, SessionID: "--permission-mode"},
+	}
+	for name, req := range refused {
+		t.Run("refuses "+name, func(t *testing.T) {
+			if _, err := BuildInvocation(req); err == nil {
+				t.Fatal("accepted")
+			}
+		})
+	}
 }

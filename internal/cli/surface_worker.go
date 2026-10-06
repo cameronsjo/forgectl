@@ -88,7 +88,13 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 	if err != nil {
 		return fail(err)
 	}
-	if err := led.Update(name, func(r *worker.Row) { r.Harness = built.Invocation.Harness }); err != nil {
+	if err := led.Update(name, func(r *worker.Row) {
+		r.Harness = built.Invocation.Harness
+		if built.SessionID != "" {
+			r.SessionID = built.SessionID
+			r.Transcript = worker.TranscriptPath(built.Invocation.Env, built.Invocation.CWD, built.SessionID)
+		}
+	}); err != nil {
 		return fail(err)
 	}
 
@@ -174,6 +180,15 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 			req := surfaceInvocationRequest(deps.Cfg.Launch, cwd, injected, unset, opts.Harness)
 			req.Worker = true
 			req.Prompt = prompt
+			built, err := launch.BuildInvocation(req)
+			if err != nil || built.Invocation.Harness != "claude" {
+				return built, err
+			}
+			// The harness is known only once the profile resolves, so a
+			// claude worker is built a second time with its session id.
+			if req.SessionID, err = worker.NewSessionID(); err != nil {
+				return launch.BuiltInvocation{}, err
+			}
 			return launch.BuildInvocation(req)
 		},
 		launch: func(ctx context.Context, inv launch.Invocation) (backend.Ref, error) {

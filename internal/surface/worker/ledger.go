@@ -27,6 +27,9 @@ const (
 	StageLaunched Stage = "launched"
 	// StageFailed: a step failed. Worktree and Recovery say what may remain.
 	StageFailed Stage = "failed"
+	// StageClosed: `surface close` closed the workspace and kept the
+	// worktree, because a removal check failed. A later close retries it.
+	StageClosed Stage = "closed"
 )
 
 // Row is one worker in the ledger.
@@ -51,6 +54,11 @@ type Row struct {
 	// It is written before the brief is sent, so a send that dies partway
 	// still leaves the marker its report will carry.
 	Brief *Brief `json:"brief,omitempty"`
+	// SessionID is the --session-id a claude worker was started with, and
+	// Transcript the file Claude Code writes that session to. Both are empty
+	// for a codex worker.
+	SessionID  string `json:"session_id,omitempty"`
+	Transcript string `json:"transcript,omitempty"`
 }
 
 // ledgerVersion is the on-disk format version. A file with another version is
@@ -196,6 +204,50 @@ func (l *Ledger) Begin(row Row) error {
 // Update changes the row named name.
 func (l *Ledger) Update(name string, fn func(*Row)) error {
 	return l.mutate(func(rows []Row) ([]Row, error) { return updateRow(rows, name, fn) })
+}
+
+// ErrRowChanged reports a conditional change to a row that no longer matches
+// what the caller read: a launch reused the name, or the row moved on.
+var ErrRowChanged = errors.New("worker: the ledger row changed since it was read")
+
+// SameRow reports whether a row is still the one read as was: the same
+// launch (start time) at the same stage. It is the guard close passes to
+// RemoveIf and UpdateIf.
+func SameRow(was Row) func(Row) bool {
+	return func(r Row) bool { return r.StartedAt.Equal(was.StartedAt) && r.Stage == was.Stage }
+}
+
+// RemoveIf deletes the row named name when match accepts it.
+func (l *Ledger) RemoveIf(name string, match func(Row) bool) error {
+	return l.mutate(func(rows []Row) ([]Row, error) {
+		for i := range rows {
+			if rows[i].Name != name {
+				continue
+			}
+			if !match(rows[i]) {
+				return nil, ErrRowChanged
+			}
+			return append(rows[:i:i], rows[i+1:]...), nil
+		}
+		return nil, ErrNoRow
+	})
+}
+
+// UpdateIf changes the row named name when match accepts it.
+func (l *Ledger) UpdateIf(name string, match func(Row) bool, fn func(*Row)) error {
+	return l.mutate(func(rows []Row) ([]Row, error) {
+		for i := range rows {
+			if rows[i].Name != name {
+				continue
+			}
+			if !match(rows[i]) {
+				return nil, ErrRowChanged
+			}
+			fn(&rows[i])
+			return rows, nil
+		}
+		return nil, ErrNoRow
+	})
 }
 
 // Rows returns every row.

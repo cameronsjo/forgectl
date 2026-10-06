@@ -209,3 +209,32 @@ func TestLedgerRefusesAHardlinkedFile(t *testing.T) {
 		t.Errorf("Rows on a hardlinked ledger: err = %v, want ErrLedgerUnreadable", err)
 	}
 }
+
+// TestLedgerConditionalChanges pins close's guard: RemoveIf and UpdateIf act
+// only on the row that was read, never on a launch that reused the name.
+func TestLedgerConditionalChanges(t *testing.T) {
+	l, _ := testLedger(t)
+	read := Row{Name: "w", Branch: "b", StartedAt: time.Unix(100, 0).UTC()}
+	if err := l.Begin(read); err != nil {
+		t.Fatal(err)
+	}
+	read.Stage = StagePending
+	reused := read
+	reused.StartedAt = time.Unix(200, 0).UTC()
+
+	if err := l.UpdateIf("w", SameRow(reused), func(r *Row) { r.Stage = StageClosed }); !errors.Is(err, ErrRowChanged) {
+		t.Fatalf("UpdateIf on a changed row: %v", err)
+	}
+	if err := l.RemoveIf("w", SameRow(reused)); !errors.Is(err, ErrRowChanged) {
+		t.Fatalf("RemoveIf on a changed row: %v", err)
+	}
+	if err := l.RemoveIf("w", SameRow(read)); err != nil {
+		t.Fatalf("RemoveIf: %v", err)
+	}
+	if rows, err := l.Rows(); err != nil || len(rows) != 0 {
+		t.Fatalf("rows %+v, %v after removing the only row", rows, err)
+	}
+	if err := l.RemoveIf("w", SameRow(read)); !errors.Is(err, ErrNoRow) {
+		t.Fatalf("RemoveIf on a missing row: %v", err)
+	}
+}
