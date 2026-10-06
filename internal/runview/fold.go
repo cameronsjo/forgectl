@@ -88,8 +88,8 @@ func edges(defs []StepDef) [][2]string {
 
 // apply folds one event. An event no action maps to changes only LastEvent.
 func (r *reducer) apply(e Event) {
-	if !e.Time.IsZero() {
-		r.state.LastEvent = e.Time
+	if e.Time.After(r.state.LastEvent) {
+		r.state.LastEvent = e.Time // the newest, so an out-of-order log still sorts by its latest
 	}
 	switch r.spec.On[e.Name] {
 	case ActionStart:

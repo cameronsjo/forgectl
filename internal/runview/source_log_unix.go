@@ -61,7 +61,7 @@ func (s *logSource) Load(_ RunRef, cur *Cursor) (Delta, error) {
 		*cur = Cursor{}
 		d.Reset = true
 	}
-	capped, err := readLines(f, &st, cur, func(seq int, b []byte) {
+	capped, err := readLines(f, &st, cur, func(_ int, b []byte) {
 		if cur.kept >= maxRunEvents {
 			cur.dropped++
 			return
@@ -70,7 +70,8 @@ func (s *logSource) Load(_ RunRef, cur *Cursor) (Delta, error) {
 			return
 		}
 		raw, nf, ok := scalarFields(b)
-		e, named := logEvent(s.keys, seq, raw)
+		// Seq numbers events, not file lines, so #N and --at N agree.
+		e, named := logEvent(s.keys, cur.kept+1, raw)
 		if !ok || !named {
 			cur.dropped++
 			return
@@ -80,7 +81,7 @@ func (s *logSource) Load(_ RunRef, cur *Cursor) (Delta, error) {
 		d.Events = append(d.Events, e)
 	})
 	d.Partial = capped
-	d.Held = len(cur.held) > 0 || cur.dropping
+	d.Held = !capped && (len(cur.held) > 0 || cur.dropping) // past the cap, a cut line is Partial
 	if err != nil {
 		d.Err = cleanErr(fmt.Errorf("cannot read %s: %w", clean(filepath.Base(s.path)), err))
 	}

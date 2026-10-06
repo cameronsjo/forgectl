@@ -193,7 +193,7 @@ A log has no step model, so `show --log` lists its events and no steps. A line t
 
 A waiting item has no run yet: `show` reads it as `waiting`, with no events.
 
-Exit codes: 0 shown; 1 no such run, or it was read only in part (it is still shown, with a `note`); 2 a usage error.
+Exit codes: 0 shown; 1 no such run, or it was read only in part: a read error (shown as a `note`) or a log past the 32 MiB cap (`partial`); it is still shown; 2 a usage error.
 
 ### `forgectl desk skip <name> --reason <text>`
 

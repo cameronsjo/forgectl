@@ -48,8 +48,8 @@ Exit codes: 0 listed; 1 a source could not be read (the rest are still
 listed); 2 usage.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if log.eventKey == "" {
-				return deskUsage("desk runs: --event-key must not be empty")
+			if err := log.check(cmd, "runs"); err != nil {
+				return err
 			}
 			return runDeskRuns(cmd, *dir, log, asJSON)
 		},
@@ -95,8 +95,9 @@ Exit codes: 0 shown; 1 no such run, or it could not be read; 2 usage.`,
 				return deskUsage("desk show: give a run name or --log FILE, not both")
 			case cmd.Flags().Changed("at") && at < 0:
 				return deskUsage("desk show: --at must be 0 or more")
-			case log.eventKey == "":
-				return deskUsage("desk show: --event-key must not be empty")
+			}
+			if err := log.check(cmd, "show"); err != nil {
+				return err
 			}
 			replay := -1
 			if cmd.Flags().Changed("at") {
@@ -117,4 +118,20 @@ Exit codes: 0 shown; 1 no such run, or it could not be read; 2 usage.`,
 type deskShowOpts struct {
 	asJSON, events bool
 	at             int
+}
+
+// check refuses a key flag given without --log, where nothing would read it,
+// and an empty event key, which matches no line.
+func (o deskLogOpts) check(cmd *cobra.Command, verb string) error {
+	if o.path == "" {
+		for _, f := range []string{"event-key", "step-key", "time-key"} {
+			if cmd.Flags().Changed(f) {
+				return deskUsage("desk %s: --%s is only read with --log", verb, f)
+			}
+		}
+	}
+	if o.eventKey == "" {
+		return deskUsage("desk %s: --event-key must not be empty", verb)
+	}
+	return nil
 }

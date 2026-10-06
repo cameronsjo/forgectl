@@ -207,6 +207,9 @@ func TestDeskShow_LogRefusesASymlink(t *testing.T) {
 	}
 	_, _, err := deskRun(t, deskDeps(), "show", "--log", link)
 	wantExit(t, err, 1)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Errorf("the refusal should name the symlink: %v", err)
+	}
 }
 
 // deskRunASCII is deskRun with the root's --no-icons set, so the text
@@ -242,4 +245,77 @@ func TestDeskShow_LogReplayStaysUnknownAndHeldLineIsNamed(t *testing.T) {
 	}
 	_, _, err = deskRun(t, deskDeps(), "runs", "--log", p, "--event-key", "")
 	wantExit(t, err, 2)
+}
+
+// A source that cannot be read is named on stderr and exits 1, and the
+// sources that could be read are still listed.
+func TestDeskRuns_OneBadSourceStillListsTheRest(t *testing.T) {
+	dir := newDeskDir(t)
+	script, sha := queueItem(t, "ok.sh", "echo ok\n")
+	finishRun(t, openTestDesk(t, dir), script, sha, 0)
+	out, errOut, err := deskRun(t, deskDeps(), "runs", "--log", filepath.Join(t.TempDir(), "missing.jsonl"))
+	wantExit(t, err, 1)
+	if !strings.Contains(out, script) {
+		t.Errorf("the desk's run is not listed:\n%s", out)
+	}
+	if !strings.Contains(errOut, "missing.jsonl") {
+		t.Errorf("stderr does not name the bad source:\n%s", errOut)
+	}
+}
+
+// A log past the 32 MiB cap is shown, says so, and exits 1: a partial
+// result is not success.
+func TestDeskShow_LogPastTheCapExits1(t *testing.T) {
+	newDeskDir(t)
+	p := filepath.Join(t.TempDir(), "big.jsonl")
+	line := []byte(`{"event":"tick","pad":"` + strings.Repeat("x", 1000) + `"}` + "\n")
+	f, err := os.Create(p) //nolint:gosec // G304: a test file under t.TempDir
+	if err != nil {
+		t.Fatal(err)
+	}
+	for written := 0; written <= 33<<20; written += len(line) {
+		if _, err := f.Write(line); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := deskRun(t, deskDeps(), "show", "--log", p)
+	wantExit(t, err, 1)
+	if !strings.Contains(out, "partial: past the 32 MiB cap") || strings.Contains(out, "no newline") {
+		t.Errorf("show should name the cap, and not call the cut line held:\n%s", out)
+	}
+	_, _, err = deskRun(t, deskDeps(), "runs", "--log", p)
+	wantExit(t, err, 1)
+}
+
+// A waiting item has no run yet: show reads it as waiting, with no events.
+func TestDeskShow_AWaitingItem(t *testing.T) {
+	newDeskDir(t)
+	name, _ := queueItem(t, "later.sh", "echo later\n")
+	out, _, err := deskRunASCII(t, "show", name)
+	wantExit(t, err, 0)
+	if !strings.Contains(out, "· waiting") || !strings.Contains(out, "0 events") {
+		t.Errorf("a waiting item should show as waiting with no events:\n%s", out)
+	}
+}
+
+// A log's #N numbers its events, not its file lines, so #N and --at N agree.
+func TestDeskShow_LogEventsAreNumberedWithoutGaps(t *testing.T) {
+	newDeskDir(t)
+	p := writeTemp(t, "e.jsonl", `{"event":"a"}`+"\n\nnot json\n"+`{"event":"b"}`+"\n"+`{"event":"c"}`+"\n")
+	out, _, err := deskRun(t, deskDeps(), "show", "--log", p, "--events", "--at", "2")
+	wantExit(t, err, 0)
+	if !strings.Contains(out, "#1    a") || !strings.Contains(out, "#2    b") || strings.Contains(out, "#3") {
+		t.Errorf("events should be #1 and #2 at --at 2:\n%s", out)
+	}
+}
+
+func TestDeskLogKeyFlagsNeedALog(t *testing.T) {
+	newDeskDir(t)
+	for _, args := range [][]string{{"runs", "--event-key", "kind"}, {"show", "01-x", "--time-key", "at"}} {
+		_, _, err := deskRun(t, deskDeps(), args...)
+		wantExit(t, err, 2)
+	}
 }
