@@ -63,7 +63,7 @@ func fitHints(width int, hints []string, prio []int) string {
 	join := func() string {
 		var parts []string
 		for i, h := range hints {
-			if keep[i] {
+			if keep[i] && h != "" {
 				parts = append(parts, h)
 			}
 		}

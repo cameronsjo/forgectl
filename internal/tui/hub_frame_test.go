@@ -337,8 +337,11 @@ func TestHubSearchSaysWhenNothingMatches(t *testing.T) {
 	}
 	m.l.SetFilterText("zzzx")
 	got := ansi.Strip(m.detailView())
-	if !strings.Contains(got, `no command name matches "zzzx" · esc clears`) {
+	if !strings.Contains(got, `no command or subcommand is named like "zzzx"`) {
 		t.Errorf("empty search detail = %q", got)
+	}
+	if footer := ansi.Strip(m.footerView()); strings.Contains(footer, "enter") || strings.Contains(footer, "·  ·") {
+		t.Errorf("empty search footer = %q, want no enter hint and no empty slot", footer)
 	}
 }
 
@@ -470,6 +473,43 @@ func TestHubFilterFramesFit(t *testing.T) {
 			t.Run(name+" applied", func(t *testing.T) { assertFrameFits(t, frameText(m), size[0], size[1]) })
 		}
 	}
+	// A typed query, not just an open filter: the prompt must leave the
+	// input room at the narrow end, on the top screen and in a subcommand
+	// list whose title is long.
+	for _, w := range []int{20, 24, 30, 40} {
+		for _, deep := range []bool{false, true} {
+			m := frameModel(w, 12)
+			if deep {
+				m, _ = press(m, '6') // agents
+				m, _ = press(m, tea.KeyEnter)
+			}
+			m = typeInto(m, "/a-much-longer-query-than-fits")
+			name := fmt.Sprintf("%dx12 deep=%v typed", w, deep)
+			t.Run(name, func(t *testing.T) { assertFrameFits(t, frameText(m), w, 12) })
+		}
+	}
+}
+
+// TestHubPickerCancelKeepsTheRecentRow pins that cancelling the argument
+// picker opened from a recent row leaves the cursor on that row, even where
+// the top screen is short enough to drop recent rows.
+func TestHubPickerCancelKeepsTheRecentRow(t *testing.T) {
+	hub := frameHub()
+	for i := range hub {
+		if hub[i].Name == "tasks ready" {
+			hub[i] = HubEntry{Name: "pr reviewed", Short: "mark a PR reviewed", Use: "reviewed <ref>", Argv: []string{"pr", "reviewed"}, NeedsArgs: true}
+		}
+	}
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{Hub: hub, NoIcons: true, Theme: theme.Default()}), 80, 24)
+	m.selectRow("pr reviewed")
+	m, _ = press(m, tea.KeyEnter)
+	if m.picker == nil {
+		t.Fatal("enter on pr reviewed did not open the picker")
+	}
+	m, _ = press(m, tea.KeyEscape)
+	if got := m.selectedName(); m.picker != nil || got != "pr reviewed" {
+		t.Errorf("after esc: picker=%v cursor=%q, want the pr reviewed row", m.picker != nil, got)
+	}
 }
 
 // TestHubOptionalArgumentRowsRunBare pins the three things enter does to a
@@ -495,7 +535,7 @@ func TestHubOptionalArgumentRowsRunBare(t *testing.T) {
 	}{
 		{1, "enter run", ActionRunVerb},
 		{2, "enter open", ActionNone},
-		{3, "enter show usage", ActionShowInvocation},
+		{3, "enter print command", ActionShowInvocation},
 	}
 	for _, c := range cases {
 		m := start(c.row)
@@ -513,5 +553,46 @@ func TestHubOptionalArgumentRowsRunBare(t *testing.T) {
 		if c.row == 2 && got.picker == nil {
 			t.Error("row 2 did not open the picker")
 		}
+	}
+	// The "$" line names exactly what enter runs: the bare command for a row
+	// that runs without its optional placeholders.
+	if got := ansi.Strip(start(1).selectedDollar()); got != "$ forgectl docs check" {
+		t.Errorf("$ line on the bare-run row = %q, want $ forgectl docs check", got)
+	}
+}
+
+// TestHubSearchFindsSubcommands pins that "/" covers subcommands under their
+// full path, and that enter on one acts on that subcommand.
+func TestHubSearchFindsSubcommands(t *testing.T) {
+	m := frameModel(80, 24)
+	m = typeInto(m, "/")
+	m.l.SetFilterText("sessions sync")
+	if got := m.selectedName(); got != "sessions sync" {
+		t.Fatalf("search for sessions sync selected %q", got)
+	}
+	out, cmd := m.Update(keyCode(tea.KeyEnter))
+	if a := out.(model).action; cmd == nil || a.Kind != ActionRunVerb || strings.Join(a.Argv, " ") != "sessions sync" {
+		t.Errorf("enter on the found subcommand = %+v, want RunVerb [sessions sync]", a)
+	}
+}
+
+// TestHubEscKeepsTheRow pins two esc paths that return to a list: clearing
+// a filter keeps the cursor on the row it was on, and leaving the tmux
+// screen lands on the tmux row.
+func TestHubEscKeepsTheRow(t *testing.T) {
+	m := frameModel(80, 24)
+	m, _ = press(m, '7') // repos
+	m = typeInto(m, "/")
+	m.l.SetFilterText("clean")
+	m, _ = press(m, tea.KeyEscape)
+	if got := m.selectedName(); m.mode != areaMode || got != "clean" {
+		t.Errorf("esc from a filter in repos: mode=%v cursor=%q, want clean", m.mode, got)
+	}
+
+	m = frameModel(80, 24)
+	m, _ = press(m, '4')
+	m, _ = press(m, tea.KeyEscape)
+	if got := m.selectedName(); m.mode != hubMode || got != "tmux" {
+		t.Errorf("esc from the tmux screen: mode=%v cursor=%q, want tmux", m.mode, got)
 	}
 }

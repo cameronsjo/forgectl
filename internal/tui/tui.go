@@ -478,7 +478,10 @@ func (m *model) applySize() {
 // short (forgectl#1074 review): when every row does not fit, the recent rows
 // and their divider go first, since each repeats a command an area holds.
 func (m *model) fitTopScreen() {
-	if m.mode != hubMode || m.hubFlat || m.l.FilterState() != list.Unfiltered {
+	// While the argument picker is open the list behind it is not what the
+	// user acts on; trimming it would drop the recent row the picker was
+	// opened from, and closing the picker would land the cursor elsewhere.
+	if m.mode != hubMode || m.hubFlat || m.picker != nil || m.l.FilterState() != list.Unfiltered {
 		return
 	}
 	// The list spends a line on its filter title and one on pagination
@@ -637,15 +640,18 @@ func (m model) updateListKey(km tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch {
 		case m.mode == hubMode:
 			m.flattenHub()
-			m.l.FilterInput.Prompt = hubSearchPrompt
+			m.l.FilterInput.Prompt = fitPrompt(m.width, hubSearchPrompt, "Search: ")
 		case m.hubScreen():
-			m.l.FilterInput.Prompt = "Filter " + fitWords(m.title, hubFilterTitleMax) + ": "
+			m.l.FilterInput.Prompt = fitPrompt(m.width, "Filter "+fitWords(m.title, hubFilterTitleMax)+": ", filterPrompt)
 		}
 	}
 	if key == "esc" && m.l.FilterState() == list.FilterApplied && m.hubScreen() {
-		// esc clears an applied filter before it backs out of the screen.
+		// esc clears an applied filter before it backs out of the screen,
+		// and leaves the cursor on the row it was on.
+		name := m.selectedName()
 		m.l.ResetFilter()
 		m.unflattenHub()
+		m.selectRow(name)
 		return m, nil
 	}
 	switch key {
@@ -937,6 +943,8 @@ func (m *model) toHub() {
 		back = m.area.Name
 	case m.mode == leavesMode && len(m.leavesPath) > 0:
 		back = m.leavesPath[0]
+	case m.mode == menuMode:
+		back = "tmux"
 	}
 	m.status = ""
 	m.title = "hub"
@@ -993,15 +1001,24 @@ func (m *model) selectRow(name string) {
 		return
 	}
 	for i, it := range m.l.Items() {
-		if hi, ok := it.(hubItem); ok && !hi.entry.Heading && hi.entry.Name == name {
-			m.l.Select(i)
-			return
+		switch row := it.(type) {
+		case hubItem:
+			if !row.entry.Heading && row.entry.Name == name {
+				m.l.Select(i)
+				return
+			}
+		case leafItem:
+			if row.leaf.Name == name {
+				m.l.Select(i)
+				return
+			}
 		}
 	}
 }
 
 // flattenHub swaps the top screen for every command in one list: the first-
-// run and pinned rows, then each area's modules, numbered by position. Recent
+// run and pinned rows, then each area's modules, each followed by its
+// subcommands, numbered by position. Recent
 // rows are left out — each repeats a command the list already holds — as are
 // dividers, area rows, and a second row of one name (the first-run init row
 // and setup's init).
@@ -1015,15 +1032,38 @@ func (m *model) flattenHub() {
 			flat = append(flat, e)
 		}
 	}
+	// A subcommand joins as a direct-command row under its full path ("pr
+	// findings list"), so "/" finds it and enter runs it, opens its picker,
+	// or prints its usage exactly as a recent row would. A nested group adds
+	// its own subcommands rather than itself; the synthetic self leaf repeats
+	// its module's row and is skipped.
+	var addLeaves func(path []string, leaves []HubLeaf)
+	addLeaves = func(path []string, leaves []HubLeaf) {
+		for _, l := range leaves {
+			if l.Self {
+				continue
+			}
+			argv := append(append([]string(nil), path...), l.Name)
+			if len(l.Leaves) > 0 {
+				addLeaves(argv, l.Leaves)
+				continue
+			}
+			add(HubEntry{Name: strings.Join(argv, " "), Short: l.Short, Use: l.Use, Argv: argv, NeedsArgs: l.NeedsArgs, NoPicker: l.NoPicker})
+		}
+	}
+	addModule := func(e HubEntry) {
+		add(e)
+		addLeaves([]string{e.Name}, e.Leaves)
+	}
 	for _, e := range m.hub {
 		switch {
 		case e.Heading, e.Argv != nil:
 		case e.Members != nil:
 			for _, member := range e.Members {
-				add(member)
+				addModule(member)
 			}
 		default:
-			add(e)
+			addModule(e)
 		}
 	}
 	m.hubFlat = true
@@ -1379,17 +1419,20 @@ func (m model) detailView() string {
 // typing, so it is escaped and capped like any free text.
 func (m model) noMatchLine() string {
 	query := capSafe(m.l.FilterValue(), hubHeaderValueMax)
-	msg := fmt.Sprintf("no command name matches %q · esc clears · forgectl menu lists descriptions", query)
+	msg := fmt.Sprintf("no command or subcommand is named like %q · forgectl menu lists descriptions", query)
 	if m.mode != hubMode {
-		msg = fmt.Sprintf("nothing in %s matches %q · esc, then / on the hub searches all", m.title, query)
+		msg = fmt.Sprintf("nothing in %s is named like %q · / on the hub searches every command", m.title, query)
 	}
-	return m.styles.Muted.Render(fitLine(msg, m.l.Width()))
+	return m.styles.Muted.Render(fitWords(msg, m.l.Width()))
 }
 
 // enterHint is the footer's enter hint for the selected row: "enter run"
 // when enter runs a command, "enter open" when it opens a list, a screen, or
 // the argument picker. It follows activate's branches.
 func (m model) enterHint() string {
+	if len(m.l.VisibleItems()) == 0 {
+		return "" // nothing to act on; the no-match line says why
+	}
 	runs := false
 	switch it := m.l.SelectedItem().(type) {
 	case hubItem:
@@ -1421,7 +1464,8 @@ func (m model) enterHint() string {
 // argHint is enterHint for a row whose Use names placeholders, following
 // activate's order: the picker opens when it can take the argument; failing
 // that, a row whose placeholders are all optional runs bare; otherwise enter
-// prints the usage to finish by hand and leaves the hub.
+// leaves the hub and prints the command with its placeholders, to finish by
+// hand.
 func argHint(use string, noPicker bool) string {
 	if _, _, ok := pickerSpec(use); ok && !noPicker {
 		return "enter open"
@@ -1429,7 +1473,22 @@ func argHint(use string, noPicker bool) string {
 	if !requiresArg(use) {
 		return "enter run"
 	}
-	return "enter show usage"
+	return "enter print command"
+}
+
+// hubQueryMin is the fewest cells a filter prompt leaves for the query.
+const hubQueryMin = 8
+
+// fitPrompt is the first of prompts that leaves hubQueryMin cells for the
+// query at width, or the shortest one, "/ ", when none does. A width of 0
+// (no size yet) takes the first.
+func fitPrompt(width int, prompts ...string) string {
+	for _, p := range prompts {
+		if width <= 0 || ansi.StringWidth(p)+hubQueryMin <= width {
+			return p
+		}
+	}
+	return "/ "
 }
 
 // filterPrompt is the list's plain filter prompt, and hubFilterTitleMax caps
@@ -1484,7 +1543,7 @@ func (m model) selectedDollar() string {
 			return ""
 		case e.Members != nil:
 			return m.styles.Muted.Render(fitLine(fmt.Sprintf("enter lists %s (%d commands)", e.Name, len(e.Members)), m.l.Width()))
-		case e.Argv != nil && !e.NeedsArgs:
+		case e.Argv != nil && (!e.NeedsArgs || argHint(e.Use, e.NoPicker) == "enter run"):
 			argv, exact = e.Argv, true
 		case e.Argv != nil:
 			argv = append(append([]string(nil), e.Argv[:len(e.Argv)-1]...), strings.Fields(e.Use)...)
@@ -1503,7 +1562,7 @@ func (m model) selectedDollar() string {
 		switch {
 		case len(it.leaf.Leaves) > 0:
 			argv = append(leafArgv(m.leavesPath, it.leaf), "<subcommand>")
-		case it.leaf.NeedsArgs:
+		case it.leaf.NeedsArgs && argHint(it.leaf.Use, it.leaf.NoPicker) != "enter run":
 			argv = strings.Fields(usageLine(m.leavesPath, it.leaf))
 		default:
 			argv, exact = leafArgv(m.leavesPath, it.leaf), true

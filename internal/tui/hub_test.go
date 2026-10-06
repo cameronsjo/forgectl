@@ -550,8 +550,8 @@ func TestHub_SearchCoversEveryCommand(t *testing.T) {
 		return m
 	}
 	m = search(m, "clean")
-	if len(m.l.VisibleItems()) != 1 {
-		t.Fatalf("filter clean shows %d rows, want only clean", len(m.l.VisibleItems()))
+	if len(m.l.VisibleItems()) != 2 {
+		t.Fatalf("filter clean shows %d rows, want clean and its subcommand clean now", len(m.l.VisibleItems()))
 	}
 	if it, ok := m.l.SelectedItem().(hubItem); !ok || it.entry.Name != "clean" {
 		t.Fatalf("filtered cursor = %+v, want clean", m.l.SelectedItem())
