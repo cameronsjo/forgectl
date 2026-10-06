@@ -18,6 +18,7 @@ forgectl desk show 17-fix --at 4                # replay: the run after its firs
 forgectl desk show --log ./events.jsonl         # a JSONL log from another tool, as a timeline
 forgectl desk skip 17-fix --reason "superseded" # skip a waiting item, or clear a lost run
 forgectl desk layout --progress 'CMD'           # herdr split: this pane left, the desk right, CMD below
+forgectl desk layout --below                    # herdr: the desk in a full-width row under every pane in the tab
 forgectl desk layout --dry-run                  # print the planned splits and commands; change nothing
 forgectl desk prune --days 30                   # delete done/ and skipped/ items older than 30 days
 ```
@@ -215,8 +216,9 @@ Splits the current herdr tab around this pane: the desk on the right, about `--w
 - herdr names a pane only by id, and ids renumber when a pane closes. So before each `rename` and `run` the pane is found again by its terminal id, and a read of that id confirms it still holds that terminal; on a mismatch the layout stops, naming both terminals. A pane closing in the moment between that read and the call can still renumber the id; a read after the call reports it, though by then the command has been typed.
 - It prints `desk=<pane id>`, `progress=<pane id>`, and `columns=<n> of <tab width>`.
 - `--dry-run` reads the tab's width and prints the plan without changing anything: one `split=`, `rename=` and `run.<pane>=` line per call it would make, then `columns=`. Run it first to see what the layout will do.
+- `--below` builds a full-width desk row instead. herdr splits panes, not the tab, so a down split of this pane would span only this pane's column. The other panes of the tab are moved into one temporary tab (`herdr pane move --new-tab`, then beside each other), the desk is split down from this pane, keeping 72% of the height for this pane's row, and the parked panes are moved back to the right of this pane in equal widths. With `--progress`, `CMD` goes to the right of the desk, which keeps 60%. A moved pane keeps its terminal, so its process keeps running; only its place changes. Stacked panes come back as one row, and panes that were left of this one come back on its right. If a step fails, or `SIGINT` or `SIGTERM` arrives, the parked panes are found again by terminal and moved back before the command exits; the error names any pane that could not be moved back. A signal after the restore leaves the desk pane unnamed and idle. Pane ids renumber after moves and splits, so a `HERDR_PANE_ID` that a process in this pane or a moved pane read at start may no longer name its pane afterwards. Whether herdr still resolves such an id was not measured; to find a pane reliably, look up its `terminal_id`, which a move keeps, in `herdr pane list`. It prints `desk=`, `progress=` and `moved=<n>`; `--dry-run` prints one `move.out=`, `move.back=`, `split=`, `rename=` and `run.<pane>=` line per call. `--width` is refused with it.
 
-Exit codes: 0 laid out, or planned with `--dry-run`; 1 a herdr call failed, and the panes made so far stay; 2 a usage error, or not in a herdr pane.
+Exit codes: 0 laid out, or planned with `--dry-run`; 1 a herdr call failed, and the panes made so far stay (with `--below`, the parked panes are moved back first); 2 a usage error, or not in a herdr pane.
 
 ### `forgectl desk prune`
 

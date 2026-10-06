@@ -180,3 +180,69 @@ func TestCurrentLayoutAndPaneByTerminal(t *testing.T) {
 		t.Error("an unknown terminal resolved")
 	}
 }
+
+const paneMoveReply = `{"id":"x","result":{"type":"pane_move","move_result":{"changed":true,"previous_pane_id":"w1:p2","previous_workspace_id":"w1","previous_tab_id":"w1:t1","focused_pane_id":"w1:p0","target_layout":{},"created_tab":{"tab_id":"w1:t2"},"pane":{"pane_id":"w1:p1","terminal_id":"term_2","tab_id":"w1:t2","workspace_id":"w1","focused":false,"agent_status":"unknown","revision":1}}}}`
+
+func TestPanePlaceBuildsTheCommandAndReadsTheMove(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		m       PaneMove
+		want    exec.SensitiveCommand
+		wantTab string
+	}{
+		{
+			name: "into a new tab",
+			m:    PaneMove{Pane: "w1:p2", NewTab: true},
+			want: paneCmd(exec.KindHerdrPaneMove, exec.MustFixed("move"), exec.Opaque("w1:p2"), exec.MustFixed("--new-tab"), exec.MustFixed("--no-focus")),
+			// created_tab names the tab
+			wantTab: "w1:t2",
+		},
+		{
+			name: "beside a pane of a tab",
+			m:    PaneMove{Pane: "w1:p2", Tab: "w1:t1", Target: "w1:p0", Direction: SplitRight, Ratio: 0.333},
+			want: paneCmd(exec.KindHerdrPaneMove, exec.MustFixed("move"), exec.Opaque("w1:p2"),
+				exec.MustFixed("--tab"), exec.Opaque("w1:t1"), exec.MustFixed("--target-pane"), exec.Opaque("w1:p0"),
+				exec.MustFixed("--split"), exec.MustFixed("right"), exec.MustFixed("--ratio"), exec.Opaque("0.33"), exec.MustFixed("--no-focus")),
+			wantTab: "w1:t2",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := replying(paneMoveReply)
+			got, err := PanePlace(t.Context(), run, testHerdrPath, tc.m)
+			if err != nil {
+				t.Fatalf("PanePlace: %v", err)
+			}
+			if got.Pane.TerminalID != "term_2" || got.NewTab != tc.wantTab {
+				t.Errorf("moved = %+v, want term_2 / %s", got, tc.wantTab)
+			}
+			if c := lastCmd(t, run); !c.Equal(tc.want) {
+				t.Errorf("command = %v, want %v", c, tc.want)
+			}
+		})
+	}
+}
+
+func TestPanePlaceRefusals(t *testing.T) {
+	good := PaneMove{Pane: "w1:p2", Tab: "w1:t1", Direction: SplitRight, Ratio: 0.5}
+	for _, tc := range []struct {
+		name  string
+		m     PaneMove
+		reply string
+	}{
+		{"flag-shaped pane", PaneMove{Pane: "--new-tab", NewTab: true}, paneMoveReply},
+		{"no tab", PaneMove{Pane: "w1:p2", Direction: SplitRight, Ratio: 0.5}, paneMoveReply},
+		{"flag-shaped target", PaneMove{Pane: "w1:p2", Tab: "w1:t1", Target: "--x", Direction: SplitRight, Ratio: 0.5}, paneMoveReply},
+		{"no direction", PaneMove{Pane: "w1:p2", Tab: "w1:t1", Ratio: 0.5}, paneMoveReply},
+		{"ratio 1", PaneMove{Pane: "w1:p2", Tab: "w1:t1", Direction: SplitRight, Ratio: 1}, paneMoveReply},
+		{"declined", good, `{"id":"x","result":{"type":"pane_move","move_result":{"changed":false,"reason":"same_tab","pane":{"pane_id":"w1:p1","terminal_id":"term_2"}}}}`},
+		{"no changed field", good, `{"id":"x","result":{"type":"pane_move","move_result":{}}}`},
+		{"no move_result", good, `{"id":"x","result":{"type":"ok"}}`},
+		{"no terminal in the reply", good, `{"id":"x","result":{"type":"pane_move","move_result":{"changed":true,"pane":{"pane_id":"w1:p1"}}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := PanePlace(t.Context(), replying(tc.reply), testHerdrPath, tc.m); err == nil {
+				t.Fatal("want an error")
+			}
+		})
+	}
+}
