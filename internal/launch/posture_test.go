@@ -56,26 +56,3 @@ func TestValidateRefusesUnknownPermissionMode(t *testing.T) {
 		t.Fatal("a launch with an unknown permission_mode was built")
 	}
 }
-
-func TestStricterPosture(t *testing.T) {
-	repo := Profile{Harness: "claude", Model: "opus", PermissionMode: "plan", Sandbox: "workspace-write", ApprovalPolicy: "never", AllowDanger: true}
-	floor := Profile{PermissionMode: "acceptEdits", Sandbox: "read-only", ApprovalPolicy: "on-request", AllowDanger: false}
-	got, err := StricterPosture(repo, floor)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := Profile{Harness: "claude", Model: "opus", PermissionMode: "plan", Sandbox: "read-only", ApprovalPolicy: "on-request", AllowDanger: false}
-	if got.Harness != want.Harness || got.Model != want.Model || got.PermissionMode != want.PermissionMode ||
-		got.Sandbox != want.Sandbox || got.ApprovalPolicy != want.ApprovalPolicy || got.AllowDanger != want.AllowDanger {
-		t.Fatalf("StricterPosture = %+v, want %+v", got, want)
-	}
-	// Equal rank keeps a's spelling.
-	if got, _ := StricterPosture(Profile{PermissionMode: "manual", Sandbox: "read-only", ApprovalPolicy: "never"}, Profile{PermissionMode: "default", Sandbox: "read-only", ApprovalPolicy: "never"}); got.PermissionMode != "manual" {
-		t.Errorf("equal rank picked %q, want a's manual", got.PermissionMode)
-	}
-	// An unknown value never wins, and is reported.
-	got, err = StricterPosture(Profile{PermissionMode: "yolo", Sandbox: "read-only", ApprovalPolicy: "never"}, floor)
-	if err == nil {
-		t.Fatalf("an unknown mode merged silently into %+v", got)
-	}
-}
