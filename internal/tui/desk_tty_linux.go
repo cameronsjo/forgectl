@@ -25,3 +25,19 @@ func ttyArgv(rcPath string) []string {
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
+
+// ttyEnv is the environment for the script(1) process on Linux. util-linux
+// script(1) runs its command with $SHELL -c, and a shell other than bash may
+// read startup files there (zsh reads .zshenv) and run code, or change
+// directory, before the item. SHELL is set to /bin/bash, which reads only
+// BASH_ENV when non-interactive, and ChildEnv has removed that. The item
+// sees SHELL=/bin/bash.
+func ttyEnv(env []string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "SHELL=") {
+			out = append(out, kv)
+		}
+	}
+	return append(out, "SHELL=/bin/bash")
+}

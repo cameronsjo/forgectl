@@ -185,6 +185,18 @@ type Headers struct {
 	TTY  bool
 }
 
+// HeadersFor is [ParseHeaders] for an item of kind. "# TTY: yes" means
+// something only in a script: a batch never runs in a terminal, and its
+// manifest must never reach bash as a script, so a manifest's TTY line is
+// ignored.
+func HeadersFor(kind Kind, data []byte) Headers {
+	h := ParseHeaders(data)
+	if kind != KindScript {
+		h.TTY = false
+	}
+	return h
+}
+
 // ParseHeaders reads the header lines from an item's bytes. Values are raw
 // script text: render them through termsafe before they reach a terminal.
 func ParseHeaders(data []byte) Headers {

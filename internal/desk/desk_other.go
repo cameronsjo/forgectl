@@ -9,7 +9,7 @@ import (
 
 // RunSupervisor is unavailable off Unix: the desk is built on openat,
 // O_NOFOLLOW, process groups and sessions.
-func RunSupervisor(string, string) int {
+func RunSupervisor(string, string, string, string) int {
 	fmt.Fprintln(os.Stderr, "desk _supervise:", ErrUnsupported)
 	return 2
 }

@@ -25,15 +25,15 @@ import (
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
-// fakeLaunch is a real desk whose Launch only records the name: a claimed
-// item stays in running/ and no supervisor process is started.
+// fakeLaunch is a real desk whose Launch only records the claimed name: a
+// claimed item stays in running/ and no supervisor process is started.
 type fakeLaunch struct {
 	*desk.Desk
 	launched []string
 }
 
-func (f *fakeLaunch) Launch(name string) (int, error) {
-	f.launched = append(f.launched, name)
+func (f *fakeLaunch) Launch(c *desk.Claimed) (int, error) {
+	f.launched = append(f.launched, c.Name)
 	return 0, nil
 }
 
@@ -899,5 +899,78 @@ func TestDesk_HungScanReportsAndRetries(t *testing.T) {
 	}
 	if !strings.Contains(ansi.Strip(h.m.footer()), "did not finish") {
 		t.Fatalf("footer = %q", ansi.Strip(h.m.footer()))
+	}
+}
+
+// TestTTYRunStartsInHomeWithACleanEnvironment: a TTY item starts where a
+// detached one does, in $HOME, with bash's startup hooks removed.
+func TestTTYRunStartsInHomeWithACleanEnvironment(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("BASH_ENV", filepath.Join(home, "hook.sh"))
+	h := newDeskHarness(t)
+	h.drop("01-console.sh", ttyScript("console"))
+	h.scan()
+	snap, err := h.d.Scan()
+	if err != nil || len(snap.Pending) != 1 {
+		t.Fatalf("scan: %v, %d pending", err, len(snap.Pending))
+	}
+	c, err := h.backend.Claim("01-console", snap.Pending[0].Meta.SHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rcPath := filepath.Join(t.TempDir(), "rc")
+	if err := os.WriteFile(rcPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := newTTYRun(h.backend, c, rcPath, func(string) []string { return []string{"/bin/true"} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = r.finish(nil) })
+	if r.cmd.Dir != home {
+		t.Errorf("dir = %q, want %q", r.cmd.Dir, home)
+	}
+	if r.cmd.Env == nil || slices.ContainsFunc(r.cmd.Env, func(kv string) bool { return strings.HasPrefix(kv, "BASH_ENV=") }) {
+		t.Errorf("env = %q; want an explicit environment without BASH_ENV", r.cmd.Env)
+	}
+}
+
+// TestAManifestWithATTYLineRunsDetached: "# TTY: yes" in a manifest does
+// not make it a TTY item. y runs it detached, as a batch; script(1) never
+// starts, so bash never reads the manifest as a script.
+func TestAManifestWithATTYLineRunsDetached(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-m.manifest", "# WHAT: x\n# WHY: y\n# TTY: yes\na -- true\n")
+	h.scan()
+	h.selectItem("01-m")
+	h.m.ttyArgv = func(string) []string { t.Fatal("script(1) was started for a manifest"); return nil }
+	h.press("y")
+	if !slices.Contains(h.backend.launched, "01-m") {
+		t.Fatalf("launched = %q, want 01-m started detached", h.backend.launched)
+	}
+}
+
+// TestTTYRunRefusesABatch: the terminal path runs only a TTY script, and
+// ends any other claim in skipped/.
+func TestTTYRunRefusesABatch(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-m.manifest", "# WHAT: x\n# WHY: y\na -- true\n")
+	h.scan()
+	snap, err := h.d.Scan()
+	if err != nil || len(snap.Pending) != 1 {
+		t.Fatalf("scan: %v, %d pending", err, len(snap.Pending))
+	}
+	c, err := h.backend.Claim("01-m", snap.Pending[0].Meta.SHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.TTY = true // as an older reader that trusted the manifest's header would have it
+	rcPath := filepath.Join(t.TempDir(), "rc")
+	if _, err := newTTYRun(h.backend, c, rcPath, func(string) []string { t.Fatal("argv built for a batch"); return nil }); err == nil {
+		t.Fatal("newTTYRun accepted a batch")
+	}
+	if got := h.where("01-m"); got != desk.DirSkipped {
+		t.Fatalf("01-m is in %s, want skipped", got)
 	}
 }

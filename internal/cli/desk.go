@@ -382,21 +382,30 @@ Exit codes: 0 pruned (maybe nothing); 1 a delete failed; 2 usage.`,
 	return cmd
 }
 
-// newDeskSuperviseCmd builds `desk _supervise NAME`: the detached process
-// that owns one claimed item's run. The desk starts it in a session of its
-// own (desk.Launch), so it outlives the desk's pane. It runs only an item
-// already in running/ whose bytes still match the hash fixed at queue time,
-// so invoking it by hand grants nothing the invoker could not do with bash.
-// Hidden is presentation, not a control.
+// newDeskSuperviseCmd builds `desk _supervise --sha SHA --kind KIND NAME`:
+// the detached process that owns one claimed item's run. The desk starts it
+// in a session of its own (desk.Launch), so it outlives the desk's pane. It
+// runs only an item already in running/ whose bytes hash to --sha, the hash
+// the operator approved, which must also be the hash fixed at queue time,
+// and that is still the --kind it was approved as. Invoking it by hand grants
+// nothing the invoker could not do with bash. Hidden is presentation, not a
+// control.
 func newDeskSuperviseCmd(dir *string) *cobra.Command {
-	return &cobra.Command{
-		Use:          "_supervise <name>",
+	var sha, kind string
+	cmd := &cobra.Command{
+		Use:          "_supervise --sha SHA --kind KIND <name>",
 		Short:        "Internal: run one claimed desk item to completion",
 		Hidden:       true,
 		SilenceUsage: true,
 		Args:         cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return runDeskSupervise(*dir, args[0])
+			return runDeskSupervise(*dir, args[0], sha, kind)
 		},
 	}
+	cmd.Flags().StringVar(&sha, "sha", "", "the approved item's full sha256; the item runs only if its bytes still match")
+	cmd.Flags().StringVar(&kind, "kind", "", "the approved item's kind, script or batch; the item runs only as that kind")
+	for _, f := range []string{"sha", "kind"} {
+		_ = cmd.MarkFlagRequired(f) // fails only for a flag that does not exist, and both are defined above
+	}
+	return cmd
 }

@@ -15,3 +15,7 @@ func ttyArgv(rcPath string) []string {
 		"/bin/bash", "-c", ttyWrapper, "desk-tty", "/bin/bash", desk.ScriptFDPath, rcPath,
 	}
 }
+
+// ttyEnv is the environment for the script(1) process. BSD script(1) runs
+// its trailing operands directly, not through $SHELL, so env is used as is.
+func ttyEnv(env []string) []string { return env }

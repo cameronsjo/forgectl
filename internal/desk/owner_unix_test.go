@@ -219,10 +219,11 @@ func TestLaunchReleasesARefusedTTYItem(t *testing.T) {
 	d := openDesk(t)
 	dropPending(t, d, "01-tty.sh", "#!/bin/bash\n# WHAT: x\n# WHY: y\n# TTY: yes\necho hi\n")
 	scan(t, d)
-	if _, err := d.Claim("01-tty", ""); err != nil {
+	c, err := d.Claim("01-tty", queuedSHA(t, d, "01-tty"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.Launch("01-tty"); err == nil {
+	if _, err := d.Launch(c); err == nil {
 		t.Fatal("Launch ran a TTY item detached")
 	}
 	if got := skipReason(t, d, "01-tty"); got != SkipLaunchFailed {
@@ -301,7 +302,7 @@ func TestClaimMetaFailureReleasesTheItem(t *testing.T) {
 	saved := claimMeta
 	t.Cleanup(func() { claimMeta = saved })
 	claimMeta = func(*Desk, string) error { return errors.New("meta rename failed") }
-	if _, err := d.Claim("01-hi", ""); err == nil {
+	if _, err := d.Claim("01-hi", queuedSHA(t, d, "01-hi")); err == nil {
 		t.Fatal("Claim succeeded with its meta left behind")
 	}
 	snap := scan(t, d)
@@ -421,7 +422,9 @@ func TestSuperviseLeavesAnotherRunsLogAlone(t *testing.T) {
 			d := openDesk(t)
 			dropPending(t, d, tc.file, tc.body)
 			scan(t, d)
-			if _, err := d.Claim("01-hi", ""); err != nil {
+			sha := queuedSHA(t, d, "01-hi")
+			c, err := d.Claim("01-hi", sha)
+			if err != nil {
 				t.Fatal(err)
 			}
 			logPath := filepath.Join(d.Path(), DirDone, "01-hi.log")
@@ -433,7 +436,7 @@ func TestSuperviseLeavesAnotherRunsLogAlone(t *testing.T) {
 				writeFile(t, recordPath, "other record\n", 0o600)
 				return nil
 			}
-			if rc, err := d.supervise("01-hi"); err == nil || rc != 2 {
+			if rc, err := d.supervise("01-hi", sha, c.Kind); err == nil || rc != 2 {
 				t.Fatalf("supervise = %d, %v; want 2 and an error", rc, err)
 			}
 			for p, want := range map[string]string{logPath: "other run\n", recordPath: "other record\n"} {

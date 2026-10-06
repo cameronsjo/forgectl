@@ -20,12 +20,12 @@ import (
 
 // supervisorArgv is the command line that runs `forgectl desk _supervise`.
 // Tests replace it to re-execute the test binary.
-var supervisorArgv = func(dir, name string) ([]string, error) {
+var supervisorArgv = func(dir, name, sha string, kind Kind) ([]string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("desk: locate the forgectl binary: %w", err)
 	}
-	return []string{exe, "desk", "_supervise", "--dir", dir, name}, nil
+	return []string{exe, "desk", "_supervise", "--dir", dir, "--sha", sha, "--kind", string(kind), name}, nil
 }
 
 // Launch starts the detached supervisor that runs a claimed item, and
@@ -33,28 +33,38 @@ var supervisorArgv = func(dir, name string) ([]string, error) {
 // foreground (see [Desk.BeginRun]). When the supervisor cannot be started
 // the item is released to skipped/ (SkipLaunchFailed).
 //
+// The supervisor is handed the approved hash and kind, c.SHA256 and c.Kind,
+// and runs the item only if running/ still holds exactly those bytes, as that
+// kind. It starts in the home directory with [ChildEnv].
+//
 // The supervisor must outlive the desk, so it is started with no parent
 // context and in a session of its own (Setsid): closing the desk's pane
 // signals the desk's process group and session, and neither reaches it. It
 // deliberately does not use internal/exec's process-group runner, which kills
 // the group when its context ends — the opposite of what is wanted here.
-func (d *Desk) Launch(name string) (int, error) {
+func (d *Desk) Launch(c *Claimed) (int, error) {
+	if c == nil {
+		return 0, errors.New("desk: launch: no claimed item")
+	}
+	name := c.Name
 	kind, err := d.findKind(DirRunning, name)
 	if err != nil {
 		return 0, fmt.Errorf("desk: launch %s: claim it first: %w", describe(name), err)
 	}
-	if kind == KindScript {
-		data, err := d.readRegular(path.Join(DirRunning, name+extScript), maxItemBytes)
-		if err != nil {
-			return 0, fmt.Errorf("desk: launch %s: %w", describe(name), err)
-		}
-		if ParseHeaders(data).TTY {
-			// A caller that should have run it in its own foreground: end the
-			// claim rather than leave it ownerless until the grace runs out.
-			return 0, errors.Join(fmt.Errorf("desk: %s is a TTY item; it runs in the desk's foreground, not detached", describe(name)), d.Release(name, SkipLaunchFailed))
-		}
+	if kind != c.Kind || !ValidSHA256(c.SHA256) {
+		return 0, errors.Join(fmt.Errorf("%w: launch %s: running/ holds a %s, the claim is for a %s with hash %q",
+			ErrRefused, describe(name), kind, describe(string(c.Kind)), describe(c.SHA256)), d.Release(name, SkipLaunchFailed))
 	}
-	argv, err := supervisorArgv(d.path, name)
+	if kind == KindScript && c.TTY {
+		// A caller that should have run it in its own foreground: end the
+		// claim rather than leave it ownerless until the grace runs out.
+		return 0, errors.Join(fmt.Errorf("desk: %s is a TTY item; it runs in the desk's foreground, not detached", describe(name)), d.Release(name, SkipLaunchFailed))
+	}
+	home, err := HomeDir()
+	if err != nil {
+		return 0, errors.Join(err, d.Release(name, SkipLaunchFailed))
+	}
+	argv, err := supervisorArgv(d.path, name, c.SHA256, c.Kind)
 	if err != nil {
 		return 0, errors.Join(err, d.Release(name, SkipLaunchFailed))
 	}
@@ -62,6 +72,7 @@ func (d *Desk) Launch(name string) (int, error) {
 	cmd := exec.CommandContext(context.Background(), argv[0], argv[1:]...) //nolint:gosec // G204: re-executing this binary's own hidden subcommand
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil // /dev/null
+	cmd.Dir, cmd.Env = home, ChildEnv()
 	if err := cmd.Start(); err != nil {
 		// Nothing owns the claim now: end it where the operator sees it.
 		return 0, errors.Join(fmt.Errorf("desk: start supervisor for %s: %w", describe(name), err), d.Release(name, SkipLaunchFailed))
@@ -75,16 +86,22 @@ func (d *Desk) Launch(name string) (int, error) {
 
 // RunSupervisor is `forgectl desk _supervise`: it runs one claimed item in
 // running/ to completion and returns the process exit code (the item's rc, or
-// 2 when the supervisor itself could not run it).
-func RunSupervisor(dir, name string) int {
-	signal.Ignore(syscall.SIGHUP)
+// 2 when the supervisor itself could not run it). sha and kind are the hash
+// and kind the operator approved; the item runs only if its bytes still hash
+// to sha and it is still that kind ("script" or "batch").
+func RunSupervisor(dir, name, sha, kind string) int {
+	// Caught and discarded, not ignored: an ignored signal stays ignored
+	// across exec, so every script would start deaf to SIGHUP, while a caught
+	// one is reset to the default there. Notify never blocks on a full
+	// channel, so nothing needs to read it.
+	signal.Notify(make(chan os.Signal, 1), syscall.SIGHUP)
 	d, err := Open(dir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "desk _supervise:", err)
 		return 2
 	}
 	defer d.Close() //nolint:errcheck // exiting
-	rc, err := d.supervise(name)
+	rc, err := d.supervise(name, sha, Kind(kind))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "desk _supervise:", err)
 		if rc == 0 {
@@ -94,12 +111,37 @@ func RunSupervisor(dir, name string) int {
 	return rc
 }
 
-func (d *Desk) supervise(name string) (int, error) {
+func (d *Desk) supervise(name, sha string, want Kind) (int, error) {
+	// An approval always carries a full hash. Checked before anything is
+	// read, so a malformed one refuses without touching the item.
+	if !ValidSHA256(sha) {
+		return 2, fmt.Errorf("%w: %s: this supervisor's approval carries no valid sha256", ErrRefused, describe(name))
+	}
 	kind, err := d.findKind(DirRunning, name)
 	if err != nil {
 		return 2, err
 	}
-	meta, _, err := d.readMeta(DirRunning, name)
+	meta, ok, err := d.readMeta(DirRunning, name)
+	if err != nil {
+		return 2, err
+	}
+	// Claim moves the item before its meta, so a missing meta is a claim
+	// still in flight, not a match: refuse rather than compare against an
+	// empty record.
+	if !ok {
+		return 2, fmt.Errorf("%w: %s: no queue record in running/ yet", ErrRefused, describe(name))
+	}
+	// The approval names this claim only if its hash is the one recorded at
+	// queue time and its kind is the one queued and found. Otherwise this
+	// supervisor was not started for this claim: it refuses without touching
+	// the item, which reads as lost once the claim grace passes. The hash
+	// binds the bytes, not how they run, and findKind prefers .sh, so the
+	// bytes of an approved manifest must not run as bash, nor the reverse.
+	if sha != meta.SHA256 || kind != want || (meta.Kind != "" && meta.Kind != want) {
+		return 2, fmt.Errorf("%w: %s: this supervisor's approval (%s) does not name the item in running/ (%s)",
+			ErrRefused, describe(name), want, kind)
+	}
+	home, err := HomeDir()
 	if err != nil {
 		return 2, err
 	}
@@ -107,7 +149,9 @@ func (d *Desk) supervise(name string) (int, error) {
 	if err != nil {
 		return 2, err
 	}
-	if SHA256Hex(data) != meta.SHA256 {
+	// sha is the queue-time hash (checked above), so a mismatch here means
+	// the bytes changed after the claim.
+	if SHA256Hex(data) != sha {
 		if err := d.skipChanged(DirRunning, name, kind, meta); err != nil {
 			return 2, err
 		}
@@ -126,9 +170,9 @@ func (d *Desk) supervise(name string) (int, error) {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigs)
 	if kind == KindBatch {
-		return d.superviseBatch(name, data, sigs)
+		return d.superviseBatch(name, data, home, sigs)
 	}
-	return d.superviseScript(name, data, sigs)
+	return d.superviseScript(name, data, home, sigs)
 }
 
 // doneTaken reports a name whose done/ entries already exist (a reused
@@ -161,7 +205,7 @@ func (d *Desk) createLog(name string) (*os.File, error) {
 	return f, nil
 }
 
-func (d *Desk) superviseScript(name string, data []byte, sigs <-chan os.Signal) (int, error) {
+func (d *Desk) superviseScript(name string, data []byte, home string, sigs <-chan os.Signal) (int, error) {
 	run, err := d.BeginRun(name, os.Getpid())
 	if err != nil {
 		return 2, err
@@ -182,6 +226,7 @@ func (d *Desk) superviseScript(name string, data []byte, sigs <-chan os.Signal) 
 	// script started. stdin is /dev/null: a detached item never prompts.
 	cmd := exec.CommandContext(context.Background(), "/bin/bash", ScriptFDPath) //nolint:gosec // G204: constant argv; the script arrives on fd 3
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, logF, logF
+	cmd.Dir, cmd.Env = home, ChildEnv()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	release, err := AttachScript(cmd, data)
 	if err != nil {
@@ -255,7 +300,7 @@ func (d *Desk) endGroup(pgid int) {
 	signalGroup(pgid, unix.SIGKILL) // the last probe, just above, found it alive
 }
 
-func (d *Desk) superviseBatch(name string, data []byte, sigs <-chan os.Signal) (int, error) {
+func (d *Desk) superviseBatch(name string, data []byte, home string, sigs <-chan os.Signal) (int, error) {
 	m, perr := LoadManifest(data, name+extManifest)
 	var fields []string
 	if perr == nil {
@@ -284,9 +329,10 @@ func (d *Desk) superviseBatch(name string, data []byte, sigs <-chan os.Signal) (
 		return 2, run.Finish(2, "id-reused", nothing...)
 	}
 	b := NewBatch(m, BatchOptions{
-		ID:  name,
-		Dir: d.abs(dir),
-		Log: logF,
+		ID:      name,
+		Dir:     d.abs(dir),
+		WorkDir: home,
+		Log:     logF,
 		Event: func(line string) {
 			_ = run.Events.Emit(line) // the combined log carries the same line
 		},

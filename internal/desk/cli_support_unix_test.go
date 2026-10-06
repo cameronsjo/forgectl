@@ -150,7 +150,7 @@ func TestAbandonLeavesNoEventsInDone(t *testing.T) {
 	d := openDesk(t)
 	c := queue(t, d, "race.sh", "true\n")
 	plantBeforeRunStart(t, d, map[string]string{c.Name + ".log": "theirs\nEXIT=0\n"})
-	if rc, err := d.supervise(c.Name); rc != 2 || err == nil {
+	if rc, err := d.supervise(c.Name, c.SHA256, c.Kind); rc != 2 || err == nil {
 		t.Fatalf("supervise = %d, %v; want 2 and the log's EEXIST", rc, err)
 	}
 	if got := readFile(t, d.LogPath(c.Name)); got != "theirs\nEXIT=0\n" {
@@ -220,19 +220,19 @@ func TestLegacyDoneNamesShowButNeverAct(t *testing.T) {
 		if err := d.Unskip(n); err == nil {
 			t.Errorf("Unskip(%s) was accepted", n)
 		}
-		if _, err := d.Claim(n, ""); err == nil {
+		if _, err := d.Claim(n, anySHA); err == nil {
 			t.Errorf("Claim(%s) was accepted", n)
 		}
 		if _, err := d.BeginRun(n, os.Getpid()); err == nil {
 			t.Errorf("BeginRun(%s) was accepted", n)
 		}
-		if _, err := d.Launch(n); err == nil {
+		if _, err := d.Launch(&Claimed{Name: n, Kind: KindScript, SHA256: anySHA}); err == nil {
 			t.Errorf("Launch(%s) was accepted", n)
 		}
 		if _, err := d.NewWatcher(n, 0); err == nil {
 			t.Errorf("NewWatcher(%s) was accepted", n)
 		}
-		if rc := RunSupervisor(d.Path(), n); rc == 0 {
+		if rc := RunSupervisor(d.Path(), n, anySHA, string(KindScript)); rc == 0 {
 			t.Errorf("RunSupervisor(%s) returned 0", n)
 		}
 	}

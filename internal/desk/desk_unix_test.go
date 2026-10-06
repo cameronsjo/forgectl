@@ -320,10 +320,10 @@ func TestSecondClaimLoses(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer other.Close() //nolint:errcheck // test
-	if _, err := d.Claim(added.Name, ""); err != nil {
+	if _, err := d.Claim(added.Name, added.SHA256); err != nil {
 		t.Fatalf("first Claim: %v", err)
 	}
-	if _, err := other.Claim(added.Name, ""); !errors.Is(err, ErrClaimed) {
+	if _, err := other.Claim(added.Name, added.SHA256); !errors.Is(err, ErrClaimed) {
 		t.Fatalf("second Claim = %v, want ErrClaimed", err)
 	}
 }
@@ -372,7 +372,7 @@ func TestScanAndClaimRefuseAnythingButAOneLinkRegularFile(t *testing.T) {
 			if err := d.writeMeta(DirPending, "07-planted", Meta{SHA256: SHA256Hex([]byte(script)), Kind: KindScript}); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := d.Claim("07-planted", ""); !errors.Is(err, ErrRefused) {
+			if _, err := d.Claim("07-planted", SHA256Hex([]byte(script))); !errors.Is(err, ErrRefused) {
 				t.Fatalf("Claim = %v, want ErrRefused", err)
 			}
 			if _, err := os.Lstat(filepath.Join(d.Path(), DirRunning, "07-planted.sh")); err == nil {
@@ -627,7 +627,7 @@ func TestAnUnreadableItemIsRefusedAndDoesNotBlockOpen(t *testing.T) {
 	if len(s.Pending) != 1 || s.Pending[0].State != StateRefused || s.Pending[0].Refusal != "not readable" {
 		t.Fatalf("pending = %+v, want refused (not readable)", s.Pending)
 	}
-	if _, err := d.Claim("03-locked", ""); !errors.Is(err, ErrRefused) {
+	if _, err := d.Claim("03-locked", anySHA); !errors.Is(err, ErrRefused) {
 		t.Errorf("Claim = %v, want ErrRefused", err)
 	}
 }

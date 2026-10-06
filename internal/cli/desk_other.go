@@ -30,7 +30,7 @@ func runDeskSkip(*cobra.Command, string, string, string) error { return errDeskU
 
 func runDeskPrune(*cobra.Command, string, int, bool) error { return errDeskUnsupported() }
 
-func runDeskSupervise(string, string) error { return errDeskUnsupported() }
+func runDeskSupervise(string, string, string, string) error { return errDeskUnsupported() }
 
 // deskSupported: the desk core does not run here.
 const deskSupported = false

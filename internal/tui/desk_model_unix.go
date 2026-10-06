@@ -74,7 +74,7 @@ type deskBackend interface {
 	Path() string
 	Scan() (*desk.Snapshot, error)
 	Claim(name, wantSHA string) (*desk.Claimed, error)
-	Launch(name string) (int, error)
+	Launch(c *desk.Claimed) (int, error)
 	BeginRun(name string, pid int, fields ...string) (*desk.Run, error)
 	Skip(name, reason string) error
 	Unskip(name string) error
@@ -554,10 +554,11 @@ func rowLabel(k rowKind) string {
 
 // launch claims one item at the hash shown and starts its supervisor.
 func launch(d deskBackend, t target) (string, error) {
-	if _, err := d.Claim(t.name, t.sha); err != nil {
+	c, err := d.Claim(t.name, t.sha)
+	if err != nil {
 		return "", err
 	}
-	if _, err := d.Launch(t.name); err != nil {
+	if _, err := d.Launch(c); err != nil {
 		return "", err
 	}
 	return "started " + itemLabel(t.name), nil
@@ -939,6 +940,19 @@ type ttyRun struct {
 const ttyLogFD = "/dev/fd/4"
 
 func newTTYRun(d deskBackend, c *desk.Claimed, rcPath string, argv func(rcPath string) []string) (*ttyRun, error) {
+	// Only a script runs in the terminal: bash reads the claimed bytes as a
+	// script, and a manifest's bytes must never reach it that way.
+	if c.Kind != desk.KindScript || !c.TTY {
+		_ = os.Remove(rcPath)
+		return nil, errors.Join(fmt.Errorf("desk: %s is a %s, not a TTY script; it does not run in the terminal", itemLabel(c.Name), c.Kind), d.Release(c.Name, desk.SkipLaunchFailed))
+	}
+	// A TTY item starts where a detached one does: in the home directory,
+	// with the operator's environment minus bash's startup hooks.
+	home, err := desk.HomeDir()
+	if err != nil {
+		_ = os.Remove(rcPath)
+		return nil, errors.Join(err, d.Release(c.Name, desk.SkipLaunchFailed))
+	}
 	run, err := d.BeginRun(c.Name, os.Getpid())
 	if err != nil {
 		// The claim has no owner: end it in skipped/ rather than leave it
@@ -961,6 +975,7 @@ func newTTYRun(d deskBackend, c *desk.Claimed, rcPath string, argv func(rcPath s
 	}
 	a := argv(rcPath)
 	cmd := osexec.CommandContext(context.Background(), a[0], a[1:]...) //nolint:gosec // G204: script(1) and bash at fixed paths; the item arrives on fd 3
+	cmd.Dir, cmd.Env = home, ttyEnv(desk.ChildEnv())
 	return &ttyRun{claimed: c, run: run, cmd: cmd, rcPath: rcPath, log: logF}, nil
 }
 
