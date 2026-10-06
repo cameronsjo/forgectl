@@ -425,3 +425,95 @@ func TestDeskFrame_DrawsNothingUnsafe(t *testing.T) {
 		t.Fatalf("the hostile WHAT is not in the frame; the inertness check proves nothing:\n%s", ansi.Strip(out))
 	}
 }
+
+// longHeaderScript carries a WHAT and WHY far longer than any window, and a
+// body that opens with an embedded program's docstring, the shape that made
+// the focus panel unreadable (forgectl#1082).
+const longHeaderScript = `#!/bin/bash
+# WHAT: Rebuild the package mirror index from the upstream release feed and prune every release older than the retention window
+# WHY: Upstream published a release this morning and the nightly mirror job is paused until the index matches it
+python3 - <<'PY'
+print("rebuild")
+PY
+`
+
+func longHeaderSnapshot() (*desk.Snapshot, DeskFrameOptions) {
+	it := item("21-rebuild-mirror", desk.KindScript, desk.StateWaiting)
+	it.Content = []byte(longHeaderScript)
+	it.Headers = desk.ParseHeaders(it.Content)
+	it.Meta = desk.Meta{AddedAt: agoPtr(4 * time.Minute), SHA256: desk.SHA256Hex([]byte("mirror"))}
+	snap := &desk.Snapshot{Dir: "/home/op/.local/state/forgectl/desk", Taken: deskNow, Pending: []desk.Item{it}}
+	return snap, deskOpts()
+}
+
+// TestGoldenDeskFocusWrap pins the focus panel at 80, 100 and 160 columns:
+// WHAT and WHY wrap under their labels, in full, and the script preview is
+// labelled.
+func TestGoldenDeskFocusWrap(t *testing.T) {
+	forceTrueColor(t)
+	for _, w := range []int{80, 100, 160} {
+		t.Run(fmt.Sprint(w), func(t *testing.T) {
+			snap, opts := longHeaderSnapshot()
+			got := RenderDeskFrame(snap, w, 30, deskNow, opts)
+			plain := strings.Join(strings.Fields(ansi.Strip(got)), " ")
+			for _, want := range []string{"retention window", "matches it", "script ·"} {
+				if want == "retention window" || want == "matches it" {
+					// The tail of each field: wrapping must not lose it.
+					if !strings.Contains(strings.ReplaceAll(plain, "│ │", ""), want) {
+						t.Errorf("%d columns: %q was cut from the focus panel", w, want)
+					}
+					continue
+				}
+				if !strings.Contains(plain, want) {
+					t.Errorf("%d columns: the script preview has no label (%q)", w, want)
+				}
+			}
+			assertGolden(t, fmt.Sprintf("desk_focuswrap_%d", w), got)
+		})
+	}
+}
+
+// A WHAT too long for four wrapped lines ends in an ellipsis rather than
+// growing the panel without bound.
+func TestDeskFrame_FocusFieldsStopAtFourLines(t *testing.T) {
+	snap, opts := longHeaderSnapshot()
+	it := &snap.Pending[0]
+	it.What = strings.Repeat("rebuild the mirror index and prune every old release ", 8)
+	it.Content = []byte("#!/bin/bash\n# WHAT: " + it.What + "\necho hi\n")
+	it.Headers = desk.ParseHeaders(it.Content)
+	out := ansi.Strip(RenderDeskFrame(snap, 80, 40, deskNow, opts))
+	whatLines := 0
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "│ what ") || (whatLines > 0 && strings.HasPrefix(l, "│       ") && !strings.Contains(l, "┆")) {
+			whatLines++
+		}
+		if strings.HasPrefix(l, "│ why ") {
+			break
+		}
+	}
+	if whatLines != 4 {
+		t.Errorf("what wrapped to %d lines, want exactly 4:\n%s", whatLines, out)
+	}
+	if !strings.Contains(out, "…") {
+		t.Errorf("a what cut at four lines must end in an ellipsis:\n%s", out)
+	}
+}
+
+// The focus panel must read without colour: WHAT and WHY are told apart by
+// their labels and the hanging indent, and the script preview by its label.
+func TestGoldenDeskFocusWrapNoColor(t *testing.T) {
+	for _, w := range []int{80, 100, 160} {
+		t.Run(fmt.Sprint(w), func(t *testing.T) {
+			snap, opts := longHeaderSnapshot()
+			var buf bytes.Buffer
+			wr := theme.Default().Writer(&buf, []string{"NO_COLOR=1", "TERM=xterm-256color"})
+			if _, err := wr.Write([]byte(RenderDeskFrame(snap, w, 30, deskNow, opts))); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(buf.String(), "\x1b") {
+				t.Fatal("the no-color render still carries escapes")
+			}
+			assertGolden(t, fmt.Sprintf("desk_focuswrap_%d_nocolor", w), buf.String())
+		})
+	}
+}

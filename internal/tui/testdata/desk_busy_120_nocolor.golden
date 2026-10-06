@@ -18,6 +18,7 @@ desk ● · forgectl 0.0.0-test · host-a · ~/.local/state/forgectl/desk       
 │ 17 merge-feature-branch · sha256 283128acef14 · unchanged since queued 12m ago                                       │
 │ what  Merge the feature branch once checks pass                                                                      │
 │ why   The review is done; merges are yours                                                                           │
+│ ┆ script · the first lines it runs                                                                                   │
 │ ┆ set -euo pipefail                                                                                                  │
 │ ┆ gh pr merge 42 --repo example/project --squash --auto                                                              │
 │ ┆ gh pr view 42 --repo example/project --json state                                                                  │
@@ -29,7 +30,6 @@ desk ● · forgectl 0.0.0-test · host-a · ~/.local/state/forgectl/desk       
 │ ✓ 15 merge-1169                        ▅▅▅      ok               23m ago   0:41                                      │
 │ ✓ 09 sync-mirror                       ▅▅▅▅▅▅▅▅ ok               5h ago    2:00                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-
 
 
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/cameronsjo/forgectl/internal/desk"
@@ -744,12 +745,9 @@ func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, curso
 	}
 	head += st.Muted.Render(" · " + f.focusState(r))
 	lines := []string{head}
-	if it.What != "" {
-		lines = append(lines, st.Muted.Render("what  ")+st.Fg.Render(deskText(it.What)))
-	}
-	if it.Why != "" {
-		lines = append(lines, st.Muted.Render("why   ")+st.Fg.Render(deskText(it.Why)))
-	}
+	// The panel's text area is the width less the border and its padding.
+	lines = append(lines, wrapField(st, "what", st.Fg.Bold(true), it.What, width-4)...)
+	lines = append(lines, wrapField(st, "why", st.Meta, it.Why, width-4)...)
 	content := it.Content
 	if content == nil {
 		content = f.opts.Records[it.Name]
@@ -763,6 +761,9 @@ func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, curso
 		lines = append(lines, f.batchLines(st, it.Name, content, body)...)
 	default:
 		shown, hidden := scriptLines(content, body)
+		if len(shown) > 0 {
+			lines = append(lines, bar+st.Muted.Render("script · the first lines it runs"))
+		}
 		for _, l := range shown {
 			lines = append(lines, bar+st.Fg.Render(deskText(l)))
 		}
@@ -771,6 +772,34 @@ func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, curso
 		}
 	}
 	return strings.Split(Panel(st, width, "focus", "", lines), "\n")
+}
+
+// deskFieldLines caps how many lines `what` or `why` may wrap to, so one
+// long header cannot push the script and the history out of a short window.
+const deskFieldLines = 4
+
+// wrapField draws "label  text", wrapping text to width under the label
+// instead of cutting it. Beyond deskFieldLines the last line ends in "…".
+func wrapField(st theme.Styles, label string, text lipgloss.Style, value string, width int) []string {
+	if value == "" {
+		return nil
+	}
+	const labelW = 6
+	value = deskText(value)
+	wrapped := strings.Split(ansi.Wrap(value, max(width-labelW, 10), ""), "\n")
+	if len(wrapped) > deskFieldLines {
+		wrapped = wrapped[:deskFieldLines]
+		wrapped[deskFieldLines-1] = cut(wrapped[deskFieldLines-1]+"…", max(width-labelW, 10))
+	}
+	out := make([]string, len(wrapped))
+	for i, l := range wrapped {
+		lead := strings.Repeat(" ", labelW)
+		if i == 0 {
+			lead = st.Muted.Render(label + strings.Repeat(" ", labelW-len(label)))
+		}
+		out[i] = lead + text.Render(strings.TrimRight(l, " "))
+	}
+	return out
 }
 
 // focusState is the head line's second half.

@@ -23,6 +23,16 @@ func (d *Desk) Scan() (*Snapshot, error) {
 	now := d.now().UTC()
 	snap := &Snapshot{Dir: d.path, Taken: now}
 
+	// An item moved to skipped/ as changed has left pending/, so the hook
+	// hears of it once the scan is done: a hook that scans again must not
+	// run in the middle of this one.
+	var changed []Meta
+	defer func() {
+		for _, m := range changed {
+			d.leftPending(m)
+		}
+	}()
+
 	pending, err := d.list(DirPending)
 	if err != nil {
 		return nil, err
@@ -36,7 +46,9 @@ func (d *Desk) Scan() (*Snapshot, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !gone {
+		if gone {
+			changed = append(changed, it.Meta)
+		} else {
 			snap.Pending = append(snap.Pending, it)
 		}
 	}
@@ -147,6 +159,7 @@ func (d *Desk) sight(name string, kind Kind, now time.Time) (it Item, gone bool,
 		if err := d.skipChanged(DirPending, name, kind, meta); err != nil {
 			return it, false, err
 		}
+		it.Meta = meta
 		return it, true, nil
 	}
 	it.Meta, it.Content, it.Headers = meta, data, HeadersFor(kind, data)

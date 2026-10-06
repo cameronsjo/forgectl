@@ -129,6 +129,51 @@ func PaneRun(ctx context.Context, run exec.SensitiveRunner, herdrPath, paneID, c
 	return err
 }
 
+// DeskAgentSource is the --source and --agent label the desk reports under.
+// herdr keeps lifecycle authority per source, so the desk's blocked state
+// never overwrites the session's own, and release-agent hands back only what
+// this source took.
+const DeskAgentSource = "forgectl-desk"
+
+// The pane id comes before the flags in both verbs below. herdr 0.9.1 help
+// shows it last, but `pane release-agent --source S --agent S PANE` exits 2
+// with "unknown option: S"; with the pane first it works (measured).
+
+// PaneReportBlocked runs `herdr pane report-agent --source forgectl-desk
+// --agent forgectl-desk --state blocked --message MESSAGE PANE`, which puts
+// the pane in herdr's needs-you state. message is untrusted text (an item
+// name) and is rendered inert and capped first.
+func PaneReportBlocked(ctx context.Context, run exec.SensitiveRunner, herdrPath, paneID, message string) error {
+	if err := checkID("pane id", paneID); err != nil {
+		return err
+	}
+	args := []exec.Arg{
+		exec.MustFixed("pane"), exec.MustFixed("report-agent"), exec.Opaque(paneID),
+		exec.MustFixed("--source"), exec.MustFixed(DeskAgentSource),
+		exec.MustFixed("--agent"), exec.MustFixed(DeskAgentSource),
+		exec.MustFixed("--state"), exec.MustFixed("blocked"),
+	}
+	if text := notificationText(message); text != "" {
+		args = append(args, exec.MustFixed("--message"), exec.Opaque(text))
+	}
+	_, err := runVerb(ctx, run, herdrPath, exec.KindHerdrPaneAgent, "pane report-agent", args)
+	return err
+}
+
+// PaneReleaseDesk runs `herdr pane release-agent --source forgectl-desk
+// --agent forgectl-desk PANE`, clearing what [PaneReportBlocked] set.
+func PaneReleaseDesk(ctx context.Context, run exec.SensitiveRunner, herdrPath, paneID string) error {
+	if err := checkID("pane id", paneID); err != nil {
+		return err
+	}
+	_, err := runVerb(ctx, run, herdrPath, exec.KindHerdrPaneAgent, "pane release-agent", []exec.Arg{
+		exec.MustFixed("pane"), exec.MustFixed("release-agent"), exec.Opaque(paneID),
+		exec.MustFixed("--source"), exec.MustFixed(DeskAgentSource),
+		exec.MustFixed("--agent"), exec.MustFixed(DeskAgentSource),
+	})
+	return err
+}
+
 // PaneMove describes one `herdr pane move`. The pane keeps its terminal, so
 // whatever runs in it keeps running; only its place in the layout changes.
 type PaneMove struct {

@@ -4,10 +4,16 @@
 
 package cli
 
-import "github.com/spf13/cobra"
+import (
+	"github.com/spf13/cobra"
 
-func runDeskRuns(*cobra.Command, string, deskLogOpts, bool) error { return errDeskUnsupported() }
+	"github.com/cameronsjo/forgectl/internal/module"
+)
 
-func runDeskShow(*cobra.Command, string, string, deskLogOpts, deskShowOpts) error {
+func runDeskRuns(*cobra.Command, module.Deps, string, deskLogOpts, bool) error {
+	return errDeskUnsupported()
+}
+
+func runDeskShow(*cobra.Command, module.Deps, string, string, deskLogOpts, deskShowOpts) error {
 	return errDeskUnsupported()
 }
