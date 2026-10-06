@@ -1,16 +1,19 @@
 package cli
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/resume"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 func pickerSessions() []resume.Session {
@@ -177,6 +180,9 @@ func TestSessionSelect_HeaderFollowsTheMode(t *testing.T) {
 	if !strings.Contains(v, filterHint) || strings.Contains(v, browseHint) {
 		t.Errorf("typing a filter must show the filter hint, got:\n%s", v)
 	}
+	if got := bindingHelp(m.(sessionSelect).KeyBinds()); got != "↑/↓ move • enter keep filter • esc cancel" {
+		t.Errorf("the footer while typing a filter = %q", got)
+	}
 	if !strings.Contains(v, "searches the newest 25 only") {
 		t.Errorf("typing a filter on a cut list must say what it searches, got:\n%s", v)
 	}
@@ -205,5 +211,62 @@ func TestKeymapCancel_FilterFooterNamesEnter(t *testing.T) {
 	}
 	if got := km.MultiSelect.SetFilter.Help().Key; got != "enter" {
 		t.Errorf("MultiSelect set-filter hint = %q, want enter", got)
+	}
+}
+
+func bindingHelp(bs []key.Binding) string {
+	parts := make([]string, 0, len(bs))
+	for _, b := range bs {
+		parts = append(parts, b.Help().Key+" "+b.Help().Desc)
+	}
+	return strings.Join(parts, " • ")
+}
+
+// TestSessionSelect_RendersInsideTheRealForm runs the wrapper through a full
+// huh.Form with the app's own theme and keymap at a real terminal height. The
+// View override edits huh's rendered lines by index, so this pins the layout
+// against the real theme and against a huh bump: no placeholder line may
+// survive, the header must sit under the title, and the form must fit its
+// height.
+func TestSessionSelect_RendersInsideTheRealForm(t *testing.T) {
+	const cols, rows = 60, 14
+	note := sessionPickerNote(25, 25)
+	ss := sessionSelect{shown: 25, note: note, width: cols}
+	var chosen string
+	opts := make([]huh.Option[string], 25)
+	for i := range opts {
+		opts[i] = huh.NewOption(fmt.Sprintf("session %02d  repo  1h ago", i), fmt.Sprint(i))
+	}
+	ss.Select = huh.NewSelect[string]().Title("Recent sessions").Description(ss.placeholderDescription()).
+		Options(opts...).Value(&chosen)
+	form := huh.NewForm(huh.NewGroup(ss)).WithKeyMap(keymap.Cancel()).WithTheme(theme.Default().Huh()).
+		WithWidth(cols).WithHeight(rows - 1)
+	form.Init()
+	m, _ := form.Update(tea.WindowSizeMsg{Width: cols, Height: rows})
+	frame := ansi.Strip(m.(*huh.Form).View())
+	lines := strings.Split(frame, "\n")
+
+	if len(lines) > rows {
+		t.Errorf("the form is %d lines, the terminal %d:\n%s", len(lines), rows, frame)
+	}
+	for _, l := range lines {
+		if strings.TrimSpace(strings.Trim(l, "┃ ")) == "." {
+			t.Errorf("a placeholder description line survived:\n%s", frame)
+		}
+	}
+	want := []string{"Recent sessions", browseHint, note, "session 00"}
+	at := 0
+	for _, w := range want {
+		found := false
+		for ; at < len(lines); at++ {
+			if strings.Contains(lines[at], w) {
+				found = true
+				at++
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%q missing or out of order in:\n%s", w, frame)
+		}
 	}
 }

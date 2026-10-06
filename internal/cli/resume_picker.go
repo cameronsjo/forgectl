@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -137,11 +138,13 @@ type sessionSelect struct {
 	shown int    // rows in the list
 	note  string // sessionPickerNote, or empty
 	width int    // terminal columns, to cut the header lines; 0 = no cut
+	// muted styles the injected lines like huh's description. Nil leaves them plain.
+	muted func(...string) string
 }
 
 const (
 	browseHint = "enter resume · / filter · esc cancel"
-	filterHint = "enter keeps filter · esc cancels"
+	filterHint = "type to filter · esc cancels"
 )
 
 // headerLines is how many lines the header needs, which the placeholder
@@ -212,12 +215,30 @@ func (s sessionSelect) View() string {
 	return strings.Join(lines, "\n")
 }
 
-// cut keeps an injected line inside the terminal so it never wraps.
+// cut keeps an injected line inside the terminal so it never wraps, and
+// styles it like the description it replaces.
 func (s sessionSelect) cut(line string) string {
 	if s.width > 0 {
-		return truncate(line, s.width-pickerChrome+2)
+		line = truncate(line, s.width-pickerChrome+2)
+	}
+	if s.muted != nil && line != "" {
+		line = s.muted(line)
 	}
 	return line
+}
+
+// KeyBinds is the footer. While a filter is being typed huh's own footer reads
+// `enter set filter • enter submit` (two enter verbs, no esc), so it is
+// replaced by what the keys do in that mode.
+func (s sessionSelect) KeyBinds() []key.Binding {
+	if !s.GetFiltering() {
+		return s.Select.KeyBinds()
+	}
+	return []key.Binding{
+		key.NewBinding(key.WithKeys("up", "down"), key.WithHelp("↑/↓", "move")),
+		key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "keep filter")),
+		key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "cancel")),
+	}
 }
 
 // borderPrefix is the start of a field line up to and including its left

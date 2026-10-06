@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/term"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/huh/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
@@ -245,28 +246,25 @@ var pickSessionFn = pickSession
 func pickSession(sessions []resume.Session, th theme.Theme, note string) (resume.Session, error) {
 	w, h := terminalSize()
 	layout := layoutPicker(sessions, w)
-	dimStyle := th.Styles().Muted
+	// The label stays plain text: huh's `/` filter matches against it, so an
+	// SGR escape in it would be matchable (`m`, `[`). A running session shows
+	// `(running)` in its row, which says it cannot be continued without
+	// colour, so no dimming is needed.
 	opts := make([]huh.Option[string], len(sessions))
 	for i, s := range sessions {
-		label := sessionPickerLabel(s, layout)
-		// A running session cannot be continued, only forked — dimming says
-		// so before the selection does, the same way `pr pick` dims a PR it
-		// will skip.
-		if s.Live {
-			label = dimStyle.Render(label)
-		}
-		opts[i] = huh.NewOption(label, s.ID)
+		opts[i] = huh.NewOption(sessionPickerLabel(s, layout), s.ID)
 	}
 
-	sel := sessionSelect{shown: len(sessions), note: note, width: w}
+	sel := sessionSelect{shown: len(sessions), note: note, width: w, muted: th.Styles().Muted.Render}
 	var chosen string
 	sel.Select = huh.NewSelect[string]().
 		Title("Recent sessions").
 		Description(sel.placeholderDescription()).
 		Options(opts...).
 		Value(&chosen)
-	form := huh.NewForm(huh.NewGroup(sel)).
-		WithKeyMap(keymap.Cancel()).WithTheme(th.Huh())
+	km := keymap.Cancel()
+	km.Select.Submit = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "resume"))
+	form := huh.NewForm(huh.NewGroup(sel)).WithKeyMap(km).WithTheme(th.Huh())
 	// Without a height the list is as tall as the history and the title
 	// scrolls off the top of a short terminal; with one huh scrolls the rows.
 	if h > 0 {
