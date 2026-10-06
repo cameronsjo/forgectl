@@ -181,6 +181,40 @@ func TestCurrentLayoutAndPaneByTerminal(t *testing.T) {
 	}
 }
 
+// The pane id comes before the flags: herdr 0.9.1 refuses release-agent with
+// the pane last ("unknown option") though its help shows it there.
+func TestPaneReportBlockedAndReleaseDesk(t *testing.T) {
+	run := replying(`{"id":"x","result":{"type":"ok"}}`)
+	if err := PaneReportBlocked(t.Context(), run, testHerdrPath, "w1:p3", "desk: 2 waiting"); err != nil {
+		t.Fatal(err)
+	}
+	src := []exec.Arg{exec.MustFixed("--source"), exec.MustFixed(DeskAgentSource), exec.MustFixed("--agent"), exec.MustFixed(DeskAgentSource)}
+	want := paneCmd(exec.KindHerdrPaneAgent, append(append([]exec.Arg{exec.MustFixed("report-agent"), exec.Opaque("w1:p3")}, src...),
+		exec.MustFixed("--state"), exec.MustFixed("blocked"), exec.MustFixed("--message"), exec.Opaque("desk: 2 waiting"))...)
+	if got := lastCmd(t, run); !got.Equal(want) {
+		t.Errorf("report = %v, want %v", got, want)
+	}
+	if err := PaneReleaseDesk(t.Context(), run, testHerdrPath, "w1:p3"); err != nil {
+		t.Fatal(err)
+	}
+	want = paneCmd(exec.KindHerdrPaneAgent, append([]exec.Arg{exec.MustFixed("release-agent"), exec.Opaque("w1:p3")}, src...)...)
+	if got := lastCmd(t, run); !got.Equal(want) {
+		t.Errorf("release = %v, want %v", got, want)
+	}
+}
+
+func TestPaneAgentVerbsRefuseAnUnsafePaneID(t *testing.T) {
+	run := replying(`{"id":"x","result":{"type":"ok"}}`)
+	for _, id := range []string{"", "-x", "w1:p3\n"} {
+		if PaneReportBlocked(t.Context(), run, testHerdrPath, id, "m") == nil || PaneReleaseDesk(t.Context(), run, testHerdrPath, id) == nil {
+			t.Errorf("pane id %q was accepted", id)
+		}
+	}
+	if len(run.Calls()) != 0 {
+		t.Error("a refused pane id still ran herdr")
+	}
+}
+
 const paneMoveReply = `{"id":"x","result":{"type":"pane_move","move_result":{"changed":true,"previous_pane_id":"w1:p2","previous_workspace_id":"w1","previous_tab_id":"w1:t1","focused_pane_id":"w1:p0","target_layout":{},"created_tab":{"tab_id":"w1:t2"},"pane":{"pane_id":"w1:p1","terminal_id":"term_2","tab_id":"w1:t2","workspace_id":"w1","focused":false,"agent_status":"unknown","revision":1}}}}`
 
 func TestPanePlaceBuildsTheCommandAndReadsTheMove(t *testing.T) {

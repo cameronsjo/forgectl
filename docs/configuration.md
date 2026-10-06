@@ -52,6 +52,7 @@ Several command groups own their own config section, documented alongside that c
 - [`docs`](commands/docs.md) — `[docs]`, local markdown reader
 - [`theme`](commands/theme.md) — `[theme]`, `[theme.colors]`, the palette every styled surface draws from
 - [`herdr`](commands/herdr.md) — `[herdr.organize]`, the rules that group herdr tabs into workspaces
+- [`desk`](commands/desk.md#forgectl-desk-add-file) — `[desk]`, `notify_herdr` and `notify_macos`: whether `desk add` signals the operator through herdr and macOS (both default on)
 - `tasks` — `[tasks]`, `allowed_hosts`: the hosts, besides the built-in default, that a keychain credential may be sent to. The list applies to every keychain entry, the write entry included: a listed host can be sent whichever keychain token a command names. See [the `tasks done` contract](json-contract.md#tasks-done). An entry that is not a plain hostname makes the file invalid, and every command refuses it the way it refuses a file that does not parse
 
 ## Theme
@@ -85,8 +86,11 @@ TTY. It does this even where forgectl's policy refuses to probe: inside
 tmux/screen, with `NO_COLOR` set, or with a forced `[theme] mode`. forgectl
 ignores the answer in those cases (it resolves the palette from `mode` or the
 dark default instead), so the colours are right; only the query itself is sent.
-Measured cost is under 50 ms and no hang has been reproduced. Piped output never
-queries. There is no fang option to turn the query off, so this is accepted
+On a terminal that answers, the cost is under 50 ms. On one that never answers
+(some multiplexer, ssh, and mosh setups, and agent harnesses that run a bare pty),
+each help or error render waits about 4.5 s for the reply. A cancelled prompt
+(Esc or Ctrl+C) skips the renderer, so it does not pay that wait (#1099). Piped
+output never queries. There is no fang option to turn the query off, so this is accepted
 until upstream adds one (tracked in #546).
 
 A bad `[theme]` never stops the binary starting: it is reported by `doctor` and

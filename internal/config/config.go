@@ -133,6 +133,7 @@ type Config struct {
 	Herdr     HerdrConfig     `toml:"herdr"`
 	Resume    ResumeConfig    `toml:"resume"`
 	Tasks     TasksConfig     `toml:"tasks"`
+	Desk      DeskConfig      `toml:"desk"`
 	launchSet bool
 	// resumeUnknown lists the undecoded keys under [resume], so
 	// ResumeConfig.Validate can name a misspelled hook key instead of

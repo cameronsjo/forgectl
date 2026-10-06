@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/desk"
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/runview"
 )
 
@@ -91,10 +92,10 @@ func (r *loadedRun) progress() (total, done, failed int) {
 // deskRunSources opens the sources `desk runs` and `desk show` read: the
 // desk unless skipDesk, and the log when one is named. A source that cannot
 // be opened is returned as a failure beside the ones that could.
-func deskRunSources(dirFlag string, log deskLogOpts, skipDesk bool) (srcs []runview.Source, closeAll func(), failed []error) {
+func deskRunSources(cmd *cobra.Command, deps module.Deps, dirFlag string, log deskLogOpts, skipDesk bool) (srcs []runview.Source, closeAll func(), failed []error) {
 	closeAll = func() {}
 	if !skipDesk {
-		d, err := openDeskDir(dirFlag)
+		d, err := openDeskDirFor(cmd, deps, dirFlag)
 		if err != nil {
 			failed = append(failed, err)
 		} else {
@@ -134,8 +135,8 @@ func reportRunFailures(w io.Writer, failed []error) error {
 	return WithExitCode(fmt.Errorf("desk: %s could not be read", plural(len(failed), "source", "sources")), 1)
 }
 
-func runDeskRuns(cmd *cobra.Command, dirFlag string, log deskLogOpts, asJSON bool) error {
-	srcs, closeAll, failed := deskRunSources(dirFlag, log, false)
+func runDeskRuns(cmd *cobra.Command, deps module.Deps, dirFlag string, log deskLogOpts, asJSON bool) error {
+	srcs, closeAll, failed := deskRunSources(cmd, deps, dirFlag, log, false)
 	defer closeAll()
 	var runs []*loadedRun
 	for _, src := range srcs {
@@ -253,13 +254,13 @@ func writeRunsText(out io.Writer, runs []*loadedRun, now time.Time, noIcons bool
 	return w.err
 }
 
-func runDeskShow(cmd *cobra.Command, dirFlag, name string, log deskLogOpts, o deskShowOpts) error {
+func runDeskShow(cmd *cobra.Command, deps module.Deps, dirFlag, name string, log deskLogOpts, o deskShowOpts) error {
 	if name != "" {
 		if err := checkDeskName(name); err != nil {
 			return err
 		}
 	}
-	srcs, closeAll, failed := deskRunSources(dirFlag, log, name == "")
+	srcs, closeAll, failed := deskRunSources(cmd, deps, dirFlag, log, name == "")
 	defer closeAll()
 	if len(failed) > 0 {
 		return errors.Join(failed...)

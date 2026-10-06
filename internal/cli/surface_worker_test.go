@@ -76,7 +76,7 @@ func goodSteps(t *testing.T) workerSteps {
 			return worker.Worktree{Path: testRepoTop + "/.claude/worktrees/w1", Branch: "feat/w1", Base: "abc123"}, nil
 		},
 		build: func(cwd string) (launch.BuiltInvocation, error) {
-			return launch.BuiltInvocation{Invocation: launch.Invocation{Harness: "codex", CWD: cwd}}, nil
+			return launch.BuiltInvocation{Invocation: launch.Invocation{Harness: "codex", CWD: cwd}, Worker: true}, nil
 		},
 		launch: func(context.Context, launch.Invocation) (backend.Ref, error) { return testHerdrRef(t), nil },
 		now:    func() time.Time { return time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC) },
@@ -201,6 +201,7 @@ func TestWorkerLaunchRecordsTheSession(t *testing.T) {
 		return launch.BuiltInvocation{
 			Invocation: launch.Invocation{Harness: "claude", CWD: cwd, Env: []string{"HOME=/h"}},
 			SessionID:  id,
+			Worker:     true,
 		}, nil
 	}
 	if _, err := runWorkerSteps(context.Background(), led, "w1", "feat/w1", steps); err != nil {
@@ -240,5 +241,31 @@ func TestBuildWorkerInvocationIsolates(t *testing.T) {
 		if strings.HasPrefix(e, "CLAUDE_CODE_MESSAGING_TOKEN=") || strings.HasPrefix(e, "HERDR_SOCKET_PATH=") {
 			t.Fatalf("worker env kept the launcher's handle %s", e)
 		}
+	}
+}
+
+// TestWorkerLaunchRefusesANonWorkerBuild closes the bypass where the launch
+// path builds the invocation without marking it a worker: no posture floor,
+// no isolation argv, the launcher's whole environment. runWorkerSteps refuses
+// to start it, and records the failure.
+func TestWorkerLaunchRefusesANonWorkerBuild(t *testing.T) {
+	led := testWorkerLedger(t)
+	steps := goodSteps(t)
+	launched := false
+	steps.build = func(cwd string) (launch.BuiltInvocation, error) {
+		return launch.BuiltInvocation{Invocation: launch.Invocation{Harness: "claude", CWD: cwd}}, nil
+	}
+	steps.launch = func(context.Context, launch.Invocation) (backend.Ref, error) {
+		launched = true
+		return testHerdrRef(t), nil
+	}
+	if _, err := runWorkerSteps(context.Background(), led, "w1", "feat/w1", steps); err == nil {
+		t.Fatal("a non-worker build was accepted")
+	}
+	if launched {
+		t.Fatal("a non-worker build was launched")
+	}
+	if row := onlyRow(t, led); row.Stage != worker.StageFailed {
+		t.Fatalf("stage = %q, want failed", row.Stage)
 	}
 }

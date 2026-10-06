@@ -738,7 +738,14 @@ func rollbackPrompt(ref Ref, bc Breadcrumb) string {
 // stood in for this, and its yes deleted a clean room.
 func confirmRemoval(prompt string, th theme.Theme) (bool, error) {
 	ok := false
-	err := keymap.Suspendable(huh.NewForm(
+	err := confirmRemovalForm(prompt, th, &ok).Run()
+	return ok, err
+}
+
+// confirmRemovalForm builds the form, split out so a test can feed it keys. It takes
+// keymap.Cancel so Esc cancels it as Ctrl+C does.
+func confirmRemovalForm(prompt string, th theme.Theme, ok *bool) *huh.Form {
+	return keymap.Suspendable(huh.NewForm(
 		huh.NewGroup(
 			huh.NewNote().
 				Title("Remove this clean room? — this cannot be undone").
@@ -747,10 +754,9 @@ func confirmRemoval(prompt string, th theme.Theme) (bool, error) {
 				Title("Remove the clean room and its session record?").
 				Affirmative("Remove").
 				Negative("Cancel").
-				Value(&ok),
+				Value(ok),
 		),
-	)).WithTheme(th.Huh()).Run()
-	return ok, err
+	)).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh())
 }
 
 // repairForgetLocked removes ONLY the record, after proving that neither a

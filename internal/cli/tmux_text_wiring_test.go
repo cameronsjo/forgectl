@@ -114,8 +114,10 @@ func TestTmuxTextUsesApprovedRenderers(t *testing.T) {
 	want := map[string]int{
 		// The hub header's session count: only len() of ListSessions is
 		// read; no session text reaches any renderer (forgectl#730).
-		"hub_header.go":  1,
-		"tmux_kill.go":   1,
+		"hub_header.go": 1,
+		// The --others prompt names the sessions it will kill; each name
+		// reaches the prompt only through termsafe.QuoteTextMax.
+		"tmux_kill.go":   2,
 		"tmux_ls.go":     1,
 		"tmux_pick.go":   1,
 		"tmux_rename.go": 1,

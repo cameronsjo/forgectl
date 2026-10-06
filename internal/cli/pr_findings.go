@@ -202,8 +202,7 @@ func runPrFindingsCleanup(cmd *cobra.Command, client *pr.Client, olderThan time.
 		return err
 	}
 	if !ok {
-		fmt.Fprintln(out, "cancelled")
-		return nil
+		return noteCancelled(out)
 	}
 
 	removed, err := client.FindingsRemove(cmd.Context(), preview)

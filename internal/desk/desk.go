@@ -331,6 +331,11 @@ type Meta struct {
 	// in a platform-specific unit, so a reused pid does not read as alive.
 	PID      int   `json:"pid,omitempty"`
 	PIDStart int64 `json:"pid_start,omitempty"`
+	// SignalPane is the herdr pane of the session that queued the item, kept
+	// so the operator signal raised for it can be cleared when the item runs
+	// or is skipped. Untrusted text on read: validate before it reaches an
+	// argv.
+	SignalPane string `json:"signal_pane,omitempty"`
 }
 
 // State is where an item stands.

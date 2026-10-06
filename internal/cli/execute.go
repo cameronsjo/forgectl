@@ -103,6 +103,15 @@ func processArgs() []string {
 // opening the TUI (bare invoke or an external-command miss — the thumb-mode
 // affordance) or handing off to fang for styled help/errors/version.
 func Execute(ctx context.Context) error {
+	userCancelled.Store(false)
+	return finishCancel(executeFn(ctx))
+}
+
+// executeFn is the dispatch Execute wraps, a seam so a test can end it in a
+// cancel and check the exit code without a terminal.
+var executeFn = execute
+
+func execute(ctx context.Context) error {
 	// FIRST, ahead of every line below. A `surface _exec` re-entry carries a
 	// private socket path and a one-use rendezvous nonce in argv, and every
 	// statement after this one either does work that invocation does not need
@@ -306,6 +315,7 @@ func execCommand(ctx context.Context, root *cobra.Command, args []string, th the
 	if err := unknownSubcommand(root, args); err != nil {
 		return renderCommandError(ctx, root, th, err)
 	}
+	withCancelHandling(root)
 	root.SetArgs(args)
 	return fang.Execute(ctx, root, fangOptions(meta.Version, meta.Commit, th)...)
 }
