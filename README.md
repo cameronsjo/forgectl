@@ -310,6 +310,7 @@ forgectl desk runs                       # every run and how far it got
 forgectl desk show 17-fix --events       # one run as a flow, with its event timeline; --at N replays
 forgectl desk status --json              # the queue as JSON
 forgectl desk layout --progress 'CMD'    # herdr split: this pane left, the desk right, CMD below it
+forgectl desk layout --below             # herdr: the desk in a full-width row under every pane in the tab
 
 # tasks — Vikunja task board: three read verbs over a local cache, one verb that closes a task, and an MCP server
 # one-time setup: store a READ-ONLY API token in the login keychain (prompts for the value)

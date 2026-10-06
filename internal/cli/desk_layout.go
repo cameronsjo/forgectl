@@ -65,7 +65,7 @@ func selfBinary() (string, error) {
 func newDeskLayoutCmd(deps module.Deps, dir *string) *cobra.Command {
 	var progress string
 	var width int
-	var dryRun bool
+	var dryRun, below bool
 	cmd := &cobra.Command{
 		Use:   "layout",
 		Short: "Split the herdr tab: this pane left, the desk right, CMD below it",
@@ -73,6 +73,16 @@ func newDeskLayoutCmd(deps module.Deps, dir *string) *cobra.Command {
 desk dashboard on the right, about --width columns wide, and, with --progress,
 CMD in a pane below the desk. The new panes are named "desk" and "progress";
 this pane keeps the focus.
+
+--below builds a different shape: the desk in a full-width row under every pane
+already in the tab, and, with --progress, CMD to the right of the desk in that
+row. herdr splits panes, not the tab, so the tab's other panes are moved to a
+temporary tab, the desk is split off this pane, and they are moved back to the
+right of this pane in a row of equal widths. A moved pane keeps its terminal,
+so whatever runs in it keeps running; only its place changes (a layout of
+stacked panes comes back as one row, and the panes left of this one come back
+on its right). If a step fails, the parked panes are moved back before the
+error returns. --width does not apply to --below.
 
 CMD is typed into the progress pane's shell as it is, so quote it for a shell.
 The desk pane runs this forgectl by its absolute path: <path> desk --dir <the
@@ -82,23 +92,28 @@ confirms the id still holds it; a mismatch stops the layout.
 
 It must run inside a herdr pane (HERDR_ENV=1, with HERDR_PANE_ID set).
 
---dry-run reads the tab's width and prints the plan (the splits and their
-ratios, the renames, and the command each pane would run) without changing
-anything.
+--dry-run reads the tab's width (with --below, its panes) and prints the plan
+(the moves and splits and their ratios, the renames, and the command each pane
+would run) without changing anything.
 
 Exit codes: 0 laid out (or planned, with --dry-run); 1 a herdr call failed (the panes made so far stay);
 2 usage, or not in a herdr pane.`,
-		Example: `  forgectl desk layout --progress 'claude-desk progress' --width 70`,
-		Args:    cobra.NoArgs,
+		Example: `  forgectl desk layout --progress 'claude-desk progress' --width 70
+  forgectl desk layout --below`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if width < deskLayoutMinWidth || width > deskLayoutMaxWidth {
 				return deskUsage("desk layout: --width must be between %d and %d", deskLayoutMinWidth, deskLayoutMaxWidth)
 			}
-			return runDeskLayout(cmd, deps, *dir, progress, width, dryRun)
+			if below && cmd.Flags().Changed("width") {
+				return deskUsage("desk layout: --width does not apply to --below")
+			}
+			return runDeskLayout(cmd, deps, *dir, progress, width, dryRun, below)
 		},
 	}
 	cmd.Flags().StringVar(&progress, "progress", "", "a shell command to run in a pane below the desk")
 	cmd.Flags().IntVar(&width, "width", deskLayoutWidth, "about how many columns the desk's column gets")
+	cmd.Flags().BoolVar(&below, "below", false, "put the desk in a full-width row under every pane in the tab (the other panes are moved out and back; their processes keep running)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the planned splits, renames and commands, and change nothing (it still reads the tab's width)")
 	return cmd
 }
@@ -111,7 +126,7 @@ func deskSplitRatio(total, want int) float64 {
 	return math.Round(r*100) / 100
 }
 
-func runDeskLayout(cmd *cobra.Command, deps module.Deps, dirFlag, progress string, width int, dryRun bool) error {
+func runDeskLayout(cmd *cobra.Command, deps module.Deps, dirFlag, progress string, width int, dryRun, below bool) error {
 	if !deskSupported {
 		return errDeskUnsupported()
 	}
@@ -155,6 +170,9 @@ func runDeskLayout(cmd *cobra.Command, deps module.Deps, dirFlag, progress strin
 	ctx := cmd.Context()
 	client := herdr.New(deps.Runner)
 	run := deps.SensitiveRunner
+	if below {
+		return runDeskLayoutBelow(cmd, client, run, herdrPath, cwd, deskCommand, progress, dryRun)
+	}
 	layout, err := client.CurrentLayout(ctx)
 	if err != nil {
 		return fmt.Errorf("desk layout: read the tab's width: %w", err)

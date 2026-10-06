@@ -30,6 +30,8 @@ type fakeHerdrTab struct {
 	// getTerminal, when set, overrides the terminal `pane get` reports for
 	// an id: a pane renumbered between the list and the confirming read.
 	getTerminal func(id string) string
+	// tabOf, when set, names the tab each terminal is in ("w1:t1" if absent).
+	tabOf map[string]string
 }
 
 func (f *fakeHerdrTab) paneID(term string) string {
@@ -44,7 +46,11 @@ func (f *fakeHerdrTab) paneID(term string) string {
 func (f *fakeHerdrTab) panes() []herdr.Pane {
 	out := make([]herdr.Pane, 0, len(f.terminals))
 	for _, t := range f.terminals {
-		out = append(out, herdr.Pane{PaneID: f.paneID(t), TabID: "w1:t1", WorkspaceID: "w1", TerminalID: t})
+		tab := "w1:t1"
+		if x, ok := f.tabOf[t]; ok {
+			tab = x
+		}
+		out = append(out, herdr.Pane{PaneID: f.paneID(t), TabID: tab, WorkspaceID: "w1", TerminalID: t})
 	}
 	return out
 }
