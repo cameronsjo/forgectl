@@ -236,3 +236,72 @@ func TestInspectWorktreeRefusesARedirectedGitFile(t *testing.T) {
 		t.Fatalf("a redirected .git was not refused: %v", err)
 	}
 }
+
+// TestInspectWorktreeRunsNoHook is the canary for a worker-selected hook:
+// status refreshing a stat-dirty entry rewrites the index, which would fire
+// post-index-change.
+func TestInspectWorktreeRunsNoHook(t *testing.T) {
+	ctx := context.Background()
+	run := fexec.OSRunner{}
+	top := gitRepo(t)
+	wt, err := AddWorktree(ctx, run, top, "w", "feat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(wt.Path, "a.txt"), "x\n")
+	mustGit(t, wt.Path, "add", "a.txt")
+	mustGit(t, wt.Path, "commit", "-q", "-m", "a")
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	hooks := t.TempDir()
+	// #nosec G306 -- a hook must be executable to be a valid control.
+	if err := os.WriteFile(filepath.Join(hooks, "post-index-change"), []byte("#!/bin/sh\ntouch '"+marker+"'\n"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, top, "config", "core.hooksPath", hooks)
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(filepath.Join(wt.Path, "a.txt"), later, later); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectWorktree(ctx, run, top, "w", wt.Base); err != nil {
+		t.Fatalf("InspectWorktree: %v", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a hook ran during close's git status")
+	}
+}
+
+func TestCheckGitFile(t *testing.T) {
+	ctx := context.Background()
+	run := fexec.OSRunner{}
+
+	t.Run("a relative gitfile git wrote is accepted", func(t *testing.T) {
+		top := gitRepo(t)
+		mustGit(t, top, "config", "worktree.useRelativePaths", "true")
+		wt, err := AddWorktree(ctx, run, top, "w", "feat")
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(filepath.Join(wt.Path, ".git"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "gitdir: /") {
+			t.Skip("this git writes absolute gitfiles (worktree.useRelativePaths needs git 2.48)")
+		}
+		if _, err := InspectWorktree(ctx, run, top, "w", wt.Base); err != nil {
+			t.Fatalf("a relative gitfile was refused: %v", err)
+		}
+	})
+
+	t.Run("a gitfile naming the worktrees dir's parent is refused", func(t *testing.T) {
+		top := gitRepo(t)
+		wt, err := AddWorktree(ctx, run, top, "w", "feat")
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(wt.Path, ".git"), "gitdir: "+top+"/.git/worktrees/..\n")
+		if _, err := InspectWorktree(ctx, run, top, "w", ""); !errors.Is(err, ErrUnsafeWorktreeRoot) {
+			t.Fatalf("not refused: %v", err)
+		}
+	})
+}

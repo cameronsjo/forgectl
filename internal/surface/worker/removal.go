@@ -113,7 +113,9 @@ func InspectWorktree(ctx context.Context, run GitRunner, top, name, base string)
 	// status re-hashes stat-dirty files through any filter driver the
 	// worktree's .gitattributes names, and the worktree is the worker's to
 	// write; RunUnfiltered blanks every driver so none runs as the operator.
-	if f.Status, err = gitenv.RunUnfiltered(ctx, run, gitenv.Bin, path, "status", "--porcelain", "--ignored"); err != nil {
+	// Refreshing a stat-dirty entry rewrites the index, which fires
+	// post-index-change, so hooks are pinned off as well.
+	if f.Status, err = gitenv.RunUnfiltered(ctx, run, gitenv.Bin, path, "-c", "core.hooksPath=/dev/null", "status", "--porcelain", "--ignored"); err != nil {
 		return WorktreeFacts{}, fmt.Errorf("worker: git status in %s: %w", path, err)
 	}
 	// An error from either lookup below is read as "detached" or "no upstream".
@@ -186,6 +188,14 @@ func checkGitFile(common, path string) error {
 		return fmt.Errorf("worker: read %s: %w", gitfile, err)
 	}
 	dir, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir: ")
+	if ok && !filepath.IsAbs(dir) {
+		// worktree.useRelativePaths writes the gitdir relative to the
+		// worktree, and git resolves it from there, not from our cwd.
+		dir = filepath.Join(path, dir)
+	}
+	if base := filepath.Base(dir); base == "." || base == ".." {
+		ok = false
+	}
 	admin, aerr := filepath.EvalSymlinks(filepath.Join(common, "worktrees"))
 	parent, perr := filepath.EvalSymlinks(filepath.Dir(dir))
 	if !ok || aerr != nil || perr != nil || parent != admin {
