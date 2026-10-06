@@ -196,9 +196,11 @@ type filterRun struct {
 // filterRun values carrying gen. bubbles runs one filter per changed query in
 // a command, and the commands of two quick keystrokes finish in either order;
 // without a stamp the list cannot tell the stale result from the current one.
-// The commands a key returns are batches of the filter run and a cursor
-// blink, so the wrapper unpacks a batch and stamps only the filter message;
-// everything else passes through untouched.
+// The commands a list update returns are batches of the filter run and a
+// cursor blink, so the wrapper unpacks a batch and stamps only the filter
+// message; everything else passes through untouched. updateList wraps every
+// command the list returns, and a result that came from anywhere else would
+// arrive unstamped and be accepted as before.
 func tagFilterRuns(cmd tea.Cmd, gen int) tea.Cmd {
 	if cmd == nil {
 		return nil

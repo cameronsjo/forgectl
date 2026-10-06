@@ -248,7 +248,7 @@ type model struct {
 
 	action Action
 
-	// filterGen numbers the query as typed: it advances whenever a key
+	// filterGen numbers the query as typed: it advances whenever a message
 	// changes the filter text, and tagFilterRuns stamps each filter run
 	// with it, so updateList can tell the newest result from an older one.
 	filterGen int
@@ -615,14 +615,31 @@ func (m *model) skipHeading(up bool) {
 	}
 }
 
+// updateList runs msg through the list and stamps the filter runs it starts
+// with the query's generation. Every message that can change the query (a key,
+// a paste) goes through here, so a result from an older query can always be
+// told from the current one: updateListMsg drops it (forgectl#1102).
 func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
+	query := m.l.FilterInput.Value()
+	out, cmd := m.updateListMsg(msg)
+	next, ok := out.(model)
+	if !ok {
+		return out, cmd
+	}
+	if next.l.FilterInput.Value() != query {
+		next.filterGen++
+	}
+	return next, tagFilterRuns(cmd, next.filterGen)
+}
+
+func (m model) updateListMsg(msg tea.Msg) (tea.Model, tea.Cmd) {
 	km, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		if run, ok := msg.(filterRun); ok {
-			// Each keystroke starts its own filter run and the runs finish in
-			// any order: the result for "p" can land after the one for "pr"
-			// and replace it. Only the newest keystroke's result is the
-			// query's; an older one is dropped (forgectl#1102).
+			// Each change to the query starts its own filter run and the runs
+			// finish in any order: the result for "p" can land after the one
+			// for "pr" and replace it. Only the newest query's result is
+			// current; an older one is dropped (forgectl#1102).
 			if run.gen != m.filterGen {
 				return m, nil
 			}
@@ -643,20 +660,14 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// list sizes its filter input by the prompt (SetSize), so a key that
 	// opens or closes a filter, or sets a prompt, re-sizes the list once it
 	// is handled.
-	before, prompt, query := m.l.FilterState(), m.l.FilterInput.Prompt, m.l.FilterInput.Value()
+	before, prompt := m.l.FilterState(), m.l.FilterInput.Prompt
 	out, cmd := m.updateListKey(km)
-	next, ok := out.(model)
-	if !ok {
-		return out, cmd
-	}
-	if next.l.FilterInput.Value() != query {
-		next.filterGen++
-	}
-	cmd = tagFilterRuns(cmd, next.filterGen)
-	if next.hubScreen() && (next.l.FilterState() != before || next.l.FilterInput.Prompt != prompt) {
+	if next, ok := out.(model); ok && next.hubScreen() &&
+		(next.l.FilterState() != before || next.l.FilterInput.Prompt != prompt) {
 		next.applySize()
+		return next, cmd
 	}
-	return next, cmd
+	return out, cmd
 }
 
 // updateListKey is updateList for a key press.

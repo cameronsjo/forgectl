@@ -118,8 +118,8 @@ func visibleNames(m model) []string {
 // terminal width). The list must show the current query's result whichever
 // order the results arrive in.
 //
-// Mutation that turns it red: in updateList, hand a FilterMatchesMsg to
-// m.l.Update instead of calling m.refilter().
+// Mutation that turns it red: delete the run.gen != m.filterGen return in
+// updateListMsg, so an older query's result is applied.
 func TestHubSearchOrderDoesNotDependOnWhichRunFinishesLast(t *testing.T) {
 	inOrder := func(perKey [][]tea.Msg) []tea.Msg {
 		var out []tea.Msg
@@ -268,7 +268,7 @@ func TestFitName(t *testing.T) {
 // caret while the operator edits mid-query, and the cursor row after the
 // filter was accepted and the operator moved down it.
 //
-// Mutation that turns it red: handle a filterRun by calling
+// Mutation that turns it red: handle a filterRun in updateListMsg by calling
 // m.l.SetFilterText(m.l.FilterValue()) instead of passing its message to the
 // list, which moves the caret to the end and the cursor to the first row.
 func TestHubSearchResultKeepsCaretAndCursor(t *testing.T) {
@@ -309,5 +309,43 @@ func TestHubSearchResultKeepsCaretAndCursor(t *testing.T) {
 	}
 	if got := m.l.Index(); got != at {
 		t.Errorf("a late filter result moved the cursor from row %d to %d", at, got)
+	}
+}
+
+// TestHubSearchPasteIsAQueryChangeToo pins a review finding on the fix for
+// forgectl#1102: a paste changes the query without a key press, so its filter
+// run must be stamped like a key's. Otherwise the run for the typed "p" still
+// looks current when it lands after the paste's, and the list shows "p"'s rows
+// under the query "pr".
+//
+// Mutation that turns it red: compare the query only for tea.KeyPressMsg in
+// updateList, as the first version did.
+func TestHubSearchPasteIsAQueryChangeToo(t *testing.T) {
+	run := func(reverse bool) []string {
+		m := searchModel(80, 24)
+		out, _ := m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+		m = out.(model)
+		out, cmd := m.Update(tea.KeyPressMsg{Code: 'p', Text: "p"})
+		m = out.(model)
+		typed := filterResults(cmd)
+		out, cmd = m.Update(tea.PasteMsg{Content: "r"})
+		m = out.(model)
+		pasted := filterResults(cmd)
+		msgs := append(append([]tea.Msg(nil), typed...), pasted...)
+		if reverse {
+			slices.Reverse(msgs)
+		}
+		for _, msg := range msgs {
+			out, _ := m.Update(msg)
+			m = out.(model)
+		}
+		return visibleNames(m)
+	}
+	want, got := run(false), run(true)
+	if !slices.Equal(got, want) {
+		t.Errorf("a paste arriving before the typed key's result changed the list:\n in order: %v\n reversed: %v", want, got)
+	}
+	if len(want) == 0 || want[0] != "pr" {
+		t.Errorf("setup: the query pr lists %v, want pr first", want)
 	}
 }
