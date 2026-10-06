@@ -89,7 +89,8 @@ func TestSuperviseRefusesAnotherApprovalInPlace(t *testing.T) {
 // Claim moves the item before its meta. A supervisor that reads in between
 // finds no meta; with an empty --sha the two empty hashes would match and the
 // item would be skipped as changed. It must refuse without touching the item.
-// The sha check and the meta check each close this alone.
+// The sha check and the meta check each close this alone; the two tests
+// after this one pin each check on its own.
 func TestSuperviseRefusesAnEmptyShaBeforeTheMetaArrives(t *testing.T) {
 	d := openDesk(t)
 	marker := filepath.Join(t.TempDir(), "ran")
@@ -106,6 +107,45 @@ func TestSuperviseRefusesAnEmptyShaBeforeTheMetaArrives(t *testing.T) {
 	}
 	if s := scan(t, d); len(s.Skipped) != 0 {
 		t.Fatalf("skipped %d; want the claim left in place", len(s.Skipped))
+	}
+}
+
+// A meta with no hash reads as present. Only the sha check stops an empty
+// --sha from matching it and skipping the item as changed.
+func TestSuperviseRefusesAnEmptyShaAgainstAMetaWithNoHash(t *testing.T) {
+	d := openDesk(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	c := queue(t, d, "x.sh", "touch "+marker+"\n")
+	m, ok, err := d.readMeta(DirRunning, c.Name)
+	if err != nil || !ok {
+		t.Fatalf("readMeta = %v, %v", ok, err)
+	}
+	m.SHA256 = ""
+	if err := d.writeMeta(DirRunning, c.Name, m); err != nil {
+		t.Fatal(err)
+	}
+	if rc, err := d.supervise(c.Name, "", c.Kind); rc != 2 || !errors.Is(err, ErrRefused) {
+		t.Fatalf("supervise = %d, %v; want 2 and ErrRefused", rc, err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the item ran")
+	}
+	if s := scan(t, d); len(s.Skipped) != 0 {
+		t.Fatalf("skipped %d; want the claim left in place", len(s.Skipped))
+	}
+}
+
+// With a valid --sha and no meta yet, the hash mismatch would refuse too;
+// the meta check refuses first and says why.
+func TestSuperviseNamesAMissingMeta(t *testing.T) {
+	d := openDesk(t)
+	c := queue(t, d, "x.sh", "true\n")
+	if err := os.Remove(filepath.Join(d.Path(), DirRunning, c.Name+".meta.json")); err != nil {
+		t.Fatal(err)
+	}
+	rc, err := d.supervise(c.Name, c.SHA256, c.Kind)
+	if rc != 2 || !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "no queue record") {
+		t.Fatalf("supervise = %d, %v; want 2 and a refusal naming the missing queue record", rc, err)
 	}
 }
 
@@ -243,7 +283,7 @@ func TestScrubEnvDropsBashStartupHooks(t *testing.T) {
 	in := []string{
 		"PATH=/bin", "HOME=/h", "BASH_ENV=/x", "ENV=production", "SHELLOPTS=xtrace", "BASHOPTS=extglob",
 		"CDPATH=/c", "GLOBIGNORE=*", "PS4=$(id)", "BASH_FUNC_ls%%=() { :; }", "GH_TOKEN=keep", "PS1=keep",
-		"POSIXLY_CORRECT=1", "BASH_COMPAT=31", "EXECIGNORE=*", "TMOUT=1", "BASH_XTRACEFD=9",
+		"POSIXLY_CORRECT=1", "BASH_COMPAT=31", "EXECIGNORE=*", "TMOUT=1", "BASH_XTRACEFD=9", "FUNCNEST=1", "GLOBSORT=-name",
 	}
 	want := []string{"PATH=/bin", "HOME=/h", "ENV=production", "GH_TOKEN=keep", "PS1=keep"}
 	if got := scrubEnv(in); !slices.Equal(got, want) {
