@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -183,6 +184,7 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 	// would let acceptEdits or workspace-write reach past it, so they are dropped
 	// until the worker profile (T5) decides otherwise.
 	p.AddDir = nil
+	p.Detached = true
 	return p, nil
 }
 
@@ -205,7 +207,7 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 // settings file) must merge its keys into this one value, not add a flag.
 const workerClaudeSettings = `{"useAutoModeDuringPlan":false,"permissions":{"deny":["SendMessage","RemoteTrigger"]}}`
 
-// workerClaudeIsolation is the argv that keeps everything but forgectl's own
+// workerClaudeIsolation returns the argv that keeps everything but forgectl's own
 // settings out of a claude worker (ADR-0010, forgectl#1050). Measured on
 // Claude Code 2.1.289 with `claude -p` in a repo whose branch carried a
 // SessionStart hook, a .mcp.json server and a skill:
@@ -225,13 +227,15 @@ const workerClaudeSettings = `{"useAutoModeDuringPlan":false,"permissions":{"den
 // CLAUDE.md is not covered: it is memory, not settings, and claudeMdExcludes
 // is read only from the settings layers this turns off. The branch's
 // CLAUDE.md still loads; checking it against a trusted base is forgectl#1061.
-var workerClaudeIsolation = []string{
-	"--setting-sources", "",
-	"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
-	"--no-chrome",
+func workerClaudeIsolation() []string {
+	return []string{
+		"--setting-sources", "",
+		"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
+		"--no-chrome",
+	}
 }
 
-// withWorkerSettings inserts workerClaudeIsolation and
+// withWorkerSettings inserts workerClaudeIsolation() and
 // `--settings <workerClaudeSettings>` right after the posture's leading
 // --permission-mode pair.
 //
@@ -246,18 +250,36 @@ func withWorkerSettings(args []string) ([]string, error) {
 		return nil, fmt.Errorf("%w: worker argv %q does not start with --permission-mode, so --settings has no anchor",
 			ErrWorkerPosture, args)
 	}
-	out := make([]string, 0, len(args)+len(workerClaudeIsolation)+2)
+	out := make([]string, 0, len(args)+8)
 	out = append(out, args[:2]...)
-	out = append(out, workerClaudeIsolation...)
+	out = append(out, workerClaudeIsolation()...)
 	out = append(out, "--settings", workerClaudeSettings)
-	// --ide connects to the operator's editor and its MCP tools (which can
-	// run code there); a worker has no editor of its own, so it is dropped.
-	for _, a := range args[2:] {
-		if a != "--ide" {
-			out = append(out, a)
+	return append(out, args[2:]...), nil
+}
+
+// workerEnvKeys are the inherited variables a worker keeps. Everything else
+// in the launcher's environment is dropped: when the launcher is a Claude Code
+// session, that environment carries its user settings' env block and its own
+// handles (the cross-session messaging socket and token, the herdr and cmux
+// sockets, a computer-use token file), which a worker's Bash could use to
+// act as the coordinator. The profile's own env and forgectl's injected
+// values still apply on top, so a variable a worker needs goes in config.
+var workerEnvKeys = []string{
+	"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "COLORTERM",
+	"LANG", "TZ", "TMPDIR", "CLAUDE_CONFIG_DIR", "SSH_AUTH_SOCK",
+}
+
+// workerBaseEnv keeps the entries of env named in workerEnvKeys, and the
+// LC_* locale variables.
+func workerBaseEnv(env []string) []string {
+	out := make([]string, 0, len(workerEnvKeys))
+	for _, e := range env {
+		key, _, _ := strings.Cut(e, "=")
+		if slices.Contains(workerEnvKeys, key) || strings.HasPrefix(key, "LC_") {
+			out = append(out, e)
 		}
 	}
-	return out, nil
+	return out
 }
 
 // validSessionID reports whether id is a lowercase 8-4-4-4-12 hex UUID, the
@@ -399,6 +421,9 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 	// naming the same variable still lands — the operator's explicit value
 	// outranks an injected default's removal, exactly as it outranks its set.
 	base := StripEnv(cloneStrings(req.BaseEnv), req.UnsetEnv)
+	if req.Worker {
+		base = workerBaseEnv(base)
+	}
 
 	return BuiltInvocation{
 		Invocation: Invocation{

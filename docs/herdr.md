@@ -81,12 +81,13 @@ A claude worker gets only forgectl's settings (ADR-0010, forgectl#1050). Its arg
 - **`--setting-sources ""`:** no user, project or local settings load. The branch's `.claude/settings.json` hooks do not run, and the operator's plugins, hooks and skills do not load. Only Claude Code's built-in plugins, skills and agents remain.
 - **`--strict-mcp-config` with an empty `--mcp-config`:** no MCP server loads. That covers the branch's `.mcp.json`, the operator's servers, and plugin servers, a herdr-driving one included.
 - **`--no-chrome`:** turns off Claude in Chrome. It is enabled from `~/.claude.json`, so the flags above leave it on.
-- **No `--ide`:** the worker does not connect to the operator's editor.
+- **No `--ide`:** the worker does not ask to connect to the operator's editor.
+- **An environment allowlist:** a worker inherits only `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `COLORTERM`, `LANG`, `LC_*`, `TZ`, `TMPDIR`, `CLAUDE_CONFIG_DIR` and `SSH_AUTH_SOCK`, plus herdr's pane ids. When the launcher is a Claude Code session, the rest of its environment carries its user settings' `env` block and its own handles: the cross-session messaging socket and token, and the herdr and cmux sockets. The profile's `env` and forgectl's injected values still apply, so a variable a worker needs goes in config.
 - **`--settings`:** sets `useAutoModeDuringPlan: false` (forgectl#1060) and denies `SendMessage` and `RemoteTrigger`. Without the deny, a worker could message another Claude session on the machine, the coordinator included, or start a cloud session.
 
-These were measured live on Claude Code 2.1.289. Every case was checked with `claude -p` in a repo carrying a hook, an MCP server and a skill. In an interactive herdr worker, with these flags it listed no MCP server, and its tool list held neither denied tool.
+These are measurements on Claude Code 2.1.289, not tests: a unit test pins the argv, the settings JSON and the environment allowlist, and nothing re-checks the behavior on a Claude Code upgrade. With `claude -p` in a repo carrying a hook, an MCP server, a skill, a subagent that declares an MCP server, and a command, none of them loaded. A live herdr worker listed no MCP server, its tool list held neither denied tool, and its process environment held only the allowlist. The built-in plugins' contents are not checked.
 
-The branch's `CLAUDE.md` still loads. It is memory, not settings, and `claudeMdExcludes` is read only from the settings layers this turns off. Checking it against a trusted base is forgectl#1061. A codex worker gets none of this yet.
+The branch's `CLAUDE.md` still loads. It is memory, not settings, and `claudeMdExcludes` is read only from the settings layers this turns off. Checking it against a trusted base is forgectl#1061. A codex worker gets only the environment allowlist so far (forgectl#1092).
 
 ## Listing and closing workers
 
