@@ -210,7 +210,7 @@ the configured GitHub host.
 			return runReviewList(cmd, srcs, reviewedPath, asJSON, kind, repo, th)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"key","kind","repo","number","title","state","isDraft","labels","updatedAt","url","reviewed"}] to stdout (an empty list is [])`)
 	cmd.Flags().StringVar(&kind, "kind", "", "filter by kind: issue or pr")
 	cmd.Flags().StringVar(&repo, "repo", "", "filter to one owner/name repo")
 

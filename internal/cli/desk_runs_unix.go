@@ -274,8 +274,15 @@ func runDeskShow(cmd *cobra.Command, dirFlag, name string, log deskLogOpts, o de
 		ref = refs[0]
 	}
 	r, err := loadRun(src, ref)
+	if errors.Is(err, desk.ErrNotFound) && name != "" {
+		// A name taken from a JSON `path` carries the item's extension.
+		if stem := trimDeskExt(name); stem != "" {
+			ref.Name = stem
+			r, err = loadRun(src, ref)
+		}
+	}
 	if errors.Is(err, desk.ErrNotFound) {
-		return fmt.Errorf("desk show: no run named %s", name)
+		return deskNotFound("desk show", "run", name, nil)
 	}
 	if err != nil {
 		return err
