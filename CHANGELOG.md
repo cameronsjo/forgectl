@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.27.0](https://github.com/cameronsjo/forgectl/compare/v0.26.0...v0.27.0) (2026-10-05)
+
+
+### Features
+
+* **desk:** add forgectl desk, an approval queue for scripts an agent stages and you run ([0512b23](https://github.com/cameronsjo/forgectl/commit/0512b230a198b6365991fbcb81166aba795d67e1))
+* **desk:** add forgectl desk, an approval queue for scripts an agent stages and you run ([ca7b78e](https://github.com/cameronsjo/forgectl/commit/ca7b78e9bb6ff6412cc7d55bcd245ab68c90e56d))
+* **desk:** add forgectl desk, an approval queue for scripts an agent stages and you run ([7526a36](https://github.com/cameronsjo/forgectl/commit/7526a36b3453e1af9dd72da9e1c1e1ecf130c6f9))
+* **desk:** add forgectl desk, an approval queue for scripts an agent stages and you run ([75cb3e4](https://github.com/cameronsjo/forgectl/commit/75cb3e4a36504328b52dc31531c17a527ad5a4f5))
+* **desk:** add forgectl desk, an approval queue for scripts an agent stages and you run ([7b12a77](https://github.com/cameronsjo/forgectl/commit/7b12a777be96d773bdbdfa65acab6ac14c2f6e33))
+* **desk:** add forgectl desk, an approval queue for scripts an agent stages and you run ([e86178d](https://github.com/cameronsjo/forgectl/commit/e86178dfff169273809a706e9d2c70ec0e2538dd))
+* **desk:** add forgectl desk, an approval queue for scripts an agent stages and you run ([72c6cf8](https://github.com/cameronsjo/forgectl/commit/72c6cf8396a14cf4a5dd3a10b59d70ef18182055))
+* **desk:** add forgectl desk, an approval queue for scripts an agent stages and you run ([8022016](https://github.com/cameronsjo/forgectl/commit/8022016a32d25872f0eae049bf3eb34ee5c1b7a3))
+* **desk:** add forgectl desk, an approval queue for scripts an agent stages and you run ([7eab56c](https://github.com/cameronsjo/forgectl/commit/7eab56c445dfc506e05cb620c6e3895e6b68d07c))
+* **desk:** add forgectl desk, an approval queue for scripts an agent stages and you run ([773e4fa](https://github.com/cameronsjo/forgectl/commit/773e4fae2a82601591ebf24cf91d7b54d03b3c8d))
+* **desk:** add forgectl desk, an approval queue for scripts an agent stages and you run ([7dad3be](https://github.com/cameronsjo/forgectl/commit/7dad3be6442b2a3d3c51fb2e0dd8b5dfb6ba6710))
+* **desk:** add forgectl desk, an approval queue for scripts an agent stages and you run ([79db941](https://github.com/cameronsjo/forgectl/commit/79db9412f89bc1efaecc13e38ffaf79ab192ec02))
+* **desk:** add forgectl desk, an approval queue for scripts an agent stages and you run ([0eb4c85](https://github.com/cameronsjo/forgectl/commit/0eb4c85eef8529585d11f58a6a930c30de482d67))
+* **desk:** queue core, unchanged check, supervisor and batch runner ([c5ee46c](https://github.com/cameronsjo/forgectl/commit/c5ee46c1be9965b69f9fb8b525dc5c4b093a330e))
+* **desk:** queue core, unchanged check, supervisor and batch runner ([348cd4c](https://github.com/cameronsjo/forgectl/commit/348cd4cf61a14d7b5b48cc2389c978e2a94284cf))
+* **desk:** read-only accessors for the dashboard ([b3729b0](https://github.com/cameronsjo/forgectl/commit/b3729b0e28ed64eb2b3fcb180cbceaf2257e6979))
+* **herdr:** readiness predicates for coordinator workers ([d909544](https://github.com/cameronsjo/forgectl/commit/d9095440f2deaae0736ed9b04a32bdc9239e06f6))
+* **herdr:** show notifications through the sensitive seam ([b372a48](https://github.com/cameronsjo/forgectl/commit/b372a488f1312b4f2b3851735dcf829116e00d83))
+* **surface:** surface ready waits for a worker's input prompt ([365f133](https://github.com/cameronsjo/forgectl/commit/365f133310349577a607906db5450f732d0b4a05))
+* **surface:** surface ready waits for a worker's input prompt ([6de8751](https://github.com/cameronsjo/forgectl/commit/6de8751e0d509744b9e9a3214149faecb5edb270))
+* **tui:** add Panel, Sparkline, and Bar rendering helpers ([912de47](https://github.com/cameronsjo/forgectl/commit/912de4709218960e177519fea308125a0ac51a7f))
+* **tui:** desk dashboard view ([f0d5d68](https://github.com/cameronsjo/forgectl/commit/f0d5d682d9a7cc0f9f652f9aecba3d3fe390cc46))
+* **tui:** forgectl desk dashboard view ([6281e49](https://github.com/cameronsjo/forgectl/commit/6281e49cb76d4ad8a02ed46ed649c1f60b0c2594))
+
+
+### Bug Fixes
+
+* **desk:** a claim whose run never begins no longer sticks in running/ ([ca7ffd4](https://github.com/cameronsjo/forgectl/commit/ca7ffd4d8132970ceb9bc78f5eeb85eb01b6bd88))
+* **desk:** close the inherited script fd; skip unreadable files ([f48e4f4](https://github.com/cameronsjo/forgectl/commit/f48e4f4b03712b5ea652c6cee7ea2c705eadf077))
+* **desk:** lock inode check, fd 4 closed in TTY items, dead claims, reused names ([594008a](https://github.com/cameronsjo/forgectl/commit/594008a5d1897e08b2231f6a7e016e8027aae2ec))
+* **desk:** owner lock, FIFO-safe readers, and a final skip for lost runs ([cb103f2](https://github.com/cameronsjo/forgectl/commit/cb103f2feb52a38cef55589ef05457debc89400d))
+* **desk:** refuse a reused name at BeginRun and report claim cleanup failures ([baa1e7e](https://github.com/cameronsjo/forgectl/commit/baa1e7e45686c90c9b4a32223d9d050420568c97))
+* **desk:** retry the owner lock briefly; release a claim whose meta is lost ([0ef7949](https://github.com/cameronsjo/forgectl/commit/0ef794947d13589c313edb99cdb228e7353d08b2))
+* **desk:** run verified bytes from a pipe; record rc in meta ([36a2ce1](https://github.com/cameronsjo/forgectl/commit/36a2ce1dc31f64590bc6a8270c897210e9dff0d0))
+* **launch:** refuse harness args for workers; anchor settings at argv[0] ([d28e977](https://github.com/cameronsjo/forgectl/commit/d28e9778fc197fa0ee2bbb6bb95207d064cc056d))
+* **launch:** turn off auto mode during plan for claude workers ([c15617b](https://github.com/cameronsjo/forgectl/commit/c15617bbfd09df0e9a61a5b60fb5e10039a883e2))
+* **launch:** turn off auto mode during plan for claude workers ([75a78f4](https://github.com/cameronsjo/forgectl/commit/75a78f4515dd8f42edb58d6ee3f44518ea7b1fa4)), closes [#1060](https://github.com/cameronsjo/forgectl/issues/1060)
+* **surface:** fold polish review into surface ready ([b6e0c73](https://github.com/cameronsjo/forgectl/commit/b6e0c73d6af30c87be6c14396bb0c0834a3f0220))
+* **surface:** fold security re-review into surface ready ([8ab3322](https://github.com/cameronsjo/forgectl/commit/8ab332257a308637314c5ab94728622d3d6d2b03))
+* **tui:** no bell on undo; clear a result on the next key ([5285c2b](https://github.com/cameronsjo/forgectl/commit/5285c2b96cfaab5cd4813acda97a94d4d22b4c2f))
+* **tui:** TTY log on fd 4, a wrapping pager, final lost skips, scan deadline ([85e7ef7](https://github.com/cameronsjo/forgectl/commit/85e7ef7c46467a7bf09ab37756d8d3b48c213247))
+
+
+### Reverts
+
+* undo the hand-merged 0.27.0 release bump ([2ba0b58](https://github.com/cameronsjo/forgectl/commit/2ba0b583bd13b7185f34325ad19a6e8ec146a841))
+* undo the hand-merged 0.27.0 release bump ([77cd9be](https://github.com/cameronsjo/forgectl/commit/77cd9be887158b95a8039c8eaed8a19fa51465f7))
+
 ## [0.26.0](https://github.com/cameronsjo/forgectl/compare/v0.25.0...v0.26.0) (2026-10-05)
 
 
