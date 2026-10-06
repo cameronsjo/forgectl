@@ -47,7 +47,7 @@ var tmuxModule = module.Manifest{
 // Without this check Bubble Tea writes alt-screen sequences into a pipe, or
 // fails with a raw /dev/tty error when there is no terminal at all
 // (forgectl#1100).
-var errTmuxMenuNeedsTerminal = errors.New("the tmux menu needs a terminal on stdin and stdout; use tmux ls, tmux pick, or tmux tree for plain output")
+var errTmuxMenuNeedsTerminal = errors.New("the tmux menu needs a terminal on stdin and stdout; use forgectl tmux ls or forgectl tmux tree for plain output")
 
 // newTmuxCmd builds the `tmux` parent command. Verbs are attached in their own
 // files (tmux_ls.go, …) so each milestone adds a slice without churn here.
@@ -70,10 +70,11 @@ func newTmuxCmdWith(deps module.Deps, client *tmux.Client, run hubRunner) *cobra
 		// every group parent).
 		Args: cobra.NoArgs,
 		// `forgectl tmux` with no verb opens the tmux jumper directly (the
-		// hub row's behavior for tmux) — StartInTmux skips the hub screen,
-		// but the hub is still one esc away, so it's built from cmd.Root()
-		// (resolved at run time, once the whole tree exists) rather than
-		// threaded through construction.
+		// hub row's behavior for tmux) — StartInTmux skips the hub screen and
+		// makes the menu the quit level. The hub rows still feed a verb chosen
+		// from the menu, so they are built from cmd.Root() (resolved at run
+		// time, once the whole tree exists) rather than threaded through
+		// construction.
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !isInteractiveTTY() {
 				return errTmuxMenuNeedsTerminal

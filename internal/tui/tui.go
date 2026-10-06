@@ -172,8 +172,8 @@ type HubLeaf struct {
 
 // RunOptions configures Run. Hub is the full ordered row set buildHub
 // produced (cli.buildHub); StartInTmux skips the hub and opens directly in
-// the tmux jumper (menuMode) — bare `forgectl tmux`'s behavior — with the hub
-// still one esc away.
+// the tmux jumper (menuMode) — bare `forgectl tmux`'s behavior. The menu is then
+// the quit level: q/esc leaves the program rather than opening the hub.
 //
 // Header is the hub's status line and ArgSources feeds the argument picker,
 // keyed by the space-joined argv before the argument ("projects clone").

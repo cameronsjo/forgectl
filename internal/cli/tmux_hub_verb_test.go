@@ -152,7 +152,7 @@ func TestTmux_BareOffTerminalRefusesWithoutOpeningTheHub(t *testing.T) {
 	if opened {
 		t.Fatal("the hub opened off a terminal")
 	}
-	if err == nil || !strings.Contains(err.Error(), "needs a terminal") || !strings.Contains(err.Error(), "tmux ls") {
+	if err == nil || !strings.Contains(err.Error(), "needs a terminal") || !strings.Contains(err.Error(), "forgectl tmux ls") {
 		t.Fatalf("err = %v, want a terminal-required message naming the plain forms", err)
 	}
 }
