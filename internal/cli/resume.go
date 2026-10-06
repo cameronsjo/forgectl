@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/term"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/huh/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
@@ -185,7 +186,7 @@ func runResume(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMig
 		// Opening the picker anyway is what ADR-0008 rule 1 forbids.
 		return ambiguousMatch(cmd, sessions, filter, dryRun)
 	default:
-		if picked, err = pickSessionFn(sessions, th); err != nil {
+		if picked, err = pickSessionFn(sessions, th, sessionPickerNote(len(sessions), limit)); err != nil {
 			return WithExitCode(err, 1)
 		}
 	}
@@ -241,30 +242,35 @@ var pickSessionFn = pickSession
 
 // pickSession runs the single-select. Options are keyed by session id so a
 // selection round-trips unambiguously (the same reason pickPRs keys on a ref).
-func pickSession(sessions []resume.Session, th theme.Theme) (resume.Session, error) {
-	w := layoutFor(sessions, terminalWidth())
-	dimStyle := th.Styles().Muted
+// note is a line about what the list leaves out (sessionPickerNote), or empty.
+func pickSession(sessions []resume.Session, th theme.Theme, note string) (resume.Session, error) {
+	w, h := terminalSize()
+	layout := layoutPicker(sessions, w)
+	// The label stays plain text: huh's `/` filter matches against it, so an
+	// SGR escape in it would be matchable (`m`, `[`). A running session shows
+	// `(running)` in its row, which says it cannot be continued without
+	// colour, so no dimming is needed.
 	opts := make([]huh.Option[string], len(sessions))
 	for i, s := range sessions {
-		label := sessionRowWidth(s, w)
-		// A running session cannot be continued, only forked — dimming says
-		// so before the selection does, the same way `pr pick` dims a PR it
-		// will skip.
-		if s.Live {
-			label = dimStyle.Render(label)
-		}
-		opts[i] = huh.NewOption(label, s.ID)
+		opts[i] = huh.NewOption(sessionPickerLabel(s, layout), s.ID)
 	}
 
+	sel := sessionSelect{shown: len(sessions), note: note, width: w, muted: th.Styles().Muted.Render}
 	var chosen string
-	err := keymap.Suspendable(huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Recent sessions — enter to resume, esc to cancel").
-				Options(opts...).
-				Value(&chosen),
-		),
-	)).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh()).Run()
+	sel.Select = huh.NewSelect[string]().
+		Title("Recent sessions").
+		Description(sel.placeholderDescription()).
+		Options(opts...).
+		Value(&chosen)
+	km := keymap.Cancel()
+	km.Select.Submit = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "resume"))
+	form := keymap.Suspendable(huh.NewForm(huh.NewGroup(sel))).WithKeyMap(km).WithTheme(th.Huh())
+	// Without a height the list is as tall as the history and the title
+	// scrolls off the top of a short terminal; with one huh scrolls the rows.
+	if h > 0 {
+		form = form.WithHeight(h - 1)
+	}
+	err := form.Run()
 	if err != nil {
 		return resume.Session{}, err
 	}
@@ -325,6 +331,20 @@ func writerWidth(w io.Writer) int {
 // picker renders to, since huh drives the terminal directly rather than a
 // writer we hand it.
 func terminalWidth() int { return writerWidth(os.Stdout) }
+
+// terminalSize reports the process's own stdout as columns and rows, or 0, 0
+// when it is not a terminal.
+func terminalSize() (cols, rows int) {
+	fd := int(os.Stdout.Fd())
+	if !term.IsTerminal(fd) {
+		return 0, 0
+	}
+	cols, rows, err := term.GetSize(fd)
+	if err != nil || cols <= 0 || rows <= 0 {
+		return 0, 0
+	}
+	return cols, rows
+}
 
 // layoutFor sizes the columns to the CONTENT and then to the TERMINAL.
 //

@@ -392,7 +392,7 @@ func pinPick(t *testing.T, choose func([]resume.Session) (resume.Session, error)
 	t.Helper()
 	calls := 0
 	prev := pickSessionFn
-	pickSessionFn = func(sessions []resume.Session, _ theme.Theme) (resume.Session, error) {
+	pickSessionFn = func(sessions []resume.Session, _ theme.Theme, _ string) (resume.Session, error) {
 		calls++
 		return choose(sessions)
 	}

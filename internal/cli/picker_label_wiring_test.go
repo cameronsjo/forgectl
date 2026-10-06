@@ -25,6 +25,7 @@ var escapedLabelRenderers = map[string]bool{
 	// are approved as whole renderers because a label built from one is escaped
 	// field by field inside it.
 	"sessionRowWidth":      true,
+	"sessionPickerLabel":   true,
 	"sessionRow":           true,
 	"projectCandidateLine": true,
 }
