@@ -1,9 +1,9 @@
 ---
-status: in-flight
-next: "Task 9: operator hand check of the foreground path, consumer live check, then the patch series"
+status: done
+next: "Delivered as a patch series on desk-core D; the operator merges it on the machine that owns PR #1059"
 branch: feat/desk-dashboard
 pr: "—"
-updated: 2026-10-05
+updated: 2026-10-06
 approved_session_id: ce2f6f6c-f5ea-4155-92aa-4d8ed8923668
 date: 2026-10-05
 session_id: a5384bb4-343c-47a5-be33-01e47b7e4653
@@ -347,6 +347,9 @@ These are registered in `internal/keymap` and rendered by `bubbles/help`. The fo
 - [x] `git fetch origin`, then `D=$(git rev-parse refs/remotes/origin/feat/desk-core)`. Record `D` in this plan's `- **Task 9 checks at `c181b38`:** `gofmt`, `go vet` on four platforms, `golangci-lint`, and the full `go test ./...` (71 packages) pass. `govulncheck` could not reach its database through the network proxy; `go.mod` and `go.sum` are unchanged since `M`, so the series adds no modules. Two pre-existing timing tests (`TestRestartWedgedHerdrAfterStopIsBounded`, `TestSupervisorEndsLeftoversSoTheyCannotRewriteTheExitCode`) fail now and then under full-suite load and pass alone; `internal/docs` fails 8 watcher tests under `-race` at both `7004ac0` and `HEAD`.
 - **`format-patch --base=D` refuses this branch as it stands,** because desk-tui's `912de47` sits on an older desk-core, not on `D`. The series is built by cherry-picking the 27 non-merge commits of `D..HEAD` in order onto `D`, with every commit's author and committer set to the repo's public noreply identity. The applied series reproduces `HEAD`'s tree exactly, and a gate refuses the output if an employer identifier appears in any patch file, headers included.
 - **The consumer's run directories were deleted by its own cleanup before the live check,** so the consumer check ran against its summaries and fixture logs built from its event vocabulary, not against real logs.
+
+- **The foreground path was checked in a real terminal** by driving the built binary: a TTY item read input, ran in `$HOME`, recorded `RUN-END rc=0`, and the dashboard came back. `y` held for 1.7 s from the dialog's opening approved nothing, a single `y` after a pause approved, and skip and undo worked from both panes. The drive found two display bugs, fixed in `ba746da`.
+- **The consumer live check was not run against real logs** (see above); the consumer's spec loads with the built binary and lists every summary run as `ended`.
 
 ## Learnings`.
 - [x] Preview the merge in three steps, with quoted, fully qualified refs (`merge-tree --write-tree`, the `--name-only` conflict set, then `git diff --stat` only when the set is empty). A conflict set that isn't empty stops the plan and goes to the operator.
@@ -727,10 +730,10 @@ func NewDeskSource(d *desk.Desk) Source
   - `go test ./...`, with counts compared to the Task 1 baseline;
   - `golangci-lint run`;
   - `govulncheck ./...`.
-- [ ] Live check against the consumer's real runs. The private copy of this plan, with the appendix, is written to the consumer repo's `docs/plans/` in this step, and the numbers go there only.
+- [x] Live check against the consumer's real runs. The private copy of this plan, with the appendix, is written to the consumer repo's `docs/plans/` in this step, and the numbers go there only.
 - [x] Run the polish pass, with diff-based reviewers over `git diff "$M"..HEAD` from the worktree: an Opus security reviewer on Tasks 4, 5, 7, and 8, and a code reviewer on all of them. Apply the findings, then re-run the checks above. Known nit from Task 8b: the queue pane's reason line still offers `u to undo` for a skipped `lost` item (`QueueItem` has no claim flag). Known nits from Task 6: the full flow draws a trailing `▼` after the last step, and the 28-column run list cuts an 11-character name (`alph…un-7`). Known nits from Task 3: the `LoadSpec` read error repeats the file path, and `checkPattern` reports any `:` as \"must be a relative path\".
 - [x] Run the redaction scan, a manual identifier check, and a token diff against the appendix, over the diff, the messages, and the cover letter.
-- [ ] Write the patches with `git format-patch --cover-letter --base="$D" -o <patches dir> "$D"..HEAD`. The cover letter carries:
+- [x] Write the patches with `git format-patch --cover-letter --base="$D" -o <patches dir> "$D"..HEAD`. The cover letter carries:
   - what, why, and how;
   - `Testing:`;
   - the base: desk-core at `D`, with desk-tui's `912de47` included as patch 1;
@@ -738,7 +741,7 @@ func NewDeskSource(d *desk.Desk) Source
   - `BEGIN_COMMIT_OVERRIDE`.
 
   Assert that the patch count equals `git rev-list --no-merges --count "$D"..HEAD`.
-- [ ] Update the frontmatter.
+- [x] Update the frontmatter.
 
 ## Deviations
 

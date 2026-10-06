@@ -20,7 +20,6 @@ Being built now.
 - [Review-autonomy spine — design](2026-09-11-review-autonomy-spine-design.md)
 - [forgectl: a coordinator over herdr worker panes](2026-09-28-forgectl-herdr-coordinator.md)
 - [A close path for board tasks (cameronsjo/forgectl#1022)](2026-10-01-tasks-close-path.md)
-- [Desk dashboard: run viewer and approval queue for `forgectl desk`](2026-10-05-desk-dashboard.md)
 
 ## Proposed
 
@@ -55,6 +54,7 @@ Built. Read as history, not as a spec: the shipped behavior and its ADR are the 
 - [Review-autonomy spine: #299 → #472 → #473](2026-09-11-review-autonomy-spine.md)
 - [`env set --sops` — write one key into a SOPS file without exposing the value](2026-09-12-env-set-sops.md)
 - [Harness update hooks — Roadmap (2026-09-29)](2026-09-29-harness-update-hooks-roadmap.md)
+- [Desk dashboard: run viewer and approval queue for `forgectl desk`](2026-10-05-desk-dashboard.md)
 
 ## Superseded
 
