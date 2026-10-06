@@ -190,7 +190,7 @@ func TestDeskLayoutBelow_ParksTheOtherPanesAndBringsThemBack(t *testing.T) {
 	stub.steps = []belowStep{
 		moveStep("term_a", "", "w1:t2", true, ""),
 		moveStep("term_b", "term_a", "w1:t2", false, "0.50"),
-		splitStep("", "down", "0.72", "term_desk", false),
+		splitStep("term_claude", "down", "0.72", "term_desk", false),
 		moveStep("term_a", "term_claude", "w1:t1", false, "0.33"),
 		moveStep("term_b", "term_a", "w1:t1", false, "0.50"),
 		splitStep("term_desk", "right", "0.60", "term_prog", false),
@@ -217,14 +217,26 @@ func TestDeskLayoutBelow_ParksTheOtherPanesAndBringsThemBack(t *testing.T) {
 func TestDeskLayoutBelow_AloneInTheTabMovesNothing(t *testing.T) {
 	tab, stub := belowTab(t)
 	stub.steps = []belowStep{
-		splitStep("", "down", "0.72", "term_desk", false),
+		splitStep("term_claude", "down", "0.72", "term_desk", false),
 		renameStep("term_desk", "desk"),
 		runStep("term_desk", "/opt/test/bin/forgectl desk --dir /state/desk"),
 	}
-	deps := module.Deps{Theme: theme.Default(), Runner: tab.runner(t), SensitiveRunner: stub.sensitive()}
+	reads := tab.runner(t)
+	deps := module.Deps{Theme: theme.Default(), Runner: reads, SensitiveRunner: stub.sensitive()}
 	out, _, err := deskRun(t, deps, "layout", "--below", "--dir", "/state/desk")
 	wantExit(t, err, 0)
 	stub.done()
+	// Plan, find this pane again, then the rename and the run each find the
+	// desk pane; the empty restore reads nothing.
+	lists := 0
+	for _, c := range reads.Calls {
+		if strings.Join(c.Args, " ") == "pane list" {
+			lists++
+		}
+	}
+	if lists != 4 {
+		t.Errorf("%d pane lists, want 4", lists)
+	}
 	if !strings.HasSuffix(out, "moved=0\n") {
 		t.Errorf("output = %q", out)
 	}
@@ -236,7 +248,7 @@ func TestDeskLayoutBelow_RestoresTheParkedPanesWhenTheDeskSplitFails(t *testing.
 	tab, stub := belowTab(t, "term_a")
 	stub.steps = []belowStep{
 		moveStep("term_a", "", "w1:t2", true, ""),
-		splitStep("", "down", "0.72", "term_desk", true),
+		splitStep("term_claude", "down", "0.72", "term_desk", true),
 		moveStep("term_a", "term_claude", "w1:t1", false, "0.50"),
 	}
 	deps := module.Deps{Theme: theme.Default(), Runner: tab.runner(t), SensitiveRunner: stub.sensitive()}
@@ -341,7 +353,7 @@ func TestDeskLayoutBelow_RestoreContinuesPastAFailedMove(t *testing.T) {
 	stub.steps = []belowStep{
 		moveStep("term_a", "", "w1:t2", true, ""),
 		moveStep("term_b", "term_a", "w1:t2", false, "0.50"),
-		failing(splitStep("", "down", "0.72", "term_desk", false)),
+		failing(splitStep("term_claude", "down", "0.72", "term_desk", false)),
 		failing(moveStep("term_a", "term_claude", "w1:t1", false, "0.33")),
 		moveStep("term_b", "term_claude", "w1:t1", false, "0.50"),
 	}
@@ -362,7 +374,7 @@ func TestDeskLayoutBelow_FinalRestoreFailureNamesTheDeskPane(t *testing.T) {
 	tab, stub := belowTab(t, "term_a")
 	stub.steps = []belowStep{
 		moveStep("term_a", "", "w1:t2", true, ""),
-		splitStep("", "down", "0.72", "term_desk", false),
+		splitStep("term_claude", "down", "0.72", "term_desk", false),
 		failing(moveStep("term_a", "term_claude", "w1:t1", false, "0.50")),
 	}
 	deps := module.Deps{Theme: theme.Default(), Runner: tab.runner(t), SensitiveRunner: stub.sensitive()}
