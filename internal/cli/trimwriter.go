@@ -2,6 +2,7 @@ package cli
 
 import (
 	"io"
+	"os"
 
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/term"
@@ -128,7 +129,11 @@ func trimIfNotTerminal(w io.Writer) (io.Writer, *trailingTrimWriter) {
 // command gets a wrapper that calls it with that command's stream swapped for
 // a trimming one for the length of the call. The stream is the command's own,
 // so a command's data output never passes through the trim, and each stream is
-// judged on its own. The root's page is covered by trimRootHelp.
+// judged on its own. The root's page is covered in execCommand.
+//
+// It replaces any help function a subcommand set for itself, because cobra
+// exposes no way to tell one from an inherited one. TestNoCommandSetsItsOwnHelpFunc
+// fails if one appears, so that is a decision to make then.
 func trimHelpFrames(root *cobra.Command) {
 	var walk func(*cobra.Command)
 	walk = func(c *cobra.Command) {
@@ -155,9 +160,25 @@ func withTrimmedOut(c *cobra.Command, fn func()) {
 	c.SetOut(trimmed)
 	defer func() {
 		_ = t.flush()
-		c.SetOut(out)
+		restoreOut(c, out)
 	}()
 	fn()
+}
+
+// restoreOut puts back the stdout c had before withTrimmedOut. cobra has no
+// getter for a command's own writer, so a command whose stream matches what it
+// would inherit goes back to inheriting (SetOut(nil)); pinning it to the old
+// writer would hide a later change to its parent's.
+func restoreOut(c *cobra.Command, out io.Writer) {
+	var inherited io.Writer = os.Stdout
+	if p := c.Parent(); p != nil {
+		inherited = p.OutOrStdout()
+	}
+	if out == inherited {
+		c.SetOut(nil)
+		return
+	}
+	c.SetOut(out)
 }
 
 // trimErrorFrame makes a fang error frame strip its padding when it is

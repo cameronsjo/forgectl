@@ -321,15 +321,25 @@ func execCommand(ctx context.Context, root *cobra.Command, args []string, th the
 	run := func() error {
 		return fang.Execute(ctx, root, fangOptions(meta.Version, meta.Commit, th)...)
 	}
-	// The root's own page (bare forgectl, --help, --version) comes from fang
-	// directly, so trim that stream for the whole run. A run that resolves to the
-	// root has no command whose data could pass through it: the root only shows help.
-	if target, _, _ := root.Find(args); target == root {
+	// The root's own page (bare forgectl, --help, help, --version) comes from fang
+	// directly, so trim that stream for the whole run. The lazy builtins other
+	// than help also resolve to the root before Execute registers them, but they
+	// print data (a completion script, a man page, __complete candidates), so
+	// they keep the original stream. Everything else that resolves to the root
+	// only shows help.
+	if target, _, _ := root.Find(args); target == root && rootRunShowsHelp(args) {
 		var err error
 		withTrimmedOut(root, func() { err = run() })
 		return err
 	}
 	return run()
+}
+
+// rootRunShowsHelp reports whether an argv that resolves to the root renders
+// only help or an error: it names no builtin verb, or names `help`.
+func rootRunShowsHelp(args []string) bool {
+	first, _ := firstNonFlag(args)
+	return first == "help" || !builtinVerbs[first]
 }
 
 // fangOptions builds the fang.Option set every dispatch runs under: the version

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -41,6 +42,7 @@ func TestTrailingTrimWriter(t *testing.T) {
 		{"color sequence split across writes", []string{"a  \x1b[3", "8;5;1m\nb"}, "a\x1b[38;5;1m\nb"},
 		{"padding inside colored text kept", []string{"\x1b[1ma  b\x1b[0m\n"}, "\x1b[1ma  b\x1b[0m\n"},
 		{"end of stream keeps held whitespace", []string{"a  "}, "a  "},
+		{"half-received color sequence at the end is kept", []string{"a  \x1b[3"}, "a  \x1b[3"},
 		{"lone escape is content", []string{"a \x1bX \n"}, "a \x1bX\n"},
 	}
 	for _, tt := range tests {
@@ -272,5 +274,143 @@ func TestWithTrimmedOut_FlushesAtTheEnd(t *testing.T) {
 	}
 	if cmd.OutOrStdout() != &sink {
 		t.Error("withTrimmedOut did not restore the command's stdout")
+	}
+}
+
+// TestWithTrimmedOut_RestoresStdoutOnPanic: the stream swap is undone even when
+// the help function panics, so a recovered panic leaves no trimming writer on
+// the command.
+func TestWithTrimmedOut_RestoresStdoutOnPanic(t *testing.T) {
+	var sink bytes.Buffer
+	cmd := &cobra.Command{Use: "x"}
+	cmd.SetOut(&sink)
+	func() {
+		defer func() { _ = recover() }()
+		withTrimmedOut(cmd, func() { panic("help blew up") })
+	}()
+	if cmd.OutOrStdout() != &sink {
+		t.Errorf("stdout after a panic is %T, want the original writer", cmd.OutOrStdout())
+	}
+}
+
+// TestWithTrimmedOut_InheritedStreamStaysInherited: a subcommand that used its
+// parent's stream goes back to following the parent after a help call, rather
+// than staying pinned to the old writer.
+func TestWithTrimmedOut_InheritedStreamStaysInherited(t *testing.T) {
+	var first, second bytes.Buffer
+	root := &cobra.Command{Use: "root"}
+	sub := &cobra.Command{Use: "sub"}
+	root.AddCommand(sub)
+	root.SetOut(&first)
+	withTrimmedOut(sub, func() {})
+	root.SetOut(&second)
+	if sub.OutOrStdout() != &second {
+		t.Error("the subcommand stayed pinned to the parent's old writer")
+	}
+}
+
+// TestTrim_RunEHelpBetweenData: a verb that writes data, renders its own help,
+// then writes more data (internal/cli/k8s.go does this on --help). The data is
+// byte-identical and the help in the middle is trimmed.
+func TestTrim_RunEHelpBetweenData(t *testing.T) {
+	t.Setenv(skipLegacyMigrateEnv, "1")
+	const before, after = "before \t\n", "after  "
+	deps := module.Deps{Runner: &exec.FakeRunner{}, Theme: theme.Default()}
+	root := newRoot(deps)
+	root.AddCommand(&cobra.Command{
+		Use:   "helpmid",
+		Short: "Test verb that renders help between data",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			out := cmd.OutOrStdout()
+			_, _ = out.Write([]byte(before))
+			if err := cmd.Help(); err != nil {
+				return err
+			}
+			_, _ = out.Write([]byte(after))
+			return nil
+		},
+	})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(new(bytes.Buffer))
+	if err := execCommand(context.Background(), root, []string{"helpmid"}, deps.Theme); err != nil {
+		t.Fatalf("execCommand() = %v", err)
+	}
+	got := out.String()
+	if !strings.HasPrefix(got, before) || !strings.HasSuffix(got, after) {
+		t.Fatalf("data around the help changed: %q", got)
+	}
+	assertNoTrailingSpace(t, "help between data", strings.TrimSuffix(strings.TrimPrefix(got, before), after))
+}
+
+// TestTrim_LazyBuiltinsKeepTheirData pins the second review round on
+// forgectl#1127: completion, man and __complete resolve to the root before
+// Execute registers them, but they print data, so their stream is not trimmed.
+// help does render a page, so it still is.
+func TestTrim_LazyBuiltinsKeepTheirData(t *testing.T) {
+	t.Setenv(skipLegacyMigrateEnv, "1")
+	deps := module.Deps{Runner: &exec.FakeRunner{}, Theme: theme.Default()}
+	build := func() *cobra.Command {
+		root := newRoot(deps)
+		root.AddCommand(&cobra.Command{
+			Use:   "dataprobe",
+			Short: "Test verb whose completion writes to the stream",
+			Args:  cobra.ArbitraryArgs,
+			// cobra trims its own candidate lines, so the probe writes a line that ends
+			// in whitespace straight to the stream __complete is printing to.
+			ValidArgsFunction: func(cmd *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+				_, _ = cmd.OutOrStdout().Write([]byte("raw \t\n"))
+				return []string{"cand"}, cobra.ShellCompDirectiveNoFileComp
+			},
+			RunE: func(*cobra.Command, []string) error { return nil },
+		})
+		return root
+	}
+	run := func(args ...string) string {
+		root := build()
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetErr(new(bytes.Buffer))
+		if err := execCommand(context.Background(), root, args, deps.Theme); err != nil {
+			t.Fatalf("execCommand(%v) = %v", args, err)
+		}
+		return out.String()
+	}
+
+	if got := run("__complete", "dataprobe", ""); !strings.Contains(got, "raw \t\n") {
+		t.Errorf("__complete lost the trailing whitespace of a line written to its stream: %q", got)
+	}
+
+	var want bytes.Buffer
+	if err := build().GenBashCompletionV2(&want, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := run("completion", "bash"); got != want.String() {
+		t.Errorf("completion bash differs from cobra's script (%d bytes, want %d)", len(got), want.Len())
+	}
+
+	assertNoTrailingSpace(t, "help", run("help"))
+}
+
+// TestNoCommandSetsItsOwnHelpFunc: trimHelpFrames replaces every subcommand's
+// help function, so a command that installs its own would silently lose it.
+// This fails first, so the choice (chain it, or exempt it) is made on purpose.
+func TestNoCommandSetsItsOwnHelpFunc(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if f == "trimwriter.go" || strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f) //nolint:gosec // f comes from Glob("*.go") in the package dir
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(src), ".SetHelpFunc(") {
+			t.Errorf("%s sets a help function; trimHelpFrames would replace it", f)
+		}
 	}
 }
