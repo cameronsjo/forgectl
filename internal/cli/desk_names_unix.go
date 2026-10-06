@@ -60,15 +60,16 @@ func resolveDeskName(d *desk.Desk, name string) string {
 
 // deskNotFound builds a "no <what> named <name>" error that says why the name
 // may be wrong: an item name carries no extension (a name that would resolve
-// to an item already has, so there is no stem to suggest), and the waiting
-// items are listed so the caller can pick one. waiting may be nil.
-func deskNotFound(verb, what, name string, waiting []string) error {
+// to an item already has, so there is no stem to suggest), and the known names
+// are listed under label ("waiting", "runs") so the caller can pick one. known
+// may be nil.
+func deskNotFound(verb, what, name, label string, known []string) error {
 	msg := fmt.Sprintf("%s: no %s named %s", verb, what, termsafe.SafeLineMax(name, deskQuoteMax))
 	if trimDeskExt(name) != "" {
 		msg += " (item names carry no extension)"
 	}
-	if len(waiting) > 0 {
-		msg += "; waiting: " + strings.Join(waiting, ", ")
+	if len(known) > 0 {
+		msg += "; " + label + ": " + strings.Join(known, ", ")
 	}
 	return fmt.Errorf("%s", msg)
 }
@@ -83,11 +84,28 @@ func waitingNames(d *desk.Desk) []string {
 	if err != nil {
 		return nil
 	}
-	var names []string
+	var waiting []desk.Item
 	for _, it := range snap.Pending {
-		if it.State != desk.StateWaiting {
-			continue
+		if it.State == desk.StateWaiting {
+			waiting = append(waiting, it)
 		}
+	}
+	return cappedNames(waiting)
+}
+
+// runNames lists the names of the items that have a run: running, then done.
+func runNames(d *desk.Desk) []string {
+	snap, err := d.Scan()
+	if err != nil {
+		return nil
+	}
+	return cappedNames(append(append([]desk.Item{}, snap.Running...), snap.Done...))
+}
+
+// cappedNames is the names of items, at most deskNotFoundListMax of them.
+func cappedNames(items []desk.Item) []string {
+	var names []string
+	for _, it := range items {
 		if len(names) == deskNotFoundListMax {
 			names = append(names, "...")
 			break

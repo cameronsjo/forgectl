@@ -531,7 +531,7 @@ func findItem(snap *desk.Snapshot, name string) (desk.Item, bool) {
 func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name string, now time.Time, asJSON bool) error {
 	it, ok := findItem(snap, name)
 	if !ok {
-		return deskNotFound("desk status", "item", name, waitingNames(d))
+		return deskNotFound("desk status", "item", name, "waiting", waitingNames(d))
 	}
 	res := deskDetailJSON{Item: itemView(it, now), Log: d.LogPath(name), Events: d.EventsPath(name)}
 	if it.State != desk.StateWaiting && it.State != desk.StateRefused {
@@ -704,7 +704,7 @@ func runDeskWatch(cmd *cobra.Command, dirFlag, name string, deadline, skip int) 
 		w.printf("resume=%s\n", watchResume(name, seen, deadline, dirFlag))
 		return WithExitCode(fmt.Errorf("desk watch: interrupted while watching %s", name), deskExitInterrupted)
 	case errors.Is(err, desk.ErrNotFound):
-		return deskNotFound("desk watch", "item", name, waitingNames(d))
+		return deskNotFound("desk watch", "item", name, "waiting", waitingNames(d))
 	case err != nil:
 		return err
 	}
@@ -791,7 +791,7 @@ func runDeskSkip(cmd *cobra.Command, dirFlag, name, reason string) error {
 	recorded, err := d.SkipNoted(name, reason)
 	switch {
 	case errors.Is(err, desk.ErrNotFound):
-		return deskNotFound("desk skip", "waiting item or lost run", name, waitingNames(d))
+		return deskNotFound("desk skip", "waiting item or lost run", name, "waiting", waitingNames(d))
 	case errors.Is(err, desk.ErrClaimed):
 		return fmt.Errorf("desk skip: %s was claimed by a desk first", name)
 	case err != nil:

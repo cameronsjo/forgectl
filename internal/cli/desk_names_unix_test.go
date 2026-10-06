@@ -74,6 +74,45 @@ func TestDeskName_NotFoundNamesTheFix(t *testing.T) {
 	}
 }
 
+// `desk show` with neither a name nor --log used to say "not both"; the
+// caller gave neither.
+func TestDeskShow_NeitherNameNorLogNamesTheFix(t *testing.T) {
+	newDeskDir(t)
+	_, _, err := deskRun(t, deskDeps(), "show")
+	wantExit(t, err, deskExitUsage)
+	want := "give a run name or --log FILE; usage: forgectl desk show <name> [flags]"
+	if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "not both") {
+		t.Errorf("error = %v, want it to contain %q and not say \"not both\"", err, want)
+	}
+	_, _, err = deskRun(t, deskDeps(), "show", "01-x", "--log", "/tmp/none.jsonl")
+	wantExit(t, err, deskExitUsage)
+	if err == nil || !strings.Contains(err.Error(), "not both") {
+		t.Errorf("error = %v, want the both-given message kept", err)
+	}
+}
+
+func TestDeskShow_NotFoundListsRuns(t *testing.T) {
+	dir := newDeskDir(t)
+	name, sha := queueItem(t, "ran.sh", "true\n")
+	finishRun(t, openTestDesk(t, dir), name, sha, 0)
+	_, _, err := deskRun(t, deskDeps(), "show", "66-none")
+	wantExit(t, err, 1)
+	if err == nil || !strings.Contains(err.Error(), "runs: "+name) {
+		t.Errorf("error = %v, want it to list the known runs", err)
+	}
+}
+
+// desk add takes one file, or "-" for stdin: the help must not say "FILE ...".
+func TestDeskHelp_AddArity(t *testing.T) {
+	cmd := newDeskCmd(deskDeps())
+	if strings.Contains(cmd.Long, "add FILE ...") {
+		t.Error("desk --help says `add FILE ...`, but desk add takes one file")
+	}
+	if !strings.Contains(cmd.Long, "desk add FILE|-") {
+		t.Error("desk --help does not show `desk add FILE|-`")
+	}
+}
+
 func TestTrimDeskExt(t *testing.T) {
 	for in, want := range map[string]string{
 		"01-x.sh": "01-x", "01-x.manifest": "01-x", "01-x": "", "01-x.sh.sh": "01-x.sh", ".sh": "", "01-x.log": "01-x", "01-x.events": "01-x",

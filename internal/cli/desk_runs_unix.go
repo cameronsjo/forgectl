@@ -284,7 +284,7 @@ func runDeskShow(cmd *cobra.Command, dirFlag, name string, log deskLogOpts, o de
 	}
 	r, err := loadRun(src, ref)
 	if errors.Is(err, desk.ErrNotFound) {
-		return deskNotFound("desk show", "run", name, nil)
+		return deskNotFound("desk show", "run", name, "runs", knownRunNames(dirFlag))
 	}
 	if err != nil {
 		return err
@@ -535,4 +535,15 @@ func (r *loadedRun) readInPart() error {
 		return errPastCap
 	}
 	return nil
+}
+
+// knownRunNames lists the runs in the desk, to decorate a not-found error. A
+// desk that cannot be opened yields none: the error is already being reported.
+func knownRunNames(dirFlag string) []string {
+	d, err := openDeskDir(dirFlag)
+	if err != nil {
+		return nil
+	}
+	defer d.Close() //nolint:errcheck // read side
+	return runNames(d)
 }
