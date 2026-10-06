@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"strings"
@@ -23,20 +25,22 @@ import (
 // worker can rewrite origin, refs, objects or config there and change what
 // the next worker starts from, and nothing here can tell.
 
-// workerBaseRefPrefix is where forgectl fetches a base commit, one ref per
-// commit so concurrent launches do not collide.
+// workerBaseRefPrefix is where forgectl fetches a base commit. Each launch
+// uses its own ref (the commit plus a random suffix), so two launches at the
+// same head do not delete each other's ref.
 const workerBaseRefPrefix = "refs/forgectl/base/"
 
 // workerBase returns the commit a new worker branch in top starts from: the
-// head of the GitHub default branch when origin is a github.com repository,
-// else the checkout's HEAD, as before.
+// head of the GitHub default branch when origin's URL has host github.com (or
+// ssh.github.com), else the checkout's HEAD, as before. An SSH host alias
+// for GitHub counts as not GitHub.
 func workerBase(ctx context.Context, run exec.Runner, top string) (string, error) {
 	origin, err := gitenv.Run(ctx, run, gitenv.Local, "-C", top, "remote", "get-url", "origin")
 	if err != nil {
 		return checkoutHead(ctx, run, top)
 	}
 	host, owner, repo, ok := pr.ParseRemoteURL(origin)
-	if !ok || host != "github.com" || !pr.ValidOwnerRepoPart(owner) || !pr.ValidOwnerRepoPart(repo) {
+	if !ok || (host != "github.com" && host != "ssh.github.com") || !pr.ValidOwnerRepoPart(owner) || !pr.ValidOwnerRepoPart(repo) {
 		return checkoutHead(ctx, run, top)
 	}
 	slug := owner + "/" + repo
@@ -56,7 +60,11 @@ func workerBase(ctx context.Context, run exec.Runner, top string) (string, error
 	if !isCommitHash(sha) {
 		return "", fmt.Errorf("forgectl: GitHub returned %q as the head of %s", sha, branch)
 	}
-	ref := workerBaseRefPrefix + sha
+	nonce := make([]byte, 4)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", fmt.Errorf("forgectl: base ref name: %w", err)
+	}
+	ref := workerBaseRefPrefix + sha + "-" + hex.EncodeToString(nonce)
 	if _, err := gitenv.RunRefusing(ctx, run, gitenv.Transport, []string{"ext", "fd"}, "-C", top, "fetch", "--no-tags", "origin", "+refs/heads/"+branch+":"+ref); err != nil {
 		return "", fmt.Errorf("forgectl: fetch %s from origin: %w", branch, err)
 	}
@@ -65,8 +73,7 @@ func workerBase(ctx context.Context, run exec.Runner, top string) (string, error
 	// commit by hash. A failed delete leaves a stray ref and nothing else.
 	_, _ = gitenv.Run(ctx, run, gitenv.Local, "-C", top, "update-ref", "-d", ref)
 	if err != nil || strings.TrimSpace(got) != sha {
-		// The branch moved between the API read and the fetch.
-		return "", fmt.Errorf("forgectl: %s moved on GitHub during the launch (fetched %q, GitHub said %s); retry", branch, strings.TrimSpace(got), sha)
+		return "", fmt.Errorf("forgectl: the fetched commit %q is not GitHub's %s head %s (the branch moved, or origin fetches from elsewhere)", strings.TrimSpace(got), branch, sha)
 	}
 	return sha, nil
 }

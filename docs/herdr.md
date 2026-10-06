@@ -92,7 +92,7 @@ Instruction files: a live worker on the argv above without `--safe-mode` loaded 
 
 ## Where a worker branch starts
 
-A `--worktree` branch that does not exist yet starts at the head of the repository's GitHub default branch (forgectl#1061), not at the checkout's `HEAD`, which is often stale or on another branch. forgectl reads the branch and its head commit from the GitHub API, fetches that branch from `origin`, checks the fetched commit is the one GitHub named, and passes the hash to `git worktree add`. When `origin` is not a github.com repository, the branch starts at the checkout's `HEAD` as before. An existing branch is checked out as it is, and needs no GitHub call.
+A `--worktree` branch that does not exist yet starts at the head of the repository's GitHub default branch (forgectl#1061), not at the checkout's `HEAD`, which is often stale or on another branch. forgectl reads the branch and its head commit from the GitHub API, fetches that branch from `origin`, checks the fetched commit is the one GitHub named, and passes the hash to `git worktree add`. Only an `origin` URL whose host is `github.com` or `ssh.github.com` counts as GitHub; any other origin, an SSH host alias for GitHub included, starts the branch at the checkout's `HEAD` as before. A failing GitHub call fails the launch rather than falling back. An existing branch is checked out as it is, and needs no GitHub call.
 
 This is a correctness fix, not a security control. Workers in one repository share its `.git` and are mutually trusting (ADR-0010): an earlier worker can change what the next one starts from.
 

@@ -57,9 +57,12 @@ func TestWorkerBase(t *testing.T) {
 	if err != nil || got != testBaseSHA {
 		t.Fatalf("workerBase = %q, %v, want %s", got, err, testBaseSHA)
 	}
-	want := []string{"fetch", "--no-tags", "origin", "+refs/heads/main:refs/forgectl/base/" + testBaseSHA}
-	if f := fetchArgs(run); !slices.Equal(f, want) {
-		t.Fatalf("fetch %q, want %q", f, want)
+	f := fetchArgs(run)
+	if len(f) != 4 || !slices.Equal(f[:3], []string{"fetch", "--no-tags", "origin"}) || !strings.HasPrefix(f[3], "+refs/heads/main:refs/forgectl/base/"+testBaseSHA+"-") {
+		t.Fatalf("fetch %q, want +refs/heads/main into a per-launch refs/forgectl/base/<sha>-<nonce>", f)
+	}
+	if got, err := workerBase(t.Context(), baseFake("ssh://git@ssh.github.com:443/o/r.git", "main", testBaseSHA, testBaseSHA), "/top"); err != nil || got != testBaseSHA {
+		t.Fatalf("an ssh.github.com origin gave %q, %v", got, err)
 	}
 
 	for name, run := range map[string]*exec.FakeRunner{
@@ -82,6 +85,7 @@ func TestWorkerBase(t *testing.T) {
 		"the fetch landed nothing":          baseFake("git@github.com:o/r.git", "main", testBaseSHA, ""),
 		"GitHub names a dash branch":        baseFake("git@github.com:o/r.git", "-x", testBaseSHA, testBaseSHA),
 		"GitHub names a branch with #":      baseFake("git@github.com:o/r.git", "a#b", testBaseSHA, testBaseSHA),
+		"gh fails":                          ghFailing(),
 	} {
 		t.Run("refuses: "+name, func(t *testing.T) {
 			if got, err := workerBase(t.Context(), run, "/top"); err == nil {
@@ -95,4 +99,18 @@ func TestEscapeRefPath(t *testing.T) {
 	if got := escapeRefPath("release/1.0 x"); got != "release/1.0%20x" {
 		t.Fatalf("escapeRefPath = %q", got)
 	}
+}
+
+// ghFailing is a GitHub origin whose gh calls fail (offline, logged out):
+// the launch must fail, not quietly fall back to the checkout's HEAD.
+func ghFailing() *exec.FakeRunner {
+	run := baseFake("git@github.com:o/r.git", "main", testBaseSHA, testBaseSHA)
+	inner := run.RunFunc
+	run.RunFunc = func(name string, args []string) (string, error) {
+		if name == "gh" {
+			return "", errors.New("gh: not logged in")
+		}
+		return inner(name, args)
+	}
+	return run
 }

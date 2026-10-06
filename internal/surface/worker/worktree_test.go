@@ -208,10 +208,10 @@ func baseOf(t *testing.T, top string) func() (string, error) {
 	return func() (string, error) { return headOf(t, top), nil }
 }
 
-// TestAddWorktreeStartsAtTheTrustedBase: a new branch starts at the commit
+// TestAddWorktreeStartsAtTheGivenBase: a new branch starts at the commit
 // base returns, not at the checkout's HEAD (forgectl#1061); nothing but a
 // full commit id is accepted; and an existing branch never asks for a base.
-func TestAddWorktreeStartsAtTheTrustedBase(t *testing.T) {
+func TestAddWorktreeStartsAtTheGivenBase(t *testing.T) {
 	ctx := context.Background()
 	top := gitRepo(t)
 	base := headOf(t, top)
@@ -221,7 +221,7 @@ func TestAddWorktreeStartsAtTheTrustedBase(t *testing.T) {
 		t.Fatal(err)
 	}
 	if wt.Base != base {
-		t.Fatalf("new branch started at %s, want the trusted base %s", wt.Base, base)
+		t.Fatalf("new branch started at %s, want the given base %s", wt.Base, base)
 	}
 	for _, bad := range []string{"", "HEAD", "main", "refs/remotes/origin/main", base[:12]} {
 		if _, err := AddWorktree(ctx, fexec.OSRunner{}, top, "x", "feat-x", func() (string, error) { return bad, nil }); err == nil {
