@@ -91,6 +91,56 @@ func TestDeskShow_BatchFlowAndReplay(t *testing.T) {
 	}
 }
 
+// A step with no deps that is not first has nothing to say after "after":
+// the flow line omits the segment instead of printing a dangling one.
+func TestDeskShow_NoDepsStepHasNoAfter(t *testing.T) {
+	dir := newDeskDir(t)
+	out, _, err := deskRun(t, deskDeps(), "add", writeTemp(t, "roots.manifest",
+		"alpha -- true\nbeta -- true\ngamma after=alpha -- exit 1\n"),
+		"--what", "two roots", "--why", "a test", "--json")
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	var a deskAddJSON
+	if err := json.Unmarshal([]byte(out), &a); err != nil {
+		t.Fatal(err)
+	}
+	run := startRun(t, openTestDesk(t, dir), a.Name, a.SHA256, os.Getpid())
+	for _, l := range []string{
+		"STEP-START id=alpha deps=",
+		"STEP-START id=beta deps=",
+		"STEP-END id=alpha rc=0 dur=0.3 reason=ok outputs= log=/x/alpha.log",
+		"STEP-END id=beta rc=0 dur=0.4 reason=ok outputs= log=/x/beta.log",
+		"STEP-START id=gamma deps=alpha",
+		"STEP-END id=gamma rc=1 dur=0.1 reason=failed outputs= log=/x/gamma.log",
+	} {
+		if err := run.Events.Emit(l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := run.Finish(1, "failed"); err != nil {
+		t.Fatal(err)
+	}
+
+	out, _, err = deskRunASCII(t, "show", a.Name)
+	wantExit(t, err, 0)
+	var beta, gamma string
+	for _, l := range strings.Split(out, "\n") {
+		switch {
+		case strings.Contains(l, " beta "):
+			beta = l
+		case strings.Contains(l, " gamma "):
+			gamma = l
+		}
+	}
+	if beta == "" || strings.Contains(beta, "after") {
+		t.Errorf("beta line = %q, want it present with no after segment:\n%s", beta, out)
+	}
+	if !strings.HasSuffix(gamma, "after alpha") {
+		t.Errorf("gamma line = %q, want it to end in %q:\n%s", gamma, "after alpha", out)
+	}
+}
+
 func TestDeskShow_JSONContract(t *testing.T) {
 	dir := newDeskDir(t)
 	name := batchRun(t, dir, pipeEvents, 1)

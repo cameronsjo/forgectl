@@ -425,7 +425,7 @@ func writeShowText(out io.Writer, r *loadedRun, o deskShowOpts, noIcons bool) er
 		if d := runview.StepDur(r.delta.Timing, st); d > 0 && !replay {
 			parts = append(parts, d.Round(100*time.Millisecond).String())
 		}
-		if p := after[st.ID]; !isChainLink(s, i, p) {
+		if p := after[st.ID]; len(p) > 0 && !isChainLink(s, i, p) {
 			safe := make([]string, len(p))
 			for k, id := range p {
 				safe[k] = safeLabel(id)
