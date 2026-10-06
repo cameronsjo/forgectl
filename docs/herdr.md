@@ -62,7 +62,7 @@ Reading the worker's pane is not this package's job. `internal/surface/herdradap
 
 ## Briefs, waits and reports
 
-A worker's first brief goes in at launch. `surface launch --brief` appends it to the harness argv after `--`, and the trampoline socket carries that argv to the pane, so the brief is never typed into a running TUI. Both harnesses treat what follows `--` as the prompt: Claude Code 2.1.289 answered `-- mcp` as a prompt rather than running the `mcp` subcommand, and Codex 0.160.0 took `-- --help` as one.
+A worker's first brief goes in at launch. `surface launch --brief` appends it to the harness argv after `--`, and the trampoline socket carries that argv to the pane, so the brief is never typed into a running TUI. The brief then stays in the harness's process arguments for the whole session, where `ps -ww` can read it, so a launch brief must not hold a secret. Both harnesses treat what follows `--` as the prompt: Claude Code 2.1.289 answered `-- mcp` as a prompt rather than running the `mcp` subcommand, and Codex 0.160.0 took `-- --help` as one.
 
 `surface brief` types the follow-ups. It writes through `TypeText` (`herdr.send-text`) and `PressEnter` (`herdr.send-keys`). Each call re-runs the ownership check `WorkerScreen` uses, so forgectl types only into the root pane of a workspace it owns. Three herdr and Claude Code facts shape it, measured on herdr 0.9.1 and Claude Code 2.1.289:
 

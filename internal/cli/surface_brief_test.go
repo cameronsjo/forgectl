@@ -186,6 +186,15 @@ func TestSendBrief(t *testing.T) {
 			pane: func() *fakePane { return &fakePane{status: "idle", typeErr: herdradapter.ErrSendFailed} },
 			step: "type",
 		},
+		"the screen changes between the read-back and Enter": {
+			pane: func() *fakePane {
+				// Read 1 is the check, read 2 the matching read-back; the
+				// dialog draws before read 3, the last look before Enter.
+				return &fakePane{status: "idle", afterReads: map[int]func(*fakePane){3: func(p *fakePane) { p.dialog = true }}}
+			},
+			step:  "enter-check",
+			reads: 3,
+		},
 		"the ledger write fails": {
 			pane: func() *fakePane { return &fakePane{status: "idle", recordErr: errors.New("disk full")} },
 			step: "record",

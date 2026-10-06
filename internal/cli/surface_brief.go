@@ -237,6 +237,14 @@ func sendBrief(ctx context.Context, s briefSteps, text, marker string) briefResu
 		return refuse("record", "the brief could not be recorded in the worker ledger, so Enter was not sent: "+
 			termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen), ready.Verdict{})
 	}
+	// One more read right before Enter: the read-back and the ledger write
+	// leave a window in which a dialog could draw, and Enter would answer it.
+	if screen, err := s.read(ctx); err != nil {
+		return refuse("enter-check", "the last read before Enter failed, so Enter was not sent; the brief sits unsent in the input box and is recorded in the ledger: "+
+			termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen), ready.Verdict{})
+	} else if v = s.evaluate(screen); !v.Ready() || v.Input != want {
+		return refuse("enter-check", "the screen changed after the read-back, so Enter was not sent; the brief sits unsent in the input box and is recorded in the ledger", v)
+	}
 	if err := s.enter(ctx); err != nil {
 		return briefResult{Outcome: briefUnconfirmed, Step: "enter", Marker: marker, Count: count,
 			Reason: "sending Enter failed, and whether it reached the pane is unknown: " + termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen)}

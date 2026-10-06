@@ -117,6 +117,9 @@ func CheckBrief(text, via string) error {
 			return fmt.Errorf("%w: %d bytes, limit %d", ErrInvalidBrief, len(text), MaxLaunchBrief)
 		}
 	case ViaTyped:
+		if strings.TrimLeft(text, " ") != text {
+			return fmt.Errorf("%w: a typed brief cannot start with a space", ErrInvalidBrief)
+		}
 		if strings.HasPrefix(text, "-") {
 			return fmt.Errorf("%w: a typed brief cannot start with '-'", ErrInvalidBrief)
 		}

@@ -47,6 +47,7 @@ func TestCheckBrief(t *testing.T) {
 		{"invalid utf8", "a\xffb", ViaLaunch, false},
 		{"typed leading dash", "-h", ViaTyped, false},
 		{"typed slash command", "/review the diff", ViaTyped, false},
+		{"typed slash command behind a space", " /clear", ViaTyped, false},
 		{"typed bash mode", "!rm -rf x", ViaTyped, false},
 		{"typed file picker", "@main.go read it", ViaTyped, false},
 		{"launch may start with a slash", "/review the diff", ViaLaunch, true},

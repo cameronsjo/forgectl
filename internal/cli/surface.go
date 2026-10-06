@@ -98,7 +98,9 @@ get --allow-dangerously-skip-permissions.
 the harness starts its first turn with it and nothing is typed into the pane.
 A random marker is recorded in the ledger, and the brief asks the worker to
 end with a REPORT line naming it (surface read --report). @file reads the
-brief from a file of at most 64 KiB.
+brief from a file of at most 64 KiB. The brief stays in the harness's
+process arguments, where any local process can list it, so it must not hold
+a secret; point the worker at a file in the worktree instead.
 
   forgectl surface launch . --surface herdr --worktree feat/x --name x --harness codex
   forgectl surface launch . --surface herdr --worktree fix/login --name fix-login --brief @brief.md`,
