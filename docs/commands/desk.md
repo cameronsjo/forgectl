@@ -24,6 +24,10 @@ forgectl desk prune --days 30                   # delete done/ and skipped/ item
 - **A terminal, for the dashboard.** `forgectl desk` with no terminal on stdin and stdout exits 2 and names `--frame` and `desk status` instead. No other verb reads the terminal.
 - **A herdr pane, for `layout`.** It needs `HERDR_ENV=1`, a `HERDR_SOCKET_PATH` naming a live socket, and `HERDR_PANE_ID`, which herdr sets in every pane it hosts.
 
+## Upgrading
+
+Quit and restart every open dashboard after you upgrade forgectl. A dashboard started by the old binary starts the new binary's supervisor without the approved hash and kind it now requires. The dashboard still shows `started <item>`, but the supervisor refuses and exits at once, and nothing runs. The item stays in `running/` and reads `lost` once the 60-second claim grace passes; clear it with `forgectl desk skip <name> --reason "restart after upgrade"` and queue it again.
+
 ## The agent workflow
 
 1. Write the script to a file and queue it, with one line on what it does and one on why it needs a person:
@@ -202,7 +206,7 @@ gh pr merge 1201 --squash --auto
 
 `# TTY: yes` makes it a TTY item, which runs in the dashboard's own pane through `script(1)` so prompts work. Everything else runs detached, under a supervisor, with stdin from `/dev/null`, and keeps running when the dashboard quits.
 
-Every item, a TTY item and each batch step included, starts in your home directory, never the directory the desk was started from. It gets your environment minus the variables that make bash run other code or change how the script behaves: `BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `GLOBIGNORE`, `PS4`, and every exported function (`BASH_FUNC_*`). Everything else, credentials included, passes through. A script that needs another directory changes to it itself. On Linux, a TTY item also sees `SHELL=/bin/bash`: util-linux `script(1)` starts the item through `$SHELL -c`, and another shell could run its own startup files first.
+Every item, a TTY item and each batch step included, starts in your home directory, never the directory the desk was started from. It gets your environment minus the variables that make bash run other code or change how the script behaves: `BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `GLOBIGNORE`, `PS4`, `POSIXLY_CORRECT`, `BASH_COMPAT`, `EXECIGNORE`, `TMOUT`, `BASH_XTRACEFD`, and every exported function (`BASH_FUNC_*`). Everything else, credentials included, passes through. A script that needs another directory changes to it itself. On Linux, a TTY item also sees `SHELL=/bin/bash`: util-linux `script(1)` starts the item through `$SHELL -c`, and another shell could run its own startup files first.
 
 An agent may also drop a file into `pending/` by hand. Its hash is fixed the first time a desk sees it, and its file time stands in for when it was added.
 
