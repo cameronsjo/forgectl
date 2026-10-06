@@ -32,6 +32,7 @@ func abortingRoot(err error) (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
 // path, which queries the terminal and stalls ~4 s on one that never answers,
 // and which renders `ERROR User aborted.`
 func TestCancel_AbortEndsAsPlainCancelled(t *testing.T) {
+	t.Cleanup(func() { userCancelled.Store(false) })
 	userCancelled.Store(false)
 	root, out, errb := abortingRoot(fmt.Errorf("pick: %w", huh.ErrUserAborted))
 
@@ -67,6 +68,7 @@ func TestCancel_OtherErrorsPassThrough(t *testing.T) {
 }
 
 func TestCancel_WrapIsIdempotent(t *testing.T) {
+	t.Cleanup(func() { userCancelled.Store(false) })
 	root, _, _ := abortingRoot(huh.ErrUserAborted)
 	withCancelHandling(root)
 	withCancelHandling(root) // a hub-selected verb dispatches through the same root again

@@ -733,7 +733,14 @@ func (c *Client) PostReview(ctx context.Context, sess Session, review string, he
 // interactive form); PostReview only calls it when isTTY reports true.
 func confirmReview(review string, th theme.Theme) (bool, error) {
 	ok := false
-	err := huh.NewForm(
+	err := confirmReviewForm(review, th, &ok).Run()
+	return ok, err
+}
+
+// confirmReviewForm builds the form, split out so a test can feed it keys. It takes
+// keymap.Cancel so Esc cancels it as Ctrl+C does.
+func confirmReviewForm(review string, th theme.Theme, ok *bool) *huh.Form {
+	return huh.NewForm(
 		huh.NewGroup(
 			huh.NewNote().
 				Title("Drafted review — approve before posting?").
@@ -742,8 +749,7 @@ func confirmReview(review string, th theme.Theme) (bool, error) {
 				Title("Post this review to the PR?").
 				Affirmative("Post").
 				Negative("Cancel").
-				Value(&ok),
+				Value(ok),
 		),
-	).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh()).Run()
-	return ok, err
+	).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh())
 }
