@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -187,7 +188,7 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 			return worker.AddWorktree(ctx, deps.Runner, top, opts.DisplayName, opts.Worktree, base)
 		},
 		build: func(cwd string) (launch.BuiltInvocation, error) {
-			return buildWorkerInvocation(surfaceInvocationRequest(deps.Cfg.Launch, cwd, injected, unset, opts.Harness), prompt, worker.NewSessionID)
+			return buildWorkerInvocation(surfaceInvocationRequest(deps.Cfg.Launch, cwd, injected, unset, opts.Harness), prompt, worker.NewSessionID, cmd.ErrOrStderr())
 		},
 		launch: func(ctx context.Context, inv launch.Invocation) (backend.Ref, error) {
 			inv.Env = markHerdrPane(inv.Env)
@@ -219,17 +220,25 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 // (launch.BuildInvocation), and gives a claude worker its session id. The
 // harness is known only once the profile resolves, so a claude worker is
 // built a second time with the id.
-func buildWorkerInvocation(req launch.InvocationRequest, prompt string, newID func() (string, error)) (launch.BuiltInvocation, error) {
+func buildWorkerInvocation(req launch.InvocationRequest, prompt string, newID func() (string, error), warn io.Writer) (launch.BuiltInvocation, error) {
 	req.Worker = true
 	req.Prompt = prompt
 	built, err := launch.BuildInvocation(req)
-	if err != nil || built.Invocation.Harness != "claude" {
+	if err == nil && built.Invocation.Harness == "claude" {
+		if req.SessionID, err = newID(); err != nil {
+			return launch.BuiltInvocation{}, err
+		}
+		built, err = launch.BuildInvocation(req)
+	}
+	if err != nil {
 		return built, err
 	}
-	if req.SessionID, err = newID(); err != nil {
-		return launch.BuiltInvocation{}, err
+	for _, n := range built.Notes {
+		if _, werr := fmt.Fprintln(warn, "forgectl: note: "+termsafe.SafeLineMax(n, 300)); werr != nil {
+			return launch.BuiltInvocation{}, werr
+		}
 	}
-	return launch.BuildInvocation(req)
+	return built, nil
 }
 
 // launchBrief turns --brief into the prompt argument and its ledger record:
