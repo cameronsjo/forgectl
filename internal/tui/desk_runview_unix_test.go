@@ -232,6 +232,9 @@ func TestRunViewDrawsHostileEventTextInert(t *testing.T) {
 		[]string{"STEP-START id=fetch deps=", "STEP-WARN id=fetch msg=\x1b]0;owned\x07\x1b[2Jgone"}, 0)
 	h.selectItem(name)
 	h.send("r")
+	if out := h.screen(); !strings.Contains(out, "STEP-WARN fetch") || !strings.Contains(out, "gone") {
+		t.Fatalf("the hostile event did not reach the screen at all:\n%s", out)
+	}
 	if out := h.m.View().Content; strings.Contains(out, "\x1b]0;") || strings.Contains(out, "\x1b[2J") || strings.ContainsRune(out, 0x07) {
 		t.Errorf("an escape sequence from the events file reached the screen: %q", out)
 	}
@@ -376,5 +379,41 @@ func TestRunViewSaysWhenItShowsAnotherRun(t *testing.T) {
 	h.send("r")
 	if out := h.screen(); !strings.Contains(out, "showing the newest") {
 		t.Errorf("the view should say it is not showing the selected item:\n%s", out)
+	}
+}
+
+// The dashboard's tick reloads a live run: the hook in the tick handler, not
+// only pollRun itself.
+func TestRunViewTickPollsALiveRun(t *testing.T) {
+	h := runHarness(t)
+	name, _ := stageRun(t, h, "go.sh", "echo hi\n", nil, -1)
+	h.selectItem(name)
+	h.send("r")
+	if h.m.rv.loading {
+		t.Fatal("the first load did not finish")
+	}
+	out, _ := h.m.Update(deskTickMsg{})
+	h.m = out.(deskModel)
+	if !h.m.rv.loading {
+		t.Error("the dashboard tick did not start a load of the live run")
+	}
+}
+
+// The key hints keep "q close" at every width.
+func TestRunHintsKeepQClose(t *testing.T) {
+	for _, w := range []int{80, 60, 40, 20, 10} {
+		if h := runHintsFor(w); !strings.HasSuffix(h, "q close") || ansi.StringWidth(h) > max(w, 8) {
+			t.Errorf("width %d: hints %q", w, h)
+		}
+	}
+}
+
+// A view opened before any run exists lists again on the tick, so a run
+// that starts later shows without reopening.
+func TestRunViewRetriesAnEmptyListing(t *testing.T) {
+	h := runHarness(t)
+	h.send("r")
+	if c := h.m.pollRun(); c == nil {
+		t.Fatal("a view with no runs yet is not retried")
 	}
 }

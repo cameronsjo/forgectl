@@ -205,6 +205,7 @@ func (m deskModel) applyRunLoad(t deskRunLoadMsg) (tea.Model, tea.Cmd) {
 	}
 	// A reset or a shorter refold can leave a replay point past the events.
 	v.at = min(v.at, v.folder.Len())
+	v.follow = v.follow || v.at == v.folder.Len() // clamped to the tip: follow again
 	return m, nil
 }
 
@@ -228,8 +229,17 @@ func sameDefs(a, b []runview.StepDef) bool {
 // is on its way.
 func (m deskModel) pollRun() tea.Cmd {
 	v := m.rv
-	if v == nil || v.loading || !v.loaded || !v.polls() {
+	if v == nil || v.loading || !v.polls() {
 		return nil
+	}
+	if !v.loaded {
+		if v.err == nil {
+			return nil // the first load is still on its way
+		}
+		// The first load failed, or found no runs: list again, since a run
+		// may have started.
+		v.loading = true
+		return loadRunCmd(m.runs, v.gen, v.want, runview.RunRef{}, nil)
 	}
 	v.loading = true
 	return loadRunCmd(m.runs, v.gen, "", v.ref(), v.cur)
@@ -404,10 +414,23 @@ func (v *deskRunView) render(st theme.Styles, width, height int) string {
 		lines = append(lines, "")
 	}
 	lines = lines[:height-1]
-	return strings.Join(append(lines, cut(st.Muted.Render(runHints), width)), "\n")
+	return strings.Join(append(lines, cut(st.Muted.Render(runHintsFor(width)), width)), "\n")
 }
 
-const runHints = " ←/→ step · [ ] ±10 · g/G start/live · space play · n/p run · q close"
+// runHintsFor is the widest key-hint line that fits, so "q close" is never
+// the part cut off.
+func runHintsFor(width int) string {
+	for _, h := range []string{
+		" ←/→ step · [ ] ±10 · g/G start/live · space play · n/p run · q close",
+		" ←/→ step · g/G start/live · space play · n/p run · q close",
+		" ←/→ · g/G · space · n/p · q close",
+	} {
+		if ansi.StringWidth(h) <= width {
+			return h
+		}
+	}
+	return " q close"
+}
 
 // timing is the runner's step state, which describes the run now: shown only
 // while following.
