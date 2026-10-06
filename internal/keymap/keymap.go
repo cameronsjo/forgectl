@@ -12,6 +12,7 @@ package keymap
 
 import (
 	"context"
+	"os"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
@@ -65,6 +66,12 @@ func ProgramOptions(ctx context.Context) []tea.ProgramOption {
 	return []tea.ProgramOption{tea.WithContext(ctx), tea.WithFilter(SuspendFilter)}
 }
 
-// Form is the program option a huh form passes to WithProgramOptions so a
-// one-shot picker suspends on Ctrl+Z like the full-screen TUIs do.
-func Form() tea.ProgramOption { return tea.WithFilter(SuspendFilter) }
+// Suspendable makes a huh form suspend on Ctrl+Z, for the one-shot pickers
+// and confirms. Use it instead of calling WithProgramOptions directly:
+// WithProgramOptions REPLACES the form's options (huh v2.0.3 form.go:351),
+// and the default it replaces is tea.WithOutput(os.Stderr), which keeps a
+// picker's frames out of a command substitution or pipe that captures stdout.
+// Setting the output again here keeps that contract.
+func Suspendable(f *huh.Form) *huh.Form {
+	return f.WithProgramOptions(tea.WithFilter(SuspendFilter)).WithOutput(os.Stderr)
+}

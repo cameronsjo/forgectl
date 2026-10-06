@@ -257,14 +257,14 @@ func pickSession(sessions []resume.Session, th theme.Theme) (resume.Session, err
 	}
 
 	var chosen string
-	err := huh.NewForm(
+	err := keymap.Suspendable(huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Recent sessions — enter to resume, esc to cancel").
 				Options(opts...).
 				Value(&chosen),
 		),
-	).WithKeyMap(keymap.Cancel()).WithProgramOptions(keymap.Form()).WithTheme(th.Huh()).Run()
+	)).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh()).Run()
 	if err != nil {
 		return resume.Session{}, err
 	}
