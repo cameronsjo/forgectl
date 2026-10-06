@@ -120,3 +120,67 @@ func TestStricterFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkerDefaultsWithinCaps(t *testing.T) {
+	for _, c := range []struct {
+		r          postureRank
+		def, limit string
+	}{
+		{claudePermissionRank, workerDefaultPermissionMode, workerMaxPermissionMode},
+		{codexSandboxRank, workerDefaultSandbox, workerMaxSandbox},
+		{codexApprovalRank, workerDefaultApproval, workerMaxApproval},
+	} {
+		if !c.r.atMost(c.def, c.limit) {
+			t.Errorf("built-in worker %s %q is looser than the cap %q", c.r.field, c.def, c.limit)
+		}
+	}
+}
+
+func TestWorkerProfileChecksAndNotes(t *testing.T) {
+	target := projectDir(t)
+	bin := fixedResolver(ResolvedBinary{Path: "/stub/harness", Source: BinaryPATH})
+	build := func(lc config.LaunchConfig, harness string) (BuiltInvocation, error) {
+		return BuildInvocation(InvocationRequest{Config: lc, CWD: target, Worker: true, Resolve: bin, StdoutTerminal: true, Harness: harness})
+	}
+
+	t.Run("a [launch.worker] typo is refused whatever the harness", func(t *testing.T) {
+		if _, err := build(config.LaunchConfig{Worker: config.LaunchWorker{Sandbox: "workspace-wirte"}}, "claude"); err == nil {
+			t.Fatal("a claude worker accepted a mistyped [launch.worker] sandbox")
+		}
+	})
+
+	t.Run("an explicit stricter default is named in a note", func(t *testing.T) {
+		built, err := build(config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: "plan"}}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(built.Notes) != 1 || !strings.Contains(built.Notes[0], `"plan"`) || !strings.Contains(built.Notes[0], "[launch.worker]") {
+			t.Fatalf("notes %q", built.Notes)
+		}
+		built, err = build(config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: "plan"}, Worker: config.LaunchWorker{PermissionMode: "plan"}}, "")
+		if err != nil || len(built.Notes) != 0 {
+			t.Fatalf("a worker that keeps plan still got notes %q, %v", built.Notes, err)
+		}
+	})
+
+	t.Run("--harness codex reads a claude block's own codex fields", func(t *testing.T) {
+		built, err := build(config.LaunchConfig{Projects: []config.LaunchProject{{Match: target, Harness: "claude", Sandbox: "read-only"}}}, "codex")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p := built.Profile; p.Sandbox != "read-only" || p.ApprovalPolicy != "on-request" {
+			t.Fatalf("codex posture %s/%s, want read-only/on-request", p.Sandbox, p.ApprovalPolicy)
+		}
+	})
+
+	t.Run("--harness claude reads a codex block's own permission_mode", func(t *testing.T) {
+		built, err := build(config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "codex"},
+			Projects: []config.LaunchProject{{Match: target, Harness: "codex", PermissionMode: "plan"}}}, "claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if built.Profile.PermissionMode != "plan" {
+			t.Fatalf("permission_mode %q, want plan", built.Profile.PermissionMode)
+		}
+	})
+}

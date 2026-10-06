@@ -213,9 +213,9 @@ type LaunchConfig struct {
 // [[launch.project]] block's own value; [launch.defaults] is the interactive
 // posture and does not bind workers. The worker floor still caps the result.
 type LaunchWorker struct {
-	PermissionMode string `toml:"permission_mode"`
-	Sandbox        string `toml:"sandbox"`
-	ApprovalPolicy string `toml:"approval_policy"`
+	PermissionMode string `toml:"permission_mode,omitempty"`
+	Sandbox        string `toml:"sandbox,omitempty"`
+	ApprovalPolicy string `toml:"approval_policy,omitempty"`
 }
 
 // LaunchDefaults is [launch.defaults]: the base posture applied when no project
@@ -260,6 +260,9 @@ type LaunchProject struct {
 
 // IsZero reports whether the [launch] section was absent or empty — the signal
 // the launcher uses to fall back to a legacy claunch.conf.
+//
+// A [launch.worker] table counts toward non-empty the same way usage_stats
+// does, below.
 //
 // usage_stats counts toward non-empty, which changes how one specific operator
 // is routed: someone holding both a claunch.conf and a config.toml containing

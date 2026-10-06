@@ -145,16 +145,17 @@ func Resolve(lc config.LaunchConfig, cwd string) (Profile, error) {
 	return resolveWithHome(lc, cwd, os.UserHomeDir)
 }
 
-// MatchedProject returns the [[launch.project]] block that Resolve would apply
-// to cwd, or nil when none matches. The worker profile reads its own values,
-// not the merged profile, so a field the block leaves unset is told apart
-// from one [launch.defaults] filled.
-func MatchedProject(lc config.LaunchConfig, cwd string) (*config.LaunchProject, error) {
-	home, err := homeIfNeeded(os.UserHomeDir, projectsUseHome(lc.Projects))
+// resolveMatched is Resolve that also returns the [[launch.project]] block it
+// applied, or nil. The worker profile reads that block's own values, not the
+// merged profile, so a field the block leaves unset is told apart from one
+// [launch.defaults] filled. One normalization and one match serve both.
+func resolveMatched(lc config.LaunchConfig, cwd string, userHome func() (string, error)) (Profile, *config.LaunchProject, error) {
+	home, err := homeIfNeeded(userHome, usesHome(lc.Defaults.AddDir) || projectsUseHome(lc.Projects))
 	if err != nil {
-		return nil, err
+		return Profile{}, nil, err
 	}
-	return matchProject(lc, normalizeCWD(cwd), home), nil
+	norm := normalizeCWD(cwd)
+	return resolve(lc, norm, home), matchProject(lc, norm, home), nil
 }
 
 // matchProject is the longest project match for an already normalized cwd.
@@ -191,11 +192,8 @@ func normalizeCWD(cwd string) string {
 
 // resolveWithHome is Resolve with the home lookup injected.
 func resolveWithHome(lc config.LaunchConfig, cwd string, userHome func() (string, error)) (Profile, error) {
-	home, err := homeIfNeeded(userHome, usesHome(lc.Defaults.AddDir) || projectsUseHome(lc.Projects))
-	if err != nil {
-		return Profile{}, err
-	}
-	return resolve(lc, normalizeCWD(cwd), home), nil
+	p, _, err := resolveMatched(lc, cwd, userHome)
+	return p, err
 }
 
 // DefaultsProfile resolves [launch.defaults] alone (no project matching), for

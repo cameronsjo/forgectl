@@ -102,37 +102,78 @@ func (r postureRank) stricter(a, b string) (string, error) {
 	return a, nil
 }
 
+// The built-in worker posture: the coordinator plan's v1 worker, which can
+// edit its worktree and whose shell commands still prompt. Separate from the
+// floor caps in invocation.go, which they must never exceed
+// (TestWorkerDefaultsWithinCaps).
+const (
+	workerDefaultPermissionMode = "acceptEdits"
+	workerDefaultSandbox        = "workspace-write"
+	workerDefaultApproval       = "on-request"
+)
+
 // applyWorkerProfile sets p's posture to the worker's: for each field, the
 // worker profile's value ([launch.worker], else the built-in worker value),
 // or the stricter of that and the matched project block's own value when the
 // block sets one. [launch.defaults] does not bind a worker: it is the
 // operator's interactive posture, and its built-in plan would leave every
 // worker unable to write. The worker floor caps the result afterwards.
-func applyWorkerProfile(p Profile, w config.LaunchWorker, proj *config.LaunchProject) (Profile, error) {
-	pick := func(r postureRank, worker, builtin, project string) (string, error) {
-		v := firstNonEmpty(worker, builtin)
-		if project == "" {
-			return v, r.check(v)
+//
+// Every [launch.worker] field is checked whatever the harness, so a typo in
+// one fails now rather than when the harness flips. A project block's field
+// is read only for the harness that takes it, so a codex value in a claude
+// repo's block cannot refuse a claude worker.
+//
+// The notes name each explicit [launch.defaults] value stricter than what the
+// worker gets: an operator who set defaults to plan expecting read-only
+// workers is told, at launch, that workers no longer read it.
+func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchProject) (Profile, []string, error) {
+	w := lc.Worker
+	wpm := firstNonEmpty(w.PermissionMode, workerDefaultPermissionMode)
+	wsb := firstNonEmpty(w.Sandbox, workerDefaultSandbox)
+	wap := firstNonEmpty(w.ApprovalPolicy, workerDefaultApproval)
+	for _, c := range []struct {
+		r postureRank
+		v string
+	}{{claudePermissionRank, wpm}, {codexSandboxRank, wsb}, {codexApprovalRank, wap}} {
+		if err := c.r.check(c.v); err != nil {
+			return Profile{}, nil, fmt.Errorf("[launch.worker]: %w", err)
 		}
-		return r.stricter(v, project)
 	}
 	var pm, sb, ap string
 	if proj != nil {
 		pm, sb, ap = proj.PermissionMode, proj.Sandbox, proj.ApprovalPolicy
 	}
-	// Each field is read only for the harness that takes it, so a codex value
-	// in a claude repo's block cannot refuse a claude worker.
+	pick := func(r postureRank, worker, project string) (string, error) {
+		return r.stricter(worker, firstNonEmpty(project, worker))
+	}
+	var notes []string
+	note := func(r postureRank, field, defaults, got string) {
+		if defaults == "" {
+			return
+		}
+		if s, err := r.stricter(defaults, got); err == nil && s != got && s == defaults {
+			notes = append(notes, fmt.Sprintf("[launch.defaults] %s = %q is stricter than the worker's %q, and does not bind workers; set [launch.worker] %s to keep it",
+				field, defaults, got, field))
+		}
+	}
 	var err error
 	switch p.Harness {
 	case "claude":
-		p.PermissionMode, err = pick(claudePermissionRank, w.PermissionMode, workerMaxPermissionMode, pm)
+		if p.PermissionMode, err = pick(claudePermissionRank, wpm, pm); err == nil {
+			note(claudePermissionRank, "permission_mode", lc.Defaults.PermissionMode, p.PermissionMode)
+		}
 	case "codex":
-		if p.Sandbox, err = pick(codexSandboxRank, w.Sandbox, workerMaxSandbox, sb); err == nil {
-			p.ApprovalPolicy, err = pick(codexApprovalRank, w.ApprovalPolicy, workerMaxApproval, ap)
+		if p.Sandbox, err = pick(codexSandboxRank, wsb, sb); err == nil {
+			p.ApprovalPolicy, err = pick(codexApprovalRank, wap, ap)
+		}
+		if err == nil {
+			note(codexSandboxRank, "sandbox", lc.Defaults.Sandbox, p.Sandbox)
+			note(codexApprovalRank, "approval_policy", lc.Defaults.ApprovalPolicy, p.ApprovalPolicy)
 		}
 	}
 	if err != nil {
-		return Profile{}, fmt.Errorf("worker profile: %w", err)
+		return Profile{}, nil, fmt.Errorf("worker profile: %w", err)
 	}
-	return p, nil
+	return p, notes, nil
 }

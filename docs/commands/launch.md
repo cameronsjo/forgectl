@@ -222,7 +222,9 @@ sandbox         = "workspace-write" # codex workers; built-in value workspace-wr
 approval_policy = "on-request"    # codex workers; built-in value on-request
 ```
 
-A repo block can only make a worker stricter. Its `plan` wins over `acceptEdits`, and its `bypassPermissions` loses to it. A worker floor then caps every field: `acceptEdits`, `workspace-write` and `on-request` at most. So `auto`, `dontAsk`, `bypassPermissions`, `danger-full-access` and `never` are refused for workers, wherever they are set. A value the floor does not rank is refused too.
+To keep workers read-only, set `permission_mode = "plan"` in `[launch.worker]`. When an explicit `[launch.defaults]` value is stricter than what a worker gets, the worker launch prints a note naming it.
+
+A repo block can only make a worker stricter. Its `plan` wins over `acceptEdits`, and its `bypassPermissions` loses to it. A worker floor then caps every field at `acceptEdits`, `workspace-write` and `on-request`. Setting `auto`, `dontAsk`, `bypassPermissions`, `danger-full-access` or `never` in `[launch.worker]` refuses the launch. The same values in a project block are not refused, but they lose to the stricter worker value. Any value the tables do not rank is refused.
 
 > Absorbed from the standalone `claunch` tool. A `claunch='forgectl launch'` shell alias preserves the old muscle memory.
 
