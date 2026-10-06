@@ -1245,3 +1245,45 @@ func TestDesk_AResizeKeepsThePlace(t *testing.T) {
 		t.Errorf("after the resize the page lost %s:\n%s", h.m.targets[first].name, ansi.Strip(h.m.footer()))
 	}
 }
+
+// The selected item leaves, the queue is empty for one scan, then a new item
+// arrives under the cursor: y still refuses once.
+func TestDesk_YRefusesOnceAfterAnEmptyScan(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-s1.sh", plainScript("s1"))
+	h.scan()
+	if err := h.d.Skip("01-s1", desk.SkipOperator); err != nil { // another desk
+		t.Fatal(err)
+	}
+	h.scan() // empty
+	h.drop("02-evil.sh", plainScript("evil"))
+	h.scan()
+	h.press("y")
+	if len(h.backend.launched) != 0 {
+		t.Fatalf("y ran %v; 01-s1 was what the operator read", h.backend.launched)
+	}
+}
+
+// The own-skip exemption is used up by the first scan after the skip: a
+// hand-dropped item reusing the skipped name, removed later, still counts
+// as a move.
+func TestDesk_OwnSkipExemptionIsOneShot(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-s1.sh", plainScript("s1"))
+	h.drop("03-s3.sh", plainScript("s3"))
+	h.scan()
+	h.press("s", "y")                           // the operator skips 01-s1; the exemption is used here
+	h.drop("01-s1.sh", plainScript("s1 again")) // same name, hand-dropped
+	h.scan()
+	h.selectItem("01-s1")
+	h.press("k") // the operator's own move onto it; nothing moved under them yet
+	h.selectItem("01-s1")
+	if err := h.d.Skip("01-s1", desk.SkipOperator); err != nil { // another desk takes it
+		t.Fatal(err)
+	}
+	h.scan()
+	h.press("y")
+	if len(h.backend.launched) != 0 {
+		t.Fatalf("y ran %v after the selection moved", h.backend.launched)
+	}
+}

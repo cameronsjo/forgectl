@@ -158,9 +158,13 @@ type deskModel struct {
 	shown   []bool
 	refused bool // the last y in the a prompt did not run: not every page seen
 	anchor  int  // the target the a prompt's page starts at, kept on a resize
-	// moved names the item that was selected when a rescan found it gone
-	// and moved the cursor to another; the next y refuses once (#1098).
+	// watch is the waiting item last under the cursor, kept across an empty
+	// queue. moved names it once a rescan finds it gone and the cursor on
+	// another; the next y refuses once (#1098). ownSkip is the item this
+	// desk just skipped, exempt for the first scan after.
+	watch    string
 	moved    string
+	ownSkip  string
 	lastSkip string // what u returns to pending/
 	busy     bool   // an action is in flight
 
@@ -346,7 +350,7 @@ func (m deskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case deskResultMsg:
 		m.busy = false
 		if t.skipped != "" {
-			m.lastSkip = t.skipped
+			m.lastSkip, m.ownSkip = t.skipped, t.skipped
 		}
 		if t.unskipped {
 			// An undone skip is back in pending/ but is not an arrival.
@@ -405,17 +409,31 @@ func (m *deskModel) rescan() tea.Cmd {
 func (m deskModel) applyScan(t deskScanMsg) (tea.Model, tea.Cmd) {
 	selected := ""
 	if m.cursor < len(m.rows) {
-		selected = m.rows[m.cursor].item.Name
+		r := m.rows[m.cursor]
+		selected = r.item.Name
+		m.watch = ""
+		if r.kind == rowWaiting {
+			m.watch = selected
+		}
 	}
 	now := m.now()
 	m.snap, m.frame.Steps, m.frame.Records = t.snap, t.steps, t.records
 	m.rows = deskRows(t.snap, now)
 	m.cursor = min(m.cursor, max(len(m.rows)-1, 0))
-	// The selected item left without the operator skipping it here (it
-	// changed, or another desk took it): the next y refuses once (see run).
-	if selected != "" && selected != m.lastSkip && len(m.rows) > 0 &&
-		!slices.ContainsFunc(m.rows, func(r queueRow) bool { return r.item.Name == selected }) {
-		m.moved = selected
+	// The waiting item the operator was reading left the queue without
+	// their own skip (another desk skipped or took it): the next y refuses
+	// once (see run). watch survives an empty queue, so an item arriving
+	// after one empty scan still counts as a move. The operator's own skip
+	// exempts only the first scan after it, so a later item reusing the
+	// name cannot borrow the exemption.
+	exempt := m.ownSkip
+	m.ownSkip = ""
+	if m.watch != "" && len(m.rows) > 0 &&
+		!slices.ContainsFunc(m.rows, func(r queueRow) bool { return r.item.Name == m.watch }) {
+		if m.watch != exempt {
+			m.moved = m.watch
+		}
+		m.watch = ""
 	}
 	for i, r := range m.rows {
 		if r.item.Name == selected {
