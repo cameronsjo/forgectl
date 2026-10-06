@@ -3,6 +3,8 @@ package worker
 import (
 	"regexp"
 	"testing"
+
+	"github.com/cameronsjo/forgectl/internal/resume"
 )
 
 func TestNewSessionID(t *testing.T) {
@@ -28,5 +30,15 @@ func TestTranscriptPath(t *testing.T) {
 	}
 	if got := TranscriptPath(nil, dir, id); got != "" {
 		t.Fatalf("no HOME and no config dir gave %q", got)
+	}
+}
+
+// TestProjectSlugMatchesResume keeps the copy in this package equal to
+// resume's, which this package may not import.
+func TestProjectSlugMatchesResume(t *testing.T) {
+	for _, dir := range []string{"/Users/c/Projects/forgectl/.claude/worktrees/fix_it", "/tmp/a b/ü-1", "", "/"} {
+		if got, want := projectSlug(dir), resume.ProjectSlug(dir); got != want {
+			t.Fatalf("projectSlug(%q) = %q, resume says %q", dir, got, want)
+		}
 	}
 }
