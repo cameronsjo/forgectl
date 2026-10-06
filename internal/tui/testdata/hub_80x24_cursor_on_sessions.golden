@@ -9,7 +9,7 @@
    desk         Operator queue: scripts Claude stages for you to approve and run
    tasks ready  List tasks that are ready to start
    resume       Pick a recent Claude Code session in any repo and resume it…
-   ── all commands (8) ──
+   ── areas · 8 commands ──
  6 agents ›     launch · resume · desk · tasks · surface · workflow · recipe…
  7 repos ›      status · review · branch · clean · audit · docker · k8s
  8 shell ›      env · y · pip · proxy · net
@@ -17,4 +17,4 @@
 $ forgectl sessions <subcommand>
    Sync local session ledgers into the operational concordance and query it
 
-↑↓ move · 1-9 jump · enter open · / search all · q/esc quit
+↑↓ move · 1-9 open · enter open · / search all · q/esc quit

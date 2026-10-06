@@ -244,11 +244,12 @@ type leafItem struct{ leaf HubLeaf }
 
 func (i leafItem) FilterValue() string { return i.leaf.Name }
 
-// desc is the row's description. A leaf needing an argument shows its Use
-// line (Architecture: "pr <ref> — needs a ref") rather than its Short, so
-// the row itself states what's missing.
+// desc is the row's description: its Short, like every other hub row. The
+// usage a leaf needing an argument still has to be given ("pr <ref>") shows
+// on the "$ forgectl …" line under the list; a leaf with no Short falls back
+// to its Use line.
 func (i leafItem) desc() string {
-	if i.leaf.NeedsArgs {
+	if i.leaf.Short == "" {
 		return i.leaf.Use
 	}
 	return i.leaf.Short

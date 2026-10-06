@@ -79,8 +79,8 @@ func TestBuildHub_PinOrder(t *testing.T) {
 	for _, a := range areas {
 		members += len(a.Members)
 	}
-	if !div.Heading || div.Name != "all commands ("+strconv.Itoa(members)+")" {
-		t.Fatalf("entries[%d] = %+v, want the divider \"all commands (%d)\"", len(want), div, members)
+	if !div.Heading || div.Name != "areas · "+strconv.Itoa(members)+" commands" {
+		t.Fatalf("entries[%d] = %+v, want the divider \"areas · %d commands\"", len(want), div, members)
 	}
 	if members != len(allModules())-len(want) {
 		t.Errorf("areas hold %d modules, want every unpinned module (%d)", members, len(allModules())-len(want))
@@ -98,6 +98,19 @@ func TestBuildHub_PinOrder(t *testing.T) {
 		}
 		if a.Short != strings.Join(g.names, " · ") {
 			t.Errorf("area %q Short = %q, want its member names", g.title, a.Short)
+		}
+	}
+}
+
+// TestBuildHub_KeyedRowsOnlyOpen pins what docs/commands/menu.md promises
+// about the top screen's keys: a keyed row opens a list (an area, or a
+// module's subcommands) or the argument picker, never a command, so one
+// keystroke on the hub cannot run anything.
+func TestBuildHub_KeyedRowsOnlyOpen(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	for _, e := range buildHub(root, true, nil) {
+		if e.Key > 0 && e.Members == nil && len(e.Leaves) == 0 {
+			t.Errorf("keyed row %d %q has no list to open, so its key would run it", e.Key, e.Name)
 		}
 	}
 }
@@ -183,8 +196,8 @@ func TestBuildHub_RecentSectionSitsBetweenPinsAndAll(t *testing.T) {
 	if got := strings.Join(entries[7].Argv, " "); got != "sessions last" || !entries[7].NeedsArgs || entries[7].Use != last.Use {
 		t.Errorf("recent row 2 = %+v, want argv [sessions last], NeedsArgs, Use %q", entries[7], last.Use)
 	}
-	if !entries[8].Heading || !strings.HasPrefix(entries[8].Name, "all commands (") {
-		t.Errorf("entries[8] = %+v, want the all-commands divider", entries[8])
+	if !entries[8].Heading || !strings.HasPrefix(entries[8].Name, "areas · ") {
+		t.Errorf("entries[8] = %+v, want the areas divider", entries[8])
 	}
 }
 

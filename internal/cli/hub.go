@@ -130,8 +130,8 @@ func collectHubSections(root *cobra.Command, configPresent bool, recent []*cobra
 // buildHub lays out the hub's rows (collectHubSections) for the TUI: an
 // optional first-run row when configPresent is false; the pinned commands
 // (hubPinned) in their fixed order; a "recent" divider and one row per recent
-// command when there are any; then an "all commands (N)" divider over one row
-// per area, each holding its modules as Members. Jump keys 1-9 go to the
+// command when there are any; then an "areas · N commands" divider over one
+// row per area, each holding its modules as Members. Jump keys 1-9 go to the
 // pinned rows, then the area rows.
 func buildHub(root *cobra.Command, configPresent bool, recent []*cobra.Command) []tui.HubEntry {
 	sec := collectHubSections(root, configPresent, recent)
@@ -160,7 +160,7 @@ func buildHub(root *cobra.Command, configPresent bool, recent []*cobra.Command) 
 		entries = append(entries, sec.recent...)
 	}
 	if len(sec.groups) > 0 {
-		entries = append(entries, tui.HubEntry{Name: "all commands (" + strconv.Itoa(len(sec.rest())) + ")", Heading: true})
+		entries = append(entries, tui.HubEntry{Name: "areas · " + strconv.Itoa(len(sec.rest())) + " commands", Heading: true})
 	}
 	for _, g := range sec.groups {
 		names := make([]string, 0, len(g.entries))

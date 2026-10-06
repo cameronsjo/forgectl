@@ -30,7 +30,7 @@ func frameHub() []HubEntry {
 		{Name: "desk", Short: "Operator queue: scripts Claude stages for you to approve and run", Argv: []string{"desk"}},
 		{Name: "tasks ready", Short: "List tasks that are ready to start", Argv: []string{"tasks", "ready"}},
 		{Name: "resume", Short: "Pick a recent Claude Code session in any repo and resume it there", Argv: []string{"resume"}},
-		{Name: "all commands (8)", Heading: true},
+		{Name: "areas · 8 commands", Heading: true},
 		{Name: "agents", Short: "launch · resume · desk · tasks · surface · workflow · recipe · preflight · quarantine", Key: 6, Members: []HubEntry{
 			{Name: "launch", Short: "Per-project launcher for Claude Code, Codex CLI, or Pi"},
 			{Name: "quarantine", Short: "Reversibly hide AI-instruction files from a workspace"},
@@ -89,6 +89,9 @@ func TestHubFrames(t *testing.T) {
 		{"hub_too_small", 18, 6, nil},
 		{"hub_80x24_setup_area", 80, 24, []tea.KeyPressMsg{key("9")}},
 		{"hub_80x24_cursor_on_sessions", 80, 24, []tea.KeyPressMsg{keyCode(tea.KeyDown), keyCode(tea.KeyDown), keyCode(tea.KeyDown), keyCode(tea.KeyDown)}},
+		{"hub_80x20_short", 80, 20, nil},
+		{"hub_100x18_short", 100, 18, nil},
+		{"hub_80x24_docs_subcommands", 80, 24, []tea.KeyPressMsg{key("1")}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -248,7 +251,7 @@ func TestHubSearchNumbersByPosition(t *testing.T) {
 	if got := ansi.Strip(m.l.View()); !strings.Contains(got, "1 quarantine") {
 		t.Fatalf("the one search result is not numbered 1:\n%s", got)
 	}
-	out, cmd := m.Update(key("1"))
+	out, cmd := choose(m, "1")
 	if a := out.(model).action; cmd == nil || a.Kind != ActionRunVerb || strings.Join(a.Argv, " ") != "quarantine" {
 		t.Errorf("1 on the search result = %+v, want RunVerb [quarantine]", a)
 	}
@@ -276,5 +279,72 @@ func TestHubTmuxMenuGetsTheFullHeight(t *testing.T) {
 	m = out.(model)
 	if m.mode != menuMode || m.l.Height() != hubHeight+hubDetailLines {
 		t.Errorf("tmux menu: mode=%v list height %d, want menuMode with %d", m.mode, m.l.Height(), hubHeight+hubDetailLines)
+	}
+}
+
+// TestHubShortTerminalKeepsTheAreas pins the short-height rule: when every
+// top-screen row does not fit, the recent rows and their divider go, and the
+// pinned rows and every area stay on screen with their keys.
+func TestHubShortTerminalKeepsTheAreas(t *testing.T) {
+	for _, h := range []int{18, 20} {
+		m := frameModel(80, h)
+		got := frameText(m)
+		if strings.Contains(got, "recent") || strings.Contains(got, "tasks ready") {
+			t.Errorf("at 80x%d the recent rows still take room:\n%s", h, got)
+		}
+		for _, want := range []string{"5 sessions", "6 agents ›", "9 setup ›"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("at 80x%d the top screen lacks %q:\n%s", h, want, got)
+			}
+		}
+	}
+	if got := frameText(frameModel(80, 24)); !strings.Contains(got, "tasks ready") {
+		t.Errorf("at 80x24 the recent rows should fit:\n%s", got)
+	}
+}
+
+// TestHubDeeperListDigitsOnlyMove pins that below the top screen a digit
+// moves the cursor and runs nothing; enter runs the row.
+func TestHubDeeperListDigitsOnlyMove(t *testing.T) {
+	m := frameModel(80, 24)
+	m, _ = press(m, '9') // setup area
+	if m.mode != areaMode {
+		t.Fatalf("9 did not open the setup area: mode=%v", m.mode)
+	}
+	out, cmd := m.Update(key("1"))
+	got := out.(model)
+	if cmd != nil || got.action.Kind != ActionNone {
+		t.Fatalf("a digit in an area ran %+v", got.action)
+	}
+	if it, ok := got.l.SelectedItem().(hubItem); !ok || it.entry.Name != "doctor" {
+		t.Fatalf("cursor after 1 = %+v, want doctor", got.l.SelectedItem())
+	}
+	out, cmd = got.Update(keyCode(tea.KeyEnter))
+	if a := out.(model).action; cmd == nil || a.Kind != ActionRunVerb || strings.Join(a.Argv, " ") != "doctor" {
+		t.Errorf("enter on doctor = %+v, want RunVerb [doctor]", a)
+	}
+}
+
+// TestHubSearchSaysWhenNothingMatches pins the empty search: the line under
+// the list names what was searched and how to clear it.
+func TestHubSearchSaysWhenNothingMatches(t *testing.T) {
+	m := frameModel(80, 24)
+	m = typeInto(m, "/")
+	if m.l.FilterInput.Prompt != "Search all: " {
+		t.Errorf("hub search prompt = %q, want \"Search all: \"", m.l.FilterInput.Prompt)
+	}
+	m.l.SetFilterText("zzzx")
+	got := ansi.Strip(m.detailView())
+	if !strings.Contains(got, `nothing matches "zzzx" in every command`) {
+		t.Errorf("empty search detail = %q", got)
+	}
+}
+
+// TestHubLeafRowsShowTheirDescription pins that a subcommand needing an
+// argument shows its description like any row; its usage is on the "$" line.
+func TestHubLeafRowsShowTheirDescription(t *testing.T) {
+	it := leafItem{leaf: HubLeaf{Name: "attach", Short: "Jump to a review window", Use: "attach <breadcrumb>", NeedsArgs: true}}
+	if got := ansi.Strip(it.render(0, false, false, 80, 10, asciiGlyphs, theme.Default().Styles())); !strings.Contains(got, "Jump to a review window") || strings.Contains(got, "<breadcrumb>") {
+		t.Errorf("leaf row = %q, want its description and not its usage", got)
 	}
 }

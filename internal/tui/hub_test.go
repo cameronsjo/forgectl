@@ -496,7 +496,7 @@ func TestHub_JumpKeysFollowTheRowNotThePosition(t *testing.T) {
 		{Name: "doctor", Short: "health check", Key: 1},
 		{Name: "recent", Heading: true},
 		{Name: "pr prs", Short: "open PRs", Use: "prs", Argv: []string{"pr", "prs"}},
-		{Name: "all commands (2)", Heading: true},
+		{Name: "areas · 2 commands", Heading: true},
 		{Name: "repos", Short: "branch · clean", Key: 2, Members: []HubEntry{
 			{Name: "branch", Short: "prune branches"},
 			{Name: "clean", Short: "reclaim space"},
@@ -517,7 +517,7 @@ func TestHub_JumpKeysFollowTheRowNotThePosition(t *testing.T) {
 	}
 	// Inside the area, members are keyed by position, and esc goes back to
 	// the hub with the area row selected.
-	out, cmd = got.Update(key("2"))
+	out, cmd = choose(got, "2")
 	if a := out.(model).action; cmd == nil || a.Kind != ActionRunVerb || strings.Join(a.Argv, " ") != "clean" {
 		t.Errorf("key 2 in the area = %+v, want RunVerb [clean]", a)
 	}

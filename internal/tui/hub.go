@@ -630,6 +630,11 @@ func (m *model) openPicker(prefix []string, use string, noPicker bool, browse *H
 
 func (m *model) closePicker() {
 	m.picker = nil
+	if m.mode == hubMode {
+		// A search-all row that opened the picker set the area esc would
+		// return to; with the picker closed there is nowhere to return from.
+		m.area = nil
+	}
 	m.applySize()
 }
 

@@ -422,11 +422,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if km, ok := msg.(tea.KeyPressMsg); ok && m.tooSmall() {
-		if s := km.String(); s == "q" || s == "esc" {
-			return m, tea.Quit
+	if m.tooSmall() {
+		switch t := msg.(type) {
+		case tea.KeyPressMsg:
+			if s := t.String(); s == "q" || s == "esc" {
+				return m, tea.Quit
+			}
+			return m, nil
+		case tea.PasteMsg:
+			return m, nil
 		}
-		return m, nil
 	}
 
 	if m.picker != nil {
@@ -451,7 +456,45 @@ func (m *model) applySize() {
 	m.l.SetSize(m.width, body)
 	m.tree.SetWidth(m.width)
 	m.tree.SetHeight(body)
+	m.fitTopScreen()
 	m.refreshDelegate()
+}
+
+// fitTopScreen keeps the top screen's areas on screen when the terminal is
+// short (forgectl#1074 review): when every row does not fit, the recent rows
+// and their divider go first, since each repeats a command an area holds.
+func (m *model) fitTopScreen() {
+	if m.mode != hubMode || m.hubFlat || m.l.FilterState() != list.Unfiltered {
+		return
+	}
+	// The list spends a line on its filter title and one on pagination
+	// (bubbles reserves it even on a single page), so rows is its height
+	// less those two.
+	entries := topEntries(m.hub, m.l.Height()-2)
+	if len(entries) == len(m.l.Items()) {
+		return
+	}
+	name, _ := m.selectedText()
+	m.l.SetItems(hubItems(entries))
+	m.l.Select(0)
+	m.selectRow(name)
+}
+
+// topEntries is hub without its recent rows (Argv set) and the divider over
+// them when all of hub does not fit in rows lines; rows <= 0 (no size yet)
+// keeps everything.
+func topEntries(hub []HubEntry, rows int) []HubEntry {
+	if rows <= 0 || len(hub) <= rows {
+		return hub
+	}
+	out := make([]HubEntry, 0, len(hub))
+	for i, e := range hub {
+		if e.Argv != nil || (e.Heading && i+1 < len(hub) && hub[i+1].Argv != nil) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // refreshDelegate rebuilds the row delegate for the list's current items and
@@ -486,7 +529,7 @@ func (m model) extraChromeLines() int {
 // the "$" line alone, so the list keeps room for more than one row.
 const (
 	hubDetailLines     = 3
-	hubDetailMinHeight = 16
+	hubDetailMinHeight = 20
 )
 
 func (m model) detailLines() int {
@@ -544,8 +587,12 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	key := km.String()
-	if key == "/" && m.mode == hubMode && !m.hubFlat {
-		m.flattenHub()
+	if key == "/" && m.hubScreen() && m.l.FilterState() == list.Unfiltered {
+		m.l.FilterInput.Prompt = "Filter " + m.title + ": "
+		if m.mode == hubMode {
+			m.flattenHub()
+			m.l.FilterInput.Prompt = "Search all: "
+		}
 	}
 	if key == "esc" && m.l.FilterState() == list.FilterApplied && m.hubScreen() {
 		// esc clears an applied filter before it backs out of the screen.
@@ -588,9 +635,13 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.activate()
 	}
 
-	// Number-key select (thumb mode) — jump straight to that row and act.
-	// The hub's top screen carries fixed keys; every other list, an area and
-	// the search-all list included, numbers its rows by position.
+	// Number-key select (thumb mode). The hub's top screen carries fixed
+	// keys, and a key opens its row: every keyed row is a pinned module or an
+	// area, so it opens a list or the argument picker and never runs a
+	// command. Every other list numbers its rows by position. In the hub's
+	// deeper lists (an area, a module's subcommands, the search-all list) a
+	// digit only moves the cursor, so a command runs only on enter; the tmux
+	// screens keep acting on a digit.
 	if len(key) == 1 && key[0] >= '1' && key[0] <= '9' && m.mode == hubMode && !m.hubFlat {
 		for i, it := range m.l.VisibleItems() {
 			if hi, ok := it.(hubItem); ok && hi.entry.Key == int(key[0]-'0') {
@@ -610,8 +661,12 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.skipHeading(false)
 				return m, nil
 			}
+			if m.hubScreen() {
+				return m, nil
+			}
 			return m.activate()
 		}
+		return m, nil
 	}
 
 	// Session-screen action keys.
@@ -927,6 +982,8 @@ func (m *model) unflattenHub() {
 	name, _ := m.selectedText()
 	m.hubFlat = false
 	m.setList(hubItems(m.hub))
+	m.fitTopScreen()
+	m.refreshDelegate()
 	m.selectRow(name)
 }
 
@@ -965,6 +1022,9 @@ func (m *model) leaveGroup() {
 func (m *model) showLeaves(leaves []HubLeaf) {
 	m.status = ""
 	m.title = strings.Join(m.leavesPath, " ")
+	if m.area != nil {
+		m.title = m.area.Name + " › " + m.title
+	}
 	m.leaves = leaves
 	m.setList(hubLeafItems(leaves))
 	m.mode = leavesMode
@@ -1226,11 +1286,15 @@ func (m model) headerView() string {
 // selected row, then that row's description in full (up to two lines) when
 // the row itself had to cut or drop it.
 func (m model) detailView() string {
+	first := m.selectedDollar()
+	if m.l.FilterState() != list.Unfiltered && len(m.l.VisibleItems()) == 0 {
+		first = m.noMatchLine()
+	}
 	if m.detailLines() == 1 {
-		return m.selectedDollar()
+		return first
 	}
 	lines := make([]string, hubDetailLines)
-	lines[0] = m.selectedDollar()
+	lines[0] = first
 	descLines := hubDetailLines - 1
 	name, desc := m.selectedText()
 	width := m.l.Width()
@@ -1249,6 +1313,18 @@ func (m model) detailView() string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// noMatchLine is the detail line when a filter matches nothing: what was
+// searched, where, and how to get out. The filter text is the operator's own
+// typing, so it is escaped and capped like any free text.
+func (m model) noMatchLine() string {
+	scope := "every command"
+	if m.mode != hubMode {
+		scope = m.title + " (esc, then / on the hub searches every command)"
+	}
+	msg := fmt.Sprintf("nothing matches %q in %s · esc clears", capSafe(m.l.FilterValue(), hubHeaderValueMax), scope)
+	return m.styles.Muted.Render(fitLine(msg, m.l.Width()))
 }
 
 // selectedText is the selected hub or leaf row's name and description, as
@@ -1280,7 +1356,7 @@ func (m model) selectedDollar() string {
 		case e.Heading:
 			return ""
 		case e.Members != nil:
-			return m.styles.Muted.Render(fitLine(fmt.Sprintf("enter lists the %d %s commands", len(e.Members), e.Name), m.l.Width()))
+			return m.styles.Muted.Render(fitLine(fmt.Sprintf("enter lists %s (%d commands)", e.Name, len(e.Members)), m.l.Width()))
 		case e.Argv != nil && !e.NeedsArgs:
 			argv, exact = e.Argv, true
 		case e.Argv != nil:
@@ -1335,19 +1411,19 @@ func (m model) footerView() string {
 		prio = []int{0, 3, 2, 1}
 	case m.l.FilterState() == list.Filtering:
 		hints = []string{"type to filter", "enter done", "esc clear"}
-		prio = []int{0, 2, 1}
+		prio = []int{2, 0, 1}
 	case m.l.FilterState() == list.FilterApplied && m.hubScreen():
 		hints = []string{"↑↓ move", "1-9 jump", "enter open", "esc clear filter"}
-		prio = []int{2, 3, 0, 1}
+		prio = []int{3, 2, 0, 1}
 	}
 	if hints == nil {
 		switch m.mode {
 		case hubMode:
-			hints = []string{"↑↓ move", "1-9 jump", "enter open", "/ search all", "q/esc quit", "forgectl --help lists every command"}
-			prio = []int{2, 4, 0, 3, 1, 5}
+			hints = []string{"↑↓ move", "1-9 open", "enter open", "/ search all", "q/esc quit", "forgectl --help lists every command"}
+			prio = []int{4, 2, 3, 0, 1, 5}
 		case areaMode, leavesMode:
 			hints = []string{"↑↓ move", "1-9 jump", "enter open", "/ filter", "q/esc back"}
-			prio = []int{2, 4, 0, 3, 1}
+			prio = []int{4, 2, 3, 0, 1}
 		case menuMode:
 			hints = []string{"1-6 / enter select", "q/esc back"}
 			prio = []int{0, 1}

@@ -14,11 +14,11 @@ Bare `forgectl` opens the hub on a TTY. `forgectl menu` prints what that hub hol
 
 On a TTY the hub shows the pinned rows, the recent rows, and one row per area, so the whole first screen fits an 80×24 terminal. Enter on an area lists its commands. The keys:
 
-- **`1`–`9`** jump to the pinned rows (`1`–`5`) and the areas (`6`–`9`). Recent rows and the first-run `init` row have no key, so a key always means the same row. Inside an area, a command's subcommands, or a search, `1`–`9` number the rows in order.
-- **`/`** searches every command, including those inside areas. `esc` clears the search before it backs out of a screen.
+- **`1`–`9`** open the pinned rows, then the areas, in order: `1`–`5` and `6`–`9` with the commands forgectl ships. A keyed row only opens a list or the argument picker; it never runs a command. Recent rows and the first-run `init` row have no key, so a key always means the same row. Inside an area, a command's subcommands, or a search, `1`–`9` number the rows in order and move the cursor there; `enter` runs the row.
+- **`/`** searches every command, including those inside areas; inside an area it filters that area. When nothing matches, the line under the list says so. `esc` clears the search before it backs out of a screen.
 - **`enter`** opens the selected row. **`q`** or **`esc`** goes back one screen, and quits from the top.
 
-The line under the list shows the exact `$ forgectl …` the selected row runs. When a description is too long for its row, the row cuts it at a word with `…` and the full text appears under that line. Below 20×8 the hub says the terminal is too small instead of drawing, and takes no key but `q` or `esc`, which quit.
+The line under the list shows the exact `$ forgectl …` the selected row runs. When a description is too long for its row, the row cuts it at a word with `…` and the full text appears under that line. On a terminal too short for every row, the recent rows go first, so the pinned rows and the areas stay on screen. Below 20×8 the hub says the terminal is too small instead of drawing, and takes no key but `q` or `esc`, which quit.
 
 `menu` changes nothing and never runs a row. It needs no TTY and opens no screen. It exits 0.
 

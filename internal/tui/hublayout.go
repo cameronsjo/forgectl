@@ -116,7 +116,8 @@ func hubNameColumn(items []list.Item, width int) int {
 // wide: the name padded to col, then the description cut to what is left of
 // width. It returns the name and description cells separately so the caller
 // can style each, and reports whether the description was shortened or
-// dropped (the detail line under the list then shows it whole).
+// dropped, or the name was cut (the detail line under the list then shows the
+// description whole; the "$ forgectl …" line above it names the command).
 func hubRow(name, desc string, used, col, width int) (nameCell, descCell string, cut bool) {
 	nameCell = padTo(fitWords(name, col), col)
 	if desc == "" {
@@ -127,5 +128,5 @@ func hubRow(name, desc string, used, col, width int) (nameCell, descCell string,
 		return strings.TrimRight(nameCell, " "), "", true
 	}
 	descCell = fitWords(desc, room)
-	return nameCell, descCell, descCell != desc
+	return nameCell, descCell, descCell != desc || ansi.StringWidth(name) > col
 }
