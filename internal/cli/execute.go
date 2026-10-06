@@ -315,10 +315,21 @@ func execCommand(ctx context.Context, root *cobra.Command, args []string, th the
 	if err := unknownSubcommand(root, args); err != nil {
 		return renderCommandError(ctx, root, th, err)
 	}
-	trimFramesOffTerminal(root)
 	withCancelHandling(root)
 	root.SetArgs(args)
-	return fang.Execute(ctx, root, fangOptions(meta.Version, meta.Commit, th)...)
+	trimHelpFrames(root)
+	run := func() error {
+		return fang.Execute(ctx, root, fangOptions(meta.Version, meta.Commit, th)...)
+	}
+	// The root's own page (bare forgectl, --help, --version) comes from fang
+	// directly, so trim that stream for the whole run. A run that resolves to the
+	// root has no command whose data could pass through it: the root only shows help.
+	if target, _, _ := root.Find(args); target == root {
+		var err error
+		withTrimmedOut(root, func() { err = run() })
+		return err
+	}
+	return run()
 }
 
 // fangOptions builds the fang.Option set every dispatch runs under: the version
@@ -361,6 +372,7 @@ func fangOptions(version, commit string, th theme.Theme) []fang.Option {
 // untouched; and SafeLine leaves ordinary ASCII byte-identical, so fang's own
 // prefix match for usage errors ("unknown flag: …") still fires.
 func termsafeErrorHandler(w io.Writer, styles fang.Styles, err error) {
+	defer trimErrorFrame(w)()
 	if structured, ok := err.(*structuredTerminalError); ok {
 		renderStructuredTerminalError(w, styles, structured)
 		return

@@ -92,7 +92,6 @@ func renderCommandError(ctx context.Context, root *cobra.Command, th theme.Theme
 	}
 	shim.SetOut(root.OutOrStdout())
 	shim.SetErr(root.ErrOrStderr())
-	trimFramesOffTerminal(shim)
 	// Empty, not nil: nil makes cobra read os.Args.
 	shim.SetArgs([]string{})
 	return fang.Execute(ctx, shim, fangOptions(root.Version, "", th)...)
