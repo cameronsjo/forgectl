@@ -96,7 +96,7 @@ It must run inside a herdr pane (HERDR_ENV=1, with HERDR_PANE_ID set).
 (the moves and splits and their ratios, the renames, and the command each pane
 would run) without changing anything.
 
-Exit codes: 0 laid out (or planned, with --dry-run); 1 a herdr call failed (the panes made so far stay);
+Exit codes: 0 laid out (or planned, with --dry-run); 1 a herdr call failed (the panes made so far stay; with --below, the parked panes are moved back first);
 2 usage, or not in a herdr pane.`,
 		Example: `  forgectl desk layout --progress 'claude-desk progress' --width 70
   forgectl desk layout --below`,

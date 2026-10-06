@@ -5,8 +5,11 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +28,9 @@ type belowStep struct {
 	reply func(f *fakeHerdrTab) string
 	apply func(f *fakeHerdrTab)
 	fail  bool
+	// garble applies the step's effect and then answers with text that is
+	// not herdr's reply: the move happened, the caller cannot tell.
+	garble bool
 }
 
 // belowStub is a stub herdr for `desk layout --below`: the reads come from
@@ -62,6 +68,9 @@ func (b *belowStub) sensitive() *exec.FakeSensitiveRunner {
 		}
 		reply := st.reply(b.tab)
 		st.apply(b.tab)
+		if st.garble {
+			reply = "not json"
+		}
 		if cmd.Kind == exec.KindHerdrPaneMove || cmd.Kind == exec.KindHerdrPaneSplit {
 			b.tab.gen += 10 // a layout change renumbers every pane id
 		}
@@ -248,7 +257,7 @@ func TestDeskLayoutBelow_DryRunMovesNothing(t *testing.T) {
 	if n := stub.n; n != 0 {
 		t.Fatalf("--dry-run made %d mutating herdr calls", n)
 	}
-	want := `dry-run: no pane is moved, split, renamed or started
+	want := `dry-run: no pane is moved, split, renamed or started (pane ids renumber after each move; the real run finds each pane again by its terminal)
 move.out=w1:p1 to=new-tab
 move.out=w1:p2 to=parked-tab direction=right ratio=0.50
 split=desk from=current direction=down ratio=0.72
@@ -273,6 +282,115 @@ func TestDeskLayoutBelow_RefusesWidth(t *testing.T) {
 	wantExit(t, err, deskExitUsage)
 	if stub.n != 0 {
 		t.Error("a refused layout still called herdr")
+	}
+}
+
+func failing(s belowStep) belowStep { s.fail = true; return s }
+func garbled(s belowStep) belowStep { s.garble = true; return s }
+
+func inTab(t *testing.T, tab *fakeHerdrTab, term, want string) {
+	t.Helper()
+	got := tab.tabOf[term]
+	if got == "" {
+		got = "w1:t1"
+	}
+	if got != want {
+		t.Errorf("%s is in tab %s, want %s", term, got, want)
+	}
+}
+
+// A park failure on a later pane puts the earlier panes back.
+func TestDeskLayoutBelow_ParkFailureRestoresTheEarlierPanes(t *testing.T) {
+	tab, stub := belowTab(t, "term_a", "term_b")
+	stub.steps = []belowStep{
+		moveStep("term_a", "", "w1:t2", true, ""),
+		failing(moveStep("term_b", "term_a", "w1:t2", false, "0.50")),
+		moveStep("term_a", "term_claude", "w1:t1", false, "0.50"),
+	}
+	deps := module.Deps{Theme: theme.Default(), Runner: tab.runner(t), SensitiveRunner: stub.sensitive()}
+	_, _, err := deskRun(t, deps, "layout", "--below")
+	wantExit(t, err, 1)
+	stub.done()
+	inTab(t, tab, "term_a", "w1:t1")
+	inTab(t, tab, "term_b", "w1:t1")
+}
+
+// herdr can carry out a move and still answer with something unreadable. The
+// pane is then parked although the call returned an error; it is put back.
+func TestDeskLayoutBelow_RestoresAPaneWhoseMoveAnsweredBadly(t *testing.T) {
+	tab, stub := belowTab(t, "term_a")
+	stub.steps = []belowStep{
+		garbled(moveStep("term_a", "", "w1:t2", true, "")),
+		moveStep("term_a", "term_claude", "w1:t1", false, "0.50"),
+	}
+	deps := module.Deps{Theme: theme.Default(), Runner: tab.runner(t), SensitiveRunner: stub.sensitive()}
+	_, _, err := deskRun(t, deps, "layout", "--below")
+	wantExit(t, err, 1)
+	stub.done()
+	inTab(t, tab, "term_a", "w1:t1")
+}
+
+// A restore move that fails does not stop the others, and the error names
+// the pane that stays parked.
+func TestDeskLayoutBelow_RestoreContinuesPastAFailedMove(t *testing.T) {
+	tab, stub := belowTab(t, "term_a", "term_b")
+	stub.steps = []belowStep{
+		moveStep("term_a", "", "w1:t2", true, ""),
+		moveStep("term_b", "term_a", "w1:t2", false, "0.50"),
+		failing(splitStep("", "down", "0.72", "term_desk", false)),
+		failing(moveStep("term_a", "term_claude", "w1:t1", false, "0.33")),
+		moveStep("term_b", "term_claude", "w1:t1", false, "0.33"),
+	}
+	deps := module.Deps{Theme: theme.Default(), Runner: tab.runner(t), SensitiveRunner: stub.sensitive()}
+	_, _, err := deskRun(t, deps, "layout", "--below")
+	wantExit(t, err, 1)
+	stub.done()
+	inTab(t, tab, "term_b", "w1:t1")
+	inTab(t, tab, "term_a", "w1:t2")
+	if !strings.Contains(err.Error(), "terminal term_a") || !strings.Contains(err.Error(), "stays in its temporary tab") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// When the final restore fails after the desk pane was made, the error says
+// the desk pane stays.
+func TestDeskLayoutBelow_FinalRestoreFailureNamesTheDeskPane(t *testing.T) {
+	tab, stub := belowTab(t, "term_a")
+	stub.steps = []belowStep{
+		moveStep("term_a", "", "w1:t2", true, ""),
+		splitStep("", "down", "0.72", "term_desk", false),
+		failing(moveStep("term_a", "term_claude", "w1:t1", false, "0.50")),
+	}
+	deps := module.Deps{Theme: theme.Default(), Runner: tab.runner(t), SensitiveRunner: stub.sensitive()}
+	_, _, err := deskRun(t, deps, "layout", "--below")
+	wantExit(t, err, 1)
+	stub.done()
+	if !strings.Contains(err.Error(), "the desk pane (terminal term_desk) was made and stays") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// A signal cancels the layout's context between moves. The parked pane is
+// still put back: the restore runs on a context a cancel cannot reach (the
+// stub refuses a command whose context is done, as a real runner does).
+func TestDeskLayoutBelow_CancelledRunStillRestores(t *testing.T) {
+	tab, stub := belowTab(t, "term_a", "term_b")
+	ctx, cancel := context.WithCancel(t.Context())
+	first := moveStep("term_a", "", "w1:t2", true, "")
+	apply := first.apply
+	first.apply = func(f *fakeHerdrTab) { apply(f); cancel() }
+	stub.steps = []belowStep{first, moveStep("term_a", "term_claude", "w1:t1", false, "0.50")}
+	deps := module.Deps{Theme: theme.Default(), Runner: tab.runner(t), SensitiveRunner: stub.sensitive()}
+	cmd := newDeskCmd(deps)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"layout", "--below"})
+	err := cmd.ExecuteContext(ctx)
+	wantExit(t, err, 1)
+	stub.done()
+	inTab(t, tab, "term_a", "w1:t1")
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want it to wrap context.Canceled", err)
 	}
 }
 

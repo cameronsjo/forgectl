@@ -6,6 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -65,20 +70,35 @@ func runDeskLayoutBelow(cmd *cobra.Command, client *herdr.Client, run exec.Sensi
 		return printBelowPlan(cmd, plan, deskCommand, progress)
 	}
 
+	// A signal or a closing terminal must not strand the parked panes: it
+	// cancels this context, and the restore below runs on a context that a
+	// cancel cannot reach.
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+
 	// Park every other pane in one temporary tab, so this pane is alone and a
-	// down split of it spans the whole tab.
-	var parked []herdr.Pane
+	// down split of it spans the whole tab. A pane is noted before its move,
+	// not after: herdr can carry out a move and still answer with something
+	// unreadable, so a pane whose move reported an error may be parked anyway.
+	// restoreParked looks at where each one is before moving it back.
+	var attempted []herdr.Pane
 	var parkTab string
 	restore := func() error {
-		return restoreParked(ctx, client, run, herdrPath, plan.caller, plan.caller.TabID, parked)
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
+		defer cancel()
+		return restoreParked(rctx, client, run, herdrPath, plan.caller, attempted)
 	}
 	for i, o := range plan.others {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(fmt.Errorf("desk layout: stopped: %w", err), restore())
+		}
 		mv := herdr.PaneMove{NewTab: true}
 		target := ""
 		if i > 0 {
 			mv = herdr.PaneMove{Tab: parkTab, Direction: herdr.SplitRight, Ratio: evenKeep(i, len(plan.others))}
 			target = plan.others[i-1].TerminalID
 		}
+		attempted = append(attempted, o)
 		moved, err := movePane(ctx, client, run, herdrPath, o.TerminalID, target, mv)
 		if err != nil {
 			return errors.Join(fmt.Errorf("desk layout: move a pane out of the tab: %w", err), restore())
@@ -86,15 +106,17 @@ func runDeskLayoutBelow(cmd *cobra.Command, client *herdr.Client, run exec.Sensi
 		if i == 0 {
 			parkTab = moved.NewTab
 		}
-		parked = append(parked, o)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return errors.Join(fmt.Errorf("desk layout: stopped: %w", err), restore())
+	}
 	deskPane, err := herdr.PaneSplit(ctx, run, herdrPath, herdr.Split{Direction: herdr.SplitDown, Ratio: deskBelowRatio, CWD: cwd})
 	if err != nil {
 		return errors.Join(fmt.Errorf("desk layout: split off the desk pane: %w", err), restore())
 	}
 	if err := restore(); err != nil {
-		return fmt.Errorf("desk layout: %w", err)
+		return fmt.Errorf("desk layout: the desk pane (terminal %s) was made and stays: %w", safeLabel(deskPane.TerminalID), err)
 	}
 
 	panes := []struct{ terminal, label, command string }{{deskPane.TerminalID, "desk", deskCommand}}
@@ -133,22 +155,50 @@ func runDeskLayoutBelow(cmd *cobra.Command, client *herdr.Client, run exec.Sensi
 	return w.err
 }
 
-// restoreParked moves the parked panes back into tab, in a row to the right
-// of caller. It keeps going after a failure so one stuck pane does not strand
-// the rest, and returns every failure.
-func restoreParked(ctx context.Context, client *herdr.Client, run exec.SensitiveRunner, herdrPath string, caller herdr.Pane, tab string, parked []herdr.Pane) error {
+// restoreTimeout bounds the restore, which runs on a context that cannot be
+// cancelled.
+const restoreTimeout = 30 * time.Second
+
+// restoreParked moves back, to the right of caller in the caller's tab, every
+// pane of attempted that is not in that tab now, in equal widths. It reads
+// where the panes are instead of trusting what the moves reported. It keeps
+// going after a failure so one stuck pane does not strand the rest, and
+// returns every failure, naming each pane that stays in its temporary tab.
+func restoreParked(ctx context.Context, client *herdr.Client, run exec.SensitiveRunner, herdrPath string, caller herdr.Pane, attempted []herdr.Pane) error {
+	now, err := client.Panes(ctx)
+	if err != nil {
+		return fmt.Errorf("find the moved panes to put back: %w (panes of this tab may be in a temporary tab: %s)", err, terminalList(attempted))
+	}
+	var strays []herdr.Pane
+	for _, a := range attempted {
+		for _, p := range now {
+			if p.TerminalID == a.TerminalID && p.TabID != caller.TabID {
+				strays = append(strays, p)
+			}
+		}
+	}
 	var errs []error
 	target := caller.TerminalID
-	for i, o := range parked {
+	placed := 0
+	for _, o := range strays {
 		_, err := movePane(ctx, client, run, herdrPath, o.TerminalID, target,
-			herdr.PaneMove{Tab: tab, Direction: herdr.SplitRight, Ratio: evenKeep(i+1, len(parked)+1)})
+			herdr.PaneMove{Tab: caller.TabID, Direction: herdr.SplitRight, Ratio: evenKeep(placed+1, len(strays)+1)})
 		if err != nil {
-			errs = append(errs, fmt.Errorf("move a pane back into the tab (it is in its temporary tab): %w", err))
+			errs = append(errs, fmt.Errorf("put the pane with terminal %s back into the tab (it stays in its temporary tab): %w", safeLabel(o.TerminalID), err))
 			continue
 		}
 		target = o.TerminalID
+		placed++
 	}
 	return errors.Join(errs...)
+}
+
+func terminalList(ps []herdr.Pane) string {
+	var ids []string
+	for _, p := range ps {
+		ids = append(ids, safeLabel(p.TerminalID))
+	}
+	return strings.Join(ids, ", ")
 }
 
 // movePane runs one `pane move`. herdr names panes only by id and ids
@@ -191,7 +241,7 @@ func movePane(ctx context.Context, client *herdr.Client, run exec.SensitiveRunne
 // and nothing changed.
 func printBelowPlan(cmd *cobra.Command, plan belowPlan, deskCommand, progress string) error {
 	w := &stickyWriter{w: cmd.OutOrStdout()}
-	w.printf("dry-run: no pane is moved, split, renamed or started\n")
+	w.printf("dry-run: no pane is moved, split, renamed or started (pane ids renumber after each move; the real run finds each pane again by its terminal)\n")
 	n := len(plan.others)
 	for i, o := range plan.others {
 		if i == 0 {
