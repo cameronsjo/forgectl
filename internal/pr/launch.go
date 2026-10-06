@@ -740,7 +740,7 @@ func confirmReview(review string, th theme.Theme) (bool, error) {
 // confirmReviewForm builds the form, split out so a test can feed it keys. It takes
 // keymap.Cancel so Esc cancels it as Ctrl+C does.
 func confirmReviewForm(review string, th theme.Theme, ok *bool) *huh.Form {
-	return huh.NewForm(
+	return keymap.Suspendable(huh.NewForm(
 		huh.NewGroup(
 			huh.NewNote().
 				Title("Drafted review — approve before posting?").
@@ -751,5 +751,5 @@ func confirmReviewForm(review string, th theme.Theme, ok *bool) *huh.Form {
 				Negative("Cancel").
 				Value(ok),
 		),
-	).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh())
+	)).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh())
 }

@@ -745,7 +745,7 @@ func confirmRemoval(prompt string, th theme.Theme) (bool, error) {
 // confirmRemovalForm builds the form, split out so a test can feed it keys. It takes
 // keymap.Cancel so Esc cancels it as Ctrl+C does.
 func confirmRemovalForm(prompt string, th theme.Theme, ok *bool) *huh.Form {
-	return huh.NewForm(
+	return keymap.Suspendable(huh.NewForm(
 		huh.NewGroup(
 			huh.NewNote().
 				Title("Remove this clean room? — this cannot be undone").
@@ -756,7 +756,7 @@ func confirmRemovalForm(prompt string, th theme.Theme, ok *bool) *huh.Form {
 				Negative("Cancel").
 				Value(ok),
 		),
-	).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh())
+	)).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh())
 }
 
 // repairForgetLocked removes ONLY the record, after proving that neither a

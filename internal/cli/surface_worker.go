@@ -88,6 +88,12 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 	if err != nil {
 		return fail(err)
 	}
+	// A worker must be built as one: that is what applies the posture floor,
+	// the isolation argv and the environment allowlist. A build step that
+	// skipped it would launch a worker with the launcher's posture and env.
+	if !built.Worker {
+		return fail(errors.New("forgectl: the worker invocation was not built as a worker launch"))
+	}
 	if err := led.Update(name, func(r *worker.Row) {
 		r.Harness = built.Invocation.Harness
 		if built.SessionID != "" {
@@ -177,19 +183,7 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 			return worker.AddWorktree(ctx, deps.Runner, top, opts.DisplayName, opts.Worktree)
 		},
 		build: func(cwd string) (launch.BuiltInvocation, error) {
-			req := surfaceInvocationRequest(deps.Cfg.Launch, cwd, injected, unset, opts.Harness)
-			req.Worker = true
-			req.Prompt = prompt
-			built, err := launch.BuildInvocation(req)
-			if err != nil || built.Invocation.Harness != "claude" {
-				return built, err
-			}
-			// The harness is known only once the profile resolves, so a
-			// claude worker is built a second time with its session id.
-			if req.SessionID, err = worker.NewSessionID(); err != nil {
-				return launch.BuiltInvocation{}, err
-			}
-			return launch.BuildInvocation(req)
+			return buildWorkerInvocation(surfaceInvocationRequest(deps.Cfg.Launch, cwd, injected, unset, opts.Harness), prompt, worker.NewSessionID)
 		},
 		launch: func(ctx context.Context, inv launch.Invocation) (backend.Ref, error) {
 			inv.Env = markHerdrPane(inv.Env)
@@ -214,6 +208,24 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	}
 	_, err = fmt.Fprintln(out, safePath(launched.worktree))
 	return err
+}
+
+// buildWorkerInvocation marks req as a worker launch, which is what turns on
+// the worker floor, the claude isolation argv and the environment allowlist
+// (launch.BuildInvocation), and gives a claude worker its session id. The
+// harness is known only once the profile resolves, so a claude worker is
+// built a second time with the id.
+func buildWorkerInvocation(req launch.InvocationRequest, prompt string, newID func() (string, error)) (launch.BuiltInvocation, error) {
+	req.Worker = true
+	req.Prompt = prompt
+	built, err := launch.BuildInvocation(req)
+	if err != nil || built.Invocation.Harness != "claude" {
+		return built, err
+	}
+	if req.SessionID, err = newID(); err != nil {
+		return launch.BuiltInvocation{}, err
+	}
+	return launch.BuildInvocation(req)
 }
 
 // launchBrief turns --brief into the prompt argument and its ledger record:

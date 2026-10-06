@@ -63,7 +63,7 @@ usage_stats = false
 harness         = "claude"   # "claude" (default), "codex", or "pi"
 model           = "opus"     # remove or replace for Codex/Pi
 # effort        = "medium"   # low|medium|high|xhigh|max; unset = derived from model
-permission_mode = "plan"     # Claude starts in plan
+permission_mode = "plan"     # Claude starts in plan; plan|default|manual|acceptEdits|auto|dontAsk|bypassPermissions, anything else is refused
 allow_danger    = true       # adds --allow-dangerously-skip-permissions (reachable, not on)
 # binary_path   = ""         # explicit claude path; $FORGECTL_CLAUDE_BIN overrides this
 # Codex-native settings (used when harness = "codex"):

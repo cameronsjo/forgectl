@@ -180,3 +180,103 @@ func TestCurrentLayoutAndPaneByTerminal(t *testing.T) {
 		t.Error("an unknown terminal resolved")
 	}
 }
+
+// The pane id comes before the flags: herdr 0.9.1 refuses release-agent with
+// the pane last ("unknown option") though its help shows it there.
+func TestPaneReportBlockedAndReleaseDesk(t *testing.T) {
+	run := replying(`{"id":"x","result":{"type":"ok"}}`)
+	if err := PaneReportBlocked(t.Context(), run, testHerdrPath, "w1:p3", "desk: 2 waiting"); err != nil {
+		t.Fatal(err)
+	}
+	src := []exec.Arg{exec.MustFixed("--source"), exec.MustFixed(DeskAgentSource), exec.MustFixed("--agent"), exec.MustFixed(DeskAgentSource)}
+	want := paneCmd(exec.KindHerdrPaneAgent, append(append([]exec.Arg{exec.MustFixed("report-agent"), exec.Opaque("w1:p3")}, src...),
+		exec.MustFixed("--state"), exec.MustFixed("blocked"), exec.MustFixed("--message"), exec.Opaque("desk: 2 waiting"))...)
+	if got := lastCmd(t, run); !got.Equal(want) {
+		t.Errorf("report = %v, want %v", got, want)
+	}
+	if err := PaneReleaseDesk(t.Context(), run, testHerdrPath, "w1:p3"); err != nil {
+		t.Fatal(err)
+	}
+	want = paneCmd(exec.KindHerdrPaneAgent, append([]exec.Arg{exec.MustFixed("release-agent"), exec.Opaque("w1:p3")}, src...)...)
+	if got := lastCmd(t, run); !got.Equal(want) {
+		t.Errorf("release = %v, want %v", got, want)
+	}
+}
+
+func TestPaneAgentVerbsRefuseAnUnsafePaneID(t *testing.T) {
+	run := replying(`{"id":"x","result":{"type":"ok"}}`)
+	for _, id := range []string{"", "-x", "w1:p3\n"} {
+		if PaneReportBlocked(t.Context(), run, testHerdrPath, id, "m") == nil || PaneReleaseDesk(t.Context(), run, testHerdrPath, id) == nil {
+			t.Errorf("pane id %q was accepted", id)
+		}
+	}
+	if len(run.Calls()) != 0 {
+		t.Error("a refused pane id still ran herdr")
+	}
+}
+
+const paneMoveReply = `{"id":"x","result":{"type":"pane_move","move_result":{"changed":true,"previous_pane_id":"w1:p2","previous_workspace_id":"w1","previous_tab_id":"w1:t1","focused_pane_id":"w1:p0","target_layout":{},"created_tab":{"tab_id":"w1:t2"},"pane":{"pane_id":"w1:p1","terminal_id":"term_2","tab_id":"w1:t2","workspace_id":"w1","focused":false,"agent_status":"unknown","revision":1}}}}`
+
+func TestPanePlaceBuildsTheCommandAndReadsTheMove(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		m       PaneMove
+		want    exec.SensitiveCommand
+		wantTab string
+	}{
+		{
+			name: "into a new tab",
+			m:    PaneMove{Pane: "w1:p2", NewTab: true},
+			want: paneCmd(exec.KindHerdrPaneMove, exec.MustFixed("move"), exec.Opaque("w1:p2"), exec.MustFixed("--new-tab"), exec.MustFixed("--no-focus")),
+			// created_tab names the tab
+			wantTab: "w1:t2",
+		},
+		{
+			name: "beside a pane of a tab",
+			m:    PaneMove{Pane: "w1:p2", Tab: "w1:t1", Target: "w1:p0", Direction: SplitRight, Ratio: 0.333},
+			want: paneCmd(exec.KindHerdrPaneMove, exec.MustFixed("move"), exec.Opaque("w1:p2"),
+				exec.MustFixed("--tab"), exec.Opaque("w1:t1"), exec.MustFixed("--target-pane"), exec.Opaque("w1:p0"),
+				exec.MustFixed("--split"), exec.MustFixed("right"), exec.MustFixed("--ratio"), exec.Opaque("0.33"), exec.MustFixed("--no-focus")),
+			wantTab: "w1:t2",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := replying(paneMoveReply)
+			got, err := PanePlace(t.Context(), run, testHerdrPath, tc.m)
+			if err != nil {
+				t.Fatalf("PanePlace: %v", err)
+			}
+			if got.Pane.TerminalID != "term_2" || got.NewTab != tc.wantTab {
+				t.Errorf("moved = %+v, want term_2 / %s", got, tc.wantTab)
+			}
+			if c := lastCmd(t, run); !c.Equal(tc.want) {
+				t.Errorf("command = %v, want %v", c, tc.want)
+			}
+		})
+	}
+}
+
+func TestPanePlaceRefusals(t *testing.T) {
+	good := PaneMove{Pane: "w1:p2", Tab: "w1:t1", Direction: SplitRight, Ratio: 0.5}
+	for _, tc := range []struct {
+		name  string
+		m     PaneMove
+		reply string
+	}{
+		{"flag-shaped pane", PaneMove{Pane: "--new-tab", NewTab: true}, paneMoveReply},
+		{"no tab", PaneMove{Pane: "w1:p2", Direction: SplitRight, Ratio: 0.5}, paneMoveReply},
+		{"flag-shaped target", PaneMove{Pane: "w1:p2", Tab: "w1:t1", Target: "--x", Direction: SplitRight, Ratio: 0.5}, paneMoveReply},
+		{"no direction", PaneMove{Pane: "w1:p2", Tab: "w1:t1", Ratio: 0.5}, paneMoveReply},
+		{"ratio 1", PaneMove{Pane: "w1:p2", Tab: "w1:t1", Direction: SplitRight, Ratio: 1}, paneMoveReply},
+		{"declined", good, `{"id":"x","result":{"type":"pane_move","move_result":{"changed":false,"reason":"same_tab","pane":{"pane_id":"w1:p1","terminal_id":"term_2"}}}}`},
+		{"no changed field", good, `{"id":"x","result":{"type":"pane_move","move_result":{}}}`},
+		{"no move_result", good, `{"id":"x","result":{"type":"ok"}}`},
+		{"no terminal in the reply", good, `{"id":"x","result":{"type":"pane_move","move_result":{"changed":true,"pane":{"pane_id":"w1:p1"}}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := PanePlace(t.Context(), replying(tc.reply), testHerdrPath, tc.m); err == nil {
+				t.Fatal("want an error")
+			}
+		})
+	}
+}

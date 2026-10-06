@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -189,7 +190,6 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 		"danger-full-access":       {Defaults: config.LaunchDefaults{Harness: "codex", Sandbox: "danger-full-access"}},
 		"claude auto mode":         {Defaults: config.LaunchDefaults{PermissionMode: "auto"}},
 		"claude dontAsk":           {Defaults: config.LaunchDefaults{PermissionMode: "dontAsk"}},
-		"claude unknown mode":      {Defaults: config.LaunchDefaults{PermissionMode: "acceptEdit"}},
 		"codex never asks":         {Defaults: config.LaunchDefaults{Harness: "codex", Sandbox: "workspace-write", ApprovalPolicy: "never"}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -202,7 +202,7 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 
 	// forgectl#1060: a plan-mode worker's shell must prompt, not go to the
 	// auto-mode classifier, so every claude worker carries the setting.
-	for _, mode := range workerPermissionModes {
+	for _, mode := range []string{"plan", "default", "manual", "acceptEdits"} {
 		t.Run("claude worker in "+mode+" turns off auto mode during plan", func(t *testing.T) {
 			built, err := BuildInvocation(InvocationRequest{
 				StdoutTerminal: true,
@@ -214,9 +214,22 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 			}
 			// Exactly after the leading --permission-mode pair: anywhere later
 			// could follow a variadic flag and swallow its list.
-			want := []string{"--permission-mode", mode, "--settings", workerClaudeSettings}
-			if args := built.Invocation.Args; len(args) < 4 || !slices.Equal(args[:4], want) {
+			// Literal, not built from the production constants, so a wrong
+			// constant cannot pass by agreeing with itself. --mcp-config is
+			// variadic in Claude Code, so the flag after its one value is load-
+			// bearing: a bare token there would join the config list.
+			want := []string{"--permission-mode", mode,
+				"--setting-sources", "",
+				"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
+				"--no-chrome",
+				"--safe-mode",
+				"--settings", `{"useAutoModeDuringPlan":false,"permissions":{"deny":["SendMessage","RemoteTrigger"]}}`,
+			}
+			if args := built.Invocation.Args; len(args) < len(want) || !slices.Equal(args[:len(want)], want) {
 				t.Errorf("worker argv %q, want it to start %q", args, want)
+			}
+			if slices.Contains(built.Invocation.Args, "--ide") {
+				t.Errorf("worker argv %q connects to the operator's IDE", built.Invocation.Args)
 			}
 		})
 	}
@@ -352,5 +365,79 @@ func TestBuildInvocation_WorkerSessionID(t *testing.T) {
 				t.Fatal("accepted")
 			}
 		})
+	}
+}
+
+// TestWorkerClaudeSettingsJSON pins the worker settings as data: it parses,
+// turns off auto mode during plan, and denies the two cross-session tools.
+func TestWorkerClaudeSettingsJSON(t *testing.T) {
+	var s struct {
+		UseAutoModeDuringPlan *bool `json:"useAutoModeDuringPlan"`
+		Permissions           struct {
+			Deny []string `json:"deny"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal([]byte(workerClaudeSettings), &s); err != nil {
+		t.Fatalf("worker settings do not parse: %v", err)
+	}
+	if s.UseAutoModeDuringPlan == nil || *s.UseAutoModeDuringPlan {
+		t.Error("useAutoModeDuringPlan is not false")
+	}
+	for _, tool := range []string{"SendMessage", "RemoteTrigger"} {
+		if !slices.Contains(s.Permissions.Deny, tool) {
+			t.Errorf("%s is not denied", tool)
+		}
+	}
+}
+
+// TestSessionArgsKeepsTheIDEForOrdinaryLaunches: only a worker is detached.
+func TestSessionArgsKeepsTheIDEForOrdinaryLaunches(t *testing.T) {
+	p := Profile{PermissionMode: "plan", Model: "opus"}
+	if !slices.Contains(SessionArgs(p), "--ide") {
+		t.Fatal("an ordinary session lost --ide")
+	}
+	p.Detached = true
+	if slices.Contains(SessionArgs(p), "--ide") {
+		t.Fatal("a detached session kept --ide")
+	}
+}
+
+// TestWorkerEnvAllowlist: a worker inherits only the allowlisted variables;
+// the launcher session's handles and settings env do not reach it, while an
+// ordinary launch keeps its whole environment.
+func TestWorkerEnvAllowlist(t *testing.T) {
+	target := projectDir(t)
+	bin := fixedResolver(ResolvedBinary{Path: "/stub/harness", Source: BinaryPATH})
+	base := []string{
+		"PATH=/usr/bin", "HOME=/h", "LC_ALL=C",
+		"CLAUDE_CODE_MESSAGING_TOKEN=secret", "HERDR_SOCKET_PATH=/s", "GH_TOKEN=t", "OTEL_EXPORTER_OTLP_ENDPOINT=x",
+	}
+	build := func(worker bool) []string {
+		built, err := BuildInvocation(InvocationRequest{
+			StdoutTerminal: true,
+			Config:         config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: "plan"}},
+			CWD:            target, Worker: worker, Resolve: bin, BaseEnv: base,
+			InjectedEnv: map[string]string{"FORGECTL_INJECTED": "1"},
+		})
+		if err != nil {
+			t.Fatalf("BuildInvocation: %v", err)
+		}
+		return built.Invocation.Env
+	}
+	env := build(true)
+	for _, kept := range []string{"PATH=/usr/bin", "HOME=/h", "LC_ALL=C", "FORGECTL_INJECTED=1"} {
+		if !slices.Contains(env, kept) {
+			t.Errorf("worker env lost %s: %q", kept, env)
+		}
+	}
+	for _, e := range env {
+		for _, dropped := range []string{"CLAUDE_CODE_MESSAGING_TOKEN=", "HERDR_SOCKET_PATH=", "GH_TOKEN=", "OTEL_EXPORTER_OTLP_ENDPOINT="} {
+			if strings.HasPrefix(e, dropped) {
+				t.Errorf("worker env kept %s", e)
+			}
+		}
+	}
+	if !slices.Contains(build(false), "CLAUDE_CODE_MESSAGING_TOKEN=secret") {
+		t.Error("an ordinary launch lost its inherited environment")
 	}
 }

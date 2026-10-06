@@ -29,7 +29,9 @@ const KindHerdrBootstrap CommandKind
 const KindHerdrCleanup CommandKind
 const KindHerdrCreate CommandKind
 const KindHerdrNotify CommandKind
+const KindHerdrPaneAgent CommandKind
 const KindHerdrPaneInspect CommandKind
+const KindHerdrPaneMove CommandKind
 const KindHerdrPaneRename CommandKind
 const KindHerdrPaneRun CommandKind
 const KindHerdrPaneSplit CommandKind

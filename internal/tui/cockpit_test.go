@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/charmbracelet/x/ansi"
 	"go/build"
 	"path"
 	"path/filepath"
@@ -359,13 +360,13 @@ func TestCockpit_ArefusedRefStaysInTheCockpit(t *testing.T) {
 	}
 }
 
-func TestCockpit_EnterOnAProjectRowOnlySaysFocusIsNotAvailable(t *testing.T) {
+func TestCockpit_EnterOnAProjectRowOnlySaysItHasNoAction(t *testing.T) {
 	m, _ := openCockpit(t, cockpitFixture(), nil)
 	m, cmd := pressCockpit(m, keyCode(tea.KeyEnter))
 	if cmd != nil || m.action.Kind != ActionNone {
 		t.Fatalf("enter on a project row did something: action=%+v", m.action)
 	}
-	if !strings.Contains(m.footer, "focus not available yet") {
+	if !strings.Contains(m.footer, "a project row has no action") {
 		t.Errorf("footer = %q", m.footer)
 	}
 }
@@ -725,5 +726,53 @@ func TestCockpit_FilterDropsControlRunes(t *testing.T) {
 	m = out.(cockpitModel)
 	if got := string(m.filter); got != "be[31m" {
 		t.Errorf("filter = %q, want the pasted text without its escape, bidi and carriage-return runes", got)
+	}
+}
+
+// sizedCockpit opens the fixture cockpit at a window size.
+func sizedCockpit(t *testing.T, w, h int) cockpitModel {
+	t.Helper()
+	m, _ := openCockpit(t, cockpitFixture(), nil)
+	out, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
+	return out.(cockpitModel)
+}
+
+// TestCockpit_FooterKeepsQuitAndHelpAtEveryWidth pins forgectl#1108: the
+// footer cut hints from the right, so `q quit` went first. Least important
+// hints must go first, and the quit and help keys stay while anything fits.
+//
+// Mutation that turns it red: join the hints without fitHints, as before.
+func TestCockpit_FooterKeepsQuitAndHelpAtEveryWidth(t *testing.T) {
+	for _, w := range []int{100, 80, 60, 50, 40, 30, 20} {
+		m := sizedCockpit(t, w, 24)
+		lines := strings.Split(ansi.Strip(m.footerView()), "\n")
+		hint := strings.TrimRight(lines[len(lines)-1], " ")
+		if !strings.HasSuffix(hint, "q quit") {
+			t.Errorf("width %d: footer %q does not end with q quit", w, hint)
+		}
+		if w >= 20 && !strings.Contains(hint, "? help") {
+			t.Errorf("width %d: footer %q lost ? help", w, hint)
+		}
+		if got := ansi.StringWidth(hint); got > w {
+			t.Errorf("width %d: footer is %d cells wide: %q", w, got, hint)
+		}
+	}
+}
+
+// TestCockpit_EnterHintOnlyOnARowItActsOn pins the second half of
+// forgectl#1108: enter opens a PR and does nothing on a project row, so the
+// footer advertises it only on a PR row.
+//
+// Mutation that turns it red: put "enter open" back in the hint list
+// unconditionally.
+func TestCockpit_EnterHintOnlyOnARowItActsOn(t *testing.T) {
+	m := sizedCockpit(t, 120, 24)
+	if f := ansi.Strip(m.footerView()); strings.Contains(f, "enter open") {
+		t.Errorf("footer on a project row advertises enter: %q", f)
+	}
+	out, _ := m.Update(keyCode(tea.KeyTab)) // prs
+	m = out.(cockpitModel)
+	if f := ansi.Strip(m.footerView()); !strings.Contains(f, "enter open") {
+		t.Errorf("footer on a PR row lost enter open: %q", f)
 	}
 }

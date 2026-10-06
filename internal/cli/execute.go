@@ -310,6 +310,11 @@ func productionDeps(cfg config.Config, boundary *config.LegacyMigrationBoundary)
 // headless-menu-route paths in Execute; the only difference between them is
 // where fang writes output, which the caller sets via root.SetOut first.
 func execCommand(ctx context.Context, root *cobra.Command, args []string, th theme.Theme) error {
+	// Before cobra: it prints help for an unknown command under --help, and for a
+	// group with no Run, and exits 0 either way (forgectl#1080, #1090).
+	if err := unknownSubcommand(root, args); err != nil {
+		return renderCommandError(ctx, root, th, err)
+	}
 	withCancelHandling(root)
 	root.SetArgs(args)
 	return fang.Execute(ctx, root, fangOptions(meta.Version, meta.Commit, th)...)

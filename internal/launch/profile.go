@@ -34,6 +34,14 @@ func (p Profile) Validate() error {
 			termsafe.QuoteArgMax(p.Effort, 0), strings.Join(EffortLevels, ", "),
 		)
 	}
+	// An empty permission_mode is a profile that does not set one (doctor's
+	// effort check builds such a profile); only a value Claude Code would not
+	// accept is refused here. The worker floor refuses empty too.
+	if p.Harness == "claude" && p.PermissionMode != "" {
+		if err := claudePermissionRank.check(p.PermissionMode); err != nil {
+			return err
+		}
+	}
 	if p.Harness == "codex" {
 		if oneOf(p.Model, "opus", "sonnet", "haiku") || strings.HasPrefix(p.Model, "claude-") {
 			return fmt.Errorf(
@@ -41,11 +49,11 @@ func (p Profile) Validate() error {
 				termsafe.QuoteArgMax(p.Model, 0),
 			)
 		}
-		if !oneOf(p.ApprovalPolicy, "untrusted", "on-request", "never") {
-			return fmt.Errorf("unsupported Codex approval_policy %s", termsafe.QuoteArgMax(p.ApprovalPolicy, 0))
+		if err := codexApprovalRank.check(p.ApprovalPolicy); err != nil {
+			return err
 		}
-		if !oneOf(p.Sandbox, "read-only", "workspace-write", "danger-full-access") {
-			return fmt.Errorf("unsupported Codex sandbox %s", termsafe.QuoteArgMax(p.Sandbox, 0))
+		if err := codexSandboxRank.check(p.Sandbox); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -96,6 +104,11 @@ type Profile struct {
 	// Claude-only. Codex has no equivalent flag and launchCodex builds a fresh
 	// Profile that never sets this, so it cannot silently no-op there.
 	StrictMCP bool
+
+	// Detached omits `--ide`, so the session connects to no editor and none of
+	// its MCP tools (which can run code there). Set by the worker floor alone,
+	// and not surfaced in config: a worker has no editor of its own.
+	Detached bool
 }
 
 // Built-in fallbacks applied when a value is set neither by a project nor by

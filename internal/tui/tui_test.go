@@ -501,3 +501,33 @@ func choose(m model, digit string) (tea.Model, tea.Cmd) {
 	out, _ := m.Update(key(digit))
 	return out.(model).Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 }
+
+// TestScopedMenuQuitsOnBack pins forgectl#1100: `forgectl tmux` opens the
+// menu directly, so q and esc leave the program; they must not land in a
+// hub the user never opened. From the hub's own tmux row they still back out
+// to the hub.
+//
+// Mutation that turns it red: drop the m.scoped check in the menuMode arm of
+// the q/esc handler.
+func TestScopedMenuQuitsOnBack(t *testing.T) {
+	for _, key := range []tea.KeyPressMsg{{Code: 'q', Text: "q"}, {Code: tea.KeyEscape}} {
+		m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{StartInTmux: true, NoIcons: true, Theme: theme.Default()}), 80, 24)
+		if !strings.Contains(m.footerView(), "q/esc quit") {
+			t.Errorf("scoped menu footer = %q, want q/esc quit", m.footerView())
+		}
+		_, cmd := m.Update(key)
+		if cmd == nil {
+			t.Fatalf("%v: no command, want tea.Quit", key)
+		}
+		if _, ok := cmd().(tea.QuitMsg); !ok {
+			t.Errorf("%v: command did not quit", key)
+		}
+	}
+	// Unscoped: the menu reached from the hub backs out to the hub.
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{NoIcons: true, Theme: theme.Default()}), 80, 24)
+	m.toMenu()
+	out, _ := m.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
+	if got := out.(model).mode; got != hubMode {
+		t.Errorf("unscoped menu q → mode %v, want hubMode", got)
+	}
+}

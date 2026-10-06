@@ -22,9 +22,10 @@ import (
 // will not run itself, which the operator approves and runs. The threat model
 // is docs/adr/0012-desk-threat-model.md; the protocol is docs/commands/desk.md.
 var deskModule = module.Manifest{
-	Name: "desk",
-	Tier: module.TierExtension,
-	New:  newDeskCmd,
+	Name:      "desk",
+	Tier:      module.TierExtension,
+	ConfigKey: "desk",
+	New:       newDeskCmd,
 }
 
 // Exit codes the desk verbs share beyond 0 and 1.
@@ -137,15 +138,15 @@ bytes, not anything the script sources, calls or downloads.`,
 	cmd.PersistentFlags().StringVar(&dir, "dir", "", "desk directory (default: $DESK_DIR, $CLAUDE_DESK_DIR, then the XDG state dir)")
 	cmd.Flags().BoolVar(&frame, "frame", false, "print one frame to stdout and exit; size from $COLUMNS and $LINES (default 80x40)")
 	cmd.AddCommand(
-		newDeskAddCmd(&dir),
-		newDeskPlanCmd(&dir),
-		newDeskStatusCmd(&dir),
-		newDeskWatchCmd(&dir),
-		newDeskRunsCmd(&dir),
-		newDeskShowCmd(&dir),
-		newDeskSkipCmd(&dir),
+		newDeskAddCmd(&dir, deps),
+		newDeskPlanCmd(&dir, deps),
+		newDeskStatusCmd(&dir, deps),
+		newDeskWatchCmd(&dir, deps),
+		newDeskRunsCmd(&dir, deps),
+		newDeskShowCmd(&dir, deps),
+		newDeskSkipCmd(&dir, deps),
 		newDeskLayoutCmd(deps, &dir),
-		newDeskPruneCmd(&dir),
+		newDeskPruneCmd(&dir, deps),
 		newDeskSuperviseCmd(&dir),
 	)
 	return cmd
@@ -157,7 +158,7 @@ type deskAddOpts struct {
 	tty, asJSON     bool
 }
 
-func newDeskAddCmd(dir *string) *cobra.Command {
+func newDeskAddCmd(dir *string, deps module.Deps) *cobra.Command {
 	var o deskAddOpts
 	cmd := &cobra.Command{
 		Use:   "add <file>",
@@ -179,6 +180,13 @@ refused, never read. FILE "-" reads the item from stdin; --name then gives its
 file name (deploy.sh, nightly.manifest), whose extension picks the kind. stdin
 must not be a terminal.
 
+When an item is queued, add tells the operator: a herdr notification and the
+queuing pane's needs-you state (inside herdr), and a macOS notification
+(macOS only). A failed signal prints "warning: operator signal failed:" and
+never fails the add; [desk] notify_herdr and notify_macos in config.toml turn
+each off. A run, a skip, or the desk skipping an item whose file changed since it was queued
+also clears that pane's state.
+
 A .manifest is checked like ` + "`desk plan`" + ` before it is queued: a manifest that cannot
 run is refused, and its warnings are printed as warning: lines on stderr.
 
@@ -192,14 +200,14 @@ bad --name).`,
   printf 'echo hi\n' | forgectl desk add - --name hi.sh --what "Say hi" --why "A test"`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDeskAdd(cmd, *dir, args[0], o)
+			return runDeskAdd(cmd, deps, *dir, args[0], o)
 		},
 	}
 	cmd.Flags().StringVar(&o.what, "what", "", "what the script does, one line (required)")
 	cmd.Flags().StringVar(&o.why, "why", "", "why it needs the operator, one line (required)")
 	cmd.Flags().BoolVar(&o.tty, "tty", false, "the script needs a terminal; it runs in the dashboard's pane")
 	cmd.Flags().StringVar(&o.name, "name", "", "file name for an item read from stdin (FILE -), e.g. deploy.sh")
-	cmd.Flags().BoolVar(&o.asJSON, "json", false, "print the queued item as one JSON object")
+	cmd.Flags().BoolVar(&o.asJSON, "json", false, "print the queued item as one JSON object; signal warnings go in warnings[]")
 	return cmd
 }
 
@@ -240,7 +248,7 @@ func checkAddFlags(file string, o deskAddOpts) error {
 	return nil
 }
 
-func newDeskPlanCmd(dir *string) *cobra.Command {
+func newDeskPlanCmd(dir *string, deps module.Deps) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "plan <name|file>",
@@ -262,14 +270,14 @@ Exit codes: 0 the manifest can run (warnings or not); 1 it cannot, or the item
 is not a manifest or was not found; 2 usage.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDeskPlan(cmd, *dir, args[0], asJSON)
+			return runDeskPlan(cmd, deps, *dir, args[0], asJSON)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the plan as one JSON object")
 	return cmd
 }
 
-func newDeskStatusCmd(dir *string) *cobra.Command {
+func newDeskStatusCmd(dir *string, deps module.Deps) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "status [name]",
@@ -294,14 +302,14 @@ Exit codes: 0 shown; 1 no such item, or the desk could not be read; 2 usage.`,
 			if len(args) == 1 {
 				name = args[0]
 			}
-			return runDeskStatus(cmd, *dir, name, asJSON)
+			return runDeskStatus(cmd, deps, *dir, name, asJSON)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the queue (or the item) as one JSON object")
 	return cmd
 }
 
-func newDeskWatchCmd(dir *string) *cobra.Command {
+func newDeskWatchCmd(dir *string, deps module.Deps) *cobra.Command {
 	var deadline, skip int
 	cmd := &cobra.Command{
 		Use:   "watch <name>",
@@ -331,7 +339,7 @@ watch printed.`,
 			if deadline < 0 || skip < 0 {
 				return deskUsage("desk watch: --deadline and --skip must not be negative")
 			}
-			return runDeskWatch(cmd, *dir, args[0], deadline, skip)
+			return runDeskWatch(cmd, deps, *dir, args[0], deadline, skip)
 		},
 	}
 	cmd.Flags().IntVar(&deadline, "deadline", 0, "stop after S seconds with exit 75 and a resume= line (0: wait for the run)")
@@ -339,7 +347,7 @@ watch printed.`,
 	return cmd
 }
 
-func newDeskSkipCmd(dir *string) *cobra.Command {
+func newDeskSkipCmd(dir *string, deps module.Deps) *cobra.Command {
 	var reason string
 	cmd := &cobra.Command{
 		Use:   "skip <name> --reason <text>",
@@ -354,14 +362,14 @@ Exit codes: 0 skipped; 1 no such item, or it is running, or another desk took
 it first; 2 usage (an empty, long or unsafe --reason).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDeskSkip(cmd, *dir, args[0], reason)
+			return runDeskSkip(cmd, deps, *dir, args[0], reason)
 		},
 	}
 	cmd.Flags().StringVar(&reason, "reason", "", "why, one line (required)")
 	return cmd
 }
 
-func newDeskPruneCmd(dir *string) *cobra.Command {
+func newDeskPruneCmd(dir *string, deps module.Deps) *cobra.Command {
 	var days int
 	var asJSON bool
 	cmd := &cobra.Command{
@@ -378,7 +386,7 @@ Exit codes: 0 pruned (maybe nothing); 1 a delete failed; 2 usage.`,
 			if days < 1 {
 				return deskUsage("desk prune: --days must be at least 1")
 			}
-			return runDeskPrune(cmd, *dir, days, asJSON)
+			return runDeskPrune(cmd, deps, *dir, days, asJSON)
 		},
 	}
 	cmd.Flags().IntVar(&days, "days", 30, "delete items older than this many days")

@@ -23,14 +23,14 @@ func confirm(th theme.Theme, prompt string) (bool, error) {
 // description says so, because huh's own help line lists only the toggle and
 // submit keys.
 func confirmForm(th theme.Theme, prompt string, ok *bool) *huh.Form {
-	return huh.NewForm(huh.NewGroup(
+	return keymap.Suspendable(huh.NewForm(huh.NewGroup(
 		huh.NewConfirm().
 			Title(prompt).
 			Description("esc to cancel").
 			Affirmative("Yes").
 			Negative("No").
 			Value(ok),
-	)).WithKeyMap(keymap.Cancel()).WithShowHelp(true).WithTheme(th.Huh())
+	))).WithKeyMap(keymap.Cancel()).WithShowHelp(true).WithTheme(th.Huh())
 }
 
 // confirmFn is confirm, exposed as a package-level var so tests can

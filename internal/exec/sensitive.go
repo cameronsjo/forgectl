@@ -122,6 +122,10 @@ const (
 	KindHerdrPaneSplit
 	KindHerdrPaneRename
 	KindHerdrPaneRun
+	// KindHerdrPaneMove is `pane move`, which `desk layout --below` uses to
+	// park the tab's other panes and bring them back. It carries only pane
+	// and tab ids, but it joins the other layout verbs on this seam.
+	KindHerdrPaneMove
 	// KindHerdrScreenRead and KindHerdrPaneStatus are `surface ready`'s two
 	// reads of a worker's root pane: its visible text and herdr's agent status.
 	KindHerdrScreenRead
@@ -132,6 +136,10 @@ const (
 	// placed in a workspace forgectl owns.
 	KindHerdrSendText
 	KindHerdrSendKeys
+	// KindHerdrPaneAgent is `pane report-agent` and `pane release-agent`: the
+	// desk marks the pane of the session that queued an item as needing the
+	// operator, and clears it when the item runs or is skipped.
+	KindHerdrPaneAgent
 
 	// KindSopsEdit drives `sops <file>` with forgectl re-invoked as the
 	// editor. KindSopsExtract is the read-back that proves what landed.
@@ -181,9 +189,11 @@ var kindNames = [kindCount]string{
 	KindHerdrPaneSplit:   "herdr.pane-split",
 	KindHerdrPaneRename:  "herdr.pane-rename",
 	KindHerdrPaneRun:     "herdr.pane-run",
+	KindHerdrPaneMove:    "herdr.pane-move",
 	KindHerdrScreenRead:  "herdr.screen-read",
 	KindHerdrPaneStatus:  "herdr.pane-status",
 	KindHerdrSendText:    "herdr.send-text",
+	KindHerdrPaneAgent:   "herdr.pane-agent",
 	KindHerdrSendKeys:    "herdr.send-keys",
 
 	KindSopsEdit:    "sops.edit",

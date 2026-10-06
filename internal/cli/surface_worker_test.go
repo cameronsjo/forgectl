@@ -5,11 +5,15 @@ package cli
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/surface"
@@ -72,7 +76,7 @@ func goodSteps(t *testing.T) workerSteps {
 			return worker.Worktree{Path: testRepoTop + "/.claude/worktrees/w1", Branch: "feat/w1", Base: "abc123"}, nil
 		},
 		build: func(cwd string) (launch.BuiltInvocation, error) {
-			return launch.BuiltInvocation{Invocation: launch.Invocation{Harness: "codex", CWD: cwd}}, nil
+			return launch.BuiltInvocation{Invocation: launch.Invocation{Harness: "codex", CWD: cwd}, Worker: true}, nil
 		},
 		launch: func(context.Context, launch.Invocation) (backend.Ref, error) { return testHerdrRef(t), nil },
 		now:    func() time.Time { return time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC) },
@@ -197,6 +201,7 @@ func TestWorkerLaunchRecordsTheSession(t *testing.T) {
 		return launch.BuiltInvocation{
 			Invocation: launch.Invocation{Harness: "claude", CWD: cwd, Env: []string{"HOME=/h"}},
 			SessionID:  id,
+			Worker:     true,
 		}, nil
 	}
 	if _, err := runWorkerSteps(context.Background(), led, "w1", "feat/w1", steps); err != nil {
@@ -205,5 +210,62 @@ func TestWorkerLaunchRecordsTheSession(t *testing.T) {
 	row := onlyRow(t, led)
 	if row.SessionID != id || row.Transcript != worker.TranscriptPath([]string{"HOME=/h"}, testRepoTop+"/.claude/worktrees/w1", id) || row.Transcript == "" {
 		t.Fatalf("row = %+v", row)
+	}
+}
+
+// TestBuildWorkerInvocationIsolates pins the call site that turns the worker
+// floor on: from surfaceInvocationRequest, as runWorkerLaunch builds it, a
+// worker gets the isolation argv, a session id, and none of the launcher's
+// handles. Dropping req.Worker, or the call through it, turns this red.
+func TestBuildWorkerInvocationIsolates(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_MESSAGING_TOKEN", "coordinator-token")
+	t.Setenv("HERDR_SOCKET_PATH", "/tmp/herdr.sock")
+	cwd, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: "acceptEdits"}}
+	req := surfaceInvocationRequest(cfg, cwd, nil, nil, "claude")
+	req.Resolve = func(string, config.LaunchDefaults) (launch.ResolvedBinary, error) {
+		return launch.ResolvedBinary{Path: "/stub/claude", Source: launch.BinaryPATH}, nil
+	}
+	const id = "0f8e2c1a-3b4d-4e5f-8a6b-7c8d9e0f1a2b"
+	built, err := buildWorkerInvocation(req, "Fix it.", func() (string, error) { return id, nil })
+	if err != nil {
+		t.Fatalf("buildWorkerInvocation: %v", err)
+	}
+	if !slices.Contains(built.Invocation.Args, "--setting-sources") || !slices.Contains(built.Invocation.Args, "--safe-mode") || built.SessionID != id {
+		t.Fatalf("argv %q, session %q: not a worker build", built.Invocation.Args, built.SessionID)
+	}
+	for _, e := range built.Invocation.Env {
+		if strings.HasPrefix(e, "CLAUDE_CODE_MESSAGING_TOKEN=") || strings.HasPrefix(e, "HERDR_SOCKET_PATH=") {
+			t.Fatalf("worker env kept the launcher's handle %s", e)
+		}
+	}
+}
+
+// TestWorkerLaunchRefusesANonWorkerBuild closes the bypass where the launch
+// path builds the invocation without marking it a worker: no posture floor,
+// no isolation argv, the launcher's whole environment. runWorkerSteps refuses
+// to start it, and records the failure.
+func TestWorkerLaunchRefusesANonWorkerBuild(t *testing.T) {
+	led := testWorkerLedger(t)
+	steps := goodSteps(t)
+	launched := false
+	steps.build = func(cwd string) (launch.BuiltInvocation, error) {
+		return launch.BuiltInvocation{Invocation: launch.Invocation{Harness: "claude", CWD: cwd}}, nil
+	}
+	steps.launch = func(context.Context, launch.Invocation) (backend.Ref, error) {
+		launched = true
+		return testHerdrRef(t), nil
+	}
+	if _, err := runWorkerSteps(context.Background(), led, "w1", "feat/w1", steps); err == nil {
+		t.Fatal("a non-worker build was accepted")
+	}
+	if launched {
+		t.Fatal("a non-worker build was launched")
+	}
+	if row := onlyRow(t, led); row.Stage != worker.StageFailed {
+		t.Fatalf("stage = %q, want failed", row.Stage)
 	}
 }
