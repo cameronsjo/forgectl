@@ -27,16 +27,55 @@ const (
 	hubRecentWindow = 200
 )
 
+// hubGroups sorts every unpinned module into an area (forgectl#1074). The
+// hub's top screen shows one row per area, which opens that area's commands,
+// so the first screen fits a 24-row terminal however many modules register.
+// Each area lists its commands in the order its rows show. A module missing
+// from every area still gets a row, under hubOtherGroup, and
+// TestHubGroups_CoverEveryModule fails until it is placed.
+var hubGroups = []struct {
+	title string
+	names []string
+}{
+	{"agents", []string{"launch", "resume", "desk", "tasks", "surface", "workflow", "recipe", "preflight", "quarantine"}},
+	{"repos", []string{"status", "review", "branch", "clean", "audit", "docker", "k8s"}},
+	{"shell", []string{"env", "y", "pip", "proxy", "net"}},
+	{"setup", []string{"doctor", "config", "init", "update", "upgrade", "bench", "theme", "ghostty", "herdr"}},
+}
+
+// hubOtherGroup holds a module no hubGroups area names.
+const hubOtherGroup = "other"
+
+// hubMaxKey is the highest jump key. Keys go to the pinned rows, then the
+// area rows, in order; recent rows never get one, so a key's meaning does not
+// change as history does.
+const hubMaxKey = 9
+
 // hubSections is the hub's content before layout (forgectl#730): whether the
 // first-run row shows, the pinned modules in hubPinned order, the recent rows,
-// and every remaining module in registry order. buildHub lays it out for the
-// TUI and `menu` reports it, so the two cannot disagree about what the hub
+// and every remaining module sorted into its area. buildHub lays it out for
+// the TUI and `menu` reports it, so the two cannot disagree about what the hub
 // holds.
 type hubSections struct {
 	firstRun bool
 	pinned   []tui.HubEntry
 	recent   []tui.HubEntry
-	rest     []tui.HubEntry
+	groups   []hubGroup
+}
+
+// hubGroup is one area and its module rows.
+type hubGroup struct {
+	title   string
+	entries []tui.HubEntry
+}
+
+// rest is every unpinned module row, area by area.
+func (s hubSections) rest() []tui.HubEntry {
+	var out []tui.HubEntry
+	for _, g := range s.groups {
+		out = append(out, g.entries...)
+	}
+	return out
 }
 
 // collectHubSections derives the hub's sections from the live cobra tree
@@ -54,20 +93,36 @@ func collectHubSections(root *cobra.Command, configPresent bool, recent []*cobra
 	for _, child := range modules {
 		byName[child.Name()] = child
 	}
-	pinned := make(map[string]bool, len(hubPinned))
+	placed := make(map[string]bool, len(modules))
 	for _, name := range hubPinned {
 		if child, ok := byName[name]; ok {
 			sec.pinned = append(sec.pinned, moduleEntry(child))
-			pinned[name] = true
+			placed[name] = true
 		}
 	}
 	for _, cmd := range recent {
 		sec.recent = append(sec.recent, recentEntry(cmd))
 	}
-	for _, child := range modules {
-		if !pinned[child.Name()] {
-			sec.rest = append(sec.rest, moduleEntry(child))
+	for _, g := range hubGroups {
+		group := hubGroup{title: g.title}
+		for _, name := range g.names {
+			if child, ok := byName[name]; ok && !placed[name] {
+				group.entries = append(group.entries, moduleEntry(child))
+				placed[name] = true
+			}
 		}
+		if len(group.entries) > 0 {
+			sec.groups = append(sec.groups, group)
+		}
+	}
+	other := hubGroup{title: hubOtherGroup}
+	for _, child := range modules {
+		if !placed[child.Name()] {
+			other.entries = append(other.entries, moduleEntry(child))
+		}
+	}
+	if len(other.entries) > 0 {
+		sec.groups = append(sec.groups, other)
 	}
 	return sec
 }
@@ -75,8 +130,9 @@ func collectHubSections(root *cobra.Command, configPresent bool, recent []*cobra
 // buildHub lays out the hub's rows (collectHubSections) for the TUI: an
 // optional first-run row when configPresent is false; the pinned commands
 // (hubPinned) in their fixed order; a "recent" divider and one row per recent
-// command when there are any; then an "all commands (N)" divider over every
-// remaining module in registry order.
+// command when there are any; then an "all commands (N)" divider over one row
+// per area, each holding its modules as Members. Jump keys 1-9 go to the
+// pinned rows, then the area rows.
 func buildHub(root *cobra.Command, configPresent bool, recent []*cobra.Command) []tui.HubEntry {
 	sec := collectHubSections(root, configPresent, recent)
 	var entries []tui.HubEntry
@@ -87,14 +143,36 @@ func buildHub(root *cobra.Command, configPresent bool, recent []*cobra.Command) 
 			Core:  true,
 		})
 	}
-	entries = append(entries, sec.pinned...)
+	key := 0
+	nextKey := func() int {
+		if key == hubMaxKey {
+			return 0
+		}
+		key++
+		return key
+	}
+	for _, e := range sec.pinned {
+		e.Key = nextKey()
+		entries = append(entries, e)
+	}
 	if len(sec.recent) > 0 {
 		entries = append(entries, tui.HubEntry{Name: "recent", Heading: true})
 		entries = append(entries, sec.recent...)
 	}
-	if len(sec.rest) > 0 {
-		entries = append(entries, tui.HubEntry{Name: "all commands (" + strconv.Itoa(len(sec.rest)) + ")", Heading: true})
-		entries = append(entries, sec.rest...)
+	if len(sec.groups) > 0 {
+		entries = append(entries, tui.HubEntry{Name: "all commands (" + strconv.Itoa(len(sec.rest())) + ")", Heading: true})
+	}
+	for _, g := range sec.groups {
+		names := make([]string, 0, len(g.entries))
+		for _, e := range g.entries {
+			names = append(names, e.Name)
+		}
+		entries = append(entries, tui.HubEntry{
+			Name:    g.title,
+			Short:   strings.Join(names, " · "),
+			Key:     nextKey(),
+			Members: g.entries,
+		})
 	}
 	return entries
 }

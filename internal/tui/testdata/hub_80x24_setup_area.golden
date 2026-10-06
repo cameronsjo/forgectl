@@ -1,0 +1,8 @@
+#  forgectl  ·  setup
+
+▌1 doctor  Check the whole workbench is wired: claude, tmux, ghostty, gh…
+ 2 config  Show the active configuration and config file path
+$ forgectl doctor
+   Check the whole workbench is wired: claude, tmux, ghostty, gh, config, the
+   local bench, and forgectl itself
+↑↓ move · 1-9 jump · enter open · / filter · q/esc back

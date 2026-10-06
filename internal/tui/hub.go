@@ -56,7 +56,9 @@ func (h HubHeader) Line() string {
 		parts = append(parts, fmt.Sprintf("%d tmux", h.TmuxSessions))
 	}
 	if h.HasReviews && h.ReviewsRunning >= 0 && h.ReviewsQueued >= 0 {
-		parts = append(parts, reviewsPhrase(h.ReviewsRunning, h.ReviewsQueued))
+		if phrase := reviewsPhrase(h.ReviewsRunning, h.ReviewsQueued); phrase != "" {
+			parts = append(parts, phrase)
+		}
 	}
 	if h.HasDoctor {
 		if result := capSafe(h.DoctorResult, hubHeaderValueMax); result != "" {
@@ -86,7 +88,9 @@ func reviewsPhrase(running, queued int) string {
 	case queued > 0:
 		return fmt.Sprintf("%d review%s queued", queued, plural(queued))
 	default:
-		return "no reviews"
+		// Nothing running or queued is the usual state, not news; the
+		// header spends no width on it (forgectl#1074).
+		return ""
 	}
 }
 

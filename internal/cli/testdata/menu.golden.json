@@ -12,6 +12,7 @@
   "pinned": [
     {
       "command": "docs",
+      "group": "",
       "argv": [
         "docs"
       ],
@@ -21,6 +22,7 @@
       "leaves": [
         {
           "command": "docs list",
+          "group": "",
           "argv": [
             "docs",
             "list"
@@ -32,6 +34,7 @@
         },
         {
           "command": "docs pin",
+          "group": "",
           "argv": [
             "docs",
             "pin"
@@ -43,6 +46,7 @@
         },
         {
           "command": "docs read",
+          "group": "",
           "argv": [
             "docs",
             "read"
@@ -56,6 +60,7 @@
     },
     {
       "command": "pr",
+      "group": "",
       "argv": [
         "pr"
       ],
@@ -65,6 +70,7 @@
       "leaves": [
         {
           "command": "pr findings",
+          "group": "",
           "argv": [
             "pr",
             "findings"
@@ -75,6 +81,7 @@
           "leaves": [
             {
               "command": "pr findings list",
+              "group": "",
               "argv": [
                 "pr",
                 "findings",
@@ -89,6 +96,7 @@
         },
         {
           "command": "pr prs",
+          "group": "",
           "argv": [
             "pr",
             "prs"
@@ -100,6 +108,7 @@
         },
         {
           "command": "pr reviewed",
+          "group": "",
           "argv": [
             "pr",
             "reviewed"
@@ -115,6 +124,7 @@
   "recent": [
     {
       "command": "pr prs",
+      "group": "",
       "argv": [
         "pr",
         "prs"
@@ -128,6 +138,7 @@
   "commands": [
     {
       "command": "doctor",
+      "group": "setup",
       "argv": [
         "doctor"
       ],

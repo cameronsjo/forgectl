@@ -18,13 +18,17 @@ import (
 // (iPhone/Termius).
 type rowItem interface {
 	list.Item
-	render(index int, selected, narrow bool, g glyphSet, s theme.Styles) string
+	render(index int, selected, narrow bool, width, col int, g glyphSet, s theme.Styles) string
 }
 
 // itemDelegate renders rowItems. Height 1 / spacing 0 → compact, mobile-first.
+// Hub and leaf rows lay out against the list's width and align their
+// descriptions on col, the name column (hubNameColumn), which the model
+// computes when the list's items or size change rather than once per row.
 type itemDelegate struct {
 	g      glyphSet
 	narrow bool
+	col    int
 	styles theme.Styles
 }
 
@@ -36,15 +40,32 @@ func (d itemDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 		// w is Bubble Tea's list renderer writing into an in-memory buffer, not
 		// a real sink — a write failure here isn't actionable, and Render's
 		// signature (no error return) gives nothing to propagate it to anyway.
-		_, _ = fmt.Fprint(w, ri.render(index, index == m.Index(), d.narrow, d.g, d.styles))
+		_, _ = fmt.Fprint(w, ri.render(index, index == m.Index(), d.narrow, m.Width(), d.col, d.g, d.styles))
 	}
 }
 
-// cursor + number prefix shared by every row.
+// cursor + number prefix shared by every row: the row's position, 1-9.
 func leader(index int, selected bool, s theme.Styles) string {
-	num := "  "
+	key := 0
 	if index < 9 {
-		num = fmt.Sprintf("%d ", index+1)
+		key = index + 1
+	}
+	return keyLeader(key, index, selected, s)
+}
+
+// leaderWidth is how many cells leader and keyLeader draw.
+const leaderWidth = 3
+
+// keyLeader is leader for a row whose jump key is fixed rather than its
+// position (the hub's top screen); key 0 draws no number, and a negative key
+// falls back to the row's position (index).
+func keyLeader(key, index int, selected bool, s theme.Styles) string {
+	if key < 0 {
+		return leader(index, selected, s)
+	}
+	num := "  "
+	if key > 0 {
+		num = fmt.Sprintf("%d ", key)
 	}
 	if selected {
 		return s.Accent.Render("▌") + s.Accent.Render(num)
@@ -76,7 +97,7 @@ const (
 )
 
 func (i menuItem) FilterValue() string { return i.label }
-func (i menuItem) render(index int, selected, narrow bool, g glyphSet, s theme.Styles) string {
+func (i menuItem) render(index int, selected, narrow bool, _, _ int, g glyphSet, s theme.Styles) string {
 	label := i.glyph(g) + "  " + i.label
 	if selected {
 		return leader(index, true, s) + s.Selected.Render(label)
@@ -102,7 +123,7 @@ func (i menuItem) render(index int, selected, narrow bool, g glyphSet, s theme.S
 type pickItem string
 
 func (i pickItem) FilterValue() string { return string(i) }
-func (i pickItem) render(index int, selected, narrow bool, g glyphSet, s theme.Styles) string {
+func (i pickItem) render(index int, selected, narrow bool, _, _ int, g glyphSet, s theme.Styles) string {
 	label := g.Session + "  " + termsafe.SafeLineMax(string(i), nameMaxRunes)
 	if selected {
 		return leader(index, true, s) + s.Selected.Render(label)
@@ -115,7 +136,7 @@ func (i pickItem) render(index int, selected, narrow bool, g glyphSet, s theme.S
 type sessionItem struct{ s tmux.Session }
 
 func (i sessionItem) FilterValue() string { return i.s.Name }
-func (i sessionItem) render(index int, selected, narrow bool, g glyphSet, s theme.Styles) string {
+func (i sessionItem) render(index int, selected, narrow bool, _, _ int, g glyphSet, s theme.Styles) string {
 	marker := s.Muted.Render(g.Detached)
 	if i.s.Attached {
 		marker = s.OK.Render(g.Attached)
@@ -143,7 +164,7 @@ func (i sessionItem) render(index int, selected, narrow bool, g glyphSet, s them
 type windowItem struct{ w tmux.Window }
 
 func (i windowItem) FilterValue() string { return i.w.Session + " " + i.w.Name }
-func (i windowItem) render(index int, selected, narrow bool, g glyphSet, s theme.Styles) string {
+func (i windowItem) render(index int, selected, narrow bool, _, _ int, g glyphSet, s theme.Styles) string {
 	sess := s.Steel.Render(termsafe.SafeLineMax(i.w.Session, nameMaxRunes))
 	name := termsafe.SafeLineMax(i.w.Name, nameMaxRunes)
 	if i.w.Active {
@@ -164,7 +185,7 @@ func (i windowItem) render(index int, selected, narrow bool, g glyphSet, s theme
 	return row + s.Muted.Render(fmt.Sprintf("  %d %s", i.w.Panes, unit))
 }
 
-// --- hub (module rows, recent command rows, and section dividers) ---
+// --- hub (module rows, area rows, recent command rows, and section dividers) ---
 
 // hubItem renders one HubEntry row. Name/Short are program-authored (cobra
 // names and Short strings compiled into this binary — the "recent" rows are
@@ -181,18 +202,40 @@ func (i hubItem) FilterValue() string {
 	return i.entry.Name
 }
 
-func (i hubItem) render(index int, selected, narrow bool, _ glyphSet, s theme.Styles) string {
+// label is the row's name as drawn: an area row ends in "›", the sign that
+// enter opens a list rather than running something.
+func (i hubItem) label() string {
+	if i.entry.Members != nil {
+		return i.entry.Name + " ›"
+	}
+	return i.entry.Name
+}
+
+func (i hubItem) render(index int, selected, _ bool, width, col int, _ glyphSet, s theme.Styles) string {
 	if i.entry.Heading {
-		return "   " + s.Muted.Render("── "+i.entry.Name+" ──")
+		heading := "── " + i.entry.Name + " ──"
+		if width > 0 {
+			heading = fitWords(heading, width-leaderWidth)
+		}
+		return "   " + s.Muted.Render(heading)
 	}
-	label := i.entry.Name
+	return renderHubRow(keyLeader(i.entry.Key, index, selected, s), i.label(), i.entry.Short, selected, width, col, s)
+}
+
+// renderHubRow draws a hub or leaf row: leader, name column, description. The
+// selected row keeps its description, so the row under the cursor is never
+// the one row that says nothing.
+func renderHubRow(lead, name, desc string, selected bool, width, col int, s theme.Styles) string {
+	nameCell, descCell, _ := hubRow(name, desc, leaderWidth, col, width)
 	if selected {
-		return leader(index, true, s) + s.Selected.Render(label)
+		nameCell = s.Selected.Render(nameCell)
+	} else {
+		nameCell = s.Fg.Render(nameCell)
 	}
-	if narrow || i.entry.Short == "" {
-		return leader(index, false, s) + s.Fg.Render(label)
+	if descCell == "" {
+		return lead + nameCell
 	}
-	return leader(index, false, s) + s.Fg.Render(label) + "  " + s.Muted.Render(i.entry.Short)
+	return lead + nameCell + "  " + s.Muted.Render(descCell)
 }
 
 // --- hub leaf (one runnable verb inside a module's drill-down list) ---
@@ -200,20 +243,17 @@ func (i hubItem) render(index int, selected, narrow bool, _ glyphSet, s theme.St
 type leafItem struct{ leaf HubLeaf }
 
 func (i leafItem) FilterValue() string { return i.leaf.Name }
-func (i leafItem) render(index int, selected, narrow bool, _ glyphSet, s theme.Styles) string {
-	label := i.leaf.Name
-	// A leaf needing an argument shows its Use line as the description
-	// (Architecture: "pr <ref> — needs a ref") rather than its Short, so the
-	// row itself states what's missing.
-	desc := i.leaf.Short
+
+// desc is the row's description. A leaf needing an argument shows its Use
+// line (Architecture: "pr <ref> — needs a ref") rather than its Short, so
+// the row itself states what's missing.
+func (i leafItem) desc() string {
 	if i.leaf.NeedsArgs {
-		desc = i.leaf.Use
+		return i.leaf.Use
 	}
-	if selected {
-		return leader(index, true, s) + s.Selected.Render(label)
-	}
-	if narrow || desc == "" {
-		return leader(index, false, s) + s.Fg.Render(label)
-	}
-	return leader(index, false, s) + s.Fg.Render(label) + "  " + s.Muted.Render(desc)
+	return i.leaf.Short
+}
+
+func (i leafItem) render(index int, selected, _ bool, width, col int, _ glyphSet, s theme.Styles) string {
+	return renderHubRow(leader(index, selected, s), i.leaf.Name, i.desc(), selected, width, col, s)
 }

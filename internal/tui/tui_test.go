@@ -188,9 +188,9 @@ func TestBackgroundColorMsgRepaintsStyles(t *testing.T) {
 // module ("doctor") and one with a NeedsArgs leaf ("pr").
 func hubTestModel() model {
 	hub := []HubEntry{
-		{Name: "tmux", Short: "sessions, windows, tree", Core: true},
-		{Name: "doctor", Short: "health check", Core: false},
-		{Name: "pr", Short: "review a PR", Core: true, Leaves: []HubLeaf{
+		{Name: "tmux", Short: "sessions, windows, tree", Core: true, Key: 1},
+		{Name: "doctor", Short: "health check", Core: false, Key: 2},
+		{Name: "pr", Short: "review a PR", Core: true, Key: 3, Leaves: []HubLeaf{
 			{Name: "pr", Short: "review a PR", Use: "pr <ref>", NeedsArgs: true, Self: true},
 			{Name: "list", Short: "list sessions", Use: "list"},
 		}},
@@ -324,8 +324,8 @@ func TestSessionItemNarrowDropsMetadata(t *testing.T) {
 	// Narrow rows (iPhone/Termius) must drop the windows/path metadata column;
 	// wide rows must include it.
 	it := sessionItem{s: tmux.Session{Name: "alpha", Windows: 3, Path: "/Users/cam/x"}}
-	wide := it.render(0, false, false, asciiGlyphs, theme.Default().Styles())
-	narrow := it.render(0, false, true, asciiGlyphs, theme.Default().Styles())
+	wide := it.render(0, false, false, 80, 12, asciiGlyphs, theme.Default().Styles())
+	narrow := it.render(0, false, true, 80, 12, asciiGlyphs, theme.Default().Styles())
 
 	if !strings.Contains(wide, "/Users/cam/x") {
 		t.Errorf("wide row should include the path: %q", wide)
@@ -371,7 +371,7 @@ func TestMenuDigitBeyondFilteredRowsIsIgnored(t *testing.T) {
 // own leaves are one runnable verb and one that needs an argument (#916).
 func nestedHubModel() model {
 	hub := []HubEntry{
-		{Name: "pr", Short: "review a PR", Core: true, Leaves: []HubLeaf{
+		{Name: "pr", Short: "review a PR", Core: true, Key: 1, Leaves: []HubLeaf{
 			{Name: "pr", Short: "review a PR", Use: "pr <ref>", NeedsArgs: true, Self: true},
 			{Name: "list", Short: "list sessions", Use: "list"},
 			{Name: "reviewed", Short: "manage marks", Use: "reviewed", Leaves: []HubLeaf{
@@ -468,7 +468,7 @@ func TestHub_ChildNamedLikeItsParent(t *testing.T) {
 		t.Errorf("leafArgv(child named pr) = %q, want pr pr", got)
 	}
 
-	hub := []HubEntry{{Name: "pr", Short: "review a PR", Core: true, Leaves: []HubLeaf{self, child}}}
+	hub := []HubEntry{{Name: "pr", Short: "review a PR", Core: true, Key: 1, Leaves: []HubLeaf{self, child}}}
 	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{Hub: hub, Theme: theme.Default()}), 80, 24)
 	out, _ := m.Update(key("1"))
 	m = out.(model)

@@ -5,7 +5,7 @@ Personal dev-experience CLI for a headless macOS workbench driven over SSH — f
 Built for two hands and one thumb:
 
 - **Power mode** — typed verbs (`forgectl tmux ls`, `forgectl tmux pick`). Full keyboard, full control.
-- **Thumb mode** — bare `forgectl` opens a hub over every command group: a status line (project and branch, tmux sessions, PR reviews), the five pinned daily verbs, your most-used recent commands, then every other command, with the old tmux jumper preserved as one row. A command that needs an argument asks for it in place, with a picker where one exists, and shows the exact `$ forgectl …` line before it runs. Number-key select. Narrow-screen. Forgiving input. Works fine in Termius over mosh.
+- **Thumb mode** — bare `forgectl` opens a hub over every command group: a status line (project and branch, tmux sessions, PR reviews), the five pinned daily verbs, your most-used recent commands, then every other command in four areas (agents, repos, shell, setup) one key away, with the old tmux jumper preserved as one row. A command that needs an argument asks for it in place, with a picker where one exists, and shows the exact `$ forgectl …` line before it runs. Fixed number keys, `/` to search every command. Narrow-screen. Forgiving input. Works fine in Termius over mosh.
 
 ## Install
 

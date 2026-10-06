@@ -53,10 +53,11 @@ func hubNames(entries []tui.HubEntry) []string {
 	return names
 }
 
-// TestBuildHub_PinOrder pins forgectl#730 item 2: the five pinned commands
-// first, in their fixed order, then an "all commands (N)" divider whose N is
-// the number of module rows under it, then every remaining module in
-// registry order — none of them repeating a pinned row.
+// TestBuildHub_PinOrder pins forgectl#730 item 2 and forgectl#1074: the five
+// pinned commands first, in their fixed order, keyed 1-5; then an "all
+// commands (N)" divider whose N counts every module under it; then one area
+// row per hubGroups entry, keyed 6-9, whose Members are its modules in the
+// order hubGroups lists them.
 func TestBuildHub_PinOrder(t *testing.T) {
 	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
 	entries := buildHub(root, true, nil)
@@ -67,35 +68,89 @@ func TestBuildHub_PinOrder(t *testing.T) {
 		t.Fatalf("got %d entries, want at least %d: %v", len(names), len(want)+1, names)
 	}
 	for i, w := range want {
-		if names[i] != w || entries[i].Heading {
-			t.Errorf("entries[%d] = %q (heading=%v), want pinned %q (full order: %v)", i, names[i], entries[i].Heading, w, names)
+		if names[i] != w || entries[i].Heading || entries[i].Key != i+1 {
+			t.Errorf("entries[%d] = %q (heading=%v key=%d), want pinned %q keyed %d (full order: %v)", i, names[i], entries[i].Heading, entries[i].Key, w, i+1, names)
 		}
 	}
 
 	div := entries[len(want)]
-	rest := entries[len(want)+1:]
-	if !div.Heading || div.Name != "all commands ("+strconv.Itoa(len(rest))+")" {
-		t.Fatalf("entries[%d] = %+v, want the divider \"all commands (%d)\"", len(want), div, len(rest))
+	areas := entries[len(want)+1:]
+	members := 0
+	for _, a := range areas {
+		members += len(a.Members)
 	}
+	if !div.Heading || div.Name != "all commands ("+strconv.Itoa(members)+")" {
+		t.Fatalf("entries[%d] = %+v, want the divider \"all commands (%d)\"", len(want), div, members)
+	}
+	if members != len(allModules())-len(want) {
+		t.Errorf("areas hold %d modules, want every unpinned module (%d)", members, len(allModules())-len(want))
+	}
+	if len(areas) != len(hubGroups) {
+		t.Fatalf("got %d area rows %v, want one per hubGroups entry (%d)", len(areas), hubNames(areas), len(hubGroups))
+	}
+	for i, a := range areas {
+		g := hubGroups[i]
+		if a.Name != g.title || a.Key != len(want)+1+i || a.Heading {
+			t.Errorf("area row %d = %q key %d, want %q keyed %d", i, a.Name, a.Key, g.title, len(want)+1+i)
+		}
+		if got := strings.Join(hubNames(a.Members), ","); got != strings.Join(g.names, ",") {
+			t.Errorf("area %q members = %s, want %s", g.title, got, strings.Join(g.names, ","))
+		}
+		if a.Short != strings.Join(g.names, " · ") {
+			t.Errorf("area %q Short = %q, want its member names", g.title, a.Short)
+		}
+	}
+}
 
-	var wantRest []string
-	pinned := map[string]bool{}
-	for _, w := range want {
-		pinned[w] = true
+// TestHubGroups_CoverEveryModule makes placing a new module a deliberate
+// choice: every registered module is pinned or named by exactly one area, and
+// no area names a module that does not exist. A module missing from both
+// still gets a row under "other", which this test refuses.
+func TestHubGroups_CoverEveryModule(t *testing.T) {
+	seen := map[string]string{}
+	for _, name := range hubPinned {
+		seen[name] = "pinned"
 	}
+	for _, g := range hubGroups {
+		for _, name := range g.names {
+			if prev, ok := seen[name]; ok {
+				t.Errorf("%q is in %q and %q", name, prev, g.title)
+			}
+			seen[name] = g.title
+		}
+	}
+	registered := map[string]bool{}
 	for _, m := range allModules() {
-		if !pinned[m.Name] {
-			wantRest = append(wantRest, m.Name)
+		registered[m.Name] = true
+		if _, ok := seen[m.Name]; !ok {
+			t.Errorf("module %q is in no hub area; add it to hubGroups (internal/cli/hub.go)", m.Name)
 		}
 	}
-	gotRest := hubNames(rest)
-	if strings.Join(gotRest, ",") != strings.Join(wantRest, ",") {
-		t.Errorf("rows under the divider =\n  %v\nwant registry order without the pinned five =\n  %v", gotRest, wantRest)
-	}
-	for _, e := range rest {
-		if e.Heading {
-			t.Errorf("unexpected divider %q among the module rows", e.Name)
+	for name, where := range seen {
+		if !registered[name] {
+			t.Errorf("%s names %q, which is not a registered module", where, name)
 		}
+	}
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	for _, e := range buildHub(root, true, nil) {
+		if e.Name == hubOtherGroup {
+			t.Errorf("the hub has an %q area: %v", hubOtherGroup, hubNames(e.Members))
+		}
+	}
+}
+
+// TestBuildHub_UnplacedModuleLandsInOther pins the fallback: a module no area
+// names still gets a row, under "other", rather than vanishing from the hub.
+func TestBuildHub_UnplacedModuleLandsInOther(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	stray := &cobra.Command{Use: "stray", Short: "a module no area names", Annotations: map[string]string{
+		hubTierAnnotation: hubTierExtension, hubOrderAnnotation: "999",
+	}}
+	root.AddCommand(stray)
+	entries := buildHub(root, true, nil)
+	last := entries[len(entries)-1]
+	if last.Name != hubOtherGroup || len(last.Members) != 1 || last.Members[0].Name != "stray" {
+		t.Errorf("last row = %q %v, want an %q area holding stray", last.Name, hubNames(last.Members), hubOtherGroup)
 	}
 }
 
@@ -178,15 +233,17 @@ func TestBuildHub_PrLeafNeedsArgs(t *testing.T) {
 
 // TestBuildHub_LeaflessExtensionRunsDirectly pins the general rule
 // (Architecture: "a module with no leaves, e.g. doctor, runs directly") at
-// the data level: doctor is its own row under "all commands", with no leaves.
+// the data level: doctor is its own row in its area, with no leaves.
 func TestBuildHub_LeaflessExtensionRunsDirectly(t *testing.T) {
 	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
 	entries := buildHub(root, true, nil)
 
 	var doctor *tui.HubEntry
 	for i := range entries {
-		if entries[i].Name == "doctor" {
-			doctor = &entries[i]
+		for j := range entries[i].Members {
+			if entries[i].Members[j].Name == "doctor" {
+				doctor = &entries[i].Members[j]
+			}
 		}
 	}
 	if doctor == nil {
