@@ -590,6 +590,14 @@ func TestHubEscKeepsTheRow(t *testing.T) {
 	}
 
 	m = frameModel(80, 24)
+	m.selectRow("agents")
+	m = typeInto(m, "/")
+	m, _ = press(m, tea.KeyEscape)
+	if got := m.selectedName(); m.mode != hubMode || got != "agents" {
+		t.Errorf("cancelled search from agents: mode=%v cursor=%q, want agents", m.mode, got)
+	}
+
+	m = frameModel(80, 24)
 	m, _ = press(m, '4')
 	m, _ = press(m, tea.KeyEscape)
 	if got := m.selectedName(); m.mode != hubMode || got != "tmux" {

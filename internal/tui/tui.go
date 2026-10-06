@@ -257,6 +257,9 @@ type model struct {
 	// it does while a filter is open, so "/" searches every command and not
 	// only the rows on the top screen.
 	hubFlat bool
+	// searchFrom is the top-screen row the search-all list was opened from,
+	// where the cursor returns when the search is cancelled.
+	searchFrom string
 	// area is the open area in areaMode, and the area a leavesMode list was
 	// entered from (esc returns there), or nil.
 	area *HubEntry
@@ -1066,23 +1069,24 @@ func (m *model) flattenHub() {
 			addModule(e)
 		}
 	}
+	m.searchFrom = m.selectedName()
 	m.hubFlat = true
 	m.setList(hubItems(flat))
 }
 
 // unflattenHub restores the top screen once the search-all list has no
-// filter left, with the cursor on the row it was on when that row is a top-
-// screen row.
+// filter left, with the cursor on the row the search started from.
 func (m *model) unflattenHub() {
 	if m.mode != hubMode || !m.hubFlat || m.l.FilterState() != list.Unfiltered {
 		return
 	}
-	name := m.selectedName()
 	m.hubFlat = false
 	m.setList(hubItems(m.hub))
 	m.fitTopScreen()
 	m.refreshDelegate()
-	m.selectRow(name)
+	// Back on the row the search started from. Clearing an applied search
+	// re-selects the found row afterwards when the top screen has it.
+	m.selectRow(m.searchFrom)
 }
 
 // enterLeaves opens entry's drill-down list.
