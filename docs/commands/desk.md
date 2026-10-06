@@ -63,7 +63,7 @@ The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with 
 
 | Key | Action |
 |---|---|
-| `y` | run the selected item at once (a TTY item runs in this pane; anything else runs detached); check its short sha256 in the focus panel first. `y` runs nothing while the window is too small to show that hash, WHAT and WHY, and refuses once when a rescan moved the selection because the selected item left the queue (another desk skipped or took it) |
+| `y` | run the selected item at once (a TTY item runs in this pane; anything else runs detached); check its short sha256 in the focus panel first. `y` runs nothing while the window is too small to show that hash, WHAT and WHY, and refuses once when a rescan, not a key, put a different waiting item under the cursor (the one being read left the queue) |
 | `s` | skip the selected item; asks first |
 | `u` | undo the last skip |
 | `v` | view the selected item's script |

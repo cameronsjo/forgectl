@@ -160,11 +160,9 @@ type deskModel struct {
 	anchor  int  // the target the a prompt's page starts at, kept on a resize
 	// watch is the waiting item last under the cursor, kept across an empty
 	// queue. moved names it once a rescan finds it gone and the cursor on
-	// another; the next y refuses once (#1098). ownSkip is the item this
-	// desk just skipped, exempt for the first scan after.
+	// another; the next y refuses once (#1098); see watchSelection.
 	watch    string
 	moved    string
-	ownSkip  string
 	lastSkip string // what u returns to pending/
 	busy     bool   // an action is in flight
 
@@ -350,7 +348,7 @@ func (m deskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case deskResultMsg:
 		m.busy = false
 		if t.skipped != "" {
-			m.lastSkip, m.ownSkip = t.skipped, t.skipped
+			m.lastSkip = t.skipped
 		}
 		if t.unskipped {
 			// An undone skip is back in pending/ but is not an arrival.
@@ -404,43 +402,49 @@ func (m *deskModel) rescan() tea.Cmd {
 	return m.scanCmd()
 }
 
+// watchSelection keeps watch, the waiting item the operator was last shown
+// under the cursor. When a scan, not a key, puts a different waiting item
+// under the cursor, the operator never matched its hash, so moved arms the
+// next y to refuse once (#1098). watch survives rows of any other kind and
+// an empty queue; only the operator's own y, s and a clear it (they resolved
+// that item), and j/k set it to the row they chose.
+func (m *deskModel) watchSelection() {
+	r, ok := m.selected()
+	if !ok || r.kind != rowWaiting {
+		return
+	}
+	if m.watch != "" && m.watch != r.item.Name {
+		m.moved = m.watch
+	}
+	m.watch = r.item.Name
+}
+
+// chooseSelection records a selection the operator made with a key.
+func (m *deskModel) chooseSelection() {
+	m.moved, m.watch = "", ""
+	if r, ok := m.selected(); ok && r.kind == rowWaiting {
+		m.watch = r.item.Name
+	}
+}
+
 // applyScan takes a new snapshot: keeps the cursor on the same item when it
 // is still listed, and rings for arrivals.
 func (m deskModel) applyScan(t deskScanMsg) (tea.Model, tea.Cmd) {
 	selected := ""
 	if m.cursor < len(m.rows) {
-		r := m.rows[m.cursor]
-		selected = r.item.Name
-		m.watch = ""
-		if r.kind == rowWaiting {
-			m.watch = selected
-		}
+		selected = m.rows[m.cursor].item.Name
 	}
 	now := m.now()
 	m.snap, m.frame.Steps, m.frame.Records = t.snap, t.steps, t.records
 	m.rows = deskRows(t.snap, now)
 	m.cursor = min(m.cursor, max(len(m.rows)-1, 0))
-	// The waiting item the operator was reading left the queue without
-	// their own skip (another desk skipped or took it): the next y refuses
-	// once (see run). watch survives an empty queue, so an item arriving
-	// after one empty scan still counts as a move. The operator's own skip
-	// exempts only the first scan after it, so a later item reusing the
-	// name cannot borrow the exemption.
-	exempt := m.ownSkip
-	m.ownSkip = ""
-	if m.watch != "" && len(m.rows) > 0 &&
-		!slices.ContainsFunc(m.rows, func(r queueRow) bool { return r.item.Name == m.watch }) {
-		if m.watch != exempt {
-			m.moved = m.watch
-		}
-		m.watch = ""
-	}
 	for i, r := range m.rows {
 		if r.item.Name == selected {
 			m.cursor = i
 			break
 		}
 	}
+	m.watchSelection()
 
 	waiting := map[string]bool{}
 	var arrived []desk.Item
@@ -553,13 +557,13 @@ func (m deskModel) updateKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.cursor < len(m.rows)-1 {
 			m.cursor++
 		}
-		m.moved = "" // the operator chose this selection
+		m.chooseSelection()
 		return m, nil
 	case "k", "up":
 		if m.cursor > 0 {
 			m.cursor--
 		}
-		m.moved = ""
+		m.chooseSelection()
 		return m, nil
 	case "y":
 		return m.run()
@@ -600,9 +604,9 @@ func (m deskModel) run() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.moved != "" {
-		// The item the operator had selected left the queue on a rescan and
-		// the cursor landed on another: they have not matched this one's hash.
-		m.message = st.Warn.Render(safeMessage("not run: " + itemLabel(m.moved) + " left the queue; check " + itemLabel(r.item.Name) + "'s sha256, then y"))
+		// A scan, not a key, put this item under the cursor in place of the
+		// one the operator was reading: they have not matched its hash.
+		m.message = st.Warn.Render(safeMessage("not run: the selection moved from " + itemLabel(m.moved) + " to " + itemLabel(r.item.Name) + " · check its sha256, then y"))
 		m.moved = ""
 		return m, nil
 	}
@@ -610,7 +614,7 @@ func (m deskModel) run() (tea.Model, tea.Cmd) {
 		m.message = st.Warn.Render(safeMessage("not run: enlarge the window to see " + itemLabel(r.item.Name) + "'s sha256, what and why"))
 		return m, nil
 	}
-	m.busy = true
+	m.busy, m.watch = true, "" // this y resolves the item the operator was reading
 	return m.start(target{name: r.item.Name, sha: r.item.Meta.SHA256, tty: r.item.TTY})
 }
 
@@ -810,7 +814,9 @@ func (m deskModel) confirmKey(key string) (tea.Model, tea.Cmd) {
 		m.message = m.styles().Muted.Render("cancelled")
 		return m, nil
 	}
-	m.busy = true
+	// A confirmed skip or run-all resolves the item the operator was
+	// reading; where the cursor lands next is not a move under them.
+	m.busy, m.watch = true, ""
 	d := m.d
 	switch kind {
 	case confirmSkip:

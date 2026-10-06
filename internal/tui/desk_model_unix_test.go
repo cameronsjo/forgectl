@@ -1196,7 +1196,7 @@ func TestDesk_YRefusesOnceWhenARescanMovesTheSelection(t *testing.T) {
 	if len(h.backend.launched) != 0 {
 		t.Fatalf("y ran %v right after the selection moved", h.backend.launched)
 	}
-	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "01 s1 left the queue") {
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "the selection moved from 01 s1 to 02 s2") {
 		t.Errorf("footer = %q", footer)
 	}
 	h.press("y")
@@ -1264,10 +1264,9 @@ func TestDesk_YRefusesOnceAfterAnEmptyScan(t *testing.T) {
 	}
 }
 
-// The own-skip exemption is used up by the first scan after the skip: a
-// hand-dropped item reusing the skipped name, removed later, still counts
-// as a move.
-func TestDesk_OwnSkipExemptionIsOneShot(t *testing.T) {
+// A hand-dropped item reusing a name the operator skipped earlier, removed
+// later, still counts as a move: no skip leaves an exemption behind.
+func TestDesk_ReusedSkipNameStillCountsAsAMove(t *testing.T) {
 	h := newDeskHarness(t)
 	h.drop("01-s1.sh", plainScript("s1"))
 	h.drop("03-s3.sh", plainScript("s3"))
@@ -1285,5 +1284,65 @@ func TestDesk_OwnSkipExemptionIsOneShot(t *testing.T) {
 	h.press("y")
 	if len(h.backend.launched) != 0 {
 		t.Fatalf("y ran %v after the selection moved", h.backend.launched)
+	}
+}
+
+// The security reviewer's probe: the item the operator read is claimed
+// elsewhere (the cursor follows it onto its running row), its record is
+// removed, and a new item lands under the cursor. y refuses once.
+func TestDesk_YRefusesAfterTheReadItemRunsElsewhereAndVanishes(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-w.sh", plainScript("w"))
+	h.scan()
+	if _, err := h.d.Claim("01-w", h.m.rows[0].item.Meta.SHA256); err != nil { // another desk
+		t.Fatal(err)
+	}
+	h.scan()
+	if r, _ := h.m.selected(); r.kind != rowRunning {
+		t.Fatalf("the cursor should follow 01-w onto its running row, got %v", r.kind)
+	}
+	for _, ext := range []string{".sh", ".meta.json"} {
+		_ = os.Remove(filepath.Join(h.d.Path(), desk.DirRunning, "01-w"+ext))
+	}
+	h.drop("02-evil.sh", plainScript("evil"))
+	h.scan()
+	h.press("y")
+	if len(h.backend.launched) != 0 {
+		t.Fatalf("y ran %v; the operator read 01-w", h.backend.launched)
+	}
+}
+
+// Skipping the only waiting item, then a new arrival: the operator's own
+// skip resolved what they read, so the first y runs.
+func TestDesk_OwnSkipOfTheOnlyItemThenAnArrivalRunsAtOnce(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-a.sh", plainScript("a"))
+	h.scan()
+	h.press("s", "y")
+	h.scan() // empty
+	h.drop("02-b.sh", plainScript("b"))
+	h.scan()
+	h.press("y")
+	if !slices.Equal(h.backend.launched, []string{"02-b"}) {
+		t.Fatalf("launched %v, want [02-b] on the first y; footer %q", h.backend.launched, ansi.Strip(h.m.footer()))
+	}
+}
+
+// After the operator runs an item and its row later leaves, a new arrival
+// under the cursor runs on the first y.
+func TestDesk_OwnRunThenAnArrivalRunsAtOnce(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-a.sh", plainScript("a"))
+	h.scan()
+	h.press("y")
+	for _, ext := range []string{".sh", ".meta.json"} { // the run ended and aged out
+		_ = os.Remove(filepath.Join(h.d.Path(), desk.DirRunning, "01-a"+ext))
+	}
+	h.scan()
+	h.drop("02-b.sh", plainScript("b"))
+	h.scan()
+	h.press("y")
+	if !slices.Equal(h.backend.launched, []string{"01-a", "02-b"}) {
+		t.Fatalf("launched %v, want [01-a 02-b]; footer %q", h.backend.launched, ansi.Strip(h.m.footer()))
 	}
 }
