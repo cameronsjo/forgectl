@@ -425,3 +425,50 @@ func TestDeskFrame_DrawsNothingUnsafe(t *testing.T) {
 		t.Fatalf("the hostile WHAT is not in the frame; the inertness check proves nothing:\n%s", ansi.Strip(out))
 	}
 }
+
+// longHeaderScript carries a WHAT and WHY far longer than any window, and a
+// body that opens with an embedded program's docstring, the shape that made
+// the focus panel unreadable (forgectl#1082).
+const longHeaderScript = `#!/bin/bash
+# WHAT: Rebuild the package mirror index from the upstream release feed and prune every release older than the retention window
+# WHY: Upstream published a release this morning and the nightly mirror job is paused until the index matches it
+python3 - <<'PY'
+print("rebuild")
+PY
+`
+
+func longHeaderSnapshot() (*desk.Snapshot, DeskFrameOptions) {
+	it := item("21-rebuild-mirror", desk.KindScript, desk.StateWaiting)
+	it.Content = []byte(longHeaderScript)
+	it.Headers = desk.ParseHeaders(it.Content)
+	it.Meta = desk.Meta{AddedAt: agoPtr(4 * time.Minute), SHA256: desk.SHA256Hex([]byte("mirror"))}
+	snap := &desk.Snapshot{Dir: "/home/op/.local/state/forgectl/desk", Taken: deskNow, Pending: []desk.Item{it}}
+	return snap, deskOpts()
+}
+
+// TestGoldenDeskFocusWrap pins the focus panel at 80, 100 and 160 columns:
+// WHAT and WHY wrap under their labels, in full, and the script preview is
+// labelled.
+func TestGoldenDeskFocusWrap(t *testing.T) {
+	forceTrueColor(t)
+	for _, w := range []int{80, 100, 160} {
+		t.Run(fmt.Sprint(w), func(t *testing.T) {
+			snap, opts := longHeaderSnapshot()
+			got := RenderDeskFrame(snap, w, 30, deskNow, opts)
+			plain := strings.Join(strings.Fields(ansi.Strip(got)), " ")
+			for _, want := range []string{"retention window", "matches it", "script ·"} {
+				if want == "retention window" || want == "matches it" {
+					// The tail of each field: wrapping must not lose it.
+					if !strings.Contains(strings.ReplaceAll(plain, "│ │", ""), want) {
+						t.Errorf("%d columns: %q was cut from the focus panel", w, want)
+					}
+					continue
+				}
+				if !strings.Contains(plain, want) {
+					t.Errorf("%d columns: the script preview has no label (%q)", w, want)
+				}
+			}
+			assertGolden(t, fmt.Sprintf("desk_focuswrap_%d", w), got)
+		})
+	}
+}
