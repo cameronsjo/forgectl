@@ -2,11 +2,13 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	fexec "github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -188,4 +190,49 @@ func TestInspectWorktreeEdges(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestInspectWorktreeRunsNoWorkerFilter is the canary for the worker-written
+// filter driver: a clean filter on a stat-dirty tracked file must not run
+// when close inspects or removes the worktree.
+func TestInspectWorktreeRunsNoWorkerFilter(t *testing.T) {
+	ctx := context.Background()
+	run := fexec.OSRunner{}
+	top := gitRepo(t)
+	wt, err := AddWorktree(ctx, run, top, "w", "feat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "filter-ran")
+	writeFile(t, filepath.Join(wt.Path, ".gitattributes"), "*.txt filter=canary\n")
+	writeFile(t, filepath.Join(wt.Path, "a.txt"), "x\n")
+	mustGit(t, wt.Path, "add", ".gitattributes", "a.txt")
+	mustGit(t, wt.Path, "commit", "-q", "-m", "files")
+	mustGit(t, top, "config", "filter.canary.clean", "touch '"+marker+"'; cat")
+	// A new mtime makes the entry stat-dirty, so status re-hashes it.
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(filepath.Join(wt.Path, "a.txt"), later, later); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectWorktree(ctx, run, top, "w", wt.Base); err != nil {
+		t.Fatalf("InspectWorktree: %v", err)
+	}
+	_ = RemoveWorktree(ctx, run, top, wt.Path)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a filter driver ran during close's git calls")
+	}
+}
+
+func TestInspectWorktreeRefusesARedirectedGitFile(t *testing.T) {
+	ctx := context.Background()
+	run := fexec.OSRunner{}
+	top := gitRepo(t)
+	if _, err := AddWorktree(ctx, run, top, "w", "feat"); err != nil {
+		t.Fatal(err)
+	}
+	other := gitRepo(t)
+	writeFile(t, filepath.Join(WorktreePath(top, "w"), ".git"), "gitdir: "+filepath.Join(other, ".git")+"\n")
+	if _, err := InspectWorktree(ctx, run, top, "w", ""); !errors.Is(err, ErrUnsafeWorktreeRoot) {
+		t.Fatalf("a redirected .git was not refused: %v", err)
+	}
 }

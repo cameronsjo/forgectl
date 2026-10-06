@@ -99,11 +99,21 @@ func InspectWorktree(ctx context.Context, run GitRunner, top, name, base string)
 	if !f.Listed {
 		return f, nil
 	}
+	common, err := gitenv.Run(ctx, run, gitenv.Local, "-C", top, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return WorktreeFacts{}, fmt.Errorf("worker: read the common git dir of %s: %w", top, err)
+	}
+	if err := checkGitFile(strings.TrimSpace(common), path); err != nil {
+		return WorktreeFacts{}, err
+	}
 
 	git := func(args ...string) (string, error) {
 		return gitenv.Run(ctx, run, gitenv.Local, append([]string{"-C", path}, args...)...)
 	}
-	if f.Status, err = git("status", "--porcelain", "--ignored"); err != nil {
+	// status re-hashes stat-dirty files through any filter driver the
+	// worktree's .gitattributes names, and the worktree is the worker's to
+	// write; RunUnfiltered blanks every driver so none runs as the operator.
+	if f.Status, err = gitenv.RunUnfiltered(ctx, run, gitenv.Bin, path, "status", "--porcelain", "--ignored"); err != nil {
 		return WorktreeFacts{}, fmt.Errorf("worker: git status in %s: %w", path, err)
 	}
 	// An error from either lookup below is read as "detached" or "no upstream".
@@ -149,8 +159,36 @@ func RemoveWorktree(ctx context.Context, run GitRunner, top, path string) error 
 	if filepath.Dir(path) != filepath.Join(append([]string{top}, worktreeDirs...)...) {
 		return fmt.Errorf("%w: %s is not directly under %s", ErrUnsafeWorktreeRoot, path, filepath.Join(append([]string{top}, worktreeDirs...)...))
 	}
-	if _, err := gitenv.Run(ctx, run, gitenv.Local, "-C", top, "-c", "core.hooksPath=/dev/null", "worktree", "remove", "--", path); err != nil {
+	// worktree remove runs its own dirty check in path, so path's filter
+	// drivers are blanked too.
+	if _, err := gitenv.RunUnfilteredAlso(ctx, run, gitenv.Bin, top, []string{path}, "-c", "core.hooksPath=/dev/null", "worktree", "remove", "--", path); err != nil {
 		return fmt.Errorf("worker: git worktree remove %s: %w", path, err)
+	}
+	return nil
+}
+
+// checkGitFile refuses a worktree whose .git is not the gitfile git wrote:
+// a regular file naming a directory under <common git dir>/worktrees. The worktree
+// is the worker's to write, and a .git it pointed elsewhere would hand git a
+// config the worker wrote.
+func checkGitFile(common, path string) error {
+	gitfile := filepath.Join(path, ".git")
+	info, err := os.Lstat(gitfile)
+	if err != nil {
+		return fmt.Errorf("worker: check %s: %w", gitfile, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > 4096 {
+		return fmt.Errorf("%w: %s is not a gitfile", ErrUnsafeWorktreeRoot, gitfile)
+	}
+	data, err := os.ReadFile(gitfile)
+	if err != nil {
+		return fmt.Errorf("worker: read %s: %w", gitfile, err)
+	}
+	dir, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir: ")
+	admin, aerr := filepath.EvalSymlinks(filepath.Join(common, "worktrees"))
+	parent, perr := filepath.EvalSymlinks(filepath.Dir(dir))
+	if !ok || aerr != nil || perr != nil || parent != admin {
+		return fmt.Errorf("%w: %s points outside %s", ErrUnsafeWorktreeRoot, gitfile, admin)
 	}
 	return nil
 }
