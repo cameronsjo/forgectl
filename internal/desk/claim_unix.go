@@ -130,6 +130,9 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 		}
 		return nil, fmt.Errorf("desk: claim %s: %w", describe(name), err)
 	}
+	// The item has left pending/ whatever happens next (run, changed, or
+	// refused), so the signal raised for it is done.
+	defer d.leftPending(meta)
 	if err := claimMeta(d, name); err != nil {
 		// The item is in running/ and nothing will own it: without its meta it
 		// would read as a claim in progress for ever. Give running/ the meta
@@ -486,6 +489,9 @@ func (d *Desk) skip(name, reason, note, by string) (string, error) {
 		return "", fmt.Errorf("desk: skip %s: %w", describe(name), err)
 	}
 	moved = from == DirRunning
+	if from == DirPending {
+		defer d.leftPending(meta)
+	}
 	if staleMeta {
 		_ = d.root.Remove(metaName(DirPending, name)) // carried over to skipped/ above
 	}

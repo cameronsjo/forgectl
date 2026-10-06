@@ -102,7 +102,7 @@ func (d *Desk) Add(src, what, why string, tty bool) (Added, error) {
 			return Added{}, fmt.Errorf("desk: queue %s: %w", name, err)
 		}
 		now := d.now().UTC()
-		if err := d.writeMeta(DirPending, name, Meta{AddedAt: &now, SHA256: sum, Kind: kind}); err != nil {
+		if err := d.writeMeta(DirPending, name, Meta{AddedAt: &now, SHA256: sum, Kind: kind, SignalPane: d.signalPane}); err != nil {
 			return Added{}, err
 		}
 		return Added{Name: name, Kind: kind, SHA256: sum, Path: d.abs(path.Join(DirPending, name+kind.Ext())), Warnings: warnings}, nil

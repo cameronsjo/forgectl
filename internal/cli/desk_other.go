@@ -18,7 +18,9 @@ func runDeskDashboard(*cobra.Command, module.Deps, string, bool) error {
 	return errDeskUnsupported()
 }
 
-func runDeskAdd(*cobra.Command, string, string, deskAddOpts) error { return errDeskUnsupported() }
+func runDeskAdd(*cobra.Command, module.Deps, string, string, deskAddOpts) error {
+	return errDeskUnsupported()
+}
 
 func runDeskPlan(*cobra.Command, string, string, bool) error { return errDeskUnsupported() }
 
@@ -26,7 +28,9 @@ func runDeskStatus(*cobra.Command, string, string, bool) error { return errDeskU
 
 func runDeskWatch(*cobra.Command, string, string, int, int) error { return errDeskUnsupported() }
 
-func runDeskSkip(*cobra.Command, string, string, string) error { return errDeskUnsupported() }
+func runDeskSkip(*cobra.Command, module.Deps, string, string, string) error {
+	return errDeskUnsupported()
+}
 
 func runDeskPrune(*cobra.Command, string, int, bool) error { return errDeskUnsupported() }
 

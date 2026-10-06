@@ -132,6 +132,10 @@ const (
 	// placed in a workspace forgectl owns.
 	KindHerdrSendText
 	KindHerdrSendKeys
+	// KindHerdrPaneAgent is `pane report-agent` and `pane release-agent`: the
+	// desk marks the pane of the session that queued an item as needing the
+	// operator, and clears it when the item runs or is skipped.
+	KindHerdrPaneAgent
 
 	// KindSopsEdit drives `sops <file>` with forgectl re-invoked as the
 	// editor. KindSopsExtract is the read-back that proves what landed.
@@ -184,6 +188,7 @@ var kindNames = [kindCount]string{
 	KindHerdrScreenRead:  "herdr.screen-read",
 	KindHerdrPaneStatus:  "herdr.pane-status",
 	KindHerdrSendText:    "herdr.send-text",
+	KindHerdrPaneAgent:   "herdr.pane-agent",
 	KindHerdrSendKeys:    "herdr.send-keys",
 
 	KindSopsEdit:    "sops.edit",

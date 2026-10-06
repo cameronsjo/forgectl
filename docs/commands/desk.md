@@ -58,7 +58,7 @@ Quit and restart every open dashboard after you upgrade forgectl. A dashboard st
 
 ### `forgectl desk`
 
-The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with a bar per item, a focus panel showing the selected item's short sha256, WHAT, WHY and first script lines, and the history of finished runs.
+The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with a bar per item, a focus panel showing the selected item's short sha256, WHAT and WHY (wrapped in full, up to four lines each) and, under a "script" label, its first script lines, and the history of finished runs.
 
 | Key | Action |
 |---|---|
@@ -93,6 +93,19 @@ A `.manifest` is planned before it is queued: one that cannot run is refused, an
 When `<file>` is `-`, stdin is read (at most 1 MiB) and must not be a terminal.
 
 `<file>` must be a regular file (a symlink to one is followed); a FIFO or device is refused at once, never read.
+
+When an item is queued, `add` tells the operator it is waiting, so a waiting item is never silent while the desk is off screen:
+
+- **herdr** (inside a herdr pane): a herdr notification, and the queuing session's pane in herdr's needs-you (`blocked`) state, reported under the source `forgectl-desk`. The state clears when the item is run or skipped, from the dashboard or `desk skip`. It stays, with its count refreshed, while other items queued from that pane still wait. Outside herdr nothing is sent to it.
+- **macOS**: a desktop notification (`osascript`); a no-op elsewhere.
+
+A signal that fails is a `warning: operator signal failed:` line on stderr and never fails the add. Turn each off in `config.toml`:
+
+```toml
+[desk]
+notify_herdr = false   # herdr notification and pane state (default true)
+notify_macos = false   # macOS notification (default true)
+```
 
 Exit codes: 0 queued; 1 refused (an unreadable or non-regular file, a manifest that cannot run, no free number); 2 a usage error (a missing or empty `--what` or `--why`, a control or bidi character in either, `--name` misused).
 
@@ -130,7 +143,7 @@ A waiting item older than 24 hours is flagged `stale`. A running item whose owne
 
 With a name, the item in detail as `key=value` lines: `name`, `state`, `kind`, `what`, `why`, `tty`, the full `sha256`, `added`, `started`, `ended`, `exit`, `skipped_at`, `skip_reason`, `skipped_by` and `skip_note`, the `log` and `events` paths, and for a batch a `summary` line and one `step` line per step. `--json` prints `{item, log, events, record, steps, summary}`; `summary` is the run's `summary.json` once a batch has finished, and `null` before.
 
-Each item in the JSON has `name`, `number` (`null` for a legacy name with no number), `legacy`, `kind`, `state`, `what`, `why`, `tty`, `sha256`, `added_at`, `started_at`, `ended_at`, `age_seconds`, `duration_seconds`, `stale`, `exit_code`, `skip_reason`, `skip_note`, `skipped_by`, `skipped_at`, `refusal` and `pid`. Times are UTC. `age_seconds` counts from when the item was added (waiting), started (running) or ended (done).
+Each item in the JSON has `name`, `number` (`null` for a legacy name with no number), `legacy`, `kind`, `state`, `what`, `why`, `tty`, `sha256`, `added_at`, `started_at`, `ended_at`, `age_seconds`, `duration_seconds`, `stale`, `exit_code`, `skip_reason`, `skip_note`, `skipped_by`, `skipped_at`, `signal_pane` (the herdr pane that queued the item, kept to clear its signal), `refusal` and `pid`. Times are UTC. `age_seconds` counts from when the item was added (waiting), started (running) or ended (done).
 
 Like the dashboard, `status` fixes the hash of a hand-dropped item the first time it sees it, and moves a pending item whose bytes changed to `skipped/`.
 
@@ -281,7 +294,7 @@ The batch ends with rc 0 (every step ok), 1 (a step failed), 2 (the batch could 
 
 ### Metadata
 
-`NN-name.meta.json` holds `added_at`, `sha256` (64 lowercase hex characters, or the item is refused), `kind`, `skip_reason`, `skip_note`, `skipped_by`, `skipped_at`, `claimed_at`, `started_at`, `ended_at`, `exit_code`, and the owning process's `pid` and `pid_start`. A legacy item with none falls back to its log's times and its log's `EXIT=` line.
+`NN-name.meta.json` holds `added_at`, `sha256` (64 lowercase hex characters, or the item is refused), `kind`, `skip_reason`, `skip_note`, `skipped_by`, `skipped_at`, `signal_pane` (the herdr pane that queued the item, kept to clear its signal), `claimed_at`, `started_at`, `ended_at`, `exit_code`, and the owning process's `pid` and `pid_start`. A legacy item with none falls back to its log's times and its log's `EXIT=` line.
 
 `skip_reason` is `operator` (skipped at the dashboard or with `desk skip`; `skipped_by` says which; can be undone), `changed` (its bytes changed after it was queued), `lost` (its run's owner died), `launch-failed` (it was claimed but its run never began), `name-reused` (its number was already in `done/`), or `refused: …` (not a regular file with one link). Only `operator` can be undone.
 

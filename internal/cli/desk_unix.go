@@ -70,8 +70,9 @@ func runDeskDashboard(cmd *cobra.Command, deps module.Deps, dirFlag string, fram
 	if err != nil {
 		return err
 	}
-	defer d.Close()           //nolint:errcheck // read side; nothing to flush
-	home, _ := deskUserHome() // display only: no home shows the full path
+	defer d.Close()               //nolint:errcheck // read side; nothing to flush
+	newDeskSignal(deps).attach(d) // a run or skip from the dashboard clears the pane state
+	home, _ := deskUserHome()     // display only: no home shows the full path
 	if frame {
 		return printDeskFrame(deps.Theme.Writer(cmd.OutOrStdout(), os.Environ()), d, deps, home)
 	}
@@ -131,7 +132,7 @@ type deskAddJSON struct {
 	Warnings []string `json:"warnings"`
 }
 
-func runDeskAdd(cmd *cobra.Command, dirFlag, file string, o deskAddOpts) error {
+func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o deskAddOpts) error {
 	if err := checkAddFlags(file, o); err != nil {
 		return err
 	}
@@ -152,10 +153,16 @@ func runDeskAdd(cmd *cobra.Command, dirFlag, file string, o deskAddOpts) error {
 		return err
 	}
 	defer d.Close() //nolint:errcheck // Add has already synced what it wrote
+	sig := newDeskSignal(deps)
+	if pane, ok := sig.pane(); ok {
+		d.SetSignalPane(pane)
+	}
 	a, err := d.Add(src, strings.TrimSpace(o.what), strings.TrimSpace(o.why), o.tty)
 	if err != nil {
 		return err
 	}
+	// The item is queued; a signal that fails is a warning, not a failed add.
+	signalFailures := sig.queued(cmd.Context(), d, a, strings.TrimSpace(o.what))
 	warnings := a.Warnings
 	if warnings == nil {
 		warnings = []string{}
@@ -167,6 +174,9 @@ func runDeskAdd(cmd *cobra.Command, dirFlag, file string, o deskAddOpts) error {
 	ew := &stickyWriter{w: cmd.ErrOrStderr()}
 	for _, w := range warnings {
 		ew.printf("warning: %s\n", safeText(w))
+	}
+	for _, f := range signalFailures {
+		ew.printf("warning: operator signal failed: %s\n", safeText(f))
 	}
 	w := &stickyWriter{w: out}
 	w.printf("name=%s\nkind=%s\nsha256=%s\n", a.Name, a.Kind, a.SHA256)
@@ -766,7 +776,7 @@ func watchResume(name string, seen, deadline int, dirFlag string) string {
 	return s
 }
 
-func runDeskSkip(cmd *cobra.Command, dirFlag, name, reason string) error {
+func runDeskSkip(cmd *cobra.Command, deps module.Deps, dirFlag, name, reason string) error {
 	if err := checkDeskName(name); err != nil {
 		return err
 	}
@@ -785,6 +795,7 @@ func runDeskSkip(cmd *cobra.Command, dirFlag, name, reason string) error {
 		return err
 	}
 	defer d.Close() //nolint:errcheck // Skip syncs its own writes
+	newDeskSignal(deps).attach(d)
 	recorded, err := d.SkipNoted(name, reason)
 	switch {
 	case errors.Is(err, desk.ErrNotFound):

@@ -22,9 +22,10 @@ import (
 // will not run itself, which the operator approves and runs. The threat model
 // is docs/adr/0012-desk-threat-model.md; the protocol is docs/commands/desk.md.
 var deskModule = module.Manifest{
-	Name: "desk",
-	Tier: module.TierExtension,
-	New:  newDeskCmd,
+	Name:      "desk",
+	Tier:      module.TierExtension,
+	ConfigKey: "desk",
+	New:       newDeskCmd,
 }
 
 // Exit codes the desk verbs share beyond 0 and 1.
@@ -137,13 +138,13 @@ bytes, not anything the script sources, calls or downloads.`,
 	cmd.PersistentFlags().StringVar(&dir, "dir", "", "desk directory (default: $DESK_DIR, $CLAUDE_DESK_DIR, then the XDG state dir)")
 	cmd.Flags().BoolVar(&frame, "frame", false, "print one frame to stdout and exit; size from $COLUMNS and $LINES (default 80x40)")
 	cmd.AddCommand(
-		newDeskAddCmd(&dir),
+		newDeskAddCmd(&dir, deps),
 		newDeskPlanCmd(&dir),
 		newDeskStatusCmd(&dir),
 		newDeskWatchCmd(&dir),
 		newDeskRunsCmd(&dir),
 		newDeskShowCmd(&dir),
-		newDeskSkipCmd(&dir),
+		newDeskSkipCmd(&dir, deps),
 		newDeskLayoutCmd(deps, &dir),
 		newDeskPruneCmd(&dir),
 		newDeskSuperviseCmd(&dir),
@@ -157,7 +158,7 @@ type deskAddOpts struct {
 	tty, asJSON     bool
 }
 
-func newDeskAddCmd(dir *string) *cobra.Command {
+func newDeskAddCmd(dir *string, deps module.Deps) *cobra.Command {
 	var o deskAddOpts
 	cmd := &cobra.Command{
 		Use:   "add <file>",
@@ -192,7 +193,7 @@ bad --name).`,
   printf 'echo hi\n' | forgectl desk add - --name hi.sh --what "Say hi" --why "A test"`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDeskAdd(cmd, *dir, args[0], o)
+			return runDeskAdd(cmd, deps, *dir, args[0], o)
 		},
 	}
 	cmd.Flags().StringVar(&o.what, "what", "", "what the script does, one line (required)")
@@ -339,7 +340,7 @@ watch printed.`,
 	return cmd
 }
 
-func newDeskSkipCmd(dir *string) *cobra.Command {
+func newDeskSkipCmd(dir *string, deps module.Deps) *cobra.Command {
 	var reason string
 	cmd := &cobra.Command{
 		Use:   "skip <name> --reason <text>",
@@ -354,7 +355,7 @@ Exit codes: 0 skipped; 1 no such item, or it is running, or another desk took
 it first; 2 usage (an empty, long or unsafe --reason).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDeskSkip(cmd, *dir, args[0], reason)
+			return runDeskSkip(cmd, deps, *dir, args[0], reason)
 		},
 	}
 	cmd.Flags().StringVar(&reason, "reason", "", "why, one line (required)")

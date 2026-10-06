@@ -40,6 +40,27 @@ type Desk struct {
 	// grace is how long a finished script's leftover processes get between
 	// SIGTERM and SIGKILL.
 	grace time.Duration
+
+	// signalPane is stamped into the meta of every item Add queues; onLeave
+	// runs when an item leaves pending/ (see SetSignalPane, OnLeavePending).
+	signalPane string
+	onLeave    func(Meta)
+}
+
+// SetSignalPane records pane, the herdr pane of the queuing session, in the
+// meta of every item this Desk adds from now on.
+func (d *Desk) SetSignalPane(pane string) { d.signalPane = pane }
+
+// OnLeavePending registers fn to run, with the item's meta, after an item
+// leaves pending/ by a claim or a skip. It is how an operator signal raised
+// at queue time gets cleared. fn runs on the caller's goroutine with no desk
+// lock held, and its failures are its own to handle.
+func (d *Desk) OnLeavePending(fn func(Meta)) { d.onLeave = fn }
+
+func (d *Desk) leftPending(m Meta) {
+	if d.onLeave != nil {
+		d.onLeave(m)
+	}
 }
 
 // Open pins the desk directory at path, creating it when absent, and migrates
