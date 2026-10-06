@@ -30,7 +30,9 @@ const ExitCancelled = 130
 var userCancelled atomic.Bool
 
 // noteCancelled prints the plain `cancelled` line and records the cancel. It
-// returns nil so a command can `return noteCancelled(out)`.
+// returns nil so a command can `return noteCancelled(out)`. An abort (Esc,
+// Ctrl+C) writes it to stderr; a No at a confirm has always written it to the
+// command's stdout, which clean's tests pin.
 func noteCancelled(w io.Writer) error {
 	_, _ = fmt.Fprintln(w, "cancelled")
 	userCancelled.Store(true)
@@ -54,7 +56,8 @@ func withCancelHandling(root *cobra.Command) {
 			c.RunE = func(cmd *cobra.Command, args []string) error {
 				err := run(cmd, args)
 				if errors.Is(err, huh.ErrUserAborted) {
-					return noteCancelled(cmd.OutOrStdout())
+					// stderr: a --json verb's stdout carries exactly one JSON value.
+					return noteCancelled(cmd.ErrOrStderr())
 				}
 				return err
 			}
@@ -64,4 +67,13 @@ func withCancelHandling(root *cobra.Command) {
 		}
 	}
 	walk(root)
+}
+
+// finishCancel is Execute's last step: a command tree that returned nil after
+// a cancel exits ExitCancelled, silently, because the line was already printed.
+func finishCancel(err error) error {
+	if err == nil && userCancelled.Load() {
+		return newSilentCodedError(ExitCancelled)
+	}
+	return err
 }

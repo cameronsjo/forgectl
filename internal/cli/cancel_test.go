@@ -41,8 +41,11 @@ func TestCancel_AbortEndsAsPlainCancelled(t *testing.T) {
 	if !userCancelled.Load() {
 		t.Error("a cancel must be recorded so Execute can exit ExitCancelled")
 	}
-	if got := strings.TrimSpace(out.String()); got != "cancelled" {
-		t.Errorf("stdout = %q, want the plain line \"cancelled\"", got)
+	if got := strings.TrimSpace(errb.String()); got != "cancelled" {
+		t.Errorf("stderr = %q, want the plain line \"cancelled\"", got)
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout = %q, want it empty: a --json verb's stdout is one JSON value", out.String())
 	}
 	if strings.Contains(errb.String()+out.String(), "ERROR") {
 		t.Errorf("a cancel must not render as an error: %q", errb.String()+out.String())
@@ -77,9 +80,27 @@ func TestCancel_WrapIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestExitCancelled_IsNeitherSuccessNorGenericFailure(t *testing.T) {
-	if got := ExitCode(newSilentCodedError(ExitCancelled)); got != 130 {
-		t.Errorf("ExitCode = %d, want 130", got)
+// TestExecute_CancelExits130 drives Execute itself: a dispatch that ends in a
+// cancel must come back as a silent error carrying ExitCancelled, and a clean
+// run after it must not inherit the flag.
+func TestExecute_CancelExits130(t *testing.T) {
+	t.Cleanup(func() { executeFn = execute; userCancelled.Store(false) })
+
+	executeFn = func(context.Context) error { return noteCancelled(&bytes.Buffer{}) }
+	err := Execute(context.Background())
+	if err == nil || ExitCode(err) != ExitCancelled {
+		t.Fatalf("Execute() after a cancel = %v (exit %d), want exit %d", err, ExitCode(err), ExitCancelled)
+	}
+
+	executeFn = func(context.Context) error { return nil }
+	if err := Execute(context.Background()); err != nil {
+		t.Fatalf("Execute() on a clean run = %v, want nil; the cancel flag leaked", err)
+	}
+
+	boom := errors.New("boom")
+	executeFn = func(context.Context) error { _ = noteCancelled(&bytes.Buffer{}); return boom }
+	if err := Execute(context.Background()); !errors.Is(err, boom) {
+		t.Fatalf("Execute() = %v, want the real failure to win over a cancel", err)
 	}
 }
 
@@ -88,11 +109,11 @@ func TestKillOthersPrompt_NamesTheTargets(t *testing.T) {
 		doomed []string
 		want   string
 	}{
-		{[]string{"other", "t"}, `Kill 2 sessions ("other", "t"), keeping "victim"?`},
-		{[]string{"solo"}, `Kill 1 session ("solo"), keeping "victim"?`},
-		{[]string{"a", "b", "c", "d", "e", "f", "g", "h"}, `Kill 8 sessions ("a", "b", "c", "d", "e", "f", and 2 more), keeping "victim"?`},
-		{[]string{"bad\x1b[2Jname"}, `Kill 1 session ("bad\x1b[2Jname"), keeping "victim"?`},
-		{[]string{strings.Repeat("x", 50)}, `Kill 1 session ("` + strings.Repeat("x", 40) + `"…), keeping "victim"?`},
+		{[]string{"other", "t"}, `Keep "victim" and kill the other 2 sessions ("other", "t")?`},
+		{[]string{"solo"}, `Keep "victim" and kill the other 1 session ("solo")?`},
+		{[]string{"a", "b", "c", "d", "e", "f", "g", "h"}, `Keep "victim" and kill the other 8 sessions ("a", "b", "c", "d", "e", "f", and 2 more)?`},
+		{[]string{"bad\x1b[2Jname"}, `Keep "victim" and kill the other 1 session ("bad\x1b[2Jname")?`},
+		{[]string{strings.Repeat("x", 50)}, `Keep "victim" and kill the other 1 session ("` + strings.Repeat("x", 40) + `"…)?`},
 	}
 	for _, c := range cases {
 		if got := killOthersPrompt("victim", c.doomed); got != c.want {

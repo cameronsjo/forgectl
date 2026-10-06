@@ -105,11 +105,4 @@ Install warns when another user could change any baked binary or directory (it i
 
 A restart run by the watcher has no terminal: its progress lines go to the log and its outcome to the audit trail. Every safety check of `resume restart --outdated` still applies — a busy session waits up to the hook's timeout, a session the run is inside is never stopped — and a restart that left sessions failed or waiting records `incomplete` and exits 1. A session the watcher could not restart (a stop or relaunch that failed, which can leave it stopped) also posts a macOS notification naming the command that resumes it, since nobody is reading the log when it happens.
 
-## Cancelling a prompt
-
-Esc or Ctrl+C in any forgectl picker or confirm prompt, and No at a confirm,
-prints `cancelled` and exits **130**. Backing out is not an error, so nothing is
-styled as one; it is not 0, so a script can tell "declined" from "done". The
-cancel never goes through the error renderer, which keeps it from waiting on the
-terminal-background query described in
-[configuration](../configuration.md#theme) on terminals that never answer.
+Cancelling the picker (Esc or Ctrl+C) prints `cancelled` and exits 130; see [Cancelling a prompt](../prompts.md).

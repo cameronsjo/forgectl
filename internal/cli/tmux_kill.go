@@ -114,5 +114,5 @@ func killOthersPrompt(keep string, doomed []string) string {
 	if len(doomed) == 1 {
 		noun = "session"
 	}
-	return fmt.Sprintf("Kill %d %s (%s), keeping %q?", len(doomed), noun, list, keep)
+	return fmt.Sprintf("Keep %q and kill the other %d %s (%s)?", keep, len(doomed), noun, list)
 }

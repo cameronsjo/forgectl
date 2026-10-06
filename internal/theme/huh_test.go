@@ -62,11 +62,11 @@ func TestHuh_ZeroValueRendersWithoutPanicking(t *testing.T) {
 	}
 }
 
-// TestHuh_ButtonFocusSurvivesNoColor pins that the focused confirm button is
+// TestHuh_ButtonFocusIsMarkedInText pins that the focused confirm button is
 // marked in the text itself. NO_COLOR strips the fill and a plain capture has
 // no attributes, so colour alone left the selected button invisible (#1103).
 // Both buttons must render the same width, or the row shifts on every toggle.
-func TestHuh_ButtonFocusSurvivesNoColor(t *testing.T) {
+func TestHuh_ButtonFocusIsMarkedInText(t *testing.T) {
 	s := New(Options{}, true).Huh().Theme(true)
 
 	focused := s.Focused.FocusedButton.Render("Yes")

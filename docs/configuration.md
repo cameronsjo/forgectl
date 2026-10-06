@@ -85,8 +85,11 @@ TTY. It does this even where forgectl's policy refuses to probe: inside
 tmux/screen, with `NO_COLOR` set, or with a forced `[theme] mode`. forgectl
 ignores the answer in those cases (it resolves the palette from `mode` or the
 dark default instead), so the colours are right; only the query itself is sent.
-Measured cost is under 50 ms and no hang has been reproduced. Piped output never
-queries. There is no fang option to turn the query off, so this is accepted
+On a terminal that answers, the cost is under 50 ms. On one that never answers
+(some multiplexer, ssh, and mosh setups, and agent harnesses that run a bare pty),
+each help or error render waits about 4.5 s for the reply. A cancelled prompt
+(Esc or Ctrl+C) skips the renderer, so it does not pay that wait (#1099). Piped
+output never queries. There is no fang option to turn the query off, so this is accepted
 until upstream adds one (tracked in #546).
 
 A bad `[theme]` never stops the binary starting: it is reported by `doctor` and

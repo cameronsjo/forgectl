@@ -11,6 +11,7 @@ import (
 
 	"charm.land/huh/v2"
 
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
@@ -748,7 +749,7 @@ func confirmRemoval(prompt string, th theme.Theme) (bool, error) {
 				Negative("Cancel").
 				Value(&ok),
 		),
-	).WithTheme(th.Huh()).Run()
+	).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh()).Run()
 	return ok, err
 }
 

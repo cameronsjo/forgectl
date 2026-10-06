@@ -104,12 +104,12 @@ func processArgs() []string {
 // affordance) or handing off to fang for styled help/errors/version.
 func Execute(ctx context.Context) error {
 	userCancelled.Store(false)
-	err := execute(ctx)
-	if err == nil && userCancelled.Load() {
-		return newSilentCodedError(ExitCancelled)
-	}
-	return err
+	return finishCancel(executeFn(ctx))
 }
+
+// executeFn is the dispatch Execute wraps, a seam so a test can end it in a
+// cancel and check the exit code without a terminal.
+var executeFn = execute
 
 func execute(ctx context.Context) error {
 	// FIRST, ahead of every line below. A `surface _exec` re-entry carries a
