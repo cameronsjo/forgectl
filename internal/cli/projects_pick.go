@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -63,8 +64,7 @@ when possible, inspect identities with projects list --json, or rerun interactiv
 					return fmt.Errorf("no project matching %q across local, GitHub, or Gitea", query)
 				}
 				if len(candidates) == 1 {
-					held.flush()
-					return openOrClone(ctx, client, cmd, candidates[0])
+					return held.before(func() error { return openOrClone(ctx, client, cmd, candidates[0]) })
 				}
 				// Multiple matches → interactive selector below.
 			}
@@ -73,15 +73,21 @@ when possible, inspect identities with projects list --json, or rerun interactiv
 			if err != nil {
 				return err
 			}
-			held.flush()
-			return openOrClone(ctx, client, cmd, chosen)
+			return held.before(func() error { return openOrClone(ctx, client, cmd, chosen) })
 		},
 	}
 }
 
 func chooseRepo(cmd *cobra.Command, repos []projects.Repo, mode projectSelectionMode, th theme.Theme, held *heldNotes) (projects.Repo, error) {
 	if isInteractiveTTY() {
-		return pickRepoFn(repos, th, held.take())
+		notes := held.take()
+		r, err := pickRepoFn(repos, th, notes)
+		if err != nil && !errors.Is(err, huh.ErrUserAborted) && held != nil {
+			// The picker did not run to a choice: give the notes back so the
+			// caller's flush still prints them.
+			held.notes = notes
+		}
+		return r, err
 	}
 	if err := writeProjectCandidates(cmd.OutOrStdout(), repos); err != nil {
 		return projects.Repo{}, err

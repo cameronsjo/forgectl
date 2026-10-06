@@ -59,16 +59,14 @@ from projects list --json, or rerun interactively when no sshUrl is available.`,
 				return fmt.Errorf("no project matching %q across local, GitHub, or Gitea", query)
 			}
 			if len(candidates) == 1 {
-				held.flush()
-				return worktreeOnly(ctx, client, cmd, candidates[0], branch)
+				return held.before(func() error { return worktreeOnly(ctx, client, cmd, candidates[0], branch) })
 			}
 
 			chosen, err := chooseRepo(cmd, candidates, projectSelectionWorktree, th, held)
 			if err != nil {
 				return err
 			}
-			held.flush()
-			return worktreeOnly(ctx, client, cmd, chosen, branch)
+			return held.before(func() error { return worktreeOnly(ctx, client, cmd, chosen, branch) })
 		},
 	}
 	return cmd

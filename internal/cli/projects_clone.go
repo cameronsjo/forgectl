@@ -98,8 +98,7 @@ interactively when no sshUrl is available.`,
 					return fmt.Errorf("no project matching %q across local, GitHub, or Gitea", query)
 				}
 				if len(candidates) == 1 {
-					held.flush()
-					return cloneOnly(ctx, client, cmd, candidates[0], wing, dryRun)
+					return held.before(func() error { return cloneOnly(ctx, client, cmd, candidates[0], wing, dryRun) })
 				}
 				// Multiple matches → interactive selector below.
 			}
@@ -108,8 +107,7 @@ interactively when no sshUrl is available.`,
 			if err != nil {
 				return err
 			}
-			held.flush()
-			return cloneOnly(ctx, client, cmd, chosen, wing, dryRun)
+			return held.before(func() error { return cloneOnly(ctx, client, cmd, chosen, wing, dryRun) })
 		},
 	}
 	cmd.Flags().StringVar(&org, "org", "", "bulk-clone every repo owned by this GitHub user/org")
