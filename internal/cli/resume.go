@@ -185,7 +185,7 @@ func runResume(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMig
 		// Opening the picker anyway is what ADR-0008 rule 1 forbids.
 		return ambiguousMatch(cmd, sessions, filter, dryRun)
 	default:
-		if picked, err = pickSessionFn(sessions, th); err != nil {
+		if picked, err = pickSessionFn(sessions, th, sessionPickerNote(len(sessions), limit)); err != nil {
 			return WithExitCode(err, 1)
 		}
 	}
@@ -241,12 +241,14 @@ var pickSessionFn = pickSession
 
 // pickSession runs the single-select. Options are keyed by session id so a
 // selection round-trips unambiguously (the same reason pickPRs keys on a ref).
-func pickSession(sessions []resume.Session, th theme.Theme) (resume.Session, error) {
-	w := layoutFor(sessions, terminalWidth())
+// note is a line about what the list leaves out (sessionPickerNote), or empty.
+func pickSession(sessions []resume.Session, th theme.Theme, note string) (resume.Session, error) {
+	w, h := terminalSize()
+	layout := layoutPicker(sessions, w)
 	dimStyle := th.Styles().Muted
 	opts := make([]huh.Option[string], len(sessions))
 	for i, s := range sessions {
-		label := sessionRowWidth(s, w)
+		label := sessionPickerLabel(s, layout)
 		// A running session cannot be continued, only forked — dimming says
 		// so before the selection does, the same way `pr pick` dims a PR it
 		// will skip.
@@ -256,15 +258,24 @@ func pickSession(sessions []resume.Session, th theme.Theme) (resume.Session, err
 		opts[i] = huh.NewOption(label, s.ID)
 	}
 
+	desc := "enter resume · / filter · esc cancel"
+	if note != "" {
+		desc += "\n" + note
+	}
 	var chosen string
-	err := huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Recent sessions — enter to resume, esc to cancel").
-				Options(opts...).
-				Value(&chosen),
-		),
-	).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh()).Run()
+	sel := huh.NewSelect[string]().
+		Title("Recent sessions").
+		Description(desc).
+		Options(opts...).
+		Value(&chosen)
+	form := huh.NewForm(huh.NewGroup(sessionSelect{sel})).
+		WithKeyMap(keymap.Cancel()).WithTheme(th.Huh())
+	// Without a height the list is as tall as the history and the title
+	// scrolls off the top of a short terminal; with one huh scrolls the rows.
+	if h > 0 {
+		form = form.WithHeight(h - 1)
+	}
+	err := form.Run()
 	if err != nil {
 		return resume.Session{}, err
 	}
@@ -325,6 +336,20 @@ func writerWidth(w io.Writer) int {
 // picker renders to, since huh drives the terminal directly rather than a
 // writer we hand it.
 func terminalWidth() int { return writerWidth(os.Stdout) }
+
+// terminalSize reports the process's own stdout as columns and rows, or 0, 0
+// when it is not a terminal.
+func terminalSize() (cols, rows int) {
+	fd := int(os.Stdout.Fd())
+	if !term.IsTerminal(fd) {
+		return 0, 0
+	}
+	cols, rows, err := term.GetSize(fd)
+	if err != nil || cols <= 0 || rows <= 0 {
+		return 0, 0
+	}
+	return cols, rows
+}
 
 // layoutFor sizes the columns to the CONTENT and then to the TERMINAL.
 //
