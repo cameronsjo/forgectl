@@ -601,6 +601,23 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.l, cmd = m.l.Update(msg)
 		return m, cmd
 	}
+	// The hub screens size the list by filter state (applySize), and the
+	// list sizes its filter input by the prompt (SetSize), so a key that
+	// opens or closes a filter, or sets a prompt, re-sizes the list once it
+	// is handled.
+	before, prompt := m.l.FilterState(), m.l.FilterInput.Prompt
+	out, cmd := m.updateListKey(km)
+	if next, ok := out.(model); ok && next.hubScreen() &&
+		(next.l.FilterState() != before || next.l.FilterInput.Prompt != prompt) {
+		next.applySize()
+		return next, cmd
+	}
+	return out, cmd
+}
+
+// updateListKey is updateList for a key press.
+func (m model) updateListKey(km tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	msg := tea.Msg(km)
 
 	// While filtering, the list owns every key.
 	if m.l.FilterState() == list.Filtering {
@@ -620,7 +637,7 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case m.mode == hubMode:
 			m.flattenHub()
-			m.l.FilterInput.Prompt = "Search all: "
+			m.l.FilterInput.Prompt = hubSearchPrompt
 		case m.hubScreen():
 			m.l.FilterInput.Prompt = "Filter " + fitWords(m.title, hubFilterTitleMax) + ": "
 		}
@@ -765,6 +782,10 @@ func (m model) activate() (tea.Model, tea.Cmd) {
 			if m.openPicker(entry.Argv, entry.Use, entry.NoPicker, nil) {
 				return m, nil
 			}
+			if !requiresArg(entry.Use) {
+				m.action = Action{Kind: ActionRunVerb, Argv: append([]string(nil), entry.Argv...)}
+				return m, tea.Quit
+			}
 			usage := append(append([]string(nil), entry.Argv[:len(entry.Argv)-1]...), strings.Fields(entry.Use)...)
 			m.action = Action{Kind: ActionShowInvocation, Argv: usage}
 			return m, tea.Quit
@@ -812,6 +833,12 @@ func (m model) activate() (tea.Model, tea.Cmd) {
 		if leaf.NeedsArgs {
 			if m.openPicker(leafArgv(m.leavesPath, leaf), leaf.Use, leaf.NoPicker, nil) {
 				return m, nil
+			}
+			if !requiresArg(leaf.Use) {
+				// Every placeholder is optional ("docs check [dir|file ...]"):
+				// the bare command runs, as `forgectl menu` reports it can.
+				m.action = Action{Kind: ActionRunVerb, Argv: leafArgv(m.leavesPath, leaf)}
+				return m, tea.Quit
 			}
 			m.action = Action{Kind: ActionShowInvocation, Argv: strings.Fields(usageLine(m.leavesPath, leaf))}
 			return m, tea.Quit
@@ -1352,7 +1379,7 @@ func (m model) detailView() string {
 // typing, so it is escaped and capped like any free text.
 func (m model) noMatchLine() string {
 	query := capSafe(m.l.FilterValue(), hubHeaderValueMax)
-	msg := fmt.Sprintf("no command matches %q · esc clears", query)
+	msg := fmt.Sprintf("no command name matches %q · esc clears · forgectl menu lists descriptions", query)
 	if m.mode != hubMode {
 		msg = fmt.Sprintf("nothing in %s matches %q · esc, then / on the hub searches all", m.title, query)
 	}
@@ -1370,14 +1397,20 @@ func (m model) enterHint() string {
 		switch {
 		case e.Heading, e.Members != nil, e.Name == "tmux" && e.Argv == nil:
 		case e.Argv != nil:
-			runs = !e.NeedsArgs
+			if e.NeedsArgs {
+				return argHint(e.Use, e.NoPicker)
+			}
+			runs = true
 		case e.Name == "status":
 			runs = true
 		default:
 			runs = !moduleNeedsArg(e) && len(e.Leaves) == 0
 		}
 	case leafItem:
-		runs = len(it.leaf.Leaves) == 0 && !it.leaf.NeedsArgs
+		if len(it.leaf.Leaves) == 0 && it.leaf.NeedsArgs {
+			return argHint(it.leaf.Use, it.leaf.NoPicker)
+		}
+		runs = len(it.leaf.Leaves) == 0
 	}
 	if runs {
 		return "enter run"
@@ -1385,10 +1418,25 @@ func (m model) enterHint() string {
 	return "enter open"
 }
 
+// argHint is enterHint for a row whose Use names placeholders, following
+// activate's order: the picker opens when it can take the argument; failing
+// that, a row whose placeholders are all optional runs bare; otherwise enter
+// prints the usage to finish by hand and leaves the hub.
+func argHint(use string, noPicker bool) string {
+	if _, _, ok := pickerSpec(use); ok && !noPicker {
+		return "enter open"
+	}
+	if !requiresArg(use) {
+		return "enter run"
+	}
+	return "enter show usage"
+}
+
 // filterPrompt is the list's plain filter prompt, and hubFilterTitleMax caps
 // the screen title an area or subcommand list's prompt names.
 const (
 	filterPrompt      = "Filter: "
+	hubSearchPrompt   = "Search commands: "
 	hubFilterTitleMax = 20
 )
 
@@ -1486,7 +1534,11 @@ func (m model) footerView() string {
 	var prio []int
 	switch {
 	case m.picker != nil:
-		hints = []string{"enter run", "tab edit", "↑↓ choose", "esc back"}
+		enter := "enter run"
+		if row, ok := m.picker.current(); ok && row.kind == pickerRowBrowse {
+			enter = "enter open"
+		}
+		hints = []string{enter, "tab edit", "↑↓ choose", "esc back"}
 		prio = []int{0, 3, 2, 1}
 	case m.l.FilterState() == list.Filtering:
 		hints = []string{"type to filter", "enter done", "esc clear"}
@@ -1498,7 +1550,7 @@ func (m model) footerView() string {
 	if hints == nil {
 		switch m.mode {
 		case hubMode:
-			hints = []string{"↑↓ move", "1-9 open", m.enterHint(), "/ search all", "q/esc quit", "forgectl --help lists every command"}
+			hints = []string{"↑↓ move", "1-9 open", m.enterHint(), "/ search", "q/esc quit", "forgectl --help lists every command"}
 			prio = []int{4, 2, 3, 0, 1, 5}
 		case areaMode, leavesMode:
 			hints = []string{"↑↓ move", "1-9 jump", m.enterHint(), "/ filter", "q/esc back"}

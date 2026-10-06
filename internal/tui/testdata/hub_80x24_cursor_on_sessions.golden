@@ -17,4 +17,4 @@
 $ forgectl sessions <subcommand>
    Sync local session ledgers into the operational concordance and query it
 
-↑↓ move · 1-9 open · enter open · / search all · q/esc quit
+↑↓ move · 1-9 open · enter open · / search · q/esc quit

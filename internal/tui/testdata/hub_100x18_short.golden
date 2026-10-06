@@ -11,4 +11,4 @@
  8 shell ›   env · y · pip · proxy · net
  9 setup ›   doctor · config · init · update · upgrade · bench · theme · ghostty · herdr
 $ forgectl docs <subcommand>
-↑↓ move · 1-9 open · enter open · / search all · q/esc quit · forgectl --help lists every command
+↑↓ move · 1-9 open · enter open · / search · q/esc quit · forgectl --help lists every command

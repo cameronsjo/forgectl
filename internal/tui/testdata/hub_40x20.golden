@@ -13,4 +13,4 @@
 $ forgectl docs <subcommand>
    Local markdown reader — render +
    serve an indexed doc set over…
-enter open · / search all · q/esc quit
+enter open · / search · q/esc quit

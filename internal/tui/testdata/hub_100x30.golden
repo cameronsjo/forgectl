@@ -17,4 +17,4 @@
 $ forgectl docs <subcommand>
 
 
-↑↓ move · 1-9 open · enter open · / search all · q/esc quit · forgectl --help lists every command
+↑↓ move · 1-9 open · enter open · / search · q/esc quit · forgectl --help lists every command

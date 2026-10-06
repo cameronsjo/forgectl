@@ -332,12 +332,12 @@ func TestHubDeeperListDigitsOnlyMove(t *testing.T) {
 func TestHubSearchSaysWhenNothingMatches(t *testing.T) {
 	m := frameModel(80, 24)
 	m = typeInto(m, "/")
-	if m.l.FilterInput.Prompt != "Search all: " {
-		t.Errorf("hub search prompt = %q, want \"Search all: \"", m.l.FilterInput.Prompt)
+	if m.l.FilterInput.Prompt != hubSearchPrompt {
+		t.Errorf("hub search prompt = %q, want %q", m.l.FilterInput.Prompt, hubSearchPrompt)
 	}
 	m.l.SetFilterText("zzzx")
 	got := ansi.Strip(m.detailView())
-	if !strings.Contains(got, `no command matches "zzzx" · esc clears`) {
+	if !strings.Contains(got, `no command name matches "zzzx" · esc clears`) {
 		t.Errorf("empty search detail = %q", got)
 	}
 }
@@ -449,6 +449,69 @@ func TestTopEntries(t *testing.T) {
 	for _, c := range cases {
 		if got := names(topEntries(all, c.rows)); got != c.want {
 			t.Errorf("topEntries(rows=%d) = %s, want %s", c.rows, got, c.want)
+		}
+	}
+}
+
+// TestHubFilterFramesFit pins the frame with a filter open, where the list
+// adds its filter bar and a longer prompt: no line wider than the terminal
+// and no more lines than it has rows, on the top screen and in an area.
+func TestHubFilterFramesFit(t *testing.T) {
+	for _, size := range [][2]int{{20, 8}, {40, 12}, {80, 12}, {80, 16}, {80, 24}, {104, 20}} {
+		for _, area := range []bool{false, true} {
+			m := frameModel(size[0], size[1])
+			if area {
+				m, _ = press(m, '9')
+			}
+			m = typeInto(m, "/")
+			name := fmt.Sprintf("%dx%d area=%v", size[0], size[1], area)
+			t.Run(name, func(t *testing.T) { assertFrameFits(t, frameText(m), size[0], size[1]) })
+			m.l.SetFilterText("zzzx")
+			t.Run(name+" applied", func(t *testing.T) { assertFrameFits(t, frameText(m), size[0], size[1]) })
+		}
+	}
+}
+
+// TestHubOptionalArgumentRowsRunBare pins the three things enter does to a
+// row whose usage names placeholders: open the picker when it can take the
+// argument, run the bare command when every placeholder is optional, or
+// print the usage when a required one is left. The footer hint says which.
+func TestHubOptionalArgumentRowsRunBare(t *testing.T) {
+	hub := []HubEntry{{Name: "docs", Key: 1, Leaves: []HubLeaf{
+		{Name: "check", Short: "check links", Use: "check [dir|file ...]", NeedsArgs: true},
+		{Name: "open", Short: "open one", Use: "open [path]", NeedsArgs: true},
+		{Name: "copy", Short: "copy two", Use: "copy <from> <to>", NeedsArgs: true},
+	}}}
+	start := func(row int) model {
+		m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{Hub: hub, NoIcons: true, Theme: theme.Default()}), 80, 24)
+		m, _ = press(m, '1')
+		out, _ := m.Update(key(fmt.Sprint(row)))
+		return out.(model)
+	}
+	cases := []struct {
+		row  int
+		hint string
+		kind ActionKind
+	}{
+		{1, "enter run", ActionRunVerb},
+		{2, "enter open", ActionNone},
+		{3, "enter show usage", ActionShowInvocation},
+	}
+	for _, c := range cases {
+		m := start(c.row)
+		if got := m.enterHint(); got != c.hint {
+			t.Errorf("row %d hint = %q, want %q", c.row, got, c.hint)
+		}
+		out, _ := m.Update(keyCode(tea.KeyEnter))
+		got := out.(model)
+		if got.action.Kind != c.kind {
+			t.Errorf("row %d enter = %+v, want kind %v", c.row, got.action, c.kind)
+		}
+		if c.row == 1 && strings.Join(got.action.Argv, " ") != "docs check" {
+			t.Errorf("row 1 argv = %v, want [docs check]", got.action.Argv)
+		}
+		if c.row == 2 && got.picker == nil {
+			t.Error("row 2 did not open the picker")
 		}
 	}
 }

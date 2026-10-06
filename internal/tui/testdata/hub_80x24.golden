@@ -17,4 +17,4 @@
 $ forgectl docs <subcommand>
    Local markdown reader — render + serve an indexed doc set over loopback HTTP
 
-↑↓ move · 1-9 open · enter open · / search all · q/esc quit
+↑↓ move · 1-9 open · enter open · / search · q/esc quit

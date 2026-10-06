@@ -262,6 +262,28 @@ func moduleNeedsArg(e HubEntry) bool {
 	return ok && !optional
 }
 
+// requiresArg reports whether a Use line names a required positional: a <…>
+// group outside every optional [...] one. "pr <ref>" does; "docs check
+// [dir|file ...]" and "pr reviewed [<ref>]" do not. It mirrors the rule
+// `forgectl menu` reports as needs_args.
+func requiresArg(use string) bool {
+	_, rest, _ := strings.Cut(use, " ")
+	depth := 0
+	for _, r := range rest {
+		switch r {
+		case '[':
+			depth++
+		case ']':
+			depth--
+		case '<':
+			if depth == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func isVariadic(group string) bool {
 	return strings.Contains(group, "...") || strings.Contains(group, "…")
 }
