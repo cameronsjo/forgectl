@@ -89,7 +89,7 @@ func newReviewConfigErrorCmd(err error) *cobra.Command {
 	// broken config must still report the config error, not
 	// `unknown flag: --json`.
 	cmd := &cobra.Command{
-		Use:                "review [--kind issue|pr] [--repo <owner/name>]",
+		Use:                "review [--kind|--repo]",
 		Short:              "Cross-project work inventory: open issues and PRs across your repos",
 		Args:               cobra.ArbitraryArgs,
 		DisableFlagParsing: true,
@@ -178,7 +178,7 @@ func newReviewCmdForSources(srcs []review.Source, reviewedPath, effectiveHost st
 		// Without them, a flag VALUE (`review --repo owner/name`) is mistaken
 		// for an unknown subverb and routed to the TUI menu — a silent exit 1
 		// in any non-TTY invocation.
-		Use:   "review [--kind issue|pr] [--repo <owner/name>]",
+		Use:   "review [--kind|--repo]",
 		Short: "Cross-project work inventory: open issues and PRs across your repos",
 		Long: `review lists every open issue and pull request across the configured
 owners — the whole work inventory, rendered live from gh. Nothing is copied or

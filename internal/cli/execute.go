@@ -315,6 +315,7 @@ func execCommand(ctx context.Context, root *cobra.Command, args []string, th the
 	if err := unknownSubcommand(root, args); err != nil {
 		return renderCommandError(ctx, root, th, err)
 	}
+	trimFramesOffTerminal(root)
 	withCancelHandling(root)
 	root.SetArgs(args)
 	return fang.Execute(ctx, root, fangOptions(meta.Version, meta.Commit, th)...)
