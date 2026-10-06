@@ -10,9 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/herdr"
@@ -339,7 +343,7 @@ func TestDeskLayoutBelow_RestoreContinuesPastAFailedMove(t *testing.T) {
 		moveStep("term_b", "term_a", "w1:t2", false, "0.50"),
 		failing(splitStep("", "down", "0.72", "term_desk", false)),
 		failing(moveStep("term_a", "term_claude", "w1:t1", false, "0.33")),
-		moveStep("term_b", "term_claude", "w1:t1", false, "0.33"),
+		moveStep("term_b", "term_claude", "w1:t1", false, "0.50"),
 	}
 	deps := module.Deps{Theme: theme.Default(), Runner: tab.runner(t), SensitiveRunner: stub.sensitive()}
 	_, _, err := deskRun(t, deps, "layout", "--below")
@@ -386,6 +390,35 @@ func TestDeskLayoutBelow_CancelledRunStillRestores(t *testing.T) {
 	cmd.SetErr(io.Discard)
 	cmd.SetArgs([]string{"layout", "--below"})
 	err := cmd.ExecuteContext(ctx)
+	wantExit(t, err, 1)
+	stub.done()
+	inTab(t, tab, "term_a", "w1:t1")
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want it to wrap context.Canceled", err)
+	}
+}
+
+// A real SIGTERM delivered between moves stops the layout and restores. The
+// test holds its own handler for the signal so a missing handler in the code
+// under test fails the test instead of killing the test binary.
+func TestDeskLayoutBelow_SIGTERMRestores(t *testing.T) {
+	tab, stub := belowTab(t, "term_a", "term_b")
+	own := make(chan os.Signal, 1)
+	signal.Notify(own, syscall.SIGTERM)
+	t.Cleanup(func() { signal.Stop(own) })
+	first := moveStep("term_a", "", "w1:t2", true, "")
+	apply := first.apply
+	first.apply = func(f *fakeHerdrTab) {
+		apply(f)
+		if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+			t.Errorf("kill: %v", err)
+		}
+		<-own
+		time.Sleep(200 * time.Millisecond) // the code's own handler cancels its context
+	}
+	stub.steps = []belowStep{first, moveStep("term_a", "term_claude", "w1:t1", false, "0.50")}
+	deps := module.Deps{Theme: theme.Default(), Runner: tab.runner(t), SensitiveRunner: stub.sensitive()}
+	_, _, err := deskRun(t, deps, "layout", "--below")
 	wantExit(t, err, 1)
 	stub.done()
 	inTab(t, tab, "term_a", "w1:t1")

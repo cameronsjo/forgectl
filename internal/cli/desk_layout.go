@@ -81,8 +81,8 @@ temporary tab, the desk is split off this pane, and they are moved back to the
 right of this pane in a row of equal widths. A moved pane keeps its terminal,
 so whatever runs in it keeps running; only its place changes (a layout of
 stacked panes comes back as one row, and the panes left of this one come back
-on its right). If a step fails, the parked panes are moved back before the
-error returns. --width does not apply to --below.
+on its right). If a step fails, or SIGINT or SIGTERM arrives, the parked panes are
+moved back before the command exits. --width does not apply to --below.
 
 CMD is typed into the progress pane's shell as it is, so quote it for a shell.
 The desk pane runs this forgectl by its absolute path: <path> desk --dir <the

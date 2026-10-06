@@ -70,11 +70,18 @@ func runDeskLayoutBelow(cmd *cobra.Command, client *herdr.Client, run exec.Sensi
 		return printBelowPlan(cmd, plan, deskCommand, progress)
 	}
 
-	// A signal or a closing terminal must not strand the parked panes: it
-	// cancels this context, and the restore below runs on a context that a
-	// cancel cannot reach.
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	// SIGINT or SIGTERM cancels this context, and the restore below runs on a
+	// context a cancel cannot reach. The handler is released at the first
+	// signal, so a second Ctrl-C during a stuck restore ends the process
+	// instead of being swallowed. SIGHUP is left alone: it arrives when the
+	// pane closes, and the restore targets this pane's terminal, which is gone
+	// by then.
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 
 	// Park every other pane in one temporary tab, so this pane is alone and a
 	// down split of it spans the whole tab. A pane is noted before its move,
@@ -113,7 +120,7 @@ func runDeskLayoutBelow(cmd *cobra.Command, client *herdr.Client, run exec.Sensi
 	}
 	deskPane, err := herdr.PaneSplit(ctx, run, herdrPath, herdr.Split{Direction: herdr.SplitDown, Ratio: deskBelowRatio, CWD: cwd})
 	if err != nil {
-		return errors.Join(fmt.Errorf("desk layout: split off the desk pane: %w", err), restore())
+		return errors.Join(fmt.Errorf("desk layout: split off the desk pane (herdr may have made it before the error; look for an unnamed pane): %w", err), restore())
 	}
 	if err := restore(); err != nil {
 		return fmt.Errorf("desk layout: the desk pane (terminal %s) was made and stays: %w", safeLabel(deskPane.TerminalID), err)
@@ -179,12 +186,13 @@ func restoreParked(ctx context.Context, client *herdr.Client, run exec.Sensitive
 	}
 	var errs []error
 	target := caller.TerminalID
-	placed := 0
+	placed, failed := 0, 0
 	for _, o := range strays {
 		_, err := movePane(ctx, client, run, herdrPath, o.TerminalID, target,
-			herdr.PaneMove{Tab: caller.TabID, Direction: herdr.SplitRight, Ratio: evenKeep(placed+1, len(strays)+1)})
+			herdr.PaneMove{Tab: caller.TabID, Direction: herdr.SplitRight, Ratio: evenKeep(placed+1, len(strays)-failed+1)})
 		if err != nil {
 			errs = append(errs, fmt.Errorf("put the pane with terminal %s back into the tab (it stays in its temporary tab): %w", safeLabel(o.TerminalID), err))
+			failed++
 			continue
 		}
 		target = o.TerminalID
