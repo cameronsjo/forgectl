@@ -235,6 +235,7 @@ func (f deskFrame) layout() ([]string, bool) {
 
 	header := f.header(st, width)
 	footer := f.footerLines(st, width)
+	focusMin := f.focusPanel(st, width, rows, cursor, 0)
 	if f.height <= 0 {
 		top := []string{cut(f.summary(st), width)}
 		if width >= deskWideMin {
@@ -243,12 +244,11 @@ func (f deskFrame) layout() ([]string, bool) {
 		queue := f.queuePanel(st, width, rows, cursor, max(len(rows), 1))
 		focus := f.focusPanel(st, width, rows, cursor, deskFocusBody)
 		lines := slices.Concat([]string{header}, top, queue, focus, f.historyPanel(st, width, -1), footer)
-		return lines, f.essentialShown(st, lines, 1+len(top)+len(queue), rows, cursor)
+		return lines, f.essentialShown(lines, 1+len(top)+len(queue), focusMin, rows, cursor)
 	}
 
 	avail := f.height - 1 - len(footer)
-	focusMin := f.focusPanel(st, width, rows, cursor, 0)
-	need := 3 + len(focusMin) // the queue panel with one row, and the focus panel
+	need := deskQueueMin + len(focusMin)
 	var top []string
 	switch {
 	case width >= deskWideMin && avail-deskTileRows >= need:
@@ -256,12 +256,12 @@ func (f deskFrame) layout() ([]string, bool) {
 	case avail-1 >= need:
 		top = []string{cut(f.summary(st), width)}
 	}
-	if avail-len(top) < need || f.width < deskMinWidth {
-		return f.tooSmall(st, width, header, footer, rows, cursor, need), false
+	if avail-len(top) < need || f.narrow() {
+		return f.tooSmall(st, header, footer, rows, cursor), false
 	}
 	avail -= len(top)
 
-	queueLines := min(max(len(rows), 1), max(3, avail/3), avail-2-len(focusMin))
+	queueLines := min(max(len(rows), 1), max(deskQueueMin, avail/3), avail-2-len(focusMin))
 	queue := f.queuePanel(st, width, rows, cursor, queueLines)
 
 	body := deskFocusBody
@@ -286,38 +286,49 @@ func (f deskFrame) layout() ([]string, bool) {
 	}
 	history := f.historyPanel(st, width, histRows)
 
-	lines := slices.Concat([]string{header}, top, queue, focus, history)
-	keep := max(f.height-len(footer), 0)
-	if len(lines) > keep {
-		lines = lines[:keep]
-	}
-	for len(lines) < keep {
-		lines = append(lines, "")
-	}
+	lines := fitHeight(slices.Concat([]string{header}, top, queue, focus, history), f.height-len(footer))
 	lines = append(lines, footer...)
-	return lines, f.essentialShown(st, lines, 1+len(top)+len(queue), rows, cursor)
+	return lines, f.essentialShown(lines, 1+len(top)+len(queue), focusMin, rows, cursor)
 }
 
-// essentialShown checks the drawn lines, not the plan: the focus panel's top
-// border, head, what and why must sit at start in lines exactly as the
-// focus panel draws them, inside the window, and the head must carry the
-// row's short sha256.
-func (f deskFrame) essentialShown(st theme.Styles, lines []string, start int, rows []queueRow, cursor int) bool {
-	if len(rows) == 0 || (f.width > 0 && f.width < deskMinWidth) {
+// deskQueueMin is the queue panel's height with one row: its border and the
+// row.
+const deskQueueMin = 3
+
+// narrow reports a known window narrower than the frame, which cuts the
+// right of every line. 0 means the width is unknown, drawn at the minimum.
+func (f deskFrame) narrow() bool { return f.width > 0 && f.width < deskMinWidth }
+
+// fitHeight cuts lines to n, or pads them with blank lines to n.
+func fitHeight(lines []string, n int) []string {
+	n = max(n, 0)
+	if len(lines) > n {
+		return lines[:n]
+	}
+	for len(lines) < n {
+		lines = append(lines, "")
+	}
+	return lines
+}
+
+// essentialShown checks the drawn lines, not the plan: the smallest focus
+// panel's top border, head, what and why (all of focusMin but its bottom
+// border) must sit at start in lines exactly as drawn, inside the window,
+// and the head must carry the row's short sha256.
+func (f deskFrame) essentialShown(lines []string, start int, focusMin []string, rows []queueRow, cursor int) bool {
+	if len(rows) == 0 || f.narrow() {
 		return false
 	}
-	width := max(f.width, deskMinWidth)
 	it := rows[cursor].item
 	if !desk.ValidSHA256(it.Meta.SHA256) {
 		return false
 	}
-	panel := f.focusPanel(st, width, rows, cursor, 0)
-	n := 2 + len(wrapField(st, "what", st.Fg, it.What, width-4)) + len(wrapField(st, "why", st.Meta, it.Why, width-4))
+	n := len(focusMin) - 1
 	if start+n > len(lines) || (f.height > 0 && start+n > f.height) {
 		return false
 	}
 	for i := range n {
-		if lines[start+i] != panel[i] {
+		if lines[start+i] != focusMin[i] {
 			return false
 		}
 	}
@@ -326,25 +337,25 @@ func (f deskFrame) essentialShown(st theme.Styles, lines []string, start int, ro
 
 // tooSmall is the frame for a window that cannot show the focus panel: the
 // header, a line saying so with the size it needs, as much of the queue as
-// fits, and the footer.
-func (f deskFrame) tooSmall(st theme.Styles, width int, header string, footer []string, rows []queueRow, cursor, need int) []string {
+// fits, and the footer. The size is measured at the minimum width, where
+// what and why wrap the most.
+func (f deskFrame) tooSmall(st theme.Styles, header string, footer []string, rows []queueRow, cursor int) []string {
+	width := max(f.width, deskMinWidth)
+	need := deskQueueMin + len(f.focusPanel(st, deskMinWidth, rows, cursor, 0))
 	size := fmt.Sprintf("%dx%d", deskMinWidth, 1+need+len(footer))
+	visible := width
+	if f.narrow() {
+		visible = f.width
+	}
 	text := "too small to show the sha256 · enlarge to " + size + " to run items"
-	if visible := min(width, max(f.width, 1)); ansi.StringWidth(text) > visible {
+	if ansi.StringWidth(text) > visible {
 		text = "too small: enlarge to " + size
 	}
-	lines := []string{header, cut(st.Warn.Render(text), min(width, max(f.width, 1)))}
-	if room := f.height - len(lines) - len(footer); room >= 3 {
+	lines := []string{header, cut(st.Warn.Render(text), visible)}
+	if room := f.height - len(lines) - len(footer); room >= deskQueueMin {
 		lines = append(lines, f.queuePanel(st, width, rows, cursor, room-2)...)
 	}
-	keep := max(f.height-len(footer), 0)
-	if len(lines) > keep {
-		lines = lines[:keep]
-	}
-	for len(lines) < keep {
-		lines = append(lines, "")
-	}
-	return append(lines, footer...)
+	return append(fitHeight(lines, f.height-len(footer)), footer...)
 }
 
 // deskPromptRoom is how many lines a footer prompt may take in a window

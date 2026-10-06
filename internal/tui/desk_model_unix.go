@@ -149,15 +149,15 @@ type deskModel struct {
 
 	message string // the last result, already inert and styled
 
-	confirm  confirmKind
-	targets  []target // what a confirmed skip or run-all acts on
+	confirm confirmKind
+	targets []target // what a confirmed skip or run-all acts on
 	// page is the a prompt's page; shown marks each target whose full hash
 	// has been on screen. y runs the set only once every one has (#1098).
 	page     int
 	shown    []bool
 	note     string // why the last y in the a prompt did not run, styled
 	lastSkip string // what u returns to pending/
-	busy     bool     // an action is in flight
+	busy     bool   // an action is in flight
 
 	pager *deskPager
 	// rv is the open run view (r), reading runs from runs.
@@ -564,6 +564,10 @@ func (m deskModel) run() (tea.Model, tea.Cmd) {
 	// operator matches to the agent's report. So y acts only when the frame
 	// on screen shows that hash, what and why; a window too small for them
 	// refuses instead (#1098). a, which runs many, confirms.
+	if !desk.ValidSHA256(r.item.Meta.SHA256) {
+		m.message = st.Warn.Render(safeMessage("not run: " + itemLabel(r.item.Name) + " has no valid sha256 recorded · ask Claude to queue it again"))
+		return m, nil
+	}
 	if !m.dashboard().focusShown() {
 		m.message = st.Warn.Render(safeMessage("not run: the window is too small to show " + itemLabel(r.item.Name) + "'s sha256, what and why · enlarge it, or use forgectl desk status"))
 		return m, nil
@@ -701,24 +705,29 @@ func (m deskModel) allShown() bool {
 	return len(m.shown) > 0
 }
 
-// screenWidth and screenHeight are the window the frame is drawn in, as
-// View sees it.
+// screenWidth and screenHeight are the window everything is drawn in: the
+// last size the terminal reported, or 80x24 until it reports one.
 func (m deskModel) screenWidth() int {
-	if m.width <= 0 {
+	if m.width <= 0 || m.height <= 0 {
 		return 80
 	}
 	return m.width
 }
 
 func (m deskModel) screenHeight() int {
-	if m.width <= 0 {
+	if m.width <= 0 || m.height <= 0 {
 		return 24
 	}
 	return m.height
 }
 
-// allPageKey turns the a prompt's page; it reports false for any other key.
+// allPageKey turns the a prompt's page when it has more than one; it
+// reports false for any other key, and for every key on a single page,
+// where the prompt says any other key cancels.
 func (m *deskModel) allPageKey(key string) bool {
+	if len(allPages(m.styles(), m.targets, m.screenWidth(), m.screenHeight())) < 2 {
+		return false
+	}
 	switch key {
 	case "space", "f", "pgdown", "j", "down":
 		m.page++
@@ -734,6 +743,11 @@ func (m *deskModel) allPageKey(key string) bool {
 
 func (m deskModel) confirmKey(key string) (tea.Model, tea.Cmd) {
 	if m.confirm == confirmAll {
+		if allPages(m.styles(), m.targets, m.screenWidth(), m.screenHeight()) == nil {
+			// The window shrank below one hash and the prompt says any key
+			// cancels: y does too, whatever was shown before.
+			key = "cancel"
+		}
 		if m.allPageKey(key) {
 			return m, nil
 		}
@@ -944,10 +958,7 @@ func (m *deskModel) pagerKey(key string) {
 }
 
 func (m deskModel) View() tea.View {
-	width, height := m.width, m.height
-	if width <= 0 {
-		width, height = 80, 24
-	}
+	width, height := m.screenWidth(), m.screenHeight()
 	var content string
 	if m.pager != nil {
 		content = m.pagerView(width, height)
@@ -1033,7 +1044,7 @@ func (m deskModel) footer() string {
 		default:
 			head += st.Muted.Render(fmt.Sprintf("  page %d/%d · space next page · y runs after every page · any other key cancels", m.page+1, len(pages)))
 		}
-		lines := []string{head}
+		lines := []string{cut(head, width)}
 		for _, i := range pages[min(m.page, len(pages)-1)] {
 			lines = append(lines, allBlock(st, m.targets[i], width)...)
 		}

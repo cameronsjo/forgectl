@@ -622,3 +622,22 @@ func TestGoldenDeskShort(t *testing.T) {
 		})
 	}
 }
+
+// The too-small notice names a size at which the focus panel does fit, even
+// when what and why wrap more at 40 columns than at the current width.
+func TestDeskFrame_TooSmallNamesASizeThatFits(t *testing.T) {
+	snap, opts := twoWaitingSnapshot()
+	snap.Pending[0].What = strings.Repeat("rebuild the index ", 6)
+	snap.Pending[0].Why = strings.Repeat("the cache was cleared ", 4)
+	out := ansi.Strip(RenderDeskFrame(snap, 120, 8, deskNow, opts))
+	var w, h int
+	if i := strings.Index(out, "enlarge to "); i < 0 {
+		t.Fatalf("no size in the notice:\n%s", out)
+	} else if _, err := fmt.Sscanf(out[i+len("enlarge to "):], "%dx%d", &w, &h); err != nil {
+		t.Fatalf("parse size: %v\n%s", err, out)
+	}
+	f := deskFrame{snap: snap, width: w, height: h, now: deskNow, opts: opts}
+	if !f.focusShown() {
+		t.Errorf("the advertised %dx%d still does not show the focus panel:\n%s", w, h, ansi.Strip(f.render()))
+	}
+}

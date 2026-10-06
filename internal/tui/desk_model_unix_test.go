@@ -1119,3 +1119,60 @@ func TestDesk_AResizeRepagesWithoutLosingTrack(t *testing.T) {
 		t.Fatalf("every hash was on screen before the resize; launched %v", h.backend.launched)
 	}
 }
+
+// Shrinking the window below one hash while the a prompt is open cancels on
+// y, as the prompt then says, even though every hash was shown before.
+func TestDesk_AShrunkBelowOneHashCancelsOnY(t *testing.T) {
+	h := newDeskHarness(t)
+	dropMany(h, 3)
+	h.m.width, h.m.height = 100, 40
+	h.press("a")
+	if !h.m.allShown() {
+		t.Fatal("a at 100x40 should show every hash on one page")
+	}
+	out, _ := h.m.Update(tea.WindowSizeMsg{Width: 100, Height: 4})
+	h.m = out.(deskModel)
+	if !strings.Contains(ansi.Strip(h.m.footer()), "any key cancels") {
+		t.Fatalf("footer = %q", ansi.Strip(h.m.footer()))
+	}
+	h.press("y")
+	if len(h.backend.launched) != 0 || h.m.confirm != confirmNone {
+		t.Fatalf("y ran %v while the prompt said any key cancels", h.backend.launched)
+	}
+}
+
+// On a one-page a prompt, j is "any other key" and cancels.
+func TestDesk_ASinglePageAnyOtherKeyCancels(t *testing.T) {
+	h := newDeskHarness(t)
+	dropMany(h, 2)
+	h.press("a", "j")
+	if h.m.confirm != confirmNone {
+		t.Fatalf("j kept a one-page prompt open: %q", ansi.Strip(h.m.footer()))
+	}
+}
+
+// A size message with no height falls back to 80x24 everywhere, so a
+// still asks.
+func TestDesk_AWithAnUnknownHeightStillAsks(t *testing.T) {
+	h := newDeskHarness(t)
+	dropMany(h, 2)
+	out, _ := h.m.Update(tea.WindowSizeMsg{Width: 100, Height: 0})
+	h.m = out.(deskModel)
+	h.press("a")
+	if h.m.confirm != confirmAll {
+		t.Fatalf("a with height 0 refused: %q", ansi.Strip(h.m.footer()))
+	}
+}
+
+// An item with no valid hash is refused for that reason, not for the
+// window's size.
+func TestDesk_YNamesAMissingHash(t *testing.T) {
+	h := newDeskHarness(t)
+	dropMany(h, 1)
+	h.m.rows[0].item.Meta.SHA256 = ""
+	h.press("y")
+	footer := ansi.Strip(h.m.footer())
+	if len(h.backend.launched) != 0 || !strings.Contains(footer, "no valid sha256") || strings.Contains(footer, "too small") {
+		t.Fatalf("launched %v footer %q", h.backend.launched, footer)
+	}
+}
