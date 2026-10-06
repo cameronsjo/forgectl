@@ -214,7 +214,7 @@ func TestFoldEndWithBadExitIsIgnoredAndCounted(t *testing.T) {
 func TestFoldUnmappedEventChangesOnlyLastEvent(t *testing.T) {
 	base := []Event{ev(1, "STEP-START", "fetch"), ev(2, "STEP-END", "fetch")}
 	without := fold(base...)
-	with := fold(append(base, ev(3, "STEP-WARN", "fetch", "rc", "1"), ev(4, "RUN-LOST", ""), ev(5, "STEP-NOTE", "build"))...)
+	with := fold(append(base, ev(3, "STEP-WARN", "fetch", "rc", "1"), ev(4, "RUN-NOTE", ""), ev(5, "STEP-NOTE", "build"))...)
 	if !with.LastEvent.Equal(at(5)) {
 		t.Errorf("LastEvent = %v, want %v", with.LastEvent, at(5))
 	}
@@ -295,5 +295,22 @@ func TestFoldReturnsIndependentState(t *testing.T) {
 	}
 	if defs[0].ID != "fetch" || len(events) != 2 || events[0].Name != "STEP-START" {
 		t.Errorf("Fold changed its inputs")
+	}
+}
+
+// A lost run (RUN-LOST, no RUN-END) reads lost, and the step it stopped in
+// reads interrupted, not running (#1106).
+func TestFoldLostRunInterruptsItsStep(t *testing.T) {
+	s := fold(ev(1, "STEP-START", "fetch"), ev(9, "RUN-LOST", ""))
+	if s.Live != LiveLost || s.Exit != nil {
+		t.Errorf("Live %s Exit %v, want lost and no exit", s.Live, s.Exit)
+	}
+	if got := step(t, s, "fetch"); got.Status != StepInterrupted || !got.End.Equal(at(9)) {
+		t.Errorf("fetch = %+v, want interrupted at 9", got)
+	}
+	// A RUN-END already seen wins: the run ended, it was not lost.
+	s = fold(ev(1, "STEP-START", "fetch"), ev(5, "RUN-END", "", "rc", "1"), ev(9, "RUN-LOST", ""))
+	if s.Live != LiveEnded || s.Exit == nil || *s.Exit != 1 {
+		t.Errorf("RUN-END then RUN-LOST: Live %s Exit %v", s.Live, s.Exit)
 	}
 }

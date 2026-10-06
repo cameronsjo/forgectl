@@ -154,6 +154,7 @@ func DeskSpec() *Spec {
 			deskStepFail:  ActionFail,
 			deskStepSkip:  ActionSkip,
 			deskRunEnd:    ActionEnd,
+			deskRunLost:   ActionLost,
 		},
 		ExitField: "rc",
 	}
@@ -167,6 +168,7 @@ const (
 	deskStepFail  = "STEP-FAIL"
 	deskStepSkip  = desk.EventStepSkip
 	deskRunEnd    = desk.EventRunEnd
+	deskRunLost   = desk.EventRunLost
 	// ScriptStep is the one step of a desk script.
 	ScriptStep = "script"
 )

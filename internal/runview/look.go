@@ -21,16 +21,17 @@ type Glyphs struct {
 	Interrupted string
 	Lost        string
 	Skipped     string
+	Changed     string
 }
 
 // IconGlyphs and ASCIIGlyphs are the two legends: Unicode marks, and the
 // fallback for a terminal that cannot draw them.
 var (
 	IconGlyphs = Glyphs{
-		Pending: "·", Running: "◐", Done: "✓", Failed: "✗", Interrupted: "⊘", Lost: "?", Skipped: "–",
+		Pending: "·", Running: "◐", Done: "✓", Failed: "✗", Interrupted: "⊘", Lost: "?", Skipped: "–", Changed: "!",
 	}
 	ASCIIGlyphs = Glyphs{
-		Pending: ".", Running: "*", Done: "+", Failed: "x", Interrupted: "/", Lost: "?", Skipped: "-",
+		Pending: ".", Running: "*", Done: "+", Failed: "x", Interrupted: "/", Lost: "?", Skipped: "-", Changed: "!",
 	}
 )
 
@@ -83,6 +84,8 @@ func RunMark(g Glyphs, live LiveState, exit *int) Mark {
 		return Mark{g.Pending, "waiting", ToneDim}
 	case LiveSkipped:
 		return Mark{g.Skipped, "skipped", ToneDim}
+	case LiveChanged:
+		return Mark{g.Changed, "changed", ToneWarn}
 	case LiveUnknown:
 		return Mark{g.Pending, "log", ToneMuted}
 	}

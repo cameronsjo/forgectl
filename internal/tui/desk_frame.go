@@ -868,7 +868,9 @@ func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, curso
 	it := r.item
 	label := itemLabel(it.Name)
 	var hash string
-	if desk.ValidSHA256(it.Meta.SHA256) {
+	// A changed item names both of its hashes in its note instead: the head
+	// would show only the one it was queued at (#1106).
+	if desk.ValidSHA256(it.Meta.SHA256) && r.kind != rowChanged {
 		// The short hash the agent reports and `desk status` prints; the a
 		// prompt shows it in full. A long name is cut first so the hash is
 		// never the part the panel cuts off. The panel's own cut ends in a
@@ -879,6 +881,13 @@ func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, curso
 	head := st.Selected.Render(label) + hash
 	head += st.Muted.Render(" · " + f.focusState(r))
 	lines := []string{head}
+	// A lost or changed item says what happened and what to do next, wrapped
+	// under the head so the next step is never the part cut off.
+	if note := stateNote(r); note != "" {
+		for _, l := range strings.Split(ansi.Wrap(note, max(width-4, 10), ""), "\n") {
+			lines = append(lines, st.Warn.Render(strings.TrimRight(l, " ")))
+		}
+	}
 	// The panel's text area is the width less the border and its padding.
 	lines = append(lines, wrapField(st, "what", st.Fg.Bold(true), it.What, width-4)...)
 	lines = append(lines, wrapField(st, "why", st.Meta, it.Why, width-4)...)
@@ -962,9 +971,9 @@ func (f deskFrame) focusState(r queueRow) string {
 		}
 		return "running " + clock(f.now.Sub(it.Started))
 	case rowLost:
-		return "lost: its owner is gone with no RUN-END"
+		return "lost"
 	case rowChanged:
-		return "changed after it was queued; it will not run"
+		return "changed"
 	}
 	outcome := "ok"
 	if it.ExitCode == nil {
@@ -976,6 +985,27 @@ func (f deskFrame) focusState(r queueRow) string {
 		outcome += " · " + clock(it.Ended.Sub(it.Started))
 	}
 	return outcome + " · ended " + agoLabel(f.now, it.Ended)
+}
+
+// stateNote is what happened to a lost or changed item and what to do next,
+// in plain words; "" for every other row. Both hashes of a changed item are
+// shown only when they are valid sha256 values.
+func stateNote(r queueRow) string {
+	switch r.kind {
+	case rowLost:
+		return "the desk stopped watching it mid-run, so it may have partly run · s clears it · l shows what it printed"
+	case rowChanged:
+		m := r.item.Meta
+		hashes := "its bytes changed after it was queued"
+		if desk.ValidSHA256(m.SHA256) {
+			hashes = "queued " + m.SHA256[:deskShortHash]
+			if desk.ValidSHA256(m.ChangedSHA256) {
+				hashes += ", now " + m.ChangedSHA256[:deskShortHash]
+			}
+		}
+		return hashes + " · not run, moved to skipped · ask Claude to queue it again"
+	}
+	return ""
 }
 
 // scriptLines returns the first n lines of a script that are neither blank

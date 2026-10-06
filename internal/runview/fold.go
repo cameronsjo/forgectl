@@ -17,6 +17,9 @@ const (
 	ActionFail  Action = "fail"
 	ActionSkip  Action = "skip"
 	ActionEnd   Action = "end"
+	// ActionLost ends a run whose owner is gone with no end event: a step
+	// still running reads interrupted, and the run reads lost.
+	ActionLost Action = "lost"
 )
 
 // Spec says how a run's events fold: which event names start, close or fail
@@ -46,6 +49,7 @@ type reducer struct {
 	state RunState
 
 	ended   bool      // an end event arrived
+	lost    bool      // the run ended as lost (ActionLost), not with an end event
 	endedAt time.Time // the time of that end event
 }
 
@@ -115,6 +119,10 @@ func (r *reducer) apply(e Event) {
 		}
 	case ActionEnd:
 		r.end(e)
+	case ActionLost:
+		if !r.ended {
+			r.ended, r.lost, r.endedAt = true, true, e.Time
+		}
 	}
 }
 
@@ -165,6 +173,9 @@ func (r *reducer) finish() RunState {
 	s.Live = LiveLive
 	if r.ended {
 		s.Live = LiveEnded
+		if r.lost {
+			s.Live = LiveLost
+		}
 		for i := range s.Steps {
 			if s.Steps[i].Status == StepRunning {
 				s.Steps[i].Status, s.Steps[i].End = StepInterrupted, r.endedAt

@@ -175,7 +175,7 @@ func TestCleanErrKeepsTheWrappedError(t *testing.T) {
 
 func TestDeskSpecMapsTheDeskVocabulary(t *testing.T) {
 	s := DeskSpec()
-	want := map[string]Action{"STEP-START": ActionStart, "STEP-END": ActionClose, "STEP-FAIL": ActionFail, "STEP-SKIP": ActionSkip, "RUN-END": ActionEnd}
+	want := map[string]Action{"STEP-START": ActionStart, "STEP-END": ActionClose, "STEP-FAIL": ActionFail, "STEP-SKIP": ActionSkip, "RUN-END": ActionEnd, "RUN-LOST": ActionLost}
 	if !reflect.DeepEqual(s.On, want) || s.ExitField != "rc" {
 		t.Errorf("DeskSpec = %+v", s)
 	}

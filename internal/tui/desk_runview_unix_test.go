@@ -136,7 +136,9 @@ func TestRunViewReplaysAndReturnsToLive(t *testing.T) {
 		h.send("right")
 	}
 	out := h.screen()
-	for _, want := range []string{"replay 4/9", "✓ fetch", "◐ build", "· stage", "▸ #4"} {
+	// The run finished with exit 1: mid-replay the header says so, not live
+	// (#1106), and G goes to its end.
+	for _, want := range []string{"✗ exit 1  replaying 4/9 · G end", "✓ fetch", "◐ build", "· stage", "▸ #4", "g/G start/end"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("replay at 4 is missing %q:\n%s", want, out)
 		}
@@ -373,16 +375,20 @@ func TestRunViewStopsPollingAGoneRun(t *testing.T) {
 	}
 }
 
-// r on an item with no run opens the newest run and says so.
-func TestRunViewSaysWhenItShowsAnotherRun(t *testing.T) {
+// r on an item with no run says so on the dashboard; it does not open
+// another item's run, which would read as this item's (#1106).
+func TestRunViewDoesNotOpenAnotherItemsRun(t *testing.T) {
 	h := runHarness(t)
 	stageRun(t, h, "done.sh", "echo done\n", nil, 0)
 	h.drop("02-later.sh", "#!/bin/bash\necho later\n")
 	h.scan()
 	h.selectItem("02-later")
 	h.send("r")
-	if out := h.screen(); !strings.Contains(out, "showing the newest") {
-		t.Errorf("the view should say it is not showing the selected item:\n%s", out)
+	if h.m.rv != nil {
+		t.Fatalf("r opened a run view on an item with no run:\n%s", h.screen())
+	}
+	if out := h.screen(); !strings.Contains(out, "02 later has not run yet") {
+		t.Errorf("the dashboard should say the item has not run:\n%s", out)
 	}
 }
 
@@ -405,9 +411,11 @@ func TestRunViewTickPollsALiveRun(t *testing.T) {
 
 // The key hints keep "q close" at every width.
 func TestRunHintsKeepQClose(t *testing.T) {
-	for _, w := range []int{80, 60, 40, 20, 10} {
-		if h := runHintsFor(w); !strings.HasSuffix(h, "q close") || ansi.StringWidth(h) > max(w, 8) {
-			t.Errorf("width %d: hints %q", w, h)
+	for _, finished := range []bool{false, true} {
+		for _, w := range []int{80, 60, 40, 20, 10} {
+			if h := runHintsFor(w, finished); !strings.HasSuffix(h, "q close") || ansi.StringWidth(h) > max(w, 8) {
+				t.Errorf("width %d finished %v: hints %q", w, finished, h)
+			}
 		}
 	}
 }
@@ -443,5 +451,29 @@ func TestRunViewRetriesTheRunShownAfterASwitch(t *testing.T) {
 	h.drive(h.m.pollRun())
 	if got := h.m.rv.ref().Name; got != first || !h.m.rv.loaded {
 		t.Errorf("the retry showed %q (loaded %v), want %s", got, h.m.rv.loaded, first)
+	}
+}
+
+// A lost run's step reads interrupted, not running, and a changed item's run
+// reads changed (the queue's word) with a reason for having no events
+// (#1106).
+func TestRunViewLostAndChanged(t *testing.T) {
+	st := theme.Default().Styles()
+	ref := runview.RunRef{Source: "desk", Name: "01-long", Kind: runview.KindDesk}
+	defs := []runview.StepDef{{ID: runview.ScriptStep}}
+	events := []runview.Event{{Name: "RUN-START", Seq: 1}, {Name: "STEP-START", Step: runview.ScriptStep, Seq: 2}, {Name: "RUN-LOST", Seq: 3}}
+	f := newRunFolder(ref, defs, events)
+	lost := &deskRunView{refs: []runview.RunRef{ref}, folder: f, defs: defs, delta: runview.Delta{Live: runview.LiveLost}, loaded: true, follow: true, at: f.Len()}
+	out := ansi.Strip(lost.render(st, 80, 20))
+	if !strings.Contains(out, "? lost") || !strings.Contains(out, "⊘") || strings.Contains(out, "◐") {
+		t.Errorf("lost run view:\n%s", out)
+	}
+
+	cref := runview.RunRef{Source: "desk", Name: "02-s2", Kind: runview.KindDesk}
+	cf := newRunFolder(cref, defs, nil)
+	changed := &deskRunView{refs: []runview.RunRef{cref}, folder: cf, defs: defs, delta: runview.Delta{Live: runview.LiveChanged}, loaded: true, follow: true}
+	out = ansi.Strip(changed.render(st, 80, 20))
+	if !strings.Contains(out, "! changed") || !strings.Contains(out, "never ran: it changed after it was queued") || strings.Contains(out, "skipped") {
+		t.Errorf("changed run view:\n%s", out)
 	}
 }
