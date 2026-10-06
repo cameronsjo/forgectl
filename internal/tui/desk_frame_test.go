@@ -498,3 +498,22 @@ func TestDeskFrame_FocusFieldsStopAtFourLines(t *testing.T) {
 		t.Errorf("a what cut at four lines must end in an ellipsis:\n%s", out)
 	}
 }
+
+// The focus panel must read without colour: WHAT and WHY are told apart by
+// their labels and the hanging indent, and the script preview by its label.
+func TestGoldenDeskFocusWrapNoColor(t *testing.T) {
+	for _, w := range []int{80, 100, 160} {
+		t.Run(fmt.Sprint(w), func(t *testing.T) {
+			snap, opts := longHeaderSnapshot()
+			var buf bytes.Buffer
+			wr := theme.Default().Writer(&buf, []string{"NO_COLOR=1", "TERM=xterm-256color"})
+			if _, err := wr.Write([]byte(RenderDeskFrame(snap, w, 30, deskNow, opts))); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(buf.String(), "\x1b") {
+				t.Fatal("the no-color render still carries escapes")
+			}
+			assertGolden(t, fmt.Sprintf("desk_focuswrap_%d_nocolor", w), buf.String())
+		})
+	}
+}

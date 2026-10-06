@@ -184,7 +184,8 @@ When an item is queued, add tells the operator: a herdr notification and the
 queuing pane's needs-you state (inside herdr), and a macOS notification
 (macOS only). A failed signal prints "warning: operator signal failed:" and
 never fails the add; [desk] notify_herdr and notify_macos in config.toml turn
-each off. Any desk verb that skips a changed item also clears that pane's state.
+each off. A run, a skip, or the desk skipping an item whose file changed since it was queued
+also clears that pane's state.
 
 A .manifest is checked like ` + "`desk plan`" + ` before it is queued: a manifest that cannot
 run is refused, and its warnings are printed as warning: lines on stderr.
@@ -206,7 +207,7 @@ bad --name).`,
 	cmd.Flags().StringVar(&o.why, "why", "", "why it needs the operator, one line (required)")
 	cmd.Flags().BoolVar(&o.tty, "tty", false, "the script needs a terminal; it runs in the dashboard's pane")
 	cmd.Flags().StringVar(&o.name, "name", "", "file name for an item read from stdin (FILE -), e.g. deploy.sh")
-	cmd.Flags().BoolVar(&o.asJSON, "json", false, "print the queued item as one JSON object")
+	cmd.Flags().BoolVar(&o.asJSON, "json", false, "print the queued item as one JSON object; signal warnings go in warnings[]")
 	return cmd
 }
 

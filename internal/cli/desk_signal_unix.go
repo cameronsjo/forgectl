@@ -174,8 +174,10 @@ func (s deskSignal) cleanupPath() (string, bool) {
 // gone. A failed scan changes nothing: a signal is never cleared on a guess.
 func (s deskSignal) attach(d *desk.Desk) {
 	// A herdr that hangs costs one timeout per process, not one per item: after
-	// a failed call this desk handle stops calling it. The hooks run on the
-	// claim path, so a "run all" must not wait on a dead herdr N times.
+	// a call times out this desk handle stops calling it. The hooks run on the
+	// claim path, so a "run all" must not wait on a dead herdr N times. Any
+	// other error (a pane that closed since it queued) says nothing about the
+	// next pane, so it does not trip.
 	var gaveUp atomic.Bool
 	refresh := func(m desk.Meta, releaseWhenNone bool) {
 		if m.SignalPane == "" || gaveUp.Load() {
@@ -196,10 +198,15 @@ func (s deskSignal) attach(d *desk.Desk) {
 		} else {
 			err = herdr.PaneReportBlocked(ctx, s.deps.SensitiveRunner, path, m.SignalPane, fmt.Sprintf("forgectl desk: %d waiting", total))
 		}
-		if err != nil {
+		if err != nil && ctx.Err() != nil {
 			gaveUp.Store(true)
 		}
 	}
 	d.OnLeavePending(func(m desk.Meta) { refresh(m, true) })
-	d.OnReturnPending(func(m desk.Meta) { refresh(m, false) })
+	// Re-raising is a new signal, so the setting gates it; clearing is not.
+	d.OnReturnPending(func(m desk.Meta) {
+		if s.cfg.HerdrSignal() {
+			refresh(m, false)
+		}
+	})
 }

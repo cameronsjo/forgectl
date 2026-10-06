@@ -1,0 +1,30 @@
+desk ● · forgectl 0.0.0-test · host-a · ~/.local/state/forgec…  up 4h37m · 19:07
+╭ waiting ───────────────╮╭ runs today ────────────╮╭ outcomes ────────────────╮
+│ 1                      ││ 0                      ││ ✓ 0  ✗ 0                 │
+│ oldest 4m              ││ median -               ││ 0 changed                │
+│ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█ ││ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ ││ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
+╰────────────────────────╯╰────────────────────────╯╰──────────────────────────╯
+╭ queue ─┤ ● 0 running  ◌ 1 waiting ├──────────────────────────────────────────╮
+│ ▸ ◌ waiting  21 rebuild-mirror                ░░░░░░░░░░░░░░░░  needs you    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ focus ───────────────────────────────────────────────────────────────────────╮
+│ 21 rebuild-mirror · sha256 00154761637c · unchanged since queued 4m ago      │
+│ what  Rebuild the package mirror index from the upstream release feed and    │
+│       prune every release older than the retention window                    │
+│ why   Upstream published a release this morning and the nightly mirror job   │
+│       is paused until the index matches it                                   │
+│ ┆ script · the first lines it runs                                           │
+│ ┆ python3 - <<'PY'                                                           │
+│ ┆ print("rebuild")                                                           │
+│ ┆ PY                                                                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ history ─────────────────────────────────────────────────────────────────────╮
+│ no runs yet                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+ y run  s skip  u undo  v view  a all  l log  r runs  j/k move  q quit

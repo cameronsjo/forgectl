@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -361,9 +362,9 @@ func TestOpenDeskDirFor_ClearsOnClaimAndReraisesOnUnskip(t *testing.T) {
 	}
 }
 
-// One failed herdr call stops the rest for this process, so a dead herdr does
-// not add a timeout to every claim of a "run all".
-func TestOpenDeskDirFor_StopsCallingAHerdrThatFailed(t *testing.T) {
+// A herdr call that times out stops the rest for this process, so a hung herdr
+// does not add a timeout to every claim of a "run all".
+func TestOpenDeskDirFor_StopsCallingAHerdrThatTimedOut(t *testing.T) {
 	dir := newDeskDir(t)
 	inHerdr(t, "w1:p9")
 	rig := newSignalRig(t, config.DeskConfig{})
@@ -378,7 +379,8 @@ func TestOpenDeskDirFor_StopsCallingAHerdrThatFailed(t *testing.T) {
 	}
 	defer d.Close() //nolint:errcheck // test
 	rig.herdr.RunFunc = func(exec.SensitiveCommand) (exec.SensitiveResult, error) {
-		return exec.SensitiveResult{}, errors.New("herdr is down")
+		time.Sleep(2 * deskSignalTimeout) // the call outlives its context
+		return exec.SensitiveResult{}, context.DeadlineExceeded
 	}
 	before := len(rig.herdr.Calls())
 	for _, n := range []string{"01-one", "02-two"} {
@@ -387,6 +389,61 @@ func TestOpenDeskDirFor_StopsCallingAHerdrThatFailed(t *testing.T) {
 		}
 	}
 	if n := len(rig.herdr.Calls()) - before; n != 1 {
-		t.Errorf("%d herdr calls after a failure, want 1 (the failed one)", n)
+		t.Errorf("%d herdr calls after a failure, want 1 (the one that timed out)", n)
+	}
+}
+
+// A refusal from herdr (the queuing pane closed since) says nothing about the
+// next pane: the rest of the items are still cleared.
+func TestOpenDeskDirFor_AClosedPaneDoesNotStopTheRest(t *testing.T) {
+	dir := newDeskDir(t)
+	rig := newSignalRig(t, config.DeskConfig{})
+	for _, it := range []struct{ pane, name string }{{"w1:p1", "a"}, {"w1:p2", "b"}} {
+		inHerdr(t, it.pane)
+		if _, err := addItem(t, rig, it.name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d, err := openDeskDirFor(&cobra.Command{}, rig.deps, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close() //nolint:errcheck // test
+	rig.herdr.RunFunc = func(c exec.SensitiveCommand) (exec.SensitiveResult, error) {
+		return exec.SensitiveResult{}, errors.New("pane not found")
+	}
+	before := len(rig.herdr.Calls())
+	for _, n := range []string{"01-a", "02-b"} {
+		if err := d.Skip(n, desk.SkipOperator); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := len(rig.herdr.Calls()) - before; n != 2 {
+		t.Errorf("%d herdr calls, want 2: a closed pane must not stop the next pane's release", n)
+	}
+}
+
+func TestOpenDeskDirFor_UnskipDoesNotReraiseWhenHerdrSignalIsOff(t *testing.T) {
+	dir := newDeskDir(t)
+	inHerdr(t, "w1:p9")
+	rig := newSignalRig(t, config.DeskConfig{})
+	if _, err := addItem(t, rig, "one"); err != nil {
+		t.Fatal(err)
+	}
+	rig.deps.Cfg.Desk = config.DeskConfig{NotifyHerdr: notOn()}
+	d, err := openDeskDirFor(&cobra.Command{}, rig.deps, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close() //nolint:errcheck // test
+	if err := d.Skip("01-one", desk.SkipOperator); err != nil {
+		t.Fatal(err)
+	}
+	before := len(rig.herdr.Calls())
+	if err := d.Unskip("01-one"); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(rig.herdr.Calls()) - before; n != 0 {
+		t.Errorf("Unskip raised %d herdr calls with notify_herdr = false", n)
 	}
 }
