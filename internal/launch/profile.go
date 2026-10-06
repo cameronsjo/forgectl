@@ -145,12 +145,41 @@ func Resolve(lc config.LaunchConfig, cwd string) (Profile, error) {
 	return resolveWithHome(lc, cwd, os.UserHomeDir)
 }
 
-// resolveWithHome is Resolve with the home lookup injected.
-func resolveWithHome(lc config.LaunchConfig, cwd string, userHome func() (string, error)) (Profile, error) {
+// resolveMatched is Resolve that also returns the [[launch.project]] block it
+// applied, or nil. The worker profile reads that block's own values, not the
+// merged profile, so a field the block leaves unset is told apart from one
+// [launch.defaults] filled. One normalization and one match serve both.
+func resolveMatched(lc config.LaunchConfig, cwd string, userHome func() (string, error)) (Profile, *config.LaunchProject, error) {
 	home, err := homeIfNeeded(userHome, usesHome(lc.Defaults.AddDir) || projectsUseHome(lc.Projects))
 	if err != nil {
-		return Profile{}, err
+		return Profile{}, nil, err
 	}
+	norm := normalizeCWD(cwd)
+	return resolve(lc, norm, home), matchProject(lc, norm, home), nil
+}
+
+// matchProject is the longest project match for an already normalized cwd.
+func matchProject(lc config.LaunchConfig, cwd, home string) *config.LaunchProject {
+	best := -1
+	var win *config.LaunchProject
+	for i := range lc.Projects {
+		if lc.Projects[i].Match == "" {
+			continue
+		}
+		m := filepath.Clean(expandTilde(lc.Projects[i].Match, home))
+		if cwd == m || strings.HasPrefix(cwd, m+string(filepath.Separator)) {
+			if len(m) > best {
+				best = len(m)
+				win = &lc.Projects[i]
+			}
+		}
+	}
+	return win
+}
+
+// normalizeCWD resolves cwd's symlinks best-effort and makes it absolute and
+// clean, as project matching expects.
+func normalizeCWD(cwd string) string {
 	resolved := cwd
 	if r, err := filepath.EvalSymlinks(cwd); err == nil {
 		resolved = r
@@ -158,7 +187,13 @@ func resolveWithHome(lc config.LaunchConfig, cwd string, userHome func() (string
 	if abs, err := filepath.Abs(resolved); err == nil {
 		resolved = abs
 	}
-	return resolve(lc, filepath.Clean(resolved), home), nil
+	return filepath.Clean(resolved)
+}
+
+// resolveWithHome is Resolve with the home lookup injected.
+func resolveWithHome(lc config.LaunchConfig, cwd string, userHome func() (string, error)) (Profile, error) {
+	p, _, err := resolveMatched(lc, cwd, userHome)
+	return p, err
 }
 
 // DefaultsProfile resolves [launch.defaults] alone (no project matching), for
@@ -218,21 +253,7 @@ func projectsUseHome(ps []config.LaunchProject) bool {
 // the risk-bearing core and is exercised directly by the tests.
 func resolve(lc config.LaunchConfig, cwd, home string) Profile {
 	p := defaultsProfile(lc.Defaults, home)
-
-	best := -1
-	var win *config.LaunchProject
-	for i := range lc.Projects {
-		if lc.Projects[i].Match == "" {
-			continue
-		}
-		m := filepath.Clean(expandTilde(lc.Projects[i].Match, home))
-		if cwd == m || strings.HasPrefix(cwd, m+string(filepath.Separator)) {
-			if len(m) > best {
-				best = len(m)
-				win = &lc.Projects[i]
-			}
-		}
-	}
+	win := matchProject(lc, cwd, home)
 
 	if win != nil {
 		if win.Harness != "" {
