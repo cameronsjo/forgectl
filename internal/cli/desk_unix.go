@@ -62,17 +62,28 @@ func openDeskDir(flag string) (*desk.Desk, error) {
 	return desk.Open(dir)
 }
 
+// openDeskDirFor opens the desk and attaches the operator-signal clearing, so
+// every verb that can take an item out of pending/ (a run, a skip, a Scan that
+// skips a changed item) keeps the pane state in step.
+func openDeskDirFor(cmd *cobra.Command, deps module.Deps, flag string) (*desk.Desk, error) {
+	d, err := openDeskDir(flag)
+	if err != nil {
+		return nil, err
+	}
+	newDeskSignal(deps).attach(d)
+	return d, nil
+}
+
 func runDeskDashboard(cmd *cobra.Command, deps module.Deps, dirFlag string, frame bool) error {
 	if !frame && !deskHasTerminal() {
 		return WithExitCode(tui.ErrDeskNeedsTerminal, deskExitUsage)
 	}
-	d, err := openDeskDir(dirFlag)
+	d, err := openDeskDirFor(cmd, deps, dirFlag)
 	if err != nil {
 		return err
 	}
-	defer d.Close()               //nolint:errcheck // read side; nothing to flush
-	newDeskSignal(deps).attach(d) // a run or skip from the dashboard clears the pane state
-	home, _ := deskUserHome()     // display only: no home shows the full path
+	defer d.Close()           //nolint:errcheck // read side; nothing to flush
+	home, _ := deskUserHome() // display only: no home shows the full path
 	if frame {
 		return printDeskFrame(deps.Theme.Writer(cmd.OutOrStdout(), os.Environ()), d, deps, home)
 	}
@@ -148,12 +159,12 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 		defer cleanup()
 		src = tmp
 	}
-	d, err := openDeskDir(dirFlag)
+	d, err := openDeskDirFor(cmd, deps, dirFlag)
 	if err != nil {
 		return err
 	}
-	defer d.Close() //nolint:errcheck // Add has already synced what it wrote
-	sig := newDeskSignal(deps)
+	defer d.Close()            //nolint:errcheck // Add has already synced what it wrote
+	sig := newDeskSignal(deps) // d already clears signals: openDeskDirFor attached them
 	if pane, ok := sig.pane(); ok {
 		d.SetSignalPane(pane)
 	}
@@ -223,8 +234,8 @@ type deskPlanStep struct {
 	Private bool     `json:"private"`
 }
 
-func runDeskPlan(cmd *cobra.Command, dirFlag, target string, asJSON bool) error {
-	label, data, err := readPlanTarget(dirFlag, target)
+func runDeskPlan(cmd *cobra.Command, deps module.Deps, dirFlag, target string, asJSON bool) error {
+	label, data, err := readPlanTarget(cmd, deps, dirFlag, target)
 	if err != nil {
 		return err
 	}
@@ -258,7 +269,7 @@ func runDeskPlan(cmd *cobra.Command, dirFlag, target string, asJSON bool) error 
 }
 
 // readPlanTarget reads a manifest file, or a desk item by name.
-func readPlanTarget(dirFlag, target string) (label string, data []byte, err error) {
+func readPlanTarget(cmd *cobra.Command, deps module.Deps, dirFlag, target string) (label string, data []byte, err error) {
 	if strings.HasSuffix(target, ".manifest") || strings.Contains(target, "/") {
 		// The core's reader: capped, and a FIFO or device is refused, not
 		// read (a blocking open would hang).
@@ -271,7 +282,7 @@ func readPlanTarget(dirFlag, target string) (label string, data []byte, err erro
 	if err := checkDeskName(target); err != nil {
 		return "", nil, err
 	}
-	d, err := openDeskDir(dirFlag)
+	d, err := openDeskDirFor(cmd, deps, dirFlag)
 	if err != nil {
 		return "", nil, err
 	}
@@ -414,13 +425,13 @@ func itemViews(items []desk.Item, now time.Time) []deskItemJSON {
 	return out
 }
 
-func runDeskStatus(cmd *cobra.Command, dirFlag, name string, asJSON bool) error {
+func runDeskStatus(cmd *cobra.Command, deps module.Deps, dirFlag, name string, asJSON bool) error {
 	if name != "" {
 		if err := checkDeskName(name); err != nil {
 			return err
 		}
 	}
-	d, err := openDeskDir(dirFlag)
+	d, err := openDeskDirFor(cmd, deps, dirFlag)
 	if err != nil {
 		return err
 	}
@@ -648,7 +659,7 @@ func stepView(r desk.StepStatus) deskStepJSON {
 	return s
 }
 
-func runDeskWatch(cmd *cobra.Command, dirFlag, name string, deadline, skip int) error {
+func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, deadline, skip int) error {
 	if err := checkDeskName(name); err != nil {
 		return err
 	}
@@ -663,7 +674,7 @@ func runDeskWatch(cmd *cobra.Command, dirFlag, name string, deadline, skip int) 
 			return deskUsage("desk watch: --dir %w, so a resume= line could not name it", err)
 		}
 	}
-	d, err := openDeskDir(dirFlag)
+	d, err := openDeskDirFor(cmd, deps, dirFlag)
 	if err != nil {
 		return err
 	}
@@ -790,12 +801,11 @@ func runDeskSkip(cmd *cobra.Command, deps module.Deps, dirFlag, name, reason str
 	if len([]rune(reason)) > desk.SkipNoteMax {
 		return deskUsage("desk skip: --reason must be at most %d characters", desk.SkipNoteMax)
 	}
-	d, err := openDeskDir(dirFlag)
+	d, err := openDeskDirFor(cmd, deps, dirFlag)
 	if err != nil {
 		return err
 	}
 	defer d.Close() //nolint:errcheck // Skip syncs its own writes
-	newDeskSignal(deps).attach(d)
 	recorded, err := d.SkipNoted(name, reason)
 	switch {
 	case errors.Is(err, desk.ErrNotFound):
@@ -815,8 +825,8 @@ type deskPruneJSON struct {
 	Days    int `json:"days"`
 }
 
-func runDeskPrune(cmd *cobra.Command, dirFlag string, days int, asJSON bool) error {
-	d, err := openDeskDir(dirFlag)
+func runDeskPrune(cmd *cobra.Command, deps module.Deps, dirFlag string, days int, asJSON bool) error {
+	d, err := openDeskDirFor(cmd, deps, dirFlag)
 	if err != nil {
 		return err
 	}

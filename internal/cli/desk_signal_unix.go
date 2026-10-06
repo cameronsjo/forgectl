@@ -6,6 +6,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -25,7 +26,7 @@ import (
 
 // deskSignalTimeout bounds each signal call. A signal is a courtesy: a hung
 // herdr or osascript must not hold up a queue operation.
-const deskSignalTimeout = 5 * time.Second
+const deskSignalTimeout = 2 * time.Second
 
 // deskSignalBodyMax caps the notification body, matching herdr.NotificationMaxRunes.
 const deskSignalBodyMax = 200
@@ -91,6 +92,7 @@ func waitingFrom(d *desk.Desk, pane string) (total, fromPane int, err error) {
 // add: the item is queued either way.
 func (s deskSignal) queued(ctx context.Context, d *desk.Desk, a desk.Added, what string) []string {
 	var failed []string
+	herdrFailed := false
 	total, _, _ := waitingFrom(d, "")
 	total = max(total, 1)
 	title := fmt.Sprintf("forgectl desk: %d waiting", total)
@@ -111,11 +113,14 @@ func (s deskSignal) queued(ctx context.Context, d *desk.Desk, a desk.Added, what
 		c, cancel := context.WithTimeout(ctx, deskSignalTimeout)
 		defer cancel()
 		if err := herdr.NotificationShow(c, s.deps.SensitiveRunner, path, herdr.Notification{Title: title, Body: body, Sound: herdr.SoundRequest}); err != nil {
-			failed = append(failed, signalFailure("herdr notification", "notify_herdr", err))
+			herdrFailed = true
+			failed = append(failed, signalFailure("herdr signal", "notify_herdr", err))
 		}
 		if pane, ok := deskLookupEnv("HERDR_PANE_ID"); ok && pane != "" {
 			if err := herdr.PaneReportBlocked(c, s.deps.SensitiveRunner, path, pane, title+": "+body); err != nil {
-				failed = append(failed, signalFailure("herdr pane state", "notify_herdr", err))
+				if !herdrFailed {
+					failed = append(failed, signalFailure("herdr signal", "notify_herdr", err))
+				}
 			}
 		}
 	}
@@ -125,7 +130,20 @@ func (s deskSignal) queued(ctx context.Context, d *desk.Desk, a desk.Added, what
 // signalFailure words one failed signal: what failed, that the item is queued
 // anyway, and which setting turns it off. The cause is the runner's own text.
 func signalFailure(what, setting string, err error) string {
-	return fmt.Sprintf("%s failed (%s); the item is queued. Turn it off with [desk] %s = false", what, termsafe.SafeLineMax(err.Error(), deskSignalErrMax), setting)
+	return fmt.Sprintf("%s failed (%s); the item is queued. Turn it off with [desk] %s = false", what, shortCause(err), setting)
+}
+
+// shortCause is the innermost error's text: the reason, without the command
+// line and wrappers around it.
+func shortCause(err error) string {
+	for {
+		next := errors.Unwrap(err)
+		if next == nil {
+			break
+		}
+		err = next
+	}
+	return termsafe.SafeLineMax(err.Error(), deskSignalErrMax)
 }
 
 // cleanupPath is where herdr is for clearing a signal already raised. It does

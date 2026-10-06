@@ -6,6 +6,8 @@ package cli
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -162,7 +164,7 @@ func TestDeskAdd_AFailedSignalIsAWarningNotAFailedAdd(t *testing.T) {
 	}
 	errOut, err := addItem(t, rig, "merge")
 	wantExit(t, err, 0)
-	if !strings.Contains(errOut, "warning: operator signal failed: herdr notification failed") {
+	if !strings.Contains(errOut, "warning: operator signal failed: herdr signal failed") {
 		t.Errorf("stderr = %q, want the failed signal named", errOut)
 	}
 	if len(queuedPane(t, dir)) != 1 {
@@ -223,7 +225,7 @@ func TestDeskAdd_JSONCarriesTheSignalFailure(t *testing.T) {
 	}
 	out, _, err := deskRun(t, rig.deps, "add", writeTemp(t, "a.sh", "echo a\n"), "--what", "w", "--why", "y", "--json")
 	wantExit(t, err, 0)
-	if !strings.Contains(out, "operator signal failed: herdr notification failed") || !strings.Contains(out, "notify_herdr = false") {
+	if !strings.Contains(out, "operator signal failed: herdr signal failed") || !strings.Contains(out, "notify_herdr = false") {
 		t.Errorf("--json output = %s, want the failed signal and its setting in warnings", out)
 	}
 }
@@ -269,5 +271,45 @@ func TestDeskSkip_ClearsEvenWhenTheSettingIsNowOff(t *testing.T) {
 	}
 	if calls := rig.herdr.Calls()[before:]; len(calls) != 1 || !calls[0].Equal(releaseCmd("w1:p9")) {
 		t.Fatalf("%d calls after the skip, want the release", len(calls))
+	}
+}
+
+// A pending item edited after it was queued is skipped as changed by whichever
+// verb scans next. Each verb that scans must clear the pane that item was
+// blocking, not only the dashboard and skip.
+func TestDeskVerbsThatScanClearAChangedItemsPane(t *testing.T) {
+	for _, verb := range [][]string{{"status"}, {"runs"}} {
+		t.Run(verb[0], func(t *testing.T) {
+			dir := newDeskDir(t)
+			inHerdr(t, "w1:p9")
+			rig := newSignalRig(config.DeskConfig{})
+			if _, err := addItem(t, rig, "one"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, desk.DirPending, "01-one.sh"), []byte("echo changed\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := len(rig.herdr.Calls())
+			if _, _, err := deskRun(t, rig.deps, verb...); err != nil {
+				t.Fatal(err)
+			}
+			if calls := rig.herdr.Calls()[before:]; len(calls) != 1 || !calls[0].Equal(releaseCmd("w1:p9")) {
+				t.Fatalf("`desk %s` after the edit: %d herdr calls, want the release of w1:p9", verb[0], len(calls))
+			}
+		})
+	}
+}
+
+func TestDeskAdd_FailureWarningIsOneLinePerSetting(t *testing.T) {
+	newDeskDir(t)
+	inHerdr(t, "w1:p9")
+	rig := newSignalRig(config.DeskConfig{})
+	rig.herdr.RunFunc = func(exec.SensitiveCommand) (exec.SensitiveResult, error) {
+		return exec.SensitiveResult{}, errors.New("herdr is down")
+	}
+	errOut, err := addItem(t, rig, "merge")
+	wantExit(t, err, 0)
+	if n := strings.Count(errOut, "notify_herdr = false"); n != 1 {
+		t.Errorf("%d herdr warning lines, want 1:\n%s", n, errOut)
 	}
 }
