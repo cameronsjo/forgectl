@@ -180,6 +180,7 @@ func checkGitFile(common, path string) error {
 	if !info.Mode().IsRegular() || info.Size() > 4096 {
 		return fmt.Errorf("%w: %s is not a gitfile", ErrUnsafeWorktreeRoot, gitfile)
 	}
+	//nolint:gosec // G304: gitfile is WorktreePath(top, a ValidName) plus .git, just checked to be a small regular file
 	data, err := os.ReadFile(gitfile)
 	if err != nil {
 		return fmt.Errorf("worker: read %s: %w", gitfile, err)
