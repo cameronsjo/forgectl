@@ -40,6 +40,50 @@ func TestWatchResumedPastRunEndStillEnds(t *testing.T) {
 	}
 }
 
+// A watcher that read RUN-END stays ended on every later poll. The run
+// viewer keeps one watcher per run and polls it again; before the fix, the
+// second poll found no new lines, judged the long-gone owner, and reported
+// the finished run lost with a RUN-LOST line.
+func TestWatcherPolledAgainAfterRunEndStaysEnded(t *testing.T) {
+	d := openDesk(t)
+	c := queue(t, d, "done.sh", "echo hi\n")
+	run, err := d.BeginRun(c.Name, deadPIDForWatch(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Finish(0, "ok"); err != nil {
+		t.Fatal(err)
+	}
+	w, err := d.NewWatcher(c.Name, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines, state, err := w.Poll()
+	if err != nil || state != WatchEnded || len(lines) != 2 {
+		t.Fatalf("first poll: %q %s %v, want RUN-START and RUN-END, ended", lines, state, err)
+	}
+	for i := 2; i <= 3; i++ {
+		lines, state, err := w.Poll()
+		if err != nil || state != WatchEnded || len(lines) != 0 {
+			t.Fatalf("poll %d: %q %s %v, want no lines, ended", i, lines, state, err)
+		}
+	}
+}
+
+// deadPIDForWatch is a pid that has exited, so the run's recorded owner is
+// gone by the time it is polled again, as a supervisor is after its run.
+func deadPIDForWatch(t *testing.T) int {
+	t.Helper()
+	p, err := os.StartProcess("/bin/sh", []string{"sh", "-c", "exit 0"}, &os.ProcAttr{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	return p.Pid
+}
+
 // SkipNoted picks the reason from where the item is and keeps the note; an
 // operator skip can be undone (which clears the note), a lost run cannot.
 func TestSkipNoted(t *testing.T) {

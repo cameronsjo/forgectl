@@ -17,19 +17,6 @@ import (
 	"time"
 )
 
-// Event line prefixes, the batch event vocabulary. Only the desk writes
-// done/<name>.events; step output never reaches it, so a step cannot print a
-// line that ends the run for a watcher.
-const (
-	EventRunStart  = "RUN-START"
-	EventStepStart = "STEP-START"
-	EventStepEnd   = "STEP-END"
-	EventStepSkip  = "STEP-SKIP"
-	EventStepWarn  = "STEP-WARN"
-	EventRunEnd    = "RUN-END"
-	EventRunLost   = "RUN-LOST"
-)
-
 // maxEventsBytes caps what hasRunEnd reads of an events file. A batch writes
 // a few lines per step, so this is far past any real run.
 const maxEventsBytes = 16 << 20
@@ -133,6 +120,10 @@ type Watcher struct {
 	seen    int
 	off     int64
 	partial []byte
+	// ended is set once RUN-END was read. A finished run never changes
+	// again, and the file offset is past its RUN-END, so a later Poll must
+	// not judge the owner (gone by then) and call the run lost.
+	ended bool
 }
 
 // NewWatcher follows name's events, not returning the first skip lines (the
@@ -152,8 +143,12 @@ func (w *Watcher) Seen() int { return w.seen }
 // run stands. When the run is lost, the last line returned is
 // "RUN-LOST id=<name> pid=<pid>".
 func (w *Watcher) Poll() ([]string, WatchState, error) {
+	if w.ended {
+		return nil, WatchEnded, nil
+	}
 	lines, ended, err := w.read()
 	if err != nil || ended {
+		w.ended = ended
 		return lines, WatchEnded, err
 	}
 	state, pid, err := w.state()
@@ -166,6 +161,7 @@ func (w *Watcher) Poll() ([]string, WatchState, error) {
 		more, ended, err := w.read()
 		lines = append(lines, more...)
 		if err != nil || ended {
+			w.ended = ended
 			return lines, WatchEnded, err
 		}
 		lines = append(lines, fmt.Sprintf("%s id=%s pid=%d", EventRunLost, w.name, pid))

@@ -300,6 +300,8 @@ forgectl herdr organize --apply          # make the moves; restores focus; needs
 forgectl desk                            # the dashboard: y run, s skip, v view, l log, q quit
 forgectl desk add ./fix.sh --what "..." --why "..."   # queue an item; prints name= and sha256=
 forgectl desk watch 17-fix --deadline 540  # stream its events; exit 0/1 with the run, 75 at the deadline
+forgectl desk runs                       # every run and how far it got
+forgectl desk show 17-fix --events       # one run as a flow, with its event timeline; --at N replays
 forgectl desk status --json              # the queue as JSON
 forgectl desk layout --progress 'CMD'    # herdr split: this pane left, the desk right, CMD below it
 

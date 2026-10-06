@@ -12,6 +12,10 @@ forgectl desk plan nightly.manifest             # check a batch: waves, warnings
 forgectl desk status                            # the queue, one line per item
 forgectl desk status 17-fix --json              # one item in detail, as JSON
 forgectl desk watch 17-fix --deadline 540       # stream its events; exit with the run's outcome
+forgectl desk runs                              # every run and how far it got
+forgectl desk show 17-fix --events              # one run as a flow, with its event timeline
+forgectl desk show 17-fix --at 4                # replay: the run after its first 4 events
+forgectl desk show --log ./events.jsonl         # a JSONL log from another tool, as a timeline
 forgectl desk skip 17-fix --reason "superseded" # skip a waiting item, or clear a lost run
 forgectl desk layout --progress 'CMD'           # herdr split: this pane left, the desk right, CMD below
 forgectl desk layout --dry-run                  # print the planned splits and commands; change nothing
@@ -148,6 +152,52 @@ Prints the item's event lines as they arrive and exits when the run does. It rea
 | 75 | the deadline passed first; the last line is `resume=forgectl desk watch NAME --skip N` (plus `--deadline` and `--dir` when they were given) |
 | 130 | interrupted; the last line is the same `resume=` line |
 | 141 | stdout closed (a write failed, as when the monitor reading it went away); the watch stops at once, and the error on stderr names the `resume` command |
+
+### `forgectl desk runs`
+
+Every run with its progress, one line each: live runs first, then the most recent. A run is a running, done or skipped item; a pending item is not a run yet. `desk runs` is the progress view; `desk status` is the queue view (waiting items, hashes, WHAT, skip reasons). How runs are read is [ADR-0013](../adr/0013-desk-run-sources-and-visualizer.md).
+
+```text
+✗ exit 1   17-nightly     2/4 steps, 1 failed  3m
+✓ ok       16-cleanup     1/1 steps  1h
+```
+
+| Flag | Meaning |
+|---|---|
+| `--json` | print `[{source, name, kind, live, exit, steps, done, failed, events, updated, partial}]` |
+| `--log FILE` | add a JSONL log as one more run (see `desk show`) |
+
+`live` is `running`, `ended`, `lost` or `skipped` for a desk run, and `unknown` for a log. Like `status`, reading the desk scans it.
+
+Exit codes: 0 listed; 1 a source or a run could not be read in full (the rest are still listed, and stderr names each one, with `--json` too: the array has no field for it); 2 a usage error.
+
+### `forgectl desk show <name>`
+
+One run as the visualizer draws it: each step with its state, its duration, and the steps it waits on when that is not simply the step before it, then a count line. The last line points to `desk status NAME`, which holds the item's record; `show` does not repeat it.
+
+```text
+desk/17-nightly · exit 1
+  ✓ fetch  done · 500ms
+  ✗ build  failed · 1s
+  – stage  skipped
+  ✓ check  done · 200ms · after fetch
+9 events
+record: forgectl desk status 17-nightly
+```
+
+| Flag | Meaning |
+|---|---|
+| `--events` | also print the event timeline, one `#N NAME step=… key="value"` line per event |
+| `--at N` | replay: the state after the run's first `N` events. A replay shows the fold alone: no durations, and no runner state, which describe the run now |
+| `--log FILE` | read a JSONL log instead of a desk item (give a name or `--log`, not both) |
+| `--event-key`, `--step-key`, `--time-key` | with `--log`: the JSON keys holding each line's event name (`event`), step (`step`) and time (`time`; RFC 3339 or epoch seconds) |
+| `--json` | print `{source, name, kind, live, exit, at, events_total, steps, edges, events, counts, partial, held, note}` |
+
+A log has no step model, so `show --log` lists its events and no steps. A line that is not one JSON object, or has no event name, is dropped and counted; a float, a nested value or `null` is dropped from its event and counted. The file is opened without following a symlink and only if it is a regular file, and reads stop at 32 MiB per file, 64 KiB per line and 50 000 events. A log whose last line has no newline yet holds that line back (`held` is true, and the text says so), since a writer may still be finishing it. An integer time past the year 9999 (epoch milliseconds, say) is read as no time. At most 256 fields are kept from one line.
+
+A waiting item has no run yet: `show` reads it as `waiting`, with no events.
+
+Exit codes: 0 shown; 1 no such run, or it was read only in part: a read error (shown as a `note`) or a log past the 32 MiB cap (`partial`); it is still shown; 2 a usage error.
 
 ### `forgectl desk skip <name> --reason <text>`
 
