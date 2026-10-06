@@ -233,7 +233,7 @@ func TestBuildWorkerInvocationIsolates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildWorkerInvocation: %v", err)
 	}
-	if !slices.Contains(built.Invocation.Args, "--setting-sources") || built.SessionID != id {
+	if !slices.Contains(built.Invocation.Args, "--setting-sources") || !slices.Contains(built.Invocation.Args, "--safe-mode") || built.SessionID != id {
 		t.Fatalf("argv %q, session %q: not a worker build", built.Invocation.Args, built.SessionID)
 	}
 	for _, e := range built.Invocation.Env {

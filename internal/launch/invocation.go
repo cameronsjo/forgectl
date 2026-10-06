@@ -223,10 +223,13 @@ const workerClaudeSettings = `{"useAutoModeDuringPlan":false,"permissions":{"den
 //     ~/.claude.json, not a settings layer, so the flags above leave it on: a
 //     live worker still listed the claude-in-chrome MCP server, which drives
 //     the operator's browser.
-//   - `--safe-mode` also turns off the operator's project auto-memory
+//   - `--safe-mode` also stops the operator's project auto-memory loading
 //     (MEMORY.md under ~/.claude/projects), which a live worker loaded
 //     without it. Every session writes that memory and the operator's own
 //     later sessions read it.
+//     It keeps the --settings deny rules (measured), and sets
+//     CLAUDE_CODE_DISABLE_CLAUDE_MDS, which covers CLAUDE.md files that
+//     load lazily from subdirectories (read from the binary, not measured).
 //
 // CLAUDE.md: a live interactive worker with these flags loaded no CLAUDE.md
 // or AGENTS.md at any level, a branch-committed one included. `claude -p`
