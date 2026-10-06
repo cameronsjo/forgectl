@@ -15,7 +15,7 @@ Today an unattended worker can reach far more than its worktree:
 - It loads its branch's `.claude/settings.json` hooks, `.mcp.json` servers, and `CLAUDE.md` with no review (forgectl#1050).
 - It loads the operator's user settings: every enabled plugin, every user hook (which runs outside any sandbox), and plugin MCP servers that can drive herdr panes without the herdr socket.
 - It inherits the operator's keychain `gh` login, which can merge, push to any branch, and write to any repo the operator can.
-- It can rewrite the shared `.git` refs of the repo it was branched from, so the next worker's "base" can be a commit it chose.
+- It can rewrite the shared `.git` refs of the repo it was branched from, so the next worker's "base" can be a commit it chose (not closed: workers in one repository are mutually trusting; see the 2026-10-06 amendment).
 - Its tools run as the operator's macOS user. Claude Code's sandbox covers Bash and its child processes only; Read, Edit, Write, and WebFetch are decided by the permission layer.
 
 `auto` turns each of these from "the operator approves each command" into "the classifier approves it". This ADR decides when a worker may run in `auto`, and what must be true first.
@@ -29,7 +29,7 @@ Today an unattended worker can reach far more than its worktree:
 5. **The hardening floor:**
    - **Only forgectl's settings load.** The worker starts with `--setting-sources` limited so user and project settings do not apply, a forgectl-supplied `--settings` file with plugins disabled, and `--strict-mcp-config` with a forgectl-supplied MCP config. A test proves a herdr-driving plugin tool is unreachable from a worker.
    - **Branch config is not loaded unreviewed** (forgectl#1050 fixed first). Project settings and hooks from the worktree are ignored, or checked byte-for-byte against the base commit.
-   - **The base commit comes from GitHub, not local refs.** (forgectl#1061) forgectl reads the default branch's head from the GitHub API, fetches it into a ref namespace only forgectl writes, checks the commit matches, and passes the commit hash to `git worktree add`. A worker that rewrites `refs/remotes/origin/*` changes nothing for the next worker.
+   - **A new branch starts at GitHub's default head (forgectl#1061).** A correctness fix, not a control: it stops a stale local `HEAD` being the base, and does not stop an earlier worker choosing the next one's base (see the 2026-10-06 amendment).
    - **Bash sandbox, deny by default.** Reads under the home directory are denied except the worktree and named toolchain caches. Writes are limited to the worktree and the temp dir. Network goes through an allowlist (GitHub, the package registries the repo profile names). `allowUnsandboxedCommands = false` with no `excludedCommands`, so a failed command cannot retry outside the sandbox.
    - **Non-Bash tools denied the same paths.** `permissions.deny` rules cover Read, Edit, and Write on forgectl's config and state dirs (including the legacy `claunch` path and any `XDG_*` override), `~/.claude`, `~/.dotfiles`, `~/Library/LaunchAgents`, shell startup files, and `~/.local/bin`. WebFetch and WebSearch are denied.
    - **`useAutoModeDuringPlan = false`** (forgectl#1060) in the worker settings file for every worker mode, so a `plan` worker's shell commands do not go to the classifier.
@@ -53,3 +53,16 @@ Today an unattended worker can reach far more than its worktree:
 - **A long-lived fine-grained PAT per repo.** Pull-requests write can merge through the API whatever the deny rules say, and stopping the drain leaves it live. Replaced by the worker App's short-lived tokens.
 - **A machine-user account pushing to a fork.** Cannot merge, but is a long-lived credential and does not make GitHub enforce the merge policy. Declined in favor of the App pair.
 - **Turn `auto` on everywhere once the floor ships.** Makes the work machine's posture depend on a home-machine decision. Declined: per-machine opt-in.
+
+## Amendment 2026-10-06: workers in one repository are mutually trusting
+
+Workers run in linked worktrees under `<repo>/.claude/worktrees/`, so they share the main checkout's `.git`. A worker has to write that `.git` to commit: its objects, its refs, and its worktree's admin directory. A worker that is sloppy or compromised can therefore change what the next worker in the same repository sees, and no check that reads the shared `.git` can detect it. The security review of forgectl#1126 named four such paths:
+
+- **C1:** rewrite `remote.origin.url`, an `insteadOf` rule, or an `include.path`, so forgectl reads a different repository's default branch.
+- **C2:** plant a forged object under the real head's hash. Git does not re-hash an object on a local read.
+- **I1:** add config or hooks that a later git call in the main checkout runs.
+- **I2:** plant `refs/heads/<branch>` or `refs/remotes/origin/<branch>`, so the next worker's branch "exists" at a chosen commit.
+
+Cameron's decision: keep shared worktrees and accept this boundary. The threat this floor addresses is accidents and a sloppy worker, not an adversarial one. Per-worker clones were declined: a separate `.git` per worker would remove these paths, at a cost of disk space, clone time, and branches that reach the operator's checkout only through GitHub. forgectl#1061's base from GitHub stays as a correctness fix, because a checkout's `HEAD` is often stale. It is not a control against these paths.
+
+Known-boundary rule: a review finding that needs a hostile earlier worker, or another attacker chain past this boundary, is recorded here, not designed against.

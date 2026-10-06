@@ -59,7 +59,7 @@ func TestInspectWorktree(t *testing.T) {
 	setup := func(t *testing.T) (top string, wt Worktree) {
 		t.Helper()
 		top = gitRepo(t)
-		wt, err := AddWorktree(ctx, run, top, "w", "feat")
+		wt, err := AddWorktree(ctx, run, top, "w", "feat", baseOf(t, top))
 		if err != nil {
 			t.Fatalf("AddWorktree: %v", err)
 		}
@@ -144,7 +144,7 @@ func TestInspectWorktreeEdges(t *testing.T) {
 
 	t.Run("an unpushed commit on a branch with an upstream", func(t *testing.T) {
 		top := gitRepo(t)
-		wt, err := AddWorktree(ctx, run, top, "w", "feat")
+		wt, err := AddWorktree(ctx, run, top, "w", "feat", baseOf(t, top))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -163,7 +163,7 @@ func TestInspectWorktreeEdges(t *testing.T) {
 
 	t.Run("a base that is not a commit id is unknown, never trusted", func(t *testing.T) {
 		top := gitRepo(t)
-		wt, err := AddWorktree(ctx, run, top, "w", "feat")
+		wt, err := AddWorktree(ctx, run, top, "w", "feat", baseOf(t, top))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -199,7 +199,7 @@ func TestInspectWorktreeRunsNoWorkerFilter(t *testing.T) {
 	ctx := context.Background()
 	run := fexec.OSRunner{}
 	top := gitRepo(t)
-	wt, err := AddWorktree(ctx, run, top, "w", "feat")
+	wt, err := AddWorktree(ctx, run, top, "w", "feat", baseOf(t, top))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestInspectWorktreeRefusesARedirectedGitFile(t *testing.T) {
 	ctx := context.Background()
 	run := fexec.OSRunner{}
 	top := gitRepo(t)
-	if _, err := AddWorktree(ctx, run, top, "w", "feat"); err != nil {
+	if _, err := AddWorktree(ctx, run, top, "w", "feat", baseOf(t, top)); err != nil {
 		t.Fatal(err)
 	}
 	other := gitRepo(t)
@@ -244,7 +244,7 @@ func TestInspectWorktreeRunsNoHook(t *testing.T) {
 	ctx := context.Background()
 	run := fexec.OSRunner{}
 	top := gitRepo(t)
-	wt, err := AddWorktree(ctx, run, top, "w", "feat")
+	wt, err := AddWorktree(ctx, run, top, "w", "feat", baseOf(t, top))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestCheckGitFile(t *testing.T) {
 	t.Run("a relative gitfile git wrote is accepted", func(t *testing.T) {
 		top := gitRepo(t)
 		mustGit(t, top, "config", "worktree.useRelativePaths", "true")
-		wt, err := AddWorktree(ctx, run, top, "w", "feat")
+		wt, err := AddWorktree(ctx, run, top, "w", "feat", baseOf(t, top))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -295,7 +295,7 @@ func TestCheckGitFile(t *testing.T) {
 
 	t.Run("a gitfile naming the worktrees dir's parent is refused", func(t *testing.T) {
 		top := gitRepo(t)
-		wt, err := AddWorktree(ctx, run, top, "w", "feat")
+		wt, err := AddWorktree(ctx, run, top, "w", "feat", baseOf(t, top))
 		if err != nil {
 			t.Fatal(err)
 		}
