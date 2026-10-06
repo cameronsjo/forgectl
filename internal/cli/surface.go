@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -58,6 +59,9 @@ The backend is always explicit. There is no default and no detection.`,
 	}
 	cmd.AddCommand(newSurfaceLaunchCmd(deps))
 	cmd.AddCommand(newSurfaceReadyCmd(deps))
+	cmd.AddCommand(newSurfaceBriefCmd(deps))
+	cmd.AddCommand(newSurfaceWaitCmd(deps))
+	cmd.AddCommand(newSurfaceReadCmd(deps))
 	return cmd
 }
 
@@ -68,6 +72,7 @@ func newSurfaceLaunchCmd(deps module.Deps) *cobra.Command {
 		allowPATH   bool
 		worktree    string
 		harness     string
+		brief       string
 	)
 
 	cmd := &cobra.Command{
@@ -89,7 +94,16 @@ acceptEdits, or codex read-only or workspace-write with untrusted or
 on-request approvals; pi and anything looser are refused, and workers never
 get --allow-dangerously-skip-permissions.
 
-  forgectl surface launch . --surface herdr --worktree feat/x --name x --harness codex`,
+--brief gives a worker its first brief as the harness's prompt argument, so
+the harness starts its first turn with it and nothing is typed into the pane.
+A random marker is recorded in the ledger, and the brief asks the worker to
+end with a REPORT line naming it (surface read --report). @file reads the
+brief from a file of at most 64 KiB. The brief stays in the harness's
+process arguments, where any local process can list it, so it must not hold
+a secret; point the worker at a file in the worktree instead.
+
+  forgectl surface launch . --surface herdr --worktree feat/x --name x --harness codex
+  forgectl surface launch . --surface herdr --worktree fix/login --name fix-login --brief @brief.md`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSurfaceLaunch(cmd, deps, surfaceLaunchOptions{
@@ -99,6 +113,7 @@ get --allow-dangerously-skip-permissions.
 				AllowPATH:   allowPATH,
 				Worktree:    worktree,
 				Harness:     harness,
+				Brief:       brief,
 			})
 		},
 	}
@@ -119,6 +134,8 @@ get --allow-dangerously-skip-permissions.
 		"start a worker on this branch in its own git worktree under <repo>/.claude/worktrees/<name> (herdr only; --name required)")
 	cmd.Flags().StringVar(&harness, "harness", "",
 		"run this harness instead of the one the directory's launch profile names (claude or codex)")
+	cmd.Flags().StringVar(&brief, "brief", "",
+		"a worker's first brief, text or @file, passed as the harness's prompt argument (--worktree only)")
 
 	return cmd
 }
@@ -132,6 +149,7 @@ type surfaceLaunchOptions struct {
 	AllowPATH   bool
 	Worktree    string
 	Harness     string
+	Brief       string
 }
 
 func firstArg(args []string) string {
@@ -155,6 +173,9 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 
 	if opts.Worktree != "" {
 		return runWorkerLaunch(cmd, deps, opts)
+	}
+	if opts.Brief != "" {
+		return WithExitCode(errors.New("--brief needs --worktree; only a worker launch takes a brief"), 2)
 	}
 
 	adapter, err := surfaceAdapterForWithWarnings(opts.Backend, cmd.ErrOrStderr())

@@ -37,6 +37,9 @@ type workerSteps struct {
 	build       func(cwd string) (launch.BuiltInvocation, error)
 	launch      func(ctx context.Context, inv launch.Invocation) (backend.Ref, error)
 	now         func() time.Time
+	// brief is the first brief's ledger record, or nil for a launch with
+	// none. It is written with the pending row, before anything starts.
+	brief *worker.Brief
 }
 
 // workerLaunched is what a successful worker launch reports.
@@ -50,7 +53,7 @@ type workerLaunched struct {
 // StageFailed with whatever the earlier steps recorded, so the next
 // coordinator can find a worktree or workspace a dead launch left behind.
 func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, s workerSteps) (workerLaunched, error) {
-	if err := led.Begin(worker.Row{Name: name, Branch: branch, StartedAt: s.now().UTC()}); err != nil {
+	if err := led.Begin(worker.Row{Name: name, Branch: branch, StartedAt: s.now().UTC(), Brief: s.brief}); err != nil {
 		return workerLaunched{}, err
 	}
 	fail := func(err error) (workerLaunched, error) {
@@ -157,6 +160,10 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	if err != nil {
 		return WithExitCode(termsafe.Error(err), 2)
 	}
+	prompt, brief, err := launchBrief(opts.Brief, time.Now)
+	if err != nil {
+		return WithExitCode(err, 2)
+	}
 	service := surface.NewService(adapter, surface.Policy{AllowPATHBinary: opts.AllowPATH}, "")
 
 	launched, err := runWorkerSteps(ctx, led, opts.DisplayName, opts.Worktree, workerSteps{
@@ -166,6 +173,7 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 		build: func(cwd string) (launch.BuiltInvocation, error) {
 			req := surfaceInvocationRequest(deps.Cfg.Launch, cwd, injected, unset, opts.Harness)
 			req.Worker = true
+			req.Prompt = prompt
 			return launch.BuildInvocation(req)
 		},
 		launch: func(ctx context.Context, inv launch.Invocation) (backend.Ref, error) {
@@ -178,7 +186,8 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 			}
 			return result.Ref(), nil
 		},
-		now: time.Now,
+		now:   time.Now,
+		brief: brief,
 	})
 	if err != nil {
 		return err
@@ -190,4 +199,26 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	}
 	_, err = fmt.Fprintln(out, safePath(launched.worktree))
 	return err
+}
+
+// launchBrief turns --brief into the prompt argument and its ledger record:
+// the checked text with the report instruction under a fresh marker. An empty
+// flag is no brief.
+func launchBrief(arg string, now func() time.Time) (string, *worker.Brief, error) {
+	if arg == "" {
+		return "", nil, nil
+	}
+	text, err := readBriefArg(arg)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := worker.CheckBrief(text, worker.ViaLaunch); err != nil {
+		return "", nil, err
+	}
+	marker, err := worker.NewMarker()
+	if err != nil {
+		return "", nil, err
+	}
+	b := &worker.Brief{Marker: marker, Count: 1, SentAt: now().UTC(), Via: worker.ViaLaunch}
+	return worker.Compose(text, marker, worker.ViaLaunch), b, nil
 }

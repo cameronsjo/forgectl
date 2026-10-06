@@ -95,67 +95,96 @@ that cannot be used, a harness with no predicates).
 }
 
 func runSurfaceReady(cmd *cobra.Command, deps module.Deps, opts readyOptions) error {
-	if err := worker.ValidName(opts.Name); err != nil {
-		return WithExitCode(fmt.Errorf("name: %w", err), 2)
-	}
 	if opts.Timeout <= 0 || opts.Interval <= 0 {
 		return WithExitCode(errors.New("--timeout and --interval must be positive"), 2)
 	}
-	adapter, err := newHerdrAdapter(cmd.ErrOrStderr())
+	w, err := openWorker(cmd, deps, opts.Repo, opts.Name)
 	if err != nil {
-		return WithExitCode(err, 2)
-	}
-	herdr, ok := adapter.(*herdradapter.Adapter)
-	if !ok {
-		return errors.New("forgectl: the herdr adapter has an unexpected type")
-	}
-
-	ctx := cmd.Context()
-	target, err := projects.New(deps.Runner).ResolveTarget(opts.Repo)
-	if err != nil {
-		return WithExitCode(err, 2)
-	}
-	top, err := worker.RepoTop(ctx, deps.Runner, target)
-	if err != nil {
-		return WithExitCode(err, 2)
-	}
-	led, err := worker.Open(top, herdr.Session())
-	if err != nil {
-		return WithExitCode(err, 2)
-	}
-	row, ref, err := launchedWorker(led, opts.Name)
-	if err != nil {
-		return WithExitCode(err, 2)
-	}
-
-	path, err := config.SurfaceReadyPredicatesPath()
-	if err != nil {
-		return WithExitCode(err, 2)
-	}
-	table, err := ready.Load(path)
-	if err != nil {
-		return WithExitCode(termsafe.Error(err), 2)
-	}
-	if !table.Has(row.Harness) {
-		return WithExitCode(fmt.Errorf("no readiness predicates for harness %q (built-in table, or %s)", row.Harness, path), 2)
+		return err
 	}
 
 	// The deadline bounds the herdr calls too: a wedged server that accepts
 	// the socket and never answers must end as unreadable, not hang.
 	// One interval of slack, so the loop's own timeout check (which knows the
 	// last verdict) normally ends the wait before the deadline cuts a read.
-	ctx, cancel := context.WithTimeout(ctx, opts.Timeout+opts.Interval)
+	ctx, cancel := context.WithTimeout(cmd.Context(), opts.Timeout+opts.Interval)
 	defer cancel()
 	res := waitReady(ctx, readyLoop{
-		read:     func(ctx context.Context) (ready.Screen, error) { return herdr.WorkerScreen(ctx, ref) },
-		evaluate: func(s ready.Screen) ready.Verdict { return table.Evaluate(row.Harness, s) },
+		read:     w.read,
+		evaluate: w.evaluate,
 		now:      time.Now,
 		sleep:    resume.SleepContext,
 		timeout:  opts.Timeout,
 		interval: opts.Interval,
 	})
-	res.Name, res.Harness = row.Name, row.Harness
+	res.Name, res.Harness = w.row.Name, w.row.Harness
 	return reportReady(cmd, res, opts.JSON)
+}
+
+// openedWorker is one launched worker, ready to be read and written: its
+// ledger row and reference, the adapter that reaches its pane, and the
+// readiness predicates for its harness.
+type openedWorker struct {
+	herdr *herdradapter.Adapter
+	led   *worker.Ledger
+	row   worker.Row
+	ref   backend.Ref
+	table *ready.Table
+}
+
+func (w *openedWorker) read(ctx context.Context) (ready.Screen, error) {
+	return w.herdr.WorkerScreen(ctx, w.ref)
+}
+
+func (w *openedWorker) evaluate(s ready.Screen) ready.Verdict {
+	return w.table.Evaluate(w.row.Harness, s)
+}
+
+// openWorker finds the launched worker name in repo's ledger and loads its
+// harness's predicates. Every failure is a usage or setup error (exit 2).
+func openWorker(cmd *cobra.Command, deps module.Deps, repo, name string) (*openedWorker, error) {
+	if err := worker.ValidName(name); err != nil {
+		return nil, WithExitCode(fmt.Errorf("name: %w", err), 2)
+	}
+	adapter, err := newHerdrAdapter(cmd.ErrOrStderr())
+	if err != nil {
+		return nil, WithExitCode(err, 2)
+	}
+	herdr, ok := adapter.(*herdradapter.Adapter)
+	if !ok {
+		return nil, errors.New("forgectl: the herdr adapter has an unexpected type")
+	}
+
+	ctx := cmd.Context()
+	target, err := projects.New(deps.Runner).ResolveTarget(repo)
+	if err != nil {
+		return nil, WithExitCode(err, 2)
+	}
+	top, err := worker.RepoTop(ctx, deps.Runner, target)
+	if err != nil {
+		return nil, WithExitCode(err, 2)
+	}
+	led, err := worker.Open(top, herdr.Session())
+	if err != nil {
+		return nil, WithExitCode(err, 2)
+	}
+	row, ref, err := launchedWorker(led, name)
+	if err != nil {
+		return nil, WithExitCode(err, 2)
+	}
+
+	path, err := config.SurfaceReadyPredicatesPath()
+	if err != nil {
+		return nil, WithExitCode(err, 2)
+	}
+	table, err := ready.Load(path)
+	if err != nil {
+		return nil, WithExitCode(termsafe.Error(err), 2)
+	}
+	if !table.Has(row.Harness) {
+		return nil, WithExitCode(fmt.Errorf("no readiness predicates for harness %q (built-in table, or %s)", row.Harness, path), 2)
+	}
+	return &openedWorker{herdr: herdr, led: led, row: row, ref: ref, table: table}, nil
 }
 
 // launchedWorker finds the row named name and decodes its reference. Only a

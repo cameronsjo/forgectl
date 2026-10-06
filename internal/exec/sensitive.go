@@ -126,6 +126,12 @@ const (
 	// reads of a worker's root pane: its visible text and herdr's agent status.
 	KindHerdrScreenRead
 	KindHerdrPaneStatus
+	// KindHerdrSendText and KindHerdrSendKeys are `surface brief`'s two
+	// writes: the brief typed without Enter, then Enter as its own call once
+	// the read-back matched. Both go only to a pane the adapter has just
+	// placed in a workspace forgectl owns.
+	KindHerdrSendText
+	KindHerdrSendKeys
 
 	// KindSopsEdit drives `sops <file>` with forgectl re-invoked as the
 	// editor. KindSopsExtract is the read-back that proves what landed.
@@ -177,6 +183,8 @@ var kindNames = [kindCount]string{
 	KindHerdrPaneRun:     "herdr.pane-run",
 	KindHerdrScreenRead:  "herdr.screen-read",
 	KindHerdrPaneStatus:  "herdr.pane-status",
+	KindHerdrSendText:    "herdr.send-text",
+	KindHerdrSendKeys:    "herdr.send-keys",
 
 	KindSopsEdit:    "sops.edit",
 	KindSopsExtract: "sops.extract",
