@@ -25,6 +25,7 @@ import (
 // Mutation that turns it red: in newTmuxCmdWith's RunE, hand the chosen
 // argv to runHubVerb directly instead of deferHubVerb.
 func TestTmux_AFailingHubVerbIsRenderedOnce(t *testing.T) {
+	stubInteractiveTTY(t, true)
 	deps := module.Deps{Runner: &exec.FakeRunner{}}
 	hub := func(context.Context, *tmux.Client, tui.RunOptions) (tui.Action, error) {
 		return tui.Action{Kind: tui.ActionRunVerb, Argv: []string{"boom"}}, nil
@@ -119,5 +120,39 @@ func TestExecDispatch_ACancelledDispatchNeverRunsTheDeferredVerb(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "not running ok") {
 		t.Errorf("stderr = %q, want a line saying the verb did not run", stderr.String())
+	}
+}
+
+func stubInteractiveTTY(t *testing.T, interactive bool) {
+	t.Helper()
+	prev := isInteractiveTTY
+	isInteractiveTTY = func() bool { return interactive }
+	t.Cleanup(func() { isInteractiveTTY = prev })
+}
+
+// TestTmux_BareOffTerminalRefusesWithoutOpeningTheHub pins forgectl#1100:
+// off a terminal `forgectl tmux` must not start the TUI (which writes
+// alt-screen sequences into a pipe) and must name the plain forms.
+//
+// Mutation that turns it red: delete the isInteractiveTTY check in
+// newTmuxCmdWith's RunE.
+func TestTmux_BareOffTerminalRefusesWithoutOpeningTheHub(t *testing.T) {
+	stubInteractiveTTY(t, false)
+	deps := module.Deps{Runner: &exec.FakeRunner{}}
+	opened := false
+	hub := func(context.Context, *tmux.Client, tui.RunOptions) (tui.Action, error) {
+		opened = true
+		return tui.Action{}, nil
+	}
+	cmd := newTmuxCmdWith(deps, tmux.New(deps.Runner), hub)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs(nil)
+	err := cmd.Execute()
+	if opened {
+		t.Fatal("the hub opened off a terminal")
+	}
+	if err == nil || !strings.Contains(err.Error(), "needs a terminal") || !strings.Contains(err.Error(), "forgectl tmux ls") {
+		t.Fatalf("err = %v, want a terminal-required message naming the plain forms", err)
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
@@ -625,7 +624,7 @@ func TestHubEveryAreaOnPageOneFrom16Rows(t *testing.T) {
 // typeAndFilter types s into an open filter the way a terminal does,
 // delivering the filter results each key asks for. bubbles filters in a
 // returned command; this runs those commands and feeds back only their
-// FilterMatchesMsg, dropping any (a cursor blink) that does not answer fast.
+// filterRun, dropping any (a cursor blink) that does not answer fast.
 func typeAndFilter(t *testing.T, m model, s string) model {
 	t.Helper()
 	var deliver func(cmd tea.Cmd)
@@ -646,7 +645,7 @@ func typeAndFilter(t *testing.T, m model, s string) model {
 			for _, c := range t {
 				deliver(c)
 			}
-		case list.FilterMatchesMsg:
+		case filterRun:
 			out, next := m.Update(t)
 			m = out.(model)
 			deliver(next)

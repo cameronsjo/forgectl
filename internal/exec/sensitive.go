@@ -122,6 +122,10 @@ const (
 	KindHerdrPaneSplit
 	KindHerdrPaneRename
 	KindHerdrPaneRun
+	// KindHerdrPaneMove is `pane move`, which `desk layout --below` uses to
+	// park the tab's other panes and bring them back. It carries only pane
+	// and tab ids, but it joins the other layout verbs on this seam.
+	KindHerdrPaneMove
 	// KindHerdrScreenRead and KindHerdrPaneStatus are `surface ready`'s two
 	// reads of a worker's root pane: its visible text and herdr's agent status.
 	KindHerdrScreenRead
@@ -185,6 +189,7 @@ var kindNames = [kindCount]string{
 	KindHerdrPaneSplit:   "herdr.pane-split",
 	KindHerdrPaneRename:  "herdr.pane-rename",
 	KindHerdrPaneRun:     "herdr.pane-run",
+	KindHerdrPaneMove:    "herdr.pane-move",
 	KindHerdrScreenRead:  "herdr.screen-read",
 	KindHerdrPaneStatus:  "herdr.pane-status",
 	KindHerdrSendText:    "herdr.send-text",

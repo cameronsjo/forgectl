@@ -11,6 +11,7 @@ import (
 
 	"charm.land/huh/v2"
 
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
@@ -737,7 +738,7 @@ func rollbackPrompt(ref Ref, bc Breadcrumb) string {
 // stood in for this, and its yes deleted a clean room.
 func confirmRemoval(prompt string, th theme.Theme) (bool, error) {
 	ok := false
-	err := huh.NewForm(
+	err := keymap.Suspendable(huh.NewForm(
 		huh.NewGroup(
 			huh.NewNote().
 				Title("Remove this clean room? — this cannot be undone").
@@ -748,7 +749,7 @@ func confirmRemoval(prompt string, th theme.Theme) (bool, error) {
 				Negative("Cancel").
 				Value(&ok),
 		),
-	).WithTheme(th.Huh()).Run()
+	)).WithTheme(th.Huh()).Run()
 	return ok, err
 }
 

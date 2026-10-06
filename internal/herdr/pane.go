@@ -174,6 +174,101 @@ func PaneReleaseDesk(ctx context.Context, run exec.SensitiveRunner, herdrPath, p
 	return err
 }
 
+// PaneMove describes one `herdr pane move`. The pane keeps its terminal, so
+// whatever runs in it keeps running; only its place in the layout changes.
+type PaneMove struct {
+	// Pane is the pane to move.
+	Pane string
+	// NewTab moves the pane into a new tab of its workspace. Otherwise Tab
+	// names the destination tab.
+	NewTab bool
+	Tab    string
+	// Target is the pane in Tab to split; "" splits the tab's focused pane.
+	// Direction and Ratio apply only with Tab (the first pane of a new tab
+	// fills it).
+	Target    string
+	Direction SplitDirection
+	// Ratio is the share Target keeps, in (0, 1).
+	Ratio float64
+}
+
+// MovedPane is what `herdr pane move` reports: the pane as it is after the
+// move, and the new tab when the move made one.
+type MovedPane struct {
+	Pane   Pane
+	NewTab string
+}
+
+// PanePlace runs `herdr pane move` without moving focus. A move herdr
+// declines (changed=false) returns an error, so a caller never carries on as
+// if the pane had moved.
+func PanePlace(ctx context.Context, run exec.SensitiveRunner, herdrPath string, m PaneMove) (MovedPane, error) {
+	if err := checkID("pane id", m.Pane); err != nil {
+		return MovedPane{}, err
+	}
+	args := []exec.Arg{exec.MustFixed("pane"), exec.MustFixed("move"), exec.Opaque(m.Pane)}
+	if m.NewTab {
+		args = append(args, exec.MustFixed("--new-tab"))
+	} else {
+		if err := checkID("tab id", m.Tab); err != nil {
+			return MovedPane{}, err
+		}
+		args = append(args, exec.MustFixed("--tab"), exec.Opaque(m.Tab))
+		if m.Target != "" {
+			if err := checkID("pane id", m.Target); err != nil {
+				return MovedPane{}, err
+			}
+			args = append(args, exec.MustFixed("--target-pane"), exec.Opaque(m.Target))
+		}
+		switch m.Direction {
+		case SplitRight:
+			args = append(args, exec.MustFixed("--split"), exec.MustFixed("right"))
+		case SplitDown:
+			args = append(args, exec.MustFixed("--split"), exec.MustFixed("down"))
+		default:
+			return MovedPane{}, fmt.Errorf("herdr: unknown split direction %q", m.Direction)
+		}
+		if !(m.Ratio > 0 && m.Ratio < 1) {
+			return MovedPane{}, fmt.Errorf("herdr: move ratio %v is not between 0 and 1", m.Ratio)
+		}
+		args = append(args, exec.MustFixed("--ratio"), exec.Opaque(strconv.FormatFloat(m.Ratio, 'f', 2, 64)))
+	}
+	args = append(args, exec.MustFixed("--no-focus"))
+	out, err := runVerb(ctx, run, herdrPath, exec.KindHerdrPaneMove, "pane move", args)
+	if err != nil {
+		return MovedPane{}, err
+	}
+	r, err := wire.DecodeResult[struct {
+		MoveResult *struct {
+			Changed    *bool `json:"changed"`
+			Pane       *Pane `json:"pane"`
+			CreatedTab *struct {
+				TabID string `json:"tab_id"`
+			} `json:"created_tab"`
+		} `json:"move_result"`
+	}](out)
+	if err != nil {
+		return MovedPane{}, fmt.Errorf("herdr pane move: %w", err)
+	}
+	mr := r.MoveResult
+	switch {
+	case mr == nil || mr.Changed == nil:
+		return MovedPane{}, errors.New("herdr pane move: the reply has no move_result.changed")
+	case !*mr.Changed:
+		return MovedPane{}, fmt.Errorf("herdr pane move: herdr declined to move pane %s", printableMax(m.Pane))
+	case mr.Pane == nil || mr.Pane.PaneID == "" || mr.Pane.TerminalID == "":
+		return MovedPane{}, errors.New("herdr pane move: the reply names no pane_id and terminal_id")
+	}
+	out2 := MovedPane{Pane: *mr.Pane}
+	if mr.CreatedTab != nil {
+		out2.NewTab = mr.CreatedTab.TabID
+	}
+	if m.NewTab && out2.NewTab == "" {
+		out2.NewTab = mr.Pane.TabID
+	}
+	return out2, nil
+}
+
 // CheckRunCommand reports why command cannot be typed by [PaneRun], or nil.
 func CheckRunCommand(command string) error {
 	switch {
