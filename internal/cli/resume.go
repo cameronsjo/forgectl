@@ -258,17 +258,14 @@ func pickSession(sessions []resume.Session, th theme.Theme, note string) (resume
 		opts[i] = huh.NewOption(label, s.ID)
 	}
 
-	desc := "enter resume · / filter · esc cancel"
-	if note != "" {
-		desc += "\n" + note
-	}
+	sel := sessionSelect{shown: len(sessions), note: note, width: w}
 	var chosen string
-	sel := huh.NewSelect[string]().
+	sel.Select = huh.NewSelect[string]().
 		Title("Recent sessions").
-		Description(desc).
+		Description(sel.placeholderDescription()).
 		Options(opts...).
 		Value(&chosen)
-	form := huh.NewForm(huh.NewGroup(sessionSelect{sel})).
+	form := huh.NewForm(huh.NewGroup(sel)).
 		WithKeyMap(keymap.Cancel()).WithTheme(th.Huh())
 	// Without a height the list is as tall as the history and the title
 	// scrolls off the top of a short terminal; with one huh scrolls the rows.

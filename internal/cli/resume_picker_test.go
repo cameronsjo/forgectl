@@ -92,8 +92,8 @@ func TestLayoutPicker_ColumnsAlign(t *testing.T) {
 
 // TestSessionPickerNote pins #1105 problem 3: a list cut at the limit says so.
 func TestSessionPickerNote(t *testing.T) {
-	if got := sessionPickerNote(25, 25); !strings.Contains(got, "25") || !strings.Contains(got, "--limit") {
-		t.Errorf("a list cut at its limit must say so and name --limit, got %q", got)
+	if got := sessionPickerNote(25, 25); !strings.Contains(got, "25") || !strings.Contains(got, "resume <text>") {
+		t.Errorf("a list cut at its limit must say so and name the way to older ones, got %q", got)
 	}
 	if got := sessionPickerNote(25, 0); got == "" {
 		t.Error("limit 0 means the default of 25; a full list must still say so")
@@ -117,28 +117,81 @@ func typeKeys(m huh.Model, keys ...string) huh.Model {
 	return m
 }
 
+func newTestSessionSelect(note string, shown, width int) (huh.Model, *huh.Select[string]) {
+	ss := sessionSelect{shown: shown, note: note, width: width}
+	var chosen string
+	sel := huh.NewSelect[string]().Title("Recent sessions").Description(ss.placeholderDescription()).
+		Options(huh.NewOption("alpha one", "a"), huh.NewOption("beta two", "b")).
+		Value(&chosen).WithKeyMap(keymap.Cancel()).WithWidth(width).WithHeight(8).(*huh.Select[string])
+	ss.Select = sel
+	sel.Focus()
+	return ss, sel
+}
+
+func view(m huh.Model) string { return ansi.Strip(m.View()) }
+
 // TestSessionSelect_EmptyFilterSaysSo pins #1105 problem 5: a filter with no
 // match shows a message instead of a column of blank rows, and the wrapper
 // survives huh's Update round trip (huh stores whatever Update returns).
 func TestSessionSelect_EmptyFilterSaysSo(t *testing.T) {
-	var chosen string
-	sel := huh.NewSelect[string]().Title("Recent sessions").
-		Options(huh.NewOption("alpha one", "a"), huh.NewOption("beta two", "b")).
-		Value(&chosen).WithKeyMap(keymap.Cancel()).WithWidth(60).WithHeight(8)
-	var m huh.Model = sessionSelect{sel.(*huh.Select[string])}
-	sel.Focus()
+	m, _ := newTestSessionSelect("", 2, 60)
 
 	m = typeKeys(m, "/", "z", "z")
 	if _, ok := m.(sessionSelect); !ok {
 		t.Fatalf("Update returned %T; the wrapper was dropped from the form", m)
 	}
-	if v := ansi.Strip(m.View()); !strings.Contains(v, noMatchesMessage) {
-		t.Errorf("an empty filter must show %q, got:\n%s", noMatchesMessage, v)
+	if v := view(m); !strings.Contains(v, "No match.") {
+		t.Errorf("an empty filter must say so, got:\n%s", v)
 	}
 
 	m = typeKeys(m, "backspace", "backspace", "a")
-	if v := ansi.Strip(m.View()); strings.Contains(v, noMatchesMessage) || !strings.Contains(v, "alpha one") {
+	if v := view(m); strings.Contains(v, "No match") || !strings.Contains(v, "alpha one") {
 		t.Errorf("a matching filter must show its rows and no message, got:\n%s", v)
+	}
+}
+
+// TestSessionSelect_EmptyFilterOfACutListNamesTheCut: when the list was cut,
+// "no match" must not read as "no such session".
+func TestSessionSelect_EmptyFilterOfACutListNamesTheCut(t *testing.T) {
+	m, _ := newTestSessionSelect(sessionPickerNote(25, 25), 25, 60)
+	m = typeKeys(m, "/", "z")
+	if v := view(m); !strings.Contains(v, "No match in the newest 25.") {
+		t.Errorf("got:\n%s", v)
+	}
+}
+
+// TestSessionSelect_HeaderFollowsTheMode pins the hint wording: browsing says
+// how to resume, filter and cancel; typing a filter says how to keep it and
+// that Esc cancels the picker (it does not just clear the filter).
+func TestSessionSelect_HeaderFollowsTheMode(t *testing.T) {
+	note := sessionPickerNote(25, 25)
+	m, _ := newTestSessionSelect(note, 25, 80)
+
+	v := view(m)
+	if !strings.Contains(v, browseHint) || !strings.Contains(v, note) {
+		t.Errorf("browsing must show the hint and the cut note, got:\n%s", v)
+	}
+
+	m = typeKeys(m, "/")
+	v = view(m)
+	if !strings.Contains(v, filterHint) || strings.Contains(v, browseHint) {
+		t.Errorf("typing a filter must show the filter hint, got:\n%s", v)
+	}
+	if !strings.Contains(v, "searches the newest 25 only") {
+		t.Errorf("typing a filter on a cut list must say what it searches, got:\n%s", v)
+	}
+	if strings.Contains(v, note) {
+		t.Errorf("the cut note is noise while filtering, got:\n%s", v)
+	}
+}
+
+// TestSessionSelect_HeaderNeverWraps: an injected line is cut to the terminal.
+func TestSessionSelect_HeaderNeverWraps(t *testing.T) {
+	m, _ := newTestSessionSelect(sessionPickerNote(25, 25), 25, 40)
+	for _, line := range strings.Split(view(m), "\n") {
+		if ansi.StringWidth(line) > 40 {
+			t.Errorf("line is %d cells at width 40: %q", ansi.StringWidth(line), line)
+		}
 	}
 }
 

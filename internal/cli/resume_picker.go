@@ -119,16 +119,48 @@ func sessionPickerLabel(s resume.Session, l pickerLayout) string {
 	return strings.Join(parts, "  ")
 }
 
-// sessionSelect is the picker's Select with one addition: when `/` filters
-// the list to nothing, it says so. huh draws a column of blank rows then, and
-// the typed filter has replaced the title, so the user lost the context
-// (#1105). Every other method is huh's own through the embedded pointer.
-type sessionSelect struct{ *huh.Select[string] }
+// sessionSelect is the picker's Select with three additions, none of which
+// huh offers a hook for:
+//
+//   - a header under the title whose hint follows the mode (browsing or
+//     typing a filter), because huh's own footer reads `enter set filter •
+//     enter submit` and never says how to leave the filter (#1105);
+//   - a note, while browsing, that the list was cut at its limit;
+//   - a message when `/` filters the list to nothing, instead of a column of
+//     blank rows with the typed filter in place of the title.
+//
+// Every other method is huh's own through the embedded pointer. The Select is
+// built with a placeholder Description of the right line count so huh sizes
+// the viewport for the header; View swaps the real text in.
+type sessionSelect struct {
+	*huh.Select[string]
+	shown int    // rows in the list
+	note  string // sessionPickerNote, or empty
+	width int    // terminal columns, to cut the header lines; 0 = no cut
+}
 
-const noMatchesMessage = "No match. Backspace to edit."
+const (
+	browseHint = "enter resume · / filter · esc cancel"
+	filterHint = "enter keeps filter · esc cancels"
+)
+
+// headerLines is how many lines the header needs, which the placeholder
+// Description must match.
+func (s sessionSelect) headerLines() int {
+	if s.note != "" {
+		return 2
+	}
+	return 1
+}
+
+// placeholderDescription is the Description the Select is built with: one
+// short line per header line, so huh never wraps it and the count is exact.
+func (s sessionSelect) placeholderDescription() string {
+	return strings.Repeat("\n.", s.headerLines())[1:]
+}
 
 // Update keeps the wrapper in the form's field slot: huh stores whatever
-// Update returns, so returning the bare Select would drop the override.
+// Update returns, so returning the bare Select would drop the overrides.
 func (s sessionSelect) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
 	m, cmd := s.Select.Update(msg)
 	if sel, ok := m.(*huh.Select[string]); ok {
@@ -137,26 +169,65 @@ func (s sessionSelect) Update(msg tea.Msg) (huh.Model, tea.Cmd) {
 	return s, cmd
 }
 
-// View swaps the first blank row of an empty list for the message.
+// View renders the Select, then swaps in the header and, for an empty list,
+// the no-match message.
 func (s sessionSelect) View() string {
-	v := s.Select.View()
-	if _, ok := s.Hovered(); ok {
-		return v
+	lines := strings.Split(s.Select.View(), "\n")
+	if len(lines) < 1+s.headerLines() {
+		return strings.Join(lines, "\n")
 	}
-	lines := strings.Split(v, "\n")
-	for i := 1; i < len(lines); i++ {
-		// A blank row is the field's border and spaces only.
-		if strings.Trim(ansi.Strip(lines[i]), "┃ \t") != "" {
-			continue
+	prefix := borderPrefix(lines[0])
+	typing := s.GetFiltering()
+	filtered := typing || strings.HasPrefix(strings.TrimLeft(strings.Trim(ansi.Strip(lines[0]), "┃ \t"), " "), "/")
+
+	header := []string{browseHint}
+	switch {
+	case typing:
+		header = []string{filterHint}
+		if s.note != "" {
+			header = append(header, fmt.Sprintf("searches the newest %d only", s.shown))
 		}
-		prefix := ""
-		if at := strings.IndexRune(lines[i], '┃'); at >= 0 {
-			prefix = lines[i][:at+len("┃")] + ansi.ResetStyle + " "
+	case s.note != "" && !filtered:
+		header = append(header, s.note)
+	case s.note != "":
+		header = append(header, "")
+	}
+	for i := range header {
+		lines[1+i] = prefix + s.cut(header[i])
+	}
+
+	if _, ok := s.Hovered(); !ok {
+		msg := "No match."
+		if s.note != "" {
+			msg = fmt.Sprintf("No match in the newest %d.", s.shown)
 		}
-		lines[i] = prefix + noMatchesMessage
-		break
+		for i := 1 + s.headerLines(); i < len(lines); i++ {
+			// A blank row is the field's border and spaces only.
+			if strings.Trim(ansi.Strip(lines[i]), "┃ \t") == "" {
+				lines[i] = prefix + s.cut(msg)
+				break
+			}
+		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// cut keeps an injected line inside the terminal so it never wraps.
+func (s sessionSelect) cut(line string) string {
+	if s.width > 0 {
+		return truncate(line, s.width-pickerChrome+2)
+	}
+	return line
+}
+
+// borderPrefix is the start of a field line up to and including its left
+// border, plus a style reset and a space, so an injected line sits in the
+// same gutter. Empty when the line has no border.
+func borderPrefix(line string) string {
+	if at := strings.IndexRune(line, '┃'); at >= 0 {
+		return line[:at+len("┃")] + ansi.ResetStyle + " "
+	}
+	return ""
 }
 
 // sessionPickerNote says what the picker is not showing: the list is the
@@ -170,5 +241,5 @@ func sessionPickerNote(shown, limit int) string {
 	if shown < limit {
 		return ""
 	}
-	return fmt.Sprintf("Newest %d shown. Older: `forgectl resume <text>` or --limit N.", shown)
+	return fmt.Sprintf("%d newest · older: resume <text>", shown)
 }
