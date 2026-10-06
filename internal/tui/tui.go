@@ -615,6 +615,13 @@ func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		var cmd tea.Cmd
 		m.l, cmd = m.l.Update(msg)
+		if _, matches := msg.(list.FilterMatchesMsg); matches && m.hubScreen() {
+			// Filter results arrive after the key that asked for them, and
+			// bubbles counts pages from the previous result set until the
+			// list is sized again; size it now so the page number is this
+			// query's.
+			m.applySize()
+		}
 		return m, cmd
 	}
 	// The hub screens size the list by filter state (applySize), and the

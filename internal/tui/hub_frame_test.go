@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
@@ -616,6 +618,67 @@ func TestHubEveryAreaOnPageOneFrom16Rows(t *testing.T) {
 				t.Errorf("at %dx%d setup is not on page one:\n%s", w, h, got)
 			}
 			assertFrameFits(t, got, w, h)
+		}
+	}
+}
+
+// typeAndFilter types s into an open filter the way a terminal does,
+// delivering the filter results each key asks for. bubbles filters in a
+// returned command; this runs those commands and feeds back only their
+// FilterMatchesMsg, dropping any (a cursor blink) that does not answer fast.
+func typeAndFilter(t *testing.T, m model, s string) model {
+	t.Helper()
+	var deliver func(cmd tea.Cmd)
+	deliver = func(cmd tea.Cmd) {
+		if cmd == nil {
+			return
+		}
+		got := make(chan tea.Msg, 1)
+		go func() { got <- cmd() }()
+		var msg tea.Msg
+		select {
+		case msg = <-got:
+		case <-time.After(100 * time.Millisecond):
+			return
+		}
+		switch t := msg.(type) {
+		case tea.BatchMsg:
+			for _, c := range t {
+				deliver(c)
+			}
+		case list.FilterMatchesMsg:
+			out, next := m.Update(t)
+			m = out.(model)
+			deliver(next)
+		}
+	}
+	for _, r := range s {
+		k := tea.KeyPressMsg{Code: r, Text: string(r)}
+		if r == '\b' {
+			k = tea.KeyPressMsg{Code: tea.KeyBackspace}
+		}
+		out, cmd := m.Update(k)
+		m = out.(model)
+		deliver(cmd)
+	}
+	return m
+}
+
+// TestHubSearchPageCountFollowsTheQuery pins the pager while a search is
+// typed: after each key, the page count is the one for the rows that query
+// matched, not the previous query's.
+func TestHubSearchPageCountFollowsTheQuery(t *testing.T) {
+	m := frameModel(80, 16)
+	m = typeAndFilter(t, m, "/")
+	for _, step := range []string{"e", "n", "\b", "x"} {
+		m = typeAndFilter(t, m, step)
+		perPage := m.l.Paginator.PerPage
+		want := (len(m.l.VisibleItems()) + perPage - 1) / perPage
+		if want < 1 {
+			want = 1
+		}
+		if got := m.l.Paginator.TotalPages; got != want {
+			t.Errorf("after %q (query %q): %d pages for %d rows at %d a page, want %d", step, m.l.FilterValue(), got, len(m.l.VisibleItems()), perPage, want)
 		}
 	}
 }
