@@ -44,11 +44,11 @@ from projects list --json, or rerun interactively when no sshUrl is available.`,
 				return worktreeOnly(ctx, client, cmd, r, branch)
 			}
 
-			all, notes, err := client.Inventory(ctx)
+			all, held, err := loadInventory(cmd, client)
 			if err != nil {
 				return err
 			}
-			renderDegradationNotes(cmd, notes)
+			defer held.flush()
 			if len(all) == 0 {
 				return fmt.Errorf("no projects found across local, GitHub, or Gitea")
 			}
@@ -59,13 +59,15 @@ from projects list --json, or rerun interactively when no sshUrl is available.`,
 				return fmt.Errorf("no project matching %q across local, GitHub, or Gitea", query)
 			}
 			if len(candidates) == 1 {
+				held.flush()
 				return worktreeOnly(ctx, client, cmd, candidates[0], branch)
 			}
 
-			chosen, err := chooseRepo(cmd, candidates, projectSelectionWorktree, th)
+			chosen, err := chooseRepo(cmd, candidates, projectSelectionWorktree, th, held)
 			if err != nil {
 				return err
 			}
+			held.flush()
 			return worktreeOnly(ctx, client, cmd, chosen, branch)
 		},
 	}

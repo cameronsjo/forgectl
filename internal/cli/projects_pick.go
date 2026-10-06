@@ -46,11 +46,11 @@ when possible, inspect identities with projects list --json, or rerun interactiv
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
-			all, notes, err := client.Inventory(ctx)
+			all, held, err := loadInventory(cmd, client)
 			if err != nil {
 				return err
 			}
-			renderDegradationNotes(cmd, notes)
+			defer held.flush()
 			if len(all) == 0 {
 				return fmt.Errorf("no projects found across local, GitHub, or Gitea")
 			}
@@ -63,23 +63,25 @@ when possible, inspect identities with projects list --json, or rerun interactiv
 					return fmt.Errorf("no project matching %q across local, GitHub, or Gitea", query)
 				}
 				if len(candidates) == 1 {
+					held.flush()
 					return openOrClone(ctx, client, cmd, candidates[0])
 				}
 				// Multiple matches → interactive selector below.
 			}
 
-			chosen, err := chooseRepo(cmd, candidates, projectSelectionPick, th)
+			chosen, err := chooseRepo(cmd, candidates, projectSelectionPick, th, held)
 			if err != nil {
 				return err
 			}
+			held.flush()
 			return openOrClone(ctx, client, cmd, chosen)
 		},
 	}
 }
 
-func chooseRepo(cmd *cobra.Command, repos []projects.Repo, mode projectSelectionMode, th theme.Theme) (projects.Repo, error) {
+func chooseRepo(cmd *cobra.Command, repos []projects.Repo, mode projectSelectionMode, th theme.Theme, held *heldNotes) (projects.Repo, error) {
 	if isInteractiveTTY() {
-		return pickRepoFn(repos, th)
+		return pickRepoFn(repos, th, held.take())
 	}
 	if err := writeProjectCandidates(cmd.OutOrStdout(), repos); err != nil {
 		return projects.Repo{}, err
@@ -190,7 +192,7 @@ func openOrClone(ctx context.Context, client *projects.Client, cmd *cobra.Comman
 // pickRepo runs huh.NewSelect over the inventory and returns the chosen repo.
 // Options are keyed by Repo.Key() so the selection round-trips unambiguously
 // even when the same name exists on both hosts.
-func pickRepo(repos []projects.Repo, th theme.Theme) (projects.Repo, error) {
+func pickRepo(repos []projects.Repo, th theme.Theme, notes []string) (projects.Repo, error) {
 	opts := make([]huh.Option[string], len(repos))
 	byKey := make(map[string]projects.Repo, len(repos))
 	for i, r := range repos {
@@ -202,14 +204,17 @@ func pickRepo(repos []projects.Repo, th theme.Theme) (projects.Repo, error) {
 		byKey[key] = r
 	}
 	var chosen string
-	err := keymap.Suspendable(huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Projects — enter to pick, esc to cancel").
-				Options(opts...).
-				Value(&chosen),
-		),
-	)).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh()).Run()
+	sel := huh.NewSelect[string]().
+		Title("Projects — enter to pick, esc to cancel").
+		Options(opts...).
+		Value(&chosen)
+	// Host failures ride in the picker's description, where they cannot push
+	// the form down or share a row with it.
+	if len(notes) > 0 {
+		sel = sel.Description(degradationNotesBlock(notes))
+	}
+	err := keymap.Suspendable(huh.NewForm(huh.NewGroup(sel))).
+		WithKeyMap(keymap.Cancel()).WithTheme(th.Huh()).Run()
 	if err != nil {
 		return projects.Repo{}, err
 	}

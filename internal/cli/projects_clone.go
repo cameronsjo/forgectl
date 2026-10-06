@@ -81,11 +81,11 @@ interactively when no sshUrl is available.`,
 				}
 			}
 
-			all, notes, err := client.Inventory(ctx)
+			all, held, err := loadInventory(cmd, client)
 			if err != nil {
 				return err
 			}
-			renderDegradationNotes(cmd, notes)
+			defer held.flush()
 			if len(all) == 0 {
 				return fmt.Errorf("no projects found across local, GitHub, or Gitea")
 			}
@@ -98,15 +98,17 @@ interactively when no sshUrl is available.`,
 					return fmt.Errorf("no project matching %q across local, GitHub, or Gitea", query)
 				}
 				if len(candidates) == 1 {
+					held.flush()
 					return cloneOnly(ctx, client, cmd, candidates[0], wing, dryRun)
 				}
 				// Multiple matches → interactive selector below.
 			}
 
-			chosen, err := chooseRepo(cmd, candidates, projectSelectionClone, th)
+			chosen, err := chooseRepo(cmd, candidates, projectSelectionClone, th, held)
 			if err != nil {
 				return err
 			}
+			held.flush()
 			return cloneOnly(ctx, client, cmd, chosen, wing, dryRun)
 		},
 	}
