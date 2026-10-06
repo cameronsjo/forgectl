@@ -312,6 +312,7 @@ func newModel(ctx context.Context, client *tmux.Client, opts RunOptions) model {
 	// monochrome terminal or a screen reader does not show.
 	l.Paginator.Type = paginator.Arabic
 	l.SetFilteringEnabled(true)
+	l.Filter = rankFilter
 
 	m := model{
 		ctx:     ctx,
@@ -613,15 +614,23 @@ func (m *model) skipHeading(up bool) {
 func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	km, ok := msg.(tea.KeyPressMsg)
 	if !ok {
+		if _, matches := msg.(list.FilterMatchesMsg); matches {
+			// Each keystroke starts its own filter run, and the runs finish
+			// in any order: the result for "p" can land after the one for
+			// "pr" and replace it. Take the message as a signal that the
+			// query changed and filter the current query here, so the list
+			// shows this query's result and not whichever run finished last
+			// (forgectl#1102). bubbles counts pages from the previous result
+			// set until the list is sized again, so size the hub screens now
+			// to make the page number this query's.
+			m.refilter()
+			if m.hubScreen() {
+				m.applySize()
+			}
+			return m, nil
+		}
 		var cmd tea.Cmd
 		m.l, cmd = m.l.Update(msg)
-		if _, matches := msg.(list.FilterMatchesMsg); matches && m.hubScreen() {
-			// Filter results arrive after the key that asked for them, and
-			// bubbles counts pages from the previous result set until the
-			// list is sized again; size it now so the page number is this
-			// query's.
-			m.applySize()
-		}
 		return m, cmd
 	}
 	// The hub screens size the list by filter state (applySize), and the

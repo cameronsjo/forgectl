@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"sort"
 	"strings"
 
 	"charm.land/bubbles/v2/list"
@@ -49,6 +50,24 @@ func fitWords(s string, width int) string {
 		return strings.TrimRight(hard, " ") + "…"
 	}
 	return strings.TrimRight(hard[:cut], " ,;:—–-·") + "…"
+}
+
+// fitName shortens a command name to width cells. A subcommand path ("pr
+// reviewed mark") keeps its head and its tail, cut in the middle, because its
+// last word is what tells it from its siblings ("pr reviewed sync", "pr
+// reviewed clear"): cutting the tail left all three as "pr reviewed…"
+// (forgectl#1102). A single word falls back to fitWords.
+func fitName(name string, width int) string {
+	if width <= 0 || ansi.StringWidth(name) <= width {
+		return fitWords(name, width)
+	}
+	if !strings.Contains(name, " ") || width < 5 {
+		return fitWords(name, width)
+	}
+	room := width - 1
+	head := room / 2
+	tail := room - head
+	return strings.TrimRight(ansi.Truncate(name, head, ""), " ") + "…" + strings.TrimLeft(ansi.TruncateLeft(name, ansi.StringWidth(name)-tail, ""), " ")
 }
 
 // fitHints joins footer hints with " · ", dropping the ones furthest down the
@@ -119,7 +138,7 @@ func hubNameColumn(items []list.Item, width int) int {
 // dropped, or the name was cut (the detail line under the list then shows the
 // description whole; the "$ forgectl …" line above it names the command).
 func hubRow(name, desc string, used, col, width int) (nameCell, descCell string, cut bool) {
-	nameCell = padTo(fitWords(name, col), col)
+	nameCell = padTo(fitName(name, col), col)
 	if desc == "" {
 		return strings.TrimRight(nameCell, " "), "", false
 	}
@@ -129,4 +148,42 @@ func hubRow(name, desc string, used, col, width int) (nameCell, descCell string,
 	}
 	descCell = fitWords(desc, room)
 	return nameCell, descCell, descCell != desc || ansi.StringWidth(name) > col
+}
+
+// rankFilter is the list's filter for every screen: the default fuzzy match,
+// with the order made a function of the query and the names only. An exact
+// name comes first, then names that start with the query, then the rest in
+// fuzzy order. The default order alone left the exact "pr" sixth behind
+// "pr repair" and "pip remove", whose fuzzy scores tie with it
+// (forgectl#1102).
+func rankFilter(term string, targets []string) []list.Rank {
+	ranks := list.DefaultFilter(term, targets)
+	q := strings.ToLower(strings.TrimSpace(term))
+	tier := func(r list.Rank) int {
+		name := strings.ToLower(strings.TrimSpace(targets[r.Index]))
+		switch {
+		case q == "":
+			return 2
+		case name == q:
+			return 0
+		case strings.HasPrefix(name, q):
+			return 1
+		}
+		return 2
+	}
+	sort.SliceStable(ranks, func(i, j int) bool { return tier(ranks[i]) < tier(ranks[j]) })
+	return ranks
+}
+
+// refilter recomputes the list's filter for the query as it stands now,
+// keeping the list in the state it was in (still typing, or accepted).
+func (m *model) refilter() {
+	state := m.l.FilterState()
+	if state == list.Unfiltered {
+		return
+	}
+	m.l.SetFilterText(m.l.FilterValue())
+	if state == list.Filtering {
+		m.l.SetFilterState(list.Filtering)
+	}
 }
