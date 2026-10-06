@@ -185,6 +185,8 @@ arguments for a menu over every command group.`,
 	// Hidden flag) are what make it safe to expose at all.
 	root.AddCommand(newSopsEditCmd())
 
+	rejectUnknownSubcommands(root)
+
 	// Last, so it sees every verb: under --json no failure renders fang's
 	// human error frame (forgectl#862, json_errors.go).
 	installJSONErrorContract(root)

@@ -101,8 +101,8 @@ func TestUnknownCommandWithHelp_LeavesFlagsAloneWithoutHelp(t *testing.T) {
 	root.AddCommand(run)
 	args := []string{"run", "--tag", "a"}
 
-	if err := unknownCommandWithHelp(root, args); err != nil {
-		t.Fatalf("unknownCommandWithHelp() = %v, want nil", err)
+	if err := unknownSubcommand(root, args); err != nil {
+		t.Fatalf("unknownSubcommand() = %v, want nil", err)
 	}
 	root.SetArgs(args)
 	if err := root.Execute(); err != nil {
@@ -110,5 +110,100 @@ func TestUnknownCommandWithHelp_LeavesFlagsAloneWithoutHelp(t *testing.T) {
 	}
 	if len(tags) != 1 || tags[0] != "a" {
 		t.Errorf("--tag = %q, want [a]: the check parsed the flags before cobra did", tags)
+	}
+}
+
+// groupPaths walks root and returns the command path of every group: a command
+// with subcommands and no positional of its own. The list comes from the tree,
+// so a group added later is covered without touching this test.
+func groupPaths(root *cobra.Command) [][]string {
+	var paths [][]string
+	var walk func(c *cobra.Command, prefix []string)
+	walk = func(c *cobra.Command, prefix []string) {
+		for _, child := range c.Commands() {
+			p := append(append([]string(nil), prefix...), child.Name())
+			if child.HasSubCommands() && !parentTakesArg(child) {
+				paths = append(paths, p)
+			}
+			walk(child, p)
+		}
+	}
+	walk(root, nil)
+	return paths
+}
+
+// TestEveryGroupRejectsUnknownSubcommand pins forgectl#1090 for every group in
+// the tree: an unknown subcommand fails with the unknown-command error, with
+// and without --help, and a near miss of a real subcommand gets a suggestion.
+func TestEveryGroupRejectsUnknownSubcommand(t *testing.T) {
+	t.Setenv(skipLegacyMigrateEnv, "1")
+	deps := module.Deps{Runner: &exec.FakeRunner{}, Theme: theme.Default()}
+	root := newRoot(deps)
+	groups := groupPaths(root)
+	if len(groups) < 18 {
+		t.Fatalf("found %d groups, want at least 18 (forgectl#1090 measured 18 that exited 0 alone)", len(groups))
+	}
+	for _, path := range groups {
+		name := strings.Join(path, " ")
+		group, _, err := root.Find(path)
+		if err != nil || group == nil {
+			t.Fatalf("Find(%q) = %v, %v", path, group, err)
+		}
+		for _, extra := range [][]string{nil, {"--help"}} {
+			args := append(append(append([]string(nil), path...), "bogusverbxyz"), extra...)
+			t.Run(strings.Join(args, " "), func(t *testing.T) {
+				stderr, err := runUnknownHelpArgs(t, args...)
+				if err == nil {
+					t.Fatalf("execCommand(%q) = nil, want an unknown-command error", args)
+				}
+				if ExitCode(err) == 0 || !strings.Contains(strings.ToLower(err.Error()), "unknown command") {
+					t.Errorf("error = %q (exit %d), want non-zero and unknown command", err.Error(), ExitCode(err))
+				}
+				if !strings.Contains(stderr, `"bogusverbxyz" for "forgectl `+name+`"`) {
+					t.Errorf("stderr = %q, want it to name the bad token and the group %q", stderr, name)
+				}
+			})
+		}
+
+		// A close miss: a real subcommand with its second letter dropped. Dropping
+		// the last would still be a prefix, which cobra suggests at any distance.
+		for _, sub := range group.Commands() {
+			if !sub.IsAvailableCommand() || len(sub.Name()) < 4 {
+				continue
+			}
+			args := append(append([]string(nil), path...), sub.Name()[:1]+sub.Name()[2:])
+			t.Run("suggest "+strings.Join(args, " "), func(t *testing.T) {
+				stderr, err := runUnknownHelpArgs(t, args...)
+				if err == nil {
+					t.Fatalf("execCommand(%q) = nil, want an unknown-command error", args)
+				}
+				if !strings.Contains(stderr, "Did you mean") || !strings.Contains(stderr, sub.Name()) {
+					t.Errorf("stderr = %q, want a suggestion of %q", stderr, sub.Name())
+				}
+			})
+			break
+		}
+	}
+}
+
+// TestGroupHelpStillSucceeds keeps the other half: a group's own help still
+// prints and succeeds, and so does a group with no Run run bare. A runnable
+// group run bare does real work (a TUI, an inventory), so only --help is run
+// for those.
+func TestGroupHelpStillSucceeds(t *testing.T) {
+	t.Setenv(skipLegacyMigrateEnv, "1")
+	deps := module.Deps{Runner: &exec.FakeRunner{}, Theme: theme.Default()}
+	root := newRoot(deps)
+	for _, path := range groupPaths(root) {
+		group, _, _ := root.Find(path)
+		argvs := [][]string{append(append([]string(nil), path...), "--help")}
+		if !group.Runnable() {
+			argvs = append(argvs, path)
+		}
+		for _, args := range argvs {
+			if stderr, err := runUnknownHelpArgs(t, args...); err != nil {
+				t.Errorf("execCommand(%q) error = %v (stderr %q), want help and success", args, err, stderr)
+			}
+		}
 	}
 }
