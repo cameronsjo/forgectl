@@ -248,6 +248,10 @@ type model struct {
 
 	action Action
 
+	// filterGen numbers the query as typed: it advances whenever a key
+	// changes the filter text, and tagFilterRuns stamps each filter run
+	// with it, so updateList can tell the newest result from an older one.
+	filterGen int
 	// hub is the full ordered row set from RunOptions.Hub — hubMode's list.
 	hub []HubEntry
 	// nameCol is the hub lists' name column (hubNameColumn), recomputed
@@ -614,37 +618,45 @@ func (m *model) skipHeading(up bool) {
 func (m model) updateList(msg tea.Msg) (tea.Model, tea.Cmd) {
 	km, ok := msg.(tea.KeyPressMsg)
 	if !ok {
-		if _, matches := msg.(list.FilterMatchesMsg); matches {
-			// Each keystroke starts its own filter run, and the runs finish
-			// in any order: the result for "p" can land after the one for
-			// "pr" and replace it. Take the message as a signal that the
-			// query changed and filter the current query here, so the list
-			// shows this query's result and not whichever run finished last
-			// (forgectl#1102). bubbles counts pages from the previous result
-			// set until the list is sized again, so size the hub screens now
-			// to make the page number this query's.
-			m.refilter()
-			if m.hubScreen() {
-				m.applySize()
+		if run, ok := msg.(filterRun); ok {
+			// Each keystroke starts its own filter run and the runs finish in
+			// any order: the result for "p" can land after the one for "pr"
+			// and replace it. Only the newest keystroke's result is the
+			// query's; an older one is dropped (forgectl#1102).
+			if run.gen != m.filterGen {
+				return m, nil
 			}
-			return m, nil
+			msg = run.msg
 		}
 		var cmd tea.Cmd
 		m.l, cmd = m.l.Update(msg)
+		if _, matches := msg.(list.FilterMatchesMsg); matches && m.hubScreen() {
+			// Filter results arrive after the key that asked for them, and
+			// bubbles counts pages from the previous result set until the
+			// list is sized again; size it now so the page number is this
+			// query's.
+			m.applySize()
+		}
 		return m, cmd
 	}
 	// The hub screens size the list by filter state (applySize), and the
 	// list sizes its filter input by the prompt (SetSize), so a key that
 	// opens or closes a filter, or sets a prompt, re-sizes the list once it
 	// is handled.
-	before, prompt := m.l.FilterState(), m.l.FilterInput.Prompt
+	before, prompt, query := m.l.FilterState(), m.l.FilterInput.Prompt, m.l.FilterInput.Value()
 	out, cmd := m.updateListKey(km)
-	if next, ok := out.(model); ok && next.hubScreen() &&
-		(next.l.FilterState() != before || next.l.FilterInput.Prompt != prompt) {
-		next.applySize()
-		return next, cmd
+	next, ok := out.(model)
+	if !ok {
+		return out, cmd
 	}
-	return out, cmd
+	if next.l.FilterInput.Value() != query {
+		next.filterGen++
+	}
+	cmd = tagFilterRuns(cmd, next.filterGen)
+	if next.hubScreen() && (next.l.FilterState() != before || next.l.FilterInput.Prompt != prompt) {
+		next.applySize()
+	}
+	return next, cmd
 }
 
 // updateListKey is updateList for a key press.

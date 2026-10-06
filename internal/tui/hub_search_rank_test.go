@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
@@ -36,6 +35,13 @@ func searchHub() []HubEntry {
 			}},
 		}},
 		{Name: "proxy", Short: "Emit proxy-profile changes", Key: 3},
+		{Name: "resume", Short: "Resume a session", Key: 5, Leaves: []HubLeaf{
+			{Name: "resume", Short: "Resume a session", Self: true},
+			{Name: "hooks", Short: "Session hooks", Leaves: []HubLeaf{
+				{Name: "install", Short: "Install the capture hooks"},
+				{Name: "uninstall", Short: "Remove the capture hooks"},
+			}},
+		}},
 		{Name: "y", Short: "Clipboard helpers", Key: 4, Leaves: []HubLeaf{
 			{Name: "y", Short: "Clipboard helpers", Self: true},
 			{Name: "paste", Short: "Print the clipboard"},
@@ -54,7 +60,7 @@ func searchModel(w, h int) model {
 // filterResults runs the commands one key returned and collects the filter
 // results they answer with. bubbles filters in a returned command, one per
 // keystroke; the cursor blink in the same batch never answers and is dropped.
-func filterResults(cmd tea.Cmd) []list.FilterMatchesMsg {
+func filterResults(cmd tea.Cmd) []tea.Msg {
 	if cmd == nil {
 		return nil
 	}
@@ -64,13 +70,13 @@ func filterResults(cmd tea.Cmd) []list.FilterMatchesMsg {
 	case msg := <-got:
 		switch t := msg.(type) {
 		case tea.BatchMsg:
-			var out []list.FilterMatchesMsg
+			var out []tea.Msg
 			for _, c := range t {
 				out = append(out, filterResults(c)...)
 			}
 			return out
-		case list.FilterMatchesMsg:
-			return []list.FilterMatchesMsg{t}
+		case filterRun:
+			return []tea.Msg{t}
 		}
 	case <-time.After(100 * time.Millisecond):
 	}
@@ -80,11 +86,11 @@ func filterResults(cmd tea.Cmd) []list.FilterMatchesMsg {
 // typeSearch opens the search and types q, then delivers every key's filter
 // result in the order deliver picks: the order the runs finish in is the
 // scheduler's, so a test has to try both.
-func typeSearch(t *testing.T, m model, q string, deliver func([][]list.FilterMatchesMsg) []list.FilterMatchesMsg) model {
+func typeSearch(t *testing.T, m model, q string, deliver func([][]tea.Msg) []tea.Msg) model {
 	t.Helper()
 	out, _ := m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
 	m = out.(model)
-	var perKey [][]list.FilterMatchesMsg
+	var perKey [][]tea.Msg
 	for _, r := range q {
 		out, cmd := m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
 		m = out.(model)
@@ -115,14 +121,14 @@ func visibleNames(m model) []string {
 // Mutation that turns it red: in updateList, hand a FilterMatchesMsg to
 // m.l.Update instead of calling m.refilter().
 func TestHubSearchOrderDoesNotDependOnWhichRunFinishesLast(t *testing.T) {
-	inOrder := func(perKey [][]list.FilterMatchesMsg) []list.FilterMatchesMsg {
-		var out []list.FilterMatchesMsg
+	inOrder := func(perKey [][]tea.Msg) []tea.Msg {
+		var out []tea.Msg
 		for _, r := range perKey {
 			out = append(out, r...)
 		}
 		return out
 	}
-	reversed := func(perKey [][]list.FilterMatchesMsg) []list.FilterMatchesMsg {
+	reversed := func(perKey [][]tea.Msg) []tea.Msg {
 		out := inOrder(perKey)
 		slices.Reverse(out)
 		return out
@@ -145,8 +151,8 @@ func TestHubSearchOrderDoesNotDependOnWhichRunFinishesLast(t *testing.T) {
 // newModel.
 func TestHubSearchRanksTheExactNameFirst(t *testing.T) {
 	for _, w := range []int{120, 80, 40} {
-		got := visibleNames(typeSearch(t, searchModel(w, 24), "pr", func(p [][]list.FilterMatchesMsg) []list.FilterMatchesMsg {
-			var out []list.FilterMatchesMsg
+		got := visibleNames(typeSearch(t, searchModel(w, 24), "pr", func(p [][]tea.Msg) []tea.Msg {
+			var out []tea.Msg
 			for _, r := range p {
 				out = append(out, r...)
 			}
@@ -191,9 +197,15 @@ func TestRankFilterIsDeterministicAndTiered(t *testing.T) {
 //
 // Mutation that turns it red: call fitWords in place of fitName in hubRow.
 func TestHubSearchNarrowNamesStayDistinct(t *testing.T) {
-	for _, w := range []int{40, 48} {
-		m := typeSearch(t, searchModel(w, 24), "reviewed", func(p [][]list.FilterMatchesMsg) []list.FilterMatchesMsg {
-			var out []list.FilterMatchesMsg
+	for _, c := range []struct {
+		w     int
+		query string
+		rows  string
+		want  int
+	}{{40, "reviewed", "pr re", 3}, {48, "reviewed", "pr re", 3}, {40, "hooks", "res", 2}} {
+		w := c.w
+		m := typeSearch(t, searchModel(w, 24), c.query, func(p [][]tea.Msg) []tea.Msg {
+			var out []tea.Msg
 			for _, r := range p {
 				out = append(out, r...)
 			}
@@ -201,14 +213,14 @@ func TestHubSearchNarrowNamesStayDistinct(t *testing.T) {
 		})
 		seen := map[string]bool{}
 		for _, line := range strings.Split(ansi.Strip(m.View().Content), "\n") {
-			if !strings.Contains(line, "pr re") || strings.HasPrefix(line, "$") {
+			if !strings.Contains(line, c.rows) || strings.HasPrefix(line, "$") {
 				continue
 			}
 			if got := ansi.StringWidth(line); got > w {
 				t.Errorf("width %d: row is %d cells wide: %q", w, got, line)
 			}
 			// the name cell is what precedes the two-space gap before the description
-			name := strings.TrimSpace(line[strings.Index(line, "pr"):])
+			name := strings.TrimSpace(line[strings.Index(line, c.rows[:2]):])
 			if i := strings.Index(name, "  "); i >= 0 {
 				name = name[:i]
 			}
@@ -217,8 +229,8 @@ func TestHubSearchNarrowNamesStayDistinct(t *testing.T) {
 			}
 			seen[name] = true
 		}
-		if len(seen) < 3 {
-			t.Errorf("width %d: found %d distinct pr reviewed rows, want 3:\n%s", w, len(seen), ansi.Strip(m.View().Content))
+		if len(seen) < c.want {
+			t.Errorf("width %d: found %d distinct %q rows, want %d:\n%s", w, len(seen), c.rows, c.want, ansi.Strip(m.View().Content))
 		}
 	}
 }
@@ -230,6 +242,8 @@ func TestFitName(t *testing.T) {
 	}{
 		{"pr reviewed mark", 13}, {"pr reviewed sync", 13}, {"pr reviewed clear", 13},
 		{"pr", 13}, {"projects", 5}, {"pr reviewed mark", 16}, {"a b", 2},
+		{"resume hooks install", 13}, {"resume hooks uninstall", 13}, {"resume hooks status", 13},
+		{"a very long first word then x", 8},
 	}
 	seen := map[string]string{}
 	for _, c := range cases {
@@ -237,7 +251,7 @@ func TestFitName(t *testing.T) {
 		if w := ansi.StringWidth(got); w > c.width {
 			t.Errorf("fitName(%q, %d) = %q, %d cells wide", c.name, c.width, got, w)
 		}
-		if c.width == 13 && strings.Contains(c.name, "reviewed") {
+		if c.width == 13 && (strings.Contains(c.name, "reviewed") || strings.HasPrefix(c.name, "resume hooks")) {
 			if prev, dup := seen[got]; dup {
 				t.Errorf("fitName(%q, 13) = %q, same as %q", c.name, got, prev)
 			}
@@ -246,5 +260,54 @@ func TestFitName(t *testing.T) {
 	}
 	if got := fitName("pr reviewed mark", 16); got != "pr reviewed mark" {
 		t.Errorf("a name that fits was cut: %q", got)
+	}
+}
+
+// TestHubSearchResultKeepsCaretAndCursor pins two things a late filter result
+// must not disturb, found in review of the first fix for forgectl#1102: the
+// caret while the operator edits mid-query, and the cursor row after the
+// filter was accepted and the operator moved down it.
+//
+// Mutation that turns it red: handle a filterRun by calling
+// m.l.SetFilterText(m.l.FilterValue()) instead of passing its message to the
+// list, which moves the caret to the end and the cursor to the first row.
+func TestHubSearchResultKeepsCaretAndCursor(t *testing.T) {
+	press := func(m model, k tea.KeyPressMsg) (model, tea.Cmd) {
+		out, cmd := m.Update(k)
+		return out.(model), cmd
+	}
+	m := searchModel(80, 24)
+	m, _ = press(m, tea.KeyPressMsg{Code: '/', Text: "/"})
+	var runs []tea.Msg
+	for _, r := range "pro" {
+		var cmd tea.Cmd
+		m, cmd = press(m, tea.KeyPressMsg{Code: r, Text: string(r)})
+		runs = filterResults(cmd)
+	}
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyLeft})
+	if got := m.l.FilterInput.Position(); got != 2 {
+		t.Fatalf("setup: caret at %d after one left, want 2", got)
+	}
+	for _, run := range runs {
+		out, _ := m.Update(run)
+		m = out.(model)
+	}
+	if got := m.l.FilterInput.Position(); got != 2 {
+		t.Errorf("a filter result moved the caret to %d, want 2", got)
+	}
+
+	// Accept the filter, move down it, then let a straggler arrive.
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	m, _ = press(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	at := m.l.Index()
+	if at == 0 {
+		t.Fatalf("setup: down did not move the cursor (%v)", visibleNames(m))
+	}
+	for _, run := range runs {
+		out, _ := m.Update(run)
+		m = out.(model)
+	}
+	if got := m.l.Index(); got != at {
+		t.Errorf("a late filter result moved the cursor from row %d to %d", at, got)
 	}
 }
