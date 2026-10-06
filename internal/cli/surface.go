@@ -91,10 +91,13 @@ A path may be anywhere, because naming it is the choice being made explicitly.
 With --worktree <branch> (herdr only, --name required) the launch starts a
 coordinator worker instead: a git worktree at <repo>/.claude/worktrees/<name>,
 created with repository hooks disabled, and a row in the worker ledger under
-$XDG_STATE_HOME/forgectl/surface. Workers allow only claude plan, default or
-acceptEdits, or codex read-only or workspace-write with untrusted or
-on-request approvals; pi and anything looser are refused, and workers never
-get --allow-dangerously-skip-permissions.
+$XDG_STATE_HOME/forgectl/surface. A branch that does not exist yet starts at
+the head of the repository's GitHub default branch, read from the GitHub API
+and fetched into refs/forgectl/base/, never at a local ref; origin must be a
+github.com repository. Workers take their posture from [launch.worker] (see
+docs/commands/launch.md), at most claude acceptEdits, or codex
+workspace-write with on-request approvals; pi and anything looser are
+refused, and workers never get --allow-dangerously-skip-permissions.
 
 --brief gives a worker its first brief as the harness's prompt argument, so
 the harness starts its first turn with it and nothing is typed into the pane.
