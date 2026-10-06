@@ -13,6 +13,7 @@ operated.
   stderr when it exits non-zero, and the failure object's `code` strings.
 - **[`configuration.md`](configuration.md)** — every `config.toml` section,
   key by key, plus logging.
+- **[`prompts.md`](prompts.md)** — how a cancelled picker or confirm ends: the line it prints and exit code 130.
 - **[`herdr.md`](herdr.md)** — the `internal/herdr` client: session and fork requirements, failure shapes, why ids move, worker readiness for `surface ready`, how `surface brief`, `wait` and `read --report` work, and how `surface list` and `close` decide.
 - **[`artificer-adaptations.md`](artificer-adaptations.md)** — where this repo
   bends the vendored Artificer design system, and why; each entry names the

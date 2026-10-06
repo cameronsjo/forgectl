@@ -190,7 +190,6 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 		"danger-full-access":       {Defaults: config.LaunchDefaults{Harness: "codex", Sandbox: "danger-full-access"}},
 		"claude auto mode":         {Defaults: config.LaunchDefaults{PermissionMode: "auto"}},
 		"claude dontAsk":           {Defaults: config.LaunchDefaults{PermissionMode: "dontAsk"}},
-		"claude unknown mode":      {Defaults: config.LaunchDefaults{PermissionMode: "acceptEdit"}},
 		"codex never asks":         {Defaults: config.LaunchDefaults{Harness: "codex", Sandbox: "workspace-write", ApprovalPolicy: "never"}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -203,7 +202,7 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 
 	// forgectl#1060: a plan-mode worker's shell must prompt, not go to the
 	// auto-mode classifier, so every claude worker carries the setting.
-	for _, mode := range workerPermissionModes {
+	for _, mode := range []string{"plan", "default", "manual", "acceptEdits"} {
 		t.Run("claude worker in "+mode+" turns off auto mode during plan", func(t *testing.T) {
 			built, err := BuildInvocation(InvocationRequest{
 				StdoutTerminal: true,

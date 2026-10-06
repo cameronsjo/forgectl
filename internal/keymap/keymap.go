@@ -40,6 +40,10 @@ import (
 func Cancel() *huh.KeyMap {
 	km := huh.NewDefaultKeyMap()
 	km.Quit = key.NewBinding(key.WithKeys("ctrl+c", "esc"), key.WithHelp("esc", "cancel"))
+	// The filter footer used to read `esc set filter`, but Quit above matches
+	// esc first and ends the whole form. Only enter sets a filter, so say that.
+	km.Select.SetFilter = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "set filter"), key.WithDisabled())
+	km.MultiSelect.SetFilter = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "set filter"), key.WithDisabled())
 	return km
 }
 
