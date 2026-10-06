@@ -1346,3 +1346,56 @@ func TestDesk_OwnRunThenAnArrivalRunsAtOnce(t *testing.T) {
 		t.Fatalf("launched %v, want [01-a 02-b]; footer %q", h.backend.launched, ansi.Strip(h.m.footer()))
 	}
 }
+
+// The security reviewer's round-five probe: Claude rewrites its hand-dropped
+// script in place; a scan skips it as changed; Claude writes it again under
+// the same name. The new bytes have a new hash, so y refuses once.
+func TestDesk_YRefusesASameNamedItemWithNewBytes(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-a.sh", plainScript("a"))
+	h.scan()
+	read := h.m.rows[0].item.Meta.SHA256
+	h.drop("01-a.sh", plainScript("a edited")) // changed: the scan moves it to skipped/
+	h.scan()
+	if err := os.Remove(filepath.Join(h.d.Path(), desk.DirSkipped, "01-a.sh")); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(filepath.Join(h.d.Path(), desk.DirSkipped, "01-a.meta.json"))
+	h.drop("01-a.sh", plainScript("a replaced"))
+	h.scan()
+	h.selectItem("01-a")
+	if r, _ := h.m.selected(); r.kind != rowWaiting || r.item.Meta.SHA256 == read {
+		t.Fatalf("fixture: want a waiting 01-a with a new hash, got %v %s", r.kind, r.item.Meta.SHA256)
+	}
+	h.press("y")
+	if len(h.backend.launched) != 0 {
+		t.Fatalf("y ran %v at a hash the operator never read", h.backend.launched)
+	}
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "01 a was replaced since you read it") {
+		t.Errorf("footer = %q", footer)
+	}
+}
+
+// A y whose claim fails has not resolved the item: when that item later
+// leaves and another lands under the cursor, the next y still refuses.
+func TestDesk_AFailedYKeepsWatching(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-a.sh", plainScript("a"))
+	h.scan()
+	if _, err := h.d.Claim("01-a", h.m.rows[0].item.Meta.SHA256); err != nil { // another desk wins the race
+		t.Fatal(err)
+	}
+	h.press("y") // fails: already claimed
+	if len(h.backend.launched) != 0 {
+		t.Fatalf("launched %v", h.backend.launched)
+	}
+	for _, ext := range []string{".sh", ".meta.json"} {
+		_ = os.Remove(filepath.Join(h.d.Path(), desk.DirRunning, "01-a"+ext))
+	}
+	h.drop("02-evil.sh", plainScript("evil"))
+	h.scan()
+	h.press("y")
+	if len(h.backend.launched) != 0 {
+		t.Fatalf("y ran %v after a failed y; 01-a was what the operator read", h.backend.launched)
+	}
+}

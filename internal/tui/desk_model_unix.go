@@ -161,8 +161,8 @@ type deskModel struct {
 	// watch is the waiting item last under the cursor, kept across an empty
 	// queue. moved names it once a rescan finds it gone and the cursor on
 	// another; the next y refuses once (#1098); see watchSelection.
-	watch    string
-	moved    string
+	watch    watched
+	moved    watched
 	lastSkip string // what u returns to pending/
 	busy     bool   // an action is in flight
 
@@ -239,6 +239,9 @@ type (
 		err       error
 		skipped   string // set when a skip succeeded, for u
 		unskipped bool
+		// resolved names the items this action ran or skipped, which ends
+		// the operator's reading of them (see resolve).
+		resolved []watched
 	}
 	// deskTTYReadyMsg is a claimed TTY item with its run begun, ready to hand
 	// the terminal to.
@@ -246,6 +249,7 @@ type (
 		run  *ttyRun
 		err  error
 		name string
+		sha  string
 	}
 	deskTTYDoneMsg struct {
 		run *ttyRun
@@ -347,6 +351,7 @@ func (m deskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applyScan(t)
 	case deskResultMsg:
 		m.busy = false
+		m.resolve(t.resolved...)
 		if t.skipped != "" {
 			m.lastSkip = t.skipped
 		}
@@ -365,6 +370,7 @@ func (m deskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = m.resultLine("", t.err)
 			return m, m.rescan()
 		}
+		m.resolve(watched{t.name, t.sha}) // claimed and begun: the item is handled
 		run := t.run
 		return m, tea.Exec(run, func(err error) tea.Msg { return deskTTYDoneMsg{run: run, err: err} })
 	case deskTTYDoneMsg:
@@ -402,28 +408,45 @@ func (m *deskModel) rescan() tea.Cmd {
 	return m.scanCmd()
 }
 
+// watched is a waiting item as the operator was shown it: its name and the
+// sha256 the focus panel showed. The zero value is none.
+type watched struct{ name, sha string }
+
+func watchOf(r queueRow) watched { return watched{r.item.Name, r.item.Meta.SHA256} }
+
 // watchSelection keeps watch, the waiting item the operator was last shown
 // under the cursor. When a scan, not a key, puts a different waiting item
-// under the cursor, the operator never matched its hash, so moved arms the
-// next y to refuse once (#1098). watch survives rows of any other kind and
-// an empty queue; only the operator's own y, s and a clear it (they resolved
-// that item), and j/k set it to the row they chose.
+// under the cursor, or the same name with other bytes, the operator never
+// matched its hash, so moved arms the next y to refuse once (#1098). watch
+// survives rows of any other kind and an empty queue; only a successful y,
+// s or a on that item clears it (resolve), and j/k set it to the row chosen.
 func (m *deskModel) watchSelection() {
 	r, ok := m.selected()
 	if !ok || r.kind != rowWaiting {
 		return
 	}
-	if m.watch != "" && m.watch != r.item.Name {
+	if cur := watchOf(r); m.watch != (watched{}) && m.watch != cur {
 		m.moved = m.watch
 	}
-	m.watch = r.item.Name
+	m.watch = watchOf(r)
 }
 
 // chooseSelection records a selection the operator made with a key.
 func (m *deskModel) chooseSelection() {
-	m.moved, m.watch = "", ""
+	m.moved, m.watch = watched{}, watched{}
 	if r, ok := m.selected(); ok && r.kind == rowWaiting {
-		m.watch = r.item.Name
+		m.watch = watchOf(r)
+	}
+}
+
+// resolve ends the operator's reading of the named items once an action on
+// them succeeded: where the cursor lands next is not a move under them, and
+// a refusal armed for an older move is spent.
+func (m *deskModel) resolve(items ...watched) {
+	for _, w := range items {
+		if w != (watched{}) && m.watch == w {
+			m.watch, m.moved = watched{}, watched{}
+		}
 	}
 }
 
@@ -603,19 +626,32 @@ func (m deskModel) run() (tea.Model, tea.Cmd) {
 		m.message = st.Warn.Render(safeMessage("not run: " + itemLabel(r.item.Name) + " has no valid sha256 recorded · ask Claude to queue it again"))
 		return m, nil
 	}
-	if m.moved != "" {
+	if m.moved != (watched{}) {
 		// A scan, not a key, put this item under the cursor in place of the
 		// one the operator was reading: they have not matched its hash.
-		m.message = st.Warn.Render(safeMessage("not run: the selection moved from " + itemLabel(m.moved) + " to " + itemLabel(r.item.Name) + " · check its sha256, then y"))
-		m.moved = ""
+		text := "not run: the selection moved from " + itemLabel(m.moved.name) + " to " + itemLabel(r.item.Name) + " · check its sha256, then y"
+		if m.moved.name == r.item.Name {
+			text = "not run: " + itemLabel(r.item.Name) + " was replaced since you read it · check its new sha256, then y"
+		}
+		m.message = st.Warn.Render(safeMessage(text))
+		m.moved = watched{}
 		return m, nil
 	}
 	if !m.dashboard().focusShownFor(r.item.Name) {
 		m.message = st.Warn.Render(safeMessage("not run: enlarge the window to see " + itemLabel(r.item.Name) + "'s sha256, what and why"))
 		return m, nil
 	}
-	m.busy, m.watch = true, "" // this y resolves the item the operator was reading
+	m.busy = true
 	return m.start(target{name: r.item.Name, sha: r.item.Meta.SHA256, tty: r.item.TTY})
+}
+
+// resolvedIf is name when err is nil: an action that failed has not
+// resolved the item.
+func resolvedIf(err error, t target) []watched {
+	if err != nil {
+		return nil
+	}
+	return []watched{{t.name, t.sha}}
 }
 
 // start runs one confirmed item at the hash that was on screen.
@@ -627,7 +663,7 @@ func (m deskModel) start(t target) (tea.Model, tea.Cmd) {
 	d := m.d
 	return m, func() tea.Msg {
 		text, err := launch(d, t)
-		return deskResultMsg{text: text, err: err}
+		return deskResultMsg{text: text, err: err, resolved: resolvedIf(err, t)}
 	}
 }
 
@@ -814,13 +850,11 @@ func (m deskModel) confirmKey(key string) (tea.Model, tea.Cmd) {
 		m.message = m.styles().Muted.Render("cancelled")
 		return m, nil
 	}
-	// A confirmed skip or run-all resolves the item the operator was
-	// reading; where the cursor lands next is not a move under them.
-	m.busy, m.watch = true, ""
+	m.busy = true
 	d := m.d
 	switch kind {
 	case confirmSkip:
-		name, lost := ts[0].name, ts[0].lost
+		name, sha, lost := ts[0].name, ts[0].sha, ts[0].lost
 		return m, func() tea.Msg {
 			if lost {
 				// A run that began is skipped as lost (Skip records SkipLost
@@ -833,7 +867,7 @@ func (m deskModel) confirmKey(key string) (tea.Model, tea.Cmd) {
 			if err := d.Skip(name, desk.SkipOperator); err != nil {
 				return deskResultMsg{err: err}
 			}
-			return deskResultMsg{text: "skipped " + itemLabel(name) + " · u to undo", skipped: name}
+			return deskResultMsg{text: "skipped " + itemLabel(name) + " · u to undo", skipped: name, resolved: []watched{{name, sha}}}
 		}
 	default:
 		return m, func() tea.Msg { return runAll(d, ts) }
@@ -847,11 +881,13 @@ func (m deskModel) confirmKey(key string) (tea.Model, tea.Cmd) {
 func runAll(d deskBackend, ts []target) deskResultMsg {
 	var started, changed, gone int
 	var errs []error
+	var resolved []watched
 	for _, t := range ts {
 		_, err := launch(d, t)
 		switch {
 		case err == nil:
 			started++
+			resolved = append(resolved, watched{t.name, t.sha})
 		case errors.Is(err, desk.ErrChanged):
 			changed++
 		case errors.Is(err, desk.ErrClaimed):
@@ -867,7 +903,7 @@ func runAll(d deskBackend, ts []target) deskResultMsg {
 	if gone > 0 {
 		text += fmt.Sprintf(" · %d no longer waiting", gone)
 	}
-	return deskResultMsg{text: text, err: errors.Join(errs...)}
+	return deskResultMsg{text: text, err: errors.Join(errs...), resolved: resolved}
 }
 
 func (m deskModel) undo() (tea.Model, tea.Cmd) {
@@ -1150,7 +1186,7 @@ func (m deskModel) startTTY(t target) tea.Cmd {
 			return deskTTYReadyMsg{err: err, name: t.name}
 		}
 		run, err := newTTYRun(d, c, rcPath, argv)
-		return deskTTYReadyMsg{run: run, err: err, name: t.name}
+		return deskTTYReadyMsg{run: run, err: err, name: t.name, sha: t.sha}
 	}
 }
 
