@@ -110,6 +110,8 @@ afterwards is skipped as "changed" instead of run.
   forgectl desk plan NAME|FILE   check a batch manifest: waves, warnings, sha256
   forgectl desk status [NAME]    the queue, or one item in detail
   forgectl desk watch NAME       stream a run's events; exit with its outcome
+  forgectl desk runs             every run and how far it got
+  forgectl desk show NAME        one run as a flow; --events, --at N to replay
   forgectl desk skip NAME        skip a waiting item, or clear a lost run
   forgectl desk layout           herdr split: Claude left, the desk right
   forgectl desk prune            delete done/ and skipped/ entries older than N days
@@ -139,6 +141,8 @@ bytes, not anything the script sources, calls or downloads.`,
 		newDeskPlanCmd(&dir),
 		newDeskStatusCmd(&dir),
 		newDeskWatchCmd(&dir),
+		newDeskRunsCmd(&dir),
+		newDeskShowCmd(&dir),
 		newDeskSkipCmd(&dir),
 		newDeskLayoutCmd(deps, &dir),
 		newDeskPruneCmd(&dir),

@@ -16,3 +16,4 @@ Records of significant design decisions made in forgectl development.
 | 0010 | [Worker `auto` permission mode: per-machine opt-in behind a hardening floor](0010-worker-auto-permission-mode.md) | Accepted | 2026-10-05 |
 | 0011 | [Worker PR merge policy: a gate check GitHub enforces, off by default](0011-worker-pr-merge-policy.md) | Accepted | 2026-10-05 |
 | 0012 | [Desk threat model: defend against accidents, not against a same-uid process](0012-desk-threat-model.md) | Accepted | 2026-10-05 |
+| 0013 | [Desk run sources and the run visualizer](0013-desk-run-sources-and-visualizer.md) | Proposed | 2026-10-06 |
