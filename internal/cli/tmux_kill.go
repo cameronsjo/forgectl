@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 )
@@ -36,17 +38,30 @@ func newTmuxKillCmd(client *tmux.Client, th theme.Theme) *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			prompt := fmt.Sprintf("Kill session %q?", name)
-			if others {
-				prompt = fmt.Sprintf("Kill ALL sessions except %q?", name)
-			}
 			if !yes {
+				if others {
+					all, err := client.ListSessions(cmd.Context())
+					if err != nil {
+						return err
+					}
+					var doomed []string
+					for _, o := range all {
+						if o.ID != session.ID {
+							doomed = append(doomed, o.Name)
+						}
+					}
+					if len(doomed) == 0 {
+						_, _ = fmt.Fprintf(out, "no other sessions besides %q\n", name)
+						return nil
+					}
+					prompt = killOthersPrompt(name, doomed)
+				}
 				ok, err := confirm(th, prompt)
 				if err != nil {
 					return err
 				}
 				if !ok {
-					fmt.Fprintln(out, "cancelled")
-					return nil
+					return noteCancelled(out)
 				}
 			}
 			if others {
@@ -72,4 +87,32 @@ func newTmuxKillCmd(client *tmux.Client, th theme.Theme) *cobra.Command {
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt")
 	cmd.Flags().BoolVar(&others, "others", false, "kill all sessions EXCEPT the named one")
 	return cmd
+}
+
+// maxNamedKills caps how many session names the --others prompt spells out; the
+// rest are counted, so the prompt stays on one screen with dozens of sessions.
+const maxNamedKills = 6
+
+// killOthersPrompt names the sessions `tmux kill --others` is about to kill, so
+// the operator confirms the actual set rather than "ALL sessions". Names are
+// quoted through termsafe, which shows control characters as escapes instead
+// of sending them to the terminal.
+func killOthersPrompt(keep string, doomed []string) string {
+	shown := doomed
+	if len(shown) > maxNamedKills {
+		shown = shown[:maxNamedKills]
+	}
+	names := make([]string, len(shown))
+	for i, n := range shown {
+		names[i] = termsafe.QuoteTextMax(n, 40)
+	}
+	list := strings.Join(names, ", ")
+	if extra := len(doomed) - len(shown); extra > 0 {
+		list += fmt.Sprintf(", and %d more", extra)
+	}
+	noun := "sessions"
+	if len(doomed) == 1 {
+		noun = "session"
+	}
+	return fmt.Sprintf("Keep %q and kill the other %d %s (%s)?", keep, len(doomed), noun, list)
 }

@@ -100,8 +100,8 @@ reads its own (empty) task list, so snapshotted tasks are reported rather than
 restored. Pass it in response to the live-session error, not defensively.
 
 Exit codes: 0 resumed; 1 no session matched, the filter was ambiguous and there
-was no way to pick, or the pick was cancelled; 2 the target is still running
-(recoverable — use --fork). Note that ` + "`resume ls`" + ` exits 0 with an empty
+was no way to pick; 2 the target is still running
+(recoverable — use --fork); 130 the pick was cancelled (Esc or Ctrl+C). Note that ` + "`resume ls`" + ` exits 0 with an empty
 list when nothing matches, so ` + "`resume ls X && resume X`" + ` is NOT a valid
 guard; test the ls output instead.`,
 		Args:          cobra.MaximumNArgs(1),
