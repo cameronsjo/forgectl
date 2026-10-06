@@ -112,13 +112,24 @@ func RunSupervisor(dir, name, sha, kind string) int {
 }
 
 func (d *Desk) supervise(name, sha string, want Kind) (int, error) {
+	// An approval always carries a full hash. Checked before anything is
+	// read, so a malformed one refuses without touching the item.
+	if !ValidSHA256(sha) {
+		return 2, fmt.Errorf("%w: %s: this supervisor's approval carries no valid sha256", ErrRefused, describe(name))
+	}
 	kind, err := d.findKind(DirRunning, name)
 	if err != nil {
 		return 2, err
 	}
-	meta, _, err := d.readMeta(DirRunning, name)
+	meta, ok, err := d.readMeta(DirRunning, name)
 	if err != nil {
 		return 2, err
+	}
+	// Claim moves the item before its meta, so a missing meta is a claim
+	// still in flight, not a match: refuse rather than compare against an
+	// empty record.
+	if !ok {
+		return 2, fmt.Errorf("%w: %s: no queue record in running/ yet", ErrRefused, describe(name))
 	}
 	// The approval names this claim only if its hash is the one recorded at
 	// queue time and its kind is the one queued and found. Otherwise this

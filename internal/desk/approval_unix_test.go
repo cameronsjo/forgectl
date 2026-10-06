@@ -60,6 +60,7 @@ func TestSuperviseRefusesAnotherApprovalInPlace(t *testing.T) {
 	}{
 		{"other sha", func(*Claimed) string { return anySHA }, KindScript},
 		{"short sha", func(c *Claimed) string { return c.SHA256[:12] }, KindScript},
+		{"empty sha", func(*Claimed) string { return "" }, KindScript},
 		{"other kind", func(c *Claimed) string { return c.SHA256 }, KindBatch},
 		{"no kind", func(c *Claimed) string { return c.SHA256 }, ""},
 	} {
@@ -82,6 +83,29 @@ func TestSuperviseRefusesAnotherApprovalInPlace(t *testing.T) {
 				t.Fatalf("meta changed: %s -> %s", before, after)
 			}
 		})
+	}
+}
+
+// Claim moves the item before its meta. A supervisor that reads in between
+// finds no meta; with an empty --sha the two empty hashes would match and the
+// item would be skipped as changed. It must refuse without touching the item.
+// The sha check and the meta check each close this alone.
+func TestSuperviseRefusesAnEmptyShaBeforeTheMetaArrives(t *testing.T) {
+	d := openDesk(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	c := queue(t, d, "x.sh", "touch "+marker+"\n")
+	metaPath := filepath.Join(d.Path(), DirRunning, c.Name+".meta.json")
+	if err := os.Remove(metaPath); err != nil {
+		t.Fatal(err)
+	}
+	if rc, err := d.supervise(c.Name, "", c.Kind); rc != 2 || !errors.Is(err, ErrRefused) {
+		t.Fatalf("supervise = %d, %v; want 2 and ErrRefused", rc, err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the item ran")
+	}
+	if s := scan(t, d); len(s.Skipped) != 0 {
+		t.Fatalf("skipped %d; want the claim left in place", len(s.Skipped))
 	}
 }
 
@@ -219,6 +243,7 @@ func TestScrubEnvDropsBashStartupHooks(t *testing.T) {
 	in := []string{
 		"PATH=/bin", "HOME=/h", "BASH_ENV=/x", "ENV=production", "SHELLOPTS=xtrace", "BASHOPTS=extglob",
 		"CDPATH=/c", "GLOBIGNORE=*", "PS4=$(id)", "BASH_FUNC_ls%%=() { :; }", "GH_TOKEN=keep", "PS1=keep",
+		"POSIXLY_CORRECT=1", "BASH_COMPAT=31", "EXECIGNORE=*", "TMOUT=1", "BASH_XTRACEFD=9",
 	}
 	want := []string{"PATH=/bin", "HOME=/h", "ENV=production", "GH_TOKEN=keep", "PS1=keep"}
 	if got := scrubEnv(in); !slices.Equal(got, want) {
