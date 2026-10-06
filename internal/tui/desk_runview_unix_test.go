@@ -1,0 +1,276 @@
+// SPDX-License-Identifier: Apache-2.0 WITH Commons-Clause
+
+//go:build unix
+
+package tui
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/cameronsjo/forgectl/internal/desk"
+	"github.com/cameronsjo/forgectl/internal/runview"
+)
+
+// runHarness is a desk harness with the run view reading the same desk.
+func runHarness(t *testing.T) *deskHarness {
+	t.Helper()
+	h := newDeskHarness(t)
+	h.m.runs = runview.NewDeskSource(h.d)
+	return h
+}
+
+// stageRun queues file, claims it and writes lines as its events. With rc
+// at 0 or more the run is finished with it; below 0 it is left running,
+// owned by this test process.
+func stageRun(t *testing.T, h *deskHarness, file, body string, lines []string, rc int) (string, *desk.Run) {
+	t.Helper()
+	src := filepath.Join(t.TempDir(), file)
+	if err := os.WriteFile(src, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := h.d.Add(src, "a test run", "a test", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.d.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.d.Claim(a.Name, a.SHA256); err != nil {
+		t.Fatal(err)
+	}
+	run, err := h.d.BeginRun(a.Name, os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range lines {
+		if err := run.Events.Emit(l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rc >= 0 {
+		if err := run.Finish(rc, "failed"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.scan()
+	return a.Name, run
+}
+
+const pipeManifest = "fetch -- true\nbuild after=fetch -- exit 3\nstage after=build -- true\ncheck after=fetch -- true\n"
+
+var pipeLines = []string{
+	"STEP-START id=fetch deps=",
+	"STEP-END id=fetch rc=0 dur=0.5 reason=ok outputs= log=/x/fetch.log",
+	"STEP-START id=build deps=fetch",
+	"STEP-START id=check deps=fetch",
+	"STEP-END id=build rc=3 dur=1.0 reason=failed outputs= log=/x/build.log",
+	"STEP-SKIP id=stage reason=dep-failed:build",
+	"STEP-END id=check rc=0 dur=0.2 reason=ok outputs= log=/x/check.log",
+}
+
+// send feeds one named or rune key straight to the model and runs what it
+// returns.
+func (h *deskHarness) send(k string) {
+	h.t.Helper()
+	var msg tea.KeyPressMsg
+	switch k {
+	case "left":
+		msg = tea.KeyPressMsg{Code: tea.KeyLeft}
+	case "right":
+		msg = tea.KeyPressMsg{Code: tea.KeyRight}
+	case "esc":
+		msg = tea.KeyPressMsg{Code: tea.KeyEscape}
+	default:
+		msg = key(k)
+	}
+	out, cmd := h.m.Update(msg)
+	h.m = out.(deskModel)
+	h.drive(cmd)
+}
+
+func (h *deskHarness) screen() string {
+	h.t.Helper()
+	return ansi.Strip(h.m.View().Content)
+}
+
+func TestRunViewShowsTheFlowAndTheEvents(t *testing.T) {
+	h := runHarness(t)
+	name, _ := stageRun(t, h, "pipe.manifest", pipeManifest, pipeLines, 1)
+	h.selectItem(name)
+	h.send("r")
+	if h.m.rv == nil {
+		t.Fatal("r did not open the run view")
+	}
+	out := h.screen()
+	for _, want := range []string{"run " + itemLabel(name), "✗ exit 1", "✓ fetch", "✗ build", "– stage", "✓ check", " → ", "STEP-SKIP stage", "9 events"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("run view is missing %q:\n%s", want, out)
+		}
+	}
+	h.send("q")
+	if h.m.rv != nil {
+		t.Fatal("q did not close the run view")
+	}
+	if !strings.Contains(h.screen(), "queue") {
+		t.Errorf("closing the run view did not return to the dashboard:\n%s", h.screen())
+	}
+}
+
+// Replay folds a prefix of the events: stepping back shows the run as it
+// was, the events after the point dim, and G returns to the live tip.
+func TestRunViewReplaysAndReturnsToLive(t *testing.T) {
+	h := runHarness(t)
+	name, _ := stageRun(t, h, "pipe.manifest", pipeManifest, pipeLines, 1)
+	h.selectItem(name)
+	h.send("r")
+	h.send("g")
+	for range 4 { // RUN-START, fetch start and end, build start
+		h.send("right")
+	}
+	out := h.screen()
+	for _, want := range []string{"replay 4/9", "✓ fetch", "◐ build", "· stage", "▸ #4"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("replay at 4 is missing %q:\n%s", want, out)
+		}
+	}
+	if h.m.rv.follow {
+		t.Error("a replay still follows the run")
+	}
+	h.send("G")
+	if !h.m.rv.follow || h.m.rv.at != 9 || strings.Contains(h.screen(), "replay") {
+		t.Errorf("G did not return to the live tip: at %d follow %v", h.m.rv.at, h.m.rv.follow)
+	}
+}
+
+// space plays the replay forward one event per tick and follows the run
+// again at its end.
+func TestRunViewPlays(t *testing.T) {
+	h := runHarness(t)
+	name, _ := stageRun(t, h, "pipe.manifest", pipeManifest, pipeLines, 1)
+	h.selectItem(name)
+	h.send("r")
+	out, cmd := h.m.Update(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
+	h.m = out.(deskModel)
+	if !h.m.rv.playing || h.m.rv.at != 0 || cmd == nil {
+		t.Fatalf("space from the live tip should play from the start: playing %v at %d", h.m.rv.playing, h.m.rv.at)
+	}
+	for i := 1; i <= 9; i++ {
+		out, _ := h.m.Update(deskRunPlayMsg{gen: h.m.rv.gen})
+		h.m = out.(deskModel)
+		if h.m.rv.at != i {
+			t.Fatalf("play step %d: at %d", i, h.m.rv.at)
+		}
+	}
+	if h.m.rv.playing || !h.m.rv.follow {
+		t.Error("play did not stop and follow at the end")
+	}
+	// A tick from an earlier view is dropped.
+	h.m.rv.at = 3
+	out, _ = h.m.Update(deskRunPlayMsg{gen: h.m.rv.gen + 1})
+	if out.(deskModel).rv.at != 3 {
+		t.Error("a play tick for another view moved this one")
+	}
+}
+
+// A running run is polled on the dashboard's tick: new events show without
+// reopening the view.
+func TestRunViewFollowsALiveRun(t *testing.T) {
+	h := runHarness(t)
+	name, run := stageRun(t, h, "go.sh", "echo hi\n", nil, -1)
+	h.selectItem(name)
+	h.send("r")
+	if !strings.Contains(h.screen(), "◐ running") {
+		t.Fatalf("a live script run should read running:\n%s", h.screen())
+	}
+	if err := run.Finish(0, "ok"); err != nil {
+		t.Fatal(err)
+	}
+	h.drive(h.m.pollRun())
+	out := h.screen()
+	if !strings.Contains(out, "✓ ok") || !strings.Contains(out, "✓ script") {
+		t.Errorf("the finished run did not show after a poll:\n%s", out)
+	}
+	if c := h.m.pollRun(); c != nil {
+		t.Error("an ended run is still polled")
+	}
+}
+
+// n and p move through the runs the source lists.
+func TestRunViewSwitchesRuns(t *testing.T) {
+	h := runHarness(t)
+	first, _ := stageRun(t, h, "one.sh", "echo one\n", nil, 0)
+	second, _ := stageRun(t, h, "two.sh", "echo two\n", nil, 2)
+	h.selectItem(second)
+	h.send("r")
+	if got := h.m.rv.ref().Name; got != second {
+		t.Fatalf("opened on %s, want %s", got, second)
+	}
+	h.send("n")
+	if got := h.m.rv.ref().Name; got != first {
+		t.Errorf("n moved to %s, want %s", got, first)
+	}
+	if !strings.Contains(h.screen(), "run 2 of 2") {
+		t.Errorf("the header does not place the run:\n%s", h.screen())
+	}
+	h.send("p")
+	if got := h.m.rv.ref().Name; got != second {
+		t.Errorf("p moved to %s, want %s", got, second)
+	}
+}
+
+// Text from an events file reaches the screen inert.
+func TestRunViewDrawsHostileEventTextInert(t *testing.T) {
+	h := runHarness(t)
+	name, _ := stageRun(t, h, "pipe.manifest", pipeManifest,
+		[]string{"STEP-START id=fetch deps=", "STEP-WARN id=fetch msg=\x1b]0;owned\x07\x1b[2Jgone"}, 0)
+	h.selectItem(name)
+	h.send("r")
+	if out := h.m.View().Content; strings.Contains(out, "\x1b]0;") || strings.Contains(out, "\x1b[2J") || strings.ContainsRune(out, 0x07) {
+		t.Errorf("an escape sequence from the events file reached the screen: %q", out)
+	}
+}
+
+// A narrow window cannot fit the columns, so the flow becomes a list.
+func TestRunFlowFallsBackToAListWhenNarrow(t *testing.T) {
+	h := runHarness(t)
+	name, _ := stageRun(t, h, "pipe.manifest", pipeManifest, pipeLines, 1)
+	h.selectItem(name)
+	h.m.width = 30
+	h.send("r")
+	out := h.screen()
+	if strings.Contains(out, " → ") {
+		t.Errorf("a 30-column flow still draws columns:\n%s", out)
+	}
+	for _, want := range []string{"✓ fetch", "  ✗ build", "    – stage"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the list flow is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunViewWithNoRunsSaysSo(t *testing.T) {
+	h := runHarness(t)
+	h.send("r")
+	if out := h.screen(); !strings.Contains(out, "no runs yet") {
+		t.Errorf("an empty desk's run view should say there are no runs:\n%s", out)
+	}
+}
+
+func TestStepDepths(t *testing.T) {
+	s := runview.Fold(runview.DeskSpec(), []runview.StepDef{
+		{ID: "a"}, {ID: "b", After: []string{"a"}}, {ID: "c", After: []string{"a"}}, {ID: "d", After: []string{"b", "c"}},
+	}, nil)
+	got := stepDepths(s)
+	want := []int{0, 1, 1, 2}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("depths = %v, want %v", got, want)
+		}
+	}
+}

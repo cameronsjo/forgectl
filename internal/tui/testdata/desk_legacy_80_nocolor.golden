@@ -57,4 +57,4 @@ desk ● · forgectl 0.0.0-test · host-a · ~/.local/state/forgec…  up 4h37m 
 │ ✓ 01 legacy-task-01              ▅▅       ok               5d ago    0:11    │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 
- y run  s skip  u undo  v view  a all  l log  j/k move  q quit
+ y run  s skip  u undo  v view  a all  l log  r runs  j/k move  q quit

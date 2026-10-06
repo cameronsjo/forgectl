@@ -932,10 +932,10 @@ func (f deskFrame) historyLine(st theme.Styles, width int, it desk.Item, longest
 // deskHints is the key-hint footer. A narrow window drops the move hint
 // (the arrows are self-explanatory) and tightens the spacing.
 func deskHints(st theme.Styles, width int) string {
-	keys := [][2]string{{"y", "run"}, {"s", "skip"}, {"u", "undo"}, {"v", "view"}, {"a", "all"}, {"l", "log"}, {"j/k", "move"}, {"q", "quit"}}
+	keys := [][2]string{{"y", "run"}, {"s", "skip"}, {"u", "undo"}, {"v", "view"}, {"a", "all"}, {"l", "log"}, {"r", "runs"}, {"j/k", "move"}, {"q", "quit"}}
 	sep := "  "
 	if width < deskWideMin {
-		keys = slices.Delete(keys, 6, 7)
+		keys = slices.Delete(keys, 7, 8)
 		sep = " "
 	}
 	parts := make([]string, len(keys))
