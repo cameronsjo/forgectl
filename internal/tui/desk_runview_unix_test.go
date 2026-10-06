@@ -351,3 +351,30 @@ func TestRunViewResetClampsTheReplayPoint(t *testing.T) {
 		t.Errorf("after a reset to 2 events: at %d of %d, want 2 of 2", h.m.rv.at, h.m.rv.folder.Len())
 	}
 }
+
+// A run that leaves the desk while its view is open stops being polled.
+func TestRunViewStopsPollingAGoneRun(t *testing.T) {
+	h := runHarness(t)
+	name, _ := stageRun(t, h, "go.sh", "echo hi\n", nil, -1)
+	h.selectItem(name)
+	h.send("r")
+	v := h.m.rv
+	out, _ := h.m.Update(deskRunLoadMsg{gen: v.gen, ref: v.ref(), cur: v.cur, err: desk.ErrNotFound})
+	h.m = out.(deskModel)
+	if c := h.m.pollRun(); c != nil {
+		t.Error("a run the desk no longer has is still polled")
+	}
+}
+
+// r on an item with no run opens the newest run and says so.
+func TestRunViewSaysWhenItShowsAnotherRun(t *testing.T) {
+	h := runHarness(t)
+	stageRun(t, h, "done.sh", "echo done\n", nil, 0)
+	h.drop("02-later.sh", "#!/bin/bash\necho later\n")
+	h.scan()
+	h.selectItem("02-later")
+	h.send("r")
+	if out := h.screen(); !strings.Contains(out, "showing the newest") {
+		t.Errorf("the view should say it is not showing the selected item:\n%s", out)
+	}
+}

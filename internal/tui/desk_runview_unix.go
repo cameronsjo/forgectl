@@ -5,6 +5,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/cameronsjo/forgectl/internal/desk"
 	"github.com/cameronsjo/forgectl/internal/runview"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
@@ -51,7 +53,12 @@ type deskRunView struct {
 	playing bool
 	loading bool
 	loaded  bool
-	err     error
+	// gone is set once the run is no longer in the desk, so it is not polled.
+	gone bool
+	// want is the run r was pressed on; notice says when the view shows
+	// another one instead.
+	want, notice string
+	err          error
 }
 
 // deskRunLoadMsg is one load of the run view's run. refs is set when the load
@@ -96,6 +103,9 @@ func (v *deskRunView) live(s runview.RunState) runview.LiveState {
 // polls reports whether the run can still change, so the view reloads it on
 // each tick.
 func (v *deskRunView) polls() bool {
+	if v.gone {
+		return false
+	}
 	switch v.delta.Live {
 	case runview.LiveEnded, runview.LiveSkipped, runview.LiveLost:
 		return false
@@ -111,11 +121,11 @@ func (m deskModel) openRunView() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	name := ""
-	if r, ok := m.selected(); ok && r.kind != rowWaiting && r.kind != rowRefused && r.kind != rowChanged {
-		name = r.item.Name
+	if r, ok := m.selected(); ok {
+		name = r.item.Name // a waiting item is not listed as a run, so the newest shows instead
 	}
 	m.runGen++
-	m.rv = &deskRunView{gen: m.runGen, follow: true, loading: true}
+	m.rv = &deskRunView{gen: m.runGen, want: name, follow: true, loading: true}
 	return m, loadRunCmd(m.runs, m.rv.gen, name, runview.RunRef{}, nil)
 }
 
@@ -156,10 +166,16 @@ func (m deskModel) applyRunLoad(t deskRunLoadMsg) (tea.Model, tea.Cmd) {
 	if v == nil || t.gen != v.gen {
 		return m, nil
 	}
+	if t.refs == nil && t.ref.Name != v.ref().Name {
+		return m, nil // a load for another run than the one shown
+	}
 	v.loading = false
 	if t.refs != nil {
 		v.refs = t.refs
 		v.idx = slices.IndexFunc(t.refs, func(r runview.RunRef) bool { return r.Name == t.ref.Name })
+		if v.want != "" && t.ref.Name != v.want {
+			v.notice = "the selected item has no run; showing the newest"
+		}
 		if len(t.refs) == 0 {
 			v.err = fmt.Errorf("no runs yet: nothing has started")
 			return m, nil
@@ -167,6 +183,7 @@ func (m deskModel) applyRunLoad(t deskRunLoadMsg) (tea.Model, tea.Cmd) {
 	}
 	if t.err != nil {
 		v.err = t.err
+		v.gone = errors.Is(t.err, desk.ErrNotFound)
 		return m, nil
 	}
 	v.err = t.delta.Err
@@ -376,6 +393,9 @@ func (v *deskRunView) render(st theme.Styles, width, height int) string {
 		}
 		if v.err != nil {
 			rule += " · " + safeMessage(v.err.Error())
+		}
+		if v.notice != "" {
+			rule += " · " + v.notice
 		}
 		lines = append(lines, cut(st.Muted.Render(" "+rule), width))
 		lines = append(lines, runEvents(st, v.folder, v.at, width, max(body-len(flow), 1))...)
