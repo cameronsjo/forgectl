@@ -56,7 +56,9 @@ func (h HubHeader) Line() string {
 		parts = append(parts, fmt.Sprintf("%d tmux", h.TmuxSessions))
 	}
 	if h.HasReviews && h.ReviewsRunning >= 0 && h.ReviewsQueued >= 0 {
-		parts = append(parts, reviewsPhrase(h.ReviewsRunning, h.ReviewsQueued))
+		if phrase := reviewsPhrase(h.ReviewsRunning, h.ReviewsQueued); phrase != "" {
+			parts = append(parts, phrase)
+		}
 	}
 	if h.HasDoctor {
 		if result := capSafe(h.DoctorResult, hubHeaderValueMax); result != "" {
@@ -86,7 +88,9 @@ func reviewsPhrase(running, queued int) string {
 	case queued > 0:
 		return fmt.Sprintf("%d review%s queued", queued, plural(queued))
 	default:
-		return "no reviews"
+		// Nothing running or queued is the usual state, not news; the
+		// header spends no width on it (forgectl#1074).
+		return ""
 	}
 }
 
@@ -256,6 +260,28 @@ func moduleNeedsArg(e HubEntry) bool {
 	}
 	_, optional, ok := pickerSpec(e.Use)
 	return ok && !optional
+}
+
+// requiresArg reports whether a Use line names a required positional: a <…>
+// group outside every optional [...] one. "pr <ref>" does; "docs check
+// [dir|file ...]" and "pr reviewed [<ref>]" do not. It mirrors the rule
+// `forgectl menu` reports as needs_args.
+func requiresArg(use string) bool {
+	_, rest, _ := strings.Cut(use, " ")
+	depth := 0
+	for _, r := range rest {
+		switch r {
+		case '[':
+			depth++
+		case ']':
+			depth--
+		case '<':
+			if depth == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isVariadic(group string) bool {
@@ -590,7 +616,9 @@ func (m model) submitPicker() (tea.Model, tea.Cmd) {
 	p := m.picker
 	if row, ok := p.current(); ok && row.kind == pickerRowBrowse {
 		entry := *p.browse
+		area := m.area // closePicker clears it; the subcommands still return there
 		m.closePicker()
+		m.area = area
 		m.enterLeaves(entry)
 		return m, nil
 	}
@@ -626,6 +654,11 @@ func (m *model) openPicker(prefix []string, use string, noPicker bool, browse *H
 
 func (m *model) closePicker() {
 	m.picker = nil
+	if m.mode == hubMode {
+		// A search-all row that opened the picker set the area esc would
+		// return to; with the picker closed there is nowhere to return from.
+		m.area = nil
+	}
 	m.applySize()
 }
 

@@ -280,7 +280,7 @@ func TestMenu_TextHasNoEscapes(t *testing.T) {
 	if strings.ContainsRune(stdout, 0x1b) {
 		t.Error("menu's text form carries an escape sequence")
 	}
-	for _, want := range []string{"\npinned\n", "\nall commands (", "  forgectl pr <ref>  "} {
+	for _, want := range []string{"\npinned\n", "\nrepos\n", "  forgectl pr <ref>  "} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("menu text lacks %q:\n%s", want, stdout)
 		}

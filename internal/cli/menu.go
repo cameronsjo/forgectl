@@ -100,9 +100,11 @@ type menuReviewsJSON struct {
 // (what to run, after `forgectl`); when NeedsArgs is true, Usage names the
 // positional to append. Usage also names optional positionals, which
 // NeedsArgs does not count. Leaves are the subverbs the hub's drill-down
-// shows.
+// shows. Group is the area a commands row sits under on the hub ("repos");
+// it is empty on pinned, recent, and leaf rows.
 type menuRowJSON struct {
 	Command     string        `json:"command"`
+	Group       string        `json:"group"`
 	Argv        []string      `json:"argv"`
 	Description string        `json:"description"`
 	Usage       string        `json:"usage"`
@@ -127,8 +129,12 @@ func menuDocument(root *cobra.Command, sec hubSections, header tui.HubHeader) me
 	for _, e := range sec.recent {
 		doc.Recent = append(doc.Recent, menuRecentRow(root, e))
 	}
-	for _, e := range sec.rest {
-		doc.Commands = append(doc.Commands, menuModuleRow(root, e))
+	for _, g := range sec.groups {
+		for _, e := range g.entries {
+			row := menuModuleRow(root, e)
+			row.Group = g.title
+			doc.Commands = append(doc.Commands, row)
+		}
 	}
 	return doc
 }
@@ -278,7 +284,8 @@ func menuUsage(parents []string, use string) string {
 
 // writeMenuText is `menu`'s human form: the hub's status line when there is
 // one (header.Line, escaped and capped as the hub draws it),
-// then each section under its heading, one row per line — usage, then
+// then each section under its heading (pinned, recent, then one per area),
+// one row per line — usage, then
 // description — with each leaf indented under its row. Plain text only, so it
 // stays line-oriented and grep-safe off a TTY (ADR-0008 rule 5).
 func writeMenuText(w io.Writer, doc menuJSON, header tui.HubHeader) error {
@@ -289,14 +296,20 @@ func writeMenuText(w io.Writer, doc menuJSON, header tui.HubHeader) error {
 	if doc.FirstRun {
 		_, _ = fmt.Fprintf(&b, "%s init  %s\n\n", meta.AppName, hubInitShort)
 	}
-	sections := []struct {
+	type section struct {
 		title string
 		rows  []menuRowJSON
-	}{
-		{"pinned", doc.Pinned},
-		{"recent", doc.Recent},
-		{fmt.Sprintf("all commands (%d)", len(doc.Commands)), doc.Commands},
 	}
+	sections := []section{{"pinned", doc.Pinned}, {"recent", doc.Recent}}
+	var areas []section
+	for _, r := range doc.Commands {
+		if n := len(areas); n > 0 && areas[n-1].title == r.Group {
+			areas[n-1].rows = append(areas[n-1].rows, r)
+			continue
+		}
+		areas = append(areas, section{r.Group, []menuRowJSON{r}})
+	}
+	sections = append(sections, areas...)
 	first := true
 	for _, s := range sections {
 		if len(s.rows) == 0 {

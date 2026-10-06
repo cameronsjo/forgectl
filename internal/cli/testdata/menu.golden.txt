@@ -14,5 +14,5 @@ pinned
 recent
   forgectl pr prs  list open PRs
 
-all commands (1)
+setup
   forgectl doctor  check the install

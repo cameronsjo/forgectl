@@ -123,11 +123,13 @@ type reviewLiteral struct{ file, value string }
 // internal/pr, keyed by file AND value, with exactly how many times that value
 // appears there. None of them posts a review: the `forgectl init` scaffold row
 // for the review workflow (its name and config key), the review workflow's own
-// Name and ConfigKey, and the review workflow's launch export. Keying by value
+// Name and ConfigKey, the review workflow's launch export, and the review
+// module's name in the hub's area list (hubGroups). Keying by value
 // means a "/reviews" path added to an allowlisted file fails even though the
 // file already holds a "review"; the exact count means a second "review" fails
 // too, and so does an entry whose literal is gone.
 var reviewLiteralAllowlist = map[reviewLiteral]int{
+	{"internal/cli/hub.go", "review"}:      1,
 	{"internal/cli/init_cmd.go", "review"}: 2,
 	{"internal/cli/review.go", "review"}:   2,
 	{"internal/launch/steps.go", "review"}: 1,

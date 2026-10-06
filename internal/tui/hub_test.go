@@ -41,7 +41,7 @@ func TestHubHeaderLine_OmitsUnavailableFields(t *testing.T) {
 		{"branch without project", HubHeader{Branch: "main", HasTmux: true}, "0 tmux"},
 		{"tmux unavailable keeps its count out", HubHeader{Project: "p", TmuxSessions: 4}, "p"},
 		{"reviews unavailable", HubHeader{HasTmux: true, TmuxSessions: 1, ReviewsRunning: 3}, "1 tmux"},
-		{"reviews zero", HubHeader{HasReviews: true}, "no reviews"},
+		{"reviews zero", HubHeader{HasReviews: true}, ""},
 		{"queued only", HubHeader{HasReviews: true, ReviewsQueued: 2}, "2 reviews queued"},
 		{"running only", HubHeader{HasReviews: true, ReviewsRunning: 2}, "2 reviews running"},
 		{"negative count dropped", HubHeader{HasTmux: true, TmuxSessions: -1, HasReviews: true, ReviewsRunning: -1}, ""},
@@ -488,17 +488,94 @@ func TestPicker_SlowSourceOpensWithoutCandidates(t *testing.T) {
 	}
 }
 
-// TestHub_NumberKeyOnDividerMovesToNextRow pins that a divider's number runs
-// nothing: the cursor lands on the next real row.
-func TestHub_NumberKeyOnDividerMovesToNextRow(t *testing.T) {
-	m := pickerHubModel(nil)
-	out, cmd := m.Update(key("3")) // index 2 is the "recent" divider
-	m = out.(model)
-	if cmd != nil || m.action.Kind != ActionNone || m.picker != nil {
-		t.Fatalf("a divider's number ran something: action=%+v picker=%v", m.action, m.picker != nil)
+// TestHub_JumpKeysFollowTheRowNotThePosition pins forgectl#1074's stable
+// keys: a digit runs the row that carries it, wherever recent rows have
+// pushed that row, and a digit no row carries does nothing.
+func TestHub_JumpKeysFollowTheRowNotThePosition(t *testing.T) {
+	hub := []HubEntry{
+		{Name: "doctor", Short: "health check", Key: 1},
+		{Name: "recent", Heading: true},
+		{Name: "pr prs", Short: "open PRs", Use: "prs", Argv: []string{"pr", "prs"}},
+		{Name: "areas · 2 commands", Heading: true},
+		{Name: "repos", Short: "branch · clean", Key: 2, Members: []HubEntry{
+			{Name: "branch", Short: "prune branches"},
+			{Name: "clean", Short: "reclaim space"},
+		}},
 	}
-	if it, ok := m.l.SelectedItem().(hubItem); !ok || it.entry.Name != "sessions last" {
-		t.Errorf("cursor = %+v, want the row after the divider", m.l.SelectedItem())
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{Hub: hub, NoIcons: true, Theme: theme.Default()}), 80, 24)
+
+	out, cmd := m.Update(key("3"))
+	got := out.(model)
+	if cmd != nil || got.action.Kind != ActionNone || got.mode != hubMode {
+		t.Fatalf("a key no row carries did something: mode=%v action=%+v", got.mode, got.action)
+	}
+
+	out, _ = m.Update(key("2"))
+	got = out.(model)
+	if got.mode != areaMode || got.title != "repos" {
+		t.Fatalf("key 2 = mode %v title %q, want the repos area (the third row's position is the recent row)", got.mode, got.title)
+	}
+	// Inside the area, members are keyed by position, and esc goes back to
+	// the hub with the area row selected.
+	out, cmd = choose(got, "2")
+	if a := out.(model).action; cmd == nil || a.Kind != ActionRunVerb || strings.Join(a.Argv, " ") != "clean" {
+		t.Errorf("key 2 in the area = %+v, want RunVerb [clean]", a)
+	}
+	out, _ = got.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	back := out.(model)
+	if it, ok := back.l.SelectedItem().(hubItem); back.mode != hubMode || !ok || it.entry.Name != "repos" {
+		t.Errorf("esc from the area: mode=%v cursor=%+v, want hubMode on repos", back.mode, back.l.SelectedItem())
+	}
+}
+
+// TestHub_SearchCoversEveryCommand pins that "/" on the top screen searches
+// every command, including those inside areas, and that clearing the filter
+// brings the top screen back.
+func TestHub_SearchCoversEveryCommand(t *testing.T) {
+	hub := []HubEntry{
+		{Name: "doctor", Short: "health check", Key: 1},
+		{Name: "recent", Heading: true},
+		{Name: "pr prs", Short: "open PRs", Use: "prs", Argv: []string{"pr", "prs"}},
+		{Name: "repos", Short: "branch · clean", Key: 2, Members: []HubEntry{
+			{Name: "branch", Short: "prune branches"},
+			{Name: "clean", Short: "reclaim space", Leaves: []HubLeaf{{Name: "now", Short: "clean now", Use: "now"}}},
+		}},
+	}
+	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{Hub: hub, NoIcons: true, Theme: theme.Default()}), 80, 24)
+	// search applies the filter text directly: bubbles filters through a
+	// returned command, which these tests do not run.
+	search := func(m model, text string) model {
+		m = typeInto(m, "/")
+		m.l.SetFilterText(text)
+		return m
+	}
+	m = search(m, "clean")
+	if len(m.l.VisibleItems()) != 2 {
+		t.Fatalf("filter clean shows %d rows, want clean and its subcommand clean now", len(m.l.VisibleItems()))
+	}
+	if it, ok := m.l.SelectedItem().(hubItem); !ok || it.entry.Name != "clean" {
+		t.Fatalf("filtered cursor = %+v, want clean", m.l.SelectedItem())
+	}
+	m, _ = press(m, tea.KeyEnter) // open clean's subcommands
+	if m.mode != leavesMode {
+		t.Fatalf("enter on a searched module: mode=%v, want leavesMode", m.mode)
+	}
+	// esc goes back to the area the command lives in, then to the top
+	// screen with that area selected.
+	m, _ = press(m, tea.KeyEscape)
+	if m.mode != areaMode || m.title != "repos" {
+		t.Fatalf("esc from a searched module: mode=%v title=%q, want the repos area", m.mode, m.title)
+	}
+	m, _ = press(m, tea.KeyEscape)
+	if m.mode != hubMode || len(m.l.Items()) != len(hub) {
+		t.Fatalf("esc from the area: mode=%v rows=%d, want the %d-row top screen", m.mode, len(m.l.Items()), len(hub))
+	}
+
+	// Clearing a filter on the top screen restores it and does not quit.
+	m = search(m, "clean")
+	m, cmd := press(m, tea.KeyEscape)
+	if cmd != nil || m.mode != hubMode || m.hubFlat || len(m.l.Items()) != len(hub) {
+		t.Errorf("esc on an applied filter: quit=%v flat=%v rows=%d, want the top screen back", cmd != nil, m.hubFlat, len(m.l.Items()))
 	}
 }
 

@@ -1,0 +1,7 @@
+#  forgectl  ·  docs
+
+▌1 list  List the indexed docs
+$ forgectl docs list
+
+
+↑↓ move · 1-9 jump · enter run · / filter · q/esc back

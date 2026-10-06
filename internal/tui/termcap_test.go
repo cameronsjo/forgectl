@@ -28,9 +28,9 @@ func TestTUITextIsCapped(t *testing.T) {
 		limit     int
 	}{
 		"errStatus":    {errStatus("", errors.New(long("ERR")), s), "ERR", statusMaxRunes},
-		"session name": {sessionItem{s: tmux.Session{Name: long("SESS"), Windows: 1}}.render(0, false, true, g, s), "SESS", nameMaxRunes},
-		"session path": {sessionItem{s: tmux.Session{Name: "s", Windows: 1, Path: long("/PATH/")}}.render(0, false, false, g, s), "/PATH/", termsafe.PathEchoMaxRunes * 7},
-		"window name":  {windowItem{w: tmux.Window{Session: "s", Name: long("WIN")}}.render(0, false, true, g, s), "WIN", nameMaxRunes},
+		"session name": {sessionItem{s: tmux.Session{Name: long("SESS"), Windows: 1}}.render(0, false, true, 80, 12, g, s), "SESS", nameMaxRunes},
+		"session path": {sessionItem{s: tmux.Session{Name: "s", Windows: 1, Path: long("/PATH/")}}.render(0, false, false, 80, 12, g, s), "/PATH/", termsafe.PathEchoMaxRunes * 7},
+		"window name":  {windowItem{w: tmux.Window{Session: "s", Name: long("WIN")}}.render(0, false, true, 80, 12, g, s), "WIN", nameMaxRunes},
 	} {
 		if n := utf8.RuneCountInString(tc.got); n > tc.limit+256 {
 			t.Errorf("%s: rendered %d runes; want it capped near %d", name, n, tc.limit)

@@ -188,9 +188,9 @@ func TestBackgroundColorMsgRepaintsStyles(t *testing.T) {
 // module ("doctor") and one with a NeedsArgs leaf ("pr").
 func hubTestModel() model {
 	hub := []HubEntry{
-		{Name: "tmux", Short: "sessions, windows, tree", Core: true},
-		{Name: "doctor", Short: "health check", Core: false},
-		{Name: "pr", Short: "review a PR", Core: true, Leaves: []HubLeaf{
+		{Name: "tmux", Short: "sessions, windows, tree", Core: true, Key: 1},
+		{Name: "doctor", Short: "health check", Core: false, Key: 2},
+		{Name: "pr", Short: "review a PR", Core: true, Key: 3, Leaves: []HubLeaf{
 			{Name: "pr", Short: "review a PR", Use: "pr <ref>", NeedsArgs: true, Self: true},
 			{Name: "list", Short: "list sessions", Use: "list"},
 		}},
@@ -275,7 +275,7 @@ func TestHub_NeedsArgsLeafOpensPickerWithoutRunning(t *testing.T) {
 	if m.mode != leavesMode {
 		t.Fatalf("expected leavesMode, got %v", m.mode)
 	}
-	out, cmd := m.Update(key("1")) // pr's own NeedsArgs leaf
+	out, cmd := choose(m, "1") // pr's own NeedsArgs leaf
 	m = out.(model)
 	if m.picker == nil {
 		t.Fatal("expected the argument picker to open")
@@ -294,7 +294,7 @@ func TestHub_LeafRunsWithFullArgv(t *testing.T) {
 	m := hubTestModel()
 	out, _ := m.Update(key("3")) // pr row -> leavesMode
 	m = out.(model)
-	out, _ = m.Update(key("2")) // pr's "list" leaf
+	out, _ = choose(m, "2") // pr's "list" leaf
 	m = out.(model)
 	if m.action.Kind != ActionRunVerb {
 		t.Fatalf("expected ActionRunVerb, got %+v", m.action)
@@ -324,8 +324,8 @@ func TestSessionItemNarrowDropsMetadata(t *testing.T) {
 	// Narrow rows (iPhone/Termius) must drop the windows/path metadata column;
 	// wide rows must include it.
 	it := sessionItem{s: tmux.Session{Name: "alpha", Windows: 3, Path: "/Users/cam/x"}}
-	wide := it.render(0, false, false, asciiGlyphs, theme.Default().Styles())
-	narrow := it.render(0, false, true, asciiGlyphs, theme.Default().Styles())
+	wide := it.render(0, false, false, 80, 12, asciiGlyphs, theme.Default().Styles())
+	narrow := it.render(0, false, true, 80, 12, asciiGlyphs, theme.Default().Styles())
 
 	if !strings.Contains(wide, "/Users/cam/x") {
 		t.Errorf("wide row should include the path: %q", wide)
@@ -371,7 +371,7 @@ func TestMenuDigitBeyondFilteredRowsIsIgnored(t *testing.T) {
 // own leaves are one runnable verb and one that needs an argument (#916).
 func nestedHubModel() model {
 	hub := []HubEntry{
-		{Name: "pr", Short: "review a PR", Core: true, Leaves: []HubLeaf{
+		{Name: "pr", Short: "review a PR", Core: true, Key: 1, Leaves: []HubLeaf{
 			{Name: "pr", Short: "review a PR", Use: "pr <ref>", NeedsArgs: true, Self: true},
 			{Name: "list", Short: "list sessions", Use: "list"},
 			{Name: "reviewed", Short: "manage marks", Use: "reviewed", Leaves: []HubLeaf{
@@ -390,7 +390,7 @@ func TestHub_NestedGroupOpensItsLeaves(t *testing.T) {
 	m := nestedHubModel()
 	out, _ := m.Update(key("1")) // pr row -> leavesMode
 	m = out.(model)
-	out, cmd := m.Update(key("3")) // the reviewed group
+	out, cmd := choose(m, "3") // the reviewed group
 	m = out.(model)
 	if m.action.Kind != ActionNone || cmd != nil {
 		t.Fatalf("selecting a group ran something: %+v", m.action)
@@ -401,7 +401,7 @@ func TestHub_NestedGroupOpensItsLeaves(t *testing.T) {
 	if got := m.selectedDollar(); !strings.Contains(got, "pr reviewed mark <ref>") {
 		t.Errorf("dollar line = %q, want the nested usage", got)
 	}
-	out, cmd = m.Update(key("2")) // sync
+	out, cmd = choose(m, "2") // sync
 	m = out.(model)
 	if m.action.Kind != ActionRunVerb || strings.Join(m.action.Argv, " ") != "pr reviewed sync" || cmd == nil {
 		t.Errorf("nested verb = %+v, want ActionRunVerb [pr reviewed sync]", m.action)
@@ -414,9 +414,9 @@ func TestHub_NestedNeedsArgsLeafOpensPicker(t *testing.T) {
 	m := nestedHubModel()
 	out, _ := m.Update(key("1"))
 	m = out.(model)
-	out, _ = m.Update(key("3"))
+	out, _ = choose(m, "3")
 	m = out.(model)
-	out, cmd := m.Update(key("1")) // mark <ref>
+	out, cmd := choose(m, "1") // mark <ref>
 	m = out.(model)
 	if m.picker == nil || cmd != nil {
 		t.Fatalf("mark did not open the picker: picker=%v action=%+v", m.picker != nil, m.action)
@@ -433,7 +433,7 @@ func TestHub_NestedGroupEscClimbsOneLevel(t *testing.T) {
 	m := nestedHubModel()
 	out, _ := m.Update(key("1"))
 	m = out.(model)
-	out, _ = m.Update(key("3"))
+	out, _ = choose(m, "3")
 	m = out.(model)
 	out, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	m = out.(model)
@@ -468,16 +468,16 @@ func TestHub_ChildNamedLikeItsParent(t *testing.T) {
 		t.Errorf("leafArgv(child named pr) = %q, want pr pr", got)
 	}
 
-	hub := []HubEntry{{Name: "pr", Short: "review a PR", Core: true, Leaves: []HubLeaf{self, child}}}
+	hub := []HubEntry{{Name: "pr", Short: "review a PR", Core: true, Key: 1, Leaves: []HubLeaf{self, child}}}
 	m := sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{Hub: hub, Theme: theme.Default()}), 80, 24)
 	out, _ := m.Update(key("1"))
 	m = out.(model)
-	out, _ = m.Update(key("2")) // the child group named pr
+	out, _ = choose(m, "2") // the child group named pr
 	m = out.(model)
 	if strings.Join(m.leavesPath, " ") != "pr pr" {
 		t.Fatalf("child group did not open: path=%q", m.leavesPath)
 	}
-	out, _ = m.Update(key("1")) // run
+	out, _ = choose(m, "1") // run
 	m = out.(model)
 	if m.action.Kind != ActionRunVerb || strings.Join(m.action.Argv, " ") != "pr pr run" {
 		t.Errorf("nested verb = %+v, want ActionRunVerb [pr pr run]", m.action)
@@ -486,11 +486,18 @@ func TestHub_ChildNamedLikeItsParent(t *testing.T) {
 	m = sized(newModel(context.Background(), tmux.New(&exec.FakeRunner{}), RunOptions{Hub: hub, Theme: theme.Default()}), 80, 24)
 	out, _ = m.Update(key("1"))
 	m = out.(model)
-	out, _ = m.Update(key("2"))
+	out, _ = choose(m, "2")
 	m = out.(model)
 	out, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
 	m = out.(model)
 	if it, ok := m.l.SelectedItem().(leafItem); !ok || it.leaf.Self || len(it.leaf.Leaves) == 0 {
 		t.Errorf("cursor after esc = %+v, want the child group's row", m.l.SelectedItem())
 	}
+}
+
+// choose picks a row in one of the hub's deeper lists the way a user does: a
+// digit moves the cursor there, and enter acts on it.
+func choose(m model, digit string) (tea.Model, tea.Cmd) {
+	out, _ := m.Update(key(digit))
+	return out.(model).Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 }
