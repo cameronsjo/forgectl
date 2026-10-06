@@ -169,7 +169,7 @@ func runSurfaceList(cmd *cobra.Command, deps module.Deps, opts listOptions) erro
 // reconcileRow checks one ledger row against herdr and git.
 //
 // debt: one Probe per row, each re-reading herdr's readiness and full
-// workspace listing; upgrade to one listing per call when the foreman pane
+// workspace listing; upgrade to one listing per call when the atelier pane
 // (P6) polls list.
 func reconcileRow(ctx context.Context, probe backend.Prober, r worker.Row, top string, listed map[string]bool, now time.Time) listRow {
 	path := worker.WorktreePath(top, r.Name)
