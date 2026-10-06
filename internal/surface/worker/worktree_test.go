@@ -76,7 +76,7 @@ func TestAddWorktreeRunsNoRepoHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	wt, err := AddWorktree(context.Background(), fexec.OSRunner{}, top, "w1", "feat/w1", headOf(t, top))
+	wt, err := AddWorktree(context.Background(), fexec.OSRunner{}, top, "w1", "feat/w1", baseOf(t, top))
 	if err != nil {
 		t.Fatalf("AddWorktree: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestAddWorktreeUsesAnExistingLocalBranch(t *testing.T) {
 	mustGit(t, top, "branch", "existing")
 	mustGit(t, top, "commit", "-q", "--allow-empty", "-m", "on main")
 
-	wt, err := AddWorktree(context.Background(), fexec.OSRunner{}, top, "w2", "existing", headOf(t, top))
+	wt, err := AddWorktree(context.Background(), fexec.OSRunner{}, top, "w2", "existing", baseOf(t, top))
 	if err != nil {
 		t.Fatalf("AddWorktree: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestAddWorktreeRefusesASymlinkedClaudeDir(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			_, err := AddWorktree(context.Background(), fexec.OSRunner{}, top, "w3", "feat/w3", headOf(t, top))
+			_, err := AddWorktree(context.Background(), fexec.OSRunner{}, top, "w3", "feat/w3", baseOf(t, top))
 			if !errors.Is(err, ErrUnsafeWorktreeRoot) {
 				t.Fatalf("err = %v, want ErrUnsafeWorktreeRoot", err)
 			}
@@ -147,7 +147,7 @@ func TestAddWorktreeRefusesAnExistingPath(t *testing.T) {
 	if err := os.MkdirAll(WorktreePath(top, "w4"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := AddWorktree(context.Background(), fexec.OSRunner{}, top, "w4", "feat/w4", headOf(t, top)); err == nil {
+	if _, err := AddWorktree(context.Background(), fexec.OSRunner{}, top, "w4", "feat/w4", baseOf(t, top)); err == nil {
 		t.Fatal("AddWorktree reused an existing directory")
 	}
 }
@@ -168,7 +168,7 @@ func TestAddWorktreeRefusesBadNamesAndBranches(t *testing.T) {
 		{"ok", "feat\x1b[31m", ErrInvalidBranch},
 		{"ok", "", ErrInvalidBranch},
 	} {
-		_, err := AddWorktree(context.Background(), fexec.OSRunner{}, top, tc.name, tc.branch, headOf(t, top))
+		_, err := AddWorktree(context.Background(), fexec.OSRunner{}, top, tc.name, tc.branch, baseOf(t, top))
 		if !errors.Is(err, tc.want) {
 			t.Errorf("AddWorktree(%q, %q) err = %v, want %v", tc.name, tc.branch, err, tc.want)
 		}
@@ -183,7 +183,7 @@ func TestAddWorktreeRefusesBadNamesAndBranches(t *testing.T) {
 // as one run from the main checkout.
 func TestRepoTopFromAWorkerWorktreeIsTheMainCheckout(t *testing.T) {
 	top := gitRepo(t)
-	wt, err := AddWorktree(context.Background(), fexec.OSRunner{}, top, "w5", "feat/w5", headOf(t, top))
+	wt, err := AddWorktree(context.Background(), fexec.OSRunner{}, top, "w5", "feat/w5", baseOf(t, top))
 	if err != nil {
 		t.Fatalf("AddWorktree: %v", err)
 	}
@@ -196,21 +196,27 @@ func TestRepoTopFromAWorkerWorktreeIsTheMainCheckout(t *testing.T) {
 	}
 }
 
-// headOf is top's HEAD commit, the trusted base these tests pass.
+// headOf is top's HEAD commit.
 func headOf(t *testing.T, top string) string {
 	t.Helper()
 	return strings.TrimSpace(mustGit(t, top, "rev-parse", "HEAD"))
 }
 
-// TestAddWorktreeStartsAtTheTrustedBase: a new branch starts at the base the
-// caller read from GitHub, not at the checkout's HEAD, which a worker can
-// move (forgectl#1061); and nothing but a full commit id is accepted.
+// baseOf is a base func returning top's HEAD commit at call time.
+func baseOf(t *testing.T, top string) func() (string, error) {
+	t.Helper()
+	return func() (string, error) { return headOf(t, top), nil }
+}
+
+// TestAddWorktreeStartsAtTheTrustedBase: a new branch starts at the commit
+// base returns, not at the checkout's HEAD (forgectl#1061); nothing but a
+// full commit id is accepted; and an existing branch never asks for a base.
 func TestAddWorktreeStartsAtTheTrustedBase(t *testing.T) {
 	ctx := context.Background()
 	top := gitRepo(t)
 	base := headOf(t, top)
 	mustGit(t, top, "commit", "-q", "--allow-empty", "-m", "a worker moved HEAD")
-	wt, err := AddWorktree(ctx, fexec.OSRunner{}, top, "w", "feat", base)
+	wt, err := AddWorktree(ctx, fexec.OSRunner{}, top, "w", "feat", func() (string, error) { return base, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,8 +224,13 @@ func TestAddWorktreeStartsAtTheTrustedBase(t *testing.T) {
 		t.Fatalf("new branch started at %s, want the trusted base %s", wt.Base, base)
 	}
 	for _, bad := range []string{"", "HEAD", "main", "refs/remotes/origin/main", base[:12]} {
-		if _, err := AddWorktree(ctx, fexec.OSRunner{}, top, "x", "feat-x", bad); err == nil {
+		if _, err := AddWorktree(ctx, fexec.OSRunner{}, top, "x", "feat-x", func() (string, error) { return bad, nil }); err == nil {
 			t.Fatalf("AddWorktree accepted base %q", bad)
 		}
+	}
+	mustGit(t, top, "branch", "existing")
+	asked := false
+	if _, err := AddWorktree(ctx, fexec.OSRunner{}, top, "e", "existing", func() (string, error) { asked = true; return "", errors.New("offline") }); err != nil || asked {
+		t.Fatalf("an existing branch asked for a base (asked=%v, err=%v)", asked, err)
 	}
 }

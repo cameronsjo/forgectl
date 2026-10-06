@@ -2,8 +2,8 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
@@ -11,60 +11,96 @@ import (
 	"github.com/cameronsjo/forgectl/internal/pr"
 )
 
-// A new worker branch starts from a commit forgectl read from GitHub, not
-// from a local ref (forgectl#1061). A worker's worktree shares the main
-// checkout's .git, so a worker can rewrite refs/remotes/origin/<default> or
-// the checkout's HEAD; the next worker branched from either would start at a
-// commit the earlier worker chose. Local refs are never trusted for the base:
-// the commit hash comes from the GitHub API, the object is fetched into a ref
-// namespace only forgectl writes, and the hash, not a ref, goes to
-// `git worktree add`.
+// A new worker branch starts at the head of the repository's GitHub default
+// branch, not at the checkout's HEAD (forgectl#1061). The checkout's HEAD is
+// often stale or on another branch: on sjomba every worker branch had been
+// starting at an old local main. forgectl reads the default branch and its
+// head from the GitHub API, fetches that branch, checks the fetched commit is
+// the one GitHub named, and passes the hash to `git worktree add`.
+//
+// This is a correctness fix, not a security control. Workers in one
+// repository share its .git and are mutually trusting (ADR-0010): an earlier
+// worker can rewrite origin, refs, objects or config there and change what
+// the next worker starts from, and nothing here can tell.
 
-// workerBaseRefPrefix is where forgectl fetches the default branch's head.
+// workerBaseRefPrefix is where forgectl fetches a base commit, one ref per
+// commit so concurrent launches do not collide.
 const workerBaseRefPrefix = "refs/forgectl/base/"
 
-// errNoTrustedBase reports a repo whose base cannot be read from GitHub.
-var errNoTrustedBase = errors.New("forgectl: cannot read this repo's default branch from GitHub")
-
-// workerBase returns the commit hash a new worker branch in top starts from:
-// the head of the GitHub repository's default branch, present locally.
+// workerBase returns the commit a new worker branch in top starts from: the
+// head of the GitHub default branch when origin is a github.com repository,
+// else the checkout's HEAD, as before.
 func workerBase(ctx context.Context, run exec.Runner, top string) (string, error) {
-	url, err := gitenv.Run(ctx, run, gitenv.Local, "-C", top, "remote", "get-url", "origin")
+	origin, err := gitenv.Run(ctx, run, gitenv.Local, "-C", top, "remote", "get-url", "origin")
 	if err != nil {
-		return "", fmt.Errorf("%w: no origin remote: %w", errNoTrustedBase, err)
+		return checkoutHead(ctx, run, top)
 	}
-	host, owner, repo, ok := pr.ParseRemoteURL(url)
-	if !ok || host != "github.com" {
-		return "", fmt.Errorf("%w: origin is not a github.com repository", errNoTrustedBase)
+	host, owner, repo, ok := pr.ParseRemoteURL(origin)
+	if !ok || host != "github.com" || !pr.ValidOwnerRepoPart(owner) || !pr.ValidOwnerRepoPart(repo) {
+		return checkoutHead(ctx, run, top)
 	}
 	slug := owner + "/" + repo
-	branch, err := run.Run(ctx, "gh", "api", "repos/"+slug, "--jq", ".default_branch")
+	branch, err := run.Run(ctx, "gh", "api", "--hostname", "github.com", "repos/"+slug, "--jq", ".default_branch")
 	if err != nil {
-		return "", fmt.Errorf("%w: read %s: %w", errNoTrustedBase, slug, err)
+		return "", fmt.Errorf("forgectl: read %s's default branch from GitHub: %w", slug, err)
 	}
 	branch = strings.TrimSpace(branch)
-	if _, err := gitenv.Run(ctx, run, gitenv.Local, "check-ref-format", "--branch", branch); err != nil || strings.HasPrefix(branch, "-") {
-		return "", fmt.Errorf("%w: GitHub named default branch %q", errNoTrustedBase, branch)
+	if err := checkDefaultBranch(ctx, run, branch); err != nil {
+		return "", err
 	}
-	sha, err := run.Run(ctx, "gh", "api", "repos/"+slug+"/commits/"+branch, "--jq", ".sha")
+	sha, err := run.Run(ctx, "gh", "api", "--hostname", "github.com", "repos/"+slug+"/commits/"+escapeRefPath(branch), "--jq", ".sha")
 	if err != nil {
-		return "", fmt.Errorf("%w: read the head of %s %s: %w", errNoTrustedBase, slug, branch, err)
+		return "", fmt.Errorf("forgectl: read the head of %s %s from GitHub: %w", slug, branch, err)
 	}
 	sha = strings.TrimSpace(sha)
 	if !isCommitHash(sha) {
-		return "", fmt.Errorf("%w: GitHub returned %q as the head of %s", errNoTrustedBase, sha, branch)
+		return "", fmt.Errorf("forgectl: GitHub returned %q as the head of %s", sha, branch)
 	}
-	ref := workerBaseRefPrefix + branch
+	ref := workerBaseRefPrefix + sha
 	if _, err := gitenv.RunRefusing(ctx, run, gitenv.Transport, []string{"ext", "fd"}, "-C", top, "fetch", "--no-tags", "origin", "+refs/heads/"+branch+":"+ref); err != nil {
 		return "", fmt.Errorf("forgectl: fetch %s from origin: %w", branch, err)
 	}
 	got, err := gitenv.Run(ctx, run, gitenv.Local, "-C", top, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	// The ref only brings the commit in; the worktree add references the
+	// commit by hash. A failed delete leaves a stray ref and nothing else.
+	_, _ = gitenv.Run(ctx, run, gitenv.Local, "-C", top, "update-ref", "-d", ref)
 	if err != nil || strings.TrimSpace(got) != sha {
-		// The branch moved between the API read and the fetch, or the fetch
-		// did not land what GitHub named. Either way the base is unproven.
-		return "", fmt.Errorf("forgectl: %s at origin is %q, GitHub reported %s; retry the launch", branch, strings.TrimSpace(got), sha)
+		// The branch moved between the API read and the fetch.
+		return "", fmt.Errorf("forgectl: %s moved on GitHub during the launch (fetched %q, GitHub said %s); retry", branch, strings.TrimSpace(got), sha)
 	}
 	return sha, nil
+}
+
+// checkoutHead is the checkout's HEAD commit, the base for a repository whose
+// origin is not on github.com.
+func checkoutHead(ctx context.Context, run exec.Runner, top string) (string, error) {
+	out, err := gitenv.Run(ctx, run, gitenv.Local, "-C", top, "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("forgectl: read %s's HEAD: %w", top, err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// checkDefaultBranch refuses a branch name git would refuse, or one that
+// could change the meaning of the API path or the fetch refspec.
+func checkDefaultBranch(ctx context.Context, run exec.Runner, branch string) error {
+	if branch == "" || strings.HasPrefix(branch, "-") || strings.ContainsAny(branch, "#%?\\: ") {
+		return fmt.Errorf("forgectl: GitHub named default branch %q, which forgectl will not use", branch)
+	}
+	if _, err := gitenv.Run(ctx, run, gitenv.Local, "check-ref-format", "--branch", branch); err != nil {
+		return fmt.Errorf("forgectl: GitHub named default branch %q, which git refuses", branch)
+	}
+	return nil
+}
+
+// escapeRefPath escapes each slash-separated part of a branch name for a
+// GitHub API path, keeping the slashes the API reads as part of the ref.
+func escapeRefPath(branch string) string {
+	parts := strings.Split(branch, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	return strings.Join(parts, "/")
 }
 
 // isCommitHash reports whether s is a full lowercase SHA-1 or SHA-256 hash.

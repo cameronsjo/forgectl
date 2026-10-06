@@ -2,24 +2,35 @@ package cli
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
 
+const (
+	testBaseSHA = "0123456789abcdef0123456789abcdef01234567"
+	testHeadSHA = "89abcdef0123456789abcdef0123456789abcdef"
+)
+
 // baseFake answers workerBase's git and gh calls: origin, the GitHub default
-// branch and its head, the fetch, and the fetched ref.
+// branch and its head, the fetch, the fetched ref, and the checkout's HEAD.
 func baseFake(origin, branch, apiSHA, fetchedSHA string) *exec.FakeRunner {
 	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		joined := strings.Join(args, " ")
 		switch {
-		case name == "gh" && strings.HasSuffix(args[1], "/commits/"+branch):
+		case name == "gh" && strings.Contains(joined, "/commits/"):
 			return apiSHA + "\n", nil
 		case name == "gh":
 			return branch + "\n", nil
 		case strings.Contains(joined, "get-url origin"):
+			if origin == "" {
+				return "", errors.New("no such remote")
+			}
 			return origin + "\n", nil
+		case strings.Contains(joined, "rev-parse") && strings.Contains(joined, "HEAD^{commit}"):
+			return testHeadSHA + "\n", nil
 		case strings.Contains(joined, "rev-parse"):
 			if fetchedSHA == "" {
 				return "", errors.New("unknown revision")
@@ -30,25 +41,58 @@ func baseFake(origin, branch, apiSHA, fetchedSHA string) *exec.FakeRunner {
 	}}
 }
 
+// fetchArgs returns the git fetch call's arguments, or nil.
+func fetchArgs(run *exec.FakeRunner) []string {
+	for _, c := range run.Calls {
+		if i := slices.Index(c.Args, "fetch"); i >= 0 {
+			return c.Args[i:]
+		}
+	}
+	return nil
+}
+
 func TestWorkerBase(t *testing.T) {
-	const sha = "0123456789abcdef0123456789abcdef01234567"
-	got, err := workerBase(t.Context(), baseFake("git@github.com:o/r.git", "main", sha, sha), "/top")
-	if err != nil || got != sha {
-		t.Fatalf("workerBase = %q, %v, want %s", got, err, sha)
+	run := baseFake("git@github.com:o/r.git", "main", testBaseSHA, testBaseSHA)
+	got, err := workerBase(t.Context(), run, "/top")
+	if err != nil || got != testBaseSHA {
+		t.Fatalf("workerBase = %q, %v, want %s", got, err, testBaseSHA)
+	}
+	want := []string{"fetch", "--no-tags", "origin", "+refs/heads/main:refs/forgectl/base/" + testBaseSHA}
+	if f := fetchArgs(run); !slices.Equal(f, want) {
+		t.Fatalf("fetch %q, want %q", f, want)
 	}
 
-	refused := map[string]*exec.FakeRunner{
-		"origin is not on github.com":         baseFake("git@gitlab.com:o/r.git", "main", sha, sha),
-		"GitHub names no commit":              baseFake("git@github.com:o/r.git", "main", "not-a-sha", sha),
-		"the fetched ref differs from GitHub": baseFake("git@github.com:o/r.git", "main", sha, strings.Repeat("f", 40)),
-		"the fetch landed nothing":            baseFake("git@github.com:o/r.git", "main", sha, ""),
-		"GitHub names a dash branch":          baseFake("git@github.com:o/r.git", "-x", sha, sha),
+	for name, run := range map[string]*exec.FakeRunner{
+		"origin is not on github.com": baseFake("git@gitlab.com:o/r.git", "main", testBaseSHA, testBaseSHA),
+		"there is no origin":          baseFake("", "main", testBaseSHA, testBaseSHA),
+	} {
+		t.Run("falls back to HEAD: "+name, func(t *testing.T) {
+			if got, err := workerBase(t.Context(), run, "/top"); err != nil || got != testHeadSHA {
+				t.Fatalf("workerBase = %q, %v, want the checkout's HEAD", got, err)
+			}
+			if fetchArgs(run) != nil {
+				t.Fatal("fetched for a non-GitHub origin")
+			}
+		})
 	}
-	for name, run := range refused {
+
+	for name, run := range map[string]*exec.FakeRunner{
+		"GitHub names no commit":            baseFake("git@github.com:o/r.git", "main", "not-a-sha", testBaseSHA),
+		"the branch moved during the fetch": baseFake("git@github.com:o/r.git", "main", testBaseSHA, strings.Repeat("f", 40)),
+		"the fetch landed nothing":          baseFake("git@github.com:o/r.git", "main", testBaseSHA, ""),
+		"GitHub names a dash branch":        baseFake("git@github.com:o/r.git", "-x", testBaseSHA, testBaseSHA),
+		"GitHub names a branch with #":      baseFake("git@github.com:o/r.git", "a#b", testBaseSHA, testBaseSHA),
+	} {
 		t.Run("refuses: "+name, func(t *testing.T) {
 			if got, err := workerBase(t.Context(), run, "/top"); err == nil {
 				t.Fatalf("workerBase accepted it: %q", got)
 			}
 		})
+	}
+}
+
+func TestEscapeRefPath(t *testing.T) {
+	if got := escapeRefPath("release/1.0 x"); got != "release/1.0%20x" {
+		t.Fatalf("escapeRefPath = %q", got)
 	}
 }

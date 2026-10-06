@@ -74,8 +74,8 @@ func WorktreePath(top, name string) string {
 //
 // Branch selection, in order: an existing local branch is checked out as is; a
 // branch that exists only as origin/<branch> gets a local tracking branch; any
-// other name becomes a new branch at base, a commit the caller read from GitHub
-// (forgectl#1061): never the checkout's HEAD, which a worker can move.
+// other name becomes a new branch at the commit base returns, called only then
+// (forgectl#1061 reads it from GitHub rather than the often-stale HEAD).
 //
 // Every git call that writes runs with core.hooksPath=/dev/null. A branch
 // fetched from a remote carries whatever hook-runner config its tree points at
@@ -86,10 +86,7 @@ func WorktreePath(top, name string) string {
 // symlink: a repo can commit .claude as a symlink, and following it would put
 // the worktree, and the worker, outside the repo. The created path is checked
 // again after git runs, against the real top.
-func AddWorktree(ctx context.Context, run GitRunner, top, name, branch, base string) (Worktree, error) {
-	if !validCommitID(base) {
-		return Worktree{}, fmt.Errorf("worker: base %q is not a full commit id; a new branch starts from a commit read from GitHub, never a local ref", base)
-	}
+func AddWorktree(ctx context.Context, run GitRunner, top, name, branch string, base func() (string, error)) (Worktree, error) {
 	if err := ValidName(name); err != nil {
 		return Worktree{}, err
 	}
@@ -116,7 +113,14 @@ func AddWorktree(ctx context.Context, run GitRunner, top, name, branch, base str
 	case refExists(ctx, run, top, "refs/remotes/origin/"+branch):
 		add = append(add, "--track", "-b", branch, "--", path, "origin/"+branch)
 	default:
-		add = append(add, "-b", branch, "--", path, base)
+		sha, err := base()
+		if err != nil {
+			return Worktree{}, err
+		}
+		if !validCommitID(sha) {
+			return Worktree{}, fmt.Errorf("worker: base %q is not a full commit id", sha)
+		}
+		add = append(add, "-b", branch, "--", path, sha)
 	}
 	if _, err := gitenv.Run(ctx, run, gitenv.Local, add...); err != nil {
 		return Worktree{}, fmt.Errorf("worker: git worktree add: %w", err)

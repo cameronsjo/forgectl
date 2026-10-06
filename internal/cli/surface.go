@@ -92,9 +92,9 @@ With --worktree <branch> (herdr only, --name required) the launch starts a
 coordinator worker instead: a git worktree at <repo>/.claude/worktrees/<name>,
 created with repository hooks disabled, and a row in the worker ledger under
 $XDG_STATE_HOME/forgectl/surface. A branch that does not exist yet starts at
-the head of the repository's GitHub default branch, read from the GitHub API
-and fetched into refs/forgectl/base/, never at a local ref; origin must be a
-github.com repository. Workers take their posture from [launch.worker] (see
+the head of the repository's GitHub default branch, read from the GitHub API,
+rather than at the checkout's HEAD; a repository whose origin is not on
+github.com starts it at HEAD. Workers take their posture from [launch.worker] (see
 docs/commands/launch.md), at most claude acceptEdits, or codex
 workspace-write with on-request approvals; pi and anything looser are
 refused, and workers never get --allow-dangerously-skip-permissions.
