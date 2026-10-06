@@ -8,7 +8,7 @@ Date: 2026-10-05
 
 The herdr coordinator plan (`docs/plans/2026-09-28-forgectl-herdr-coordinator.md`) starts claude workers at `acceptEdits`. The interim worker floor in `applyWorkerFloor` (`internal/launch/invocation.go:136-178`) allows only `plan`, `default`, and `acceptEdits` for claude, and `read-only` or `workspace-write` with `untrusted` or `on-request` approvals for codex. Anything else is refused.
 
-An `acceptEdits` worker edits files without asking but stops at every shell command. A queue that dispatches workers unattended (the foreman drain) then spends most of its time in `needs-you`: every `go test`, `git commit`, and `gh pr create` waits for the operator. Claude Code's `auto` mode sends each tool call to a classifier instead of the operator. That removes the stall, and it replaces the operator's judgment on every shell command with the classifier's.
+An `acceptEdits` worker edits files without asking but stops at every shell command. A queue that dispatches workers unattended (the atelier drain) then spends most of its time in `needs-you`: every `go test`, `git commit`, and `gh pr create` waits for the operator. Claude Code's `auto` mode sends each tool call to a classifier instead of the operator. That removes the stall, and it replaces the operator's judgment on every shell command with the classifier's.
 
 Today an unattended worker can reach far more than its worktree:
 
@@ -48,7 +48,7 @@ Today an unattended worker can reach far more than its worktree:
 
 ## Alternatives considered
 
-- **Keep workers at `acceptEdits` permanently.** Safe, and the drain stalls at every shell command. Declined by Cameron in the foreman plan.
+- **Keep workers at `acceptEdits` permanently.** Safe, and the drain stalls at every shell command. Declined by Cameron in the atelier plan.
 - **`dontAsk` or `bypassPermissions`.** No permission layer at all; the sandbox would be the only control. Declined.
 - **A long-lived fine-grained PAT per repo.** Pull-requests write can merge through the API whatever the deny rules say, and stopping the drain leaves it live. Replaced by the worker App's short-lived tokens.
 - **A machine-user account pushing to a fork.** Cannot merge, but is a long-lived credential and does not make GitHub enforce the merge policy. Declined in favor of the App pair.

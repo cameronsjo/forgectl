@@ -192,7 +192,7 @@ func TestWorkerLaunchRefusesBeforeTouchingAnything(t *testing.T) {
 	}
 }
 
-// TestWorkerLaunchRecordsTheSession pins the foreman join key: a claude
+// TestWorkerLaunchRecordsTheSession pins the atelier join key: a claude
 // worker's session id and transcript path land in its row.
 func TestWorkerLaunchRecordsTheSession(t *testing.T) {
 	led := testWorkerLedger(t)

@@ -123,7 +123,7 @@ No pre-trust. Claude Code's folder-trust dialog guards repo-supplied hooks, MCP 
 
 ## Out of scope (refused, per the 2026-07-15 steal/refuse study)
 
-- ~~No standing daemon, PR poller or auto-merge. Merge stays manual.~~ **Reversed 2026-10-05 by the foreman amendment** (see Amendment: foreman queue, drain, and merge gate). Each original ground and what answers it:
+- ~~No standing daemon, PR poller or auto-merge. Merge stays manual.~~ **Reversed 2026-10-05 by the atelier amendment** (see Amendment: atelier queue, drain, and merge gate). Each original ground and what answers it:
   - *Machinery from nowhere* (the herdr-projects plugin's per-session hooks and background poller): the drain is a forgectl verb (`surface drain start|stop|status`), detached, under one global flock, with no session hooks and nothing installed into a harness. Stopping it is one command.
   - *Edits to other harnesses' config*: still refused. The drain launches workers through `surface launch` and writes only forgectl's own state dir.
   - *Unreviewed merges*: merge stays off by default. ADR-0011 allows it per machine only, through a gate check that GitHub's ruleset requires by App id, so no worker can merge by any path. The gate needs named required checks, an approver a worker cannot impersonate, and a per-repo path allowlist, all at one head SHA, with every merge and refusal audited.
@@ -141,14 +141,14 @@ No pre-trust. Claude Code's folder-trust dialog guards repo-supplied hooks, MCP 
 - [x] T4: `list` (three-state reconcile, `--orphans`) and `close` (the four removal checks, never deletes the branch, refuses on `unreadable`).
 - [ ] T5: `--profile worker`: explicit posture per harness, stricter-of merge with the matched profile, worker settings file field, no pre-trust.
 - [ ] T6: coordinator skill: split, dispatch, verify-against-git, report. It extends `herdr-orchestrator`, which lives in the cadence plugin monorepo (`cameronsjo/cadence`), so T6 is a separate PR there after T1–T5 ship.
-- [ ] T7: re-run the trial with claude and codex as the acceptance test, on a named machine and herdr build with matching client and server protocol versions. **Amended:** extended by the foreman acceptance script (see the amendment section).
-- [ ] T8 (foreman P2): queue and drain. Own plan at pickup.
-- [ ] T9 (foreman P3): intake from GitHub labels and the board. Own plan at pickup.
-- [ ] T10 (foreman P4): verdicts, usage, merge gate, closers. Own plan at pickup.
+- [ ] T7: re-run the trial with claude and codex as the acceptance test, on a named machine and herdr build with matching client and server protocol versions. **Amended:** extended by the atelier acceptance script (see the amendment section).
+- [ ] T8 (atelier P2): queue and drain. Own plan at pickup.
+- [ ] T9 (atelier P3): intake from GitHub labels and the board. Own plan at pickup.
+- [ ] T10 (atelier P4): verdicts, usage, merge gate, closers. Own plan at pickup.
 
-## Amendment: foreman queue, drain, and merge gate (2026-10-05)
+## Amendment: atelier queue, drain, and merge gate (2026-10-05)
 
-The foreman plan (`cadence-ecosystem` `docs/plans/2026-10-05-foreman-a-herdr-work-queue-cockpit-for-claude-code.md`) builds a `/foreman` pane in Claude Code on top of this plan. forgectl stays the engine: the pane and the coordinator skill call `--json` verbs and own no state. It changes this plan as follows.
+The atelier plan (`cadence-ecosystem` `docs/plans/2026-10-05-atelier-a-herdr-work-queue-cockpit-for-claude-code.md`) builds a `/atelier` pane in Claude Code on top of this plan. forgectl stays the engine: the pane and the coordinator skill call `--json` verbs and own no state. It changes this plan as follows.
 
 - **Order.** T2–T4 run as planned. T5 runs next, before any unattended run of T8, because it carries the `auto` hardening.
 - **T4 addition.** `surface list --json` rows carry `session_id`, `transcript` (`${CLAUDE_CONFIG_DIR:-~/.claude}/projects/<slug(worktree)>/<id>.jsonl`), `pane_id`, `workspace_id`, `branch`, `repo`, `stage`, and `pr`, so usage and PR state can be joined to a worker without a second ledger.
@@ -156,8 +156,8 @@ The foreman plan (`cadence-ecosystem` `docs/plans/2026-10-05-foreman-a-herdr-wor
 - **T8: queue and drain.** `surface enqueue|dequeue|queue`, `surface drain start|stop|status|events`. One `queue.jsonl` beside the per-repo ledgers; a global drain flock with pid and heartbeat; `queued → claimed` as a compare-and-set under the lock; every step `intent → act → confirm` with a startup reconcile; caps global 3 and 1 per repo. Reuses `internal/pr`'s claim and attempt handling (`drain.go`), or the T8 plan records why it cannot.
 - **T9: intake.** `surface intake gh` (eligible `exec:*` labels from config, marker label `exec:queued`, author allowlist, fenced body) and `surface intake board`. Intake refuses PRs (the issues API returns them), and requires that the eligible label was applied by an identity other than the worker App.
 - **T10: verdicts, usage, merge, closers.** The "merge gate" GitHub App and its `forgectl/merge-gate` check run, with each eligible repo's ruleset requiring it by App id (ADR-0011); `surface status --json` with PR, required checks, approvals, and policy verdict; `surface merge` under ADR-0011; `merge-audit.jsonl` and `surface audit`; close after `MERGED` or a 24h-graced `CLOSED`; `prune` with a daily usage rollup. Live cost comes from a new `cadence-hooks metrics price --transcript` action.
-- **T6 grows** a coordinator mode: split an ask, `surface enqueue --batch` per task, point the operator at `/foreman`. It still ships in `cameronsjo/cadence`.
-- **T7 grows** `scripts/foreman-acceptance.sh` in the meta-repo, with negative cases: a review at an older SHA does not merge, a racing push does not merge, a worker-posted `cadence-review` marker does not merge, a second `drain start` is refused.
+- **T6 grows** a coordinator mode: split an ask, `surface enqueue --batch` per task, point the operator at `/atelier`. It still ships in `cameronsjo/cadence`.
+- **T7 grows** `scripts/atelier-acceptance.sh` in the meta-repo, with negative cases: a review at an older SHA does not merge, a racing push does not merge, a worker-posted `cadence-review` marker does not merge, a second `drain start` is refused.
 - **herdr package boundary (forgectl#721, agreed).** herdr reads for the drain (agent status hints, pane reads) go through the shared `internal/herdr` client (forgectl#723), with a pinned server passed as a `Runner` that sets `HERDR_SOCKET_PATH`. Starting and closing workers stays in `internal/surface/herdradapter` through the sensitive runner. Readiness predicates live in `internal/herdr/ready`, which T2 creates. An errored herdr read is `unreadable`, never `gone`.
 
 ## Verification
@@ -191,7 +191,7 @@ The foreman plan (`cadence-ecosystem` `docs/plans/2026-10-05-foreman-a-herdr-wor
 - **T3: the report marker cannot come from the echo (T3).** The brief spells the REPORT line out in words, so the echoed brief never matches `REPORT <marker>:`, and `read --report` also skips everything above the last line naming the marker. The marker is written to the ledger row before Enter (or with the pending row, for a launch brief).
 - **T3: wait reads verdict stability, not screen stability (T3).** A harness's status line and any mod drawn above the prompt change every second, so the plan's "screen stable for N seconds" became "ready verdict held for `--settle`", plus a turn seen, the report on screen, or `--quiet` at the prompt.
 - **T3 live check.** With this build on herdr 0.9.1 and Claude Code 2.1.289, a claude worker launched with `--brief` answered with no keystroke typed; `wait` settled in 16 s; `read --report` found the report; a typed `brief` came back `sent` with count 2; the second `wait` saw the turn and `read --report` found the new marker. Two stale ledger rows (`t3-probe` failed, `t3-probe2` launched) remain in sjomba's forgectl ledger for T4's `list --orphans` to show; their workspaces and worktrees were removed by hand.
-- **T4: `pr` is not in `surface list` (T4).** `list` is what the foreman pane polls, and a PR lookup there would call GitHub every few seconds per repo. The PR number and state move to T10's `surface status`, which caches `gh` per head SHA. The other T4 fields (`session_id`, `transcript`, `pane_id`, `workspace_id`, `branch`, `repo`, `stage`) are in.
+- **T4: `pr` is not in `surface list` (T4).** `list` is what the atelier pane polls, and a PR lookup there would call GitHub every few seconds per repo. The PR number and state move to T10's `surface status`, which caches `gh` per head SHA. The other T4 fields (`session_id`, `transcript`, `pane_id`, `workspace_id`, `branch`, `repo`, `stage`) are in.
 - **T4: forgectl picks the claude session id (T4).** A claude worker is launched with a forgectl-generated `--session-id`, and the row records the transcript path computed from the environment the harness got. Codex has no such flag, so a codex row carries neither field.
 - **T4: an identity mismatch is `unreadable`, not `gone` (T4).** That matches `Probe`'s rule that a mismatch is not conclusive. The cost is that rows taken before a herdr restart stay `unreadable` and `close` refuses them; forgectl#1077 tracks telling a restart apart.
 - **T4: a kept worktree keeps the row at a new stage `closed` (T4).** The row is removed only when the workspace is closed or gone and no worktree remains, so a later `close` can retry the removal.
