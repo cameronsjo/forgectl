@@ -623,21 +623,46 @@ func TestGoldenDeskShort(t *testing.T) {
 	}
 }
 
-// The too-small notice names a size at which the focus panel does fit, even
-// when what and why wrap more at 40 columns than at the current width.
+// The too-small notice names the rows at which the focus panel fits at the
+// current width.
 func TestDeskFrame_TooSmallNamesASizeThatFits(t *testing.T) {
 	snap, opts := twoWaitingSnapshot()
 	snap.Pending[0].What = strings.Repeat("rebuild the index ", 6)
 	snap.Pending[0].Why = strings.Repeat("the cache was cleared ", 4)
 	out := ansi.Strip(RenderDeskFrame(snap, 120, 8, deskNow, opts))
-	var w, h int
-	if i := strings.Index(out, "enlarge to "); i < 0 {
+	w := 120
+	var h int
+	if i := strings.Index(out, "make the window "); i < 0 {
 		t.Fatalf("no size in the notice:\n%s", out)
-	} else if _, err := fmt.Sscanf(out[i+len("enlarge to "):], "%dx%d", &w, &h); err != nil {
+	} else if _, err := fmt.Sscanf(out[i+len("make the window "):], "%d rows", &h); err != nil {
 		t.Fatalf("parse size: %v\n%s", err, out)
 	}
 	f := deskFrame{snap: snap, width: w, height: h, now: deskNow, opts: opts}
 	if !f.focusShown() {
 		t.Errorf("the advertised %dx%d still does not show the focus panel:\n%s", w, h, ansi.Strip(f.render()))
+	}
+}
+
+// No frame draws the history panel as a lone top border.
+func TestDeskFrame_NoLoneHistoryBorder(t *testing.T) {
+	for _, fx := range []func() (*desk.Snapshot, DeskFrameOptions){twoWaitingSnapshot, busySnapshot} {
+		for h := 8; h <= 30; h++ {
+			snap, opts := fx()
+			lines := strings.Split(ansi.Strip(RenderDeskFrame(snap, 80, h, deskNow, opts)), "\n")
+			for i, l := range lines {
+				if strings.HasPrefix(l, "╭ history") && (i+1 >= len(lines) || !strings.HasPrefix(lines[i+1], "│")) {
+					t.Errorf("80x%d: history has a border and no body:\n%s", h, strings.Join(lines, "\n"))
+				}
+			}
+		}
+	}
+}
+
+// The too-small frame does not offer y, which refuses there.
+func TestDeskFrame_TooSmallHidesY(t *testing.T) {
+	snap, opts := twoWaitingSnapshot()
+	out := ansi.Strip(RenderDeskFrame(snap, 100, 7, deskNow, opts))
+	if strings.Contains(out, "y run") || !strings.Contains(out, "a all") {
+		t.Errorf("too-small hints:\n%s", out)
 	}
 }

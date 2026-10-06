@@ -992,7 +992,7 @@ func TestDesk_YRefusesWhenTheFocusPanelIsNotOnScreen(t *testing.T) {
 		if len(h.backend.launched) != 0 || h.where("01-s1") != desk.DirPending {
 			t.Fatalf("%dx%d: y ran %v with the focus panel off screen", size[0], size[1], h.backend.launched)
 		}
-		if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "not run: the window is too small to show 01 s1's sha256") {
+		if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "not run: enlarge the window to see 01 s1's sha256, what and why") {
 			t.Errorf("%dx%d: footer = %q", size[0], size[1], footer)
 		}
 		h.m.width, h.m.height = 80, 10
@@ -1071,7 +1071,7 @@ func TestDesk_APagesAndRunsOnlyAfterEveryHashWasShown(t *testing.T) {
 	if len(h.backend.launched) != 0 || h.m.confirm != confirmAll {
 		t.Fatalf("y on page 1 ran %v; it must wait for every page", h.backend.launched)
 	}
-	if !strings.Contains(ansi.Strip(h.m.footer()), "y runs once every hash has been shown") {
+	if !strings.Contains(ansi.Strip(h.m.footer()), "not run: see every page first") {
 		t.Errorf("y on page 1 should say why it did not run: %q", ansi.Strip(h.m.footer()))
 	}
 	for range 10 {
@@ -1174,5 +1174,74 @@ func TestDesk_YNamesAMissingHash(t *testing.T) {
 	footer := ansi.Strip(h.m.footer())
 	if len(h.backend.launched) != 0 || !strings.Contains(footer, "no valid sha256") || strings.Contains(footer, "too small") {
 		t.Fatalf("launched %v footer %q", h.backend.launched, footer)
+	}
+}
+
+// TestDesk_YRefusesOnceWhenARescanMovesTheSelection: another desk skips the
+// selected item, and a rescan drops it, so the cursor lands on the next item. That item's hash was never matched, so y refuses once and
+// names what happened; a second y (now on screen) runs it.
+func TestDesk_YRefusesOnceWhenARescanMovesTheSelection(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-s1.sh", plainScript("s1"))
+	h.drop("02-s2.sh", plainScript("s2"))
+	h.scan()
+	if err := h.d.Skip("01-s1", desk.SkipOperator); err != nil { // another desk skipped it
+		h.t.Fatal(err)
+	}
+	h.scan()
+	if r, _ := h.m.selected(); r.item.Name != "02-s2" {
+		t.Fatalf("selected %s after 01-s1 left, want 02-s2", r.item.Name)
+	}
+	h.press("y")
+	if len(h.backend.launched) != 0 {
+		t.Fatalf("y ran %v right after the selection moved", h.backend.launched)
+	}
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "01 s1 left the queue") {
+		t.Errorf("footer = %q", footer)
+	}
+	h.press("y")
+	if !slices.Equal(h.backend.launched, []string{"02-s2"}) {
+		t.Fatalf("the second y launched %v, want [02-s2]", h.backend.launched)
+	}
+}
+
+// The operator's own skip moves the selection too, but they did that: y on
+// the next item runs at once.
+func TestDesk_OwnSkipDoesNotCostAnExtraY(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-s1.sh", plainScript("s1"))
+	h.drop("02-s2.sh", plainScript("s2"))
+	h.scan()
+	h.press("s", "y") // skip 01-s1
+	h.press("y")
+	if !slices.Equal(h.backend.launched, []string{"02-s2"}) {
+		t.Fatalf("launched %v, want [02-s2]", h.backend.launched)
+	}
+}
+
+// While the a prompt crowds the dashboard out, the frame says the dashboard
+// is hidden rather than that items cannot run.
+func TestDesk_APromptDoesNotSayTooSmallToRun(t *testing.T) {
+	h := newDeskHarness(t)
+	dropMany(h, 12)
+	h.m.width, h.m.height = 80, 10
+	h.press("a")
+	view := ansi.Strip(h.m.View().Content)
+	if strings.Contains(view, "to run items") || !strings.Contains(view, "dashboard hidden while you confirm") {
+		t.Errorf("view during the a prompt:\n%s", view)
+	}
+}
+
+// A resize during the a prompt keeps the first item of the page on screen.
+func TestDesk_AResizeKeepsThePlace(t *testing.T) {
+	h := newDeskHarness(t)
+	dropMany(h, 12)
+	h.m.width, h.m.height = 100, 24
+	h.press("a", "space")
+	first := h.m.anchor
+	out, _ := h.m.Update(tea.WindowSizeMsg{Width: 100, Height: 8})
+	h.m = out.(deskModel)
+	if !strings.Contains(ansi.Strip(h.m.footer()), itemLabel(h.m.targets[first].name)) {
+		t.Errorf("after the resize the page lost %s:\n%s", h.m.targets[first].name, ansi.Strip(h.m.footer()))
 	}
 }
