@@ -6,203 +6,164 @@ Date: 2026-10-06
 
 ## Context
 
-[ADR-0008](0008-agent-contract.md) rule 3 says exit codes must be honest. It does not say which numbers mean what, so each verb family picked its own. [#1085](https://github.com/cameronsjo/forgectl/issues/1085) found the result: the same failure class exits 1 or 2 depending on which layer caught it, and exit 2 means four different things. An agent that branches on `rc == 2` ("fix the call, do not retry") misreads a `tasks` outage.
+[ADR-0008](0008-agent-contract.md) rule 3 says exit codes must be honest. It does not say which numbers mean what, so each verb family picked its own. [#1085](https://github.com/cameronsjo/forgectl/issues/1085) found the result: the same failure class exits 1 or 2 depending on which layer caught it, and exit 2 means several different things. An agent that branches on `rc == 2` ("fix the call, do not retry") misreads a `tasks` outage.
 
-This ADR measures today's codes, proposes one table, lists every code that would change, and asks the maintainer for the decisions that break callers. It changes no code.
+Measured on `origin/main` at `2ecae571`, with the evidence, file and line cites, and the list of dependents in the [appendix](0014-exit-code-table-appendix.md):
 
-### What the code does today
+- Cobra's own flag, argument and unknown-verb errors exit 1 on every leaf outside `docs`; the six `docs` leaves exit 2. `config zzbogus` and `completion nonesuch` exit 0.
+- Verb-level checks use 2 for usage or setup (`desk`, `surface`, `preflight`, `herdr`, `recipe`, `launch which`, `audit`, `update`), but 2 also means "target running" (`resume`), "file absent" (`env check`), "instance unreachable" (`tasks`) and "could not run" (`docs`).
+- `tasks` also uses 3 (credential rejected) and 4 (host refused). `desk watch` uses 75, 130, 141. `k8s`, `launch` and `surface _exec` pass a child's code through.
+- JSON `code` strings split the same way: `desk show a/b --json` emits `failed` at exit 2, `tasks show abc` emits `failed` at exit 1, `docs` writes an integer, `env check` writes `check_failed` for usage errors.
 
-Measured on `origin/main` at `2ecae571` with a built binary, stdin on `/dev/null`, a throwaway `HOME`, and the help text of every verb. A repeat of the measurement: build with `go build -o /tmp/forgectl .`, then run `forgectl <verb> --zzbogus; echo $?` for each leaf in `forgectl menu --json`.
-
-The mechanism is `WithExitCode` and `ExitCode` (`internal/cli/exitcode.go:37`, `:48`). An error that never opts in exits 1; `main.go` calls `cli.ExitCode` once on whatever `Execute` returns. There is no shared set of names. Each family declares its own numbers.
-
-| Family | Codes in use | Where | What each one means |
-| --- | --- | --- | --- |
-| Cobra's own errors (bad flag, wrong argument count, unknown verb) | 1 | default of `ExitCode` | 130 leaves measured exit 1 on `--zzbogus` (a few pass-through verbs such as `k8s exec` fail for another reason, also 1); the six `docs` leaves exit 2 |
-| Group verbs with an unknown argument | 0 | `config zzbogus`, `completion nonesuch` print help and exit 0 | no failure reported |
-| `desk` | 1, 2, 75, 130, 141 | `internal/cli/desk.go:35-43` | 2 usage or missing precondition; 1 refused, no such item or run, desk unreadable; 75 `desk watch` hit `--deadline`; 130 interrupted; 141 stdout closed. `desk watch` otherwise exits with the run's own rc |
-| `surface` | 1, 2 | `surface_close.go:113-114`, `surface_read.go:66-67`, `surface_brief.go:97-99`, `surface_ready.go:77-78`, `surface_wait.go:79-80` | 2 usage or setup, including "no such worker" (`surface_close.go:146`); 1 refused, blocked, gone, not settled |
-| `resume` | 0, 1, 2, 130 | `resume.go:103-107`, `:163-165`, `:454`, `:518` | 1 no session matched, or ambiguous with no way to pick; 2 the target is still running, or a bad `[proxy] launch_profile`; 130 the pick was cancelled. `resume restart` and `resume hooks` use 1 for "incomplete, retry" and 2 for bad usage (`resume_restart.go:121-125`) |
-| `tasks` | 1, 2, 3, 4 | `internal/cli/tasks.go:36-38`, `tasks_mcp.go:399-402` | 2 instance unreachable; 3 credential rejected; 4 host not allowed for the keychain credential; 1 everything else, including usage, not found, credential missing, write refused. `tasks mcp --ping` uses the same 2 and 3 |
-| `docs` | 0, 1, 2 | `docs_errors.go:31-41`; `docs/commands/docs.md` § Exit codes and errors | 2 "could not run" (bad root or config, bad flag, timeout, no backend, bind failure); 1 the verb ran and found errors or a partial search; `docs check` returns 2 for a partial tree. `docs read` passes `mdroll`'s status through |
-| `env check` | 0, 1, 2 | `env.go:546-569` | 1 drift, and also every failure that is not "file absent", usage included; 2 the env file or example is absent |
-| `env get`, `env set`, `y`, `proxy`, `k8s` and the rest | 1 | default | usage and failure are the same code |
-| `update` | 0, 1, 2 | `update.go:94-95` | 1 a step failed; 2 a harness error |
-| `audit secrets` | 0, 1, 2 | `audit_secrets.go:101-103` | 1 the scan could not complete; 2 a bad flag value |
-| `status`, `projects list`, `review releases` with `--strict` or `--fail-on-stall` | 0, 1 | `status.go:319`, `projects_list.go:163`, `review_releases.go:114` | 1 degraded, by request |
-| `doctor`, `preflight`, `pr drain`, `pr repair`, `upgrade` | 0, 1 | `doctor.go:57`, `preflight.go:80`, `pr_drain.go:222-230`, `pr_repair.go:398-409`, `upgrade.go:62` | 1 a check failed, misaligned, a review failed to launch, unsettled sessions, upgrade failed |
-| Config that does not parse | 2 | `execute.go:194` | every verb |
-| Unresolvable `$HOME` or `$XDG_CONFIG_HOME` | 1 | `docs/json-contract.md` | every verb |
-| `launch`, `surface _exec` | the harness's own code | `surface_trampoline.go:310-321` | pass-through; not forgectl's to assign |
-
-Probes that show the split directly:
-
-```text
-desk add (no file)          1   cobra's argument check; the verb's help says "2 a usage error"
-desk add X --what a         2   the verb's own check (--why missing)
-desk show (no name)         2   verb check
-desk status a/b             2   verb check (malformed name)
-desk status 99-nope         1   real not found; the error lists the waiting items
-surface close (no name)     1   cobra; the verb's help says "2 usage or setup"
-surface close nosuch        2   not found, folded into "setup"
-tasks done abc --evidence x 1   code "usage_error", documented as exit 1
-tasks show abc              1   "abc is not a task id"; the usage class
-tasks mcp --ping            1   needs --http; the usage class
-```
-
-The JSON `code` strings split the same way. `docs/json-contract.md` documents `usage_error` and `failed` for most verbs, with `usage_error` at exit 1 for `tasks done`. A `failed` object appears at exit 1, 2 or 4. `docs` writes an integer `code`, and `env check` writes `check_failed` for usage errors.
-
-### Who depends on today's codes
-
-Measured by searching this repo and the maintainer's other local checkouts.
-
-- **In this repo, scripts test zero or non-zero only.** `scripts/dogfood-drain.sh:72-77` treats any non-zero from `pr drain` as failure. `scripts/verify-v2-list-surfaces-unreadable.sh:43-49` requires exit 0. `scripts/mcp-stdio-smoke.sh` reserves its own 1 and 2 and does not read forgectl's codes except through the server's output.
-- **The `tasks` codes 2, 3 and 4 are a public contract.** They are documented in `docs/json-contract.md` and `tasks.go:24-35`, which says 2 and 3 match an external reference probe script (`UNREACHABLE`, `UNAUTHENTICATED/FORBIDDEN`). A caller can alert on 4 because it is a security verdict.
-- **The resume watcher retries on exit 1** (`resume_restart.go:121-125`, `docs/commands/resume.md`). A change to 1 for "incomplete" would stop retries.
-- **Documented per-verb contracts**: `resume.md:54-56` (1 vs 2), `env.md:68` ("exit codes are part of its contract"), `docs.md` § Exit codes and errors, `desk.md` and `surface` help.
-- **Outside this repository, not verified.** I searched the maintainer's other local checkouts for callers of `forgectl desk|surface|tasks|docs|resume|env|review|pr|status` and found none that branch on a code other than zero. The request for this ADR said scripts and a fleet orchestrator ("foreman") depend on today's codes. No script by that name turned up; the string appears in another checkout only as an agent label. Whether a fleet script branches on a specific code is a question only the maintainer can answer. This is decision 1 below.
+This ADR proposes one table, lists every code that changes, and asks the maintainer for the decisions that break callers. It changes no code.
 
 ## Decision
 
-Adopt one table, apply it at the root, and ship it in two phases that differ in risk. Phase 1 is a small break with a clear gain. Phase 2 is the rest of the table behind an explicit opt-in.
+Adopt one table, apply it at the root, and ship it in two phases that differ in risk.
 
 ### The table
 
-Every forgectl-assigned exit code is one of these. A verb's help lists the codes it can return, with the class name.
+Every forgectl-assigned exit code is one of these. Branch on the exit status first; the JSON `code` is detail.
 
-| Code | Class | Meaning | Retry? |
+| Code | Class | Meaning | Default action |
 | ---: | --- | --- | --- |
-| 0 | `ok` | The verb did what its name says. Includes "already done" and a no-op whose goal already holds (`desk skip` of an already-skipped item, `tasks done` of a done task). An empty list or search is `ok`. | n/a |
-| 1 | `failed` | The verb ran and the result did not hold: a failed step, a refused action whose reason is in the output, a partial result, drift, a degraded `--strict` report. This is the default for any error with no class. | Maybe |
-| 2 | `usage` | Nothing was attempted, and the caller or operator can fix it by changing the call or the setup: a bad flag, a wrong or malformed argument, an unknown verb or subverb, a missing precondition (no terminal, no herdr pane, no backend), a config that does not parse. | No: fix the call |
-| 3 | `unauthorized` | A credential is missing, rejected, or may not do this. | No: fix the credential |
-| 4 | `refused` | A safety rule refused to send or do something, and no retry with the same inputs will pass. Today only `tasks` host refusal. | No |
-| 5 | `unreachable` | A dependency did not answer: the instance, the network, a socket. | Yes, later |
-| 6 | `not_found` | The thing the caller named does not exist: a task id, a worker, an item, a run, a session filter with no match, a file the verb was told to read. | No: fix the name |
+| 0 | `ok` | The verb did what its name says. Includes "already done" and a no-op whose goal already holds. An empty list or search is `ok`. | Continue. |
+| 1 | `failed` | The verb ran and the result did not hold: a failed step, drift, a partial result, a refusal that carries its reason, a degraded `--strict` report. The default for any error with no class. | Read the output. Re-run once if it names a transient cause; otherwise stop and report. |
+| 2 | `usage` | Nothing was attempted, and the caller or operator can fix it by changing the call or the setup: a bad flag or argument, an unknown verb, a malformed name, something absent or unconfigured (no terminal, no herdr pane, no backend on `PATH`), a config that does not parse. | Stop. Fix the call or setup. Do not retry it unchanged. |
+| 3 | `unauthorized` | A credential is missing, rejected, or may not do this. | Stop. Escalate to whoever owns the credential. |
+| 4 | `refused` | A safety rule said no, and the same inputs will not pass. Today only `tasks` host refusal. | Stop. Escalate. |
+| 5 | `unreachable` | A configured dependency is present but did not answer: the instance, the network, a socket. | Retry with backoff, then escalate. |
+| 6 | `not_found` | The thing the caller named does not exist: a task id, a worker, an item, a run. | Stop. List or inspect to find the right name. |
 
-Outside the table, kept as they are and documented once in the same place:
+The boundary between 2 and 5: absent or unconfigured is 2, configured and present but silent is 5.
 
-- **75** (`desk watch` reached `--deadline`; the last line holds the resume command), **130** (interrupted), **141** (stdout closed). These mimic `sysexits.h` and the shell's reporting of signals and already ship in `desk.go:38-43`. `resume` also uses 130 for a cancelled pick.
-- **Pass-through** verbs (`launch`, `surface _exec`, `docs read`, `desk watch` for its run's rc) return a child's code. The table does not apply to a child's code. The help of each says so.
-- Codes 126, 127 and 128 and above are never assigned for forgectl's own errors, apart from 130 and 141 above.
+Phase 1 emits only 0 to 4 (plus the exceptions below). **5 and 6 exist only under `FORGECTL_EXIT_CODES=v2`.**
 
-`usage` is the one class that was never misleading in the help text: `desk`, `surface`, `resume`, `docs`, `update` and `audit` already document 2 as usage or setup. The table keeps that and makes cobra's errors match it.
+Outside the table, documented once in the same place:
+
+- **75** (`desk watch` reached `--deadline`; the last line holds the resume command), **130** (interrupted) and **141** (stdout closed) already ship in `desk.go`. `resume` also uses 130 for a cancelled pick.
+- **Pass-through** verbs return a child's code, which the table does not govern: `launch`, `surface _exec`, `docs read` (the reader's status), `k8s` (kubectl's, including a remote command's), and `desk watch` for its run's rc. Each one's help says so. 126, 127 and 128 and above are never assigned for forgectl's own errors, apart from 130 and 141; a pass-through verb can return them.
 
 ### Root mapping
 
 One place maps errors to classes, so no verb has to remember.
 
-1. Cobra's flag errors, argument-count errors and unknown-command errors are wrapped as `usage` at the root. `SetFlagErrorFunc` and the argument wrapper already exist in `internal/cli/json_errors.go` and `usage_args.go`; both gain the code.
-2. A group verb with an unrecognized argument (`config zzbogus`, `completion nonesuch`) returns `usage` instead of printing help and exiting 0 (ADR-0008 rule 3).
-3. `ExitCode` keeps its default of 1 (`failed`). The class constants replace the bare numbers in `WithExitCode` calls, so a reader greps `exitNotFound`, not `6`.
-4. A table-driven test walks every leaf and proves that a bad flag exits 2 and, under `--json`, writes `code: "usage_error"`.
+1. Cobra's flag errors, argument-count errors and unknown-command errors are wrapped as `usage` at the root (`SetFlagErrorFunc` and the argument wrapper in `json_errors.go` and `usage_args.go`, and the unknown-command path in `execute.go`).
+2. A group verb with an unrecognized argument (`config zzbogus`, `completion nonesuch`, `docs --zzbogus`) returns `usage`, not help at exit 0 or 1 (ADR-0008 rule 3).
+3. `ExitCode` keeps its default of 1. Class constants (`exitUsage`, `exitNotFound`, and so on) replace the bare numbers in `WithExitCode` calls.
+
+### Phase 1 exceptions: where 2 already means something else
+
+Phase 1 moves cobra's usage errors to 2 everywhere except verbs whose 2 already carries a different meaning. Those keep usage at 1 until v2, so a 2 never means two things in one verb.
+
+| Verb | Stays at | Why |
+| --- | --- | --- |
+| `tasks` (all subverbs, `mcp --ping`) | usage 1 | 2 is "unreachable, retry" and an external probe depends on it |
+| `env check` | usage 1 (`check_failed`) | 2 is "file absent", documented as part of its contract |
+| `resume snapshot` | flag errors 1 | wired as a Claude Code `Stop` hook that must not exit 2 (see Consumers) |
+| `k8s` | kubectl's code, else 1 | pass-through; a forgectl 2 would collide with kubectl's |
+
+`docs` keeps every code it has (2 is its "could not run", timeout included), apart from the `docs` group's own flag error, 1 to 2. `resume` keeps its documented 1 for "no session matched" and "ambiguous filter" (`resume.md:54`) and 2 for a running target. Setup 2s that already match `usage` (`preflight`, `herdr`, `recipe`, `launch which`, `launch`, `desk`, `surface`, `audit`, `update`) are unchanged. `surface`'s "no such worker" stays 2 until v2.
+
+### Every code that changes
+
+**Phase 1** (no opt-in), old to new:
+
+| Path | Old | New |
+| --- | ---: | ---: |
+| Cobra flag error on every leaf outside the exceptions and `docs *` | 1 | 2 |
+| Cobra argument-count error: `desk add\|plan\|skip\|watch`, `surface brief\|close\|read\|ready\|wait`, `workflow bless\|run\|status\|verify`, `review mark\|unmark`, `env get\|set`, `y file\|img`, `proxy use`, `version x`, and the rest | 1 | 2 |
+| Unknown verb or subverb (`forgectl zzbogus`, `desk zzbogus`), and the `docs` group's own flag error | 1 | 2 |
+| `config zzbogus`, `completion nonesuch` | 0 | 2 |
+| Unresolvable `$HOME` or relative `$XDG_CONFIG_HOME` (not `resume snapshot`, which exits 0) | 1 | 2 |
+| `resume` flag and argument errors (not `resume snapshot`) | 1 | 2 |
+
+**Phase 2** (`FORGECTL_EXIT_CODES=v2`), old to new:
+
+| Path | Old | New |
+| --- | ---: | ---: |
+| `tasks` instance unreachable, `tasks mcp --ping` no answer | 2 | 5 |
+| `tasks` usage cases | 1 | 2 |
+| `tasks` credential missing | 1 | 3 |
+| `tasks show\|done` task not found | 1 | 6 |
+| `desk status\|skip\|watch\|plan` no such item; `desk show\|runs` no such run | 1 | 6 |
+| `surface close\|read\|ready\|wait\|brief` no such worker | 2 | 6 |
+| `env check` usage cases (flag error, stray argument, refused `--file` name) | 1 | 2 |
+| `env check` file absent | 2 | 6 |
+| `resume snapshot` flag errors | 1 | 1 (stays; Stop hook) |
+| `tasks` host refusal | 4 | 4 (JSON `code` becomes `refused`) |
+
+Unchanged in both phases: every other `docs` code, 75, 130, 141, `tasks` 3 and 4, every verdict exit 1 (a failed check, drift, a degraded `--strict`, `surface` blocked or refused, `desk` refusals), `resume`'s 1s and its running-target 2, and the pass-through verbs.
 
 ### JSON `code` and exit status
 
-Under `--json`, one table ties the string to the exit status. The failure object keeps its shape (`{"error","code","path"}`); only the pairing is fixed.
+The failure object keeps its shape (`{"error","code","path"}`). The pairing is many-to-one, and an agent branches on the exit status first.
 
-| `code` | Exit |
-| --- | ---: |
-| `usage_error` | 2 |
-| `unauthorized`, `credential_missing` | 3 |
-| `refused` (new; `tasks` host refusal is `failed` today) | 4 |
-| `unreachable` (new; `failed` today) | 5 |
-| `not_found` | 6 |
-| `failed` and every other string (`repeating_task`, `write_refused`, `not_confirmed`, `trailer_too_long`, `check_failed`) | 1 |
+| `code` | v1 (Phase 1) exit | v2 exit |
+| --- | --- | --- |
+| `usage_error` | 2, or 1 in the exceptions | 2 |
+| `unauthorized` | 3 | 3 |
+| `credential_missing` | 1 | 3 |
+| `refused` (new) | not emitted | 4 |
+| `unreachable` (new) | not emitted | 5 |
+| `not_found` | 1 (`tasks`) | 6 |
+| `failed`, `repeating_task`, `write_refused`, `not_confirmed`, `trailer_too_long`, `check_failed` | 1, and a few legacy 2 and 4 | 1 |
 
-`env check` keeps `check_failed` for non-usage failures and `file_not_found` for an absent file. `docs` keeps its integer `code`, which already equals the exit status.
+Two further notes. `docs` writes an integer `code` equal to its exit status and keeps it. `desk show a/b --json` and `tasks show abc` carry `failed` today for what is a usage error: both become `usage_error` in Phase 1 (a new `code` string on a failure object, still the same three keys).
 
-### Every code that would change
+Retry guidance by code: only `unreachable` (v2), `tasks` `failed` at exit 2 (v1), and a `docs` timeout are retryable. `not_confirmed` is not: read the task before retrying. `write_refused`, `repeating_task` and `trailer_too_long` are stops.
 
-**Phase 1: usage becomes 2.** No opt-in. Each row is old to new.
+### Migration
 
-| Verb or path | Old | New | Why it changes |
-| --- | ---: | ---: | --- |
-| Cobra flag error, every leaf except `docs *` (130 measured) | 1 | 2 | matches verb help that already says 2 |
-| Cobra argument-count error: `desk add\|plan\|skip\|watch`, `surface brief\|close\|read\|ready\|wait`, `tasks done\|show`, `workflow bless\|run\|status\|verify`, `review mark\|unmark`, `env get\|set`, `y file\|img`, `proxy use`, `k8s exec\|logs`, `version x`, and the rest | 1 | 2 | same |
-| Unknown verb or subverb (`forgectl zzbogus`, `desk zzbogus`) | 1 | 2 | same |
-| `config zzbogus`, `completion nonesuch` | 0 | 2 | ADR-0008 rule 3: a failed request must not exit 0 |
-| `tasks done` usage refusals (`usage_error`), `tasks show` with a non-numeric id, `tasks mcp --ping` without `--http`, a refused `--keychain-service` | 1 | 2 | `docs/json-contract.md` today documents 1 for `usage_error` |
-| `env check` usage cases (unknown flag, flag missing its value, stray argument): code `check_failed` | 1 | 2, code `usage_error` | one string changes; drift and other failures stay `check_failed` at 1 |
-| Unresolvable `$HOME` or relative `$XDG_CONFIG_HOME` | 1 | 2 | setup error, like an unparseable config, which is already 2 |
-| `resume` ambiguous filter with no way to pick | 1 | 2 | the caller must change the filter; this splits it from "no session matched" |
+The CLI integrator contract asks for an announcement, a stated window, a way for CI to find use before removal, and no flag accepted and ignored.
 
-Unchanged in Phase 1: every `docs` code, every `desk` and `surface` code that is already 2, 75, 130, 141, all `tasks` codes 3 and 4, every verdict exit (1 for a failed check, drift, degraded `--strict`).
-
-**Phase 2: the rest of the table, opt-in.**
-
-| Verb or path | Old | New |
-| --- | ---: | ---: |
-| `tasks` instance unreachable (`failed`), `tasks mcp --ping` no answer | 2 | 5 (`unreachable`) |
-| `tasks` host refusal | 4 | 4 (`failed` becomes `refused`) |
-| `tasks` credential missing (`credential_missing`) | 1 | 3 |
-| `tasks show`, `tasks done` task not found (`not_found`) | 1 | 6 |
-| `desk status\|skip\|watch\|plan` no such item; `desk show`, `desk runs` no such run | 1 | 6 |
-| `surface close\|read\|ready\|wait\|brief` no such worker | 2 | 6 |
-| `resume` no session matched, no recent sessions | 1 | 6 |
-| `env check` env or example file absent (`file_not_found`) | 2 | 6 |
-| `docs` timeout (`--timeout` deadline) | 2 | 5 |
-
-Legacy codes, deliberately not moved in either phase, and listed in the table's reference page: the `surface` "refused, blocked, gone, not settled" verdicts and `desk` refusals (1, a `failed` verdict that carries its reason), `resume`'s "target is still running" refusal (documented 2 in `resume.md:55`; moving it to 4 would break a published contract for no gain a caller can use), and the whole `docs` "could not run" family at 2 (it is usage or setup under this table).
-
-Phase 2 also changes JSON `code` strings (`failed` becomes `unreachable`, `refused`; `credential_missing` and `not_found` get new exits). That is a breaking change to a documented object shape and is the strongest reason to keep Phase 2 behind an opt-in.
-
-### Migration, per the integrator contract
-
-The CLI integrator contract (stable surface, deprecation window, a way for CI to find use before removal) asks for an announcement, a stated window, a way for CI to find use before removal, and no flag that is accepted and ignored. Applied here:
-
-1. **Phase 1 ships in one minor release, marked breaking.** The PR carries a `BEGIN_COMMIT_OVERRIDE` block with a `feat!:` line, so the release note names every row above. There is no opt-in: the change moves only the usage class, the verb help already promises 2, and no consumer found in this checkout or its siblings reads the old value. `0.x` bumps the minor.
-2. **Phase 2 ships behind `FORGECTL_EXIT_CODES=v2`.** The variable is a declared mode, not environment sniffing. It appears in `forgectl config` output, so ADR-0008 rule 4 holds. Unset, the codes are Phase 1's. Set to `v2`, the Phase 2 rows apply and the new `code` strings are emitted.
-3. **The window is two minor releases**, then `v2` becomes the default and `FORGECTL_EXIT_CODES=v1` is the one-release escape hatch. Each release's notes repeat the table. A deprecation line goes to stderr, once per run and only when the variable is unset and a changed code would have been returned, so CI finds the dependency before the default flips.
-4. **A snapshot gate protects the release.** The release PR runs the contract snapshot and diff from `cli-integrator-contract` against the previous tag, with exit codes captured for a fixed set of failing invocations (one per row above). A `BREAKING exit A -> B` row outside the lists in this ADR fails the check.
-
-### The reference page
-
-`docs/exit-codes.md` holds the one table. `forgectl --help` links it in the footer. `docs/json-contract.md` points to it instead of repeating numbers, and each verb page and help text names the classes it can return with the number: `2  usage`, not `2  a usage or setup error`.
+1. **Phase 1 ships in one minor release, marked breaking.** The PR carries a `BEGIN_COMMIT_OVERRIDE` block with a `feat!:` line that names the rows above. There is no opt-in: the change moves only the usage class, the verb help already promises 2 for most of it, and the exceptions keep every verb's 2 unambiguous.
+2. **Phase 2 ships behind `FORGECTL_EXIT_CODES=v2`.** The variable is a declared mode, not environment sniffing, and `forgectl config` prints it, so ADR-0008 rule 4 holds. The window is two minor releases, then `v2` becomes the default and `FORGECTL_EXIT_CODES=v1` is a one-release escape hatch. A deprecation line names the variable and goes to stderr only, once per run, only when the variable is unset and a changed code would have been returned; it never touches `--json` stdout.
+3. **A snapshot gate protects the release.** A table-pin test lists every row above and asserts the new code. If the maintainer's contract-snapshot tooling (`cli_contract.py`, outside this repo) is available, run its `snapshot` and `diff` against the previous tag with one failing invocation per row. The in-repo tests are the gate that does not depend on it.
 
 ## Implementation plan
 
-A separate PR, not this one. Steps, in order:
+A separate PR, not this one:
 
-1. Add class constants (`exitOK`, `exitFailed`, `exitUsage`, `exitUnauthorized`, `exitRefused`, `exitUnreachable`, `exitNotFound`) beside `WithExitCode` in `internal/cli/exitcode.go`, and replace the bare 1 and 2 literals listed under "What the code does today". Keep `ExitCode`'s default.
-2. Wrap cobra errors as `usage`: the flag-error func and argument wrapper in `json_errors.go` and `usage_args.go`, and the unknown-command path in `execute.go`. Make group verbs reject unknown arguments.
-3. Add the code-to-exit table to the JSON failure helper (`jsonFailure`) so each `code` string carries its exit, and fail a test if a string has no row.
-4. Apply the Phase 1 rows per verb: `tasks` usage cases, `env check` usage cases, `$HOME` resolution, `resume` ambiguity.
-5. Write `docs/exit-codes.md`; update `docs/json-contract.md`, the verb pages, and each help `Exit codes:` block.
-6. Phase 2 behind `FORGECTL_EXIT_CODES`: one resolver `classExit(class)` that returns the v1 or v2 number, so a verb names a class and never a number. Show the mode in `forgectl config`.
+1. Add class constants beside `WithExitCode` in `internal/cli/exitcode.go` and replace the bare literals listed in the appendix.
+2. Wrap cobra errors as `usage` at the root; make group verbs reject unknown arguments; implement the four exceptions as explicit per-verb overrides.
+3. Add the `code`-to-exit pairs to the JSON failure helper (`jsonFailure`). Group verbs do not declare `--json`, so their usage errors stay human text; the leaf walk asserts the `usage_error` object only for leaves that declare it.
+4. Make `desk show a/b --json` and `tasks show abc` emit `usage_error`.
+5. Write `docs/exit-codes.md`. Add to root `--help` and to each verb's `Exit codes:` block: the seven-row table with the default-action column, the line `FORGECTL_EXIT_CODES=v2 opts in to codes 5 and 6; unset keeps Phase 1 codes`, and the line that 75, 130, 141 and pass-through verbs sit outside the table. Update `docs/json-contract.md` and the verb pages (`resume.md` keeps its 1s).
+6. Phase 2 behind one resolver, `classExit(class)`, that returns the v1 or v2 number, so a verb names a class and never a number. Show the mode in `forgectl config`.
+7. Check Claude Code's hooks reference on exit 2 for a `Stop` hook, and confirm `resume snapshot`'s exemption.
 
 Tests, each shown red without its change:
 
-- **Leaf walk.** Every leaf from `menu --json` with a bad flag exits 2, and under `--json` writes one `usage_error` object (extends `TestJSONStderr_BadFlag_EveryVerb`).
-- **Table pin.** A test lists every old to new row above and asserts the new code.
-- **Legacy pin.** The legacy rows still return their numbers, so a later edit cannot move them silently.
-- **Docs agreement.** The reference page and each help `Exit codes:` block name the same numbers (the same pattern `desk_names` help tests use).
-- **Phase 2.** The same table under `FORGECTL_EXIT_CODES=v2`, and an unset run still returns Phase 1.
-- **Contract snapshot.** `cli_contract.py snapshot` and `diff` against the last release, with the failing-invocation set.
+- **Leaf walk.** Every leaf with a bad flag exits 2 (or 1 for an exception), and exits as documented under `--json`.
+- **Table pin.** Every row above asserts its new code; the exceptions and the unchanged `docs`, `resume` and pass-through rows assert their old ones.
+- **JSON pairs.** Each `(code, exit)` pair in the table holds in both modes. A string absent from the table is not an error, because the pairing is many-to-one.
+- **Help names the classes.** Root help names every class and `FORGECTL_EXIT_CODES`; each `Exit codes:` block agrees with the reference page.
+- **Phase 2.** The same table under `v2`; an unset run still returns Phase 1.
+- **Existing pins.** Update the tests that pin 1 for usage, such as `json_stderr_contract_test.go`.
 
-The PR states every changed code in its body, which this ADR's two tables supply.
+The PR states every changed code in its body, which the two tables above supply.
 
 ## Decisions for the maintainer
 
-1. **Does anything outside this repo branch on a specific forgectl code?** The request for this ADR names a fleet orchestrator and scripts. Nothing in this checkout or its siblings does. If a fleet script tests `== 1` for usage, Phase 1 changes its behavior. Confirm before the PR merges.
-2. **Phase 1 as a direct break, or opt-in first?** Recommended: direct, in one minor, with the `feat!:` note. The alternative is to ship the whole table behind `FORGECTL_EXIT_CODES=v2` and flip the default after the window, which costs two release cycles and leaves the misleading cobra codes in place meanwhile.
-3. **Phase 2 at all, and its window.** Recommended: ship it opt-in, two minor releases before the default flips. The cost lands on the `tasks` consumers (2 becomes 5), the resume watcher is untouched, and the JSON `code` strings change. If nothing needs to tell "not found" from "failed", skipping Phase 2 leaves the surface clean and smaller.
-4. **`tasks` unreachable moves from 2 to 5.** The reference probe script treats 2 as `UNREACHABLE`. That script is outside this repo. If it must not change, the alternative is to keep `tasks` at 2 and let `usage` stay 1 there, which gives up the single table.
-5. **New `code` strings (`refused`, `unreachable`) are a breaking change to the JSON object.** Accept, or keep `failed` and let the exit status carry the class.
+1. **Does anything outside this repo depend on a specific forgectl code?** This is the only merge blocker. The request for this ADR names a fleet orchestrator ("foreman") and scripts. None turned up in the checkouts searched, and the Claude Code `Stop` hook that runs `resume snapshot --quiet` is a new risk input: a hook that exits 2 can block a turn. The ADR exempts `resume snapshot`, but only the maintainer knows what else is wired. Recommended: confirm none branches on `== 1` for usage, and name any hook-wired forgectl command.
+2. **Phase 1 as a direct break, or opt-in first?** Recommended: direct, in one minor, with the `feat!:` note and the four exceptions. The alternative ships the whole table behind `v2` and leaves cobra's misleading 1 in place for two releases.
+3. **Phase 2: accept it, with its window and JSON string changes.** This covers `tasks` unreachable 2 to 5, the not-found moves to 6, and the new `code` strings (`refused`, `unreachable`) that change a documented object. Recommended: accept, opt-in, two minors before the default flips. If nothing needs to tell "not found" from "failed", skipping Phase 2 leaves a smaller surface.
 
 ## Alternatives declined
 
-- **Minimum fix: only make cobra usage errors exit 2.** This is Phase 1 without the table. It removes the 1-or-2 split and leaves "exit 2 means different things" untouched. It is the right first step, and the decision above keeps it as Phase 1. Declined as the whole answer because `tasks 2` stays the exception.
-- **Adopt `sysexits.h` (64 usage, 66 no input, 69 unavailable, 75 temp fail, 77 no permission, 78 config).** It is a standard, and `desk watch` already returns 75. It collides with nothing in the table, but it moves every `usage` code from 2 to 64, where the verb help and most callers already read 2, and it leaves `tasks` 3 and 4 as odd ones. A bigger break for a naming gain.
-- **The issue's example numbering: 2 usage, 3 auth, 4 not found, 5 transient.** It conflicts with the live `tasks` meaning of 4 (host refused). This table keeps 3 and 4 where `tasks` already puts them and takes 5 and 6 for the new classes.
-- **One-shot break of the whole table in a minor.** Faster, and a loud surprise for `tasks` callers and anything matching `code: "failed"`. Declined for Phase 2; accepted for Phase 1, where the changed class is small and the documentation already promised it.
-- **A flag instead of an environment variable for the opt-in.** A flag must be added to every invocation and does not reach wrappers that call forgectl for you. The variable reaches them. A `--exit-codes` root flag can be added later for one-off checks.
-- **Leave it and document the per-verb codes better.** The per-verb docs already exist and are accurate. The failure is that no one table lets a caller decide without reading the verb's page.
+- **Minimum fix: only cobra usage errors exit 2.** This is Phase 1 without the table. It removes the 1-or-2 split and leaves "2 means different things" untouched. It is Phase 1 here; declined as the whole answer.
+- **Adopt `sysexits.h` (64 usage, 66 no input, 69 unavailable, 75 tempfail, 77 no permission, 78 config).** It is a standard and `desk watch` already returns 75. It moves every usage code from 2 to 64, where the verb help and most callers already read 2, and leaves `tasks` 3 and 4 as odd ones.
+- **The issue's example numbering: 2 usage, 3 auth, 4 not found, 5 transient.** It conflicts with the live `tasks` meaning of 4 (host refused). This table keeps `tasks` 3 and 4 and takes 5 and 6 for the new classes.
+- **One-shot break of the whole table in a minor.** Faster, and a loud surprise for `tasks` callers and anything matching `code: "failed"`. Declined for Phase 2.
+- **A flag instead of an environment variable for the opt-in.** A flag must be added to every invocation and does not reach wrappers that call forgectl for you. A `--exit-codes` root flag can follow for one-off checks.
+- **Move `tasks` unreachable to 5 in Phase 1, or leave `tasks` usage at 2.** Either breaks the documented `tasks` contract and the external probe in the default phase. The exception column keeps `tasks` 2 single-meaning until v2.
+- **Leave it and document per-verb codes better.** Those docs exist and are accurate. No single table lets a caller decide without reading each verb's page.
 
 ## Consequences
 
-- An agent can branch on a number: 2 means fix the call, 3 the credential, 5 try later, 6 fix the name. This holds for cobra's errors too.
-- Phase 1 changes the exit status of every usage error. A script that tests `$? -eq 1` for "bad call" breaks. A script that tests non-zero is unaffected.
-- The reference page becomes a contract. A new verb picks a class instead of a number, and review checks the choice (the ADR-0008 review checklist gains an exit-class line).
+- An agent can branch on a number: 2 means fix the call, 3 the credential, 5 try later, 6 fix the name. In Phase 1, five verb families keep documented exceptions.
+- Phase 1 changes the exit status of most usage errors. A script that tests `$? -eq 1` for "bad call" breaks. A script that tests non-zero is unaffected.
+- The reference page becomes a contract. A new verb picks a class, and review checks it (the ADR-0008 checklist gains an exit-class line).
 - `docs/json-contract.md` stops carrying its own copy of the numbers.
-- Phase 2 leaves two modes for two releases, with the cost of keeping both tested.
+- Phase 2 leaves two modes for two releases, both tested.
