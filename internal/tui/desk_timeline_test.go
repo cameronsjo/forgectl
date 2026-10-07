@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/cameronsjo/forgectl/internal/desk"
@@ -227,5 +228,50 @@ func TestDeskTimeline_EmptySaysHowItFills(t *testing.T) {
 	out := ansi.Strip(renderTimeline(snap, opts, 100, 12, 0))
 	if !strings.Contains(out, "forgectl desk add") || !strings.Contains(out, "all caught up") {
 		t.Errorf("empty timeline:\n%s", out)
+	}
+}
+
+// TestDeskTimeline_WeightFollowsNeedsYou pins the title weight: bold for
+// what needs the operator, regular for today's finished work, muted for
+// anything older, and a failure keeps its red glyph whatever its age.
+func TestDeskTimeline_WeightFollowsNeedsYou(t *testing.T) {
+	forceTrueColor(t)
+	st := theme.Default().Styles()
+	entry := func(k rowKind, at time.Time) tlEntry {
+		return tlEntry{row: queueRow{k, item("01-x", desk.KindScript, desk.StateDone)}, at: at}
+	}
+	today, yesterday := ago(time.Hour), ago(26*time.Hour)
+	title := func(e tlEntry) lipgloss.Style { return tlTitleStyle(st, deskNow, e) }
+	same := func(a, b lipgloss.Style) bool { return a.Render("x") == b.Render("x") }
+
+	for _, k := range []rowKind{rowWaiting, rowLost, rowRunning} {
+		for _, at := range []time.Time{today, yesterday} {
+			if !title(entry(k, at)).GetBold() {
+				t.Errorf("kind %v at %v: a live entry's title is not bold", k, at)
+			}
+		}
+	}
+	for _, k := range []rowKind{rowDone, rowFailed, rowSkipped, rowChanged, rowRefused} {
+		if got := title(entry(k, today)); got.GetBold() || !same(got, st.Fg) {
+			t.Errorf("kind %v today: want regular Fg, got %q", k, got.Render("x"))
+		}
+		for _, at := range []time.Time{yesterday, {}} {
+			if got := title(entry(k, at)); got.GetBold() || !same(got, st.Muted) {
+				t.Errorf("kind %v at %v: want Muted, got %q", k, at, got.Render("x"))
+			}
+		}
+	}
+
+	for _, k := range []rowKind{rowFailed, rowRefused} {
+		if !tlPreviewStyle(st, deskNow, entry(k, yesterday)).GetFaint() {
+			t.Errorf("kind %v: an older failure's detail should be faint", k)
+		}
+		if tlPreviewStyle(st, deskNow, entry(k, today)).GetFaint() {
+			t.Errorf("kind %v: today's failure detail should not be faint", k)
+		}
+	}
+	_, _, look := rowLook(st, rowFailed)
+	if !strings.Contains(look("✗"), st.Danger.Render("✗")) {
+		t.Error("a failed entry lost its red glyph")
 	}
 }

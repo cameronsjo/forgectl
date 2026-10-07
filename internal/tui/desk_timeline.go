@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/cameronsjo/forgectl/internal/desk"
@@ -108,6 +109,9 @@ func (e tlEntry) needsYou() bool {
 
 // tlNeedsYou is the leading group's heading.
 const tlNeedsYou = "Needs you"
+
+// tlToday is the heading of the current day's group.
+const tlToday = "Today"
 
 // tlGroup is the heading an entry sits under.
 func tlGroup(now time.Time, e tlEntry) string {
@@ -237,7 +241,7 @@ func tlDay(now, t time.Time) string {
 	}
 	switch day(now).Sub(day(t)) / (24 * time.Hour) {
 	case 0:
-		return "Today"
+		return tlToday
 	case 1:
 		return "Yesterday"
 	}
@@ -317,9 +321,13 @@ func (f tlFrame) body(st theme.Styles, entries []tlEntry) []tlLine {
 // dayHeading is "Today · Wed 7 Oct ───────── 4": the day, its date, a rule
 // and how many entries it holds. The needs-you group says what to do.
 func (f tlFrame) dayHeading(st theme.Styles, width int, day string, t time.Time, n int) string {
-	head := " " + st.Header.Render(day)
+	headStyle := st.Header
+	if tlOld(day) {
+		headStyle = st.Muted
+	}
+	head := " " + headStyle.Render(day)
 	switch day {
-	case "Today", "Yesterday":
+	case tlToday, "Yesterday":
 		head += st.Muted.Render(" · " + t.In(f.now.Location()).Format("Mon 2 Jan"))
 	case tlNeedsYou:
 		head += st.Muted.Render(" · enter takes you to it")
@@ -387,7 +395,7 @@ func (f tlFrame) entryLines(st theme.Styles, width int, e tlEntry, selected, las
 		room -= ansi.StringWidth(badge) + 2
 	}
 	room = max(room, 8)
-	titleStyle := st.Fg.Bold(true)
+	titleStyle := tlTitleStyle(st, f.now, e)
 	if selected {
 		titleStyle = st.Selected
 	}
@@ -408,18 +416,57 @@ func (f tlFrame) entryLines(st theme.Styles, width int, e tlEntry, selected, las
 	if outcome == "" {
 		outcome = label
 	}
-	previewStyle := st.Muted
-	switch e.row.kind {
-	case rowFailed, rowRefused:
-		previewStyle = st.Danger.Bold(false)
-	case rowLost, rowChanged:
-		previewStyle = st.Warn
-	case rowRunning:
-		previewStyle = st.Active
-	}
+	previewStyle := tlPreviewStyle(st, f.now, e)
 	pad := strings.Repeat(" ", tlGutter+tlTimeW+2)
 	preview := pad + rail + " " + previewStyle.Render(cut(outcome, max(width-leadW-1, 8)))
 	return cut(line, width), cut(preview, width)
+}
+
+// tlOld reports a day group that is not today and not the needs-you group:
+// yesterday, an older day, or undated.
+func tlOld(group string) bool {
+	return group != tlToday && group != tlNeedsYou
+}
+
+// tlQuiet reports a finished entry from before today. Weight follows
+// "needs you"; age only quiets.
+func tlQuiet(now time.Time, e tlEntry) bool {
+	return !tlLive(e) && tlOld(tlGroup(now, e))
+}
+
+// tlLive reports an entry still in play: waiting, lost or running.
+func tlLive(e tlEntry) bool {
+	return e.needsYou() || e.row.kind == rowRunning
+}
+
+// tlTitleStyle is an entry's title weight, shared by the dashboard panel
+// and the full-screen timeline: bold bright for what needs the operator,
+// regular for what finished today, muted for what finished before today.
+func tlTitleStyle(st theme.Styles, now time.Time, e tlEntry) lipgloss.Style {
+	switch {
+	case tlLive(e):
+		return st.Fg.Bold(true)
+	case tlQuiet(now, e):
+		return st.Muted
+	}
+	return st.Fg
+}
+
+// tlPreviewStyle is the detail line's style: its status colour, softened
+// (faint, not bold) for a failure from before today.
+func tlPreviewStyle(st theme.Styles, now time.Time, e tlEntry) lipgloss.Style {
+	switch e.row.kind {
+	case rowFailed, rowRefused:
+		if tlQuiet(now, e) {
+			return st.Danger.Bold(false).Faint(true)
+		}
+		return st.Danger.Bold(false)
+	case rowLost, rowChanged:
+		return st.Warn
+	case rowRunning:
+		return st.Active
+	}
+	return st.Muted
 }
 
 // counts are the header's numbers.
