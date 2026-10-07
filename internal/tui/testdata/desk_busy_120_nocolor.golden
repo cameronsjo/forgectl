@@ -25,16 +25,16 @@ desk ● 3 waiting · forgectl 0.0.0-test · host-a · ~/.local/state/forgectl/d
 │ ┆ echo merged                                                                                                        │
 │ ┆     echo "an indented line"                                                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ history ─┤ bar: run length, longest full ├───────────────────────────────────────────────────────────────────────────╮
-│ ✗ 12 canary-probe                      ▅        exit 1           20m ago   0:18                                      │
-│ ✓ 15 merge-1169                        ▅▅▅      ok               23m ago   0:41                                      │
-│ ✓ 09 sync-mirror                       ▅▅▅▅▅▅▅▅ ok               5h ago    2:00                                      │
+╭ timeline ─┤ newest first ├───────────────────────────────────────────────────────────────────────────────────────────╮
+│  Needs you · enter takes you to it ────────────────────────────────────────────────────────────────────────────── 3  │
+│      5m  ◌ Refresh the sudo ticket                                                     18 refresh-credentials · tty  │
+│          │ waiting for you · queued 5m ago · runs in the desk's pane                                                 │
+│     12m  ◌ Merge the feature branch once checks pass                                        17 merge-feature-branch  │
+│          │ waiting for you · queued 12m ago                                                                          │
+│     30h  ◌ Clear old caches                                                                          19 old-cleanup  │
+│            waiting for you · queued 30h ago · stale                                                                  │
+│ … 6 more · t to open                                                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
 
-
-
-
-
-
- y run · s skip · v view · a all · l log · r runs · t timeline · j/k move · ? help · q quit
+ y run · s skip · v view · a all · l log · r runs · t timeline · h history · j/k move · ? help · q quit

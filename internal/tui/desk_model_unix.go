@@ -175,8 +175,10 @@ type deskModel struct {
 	pager *deskPager
 	// tl is the open timeline (t). tlSeen is when the operator last closed
 	// it: entries after it read as new, on the timeline and in the footer.
-	tl     *deskTimelineView
-	tlSeen time.Time
+	tl *deskTimelineView
+	// history swaps the dashboard's timeline panel for the finished runs (h).
+	history bool
+	tlSeen  time.Time
 	// rv is the open run view (r), reading runs from runs.
 	rv   *deskRunView
 	runs runview.Source
@@ -626,6 +628,9 @@ func (m deskModel) updateKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openRunView()
 	case "t":
 		return m.openTimeline(), nil
+	case "h":
+		m.history = !m.history
+		return m, nil
 	case "?":
 		// The key list, from the table the footer is drawn from (#1108).
 		m.pager = &deskPager{title: "keys", lines: deskKeyLines()}
@@ -1144,7 +1149,7 @@ func (m deskModel) dashboard() deskFrame {
 	return deskFrame{
 		snap: m.snap, width: m.screenWidth(), height: m.screenHeight(), now: m.now(), opts: opts,
 		cursor: m.cursor, footer: m.footer(), confirming: m.confirm != confirmNone, canUndo: m.lastSkip != "",
-		tlNew: m.tlNewCount(),
+		tlNew: m.tlNewCount(), history: m.history,
 	}
 }
 

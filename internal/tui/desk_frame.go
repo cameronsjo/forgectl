@@ -75,9 +75,10 @@ const (
 	// when the window has room, and deskFocusBodyMin when it is short.
 	deskFocusBody    = 3
 	deskFocusBodyMin = 1
-	// deskFocusBodyMax is the most it shows when the history leaves room.
+	// deskFocusBodyMax is the most it shows when the timeline leaves room.
 	deskFocusBodyMax = 8
-	// deskHistoryDefault caps history rows when the height is unknown.
+	// deskHistoryDefault caps history and timeline rows when the height is
+	// unknown, and what the focus panel leaves them before it grows.
 	deskHistoryDefault = 10
 	// deskTextMax caps any one untrusted value, in rendered runes, before the
 	// panel cuts it to the width.
@@ -203,6 +204,9 @@ type deskFrame struct {
 	// tlNew is how many timeline entries are new since the operator last
 	// closed the timeline; the footer's t hint carries it.
 	tlNew int
+	// history puts the finished-runs panel (h) where the timeline panel sits
+	// by default.
+	history bool
 }
 
 func (f deskFrame) styles() (theme.Styles, theme.Theme) {
@@ -214,8 +218,9 @@ func (f deskFrame) styles() (theme.Styles, theme.Theme) {
 }
 
 // render lays the frame out: header, tiles (or a summary line), queue,
-// focus, history, footer. With a known height the frame is exactly that many
-// lines; the history panel takes what the others leave.
+// focus, the timeline (or the history, behind h), footer. With a known height
+// the frame is exactly that many lines; the timeline takes what the others
+// leave.
 func (f deskFrame) render() string {
 	lines, _ := f.layout()
 	return asciiFrame(strings.Join(lines, "\n"), f.opts.ASCII)
@@ -247,9 +252,9 @@ func (f deskFrame) focusShownFor(name string) bool {
 //
 // The focus panel is what the operator approves from, so it is placed
 // before everything but the header, the footer and one queue row: a short
-// window gives up the tiles, then the summary line, then queue rows, then
-// the history and the script preview. Below that minimum the frame says it
-// is too small instead of drawing a focus panel with its hash cut off.
+// window gives up the tiles, then the summary line, then the script preview
+// and the timeline (down to one line), then queue rows. Below that minimum
+// the frame says it is too small instead of drawing a focus panel with its hash cut off.
 func (f deskFrame) layout() ([]string, bool) {
 	st, _ := f.styles()
 	width := max(f.width, deskMinWidth)
@@ -266,7 +271,7 @@ func (f deskFrame) layout() ([]string, bool) {
 		}
 		queue := f.queuePanel(st, width, rows, cursor, max(len(rows), 1))
 		focus := f.focusPanel(st, width, rows, cursor, deskFocusBody)
-		lines := slices.Concat([]string{header}, top, queue, focus, f.historyPanel(st, width, -1), footer)
+		lines := slices.Concat([]string{header}, top, queue, focus, f.lowerPanel(st, width, -1), footer)
 		return lines, f.essentialShown(lines, 1+len(top)+len(queue), focusMin, rows, cursor)
 	}
 
@@ -289,28 +294,27 @@ func (f deskFrame) layout() ([]string, bool) {
 
 	body := deskFocusBody
 	if f.snap != nil {
-		// Rows the history will not use go to the script preview.
-		histNeed := min(max(len(f.snap.Done), 1), deskHistoryDefault) + 2
+		// Rows the timeline will not use go to the script preview.
+		want := f.lowerWant(st, width)
 		for b := deskFocusBodyMax; b > deskFocusBody; b-- {
-			if len(queue)+len(f.focusPanel(st, width, rows, cursor, b))+histNeed <= avail {
+			if len(queue)+len(f.focusPanel(st, width, rows, cursor, b))+want <= avail {
 				body = b
 				break
 			}
 		}
 	}
+	// Queue and focus keep their rows; the timeline takes what is left and
+	// shrinks first, down to one summary line.
 	focus := f.focusPanel(st, width, rows, cursor, body)
-	histRows := avail - len(queue) - len(focus) - 2
-	if histRows < 1 {
+	if len(queue)+len(focus) >= avail { // leave the summary line a row
 		focus = f.focusPanel(st, width, rows, cursor, deskFocusBodyMin)
-		histRows = avail - len(queue) - len(focus) - 2
 	}
 	if len(queue)+len(focus) > avail {
 		focus = focusMin
-		histRows = avail - len(queue) - len(focus) - 2
 	}
-	history := f.historyPanel(st, width, max(histRows, 0)) // -1 is historyPanel's "unbounded"
+	lower := f.lowerPanel(st, width, max(avail-len(queue)-len(focus), 0))
 
-	lines := fitHeight(slices.Concat([]string{header}, top, queue, focus, history), f.height-len(footer))
+	lines := fitHeight(slices.Concat([]string{header}, top, queue, focus, lower), f.height-len(footer))
 	lines = append(lines, footer...)
 	return lines, f.essentialShown(lines, 1+len(top)+len(queue), focusMin, rows, cursor)
 }
@@ -1167,6 +1171,91 @@ func (f deskFrame) batchLines(st theme.Styles, name string, data []byte, n int) 
 	return out
 }
 
+// lowerPanel is the panel under the focus: the timeline, or the history once
+// h has asked for it. space is the lines it may take, or < 0 for as many as it
+// needs (up to deskHistoryDefault rows). The history needs a panel's border
+// and a row; the timeline needs room for a few entries, and below that it is
+// one summary line, so the panels above it never give up rows for it.
+func (f deskFrame) lowerPanel(st theme.Styles, width, space int) []string {
+	if f.history {
+		if space < 0 {
+			return f.historyPanel(st, width, -1)
+		}
+		return f.historyPanel(st, width, max(space-2, 0)) // 0 drops it; < 0 would mean unbounded
+	}
+	entries := deskTimeline(f.snap)
+	tl := f.tlView(width)
+	switch {
+	case space < 0:
+		return f.timelinePanel(st, width, tl, entries, min(len(tl.body(st, entries)), deskHistoryDefault))
+	case space >= deskTimelineMin+2:
+		return f.timelinePanel(st, width, tl, entries, space-2)
+	case space >= 1:
+		return []string{f.timelineSummary(st, width, tl, entries)}
+	}
+	return nil
+}
+
+// lowerWant is the lines lowerPanel would use at a height that does not
+// squeeze it: what the focus panel leaves alone before it grows.
+func (f deskFrame) lowerWant(st theme.Styles, width int) int {
+	if f.history {
+		done := 0
+		if f.snap != nil {
+			done = len(f.snap.Done)
+		}
+		return min(max(done, 1), deskHistoryDefault) + 2
+	}
+	entries := deskTimeline(f.snap)
+	return min(max(len(f.tlView(width).body(st, entries)), deskTimelineMin), deskHistoryDefault) + 2
+}
+
+// deskTimelineMin is the fewest rows the timeline panel is drawn with; under
+// that the dashboard shows its one summary line.
+const deskTimelineMin = 3
+
+// tlView is the timeline frame the panel draws its lines from: no selection,
+// and nothing marked new (that is the t hint's job).
+func (f deskFrame) tlView(width int) tlFrame {
+	return tlFrame{snap: f.snap, steps: f.opts.Steps, width: width - 4, now: f.now, seen: f.now, cursor: -1}
+}
+
+// timelinePanel is the timeline in a panel: what needs the operator first,
+// then the desk by day, newest first. A panel shorter than the timeline ends
+// on how many entries it left out.
+func (f deskFrame) timelinePanel(st theme.Styles, width int, tl tlFrame, entries []tlEntry, rows int) []string {
+	rows = max(rows, 1)
+	var content []string
+	if len(entries) == 0 {
+		content = []string{st.Muted.Render("nothing on the desk yet")}
+	} else {
+		content = tl.panelLines(st, entries, rows)
+	}
+	legend := ""
+	if width >= deskWideMin {
+		legend = st.Muted.Render("newest first")
+	}
+	return strings.Split(Panel(st, width, "timeline", legend, content), "\n")
+}
+
+// timelineSummary is the timeline as one line, for a window with no room for
+// the panel.
+func (f deskFrame) timelineSummary(st theme.Styles, width int, tl tlFrame, entries []tlEntry) string {
+	if len(entries) == 0 {
+		return cut(" "+st.Muted.Render("timeline · nothing on the desk yet"), width)
+	}
+	waiting, running, _ := tl.counts(entries)
+	parts := []string{st.Header.Render("timeline")}
+	if waiting > 0 {
+		parts = append(parts, st.Accent.Render(strconv.Itoa(waiting)+" need you"))
+	}
+	if running > 0 {
+		parts = append(parts, st.Active.Render(strconv.Itoa(running)+" running"))
+	}
+	parts = append(parts, st.Muted.Render(strconv.Itoa(len(entries))+" in all"), st.Muted.Render("t to open"))
+	return cut(" "+strings.Join(parts, st.Muted.Render(" · ")), width)
+}
+
 // historyPanel lists finished runs, most recent first. rows < 0 means up to
 // deskHistoryDefault; 0 or less room than a panel needs drops the panel.
 func (f deskFrame) historyPanel(st theme.Styles, width, rows int) []string {
@@ -1257,6 +1346,7 @@ func (f deskFrame) hints(st theme.Styles, width int, canRun bool) string {
 		logs:    f.snap != nil && len(f.snap.Done)+len(f.snap.Running) > 0,
 		runs:    f.snap != nil && len(f.snap.Done)+len(f.snap.Running)+len(f.snap.Skipped) > 0,
 		tlNew:   f.tlNew,
+		history: f.history || (f.snap != nil && len(f.snap.Done) > 0),
 	})
 }
 
@@ -1264,6 +1354,8 @@ func (f deskFrame) hints(st theme.Styles, width int, canRun bool) string {
 type keyState struct {
 	rows, run, skip, waiting bool
 	undo, logs, runs         bool
+	// history is true when h has finished runs to show, or is showing them.
+	history bool
 	// tlNew is the timeline's new-entry count, shown on the t hint.
 	tlNew int
 }
@@ -1286,6 +1378,7 @@ var deskBindings = []deskBinding{
 	{"l", "log", "view the selected run's log", 4},
 	{"r", "runs", "open the run view: flow, events, replay", 8},
 	{"t", "timeline", "open the timeline: what needs you, then everything on the desk by day, in plain words", 8},
+	{"h", "history", "show the finished runs in place of the timeline panel; h again brings it back", 8},
 	{"j/k", "move", "move the selection (also the arrow keys)", 9},
 	{"?", "help", "show these keys", 1},
 	{"q", "quit", "quit; detached runs keep running", 0},
@@ -1297,7 +1390,7 @@ var deskBindings = []deskBinding{
 // ? help until the window is very narrow (#1108). u shows only with a skip
 // to undo, l and r only once something has run.
 func deskKeys(st theme.Styles, width int, s keyState) string {
-	gated := map[string]bool{"y": s.run, "s": s.skip, "u": s.undo, "v": s.rows, "a": s.waiting, "l": s.logs, "r": s.runs, "t": s.rows || s.runs, "j/k": s.rows}
+	gated := map[string]bool{"y": s.run, "s": s.skip, "u": s.undo, "v": s.rows, "a": s.waiting, "l": s.logs, "r": s.runs, "t": s.rows || s.runs, "h": s.history, "j/k": s.rows}
 	var hints []string
 	var shown []deskBinding
 	for _, b := range deskBindings {
