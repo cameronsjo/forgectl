@@ -1,5 +1,71 @@
 # Changelog
 
+## [0.30.0](https://github.com/cameronsjo/forgectl/compare/v0.29.0...v0.30.0) (2026-10-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **desk:** `desk runs --json` and `desk show --json` report `live: "changed"` (was `"skipped"`) for an item the desk skipped because its bytes changed after it was queued; the text output and the dashboard use the same word.
+* **desk:** `desk runs --json` and `desk show --json` report `live: "changed"` (was `"skipped"`) for an item the desk skipped because its bytes changed after it was queued; the text output and the dashboard use the same word.
+* **desk:** lost and changed items say what happened and what to do; desk runs/show --json report live "changed" for a changed item
+* **cli:** scripts that treated a declined confirm (clean, branch, tmux kill, pr findings cleanup) as exit 0 now see 130.
+
+### Features
+
+* **cli:** bound list output with --limit and --fields ([#1130](https://github.com/cameronsjo/forgectl/issues/1130)) ([ec79ea2](https://github.com/cameronsjo/forgectl/commit/ec79ea273f0b3921b959609999408184716f7415))
+* **cli:** preview launch/close/prune, retry-safe desk add and skip ([#1138](https://github.com/cameronsjo/forgectl/issues/1138)) ([e02dcc0](https://github.com/cameronsjo/forgectl/commit/e02dcc0d6720bf6857ec35e5ee4b5a5a174aa884))
+* **desk:** add desk layout --below, a full-width desk row ([#1091](https://github.com/cameronsjo/forgectl/issues/1091)) ([25e936f](https://github.com/cameronsjo/forgectl/commit/25e936fcfc20bdbc6bc83ed995db86e0db584ee6))
+* **desk:** add desk runs and desk show, a run view for agents ([c205d1c](https://github.com/cameronsjo/forgectl/commit/c205d1c57f78cab61b5d4ec06cd5ed05808558af))
+* **desk:** add desk runs and desk show, a run view of desk items and JSONL logs ([5e13cf7](https://github.com/cameronsjo/forgectl/commit/5e13cf736ffaedf1f522431a145ce5659def6aae))
+* **desk:** lenses teach the run view to read an app's log: desk show --lens and --live, desk lens check and list, and a built-in events lens for translators ([87315be](https://github.com/cameronsjo/forgectl/commit/87315be6eb8d00ce8cbcf1560f56a1cb46994f26))
+* **desk:** signal the operator when an item is queued; wrap and style what/why ([#1097](https://github.com/cameronsjo/forgectl/issues/1097)) ([5d15896](https://github.com/cameronsjo/forgectl/commit/5d1589603e847da2e5c59fc7fb2212fd8b2ad92f))
+* **desk:** t opens a timeline of everything on the desk, what needs you first, then by day in plain words ([7d93946](https://github.com/cameronsjo/forgectl/commit/7d93946d6cd7f3dcfe5510ffab35bb917354840b))
+* **desk:** the dashboard's run view: flow, event timeline and replay ([9fd1ce0](https://github.com/cameronsjo/forgectl/commit/9fd1ce02980c96867bb6778ba4487dfca2fcdbe4))
+* **desk:** the dashboard's run view: flow, timeline and replay ([9614a77](https://github.com/cameronsjo/forgectl/commit/9614a7768727947c9ac3ba769eee18bece09d37a))
+* **launch:** claude workers load only forgectl's settings (T5 slice 1) ([#1093](https://github.com/cameronsjo/forgectl/issues/1093)) ([ab50094](https://github.com/cameronsjo/forgectl/commit/ab50094bc556307965817db6b037c08e5c2dd795))
+* **launch:** claude workers run with --safe-mode (T5 slice 2a) ([#1115](https://github.com/cameronsjo/forgectl/issues/1115)) ([f495e7b](https://github.com/cameronsjo/forgectl/commit/f495e7bab7977f0527c8fa42d60406d22e16c729))
+* **launch:** rank posture fields as data; validate permission_mode (T5 slice 2b) ([#1118](https://github.com/cameronsjo/forgectl/issues/1118)) ([8e3b783](https://github.com/cameronsjo/forgectl/commit/8e3b783e1ed2563df29120affcb2268dff05e9c4))
+* **launch:** start claude at the repository root when its .claude settings live there (not when resuming, never at the user config dir); --here keeps it in place, and launch which and surface launch --dry-run report run_directory ([fbf1ca1](https://github.com/cameronsjo/forgectl/commit/fbf1ca13a36ca410bd81a4a083332d403e86b493))
+* **launch:** worker profile [launch.worker]; workers start in acceptEdits (T5 slice 3) ([#1124](https://github.com/cameronsjo/forgectl/issues/1124)) ([2f62dcd](https://github.com/cameronsjo/forgectl/commit/2f62dcd59383e58dd7a065c3071a1209f21acf58))
+* **surface:** brief, wait and read --report for herdr workers (T3) ([#1068](https://github.com/cameronsjo/forgectl/issues/1068)) ([8737c77](https://github.com/cameronsjo/forgectl/commit/8737c7766b1e10b305900e1e0fff04d10107b7c5))
+* **surface:** list and close for herdr workers (T4) ([#1078](https://github.com/cameronsjo/forgectl/issues/1078)) ([1e494f5](https://github.com/cameronsjo/forgectl/commit/1e494f55e98d69783ff714e22792c0ecb192afea))
+* **tui:** the bare forgectl hub fits an 80x24 screen: unpinned commands sit in four areas, keys 1-9 are fixed and only open, / searches every command and subcommand, rows cut at a word with an ellipsis, and the footer, header, and enter hint fit the width and the row ([fd53304](https://github.com/cameronsjo/forgectl/commit/fd53304859e25d9f91afe62597a3c87031144873))
+
+
+### Bug Fixes
+
+* **cli:** a cancelled prompt now exits 130 with a plain "cancelled" line instead of exit 1 with an ERROR frame, and No at a confirm exits 130 instead of 0 ([2388541](https://github.com/cameronsjo/forgectl/commit/23885415731b84291e2aa32004bfb663310115e3))
+* **cli:** projects pick shows a status line while hosts are queried and shows host notes inside the picker ([0e98405](https://github.com/cameronsjo/forgectl/commit/0e98405e021974f363c14b5e1353ee8e478511cd))
+* **cli:** resume picker leads with the session name or prompt, fits the terminal width, and says when its list is cut ([204fc12](https://github.com/cameronsjo/forgectl/commit/204fc126a71bb68328472da6157d3495b4af0709))
+* **cli:** strip trailing padding from help and error frames off a TTY ([#1127](https://github.com/cameronsjo/forgectl/issues/1127)) ([c8770a0](https://github.com/cameronsjo/forgectl/commit/c8770a0dce5bba1911537d162246f88466d2cfaa))
+* **cli:** unknown commands and subcommands exit non-zero, with or without --help ([#1089](https://github.com/cameronsjo/forgectl/issues/1089)) ([828ca18](https://github.com/cameronsjo/forgectl/commit/828ca1892904c1b1127a15dc0bdc7cb74a18303f))
+* **cli:** usage errors name the fix; desk file names; --json shapes ([#1121](https://github.com/cameronsjo/forgectl/issues/1121)) ([28a002b](https://github.com/cameronsjo/forgectl/commit/28a002b763f53714d98c006135602c95c26a5180))
+* **desk:** --no-icons draws ASCII; empty state and labels explain ([#1139](https://github.com/cameronsjo/forgectl/issues/1139)) ([9e506f4](https://github.com/cameronsjo/forgectl/commit/9e506f43695a96ba4e2ebf6316c4ef49dd667b32))
+* **desk:** a failed first load after n or p retries the run shown ([8c91a89](https://github.com/cameronsjo/forgectl/commit/8c91a898fcc0df969fdd24d75f93c075cb36a375))
+* **desk:** a log past the read cap exits 1, and log events number without gaps ([f8ca275](https://github.com/cameronsjo/forgectl/commit/f8ca275fdfce2c779632ff0689623ceede909874))
+* **desk:** add's synopsis and usage line name its one file and both flags ([#1132](https://github.com/cameronsjo/forgectl/issues/1132)) ([4a64dd9](https://github.com/cameronsjo/forgectl/commit/4a64dd97d7ac0ac5380c117a05fb9faa3903463b))
+* **desk:** drop the empty "after" on a step with no deps in desk show ([7692de4](https://github.com/cameronsjo/forgectl/commit/7692de4f4e2efda94bcf93da12db7a087466d767))
+* **desk:** lost and changed items say what happened and what to do; desk runs/show --json report live "changed" for a changed item ([e140e1d](https://github.com/cameronsjo/forgectl/commit/e140e1dd9106551001bae0b16592d80e316e9739))
+* **desk:** make the prune preview refuse what a real prune refuses, in all five places ([#1144](https://github.com/cameronsjo/forgectl/issues/1144)) ([bf7c82c](https://github.com/cameronsjo/forgectl/commit/bf7c82c13d7a496b2f6a20d91ffc409c51eafe6f))
+* **desk:** run view drops another run's load, stops polling a gone run ([dd2a0e9](https://github.com/cameronsjo/forgectl/commit/dd2a0e9fbc739c5883c9060a61ee1970b692a3c0))
+* **desk:** run view keeps "q close" on narrow screens and retries an empty listing ([226898d](https://github.com/cameronsjo/forgectl/commit/226898d2f8b77274212f058e3c6ba248d141c3a3))
+* **desk:** run view loads and play ticks never land in the wrong view ([c57fe07](https://github.com/cameronsjo/forgectl/commit/c57fe07a8127ed82fea52046f695a111e714f0ba))
+* **desk:** say what a duplicate add signals, stamp hand-dropped files, refuse a symlinked prune dir ([#1143](https://github.com/cameronsjo/forgectl/issues/1143)) ([657eefc](https://github.com/cameronsjo/forgectl/commit/657eefcced43005bc78a6ae615bc24f72207d195))
+* **desk:** signal state reflects what can go out; the prune preview binds what it reads to what it checked ([#1145](https://github.com/cameronsjo/forgectl/issues/1145)) ([2ecae57](https://github.com/cameronsjo/forgectl/commit/2ecae571bda5d1257988a9f20e27d638298e1d5c))
+* **desk:** the footer keeps q quit and ? help; ? lists every key ([#1140](https://github.com/cameronsjo/forgectl/issues/1140)) ([8f6c506](https://github.com/cameronsjo/forgectl/commit/8f6c50624ce5ff8d9bd0a2267335b18ac51c1016))
+* **desk:** y and a act only on hashes the window shows ([#1122](https://github.com/cameronsjo/forgectl/issues/1122)) ([6a176a4](https://github.com/cameronsjo/forgectl/commit/6a176a46577abe4e6d6b41f79ea5038d6f49b03a))
+* **doctor:** a missing config.toml is skip with an init hint, the closing line names the failed checks, and the trust-store hints point at the trust command that state accepts ([af478e3](https://github.com/cameronsjo/forgectl/commit/af478e3b77236dc0e888070688f51127c10da1ed))
+* **forgectl:** degraded GitHub notes name the cause and the fix (not signed in, token rejected, rate limited, unreachable), and a missing projects root names PROJECTS_DIR ([af478e3](https://github.com/cameronsjo/forgectl/commit/af478e3b77236dc0e888070688f51127c10da1ed))
+* **forgectl:** pr prs and pr dash say a failed query's PRs did not load or are incomplete, instead of printing "0 open PRs" ([af478e3](https://github.com/cameronsjo/forgectl/commit/af478e3b77236dc0e888070688f51127c10da1ed))
+* **forgectl:** projects list/pick/clone/worktree exit 1 when no project source could be read, instead of printing an empty inventory ([af478e3](https://github.com/cameronsjo/forgectl/commit/af478e3b77236dc0e888070688f51127c10da1ed))
+* **surface:** new worker branches start at GitHub's default head, not a stale HEAD ([#1061](https://github.com/cameronsjo/forgectl/issues/1061)) ([#1126](https://github.com/cameronsjo/forgectl/issues/1126)) ([b5ed0ab](https://github.com/cameronsjo/forgectl/commit/b5ed0ab8eb77eddb1bcff6c03a23b35a81b2b9f1))
+* **surface:** say why a worker base falls back to HEAD; accept trailing slash ([#1136](https://github.com/cameronsjo/forgectl/issues/1136)) ([9ecd46a](https://github.com/cameronsjo/forgectl/commit/9ecd46aed70a5a702243205c5a9eec551096e74d))
+* **tmux:** refuse the bare menu off a terminal and quit straight from it ([#1110](https://github.com/cameronsjo/forgectl/issues/1110)) ([cb77529](https://github.com/cameronsjo/forgectl/commit/cb775290ee4988b5c8e487231dc0423efd323ffa))
+* **tui:** drop least important status hints first and show enter only where it acts ([#1117](https://github.com/cameronsjo/forgectl/issues/1117)) ([7e80418](https://github.com/cameronsjo/forgectl/commit/7e80418ceff287d475570981cf90abb9c4e4c5dd))
+* **tui:** hub kill-others confirm names the sessions it kills ([#1133](https://github.com/cameronsjo/forgectl/issues/1133)) ([8f23805](https://github.com/cameronsjo/forgectl/commit/8f23805c5cda9f4e4bdd074189e55efce646cc52))
+* **tui:** hub search ranks the same at every width and keeps names distinct ([#1116](https://github.com/cameronsjo/forgectl/issues/1116)) ([672af48](https://github.com/cameronsjo/forgectl/commit/672af482034b399723beaae77b03a131ce592156))
+* **tui:** suspend on Ctrl+Z in every full-screen TUI and one-shot picker ([#1112](https://github.com/cameronsjo/forgectl/issues/1112)) ([ac0ada2](https://github.com/cameronsjo/forgectl/commit/ac0ada2b02d2f0b7915d22cc10dcc8269de1bd4c))
+
 ## [0.29.0](https://github.com/cameronsjo/forgectl/compare/v0.28.0...v0.29.0) (2026-10-06)
 
 
