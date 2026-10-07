@@ -85,7 +85,8 @@ func runDrainProcess(ctx context.Context, deps module.Deps, session, herdrPath s
 	}()
 
 	pid := os.Getpid()
-	start, _ := procstart.Of(pid) // 0 when unreadable; stop then refuses to signal
+	// 0 when unreadable; stop then refuses to signal, and the event says why.
+	start, startErr := procstart.Of(pid)
 	base := drain.Status{PID: pid, ProcessStart: start, HerdrSession: session, HerdrPath: herdrPath, StartedAt: time.Now().UTC()}
 	var seq int64
 	emit := func(e drain.Event) error {
@@ -120,6 +121,9 @@ func runDrainProcess(ctx context.Context, deps module.Deps, session, herdrPath s
 
 	if err := emit(drain.Event{Kind: drain.EventStart, State: session}); err != nil {
 		return WithExitCode(termsafe.Error(err), exitUsage)
+	}
+	if startErr != nil {
+		_ = emit(drain.Event{Kind: drain.EventError, Error: "this process's start time could not be read, so drain stop will refuse to signal it: " + startErr.Error()})
 	}
 	if err := drainSessionPin(session, herdrPath); err != nil {
 		return WithExitCode(termsafe.Error(errors.Join(err, stopped(nil, err))), exitUsage)

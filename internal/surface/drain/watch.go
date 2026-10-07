@@ -92,7 +92,7 @@ func Watch(q worker.QueueRow, l Ledger, p Probe, m Memo, now time.Time, idle tim
 	}
 	switch p.State {
 	case ProbeGone:
-		return c.to(worker.QueueFailed, "the worker's herdr workspace is gone"), Memo{}
+		return c.to(worker.QueueFailed, fmt.Sprintf("the worker's herdr workspace is gone; its ledger row still holds a slot: run surface close %s", q.Name)), Memo{}
 	case ProbeUnreadable:
 		return unreadable(c, m, "the worker's pane could not be read: "+p.Err)
 	case ProbeNone:
@@ -158,4 +158,29 @@ func blockingName(v ready.Verdict) string {
 		return v.Reason
 	}
 	return "a blocking screen"
+}
+
+// Settle moves a reported or failed row to closed once its worker is closed:
+// its own ledger row (same launch id) is closed, or gone, because surface
+// close removed it, or replaced by another launch's row under the same name.
+// A row without a launch id had no worker of its own (DecideLaunch drops the
+// id when nothing of the launch exists), so there is nothing to settle. An
+// unreadable ledger leaves the row as is; the watch notes unreadable live
+// rows, and a terminal row's ledger is read again next tick.
+func Settle(q worker.QueueRow, l Ledger) Change {
+	c := change(q)
+	if (q.State != worker.QueueReported && q.State != worker.QueueFailed) || q.LaunchID == "" {
+		return c
+	}
+	switch l.State {
+	case LedgerAbsent:
+		return c.to(worker.QueueClosed, "")
+	case LedgerOther:
+		return c.to(worker.QueueClosed, fmt.Sprintf("closed; the ledger row named %q is now another launch's (expected launch_id %s, saw %q)", q.Name, q.LaunchID, l.Row.LaunchID))
+	case LedgerOurs:
+		if l.Row.Stage == worker.StageClosed {
+			return c.to(worker.QueueClosed, "")
+		}
+	}
+	return c
 }

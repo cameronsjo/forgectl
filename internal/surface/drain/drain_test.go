@@ -193,16 +193,18 @@ func TestDecideLaunch(t *testing.T) {
 		inErr     []string
 		clear     bool
 	}{
-		"success":                                {0, Attempt{Class: ErrNone}, worker.QueueLaunched, -1, "", nil, false},
-		"created nothing retries":                {0, Attempt{Class: ErrOther, Err: "boom", CreatedNothing: true}, worker.QueueQueued, 1, "", []string{"attempt 1 of 3", "boom"}, true},
-		"second failure retries":                 {1, Attempt{Class: ErrOther, Err: "boom", CreatedNothing: true}, worker.QueueQueued, 2, "", nil, true},
-		"third failure fails":                    {2, Attempt{Class: ErrOther, Err: "boom", CreatedNothing: true}, worker.QueueFailed, 3, "", []string{"attempt 3 of 3"}, false},
-		"created something fails at once":        {0, Attempt{Class: ErrOther, Err: "boom", Row: failedRow, Worktree: failedRow.Worktree}, worker.QueueFailed, -1, "", []string{"boom", failedRow.Worktree, "ledger stage failed"}, false},
-		"name taken fails, not retried":          {0, Attempt{Class: ErrNameTaken, Err: "taken", CreatedNothing: true}, worker.QueueFailed, -1, "", []string{"already exists"}, false},
-		"invalid row fails, no attempt":          {0, Attempt{Class: ErrRowInvalid, Err: "bad hash", CreatedNothing: true}, worker.QueueFailed, -1, "", []string{"bad hash"}, false},
-		"auth error requeues and pauses":         {1, Attempt{Class: ErrGitHubAuth, Err: "HTTP 401", CreatedNothing: true}, worker.QueueQueued, -1, PauseGitHubAuth, []string{"HTTP 401"}, true},
-		"herdr down requeues and pauses":         {1, Attempt{Class: ErrHerdrDown, Err: "not running", CreatedNothing: true}, worker.QueueQueued, -1, PauseHerdr, nil, true},
-		"herdr down after a worktree fails, too": {0, Attempt{Class: ErrHerdrDown, Err: "not running", Row: failedRow, Worktree: failedRow.Worktree}, worker.QueueFailed, -1, PauseHerdr, []string{failedRow.Worktree}, false},
+		"success":                                             {0, Attempt{Class: ErrNone}, worker.QueueLaunched, -1, "", nil, false},
+		"created nothing retries":                             {0, Attempt{Class: ErrOther, Err: "boom", CreatedNothing: true}, worker.QueueQueued, 1, "", []string{"attempt 1 of 3", "boom"}, true},
+		"second failure retries":                              {1, Attempt{Class: ErrOther, Err: "boom", CreatedNothing: true}, worker.QueueQueued, 2, "", nil, true},
+		"third failure fails":                                 {2, Attempt{Class: ErrOther, Err: "boom", CreatedNothing: true}, worker.QueueFailed, 3, "", []string{"attempt 3 of 3"}, true},
+		"created something fails at once":                     {0, Attempt{Class: ErrOther, Err: "boom", Row: failedRow, Worktree: failedRow.Worktree}, worker.QueueFailed, -1, "", []string{"boom", failedRow.Worktree, "ledger stage failed"}, false},
+		"name taken fails, not retried":                       {0, Attempt{Class: ErrNameTaken, Err: "taken", CreatedNothing: true}, worker.QueueFailed, -1, "", []string{"already exists"}, true},
+		"invalid row fails, no attempt":                       {0, Attempt{Class: ErrRowInvalid, Err: "bad hash", CreatedNothing: true}, worker.QueueFailed, -1, "", []string{"bad hash"}, true},
+		"auth error requeues and pauses":                      {1, Attempt{Class: ErrGitHubAuth, Err: "HTTP 401", CreatedNothing: true}, worker.QueueQueued, -1, PauseGitHubAuth, []string{"HTTP 401"}, true},
+		"herdr down requeues and pauses":                      {1, Attempt{Class: ErrHerdrDown, Err: "not running", CreatedNothing: true}, worker.QueueQueued, -1, PauseHerdr, nil, true},
+		"herdr down after a worktree fails, too":              {0, Attempt{Class: ErrHerdrDown, Err: "not running", Row: failedRow, Worktree: failedRow.Worktree}, worker.QueueFailed, -1, PauseHerdr, []string{failedRow.Worktree}, false},
+		"launch config after a worktree fails and pauses":     {0, Attempt{Class: ErrLaunchConfig, Err: "binary found on PATH", Row: failedRow, Worktree: failedRow.Worktree}, worker.QueueFailed, -1, PauseLaunchConfig, []string{failedRow.Worktree, "binary found on PATH"}, false},
+		"launch config with nothing made requeues and pauses": {0, Attempt{Class: ErrLaunchConfig, Err: "posture", CreatedNothing: true}, worker.QueueQueued, -1, PauseLaunchConfig, nil, true},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -248,7 +250,7 @@ func TestReconcileTable(t *testing.T) {
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			ch := Reconcile(q, c.l)
+			ch, _ := Reconcile(q, c.l, Memo{})
 			if ch.To != c.to || ch.ClearLaunch != c.clear || ch.SetAttempts {
 				t.Fatalf("Reconcile = to %q clear %v attempts %v; want %q %v and no attempt", ch.To, ch.ClearLaunch, ch.SetAttempts, c.to, c.clear)
 			}
@@ -257,7 +259,7 @@ func TestReconcileTable(t *testing.T) {
 			}
 		})
 	}
-	if ch := Reconcile(qrow("w", "/r", worker.QueueLaunched, t0), Ledger{}); ch.Writes() {
+	if ch, _ := Reconcile(qrow("w", "/r", worker.QueueLaunched, t0), Ledger{}, Memo{}); ch.Writes() {
 		t.Error("Reconcile changed a row that is not claimed")
 	}
 }
@@ -399,5 +401,73 @@ func TestEventsSince(t *testing.T) {
 	}
 	if _, err := ParseEvents([]byte(`{"v":2}` + "\n")); err == nil || !strings.Contains(err.Error(), "version 2") {
 		t.Fatalf("a version-2 line: %v", err)
+	}
+}
+
+// TestSettle pins the Loop closer for rows the watch no longer reads: a
+// reported or failed row whose worker was closed reads closed.
+func TestSettle(t *testing.T) {
+	reported := qrow("w", "/r", worker.QueueReported, t0)
+	failed := qrow("w", "/r", worker.QueueFailed, t0)
+	noLaunch := failed
+	noLaunch.LaunchID = ""
+	cases := map[string]struct {
+		q  worker.QueueRow
+		l  Ledger
+		to worker.QueueState
+	}{
+		"reported, ledger closed":           {reported, ours(worker.StageClosed), worker.QueueClosed},
+		"reported, ledger row removed":      {reported, Ledger{State: LedgerAbsent}, worker.QueueClosed},
+		"failed, ledger closed":             {failed, ours(worker.StageClosed), worker.QueueClosed},
+		"failed, ledger row removed":        {failed, Ledger{State: LedgerAbsent}, worker.QueueClosed},
+		"failed, name reused by another":    {failed, Ledger{State: LedgerOther, Row: worker.Row{LaunchID: "L-x"}}, worker.QueueClosed},
+		"reported, worker still running":    {reported, ours(worker.StageLaunched), ""},
+		"failed, worktree still there":      {failed, ours(worker.StageFailed), ""},
+		"failed, live ledger row":           {failed, ours(worker.StageWorktree), ""},
+		"unreadable ledger":                 {failed, Ledger{State: LedgerUnreadable}, ""},
+		"failed with no worker of its own":  {noLaunch, Ledger{State: LedgerAbsent}, ""},
+		"launched rows are the watch's job": {qrow("w", "/r", worker.QueueLaunched, t0), ours(worker.StageClosed), ""},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := Settle(c.q, c.l); got.To != c.to {
+				t.Fatalf("Settle = to %q, want %q", got.To, c.to)
+			}
+		})
+	}
+}
+
+// TestReconcileNotesUnreadableOnce: an unreadable ledger under a claimed row
+// is one event per change, not one per tick.
+func TestReconcileNotesUnreadableOnce(t *testing.T) {
+	q := qrow("w", "/r", worker.QueueClaimed, t0)
+	bad := Ledger{State: LedgerUnreadable, Err: "eio"}
+	c, m := Reconcile(q, bad, Memo{})
+	if c.Note == "" || c.Writes() || !m.Unreadable {
+		t.Fatalf("first unreadable tick: %+v %+v", c, m)
+	}
+	c, m = Reconcile(q, bad, m)
+	if c.Note != "" {
+		t.Fatalf("second unreadable tick noted again: %q", c.Note)
+	}
+	c, _ = Reconcile(q, ours(worker.StageLaunched), m)
+	if c.To != worker.QueueLaunched {
+		t.Fatalf("readable again: %+v", c)
+	}
+}
+
+func TestProbeGoneNamesTheWayOut(t *testing.T) {
+	q := qrow("fix-login", "/r", worker.QueueLaunched, t0)
+	c, _ := Watch(q, ours(worker.StageLaunched), Probe{State: ProbeGone}, Memo{}, t0, time.Minute)
+	if c.To != worker.QueueFailed || !strings.Contains(c.Error, "run surface close fix-login") {
+		t.Fatalf("ProbeGone: %+v", c)
+	}
+}
+
+func TestHeld(t *testing.T) {
+	rows := []worker.QueueRow{qrow("a", "/a", worker.QueueClaimed, t0), qrow("b", "/b", worker.QueueFailed, t0), qrow("c", "/c", worker.QueueQueued, t0)}
+	got := Held(rows, map[string]Ledger{"b": ours(worker.StageLaunched)})
+	if strings.Join(got, ",") != "a,b" {
+		t.Fatalf("Held = %v, want a,b", got)
 	}
 }

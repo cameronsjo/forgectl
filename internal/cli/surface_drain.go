@@ -8,6 +8,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -61,7 +62,12 @@ type drainStatusView struct {
 	Seq             int64             `json:"seq"`
 	Counts          map[string]int    `json:"counts"`
 	Attention       []drain.Attention `json:"attention"`
-	Error           string            `json:"error,omitempty"`
+	// HeldSlots counts the rows holding a slot (drain.HoldsSlot), and
+	// Holding names them, so a queue held back by failed rows whose workers
+	// are still live is explainable: surface close frees each.
+	HeldSlots int      `json:"held_slots"`
+	Holding   []string `json:"holding"`
+	Error     string   `json:"error,omitempty"`
 }
 
 // drainEventsResult is what `drain events --json` prints.
@@ -328,13 +334,15 @@ func newSurfaceDrainStatusCmd() *cobra.Command {
 		Long: `status prints the drain's state from drain.json: running, paused (with the
 pause reason), stopped, or stale (running or paused, but the last tick is
 older than 3 intervals). It names the pid, process start time, herdr
-session and last tick, counts the queue's rows per state, and lists the rows
-in needs-you or failed with their last error. Counts and rows are read from
-the queue now, not from the last tick.
+session and last tick, counts the queue's rows per state, lists the rows
+in needs-you or failed with their last error, and names the rows holding a
+slot (a failed row whose worker is still live holds one until surface
+close). Counts and rows are read from the queue now, not from the last tick.
 
 --json prints {"status","pause_reason","pid","process_start","herdr_session",
 "started_at","last_tick","interval_seconds","seq","counts","attention",
-"error"}, where attention is [{"name","repo","state","last_error","state_at"}].
+"held_slots","holding","error"}, where attention is
+[{"name","repo","state","last_error","state_at"}].
 
 Exit 0: printed, whatever the state. Exit 2: drain.json or the queue cannot
 be read.
@@ -345,7 +353,7 @@ be read.
 			return runSurfaceDrainStatus(cmd, asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"status","pause_reason","pid","process_start","herdr_session","started_at","last_tick","interval_seconds","seq","counts","attention","error"} as JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"status","pause_reason","pid","process_start","herdr_session","started_at","last_tick","interval_seconds","seq","counts","attention","held_slots","holding","error"} as JSON`)
 	return cmd
 }
 
@@ -379,6 +387,14 @@ func runSurfaceDrainStatus(cmd *cobra.Command, asJSON bool) error {
 		}
 	}
 	view.Counts, view.Attention = drain.Summarize(rows)
+	view.Holding = drain.Held(rows, readLedgers(rows, view.HerdrSession, func(repo, session string) ([]worker.Row, error) {
+		led, err := worker.Open(repo, session)
+		if err != nil {
+			return nil, err
+		}
+		return led.Rows()
+	}))
+	view.HeldSlots = len(view.Holding)
 	return reportDrainStatus(cmd.OutOrStdout(), view, asJSON)
 }
 
@@ -393,7 +409,7 @@ func reportDrainStatus(out io.Writer, v drainStatusView, asJSON bool) error {
 	if asJSON {
 		return writeJSON(out, v)
 	}
-	line := "drain " + v.Status
+	line := "drain " + termsafe.SafeLineMax(v.Status, 16)
 	if v.PID > 0 && v.Status != drain.StatusStopped {
 		line += fmt.Sprintf(": pid %d, herdr session %s", v.PID, termsafe.SafeLineMax(v.HerdrSession, 64))
 	}
@@ -427,8 +443,17 @@ func reportDrainStatus(out io.Writer, v drainStatusView, asJSON bool) error {
 	if _, err := fmt.Fprintf(out, "rows:%s\n", counts); err != nil {
 		return err
 	}
+	if v.HeldSlots > 0 {
+		names := make([]string, 0, len(v.Holding))
+		for _, n := range v.Holding {
+			names = append(names, termsafe.SafeLineMax(n, 64))
+		}
+		if _, err := fmt.Fprintf(out, "slots held: %d (%s)\n", v.HeldSlots, strings.Join(names, ", ")); err != nil {
+			return err
+		}
+	}
 	for _, a := range v.Attention {
-		if _, err := fmt.Fprintf(out, "  %s  %s  %s\n", termsafe.SafeLineMax(a.Name, 64), a.State, termsafe.SafeLineMax(a.LastError, 300)); err != nil {
+		if _, err := fmt.Fprintf(out, "  %s  %s  %s\n", termsafe.SafeLineMax(a.Name, 64), termsafe.SafeLineMax(a.State, 16), termsafe.SafeLineMax(a.LastError, 300)); err != nil {
 			return err
 		}
 	}

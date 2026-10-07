@@ -400,12 +400,6 @@ func SameRead(was QueueRow) func(QueueRow) bool {
 	}
 }
 
-// SameLaunch matches a row still carrying launchID: the guard the drain
-// passes to UpdateIf, so it changes only rows whose claim it made.
-func SameLaunch(launchID string) func(QueueRow) bool {
-	return func(r QueueRow) bool { return launchID != "" && r.LaunchID == launchID }
-}
-
 // maxLastError caps a row's LastError, so a long error from a launch cannot
 // grow the queue toward its read cap.
 const maxLastError = 1024

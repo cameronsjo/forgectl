@@ -13,7 +13,9 @@ import (
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/herdr/ready"
+	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/surface"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 	"github.com/cameronsjo/forgectl/internal/surface/drain"
 	"github.com/cameronsjo/forgectl/internal/surface/herdradapter"
@@ -132,17 +134,16 @@ func (d *drainer) loadSettings() {
 	d.resume(drain.PauseConfig)
 }
 
-// sessionOf is the herdr session whose ledger holds q's worker.
-func (d *drainer) sessionOf(q worker.QueueRow) string {
-	if q.Session != "" {
-		return q.Session
-	}
-	return d.session
-}
-
 // ledgers reads each row's ledger row, reading each (repo, session) ledger
 // once. Queued rows are not read: nothing of theirs is live.
 func (d *drainer) ledgers(rows []worker.QueueRow) map[string]drain.Ledger {
+	return readLedgers(rows, d.session, d.io.ledgerRows)
+}
+
+// readLedgers reads each row's ledger row, reading each (repo, session)
+// ledger once. A row with no recorded session reads defaultSession's.
+// Queued and expired rows are not read: nothing of theirs is live.
+func readLedgers(rows []worker.QueueRow, defaultSession string, ledgerRows func(repo, session string) ([]worker.Row, error)) map[string]drain.Ledger {
 	type key struct{ repo, session string }
 	type read struct {
 		rows []worker.Row
@@ -154,10 +155,14 @@ func (d *drainer) ledgers(rows []worker.QueueRow) map[string]drain.Ledger {
 		if q.State == worker.QueueQueued || q.State == worker.QueueExpired {
 			continue
 		}
-		k := key{q.Repo, d.sessionOf(q)}
+		session := q.Session
+		if session == "" {
+			session = defaultSession
+		}
+		k := key{q.Repo, session}
 		r, ok := cache[k]
 		if !ok {
-			r.rows, r.err = d.io.ledgerRows(k.repo, k.session)
+			r.rows, r.err = ledgerRows(k.repo, k.session)
 			cache[k] = r
 		}
 		out[q.Name] = drain.MatchLedger(q, r.rows, r.err)
@@ -214,7 +219,10 @@ func (d *drainer) tick(ctx context.Context) []worker.QueueRow {
 	// process launches every row it claims within the tick that claimed it.
 	for _, q := range rows {
 		if q.State == worker.QueueClaimed {
-			d.apply(q, drain.Reconcile(q, ledgers[q.Name]))
+			c, m := drain.Reconcile(q, ledgers[q.Name], d.memo[q.Name])
+			if _, ok := d.apply(q, c); ok || !c.Writes() {
+				d.memo[q.Name] = m
+			}
 		}
 	}
 	if d.stopping() {
@@ -260,6 +268,11 @@ func (d *drainer) watch(ctx context.Context, rows []worker.QueueRow, ledgers map
 	var probe drainProber
 	live := map[string]bool{}
 	for _, q := range rows {
+		if q.State == worker.QueueClaimed {
+			live[q.Name] = true // its Reconcile memo outlives the tick
+		}
+	}
+	for _, q := range rows {
 		if q.State != worker.QueueLaunched && q.State != worker.QueueNeedsYou {
 			continue
 		}
@@ -283,6 +296,11 @@ func (d *drainer) watch(ctx context.Context, rows []worker.QueueRow, ledgers map
 		d.memo[q.Name] = m
 		if ok && c.Notify && d.settings.Notify {
 			d.io.notify.NeedsYou(ctx, written, written.LastError)
+		}
+	}
+	for _, q := range rows {
+		if q.State == worker.QueueReported || q.State == worker.QueueFailed {
+			d.apply(q, drain.Settle(q, ledgers[q.Name]))
 		}
 	}
 	for name := range d.memo {
@@ -388,6 +406,14 @@ func newDrainLaunchID() (string, error) {
 // harness claude, the row's brief text, and the branch worker/<name>. The
 // repo must still resolve to the top the row records.
 func drainLaunch(runner exec.Runner) func(context.Context, config.Config, worker.QueueRow) drain.Attempt {
+	return drainLaunchWith(runner, launchWorker)
+}
+
+// workerLauncher is launchWorker's shape, so a test can drive the drain's
+// launch with the real spec and stubbed git and herdr.
+type workerLauncher func(ctx context.Context, warn io.Writer, deps module.Deps, spec workerSpec, briefText string) (workerAttempt, error)
+
+func drainLaunchWith(runner exec.Runner, launchFn workerLauncher) func(context.Context, config.Config, worker.QueueRow) drain.Attempt {
 	return func(ctx context.Context, cfg config.Config, row worker.QueueRow) drain.Attempt {
 		top, err := worker.RepoTop(ctx, runner, row.Repo)
 		if err != nil {
@@ -397,10 +423,15 @@ func drainLaunch(runner exec.Runner) func(context.Context, config.Config, worker
 			return drain.Attempt{Class: drain.ErrRowInvalid, CreatedNothing: true,
 				Err: fmt.Sprintf("the repository top is now %s, expected the queued %s", top, row.Repo)}
 		}
-		spec := workerSpec{target: row.Repo, name: row.Name, branch: drain.Branch(row.Name), harness: "claude", launchID: row.LaunchID}
-		attempt, err := launchWorker(ctx, io.Discard, module.Deps{Runner: runner, Cfg: cfg}, spec, row.Brief)
+		attempt, err := launchFn(ctx, io.Discard, module.Deps{Runner: runner, Cfg: cfg}, drainSpec(row), row.Brief)
 		return attemptOf(attempt, err, row)
 	}
+}
+
+// drainSpec is the worker launch for a claimed row: harness claude, branch
+// worker/<name>, no $PATH binary, and the claim's launch id for the ledger.
+func drainSpec(row worker.QueueRow) workerSpec {
+	return workerSpec{target: row.Repo, name: row.Name, branch: drain.Branch(row.Name), harness: "claude", allowPATH: false, launchID: row.LaunchID}
 }
 
 // attemptOf turns a workerAttempt and its error into the drain's view.
@@ -428,12 +459,27 @@ func classifyLaunchError(err error) drain.ErrClass {
 		return drain.ErrNone
 	case errors.Is(err, worker.ErrNameTaken):
 		return drain.ErrNameTaken
+	case launchConfigFailure(err):
+		return drain.ErrLaunchConfig
 	case herdrUnavailable(err):
 		return drain.ErrHerdrDown
 	case githubAuthFailure(err):
 		return drain.ErrGitHubAuth
 	}
 	return drain.ErrOther
+}
+
+// launchConfigFailure reports a launch whose configuration cannot build a
+// worker: the build step, the worker posture or harness override, or the
+// binary policy (a claude found only on $PATH, unusable, or forgectl).
+func launchConfigFailure(err error) bool {
+	for _, target := range []error{errLaunchConfig, launch.ErrWorkerPosture, launch.ErrHarnessOverride,
+		surface.ErrBinaryProvenance, surface.ErrBinaryUnusable, surface.ErrBinarySelfLoop} {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
 }
 
 // herdrUnavailable reports herdr missing from PATH, or a start cause of

@@ -21,6 +21,10 @@ const (
 	ErrGitHubAuth
 	// ErrHerdrDown: herdr is not running or cannot be reached.
 	ErrHerdrDown
+	// ErrLaunchConfig: the launch configuration cannot build a worker (the
+	// posture, the harness binary, the profile). It fails the same way for
+	// every row, and only after the worktree exists.
+	ErrLaunchConfig
 	// ErrOther: anything else.
 	ErrOther
 )
@@ -50,6 +54,9 @@ const (
 	// PauseGitHubAuth: GitHub refused the credentials. Cleared only by the
 	// next drain start.
 	PauseGitHubAuth PauseKind = "github-auth"
+	// PauseLaunchConfig: the launch configuration cannot build a worker.
+	// Cleared only by the next drain start, after the operator fixes [launch].
+	PauseLaunchConfig PauseKind = "launch-config"
 )
 
 // LaunchDecision is the row change a launch attempt leads to, and a pause to
@@ -66,13 +73,17 @@ type LaunchDecision struct {
 //   - the row failed its re-check: failed, no attempt counted.
 //   - a ledger row already holds the name: failed. The attempt created
 //     nothing, but a retry would only hit that row again.
-//   - GitHub auth or herdr unreachable, having created nothing: back to
+//   - GitHub auth, herdr unreachable, or a launch config that cannot build
+//     a worker, having created nothing: back to
 //     queued, no attempt counted, and claiming pauses with that reason.
 //   - any other failure that created nothing: back to queued with one more
 //     attempt, or failed at MaxAttempts.
 //   - a failure after something was created: failed at once, naming the
-//     error, the worktree and the ledger stage. (An auth or herdr failure
-//     here also pauses.)
+//     error, the worktree and the ledger stage. (An auth, herdr or
+//     launch-config failure here also pauses.)
+//
+// A row failed with nothing of its launch to close drops its launch id, so
+// Settle never reads another launch's ledger row, or none, as its close.
 func DecideLaunch(q worker.QueueRow, a Attempt) LaunchDecision {
 	c := change(q)
 	d := LaunchDecision{}
@@ -81,14 +92,18 @@ func DecideLaunch(q worker.QueueRow, a Attempt) LaunchDecision {
 		d.Pause, d.PauseReason = PauseGitHubAuth, "GitHub refused the credentials: "+a.Err
 	case ErrHerdrDown:
 		d.Pause, d.PauseReason = PauseHerdr, "herdr is unreachable: "+a.Err
+	case ErrLaunchConfig:
+		d.Pause, d.PauseReason = PauseLaunchConfig, "the launch configuration cannot build a worker: "+a.Err
 	}
 	switch {
 	case a.Class == ErrNone:
 		d.Change = c.to(worker.QueueLaunched, "")
 	case a.Class == ErrRowInvalid:
 		d.Change = c.to(worker.QueueFailed, "refused before launch: "+a.Err)
+		d.ClearLaunch = true // nothing of this launch exists to match or close
 	case a.Class == ErrNameTaken:
 		d.Change = c.to(worker.QueueFailed, fmt.Sprintf("%s; a ledger row named %q already exists, expected none: run surface close, then dequeue and enqueue to retry", a.Err, q.Name))
+		d.ClearLaunch = true // the ledger row is not this launch's
 	case d.Pause != "" && a.CreatedNothing:
 		d.Change = c.to(worker.QueueQueued, fmt.Sprintf("not launched, claiming paused (%s): %s", d.Pause, a.Err))
 		d.ClearLaunch = true
@@ -98,8 +113,8 @@ func DecideLaunch(q worker.QueueRow, a Attempt) LaunchDecision {
 			d.Change = c.to(worker.QueueFailed, fmt.Sprintf("attempt %d of %d failed having created nothing: %s", n, MaxAttempts, a.Err))
 		} else {
 			d.Change = c.to(worker.QueueQueued, fmt.Sprintf("attempt %d of %d failed having created nothing, will retry: %s", n, MaxAttempts, a.Err))
-			d.ClearLaunch = true
 		}
+		d.ClearLaunch = true
 		d.Attempts, d.SetAttempts = n, true
 	default:
 		d.Change = c.to(worker.QueueFailed, fmt.Sprintf("launch failed after creating something: %s; worktree %s; ledger stage %s; run surface close, then dequeue and enqueue to retry",
@@ -121,21 +136,25 @@ func DecideLaunch(q worker.QueueRow, a Attempt) LaunchDecision {
 //	closed                      closed
 //
 // An unreadable ledger leaves the row claimed (it keeps its slot) and is
-// tried again next tick.
-func Reconcile(q worker.QueueRow, l Ledger) Change {
+// tried again next tick; m records it, so it is noted once, not each tick.
+func Reconcile(q worker.QueueRow, l Ledger, m Memo) (Change, Memo) {
 	c := change(q)
 	if q.State != worker.QueueClaimed {
-		return c
+		return c, m
 	}
+	if l.State == LedgerUnreadable {
+		return unreadable(c, m, "claimed row left as is; the ledger could not be read: "+l.Err)
+	}
+	return reconcileReadable(q, l, c), Memo{}
+}
+
+func reconcileReadable(q worker.QueueRow, l Ledger, c Change) Change {
 	requeue := func(why string) Change {
 		c = c.to(worker.QueueQueued, why)
 		c.ClearLaunch = true
 		return c
 	}
 	switch l.State {
-	case LedgerUnreadable:
-		c.Note = "claimed row left as is; the ledger could not be read: " + l.Err
-		return c
 	case LedgerAbsent:
 		return requeue("the drain stopped before this launch wrote its ledger row; requeued")
 	case LedgerOther:

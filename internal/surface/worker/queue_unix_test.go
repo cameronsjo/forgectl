@@ -167,10 +167,11 @@ func TestQueueSizeCapRefusedBeforeWrite(t *testing.T) {
 	if room := MaxQueueBytes - size(); room < 0 || room > 64 {
 		t.Fatalf("the fill left %d bytes under the cap, want a few", room)
 	}
-	if _, err := q.Claim("w0", "launch-0123456789abcdef0123456789abcdef", queueNow); err != nil {
+	claimed, err := q.Claim("w0", "launch-0123456789abcdef0123456789abcdef", queueNow)
+	if err != nil {
 		t.Fatalf("claim on a full queue: %v", err)
 	}
-	failed, err := q.UpdateIf("w0", SameLaunch("launch-0123456789abcdef0123456789abcdef"), queueNow, func(r *QueueRow) {
+	failed, err := q.UpdateIf("w0", SameRead(claimed), queueNow, func(r *QueueRow) {
 		r.State = QueueFailed
 		r.LastError = strings.Repeat("é", maxLastError)
 	})
@@ -282,11 +283,13 @@ func TestQueueClaimOneWinner(t *testing.T) {
 	if err != nil || rows[0].State != QueueClaimed || rows[0].LaunchID == "" {
 		t.Fatalf("rows %+v, err %v", rows, err)
 	}
-	// SameLaunch guards a later update to the winner's claim only.
-	if _, err := openQueueAt(state).UpdateIf("w1", SameLaunch("someone-else"), queueNow, func(r *QueueRow) { r.State = QueueLaunched }); !errors.Is(err, ErrQueueRowChanged) {
+	// SameRead guards a later update to the winner's claim only.
+	other := rows[0]
+	other.LaunchID = "someone-else"
+	if _, err := openQueueAt(state).UpdateIf("w1", SameRead(other), queueNow, func(r *QueueRow) { r.State = QueueLaunched }); !errors.Is(err, ErrQueueRowChanged) {
 		t.Fatalf("UpdateIf with another launch id: %v", err)
 	}
-	if _, err := openQueueAt(state).UpdateIf("w1", SameLaunch(rows[0].LaunchID), queueNow, func(r *QueueRow) { r.State = QueueLaunched }); err != nil {
+	if _, err := openQueueAt(state).UpdateIf("w1", SameRead(rows[0]), queueNow, func(r *QueueRow) { r.State = QueueLaunched }); err != nil {
 		t.Fatalf("UpdateIf with the claim's launch id: %v", err)
 	}
 }

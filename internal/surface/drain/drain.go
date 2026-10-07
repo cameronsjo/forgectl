@@ -227,3 +227,14 @@ func Expire(q worker.QueueRow, now time.Time) Change {
 func Prunable(q worker.QueueRow, now time.Time) bool {
 	return q.State.Terminal() && now.Sub(q.StateAt) > PruneAfter
 }
+
+// Held returns the names of the rows holding a slot, in row order.
+func Held(rows []worker.QueueRow, ledgers map[string]Ledger) []string {
+	held := []string{}
+	for _, r := range rows {
+		if HoldsSlot(r, ledgers[r.Name]) {
+			held = append(held, r.Name)
+		}
+	}
+	return held
+}

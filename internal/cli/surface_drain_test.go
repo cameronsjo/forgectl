@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -212,7 +214,13 @@ func TestDrainTickFailsAtOnce(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f, d, q := newFakeDrain(t)
 			enqueueAt(t, q, "w", "/repo/a", drainT0)
-			f.launch = func(worker.QueueRow) drain.Attempt { return c.a }
+			f.launch = func(row worker.QueueRow) drain.Attempt {
+				if c.a.Row != nil {
+					// What a real attempt leaves: its own failed row naming the worktree.
+					seedLedger(t, row.Repo, row.Name, row.LaunchID, worker.StageFailed, func(r *worker.Row) { r.Worktree = c.a.Worktree })
+				}
+				return c.a
+			}
 			d.tick(t.Context())
 			d.tick(t.Context())
 			r := rowNamed(t, q, "w")
@@ -327,14 +335,6 @@ func TestDrainTickWatch(t *testing.T) {
 	d.tick(t.Context())
 	if r := rowNamed(t, q, "w"); r.State != worker.QueueNeedsYou || r.LastError != drain.ReasonIdle || len(f.notified) != 2 {
 		t.Fatalf("idle: row %s %q, notified %v", r.State, r.LastError, f.notified)
-	}
-	// notify = false: the state still changes, no notification.
-	off := false
-	f.cfg.Surface.Drain.Notify = &off
-	verdict = ready.StateBlocked
-	d.tick(t.Context())
-	if len(f.notified) != 2 {
-		t.Fatalf("notify = false still notified: %v", f.notified)
 	}
 	// Ledger closed: the row closes.
 	led, err := worker.Open("/repo/a", drainTestSession)
@@ -737,5 +737,261 @@ func TestProbeWorker(t *testing.T) {
 				t.Fatalf("probe %+v after %d reads; want state %v after %d", p, c.screen.reads, c.want, c.reads)
 			}
 		})
+	}
+}
+
+// seedLive puts name in state with its own ledger row at stage.
+func seedLive(t *testing.T, q *worker.Queue, name, repo string, state worker.QueueState, stage worker.Stage) string {
+	t.Helper()
+	enqueueAt(t, q, name, repo, drainT0)
+	id := seedState(t, q, name, state)
+	seedLedger(t, repo, name, id, stage, func(r *worker.Row) { r.Harness = "claude" })
+	return id
+}
+
+// TestDrainNotifyOffSuppressesTheNotification drives a launched → needs-you
+// change with notify = false: the row changes, nothing is notified.
+func TestDrainNotifyOffSuppressesTheNotification(t *testing.T) {
+	for _, notify := range []bool{true, false} {
+		t.Run(fmt.Sprintf("notify=%v", notify), func(t *testing.T) {
+			f, d, q := newFakeDrain(t)
+			seedLive(t, q, "w", "/repo/a", worker.QueueLaunched, worker.StageLaunched)
+			f.cfg.Surface.Drain.Notify = &notify
+			f.probe = func(worker.QueueRow, worker.Row) drain.Probe {
+				return drain.Probe{State: drain.ProbeRead, Verdict: ready.Verdict{State: ready.StateBlocked, Blocking: "permission prompt"}}
+			}
+			d.tick(t.Context())
+			if r := rowNamed(t, q, "w"); r.State != worker.QueueNeedsYou {
+				t.Fatalf("row %s, want needs-you", r.State)
+			}
+			want := 0
+			if notify {
+				want = 1
+			}
+			if len(f.notified) != want {
+				t.Fatalf("notified %v, want %d notifications", f.notified, want)
+			}
+		})
+	}
+}
+
+// TestDrainSettlesClosedTerminalRows pins the Loop closer: a reported or
+// failed row reads closed once surface close closes or removes its ledger row.
+func TestDrainSettlesClosedTerminalRows(t *testing.T) {
+	f, d, q := newFakeDrain(t)
+	f.herdrErr = errors.New("down")
+	seedLive(t, q, "rep", "/repo/a", worker.QueueReported, worker.StageLaunched)
+	seedLive(t, q, "fail", "/repo/b", worker.QueueFailed, worker.StageFailed)
+	d.tick(t.Context())
+	if a, b := rowNamed(t, q, "rep").State, rowNamed(t, q, "fail").State; a != worker.QueueReported || b != worker.QueueFailed {
+		t.Fatalf("before close: %s, %s", a, b)
+	}
+	ledA, err := worker.Open("/repo/a", drainTestSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledA.Update("rep", func(r *worker.Row) { r.Stage = worker.StageClosed }); err != nil {
+		t.Fatal(err)
+	}
+	ledB, err := worker.Open("/repo/b", drainTestSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledB.RemoveIf("fail", func(worker.Row) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	d.tick(t.Context())
+	if a, b := rowNamed(t, q, "rep").State, rowNamed(t, q, "fail").State; a != worker.QueueClosed || b != worker.QueueClosed {
+		t.Fatalf("after close: reported row %s, failed row %s; want both closed", a, b)
+	}
+}
+
+// TestDrainDoesNotAdoptAnotherLaunch: a ledger row under the name with
+// another launch id is not the drain's. The launched row is not read, holds
+// no slot, and is closed; a claimed row is requeued.
+func TestDrainDoesNotAdoptAnotherLaunch(t *testing.T) {
+	f, d, q := newFakeDrain(t)
+	f.herdrErr = errors.New("down")
+	enqueueAt(t, q, "w", "/repo/a", drainT0)
+	seedState(t, q, "w", worker.QueueLaunched)
+	seedLedger(t, "/repo/a", "w", "launch-someone-else", worker.StageLaunched, nil)
+	enqueueAt(t, q, "c", "/repo/b", drainT0)
+	seedState(t, q, "c", worker.QueueClaimed)
+	seedLedger(t, "/repo/b", "c", "launch-someone-else", worker.StageLaunched, nil)
+	probed := 0
+	f.probe = func(worker.QueueRow, worker.Row) drain.Probe { probed++; return drain.Probe{} }
+	rows, err := q.Rows()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if held := drain.Held(rows, d.ledgers(rows)); strings.Join(held, ",") != "c" {
+		t.Fatalf("held %v; only the claimed row may hold a slot", held)
+	}
+	d.tick(t.Context())
+	if probed != 0 {
+		t.Fatal("another launch's worker was read")
+	}
+	if w, c := rowNamed(t, q, "w"), rowNamed(t, q, "c"); w.State != worker.QueueClosed || c.State != worker.QueueQueued || c.LaunchID != "" {
+		t.Fatalf("w %s; c %s launch %q; want closed and requeued", w.State, c.State, c.LaunchID)
+	}
+}
+
+// TestDrainReconcileUnreadableIsOneEvent: a claimed row over an unreadable
+// ledger is noted once across ticks.
+func TestDrainReconcileUnreadableIsOneEvent(t *testing.T) {
+	f, d, q := newFakeDrain(t)
+	f.herdrErr = errors.New("down")
+	enqueueAt(t, q, "w", "/repo/a", drainT0)
+	seedState(t, q, "w", worker.QueueClaimed)
+	d.io.ledgerRows = func(string, string) ([]worker.Row, error) { return nil, errors.New("ledger version 9") }
+	for range 3 {
+		d.tick(t.Context())
+	}
+	n := 0
+	for _, e := range f.events {
+		if e.Kind == drain.EventUnreadable {
+			n++
+		}
+	}
+	if n != 1 || rowNamed(t, q, "w").State != worker.QueueClaimed {
+		t.Fatalf("%d unreadable events over 3 ticks, row %s; want 1 and still claimed", n, rowNamed(t, q, "w").State)
+	}
+}
+
+// TestDrainPausesOnLaunchConfig: a launch config that cannot build a worker
+// fails the row (naming its worktree) and pauses claiming, so the rest of
+// the queue is not burned.
+func TestDrainPausesOnLaunchConfig(t *testing.T) {
+	f, d, q := newFakeDrain(t)
+	enqueueAt(t, q, "a", "/repo/a", drainT0)
+	enqueueAt(t, q, "b", "/repo/b", drainT0.Add(time.Minute))
+	enqueueAt(t, q, "c", "/repo/c", drainT0.Add(2*time.Minute))
+	f.launch = func(row worker.QueueRow) drain.Attempt {
+		wt := worker.WorktreePath(row.Repo, row.Name)
+		seedLedger(t, row.Repo, row.Name, row.LaunchID, worker.StageFailed, func(r *worker.Row) { r.Worktree = wt })
+		return drain.Attempt{Class: drain.ErrLaunchConfig, Err: "harness binary was found on $PATH", Worktree: wt, Row: &worker.Row{Stage: worker.StageFailed, Worktree: wt}}
+	}
+	d.tick(t.Context())
+	d.tick(t.Context())
+	if len(f.launched) != 1 {
+		t.Fatalf("launched %v; a launch-config failure must stop further claims", f.launched)
+	}
+	if r := rowNamed(t, q, "a"); r.State != worker.QueueFailed || !strings.Contains(r.LastError, "/repo/a/.claude/worktrees/a") {
+		t.Fatalf("row a %s %q", r.State, r.LastError)
+	}
+	if b := rowNamed(t, q, "b"); b.State != worker.QueueQueued || !strings.Contains(d.pauses.Reason(), "launch-config") {
+		t.Fatalf("row b %s, pause %q", b.State, d.pauses.Reason())
+	}
+}
+
+// TestLaunchConfigErrorsClassify drives a real build-step failure through
+// runWorkerSteps and checks the drain reads it as a launch-config failure.
+func TestLaunchConfigErrorsClassify(t *testing.T) {
+	cases := map[string]func(workerSteps) workerSteps{
+		"build error": func(s workerSteps) workerSteps {
+			s.build = func(string) (launch.BuiltInvocation, error) {
+				return launch.BuiltInvocation{}, errors.New("launch: the harness profile does not resolve")
+			}
+			return s
+		},
+		"non-worker build": func(s workerSteps) workerSteps {
+			build := s.build
+			s.build = func(cwd string) (launch.BuiltInvocation, error) {
+				b, err := build(cwd)
+				b.Worker = false
+				return b, err
+			}
+			return s
+		},
+		"binary on PATH at launch": func(s workerSteps) workerSteps {
+			s.launch = func(context.Context, launch.Invocation) (backend.Ref, error) {
+				return backend.Ref{}, fmt.Errorf("launch: %w: /usr/bin/claude", surface.ErrBinaryProvenance)
+			}
+			return s
+		},
+	}
+	for name, mod := range cases {
+		t.Run(name, func(t *testing.T) {
+			led := testWorkerLedger(t)
+			attempt, err := attemptWorker(t.Context(), led, "w1", "feat/w1", mod(goodSteps(t)))
+			if got := classifyLaunchError(err); got != drain.ErrLaunchConfig {
+				t.Fatalf("classifyLaunchError(%v) = %v, want ErrLaunchConfig", err, got)
+			}
+			if attempt.createdNothing() {
+				t.Fatal("a failure after the worktree read as creating nothing")
+			}
+		})
+	}
+	if got := classifyLaunchError(errors.New("workspace create failed")); got != drain.ErrOther {
+		t.Fatalf("an unrelated error classified as %v", got)
+	}
+}
+
+// TestDrainLaunchWiring drives the production launch wiring (drainLaunch's
+// spec, and workerSetup.steps with git and herdr stubbed): the ledger row
+// carries the claim's launch id, the harness is claude, $PATH binaries stay
+// refused, and a repo whose top moved is refused before anything runs.
+func TestDrainLaunchWiring(t *testing.T) {
+	repo := t.TempDir()
+	//nolint:gosec // G204: a fixed tool name with arguments this test constructed
+	if out, err := osexec.CommandContext(t.Context(), "git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	top, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(top, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	brief := "fix it"
+	row := worker.QueueRow{Name: "w1", Repo: top, Brief: brief, BriefSHA256: worker.BriefSHA256(brief), LaunchID: "launch-wired", State: worker.QueueClaimed}
+
+	led := testWorkerLedger(t)
+	var specs []workerSpec
+	fake := func(ctx context.Context, warn io.Writer, deps module.Deps, spec workerSpec, text string) (workerAttempt, error) {
+		specs = append(specs, spec)
+		var launched []launch.Invocation
+		steps := inProcessSteps(t, led, &launched)
+		wired := workerSetup{top: testRepoTop, led: led, self: "/nonexistent/forgectl"}.steps(deps, spec, text, nil, warn)
+		steps.launchID = wired.launchID
+		return attemptWorker(ctx, led, spec.name, spec.branch, steps)
+	}
+	a := drainLaunchWith(exec.OSRunner{}, fake)(t.Context(), config.Config{}, row)
+	if a.Class != drain.ErrNone || len(specs) != 1 {
+		t.Fatalf("attempt %+v, specs %d", a, len(specs))
+	}
+	got := specs[0]
+	if got.harness != "claude" || got.allowPATH || got.branch != "worker/w1" || got.target != top {
+		t.Fatalf("spec %+v; want harness claude, no $PATH binary, branch worker/w1", got)
+	}
+	if r := onlyRow(t, led); r.LaunchID != row.LaunchID {
+		t.Fatalf("ledger row launch_id %q, want the claim's %q", r.LaunchID, row.LaunchID)
+	}
+
+	moved := row
+	moved.Repo = filepath.Join(top, "sub")
+	a = drainLaunchWith(exec.OSRunner{}, fake)(t.Context(), config.Config{}, moved)
+	if a.Class != drain.ErrRowInvalid || !a.CreatedNothing || len(specs) != 1 || !strings.Contains(a.Err, "expected the queued") {
+		t.Fatalf("moved top: attempt %+v, launches %d; want refused before launch", a, len(specs))
+	}
+}
+
+func TestDrainStatusShowsHeldSlots(t *testing.T) {
+	drainCmdEnv(t)
+	q, err := worker.OpenQueue()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedLive(t, q, "stuck", "/repo/a", worker.QueueFailed, worker.StageLaunched)
+	enqueueAt(t, q, "waiting", "/repo/a", drainT0)
+	out, err := runQueueCmd(t, newSurfaceDrainStatusCmd(), "--json")
+	var v drainStatusView
+	if err != nil || json.Unmarshal([]byte(out), &v) != nil || v.HeldSlots != 1 || strings.Join(v.Holding, ",") != "stuck" {
+		t.Fatalf("status: %q, %v; want held_slots 1 holding [stuck]", out, err)
+	}
+	out, err = runQueueCmd(t, newSurfaceDrainStatusCmd())
+	if err != nil || !strings.Contains(out, "slots held: 1 (stuck)") {
+		t.Fatalf("status text: %q, %v", out, err)
 	}
 }
