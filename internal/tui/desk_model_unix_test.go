@@ -1499,6 +1499,25 @@ func TestDesk_StartedLineBecomesLost(t *testing.T) {
 	}
 }
 
+// ? opens the key list and ? closes it (#1108).
+func TestDesk_QuestionMarkShowsTheKeys(t *testing.T) {
+	h := newDeskHarness(t)
+	h.press("?")
+	if h.m.pager == nil || h.m.pager.title != "keys" {
+		t.Fatalf("? did not open the key list: %+v", h.m.pager)
+	}
+	view := ansi.Strip(h.m.View().Content)
+	for _, want := range []string{"y    run the selected item", "q    quit", "? or q close"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("key list lacks %q:\n%s", want, view)
+		}
+	}
+	h.press("?")
+	if h.m.pager != nil {
+		t.Error("? did not close the key list")
+	}
+}
+
 // --no-icons reaches the window title too.
 func TestDesk_WindowTitleFollowsNoIcons(t *testing.T) {
 	h := newDeskHarness(t)

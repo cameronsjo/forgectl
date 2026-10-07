@@ -27,4 +27,4 @@ desk ○ idle · forgectl 0.0.0-test · host-a · ~/.local/state/forgectl/desk  
 
 
 
- u undo  l log  r runs  q quit
+ ? help · q quit

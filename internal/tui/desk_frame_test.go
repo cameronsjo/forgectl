@@ -845,6 +845,38 @@ func TestDeskFrame_HintsFollowTheSelection(t *testing.T) {
 	}
 }
 
+// The footer drops the least important hints first and always keeps q quit
+// and ? help (#1108: at 40 columns it used to cut "q quit" off first).
+func TestDeskFrame_FooterKeepsQuitAndHelp(t *testing.T) {
+	snap, opts := busySnapshot()
+	for w := 30; w <= 140; w += 5 {
+		out := ansi.Strip(RenderDeskFrame(snap, w, 40, deskNow, opts))
+		footer := out[strings.LastIndex(out, "\n")+1:]
+		if !strings.Contains(footer, "q quit") || !strings.Contains(footer, "? help") {
+			t.Errorf("width %d: footer %q lost q quit or ? help", w, footer)
+		}
+		if ansi.StringWidth(footer) > max(w, deskMinWidth) || strings.Contains(footer, "…") {
+			t.Errorf("width %d: footer %q is cut", w, footer)
+		}
+	}
+	// j/k goes first, then r: the move hint is the least needed.
+	out := ansi.Strip(RenderDeskFrame(snap, 75, 40, deskNow, opts))
+	footer := out[strings.LastIndex(out, "\n")+1:]
+	if strings.Contains(footer, "j/k") || !strings.Contains(footer, "r runs") {
+		t.Errorf("75 columns: %q", footer)
+	}
+}
+
+// The ? screen lists every key the footer can show, from the same table.
+func TestDeskKeyLinesListEveryBinding(t *testing.T) {
+	lines := strings.Join(deskKeyLines(), "\n")
+	for _, b := range deskBindings {
+		if !strings.Contains(lines, b.key) || !strings.Contains(lines, b.help) {
+			t.Errorf("? screen lacks %q", b.key)
+		}
+	}
+}
+
 // The header names what the desk is doing when nothing waits: running, or
 // idle (#1107 review: "nothing waiting" beside a running item misled).
 func TestDeskFrame_HeaderSaysRunningOrIdle(t *testing.T) {
@@ -859,5 +891,32 @@ func TestDeskFrame_HeaderSaysRunningOrIdle(t *testing.T) {
 	out = ansi.Strip(RenderDeskFrame(empty, 100, 30, deskNow, eopts))
 	if !strings.HasPrefix(out, "desk ○ idle") {
 		t.Errorf("empty header: %q", strings.SplitN(out, "\n", 2)[0])
+	}
+}
+
+// u, l and r show only when they can act (#1108 review): no skip to undo, no
+// log and no run on an empty desk; and l outranks v when the window is narrow.
+func TestDeskFrame_HintsHideKeysWithNothingToActOn(t *testing.T) {
+	empty, opts := emptySnapshot()
+	out := ansi.Strip(RenderDeskFrame(empty, 120, 30, deskNow, opts))
+	footer := out[strings.LastIndex(out, "\n")+1:]
+	for _, k := range []string{"u undo", "l log", "r runs"} {
+		if strings.Contains(footer, k) {
+			t.Errorf("empty desk offers %q: %q", k, footer)
+		}
+	}
+	f := deskFrame{snap: empty, width: 120, height: 30, now: deskNow, opts: opts, canUndo: true}
+	if out := ansi.Strip(f.render()); !strings.Contains(out[strings.LastIndex(out, "\n")+1:], "u undo") {
+		t.Error("u undo is not offered with a skip to undo")
+	}
+	snap, bopts := busySnapshot()
+	rows := deskRows(snap, deskNow)
+	done := slices.IndexFunc(rows, func(r queueRow) bool { return r.kind == rowDone || r.kind == rowFailed })
+	for w := 40; w <= 70; w += 5 {
+		out := ansi.Strip(deskFrame{snap: snap, width: w, height: 40, now: deskNow, opts: bopts, cursor: done}.render())
+		footer := out[strings.LastIndex(out, "\n")+1:]
+		if strings.Contains(footer, "v view") && !strings.Contains(footer, "l log") {
+			t.Errorf("width %d: v view kept over l log: %q", w, footer)
+		}
 	}
 }

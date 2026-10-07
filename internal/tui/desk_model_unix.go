@@ -614,6 +614,10 @@ func (m deskModel) updateKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.log()
 	case "r":
 		return m.openRunView()
+	case "?":
+		// The key list, from the table the footer is drawn from (#1108).
+		m.pager = &deskPager{title: "keys", lines: deskKeyLines()}
+		return m, nil
 	}
 	return m, nil
 }
@@ -1063,7 +1067,7 @@ func (m *deskModel) pagerKey(key string) {
 	page := max(m.height-2, 1)
 	last := max(len(pagerRows(p.lines, m.width))-page, 0)
 	switch key {
-	case "q", "esc", "v", "l":
+	case "q", "esc", "v", "l", "?":
 		m.pager = nil
 		return
 	case "j", "down":
@@ -1112,7 +1116,7 @@ func (m deskModel) dashboard() deskFrame {
 	opts.Theme = &th
 	return deskFrame{
 		snap: m.snap, width: m.screenWidth(), height: m.screenHeight(), now: m.now(), opts: opts,
-		cursor: m.cursor, footer: m.footer(), confirming: m.confirm != confirmNone,
+		cursor: m.cursor, footer: m.footer(), confirming: m.confirm != confirmNone, canUndo: m.lastSkip != "",
 	}
 }
 
@@ -1200,7 +1204,11 @@ func (m deskModel) pagerView(width, height int) string {
 	for len(lines) < height-1 {
 		lines = append(lines, "")
 	}
-	lines = append(lines, cut(st.Muted.Render(" j/k scroll · space/b page · g/G top/bottom · q close"), width))
+	closeHint := "q close"
+	if p.title == "keys" {
+		closeHint = "? or q close"
+	}
+	lines = append(lines, cut(st.Muted.Render(" j/k scroll · space/b page · g/G top/bottom · "+closeHint), width))
 	return strings.Join(lines, "\n")
 }
 
