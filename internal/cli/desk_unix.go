@@ -233,7 +233,9 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 		case len(signalFailures) == 0:
 			ew.printf("note: %s is already waiting with this sha256; nothing was queued, and the operator signal had not gone out, so it was sent now (--allow-duplicate queues another)\n", safeText(a.Name))
 		default:
-			ew.printf("note: %s already queued; signal not sent: %s (--allow-duplicate queues another)\n", safeText(a.Name), safeText(signalFailures[0]))
+			// The failure itself is the warning line above, once; the note
+			// only says what it means for this retry.
+			ew.printf("note: %s already queued; signal not sent (the warning above says why; --allow-duplicate queues another)\n", safeText(a.Name))
 		}
 	}
 	return errors.Join(w.err, ew.err)

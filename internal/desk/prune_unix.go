@@ -137,12 +137,21 @@ func Exists(dir string) bool {
 // without opening it: no MkdirAll, no chmod, no migration, nothing written.
 // (Open tightens modes and creates the protocol directories, so a preview
 // cannot go through it.) It selects with the same code as Prune. A protocol
-// subdirectory that is absent, or is a symlink, reads as empty.
+// subdirectory that is absent reads as empty; one that is a symlink or a file
+// is refused, as Open refuses it.
 func PrunePlanAt(dir string, days int) ([]PrunedItem, error) {
 	list := func(sub string) ([]fs.DirEntry, error) {
 		p := filepath.Join(dir, sub)
-		if fi, err := os.Lstat(p); err != nil || !fi.IsDir() {
+		fi, err := os.Lstat(p)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
 			return nil, nil
+		case err != nil:
+			return nil, fmt.Errorf("desk: stat %s/: %w", sub, err)
+		case !fi.IsDir():
+			// A real prune opens the desk, and Open refuses a protocol
+			// directory that is a symlink or a file; the preview refuses it too.
+			return nil, fmt.Errorf("desk: %s/ is not a directory; refusing", sub)
 		}
 		entries, err := os.ReadDir(p)
 		if err != nil {

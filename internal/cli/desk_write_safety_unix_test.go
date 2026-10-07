@@ -562,7 +562,54 @@ func TestDeskAdd_DuplicateWithAFailingSignalSaysSoPlainly(t *testing.T) {
 	}
 	_, errOut, err := deskRun(t, rig.deps, args...)
 	wantExit(t, err, 0)
-	if !strings.Contains(errOut, "already queued; signal not sent: ") || strings.Contains(errOut, "sent now") || strings.Contains(errOut, "nothing was queued, and") {
-		t.Errorf("stderr = %q, want 'already queued; signal not sent: <why>' and no 'sent now'", errOut)
+	if !strings.Contains(errOut, "already queued; signal not sent") || strings.Contains(errOut, "sent now") || strings.Contains(errOut, "nothing was queued, and") {
+		t.Errorf("stderr = %q, want 'already queued; signal not sent' and no 'sent now'", errOut)
+	}
+	// The failure is reported once, as the warning line, not again in the note.
+	if n := strings.Count(errOut, "macOS notification failed"); n != 1 {
+		t.Errorf("the signal failure is printed %d times in %q, want once", n, errOut)
+	}
+}
+
+// The help says what the code does: a duplicate re-sends the operator signal
+// when the first attempt never finished signalling, and otherwise signals
+// nothing.
+func TestDeskAddHelpDescribesTheRetrySignal(t *testing.T) {
+	newDeskDir(t)
+	out, _, err := deskRun(t, deskDeps(), "add", "--help")
+	wantExit(t, err, 0)
+	flat := strings.Join(strings.Fields(out), " ")
+	for _, want := range []string{"only if the first attempt never finished signalling", "signalled_at", "otherwise signals nothing"} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("desk add --help lacks %q", want)
+		}
+	}
+	if strings.Contains(flat, "add queues nothing, signals nothing") {
+		t.Error("desk add --help still says a duplicate signals nothing")
+	}
+}
+
+// A protocol directory that is a symlink is refused by a real prune (Open
+// refuses it), and the preview refuses it the same way instead of reading it
+// as empty.
+func TestDeskPrune_DryRunRefusesASymlinkedProtocolDirLikePrune(t *testing.T) {
+	desk := t.TempDir()
+	for _, sub := range []string{"pending", "running", "skipped"} {
+		if err := os.MkdirAll(filepath.Join(desk, sub), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	elsewhere := t.TempDir()
+	if err := os.Symlink(elsewhere, filepath.Join(desk, "done")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, planErr := deskRun(t, deskDeps(), "prune", "--dry-run", "--dir", desk)
+	_, _, realErr := deskRun(t, deskDeps(), "prune", "--dir", desk)
+	if planErr == nil || realErr == nil {
+		t.Fatalf("plan err = %v, real err = %v; both must refuse", planErr, realErr)
+	}
+	if !strings.Contains(planErr.Error(), "not a directory") || !strings.Contains(realErr.Error(), "not a directory") {
+		t.Errorf("plan err %q, real err %q, want both to say not a directory", planErr, realErr)
 	}
 }

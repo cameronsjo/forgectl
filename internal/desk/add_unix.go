@@ -66,11 +66,13 @@ func (d *Desk) AddUnique(src, what, why string, tty bool) (a Added, duplicate bo
 }
 
 // Signalled reports whether the operator signal for the pending item name is
-// recorded as sent (see [Meta.SignalledAt]). An item with no meta reads as
-// signalled. Add writes an item's meta before the item becomes visible in
-// pending/, so a pending item with no meta is a file a person dropped in by
-// hand: nothing here ever signalled it, and a retry must not start pinging
-// for it.
+// recorded as sent (see [Meta.SignalledAt]). Add writes an item's meta, with
+// no signalled_at, before the item is visible, and MarkSignalled stamps it
+// once every enabled signal went out; an item still unstamped was never fully
+// announced. A hand-dropped file is the other case: it has no meta until its
+// first sighting, which stamps signalled_at, and until then it has none at
+// all. Both read as signalled, so a retry never pings for a file a person put
+// there.
 func (d *Desk) Signalled(name string) bool {
 	meta, ok, err := d.readMeta(DirPending, name)
 	return err != nil || !ok || meta.SignalledAt != nil

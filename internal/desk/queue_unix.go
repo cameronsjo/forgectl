@@ -139,8 +139,11 @@ func (d *Desk) sight(name string, kind Kind, now time.Time) (it Item, gone bool,
 	}
 	if !ok || meta.SHA256 == "" {
 		// First sighting of a hand-dropped item: its hash is fixed now. The
-		// file's mtime stands in for its arrival.
-		meta = Meta{AddedAt: &mtime, SHA256: sum, Kind: kind}
+		// file's mtime stands in for its arrival. Nothing here ever signalled
+		// it, and nothing will: stamping signalled_at keeps `desk add`'s retry
+		// from pinging the operator for a file a person put there.
+		signalled := now
+		meta = Meta{AddedAt: &mtime, SHA256: sum, Kind: kind, SignalledAt: &signalled}
 		created, err := d.createMeta(DirPending, name, meta)
 		if err != nil {
 			return it, false, err
