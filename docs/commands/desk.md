@@ -71,7 +71,7 @@ The dashboard: three stat tiles (waiting, started today, outcomes), the queue wi
 | `r` | open the run view on the selected item's run (an item that has not run yet says so instead; with nothing selected, the newest run): its steps as a flow, the event timeline, and replay. `←`/`→` step through events, `[`/`]` move 10, `g`/`G` jump to the start or to the end (back to live for a running item); a finished run's replay keeps its outcome in the header, `space` plays, `n`/`p` switch runs, `q` closes |
 | `a` | run every waiting item on screen, except TTY and changed items; asks first, listing each item with its full sha256, and runs exactly those names and hashes. A list longer than half the window pages (`space` next, `b` back, `esc` cancels), and `y` runs it only once every page has been on screen; a window too small for one full hash refuses |
 | `j` / `k` | move |
-| `?` | show every key and what it does (the footer drops the least important hints first in a narrow window and always keeps `?` and `q`) |
+| `?` | show every key and what it does (a narrow footer drops the least important hints first; `q` always stays, and `?` until the window is very narrow) |
 | `q` | quit; detached runs keep running |
 
 The dashboard rings the terminal bell when an item arrives, and again every 5 minutes while anything waits; inside a herdr pane it also sends a herdr notification. The window title reads `desk ● N waiting`.

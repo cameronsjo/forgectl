@@ -1507,7 +1507,7 @@ func TestDesk_QuestionMarkShowsTheKeys(t *testing.T) {
 		t.Fatalf("? did not open the key list: %+v", h.m.pager)
 	}
 	view := ansi.Strip(h.m.View().Content)
-	for _, want := range []string{"y    run the selected item", "q    quit"} {
+	for _, want := range []string{"y    run the selected item", "q    quit", "? or q close"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("key list lacks %q:\n%s", want, view)
 		}

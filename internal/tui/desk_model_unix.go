@@ -1204,7 +1204,11 @@ func (m deskModel) pagerView(width, height int) string {
 	for len(lines) < height-1 {
 		lines = append(lines, "")
 	}
-	lines = append(lines, cut(st.Muted.Render(" j/k scroll · space/b page · g/G top/bottom · q close"), width))
+	close := "q close"
+	if p.title == "keys" {
+		close = "? or q close"
+	}
+	lines = append(lines, cut(st.Muted.Render(" j/k scroll · space/b page · g/G top/bottom · "+close), width))
 	return strings.Join(lines, "\n")
 }
 
