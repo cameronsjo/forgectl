@@ -108,8 +108,11 @@ Started in a subfolder of a git repository whose root has
 .claude/settings.json or .claude/settings.local.json, and with no settings of
 its own, a claude session runs at the repository root, because Claude Code
 reads those settings only from the directory it starts in. The profile is still
-the one for the directory you ran launch from. --here, as the first argument,
-keeps the session where it was started.
+the one for the directory you ran launch from. A launch that continues or
+resumes a session (-c, --continue, -r, --resume) never moves, since Claude
+Code keeps sessions per directory. After a move, relative paths in arguments
+and prompts resolve against the root; --here, as the first argument, keeps the
+session (and those paths) where it was started.
 
 To resume or fork an earlier session, use "forgectl resume" — it discovers
 sessions across repos, flags the live ones, and restores their tasks.
@@ -209,12 +212,11 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 
 	// The profile was resolved for cwd; a claude session may still run at the
 	// repository root, where its .claude settings live (cadence-ecosystem#608).
-	// syscall.Exec keeps the process's working directory, so this chdir is
-	// what moves the session.
+	// The exec seam does the chdir, as the last step before the exec; "" keeps
+	// the process where it is.
+	runIn := ""
 	if dir := built.Invocation.CWD; dir != cwd {
-		if err := launchChdir(dir); err != nil {
-			return fmt.Errorf("change to the repository root: %w", termsafe.Error(err))
-		}
+		runIn = dir
 		fmt.Fprintln(os.Stderr, settingsRootNotice(cwd, dir))
 	}
 
@@ -234,12 +236,8 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	// mean the harness started: nothing after syscall.Exec is observable.
 	sessionMode, posture := launchUsageClassification(args)
 	recordUsageSilently(usageEnabled, newLaunchUsageEvent(profile.Harness, profile.Model, sessionMode, posture))
-	return execHarness(built.Invocation.Binary.Path, built.Invocation.Args, built.Invocation.Env)
+	return execHarness(runIn, built.Invocation.Binary.Path, built.Invocation.Args, built.Invocation.Env)
 }
-
-// launchChdir is os.Chdir, a variable only so a test can watch the move
-// without changing the test process's directory.
-var launchChdir = os.Chdir
 
 // hereFlag keeps a claude launch in the directory it was started from. See
 // launch.SettingsRoot for where it would otherwise run.

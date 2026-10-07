@@ -44,16 +44,23 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 			if err != nil {
 				return WithExitCode(termsafe.Error(err), 2)
 			}
+			// Where a bare `forgectl launch` would start the session: only a
+			// claude session moves to the repository's settings root, so
+			// every other harness reports none.
+			runDir := ""
+			if profile.Harness == "claude" {
+				runDir = launch.SettingsRoot(cwd)
+			}
 			if asJSON {
-				return writeLaunchWhichJSON(cmd.OutOrStdout(), profile, cwd, src, injected)
+				return writeLaunchWhichJSON(cmd.OutOrStdout(), profile, cwd, runDir, src, injected)
 			}
 			out := th.Writer(cmd.OutOrStdout(), os.Environ())
-			printLaunchProfile(out, th, profile, cwd, src, injected)
+			printLaunchProfile(out, th, profile, cwd, runDir, src, injected)
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false,
-		`emit {"directory":...,"config":...,"matched":...,"harness":...,"model":...,"effort":...,"permission_mode":...,"allow_danger":...,"env_keys":[...],"injected_env_keys":[...],"add_dir":[...]} to stdout`)
+		`emit {"directory":...,"run_directory":...,"config":...,"matched":...,"harness":...,"model":...,"effort":...,"permission_mode":...,"allow_danger":...,"env_keys":[...],"injected_env_keys":[...],"add_dir":[...]} to stdout`)
 	return cmd
 }
 
@@ -63,7 +70,12 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 // machine) is the kind of thing pasted into an issue or an agent transcript,
 // and a configured env value is exactly where a secret lives.
 type launchWhichJSON struct {
-	Directory      string   `json:"directory"`
+	Directory string `json:"directory"`
+	// RunDirectory is where a bare `forgectl launch` starts the session: the
+	// repository's settings root for a claude launch from a subfolder,
+	// otherwise Directory. Present for the claude harness only, the one that
+	// can move (launch.SettingsRoot).
+	RunDirectory   string   `json:"run_directory,omitempty"`
 	Config         string   `json:"config"`
 	Matched        string   `json:"matched"`
 	Harness        string   `json:"harness"`
@@ -84,7 +96,7 @@ type launchWhichJSON struct {
 // buildLaunchWhichJSON converts a resolved profile into the --json wire
 // shape. Slice fields are never nil so the encoder emits [] rather than null
 // for a profile with no env or no add-dir entries.
-func buildLaunchWhichJSON(p launch.Profile, cwd, confPath string, injected []string) launchWhichJSON {
+func buildLaunchWhichJSON(p launch.Profile, cwd, runDir, confPath string, injected []string) launchWhichJSON {
 	envKeys := launch.SortedEnvKeys(p.Env)
 	if envKeys == nil {
 		envKeys = []string{}
@@ -98,6 +110,7 @@ func buildLaunchWhichJSON(p launch.Profile, cwd, confPath string, injected []str
 	}
 	return launchWhichJSON{
 		Directory:       cwd,
+		RunDirectory:    runDir,
 		Config:          confPath,
 		Matched:         p.Match,
 		Harness:         p.Harness,
@@ -114,13 +127,13 @@ func buildLaunchWhichJSON(p launch.Profile, cwd, confPath string, injected []str
 // writeLaunchWhichJSON encodes the profile through the sanctioned termsafe
 // seam. Nothing is written before a marshal error, so a failing writer or
 // encoder never leaves a partial document on stdout.
-func writeLaunchWhichJSON(w io.Writer, p launch.Profile, cwd, confPath string, injected []string) error {
+func writeLaunchWhichJSON(w io.Writer, p launch.Profile, cwd, runDir, confPath string, injected []string) error {
 	enc := termsafe.JSONEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(buildLaunchWhichJSON(p, cwd, confPath, injected))
+	return enc.Encode(buildLaunchWhichJSON(p, cwd, runDir, confPath, injected))
 }
 
-func printLaunchProfile(w io.Writer, th theme.Theme, p launch.Profile, cwd, confPath string, injected []string) {
+func printLaunchProfile(w io.Writer, th theme.Theme, p launch.Profile, cwd, runDir, confPath string, injected []string) {
 	styles := th.Styles()
 	labelStyle := styles.Muted.Width(14)
 	valueStyle := styles.Fg
@@ -136,6 +149,9 @@ func printLaunchProfile(w io.Writer, th theme.Theme, p launch.Profile, cwd, conf
 
 	_, _ = fmt.Fprintln(w, titleStyle.Render("launch profile")+renderSafe(dimStyle.Render, "  "+cwd))
 	row("config", confPath)
+	if runDir != "" && runDir != cwd {
+		row("runs in", runDir+"  (settings root; --here to stay)")
+	}
 
 	matched := p.Match
 	if matched == "" {

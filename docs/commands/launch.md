@@ -152,6 +152,30 @@ passthroughs (`mcp …`, `--help`, `agents --json`) never move, so `mcp add
 neither reads `.claude`, and neither does a coordinator worker, which already
 starts at its worktree's root.
 
+Some other cases never move:
+
+- **Continuing or resuming a session.** A launch whose arguments carry `-c`,
+  `--continue`, `-r`, or `--resume` (before claude's own `--`) stays put.
+  Claude Code keeps sessions per project directory, so a move would silently
+  resume the root's history, not the subfolder's.
+- **Symlinked directories.** The walk follows the physical path, the same one
+  profile matching uses. A `~/link` to `/real/pkg` looks for the repository
+  above `/real/pkg`, never above `~`. A move starts claude at the physical root.
+- **Your user configuration directory.** A root whose `.claude` is Claude
+  Code's user configuration (`~/.claude`, or `$CLAUDE_CONFIG_DIR`) is never a
+  settings root. Its `settings.json` is your user settings file, which applies
+  everywhere already. Without this rule, a git-tracked home directory would pull
+  every launch outside a repository up to `$HOME`.
+
+**Relative paths resolve against the root after a move.** forgectl does not
+rewrite path arguments, so a relative path in a flag or a prompt
+(`forgectl launch -- "fix ./main.go"`) means the root's `./main.go`. Use an
+absolute path, or `--here` to keep the session and its paths local.
+
+`launch which` reports the move. A `runs in` row names the root when a bare
+launch would start there. `run_directory` under `--json` names where the
+session starts, and is present for the claude harness only.
+
 To stay put, pass `--here` as the **first** argument: `forgectl launch --here`,
 `forgectl launch --here -- "<task>"`. Like the leading `--`, it is forgectl's
 and never reaches the harness, and only the first position counts: `forgectl

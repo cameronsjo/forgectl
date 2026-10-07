@@ -508,8 +508,12 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 // stay, because forgectl promises them byte-clean with nothing added, and a
 // subcommand such as `mcp add --scope project` writes into its cwd. A worker
 // stays too: it already starts at its worktree's root.
+//
+// A launch that continues or resumes a session never moves. Claude Code keeps
+// sessions per project directory, so `-c` from a subfolder run at the root
+// would silently pick up the root's latest session instead of the subfolder's.
 func runDirectory(req InvocationRequest, posture Posture) string {
-	if req.Worker || req.StayInCWD {
+	if req.Worker || req.StayInCWD || resumesSession(req.Args) {
 		return req.CWD
 	}
 	switch posture {
@@ -518,6 +522,21 @@ func runDirectory(req InvocationRequest, posture Posture) string {
 	default:
 		return req.CWD
 	}
+}
+
+// resumesSession reports whether args continue or resume a claude session,
+// in any position before claude's own `--`. A token after `--` is a prompt.
+func resumesSession(args []string) bool {
+	for _, a := range args {
+		switch {
+		case a == "--":
+			return false
+		case a == "-c", a == "--continue", a == "-r", a == "--resume",
+			strings.HasPrefix(a, "--resume="), strings.HasPrefix(a, "--continue="):
+			return true
+		}
+	}
+	return false
 }
 
 // selectPosture routes args to the builder that owns them and reports which one

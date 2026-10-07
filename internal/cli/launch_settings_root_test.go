@@ -8,15 +8,6 @@ import (
 	"testing"
 )
 
-// The package's tests run inside this repository, whose root carries
-// .claude/settings.json, so every test that drives launchExec from the package
-// directory would really chdir the test process to the root and break each
-// later test that reads a file by a relative path. No test here wants the real
-// move; launchExecProbe installs its own recorder over this one.
-func init() {
-	launchChdir = func(string) error { return nil }
-}
-
 // settingsRootRepo builds a repository whose root carries .claude settings and
 // returns the root and a subfolder of it, both with symlinks resolved so they
 // compare equal to what os.Getwd reports after a chdir.
@@ -38,9 +29,9 @@ func settingsRootRepo(t *testing.T) (root, sub string) {
 	return root, sub
 }
 
-// launchRun is what launchExecProbe saw: where launchExec chdir'd ("" for
-// nowhere), the argv and env it would exec with, and everything it wrote to
-// stdout and stderr.
+// launchRun is what launchExecProbe saw: the directory launchExec asked the
+// exec seam to start in ("" for where it is), the argv and env it would exec
+// with, and everything it wrote to stdout and stderr.
 type launchRun struct {
 	moved string
 	argv  []string
@@ -48,22 +39,17 @@ type launchRun struct {
 	out   string
 }
 
-// launchExecProbe runs launchExec from dir with the exec and chdir seams
-// stubbed.
+// launchExecProbe runs launchExec from dir with the exec seam stubbed.
 func launchExecProbe(t *testing.T, dir, harness string, args []string) launchRun {
 	t.Helper()
 	t.Chdir(dir)
 	var run launchRun
-	prevExec, prevChdir := execHarness, launchChdir
-	execHarness = func(_ string, a, e []string) error {
-		run.argv, run.env = a, e
+	prevExec := execHarness
+	execHarness = func(d, _ string, a, e []string) error {
+		run.moved, run.argv, run.env = d, a, e
 		return nil
 	}
-	launchChdir = func(d string) error {
-		run.moved = d
-		return nil
-	}
-	t.Cleanup(func() { execHarness, launchChdir = prevExec, prevChdir })
+	t.Cleanup(func() { execHarness = prevExec })
 
 	run.out = captureStdio(t, func() {
 		if err := launchExec(nil, usageConfig(t, harness, false), args); err != nil {
@@ -120,6 +106,13 @@ func TestLaunchExec_SettingsRoot(t *testing.T) {
 		}
 	})
 
+	t.Run("--continue stays", func(t *testing.T) {
+		run := launchExecProbe(t, sub, "claude", []string{"--continue"})
+		if run.moved != "" || strings.Contains(run.out, "starting claude in") {
+			t.Errorf("--continue moved to %q (stderr %q); it would resume the root's session", run.moved, run.out)
+		}
+	})
+
 	t.Run("codex stays", func(t *testing.T) {
 		run := launchExecProbe(t, sub, "codex", nil)
 		if run.moved != "" || strings.Contains(run.out, "starting claude in") {
@@ -152,5 +145,38 @@ func TestConsumeHereFlag(t *testing.T) {
 		if here != tc.wantHere || !slices.Equal(rest, tc.wantRest) {
 			t.Errorf("consumeHereFlag(%q) = %q, %t; want %q, %t", tc.in, rest, here, tc.wantRest, tc.wantHere)
 		}
+	}
+}
+
+// TestBuildSurfaceLaunchInvocation_SettingsRoot is the surface half of
+// cadence-ecosystem#608: a claude surface aimed at a repository subfolder is
+// created at the root with one stderr notice, and --here keeps it in the
+// target with none.
+func TestBuildSurfaceLaunchInvocation_SettingsRoot(t *testing.T) {
+	root, sub := settingsRootRepo(t)
+	cfg := usageConfig(t, "claude", false).Launch
+
+	var moved strings.Builder
+	built, err := buildSurfaceLaunchInvocation(cfg, sub, nil, nil, "", false, &moved)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if built.Invocation.CWD != root {
+		t.Errorf("Invocation.CWD = %q, want the repository root %q", built.Invocation.CWD, root)
+	}
+	if !strings.Contains(moved.String(), "forgectl: starting claude in") {
+		t.Errorf("stderr = %q, want the move notice", moved.String())
+	}
+
+	var stayed strings.Builder
+	built, err = buildSurfaceLaunchInvocation(cfg, sub, nil, nil, "", true, &stayed)
+	if err != nil {
+		t.Fatalf("build --here: %v", err)
+	}
+	if built.Invocation.CWD != sub {
+		t.Errorf("--here: Invocation.CWD = %q, want the target %q", built.Invocation.CWD, sub)
+	}
+	if stayed.Len() != 0 {
+		t.Errorf("--here: stderr = %q, want nothing", stayed.String())
 	}
 }

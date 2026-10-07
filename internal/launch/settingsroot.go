@@ -1,8 +1,11 @@
 package launch
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // claudeSettingsFiles are the project settings files Claude Code reads from
@@ -26,18 +29,43 @@ var claudeSettingsFiles = []string{
 // cwd or a repository root with no settings, cwd comes back unchanged, so a
 // launch outside a configured repository runs exactly where it was started.
 //
+// The walk runs on cwd's physical path. os.Getwd reports the logical $PWD, so
+// a ~/link to /real/pkg would otherwise climb ~ instead of /real, while the
+// launch profile, which follows symlinks, is resolved for /real/pkg. A moved
+// launch gets the physical root; an unmoved one gets cwd back verbatim, so a
+// caller detects a move by comparing the two strings.
+//
+// A root whose .claude is Claude Code's USER configuration directory (~/.claude,
+// or $CLAUDE_CONFIG_DIR) is never a settings root: its settings.json is the
+// user settings file, which applies everywhere already, and a git-tracked home
+// directory would otherwise pull every launch outside a repository up to $HOME.
+//
 // Only the walk stops at .git. A settings directory between cwd and the
 // repository root is not looked for, because Claude Code would not read it
-// from cwd either; the repository root is the one place a project's settings
-// are expected to live.
+// from cwd either. Any filesystem error other than "does not exist" stops the
+// walk and keeps cwd: an unreadable directory is no evidence of a root.
 func SettingsRoot(cwd string) string {
-	start := filepath.Clean(cwd)
-	if hasClaudeSettings(start) {
+	return settingsRoot(cwd, userClaudeConfigDir())
+}
+
+func settingsRoot(cwd, userConfigDir string) string {
+	start, err := filepath.EvalSymlinks(filepath.Clean(cwd))
+	if err != nil {
+		return cwd
+	}
+	if own, err := hasClaudeSettings(start); err != nil || own {
 		return cwd
 	}
 	for dir := start; ; {
-		if pathExists(filepath.Join(dir, ".git")) {
-			if dir != start && hasClaudeSettings(dir) {
+		isRoot, err := present(os.Lstat, filepath.Join(dir, ".git"))
+		if err != nil {
+			return cwd
+		}
+		if isRoot {
+			if dir == start || isUserConfigDir(filepath.Join(dir, ".claude"), userConfigDir) {
+				return cwd
+			}
+			if has, err := hasClaudeSettings(dir); err == nil && has {
 				return dir
 			}
 			return cwd
@@ -50,19 +78,64 @@ func SettingsRoot(cwd string) string {
 	}
 }
 
-func hasClaudeSettings(dir string) bool {
-	for _, name := range claudeSettingsFiles {
-		if pathExists(filepath.Join(dir, name)) {
-			return true
-		}
+// userClaudeConfigDir is Claude Code's user configuration directory:
+// $CLAUDE_CONFIG_DIR when set, otherwise ~/.claude. "" when neither resolves,
+// which disables the check rather than guessing at a home.
+func userClaudeConfigDir() string {
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		return dir
 	}
-	return false
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".claude")
 }
 
-// pathExists reports whether path names anything at all. Lstat, because a .git
-// that is a dangling symlink still marks where the repository's root was meant
-// to be, and a settings file is followed by Claude Code itself.
-func pathExists(path string) bool {
-	_, err := os.Lstat(path)
-	return err == nil
+// isUserConfigDir reports whether candidate names the user configuration
+// directory, comparing physical paths so a symlinked home still matches.
+func isUserConfigDir(candidate, userConfigDir string) bool {
+	if userConfigDir == "" {
+		return false
+	}
+	return physical(candidate) == physical(userConfigDir)
+}
+
+func physical(path string) string {
+	if p, err := filepath.EvalSymlinks(path); err == nil {
+		return p
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(path)
+}
+
+// hasClaudeSettings reports whether dir holds either settings file. os.Stat,
+// because Claude Code follows a settings symlink: a dangling one is no file.
+func hasClaudeSettings(dir string) (bool, error) {
+	for _, name := range claudeSettingsFiles {
+		ok, err := present(os.Stat, filepath.Join(dir, name))
+		if err != nil || ok {
+			return ok, err
+		}
+	}
+	return false, nil
+}
+
+// present reports whether stat finds path. Only "does not exist" means absent
+// (ENOTDIR included: a .claude that is a file holds no settings);
+// any other error is returned so the caller stops rather than guesses. .git is
+// probed with os.Lstat, because a .git that is a dangling symlink still marks
+// where the repository's root was meant to be.
+func present(stat func(string) (fs.FileInfo, error), path string) (bool, error) {
+	_, err := stat(path)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ENOTDIR):
+		return false, nil
+	default:
+		return false, err
+	}
 }

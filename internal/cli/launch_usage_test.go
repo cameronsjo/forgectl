@@ -38,7 +38,7 @@ func installUsageProbe(t *testing.T) *usageProbe {
 		}
 		return probe.failWith
 	}
-	execHarness = func(string, []string, []string) error {
+	execHarness = func(string, string, []string, []string) error {
 		probe.execs++
 		return nil
 	}
@@ -320,7 +320,7 @@ func pinLaunchStdoutTerminal(t *testing.T, terminal bool) *[]string {
 	var got []string
 	prevTTY, prevExec := launchStdoutIsTerminal, execHarness
 	launchStdoutIsTerminal = func() bool { return terminal }
-	execHarness = func(_ string, args []string, _ []string) error {
+	execHarness = func(_, _ string, args []string, _ []string) error {
 		got = append([]string(nil), args...)
 		return nil
 	}

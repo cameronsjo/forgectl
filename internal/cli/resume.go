@@ -594,7 +594,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	}
 	recordUsageSilently(cfg.Launch.UsageStats,
 		newLaunchUsageEvent(profile.Harness, profile.Model, sessionMode, launch.UsagePostureDefault))
-	return execHarness(claudePath, args, env)
+	return execHarness("", claudePath, args, env)
 }
 
 // forkTaskNote annotates the dry-run task line so a fork's task behavior is

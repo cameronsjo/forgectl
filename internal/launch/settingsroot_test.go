@@ -1,9 +1,12 @@
 package launch
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -90,6 +93,18 @@ func TestSettingsRoot(t *testing.T) {
 			want: "vendor/inner/lib",
 		},
 		{
+			name: "a dangling settings symlink is no settings file",
+			tree: []string{".git/", ".claude/", "pkg/"},
+			cwd:  "pkg",
+			want: "pkg",
+		},
+		{
+			name: "a .claude that is a file holds no settings",
+			tree: []string{".git/", ".claude/settings.json", "pkg/.claude"},
+			cwd:  "pkg",
+			want: ".",
+		},
+		{
 			name: "the root itself stays",
 			tree: []string{".git/", ".claude/settings.json"},
 			cwd:  ".",
@@ -100,9 +115,14 @@ func TestSettingsRoot(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := projectDir(t)
 			writeTree(t, root, tc.tree...)
+			if tc.name == "a dangling settings symlink is no settings file" {
+				if err := os.Symlink(filepath.Join(root, "gone.json"), filepath.Join(root, ".claude", "settings.json")); err != nil {
+					t.Skipf("symlink: %v", err)
+				}
+			}
 			cwd := filepath.Join(root, tc.cwd)
 			want := filepath.Join(root, tc.want)
-			if got := SettingsRoot(cwd); got != want {
+			if got := settingsRoot(cwd, ""); got != want {
 				t.Errorf("SettingsRoot(%q) = %q, want %q", cwd, got, want)
 			}
 		})
@@ -117,8 +137,102 @@ func TestSettingsRoot_UnmovedReturnsInputVerbatim(t *testing.T) {
 	root := projectDir(t)
 	writeTree(t, root, "pkg/")
 	cwd := root + string(filepath.Separator) + "pkg" + string(filepath.Separator)
-	if got := SettingsRoot(cwd); got != cwd {
+	if got := settingsRoot(cwd, ""); got != cwd {
 		t.Errorf("SettingsRoot(%q) = %q, want it unchanged", cwd, got)
+	}
+}
+
+// TestSettingsRoot_SymlinkedCWDWalksThePhysicalPath is review finding 1:
+// os.Getwd reports the logical $PWD, so a symlink from outside a repository
+// into its subfolder must still find that repository's root, and must not
+// climb the directories above the link, where a different repository with
+// settings sits here.
+func TestSettingsRoot_SymlinkedCWDWalksThePhysicalPath(t *testing.T) {
+	outer := projectDir(t)
+	writeTree(t, outer, ".git/", ".claude/settings.json", "home/")
+	physicalRepo := projectDir(t)
+	writeTree(t, physicalRepo, ".git/", ".claude/settings.json", "pkg/")
+	link := filepath.Join(outer, "home", "link")
+	if err := os.Symlink(filepath.Join(physicalRepo, "pkg"), link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	if got := settingsRoot(link, ""); got != physicalRepo {
+		t.Errorf("settingsRoot(%q) = %q, want the physical root %q", link, got, physicalRepo)
+	}
+
+	// A link into a directory that does not move comes back verbatim.
+	writeTree(t, physicalRepo, "pkg/.claude/settings.json")
+	if got := settingsRoot(link, ""); got != link {
+		t.Errorf("settingsRoot(%q) = %q, want it unchanged", link, got)
+	}
+}
+
+// TestSettingsRoot_NeverTheUserConfigDir is review finding 2: a git-tracked
+// home directory holds ~/.claude/settings.json, the USER settings file, so a
+// launch from a non-repository folder under it must stay put.
+func TestSettingsRoot_NeverTheUserConfigDir(t *testing.T) {
+	home := projectDir(t)
+	writeTree(t, home, ".git/", ".claude/settings.json", "notes/")
+	cwd := filepath.Join(home, "notes")
+
+	t.Run("home .claude", func(t *testing.T) {
+		t.Setenv("HOME", home)
+		t.Setenv("CLAUDE_CONFIG_DIR", "")
+		if got := SettingsRoot(cwd); got != cwd {
+			t.Errorf("SettingsRoot(%q) = %q, want it unchanged under a git-tracked home", cwd, got)
+		}
+	})
+	t.Run("CLAUDE_CONFIG_DIR", func(t *testing.T) {
+		t.Setenv("HOME", projectDir(t))
+		t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+		if got := SettingsRoot(cwd); got != cwd {
+			t.Errorf("SettingsRoot(%q) = %q, want it unchanged when .claude is $CLAUDE_CONFIG_DIR", cwd, got)
+		}
+	})
+	t.Run("an unrelated home still moves", func(t *testing.T) {
+		t.Setenv("HOME", projectDir(t))
+		t.Setenv("CLAUDE_CONFIG_DIR", "")
+		if got := SettingsRoot(cwd); got != home {
+			t.Errorf("SettingsRoot(%q) = %q, want the repository root %q", cwd, got, home)
+		}
+	})
+}
+
+func TestResumesSession(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{
+		{nil, false},
+		{[]string{"-c"}, true},
+		{[]string{"--continue"}, true},
+		{[]string{"-r", "abc"}, true},
+		{[]string{"--resume"}, true},
+		{[]string{"--resume=abc"}, true},
+		{[]string{"--model", "opus", "-c"}, true},
+		{[]string{"-p", "hi"}, false},
+		{[]string{"--", "-c"}, false},
+	} {
+		if got := resumesSession(tc.args); got != tc.want {
+			t.Errorf("resumesSession(%q) = %t, want %t", tc.args, got, tc.want)
+		}
+	}
+}
+
+// TestExecIn_WrapsAChdirFailure covers the real exec seam's one step before
+// syscall.Exec: a directory it cannot enter is an error naming that
+// directory, and the harness is never exec'd (the test process survives).
+func TestExecIn_WrapsAChdirFailure(t *testing.T) {
+	missing := filepath.Join(projectDir(t), "gone")
+	err := ExecIn(missing, "/nonexistent/harness", nil, nil)
+	if err == nil {
+		t.Fatal("ExecIn into a missing directory returned nil")
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("err = %v, want it to wrap fs.ErrNotExist", err)
+	}
+	if !strings.Contains(err.Error(), "start the harness in") || !strings.Contains(err.Error(), "gone") {
+		t.Errorf("err = %q, want it to name the directory", err)
 	}
 }
 
@@ -145,6 +259,8 @@ func TestBuildInvocation_RunDirectory(t *testing.T) {
 		{name: "claude builder", harness: "claude", args: []string{"do the thing"}, wantRoot: true},
 		{name: "claude print", harness: "claude", args: []string{"-p", "hi"}, wantRoot: true},
 		{name: "claude --here", harness: "claude", stay: true},
+		{name: "claude --continue", harness: "claude", args: []string{"--continue"}},
+		{name: "claude -r in print mode", harness: "claude", args: []string{"-p", "-r", "abc", "hi"}},
 		{name: "claude subcommand passthrough", harness: "claude", args: []string{"mcp", "list"}},
 		{name: "codex", harness: "codex"},
 		{name: "pi", harness: "pi"},

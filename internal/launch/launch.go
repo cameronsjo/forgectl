@@ -13,6 +13,7 @@ package launch
 import (
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"syscall"
@@ -359,6 +360,19 @@ func HarnessBanner(w io.Writer, harness string, args []string) {
 		line += " " + strings.Join(args, " ")
 	}
 	_, _ = fmt.Fprintln(w, termsafe.SafeLineMax(line, bannerMaxRunes))
+}
+
+// ExecIn is Exec started from dir: it changes the process's working directory
+// to dir first, since syscall.Exec keeps it, and the harness starts there. An
+// empty dir changes nothing. The chdir is the last thing before the exec, so
+// everything forgectl does before handing off still runs where it was started.
+func ExecIn(dir, harnessPath string, args, env []string) error {
+	if dir != "" {
+		if err := os.Chdir(dir); err != nil {
+			return fmt.Errorf("start the harness in %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
+		}
+	}
+	return Exec(harnessPath, args, env)
 }
 
 // Exec replaces the current process with the selected harness. On success it never returns, so
