@@ -18,3 +18,4 @@ Records of significant design decisions made in forgectl development.
 | 0012 | [Desk threat model: defend against accidents, not against a same-uid process](0012-desk-threat-model.md) | Accepted | 2026-10-05 |
 | 0013 | [Desk run sources and the run visualizer](0013-desk-run-sources-and-visualizer.md) | Proposed | 2026-10-06 |
 | 0014 | [Log lenses: teaching the run view to read an app's log](0014-log-lenses.md) | Proposed | 2026-10-07 |
+| 0015 | [One exit-code table for every verb](0015-exit-code-table.md) | Accepted | 2026-10-06 |

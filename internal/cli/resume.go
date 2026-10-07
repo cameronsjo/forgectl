@@ -160,9 +160,9 @@ func runResume(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMig
 	}
 	if len(sessions) == 0 {
 		if filter != "" {
-			return WithExitCode(fmt.Errorf("no session matched %q — try `forgectl resume ls` to see what's there", safeTitle(filter)), 1)
+			return WithExitCode(fmt.Errorf("no session matched %q — try `forgectl resume ls` to see what's there", safeTitle(filter)), exitFailed)
 		}
-		return WithExitCode(fmt.Errorf("no recent sessions found"), 1)
+		return WithExitCode(fmt.Errorf("no recent sessions found"), exitFailed)
 	}
 
 	picked := sessions[0]
@@ -187,7 +187,7 @@ func runResume(cmd *cobra.Command, cfg config.Config, boundary *config.LegacyMig
 		return ambiguousMatch(cmd, sessions, filter, dryRun)
 	default:
 		if picked, err = pickSessionFn(sessions, th, sessionPickerNote(len(sessions), limit)); err != nil {
-			return WithExitCode(err, 1)
+			return WithExitCode(err, exitFailed)
 		}
 	}
 	return resumeSession(cmd, cfg, boundary, picked, fork, dryRun)
@@ -462,7 +462,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 		return blocked
 	}
 	if s.Cwd == "" {
-		return WithExitCode(fmt.Errorf("session %s has no recorded working directory to resume into", safeLabel(s.ID)), 1)
+		return WithExitCode(fmt.Errorf("session %s has no recorded working directory to resume into", safeLabel(s.ID)), exitFailed)
 	}
 
 	// Confirm the target is a real directory BEFORE anything writes. Task
@@ -515,7 +515,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	// code `launch` and `surface launch` give for this same config.
 	injected, unset, err := injectedLaunchEnv(cfg)
 	if err != nil {
-		return WithExitCode(termsafe.Error(err), 2)
+		return WithExitCode(termsafe.Error(err), exitUsage)
 	}
 
 	// --dry-run is the headless escape. Resuming exec-replaces this process
@@ -571,7 +571,7 @@ func resumeSession(cmd *cobra.Command, cfg config.Config, boundary *config.Legac
 	}
 
 	if err := os.Chdir(s.Cwd); err != nil {
-		return WithExitCode(fmt.Errorf("enter %s: %w", termsafe.QuotePath(s.Cwd), termsafe.Error(err)), 1)
+		return WithExitCode(fmt.Errorf("enter %s: %w", termsafe.QuotePath(s.Cwd), termsafe.Error(err)), exitFailed)
 	}
 
 	// Same layering BuildInvocation does: removals hit the inherited snapshot

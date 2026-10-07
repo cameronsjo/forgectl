@@ -120,7 +120,7 @@ type workerLedgerContext struct {
 func openWorkerLedger(ctx context.Context, warn io.Writer, deps module.Deps, repo string) (*workerLedgerContext, error) {
 	adapter, err := newHerdrAdapter(warn)
 	if err != nil {
-		return nil, WithExitCode(err, 2)
+		return nil, WithExitCode(err, exitUsage)
 	}
 	herdr, ok := adapter.(*herdradapter.Adapter)
 	if !ok {
@@ -128,15 +128,15 @@ func openWorkerLedger(ctx context.Context, warn io.Writer, deps module.Deps, rep
 	}
 	target, err := projects.New(deps.Runner).ResolveTarget(repo)
 	if err != nil {
-		return nil, WithExitCode(err, 2)
+		return nil, WithExitCode(err, exitUsage)
 	}
 	top, err := worker.RepoTop(ctx, deps.Runner, target)
 	if err != nil {
-		return nil, WithExitCode(err, 2)
+		return nil, WithExitCode(err, exitUsage)
 	}
 	led, err := worker.Open(top, herdr.Session())
 	if err != nil {
-		return nil, WithExitCode(err, 2)
+		return nil, WithExitCode(err, exitUsage)
 	}
 	return &workerLedgerContext{herdr: herdr, led: led, top: top}, nil
 }
@@ -148,13 +148,13 @@ func runSurfaceList(cmd *cobra.Command, deps module.Deps, opts listOptions) erro
 	}
 	rows, err := w.led.Rows()
 	if err != nil {
-		return WithExitCode(err, 2)
+		return WithExitCode(err, exitUsage)
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), listTimeout)
 	defer cancel()
 	listed, err := worker.ListedWorktrees(ctx, deps.Runner, w.top)
 	if err != nil {
-		return WithExitCode(err, 2)
+		return WithExitCode(err, exitUsage)
 	}
 	now := time.Now()
 	res := listResult{Repo: w.top, Session: w.herdr.Session(), Workers: []listRow{}}

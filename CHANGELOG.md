@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.31.0](https://github.com/cameronsjo/forgectl/compare/v0.30.0...v0.31.0) (2026-10-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* one exit-code table for every verb (ADR-0014 Phase 1). Cobra usage errors (a bad flag, a wrong argument count, an unknown verb or subverb), `config zzbogus`, `completion nonesuch`, an unresolvable `$HOME` or relative `$XDG_CONFIG_HOME`, and `resume` flag and argument errors now exit 2, not 1 or 0. `tasks`, `env check`, `resume snapshot` and `k8s` keep usage errors at 1; `resume snapshot` never exits 2. `desk show` and `tasks show` report `usage_error` for a malformed name or id. Scripts that test `$? -eq 1` for a bad call must test non-zero or 2.
+
+### Features
+
+* **cli:** forgectl --skill prints forgectl's agent skill and --skill --install &lt;dir&gt; writes it, so agents read instructions that match the binary ([30ffbec](https://github.com/cameronsjo/forgectl/commit/30ffbec47d09c3166ba49e4f076bebb8b4cfe513))
+* **launch:** pre-approve a fixed command list for acceptEdits workers ([#1161](https://github.com/cameronsjo/forgectl/issues/1161)) ([b3aa581](https://github.com/cameronsjo/forgectl/commit/b3aa5817873f227cfbd7643461c1f630af514d6c))
+* one exit-code table for every verb (ADR-0014 Phase 1). Cobra usage errors (a bad flag, a wrong argument count, an unknown verb or subverb), `config zzbogus`, `completion nonesuch`, an unresolvable `$HOME` or relative `$XDG_CONFIG_HOME`, and `resume` flag and argument errors now exit 2, not 1 or 0. `tasks`, `env check`, `resume snapshot` and `k8s` keep usage errors at 1; `resume snapshot` never exits 2. `desk show` and `tasks show` report `usage_error` for a malformed name or id. Scripts that test `$? -eq 1` for a bad call must test non-zero or 2. ([011a78c](https://github.com/cameronsjo/forgectl/commit/011a78c999473f9b0b2d8177f51c29e8b4edd585))
+
+
+### Bug Fixes
+
+* **launch:** allow auto permission mode for workers ([#1163](https://github.com/cameronsjo/forgectl/issues/1163)) ([d23aa61](https://github.com/cameronsjo/forgectl/commit/d23aa61b76b9abaadf07063050696284a7cba239))
+
 ## [0.30.0](https://github.com/cameronsjo/forgectl/compare/v0.29.0...v0.30.0) (2026-10-07)
 
 

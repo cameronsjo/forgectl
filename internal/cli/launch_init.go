@@ -84,9 +84,9 @@ allow_danger    = true       # adds --allow-dangerously-skip-permissions (reacha
 
 # Coordinator workers (surface launch --worktree) do not read [launch.defaults].
 # They take [launch.worker], each field made stricter by the matched project
-# block, and capped at acceptEdits / workspace-write / on-request.
+# block, and capped at auto / workspace-write / on-request.
 # [launch.worker]
-# permission_mode = "acceptEdits"   # set "plan" to keep workers read-only
+# permission_mode = "acceptEdits"   # "plan" keeps workers read-only; "auto" runs them unattended
 # sandbox         = "workspace-write"
 # approval_policy = "on-request"
 `

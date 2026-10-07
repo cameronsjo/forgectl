@@ -32,7 +32,7 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 			lc, src := resolveLaunchConfig(boundary, cfg, effFrom)
 			profile, err := launch.Resolve(lc, cwd)
 			if err != nil {
-				return WithExitCode(termsafe.Error(err), 2)
+				return WithExitCode(termsafe.Error(err), exitUsage)
 			}
 			// The injected block is not part of the profile, so without this
 			// `which` reports a posture that omits variables the launch will
@@ -42,7 +42,7 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 			// whether this config can launch.
 			injected, err := injectedLaunchKeys(cfg)
 			if err != nil {
-				return WithExitCode(termsafe.Error(err), 2)
+				return WithExitCode(termsafe.Error(err), exitUsage)
 			}
 			// Where a bare `forgectl launch` would start the session: only a
 			// claude session moves to the repository's settings root, so

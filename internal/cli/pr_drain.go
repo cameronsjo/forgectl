@@ -224,10 +224,10 @@ func writeDrainRefusedItems(out io.Writer, report pr.DrainReport) {
 // this" contract `pr repair`'s inspect exit code follows.
 func drainExitCode(report pr.DrainReport) error {
 	if report.Refusal != "" {
-		return WithExitCode(fmt.Errorf("drain pass refused: %s", safeText(report.Refusal)), 1)
+		return WithExitCode(fmt.Errorf("drain pass refused: %s", safeText(report.Refusal)), exitFailed)
 	}
 	if report.Failed > 0 {
-		return WithExitCode(fmt.Errorf("%d review(s) failed to launch this pass", report.Failed), 1)
+		return WithExitCode(fmt.Errorf("%d review(s) failed to launch this pass", report.Failed), exitFailed)
 	}
 	return nil
 }

@@ -115,14 +115,14 @@ Exit 2: a usage or setup error.
 
 func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) error {
 	if opts.Readback <= 0 || opts.Start <= 0 {
-		return WithExitCode(errors.New("--readback-timeout and --start-timeout must be positive"), 2)
+		return WithExitCode(errors.New("--readback-timeout and --start-timeout must be positive"), exitUsage)
 	}
 	text, err := readBriefArg(opts.Text)
 	if err != nil {
-		return WithExitCode(err, 2)
+		return WithExitCode(err, exitUsage)
 	}
 	if err := worker.CheckBrief(text, worker.ViaTyped); err != nil {
-		return WithExitCode(err, 2)
+		return WithExitCode(err, exitUsage)
 	}
 	w, err := openWorker(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo, opts.Name)
 	if err != nil {
@@ -294,7 +294,7 @@ func reportBrief(cmd *cobra.Command, r briefResult, asJSON bool) error {
 		_, err := fmt.Fprintf(out, "%s: brief %d sent, marker %s\n", r.Name, r.Count, r.Marker)
 		return err
 	}
-	return WithExitCode(fmt.Errorf("brief to %s %s at %s: %s", r.Name, r.Outcome, r.Step, termsafe.SafeLineMax(r.Reason, 300)), 1)
+	return WithExitCode(fmt.Errorf("brief to %s %s at %s: %s", r.Name, r.Outcome, r.Step, termsafe.SafeLineMax(r.Reason, 300)), exitFailed)
 }
 
 // readBriefArg returns arg, or the contents of the file it names after '@'.

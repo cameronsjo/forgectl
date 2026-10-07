@@ -70,7 +70,7 @@ func runDeskLensList(cmd *cobra.Command, asJSON bool) error {
 	}
 	var verdict error
 	if bad > 0 {
-		verdict = WithExitCode(fmt.Errorf("desk lens list: %s did not parse", plural(bad, "lens", "lenses")), 1)
+		verdict = WithExitCode(fmt.Errorf("desk lens list: %s did not parse", plural(bad, "lens", "lenses")), exitFailed)
 	}
 	if asJSON {
 		if err := writeJSON(cmd.OutOrStdout(), out); err != nil {

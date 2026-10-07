@@ -157,12 +157,12 @@ type workerSetup struct {
 // setup warnings.
 func prepareWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec workerSpec) (workerSetup, error) {
 	if err := worker.ValidName(spec.name); err != nil {
-		return workerSetup{}, WithExitCode(fmt.Errorf("--name: %w", err), 2)
+		return workerSetup{}, WithExitCode(fmt.Errorf("--name: %w", err), exitUsage)
 	}
 
 	adapter, err := newHerdrAdapter(warn)
 	if err != nil {
-		return workerSetup{}, WithExitCode(err, 2)
+		return workerSetup{}, WithExitCode(err, exitUsage)
 	}
 	namer, ok := adapter.(sessionNamer)
 	if !ok {
@@ -171,11 +171,11 @@ func prepareWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec w
 
 	target, err := projects.New(deps.Runner).ResolveTarget(spec.target)
 	if err != nil {
-		return workerSetup{}, WithExitCode(err, 2)
+		return workerSetup{}, WithExitCode(err, exitUsage)
 	}
 	top, err := worker.RepoTop(ctx, deps.Runner, target)
 	if err != nil {
-		return workerSetup{}, WithExitCode(err, 2)
+		return workerSetup{}, WithExitCode(err, exitUsage)
 	}
 	led, err := worker.Open(top, namer.Session())
 	if err != nil {
@@ -188,7 +188,7 @@ func prepareWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec w
 	}
 	injected, unset, err := injectedLaunchEnv(deps.Cfg)
 	if err != nil {
-		return workerSetup{}, WithExitCode(termsafe.Error(err), 2)
+		return workerSetup{}, WithExitCode(termsafe.Error(err), exitUsage)
 	}
 	return workerSetup{adapter: adapter, top: top, led: led, self: self, injected: injected, unset: unset}, nil
 }
@@ -299,7 +299,7 @@ func launchWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec wo
 // top as the ledger key, and the worker posture floor on the invocation.
 func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOptions) error {
 	if opts.Backend != "herdr" {
-		return WithExitCode(errors.New("--worktree needs --surface herdr; workers run in herdr only"), 2)
+		return WithExitCode(errors.New("--worktree needs --surface herdr; workers run in herdr only"), exitUsage)
 	}
 	spec := workerSpec{target: opts.Target, name: opts.DisplayName, branch: opts.Worktree, harness: opts.Harness, allowPATH: opts.AllowPATH}
 	ctx, warn := cmd.Context(), cmd.ErrOrStderr()
@@ -309,7 +309,7 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	}
 	prompt, brief, err := launchBrief(opts.Brief, time.Now)
 	if err != nil {
-		return WithExitCode(err, 2)
+		return WithExitCode(err, exitUsage)
 	}
 	if opts.DryRun {
 		return planWorkerLaunch(cmd, deps, opts, setup.top, setup.led, workerPlanInputs{injected: setup.injected, unset: setup.unset, prompt: prompt, hasBrief: brief != nil, self: setup.self})
@@ -403,7 +403,7 @@ type workerPlanInputs struct {
 func planWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOptions, top string, led *worker.Ledger, in workerPlanInputs) error {
 	taken, err := led.NameTaken(opts.DisplayName)
 	if err != nil {
-		return WithExitCode(err, 2)
+		return WithExitCode(err, exitUsage)
 	}
 	if taken {
 		// The launch refuses it in Begin, with this error and no exit code.

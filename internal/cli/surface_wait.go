@@ -98,7 +98,7 @@ Exit 0: settled. Exit 1: blocked, gone, unreadable, or not settled by
 
 func runSurfaceWait(cmd *cobra.Command, deps module.Deps, opts waitOptions) error {
 	if opts.Timeout <= 0 || opts.Interval <= 0 || opts.Settle < 0 || opts.Quiet < opts.Settle {
-		return WithExitCode(errors.New("--timeout and --interval must be positive, and --quiet at least --settle"), 2)
+		return WithExitCode(errors.New("--timeout and --interval must be positive, and --quiet at least --settle"), exitUsage)
 	}
 	w, err := openWorker(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo, opts.Name)
 	if err != nil {
@@ -229,5 +229,5 @@ func reportWait(cmd *cobra.Command, r waitResult, asJSON bool) error {
 		_, err := fmt.Fprintf(out, "%s: settled\n", r.Name)
 		return err
 	}
-	return WithExitCode(fmt.Errorf("worker %s is %s: %s", r.Name, r.State, termsafe.SafeLineMax(r.Reason, 300)), 1)
+	return WithExitCode(fmt.Errorf("worker %s is %s: %s", r.Name, r.State, termsafe.SafeLineMax(r.Reason, 300)), exitFailed)
 }

@@ -136,7 +136,7 @@ func runHerdrOrganize(cmd *cobra.Command, deps module.Deps, opts organizeOpts) e
 		for i, p := range problems {
 			msgs[i] = p.Error()
 		}
-		return WithExitCode(termsafe.Error(errors.New(strings.Join(msgs, "; "))), 2)
+		return WithExitCode(termsafe.Error(errors.New(strings.Join(msgs, "; "))), exitUsage)
 	}
 
 	if !opts.apply {
@@ -146,19 +146,19 @@ func runHerdrOrganize(cmd *cobra.Command, deps module.Deps, opts organizeOpts) e
 	// --apply needs the lock that serializes it against other organize runs.
 	// Off Unix there is none, so it refuses before any herdr call (#732).
 	if !herdrLockSupported {
-		return WithExitCode(errors.New("organize --apply needs a file lock to keep two runs apart, and forgectl has one only on Unix; run it without --apply for the report"), 2)
+		return WithExitCode(errors.New("organize --apply needs a file lock to keep two runs apart, and forgectl has one only on Unix; run it without --apply for the report"), exitUsage)
 	}
 
 	// --apply gates twice, both before any change: the session (above), then
 	// the fork's `tab move`. Then it serializes against other organize runs.
 	if err := herdrCheckFork(cmd.Context(), deps.Runner); err != nil {
-		return WithExitCode(termsafe.Error(forkRefusal(err)), 2)
+		return WithExitCode(termsafe.Error(forkRefusal(err)), exitUsage)
 	}
 	lockPath, err := herdrLockPath()
 	if err != nil {
 		// Nothing has changed yet: the same class as the other pre-apply setup
 		// failures, exit 2.
-		return WithExitCode(termsafe.Error(err), 2)
+		return WithExitCode(termsafe.Error(err), exitUsage)
 	}
 	notice := func() { _, _ = fmt.Fprintln(cmd.ErrOrStderr(), lockWaitNotice) }
 	return herdrWithLock(lockPath, notice, func() error { return organizeOnce(cmd, deps, opts) })

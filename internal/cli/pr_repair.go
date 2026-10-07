@@ -406,7 +406,7 @@ func repairExitCode(report pr.RepairReport, apply bool) error {
 	if apply || len(report.Items) == 0 {
 		return nil
 	}
-	return WithExitCode(fmt.Errorf("%d review session(s) are unsettled", len(report.Items)), 1)
+	return WithExitCode(fmt.Errorf("%d review session(s) are unsettled", len(report.Items)), exitFailed)
 }
 
 // windowObservation renders what tmux said, never what the record claims — the

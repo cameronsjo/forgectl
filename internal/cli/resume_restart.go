@@ -128,15 +128,15 @@ watcher retries it). Exit 2 on bad usage.`,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !outdated {
-				return WithExitCode(errors.New("pass --outdated: it is the only selector `resume restart` has"), 2)
+				return WithExitCode(errors.New("pass --outdated: it is the only selector `resume restart` has"), exitUsage)
 			}
 			for _, id := range only {
 				if !resume.ValidSessionID(id) {
-					return WithExitCode(fmt.Errorf("--session %s is not a session id", safeLabel(id)), 2)
+					return WithExitCode(fmt.Errorf("--session %s is not a session id", safeLabel(id)), exitUsage)
 				}
 			}
 			if timeout <= 0 {
-				return WithExitCode(errors.New("--timeout must be positive"), 2)
+				return WithExitCode(errors.New("--timeout must be positive"), exitUsage)
 			}
 			ctx := cmd.Context()
 			if ctx == nil {
@@ -183,7 +183,7 @@ func runResumeRestart(ctx context.Context, out io.Writer, deps module.Deps, only
 		return err
 	}
 	if res.Incomplete() {
-		return WithExitCode(fmt.Errorf("%d session(s) failed, %d left waiting, %d with no herdr pane — each is listed above with the command to resume it by hand", res.Failed, res.Left, res.PaneGone), 1)
+		return WithExitCode(fmt.Errorf("%d session(s) failed, %d left waiting, %d with no herdr pane — each is listed above with the command to resume it by hand", res.Failed, res.Left, res.PaneGone), exitFailed)
 	}
 	return nil
 }

@@ -64,12 +64,18 @@ deep-dive get a link here.
 | `upgrade` | Update forgectl itself via the Homebrew tap | Usage below |
 | `y` | Clipboard (macOS only) + read-only zsh history recall | Usage below |
 
+## Agent skill
+
+forgectl carries its own agent skill, so an agent's instructions always match the binary it runs. `forgectl --skill` prints `SKILL.md`; `forgectl --skill --install <dir>` writes `SKILL.md` and `references/` into `<dir>`, which must be an absolute path to a directory that already exists. Point your harness's skill directory at the result, for example `forgectl --skill --install ~/.claude/skills/forgectl` (create the directory first). Reinstall after upgrading forgectl.
+
 ## Usage
 
 ```sh
 forgectl                   # open TUI menu (thumb mode)
 forgectl --help            # list every command group (non-interactive entrypoint)
 forgectl menu --json       # the menu's contents as data, no TTY needed (see docs/commands/menu.md)
+forgectl --skill           # print forgectl's agent skill (SKILL.md), the one copy that matches this binary
+forgectl --skill --install /abs/dir   # write SKILL.md + references/ into an existing absolute directory
 forgectl tmux ls           # list sessions
 forgectl tmux pick [name]  # connect/smart-create via sesh (no name → list)
 forgectl tmux kill <name>  # kill a session (--others keeps only it)
