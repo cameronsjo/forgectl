@@ -170,7 +170,7 @@ No merge, PR status, or close after merge (P4). No intake from GitHub or the boa
 ### T8.4: notify, security review, live check (one PR or folded into T8.3)
 
 - [x] Split a generic notifier out of `deskSignal` (`internal/cli/desk_signal_unix.go`): macOS notification through `internal/notify`, and herdr pane state on the worker's pane from its ledger ref.
-- [ ] Security review (an Opus-tier security reviewer) of the control's file set before the first `drain start`: the T8.1 diff, `internal/cli/surface_worker.go`, `internal/launch/invocation.go` (`applyWorkerFloor`, `workerBaseEnv`, `buildWorkerInvocation` callers), `internal/surface/worker/{ledger,ledger_unix,brief}.go`, `internal/herdr/ready/`, `internal/desk/proc_unix.go`, `internal/cli/desk_signal_unix.go`, `internal/notify/notify.go`, and the new queue and drain files.
+- [x] Security review (an Opus-tier security reviewer) of the control's file set before the first `drain start`: the T8.1 diff, `internal/cli/surface_worker.go`, `internal/launch/invocation.go` (`applyWorkerFloor`, `workerBaseEnv`, `buildWorkerInvocation` callers), `internal/surface/worker/{ledger,ledger_unix,brief}.go`, `internal/herdr/ready/`, `internal/desk/proc_unix.go`, `internal/cli/desk_signal_unix.go`, `internal/notify/notify.go`, and the new queue and drain files.
 - [ ] Live check on sjomba with a real batch (open forgectl issues small enough for one worker): enqueue 3 tasks across 2 repos; the per-repo cap holds; a worker at a permission prompt shows `needs-you` and notifies; answering it returns the row to `launched`; a report marks it `reported`; `drain status` lists rows needing attention. Record how often workers stopped, for the autonomy question.
 
 ## Verification
@@ -234,6 +234,8 @@ Panel: plan-reviewer, security-posture-reviewer (Opus), operability-reviewer, ca
 - **T8.4 staged breaks** (working-tree edits restored by `cp`), each red: `Adapter.ReportBlocked` targeting `os.Getenv("HERDR_PANE_ID")` instead of the ref's pane → `TestPaneState/reports_blocked_on_the_owned_root_pane`; releasing on any write out of `needs-you`-or-not (dropping the `q.State == needs-you` check) → `TestDrainClearsOnlyOnLeavingNeedsYou`.
 
 ## Learnings
+
+- T8.4 file-set security review (Opus, at 3cdc3fa5 = main with the drain plus the notifier): 0 Critical, 0 Important; the first supervised `drain start` on sjomba may proceed. Start it from a plain terminal, not a Claude Code session, so the drain does not inherit that session's environment (its own `gh` and herdr calls still see it; workers do not). Past the boundary: a worker can enqueue rows the drain then launches unattended. Fixed from its nits: the notifier gets only the row's own ledger row, so a release is never aimed at another launch's pane.
 
 - T8.2 reviews, for T8.3: the drain re-checks each queue row it launches from (clean absolute repo, `CheckQueueBrief`, brief hash), since the store checks only version, fields and state on read; the 30-day prune needs a conditional remove (a row can be dequeued and re-enqueued between read and remove); the 768 KiB cap applies to `enqueue` only, so the drain's claim and failure writes are never refused by a queue the operator filled; `last_error` is capped at 1 KiB. `drain-events.jsonl` should record who enqueued and dequeued, which the queue row does not.
 

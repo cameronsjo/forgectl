@@ -936,6 +936,21 @@ func TestDrainDoesNotAdoptAnotherLaunch(t *testing.T) {
 	}
 }
 
+// TestDrainClearsWithoutAnotherLaunchsPane: a needs-you row whose ledger row
+// now belongs to another launch closes, and its release is not aimed at that
+// launch's pane (the fake fails the test on a mismatched ledger row).
+func TestDrainClearsWithoutAnotherLaunchsPane(t *testing.T) {
+	f, d, q := newFakeDrain(t)
+	f.herdrErr = errors.New("down")
+	enqueueAt(t, q, "w", "/repo/a", drainT0)
+	seedState(t, q, "w", worker.QueueNeedsYou)
+	seedLedger(t, "/repo/a", "w", "launch-someone-else", worker.StageLaunched, nil)
+	d.tick(t.Context())
+	if w := rowNamed(t, q, "w"); w.State != worker.QueueClosed || len(f.cleared) != 1 {
+		t.Fatalf("w %s, cleared %v; want closed and one release", w.State, f.cleared)
+	}
+}
+
 // TestDrainReconcileUnreadableIsOneEvent: a claimed row over an unreadable
 // ledger is noted once across ticks.
 func TestDrainReconcileUnreadableIsOneEvent(t *testing.T) {

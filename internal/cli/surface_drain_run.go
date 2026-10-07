@@ -300,16 +300,22 @@ func (d *drainer) watch(ctx context.Context, rows []worker.QueueRow, ledgers map
 		if !ok {
 			continue
 		}
+		// The notifier gets the row's own ledger row only: another launch's
+		// ref names another worker's pane.
+		own := l.Row
+		if l.State == drain.LedgerOther {
+			own = worker.Row{}
+		}
 		// Each call below happens once per state entry or exit, so a failure
 		// is one event, never one per tick.
 		if c.Notify && d.settings.Notify {
-			if err := d.io.notify.NeedsYou(ctx, written, l.Row, written.LastError); err != nil {
+			if err := d.io.notify.NeedsYou(ctx, written, own, written.LastError); err != nil {
 				d.event(drain.Event{Kind: drain.EventError, Name: written.Name, Repo: written.Repo, State: string(written.State),
 					Error: "needs-you notification: " + err.Error()})
 			}
 		}
 		if q.State == worker.QueueNeedsYou && written.State != worker.QueueNeedsYou {
-			if err := d.io.notify.Cleared(ctx, written, l.Row); err != nil {
+			if err := d.io.notify.Cleared(ctx, written, own); err != nil {
 				d.event(drain.Event{Kind: drain.EventError, Name: written.Name, Repo: written.Repo, State: string(written.State),
 					Error: "clear the needs-you pane state: " + err.Error()})
 			}
