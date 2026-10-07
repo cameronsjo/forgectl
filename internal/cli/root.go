@@ -127,7 +127,7 @@ func newRoot(deps module.Deps) *cobra.Command {
 arguments for a menu over every command group.`,
 		Version: meta.Version,
 		Args:    safeRootArgs,
-		RunE:    showRootHelp,
+		RunE:    rootRun,
 		// fang renders styled errors/usage; we own when usage appears so an op
 		// failure doesn't dump a wall of help. Bare-invoke → TUI is handled in
 		// Execute, before Cobra runs.
@@ -138,6 +138,7 @@ arguments for a menu over every command group.`,
 	root.SuggestionsMinimumDistance = 2
 	// Honored by the TUI and the tree verb; swaps Nerd Font glyphs for ASCII.
 	root.PersistentFlags().Bool("no-icons", false, "use ASCII markers instead of Nerd Font glyphs")
+	addSkillFlags(root)
 
 	root.AddGroup(
 		&cobra.Group{ID: everydayGroupID, Title: "Everyday:"},
