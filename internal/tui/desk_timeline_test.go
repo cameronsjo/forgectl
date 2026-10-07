@@ -233,55 +233,45 @@ func TestDeskTimeline_EmptySaysHowItFills(t *testing.T) {
 
 // TestDeskTimeline_WeightFollowsNeedsYou pins the title weight: bold for
 // what needs the operator, regular for today's finished work, muted for
-// anything older, and a failure's glyph stays red whatever its age.
+// anything older, and a failure keeps its red glyph whatever its age.
 func TestDeskTimeline_WeightFollowsNeedsYou(t *testing.T) {
 	forceTrueColor(t)
-	snap, _ := timelineSnapshot()
 	st := theme.Default().Styles()
-	byName := map[string]tlEntry{}
-	for _, e := range deskTimeline(snap) {
-		byName[e.row.item.Name] = e
+	entry := func(k rowKind, at time.Time) tlEntry {
+		return tlEntry{row: queueRow{k, item("01-x", desk.KindScript, desk.StateDone)}, at: at}
 	}
-	today := func(e tlEntry) bool { return tlDay(deskNow, e.at) == "Today" }
-	var waiting, doneToday, old, oldFailed *tlEntry
-	for _, e := range byName {
-		switch {
-		case e.row.kind == rowWaiting && waiting == nil:
-			waiting = &e
-		case e.row.kind == rowDone && today(e) && doneToday == nil:
-			doneToday = &e
-		case !tlLive(e) && !today(e) && old == nil:
-			old = &e
-		}
-		if e.row.kind == rowFailed && !today(e) && oldFailed == nil {
-			oldFailed = &e
+	today, yesterday := ago(time.Hour), ago(26*time.Hour)
+	title := func(e tlEntry) lipgloss.Style { return tlTitleStyle(st, deskNow, e) }
+	same := func(a, b lipgloss.Style) bool { return a.Render("x") == b.Render("x") }
+
+	for _, k := range []rowKind{rowWaiting, rowLost, rowRunning} {
+		for _, at := range []time.Time{today, yesterday} {
+			if !title(entry(k, at)).GetBold() {
+				t.Errorf("kind %v at %v: a live entry's title is not bold", k, at)
+			}
 		}
 	}
-	if waiting == nil || doneToday == nil || old == nil {
-		t.Fatalf("fixture lacks an entry: waiting=%v doneToday=%v old=%v", waiting != nil, doneToday != nil, old != nil)
-	}
-	bold := func(s lipgloss.Style) bool {
-		return strings.Contains(s.Render("x"), "\x1b[1;") || strings.Contains(s.Render("x"), "\x1b[1m")
-	}
-	if !bold(tlTitleStyle(st, deskNow, *waiting)) {
-		t.Error("a waiting entry's title is not bold")
-	}
-	if got := tlTitleStyle(st, deskNow, *doneToday); bold(got) || got.Render("x") != st.Fg.Render("x") {
-		t.Errorf("a finished-today title should be regular Fg, got %q", got.Render("x"))
-	}
-	if got := tlTitleStyle(st, deskNow, *old); got.Render("x") != st.Muted.Render("x") {
-		t.Errorf("an older title should be Muted, got %q", got.Render("x"))
-	}
-	if oldFailed != nil {
-		if tlTitleStyle(st, deskNow, *oldFailed).Render("x") != st.Muted.Render("x") {
-			t.Error("an older failed title should be Muted")
+	for _, k := range []rowKind{rowDone, rowFailed, rowSkipped, rowChanged, rowRefused} {
+		if got := title(entry(k, today)); got.GetBold() || !same(got, st.Fg) {
+			t.Errorf("kind %v today: want regular Fg, got %q", k, got.Render("x"))
 		}
-		_, _, look := rowLook(st, rowFailed)
-		if !strings.Contains(look("✗"), st.Danger.Render("✗")) {
-			t.Error("a failed entry lost its red glyph")
+		for _, at := range []time.Time{yesterday, {}} {
+			if got := title(entry(k, at)); got.GetBold() || !same(got, st.Muted) {
+				t.Errorf("kind %v at %v: want Muted, got %q", k, at, got.Render("x"))
+			}
 		}
-		if tlPreviewStyle(st, deskNow, *oldFailed).Render("x") == tlPreviewStyle(st, deskNow, tlEntry{row: oldFailed.row, at: deskNow}).Render("x") {
-			t.Error("an older failure's detail should be softer than today's")
+	}
+
+	for _, k := range []rowKind{rowFailed, rowRefused} {
+		if !tlPreviewStyle(st, deskNow, entry(k, yesterday)).GetFaint() {
+			t.Errorf("kind %v: an older failure's detail should be faint", k)
 		}
+		if tlPreviewStyle(st, deskNow, entry(k, today)).GetFaint() {
+			t.Errorf("kind %v: today's failure detail should not be faint", k)
+		}
+	}
+	_, _, look := rowLook(st, rowFailed)
+	if !strings.Contains(look("✗"), st.Danger.Render("✗")) {
+		t.Error("a failed entry lost its red glyph")
 	}
 }

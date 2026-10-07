@@ -110,6 +110,9 @@ func (e tlEntry) needsYou() bool {
 // tlNeedsYou is the leading group's heading.
 const tlNeedsYou = "Needs you"
 
+// tlToday is the heading of the current day's group.
+const tlToday = "Today"
+
 // tlGroup is the heading an entry sits under.
 func tlGroup(now time.Time, e tlEntry) string {
 	if e.needsYou() {
@@ -238,7 +241,7 @@ func tlDay(now, t time.Time) string {
 	}
 	switch day(now).Sub(day(t)) / (24 * time.Hour) {
 	case 0:
-		return "Today"
+		return tlToday
 	case 1:
 		return "Yesterday"
 	}
@@ -324,7 +327,7 @@ func (f tlFrame) dayHeading(st theme.Styles, width int, day string, t time.Time,
 	}
 	head := " " + headStyle.Render(day)
 	switch day {
-	case "Today", "Yesterday":
+	case tlToday, "Yesterday":
 		head += st.Muted.Render(" · " + t.In(f.now.Location()).Format("Mon 2 Jan"))
 	case tlNeedsYou:
 		head += st.Muted.Render(" · enter takes you to it")
@@ -422,7 +425,7 @@ func (f tlFrame) entryLines(st theme.Styles, width int, e tlEntry, selected, las
 // tlOld reports a day group that is not today and not the needs-you group:
 // yesterday, an older day, or undated.
 func tlOld(group string) bool {
-	return group != "Today" && group != tlNeedsYou
+	return group != tlToday && group != tlNeedsYou
 }
 
 // tlQuiet reports a finished entry from before today. Weight follows
