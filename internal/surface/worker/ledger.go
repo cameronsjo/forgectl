@@ -60,6 +60,10 @@ type Row struct {
 	// for a codex worker.
 	SessionID  string `json:"session_id,omitempty"`
 	Transcript string `json:"transcript,omitempty"`
+	// LaunchID is the queue claim this row was launched for, written by
+	// Begin. It is empty for a CLI launch. `surface drain` acts only on a
+	// row whose LaunchID matches the queue row it claimed.
+	LaunchID string `json:"launch_id,omitempty"`
 }
 
 // ledgerVersion is the on-disk format version. A file with another version is

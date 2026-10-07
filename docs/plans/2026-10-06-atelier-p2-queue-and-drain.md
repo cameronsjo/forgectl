@@ -1,6 +1,6 @@
 ---
 status: in-flight
-next: "Approved 2026-10-07. T8.0 (worker allow list), then T8.1 (cobra-free worker ops), T8.2 (queue), T8.3 (drain), T8.4 (notify, review, live check)."
+next: "T8.3 (drain) on feat/surface-drain. Next: T8.4 (notifier, Opus security review of the file set, live check on sjomba)."
 branch: plan/atelier-p2-drain
 pr: cameronsjo/forgectl#1137
 updated: 2026-10-07
@@ -161,11 +161,11 @@ No merge, PR status, or close after merge (P4). No intake from GitHub or the boa
 
 ### T8.3: the drain (one PR)
 
-- [ ] `surface drain start|stop|status|events`, `_drain`, `drain.lock`, `drain.json`, events file with its one-file rotation.
-- [ ] Config section, reload each tick, pause on an invalid value.
-- [ ] The tick as pure decision functions plus I/O.
-- [ ] Tests: caps (global, per repo, a `failed` row with a live ledger row holds a slot); retry only when nothing was created; `failed` at once with the worktree named otherwise; 3-attempt cap; pause on auth and herdr errors with no attempt counted; idle-without-report rule; `needs-you` clears on any non-blocked verdict; ledger `closed` maps to `closed`; expiry; prune; every startup-reconcile row in the table; a kill at each launch stage then restart gives the table's outcome; second `start` refused; `stop` refuses a zero or mismatched start time; `start` reports a child that never reached `running`.
-- [ ] Mutation sweep over the slot rule, the claim compare-and-set, the retry rule, and the reconcile table.
+- [x] `surface drain start|stop|status|events`, `_drain`, `drain.lock`, `drain.json`, events file with its one-file rotation.
+- [x] Config section, reload each tick, pause on an invalid value.
+- [x] The tick as pure decision functions plus I/O.
+- [x] Tests: caps (global, per repo, a `failed` row with a live ledger row holds a slot); retry only when nothing was created; `failed` at once with the worktree named otherwise; 3-attempt cap; pause on auth and herdr errors with no attempt counted; idle-without-report rule; `needs-you` clears on any non-blocked verdict; ledger `closed` maps to `closed`; expiry; prune; every startup-reconcile row in the table; a kill at each launch stage then restart gives the table's outcome; second `start` refused; `stop` refuses a zero or mismatched start time; `start` reports a child that never reached `running`.
+- [x] Mutation sweep over the slot rule, the claim compare-and-set, the retry rule, and the reconcile table.
 
 ### T8.4: notify, security review, live check (one PR or folded into T8.3)
 
@@ -208,6 +208,24 @@ Panel: plan-reviewer, security-posture-reviewer (Opus), operability-reviewer, ca
 - **T8.2: a name is refused for another repository too,** not only for another brief: `name` is unique machine-wide, so a same-brief enqueue aimed at a second repository is an error naming the first.
 - **T8.2: the leading-`@` rule applies twice.** The brief text may not start with `@` (after leading whitespace), and `--brief` refuses an `@path` argument, since it takes a path and `surface launch --brief @file` would otherwise read the same.
 - **T8.2: every queue write drops the brief text of terminal rows** (`TrimTerminal`), so the drain needs no separate trim call. `--batch` takes the worker-name character set, up to 64 characters. `surface queue --json` omits brief text as the text output does.
+- **T8.3: a ledger row carries `launch_id`.** The plan matches ledger rows by `launch_id` but the ledger had no such field; `worker.Row.LaunchID` (omitempty, written by `Begin`) holds it, so a CLI launch's ledger file is unchanged. A row with the name but another or no `launch_id` is not the drain's.
+- **T8.3: the claim records the herdr session too** (`Queue.ClaimFor`), in the same locked write as `launch_id`, so a restart always knows which ledger to read.
+- **T8.3: claimed rows are settled at the start of every tick,** not only at startup. The drain launches every row it claims within the claiming tick, so a claimed row at a tick's start is always a dead launch's; the startup case is the first tick. An unreadable ledger leaves the row claimed (holding its slot) and is retried next tick, with one event per change: `Reconcile` takes the row's `Memo` as `Watch` does (review I4).
+- **T8.3: claim then launch, one row at a time.** Each claim takes the queue lock on its own, and the launch follows outside it, so a pause raised by one launch (auth, herdr) stops the next claim in the same tick.
+- **T8.3: herdr readiness is checked before claiming** (`herdradapter.Adapter.CheckReady`), whenever a row could be claimed or a herdr pause is held. A herdr failure inside a launch happens after `git worktree add`, so it would leave a worktree and a retry would hit `ErrNameTaken`; such a row is `failed` (and claiming pauses). Only a herdr or auth failure that created nothing goes back to `queued`.
+- **T8.3: slot details the plan left open.** A `reported` row frees its slot even with a live ledger row (Known boundary). An unreadable ledger holds the slot of a `launched`, `needs-you` or `failed` row, since nothing proves its worker ended. `dequeue` (T8.2) and the 30-day prune remove a `failed` row even while its ledger row is live, which frees that slot before `surface close`; the Slots rule's "until the operator closes it" holds only while the row stays in the queue.
+- **T8.3: the needs-you reason lives in `last_error`** (`blocked: <screen>` or `idle without report`). A blocked needs-you row clears on any non-blocked verdict; an idle one clears only when the worker is working again (`not-ready`), since a `ready` verdict would flap it back and forth each tick. The idle clock is kept in memory and restarts with the drain.
+- **T8.3: an invalid config keeps the last valid values for pacing and the idle rule;** claiming pauses. `drain start` refuses an invalid `[surface.drain]` (exit 2) before starting anything, and checks `drain.lock` before resolving herdr, so a second start is refused even with herdr down.
+- **T8.3: drain worker branch is `worker/<name>`;** the drain never passes `--allow-path-binary`, so the claude binary must be named in `[launch]`.
+- **T8.3: GitHub auth failure is recognized from `gh`'s stderr** (`HTTP 401`, `Bad credentials`, `gh auth login`, ...), read from `exec.CommandError.Stderr` because `Error()` redacts it. Marked `debt:` until `internal/githubauth` classifies `gh` failures.
+- **T8.3: who enqueued or dequeued is not recorded.** Only the drain appends to `drain-events.jsonl` (under its lock); a CLI writer would need its own lock and a seq outside the drain's run. Left for P6 or a follow-up.
+- **T8.3: extra event kinds and status fields:** `start`, `stop`, `unreadable`, `error`, and a `pruned` state; `drain.json` also records `herdr_path`, `started_at`, `interval_seconds` and the last tick's I/O `error`. `drain status` counts rows from the queue at the time it runs, not from the last tick. It also reports `held_slots` and `holding`, the rows holding a slot by `HoldsSlot` (review I5).
+- **T8.3: `internal/procstart`** is the shared strict copy of `desk.processAlive`; `internal/desk` is unchanged.
+- **T8.3 review (forgectl#1172): a `reported` or `failed` row closes with its worker.** The Loop row "its queue row then reads `closed`" covered only rows closed while `launched` or `needs-you`. `drain.Settle` now moves a `reported` or `failed` row to `closed` when its own ledger row is `closed`, removed, or replaced by another launch's, each tick, with no screen read. A row failed with nothing of its launch left (refused at re-check, `ErrNameTaken`, three empty attempts) drops its `launch_id` so `Settle` never reads someone else's row, or none, as its close.
+- **T8.3 review: a launch configuration that cannot build a worker pauses claiming** (`ErrLaunchConfig`, `PauseLaunchConfig`). The build step runs after `git worktree add`, so a bad `[launch]` (worker posture, harness profile, a claude found only on `$PATH`) would fail every queued row in turn, each leaving a worktree. The build-step error is marked `errLaunchConfig` without changing its text; the row is still `failed` naming its worktree, and the pause lasts until the next `drain start`.
+- **T8.3 review: smaller fixes.** A `ProbeGone` row's `last_error` ends "run surface close <name>". `drain status` text escapes its state fields. `worker.SameLaunch` is gone (`SameRead` replaced it). A `procstart.Of` failure at drain start is recorded as an `error` event, so a later `stop` refusal is explainable. The startup-only herdr pin is stated as such in `docs/herdr.md`.
+- **T8.3 mutation sweep** (each a working-tree edit restored by `cp`): failed rows stop holding a slot → `TestHoldsSlot`, `TestPlanClaims`, `TestDrainTickCaps` red; claim without the `queued` check → `TestQueueClaimOneWinner`, `TestQueueClaimRefusesAnUnqueuedRow` red; retry a launch that created something → `TestDecideLaunch`, `TestDrainTickFailsAtOnce` red; drop the `ErrNameTaken` rule → the same two red; reconcile `pending`/`worktree` to `queued` → `TestReconcileTable`, `TestDrainKillAtEachLaunchStage` red; ignore `launch_id` when matching → only `TestMatchLedger` red (no tick-level test pins a mismatched id).
+- **T8.3 review staged breaks** (working-tree edits restored by `cp`), each red: drop `launch_id` from `drainSpec` or from `workerSetup.steps` → `TestDrainLaunchWiring`; harness `""`, `allowPATH: true`, or no repo-top check → `TestDrainLaunchWiring`; notify ignoring the setting → `TestDrainNotifyOffSuppressesTheNotification`; `Settle` a no-op → `TestSettle`, `TestDrainSettlesClosedTerminalRows`; keep the launch id on `ErrNameTaken` → `TestDecideLaunch`, `TestDrainTickFailsAtOnce`; no launch-config class, wrapper or pause → `TestLaunchConfigErrorsClassify` or `TestDecideLaunch` and `TestDrainPausesOnLaunchConfig`; `Reconcile` noting every tick → `TestReconcileNotesUnreadableOnce`, `TestDrainReconcileUnreadableIsOneEvent`; no held-slot count → `TestDrainStatusShowsHeldSlots`; no close hint → `TestProbeGoneNamesTheWayOut`; adopt any launch id → `TestDrainDoesNotAdoptAnotherLaunch` (closing the tick-level gap above).
 
 ## Learnings
 
@@ -216,3 +234,7 @@ Panel: plan-reviewer, security-posture-reviewer (Opus), operability-reviewer, ca
 - `worker.AddWorktree` used to return an empty `Worktree` for a failure after `git worktree add` succeeded (path resolve, root check, `rev-parse HEAD`, a cancelled context). The attempt then read as having created nothing, so a drain would retry into a taken path and the ledger would lose the orphan. It now returns the path, and the failed row records it (T8.1 security review). T8.3: an `ErrNameTaken` attempt also reads as having created nothing, but the drain must mark the row `failed`, not retry.
 
 - A launch that fails in setup after `git worktree add` (here, the `$PATH` binary refusal) leaves a `failed` ledger row with a worktree, and the same name is then refused. Seen live during T8.0; it is the case T8.3's retry rule handles by failing at once.
+
+- `exec.CommandError.Error()` redacts stderr, so a classifier that matches error text (here, `gh`'s auth failure) never sees the words it looks for; the first test of the classifier went red for exactly that. Match `CommandError.Stderr` and never render it.
+
+- A worker launch with a zero `backend.Ref` fails at `ref.MarshalJSON` before the ledger reaches `launched`, so a kill-at-stage test with a fake launch step must return a real ref (`testHerdrRef`) or its last stage is never reached; the test now asserts the kill call actually happened.

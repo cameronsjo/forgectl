@@ -41,6 +41,9 @@ type workerSteps struct {
 	// brief is the first brief's ledger record, or nil for a launch with
 	// none. It is written with the pending row, before anything starts.
 	brief *worker.Brief
+	// launchID is the queue claim the launch is for, written with the
+	// pending row; empty for a CLI launch.
+	launchID string
 }
 
 // workerLaunched is what a successful worker launch reports.
@@ -54,7 +57,7 @@ type workerLaunched struct {
 // StageFailed with whatever the earlier steps recorded, so the next
 // coordinator can find a worktree or workspace a dead launch left behind.
 func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, s workerSteps) (workerLaunched, error) {
-	if err := led.Begin(worker.Row{Name: name, Branch: branch, StartedAt: s.now().UTC(), Brief: s.brief}); err != nil {
+	if err := led.Begin(worker.Row{Name: name, Branch: branch, StartedAt: s.now().UTC(), Brief: s.brief, LaunchID: s.launchID}); err != nil {
 		return workerLaunched{}, err
 	}
 	// created is a worktree path the attempt made, recorded on failure so the
@@ -94,13 +97,13 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 
 	built, err := s.build(wt.Path)
 	if err != nil {
-		return fail(err)
+		return fail(launchConfigError{err})
 	}
 	// A worker must be built as one: that is what applies the posture floor,
 	// the isolation argv and the environment allowlist. A build step that
 	// skipped it would launch a worker with the launcher's posture and env.
 	if !built.Worker {
-		return fail(errors.New("forgectl: the worker invocation was not built as a worker launch"))
+		return fail(launchConfigError{errors.New("forgectl: the worker invocation was not built as a worker launch")})
 	}
 	if err := led.Update(name, func(r *worker.Row) {
 		r.Harness = built.Invocation.Harness
@@ -136,6 +139,20 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 	return workerLaunched{ref: ref, worktree: wt.Path}, nil
 }
 
+// errLaunchConfig marks a launch that failed because its configuration
+// cannot build a worker: the build step (posture, harness profile, binary
+// resolution) or a build that is not a worker. It fails the same way for
+// every worker, so the drain pauses on it rather than failing row after row.
+var errLaunchConfig = errors.New("forgectl: the launch configuration cannot build a worker")
+
+// launchConfigError wraps a build-step error as errLaunchConfig without
+// changing its text, which the CLI prints and the ledger records.
+type launchConfigError struct{ err error }
+
+func (e launchConfigError) Error() string        { return e.err.Error() }
+func (e launchConfigError) Unwrap() error        { return e.err }
+func (e launchConfigError) Is(target error) bool { return target == errLaunchConfig }
+
 // sessionNamer is implemented by the herdr adapter.
 type sessionNamer interface{ Session() string }
 
@@ -147,6 +164,8 @@ type workerSpec struct {
 	branch    string
 	harness   string
 	allowPATH bool
+	// launchID is the drain's queue claim; empty for the CLI.
+	launchID string
 }
 
 // workerSetup is what a worker launch resolves before it writes anything.
@@ -225,8 +244,9 @@ func (s workerSetup) steps(deps module.Deps, spec workerSpec, prompt string, bri
 			}
 			return result.Ref(), nil
 		},
-		now:   time.Now,
-		brief: brief,
+		now:      time.Now,
+		brief:    brief,
+		launchID: spec.launchID,
 	}
 }
 
