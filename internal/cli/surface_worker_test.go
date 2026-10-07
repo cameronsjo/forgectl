@@ -391,6 +391,27 @@ func TestInProcessAttemptTellsCreationApart(t *testing.T) {
 			t.Fatalf("err %v, row %+v: want a failed row naming the worktree", err, attempt.row)
 		}
 	})
+	// git worktree add succeeded, then a later check in AddWorktree failed
+	// (a cancelled context at rev-parse): the worktree exists, so the row
+	// must name it and the attempt must not read as having created nothing.
+	t.Run("failure inside the worktree step after git made it", func(t *testing.T) {
+		led := testWorkerLedger(t)
+		steps := goodSteps(t)
+		steps.addWorktree = func(context.Context) (worker.Worktree, error) {
+			return worker.Worktree{Path: "/repo/.claude/worktrees/w1", Branch: "feat/w1"}, errors.New("worker: read worktree HEAD: context canceled")
+		}
+		attempt, err := attemptWorker(context.Background(), led, "w1", "feat/w1", steps)
+		if err == nil || attempt.createdNothing() || attempt.row == nil || attempt.row.Worktree != "/repo/.claude/worktrees/w1" {
+			t.Fatalf("err %v, row %+v: want a failed row naming the made worktree", err, attempt.row)
+		}
+	})
+	// A row that could not be read back is not known to be empty.
+	t.Run("unreadable row", func(t *testing.T) {
+		attempt := workerAttempt{rowErr: errors.New("ledger unreadable")}
+		if attempt.createdNothing() {
+			t.Fatal("an attempt whose row could not be read back reads as having created nothing")
+		}
+	})
 }
 
 // TestInProcessLaunchRefusesBeforeTouchingAnything: the in-process launch

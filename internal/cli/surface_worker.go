@@ -57,6 +57,9 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 	if err := led.Begin(worker.Row{Name: name, Branch: branch, StartedAt: s.now().UTC(), Brief: s.brief}); err != nil {
 		return workerLaunched{}, err
 	}
+	// created is a worktree path the attempt made, recorded on failure so the
+	// row never reads as having created nothing.
+	var created string
 	fail := func(err error) (workerLaunched, error) {
 		var recovery string
 		var launchErr *surface.LaunchError
@@ -67,6 +70,9 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 			r.Stage = worker.StageFailed
 			r.Failure = termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen)
 			r.Recovery = recovery
+			if created != "" && r.Worktree == "" {
+				r.Worktree = created
+			}
 		}); uerr != nil {
 			return workerLaunched{}, errors.Join(err, fmt.Errorf("record the failure in the worker ledger: %w", uerr))
 		}
@@ -75,6 +81,7 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 
 	wt, err := s.addWorktree(ctx)
 	if err != nil {
+		created = wt.Path
 		return fail(err)
 	}
 	if err := led.Update(name, func(r *worker.Row) {

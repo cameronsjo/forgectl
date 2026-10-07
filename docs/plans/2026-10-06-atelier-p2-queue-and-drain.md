@@ -207,4 +207,6 @@ Panel: plan-reviewer, security-posture-reviewer (Opus), operability-reviewer, ca
 
 ## Learnings
 
+- `worker.AddWorktree` used to return an empty `Worktree` for a failure after `git worktree add` succeeded (path resolve, root check, `rev-parse HEAD`, a cancelled context). The attempt then read as having created nothing, so a drain would retry into a taken path and the ledger would lose the orphan. It now returns the path, and the failed row records it (T8.1 security review). T8.3: an `ErrNameTaken` attempt also reads as having created nothing, but the drain must mark the row `failed`, not retry.
+
 - A launch that fails in setup after `git worktree add` (here, the `$PATH` binary refusal) leaves a `failed` ledger row with a worktree, and the same name is then refused. Seen live during T8.0; it is the case T8.3's retry rule handles by failing at once.
