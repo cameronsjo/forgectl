@@ -520,6 +520,7 @@ type deskStats struct {
 	ok, failed   int
 	noExit       int
 	changed      int
+	lost         int
 	failures     []float64
 }
 
@@ -586,6 +587,11 @@ func (f deskFrame) stats() deskStats {
 			s.changed++
 		}
 	}
+	for _, it := range f.snap.Running {
+		if it.State == desk.StateLost {
+			s.lost++
+		}
+	}
 	if len(durations) > 0 {
 		s.median, s.hasMedian = median(durations), true
 	}
@@ -620,6 +626,9 @@ func (f deskFrame) tiles(st theme.Styles, width int) []string {
 		outcome += "  " + st.Muted.Render("?") + " " + strconv.Itoa(s.noExit)
 	}
 	changed := strconv.Itoa(s.changed) + " changed"
+	if s.lost > 0 {
+		changed += " · " + strconv.Itoa(s.lost) + " lost"
+	}
 	panels := [3]string{
 		Panel(st, widths[0], "waiting", "", []string{
 			st.Header.Render(strconv.Itoa(s.waiting)),
@@ -710,11 +719,21 @@ func queueWidths(width int) (nameW, barW, detailW int) {
 
 func (f deskFrame) queuePanel(st theme.Styles, width int, rows []queueRow, cursor, lines int) []string {
 	n, tty, _ := f.waiting()
-	running := 0
+	// A lost run is not running: it is counted on its own (#1106).
+	running, lost := 0, 0
 	if f.snap != nil {
-		running = len(f.snap.Running)
+		for _, it := range f.snap.Running {
+			if it.State == desk.StateLost {
+				lost++
+			} else {
+				running++
+			}
+		}
 	}
 	strip := st.Active.Render("●") + " " + strconv.Itoa(running) + " running  " + st.Accent.Render("◌") + " " + strconv.Itoa(n) + " waiting"
+	if lost > 0 {
+		strip += "  " + st.Warn.Render("?") + " " + strconv.Itoa(lost) + " lost"
+	}
 	if tty > 0 {
 		strip += "  " + st.Steel.Render("⌨") + " " + strconv.Itoa(tty) + " tty"
 	}
@@ -999,7 +1018,7 @@ func (f deskFrame) focusState(r queueRow) string {
 // The next step for a lost run and a changed item, shared by the focus
 // panel, y's reply and u's reply so the three cannot drift apart.
 const (
-	lostNext    = "s clears it · l shows what it printed"
+	lostNext    = "s clears it · l shows its output"
 	changedNext = "ask Claude to queue it again"
 )
 

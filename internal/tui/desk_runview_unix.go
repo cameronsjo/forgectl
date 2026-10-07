@@ -130,7 +130,7 @@ func (m deskModel) openRunView() (tea.Model, tea.Cmd) {
 	name := ""
 	if r, ok := m.selected(); ok {
 		if r.kind == rowWaiting || r.kind == rowRefused {
-			m.message = m.styles().Muted.Render(safeMessage(itemLabel(r.item.Name) + " has not run yet · r opens its run once it starts; move to a run to see it"))
+			m.message = m.styles().Muted.Render(safeMessage(itemLabel(r.item.Name) + " has not run yet; r opens its run once it starts"))
 			return m, nil
 		}
 		name = r.item.Name

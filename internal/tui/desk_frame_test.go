@@ -686,7 +686,7 @@ func TestDeskFrame_LostAndChangedSayWhatToDo(t *testing.T) {
 		return strings.Join(strings.Fields(strings.ReplaceAll(out, "│", " ")), " ")
 	}
 	got := flat(0)
-	for _, want := range []string{"01 long · sha256 " + lost.Meta.SHA256[:12] + " · lost", "the desk stopped watching it mid-run, so it may have partly run", "s clears it", "l shows what it printed"} {
+	for _, want := range []string{"01 long · sha256 " + lost.Meta.SHA256[:12] + " · lost", "the desk stopped watching it mid-run, so it may have partly run", "s clears it", "l shows its output"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("lost panel lacks %q:\n%s", want, got)
 		}
@@ -733,5 +733,17 @@ func TestDeskFrame_ChangedHashEqualToQueuedIsNotShown(t *testing.T) {
 	out := ansi.Strip(deskFrame{snap: snap, width: 100, height: 30, now: deskNow, opts: opts}.render())
 	if strings.Contains(out, ", now ") || !strings.Contains(out, "queued "+h[:12]+", since changed") {
 		t.Errorf("changed note:\n%s", out)
+	}
+}
+
+// A lost run is not counted as running: the queue strip and the outcomes
+// tile count it as lost (#1106).
+func TestDeskFrame_LostIsNotCountedRunning(t *testing.T) {
+	lost := item("01-long", desk.KindScript, desk.StateLost)
+	snap := &desk.Snapshot{Dir: "/d", Taken: deskNow, Running: []desk.Item{lost}}
+	_, opts := emptySnapshot()
+	out := ansi.Strip(RenderDeskFrame(snap, 100, 30, deskNow, opts))
+	if !strings.Contains(out, "● 0 running") || !strings.Contains(out, "? 1 lost") || !strings.Contains(out, "0 changed · 1 lost") {
+		t.Errorf("lost counts:\n%s", out)
 	}
 }
