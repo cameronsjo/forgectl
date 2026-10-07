@@ -134,6 +134,7 @@ type Config struct {
 	Resume    ResumeConfig    `toml:"resume"`
 	Tasks     TasksConfig     `toml:"tasks"`
 	Desk      DeskConfig      `toml:"desk"`
+	Surface   SurfaceConfig   `toml:"surface"`
 	launchSet bool
 	// resumeUnknown lists the undecoded keys under [resume], so
 	// ResumeConfig.Validate can name a misspelled hook key instead of
@@ -1285,7 +1286,7 @@ func Validate() error {
 
 // ValidatePath strictly decodes the already-resolved config path, then asks
 // each section that owns a semantic rule to check itself — [docs], [proxy],
-// [herdr.organize], [resume], and [theme]. [tasks] and log_level are checked
+// [herdr.organize], [surface.drain], [resume], and [theme]. [tasks] and log_level are checked
 // by the decode itself. A missing file remains valid and selects built-in defaults.
 //
 // The semantic half is the point for `launch doctor`: a config can decode
@@ -1310,6 +1311,9 @@ func ValidatePath(path string) error {
 		return err
 	}
 	if err := cfg.Herdr.Organize.Validate(); err != nil {
+		return err
+	}
+	if err := cfg.Surface.Drain.Validate(); err != nil {
 		return err
 	}
 	if err := cfg.Resume.Validate(cfg.resumeUnknown); err != nil {

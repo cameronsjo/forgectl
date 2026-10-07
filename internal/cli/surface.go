@@ -34,9 +34,10 @@ import (
 var surfaceModule = module.Manifest{
 	Name: "surface",
 	Tier: module.TierExtension,
-	// No config section: v1 adds no default backend, no auto-detection, and no
-	// persisted preference. Every launch names its manager explicitly.
-	ConfigKey: "",
+	// [surface] holds [surface.drain] only. There is still no default
+	// backend, no auto-detection, and no persisted preference: every launch
+	// names its manager explicitly.
+	ConfigKey: "surface",
 	New:       newSurfaceCmd,
 }
 
