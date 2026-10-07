@@ -374,7 +374,7 @@ func LocalNames(dir string) []string {
 // resolves every project's (name, dir) without spawning anything.
 func discoverCandidates(dir string) ([]discoverCandidate, error) {
 	if _, err := os.Stat(dir); err != nil {
-		return nil, fmt.Errorf("projects directory not found: %s", termsafe.QuotePath(dir))
+		return nil, fmt.Errorf("projects directory not found: %s (set PROJECTS_DIR to the folder that holds your repos, or create it)", termsafe.QuotePath(dir))
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {

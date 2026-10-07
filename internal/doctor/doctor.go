@@ -82,6 +82,17 @@ func (r Report) Healthy() bool {
 	return true
 }
 
+// Failed returns the names of the checks that failed, in report order.
+func (r Report) Failed() []string {
+	var names []string
+	for _, c := range r.Checks {
+		if c.State == StateFail {
+			names = append(names, c.Name)
+		}
+	}
+	return names
+}
+
 // Deps carries the seams Run needs. NewDeps wires the real production
 // values; tests inject fakes for LookPath/TrustedStore/Prober so a check can
 // be exercised without a real claude/tmux/ghostty/brew on PATH or a real
@@ -404,13 +415,13 @@ func checkTrustStore(d Deps) Check {
 	case err == nil:
 		return Check{Name: "trust store", State: StateOK, Detail: fmt.Sprintf("verified, %d enrolled key(s)", len(store.Keys))}
 	case errors.Is(err, bless.ErrTrustStoreMissing):
-		return Check{Name: "trust store", State: StateSkip, Detail: "trust store not found", Hint: "run `forgectl workflow bless` to enroll a signing key, if you use blessed workflows"}
+		return Check{Name: "trust store", State: StateSkip, Detail: "trust store not found", Hint: "run `forgectl workflow trust init` to enroll a signing key, if you use blessed workflows"}
 	case errors.Is(err, bless.ErrNoAnchor) && errors.Is(err, fs.ErrNotExist) && trustStoreAbsent(d):
 		// No anchor AND no store: blessed workflows were never set up here, so
 		// there is nothing to verify (forgectl#635). Any other anchor failure
 		// — present but not root-owned, group/world-writable, unparseable — or
 		// a store that exists without its anchor falls through to fail.
-		return Check{Name: "trust store", State: StateSkip, Detail: "blessed workflows not set up (no trust anchor, no trust store)", Hint: "run `forgectl workflow bless` to set up blessed workflows, if you use them"}
+		return Check{Name: "trust store", State: StateSkip, Detail: "blessed workflows not set up (no trust anchor, no trust store)", Hint: "run `forgectl workflow trust init` to set up blessed workflows, if you use them"}
 	default:
 		// Categorical (#716): err renders key ids, paths and decoder text read
 		// from the store and anchor files on disk. The sentinel names which

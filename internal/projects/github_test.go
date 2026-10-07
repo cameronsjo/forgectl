@@ -185,7 +185,7 @@ func TestGithubList_PartialFailureKeepsHealthyRowsAndNotesCategorically(t *testi
 	if len(repos) != 1 || repos[0].Owner != "alpha" {
 		t.Fatalf("repos = %+v, want alpha's rows preserved", repos)
 	}
-	if len(notes) != 1 || notes[0] != "github(beta): query failed" {
+	if len(notes) != 1 || notes[0] != "github(beta): query failed (run forgectl doctor for the cause)" {
 		t.Fatalf("notes = %v, want exactly [github(beta): query failed]", notes)
 	}
 	if strings.Contains(strings.Join(notes, " "), "ghp_deadbeef") {
@@ -207,7 +207,7 @@ func TestGithubList_EveryOwnerFailingReturnsSafeAggregate(t *testing.T) {
 	if len(repos) != 0 {
 		t.Errorf("repos = %+v, want none", repos)
 	}
-	want := []string{"github(alpha): query failed", "github(beta): query failed"}
+	want := []string{"github(alpha): query failed (run forgectl doctor for the cause)", "github(beta): query failed (run forgectl doctor for the cause)"}
 	if len(notes) != 2 || notes[0] != want[0] || notes[1] != want[1] {
 		t.Fatalf("notes = %v, want %v in owner order", notes, want)
 	}
@@ -226,7 +226,7 @@ func TestGithubList_BadJSONIsACategoricalOwnerFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("a JSON parse failure for the only owner must return an error")
 	}
-	if len(notes) != 1 || notes[0] != "github(alpha): query failed" {
+	if len(notes) != 1 || notes[0] != "github(alpha): query failed (run forgectl doctor for the cause)" {
 		t.Fatalf("notes = %v, want the categorical owner note", notes)
 	}
 }
@@ -305,7 +305,7 @@ func TestInventory_KeepsOwnerNotesAndOneAggregateNote(t *testing.T) {
 			aggregates++
 		}
 	}
-	want := []string{"github(alpha): query failed", "github(beta): query failed"}
+	want := []string{"github(alpha): query failed (run forgectl doctor for the cause)", "github(beta): query failed (run forgectl doctor for the cause)"}
 	if len(notes) != 3 || notes[0] != want[0] || notes[1] != want[1] {
 		t.Fatalf("notes = %v, want the two owner notes in order plus one aggregate", notes)
 	}

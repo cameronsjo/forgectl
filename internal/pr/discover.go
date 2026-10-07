@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/ghfail"
 )
 
 // PR is one open pull request surfaced by the discovery layer — the rich type
@@ -120,7 +122,7 @@ func (c *Client) PRs(ctx context.Context) ([]PR, []string, error) {
 			// extension in between chooses. These notes are printed to a terminal, so interpolating
 			// %v would hand that writer the operator's screen.
 			slog.Warn("PR query degraded.", "query", res.label, "error", res.err)
-			notes = append(notes, fmt.Sprintf("%s: query failed", res.label))
+			notes = append(notes, ghfail.Note(res.label, res.err, c.githubHost))
 			continue
 		}
 		if res.truncated {
@@ -181,7 +183,7 @@ func (c *Client) Dash(ctx context.Context) (Dashboard, []string, error) {
 			// Categorical note, raw cause to the log only — same
 			// subprocess-stderr reasoning as PRs above.
 			slog.Warn("Dashboard section degraded.", "section", res.label, "error", res.err)
-			notes = append(notes, fmt.Sprintf("%s: query failed", res.label))
+			notes = append(notes, ghfail.Note(res.label, res.err, c.githubHost))
 			continue
 		}
 		if res.truncated {

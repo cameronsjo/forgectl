@@ -169,9 +169,12 @@ func TestInventory_DegradesWhenHostErrors(t *testing.T) {
 	if len(repos) != 1 || repos[0].Host != "git.sjo.lol" {
 		t.Fatalf("expected the surviving gitea repo, got %+v", repos)
 	}
-	if len(notes) != 1 {
-		t.Fatalf("expected one degradation note, got %v", notes)
+	// One note for the owner lookup, with its categorical reason, then the
+	// source note.
+	if len(notes) != 2 || !strings.HasPrefix(notes[0], "github owners: query failed (") {
+		t.Fatalf("expected the owner-lookup note and one source note, got %v", notes)
 	}
+	notes = notes[1:]
 	// The note names the SOURCE (which enumerator failed), not a hostname —
 	// a GitHub run that errors produced no rows, so it has no host to name.
 	if !strings.Contains(notes[0], "github") {
