@@ -140,8 +140,8 @@ No merge, PR status, or close after merge (P4). No intake from GitHub or the boa
 
 ### T8.0: worker command allow list (one PR, first)
 
-- [ ] Add the static `permissions.allow` list from the Autonomy decision to the worker's inline `--settings` (`workerClaudeSettings`, `internal/launch/invocation.go`). Rules: `Bash(go test:*)`, `Bash(go build:*)`, `Bash(make:*)`, `Bash(git add:*)`, `Bash(git commit:*)`, `Bash(git push:*)`, `Bash(gh pr create:*)`, `Bash(gh pr view:*)`.
-- [ ] Update the ADR-0010 amendment and `docs/herdr.md` ("What a claude worker loads") to name the list and the two limits above.
+- [x] Add the static `permissions.allow` list from the Autonomy decision to the worker's inline `--settings` (`workerClaudeEditSettings`, `internal/launch/invocation.go`), for `acceptEdits` workers only. Rules use the word-boundary form: `Bash(go test *)`, `Bash(go build *)`, `Bash(make *)`, `Bash(git add *)`, `Bash(git commit *)`, `Bash(git push *)`, `Bash(gh pr create *)`, `Bash(gh pr view *)`.
+- [x] Update the ADR-0010 amendment and `docs/herdr.md` ("What a claude worker loads") to name the list and the two limits above.
 - [ ] Tests pin the settings JSON. Live check: a worker runs `go test` and `git commit` with no prompt, and `gh pr merge` still prompts.
 - [ ] Security review (Opus) of the diff before merge; this loosens a default.
 
@@ -197,6 +197,7 @@ Panel: plan-reviewer, security-posture-reviewer (Opus), operability-reviewer, ca
 - **"intent → act → confirm" per step** became a launch-stage reconcile table plus a kill-at-each-stage test, because the existing launch already writes its ledger row before each step.
 - **Retry cap is 3 per row, not per step,** and only for failures that created nothing.
 - **Autonomy allow list (T8.0) added at approval,** per the Autonomy decision; it is the only change to worker posture in P2.
+- **T8.0: the allow list reaches `acceptEdits` workers only.** The first cut put it in the one settings value every worker gets; the worker-floor test showed `plan`, `default` and `manual` workers receiving it, which would let a plan worker commit and push unprompted. A second constant carries the list, chosen by the leading `--permission-mode` value. Rules use `Bash(<cmd> *)`, which enforces a word boundary, rather than the `:*` form.
 - **P7a (skill enqueue step) ships separately** in `cameronsjo/cadence` after T8.2; until then the coordinator calls `surface enqueue` directly.
 
 ## Learnings
