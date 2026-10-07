@@ -394,8 +394,8 @@ func TestDash_ActiveReviewsNoteIsCategorical(t *testing.T) {
 func assertCategoricalPRNotes(t *testing.T, notes []string) {
 	t.Helper()
 	for _, n := range notes {
-		if !strings.HasSuffix(n, ": query failed") {
-			t.Errorf("note %q is not categorical; want a %q suffix", n, ": query failed")
+		if !strings.HasSuffix(n, ": query failed (run forgectl doctor for the cause)") {
+			t.Errorf("note %q is not categorical; want the fixed fallback reason", n)
 		}
 	}
 	assertNoPRNoteLeaks(t, notes)
@@ -699,7 +699,8 @@ func TestPRs_NotesFollowQueryOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PRs: %v", err)
 	}
-	want := []string{"authored: query failed", "assigned: query failed", "review-requested: query failed"}
+	const f = ": query failed (run forgectl doctor for the cause)"
+	want := []string{"authored" + f, "assigned" + f, "review-requested" + f}
 	if strings.Join(notes, "|") != strings.Join(want, "|") {
 		t.Errorf("notes = %q, want %q", notes, want)
 	}
@@ -715,7 +716,32 @@ func TestDash_NotesFollowSectionOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dash: %v", err)
 	}
-	want := []string{"awaiting-you: query failed", "your-open: query failed"}
+	const f = ": query failed (run forgectl doctor for the cause)"
+	want := []string{"awaiting-you" + f, "your-open" + f}
+	if strings.Join(notes, "|") != strings.Join(want, "|") {
+		t.Errorf("notes = %q, want %q", notes, want)
+	}
+}
+
+// TestDash_NotSignedInNoteNamesTheFix: when gh has no credential (it exits
+// 4), each section's note says so and names `gh auth login`, rather than a
+// bare "query failed" the operator must decode with doctor (forgectl#1148).
+func TestDash_NotSignedInNoteNamesTheFix(t *testing.T) {
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "gh" && len(args) >= 2 && args[0] == "search" && args[1] == "prs" {
+			return "", &exec.CommandError{Name: "gh", Stderr: "To get started with GitHub CLI, please run:  gh auth login", ExitCode: 4, Err: errors.New("exit status 4")}
+		}
+		return "", nil
+	}}
+	client := New(fake, WithSessionsDir(t.TempDir()))
+	_, notes, err := client.Dash(context.Background())
+	if err != nil {
+		t.Fatalf("Dash: %v", err)
+	}
+	want := []string{
+		"awaiting-you: query failed (gh is not signed in to github.com; run gh auth login)",
+		"your-open: query failed (gh is not signed in to github.com; run gh auth login)",
+	}
 	if strings.Join(notes, "|") != strings.Join(want, "|") {
 		t.Errorf("notes = %q, want %q", notes, want)
 	}

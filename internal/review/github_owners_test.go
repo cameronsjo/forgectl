@@ -204,10 +204,10 @@ func TestGitHubItems_FoldsInOwnerOrderRegardlessOfCompletion(t *testing.T) {
 		t.Fatal("every query failing must be an error")
 	}
 	want := []string{
-		"issues(alpha): query failed",
-		"prs(alpha): query failed",
-		"issues(beta): query failed",
-		"prs(beta): query failed",
+		"issues(alpha): query failed (run forgectl doctor for the cause)",
+		"prs(alpha): query failed (run forgectl doctor for the cause)",
+		"issues(beta): query failed (run forgectl doctor for the cause)",
+		"prs(beta): query failed (run forgectl doctor for the cause)",
 	}
 	if len(notes) != len(want) {
 		t.Fatalf("notes = %v, want %v", notes, want)
@@ -247,7 +247,7 @@ func TestGitHubItems_PartialFailureKeepsHealthyRows(t *testing.T) {
 	if len(items) != 1 {
 		t.Errorf("healthy leg's rows must survive; got %d", len(items))
 	}
-	if len(notes) != 1 || notes[0] != "issues(cameronsjo): query failed" {
+	if len(notes) != 1 || notes[0] != "issues(cameronsjo): query failed (run forgectl doctor for the cause)" {
 		t.Fatalf("notes = %v, want the categorical issues note", notes)
 	}
 }

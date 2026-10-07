@@ -53,13 +53,13 @@ Rows you've marked reviewed are dimmed (new activity auto-un-dims them).`,
 			_, _ = fmt.Fprintln(out)
 
 			_, _ = fmt.Fprintln(out, styles.Accent.Render("awaiting your review"))
-			if err := renderPRTable(out, errOut, dash.AwaitingYou, store, styles.Muted); err != nil {
+			if err := renderPRTable(out, errOut, dash.AwaitingYou, store, styles.Muted, failedQueries(notes, "awaiting-you"), 1); err != nil {
 				return err
 			}
 			_, _ = fmt.Fprintln(out)
 
 			_, _ = fmt.Fprintln(out, styles.Accent.Render("your open PRs"))
-			return renderPRTable(out, errOut, dash.YourOpen, store, styles.Muted)
+			return renderPRTable(out, errOut, dash.YourOpen, store, styles.Muted, failedQueries(notes, "your-open"), 1)
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false,

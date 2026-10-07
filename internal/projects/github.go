@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/ghfail"
 	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -39,7 +40,7 @@ func githubList(ctx context.Context, run exec.Runner, configured []string, host 
 	owners, err := githubauth.ResolveOwners(ctx, run, configured, host)
 	if err != nil {
 		slog.Warn("Failed to resolve GitHub owners.", "configured", len(configured), "error", err)
-		return nil, nil, err
+		return nil, []string{ownersNote(err, host)}, err
 	}
 
 	results := fanOut(owners, func(owner string) ownerListResult {
@@ -55,7 +56,8 @@ func githubList(ctx context.Context, run exec.Runner, configured []string, host 
 	for i, res := range results {
 		if res.err != nil {
 			failed++
-			notes = append(notes, fmt.Sprintf("github(%s): query failed", owners[i]))
+			slog.Warn("GitHub owner query degraded.", "owner", owners[i], "error", res.err)
+			notes = append(notes, ghfail.Note("github("+owners[i]+")", res.err, host))
 			continue
 		}
 		repos = append(repos, res.repos...)
@@ -174,4 +176,14 @@ func cloneBareRepo(ctx context.Context, run exec.Runner, name, dest, host string
 	}
 	slog.Info("Successfully bare-cloned from GitHub.", "repo", name, "dest", dest)
 	return nil
+}
+
+// ownersNote is the note for a failed owner resolution. Only a failed login
+// lookup ran gh; anything else is the configured owner list being refused
+// before any query, which config.toml fixes and doctor does not check.
+func ownersNote(err error, host string) string {
+	if errors.Is(err, githubauth.ErrLoginUnavailable) {
+		return ghfail.Note("github owners", err, host)
+	}
+	return "github owners: configured owners refused (fix the owners list in config.toml)"
 }
