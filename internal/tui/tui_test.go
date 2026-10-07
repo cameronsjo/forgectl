@@ -110,13 +110,17 @@ func TestKillOthersEntersConfirm(t *testing.T) {
 	// "2" → Sessions (one session via fake), then "K" → kill-others confirm form
 	// with the right pending op + target. (Driving the huh form to completion is
 	// out of scope; this locks the wiring.)
+	rows := oneSessionRow + "\n" + "123" + sep + "456" + sep + "$2" + sep + "beta" + sep +
+		"1" + sep + "0" + sep + "1700000001" + sep + "/tmp"
 	fake := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
-		return oneSessionRow, nil
+		return rows, nil
 	}}
 	m := sized(newModel(context.Background(), tmux.New(fake), RunOptions{StartInTmux: true, NoIcons: true, Theme: theme.Default()}), 80, 24)
 
 	out, _ := m.Update(key("2"))
 	m = out.(model)
+	// Pin the target: K keeps the selected session, and the identity check below reads alpha.
+	m.l.Select(indexOfSession(m, "alpha"))
 	out, _ = m.Update(key("K"))
 	m = out.(model)
 
@@ -558,4 +562,29 @@ func TestKillOthersConfirmNamesTargets(t *testing.T) {
 	if strings.Contains(view, "ALL") {
 		t.Errorf("kill-others confirm still says ALL:\n%s", view)
 	}
+}
+
+// TestKillOthersNoOthersSkipsConfirm: with one session there is nothing to
+// kill, so the hub says so instead of prompting about zero sessions.
+func TestKillOthersNoOthersSkipsConfirm(t *testing.T) {
+	fake := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) { return oneSessionRow, nil }}
+	m := sized(newModel(context.Background(), tmux.New(fake), RunOptions{StartInTmux: true, NoIcons: true, Theme: theme.Default()}), 80, 24)
+	out, _ := m.Update(key("2"))
+	out, _ = out.(model).Update(key("K"))
+	got := out.(model)
+	if got.mode == formMode {
+		t.Fatalf("K with no other sessions opened a confirm:\n%s", got.View().Content)
+	}
+	if !strings.Contains(got.status, "no other sessions") {
+		t.Errorf("status = %q, want a no-other-sessions note", got.status)
+	}
+}
+
+func indexOfSession(m model, name string) int {
+	for i, li := range m.l.Items() {
+		if it, ok := li.(sessionItem); ok && it.s.Name == name {
+			return i
+		}
+	}
+	return 0
 }

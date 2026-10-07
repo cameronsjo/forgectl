@@ -790,7 +790,14 @@ func (m model) updateListKey(km tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			case "k":
 				return m.startConfirm(opKill, m.client.SessionIdentity(it.s), nil)
 			case "K":
-				return m.startConfirm(opKillOthers, m.client.SessionIdentity(it.s), m.otherSessionNames(it.s))
+				// The names come from the last refresh; the kill itself
+				// runs against the live set.
+				others := m.otherSessionNames(it.s)
+				if len(others) == 0 {
+					m.status = "no other sessions to kill"
+					return m, nil
+				}
+				return m.startConfirm(opKillOthers, m.client.SessionIdentity(it.s), others)
 			case "r":
 				return m.startRename(m.client.SessionIdentity(it.s))
 			}
