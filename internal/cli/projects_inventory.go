@@ -158,6 +158,10 @@ func loadInventoryTo(cmd *cobra.Command, client *projects.Client, stderr io.Writ
 		if interactive && errors.Is(err, context.Canceled) && ctx.Err() != nil && cmd.Context().Err() == nil {
 			return nil, held, huh.ErrUserAborted
 		}
+		// The notes are why the query failed (ErrNoSourceReadable says so),
+		// so they print now rather than being held for a picker that never
+		// opens.
+		renderDegradationNotes(cmd, notes)
 		return nil, held, err
 	}
 	if interactive {

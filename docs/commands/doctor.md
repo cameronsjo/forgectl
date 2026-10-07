@@ -13,6 +13,10 @@ Every check runs independently, so one failure never hides another. A check's
 configured on this machine). A machine that never set up blessed workflows (no
 trust anchor and no trust store) reports the `trust store` check as `skip`; a
 present-but-insecure anchor, or a store whose anchor is gone, is still `fail`.
+With no `config.toml`, the `config` check is `skip` (built-in defaults in use,
+hint `forgectl init`); a file that exists and parses is `ok`. When any check
+fails, the closing line names the failed checks, for example
+`Doctor found 1 problem: gh (each row's hint names the fix).`
 
 ## Exit codes
 

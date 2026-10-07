@@ -184,6 +184,11 @@ func checkConfig(d Deps) Check {
 	if pathErr != nil {
 		return Check{Name: "config", State: StateWarn, Detail: pathErr.Error(), Hint: "config directory could not be resolved"}
 	}
+	// No file is valid (built-in defaults), but it is not "present": a ✓ here
+	// told the operator a config existed when none did (forgectl#1149).
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		return Check{Name: "config", State: StateSkip, Detail: "not created yet; built-in defaults in use", Hint: "run `forgectl init` to scaffold one"}
+	}
 	return Check{Name: "config", State: StateOK, Detail: path}
 }
 

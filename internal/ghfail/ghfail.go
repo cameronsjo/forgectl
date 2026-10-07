@@ -55,6 +55,8 @@ var (
 )
 
 // causeNames are Categorized's fixed error texts.
+//
+//nolint:gosec // G101: category labels ("credential rejected"), not credentials
 var causeNames = map[Cause]string{
 	Other:         "unrecognized failure",
 	Missing:       "gh not installed",

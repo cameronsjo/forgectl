@@ -592,6 +592,11 @@ func (c *Client) localRepos(ctx context.Context) ([]Repo, error) {
 	return out, nil
 }
 
+// ErrNoSourceReadable is Inventory's error when no source answered: the local
+// walk, GitHub, and an installed Gitea all failed. An empty list then would
+// read as "you have no projects" when nothing was actually searched.
+var ErrNoSourceReadable = errors.New("no project source could be read (local, GitHub, Gitea); the notes above say why")
+
 // Inventory builds the unified cross-host project list: local clones merged with
 // every repo on GitHub and Gitea, deduped by Repo.Key() with the local clone
 // winning (it carries LocalPath + Status). The two remote lists are fetched
@@ -599,9 +604,10 @@ func (c *Client) localRepos(ctx context.Context) ([]Repo, error) {
 // contributes no rows and a human-readable note instead of failing the whole
 // call — so a partial outage still answers "where's my project?".
 //
-// Returns (repos, notes, err). err is non-nil only for a catastrophic local
-// failure that isn't a missing projects dir; notes carries per-host degradation
-// messages for the caller to surface on stderr.
+// Returns (repos, notes, err). err is ErrNoSourceReadable when no source
+// answered, and otherwise non-nil only for a catastrophic local failure that
+// isn't a missing projects dir; notes carries per-host degradation messages
+// for the caller to surface on stderr, and is returned with the error too.
 func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 	slog.Debug("Preparing to build inventory.", "projectsDir", c.Dir)
 	start := time.Now()
@@ -639,6 +645,9 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 		ch <- hostResult{sourceGitea, r, nil, e}
 	}()
 
+	// readable counts the sources that answered. An empty inventory from
+	// sources that all failed is not "you have no projects" (forgectl#1149).
+	readable := 0
 	local, err := c.localRepos(ctx)
 	if err != nil {
 		// A missing/unreadable projects dir shouldn't suppress the remote view —
@@ -651,6 +660,8 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 		slog.Warn("Failed to enumerate local repos.", "projectsDir", c.Dir, "error", err)
 		notes = append(notes, fmt.Sprintf("local: %v", err))
 		local = nil
+	} else {
+		readable++
 	}
 
 	// Collect first, fold second: the two fetches finish in whatever order the
@@ -683,7 +694,12 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 			continue
 		}
 		slog.Debug("Host succeeded.", "host", host, "count", len(res.repos))
+		readable++
 		remote = append(remote, res.repos...)
+	}
+	if readable == 0 {
+		slog.Warn("Every project source failed.", "notes", len(notes))
+		return nil, notes, ErrNoSourceReadable
 	}
 
 	seen := make(map[string]bool, len(local))

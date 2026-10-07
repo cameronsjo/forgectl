@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -1641,5 +1642,55 @@ func TestLocalNames_MatchesDiscoverWithoutSpawning(t *testing.T) {
 	}
 	if LocalNames(filepath.Join(tmp, "absent")) != nil {
 		t.Error("LocalNames of a missing root should be nil")
+	}
+}
+
+// TestInventory_EverySourceFailingIsAnError: a missing projects root, a
+// failing GitHub, and no Gitea used to come back as an empty inventory with
+// no error, which `projects list` printed as "0 projects" and exit 0
+// (forgectl#1149). It is ErrNoSourceReadable now, with every note kept.
+func TestInventory_EverySourceFailingIsAnError(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			switch name {
+			case "gh":
+				return "", errors.New("gh: not authenticated")
+			case "tea":
+				return "", &exec.CommandError{Name: "tea", ExitCode: -1, Err: osexec.ErrNotFound}
+			}
+			return "", nil
+		},
+	}
+	c := &Client{Dir: filepath.Join(t.TempDir(), "missing"), run: fake, gitBin: "git"}
+
+	repos, notes, err := c.Inventory(context.Background())
+	if !errors.Is(err, ErrNoSourceReadable) {
+		t.Fatalf("err = %v, want ErrNoSourceReadable", err)
+	}
+	if repos != nil {
+		t.Errorf("repos = %v, want none", repos)
+	}
+	if len(notes) == 0 || !strings.HasPrefix(notes[0], "local: projects directory not found") {
+		t.Errorf("notes = %v, want the local note first", notes)
+	}
+}
+
+// TestInventory_OneReadableSourceIsNotAnError: GitHub failing while the
+// local walk works is a partial inventory, not a failure.
+func TestInventory_OneReadableSourceIsNotAnError(t *testing.T) {
+	fake := &exec.FakeRunner{
+		RunFunc: func(name string, args []string) (string, error) {
+			switch name {
+			case "gh":
+				return "", errors.New("gh: not authenticated")
+			case "tea":
+				return "", &exec.CommandError{Name: "tea", ExitCode: -1, Err: osexec.ErrNotFound}
+			}
+			return "", nil
+		},
+	}
+	c := &Client{Dir: t.TempDir(), run: fake, gitBin: "git"}
+	if _, _, err := c.Inventory(context.Background()); err != nil {
+		t.Fatalf("a readable local root must keep the inventory partial, got %v", err)
 	}
 }
