@@ -244,3 +244,53 @@ func TestExitCodesDoc_AgreesWithClasses(t *testing.T) {
 		t.Error("docs/exit-codes.md names FORGECTL_EXIT_CODES; Phase 2 is deferred")
 	}
 }
+
+// TestExitTable_CompletionLeafArgCount: `completion <shell>` leaves are created
+// lazily, so they take the usage class at Execute time.
+func TestExitTable_CompletionLeafArgCount(t *testing.T) {
+	for _, args := range [][]string{{"completion", "bash", "x", "y"}, {"completion", "zsh", "--zz-no-such-flag"}} {
+		isolateJSONContractEnv(t)
+		_, err := executeCapturingStderr(t, args...)
+		if got := ExitCode(err); err == nil || got != exitUsage {
+			t.Errorf("%v: exit = %d (err %v), want %d", args, got, err, exitUsage)
+		}
+	}
+}
+
+// TestExitTable_ArgCountWalk: two stray positionals on every leaf. A leaf that
+// rejects them with a count error (the "; usage:" line nameUsageArgs adds)
+// exits 2, or 1 for an exception. Leaves that accept positionals, and
+// pass-through verbs, are outside the claim.
+func TestExitTable_ArgCountWalk(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	rejected := 0
+	var walk func(c *cobra.Command, path []string)
+	walk = func(c *cobra.Command, path []string) {
+		for _, sub := range c.Commands() {
+			p := append(append([]string(nil), path...), sub.Name())
+			if sub.HasSubCommands() {
+				walk(sub, p)
+				continue
+			}
+			if sub.DisableFlagParsing || sub.Hidden || p[0] == "launch" || p[0] == "k8s" {
+				continue
+			}
+			err := execRoot(t, append(append([]string(nil), p...), "zz1", "zz2")...)
+			if err == nil || !strings.Contains(err.Error(), "; usage: ") {
+				continue
+			}
+			rejected++
+			want := exitUsage
+			if p[0] == "tasks" || strings.Join(p, " ") == "env check" || strings.Join(p, " ") == "resume snapshot" {
+				want = exitFailed
+			}
+			if got := ExitCode(err); got != want {
+				t.Errorf("%v: exit = %d, want %d", p, got, want)
+			}
+		}
+	}
+	walk(root, nil)
+	if rejected < 20 {
+		t.Errorf("only %d leaves rejected stray arguments; the walk is not reaching the tree", rejected)
+	}
+}
