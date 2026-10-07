@@ -133,7 +133,7 @@ func runSurfaceClose(cmd *cobra.Command, deps module.Deps, opts closeOptions) er
 	if err := worker.ValidName(opts.Name); err != nil {
 		return WithExitCode(fmt.Errorf("name: %w", err), exitUsage)
 	}
-	w, err := openWorkerLedger(cmd, deps, opts.Repo)
+	w, err := openWorkerLedger(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo)
 	if err != nil {
 		return err
 	}

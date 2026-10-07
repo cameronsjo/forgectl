@@ -124,7 +124,7 @@ func runSurfaceBrief(cmd *cobra.Command, deps module.Deps, opts briefOptions) er
 	if err := worker.CheckBrief(text, worker.ViaTyped); err != nil {
 		return WithExitCode(err, exitUsage)
 	}
-	w, err := openWorker(cmd, deps, opts.Repo, opts.Name)
+	w, err := openWorker(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo, opts.Name)
 	if err != nil {
 		return err
 	}

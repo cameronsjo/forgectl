@@ -147,11 +147,11 @@ No merge, PR status, or close after merge (P4). No intake from GitHub or the boa
 
 ### T8.1: cobra-free worker operations (one PR)
 
-- [ ] Give launch, screen read, and ledger open an `io.Writer` in place of `cmd` (`surface_ready.go:144`, `surface_list.go:118`, `surface_worker.go:137`).
-- [ ] Split `launchBrief` so an in-process caller passes brief text directly; `readBriefArg`'s `@path` handling stays CLI-only.
-- [ ] Return the ledger row the attempt left alongside the error, so a caller can tell a failure before creation from one after.
-- [ ] Keep `buildWorkerInvocation` and the `!built.Worker` refusal on the in-process path. Test: a non-worker invocation is refused, and a sentinel env var set on the caller does not reach the worker's `Invocation.Env`.
-- [ ] No behavior change for the CLI; existing tests stay green.
+- [x] Give launch, screen read, and ledger open an `io.Writer` in place of `cmd` (`surface_ready.go:144`, `surface_list.go:118`, `surface_worker.go:137`).
+- [x] Split `launchBrief` so an in-process caller passes brief text directly; `readBriefArg`'s `@path` handling stays CLI-only.
+- [x] Return the ledger row the attempt left alongside the error, so a caller can tell a failure before creation from one after.
+- [x] Keep `buildWorkerInvocation` and the `!built.Worker` refusal on the in-process path. Test: a non-worker invocation is refused, and a sentinel env var set on the caller does not reach the worker's `Invocation.Env`.
+- [x] No behavior change for the CLI; existing tests stay green.
 
 ### T8.2: queue store and verbs (one PR)
 
@@ -202,7 +202,11 @@ Panel: plan-reviewer, security-posture-reviewer (Opus), operability-reviewer, ca
 - **`auto` allowed for workers (2026-10-07, chief-of-staff, forgectl fix PR).** Cameron's work machine reported forgectl refusing `auto`; the worker cap is now `auto` (ADR-0010 amendment). A classifier block does not show a prompt: the worker gets the reason and tries another way. Claude Code falls back to a prompt after 3 blocks in a row or 20 in total, and only then does the drain see `needs-you`. The drain's design is unchanged; `[launch.worker]` stays `acceptEdits` by default.
 - **T8.0: the allow list reaches `acceptEdits` workers only.** The first cut put it in the one settings value every worker gets; the worker-floor test showed `plan`, `default` and `manual` workers receiving it, which would let a plan worker commit and push unprompted. A second constant carries the list, chosen by the leading `--permission-mode` value. Rules use `Bash(<cmd> *)`, which enforces a word boundary, rather than the `:*` form.
 - **P7a (skill enqueue step) ships separately** in `cameronsjo/cadence` after T8.2; until then the coordinator calls `surface enqueue` directly.
+- **T8.1 exports `worker.CreatedNothing`** (was `createdNothing`) so the drain can apply the retry rule to the row an attempt left; the in-process launch is `launchWorker(ctx, warn, deps, workerSpec, briefText) (workerAttempt, error)`, and `workerAttempt.createdNothing()` is the rule. A row that cannot be read back after an attempt counts as having created something, so the drain fails it rather than retrying.
+- **T8.1 routes the CLI launch through the same `attemptWorker` core as the drain,** so both paths share the `!built.Worker` refusal. The only CLI-side difference is one ledger read after the attempt, which changes no output or exit code.
 
 ## Learnings
+
+- `worker.AddWorktree` used to return an empty `Worktree` for a failure after `git worktree add` succeeded (path resolve, root check, `rev-parse HEAD`, a cancelled context). The attempt then read as having created nothing, so a drain would retry into a taken path and the ledger would lose the orphan. It now returns the path, and the failed row records it (T8.1 security review). T8.3: an `ErrNameTaken` attempt also reads as having created nothing, but the drain must mark the row `failed`, not retry.
 
 - A launch that fails in setup after `git worktree add` (here, the `$PATH` binary refusal) leaves a `failed` ledger row with a worktree, and the same name is then refused. Seen live during T8.0; it is the case T8.3's retry rule handles by failing at once.

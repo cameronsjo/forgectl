@@ -136,7 +136,7 @@ func insertRow(rows []Row, row Row) ([]Row, error) {
 		if r.Name != row.Name {
 			continue
 		}
-		if !createdNothing(r) {
+		if !CreatedNothing(r) {
 			return nil, ErrNameTaken
 		}
 		rows[i] = row
@@ -145,7 +145,10 @@ func insertRow(rows []Row, row Row) ([]Row, error) {
 	return append(rows, row), nil
 }
 
-func createdNothing(r Row) bool {
+// CreatedNothing reports whether r is a failed row that names no worktree,
+// workspace, or recovery tag: its launch left nothing behind, so a retry under
+// the same name may replace it.
+func CreatedNothing(r Row) bool {
 	return r.Stage == StageFailed && r.Worktree == "" && len(r.Ref) == 0 && r.Recovery == ""
 }
 

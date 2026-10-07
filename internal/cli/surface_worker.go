@@ -57,6 +57,9 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 	if err := led.Begin(worker.Row{Name: name, Branch: branch, StartedAt: s.now().UTC(), Brief: s.brief}); err != nil {
 		return workerLaunched{}, err
 	}
+	// created is a worktree path the attempt made, recorded on failure so the
+	// row never reads as having created nothing.
+	var created string
 	fail := func(err error) (workerLaunched, error) {
 		var recovery string
 		var launchErr *surface.LaunchError
@@ -67,6 +70,9 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 			r.Stage = worker.StageFailed
 			r.Failure = termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen)
 			r.Recovery = recovery
+			if created != "" && r.Worktree == "" {
+				r.Worktree = created
+			}
 		}); uerr != nil {
 			return workerLaunched{}, errors.Join(err, fmt.Errorf("record the failure in the worker ledger: %w", uerr))
 		}
@@ -75,6 +81,7 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 
 	wt, err := s.addWorktree(ctx)
 	if err != nil {
+		created = wt.Path
 		return fail(err)
 	}
 	if err := led.Update(name, func(r *worker.Row) {
@@ -132,69 +139,86 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 // sessionNamer is implemented by the herdr adapter.
 type sessionNamer interface{ Session() string }
 
-// runWorkerLaunch wires the real steps: herdr only, a validated name, the repo
-// top as the ledger key, and the worker posture floor on the invocation.
-func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOptions) error {
-	if opts.Backend != "herdr" {
-		return WithExitCode(errors.New("--worktree needs --surface herdr; workers run in herdr only"), exitUsage)
-	}
-	if err := worker.ValidName(opts.DisplayName); err != nil {
-		return WithExitCode(fmt.Errorf("--name: %w", err), exitUsage)
+// workerSpec is one worker launch: the CLI builds it from its flags, and an
+// in-process caller (the drain) builds it directly.
+type workerSpec struct {
+	target    string // repo, as a project name or path
+	name      string
+	branch    string
+	harness   string
+	allowPATH bool
+}
+
+// workerSetup is what a worker launch resolves before it writes anything.
+type workerSetup struct {
+	adapter  backend.Adapter
+	top      string
+	led      *worker.Ledger
+	self     string
+	injected map[string]string
+	unset    []string
+}
+
+// prepareWorker validates the name and resolves the herdr adapter, the repo
+// top, its ledger, and the injected environment. warn takes the adapter's
+// setup warnings.
+func prepareWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec workerSpec) (workerSetup, error) {
+	if err := worker.ValidName(spec.name); err != nil {
+		return workerSetup{}, WithExitCode(fmt.Errorf("--name: %w", err), exitUsage)
 	}
 
-	adapter, err := newHerdrAdapter(cmd.ErrOrStderr())
+	adapter, err := newHerdrAdapter(warn)
 	if err != nil {
-		return WithExitCode(err, exitUsage)
+		return workerSetup{}, WithExitCode(err, exitUsage)
 	}
 	namer, ok := adapter.(sessionNamer)
 	if !ok {
-		return errors.New("forgectl: the herdr adapter does not report its session")
+		return workerSetup{}, errors.New("forgectl: the herdr adapter does not report its session")
 	}
 
-	ctx := cmd.Context()
-	target, err := projects.New(deps.Runner).ResolveTarget(opts.Target)
+	target, err := projects.New(deps.Runner).ResolveTarget(spec.target)
 	if err != nil {
-		return WithExitCode(err, exitUsage)
+		return workerSetup{}, WithExitCode(err, exitUsage)
 	}
 	top, err := worker.RepoTop(ctx, deps.Runner, target)
 	if err != nil {
-		return WithExitCode(err, exitUsage)
+		return workerSetup{}, WithExitCode(err, exitUsage)
 	}
 	led, err := worker.Open(top, namer.Session())
 	if err != nil {
-		return err
+		return workerSetup{}, err
 	}
 
 	self, err := surface.SelfPath()
 	if err != nil {
-		return err
+		return workerSetup{}, err
 	}
 	injected, unset, err := injectedLaunchEnv(deps.Cfg)
 	if err != nil {
-		return WithExitCode(termsafe.Error(err), exitUsage)
+		return workerSetup{}, WithExitCode(termsafe.Error(err), exitUsage)
 	}
-	prompt, brief, err := launchBrief(opts.Brief, time.Now)
-	if err != nil {
-		return WithExitCode(err, exitUsage)
-	}
-	if opts.DryRun {
-		return planWorkerLaunch(cmd, deps, opts, top, led, workerPlanInputs{injected: injected, unset: unset, prompt: prompt, hasBrief: brief != nil, self: self})
-	}
-	service := surface.NewService(adapter, surface.Policy{AllowPATHBinary: opts.AllowPATH}, "")
+	return workerSetup{adapter: adapter, top: top, led: led, self: self, injected: injected, unset: unset}, nil
+}
 
-	launched, err := runWorkerSteps(ctx, led, opts.DisplayName, opts.Worktree, workerSteps{
+// steps wires the real launch steps. The build step always goes through
+// buildWorkerInvocation, which applies the worker floor and the environment
+// allowlist; runWorkerSteps refuses a build that was not made as a worker.
+// warn takes base-lookup and build notes.
+func (s workerSetup) steps(deps module.Deps, spec workerSpec, prompt string, brief *worker.Brief, warn io.Writer) workerSteps {
+	service := surface.NewService(s.adapter, surface.Policy{AllowPATHBinary: spec.allowPATH}, "")
+	return workerSteps{
 		addWorktree: func(ctx context.Context) (worker.Worktree, error) {
-			return worker.AddWorktree(ctx, deps.Runner, top, opts.DisplayName, opts.Worktree, func() (string, error) {
-				return workerBase(ctx, deps.Runner, top, cmd.ErrOrStderr())
+			return worker.AddWorktree(ctx, deps.Runner, s.top, spec.name, spec.branch, func() (string, error) {
+				return workerBase(ctx, deps.Runner, s.top, warn)
 			})
 		},
 		build: func(cwd string) (launch.BuiltInvocation, error) {
-			return buildWorkerInvocation(surfaceInvocationRequest(deps.Cfg.Launch, cwd, injected, unset, opts.Harness), prompt, worker.NewSessionID, cmd.ErrOrStderr())
+			return buildWorkerInvocation(surfaceInvocationRequest(deps.Cfg.Launch, cwd, s.injected, s.unset, spec.harness), prompt, worker.NewSessionID, warn)
 		},
 		launch: func(ctx context.Context, inv launch.Invocation) (backend.Ref, error) {
 			inv.Env = markHerdrPane(inv.Env)
-			req := surface.NewLaunchRequest(opts.DisplayName, inv)
-			req.Self = self
+			req := surface.NewLaunchRequest(spec.name, inv)
+			req.Self = s.self
 			result, err := service.Launch(ctx, req)
 			if err != nil {
 				return backend.Ref{}, err
@@ -203,16 +227,111 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 		},
 		now:   time.Now,
 		brief: brief,
-	})
+	}
+}
+
+// workerAttempt is what one launch attempt left behind.
+type workerAttempt struct {
+	launched workerLaunched
+	// row is the ledger row the attempt wrote, read back once it ended. It is
+	// nil when the attempt wrote no row: it failed before or at Begin (a
+	// taken name is refused there, and that row is not this attempt's).
+	row *worker.Row
+	// rowErr is set when the attempt wrote a row that could not be read back.
+	rowErr error
+}
+
+// createdNothing reports whether the attempt is known to have created
+// nothing: it wrote no row, or its row is a failed one naming no worktree,
+// workspace, or recovery tag (worker.CreatedNothing). A row that could not be
+// read back is not known to be empty.
+func (a workerAttempt) createdNothing() bool {
+	if a.rowErr != nil {
+		return false
+	}
+	return a.row == nil || worker.CreatedNothing(*a.row)
+}
+
+// beginWatch records whether Begin wrote the attempt's row.
+type beginWatch struct {
+	workerLedger
+	began bool
+}
+
+func (b *beginWatch) Begin(r worker.Row) error {
+	err := b.workerLedger.Begin(r)
+	b.began = err == nil
+	return err
+}
+
+// attemptWorker runs the steps and reads back the row the attempt left, so a
+// caller can tell a failure before anything was created from one after.
+func attemptWorker(ctx context.Context, led *worker.Ledger, name, branch string, s workerSteps) (workerAttempt, error) {
+	watch := &beginWatch{workerLedger: led}
+	launched, err := runWorkerSteps(ctx, watch, name, branch, s)
+	attempt := workerAttempt{launched: launched}
+	if !watch.began {
+		return attempt, err
+	}
+	rows, rerr := led.Rows()
+	if rerr != nil {
+		attempt.rowErr = rerr
+		return attempt, err
+	}
+	if r, ok := findRow(rows, name); ok {
+		attempt.row = &r
+	} else {
+		attempt.rowErr = fmt.Errorf("worker %q: the row this launch wrote is no longer in the ledger", name)
+	}
+	return attempt, err
+}
+
+// launchWorker is the in-process worker launch, for a caller with no cobra
+// command: the brief arrives as text, not as a --brief argument, and is
+// checked with worker.CheckBrief. warn takes the launch's setup warnings and
+// notes. It returns the attempt alongside any error.
+func launchWorker(ctx context.Context, warn io.Writer, deps module.Deps, spec workerSpec, briefText string) (workerAttempt, error) {
+	setup, err := prepareWorker(ctx, warn, deps, spec)
+	if err != nil {
+		return workerAttempt{}, err
+	}
+	prompt, brief, err := composeLaunchBrief(briefText, time.Now)
+	if err != nil {
+		return workerAttempt{}, err
+	}
+	return attemptWorker(ctx, setup.led, spec.name, spec.branch, setup.steps(deps, spec, prompt, brief, warn))
+}
+
+// runWorkerLaunch wires the real steps: herdr only, a validated name, the repo
+// top as the ledger key, and the worker posture floor on the invocation.
+func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOptions) error {
+	if opts.Backend != "herdr" {
+		return WithExitCode(errors.New("--worktree needs --surface herdr; workers run in herdr only"), exitUsage)
+	}
+	spec := workerSpec{target: opts.Target, name: opts.DisplayName, branch: opts.Worktree, harness: opts.Harness, allowPATH: opts.AllowPATH}
+	ctx, warn := cmd.Context(), cmd.ErrOrStderr()
+	setup, err := prepareWorker(ctx, warn, deps, spec)
+	if err != nil {
+		return err
+	}
+	prompt, brief, err := launchBrief(opts.Brief, time.Now)
+	if err != nil {
+		return WithExitCode(err, exitUsage)
+	}
+	if opts.DryRun {
+		return planWorkerLaunch(cmd, deps, opts, setup.top, setup.led, workerPlanInputs{injected: setup.injected, unset: setup.unset, prompt: prompt, hasBrief: brief != nil, self: setup.self})
+	}
+
+	attempt, err := attemptWorker(ctx, setup.led, spec.name, spec.branch, setup.steps(deps, spec, prompt, brief, warn))
 	if err != nil {
 		return err
 	}
 
 	out := cmd.OutOrStdout()
-	if _, err := fmt.Fprintln(out, safeTitle(launched.ref.String())); err != nil {
+	if _, err := fmt.Fprintln(out, safeTitle(attempt.launched.ref.String())); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintln(out, safePath(launched.worktree))
+	_, err = fmt.Fprintln(out, safePath(attempt.launched.worktree))
 	return err
 }
 
@@ -244,7 +363,8 @@ func buildWorkerInvocation(req launch.InvocationRequest, prompt string, newID fu
 
 // launchBrief turns --brief into the prompt argument and its ledger record:
 // the checked text with the report instruction under a fresh marker. An empty
-// flag is no brief.
+// flag is no brief. The @path form is read here only; an in-process caller
+// passes text to composeLaunchBrief.
 func launchBrief(arg string, now func() time.Time) (string, *worker.Brief, error) {
 	if arg == "" {
 		return "", nil, nil
@@ -253,6 +373,12 @@ func launchBrief(arg string, now func() time.Time) (string, *worker.Brief, error
 	if err != nil {
 		return "", nil, err
 	}
+	return composeLaunchBrief(text, now)
+}
+
+// composeLaunchBrief checks brief text and composes it with the report
+// instruction under a fresh marker. Empty text is refused by the check.
+func composeLaunchBrief(text string, now func() time.Time) (string, *worker.Brief, error) {
 	if err := worker.CheckBrief(text, worker.ViaLaunch); err != nil {
 		return "", nil, err
 	}

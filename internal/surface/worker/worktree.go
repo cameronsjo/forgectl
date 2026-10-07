@@ -118,16 +118,20 @@ func AddWorktree(ctx context.Context, run GitRunner, top, name, branch string, b
 		return Worktree{}, fmt.Errorf("worker: git worktree add: %w", err)
 	}
 
+	// The worktree exists from here on. A later failure still returns its
+	// path, so the caller records it and does not take the attempt for one
+	// that created nothing (a retry would find the path taken).
+	created := Worktree{Path: path, Branch: branch}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return Worktree{}, fmt.Errorf("worker: resolve created worktree: %w", err)
+		return created, fmt.Errorf("worker: resolve created worktree: %w", err)
 	}
 	if filepath.Dir(resolved) != filepath.Dir(path) {
-		return Worktree{}, fmt.Errorf("%w: the worktree resolved to %s, outside %s", ErrUnsafeWorktreeRoot, resolved, filepath.Dir(path))
+		return created, fmt.Errorf("%w: the worktree resolved to %s, outside %s", ErrUnsafeWorktreeRoot, resolved, filepath.Dir(path))
 	}
 	head, err := gitenv.Run(ctx, run, gitenv.Local, "-C", resolved, "rev-parse", "HEAD")
 	if err != nil {
-		return Worktree{}, fmt.Errorf("worker: read worktree HEAD: %w", err)
+		return Worktree{Path: resolved, Branch: branch}, fmt.Errorf("worker: read worktree HEAD: %w", err)
 	}
 	return Worktree{Path: resolved, Branch: branch, Base: strings.TrimSpace(head)}, nil
 }

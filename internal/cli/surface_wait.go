@@ -100,7 +100,7 @@ func runSurfaceWait(cmd *cobra.Command, deps module.Deps, opts waitOptions) erro
 	if opts.Timeout <= 0 || opts.Interval <= 0 || opts.Settle < 0 || opts.Quiet < opts.Settle {
 		return WithExitCode(errors.New("--timeout and --interval must be positive, and --quiet at least --settle"), exitUsage)
 	}
-	w, err := openWorker(cmd, deps, opts.Repo, opts.Name)
+	w, err := openWorker(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo, opts.Name)
 	if err != nil {
 		return err
 	}

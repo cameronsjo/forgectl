@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -97,7 +98,7 @@ func runSurfaceReady(cmd *cobra.Command, deps module.Deps, opts readyOptions) er
 	if opts.Timeout <= 0 || opts.Interval <= 0 {
 		return WithExitCode(errors.New("--timeout and --interval must be positive"), exitUsage)
 	}
-	w, err := openWorker(cmd, deps, opts.Repo, opts.Name)
+	w, err := openWorker(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo, opts.Name)
 	if err != nil {
 		return err
 	}
@@ -141,11 +142,12 @@ func (w *openedWorker) evaluate(s ready.Screen) ready.Verdict {
 
 // openWorker finds the launched worker name in repo's ledger and loads its
 // harness's predicates. Every failure is a usage or setup error (exit 2).
-func openWorker(cmd *cobra.Command, deps module.Deps, repo, name string) (*openedWorker, error) {
+// warn takes the herdr adapter's setup warnings.
+func openWorker(ctx context.Context, warn io.Writer, deps module.Deps, repo, name string) (*openedWorker, error) {
 	if err := worker.ValidName(name); err != nil {
 		return nil, WithExitCode(fmt.Errorf("name: %w", err), exitUsage)
 	}
-	wl, err := openWorkerLedger(cmd, deps, repo)
+	wl, err := openWorkerLedger(ctx, warn, deps, repo)
 	if err != nil {
 		return nil, err
 	}

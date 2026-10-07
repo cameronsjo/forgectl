@@ -284,3 +284,19 @@ func TestLaunchBrief(t *testing.T) {
 		t.Fatalf("an escape sequence passed: %v", err)
 	}
 }
+
+// TestComposeLaunchBrief: the in-process brief is text only. A leading @ is
+// not read as a path, and empty text is refused rather than meaning no brief.
+func TestComposeLaunchBrief(t *testing.T) {
+	now := func() time.Time { return time.Unix(100, 0) }
+	if _, _, err := composeLaunchBrief("", now); !errors.Is(err, worker.ErrInvalidBrief) {
+		t.Fatalf("empty text passed: %v", err)
+	}
+	p, b, err := composeLaunchBrief("@/etc/hosts", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b == nil || !strings.HasPrefix(p, "@/etc/hosts\n") {
+		t.Fatalf("prompt %q: the @ text was not kept as text", p)
+	}
+}

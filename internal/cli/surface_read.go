@@ -86,7 +86,7 @@ func runSurfaceRead(cmd *cobra.Command, deps module.Deps, opts readOptions) erro
 	if opts.Lines <= 0 || opts.Lines > maxReadLines {
 		return WithExitCode(fmt.Errorf("--lines must be 1-%d", maxReadLines), exitUsage)
 	}
-	w, err := openWorker(cmd, deps, opts.Repo, opts.Name)
+	w, err := openWorker(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo, opts.Name)
 	if err != nil {
 		return err
 	}
