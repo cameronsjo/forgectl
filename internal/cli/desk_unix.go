@@ -153,6 +153,35 @@ type deskAddJSON struct {
 	// Duplicate is true when an identical item was already waiting: nothing
 	// was queued, and the other fields describe that item.
 	Duplicate bool `json:"duplicate"`
+	// Signal says what happened to the operator signal on this call, so a
+	// caller can tell "nobody was told" from "already told": "sent" (this call
+	// sent it), "already-sent" (a duplicate whose signal went out earlier),
+	// "failed" (see warnings), or "none-enabled" (no signal can go out, so
+	// none was sent and the item is not marked signalled).
+	Signal string `json:"signal"`
+}
+
+// The values of deskAddJSON.Signal.
+const (
+	deskSignalSent        = "sent"
+	deskSignalAlready     = "already-sent"
+	deskSignalFailed      = "failed"
+	deskSignalNoneEnabled = "none-enabled"
+)
+
+// deskSignalState names what happened to the operator signal on a `desk add`:
+// whether this call tried (signalNow), how many signals failed, and whether
+// any signal can go out at all.
+func deskSignalState(signalNow bool, failures int, enabled bool) string {
+	switch {
+	case !signalNow:
+		return deskSignalAlready
+	case failures > 0:
+		return deskSignalFailed
+	case !enabled:
+		return deskSignalNoneEnabled
+	}
+	return deskSignalSent
 }
 
 func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o deskAddOpts) error {
@@ -209,16 +238,18 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 	for _, f := range signalFailures {
 		warnings = append(warnings, "operator signal failed: "+f)
 	}
-	if signalNow && len(signalFailures) == 0 {
-		// Recorded only when every enabled signal went out, so a failed one
-		// is retried by the next add of the same file.
+	signal := deskSignalState(signalNow, len(signalFailures), sig.enabled())
+	if signal == deskSignalSent {
+		// Recorded only when a signal went out and none failed, so a failed one
+		// is retried by the next add of the same file, and so is an item queued
+		// while no signal was enabled once one is turned on.
 		if err := d.MarkSignalled(a.Name); err != nil {
 			warnings = append(warnings, "could not record that the operator was signalled: "+termsafe.SafeLineMax(err.Error(), deskWhatCols))
 		}
 	}
 	out := cmd.OutOrStdout()
 	if o.asJSON {
-		return writeJSON(out, deskAddJSON{Name: a.Name, Kind: string(a.Kind), SHA256: a.SHA256, Path: a.Path, Warnings: warnings, Duplicate: duplicate})
+		return writeJSON(out, deskAddJSON{Name: a.Name, Kind: string(a.Kind), SHA256: a.SHA256, Path: a.Path, Warnings: warnings, Duplicate: duplicate, Signal: signal})
 	}
 	ew := &stickyWriter{w: cmd.ErrOrStderr()}
 	for _, w := range warnings {
@@ -230,9 +261,9 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 		switch {
 		case !signalNow:
 			ew.printf("note: %s is already waiting with this sha256; nothing was queued (--allow-duplicate queues another)\n", safeText(a.Name))
-		case len(signalFailures) == 0 && !sig.enabled():
+		case signal == deskSignalNoneEnabled:
 			ew.printf("note: %s is already waiting with this sha256; nothing was queued, and no operator signal is enabled, so none was sent (--allow-duplicate queues another)\n", safeText(a.Name))
-		case len(signalFailures) == 0:
+		case signal == deskSignalSent:
 			ew.printf("note: %s is already waiting with this sha256; nothing was queued, and the operator signal had not gone out, so it was sent now (--allow-duplicate queues another)\n", safeText(a.Name))
 		default:
 			// The failure itself is the warning line above, once; the note

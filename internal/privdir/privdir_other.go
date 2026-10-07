@@ -13,3 +13,6 @@ func Pin(Spec) (int, error) { return -1, ErrUnsupported }
 
 // Check is Pin's refusals without its writes; see the unix file.
 func Check(Spec) error { return ErrUnsupported }
+
+// OpenChecked is Check that keeps the descriptor; see the unix file.
+func OpenChecked(Spec) (int, error) { return -1, ErrUnsupported }

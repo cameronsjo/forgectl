@@ -202,9 +202,10 @@ Adding is safe to retry. When an item with the same kind and the same sha256
 (the hash after the WHAT and WHY lines are inserted, so the same file with the
 same --what and --why) is already waiting in pending/, add queues nothing. It
 sends the operator signal only if the first attempt never finished signalling
-(it died after queueing, or a signal failed; the item records signalled_at once
-every enabled signal went out), and otherwise signals nothing. It prints that
-item with duplicate=true and exits 0. In text mode a note on stderr says what
+(it died after queueing, a signal failed, or no signal was enabled: the item
+records signalled_at once a signal went out and none failed, so a retry after
+you turn one on sends it), and otherwise signals nothing. It prints that item
+with duplicate=true and exits 0. In text mode a note on stderr says what
 happened; with --json there is no note, and duplicate and warnings[] carry it.
 A retry after a timeout therefore finds the first attempt and does not leave
 it unannounced. An item that is running, done or skipped does not count: it is
@@ -224,7 +225,7 @@ unsafe --what/--why, a bad --name).`,
 	cmd.Flags().StringVar(&o.why, "why", "", "why it needs the operator, one line (required)")
 	cmd.Flags().BoolVar(&o.tty, "tty", false, "the script needs a terminal; it runs in the dashboard's pane")
 	cmd.Flags().StringVar(&o.name, "name", "", "file name for an item read from stdin (FILE -), e.g. deploy.sh")
-	cmd.Flags().BoolVar(&o.asJSON, "json", false, `print the queued item as {"name","kind","sha256","path","warnings","duplicate"} JSON; duplicate is true when an identical item was already waiting; signal warnings go in warnings[]`)
+	cmd.Flags().BoolVar(&o.asJSON, "json", false, `print the queued item as {"name","kind","sha256","path","warnings","duplicate","signal"} JSON; duplicate is true when an identical item was already waiting; signal is sent, already-sent, failed or none-enabled; signal warnings go in warnings[]`)
 	cmd.Flags().BoolVar(&o.allowDuplicate, "allow-duplicate", false, "queue the item even when an identical one is already waiting")
 	return cmd
 }
@@ -414,15 +415,21 @@ running/, done/, skipped/ in it) is not opened or created: prune prints
 "note: desk not found at <path>" on stderr and the empty result, exit 0, so a
 typo in --dir does not become a new desk and a quiet pruned=0.
 
+prune refuses a desk it cannot safely open, with or without --dry-run: a desk
+directory that is a symlink, not a directory, or owned by another user, or a
+pending/, running/, done/ or skipped/ that is a symlink, a file or unreadable.
+It says which and exits 1; nothing is deleted.
+
 --dry-run lists what prune would delete and deletes nothing. It uses the same
 selection, so the list is what a real prune removes right now. It also opens
 nothing for writing: it reads done/, skipped/ and running/ in place, with no
 chmod and no directories created, even in a directory that is not a desk (that
-reports found=false). With --json it prints
-{"dry_run","found","days","would_remove","items"}, each item
+reports found=false), and it makes the same refusals as above. With --json it
+prints {"dry_run","found","days","would_remove","items"}, each item
 {"state","name","newest"}; without it, {"removed","days","found"}.
 
-Exit codes: 0 pruned (maybe nothing); 1 a delete failed; 2 usage.`,
+Exit codes: 0 pruned (maybe nothing), or listed with --dry-run; 1 a delete
+failed, or the desk was refused (see above); 2 usage (--days below 1).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if days < 1 {

@@ -36,9 +36,12 @@ type signalRig struct {
 func newSignalRig(t *testing.T, cfg config.DeskConfig) *signalRig {
 	t.Helper()
 	r := &signalRig{runner: &exec.FakeRunner{}, herdr: &exec.FakeSensitiveRunner{}}
-	prev := deskMacNotify
+	prev, prevSupported := deskMacNotify, deskMacSupported
 	deskMacNotify = func(context.Context, module.Deps, string, string) error { r.mac++; return nil }
-	t.Cleanup(func() { deskMacNotify = prev })
+	// The stub stands in for darwin, where the notification posts; a test of
+	// the non-darwin case sets deskMacSupported itself.
+	deskMacSupported = func(module.Deps) bool { return true }
+	t.Cleanup(func() { deskMacNotify, deskMacSupported = prev, prevSupported })
 	r.deps = module.Deps{Theme: theme.Default(), Cfg: config.Config{Desk: cfg}, Runner: r.runner, SensitiveRunner: r.herdr}
 	return r
 }

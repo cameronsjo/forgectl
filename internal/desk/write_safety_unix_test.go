@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // tree lists every path under root, so a test can prove a preview wrote
@@ -359,4 +361,33 @@ func dirState(t *testing.T, dir string) string {
 		out += "|" + e.Name() + ":" + info.Mode().String() + ":" + info.ModTime().String()
 	}
 	return out
+}
+
+// bindRoot refuses a root opened on a different directory than the pinned
+// descriptor: the check PrunePlanAt and Open make so a swap between the two
+// opens is refused rather than read.
+func TestBindRootRefusesADifferentDirectory(t *testing.T) {
+	a, b := t.TempDir(), t.TempDir()
+	fd, err := unix.Open(a, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Close(fd) })
+	same, err := os.OpenRoot(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = same.Close() })
+	other, err := os.OpenRoot(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = other.Close() })
+
+	if err := bindRoot(fd, same, a); err != nil {
+		t.Errorf("a root on the pinned directory was refused: %v", err)
+	}
+	if err := bindRoot(fd, other, a); err == nil {
+		t.Error("a root on another directory was accepted")
+	}
 }
