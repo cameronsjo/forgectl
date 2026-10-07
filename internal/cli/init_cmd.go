@@ -296,6 +296,16 @@ const deskScaffold = `
 # notify_macos = true # macOS notification
 `
 
+const surfaceScaffold = `
+# ── surface: how "forgectl surface drain" paces and caps workers ────────────
+[surface.drain]
+# interval = "15s"   # time between ticks; at least 5s
+# cap = 3            # workers holding a slot at once, machine-wide (1-10)
+# per_repo = 1       # of those, how many in one repository
+# notify = true      # notify when a worker needs you
+# idle_minutes = 10  # at the prompt this long with no report: needs-you
+`
+
 // initSection is one scaffoldable block: a config.toml section (or, for the
 // empty name, the host-scalar preamble) plus its annotated template.
 type initSection struct {
@@ -338,6 +348,7 @@ var initSections = []initSection{
 	{"resume", "resume", resumeScaffold},
 	{"tasks", "tasks", tasksScaffold},
 	{"desk", "desk", deskScaffold},
+	{"surface", "surface", surfaceScaffold},
 }
 
 // initModule declares the full-scaffold convenience extension (ADR-0005). It

@@ -27,7 +27,7 @@ func TestMatches(t *testing.T) {
 }
 
 func TestMatchesExitedProcess(t *testing.T) {
-	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	cmd := exec.CommandContext(t.Context(), "/bin/sh", "-c", "exit 0")
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}

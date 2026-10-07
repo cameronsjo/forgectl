@@ -63,7 +63,13 @@ enqueue, dequeue and queue manage the machine's queue of briefs, which
 surface drain launches as claude workers in herdr:
 
   forgectl surface enqueue --repo forgectl --name fix-login --brief brief.md
-  forgectl surface queue`,
+  forgectl surface queue
+
+drain start runs the detached process that launches them; drain status,
+events and stop inspect and end it:
+
+  forgectl surface drain start
+  forgectl surface drain status`,
 	}
 	cmd.AddCommand(newSurfaceLaunchCmd(deps))
 	cmd.AddCommand(newSurfaceReadyCmd(deps))
@@ -75,6 +81,8 @@ surface drain launches as claude workers in herdr:
 	cmd.AddCommand(newSurfaceEnqueueCmd(deps))
 	cmd.AddCommand(newSurfaceDequeueCmd(deps))
 	cmd.AddCommand(newSurfaceQueueCmd(deps))
+	cmd.AddCommand(newSurfaceDrainCmd(deps))
+	cmd.AddCommand(newSurfaceDrainProcessCmd(deps))
 	return cmd
 }
 

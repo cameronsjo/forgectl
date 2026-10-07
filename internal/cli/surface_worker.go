@@ -41,6 +41,9 @@ type workerSteps struct {
 	// brief is the first brief's ledger record, or nil for a launch with
 	// none. It is written with the pending row, before anything starts.
 	brief *worker.Brief
+	// launchID is the queue claim the launch is for, written with the
+	// pending row; empty for a CLI launch.
+	launchID string
 }
 
 // workerLaunched is what a successful worker launch reports.
@@ -54,7 +57,7 @@ type workerLaunched struct {
 // StageFailed with whatever the earlier steps recorded, so the next
 // coordinator can find a worktree or workspace a dead launch left behind.
 func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, s workerSteps) (workerLaunched, error) {
-	if err := led.Begin(worker.Row{Name: name, Branch: branch, StartedAt: s.now().UTC(), Brief: s.brief}); err != nil {
+	if err := led.Begin(worker.Row{Name: name, Branch: branch, StartedAt: s.now().UTC(), Brief: s.brief, LaunchID: s.launchID}); err != nil {
 		return workerLaunched{}, err
 	}
 	// created is a worktree path the attempt made, recorded on failure so the
@@ -147,6 +150,8 @@ type workerSpec struct {
 	branch    string
 	harness   string
 	allowPATH bool
+	// launchID is the drain's queue claim; empty for the CLI.
+	launchID string
 }
 
 // workerSetup is what a worker launch resolves before it writes anything.
@@ -225,8 +230,9 @@ func (s workerSetup) steps(deps module.Deps, spec workerSpec, prompt string, bri
 			}
 			return result.Ref(), nil
 		},
-		now:   time.Now,
-		brief: brief,
+		now:      time.Now,
+		brief:    brief,
+		launchID: spec.launchID,
 	}
 }
 

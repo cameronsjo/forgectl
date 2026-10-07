@@ -95,7 +95,8 @@ func TestDrainEventsRotateAtTheCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Close() //nolint:errcheck // test
-	line := append(bytes.Repeat([]byte("a"), 1023), '\n') // 1 KiB
+	// One 1 KiB line.
+	line := append(bytes.Repeat([]byte("a"), 1023), '\n')
 	for range MaxDrainEventsBytes / len(line) {
 		if err := d.AppendEvent(lock, line); err != nil {
 			t.Fatal(err)

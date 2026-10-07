@@ -84,6 +84,9 @@ type Status struct {
 	Seq             int64          `json:"seq"`
 	Counts          map[string]int `json:"counts"`
 	Attention       []Attention    `json:"attention"`
+	// Error is the last I/O error a tick met (a queue, ledger or events
+	// write that failed), or empty.
+	Error string `json:"error,omitempty"`
 }
 
 // DecodeStatus parses drain.json, refusing unknown fields and versions.
@@ -198,4 +201,26 @@ func Since(events []Event, cursor int64) []Event {
 		}
 	}
 	return out
+}
+
+// EncodeStatus renders drain.json.
+func EncodeStatus(s Status) ([]byte, error) {
+	s.V = StatusVersion
+	// termsafe:allow-raw-json private 0600 drain.json read back by forgectl; status --json re-encodes through termsafe
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+// EncodeEvent renders one events line, with its trailing newline.
+func EncodeEvent(e Event) ([]byte, error) {
+	e.V = EventVersion
+	// termsafe:allow-raw-json private 0600 events file; drain events re-encodes or escapes every field it prints
+	data, err := json.Marshal(e)
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
 }
