@@ -155,9 +155,9 @@ No merge, PR status, or close after merge (P4). No intake from GitHub or the boa
 
 ### T8.2: queue store and verbs (one PR)
 
-- [ ] `queue.json` store in package `worker`, reusing `openVerified`, `readAt`, `writeAt` with its own name and lock.
-- [ ] `surface enqueue`, `dequeue`, `queue --json` with the rules above.
-- [ ] Tests: same brief no-op; different brief refused with both hashes; leading `@` refused; size cap refused before write; `dequeue` of a live row refused; `dequeue` then `enqueue` of a failed row works; unknown version refused; two claimers of one row, one wins.
+- [x] `queue.json` store in package `worker`, reusing `openVerified`, `readAt`, `writeAt` with its own name and lock.
+- [x] `surface enqueue`, `dequeue`, `queue --json` with the rules above.
+- [x] Tests: same brief no-op; different brief refused with both hashes; leading `@` refused; size cap refused before write; `dequeue` of a live row refused; `dequeue` then `enqueue` of a failed row works; unknown version refused; two claimers of one row, one wins.
 
 ### T8.3: the drain (one PR)
 
@@ -204,6 +204,10 @@ Panel: plan-reviewer, security-posture-reviewer (Opus), operability-reviewer, ca
 - **P7a (skill enqueue step) ships separately** in `cameronsjo/cadence` after T8.2; until then the coordinator calls `surface enqueue` directly.
 - **T8.1 exports `worker.CreatedNothing`** (was `createdNothing`) so the drain can apply the retry rule to the row an attempt left; the in-process launch is `launchWorker(ctx, warn, deps, workerSpec, briefText) (workerAttempt, error)`, and `workerAttempt.createdNothing()` is the rule. A row that cannot be read back after an attempt counts as having created something, so the drain fails it rather than retrying.
 - **T8.1 routes the CLI launch through the same `attemptWorker` core as the drain,** so both paths share the `!built.Worker` refusal. The only CLI-side difference is one ledger read after the attempt, which changes no output or exit code.
+- **T8.2: the row's "ledger key" is `session`,** the herdr session name, set at launch. With `repo` and `name` it names the ledger row (`worker.Open(repo, session)`), which the hashed ledger key alone cannot reopen.
+- **T8.2: a name is refused for another repository too,** not only for another brief: `name` is unique machine-wide, so a same-brief enqueue aimed at a second repository is an error naming the first.
+- **T8.2: the leading-`@` rule applies twice.** The brief text may not start with `@` (after leading whitespace), and `--brief` refuses an `@path` argument, since it takes a path and `surface launch --brief @file` would otherwise read the same.
+- **T8.2: every queue write drops the brief text of terminal rows** (`TrimTerminal`), so the drain needs no separate trim call. `--batch` takes the worker-name character set, up to 64 characters. `surface queue --json` omits brief text as the text output does.
 
 ## Learnings
 
