@@ -627,3 +627,56 @@ func TestSurfaceWorkerLaunchDryRunCreatesNothing(t *testing.T) {
 		t.Errorf("the dry run wrote to the state dir: %v", entries)
 	}
 }
+
+// TestSurfaceLaunchDryRunFromASubfolder is cadence-ecosystem#608 in the
+// preview: a claude launch aimed at a repository subfolder whose root carries
+// the .claude settings previews the root as run_directory, with the same move
+// notice on stderr as the launch, and --here previews the target itself.
+func TestSurfaceLaunchDryRunFromASubfolder(t *testing.T) {
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil { //nolint:gosec // G306: a backend stub must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root, sub := settingsRootRepo(t)
+
+	deps := dryRunDeps(t)
+	deps.Cfg.Launch.Defaults = config.LaunchDefaults{Harness: "claude", BinaryPath: stubHarness(t)}
+
+	run := func(args ...string) (string, string, error) {
+		cmd := newSurfaceLaunchCmd(deps)
+		var o, e bytes.Buffer
+		cmd.SetOut(&o)
+		cmd.SetErr(&e)
+		cmd.SetArgs(args)
+		err := cmd.ExecuteContext(t.Context())
+		return o.String(), e.String(), err
+	}
+
+	out, stderr, err := run(sub, "--surface", "tmux", "--dry-run", "--json")
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	if got["target"] != sub || got["run_directory"] != root {
+		t.Errorf("target/run_directory = %v/%v, want %s/%s", got["target"], got["run_directory"], sub, root)
+	}
+	if !strings.Contains(stderr, "forgectl: starting claude in") {
+		t.Errorf("stderr = %q, want the move notice", stderr)
+	}
+
+	out, stderr, err = run(sub, "--surface", "tmux", "--dry-run", "--here")
+	if err != nil {
+		t.Fatalf("dry run --here: %v", err)
+	}
+	if !strings.Contains(out, "run_directory="+sub+"\n") {
+		t.Errorf("--here preview does not start in the target:\n%s", out)
+	}
+	if stderr != "" {
+		t.Errorf("--here: stderr = %q, want nothing", stderr)
+	}
+}

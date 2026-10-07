@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -75,6 +76,7 @@ func newSurfaceLaunchCmd(deps module.Deps) *cobra.Command {
 		worktree    string
 		harness     string
 		brief       string
+		here        bool
 		dryRun      bool
 		asJSON      bool
 	)
@@ -89,6 +91,13 @@ The target is a project name or a path. A bare name is looked up beneath the
 projects root and must match exactly — an ambiguous name is refused rather than
 guessed at, because guessing means opening a session in the wrong repository.
 A path may be anywhere, because naming it is the choice being made explicitly.
+
+A claude session aimed at a subfolder of a git repository starts at the
+repository root when the root has .claude/settings.json or
+.claude/settings.local.json and the subfolder has neither, because Claude Code
+reads those settings only from the directory it starts in. The launch profile
+is still the target's. After a move, relative paths in a prompt resolve
+against the root; --here starts the session in the target itself.
 
 With --worktree <branch> (herdr only, --name required) the launch starts a
 coordinator worker instead: a git worktree at <repo>/.claude/worktrees/<name>,
@@ -135,6 +144,7 @@ and absent otherwise. --json needs --dry-run.
 				Worktree:    worktree,
 				Harness:     harness,
 				Brief:       brief,
+				Here:        here,
 				DryRun:      dryRun,
 				JSON:        asJSON,
 			})
@@ -157,12 +167,14 @@ and absent otherwise. --json needs --dry-run.
 		"start a worker on this branch in its own git worktree under <repo>/.claude/worktrees/<name> (herdr only; --name required)")
 	cmd.Flags().StringVar(&harness, "harness", "",
 		"run this harness instead of the one the directory's launch profile names (claude or codex)")
+	cmd.Flags().BoolVar(&here, "here", false,
+		"start claude in the target itself, not at its repository root when the .claude settings live there (claude only; no effect on workers or codex)")
 	cmd.Flags().StringVar(&brief, "brief", "",
 		"a worker's first brief, text or @file, passed as the harness's prompt argument (--worktree only)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"run the launch's checks and print what it would create, creating nothing")
 	cmd.Flags().BoolVar(&asJSON, "json", false,
-		`print the --dry-run preview as {"dry_run","surface","name","target","harness","worker"} JSON (needs --dry-run)`)
+		`print the --dry-run preview as {"dry_run","surface","name","target","harness","run_directory","worker"} JSON (needs --dry-run)`)
 
 	return cmd
 }
@@ -177,6 +189,7 @@ type surfaceLaunchOptions struct {
 	Worktree    string
 	Harness     string
 	Brief       string
+	Here        bool
 	DryRun      bool
 	JSON        bool
 }
@@ -233,7 +246,7 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 		return WithExitCode(termsafe.Error(err), 2)
 	}
 
-	built, err := launch.BuildInvocation(surfaceInvocationRequest(deps.Cfg.Launch, target, injected, unset, opts.Harness))
+	built, err := buildSurfaceLaunchInvocation(deps.Cfg.Launch, target, injected, unset, opts.Harness, opts.Here, cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}
@@ -245,13 +258,17 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 		if err := (surface.Policy{AllowPATHBinary: opts.AllowPATH}).AcceptBinary(built.Invocation.Binary, self); err != nil {
 			return err
 		}
-		return renderLaunchPlan(cmd.OutOrStdout(), launchPlan{
+		plan := launchPlan{
 			DryRun:  true,
 			Surface: opts.Backend,
 			Name:    displayNameFor(opts.DisplayName, target),
 			Target:  target,
 			Harness: built.Invocation.Harness,
-		}, opts.JSON)
+		}
+		if built.Invocation.Harness == "claude" {
+			plan.RunDirectory = built.Invocation.CWD
+		}
+		return renderLaunchPlan(cmd.OutOrStdout(), plan, opts.JSON)
 	}
 
 	service := surface.NewService(adapter, surface.Policy{AllowPATHBinary: opts.AllowPATH}, "")
@@ -374,6 +391,25 @@ func displayNameFor(explicit, target string) string {
 		return explicit
 	}
 	return filepath.Base(target)
+}
+
+// buildSurfaceLaunchInvocation builds a non-worker surface launch. A claude
+// session aimed at a repository subfolder starts at the root, where its
+// .claude settings live, and the surface is created there
+// (cadence-ecosystem#608); here keeps it in the target. The move is said on
+// stderr, like the backend warnings: the manager shows the root, not the
+// directory that was named.
+func buildSurfaceLaunchInvocation(cfg config.LaunchConfig, target string, injected map[string]string, unset []string, harness string, here bool, stderr io.Writer) (launch.BuiltInvocation, error) {
+	req := surfaceInvocationRequest(cfg, target, injected, unset, harness)
+	req.StayInCWD = here
+	built, err := launch.BuildInvocation(req)
+	if err != nil {
+		return launch.BuiltInvocation{}, err
+	}
+	if dir := built.Invocation.CWD; dir != target {
+		_, _ = fmt.Fprintln(stderr, settingsRootNotice(target, dir))
+	}
+	return built, nil
 }
 
 // surfaceInvocationRequest is the one place a surface launch, ordinary or

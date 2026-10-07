@@ -92,9 +92,13 @@ type BinaryResolver func(harness string, defaults config.LaunchDefaults) (Resolv
 // and the resolver to use.
 type InvocationRequest struct {
 	Config config.LaunchConfig
-	// CWD is the directory whose profile applies AND the directory the harness
-	// runs in. There is deliberately no second caller-set cwd: two of them would
-	// permit resolving one project's posture and running it in another.
+	// CWD is the directory whose profile applies AND, for every harness but
+	// claude, the directory the harness runs in. There is deliberately no second
+	// caller-set cwd: two of them would permit resolving one project's posture
+	// and running it in another. A launch that starts a claude session runs in
+	// SettingsRoot(CWD) instead (runDirectory), which only ever moves it up to
+	// the root of the repository CWD is in, so the profile still comes from
+	// where the operator stood; StayInCWD turns that off.
 	CWD         string
 	Args        []string
 	BaseEnv     []string
@@ -114,6 +118,10 @@ type InvocationRequest struct {
 	// fields gives a codex override the codex values from [launch.defaults];
 	// the worker profile (T5) is what compares the two.
 	Harness string
+	// StayInCWD keeps a claude launch in CWD even when CWD is a subfolder of a
+	// repository whose root carries the .claude settings (SettingsRoot). It is
+	// the `--here` flag of `forgectl launch` and `forgectl surface launch`.
+	StayInCWD bool
 	// Worker marks a coordinator's worker launch. It applies a floor under
 	// the resolved posture; see applyWorkerFloor.
 	Worker bool
@@ -378,10 +386,11 @@ var ErrNoBinaryResolver = errors.New("launch: invocation request has no binary r
 
 // BuildInvocation reduces the launch config against req.CWD, chooses the argv
 // posture, resolves the binary, and merges the environment — returning data.
-// It starts no process, prints nothing, walks no project tree, and touches no
-// terminal surface; those belong to its callers. It does read the filesystem:
-// resolving the profile follows symlinks on req.CWD, and the default resolver
-// stats the binary it selects.
+// It starts no process, prints nothing, and touches no terminal surface; those
+// belong to its callers. It does read the filesystem: resolving the profile
+// follows symlinks on req.CWD, a claude launch looks above req.CWD for the
+// repository root's settings (runDirectory), and the default resolver stats the
+// binary it selects.
 //
 // Every refusal runs before the resolver, so a rejected invocation never
 // reports a binary-resolution problem it was not going to reach.
@@ -464,13 +473,22 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		base = workerBaseEnv(base)
 	}
 
+	env := MergeEnv(base, extra)
+	dir := runDirectory(req, posture)
+	if dir != req.CWD {
+		// The harness inherits PWD; left alone it would still name the
+		// subfolder, and a shell the session starts trusts PWD when it names
+		// the directory it is in.
+		env = MergeEnv(env, map[string]string{"PWD": dir})
+	}
+
 	return BuiltInvocation{
 		Invocation: Invocation{
 			Harness: profile.Harness,
 			Binary:  binary,
 			Args:    harnessArgs,
-			Env:     MergeEnv(base, extra),
-			CWD:     req.CWD,
+			Env:     env,
+			CWD:     dir,
 		},
 		Profile:   profile,
 		Posture:   posture,
@@ -478,6 +496,52 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		Worker:    req.Worker,
 		Notes:     notes,
 	}, nil
+}
+
+// runDirectory is the directory the harness runs in. Claude Code reads
+// .claude/settings*.json only from its launch directory, so a claude launch
+// from a repository subfolder moves to the repository root when the settings
+// live there (SettingsRoot).
+//
+// Only the postures that start a claude session move. Codex and Pi do not read
+// .claude. The two passthroughs (`claude mcp …`, `--help`, `agents --json`)
+// stay, because forgectl promises them byte-clean with nothing added, and a
+// subcommand such as `mcp add --scope project` writes into its cwd. A worker
+// stays too: it already starts at its worktree's root.
+//
+// A launch that continues or resumes a session (resumeFlags) never moves. Claude Code keeps
+// sessions per project directory, so `-c` from a subfolder run at the root
+// would silently pick up the root's latest session instead of the subfolder's.
+func runDirectory(req InvocationRequest, posture Posture) string {
+	if req.Worker || req.StayInCWD || resumesSession(req.Args) {
+		return req.CWD
+	}
+	switch posture {
+	case PostureClaudeSession, PostureClaudeBuilder, PostureClaudePrint, PostureClaudeAgents:
+		return SettingsRoot(req.CWD)
+	default:
+		return req.CWD
+	}
+}
+
+// resumeFlags are the claude flags that pick up an existing session rather
+// than start one: -c/--continue, -r/--resume, --from-pr (a session linked to a
+// PR), and --teleport (a cloud session). Read from `claude --help` on 2.1.292.
+var resumeFlags = []string{"-c", "--continue", "-r", "--resume", "--from-pr", "--teleport"}
+
+// resumesSession reports whether args continue or resume a claude session,
+// in any position before claude's own `--`. A token after `--` is a prompt.
+func resumesSession(args []string) bool {
+	for _, a := range args {
+		if a == "--" {
+			return false
+		}
+		name, _, _ := strings.Cut(a, "=")
+		if slices.Contains(resumeFlags, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // selectPosture routes args to the builder that owns them and reports which one

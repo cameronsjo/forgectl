@@ -29,6 +29,11 @@ type launchPlan struct {
 	// worker it is the repository; the harness starts in the new worktree.
 	Target  string `json:"target"`
 	Harness string `json:"harness"`
+	// RunDirectory is where a claude session would actually start: the
+	// target's repository settings root when the launch would move there
+	// (launch.SettingsRoot, cadence-ecosystem#608), otherwise Target. Present
+	// for a plain claude launch only, mirroring `launch which --json`.
+	RunDirectory string `json:"run_directory,omitempty"`
 	// Worker is set for a --worktree launch.
 	Worker *workerLaunchPlan `json:"worker,omitempty"`
 }
@@ -58,6 +63,9 @@ func renderLaunchPlan(out io.Writer, p launchPlan, asJSON bool) error {
 	w.printf("dry_run=true\nsurface=%s\nname=%s\ntarget=%s\nharness=%s\n",
 		termsafe.SafeLineMax(p.Surface, 64), termsafe.SafeLineMax(p.Name, 64),
 		safeColumnPath(p.Target), termsafe.SafeLineMax(p.Harness, 64))
+	if p.RunDirectory != "" {
+		w.printf("run_directory=%s\n", safeColumnPath(p.RunDirectory))
+	}
 	if wp := p.Worker; wp != nil {
 		w.printf("worktree=%s\nbranch=%s\nbranch_from=%s\nledger_row=%s\nbrief=%t\n",
 			safeColumnPath(wp.Worktree), termsafe.SafeLineMax(wp.Branch, 120), wp.BranchFrom, wp.LedgerRow, wp.Brief)
