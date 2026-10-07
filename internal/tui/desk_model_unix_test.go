@@ -1594,3 +1594,39 @@ func TestDesk_TimelineCloseMarksEverythingSeen(t *testing.T) {
 		t.Errorf("new after a look = %d, want 0", n)
 	}
 }
+
+// An item skipped as name-reused shares its name with an earlier run. r on
+// it says it did not run rather than show that run as its own (#1106), and
+// a rescan keeps the selection on the entry chosen, not the other one with
+// the same name.
+func TestDesk_TimelineNameReusedIsNotAnotherItemsRun(t *testing.T) {
+	h := newDeskHarness(t)
+	snap, _ := timelineSnapshot()
+	reused := item("15-merge-1169", desk.KindScript, desk.StateSkipped)
+	reused.Meta = desk.Meta{AddedAt: agoPtr(time.Minute), SkipReason: desk.SkipReused, SkippedAt: agoPtr(time.Minute)}
+	snap.Skipped = append(snap.Skipped, reused)
+	h.m.snap = snap
+	h.m.rows = deskRows(snap, deskNow)
+	h.press("t")
+	pick := func(kind rowKind) {
+		t.Helper()
+		for i, e := range deskTimeline(snap) {
+			if e.row.item.Name == "15-merge-1169" && e.row.kind == kind {
+				h.m.tl.cursor, h.m.tl.name = i, ""
+				h.m.syncTimeline()
+				return
+			}
+		}
+		t.Fatalf("no 15-merge-1169 entry of kind %v", kind)
+	}
+	pick(rowSkipped)
+	h.press("r")
+	if h.m.rv != nil || !strings.Contains(ansi.Strip(h.m.message), "did not run") {
+		t.Errorf("r on a name-reused skip: run view %v, message %q", h.m.rv != nil, ansi.Strip(h.m.message))
+	}
+	pick(rowDone)
+	h.m.syncTimeline() // a rescan
+	if e, _ := h.m.selectedEntry(); e.row.kind != rowDone {
+		t.Errorf("after a rescan the selection moved to the %v entry", e.row.kind)
+	}
+}

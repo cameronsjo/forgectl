@@ -1494,15 +1494,17 @@ func (m *deskModel) syncTimeline() {
 		return
 	}
 	entries := deskTimeline(m.snap)
+	// A name can be on two entries (a run in done/ and a later item skipped
+	// as name-reused), so the selection is the name and the kind of row.
 	if v.name != "" {
-		if i := slices.IndexFunc(entries, func(e tlEntry) bool { return e.row.item.Name == v.name }); i >= 0 {
+		if i := slices.IndexFunc(entries, func(e tlEntry) bool { return e.row.item.Name == v.name && e.row.kind == v.kind }); i >= 0 {
 			v.cursor = i
 		}
 	}
 	v.cursor = min(max(v.cursor, 0), max(len(entries)-1, 0))
 	v.name = ""
 	if len(entries) > 0 {
-		v.name = entries[v.cursor].row.item.Name
+		v.name, v.kind = entries[v.cursor].row.item.Name, entries[v.cursor].row.kind
 	}
 	_, v.offset = m.timeline().render()
 }
@@ -1514,6 +1516,17 @@ func (m deskModel) selectedEntry() (tlEntry, bool) {
 		return tlEntry{}, false
 	}
 	return entries[min(max(m.tl.cursor, 0), len(entries)-1)], true
+}
+
+// timelineRunView opens the run view for an entry that ran. One that did
+// not says so: its name may belong to another item's run (a name-reused
+// skip), which must not be shown as its own (#1106).
+func (m deskModel) timelineRunView(e tlEntry) (tea.Model, tea.Cmd) {
+	if !e.hasRun() {
+		m.message = m.styles().Muted.Render(safeMessage(itemLabel(e.row.item.Name) + " did not run, so there is no run to show · v shows its script"))
+		return m, nil
+	}
+	return m.openRunViewOf(e.row, true)
 }
 
 // timelineKey handles a key while the timeline is open. Nothing here runs or
@@ -1540,20 +1553,18 @@ func (m deskModel) timelineKey(key string) (tea.Model, tea.Cmd) {
 		if !ok {
 			return m, nil
 		}
-		if i := slices.IndexFunc(m.rows, func(r queueRow) bool { return r.item.Name == e.row.item.Name }); i >= 0 && e.row.kind == rowWaiting {
+		// What needs you is acted on from the dashboard: y on a waiting
+		// item's hash, s to clear a lost run.
+		if i := slices.IndexFunc(m.rows, func(r queueRow) bool { return r.item.Name == e.row.item.Name && r.kind == e.row.kind }); i >= 0 && e.needsYou() {
 			m.closeTimeline()
 			m.cursor = i
 			m.chooseSelection()
 			return m, nil
 		}
-		if e.hasRun() {
-			return m.openRunViewOf(e.row, true)
-		}
-		m.message = m.styles().Muted.Render(safeMessage(itemLabel(e.row.item.Name) + " did not run, so there is no run to show · v shows its script"))
-		return m, nil
+		return m.timelineRunView(e)
 	case "r":
 		if e, ok := m.selectedEntry(); ok {
-			return m.openRunViewOf(e.row, true)
+			return m.timelineRunView(e)
 		}
 		return m, nil
 	case "l":

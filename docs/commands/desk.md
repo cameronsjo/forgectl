@@ -101,7 +101,7 @@ desk timeline  ◌ 3 need you · ● 2 running · • 3 new                   19
 - Everything else follows newest first, grouped under Today, Yesterday and then the date. Each entry is placed at its latest moment: when it ended, started, was skipped or was queued.
 - An entry shows its WHAT, or its name when it has none. The line under it says what happened in plain words, such as `ran ok in 0:41`, `failed · exit 1 after 0:18`, `skipped by you: superseded` or `not run · its bytes changed after it was queued`.
 - A `new` badge marks entries that happened after you last closed the timeline. Until you close it once, that means after the dashboard started.
-- Nothing runs from the timeline. `enter` on an item that needs you returns to the dashboard with it selected, where `y` still acts only on the hash in the focus panel. On a run, `enter` (or `r`) opens the run view.
+- Nothing runs from the timeline. `enter` on an item that needs you returns to the dashboard with it selected, where `y` still acts only on the hash in the focus panel and `s` clears a lost run. On any other run, `enter` (or `r`) opens the run view.
 
 | Key | Action |
 |---|---|

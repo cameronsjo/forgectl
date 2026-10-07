@@ -248,10 +248,11 @@ func tlDay(now, t time.Time) string {
 }
 
 // deskTimelineView is the open timeline's state: the selected entry, by
-// name so a rescan keeps it, and the first line on screen.
+// name and kind so a rescan keeps it, and the first line on screen.
 type deskTimelineView struct {
 	cursor int
 	name   string
+	kind   rowKind
 	offset int
 }
 
