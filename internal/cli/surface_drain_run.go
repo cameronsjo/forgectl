@@ -41,16 +41,19 @@ type drainQueue interface {
 	RemoveIf(name string, match func(worker.QueueRow) bool) (worker.QueueRow, error)
 }
 
-// drainNotifier is told once each time a row enters needs-you, when
-// [surface.drain] notify is on. T8.4 supplies the real notifier (macOS, and
-// the worker's herdr pane from its ledger ref); until then it is a no-op.
+// drainNotifier signals the operator about a row's needs-you state. led is
+// the row's own ledger row (matched by launch id), whose ref names the
+// worker's pane. Each returns what failed; the drain records it as one error
+// event and carries on.
 type drainNotifier interface {
-	NeedsYou(ctx context.Context, row worker.QueueRow, reason string)
+	// NeedsYou is called once each time a row enters needs-you, when
+	// [surface.drain] notify is on.
+	NeedsYou(ctx context.Context, row worker.QueueRow, led worker.Row, reason string) error
+	// Cleared is called once each time a row leaves needs-you. It is not
+	// gated on notify: turning notify off must not strand a pane marked
+	// from before.
+	Cleared(ctx context.Context, row worker.QueueRow, led worker.Row) error
 }
-
-type noDrainNotifier struct{}
-
-func (noDrainNotifier) NeedsYou(context.Context, worker.QueueRow, string) {}
 
 // drainIO is everything a tick reads and writes, apart from the queue.
 type drainIO struct {
@@ -294,8 +297,28 @@ func (d *drainer) watch(ctx context.Context, rows []worker.QueueRow, ledgers map
 			continue // not written: keep the old memo so the change is retried
 		}
 		d.memo[q.Name] = m
-		if ok && c.Notify && d.settings.Notify {
-			d.io.notify.NeedsYou(ctx, written, written.LastError)
+		if !ok {
+			continue
+		}
+		// The notifier gets the row's own ledger row only: another launch's
+		// ref names another worker's pane.
+		own := l.Row
+		if l.State == drain.LedgerOther {
+			own = worker.Row{}
+		}
+		// Each call below happens once per state entry or exit, so a failure
+		// is one event, never one per tick.
+		if c.Notify && d.settings.Notify {
+			if err := d.io.notify.NeedsYou(ctx, written, own, written.LastError); err != nil {
+				d.event(drain.Event{Kind: drain.EventError, Name: written.Name, Repo: written.Repo, State: string(written.State),
+					Error: "needs-you notification: " + err.Error()})
+			}
+		}
+		if q.State == worker.QueueNeedsYou && written.State != worker.QueueNeedsYou {
+			if err := d.io.notify.Cleared(ctx, written, own); err != nil {
+				d.event(drain.Event{Kind: drain.EventError, Name: written.Name, Repo: written.Repo, State: string(written.State),
+					Error: "clear the needs-you pane state: " + err.Error()})
+			}
 		}
 	}
 	for _, q := range rows {
@@ -625,7 +648,7 @@ func realDrainIO(deps module.Deps, session string, emit func(drain.Event) error)
 			return herdr.CheckReady(ctx)
 		},
 		load:     drainLoadConfig,
-		notify:   noDrainNotifier{},
+		notify:   newNeedsYouNotifier(deps.Runner, session),
 		emit:     emit,
 		now:      time.Now,
 		launchID: newDrainLaunchID,

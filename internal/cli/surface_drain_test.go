@@ -45,12 +45,34 @@ type fakeDrain struct {
 	probe    func(q worker.QueueRow, led worker.Row) drain.Probe
 	launched []string
 	notified []string
-	events   []drain.Event
-	ids      int
+	cleared  []string
+	// notifyErr and clearErr are what NeedsYou and Cleared return.
+	notifyErr error
+	clearErr  error
+	events    []drain.Event
+	ids       int
+	t         *testing.T
 }
 
-func (f *fakeDrain) NeedsYou(_ context.Context, row worker.QueueRow, reason string) {
+// checkOwnLedger fails the test when the drain hands the notifier a ledger
+// row other than the queue row's own: a different row's ref would mark
+// another worker's pane.
+func (f *fakeDrain) checkOwnLedger(row worker.QueueRow, led worker.Row) {
+	if led.Name != "" && (led.Name != row.Name || led.LaunchID != row.LaunchID) {
+		f.t.Errorf("notifier for %s got ledger row %s (launch %q), want its own (launch %q)", row.Name, led.Name, led.LaunchID, row.LaunchID)
+	}
+}
+
+func (f *fakeDrain) NeedsYou(_ context.Context, row worker.QueueRow, led worker.Row, reason string) error {
+	f.checkOwnLedger(row, led)
 	f.notified = append(f.notified, row.Name+": "+reason)
+	return f.notifyErr
+}
+
+func (f *fakeDrain) Cleared(_ context.Context, row worker.QueueRow, led worker.Row) error {
+	f.checkOwnLedger(row, led)
+	f.cleared = append(f.cleared, row.Name)
+	return f.clearErr
 }
 
 func newFakeDrain(t *testing.T) (*fakeDrain, *drainer, *worker.Queue) {
@@ -60,7 +82,7 @@ func newFakeDrain(t *testing.T) (*fakeDrain, *drainer, *worker.Queue) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeDrain{now: drainT0}
+	f := &fakeDrain{now: drainT0, t: t}
 	f.launch = func(worker.QueueRow) drain.Attempt { return drain.Attempt{} }
 	f.probe = func(worker.QueueRow, worker.Row) drain.Probe { return drain.Probe{} }
 	io := drainIO{
@@ -775,6 +797,84 @@ func TestDrainNotifyOffSuppressesTheNotification(t *testing.T) {
 	}
 }
 
+// errorEvents counts the error events whose text starts with prefix.
+func errorEvents(f *fakeDrain, prefix string) int {
+	n := 0
+	for _, e := range f.events {
+		if e.Kind == drain.EventError && strings.HasPrefix(e.Error, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestDrainNotifyFailureIsOneEvent: a failed needs-you signal never fails
+// the tick, and is one error event per entry into needs-you, not one per
+// tick. Leaving needs-you clears the pane, once, and a failed clear is one
+// event too.
+func TestDrainNotifyFailureIsOneEvent(t *testing.T) {
+	f, d, q := newFakeDrain(t)
+	seedLive(t, q, "w", "/repo/a", worker.QueueLaunched, worker.StageLaunched)
+	f.notifyErr = errors.New("herdr pane state: refused")
+	f.clearErr = errors.New("herdr pane state: refused")
+	verdict := ready.StateBlocked
+	f.probe = func(worker.QueueRow, worker.Row) drain.Probe {
+		return drain.Probe{State: drain.ProbeRead, Verdict: ready.Verdict{State: verdict, Blocking: "permission prompt"}}
+	}
+	for range 3 {
+		d.tick(t.Context())
+	}
+	if r := rowNamed(t, q, "w"); r.State != worker.QueueNeedsYou {
+		t.Fatalf("row %s, want needs-you", r.State)
+	}
+	if n := errorEvents(f, "needs-you notification: "); len(f.notified) != 1 || n != 1 {
+		t.Fatalf("notified %v, %d error events; want one each", f.notified, n)
+	}
+	if len(f.cleared) != 0 {
+		t.Fatalf("cleared %v while still in needs-you", f.cleared)
+	}
+	verdict = ready.StateNotReady
+	for range 3 {
+		d.tick(t.Context())
+	}
+	if r := rowNamed(t, q, "w"); r.State != worker.QueueLaunched {
+		t.Fatalf("row %s, want launched", r.State)
+	}
+	if n := errorEvents(f, "clear the needs-you pane state: "); len(f.cleared) != 1 || n != 1 {
+		t.Fatalf("cleared %v, %d error events; want one each", f.cleared, n)
+	}
+}
+
+// TestDrainClearsWithNotifyOff: clearing is not gated on notify, so turning
+// it off cannot strand a pane marked from before.
+func TestDrainClearsWithNotifyOff(t *testing.T) {
+	f, d, q := newFakeDrain(t)
+	seedLive(t, q, "w", "/repo/a", worker.QueueNeedsYou, worker.StageLaunched)
+	off := false
+	f.cfg.Surface.Drain.Notify = &off
+	f.probe = func(worker.QueueRow, worker.Row) drain.Probe {
+		return drain.Probe{State: drain.ProbeRead, Verdict: ready.Verdict{State: ready.StateNotReady}}
+	}
+	d.tick(t.Context())
+	if r := rowNamed(t, q, "w"); r.State != worker.QueueLaunched || len(f.cleared) != 1 || len(f.notified) != 0 {
+		t.Fatalf("row %s, cleared %v, notified %v", r.State, f.cleared, f.notified)
+	}
+}
+
+// TestDrainClearsOnlyOnLeavingNeedsYou: a launched row that reports was
+// never marked, so nothing is released.
+func TestDrainClearsOnlyOnLeavingNeedsYou(t *testing.T) {
+	f, d, q := newFakeDrain(t)
+	seedLive(t, q, "w", "/repo/a", worker.QueueLaunched, worker.StageLaunched)
+	f.probe = func(worker.QueueRow, worker.Row) drain.Probe {
+		return drain.Probe{State: drain.ProbeRead, Report: true, Verdict: ready.Verdict{State: ready.StateReady}}
+	}
+	d.tick(t.Context())
+	if r := rowNamed(t, q, "w"); r.State != worker.QueueReported || len(f.cleared) != 0 {
+		t.Fatalf("row %s, cleared %v; want reported, nothing cleared", r.State, f.cleared)
+	}
+}
+
 // TestDrainSettlesClosedTerminalRows pins the Loop closer: a reported or
 // failed row reads closed once surface close closes or removes its ledger row.
 func TestDrainSettlesClosedTerminalRows(t *testing.T) {
@@ -833,6 +933,21 @@ func TestDrainDoesNotAdoptAnotherLaunch(t *testing.T) {
 	}
 	if w, c := rowNamed(t, q, "w"), rowNamed(t, q, "c"); w.State != worker.QueueClosed || c.State != worker.QueueQueued || c.LaunchID != "" {
 		t.Fatalf("w %s; c %s launch %q; want closed and requeued", w.State, c.State, c.LaunchID)
+	}
+}
+
+// TestDrainClearsWithoutAnotherLaunchsPane: a needs-you row whose ledger row
+// now belongs to another launch closes, and its release is not aimed at that
+// launch's pane (the fake fails the test on a mismatched ledger row).
+func TestDrainClearsWithoutAnotherLaunchsPane(t *testing.T) {
+	f, d, q := newFakeDrain(t)
+	f.herdrErr = errors.New("down")
+	enqueueAt(t, q, "w", "/repo/a", drainT0)
+	seedState(t, q, "w", worker.QueueNeedsYou)
+	seedLedger(t, "/repo/a", "w", "launch-someone-else", worker.StageLaunched, nil)
+	d.tick(t.Context())
+	if w := rowNamed(t, q, "w"); w.State != worker.QueueClosed || len(f.cleared) != 1 {
+		t.Fatalf("w %s, cleared %v; want closed and one release", w.State, f.cleared)
 	}
 }
 
