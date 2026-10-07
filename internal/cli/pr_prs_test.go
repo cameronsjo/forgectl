@@ -214,7 +214,7 @@ func TestRenderPRTable_VisiblyEscapesUnsafeTitlesAndKeepsThemDistinct(t *testing
 	}
 	store := pr.LoadReviewed(filepath.Join(t.TempDir(), "reviewed.json"))
 	var stdout, stderr bytes.Buffer
-	if err := renderPRTable(&stdout, &stderr, prs, store, theme.Theme{}.Styles().Muted, 0); err != nil {
+	if err := renderPRTable(&stdout, &stderr, prs, store, theme.Theme{}.Styles().Muted, 0, 1); err != nil {
 		t.Fatal(err)
 	}
 
@@ -243,7 +243,7 @@ func TestRenderPRTable_OrdinaryTitleIsByteStable(t *testing.T) {
 	}}
 	store := pr.LoadReviewed(filepath.Join(t.TempDir(), "reviewed.json"))
 	var stdout, stderr bytes.Buffer
-	if err := renderPRTable(&stdout, &stderr, prs, store, theme.Theme{}.Styles().Muted, 0); err != nil {
+	if err := renderPRTable(&stdout, &stderr, prs, store, theme.Theme{}.Styles().Muted, 0, 1); err != nil {
 		t.Fatal(err)
 	}
 	if got := termsafe.SafeLine(title); got != title {
@@ -259,7 +259,7 @@ func TestRenderPRTable_OrdinaryTitleIsByteStable(t *testing.T) {
 // clean inbox (forgectl#1149).
 func TestRenderPRTable_FailedQueryIsNotInboxZero(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if err := renderPRTable(&stdout, &stderr, nil, nil, theme.Theme{}.Styles().Muted, 1); err != nil {
+	if err := renderPRTable(&stdout, &stderr, nil, nil, theme.Theme{}.Styles().Muted, 1, 1); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := stderr.String(), "PRs not loaded: the query failed (see the note above)\n"; got != want {
@@ -282,5 +282,18 @@ func TestFailedQueries(t *testing.T) {
 	}
 	if got := failedQueries(notes, "your-open"); got != 0 {
 		t.Errorf("failedQueries(your-open) = %d, want 0", got)
+	}
+}
+
+// TestRenderPRTable_PartialFailureIsIncomplete: one of three queries failing
+// with the other two answering zero rows is an incomplete list, not "not
+// loaded".
+func TestRenderPRTable_PartialFailureIsIncomplete(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if err := renderPRTable(&stdout, &stderr, nil, nil, theme.Theme{}.Styles().Muted, 1, prQueryCount); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stderr.String(), "0 open PRs (0 reviewed), incomplete: 1 of 3 queries failed (see the notes above)\n"; got != want {
+		t.Errorf("count line = %q, want %q", got, want)
 	}
 }

@@ -520,13 +520,13 @@ func statusCleanHeadline(c statusCleanJSON) string {
 		formatBytes(c.TotalReclaimableBytes), c.Reclaimable, c.Skipped, termsafe.QuotePath(c.Root))
 }
 
-// statusBenchHeadline is the bench section's headline: each component's
-// state.
 // benchUnset reports whether no bench component is configured at all.
 func benchUnset(b bench.Report) bool {
 	return b.Hearth.State == bench.StateNotConfigured && b.Chronicle.State == bench.StateNotConfigured
 }
 
+// statusBenchHeadline is the bench section's headline: each component's
+// state.
 func statusBenchHeadline(b bench.Report) string {
 	parts := make([]string, 0, 2)
 	for _, c := range []bench.Component{b.Hearth, b.Chronicle} {

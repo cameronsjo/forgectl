@@ -63,6 +63,7 @@ func TestReasonHost(t *testing.T) {
 	cases := []struct{ host, want string }{
 		{"", "gh is not signed in to github.com; run gh auth login"},
 		{"github.example.com", "gh is not signed in to github.example.com; run gh auth login --hostname github.example.com"},
+		{" GHE.Example.com ", "gh is not signed in to ghe.example.com; run gh auth login --hostname ghe.example.com"},
 		{"evil\x1b[2J.com", "gh is not signed in to the GitHub host; run gh auth login"},
 	}
 	for _, tc := range cases {
@@ -81,6 +82,11 @@ func TestReasonTokenRejectedNamesTheVariable(t *testing.T) {
 	t.Setenv("GH_TOKEN", "x")
 	if got, want := Reason(rejected, ""), "github.com rejected the token in GH_TOKEN; replace it, or unset it and run gh auth login"; got != want {
 		t.Errorf("with GH_TOKEN set: %q, want %q", got, want)
+	}
+	// On another host the pinned runner scrubs the token variables, so gh
+	// sent its stored login and the variable is not the one to blame.
+	if got, want := Reason(rejected, "ghe.example.com"), "ghe.example.com rejected gh's credential; run gh auth login --hostname ghe.example.com"; got != want {
+		t.Errorf("enterprise host with GH_TOKEN set: %q, want %q", got, want)
 	}
 	t.Setenv("GH_TOKEN", "")
 	if got, want := Reason(rejected, ""), "github.com rejected gh's credential; run gh auth login"; got != want {

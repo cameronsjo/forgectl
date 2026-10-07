@@ -17,6 +17,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"regexp"
+	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -111,10 +112,13 @@ func Classify(err error) Cause {
 	return Other
 }
 
-// tokenEnvVars are the variables gh takes a credential from ahead of its
-// stored login. When one is set, `gh auth login` does not change what gh
-// sends, so the fix names the variable instead.
-var tokenEnvVars = []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}
+// tokenEnvVars are the variables gh sends to github.com ahead of its stored
+// login. When one is set, `gh auth login` does not change what gh sends, so
+// the fix names the variable instead. Only github.com is covered: on any
+// other host the pinned runner scrubs every token variable from gh's
+// environment (githubauth.Runner), so gh sent its stored login there, and
+// gh never sends GH_ENTERPRISE_TOKEN to github.com.
+var tokenEnvVars = []string{"GH_TOKEN", "GITHUB_TOKEN"}
 
 func tokenFromEnv() string {
 	for _, name := range tokenEnvVars {
@@ -136,6 +140,9 @@ const maxHostBytes = 253
 // exists, the command that fixes it. An empty host means github.com; a host
 // that is not a plain DNS name is rendered as "the GitHub host".
 func Reason(err error, host string) string {
+	// The configured value reaches here untrimmed; githubauth.ResolveHost
+	// normalizes it the same way before pinning gh to it.
+	host = strings.ToLower(strings.TrimSpace(host))
 	login := "gh auth login"
 	switch {
 	case host == "" || host == "github.com":
@@ -155,7 +162,7 @@ func Reason(err error, host string) string {
 	case NotSignedIn:
 		return fmt.Sprintf("gh is not signed in to %s; run %s", host, login)
 	case TokenRejected:
-		if name := tokenFromEnv(); name != "" {
+		if name := tokenFromEnv(); name != "" && host == "github.com" {
 			return fmt.Sprintf("%s rejected the token in %s; replace it, or unset it and run %s", host, name, login)
 		}
 		return fmt.Sprintf("%s rejected gh's credential; run %s", host, login)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	neturl "net/url"
 	"os"
@@ -373,7 +374,7 @@ func LocalNames(dir string) []string {
 // discoverCandidates is discovery's phase 1: the serial filesystem walk that
 // resolves every project's (name, dir) without spawning anything.
 func discoverCandidates(dir string) ([]discoverCandidate, error) {
-	if _, err := os.Stat(dir); err != nil {
+	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("projects directory not found: %s (set PROJECTS_DIR to the folder that holds your repos, or create it)", termsafe.QuotePath(dir))
 	}
 	entries, err := os.ReadDir(dir)
@@ -699,6 +700,10 @@ func (c *Client) Inventory(ctx context.Context) ([]Repo, []string, error) {
 	}
 	if readable == 0 {
 		slog.Warn("Every project source failed.", "notes", len(notes))
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// Keep the cancel or deadline visible to errors.Is.
+			return nil, notes, errors.Join(ErrNoSourceReadable, ctxErr)
+		}
 		return nil, notes, ErrNoSourceReadable
 	}
 

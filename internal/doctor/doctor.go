@@ -420,7 +420,7 @@ func checkTrustStore(d Deps) Check {
 	case err == nil:
 		return Check{Name: "trust store", State: StateOK, Detail: fmt.Sprintf("verified, %d enrolled key(s)", len(store.Keys))}
 	case errors.Is(err, bless.ErrTrustStoreMissing):
-		return Check{Name: "trust store", State: StateSkip, Detail: "trust store not found", Hint: "run `forgectl workflow trust init` to enroll a signing key, if you use blessed workflows"}
+		return Check{Name: "trust store", State: StateSkip, Detail: "trust store not found", Hint: "run `forgectl workflow trust rebuild` to recreate it from the installed anchor, if you use blessed workflows"}
 	case errors.Is(err, bless.ErrNoAnchor) && errors.Is(err, fs.ErrNotExist) && trustStoreAbsent(d):
 		// No anchor AND no store: blessed workflows were never set up here, so
 		// there is nothing to verify (forgectl#635). Any other anchor failure

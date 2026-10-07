@@ -40,7 +40,7 @@ func githubList(ctx context.Context, run exec.Runner, configured []string, host 
 	owners, err := githubauth.ResolveOwners(ctx, run, configured, host)
 	if err != nil {
 		slog.Warn("Failed to resolve GitHub owners.", "configured", len(configured), "error", err)
-		return nil, []string{ghfail.Note("github owners", err, host)}, err
+		return nil, []string{ownersNote(err, host)}, err
 	}
 
 	results := fanOut(owners, func(owner string) ownerListResult {
@@ -176,4 +176,14 @@ func cloneBareRepo(ctx context.Context, run exec.Runner, name, dest, host string
 	}
 	slog.Info("Successfully bare-cloned from GitHub.", "repo", name, "dest", dest)
 	return nil
+}
+
+// ownersNote is the note for a failed owner resolution. Only a failed login
+// lookup ran gh; anything else is the configured owner list being refused
+// before any query, which config.toml fixes and doctor does not check.
+func ownersNote(err error, host string) string {
+	if errors.Is(err, githubauth.ErrLoginUnavailable) {
+		return ghfail.Note("github owners", err, host)
+	}
+	return "github owners: configured owners refused (fix the owners list in config.toml)"
 }

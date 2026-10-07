@@ -3,6 +3,7 @@ package projects
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -359,5 +360,17 @@ func TestCloneRepo_ScrubsRepositoryVariablesFromGh(t *testing.T) {
 				t.Errorf("GH_HOST = %q, want the pin %q", c.Env["GH_HOST"], githubauth.DefaultHost)
 			}
 		})
+	}
+}
+
+// TestOwnersNote: a failed login lookup gets ghfail's categorical note; a
+// configured owner list refused before any query says to fix the config.
+func TestOwnersNote(t *testing.T) {
+	login := fmt.Errorf("%w: gh could not report the authenticated login", githubauth.ErrLoginUnavailable)
+	if got := ownersNote(login, "github.com"); got != "github owners: query failed (run forgectl doctor for the cause)" {
+		t.Errorf("login failure note = %q", got)
+	}
+	if got := ownersNote(errors.New("configured owner 1 is outside the allowed owner charset"), "github.com"); got != "github owners: configured owners refused (fix the owners list in config.toml)" {
+		t.Errorf("config refusal note = %q", got)
 	}
 }
