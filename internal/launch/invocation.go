@@ -232,11 +232,13 @@ const workerClaudeSettings = `{"useAutoModeDuringPlan":false,"permissions":{"den
 // every task, so it stops at a prompt only for the rest (atelier P2 autonomy
 // decision, 2026-10-07; ADR-0010). A plan, default or manual worker keeps
 // prompting for everything: the list would let a plan worker commit and push.
-// Merges and `gh api` are not on it and still prompt. Two limits: a prefix
-// rule cannot see a push's target, so `git push origin HEAD:main` matches
-// `git push *` and only a repository ruleset refuses it; and `go test` and
-// `make` run the repository's own code, which can do anything the operator's
-// identity can.
+// A merge or `gh api` typed as its own command still prompts. Two limits: a
+// prefix rule cannot see a push's target, so `git push origin HEAD:main`
+// matches `git push *` and only a repository ruleset refuses it; and four
+// listed commands can run any other command with no prompt, through code the
+// worker can write itself or through a flag: `go test` (test code, `-exec`),
+// `go build -toolexec`, `make`, and `git push --receive-pack`/`--exec`. That
+// is accepted under ADR-0010's "accidents, not adversaries" boundary.
 const workerClaudeEditSettings = `{"useAutoModeDuringPlan":false,"permissions":{` +
 	`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"],` +
 	`"deny":["SendMessage","RemoteTrigger"]}}`

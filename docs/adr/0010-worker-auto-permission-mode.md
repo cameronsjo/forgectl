@@ -80,9 +80,9 @@ The floor items "Bash sandbox", "Non-Bash tools denied the same paths", "Worker 
 
 ## Amendment 2026-10-07: a fixed allow list for `acceptEdits` workers
 
-Approved with the atelier P2 plan (forgectl#1137): more autonomy by an allow list, not a broader mode. An `acceptEdits` worker's `--settings` pre-approves `go test`, `go build`, `make`, `git add`, `git commit`, `git push`, `gh pr create`, and `gh pr view`. Merges, `gh api`, and every other command still prompt. Workers in other modes get no list. This loosens the default above ("every outward command prompts") on purpose, within the "accidents, not adversaries" boundary:
+Approved with the atelier P2 plan (forgectl#1137): more autonomy by an allow list, not a broader mode. An `acceptEdits` worker's `--settings` pre-approves `go test`, `go build`, `make`, `git add`, `git commit`, `git push`, `gh pr create`, and `gh pr view`. A merge, `gh api`, or any other command typed on its own still prompts. Workers in other modes get no list. This loosens the default above ("every outward command prompts") on purpose, within the "accidents, not adversaries" boundary:
 
 - `git push *` cannot be limited to the worker's branch; only a repository ruleset refuses a push to `main`. forgectl's and cadence's `estate-main` rulesets do. A repository without one does not.
-- `go test` and `make` run the repository's own code, which can push or merge with the operator's identity without a prompt.
+- Four listed commands can run any other command with no prompt, so the list does not bound what a worker can do: `go test` and `make` run repository code the worker can write itself, `go test -exec` and `go build -toolexec` run a named program, and `git push --receive-pack` (or `--exec`) runs a command through `sh -c`. A worker can therefore merge or push with the operator's identity without a prompt; the prompts catch an accident, not a determined worker.
 
 Widening the list needs its own security review. `auto` stays refused.
