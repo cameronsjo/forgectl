@@ -84,22 +84,36 @@ func TestTrimIfNotTerminal(t *testing.T) {
 }
 
 func TestTrimErrorFrame(t *testing.T) {
+	prev := isTerminalFd
+	t.Cleanup(func() { isTerminalFd = prev })
+
 	for _, tt := range []struct {
-		name    string
-		profile colorprofile.Profile
-		want    string
+		name     string
+		terminal bool
+		profile  colorprofile.Profile
+		want     string
 	}{
-		{"not a terminal", colorprofile.NoTTY, "a\nb\n"},
-		{"a terminal profile keeps the frame", colorprofile.TrueColor, "a   \nb  \n"},
+		{"not a terminal", false, colorprofile.NoTTY, "a\nb\n"},
+		{"not a terminal with forced color", false, colorprofile.TrueColor, "a\nb\n"},
+		{"a terminal keeps the frame", true, colorprofile.TrueColor, "a   \nb  \n"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			var sink bytes.Buffer
-			w := &colorprofile.Writer{Forward: &sink, Profile: tt.profile}
+			isTerminalFd = func(uintptr) bool { return tt.terminal }
+			f, err := os.CreateTemp(t.TempDir(), "err")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = f.Close() })
+			w := &colorprofile.Writer{Forward: f, Profile: tt.profile}
 			done := trimErrorFrame(w)
 			_, _ = w.Write([]byte("a   \nb  \n"))
 			done()
-			if got := sink.String(); got != tt.want {
-				t.Errorf("sink = %q, want %q", got, tt.want)
+			got, err := os.ReadFile(f.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tt.want {
+				t.Errorf("stream = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -411,6 +425,42 @@ func TestNoCommandSetsItsOwnHelpFunc(t *testing.T) {
 		}
 		if strings.Contains(string(src), ".SetHelpFunc(") {
 			t.Errorf("%s sets a help function; trimHelpFrames would replace it", f)
+		}
+	}
+}
+
+// TestTrim_CompletionHelpTrimmedScriptUntouched pins the third review round on
+// forgectl#1127: the lazy `completion` builtin resolves to the root before
+// Execute registers it, so its help frames need the root trim, while
+// `completion <shell>` prints a script that must pass through untouched.
+func TestTrim_CompletionHelpTrimmedScriptUntouched(t *testing.T) {
+	for _, args := range [][]string{
+		{"completion", "--help"},
+		{"completion", "bash", "--help"},
+		{"completion", "-h"},
+		{"completion", "nonesuch"},
+		{"--no-icons", "completion", "--help"},
+	} {
+		stdout, stderr := runFramed(t, args...)
+		assertNoTrailingSpace(t, "completion help "+strings.Join(args, " "), stdout+stderr)
+	}
+
+	for _, tt := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"completion", "bash"}, false},
+		{[]string{"completion", "zsh", "--no-descriptions"}, false},
+		{[]string{"completion", "bash", "--", "--help"}, false},
+		{[]string{"completion"}, true},
+		{[]string{"completion", "bash", "-h"}, true},
+		{[]string{"completion", "nonesuch"}, true},
+		{[]string{"help"}, true},
+		{[]string{"__complete", "x"}, false},
+		{[]string{"desk"}, true},
+	} {
+		if got := rootRunShowsHelp(tt.args); got != tt.want {
+			t.Errorf("rootRunShowsHelp(%v) = %v, want %v", tt.args, got, tt.want)
 		}
 	}
 }

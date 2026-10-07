@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/fang"
@@ -335,11 +336,39 @@ func execCommand(ctx context.Context, root *cobra.Command, args []string, th the
 	return run()
 }
 
+// completionShells are the shell children cobra's lazy `completion` builtin
+// registers; `completion <shell>` prints a script, which is data.
+var completionShells = map[string]bool{"bash": true, "zsh": true, "fish": true, "powershell": true}
+
 // rootRunShowsHelp reports whether an argv that resolves to the root renders
-// only help or an error: it names no builtin verb, or names `help`.
+// only help or an error. The lazy builtins resolve to the root before Execute
+// registers them: `help` renders a page; `completion` does too, unless it
+// names a shell and no help flag, which prints a script; `man` and
+// `__complete` print data.
 func rootRunShowsHelp(args []string) bool {
-	first, _ := firstNonFlag(args)
-	return first == "help" || !builtinVerbs[first]
+	first, i := firstNonFlag(args)
+	switch first {
+	case "completion":
+		rest := args[i+1:]
+		flags := rest[:indexOr(rest, "--")]
+		if slices.Contains(flags, "-h") || slices.Contains(flags, "--help") {
+			return true
+		}
+		shell, _ := firstNonFlag(rest)
+		return !completionShells[shell]
+	case "help":
+		return true
+	default:
+		return !builtinVerbs[first]
+	}
+}
+
+// indexOr returns the index of the first x in s, or len(s) when absent.
+func indexOr(s []string, x string) int {
+	if i := slices.Index(s, x); i >= 0 {
+		return i
+	}
+	return len(s)
 }
 
 // fangOptions builds the fang.Option set every dispatch runs under: the version

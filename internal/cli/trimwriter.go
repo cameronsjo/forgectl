@@ -182,16 +182,19 @@ func restoreOut(c *cobra.Command, out io.Writer) {
 }
 
 // trimErrorFrame makes a fang error frame strip its padding when it is
-// written to a stream that is not a terminal. fang hands the handler a
-// colorprofile.Writer; its NoTTY profile is the not-a-terminal answer, and the
-// trim sits below it so it sees the text after the color codes are stripped.
+// written to a stream that is not a terminal, by the same test the help frames
+// use. fang hands the handler a colorprofile.Writer; the trim goes below it,
+// on the real stream, so it sees the text after the color codes are stripped.
 // The returned func flushes and must run after the frame is rendered.
 func trimErrorFrame(w io.Writer) (done func()) {
 	cw, ok := w.(*colorprofile.Writer)
-	if !ok || cw.Profile != colorprofile.NoTTY {
+	if !ok {
 		return func() {}
 	}
-	t := &trailingTrimWriter{w: cw.Forward}
-	cw.Forward = t
+	trimmed, t := trimIfNotTerminal(cw.Forward)
+	if t == nil {
+		return func() {}
+	}
+	cw.Forward = trimmed
 	return func() { _ = t.flush() }
 }
