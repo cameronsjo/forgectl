@@ -188,6 +188,10 @@ type deskFrame struct {
 	// footer replaces the key hints when set: a prompt or the last result.
 	// It is already safe and styled.
 	footer string
+	// confirming marks a y/n prompt in the footer: a dashboard it crowds out
+	// says so, rather than that the window is too small to run items, since
+	// the prompt itself is how they run.
+	confirming bool
 }
 
 func (f deskFrame) styles() (theme.Styles, theme.Theme) {
@@ -202,32 +206,78 @@ func (f deskFrame) styles() (theme.Styles, theme.Theme) {
 // focus, history, footer. With a known height the frame is exactly that many
 // lines; the history panel takes what the others leave.
 func (f deskFrame) render() string {
+	lines, _ := f.layout()
+	return strings.Join(lines, "\n")
+}
+
+// deskMinWidth is the narrowest window the frame is drawn for; a narrower
+// terminal cuts the right of every line.
+const deskMinWidth = 40
+
+// focusShown reports whether this frame, as drawn, shows the selected row's
+// short sha256, what and why in full. y runs an item only when it does: the
+// operator approves by matching that hash, so a frame too small to show it
+// must not let y act (#1098).
+func (f deskFrame) focusShown() bool {
+	_, shown := f.layout()
+	return shown
+}
+
+// focusShownFor is focusShown for the item named name: the frame's selected
+// row must be that item, so the gate and the run cannot drift apart.
+func (f deskFrame) focusShownFor(name string) bool {
+	rows := deskRows(f.snap, f.now)
+	c := min(max(f.cursor, 0), max(len(rows)-1, 0))
+	return len(rows) > 0 && rows[c].item.Name == name && f.focusShown()
+}
+
+// layout builds the frame's lines and reports whether the selected row's
+// focus head (with its short sha256), what and why are all on screen.
+//
+// The focus panel is what the operator approves from, so it is placed
+// before everything but the header, the footer and one queue row: a short
+// window gives up the tiles, then the summary line, then queue rows, then
+// the history and the script preview. Below that minimum the frame says it
+// is too small instead of drawing a focus panel with its hash cut off.
+func (f deskFrame) layout() ([]string, bool) {
 	st, _ := f.styles()
-	width := max(f.width, 40)
+	width := max(f.width, deskMinWidth)
 	rows := deskRows(f.snap, f.now)
 	cursor := min(max(f.cursor, 0), max(len(rows)-1, 0))
 
 	header := f.header(st, width)
+	footer := f.footerLines(st, width)
+	focusMin := f.focusPanel(st, width, rows, cursor, 0)
+	if f.height <= 0 {
+		top := []string{cut(f.summary(st), width)}
+		if width >= deskWideMin {
+			top = f.tiles(st, width)
+		}
+		queue := f.queuePanel(st, width, rows, cursor, max(len(rows), 1))
+		focus := f.focusPanel(st, width, rows, cursor, deskFocusBody)
+		lines := slices.Concat([]string{header}, top, queue, focus, f.historyPanel(st, width, -1), footer)
+		return lines, f.essentialShown(lines, 1+len(top)+len(queue), focusMin, rows, cursor)
+	}
+
+	avail := f.height - 1 - len(footer)
+	need := deskQueueMin + len(focusMin)
 	var top []string
-	if width >= deskWideMin {
+	switch {
+	case width >= deskWideMin && avail-deskTileRows >= need:
 		top = f.tiles(st, width)
-	} else {
+	case avail-1 >= need:
 		top = []string{cut(f.summary(st), width)}
 	}
-	footer := f.footerLines(st, width)
+	if avail-len(top) < need || f.narrow() {
+		return f.tooSmall(st, header, footer, rows, cursor), false
+	}
+	avail -= len(top)
 
-	avail := 0
-	if f.height > 0 {
-		avail = f.height - 1 - len(top) - len(footer)
-	}
-	queueLines := max(len(rows), 1)
-	if f.height > 0 {
-		queueLines = min(queueLines, max(3, avail/3))
-	}
+	queueLines := min(max(len(rows), 1), max(deskQueueMin, avail/3), avail-2-len(focusMin))
 	queue := f.queuePanel(st, width, rows, cursor, queueLines)
 
 	body := deskFocusBody
-	if f.height > 0 && f.snap != nil {
+	if f.snap != nil {
 		// Rows the history will not use go to the script preview.
 		histNeed := min(max(len(f.snap.Done), 1), deskHistoryDefault) + 2
 		for b := deskFocusBodyMax; b > deskFocusBody; b-- {
@@ -238,46 +288,123 @@ func (f deskFrame) render() string {
 		}
 	}
 	focus := f.focusPanel(st, width, rows, cursor, body)
-	histRows := -1 // as many as there are, up to the default
-	if f.height > 0 {
+	histRows := avail - len(queue) - len(focus) - 2
+	if histRows < 1 {
+		focus = f.focusPanel(st, width, rows, cursor, deskFocusBodyMin)
 		histRows = avail - len(queue) - len(focus) - 2
-		if histRows < 1 {
-			focus = f.focusPanel(st, width, rows, cursor, deskFocusBodyMin)
-			histRows = avail - len(queue) - len(focus) - 2
-		}
 	}
-	history := f.historyPanel(st, width, histRows)
+	if len(queue)+len(focus) > avail {
+		focus = focusMin
+		histRows = avail - len(queue) - len(focus) - 2
+	}
+	history := f.historyPanel(st, width, max(histRows, 0)) // -1 is historyPanel's "unbounded"
 
-	lines := []string{header}
-	lines = append(lines, top...)
-	lines = append(lines, queue...)
-	lines = append(lines, focus...)
-	lines = append(lines, history...)
-	if f.height > 0 {
-		keep := max(f.height-len(footer), 0)
-		if len(lines) > keep {
-			lines = lines[:keep]
-		}
-		for len(lines) < keep {
-			lines = append(lines, "")
+	lines := fitHeight(slices.Concat([]string{header}, top, queue, focus, history), f.height-len(footer))
+	lines = append(lines, footer...)
+	return lines, f.essentialShown(lines, 1+len(top)+len(queue), focusMin, rows, cursor)
+}
+
+// deskQueueMin is the queue panel's height with one row: its border and the
+// row.
+const deskQueueMin = 3
+
+// narrow reports a known window narrower than the frame, which cuts the
+// right of every line. 0 means the width is unknown, drawn at the minimum.
+func (f deskFrame) narrow() bool { return f.width > 0 && f.width < deskMinWidth }
+
+// fitHeight cuts lines to n, or pads them with blank lines to n.
+func fitHeight(lines []string, n int) []string {
+	n = max(n, 0)
+	if len(lines) > n {
+		return lines[:n]
+	}
+	for len(lines) < n {
+		lines = append(lines, "")
+	}
+	return lines
+}
+
+// essentialShown checks the drawn lines, not the plan: the smallest focus
+// panel's top border, head, what and why (all of focusMin but its bottom
+// border) must sit at start in lines exactly as drawn, inside the window,
+// and the head must carry the row's short sha256.
+func (f deskFrame) essentialShown(lines []string, start int, focusMin []string, rows []queueRow, cursor int) bool {
+	if len(rows) == 0 || f.narrow() {
+		return false
+	}
+	it := rows[cursor].item
+	if !desk.ValidSHA256(it.Meta.SHA256) {
+		return false
+	}
+	n := len(focusMin) - 1
+	if start+n > len(lines) || (f.height > 0 && start+n > f.height) {
+		return false
+	}
+	for i := range n {
+		if lines[start+i] != focusMin[i] {
+			return false
 		}
 	}
-	lines = append(lines, footer...)
-	return strings.Join(lines, "\n")
+	return strings.Contains(ansi.Strip(lines[start+1]), "sha256 "+it.Meta.SHA256[:deskShortHash])
+}
+
+// tooSmall is the frame for a window that cannot show the focus panel: the
+// header, a line saying which dimension is short, as much of the queue as
+// fits, and the footer. A narrow window asks for the minimum width; past it,
+// the rows asked for are measured at the current width, where what and why
+// wrap as drawn. The key hints leave out y and a, which cannot run here.
+func (f deskFrame) tooSmall(st theme.Styles, header string, footer []string, rows []queueRow, cursor int) []string {
+	width := max(f.width, deskMinWidth)
+	visible := width
+	if f.narrow() {
+		visible = f.width
+	}
+	var text string
+	switch {
+	case f.confirming:
+		text = "dashboard hidden while you confirm"
+	case f.narrow():
+		text = fmt.Sprintf("too small: needs %d columns", deskMinWidth)
+	default:
+		need := 1 + deskQueueMin + len(f.focusPanel(st, width, rows, cursor, 0)) + 1
+		text = fmt.Sprintf("too small to show the sha256 · make the window %d rows tall to run items", need)
+		if ansi.StringWidth(text) > visible {
+			text = fmt.Sprintf("too small: make it %d rows tall", need)
+		}
+	}
+	if f.footer == "" {
+		footer = []string{cut(deskHintsNoRun(st, width), visible)}
+	}
+	lines := []string{header, cut(st.Warn.Render(text), visible)}
+	if room := f.height - len(lines) - len(footer); room >= deskQueueMin {
+		lines = append(lines, f.queuePanel(st, width, rows, cursor, room-2)...)
+	}
+	return append(fitHeight(lines, f.height-len(footer)), footer...)
+}
+
+// deskPromptRoom is how many lines a footer prompt may take in a window
+// height lines tall: half of it, and at least two. 0 or less means the
+// height is unknown and there is no limit. The model pages the a prompt to
+// this, so the frame never has to cut a hash out of it.
+func deskPromptRoom(height int) int {
+	if height <= 0 {
+		return 0
+	}
+	return max(height/2, 2)
 }
 
 // footerLines is the footer cut to the width: the key hints, or the prompt
 // or result the model set. A prompt may span lines (a full hash per item);
-// with a known height it keeps at most half the window, and says how many
-// lines it left out.
+// the model keeps it within deskPromptRoom. One that is longer anyway is cut
+// to that room and says so; nothing is ever drawn over the dashboard.
 func (f deskFrame) footerLines(st theme.Styles, width int) []string {
 	if f.footer == "" {
 		return []string{cut(deskHints(st, width), width)}
 	}
 	lines := strings.Split(f.footer, "\n")
-	if limit := f.height / 2; f.height > 0 && len(lines) > max(limit, 2) {
-		more := len(lines) - (max(limit, 2) - 1)
-		lines = append(lines[:max(limit, 2)-1], st.Muted.Render(fmt.Sprintf("  … %d more lines; forgectl desk status lists every hash", more)))
+	if room := deskPromptRoom(f.height); room > 0 && len(lines) > room {
+		more := len(lines) - (room - 1)
+		lines = append(lines[:room-1], st.Muted.Render(fmt.Sprintf("  … %d more lines not shown", more)))
 	}
 	for i, l := range lines {
 		lines[i] = cut(l, width)
@@ -731,18 +858,25 @@ func stepGlyph(st theme.Styles, state string) string {
 }
 
 // focusPanel draws the selected row: what it is, why, and what it runs.
+// body is how many script lines or steps to show; 0 leaves the script
+// section out entirely.
 func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, cursor, body int) []string {
 	if len(rows) == 0 {
 		return strings.Split(Panel(st, width, "focus", "", []string{st.Muted.Render("nothing waiting")}), "\n")
 	}
 	r := rows[cursor]
 	it := r.item
-	head := st.Selected.Render(itemLabel(it.Name))
+	label := itemLabel(it.Name)
+	var hash string
 	if desk.ValidSHA256(it.Meta.SHA256) {
-		// The short hash the agent reports and `desk status` prints; the y
-		// and a prompts show it in full.
-		head += st.Muted.Render(" · sha256 ") + st.Fg.Render(it.Meta.SHA256[:deskShortHash])
+		// The short hash the agent reports and `desk status` prints; the a
+		// prompt shows it in full. A long name is cut first so the hash is
+		// never the part the panel cuts off. The panel's own cut ends in a
+		// "…" cell, so the hash must end one cell short of the edge.
+		hash = st.Muted.Render(" · sha256 ") + st.Fg.Render(it.Meta.SHA256[:deskShortHash])
+		label = cut(label, max(width-5-ansi.StringWidth(hash), 8))
 	}
+	head := st.Selected.Render(label) + hash
 	head += st.Muted.Render(" · " + f.focusState(r))
 	lines := []string{head}
 	// The panel's text area is the width less the border and its padding.
@@ -754,6 +888,8 @@ func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, curso
 	}
 	bar := st.Dim.Render("┆ ")
 	switch {
+	case body == 0:
+		// The smallest panel: the head, what and why, which y needs on screen.
 	case r.kind == rowDone || r.kind == rowFailed:
 		lines = append(lines, bar+st.Muted.Render("l to view the log"))
 	case content == nil:
@@ -961,10 +1097,20 @@ func (f deskFrame) historyLine(st theme.Styles, width int, it desk.Item, longest
 // deskHints is the key-hint footer. A narrow window drops the move hint
 // (the arrows are self-explanatory) and tightens the spacing.
 func deskHints(st theme.Styles, width int) string {
-	keys := [][2]string{{"y", "run"}, {"s", "skip"}, {"u", "undo"}, {"v", "view"}, {"a", "all"}, {"l", "log"}, {"r", "runs"}, {"j/k", "move"}, {"q", "quit"}}
+	return hintLine(st, width, [][2]string{{"y", "run"}, {"s", "skip"}, {"u", "undo"}, {"v", "view"}, {"a", "all"}, {"l", "log"}, {"r", "runs"}, {"j/k", "move"}, {"q", "quit"}})
+}
+
+// deskHintsNoRun is the hints for a window too small to show the focus
+// panel: y refuses there, so it is not offered. a stays, since its prompt
+// shows each full hash itself.
+func deskHintsNoRun(st theme.Styles, width int) string {
+	return hintLine(st, width, [][2]string{{"s", "skip"}, {"u", "undo"}, {"v", "view"}, {"a", "all"}, {"l", "log"}, {"r", "runs"}, {"j/k", "move"}, {"q", "quit"}})
+}
+
+func hintLine(st theme.Styles, width int, keys [][2]string) string {
 	sep := "  "
 	if width < deskWideMin {
-		keys = slices.Delete(keys, 7, 8)
+		keys = slices.DeleteFunc(slices.Clone(keys), func(k [2]string) bool { return k[0] == "j/k" })
 		sep = " "
 	}
 	parts := make([]string, len(keys))

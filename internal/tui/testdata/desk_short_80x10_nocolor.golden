@@ -1,0 +1,10 @@
+desk ● · forgectl 0.0.0-test · host-a · ~/.local/state/forgec…  up 4h37m · 19:07
+╭ queue ─┤ ● 0 running  ◌ 2 waiting ├──────────────────────────────────────────╮
+│ ▸ ◌ waiting  01 s1                            ░░░░░░░░░░░░░░░░  needs you    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ focus ───────────────────────────────────────────────────────────────────────╮
+│ 01 s1 · sha256 184cfa7e7378 · unchanged since queued 1m ago                  │
+│ what  Print step 01-s1                                                       │
+│ why   The approval check                                                     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ y run  s skip  u undo  v view  a all  l log  r runs  j/k move  q quit

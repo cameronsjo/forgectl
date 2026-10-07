@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -113,6 +114,8 @@ func (h *deskHarness) press(keys ...string) {
 			msg = tea.KeyPressMsg{Code: tea.KeyUp}
 		case "esc":
 			msg = tea.KeyPressMsg{Code: tea.KeyEscape}
+		case "space":
+			msg = tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
 		default:
 			msg = key(k)
 		}
@@ -972,5 +975,427 @@ func TestTTYRunRefusesABatch(t *testing.T) {
 	}
 	if got := h.where("01-m"); got != desk.DirSkipped {
 		t.Fatalf("01-m is in %s, want skipped", got)
+	}
+}
+
+// TestDesk_YRefusesWhenTheFocusPanelIsNotOnScreen is #1098: in a window too
+// small to show the selected item's sha256, what and why, y runs nothing and
+// says why. The same item runs once the window can show them.
+func TestDesk_YRefusesWhenTheFocusPanelIsNotOnScreen(t *testing.T) {
+	for _, size := range [][2]int{{100, 7}, {80, 9}, {30, 8}} {
+		h := newDeskHarness(t)
+		h.drop("01-s1.sh", plainScript("s1"))
+		h.drop("02-s2.sh", plainScript("s2"))
+		h.scan()
+		h.m.width, h.m.height = size[0], size[1]
+		h.press("y")
+		if len(h.backend.launched) != 0 || h.where("01-s1") != desk.DirPending {
+			t.Fatalf("%dx%d: y ran %v with the focus panel off screen", size[0], size[1], h.backend.launched)
+		}
+		if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "not run: enlarge the window to see 01 s1's sha256, what and why") {
+			t.Errorf("%dx%d: footer = %q", size[0], size[1], footer)
+		}
+		h.m.width, h.m.height = 80, 10
+		h.press("y")
+		if !slices.Equal(h.backend.launched, []string{"01-s1"}) {
+			t.Errorf("%dx%d then 80x10: launched %v, want [01-s1]", size[0], size[1], h.backend.launched)
+		}
+	}
+}
+
+// The y gate reads the frame View draws: whenever y runs, that frame showed
+// the selected item's short sha256.
+func TestDesk_YRunsOnlyWhatTheViewShows(t *testing.T) {
+	for h := 6; h <= 16; h++ {
+		for _, w := range []int{30, 40, 80} {
+			hn := newDeskHarness(t)
+			hn.drop("01-s1.sh", plainScript("s1"))
+			hn.scan()
+			hn.m.width, hn.m.height = w, h
+			sha := hn.m.rows[0].item.Meta.SHA256
+			view := ansi.Strip(hn.m.View().Content)
+			hn.press("y")
+			ran := len(hn.backend.launched) == 1
+			var visible []string
+			for _, l := range strings.Split(view, "\n") {
+				visible = append(visible, ansi.Truncate(l, w, ""))
+			}
+			if ran && !strings.Contains(strings.Join(visible, "\n"), "sha256 "+sha[:deskShortHash]) {
+				t.Errorf("%dx%d: y ran an item whose hash the view did not show:\n%s", w, h, view)
+			}
+		}
+	}
+}
+
+func dropMany(h *deskHarness, n int) []string {
+	h.t.Helper()
+	var names []string
+	for i := 1; i <= n; i++ {
+		name := fmt.Sprintf("%02d-item%02d", i, i)
+		h.drop(name+".sh", plainScript(name))
+		names = append(names, name)
+	}
+	h.scan()
+	return names
+}
+
+// TestDesk_APagesAndRunsOnlyAfterEveryHashWasShown is #1098's second gap:
+// with 12 items at 100x24 the a prompt cannot fit every hash at once. It
+// pages, y refuses until every page has been on screen, and every full hash
+// appears on some page.
+func TestDesk_APagesAndRunsOnlyAfterEveryHashWasShown(t *testing.T) {
+	h := newDeskHarness(t)
+	names := dropMany(h, 12)
+	h.m.width, h.m.height = 100, 24
+	want := map[string]bool{}
+	for _, r := range h.m.rows {
+		want[r.item.Meta.SHA256] = false
+	}
+
+	h.press("a")
+	if h.m.confirm != confirmAll {
+		t.Fatalf("a did not ask; footer = %q", ansi.Strip(h.m.footer()))
+	}
+	seen := func() {
+		for _, l := range strings.Split(ansi.Strip(h.m.View().Content), "\n") {
+			if f := strings.Fields(l); len(f) == 2 && f[0] == "sha256" {
+				want[f[1]] = true
+			}
+		}
+	}
+	seen()
+	if !strings.Contains(ansi.Strip(h.m.footer()), "page 1/") {
+		t.Fatalf("12 items at 100x24 should page; footer = %q", ansi.Strip(h.m.footer()))
+	}
+	h.press("y")
+	if len(h.backend.launched) != 0 || h.m.confirm != confirmAll {
+		t.Fatalf("y on page 1 ran %v; it must wait for every page", h.backend.launched)
+	}
+	if !strings.Contains(ansi.Strip(h.m.footer()), "not run: see every page first") {
+		t.Errorf("y on page 1 should say why it did not run: %q", ansi.Strip(h.m.footer()))
+	}
+	for range 10 {
+		h.press("space")
+		seen()
+	}
+	for sha, ok := range want {
+		if !ok {
+			t.Errorf("hash %s never appeared on any page", sha)
+		}
+	}
+	h.press("y")
+	if !slices.Equal(h.backend.launched, names) {
+		t.Fatalf("after every page, launched %v, want %v", h.backend.launched, names)
+	}
+}
+
+// A window too short for even one item's full hash refuses a outright.
+func TestDesk_ARefusesWhenNoHashFits(t *testing.T) {
+	h := newDeskHarness(t)
+	dropMany(h, 2)
+	h.m.width, h.m.height = 100, 4
+	h.press("a")
+	if h.m.confirm != confirmNone || !strings.Contains(ansi.Strip(h.m.footer()), "too small to show a full sha256") {
+		t.Fatalf("a in a 4-line window: confirm %v footer %q", h.m.confirm, ansi.Strip(h.m.footer()))
+	}
+	h.m.width, h.m.height = 6, 40 // too narrow for an 8-character chunk
+	h.press("a")
+	if h.m.confirm != confirmNone {
+		t.Fatalf("a in a 6-column window asked anyway: %q", ansi.Strip(h.m.footer()))
+	}
+}
+
+// Shrinking the window during the a prompt re-pages it; hashes shown before
+// the resize stay shown, and y still waits for the rest.
+func TestDesk_AResizeRepagesWithoutLosingTrack(t *testing.T) {
+	h := newDeskHarness(t)
+	names := dropMany(h, 4)
+	h.m.width, h.m.height = 100, 40
+	h.press("a") // one page: all four shown
+	out, _ := h.m.Update(tea.WindowSizeMsg{Width: 100, Height: 8})
+	h.m = out.(deskModel)
+	h.press("y")
+	if !slices.Equal(h.backend.launched, names) {
+		t.Fatalf("every hash was on screen before the resize; launched %v", h.backend.launched)
+	}
+}
+
+// Shrinking the window below one hash while the a prompt is open cancels on
+// y, as the prompt then says, even though every hash was shown before.
+func TestDesk_AShrunkBelowOneHashCancelsOnY(t *testing.T) {
+	h := newDeskHarness(t)
+	dropMany(h, 3)
+	h.m.width, h.m.height = 100, 40
+	h.press("a")
+	if !h.m.allShown() {
+		t.Fatal("a at 100x40 should show every hash on one page")
+	}
+	out, _ := h.m.Update(tea.WindowSizeMsg{Width: 100, Height: 4})
+	h.m = out.(deskModel)
+	if !strings.Contains(ansi.Strip(h.m.footer()), "any key cancels") {
+		t.Fatalf("footer = %q", ansi.Strip(h.m.footer()))
+	}
+	h.press("y")
+	if len(h.backend.launched) != 0 || h.m.confirm != confirmNone {
+		t.Fatalf("y ran %v while the prompt said any key cancels", h.backend.launched)
+	}
+}
+
+// On a one-page a prompt, j is "any other key" and cancels.
+func TestDesk_ASinglePageAnyOtherKeyCancels(t *testing.T) {
+	h := newDeskHarness(t)
+	dropMany(h, 2)
+	h.press("a", "j")
+	if h.m.confirm != confirmNone {
+		t.Fatalf("j kept a one-page prompt open: %q", ansi.Strip(h.m.footer()))
+	}
+}
+
+// A size message with no height falls back to 80x24 everywhere, so a
+// still asks.
+func TestDesk_AWithAnUnknownHeightStillAsks(t *testing.T) {
+	h := newDeskHarness(t)
+	dropMany(h, 2)
+	out, _ := h.m.Update(tea.WindowSizeMsg{Width: 100, Height: 0})
+	h.m = out.(deskModel)
+	h.press("a")
+	if h.m.confirm != confirmAll {
+		t.Fatalf("a with height 0 refused: %q", ansi.Strip(h.m.footer()))
+	}
+}
+
+// An item with no valid hash is refused for that reason, not for the
+// window's size.
+func TestDesk_YNamesAMissingHash(t *testing.T) {
+	h := newDeskHarness(t)
+	dropMany(h, 1)
+	h.m.rows[0].item.Meta.SHA256 = ""
+	h.press("y")
+	footer := ansi.Strip(h.m.footer())
+	if len(h.backend.launched) != 0 || !strings.Contains(footer, "no valid sha256") || strings.Contains(footer, "too small") {
+		t.Fatalf("launched %v footer %q", h.backend.launched, footer)
+	}
+}
+
+// TestDesk_YRefusesOnceWhenARescanMovesTheSelection: another desk skips the
+// selected item, and a rescan drops it, so the cursor lands on the next item. That item's hash was never matched, so y refuses once and
+// names what happened; a second y (now on screen) runs it.
+func TestDesk_YRefusesOnceWhenARescanMovesTheSelection(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-s1.sh", plainScript("s1"))
+	h.drop("02-s2.sh", plainScript("s2"))
+	h.scan()
+	if err := h.d.Skip("01-s1", desk.SkipOperator); err != nil { // another desk skipped it
+		h.t.Fatal(err)
+	}
+	h.scan()
+	if r, _ := h.m.selected(); r.item.Name != "02-s2" {
+		t.Fatalf("selected %s after 01-s1 left, want 02-s2", r.item.Name)
+	}
+	h.press("y")
+	if len(h.backend.launched) != 0 {
+		t.Fatalf("y ran %v right after the selection moved", h.backend.launched)
+	}
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "the selection moved from 01 s1 to 02 s2") {
+		t.Errorf("footer = %q", footer)
+	}
+	h.press("y")
+	if !slices.Equal(h.backend.launched, []string{"02-s2"}) {
+		t.Fatalf("the second y launched %v, want [02-s2]", h.backend.launched)
+	}
+}
+
+// The operator's own skip moves the selection too, but they did that: y on
+// the next item runs at once.
+func TestDesk_OwnSkipDoesNotCostAnExtraY(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-s1.sh", plainScript("s1"))
+	h.drop("02-s2.sh", plainScript("s2"))
+	h.scan()
+	h.press("s", "y") // skip 01-s1
+	h.press("y")
+	if !slices.Equal(h.backend.launched, []string{"02-s2"}) {
+		t.Fatalf("launched %v, want [02-s2]", h.backend.launched)
+	}
+}
+
+// While the a prompt crowds the dashboard out, the frame says the dashboard
+// is hidden rather than that items cannot run.
+func TestDesk_APromptDoesNotSayTooSmallToRun(t *testing.T) {
+	h := newDeskHarness(t)
+	dropMany(h, 12)
+	h.m.width, h.m.height = 80, 10
+	h.press("a")
+	view := ansi.Strip(h.m.View().Content)
+	if strings.Contains(view, "to run items") || !strings.Contains(view, "dashboard hidden while you confirm") {
+		t.Errorf("view during the a prompt:\n%s", view)
+	}
+}
+
+// A resize during the a prompt keeps the first item of the page on screen.
+func TestDesk_AResizeKeepsThePlace(t *testing.T) {
+	h := newDeskHarness(t)
+	dropMany(h, 12)
+	h.m.width, h.m.height = 100, 24
+	h.press("a", "space")
+	first := h.m.anchor
+	out, _ := h.m.Update(tea.WindowSizeMsg{Width: 100, Height: 8})
+	h.m = out.(deskModel)
+	if !strings.Contains(ansi.Strip(h.m.footer()), itemLabel(h.m.targets[first].name)) {
+		t.Errorf("after the resize the page lost %s:\n%s", h.m.targets[first].name, ansi.Strip(h.m.footer()))
+	}
+}
+
+// The selected item leaves, the queue is empty for one scan, then a new item
+// arrives under the cursor: y still refuses once.
+func TestDesk_YRefusesOnceAfterAnEmptyScan(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-s1.sh", plainScript("s1"))
+	h.scan()
+	if err := h.d.Skip("01-s1", desk.SkipOperator); err != nil { // another desk
+		t.Fatal(err)
+	}
+	h.scan() // empty
+	h.drop("02-evil.sh", plainScript("evil"))
+	h.scan()
+	h.press("y")
+	if len(h.backend.launched) != 0 {
+		t.Fatalf("y ran %v; 01-s1 was what the operator read", h.backend.launched)
+	}
+}
+
+// A hand-dropped item reusing a name the operator skipped earlier, removed
+// later, still counts as a move: no skip leaves an exemption behind.
+func TestDesk_ReusedSkipNameStillCountsAsAMove(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-s1.sh", plainScript("s1"))
+	h.drop("03-s3.sh", plainScript("s3"))
+	h.scan()
+	h.press("s", "y")                           // the operator skips 01-s1; the exemption is used here
+	h.drop("01-s1.sh", plainScript("s1 again")) // same name, hand-dropped
+	h.scan()
+	h.selectItem("01-s1")
+	h.press("k") // the operator's own move onto it; nothing moved under them yet
+	h.selectItem("01-s1")
+	if err := h.d.Skip("01-s1", desk.SkipOperator); err != nil { // another desk takes it
+		t.Fatal(err)
+	}
+	h.scan()
+	h.press("y")
+	if len(h.backend.launched) != 0 {
+		t.Fatalf("y ran %v after the selection moved", h.backend.launched)
+	}
+}
+
+// The security reviewer's probe: the item the operator read is claimed
+// elsewhere (the cursor follows it onto its running row), its record is
+// removed, and a new item lands under the cursor. y refuses once.
+func TestDesk_YRefusesAfterTheReadItemRunsElsewhereAndVanishes(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-w.sh", plainScript("w"))
+	h.scan()
+	if _, err := h.d.Claim("01-w", h.m.rows[0].item.Meta.SHA256); err != nil { // another desk
+		t.Fatal(err)
+	}
+	h.scan()
+	if r, _ := h.m.selected(); r.kind != rowRunning {
+		t.Fatalf("the cursor should follow 01-w onto its running row, got %v", r.kind)
+	}
+	for _, ext := range []string{".sh", ".meta.json"} {
+		_ = os.Remove(filepath.Join(h.d.Path(), desk.DirRunning, "01-w"+ext))
+	}
+	h.drop("02-evil.sh", plainScript("evil"))
+	h.scan()
+	h.press("y")
+	if len(h.backend.launched) != 0 {
+		t.Fatalf("y ran %v; the operator read 01-w", h.backend.launched)
+	}
+}
+
+// Skipping the only waiting item, then a new arrival: the operator's own
+// skip resolved what they read, so the first y runs.
+func TestDesk_OwnSkipOfTheOnlyItemThenAnArrivalRunsAtOnce(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-a.sh", plainScript("a"))
+	h.scan()
+	h.press("s", "y")
+	h.scan() // empty
+	h.drop("02-b.sh", plainScript("b"))
+	h.scan()
+	h.press("y")
+	if !slices.Equal(h.backend.launched, []string{"02-b"}) {
+		t.Fatalf("launched %v, want [02-b] on the first y; footer %q", h.backend.launched, ansi.Strip(h.m.footer()))
+	}
+}
+
+// After the operator runs an item and its row later leaves, a new arrival
+// under the cursor runs on the first y.
+func TestDesk_OwnRunThenAnArrivalRunsAtOnce(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-a.sh", plainScript("a"))
+	h.scan()
+	h.press("y")
+	for _, ext := range []string{".sh", ".meta.json"} { // the run ended and aged out
+		_ = os.Remove(filepath.Join(h.d.Path(), desk.DirRunning, "01-a"+ext))
+	}
+	h.scan()
+	h.drop("02-b.sh", plainScript("b"))
+	h.scan()
+	h.press("y")
+	if !slices.Equal(h.backend.launched, []string{"01-a", "02-b"}) {
+		t.Fatalf("launched %v, want [01-a 02-b]; footer %q", h.backend.launched, ansi.Strip(h.m.footer()))
+	}
+}
+
+// The security reviewer's round-five probe: Claude rewrites its hand-dropped
+// script in place; a scan skips it as changed; Claude writes it again under
+// the same name. The new bytes have a new hash, so y refuses once.
+func TestDesk_YRefusesASameNamedItemWithNewBytes(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-a.sh", plainScript("a"))
+	h.scan()
+	read := h.m.rows[0].item.Meta.SHA256
+	h.drop("01-a.sh", plainScript("a edited")) // changed: the scan moves it to skipped/
+	h.scan()
+	if err := os.Remove(filepath.Join(h.d.Path(), desk.DirSkipped, "01-a.sh")); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(filepath.Join(h.d.Path(), desk.DirSkipped, "01-a.meta.json"))
+	h.drop("01-a.sh", plainScript("a replaced"))
+	h.scan()
+	h.selectItem("01-a")
+	if r, _ := h.m.selected(); r.kind != rowWaiting || r.item.Meta.SHA256 == read {
+		t.Fatalf("fixture: want a waiting 01-a with a new hash, got %v %s", r.kind, r.item.Meta.SHA256)
+	}
+	h.press("y")
+	if len(h.backend.launched) != 0 {
+		t.Fatalf("y ran %v at a hash the operator never read", h.backend.launched)
+	}
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "01 a was replaced since you read it") {
+		t.Errorf("footer = %q", footer)
+	}
+}
+
+// A y whose claim fails has not resolved the item: when that item later
+// leaves and another lands under the cursor, the next y still refuses.
+func TestDesk_AFailedYKeepsWatching(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-a.sh", plainScript("a"))
+	h.scan()
+	if _, err := h.d.Claim("01-a", h.m.rows[0].item.Meta.SHA256); err != nil { // another desk wins the race
+		t.Fatal(err)
+	}
+	h.press("y") // fails: already claimed
+	if len(h.backend.launched) != 0 {
+		t.Fatalf("launched %v", h.backend.launched)
+	}
+	for _, ext := range []string{".sh", ".meta.json"} {
+		_ = os.Remove(filepath.Join(h.d.Path(), desk.DirRunning, "01-a"+ext))
+	}
+	h.drop("02-evil.sh", plainScript("evil"))
+	h.scan()
+	h.press("y")
+	if len(h.backend.launched) != 0 {
+		t.Fatalf("y ran %v after a failed y; 01-a was what the operator read", h.backend.launched)
 	}
 }

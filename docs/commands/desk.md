@@ -59,17 +59,17 @@ Quit and restart every open dashboard after you upgrade forgectl. A dashboard st
 
 ### `forgectl desk`
 
-The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with a bar per item, a focus panel showing the selected item's short sha256, WHAT and WHY (wrapped, up to four lines each; `desk status NAME` shows them whole) and, under a "script" label, its first script lines, and the history of finished runs.
+The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with a bar per item, a focus panel showing the selected item's short sha256, WHAT and WHY (wrapped, up to four lines each; `desk status NAME` shows them whole) and, under a "script" label, its first script lines, and the history of finished runs. A short window gives up the tiles, then the summary line, the queue rows, the history and the script preview before the focus panel's hash, WHAT and WHY; below that minimum (about 40x10) the dashboard says how many rows or columns it needs.
 
 | Key | Action |
 |---|---|
-| `y` | run the selected item at once (a TTY item runs in this pane; anything else runs detached); check its short sha256 in the focus panel first |
+| `y` | run the selected item at once (a TTY item runs in this pane; anything else runs detached); check its short sha256 in the focus panel first. `y` runs nothing while the window is too small to show that hash, WHAT and WHY, and refuses once when a rescan, not a key, put a different waiting item under the cursor (the one being read left the queue) |
 | `s` | skip the selected item; asks first |
 | `u` | undo the last skip |
 | `v` | view the selected item's script |
 | `l` | view the latest log |
 | `r` | open the run view on the selected run (or the newest): its steps as a flow, the event timeline, and replay. `←`/`→` step through events, `[`/`]` move 10, `g`/`G` jump to the start or back to live, `space` plays, `n`/`p` switch runs, `q` closes |
-| `a` | run every waiting item on screen, except TTY and changed items; asks first, listing each item with its full sha256, and runs exactly those names and hashes |
+| `a` | run every waiting item on screen, except TTY and changed items; asks first, listing each item with its full sha256, and runs exactly those names and hashes. A list longer than half the window pages (`space` next, `b` back, `esc` cancels), and `y` runs it only once every page has been on screen; a window too small for one full hash refuses |
 | `j` / `k` | move |
 | `q` | quit; detached runs keep running |
 

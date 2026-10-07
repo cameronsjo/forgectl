@@ -1,0 +1,14 @@
+desk ● · forgectl 0.0.0-test · host-a · ~/.local/state/forgectl/desk                up 4h37m · 19:07
+◌ 2 waiting · oldest 2m · 0 runs today · ✓ 0 ✗ 0
+╭ queue ─┤ ● 0 running  ◌ 2 waiting ├──────────────────────────────────────────────────────────────╮
+│ ▸ ◌ waiting  01 s1                                  ░░░░░░░░░░░░░░░░  needs you                  │
+│   ◌ waiting  02 s2                                  ░░░░░░░░░░░░░░░░  needs you                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ focus ───────────────────────────────────────────────────────────────────────────────────────────╮
+│ 01 s1 · sha256 184cfa7e7378 · unchanged since queued 1m ago                                      │
+│ what  Print step 01-s1                                                                           │
+│ why   The approval check                                                                         │
+│ ┆ script · the first lines it runs                                                               │
+│ ┆ echo 01-s1                                                                                     │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+ y run  s skip  u undo  v view  a all  l log  r runs  j/k move  q quit
