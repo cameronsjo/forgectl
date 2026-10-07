@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -664,5 +665,199 @@ func TestDeskFrame_TooSmallHidesY(t *testing.T) {
 	out := ansi.Strip(RenderDeskFrame(snap, 100, 7, deskNow, opts))
 	if strings.Contains(out, "y run") || !strings.Contains(out, "a all") {
 		t.Errorf("too-small hints:\n%s", out)
+	}
+}
+
+// A lost item's panel says what happened and what to do, in plain words; a
+// changed one shows the hash it was queued at and the hash it has now
+// (#1106).
+func TestDeskFrame_LostAndChangedSayWhatToDo(t *testing.T) {
+	lost := item("01-long", desk.KindScript, desk.StateLost)
+	lost.Headers = desk.Headers{What: "Sleep", Why: "A test"}
+	lost.Meta.SHA256 = desk.SHA256Hex([]byte("long"))
+	queued, now := desk.SHA256Hex([]byte("v1")), desk.SHA256Hex([]byte("v2"))
+	changed := item("02-s2", desk.KindScript, desk.StateSkipped)
+	changed.Headers = desk.Headers{What: "Print", Why: "A test"}
+	changed.Meta = desk.Meta{AddedAt: agoPtr(time.Minute), SHA256: queued, ChangedSHA256: now, SkipReason: desk.SkipChanged}
+	snap := &desk.Snapshot{Dir: "/d", Taken: deskNow, Running: []desk.Item{lost}, Skipped: []desk.Item{changed}}
+	_, opts := emptySnapshot()
+
+	flat := func(cursor int) string {
+		out := ansi.Strip(deskFrame{snap: snap, width: 80, height: 30, now: deskNow, opts: opts, cursor: cursor}.render())
+		return strings.Join(strings.Fields(strings.ReplaceAll(out, "│", " ")), " ")
+	}
+	got := flat(0)
+	for _, want := range []string{"01 long · sha256 " + lost.Meta.SHA256[:12] + " · lost", "the desk stopped watching it mid-run, so it may have partly run", "s clears it", "l shows its output"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("lost panel lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "RUN-END") || strings.Contains(got, "owner") {
+		t.Errorf("lost panel still uses internal words:\n%s", got)
+	}
+	got = flat(1)
+	for _, want := range []string{"02 s2 · changed", "queued " + queued[:12] + ", now " + now[:12], "not run, moved to skipped", "ask Claude to queue it again"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("changed panel lacks %q:\n%s", want, got)
+		}
+	}
+	// A forged hash read back from meta is never drawn.
+	snap.Skipped[0].Meta.ChangedSHA256 = "\x1b]0;x\a" + now[:40]
+	if got := flat(1); strings.Contains(got, ", now") || strings.Contains(got, "\x1b") {
+		t.Errorf("an invalid changed hash was drawn:\n%s", got)
+	}
+}
+
+// The lost or changed note is not part of the focus panel's minimum: a
+// small window that shows a waiting row's panel shows a lost row's too,
+// without the note.
+func TestDeskFrame_NoteDoesNotForceTooSmall(t *testing.T) {
+	lost := item("01-long", desk.KindScript, desk.StateLost)
+	lost.Headers = desk.Headers{What: "Sleep", Why: "A test"}
+	lost.Meta.SHA256 = desk.SHA256Hex([]byte("long"))
+	snap := &desk.Snapshot{Dir: "/d", Taken: deskNow, Running: []desk.Item{lost}}
+	_, opts := emptySnapshot()
+	out := ansi.Strip(deskFrame{snap: snap, width: 40, height: 10, now: deskNow, opts: opts}.render())
+	if strings.Contains(out, "too small") || !strings.Contains(out, "01 long") {
+		t.Errorf("a lost row forced the too-small frame at 40x10:\n%s", out)
+	}
+}
+
+// A changed hash equal to the queued one (a forged or old meta) is not shown
+// as "now": the note says only that it changed.
+func TestDeskFrame_ChangedHashEqualToQueuedIsNotShown(t *testing.T) {
+	h := desk.SHA256Hex([]byte("v1"))
+	changed := item("02-s2", desk.KindScript, desk.StateSkipped)
+	changed.Meta = desk.Meta{AddedAt: agoPtr(time.Minute), SHA256: h, ChangedSHA256: h, SkipReason: desk.SkipChanged}
+	snap := &desk.Snapshot{Dir: "/d", Taken: deskNow, Skipped: []desk.Item{changed}}
+	_, opts := emptySnapshot()
+	out := ansi.Strip(deskFrame{snap: snap, width: 100, height: 30, now: deskNow, opts: opts}.render())
+	if strings.Contains(out, ", now ") || !strings.Contains(out, "queued "+h[:12]+", since changed") {
+		t.Errorf("changed note:\n%s", out)
+	}
+}
+
+// A lost run is not counted as running: the queue strip and the outcomes
+// tile count it as lost (#1106).
+func TestDeskFrame_LostIsNotCountedRunning(t *testing.T) {
+	lost := item("01-long", desk.KindScript, desk.StateLost)
+	snap := &desk.Snapshot{Dir: "/d", Taken: deskNow, Running: []desk.Item{lost}}
+	_, opts := emptySnapshot()
+	out := ansi.Strip(RenderDeskFrame(snap, 100, 30, deskNow, opts))
+	if !strings.Contains(out, "● 0 running") || !strings.Contains(out, "? 1 lost") || !strings.Contains(out, "0 changed · 1 lost") {
+		t.Errorf("lost counts:\n%s", out)
+	}
+}
+
+// An empty desk says how the queue fills and offers only keys that can act
+// (#1107).
+func TestDeskFrame_EmptyStateSaysHowItFills(t *testing.T) {
+	snap, opts := emptySnapshot()
+	out := ansi.Strip(RenderDeskFrame(snap, 100, 30, deskNow, opts))
+	if !strings.Contains(out, "Claude queues scripts with forgectl desk add; they appear here") {
+		t.Errorf("the empty queue does not say how it fills:\n%s", out)
+	}
+	footer := out[strings.LastIndex(out, "\n")+1:]
+	for _, k := range []string{"y run", "s skip", "v view", "a all", "j/k"} {
+		if strings.Contains(footer, k) {
+			t.Errorf("empty desk offers %q: %q", k, footer)
+		}
+	}
+	if !strings.Contains(footer, "q quit") {
+		t.Errorf("footer lost q quit: %q", footer)
+	}
+}
+
+// Every indicator carries a word (#1107): the header dot, the history bars'
+// legend, a running item with no earlier run to compare with; and the
+// counts agree: "started today" beside "no finished runs yet".
+func TestDeskFrame_IndicatorsAreLabelled(t *testing.T) {
+	snap, opts := busySnapshot()
+	out := ansi.Strip(RenderDeskFrame(snap, 120, 40, deskNow, opts))
+	for _, want := range []string{"desk ● 3 waiting", "bar: run length, longest full", "started today"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("busy frame lacks %q:\n%s", want, out)
+		}
+	}
+	run := item("01-new", desk.KindScript, desk.StateRunning)
+	run.Started = ago(12 * time.Second)
+	snap = &desk.Snapshot{Dir: "/d", Taken: deskNow, Running: []desk.Item{run}}
+	out = ansi.Strip(RenderDeskFrame(snap, 120, 30, deskNow, opts))
+	for _, want := range []string{"desk ● 1 running", "0:12 so far", "no finished runs yet", "1 started today"[2:]} {
+		if !strings.Contains(out, want) {
+			t.Errorf("frame lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "no runs yet") || strings.Contains(out, "runs today") {
+		t.Errorf("frame still has the old wording:\n%s", out)
+	}
+}
+
+// --no-icons maps every glyph to one ASCII character of the same width.
+func TestDeskFrame_ASCIIKeepsTheLayout(t *testing.T) {
+	for _, fx := range deskFixtures {
+		snap, opts := fx.build()
+		assertASCIIFrame(t, fx.name, snap, opts)
+	}
+	snap, opts := twoWaitingSnapshot()
+	assertASCIIFrame(t, "short", snap, opts)
+}
+
+func assertASCIIFrame(t *testing.T, name string, snap *desk.Snapshot, opts DeskFrameOptions) {
+	t.Helper()
+	icons := ansi.Strip(RenderDeskFrame(snap, 120, 40, deskNow, opts))
+	opts.ASCII = true
+	ascii := ansi.Strip(RenderDeskFrame(snap, 120, 40, deskNow, opts))
+	for _, r := range ascii {
+		if r >= 0x80 && !strings.ContainsRune("·…±", r) {
+			t.Fatalf("%s: ASCII frame draws %q:\n%s", name, r, ascii)
+		}
+	}
+	il, al := strings.Split(icons, "\n"), strings.Split(ascii, "\n")
+	for i := range il {
+		if ansi.StringWidth(il[i]) != ansi.StringWidth(al[i]) {
+			t.Errorf("line %d: width %d vs %d", i, ansi.StringWidth(il[i]), ansi.StringWidth(al[i]))
+		}
+	}
+}
+
+// The footer follows the selected row: y and s only where they act, a
+// whenever something waits, and nothing item-shaped on an empty queue even
+// in a too-small window (#1107).
+func TestDeskFrame_HintsFollowTheSelection(t *testing.T) {
+	snap, opts := busySnapshot()
+	rows := deskRows(snap, deskNow)
+	footer := func(cursor, w, h int) string {
+		out := ansi.Strip(deskFrame{snap: snap, width: w, height: h, now: deskNow, opts: opts, cursor: cursor}.render())
+		return out[strings.LastIndex(out, "\n")+1:]
+	}
+	running := slices.IndexFunc(rows, func(r queueRow) bool { return r.kind == rowRunning })
+	if f := footer(0, 120, 40); !strings.Contains(f, "y run") || !strings.Contains(f, "s skip") {
+		t.Errorf("waiting row: %q", f)
+	}
+	if f := footer(running, 120, 40); strings.Contains(f, "y run") || strings.Contains(f, "s skip") || !strings.Contains(f, "a all") {
+		t.Errorf("running row: %q", f)
+	}
+	empty, eopts := emptySnapshot()
+	out := ansi.Strip(deskFrame{snap: empty, width: 100, height: 6, now: deskNow, opts: eopts}.render())
+	if f := out[strings.LastIndex(out, "\n")+1:]; strings.Contains(f, "s skip") || strings.Contains(f, "j/k") || !strings.Contains(f, "q quit") {
+		t.Errorf("empty, too small: %q", f)
+	}
+}
+
+// The header names what the desk is doing when nothing waits: running, or
+// idle (#1107 review: "nothing waiting" beside a running item misled).
+func TestDeskFrame_HeaderSaysRunningOrIdle(t *testing.T) {
+	run := item("01-a", desk.KindScript, desk.StateRunning)
+	run.Started = ago(time.Second)
+	_, opts := emptySnapshot()
+	out := ansi.Strip(RenderDeskFrame(&desk.Snapshot{Dir: "/d", Taken: deskNow, Running: []desk.Item{run}}, 100, 30, deskNow, opts))
+	if !strings.HasPrefix(out, "desk ● 1 running") {
+		t.Errorf("header with one running item: %q", strings.SplitN(out, "\n", 2)[0])
+	}
+	empty, eopts := emptySnapshot()
+	out = ansi.Strip(RenderDeskFrame(empty, 100, 30, deskNow, eopts))
+	if !strings.HasPrefix(out, "desk ○ idle") {
+		t.Errorf("empty header: %q", strings.SplitN(out, "\n", 2)[0])
 	}
 }

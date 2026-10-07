@@ -309,6 +309,10 @@ type Meta struct {
 	SHA256     string     `json:"sha256,omitempty"`
 	Kind       Kind       `json:"kind,omitempty"`
 	SkipReason string     `json:"skip_reason,omitempty"`
+	// ChangedSHA256 is the hash of the bytes the desk found when it skipped
+	// the item as changed, beside SHA256, the hash it was queued at. Shown
+	// only after ValidSHA256, like every hash read back from meta.
+	ChangedSHA256 string `json:"changed_sha256,omitempty"`
 	// SkipNote is the operator's own one-line reason, from `desk skip
 	// --reason`. Untrusted text: render it through termsafe.
 	SkipNote string `json:"skip_note,omitempty"`

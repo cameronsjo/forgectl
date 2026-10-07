@@ -158,7 +158,7 @@ func (d *Desk) Claim(name, wantSHA string) (*Claimed, error) {
 	}
 	sum := SHA256Hex(data)
 	if sum != meta.SHA256 {
-		if err := d.skipChanged(DirRunning, name, kind, meta); err != nil {
+		if err := d.skipChanged(DirRunning, name, kind, meta, sum); err != nil {
 			return nil, err
 		}
 		return nil, fmt.Errorf("%w: %s", ErrChanged, describe(name))

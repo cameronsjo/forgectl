@@ -51,6 +51,9 @@ type DeskOptions struct {
 	// Runs is where the run view (r) reads runs from; RunDesk sets the
 	// desk itself. nil leaves the run view off.
 	Runs runview.Source
+	// ASCII draws the dashboard's marks, borders and bars in ASCII
+	// (--no-icons). The script viewer (v) is never changed.
+	ASCII bool
 }
 
 const (
@@ -158,6 +161,9 @@ type deskModel struct {
 	shown   []bool
 	refused bool // the last y in the a prompt did not run: not every page seen
 	anchor  int  // the target the a prompt's page starts at, kept on a resize
+	// runStarted is the item the last "started X" line names, and startedLine
+	// that line, so it can turn into the outcome once the run ends (#1107).
+	runStarted, startedLine string
 	// watch is the waiting item last under the cursor, kept across an empty
 	// queue. moved names it once a rescan finds it gone and the cursor on
 	// another; the next y refuses once (#1098); see watchSelection.
@@ -220,6 +226,7 @@ func newDeskModel(ctx context.Context, d deskBackend, opts DeskOptions) deskMode
 		Version: opts.Version,
 		Dir:     TildePath(d.Path(), opts.Home),
 		Started: m.started,
+		ASCII:   opts.ASCII,
 	}
 	return m
 }
@@ -363,6 +370,10 @@ func (m deskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastSkip = ""
 		}
 		m.message = m.resultLine(t.text, t.err)
+		m.runStarted, m.startedLine = "", ""
+		if t.err == nil && len(t.resolved) == 1 && strings.HasPrefix(t.text, "started ") {
+			m.runStarted, m.startedLine = t.resolved[0].name, m.message
+		}
 		return m, m.rescan()
 	case deskTTYReadyMsg:
 		if t.err != nil {
@@ -468,6 +479,7 @@ func (m deskModel) applyScan(t deskScanMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	m.watchSelection()
+	m.reportEnded()
 
 	waiting := map[string]bool{}
 	var arrived []desk.Item
@@ -615,7 +627,7 @@ func (m deskModel) run() (tea.Model, tea.Cmd) {
 	}
 	st := m.styles()
 	if !r.runnable() {
-		m.message = st.Warn.Render(safeMessage(itemLabel(r.item.Name) + " is " + rowLabel(r.kind) + "; only a waiting item runs"))
+		m.message = st.Warn.Render(safeMessage(notRunnable(r)))
 		return m, nil
 	}
 	// One key, as the old desk had: the focus panel's short hash is what the
@@ -665,6 +677,19 @@ func (m deskModel) start(t target) (tea.Model, tea.Cmd) {
 		text, err := launch(d, t)
 		return deskResultMsg{text: text, err: err, resolved: resolvedIf(err, t)}
 	}
+}
+
+// notRunnable is y's reply for a row that cannot run: what it is, and for a
+// lost or changed item, what to do instead.
+func notRunnable(r queueRow) string {
+	label := itemLabel(r.item.Name)
+	switch r.kind {
+	case rowLost:
+		return label + " was lost mid-run · " + lostNext
+	case rowChanged:
+		return label + " changed and did not run · " + changedNext
+	}
+	return label + " is " + rowLabel(r.kind) + "; only a waiting item runs"
 }
 
 func rowLabel(k rowKind) string {
@@ -862,7 +887,7 @@ func (m deskModel) confirmKey(key string) (tea.Model, tea.Cmd) {
 				if err := d.Skip(name, desk.SkipLost); err != nil {
 					return deskResultMsg{err: err}
 				}
-				return deskResultMsg{text: "skipped lost run " + itemLabel(name) + "; queue a new item to run it again"}
+				return deskResultMsg{text: "cleared lost run " + itemLabel(name) + " · ask Claude to queue it again to rerun it"}
 			}
 			if err := d.Skip(name, desk.SkipOperator); err != nil {
 				return deskResultMsg{err: err}
@@ -912,7 +937,12 @@ func (m deskModel) undo() (tea.Model, tea.Cmd) {
 	}
 	name := m.lastSkip
 	if name == "" {
-		m.message = m.styles().Muted.Render("nothing to undo")
+		text := "nothing to undo"
+		if r, ok := m.selected(); ok && r.kind == rowChanged {
+			// The desk skipped it, not the operator, and it cannot be re-armed.
+			text = itemLabel(r.item.Name) + " changed; nothing to undo · " + changedNext
+		}
+		m.message = m.styles().Muted.Render(safeMessage(text))
 		return m, nil
 	}
 	m.busy = true
@@ -946,11 +976,17 @@ func (m deskModel) view() tea.Cmd {
 	}
 }
 
-// log opens the selected item's log, or the latest run's when the selected
-// item has not run.
+// log opens the selected item's log, or the latest run's when nothing is
+// selected. A selected item that has not run says so.
 func (m deskModel) log() tea.Cmd {
 	name := ""
-	if r, ok := m.selected(); ok && r.kind != rowWaiting && r.kind != rowRefused && r.kind != rowChanged {
+	if r, ok := m.selected(); ok {
+		if r.kind == rowWaiting || r.kind == rowRefused || r.kind == rowChanged {
+			// No run, so no log: say so rather than open another item's log as
+			// this one's (#1106).
+			msg := itemLabel(r.item.Name) + " has not run, so it has no log"
+			return func() tea.Msg { return deskPagerMsg{err: errors.New(msg)} }
+		}
 		name = r.item.Name
 	}
 	if name == "" && m.snap != nil && len(m.snap.Done) > 0 {
@@ -1052,7 +1088,7 @@ func (m deskModel) View() tea.View {
 	if m.pager != nil {
 		content = m.pagerView(width, height)
 	} else if m.rv != nil {
-		content = m.rv.render(m.styles(), width, height)
+		content = asciiFrame(m.rv.render(m.styles(), width, height), m.opts.ASCII)
 	} else {
 		content = m.dashboard().render()
 	}
@@ -1064,7 +1100,7 @@ func (m deskModel) View() tea.View {
 			n++
 		}
 	}
-	v.WindowTitle = fmt.Sprintf("desk ● %d waiting", n)
+	v.WindowTitle = asciiFrame(fmt.Sprintf("desk ● %d waiting", n), m.opts.ASCII)
 	return v
 }
 
@@ -1114,6 +1150,10 @@ func (m deskModel) footer() string {
 	st := m.styles()
 	switch m.confirm {
 	case confirmSkip:
+		if m.targets[0].lost {
+			// It already ran, or part of it did: "skip" is the wrong word.
+			return " " + st.Warn.Render("clear lost run "+itemLabel(m.targets[0].name)+"?") + st.Muted.Render("  y clear · any other key cancels")
+		}
 		return " " + st.Warn.Render("skip "+itemLabel(m.targets[0].name)+"?") + st.Muted.Render("  y skip · any other key cancels")
 	case confirmAll:
 		width := m.screenWidth()
@@ -1332,3 +1372,37 @@ func (r *ttyRun) finish(runErr error) (int, error) {
 // a writable one on the done/ record. (fd 3 is closed by the desk's prelude
 // inside the script itself.)
 const ttyWrapper = `exec 4>&-; "$1" "$2"; echo $? > "$3"`
+
+// reportEnded turns a "started X" line still on screen into X's outcome once
+// its run has ended, so the footer never says a finished run just started.
+func (m *deskModel) reportEnded() {
+	if m.runStarted == "" || m.snap == nil {
+		return
+	}
+	for _, it := range m.snap.Running {
+		if it.Name == m.runStarted && it.State == desk.StateLost {
+			if m.message == m.startedLine {
+				m.message = m.styles().Warn.Render(safeMessage(itemLabel(it.Name) + " was lost mid-run · " + lostNext))
+			}
+			m.runStarted, m.startedLine = "", ""
+			return
+		}
+	}
+	for _, it := range m.snap.Done {
+		if it.Name != m.runStarted {
+			continue
+		}
+		if m.message == m.startedLine {
+			outcome, style := "ok", m.styles().OK
+			switch {
+			case it.ExitCode == nil:
+				outcome, style = "no exit recorded", m.styles().Muted
+			case *it.ExitCode != 0:
+				outcome, style = "exit "+strconv.Itoa(*it.ExitCode), m.styles().Danger
+			}
+			m.message = style.Render(safeMessage(itemLabel(it.Name) + " ended: " + outcome))
+		}
+		m.runStarted, m.startedLine = "", ""
+		return
+	}
+}

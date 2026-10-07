@@ -156,7 +156,7 @@ func (d *Desk) sight(name string, kind Kind, now time.Time) (it Item, gone bool,
 		return it, false, nil
 	}
 	if meta.SHA256 != sum {
-		if err := d.skipChanged(DirPending, name, kind, meta); err != nil {
+		if err := d.skipChanged(DirPending, name, kind, meta, sum); err != nil {
 			return it, false, err
 		}
 		it.Meta = meta
@@ -168,9 +168,10 @@ func (d *Desk) sight(name string, kind Kind, now time.Time) (it Item, gone bool,
 }
 
 // skipChanged moves an item whose bytes no longer match its hash to
-// skipped/. It cannot be re-armed; a new item is queued instead.
-func (d *Desk) skipChanged(from, name string, kind Kind, meta Meta) error {
-	meta.SkipReason = SkipChanged
+// skipped/, recording found, the hash of the bytes it has now. It cannot be
+// re-armed; a new item is queued instead.
+func (d *Desk) skipChanged(from, name string, kind Kind, meta Meta, found string) error {
+	meta.SkipReason, meta.ChangedSHA256 = SkipChanged, found
 	if err := d.writeMeta(from, name, meta); err != nil {
 		return err
 	}

@@ -59,7 +59,7 @@ Quit and restart every open dashboard after you upgrade forgectl. A dashboard st
 
 ### `forgectl desk`
 
-The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with a bar per item, a focus panel showing the selected item's short sha256, WHAT and WHY (wrapped, up to four lines each; `desk status NAME` shows them whole) and, under a "script" label, its first script lines, and the history of finished runs. A short window gives up the tiles, then the summary line, the queue rows, the history and the script preview before the focus panel's hash, WHAT and WHY; below that minimum (about 40x10) the dashboard says how many rows or columns it needs.
+The dashboard: three stat tiles (waiting, started today, outcomes), the queue with a bar per item, a focus panel showing the selected item's short sha256, WHAT and WHY (wrapped, up to four lines each; `desk status NAME` shows them whole) and, under a "script" label, its first script lines, and the history of finished runs, whose bars are each run's length against the longest shown. An empty queue says that Claude fills it with `forgectl desk add`, and the footer offers only the keys that can act. A lost run's panel says it may have partly run and that `s` clears it and `l` shows what it printed; a changed item's panel shows the hash it was queued at and the hash it has now (a short window leaves the note out; `y`, `s` and `u` say the same in the footer). A short window gives up the tiles, then the summary line, the queue rows, the history and the script preview before the focus panel's hash, WHAT and WHY; below that minimum (about 40x10) the dashboard says how many rows or columns it needs.
 
 | Key | Action |
 |---|---|
@@ -68,7 +68,7 @@ The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with 
 | `u` | undo the last skip |
 | `v` | view the selected item's script |
 | `l` | view the latest log |
-| `r` | open the run view on the selected run (or the newest): its steps as a flow, the event timeline, and replay. `←`/`→` step through events, `[`/`]` move 10, `g`/`G` jump to the start or back to live, `space` plays, `n`/`p` switch runs, `q` closes |
+| `r` | open the run view on the selected item's run (an item that has not run yet says so instead; with nothing selected, the newest run): its steps as a flow, the event timeline, and replay. `←`/`→` step through events, `[`/`]` move 10, `g`/`G` jump to the start or to the end (back to live for a running item); a finished run's replay keeps its outcome in the header, `space` plays, `n`/`p` switch runs, `q` closes |
 | `a` | run every waiting item on screen, except TTY and changed items; asks first, listing each item with its full sha256, and runs exactly those names and hashes. A list longer than half the window pages (`space` next, `b` back, `esc` cancels), and `y` runs it only once every page has been on screen; a window too small for one full hash refuses |
 | `j` / `k` | move |
 | `q` | quit; detached runs keep running |
@@ -76,6 +76,8 @@ The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with 
 The dashboard rings the terminal bell when an item arrives, and again every 5 minutes while anything waits; inside a herdr pane it also sends a herdr notification. The window title reads `desk ● N waiting`.
 
 `--frame` prints one frame to stdout and exits, sized by `$COLUMNS` and `$LINES` (80x40 when unset). Colour follows `NO_COLOR` and is dropped on a pipe. It reads the queue the same way `status` does.
+
+`--no-icons`, or `no_icons = true` in the config (on the dashboard and `--frame`), draws every mark, border and bar in ASCII, one character for one, so the layout does not move; punctuation such as `·` stays, and the run view uses the legend `desk runs --no-icons` prints. Every state also carries a word, so neither mode depends on a glyph or on colour. `v` always shows a script's bytes unchanged.
 
 ### `forgectl desk add <file|->`
 
@@ -185,7 +187,7 @@ Every run with its progress, one line each: live runs first, then the most recen
 | `--json` | print `[{source, name, kind, live, exit, steps, done, failed, events, updated, partial}]` |
 | `--log FILE` | add a JSONL log as one more run (see `desk show`) |
 
-`live` is `running`, `ended`, `lost` or `skipped` for a desk run, and `unknown` for a log. Like `status`, reading the desk scans it.
+`live` is `running`, `ended`, `lost`, `skipped` or `changed` (skipped because its bytes changed after it was queued; it never ran) for a desk run, and `unknown` for a log. Like `status`, reading the desk scans it.
 
 Exit codes: 0 listed; 1 a source or a run could not be read in full (the rest are still listed, and stderr names each one, with `--json` too: the array has no field for it); 2 a usage error.
 
@@ -307,7 +309,7 @@ The batch ends with rc 0 (every step ok), 1 (a step failed), 2 (the batch could 
 
 `NN-name.meta.json` holds `added_at`, `sha256` (64 lowercase hex characters, or the item is refused), `kind`, `skip_reason`, `skip_note`, `skipped_by`, `skipped_at`, `signal_pane` (the herdr pane that queued the item, kept to clear its signal), `claimed_at`, `started_at`, `ended_at`, `exit_code`, and the owning process's `pid` and `pid_start`. A legacy item with none falls back to its log's times and its log's `EXIT=` line.
 
-`skip_reason` is `operator` (skipped at the dashboard or with `desk skip`; `skipped_by` says which; can be undone), `changed` (its bytes changed after it was queued), `lost` (its run's owner died), `launch-failed` (it was claimed but its run never began), `name-reused` (its number was already in `done/`), or `refused: …` (not a regular file with one link). Only `operator` can be undone.
+`skip_reason` is `operator` (skipped at the dashboard or with `desk skip`; `skipped_by` says which; can be undone), `changed` (its bytes changed after it was queued; `changed_sha256` records the hash of the bytes the desk found, beside `sha256`, the hash it was queued at), `lost` (its run's owner died), `launch-failed` (it was claimed but its run never began), `name-reused` (its number was already in `done/`), or `refused: …` (not a regular file with one link). Only `operator` can be undone.
 
 ### Events
 

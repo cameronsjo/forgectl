@@ -814,30 +814,7 @@ func TestDesk_SkippingALostRunIsFinal(t *testing.T) {
 	h := newDeskHarness(t)
 	h.drop("01-alpha.sh", plainScript("alpha"))
 	h.scan()
-	h.press("y") // claimed; the fake Launch starts no owner
-	// Age the claim past the grace: the claim's owner never came.
-	metaPath := filepath.Join(h.d.Path(), desk.DirRunning, "01-alpha.meta.json")
-	data, err := os.ReadFile(metaPath) //nolint:gosec // G304: a path under t.TempDir
-	if err != nil {
-		t.Fatal(err)
-	}
-	var meta desk.Meta
-	if err := json.Unmarshal(data, &meta); err != nil {
-		t.Fatal(err)
-	}
-	old := time.Now().Add(-time.Hour)
-	meta.ClaimedAt = &old
-	if data, err = json.Marshal(meta); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(metaPath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	h.scan()
-	h.selectItem("01-alpha")
-	if r, _ := h.m.selected(); r.kind != rowLost {
-		t.Fatalf("row kind %d, want lost", r.kind)
-	}
+	makeLost(t, h, "01-alpha")
 	h.press("s", "y")
 	if got := h.where("01-alpha"); got != desk.DirSkipped {
 		t.Fatalf("01-alpha is in %s, want skipped", got)
@@ -1397,5 +1374,136 @@ func TestDesk_AFailedYKeepsWatching(t *testing.T) {
 	h.press("y")
 	if len(h.backend.launched) != 0 {
 		t.Fatalf("y ran %v after a failed y; 01-a was what the operator read", h.backend.launched)
+	}
+}
+
+// makeLost claims name with y (the fake Launch starts no owner) and ages the
+// claim past the grace, so the next scan reads it lost.
+func makeLost(t *testing.T, h *deskHarness, name string) {
+	t.Helper()
+	h.selectItem(name)
+	h.press("y")
+	metaPath := filepath.Join(h.d.Path(), desk.DirRunning, name+".meta.json")
+	data, err := os.ReadFile(metaPath) //nolint:gosec // G304: a path under t.TempDir
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta desk.Meta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	meta.ClaimedAt = &old
+	if data, err = json.Marshal(meta); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metaPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.scan()
+	h.selectItem(name)
+	if r, _ := h.m.selected(); r.kind != rowLost {
+		t.Fatalf("row kind %d, want lost", r.kind)
+	}
+}
+
+// y and s on a lost run name what happened and what to do; s asks to clear
+// it, not to skip it (it already ran, or part of it did) (#1106).
+func TestDesk_LostRunKeysSayWhatToDo(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-long.sh", plainScript("long"))
+	h.scan()
+	makeLost(t, h, "01-long")
+	h.press("y")
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "01 long was lost mid-run · s clears it · l shows its output") || ansi.StringWidth(footer) > 80 {
+		t.Errorf("y on a lost run: %q", footer)
+	}
+	h.press("s")
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "clear lost run 01 long?") || strings.Contains(footer, "skip 01 long?") {
+		t.Errorf("s on a lost run: %q", footer)
+	}
+	h.press("y")
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "cleared lost run 01 long") {
+		t.Errorf("after clearing: %q", footer)
+	}
+}
+
+// y and u on a changed item say it did not run and what to do (#1106).
+func TestDesk_ChangedItemKeysSayWhatToDo(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("02-s2.sh", plainScript("s2"))
+	h.scan()
+	h.drop("02-s2.sh", plainScript("s2 edited"))
+	h.scan()
+	h.selectItem("02-s2")
+	h.press("y")
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "02 s2 changed and did not run · ask Claude to queue it again") || ansi.StringWidth(footer) > 80 {
+		t.Errorf("y on a changed item: %q", footer)
+	}
+	h.press("u")
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "02 s2 changed; nothing to undo · ask Claude to queue it again") || ansi.StringWidth(footer) > 80 {
+		t.Errorf("u on a changed item: %q", footer)
+	}
+}
+
+// l on an item that has not run says so; it never opens another item's log
+// as this one's (#1106).
+func TestDesk_LOnAnItemWithNoRunSaysSo(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-a.sh", plainScript("a"))
+	h.scan()
+	h.press("y") // 01-a runs (the fake launch leaves it in running/)
+	h.drop("02-b.sh", plainScript("b"))
+	h.scan()
+	h.selectItem("02-b")
+	h.press("l")
+	if h.m.pager != nil {
+		t.Fatalf("l opened %q for an item with no run", h.m.pager.title)
+	}
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "02 b has not run, so it has no log") {
+		t.Errorf("footer = %q", footer)
+	}
+}
+
+// A "started X" line still on screen turns into X's outcome once the run
+// ends, instead of saying a finished run just started (#1107).
+func TestDesk_StartedLineBecomesTheOutcome(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-a.sh", plainScript("a"))
+	h.scan()
+	h.press("y")
+	if !strings.Contains(ansi.Strip(h.m.footer()), "started 01 a") {
+		t.Fatalf("footer = %q", ansi.Strip(h.m.footer()))
+	}
+	run, err := h.d.BeginRun("01-a", os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Finish(3, "failed"); err != nil {
+		t.Fatal(err)
+	}
+	h.scan()
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "01 a ended: exit 3") {
+		t.Errorf("footer after the run ended = %q", footer)
+	}
+}
+
+// A started run that ends as lost replaces "started X" with what happened.
+func TestDesk_StartedLineBecomesLost(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-a.sh", plainScript("a"))
+	h.scan()
+	makeLost(t, h, "01-a")
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "01 a was lost mid-run · s clears it") {
+		t.Errorf("footer after the run was lost = %q", footer)
+	}
+}
+
+// --no-icons reaches the window title too.
+func TestDesk_WindowTitleFollowsNoIcons(t *testing.T) {
+	h := newDeskHarness(t)
+	h.m.opts.ASCII = true
+	if title := h.m.View().WindowTitle; strings.ContainsRune(title, '●') {
+		t.Errorf("ASCII window title = %q", title)
 	}
 }

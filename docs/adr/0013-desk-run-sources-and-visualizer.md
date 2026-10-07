@@ -29,7 +29,7 @@ A source lists runs and loads each one's new events from a cursor.
 | desk | Every running, done and skipped item. A pending item is not a run yet; the queue shows it | A script is one step, `script`. A batch's steps and edges come from its manifest |
 | log | The one JSONL file named with `--log` | None: a log has no step model, so it shows its events and no step state |
 
-The desk source folds with `DeskSpec()`: `STEP-START` starts a step, `STEP-END` closes it (or fails it when `rc` is not 0), `STEP-SKIP` skips a step that never started, and `RUN-END` carries the exit. Desk events carry no time of their own, so step durations come from the batch's `status.tsv`, else the `STEP-END dur=` field, else the item's start and end times. The run's live state is the desk's own word (`running`, `lost`, `skipped`, `ended`), not the fold's.
+The desk source folds with `DeskSpec()`: `STEP-START` starts a step, `STEP-END` closes it (or fails it when `rc` is not 0), `STEP-SKIP` skips a step that never started, `RUN-END` carries the exit, and `RUN-LOST` (added by the source when the owner is gone with no `RUN-END`) ends the run as lost, its running step interrupted. Desk events carry no time of their own, so step durations come from the batch's `status.tsv`, else the `STEP-END dur=` field, else the item's start and end times. While following, the run's live state is the desk's own word (`running`, `lost`, `skipped`, `changed`, `ended`); a replay uses the fold's.
 
 A log line's event name, step and time come from three keys, `event`, `step` and `time` by default, which `--event-key`, `--step-key` and `--time-key` rename.
 
