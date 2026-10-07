@@ -570,15 +570,18 @@ func TestDeskFrame_ShortWindowCutsFieldsLast(t *testing.T) {
 // A finished or failed item wraps what and why in full too, above its
 // "l to view the log" line.
 func TestDeskFrame_DoneItemFieldsWrapInFull(t *testing.T) {
+	// Doubled, each wraps to 5 lines at 100 columns, past the old 4-line cap.
+	what := longWhat + " " + longWhat
+	why := longWhy + " " + longWhy
 	for _, code := range []int{0, 1} {
 		it := item("15-merge-1169", desk.KindScript, desk.StateDone)
-		it.Headers = desk.Headers{What: longWhat, Why: longWhy}
+		it.Headers = desk.Headers{What: what, Why: why}
 		it.Started, it.Ended, it.ExitCode = ago(10*time.Minute), ago(9*time.Minute), rcPtr(code)
 		it.Meta = desk.Meta{AddedAt: agoPtr(time.Hour), SHA256: desk.SHA256Hex([]byte("x"))}
 		snap := &desk.Snapshot{Dir: "/d", Taken: deskNow, Done: []desk.Item{it}}
 		raw := RenderDeskFrame(snap, 100, 30, deskNow, deskOpts())
 		got := squash(focusText(raw))
-		if !strings.Contains(got, longWhat) || !strings.Contains(got, longWhy) || !strings.Contains(got, "l to view the log") {
+		if !strings.Contains(got, what) || !strings.Contains(got, why) || !strings.Contains(got, "l to view the log") {
 			t.Errorf("exit %d: done item cut what/why or lost the log hint:\n%s", code, ansi.Strip(raw))
 		}
 	}
