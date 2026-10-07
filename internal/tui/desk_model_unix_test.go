@@ -1487,3 +1487,14 @@ func TestDesk_StartedLineBecomesTheOutcome(t *testing.T) {
 		t.Errorf("footer after the run ended = %q", footer)
 	}
 }
+
+// A started run that ends as lost replaces "started X" with what happened.
+func TestDesk_StartedLineBecomesLost(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-a.sh", plainScript("a"))
+	h.scan()
+	makeLost(t, h, "01-a")
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "01 a was lost mid-run · s clears it") {
+		t.Errorf("footer after the run was lost = %q", footer)
+	}
+}

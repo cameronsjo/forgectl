@@ -77,7 +77,7 @@ The dashboard rings the terminal bell when an item arrives, and again every 5 mi
 
 `--frame` prints one frame to stdout and exits, sized by `$COLUMNS` and `$LINES` (80x40 when unset). Colour follows `NO_COLOR` and is dropped on a pipe. It reads the queue the same way `status` does.
 
-`--no-icons` (on the dashboard and `--frame`) draws every mark, border and bar in ASCII, one character for one, so the layout does not move; punctuation such as `·` stays. Every state also carries a word, so neither mode depends on a glyph or on colour. `v` always shows a script's bytes unchanged.
+`--no-icons`, or `no_icons = true` in the config (on the dashboard and `--frame`), draws every mark, border and bar in ASCII, one character for one, so the layout does not move; punctuation such as `·` stays, and the run view uses the legend `desk runs --no-icons` prints. Every state also carries a word, so neither mode depends on a glyph or on colour. `v` always shows a script's bytes unchanged.
 
 ### `forgectl desk add <file>`
 

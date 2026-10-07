@@ -84,12 +84,18 @@ func runDeskDashboard(cmd *cobra.Command, deps module.Deps, dirFlag string, fram
 	}
 	defer d.Close()           //nolint:errcheck // read side; nothing to flush
 	home, _ := deskUserHome() // display only: no home shows the full path
+	ascii := deskNoIcons(cmd, deps)
 	if frame {
-		noIcons, _ := cmd.Flags().GetBool("no-icons")
-		return printDeskFrame(deps.Theme.Writer(cmd.OutOrStdout(), os.Environ()), d, deps, home, noIcons)
+		return printDeskFrame(deps.Theme.Writer(cmd.OutOrStdout(), os.Environ()), d, deps, home, ascii)
 	}
-	noIcons, _ := cmd.Flags().GetBool("no-icons")
-	return tui.RunDesk(cmd.Context(), d, tui.DeskOptions{Version: meta.Version, Home: home, Theme: deps.Theme, ASCII: noIcons})
+	return tui.RunDesk(cmd.Context(), d, tui.DeskOptions{Version: meta.Version, Home: home, Theme: deps.Theme, ASCII: ascii})
+}
+
+// deskNoIcons reports whether the desk draws in ASCII: the root's
+// --no-icons flag, or no_icons in the config, as the hub reads them.
+func deskNoIcons(cmd *cobra.Command, deps module.Deps) bool {
+	flag, err := cmd.Flags().GetBool("no-icons")
+	return deps.Cfg.NoIcons || (err == nil && flag)
 }
 
 // printDeskFrame draws one frame the way the dashboard would, sized by

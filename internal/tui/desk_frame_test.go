@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -817,5 +818,29 @@ func assertASCIIFrame(t *testing.T, name string, snap *desk.Snapshot, opts DeskF
 		if ansi.StringWidth(il[i]) != ansi.StringWidth(al[i]) {
 			t.Errorf("line %d: width %d vs %d", i, ansi.StringWidth(il[i]), ansi.StringWidth(al[i]))
 		}
+	}
+}
+
+// The footer follows the selected row: y and s only where they act, a
+// whenever something waits, and nothing item-shaped on an empty queue even
+// in a too-small window (#1107).
+func TestDeskFrame_HintsFollowTheSelection(t *testing.T) {
+	snap, opts := busySnapshot()
+	rows := deskRows(snap, deskNow)
+	footer := func(cursor, w, h int) string {
+		out := ansi.Strip(deskFrame{snap: snap, width: w, height: h, now: deskNow, opts: opts, cursor: cursor}.render())
+		return out[strings.LastIndex(out, "\n")+1:]
+	}
+	running := slices.IndexFunc(rows, func(r queueRow) bool { return r.kind == rowRunning })
+	if f := footer(0, 120, 40); !strings.Contains(f, "y run") || !strings.Contains(f, "s skip") {
+		t.Errorf("waiting row: %q", f)
+	}
+	if f := footer(running, 120, 40); strings.Contains(f, "y run") || strings.Contains(f, "s skip") || !strings.Contains(f, "a all") {
+		t.Errorf("running row: %q", f)
+	}
+	empty, eopts := emptySnapshot()
+	out := ansi.Strip(deskFrame{snap: empty, width: 100, height: 6, now: deskNow, opts: eopts}.render())
+	if f := out[strings.LastIndex(out, "\n")+1:]; strings.Contains(f, "s skip") || strings.Contains(f, "j/k") || !strings.Contains(f, "q quit") {
+		t.Errorf("empty, too small: %q", f)
 	}
 }

@@ -1379,6 +1379,15 @@ func (m *deskModel) reportEnded() {
 	if m.runStarted == "" || m.snap == nil {
 		return
 	}
+	for _, it := range m.snap.Running {
+		if it.Name == m.runStarted && it.State == desk.StateLost {
+			if m.message == m.startedLine {
+				m.message = m.styles().Warn.Render(safeMessage(itemLabel(it.Name) + " was lost mid-run · " + lostNext))
+			}
+			m.runStarted, m.startedLine = "", ""
+			return
+		}
+	}
 	for _, it := range m.snap.Done {
 		if it.Name != m.runStarted {
 			continue

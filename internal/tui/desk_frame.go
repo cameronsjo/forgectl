@@ -375,8 +375,7 @@ func (f deskFrame) tooSmall(st theme.Styles, header string, footer []string, row
 		}
 	}
 	if f.footer == "" {
-		n, _, _ := f.waiting()
-		footer = []string{cut(deskHintsNoRun(st, width, n > 0), visible)}
+		footer = []string{cut(f.hints(st, width, false), visible)}
 	}
 	lines := []string{header, cut(st.Warn.Render(text), visible)}
 	if room := f.height - len(lines) - len(footer); room >= deskQueueMin {
@@ -402,7 +401,7 @@ func deskPromptRoom(height int) int {
 // to that room and says so; nothing is ever drawn over the dashboard.
 func (f deskFrame) footerLines(st theme.Styles, width int) []string {
 	if f.footer == "" {
-		return []string{cut(f.hints(st, width), width)}
+		return []string{cut(f.hints(st, width, true), width)}
 	}
 	lines := strings.Split(f.footer, "\n")
 	if room := deskPromptRoom(f.height); room > 0 && len(lines) > room {
@@ -514,7 +513,7 @@ type deskStats struct {
 	waiting, tty int
 	oldest       time.Time
 	arrivals     []float64
-	runsToday    int
+	startedToday int
 	median       time.Duration
 	hasMedian    bool
 	runs         []float64
@@ -564,7 +563,7 @@ func (f deskFrame) stats() deskStats {
 			s.runs[b]++
 		}
 		if !it.Started.IsZero() && !it.Started.Before(today) {
-			s.runsToday++
+			s.startedToday++
 			if it.State == desk.StateDone && !it.Ended.IsZero() {
 				durations = append(durations, it.Ended.Sub(it.Started))
 			}
@@ -637,7 +636,7 @@ func (f deskFrame) tiles(st theme.Styles, width int) []string {
 			st.Accent.Render(Sparkline(s.arrivals, min(widths[0]-4, deskSparkHours))),
 		}),
 		Panel(st, widths[1], "started today", "", []string{
-			st.Header.Render(strconv.Itoa(s.runsToday)),
+			st.Header.Render(strconv.Itoa(s.startedToday)),
 			st.Muted.Render(med),
 			st.Active.Render(Sparkline(s.runs, min(widths[1]-4, deskSparkHours))),
 		}),
@@ -665,7 +664,7 @@ func (f deskFrame) summary(st theme.Styles) string {
 	if !s.oldest.IsZero() {
 		parts = append(parts, "oldest "+strings.TrimSuffix(agoLabel(f.now, s.oldest), " ago"))
 	}
-	parts = append(parts, strconv.Itoa(s.runsToday)+" started today")
+	parts = append(parts, strconv.Itoa(s.startedToday)+" started today")
 	if s.hasMedian {
 		parts = append(parts, "median "+shortDur(s.median))
 	}
@@ -1171,33 +1170,45 @@ func (f deskFrame) historyLine(st theme.Styles, width int, it desk.Item, longest
 	return line + outcome + " " + st.Muted.Render(padTo(agoLabel(f.now, it.Ended), ageW)) + " " + st.Muted.Render(dur)
 }
 
-// hints is the key-hint footer for what is on screen: an empty queue offers
-// none of the keys that act on an item, and a queue with nothing waiting
-// does not offer y or a (#1107).
-func (f deskFrame) hints(st theme.Styles, width int) string {
+// hints is the key-hint footer for what is on screen, built by deskKeys.
+// canRun is false in a window too small to show the focus panel.
+func (f deskFrame) hints(st theme.Styles, width int, canRun bool) string {
 	rows := deskRows(f.snap, f.now)
-	if len(rows) == 0 {
-		return hintLine(st, width, [][2]string{{"u", "undo"}, {"l", "log"}, {"r", "runs"}, {"q", "quit"}})
+	var sel queueRow
+	if len(rows) > 0 {
+		sel = rows[min(max(f.cursor, 0), len(rows)-1)]
 	}
-	if n, _, _ := f.waiting(); n == 0 {
-		return deskHintsNoRun(st, width, false)
-	}
-	return deskHints(st, width)
+	n, _, _ := f.waiting()
+	return deskKeys(st, width, keyState{
+		rows:    len(rows) > 0,
+		run:     canRun && len(rows) > 0 && sel.kind == rowWaiting,
+		skip:    len(rows) > 0 && (sel.kind == rowWaiting || sel.kind == rowRefused || sel.kind == rowLost),
+		waiting: n > 0,
+	})
 }
 
-// deskHints is the key-hint footer. A narrow window drops the move hint
-// (the arrows are self-explanatory) and tightens the spacing.
-func deskHints(st theme.Styles, width int) string {
-	return hintLine(st, width, [][2]string{{"y", "run"}, {"s", "skip"}, {"u", "undo"}, {"v", "view"}, {"a", "all"}, {"l", "log"}, {"r", "runs"}, {"j/k", "move"}, {"q", "quit"}})
+// keyState is what the keys can act on now.
+type keyState struct {
+	rows, run, skip, waiting bool
 }
 
-// deskHintsNoRun is the hints when y cannot run the selection: a window too
-// small to show the focus panel, or nothing waiting. a stays offered only
-// when something waits (its prompt shows each full hash itself).
-func deskHintsNoRun(st theme.Styles, width int, all bool) string {
-	keys := [][2]string{{"s", "skip"}, {"u", "undo"}, {"v", "view"}, {"l", "log"}, {"r", "runs"}, {"j/k", "move"}, {"q", "quit"}}
-	if all {
-		keys = slices.Insert(keys, 3, [2]string{"a", "all"})
+// deskKeys is the key-hint footer from one ordered table: a key shows only
+// when it can act on what is on screen (#1107). u, l, r and q always can (u
+// and l answer when there is nothing to undo or no log). A narrow window drops
+// the move hint (the arrows are self-explanatory) and tightens the spacing.
+func deskKeys(st theme.Styles, width int, s keyState) string {
+	table := []struct {
+		key, label string
+		show       bool
+	}{
+		{"y", "run", s.run}, {"s", "skip", s.skip}, {"u", "undo", true}, {"v", "view", s.rows},
+		{"a", "all", s.waiting}, {"l", "log", true}, {"r", "runs", true}, {"j/k", "move", s.rows}, {"q", "quit", true},
+	}
+	var keys [][2]string
+	for _, k := range table {
+		if k.show {
+			keys = append(keys, [2]string{k.key, k.label})
+		}
 	}
 	return hintLine(st, width, keys)
 }

@@ -820,3 +820,16 @@ func TestDeskFrameNoIcons(t *testing.T) {
 		}
 	}
 }
+
+// no_icons in the config draws the desk in ASCII too, as it does the hub.
+func TestDeskNoIconsHonorsConfig(t *testing.T) {
+	cmd := &cobra.Command{}
+	deps := deskDeps()
+	if deskNoIcons(cmd, deps) {
+		t.Fatal("ASCII with neither the flag nor the config")
+	}
+	deps.Cfg.NoIcons = true
+	if !deskNoIcons(cmd, deps) {
+		t.Error("config no_icons did not select ASCII")
+	}
+}
