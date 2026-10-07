@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.34.0](https://github.com/cameronsjo/forgectl/compare/v0.33.0...v0.34.0) (2026-10-07)
+
+
+### Features
+
+* **desk:** bold only what needs you in the timeline, quiet old entries ([#1178](https://github.com/cameronsjo/forgectl/issues/1178)) ([23ca61d](https://github.com/cameronsjo/forgectl/commit/23ca61df3f061771ada27a152c73693c1c45c7fb))
+* **surface:** the drain tells the operator when a worker needs them ([#1177](https://github.com/cameronsjo/forgectl/issues/1177)) ([7fd0698](https://github.com/cameronsjo/forgectl/commit/7fd06985a9edbb153f623891b4d98fe33349aa96))
+* **surface:** the drain, a detached launcher for queued workers ([#1172](https://github.com/cameronsjo/forgectl/issues/1172)) ([02a80ee](https://github.com/cameronsjo/forgectl/commit/02a80eeba7d443f9c13a731f571a113b6e424485))
+
+
+### Bug Fixes
+
+* **deps:** bump golang.org/x/text to v0.41.0 for GO-2026-6629 ([#1179](https://github.com/cameronsjo/forgectl/issues/1179)) ([99749ca](https://github.com/cameronsjo/forgectl/commit/99749ca35916966ad1e1d3ec8be270167f66ed0b))
+
 ## [0.33.0](https://github.com/cameronsjo/forgectl/compare/v0.32.0...v0.33.0) (2026-10-07)
 
 
