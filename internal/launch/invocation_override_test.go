@@ -188,7 +188,6 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 		"pi from the repo profile": {Projects: []config.LaunchProject{{Match: target, Harness: "pi"}}},
 		"bypassPermissions":        {Worker: config.LaunchWorker{PermissionMode: "bypassPermissions"}},
 		"danger-full-access":       {Defaults: config.LaunchDefaults{Harness: "codex"}, Worker: config.LaunchWorker{Sandbox: "danger-full-access"}},
-		"claude auto mode":         {Worker: config.LaunchWorker{PermissionMode: "auto"}},
 		"claude dontAsk":           {Worker: config.LaunchWorker{PermissionMode: "dontAsk"}},
 		"codex never asks":         {Defaults: config.LaunchDefaults{Harness: "codex"}, Worker: config.LaunchWorker{ApprovalPolicy: "never"}},
 		"unknown worker mode":      {Worker: config.LaunchWorker{PermissionMode: "acceptEdit"}},
@@ -203,7 +202,7 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 
 	// forgectl#1060: a plan-mode worker's shell must prompt, not go to the
 	// auto-mode classifier, so every claude worker carries the setting.
-	for _, mode := range []string{"plan", "default", "manual", "acceptEdits"} {
+	for _, mode := range []string{"plan", "default", "manual", "acceptEdits", "auto"} {
 		t.Run("claude worker in "+mode+" turns off auto mode during plan", func(t *testing.T) {
 			built, err := BuildInvocation(InvocationRequest{
 				StdoutTerminal: true,

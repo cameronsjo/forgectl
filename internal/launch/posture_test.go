@@ -10,9 +10,10 @@ import (
 
 // TestWorkerFloorWalksEveryKnownValue: the floor accepts exactly the values
 // at or below each cap. Ranking dontAsk (or any looser mode) at or below the
-// cap, or raising the cap, turns this red (ADR-0010 item 4).
+// cap, or raising the cap, turns this red (ADR-0010 item 4; the claude cap is
+// auto since the 2026-10-07 amendment).
 func TestWorkerFloorWalksEveryKnownValue(t *testing.T) {
-	wantClaude := map[string]bool{"plan": true, "default": true, "manual": true, "acceptEdits": true}
+	wantClaude := map[string]bool{"plan": true, "default": true, "manual": true, "acceptEdits": true, "auto": true}
 	for _, mode := range claudePermissionRank.known() {
 		_, err := applyWorkerFloor(Profile{Harness: "claude", PermissionMode: mode})
 		if got := err == nil; got != wantClaude[mode] {
