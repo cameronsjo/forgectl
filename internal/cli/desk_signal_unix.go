@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
-	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/desk"
@@ -27,7 +26,7 @@ import (
 
 // deskSignalTimeout bounds each signal call. A signal is a courtesy: a hung
 // herdr or osascript must not hold up a queue operation.
-const deskSignalTimeout = time.Second
+const deskSignalTimeout = signalTimeout
 
 // deskSignalBodyMax caps the notification body, matching herdr.NotificationMaxRunes.
 const deskSignalBodyMax = 200
@@ -123,11 +122,10 @@ func (s deskSignal) queued(ctx context.Context, d *desk.Desk, a desk.Added, what
 	body = termsafe.SafeLineMax(body, deskSignalBodyMax)
 
 	if s.cfg.MacOSSignal() && deskMacSupported(s.deps) {
-		c, cancel := context.WithTimeout(ctx, deskSignalTimeout)
-		if err := deskMacNotify(c, s.deps, title, body); err != nil {
+		post := func(c context.Context, title, body string) error { return deskMacNotify(c, s.deps, title, body) }
+		if err := sendMacSignal(ctx, post, title, body); err != nil {
 			failed = append(failed, signalFailure("macOS notification", "notify_macos", err))
 		}
-		cancel()
 	}
 	if path, ok := s.herdrPath(); ok && herdr.CheckSession(deskLookupEnv) == nil {
 		c, cancel := context.WithTimeout(ctx, deskSignalTimeout)

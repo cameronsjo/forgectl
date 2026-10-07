@@ -135,42 +135,82 @@ func PaneRun(ctx context.Context, run exec.SensitiveRunner, herdrPath, paneID, c
 // this source took.
 const DeskAgentSource = "forgectl-desk"
 
+// DrainAgentSource is the label the surface drain reports a worker's pane
+// under. It is not the desk's, so a drain release never clears a desk signal
+// on the same pane, nor the other way round.
+const DrainAgentSource = "forgectl-drain"
+
+// AgentSource selects the --source and --agent label of a pane-state verb.
+// It is a closed set so every label stays a constant on the argv.
+type AgentSource int
+
+const (
+	// SourceDesk is [DeskAgentSource].
+	SourceDesk AgentSource = iota
+	// SourceDrain is [DrainAgentSource].
+	SourceDrain
+)
+
+// label is the source's --source and --agent operands.
+func (s AgentSource) label() []exec.Arg {
+	if s == SourceDrain {
+		return []exec.Arg{exec.MustFixed("--source"), exec.MustFixed(DrainAgentSource), exec.MustFixed("--agent"), exec.MustFixed(DrainAgentSource)}
+	}
+	return []exec.Arg{exec.MustFixed("--source"), exec.MustFixed(DeskAgentSource), exec.MustFixed("--agent"), exec.MustFixed(DeskAgentSource)}
+}
+
 // The pane id comes before the flags in both verbs below. herdr 0.9.1 help
 // shows it last, but `pane release-agent --source S --agent S PANE` exits 2
 // with "unknown option: S"; with the pane first it works (measured).
+
+// ReportBlockedArgs is the argv, after the binary and any --session pin, of
+// `pane report-agent PANE --source S --agent S --state blocked [--message M]`,
+// which puts paneID in herdr's needs-you state under src. The pane is always
+// named by the caller. message is untrusted text and is rendered inert and
+// capped first.
+func ReportBlockedArgs(src AgentSource, paneID, message string) ([]exec.Arg, error) {
+	if err := checkID("pane id", paneID); err != nil {
+		return nil, err
+	}
+	args := append([]exec.Arg{exec.MustFixed("pane"), exec.MustFixed("report-agent"), exec.Opaque(paneID)}, src.label()...)
+	args = append(args, exec.MustFixed("--state"), exec.MustFixed("blocked"))
+	if text := notificationText(message); text != "" {
+		args = append(args, exec.MustFixed("--message"), exec.Opaque(text))
+	}
+	return args, nil
+}
+
+// ReleaseAgentArgs is the argv, after the binary and any --session pin, of
+// `pane release-agent PANE --source S --agent S`, clearing what
+// [ReportBlockedArgs] set under the same src.
+func ReleaseAgentArgs(src AgentSource, paneID string) ([]exec.Arg, error) {
+	if err := checkID("pane id", paneID); err != nil {
+		return nil, err
+	}
+	return append([]exec.Arg{exec.MustFixed("pane"), exec.MustFixed("release-agent"), exec.Opaque(paneID)}, src.label()...), nil
+}
 
 // PaneReportBlocked runs `herdr pane report-agent --source forgectl-desk
 // --agent forgectl-desk --state blocked --message MESSAGE PANE`, which puts
 // the pane in herdr's needs-you state. message is untrusted text (an item
 // name) and is rendered inert and capped first.
 func PaneReportBlocked(ctx context.Context, run exec.SensitiveRunner, herdrPath, paneID, message string) error {
-	if err := checkID("pane id", paneID); err != nil {
+	args, err := ReportBlockedArgs(SourceDesk, paneID, message)
+	if err != nil {
 		return err
 	}
-	args := []exec.Arg{
-		exec.MustFixed("pane"), exec.MustFixed("report-agent"), exec.Opaque(paneID),
-		exec.MustFixed("--source"), exec.MustFixed(DeskAgentSource),
-		exec.MustFixed("--agent"), exec.MustFixed(DeskAgentSource),
-		exec.MustFixed("--state"), exec.MustFixed("blocked"),
-	}
-	if text := notificationText(message); text != "" {
-		args = append(args, exec.MustFixed("--message"), exec.Opaque(text))
-	}
-	_, err := runVerb(ctx, run, herdrPath, exec.KindHerdrPaneAgent, "pane report-agent", args)
+	_, err = runVerb(ctx, run, herdrPath, exec.KindHerdrPaneAgent, "pane report-agent", args)
 	return err
 }
 
 // PaneReleaseDesk runs `herdr pane release-agent --source forgectl-desk
 // --agent forgectl-desk PANE`, clearing what [PaneReportBlocked] set.
 func PaneReleaseDesk(ctx context.Context, run exec.SensitiveRunner, herdrPath, paneID string) error {
-	if err := checkID("pane id", paneID); err != nil {
+	args, err := ReleaseAgentArgs(SourceDesk, paneID)
+	if err != nil {
 		return err
 	}
-	_, err := runVerb(ctx, run, herdrPath, exec.KindHerdrPaneAgent, "pane release-agent", []exec.Arg{
-		exec.MustFixed("pane"), exec.MustFixed("release-agent"), exec.Opaque(paneID),
-		exec.MustFixed("--source"), exec.MustFixed(DeskAgentSource),
-		exec.MustFixed("--agent"), exec.MustFixed(DeskAgentSource),
-	})
+	_, err = runVerb(ctx, run, herdrPath, exec.KindHerdrPaneAgent, "pane release-agent", args)
 	return err
 }
 
