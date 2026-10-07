@@ -128,8 +128,11 @@ branch reads as branch_from "new". The preview sees a branch another worktree
 has checked out, but git can still refuse the real worktree add for a reason
 only it sees, so a clean preview is not a promise. --json prints the preview as one object:
 {"dry_run","surface","name","target","harness","worker"}, where worker is
-{"repo","worktree","branch","branch_from","ledger_row","brief"} for --worktree
-and absent otherwise. --json needs --dry-run.
+{"repo","worktree","branch","branch_from","ledger_row","brief","posture"} for --worktree
+and absent otherwise. posture maps each field the harness takes (claude
+permission_mode; codex sandbox, approval_policy) to {"value","source"}, where
+source is default, launch.worker, or repo-profile; the text preview prints
+<field>= and <field>_source= lines. --json needs --dry-run.
 
   forgectl surface launch . --surface herdr --worktree feat/x --name x --harness codex
   forgectl surface launch . --surface herdr --worktree fix/login --name fix-login --brief @brief.md

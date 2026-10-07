@@ -162,11 +162,89 @@ func TestPlanWorkerLaunchJSONShape(t *testing.T) {
 		t.Errorf("top-level keys = %v", keys)
 	}
 	w, _ := got["worker"].(map[string]any)
-	if keys := mapKeys(w); !reflect.DeepEqual(keys, []string{"branch", "branch_from", "brief", "ledger_row", "repo", "worktree"}) {
+	if keys := mapKeys(w); !reflect.DeepEqual(keys, []string{"branch", "branch_from", "brief", "ledger_row", "posture", "repo", "worktree"}) {
 		t.Errorf("worker keys = %v", keys)
 	}
 	if got["dry_run"] != true || w["branch_from"] != "new" || w["ledger_row"] != "would-create" {
 		t.Errorf("preview = %v", got)
+	}
+}
+
+// The preview shows the worker posture the launch would use and where each
+// value came from, so an operator can confirm auto took effect before
+// launching: the built-in value, [launch.worker], or a stricter repo block.
+func TestPlanWorkerLaunchShowsThePosture(t *testing.T) {
+	top := dryRunRepo(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	claude := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claude, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil { //nolint:gosec // G306: a harness stub must be executable
+		t.Fatal(err)
+	}
+	codex := stubHarness(t)
+	for name, tc := range map[string]struct {
+		lc   config.LaunchConfig
+		want map[string]postureSetting
+		text []string
+	}{
+		"claude built-in": {
+			lc:   config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "claude", BinaryPath: claude}},
+			want: map[string]postureSetting{"permission_mode": {"acceptEdits", "default"}},
+			text: []string{"permission_mode=acceptEdits\n", "permission_mode_source=default\n"},
+		},
+		"claude auto from [launch.worker]": {
+			lc: config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "claude", BinaryPath: claude},
+				Worker: config.LaunchWorker{PermissionMode: "auto"}},
+			want: map[string]postureSetting{"permission_mode": {"auto", "launch.worker"}},
+			text: []string{"permission_mode=auto\n", "permission_mode_source=launch.worker\n"},
+		},
+		"claude repo block stricter than auto": {
+			lc: config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "claude", BinaryPath: claude},
+				Worker:   config.LaunchWorker{PermissionMode: "auto"},
+				Projects: []config.LaunchProject{{Match: top, PermissionMode: "plan"}}},
+			want: map[string]postureSetting{"permission_mode": {"plan", "repo-profile"}},
+			text: []string{"permission_mode=plan\n", "permission_mode_source=repo-profile\n"},
+		},
+		"codex mixed sources": {
+			lc: config.LaunchConfig{Defaults: config.LaunchDefaults{Harness: "codex", CodexBinaryPath: codex},
+				Worker: config.LaunchWorker{Sandbox: "read-only"}},
+			want: map[string]postureSetting{"sandbox": {"read-only", "launch.worker"}, "approval_policy": {"on-request", "default"}},
+			text: []string{"sandbox=read-only\n", "sandbox_source=launch.worker\n", "approval_policy=on-request\n", "approval_policy_source=default\n"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			led, err := worker.Open(top, "default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			deps := module.Deps{Runner: exec.OSRunner{}, Cfg: config.Config{Launch: tc.lc}}
+			opts := surfaceLaunchOptions{Backend: "herdr", DisplayName: "w1", Worktree: "feat/w1", AllowPATH: true}
+			opts.JSON = true
+			out, _, err := runPlan(t, deps, top, led, opts)
+			if err != nil {
+				t.Fatalf("preview: %v", err)
+			}
+			var got struct {
+				Worker struct {
+					Posture map[string]postureSetting `json:"posture"`
+				} `json:"worker"`
+			}
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("not JSON: %v\n%s", err, out)
+			}
+			if !reflect.DeepEqual(got.Worker.Posture, tc.want) {
+				t.Errorf("posture = %+v, want %+v", got.Worker.Posture, tc.want)
+			}
+			opts.JSON = false
+			out, _, err = runPlan(t, deps, top, led, opts)
+			if err != nil {
+				t.Fatalf("text preview: %v", err)
+			}
+			for _, line := range tc.text {
+				if !strings.Contains(out, line) {
+					t.Errorf("text preview lacks %q:\n%s", line, out)
+				}
+			}
+		})
 	}
 }
 

@@ -306,6 +306,7 @@ func planWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	if err := (surface.Policy{AllowPATHBinary: opts.AllowPATH}).AcceptBinary(built.Invocation.Binary, in.self); err != nil {
 		return err
 	}
+	posture, order := workerPosturePlan(built.WorkerPosture)
 	return renderLaunchPlan(cmd.OutOrStdout(), launchPlan{
 		DryRun:  true,
 		Surface: opts.Backend,
@@ -313,12 +314,14 @@ func planWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 		Target:  top,
 		Harness: built.Invocation.Harness,
 		Worker: &workerLaunchPlan{
-			Repo:       top,
-			Worktree:   plan.Path,
-			Branch:     plan.Branch,
-			BranchFrom: plan.BranchFrom,
-			LedgerRow:  ledgerRowWouldCreate,
-			Brief:      in.hasBrief,
+			Repo:         top,
+			Worktree:     plan.Path,
+			Branch:       plan.Branch,
+			BranchFrom:   plan.BranchFrom,
+			LedgerRow:    ledgerRowWouldCreate,
+			Brief:        in.hasBrief,
+			Posture:      posture,
+			postureOrder: order,
 		},
 	}, opts.JSON)
 }

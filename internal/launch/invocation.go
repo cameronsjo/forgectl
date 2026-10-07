@@ -399,6 +399,9 @@ type BuiltInvocation struct {
 	// Notes are posture notices for the operator, one per line: today, an
 	// explicit [launch.defaults] value a worker no longer reads.
 	Notes []string
+	// WorkerPosture is a worker's resolved posture, each field its harness
+	// takes with its source. Empty for a non-worker launch.
+	WorkerPosture []PostureValue
 }
 
 // ErrNoBinaryResolver reports a request with no resolver. Refusing beats
@@ -424,6 +427,7 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 
 	profile, proj, err := resolveMatched(req.Config, req.CWD, os.UserHomeDir)
 	var notes []string
+	var workerPosture []PostureValue
 	if err != nil {
 		return BuiltInvocation{}, err
 	}
@@ -443,7 +447,7 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 		if len(req.Args) > 0 {
 			return BuiltInvocation{}, fmt.Errorf("%w: workers take no harness args, got %q", ErrWorkerPosture, req.Args)
 		}
-		if profile, notes, err = applyWorkerProfile(profile, req.Config, proj); err != nil {
+		if profile, workerPosture, notes, err = applyWorkerProfile(profile, req.Config, proj); err != nil {
 			return BuiltInvocation{}, fmt.Errorf("%w: %w", ErrWorkerPosture, err)
 		}
 		if profile, err = applyWorkerFloor(profile); err != nil {
@@ -513,11 +517,12 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 			Env:     env,
 			CWD:     dir,
 		},
-		Profile:   profile,
-		Posture:   posture,
-		SessionID: req.SessionID,
-		Worker:    req.Worker,
-		Notes:     notes,
+		Profile:       profile,
+		Posture:       posture,
+		SessionID:     req.SessionID,
+		Worker:        req.Worker,
+		Notes:         notes,
+		WorkerPosture: workerPosture,
 	}, nil
 }
 

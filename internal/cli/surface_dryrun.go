@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
@@ -52,6 +53,31 @@ type workerLaunchPlan struct {
 	LedgerRow string `json:"ledger_row"`
 	// Brief is true when --brief was given and passed its checks.
 	Brief bool `json:"brief"`
+	// Posture is the worker's resolved posture, keyed by field: claude's
+	// permission_mode, or codex's sandbox and approval_policy. Each value
+	// names its source: "default" (built-in), "launch.worker", or
+	// "repo-profile" (a stricter matched project block).
+	Posture map[string]postureSetting `json:"posture"`
+	// postureOrder is the text preview's line order (the harness's fields).
+	postureOrder []string
+}
+
+// postureSetting is one resolved worker posture field in the preview.
+type postureSetting struct {
+	Value  string `json:"value"`
+	Source string `json:"source"`
+}
+
+// workerPosturePlan turns the built posture into the preview's map and the
+// text lines' order.
+func workerPosturePlan(values []launch.PostureValue) (map[string]postureSetting, []string) {
+	m := make(map[string]postureSetting, len(values))
+	order := make([]string, 0, len(values))
+	for _, v := range values {
+		m[v.Field] = postureSetting{Value: v.Value, Source: v.Source}
+		order = append(order, v.Field)
+	}
+	return m, order
 }
 
 // renderLaunchPlan prints the preview as key=value lines or one JSON object.
@@ -69,6 +95,10 @@ func renderLaunchPlan(out io.Writer, p launchPlan, asJSON bool) error {
 	if wp := p.Worker; wp != nil {
 		w.printf("worktree=%s\nbranch=%s\nbranch_from=%s\nledger_row=%s\nbrief=%t\n",
 			safeColumnPath(wp.Worktree), termsafe.SafeLineMax(wp.Branch, 120), wp.BranchFrom, wp.LedgerRow, wp.Brief)
+		for _, field := range wp.postureOrder {
+			s := wp.Posture[field]
+			w.printf("%s=%s\n%s_source=%s\n", field, termsafe.SafeLineMax(s.Value, 64), field, s.Source)
+		}
 	}
 	return w.err
 }

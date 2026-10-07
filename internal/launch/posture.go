@@ -112,6 +112,24 @@ const (
 	workerDefaultApproval       = "on-request"
 )
 
+// Sources of a worker posture value, as the --dry-run preview names them.
+const (
+	// PostureFromDefault is the built-in worker value ([launch.worker] unset).
+	PostureFromDefault = "default"
+	// PostureFromWorker is the [launch.worker] value.
+	PostureFromWorker = "launch.worker"
+	// PostureFromRepo is the matched project block's value, which won because
+	// it is stricter.
+	PostureFromRepo = "repo-profile"
+)
+
+// PostureValue is one resolved worker posture field and where it came from.
+type PostureValue struct {
+	Field  string
+	Value  string
+	Source string
+}
+
 // applyWorkerProfile sets p's posture to the worker's: for each field, the
 // worker profile's value ([launch.worker], else the built-in worker value),
 // or the stricter of that and the matched project block's own value when the
@@ -127,7 +145,10 @@ const (
 // The notes name each explicit [launch.defaults] value stricter than what the
 // worker gets: an operator who set defaults to plan expecting read-only
 // workers is told, at launch, that workers no longer read it.
-func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchProject) (Profile, []string, error) {
+//
+// The returned values name each field the harness takes, with its source. The
+// floor afterwards refuses rather than lowers, so they are the final posture.
+func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchProject) (Profile, []PostureValue, []string, error) {
 	w := lc.Worker
 	wpm := firstNonEmpty(w.PermissionMode, workerDefaultPermissionMode)
 	wsb := firstNonEmpty(w.Sandbox, workerDefaultSandbox)
@@ -137,15 +158,30 @@ func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchPr
 		v string
 	}{{claudePermissionRank, wpm}, {codexSandboxRank, wsb}, {codexApprovalRank, wap}} {
 		if err := c.r.check(c.v); err != nil {
-			return Profile{}, nil, fmt.Errorf("[launch.worker]: %w", err)
+			return Profile{}, nil, nil, fmt.Errorf("[launch.worker]: %w", err)
 		}
 	}
 	var pm, sb, ap string
 	if proj != nil {
 		pm, sb, ap = proj.PermissionMode, proj.Sandbox, proj.ApprovalPolicy
 	}
-	pick := func(r postureRank, worker, project string) (string, error) {
-		return r.stricter(worker, firstNonEmpty(project, worker))
+	var values []PostureValue
+	// pick takes the stricter of the worker and project values. On a tie the
+	// worker side wins, as stricter returns its first argument.
+	pick := func(r postureRank, field, set, worker, project string) (string, error) {
+		got, err := r.stricter(worker, firstNonEmpty(project, worker))
+		if err != nil {
+			return "", err
+		}
+		source := PostureFromDefault
+		if set != "" {
+			source = PostureFromWorker
+		}
+		if project != "" && got == project && got != worker {
+			source = PostureFromRepo
+		}
+		values = append(values, PostureValue{Field: field, Value: got, Source: source})
+		return got, nil
 	}
 	var notes []string
 	note := func(r postureRank, field, defaults, got string) {
@@ -162,12 +198,12 @@ func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchPr
 	var err error
 	switch p.Harness {
 	case "claude":
-		if p.PermissionMode, err = pick(claudePermissionRank, wpm, pm); err == nil {
+		if p.PermissionMode, err = pick(claudePermissionRank, "permission_mode", w.PermissionMode, wpm, pm); err == nil {
 			note(claudePermissionRank, "permission_mode", lc.Defaults.PermissionMode, p.PermissionMode)
 		}
 	case "codex":
-		if p.Sandbox, err = pick(codexSandboxRank, wsb, sb); err == nil {
-			p.ApprovalPolicy, err = pick(codexApprovalRank, wap, ap)
+		if p.Sandbox, err = pick(codexSandboxRank, "sandbox", w.Sandbox, wsb, sb); err == nil {
+			p.ApprovalPolicy, err = pick(codexApprovalRank, "approval_policy", w.ApprovalPolicy, wap, ap)
 		}
 		if err == nil {
 			note(codexSandboxRank, "sandbox", lc.Defaults.Sandbox, p.Sandbox)
@@ -175,7 +211,7 @@ func applyWorkerProfile(p Profile, lc config.LaunchConfig, proj *config.LaunchPr
 		}
 	}
 	if err != nil {
-		return Profile{}, nil, fmt.Errorf("worker profile: %w", err)
+		return Profile{}, nil, nil, fmt.Errorf("worker profile: %w", err)
 	}
-	return p, notes, nil
+	return p, values, notes, nil
 }
