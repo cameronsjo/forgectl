@@ -56,7 +56,13 @@ exists.
   forgectl surface launch forgectl --surface tmux
   forgectl surface launch ~/Projects/thing --surface tmux --name review
 
-The backend is always explicit. There is no default and no detection.`,
+The backend is always explicit. There is no default and no detection.
+
+enqueue, dequeue and queue manage the machine's queue of briefs, which
+surface drain launches as claude workers in herdr:
+
+  forgectl surface enqueue --repo forgectl --name fix-login --brief brief.md
+  forgectl surface queue`,
 	}
 	cmd.AddCommand(newSurfaceLaunchCmd(deps))
 	cmd.AddCommand(newSurfaceReadyCmd(deps))
@@ -65,6 +71,9 @@ The backend is always explicit. There is no default and no detection.`,
 	cmd.AddCommand(newSurfaceReadCmd(deps))
 	cmd.AddCommand(newSurfaceListCmd(deps))
 	cmd.AddCommand(newSurfaceCloseCmd(deps))
+	cmd.AddCommand(newSurfaceEnqueueCmd(deps))
+	cmd.AddCommand(newSurfaceDequeueCmd(deps))
+	cmd.AddCommand(newSurfaceQueueCmd(deps))
 	return cmd
 }
 

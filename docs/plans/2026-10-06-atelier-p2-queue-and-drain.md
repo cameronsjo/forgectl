@@ -61,7 +61,7 @@ Before the decision, under plain `acceptEdits`, `go test`, `git commit` and `mak
 - Location: `$XDG_STATE_HOME/forgectl/surface/queue.json`, through the ledger's `privdir` pin and verified open (0600 file, 0700 dir, no symlink follow, flock on `queue.lock`). One queue per machine; `name` is unique machine-wide. `drain.lock`, `drain.json` (status), and `drain-events.jsonl` use the same pin and open helpers.
 - Size: the document stays under 768 KiB, below the ledger's 1 MiB read cap. `enqueue` refuses, before writing, a row that would push it past that, naming the current size. Terminal rows drop their brief text and keep `brief_sha256`.
 - Row: `name`, `repo` (top-level path), `brief` (text, 64 KiB cap), `brief_sha256`, `batch`, `state`, `attempts`, `last_error`, `launch_id`, `enqueued_at`, `state_at`, and the ledger key once launched.
-- States: `queued → claimed → launched ⇄ needs-you → reported | failed | closed`; `queued → expired | dequeued`. `claimed` is set under the queue lock only from `queued`.
+- States: `queued → claimed → launched ⇄ needs-you → reported | failed | closed`; `queued → expired`; `dequeue` removes a row rather than marking it. `claimed` is set under the queue lock only from `queued`.
 - `enqueue --repo <path> --name <slug> --brief <file> [--batch <id>] --json`: claude only. Idempotent on `name`: the same brief hash is a no-op that prints the row's current state; a different brief is an error naming both hashes. The file is read once, checked with `worker.CheckBrief(..., ViaLaunch)`, and stored as text. A leading `@` is refused.
 - `dequeue <name>` removes a row whose worker is not live (any state except `claimed`, `launched`, `needs-you`). After `dequeue`, the same name can be enqueued again; that is the way back from `failed`.
 - `queue --json` lists rows with their age in state.
@@ -155,9 +155,9 @@ No merge, PR status, or close after merge (P4). No intake from GitHub or the boa
 
 ### T8.2: queue store and verbs (one PR)
 
-- [ ] `queue.json` store in package `worker`, reusing `openVerified`, `readAt`, `writeAt` with its own name and lock.
-- [ ] `surface enqueue`, `dequeue`, `queue --json` with the rules above.
-- [ ] Tests: same brief no-op; different brief refused with both hashes; leading `@` refused; size cap refused before write; `dequeue` of a live row refused; `dequeue` then `enqueue` of a failed row works; unknown version refused; two claimers of one row, one wins.
+- [x] `queue.json` store in package `worker`, reusing `openVerified`, `readAt`, `writeAt` with its own name and lock.
+- [x] `surface enqueue`, `dequeue`, `queue --json` with the rules above.
+- [x] Tests: same brief no-op; different brief refused with both hashes; leading `@` refused; size cap refused before write; `dequeue` of a live row refused; `dequeue` then `enqueue` of a failed row works; unknown version refused; two claimers of one row, one wins.
 
 ### T8.3: the drain (one PR)
 
@@ -204,8 +204,14 @@ Panel: plan-reviewer, security-posture-reviewer (Opus), operability-reviewer, ca
 - **P7a (skill enqueue step) ships separately** in `cameronsjo/cadence` after T8.2; until then the coordinator calls `surface enqueue` directly.
 - **T8.1 exports `worker.CreatedNothing`** (was `createdNothing`) so the drain can apply the retry rule to the row an attempt left; the in-process launch is `launchWorker(ctx, warn, deps, workerSpec, briefText) (workerAttempt, error)`, and `workerAttempt.createdNothing()` is the rule. A row that cannot be read back after an attempt counts as having created something, so the drain fails it rather than retrying.
 - **T8.1 routes the CLI launch through the same `attemptWorker` core as the drain,** so both paths share the `!built.Worker` refusal. The only CLI-side difference is one ledger read after the attempt, which changes no output or exit code.
+- **T8.2: the row's "ledger key" is `session`,** the herdr session name, set at launch. With `repo` and `name` it names the ledger row (`worker.Open(repo, session)`), which the hashed ledger key alone cannot reopen.
+- **T8.2: a name is refused for another repository too,** not only for another brief: `name` is unique machine-wide, so a same-brief enqueue aimed at a second repository is an error naming the first.
+- **T8.2: the leading-`@` rule applies twice.** The brief text may not start with `@` (after leading whitespace), and `--brief` refuses an `@path` argument, since it takes a path and `surface launch --brief @file` would otherwise read the same.
+- **T8.2: every queue write drops the brief text of terminal rows** (`TrimTerminal`), so the drain needs no separate trim call. `--batch` takes the worker-name character set, up to 64 characters. `surface queue --json` omits brief text as the text output does.
 
 ## Learnings
+
+- T8.2 reviews, for T8.3: the drain re-checks each queue row it launches from (clean absolute repo, `CheckQueueBrief`, brief hash), since the store checks only version, fields and state on read; the 30-day prune needs a conditional remove (a row can be dequeued and re-enqueued between read and remove); the 768 KiB cap applies to `enqueue` only, so the drain's claim and failure writes are never refused by a queue the operator filled; `last_error` is capped at 1 KiB. `drain-events.jsonl` should record who enqueued and dequeued, which the queue row does not.
 
 - `worker.AddWorktree` used to return an empty `Worktree` for a failure after `git worktree add` succeeded (path resolve, root check, `rev-parse HEAD`, a cancelled context). The attempt then read as having created nothing, so a drain would retry into a taken path and the ledger would lose the orphan. It now returns the path, and the failed row records it (T8.1 security review). T8.3: an `ErrNameTaken` attempt also reads as having created nothing, but the drain must mark the row `failed`, not retry.
 
