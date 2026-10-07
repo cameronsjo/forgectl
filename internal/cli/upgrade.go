@@ -95,9 +95,7 @@ func runUpgrade(cmd *cobra.Command, deps module.Deps, checkOnly, asJSON bool) er
 	// here rather than guessing.
 	if selfupdate.IsSourceBuild() {
 		if asJSON {
-			// stdout stays JSON-only; there is no upgrade document to emit.
-			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "forgectl was built from source (not installed via the Homebrew tap) — a self-update can't manage this.")
-			return nil
+			return writeJSON(out, upgradeJSON{Skipped: "source build: not installed via the Homebrew tap, so a self-update can't manage it"})
 		}
 		fmt.Fprintln(out, "forgectl was built from source (not installed via the Homebrew tap) — a self-update can't manage this.")
 		fmt.Fprintln(out, "To update your source checkout: git pull && go build -o $(go env GOPATH)/bin/forgectl .")
@@ -105,12 +103,12 @@ func runUpgrade(cmd *cobra.Command, deps module.Deps, checkOnly, asJSON bool) er
 		return nil
 	}
 
-	if _, err := upgradeLookPath("brew"); err != nil {
-		return WithExitCode(fmt.Errorf("brew not found on PATH — forgectl ships via the Homebrew tap; install Homebrew (https://brew.sh), or reinstall manually: %w", err), exitFailed)
-	}
-
 	if asJSON && checkOnly {
 		return WithExitCode(errors.New("upgrade: --json is not valid with --check"), exitUsage)
+	}
+
+	if _, err := upgradeLookPath("brew"); err != nil {
+		return WithExitCode(fmt.Errorf("brew not found on PATH — forgectl ships via the Homebrew tap; install Homebrew (https://brew.sh), or reinstall manually: %w", err), exitFailed)
 	}
 
 	if checkOnly {
@@ -124,14 +122,19 @@ func runUpgrade(cmd *cobra.Command, deps module.Deps, checkOnly, asJSON bool) er
 // output was not streamed live.
 const upgradeTailLines = 20
 
-// upgradeStderrIsTTY reports whether brew's live output can be shown. A
+// upgradeStreamable reports whether w is a terminal brew's live output can be
+// shown on. It tests the writer the output goes to, not the process stderr. A
 // package-level var so a test can stub it.
-var upgradeStderrIsTTY = func() bool { return term.IsTerminal(int(os.Stderr.Fd())) }
+var upgradeStreamable = func(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd()))
+}
 
 // upgradeJSON is `upgrade --json`'s stdout document.
 type upgradeJSON struct {
 	OK             bool              `json:"ok"`
 	AlreadyCurrent bool              `json:"already_current"`
+	Skipped        string            `json:"skipped,omitempty"`
 	From           string            `json:"from,omitempty"`
 	To             string            `json:"to,omitempty"`
 	Error          *upgradeErrorJSON `json:"error"`
@@ -158,7 +161,7 @@ func runUpgradeApply(ctx context.Context, deps module.Deps, out, errOut io.Write
 	var stream io.Writer
 	if !asJSON {
 		_, _ = fmt.Fprintln(out, "Refreshing the Homebrew tap and upgrading "+selfupdate.CaskRef+"…")
-		if upgradeStderrIsTTY() {
+		if upgradeStreamable(errOut) {
 			stream = errOut
 		}
 	}
@@ -180,7 +183,7 @@ func runUpgradeApply(ctx context.Context, deps module.Deps, out, errOut io.Write
 	}
 	switch {
 	case res.AlreadyCurrent:
-		_, _ = fmt.Fprintln(out, "forgectl is already up to date.")
+		_, _ = fmt.Fprintln(out, "forgectl is already up to date (brew upgrade exited non-zero, but the cask is installed and nothing is outdated).")
 	case named:
 		_, _ = fmt.Fprintf(out, "forgectl upgraded %s → %s — restart your shell (or open a new one) to pick up the new binary.\n", from, to)
 	default:
@@ -210,6 +213,8 @@ func upgradeFailed(ctx context.Context, out, errOut io.Writer, err error, asJSON
 		if hasStep {
 			doc.Error.Step, doc.Error.ExitCode, doc.Error.Cause = step.Step, step.ExitCode, step.Cause
 		}
+		// A failed write only logs: the returned error already sets exit 1 and
+		// reaches stderr as text, and there is no second channel for the JSON.
 		if jerr := writeJSON(out, doc); jerr != nil {
 			slog.Warn("upgrade --json write failed.", "error", jerr)
 		}

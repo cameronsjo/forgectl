@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -63,9 +64,9 @@ func execUpgradeBoth(t *testing.T, runner exec.Runner, args ...string) (stdout, 
 
 func stubUpgradeTTY(t *testing.T, tty bool) {
 	t.Helper()
-	prev := upgradeStderrIsTTY
-	upgradeStderrIsTTY = func() bool { return tty }
-	t.Cleanup(func() { upgradeStderrIsTTY = prev })
+	prev := upgradeStreamable
+	upgradeStreamable = func(io.Writer) bool { return tty }
+	t.Cleanup(func() { upgradeStreamable = prev })
 }
 
 // brewFailing fails the named brew subcommand with output on both streams.
@@ -505,5 +506,27 @@ func TestUpgrade_Apply_AlreadyCurrentIsSuccess(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "already up to date") {
 		t.Errorf("stdout = %q", stdout)
+	}
+}
+
+func TestUpgrade_JSON_SourceBuildEmitsSkipDocument(t *testing.T) {
+	setMetaVersion(t, "dev")
+	stdout, err := execUpgrade(t, &exec.FakeRunner{}, "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc upgradeJSON
+	if jerr := json.Unmarshal([]byte(stdout), &doc); jerr != nil || doc.OK || doc.Skipped == "" {
+		t.Fatalf("stdout = %q (%v), want a JSON skip document", stdout, jerr)
+	}
+}
+
+// Argument validation comes before the brew-on-PATH check.
+func TestUpgrade_JSON_CheckUsageErrorWithoutBrew(t *testing.T) {
+	setMetaVersion(t, "1.0.0")
+	stubUpgradeLookPath(t)
+	_, err := execUpgrade(t, &exec.FakeRunner{}, "--json", "--check")
+	if err == nil || ExitCode(err) != exitUsage {
+		t.Fatalf("err = %v (exit %d), want exit %d", err, ExitCode(err), exitUsage)
 	}
 }

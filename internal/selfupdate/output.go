@@ -1,7 +1,6 @@
 package selfupdate
 
 import (
-	"bytes"
 	"io"
 	"strings"
 	"sync"
@@ -50,9 +49,11 @@ func (c *captureBuffer) String() string {
 // the window, or forge a prompt. A carriage return ends a line like a newline,
 // so a progress bar cannot overwrite what is already on screen.
 type safeWriter struct {
-	mu  sync.Mutex
-	out io.Writer
-	buf []byte
+	mu       sync.Mutex
+	out      io.Writer
+	buf      []byte
+	skipLF   bool // the last terminator was a \r, so a leading \n completes a CRLF
+	dropping bool // inside an over-long line, discarding until its terminator
 }
 
 func newSafeWriter(out io.Writer) *safeWriter { return &safeWriter{out: out} }
@@ -60,23 +61,35 @@ func newSafeWriter(out io.Writer) *safeWriter { return &safeWriter{out: out} }
 func (s *safeWriter) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.buf = append(s.buf, p...)
-	for {
-		i := bytes.IndexAny(s.buf, "\r\n")
-		if i < 0 {
-			break
+	for _, c := range p {
+		if s.skipLF {
+			s.skipLF = false
+			if c == '\n' {
+				continue
+			}
 		}
-		line, blankOK := s.buf[:i], s.buf[i] == '\n'
-		rest := s.buf[i+1:]
-		if s.buf[i] == '\r' && len(rest) > 0 && rest[0] == '\n' {
-			rest, blankOK = rest[1:], true
+		if c == '\r' || c == '\n' {
+			switch {
+			case s.dropping:
+				s.dropping = false
+			default:
+				s.emit(string(s.buf), c == '\n')
+			}
+			s.buf = s.buf[:0]
+			s.skipLF = c == '\r'
+			continue
 		}
-		s.emit(string(line), blankOK)
-		s.buf = append(s.buf[:0], rest...)
-	}
-	if len(s.buf) > maxLineBytes {
-		s.emit(string(s.buf), false)
-		s.buf = s.buf[:0]
+		if s.dropping {
+			continue
+		}
+		s.buf = append(s.buf, c)
+		if len(s.buf) > maxLineBytes {
+			// Withhold the whole line: redacting it in chunks could split a
+			// credential-shaped word across the cut so neither half matches.
+			s.buf = s.buf[:0]
+			s.dropping = true
+			_, _ = io.WriteString(s.out, "[line over 8 KiB withheld]\n")
+		}
 	}
 	return len(p), nil
 }

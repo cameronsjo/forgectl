@@ -372,3 +372,30 @@ func TestTail(t *testing.T) {
 		t.Error("Tail of nothing is not empty")
 	}
 }
+
+func TestSafeWriter_CRLFSplitAcrossWrites(t *testing.T) {
+	var out bytes.Buffer
+	w := newSafeWriter(&out)
+	_, _ = w.Write([]byte("a\r"))
+	_, _ = w.Write([]byte("\nb\n"))
+	if got := out.String(); got != "a\nb\n" {
+		t.Errorf("out = %q, want a and b with no blank line", got)
+	}
+}
+
+// A line past the cap is withheld whole, so a credential-shaped word cannot be
+// split across two separately redacted chunks.
+func TestSafeWriter_OverlongLineWithheld(t *testing.T) {
+	var out bytes.Buffer
+	w := newSafeWriter(&out)
+	long := strings.Repeat("x", maxLineBytes-3) + " https://user:hunter2@example.com/x " + strings.Repeat("y", 100)
+	_, _ = w.Write([]byte(long))
+	_, _ = w.Write([]byte("tail\nnext\n"))
+	got := out.String()
+	if strings.Contains(got, "hunter2") || strings.Contains(got, "xxxx") || strings.Contains(got, "tail") {
+		t.Errorf("out = %q, shows part of the over-long line", got)
+	}
+	if !strings.Contains(got, "withheld") || !strings.HasSuffix(got, "next\n") {
+		t.Errorf("out = %q, want the marker and the following line", got)
+	}
+}
