@@ -312,7 +312,7 @@ func productionDeps(cfg config.Config, boundary *config.LegacyMigrationBoundary)
 // where fang writes output, which the caller sets via root.SetOut first.
 func execCommand(ctx context.Context, root *cobra.Command, args []string, th theme.Theme) error {
 	// `completion` is a lazy builtin, so classifyUsageErrors (newRoot) never saw it.
-	// Register it now (idempotent) and give it the same usage class (ADR-0014).
+	// Register it now (idempotent) and give it the same usage class (ADR-0015).
 	root.InitDefaultCompletionCmd()
 	if c, _, err := root.Find([]string{"completion"}); err == nil && c != nil && c != root {
 		classifyUsageErrors(c)

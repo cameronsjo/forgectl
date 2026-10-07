@@ -1,6 +1,6 @@
 # Exit codes
 
-One table for every forgectl verb ([ADR-0014](https://github.com/cameronsjo/forgectl/pull/1146), [#1085](https://github.com/cameronsjo/forgectl/issues/1085)). Branch on the exit status first. The JSON `code` string on stderr is detail, and several strings share one exit status.
+One table for every forgectl verb ([ADR-0015](adr/0015-exit-code-table.md), [#1085](https://github.com/cameronsjo/forgectl/issues/1085)). Branch on the exit status first. The JSON `code` string on stderr is detail, and several strings share one exit status.
 
 | Code | Class | Meaning | Default action |
 | ---: | --- | --- | --- |

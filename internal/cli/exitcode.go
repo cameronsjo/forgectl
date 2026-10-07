@@ -81,7 +81,7 @@ func chainAs[T any](err error, target *T) (found bool) {
 	return errors.As(err, target)
 }
 
-// exitClass is one of the classes in the exit-code table (ADR-0014,
+// exitClass is one of the classes in the exit-code table (ADR-0015,
 // forgectl#1085). A verb names a class, never a number, so the table lives in
 // one place.
 type exitClass int
@@ -101,7 +101,7 @@ const (
 )
 
 // The numbers behind the classes. 5 (unreachable) and 6 (not_found) are
-// reserved by ADR-0014 and deliberately absent: no verb emits them, and a new
+// reserved by ADR-0015 and deliberately absent: no verb emits them, and a new
 // verb must not reuse them. Outside the table: 75, 130 and 141 (desk watch,
 // interrupts) and the exit codes of pass-through verbs.
 const (

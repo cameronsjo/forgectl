@@ -194,7 +194,7 @@ Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused; see docs/exit-co
 	nameUsageArgs(root)
 
 	// Before the JSON contract, so a usage error carries its exit code into it
-	// (ADR-0014).
+	// (ADR-0015).
 	classifyUsageErrors(root)
 
 	// Last, so it sees every verb: under --json no failure renders fang's

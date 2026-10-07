@@ -55,11 +55,11 @@ func TestUsageArgs_NamesTheArgumentAndUsage(t *testing.T) {
 				t.Errorf("error = %q still carries cobra's count text", err)
 			}
 			want := exitUsage
-			if tt.args[0] == "tasks" { // a documented ADR-0014 exception: tasks keeps 2 for "unreachable"
+			if tt.args[0] == "tasks" { // a documented ADR-0015 exception: tasks keeps 2 for "unreachable"
 				want = exitFailed
 			}
 			if got := ExitCode(err); got != want {
-				t.Errorf("exit = %d, want %d: a wrong argument count is a usage error (ADR-0014)", got, want)
+				t.Errorf("exit = %d, want %d: a wrong argument count is a usage error (ADR-0015)", got, want)
 			}
 		})
 	}

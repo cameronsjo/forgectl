@@ -11,7 +11,7 @@ import (
 
 // classifyUsageErrors gives every cobra-raised usage error (a bad flag, a
 // wrong argument count, an unknown verb) the usage class, so the same mistake
-// exits the same way whichever layer caught it (ADR-0014, forgectl#1085).
+// exits the same way whichever layer caught it (ADR-0015, forgectl#1085).
 //
 // It wraps the two places cobra reports a bad call: each command's
 // flag-error handler and its Args validator. A command that already returns a

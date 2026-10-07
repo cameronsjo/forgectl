@@ -15,7 +15,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/module"
 )
 
-// The exit-code table (ADR-0014, forgectl#1085): Phase 1 moves every usage
+// The exit-code table (ADR-0015, forgectl#1085): Phase 1 moves every usage
 // error to exit 2, except the four verbs whose 2 already means something else.
 
 // TestExitTable_UsageErrors pins each row of the Phase 1 change list.
