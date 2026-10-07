@@ -1272,3 +1272,17 @@ func (f deskFrame) runningCount() int {
 	}
 	return n
 }
+
+// runningCount is how many runs are going now: running items that are not
+// lost.
+func (f deskFrame) runningCount() int {
+	n := 0
+	if f.snap != nil {
+		for _, it := range f.snap.Running {
+			if it.State != desk.StateLost {
+				n++
+			}
+		}
+	}
+	return n
+}
