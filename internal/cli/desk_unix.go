@@ -230,6 +230,8 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 		switch {
 		case !signalNow:
 			ew.printf("note: %s is already waiting with this sha256; nothing was queued (--allow-duplicate queues another)\n", safeText(a.Name))
+		case len(signalFailures) == 0 && !sig.enabled():
+			ew.printf("note: %s is already waiting with this sha256; nothing was queued, and no operator signal is enabled, so none was sent (--allow-duplicate queues another)\n", safeText(a.Name))
 		case len(signalFailures) == 0:
 			ew.printf("note: %s is already waiting with this sha256; nothing was queued, and the operator signal had not gone out, so it was sent now (--allow-duplicate queues another)\n", safeText(a.Name))
 		default:

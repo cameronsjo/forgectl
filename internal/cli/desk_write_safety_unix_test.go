@@ -589,27 +589,111 @@ func TestDeskAddHelpDescribesTheRetrySignal(t *testing.T) {
 	}
 }
 
-// A protocol directory that is a symlink is refused by a real prune (Open
-// refuses it), and the preview refuses it the same way instead of reading it
-// as empty.
-func TestDeskPrune_DryRunRefusesASymlinkedProtocolDirLikePrune(t *testing.T) {
-	desk := t.TempDir()
-	for _, sub := range []string{"pending", "running", "skipped"} {
-		if err := os.MkdirAll(filepath.Join(desk, sub), 0o700); err != nil {
-			t.Fatal(err)
-		}
+// The preview refuses what a real prune refuses, in each of the five places
+// Open looks: a symlinked desk root and a symlinked pending/, running/, done/
+// or skipped/. Each case runs both and compares: both fail, with the same
+// kind of message, and the dry run leaves the tree as it found it.
+func TestDeskPrune_DryRunRefusesWhatARealPruneRefuses(t *testing.T) {
+	cases := map[string]struct {
+		build func(t *testing.T) string // returns the --dir to pass
+		want  string                    // in both messages
+	}{
+		"symlinked desk root": {want: "symlink", build: func(t *testing.T) string {
+			live := t.TempDir()
+			openTestDesk(t, live)
+			link := filepath.Join(t.TempDir(), "link")
+			if err := os.Symlink(live, link); err != nil {
+				t.Fatal(err)
+			}
+			return link
+		}},
 	}
-	elsewhere := t.TempDir()
-	if err := os.Symlink(elsewhere, filepath.Join(desk, "done")); err != nil {
+	for _, sub := range []string{"pending", "running", "done", "skipped"} {
+		cases["symlinked "+sub] = struct {
+			build func(t *testing.T) string
+			want  string
+		}{want: "not a directory", build: func(t *testing.T) string {
+			desk := t.TempDir()
+			for _, other := range []string{"pending", "running", "done", "skipped"} {
+				if other == sub {
+					continue
+				}
+				if err := os.MkdirAll(filepath.Join(desk, other), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Symlink(t.TempDir(), filepath.Join(desk, sub)); err != nil {
+				t.Fatal(err)
+			}
+			return desk
+		}}
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := tc.build(t)
+			before := treeState(t, dir)
+			_, _, planErr := deskRun(t, deskDeps(), "prune", "--dry-run", "--dir", dir)
+			if after := treeState(t, dir); after != before {
+				t.Errorf("the refused dry run changed the tree:\nbefore\n%s\nafter\n%s", before, after)
+			}
+			_, _, realErr := deskRun(t, deskDeps(), "prune", "--dir", dir)
+			if planErr == nil || realErr == nil {
+				t.Fatalf("plan err = %v, real err = %v; both must refuse", planErr, realErr)
+			}
+			if !strings.Contains(planErr.Error(), tc.want) || !strings.Contains(realErr.Error(), tc.want) {
+				t.Errorf("plan err %q, real err %q, want both to contain %q", planErr, realErr, tc.want)
+			}
+			if ExitCode(planErr) != ExitCode(realErr) {
+				t.Errorf("dry run exits %d, real prune exits %d", ExitCode(planErr), ExitCode(realErr))
+			}
+		})
+	}
+}
+
+// With --json a duplicate add prints no note: duplicate and warnings[] carry
+// it, and the help says so.
+func TestDeskAdd_JSONDuplicateHasNoNote(t *testing.T) {
+	newDeskDir(t)
+	file := writeTemp(t, "x.sh", "echo hi\n")
+	if _, _, err := addJSON(t, file); err != nil {
+		t.Fatal(err)
+	}
+	out, errOut, err := deskRun(t, deskDeps(), "add", file, "--what", "a test item", "--why", "a test", "--json")
+	wantExit(t, err, 0)
+	if errOut != "" {
+		t.Errorf("--json duplicate printed to stderr: %q", errOut)
+	}
+	var a deskAddJSON
+	if err := json.Unmarshal([]byte(out), &a); err != nil || !a.Duplicate {
+		t.Errorf("out = %s (err %v), want duplicate true", out, err)
+	}
+	help, _, err := deskRun(t, deskDeps(), "add", "--help")
+	wantExit(t, err, 0)
+	if !strings.Contains(strings.Join(strings.Fields(help), " "), "with --json there is no note") {
+		t.Error("desk add --help does not say what a JSON duplicate prints")
+	}
+}
+
+// A duplicate whose first signal never went out, with every signal turned off,
+// does not claim to have sent one.
+func TestDeskAdd_DuplicateWithNoSignalEnabledSaysSo(t *testing.T) {
+	dir := newDeskDir(t)
+	off := false
+	rig := newSignalRig(t, config.DeskConfig{NotifyHerdr: &off, NotifyMacOS: &off})
+	file := writeTemp(t, "x.sh", "echo hi\n")
+	// Queue it the way a first attempt that died before signalling would have
+	// left it: in pending/ with its meta and no signalled_at.
+	d := openTestDesk(t, dir)
+	if _, err := d.Add(file, "w", "y", false); err != nil {
 		t.Fatal(err)
 	}
 
-	_, _, planErr := deskRun(t, deskDeps(), "prune", "--dry-run", "--dir", desk)
-	_, _, realErr := deskRun(t, deskDeps(), "prune", "--dir", desk)
-	if planErr == nil || realErr == nil {
-		t.Fatalf("plan err = %v, real err = %v; both must refuse", planErr, realErr)
+	_, errOut, err := deskRun(t, rig.deps, "add", file, "--what", "w", "--why", "y")
+	wantExit(t, err, 0)
+	if !strings.Contains(errOut, "no operator signal is enabled") || strings.Contains(errOut, "sent now") {
+		t.Errorf("stderr = %q, want 'no operator signal is enabled' and no 'sent now'", errOut)
 	}
-	if !strings.Contains(planErr.Error(), "not a directory") || !strings.Contains(realErr.Error(), "not a directory") {
-		t.Errorf("plan err %q, real err %q, want both to say not a directory", planErr, realErr)
+	if rig.osascript() != 0 || len(rig.herdr.Calls()) != 0 {
+		t.Errorf("a disabled signal went out: %d macOS, %d herdr", rig.osascript(), len(rig.herdr.Calls()))
 	}
 }

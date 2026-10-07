@@ -11,6 +11,10 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
+
+	"github.com/cameronsjo/forgectl/internal/privdir"
 )
 
 // protocolSuffixes are the entry suffixes Prune may remove, longest first so
@@ -136,24 +140,34 @@ func Exists(dir string) bool {
 // PrunePlanAt returns what [Desk.Prune] would remove from the desk at dir,
 // without opening it: no MkdirAll, no chmod, no migration, nothing written.
 // (Open tightens modes and creates the protocol directories, so a preview
-// cannot go through it.) It selects with the same code as Prune. A protocol
-// subdirectory that is absent reads as empty; one that is a symlink or a file
-// is refused, as Open refuses it.
+// cannot go through it.) It selects with the same code as Prune, and refuses
+// what Open refuses, with the same checks made read-only: a desk root that is
+// a symlink, not a directory, or owned by another user (privdir.Check), and a
+// protocol directory that is a symlink, a file, or not readable
+// (checkProtocolDir, the checks tightenDir makes). A protocol directory that
+// is absent reads as empty.
 func PrunePlanAt(dir string, days int) ([]PrunedItem, error) {
-	list := func(sub string) ([]fs.DirEntry, error) {
-		p := filepath.Join(dir, sub)
-		fi, err := os.Lstat(p)
-		switch {
-		case errors.Is(err, fs.ErrNotExist):
-			return nil, nil
-		case err != nil:
-			return nil, fmt.Errorf("desk: stat %s/: %w", sub, err)
-		case !fi.IsDir():
-			// A real prune opens the desk, and Open refuses a protocol
-			// directory that is a symlink or a file; the preview refuses it too.
-			return nil, fmt.Errorf("desk: %s/ is not a directory; refusing", sub)
+	if !filepath.IsAbs(dir) {
+		return nil, errors.New("desk: the desk directory must be an absolute path")
+	}
+	dir = filepath.Clean(dir)
+	err := privdir.Check(privdir.Spec{Base: filepath.Dir(dir), Leaf: filepath.Base(dir), Mode: dirMode})
+	switch {
+	case errors.Is(err, privdir.ErrAbsent):
+		return []PrunedItem{}, nil
+	case err != nil:
+		return nil, fmt.Errorf("desk: open %s: %w", describe(dir), err)
+	}
+	for _, sub := range protocolDirs {
+		if err := checkProtocolDir(dir, sub); err != nil {
+			return nil, err
 		}
-		entries, err := os.ReadDir(p)
+	}
+	list := func(sub string) ([]fs.DirEntry, error) {
+		entries, err := os.ReadDir(filepath.Join(dir, sub))
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
 		if err != nil {
 			return nil, fmt.Errorf("desk: read %s/: %w", sub, err)
 		}
@@ -168,6 +182,25 @@ func PrunePlanAt(dir string, days int) ([]PrunedItem, error) {
 		plan = append(plan, PrunedItem{State: c.sub, Name: c.name, Newest: c.newest})
 	}
 	return plan, nil
+}
+
+// checkProtocolDir makes tightenDir's refusals on dir/sub without its writes:
+// the directory is opened no-follow, and a symlink or a file, or a directory
+// its owner cannot read, is refused with tightenDir's message. An absent one
+// passes (Open would create it).
+func checkProtocolDir(dir, sub string) error {
+	fd, err := unix.Open(filepath.Join(dir, sub), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	switch {
+	case err == nil:
+		return unix.Close(fd)
+	case errors.Is(err, unix.ENOENT):
+		return nil
+	case errors.Is(err, unix.ELOOP), errors.Is(err, unix.ENOTDIR), errors.Is(err, unix.EMLINK):
+		return fmt.Errorf("desk: %s/ is not a directory; refusing", sub)
+	case errors.Is(err, unix.EACCES):
+		return fmt.Errorf("desk: %s/ is not readable by its owner; it needs mode 0700 (chmod 700 %s)", sub, describe(filepath.Join(dir, sub)))
+	}
+	return fmt.Errorf("desk: open %s/: %w", sub, err)
 }
 
 // protocolEntry returns the item name an entry belongs to, or ok=false for

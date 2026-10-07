@@ -188,25 +188,27 @@ When an item is queued, add tells the operator: a herdr notification and the
 queuing pane's needs-you state (inside herdr), and a macOS notification
 (macOS only). A failed signal prints "warning: operator signal failed:" and
 never fails the add; [desk] notify_herdr and notify_macos in config.toml turn
-each off. A run, a skip, or the desk skipping an item whose file changed since it was queued
-also clears that pane's state.
+each off. A run, a skip, or the desk skipping an item whose file changed since
+it was queued also clears that pane's state.
 
-A .manifest is checked like ` + "`desk plan`" + ` before it is queued: a manifest that cannot
-run is refused, and its warnings are printed as warning: lines on stderr.
+A .manifest is checked like ` + "`desk plan`" + ` before it is queued: a manifest that
+cannot run is refused, and its warnings are printed as warning: lines on
+stderr.
 
 --tty marks a script that needs the terminal (a password prompt, sudo); it runs
 in the dashboard's own pane. A batch cannot be a TTY item.
 
 Adding is safe to retry. When an item with the same kind and the same sha256
 (the hash after the WHAT and WHY lines are inserted, so the same file with the
-same --what and --why) is already waiting in pending/, add queues nothing. It sends the operator
-signal only if the first attempt never finished signalling (it died after
-queueing, or a signal failed; the item records signalled_at once every enabled
-signal went out), and otherwise signals nothing. It prints that item with
-duplicate=true (and a note on stderr), exit 0. A retry after a timeout
-therefore finds the first attempt and does not leave it unannounced. An
-item that is running, done or skipped does not count: it is queued again.
---allow-duplicate queues another anyway.
+same --what and --why) is already waiting in pending/, add queues nothing. It
+sends the operator signal only if the first attempt never finished signalling
+(it died after queueing, or a signal failed; the item records signalled_at once
+every enabled signal went out), and otherwise signals nothing. It prints that
+item with duplicate=true and exits 0. In text mode a note on stderr says what
+happened; with --json there is no note, and duplicate and warnings[] carry it.
+A retry after a timeout therefore finds the first attempt and does not leave
+it unannounced. An item that is running, done or skipped does not count: it is
+queued again. --allow-duplicate queues another anyway.
 
 Exit codes: 0 queued, or already waiting (duplicate); 1 refused (unreadable or
 non-regular file, bad manifest, no free number); 2 usage (missing, empty or

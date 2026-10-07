@@ -10,3 +10,6 @@ package privdir
 // pinned private directory while holding a path it re-resolves. Refusing is
 // the honest answer, and forgectl's release targets are Darwin and Linux.
 func Pin(Spec) (int, error) { return -1, ErrUnsupported }
+
+// Check is Pin's refusals without its writes; see the unix file.
+func Check(Spec) error { return ErrUnsupported }
