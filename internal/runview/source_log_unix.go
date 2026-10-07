@@ -15,9 +15,14 @@ import (
 // one event. It has no step model, so its runs show their events and no step
 // state, and their Live is LiveUnknown. It holds no per-run state: the Cursor
 // carries it.
+//
+// With a lens (NewLensSource) the same file is read through the lens: its
+// lines may be plain text, its rules give it a step model, and its runs fold
+// with the lens's spec.
 type logSource struct {
 	path string
 	keys LogKeys
+	lens *Lens
 }
 
 // NewLogSource returns the source for the JSONL file at path, read with keys.
@@ -32,7 +37,27 @@ func NewLogSource(path string, keys LogKeys) (Source, error) {
 	return &logSource{path: filepath.Clean(path), keys: keys}, nil
 }
 
+// NewLensSource returns the source for the log at path, read through lens.
+// path must be absolute.
+func NewLensSource(path string, lens *Lens) (Source, error) {
+	switch {
+	case !filepath.IsAbs(path):
+		return nil, fmt.Errorf("log %s: must be an absolute path", clean(path))
+	case lens == nil:
+		return nil, errors.New("log: no lens")
+	}
+	return &logSource{path: filepath.Clean(path), lens: lens}, nil
+}
+
 func (s *logSource) Name() string { return "log" }
+
+// Spec is the fold a run of this source takes: the lens's, or none.
+func (s *logSource) Spec(RunRef) *Spec {
+	if s.lens != nil {
+		return s.lens.Spec()
+	}
+	return &Spec{}
+}
 
 // List returns the one run: the file, named by its base name.
 func (s *logSource) List() ([]RunRef, error) {
@@ -57,6 +82,12 @@ func (s *logSource) Load(_ RunRef, cur *Cursor) (Delta, error) {
 	defer f.Close() //nolint:errcheck // read-only
 
 	d := Delta{Live: LiveUnknown}
+	if s.lens != nil {
+		d.Defs = s.lens.Steps()
+		if s.lens.Ends() {
+			d.Live = "" // the fold knows when the run ends
+		}
+	}
 	if replaced(&st, cur) {
 		*cur = Cursor{}
 		d.Reset = true
@@ -67,6 +98,26 @@ func (s *logSource) Load(_ RunRef, cur *Cursor) (Delta, error) {
 			return
 		}
 		if strings.TrimSpace(string(b)) == "" {
+			return
+		}
+		if s.lens != nil {
+			e, nf, res, rule := s.lens.read(cur.kept+1, b)
+			cur.fields += nf
+			if rule > 0 {
+				if cur.ruleHits == nil {
+					cur.ruleHits = make([]int, s.lens.Rules())
+				}
+				cur.ruleHits[rule-1]++
+			}
+			switch res {
+			case lineDropped:
+				cur.dropped++
+			case lineIgnored:
+				cur.ignored++
+			default:
+				cur.kept++
+				d.Events = append(d.Events, e)
+			}
 			return
 		}
 		raw, nf, ok := scalarFields(b)
@@ -85,6 +136,10 @@ func (s *logSource) Load(_ RunRef, cur *Cursor) (Delta, error) {
 	if err != nil {
 		d.Err = cleanErr(fmt.Errorf("cannot read %s: %w", clean(filepath.Base(s.path)), err))
 	}
-	d.Dropped, d.DroppedFields = cur.dropped, cur.fields
+	d.Dropped, d.DroppedFields, d.Ignored = cur.dropped, cur.fields, cur.ignored
+	if s.lens != nil {
+		d.RuleHits = make([]int, s.lens.Rules())
+		copy(d.RuleHits, cur.ruleHits)
+	}
 	return d, nil
 }

@@ -14,6 +14,9 @@ import (
 type deskLogOpts struct {
 	path                    string
 	eventKey, stepKey, time string
+	// lens names the lens the log is read through: a name in the lenses
+	// directory, or a file path (ADR-0014).
+	lens string
 }
 
 func (o *deskLogOpts) bind(cmd *cobra.Command) {
@@ -21,6 +24,7 @@ func (o *deskLogOpts) bind(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&o.eventKey, "event-key", runview.DefaultLogKeys.Event, "with --log: the key holding each line's event name")
 	cmd.Flags().StringVar(&o.stepKey, "step-key", runview.DefaultLogKeys.Step, "with --log: the key holding the step an event belongs to")
 	cmd.Flags().StringVar(&o.time, "time-key", runview.DefaultLogKeys.Time, "with --log: the key holding the event time (RFC 3339, or epoch seconds)")
+	cmd.Flags().StringVar(&o.lens, "lens", "", "with --log: read it through a lens (NAME in the lenses directory, or a .toml file) that says how the app's lines read and which start, finish or fail a step")
 }
 
 func (o deskLogOpts) keys() runview.LogKeys {
@@ -62,11 +66,11 @@ listed); 2 usage.`,
 }
 
 func newDeskShowCmd(dir *string, deps module.Deps) *cobra.Command {
-	var asJSON, events bool
+	var asJSON, events, live bool
 	var at int
 	var log deskLogOpts
 	cmd := &cobra.Command{
-		Use:   "show <name> | show --log FILE",
+		Use:   "show <name> | show --log FILE [--lens LENS]",
 		Short: "Show one run as a flow: steps, edges, durations; replay with --at",
 		Long: `show prints one run as the visualizer draws it: each step with its state,
 duration and the steps it waits on, then the run's exit. --events adds the
@@ -77,6 +81,17 @@ NAME is a desk item (NN-name). --log FILE reads a JSONL log instead: one
 JSON object per line, whose --event-key (default "event") names the event.
 A log has no step model, so it shows its events and no step state.
 
+--lens teaches show to read an app's own log: a small TOML file that says
+how a line splits (JSON keys, or a regular expression for plain text) and
+which lines start, finish or fail a step, or end the run. With it the log
+gets steps, a flow and an exit. Lenses live in the lenses directory
+(` + "`desk lens list`" + ` prints it); ` + "`desk lens check`" + ` shows which lines each
+rule matched, to write or fix one.
+
+--live opens the dashboard's run view on the run alone, full screen, and
+follows it as the log grows: the steps as a flow above the event timeline,
+with replay. It needs a terminal.
+
 show is the run's shape and timeline. The item's record (WHAT, WHY, sha256,
 times, skip reason, log path) is ` + "`desk status NAME`" + `, which show points to and
 does not repeat.
@@ -84,7 +99,8 @@ does not repeat.
 Exit codes: 0 shown; 1 no such run, or it could not be read; 2 usage.`,
 		Example: `  forgectl desk show 17-nightly --events
   forgectl desk show 17-nightly --at 4
-  forgectl desk show --log /tmp/build/events.jsonl --event-key kind --json`,
+  forgectl desk show --log /tmp/build/events.jsonl --event-key kind --json
+  forgectl desk show --log /var/log/backup.log --lens backup --live`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := ""
@@ -98,6 +114,8 @@ Exit codes: 0 shown; 1 no such run, or it could not be read; 2 usage.`,
 				return deskUsage("desk show: give a run name or --log FILE, not both")
 			case cmd.Flags().Changed("at") && at < 0:
 				return deskUsage("desk show: --at must be 0 or more")
+			case live && (asJSON || events || cmd.Flags().Changed("at")):
+				return deskUsage("desk show: --live is the live view; it takes no --json, --events or --at (its own keys step and replay)")
 			}
 			if err := log.check(cmd, "show"); err != nil {
 				return err
@@ -106,30 +124,42 @@ Exit codes: 0 shown; 1 no such run, or it could not be read; 2 usage.`,
 			if cmd.Flags().Changed("at") {
 				replay = at
 			}
-			return runDeskShow(cmd, deps, *dir, name, log, deskShowOpts{asJSON: asJSON, events: events, at: replay})
+			return runDeskShow(cmd, deps, *dir, name, log, deskShowOpts{asJSON: asJSON, events: events, at: replay, live: live})
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false,
 		`print {"source","name","kind","live","exit","at","events_total","steps","edges","events","counts","partial","held","note"}`)
 	cmd.Flags().BoolVar(&events, "events", false, "also print the event timeline (always in --json)")
 	cmd.Flags().IntVar(&at, "at", 0, "replay: show the state after the run's first N events")
+	cmd.Flags().BoolVar(&live, "live", false, "open the live run view on this run, full screen, and follow it (needs a terminal)")
 	log.bind(cmd)
 	return cmd
 }
 
 // deskShowOpts are show's output choices. at is -1 for no replay.
 type deskShowOpts struct {
-	asJSON, events bool
-	at             int
+	asJSON, events, live bool
+	at                   int
 }
 
 // check refuses a key flag given without --log, where nothing would read it,
-// and an empty event key, which matches no line.
+// a key flag beside --lens, which names its own keys, and an empty event key,
+// which matches no line.
 func (o deskLogOpts) check(cmd *cobra.Command, verb string) error {
 	if o.path == "" {
-		for _, f := range []string{"event-key", "step-key", "time-key"} {
+		for _, f := range []string{"event-key", "step-key", "time-key", "lens"} {
 			if cmd.Flags().Changed(f) {
 				return deskUsage("desk %s: --%s is only read with --log", verb, f)
+			}
+		}
+	}
+	if cmd.Flags().Changed("lens") {
+		if o.lens == "" {
+			return deskUsage("desk %s: --lens must name a lens", verb)
+		}
+		for _, f := range []string{"event-key", "step-key", "time-key"} {
+			if cmd.Flags().Changed(f) {
+				return deskUsage("desk %s: --%s is not read with --lens: set the keys in the lens's [json] table", verb, f)
 			}
 		}
 	}

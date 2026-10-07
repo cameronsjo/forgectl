@@ -51,6 +51,8 @@ type Cursor struct {
 	lines    int    // complete lines read, the next Seq
 	kept     int    // events delivered, for maxRunEvents
 	dropped  int    // lines dropped: too long, not JSON, unnamed, or past maxRunEvents
+	ignored  int    // lines a lens's ignore rule matched
+	ruleHits []int  // lines each lens rule matched
 	fields   int    // field values dropped: not a string, an int64 or a boolean
 	lost     bool   // desk only: RUN-LOST was delivered
 	desk     any    // desk only: the source's watcher for this run
@@ -75,8 +77,15 @@ type Delta struct {
 	Defs          []StepDef
 	Dropped       int
 	DroppedFields int
-	Partial       bool
-	Reset         bool
+	// Ignored counts lines a lens's ignore rule matched: noise left out on
+	// purpose, not a fault. A total, like Dropped.
+	Ignored int
+	// RuleHits counts, for a lens's runs, the lines each rule matched,
+	// ignored lines included: RuleHits[i] is rule i+1's. A total, like
+	// Dropped. It is how a person (or an agent) sees which rules work.
+	RuleHits []int
+	Partial  bool
+	Reset    bool
 	// Held is set when the log ends in a line with no newline yet. It is
 	// held back until its newline arrives; a log that is finished without
 	// one never shows that line.
@@ -107,6 +116,18 @@ type Source interface {
 	Name() string
 	List() ([]RunRef, error)
 	Load(ref RunRef, cur *Cursor) (Delta, error)
+}
+
+// SpecOf is the spec ref's events fold with: the source's own when it has
+// one (a lens), the desk's for a desk run, and none otherwise.
+func SpecOf(src Source, ref RunRef) *Spec {
+	if s, ok := src.(interface{ Spec(RunRef) *Spec }); ok {
+		return s.Spec(ref)
+	}
+	if ref.Kind == KindDesk {
+		return DeskSpec()
+	}
+	return &Spec{}
 }
 
 // ErrRefused marks a path that is a symlink or not a regular file.

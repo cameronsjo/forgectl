@@ -3,6 +3,7 @@
 package runview
 
 import (
+	"maps"
 	"slices"
 	"strconv"
 	"time"
@@ -24,11 +25,20 @@ const (
 
 // Spec says how a run's events fold: which event names start, close or fail
 // a step or end the run, and which field of the end event holds the exit.
-// It is built in code (DeskSpec); there is no spec file. A run read with an
-// empty Spec shows its events and no step state.
+// The desk's is built in code (DeskSpec); a lens builds one from its file
+// (Lens.Spec, ADR-0014). A run read with an empty Spec shows its events and
+// no step state.
 type Spec struct {
 	On        map[string]Action // event name -> action
 	ExitField string
+	// ActionField, when set, names an event field holding the event's
+	// action; it decides over On. A lens writes it at ingest, where its
+	// rules matched the line.
+	ActionField string
+	// Discover adds a step the first time an event names it, in the order
+	// they appear, with no edges. Without it, a step the defs do not have
+	// is counted in UnknownSteps.
+	Discover bool
 }
 
 // Fold reduces events into the run's state. It is pure: the same spec, defs
@@ -95,7 +105,13 @@ func (r *reducer) apply(e Event) {
 	if e.Time.After(r.state.LastEvent) {
 		r.state.LastEvent = e.Time // the newest, so an out-of-order log still sorts by its latest
 	}
-	switch r.spec.On[e.Name] {
+	action := r.spec.On[e.Name]
+	if r.spec.ActionField != "" {
+		if v, ok := e.field(r.spec.ActionField); ok {
+			action = Action(v)
+		}
+	}
+	switch action {
 	case ActionStart:
 		if i, ok := r.step(e); ok {
 			s := &r.state.Steps[i]
@@ -127,9 +143,15 @@ func (r *reducer) apply(e Event) {
 }
 
 // step resolves the event's step, counting an id the defs do not have (an
-// empty one included) in UnknownSteps.
+// empty one included) in UnknownSteps. Under Discover a named step the defs
+// do not have is added, pending, after the others.
 func (r *reducer) step(e Event) (int, bool) {
 	i, ok := r.steps[e.Step]
+	if !ok && r.spec.Discover && e.Step != "" {
+		i, ok = len(r.state.Steps), true
+		r.steps[e.Step] = i
+		r.state.Steps = append(r.state.Steps, StepState{ID: e.Step, Status: StepPending})
+	}
 	if !ok {
 		r.state.UnknownSteps++
 	}
@@ -186,10 +208,13 @@ func (r *reducer) finish() RunState {
 	return s
 }
 
-// clone deep-copies the reducer's mutable state. spec and steps are read-only
-// after newReducer and are shared.
+// clone deep-copies the reducer's mutable state. spec is read-only and
+// shared; steps is too, unless the spec discovers steps, which adds to it.
 func (r *reducer) clone() *reducer {
 	c := *r
+	if r.spec.Discover {
+		c.steps = maps.Clone(r.steps)
+	}
 	c.state.Steps = slices.Clone(r.state.Steps)
 	c.state.Edges = slices.Clone(r.state.Edges)
 	if r.state.Exit != nil {
