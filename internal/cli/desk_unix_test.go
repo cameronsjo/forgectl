@@ -717,7 +717,7 @@ func TestDeskPrune(t *testing.T) {
 	newDeskDir(t)
 	out, _, err := deskRun(t, deskDeps(), "prune", "--json")
 	wantExit(t, err, 0)
-	if got, want := jsonKeys(t, []byte(out)), []string{"days", "removed"}; !reflect.DeepEqual(got, want) {
+	if got, want := jsonKeys(t, []byte(out)), []string{"days", "found", "removed"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("prune --json keys = %v, want %v", got, want)
 	}
 	out, _, err = deskRun(t, deskDeps(), "prune", "--days", "7")

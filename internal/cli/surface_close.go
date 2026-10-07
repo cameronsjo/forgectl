@@ -105,7 +105,9 @@ ledger stage, and the read-only worktree inspection) and prints what close
 would do, changing nothing: herdr is not asked, so it cannot say whether herdr
 would refuse, and a workspace that would be closed reads "would-close". It
 exits 1 where close would refuse, so close --dry-run && close stops where
-close would. With --json it prints {"name","branch","dry_run","refused",
+close would. git status runs without optional locks, so the preview takes no
+index.lock; a worktree in the middle of a rebase or bisect can list as a
+detached HEAD, which keeps it (would-keep). With --json it prints {"name","branch","dry_run","refused",
 "workspace","worktree","kept_because","would_forget","reason","note"}.
 
 Exit 0: the workspace is closed or gone (the worktree may be kept). Exit 1:

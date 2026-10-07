@@ -218,11 +218,14 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 	w := &stickyWriter{w: out}
 	w.printf("name=%s\nkind=%s\nsha256=%s\nduplicate=%t\n", a.Name, a.Kind, a.SHA256, duplicate)
 	if duplicate {
-		note := "nothing was queued"
-		if signalNow {
-			note = "nothing was queued, and the operator signal had not gone out, so it was sent now"
+		switch {
+		case !signalNow:
+			ew.printf("note: %s is already waiting with this sha256; nothing was queued (--allow-duplicate queues another)\n", safeText(a.Name))
+		case len(signalFailures) == 0:
+			ew.printf("note: %s is already waiting with this sha256; nothing was queued, and the operator signal had not gone out, so it was sent now (--allow-duplicate queues another)\n", safeText(a.Name))
+		default:
+			ew.printf("note: %s already queued; signal not sent: %s (--allow-duplicate queues another)\n", safeText(a.Name), safeText(signalFailures[0]))
 		}
-		ew.printf("note: %s is already waiting with this sha256; %s (--allow-duplicate queues another)\n", safeText(a.Name), note)
 	}
 	return errors.Join(w.err, ew.err)
 }
@@ -919,6 +922,9 @@ func deskSkipNotFound(d *desk.Desk, name string) error {
 type deskPruneJSON struct {
 	Removed int `json:"removed"`
 	Days    int `json:"days"`
+	// Found is false when the directory is not a desk: nothing was opened or
+	// created, and Removed is 0.
+	Found bool `json:"found"`
 }
 
 // deskPrunePlanJSON is `desk prune --dry-run --json`.
@@ -940,8 +946,22 @@ type deskPrunePlanItem struct {
 }
 
 func runDeskPrune(cmd *cobra.Command, deps module.Deps, dirFlag string, days int, asJSON, dryRun bool) error {
+	dir, err := resolveDeskDir(dirFlag)
+	if err != nil {
+		return err
+	}
+	// A prune never creates the desk: every other verb makes a missing desk
+	// directory by opening it, which for prune would turn a typo in --dir into
+	// a new empty desk and a quiet pruned=0.
+	if !desk.Exists(dir) {
+		return reportNoDeskToPrune(cmd, dir, days, asJSON, dryRun)
+	}
 	if dryRun {
-		return runDeskPrunePlan(cmd, deps, dirFlag, days, asJSON)
+		plan, err := desk.PrunePlanAt(dir, days)
+		if err != nil {
+			return err
+		}
+		return printDeskPrunePlan(cmd.OutOrStdout(), plan, true, days, asJSON)
 	}
 	d, err := openDeskDirFor(cmd, deps, dirFlag)
 	if err != nil {
@@ -953,39 +973,31 @@ func runDeskPrune(cmd *cobra.Command, deps module.Deps, dirFlag string, days int
 		return err
 	}
 	if asJSON {
-		return writeJSON(cmd.OutOrStdout(), deskPruneJSON{Removed: n, Days: days})
+		return writeJSON(cmd.OutOrStdout(), deskPruneJSON{Removed: n, Days: days, Found: true})
 	}
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "pruned=%d days=%d\n", n, days)
 	return err
 }
 
-// runDeskPrunePlan is `desk prune --dry-run`: what Prune would delete, with
-// nothing deleted and nothing created. Every other desk verb creates the desk
-// directory when it is absent; a preview must not, so an absent directory is
-// reported as such (a typo in --dir reads as "no desk", not as an empty one).
-func runDeskPrunePlan(cmd *cobra.Command, deps module.Deps, dirFlag string, days int, asJSON bool) error {
-	dir, err := resolveDeskDir(dirFlag)
-	if err != nil {
+// reportNoDeskToPrune is prune, or its preview, on a directory that is not a
+// desk: nothing is opened or created, a note names the path on stderr, and the
+// result is the empty one with found=false. Exit 0, as an empty desk.
+func reportNoDeskToPrune(cmd *cobra.Command, dir string, days int, asJSON, dryRun bool) error {
+	if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "note: desk not found at %s; nothing to prune\n", safePath(dir)); err != nil {
 		return err
 	}
-	var plan []desk.PrunedItem
-	found := true
-	if _, serr := os.Lstat(dir); errors.Is(serr, os.ErrNotExist) {
-		found = false
-		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "note: desk not found at %s; nothing to prune\n", safePath(dir)); err != nil {
-			return err
-		}
-	} else {
-		d, err := openDeskDirFor(cmd, deps, dirFlag)
-		if err != nil {
-			return err
-		}
-		defer d.Close() //nolint:errcheck // read only
-		if plan, err = d.PrunePlan(days); err != nil {
-			return err
-		}
+	if dryRun {
+		return printDeskPrunePlan(cmd.OutOrStdout(), nil, false, days, asJSON)
 	}
-	out := cmd.OutOrStdout()
+	if asJSON {
+		return writeJSON(cmd.OutOrStdout(), deskPruneJSON{Days: days})
+	}
+	_, err := fmt.Fprintf(cmd.OutOrStdout(), "pruned=0 days=%d\n", days)
+	return err
+}
+
+// printDeskPrunePlan is `desk prune --dry-run`'s output for plan.
+func printDeskPrunePlan(out io.Writer, plan []desk.PrunedItem, found bool, days int, asJSON bool) error {
 	if asJSON {
 		items := make([]deskPrunePlanItem, 0, len(plan))
 		for _, p := range plan {

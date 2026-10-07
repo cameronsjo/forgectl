@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	fexec "github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -166,5 +167,61 @@ func TestPlanWorktreeAcceptsAFreeLocalBranch(t *testing.T) {
 	plan, err := PlanWorktree(context.Background(), fexec.OSRunner{}, top, "w1", "free")
 	if err != nil || plan.BranchFrom != BranchLocal {
 		t.Fatalf("plan = %+v err = %v, want a local branch", plan, err)
+	}
+}
+
+// Inspecting a worktree must not rewrite its index: `surface close --dry-run`
+// rests on it, and a preview changes nothing. A plain `git status` refreshes a
+// stat-dirty entry and writes the index back; that is the control, so the
+// assertion below can see the difference. InspectWorktree runs status with
+// --no-optional-locks and leaves the index bytes alone.
+func TestInspectWorktreeDoesNotRewriteTheIndex(t *testing.T) {
+	ctx := context.Background()
+	run := fexec.OSRunner{}
+	top := gitRepo(t)
+	wt, err := AddWorktree(ctx, run, top, "w", "feat", baseOf(t, top))
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(wt.Path, "a.txt")
+	if err := os.WriteFile(file, []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, wt.Path, "add", "a.txt")
+	mustGit(t, wt.Path, "commit", "-q", "-m", "a")
+	indexPath := strings.TrimSpace(mustGit(t, wt.Path, "rev-parse", "--path-format=absolute", "--git-path", "index"))
+	// Each call moves the file's mtime somewhere new: an index already
+	// refreshed to the same mtime has nothing left to rewrite, and the test
+	// would see no difference whether or not status takes locks.
+	hours := 0
+	staleStat := func() {
+		hours++
+		later := time.Now().Add(time.Duration(hours) * time.Hour)
+		if err := os.Chtimes(file, later, later); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readIndex := func() string {
+		b, err := os.ReadFile(indexPath) //nolint:gosec // G304: the index path git reported for a test worktree
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	staleStat()
+	before := readIndex()
+	mustGit(t, wt.Path, "status", "--porcelain")
+	if readIndex() == before {
+		t.Skip("this git does not rewrite a stat-dirty index on status; the control cannot see the difference")
+	}
+
+	staleStat()
+	before = readIndex()
+	if _, err := InspectWorktree(ctx, run, top, "w", wt.Base); err != nil {
+		t.Fatalf("InspectWorktree: %v", err)
+	}
+	if readIndex() != before {
+		t.Error("InspectWorktree rewrote the worktree's index")
 	}
 }

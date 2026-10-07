@@ -425,3 +425,144 @@ func TestDeskSkip_NotFoundNamesTheSameItemUnderAnotherNumber(t *testing.T) {
 		t.Errorf("a name no item shares got a similar-name hint: %q", err)
 	}
 }
+
+// treeState is the mode and mtime of dir and everything under it, so a test can
+// prove a command wrote, created or chmodded nothing.
+func treeState(t *testing.T, dir string) string {
+	t.Helper()
+	var lines []string
+	err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		lines = append(lines, strings.TrimPrefix(p, dir)+":"+info.Mode().String()+":"+info.ModTime().String())
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// The dry run is read-only on an EXISTING directory too: a 755 directory that
+// is not a desk keeps its mode, its entries and its mtimes, and reads
+// found=false; a desk whose subdirectories are 755 keeps those modes while the
+// plan lists the same items a real prune then removes (forgectl#1088).
+func TestDeskPrune_DryRunIsReadOnlyOnAnExistingDir(t *testing.T) {
+	dir := newDeskDir(t)
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: the test needs a wide mode to see it left alone
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil { //nolint:gosec // G302: as above
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "stray.txt"), []byte("not a desk\n"), 0o644); err != nil { //nolint:gosec // G306: as above
+		t.Fatal(err)
+	}
+	before := treeState(t, dir)
+
+	out, errOut, err := deskRun(t, deskDeps(), "prune", "--dry-run")
+	wantExit(t, err, 0)
+	if out != "would_prune=0 days=30 found=false\n" || !strings.Contains(errOut, "desk not found at") {
+		t.Errorf("non-desk dir: out %q err %q, want found=false and a note", out, errOut)
+	}
+	if after := treeState(t, dir); after != before {
+		t.Fatalf("the dry run changed a non-desk directory:\nbefore\n%s\nafter\n%s", before, after)
+	}
+
+	// A desk with wide modes: the plan is the real prune's, and nothing changes.
+	desk := t.TempDir()
+	for _, sub := range []string{"pending", "running", "done", "skipped"} {
+		if err := os.MkdirAll(filepath.Join(desk, sub), 0o755); err != nil { //nolint:gosec // G301: as above
+			t.Fatal(err)
+		}
+	}
+	plantOldDone(t, desk, "01-old", 40)
+	plantOldDone(t, desk, "02-new", 1)
+	before = treeState(t, desk)
+	out, _, err = deskRun(t, deskDeps(), "prune", "--dry-run", "--dir", desk)
+	wantExit(t, err, 0)
+	if !strings.HasPrefix(out, "would_prune=1 days=30 found=true\n") || !strings.Contains(out, "done/01-old") || strings.Contains(out, "02-new") {
+		t.Errorf("desk plan = %q", out)
+	}
+	if after := treeState(t, desk); after != before {
+		t.Fatalf("the dry run changed a desk (modes tightened or files touched):\nbefore\n%s\nafter\n%s", before, after)
+	}
+	realOut, _, err := deskRun(t, deskDeps(), "prune", "--dir", desk)
+	wantExit(t, err, 0)
+	if realOut != "pruned=1 days=30\n" {
+		t.Errorf("real prune = %q, want the one item the plan listed", realOut)
+	}
+}
+
+// A real prune on a missing desk creates nothing and says so, with the exit
+// code unchanged; --json carries found (forgectl#1088).
+func TestDeskPrune_RealPruneNeverCreatesAMissingDesk(t *testing.T) {
+	dir := newDeskDir(t)
+	out, errOut, err := deskRun(t, deskDeps(), "prune")
+	wantExit(t, err, 0)
+	if out != "pruned=0 days=30\n" || !strings.Contains(errOut, "desk not found at") {
+		t.Errorf("out %q err %q, want pruned=0 and a not-found note", out, errOut)
+	}
+	if _, serr := os.Lstat(dir); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("a real prune created the desk dir: %v", serr)
+	}
+
+	out, _, err = deskRun(t, deskDeps(), "prune", "--json")
+	wantExit(t, err, 0)
+	if got, want := jsonKeys(t, []byte(out)), []string{"days", "found", "removed"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("keys = %v, want %v", got, want)
+	}
+	var res deskPruneJSON
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Found || res.Removed != 0 {
+		t.Errorf("result = %+v, want found=false removed=0", res)
+	}
+	if _, serr := os.Lstat(dir); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("--json prune created the desk dir: %v", serr)
+	}
+
+	// A directory that exists but is not a desk is left alone too.
+	other := t.TempDir()
+	if err := os.WriteFile(filepath.Join(other, "stray.txt"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := treeState(t, other)
+	_, _, err = deskRun(t, deskDeps(), "prune", "--dir", other)
+	wantExit(t, err, 0)
+	if after := treeState(t, other); after != before {
+		t.Errorf("a real prune opened a non-desk dir:\nbefore\n%s\nafter\n%s", before, after)
+	}
+
+	// A real desk reads found=true.
+	live := t.TempDir()
+	openTestDesk(t, live)
+	out, _, err = deskRun(t, deskDeps(), "prune", "--dir", live, "--json")
+	wantExit(t, err, 0)
+	if err := json.Unmarshal([]byte(out), &res); err != nil || !res.Found {
+		t.Errorf("real desk result = %s (err %v), want found=true", out, err)
+	}
+}
+
+// When the retry's own signal fails, the note says the item was already queued
+// and the signal was not sent. It never says "sent now" next to a failure.
+func TestDeskAdd_DuplicateWithAFailingSignalSaysSoPlainly(t *testing.T) {
+	newDeskDir(t)
+	inHerdr(t, "w1:p9")
+	rig := newSignalRig(t, config.DeskConfig{})
+	deskMacNotify = func(context.Context, module.Deps, string, string) error {
+		rig.mac++
+		return errors.New("notification centre unavailable")
+	}
+	args := []string{"add", writeTemp(t, "merge.sh", "echo merge\n"), "--what", "w", "--why", "y"}
+	if _, _, err := deskRun(t, rig.deps, args...); err != nil {
+		t.Fatal(err)
+	}
+	_, errOut, err := deskRun(t, rig.deps, args...)
+	wantExit(t, err, 0)
+	if !strings.Contains(errOut, "already queued; signal not sent: ") || strings.Contains(errOut, "sent now") || strings.Contains(errOut, "nothing was queued, and") {
+		t.Errorf("stderr = %q, want 'already queued; signal not sent: <why>' and no 'sent now'", errOut)
+	}
+}

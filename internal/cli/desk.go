@@ -403,13 +403,18 @@ func newDeskPruneCmd(dir *string, deps module.Deps) *cobra.Command {
 never touches pending/ or running/, unknown files, symlinks, or anything at the
 desk root. Nothing else ever deletes desk files: prune runs only when asked.
 
+prune never creates a desk. A directory that is not a desk (none of pending/,
+running/, done/, skipped/ in it) is not opened or created: prune prints
+"note: desk not found at <path>" on stderr and the empty result, exit 0, so a
+typo in --dir does not become a new desk and a quiet pruned=0.
+
 --dry-run lists what prune would delete and deletes nothing. It uses the same
-selection, so the list is what a real prune removes right now. It creates
-nothing either: a desk directory that does not exist is not created but
-reported (found=false, and a note on stderr), so a typo in --dir does not read
-as an empty desk; an existing desk is opened as every verb opens it. With
---json it prints {"dry_run","found","days","would_remove","items"}, each item
-{"state","name","newest"}; without it, {"removed","days"}.
+selection, so the list is what a real prune removes right now. It also opens
+nothing for writing: it reads done/, skipped/ and running/ in place, with no
+chmod and no directories created, even in a directory that is not a desk (that
+reports found=false). With --json it prints
+{"dry_run","found","days","would_remove","items"}, each item
+{"state","name","newest"}; without it, {"removed","days","found"}.
 
 Exit codes: 0 pruned (maybe nothing); 1 a delete failed; 2 usage.`,
 		Args: cobra.NoArgs,
@@ -421,7 +426,7 @@ Exit codes: 0 pruned (maybe nothing); 1 a delete failed; 2 usage.`,
 		},
 	}
 	cmd.Flags().IntVar(&days, "days", 30, "delete items older than this many days")
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"removed","days"} as one JSON object (with --dry-run, {"dry_run","found","days","would_remove","items"})`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"removed","days","found"} as one JSON object (with --dry-run, {"dry_run","found","days","would_remove","items"})`)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "list what would be deleted and delete nothing")
 	return cmd
 }

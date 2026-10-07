@@ -114,8 +114,11 @@ func InspectWorktree(ctx context.Context, run GitRunner, top, name, base string)
 	// worktree's .gitattributes names, and the worktree is the worker's to
 	// write; RunUnfiltered blanks every driver so none runs as the operator.
 	// Refreshing a stat-dirty entry rewrites the index, which fires
-	// post-index-change, so hooks are pinned off as well.
-	if f.Status, err = gitenv.RunUnfiltered(ctx, run, gitenv.Bin, path, "-c", "core.hooksPath=/dev/null", "status", "--porcelain", "--ignored"); err != nil {
+	// post-index-change, so hooks are pinned off as well. --no-optional-locks
+	// (GIT_OPTIONAL_LOCKS=0) stops status from taking index.lock to write that
+	// refresh back: this inspection also backs `surface close --dry-run`, which
+	// must change nothing, and the answer needs no refreshed index.
+	if f.Status, err = gitenv.RunUnfiltered(ctx, run, gitenv.Bin, path, "-c", "core.hooksPath=/dev/null", "--no-optional-locks", "status", "--porcelain", "--ignored"); err != nil {
 		return WorktreeFacts{}, fmt.Errorf("worker: git status in %s: %w", path, err)
 	}
 	// An error from either lookup below is read as "detached" or "no upstream".

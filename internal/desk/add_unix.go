@@ -19,6 +19,10 @@ import (
 // there to make the link collide.
 var beforeLink = func(string) {}
 
+// afterLink runs right after the item is linked into pending/; tests read the
+// directory there to prove the item is never visible without its meta.
+var afterLink = func(string) {}
+
 // maxNumberTries bounds the NN- search when other writers keep taking numbers.
 const maxNumberTries = 1000
 
@@ -62,9 +66,11 @@ func (d *Desk) AddUnique(src, what, why string, tty bool) (a Added, duplicate bo
 }
 
 // Signalled reports whether the operator signal for the pending item name is
-// recorded as sent (see [Meta.SignalledAt]). An item with no meta, such as a
-// hand-dropped file, reads as signalled: nothing here ever signalled it, and a
-// retry must not start pinging for a file a person put there.
+// recorded as sent (see [Meta.SignalledAt]). An item with no meta reads as
+// signalled. Add writes an item's meta before the item becomes visible in
+// pending/, so a pending item with no meta is a file a person dropped in by
+// hand: nothing here ever signalled it, and a retry must not start pinging
+// for it.
 func (d *Desk) Signalled(name string) bool {
 	meta, ok, err := d.readMeta(DirPending, name)
 	return err != nil || !ok || meta.SignalledAt != nil
@@ -165,18 +171,30 @@ func (d *Desk) add(src, what, why string, tty, unique bool) (Added, bool, error)
 		if d.nameTaken(name) {
 			continue
 		}
-		beforeLink(name + kind.Ext())
-		err := d.root.Link(tmp, path.Join(DirPending, name+kind.Ext()))
-		if errors.Is(err, fs.ErrExist) {
-			continue
-		}
-		if err != nil {
-			return Added{}, false, fmt.Errorf("desk: queue %s: %w", name, err)
-		}
+		// The meta goes in before the item is visible. A desk or a retry that
+		// sees the item therefore always sees its meta, so "no meta" can only
+		// mean a file a person dropped in by hand. createMeta fails rather
+		// than overwrite a meta that appeared after the name check.
 		now := d.now().UTC()
-		if err := d.writeMeta(DirPending, name, Meta{AddedAt: &now, SHA256: sum, Kind: kind, SignalPane: d.signalPane}); err != nil {
+		created, err := d.createMeta(DirPending, name, Meta{AddedAt: &now, SHA256: sum, Kind: kind, SignalPane: d.signalPane})
+		if err != nil {
 			return Added{}, false, err
 		}
+		if !created {
+			continue
+		}
+		beforeLink(name + kind.Ext())
+		err = d.root.Link(tmp, path.Join(DirPending, name+kind.Ext()))
+		if err != nil {
+			// The item never became visible, so its meta must not stay behind
+			// naming a hash for a file that is not there.
+			_ = d.root.Remove(metaName(DirPending, name))
+			if errors.Is(err, fs.ErrExist) {
+				continue
+			}
+			return Added{}, false, fmt.Errorf("desk: queue %s: %w", name, err)
+		}
+		afterLink(name + kind.Ext())
 		return Added{Name: name, Kind: kind, SHA256: sum, Path: d.abs(path.Join(DirPending, name+kind.Ext())), Warnings: warnings}, false, nil
 	}
 	return Added{}, false, errors.New("desk: no free item number; is something else writing pending/?")
