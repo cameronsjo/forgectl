@@ -783,7 +783,7 @@ func TestDeskFrame_IndicatorsAreLabelled(t *testing.T) {
 	run.Started = ago(12 * time.Second)
 	snap = &desk.Snapshot{Dir: "/d", Taken: deskNow, Running: []desk.Item{run}}
 	out = ansi.Strip(RenderDeskFrame(snap, 120, 30, deskNow, opts))
-	for _, want := range []string{"desk ○ nothing waiting", "0:12 so far", "no finished runs yet", "1 started today"[2:]} {
+	for _, want := range []string{"desk ● 1 running", "0:12 so far", "no finished runs yet", "1 started today"[2:]} {
 		if !strings.Contains(out, want) {
 			t.Errorf("frame lacks %q:\n%s", want, out)
 		}
@@ -874,5 +874,22 @@ func TestDeskKeyLinesListEveryBinding(t *testing.T) {
 		if !strings.Contains(lines, b.key) || !strings.Contains(lines, b.help) {
 			t.Errorf("? screen lacks %q", b.key)
 		}
+	}
+}
+
+// The header names what the desk is doing when nothing waits: running, or
+// idle (#1107 review: "nothing waiting" beside a running item misled).
+func TestDeskFrame_HeaderSaysRunningOrIdle(t *testing.T) {
+	run := item("01-a", desk.KindScript, desk.StateRunning)
+	run.Started = ago(time.Second)
+	_, opts := emptySnapshot()
+	out := ansi.Strip(RenderDeskFrame(&desk.Snapshot{Dir: "/d", Taken: deskNow, Running: []desk.Item{run}}, 100, 30, deskNow, opts))
+	if !strings.HasPrefix(out, "desk ● 1 running") {
+		t.Errorf("header with one running item: %q", strings.SplitN(out, "\n", 2)[0])
+	}
+	empty, eopts := emptySnapshot()
+	out = ansi.Strip(RenderDeskFrame(empty, 100, 30, deskNow, eopts))
+	if !strings.HasPrefix(out, "desk ○ idle") {
+		t.Errorf("empty header: %q", strings.SplitN(out, "\n", 2)[0])
 	}
 }

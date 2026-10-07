@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -31,22 +32,36 @@ const menuTextMaxRunes = 200
 func newMenuCmd(deps module.Deps) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
-		Use:   "menu",
+		Use:   "menu [group]",
 		Short: "Print the hub's contents: status, pinned, recent, and every command",
 		Long: `Print what bare forgectl shows, without opening it: the status line, the
 pinned commands, the recent ones, and every other command with its subverbs.
-Nothing is run. --json emits the same content as one document.`,
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+Nothing is run. --json emits the same content as one document.
+
+The whole --json document is about 33 KB. To read less, name a group:
+  forgectl menu --json desk     one command and its subverbs
+  forgectl menu --json repos    one area: every command in it
+
+A group is a command name or an area name (` + menuAreaNames() + `).
+A name that is neither is a usage error that lists every valid one.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
 			sec, header := gatherMenu(cmd.Context(), deps, cmd.Root())
 			doc := menuDocument(cmd.Root(), sec, header)
+			if len(args) == 1 {
+				scoped, err := menuScope(doc, args[0])
+				if err != nil {
+					return usageFailure(cmd, err, asJSON)
+				}
+				doc = scoped
+			}
 			if asJSON {
 				return menuEncoder(cmd.OutOrStdout()).Encode(doc)
 			}
 			return writeMenuText(cmd.OutOrStdout(), doc, header)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"header","first_run","pinned","recent","commands"} to stdout (see docs/commands/menu.md)`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"header","first_run","pinned","recent","commands"} to stdout; about 33 KB whole, so name a command or area (menu --json desk) to get one subtree (see docs/commands/menu.md)`)
 	return cmd
 }
 
@@ -137,6 +152,77 @@ func menuDocument(root *cobra.Command, sec hubSections, header tui.HubHeader) me
 		}
 	}
 	return doc
+}
+
+// menuAreaNames lists the hub's named areas (the `group` key on commands rows)
+// for help text, in hub order. The catch-all area is left out: it exists only
+// while some command is unplaced, and menuScope accepts every name listed here.
+func menuAreaNames() string {
+	names := make([]string, 0, len(hubGroups))
+	for _, g := range hubGroups {
+		names = append(names, g.title)
+	}
+	return strings.Join(names, ", ")
+}
+
+// menuKnownArea reports whether group names an area the hub defines, even one
+// with no command registered on this build.
+func menuKnownArea(group string) bool {
+	if group == hubOtherGroup {
+		return true
+	}
+	for _, g := range hubGroups {
+		if g.title == group {
+			return true
+		}
+	}
+	return false
+}
+
+// menuScope narrows doc to one group, which is either a command name (the
+// rows whose command path starts with it) or an area name (the commands rows
+// whose group key is it; an area the hub defines is valid when empty). The header and first_run stay, so the document keeps
+// its shape. An unknown group is an error that lists every command and area a
+// group can name.
+func menuScope(doc menuJSON, group string) (menuJSON, error) {
+	keep := func(rows []menuRowJSON) []menuRowJSON {
+		out := []menuRowJSON{}
+		for _, r := range rows {
+			if (len(r.Argv) > 0 && r.Argv[0] == group) || (r.Group != "" && r.Group == group) {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	scoped := doc
+	scoped.Pinned = keep(doc.Pinned)
+	scoped.Recent = keep(doc.Recent)
+	scoped.Commands = keep(doc.Commands)
+	if len(scoped.Pinned)+len(scoped.Recent)+len(scoped.Commands) == 0 && !menuKnownArea(group) {
+		seen := map[string]bool{}
+		var cmds, areas []string
+		var extra string
+		for _, r := range append(append([]menuRowJSON{}, doc.Pinned...), doc.Commands...) {
+			if !seen[r.Command] {
+				seen[r.Command] = true
+				cmds = append(cmds, r.Command)
+			}
+			if r.Group == hubOtherGroup && !seen["area:"+r.Group] {
+				seen["area:"+r.Group] = true
+				extra = r.Group
+			}
+		}
+		for _, g := range hubGroups {
+			areas = append(areas, g.title)
+		}
+		if extra != "" {
+			areas = append(areas, extra)
+		}
+		slices.Sort(cmds)
+		return menuJSON{}, fmt.Errorf("unknown menu group %s; commands: %s; areas: %s",
+			termsafe.QuoteArgMax(group, termsafe.ArgEchoMaxRunes), safeText(strings.Join(cmds, ", ")), safeText(strings.Join(areas, ", ")))
+	}
+	return scoped, nil
 }
 
 // menuHeader applies tui.HubHeader's availability rules: an empty project

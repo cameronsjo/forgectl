@@ -78,7 +78,7 @@ or the pane could not be read. Exit 2: a usage or setup error, including
 	cmd.Flags().StringVar(&opts.Repo, "repo", ".", "repository the worker was launched from (project name or path)")
 	cmd.Flags().IntVar(&opts.Lines, "lines", defaultReadLines, fmt.Sprintf("how many screen rows to print (at most %d)", maxReadLines))
 	cmd.Flags().BoolVar(&opts.Report, "report", false, "print only the REPORT line for the last brief")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, "print the result as JSON")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"name","harness","agent","status","text","marker","found","report"} as JSON`)
 	return cmd
 }
 

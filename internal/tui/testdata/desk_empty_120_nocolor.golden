@@ -1,4 +1,4 @@
-desk ○ nothing waiting · forgectl 0.0.0-test · host-a · ~/.local/state/forgectl/desk                    up 4h37m · 19:07
+desk ○ idle · forgectl 0.0.0-test · host-a · ~/.local/state/forgectl/desk                               up 4h37m · 19:07
 ╭ waiting ─────────────────────────────╮╭ started today ───────────────────────╮╭ outcomes ────────────────────────────╮
 │ 0                                    ││ 0                                    ││ ✓ 0  ✗ 0                             │
 │ nothing waiting                      ││ median -                             ││ 0 changed                            │

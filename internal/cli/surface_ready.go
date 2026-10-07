@@ -89,7 +89,7 @@ that cannot be used, a harness with no predicates).
 	cmd.Flags().StringVar(&opts.Repo, "repo", ".", "repository the worker was launched from (project name or path)")
 	cmd.Flags().DurationVar(&opts.Timeout, "timeout", defaultReadyTimeout, "how long to wait for the prompt")
 	cmd.Flags().DurationVar(&opts.Interval, "interval", defaultReadyInterval, "how often to read the pane")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, "print the result as JSON")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"name","harness","state","blocking","reason","input","waited_ms"} as JSON`)
 	return cmd
 }
 

@@ -1517,3 +1517,12 @@ func TestDesk_QuestionMarkShowsTheKeys(t *testing.T) {
 		t.Error("? did not close the key list")
 	}
 }
+
+// --no-icons reaches the window title too.
+func TestDesk_WindowTitleFollowsNoIcons(t *testing.T) {
+	h := newDeskHarness(t)
+	h.m.opts.ASCII = true
+	if title := h.m.View().WindowTitle; strings.ContainsRune(title, '●') {
+		t.Errorf("ASCII window title = %q", title)
+	}
+}

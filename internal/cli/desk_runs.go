@@ -92,7 +92,9 @@ Exit codes: 0 shown; 1 no such run, or it could not be read; 2 usage.`,
 				name = args[0]
 			}
 			switch {
-			case (name == "") == (log.path == ""):
+			case name == "" && log.path == "":
+				return deskUsage("desk show: give a run name or --log FILE; usage: forgectl desk show <name> [flags]")
+			case name != "" && log.path != "":
 				return deskUsage("desk show: give a run name or --log FILE, not both")
 			case cmd.Flags().Changed("at") && at < 0:
 				return deskUsage("desk show: --at must be 0 or more")

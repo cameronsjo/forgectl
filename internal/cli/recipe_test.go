@@ -693,7 +693,7 @@ func TestRecipeAfkCommandRejectsArgs(t *testing.T) {
 	if err == nil {
 		t.Fatal("ExecuteContext() error = nil, want arg error")
 	}
-	if !strings.Contains(err.Error(), "unknown command") && !strings.Contains(err.Error(), "accepts 0 arg") {
+	if !strings.Contains(err.Error(), "takes no arguments") {
 		t.Fatalf("ExecuteContext() error = %v, want Cobra argument error", err)
 	}
 }

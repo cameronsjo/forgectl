@@ -92,7 +92,7 @@ Exit 0: settled. Exit 1: blocked, gone, unreadable, or not settled by
 	cmd.Flags().DurationVar(&opts.Interval, "interval", defaultWaitInterval, "how often to read the pane")
 	cmd.Flags().DurationVar(&opts.Settle, "settle", defaultWaitSettle, "how long the worker must stay at its prompt")
 	cmd.Flags().DurationVar(&opts.Quiet, "quiet", defaultWaitQuiet, "settle after this long at the prompt even with no turn or report seen")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, "print the result as JSON")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"name","harness","state","blocking","reason","turn_seen","report","waited_ms"} as JSON`)
 	return cmd
 }
 
