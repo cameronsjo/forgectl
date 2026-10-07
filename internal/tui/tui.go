@@ -788,9 +788,9 @@ func (m model) updateListKey(km tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if it, ok := m.l.SelectedItem().(sessionItem); ok {
 			switch key {
 			case "k":
-				return m.startConfirm(opKill, m.client.SessionIdentity(it.s))
+				return m.startConfirm(opKill, m.client.SessionIdentity(it.s), nil)
 			case "K":
-				return m.startConfirm(opKillOthers, m.client.SessionIdentity(it.s))
+				return m.startConfirm(opKillOthers, m.client.SessionIdentity(it.s), m.otherSessionNames(it.s))
 			case "r":
 				return m.startRename(m.client.SessionIdentity(it.s))
 			}
@@ -1289,16 +1289,28 @@ func (m *model) setList(items []list.Item) {
 	m.refreshDelegate()
 }
 
-func (m model) startConfirm(op opKind, session tmux.SessionIdentity) (tea.Model, tea.Cmd) {
+// otherSessionNames lists every session on screen except keep, for the
+// kill-others prompt to name.
+func (m model) otherSessionNames(keep tmux.Session) []string {
+	var names []string
+	for _, li := range m.l.Items() {
+		if it, ok := li.(sessionItem); ok && it.s.ID != keep.ID {
+			names = append(names, it.s.Name)
+		}
+	}
+	return names
+}
+
+func (m model) startConfirm(op opKind, session tmux.SessionIdentity, doomed []string) (tea.Model, tea.Cmd) {
 	m.status = ""
 	prompt := fmt.Sprintf("Kill session %q?", session.Name)
 	if op == opKillOthers {
-		prompt = fmt.Sprintf("Kill ALL sessions except %q?", session.Name)
+		prompt = termsafe.KillOthersPrompt(session.Name, doomed)
 	}
 	m.pendingOp = op
 	m.pendingSession = session
 	m.form = huh.NewForm(huh.NewGroup(
-		huh.NewConfirm().Key("ok").Title(prompt).Affirmative("Yes").Negative("No"),
+		huh.NewConfirm().Key("ok").Title(prompt).Description("esc to cancel").Affirmative("Yes").Negative("No"),
 	)).WithWidth(m.formWidth()).WithShowHelp(false).WithKeyMap(keymap.Cancel()).
 		WithTheme(m.theme.Huh())
 	m.mode = formMode

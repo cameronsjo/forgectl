@@ -531,3 +531,31 @@ func TestScopedMenuQuitsOnBack(t *testing.T) {
 		t.Errorf("unscoped menu q → mode %v, want hubMode", got)
 	}
 }
+
+// TestKillOthersConfirmNamesTargets pins #1114: the hub's kill-others confirm
+// names the sessions it will kill (as `tmux kill --others` does) and says esc
+// cancels.
+func TestKillOthersConfirmNamesTargets(t *testing.T) {
+	rows := oneSessionRow + "\n" + "123" + sep + "456" + sep + "$2" + sep + "beta" + sep +
+		"1" + sep + "0" + sep + "1700000001" + sep + "/tmp"
+	fake := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) { return rows, nil }}
+	m := sized(newModel(context.Background(), tmux.New(fake), RunOptions{StartInTmux: true, NoIcons: true, Theme: theme.Default()}), 80, 24)
+
+	out, _ := m.Update(key("2"))
+	m = out.(model)
+	// Sessions sort order is not pinned here; keep whichever is selected.
+	sel := m.l.SelectedItem().(sessionItem).s.Name
+	other := map[string]string{"alpha": "beta", "beta": "alpha"}[sel]
+	out, _ = m.Update(key("K"))
+	m = out.(model)
+
+	view := m.View().Content
+	for _, want := range []string{`Keep "` + sel + `"`, `"` + other + `"`, "esc to cancel"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("kill-others confirm missing %q in:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "ALL") {
+		t.Errorf("kill-others confirm still says ALL:\n%s", view)
+	}
+}
