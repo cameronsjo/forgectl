@@ -141,8 +141,8 @@ func TestExecute_EnvFailureUnderJSON(t *testing.T) {
 	stubEnvFailure(t)
 	buildRoot = newRoot
 	stderr, err := executeCapturingStderr(t, "projects", "list", "--json")
-	if ExitCode(err) != 1 {
-		t.Fatalf("exit code = %d (err %v), want 1", ExitCode(err), err)
+	if ExitCode(err) != 2 {
+		t.Fatalf("exit code = %d (err %v), want 2", ExitCode(err), err)
 	}
 	obj := decodeOneStderrObject(t, stderr)
 	if obj["code"] != jsonCodeFailed || !strings.Contains(obj["error"].(string), "XDG_CONFIG_HOME") {

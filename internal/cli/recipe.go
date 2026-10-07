@@ -111,16 +111,16 @@ func newRecipeAfkCmd(deps module.Deps) *cobra.Command {
 func runRecipeAfk(ctx context.Context, runner exec.Runner, opts recipeAfkOptions) error {
 	target, source, ok := resolveRecipeHerdrTarget(opts.Target)
 	if !ok {
-		return WithExitCode(fmt.Errorf("no Herdr target found; pass --target or run inside a Herdr pane with %s or %s set", herdrPaneIDEnv, herdrActivePaneIDEnv), 2)
+		return WithExitCode(fmt.Errorf("no Herdr target found; pass --target or run inside a Herdr pane with %s or %s set", herdrPaneIDEnv, herdrActivePaneIDEnv), exitUsage)
 	}
 	if err := validateRecipeHerdrTarget(target); err != nil {
 		// Name the source: a bad value inherited from HERDR_PANE_ID gives the
 		// operator no other path back to the variable that set it (#464).
-		return WithExitCode(fmt.Errorf("%w (from %s)", err, source), 2)
+		return WithExitCode(fmt.Errorf("%w (from %s)", err, source), exitUsage)
 	}
 	if opts.Rename != "" {
 		if err := validateRecipeRename(opts.Rename); err != nil {
-			return WithExitCode(err, 2)
+			return WithExitCode(err, exitUsage)
 		}
 	}
 	// No empty-to-default fallback here, deliberately: the --prompt flag's
@@ -132,7 +132,7 @@ func runRecipeAfk(ctx context.Context, runner exec.Runner, opts recipeAfkOptions
 	// target pane, which may not be their own. An explicit empty value is
 	// rejected below, same as every other invalid --prompt.
 	if err := validateRecipePrompt(opts.Prompt); err != nil {
-		return WithExitCode(err, 2)
+		return WithExitCode(err, exitUsage)
 	}
 
 	// Preflight before the first side effect. `agent get` is the honest probe:

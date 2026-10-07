@@ -160,7 +160,7 @@ func execute(ctx context.Context) error {
 	env, err := captureEnvSnapshot()
 	if err != nil {
 		if args := normalizeArgs(processArgs()); !invokesHookVerb(args) {
-			return preFangFailure(defaultRoot, args, err)
+			return preFangFailure(defaultRoot, args, WithExitCode(err, classExit(classUsage)))
 		}
 	} else {
 		legacyBoundary, err = prepareLegacyBoundary(env, config.NativeMigrationFS())
@@ -191,7 +191,7 @@ func execute(ctx context.Context) error {
 	// built over a config that failed to decode can stand in a stub without
 	// its flags (projects does), which would hide the verb's --json.
 	if err := configParseGate(cfg, root, args); err != nil {
-		return preFangFailure(defaultRoot, args, WithExitCode(err, 2))
+		return preFangFailure(defaultRoot, args, WithExitCode(err, classExit(classUsage)))
 	}
 	builtRoot := func() *cobra.Command { return root }
 

@@ -1,5 +1,7 @@
 # The `--json` stderr contract
 
+Exit statuses follow one table: [exit-codes.md](exit-codes.md).
+
 [ADR-0008](adr/0008-agent-contract.md) rule 2 puts `--json` on every verb that reports state, and says what goes to stdout. This page covers the other stream: what a `--json` verb writes to stderr when it exits non-zero ([#862](https://github.com/cameronsjo/forgectl/issues/862)).
 
 Under `--json`, forgectl never writes its human error frame (the styled `ERROR` block) to stderr. A non-zero exit takes one of two forms:
@@ -11,7 +13,7 @@ A verb that streams several verdicts can hit both forms in one run. `pr drain --
 
 `--json` never changes an exit code. The same failure exits with the same code with or without it.
 
-Some failures happen before any verb starts: a `config.toml` that does not parse or cannot be read (exit 2), and an environment forgectl cannot resolve its directories from, such as an unset `$HOME` or a relative `$XDG_CONFIG_HOME` (exit 1). These follow the same rule. When the verb you ran declares `--json` and you passed it, stderr gets that verb's one failure object in place of the plain `forgectl: …` line: code `failed` for most verbs, and the family shapes below for `env check` and the docs verbs. `launch` declares no `--json`, because everything after `launch` goes to the harness, so a `launch` failure stays a plain line.
+Some failures happen before any verb starts: a `config.toml` that does not parse or cannot be read (exit 2), and an environment forgectl cannot resolve its directories from, such as an unset `$HOME` or a relative `$XDG_CONFIG_HOME` (exit 2). These follow the same rule. When the verb you ran declares `--json` and you passed it, stderr gets that verb's one failure object in place of the plain `forgectl: …` line: code `failed` for most verbs, and the family shapes below for `env check` and the docs verbs. `launch` declares no `--json`, because everything after `launch` goes to the harness, so a `launch` failure stays a plain line.
 
 Some verbs also write documented progress or notes to stderr under `--json`: the `update` transcript, `herdr organize`'s human report, `projects list`'s per-host degradation notes, `sessions why`'s match count, and `tasks done`'s close record. Those lines are part of the verb's normal output. The contract only rules out the human error frame on top of them.
 
