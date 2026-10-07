@@ -111,32 +111,47 @@ func Pin(s Spec) (int, error) {
 // Callers that must not write, such as a dry run, use it to agree with Pin on
 // refusal. s.Create is ignored.
 func Check(s Spec) error {
+	fd, err := OpenChecked(s)
+	if err != nil {
+		return err
+	}
+	return unix.Close(fd)
+}
+
+// OpenChecked is Check that keeps the descriptor: it returns a descriptor on
+// the leaf after Pin's refusals, with none of Pin's writes. The caller closes
+// it and does its later work against it, as with Pin. A caller that reads the
+// directory (a dry run) uses it to bind what it reads to what was checked.
+func OpenChecked(s Spec) (int, error) {
 	s.Create = false
 	if err := s.validate(); err != nil {
-		return err
+		return -1, err
 	}
 	baseFD, err := unix.Open(s.Base, dirOpenFlags, 0)
 	switch {
 	case errors.Is(err, unix.ENOENT):
-		return ErrAbsent
+		return -1, ErrAbsent
 	case errors.Is(err, unix.ELOOP), errors.Is(err, unix.ENOTDIR):
-		return unsafe("base is a symlink or not a directory")
+		return -1, unsafe("base is a symlink or not a directory")
 	case err != nil:
-		return unsafe("open base: %s", err)
+		return -1, unsafe("open base: %s", err)
 	}
 	defer unix.Close(baseFD) //nolint:errcheck // read-only descriptor
 
 	leafFD, err := unix.Openat(baseFD, s.Leaf, dirOpenFlags, 0)
 	switch {
 	case errors.Is(err, unix.ENOENT):
-		return ErrAbsent
+		return -1, ErrAbsent
 	case errors.Is(err, unix.ELOOP), errors.Is(err, unix.ENOTDIR):
-		return unsafe("leaf is a symlink or not a directory")
+		return -1, unsafe("leaf is a symlink or not a directory")
 	case err != nil:
-		return unsafe("open leaf: %s", err)
+		return -1, unsafe("open leaf: %s", err)
 	}
-	defer unix.Close(leafFD) //nolint:errcheck // read-only descriptor
-	return s.verify(baseFD, leafFD, false)
+	if err := s.verify(baseFD, leafFD, false); err != nil {
+		_ = unix.Close(leafFD)
+		return -1, err
+	}
+	return leafFD, nil
 }
 
 // validate refuses a spec that cannot describe a checkable directory, before

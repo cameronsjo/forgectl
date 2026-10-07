@@ -250,7 +250,7 @@ func TestDeskAdd_JSONContract(t *testing.T) {
 	newDeskDir(t)
 	out, _, err := deskRun(t, deskDeps(), "add", writeTemp(t, "a.sh", "echo a\n"), "--what", "w", "--why", "y", "--json")
 	wantExit(t, err, 0)
-	if got, want := jsonKeys(t, []byte(out)), []string{"duplicate", "kind", "name", "path", "sha256", "warnings"}; !reflect.DeepEqual(got, want) {
+	if got, want := jsonKeys(t, []byte(out)), []string{"duplicate", "kind", "name", "path", "sha256", "signal", "warnings"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("keys = %v, want %v", got, want)
 	}
 }

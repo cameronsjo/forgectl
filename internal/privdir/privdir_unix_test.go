@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -425,5 +426,43 @@ func TestCheck_AgreesWithPinOnRefusalAndWritesNothing(t *testing.T) {
 	s3.Base = base3
 	if err := privdir.Check(s3); !errors.Is(err, privdir.ErrUnsafe) {
 		t.Errorf("Check on a file = %v, want ErrUnsafe", err)
+	}
+}
+
+// A base that is a symlink or not a directory is refused by Check as by Pin,
+// and a base that is absent is ErrAbsent. (A leaf owned by another user is
+// refused by both through the same verify; it cannot be built without root,
+// so no test plants one.)
+func TestCheck_RefusesASymlinkedOrNonDirectoryBase(t *testing.T) {
+	target := scratch(t)
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := scratch(t)
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	file := scratch(t)
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, base := range map[string]string{"symlinked base": link, "file base": file} {
+		s := spec(base)
+		checkErr := privdir.Check(s)
+		_, pinErr := privdir.Pin(s)
+		if !errors.Is(checkErr, privdir.ErrUnsafe) || !errors.Is(pinErr, privdir.ErrUnsafe) {
+			t.Errorf("%s: Check err = %v, Pin err = %v, want both ErrUnsafe", name, checkErr, pinErr)
+		}
+		// The same reason, not just the same class: a refusal that fell through
+		// to a generic "open base" error would also be ErrUnsafe.
+		if checkErr != nil && pinErr != nil && checkErr.Error() != pinErr.Error() {
+			t.Errorf("%s: Check says %q, Pin says %q", name, checkErr, pinErr)
+		}
+		if checkErr != nil && !strings.Contains(checkErr.Error(), "base is a symlink or not a directory") {
+			t.Errorf("%s: Check says %q, want the base refusal", name, checkErr)
+		}
+	}
+	if err := privdir.Check(spec(filepath.Join(scratch(t), "nope"))); !errors.Is(err, privdir.ErrAbsent) {
+		t.Errorf("absent base: Check = %v, want ErrAbsent", err)
 	}
 }

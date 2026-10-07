@@ -433,7 +433,12 @@ func treeState(t *testing.T, dir string) string {
 	var lines []string
 	err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
-			return err
+			if info == nil {
+				return err
+			}
+			// A directory the test made unreadable: record it, skip its children.
+			lines = append(lines, strings.TrimPrefix(p, dir)+":unreadable")
+			return nil
 		}
 		lines = append(lines, strings.TrimPrefix(p, dir)+":"+info.Mode().String()+":"+info.ModTime().String())
 		return nil
@@ -612,7 +617,7 @@ func TestDeskPrune_DryRunRefusesWhatARealPruneRefuses(t *testing.T) {
 		cases["symlinked "+sub] = struct {
 			build func(t *testing.T) string
 			want  string
-		}{want: "not a directory", build: func(t *testing.T) string {
+		}{want: "is not a directory; refusing", build: func(t *testing.T) string {
 			desk := t.TempDir()
 			for _, other := range []string{"pending", "running", "done", "skipped"} {
 				if other == sub {
@@ -625,6 +630,42 @@ func TestDeskPrune_DryRunRefusesWhatARealPruneRefuses(t *testing.T) {
 			if err := os.Symlink(t.TempDir(), filepath.Join(desk, sub)); err != nil {
 				t.Fatal(err)
 			}
+			return desk
+		}}
+	}
+	// A protocol directory that is a regular file (ENOTDIR), and one its owner
+	// cannot read (EACCES): the two other refusals tightenDir makes.
+	cases["done is a file"] = struct {
+		build func(t *testing.T) string
+		want  string
+	}{want: "is not a directory; refusing", build: func(t *testing.T) string {
+		desk := t.TempDir()
+		for _, other := range []string{"pending", "running", "skipped"} {
+			if err := os.MkdirAll(filepath.Join(desk, other), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(desk, "done"), []byte("not a dir\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return desk
+	}}
+	if os.Geteuid() != 0 { // root reads a mode-000 directory
+		cases["done is unreadable"] = struct {
+			build func(t *testing.T) string
+			want  string
+		}{want: "not readable by its owner", build: func(t *testing.T) string {
+			desk := t.TempDir()
+			for _, other := range []string{"pending", "running", "done", "skipped"} {
+				if err := os.MkdirAll(filepath.Join(desk, other), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			locked := filepath.Join(desk, "done")
+			if err := os.Chmod(locked, 0o000); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(locked, 0o700) }) //nolint:gosec // G302: restoring a directory the test locked, so t.TempDir can remove it
 			return desk
 		}}
 	}
@@ -643,8 +684,8 @@ func TestDeskPrune_DryRunRefusesWhatARealPruneRefuses(t *testing.T) {
 			if !strings.Contains(planErr.Error(), tc.want) || !strings.Contains(realErr.Error(), tc.want) {
 				t.Errorf("plan err %q, real err %q, want both to contain %q", planErr, realErr, tc.want)
 			}
-			if ExitCode(planErr) != ExitCode(realErr) {
-				t.Errorf("dry run exits %d, real prune exits %d", ExitCode(planErr), ExitCode(realErr))
+			if ExitCode(planErr) != ExitCode(realErr) || ExitCode(planErr) != 1 {
+				t.Errorf("dry run exits %d, real prune exits %d, want both 1", ExitCode(planErr), ExitCode(realErr))
 			}
 		})
 	}
@@ -696,4 +737,143 @@ func TestDeskAdd_DuplicateWithNoSignalEnabledSaysSo(t *testing.T) {
 	if rig.osascript() != 0 || len(rig.herdr.Calls()) != 0 {
 		t.Errorf("a disabled signal went out: %d macOS, %d herdr", rig.osascript(), len(rig.herdr.Calls()))
 	}
+}
+
+// enabled() says whether a signal can actually go out, not whether one is
+// configured: the macOS notification is a no-op off darwin, and herdr needs the
+// binary and a session.
+func TestDeskSignalEnabledReflectsWhatCanGoOut(t *testing.T) {
+	off := false
+	for _, tc := range []struct {
+		name      string
+		cfg       config.DeskConfig
+		macPosts  bool
+		inHerdr   bool
+		wantReady bool
+	}{
+		{"default config on darwin", config.DeskConfig{}, true, false, true},
+		{"default config off darwin, outside herdr", config.DeskConfig{}, false, false, false},
+		{"default config off darwin, inside herdr", config.DeskConfig{}, false, true, true},
+		{"macOS off, outside herdr", config.DeskConfig{NotifyMacOS: &off}, true, false, false},
+		{"macOS off, inside herdr", config.DeskConfig{NotifyMacOS: &off}, true, true, true},
+		{"herdr off, off darwin", config.DeskConfig{NotifyHerdr: &off}, false, true, false},
+		{"both off", config.DeskConfig{NotifyHerdr: &off, NotifyMacOS: &off}, true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.inHerdr {
+				inHerdr(t, "w1:p9")
+			} else {
+				stubLayout(t, map[string]string{}) // outside a herdr session, whatever this process runs in
+			}
+			rig := newSignalRig(t, tc.cfg)
+			deskMacSupported = func(module.Deps) bool { return tc.macPosts }
+			if got := newDeskSignal(rig.deps).enabled(); got != tc.wantReady {
+				t.Errorf("enabled() = %v, want %v", got, tc.wantReady)
+			}
+		})
+	}
+}
+
+// The real retry path of a desk add whose signals could not go out: with none
+// able to, the item is not marked signalled (and says so, as JSON signal
+// "none-enabled" and in the note), so a retry after a signal becomes possible
+// sends it, marks it, and the retry after that sends nothing.
+func TestDeskAdd_RetryAfterASignalBecomesPossibleSendsIt(t *testing.T) {
+	dir := newDeskDir(t)
+	stubLayout(t, map[string]string{}) // outside a herdr session, whatever this process runs in
+	file := writeTemp(t, "x.sh", "echo hi\n")
+	args := []string{"add", file, "--what", "w", "--why", "y"}
+
+	// Off darwin and outside herdr, with the default config: nothing can go out.
+	rig := newSignalRig(t, config.DeskConfig{})
+	deskMacSupported = func(module.Deps) bool { return false }
+
+	out, _, err := deskRun(t, rig.deps, append(args, "--json")...)
+	wantExit(t, err, 0)
+	var first deskAddJSON
+	if err := json.Unmarshal([]byte(out), &first); err != nil {
+		t.Fatal(err)
+	}
+	if first.Signal != "none-enabled" || first.Duplicate {
+		t.Fatalf("first add = %+v, want signal none-enabled", first)
+	}
+	if openTestDesk(t, dir).Signalled(first.Name) {
+		t.Fatal("an item queued while nothing could signal is marked signalled; a later retry would stay silent")
+	}
+
+	out, errOut, err := deskRun(t, rig.deps, append(args, "--json")...)
+	wantExit(t, err, 0)
+	var retry deskAddJSON
+	if err := json.Unmarshal([]byte(out), &retry); err != nil {
+		t.Fatal(err)
+	}
+	if retry.Signal != "none-enabled" || !retry.Duplicate || errOut != "" {
+		t.Errorf("retry = %+v stderr %q, want a duplicate with signal none-enabled", retry, errOut)
+	}
+	_, errOut, err = deskRun(t, rig.deps, args...)
+	wantExit(t, err, 0)
+	if !strings.Contains(errOut, "no operator signal is enabled") || strings.Contains(errOut, "sent now") {
+		t.Errorf("text retry stderr = %q, want the no-signal note", errOut)
+	}
+	if rig.osascript() != 0 {
+		t.Errorf("a notification went out while none could: %d", rig.osascript())
+	}
+
+	// A signal becomes possible (darwin): the next retry sends it and marks it.
+	deskMacSupported = func(module.Deps) bool { return true }
+	out, errOut, err = deskRun(t, rig.deps, append(args, "--json")...)
+	wantExit(t, err, 0)
+	var sent deskAddJSON
+	if err := json.Unmarshal([]byte(out), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent.Signal != "sent" || !sent.Duplicate || rig.osascript() != 1 {
+		t.Fatalf("retry after enabling = %+v, %d notifications, want signal sent and one notification", sent, rig.osascript())
+	}
+	if !openTestDesk(t, dir).Signalled(first.Name) {
+		t.Error("the retry that sent the signal did not mark the item")
+	}
+	out, _, err = deskRun(t, rig.deps, append(args, "--json")...)
+	wantExit(t, err, 0)
+	var again deskAddJSON
+	if err := json.Unmarshal([]byte(out), &again); err != nil {
+		t.Fatal(err)
+	}
+	if again.Signal != "already-sent" || rig.osascript() != 1 {
+		t.Errorf("last retry = %+v, %d notifications, want already-sent and still one", again, rig.osascript())
+	}
+	_ = errOut
+}
+
+// desk prune --help says what the code does, in step with the docs: the
+// refusal, and exit 1 for a refused desk or a failed delete, exit 2 for
+// --days below 1 (the code's own usage error).
+func TestDeskPruneHelpDescribesRefusalAndExitCodes(t *testing.T) {
+	newDeskDir(t)
+	out, _, err := deskRun(t, deskDeps(), "prune", "--help")
+	wantExit(t, err, 0)
+	help := strings.Join(strings.Fields(out), " ")
+	docsBytes, err := os.ReadFile("../../docs/commands/desk.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs := strings.Join(strings.Fields(string(docsBytes)), " ")
+	for _, want := range []string{
+		"prune refuses a desk it cannot safely open",
+		"a symlink, not a directory, or owned by another user",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("desk prune --help lacks %q", want)
+		}
+	}
+	if !strings.Contains(help, "1 a delete failed, or the desk was refused") || !strings.Contains(help, "2 usage (--days below 1)") {
+		t.Errorf("desk prune --help exit codes are not 'delete failed or refused' and 'usage (--days below 1)'")
+	}
+	if !strings.Contains(docs, "1 a delete failed, or the desk was refused; 2 `--days` below 1") {
+		t.Error("docs/commands/desk.md and desk prune --help disagree about the exit codes")
+	}
+
+	// What the help promises is what the code does.
+	_, _, err = deskRun(t, deskDeps(), "prune", "--days", "0")
+	wantExit(t, err, deskExitUsage)
 }

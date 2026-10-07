@@ -111,18 +111,22 @@ func Open(dir string) (*Desk, error) {
 
 // bindRoot proves the os.Root opened by name is the directory privdir pinned,
 // so a swap between the two opens is refused rather than followed.
-func (d *Desk) bindRoot() error {
-	dup, err := unix.Dup(d.fd)
+func (d *Desk) bindRoot() error { return bindRoot(d.fd, d.root, d.path) }
+
+// bindRoot is bindRoot for any pinned descriptor and the os.Root opened on the
+// same path: it refuses unless both name one directory.
+func bindRoot(fd int, root *os.Root, path string) error {
+	dup, err := unix.Dup(fd)
 	if err != nil {
 		return fmt.Errorf("desk: dup pinned dir: %w", err)
 	}
-	pinned := os.NewFile(uintptr(dup), d.path)
+	pinned := os.NewFile(uintptr(dup), path)
 	defer pinned.Close() //nolint:errcheck // read-only descriptor
 	a, err := pinned.Stat()
 	if err != nil {
 		return fmt.Errorf("desk: stat pinned dir: %w", err)
 	}
-	b, err := d.root.Stat(".")
+	b, err := root.Stat(".")
 	if err != nil {
 		return fmt.Errorf("desk: stat desk root: %w", err)
 	}

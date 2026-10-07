@@ -41,6 +41,13 @@ var deskMacNotify = func(ctx context.Context, deps module.Deps, title, body stri
 	return notify.New(deps.Runner).Notify(ctx, title, body)
 }
 
+// deskMacSupported reports whether the macOS notification can post here: the
+// same predicate Notify checks, so a signal that Notify would drop silently is
+// not counted as one that can go out. A seam so tests simulate either platform.
+var deskMacSupported = func(deps module.Deps) bool {
+	return notify.New(deps.Runner).Supported()
+}
+
 type deskSignal struct {
 	cfg  config.DeskConfig
 	deps module.Deps
@@ -50,11 +57,12 @@ func newDeskSignal(deps module.Deps) deskSignal {
 	return deskSignal{cfg: deps.Cfg.Desk, deps: deps}
 }
 
-// enabled reports whether any operator signal can go out: the macOS
-// notification is on, or the herdr signal is on, herdr is found, and this
-// process is in a herdr session. With none, queueing an item tells nobody.
+// enabled reports whether any operator signal can actually go out: the macOS
+// notification is on and this platform posts it (Notify is a no-op off
+// darwin), or the herdr signal is on, herdr is found, and this process is in a
+// herdr session. With none, queueing an item tells nobody.
 func (s deskSignal) enabled() bool {
-	if s.cfg.MacOSSignal() {
+	if s.cfg.MacOSSignal() && deskMacSupported(s.deps) {
 		return true
 	}
 	_, ok := s.herdrPath()
@@ -114,7 +122,7 @@ func (s deskSignal) queued(ctx context.Context, d *desk.Desk, a desk.Added, what
 	}
 	body = termsafe.SafeLineMax(body, deskSignalBodyMax)
 
-	if s.cfg.MacOSSignal() {
+	if s.cfg.MacOSSignal() && deskMacSupported(s.deps) {
 		c, cancel := context.WithTimeout(ctx, deskSignalTimeout)
 		if err := deskMacNotify(c, s.deps, title, body); err != nil {
 			failed = append(failed, signalFailure("macOS notification", "notify_macos", err))
