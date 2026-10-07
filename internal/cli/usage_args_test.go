@@ -181,3 +181,25 @@ func TestBenchStatusJSONHelp_NamesStatesAndExit(t *testing.T) {
 		}
 	}
 }
+
+// desk add's usage line names the one file it takes and the two flags it
+// requires (#1109): `desk add FILE ...` read as several files, and the
+// synopsis left out --what and --why.
+func TestUsageArgs_DeskAddNamesItsRequiredFlags(t *testing.T) {
+	for _, args := range [][]string{{"desk", "add"}, {"desk", "add", "a", "b"}} {
+		err := execRoot(t, args...)
+		if err == nil || !strings.Contains(err.Error(), "usage: forgectl desk add <file|-> --what <text> --why <text>") {
+			t.Errorf("%v: err = %v", args, err)
+		}
+	}
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	var out strings.Builder
+	root.SetOut(&out)
+	root.SetArgs([]string{"desk", "--help"})
+	if err := root.ExecuteContext(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "forgectl desk add FILE|- --what TEXT --why TEXT") || !strings.Contains(out.String(), "per call") {
+		t.Errorf("desk --help synopsis:\n%s", out.String())
+	}
+}

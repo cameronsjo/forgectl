@@ -107,7 +107,8 @@ afterwards is skipped as "changed" instead of run.
 
   forgectl desk                  the dashboard (needs a terminal)
   forgectl desk --frame          one frame to stdout, sized by $COLUMNS/$LINES
-  forgectl desk add FILE|-       queue a script (.sh) or batch (.manifest); - reads stdin
+  forgectl desk add FILE|- --what TEXT --why TEXT
+                                 queue one script (.sh) or batch (.manifest) per call; - reads stdin
   forgectl desk plan NAME|FILE   check a batch manifest: waves, warnings, sha256
   forgectl desk status [NAME]    the queue, or one item in detail
   forgectl desk watch NAME       stream a run's events; exit with its outcome
@@ -161,7 +162,7 @@ type deskAddOpts struct {
 func newDeskAddCmd(dir *string, deps module.Deps) *cobra.Command {
 	var o deskAddOpts
 	cmd := &cobra.Command{
-		Use:   "add <file|->",
+		Use:   "add <file|-> --what <text> --why <text>",
 		Short: "Queue a script (.sh) or batch manifest (.manifest) for the operator",
 		Long: `add copies FILE into pending/ as the next NN-<name>, with "# WHAT:" and
 "# WHY:" header lines inserted (after a shebang), and fixes its sha256. It
