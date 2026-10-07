@@ -462,7 +462,7 @@ func TestRunViewLostAndChanged(t *testing.T) {
 	ref := runview.RunRef{Source: "desk", Name: "01-long", Kind: runview.KindDesk}
 	defs := []runview.StepDef{{ID: runview.ScriptStep}}
 	events := []runview.Event{{Name: "RUN-START", Seq: 1}, {Name: "STEP-START", Step: runview.ScriptStep, Seq: 2}, {Name: "RUN-LOST", Seq: 3}}
-	f := newRunFolder(ref, defs, events)
+	f := newRunFolder(nil, ref, defs, events)
 	lost := &deskRunView{refs: []runview.RunRef{ref}, folder: f, defs: defs, delta: runview.Delta{Live: runview.LiveLost}, loaded: true, follow: true, at: f.Len()}
 	out := ansi.Strip(lost.render(st, 80, 20))
 	if !strings.Contains(out, "? lost") || !strings.Contains(out, "⊘") || strings.Contains(out, "◐") {
@@ -470,7 +470,7 @@ func TestRunViewLostAndChanged(t *testing.T) {
 	}
 
 	cref := runview.RunRef{Source: "desk", Name: "02-s2", Kind: runview.KindDesk}
-	cf := newRunFolder(cref, defs, nil)
+	cf := newRunFolder(nil, cref, defs, nil)
 	changed := &deskRunView{refs: []runview.RunRef{cref}, folder: cf, defs: defs, delta: runview.Delta{Live: runview.LiveChanged}, loaded: true, follow: true}
 	out = ansi.Strip(changed.render(st, 80, 20))
 	if !strings.Contains(out, "! changed") || !strings.Contains(out, "never ran: it changed after it was queued") || strings.Contains(out, "skipped") {
@@ -484,7 +484,7 @@ func TestRunViewGoneRunIsNotFinished(t *testing.T) {
 	st := theme.Default().Styles()
 	ref := runview.RunRef{Source: "desk", Name: "01-a", Kind: runview.KindDesk}
 	defs := []runview.StepDef{{ID: runview.ScriptStep}}
-	f := newRunFolder(ref, defs, []runview.Event{{Name: "RUN-START", Seq: 1}, {Name: "STEP-START", Step: runview.ScriptStep, Seq: 2}})
+	f := newRunFolder(nil, ref, defs, []runview.Event{{Name: "RUN-START", Seq: 1}, {Name: "STEP-START", Step: runview.ScriptStep, Seq: 2}})
 	v := &deskRunView{refs: []runview.RunRef{ref}, folder: f, defs: defs, delta: runview.Delta{Live: runview.LiveRunning}, loaded: true, gone: true, at: 1}
 	out := ansi.Strip(v.render(st, 80, 20))
 	if strings.Contains(out, "G end") || strings.Contains(out, "start/end") || !strings.Contains(out, "replay 1/2 · G live") {
@@ -517,7 +517,7 @@ func TestRunViewASCIILegend(t *testing.T) {
 	st := theme.Default().Styles()
 	ref := runview.RunRef{Source: "desk", Name: "01-a", Kind: runview.KindDesk}
 	defs := []runview.StepDef{{ID: "fetch"}, {ID: "build"}}
-	f := newRunFolder(ref, defs, nil)
+	f := newRunFolder(nil, ref, defs, nil)
 	v := &deskRunView{refs: []runview.RunRef{ref}, folder: f, defs: defs, delta: runview.Delta{Live: runview.LiveRunning}, loaded: true, follow: true, ascii: true}
 	out := ansi.Strip(asciiFrame(v.render(st, 80, 20), true))
 	if !strings.Contains(out, ". fetch > . build") || strings.Contains(out, "· fetch") {

@@ -59,6 +59,11 @@ type deskRunView struct {
 	want string
 	// ascii draws the run view with runview's ASCII legend (--no-icons).
 	ascii bool
+	// raw shows each line as the log wrote it rather than as a lens's say
+	// rewrote it (o); rewrites is set once any event was rewritten.
+	raw, rewrites bool
+	// clock is the time a running step is counted from; nil is time.Now.
+	clock func() time.Time
 	err   error
 }
 
@@ -117,7 +122,19 @@ func (v *deskRunView) polls() bool {
 	if v.gone {
 		return false
 	}
-	return !runEnded(v.delta.Live)
+	// An ended desk run is final; a log may go on (an app restarted and kept
+	// appending), so a log is followed for as long as the view is open.
+	return v.ref().Kind == runview.KindLog || !runEnded(v.sourceLive())
+}
+
+// sourceLive is the run's state now: its source's word, or, for a run whose
+// source leaves that to the fold (a lens that knows how its runs end), the
+// fold of every event so far.
+func (v *deskRunView) sourceLive() runview.LiveState {
+	if v.delta.Live != "" || v.folder == nil {
+		return v.delta.Live
+	}
+	return v.folder.At(v.folder.Len()).Live
 }
 
 // openRunView opens the run view on the selected item's run, or on the
@@ -215,13 +232,18 @@ func (m deskModel) applyRunLoad(t deskRunLoadMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case v.folder == nil || t.delta.Reset:
 		v.defs = t.delta.Defs
-		v.folder = newRunFolder(t.ref, v.defs, nil)
+		v.folder = newRunFolder(m.runs, t.ref, v.defs, nil)
 	case !sameDefs(v.defs, t.delta.Defs) && t.delta.Defs != nil:
 		// The manifest arrived late, or changed: fold everything again.
 		v.defs = t.delta.Defs
-		v.folder = newRunFolder(t.ref, v.defs, v.folder.Events())
+		v.folder = newRunFolder(m.runs, t.ref, v.defs, v.folder.Events())
 	}
 	v.folder.Append(t.delta.Events...)
+	for _, e := range t.delta.Events {
+		if !v.rewrites && slices.ContainsFunc(e.Fields, func(f runview.Field) bool { return f.Key == runview.LensLineField }) {
+			v.rewrites = true
+		}
+	}
 	v.delta = t.delta
 	v.loaded = true
 	if v.follow {
@@ -233,12 +255,8 @@ func (m deskModel) applyRunLoad(t deskRunLoadMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func newRunFolder(ref runview.RunRef, defs []runview.StepDef, events []runview.Event) *runview.Folder {
-	spec := &runview.Spec{}
-	if ref.Kind == runview.KindDesk {
-		spec = runview.DeskSpec()
-	}
-	f := runview.NewFolder(spec, defs)
+func newRunFolder(src runview.Source, ref runview.RunRef, defs []runview.StepDef, events []runview.Event) *runview.Folder {
+	f := runview.NewFolder(runview.SpecOf(src, ref), defs)
 	f.Append(events...)
 	return f
 }
@@ -326,6 +344,10 @@ func (m deskModel) runViewKey(key string) (tea.Model, tea.Cmd) {
 		v.playing, v.follow = true, false
 		v.playSeq++
 		return m, playRunCmd(v.gen, v.playSeq)
+	case "o":
+		if v.rewrites {
+			v.raw = !v.raw
+		}
 	case "n":
 		return m.switchRun(1)
 	case "p":
@@ -395,7 +417,7 @@ func (v *deskRunView) render(st theme.Styles, width, height int) string {
 	}
 
 	head := st.Header.Render("run")
-	finished := v.loaded && runEnded(v.delta.Live)
+	finished := v.loaded && runEnded(v.sourceLive())
 	if ref.Name != "" {
 		head += " " + st.Fg.Render(itemLabel(ref.Name))
 		if ref.Kind == runview.KindLog {
@@ -405,7 +427,7 @@ func (v *deskRunView) render(st theme.Styles, width, height int) string {
 		// the fold at the replay point would call it live (#1106).
 		live, exit := v.live(s), s.Exit
 		if finished {
-			live, exit = v.delta.Live, v.folder.At(n).Exit
+			live, exit = v.sourceLive(), v.folder.At(n).Exit
 		}
 		mk := runview.RunMark(g, live, exit)
 		head += "  " + runToneStyle(st, mk.Tone).Render(mk.Glyph+" "+mk.Word)
@@ -426,6 +448,12 @@ func (v *deskRunView) render(st theme.Styles, width, height int) string {
 	lines := []string{cut(head, width)}
 
 	body := height - 3 // header, events rule, hints
+	if v.loaded && body > 4 {
+		if g := v.gist(st, s); g != "" {
+			lines = append(lines, cut(" "+g, width))
+			body--
+		}
+	}
 	switch {
 	case !v.loaded && v.err == nil:
 		lines = append(lines, st.Muted.Render(" loading…"))
@@ -443,7 +471,7 @@ func (v *deskRunView) render(st theme.Styles, width, height int) string {
 			rule += " · " + safeMessage(v.err.Error())
 		}
 		lines = append(lines, cut(st.Muted.Render(" "+rule), width))
-		events := runEvents(st, v.folder, v.at, width, max(body-len(flow), 1))
+		events := runEvents(st, v.folder, v.at, width, max(body-len(flow), 1), v.raw)
 		if n == 0 {
 			events = []string{st.Muted.Render(" " + noEventsText(v.delta.Live))}
 		}
@@ -453,7 +481,55 @@ func (v *deskRunView) render(st theme.Styles, width, height int) string {
 		lines = append(lines, "")
 	}
 	lines = lines[:height-1]
-	return strings.Join(append(lines, cut(st.Muted.Render(runHintsFor(width, finished)), width)), "\n")
+	hints := runHintsFor(width, finished)
+	if v.rewrites {
+		hints = runHintsWith(hints, width, v.raw)
+	}
+	return strings.Join(append(lines, cut(st.Muted.Render(hints), width)), "\n")
+}
+
+// gist is the run in one plain line, toned by what it says: the answer the
+// view leads with, so the flow and timeline are there for detail, not
+// needed to know how the run is going.
+func (v *deskRunView) gist(st theme.Styles, s runview.RunState) string {
+	var now time.Time
+	if v.follow {
+		now = time.Now()
+		if v.clock != nil {
+			now = v.clock()
+		}
+	}
+	live := v.live(s)
+	g := runview.Gist(s, live, v.folder.Events()[:v.at], now)
+	if g == "" {
+		return ""
+	}
+	style := st.Fg
+	switch {
+	case slices.ContainsFunc(s.Steps, func(x runview.StepState) bool { return x.Status == runview.StepFailed }),
+		s.Exit != nil && *s.Exit != 0:
+		style = st.Danger
+	case live == runview.LiveLost:
+		style = st.Warn
+	case live == runview.LiveEnded:
+		style = st.OK
+	case live == runview.LiveLive || live == runview.LiveRunning:
+		style = st.Active
+	}
+	return style.Render(g)
+}
+
+// runHintsWith adds the o key to the hints when the width has room for it.
+func runHintsWith(hints string, width int, raw bool) string {
+	o := " · o as written"
+	if raw {
+		o = " · o plain words"
+	}
+	h := strings.Replace(hints, " · q close", o+" · q close", 1)
+	if ansi.StringWidth(h) <= width {
+		return h
+	}
+	return hints
 }
 
 // noEventsText says why a run shows no events: one that never ran says so,
@@ -505,6 +581,7 @@ func (v *deskRunView) counts(s runview.RunState) string {
 		one, many string
 	}{
 		{v.delta.Dropped, "line dropped", "lines dropped"},
+		{v.delta.Ignored, "line ignored", "lines ignored"},
 		{s.UnknownSteps, "unknown step", "unknown steps"},
 	} {
 		switch {
@@ -631,7 +708,7 @@ func stepDepths(s runview.RunState) []int {
 
 // runEvents draws the events around the replay point: the folded ones in the
 // normal color with the newest marked, the ones after it dimmed.
-func runEvents(st theme.Styles, f *runview.Folder, at, width, rows int) []string {
+func runEvents(st theme.Styles, f *runview.Folder, at, width, rows int, raw bool) []string {
 	if f == nil || f.Len() == 0 {
 		return []string{st.Muted.Render(" no events yet")}
 	}
@@ -648,25 +725,40 @@ func runEvents(st theme.Styles, f *runview.Folder, at, width, rows int) []string
 		case i >= at:
 			style = st.Dim
 		}
-		out = append(out, cut(" "+mark+style.Render(runEventText(e)), width))
+		out = append(out, cut(" "+mark+style.Render(runEventText(e, raw)), width))
 	}
 	return out
 }
 
 // runEventText is one event as a timeline row. Every value was made inert
 // and capped when it was read.
-func runEventText(e runview.Event) string {
+func runEventText(e runview.Event, raw bool) string {
 	parts := []string{fmt.Sprintf("#%-4d", e.Seq)}
 	if !e.Time.IsZero() {
 		parts = append(parts, e.Time.UTC().Format("15:04:05"))
 	}
-	parts = append(parts, e.Name)
+	name := e.Name
+	if raw {
+		for _, f := range e.Fields {
+			if f.Key == runview.LensLineField {
+				name = f.Value
+				break
+			}
+		}
+	}
+	parts = append(parts, name)
 	if e.Step != "" {
 		parts = append(parts, e.Step)
 	}
 	for _, f := range e.Fields {
-		if f.Key == "id" && e.Step != "" {
+		switch {
+		case f.Key == "id" && e.Step != "":
 			continue
+		case f.Key == runview.LensActionField:
+			parts = append(parts, "→ "+f.Value) // what a lens rule made of the line
+			continue
+		case strings.HasPrefix(f.Key, "@"):
+			continue // a lens's own bookkeeping: desk show --events prints it
 		}
 		parts = append(parts, f.Key+"="+f.Value)
 	}

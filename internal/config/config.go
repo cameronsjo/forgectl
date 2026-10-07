@@ -1536,6 +1536,18 @@ func WorkflowsDir() (string, error) {
 	return filepath.Join(dir, "workflows"), nil
 }
 
+// LensesDir returns the directory `desk show --lens NAME` reads NAME.toml
+// from: <os.UserConfigDir()>/forgectl/lenses (macOS: ~/Library/Application
+// Support/forgectl/lenses; Linux: ~/.config/forgectl/lenses). A lens teaches
+// forgectl to read one app's log as a run (ADR-0014).
+func LensesDir() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "lenses"), nil
+}
+
 // WorkflowStateDir returns the directory holding per-workflow run-state
 // sidecars that back `workflow run --resume` and `workflow status`:
 // <os.UserConfigDir()>/forgectl/workflows/.state (macOS: ~/Library/Application

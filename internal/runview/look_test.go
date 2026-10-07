@@ -125,3 +125,30 @@ func TestCompareRuns(t *testing.T) {
 		t.Errorf("prefix name: CompareRuns = %d, want -1", got)
 	}
 }
+
+func TestGist(t *testing.T) {
+	t0 := time.Date(2026, 10, 7, 1, 0, 0, 0, time.UTC)
+	exit1, exit0 := 1, 0
+	failEv := Event{Step: "docs", Name: "connection reset", Time: t0.Add(time.Minute), Fields: []Field{{LensActionField, "fail"}}}
+	for _, c := range []struct {
+		name   string
+		s      RunState
+		live   LiveState
+		events []Event
+		now    time.Time
+		want   string
+	}{
+		{"failed with why", RunState{Steps: []StepState{{ID: "photos", Status: StepClosed}, {ID: "docs", Status: StepFailed}}, Exit: &exit1},
+			LiveEnded, []Event{failEv}, t0, "docs failed at 01:01:00: connection reset · exit 1"},
+		{"finished", RunState{Steps: []StepState{{ID: "a", Status: StepClosed}}, Exit: &exit0}, LiveEnded, nil, t0, "finished: 1 of 1 steps done · exit 0"},
+		{"running", RunState{Steps: []StepState{{ID: "a", Status: StepRunning, Start: t0}}}, LiveLive, nil, t0.Add(3 * time.Minute), "running a for 3m0s"},
+		{"replay has no clock", RunState{Steps: []StepState{{ID: "a", Status: StepRunning, Start: t0}}}, LiveLive, nil, time.Time{}, "running a"},
+		{"desk failure says no why", RunState{Steps: []StepState{{ID: "b", Status: StepFailed}}}, LiveRunning, []Event{{Step: "b", Name: "STEP-FAIL"}}, t0, "b failed"},
+		{"lost", RunState{}, LiveLost, nil, t0, "lost: it stopped with no end"},
+		{"nothing yet", RunState{}, LiveUnknown, nil, t0, ""},
+	} {
+		if got := Gist(c.s, c.live, c.events, c.now); got != c.want {
+			t.Errorf("%s: Gist = %q, want %q", c.name, got, c.want)
+		}
+	}
+}

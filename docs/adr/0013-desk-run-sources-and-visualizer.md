@@ -35,6 +35,8 @@ A log line's event name, step and time come from three keys, `event`, `step` and
 
 ### No run spec file
 
+_Superseded by [ADR-0014](0014-log-lenses.md): a lens file now teaches the run view an app's log, with the operator as the consumer this section waited for._
+
 The parallel design's TOML run spec is left out. Its fields (a run root from an environment variable, glob patterns for run directories and summaries, a gate with a reject limit, checks, metrics, exit meanings, staleness) described one other tool's run layout, and that tool was its only consumer. Nothing forgectl's users run writes runs in that shape. Without the spec, a log is read as a timeline with no step state, which is true to what forgectl knows about it.
 
 If a tool in use starts writing multi-step JSONL logs, a step model for it comes back as a change to this ADR: either a spec file or a fixed event vocabulary, decided then with a real consumer to check it against.

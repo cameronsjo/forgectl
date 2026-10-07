@@ -11,3 +11,8 @@ import "errors"
 func NewLogSource(string, LogKeys) (Source, error) {
 	return nil, errors.New("runview: reading a log needs a Unix system")
 }
+
+// NewLensSource needs the log source, which is Unix-only.
+func NewLensSource(string, *Lens) (Source, error) {
+	return nil, errors.New("runview: reading a log needs a Unix system")
+}
