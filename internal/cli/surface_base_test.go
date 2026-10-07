@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -53,7 +55,7 @@ func fetchArgs(run *exec.FakeRunner) []string {
 
 func TestWorkerBase(t *testing.T) {
 	run := baseFake("git@github.com:o/r.git", "main", testBaseSHA, testBaseSHA)
-	got, err := workerBase(t.Context(), run, "/top")
+	got, err := workerBase(t.Context(), run, "/top", io.Discard)
 	if err != nil || got != testBaseSHA {
 		t.Fatalf("workerBase = %q, %v, want %s", got, err, testBaseSHA)
 	}
@@ -61,7 +63,7 @@ func TestWorkerBase(t *testing.T) {
 	if len(f) != 4 || !slices.Equal(f[:3], []string{"fetch", "--no-tags", "origin"}) || !strings.HasPrefix(f[3], "+refs/heads/main:refs/forgectl/base/"+testBaseSHA+"-") {
 		t.Fatalf("fetch %q, want +refs/heads/main into a per-launch refs/forgectl/base/<sha>-<nonce>", f)
 	}
-	if got, err := workerBase(t.Context(), baseFake("ssh://git@ssh.github.com:443/o/r.git", "main", testBaseSHA, testBaseSHA), "/top"); err != nil || got != testBaseSHA {
+	if got, err := workerBase(t.Context(), baseFake("ssh://git@ssh.github.com:443/o/r.git", "main", testBaseSHA, testBaseSHA), "/top", io.Discard); err != nil || got != testBaseSHA {
 		t.Fatalf("an ssh.github.com origin gave %q, %v", got, err)
 	}
 
@@ -70,7 +72,7 @@ func TestWorkerBase(t *testing.T) {
 		"there is no origin":          baseFake("", "main", testBaseSHA, testBaseSHA),
 	} {
 		t.Run("falls back to HEAD: "+name, func(t *testing.T) {
-			if got, err := workerBase(t.Context(), run, "/top"); err != nil || got != testHeadSHA {
+			if got, err := workerBase(t.Context(), run, "/top", io.Discard); err != nil || got != testHeadSHA {
 				t.Fatalf("workerBase = %q, %v, want the checkout's HEAD", got, err)
 			}
 			if fetchArgs(run) != nil {
@@ -88,7 +90,7 @@ func TestWorkerBase(t *testing.T) {
 		"gh fails":                          ghFailing(),
 	} {
 		t.Run("refuses: "+name, func(t *testing.T) {
-			if got, err := workerBase(t.Context(), run, "/top"); err == nil {
+			if got, err := workerBase(t.Context(), run, "/top", io.Discard); err == nil {
 				t.Fatalf("workerBase accepted it: %q", got)
 			}
 		})
@@ -113,4 +115,24 @@ func ghFailing() *exec.FakeRunner {
 		return inner(name, args)
 	}
 	return run
+}
+
+// TestWorkerBase_FallbackSaysWhy pins forgectl#1129: an SSH host alias falls
+// back to HEAD with one line naming why, and a trailing-slash GitHub URL no
+// longer falls back at all.
+func TestWorkerBase_FallbackSaysWhy(t *testing.T) {
+	var note bytes.Buffer
+	got, err := workerBase(t.Context(), baseFake("git@gh-work:o/r.git", "main", testBaseSHA, testBaseSHA), "/top", &note)
+	if err != nil || got != testHeadSHA {
+		t.Fatalf("an ssh alias gave %q, %v, want the checkout's HEAD", got, err)
+	}
+	if out := note.String(); strings.Count(out, "\n") != 1 || !strings.Contains(out, `"gh-work"`) || strings.Contains(out, "o/r") {
+		t.Fatalf("fallback note = %q, want one line naming the host and not the URL", out)
+	}
+
+	note.Reset()
+	got, err = workerBase(t.Context(), baseFake("https://github.com/o/r/", "main", testBaseSHA, testBaseSHA), "/top", &note)
+	if err != nil || got != testBaseSHA || note.Len() != 0 {
+		t.Fatalf("a trailing-slash origin gave %q, %v, note %q, want GitHub's head and no note", got, err, note.String())
+	}
 }

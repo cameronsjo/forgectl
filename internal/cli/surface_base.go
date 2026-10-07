@@ -5,12 +5,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/pr"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // A new worker branch starts at the head of the repository's GitHub default
@@ -33,15 +35,27 @@ const workerBaseRefPrefix = "refs/forgectl/base/"
 // workerBase returns the commit a new worker branch in top starts from: the
 // head of the GitHub default branch when origin's URL has host github.com (or
 // ssh.github.com), else the checkout's HEAD, as before. An SSH host alias
-// for GitHub counts as not GitHub.
-func workerBase(ctx context.Context, run exec.Runner, top string) (string, error) {
-	origin, err := gitenv.Run(ctx, run, gitenv.Local, "-C", top, "remote", "get-url", "origin")
-	if err != nil {
+// for GitHub counts as not GitHub. Each fallback writes one line to note
+// naming why, so a stale base is never silent (forgectl#1129). The line names
+// only the parsed host, never the raw URL, which can carry a credential.
+func workerBase(ctx context.Context, run exec.Runner, top string, note io.Writer) (string, error) {
+	fallback := func(why string) (string, error) {
+		_, _ = fmt.Fprintf(note, "forgectl: starting from this checkout's HEAD, not GitHub's default branch: %s\n", why)
 		return checkoutHead(ctx, run, top)
 	}
+	origin, err := gitenv.Run(ctx, run, gitenv.Local, "-C", top, "remote", "get-url", "origin")
+	if err != nil {
+		return fallback("this checkout has no origin remote")
+	}
 	host, owner, repo, ok := pr.ParseRemoteURL(origin)
-	if !ok || (host != "github.com" && host != "ssh.github.com") || !pr.ValidOwnerRepoPart(owner) || !pr.ValidOwnerRepoPart(repo) {
-		return checkoutHead(ctx, run, top)
+	if !ok {
+		return fallback("origin's URL is not a form forgectl can read")
+	}
+	if host != "github.com" && host != "ssh.github.com" {
+		return fallback(fmt.Sprintf("origin's host %s is not github.com (an SSH host alias for GitHub counts as not GitHub)", termsafe.QuoteTextMax(host, 40)))
+	}
+	if !pr.ValidOwnerRepoPart(owner) || !pr.ValidOwnerRepoPart(repo) {
+		return fallback("origin's owner or repository name is not one forgectl will use")
 	}
 	slug := owner + "/" + repo
 	branch, err := run.Run(ctx, "gh", "api", "--hostname", "github.com", "repos/"+slug, "--jq", ".default_branch")
