@@ -13,7 +13,7 @@ import "strings"
 // That is display only; v shows a script's bytes unchanged.
 var deskASCII = strings.NewReplacer(
 	// row and step marks
-	"◌", "o", "●", "*", "◐", "*", "✓", "+", "✗", "x", "⊘", "/", "–", "-",
+	"◌", "o", "○", "o", "●", "*", "◐", "*", "✓", "+", "✗", "x", "⊘", "/", "–", "-",
 	"▸", ">", "▶", ">", "⌨", "t", "┆", "|", "↳", ">", "→", ">", "←", "<",
 	// panel borders
 	"╭", "+", "╮", "+", "╰", "+", "╯", "+", "─", "-", "│", "|", "┤", "|", "├", "|",

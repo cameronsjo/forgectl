@@ -375,7 +375,8 @@ func (f deskFrame) tooSmall(st theme.Styles, header string, footer []string, row
 		}
 	}
 	if f.footer == "" {
-		footer = []string{cut(deskHintsNoRun(st, width), visible)}
+		n, _, _ := f.waiting()
+		footer = []string{cut(deskHintsNoRun(st, width, n > 0), visible)}
 	}
 	lines := []string{header, cut(st.Warn.Render(text), visible)}
 	if room := f.height - len(lines) - len(footer); room >= deskQueueMin {
@@ -401,7 +402,7 @@ func deskPromptRoom(height int) int {
 // to that room and says so; nothing is ever drawn over the dashboard.
 func (f deskFrame) footerLines(st theme.Styles, width int) []string {
 	if f.footer == "" {
-		return []string{cut(deskHints(st, width), width)}
+		return []string{cut(f.hints(st, width), width)}
 	}
 	lines := strings.Split(f.footer, "\n")
 	if room := deskPromptRoom(f.height); room > 0 && len(lines) > room {
@@ -835,6 +836,11 @@ func (f deskFrame) rowBar(st theme.Styles, r queueRow, w int) (string, string) {
 	if typical, ok := f.typical(it.Stem); ok && typical > 0 {
 		return BarSolid(st, w, float64(elapsed)/float64(typical)), detail
 	}
+	// No earlier run to compare with: the shimmer is activity, not progress,
+	// and the detail says the length so far (#1107).
+	if w >= 16 {
+		detail = st.Active.Render(clock(elapsed) + " so far")
+	}
 	return BarShimmer(st, w, int(elapsed/time.Second)), detail
 }
 
@@ -1126,7 +1132,12 @@ func (f deskFrame) historyPanel(st theme.Styles, width, rows int) []string {
 	if len(show) < len(done) {
 		content = append(content, st.Muted.Render(fmt.Sprintf("… %d older", len(done)-len(show))))
 	}
-	return strings.Split(Panel(st, width, "history", "", content), "\n")
+	// The bars have a legend, so they are not read as progress (#1107).
+	legend := ""
+	if width >= deskWideMin && len(done) > 0 {
+		legend = st.Muted.Render("bar: run length, longest full")
+	}
+	return strings.Split(Panel(st, width, "history", legend, content), "\n")
 }
 
 func (f deskFrame) historyLine(st theme.Styles, width int, it desk.Item, longest time.Duration) string {
@@ -1160,17 +1171,35 @@ func (f deskFrame) historyLine(st theme.Styles, width int, it desk.Item, longest
 	return line + outcome + " " + st.Muted.Render(padTo(agoLabel(f.now, it.Ended), ageW)) + " " + st.Muted.Render(dur)
 }
 
+// hints is the key-hint footer for what is on screen: an empty queue offers
+// none of the keys that act on an item, and a queue with nothing waiting
+// does not offer y or a (#1107).
+func (f deskFrame) hints(st theme.Styles, width int) string {
+	rows := deskRows(f.snap, f.now)
+	if len(rows) == 0 {
+		return hintLine(st, width, [][2]string{{"u", "undo"}, {"l", "log"}, {"r", "runs"}, {"q", "quit"}})
+	}
+	if n, _, _ := f.waiting(); n == 0 {
+		return deskHintsNoRun(st, width, false)
+	}
+	return deskHints(st, width)
+}
+
 // deskHints is the key-hint footer. A narrow window drops the move hint
 // (the arrows are self-explanatory) and tightens the spacing.
 func deskHints(st theme.Styles, width int) string {
 	return hintLine(st, width, [][2]string{{"y", "run"}, {"s", "skip"}, {"u", "undo"}, {"v", "view"}, {"a", "all"}, {"l", "log"}, {"r", "runs"}, {"j/k", "move"}, {"q", "quit"}})
 }
 
-// deskHintsNoRun is the hints for a window too small to show the focus
-// panel: y refuses there, so it is not offered. a stays, since its prompt
-// shows each full hash itself.
-func deskHintsNoRun(st theme.Styles, width int) string {
-	return hintLine(st, width, [][2]string{{"s", "skip"}, {"u", "undo"}, {"v", "view"}, {"a", "all"}, {"l", "log"}, {"r", "runs"}, {"j/k", "move"}, {"q", "quit"}})
+// deskHintsNoRun is the hints when y cannot run the selection: a window too
+// small to show the focus panel, or nothing waiting. a stays offered only
+// when something waits (its prompt shows each full hash itself).
+func deskHintsNoRun(st theme.Styles, width int, all bool) string {
+	keys := [][2]string{{"s", "skip"}, {"u", "undo"}, {"v", "view"}, {"l", "log"}, {"r", "runs"}, {"j/k", "move"}, {"q", "quit"}}
+	if all {
+		keys = slices.Insert(keys, 3, [2]string{"a", "all"})
+	}
+	return hintLine(st, width, keys)
 }
 
 func hintLine(st theme.Styles, width int, keys [][2]string) string {

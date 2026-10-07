@@ -747,3 +747,75 @@ func TestDeskFrame_LostIsNotCountedRunning(t *testing.T) {
 		t.Errorf("lost counts:\n%s", out)
 	}
 }
+
+// An empty desk says how the queue fills and offers only keys that can act
+// (#1107).
+func TestDeskFrame_EmptyStateSaysHowItFills(t *testing.T) {
+	snap, opts := emptySnapshot()
+	out := ansi.Strip(RenderDeskFrame(snap, 100, 30, deskNow, opts))
+	if !strings.Contains(out, "Claude queues scripts with forgectl desk add; they appear here") {
+		t.Errorf("the empty queue does not say how it fills:\n%s", out)
+	}
+	footer := out[strings.LastIndex(out, "\n")+1:]
+	for _, k := range []string{"y run", "s skip", "v view", "a all", "j/k"} {
+		if strings.Contains(footer, k) {
+			t.Errorf("empty desk offers %q: %q", k, footer)
+		}
+	}
+	if !strings.Contains(footer, "q quit") {
+		t.Errorf("footer lost q quit: %q", footer)
+	}
+}
+
+// Every indicator carries a word (#1107): the header dot, the history bars'
+// legend, a running item with no earlier run to compare with; and the
+// counts agree: "started today" beside "no finished runs yet".
+func TestDeskFrame_IndicatorsAreLabelled(t *testing.T) {
+	snap, opts := busySnapshot()
+	out := ansi.Strip(RenderDeskFrame(snap, 120, 40, deskNow, opts))
+	for _, want := range []string{"desk ● 3 waiting", "bar: run length, longest full", "started today"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("busy frame lacks %q:\n%s", want, out)
+		}
+	}
+	run := item("01-new", desk.KindScript, desk.StateRunning)
+	run.Started = ago(12 * time.Second)
+	snap = &desk.Snapshot{Dir: "/d", Taken: deskNow, Running: []desk.Item{run}}
+	out = ansi.Strip(RenderDeskFrame(snap, 120, 30, deskNow, opts))
+	for _, want := range []string{"desk ○ nothing waiting", "0:12 so far", "no finished runs yet", "1 started today"[2:]} {
+		if !strings.Contains(out, want) {
+			t.Errorf("frame lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "no runs yet") || strings.Contains(out, "runs today") {
+		t.Errorf("frame still has the old wording:\n%s", out)
+	}
+}
+
+// --no-icons maps every glyph to one ASCII character of the same width.
+func TestDeskFrame_ASCIIKeepsTheLayout(t *testing.T) {
+	for _, fx := range deskFixtures {
+		snap, opts := fx.build()
+		assertASCIIFrame(t, fx.name, snap, opts)
+	}
+	snap, opts := twoWaitingSnapshot()
+	assertASCIIFrame(t, "short", snap, opts)
+}
+
+func assertASCIIFrame(t *testing.T, name string, snap *desk.Snapshot, opts DeskFrameOptions) {
+	t.Helper()
+	icons := ansi.Strip(RenderDeskFrame(snap, 120, 40, deskNow, opts))
+	opts.ASCII = true
+	ascii := ansi.Strip(RenderDeskFrame(snap, 120, 40, deskNow, opts))
+	for _, r := range ascii {
+		if r >= 0x80 && !strings.ContainsRune("·…±", r) {
+			t.Fatalf("%s: ASCII frame draws %q:\n%s", name, r, ascii)
+		}
+	}
+	il, al := strings.Split(icons, "\n"), strings.Split(ascii, "\n")
+	for i := range il {
+		if ansi.StringWidth(il[i]) != ansi.StringWidth(al[i]) {
+			t.Errorf("line %d: width %d vs %d", i, ansi.StringWidth(il[i]), ansi.StringWidth(al[i]))
+		}
+	}
+}

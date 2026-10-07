@@ -1464,3 +1464,26 @@ func TestDesk_LOnAnItemWithNoRunSaysSo(t *testing.T) {
 		t.Errorf("footer = %q", footer)
 	}
 }
+
+// A "started X" line still on screen turns into X's outcome once the run
+// ends, instead of saying a finished run just started (#1107).
+func TestDesk_StartedLineBecomesTheOutcome(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-a.sh", plainScript("a"))
+	h.scan()
+	h.press("y")
+	if !strings.Contains(ansi.Strip(h.m.footer()), "started 01 a") {
+		t.Fatalf("footer = %q", ansi.Strip(h.m.footer()))
+	}
+	run, err := h.d.BeginRun("01-a", os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Finish(3, "failed"); err != nil {
+		t.Fatal(err)
+	}
+	h.scan()
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "01 a ended: exit 3") {
+		t.Errorf("footer after the run ended = %q", footer)
+	}
+}

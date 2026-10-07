@@ -1,5 +1,5 @@
-desk ● · forgectl 0.0.0-test · host-a · ~…  up 4h37m · 19:07
-◌ 3 waiting · oldest 30h · 5 runs today · median 41s · ✓ 2 …
+desk ● 3 waiting · forgectl 0.0.0-test · …  up 4h37m · 19:07
+◌ 3 waiting · oldest 30h · 5 started today · median 41s · ✓…
 ╭ queue ─┤ ● 2 running  ◌ 3 waiting  ⌨ 1 tty ├─────────────╮
 │ ▸ ◌ waiting  17 merge-feature-bra…   ░░░░░░░░  needs you │
 │   ◌ waiting  18 refresh-credentia… ⌨ ░░░░░░░░  tty       │
