@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -24,6 +25,7 @@ import (
 func newProjectsListCmd(client *projects.Client) *cobra.Command {
 	var asJSON, strict bool
 	var host string
+	var bound listBound
 	cmd := &cobra.Command{
 		Use:   "list [query]",
 		Short: "List projects across local, GitHub, and Gitea (cloned + uncloned)",
@@ -40,6 +42,8 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 			"  forgectl projects list                         # human table, all hosts\n" +
 			"  forgectl projects list --json                  # machine-readable, for scripts\n" +
 			"  forgectl projects list --json --strict         # same, but exit 1 if any host degraded\n" +
+			"  forgectl projects list --json --limit 50       # first 50 rows plus total and truncated\n" +
+			"  forgectl projects list --json --fields host,owner,name   # only those row fields\n" +
 			"  forgectl projects list --host git.example.com  # only that host's repos\n" +
 			"  forgectl projects find homeclaw                # 'find' alias + a name filter",
 		Args: cobra.MaximumNArgs(1),
@@ -49,6 +53,16 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+			if err := bound.resolve(cmd); err != nil {
+				return err
+			}
+			fields, err := bound.fieldList(projectsJSONKeys)
+			if err != nil {
+				return err
+			}
+			if fields != nil && !asJSON {
+				return errors.New("--fields shapes the JSON rows; add --json")
+			}
 
 			// One stderr line names a non-default GitHub host, so a surprising
 			// inventory is never silently attributable to the wrong forge. The
@@ -103,13 +117,30 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 				if repos == nil {
 					repos = []projects.Repo{}
 				}
-				enc := termsafe.JSONEncoder(cmd.OutOrStdout())
-				enc.SetIndent("", "  ")
-				if err := enc.Encode(repos); err != nil {
+				w := window(len(repos), 0)
+				if bound.set {
+					w = window(len(repos), bound.limit)
+				}
+				kept := repos[:w.Shown]
+				var rows any = kept
+				if fields != nil {
+					projected, err := projectRows(kept, fields)
+					if err != nil {
+						return err
+					}
+					rows = projected
+				}
+				if err := emitListJSON(cmd.OutOrStdout(), rows, &bound, w, projectsNarrowFlags, notes); err != nil {
 					return err
 				}
-			} else if err := renderRepoTable(cmd.OutOrStdout(), cmd.ErrOrStderr(), repos); err != nil {
-				return err
+			} else {
+				w := window(len(repos), bound.tableCap())
+				if err := renderRepoTable(cmd.OutOrStdout(), cmd.ErrOrStderr(), repos[:w.Shown]); err != nil {
+					return err
+				}
+				if w.Truncated {
+					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "note: "+w.narrowHint(projectsNarrowFlags))
+				}
 			}
 
 			// --strict turns a partial inventory into a non-zero exit, so a
@@ -128,11 +159,19 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the rows to stdout as a JSON array of {host,owner,name,sshUrl,mirror,private,cloned,localPath,status} (sshUrl, mirror, private, localPath only when set); with --limit, a {items,total,shown,limit,truncated,hint,notes} document instead")
 	cmd.Flags().BoolVar(&strict, "strict", false, "exit 1 when any host produced a degradation note (output is still written)")
 	cmd.Flags().StringVar(&host, "host", "", "filter by hostname (e.g. github.com, git.example.com) or \"local\"")
+	bound.addFlags(cmd, projectsJSONKeys)
 	return cmd
 }
+
+// projectsNarrowFlags names what a truncation hint points at: the name query
+// and --host.
+const projectsNarrowFlags = "a name query, --host"
+
+// projectsJSONKeys are the row fields --fields accepts, in wire order.
+var projectsJSONKeys = []string{"host", "owner", "name", "sshUrl", "mirror", "private", "cloned", "localPath", "status"}
 
 // filterRepos narrows the inventory by host and/or a case-insensitive name
 // substring. Either filter empty means "don't filter on it".

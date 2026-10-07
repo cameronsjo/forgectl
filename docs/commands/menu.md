@@ -5,6 +5,7 @@
 ```sh
 forgectl menu            # the hub as plain text: status line, sections, every command and subverb
 forgectl menu --json     # the same content as one JSON document
+forgectl menu --json desk  # only the `desk` rows and subverbs (one subtree, a fraction of the bytes)
 ```
 
 Bare `forgectl` opens the hub on a TTY. `forgectl menu` prints what that hub holds, so an agent or a script can read it without a terminal ([ADR-0008](../adr/0008-agent-contract.md)). It reads the same sources the hub reads and it lays out the same rows:
@@ -19,6 +20,8 @@ On a TTY the hub shows the pinned rows, the recent rows, and one row per area, s
 - **`enter`** opens the selected row. **`q`** or **`esc`** goes back one screen, and quits from the top.
 
 The line under the list shows the exact `$ forgectl …` the selected row runs. When a description is too long for its row, the row cuts it at a word with `…` and the full text appears under that line when the terminal has rows to spare (20 or more). On a terminal too short for every row, the recent rows go first, then the section dividers, so at 16 rows or more (17 on a first run, when the `init` row shows) the pinned rows and the areas stay on screen. Shorter terminals page (the page number shows under the list), and `1`–`9` still reach every keyed row. The footer's enter hint says what enter does to the selected row: `enter open` opens its subcommands, an area, or the argument picker; `enter run` runs it (a row whose placeholders are all optional runs without them); `enter print command` leaves the hub and prints the command with its placeholders when a required argument is one the picker cannot take. Below 20×8 the hub says the terminal is too small instead of drawing, and takes no key but `q` or `esc`, which quit.
+
+**One subtree.** The whole `--json` document is about 33 KB on one line, because each pinned command's `leaves` also appear under `commands`. Name a command (`forgectl menu --json desk`, `forgectl menu --json pr`) and the `pinned`, `recent` and `commands` lists keep only the rows whose command path starts with that name. `header` and `first_run` stay, so the shape does not change. A name that is no command is a usage error (exit 1) that lists every pinned and grouped command name. Dropping the duplicate `leaves` would remove keys from existing rows, which ADR-0008 forbids; the group argument is the way to read less.
 
 `menu` changes nothing and never runs a row. It needs no TTY and opens no screen. It exits 0.
 

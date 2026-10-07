@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -31,22 +32,33 @@ const menuTextMaxRunes = 200
 func newMenuCmd(deps module.Deps) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
-		Use:   "menu",
+		Use:   "menu [group]",
 		Short: "Print the hub's contents: status, pinned, recent, and every command",
 		Long: `Print what bare forgectl shows, without opening it: the status line, the
 pinned commands, the recent ones, and every other command with its subverbs.
-Nothing is run. --json emits the same content as one document.`,
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+Nothing is run. --json emits the same content as one document.
+
+Name a command group (forgectl menu desk) to print only that group's rows
+and subverbs: the way to read one subtree without the whole hub. A name that
+is not a command lists the valid ones.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
 			sec, header := gatherMenu(cmd.Context(), deps, cmd.Root())
 			doc := menuDocument(cmd.Root(), sec, header)
+			if len(args) == 1 {
+				scoped, err := menuScope(doc, args[0])
+				if err != nil {
+					return err
+				}
+				doc = scoped
+			}
 			if asJSON {
 				return menuEncoder(cmd.OutOrStdout()).Encode(doc)
 			}
 			return writeMenuText(cmd.OutOrStdout(), doc, header)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"header","first_run","pinned","recent","commands"} to stdout (see docs/commands/menu.md)`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"header","first_run","pinned","recent","commands"} to stdout; with a group, each list holds only that group's rows (see docs/commands/menu.md)`)
 	return cmd
 }
 
@@ -137,6 +149,40 @@ func menuDocument(root *cobra.Command, sec hubSections, header tui.HubHeader) me
 		}
 	}
 	return doc
+}
+
+// menuScope narrows doc to one command group: the pinned, recent, and commands
+// rows whose command path starts with group. The header and first_run stay, so
+// the document keeps its shape. An unknown group is an error that lists every
+// command a group can name.
+func menuScope(doc menuJSON, group string) (menuJSON, error) {
+	keep := func(rows []menuRowJSON) []menuRowJSON {
+		out := []menuRowJSON{}
+		for _, r := range rows {
+			if len(r.Argv) > 0 && r.Argv[0] == group {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	scoped := doc
+	scoped.Pinned = keep(doc.Pinned)
+	scoped.Recent = keep(doc.Recent)
+	scoped.Commands = keep(doc.Commands)
+	if len(scoped.Pinned)+len(scoped.Recent)+len(scoped.Commands) == 0 {
+		seen := map[string]bool{}
+		var names []string
+		for _, r := range append(append([]menuRowJSON{}, doc.Pinned...), doc.Commands...) {
+			if !seen[r.Command] {
+				seen[r.Command] = true
+				names = append(names, r.Command)
+			}
+		}
+		slices.Sort(names)
+		return menuJSON{}, fmt.Errorf("unknown menu group %s; valid: %s",
+			termsafe.QuoteArgMax(group, termsafe.ArgEchoMaxRunes), safeText(strings.Join(names, ", ")))
+	}
+	return scoped, nil
 }
 
 // menuHeader applies tui.HubHeader's availability rules: an empty project
