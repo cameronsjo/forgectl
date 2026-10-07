@@ -399,3 +399,27 @@ func TestSafeWriter_OverlongLineWithheld(t *testing.T) {
 		t.Errorf("out = %q, want the marker and the following line", got)
 	}
 }
+
+const pemBlock = "-----BEGIN OPENSSH PRIVATE KEY-----\nPEMBODYLINE1\nPEMBODYLINE2\n-----END OPENSSH PRIVATE KEY-----"
+
+// A multi-line secret must stay withheld on both display paths, even when the
+// tail window starts inside it.
+func TestTail_MultiLineSecretWithheld(t *testing.T) {
+	got := Tail("before\n"+pemBlock+"\nafter", 3)
+	if strings.Contains(got, "PEMBODY") {
+		t.Errorf("Tail = %q, prints a private key body", got)
+	}
+}
+
+func TestSafeWriter_MultiLineSecretWithheld(t *testing.T) {
+	var out bytes.Buffer
+	w := newSafeWriter(&out)
+	_, _ = w.Write([]byte("before\n" + pemBlock + "\nafter\n"))
+	got := out.String()
+	if strings.Contains(got, "PEMBODY") {
+		t.Errorf("stream = %q, prints a private key body", got)
+	}
+	if !strings.Contains(got, "before\n") || !strings.Contains(got, "after\n") {
+		t.Errorf("stream = %q, dropped ordinary lines", got)
+	}
+}

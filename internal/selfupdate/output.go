@@ -18,6 +18,11 @@ const (
 	maxLineBytes = 8 << 10
 	// maxLineRunes caps one rendered line.
 	maxLineRunes = 400
+	// redactContext is how many preceding lines a live line is redacted with.
+	// redact withholds a PEM block or a multi-line secret value from its
+	// opening line on, so a line alone cannot tell it is inside one. 128 lines
+	// covers a 4096-bit RSA key with room.
+	redactContext = 128
 )
 
 // captureBuffer keeps the last captureLimit bytes written to it. Safe for
@@ -52,8 +57,9 @@ type safeWriter struct {
 	mu       sync.Mutex
 	out      io.Writer
 	buf      []byte
-	skipLF   bool // the last terminator was a \r, so a leading \n completes a CRLF
-	dropping bool // inside an over-long line, discarding until its terminator
+	context  []string // the last redactContext raw lines, so multi-line secrets stay withheld
+	skipLF   bool     // the last terminator was a \r, so a leading \n completes a CRLF
+	dropping bool     // inside an over-long line, discarding until its terminator
 }
 
 func newSafeWriter(out io.Writer) *safeWriter { return &safeWriter{out: out} }
@@ -108,13 +114,16 @@ func (s *safeWriter) emit(line string, blankOK bool) {
 	if line == "" && !blankOK {
 		return
 	}
-	_, _ = io.WriteString(s.out, safeText(line)+"\n")
-}
-
-// safeText is the one rendering of an untrusted brew line: redact first, then
-// escape, then cap (a cap that cut first could split a credential shape).
-func safeText(line string) string {
-	return termsafe.SafeLineMax(redact.Text(line), maxLineRunes)
+	s.context = append(s.context, line)
+	if len(s.context) > redactContext {
+		s.context = append(s.context[:0], s.context[len(s.context)-redactContext:]...)
+	}
+	// Redact the window, keep the verdict on its last line only.
+	red := redact.Text(strings.Join(s.context, "\n"))
+	if i := strings.LastIndexByte(red, '\n'); i >= 0 && len(s.context) > 1 {
+		red = red[i+1:]
+	}
+	_, _ = io.WriteString(s.out, termsafe.SafeLineMax(red, maxLineRunes)+"\n")
 }
 
 // Tail returns the last n non-empty lines of brew output, each redacted and
@@ -122,8 +131,11 @@ func safeText(line string) string {
 // untrusted (it relays what the tap's server and git transport send), so this
 // is the only way it reaches a terminal or a JSON field from here.
 func Tail(output string, n int) string {
+	// Redact the whole output before cutting it to a tail: a PEM block or a
+	// multi-line secret is withheld from its opening line, which a 20-line
+	// window may not contain. Redact, then escape, then cap.
 	var lines []string
-	for _, l := range strings.FieldsFunc(output, func(r rune) bool { return r == '\n' || r == '\r' }) {
+	for _, l := range strings.FieldsFunc(redact.Text(output), func(r rune) bool { return r == '\n' || r == '\r' }) {
 		if strings.TrimSpace(l) != "" {
 			lines = append(lines, l)
 		}
@@ -132,7 +144,7 @@ func Tail(output string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	for i, l := range lines {
-		lines[i] = safeText(l)
+		lines[i] = termsafe.SafeLineMax(l, maxLineRunes)
 	}
 	return strings.Join(lines, "\n")
 }
