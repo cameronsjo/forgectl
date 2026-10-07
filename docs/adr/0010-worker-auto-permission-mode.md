@@ -40,7 +40,7 @@ Today an unattended worker can reach far more than its worktree:
 ## Consequences
 
 - The remaining risk is stated plainly: **an `auto` worker runs as the operator's macOS user, minus what the sandbox and deny rules remove, with the classifier as its only per-call check.** Anything the deny-by-default read rule allows and anything the classifier approves is reachable by a worker following instructions planted in an issue body, a fetched branch, a dependency, or a review comment. Running workers as a separate macOS user would remove most of this; it is the next step if the floor proves leaky.
-- A worker cannot merge anything, because its GitHub identity holds no merge path the ruleset accepts.
+- A worker cannot merge anything, because its GitHub identity holds no merge path the ruleset accepts. (Deferred: see the second 2026-10-06 amendment; workers use the operator's identity, which can merge.)
 - The drain's `needs-you` rate falls on machines that opt in and stays as it is elsewhere. The pane shows each worker's mode.
 - T5 (worker profile) grows to carry the floor, and moves ahead of the queue and drain so no unattended `auto` run happens first.
 - Turning `auto` off is one config edit (`allow_auto = false`), effective at the next launch. `drain stop` also revokes every live worker token. Running workers keep their permission mode until closed.
@@ -71,9 +71,9 @@ Known-boundary rule: a review finding that needs a hostile earlier worker, or an
 
 Cameron's decision: skip the worker GitHub App, the Bash sandbox, and the ruleset change. Workers keep running as the operator.
 
-- **Identity.** A worker uses the operator's keychain `gh` login and SSH keys (`SSH_AUTH_SOCK` stays in the environment allowlist). It can push to any branch, merge, and write to any repository the operator can.
-- **No OS sandbox.** A worker's tools run as the operator's macOS user with no Claude Code sandbox.
-- **What bounds a worker.** Its brief, which forbids merging its own PR and touching the default branch, plus what forgectl already enforces: the settings and MCP isolation, `--safe-mode`, the environment allowlist, and the `SendMessage` and `RemoteTrigger` deny rules (`docs/herdr.md`, "What a claude worker loads"). Nothing enforces "a worker cannot merge or push to `main`". The brief asks for it; the operator's identity allows it.
-- **`auto` stays refused.** Decision 3 still holds: `auto` needs the whole floor, and the floor's sandbox and worker-identity items are not built. Workers stay capped at `acceptEdits` (`workerMaxPermissionMode`), so every shell command still prompts the operator.
+- **Identity.** A worker uses the operator's keychain `gh` login and SSH keys (`SSH_AUTH_SOCK` stays in the environment allowlist). It can push to any branch, merge, and write to any repository the operator can, and the SSH agent signs for every host the operator's keys reach, not only GitHub.
+- **No OS sandbox.** A claude worker's tools run as the operator's macOS user with no Claude Code sandbox. A codex worker runs in Codex's own sandbox at its configured `--sandbox` level.
+- **What bounds a worker.** Its brief, which forbids merging its own PR and touching the default branch, plus what forgectl already enforces: the settings and MCP isolation, `--safe-mode`, the environment allowlist, and the `SendMessage` and `RemoteTrigger` deny rules (`docs/herdr.md`, "What a claude worker loads"). The isolation applies to claude workers only; a codex worker gets just the environment allowlist (forgectl#1092). Nothing enforces "a worker cannot merge or push to `main`". The brief asks for it; the operator's identity allows it.
+- **`auto` stays refused.** Decision 3 still holds: `auto` needs the whole floor, and the floor's sandbox and worker-identity items are not built. Workers stay capped at `acceptEdits` (`workerMaxPermissionMode`). Claude Code's built-in read-only commands and, under `acceptEdits`, file commands inside the worktree run without a prompt; commands that act outward, such as `git push`, `gh pr merge` and `ssh`, prompt the operator.
 
 The floor items "Bash sandbox", "Non-Bash tools denied the same paths", "Worker GitHub identity", and "Deny rules as a second layer", and ADR-0011's restrict-updates ruleset, are deferred, not rejected. forgectl#1134 lists where each would change if workers need a sandbox later.

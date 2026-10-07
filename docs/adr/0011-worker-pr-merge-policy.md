@@ -16,7 +16,7 @@ Three facts shape the design, each checked against live GitHub on 2026-10-05:
 
 ## Decision
 
-1. **GitHub enforces the gate.** A forgectl "merge gate" GitHub App posts a check run named `forgectl/merge-gate` on a PR's head commit. Each eligible repo's ruleset requires that check, pinned to the gate App's id. The App's private key lives outside every worker sandbox (in the operator's keychain), and only the drain and `forgectl surface merge` use it. The gate posts `success` only after every predicate in item 4 holds at that head commit; a later push leaves the new head without the check. Workers use a separate "worker" App (ADR-0010) whose tokens cannot satisfy the gate, so no worker can merge by any path.
+1. **GitHub enforces the gate.** A forgectl "merge gate" GitHub App posts a check run named `forgectl/merge-gate` on a PR's head commit. Each eligible repo's ruleset requires that check, pinned to the gate App's id. The App's private key lives outside every worker sandbox (in the operator's keychain), and only the drain and `forgectl surface merge` use it. The gate posts `success` only after every predicate in item 4 holds at that head commit; a later push leaves the new head without the check. Workers use a separate "worker" App (ADR-0010) whose tokens cannot satisfy the gate, so no worker can merge by any path. (Deferred with the worker App: see the 2026-10-06 amendment below.)
 2. **Policy lives in forgectl's per-machine config.** A missing file, a missing `[surface.merge]` table, or any key that fails to parse means `mode = "off"`. Fail closed on every error.
 
    ```toml
