@@ -92,7 +92,7 @@ func chooseRepo(cmd *cobra.Command, repos []projects.Repo, mode projectSelection
 	if err := writeProjectCandidates(cmd.OutOrStdout(), repos); err != nil {
 		return projects.Repo{}, err
 	}
-	return projects.Repo{}, WithExitCode(projectAmbiguityError(mode, len(repos)), 1)
+	return projects.Repo{}, WithExitCode(projectAmbiguityError(mode, len(repos)), exitFailed)
 }
 
 func writeProjectCandidates(out io.Writer, repos []projects.Repo) error {

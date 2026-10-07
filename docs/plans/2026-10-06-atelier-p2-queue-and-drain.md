@@ -140,10 +140,10 @@ No merge, PR status, or close after merge (P4). No intake from GitHub or the boa
 
 ### T8.0: worker command allow list (one PR, first)
 
-- [ ] Add the static `permissions.allow` list from the Autonomy decision to the worker's inline `--settings` (`workerClaudeSettings`, `internal/launch/invocation.go`). Rules: `Bash(go test:*)`, `Bash(go build:*)`, `Bash(make:*)`, `Bash(git add:*)`, `Bash(git commit:*)`, `Bash(git push:*)`, `Bash(gh pr create:*)`, `Bash(gh pr view:*)`.
-- [ ] Update the ADR-0010 amendment and `docs/herdr.md` ("What a claude worker loads") to name the list and the two limits above.
-- [ ] Tests pin the settings JSON. Live check: a worker runs `go test` and `git commit` with no prompt, and `gh pr merge` still prompts.
-- [ ] Security review (Opus) of the diff before merge; this loosens a default.
+- [x] Add the static `permissions.allow` list from the Autonomy decision to the worker's inline `--settings` (`workerClaudeEditSettings`, `internal/launch/invocation.go`), for `acceptEdits` workers only. Rules use the word-boundary form: `Bash(go test *)`, `Bash(go build *)`, `Bash(make *)`, `Bash(git add *)`, `Bash(git commit *)`, `Bash(git push *)`, `Bash(gh pr create *)`, `Bash(gh pr view *)`.
+- [x] Update the ADR-0010 amendment and `docs/herdr.md` ("What a claude worker loads") to name the list and the two limits above.
+- [x] Tests pin the settings JSON. Live check: a worker runs `go test` and `git commit` with no prompt, and `gh pr merge` still prompts.
+- [x] Security review (Opus) of the diff before merge; this loosens a default.
 
 ### T8.1: cobra-free worker operations (one PR)
 
@@ -197,6 +197,12 @@ Panel: plan-reviewer, security-posture-reviewer (Opus), operability-reviewer, ca
 - **"intent → act → confirm" per step** became a launch-stage reconcile table plus a kill-at-each-stage test, because the existing launch already writes its ledger row before each step.
 - **Retry cap is 3 per row, not per step,** and only for failures that created nothing.
 - **Autonomy allow list (T8.0) added at approval,** per the Autonomy decision; it is the only change to worker posture in P2.
+- **T8.0 live check (sjomba, herdr 0.9.3, Claude Code 2.1.289).** A worker in the trusted forgectl repo ran `go test ./...` and `git add note.txt && git commit -m probe` with no prompt; `gh pr merge --help` stopped at "This command requires approval", and `surface wait` returned `blocked: showing the permission prompt`. A first probe in an untrusted scratch repo stopped at the folder-trust dialog, which the coordinator does not answer.
+- **T8.0 security review: the list does not bound a worker.** `go build -toolexec` and `git push --receive-pack`/`--exec` run any command through a pre-approved rule, as do `go test` (`-exec`, test code) and `make`. Docs and the code comment now say so; no flag denylist was added, because it could never be complete. The `--receive-pack` path is from git's manual, not run.
+- **`auto` allowed for workers (2026-10-07, chief-of-staff, forgectl fix PR).** Cameron's work machine reported forgectl refusing `auto`; the worker cap is now `auto` (ADR-0010 amendment). A classifier block does not show a prompt: the worker gets the reason and tries another way. Claude Code falls back to a prompt after 3 blocks in a row or 20 in total, and only then does the drain see `needs-you`. The drain's design is unchanged; `[launch.worker]` stays `acceptEdits` by default.
+- **T8.0: the allow list reaches `acceptEdits` workers only.** The first cut put it in the one settings value every worker gets; the worker-floor test showed `plan`, `default` and `manual` workers receiving it, which would let a plan worker commit and push unprompted. A second constant carries the list, chosen by the leading `--permission-mode` value. Rules use `Bash(<cmd> *)`, which enforces a word boundary, rather than the `:*` form.
 - **P7a (skill enqueue step) ships separately** in `cameronsjo/cadence` after T8.2; until then the coordinator calls `surface enqueue` directly.
 
 ## Learnings
+
+- A launch that fails in setup after `git worktree add` (here, the `$PATH` binary refusal) leaves a `failed` ledger row with a worktree, and the same name is then refused. Seen live during T8.0; it is the case T8.3's retry rule handles by failing at once.

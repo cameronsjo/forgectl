@@ -178,7 +178,7 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	// wins over an injected default. Contents and rationale: injectedLaunchEnv.
 	injected, unset, err := injectedLaunchEnv(cfg)
 	if err != nil {
-		return WithExitCode(termsafe.Error(err), 2)
+		return WithExitCode(termsafe.Error(err), exitUsage)
 	}
 
 	effLaunch, notice, effFrom := autoMigrateOrWarnLegacyLaunch(boundary, cfg)

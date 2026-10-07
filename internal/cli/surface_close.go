@@ -131,7 +131,7 @@ refused. Exit 2: a usage or setup error.
 
 func runSurfaceClose(cmd *cobra.Command, deps module.Deps, opts closeOptions) error {
 	if err := worker.ValidName(opts.Name); err != nil {
-		return WithExitCode(fmt.Errorf("name: %w", err), 2)
+		return WithExitCode(fmt.Errorf("name: %w", err), exitUsage)
 	}
 	w, err := openWorkerLedger(cmd, deps, opts.Repo)
 	if err != nil {
@@ -139,11 +139,11 @@ func runSurfaceClose(cmd *cobra.Command, deps module.Deps, opts closeOptions) er
 	}
 	rows, err := w.led.Rows()
 	if err != nil {
-		return WithExitCode(err, 2)
+		return WithExitCode(err, exitUsage)
 	}
 	row, ok := findRow(rows, opts.Name)
 	if !ok {
-		return WithExitCode(fmt.Errorf("no worker named %q in this repo's ledger", opts.Name), 2)
+		return WithExitCode(fmt.Errorf("no worker named %q in this repo's ledger", opts.Name), exitUsage)
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), closeTimeout)
 	defer cancel()
@@ -382,7 +382,7 @@ func reportClose(cmd *cobra.Command, r closeResult, asJSON bool) error {
 		return nil
 	}
 	if !r.Closed {
-		return WithExitCode(fmt.Errorf("worker %s: close refused, nothing was touched: %s", termsafe.SafeLineMax(r.Name, 64), termsafe.SafeLineMax(r.Reason, 300)), 1)
+		return WithExitCode(fmt.Errorf("worker %s: close refused, nothing was touched: %s", termsafe.SafeLineMax(r.Name, 64), termsafe.SafeLineMax(r.Reason, 300)), exitFailed)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s: workspace %s, worktree %s", termsafe.SafeLineMax(r.Name, 64), r.Workspace, r.Worktree)

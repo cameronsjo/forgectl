@@ -136,15 +136,15 @@ type sessionNamer interface{ Session() string }
 // top as the ledger key, and the worker posture floor on the invocation.
 func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOptions) error {
 	if opts.Backend != "herdr" {
-		return WithExitCode(errors.New("--worktree needs --surface herdr; workers run in herdr only"), 2)
+		return WithExitCode(errors.New("--worktree needs --surface herdr; workers run in herdr only"), exitUsage)
 	}
 	if err := worker.ValidName(opts.DisplayName); err != nil {
-		return WithExitCode(fmt.Errorf("--name: %w", err), 2)
+		return WithExitCode(fmt.Errorf("--name: %w", err), exitUsage)
 	}
 
 	adapter, err := newHerdrAdapter(cmd.ErrOrStderr())
 	if err != nil {
-		return WithExitCode(err, 2)
+		return WithExitCode(err, exitUsage)
 	}
 	namer, ok := adapter.(sessionNamer)
 	if !ok {
@@ -154,11 +154,11 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	ctx := cmd.Context()
 	target, err := projects.New(deps.Runner).ResolveTarget(opts.Target)
 	if err != nil {
-		return WithExitCode(err, 2)
+		return WithExitCode(err, exitUsage)
 	}
 	top, err := worker.RepoTop(ctx, deps.Runner, target)
 	if err != nil {
-		return WithExitCode(err, 2)
+		return WithExitCode(err, exitUsage)
 	}
 	led, err := worker.Open(top, namer.Session())
 	if err != nil {
@@ -171,11 +171,11 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	}
 	injected, unset, err := injectedLaunchEnv(deps.Cfg)
 	if err != nil {
-		return WithExitCode(termsafe.Error(err), 2)
+		return WithExitCode(termsafe.Error(err), exitUsage)
 	}
 	prompt, brief, err := launchBrief(opts.Brief, time.Now)
 	if err != nil {
-		return WithExitCode(err, 2)
+		return WithExitCode(err, exitUsage)
 	}
 	if opts.DryRun {
 		return planWorkerLaunch(cmd, deps, opts, top, led, workerPlanInputs{injected: injected, unset: unset, prompt: prompt, hasBrief: brief != nil, self: self})
@@ -284,7 +284,7 @@ type workerPlanInputs struct {
 func planWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOptions, top string, led *worker.Ledger, in workerPlanInputs) error {
 	taken, err := led.NameTaken(opts.DisplayName)
 	if err != nil {
-		return WithExitCode(err, 2)
+		return WithExitCode(err, exitUsage)
 	}
 	if taken {
 		// The launch refuses it in Begin, with this error and no exit code.

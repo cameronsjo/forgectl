@@ -75,6 +75,10 @@ func jsonFailure(cmd *cobra.Command, err error, asJSON bool, code string) error 
 		return silent
 	}
 	path := ""
+	var jsonCoded *jsonCodedError
+	if chainAs(err, &jsonCoded) {
+		code = jsonCoded.code
+	}
 	var withPath jsonFailurePath
 	if chainAs(err, &withPath) {
 		path = withPath.jsonFailurePath()

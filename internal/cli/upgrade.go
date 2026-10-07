@@ -91,7 +91,7 @@ func runUpgrade(cmd *cobra.Command, deps module.Deps, checkOnly bool) error {
 	}
 
 	if _, err := upgradeLookPath("brew"); err != nil {
-		return WithExitCode(fmt.Errorf("brew not found on PATH — forgectl ships via the Homebrew tap; install Homebrew (https://brew.sh), or reinstall manually: %w", err), 1)
+		return WithExitCode(fmt.Errorf("brew not found on PATH — forgectl ships via the Homebrew tap; install Homebrew (https://brew.sh), or reinstall manually: %w", err), exitFailed)
 	}
 
 	if checkOnly {
@@ -115,7 +115,7 @@ func runUpgradeApply(ctx context.Context, deps module.Deps, out io.Writer) error
 	}
 	if err != nil {
 		slog.Warn("brew upgrade failed.", "error", err)
-		return WithExitCode(termsafe.Categorical(upgradeFailure(ctx, err), err), 1)
+		return WithExitCode(termsafe.Categorical(upgradeFailure(ctx, err), err), exitFailed)
 	}
 	if from, to, ok := selfupdate.UpgradedVersions(upgradeOut); ok {
 		_, _ = fmt.Fprintf(out, "forgectl upgraded %s → %s — restart your shell (or open a new one) to pick up the new binary.\n", from, to)
@@ -155,7 +155,7 @@ func runUpgradeCheck(ctx context.Context, deps module.Deps, out io.Writer) error
 	outdated, detail, err := selfupdate.CheckOutdated(ctx, deps.Runner)
 	if err != nil {
 		slog.Warn("brew outdated failed.", "error", err)
-		return WithExitCode(termsafe.Categorical("check: brew outdated failed; check network access to the Homebrew tap", err), 1)
+		return WithExitCode(termsafe.Categorical("check: brew outdated failed; check network access to the Homebrew tap", err), exitFailed)
 	}
 	if outdated {
 		_, _ = fmt.Fprintf(out, "update available: %s\n", selfupdate.OutdatedDetail(detail))

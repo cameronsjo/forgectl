@@ -124,7 +124,9 @@ func newRoot(deps module.Deps) *cobra.Command {
 		Use:   meta.AppName,
 		Short: meta.Tagline,
 		Long: `Two ways in: type a command — forgectl tmux ls — or run forgectl with no
-arguments for a menu over every command group.`,
+arguments for a menu over every command group.
+
+Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused; see docs/exit-codes.md.`,
 		Version: meta.Version,
 		Args:    safeRootArgs,
 		RunE:    rootRun,
@@ -191,6 +193,10 @@ arguments for a menu over every command group.`,
 	// After the group pass, before the JSON contract wraps Args: a wrong argument
 	// count names the argument and the usage line (forgectl#1087).
 	nameUsageArgs(root)
+
+	// Before the JSON contract, so a usage error carries its exit code into it
+	// (ADR-0015).
+	classifyUsageErrors(root)
 
 	// Last, so it sees every verb: under --json no failure renders fang's
 	// human error frame (forgectl#862, json_errors.go).

@@ -188,7 +188,6 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 		"pi from the repo profile": {Projects: []config.LaunchProject{{Match: target, Harness: "pi"}}},
 		"bypassPermissions":        {Worker: config.LaunchWorker{PermissionMode: "bypassPermissions"}},
 		"danger-full-access":       {Defaults: config.LaunchDefaults{Harness: "codex"}, Worker: config.LaunchWorker{Sandbox: "danger-full-access"}},
-		"claude auto mode":         {Worker: config.LaunchWorker{PermissionMode: "auto"}},
 		"claude dontAsk":           {Worker: config.LaunchWorker{PermissionMode: "dontAsk"}},
 		"codex never asks":         {Defaults: config.LaunchDefaults{Harness: "codex"}, Worker: config.LaunchWorker{ApprovalPolicy: "never"}},
 		"unknown worker mode":      {Worker: config.LaunchWorker{PermissionMode: "acceptEdit"}},
@@ -203,7 +202,7 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 
 	// forgectl#1060: a plan-mode worker's shell must prompt, not go to the
 	// auto-mode classifier, so every claude worker carries the setting.
-	for _, mode := range []string{"plan", "default", "manual", "acceptEdits"} {
+	for _, mode := range []string{"plan", "default", "manual", "acceptEdits", "auto"} {
 		t.Run("claude worker in "+mode+" turns off auto mode during plan", func(t *testing.T) {
 			built, err := BuildInvocation(InvocationRequest{
 				StdoutTerminal: true,
@@ -225,6 +224,13 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 				"--no-chrome",
 				"--safe-mode",
 				"--settings", `{"useAutoModeDuringPlan":false,"permissions":{"deny":["SendMessage","RemoteTrigger"]}}`,
+			}
+			// Only acceptEdits carries the allow list; a plan worker that could
+			// commit and push unprompted would be looser than its mode.
+			if mode == "acceptEdits" {
+				want[len(want)-1] = `{"useAutoModeDuringPlan":false,"permissions":{` +
+					`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"],` +
+					`"deny":["SendMessage","RemoteTrigger"]}}`
 			}
 			if args := built.Invocation.Args; len(args) < len(want) || !slices.Equal(args[:len(want)], want) {
 				t.Errorf("worker argv %q, want it to start %q", args, want)
@@ -369,25 +375,45 @@ func TestBuildInvocation_WorkerSessionID(t *testing.T) {
 	}
 }
 
-// TestWorkerClaudeSettingsJSON pins the worker settings as data: it parses,
-// turns off auto mode during plan, and denies the two cross-session tools.
+// TestWorkerClaudeSettingsJSON pins the worker settings as data: both parse,
+// turn off auto mode during plan, and deny the two cross-session tools; only
+// the acceptEdits settings pre-approve commands, and exactly the agreed list.
 func TestWorkerClaudeSettingsJSON(t *testing.T) {
-	var s struct {
-		UseAutoModeDuringPlan *bool `json:"useAutoModeDuringPlan"`
-		Permissions           struct {
-			Deny []string `json:"deny"`
-		} `json:"permissions"`
+	wantAllow := []string{
+		"Bash(go test *)", "Bash(go build *)", "Bash(make *)",
+		"Bash(git add *)", "Bash(git commit *)", "Bash(git push *)",
+		"Bash(gh pr create *)", "Bash(gh pr view *)",
 	}
-	if err := json.Unmarshal([]byte(workerClaudeSettings), &s); err != nil {
-		t.Fatalf("worker settings do not parse: %v", err)
-	}
-	if s.UseAutoModeDuringPlan == nil || *s.UseAutoModeDuringPlan {
-		t.Error("useAutoModeDuringPlan is not false")
-	}
-	for _, tool := range []string{"SendMessage", "RemoteTrigger"} {
-		if !slices.Contains(s.Permissions.Deny, tool) {
-			t.Errorf("%s is not denied", tool)
-		}
+	for _, tc := range []struct {
+		name, json string
+		allow      []string
+	}{
+		{"workerClaudeSettings", workerClaudeSettings, nil},
+		{"workerClaudeEditSettings", workerClaudeEditSettings, wantAllow},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var s struct {
+				UseAutoModeDuringPlan *bool `json:"useAutoModeDuringPlan"`
+				Permissions           struct {
+					Allow []string `json:"allow"`
+					Deny  []string `json:"deny"`
+				} `json:"permissions"`
+			}
+			if err := json.Unmarshal([]byte(tc.json), &s); err != nil {
+				t.Fatalf("worker settings do not parse: %v", err)
+			}
+			if s.UseAutoModeDuringPlan == nil || *s.UseAutoModeDuringPlan {
+				t.Error("useAutoModeDuringPlan is not false")
+			}
+			for _, tool := range []string{"SendMessage", "RemoteTrigger"} {
+				if !slices.Contains(s.Permissions.Deny, tool) {
+					t.Errorf("%s is not denied", tool)
+				}
+			}
+			if !slices.Equal(s.Permissions.Allow, tc.allow) {
+				t.Errorf("allow list = %q, want exactly %q (widening it needs a security review)", s.Permissions.Allow, tc.allow)
+			}
+		})
 	}
 }
 

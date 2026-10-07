@@ -77,7 +77,7 @@ func choosePRs(cmd *cobra.Command, prs []pr.PR, store *pr.ReviewedStore, th them
 	if err := writePRCandidates(cmd.OutOrStdout(), prs, store); err != nil {
 		return nil, err
 	}
-	return nil, WithExitCode(fmt.Errorf("%d open PRs require a selection, and there is no interactive terminal — pass one printed owner/repo#N to `forgectl pr <ref>`, inspect the inventory with `forgectl pr prs --json`, or rerun `forgectl pr pick` interactively; candidates are on stdout", len(prs)), 1)
+	return nil, WithExitCode(fmt.Errorf("%d open PRs require a selection, and there is no interactive terminal — pass one printed owner/repo#N to `forgectl pr <ref>`, inspect the inventory with `forgectl pr prs --json`, or rerun `forgectl pr pick` interactively; candidates are on stdout", len(prs)), exitFailed)
 }
 
 func writePRCandidates(out io.Writer, prs []pr.PR, store *pr.ReviewedStore) error {
