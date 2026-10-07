@@ -42,9 +42,13 @@ The sections run concurrently, and each has its own deadline, set with `--timeou
 }
 ```
 
-`cut` names only the lists that had more than N rows, so `"truncated": false` and an empty `cut` mean nothing was dropped. The `git` totals (`total`, `clean`, `dirty`, ...) still count every project. `--limit 0` is every row and adds no `bound` key.
+`cut` names only the lists that had more than N rows, so `"truncated": false` and an empty `cut` mean nothing was dropped. The `git` totals (`total`, `clean`, `dirty`, ...) still count every project.
 
-Without `--json`, `--limit N` replaces the text view's caps (10 projects, 5 PRs) with N for each list; `--limit 0` lists every row. `--limit` with `--tui` is refused (exit 1): the cockpit has its own layout. A negative `--limit` is a usage error (exit 1, code `usage_error` under `--json`). `--limit` does not shorten the run, since every section still runs under its `--timeout`.
+**One rule for `--limit 0`:** it means every row, in the same shape as a bounded call. `status --json --limit 0` writes `"bound": {"limit": 0, "truncated": false, "cut": []}` and cuts nothing. A caller that passes `--limit` always gets one shape. Without `--limit` there is no `bound` key.
+
+**What a cut keeps.** When `--limit` is above 0, `git.projects` is sorted attention-first (dirty, ahead or unreadable trees, then clean trees, then plain directories; discovery order within each group) before the cut. The text view lists exactly the first group, so both views keep the same projects. Without `--limit`, the order is unchanged. The three `prs` lists keep their own order.
+
+Without `--json`, `--limit N` replaces the text view's caps (10 projects, 5 PRs) with N for each list; `--limit 0` lists every row. `--fields` exists only on `review` and `projects list`. `--limit` with `--tui` is refused (exit 1): the cockpit has its own layout. A negative `--limit` is a usage error (exit 1, code `usage_error` under `--json`). `--limit` does not shorten the run, since every section still runs under its `--timeout`.
 
 ## `--json` shape
 

@@ -42,7 +42,7 @@ On a terminal, `pick`, `clone`, and `worktree` show `Querying local, GitHub, and
 
 Both verbs list everything by default, and `review --json` was measured at 473 KB (1,070 items). Two flags bound it:
 
-- **`--limit N`** keeps the first N rows (`review` sorts by host, repo, number; `projects list` keeps inventory order). The human table stops at 100 rows by default and says `showing N of M; narrow with ...` on stderr; `--limit 0` shows every row.
+- **`--limit N`** keeps the first N rows (`review` sorts by host, repo, number; `projects list` keeps inventory order). **The human table now stops at 100 rows by default** (a changed default for existing callers; stdout only) and says `showing N of M; narrow with <flags>, or use --limit 0 for every row` on stderr. `--limit 0` shows every row.
 - **`--fields a,b,c`** (with `--json`) keeps only those keys of each row, in the order you give. An unknown name is an error (exit 1) that lists the valid ones. Valid names are the row keys in `--help`.
 
 **`--json` default is unchanged.** With no `--limit`, `--json` is still the bare array of every row, because ADR-0008 lets JSON shapes change only additively and a default cap would silently drop rows from scripts that read the array today. Once `--limit` is given, the output is one object instead:
@@ -54,7 +54,7 @@ Both verbs list everything by default, and `review --json` was measured at 473 K
  "items": [...]}
 ```
 
-Key order is stable and `items` comes last, so a caller that reads only the first bytes of a large document still sees `truncated`. `truncated` is true only when `shown` is less than `total`. `hint` appears only when truncated. `notes` carries the notes the verb also writes to stderr (degradation notes, and for `review` the "reviewed-store path unavailable" note), so a caller that reads only stdout still sees an upstream "results may be truncated at N" (the GitHub search cap): `truncated: false` with that note means the source, not `--limit`, cut the list. `--limit 0` gives the object with every row. `--fields` alone keeps the bare array.
+Key order is stable and `items` comes last, so a caller that reads only the first bytes of a large document still sees `truncated`. `truncated` is true only when `shown` is less than `total`. `hint` appears only when truncated. `notes` carries the notes the verb also writes to stderr (degradation notes, and for `review` the "reviewed-store path unavailable" note), so a caller that reads only stdout still sees an upstream "results may be truncated at N" (the GitHub search cap): `truncated: false` with that note means the source, not `--limit`, cut the list. **`--limit 0` is every row in the same shape as a bounded call**: the object with `truncated: false`. Any `--limit` (zero included) switches `--json` from the bare array to the object, so a caller that passes `--limit` always gets one shape; `status --json --limit 0` follows the same rule with its `bound` key. `--fields` alone keeps the bare array.
 
 **`projects list` has no `--dir` flag.** Its local scan reads the real projects root (`PROJECTS_DIR`, read-only), so a test or a review of this verb must point `PROJECTS_DIR` at a fixture directory.
 

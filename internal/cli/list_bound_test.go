@@ -171,7 +171,7 @@ func TestReviewTable_CapsAtTheDefaultAndSaysSo(t *testing.T) {
 		t.Errorf("table has %d data rows, want %d", got, humanListLimit)
 	}
 	want := fmt.Sprintf("showing %d of %d", humanListLimit, humanListLimit+20)
-	if !strings.Contains(errOut, want) || !strings.Contains(errOut, "--kind, --repo") {
+	if !strings.Contains(errOut, want) || !strings.Contains(errOut, "--kind, --repo") || !strings.Contains(errOut, "--limit 0") {
 		t.Errorf("stderr %q lacks %q and a narrowing hint", errOut, want)
 	}
 
@@ -631,20 +631,83 @@ func TestStatusJSON_LimitCutsPRListsAndEqualToLengthCutsNothing(t *testing.T) {
 	}
 }
 
-func TestStatusJSON_LimitZeroIsEveryRowWithNoBoundKey(t *testing.T) {
+func TestStatusJSON_LimitZeroIsEveryRowInTheBoundedShape(t *testing.T) {
 	out, _, err := runStatus(t, manyStatusSources(9), "--json", "--limit", "0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+	var doc struct {
+		Bound *struct {
+			Limit     int   `json:"limit"`
+			Truncated bool  `json:"truncated"`
+			Cut       []any `json:"cut"`
+		} `json:"bound"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := raw["bound"]; ok {
-		t.Error("--limit 0 must add no bound key")
+	if doc.Bound == nil || doc.Bound.Limit != 0 || doc.Bound.Truncated || doc.Bound.Cut == nil || len(doc.Bound.Cut) != 0 {
+		t.Errorf("--limit 0 bound = %+v; want {limit 0, truncated false, cut []}: a call that passes --limit always gets the bounded shape", doc.Bound)
 	}
 	if n := strings.Count(out, `"/p/p`); n != 9 {
 		t.Errorf("--limit 0 lists %d projects, want all 9", n)
+	}
+}
+
+func TestStatusJSON_LimitKeepsTheProjectsTheTextViewLists(t *testing.T) {
+	// Discovery order: six clean trees, then two dirty ones. The text view
+	// lists the dirty ones; a cut must keep them too.
+	src := okStatusSources()
+	src.Git = func(context.Context) (statusGitJSON, []string, error) {
+		var found []projects.Project
+		for i := 0; i < 6; i++ {
+			found = append(found, projects.Project{Name: fmt.Sprintf("clean%d", i), Dir: "/p", Status: projects.GitStatus{State: projects.StatusOK}})
+		}
+		for i := 0; i < 2; i++ {
+			found = append(found, projects.Project{Name: fmt.Sprintf("dirty%d", i), Dir: "/p", Status: projects.GitStatus{State: projects.StatusOK, Modified: 1}})
+		}
+		return newStatusGit("/p", found), nil, nil
+	}
+	out, _, err := runStatus(t, src, "--json", "--limit", "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Git struct {
+			Data struct {
+				Projects []struct {
+					Name string `json:"name"`
+				} `json:"projects"`
+			} `json:"data"`
+		} `json:"git"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, p := range doc.Git.Data.Projects {
+		names = append(names, p.Name)
+	}
+	if strings.Join(names, ",") != "dirty0,dirty1" {
+		t.Errorf("kept %v; want the two dirty projects, which the text view lists", names)
+	}
+	text, _, err := runStatus(t, src, "--limit", "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "dirty0") || !strings.Contains(text, "dirty1") || strings.Contains(text, "clean0") {
+		t.Errorf("text view disagrees with the JSON cut:\n%s", text)
+	}
+}
+
+func TestLimitFlag_BadValueNamesTheFlagAndTheFix(t *testing.T) {
+	cmd := newReviewCmdForSources([]review.Source{fakeReviewSource{}}, filepath.Join(t.TempDir(), "r.json"), review.GitHubHost, theme.Theme{})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--limit", "abc"})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "--limit") || !strings.Contains(err.Error(), "0 for every row") || strings.Contains(err.Error(), "strconv") {
+		t.Errorf("err = %v; want a message naming --limit and the fix, with no strconv text", err)
 	}
 }
 
@@ -684,12 +747,36 @@ func TestMenuGroup_AcceptsAnAreaName(t *testing.T) {
 
 func TestMenuHelp_PointsAtTheGroupArgumentAndNamesTheAreas(t *testing.T) {
 	cmd := newMenuCmd(module.Deps{})
-	for _, want := range []string{"33 KB", "menu --json desk", "agents", "repos", "other"} {
+	for _, want := range []string{"33 KB", "menu --json desk", "agents", "repos", "shell", "setup"} {
 		if !strings.Contains(cmd.Long, want) {
 			t.Errorf("menu --help lacks %q:\n%s", want, cmd.Long)
 		}
 	}
 	if f := cmd.Flags().Lookup("json"); f == nil || !strings.Contains(f.Usage, "33 KB") {
 		t.Error("the --json flag text must carry the size and the group pointer")
+	}
+}
+
+func TestMenuHelp_EveryAreaItListsIsAccepted(t *testing.T) {
+	isolateJSONContractEnv(t)
+	long := newMenuCmd(module.Deps{}).Long
+	i := strings.Index(long, "area name (")
+	if i < 0 {
+		t.Fatalf("help names no areas:\n%s", long)
+	}
+	list, _, _ := strings.Cut(long[i+len("area name ("):], ")")
+	names := strings.Split(list, ", ")
+	if len(names) < 4 {
+		t.Fatalf("parsed areas %q from the help", names)
+	}
+	for _, name := range names {
+		out, stderr, err := runJSONThroughFang(t, productionJSONRoot(&exec.FakeRunner{}), "menu", "--json", name)
+		if err != nil || stderr != "" {
+			t.Errorf("menu --json %s: err %v stderr %q; the help promised this name", name, err, stderr)
+		}
+		var doc menuJSON
+		if json.Unmarshal([]byte(out), &doc) != nil {
+			t.Errorf("menu --json %s printed no document: %q", name, out)
+		}
 	}
 }

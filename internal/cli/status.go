@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -89,22 +90,48 @@ type statusListCut struct {
 	Shown int    `json:"shown"`
 }
 
+// statusProjectRank orders git.projects for a cut: 0 for a project the text
+// view lists (dirty, ahead, or unreadable), 1 for a clean tree, 2 for a plain
+// directory. It mirrors the skips in renderStatusGit.
+func statusProjectRank(p statusProjectJSON) int {
+	switch p.Status.State {
+	case projects.StatusNotRepo:
+		return 2
+	case projects.StatusOK:
+		if p.Status.Label() == "[clean]" {
+			return 1
+		}
+	}
+	return 0
+}
+
 // applyLimit keeps at most limit rows of each unbounded list in the report
 // (git.projects and the three prs lists) and records what it cut. The rows
-// kept are the first ones in the report's own order; the git section's totals
-// (total, clean, dirty, ...) still count every project.
+// kept are the first ones in the report's own order, except git.projects: it is
+// sorted attention-first (statusProjectRank, stable) so the text and JSON views
+// keep the same projects. The git section's totals (total, clean, dirty, ...)
+// still count every project. limit 0 cuts nothing but still writes "bound".
 func (r *statusReportJSON) applyLimit(limit int) {
 	b := &statusBoundJSON{Limit: limit, Cut: []statusListCut{}}
 	cut := func(list string, total int) bool {
-		if total <= limit {
+		if limit == 0 || total <= limit {
 			return false
 		}
 		b.Truncated = true
 		b.Cut = append(b.Cut, statusListCut{List: list, Total: total, Shown: limit})
 		return true
 	}
-	if g := r.Git.Data; g != nil && cut("git.projects", len(g.Projects)) {
-		g.Projects = g.Projects[:limit]
+	if g := r.Git.Data; g != nil {
+		// Attention rows first, as the text view lists them, so a cut keeps the
+		// projects that need a look and drops the clean ones.
+		if limit > 0 {
+			slices.SortStableFunc(g.Projects, func(a, b statusProjectJSON) int {
+				return statusProjectRank(a) - statusProjectRank(b)
+			})
+		}
+		if cut("git.projects", len(g.Projects)) {
+			g.Projects = g.Projects[:limit]
+		}
 	}
 	if d := r.PRs.Data; d != nil {
 		if cut("prs.active_reviews", len(d.ActiveReviews)) {
@@ -265,7 +292,7 @@ minute; prs, clean and bench refresh when you press r or R.`,
 				return runStatusCockpit(cmd, src, th, rt, timeout)
 			}
 			report := collectStatus(cmd.Context(), src, timeout)
-			if asJSON && limitSet && limit > 0 {
+			if asJSON && limitSet {
 				report.applyLimit(limit)
 			}
 			if asJSON {
@@ -288,7 +315,7 @@ minute; prs, clean and bench refresh when you press r or R.`,
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false,
 		`emit {"git":S,"prs":S,"clean":S,"bench":S} to stdout, each S {"state":"ok|degraded|failed","error":...,"notes":[...],"data":...}; data is null only when state is failed; --limit adds a top-level "bound"`)
-	cmd.Flags().IntVar(&limit, "limit", 0, `keep at most N rows of each list. With --json: git.projects, prs.active_reviews, prs.awaiting_you and prs.your_open are cut, and a top-level "bound":{limit,truncated,cut:[{list,total,shown}],hint} says what was cut. Without --json: replaces the text view's 10-project and 5-PR caps. 0 = every row (JSON: no "bound" key). Not valid with --tui`)
+	cmd.Flags().IntVar(&limit, "limit", 0, `keep at most N rows of each list. With --json: git.projects, prs.active_reviews, prs.awaiting_you and prs.your_open are cut, and a top-level "bound":{limit,truncated,cut:[{list,total,shown}],hint} says what was cut. Without --json: replaces the text view's 10-project and 5-PR caps. 0 = every row, and with --json "bound" is still written (limit 0, truncated false), so a call that passes --limit always gets one shape. git.projects is sorted attention-first when --limit is given. --fields exists only on review and projects list. Not valid with --tui`)
 	cmd.Flags().BoolVar(&strict, "strict", false, "exit 1 when any section is degraded or failed (the report is still written)")
 	cmd.Flags().DurationVar(&timeout, "timeout", statusDefaultTimeout, "deadline for each section; a section that misses it is reported as failed")
 	cmd.Flags().BoolVar(&asTUI, "tui", false, "open the cockpit: the sections on one screen, refreshing in place (needs a terminal)")

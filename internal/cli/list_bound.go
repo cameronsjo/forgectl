@@ -3,8 +3,10 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -35,11 +37,34 @@ type listBound struct {
 	set    bool // --limit was given on the command line
 }
 
+// limitFlag is the --limit value. It is an int to pflag (the help shows
+// "--limit int"), but a bad value reads as a message naming the fix rather than
+// strconv's text.
+type limitFlag struct{ p *int }
+
+func (l limitFlag) String() string {
+	if l.p == nil {
+		return "0"
+	}
+	return strconv.Itoa(*l.p)
+}
+
+func (l limitFlag) Set(v string) error {
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return errors.New("want a whole number of rows, or 0 for every row")
+	}
+	*l.p = n
+	return nil
+}
+
+func (limitFlag) Type() string { return "int" }
+
 // addFlags registers --limit and --fields on cmd. jsonKeys names the fields
 // --fields accepts, in wire order.
 func (b *listBound) addFlags(cmd *cobra.Command, jsonKeys []string) {
-	cmd.Flags().IntVar(&b.limit, "limit", 0, fmt.Sprintf(
-		"show at most N rows (0 = all). The table defaults to %d; --json defaults to every row and, once --limit is given, emits {truncated,total,shown,limit,hint,notes,items} instead of a bare array",
+	cmd.Flags().Var(limitFlag{p: &b.limit}, "limit", fmt.Sprintf(
+		"show at most N rows; 0 = every row. The table defaults to %d. --json defaults to a bare array of every row; any --limit (0 included) emits {truncated,total,shown,limit,hint,notes,items} instead",
 		humanListLimit))
 	cmd.Flags().StringVar(&b.fields, "fields", "", "with --json: comma-separated row fields to keep ("+strings.Join(jsonKeys, ", ")+")")
 }
@@ -119,7 +144,7 @@ func window(total, limit int) listWindow {
 // narrowHint is the one-line hint printed when rows were dropped. narrow names
 // the filters this verb has ("--kind, --repo").
 func (w listWindow) narrowHint(narrow string) string {
-	return fmt.Sprintf("showing %d of %d; narrow with %s, or raise --limit (0 = all)", w.Shown, w.Total, narrow)
+	return fmt.Sprintf("showing %d of %d; narrow with %s, or use --limit 0 for every row", w.Shown, w.Total, narrow)
 }
 
 // boundedJSON is the document `--limit` turns a list verb's bare JSON array

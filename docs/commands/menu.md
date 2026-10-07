@@ -25,7 +25,7 @@ The line under the list shows the exact `$ forgectl …` the selected row runs. 
 **One subtree.** The default `--json` document is about 33 KB on one line, because each pinned command's `leaves` also appear under `commands`. That does not change: dropping the duplicate `leaves` would remove keys from existing rows, which ADR-0008 forbids. To read less, name a group:
 
 - **A command** (`forgectl menu --json desk`, `forgectl menu --json pr`): the `pinned`, `recent` and `commands` rows whose command path starts with that name.
-- **An area** (`forgectl menu --json repos`): the `commands` rows whose `group` key is that area. The areas are `agents`, `repos`, `shell`, `setup` and `other`. An area has no pinned or recent rows.
+- **An area** (`forgectl menu --json repos`): the `commands` rows whose `group` key is that area. The areas are `agents`, `repos`, `shell`, `setup`, and `other` while some command is not placed in one of the first four. Every area name `forgectl menu --help` lists is accepted, even on a build where one has no command registered (it prints an empty document). An area has no pinned or recent rows.
 
 `header` and `first_run` stay, so the shape does not change. A name that is neither is a usage error (exit 1, code `usage_error` under `--json`) that lists every command name and every area name. `forgectl menu --help` carries the same pointer.
 
