@@ -452,6 +452,7 @@ func runDeskStatus(cmd *cobra.Command, deps module.Deps, dirFlag, name string, a
 	now := deskNow().UTC()
 	out := cmd.OutOrStdout()
 	if name != "" {
+		name = resolveName(name, func(n string) bool { return snapshotHasItem(snap, n) })
 		return printDeskDetail(out, d, snap, name, now, asJSON)
 	}
 	if asJSON {
@@ -560,7 +561,7 @@ func findItem(snap *desk.Snapshot, name string) (desk.Item, bool) {
 func printDeskDetail(out io.Writer, d *desk.Desk, snap *desk.Snapshot, name string, now time.Time, asJSON bool) error {
 	it, ok := findItem(snap, name)
 	if !ok {
-		return fmt.Errorf("desk status: no item named %s", name)
+		return deskNotFound("desk status", "item", name, "waiting", waitingNames(d))
 	}
 	res := deskDetailJSON{Item: itemView(it, now), Log: d.LogPath(name), Events: d.EventsPath(name)}
 	if it.State != desk.StateWaiting && it.State != desk.StateRefused {
@@ -688,6 +689,7 @@ func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, de
 		return err
 	}
 	defer d.Close() //nolint:errcheck // read side
+	name = resolveDeskName(d, name)
 	// A write to a closed stdout must come back as EPIPE, not kill the
 	// process with SIGPIPE before it can say where to resume.
 	signal.Ignore(syscall.SIGPIPE)
@@ -732,7 +734,7 @@ func runDeskWatch(cmd *cobra.Command, deps module.Deps, dirFlag, name string, de
 		w.printf("resume=%s\n", watchResume(name, seen, deadline, dirFlag))
 		return WithExitCode(fmt.Errorf("desk watch: interrupted while watching %s", name), deskExitInterrupted)
 	case errors.Is(err, desk.ErrNotFound):
-		return fmt.Errorf("desk watch: no item named %s", name)
+		return deskNotFound("desk watch", "item", name, "waiting", waitingNames(d))
 	case err != nil:
 		return err
 	}
@@ -815,10 +817,11 @@ func runDeskSkip(cmd *cobra.Command, deps module.Deps, dirFlag, name, reason str
 		return err
 	}
 	defer d.Close() //nolint:errcheck // Skip syncs its own writes
+	name = resolveDeskName(d, name)
 	recorded, err := d.SkipNoted(name, reason)
 	switch {
 	case errors.Is(err, desk.ErrNotFound):
-		return fmt.Errorf("desk skip: no waiting item or lost run named %s", name)
+		return deskNotFound("desk skip", "waiting item or lost run", name, "waiting", waitingNames(d))
 	case errors.Is(err, desk.ErrClaimed):
 		return fmt.Errorf("desk skip: %s was claimed by a desk first", name)
 	case err != nil:

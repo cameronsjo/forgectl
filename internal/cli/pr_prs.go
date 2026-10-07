@@ -60,7 +60,7 @@ reviewed are dimmed; new activity on the PR auto-un-dims them.
 			return renderPRTable(out, cmd.ErrOrStderr(), prs, store, th.Styles().Muted)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"ref","repo","number","title","state","author","isDraft","updatedAt","url","reviewed"}] to stdout (an empty list is [])`)
 	return cmd
 }
 

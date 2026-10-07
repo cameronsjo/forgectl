@@ -109,7 +109,7 @@ Exit 2: a usage or setup error.
 	cmd.Flags().StringVar(&opts.Repo, "repo", ".", "repository the worker was launched from (project name or path)")
 	cmd.Flags().DurationVar(&opts.Readback, "readback-timeout", defaultBriefReadback, "how long to wait for the typed text to show")
 	cmd.Flags().DurationVar(&opts.Start, "start-timeout", defaultBriefStart, "how long to wait for the turn to start after Enter")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, "print the result as JSON")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"name","harness","outcome","step","marker","count","blocking","reason"} as JSON`)
 	return cmd
 }
 

@@ -5,6 +5,8 @@
 ```sh
 forgectl menu            # the hub as plain text: status line, sections, every command and subverb
 forgectl menu --json     # the same content as one JSON document
+forgectl menu --json desk  # only the `desk` rows and subverbs (one subtree, a fraction of the bytes)
+forgectl menu --json repos # one area: every command in it
 ```
 
 Bare `forgectl` opens the hub on a TTY. `forgectl menu` prints what that hub holds, so an agent or a script can read it without a terminal ([ADR-0008](../adr/0008-agent-contract.md)). It reads the same sources the hub reads and it lays out the same rows:
@@ -19,6 +21,13 @@ On a TTY the hub shows the pinned rows, the recent rows, and one row per area, s
 - **`enter`** opens the selected row. **`q`** or **`esc`** goes back one screen, and quits from the top.
 
 The line under the list shows the exact `$ forgectl …` the selected row runs. When a description is too long for its row, the row cuts it at a word with `…` and the full text appears under that line when the terminal has rows to spare (20 or more). On a terminal too short for every row, the recent rows go first, then the section dividers, so at 16 rows or more (17 on a first run, when the `init` row shows) the pinned rows and the areas stay on screen. Shorter terminals page (the page number shows under the list), and `1`–`9` still reach every keyed row. The footer's enter hint says what enter does to the selected row: `enter open` opens its subcommands, an area, or the argument picker; `enter run` runs it (a row whose placeholders are all optional runs without them); `enter print command` leaves the hub and prints the command with its placeholders when a required argument is one the picker cannot take. Below 20×8 the hub says the terminal is too small instead of drawing, and takes no key but `q` or `esc`, which quit.
+
+**One subtree.** The default `--json` document is about 33 KB on one line, because each pinned command's `leaves` also appear under `commands`. That does not change: dropping the duplicate `leaves` would remove keys from existing rows, which ADR-0008 forbids. To read less, name a group:
+
+- **A command** (`forgectl menu --json desk`, `forgectl menu --json pr`): the `pinned`, `recent` and `commands` rows whose command path starts with that name.
+- **An area** (`forgectl menu --json repos`): the `commands` rows whose `group` key is that area. The areas are `agents`, `repos`, `shell`, `setup`, and `other` while some command is not placed in one of the first four. Every area name `forgectl menu --help` lists is accepted, even on a build where one has no command registered (it prints an empty document). An area has no pinned or recent rows.
+
+`header` and `first_run` stay, so the shape does not change. A name that is neither is a usage error (exit 1, code `usage_error` under `--json`) that lists every command name and every area name. `forgectl menu --help` carries the same pointer.
 
 `menu` changes nothing and never runs a row. It needs no TTY and opens no screen. It exits 0.
 

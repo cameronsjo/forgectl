@@ -124,7 +124,7 @@ exits 2.`,
 			return printDocsSearch(cmd, resp, asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"backend","query","results","truncated","skipped","errors","skipped_paths"} to stdout; a result is {"root","path","title","line","snippet"}`)
 	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Second, "deadline for indexing plus search, e.g. 10s or 1m")
 	cmd.Flags().IntVar(&limit, "limit", 50, "return at most N results")
 	cmd.Flags().StringVar(&backend, "backend", "", `search backend, "ripgrep" or "qmd" (default: [docs] search_backend, else ripgrep)`)

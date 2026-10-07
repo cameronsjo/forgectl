@@ -16,7 +16,7 @@ Three facts shape the design, each checked against live GitHub on 2026-10-05:
 
 ## Decision
 
-1. **GitHub enforces the gate.** A forgectl "merge gate" GitHub App posts a check run named `forgectl/merge-gate` on a PR's head commit. Each eligible repo's ruleset requires that check, pinned to the gate App's id. The App's private key lives outside every worker sandbox (in the operator's keychain), and only the drain and `forgectl surface merge` use it. The gate posts `success` only after every predicate in item 4 holds at that head commit; a later push leaves the new head without the check. Workers use a separate "worker" App (ADR-0010) whose tokens cannot satisfy the gate, so no worker can merge by any path.
+1. **GitHub enforces the gate.** A forgectl "merge gate" GitHub App posts a check run named `forgectl/merge-gate` on a PR's head commit. Each eligible repo's ruleset requires that check, pinned to the gate App's id. The App's private key lives outside every worker sandbox (in the operator's keychain), and only the drain and `forgectl surface merge` use it. The gate posts `success` only after every predicate in item 4 holds at that head commit; a later push leaves the new head without the check. Workers use a separate "worker" App (ADR-0010) whose tokens cannot satisfy the gate, so no worker can merge by any path. (Deferred with the worker App: see the 2026-10-06 amendment below.)
 2. **Policy lives in forgectl's per-machine config.** A missing file, a missing `[surface.merge]` table, or any key that fails to parse means `mode = "off"`. Fail closed on every error.
 
    ```toml
@@ -65,3 +65,7 @@ Three facts shape the design, each checked against live GitHub on 2026-10-05:
 - **A refused-paths denylist.** The set of files that change what runs keeps growing (CI scripts, lint config, release config, `go.mod` `replace` lines, instruction files). Replaced by a per-repo allowlist.
 - **GitHub's native auto-merge with branch protection alone.** It cannot express the path allowlist or approver identity rules. The gate check carries those, and GitHub's required-check rule enforces it.
 - **A policy file in each repo.** A worker can edit its own repo. Declined: the policy lives outside every worktree.
+
+## Amendment 2026-10-06: the worker App is deferred
+
+ADR-0010's amendment of the same date keeps workers on the operator's GitHub identity, and defers the worker App and the restrict-updates ruleset (forgectl#1134). This policy's guarantee that a worker cannot approve or merge its own PR rests on both. Until they exist, a worker can merge with the operator's identity, and only its brief asks it not to. Auto-merge (`mode = "auto"`) does not ship until forgectl#1134 lands or this ADR is revisited.

@@ -12,6 +12,8 @@ generic failure 1.
 - The `pr` review and clean-room prompts have a **Cancel** button of their own.
   It records a typed `declined` outcome instead of exiting 130; Esc and Ctrl+C
   on those prompts exit 130 like any other.
+  The button stays a typed `declined` outcome: `pr repair` has its own typed
+  exit codes, and a 130 would hide which step the operator declined.
 - A verb with several confirms (`clean --apply` runs one per pass) exits 130 when
   *any* of them was declined, even if another was accepted and ran.
 - Closing the bare menu (`forgectl` with no verb) with Esc exits 0.

@@ -131,7 +131,7 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"schema_version","roots","findings","summary","skipped"} to stdout; a finding is {"kind","severity","root","path","target","line","stale_after"}`)
 	cmd.Flags().DurationVar(&timeout, "timeout", 15*time.Second, "walk deadline, e.g. 15s or 2m")
 	cmd.SetFlagErrorFunc(docsFlagError("docs check"))
 	return cmd

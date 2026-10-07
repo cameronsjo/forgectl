@@ -182,7 +182,7 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	launched, err := runWorkerSteps(ctx, led, opts.DisplayName, opts.Worktree, workerSteps{
 		addWorktree: func(ctx context.Context) (worker.Worktree, error) {
 			return worker.AddWorktree(ctx, deps.Runner, top, opts.DisplayName, opts.Worktree, func() (string, error) {
-				return workerBase(ctx, deps.Runner, top)
+				return workerBase(ctx, deps.Runner, top, cmd.ErrOrStderr())
 			})
 		},
 		build: func(cwd string) (launch.BuiltInvocation, error) {
