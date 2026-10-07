@@ -1,6 +1,6 @@
 # 0010. Worker `auto` permission mode: per-machine opt-in behind a hardening floor
 
-**Status: Accepted**
+**Status: Accepted** (Decisions 1 to 3 superseded by the second 2026-10-07 amendment: `auto` is allowed for workers without the floor.)
 
 Date: 2026-10-05
 
@@ -74,7 +74,7 @@ Cameron's decision: skip the worker GitHub App, the Bash sandbox, and the rulese
 - **Identity.** A worker uses the operator's keychain `gh` login and SSH keys (`SSH_AUTH_SOCK` stays in the environment allowlist). It can push to any branch, merge, and write to any repository the operator can, and the SSH agent signs for every host the operator's keys reach, not only GitHub.
 - **No OS sandbox.** A claude worker's tools run as the operator's macOS user with no Claude Code sandbox. A codex worker runs in Codex's own sandbox at its configured `--sandbox` level.
 - **What bounds a worker.** Its brief, which forbids merging its own PR and touching the default branch, plus what forgectl already enforces: the settings and MCP isolation, `--safe-mode`, the environment allowlist, and the `SendMessage` and `RemoteTrigger` deny rules (`docs/herdr.md`, "What a claude worker loads"). The isolation applies to claude workers only; a codex worker gets just the environment allowlist (forgectl#1092). Nothing enforces "a worker cannot merge or push to `main`". The brief asks for it; the operator's identity allows it.
-- **`auto` stays refused.** Decision 3 still holds: `auto` needs the whole floor, and the floor's sandbox and worker-identity items are not built. Workers stay capped at `acceptEdits` (`workerMaxPermissionMode`). Claude Code's built-in read-only commands and, under `acceptEdits`, file commands inside the worktree run without a prompt; commands that act outward, such as `gh pr merge` and `ssh`, prompt the operator (`git push` is pre-approved for `acceptEdits` workers since the 2026-10-07 amendment).
+- **`auto` stays refused.** (Superseded by the second 2026-10-07 amendment: `auto` is allowed.) Decision 3 still holds: `auto` needs the whole floor, and the floor's sandbox and worker-identity items are not built. Workers stay capped at `acceptEdits` (`workerMaxPermissionMode`). Claude Code's built-in read-only commands and, under `acceptEdits`, file commands inside the worktree run without a prompt; commands that act outward, such as `gh pr merge` and `ssh`, prompt the operator (`git push` is pre-approved for `acceptEdits` workers since the 2026-10-07 amendment).
 
 The floor items "Bash sandbox", "Non-Bash tools denied the same paths", "Worker GitHub identity", and "Deny rules as a second layer", and ADR-0011's restrict-updates ruleset, are deferred, not rejected. forgectl#1134 lists where each would change if workers need a sandbox later.
 
@@ -85,4 +85,14 @@ Approved with the atelier P2 plan (forgectl#1137): more autonomy by an allow lis
 - `git push *` cannot be limited to the worker's branch; only a repository ruleset refuses a push to `main`. forgectl's and cadence's `estate-main` rulesets do. A repository without one does not.
 - Four listed commands can run any other command with no prompt, so the list does not bound what a worker can do: `go test` and `make` run repository code the worker can write itself, `go test -exec` and `go build -toolexec` run a named program, and `git push --receive-pack` (or `--exec`) runs a command through `sh -c`. A worker can therefore merge or push with the operator's identity without a prompt; the prompts catch an accident, not a determined worker.
 
-Widening the list needs its own security review. `auto` stays refused.
+Widening the list needs its own security review. `auto` stays refused (superseded by the next amendment).
+
+## Amendment 2026-10-07: `auto` is allowed for workers
+
+Decision (chief-of-staff, 2026-10-07, after Cameron's work machine reported forgectl refusing `auto`): a worker may run in `auto`. The worker cap rises from `acceptEdits` to `auto`; `dontAsk` and `bypassPermissions` rank above it and stay refused. This supersedes Decisions 1 to 3 and the 2026-10-06 line "`auto` stays refused":
+
+- **Opt-in per machine.** `[launch.worker]` defaults to `acceptEdits`. A machine opts in with `[launch.worker] permission_mode = "auto"`. There is no separate `allow_auto` key and no refusal for chezmoi-managed config or Full Disk Access (Decisions 1 and 2 are not built).
+- **No floor first.** The sandbox, the worker App, and the deny-rule second layer stay deferred (forgectl#1134). An `auto` worker runs as the operator, unsandboxed, with Claude Code's classifier as the only per-call check on what the mode does not approve on its own (reads and in-worktree edits are approved without it). The Context section's list of what a worker can reach applies in full; the classifier, not the operator, now approves each item.
+- **What still applies:** the settings and MCP isolation, `--safe-mode`, the environment allowlist, the `SendMessage` and `RemoteTrigger` deny rules, and `useAutoModeDuringPlan = false`. An `auto` worker gets no allow list: allow rules would skip the classifier.
+- **Measured** with `claude -p` on Claude Code 2.1.289 and the exact worker argv: the session started in `auto` (`permissionMode=auto` in its init event), and a Bash command ran through the classifier. So the isolation flags do not hide `auto`. The availability of `auto` itself depends on the account and model.
+- **Why not `acceptEdits` plus the allow list only:** under `acceptEdits` every command off the list waits for the operator, and the list does not bound a worker anyway. The classifier checks the calls the list would wave through. It can allow `ssh` and `git push` to the default branch; by default it blocks merging a PR no human approved.

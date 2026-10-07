@@ -151,12 +151,14 @@ var (
 )
 
 // Worker posture caps. A worker may take each cap or anything stricter (the
-// rank tables in posture.go): a claude worker whose shell commands still
-// prompt, and a codex worker that can write only its workspace and asks
-// before anything else. A value the tables do not rank is refused, so a mode
-// Claude Code or Codex adds later is refused until someone ranks it.
+// rank tables in posture.go): a claude worker in auto mode, whose tool calls
+// go to Claude Code's classifier (ADR-0010, 2026-10-07 amendment), and a codex
+// worker that can write only its workspace and asks before anything else.
+// dontAsk and bypassPermissions rank above auto and stay refused. A value the
+// tables do not rank is refused, so a mode Claude Code or Codex adds later is
+// refused until someone ranks it.
 const (
-	workerMaxPermissionMode = "acceptEdits"
+	workerMaxPermissionMode = "auto"
 	workerMaxSandbox        = "workspace-write"
 	workerMaxApproval       = "on-request"
 )

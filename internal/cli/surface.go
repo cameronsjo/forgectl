@@ -106,7 +106,7 @@ $XDG_STATE_HOME/forgectl/surface. A branch that does not exist yet starts at
 the head of the repository's GitHub default branch, read from the GitHub API,
 rather than at the checkout's HEAD; a repository whose origin is not on
 github.com starts it at HEAD. Workers take their posture from [launch.worker] (see
-docs/commands/launch.md), at most claude acceptEdits, or codex
+docs/commands/launch.md), at most claude auto, or codex
 workspace-write with on-request approvals; pi and anything looser are
 refused, and workers never get --allow-dangerously-skip-permissions.
 
