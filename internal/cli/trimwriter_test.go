@@ -22,8 +22,9 @@ import (
 // Stripping the padding takes root help from 5,809 to 5,575 bytes. It does not
 // reach the 4 KB the checklist suggests (forgectl#1086): the rest is the column
 // fang aligns to the widest command usage. The bound pins today's size so the
-// page does not grow back.
-const rootHelpMaxBytes = 5700
+// page does not grow back. The ceiling moved from 5,700 to 5,800 for the --skill
+// flag row, the one root flag an agent needs to find (hidden --install rides on it).
+const rootHelpMaxBytes = 5800
 
 func TestTrailingTrimWriter(t *testing.T) {
 	tests := []struct {

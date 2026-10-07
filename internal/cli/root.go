@@ -129,7 +129,7 @@ arguments for a menu over every command group.
 Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused; see docs/exit-codes.md.`,
 		Version: meta.Version,
 		Args:    safeRootArgs,
-		RunE:    showRootHelp,
+		RunE:    rootRun,
 		// fang renders styled errors/usage; we own when usage appears so an op
 		// failure doesn't dump a wall of help. Bare-invoke → TUI is handled in
 		// Execute, before Cobra runs.
@@ -140,6 +140,7 @@ Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused; see docs/exit-co
 	root.SuggestionsMinimumDistance = 2
 	// Honored by the TUI and the tree verb; swaps Nerd Font glyphs for ASCII.
 	root.PersistentFlags().Bool("no-icons", false, "use ASCII markers instead of Nerd Font glyphs")
+	addSkillFlags(root)
 
 	root.AddGroup(
 		&cobra.Group{ID: everydayGroupID, Title: "Everyday:"},
