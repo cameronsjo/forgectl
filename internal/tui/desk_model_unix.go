@@ -673,9 +673,9 @@ func notRunnable(r queueRow) string {
 	label := itemLabel(r.item.Name)
 	switch r.kind {
 	case rowLost:
-		return label + " was lost mid-run and may have partly run · " + lostNext
+		return label + " was lost mid-run · " + lostNext
 	case rowChanged:
-		return label + " changed after it was queued and did not run · " + changedNext
+		return label + " changed and did not run · " + changedNext
 	}
 	return label + " is " + rowLabel(r.kind) + "; only a waiting item runs"
 }
@@ -928,7 +928,7 @@ func (m deskModel) undo() (tea.Model, tea.Cmd) {
 		text := "nothing to undo"
 		if r, ok := m.selected(); ok && r.kind == rowChanged {
 			// The desk skipped it, not the operator, and it cannot be re-armed.
-			text = "nothing to undo: " + itemLabel(r.item.Name) + " changed after it was queued and cannot run · " + changedNext
+			text = itemLabel(r.item.Name) + " changed; nothing to undo · " + changedNext
 		}
 		m.message = m.styles().Muted.Render(safeMessage(text))
 		return m, nil
@@ -964,11 +964,17 @@ func (m deskModel) view() tea.Cmd {
 	}
 }
 
-// log opens the selected item's log, or the latest run's when the selected
-// item has not run.
+// log opens the selected item's log, or the latest run's when nothing is
+// selected. A selected item that has not run says so.
 func (m deskModel) log() tea.Cmd {
 	name := ""
-	if r, ok := m.selected(); ok && r.kind != rowWaiting && r.kind != rowRefused && r.kind != rowChanged {
+	if r, ok := m.selected(); ok {
+		if r.kind == rowWaiting || r.kind == rowRefused || r.kind == rowChanged {
+			// No run, so no log: say so rather than open another item's log as
+			// this one's (#1106).
+			msg := itemLabel(r.item.Name) + " has not run, so it has no log"
+			return func() tea.Msg { return deskPagerMsg{err: errors.New(msg)} }
+		}
 		name = r.item.Name
 	}
 	if name == "" && m.snap != nil && len(m.snap.Done) > 0 {

@@ -1415,7 +1415,7 @@ func TestDesk_LostRunKeysSayWhatToDo(t *testing.T) {
 	h.scan()
 	makeLost(t, h, "01-long")
 	h.press("y")
-	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "01 long was lost mid-run and may have partly run · s clears it") {
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "01 long was lost mid-run · s clears it · l shows its output") || ansi.StringWidth(footer) > 80 {
 		t.Errorf("y on a lost run: %q", footer)
 	}
 	h.press("s")
@@ -1437,11 +1437,30 @@ func TestDesk_ChangedItemKeysSayWhatToDo(t *testing.T) {
 	h.scan()
 	h.selectItem("02-s2")
 	h.press("y")
-	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "02 s2 changed after it was queued and did not run · ask Claude to queue it again") {
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "02 s2 changed and did not run · ask Claude to queue it again") || ansi.StringWidth(footer) > 80 {
 		t.Errorf("y on a changed item: %q", footer)
 	}
 	h.press("u")
-	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "cannot run · ask Claude to queue it again") {
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "02 s2 changed; nothing to undo · ask Claude to queue it again") || ansi.StringWidth(footer) > 80 {
 		t.Errorf("u on a changed item: %q", footer)
+	}
+}
+
+// l on an item that has not run says so; it never opens another item's log
+// as this one's (#1106).
+func TestDesk_LOnAnItemWithNoRunSaysSo(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-a.sh", plainScript("a"))
+	h.scan()
+	h.press("y") // 01-a runs (the fake launch leaves it in running/)
+	h.drop("02-b.sh", plainScript("b"))
+	h.scan()
+	h.selectItem("02-b")
+	h.press("l")
+	if h.m.pager != nil {
+		t.Fatalf("l opened %q for an item with no run", h.m.pager.title)
+	}
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "02 b has not run, so it has no log") {
+		t.Errorf("footer = %q", footer)
 	}
 }
