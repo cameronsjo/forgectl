@@ -474,29 +474,116 @@ func TestGoldenDeskFocusWrap(t *testing.T) {
 	}
 }
 
-// A WHAT too long for four wrapped lines ends in an ellipsis rather than
-// growing the panel without bound.
-func TestDeskFrame_FocusFieldsStopAtFourLines(t *testing.T) {
+const (
+	longWhat = "Rebuild the mirror index for every release channel, prune releases older than the retention window, and re-sign the manifest with the rotated key so downstream clients accept it again."
+	longWhy  = "The nightly mirror job has been failing since the key rotation, and clients now reject the stale manifest; this restores the mirror before the morning sync window opens and the retention prune keeps the disk from filling again."
+)
+
+// focusText is the plain text of the focus panel's body, panel borders
+// stripped, one string per line.
+func focusText(out string) []string {
+	var lines []string
+	in := false
+	for _, l := range strings.Split(ansi.Strip(out), "\n") {
+		switch {
+		case strings.HasPrefix(l, "╭ focus"):
+			in = true
+		case in && strings.HasPrefix(l, "╰"):
+			return lines
+		case in:
+			lines = append(lines, strings.TrimSpace(strings.Trim(l, "│ ")))
+		}
+	}
+	return lines
+}
+
+// squash joins wrapped lines back into the words they hold.
+func squash(lines []string) string {
+	return strings.Join(strings.Fields(strings.Join(lines, " ")), " ")
+}
+
+// A long what and why wrap in full, however long, continuation lines sit
+// under the text, and the script preview gives up its rows for them.
+func TestDeskFrame_LongFieldsWrapInFull(t *testing.T) {
 	snap, opts := longHeaderSnapshot()
 	it := &snap.Pending[0]
-	it.What = strings.Repeat("rebuild the mirror index and prune every old release ", 8)
-	it.Content = []byte("#!/bin/bash\n# WHAT: " + it.What + "\necho hi\n")
-	it.Headers = desk.ParseHeaders(it.Content)
-	out := ansi.Strip(RenderDeskFrame(snap, 80, 40, deskNow, opts))
-	whatLines := 0
-	for _, l := range strings.Split(out, "\n") {
-		if strings.HasPrefix(l, "│ what ") || (whatLines > 0 && strings.HasPrefix(l, "│       ") && !strings.Contains(l, "┆")) {
-			whatLines++
-		}
-		if strings.HasPrefix(l, "│ why ") {
-			break
+	what := strings.TrimSpace(strings.Repeat(longWhat+" ", 2))
+	it.Headers = desk.Headers{What: what, Why: longWhy}
+	it.Content = []byte("#!/bin/bash\n" + strings.Repeat("echo hi\n", 12))
+	raw := RenderDeskFrame(snap, 100, 30, deskNow, opts)
+	out := ansi.Strip(raw)
+	body := squash(focusText(raw))
+	for _, want := range []string{what, longWhy} {
+		if !strings.Contains(body, want) {
+			t.Errorf("a field was cut:\n%s", out)
 		}
 	}
-	if whatLines != 4 {
-		t.Errorf("what wrapped to %d lines, want exactly 4:\n%s", whatLines, out)
+	if strings.Contains(strings.SplitN(out, "why ", 2)[0], "…") {
+		t.Errorf("what ends in an ellipsis though the panel has room:\n%s", out)
 	}
-	if !strings.Contains(out, "…") {
-		t.Errorf("a what cut at four lines must end in an ellipsis:\n%s", out)
+	short, _ := longHeaderSnapshot()
+	short.Pending[0].Headers = desk.Headers{What: "Rebuild", Why: "Restore"}
+	short.Pending[0].Content = it.Content
+	before := strings.Count(ansi.Strip(RenderDeskFrame(short, 100, 30, deskNow, opts)), "┆ echo hi")
+	if after := strings.Count(out, "┆ echo hi"); after >= before {
+		t.Errorf("the preview kept %d rows, %d with short fields:\n%s", after, before, out)
+	}
+}
+
+// With fewer than deskScriptMin rows left, the preview is one line.
+func TestDeskFrame_PreviewCollapsesToOneLine(t *testing.T) {
+	snap, opts := longHeaderSnapshot()
+	it := &snap.Pending[0]
+	it.Headers = desk.Headers{What: strings.Repeat(longWhat+" ", 2), Why: longWhy}
+	it.Content = []byte("#!/bin/bash\n" + strings.Repeat("echo hi\n", 12))
+	raw := RenderDeskFrame(snap, 100, 24, deskNow, opts)
+	got := strings.Join(focusText(raw), "\n")
+	if !strings.Contains(got, "script: 12 lines · v to view") || strings.Contains(got, "┆ echo hi") {
+		t.Errorf("want the one-line script summary:\n%s", ansi.Strip(raw))
+	}
+	if !strings.Contains(squash(focusText(raw)), longWhy) {
+		t.Errorf("why was cut while the preview collapsed:\n%s", ansi.Strip(raw))
+	}
+}
+
+// On a window too short for both fields, they still win over the preview and
+// are cut only when they alone exceed the panel, ending in an ellipsis; the
+// header line and its sha256 stay.
+func TestDeskFrame_ShortWindowCutsFieldsLast(t *testing.T) {
+	snap, opts := longHeaderSnapshot()
+	it := &snap.Pending[0]
+	it.Headers = desk.Headers{What: strings.Repeat(longWhat+" ", 6), Why: strings.Repeat(longWhy+" ", 6)}
+	raw := RenderDeskFrame(snap, 100, 20, deskNow, opts)
+	out := ansi.Strip(raw)
+	lines := strings.Split(out, "\n")
+	if len(lines) > 20 {
+		t.Errorf("frame is %d lines in a 20-line window", len(lines))
+	}
+	if strings.Contains(out, "┆") || !strings.Contains(out, "…") {
+		t.Errorf("want no preview and a cut ending in an ellipsis:\n%s", out)
+	}
+	if !strings.Contains(out, "sha256 "+it.Meta.SHA256[:deskShortHash]) || !strings.Contains(out, "what ") || !strings.Contains(out, "why ") {
+		t.Errorf("the head, what or why is missing:\n%s", out)
+	}
+}
+
+// A finished or failed item wraps what and why in full too, above its
+// "l to view the log" line.
+func TestDeskFrame_DoneItemFieldsWrapInFull(t *testing.T) {
+	// Doubled, each wraps to 5 lines at 100 columns, past the old 4-line cap.
+	what := longWhat + " " + longWhat
+	why := longWhy + " " + longWhy
+	for _, code := range []int{0, 1} {
+		it := item("15-merge-1169", desk.KindScript, desk.StateDone)
+		it.Headers = desk.Headers{What: what, Why: why}
+		it.Started, it.Ended, it.ExitCode = ago(10*time.Minute), ago(9*time.Minute), rcPtr(code)
+		it.Meta = desk.Meta{AddedAt: agoPtr(time.Hour), SHA256: desk.SHA256Hex([]byte("x"))}
+		snap := &desk.Snapshot{Dir: "/d", Taken: deskNow, Done: []desk.Item{it}}
+		raw := RenderDeskFrame(snap, 100, 30, deskNow, deskOpts())
+		got := squash(focusText(raw))
+		if !strings.Contains(got, what) || !strings.Contains(got, why) || !strings.Contains(got, "l to view the log") {
+			t.Errorf("exit %d: done item cut what/why or lost the log hint:\n%s", code, ansi.Strip(raw))
+		}
 	}
 }
 
