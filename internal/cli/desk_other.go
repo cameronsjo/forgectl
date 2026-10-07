@@ -34,11 +34,13 @@ func runDeskWatch(*cobra.Command, module.Deps, string, string, int, int) error {
 	return errDeskUnsupported()
 }
 
-func runDeskSkip(*cobra.Command, module.Deps, string, string, string) error {
+func runDeskSkip(*cobra.Command, module.Deps, string, string, string, bool) error {
 	return errDeskUnsupported()
 }
 
-func runDeskPrune(*cobra.Command, module.Deps, string, int, bool) error { return errDeskUnsupported() }
+func runDeskPrune(*cobra.Command, module.Deps, string, int, bool, bool) error {
+	return errDeskUnsupported()
+}
 
 func runDeskSupervise(string, string, string, string) error { return errDeskUnsupported() }
 

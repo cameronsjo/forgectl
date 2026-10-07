@@ -509,7 +509,7 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 // subcommand such as `mcp add --scope project` writes into its cwd. A worker
 // stays too: it already starts at its worktree's root.
 //
-// A launch that continues or resumes a session never moves. Claude Code keeps
+// A launch that continues or resumes a session (resumeFlags) never moves. Claude Code keeps
 // sessions per project directory, so `-c` from a subfolder run at the root
 // would silently pick up the root's latest session instead of the subfolder's.
 func runDirectory(req InvocationRequest, posture Posture) string {
@@ -524,15 +524,20 @@ func runDirectory(req InvocationRequest, posture Posture) string {
 	}
 }
 
+// resumeFlags are the claude flags that pick up an existing session rather
+// than start one: -c/--continue, -r/--resume, --from-pr (a session linked to a
+// PR), and --teleport (a cloud session). Read from `claude --help` on 2.1.292.
+var resumeFlags = []string{"-c", "--continue", "-r", "--resume", "--from-pr", "--teleport"}
+
 // resumesSession reports whether args continue or resume a claude session,
 // in any position before claude's own `--`. A token after `--` is a prompt.
 func resumesSession(args []string) bool {
 	for _, a := range args {
-		switch {
-		case a == "--":
+		if a == "--" {
 			return false
-		case a == "-c", a == "--continue", a == "-r", a == "--resume",
-			strings.HasPrefix(a, "--resume="), strings.HasPrefix(a, "--continue="):
+		}
+		name, _, _ := strings.Cut(a, "=")
+		if slices.Contains(resumeFlags, name) {
 			return true
 		}
 	}

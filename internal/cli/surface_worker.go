@@ -177,6 +177,9 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	if err != nil {
 		return WithExitCode(err, 2)
 	}
+	if opts.DryRun {
+		return planWorkerLaunch(cmd, deps, opts, top, led, workerPlanInputs{injected: injected, unset: unset, prompt: prompt, hasBrief: brief != nil, self: self})
+	}
 	service := surface.NewService(adapter, surface.Policy{AllowPATHBinary: opts.AllowPATH}, "")
 
 	launched, err := runWorkerSteps(ctx, led, opts.DisplayName, opts.Worktree, workerSteps{
@@ -259,4 +262,63 @@ func launchBrief(arg string, now func() time.Time) (string, *worker.Brief, error
 	}
 	b := &worker.Brief{Marker: marker, Count: 1, SentAt: now().UTC(), Via: worker.ViaLaunch}
 	return worker.Compose(text, marker, worker.ViaLaunch), b, nil
+}
+
+// workerPlanInputs are the pieces runWorkerLaunch has already built when it
+// reaches a --dry-run.
+type workerPlanInputs struct {
+	injected map[string]string
+	unset    []string
+	prompt   string
+	hasBrief bool
+	// self is this forgectl executable, which the harness binary must not be.
+	self string
+}
+
+// planWorkerLaunch is runWorkerLaunch's --dry-run: the checks the launch runs
+// before its first write, then a preview. It does not open the ledger for
+// writing, create the worktree root, run git worktree add, or start a surface.
+// A name already in the ledger, a branch or path the launch would refuse, and
+// a harness profile that does not build as a worker all fail here as they
+// fail there.
+func planWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOptions, top string, led *worker.Ledger, in workerPlanInputs) error {
+	taken, err := led.NameTaken(opts.DisplayName)
+	if err != nil {
+		return WithExitCode(err, 2)
+	}
+	if taken {
+		// The launch refuses it in Begin, with this error and no exit code.
+		return fmt.Errorf("%w (--name %q); close it first or pick another name", worker.ErrNameTaken, opts.DisplayName)
+	}
+	plan, err := worker.PlanWorktree(cmd.Context(), deps.Runner, top, opts.DisplayName, opts.Worktree)
+	if err != nil {
+		return err
+	}
+	built, err := buildWorkerInvocation(surfaceInvocationRequest(deps.Cfg.Launch, plan.Path, in.injected, in.unset, opts.Harness), in.prompt, worker.NewSessionID, cmd.ErrOrStderr())
+	if err != nil {
+		return err
+	}
+	if !built.Worker {
+		return errors.New("forgectl: the worker invocation was not built as a worker launch")
+	}
+	// The service refuses an unaccepted binary when it launches; ask the same
+	// policy here so the preview refuses too.
+	if err := (surface.Policy{AllowPATHBinary: opts.AllowPATH}).AcceptBinary(built.Invocation.Binary, in.self); err != nil {
+		return err
+	}
+	return renderLaunchPlan(cmd.OutOrStdout(), launchPlan{
+		DryRun:  true,
+		Surface: opts.Backend,
+		Name:    opts.DisplayName,
+		Target:  top,
+		Harness: built.Invocation.Harness,
+		Worker: &workerLaunchPlan{
+			Repo:       top,
+			Worktree:   plan.Path,
+			Branch:     plan.Branch,
+			BranchFrom: plan.BranchFrom,
+			LedgerRow:  ledgerRowWouldCreate,
+			Brief:      in.hasBrief,
+		},
+	}, opts.JSON)
 }

@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -745,5 +746,177 @@ func TestDeskFrame_LostIsNotCountedRunning(t *testing.T) {
 	out := ansi.Strip(RenderDeskFrame(snap, 100, 30, deskNow, opts))
 	if !strings.Contains(out, "● 0 running") || !strings.Contains(out, "? 1 lost") || !strings.Contains(out, "0 changed · 1 lost") {
 		t.Errorf("lost counts:\n%s", out)
+	}
+}
+
+// An empty desk says how the queue fills and offers only keys that can act
+// (#1107).
+func TestDeskFrame_EmptyStateSaysHowItFills(t *testing.T) {
+	snap, opts := emptySnapshot()
+	out := ansi.Strip(RenderDeskFrame(snap, 100, 30, deskNow, opts))
+	if !strings.Contains(out, "Claude queues scripts with forgectl desk add; they appear here") {
+		t.Errorf("the empty queue does not say how it fills:\n%s", out)
+	}
+	footer := out[strings.LastIndex(out, "\n")+1:]
+	for _, k := range []string{"y run", "s skip", "v view", "a all", "j/k"} {
+		if strings.Contains(footer, k) {
+			t.Errorf("empty desk offers %q: %q", k, footer)
+		}
+	}
+	if !strings.Contains(footer, "q quit") {
+		t.Errorf("footer lost q quit: %q", footer)
+	}
+}
+
+// Every indicator carries a word (#1107): the header dot, the history bars'
+// legend, a running item with no earlier run to compare with; and the
+// counts agree: "started today" beside "no finished runs yet".
+func TestDeskFrame_IndicatorsAreLabelled(t *testing.T) {
+	snap, opts := busySnapshot()
+	out := ansi.Strip(RenderDeskFrame(snap, 120, 40, deskNow, opts))
+	for _, want := range []string{"desk ● 3 waiting", "bar: run length, longest full", "started today"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("busy frame lacks %q:\n%s", want, out)
+		}
+	}
+	run := item("01-new", desk.KindScript, desk.StateRunning)
+	run.Started = ago(12 * time.Second)
+	snap = &desk.Snapshot{Dir: "/d", Taken: deskNow, Running: []desk.Item{run}}
+	out = ansi.Strip(RenderDeskFrame(snap, 120, 30, deskNow, opts))
+	for _, want := range []string{"desk ● 1 running", "0:12 so far", "no finished runs yet", "1 started today"[2:]} {
+		if !strings.Contains(out, want) {
+			t.Errorf("frame lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "no runs yet") || strings.Contains(out, "runs today") {
+		t.Errorf("frame still has the old wording:\n%s", out)
+	}
+}
+
+// --no-icons maps every glyph to one ASCII character of the same width.
+func TestDeskFrame_ASCIIKeepsTheLayout(t *testing.T) {
+	for _, fx := range deskFixtures {
+		snap, opts := fx.build()
+		assertASCIIFrame(t, fx.name, snap, opts)
+	}
+	snap, opts := twoWaitingSnapshot()
+	assertASCIIFrame(t, "short", snap, opts)
+}
+
+func assertASCIIFrame(t *testing.T, name string, snap *desk.Snapshot, opts DeskFrameOptions) {
+	t.Helper()
+	icons := ansi.Strip(RenderDeskFrame(snap, 120, 40, deskNow, opts))
+	opts.ASCII = true
+	ascii := ansi.Strip(RenderDeskFrame(snap, 120, 40, deskNow, opts))
+	for _, r := range ascii {
+		if r >= 0x80 && !strings.ContainsRune("·…±", r) {
+			t.Fatalf("%s: ASCII frame draws %q:\n%s", name, r, ascii)
+		}
+	}
+	il, al := strings.Split(icons, "\n"), strings.Split(ascii, "\n")
+	for i := range il {
+		if ansi.StringWidth(il[i]) != ansi.StringWidth(al[i]) {
+			t.Errorf("line %d: width %d vs %d", i, ansi.StringWidth(il[i]), ansi.StringWidth(al[i]))
+		}
+	}
+}
+
+// The footer follows the selected row: y and s only where they act, a
+// whenever something waits, and nothing item-shaped on an empty queue even
+// in a too-small window (#1107).
+func TestDeskFrame_HintsFollowTheSelection(t *testing.T) {
+	snap, opts := busySnapshot()
+	rows := deskRows(snap, deskNow)
+	footer := func(cursor, w, h int) string {
+		out := ansi.Strip(deskFrame{snap: snap, width: w, height: h, now: deskNow, opts: opts, cursor: cursor}.render())
+		return out[strings.LastIndex(out, "\n")+1:]
+	}
+	running := slices.IndexFunc(rows, func(r queueRow) bool { return r.kind == rowRunning })
+	if f := footer(0, 120, 40); !strings.Contains(f, "y run") || !strings.Contains(f, "s skip") {
+		t.Errorf("waiting row: %q", f)
+	}
+	if f := footer(running, 120, 40); strings.Contains(f, "y run") || strings.Contains(f, "s skip") || !strings.Contains(f, "a all") {
+		t.Errorf("running row: %q", f)
+	}
+	empty, eopts := emptySnapshot()
+	out := ansi.Strip(deskFrame{snap: empty, width: 100, height: 6, now: deskNow, opts: eopts}.render())
+	if f := out[strings.LastIndex(out, "\n")+1:]; strings.Contains(f, "s skip") || strings.Contains(f, "j/k") || !strings.Contains(f, "q quit") {
+		t.Errorf("empty, too small: %q", f)
+	}
+}
+
+// The footer drops the least important hints first and always keeps q quit
+// and ? help (#1108: at 40 columns it used to cut "q quit" off first).
+func TestDeskFrame_FooterKeepsQuitAndHelp(t *testing.T) {
+	snap, opts := busySnapshot()
+	for w := 30; w <= 140; w += 5 {
+		out := ansi.Strip(RenderDeskFrame(snap, w, 40, deskNow, opts))
+		footer := out[strings.LastIndex(out, "\n")+1:]
+		if !strings.Contains(footer, "q quit") || !strings.Contains(footer, "? help") {
+			t.Errorf("width %d: footer %q lost q quit or ? help", w, footer)
+		}
+		if ansi.StringWidth(footer) > max(w, deskMinWidth) || strings.Contains(footer, "…") {
+			t.Errorf("width %d: footer %q is cut", w, footer)
+		}
+	}
+	// j/k goes first, then r: the move hint is the least needed.
+	out := ansi.Strip(RenderDeskFrame(snap, 75, 40, deskNow, opts))
+	footer := out[strings.LastIndex(out, "\n")+1:]
+	if strings.Contains(footer, "j/k") || !strings.Contains(footer, "r runs") {
+		t.Errorf("75 columns: %q", footer)
+	}
+}
+
+// The ? screen lists every key the footer can show, from the same table.
+func TestDeskKeyLinesListEveryBinding(t *testing.T) {
+	lines := strings.Join(deskKeyLines(), "\n")
+	for _, b := range deskBindings {
+		if !strings.Contains(lines, b.key) || !strings.Contains(lines, b.help) {
+			t.Errorf("? screen lacks %q", b.key)
+		}
+	}
+}
+
+// The header names what the desk is doing when nothing waits: running, or
+// idle (#1107 review: "nothing waiting" beside a running item misled).
+func TestDeskFrame_HeaderSaysRunningOrIdle(t *testing.T) {
+	run := item("01-a", desk.KindScript, desk.StateRunning)
+	run.Started = ago(time.Second)
+	_, opts := emptySnapshot()
+	out := ansi.Strip(RenderDeskFrame(&desk.Snapshot{Dir: "/d", Taken: deskNow, Running: []desk.Item{run}}, 100, 30, deskNow, opts))
+	if !strings.HasPrefix(out, "desk ● 1 running") {
+		t.Errorf("header with one running item: %q", strings.SplitN(out, "\n", 2)[0])
+	}
+	empty, eopts := emptySnapshot()
+	out = ansi.Strip(RenderDeskFrame(empty, 100, 30, deskNow, eopts))
+	if !strings.HasPrefix(out, "desk ○ idle") {
+		t.Errorf("empty header: %q", strings.SplitN(out, "\n", 2)[0])
+	}
+}
+
+// u, l and r show only when they can act (#1108 review): no skip to undo, no
+// log and no run on an empty desk; and l outranks v when the window is narrow.
+func TestDeskFrame_HintsHideKeysWithNothingToActOn(t *testing.T) {
+	empty, opts := emptySnapshot()
+	out := ansi.Strip(RenderDeskFrame(empty, 120, 30, deskNow, opts))
+	footer := out[strings.LastIndex(out, "\n")+1:]
+	for _, k := range []string{"u undo", "l log", "r runs"} {
+		if strings.Contains(footer, k) {
+			t.Errorf("empty desk offers %q: %q", k, footer)
+		}
+	}
+	f := deskFrame{snap: empty, width: 120, height: 30, now: deskNow, opts: opts, canUndo: true}
+	if out := ansi.Strip(f.render()); !strings.Contains(out[strings.LastIndex(out, "\n")+1:], "u undo") {
+		t.Error("u undo is not offered with a skip to undo")
+	}
+	snap, bopts := busySnapshot()
+	rows := deskRows(snap, deskNow)
+	done := slices.IndexFunc(rows, func(r queueRow) bool { return r.kind == rowDone || r.kind == rowFailed })
+	for w := 40; w <= 70; w += 5 {
+		out := ansi.Strip(deskFrame{snap: snap, width: w, height: 40, now: deskNow, opts: bopts, cursor: done}.render())
+		footer := out[strings.LastIndex(out, "\n")+1:]
+		if strings.Contains(footer, "v view") && !strings.Contains(footer, "l log") {
+			t.Errorf("width %d: v view kept over l log: %q", w, footer)
+		}
 	}
 }

@@ -109,8 +109,8 @@ Started in a subfolder of a git repository whose root has
 its own, a claude session runs at the repository root, because Claude Code
 reads those settings only from the directory it starts in. The profile is still
 the one for the directory you ran launch from. A launch that continues or
-resumes a session (-c, --continue, -r, --resume) never moves, since Claude
-Code keeps sessions per directory. After a move, relative paths in arguments
+resumes a session (-c, --continue, -r, --resume, --from-pr, --teleport) never
+moves, since Claude Code keeps sessions per directory. After a move, relative paths in arguments
 and prompts resolve against the root; --here, as the first argument, keeps the
 session (and those paths) where it was started.
 

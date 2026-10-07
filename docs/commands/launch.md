@@ -155,7 +155,8 @@ starts at its worktree's root.
 Some other cases never move:
 
 - **Continuing or resuming a session.** A launch whose arguments carry `-c`,
-  `--continue`, `-r`, or `--resume` (before claude's own `--`) stays put.
+  `--continue`, `-r`, `--resume`, `--from-pr`, or `--teleport` (before
+  claude's own `--`) stays put.
   Claude Code keeps sessions per project directory, so a move would silently
   resume the root's history, not the subfolder's.
 - **Symlinked directories.** The walk follows the physical path, the same one
@@ -174,7 +175,8 @@ absolute path, or `--here` to keep the session and its paths local.
 
 `launch which` reports the move. A `runs in` row names the root when a bare
 launch would start there. `run_directory` under `--json` names where the
-session starts, and is present for the claude harness only.
+session starts, and is present for the claude harness only. `surface launch
+--dry-run` previews the same `run_directory` for a claude launch.
 
 To stay put, pass `--here` as the **first** argument: `forgectl launch --here`,
 `forgectl launch --here -- "<task>"`. Like the leading `--`, it is forgectl's

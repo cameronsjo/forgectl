@@ -24,6 +24,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/spf13/cobra"
+
 	"github.com/cameronsjo/forgectl/internal/desk"
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
@@ -106,10 +108,12 @@ func openTestDesk(t *testing.T, dir string) *desk.Desk {
 	return d
 }
 
-// queueItem adds a script through the CLI and returns its name and hash.
+// queueItem adds a script through the CLI and returns its name and hash. It
+// passes --allow-duplicate: tests queue several items with one filler body and
+// need each to be its own item; duplicate detection has its own tests.
 func queueItem(t *testing.T, file, body string) (name, sha string) {
 	t.Helper()
-	out, _, err := deskRun(t, deskDeps(), "add", writeTemp(t, file, body), "--what", "a test item", "--why", "a test", "--json")
+	out, _, err := deskRun(t, deskDeps(), "add", writeTemp(t, file, body), "--what", "a test item", "--why", "a test", "--json", "--allow-duplicate")
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
@@ -233,7 +237,7 @@ func TestDeskAdd_PrintsNameAndHash(t *testing.T) {
 	out, _, err := deskRun(t, deskDeps(), "add", writeTemp(t, "merge.sh", "#!/bin/bash\necho hi\n"), "--what", "merge it", "--why", "you own merges")
 	wantExit(t, err, 0)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 3 || lines[0] != "name=01-merge" || lines[1] != "kind=script" || !sha256Re.MatchString(strings.TrimPrefix(lines[2], "sha256=")) {
+	if len(lines) != 4 || lines[0] != "name=01-merge" || lines[1] != "kind=script" || !sha256Re.MatchString(strings.TrimPrefix(lines[2], "sha256=")) || lines[3] != "duplicate=false" {
 		t.Fatalf("output = %q", out)
 	}
 	name, sha := queueItem(t, "second.sh", "echo two\n")
@@ -246,7 +250,7 @@ func TestDeskAdd_JSONContract(t *testing.T) {
 	newDeskDir(t)
 	out, _, err := deskRun(t, deskDeps(), "add", writeTemp(t, "a.sh", "echo a\n"), "--what", "w", "--why", "y", "--json")
 	wantExit(t, err, 0)
-	if got, want := jsonKeys(t, []byte(out)), []string{"kind", "name", "path", "sha256", "warnings"}; !reflect.DeepEqual(got, want) {
+	if got, want := jsonKeys(t, []byte(out)), []string{"duplicate", "kind", "name", "path", "sha256", "warnings"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("keys = %v, want %v", got, want)
 	}
 }
@@ -685,7 +689,7 @@ func TestDeskSkip(t *testing.T) {
 	wantExit(t, err, deskExitUsage)
 	out, _, err := deskRun(t, deskDeps(), "skip", waiting, "--reason", "superseded by 03")
 	wantExit(t, err, 0)
-	if out != "skipped="+waiting+" reason=operator\n" {
+	if out != "skipped="+waiting+" reason=operator note=\"superseded by 03\"\n" {
 		t.Errorf("output = %q", out)
 	}
 
@@ -693,7 +697,7 @@ func TestDeskSkip(t *testing.T) {
 	markLost(t, d, dir, lost, lostSHA)
 	out, _, err = deskRun(t, deskDeps(), "skip", lost, "--reason", "supervisor died")
 	wantExit(t, err, 0)
-	if out != "skipped="+lost+" reason=lost\n" {
+	if out != "skipped="+lost+" reason=lost note=\"supervisor died\"\n" {
 		t.Errorf("output = %q", out)
 	}
 
@@ -715,7 +719,7 @@ func TestDeskPrune(t *testing.T) {
 	newDeskDir(t)
 	out, _, err := deskRun(t, deskDeps(), "prune", "--json")
 	wantExit(t, err, 0)
-	if got, want := jsonKeys(t, []byte(out)), []string{"days", "removed"}; !reflect.DeepEqual(got, want) {
+	if got, want := jsonKeys(t, []byte(out)), []string{"days", "found", "removed"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("prune --json keys = %v, want %v", got, want)
 	}
 	out, _, err = deskRun(t, deskDeps(), "prune", "--days", "7")
@@ -770,5 +774,74 @@ func TestDeskFrame(t *testing.T) {
 func TestDeskSupported(t *testing.T) {
 	if !deskSupported {
 		t.Fatal("deskSupported is false on a Unix build")
+	}
+}
+
+// --no-icons draws the desk in ASCII (#1107): before the fix the frame was
+// byte-identical with and without it. The flag is the root's persistent
+// one, so the test mounts desk under a root that has it, as production does.
+func TestDeskFrameNoIcons(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "desk")
+	stubDeskEnv(t, map[string]string{"DESK_DIR": dir, "COLUMNS": "100", "LINES": "30"})
+	t.Setenv("NO_COLOR", "1")
+	queueItem(t, "frame.sh", "echo frame\n")
+	for _, k := range []string{"HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID"} {
+		t.Setenv(k, "")
+	}
+	frame := func(args ...string) string {
+		t.Helper()
+		root := &cobra.Command{Use: "forgectl"}
+		root.PersistentFlags().Bool("no-icons", false, "")
+		root.AddCommand(newDeskCmd(deskDeps()))
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetErr(io.Discard)
+		root.SetArgs(append([]string{"desk", "--frame"}, args...))
+		if err := root.ExecuteContext(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	icons, ascii := frame(), frame("--no-icons")
+	if icons == ascii {
+		t.Fatal("--no-icons changed nothing")
+	}
+	for _, r := range ascii {
+		if r >= 0x80 && !strings.ContainsRune("·…±", r) {
+			t.Errorf("--no-icons frame still draws %q", r)
+			break
+		}
+	}
+	il, al := strings.Split(icons, "\n"), strings.Split(ascii, "\n")
+	if len(il) != len(al) {
+		t.Fatalf("line counts differ: %d vs %d", len(il), len(al))
+	}
+	for i := range il {
+		if utf8.RuneCountInString(il[i]) != utf8.RuneCountInString(al[i]) {
+			t.Errorf("line %d changed width: %q vs %q", i, il[i], al[i])
+		}
+	}
+}
+
+// no_icons in the config draws the desk in ASCII too, as it does the hub.
+func TestDeskNoIconsHonorsConfig(t *testing.T) {
+	cmd := &cobra.Command{}
+	deps := deskDeps()
+	if deskNoIcons(cmd, deps) {
+		t.Fatal("ASCII with neither the flag nor the config")
+	}
+	deps.Cfg.NoIcons = true
+	if !deskNoIcons(cmd, deps) {
+		t.Error("config no_icons did not select ASCII")
+	}
+}
+
+// desk --help's key paragraph stays within 80 columns (#1107 review: a word
+// was left alone on its own line).
+func TestDeskHelpKeysParagraphWraps(t *testing.T) {
+	out, _, err := deskRun(t, deskDeps(), "--help")
+	wantExit(t, err, 0)
+	if !strings.Contains(out, "everything on screen (asks first, listing each full sha256), j/k move,") {
+		t.Errorf("dashboard keys paragraph:\n%s", out)
 	}
 }

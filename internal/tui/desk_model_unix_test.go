@@ -1464,3 +1464,65 @@ func TestDesk_LOnAnItemWithNoRunSaysSo(t *testing.T) {
 		t.Errorf("footer = %q", footer)
 	}
 }
+
+// A "started X" line still on screen turns into X's outcome once the run
+// ends, instead of saying a finished run just started (#1107).
+func TestDesk_StartedLineBecomesTheOutcome(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-a.sh", plainScript("a"))
+	h.scan()
+	h.press("y")
+	if !strings.Contains(ansi.Strip(h.m.footer()), "started 01 a") {
+		t.Fatalf("footer = %q", ansi.Strip(h.m.footer()))
+	}
+	run, err := h.d.BeginRun("01-a", os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.Finish(3, "failed"); err != nil {
+		t.Fatal(err)
+	}
+	h.scan()
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "01 a ended: exit 3") {
+		t.Errorf("footer after the run ended = %q", footer)
+	}
+}
+
+// A started run that ends as lost replaces "started X" with what happened.
+func TestDesk_StartedLineBecomesLost(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-a.sh", plainScript("a"))
+	h.scan()
+	makeLost(t, h, "01-a")
+	if footer := ansi.Strip(h.m.footer()); !strings.Contains(footer, "01 a was lost mid-run · s clears it") {
+		t.Errorf("footer after the run was lost = %q", footer)
+	}
+}
+
+// ? opens the key list and ? closes it (#1108).
+func TestDesk_QuestionMarkShowsTheKeys(t *testing.T) {
+	h := newDeskHarness(t)
+	h.press("?")
+	if h.m.pager == nil || h.m.pager.title != "keys" {
+		t.Fatalf("? did not open the key list: %+v", h.m.pager)
+	}
+	view := ansi.Strip(h.m.View().Content)
+	for _, want := range []string{"y    run the selected item", "q    quit", "? or q close"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("key list lacks %q:\n%s", want, view)
+		}
+	}
+	h.press("?")
+	if h.m.pager != nil {
+		t.Error("? did not close the key list")
+	}
+}
+
+// --no-icons reaches the window title too.
+func TestDesk_WindowTitleFollowsNoIcons(t *testing.T) {
+	h := newDeskHarness(t)
+	h.m.opts.ASCII = true
+	if title := h.m.View().WindowTitle; strings.ContainsRune(title, '●') {
+		t.Errorf("ASCII window title = %q", title)
+	}
+}

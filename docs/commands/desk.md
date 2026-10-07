@@ -59,7 +59,7 @@ Quit and restart every open dashboard after you upgrade forgectl. A dashboard st
 
 ### `forgectl desk`
 
-The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with a bar per item, a focus panel showing the selected item's short sha256, WHAT and WHY (wrapped, up to four lines each; `desk status NAME` shows them whole) and, under a "script" label, its first script lines, and the history of finished runs. A lost run's panel says it may have partly run and that `s` clears it and `l` shows what it printed; a changed item's panel shows the hash it was queued at and the hash it has now (a short window leaves the note out; `y`, `s` and `u` say the same in the footer). A short window gives up the tiles, then the summary line, the queue rows, the history and the script preview before the focus panel's hash, WHAT and WHY; below that minimum (about 40x10) the dashboard says how many rows or columns it needs.
+The dashboard: three stat tiles (waiting, started today, outcomes), the queue with a bar per item, a focus panel showing the selected item's short sha256, WHAT and WHY (wrapped, up to four lines each; `desk status NAME` shows them whole) and, under a "script" label, its first script lines, and the history of finished runs, whose bars are each run's length against the longest shown. An empty queue says that Claude fills it with `forgectl desk add`, and the footer offers only the keys that can act. A lost run's panel says it may have partly run and that `s` clears it and `l` shows what it printed; a changed item's panel shows the hash it was queued at and the hash it has now (a short window leaves the note out; `y`, `s` and `u` say the same in the footer). A short window gives up the tiles, then the summary line, the queue rows, the history and the script preview before the focus panel's hash, WHAT and WHY; below that minimum (about 40x10) the dashboard says how many rows or columns it needs.
 
 | Key | Action |
 |---|---|
@@ -71,11 +71,14 @@ The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with 
 | `r` | open the run view on the selected item's run (an item that has not run yet says so instead; with nothing selected, the newest run): its steps as a flow, the event timeline, and replay. `←`/`→` step through events, `[`/`]` move 10, `g`/`G` jump to the start or to the end (back to live for a running item); a finished run's replay keeps its outcome in the header, `space` plays, `n`/`p` switch runs, `q` closes |
 | `a` | run every waiting item on screen, except TTY and changed items; asks first, listing each item with its full sha256, and runs exactly those names and hashes. A list longer than half the window pages (`space` next, `b` back, `esc` cancels), and `y` runs it only once every page has been on screen; a window too small for one full hash refuses |
 | `j` / `k` | move |
+| `?` | show every key and what it does (a narrow footer drops the least important hints first; `q` always stays, and `?` until the window is very narrow) |
 | `q` | quit; detached runs keep running |
 
 The dashboard rings the terminal bell when an item arrives, and again every 5 minutes while anything waits; inside a herdr pane it also sends a herdr notification. The window title reads `desk ● N waiting`.
 
 `--frame` prints one frame to stdout and exits, sized by `$COLUMNS` and `$LINES` (80x40 when unset). Colour follows `NO_COLOR` and is dropped on a pipe. It reads the queue the same way `status` does.
+
+`--no-icons`, or `no_icons = true` in the config (on the dashboard and `--frame`), draws every mark, border and bar in ASCII, one character for one, so the layout does not move; punctuation such as `·` stays, and the run view uses the legend `desk runs --no-icons` prints. Every state also carries a word, so neither mode depends on a glyph or on colour. `v` always shows a script's bytes unchanged.
 
 ### `forgectl desk add <file|->`
 
@@ -85,13 +88,16 @@ The dashboard rings the terminal bell when an item arrives, and again every 5 mi
 | `--why TEXT` | why it needs a person, one line of plain text; required and non-empty |
 | `--tty` | the script needs a terminal (a password prompt, `sudo`); it runs in the dashboard's own pane |
 | `--name FILE` | the file name for an item read from stdin (`<file>` is `-`), such as `deploy.sh` |
-| `--json` | print `{name, kind, sha256, path, warnings}` |
+| `--allow-duplicate` | queue the item even when an identical one is already waiting |
+| `--json` | print `{name, kind, sha256, path, warnings, duplicate}` |
 
 The kind comes from the extension: `.sh` is a script, `.manifest` is a batch. The name is the next free `NN-` plus the file's base name. `# WHAT:`, `# WHY:` and (with `--tty`) `# TTY: yes` lines are inserted after a shebang before the hash is taken. `--what` and `--why` are required, so the file must not already carry a `# WHAT:` or `# WHY:` line: `add` refuses the duplicate. Neither may hold a control character (a newline, CR, ESC, or a C1 code) or a bidi control; they are written into the script, where `cat` and editors would show them raw.
 
 A `.manifest` is planned before it is queued: one that cannot run is refused, and its warnings are printed as `warning:` lines on stderr. A batch cannot be a TTY item.
 
 When `<file>` is `-`, stdin is read (at most 1 MiB) and must not be a terminal.
+
+Adding is safe to retry. When an item of the same kind with the same sha256 (taken after the `# WHAT:` and `# WHY:` lines are inserted, so the same file with the same `--what` and `--why`) is already waiting in `pending/`, `add` queues nothing. It signals only if the first attempt never finished signalling (it died after queueing, or a signal failed): the item records `signalled_at` once every enabled signal went out, and a retry that finds it unrecorded sends them, so the item does not wait with nobody told. Otherwise it signals nothing. A file a person dropped into `pending/` is stamped as signalled when the desk first sees it, so a retry never pings for it. A failed signal on the retry is the one `warning:` line; the `note:` says only that the signal was not sent. It prints that item, with `duplicate=true` (text, where a queued item prints `duplicate=false`) or `"duplicate": true` (`--json`), and a `note:` on stderr, and exits 0. A retry after a timeout therefore finds the first attempt instead of queueing a second approval. Only a waiting item counts: one that is running, done or skipped does not, so the same file queues again. A different `--what` or `--why`, or a different body, is a different item. `--allow-duplicate` queues another. The check and the queueing are not one atomic step: two adds of the same file at the same instant can both queue.
 
 `<file>` must be a regular file (a symlink to one is followed); a FIFO or device is refused at once, never read.
 
@@ -108,7 +114,7 @@ notify_herdr = false   # herdr notification and pane state (default true)
 notify_macos = false   # macOS notification (default true)
 ```
 
-Exit codes: 0 queued; 1 refused (an unreadable or non-regular file, a manifest that cannot run, no free number); 2 a usage error (a missing or empty `--what` or `--why`, a control or bidi character in either, `--name` misused).
+Exit codes: 0 queued, or already waiting (`duplicate`); 1 refused (an unreadable or non-regular file, a manifest that cannot run, no free number); 2 a usage error (a missing or empty `--what` or `--why`, a control or bidi character in either, `--name` misused).
 
 ### `forgectl desk plan <name|file>`
 
@@ -218,7 +224,11 @@ Exit codes: 0 shown; 1 no such run, or it was read only in part: a read error (s
 
 Moves a waiting item to `skipped/` (`reason=operator`; the dashboard's `u` can bring it back), or a lost run out of `running/` (`reason=lost`; it cannot be re-armed). This is the only way a lost run leaves `running/`. A live run is refused. The `--reason` text, one line of plain text (no control or bidi characters) of at most 200 characters, is kept as the item's `skip_note`, with `skipped_by: cli` and the time as `skipped_at`; `status` shows `by=cli`. A skip from the dashboard records `skipped_by: dashboard`.
 
-Exit codes: 0 skipped; 1 no such item, the item is running, or another desk claimed it first; 2 a usage error.
+A skip prints `skipped=<name> reason=<operator|lost> note="<the --reason text>"`: `reason` is the category, `note` is the text, quoted. With `--json` it prints `{name, reason, note, already}`.
+
+Skip is safe to retry. An item already in `skipped/` prints the same line with the reason and note recorded when it was skipped (this call's `--reason` is not kept) and `already=true` (`"already": true`), with a `note:` on stderr, changes nothing (the first skip's note and time stand), and exits 0. A name that matches no item at all is the error: it lists the waiting names and any item with the same name under another number, so a caller can tell "already done" from "wrong name".
+
+Exit codes: 0 skipped, or already skipped; 1 no such item, the item is running, or another desk claimed it first; 2 a usage error.
 
 ### `forgectl desk layout`
 
@@ -235,9 +245,11 @@ Exit codes: 0 laid out, or planned with `--dry-run`; 1 a herdr call failed, and 
 
 ### `forgectl desk prune`
 
-Deletes the protocol files (`.sh`, `.manifest`, `.log`, `.events`, `.meta.json`, `.d/`) of items in `done/` and `skipped/` whose newest file is older than `--days` (default 30), legacy `done/` logs with no `NN-` number included. It never touches `pending/`, `running/`, unknown files, symlinks, or the desk root. No other command deletes an item's files; the desk itself removes only its own owner locks and temporary files. `--json` prints `{removed, days}`.
+Deletes the protocol files (`.sh`, `.manifest`, `.log`, `.events`, `.meta.json`, `.d/`) of items in `done/` and `skipped/` whose newest file is older than `--days` (default 30), legacy `done/` logs with no `NN-` number included. It never touches `pending/`, `running/`, unknown files, symlinks, or the desk root. No other command deletes an item's files; the desk itself removes only its own owner locks and temporary files. `prune` never creates a desk. A directory that is not a desk (it holds none of `pending/`, `running/`, `done/`, `skipped/`) is not opened or created: prune prints `note: desk not found at <path>` on stderr and the empty result (`found=false` in JSON), exit 0, so a typo in `--dir` does not become a new desk and a quiet `pruned=0`. `--json` prints `{removed, days, found}`.
 
-Exit codes: 0 pruned (perhaps nothing); 1 a delete failed; 2 `--days` below 1.
+`--dry-run` lists what a prune would delete and deletes nothing. It runs the same selection, so the list is what a real prune would remove right now. It opens nothing for writing: it reads `done/`, `skipped/` and `running/` in place, with no `chmod` and no directories created, even in a directory that is not a desk. A protocol directory that is a symlink or a file is refused, as a real prune refuses it, not read as empty. Text prints `would_prune=<n> days=<d> found=<bool>` and one `<state>/<name> newest=<time>` line per item; `--json` prints `{dry_run, found, days, would_remove, items}`, each item `{state, name, newest}`. Prune selects every item before it deletes the first, so a directory that cannot be read stops it before anything is removed.
+
+Exit codes: 0 pruned (perhaps nothing), or listed with `--dry-run`; 1 a delete failed; 2 `--days` below 1.
 
 ## The queue protocol
 

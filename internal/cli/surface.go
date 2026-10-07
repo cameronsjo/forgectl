@@ -77,6 +77,8 @@ func newSurfaceLaunchCmd(deps module.Deps) *cobra.Command {
 		harness     string
 		brief       string
 		here        bool
+		dryRun      bool
+		asJSON      bool
 	)
 
 	cmd := &cobra.Command{
@@ -116,8 +118,22 @@ brief from a file of at most 64 KiB. The brief stays in the harness's
 process arguments, where any local process can list it, so it must not hold
 a secret; point the worker at a file in the worktree instead.
 
+--dry-run runs every check the launch runs before it writes (the backend is
+on PATH, the target resolves, the harness profile builds, and for a worker the
+name, branch and worktree path are free) and prints what it would create, then
+creates nothing: no worktree, branch, ledger row or surface. It never prints
+the harness path, arguments, environment or brief. A refusal prints as the
+launch would and exits as the launch does. Nothing is asked of GitHub, so a new
+branch reads as branch_from "new". The preview sees a branch another worktree
+has checked out, but git can still refuse the real worktree add for a reason
+only it sees, so a clean preview is not a promise. --json prints the preview as one object:
+{"dry_run","surface","name","target","harness","worker"}, where worker is
+{"repo","worktree","branch","branch_from","ledger_row","brief"} for --worktree
+and absent otherwise. --json needs --dry-run.
+
   forgectl surface launch . --surface herdr --worktree feat/x --name x --harness codex
-  forgectl surface launch . --surface herdr --worktree fix/login --name fix-login --brief @brief.md`,
+  forgectl surface launch . --surface herdr --worktree fix/login --name fix-login --brief @brief.md
+  forgectl surface launch . --surface herdr --worktree feat/x --name x --dry-run --json`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSurfaceLaunch(cmd, deps, surfaceLaunchOptions{
@@ -129,6 +145,8 @@ a secret; point the worker at a file in the worktree instead.
 				Harness:     harness,
 				Brief:       brief,
 				Here:        here,
+				DryRun:      dryRun,
+				JSON:        asJSON,
 			})
 		},
 	}
@@ -153,6 +171,10 @@ a secret; point the worker at a file in the worktree instead.
 		"start claude in the target itself, not at its repository root when the .claude settings live there (claude only; no effect on workers or codex)")
 	cmd.Flags().StringVar(&brief, "brief", "",
 		"a worker's first brief, text or @file, passed as the harness's prompt argument (--worktree only)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
+		"run the launch's checks and print what it would create, creating nothing")
+	cmd.Flags().BoolVar(&asJSON, "json", false,
+		`print the --dry-run preview as {"dry_run","surface","name","target","harness","run_directory","worker"} JSON (needs --dry-run)`)
 
 	return cmd
 }
@@ -168,6 +190,8 @@ type surfaceLaunchOptions struct {
 	Harness     string
 	Brief       string
 	Here        bool
+	DryRun      bool
+	JSON        bool
 }
 
 func firstArg(args []string) string {
@@ -187,6 +211,9 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	if opts.Backend == "" {
 		return WithExitCode(fmt.Errorf(
 			"--surface is required and has no default; pass --surface tmux"), 2)
+	}
+	if opts.JSON && !opts.DryRun {
+		return WithExitCode(errors.New("--json prints the --dry-run preview; add --dry-run (a launch prints one line, not JSON)"), 2)
 	}
 
 	if opts.Worktree != "" {
@@ -222,6 +249,26 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	built, err := buildSurfaceLaunchInvocation(deps.Cfg.Launch, target, injected, unset, opts.Harness, opts.Here, cmd.ErrOrStderr())
 	if err != nil {
 		return err
+	}
+
+	if opts.DryRun {
+		// The service refuses an unaccepted binary (a harness found on $PATH
+		// without --allow-path-binary, a missing or self-looping path) when it
+		// launches; the preview asks the same policy so it refuses too.
+		if err := (surface.Policy{AllowPATHBinary: opts.AllowPATH}).AcceptBinary(built.Invocation.Binary, self); err != nil {
+			return err
+		}
+		plan := launchPlan{
+			DryRun:  true,
+			Surface: opts.Backend,
+			Name:    displayNameFor(opts.DisplayName, target),
+			Target:  target,
+			Harness: built.Invocation.Harness,
+		}
+		if built.Invocation.Harness == "claude" {
+			plan.RunDirectory = built.Invocation.CWD
+		}
+		return renderLaunchPlan(cmd.OutOrStdout(), plan, opts.JSON)
 	}
 
 	service := surface.NewService(adapter, surface.Policy{AllowPATHBinary: opts.AllowPATH}, "")

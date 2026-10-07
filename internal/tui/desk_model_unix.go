@@ -51,6 +51,9 @@ type DeskOptions struct {
 	// Runs is where the run view (r) reads runs from; RunDesk sets the
 	// desk itself. nil leaves the run view off.
 	Runs runview.Source
+	// ASCII draws the dashboard's marks, borders and bars in ASCII
+	// (--no-icons). The script viewer (v) is never changed.
+	ASCII bool
 }
 
 const (
@@ -158,6 +161,9 @@ type deskModel struct {
 	shown   []bool
 	refused bool // the last y in the a prompt did not run: not every page seen
 	anchor  int  // the target the a prompt's page starts at, kept on a resize
+	// runStarted is the item the last "started X" line names, and startedLine
+	// that line, so it can turn into the outcome once the run ends (#1107).
+	runStarted, startedLine string
 	// watch is the waiting item last under the cursor, kept across an empty
 	// queue. moved names it once a rescan finds it gone and the cursor on
 	// another; the next y refuses once (#1098); see watchSelection.
@@ -220,6 +226,7 @@ func newDeskModel(ctx context.Context, d deskBackend, opts DeskOptions) deskMode
 		Version: opts.Version,
 		Dir:     TildePath(d.Path(), opts.Home),
 		Started: m.started,
+		ASCII:   opts.ASCII,
 	}
 	return m
 }
@@ -363,6 +370,10 @@ func (m deskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastSkip = ""
 		}
 		m.message = m.resultLine(t.text, t.err)
+		m.runStarted, m.startedLine = "", ""
+		if t.err == nil && len(t.resolved) == 1 && strings.HasPrefix(t.text, "started ") {
+			m.runStarted, m.startedLine = t.resolved[0].name, m.message
+		}
 		return m, m.rescan()
 	case deskTTYReadyMsg:
 		if t.err != nil {
@@ -468,6 +479,7 @@ func (m deskModel) applyScan(t deskScanMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	m.watchSelection()
+	m.reportEnded()
 
 	waiting := map[string]bool{}
 	var arrived []desk.Item
@@ -602,6 +614,10 @@ func (m deskModel) updateKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.log()
 	case "r":
 		return m.openRunView()
+	case "?":
+		// The key list, from the table the footer is drawn from (#1108).
+		m.pager = &deskPager{title: "keys", lines: deskKeyLines()}
+		return m, nil
 	}
 	return m, nil
 }
@@ -1051,7 +1067,7 @@ func (m *deskModel) pagerKey(key string) {
 	page := max(m.height-2, 1)
 	last := max(len(pagerRows(p.lines, m.width))-page, 0)
 	switch key {
-	case "q", "esc", "v", "l":
+	case "q", "esc", "v", "l", "?":
 		m.pager = nil
 		return
 	case "j", "down":
@@ -1076,7 +1092,7 @@ func (m deskModel) View() tea.View {
 	if m.pager != nil {
 		content = m.pagerView(width, height)
 	} else if m.rv != nil {
-		content = m.rv.render(m.styles(), width, height)
+		content = asciiFrame(m.rv.render(m.styles(), width, height), m.opts.ASCII)
 	} else {
 		content = m.dashboard().render()
 	}
@@ -1088,7 +1104,7 @@ func (m deskModel) View() tea.View {
 			n++
 		}
 	}
-	v.WindowTitle = fmt.Sprintf("desk ● %d waiting", n)
+	v.WindowTitle = asciiFrame(fmt.Sprintf("desk ● %d waiting", n), m.opts.ASCII)
 	return v
 }
 
@@ -1100,7 +1116,7 @@ func (m deskModel) dashboard() deskFrame {
 	opts.Theme = &th
 	return deskFrame{
 		snap: m.snap, width: m.screenWidth(), height: m.screenHeight(), now: m.now(), opts: opts,
-		cursor: m.cursor, footer: m.footer(), confirming: m.confirm != confirmNone,
+		cursor: m.cursor, footer: m.footer(), confirming: m.confirm != confirmNone, canUndo: m.lastSkip != "",
 	}
 }
 
@@ -1188,7 +1204,11 @@ func (m deskModel) pagerView(width, height int) string {
 	for len(lines) < height-1 {
 		lines = append(lines, "")
 	}
-	lines = append(lines, cut(st.Muted.Render(" j/k scroll · space/b page · g/G top/bottom · q close"), width))
+	closeHint := "q close"
+	if p.title == "keys" {
+		closeHint = "? or q close"
+	}
+	lines = append(lines, cut(st.Muted.Render(" j/k scroll · space/b page · g/G top/bottom · "+closeHint), width))
 	return strings.Join(lines, "\n")
 }
 
@@ -1360,3 +1380,37 @@ func (r *ttyRun) finish(runErr error) (int, error) {
 // a writable one on the done/ record. (fd 3 is closed by the desk's prelude
 // inside the script itself.)
 const ttyWrapper = `exec 4>&-; "$1" "$2"; echo $? > "$3"`
+
+// reportEnded turns a "started X" line still on screen into X's outcome once
+// its run has ended, so the footer never says a finished run just started.
+func (m *deskModel) reportEnded() {
+	if m.runStarted == "" || m.snap == nil {
+		return
+	}
+	for _, it := range m.snap.Running {
+		if it.Name == m.runStarted && it.State == desk.StateLost {
+			if m.message == m.startedLine {
+				m.message = m.styles().Warn.Render(safeMessage(itemLabel(it.Name) + " was lost mid-run · " + lostNext))
+			}
+			m.runStarted, m.startedLine = "", ""
+			return
+		}
+	}
+	for _, it := range m.snap.Done {
+		if it.Name != m.runStarted {
+			continue
+		}
+		if m.message == m.startedLine {
+			outcome, style := "ok", m.styles().OK
+			switch {
+			case it.ExitCode == nil:
+				outcome, style = "no exit recorded", m.styles().Muted
+			case *it.ExitCode != 0:
+				outcome, style = "exit "+strconv.Itoa(*it.ExitCode), m.styles().Danger
+			}
+			m.message = style.Render(safeMessage(itemLabel(it.Name) + " ended: " + outcome))
+		}
+		m.runStarted, m.startedLine = "", ""
+		return
+	}
+}

@@ -57,7 +57,9 @@ type deskRunView struct {
 	gone bool
 	// want is the run r was pressed on.
 	want string
-	err  error
+	// ascii draws the run view with runview's ASCII legend (--no-icons).
+	ascii bool
+	err   error
 }
 
 // deskRunLoadMsg is one load of the run view's run. refs is set when the load
@@ -136,7 +138,7 @@ func (m deskModel) openRunView() (tea.Model, tea.Cmd) {
 		name = r.item.Name
 	}
 	m.runGen++
-	m.rv = &deskRunView{gen: m.runGen, want: name, follow: true, loading: true}
+	m.rv = &deskRunView{gen: m.runGen, want: name, follow: true, loading: true, ascii: m.opts.ASCII}
 	return m, loadRunCmd(m.runs, m.rv.gen, name, runview.RunRef{}, nil)
 }
 
@@ -273,7 +275,7 @@ func (m deskModel) switchRun(step int) (tea.Model, tea.Cmd) {
 	}
 	idx := (v.idx + step + len(v.refs)) % len(v.refs)
 	m.runGen++
-	m.rv = &deskRunView{refs: v.refs, idx: idx, gen: m.runGen, follow: true, loading: true}
+	m.rv = &deskRunView{refs: v.refs, idx: idx, gen: m.runGen, follow: true, loading: true, ascii: v.ascii}
 	return m, loadRunCmd(m.runs, m.rv.gen, "", m.rv.ref(), nil)
 }
 
@@ -377,7 +379,7 @@ func (v *deskRunView) render(st theme.Styles, width, height int) string {
 		width = 80
 	}
 	height = max(height, 3)
-	g := runview.IconGlyphs
+	g := runview.PickGlyphs(v.ascii) // the legend `desk runs --no-icons` prints
 	ref := v.ref()
 	s := v.state()
 	n := 0
