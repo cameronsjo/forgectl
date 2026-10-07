@@ -50,6 +50,17 @@ func newDeskSignal(deps module.Deps) deskSignal {
 	return deskSignal{cfg: deps.Cfg.Desk, deps: deps}
 }
 
+// enabled reports whether any operator signal can go out: the macOS
+// notification is on, or the herdr signal is on, herdr is found, and this
+// process is in a herdr session. With none, queueing an item tells nobody.
+func (s deskSignal) enabled() bool {
+	if s.cfg.MacOSSignal() {
+		return true
+	}
+	_, ok := s.herdrPath()
+	return ok && herdr.CheckSession(deskLookupEnv) == nil
+}
+
 // herdrPath is where herdr is when the herdr signal is on and can run.
 func (s deskSignal) herdrPath() (string, bool) {
 	if !s.cfg.HerdrSignal() || s.deps.SensitiveRunner == nil {

@@ -352,3 +352,78 @@ func containsEscape(s string) bool {
 	}
 	return false
 }
+
+// Check refuses what Pin refuses and writes nothing: it does not create an
+// absent leaf, and it does not narrow a leaf that is only too broad, which Pin
+// repairs with a chmod (forgectl#1088: a dry run must agree with Pin on refusal
+// without Pin's writes).
+func TestCheck_AgreesWithPinOnRefusalAndWritesNothing(t *testing.T) {
+	base := scratch(t)
+	if err := os.MkdirAll(base, 0o755); err != nil { //nolint:gosec // G301: the test needs a wide base
+		t.Fatal(err)
+	}
+	s := spec(base)
+
+	// Absent: ErrAbsent, and nothing is created.
+	if err := privdir.Check(s); !errors.Is(err, privdir.ErrAbsent) {
+		t.Fatalf("Check on an absent leaf = %v, want ErrAbsent", err)
+	}
+	if _, err := os.Lstat(filepath.Join(base, s.Leaf)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Check created the leaf: %v", err)
+	}
+
+	// Too broad: Check passes and leaves the mode; Pin narrows it.
+	leaf := filepath.Join(base, s.Leaf)
+	if err := os.Mkdir(leaf, 0o755); err != nil { //nolint:gosec // G301: the test needs a broad leaf
+		t.Fatal(err)
+	}
+	if err := os.Chmod(leaf, 0o755); err != nil { //nolint:gosec // G302: as above
+		t.Fatal(err)
+	}
+	if err := privdir.Check(s); err != nil {
+		t.Fatalf("Check on a broad leaf = %v, want nil", err)
+	}
+	if fi, _ := os.Stat(leaf); fi.Mode().Perm() != 0o755 {
+		t.Fatalf("Check changed the leaf mode to %v", fi.Mode().Perm())
+	}
+	if _, err := pin(t, s); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(leaf); fi.Mode().Perm() != 0o700 {
+		t.Fatalf("the control is wrong: Pin left the mode %v", fi.Mode().Perm())
+	}
+
+	// A symlinked leaf: both refuse with ErrUnsafe.
+	elsewhere := scratch(t)
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	base2 := scratch(t)
+	if err := os.MkdirAll(base2, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(base2, s.Leaf)); err != nil {
+		t.Fatal(err)
+	}
+	s2 := s
+	s2.Base = base2
+	checkErr := privdir.Check(s2)
+	_, pinErr := privdir.Pin(s2)
+	if !errors.Is(checkErr, privdir.ErrUnsafe) || !errors.Is(pinErr, privdir.ErrUnsafe) {
+		t.Fatalf("Check err = %v, Pin err = %v, want both ErrUnsafe", checkErr, pinErr)
+	}
+
+	// A file in the leaf's place: both refuse.
+	base3 := scratch(t)
+	if err := os.MkdirAll(base3, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base3, s.Leaf), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s3 := s
+	s3.Base = base3
+	if err := privdir.Check(s3); !errors.Is(err, privdir.ErrUnsafe) {
+		t.Errorf("Check on a file = %v, want ErrUnsafe", err)
+	}
+}

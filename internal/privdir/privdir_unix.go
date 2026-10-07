@@ -94,13 +94,49 @@ func Pin(s Spec) (int, error) {
 		return -1, unsafe("open leaf: %s", err)
 	}
 
-	if err := s.verify(baseFD, leafFD); err != nil {
+	if err := s.verify(baseFD, leafFD, true); err != nil {
 		//nolint:errcheck,gosec // G104: refusing, and nothing was written; a
 		// close failure here cannot change the refusal we are about to return.
 		unix.Close(leafFD)
 		return -1, err
 	}
 	return leafFD, nil
+}
+
+// Check runs Pin's refusals without Pin's writes: it creates nothing, narrows
+// nothing, and returns no descriptor. A leaf that Pin would refuse (a symlink,
+// not a directory, owned by another user, a name that does not match what was
+// opened) is refused here with the same error; a leaf that is only too broad,
+// which Pin repairs with a chmod, passes. An absent directory is ErrAbsent.
+// Callers that must not write, such as a dry run, use it to agree with Pin on
+// refusal. s.Create is ignored.
+func Check(s Spec) error {
+	s.Create = false
+	if err := s.validate(); err != nil {
+		return err
+	}
+	baseFD, err := unix.Open(s.Base, dirOpenFlags, 0)
+	switch {
+	case errors.Is(err, unix.ENOENT):
+		return ErrAbsent
+	case errors.Is(err, unix.ELOOP), errors.Is(err, unix.ENOTDIR):
+		return unsafe("base is a symlink or not a directory")
+	case err != nil:
+		return unsafe("open base: %s", err)
+	}
+	defer unix.Close(baseFD) //nolint:errcheck // read-only descriptor
+
+	leafFD, err := unix.Openat(baseFD, s.Leaf, dirOpenFlags, 0)
+	switch {
+	case errors.Is(err, unix.ENOENT):
+		return ErrAbsent
+	case errors.Is(err, unix.ELOOP), errors.Is(err, unix.ENOTDIR):
+		return unsafe("leaf is a symlink or not a directory")
+	case err != nil:
+		return unsafe("open leaf: %s", err)
+	}
+	defer unix.Close(leafFD) //nolint:errcheck // read-only descriptor
+	return s.verify(baseFD, leafFD, false)
 }
 
 // validate refuses a spec that cannot describe a checkable directory, before
@@ -169,7 +205,7 @@ func (s Spec) createBase() error {
 // Note the third clause is "the caller's mode", not "private": validate
 // accepts any permission bits, so how private the result is remains the
 // caller's choice. Both of forgectl's callers ask for 0o700.
-func (s Spec) verify(baseFD, leafFD int) error {
+func (s Spec) verify(baseFD, leafFD int, narrow bool) error {
 	want := uint32(s.Mode.Perm())
 
 	var pinned unix.Stat_t
@@ -205,7 +241,7 @@ func (s Spec) verify(baseFD, leafFD int) error {
 	// Stat_t.Mode is uint16 on Darwin and uint32 on Linux, so every comparison
 	// against the wanted bits widens explicitly rather than relying on an
 	// untyped constant to paper over the difference.
-	if uint32(pinned.Mode)&0o7777 != want {
+	if narrow && uint32(pinned.Mode)&0o7777 != want {
 		if err := unix.Fchmod(leafFD, want); err != nil {
 			return unsafe("restrict leaf mode: %s", err)
 		}
