@@ -937,8 +937,10 @@ func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, curso
 		}
 	}
 	// The panel's text area is the width less the border and its padding.
-	lines = append(lines, wrapField(st, "what", st.Fg.Bold(true), it.What, width-4)...)
-	lines = append(lines, wrapField(st, "why", st.Meta, it.Why, width-4)...)
+	what, why := wrapField(it.What, width-4), wrapField(it.Why, width-4)
+	what, why = capFields(what, why, f.fieldRoom(width), max(width-4-deskFieldLabelW, 10))
+	lines = append(lines, drawField(st, "what", st.Fg.Bold(true), what)...)
+	lines = append(lines, drawField(st, "why", st.Meta, why)...)
 	content := it.Content
 	if content == nil {
 		content = f.opts.Records[it.Name]
@@ -954,6 +956,16 @@ func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, curso
 		lines = append(lines, f.batchLines(st, it.Name, content, body)...)
 	default:
 		shown, hidden := scriptLines(content, body)
+		if body < deskScriptMin {
+			// Little room is left after what and why: one line, not a
+			// preview too short to read.
+			total, noun := len(shown)+hidden, "lines"
+			if total == 1 {
+				noun = "line"
+			}
+			lines = append(lines, bar+st.Muted.Render(fmt.Sprintf("script: %d %s · v to view", total, noun)))
+			break
+		}
 		if len(shown) > 0 {
 			lines = append(lines, bar+st.Muted.Render("script · the first lines it runs"))
 		}
@@ -967,30 +979,72 @@ func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, curso
 	return strings.Split(Panel(st, width, "focus", "", lines), "\n")
 }
 
-// deskFieldLines caps how many lines `what` or `why` may wrap to, so one
-// long header cannot push the script and the history out of a short window.
-const deskFieldLines = 4
+// deskScriptMin is the fewest script rows worth a preview; with fewer left
+// after what and why, the panel shows a one-line "script: N lines" instead.
+const deskScriptMin = 3
 
-// wrapField draws "label  text", wrapping text to width under the label
-// instead of cutting it. Beyond deskFieldLines the last line ends in "…".
-func wrapField(st theme.Styles, label string, text lipgloss.Style, value string, width int) []string {
+// deskFieldLabelW is the label column of what and why; continuation lines
+// indent to it so they sit under the text.
+const deskFieldLabelW = 6
+
+// wrapField wraps value to the text column of a field drawn in width cells.
+// It cuts nothing: capFields does that, only when the panel has no room.
+func wrapField(value string, width int) []string {
 	if value == "" {
 		return nil
 	}
-	const labelW = 6
-	value = deskText(value)
-	wrapped := strings.Split(ansi.Wrap(value, max(width-labelW, 10), ""), "\n")
-	if len(wrapped) > deskFieldLines {
-		wrapped = wrapped[:deskFieldLines]
-		wrapped[deskFieldLines-1] = cut(wrapped[deskFieldLines-1]+"…", max(width-labelW, 10))
+	wrapped := strings.Split(ansi.Wrap(deskText(value), max(width-deskFieldLabelW, 10), ""), "\n")
+	for i, l := range wrapped {
+		wrapped[i] = strings.TrimRight(l, " ")
 	}
+	return wrapped
+}
+
+// fieldRoom is how many lines what and why may take together before the
+// frame has no room for anything else: the window less the header, one
+// footer line, the smallest queue panel, the focus border and the head.
+// 0 means the window height is unknown and there is no limit.
+func (f deskFrame) fieldRoom(width int) int {
+	if f.height <= 0 {
+		return 0
+	}
+	return max(f.height-1-len(f.footerLines(theme.Styles{}, width))-deskQueueMin-2-1, 2)
+}
+
+// capFields keeps what and why whole unless together they exceed room lines
+// (0 = no limit); textW is the text column. Then the longer one loses its last lines first, and its
+// last kept line ends in "…".
+func capFields(what, why []string, room, textW int) ([]string, []string) {
+	if room <= 0 {
+		return what, why
+	}
+	for len(what)+len(why) > room {
+		long := &what
+		if len(why) > len(what) {
+			long = &why
+		}
+		if len(*long) <= 1 {
+			break
+		}
+		*long = (*long)[:len(*long)-1]
+		last := len(*long) - 1
+		if !strings.HasSuffix((*long)[last], "…") {
+			(*long)[last] = cut((*long)[last]+"…", textW)
+		}
+	}
+	return what, why
+}
+
+// drawField draws "label  text" with the continuation lines indented under
+// the text.
+func drawField(st theme.Styles, label string, text lipgloss.Style, wrapped []string) []string {
 	out := make([]string, len(wrapped))
 	for i, l := range wrapped {
-		lead := strings.Repeat(" ", labelW)
+		lead := strings.Repeat(" ", deskFieldLabelW)
 		if i == 0 {
-			lead = st.Muted.Render(label + strings.Repeat(" ", labelW-len(label)))
+			lead = st.Muted.Render(label + strings.Repeat(" ", deskFieldLabelW-len(label)))
 		}
-		out[i] = lead + text.Render(strings.TrimRight(l, " "))
+		out[i] = lead + text.Render(l)
 	}
 	return out
 }

@@ -8,7 +8,7 @@ desk ● 2 waiting · forgectl 0.0.0-test · host-a · ~/.local/state/forgectl/d
 │ 01 s1 · sha256 184cfa7e7378 · unchanged since queued 1m ago                                      │
 │ what  Print step 01-s1                                                                           │
 │ why   The approval check                                                                         │
-│ ┆ script · the first lines it runs                                                               │
-│ ┆ echo 01-s1                                                                                     │
+│ ┆ script: 1 line · v to view                                                                     │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
  y run · s skip · v view · a all · t timeline · j/k move · ? help · q quit
