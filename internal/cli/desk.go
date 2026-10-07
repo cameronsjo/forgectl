@@ -123,9 +123,10 @@ $XDG_STATE_HOME/forgectl/desk (~/.local/state/forgectl/desk). Only its
 pending/, running/, done/ and skipped/ subdirectories are touched.
 
 Dashboard keys: y run, s skip (asks first), u undo a skip, v view the script,
-l the latest log, r runs (the run view: flow, events, replay), a run
-everything on screen (asks first, listing each full sha256), j/k move,
-? the keys, q quit.
+l the latest log, r runs (the run view: flow, events, replay), t the
+timeline (what needs you, then the desk by day), h the finished runs in place
+of the timeline panel (h again goes back), a run everything on screen (asks
+first, listing each full sha256), j/k move, ? the keys, q quit.
 
 The desk defends against accidents (an item edited after it was queued, an item
 run twice, hostile text in a header); it does not defend against another

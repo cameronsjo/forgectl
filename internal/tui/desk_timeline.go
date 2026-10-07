@@ -534,6 +534,36 @@ func tlEntriesFrom(lines []tlLine, i int) int {
 	return n
 }
 
+// panelLines are the timeline's lines cut to rows, for the dashboard's panel:
+// whole entries only, no heading left hanging, and a last line saying how
+// many entries were left out.
+func (f tlFrame) panelLines(st theme.Styles, entries []tlEntry, rows int) []string {
+	body := f.body(st, entries)
+	if len(body) <= rows {
+		return tlTexts(body)
+	}
+	keep := max(rows-1, 0)
+	// Drop an entry cut between its two lines, then a heading or blank line
+	// with nothing under it.
+	if keep > 0 && body[keep].entry >= 0 && body[keep].entry == body[keep-1].entry {
+		keep--
+	}
+	for keep > 0 && body[keep-1].entry < 0 {
+		keep--
+	}
+	out := tlTexts(body[:keep])
+	left := tlEntriesFrom(body, keep)
+	return append(out, st.Muted.Render(fmt.Sprintf("… %d more · t to open", left)))
+}
+
+func tlTexts(lines []tlLine) []string {
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		out[i] = l.text
+	}
+	return out
+}
+
 // render draws the frame and returns the scroll offset it used.
 func (f tlFrame) render() (string, int) {
 	st := f.styles()

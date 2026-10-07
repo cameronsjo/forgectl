@@ -1630,3 +1630,28 @@ func TestDesk_TimelineNameReusedIsNotAnotherItemsRun(t *testing.T) {
 		t.Errorf("after a rescan the selection moved to the %v entry", e.row.kind)
 	}
 }
+
+// h swaps the dashboard's timeline panel for the finished runs, and h again
+// swaps it back; ? lists the key.
+func TestDesk_HToggleSwapsTimelineAndHistory(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-alpha.sh", plainScript("alpha"))
+	h.drop("02-beta.sh", plainScript("beta"))
+	h.scan()
+	h.press("y") // alpha runs and ends: there is a finished run to show
+	h.scan()
+	if f := ansi.Strip(h.m.dashboard().render()); !strings.Contains(f, "╭ timeline") || strings.Contains(f, "╭ history") {
+		t.Fatalf("the dashboard should open on the timeline:\n%s", f)
+	}
+	h.press("h")
+	if f := ansi.Strip(h.m.dashboard().render()); !strings.Contains(f, "╭ history") || strings.Contains(f, "╭ timeline") {
+		t.Errorf("h should show the history in place of the timeline:\n%s", f)
+	}
+	h.press("h")
+	if f := ansi.Strip(h.m.dashboard().render()); !strings.Contains(f, "╭ timeline") {
+		t.Errorf("h again should bring the timeline back:\n%s", f)
+	}
+	if !strings.Contains(strings.Join(deskKeyLines(), "\n"), "h    show the finished runs") {
+		t.Errorf("? does not list h:\n%s", strings.Join(deskKeyLines(), "\n"))
+	}
+}

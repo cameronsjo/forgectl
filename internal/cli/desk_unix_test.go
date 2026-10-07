@@ -650,17 +650,17 @@ func TestDeskLegacyDoneNames(t *testing.T) {
 		t.Fatalf("status --json: %d done, %d legacy; want 44 and 4", len(snap.Done), legacyRows)
 	}
 
-	stubDeskEnv(t, map[string]string{"DESK_DIR": dir, "COLUMNS": "100", "LINES": "80"})
+	stubDeskEnv(t, map[string]string{"DESK_DIR": dir, "COLUMNS": "100", "LINES": "200"})
 	frame, _, err := deskRun(t, deskDeps(), "--frame")
 	wantExit(t, err, 0)
-	rows := 0 // history rows: "? name … no exit recorded"
+	rows := 0 // timeline entries: "│ ended with no exit recorded"
 	for _, l := range strings.Split(frame, "\n") {
-		if strings.HasPrefix(l, "│ ? ") && strings.Contains(l, "no exit recorded") {
+		if strings.Contains(l, "ended with no exit recorded") {
 			rows++
 		}
 	}
 	if rows != 4 {
-		t.Errorf("history shows %d no-exit rows, want 4:\n%s", rows, frame)
+		t.Errorf("the timeline shows %d no-exit rows, want 4:\n%s", rows, frame)
 	}
 	for _, n := range []string{"07b-cleanup", "operator-grow"} {
 		if !strings.Contains(frame, n) {
@@ -841,7 +841,20 @@ func TestDeskNoIconsHonorsConfig(t *testing.T) {
 func TestDeskHelpKeysParagraphWraps(t *testing.T) {
 	out, _, err := deskRun(t, deskDeps(), "--help")
 	wantExit(t, err, 0)
-	if !strings.Contains(out, "everything on screen (asks first, listing each full sha256), j/k move,") {
-		t.Errorf("dashboard keys paragraph:\n%s", out)
+	_, para, ok := strings.Cut(out, "Dashboard keys:")
+	para, _, _ = strings.Cut(para, "\n\n")
+	if !ok {
+		t.Fatalf("no dashboard keys paragraph:\n%s", out)
+	}
+	for _, l := range strings.Split(para, "\n") {
+		if len(l) > 80 {
+			t.Errorf("keys paragraph line is %d columns: %q", len(l), l)
+		}
+	}
+	// Every dashboard key, including the timeline's t and the history's h.
+	for _, want := range []string{"t the\ntimeline", "h the finished runs", "j/k move", "? the keys"} {
+		if !strings.Contains(para, want) {
+			t.Errorf("keys paragraph lacks %q:\n%s", want, para)
+		}
 	}
 }

@@ -244,11 +244,11 @@ func TestDeskFrame_TilesCollapseBelow72(t *testing.T) {
 	}
 }
 
-// TestDeskFrame_Legacy shows every legacy run: 40 with an exit code and 4 as
-// "no exit recorded", none hidden.
+// TestDeskFrame_Legacy shows every legacy run in the history panel (h): 40
+// with an exit code and 4 as "no exit recorded", none hidden.
 func TestDeskFrame_Legacy(t *testing.T) {
 	snap, opts := legacySnapshot()
-	out := ansi.Strip(RenderDeskFrame(snap, 120, 60, deskNow, opts))
+	out := ansi.Strip(deskFrame{snap: snap, width: 120, height: 60, now: deskNow, opts: opts, history: true}.render())
 	if n := strings.Count(out, "no exit recorded"); n != 4 {
 		t.Errorf("%d rows say no exit recorded, want 4", n)
 	}
@@ -860,7 +860,7 @@ func TestDeskFrame_EmptyStateSaysHowItFills(t *testing.T) {
 // counts agree: "started today" beside "no finished runs yet".
 func TestDeskFrame_IndicatorsAreLabelled(t *testing.T) {
 	snap, opts := busySnapshot()
-	out := ansi.Strip(RenderDeskFrame(snap, 120, 40, deskNow, opts))
+	out := ansi.Strip(deskFrame{snap: snap, width: 120, height: 40, now: deskNow, opts: opts, history: true}.render())
 	for _, want := range []string{"desk ● 3 waiting", "bar: run length, longest full", "started today"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("busy frame lacks %q:\n%s", want, out)
@@ -869,7 +869,7 @@ func TestDeskFrame_IndicatorsAreLabelled(t *testing.T) {
 	run := item("01-new", desk.KindScript, desk.StateRunning)
 	run.Started = ago(12 * time.Second)
 	snap = &desk.Snapshot{Dir: "/d", Taken: deskNow, Running: []desk.Item{run}}
-	out = ansi.Strip(RenderDeskFrame(snap, 120, 30, deskNow, opts))
+	out = ansi.Strip(deskFrame{snap: snap, width: 120, height: 30, now: deskNow, opts: opts, history: true}.render())
 	for _, want := range []string{"desk ● 1 running", "0:12 so far", "no finished runs yet", "1 started today"[2:]} {
 		if !strings.Contains(out, want) {
 			t.Errorf("frame lacks %q:\n%s", want, out)
@@ -1005,5 +1005,74 @@ func TestDeskFrame_HintsHideKeysWithNothingToActOn(t *testing.T) {
 		if strings.Contains(footer, "v view") && !strings.Contains(footer, "l log") {
 			t.Errorf("width %d: v view kept over l log: %q", w, footer)
 		}
+	}
+}
+
+// The dashboard's bottom panel is the timeline: what needs the operator
+// first, then the desk by day, newest first. The history is behind h.
+func TestDeskFrame_TimelineIsTheDefaultPanel(t *testing.T) {
+	snap, opts := busySnapshot()
+	out := ansi.Strip(RenderDeskFrame(snap, 120, 60, deskNow, opts))
+	for _, want := range []string{"╭ timeline", "Needs you", "waiting for you · queued 12m ago", "Today", "ran ok"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the default frame lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "╭ history") || strings.Contains(out, "bar: run length") {
+		t.Errorf("the default frame still draws the history:\n%s", out)
+	}
+	if strings.Index(out, "Needs you") > strings.Index(out, "Today") {
+		t.Errorf("Needs you must lead the timeline:\n%s", out)
+	}
+	if !strings.Contains(out, "h history") {
+		t.Errorf("the footer does not offer h:\n%s", out)
+	}
+}
+
+func TestDeskFrame_HistoryReplacesTheTimeline(t *testing.T) {
+	snap, opts := busySnapshot()
+	out := ansi.Strip(deskFrame{snap: snap, width: 120, height: 60, now: deskNow, opts: opts, history: true}.render())
+	if !strings.Contains(out, "╭ history") || strings.Contains(out, "╭ timeline") {
+		t.Errorf("h should swap the timeline panel for the history:\n%s", out)
+	}
+}
+
+// A panel shorter than the timeline ends on how many entries it left out,
+// and never on a heading or half an entry.
+func TestDeskFrame_TimelinePanelTrims(t *testing.T) {
+	snap, opts := legacySnapshot()
+	out := ansi.Strip(deskFrame{snap: snap, width: 120, height: 36, now: deskNow, opts: opts}.render())
+	lines := strings.Split(out, "\n")
+	var more string
+	for i, l := range lines {
+		if strings.Contains(l, " more · t to open") {
+			more = l
+			if !strings.HasPrefix(lines[i+1], "╰") {
+				t.Errorf("the more line is not the panel's last row: %q", lines[i+1])
+			}
+		}
+	}
+	if more == "" {
+		t.Fatalf("a 44-entry timeline in a 36-line window has no more line:\n%s", out)
+	}
+}
+
+// A short window keeps the queue and focus, and the timeline shrinks to one
+// summary line before either gives up a row.
+func TestDeskFrame_ShortWindowTimelineIsOneLine(t *testing.T) {
+	snap, opts := busySnapshot()
+	f := deskFrame{snap: snap, width: 110, height: 20, now: deskNow, opts: opts}
+	out := ansi.Strip(f.render())
+	if strings.Contains(out, "╭ timeline") {
+		t.Errorf("a 20-line window has no room for the timeline panel:\n%s", out)
+	}
+	if !strings.Contains(out, "timeline · 3 need you") || !strings.Contains(out, "t to open") {
+		t.Errorf("the summary line is missing:\n%s", out)
+	}
+	if !strings.Contains(out, "╭ queue") || !strings.Contains(out, "╭ focus") || !f.focusShown() {
+		t.Errorf("queue and focus must keep their rows:\n%s", out)
+	}
+	if n := len(strings.Split(out, "\n")); n != 20 {
+		t.Errorf("frame is %d lines, want 20", n)
 	}
 }
