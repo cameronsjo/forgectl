@@ -2,7 +2,7 @@
 status: planned
 next: "Proposed, awaiting Cameron's approval and his answer to the autonomy question. On approval: T8.1 (cobra-free worker ops), T8.2 (queue), T8.3 (drain), T8.4 (notify, review, live check)."
 branch: plan/atelier-p2-drain
-pr: "—"
+pr: cameronsjo/forgectl#1137
 updated: 2026-10-06
 approved_session_id: "—"
 date: 2026-10-06
