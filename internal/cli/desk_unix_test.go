@@ -833,3 +833,13 @@ func TestDeskNoIconsHonorsConfig(t *testing.T) {
 		t.Error("config no_icons did not select ASCII")
 	}
 }
+
+// desk --help's key paragraph stays within 80 columns (#1107 review: a word
+// was left alone on its own line).
+func TestDeskHelpKeysParagraphWraps(t *testing.T) {
+	out, _, err := deskRun(t, deskDeps(), "--help")
+	wantExit(t, err, 0)
+	if !strings.Contains(out, "everything on screen (asks first, listing each full sha256), j/k move,") {
+		t.Errorf("dashboard keys paragraph:\n%s", out)
+	}
+}

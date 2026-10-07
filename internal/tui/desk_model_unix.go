@@ -1100,7 +1100,7 @@ func (m deskModel) View() tea.View {
 			n++
 		}
 	}
-	v.WindowTitle = fmt.Sprintf("desk ● %d waiting", n)
+	v.WindowTitle = asciiFrame(fmt.Sprintf("desk ● %d waiting", n), m.opts.ASCII)
 	return v
 }
 

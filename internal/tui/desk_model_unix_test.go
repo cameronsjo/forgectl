@@ -1498,3 +1498,12 @@ func TestDesk_StartedLineBecomesLost(t *testing.T) {
 		t.Errorf("footer after the run was lost = %q", footer)
 	}
 }
+
+// --no-icons reaches the window title too.
+func TestDesk_WindowTitleFollowsNoIcons(t *testing.T) {
+	h := newDeskHarness(t)
+	h.m.opts.ASCII = true
+	if title := h.m.View().WindowTitle; strings.ContainsRune(title, '●') {
+		t.Errorf("ASCII window title = %q", title)
+	}
+}

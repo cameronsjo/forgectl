@@ -437,9 +437,13 @@ func (f deskFrame) waiting() (n, tty int, oldest time.Time) {
 func (f deskFrame) header(st theme.Styles, width int) string {
 	n, _, _ := f.waiting()
 	// The dot says what it means in words, so it reads without colour (#1107).
-	dot := st.Dim.Render("○ nothing waiting")
-	if n > 0 {
+	dot := st.Dim.Render("○ idle")
+	switch running := f.runningCount(); {
+	case n > 0:
 		dot = st.Accent.Render("● " + strconv.Itoa(n) + " waiting")
+	case running > 0:
+		// Nothing waits for the operator, but the desk is not idle.
+		dot = st.Active.Render("● " + strconv.Itoa(running) + " running")
 	}
 	parts := []string{"forgectl " + deskText(f.opts.Version)}
 	if f.opts.Host != "" {
@@ -1224,4 +1228,18 @@ func hintLine(st theme.Styles, width int, keys [][2]string) string {
 		parts[i] = st.Accent.Render(k[0]) + " " + st.Muted.Render(k[1])
 	}
 	return " " + strings.Join(parts, sep)
+}
+
+// runningCount is how many runs are going now: running items that are not
+// lost.
+func (f deskFrame) runningCount() int {
+	n := 0
+	if f.snap != nil {
+		for _, it := range f.snap.Running {
+			if it.State != desk.StateLost {
+				n++
+			}
+		}
+	}
+	return n
 }
