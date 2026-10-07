@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -268,5 +269,140 @@ func TestWorkerLaunchRefusesANonWorkerBuild(t *testing.T) {
 	}
 	if row := onlyRow(t, led); row.Stage != worker.StageFailed {
 		t.Fatalf("stage = %q, want failed", row.Stage)
+	}
+}
+
+// inProcessSteps wires the in-process launch's real steps (workerSetup.steps)
+// with git and herdr stubbed: the worktree is a temp dir and launch captures
+// the invocation instead of starting it. The build step is the real one, so
+// the worker floor and the environment allowlist apply as they do in a drain
+// launch. The claude binary resolves to an executable stub.
+func inProcessSteps(t *testing.T, led *worker.Ledger, launched *[]launch.Invocation) workerSteps {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // G306: the stub must be executable to resolve as the claude binary
+		t.Fatal(err)
+	}
+	t.Setenv("FORGECTL_CLAUDE_BIN", bin)
+	cwd, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := module.Deps{Cfg: config.Config{Launch: config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: "acceptEdits"}}}}
+	setup := workerSetup{top: testRepoTop, led: led, self: "/nonexistent/forgectl"}
+	steps := setup.steps(deps, workerSpec{name: "w1", branch: "feat/w1", harness: "claude"}, "Fix it.", nil, io.Discard)
+	steps.addWorktree = func(context.Context) (worker.Worktree, error) {
+		return worker.Worktree{Path: cwd, Branch: "feat/w1", Base: "abc123"}, nil
+	}
+	steps.launch = func(_ context.Context, inv launch.Invocation) (backend.Ref, error) {
+		*launched = append(*launched, inv)
+		return testHerdrRef(t), nil
+	}
+	return steps
+}
+
+// TestInProcessLaunchKeepsTheWorkerFloor pins the security invariant of the
+// in-process launch (the drain's path): the invocation is built as a worker,
+// so a variable set in the caller's environment does not reach the worker,
+// and a build that is not a worker is refused before anything starts.
+func TestInProcessLaunchKeepsTheWorkerFloor(t *testing.T) {
+	t.Run("caller env does not reach the worker", func(t *testing.T) {
+		t.Setenv("FORGECTL_DRAIN_SENTINEL", "caller-only")
+		led := testWorkerLedger(t)
+		var launched []launch.Invocation
+		attempt, err := attemptWorker(context.Background(), led, "w1", "feat/w1", inProcessSteps(t, led, &launched))
+		if err != nil {
+			t.Fatalf("attemptWorker: %v", err)
+		}
+		if len(launched) != 1 {
+			t.Fatalf("launched %d invocations, want 1", len(launched))
+		}
+		for _, e := range launched[0].Env {
+			if strings.HasPrefix(e, "FORGECTL_DRAIN_SENTINEL=") || strings.HasPrefix(e, "FORGECTL_CLAUDE_BIN=") {
+				t.Fatalf("worker env kept the caller's %s", e)
+			}
+		}
+		if !slices.Contains(launched[0].Args, "--setting-sources") {
+			t.Fatalf("argv %q: not a worker build", launched[0].Args)
+		}
+		if attempt.row == nil || attempt.row.Stage != worker.StageLaunched || attempt.createdNothing() {
+			t.Fatalf("attempt row = %+v, want launched", attempt.row)
+		}
+	})
+	t.Run("a non-worker build is refused", func(t *testing.T) {
+		led := testWorkerLedger(t)
+		var launched []launch.Invocation
+		steps := inProcessSteps(t, led, &launched)
+		build := steps.build
+		steps.build = func(cwd string) (launch.BuiltInvocation, error) {
+			b, err := build(cwd)
+			b.Worker = false
+			return b, err
+		}
+		attempt, err := attemptWorker(context.Background(), led, "w1", "feat/w1", steps)
+		if err == nil {
+			t.Fatal("a non-worker build was accepted")
+		}
+		if len(launched) != 0 {
+			t.Fatal("a non-worker build was launched")
+		}
+		if attempt.row == nil || attempt.row.Stage != worker.StageFailed || attempt.row.Worktree == "" {
+			t.Fatalf("attempt row = %+v, want failed naming the worktree", attempt.row)
+		}
+		if attempt.createdNothing() {
+			t.Fatal("a failure after the worktree was reported as creating nothing")
+		}
+	})
+}
+
+// TestInProcessAttemptTellsCreationApart: the drain retries only an attempt
+// that created nothing. A failure before the worktree, and a name refused at
+// Begin, created nothing; a failure after the worktree did not.
+func TestInProcessAttemptTellsCreationApart(t *testing.T) {
+	t.Run("failure before the worktree", func(t *testing.T) {
+		led := testWorkerLedger(t)
+		steps := goodSteps(t)
+		steps.addWorktree = func(context.Context) (worker.Worktree, error) {
+			return worker.Worktree{}, errors.New("base lookup failed")
+		}
+		attempt, err := attemptWorker(context.Background(), led, "w1", "feat/w1", steps)
+		if err == nil || attempt.row == nil || attempt.row.Stage != worker.StageFailed || !attempt.createdNothing() {
+			t.Fatalf("err %v, row %+v: want a failed row that created nothing", err, attempt.row)
+		}
+	})
+	t.Run("name taken", func(t *testing.T) {
+		led := testWorkerLedger(t)
+		if _, err := attemptWorker(context.Background(), led, "w1", "feat/w1", goodSteps(t)); err != nil {
+			t.Fatal(err)
+		}
+		attempt, err := attemptWorker(context.Background(), led, "w1", "feat/w1", goodSteps(t))
+		if !errors.Is(err, worker.ErrNameTaken) || attempt.row != nil || !attempt.createdNothing() {
+			t.Fatalf("err %v, row %+v: want ErrNameTaken and no row of this attempt's", err, attempt.row)
+		}
+	})
+	t.Run("failure after the worktree", func(t *testing.T) {
+		led := testWorkerLedger(t)
+		steps := goodSteps(t)
+		steps.launch = func(context.Context, launch.Invocation) (backend.Ref, error) {
+			return backend.Ref{}, errors.New("herdr went away")
+		}
+		attempt, err := attemptWorker(context.Background(), led, "w1", "feat/w1", steps)
+		if err == nil || attempt.createdNothing() || attempt.row == nil || attempt.row.Worktree == "" {
+			t.Fatalf("err %v, row %+v: want a failed row naming the worktree", err, attempt.row)
+		}
+	})
+}
+
+// TestInProcessLaunchRefusesBeforeTouchingAnything: the in-process launch
+// checks the name before it reaches herdr, git, or the ledger.
+func TestInProcessLaunchRefusesBeforeTouchingAnything(t *testing.T) {
+	for _, name := range []string{"", "../w1", "W1"} {
+		attempt, err := launchWorker(context.Background(), io.Discard, module.Deps{}, workerSpec{target: ".", name: name, branch: "feat/x"}, "Fix it.")
+		if code := ExitCode(err); code != 2 {
+			t.Fatalf("name %q: exit code = %d (err %v), want 2", name, code, err)
+		}
+		if attempt.row != nil || !attempt.createdNothing() {
+			t.Fatalf("name %q: attempt %+v, want nothing created", name, attempt)
+		}
 	}
 }

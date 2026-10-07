@@ -147,11 +147,11 @@ No merge, PR status, or close after merge (P4). No intake from GitHub or the boa
 
 ### T8.1: cobra-free worker operations (one PR)
 
-- [ ] Give launch, screen read, and ledger open an `io.Writer` in place of `cmd` (`surface_ready.go:144`, `surface_list.go:118`, `surface_worker.go:137`).
-- [ ] Split `launchBrief` so an in-process caller passes brief text directly; `readBriefArg`'s `@path` handling stays CLI-only.
-- [ ] Return the ledger row the attempt left alongside the error, so a caller can tell a failure before creation from one after.
-- [ ] Keep `buildWorkerInvocation` and the `!built.Worker` refusal on the in-process path. Test: a non-worker invocation is refused, and a sentinel env var set on the caller does not reach the worker's `Invocation.Env`.
-- [ ] No behavior change for the CLI; existing tests stay green.
+- [x] Give launch, screen read, and ledger open an `io.Writer` in place of `cmd` (`surface_ready.go:144`, `surface_list.go:118`, `surface_worker.go:137`).
+- [x] Split `launchBrief` so an in-process caller passes brief text directly; `readBriefArg`'s `@path` handling stays CLI-only.
+- [x] Return the ledger row the attempt left alongside the error, so a caller can tell a failure before creation from one after.
+- [x] Keep `buildWorkerInvocation` and the `!built.Worker` refusal on the in-process path. Test: a non-worker invocation is refused, and a sentinel env var set on the caller does not reach the worker's `Invocation.Env`.
+- [x] No behavior change for the CLI; existing tests stay green.
 
 ### T8.2: queue store and verbs (one PR)
 
@@ -198,5 +198,7 @@ Panel: plan-reviewer, security-posture-reviewer (Opus), operability-reviewer, ca
 - **Retry cap is 3 per row, not per step,** and only for failures that created nothing.
 - **Autonomy allow list (T8.0) added at approval,** per the Autonomy decision; it is the only change to worker posture in P2.
 - **P7a (skill enqueue step) ships separately** in `cameronsjo/cadence` after T8.2; until then the coordinator calls `surface enqueue` directly.
+- **T8.1 exports `worker.CreatedNothing`** (was `createdNothing`) so the drain can apply the retry rule to the row an attempt left; the in-process launch is `launchWorker(ctx, warn, deps, workerSpec, briefText) (workerAttempt, error)`, and `workerAttempt.createdNothing()` is the rule. A row that cannot be read back after an attempt counts as having created something, so the drain fails it rather than retrying.
+- **T8.1 routes the CLI launch through the same `attemptWorker` core as the drain,** so both paths share the `!built.Worker` refusal. The only CLI-side difference is one ledger read after the attempt, which changes no output or exit code.
 
 ## Learnings

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -114,9 +115,10 @@ type workerLedgerContext struct {
 }
 
 // openWorkerLedger resolves repo and opens its ledger for the current herdr
-// session. Every failure is a usage or setup error (exit 2).
-func openWorkerLedger(cmd *cobra.Command, deps module.Deps, repo string) (*workerLedgerContext, error) {
-	adapter, err := newHerdrAdapter(cmd.ErrOrStderr())
+// session. Every failure is a usage or setup error (exit 2). warn takes the
+// herdr adapter's setup warnings.
+func openWorkerLedger(ctx context.Context, warn io.Writer, deps module.Deps, repo string) (*workerLedgerContext, error) {
+	adapter, err := newHerdrAdapter(warn)
 	if err != nil {
 		return nil, WithExitCode(err, 2)
 	}
@@ -128,7 +130,7 @@ func openWorkerLedger(cmd *cobra.Command, deps module.Deps, repo string) (*worke
 	if err != nil {
 		return nil, WithExitCode(err, 2)
 	}
-	top, err := worker.RepoTop(cmd.Context(), deps.Runner, target)
+	top, err := worker.RepoTop(ctx, deps.Runner, target)
 	if err != nil {
 		return nil, WithExitCode(err, 2)
 	}
@@ -140,7 +142,7 @@ func openWorkerLedger(cmd *cobra.Command, deps module.Deps, repo string) (*worke
 }
 
 func runSurfaceList(cmd *cobra.Command, deps module.Deps, opts listOptions) error {
-	w, err := openWorkerLedger(cmd, deps, opts.Repo)
+	w, err := openWorkerLedger(cmd.Context(), cmd.ErrOrStderr(), deps, opts.Repo)
 	if err != nil {
 		return err
 	}
