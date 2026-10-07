@@ -58,7 +58,7 @@ func docsFlagError(verb string) func(*cobra.Command, error) error {
 func docsArgs(verb string, inner cobra.PositionalArgs) cobra.PositionalArgs {
 	return func(cmd *cobra.Command, args []string) error {
 		if err := inner(cmd, args); err != nil {
-			return docsFail(cmd, verb, "", err, 2, jsonFlagParsed(cmd))
+			return docsFail(cmd, verb, "", usageArgError(cmd, args, err), 2, jsonFlagParsed(cmd))
 		}
 		return nil
 	}

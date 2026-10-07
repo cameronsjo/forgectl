@@ -119,7 +119,7 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"root","path","title","modTime"}] to stdout (an empty list is [])`)
 	cmd.Flags().DurationVar(&timeout, "timeout", 15*time.Second, "walk deadline, e.g. 15s or 2m")
 	cmd.Flags().IntVar(&limit, "limit", 0, "print only the first N entries, after the full walk completes (0 or unset: no limit)")
 	cmd.SetFlagErrorFunc(docsFlagError("docs list"))

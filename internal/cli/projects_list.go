@@ -159,7 +159,7 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the rows to stdout as a JSON array of {host,owner,name,sshUrl,mirror,private,cloned,localPath,status} (sshUrl, mirror, private, localPath only when set); with --limit, a {truncated,total,shown,limit,hint,notes,items} document instead")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"host","owner","name","sshUrl","mirror","private","cloned","localPath","status"}] to stdout (an empty list is []); with --limit, {"truncated","total","shown","limit","hint","notes","items"} instead`)
 	cmd.Flags().BoolVar(&strict, "strict", false, "exit 1 when any host produced a degradation note (output is still written)")
 	cmd.Flags().StringVar(&host, "host", "", "filter by hostname (e.g. github.com, git.example.com) or \"local\"")
 	bound.addFlags(cmd, projectsJSONKeys)

@@ -175,6 +175,30 @@ func runOrganize(t *testing.T, cfg config.Config, w *herdrWorld, args ...string)
 
 var inSession = herdrSeams{env: map[string]string{"HERDR_ENV": "1"}}
 
+// A newline in the organize message reached a --json consumer as a literal
+// backslash and n: termsafe.Error flattens newlines, and the problems were
+// joined with errors.Join's (forgectl#1087).
+func TestHerdrOrganize_NoRules_MessageHasNoLiteralBackslashN(t *testing.T) {
+	setHerdrSeams(t, herdrSeams{
+		sessionErr:  herdr.ErrNotInSession,
+		legacyRules: true,
+		env:         map[string]string{"HERDR_ORGANIZE_RULES": "/x/rules.toml"},
+	})
+	r := runOrganize(t, config.Config{}, nil)
+	if r.err == nil {
+		t.Fatal("want an error")
+	}
+	msg := r.err.Error()
+	if strings.Contains(msg, `\n`) || strings.Contains(msg, "\n") {
+		t.Errorf("error carries a newline or a literal backslash-n: %q", msg)
+	}
+	for _, want := range []string{"no rules are configured", "forgectl no longer reads", "HERDR_ORGANIZE_RULES is set", "not inside a herdr session"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error lacks %q: %q", want, msg)
+		}
+	}
+}
+
 func TestHerdrOrganize_NotInHerdrAndNoConfig_ReportsBothInOneRun(t *testing.T) {
 	setHerdrSeams(t, herdrSeams{sessionErr: herdr.ErrNotInSession})
 	r := runOrganize(t, config.Config{}, nil)

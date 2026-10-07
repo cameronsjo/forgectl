@@ -107,7 +107,7 @@ refused. Exit 2: a usage or setup error.
 	}
 	cmd.Flags().StringVar(&opts.Repo, "repo", ".", "repository the worker was launched from (project name or path)")
 	cmd.Flags().BoolVar(&opts.KeepWorktree, "keep-worktree", false, "close the workspace and keep the worktree")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, "print the result as JSON")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"name","branch","closed","workspace","worktree","kept_because","forgotten","reason","note"} as JSON`)
 	return cmd
 }
 
