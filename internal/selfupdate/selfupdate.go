@@ -15,10 +15,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"path"
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/meta"
+	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
 // CaskRef is the fully-qualified Homebrew cask reference `doctor`/`upgrade`
@@ -60,8 +63,8 @@ func homebrewSafeEnv() map[string]string {
 // ErrTapUpdate and ErrCaskUpgrade mark which step of Upgrade failed, so a
 // caller can word the failure from fixed text (#761) without parsing brew's
 // argv or stderr, which relay what the tap's server and git transport send.
-// Each wraps alongside the step's own error; errors.As still reaches the
-// underlying exec.CommandError.
+// A *StepError wraps one of them alongside the step's own error; errors.As
+// still reaches the underlying exec.CommandError.
 var (
 	ErrTapUpdate   = errors.New("brew update failed")
 	ErrCaskUpgrade = errors.New("brew upgrade --cask failed")
@@ -91,6 +94,44 @@ func CheckOutdated(ctx context.Context, run exec.Runner) (outdated bool, detail 
 	return out != "", out, nil
 }
 
+// Result is what a successful Upgrade did.
+type Result struct {
+	// Output is brew's combined output across both steps. It is untrusted
+	// text: callers redact and escape it before showing it (Tail does).
+	Output string
+	// AlreadyCurrent is true when `brew upgrade --cask` exited non-zero but
+	// the cask is installed and nothing is outdated, so there was nothing to
+	// do. Output still holds what brew printed.
+	AlreadyCurrent bool
+}
+
+// StepError is a failed Upgrade step. Error() is the fixed sentinel text, never
+// brew's own (#761); the fields carry what an operator needs to see why.
+type StepError struct {
+	// Step is the command that failed, as shown to the operator.
+	Step string
+	// Kind is ErrTapUpdate or ErrCaskUpgrade.
+	Kind error
+	// ExitCode is brew's exit status, or -1 when it never exited normally.
+	ExitCode int
+	// Output is what the step printed (stdout then stderr), unsanitized.
+	Output string
+	// Cause is a fixed-text diagnosis from a read-only follow-up probe, or "".
+	Cause string
+	// Err is the runner's error, a *exec.CommandError in production.
+	Err error
+}
+
+func (e *StepError) Error() string { return e.Kind.Error() }
+
+// Unwrap lets errors.Is reach the sentinel and errors.As the CommandError.
+func (e *StepError) Unwrap() []error { return []error{e.Kind, e.Err} }
+
+// caskToken is the unqualified cask name. `brew list --cask` does not accept
+// the tap-qualified CaskRef for an installed cask on every brew version, so the
+// installed-or-not probe uses the token.
+var caskToken = path.Base(CaskRef)
+
 // Upgrade applies the safe upgrade path: `brew update` (refresh the tap
 // index) followed by `brew upgrade --cask` for forgectl's own cask. Both
 // commands' download, checksum verification (the cask's declared sha256),
@@ -98,23 +139,103 @@ func CheckOutdated(ctx context.Context, run exec.Runner) (outdated bool, detail 
 // on disk itself, so there is no temp file, no rename, and nothing here that
 // could leave a half-written executable behind; a failure at either step
 // leaves the previously-installed binary exactly as it was.
-func Upgrade(ctx context.Context, run exec.Runner) (string, error) {
+//
+// When stream is non-nil each step prints a "== <command>" header to it and
+// then brew's output, redacted and escaped line by line, as brew produces it
+// (a runner without live streaming prints it when the step ends). Output is
+// captured either way. A failed step returns a *StepError.
+func Upgrade(ctx context.Context, run exec.Runner, stream io.Writer) (Result, error) {
 	var parts []string
 
-	updateOut, err := run.RunWithEnv(ctx, homebrewSafeEnv(), "brew", "update")
-	if updateOut != "" {
-		parts = append(parts, updateOut)
+	out, err := runStep(ctx, run, stream, "brew update", "update")
+	if out != "" {
+		parts = append(parts, out)
 	}
 	if err != nil {
-		return strings.Join(parts, "\n\n"), fmt.Errorf("%w: %w", ErrTapUpdate, err)
+		return Result{Output: strings.Join(parts, "\n\n")}, newStepError("brew update", ErrTapUpdate, out, err, "")
 	}
 
-	upgradeOut, err := run.RunWithEnv(ctx, homebrewSafeEnv(), "brew", "upgrade", "--cask", CaskRef)
-	if upgradeOut != "" {
-		parts = append(parts, upgradeOut)
+	step := "brew upgrade --cask " + CaskRef
+	out, err = runStep(ctx, run, stream, step, "upgrade", "--cask", CaskRef)
+	if out != "" {
+		parts = append(parts, out)
 	}
 	if err != nil {
-		return strings.Join(parts, "\n\n"), fmt.Errorf("%w: %w", ErrCaskUpgrade, err)
+		cause, current := diagnoseCaskFailure(ctx, run)
+		if current {
+			return Result{Output: strings.Join(parts, "\n\n"), AlreadyCurrent: true}, nil
+		}
+		return Result{Output: strings.Join(parts, "\n\n")}, newStepError(step, ErrCaskUpgrade, out, err, cause)
 	}
-	return strings.Join(parts, "\n\n"), nil
+	return Result{Output: strings.Join(parts, "\n\n")}, nil
+}
+
+func newStepError(step string, kind error, out string, err error, cause string) *StepError {
+	code := -1
+	var ce *exec.CommandError
+	if errors.As(err, &ce) {
+		code = ce.ExitCode
+	}
+	return &StepError{Step: step, Kind: kind, ExitCode: code, Output: out, Cause: cause, Err: err}
+}
+
+// runStep runs one brew step with the pinned environment and returns what it
+// printed. On failure the output is rebuilt from the CommandError, because the
+// Runner contract returns no stdout with an error.
+func runStep(ctx context.Context, run exec.Runner, stream io.Writer, step string, args ...string) (string, error) {
+	env := homebrewSafeEnv()
+	if stream != nil {
+		_, _ = fmt.Fprintf(stream, "== %s\n", step)
+	}
+	if sr, ok := run.(exec.EnvStreamingRunner); ok && stream != nil {
+		capture := &captureBuffer{}
+		live := newSafeWriter(stream)
+		w := io.MultiWriter(capture, live)
+		err := sr.RunStreamingWithEnv(ctx, env, w, w, "brew", args...)
+		live.Flush()
+		return strings.TrimRight(capture.String(), "\n"), err
+	}
+	out, err := run.RunWithEnv(ctx, env, "brew", args...)
+	if err != nil {
+		out = commandErrorOutput(err)
+	}
+	if stream != nil && out != "" {
+		live := newSafeWriter(stream)
+		_, _ = io.WriteString(live, out+"\n")
+		live.Flush()
+	}
+	return out, err
+}
+
+// commandErrorOutput is what a failed command printed: stdout, then stderr.
+func commandErrorOutput(err error) string {
+	var ce *exec.CommandError
+	if !errors.As(err, &ce) {
+		return ""
+	}
+	return strings.Trim(strings.Join([]string{redact.Stdout(ce.Output), ce.Stderr}, "\n"), "\n")
+}
+
+// diagnoseCaskFailure runs two read-only probes after a failed `brew upgrade
+// --cask`. current is true when the cask is installed and nothing is outdated,
+// so the failure was only "nothing to do". cause is a fixed-text reason when
+// the cask is not installed as a cask at all (a formula install, or a copy
+// put in place by hand), and "" when the probes explain nothing.
+func diagnoseCaskFailure(ctx context.Context, run exec.Runner) (cause string, current bool) {
+	listed, err := run.RunWithEnv(ctx, homebrewSafeEnv(), "brew", "list", "--cask", "--versions", caskToken)
+	if err != nil {
+		var ce *exec.CommandError
+		if errors.As(err, &ce) && ce.ExitCode == 1 && strings.TrimSpace(ce.Output) == "" {
+			return "forgectl is not installed as a Homebrew cask (installed as a formula, or by hand?), so brew upgrade --cask has nothing to upgrade. Reinstall with: brew install --cask " + CaskRef, false
+		}
+		return "", false
+	}
+	if strings.TrimSpace(listed) == "" {
+		return "", false
+	}
+	outdated, _, err := CheckOutdated(ctx, run)
+	if err != nil {
+		return "", false
+	}
+	return "", !outdated
 }

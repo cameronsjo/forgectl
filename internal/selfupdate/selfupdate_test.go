@@ -1,8 +1,12 @@
 package selfupdate
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -72,7 +76,8 @@ func TestUpgrade_RunsUpdateThenUpgradeInOrder(t *testing.T) {
 	fr := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
 		return strings.Join(append([]string{name}, args...), " ") + " ok", nil
 	}}
-	out, err := Upgrade(context.Background(), fr)
+	res, err := Upgrade(context.Background(), fr, nil)
+	out := res.Output
 	if err != nil {
 		t.Fatalf("Upgrade: %v", err)
 	}
@@ -93,7 +98,7 @@ func TestUpgrade_StopsAfterUpdateFailure(t *testing.T) {
 		}
 		return "", nil
 	}}
-	_, err := Upgrade(context.Background(), fr)
+	_, err := Upgrade(context.Background(), fr, nil)
 	if err == nil {
 		t.Fatal("Upgrade returned nil error when brew update failed")
 	}
@@ -160,10 +165,210 @@ func TestBrewCalls_PinSecurityRelevantEnv(t *testing.T) {
 	assertHomebrewSafeEnv(t, fr.Last())
 
 	fr = &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) { return "", nil }}
-	if _, err := Upgrade(context.Background(), fr); err != nil {
+	if _, err := Upgrade(context.Background(), fr, nil); err != nil {
 		t.Fatalf("Upgrade: %v", err)
 	}
 	for _, call := range fr.Calls {
 		assertHomebrewSafeEnv(t, call)
+	}
+}
+
+// failingCommand is a brew failure the way OSRunner reports one: stdout in
+// Output, stderr in Stderr, no output returned alongside.
+func failingCommand(name string) error {
+	return &exec.CommandError{Name: name, Output: "==> Downloading", Stderr: "Error: boom\x1b[2J", ExitCode: 1, Err: errors.New("exit status 1")}
+}
+
+func TestUpgrade_UpgradeFailure_CarriesStepAndOutput(t *testing.T) {
+	fr := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		switch args[0] {
+		case "upgrade":
+			return "", failingCommand("brew")
+		case "list":
+			return "forgectl 0.31.0", nil
+		case "outdated":
+			return "forgectl (0.31.0) < 0.32.0", nil
+		}
+		return "updated", nil
+	}}
+	_, err := Upgrade(context.Background(), fr, nil)
+	var se *StepError
+	if !errors.As(err, &se) {
+		t.Fatalf("err = %v, want a *StepError", err)
+	}
+	if !errors.Is(err, ErrCaskUpgrade) || errors.Is(err, ErrTapUpdate) {
+		t.Errorf("err = %v, want ErrCaskUpgrade only", err)
+	}
+	var ce *exec.CommandError
+	if !errors.As(err, &ce) {
+		t.Error("the CommandError is no longer on the chain")
+	}
+	if se.Step != "brew upgrade --cask "+CaskRef || se.ExitCode != 1 {
+		t.Errorf("step = %q exit = %d", se.Step, se.ExitCode)
+	}
+	if !strings.Contains(se.Output, "==> Downloading") || !strings.Contains(se.Output, "Error: boom") {
+		t.Errorf("Output = %q, want stdout then stderr", se.Output)
+	}
+	if se.Cause != "" {
+		t.Errorf("Cause = %q, want none when the cask is installed and outdated", se.Cause)
+	}
+	if strings.Contains(err.Error(), "boom") {
+		t.Errorf("Error() = %q, echoes brew's text", err)
+	}
+}
+
+func TestUpgrade_UpdateFailure_CarriesOutput(t *testing.T) {
+	fr := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) { return "", failingCommand("brew") }}
+	_, err := Upgrade(context.Background(), fr, nil)
+	var se *StepError
+	if !errors.As(err, &se) || !errors.Is(err, ErrTapUpdate) || se.Step != "brew update" {
+		t.Fatalf("err = %v, want a brew update StepError", err)
+	}
+	if !strings.Contains(se.Output, "Error: boom") {
+		t.Errorf("Output = %q", se.Output)
+	}
+}
+
+// brew exits non-zero though the cask is installed and current: success.
+func TestUpgrade_AlreadyCurrentIsSuccess(t *testing.T) {
+	fr := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		switch args[0] {
+		case "upgrade":
+			return "", failingCommand("brew")
+		case "list":
+			return "forgectl 0.31.0", nil
+		}
+		return "", nil // update, outdated
+	}}
+	res, err := Upgrade(context.Background(), fr, nil)
+	if err != nil || !res.AlreadyCurrent {
+		t.Fatalf("res = %+v err = %v, want AlreadyCurrent and no error", res, err)
+	}
+	for _, c := range fr.Calls {
+		assertHomebrewSafeEnv(t, c)
+	}
+}
+
+// brew exits non-zero because forgectl is not a cask install: say so.
+func TestUpgrade_NotInstalledAsCask_Diagnosed(t *testing.T) {
+	fr := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		switch args[0] {
+		case "upgrade":
+			return "", failingCommand("brew")
+		case "list":
+			return "", &exec.CommandError{Name: "brew", ExitCode: 1, Err: errors.New("exit status 1")}
+		}
+		return "", nil
+	}}
+	_, err := Upgrade(context.Background(), fr, nil)
+	var se *StepError
+	if !errors.As(err, &se) || !strings.Contains(se.Cause, "not installed as a Homebrew cask") {
+		t.Fatalf("err = %v, want the not-a-cask cause", err)
+	}
+	// The probe names the unqualified token: brew list --cask rejects the
+	// tap-qualified reference for an installed cask.
+	if last := fr.Calls[2].Args; last[len(last)-1] != "forgectl" {
+		t.Errorf("list probe args = %v, want the bare cask token", last)
+	}
+}
+
+func TestUpgrade_StreamPrintsHeadersAndSanitizedOutput(t *testing.T) {
+	fr := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		return "line from " + args[0] + " \x1b[2J\x1b]0;pwned\x07", nil
+	}}
+	var stream bytes.Buffer
+	if _, err := Upgrade(context.Background(), fr, &stream); err != nil {
+		t.Fatal(err)
+	}
+	got := stream.String()
+	for _, want := range []string{"== brew update\n", "== brew upgrade --cask " + CaskRef + "\n", "line from update", "line from upgrade"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("stream = %q, want %q", got, want)
+		}
+	}
+	if strings.ContainsAny(got, "\x1b\x07") {
+		t.Errorf("stream = %q, carries a raw control byte", got)
+	}
+}
+
+func TestUpgrade_StreamFailureShowsOutputAndStops(t *testing.T) {
+	fr := &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) { return "", failingCommand("brew") }}
+	var stream bytes.Buffer
+	if _, err := Upgrade(context.Background(), fr, &stream); err == nil {
+		t.Fatal("want an error")
+	}
+	if got := stream.String(); !strings.Contains(got, "== brew update") || !strings.Contains(got, "Error: boom") || strings.ContainsRune(got, 0x1b) {
+		t.Errorf("stream = %q, want header and escaped failure output", got)
+	}
+}
+
+// fakeBrewPath puts a `brew` script that prints to both streams and exits with
+// the code of the step named in BREW_FAIL on PATH.
+func fakeBrewPath(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fake brew")
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\necho \"out:$1\"\necho \"err:$1 \\033[2J\" >&2\n[ \"$1\" = \"$BREW_FAIL\" ] && exit 3\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "brew"), []byte(script), 0o700); err != nil { //nolint:gosec // the fake brew must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// The real OSRunner path: output streams live from a child, interleaved and
+// escaped, and a failing step keeps its exit status.
+func TestUpgrade_OSRunnerStreamsLive(t *testing.T) {
+	fakeBrewPath(t)
+	t.Setenv("BREW_FAIL", "")
+	var stream bytes.Buffer
+	res, err := Upgrade(context.Background(), exec.OSRunner{}, &stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := stream.String()
+	for _, want := range []string{"== brew update", "out:update", "err:update", "out:upgrade"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("stream = %q, want %q", got, want)
+		}
+	}
+	if strings.ContainsRune(got, 0x1b) {
+		t.Errorf("stream = %q, carries a raw ESC", got)
+	}
+	if !strings.Contains(res.Output, "out:upgrade") {
+		t.Errorf("Output = %q, want the capture kept", res.Output)
+	}
+
+	t.Setenv("BREW_FAIL", "upgrade")
+	stream.Reset()
+	_, err = Upgrade(context.Background(), exec.OSRunner{}, &stream)
+	var se *StepError
+	if !errors.As(err, &se) || se.ExitCode != 3 || !strings.Contains(se.Output, "err:upgrade") {
+		t.Fatalf("err = %v (%+v), want exit 3 with the streamed output captured", err, se)
+	}
+}
+
+func TestUpgrade_OSRunnerCapturesWithoutStream(t *testing.T) {
+	fakeBrewPath(t)
+	t.Setenv("BREW_FAIL", "update")
+	_, err := Upgrade(context.Background(), exec.OSRunner{}, nil)
+	var se *StepError
+	if !errors.As(err, &se) || se.Step != "brew update" || !strings.Contains(se.Output, "out:update") || !strings.Contains(se.Output, "err:update") {
+		t.Fatalf("err = %v (%+v), want the captured stdout and stderr", err, se)
+	}
+}
+
+func TestTail(t *testing.T) {
+	in := "a\n\nb\r\nc \x1b[2J\nd\ne\n"
+	got := Tail(in, 3)
+	if strings.ContainsRune(got, 0x1b) {
+		t.Errorf("Tail = %q, carries a raw ESC", got)
+	}
+	if lines := strings.Split(got, "\n"); len(lines) != 3 || !strings.HasPrefix(lines[0], "c ") || lines[1] != "d" || lines[2] != "e" {
+		t.Errorf("Tail = %q, want the last 3 lines", got)
+	}
+	if Tail("", 5) != "" {
+		t.Error("Tail of nothing is not empty")
 	}
 }

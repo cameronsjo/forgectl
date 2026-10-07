@@ -86,7 +86,6 @@ var jsonContractExempt = map[string]string{
 	"tmux last":              "jumps to the last-used session; nothing to report",
 	"tmux pick":              "connects to or smart-creates a session through sesh; nothing to report",
 	"tmux rename":            "renames a session; the exit code is the outcome",
-	"upgrade":                "updates through the Homebrew tap and exits with the outcome; the `--check` arm is a state flag arm, out of scope here, and `doctor --json` already reports the forgectl version check",
 	"workflow bless":         "signs a workflow file's bytes with a user-presence signature; the exit code is the outcome (`workflow verify --json` reports blessing state)",
 	"workflow run":           "an executor that runs steps and streams their output; `--dry-run` prints the plan (a flag arm, out of scope), while `workflow status --json` and `workflow list --json` report state",
 	"workflow trust init":    "establishes the machine as trust anchor; the exit code is the outcome (`workflow trust list --json` reports the store)",

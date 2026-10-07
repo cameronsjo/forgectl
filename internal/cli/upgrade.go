@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	osexec "os/exec"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/redact"
@@ -33,7 +35,7 @@ var upgradeLookPath = osexec.LookPath
 
 // newUpgradeCmd builds `forgectl upgrade` over the registry Deps.
 func newUpgradeCmd(deps module.Deps) *cobra.Command {
-	var checkOnly bool
+	var checkOnly, asJSON bool
 
 	cmd := &cobra.Command{
 		Use:   "upgrade",
@@ -53,6 +55,13 @@ upgrade.
 
   forgectl upgrade            update via the Homebrew tap
   forgectl upgrade --check    report whether an update is available, no mutation
+  forgectl upgrade --json     machine-readable outcome; a failure carries the step and brew's last lines
+
+On a terminal brew's output streams to stderr under a "== <command>" header
+per step. Without one, a failure prints the last 20 lines of the failed step.
+Either way brew's text is redacted and escaped first. If brew upgrade exits
+non-zero but forgectl is installed as a cask and nothing is outdated, upgrade
+reports "already up to date".
 
 Running from a source build (go build/go run, not the released cask) has no
 cask install to manage — upgrade WARNS and tells you what to run instead,
@@ -65,17 +74,18 @@ outdated check) failed.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpgrade(cmd, deps, checkOnly)
+			return runUpgrade(cmd, deps, checkOnly, asJSON)
 		},
 	}
 	cmd.Flags().BoolVar(&checkOnly, "check", false, "report whether an update is available, without applying it")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"ok","already_current","from","to","error"} to stdout, with error {"step","exit_code","message","cause","output_tail"} on failure (brew's last lines, redacted and escaped); stdout stays valid JSON and brew's output does not stream; not valid with --check`)
 	return cmd
 }
 
 // runUpgrade is newUpgradeCmd's RunE body, split out so the source-build
 // warning, the brew-presence check, and the check-only/apply branches are
 // each a single readable step.
-func runUpgrade(cmd *cobra.Command, deps module.Deps, checkOnly bool) error {
+func runUpgrade(cmd *cobra.Command, deps module.Deps, checkOnly, asJSON bool) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
@@ -84,6 +94,11 @@ func runUpgrade(cmd *cobra.Command, deps module.Deps, checkOnly bool) error {
 	// binary may not even be the one `brew` would touch, so upgrade stops
 	// here rather than guessing.
 	if selfupdate.IsSourceBuild() {
+		if asJSON {
+			// stdout stays JSON-only; there is no upgrade document to emit.
+			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "forgectl was built from source (not installed via the Homebrew tap) — a self-update can't manage this.")
+			return nil
+		}
 		fmt.Fprintln(out, "forgectl was built from source (not installed via the Homebrew tap) — a self-update can't manage this.")
 		fmt.Fprintln(out, "To update your source checkout: git pull && go build -o $(go env GOPATH)/bin/forgectl .")
 		fmt.Fprintln(out, "To switch to the released version instead: brew install cameronsjo/tap/forgectl")
@@ -94,35 +109,114 @@ func runUpgrade(cmd *cobra.Command, deps module.Deps, checkOnly bool) error {
 		return WithExitCode(fmt.Errorf("brew not found on PATH — forgectl ships via the Homebrew tap; install Homebrew (https://brew.sh), or reinstall manually: %w", err), exitFailed)
 	}
 
+	if asJSON && checkOnly {
+		return WithExitCode(errors.New("upgrade: --json is not valid with --check"), exitUsage)
+	}
+
 	if checkOnly {
 		return runUpgradeCheck(ctx, deps, out)
 	}
 
-	return runUpgradeApply(ctx, deps, out)
+	return runUpgradeApply(ctx, deps, out, cmd.ErrOrStderr(), asJSON)
 }
 
-// runUpgradeApply is the applying path. Like --check (#738), it never renders
-// brew's text (#761): brew's stdout relays what the tap's server and git
-// transport send, and the CommandError carries brew's argv and stderr. The
-// progress and the outcome are fixed text; brew's output goes to the debug
-// log, whose text handler quotes it, and the CommandError stays on the chain
-// for errors.As.
-func runUpgradeApply(ctx context.Context, deps module.Deps, out io.Writer) error {
-	_, _ = fmt.Fprintln(out, "Refreshing the Homebrew tap and upgrading "+selfupdate.CaskRef+"…")
-	upgradeOut, err := selfupdate.Upgrade(ctx, deps.Runner)
-	if upgradeOut != "" {
-		slog.Debug("brew output.", "output", redact.Stdout(upgradeOut))
+// upgradeTailLines is how many of brew's last lines a failure shows when the
+// output was not streamed live.
+const upgradeTailLines = 20
+
+// upgradeStderrIsTTY reports whether brew's live output can be shown. A
+// package-level var so a test can stub it.
+var upgradeStderrIsTTY = func() bool { return term.IsTerminal(int(os.Stderr.Fd())) }
+
+// upgradeJSON is `upgrade --json`'s stdout document.
+type upgradeJSON struct {
+	OK             bool              `json:"ok"`
+	AlreadyCurrent bool              `json:"already_current"`
+	From           string            `json:"from,omitempty"`
+	To             string            `json:"to,omitempty"`
+	Error          *upgradeErrorJSON `json:"error"`
+}
+
+// upgradeErrorJSON names the failed step. Message is fixed text; OutputTail is
+// brew's last lines, redacted and escaped.
+type upgradeErrorJSON struct {
+	Step       string `json:"step"`
+	ExitCode   int    `json:"exit_code"`
+	Message    string `json:"message"`
+	Cause      string `json:"cause,omitempty"`
+	OutputTail string `json:"output_tail"`
+}
+
+// runUpgradeApply is the applying path. On a terminal, brew's output streams to
+// stderr as each step runs, redacted and escaped line by line (brew's stdout
+// relays what the tap's server and git transport send, so it is untrusted,
+// #761). Without a terminal, or under --json, nothing streams: a failure shows
+// the last lines of the failed step's output the same way, and --json puts them
+// in the error object. The outcome line itself stays fixed text, and the
+// CommandError stays on the chain for errors.As.
+func runUpgradeApply(ctx context.Context, deps module.Deps, out, errOut io.Writer, asJSON bool) error {
+	var stream io.Writer
+	if !asJSON {
+		_, _ = fmt.Fprintln(out, "Refreshing the Homebrew tap and upgrading "+selfupdate.CaskRef+"…")
+		if upgradeStderrIsTTY() {
+			stream = errOut
+		}
+	}
+	res, err := selfupdate.Upgrade(ctx, deps.Runner, stream)
+	if res.Output != "" {
+		slog.Debug("brew output.", "output", redact.Stdout(res.Output))
 	}
 	if err != nil {
 		slog.Warn("brew upgrade failed.", "error", err)
-		return WithExitCode(termsafe.Categorical(upgradeFailure(ctx, err), err), exitFailed)
+		return upgradeFailed(ctx, out, errOut, err, asJSON, stream != nil)
 	}
-	if from, to, ok := selfupdate.UpgradedVersions(upgradeOut); ok {
+	from, to, named := selfupdate.UpgradedVersions(res.Output)
+	if asJSON {
+		doc := upgradeJSON{OK: true, AlreadyCurrent: res.AlreadyCurrent}
+		if named {
+			doc.From, doc.To = from, to
+		}
+		return writeJSON(out, doc)
+	}
+	switch {
+	case res.AlreadyCurrent:
+		_, _ = fmt.Fprintln(out, "forgectl is already up to date.")
+	case named:
 		_, _ = fmt.Fprintf(out, "forgectl upgraded %s → %s — restart your shell (or open a new one) to pick up the new binary.\n", from, to)
-		return nil
+	default:
+		_, _ = fmt.Fprintln(out, "forgectl upgraded — restart your shell (or open a new one) to pick up the new binary.")
 	}
-	_, _ = fmt.Fprintln(out, "forgectl upgraded — restart your shell (or open a new one) to pick up the new binary.")
 	return nil
+}
+
+// upgradeFailed reports a failed apply: the fixed-text error (exit 1), plus
+// brew's output tail, on stderr or in --json's error object, unless it already
+// streamed.
+func upgradeFailed(ctx context.Context, out, errOut io.Writer, err error, asJSON, streamed bool) error {
+	fixed := upgradeFailure(ctx, err)
+	msg := fixed
+	var step *selfupdate.StepError
+	hasStep := errors.As(err, &step)
+	if hasStep && step.Cause != "" {
+		msg += "\n" + step.Cause
+	}
+	tail := ""
+	if hasStep {
+		tail = selfupdate.Tail(step.Output, upgradeTailLines)
+	}
+	switch {
+	case asJSON:
+		doc := upgradeJSON{Error: &upgradeErrorJSON{Message: fixed, OutputTail: tail}}
+		if hasStep {
+			doc.Error.Step, doc.Error.ExitCode, doc.Error.Cause = step.Step, step.ExitCode, step.Cause
+		}
+		if jerr := writeJSON(out, doc); jerr != nil {
+			slog.Warn("upgrade --json write failed.", "error", jerr)
+		}
+	case tail != "" && !streamed:
+		_, _ = fmt.Fprintf(errOut, "== last lines of %s\n%s\n", step.Step, tail)
+	}
+	return WithExitCode(termsafe.Categorical(msg, err), exitFailed)
 }
 
 // upgradeFailure words a failed apply from fixed text, by cause. The

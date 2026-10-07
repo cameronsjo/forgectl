@@ -161,6 +161,7 @@ method (OSRunner) Run(ctx context.Context, name string, args ...string) (string,
 method (OSRunner) RunDiscardingStdout(ctx context.Context, name string, args ...string) error
 method (OSRunner) RunInteractive(ctx context.Context, name string, args ...string) error
 method (OSRunner) RunStreaming(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer, name string, args ...string) error
+method (OSRunner) RunStreamingWithEnv(ctx context.Context, env map[string]string, stdout io.Writer, stderr io.Writer, name string, args ...string) error
 method (OSRunner) RunWithEnv(ctx context.Context, env map[string]string, name string, args ...string) (string, error)
 method (OSRunner) RunWithEnvFiltered(ctx context.Context, env map[string]string, unset []string, name string, args ...string) (string, error)
 method (OSRunner) RunWithInput(ctx context.Context, stdin string, name string, args ...string) (string, error)
@@ -234,6 +235,7 @@ type CommandError struct{Name string; Args []string; Stderr string; StderrDroppe
 type CommandKind uint8
 type DiscardingRunner interface{RunDiscardingStdout(ctx context.Context, name string, args ...string) error}
 type EnvMutation struct{key string; value SecretArg; op envOp}
+type EnvStreamingRunner interface{RunStreamingWithEnv(ctx context.Context, env map[string]string, stdout io.Writer, stderr io.Writer, name string, args ...string) error}
 type FakeRunner struct{RunFunc func(name string, args []string) (string, error); InteractiveErr error; mu sync.Mutex; Calls []Call}
 type FakeSensitiveRunner struct{RunFunc func(cmd SensitiveCommand) (SensitiveResult, error); mu sync.Mutex; calls []SensitiveCommand}
 type OSRunner struct{stdoutCeiling int}
