@@ -35,6 +35,10 @@ type Spec struct {
 	// action; it decides over On. A lens writes it at ingest, where its
 	// rules matched the line.
 	ActionField string
+	// ExitOptional reads an end event with no exit as an end with an
+	// unknown exit, not a bad one: a lens's end rule may match a line that
+	// carries no exit ("shutting down").
+	ExitOptional bool
 	// Discover adds a step the first time an event names it, in the order
 	// they appear, with no edges. Without it, a step the defs do not have
 	// is counted in UnknownSteps.
@@ -113,6 +117,11 @@ func (r *reducer) apply(e Event) {
 	}
 	switch action {
 	case ActionStart:
+		if r.ended && r.spec.ActionField != "" {
+			// A lens's log went on past an end: the app started again, so
+			// the run is live again, its new exit not known yet.
+			r.ended, r.lost, r.state.Exit = false, false, nil
+		}
 		if i, ok := r.step(e); ok {
 			s := &r.state.Steps[i]
 			s.Status, s.Start, s.End = StepRunning, e.Time, time.Time{}
@@ -165,7 +174,9 @@ func (r *reducer) end(e Event) {
 	r.ended, r.lost, r.endedAt = true, false, e.Time
 	v, ok := e.field(r.spec.ExitField)
 	if !ok {
-		r.state.BadExits++
+		if !r.spec.ExitOptional {
+			r.state.BadExits++
+		}
 		return
 	}
 	code, ok := exitCode(v)

@@ -96,8 +96,11 @@ func (w runWatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case deskRunPlayMsg:
 		next, cmd = w.m.playStep(t)
 	case tea.KeyPressMsg:
-		if t.String() == "ctrl+c" {
+		switch t.String() {
+		case "ctrl+c":
 			return w, tea.Quit
+		case "esc", "r":
+			return w, nil // the dashboard's close keys; here only q quits
 		}
 		next, cmd = w.m.runViewKey(t.String())
 	default:

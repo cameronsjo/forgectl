@@ -101,8 +101,11 @@ func (s *logSource) Load(_ RunRef, cur *Cursor) (Delta, error) {
 			return
 		}
 		if s.lens != nil {
-			e, nf, res, rule := s.lens.read(cur.kept+1, b)
-			cur.fields += nf
+			e, nf, res, rule, split := s.lens.read(cur.kept+1, b)
+			cur.lensLines++
+			if split {
+				cur.split++
+			}
 			if rule > 0 {
 				if cur.ruleHits == nil {
 					cur.ruleHits = make([]int, s.lens.Rules())
@@ -115,6 +118,7 @@ func (s *logSource) Load(_ RunRef, cur *Cursor) (Delta, error) {
 			case lineIgnored:
 				cur.ignored++
 			default:
+				cur.fields += nf // as for a plain log: fields of a kept event
 				cur.kept++
 				d.Events = append(d.Events, e)
 			}
@@ -140,6 +144,7 @@ func (s *logSource) Load(_ RunRef, cur *Cursor) (Delta, error) {
 	if s.lens != nil {
 		d.RuleHits = make([]int, s.lens.Rules())
 		copy(d.RuleHits, cur.ruleHits)
+		d.Lines, d.Split = cur.lensLines, cur.split
 	}
 	return d, nil
 }

@@ -80,12 +80,17 @@ func TestRunWatch_DrawsALensRunAndQQuits(t *testing.T) {
 	}
 }
 
-func TestRunWatch_EndedLensRunStopsPolling(t *testing.T) {
+// An ended log reads ended but is still followed: the app may start again
+// and keep appending to the same file.
+func TestRunWatch_EndedLensRunReadsEndedAndKeepsFollowing(t *testing.T) {
 	src := lensLogSource(t, "go fetch\ndone\n")
-	w := newRunWatchModel(t.Context(), src, RunWatchOptions{Poll: time.Millisecond, Theme: theme.Default()})
+	w := newRunWatchModel(t.Context(), src, RunWatchOptions{Poll: time.Millisecond, Theme: theme.Default(), ASCII: true})
 	w = driveWatch(t, w, w.Init())
-	if w.m.rv.polls() {
-		t.Error("a lens run that ended should stop polling")
+	if !w.m.rv.polls() {
+		t.Error("a log should be followed even after its run ended")
+	}
+	if view := ansi.Strip(w.View().Content); !strings.Contains(view, "ended") {
+		t.Errorf("an ended lens run should read ended:\n%s", view)
 	}
 }
 

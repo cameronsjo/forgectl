@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -43,7 +44,7 @@ func runDeskLensList(cmd *cobra.Command, asJSON bool) error {
 	if err != nil {
 		return fmt.Errorf("desk lens list: lenses directory: %w", err)
 	}
-	out := lensListJSON{Dir: dir, Lenses: []lensListItem{}}
+	out := lensListJSON{Dir: safeText(dir), Lenses: []lensListItem{}}
 	ents, err := os.ReadDir(dir)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("desk lens list: %w", err)
@@ -54,7 +55,7 @@ func runDeskLensList(cmd *cobra.Command, asJSON bool) error {
 			continue
 		}
 		p := filepath.Join(dir, e.Name())
-		it := lensListItem{Name: strings.TrimSuffix(e.Name(), ".toml"), Path: p}
+		it := lensListItem{Name: safeLabel(strings.TrimSuffix(e.Name(), ".toml")), Path: safeText(p)}
 		if l, err := runview.LoadLens(p); err != nil {
 			it.Error = err.Error()
 			bad++
@@ -106,6 +107,8 @@ func runDeskLensList(cmd *cobra.Command, asJSON bool) error {
 type lensCheckJSON struct {
 	Lens          string          `json:"lens"`
 	Format        string          `json:"format"`
+	Lines         int             `json:"lines"`
+	Split         int             `json:"split"`
 	Events        int             `json:"events"`
 	Ignored       int             `json:"ignored"`
 	Dropped       int             `json:"dropped"`
@@ -155,7 +158,7 @@ func runDeskLensCheck(cmd *cobra.Command, lensName, logPath string, asJSON bool)
 		if err := writeJSON(cmd.OutOrStdout(), out); err != nil {
 			return err
 		}
-	} else if err := writeLensCheck(cmd, out); err != nil {
+	} else if err := writeLensCheck(cmd, out, lens.Splits()); err != nil {
 		return err
 	}
 	if err := r.readInPart(); err != nil {
@@ -168,7 +171,7 @@ func runDeskLensCheck(cmd *cobra.Command, lensName, logPath string, asJSON bool)
 func lensCheck(lens *runview.Lens, r *loadedRun) lensCheckJSON {
 	d := r.delta
 	out := lensCheckJSON{
-		Lens: lens.Name, Format: lens.Format(), Events: r.folder.Len(),
+		Lens: lens.Name, Format: lens.Format(), Lines: d.Lines, Split: d.Split, Events: r.folder.Len(),
 		Ignored: d.Ignored, Dropped: d.Dropped, DroppedFields: d.DroppedFields,
 		Rules: make([]lensRuleJSON, 0, lens.Rules()), Steps: []string{}, UnmatchedTop: []lensCountJSON{},
 		Partial: d.Partial,
@@ -184,13 +187,17 @@ func lensCheck(lens *runview.Lens, r *loadedRun) lensCheckJSON {
 		out.Rules = append(out.Rules, lensRuleJSON{N: i, Rule: lens.RuleText(i), Hits: hits})
 	}
 	for _, st := range r.folder.At(r.folder.Len()).Steps {
-		out.Steps = append(out.Steps, st.ID)
+		if st.Status != runview.StepPending { // a declared step the log never reached is not found
+			out.Steps = append(out.Steps, st.ID)
+		}
 	}
+	// Unmatched lines are counted by shape, their digits folded to #, so
+	// lines that differ only in an id or a time count as one kind of line.
 	counts := map[string]int{}
 	for _, e := range r.folder.Events() {
 		if !slices.ContainsFunc(e.Fields, func(f runview.Field) bool { return f.Key == runview.LensActionField }) {
 			out.Unmatched++
-			counts[e.Name]++
+			counts[lineShape(e.Name)]++
 		}
 	}
 	for name, n := range counts {
@@ -203,7 +210,13 @@ func lensCheck(lens *runview.Lens, r *loadedRun) lensCheckJSON {
 	return out
 }
 
-func writeLensCheck(cmd *cobra.Command, c lensCheckJSON) error {
+// digitRun is a run of digits, which lineShape folds.
+var digitRun = regexp.MustCompile(`[0-9]+`)
+
+// lineShape is a line with each run of digits replaced by #.
+func lineShape(s string) string { return digitRun.ReplaceAllString(s, "#") }
+
+func writeLensCheck(cmd *cobra.Command, c lensCheckJSON, splits bool) error {
 	w := &stickyWriter{w: cmd.OutOrStdout()}
 	w.printf("lens %s · %s · %s\n", safeLabel(c.Lens), c.Format, plural(len(c.Rules), "rule", "rules"))
 	parts := []string{plural(c.Events, "event", "events")}
@@ -217,6 +230,16 @@ func writeLensCheck(cmd *cobra.Command, c lensCheckJSON) error {
 		parts = append(parts, plural(c.DroppedFields, "field dropped", "fields dropped"))
 	}
 	w.printf("read: %s\n", strings.Join(parts, " · "))
+	if splits {
+		what := "the pattern split"
+		if c.Format == runview.LensJSON {
+			what = "parsed as JSON"
+		}
+		w.printf("format: %d of %s %s\n", c.Split, plural(c.Lines, "line", "lines"), what)
+		if c.Lines > 0 && c.Split == 0 {
+			w.printf("warning: no line fit the format, so nothing has a time, step or fields; fix the format before the rules\n")
+		}
+	}
 	w.printf("rules (first match wins):\n")
 	unused := 0
 	for _, r := range c.Rules {
@@ -239,7 +262,7 @@ func writeLensCheck(cmd *cobra.Command, c lensCheckJSON) error {
 	if c.Unmatched == 0 {
 		w.printf("unmatched: none: every event matched a rule\n")
 	} else {
-		w.printf("unmatched: %s no rule matched; the most common:\n", plural(c.Unmatched, "event", "events"))
+		w.printf("unmatched: %s no rule matched; the most common shapes (digits as #):\n", plural(c.Unmatched, "event", "events"))
 		for _, u := range c.UnmatchedTop {
 			w.printf("  %6d×  %s\n", u.Count, safeText(u.Name))
 		}

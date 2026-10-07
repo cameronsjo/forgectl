@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -51,6 +50,7 @@ type lensRule struct {
 	match  *regexp.Regexp
 	step   string
 	say    string
+	exit   *int // end: the exit to record when match has no exit group
 }
 
 // Lens formats.
@@ -83,6 +83,7 @@ const (
 	maxLensBytes = 64 << 10
 	maxLensRules = 200
 	maxLensSteps = 200
+	maxSayRefs   = 32 // {name}s in one say: a line's words, not a template engine
 )
 
 // lensFile is the TOML shape. Every key is listed, so an unknown one (a
@@ -112,6 +113,7 @@ type lensFile struct {
 		Field  string `toml:"field"`
 		Step   string `toml:"step"`
 		Say    string `toml:"say"`
+		Exit   *int   `toml:"exit"`
 	} `toml:"rule"`
 }
 
@@ -123,7 +125,7 @@ var sayRef = regexp.MustCompile(`\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 // LoadLens reads the lens file at path, named by its stem.
 func LoadLens(path string) (*Lens, error) {
-	f, err := os.Open(path) //nolint:gosec // G304: the person names their own lens file
+	f, err := openLensFile(path)
 	if err != nil {
 		return nil, cleanErr(err)
 	}
@@ -158,7 +160,7 @@ func ParseLens(name string, b []byte) (*Lens, error) {
 		for i, k := range un {
 			keys[i] = k.String()
 		}
-		return nil, fmt.Errorf("lens %s: unknown key %s; the keys are about, format, time_layout, [json], [text], [[step]] and [[rule]]", clean(name), clean(strings.Join(keys, ", ")))
+		return nil, fmt.Errorf("lens %s: unknown key %s; %s", clean(name), clean(strings.Join(keys, ", ")), lensKeysFor(un[0]))
 	}
 	l := &Lens{Name: clean(name), About: clean(f.About), format: f.Format, layout: f.TimeLayout}
 	if err := l.setFormat(&f); err != nil {
@@ -218,21 +220,27 @@ func (l *Lens) setSteps(f *lensFile) error {
 	if len(f.Steps) > maxLensSteps {
 		return fmt.Errorf("more than %d [[step]] entries", maxLensSteps)
 	}
+	// Ids are compared as cleaned, the form the events carry them in.
 	seen := map[string]bool{}
 	for i, s := range f.Steps {
-		if s.ID == "" {
+		id := clean(s.ID)
+		if id == "" {
 			return fmt.Errorf("[[step]] %d: id is missing", i+1)
 		}
-		if seen[s.ID] {
-			return fmt.Errorf("[[step]] %d: id %q is listed twice", i+1, clean(s.ID))
+		if seen[id] {
+			return fmt.Errorf("[[step]] %d: id %q is listed twice", i+1, id)
 		}
-		seen[s.ID] = true
-		l.steps = append(l.steps, StepDef{ID: clean(s.ID), Note: clean(s.Note), After: slices.Clone(s.After)})
+		seen[id] = true
+		after := make([]string, len(s.After))
+		for k, a := range s.After {
+			after[k] = clean(a)
+		}
+		l.steps = append(l.steps, StepDef{ID: id, Note: clean(s.Note), After: after})
 	}
-	for i, s := range f.Steps {
-		for _, a := range s.After {
+	for i, d := range l.steps {
+		for _, a := range d.After {
 			if !seen[a] {
-				return fmt.Errorf("[[step]] %d (%s): after %q names no [[step]]", i+1, clean(s.ID), clean(a))
+				return fmt.Errorf("[[step]] %d (%s): after %q names no [[step]]", i+1, d.ID, a)
 			}
 		}
 	}
@@ -240,9 +248,6 @@ func (l *Lens) setSteps(f *lensFile) error {
 }
 
 func (l *Lens) setRules(f *lensFile) error {
-	if len(f.Rules) == 0 && l.actionKey == "" {
-		return errors.New("no [[rule]]: a lens needs at least one, or a [json] action key, or it shows nothing a plain log does not")
-	}
 	if len(f.Rules) > maxLensRules {
 		return fmt.Errorf("more than %d [[rule]] entries", maxLensRules)
 	}
@@ -267,6 +272,12 @@ func (l *Lens) setRules(f *lensFile) error {
 			return fmt.Errorf("%s: an ignore rule drops its line, so its say is never shown", at)
 		case strings.Count(r.Say, "{") != len(sayRef.FindAllString(r.Say, -1)):
 			return fmt.Errorf("%s: say: a { must open a {name}: a group of match, or a field of the line", at)
+		case len(sayRef.FindAllString(r.Say, -1)) > maxSayRefs:
+			return fmt.Errorf("%s: say: more than %d {name}s", at, maxSayRefs)
+		case r.Exit != nil && a != ActionEnd:
+			return fmt.Errorf("%s: exit is only read on an end rule", at)
+		case r.Exit != nil && (*r.Exit < 0 || *r.Exit > 255):
+			return fmt.Errorf("%s: exit %d: want 0 to 255", at, *r.Exit)
 		}
 		stepped := r.Step != "" || slices.Contains(names, "step")
 		switch a {
@@ -278,9 +289,29 @@ func (l *Lens) setRules(f *lensFile) error {
 		if len(l.steps) > 0 && r.Step != "" && !slices.ContainsFunc(l.steps, func(d StepDef) bool { return d.ID == r.Step }) {
 			return fmt.Errorf("%s: step %q names no [[step]]", at, clean(r.Step))
 		}
-		l.rules = append(l.rules, lensRule{action: a, field: r.Field, match: re, step: clean(r.Step), say: r.Say})
+		l.rules = append(l.rules, lensRule{action: a, field: r.Field, match: re, step: clean(r.Step), say: r.Say, exit: r.Exit})
 	}
 	return nil
+}
+
+// lensKeysFor lists the keys allowed where an unknown key k was found, so
+// the error names the fix in that table rather than at the top level.
+func lensKeysFor(k toml.Key) string {
+	table := ""
+	if len(k) > 1 {
+		table = k[0]
+	}
+	switch table {
+	case "json":
+		return "the keys in [json] are event, step, time, action and exit"
+	case "text":
+		return "the only key in [text] is pattern (time_layout goes at the top, before any table)"
+	case "step":
+		return "the keys in [[step]] are id, note and after"
+	case "rule":
+		return "the keys in [[rule]] are action, match, field, step, say and exit"
+	}
+	return "the top-level keys are about, format and time_layout, then the tables [json], [text], [[step]] and [[rule]]"
 }
 
 // hasStepSource reports whether the line format itself can carry a step: a
@@ -316,7 +347,7 @@ exit   = "exit"
 // Spec is the fold a lens's runs take: the action and exit its rules wrote,
 // and the steps it declares, or else the steps as the log names them.
 func (l *Lens) Spec() *Spec {
-	return &Spec{ActionField: LensActionField, ExitField: lensExitField, Discover: len(l.steps) == 0}
+	return &Spec{ActionField: LensActionField, ExitField: lensExitField, ExitOptional: true, Discover: len(l.steps) == 0}
 }
 
 // Steps is the steps the lens declares; none means they are discovered.
@@ -330,6 +361,10 @@ func (l *Lens) Ends() bool {
 
 // Format is how the lens splits a line: LensJSON or LensText.
 func (l *Lens) Format() string { return l.format }
+
+// Splits reports whether the lens has a line format to split lines by:
+// always for JSON, and for text only with a pattern.
+func (l *Lens) Splits() bool { return l.format == LensJSON || l.pattern != nil }
 
 // Rules is how many rules the lens has.
 func (l *Lens) Rules() int { return len(l.rules) }
@@ -370,13 +405,17 @@ const (
 // read turns one log line into an event. droppedFields counts JSON values
 // left out (as for a plain log). The event's fields carry @action and @rule
 // when a rule matched.
-func (l *Lens) read(seq int, b []byte) (e Event, droppedFields int, res lineResult, rule int) {
+//
+// split reports that the line format read the line: it parsed as JSON, or
+// the text pattern matched it. A text lens with no pattern splits nothing.
+func (l *Lens) read(seq int, b []byte) (e Event, droppedFields int, res lineResult, rule int, split bool) {
 	switch l.format {
 	case LensJSON:
 		raw, nf, ok := scalarFields(b)
 		if !ok {
-			return Event{}, 0, lineDropped, 0
+			return Event{}, 0, lineDropped, 0, false
 		}
+		split = true
 		raw = slices.DeleteFunc(raw, func(f Field) bool {
 			if strings.HasPrefix(f.Key, "@") {
 				nf++
@@ -387,7 +426,7 @@ func (l *Lens) read(seq int, b []byte) (e Event, droppedFields int, res lineResu
 		var named bool
 		e, named = logEvent(LogKeys{Event: l.keys.Event, Step: l.keys.Step, Time: ""}, seq, raw)
 		if !named {
-			return Event{}, nf, lineDropped, 0
+			return Event{}, nf, lineDropped, 0, split
 		}
 		if l.keys.Time != "" {
 			if v, ok := e.field(l.keys.Time); ok {
@@ -396,23 +435,23 @@ func (l *Lens) read(seq int, b []byte) (e Event, droppedFields int, res lineResu
 		}
 		droppedFields = nf
 	default:
-		e = l.readText(seq, string(bytes.TrimRight(b, "\r")))
+		e, split = l.readText(seq, string(bytes.TrimRight(b, "\r")))
 		if e.Name == "" {
-			return Event{}, 0, lineDropped, 0
+			return Event{}, 0, lineDropped, 0, split
 		}
 	}
 	if a, ok := l.ownAction(e); ok {
 		if a == ActionIgnore {
-			return Event{}, droppedFields, lineIgnored, 0
+			return Event{}, droppedFields, lineIgnored, 0, split
 		}
 		if v, ok := e.field(l.exitKey); ok && l.exitKey != "" {
 			e.Fields = append(e.Fields, Field{Key: lensExitField, Value: v})
 		}
 		e.Fields = append(e.Fields, Field{Key: LensActionField, Value: string(a)})
-		return e, droppedFields, lineEvent, 0
+		return e, droppedFields, lineEvent, 0, split
 	}
 	e, res, rule = l.classify(e)
-	return e, droppedFields, res, rule
+	return e, droppedFields, res, rule, split
 }
 
 // ownAction is the action a JSON line names under the lens's action key,
@@ -432,16 +471,16 @@ func (l *Lens) ownAction(e Event) (Action, bool) {
 // readText splits a text line by the pattern. A line the pattern does not
 // match (a stack trace's continuation, say) is an event named by the whole
 // line, with no step or time.
-func (l *Lens) readText(seq int, line string) Event {
+func (l *Lens) readText(seq int, line string) (Event, bool) {
 	e := Event{Seq: seq}
 	if l.pattern == nil {
 		e.Name = clean(line)
-		return e
+		return e, false
 	}
 	m := l.pattern.FindStringSubmatch(line)
 	if m == nil {
 		e.Name = clean(line)
-		return e
+		return e, false
 	}
 	named := false
 	for i, g := range l.pattern.SubexpNames() {
@@ -465,7 +504,7 @@ func (l *Lens) readText(seq int, line string) Event {
 	if !named {
 		e.Name = clean(line)
 	}
-	return e
+	return e, true
 }
 
 // classify runs the rules over an event, first match wins, and writes what
@@ -508,6 +547,9 @@ func (l *Lens) classify(e Event) (_ Event, _ lineResult, rule int) {
 					e.Fields = append(e.Fields, Field{Key: clean(g), Value: v})
 				}
 			}
+		}
+		if r.exit != nil && !slices.Contains(r.match.SubexpNames(), "exit") {
+			e.Fields = append(e.Fields, Field{Key: lensExitField, Value: strconv.Itoa(*r.exit)})
 		}
 		if r.say != "" {
 			e.Fields = append(e.Fields, Field{Key: LensLineField, Value: e.Name})

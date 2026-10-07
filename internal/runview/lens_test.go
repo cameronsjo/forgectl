@@ -48,7 +48,9 @@ func TestParseLens_Refusals(t *testing.T) {
 		{"no format", "[[rule]]\naction='end'\nmatch='x'", "format is missing"},
 		{"bad format", "format='xml'\n[[rule]]\naction='end'\nmatch='x'", `format "xml"`},
 		{"typo key", "format='text'\nrules=1\n[[rule]]\naction='end'\nmatch='x'", "unknown key rules"},
-		{"no rules", "format='text'", "no [[rule]]"},
+		{"exit off an end", "format='text'\n[[rule]]\naction='note'\nmatch='x'\nsay='y'\nexit=0", "exit is only read on an end rule"},
+		{"exit out of range", "format='text'\n[[rule]]\naction='end'\nmatch='x'\nexit=300", "exit 300"},
+		{"key in a table", "format='text'\n[text]\ntime_layout='x'", "the only key in [text] is pattern"},
 		{"bad action", "format='text'\n[[rule]]\naction='begin'\nmatch='x'", `action "begin"`},
 		{"no match", "format='text'\n[[rule]]\naction='end'", "match is missing"},
 		{"bad regexp", "format='text'\n[[rule]]\naction='end'\nmatch='('", "[[rule]] 1: match"},
@@ -82,7 +84,7 @@ func readAll(t *testing.T, l *Lens, lines ...string) (events []Event, ignored, d
 	t.Helper()
 	hits = make([]int, l.Rules())
 	for _, line := range lines {
-		e, _, res, rule := l.read(len(events)+1, []byte(line))
+		e, _, res, rule, _ := l.read(len(events)+1, []byte(line))
 		if rule > 0 {
 			hits[rule-1]++
 		}
@@ -275,5 +277,48 @@ say    = "{step} started"
 		if _, err := ParseLens("t", []byte(bad)); err == nil {
 			t.Errorf("ParseLens(%q) should refuse", bad)
 		}
+	}
+}
+
+func TestLens_EndWithFixedOrNoExitAndFirstFailIsTheReason(t *testing.T) {
+	l := mustLens(t, `
+format = "text"
+[[rule]]
+action = "start"
+match  = '^serving$'
+step   = "serve"
+[[rule]]
+action = "fail"
+match  = '^(duplicate key|rollback)'
+step   = "serve"
+[[rule]]
+action = "end"
+match  = '^stopped$'
+exit   = 3
+[[rule]]
+action = "end"
+match  = '^shutting down$'
+`)
+	evs, _, _, _ := readAll(t, l, "serving", "duplicate key orders_pkey", "rollback tx=8812", "stopped")
+	s := Fold(l.Spec(), nil, evs)
+	if s.Exit == nil || *s.Exit != 3 || s.BadExits != 0 {
+		t.Errorf("exit = %v bad = %d, want 3 and 0", s.Exit, s.BadExits)
+	}
+	if g := Gist(s, s.Live, evs, time.Time{}); !strings.HasPrefix(g, "serve failed: duplicate key orders_pkey") {
+		t.Errorf("the first failing line is the reason: %q", g)
+	}
+	evs, _, _, _ = readAll(t, l, "serving", "shutting down")
+	if s := Fold(l.Spec(), nil, evs); s.Exit != nil || s.BadExits != 0 || s.Live != LiveEnded {
+		t.Errorf("an end with no exit is ended with an unknown exit, not a bad one: %+v", s)
+	}
+}
+
+// A lens's log that goes on past an end (the app restarted) is live again.
+func TestLens_StartAfterEndReopensTheRun(t *testing.T) {
+	l := mustLens(t, "format='text'\n[[rule]]\naction='start'\nmatch='^go (?P<step>\\w+)'\n[[rule]]\naction='end'\nmatch='^done rc=(?P<exit>\\d+)'\n")
+	evs, _, _, _ := readAll(t, l, "go a", "done rc=1", "go a")
+	s := Fold(l.Spec(), nil, evs)
+	if s.Live != LiveLive || s.Exit != nil || s.Steps[0].Status != StepRunning {
+		t.Errorf("a start after an end should reopen the run: %+v", s)
 	}
 }

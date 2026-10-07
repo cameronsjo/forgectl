@@ -20,7 +20,7 @@ type deskLogOpts struct {
 }
 
 func (o *deskLogOpts) bind(cmd *cobra.Command) {
-	cmd.Flags().StringVar(&o.path, "log", "", "a JSONL log to read as a run: one JSON object per line, one event each")
+	cmd.Flags().StringVar(&o.path, "log", "", "a log to read as a run: JSONL (one JSON object per line), or with --lens any format the lens reads")
 	cmd.Flags().StringVar(&o.eventKey, "event-key", runview.DefaultLogKeys.Event, "with --log: the key holding each line's event name")
 	cmd.Flags().StringVar(&o.stepKey, "step-key", runview.DefaultLogKeys.Step, "with --log: the key holding the step an event belongs to")
 	cmd.Flags().StringVar(&o.time, "time-key", runview.DefaultLogKeys.Time, "with --log: the key holding the event time (RFC 3339, or epoch seconds)")

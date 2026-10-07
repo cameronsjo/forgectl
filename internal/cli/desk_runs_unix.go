@@ -135,6 +135,9 @@ func openLogSource(log deskLogOpts) (runview.Source, error) {
 // lens for "events".
 func loadLens(name string) (*runview.Lens, error) {
 	path, err := lensPath(name)
+	if errors.Is(err, fs.ErrNotExist) && name == runview.EventsLensName {
+		return runview.EventsLens(), nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -152,6 +155,12 @@ func loadLens(name string) (*runview.Lens, error) {
 }
 
 func lensPath(name string) (string, error) {
+	if name == runview.EventsLensName {
+		if dir, err := config.LensesDir(); err == nil {
+			return filepath.Join(dir, name+".toml"), nil
+		}
+		return "", fs.ErrNotExist // no config dir: the built-in lens
+	}
 	if strings.ContainsRune(name, filepath.Separator) || strings.HasSuffix(name, ".toml") {
 		return filepath.Abs(name)
 	}

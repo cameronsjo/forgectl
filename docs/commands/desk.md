@@ -227,7 +227,7 @@ Every run with its progress, one line each: live runs first, then the most recen
 | `--json` | print `[{source, name, kind, live, exit, steps, done, failed, events, updated, partial}]` |
 | `--log FILE` | add a JSONL log as one more run (see `desk show`) |
 
-`live` is `running`, `ended`, `lost`, `skipped` or `changed` (skipped because its bytes changed after it was queued; it never ran) for a desk run, and `unknown` for a log. Like `status`, reading the desk scans it.
+`live` is `running`, `ended`, `lost`, `skipped` or `changed` (skipped because its bytes changed after it was queued; it never ran) for a desk run; `live` or `ended` for a log read through a lens that can end it; and `unknown` for any other log. Like `status`, reading the desk scans it.
 
 Exit codes: 0 listed; 1 a source or a run could not be read in full (the rest are still listed, and stderr names each one, with `--json` too: the array has no field for it); 2 a usage error.
 
@@ -252,7 +252,7 @@ record: forgectl desk status 17-nightly
 | `--log FILE` | read a JSONL log instead of a desk item (give a name or `--log`, not both) |
 | `--event-key`, `--step-key`, `--time-key` | with `--log`: the JSON keys holding each line's event name (`event`), step (`step`) and time (`time`; RFC 3339 or epoch seconds) |
 | `--lens LENS` | with `--log`: read the log through a lens, which gives it steps and an exit and may be plain text (see [`desk lens`](#forgectl-desk-lens)). Not with the key flags: a lens names its own keys |
-| `--live` | open the dashboard's run view on this run alone, full screen, and follow it as it grows: a line that says how the run is going (what failed and why, or what is running and for how long), the steps as a flow, the event timeline, replay. The keys are the run view's (`r` on the dashboard), plus `o` to show lines as the log wrote them when a lens rewrote them; `q` quits. It needs a terminal, and takes no `--json`, `--events` or `--at` |
+| `--live` | open the dashboard's run view on this run alone, full screen, and follow it as it grows: a line that says how the run is going (what failed and why, or what is running and for how long), the steps as a flow, the event timeline, replay. The keys are the run view's (`r` on the dashboard), plus `o` to show lines as the log wrote them when a lens rewrote them; only `q` (or `ctrl+c`) quits. It needs a terminal, and takes no `--json`, `--events` or `--at` |
 | `--json` | print `{source, name, kind, live, exit, at, events_total, steps, edges, events, counts, partial, held, note}`; `counts` is `{dropped, ignored, dropped_fields, unknown_steps, bad_exits}` |
 
 A log has no step model, so `show --log` lists its events and no steps; with `--lens` it has the lens's. A line that is not one JSON object, or has no event name, is dropped and counted; a float, a nested value or `null` is dropped from its event and counted. The file is opened without following a symlink and only if it is a regular file, and reads stop at 32 MiB per file, 64 KiB per line and 50 000 events. A log whose last line has no newline yet holds that line back (`held` is true, and the text says so), since a writer may still be finishing it. An integer time past the year 9999 (epoch milliseconds, say) is read as no time. At most 256 fields are kept from one line.
@@ -270,10 +270,10 @@ A lens is `NAME.toml` in the lenses directory (`desk lens list` prints where: `~
 ```toml
 about  = "nightly backup"
 format = "text"                       # or "json": one JSON object per line
+# time_layout = "2006-01-02 15:04:05" # top level: a Go layout; default RFC 3339 or epoch seconds
 
 [text]                                # format = "text": how a line splits
 pattern = '^(?P<time>\S+) (?P<level>\w+) (?P<event>.*)$'
-# time_layout = "2006-01-02 15:04:05" # a Go layout; default RFC 3339 or epoch seconds
 
 [[rule]]                              # rules run in order; the first match wins
 action = "ignore"
@@ -297,6 +297,10 @@ say    = "querying orders for customer {cid}"
 [[rule]]
 action = "end"
 match  = '^done rc=(?P<exit>\d+)'
+[[rule]]
+action = "end"
+match  = '^shutting down'
+exit   = 0                            # a fixed exit for a line that carries none
 ```
 
 | Key | Meaning |
@@ -306,16 +310,21 @@ match  = '^done rc=(?P<exit>\d+)'
 | `[json]` `event`, `step`, `time` | the keys holding each line's event name, step and time (default `event`, `step`, `time`) |
 | `[json]` `action`, `exit` | keys a line may carry its own action and exit in; a valid action there decides before the rules |
 | `[text]` `pattern` | a regular expression whose named groups split a line: `event`, `step` and `time` fill those, any other becomes a field. A line it does not match (a stack trace's next line) is an event named by the whole line. With no pattern, each line is its event |
-| `time_layout` | a [Go time layout](https://pkg.go.dev/time#pkg-constants) for the time; a layout with no zone reads local time |
-| `[[step]]` `id`, `note`, `after` | steps known up front and the steps each waits on, drawn as a flow. With none, steps appear in the order the log names them, with no edges; with some, a step the log names that is not listed is counted as unknown |
+| `time_layout` | a [Go time layout](https://pkg.go.dev/time#pkg-constants) for the time, at the top level (not in `[text]`); a layout with no zone reads local time |
+| `[[step]]` `id`, `note`, `after` | steps known up front and the steps each waits on, drawn as a flow. With none, a step appears the first time a rule starts, closes, fails or skips it, in that order, with no edges; with some, a step a rule names that is not listed is counted as unknown |
 | `[[rule]]` `action` | `start`, `close`, `fail` or `skip` a step; `end` the run; `note`, which changes no step and only rewrites the line; or `ignore`, which drops the line as noise |
 | `[[rule]]` `match` | a regular expression the event name must match, or `field`'s value when `field` is set. Its named groups fill the event: `step` the step, `exit` the run's exit (an integer 0–255), any other a field |
 | `[[rule]]` `step` | the step the rule acts on, when the line does not name it |
-| `[[rule]]` `say` | plain words to show in place of the line: `{name}` takes a group of `match`, or the event's step or a field. The line as read is kept in the `@line` field |
+| `[[rule]]` `say` | plain words to show in place of the line: `{name}` takes a group of `match`, or the event's step or a field (at most 32). The line as read is kept in the `@line` field |
+| `[[rule]]` `exit` | on an `end` rule, the exit to record when `match` has no `exit` group. An end with neither ends the run with its exit unknown |
+
+A lens needs no rules to be checked: write the format first, run `desk lens check`, and add rules once its `format:` line says every line splits.
 
 Patterns are Go's RE2, which matches in time linear in the line, so no line can stall a read. A rule that starts, closes, fails or skips a step must have a step to act on: `step`, a `step` group, or a step from the line format. An unknown key is an error, so a typo does not become a rule that never fires. Every error names the place to fix, as `[[rule]] 3: match: …`.
 
-The run ends when an `end` rule matches. A lens with no `end` rule (and no `[json]` `action` key) cannot know, so its run reads `log` and the live view keeps following it.
+The run ends when an `end` rule matches, and reads `live` until then (`desk runs` and `show --json` give `live` or `ended` for it). A start after an end opens the run again, as when the app restarted into the same log; the live view keeps following a log after it ends for that reason. A lens with no `end` rule (and no `[json]` `action` key) cannot know, so its run reads `log` (`unknown` in JSON), and its gist says what is running without counting the time, since the log may be old.
+
+A failed step's reason, on the gist line, is the first failing line since the step last started: usually the cause, where the lines after it are the fallout.
 
 The events a lens reads carry `@action` and `@rule` (which rule matched, from 1), and `@line` and `@exit` when set; `show --events` prints them, so the timeline says why each line did what it did. A line's own key starting with `@` is dropped, so a log cannot set its own action.
 
@@ -326,7 +335,7 @@ The events a lens reads carry `@action` and `@rule` (which rule matched, from 1)
 {"event":"done","action":"end","exit":0}
 ```
 
-`action` is `start`, `close`, `fail`, `skip`, `end` or `note`, or absent. forgectl never runs a translator: pipe its output into a file (`my-translator < app.log > run.jsonl`) and point `--log` at that file. An app can also write the vocabulary itself and need no translator.
+`action` is `start`, `close`, `fail`, `skip`, `end`, `note` or `ignore`, or absent (the event is shown and changes no step). forgectl never runs a translator: pipe its output into a file (`my-translator < app.log > run.jsonl`) and point `--log` at that file. An app can also write the vocabulary itself and need no translator.
 
 #### `forgectl desk lens list`
 
@@ -336,11 +345,12 @@ Exit codes: 0 listed (an empty or missing directory too); 1 a lens did not parse
 
 #### `forgectl desk lens check <lens> --log FILE`
 
-What a lens makes of a real log, without drawing the run: how many lines became events, were ignored or dropped; how many lines each rule matched, marking a rule that matched none; the steps found; and the most common events no rule matched, the lines a new rule could claim. It is the loop to write a lens by, or to have an agent write one: write a rule, check, repeat until the unmatched lines are the ones that do not matter.
+What a lens makes of a real log, without drawing the run: how many lines became events, were ignored or dropped; how many lines the format split (the pattern matched, or parsed as JSON), with a warning when none did; how many lines each rule matched, marking a rule that matched none; the steps found; and the most common shapes of events no rule matched (digits folded to `#`, so `user 17` and `user 23` count as one), the lines a new rule could claim. It is the loop to write a lens by, or to have an agent write one: write a rule, check, repeat until the unmatched lines are the ones that do not matter.
 
 ```text
 lens backup · text · 6 rules
 read: 8 events · 1 ignored
+format: 9 of 9 lines the pattern split
 rules (first match wins):
    1  1      ignore '^heartbeat'
    2  2      start  '^backing up (?P<step>\S+)'
@@ -352,7 +362,7 @@ unmatched: 3 events no rule matched; the most common:
        1×  starting
 ```
 
-`--json` prints `{lens, format, events, ignored, dropped, dropped_fields, rules: [{n, rule, hits}], steps, unmatched, unmatched_top: [{name, count}], partial, note}`.
+`--json` prints `{lens, format, lines, split, events, ignored, dropped, dropped_fields, rules: [{n, rule, hits}], steps, unmatched, unmatched_top: [{name, count}], partial, note}`.
 
 Exit codes: 0 checked; 1 the log could not be read in full; 2 a usage error, or the lens does not parse.
 

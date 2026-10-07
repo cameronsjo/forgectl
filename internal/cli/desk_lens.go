@@ -91,9 +91,13 @@ func newDeskLensCheckCmd() *cobra.Command {
 		Use:   "check <lens> --log FILE",
 		Short: "Show what a lens makes of a log: rule hits, unused rules, unmatched lines",
 		Long: `check reads FILE through the lens and reports, without drawing the run:
-how many lines became events, were ignored or dropped; how many lines each
+how many lines became events, were ignored or dropped; how many lines the
+format split (the text pattern matched, or parsed as JSON), with a warning
+when none did; how many lines each
 rule matched, marking a rule that matched none; the steps found; and the
-most common events no rule matched, the lines a new rule could claim.
+most common shapes of events no rule matched (digits folded to #), the lines
+a new rule could claim. A lens with no rules yet is fine: check its format
+first.
 
 LENS is a name in the lenses directory, or a path to a .toml file.
 
@@ -111,6 +115,6 @@ lens does not parse (the error names the line to fix).`,
 	}
 	cmd.Flags().StringVar(&logPath, "log", "", "the log to read through the lens")
 	cmd.Flags().BoolVar(&asJSON, "json", false,
-		`print {"lens","format","events","ignored","dropped","dropped_fields","rules":[{"n","rule","hits"}],"steps","unmatched","unmatched_top":[{"name","count"}],"partial","note"}`)
+		`print {"lens","format","lines","split","events","ignored","dropped","dropped_fields","rules":[{"n","rule","hits"}],"steps","unmatched","unmatched_top":[{"name","count"}],"partial","note"}`)
 	return cmd
 }

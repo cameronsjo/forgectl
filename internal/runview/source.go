@@ -53,9 +53,12 @@ type Cursor struct {
 	dropped  int    // lines dropped: too long, not JSON, unnamed, or past maxRunEvents
 	ignored  int    // lines a lens's ignore rule matched
 	ruleHits []int  // lines each lens rule matched
-	fields   int    // field values dropped: not a string, an int64 or a boolean
-	lost     bool   // desk only: RUN-LOST was delivered
-	desk     any    // desk only: the source's watcher for this run
+	// lensLines and split count the non-blank lines a lens read and the ones
+	// its line format split.
+	lensLines, split int
+	fields           int  // field values dropped: not a string, an int64 or a boolean
+	lost             bool // desk only: RUN-LOST was delivered
+	desk             any  // desk only: the source's watcher for this run
 }
 
 // Delta is what one Load found.
@@ -84,8 +87,12 @@ type Delta struct {
 	// ignored lines included: RuleHits[i] is rule i+1's. A total, like
 	// Dropped. It is how a person (or an agent) sees which rules work.
 	RuleHits []int
-	Partial  bool
-	Reset    bool
+	// Lines and Split are, for a lens's runs, the non-blank lines read and
+	// the ones the lens's format split (parsed as JSON, or matched by the
+	// text pattern). Split far below Lines means the pattern is wrong.
+	Lines, Split int
+	Partial      bool
+	Reset        bool
 	// Held is set when the log ends in a line with no newline yet. It is
 	// held back until its newline arrives; a log that is finished without
 	// one never shows that line.

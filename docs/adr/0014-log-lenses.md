@@ -19,7 +19,7 @@ A lens says, for one app:
 - **How a line splits**: `format = "json"` with the keys for event, step and time, or `format = "text"` with one RE2 pattern whose named groups fill them (any other group is a field). A text line the pattern does not match is an event named by the whole line, so a stack trace's continuation is kept, not lost.
 - **What a line does**: ordered `[[rule]]`s, first match wins, each matching the event name or a field. A rule's action starts, closes, fails or skips a step, ends the run, `note`s the line (no step change), or `ignore`s it as noise. Its named groups fill the step, the exit and fields.
 - **How a line reads**: a rule's `say` rewrites the event's name into plain words (`querying orders for customer {cid}`); the line as read stays in `@line`, one key away in the run view (`o`) and in `--events`.
-- **Which steps exist**, optionally: `[[step]]` with `after` edges draws a graph. With none, steps are discovered in the order the log names them, with no edges, because order of appearance is not dependency.
+- **Which steps exist**, optionally: `[[step]]` with `after` edges draws a graph. With none, a step is discovered the first time a rule acts on it, with no edges, because order of appearance is not dependency.
 
 Lenses live in `<config dir>/forgectl/lenses/NAME.toml`, or any path `--lens` names. Parsing is strict: an unknown key, an action outside the list, a step rule with no step source, a `say` referring to nothing parseable, or an `after` naming no step is an error that names the rule to fix.
 
@@ -53,6 +53,8 @@ The run view's second line, and `desk show`'s, is the run's gist: the first fail
 ## Consequences
 
 - `desk show` and `desk runs` take `--lens`; `desk show` takes `--live`; `desk lens list` and `desk lens check` are new verbs. JSON changes are additive (`counts.ignored`).
-- A lens with no end rule (and no `action` key) cannot know its run ended: its state stays `log` and the live view keeps polling, as a plain log does.
+- `live` gains two values for a log: a lens that can end its run reports `live` until an end and `ended` after it, where every log was `unknown` before. Under ADR-0008 that is a new value in an existing field; a reader that treats an unknown `live` as "not a desk run" is unaffected. A lens with no end rule (and no `action` key) still reads `unknown`.
+- A start after an end reopens a lens's run (the app restarted into the same log), and the live view keeps following a log after it ends. An ended desk run is still final.
+- An end with no exit, from a lens, ends the run with its exit unknown rather than counting a bad exit; `exit = N` on an end rule records a fixed one.
 - `say` text and every captured value pass through `termsafe` at ingest, like every other string a source reads.
 - ADR-0013's "No run spec file" section is superseded by this ADR; the rest of 0013 stands.

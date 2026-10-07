@@ -220,7 +220,9 @@ func Gist(s RunState, live LiveState, events []Event, now time.Time) string {
 	default:
 		if len(running) > 0 {
 			p := "running " + strings.Join(running, ", ")
-			if !now.IsZero() && !since.IsZero() && now.After(since) {
+			// Only a run its source calls live has been running until now; a
+			// log with no end rule may be yesterday's.
+			if (live == LiveLive || live == LiveRunning) && !now.IsZero() && !since.IsZero() && now.After(since) {
 				p = "running " + strings.Join(running, ", ") + " for " + now.Sub(since).Round(time.Second).String()
 			}
 			parts = append(parts, p)
@@ -232,18 +234,26 @@ func Gist(s RunState, live LiveState, events []Event, now time.Time) string {
 }
 
 // failure is why step id failed, as the event that failed it says it: its
-// name, in plain words when a lens's rule rewrote it, and its time. Only an
-// event a lens classified carries a name worth reading; a desk run's
+// name, in plain words when a lens's rule rewrote it, and its time. It is the
+// first failing line since the step last started, which is usually the
+// cause; the lines after it are often the fallout (a rollback, a retry).
+// Only an event a lens classified carries a name worth reading; a desk run's
 // STEP-FAIL says nothing the flow does not.
-func failure(events []Event, id string) (string, time.Time) {
-	for i := len(events) - 1; i >= 0; i-- {
-		e := events[i]
+func failure(events []Event, id string) (why string, at time.Time) {
+	found := false
+	for _, e := range events {
 		if e.Step != id {
 			continue
 		}
-		if a, ok := e.field(LensActionField); ok && Action(a) == ActionFail {
-			return e.Name, e.Time
+		a, _ := e.field(LensActionField)
+		switch Action(a) {
+		case ActionStart:
+			why, at, found = "", time.Time{}, false
+		case ActionFail:
+			if !found {
+				why, at, found = e.Name, e.Time, true
+			}
 		}
 	}
-	return "", time.Time{}
+	return why, at
 }

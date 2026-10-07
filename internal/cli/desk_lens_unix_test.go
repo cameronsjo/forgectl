@@ -189,3 +189,29 @@ func TestDeskShow_EventsLens(t *testing.T) {
 		}
 	}
 }
+
+// A pattern that splits no line is the silent failure check must not pass
+// over; a lens with no rules is how a pattern is checked first.
+func TestDeskLensCheck_NamesAPatternThatSplitsNothing(t *testing.T) {
+	newDeskDir(t)
+	lensHome(t, "wrong", "format = 'text'\n[text]\npattern = '^(?P<time>\\S+) (?P<event>.*)$'\n")
+	p := writeTemp(t, "a.log", "2026-10-07 09:00:00.001 INFO user 17 logged in\n\n2026-10-07 09:00:01.002 INFO user 23 logged in\n")
+	lensHome(t, "spaced", "format = 'text'\n[text]\npattern = '^(?P<time>\\S+ \\S+) (?P<level>\\w+) (?P<event>.*)$'\n")
+	out, _, err := deskRun(t, deskDeps(), "lens", "check", "spaced", "--log", p)
+	wantExit(t, err, 0)
+	for _, want := range []string{"format: 2 of 2 lines the pattern split", "2×  user # logged in"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("lens check is missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "warning:") {
+		t.Errorf("a pattern that splits every line is no warning:\n%s", out)
+	}
+
+	bad := writeTemp(t, "wrong.toml", "format = 'text'\n[text]\npattern = '^(?P<level>[a-z]+):'\n")
+	out, _, err = deskRun(t, deskDeps(), "lens", "check", bad, "--log", p)
+	wantExit(t, err, 0)
+	if !strings.Contains(out, "format: 0 of 2 lines the pattern split") || !strings.Contains(out, "warning: no line fit the format") {
+		t.Errorf("a pattern that splits nothing should say so:\n%s", out)
+	}
+}

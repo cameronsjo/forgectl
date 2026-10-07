@@ -122,7 +122,9 @@ func (v *deskRunView) polls() bool {
 	if v.gone {
 		return false
 	}
-	return !runEnded(v.sourceLive())
+	// An ended desk run is final; a log may go on (an app restarted and kept
+	// appending), so a log is followed for as long as the view is open.
+	return v.ref().Kind == runview.KindLog || !runEnded(v.sourceLive())
 }
 
 // sourceLive is the run's state now: its source's word, or, for a run whose
