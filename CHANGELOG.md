@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.33.0](https://github.com/cameronsjo/forgectl/compare/v0.32.0...v0.33.0) (2026-10-07)
+
+
+### Features
+
+* **desk:** show the timeline on the dashboard instead of the history ([#1173](https://github.com/cameronsjo/forgectl/issues/1173)) ([abbfa02](https://github.com/cameronsjo/forgectl/commit/abbfa0296c26fc0cae9cc52eb753361d4c921087))
+* **surface:** a work queue for herdr workers (enqueue, dequeue, queue) ([#1170](https://github.com/cameronsjo/forgectl/issues/1170)) ([060046f](https://github.com/cameronsjo/forgectl/commit/060046f9062db3324b034036777830419fb0356a))
+
 ## [0.32.0](https://github.com/cameronsjo/forgectl/compare/v0.31.0...v0.32.0) (2026-10-07)
 
 
