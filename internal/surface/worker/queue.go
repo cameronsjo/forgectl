@@ -229,8 +229,9 @@ func enqueueRow(rows []QueueRow, row QueueRow) (out []QueueRow, existing QueueRo
 	return append(rows, row), row, true, nil
 }
 
-// claimRow moves the row named name from queued to claimed, writing launchID.
-func claimRow(rows []QueueRow, name, launchID string, now time.Time) ([]QueueRow, QueueRow, error) {
+// claimRow moves the row named name from queued to claimed, writing launchID
+// and, when it is not empty, the herdr session the launch will use.
+func claimRow(rows []QueueRow, name, launchID, session string, now time.Time) ([]QueueRow, QueueRow, error) {
 	for i := range rows {
 		if rows[i].Name != name {
 			continue
@@ -240,6 +241,9 @@ func claimRow(rows []QueueRow, name, launchID string, now time.Time) ([]QueueRow
 		}
 		rows[i].State = QueueClaimed
 		rows[i].LaunchID = launchID
+		if session != "" {
+			rows[i].Session = session
+		}
 		rows[i].StateAt = now
 		return rows, rows[i], nil
 	}
@@ -343,16 +347,57 @@ func (q *Queue) Dequeue(name string) (QueueRow, error) {
 // and records launchID, which must not be empty. Of two claimers of one row,
 // exactly one succeeds; the other gets ErrQueueNotQueued.
 func (q *Queue) Claim(name, launchID string, now time.Time) (QueueRow, error) {
+	return q.ClaimFor(name, launchID, "", now)
+}
+
+// ClaimFor is Claim that also records session, the herdr session whose
+// ledger the launch will write, in the same locked write. The drain uses it,
+// so a claimed row always names the ledger a restart must read.
+func (q *Queue) ClaimFor(name, launchID, session string, now time.Time) (QueueRow, error) {
 	if launchID == "" {
 		return QueueRow{}, errors.New("worker: a claim needs a launch id")
 	}
 	var claimed QueueRow
 	err := q.mutate(maxLedgerBytes, func(rows []QueueRow) ([]QueueRow, error) {
-		out, r, err := claimRow(rows, name, launchID, now.UTC())
+		out, r, err := claimRow(rows, name, launchID, session, now.UTC())
 		claimed = r
 		return out, err
 	})
 	return claimed, err
+}
+
+// RemoveIf removes the row named name when match accepts it, and returns the
+// row removed. It is the drain's prune: a row can be dequeued and enqueued
+// again between the drain's read and its remove, and match (the row as read)
+// keeps the new one. A row that no longer matches is ErrQueueRowChanged.
+func (q *Queue) RemoveIf(name string, match func(QueueRow) bool) (QueueRow, error) {
+	var removed QueueRow
+	err := q.mutate(maxLedgerBytes, func(rows []QueueRow) ([]QueueRow, error) {
+		for i := range rows {
+			if rows[i].Name != name {
+				continue
+			}
+			if !match(rows[i]) {
+				return nil, ErrQueueRowChanged
+			}
+			removed = rows[i]
+			return append(rows[:i:i], rows[i+1:]...), nil
+		}
+		return nil, ErrQueueNoRow
+	})
+	return removed, err
+}
+
+// SameRead matches a row that is still exactly as read: the same launch, the
+// same state entered at the same time, and the same brief enqueued at the
+// same time. Every drain write but the claim passes it to UpdateIf or
+// RemoveIf, so a row the operator dequeued and enqueued again, or another
+// writer moved on, is left alone.
+func SameRead(was QueueRow) func(QueueRow) bool {
+	return func(r QueueRow) bool {
+		return r.LaunchID == was.LaunchID && r.State == was.State && r.StateAt.Equal(was.StateAt) &&
+			r.EnqueuedAt.Equal(was.EnqueuedAt) && r.BriefSHA256 == was.BriefSHA256 && r.Repo == was.Repo
+	}
 }
 
 // SameLaunch matches a row still carrying launchID: the guard the drain

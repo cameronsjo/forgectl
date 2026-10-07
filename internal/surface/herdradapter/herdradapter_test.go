@@ -1781,3 +1781,30 @@ func foreignRef(t *testing.T) backend.Ref {
 	}
 	return ref
 }
+
+// TestCheckReadyRunsReadinessOnly pins the drain's pre-claim check: a stopped
+// session is FailureUnavailable, a running one passes, and neither creates.
+func TestCheckReadyRunsReadinessOnly(t *testing.T) {
+	stopped := sessionsJSON(map[string]any{
+		"default": true, "name": defaultSession, "running": false, "socket_path": testSocket,
+	})
+	run := newRunner()
+	run.sessions = func() (exec.SensitiveResult, error) { return stdout(stopped), nil }
+	a := newTestAdapter(t, run, nil)
+	err := a.CheckReady(context.Background())
+	var cause backend.StartCause
+	if !errors.As(err, &cause) || cause.Class() != backend.FailureUnavailable || !errors.Is(err, ErrSessionNotRunning) {
+		t.Fatalf("CheckReady on a stopped session: %v, want FailureUnavailable naming ErrSessionNotRunning", err)
+	}
+
+	running := newRunner()
+	b := newTestAdapter(t, running, nil)
+	if err := b.CheckReady(context.Background()); err != nil {
+		t.Fatalf("CheckReady on a running session: %v", err)
+	}
+	for _, r := range []*scriptedRunner{run, running} {
+		if _, created := commandOfKind(r.calls(), exec.KindHerdrCreate); created {
+			t.Error("CheckReady created a workspace")
+		}
+	}
+}

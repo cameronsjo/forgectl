@@ -439,6 +439,19 @@ func (a *Adapter) readiness(ctx context.Context) (serverInfo, *backend.StartCaus
 	return a.readinessAtPin(ctx, "", true)
 }
 
+// CheckReady runs the readiness check Start runs first, and nothing else: the
+// pinned session is running, its socket is ours, and it speaks a protocol
+// this build knows. `surface drain` asks it before claiming, so a herdr that
+// is down pauses claiming instead of failing a launch after its worktree
+// exists. The error is a backend.StartCause; FailureUnavailable means the
+// session is not running or cannot be reached.
+func (a *Adapter) CheckReady(ctx context.Context) error {
+	if _, cause := a.readiness(ctx); cause != nil {
+		return *cause
+	}
+	return nil
+}
+
 // freshReadiness resolves the original named session again but refuses a new
 // socket before protocol() can follow the session pin to another endpoint. The
 // warning is suppressed because the initial readiness already emitted it for
