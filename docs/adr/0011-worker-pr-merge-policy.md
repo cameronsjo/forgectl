@@ -65,3 +65,7 @@ Three facts shape the design, each checked against live GitHub on 2026-10-05:
 - **A refused-paths denylist.** The set of files that change what runs keeps growing (CI scripts, lint config, release config, `go.mod` `replace` lines, instruction files). Replaced by a per-repo allowlist.
 - **GitHub's native auto-merge with branch protection alone.** It cannot express the path allowlist or approver identity rules. The gate check carries those, and GitHub's required-check rule enforces it.
 - **A policy file in each repo.** A worker can edit its own repo. Declined: the policy lives outside every worktree.
+
+## Amendment 2026-10-06: the worker App is deferred
+
+ADR-0010's amendment of the same date keeps workers on the operator's GitHub identity, and defers the worker App and the restrict-updates ruleset (forgectl#1134). This policy's guarantee that a worker cannot approve or merge its own PR rests on both. Until they exist, a worker can merge with the operator's identity, and only its brief asks it not to. Auto-merge (`mode = "auto"`) does not ship until forgectl#1134 lands or this ADR is revisited.

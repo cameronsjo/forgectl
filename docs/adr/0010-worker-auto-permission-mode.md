@@ -66,3 +66,14 @@ Workers run in linked worktrees under `<repo>/.claude/worktrees/`, so they share
 Cameron's decision: keep shared worktrees and accept this boundary. The threat this floor addresses is accidents and a sloppy worker, not an adversarial one. Per-worker clones were declined: a separate `.git` per worker would remove these paths, at a cost of disk space, clone time, and branches that reach the operator's checkout only through GitHub. forgectl#1061's base from GitHub stays as a correctness fix, because a checkout's `HEAD` is often stale. It is not a control against these paths.
 
 Known-boundary rule: a review finding that needs a hostile earlier worker, or another attacker chain past this boundary, is recorded here, not designed against.
+
+## Amendment 2026-10-06: workers run as the operator, unsandboxed
+
+Cameron's decision: skip the worker GitHub App, the Bash sandbox, and the ruleset change. Workers keep running as the operator.
+
+- **Identity.** A worker uses the operator's keychain `gh` login and SSH keys (`SSH_AUTH_SOCK` stays in the environment allowlist). It can push to any branch, merge, and write to any repository the operator can.
+- **No OS sandbox.** A worker's tools run as the operator's macOS user with no Claude Code sandbox.
+- **What bounds a worker.** Its brief, which forbids merging its own PR and touching the default branch, plus what forgectl already enforces: the settings and MCP isolation, `--safe-mode`, the environment allowlist, and the `SendMessage` and `RemoteTrigger` deny rules (`docs/herdr.md`, "What a claude worker loads"). Nothing enforces "a worker cannot merge or push to `main`". The brief asks for it; the operator's identity allows it.
+- **`auto` stays refused.** Decision 3 still holds: `auto` needs the whole floor, and the floor's sandbox and worker-identity items are not built. Workers stay capped at `acceptEdits` (`workerMaxPermissionMode`), so every shell command still prompts the operator.
+
+The floor items "Bash sandbox", "Non-Bash tools denied the same paths", "Worker GitHub identity", and "Deny rules as a second layer", and ADR-0011's restrict-updates ruleset, are deferred, not rejected. forgectl#1134 lists where each would change if workers need a sandbox later.
