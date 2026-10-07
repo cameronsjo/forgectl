@@ -666,3 +666,84 @@ func TestDeskFrame_TooSmallHidesY(t *testing.T) {
 		t.Errorf("too-small hints:\n%s", out)
 	}
 }
+
+// A lost item's panel says what happened and what to do, in plain words; a
+// changed one shows the hash it was queued at and the hash it has now
+// (#1106).
+func TestDeskFrame_LostAndChangedSayWhatToDo(t *testing.T) {
+	lost := item("01-long", desk.KindScript, desk.StateLost)
+	lost.Headers = desk.Headers{What: "Sleep", Why: "A test"}
+	lost.Meta.SHA256 = desk.SHA256Hex([]byte("long"))
+	queued, now := desk.SHA256Hex([]byte("v1")), desk.SHA256Hex([]byte("v2"))
+	changed := item("02-s2", desk.KindScript, desk.StateSkipped)
+	changed.Headers = desk.Headers{What: "Print", Why: "A test"}
+	changed.Meta = desk.Meta{AddedAt: agoPtr(time.Minute), SHA256: queued, ChangedSHA256: now, SkipReason: desk.SkipChanged}
+	snap := &desk.Snapshot{Dir: "/d", Taken: deskNow, Running: []desk.Item{lost}, Skipped: []desk.Item{changed}}
+	_, opts := emptySnapshot()
+
+	flat := func(cursor int) string {
+		out := ansi.Strip(deskFrame{snap: snap, width: 80, height: 30, now: deskNow, opts: opts, cursor: cursor}.render())
+		return strings.Join(strings.Fields(strings.ReplaceAll(out, "│", " ")), " ")
+	}
+	got := flat(0)
+	for _, want := range []string{"01 long · sha256 " + lost.Meta.SHA256[:12] + " · lost", "the desk stopped watching it mid-run, so it may have partly run", "s clears it", "l shows its output"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("lost panel lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "RUN-END") || strings.Contains(got, "owner") {
+		t.Errorf("lost panel still uses internal words:\n%s", got)
+	}
+	got = flat(1)
+	for _, want := range []string{"02 s2 · changed", "queued " + queued[:12] + ", now " + now[:12], "not run, moved to skipped", "ask Claude to queue it again"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("changed panel lacks %q:\n%s", want, got)
+		}
+	}
+	// A forged hash read back from meta is never drawn.
+	snap.Skipped[0].Meta.ChangedSHA256 = "\x1b]0;x\a" + now[:40]
+	if got := flat(1); strings.Contains(got, ", now") || strings.Contains(got, "\x1b") {
+		t.Errorf("an invalid changed hash was drawn:\n%s", got)
+	}
+}
+
+// The lost or changed note is not part of the focus panel's minimum: a
+// small window that shows a waiting row's panel shows a lost row's too,
+// without the note.
+func TestDeskFrame_NoteDoesNotForceTooSmall(t *testing.T) {
+	lost := item("01-long", desk.KindScript, desk.StateLost)
+	lost.Headers = desk.Headers{What: "Sleep", Why: "A test"}
+	lost.Meta.SHA256 = desk.SHA256Hex([]byte("long"))
+	snap := &desk.Snapshot{Dir: "/d", Taken: deskNow, Running: []desk.Item{lost}}
+	_, opts := emptySnapshot()
+	out := ansi.Strip(deskFrame{snap: snap, width: 40, height: 10, now: deskNow, opts: opts}.render())
+	if strings.Contains(out, "too small") || !strings.Contains(out, "01 long") {
+		t.Errorf("a lost row forced the too-small frame at 40x10:\n%s", out)
+	}
+}
+
+// A changed hash equal to the queued one (a forged or old meta) is not shown
+// as "now": the note says only that it changed.
+func TestDeskFrame_ChangedHashEqualToQueuedIsNotShown(t *testing.T) {
+	h := desk.SHA256Hex([]byte("v1"))
+	changed := item("02-s2", desk.KindScript, desk.StateSkipped)
+	changed.Meta = desk.Meta{AddedAt: agoPtr(time.Minute), SHA256: h, ChangedSHA256: h, SkipReason: desk.SkipChanged}
+	snap := &desk.Snapshot{Dir: "/d", Taken: deskNow, Skipped: []desk.Item{changed}}
+	_, opts := emptySnapshot()
+	out := ansi.Strip(deskFrame{snap: snap, width: 100, height: 30, now: deskNow, opts: opts}.render())
+	if strings.Contains(out, ", now ") || !strings.Contains(out, "queued "+h[:12]+", since changed") {
+		t.Errorf("changed note:\n%s", out)
+	}
+}
+
+// A lost run is not counted as running: the queue strip and the outcomes
+// tile count it as lost (#1106).
+func TestDeskFrame_LostIsNotCountedRunning(t *testing.T) {
+	lost := item("01-long", desk.KindScript, desk.StateLost)
+	snap := &desk.Snapshot{Dir: "/d", Taken: deskNow, Running: []desk.Item{lost}}
+	_, opts := emptySnapshot()
+	out := ansi.Strip(RenderDeskFrame(snap, 100, 30, deskNow, opts))
+	if !strings.Contains(out, "● 0 running") || !strings.Contains(out, "? 1 lost") || !strings.Contains(out, "0 changed · 1 lost") {
+		t.Errorf("lost counts:\n%s", out)
+	}
+}

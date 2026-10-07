@@ -615,7 +615,7 @@ func (m deskModel) run() (tea.Model, tea.Cmd) {
 	}
 	st := m.styles()
 	if !r.runnable() {
-		m.message = st.Warn.Render(safeMessage(itemLabel(r.item.Name) + " is " + rowLabel(r.kind) + "; only a waiting item runs"))
+		m.message = st.Warn.Render(safeMessage(notRunnable(r)))
 		return m, nil
 	}
 	// One key, as the old desk had: the focus panel's short hash is what the
@@ -665,6 +665,19 @@ func (m deskModel) start(t target) (tea.Model, tea.Cmd) {
 		text, err := launch(d, t)
 		return deskResultMsg{text: text, err: err, resolved: resolvedIf(err, t)}
 	}
+}
+
+// notRunnable is y's reply for a row that cannot run: what it is, and for a
+// lost or changed item, what to do instead.
+func notRunnable(r queueRow) string {
+	label := itemLabel(r.item.Name)
+	switch r.kind {
+	case rowLost:
+		return label + " was lost mid-run · " + lostNext
+	case rowChanged:
+		return label + " changed and did not run · " + changedNext
+	}
+	return label + " is " + rowLabel(r.kind) + "; only a waiting item runs"
 }
 
 func rowLabel(k rowKind) string {
@@ -862,7 +875,7 @@ func (m deskModel) confirmKey(key string) (tea.Model, tea.Cmd) {
 				if err := d.Skip(name, desk.SkipLost); err != nil {
 					return deskResultMsg{err: err}
 				}
-				return deskResultMsg{text: "skipped lost run " + itemLabel(name) + "; queue a new item to run it again"}
+				return deskResultMsg{text: "cleared lost run " + itemLabel(name) + " · ask Claude to queue it again to rerun it"}
 			}
 			if err := d.Skip(name, desk.SkipOperator); err != nil {
 				return deskResultMsg{err: err}
@@ -912,7 +925,12 @@ func (m deskModel) undo() (tea.Model, tea.Cmd) {
 	}
 	name := m.lastSkip
 	if name == "" {
-		m.message = m.styles().Muted.Render("nothing to undo")
+		text := "nothing to undo"
+		if r, ok := m.selected(); ok && r.kind == rowChanged {
+			// The desk skipped it, not the operator, and it cannot be re-armed.
+			text = itemLabel(r.item.Name) + " changed; nothing to undo · " + changedNext
+		}
+		m.message = m.styles().Muted.Render(safeMessage(text))
 		return m, nil
 	}
 	m.busy = true
@@ -946,11 +964,17 @@ func (m deskModel) view() tea.Cmd {
 	}
 }
 
-// log opens the selected item's log, or the latest run's when the selected
-// item has not run.
+// log opens the selected item's log, or the latest run's when nothing is
+// selected. A selected item that has not run says so.
 func (m deskModel) log() tea.Cmd {
 	name := ""
-	if r, ok := m.selected(); ok && r.kind != rowWaiting && r.kind != rowRefused && r.kind != rowChanged {
+	if r, ok := m.selected(); ok {
+		if r.kind == rowWaiting || r.kind == rowRefused || r.kind == rowChanged {
+			// No run, so no log: say so rather than open another item's log as
+			// this one's (#1106).
+			msg := itemLabel(r.item.Name) + " has not run, so it has no log"
+			return func() tea.Msg { return deskPagerMsg{err: errors.New(msg)} }
+		}
 		name = r.item.Name
 	}
 	if name == "" && m.snap != nil && len(m.snap.Done) > 0 {
@@ -1114,6 +1138,10 @@ func (m deskModel) footer() string {
 	st := m.styles()
 	switch m.confirm {
 	case confirmSkip:
+		if m.targets[0].lost {
+			// It already ran, or part of it did: "skip" is the wrong word.
+			return " " + st.Warn.Render("clear lost run "+itemLabel(m.targets[0].name)+"?") + st.Muted.Render("  y clear · any other key cancels")
+		}
 		return " " + st.Warn.Render("skip "+itemLabel(m.targets[0].name)+"?") + st.Muted.Render("  y skip · any other key cancels")
 	case confirmAll:
 		width := m.screenWidth()

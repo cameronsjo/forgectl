@@ -64,8 +64,8 @@ type StepState struct {
 	Start, End time.Time
 }
 
-// LiveState says whether a run is still going. Fold sets ended or live; the
-// desk source sets the others from the desk's own state.
+// LiveState says whether a run is still going. Fold sets live, ended or
+// lost; the desk source sets the others from the desk's own state.
 type LiveState string
 
 const (
@@ -75,6 +75,9 @@ const (
 	LiveRunning LiveState = "running"
 	LiveLost    LiveState = "lost"
 	LiveSkipped LiveState = "skipped"
+	// LiveChanged is a desk item skipped because its bytes changed after it
+	// was queued: it never ran. The queue and outcomes use the same word.
+	LiveChanged LiveState = "changed"
 	// LiveUnknown is a JSONL log's state: with no step model, nothing in the
 	// log says whether its run is over.
 	LiveUnknown LiveState = "unknown"

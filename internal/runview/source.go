@@ -144,8 +144,9 @@ func cleanErr(err error) error {
 // step, STEP-END closes it, and STEP-FAIL (the desk source's name for a
 // STEP-END whose rc is not 0) fails it; RUN-END carries the exit. A script is
 // one step, ScriptStep, whose start and end the desk source derives from
-// RUN-START and RUN-END. STEP-SKIP skips a step that never started. RUN-LOST
-// stays unmapped: Delta.Live says the run is lost.
+// RUN-START and RUN-END. STEP-SKIP skips a step that never started.
+// RUN-LOST, which the desk source adds when a run's owner is gone with no
+// RUN-END, ends the run as lost: a step still running reads interrupted.
 func DeskSpec() *Spec {
 	return &Spec{
 		On: map[string]Action{
@@ -154,6 +155,7 @@ func DeskSpec() *Spec {
 			deskStepFail:  ActionFail,
 			deskStepSkip:  ActionSkip,
 			deskRunEnd:    ActionEnd,
+			deskRunLost:   ActionLost,
 		},
 		ExitField: "rc",
 	}
@@ -167,6 +169,7 @@ const (
 	deskStepFail  = "STEP-FAIL"
 	deskStepSkip  = desk.EventStepSkip
 	deskRunEnd    = desk.EventRunEnd
+	deskRunLost   = desk.EventRunLost
 	// ScriptStep is the one step of a desk script.
 	ScriptStep = "script"
 )

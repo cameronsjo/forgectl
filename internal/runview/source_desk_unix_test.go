@@ -431,10 +431,10 @@ func TestDeskRunLostIsDeliveredOnce(t *testing.T) {
 			t.Fatalf("again: live %s, events %v, reset %v", again.Live, names(again.Events), again.Reset)
 		}
 	}
-	// RUN-LOST is unmapped: the fold leaves the run live and the step running;
-	// the delta's Live says lost.
+	// RUN-LOST folds: the run reads lost and its step interrupted, not running
+	// (#1106), so a replay agrees with the delta's Live.
 	st := Fold(DeskSpec(), first.Defs, first.Events)
-	if st.Live != LiveLive || st.Steps[0].Status != StepRunning {
+	if st.Live != LiveLost || st.Steps[0].Status != StepInterrupted {
 		t.Errorf("fold of a lost run = %+v", st)
 	}
 }
@@ -566,5 +566,56 @@ func TestHostileDeskTextIsInert(t *testing.T) {
 				t.Errorf("control byte survived in %s.%s = %q", e.Name, f.Key, f.Value)
 			}
 		}
+	}
+}
+
+// An item the desk skipped because it changed lists and loads as changed,
+// the word the queue and the outcomes use, not skipped (#1106).
+func TestDeskChangedItemReadsChanged(t *testing.T) {
+	d := openDesk(t)
+	src := filepath.Join(t.TempDir(), "s2.sh")
+	writeFile(t, src, "#!/bin/bash\necho s2\n")
+	a, err := d.Add(src, "print", "a test", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(d.Path(), desk.DirPending, a.Name+".sh"), "#!/bin/bash\necho s2\n# appended\n")
+	s := NewDeskSource(d)
+	refs, err := s.List() // the scan moves it to skipped/ as changed
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 1 || refs[0].Live != LiveChanged {
+		t.Fatalf("List = %+v; want one changed run", refs)
+	}
+	if dl := loadDesk(t, s, a.Name, &Cursor{}); dl.Live != LiveChanged {
+		t.Errorf("Load Live = %s, want changed", dl.Live)
+	}
+	if mk := RunMark(IconGlyphs, LiveChanged, nil); mk.Word != "changed" || mk.Glyph != "!" {
+		t.Errorf("RunMark(changed) = %+v", mk)
+	}
+}
+
+// A run the source's last scan saw as pending, then skipped as changed by
+// another reader of the desk, loads as changed, not skipped: the word comes
+// from the item as read after the rescan.
+func TestDeskChangedAfterAStaleScanReadsChanged(t *testing.T) {
+	d := openDesk(t)
+	src := filepath.Join(t.TempDir(), "s3.sh")
+	writeFile(t, src, "#!/bin/bash\necho s3\n")
+	a, err := d.Add(src, "print", "a test", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewDeskSource(d)
+	if _, err := s.List(); err != nil { // caches the item as pending
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(d.Path(), desk.DirPending, a.Name+".sh"), "#!/bin/bash\necho s3 edited\n")
+	if _, err := d.Scan(); err != nil { // another reader moves it to skipped/
+		t.Fatal(err)
+	}
+	if dl := loadDesk(t, s, a.Name, &Cursor{}); dl.Live != LiveChanged {
+		t.Errorf("Load Live = %s, want changed", dl.Live)
 	}
 }

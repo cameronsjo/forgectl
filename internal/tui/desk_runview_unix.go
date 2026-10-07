@@ -55,10 +55,9 @@ type deskRunView struct {
 	loaded  bool
 	// gone is set once the run is no longer in the desk, so it is not polled.
 	gone bool
-	// want is the run r was pressed on; notice says when the view shows
-	// another one instead.
-	want, notice string
-	err          error
+	// want is the run r was pressed on.
+	want string
+	err  error
 }
 
 // deskRunLoadMsg is one load of the run view's run. refs is set when the load
@@ -100,21 +99,29 @@ func (v *deskRunView) live(s runview.RunState) runview.LiveState {
 	return s.Live
 }
 
+// runEnded reports a run that is over, however it ended; a run the desk no
+// longer has is not one of them, since it may have been running.
+func runEnded(live runview.LiveState) bool {
+	switch live {
+	case runview.LiveEnded, runview.LiveSkipped, runview.LiveChanged, runview.LiveLost:
+		return true
+	}
+	return false
+}
+
 // polls reports whether the run can still change, so the view reloads it on
 // each tick.
 func (v *deskRunView) polls() bool {
 	if v.gone {
 		return false
 	}
-	switch v.delta.Live {
-	case runview.LiveEnded, runview.LiveSkipped, runview.LiveLost:
-		return false
-	}
-	return true
+	return !runEnded(v.delta.Live)
 }
 
 // openRunView opens the run view on the selected item's run, or on the
-// newest run when the selected item has not run.
+// newest run when nothing is selected. A selected item with no run (waiting
+// or refused) says so on the dashboard instead of opening another item's
+// run, which would read as its own (#1106).
 func (m deskModel) openRunView() (tea.Model, tea.Cmd) {
 	if m.runs == nil {
 		m.message = m.styles().Warn.Render("the run view is not available here")
@@ -122,7 +129,11 @@ func (m deskModel) openRunView() (tea.Model, tea.Cmd) {
 	}
 	name := ""
 	if r, ok := m.selected(); ok {
-		name = r.item.Name // a waiting item is not listed as a run, so the newest shows instead
+		if r.kind == rowWaiting || r.kind == rowRefused {
+			m.message = m.styles().Muted.Render(safeMessage(itemLabel(r.item.Name) + " has not run yet; r opens its run once it starts"))
+			return m, nil
+		}
+		name = r.item.Name
 	}
 	m.runGen++
 	m.rv = &deskRunView{gen: m.runGen, want: name, follow: true, loading: true}
@@ -174,7 +185,11 @@ func (m deskModel) applyRunLoad(t deskRunLoadMsg) (tea.Model, tea.Cmd) {
 		v.refs = t.refs
 		v.idx = slices.IndexFunc(t.refs, func(r runview.RunRef) bool { return r.Name == t.ref.Name })
 		if v.want != "" && t.ref.Name != v.want {
-			v.notice = "the selected item has no run; showing the newest"
+			// The selected item has no run (gone since the dashboard's scan):
+			// say so rather than show another item's run as its own (#1106).
+			m.rv = nil
+			m.message = m.styles().Muted.Render(safeMessage(itemLabel(v.want) + " has no run to show"))
+			return m, nil
 		}
 		if len(t.refs) == 0 {
 			v.err = fmt.Errorf("no runs yet: nothing has started")
@@ -371,19 +386,28 @@ func (v *deskRunView) render(st theme.Styles, width, height int) string {
 	}
 
 	head := st.Header.Render("run")
+	finished := v.loaded && runEnded(v.delta.Live)
 	if ref.Name != "" {
 		head += " " + st.Fg.Render(itemLabel(ref.Name))
 		if ref.Kind == runview.KindLog {
 			head = st.Header.Render("log") + " " + st.Fg.Render(ref.Name)
 		}
-		mk := runview.RunMark(g, v.live(s), s.Exit)
+		// A finished run's header shows how it finished, even mid-replay:
+		// the fold at the replay point would call it live (#1106).
+		live, exit := v.live(s), s.Exit
+		if finished {
+			live, exit = v.delta.Live, v.folder.At(n).Exit
+		}
+		mk := runview.RunMark(g, live, exit)
 		head += "  " + runToneStyle(st, mk.Tone).Render(mk.Glyph+" "+mk.Word)
 	}
 	switch {
 	case v.playing:
 		head += st.Accent.Render(fmt.Sprintf("  ▶ %d/%d", v.at, n))
+	case !v.follow && finished:
+		head += st.Warn.Render(fmt.Sprintf("  replaying %d/%d · G end", v.at, n))
 	case !v.follow:
-		head += st.Warn.Render(fmt.Sprintf("  replay %d/%d", v.at, n))
+		head += st.Warn.Render(fmt.Sprintf("  replay %d/%d · G live", v.at, n))
 	case v.loaded:
 		head += st.Muted.Render(fmt.Sprintf("  %d events", n))
 	}
@@ -409,25 +433,43 @@ func (v *deskRunView) render(st theme.Styles, width, height int) string {
 		if v.err != nil {
 			rule += " · " + safeMessage(v.err.Error())
 		}
-		if v.notice != "" {
-			rule += " · " + v.notice
-		}
 		lines = append(lines, cut(st.Muted.Render(" "+rule), width))
-		lines = append(lines, runEvents(st, v.folder, v.at, width, max(body-len(flow), 1))...)
+		events := runEvents(st, v.folder, v.at, width, max(body-len(flow), 1))
+		if n == 0 {
+			events = []string{st.Muted.Render(" " + noEventsText(v.delta.Live))}
+		}
+		lines = append(lines, events...)
 	}
 	for len(lines) < height-1 {
 		lines = append(lines, "")
 	}
 	lines = lines[:height-1]
-	return strings.Join(append(lines, cut(st.Muted.Render(runHintsFor(width)), width)), "\n")
+	return strings.Join(append(lines, cut(st.Muted.Render(runHintsFor(width, finished)), width)), "\n")
+}
+
+// noEventsText says why a run shows no events: one that never ran says so,
+// in the word the queue uses; one that may still start is waiting for them.
+func noEventsText(live runview.LiveState) string {
+	switch live {
+	case runview.LiveChanged:
+		return "never ran: it changed after it was queued"
+	case runview.LiveSkipped:
+		return "never ran: skipped before it started"
+	}
+	return "no events yet"
 }
 
 // runHintsFor is the widest key-hint line that fits, so "q close" is never
-// the part cut off.
-func runHintsFor(width int) string {
+// the part cut off. G goes to a finished run's end, or back to a live run's
+// newest event.
+func runHintsFor(width int, finished bool) string {
+	g := "g/G start/live"
+	if finished {
+		g = "g/G start/end"
+	}
 	for _, h := range []string{
-		" ←/→ step · [ ] ±10 · g/G start/live · space play · n/p run · q close",
-		" ←/→ step · g/G start/live · space play · n/p run · q close",
+		" ←/→ step · [ ] ±10 · " + g + " · space play · n/p run · q close",
+		" ←/→ step · " + g + " · space play · n/p run · q close",
 		" ←/→ · g/G · space · n/p · q close",
 	} {
 		if ansi.StringWidth(h) <= width {

@@ -517,6 +517,7 @@ type deskStats struct {
 	ok, failed   int
 	noExit       int
 	changed      int
+	lost         int
 	failures     []float64
 }
 
@@ -583,6 +584,11 @@ func (f deskFrame) stats() deskStats {
 			s.changed++
 		}
 	}
+	for _, it := range f.snap.Running {
+		if it.State == desk.StateLost {
+			s.lost++
+		}
+	}
 	if len(durations) > 0 {
 		s.median, s.hasMedian = median(durations), true
 	}
@@ -617,6 +623,9 @@ func (f deskFrame) tiles(st theme.Styles, width int) []string {
 		outcome += "  " + st.Muted.Render("?") + " " + strconv.Itoa(s.noExit)
 	}
 	changed := strconv.Itoa(s.changed) + " changed"
+	if s.lost > 0 {
+		changed += " · " + strconv.Itoa(s.lost) + " lost"
+	}
 	panels := [3]string{
 		Panel(st, widths[0], "waiting", "", []string{
 			st.Header.Render(strconv.Itoa(s.waiting)),
@@ -707,11 +716,21 @@ func queueWidths(width int) (nameW, barW, detailW int) {
 
 func (f deskFrame) queuePanel(st theme.Styles, width int, rows []queueRow, cursor, lines int) []string {
 	n, tty, _ := f.waiting()
-	running := 0
+	// A lost run is not running: it is counted on its own (#1106).
+	running, lost := 0, 0
 	if f.snap != nil {
-		running = len(f.snap.Running)
+		for _, it := range f.snap.Running {
+			if it.State == desk.StateLost {
+				lost++
+			} else {
+				running++
+			}
+		}
 	}
 	strip := st.Active.Render("●") + " " + strconv.Itoa(running) + " running  " + st.Accent.Render("◌") + " " + strconv.Itoa(n) + " waiting"
+	if lost > 0 {
+		strip += "  " + st.Warn.Render("?") + " " + strconv.Itoa(lost) + " lost"
+	}
 	if tty > 0 {
 		strip += "  " + st.Steel.Render("⌨") + " " + strconv.Itoa(tty) + " tty"
 	}
@@ -868,7 +887,9 @@ func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, curso
 	it := r.item
 	label := itemLabel(it.Name)
 	var hash string
-	if desk.ValidSHA256(it.Meta.SHA256) {
+	// A changed item names both of its hashes in its note instead: the head
+	// would show only the one it was queued at (#1106).
+	if desk.ValidSHA256(it.Meta.SHA256) && r.kind != rowChanged {
 		// The short hash the agent reports and `desk status` prints; the a
 		// prompt shows it in full. A long name is cut first so the hash is
 		// never the part the panel cuts off. The panel's own cut ends in a
@@ -879,6 +900,15 @@ func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, curso
 	head := st.Selected.Render(label) + hash
 	head += st.Muted.Render(" · " + f.focusState(r))
 	lines := []string{head}
+	// A lost or changed item says what happened and what to do next, wrapped
+	// under the head so the next step is never the part cut off. The smallest
+	// panel (body 0) leaves it out: it is not what y needs, and y, s and u
+	// say the same in the footer.
+	if note := stateNote(r); note != "" && body > 0 {
+		for _, l := range strings.Split(ansi.Wrap(note, max(width-4, 10), ""), "\n") {
+			lines = append(lines, st.Warn.Render(strings.TrimRight(l, " ")))
+		}
+	}
 	// The panel's text area is the width less the border and its padding.
 	lines = append(lines, wrapField(st, "what", st.Fg.Bold(true), it.What, width-4)...)
 	lines = append(lines, wrapField(st, "why", st.Meta, it.Why, width-4)...)
@@ -962,9 +992,9 @@ func (f deskFrame) focusState(r queueRow) string {
 		}
 		return "running " + clock(f.now.Sub(it.Started))
 	case rowLost:
-		return "lost: its owner is gone with no RUN-END"
+		return "lost"
 	case rowChanged:
-		return "changed after it was queued; it will not run"
+		return "changed"
 	}
 	outcome := "ok"
 	if it.ExitCode == nil {
@@ -976,6 +1006,35 @@ func (f deskFrame) focusState(r queueRow) string {
 		outcome += " · " + clock(it.Ended.Sub(it.Started))
 	}
 	return outcome + " · ended " + agoLabel(f.now, it.Ended)
+}
+
+// The next step for a lost run and a changed item, shared by the focus
+// panel, y's reply and u's reply so the three cannot drift apart.
+const (
+	lostNext    = "s clears it · l shows its output"
+	changedNext = "ask Claude to queue it again"
+)
+
+// stateNote is what happened to a lost or changed item and what to do next,
+// in plain words; "" for every other row. Both hashes of a changed item are
+// shown only when they are valid sha256 values, and the second only when it
+// differs from the first.
+func stateNote(r queueRow) string {
+	switch r.kind {
+	case rowLost:
+		return "the desk stopped watching it mid-run, so it may have partly run · " + lostNext
+	case rowChanged:
+		m := r.item.Meta
+		hashes := "its bytes changed after it was queued"
+		if desk.ValidSHA256(m.SHA256) {
+			hashes = "queued " + m.SHA256[:deskShortHash] + ", since changed"
+			if desk.ValidSHA256(m.ChangedSHA256) && m.ChangedSHA256 != m.SHA256 {
+				hashes = "queued " + m.SHA256[:deskShortHash] + ", now " + m.ChangedSHA256[:deskShortHash]
+			}
+		}
+		return hashes + " · not run, moved to skipped · " + changedNext
+	}
+	return ""
 }
 
 // scriptLines returns the first n lines of a script that are neither blank

@@ -151,8 +151,8 @@ func (d *Desk) supervise(name, sha string, want Kind) (int, error) {
 	}
 	// sha is the queue-time hash (checked above), so a mismatch here means
 	// the bytes changed after the claim.
-	if SHA256Hex(data) != sha {
-		if err := d.skipChanged(DirRunning, name, kind, meta); err != nil {
+	if found := SHA256Hex(data); found != sha {
+		if err := d.skipChanged(DirRunning, name, kind, meta, found); err != nil {
 			return 2, err
 		}
 		return 2, fmt.Errorf("%w: %s", ErrChanged, describe(name))

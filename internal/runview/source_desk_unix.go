@@ -67,7 +67,7 @@ func (s *deskSource) List() ([]RunRef, error) {
 			if it.Legacy {
 				continue
 			}
-			refs = append(refs, RunRef{Source: s.Name(), Name: clean(it.Name), Kind: KindDesk, Updated: itemUpdated(it, snap.Taken), Live: liveOfItem(it.State)})
+			refs = append(refs, RunRef{Source: s.Name(), Name: clean(it.Name), Kind: KindDesk, Updated: itemUpdated(it, snap.Taken), Live: liveOfItem(it)})
 		}
 	}
 	slices.SortFunc(refs, func(a, b RunRef) int {
@@ -158,7 +158,10 @@ func (s *deskSource) Load(ref RunRef, cur *Cursor) (Delta, error) {
 
 	lines, ws, err := dc.w.Poll()
 	d.Live = liveOf(ws)
-	if err == nil && d.Live != liveOfItem(it.State) && d.Live != dc.rescannedAt {
+	if d.Live == LiveSkipped {
+		d.Live = skippedLive(it)
+	}
+	if err == nil && d.Live != liveOfItem(it) && d.Live != dc.rescannedAt {
 		dc.rescannedAt = d.Live // once per state change, not on every poll
 		// The scan this item came from is older than the run: it ended or
 		// was lost since. Read the item again for its times and exit.
@@ -166,13 +169,18 @@ func (s *deskSource) Load(ref RunRef, cur *Cursor) (Delta, error) {
 			it = fresh
 		}
 	}
+	// The skip reason comes from the item as read now: one the scan saw
+	// still pending reads changed once the rescan finds why it was skipped.
+	if d.Live == LiveSkipped || d.Live == LiveChanged {
+		d.Live = skippedLive(it)
+	}
 	if it.Kind != desk.KindBatch {
 		d.Timing = []StepTiming{scriptTiming(it)}
 	}
 	if err != nil {
 		// Poll reports a failed read as ended; the scan's state is the
 		// better guess then.
-		d.Live = liveOfItem(it.State)
+		d.Live = liveOfItem(it)
 		if d.Err == nil {
 			d.Err = cleanErr(err)
 		}
@@ -320,8 +328,8 @@ func liveOf(ws desk.WatchState) LiveState {
 	return LiveWaiting
 }
 
-func liveOfItem(st desk.State) LiveState {
-	switch st {
+func liveOfItem(it desk.Item) LiveState {
+	switch it.State {
 	case desk.StateRunning:
 		return LiveRunning
 	case desk.StateDone:
@@ -329,9 +337,19 @@ func liveOfItem(st desk.State) LiveState {
 	case desk.StateLost:
 		return LiveLost
 	case desk.StateSkipped:
-		return LiveSkipped
+		return skippedLive(it)
 	}
 	return LiveWaiting
+}
+
+// skippedLive is a skipped item's state: changed when the desk skipped it
+// because its bytes changed after it was queued (it never ran), the word the
+// queue and the outcomes use; skipped otherwise.
+func skippedLive(it desk.Item) LiveState {
+	if it.Meta.SkipReason == desk.SkipChanged {
+		return LiveChanged
+	}
+	return LiveSkipped
 }
 
 // batchDefs turns a manifest into step defs: After gives the edges, and the
