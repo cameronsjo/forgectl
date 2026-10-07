@@ -51,14 +51,26 @@ type fakeDrain struct {
 	clearErr  error
 	events    []drain.Event
 	ids       int
+	t         *testing.T
 }
 
-func (f *fakeDrain) NeedsYou(_ context.Context, row worker.QueueRow, _ worker.Row, reason string) error {
+// checkOwnLedger fails the test when the drain hands the notifier a ledger
+// row other than the queue row's own: a different row's ref would mark
+// another worker's pane.
+func (f *fakeDrain) checkOwnLedger(row worker.QueueRow, led worker.Row) {
+	if led.Name != "" && (led.Name != row.Name || led.LaunchID != row.LaunchID) {
+		f.t.Errorf("notifier for %s got ledger row %s (launch %q), want its own (launch %q)", row.Name, led.Name, led.LaunchID, row.LaunchID)
+	}
+}
+
+func (f *fakeDrain) NeedsYou(_ context.Context, row worker.QueueRow, led worker.Row, reason string) error {
+	f.checkOwnLedger(row, led)
 	f.notified = append(f.notified, row.Name+": "+reason)
 	return f.notifyErr
 }
 
-func (f *fakeDrain) Cleared(_ context.Context, row worker.QueueRow, _ worker.Row) error {
+func (f *fakeDrain) Cleared(_ context.Context, row worker.QueueRow, led worker.Row) error {
+	f.checkOwnLedger(row, led)
 	f.cleared = append(f.cleared, row.Name)
 	return f.clearErr
 }
@@ -70,7 +82,7 @@ func newFakeDrain(t *testing.T) (*fakeDrain, *drainer, *worker.Queue) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeDrain{now: drainT0}
+	f := &fakeDrain{now: drainT0, t: t}
 	f.launch = func(worker.QueueRow) drain.Attempt { return drain.Attempt{} }
 	f.probe = func(worker.QueueRow, worker.Row) drain.Probe { return drain.Probe{} }
 	io := drainIO{
