@@ -1076,3 +1076,17 @@ func TestDeskFrame_ShortWindowTimelineIsOneLine(t *testing.T) {
 		t.Errorf("frame is %d lines, want 20", n)
 	}
 }
+
+// The history panel, like the timeline, never leaves a bare border when the
+// window gives it a row or two.
+func TestDeskFrame_HistoryTightHeightLeavesNoBareBorder(t *testing.T) {
+	snap, opts := busySnapshot()
+	for h := 12; h <= 30; h++ {
+		out := ansi.Strip(deskFrame{snap: snap, width: 110, height: h, now: deskNow, opts: opts, history: true}.render())
+		for i, l := range strings.Split(out, "\n") {
+			if strings.HasPrefix(l, "╭ history") && !strings.Contains(strings.Split(out, "\n")[min(i+1, h-1)], "│") {
+				t.Errorf("height %d: history border with no row under it:\n%s", h, out)
+			}
+		}
+	}
+}

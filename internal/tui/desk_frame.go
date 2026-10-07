@@ -253,8 +253,8 @@ func (f deskFrame) focusShownFor(name string) bool {
 // The focus panel is what the operator approves from, so it is placed
 // before everything but the header, the footer and one queue row: a short
 // window gives up the tiles, then the summary line, then the script preview
-// and the timeline (down to one line), then queue rows. Below that minimum the frame says it
-// is too small instead of drawing a focus panel with its hash cut off.
+// and the timeline (down to one line), then queue rows. Below that minimum
+// the frame says it is too small instead of drawing a focus panel with its hash cut off.
 func (f deskFrame) layout() ([]string, bool) {
 	st, _ := f.styles()
 	width := max(f.width, deskMinWidth)
@@ -1181,7 +1181,7 @@ func (f deskFrame) lowerPanel(st theme.Styles, width, space int) []string {
 		if space < 0 {
 			return f.historyPanel(st, width, -1)
 		}
-		return f.historyPanel(st, width, space-2)
+		return f.historyPanel(st, width, max(space-2, 0)) // 0 drops it; < 0 would mean unbounded
 	}
 	entries := deskTimeline(f.snap)
 	tl := f.tlView(width)
@@ -1200,7 +1200,11 @@ func (f deskFrame) lowerPanel(st theme.Styles, width, space int) []string {
 // squeeze it: what the focus panel leaves alone before it grows.
 func (f deskFrame) lowerWant(st theme.Styles, width int) int {
 	if f.history {
-		return min(max(len(f.snap.Done), 1), deskHistoryDefault) + 2
+		done := 0
+		if f.snap != nil {
+			done = len(f.snap.Done)
+		}
+		return min(max(done, 1), deskHistoryDefault) + 2
 	}
 	entries := deskTimeline(f.snap)
 	return min(max(len(f.tlView(width).body(st, entries)), deskTimelineMin), deskHistoryDefault) + 2
