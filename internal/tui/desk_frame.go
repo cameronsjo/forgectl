@@ -194,6 +194,9 @@ type deskFrame struct {
 	// says so, rather than that the window is too small to run items, since
 	// the prompt itself is how they run.
 	confirming bool
+	// canUndo marks a skip this desk can undo, so the footer offers u only
+	// then (#1108).
+	canUndo bool
 }
 
 func (f deskFrame) styles() (theme.Styles, theme.Theme) {
@@ -1188,12 +1191,16 @@ func (f deskFrame) hints(st theme.Styles, width int, canRun bool) string {
 		run:     canRun && len(rows) > 0 && sel.kind == rowWaiting,
 		skip:    len(rows) > 0 && (sel.kind == rowWaiting || sel.kind == rowRefused || sel.kind == rowLost),
 		waiting: n > 0,
+		undo:    f.canUndo,
+		logs:    f.snap != nil && len(f.snap.Done)+len(f.snap.Running) > 0,
+		runs:    f.snap != nil && len(f.snap.Done)+len(f.snap.Running)+len(f.snap.Skipped) > 0,
 	})
 }
 
 // keyState is what the keys can act on now.
 type keyState struct {
 	rows, run, skip, waiting bool
+	undo, logs, runs         bool
 }
 
 // deskBinding is one dashboard key: its footer label, what ? says it does,
@@ -1207,11 +1214,11 @@ type deskBinding struct {
 // deskBindings are the dashboard's keys in footer order.
 var deskBindings = []deskBinding{
 	{"y", "run", "run the selected item at once; check its short sha256 first", 2},
-	{"s", "skip", "skip the selected item, or clear a lost run (asks first)", 4},
-	{"u", "undo", "undo the last skip", 6},
-	{"v", "view", "view the selected item's script: the bytes y runs", 5},
+	{"s", "skip", "skip the selected item, or clear a lost run (asks first)", 5},
+	{"u", "undo", "undo the last skip", 7},
+	{"v", "view", "view the selected item's script: the bytes y runs", 6},
 	{"a", "all", "run every waiting item on screen (asks first, listing each full sha256)", 3},
-	{"l", "log", "view the selected run's log", 7},
+	{"l", "log", "view the selected run's log", 4},
 	{"r", "runs", "open the run view: flow, events, replay", 8},
 	{"j/k", "move", "move the selection (also the arrow keys)", 9},
 	{"?", "help", "show these keys", 1},
@@ -1220,11 +1227,11 @@ var deskBindings = []deskBinding{
 
 // deskKeys is the key-hint footer from deskBindings: a key shows only when
 // it can act on what is on screen (#1107), and a narrow window drops the
-// least important first with the shared fitHints, so q quit and ? help are
-// always there (#1108). u, l, r and q always can act (u and l answer when
-// there is nothing to undo or no log).
+// least important first with the shared fitHints: q quit always stays, and
+// ? help until the window is very narrow (#1108). u shows only with a skip
+// to undo, l and r only once something has run.
 func deskKeys(st theme.Styles, width int, s keyState) string {
-	gated := map[string]bool{"y": s.run, "s": s.skip, "v": s.rows, "a": s.waiting, "j/k": s.rows}
+	gated := map[string]bool{"y": s.run, "s": s.skip, "u": s.undo, "v": s.rows, "a": s.waiting, "l": s.logs, "r": s.runs, "j/k": s.rows}
 	var hints []string
 	var shown []deskBinding
 	for _, b := range deskBindings {

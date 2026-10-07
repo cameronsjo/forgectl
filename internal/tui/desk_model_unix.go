@@ -1116,7 +1116,7 @@ func (m deskModel) dashboard() deskFrame {
 	opts.Theme = &th
 	return deskFrame{
 		snap: m.snap, width: m.screenWidth(), height: m.screenHeight(), now: m.now(), opts: opts,
-		cursor: m.cursor, footer: m.footer(), confirming: m.confirm != confirmNone,
+		cursor: m.cursor, footer: m.footer(), confirming: m.confirm != confirmNone, canUndo: m.lastSkip != "",
 	}
 }
 
@@ -1204,11 +1204,11 @@ func (m deskModel) pagerView(width, height int) string {
 	for len(lines) < height-1 {
 		lines = append(lines, "")
 	}
-	close := "q close"
+	closeHint := "q close"
 	if p.title == "keys" {
-		close = "? or q close"
+		closeHint = "? or q close"
 	}
-	lines = append(lines, cut(st.Muted.Render(" j/k scroll · space/b page · g/G top/bottom · "+close), width))
+	lines = append(lines, cut(st.Muted.Render(" j/k scroll · space/b page · g/G top/bottom · "+closeHint), width))
 	return strings.Join(lines, "\n")
 }
 
