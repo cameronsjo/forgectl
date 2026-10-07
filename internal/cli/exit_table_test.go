@@ -294,3 +294,25 @@ func TestExitTable_ArgCountWalk(t *testing.T) {
 		t.Errorf("only %d leaves rejected stray arguments; the walk is not reaching the tree", rejected)
 	}
 }
+
+// TestExitTable_EnvFailureKeepsExceptionVerbs: the environment failure is
+// raised before the command tree exists, so the exceptions are read from argv.
+// tasks and env check keep 1 (their 2 means "unreachable" and "file absent").
+func TestExitTable_EnvFailureKeepsExceptionVerbs(t *testing.T) {
+	for _, tt := range []struct {
+		argv []string
+		want int
+	}{
+		{[]string{"tasks", "ls"}, exitFailed},
+		{[]string{"--no-icons", "tasks", "ls", "--json"}, exitFailed},
+		{[]string{"env", "check", ".env"}, exitFailed},
+		{[]string{"env", "get", "X"}, exitUsage},
+		{[]string{"projects", "list"}, exitUsage},
+	} {
+		stubEnvFailure(t)
+		withArgs(t, tt.argv...)
+		if got := ExitCode(Execute(context.Background())); got != tt.want {
+			t.Errorf("%v: exit = %d, want %d", tt.argv, got, tt.want)
+		}
+	}
+}

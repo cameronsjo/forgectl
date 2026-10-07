@@ -160,7 +160,7 @@ func execute(ctx context.Context) error {
 	env, err := captureEnvSnapshot()
 	if err != nil {
 		if args := normalizeArgs(processArgs()); !invokesHookVerb(args) {
-			return preFangFailure(defaultRoot, args, WithExitCode(err, classExit(classUsage)))
+			return preFangFailure(defaultRoot, args, WithExitCode(err, preFangUsageExit(args)))
 		}
 	} else {
 		legacyBoundary, err = prepareLegacyBoundary(env, config.NativeMigrationFS())

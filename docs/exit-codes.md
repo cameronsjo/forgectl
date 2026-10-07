@@ -30,6 +30,8 @@ A verb whose 2 already means something else keeps usage errors at 1, so a 2 neve
 | `resume snapshot` | 1 | Wired as a Claude Code `Stop` hook. A `Stop` hook that exits 2 blocks the session from stopping, so `resume snapshot` never exits 2: not on a bad flag, an unresolvable `$HOME`, or a config that does not parse. |
 | `k8s` | kubectl's code, else 1 | Pass-through. |
 
+Setup failures raised before any verb starts (an unresolvable `$HOME`, a relative `$XDG_CONFIG_HOME`) follow the same exceptions, read from the command line. A config that does not parse exits 2 for every verb, `tasks` and `env check` included (unchanged from the previous release). `resume snapshot` never exits 2 when the command line names it exactly; a mistyped verb (`resume snapshott`) is an unknown flag on the `resume` group and exits 2, so the Stop hook must spell it exactly.
+
 `docs` keeps every code it has (2 is its "could not run", timeout included). `resume` keeps 1 for "no session matched" and "ambiguous filter", and 2 for a running target. Existing setup 2s in `preflight`, `doctor` and `update` stay as they are.
 
 ## What changed from the previous release
@@ -40,7 +42,7 @@ A verb whose 2 already means something else keeps usage errors at 1, so a 2 neve
 | Cobra argument-count error (`desk add`, `surface close`, `workflow run`, `env get`, `y file`, `proxy use`, `version x`, and the rest) | 1 | 2 |
 | Unknown verb or subverb (`forgectl zzbogus`, `desk zzbogus`), and the `docs` group's own flag error | 1 | 2 |
 | `config zzbogus`, `completion nonesuch` | 0 | 2 |
-| Unresolvable `$HOME` or relative `$XDG_CONFIG_HOME` (not `resume snapshot`, which exits 0) | 1 | 2 |
+| Unresolvable `$HOME` or relative `$XDG_CONFIG_HOME` (not `resume snapshot`, which exits 0, and not `tasks` or `env check`, which stay at 1) | 1 | 2 |
 | `resume` flag and argument errors (not `resume snapshot`) | 1 | 2 |
 
 `desk show a/b --json` and `tasks show abc --json` now report `code: "usage_error"` instead of `failed`. Their exit status is unchanged by the code string (2 and 1).

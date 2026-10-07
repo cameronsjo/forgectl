@@ -104,3 +104,22 @@ func withJSONUsageCode(err error) error {
 	}
 	return &jsonCodedError{err: err, code: jsonCodeUsage}
 }
+
+// preFangUsageExit is the exit code for a setup failure raised before any
+// command tree exists (an unresolvable $HOME, a relative $XDG_CONFIG_HOME). It
+// reads the exceptions from argv by literal verb name, as invokesHookVerb
+// does, so `tasks` and `env check` keep 1 where their 2 means something else.
+func preFangUsageExit(args []string) int {
+	first, idx := firstNonFlag(args)
+	switch first {
+	case "tasks", "k8s":
+		return classExit(classFailed)
+	case "env":
+		if idx >= 0 {
+			if next, _ := firstNonFlag(args[idx+1:]); next == "check" {
+				return classExit(classFailed)
+			}
+		}
+	}
+	return classExit(classUsage)
+}
