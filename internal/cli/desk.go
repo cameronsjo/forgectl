@@ -123,7 +123,7 @@ pending/, running/, done/ and skipped/ subdirectories are touched.
 
 Dashboard keys: y run, s skip (asks first), u undo a skip, v view the script,
 l the latest log, r runs (the run view: flow, events, replay), a run everything on screen (asks first, listing each full
-sha256), j/k move, q quit.
+sha256), j/k move, ? the keys, q quit.
 
 The desk defends against accidents (an item edited after it was queued, an item
 run twice, hostile text in a header); it does not defend against another

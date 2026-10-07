@@ -844,3 +844,35 @@ func TestDeskFrame_HintsFollowTheSelection(t *testing.T) {
 		t.Errorf("empty, too small: %q", f)
 	}
 }
+
+// The footer drops the least important hints first and always keeps q quit
+// and ? help (#1108: at 40 columns it used to cut "q quit" off first).
+func TestDeskFrame_FooterKeepsQuitAndHelp(t *testing.T) {
+	snap, opts := busySnapshot()
+	for w := 30; w <= 140; w += 5 {
+		out := ansi.Strip(RenderDeskFrame(snap, w, 40, deskNow, opts))
+		footer := out[strings.LastIndex(out, "\n")+1:]
+		if !strings.Contains(footer, "q quit") || !strings.Contains(footer, "? help") {
+			t.Errorf("width %d: footer %q lost q quit or ? help", w, footer)
+		}
+		if ansi.StringWidth(footer) > max(w, deskMinWidth) || strings.Contains(footer, "…") {
+			t.Errorf("width %d: footer %q is cut", w, footer)
+		}
+	}
+	// j/k goes first, then r: the move hint is the least needed.
+	out := ansi.Strip(RenderDeskFrame(snap, 85, 40, deskNow, opts))
+	footer := out[strings.LastIndex(out, "\n")+1:]
+	if strings.Contains(footer, "j/k") || !strings.Contains(footer, "r runs") {
+		t.Errorf("85 columns: %q", footer)
+	}
+}
+
+// The ? screen lists every key the footer can show, from the same table.
+func TestDeskKeyLinesListEveryBinding(t *testing.T) {
+	lines := strings.Join(deskKeyLines(), "\n")
+	for _, b := range deskBindings {
+		if !strings.Contains(lines, b.key) || !strings.Contains(lines, b.help) {
+			t.Errorf("? screen lacks %q", b.key)
+		}
+	}
+}

@@ -27,4 +27,4 @@ desk ○ nothing waiting · forgectl 0.0.0-test · host-a · ~/.local/state/forg
 
 
 
- u undo  l log  r runs  q quit
+ u undo · l log · r runs · ? help · q quit

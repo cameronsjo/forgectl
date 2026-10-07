@@ -375,7 +375,7 @@ func (f deskFrame) tooSmall(st theme.Styles, header string, footer []string, row
 		}
 	}
 	if f.footer == "" {
-		footer = []string{cut(f.hints(st, width, false), visible)}
+		footer = []string{cut(f.hints(st, visible, false), visible)}
 	}
 	lines := []string{header, cut(st.Warn.Render(text), visible)}
 	if room := f.height - len(lines) - len(footer); room >= deskQueueMin {
@@ -1192,36 +1192,58 @@ type keyState struct {
 	rows, run, skip, waiting bool
 }
 
-// deskKeys is the key-hint footer from one ordered table: a key shows only
-// when it can act on what is on screen (#1107). u, l, r and q always can (u
-// and l answer when there is nothing to undo or no log). A narrow window drops
-// the move hint (the arrows are self-explanatory) and tightens the spacing.
-func deskKeys(st theme.Styles, width int, s keyState) string {
-	table := []struct {
-		key, label string
-		show       bool
-	}{
-		{"y", "run", s.run}, {"s", "skip", s.skip}, {"u", "undo", true}, {"v", "view", s.rows},
-		{"a", "all", s.waiting}, {"l", "log", true}, {"r", "runs", true}, {"j/k", "move", s.rows}, {"q", "quit", true},
-	}
-	var keys [][2]string
-	for _, k := range table {
-		if k.show {
-			keys = append(keys, [2]string{k.key, k.label})
-		}
-	}
-	return hintLine(st, width, keys)
+// deskBinding is one dashboard key: its footer label, what ? says it does,
+// and its place in the footer's drop order (0 is dropped last). The footer
+// and the ? screen both come from deskBindings, so they cannot drift (#1108).
+type deskBinding struct {
+	key, label, help string
+	prio             int
 }
 
-func hintLine(st theme.Styles, width int, keys [][2]string) string {
-	sep := "  "
-	if width < deskWideMin {
-		keys = slices.DeleteFunc(slices.Clone(keys), func(k [2]string) bool { return k[0] == "j/k" })
-		sep = " "
+// deskBindings are the dashboard's keys in footer order.
+var deskBindings = []deskBinding{
+	{"y", "run", "run the selected item at once; check its short sha256 first", 2},
+	{"s", "skip", "skip the selected item, or clear a lost run (asks first)", 4},
+	{"u", "undo", "undo the last skip", 6},
+	{"v", "view", "view the selected item's script: the bytes y runs", 5},
+	{"a", "all", "run every waiting item on screen (asks first, listing each full sha256)", 3},
+	{"l", "log", "view the selected run's log", 7},
+	{"r", "runs", "open the run view: flow, events, replay", 8},
+	{"j/k", "move", "move the selection (also the arrow keys)", 9},
+	{"?", "help", "show these keys", 1},
+	{"q", "quit", "quit; detached runs keep running", 0},
+}
+
+// deskKeys is the key-hint footer from deskBindings: a key shows only when
+// it can act on what is on screen (#1107), and a narrow window drops the
+// least important first with the shared fitHints, so q quit and ? help are
+// always there (#1108). u, l, r and q always can act (u and l answer when
+// there is nothing to undo or no log).
+func deskKeys(st theme.Styles, width int, s keyState) string {
+	gated := map[string]bool{"y": s.run, "s": s.skip, "v": s.rows, "a": s.waiting, "j/k": s.rows}
+	var hints []string
+	var shown []deskBinding
+	for _, b := range deskBindings {
+		if ok, isGated := gated[b.key]; isGated && !ok {
+			continue
+		}
+		hints = append(hints, st.Accent.Render(b.key)+" "+st.Muted.Render(b.label))
+		shown = append(shown, b)
 	}
-	parts := make([]string, len(keys))
-	for i, k := range keys {
-		parts[i] = st.Accent.Render(k[0]) + " " + st.Muted.Render(k[1])
+	prio := make([]int, len(shown))
+	for i := range prio {
+		prio[i] = i
 	}
-	return " " + strings.Join(parts, sep)
+	slices.SortStableFunc(prio, func(a, b int) int { return shown[a].prio - shown[b].prio })
+	return " " + fitHints(width-1, hints, prio)
+}
+
+// deskKeyLines is the ? screen: every key and what it does, from
+// deskBindings.
+func deskKeyLines() []string {
+	lines := make([]string, 0, len(deskBindings))
+	for _, b := range deskBindings {
+		lines = append(lines, fmt.Sprintf("%-4s %s", b.key, b.help))
+	}
+	return lines
 }

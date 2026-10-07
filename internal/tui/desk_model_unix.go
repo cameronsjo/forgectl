@@ -614,6 +614,10 @@ func (m deskModel) updateKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.log()
 	case "r":
 		return m.openRunView()
+	case "?":
+		// The key list, from the table the footer is drawn from (#1108).
+		m.pager = &deskPager{title: "keys", lines: deskKeyLines()}
+		return m, nil
 	}
 	return m, nil
 }
@@ -1063,7 +1067,7 @@ func (m *deskModel) pagerKey(key string) {
 	page := max(m.height-2, 1)
 	last := max(len(pagerRows(p.lines, m.width))-page, 0)
 	switch key {
-	case "q", "esc", "v", "l":
+	case "q", "esc", "v", "l", "?":
 		m.pager = nil
 		return
 	case "j", "down":

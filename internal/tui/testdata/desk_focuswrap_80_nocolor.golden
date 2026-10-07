@@ -27,4 +27,4 @@ desk ● 1 waiting · forgectl 0.0.0-test · host-a · ~/.local/st…  up 4h37m 
 
 
 
- y run  s skip  u undo  v view  a all  l log  r runs  j/k move  q quit
+ y run · s skip · u undo · v view · a all · l log · r runs · ? help · q quit
