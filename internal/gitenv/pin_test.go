@@ -58,6 +58,7 @@ var transportAllowlist = map[string]struct {
 	"internal/branch/branch.go:Client.deleteRemote": {1, "`git push --delete` removes the branch on the remote"},
 	"internal/projects/github.go:cloneRepo":         {1, "gitenv.Unset(Transport): the variables gh's environment loses, since gh runs git clone itself (ghGitAllowlist)"},
 	"internal/projects/github.go:cloneBareRepo":     {1, "as cloneRepo"},
+	"internal/cli/surface_base.go:workerBase":       {1, "fetches the GitHub default branch into refs/forgectl/base/ for a new worker branch's base from GitHub's default head (forgectl#1061)"},
 }
 
 // ghGitAllowlist is every function that may start gh with a subcommand that

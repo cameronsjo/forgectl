@@ -90,6 +90,12 @@ These are measurements on Claude Code 2.1.289, not tests: a unit test pins the a
 
 Instruction files: a live worker on the argv above without `--safe-mode` loaded no `CLAUDE.md` or `AGENTS.md` at any level, including one the branch committed; its `instructions` record listed only the operator's project auto-memory. With `--safe-mode` added, the record was empty. `claude -p` without `--safe-mode` did load the cwd's `CLAUDE.md`. These are session-start records: a `CLAUDE.md` in a subdirectory loads lazily, and is covered only by `CLAUDE_CODE_DISABLE_CLAUDE_MDS`, read from the 2.1.289 binary, not measured. A codex worker gets only the environment allowlist so far (forgectl#1092).
 
+## Where a worker branch starts
+
+A `--worktree` branch that does not exist yet starts at the head of the repository's GitHub default branch (forgectl#1061), not at the checkout's `HEAD`, which is often stale or on another branch. forgectl reads the branch and its head commit from the GitHub API, fetches that branch from `origin`, checks the fetched commit is the one GitHub named, and passes the hash to `git worktree add`. Only an `origin` URL whose host is `github.com` or `ssh.github.com` counts as GitHub; any other origin, an SSH host alias for GitHub included, starts the branch at the checkout's `HEAD` as before. A failing GitHub call fails the launch rather than falling back. An existing branch is checked out as it is, and needs no GitHub call.
+
+This is a correctness fix, not a security control. Workers in one repository share its `.git` and are mutually trusting (ADR-0010): an earlier worker can change what the next one starts from.
+
 ## Listing and closing workers
 
 `surface list` probes each ledger row's workspace through `Adapter.Probe`, the same lookup `Close` uses: the server incarnation must match the reference, the listing must be complete, and the workspace must carry forgectl's ownership marker. A workspace missing from that listing is `gone`. Any herdr error is `unreadable`, and so is an identity mismatch: after a herdr restart, or when a workspace id now names a workspace without forgectl's marker, nothing proves forgectl's own workspace gone. `--orphans` keeps the rows `close` should act on: a `gone` workspace, or any stage other than `launched` (`failed`, `closed`, or a launch stopped at `pending` or `worktree`). A launch at `pending` or `worktree` for less than ten minutes may still be running, so it is never an orphan, and `close` refuses it.

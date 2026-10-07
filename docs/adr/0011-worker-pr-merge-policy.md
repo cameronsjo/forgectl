@@ -6,7 +6,7 @@ Date: 2026-10-05
 
 ## Context
 
-The herdr coordinator plan refused auto-merge ("No standing daemon, PR poller or auto-merge. Merge stays manual."). The foreman plan (private meta-repo, `docs/plans/2026-10-05-foreman-a-herdr-work-queue-cockpit-for-claude-code.md`) reverses that for one case: a detached drain dispatches queued tasks, and a worker's PR may merge without the operator when a written policy allows it.
+The herdr coordinator plan refused auto-merge ("No standing daemon, PR poller or auto-merge. Merge stays manual."). The atelier plan (private meta-repo, `docs/plans/2026-10-05-atelier-a-herdr-work-queue-cockpit-for-claude-code.md`) reverses that for one case: a detached drain dispatches queued tasks, and a worker's PR may merge without the operator when a written policy allows it.
 
 Three facts shape the design, each checked against live GitHub on 2026-10-05:
 

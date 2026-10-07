@@ -211,6 +211,21 @@ A captured legacy name disappearing while a process waits for the writer lock is
 
 New config and backup files are owner-only and no broader than `0600`; a restrictive umask may narrow them further, and an existing config mode such as `0400`, `0200`, or `0000` is not broadened. Every cooperating launch/top-level init writer shares the same Unix sibling lock and atomic replacement path. Secure legacy mutation and directory-durability claims apply to Unix builds (the shipped Darwin/Linux targets); non-Unix builds refuse automatic and explicit legacy mutation before writer activity. Their developer-only normal init may make a replacement visible, but reports that directory durability and cross-process serialization are unavailable.
 
+### Worker posture: `[launch.worker]`
+
+A coordinator worker (`forgectl surface launch --worktree`) does not take its posture from `[launch.defaults]`. Those are your interactive defaults, and their built-in `plan` would leave every worker unable to write. Each worker posture field comes from `[launch.worker]`, or the built-in worker value when it is unset. When the matched `[[launch.project]]` block sets the same field itself, the worker takes the stricter of the two:
+
+```toml
+[launch.worker]
+permission_mode = "acceptEdits"   # claude workers; built-in value acceptEdits
+sandbox         = "workspace-write" # codex workers; built-in value workspace-write
+approval_policy = "on-request"    # codex workers; built-in value on-request
+```
+
+To keep workers read-only, set `permission_mode = "plan"` in `[launch.worker]`. When an explicit `[launch.defaults]` value is stricter than what a worker gets, the worker launch prints a note naming it.
+
+A repo block can only make a worker stricter. Its `plan` wins over `acceptEdits`, and its `bypassPermissions` loses to it. A worker floor then caps every field at `acceptEdits`, `workspace-write` and `on-request`. Setting `auto`, `dontAsk`, `bypassPermissions`, `danger-full-access` or `never` in `[launch.worker]` refuses the launch. The same values in a project block are not refused, but they lose to the stricter worker value. A value the tables do not rank is refused wherever a worker reads it: in `[launch.worker]`, and in a project block field for the worker's harness.
+
 > Absorbed from the standalone `claunch` tool. A `claunch='forgectl launch'` shell alias preserves the old muscle memory.
 
 ## Local launch statistics

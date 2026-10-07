@@ -81,6 +81,14 @@ allow_danger    = true       # adds --allow-dangerously-skip-permissions (reacha
 # effort  = "xhigh"          # omit to take sonnet's derived "high"
 # env     = { OTEL_EXPORTER = "otlp" }
 # add_dir = ["~/Projects/minute/shared"]
+
+# Coordinator workers (surface launch --worktree) do not read [launch.defaults].
+# They take [launch.worker], each field made stricter by the matched project
+# block, and capped at acceptEdits / workspace-write / on-request.
+# [launch.worker]
+# permission_mode = "acceptEdits"   # set "plan" to keep workers read-only
+# sandbox         = "workspace-write"
+# approval_policy = "on-request"
 `
 
 func newLaunchInitCmd(boundary *config.LegacyMigrationBoundary) *cobra.Command {
