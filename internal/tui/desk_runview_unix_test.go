@@ -510,3 +510,17 @@ func TestRunViewSelectedRunGoneSaysSo(t *testing.T) {
 		t.Errorf("footer = %q", ansi.Strip(h.m.footer()))
 	}
 }
+
+// --no-icons gives the run view runview's ASCII legend, the one
+// `desk runs --no-icons` prints: a pending step is ".", not "·".
+func TestRunViewASCIILegend(t *testing.T) {
+	st := theme.Default().Styles()
+	ref := runview.RunRef{Source: "desk", Name: "01-a", Kind: runview.KindDesk}
+	defs := []runview.StepDef{{ID: "fetch"}, {ID: "build"}}
+	f := newRunFolder(ref, defs, nil)
+	v := &deskRunView{refs: []runview.RunRef{ref}, folder: f, defs: defs, delta: runview.Delta{Live: runview.LiveRunning}, loaded: true, follow: true, ascii: true}
+	out := ansi.Strip(asciiFrame(v.render(st, 80, 20), true))
+	if !strings.Contains(out, ". fetch > . build") || strings.Contains(out, "· fetch") {
+		t.Errorf("ASCII run view:\n%s", out)
+	}
+}

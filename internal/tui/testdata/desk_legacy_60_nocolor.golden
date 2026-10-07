@@ -1,10 +1,11 @@
-desk ● · forgectl 0.0.0-test · host-a · ~…  up 4h37m · 19:07
-◌ 0 waiting · 6 runs today · median 52s · ✓ 36 ✗ 4
+desk ○ idle · forgectl 0.0.0-test · host-…  up 4h37m · 19:07
+◌ 0 waiting · 6 started today · median 52s · ✓ 36 ✗ 4
 ╭ queue ─┤ ● 0 running  ◌ 0 waiting ├──────────────────────╮
 │ nothing waiting                                          │
+│ Claude queues scripts with forgectl desk add; they appe… │
 ╰──────────────────────────────────────────────────────────╯
 ╭ focus ───────────────────────────────────────────────────╮
-│ nothing waiting                                          │
+│ the selected item's sha256, what and why show here       │
 ╰──────────────────────────────────────────────────────────╯
 ╭ history ─────────────────────────────────────────────────╮
 │ ? 44 legacy-task-44  no exit recorded 3h ago    0:54     │
@@ -56,5 +57,4 @@ desk ● · forgectl 0.0.0-test · host-a · ~…  up 4h37m · 19:07
 
 
 
-
- y run s skip u undo v view a all l log r runs q quit
+ u undo l log r runs q quit

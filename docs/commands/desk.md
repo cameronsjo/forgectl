@@ -59,7 +59,7 @@ Quit and restart every open dashboard after you upgrade forgectl. A dashboard st
 
 ### `forgectl desk`
 
-The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with a bar per item, a focus panel showing the selected item's short sha256, WHAT and WHY (wrapped, up to four lines each; `desk status NAME` shows them whole) and, under a "script" label, its first script lines, and the history of finished runs. A lost run's panel says it may have partly run and that `s` clears it and `l` shows what it printed; a changed item's panel shows the hash it was queued at and the hash it has now (a short window leaves the note out; `y`, `s` and `u` say the same in the footer). A short window gives up the tiles, then the summary line, the queue rows, the history and the script preview before the focus panel's hash, WHAT and WHY; below that minimum (about 40x10) the dashboard says how many rows or columns it needs.
+The dashboard: three stat tiles (waiting, started today, outcomes), the queue with a bar per item, a focus panel showing the selected item's short sha256, WHAT and WHY (wrapped, up to four lines each; `desk status NAME` shows them whole) and, under a "script" label, its first script lines, and the history of finished runs, whose bars are each run's length against the longest shown. An empty queue says that Claude fills it with `forgectl desk add`, and the footer offers only the keys that can act. A lost run's panel says it may have partly run and that `s` clears it and `l` shows what it printed; a changed item's panel shows the hash it was queued at and the hash it has now (a short window leaves the note out; `y`, `s` and `u` say the same in the footer). A short window gives up the tiles, then the summary line, the queue rows, the history and the script preview before the focus panel's hash, WHAT and WHY; below that minimum (about 40x10) the dashboard says how many rows or columns it needs.
 
 | Key | Action |
 |---|---|
@@ -76,6 +76,8 @@ The dashboard: three stat tiles (waiting, runs today, outcomes), the queue with 
 The dashboard rings the terminal bell when an item arrives, and again every 5 minutes while anything waits; inside a herdr pane it also sends a herdr notification. The window title reads `desk ● N waiting`.
 
 `--frame` prints one frame to stdout and exits, sized by `$COLUMNS` and `$LINES` (80x40 when unset). Colour follows `NO_COLOR` and is dropped on a pipe. It reads the queue the same way `status` does.
+
+`--no-icons`, or `no_icons = true` in the config (on the dashboard and `--frame`), draws every mark, border and bar in ASCII, one character for one, so the layout does not move; punctuation such as `·` stays, and the run view uses the legend `desk runs --no-icons` prints. Every state also carries a word, so neither mode depends on a glyph or on colour. `v` always shows a script's bytes unchanged.
 
 ### `forgectl desk add <file|->`
 
