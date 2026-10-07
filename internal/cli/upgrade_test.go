@@ -3,7 +3,10 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -41,13 +44,45 @@ func setMetaVersion(t *testing.T, v string) {
 
 func execUpgrade(t *testing.T, runner exec.Runner, args ...string) (stdout string, err error) {
 	t.Helper()
+	stdout, _, err = execUpgradeBoth(t, runner, args...)
+	return stdout, err
+}
+
+// execUpgradeBoth also returns stderr, where brew's output tail and live
+// stream go. The stderr is not a terminal unless a test stubs it.
+func execUpgradeBoth(t *testing.T, runner exec.Runner, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
 	deps := module.Deps{Cfg: config.Config{}, Runner: runner}
 	cmd := newUpgradeCmd(deps)
-	var out bytes.Buffer
+	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
 	cmd.SetArgs(args)
 	err = cmd.Execute()
-	return out.String(), err
+	return out.String(), errOut.String(), err
+}
+
+func stubUpgradeTTY(t *testing.T, tty bool) {
+	t.Helper()
+	prev := upgradeStreamable
+	upgradeStreamable = func(io.Writer) bool { return tty }
+	t.Cleanup(func() { upgradeStreamable = prev })
+}
+
+// brewFailing fails the named brew subcommand with output on both streams.
+func brewFailing(sub string) *exec.FakeRunner {
+	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if args[0] == sub {
+			return "", &exec.CommandError{Name: name, Args: args, Output: "==> Downloading", Stderr: "Error: SERVERTEXT\x1b[2J", ExitCode: 1, Err: errors.New("exit status 1")}
+		}
+		switch args[0] {
+		case "list":
+			return "forgectl 1.0.0", nil
+		case "outdated":
+			return "cameronsjo/tap/forgectl (1.0.0) < 1.1.0", nil
+		}
+		return "", nil
+	}}
 }
 
 func TestUpgrade_SourceBuild_WarnsAndExitsZero(t *testing.T) {
@@ -194,10 +229,11 @@ func TestUpgrade_Check_NeverEchoesBrew(t *testing.T) {
 	}
 }
 
-// TestUpgrade_Apply_NeverEchoesBrew pins #761: the applying path renders its
-// progress and its outcome from fixed text, never from brew's stdout or its
-// CommandError (argv plus stderr, which relays the tap's server), and still
-// tells a failed tap refresh from a failed cask upgrade.
+// TestUpgrade_Apply_NeverEchoesBrew pins #761: the outcome line and the error
+// are fixed text, never brew's stdout or its CommandError (argv plus stderr,
+// which relays the tap's server). Brew's output reaches only stderr, escaped,
+// so stdout and the error carry none of it. It still tells a failed tap
+// refresh from a failed cask upgrade.
 func TestUpgrade_Apply_NeverEchoesBrew(t *testing.T) {
 	setMetaVersion(t, "1.0.0")
 	stubUpgradeLookPath(t, "brew")
@@ -313,5 +349,184 @@ func TestUpgrade_Apply_InterruptIsNotNetwork(t *testing.T) {
 				t.Errorf("error = %q, want the interrupt wording, not a network fault", err)
 			}
 		})
+	}
+}
+
+// A failure with no live stream shows the failed step's last lines on stderr,
+// escaped, and names the step; stdout and the error stay fixed text.
+func TestUpgrade_Apply_FailureShowsOutputTail(t *testing.T) {
+	setMetaVersion(t, "1.0.0")
+	stubUpgradeLookPath(t, "brew")
+	stubUpgradeTTY(t, false)
+
+	for _, tc := range []struct{ fail, step string }{
+		{"update", "brew update"},
+		{"upgrade", "brew upgrade --cask " + selfupdate.CaskRef},
+	} {
+		t.Run(tc.fail, func(t *testing.T) {
+			stdout, stderr, err := execUpgradeBoth(t, brewFailing(tc.fail))
+			if err == nil || ExitCode(err) != 1 {
+				t.Fatalf("err = %v, want exit 1", err)
+			}
+			if !strings.Contains(stderr, "== last lines of "+tc.step) || !strings.Contains(stderr, "Error: SERVERTEXT") || !strings.Contains(stderr, "==> Downloading") {
+				t.Errorf("stderr = %q, want the step name and brew's output tail", stderr)
+			}
+			if strings.ContainsRune(stderr, 0x1b) || !strings.Contains(stderr, `\x1b`) && !strings.Contains(stderr, `\u001b`) {
+				t.Errorf("stderr = %q, want ESC escaped, not raw", stderr)
+			}
+			if strings.Contains(stdout+err.Error(), "SERVERTEXT") {
+				t.Errorf("stdout/error echo brew's text: %q / %q", stdout, err)
+			}
+		})
+	}
+}
+
+func TestUpgrade_Apply_TailCappedAtTwentyLines(t *testing.T) {
+	setMetaVersion(t, "1.0.0")
+	stubUpgradeLookPath(t, "brew")
+	stubUpgradeTTY(t, false)
+	var b strings.Builder
+	for i := 1; i <= 50; i++ {
+		b.WriteString("line" + strings.Repeat("x", i%3) + "-" + string(rune('A'+i%26)) + "\n")
+	}
+	fr := &exec.FakeRunner{RunFunc: func(name string, _ []string) (string, error) {
+		return "", &exec.CommandError{Name: name, Output: strings.TrimRight(b.String(), "\n"), ExitCode: 1, Err: errors.New("exit status 1")}
+	}}
+	_, stderr, _ := execUpgradeBoth(t, fr)
+	if got := strings.Count(stderr, "\nline"); got != upgradeTailLines {
+		t.Errorf("tail has %d lines, want %d", got, upgradeTailLines)
+	}
+}
+
+// On a terminal the output streams under a header per step, and a failure does
+// not print the tail a second time.
+func TestUpgrade_Apply_StreamsOnTTY(t *testing.T) {
+	setMetaVersion(t, "1.0.0")
+	stubUpgradeLookPath(t, "brew")
+	stubUpgradeTTY(t, true)
+
+	fr := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) { return "output of " + args[0], nil }}
+	_, stderr, err := execUpgradeBoth(t, fr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"== brew update", "output of update", "== brew upgrade --cask " + selfupdate.CaskRef, "output of upgrade"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want %q", stderr, want)
+		}
+	}
+
+	_, stderr, err = execUpgradeBoth(t, brewFailing("upgrade"))
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if got := strings.Count(stderr, "Error: SERVERTEXT"); got != 1 {
+		t.Errorf("failure output printed %d times, want once (streamed, not repeated as a tail): %q", got, stderr)
+	}
+	if strings.Contains(stderr, "last lines of") {
+		t.Errorf("stderr = %q, repeats the tail after streaming", stderr)
+	}
+}
+
+func TestUpgrade_JSON_Failure(t *testing.T) {
+	setMetaVersion(t, "1.0.0")
+	stubUpgradeLookPath(t, "brew")
+	stubUpgradeTTY(t, true) // --json must not stream even on a terminal
+
+	stdout, stderr, err := execUpgradeBoth(t, brewFailing("upgrade"), "--json")
+	if err == nil || ExitCode(err) != 1 {
+		t.Fatalf("err = %v, want exit 1", err)
+	}
+	var doc upgradeJSON
+	if jerr := json.Unmarshal([]byte(stdout), &doc); jerr != nil {
+		t.Fatalf("stdout is not JSON: %v\n%q", jerr, stdout)
+	}
+	if doc.OK || doc.Error == nil {
+		t.Fatalf("doc = %+v, want ok=false with an error object", doc)
+	}
+	e := doc.Error
+	if e.Step != "brew upgrade --cask "+selfupdate.CaskRef || e.ExitCode != 1 || e.Message == "" {
+		t.Errorf("error = %+v", e)
+	}
+	if !strings.Contains(e.OutputTail, "Error: SERVERTEXT") || strings.ContainsRune(e.OutputTail, 0x1b) {
+		t.Errorf("output_tail = %q, want brew's escaped tail", e.OutputTail)
+	}
+	if strings.Contains(stderr, "SERVERTEXT") {
+		t.Errorf("stderr = %q, --json must not stream or print the tail", stderr)
+	}
+}
+
+func TestUpgrade_JSON_Success(t *testing.T) {
+	setMetaVersion(t, "1.0.0")
+	stubUpgradeLookPath(t, "brew")
+	fr := &exec.FakeRunner{RunFunc: func(_ string, args []string) (string, error) {
+		if args[0] == "upgrade" {
+			return "cameronsjo/tap/forgectl 1.0.0 -> 1.1.0", nil
+		}
+		return "", nil
+	}}
+	stdout, err := execUpgrade(t, fr, "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc upgradeJSON
+	if jerr := json.Unmarshal([]byte(stdout), &doc); jerr != nil {
+		t.Fatalf("stdout is not JSON: %v\n%q", jerr, stdout)
+	}
+	if !doc.OK || doc.From != "1.0.0" || doc.To != "1.1.0" || doc.Error != nil {
+		t.Errorf("doc = %+v", doc)
+	}
+}
+
+func TestUpgrade_JSON_WithCheckIsUsageError(t *testing.T) {
+	setMetaVersion(t, "1.0.0")
+	stubUpgradeLookPath(t, "brew")
+	_, err := execUpgrade(t, &exec.FakeRunner{}, "--json", "--check")
+	if err == nil || ExitCode(err) != exitUsage {
+		t.Fatalf("err = %v (exit %d), want a usage error", err, ExitCode(err))
+	}
+}
+
+// brew exits non-zero though forgectl is installed and current: success.
+func TestUpgrade_Apply_AlreadyCurrentIsSuccess(t *testing.T) {
+	setMetaVersion(t, "1.0.0")
+	stubUpgradeLookPath(t, "brew")
+	stubUpgradeTTY(t, false)
+	fr := brewFailing("upgrade")
+	run := fr.RunFunc
+	fr.RunFunc = func(name string, args []string) (string, error) {
+		if args[0] == "outdated" {
+			return "", nil
+		}
+		return run(name, args)
+	}
+	stdout, _, err := execUpgradeBoth(t, fr)
+	if err != nil {
+		t.Fatalf("err = %v, want success when nothing is outdated", err)
+	}
+	if !strings.Contains(stdout, "already up to date") {
+		t.Errorf("stdout = %q", stdout)
+	}
+}
+
+func TestUpgrade_JSON_SourceBuildEmitsSkipDocument(t *testing.T) {
+	setMetaVersion(t, "dev")
+	stdout, err := execUpgrade(t, &exec.FakeRunner{}, "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc upgradeJSON
+	if jerr := json.Unmarshal([]byte(stdout), &doc); jerr != nil || doc.OK || doc.Skipped == "" {
+		t.Fatalf("stdout = %q (%v), want a JSON skip document", stdout, jerr)
+	}
+}
+
+// Argument validation comes before the brew-on-PATH check.
+func TestUpgrade_JSON_CheckUsageErrorWithoutBrew(t *testing.T) {
+	setMetaVersion(t, "1.0.0")
+	stubUpgradeLookPath(t)
+	_, err := execUpgrade(t, &exec.FakeRunner{}, "--json", "--check")
+	if err == nil || ExitCode(err) != exitUsage {
+		t.Fatalf("err = %v (exit %d), want exit %d", err, ExitCode(err), exitUsage)
 	}
 }

@@ -51,10 +51,28 @@ const streamCancelGrace = 2 * time.Second
 // caller's Read, which nothing here can interrupt; that goroutine ends when
 // the Read returns, without reading again.
 func (OSRunner) RunStreaming(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
-	slog.Debug("Preparing to run streaming command.", "cmd", name)
 	// name and args stay distinct all the way into os/exec; no shell parses
 	// them. StreamingRunner is the same process boundary as Runner.Run above.
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // structural argv is the purpose of this execution seam
+	return runStreaming(ctx, cmd, stdin, stdout, stderr, name)
+}
+
+// RunStreamingWithEnv is RunStreaming with env merged on top of the inherited
+// environment, as RunWithEnv does, and no stdin. It is for a caller that pins
+// environment variables on a child whose output it must show as it arrives
+// (`forgectl upgrade` and brew).
+func (OSRunner) RunStreamingWithEnv(ctx context.Context, env map[string]string, stdout, stderr io.Writer, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // structural argv is the purpose of this execution seam
+	cmd.Env = os.Environ()
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	return runStreaming(ctx, cmd, nil, stdout, stderr, name)
+}
+
+// runStreaming is the shared body of RunStreaming and RunStreamingWithEnv.
+func runStreaming(ctx context.Context, cmd *exec.Cmd, stdin io.Reader, stdout, stderr io.Writer, name string) error {
+	slog.Debug("Preparing to run streaming command.", "cmd", name)
 	var p streamPipes
 	if err := p.wire(cmd, stdin, stdout, stderr); err != nil {
 		p.closeAll()

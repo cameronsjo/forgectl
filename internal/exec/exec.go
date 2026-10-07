@@ -111,6 +111,16 @@ type StreamingRunner interface {
 	RunStreaming(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error
 }
 
+// EnvStreamingRunner is the optional seam for a caller that must pin
+// environment variables on a child and show its output as it arrives.
+// RunStreamingWithEnv behaves like RunStreaming (no buffering, a *CommandError
+// carrying the exit code and no argv) with env merged over the inherited
+// environment. A caller type-asserts for it and falls back to RunWithEnv, so a
+// Runner that does not implement it keeps working unchanged.
+type EnvStreamingRunner interface {
+	RunStreamingWithEnv(ctx context.Context, env map[string]string, stdout, stderr io.Writer, name string, args ...string) error
+}
+
 // DiscardingRunner is the optional seam for a caller that runs a command only
 // for whether it succeeds and throws its stdout away. RunDiscardingStdout
 // behaves like Runner.Run on the failure path (a *CommandError carrying the

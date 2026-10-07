@@ -424,6 +424,9 @@ forgectl doctor --json                   # machine-readable report for scripting
 
 # upgrade — update forgectl itself via the Homebrew tap (never `go build` over the brew-linked binary)
 forgectl upgrade                         # brew update + brew upgrade --cask forgectl; brew owns the checksum + atomic install
+                                          #   brew's output streams to stderr on a terminal; a failure otherwise
+                                          #   shows the last 20 lines of the failed step
+forgectl upgrade --json                  # {"ok","already_current","from","to","error":{"step","exit_code","message","cause","output_tail"}}
 forgectl upgrade --check                 # report whether an update is available, no mutation
                                           #   a source build (go build/go run) WARNS instead of attempting anything —
                                           #   there's no cask install to manage
