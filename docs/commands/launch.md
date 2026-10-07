@@ -9,6 +9,7 @@ forgectl launch agents --json      # pure passthrough (byte-clean); posture inje
 forgectl launch mcp list           # Claude subcommands, -- --help, --version: byte-clean, no posture
 forgectl launch -p "<prompt>"      # print mode: only the profile's --permission-mode is injected
 forgectl launch -- <harness args…> # `--` ends launch verbs: `-- doctor` is claude's, not forgectl's
+forgectl launch --here [args…]     # from a repo subfolder: start claude here, not at the repo root
 forgectl launch which              # show the profile resolved for the current directory (alias: config)
 forgectl launch init               # scaffold the [launch] section into config.toml
 forgectl launch migrate            # explicitly import an existing claunch.conf without retiring it
@@ -128,6 +129,34 @@ An `effort` outside the five accepted levels is rejected before anything is laun
   Cadence bridge variables such as `CADENCE_BRIEFS_DIR`,
   `CADENCE_METRICS_DIR`, and `GIT_GUARDRAILS_ALLOWED_OWNERS` in `env`; forgectl
   passes their values to Pi but shows only their names in `launch which`.
+
+**A claude session starts at the repository root when the settings live
+there.** Claude Code reads `.claude/settings.json` and
+`.claude/settings.local.json` only from the directory it starts in (measured on
+2.1.292), so a session started in a subfolder of a repository silently runs
+without the root's env, hooks, and permissions. `forgectl launch` and
+`forgectl surface launch` therefore start claude at the repository root when
+all of these hold:
+
+- the directory has neither settings file of its own;
+- walking up from it, the nearest directory with a `.git` entry (a directory,
+  or the file a linked worktree has) holds one of them.
+
+Otherwise claude starts where you are. The profile is still resolved for the
+directory you ran from, so a `[[launch.project]]` block that matches the
+subfolder still applies. The move prints one stderr line naming both
+directories, and sets `PWD` to the root. It applies to the postures that start
+a session (bare, builder, print, and `agents` with posture); the byte-clean
+passthroughs (`mcp …`, `--help`, `agents --json`) never move, so `mcp add
+--scope project` still writes where you ran it. Codex and Pi never move, since
+neither reads `.claude`, and neither does a coordinator worker, which already
+starts at its worktree's root.
+
+To stay put, pass `--here` as the **first** argument: `forgectl launch --here`,
+`forgectl launch --here -- "<task>"`. Like the leading `--`, it is forgectl's
+and never reaches the harness, and only the first position counts: `forgectl
+launch -- --here` hands claude a `--here` of its own. `surface launch` takes it
+as an ordinary flag, `--here`.
 
 **Choosing the binary** uses env → config → PATH:
 `FORGECTL_CLAUDE_BIN` / `binary_path` / `claude`, or

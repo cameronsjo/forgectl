@@ -102,6 +102,14 @@ then execs the configured harness with that posture — no prompts.
   forgectl launch mcp …            Claude subcommands run with no posture
   forgectl launch -p …             print mode: only the permission mode
   forgectl launch -- <args…>       skip launch's own verbs; "--" is dropped
+  forgectl launch --here [args…]   stay in this directory (see below)
+
+Started in a subfolder of a git repository whose root has
+.claude/settings.json or .claude/settings.local.json, and with no settings of
+its own, a claude session runs at the repository root, because Claude Code
+reads those settings only from the directory it starts in. The profile is still
+the one for the directory you ran launch from. --here, as the first argument,
+keeps the session where it was started.
 
 To resume or fork an earlier session, use "forgectl resume" — it discovers
 sessions across repos, flags the live ones, and restores their tasks.
@@ -154,6 +162,10 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	// done its job: it kept a prompt such as "doctor" or "which" from reaching
 	// a forgectl verb. The harness never sees it. Everything below, usage
 	// classification included, reads the consumed args.
+	//
+	// `--here` is launch's one flag of its own, and it is read only as the
+	// first token: anything after it, `--` included, is still the harness's.
+	args, here := consumeHereFlag(args)
 	args = launch.ConsumeLeadingSeparator(args)
 
 	// Before the automatic legacy migration below, which renames claunch.conf
@@ -188,11 +200,23 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 		// The harness inherits this stdout through the exec, so whether it
 		// is a terminal is what claude itself will see (forgectl#795).
 		StdoutTerminal: launchStdoutIsTerminal(),
+		StayInCWD:      here,
 	})
 	if err != nil {
 		return err
 	}
 	profile := built.Profile
+
+	// The profile was resolved for cwd; a claude session may still run at the
+	// repository root, where its .claude settings live (cadence-ecosystem#608).
+	// syscall.Exec keeps the process's working directory, so this chdir is
+	// what moves the session.
+	if dir := built.Invocation.CWD; dir != cwd {
+		if err := launchChdir(dir); err != nil {
+			return fmt.Errorf("change to the repository root: %w", termsafe.Error(err))
+		}
+		fmt.Fprintln(os.Stderr, settingsRootNotice(cwd, dir))
+	}
 
 	// Banner the resolved posture to stderr — the builder path and the agents
 	// scripting passthrough stay silent, which EmitBanner owns. This is the only
@@ -211,6 +235,35 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	sessionMode, posture := launchUsageClassification(args)
 	recordUsageSilently(usageEnabled, newLaunchUsageEvent(profile.Harness, profile.Model, sessionMode, posture))
 	return execHarness(built.Invocation.Binary.Path, built.Invocation.Args, built.Invocation.Env)
+}
+
+// launchChdir is os.Chdir, a variable only so a test can watch the move
+// without changing the test process's directory.
+var launchChdir = os.Chdir
+
+// hereFlag keeps a claude launch in the directory it was started from. See
+// launch.SettingsRoot for where it would otherwise run.
+const hereFlag = "--here"
+
+// consumeHereFlag drops a leading --here from args and reports whether it was
+// there. Only the first token counts: launch passes everything else through to
+// the harness, so a --here anywhere later belongs to the harness, and
+// `forgectl launch -- --here` is how to hand it one.
+func consumeHereFlag(args []string) ([]string, bool) {
+	if len(args) > 0 && args[0] == hereFlag {
+		return args[1:], true
+	}
+	return args, false
+}
+
+// settingsRootNotice is the one stderr line a launch prints when it starts a
+// claude session at the repository root rather than in the subfolder it was
+// run from. A move nobody mentioned would be the same silent surprise as the
+// settings it exists to apply.
+func settingsRootNotice(from, to string) string {
+	return "forgectl: starting claude in " + termsafe.QuotePath(to) +
+		", the repository root, so its .claude settings apply (from " +
+		termsafe.QuotePath(from) + "; pass " + hereFlag + " to stay)"
 }
 
 // legacyShadowWarning reports the one-line #114 fallback-cliff warning when

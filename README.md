@@ -142,6 +142,7 @@ exits 1; each printed ref is directly usable with `forgectl pr <ref>`, while `pr
 forgectl launch                    # drop straight into the resolved profile (no prompt)
 forgectl launch <harness args…>    # apply the project profile, then exec the configured harness
 forgectl launch agents --json      # pure passthrough (byte-clean); posture injected only when interactive
+forgectl launch --here             # from a repo subfolder: stay put instead of starting claude at the root
 forgectl launch which              # show the profile resolved for the current directory (alias: config)
 forgectl launch init               # scaffold the [launch] section into config.toml
 forgectl launch migrate            # explicitly import an existing claunch.conf without retiring it
@@ -169,6 +170,7 @@ forgectl resume hooks status       # watcher installed/loaded, recorded versions
 forgectl surface launch <target> --surface tmux           # tmux, cmux, or herdr — always explicit, never a default
 forgectl surface launch . --surface tmux --name review     # override the display name (defaults to the target dir's name)
 forgectl surface launch . --surface tmux --harness codex   # run codex here instead of the profile's harness (claude or codex)
+forgectl surface launch . --surface tmux --here      # start claude in the target, not at its repo root
 forgectl surface launch . --surface herdr --worktree feat/x --name x   # coordinator worker: own worktree under .claude/worktrees/x, own herdr workspace, ledger row
 forgectl surface launch . --surface herdr --worktree feat/x --name x --brief @brief.md   # first brief as the harness's prompt argument, nothing typed
 forgectl surface ready x --json    # wait until worker x is at its input prompt; exit 1 naming any blocking dialog (never answers one)
