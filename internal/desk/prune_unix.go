@@ -137,6 +137,11 @@ func Exists(dir string) bool {
 	return false
 }
 
+// beforeBind runs in PrunePlanAt between the root being checked and the root
+// being opened by name; a test swaps the directory there to reach bindRoot's
+// refusal, as add's beforeLink hook does for the link.
+var beforeBind = func(string) {}
+
 // PrunePlanAt returns what [Desk.Prune] would remove from the desk at dir,
 // without opening it: no MkdirAll, no chmod, no migration, nothing written.
 // (Open tightens modes and creates the protocol directories, so a preview
@@ -149,9 +154,15 @@ func Exists(dir string) bool {
 //
 // Like Open, it pins the root by descriptor, binds an os.Root opened by name
 // to that descriptor (bindRoot), and lists through the root, so a root swapped
-// for another directory after the check is refused rather than read. As in
-// Open, a protocol directory swapped for a symlink in the instant between its
-// check and its listing is not caught.
+// for another directory after the check is refused rather than read.
+//
+// A protocol directory swapped for a symlink in the instant between its check
+// and its listing is not caught. The listing goes through os.Root, so a
+// swapped-in symlink can only redirect it to another directory inside the desk
+// root: the preview may be wrong, and it never writes. This is not identical to
+// Open: Open narrows the root to 0700 before it lists, and OpenChecked lets a
+// too-broad root through on purpose (narrowing is a write), so in a dry run
+// another local user with write access to that root can trigger the swap.
 func PrunePlanAt(dir string, days int) ([]PrunedItem, error) {
 	if !filepath.IsAbs(dir) {
 		return nil, errors.New("desk: the desk directory must be an absolute path")
@@ -165,6 +176,7 @@ func PrunePlanAt(dir string, days int) ([]PrunedItem, error) {
 		return nil, fmt.Errorf("desk: open %s: %w", describe(dir), err)
 	}
 	defer unix.Close(fd) //nolint:errcheck // read-only descriptor
+	beforeBind(dir)
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, fmt.Errorf("desk: open %s: %w", describe(dir), err)

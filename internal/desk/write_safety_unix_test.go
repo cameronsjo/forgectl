@@ -391,3 +391,46 @@ func TestBindRootRefusesADifferentDirectory(t *testing.T) {
 		t.Error("a root on another directory was accepted")
 	}
 }
+
+// PrunePlanAt refuses a root swapped for another directory between the check
+// and the listing: the root opened by name no longer matches the descriptor
+// that was checked, and bindRoot says so before anything is read. The hook
+// moves the desk away and puts a different desk, with an item in it, at its
+// name.
+func TestPrunePlanAtRefusesARootSwappedAfterTheCheck(t *testing.T) {
+	d := openDesk(t)
+	dir := d.Path()
+	old := time.Now().Add(-40 * 24 * time.Hour)
+	swapped := false
+	beforeBind = func(path string) {
+		if swapped || path != dir {
+			return
+		}
+		swapped = true
+		if err := os.Rename(dir, dir+".moved"); err != nil {
+			t.Fatal(err)
+		}
+		for _, sub := range []string{DirPending, DirRunning, DirDone, DirSkipped} {
+			if err := os.MkdirAll(filepath.Join(dir, sub), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		planted := filepath.Join(dir, DirDone, "01-planted.log")
+		writeFile(t, planted, "EXIT=0\n", 0o600)
+		if err := os.Chtimes(planted, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { beforeBind = func(string) {} })
+
+	plan, err := PrunePlanAt(dir, 30)
+	if !swapped {
+		t.Fatal("the hook never ran; the test did not reach the bind")
+	}
+	if err == nil || !strings.Contains(err.Error(), "changed while it was being opened") {
+		t.Fatalf("PrunePlanAt = %v, %v, want a refusal naming the swap", plan, err)
+	}
+	if len(plan) != 0 {
+		t.Errorf("the plan listed %v from a directory it did not check", plan)
+	}
+}
