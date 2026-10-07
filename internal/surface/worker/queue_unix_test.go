@@ -167,7 +167,7 @@ func TestQueueSizeCapRefusedBeforeWrite(t *testing.T) {
 	if room := MaxQueueBytes - size(); room < 0 || room > 64 {
 		t.Fatalf("the fill left %d bytes under the cap, want a few", room)
 	}
-	if _, err := q.Claim("w0","launch-0123456789abcdef0123456789abcdef", queueNow); err != nil {
+	if _, err := q.Claim("w0", "launch-0123456789abcdef0123456789abcdef", queueNow); err != nil {
 		t.Fatalf("claim on a full queue: %v", err)
 	}
 	failed, err := q.UpdateIf("w0", SameLaunch("launch-0123456789abcdef0123456789abcdef"), queueNow, func(r *QueueRow) {
