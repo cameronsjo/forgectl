@@ -35,6 +35,8 @@ type DeskFrameOptions struct {
 	Started time.Time
 	// Theme is the palette; nil means theme.Default().
 	Theme *theme.Theme
+	// ASCII draws the desk's marks, borders and bars in ASCII (--no-icons).
+	ASCII bool
 	// Steps holds a running or finished batch's status.tsv rows, by item
 	// name. A batch with none draws as all waiting.
 	Steps map[string][]desk.StepStatus
@@ -207,7 +209,7 @@ func (f deskFrame) styles() (theme.Styles, theme.Theme) {
 // lines; the history panel takes what the others leave.
 func (f deskFrame) render() string {
 	lines, _ := f.layout()
-	return strings.Join(lines, "\n")
+	return asciiFrame(strings.Join(lines, "\n"), f.opts.ASCII)
 }
 
 // deskMinWidth is the narrowest window the frame is drawn for; a narrower
@@ -434,9 +436,10 @@ func (f deskFrame) waiting() (n, tty int, oldest time.Time) {
 
 func (f deskFrame) header(st theme.Styles, width int) string {
 	n, _, _ := f.waiting()
-	dot := st.Dim.Render("●")
+	// The dot says what it means in words, so it reads without colour (#1107).
+	dot := st.Dim.Render("○ nothing waiting")
 	if n > 0 {
-		dot = st.Accent.Render("●")
+		dot = st.Accent.Render("● " + strconv.Itoa(n) + " waiting")
 	}
 	parts := []string{"forgectl " + deskText(f.opts.Version)}
 	if f.opts.Host != "" {
@@ -623,7 +626,7 @@ func (f deskFrame) tiles(st theme.Styles, width int) []string {
 			st.Muted.Render(oldest),
 			st.Accent.Render(Sparkline(s.arrivals, min(widths[0]-4, deskSparkHours))),
 		}),
-		Panel(st, widths[1], "runs today", "", []string{
+		Panel(st, widths[1], "started today", "", []string{
 			st.Header.Render(strconv.Itoa(s.runsToday)),
 			st.Muted.Render(med),
 			st.Active.Render(Sparkline(s.runs, min(widths[1]-4, deskSparkHours))),
@@ -652,7 +655,7 @@ func (f deskFrame) summary(st theme.Styles) string {
 	if !s.oldest.IsZero() {
 		parts = append(parts, "oldest "+strings.TrimSuffix(agoLabel(f.now, s.oldest), " ago"))
 	}
-	parts = append(parts, strconv.Itoa(s.runsToday)+" runs today")
+	parts = append(parts, strconv.Itoa(s.runsToday)+" started today")
 	if s.hasMedian {
 		parts = append(parts, "median "+shortDur(s.median))
 	}
@@ -717,7 +720,11 @@ func (f deskFrame) queuePanel(st theme.Styles, width int, rows []queueRow, curso
 	}
 	var content []string
 	if len(rows) == 0 {
-		content = []string{st.Muted.Render("nothing waiting")}
+		// An empty queue says how it fills, not only that it is empty (#1107).
+		content = []string{
+			st.Muted.Render("nothing waiting"),
+			st.Muted.Render("Claude queues scripts with forgectl desk add; they appear here"),
+		}
 	} else {
 		start := 0
 		if cursor >= lines {
@@ -862,7 +869,7 @@ func stepGlyph(st theme.Styles, state string) string {
 // section out entirely.
 func (f deskFrame) focusPanel(st theme.Styles, width int, rows []queueRow, cursor, body int) []string {
 	if len(rows) == 0 {
-		return strings.Split(Panel(st, width, "focus", "", []string{st.Muted.Render("nothing waiting")}), "\n")
+		return strings.Split(Panel(st, width, "focus", "", []string{st.Muted.Render("the selected item's sha256, what and why show here")}), "\n")
 	}
 	r := rows[cursor]
 	it := r.item
@@ -1082,7 +1089,7 @@ func (f deskFrame) historyPanel(st theme.Styles, width, rows int) []string {
 	}
 	var content []string
 	if len(done) == 0 {
-		content = []string{st.Muted.Render("no runs yet")}
+		content = []string{st.Muted.Render("no finished runs yet")}
 	}
 	show := done
 	if len(show) > rows {

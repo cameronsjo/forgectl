@@ -51,6 +51,9 @@ type DeskOptions struct {
 	// Runs is where the run view (r) reads runs from; RunDesk sets the
 	// desk itself. nil leaves the run view off.
 	Runs runview.Source
+	// ASCII draws the dashboard's marks, borders and bars in ASCII
+	// (--no-icons). The script viewer (v) is never changed.
+	ASCII bool
 }
 
 const (
@@ -220,6 +223,7 @@ func newDeskModel(ctx context.Context, d deskBackend, opts DeskOptions) deskMode
 		Version: opts.Version,
 		Dir:     TildePath(d.Path(), opts.Home),
 		Started: m.started,
+		ASCII:   opts.ASCII,
 	}
 	return m
 }
@@ -1070,7 +1074,7 @@ func (m deskModel) View() tea.View {
 	if m.pager != nil {
 		content = m.pagerView(width, height)
 	} else if m.rv != nil {
-		content = m.rv.render(m.styles(), width, height)
+		content = asciiFrame(m.rv.render(m.styles(), width, height), m.opts.ASCII)
 	} else {
 		content = m.dashboard().render()
 	}

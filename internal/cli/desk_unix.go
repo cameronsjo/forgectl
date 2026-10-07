@@ -85,15 +85,17 @@ func runDeskDashboard(cmd *cobra.Command, deps module.Deps, dirFlag string, fram
 	defer d.Close()           //nolint:errcheck // read side; nothing to flush
 	home, _ := deskUserHome() // display only: no home shows the full path
 	if frame {
-		return printDeskFrame(deps.Theme.Writer(cmd.OutOrStdout(), os.Environ()), d, deps, home)
+		noIcons, _ := cmd.Flags().GetBool("no-icons")
+		return printDeskFrame(deps.Theme.Writer(cmd.OutOrStdout(), os.Environ()), d, deps, home, noIcons)
 	}
-	return tui.RunDesk(cmd.Context(), d, tui.DeskOptions{Version: meta.Version, Home: home, Theme: deps.Theme})
+	noIcons, _ := cmd.Flags().GetBool("no-icons")
+	return tui.RunDesk(cmd.Context(), d, tui.DeskOptions{Version: meta.Version, Home: home, Theme: deps.Theme, ASCII: noIcons})
 }
 
 // printDeskFrame draws one frame the way the dashboard would, sized by
 // $COLUMNS and $LINES. out is the theme's writer, so NO_COLOR and a pipe
 // both drop the colour.
-func printDeskFrame(out io.Writer, d *desk.Desk, deps module.Deps, home string) error {
+func printDeskFrame(out io.Writer, d *desk.Desk, deps module.Deps, home string, ascii bool) error {
 	snap, err := d.Scan()
 	if err != nil {
 		return err
@@ -103,6 +105,7 @@ func printDeskFrame(out io.Writer, d *desk.Desk, deps module.Deps, home string) 
 		Dir:     tui.TildePath(d.Path(), home),
 		Steps:   map[string][]desk.StepStatus{},
 		Records: map[string][]byte{},
+		ASCII:   ascii,
 	}
 	if h, err := os.Hostname(); err == nil {
 		opts.Host = h
