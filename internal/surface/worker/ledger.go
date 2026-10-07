@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
@@ -248,6 +249,18 @@ func (l *Ledger) UpdateIf(name string, match func(Row) bool, fn func(*Row)) erro
 		}
 		return nil, ErrNoRow
 	})
+}
+
+// NameTaken reports whether Begin would refuse name with ErrNameTaken, without
+// writing: a row with that name exists and is not a failed launch that created
+// nothing. `surface launch --dry-run` asks it.
+func (l *Ledger) NameTaken(name string) (bool, error) {
+	rows, err := l.Rows()
+	if err != nil {
+		return false, err
+	}
+	_, err = insertRow(slices.Clone(rows), Row{Name: name})
+	return errors.Is(err, ErrNameTaken), nil
 }
 
 // Rows returns every row.

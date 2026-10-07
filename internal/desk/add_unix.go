@@ -19,6 +19,10 @@ import (
 // there to make the link collide.
 var beforeLink = func(string) {}
 
+// afterLink runs right after the item is linked into pending/; tests read the
+// directory there to prove the item is never visible without its meta.
+var afterLink = func(string) {}
+
 // maxNumberTries bounds the NN- search when other writers keep taking numbers.
 const maxNumberTries = 1000
 
@@ -46,6 +50,71 @@ type Added struct {
 // removal sees link count 2 and refuses the item until the next scan, so it
 // never hashes a partial file.
 func (d *Desk) Add(src, what, why string, tty bool) (Added, error) {
+	a, _, err := d.add(src, what, why, tty, false)
+	return a, err
+}
+
+// AddUnique is [Desk.Add], except that an item already waiting in pending/ with
+// the same kind and the same sha256 (the hash taken after the header lines are
+// inserted, so the same file with the same what and why) is not queued again:
+// it returns that item, with duplicate true, and writes nothing. A retry after
+// a timeout therefore finds the first attempt instead of queueing a second
+// approval. The check and the queueing are not one atomic step: two adds of
+// the same file at the same instant can both queue.
+func (d *Desk) AddUnique(src, what, why string, tty bool) (a Added, duplicate bool, err error) {
+	return d.add(src, what, why, tty, true)
+}
+
+// Signalled reports whether the operator signal for the pending item name is
+// recorded as sent (see [Meta.SignalledAt]). An item with no meta reads as
+// signalled. Add writes an item's meta before the item becomes visible in
+// pending/, so a pending item with no meta is a file a person dropped in by
+// hand: nothing here ever signalled it, and a retry must not start pinging
+// for it.
+func (d *Desk) Signalled(name string) bool {
+	meta, ok, err := d.readMeta(DirPending, name)
+	return err != nil || !ok || meta.SignalledAt != nil
+}
+
+// MarkSignalled records that the operator signal for the pending item name
+// was sent. An item with no meta is left alone, so a legacy item is never
+// given a partial one.
+func (d *Desk) MarkSignalled(name string) error {
+	meta, ok, err := d.readMeta(DirPending, name)
+	if err != nil || !ok {
+		return err
+	}
+	now := d.now().UTC()
+	meta.SignalledAt = &now
+	return d.writeMeta(DirPending, name, meta)
+}
+
+// waitingWith returns the pending item of kind whose bytes hash to sum. An
+// entry that cannot be read (mid-link, refused, unreadable) does not match.
+func (d *Desk) waitingWith(kind Kind, sum string) (string, bool, error) {
+	entries, err := d.list(DirPending)
+	if err != nil {
+		return "", false, err
+	}
+	for _, e := range entries {
+		name, k, ok := kindOfFile(e.Name())
+		if !ok || k != kind {
+			continue
+		}
+		data, _, err := d.readItem(DirPending, e.Name())
+		if err != nil {
+			continue
+		}
+		if SHA256Hex(data) == sum {
+			return name, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// add is Add and AddUnique: with unique set, an identical waiting item is
+// returned instead of a new one being queued.
+func (d *Desk) add(src, what, why string, tty, unique bool) (Added, bool, error) {
 	base := filepath.Base(src)
 	var kind Kind
 	switch {
@@ -54,38 +123,47 @@ func (d *Desk) Add(src, what, why string, tty bool) (Added, error) {
 	case strings.HasSuffix(base, extManifest):
 		kind = KindBatch
 	default:
-		return Added{}, errors.New("desk: the file must end in .sh (a script) or .manifest (a batch)")
+		return Added{}, false, errors.New("desk: the file must end in .sh (a script) or .manifest (a batch)")
 	}
 	stem := strings.TrimSuffix(base, kind.Ext())
 	if !stemRe.MatchString(stem) || strings.Contains(stem, "..") {
-		return Added{}, fmt.Errorf("desk: %q is not a usable item name (letters, digits, '.', '_', '-'; at most 64)", describe(stem))
+		return Added{}, false, fmt.Errorf("desk: %q is not a usable item name (letters, digits, '.', '_', '-'; at most 64)", describe(stem))
 	}
 	data, err := ReadSource(src)
 	if err != nil {
-		return Added{}, err
+		return Added{}, false, err
 	}
 	body, err := insertHeaders(data, kind, what, why, tty)
 	if err != nil {
-		return Added{}, err
+		return Added{}, false, err
 	}
 	var warnings []string
 	if kind == KindBatch {
 		m, err := LoadManifest(body, base)
 		if err != nil {
-			return Added{}, err
+			return Added{}, false, err
 		}
 		warnings = m.Lint()
 	}
 	sum := SHA256Hex(body)
+	if unique {
+		name, found, err := d.waitingWith(kind, sum)
+		if err != nil {
+			return Added{}, false, err
+		}
+		if found {
+			return Added{Name: name, Kind: kind, SHA256: sum, Path: d.abs(path.Join(DirPending, name+kind.Ext())), Warnings: warnings}, true, nil
+		}
+	}
 	tmp, err := d.writeTemp(DirPending, "add", body)
 	if err != nil {
-		return Added{}, err
+		return Added{}, false, err
 	}
 	defer d.root.Remove(tmp) //nolint:errcheck // best effort; a dot-named leftover is ignored by scans
 
 	n, err := d.nextNumber()
 	if err != nil {
-		return Added{}, err
+		return Added{}, false, err
 	}
 	for range maxNumberTries {
 		name := fmt.Sprintf("%02d-%s", n, stem)
@@ -93,21 +171,33 @@ func (d *Desk) Add(src, what, why string, tty bool) (Added, error) {
 		if d.nameTaken(name) {
 			continue
 		}
-		beforeLink(name + kind.Ext())
-		err := d.root.Link(tmp, path.Join(DirPending, name+kind.Ext()))
-		if errors.Is(err, fs.ErrExist) {
+		// The meta goes in before the item is visible. A desk or a retry that
+		// sees the item therefore always sees its meta, so "no meta" can only
+		// mean a file a person dropped in by hand. createMeta fails rather
+		// than overwrite a meta that appeared after the name check.
+		now := d.now().UTC()
+		created, err := d.createMeta(DirPending, name, Meta{AddedAt: &now, SHA256: sum, Kind: kind, SignalPane: d.signalPane})
+		if err != nil {
+			return Added{}, false, err
+		}
+		if !created {
 			continue
 		}
+		beforeLink(name + kind.Ext())
+		err = d.root.Link(tmp, path.Join(DirPending, name+kind.Ext()))
 		if err != nil {
-			return Added{}, fmt.Errorf("desk: queue %s: %w", name, err)
+			// The item never became visible, so its meta must not stay behind
+			// naming a hash for a file that is not there.
+			_ = d.root.Remove(metaName(DirPending, name))
+			if errors.Is(err, fs.ErrExist) {
+				continue
+			}
+			return Added{}, false, fmt.Errorf("desk: queue %s: %w", name, err)
 		}
-		now := d.now().UTC()
-		if err := d.writeMeta(DirPending, name, Meta{AddedAt: &now, SHA256: sum, Kind: kind, SignalPane: d.signalPane}); err != nil {
-			return Added{}, err
-		}
-		return Added{Name: name, Kind: kind, SHA256: sum, Path: d.abs(path.Join(DirPending, name+kind.Ext())), Warnings: warnings}, nil
+		afterLink(name + kind.Ext())
+		return Added{Name: name, Kind: kind, SHA256: sum, Path: d.abs(path.Join(DirPending, name+kind.Ext())), Warnings: warnings}, false, nil
 	}
-	return Added{}, errors.New("desk: no free item number; is something else writing pending/?")
+	return Added{}, false, errors.New("desk: no free item number; is something else writing pending/?")
 }
 
 // ReadSource reads the file Claude asked to enqueue, capped like an item.

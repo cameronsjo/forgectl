@@ -108,10 +108,12 @@ func openTestDesk(t *testing.T, dir string) *desk.Desk {
 	return d
 }
 
-// queueItem adds a script through the CLI and returns its name and hash.
+// queueItem adds a script through the CLI and returns its name and hash. It
+// passes --allow-duplicate: tests queue several items with one filler body and
+// need each to be its own item; duplicate detection has its own tests.
 func queueItem(t *testing.T, file, body string) (name, sha string) {
 	t.Helper()
-	out, _, err := deskRun(t, deskDeps(), "add", writeTemp(t, file, body), "--what", "a test item", "--why", "a test", "--json")
+	out, _, err := deskRun(t, deskDeps(), "add", writeTemp(t, file, body), "--what", "a test item", "--why", "a test", "--json", "--allow-duplicate")
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
@@ -235,7 +237,7 @@ func TestDeskAdd_PrintsNameAndHash(t *testing.T) {
 	out, _, err := deskRun(t, deskDeps(), "add", writeTemp(t, "merge.sh", "#!/bin/bash\necho hi\n"), "--what", "merge it", "--why", "you own merges")
 	wantExit(t, err, 0)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 3 || lines[0] != "name=01-merge" || lines[1] != "kind=script" || !sha256Re.MatchString(strings.TrimPrefix(lines[2], "sha256=")) {
+	if len(lines) != 4 || lines[0] != "name=01-merge" || lines[1] != "kind=script" || !sha256Re.MatchString(strings.TrimPrefix(lines[2], "sha256=")) || lines[3] != "duplicate=false" {
 		t.Fatalf("output = %q", out)
 	}
 	name, sha := queueItem(t, "second.sh", "echo two\n")
@@ -248,7 +250,7 @@ func TestDeskAdd_JSONContract(t *testing.T) {
 	newDeskDir(t)
 	out, _, err := deskRun(t, deskDeps(), "add", writeTemp(t, "a.sh", "echo a\n"), "--what", "w", "--why", "y", "--json")
 	wantExit(t, err, 0)
-	if got, want := jsonKeys(t, []byte(out)), []string{"kind", "name", "path", "sha256", "warnings"}; !reflect.DeepEqual(got, want) {
+	if got, want := jsonKeys(t, []byte(out)), []string{"duplicate", "kind", "name", "path", "sha256", "warnings"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("keys = %v, want %v", got, want)
 	}
 }
@@ -687,7 +689,7 @@ func TestDeskSkip(t *testing.T) {
 	wantExit(t, err, deskExitUsage)
 	out, _, err := deskRun(t, deskDeps(), "skip", waiting, "--reason", "superseded by 03")
 	wantExit(t, err, 0)
-	if out != "skipped="+waiting+" reason=operator\n" {
+	if out != "skipped="+waiting+" reason=operator note=\"superseded by 03\"\n" {
 		t.Errorf("output = %q", out)
 	}
 
@@ -695,7 +697,7 @@ func TestDeskSkip(t *testing.T) {
 	markLost(t, d, dir, lost, lostSHA)
 	out, _, err = deskRun(t, deskDeps(), "skip", lost, "--reason", "supervisor died")
 	wantExit(t, err, 0)
-	if out != "skipped="+lost+" reason=lost\n" {
+	if out != "skipped="+lost+" reason=lost note=\"supervisor died\"\n" {
 		t.Errorf("output = %q", out)
 	}
 
@@ -717,7 +719,7 @@ func TestDeskPrune(t *testing.T) {
 	newDeskDir(t)
 	out, _, err := deskRun(t, deskDeps(), "prune", "--json")
 	wantExit(t, err, 0)
-	if got, want := jsonKeys(t, []byte(out)), []string{"days", "removed"}; !reflect.DeepEqual(got, want) {
+	if got, want := jsonKeys(t, []byte(out)), []string{"days", "found", "removed"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("prune --json keys = %v, want %v", got, want)
 	}
 	out, _, err = deskRun(t, deskDeps(), "prune", "--days", "7")

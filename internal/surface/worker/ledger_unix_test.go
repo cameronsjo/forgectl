@@ -238,3 +238,40 @@ func TestLedgerConditionalChanges(t *testing.T) {
 		t.Fatalf("RemoveIf on a missing row: %v", err)
 	}
 }
+
+// NameTaken answers what Begin would, and writes nothing (forgectl#1088).
+func TestLedgerNameTakenMatchesBegin(t *testing.T) {
+	l, dir := testLedger(t)
+	if taken, err := l.NameTaken("w1"); err != nil || taken {
+		t.Fatalf("empty ledger: taken=%v err=%v, want free", taken, err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("NameTaken created the ledger directory: %v", err)
+	}
+	if err := l.Begin(Row{Name: "w1", Branch: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	if taken, err := l.NameTaken("w1"); err != nil || !taken {
+		t.Errorf("pending row: taken=%v err=%v, want taken", taken, err)
+	}
+	if taken, _ := l.NameTaken("w2"); taken {
+		t.Error("an unused name reads as taken")
+	}
+	// A failed launch that created nothing may be retried under its name.
+	if err := l.Update("w1", func(r *Row) { r.Stage = StageFailed; r.Failure = "x" }); err != nil {
+		t.Fatal(err)
+	}
+	if taken, _ := l.NameTaken("w1"); taken {
+		t.Error("a failed row that created nothing reads as taken; Begin would reuse it")
+	}
+	if err := l.Update("w1", func(r *Row) { r.Worktree = "/repo/one/.claude/worktrees/w1" }); err != nil {
+		t.Fatal(err)
+	}
+	if taken, _ := l.NameTaken("w1"); !taken {
+		t.Error("a failed row that holds a worktree reads as free; Begin would refuse it")
+	}
+	rows, err := l.Rows()
+	if err != nil || len(rows) != 1 {
+		t.Errorf("NameTaken changed the ledger: rows=%+v err=%v", rows, err)
+	}
+}

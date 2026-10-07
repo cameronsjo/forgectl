@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -21,13 +23,62 @@ var protocolSuffixes = [...]string{extMeta, extManifest, extEvents, extScript, e
 // symlinks, dot files, or anything else; an item still in running/ keeps its
 // done/ files. Nothing in pending/ or running/ is touched.
 func (d *Desk) Prune(days int) (int, error) {
-	if days < 1 {
-		return 0, errors.New("desk: prune needs --days of at least 1")
-	}
-	cutoff := d.now().Add(-time.Duration(days) * 24 * time.Hour)
-	running, err := d.list(DirRunning)
+	cands, err := d.pruneCandidates(days)
 	if err != nil {
 		return 0, err
+	}
+	removed := 0
+	for _, c := range cands {
+		for _, e := range c.entries {
+			p := path.Join(c.sub, e.Name())
+			var err error
+			if e.IsDir() {
+				err = d.root.RemoveAll(p)
+			} else {
+				err = d.root.Remove(p)
+			}
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return removed, fmt.Errorf("desk: prune %s: %w", describe(p), err)
+			}
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+// PrunedItem is one item [Desk.Prune] would remove, as [PrunePlanAt] lists it.
+type PrunedItem struct {
+	// State is the directory the item is in: [DirDone] or [DirSkipped].
+	State string
+	// Name is the item's name.
+	Name string
+	// Newest is the modification time of its newest file.
+	Newest time.Time
+}
+
+// pruneCandidate is one item Prune removes: its entries in sub.
+type pruneCandidate struct {
+	sub     string
+	name    string
+	newest  time.Time
+	entries []fs.DirEntry
+}
+
+// pruneCandidates selects the items older than days in the open desk.
+func (d *Desk) pruneCandidates(days int) ([]pruneCandidate, error) {
+	return selectPrune(d.list, d.now(), days)
+}
+
+// selectPrune is the one place that decides what is old, shared by Prune
+// and PrunePlanAt. It reads through list and never writes.
+func selectPrune(list func(sub string) ([]fs.DirEntry, error), now time.Time, days int) ([]pruneCandidate, error) {
+	if days < 1 {
+		return nil, errors.New("desk: prune needs --days of at least 1")
+	}
+	cutoff := now.Add(-time.Duration(days) * 24 * time.Hour)
+	running, err := list(DirRunning)
+	if err != nil {
+		return nil, err
 	}
 	live := map[string]bool{}
 	for _, e := range running {
@@ -35,11 +86,11 @@ func (d *Desk) Prune(days int) (int, error) {
 			live[name] = true
 		}
 	}
-	removed := 0
+	var out []pruneCandidate
 	for _, sub := range [...]string{DirDone, DirSkipped} {
-		entries, err := d.list(sub)
+		entries, err := list(sub)
 		if err != nil {
-			return removed, err
+			return nil, err
 		}
 		groups := map[string][]fs.DirEntry{}
 		var order []string
@@ -63,22 +114,51 @@ func (d *Desk) Prune(days int) (int, error) {
 			if !newest.Before(cutoff) {
 				continue
 			}
-			for _, e := range groups[name] {
-				p := path.Join(sub, e.Name())
-				var err error
-				if e.IsDir() {
-					err = d.root.RemoveAll(p)
-				} else {
-					err = d.root.Remove(p)
-				}
-				if err != nil && !errors.Is(err, fs.ErrNotExist) {
-					return removed, fmt.Errorf("desk: prune %s: %w", describe(p), err)
-				}
-			}
-			removed++
+			out = append(out, pruneCandidate{sub: sub, name: name, newest: newest, entries: groups[name]})
 		}
 	}
-	return removed, nil
+	return out, nil
+}
+
+// Exists reports whether dir looks like a desk: it holds at least one of the
+// protocol subdirectories as a real directory (a symlink does not count). It
+// reads only. Open creates a missing desk, so a verb that must not create one
+// asks this first.
+func Exists(dir string) bool {
+	for _, sub := range protocolDirs {
+		if fi, err := os.Lstat(filepath.Join(dir, sub)); err == nil && fi.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+// PrunePlanAt returns what [Desk.Prune] would remove from the desk at dir,
+// without opening it: no MkdirAll, no chmod, no migration, nothing written.
+// (Open tightens modes and creates the protocol directories, so a preview
+// cannot go through it.) It selects with the same code as Prune. A protocol
+// subdirectory that is absent, or is a symlink, reads as empty.
+func PrunePlanAt(dir string, days int) ([]PrunedItem, error) {
+	list := func(sub string) ([]fs.DirEntry, error) {
+		p := filepath.Join(dir, sub)
+		if fi, err := os.Lstat(p); err != nil || !fi.IsDir() {
+			return nil, nil
+		}
+		entries, err := os.ReadDir(p)
+		if err != nil {
+			return nil, fmt.Errorf("desk: read %s/: %w", sub, err)
+		}
+		return entries, nil
+	}
+	cands, err := selectPrune(list, time.Now(), days)
+	if err != nil {
+		return nil, err
+	}
+	plan := make([]PrunedItem, 0, len(cands))
+	for _, c := range cands {
+		plan = append(plan, PrunedItem{State: c.sub, Name: c.name, Newest: c.newest})
+	}
+	return plan, nil
 }
 
 // protocolEntry returns the item name an entry belongs to, or ok=false for
