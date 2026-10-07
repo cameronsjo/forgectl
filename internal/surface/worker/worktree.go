@@ -87,30 +87,22 @@ func WorktreePath(top, name string) string {
 // the worktree, and the worker, outside the repo. The created path is checked
 // again after git runs, against the real top.
 func AddWorktree(ctx context.Context, run GitRunner, top, name, branch string, base func() (string, error)) (Worktree, error) {
-	if err := ValidName(name); err != nil {
+	if err := checkWorktreeRequest(ctx, run, name, branch); err != nil {
 		return Worktree{}, err
-	}
-	if err := precheckBranch(branch); err != nil {
-		return Worktree{}, err
-	}
-	if _, err := gitenv.Run(ctx, run, gitenv.Local, "check-ref-format", "--branch", branch); err != nil {
-		return Worktree{}, fmt.Errorf("%w: git check-ref-format refused it", ErrInvalidBranch)
 	}
 	if err := ensureWorktreeRoot(top); err != nil {
 		return Worktree{}, err
 	}
 	path := WorktreePath(top, name)
-	if _, err := os.Lstat(path); err == nil {
-		return Worktree{}, fmt.Errorf("worker: %s already exists; a worker named %q was started here before", path, name)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return Worktree{}, fmt.Errorf("worker: check %s: %w", path, err)
+	if err := checkWorktreePathFree(path, name); err != nil {
+		return Worktree{}, err
 	}
 
 	add := []string{"-C", top, "-c", "core.hooksPath=/dev/null", "worktree", "add"}
-	switch {
-	case refExists(ctx, run, top, "refs/heads/"+branch):
+	switch branchSource(ctx, run, top, branch) {
+	case BranchLocal:
 		add = append(add, "--", path, branch)
-	case refExists(ctx, run, top, "refs/remotes/origin/"+branch):
+	case BranchOrigin:
 		add = append(add, "--track", "-b", branch, "--", path, "origin/"+branch)
 	default:
 		sha, err := base()
@@ -138,6 +130,106 @@ func AddWorktree(ctx context.Context, run GitRunner, top, name, branch string, b
 		return Worktree{}, fmt.Errorf("worker: read worktree HEAD: %w", err)
 	}
 	return Worktree{Path: resolved, Branch: branch, Base: strings.TrimSpace(head)}, nil
+}
+
+// Where a worker's branch comes from.
+const (
+	// BranchLocal checks out a local branch that already exists.
+	BranchLocal = "local"
+	// BranchOrigin makes a local tracking branch from origin/<branch>.
+	BranchOrigin = "origin"
+	// BranchNew creates the branch at a base commit.
+	BranchNew = "new"
+)
+
+// checkWorktreeRequest refuses a worker name or branch before anything is
+// created. AddWorktree and PlanWorktree both call it, so a preview refuses
+// exactly what the launch would.
+func checkWorktreeRequest(ctx context.Context, run GitRunner, name, branch string) error {
+	if err := ValidName(name); err != nil {
+		return err
+	}
+	if err := precheckBranch(branch); err != nil {
+		return err
+	}
+	if _, err := gitenv.Run(ctx, run, gitenv.Local, "check-ref-format", "--branch", branch); err != nil {
+		return fmt.Errorf("%w: git check-ref-format refused it", ErrInvalidBranch)
+	}
+	return nil
+}
+
+// checkWorktreePathFree refuses a worktree path that already exists.
+func checkWorktreePathFree(path, name string) error {
+	if _, err := os.Lstat(path); err == nil {
+		return fmt.Errorf("worker: %s already exists; a worker named %q was started here before", path, name)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("worker: check %s: %w", path, err)
+	}
+	return nil
+}
+
+// branchSource decides where branch comes from, in the order AddWorktree
+// uses: a local branch, then origin/<branch>, then a new branch.
+func branchSource(ctx context.Context, run GitRunner, top, branch string) string {
+	switch {
+	case refExists(ctx, run, top, "refs/heads/"+branch):
+		return BranchLocal
+	case refExists(ctx, run, top, "refs/remotes/origin/"+branch):
+		return BranchOrigin
+	default:
+		return BranchNew
+	}
+}
+
+// WorktreePlan is what AddWorktree would do for a request.
+type WorktreePlan struct {
+	// Path is where the worktree would be created. The directory chain above
+	// it may not exist yet; unlike Worktree.Path it is not symlink-resolved.
+	Path string
+	// Branch is the branch it would hold.
+	Branch string
+	// BranchFrom is BranchLocal, BranchOrigin or BranchNew.
+	BranchFrom string
+}
+
+// PlanWorktree runs every check AddWorktree runs before it writes and returns
+// what it would create, writing nothing: it does not create the worktree root,
+// the worktree, or a branch, and a new branch's base commit is not read (that
+// is a GitHub call). It refuses what AddWorktree refuses up to that point.
+func PlanWorktree(ctx context.Context, run GitRunner, top, name, branch string) (WorktreePlan, error) {
+	if err := checkWorktreeRequest(ctx, run, name, branch); err != nil {
+		return WorktreePlan{}, err
+	}
+	if err := checkWorktreeRoot(top); err != nil {
+		return WorktreePlan{}, err
+	}
+	path := WorktreePath(top, name)
+	if err := checkWorktreePathFree(path, name); err != nil {
+		return WorktreePlan{}, err
+	}
+	return WorktreePlan{Path: path, Branch: branch, BranchFrom: branchSource(ctx, run, top, branch)}, nil
+}
+
+// checkWorktreeRoot is ensureWorktreeRoot without the creating: it refuses a
+// component that exists as a symlink or a non-directory, and stops at the
+// first one that does not exist yet.
+func checkWorktreeRoot(top string) error {
+	dir := top
+	for _, part := range worktreeDirs {
+		dir = filepath.Join(dir, part)
+		info, err := os.Lstat(dir)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			return nil
+		case err != nil:
+			return fmt.Errorf("worker: check %s: %w", dir, err)
+		case info.Mode()&os.ModeSymlink != 0:
+			return fmt.Errorf("%w: %s is a symlink", ErrUnsafeWorktreeRoot, dir)
+		case !info.IsDir():
+			return fmt.Errorf("%w: %s is not a directory", ErrUnsafeWorktreeRoot, dir)
+		}
+	}
+	return nil
 }
 
 // ensureWorktreeRoot creates <top>/.claude/worktrees, refusing any component

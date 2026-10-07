@@ -78,7 +78,6 @@ var jsonContractExempt = map[string]string{
 	"review mark":            "records a reviewed mark; the exit code is the outcome",
 	"review sync":            "prunes reviewed marks for closed work items; the exit code is the outcome",
 	"review unmark":          "clears a reviewed mark; the exit code is the outcome",
-	"surface launch":         "starts a harness in a new managed surface; the exit code is the outcome",
 	"tasks":                  "a bare `tasks` prints its help and reports no state; it runs only so that an unknown verb is refused with exit 1 (`tasks ls --json` reports tasks)",
 	"tasks mcp":              "a long-running MCP server (stdio or streamable HTTP); it serves rather than reports",
 	"theme preview":          "renders a live palette to the terminal for the eye; `theme show --json` reports the resolved roles",

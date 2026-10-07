@@ -498,6 +498,21 @@ func (d *Desk) skip(name, reason, note, by string) (string, error) {
 	return reason, nil
 }
 
+// SkippedMeta reports whether an item called name is in skipped/, and its
+// meta (zero when it has none or it cannot be read). It reads only: `desk
+// skip` asks it to tell an item that was already skipped from a name that
+// never existed.
+func (d *Desk) SkippedMeta(name string) (Meta, bool) {
+	if _, err := d.findKind(DirSkipped, name); err != nil {
+		return Meta{}, false
+	}
+	meta, _, err := d.readMeta(DirSkipped, name)
+	if err != nil {
+		return Meta{}, true
+	}
+	return meta, true
+}
+
 // Unskip returns an operator-skipped item to pending/. An item skipped
 // because it changed, was refused, or was lost cannot be re-armed.
 func (d *Desk) Unskip(name string) error {

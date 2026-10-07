@@ -38,7 +38,9 @@ func runDeskSkip(*cobra.Command, module.Deps, string, string, string) error {
 	return errDeskUnsupported()
 }
 
-func runDeskPrune(*cobra.Command, module.Deps, string, int, bool) error { return errDeskUnsupported() }
+func runDeskPrune(*cobra.Command, module.Deps, string, int, bool, bool) error {
+	return errDeskUnsupported()
+}
 
 func runDeskSupervise(string, string, string, string) error { return errDeskUnsupported() }
 

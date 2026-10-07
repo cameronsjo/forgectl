@@ -141,6 +141,9 @@ type deskAddJSON struct {
 	SHA256   string   `json:"sha256"`
 	Path     string   `json:"path"`
 	Warnings []string `json:"warnings"`
+	// Duplicate is true when an identical item was already waiting: nothing
+	// was queued, and the other fields describe that item.
+	Duplicate bool `json:"duplicate"`
 }
 
 func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o deskAddOpts) error {
@@ -168,12 +171,25 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 	if pane, ok := sig.pane(); ok {
 		d.SetSignalPane(pane)
 	}
-	a, err := d.Add(src, strings.TrimSpace(o.what), strings.TrimSpace(o.why), o.tty)
+	what, why := strings.TrimSpace(o.what), strings.TrimSpace(o.why)
+	var (
+		a         desk.Added
+		duplicate bool
+	)
+	if o.allowDuplicate {
+		a, err = d.Add(src, what, why, o.tty)
+	} else {
+		a, duplicate, err = d.AddUnique(src, what, why, o.tty)
+	}
 	if err != nil {
 		return err
 	}
 	// The item is queued; a signal that fails is a warning, not a failed add.
-	signalFailures := sig.queued(cmd.Context(), d, a, strings.TrimSpace(o.what))
+	// A duplicate queued nothing, so there is nothing to signal.
+	var signalFailures []string
+	if !duplicate {
+		signalFailures = sig.queued(cmd.Context(), d, a, what)
+	}
 	warnings := a.Warnings
 	if warnings == nil {
 		warnings = []string{}
@@ -183,7 +199,7 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 		warnings = append(warnings, "operator signal failed: "+f)
 	}
 	if o.asJSON {
-		return writeJSON(out, deskAddJSON{Name: a.Name, Kind: string(a.Kind), SHA256: a.SHA256, Path: a.Path, Warnings: warnings})
+		return writeJSON(out, deskAddJSON{Name: a.Name, Kind: string(a.Kind), SHA256: a.SHA256, Path: a.Path, Warnings: warnings, Duplicate: duplicate})
 	}
 	ew := &stickyWriter{w: cmd.ErrOrStderr()}
 	for _, w := range warnings {
@@ -191,6 +207,10 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 	}
 	w := &stickyWriter{w: out}
 	w.printf("name=%s\nkind=%s\nsha256=%s\n", a.Name, a.Kind, a.SHA256)
+	if duplicate {
+		w.printf("duplicate=true\n")
+		ew.printf("note: %s is already waiting with this sha256; nothing was queued (--allow-duplicate queues another)\n", safeText(a.Name))
+	}
 	return errors.Join(w.err, ew.err)
 }
 
@@ -812,6 +832,12 @@ func runDeskSkip(cmd *cobra.Command, deps module.Deps, dirFlag, name, reason str
 	recorded, err := d.SkipNoted(name, reason)
 	switch {
 	case errors.Is(err, desk.ErrNotFound):
+		// A retry finds the item already skipped: report it, exit 0, as
+		// `tasks done` does for a task already done. A name that never
+		// existed is the error below, so a caller can tell them apart.
+		if meta, ok := d.SkippedMeta(name); ok {
+			return reportDeskAlreadySkipped(cmd, name, meta)
+		}
 		return deskNotFound("desk skip", "waiting item or lost run", name, "waiting", waitingNames(d))
 	case errors.Is(err, desk.ErrClaimed):
 		return fmt.Errorf("desk skip: %s was claimed by a desk first", name)
@@ -822,18 +848,51 @@ func runDeskSkip(cmd *cobra.Command, deps module.Deps, dirFlag, name, reason str
 	return err
 }
 
+// reportDeskAlreadySkipped is `desk skip` on an item already in skipped/: no
+// change, exit 0. The reason printed is the one recorded when it was skipped
+// ("operator" for a CLI or dashboard skip), not the --reason of this call.
+func reportDeskAlreadySkipped(cmd *cobra.Command, name string, meta desk.Meta) error {
+	recorded := meta.SkipReason
+	if recorded == "" {
+		recorded = desk.SkipOperator
+	}
+	if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "note: %s was already skipped; nothing changed\n", safeText(name)); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(cmd.OutOrStdout(), "skipped=%s reason=%s already=true\n", name, safeText(recorded))
+	return err
+}
+
 // deskPruneJSON is `desk prune --json`.
 type deskPruneJSON struct {
 	Removed int `json:"removed"`
 	Days    int `json:"days"`
 }
 
-func runDeskPrune(cmd *cobra.Command, deps module.Deps, dirFlag string, days int, asJSON bool) error {
+// deskPrunePlanJSON is `desk prune --dry-run --json`.
+type deskPrunePlanJSON struct {
+	DryRun      bool                `json:"dry_run"`
+	Days        int                 `json:"days"`
+	WouldRemove int                 `json:"would_remove"`
+	Items       []deskPrunePlanItem `json:"items"`
+}
+
+// deskPrunePlanItem is one item a prune would delete.
+type deskPrunePlanItem struct {
+	State  string    `json:"state"`
+	Name   string    `json:"name"`
+	Newest time.Time `json:"newest"`
+}
+
+func runDeskPrune(cmd *cobra.Command, deps module.Deps, dirFlag string, days int, asJSON, dryRun bool) error {
 	d, err := openDeskDirFor(cmd, deps, dirFlag)
 	if err != nil {
 		return err
 	}
 	defer d.Close() //nolint:errcheck // deletes are not buffered
+	if dryRun {
+		return printDeskPrunePlan(cmd.OutOrStdout(), d, days, asJSON)
+	}
 	n, err := d.Prune(days)
 	if err != nil {
 		return err
@@ -843,6 +902,28 @@ func runDeskPrune(cmd *cobra.Command, deps module.Deps, dirFlag string, days int
 	}
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "pruned=%d days=%d\n", n, days)
 	return err
+}
+
+// printDeskPrunePlan is `desk prune --dry-run`: what Prune would delete, with
+// nothing deleted.
+func printDeskPrunePlan(out io.Writer, d *desk.Desk, days int, asJSON bool) error {
+	plan, err := d.PrunePlan(days)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		items := make([]deskPrunePlanItem, 0, len(plan))
+		for _, p := range plan {
+			items = append(items, deskPrunePlanItem{State: p.State, Name: p.Name, Newest: p.Newest.UTC()})
+		}
+		return writeJSON(out, deskPrunePlanJSON{DryRun: true, Days: days, WouldRemove: len(plan), Items: items})
+	}
+	w := &stickyWriter{w: out}
+	w.printf("would_prune=%d days=%d\n", len(plan), days)
+	for _, p := range plan {
+		w.printf("%s/%s newest=%s\n", p.State, safeText(p.Name), p.Newest.UTC().Format(time.RFC3339))
+	}
+	return w.err
 }
 
 func runDeskSupervise(dirFlag, name, sha, kind string) error {

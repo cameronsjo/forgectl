@@ -106,10 +106,12 @@ func openTestDesk(t *testing.T, dir string) *desk.Desk {
 	return d
 }
 
-// queueItem adds a script through the CLI and returns its name and hash.
+// queueItem adds a script through the CLI and returns its name and hash. It
+// passes --allow-duplicate: tests queue several items with one filler body and
+// need each to be its own item; duplicate detection has its own tests.
 func queueItem(t *testing.T, file, body string) (name, sha string) {
 	t.Helper()
-	out, _, err := deskRun(t, deskDeps(), "add", writeTemp(t, file, body), "--what", "a test item", "--why", "a test", "--json")
+	out, _, err := deskRun(t, deskDeps(), "add", writeTemp(t, file, body), "--what", "a test item", "--why", "a test", "--json", "--allow-duplicate")
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
@@ -246,7 +248,7 @@ func TestDeskAdd_JSONContract(t *testing.T) {
 	newDeskDir(t)
 	out, _, err := deskRun(t, deskDeps(), "add", writeTemp(t, "a.sh", "echo a\n"), "--what", "w", "--why", "y", "--json")
 	wantExit(t, err, 0)
-	if got, want := jsonKeys(t, []byte(out)), []string{"kind", "name", "path", "sha256", "warnings"}; !reflect.DeepEqual(got, want) {
+	if got, want := jsonKeys(t, []byte(out)), []string{"duplicate", "kind", "name", "path", "sha256", "warnings"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("keys = %v, want %v", got, want)
 	}
 }

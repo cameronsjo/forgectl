@@ -46,6 +46,47 @@ type Added struct {
 // removal sees link count 2 and refuses the item until the next scan, so it
 // never hashes a partial file.
 func (d *Desk) Add(src, what, why string, tty bool) (Added, error) {
+	a, _, err := d.add(src, what, why, tty, false)
+	return a, err
+}
+
+// AddUnique is [Desk.Add], except that an item already waiting in pending/ with
+// the same kind and the same sha256 (the hash taken after the header lines are
+// inserted, so the same file with the same what and why) is not queued again:
+// it returns that item, with duplicate true, and writes nothing. A retry after
+// a timeout therefore finds the first attempt instead of queueing a second
+// approval. The check and the queueing are not one atomic step: two adds of
+// the same file at the same instant can both queue.
+func (d *Desk) AddUnique(src, what, why string, tty bool) (a Added, duplicate bool, err error) {
+	return d.add(src, what, why, tty, true)
+}
+
+// waitingWith returns the pending item of kind whose bytes hash to sum. An
+// entry that cannot be read (mid-link, refused, unreadable) does not match.
+func (d *Desk) waitingWith(kind Kind, sum string) (string, bool, error) {
+	entries, err := d.list(DirPending)
+	if err != nil {
+		return "", false, err
+	}
+	for _, e := range entries {
+		name, k, ok := kindOfFile(e.Name())
+		if !ok || k != kind {
+			continue
+		}
+		data, _, err := d.readItem(DirPending, e.Name())
+		if err != nil {
+			continue
+		}
+		if SHA256Hex(data) == sum {
+			return name, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// add is Add and AddUnique: with unique set, an identical waiting item is
+// returned instead of a new one being queued.
+func (d *Desk) add(src, what, why string, tty, unique bool) (Added, bool, error) {
 	base := filepath.Base(src)
 	var kind Kind
 	switch {
@@ -54,38 +95,47 @@ func (d *Desk) Add(src, what, why string, tty bool) (Added, error) {
 	case strings.HasSuffix(base, extManifest):
 		kind = KindBatch
 	default:
-		return Added{}, errors.New("desk: the file must end in .sh (a script) or .manifest (a batch)")
+		return Added{}, false, errors.New("desk: the file must end in .sh (a script) or .manifest (a batch)")
 	}
 	stem := strings.TrimSuffix(base, kind.Ext())
 	if !stemRe.MatchString(stem) || strings.Contains(stem, "..") {
-		return Added{}, fmt.Errorf("desk: %q is not a usable item name (letters, digits, '.', '_', '-'; at most 64)", describe(stem))
+		return Added{}, false, fmt.Errorf("desk: %q is not a usable item name (letters, digits, '.', '_', '-'; at most 64)", describe(stem))
 	}
 	data, err := ReadSource(src)
 	if err != nil {
-		return Added{}, err
+		return Added{}, false, err
 	}
 	body, err := insertHeaders(data, kind, what, why, tty)
 	if err != nil {
-		return Added{}, err
+		return Added{}, false, err
 	}
 	var warnings []string
 	if kind == KindBatch {
 		m, err := LoadManifest(body, base)
 		if err != nil {
-			return Added{}, err
+			return Added{}, false, err
 		}
 		warnings = m.Lint()
 	}
 	sum := SHA256Hex(body)
+	if unique {
+		name, found, err := d.waitingWith(kind, sum)
+		if err != nil {
+			return Added{}, false, err
+		}
+		if found {
+			return Added{Name: name, Kind: kind, SHA256: sum, Path: d.abs(path.Join(DirPending, name+kind.Ext())), Warnings: warnings}, true, nil
+		}
+	}
 	tmp, err := d.writeTemp(DirPending, "add", body)
 	if err != nil {
-		return Added{}, err
+		return Added{}, false, err
 	}
 	defer d.root.Remove(tmp) //nolint:errcheck // best effort; a dot-named leftover is ignored by scans
 
 	n, err := d.nextNumber()
 	if err != nil {
-		return Added{}, err
+		return Added{}, false, err
 	}
 	for range maxNumberTries {
 		name := fmt.Sprintf("%02d-%s", n, stem)
@@ -99,15 +149,15 @@ func (d *Desk) Add(src, what, why string, tty bool) (Added, error) {
 			continue
 		}
 		if err != nil {
-			return Added{}, fmt.Errorf("desk: queue %s: %w", name, err)
+			return Added{}, false, fmt.Errorf("desk: queue %s: %w", name, err)
 		}
 		now := d.now().UTC()
 		if err := d.writeMeta(DirPending, name, Meta{AddedAt: &now, SHA256: sum, Kind: kind, SignalPane: d.signalPane}); err != nil {
-			return Added{}, err
+			return Added{}, false, err
 		}
-		return Added{Name: name, Kind: kind, SHA256: sum, Path: d.abs(path.Join(DirPending, name+kind.Ext())), Warnings: warnings}, nil
+		return Added{Name: name, Kind: kind, SHA256: sum, Path: d.abs(path.Join(DirPending, name+kind.Ext())), Warnings: warnings}, false, nil
 	}
-	return Added{}, errors.New("desk: no free item number; is something else writing pending/?")
+	return Added{}, false, errors.New("desk: no free item number; is something else writing pending/?")
 }
 
 // ReadSource reads the file Claude asked to enqueue, capped like an item.

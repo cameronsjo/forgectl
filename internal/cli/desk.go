@@ -157,6 +157,8 @@ bytes, not anything the script sources, calls or downloads.`,
 type deskAddOpts struct {
 	what, why, name string
 	tty, asJSON     bool
+	// allowDuplicate queues the item even when an identical one is waiting.
+	allowDuplicate bool
 }
 
 func newDeskAddCmd(dir *string, deps module.Deps) *cobra.Command {
@@ -194,9 +196,17 @@ run is refused, and its warnings are printed as warning: lines on stderr.
 --tty marks a script that needs the terminal (a password prompt, sudo); it runs
 in the dashboard's own pane. A batch cannot be a TTY item.
 
-Exit codes: 0 queued; 1 refused (unreadable or non-regular file, bad
-manifest, no free number); 2 usage (missing, empty or unsafe --what/--why, a
-bad --name).`,
+Adding is safe to retry. When an item with the same kind and the same sha256
+(the hash after the WHAT and WHY lines are inserted, so the same file with the
+same --what and --why) is already waiting in pending/, add queues nothing,
+signals nothing, and prints that item with duplicate=true (and a note on
+stderr), exit 0. A retry after a timeout therefore finds the first attempt. An
+item that is running, done or skipped does not count: it is queued again.
+--allow-duplicate queues another anyway.
+
+Exit codes: 0 queued, or already waiting (duplicate); 1 refused (unreadable or
+non-regular file, bad manifest, no free number); 2 usage (missing, empty or
+unsafe --what/--why, a bad --name).`,
 		Example: `  forgectl desk add ./merge-1201.sh --what "Merge PR 1201 once green" --why "You own merges"
   printf 'echo hi\n' | forgectl desk add - --name hi.sh --what "Say hi" --why "A test"`,
 		Args: cobra.ExactArgs(1),
@@ -208,7 +218,8 @@ bad --name).`,
 	cmd.Flags().StringVar(&o.why, "why", "", "why it needs the operator, one line (required)")
 	cmd.Flags().BoolVar(&o.tty, "tty", false, "the script needs a terminal; it runs in the dashboard's pane")
 	cmd.Flags().StringVar(&o.name, "name", "", "file name for an item read from stdin (FILE -), e.g. deploy.sh")
-	cmd.Flags().BoolVar(&o.asJSON, "json", false, "print the queued item as one JSON object; signal warnings go in warnings[]")
+	cmd.Flags().BoolVar(&o.asJSON, "json", false, `print the queued item as {"name","kind","sha256","path","warnings","duplicate"} JSON; duplicate is true when an identical item was already waiting; signal warnings go in warnings[]`)
+	cmd.Flags().BoolVar(&o.allowDuplicate, "allow-duplicate", false, "queue the item even when an identical one is already waiting")
 	return cmd
 }
 
@@ -359,8 +370,13 @@ only way a lost run leaves it; a lost run cannot be re-armed. A live run is
 refused. The --reason text (one line of plain text, at most 200 characters)
 is kept as the item's skip_note, with skipped_by "cli" and the time.
 
-Exit codes: 0 skipped; 1 no such item, or it is running, or another desk took
-it first; 2 usage (an empty, long or unsafe --reason).`,
+Skip is safe to retry: an item already in skipped/ prints
+skipped=<name> reason=<recorded reason> already=true, changes nothing, and
+exits 0, so a retry after a timeout does not read as a failure. A name that
+matches no item at all is the error, and lists the waiting names.
+
+Exit codes: 0 skipped, or already skipped; 1 no such item, or it is running, or
+another desk took it first; 2 usage (an empty, long or unsafe --reason).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDeskSkip(cmd, deps, *dir, args[0], reason)
@@ -372,7 +388,7 @@ it first; 2 usage (an empty, long or unsafe --reason).`,
 
 func newDeskPruneCmd(dir *string, deps module.Deps) *cobra.Command {
 	var days int
-	var asJSON bool
+	var asJSON, dryRun bool
 	cmd := &cobra.Command{
 		Use:   "prune",
 		Short: "Delete done/ and skipped/ items older than --days",
@@ -381,17 +397,23 @@ func newDeskPruneCmd(dir *string, deps module.Deps) *cobra.Command {
 never touches pending/ or running/, unknown files, symlinks, or anything at the
 desk root. Nothing else ever deletes desk files: prune runs only when asked.
 
+--dry-run lists what prune would delete and deletes nothing. It uses the same
+selection, so the list is what a real prune removes right now. With --json it
+prints {"dry_run","days","would_remove","items"}, each item {"state","name",
+"newest"}; without it, {"removed","days"}.
+
 Exit codes: 0 pruned (maybe nothing); 1 a delete failed; 2 usage.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if days < 1 {
 				return deskUsage("desk prune: --days must be at least 1")
 			}
-			return runDeskPrune(cmd, deps, *dir, days, asJSON)
+			return runDeskPrune(cmd, deps, *dir, days, asJSON, dryRun)
 		},
 	}
 	cmd.Flags().IntVar(&days, "days", 30, "delete items older than this many days")
-	cmd.Flags().BoolVar(&asJSON, "json", false, "print the count as one JSON object")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"removed","days"} as one JSON object (with --dry-run, {"dry_run","days","would_remove","items"})`)
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "list what would be deleted and delete nothing")
 	return cmd
 }
 
