@@ -125,12 +125,19 @@ func (v *deskRunView) polls() bool {
 // or refused) says so on the dashboard instead of opening another item's
 // run, which would read as its own (#1106).
 func (m deskModel) openRunView() (tea.Model, tea.Cmd) {
+	r, ok := m.selected()
+	return m.openRunViewOf(r, ok)
+}
+
+// openRunViewOf opens the run view on r's run, or on the newest run when ok
+// is false.
+func (m deskModel) openRunViewOf(r queueRow, ok bool) (tea.Model, tea.Cmd) {
 	if m.runs == nil {
 		m.message = m.styles().Warn.Render("the run view is not available here")
 		return m, nil
 	}
 	name := ""
-	if r, ok := m.selected(); ok {
+	if ok {
 		if r.kind == rowWaiting || r.kind == rowRefused {
 			m.message = m.styles().Muted.Render(safeMessage(itemLabel(r.item.Name) + " has not run yet; r opens its run once it starts"))
 			return m, nil

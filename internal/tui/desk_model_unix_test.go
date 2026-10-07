@@ -114,6 +114,8 @@ func (h *deskHarness) press(keys ...string) {
 			msg = tea.KeyPressMsg{Code: tea.KeyUp}
 		case "esc":
 			msg = tea.KeyPressMsg{Code: tea.KeyEscape}
+		case "enter":
+			msg = tea.KeyPressMsg{Code: tea.KeyEnter}
 		case "space":
 			msg = tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
 		default:
@@ -1524,5 +1526,71 @@ func TestDesk_WindowTitleFollowsNoIcons(t *testing.T) {
 	h.m.opts.ASCII = true
 	if title := h.m.View().WindowTitle; strings.ContainsRune(title, '●') {
 		t.Errorf("ASCII window title = %q", title)
+	}
+}
+
+// t opens the timeline and t closes it; enter on a waiting entry goes back
+// to the dashboard with that item selected, where y acts only on the hash
+// the focus panel shows. Nothing on the timeline runs or skips an item.
+func TestDesk_TimelineEnterOnAWaitingEntrySelectsItOnTheDashboard(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-alpha.sh", plainScript("alpha"))
+	h.drop("02-beta.sh", plainScript("beta"))
+	h.scan()
+	h.selectItem("01-alpha")
+	h.press("t")
+	if h.m.tl == nil {
+		t.Fatal("t did not open the timeline")
+	}
+	if out := ansi.Strip(h.m.View().Content); !strings.Contains(out, "desk timeline") || !strings.Contains(out, "Needs you") {
+		t.Fatalf("timeline view:\n%s", out)
+	}
+	// Find beta on the timeline and press enter on it.
+	for range 5 {
+		if e, ok := h.m.selectedEntry(); ok && e.row.item.Name == "02-beta" {
+			break
+		}
+		h.press("j")
+	}
+	h.press("y", "s", "a") // not timeline keys: nothing runs or skips
+	if len(h.backend.launched) != 0 || h.where("02-beta") != desk.DirPending || h.where("01-alpha") != desk.DirPending {
+		t.Fatalf("a timeline key acted on an item: launched %v", h.backend.launched)
+	}
+	h.press("enter")
+	if h.m.tl != nil {
+		t.Fatal("enter on a waiting entry left the timeline open")
+	}
+	if r, ok := h.m.selected(); !ok || r.item.Name != "02-beta" {
+		t.Fatalf("selected %v, want 02-beta", r.item.Name)
+	}
+	if !h.m.dashboard().focusShownFor("02-beta") {
+		t.Error("the focus panel does not show the item enter selected")
+	}
+}
+
+// Closing the timeline is a look: what was new is not new afterwards, and
+// the dashboard's t hint stops counting it.
+func TestDesk_TimelineCloseMarksEverythingSeen(t *testing.T) {
+	h := newDeskHarness(t)
+	h.drop("01-alpha.sh", plainScript("alpha"))
+	h.scan()
+	h.press("y") // claimed, so it is a run, not something that needs you
+	h.scan()
+	h.press("k") // a key clears the "started" line, and the hints come back
+	// The dashboard opened at deskNow, before the run started (at the real
+	// time it was claimed), so the run is new.
+	if h.m.tlNewCount() != 1 {
+		t.Fatalf("new before a look = %d, want 1", h.m.tlNewCount())
+	}
+	if f := ansi.Strip(h.m.dashboard().render()); !strings.Contains(f, "t timeline • 1 new") {
+		t.Errorf("dashboard footer lacks the new count:\n%s", f)
+	}
+	h.clock.t = time.Now().Add(time.Minute) // the look happens after the run started
+	h.press("t", "esc")
+	if h.m.tl != nil {
+		t.Fatal("esc did not close the timeline")
+	}
+	if n := h.m.tlNewCount(); n != 0 {
+		t.Errorf("new after a look = %d, want 0", n)
 	}
 }

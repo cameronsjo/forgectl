@@ -57,4 +57,4 @@ desk ○ idle · forgectl 0.0.0-test · host-a · ~/.local/state/f…  up 4h37m 
 │ ✓ 02 legacy-task-02              ▅▅       ok               5d ago    0:12    │
 │ ✓ 01 legacy-task-01              ▅▅       ok               5d ago    0:11    │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- l log · r runs · ? help · q quit
+ l log · r runs · t timeline · ? help · q quit

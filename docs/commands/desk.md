@@ -69,10 +69,48 @@ The dashboard: three stat tiles (waiting, started today, outcomes), the queue wi
 | `v` | view the selected item's script |
 | `l` | view the latest log |
 | `r` | open the run view on the selected item's run (an item that has not run yet says so instead; with nothing selected, the newest run): its steps as a flow, the event timeline, and replay. `←`/`→` step through events, `[`/`]` move 10, `g`/`G` jump to the start or to the end (back to live for a running item); a finished run's replay keeps its outcome in the header, `space` plays, `n`/`p` switch runs, `q` closes |
+| `t` | open the timeline (below); the footer's hint counts what is new since you last closed it |
 | `a` | run every waiting item on screen, except TTY and changed items; asks first, listing each item with its full sha256, and runs exactly those names and hashes. A list longer than half the window pages (`space` next, `b` back, `esc` cancels), and `y` runs it only once every page has been on screen; a window too small for one full hash refuses |
 | `j` / `k` | move |
 | `?` | show every key and what it does (a narrow footer drops the least important hints first; `q` always stays, and `?` until the window is very narrow) |
 | `q` | quit; detached runs keep running |
+
+#### The timeline
+
+`t` shows everything on the desk in one list, so you can see what happened while you were away without reading logs or hashes:
+
+```text
+desk timeline  ◌ 3 need you · ● 2 running · • 3 new                   19:07
+
+ Needs you · enter takes you to it ──────────────────────────────────── 3
+▸    5m  ◌ Refresh the sudo ticket             18 refresh-credentials · tty
+         │ waiting for you · queued 5m ago · runs in the desk's pane
+    30h  ◌ Clear old caches                                 19 old-cleanup
+           waiting for you · queued 30h ago · stale
+
+ Today · Mon 5 Oct ──────────────────────────────────────────────────── 6
+  19:06  ● Sync the package mirror  • new                   14 sync-mirror
+         │ running · 0:50 so far
+  18:47  ✗ Probe the canary  • new                         12 canary-probe
+         │ failed · exit 1 after 0:18
+  18:44  ✓ Merge 1169                                        15 merge-1169
+           ran ok in 0:41
+```
+
+- **Needs you** comes first: waiting items and lost runs, whatever their day, each with how long it has waited.
+- Everything else follows newest first, grouped under Today, Yesterday and then the date. Each entry is placed at its latest moment: when it ended, started, was skipped or was queued.
+- An entry shows its WHAT, or its name when it has none. The line under it says what happened in plain words, such as `ran ok in 0:41`, `failed · exit 1 after 0:18`, `skipped by you: superseded` or `not run · its bytes changed after it was queued`.
+- A `new` badge marks entries that happened after you last closed the timeline. Until you close it once, that means after the dashboard started.
+- Nothing runs from the timeline. `enter` on an item that needs you returns to the dashboard with it selected, where `y` still acts only on the hash in the focus panel. On a run, `enter` (or `r`) opens the run view.
+
+| Key | Action |
+|---|---|
+| `enter` | an item that needs you: back to the dashboard with it selected. A run: the run view |
+| `r` | the run view for the selected entry |
+| `l` | the selected run's log |
+| `v` | the selected item's script |
+| `j` / `k`, `g` / `G` | move, or jump to the first or last entry |
+| `t`, `esc`, `q` | back to the dashboard; what was new counts as seen |
 
 The dashboard rings the terminal bell when an item arrives, and again every 5 minutes while anything waits; inside a herdr pane it also sends a herdr notification. The window title reads `desk ● N waiting`.
 

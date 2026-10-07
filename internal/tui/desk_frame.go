@@ -117,6 +117,9 @@ const (
 	rowDone
 	rowFailed
 	rowChanged
+	// rowSkipped is an item skipped for any reason but a change. Only the
+	// timeline shows one; the queue panel never does.
+	rowSkipped
 )
 
 // queueRow is one row of the queue panel.
@@ -197,6 +200,9 @@ type deskFrame struct {
 	// canUndo marks a skip this desk can undo, so the footer offers u only
 	// then (#1108).
 	canUndo bool
+	// tlNew is how many timeline entries are new since the operator last
+	// closed the timeline; the footer's t hint carries it.
+	tlNew int
 }
 
 func (f deskFrame) styles() (theme.Styles, theme.Theme) {
@@ -697,6 +703,8 @@ func rowLook(st theme.Styles, k rowKind) (glyph, label string, style func(...str
 		return "✗", "failed", st.Danger.Render
 	case rowChanged:
 		return "!", "changed", st.Warn.Render
+	case rowSkipped:
+		return "–", "skipped", st.Muted.Render
 	default:
 		return "◌", "waiting", st.Accent.Render
 	}
@@ -1194,6 +1202,7 @@ func (f deskFrame) hints(st theme.Styles, width int, canRun bool) string {
 		undo:    f.canUndo,
 		logs:    f.snap != nil && len(f.snap.Done)+len(f.snap.Running) > 0,
 		runs:    f.snap != nil && len(f.snap.Done)+len(f.snap.Running)+len(f.snap.Skipped) > 0,
+		tlNew:   f.tlNew,
 	})
 }
 
@@ -1201,6 +1210,8 @@ func (f deskFrame) hints(st theme.Styles, width int, canRun bool) string {
 type keyState struct {
 	rows, run, skip, waiting bool
 	undo, logs, runs         bool
+	// tlNew is the timeline's new-entry count, shown on the t hint.
+	tlNew int
 }
 
 // deskBinding is one dashboard key: its footer label, what ? says it does,
@@ -1220,6 +1231,7 @@ var deskBindings = []deskBinding{
 	{"a", "all", "run every waiting item on screen (asks first, listing each full sha256)", 3},
 	{"l", "log", "view the selected run's log", 4},
 	{"r", "runs", "open the run view: flow, events, replay", 8},
+	{"t", "timeline", "open the timeline: what needs you, then everything on the desk by day, in plain words", 8},
 	{"j/k", "move", "move the selection (also the arrow keys)", 9},
 	{"?", "help", "show these keys", 1},
 	{"q", "quit", "quit; detached runs keep running", 0},
@@ -1231,14 +1243,20 @@ var deskBindings = []deskBinding{
 // ? help until the window is very narrow (#1108). u shows only with a skip
 // to undo, l and r only once something has run.
 func deskKeys(st theme.Styles, width int, s keyState) string {
-	gated := map[string]bool{"y": s.run, "s": s.skip, "u": s.undo, "v": s.rows, "a": s.waiting, "l": s.logs, "r": s.runs, "j/k": s.rows}
+	gated := map[string]bool{"y": s.run, "s": s.skip, "u": s.undo, "v": s.rows, "a": s.waiting, "l": s.logs, "r": s.runs, "t": s.rows || s.runs, "j/k": s.rows}
 	var hints []string
 	var shown []deskBinding
 	for _, b := range deskBindings {
 		if ok, isGated := gated[b.key]; isGated && !ok {
 			continue
 		}
-		hints = append(hints, st.Accent.Render(b.key)+" "+st.Muted.Render(b.label))
+		label := st.Muted.Render(b.label)
+		if b.key == "t" && s.tlNew > 0 {
+			// What is new since the operator last looked, so the timeline is
+			// worth opening (and is not, when this is absent).
+			label += " " + st.Accent.Render("• "+strconv.Itoa(s.tlNew)+" new")
+		}
+		hints = append(hints, st.Accent.Render(b.key)+" "+label)
 		shown = append(shown, b)
 	}
 	prio := make([]int, len(shown))
