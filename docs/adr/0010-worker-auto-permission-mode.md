@@ -1,6 +1,6 @@
 # 0010. Worker `auto` permission mode: per-machine opt-in behind a hardening floor
 
-**Status: Accepted**
+**Status: Accepted** (Decisions 1 to 3 superseded by the second 2026-10-07 amendment: `auto` is allowed for workers without the floor.)
 
 Date: 2026-10-05
 
@@ -92,7 +92,7 @@ Widening the list needs its own security review. `auto` stays refused (supersede
 Decision (chief-of-staff, 2026-10-07, after Cameron's work machine reported forgectl refusing `auto`): a worker may run in `auto`. The worker cap rises from `acceptEdits` to `auto`; `dontAsk` and `bypassPermissions` rank above it and stay refused. This supersedes Decisions 1 to 3 and the 2026-10-06 line "`auto` stays refused":
 
 - **Opt-in per machine.** `[launch.worker]` defaults to `acceptEdits`. A machine opts in with `[launch.worker] permission_mode = "auto"`. There is no separate `allow_auto` key and no refusal for chezmoi-managed config or Full Disk Access (Decisions 1 and 2 are not built).
-- **No floor first.** The sandbox, the worker App, and the deny-rule second layer stay deferred (forgectl#1134). An `auto` worker runs as the operator, unsandboxed, with Claude Code's classifier as the only per-call check on every tool call. The Context section's list of what a worker can reach applies in full; the classifier, not the operator, now approves each item.
+- **No floor first.** The sandbox, the worker App, and the deny-rule second layer stay deferred (forgectl#1134). An `auto` worker runs as the operator, unsandboxed, with Claude Code's classifier as the only per-call check on what the mode does not approve on its own (reads and in-worktree edits are approved without it). The Context section's list of what a worker can reach applies in full; the classifier, not the operator, now approves each item.
 - **What still applies:** the settings and MCP isolation, `--safe-mode`, the environment allowlist, the `SendMessage` and `RemoteTrigger` deny rules, and `useAutoModeDuringPlan = false`. An `auto` worker gets no allow list: allow rules would skip the classifier.
 - **Measured** with `claude -p` on Claude Code 2.1.289 and the exact worker argv: the session started in `auto` (`permissionMode=auto` in its init event), and a Bash command ran through the classifier. So the isolation flags do not hide `auto`. The availability of `auto` itself depends on the account and model.
-- **Why not `acceptEdits` plus the allow list only:** under `acceptEdits` every command off the list waits for the operator, and the list does not bound a worker anyway. The classifier checks every call, including those the list would wave through.
+- **Why not `acceptEdits` plus the allow list only:** under `acceptEdits` every command off the list waits for the operator, and the list does not bound a worker anyway. The classifier checks the calls the list would wave through. It can allow `ssh` and `git push` to the default branch; by default it blocks merging a PR no human approved.
