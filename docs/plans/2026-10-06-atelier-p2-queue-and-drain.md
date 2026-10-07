@@ -1,10 +1,10 @@
 ---
-status: planned
-next: "Proposed, awaiting Cameron's approval and his answer to the autonomy question. On approval: T8.1 (cobra-free worker ops), T8.2 (queue), T8.3 (drain), T8.4 (notify, review, live check)."
+status: in-flight
+next: "Approved 2026-10-07. T8.0 (worker allow list), then T8.1 (cobra-free worker ops), T8.2 (queue), T8.3 (drain), T8.4 (notify, review, live check)."
 branch: plan/atelier-p2-drain
 pr: cameronsjo/forgectl#1137
-updated: 2026-10-06
-approved_session_id: "—"
+updated: 2026-10-07
+approved_session_id: "— (approved on forgectl#1137 by chief-of-staff on Cameron's go-ahead, 2026-10-07)"
 date: 2026-10-06
 session_id: 30dd3ebb-3720-463f-aa15-9570c1ff88a9
 model: claude-opus-5-5
@@ -19,17 +19,19 @@ source_plan: "cadence-ecosystem docs/plans/2026-10-05-atelier-a-herdr-work-queue
 
 The coordinator session puts tasks on a queue (`surface enqueue`), and a detached `surface drain` launches them as herdr claude workers, at most 3 at a time and 1 per repo. The drain watches each worker and records when it reports, fails, goes quiet, or stops at a permission prompt. A worker stopped at a prompt is `needs-you`: the normal checkpoint, not an error. The operator answers it in the worker's pane.
 
-Workers stay capped at `acceptEdits` and run as the operator (ADR-0010, 2026-10-06 amendment). P2 is built around that and does not depend on any change to it.
+Workers stay capped at `acceptEdits` and run as the operator (ADR-0010, 2026-10-06 amendment), with a fixed pre-approved command list (Autonomy decision, T8.0). `needs-you` is what remains: commands off the list, such as merges.
 
-## Question for Cameron
+## Autonomy decision (2026-10-07)
 
-**Should P2 allow more autonomy?** Nothing below depends on the answer; each option other than the first is a later, separate PR.
+Approved on forgectl#1137 by chief-of-staff on Cameron's go-ahead: **more autonomy by an allow list, not a broader mode.** Workers keep `acceptEdits`. The worker launch adds one static `permissions.allow` list: the repo's build and test commands (`go test`, `go build`, `make`), `git add`, `git commit`, `git push` to the worker's own branch, and `gh pr create` / `gh pr view`. Pushing to `main` and every merge stay off the list; merges keep going through the review-marker gate. No per-repo config until a second repo needs a different list. This is task T8.0.
 
-Today's cost, stated plainly: workers start with `--setting-sources ""` (`docs/herdr.md`), so none of your user allow rules load. Under plain `acceptEdits`, `go test`, `git commit` and `make` prompt, not only `git push` and `gh`. A worker will sit at `needs-you` several times per task.
+What the list does and does not hold, stated plainly:
 
-- **No change (recommended for P2's first ship).** Every shell command waits for you in the worker's pane. The drain still does the launch, the brief, the watching, and the per-repo cap. Measure how often workers stop before choosing an allow list.
-- **Pre-approve a short list of local commands** (for example `go test`, `git commit`) in the worker's `--settings` `permissions.allow`. `git push` and `gh` typed by the model still prompt, but a pre-approved `go test` or `make` runs the repo's own code, which can push with your identity. Under the "accidents, not adversaries" boundary that may be fine. It loosens a default, so it gets its own small PR and a security review.
-- **`auto` mode.** Needs the deferred sandbox and worker App (forgectl#1134) first.
+- **Push to `main` is refused by GitHub, not by the list.** A Claude Code prefix rule matches the command's start, so `Bash(git push:*)` also allows `git push origin HEAD:main`. On forgectl and cadence the `estate-main` rulesets refuse a direct push to `main` (pull request required, bypass in pull-request mode only). A repo without such a ruleset has no block.
+- **Pre-approved build commands run repo code.** `go test` and `make` execute the repo's own code, which can push or merge with the operator's identity without a prompt. This sits inside ADR-0010's "accidents, not adversaries" boundary.
+- `gh pr merge`, `gh api`, and anything else off the list still prompt.
+
+Before the decision, under plain `acceptEdits`, `go test`, `git commit` and `make` all prompted (workers start with `--setting-sources ""`, so no user allow rules load).
 
 ## Loop
 
@@ -112,7 +114,7 @@ One JSON line per state change and per pause or resume in `drain-events.jsonl` (
 
 ### What P2 does not do
 
-No merge, PR status, or close after merge (P4). No intake from GitHub or the board (P3). No pane (P6). No codex workers (forgectl#1092 first). No change to worker posture or identity.
+No merge, PR status, or close after merge (P4). No intake from GitHub or the board (P3). No pane (P6). No codex workers (forgectl#1092 first). No other change to worker posture, and none to identity.
 
 ## Global Constraints
 
@@ -135,6 +137,13 @@ No merge, PR status, or close after merge (P4). No intake from GitHub or the boa
 **Driver:** opus. Trigger: a background process that launches workers unattended under the operator's identity.
 
 ## Tasks
+
+### T8.0: worker command allow list (one PR, first)
+
+- [ ] Add the static `permissions.allow` list from the Autonomy decision to the worker's inline `--settings` (`workerClaudeSettings`, `internal/launch/invocation.go`). Rules: `Bash(go test:*)`, `Bash(go build:*)`, `Bash(make:*)`, `Bash(git add:*)`, `Bash(git commit:*)`, `Bash(git push:*)`, `Bash(gh pr create:*)`, `Bash(gh pr view:*)`.
+- [ ] Update the ADR-0010 amendment and `docs/herdr.md` ("What a claude worker loads") to name the list and the two limits above.
+- [ ] Tests pin the settings JSON. Live check: a worker runs `go test` and `git commit` with no prompt, and `gh pr merge` still prompts.
+- [ ] Security review (Opus) of the diff before merge; this loosens a default.
 
 ### T8.1: cobra-free worker operations (one PR)
 
@@ -187,6 +196,7 @@ Panel: plan-reviewer, security-posture-reviewer (Opus), operability-reviewer, ca
 - **Event kinds** are the ones P2 emits (state changes, pause, resume). P4 and P6 add theirs (`verdict`, `merged`, …) when they ship.
 - **"intent → act → confirm" per step** became a launch-stage reconcile table plus a kill-at-each-stage test, because the existing launch already writes its ledger row before each step.
 - **Retry cap is 3 per row, not per step,** and only for failures that created nothing.
+- **Autonomy allow list (T8.0) added at approval,** per the Autonomy decision; it is the only change to worker posture in P2.
 - **P7a (skill enqueue step) ships separately** in `cameronsjo/cadence` after T8.2; until then the coordinator calls `surface enqueue` directly.
 
 ## Learnings
