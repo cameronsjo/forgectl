@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -60,10 +61,93 @@ type statusSources struct {
 // statusReportJSON is the `status --json` wire shape: one status.Section per
 // source, each always present. See docs/commands/status.md.
 type statusReportJSON struct {
+	// Bound is present only under --limit: which lists were cut and by how
+	// much. It is a new top-level key, so the default document is unchanged
+	// (ADR-0008 rule 2: additive only). It comes first so a head -c read sees
+	// the cut before the lists.
+	Bound *statusBoundJSON `json:"bound,omitempty"`
+
 	Git   status.Section[statusGitJSON]   `json:"git"`
 	PRs   status.Section[prDashJSON]      `json:"prs"`
 	Clean status.Section[statusCleanJSON] `json:"clean"`
 	Bench status.Section[bench.Report]    `json:"bench"`
+}
+
+// statusBoundJSON reports what --limit cut. Cut holds one entry per list that
+// has more rows than the limit; a list at or under the limit is not named.
+type statusBoundJSON struct {
+	Limit     int             `json:"limit"`
+	Truncated bool            `json:"truncated"`
+	Cut       []statusListCut `json:"cut"`
+	Hint      string          `json:"hint,omitempty"`
+}
+
+// statusListCut names one truncated list by its JSON path and how many rows it
+// had and kept.
+type statusListCut struct {
+	List  string `json:"list"`
+	Total int    `json:"total"`
+	Shown int    `json:"shown"`
+}
+
+// statusProjectRank orders git.projects for a cut: 0 for a project the text
+// view lists (dirty, ahead, or unreadable), 1 for a clean tree, 2 for a plain
+// directory. It mirrors the skips in renderStatusGit.
+func statusProjectRank(p statusProjectJSON) int {
+	switch p.Status.State {
+	case projects.StatusNotRepo:
+		return 2
+	case projects.StatusOK:
+		if p.Status.Label() == "[clean]" {
+			return 1
+		}
+	}
+	return 0
+}
+
+// applyLimit keeps at most limit rows of each unbounded list in the report
+// (git.projects and the three prs lists) and records what it cut. The rows
+// kept are the first ones in the report's own order, except git.projects: it is
+// sorted attention-first (statusProjectRank, stable) so the text and JSON views
+// keep the same projects. The git section's totals (total, clean, dirty, ...)
+// still count every project. limit 0 cuts nothing but still writes "bound".
+func (r *statusReportJSON) applyLimit(limit int) {
+	b := &statusBoundJSON{Limit: limit, Cut: []statusListCut{}}
+	cut := func(list string, total int) bool {
+		if limit == 0 || total <= limit {
+			return false
+		}
+		b.Truncated = true
+		b.Cut = append(b.Cut, statusListCut{List: list, Total: total, Shown: limit})
+		return true
+	}
+	if g := r.Git.Data; g != nil {
+		// Attention rows first, as the text view lists them, so a cut keeps the
+		// projects that need a look and drops the clean ones.
+		if limit > 0 {
+			slices.SortStableFunc(g.Projects, func(a, b statusProjectJSON) int {
+				return statusProjectRank(a) - statusProjectRank(b)
+			})
+		}
+		if cut("git.projects", len(g.Projects)) {
+			g.Projects = g.Projects[:limit]
+		}
+	}
+	if d := r.PRs.Data; d != nil {
+		if cut("prs.active_reviews", len(d.ActiveReviews)) {
+			d.ActiveReviews = d.ActiveReviews[:limit]
+		}
+		if cut("prs.awaiting_you", len(d.AwaitingYou)) {
+			d.AwaitingYou = d.AwaitingYou[:limit]
+		}
+		if cut("prs.your_open", len(d.YourOpen)) {
+			d.YourOpen = d.YourOpen[:limit]
+		}
+	}
+	if b.Truncated {
+		b.Hint = "cut to --limit rows; raise --limit (0 = every row), or read one list at a time: projects list --json, pr dash --json"
+	}
+	r.Bound = b
 }
 
 // statusGitJSON is the git section: every local project under the projects
@@ -156,6 +240,7 @@ func newStatusCmdWith(src statusSources, th theme.Theme, rt statusTUIRuntime) *c
 		strict  bool
 		asTUI   bool
 		timeout time.Duration
+		limit   int
 	)
 	cmd := &cobra.Command{
 		Use:   "status",
@@ -175,6 +260,8 @@ the command. --strict exits 1 after the report when any section is not ok.
   forgectl status                  the overview
   forgectl status --json           every section, every row, for scripts
   forgectl status --json --strict  same, but exit 1 when a section degraded or failed
+  forgectl status --json --limit 20  each list cut to 20 rows; "bound" says what was cut
+  forgectl status --limit 30       the text view lists up to 30 rows per list, not 10 and 5
   forgectl status --timeout 5s     give each section five seconds
   forgectl status --tui            the cockpit: the same sections, refreshing in place
 
@@ -194,17 +281,31 @@ minute; prs, clean and bench refresh when you press r or R.`,
 			if timeout <= 0 {
 				return errors.New("invalid --timeout: must be greater than zero")
 			}
+			limitSet := cmd.Flags().Changed("limit")
+			if limit < 0 {
+				return usageFailure(cmd, fmt.Errorf("invalid --limit %d: use a positive row count, or 0 for every row", limit), asJSON)
+			}
+			if asTUI && limitSet {
+				return usageFailure(cmd, errors.New("--limit sizes the JSON lists and the text view; the --tui cockpit has its own layout, so drop --limit"), asJSON)
+			}
 			if asTUI {
 				return runStatusCockpit(cmd, src, th, rt, timeout)
 			}
 			report := collectStatus(cmd.Context(), src, timeout)
+			if asJSON && limitSet {
+				report.applyLimit(limit)
+			}
 			if asJSON {
 				if err := writeJSON(cmd.OutOrStdout(), report); err != nil {
 					return err
 				}
 			} else {
 				out := th.Writer(cmd.OutOrStdout(), os.Environ())
-				renderStatus(out, report, th.Marks())
+				projectCap, prCap := statusProjectRowsMax, statusPRRowsMax
+				if limitSet {
+					projectCap, prCap = limit, limit
+				}
+				renderStatusCapped(out, report, th.Marks(), projectCap, prCap)
 			}
 			if n := report.notOK(); strict && n > 0 {
 				return jsonVerdict(WithExitCode(fmt.Errorf("%d section(s) degraded or failed (--strict)", n), 1), asJSON)
@@ -213,7 +314,8 @@ minute; prs, clean and bench refresh when you press r or R.`,
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false,
-		`emit {"git":S,"prs":S,"clean":S,"bench":S} to stdout, each S {"state":"ok|degraded|failed","error":...,"notes":[...],"data":...}; data is null only when state is failed`)
+		`emit {"git":S,"prs":S,"clean":S,"bench":S} to stdout, each S {"state":"ok|degraded|failed","error":...,"notes":[...],"data":...}; data is null only when state is failed; --limit adds a top-level "bound"`)
+	cmd.Flags().IntVar(&limit, "limit", 0, `keep at most N rows of each list. With --json: git.projects, prs.active_reviews, prs.awaiting_you and prs.your_open are cut, and a top-level "bound":{limit,truncated,cut:[{list,total,shown}],hint} says what was cut. Without --json: replaces the text view's 10-project and 5-PR caps. 0 = every row, and with --json "bound" is still written (limit 0, truncated false), so a call that passes --limit always gets one shape. git.projects is sorted attention-first when --limit is given. --fields exists only on review and projects list. Not valid with --tui`)
 	cmd.Flags().BoolVar(&strict, "strict", false, "exit 1 when any section is degraded or failed (the report is still written)")
 	cmd.Flags().DurationVar(&timeout, "timeout", statusDefaultTimeout, "deadline for each section; a section that misses it is reported as failed")
 	cmd.Flags().BoolVar(&asTUI, "tui", false, "open the cockpit: the sections on one screen, refreshing in place (needs a terminal)")
@@ -353,9 +455,15 @@ func statusView(label string, state status.State, errText string, notes []string
 // filesystem, a subprocess or a server is escaped and capped here; notes and
 // errors were escaped and capped by status.Collect.
 func renderStatus(out io.Writer, r statusReportJSON, marks theme.Marks) {
+	renderStatusCapped(out, r, marks, statusProjectRowsMax, statusPRRowsMax)
+}
+
+// renderStatusCapped is renderStatus with explicit row caps for the git and
+// prs lists. A cap of 0 lists every row.
+func renderStatusCapped(out io.Writer, r statusReportJSON, marks theme.Marks, projectCap, prCap int) {
 	views := statusSectionViews(r)
-	renderStatusSection(out, marks, views[statusIdxGit], func() { renderStatusGit(out, *r.Git.Data) })
-	renderStatusSection(out, marks, views[statusIdxPRs], func() { renderStatusPRs(out, *r.PRs.Data) })
+	renderStatusSection(out, marks, views[statusIdxGit], func() { renderStatusGit(out, *r.Git.Data, projectCap) })
+	renderStatusSection(out, marks, views[statusIdxPRs], func() { renderStatusPRs(out, *r.PRs.Data, prCap) })
 	renderStatusSection(out, marks, views[statusIdxClean], func() {})
 	renderStatusSection(out, marks, views[statusIdxBench], func() { renderStatusBench(out, *r.Bench.Data, marks) })
 }
@@ -415,7 +523,7 @@ func statusBenchHeadline(b bench.Report) string {
 // renderStatusGit prints, under the counts headline, the projects that need
 // attention: dirty, ahead, or unreadable. Clean trees and plain directories
 // are counted, not listed.
-func renderStatusGit(out io.Writer, g statusGitJSON) {
+func renderStatusGit(out io.Writer, g statusGitJSON, rowCap int) {
 	shown, hidden := 0, 0
 	for _, p := range g.Projects {
 		label := ""
@@ -430,7 +538,7 @@ func renderStatusGit(out io.Writer, g statusGitJSON) {
 		default:
 			label = "[status unknown]"
 		}
-		if shown == statusProjectRowsMax {
+		if rowCap > 0 && shown == rowCap {
 			hidden++
 			continue
 		}
@@ -443,9 +551,9 @@ func renderStatusGit(out io.Writer, g statusGitJSON) {
 }
 
 // renderStatusPRs prints the PRs awaiting you under the prs headline.
-func renderStatusPRs(out io.Writer, d prDashJSON) {
+func renderStatusPRs(out io.Writer, d prDashJSON, rowCap int) {
 	for i, p := range d.AwaitingYou {
-		if i == statusPRRowsMax {
+		if rowCap > 0 && i == rowCap {
 			_, _ = fmt.Fprintf(out, "    … %d more (pr dash)\n", len(d.AwaitingYou)-i)
 			break
 		}

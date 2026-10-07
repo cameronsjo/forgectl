@@ -170,6 +170,7 @@ func newReviewCmdForSources(srcs []review.Source, reviewedPath, effectiveHost st
 		asJSON bool
 		kind   string
 		repo   string
+		bound  listBound
 	)
 	cmd := &cobra.Command{
 		// The Use line's [--flag …] placeholders are load-bearing, not just help
@@ -199,7 +200,9 @@ issue/pull URL, alongside the plain "owner/repo#N" form, which always means
 the configured GitHub host.
 
   forgectl review                       unified table (reviewed rows dimmed)
-  forgectl review --json                machine-readable output
+  forgectl review --json                machine-readable output, every row
+  forgectl review --json --limit 50     the first 50 rows (host, repo, number order) plus total and truncated
+  forgectl review --json --fields repo,number,title   only those row fields
   forgectl review --kind issue          issues only (or: pr)
   forgectl review --repo owner/name     one repo only
   forgectl review mark owner/repo#42    mark an item reviewed
@@ -207,12 +210,13 @@ the configured GitHub host.
   forgectl review sync                  prune marks for closed items`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runReviewList(cmd, srcs, reviewedPath, asJSON, kind, repo, th)
+			return runReviewList(cmd, srcs, reviewedPath, asJSON, kind, repo, &bound, th)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"key","kind","repo","number","title","state","isDraft","labels","updatedAt","url","reviewed"}] to stdout (an empty list is [])`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"key","kind","repo","number","title","state","isDraft","labels","updatedAt","url","reviewed"}] to stdout (an empty list is []); with --limit, {"truncated","total","shown","limit","hint","notes","items"} instead`)
 	cmd.Flags().StringVar(&kind, "kind", "", "filter by kind: issue or pr")
 	cmd.Flags().StringVar(&repo, "repo", "", "filter to one owner/name repo")
+	bound.addFlags(cmd, reviewJSONKeys)
 
 	hosts := extraHosts(srcs)
 	cmd.AddCommand(
