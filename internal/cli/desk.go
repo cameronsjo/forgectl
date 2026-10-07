@@ -199,9 +199,12 @@ in the dashboard's own pane. A batch cannot be a TTY item.
 
 Adding is safe to retry. When an item with the same kind and the same sha256
 (the hash after the WHAT and WHY lines are inserted, so the same file with the
-same --what and --why) is already waiting in pending/, add queues nothing,
-signals nothing, and prints that item with duplicate=true (and a note on
-stderr), exit 0. A retry after a timeout therefore finds the first attempt. An
+same --what and --why) is already waiting in pending/, add queues nothing. It sends the operator
+signal only if the first attempt never finished signalling (it died after
+queueing, or a signal failed; the item records signalled_at once every enabled
+signal went out), and otherwise signals nothing. It prints that item with
+duplicate=true (and a note on stderr), exit 0. A retry after a timeout
+therefore finds the first attempt and does not leave it unannounced. An
 item that is running, done or skipped does not count: it is queued again.
 --allow-duplicate queues another anyway.
 

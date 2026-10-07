@@ -276,6 +276,43 @@ func TestSignalledReadsAHandDroppedFileAsSignalled(t *testing.T) {
 	}
 }
 
+// The first sighting of a hand-dropped file stamps signalled_at, so a file a
+// person placed reads as signalled before and after the desk scans it, and a
+// retry never pings for it. A scan of an item Add queued does not stamp it.
+func TestSightStampsAHandDroppedFileAsSignalled(t *testing.T) {
+	d := openDesk(t)
+	writeFile(t, filepath.Join(d.Path(), DirPending, "07-hand.sh"), "echo hand\n", 0o600)
+	if !d.Signalled("07-hand") {
+		t.Fatal("before any scan a hand-dropped file reads as unsignalled")
+	}
+	if _, err := d.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	meta, ok, err := d.readMeta(DirPending, "07-hand")
+	if err != nil || !ok || meta.SHA256 == "" {
+		t.Fatalf("the scan wrote no meta for the hand-dropped file: %+v ok=%v err=%v", meta, ok, err)
+	}
+	if meta.SignalledAt == nil {
+		t.Error("the scan's meta for a hand-dropped file has no signalled_at")
+	}
+	if !d.Signalled("07-hand") {
+		t.Error("after a scan a hand-dropped file reads as unsignalled: a retry would ping for it")
+	}
+
+	src := filepath.Join(t.TempDir(), "job.sh")
+	writeFile(t, src, "echo hi\n", 0o600)
+	a, err := d.Add(src, "what", "why", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	if d.Signalled(a.Name) {
+		t.Error("a scan stamped an item Add queued as signalled; it was never announced")
+	}
+}
+
 // Exists is true for a desk and false for a directory that is not one, and it
 // writes nothing either way.
 func TestExistsAndPrunePlanAtWriteNothingInANonDeskDir(t *testing.T) {
