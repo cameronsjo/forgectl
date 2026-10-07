@@ -203,3 +203,21 @@ func TestUsageArgs_DeskAddNamesItsRequiredFlags(t *testing.T) {
 		t.Errorf("desk --help synopsis:\n%s", out.String())
 	}
 }
+
+// desk add's help lists a wrong file count under the exit code it gets (1),
+// not under usage (2), which forgectl#1085 owns.
+func TestDeskAddHelpNamesTheWrongCountExit(t *testing.T) {
+	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
+	var out strings.Builder
+	root.SetOut(&out)
+	root.SetArgs([]string{"desk", "add", "--help"})
+	if err := root.ExecuteContext(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if flat := strings.Join(strings.Fields(out.String()), " "); !strings.Contains(flat, "1 refused (unreadable or non-regular file, bad manifest, no free number) or a wrong number of files (one per call)") {
+		t.Errorf("desk add --help exit codes:\n%s", out.String())
+	}
+	if err := execRoot(t, "desk", "add", "a", "b"); ExitCode(err) != 1 {
+		t.Errorf("a wrong file count exits %d, the help says 1", ExitCode(err))
+	}
+}

@@ -195,8 +195,8 @@ run is refused, and its warnings are printed as warning: lines on stderr.
 in the dashboard's own pane. A batch cannot be a TTY item.
 
 Exit codes: 0 queued; 1 refused (unreadable or non-regular file, bad
-manifest, no free number); 2 usage (missing, empty or unsafe --what/--why, a
-bad --name).`,
+manifest, no free number) or a wrong number of files (one per call); 2
+usage (missing, empty or unsafe --what/--why, a bad --name).`,
 		Example: `  forgectl desk add ./merge-1201.sh --what "Merge PR 1201 once green" --why "You own merges"
   printf 'echo hi\n' | forgectl desk add - --name hi.sh --what "Say hi" --why "A test"`,
 		Args: cobra.ExactArgs(1),
