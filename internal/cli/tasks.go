@@ -213,7 +213,7 @@ func newTasksShowCmd(deps module.Deps, host, keychainService *string) *cobra.Com
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id, err := strconv.Atoi(args[0])
 			if err != nil {
-				return WithExitCode(fmt.Errorf("tasks show: %q is not a task id", args[0]), 1)
+				return withJSONUsageCode(WithExitCode(fmt.Errorf("tasks show: %q is not a task id", args[0]), classExit(classFailed)))
 			}
 			snap, fromCache, err := loadTasksSnapshot(cmd, deps.Runner, *host, *keychainService, deps.Cfg.Tasks.AllowedHosts)
 			if err != nil {
@@ -223,7 +223,7 @@ func newTasksShowCmd(deps module.Deps, host, keychainService *string) *cobra.Com
 
 			task, ok := findTask(snap.Tasks, id)
 			if !ok {
-				return WithExitCode(fmt.Errorf("tasks show: no task with id %d in the current snapshot", id), 1)
+				return WithExitCode(fmt.Errorf("tasks show: no task with id %d in the current snapshot", id), exitFailed)
 			}
 			if asJSON {
 				enc := termsafe.JSONEncoder(cmd.OutOrStdout())
@@ -391,7 +391,7 @@ func checkTasksKeychainUse(flag, service, host string, allowedHosts []string) er
 		return WithExitCode(err, exitTasksHostRefused)
 	}
 	if err := tasks.CheckKeychainService(service); err != nil {
-		return WithExitCode(fmt.Errorf("tasks: %s: %s", flag, strings.TrimPrefix(err.Error(), "tasks: ")), 1)
+		return WithExitCode(fmt.Errorf("tasks: %s: %s", flag, strings.TrimPrefix(err.Error(), "tasks: ")), exitFailed)
 	}
 	return nil
 }

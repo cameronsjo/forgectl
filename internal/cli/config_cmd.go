@@ -139,6 +139,7 @@ func newConfigCmd(module.Deps) *cobra.Command {
 		Use:     "config",
 		Short:   "Show the active configuration and config file path",
 		Aliases: []string{"cfg"},
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			slog.Debug("Preparing to display configuration.")
 			out := cmd.OutOrStdout()

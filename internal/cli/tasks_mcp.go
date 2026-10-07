@@ -188,13 +188,13 @@ func runTasksMCP(
 	pinIPs []string,
 ) error {
 	if err := validateMCPFlags(httpAddr, tokenFile, pinIPs); err != nil {
-		return WithExitCode(fmt.Errorf("tasks mcp: %w", err), 1)
+		return WithExitCode(fmt.Errorf("tasks mcp: %w", err), exitFailed)
 	}
 	ctx := cmd.Context()
 
 	pins, err := tasks.ParsePinList(pinIPs)
 	if err != nil {
-		return WithExitCode(err, 1)
+		return WithExitCode(err, exitFailed)
 	}
 
 	// The credential is read BEFORE the listener opens. A server that binds a
@@ -402,11 +402,11 @@ const pingProtocolVersion = "2025-06-18"
 // failed for another reason.
 func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 	if httpAddr == "" {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping requires --http <addr> — it probes a local listener, and without the address there is nothing to probe"), 1)
+		return WithExitCode(fmt.Errorf("tasks mcp --ping requires --http <addr> — it probes a local listener, and without the address there is nothing to probe"), exitFailed)
 	}
 	url, err := pingURL(httpAddr)
 	if err != nil {
-		return WithExitCode(err, 1)
+		return WithExitCode(err, exitFailed)
 	}
 	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"` + pingProtocolVersion + `","capabilities":{},"clientInfo":{"name":"forgectl-ping","version":"0"}}}`
 
@@ -417,7 +417,7 @@ func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s did not answer: %w", pingURLLabel, pingCause(err)), exitTasksUnreachable)
 	}
 	if status < 200 || status >= 300 {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d", pingURLLabel, status), 1)
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d", pingURLLabel, status), exitFailed)
 	}
 	// Release the session this probe just created, on every path from here.
 	// The server also expires idle sessions (mcpSessionTimeout), which is the
@@ -440,7 +440,7 @@ func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d but the body could not be read: %w", pingURLLabel, status, pingCause(readErr)), exitTasksUnreachable)
 	}
 	if !hasJSONRPCResult(raw) {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d but the body carries no JSON-RPC result", pingURLLabel, status), 1)
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d but the body carries no JSON-RPC result", pingURLLabel, status), exitFailed)
 	}
 
 	// The protocol requires this notification before any other request; a
@@ -450,7 +450,7 @@ func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s did not answer the initialized notification: %w", pingURLLabel, pingCause(err)), exitTasksUnreachable)
 	}
 	if status < 200 || status >= 300 {
-		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d to the initialized notification", pingURLLabel, status), 1)
+		return WithExitCode(fmt.Errorf("tasks mcp --ping: %s answered %d to the initialized notification", pingURLLabel, status), exitFailed)
 	}
 
 	readCtx, cancelRead := context.WithTimeout(cmd.Context(), pingReadTimeout)
@@ -466,7 +466,7 @@ func runMCPPing(cmd *cobra.Command, httpAddr string) error {
 	case pingReadRefused:
 		return WithExitCode(errors.New("tasks mcp --ping: the server is up, and the board refused its credential: the token is revoked, expired, or no longer allowed to read"), exitTasksUnauthorized)
 	case pingReadFailed:
-		return WithExitCode(errors.New("tasks mcp --ping: the server is up, and its read of the board failed"), 1)
+		return WithExitCode(errors.New("tasks mcp --ping: the server is up, and its read of the board failed"), exitFailed)
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), "ok") //nolint:errcheck // best-effort healthcheck output
 	return nil

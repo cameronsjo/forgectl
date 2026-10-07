@@ -184,7 +184,7 @@ func reportRunFailures(w io.Writer, failed []error) error {
 	for _, err := range failed {
 		_, _ = fmt.Fprintln(w, safeText(err.Error()))
 	}
-	return WithExitCode(fmt.Errorf("desk: %s could not be read", plural(len(failed), "source", "sources")), 1)
+	return WithExitCode(fmt.Errorf("desk: %s could not be read", plural(len(failed), "source", "sources")), exitFailed)
 }
 
 func runDeskRuns(cmd *cobra.Command, deps module.Deps, dirFlag string, log deskLogOpts, asJSON bool) error {
@@ -348,7 +348,7 @@ func runDeskShow(cmd *cobra.Command, deps module.Deps, dirFlag, name string, log
 	if o.live {
 		err := tui.RunWatch(cmd.Context(), src, tui.RunWatchOptions{Theme: deps.Theme, Name: r.ref.Name, ASCII: deskNoIcons(cmd, deps)})
 		if errors.Is(err, tui.ErrRunWatchNoRun) {
-			return WithExitCode(err, 1)
+			return WithExitCode(err, exitFailed)
 		}
 		return err
 	}

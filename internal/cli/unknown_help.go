@@ -24,9 +24,14 @@ import (
 //     before it looks at Args, so `forgectl surface lst` exited 0 (forgectl#1090).
 //     rejectUnknownSubcommands gives such a group the validator; this runs it.
 func unknownSubcommand(root *cobra.Command, args []string) error {
-	// Lazy builtins (help, completion, man) are not in the tree yet.
+	// Lazy builtins (help, completion, man) are not in the tree yet. `completion`
+	// is a group, so it is registered now and validated below like any other
+	// (`completion nonesuch` must not exit 0).
 	if first, _ := firstNonFlag(args); builtinVerbs[first] {
-		return nil
+		if first != "completion" {
+			return nil
+		}
+		root.InitDefaultCompletionCmd()
 	}
 	found, rest, err := root.Find(args)
 	if found == nil {
@@ -59,7 +64,7 @@ func unknownSubcommand(root *cobra.Command, args []string) error {
 	if !found.HasSubCommands() || len(positional) == 0 {
 		return nil
 	}
-	return found.ValidateArgs(positional)
+	return asUsageError(found, found.ValidateArgs(positional))
 }
 
 // mentionsHelp reports whether args hold a help flag before any `--`: the long

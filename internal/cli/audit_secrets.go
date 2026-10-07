@@ -107,10 +107,10 @@ when --gitleaks=require and gitleaks did not run; 2 for a bad flag value.`,
 			switch mode {
 			case gitleaksAuto, gitleaksOff, gitleaksRequire:
 			default:
-				return WithExitCode(fmt.Errorf("--gitleaks must be auto, off or require, not %s", termsafe.QuoteTextMax(mode, labelMaxRunes)), 2)
+				return WithExitCode(fmt.Errorf("--gitleaks must be auto, off or require, not %s", termsafe.QuoteTextMax(mode, labelMaxRunes)), exitUsage)
 			}
 			if timeout <= 0 {
-				return WithExitCode(errors.New("--timeout must be positive"), 2)
+				return WithExitCode(errors.New("--timeout must be positive"), exitUsage)
 			}
 			root, err := d.resolveRoot()
 			if err != nil {
