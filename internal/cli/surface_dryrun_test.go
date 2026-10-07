@@ -324,6 +324,16 @@ func TestSurfaceLaunchDryRunNeverCallsTheBackend(t *testing.T) {
 
 // planClose and closeWorker decide the same way wherever the answer needs no
 // herdr: every scenario below runs both and compares them.
+// dirtyFacts trips every removal check at once.
+func dirtyFacts() worker.WorktreeFacts {
+	f := cleanFacts
+	f.Stashes = 1
+	f.Status = "?? untracked.txt\n"
+	f.Branch = ""
+	f.Ahead = 3
+	return f
+}
+
 func TestPlanCloseAgreesWithCloseWorker(t *testing.T) {
 	ctx := context.Background()
 	now := time.Unix(1e9, 0)
@@ -356,6 +366,20 @@ func TestPlanCloseAgreesWithCloseWorker(t *testing.T) {
 			r.Ref = []byte(`{"kind":"nope"}`)
 			return r
 		}, fake: fakeClose{facts: cleanFacts}},
+		"a failed launch that left a recovery tag": {row: func(*testing.T) worker.Row {
+			return worker.Row{Name: "w", Branch: "feat", Stage: worker.StageFailed, Recovery: "forgectl-abc"}
+		}, fake: fakeClose{facts: cleanFacts}},
+		"a launch past its settle window": {row: func(*testing.T) worker.Row {
+			return worker.Row{Name: "w", Branch: "feat", Stage: worker.StageWorktree, StartedAt: now.Add(-launchSettleAfter - time.Second), Worktree: "/r/.claude/worktrees/w"}
+		}, fake: fakeClose{facts: cleanFacts}},
+		"a failed launch that holds a workspace": {row: func(t *testing.T) worker.Row {
+			r := launchedRow(t)
+			r.Stage = worker.StageFailed
+			return r
+		}, fake: fakeClose{result: backend.NewCloseAlreadyGone(), facts: cleanFacts}},
+		"every removal blocker keeps the worktree": {row: launchedRow, fake: fakeClose{result: backend.NewCloseClosed(), facts: dirtyFacts()}},
+		"--keep-worktree on an unreadable git":     {row: launchedRow, fake: fakeClose{result: backend.NewCloseClosed(), inspErr: errors.New("git broke")}, keep: true},
+		"--keep-worktree on a missing worktree":    {row: launchedRow, fake: fakeClose{result: backend.NewCloseClosed()}, keep: true},
 	}
 	for name, sc := range scenarios {
 		t.Run(name, func(t *testing.T) {
@@ -376,6 +400,15 @@ func TestPlanCloseAgreesWithCloseWorker(t *testing.T) {
 			}
 			if plan.WouldForget != closed.Forgotten {
 				t.Errorf("would_forget = %v, close forgot = %v", plan.WouldForget, closed.Forgotten)
+			}
+			if plan.Reason != closed.Reason {
+				t.Errorf("reason = %q, close said %q", plan.Reason, closed.Reason)
+			}
+			if plan.Note != closed.Note {
+				t.Errorf("note = %q, close said %q", plan.Note, closed.Note)
+			}
+			if sc.keep && len(planFake.calls) != 0 {
+				t.Errorf("--keep-worktree inspected the worktree: %v", planFake.calls)
 			}
 			if !reflect.DeepEqual(plan.KeptBecause, closed.KeptBecause) {
 				t.Errorf("kept_because = %v, close kept %v", plan.KeptBecause, closed.KeptBecause)
@@ -455,6 +488,13 @@ func TestRenderClosePlan(t *testing.T) {
 	err := renderClosePlan(&out, refused, false)
 	if ExitCode(err) != 1 || !strings.Contains(err.Error(), "would refuse") {
 		t.Errorf("text refusal: err = %v (exit %d)", err, ExitCode(err))
+	}
+	// Text mode prints the preview lines before the error, as JSON mode prints
+	// its object, so a caller reading stdout sees the same facts either way.
+	for _, want := range []string{"dry_run=true\n", "refused=true\n", "workspace=refused\n", "worktree=untouched\n"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("a refused text preview lacks %q:\n%s", want, out.String())
+		}
 	}
 	out.Reset()
 	err = renderClosePlan(&out, refused, true)

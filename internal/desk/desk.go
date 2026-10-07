@@ -336,6 +336,11 @@ type Meta struct {
 	// or is skipped. Untrusted text on read: validate before it reaches an
 	// argv.
 	SignalPane string `json:"signal_pane,omitempty"`
+	// SignalledAt is when `desk add` finished telling the operator the item
+	// is waiting, with every enabled signal sent. Absent when the add died
+	// before signalling or a signal failed, so a retry that finds the item
+	// sends it again. Not read by the dashboard.
+	SignalledAt *time.Time `json:"signalled_at,omitempty"`
 }
 
 // State is where an item stands.

@@ -87,8 +87,11 @@ type closePlan struct {
 	Note        string `json:"note,omitempty"`
 }
 
-// renderClosePlan prints the preview. A refusal is exit 1, as the real close
-// exits, so `close --dry-run && close` stops where close would.
+// renderClosePlan prints the preview, in text or JSON, whether or not close
+// would refuse. A refusal is then exit 1, as the real close exits, so
+// `close --dry-run && close` stops where close would. Text mode prints the
+// preview lines first and the error after them, as JSON mode prints the object
+// first.
 func renderClosePlan(out io.Writer, p closePlan, asJSON bool) error {
 	if asJSON {
 		if err := writeJSON(out, p); err != nil {
@@ -99,18 +102,21 @@ func renderClosePlan(out io.Writer, p closePlan, asJSON bool) error {
 		}
 		return nil
 	}
-	if p.Refused {
-		return WithExitCode(fmt.Errorf("worker %s: close would refuse, nothing was touched: %s",
-			termsafe.SafeLineMax(p.Name, 64), termsafe.SafeLineMax(p.Reason, 300)), 1)
-	}
 	w := &stickyWriter{w: out}
-	w.printf("dry_run=true\nname=%s\nbranch=%s\nworkspace=%s\nworktree=%s\nwould_forget=%t\n",
-		termsafe.SafeLineMax(p.Name, 64), termsafe.SafeLineMax(p.Branch, 120), p.Workspace, p.Worktree, p.WouldForget)
+	w.printf("dry_run=true\nname=%s\nbranch=%s\nrefused=%t\nworkspace=%s\nworktree=%s\nwould_forget=%t\n",
+		termsafe.SafeLineMax(p.Name, 64), termsafe.SafeLineMax(p.Branch, 120), p.Refused, p.Workspace, p.Worktree, p.WouldForget)
 	for _, k := range p.KeptBecause {
 		w.printf("kept: %s\n", termsafe.SafeLineMax(k, 300))
 	}
 	if p.Note != "" {
 		w.printf("note: %s\n", termsafe.SafeLineMax(p.Note, 300))
 	}
-	return w.err
+	if w.err != nil {
+		return w.err
+	}
+	if p.Refused {
+		return WithExitCode(fmt.Errorf("worker %s: close would refuse, nothing was touched: %s",
+			termsafe.SafeLineMax(p.Name, 64), termsafe.SafeLineMax(p.Reason, 300)), 1)
+	}
+	return nil
 }

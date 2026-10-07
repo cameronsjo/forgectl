@@ -235,7 +235,7 @@ func TestDeskAdd_PrintsNameAndHash(t *testing.T) {
 	out, _, err := deskRun(t, deskDeps(), "add", writeTemp(t, "merge.sh", "#!/bin/bash\necho hi\n"), "--what", "merge it", "--why", "you own merges")
 	wantExit(t, err, 0)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 3 || lines[0] != "name=01-merge" || lines[1] != "kind=script" || !sha256Re.MatchString(strings.TrimPrefix(lines[2], "sha256=")) {
+	if len(lines) != 4 || lines[0] != "name=01-merge" || lines[1] != "kind=script" || !sha256Re.MatchString(strings.TrimPrefix(lines[2], "sha256=")) || lines[3] != "duplicate=false" {
 		t.Fatalf("output = %q", out)
 	}
 	name, sha := queueItem(t, "second.sh", "echo two\n")
@@ -687,7 +687,7 @@ func TestDeskSkip(t *testing.T) {
 	wantExit(t, err, deskExitUsage)
 	out, _, err := deskRun(t, deskDeps(), "skip", waiting, "--reason", "superseded by 03")
 	wantExit(t, err, 0)
-	if out != "skipped="+waiting+" reason=operator\n" {
+	if out != "skipped="+waiting+" reason=operator note=\"superseded by 03\"\n" {
 		t.Errorf("output = %q", out)
 	}
 
@@ -695,7 +695,7 @@ func TestDeskSkip(t *testing.T) {
 	markLost(t, d, dir, lost, lostSHA)
 	out, _, err = deskRun(t, deskDeps(), "skip", lost, "--reason", "supervisor died")
 	wantExit(t, err, 0)
-	if out != "skipped="+lost+" reason=lost\n" {
+	if out != "skipped="+lost+" reason=lost note=\"supervisor died\"\n" {
 		t.Errorf("output = %q", out)
 	}
 

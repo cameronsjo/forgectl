@@ -114,3 +114,33 @@ func cappedNames(items []desk.Item) []string {
 	}
 	return names
 }
+
+// similarItems lists the items, in any state, whose name matches name once the
+// NN- number is dropped, as "NAME (state)", at most deskNotFoundListMax of
+// them. It answers a skip of 03-x when the item now waits as 05-x or ran as
+// 02-x. A name with no number, or a scan failure, yields none.
+func similarItems(d *desk.Desk, name string) []string {
+	_, stem, ok := strings.Cut(name, "-")
+	if !ok || stem == "" {
+		return nil
+	}
+	snap, err := d.Scan()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, group := range [][]desk.Item{snap.Pending, snap.Running, snap.Done, snap.Skipped} {
+		for _, it := range group {
+			if it.Name == name {
+				continue
+			}
+			if _, s, ok := strings.Cut(it.Name, "-"); ok && s == stem {
+				if len(out) == deskNotFoundListMax {
+					return append(out, "...")
+				}
+				out = append(out, safeText(it.Name)+" ("+string(it.State)+")")
+			}
+		}
+	}
+	return out
+}

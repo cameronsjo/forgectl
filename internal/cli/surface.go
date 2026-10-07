@@ -115,7 +115,9 @@ name, branch and worktree path are free) and prints what it would create, then
 creates nothing: no worktree, branch, ledger row or surface. It never prints
 the harness path, arguments, environment or brief. A refusal prints as the
 launch would and exits as the launch does. Nothing is asked of GitHub, so a new
-branch reads as branch_from "new". --json prints the preview as one object:
+branch reads as branch_from "new". The preview sees a branch another worktree
+has checked out, but git can still refuse the real worktree add for a reason
+only it sees, so a clean preview is not a promise. --json prints the preview as one object:
 {"dry_run","surface","name","target","harness","worker"}, where worker is
 {"repo","worktree","branch","branch_from","ledger_row","brief"} for --worktree
 and absent otherwise. --json needs --dry-run.

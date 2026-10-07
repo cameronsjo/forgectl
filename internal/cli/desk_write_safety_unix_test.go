@@ -5,7 +5,9 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/module"
 )
 
 // addJSON runs `desk add FILE --json` with the flags given and decodes it.
@@ -72,14 +75,14 @@ func TestDeskAdd_DuplicateTextSaysSo(t *testing.T) {
 	args := []string{"add", file, "--what", "w", "--why", "y"}
 	first, _, err := deskRun(t, deskDeps(), args...)
 	wantExit(t, err, 0)
-	if strings.Contains(first, "duplicate") {
-		t.Errorf("a new item's output mentions duplicate: %q", first)
+	if !strings.HasSuffix(first, "duplicate=false\n") {
+		t.Errorf("a new item's output = %q, want it to end duplicate=false (stable keys)", first)
 	}
 
 	out, errOut, err := deskRun(t, deskDeps(), args...)
 	wantExit(t, err, 0)
-	if out != first+"duplicate=true\n" {
-		t.Errorf("duplicate output = %q, want the first output plus duplicate=true", out)
+	if out != strings.TrimSuffix(first, "duplicate=false\n")+"duplicate=true\n" {
+		t.Errorf("duplicate output = %q, want the first output with duplicate=true", out)
 	}
 	if !strings.Contains(errOut, "already waiting") || !strings.Contains(errOut, "--allow-duplicate") {
 		t.Errorf("stderr = %q, want a note naming the escape", errOut)
@@ -136,13 +139,13 @@ func TestDeskSkip_AlreadySkippedIsNotAnError(t *testing.T) {
 
 	out, errOut, err := deskRun(t, deskDeps(), "skip", gone, "--reason", "first")
 	wantExit(t, err, 0)
-	if out != "skipped="+gone+" reason=operator\n" || errOut != "" {
+	if out != "skipped="+gone+" reason=operator note=\"first\"\n" || errOut != "" {
 		t.Fatalf("first skip: out %q err %q", out, errOut)
 	}
 
 	out, errOut, err = deskRun(t, deskDeps(), "skip", gone, "--reason", "second try")
 	wantExit(t, err, 0)
-	if out != "skipped="+gone+" reason=operator already=true\n" {
+	if out != "skipped="+gone+" reason=operator note=\"first\" already=true\n" {
 		t.Errorf("retry output = %q, want already=true", out)
 	}
 	if !strings.Contains(errOut, "was already skipped") {
@@ -208,7 +211,7 @@ func TestDeskPrune_DryRunListsAndDeletesNothing(t *testing.T) {
 
 	out, _, err := deskRun(t, deskDeps(), "prune", "--dry-run")
 	wantExit(t, err, 0)
-	if !strings.HasPrefix(out, "would_prune=2 days=30\n") || !strings.Contains(out, "done/01-old newest=") || !strings.Contains(out, "done/02-older newest=") || strings.Contains(out, "03-recent") {
+	if !strings.HasPrefix(out, "would_prune=2 days=30 found=true\n") || !strings.Contains(out, "done/01-old newest=") || !strings.Contains(out, "done/02-older newest=") || strings.Contains(out, "03-recent") {
 		t.Errorf("dry-run output = %q", out)
 	}
 	if after := doneFiles(t, dir); !reflect.DeepEqual(before, after) {
@@ -217,7 +220,7 @@ func TestDeskPrune_DryRunListsAndDeletesNothing(t *testing.T) {
 
 	jsonOut, _, err := deskRun(t, deskDeps(), "prune", "--dry-run", "--json")
 	wantExit(t, err, 0)
-	if got, want := jsonKeys(t, []byte(jsonOut)), []string{"days", "dry_run", "items", "would_remove"}; !reflect.DeepEqual(got, want) {
+	if got, want := jsonKeys(t, []byte(jsonOut)), []string{"days", "dry_run", "found", "items", "would_remove"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("--dry-run --json keys = %v, want %v", got, want)
 	}
 	var plan deskPrunePlanJSON
@@ -273,5 +276,152 @@ func TestDeskAdd_DuplicateSignalsNothing(t *testing.T) {
 	}
 	if rig.osascript() != 2 {
 		t.Errorf("--allow-duplicate sent %d macOS notifications, want 2 in all", rig.osascript())
+	}
+}
+
+// If the first attempt never finished signalling (it died after queueing, or
+// a signal failed), the retry finds the item and sends the signal, so the item
+// does not wait with nobody told. Once it has gone out, a retry sends nothing.
+func TestDeskAdd_RetryResignalsUntilTheFirstSignalWentOut(t *testing.T) {
+	newDeskDir(t)
+	inHerdr(t, "w1:p9")
+	rig := newSignalRig(t, config.DeskConfig{})
+	failing := true
+	deskMacNotify = func(context.Context, module.Deps, string, string) error {
+		rig.mac++
+		if failing {
+			return errors.New("notification centre unavailable")
+		}
+		return nil
+	}
+	file := writeTemp(t, "merge.sh", "echo merge\n")
+	args := []string{"add", file, "--what", "w", "--why", "y"}
+
+	_, errOut, err := deskRun(t, rig.deps, args...)
+	wantExit(t, err, 0)
+	if !strings.Contains(errOut, "operator signal failed") || rig.osascript() != 1 {
+		t.Fatalf("first add: stderr %q, %d macOS attempts; the control is wrong", errOut, rig.osascript())
+	}
+
+	failing = false
+	_, errOut, err = deskRun(t, rig.deps, args...)
+	wantExit(t, err, 0)
+	if rig.osascript() != 2 {
+		t.Errorf("the retry made %d macOS attempts in all, want 2: the unsignalled item was not re-signalled", rig.osascript())
+	}
+	if !strings.Contains(errOut, "already waiting") || !strings.Contains(errOut, "had not gone out") {
+		t.Errorf("retry stderr = %q, want it to say the signal was sent now", errOut)
+	}
+
+	if _, errOut, err = deskRun(t, rig.deps, args...); err != nil {
+		t.Fatal(err)
+	}
+	if rig.osascript() != 2 || strings.Contains(errOut, "had not gone out") {
+		t.Errorf("a retry after the signal went out signalled again: %d attempts, stderr %q", rig.osascript(), errOut)
+	}
+}
+
+// A dry run creates nothing, not even the desk directory every other verb
+// makes, and says the desk is absent rather than printing what an empty desk
+// prints (forgectl#1088).
+func TestDeskPrune_DryRunCreatesNothingOnAnAbsentDir(t *testing.T) {
+	dir := newDeskDir(t)
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the control desk dir exists: %v", err)
+	}
+
+	out, errOut, err := deskRun(t, deskDeps(), "prune", "--dry-run")
+	wantExit(t, err, 0)
+	if _, serr := os.Lstat(dir); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("the dry run created the desk dir: %v", serr)
+	}
+	if out != "would_prune=0 days=30 found=false\n" {
+		t.Errorf("output = %q, want found=false", out)
+	}
+	if !strings.Contains(errOut, "desk not found at") {
+		t.Errorf("stderr = %q, want a note that the desk was not found", errOut)
+	}
+
+	out, _, err = deskRun(t, deskDeps(), "prune", "--dry-run", "--json")
+	wantExit(t, err, 0)
+	var plan deskPrunePlanJSON
+	if err := json.Unmarshal([]byte(out), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.Found || !plan.DryRun || plan.WouldRemove != 0 || plan.Items == nil {
+		t.Errorf("plan = %+v, want found=false with an empty items array", plan)
+	}
+	if _, serr := os.Lstat(dir); !errors.Is(serr, os.ErrNotExist) {
+		t.Fatalf("--json dry run created the desk dir: %v", serr)
+	}
+
+	// An existing desk reads found=true, so the two cases differ.
+	openTestDesk(t, dir)
+	out, _, err = deskRun(t, deskDeps(), "prune", "--dry-run")
+	wantExit(t, err, 0)
+	if out != "would_prune=0 days=30 found=true\n" {
+		t.Errorf("existing empty desk output = %q", out)
+	}
+}
+
+// desk skip reports the recorded --reason text as note=, quoted, next to the
+// reason category, and --json carries the same plus already (forgectl#1088).
+func TestDeskSkip_ReportsTheNoteAndHasJSON(t *testing.T) {
+	newDeskDir(t)
+	a, _ := queueItem(t, "a.sh", "echo a\n")
+	b, _ := queueItem(t, "b.sh", "echo b\n")
+
+	out, _, err := deskRun(t, deskDeps(), "skip", a, "--reason", `needs "review" first`)
+	wantExit(t, err, 0)
+	if out != "skipped="+a+` reason=operator note="needs \"review\" first"`+"\n" {
+		t.Errorf("text = %q", out)
+	}
+
+	out, _, err = deskRun(t, deskDeps(), "skip", b, "--reason", "superseded", "--json")
+	wantExit(t, err, 0)
+	if got, want := jsonKeys(t, []byte(out)), []string{"already", "name", "note", "reason"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("keys = %v, want %v", got, want)
+	}
+	var first deskSkipJSON
+	if err := json.Unmarshal([]byte(out), &first); err != nil {
+		t.Fatal(err)
+	}
+	if first != (deskSkipJSON{Name: b, Reason: "operator", Note: "superseded"}) {
+		t.Errorf("first = %+v", first)
+	}
+
+	out, _, err = deskRun(t, deskDeps(), "skip", b, "--reason", "a different reason", "--json")
+	wantExit(t, err, 0)
+	var again deskSkipJSON
+	if err := json.Unmarshal([]byte(out), &again); err != nil {
+		t.Fatal(err)
+	}
+	if again != (deskSkipJSON{Name: b, Reason: "operator", Note: "superseded", Already: true}) {
+		t.Errorf("retry = %+v, want the first skip's recorded note with already true", again)
+	}
+}
+
+// A skip of 03-x after the item was queued again as 05-x points at 05-x.
+func TestDeskSkip_NotFoundNamesTheSameItemUnderAnotherNumber(t *testing.T) {
+	newDeskDir(t)
+	a, _ := queueItem(t, "same.sh", "echo a\n")
+	_, _, err := deskRun(t, deskDeps(), "skip", a, "--reason", "first")
+	wantExit(t, err, 0)
+	b, _ := queueItem(t, "same.sh", "echo b\n")
+	if a == b {
+		t.Fatalf("both items are %s", a)
+	}
+
+	_, _, err = deskRun(t, deskDeps(), "skip", "09-same", "--reason", "x")
+	wantExit(t, err, 1)
+	for _, want := range []string{"same name under another number", a + " (skipped)", b + " (waiting)"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err, want)
+		}
+	}
+	_, _, err = deskRun(t, deskDeps(), "skip", "09-other", "--reason", "x")
+	wantExit(t, err, 1)
+	if strings.Contains(err.Error(), "another number") {
+		t.Errorf("a name no item shares got a similar-name hint: %q", err)
 	}
 }

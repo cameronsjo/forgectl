@@ -185,19 +185,29 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 		return err
 	}
 	// The item is queued; a signal that fails is a warning, not a failed add.
-	// A duplicate queued nothing, so there is nothing to signal.
+	// A duplicate queued nothing, so it signals only when the first attempt
+	// never finished signalling (it died after queueing, or a signal failed):
+	// the item would otherwise wait with nobody told.
+	signalNow := !duplicate || !d.Signalled(a.Name)
 	var signalFailures []string
-	if !duplicate {
+	if signalNow {
 		signalFailures = sig.queued(cmd.Context(), d, a, what)
 	}
 	warnings := a.Warnings
 	if warnings == nil {
 		warnings = []string{}
 	}
-	out := cmd.OutOrStdout()
 	for _, f := range signalFailures {
 		warnings = append(warnings, "operator signal failed: "+f)
 	}
+	if signalNow && len(signalFailures) == 0 {
+		// Recorded only when every enabled signal went out, so a failed one
+		// is retried by the next add of the same file.
+		if err := d.MarkSignalled(a.Name); err != nil {
+			warnings = append(warnings, "could not record that the operator was signalled: "+termsafe.SafeLineMax(err.Error(), deskWhatCols))
+		}
+	}
+	out := cmd.OutOrStdout()
 	if o.asJSON {
 		return writeJSON(out, deskAddJSON{Name: a.Name, Kind: string(a.Kind), SHA256: a.SHA256, Path: a.Path, Warnings: warnings, Duplicate: duplicate})
 	}
@@ -206,10 +216,13 @@ func runDeskAdd(cmd *cobra.Command, deps module.Deps, dirFlag, file string, o de
 		ew.printf("warning: %s\n", safeText(w))
 	}
 	w := &stickyWriter{w: out}
-	w.printf("name=%s\nkind=%s\nsha256=%s\n", a.Name, a.Kind, a.SHA256)
+	w.printf("name=%s\nkind=%s\nsha256=%s\nduplicate=%t\n", a.Name, a.Kind, a.SHA256, duplicate)
 	if duplicate {
-		w.printf("duplicate=true\n")
-		ew.printf("note: %s is already waiting with this sha256; nothing was queued (--allow-duplicate queues another)\n", safeText(a.Name))
+		note := "nothing was queued"
+		if signalNow {
+			note = "nothing was queued, and the operator signal had not gone out, so it was sent now"
+		}
+		ew.printf("note: %s is already waiting with this sha256; %s (--allow-duplicate queues another)\n", safeText(a.Name), note)
 	}
 	return errors.Join(w.err, ew.err)
 }
@@ -809,7 +822,21 @@ func watchResume(name string, seen, deadline int, dirFlag string) string {
 	return s
 }
 
-func runDeskSkip(cmd *cobra.Command, deps module.Deps, dirFlag, name, reason string) error {
+// deskSkipJSON is `desk skip --json`.
+type deskSkipJSON struct {
+	Name string `json:"name"`
+	// Reason is the category recorded with the skip: "operator", or "lost" for
+	// a lost run.
+	Reason string `json:"reason"`
+	// Note is the one-line --reason text kept with the skip (empty for a skip
+	// made without one).
+	Note string `json:"note"`
+	// Already is true when the item was already in skipped/: nothing changed,
+	// and Reason and Note are what was recorded then.
+	Already bool `json:"already"`
+}
+
+func runDeskSkip(cmd *cobra.Command, deps module.Deps, dirFlag, name, reason string, asJSON bool) error {
 	if err := checkDeskName(name); err != nil {
 		return err
 	}
@@ -836,30 +863,55 @@ func runDeskSkip(cmd *cobra.Command, deps module.Deps, dirFlag, name, reason str
 		// `tasks done` does for a task already done. A name that never
 		// existed is the error below, so a caller can tell them apart.
 		if meta, ok := d.SkippedMeta(name); ok {
-			return reportDeskAlreadySkipped(cmd, name, meta)
+			return reportDeskSkip(cmd, deskSkipJSON{Name: name, Reason: skipReasonOf(meta), Note: meta.SkipNote, Already: true}, asJSON)
 		}
-		return deskNotFound("desk skip", "waiting item or lost run", name, "waiting", waitingNames(d))
+		return deskSkipNotFound(d, name)
 	case errors.Is(err, desk.ErrClaimed):
 		return fmt.Errorf("desk skip: %s was claimed by a desk first", name)
 	case err != nil:
 		return err
 	}
-	_, err = fmt.Fprintf(cmd.OutOrStdout(), "skipped=%s reason=%s\n", name, recorded)
+	return reportDeskSkip(cmd, deskSkipJSON{Name: name, Reason: recorded, Note: reason}, asJSON)
+}
+
+// skipReasonOf is the category recorded with a skip: operator when the meta
+// names none (an older skip).
+func skipReasonOf(meta desk.Meta) string {
+	if meta.SkipReason == "" {
+		return desk.SkipOperator
+	}
+	return meta.SkipReason
+}
+
+// reportDeskSkip prints a skip: key=value lines with the note quoted, or JSON.
+// An already-skipped item adds already=true and a note on stderr.
+func reportDeskSkip(cmd *cobra.Command, r deskSkipJSON, asJSON bool) error {
+	if asJSON {
+		r.Reason, r.Note = safeText(r.Reason), safeText(r.Note)
+		return writeJSON(cmd.OutOrStdout(), r)
+	}
+	if r.Already {
+		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "note: %s was already skipped; nothing changed\n", safeText(r.Name)); err != nil {
+			return err
+		}
+	}
+	line := fmt.Sprintf("skipped=%s reason=%s note=%s", r.Name, safeText(r.Reason), strconv.Quote(safeText(r.Note)))
+	if r.Already {
+		line += " already=true"
+	}
+	_, err := fmt.Fprintln(cmd.OutOrStdout(), line)
 	return err
 }
 
-// reportDeskAlreadySkipped is `desk skip` on an item already in skipped/: no
-// change, exit 0. The reason printed is the one recorded when it was skipped
-// ("operator" for a CLI or dashboard skip), not the --reason of this call.
-func reportDeskAlreadySkipped(cmd *cobra.Command, name string, meta desk.Meta) error {
-	recorded := meta.SkipReason
-	if recorded == "" {
-		recorded = desk.SkipOperator
+// deskSkipNotFound is the error for a name that is in no state a skip can
+// act on. It lists the waiting names, and any item with the same name under
+// another number, which is the usual cause (the number changed when the item
+// was queued again).
+func deskSkipNotFound(d *desk.Desk, name string) error {
+	err := deskNotFound("desk skip", "waiting item or lost run", name, "waiting", waitingNames(d))
+	if similar := similarItems(d, name); len(similar) > 0 {
+		return fmt.Errorf("%w; same name under another number: %s", err, strings.Join(similar, ", "))
 	}
-	if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "note: %s was already skipped; nothing changed\n", safeText(name)); err != nil {
-		return err
-	}
-	_, err := fmt.Fprintf(cmd.OutOrStdout(), "skipped=%s reason=%s already=true\n", name, safeText(recorded))
 	return err
 }
 
@@ -871,7 +923,10 @@ type deskPruneJSON struct {
 
 // deskPrunePlanJSON is `desk prune --dry-run --json`.
 type deskPrunePlanJSON struct {
-	DryRun      bool                `json:"dry_run"`
+	DryRun bool `json:"dry_run"`
+	// Found is false when the desk directory does not exist: nothing was
+	// opened or created, and the plan is empty because there is no desk.
+	Found       bool                `json:"found"`
 	Days        int                 `json:"days"`
 	WouldRemove int                 `json:"would_remove"`
 	Items       []deskPrunePlanItem `json:"items"`
@@ -885,14 +940,14 @@ type deskPrunePlanItem struct {
 }
 
 func runDeskPrune(cmd *cobra.Command, deps module.Deps, dirFlag string, days int, asJSON, dryRun bool) error {
+	if dryRun {
+		return runDeskPrunePlan(cmd, deps, dirFlag, days, asJSON)
+	}
 	d, err := openDeskDirFor(cmd, deps, dirFlag)
 	if err != nil {
 		return err
 	}
 	defer d.Close() //nolint:errcheck // deletes are not buffered
-	if dryRun {
-		return printDeskPrunePlan(cmd.OutOrStdout(), d, days, asJSON)
-	}
 	n, err := d.Prune(days)
 	if err != nil {
 		return err
@@ -904,22 +959,42 @@ func runDeskPrune(cmd *cobra.Command, deps module.Deps, dirFlag string, days int
 	return err
 }
 
-// printDeskPrunePlan is `desk prune --dry-run`: what Prune would delete, with
-// nothing deleted.
-func printDeskPrunePlan(out io.Writer, d *desk.Desk, days int, asJSON bool) error {
-	plan, err := d.PrunePlan(days)
+// runDeskPrunePlan is `desk prune --dry-run`: what Prune would delete, with
+// nothing deleted and nothing created. Every other desk verb creates the desk
+// directory when it is absent; a preview must not, so an absent directory is
+// reported as such (a typo in --dir reads as "no desk", not as an empty one).
+func runDeskPrunePlan(cmd *cobra.Command, deps module.Deps, dirFlag string, days int, asJSON bool) error {
+	dir, err := resolveDeskDir(dirFlag)
 	if err != nil {
 		return err
 	}
+	var plan []desk.PrunedItem
+	found := true
+	if _, serr := os.Lstat(dir); errors.Is(serr, os.ErrNotExist) {
+		found = false
+		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "note: desk not found at %s; nothing to prune\n", safePath(dir)); err != nil {
+			return err
+		}
+	} else {
+		d, err := openDeskDirFor(cmd, deps, dirFlag)
+		if err != nil {
+			return err
+		}
+		defer d.Close() //nolint:errcheck // read only
+		if plan, err = d.PrunePlan(days); err != nil {
+			return err
+		}
+	}
+	out := cmd.OutOrStdout()
 	if asJSON {
 		items := make([]deskPrunePlanItem, 0, len(plan))
 		for _, p := range plan {
 			items = append(items, deskPrunePlanItem{State: p.State, Name: p.Name, Newest: p.Newest.UTC()})
 		}
-		return writeJSON(out, deskPrunePlanJSON{DryRun: true, Days: days, WouldRemove: len(plan), Items: items})
+		return writeJSON(out, deskPrunePlanJSON{DryRun: true, Found: found, Days: days, WouldRemove: len(plan), Items: items})
 	}
 	w := &stickyWriter{w: out}
-	w.printf("would_prune=%d days=%d\n", len(plan), days)
+	w.printf("would_prune=%d days=%d found=%t\n", len(plan), days, found)
 	for _, p := range plan {
 		w.printf("%s/%s newest=%s\n", p.State, safeText(p.Name), p.Newest.UTC().Format(time.RFC3339))
 	}

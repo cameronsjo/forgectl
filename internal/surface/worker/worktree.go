@@ -207,49 +207,71 @@ func PlanWorktree(ctx context.Context, run GitRunner, top, name, branch string) 
 	if err := checkWorktreePathFree(path, name); err != nil {
 		return WorktreePlan{}, err
 	}
-	return WorktreePlan{Path: path, Branch: branch, BranchFrom: branchSource(ctx, run, top, branch)}, nil
+	from := branchSource(ctx, run, top, branch)
+	if from == BranchLocal {
+		at, err := checkedOutAt(ctx, run, top, branch)
+		if err != nil {
+			return WorktreePlan{}, err
+		}
+		if at != "" {
+			return WorktreePlan{}, fmt.Errorf("%w: branch %q is already checked out at %s; git would refuse a second worktree for it", ErrBranchCheckedOut, branch, at)
+		}
+	}
+	return WorktreePlan{Path: path, Branch: branch, BranchFrom: from}, nil
+}
+
+// ErrBranchCheckedOut reports a local branch that another worktree (the main
+// checkout included) already has checked out, which git refuses to add again.
+var ErrBranchCheckedOut = errors.New("worker: branch is checked out in another worktree")
+
+// checkedOutAt returns the path of the worktree that has branch checked out, or
+// "" when none does. It reads `git worktree list --porcelain` and changes
+// nothing.
+func checkedOutAt(ctx context.Context, run GitRunner, top, branch string) (string, error) {
+	out, err := gitenv.Run(ctx, run, gitenv.Local, "-C", top, "worktree", "list", "--porcelain")
+	if err != nil {
+		return "", fmt.Errorf("worker: list worktrees: %w", err)
+	}
+	var path string
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			path = strings.TrimPrefix(line, "worktree ")
+		case line == "branch refs/heads/"+branch:
+			return path, nil
+		}
+	}
+	return "", nil
 }
 
 // checkWorktreeRoot is ensureWorktreeRoot without the creating: it refuses a
 // component that exists as a symlink or a non-directory, and stops at the
 // first one that does not exist yet.
-func checkWorktreeRoot(top string) error {
-	dir := top
-	for _, part := range worktreeDirs {
-		dir = filepath.Join(dir, part)
-		info, err := os.Lstat(dir)
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-			return nil
-		case err != nil:
-			return fmt.Errorf("worker: check %s: %w", dir, err)
-		case info.Mode()&os.ModeSymlink != 0:
-			return fmt.Errorf("%w: %s is a symlink", ErrUnsafeWorktreeRoot, dir)
-		case !info.IsDir():
-			return fmt.Errorf("%w: %s is not a directory", ErrUnsafeWorktreeRoot, dir)
-		}
-	}
-	return nil
-}
+func checkWorktreeRoot(top string) error { return walkWorktreeRoot(top, false) }
 
 // ensureWorktreeRoot creates <top>/.claude/worktrees, refusing any component
 // that already exists as a symlink or a non-directory.
-func ensureWorktreeRoot(top string) error {
+func ensureWorktreeRoot(top string) error { return walkWorktreeRoot(top, true) }
+
+// walkWorktreeRoot is the one walk down <top>/.claude/worktrees behind both:
+// with create it makes a missing component, without it a missing component
+// ends the walk with nothing wrong found (nothing below it can exist).
+func walkWorktreeRoot(top string, create bool) error {
 	dir := top
 	for _, part := range worktreeDirs {
 		dir = filepath.Join(dir, part)
 		info, err := os.Lstat(dir)
-		switch {
-		case errors.Is(err, os.ErrNotExist):
+		if errors.Is(err, os.ErrNotExist) {
+			if !create {
+				return nil
+			}
 			if err := os.Mkdir(dir, 0o750); err != nil && !errors.Is(err, os.ErrExist) {
 				return fmt.Errorf("worker: create %s: %w", dir, err)
 			}
 			// Re-check: a racing creator could have put a symlink there.
 			info, err = os.Lstat(dir)
-			if err != nil {
-				return fmt.Errorf("worker: check %s: %w", dir, err)
-			}
-		case err != nil:
+		}
+		if err != nil {
 			return fmt.Errorf("worker: check %s: %w", dir, err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {

@@ -125,3 +125,46 @@ func TestPlanWorktreeThenAddAgree(t *testing.T) {
 		t.Errorf("AddWorktree = %+v, plan said %+v", wt, plan)
 	}
 }
+
+// git refuses a second worktree for a branch another worktree has checked out.
+// The preview sees that case (it reads the worktree list) and refuses before
+// the launch would, and AddWorktree refuses it too, so the preview is not
+// optimistic about it.
+func TestPlanWorktreeRefusesABranchCheckedOutElsewhere(t *testing.T) {
+	ctx := context.Background()
+	for name, setup := range map[string]func(t *testing.T, top string) string{
+		"the main checkout's own branch": func(*testing.T, string) string { return "main" },
+		"another worktree's branch": func(t *testing.T, top string) string {
+			mustGit(t, top, "branch", "busy")
+			mustGit(t, top, "worktree", "add", "-q", filepath.Join(t.TempDir(), "other"), "busy")
+			return "busy"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			top := gitRepo(t)
+			branch := setup(t, top)
+			before := repoState(t, top)
+
+			_, planErr := PlanWorktree(ctx, fexec.OSRunner{}, top, "w1", branch)
+			if !errors.Is(planErr, ErrBranchCheckedOut) {
+				t.Fatalf("PlanWorktree err = %v, want ErrBranchCheckedOut", planErr)
+			}
+			if after := repoState(t, top); after != before {
+				t.Errorf("the refused preview changed the repo")
+			}
+			if _, addErr := AddWorktree(ctx, fexec.OSRunner{}, top, "w1", branch, baseOf(t, top)); addErr == nil {
+				t.Error("AddWorktree accepted a branch git refuses; the preview's refusal has no real counterpart")
+			}
+		})
+	}
+}
+
+// A branch that exists but is checked out nowhere is fine.
+func TestPlanWorktreeAcceptsAFreeLocalBranch(t *testing.T) {
+	top := gitRepo(t)
+	mustGit(t, top, "branch", "free")
+	plan, err := PlanWorktree(context.Background(), fexec.OSRunner{}, top, "w1", "free")
+	if err != nil || plan.BranchFrom != BranchLocal {
+		t.Fatalf("plan = %+v err = %v, want a local branch", plan, err)
+	}
+}

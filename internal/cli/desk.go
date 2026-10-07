@@ -361,6 +361,7 @@ watch printed.`,
 
 func newDeskSkipCmd(dir *string, deps module.Deps) *cobra.Command {
 	var reason string
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "skip <name> --reason <text>",
 		Short: "Skip a waiting item, or clear a lost run out of running/",
@@ -370,19 +371,24 @@ only way a lost run leaves it; a lost run cannot be re-armed. A live run is
 refused. The --reason text (one line of plain text, at most 200 characters)
 is kept as the item's skip_note, with skipped_by "cli" and the time.
 
-Skip is safe to retry: an item already in skipped/ prints
-skipped=<name> reason=<recorded reason> already=true, changes nothing, and
-exits 0, so a retry after a timeout does not read as a failure. A name that
-matches no item at all is the error, and lists the waiting names.
+It prints skipped=<name> reason=<operator|lost> note="<the --reason text>":
+reason is the category, note is the text, quoted. Skip is safe to retry: an
+item already in skipped/ prints the same line, with the reason and note
+recorded when it was skipped (this call's --reason is not kept) and
+already=true, changes nothing, and exits 0, so a retry after a timeout does
+not read as a failure. With --json: {"name","reason","note","already"}. A name
+that matches no item at all is the error; it lists the waiting names, and an
+item with the same name under another number in any state.
 
 Exit codes: 0 skipped, or already skipped; 1 no such item, or it is running, or
 another desk took it first; 2 usage (an empty, long or unsafe --reason).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDeskSkip(cmd, deps, *dir, args[0], reason)
+			return runDeskSkip(cmd, deps, *dir, args[0], reason, asJSON)
 		},
 	}
 	cmd.Flags().StringVar(&reason, "reason", "", "why, one line (required)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"name","reason","note","already"} as one JSON object: reason is operator or lost, note is the recorded --reason text, already is true when the item was already skipped`)
 	return cmd
 }
 
@@ -398,9 +404,12 @@ never touches pending/ or running/, unknown files, symlinks, or anything at the
 desk root. Nothing else ever deletes desk files: prune runs only when asked.
 
 --dry-run lists what prune would delete and deletes nothing. It uses the same
-selection, so the list is what a real prune removes right now. With --json it
-prints {"dry_run","days","would_remove","items"}, each item {"state","name",
-"newest"}; without it, {"removed","days"}.
+selection, so the list is what a real prune removes right now. It creates
+nothing either: a desk directory that does not exist is not created but
+reported (found=false, and a note on stderr), so a typo in --dir does not read
+as an empty desk; an existing desk is opened as every verb opens it. With
+--json it prints {"dry_run","found","days","would_remove","items"}, each item
+{"state","name","newest"}; without it, {"removed","days"}.
 
 Exit codes: 0 pruned (maybe nothing); 1 a delete failed; 2 usage.`,
 		Args: cobra.NoArgs,
@@ -412,7 +421,7 @@ Exit codes: 0 pruned (maybe nothing); 1 a delete failed; 2 usage.`,
 		},
 	}
 	cmd.Flags().IntVar(&days, "days", 30, "delete items older than this many days")
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"removed","days"} as one JSON object (with --dry-run, {"dry_run","days","would_remove","items"})`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"removed","days"} as one JSON object (with --dry-run, {"dry_run","found","days","would_remove","items"})`)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "list what would be deleted and delete nothing")
 	return cmd
 }

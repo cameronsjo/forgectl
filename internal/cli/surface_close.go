@@ -189,6 +189,81 @@ type closeSteps struct {
 	markClosed func() error
 }
 
+// workspaceDecision is what the ledger row alone decides about the workspace:
+// refuse, skip herdr (an earlier close, or nothing was ever created), or ask
+// herdr to close ref. closeWorker and planClose both read it, so the preview
+// and the real close cannot decide differently.
+type workspaceDecision struct {
+	// refuse, when set, is the reason close refuses and touches nothing.
+	refuse string
+	// state is the workspace outcome when herdr is not asked.
+	state string
+	// ref is the workspace to close when ask is true.
+	ref backend.Ref
+	ask bool
+	// note is advice for the operator, carried to the result.
+	note string
+}
+
+// decideWorkspace decides the workspace step from the row and the clock.
+func decideWorkspace(row worker.Row, now time.Time) workspaceDecision {
+	if launchInFlight(row, now) {
+		return workspaceDecision{refuse: fmt.Sprintf("its launch may still be running (stage %s, started %s ago); retry after %s", row.Stage, now.Sub(row.StartedAt).Truncate(time.Second), launchSettleAfter)}
+	}
+	switch {
+	case row.Stage == worker.StageClosed:
+		// An earlier close closed the workspace and kept the worktree. herdr
+		// is not asked again: after a restart it could only refuse.
+		return workspaceDecision{state: closeWorkspaceEarlier}
+	case len(row.Ref) == 0:
+		d := workspaceDecision{state: closeWorkspaceNone}
+		if row.Recovery != "" {
+			d.note = "a failed launch may have left a herdr workspace labeled " + row.Recovery +
+				"; forgectl cannot prove it is its own, so close it in herdr if it is still there"
+		}
+		return d
+	}
+	ref, err := backend.DecodeRef(row.Ref)
+	if err != nil {
+		return workspaceDecision{refuse: "the ledger reference does not decode"}
+	}
+	return workspaceDecision{ref: ref, ask: true}
+}
+
+// worktreeDecision is what the inspected worktree decides: keep it (and why),
+// find it gone, or remove it at path.
+type worktreeDecision struct {
+	// outcome is closeWorktreeKept, closeWorktreeGone or closeWorktreeRemoved;
+	// closeWorktreeRemoved here means "remove it", and closeWorker turns a
+	// failed removal into kept.
+	outcome string
+	path    string
+	because []string
+}
+
+// decideWorktree decides the worktree step. inspect is called only when the
+// worktree is not being kept anyway, so --keep-worktree never reads git.
+func decideWorktree(ctx context.Context, keep bool, inspect func(context.Context) (worker.WorktreeFacts, error)) worktreeDecision {
+	if keep {
+		return worktreeDecision{outcome: closeWorktreeKept, because: []string{"--keep-worktree"}}
+	}
+	facts, err := inspect(ctx)
+	switch {
+	case err != nil:
+		return worktreeDecision{outcome: closeWorktreeKept, because: []string{"git could not be read: " + termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen)}}
+	case !facts.Present():
+		return worktreeDecision{outcome: closeWorktreeGone}
+	}
+	if blockers := worker.RemovalBlockers(facts); len(blockers) > 0 {
+		return worktreeDecision{outcome: closeWorktreeKept, because: blockers}
+	}
+	return worktreeDecision{outcome: closeWorktreeRemoved, path: facts.Path}
+}
+
+// keepsRow reports whether the ledger row stays: a kept worktree keeps it (at
+// stage closed); anything else forgets it.
+func (d worktreeDecision) keepsRow() bool { return d.outcome == closeWorktreeKept }
+
 // closeWorker closes the workspace first, so the harness stops before its
 // worktree is judged, then decides the worktree, then the ledger row.
 func closeWorker(ctx context.Context, row worker.Row, keepWorktree bool, now time.Time, s closeSteps) closeResult {
@@ -198,27 +273,13 @@ func closeWorker(ctx context.Context, row worker.Row, keepWorktree bool, now tim
 		return res
 	}
 
-	if launchInFlight(row, now) {
-		return refuse(fmt.Sprintf("its launch may still be running (stage %s, started %s ago); retry after %s", row.Stage, now.Sub(row.StartedAt).Truncate(time.Second), launchSettleAfter))
+	ws := decideWorkspace(row, now)
+	if ws.refuse != "" {
+		return refuse(ws.refuse)
 	}
-
-	switch {
-	case row.Stage == worker.StageClosed:
-		// An earlier close closed the workspace and kept the worktree. herdr
-		// is not asked again: after a restart it could only refuse.
-		res.Workspace = closeWorkspaceEarlier
-	case len(row.Ref) == 0:
-		res.Workspace = closeWorkspaceNone
-		if row.Recovery != "" {
-			res.Note = "a failed launch may have left a herdr workspace labeled " + row.Recovery +
-				"; forgectl cannot prove it is its own, so close it in herdr if it is still there"
-		}
-	default:
-		ref, err := backend.DecodeRef(row.Ref)
-		if err != nil {
-			return refuse("the ledger reference does not decode")
-		}
-		cr := s.close(ctx, ref)
+	res.Note = ws.note
+	if ws.ask {
+		cr := s.close(ctx, ws.ref)
 		switch cr.State() {
 		case backend.CloseClosed:
 			res.Workspace = closeWorkspaceClosed
@@ -231,28 +292,17 @@ func closeWorker(ctx context.Context, row worker.Row, keepWorktree bool, now tim
 		default:
 			return refuse("herdr did not close the workspace (" + causeText(cr) + ")")
 		}
+	} else {
+		res.Workspace = ws.state
 	}
 	res.Closed = true
 
-	if keepWorktree {
-		res.Worktree, res.KeptBecause = closeWorktreeKept, []string{"--keep-worktree"}
-	} else {
-		facts, err := s.inspect(ctx)
-		switch {
-		case err != nil:
+	wt := decideWorktree(ctx, keepWorktree, s.inspect)
+	res.Worktree, res.KeptBecause = wt.outcome, wt.because
+	if wt.outcome == closeWorktreeRemoved {
+		if err := s.remove(ctx, wt.path); err != nil {
 			res.Worktree = closeWorktreeKept
-			res.KeptBecause = []string{"git could not be read: " + termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen)}
-		case !facts.Present():
-			res.Worktree = closeWorktreeGone
-		default:
-			if blockers := worker.RemovalBlockers(facts); len(blockers) > 0 {
-				res.Worktree, res.KeptBecause = closeWorktreeKept, blockers
-			} else if err := s.remove(ctx, facts.Path); err != nil {
-				res.Worktree = closeWorktreeKept
-				res.KeptBecause = []string{termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen)}
-			} else {
-				res.Worktree = closeWorktreeRemoved
-			}
+			res.KeptBecause = []string{termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen)}
 		}
 	}
 
@@ -270,55 +320,34 @@ func closeWorker(ctx context.Context, row worker.Row, keepWorktree bool, now tim
 	return res
 }
 
-// planClose is closeWorker's --dry-run: the decisions that need no write, in
-// closeWorker's order, with the workspace step answered from the ledger row
-// alone. It reads the worktree (inspect is read-only) and changes nothing.
+// planClose is closeWorker's --dry-run: the same two decisions (decideWorkspace
+// and decideWorktree), with herdr not asked and nothing removed. It reads the
+// worktree (inspect is read-only) and changes nothing.
 func planClose(ctx context.Context, row worker.Row, keepWorktree bool, now time.Time, inspect func(context.Context) (worker.WorktreeFacts, error)) closePlan {
 	plan := closePlan{Name: row.Name, Branch: row.Branch, DryRun: true, Worktree: closeWorktreeUntouched}
-	refuse := func(reason string) closePlan {
-		plan.Refused, plan.Workspace, plan.Reason = true, closeWorkspaceRefused, reason
+	ws := decideWorkspace(row, now)
+	if ws.refuse != "" {
+		plan.Refused, plan.Workspace, plan.Reason = true, closeWorkspaceRefused, ws.refuse
 		return plan
 	}
-
-	if launchInFlight(row, now) {
-		return refuse(fmt.Sprintf("its launch may still be running (stage %s, started %s ago); retry after %s", row.Stage, now.Sub(row.StartedAt).Truncate(time.Second), launchSettleAfter))
-	}
-
-	switch {
-	case row.Stage == worker.StageClosed:
-		plan.Workspace = closeWorkspaceEarlier
-	case len(row.Ref) == 0:
-		plan.Workspace = closeWorkspaceNone
-		if row.Recovery != "" {
-			plan.Note = "a failed launch may have left a herdr workspace labeled " + row.Recovery +
-				"; forgectl cannot prove it is its own, so close it in herdr if it is still there"
-		}
-	default:
-		if _, err := backend.DecodeRef(row.Ref); err != nil {
-			return refuse("the ledger reference does not decode")
-		}
+	plan.Note = ws.note
+	if ws.ask {
 		plan.Workspace = closeWorkspaceWouldClose
+	} else {
+		plan.Workspace = ws.state
 	}
 
-	if keepWorktree {
-		plan.Worktree, plan.KeptBecause = closeWorktreeWouldKeep, []string{"--keep-worktree"}
-	} else {
-		facts, err := inspect(ctx)
-		switch {
-		case err != nil:
-			plan.Worktree = closeWorktreeWouldKeep
-			plan.KeptBecause = []string{"git could not be read: " + termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen)}
-		case !facts.Present():
-			plan.Worktree = closeWorktreeGone
-		default:
-			if blockers := worker.RemovalBlockers(facts); len(blockers) > 0 {
-				plan.Worktree, plan.KeptBecause = closeWorktreeWouldKeep, blockers
-			} else {
-				plan.Worktree = closeWorktreeWouldRemove
-			}
-		}
+	wt := decideWorktree(ctx, keepWorktree, inspect)
+	plan.KeptBecause = wt.because
+	switch wt.outcome {
+	case closeWorktreeRemoved:
+		plan.Worktree = closeWorktreeWouldRemove
+	case closeWorktreeKept:
+		plan.Worktree = closeWorktreeWouldKeep
+	default:
+		plan.Worktree = wt.outcome
 	}
-	plan.WouldForget = plan.Worktree != closeWorktreeWouldKeep
+	plan.WouldForget = !wt.keepsRow()
 	return plan
 }
 

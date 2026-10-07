@@ -61,6 +61,28 @@ func (d *Desk) AddUnique(src, what, why string, tty bool) (a Added, duplicate bo
 	return d.add(src, what, why, tty, true)
 }
 
+// Signalled reports whether the operator signal for the pending item name is
+// recorded as sent (see [Meta.SignalledAt]). An item with no meta, such as a
+// hand-dropped file, reads as signalled: nothing here ever signalled it, and a
+// retry must not start pinging for a file a person put there.
+func (d *Desk) Signalled(name string) bool {
+	meta, ok, err := d.readMeta(DirPending, name)
+	return err != nil || !ok || meta.SignalledAt != nil
+}
+
+// MarkSignalled records that the operator signal for the pending item name
+// was sent. An item with no meta is left alone, so a legacy item is never
+// given a partial one.
+func (d *Desk) MarkSignalled(name string) error {
+	meta, ok, err := d.readMeta(DirPending, name)
+	if err != nil || !ok {
+		return err
+	}
+	now := d.now().UTC()
+	meta.SignalledAt = &now
+	return d.writeMeta(DirPending, name, meta)
+}
+
 // waitingWith returns the pending item of kind whose bytes hash to sum. An
 // entry that cannot be read (mid-link, refused, unreadable) does not match.
 func (d *Desk) waitingWith(kind Kind, sum string) (string, bool, error) {
