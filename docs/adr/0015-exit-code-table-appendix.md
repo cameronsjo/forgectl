@@ -1,6 +1,6 @@
-# ADR-0014 appendix: exit codes as measured on 2026-10-06
+# ADR-0015 appendix: exit codes as measured on 2026-10-06
 
-Evidence for [ADR-0014](0014-exit-code-table.md). It records what the code does today, so the ADR can stay a decision. Measured on `origin/main` at `2ecae571` with a built binary, stdin on `/dev/null`, a throwaway `HOME`, plus each verb's help text and the code.
+Evidence for [ADR-0015](0015-exit-code-table.md). It records what the code does today, so the ADR can stay a decision. Measured on `origin/main` at `2ecae571` with a built binary, stdin on `/dev/null`, a throwaway `HOME`, plus each verb's help text and the code.
 
 To repeat the flag-error measurement: build with `go build -o /tmp/forgectl .`, then run `forgectl <verb> --zzbogus; echo $?` for every leaf in `forgectl menu --json`. That probe sees cobra's errors only. It cannot see the verb-level 2s below, so the second half of the audit is `grep -rn 'WithExitCode(' internal/cli`.
 

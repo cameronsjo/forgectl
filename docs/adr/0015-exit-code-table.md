@@ -1,4 +1,4 @@
-# 0014. One exit-code table for every verb
+# 0015. One exit-code table for every verb
 
 **Status: Accepted**
 
@@ -8,7 +8,7 @@ Date: 2026-10-06 (accepted 2026-10-07)
 
 [ADR-0008](0008-agent-contract.md) rule 3 says exit codes must be honest. It does not say which numbers mean what, so each verb family picked its own. [#1085](https://github.com/cameronsjo/forgectl/issues/1085) found the result: the same failure class exits 1 or 2 depending on which layer caught it, and exit 2 means several different things. An agent that branches on `rc == 2` ("fix the call, do not retry") misreads a `tasks` outage.
 
-Measured on `origin/main` at `2ecae571`, with the evidence, file and line cites, and the list of dependents in the [appendix](0014-exit-code-table-appendix.md):
+Measured on `origin/main` at `2ecae571`, with the evidence, file and line cites, and the list of dependents in the [appendix](0015-exit-code-table-appendix.md):
 
 - Cobra's own flag, argument and unknown-verb errors exit 1 on every leaf outside `docs`; the six `docs` leaves exit 2. `config zzbogus` and `completion nonesuch` exit 0.
 - Verb-level checks use 2 for usage or setup (`desk`, `surface`, `preflight`, `herdr`, `recipe`, `launch which`, `audit`, `update`), but 2 also means "target running" (`resume`), "file absent" (`env check`), "instance unreachable" (`tasks`) and "could not run" (`docs`).

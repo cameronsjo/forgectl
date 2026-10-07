@@ -590,3 +590,39 @@ func TestStatusText_HeadlinesComeFromTheSharedViews(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderStatus_UnconfiguredBenchIsNotHealthy: a bench with neither
+// component configured used to print "✓ bench  hearth not-configured, …",
+// a healthy glyph over an unset section (forgectl#1149). It prints the skip
+// glyph and says it is not set up; one configured component keeps the
+// normal headline.
+func TestRenderStatus_UnconfiguredBenchIsNotHealthy(t *testing.T) {
+	marks := theme.Theme{}.Marks()
+	render := func(b bench.Report) string {
+		var r statusReportJSON
+		r.Git = status.Section[statusGitJSON]{State: status.StateOK}
+		r.PRs = status.Section[prDashJSON]{State: status.StateOK}
+		r.Clean = status.Section[statusCleanJSON]{State: status.StateOK}
+		r.Bench = status.Section[bench.Report]{State: status.StateOK, Data: &b}
+		var buf bytes.Buffer
+		renderStatus(&buf, r, marks)
+		for _, line := range strings.Split(buf.String(), "\n") {
+			if strings.Contains(line, "bench") {
+				return line
+			}
+		}
+		return ""
+	}
+	unset := bench.Report{
+		Hearth:    bench.Component{Name: "hearth", State: bench.StateNotConfigured},
+		Chronicle: bench.Component{Name: "chronicle", State: bench.StateNotConfigured},
+	}
+	if got, want := render(unset), marks.Skip+" bench  not set up (optional)"; got != want {
+		t.Errorf("unset bench line = %q, want %q", got, want)
+	}
+	half := unset
+	half.Hearth.State = bench.StateOK
+	if got := render(half); !strings.HasPrefix(got, marks.OK+" bench  hearth ok") {
+		t.Errorf("configured bench line = %q, want the ✓ component headline", got)
+	}
+}

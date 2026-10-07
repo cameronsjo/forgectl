@@ -213,19 +213,19 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 			"--surface is required and has no default; pass --surface tmux"), 2)
 	}
 	if opts.JSON && !opts.DryRun {
-		return WithExitCode(errors.New("--json prints the --dry-run preview; add --dry-run (a launch prints one line, not JSON)"), 2)
+		return WithExitCode(errors.New("--json prints the --dry-run preview; add --dry-run (a launch prints one line, not JSON)"), exitUsage)
 	}
 
 	if opts.Worktree != "" {
 		return runWorkerLaunch(cmd, deps, opts)
 	}
 	if opts.Brief != "" {
-		return WithExitCode(errors.New("--brief needs --worktree; only a worker launch takes a brief"), 2)
+		return WithExitCode(errors.New("--brief needs --worktree; only a worker launch takes a brief"), exitUsage)
 	}
 
 	adapter, err := surfaceAdapterForWithWarnings(opts.Backend, cmd.ErrOrStderr())
 	if err != nil {
-		return WithExitCode(err, 2)
+		return WithExitCode(err, exitUsage)
 	}
 
 	// New resolves the root from PROJECTS_DIR or ~/Projects; the surface has no
@@ -233,7 +233,7 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	client := projects.New(deps.Runner)
 	target, err := client.ResolveTarget(opts.Target)
 	if err != nil {
-		return WithExitCode(err, 2)
+		return WithExitCode(err, exitUsage)
 	}
 
 	self, err := surface.SelfPath()
@@ -243,7 +243,7 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 
 	injected, unset, err := injectedLaunchEnv(deps.Cfg)
 	if err != nil {
-		return WithExitCode(termsafe.Error(err), 2)
+		return WithExitCode(termsafe.Error(err), exitUsage)
 	}
 
 	built, err := buildSurfaceLaunchInvocation(deps.Cfg.Launch, target, injected, unset, opts.Harness, opts.Here, cmd.ErrOrStderr())

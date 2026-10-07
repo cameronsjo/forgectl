@@ -54,8 +54,12 @@ func TestUsageArgs_NamesTheArgumentAndUsage(t *testing.T) {
 			if strings.Contains(err.Error(), "arg(s)") {
 				t.Errorf("error = %q still carries cobra's count text", err)
 			}
-			if got := ExitCode(err); got != 1 {
-				t.Errorf("exit = %d, want 1: this change rewrites text, not codes (forgectl#1085 owns codes)", got)
+			want := exitUsage
+			if tt.args[0] == "tasks" { // a documented ADR-0015 exception: tasks keeps 2 for "unreachable"
+				want = exitFailed
+			}
+			if got := ExitCode(err); got != want {
+				t.Errorf("exit = %d, want %d: a wrong argument count is a usage error (ADR-0015)", got, want)
 			}
 		})
 	}

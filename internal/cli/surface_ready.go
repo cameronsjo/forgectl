@@ -95,7 +95,7 @@ that cannot be used, a harness with no predicates).
 
 func runSurfaceReady(cmd *cobra.Command, deps module.Deps, opts readyOptions) error {
 	if opts.Timeout <= 0 || opts.Interval <= 0 {
-		return WithExitCode(errors.New("--timeout and --interval must be positive"), 2)
+		return WithExitCode(errors.New("--timeout and --interval must be positive"), exitUsage)
 	}
 	w, err := openWorker(cmd, deps, opts.Repo, opts.Name)
 	if err != nil {
@@ -143,7 +143,7 @@ func (w *openedWorker) evaluate(s ready.Screen) ready.Verdict {
 // harness's predicates. Every failure is a usage or setup error (exit 2).
 func openWorker(cmd *cobra.Command, deps module.Deps, repo, name string) (*openedWorker, error) {
 	if err := worker.ValidName(name); err != nil {
-		return nil, WithExitCode(fmt.Errorf("name: %w", err), 2)
+		return nil, WithExitCode(fmt.Errorf("name: %w", err), exitUsage)
 	}
 	wl, err := openWorkerLedger(cmd, deps, repo)
 	if err != nil {
@@ -152,19 +152,19 @@ func openWorker(cmd *cobra.Command, deps module.Deps, repo, name string) (*opene
 	herdr, led := wl.herdr, wl.led
 	row, ref, err := launchedWorker(led, name)
 	if err != nil {
-		return nil, WithExitCode(err, 2)
+		return nil, WithExitCode(err, exitUsage)
 	}
 
 	path, err := config.SurfaceReadyPredicatesPath()
 	if err != nil {
-		return nil, WithExitCode(err, 2)
+		return nil, WithExitCode(err, exitUsage)
 	}
 	table, err := ready.Load(path)
 	if err != nil {
-		return nil, WithExitCode(termsafe.Error(err), 2)
+		return nil, WithExitCode(termsafe.Error(err), exitUsage)
 	}
 	if !table.Has(row.Harness) {
-		return nil, WithExitCode(fmt.Errorf("no readiness predicates for harness %q (built-in table, or %s)", row.Harness, path), 2)
+		return nil, WithExitCode(fmt.Errorf("no readiness predicates for harness %q (built-in table, or %s)", row.Harness, path), exitUsage)
 	}
 	return &openedWorker{herdr: herdr, led: led, row: row, ref: ref, table: table}, nil
 }
@@ -267,5 +267,5 @@ func reportReady(cmd *cobra.Command, r readyResult, asJSON bool) error {
 		_, err := fmt.Fprintf(out, "%s: ready\n", r.Name)
 		return err
 	}
-	return WithExitCode(fmt.Errorf("worker %s is %s: %s", r.Name, r.State, termsafe.SafeLineMax(r.Reason, 300)), 1)
+	return WithExitCode(fmt.Errorf("worker %s is %s: %s", r.Name, r.State, termsafe.SafeLineMax(r.Reason, 300)), exitFailed)
 }

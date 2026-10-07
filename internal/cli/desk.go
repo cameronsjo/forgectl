@@ -32,7 +32,7 @@ var deskModule = module.Manifest{
 const (
 	// deskExitUsage: a flag or argument was wrong, or a precondition (a
 	// terminal, a herdr pane) is missing. Nothing was changed.
-	deskExitUsage = 2
+	deskExitUsage = exitUsage
 	// deskExitTempFail: `desk watch` reached its --deadline before the run
 	// ended (EX_TEMPFAIL); the printed resume= line picks up where it stopped.
 	deskExitTempFail = 75
@@ -88,7 +88,7 @@ func resolveDeskDir(flag string) (string, error) {
 // desk is opened.
 func checkDeskName(name string) error {
 	if !desk.ValidName(name) {
-		return deskUsage("desk: %q is not an item name (NN-name, as `forgectl desk add` prints it)", termsafe.SafeLineMax(name, deskQuoteMax))
+		return withJSONUsageCode(deskUsage("desk: %q is not an item name (NN-name, as `forgectl desk add` prints it)", termsafe.SafeLineMax(name, deskQuoteMax)))
 	}
 	return nil
 }
@@ -146,6 +146,7 @@ bytes, not anything the script sources, calls or downloads.`,
 		newDeskWatchCmd(&dir, deps),
 		newDeskRunsCmd(&dir, deps),
 		newDeskShowCmd(&dir, deps),
+		newDeskLensCmd(),
 		newDeskSkipCmd(&dir, deps),
 		newDeskLayoutCmd(deps, &dir),
 		newDeskPruneCmd(&dir, deps),

@@ -227,6 +227,22 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 // slice's settings) must merge its keys into this one value, not add a flag.
 const workerClaudeSettings = `{"useAutoModeDuringPlan":false,"permissions":{"deny":["SendMessage","RemoteTrigger"]}}`
 
+// workerClaudeEditSettings is workerClaudeSettings plus an allow list, for an
+// acceptEdits worker only. The list pre-approves the commands a worker runs on
+// every task, so it stops at a prompt only for the rest (atelier P2 autonomy
+// decision, 2026-10-07; ADR-0010). A plan, default or manual worker keeps
+// prompting for everything: the list would let a plan worker commit and push.
+// A merge or `gh api` typed as its own command still prompts. Two limits: a
+// prefix rule cannot see a push's target, so `git push origin HEAD:main`
+// matches `git push *` and only a repository ruleset refuses it; and four
+// listed commands can run any other command with no prompt, through code the
+// worker can write itself or through a flag: `go test` (test code, `-exec`),
+// `go build -toolexec`, `make`, and `git push --receive-pack`/`--exec`. That
+// is accepted under ADR-0010's "accidents, not adversaries" boundary.
+const workerClaudeEditSettings = `{"useAutoModeDuringPlan":false,"permissions":{` +
+	`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"],` +
+	`"deny":["SendMessage","RemoteTrigger"]}}`
+
 // workerClaudeIsolation returns the argv that keeps everything but forgectl's own
 // settings out of a claude worker (ADR-0010, forgectl#1050). Measured on
 // Claude Code 2.1.289 with `claude -p` in a repo whose branch carried a
@@ -264,9 +280,10 @@ func workerClaudeIsolation() []string {
 	}
 }
 
-// withWorkerSettings inserts workerClaudeIsolation() and
-// `--settings <workerClaudeSettings>` right after the posture's leading
-// --permission-mode pair.
+// withWorkerSettings inserts workerClaudeIsolation() and the worker settings
+// right after the posture's leading --permission-mode pair:
+// workerClaudeEditSettings for an acceptEdits worker, workerClaudeSettings for
+// any other mode.
 //
 // A worker takes no harness args (BuildInvocation refuses them), so its
 // posture is always the session posture, which starts with that pair. The
@@ -282,7 +299,11 @@ func withWorkerSettings(args []string) ([]string, error) {
 	out := make([]string, 0, len(args)+8)
 	out = append(out, args[:2]...)
 	out = append(out, workerClaudeIsolation()...)
-	out = append(out, "--settings", workerClaudeSettings)
+	settings := workerClaudeSettings
+	if args[1] == "acceptEdits" {
+		settings = workerClaudeEditSettings
+	}
+	out = append(out, "--settings", settings)
 	return append(out, args[2:]...), nil
 }
 

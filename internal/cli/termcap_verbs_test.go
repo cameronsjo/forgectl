@@ -87,7 +87,7 @@ func TestTextVerbsCapUntrustedFields(t *testing.T) {
 		p := title(capProbe{field: "a PR title", r: 'γ'})
 		var out, errOut bytes.Buffer
 		prs := []pr.PR{{Ref: pr.Ref{Owner: "o", Repo: "r", Number: 1}, Title: p.long(), State: "OPEN"}}
-		if err := renderPRTable(&out, &errOut, prs, store(t), theme.Theme{}.Styles().Muted); err != nil {
+		if err := renderPRTable(&out, &errOut, prs, store(t), theme.Theme{}.Styles().Muted, 0, 1); err != nil {
 			t.Fatal(err)
 		}
 		p.check(t, "pr prs", out.String(), termsafe.TruncatedMarker)

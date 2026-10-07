@@ -89,10 +89,20 @@ func TestCheckConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// No file at all: valid (built-in defaults).
+	// No file at all: valid (built-in defaults), but reported as not
+	// created rather than ok, with init as the hint.
 	check := checkConfig(Deps{})
-	if check.State != StateOK {
-		t.Errorf("no config file: state = %q, want ok", check.State)
+	if check.State != StateSkip || !strings.Contains(check.Hint, "forgectl init") {
+		t.Errorf("no config file: state = %q, hint = %q; want skip pointing at forgectl init", check.State, check.Hint)
+	}
+
+	// A valid file: ok, naming the path.
+	if err := os.WriteFile(dir, []byte("log_level = \"off\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check = checkConfig(Deps{})
+	if check.State != StateOK || check.Detail != dir {
+		t.Errorf("valid config: state = %q, detail = %q; want ok with the path", check.State, check.Detail)
 	}
 
 	// Malformed TOML: fail, with a hint.

@@ -160,7 +160,7 @@ func execute(ctx context.Context) error {
 	env, err := captureEnvSnapshot()
 	if err != nil {
 		if args := normalizeArgs(processArgs()); !invokesHookVerb(args) {
-			return preFangFailure(defaultRoot, args, err)
+			return preFangFailure(defaultRoot, args, WithExitCode(err, preFangUsageExit(args)))
 		}
 	} else {
 		legacyBoundary, err = prepareLegacyBoundary(env, config.NativeMigrationFS())
@@ -191,7 +191,7 @@ func execute(ctx context.Context) error {
 	// built over a config that failed to decode can stand in a stub without
 	// its flags (projects does), which would hide the verb's --json.
 	if err := configParseGate(cfg, root, args); err != nil {
-		return preFangFailure(defaultRoot, args, WithExitCode(err, 2))
+		return preFangFailure(defaultRoot, args, WithExitCode(err, classExit(classUsage)))
 	}
 	builtRoot := func() *cobra.Command { return root }
 
@@ -311,6 +311,12 @@ func productionDeps(cfg config.Config, boundary *config.LegacyMigrationBoundary)
 // headless-menu-route paths in Execute; the only difference between them is
 // where fang writes output, which the caller sets via root.SetOut first.
 func execCommand(ctx context.Context, root *cobra.Command, args []string, th theme.Theme) error {
+	// `completion` is a lazy builtin, so classifyUsageErrors (newRoot) never saw it.
+	// Register it now (idempotent) and give it the same usage class (ADR-0015).
+	root.InitDefaultCompletionCmd()
+	if c, _, err := root.Find([]string{"completion"}); err == nil && c != nil && c != root {
+		classifyUsageErrors(c)
+	}
 	// Before cobra: it prints help for an unknown command under --help, and for a
 	// group with no Run, and exits 0 either way (forgectl#1080, #1090).
 	if err := unknownSubcommand(root, args); err != nil {

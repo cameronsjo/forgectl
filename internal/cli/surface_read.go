@@ -84,14 +84,14 @@ or the pane could not be read. Exit 2: a usage or setup error, including
 
 func runSurfaceRead(cmd *cobra.Command, deps module.Deps, opts readOptions) error {
 	if opts.Lines <= 0 || opts.Lines > maxReadLines {
-		return WithExitCode(fmt.Errorf("--lines must be 1-%d", maxReadLines), 2)
+		return WithExitCode(fmt.Errorf("--lines must be 1-%d", maxReadLines), exitUsage)
 	}
 	w, err := openWorker(cmd, deps, opts.Repo, opts.Name)
 	if err != nil {
 		return err
 	}
 	if opts.Report && w.row.Brief == nil {
-		return WithExitCode(fmt.Errorf("worker %s has no recorded brief, so no report to look for", w.row.Name), 2)
+		return WithExitCode(fmt.Errorf("worker %s has no recorded brief, so no report to look for", w.row.Name), exitUsage)
 	}
 	// A wedged herdr server that accepts the socket and never answers must
 	// end as unreadable, not hang.
@@ -103,7 +103,7 @@ func runSurfaceRead(cmd *cobra.Command, deps module.Deps, opts readOptions) erro
 		if errors.Is(err, herdradapter.ErrWorkerGone) {
 			reason = "the worker's herdr workspace is gone"
 		}
-		return WithExitCode(fmt.Errorf("%s: %s", reason, termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen)), 1)
+		return WithExitCode(fmt.Errorf("%s: %s", reason, termsafe.SafeLineMax(err.Error(), maxLedgerFailureLen)), exitFailed)
 	}
 
 	res := readResult{Name: w.row.Name, Harness: w.row.Harness, Agent: s.Agent, Status: s.Status}
@@ -138,7 +138,7 @@ func reportRead(cmd *cobra.Command, r readResult, opts readOptions) error {
 	}
 	if opts.Report {
 		if !*r.Found {
-			return WithExitCode(fmt.Errorf("worker %s: no REPORT %s line on screen yet", r.Name, r.Marker), 1)
+			return WithExitCode(fmt.Errorf("worker %s: no REPORT %s line on screen yet", r.Name, r.Marker), exitFailed)
 		}
 		_, err := fmt.Fprintln(out, termsafe.SafeLineMax(r.Report, 2000))
 		return err

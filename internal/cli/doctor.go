@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -79,7 +80,7 @@ Exit codes: 0 every check ok, warn, or skipped; 1 at least one check failed.`,
 			if !report.Healthy() {
 				// Under --json the report on stdout is the verdict
 				// (forgectl#862).
-				return jsonVerdict(WithExitCode(fmt.Errorf("doctor found problems"), 1), asJSON)
+				return jsonVerdict(WithExitCode(doctorProblems(report), 1), asJSON)
 			}
 			return nil
 		},
@@ -153,4 +154,16 @@ func writeDoctorJSON(out io.Writer, report doctor.Report) error {
 	enc := termsafe.JSONEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(j)
+}
+
+// doctorProblems is doctor's closing verdict. It names the failed checks so
+// the operator need not rescan every row for the ✗ (forgectl#1148); each
+// row's own hint carries the fix. Check names are fixed strings.
+func doctorProblems(report doctor.Report) error {
+	failed := report.Failed()
+	noun := "problems"
+	if len(failed) == 1 {
+		noun = "problem"
+	}
+	return fmt.Errorf("doctor found %d %s: %s (each row's hint names the fix)", len(failed), noun, strings.Join(failed, ", "))
 }

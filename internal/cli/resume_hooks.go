@@ -262,10 +262,10 @@ func runResumeHooks(ctx context.Context, out io.Writer, deps module.Deps, dryRun
 		failed = failed || res.Failed()
 	}
 	if len(errs) > 0 {
-		return WithExitCode(errors.Join(errs...), 1)
+		return WithExitCode(errors.Join(errs...), exitFailed)
 	}
 	if failed {
-		return WithExitCode(errors.New("a hook did not end ok — see the lines above, or `forgectl resume hooks status`"), 1)
+		return WithExitCode(errors.New("a hook did not end ok — see the lines above, or `forgectl resume hooks status`"), exitFailed)
 	}
 	return nil
 }

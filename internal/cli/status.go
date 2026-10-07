@@ -393,6 +393,10 @@ type statusSectionView struct {
 	Notes    []string
 	HasData  bool
 	Headline string
+	// Unset marks a section whose components are all not configured. It is
+	// not a failure, and it is not healthy either, so the line renderer
+	// draws the neutral skip glyph rather than ✓ (forgectl#1149).
+	Unset bool
 }
 
 // The four sections in report order, as indexes into statusSectionViews.
@@ -434,6 +438,10 @@ func statusSectionViews(r statusReportJSON) [statusSectionCount]statusSectionVie
 	}
 	if r.Bench.Data != nil {
 		views[statusIdxBench].Headline = statusBenchHeadline(*r.Bench.Data)
+		if benchUnset(*r.Bench.Data) {
+			views[statusIdxBench].Unset = true
+			views[statusIdxBench].Headline = "not set up (optional)"
+		}
 	}
 	return views
 }
@@ -474,10 +482,12 @@ func renderStatusCapped(out io.Writer, r statusReportJSON, marks theme.Marks, pr
 // dereference Data.
 func renderStatusSection(out io.Writer, marks theme.Marks, v statusSectionView, rows func()) {
 	var glyph string
-	switch v.State {
-	case status.StateOK:
+	switch {
+	case v.Unset:
+		glyph = marks.Skip
+	case v.State == status.StateOK:
 		glyph = marks.OK
-	case status.StateDegraded:
+	case v.State == status.StateDegraded:
 		glyph = marks.Warn
 	default:
 		glyph = marks.Fail
@@ -508,6 +518,11 @@ func statusPRsHeadline(d prDashJSON) string {
 func statusCleanHeadline(c statusCleanJSON) string {
 	return fmt.Sprintf("%s reclaimable across %d target(s), %d skipped, under %s",
 		formatBytes(c.TotalReclaimableBytes), c.Reclaimable, c.Skipped, termsafe.QuotePath(c.Root))
+}
+
+// benchUnset reports whether no bench component is configured at all.
+func benchUnset(b bench.Report) bool {
+	return b.Hearth.State == bench.StateNotConfigured && b.Chronicle.State == bench.StateNotConfigured
 }
 
 // statusBenchHeadline is the bench section's headline: each component's

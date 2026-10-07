@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -16,14 +17,17 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/desk"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/runview"
+	"github.com/cameronsjo/forgectl/internal/tui"
 )
 
 // loadedRun is one run read in full for `desk runs` and `desk show`.
 type loadedRun struct {
 	ref    runview.RunRef
+	spec   *runview.Spec
 	delta  runview.Delta
 	folder *runview.Folder
 	state  runview.RunState
@@ -38,11 +42,8 @@ func loadRun(src runview.Source, ref runview.RunRef) (*loadedRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	spec := &runview.Spec{}
-	if ref.Kind == runview.KindDesk {
-		spec = runview.DeskSpec()
-	}
-	r := &loadedRun{ref: ref, delta: d, folder: runview.NewFolder(spec, d.Defs)}
+	spec := runview.SpecOf(src, ref)
+	r := &loadedRun{ref: ref, spec: spec, delta: d, folder: runview.NewFolder(spec, d.Defs)}
 	r.folder.Append(d.Events...)
 	r.foldTo(r.folder.Len(), false)
 	return r, nil
@@ -119,7 +120,58 @@ func openLogSource(log deskLogOpts) (runview.Source, error) {
 	if err != nil {
 		return nil, fmt.Errorf("desk: --log: %w", err)
 	}
+	if log.lens != "" {
+		lens, err := loadLens(log.lens)
+		if err != nil {
+			return nil, err
+		}
+		return runview.NewLensSource(abs, lens)
+	}
 	return runview.NewLogSource(abs, log.keys())
+}
+
+// loadLens reads the lens --lens names: a path when it has a slash or ends in
+// .toml, else NAME.toml in the lenses directory, else the built-in events
+// lens for "events".
+func loadLens(name string) (*runview.Lens, error) {
+	path, err := lensPath(name)
+	if errors.Is(err, fs.ErrNotExist) && name == runview.EventsLensName {
+		return runview.EventsLens(), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	lens, err := runview.LoadLens(path)
+	if errors.Is(err, fs.ErrNotExist) && name == runview.EventsLensName {
+		return runview.EventsLens(), nil // built in; a file of that name wins
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, WithExitCode(fmt.Errorf("desk: no lens %s at %s; write one there, or see forgectl desk lens --help", safeLabel(name), safeText(path)), deskExitUsage)
+	}
+	if err != nil {
+		return nil, WithExitCode(fmt.Errorf("desk: %w", err), deskExitUsage)
+	}
+	return lens, nil
+}
+
+func lensPath(name string) (string, error) {
+	if name == runview.EventsLensName {
+		if dir, err := config.LensesDir(); err == nil {
+			return filepath.Join(dir, name+".toml"), nil
+		}
+		return "", fs.ErrNotExist // no config dir: the built-in lens
+	}
+	if strings.ContainsRune(name, filepath.Separator) || strings.HasSuffix(name, ".toml") {
+		return filepath.Abs(name)
+	}
+	if name == "." || name == ".." {
+		return "", deskUsage("desk: --lens %s: give a lens name or a .toml file", safeLabel(name))
+	}
+	dir, err := config.LensesDir()
+	if err != nil {
+		return "", fmt.Errorf("desk: lenses directory: %w", err)
+	}
+	return filepath.Join(dir, name+".toml"), nil
 }
 
 // reportRunFailures writes one stderr line per failure and returns the error
@@ -132,7 +184,7 @@ func reportRunFailures(w io.Writer, failed []error) error {
 	for _, err := range failed {
 		_, _ = fmt.Fprintln(w, safeText(err.Error()))
 	}
-	return WithExitCode(fmt.Errorf("desk: %s could not be read", plural(len(failed), "source", "sources")), 1)
+	return WithExitCode(fmt.Errorf("desk: %s could not be read", plural(len(failed), "source", "sources")), exitFailed)
 }
 
 func runDeskRuns(cmd *cobra.Command, deps module.Deps, dirFlag string, log deskLogOpts, asJSON bool) error {
@@ -260,6 +312,9 @@ func runDeskShow(cmd *cobra.Command, deps module.Deps, dirFlag, name string, log
 			return err
 		}
 	}
+	if o.live && !deskHasTerminal() {
+		return WithExitCode(tui.ErrRunWatchNeedsTerminal, deskExitUsage)
+	}
 	srcs, closeAll, failed := deskRunSources(cmd, deps, dirFlag, log, name == "")
 	defer closeAll()
 	if len(failed) > 0 {
@@ -288,6 +343,13 @@ func runDeskShow(cmd *cobra.Command, deps module.Deps, dirFlag, name string, log
 		return deskNotFound("desk show", "run", name, "runs", knownRunNames(dirFlag))
 	}
 	if err != nil {
+		return err
+	}
+	if o.live {
+		err := tui.RunWatch(cmd.Context(), src, tui.RunWatchOptions{Theme: deps.Theme, Name: r.ref.Name, ASCII: deskNoIcons(cmd, deps)})
+		if errors.Is(err, tui.ErrRunWatchNoRun) {
+			return WithExitCode(err, exitFailed)
+		}
 		return err
 	}
 	if o.at >= 0 {
@@ -352,6 +414,7 @@ type runEventJSON struct {
 
 type runShowCountJSON struct {
 	Dropped       int `json:"dropped"`
+	Ignored       int `json:"ignored"`
 	DroppedFields int `json:"dropped_fields"`
 	UnknownSteps  int `json:"unknown_steps"`
 	BadExits      int `json:"bad_exits"`
@@ -366,7 +429,7 @@ func showJSON(r *loadedRun, replay bool) deskShowJSON {
 		Edges:       append(make([][2]string, 0, len(s.Edges)), s.Edges...),
 		Events:      make([]runEventJSON, 0, r.at),
 		Counts: runShowCountJSON{
-			Dropped: r.delta.Dropped, DroppedFields: r.delta.DroppedFields,
+			Dropped: r.delta.Dropped, Ignored: r.delta.Ignored, DroppedFields: r.delta.DroppedFields,
 			UnknownSteps: s.UnknownSteps, BadExits: s.BadExits,
 		},
 		Partial: r.delta.Partial,
@@ -419,6 +482,13 @@ func writeShowText(out io.Writer, r *loadedRun, o deskShowOpts, noIcons bool) er
 		head += fmt.Sprintf(" · replay %d/%d", r.at, r.folder.Len())
 	}
 	w.printf("%s\n", head)
+	now := deskNow()
+	if replay {
+		now = time.Time{}
+	}
+	if g := runview.Gist(s, r.live, r.folder.Events()[:r.at], now); g != "" {
+		w.printf("%s\n", safeText(g))
+	}
 
 	idW := 0
 	for _, st := range s.Steps {
@@ -445,7 +515,11 @@ func writeShowText(out io.Writer, r *loadedRun, o deskShowOpts, noIcons bool) er
 		w.printf("  %s %-*s  %s\n", smk.Glyph, idW, safeLabel(st.ID), strings.Join(parts, " · "))
 	}
 	if len(s.Steps) == 0 && r.ref.Kind == runview.KindLog {
-		w.printf("  (a log has no step model: --events shows its timeline)\n")
+		if r.spec.ActionField != "" {
+			w.printf("  (no step has started: --events shows the timeline, and forgectl desk lens check shows which rules matched)\n")
+		} else {
+			w.printf("  (a log has no step model: --events shows its timeline, and a --lens gives it one)\n")
+		}
 	}
 
 	if o.events {
@@ -460,6 +534,7 @@ func writeShowText(out io.Writer, r *loadedRun, o deskShowOpts, noIcons bool) er
 		one, many string
 	}{
 		{r.delta.Dropped, "line dropped", "lines dropped"},
+		{r.delta.Ignored, "line ignored", "lines ignored"},
 		{r.delta.DroppedFields, "field dropped", "fields dropped"},
 		{s.UnknownSteps, "unknown step", "unknown steps"},
 		{s.BadExits, "bad exit", "bad exits"},

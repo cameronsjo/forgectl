@@ -3,6 +3,7 @@
 package runview
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -162,4 +163,97 @@ func CompareRuns(a, b RunOrder) int {
 		return 1
 	}
 	return strings.Compare(a.Name+"\x00"+a.Source, b.Name+"\x00"+b.Source)
+}
+
+// Gist is the run in one plain line, the answer to "what is going on": the
+// step that failed and why, else how the run ended, else what is running
+// and for how long. events are the run's events up to the state shown; now
+// is the clock to count a running step from, or zero to leave that out (a
+// replay, whose state is not now). It is "" when there is nothing to say yet.
+func Gist(s RunState, live LiveState, events []Event, now time.Time) string {
+	var parts []string
+	for _, st := range s.Steps {
+		if st.Status != StepFailed {
+			continue
+		}
+		p := st.ID + " failed"
+		if why, at := failure(events, st.ID); why != "" || !at.IsZero() {
+			if !at.IsZero() {
+				p += " at " + at.UTC().Format("15:04:05") // as the timeline shows times
+			}
+			if why != "" {
+				p += ": " + why
+			}
+		}
+		parts = append(parts, p)
+		break // the first failure is the one to read; the flow shows the rest
+	}
+	total, done := len(s.Steps), 0
+	var running []string
+	var since time.Time
+	for _, st := range s.Steps {
+		switch st.Status {
+		case StepClosed:
+			done++
+		case StepRunning:
+			running = append(running, st.ID)
+			if since.IsZero() || (!st.Start.IsZero() && st.Start.Before(since)) {
+				since = st.Start
+			}
+		}
+	}
+	switch live {
+	case LiveEnded:
+		if len(parts) == 0 {
+			p := "finished"
+			if total > 0 {
+				p += fmt.Sprintf(": %d of %d steps done", done, total)
+			}
+			parts = append(parts, p)
+		}
+		if s.Exit != nil {
+			parts = append(parts, fmt.Sprintf("exit %d", *s.Exit))
+		}
+	case LiveLost:
+		parts = append(parts, "lost: it stopped with no end")
+	case LiveSkipped, LiveChanged, LiveWaiting:
+	default:
+		if len(running) > 0 {
+			p := "running " + strings.Join(running, ", ")
+			// Only a run its source calls live has been running until now; a
+			// log with no end rule may be yesterday's.
+			if (live == LiveLive || live == LiveRunning) && !now.IsZero() && !since.IsZero() && now.After(since) {
+				p = "running " + strings.Join(running, ", ") + " for " + now.Sub(since).Round(time.Second).String()
+			}
+			parts = append(parts, p)
+		} else if total > 0 && len(parts) == 0 {
+			parts = append(parts, fmt.Sprintf("%d of %d steps done", done, total))
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// failure is why step id failed, as the event that failed it says it: its
+// name, in plain words when a lens's rule rewrote it, and its time. It is the
+// first failing line since the step last started, which is usually the
+// cause; the lines after it are often the fallout (a rollback, a retry).
+// Only an event a lens classified carries a name worth reading; a desk run's
+// STEP-FAIL says nothing the flow does not.
+func failure(events []Event, id string) (why string, at time.Time) {
+	found := false
+	for _, e := range events {
+		if e.Step != id {
+			continue
+		}
+		a, _ := e.field(LensActionField)
+		switch Action(a) {
+		case ActionStart:
+			why, at, found = "", time.Time{}, false
+		case ActionFail:
+			if !found {
+				why, at, found = e.Name, e.Time, true
+			}
+		}
+	}
+	return why, at
 }

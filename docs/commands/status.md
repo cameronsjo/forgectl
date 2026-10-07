@@ -55,7 +55,7 @@ Without `--json`, `--limit N` replaces the text view's caps (10 projects, 5 PRs)
 ```json
 {
   "git":   {"state": "ok",       "error": "", "notes": [], "data": {…}},
-  "prs":   {"state": "degraded", "error": "", "notes": ["awaiting-you: query failed"], "data": {…}},
+  "prs":   {"state": "degraded", "error": "", "notes": ["awaiting-you: query failed (gh is not signed in to github.com; run gh auth login)"], "data": {…}},
   "clean": {"state": "failed",   "error": "timed out after 20s", "notes": [], "data": null},
   "bench": {"state": "ok",       "error": "", "notes": [], "data": {…}}
 }
@@ -93,7 +93,7 @@ Under `--json`, a failure before any section runs (a bad flag, or a bad `--timeo
     "hearth"  [status unknown]
 ! prs    1 active review(s), 3 awaiting you, 5 open by you
     cameronsjo/forgectl#42  fix(cli): cap the status rows
-    note: your-open: query failed
+    note: your-open: query failed (gh is not signed in to github.com; run gh auth login)
 ✗ clean  failed: timed out after 20s
 ✓ bench  hearth ok, chronicle unavailable
     ✗ chronicle — chronicle status failed
@@ -120,7 +120,7 @@ The human view can change between releases. Scripts should read `--json`, whose 
   > beta                      [2 modified]
     gamma                     [1 ahead]
 ! prs    0 active review(s), 2 awaiting you, 1 open by you
-    note: your-open: query failed
+    note: your-open: query failed (gh is not signed in to github.com; run gh auth login)
     o/r#1                     awaiting you · fix the thing
     o/r#2                     awaiting you · add the other
     … 1 more (tab to this section)

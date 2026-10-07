@@ -16,6 +16,7 @@ forgectl desk runs                              # every run and how far it got
 forgectl desk show 17-fix --events              # one run as a flow, with its event timeline
 forgectl desk show 17-fix --at 4                # replay: the run after its first 4 events
 forgectl desk show --log ./events.jsonl         # a JSONL log from another tool, as a timeline
+forgectl desk show --log app.log --lens myapp --live   # an app's log, taught by a lens, followed live
 forgectl desk skip 17-fix --reason "superseded" # skip a waiting item, or clear a lost run
 forgectl desk layout --progress 'CMD'           # herdr split: this pane left, the desk right, CMD below
 forgectl desk layout --below                    # herdr: the desk in a full-width row under every pane in the tab
@@ -69,10 +70,48 @@ The dashboard: three stat tiles (waiting, started today, outcomes), the queue wi
 | `v` | view the selected item's script |
 | `l` | view the latest log |
 | `r` | open the run view on the selected item's run (an item that has not run yet says so instead; with nothing selected, the newest run): its steps as a flow, the event timeline, and replay. `←`/`→` step through events, `[`/`]` move 10, `g`/`G` jump to the start or to the end (back to live for a running item); a finished run's replay keeps its outcome in the header, `space` plays, `n`/`p` switch runs, `q` closes |
+| `t` | open the timeline (below); the footer's hint counts what is new since you last closed it |
 | `a` | run every waiting item on screen, except TTY and changed items; asks first, listing each item with its full sha256, and runs exactly those names and hashes. A list longer than half the window pages (`space` next, `b` back, `esc` cancels), and `y` runs it only once every page has been on screen; a window too small for one full hash refuses |
 | `j` / `k` | move |
 | `?` | show every key and what it does (a narrow footer drops the least important hints first; `q` always stays, and `?` until the window is very narrow) |
 | `q` | quit; detached runs keep running |
+
+#### The timeline
+
+`t` shows everything on the desk in one list, so you can see what happened while you were away without reading logs or hashes:
+
+```text
+desk timeline  ◌ 3 need you · ● 2 running · • 3 new                   19:07
+
+ Needs you · enter takes you to it ──────────────────────────────────── 3
+▸    5m  ◌ Refresh the sudo ticket             18 refresh-credentials · tty
+         │ waiting for you · queued 5m ago · runs in the desk's pane
+    30h  ◌ Clear old caches                                 19 old-cleanup
+           waiting for you · queued 30h ago · stale
+
+ Today · Mon 5 Oct ──────────────────────────────────────────────────── 6
+  19:06  ● Sync the package mirror  • new                   14 sync-mirror
+         │ running · 0:50 so far
+  18:47  ✗ Probe the canary  • new                         12 canary-probe
+         │ failed · exit 1 after 0:18
+  18:44  ✓ Merge 1169                                        15 merge-1169
+           ran ok in 0:41
+```
+
+- **Needs you** comes first: waiting items and lost runs, whatever their day, each with how long it has waited.
+- Everything else follows newest first, grouped under Today, Yesterday and then the date. Each entry is placed at its latest moment: when it ended, started, was skipped or was queued.
+- An entry shows its WHAT, or its name when it has none. The line under it says what happened in plain words, such as `ran ok in 0:41`, `failed · exit 1 after 0:18`, `skipped by you: superseded` or `not run · its bytes changed after it was queued`.
+- A `new` badge marks entries that happened after you last closed the timeline. Until you close it once, that means after the dashboard started.
+- Nothing runs from the timeline. `enter` on an item that needs you returns to the dashboard with it selected, where `y` still acts only on the hash in the focus panel and `s` clears a lost run. On any other run, `enter` (or `r`) opens the run view.
+
+| Key | Action |
+|---|---|
+| `enter` | an item that needs you: back to the dashboard with it selected. A run: the run view |
+| `r` | the run view for the selected entry |
+| `l` | the selected run's log |
+| `v` | the selected item's script |
+| `j` / `k`, `g` / `G` | move, or jump to the first or last entry |
+| `t`, `esc`, `q` | back to the dashboard; what was new counts as seen |
 
 The dashboard rings the terminal bell when an item arrives, and again every 5 minutes while anything waits; inside a herdr pane it also sends a herdr notification. The window title reads `desk ● N waiting`.
 
@@ -188,7 +227,7 @@ Every run with its progress, one line each: live runs first, then the most recen
 | `--json` | print `[{source, name, kind, live, exit, steps, done, failed, events, updated, partial}]` |
 | `--log FILE` | add a JSONL log as one more run (see `desk show`) |
 
-`live` is `running`, `ended`, `lost`, `skipped` or `changed` (skipped because its bytes changed after it was queued; it never ran) for a desk run, and `unknown` for a log. Like `status`, reading the desk scans it.
+`live` is `running`, `ended`, `lost`, `skipped` or `changed` (skipped because its bytes changed after it was queued; it never ran) for a desk run; `live` or `ended` for a log read through a lens that can end it; and `unknown` for any other log. Like `status`, reading the desk scans it.
 
 Exit codes: 0 listed; 1 a source or a run could not be read in full (the rest are still listed, and stderr names each one, with `--json` too: the array has no field for it); 2 a usage error.
 
@@ -212,13 +251,120 @@ record: forgectl desk status 17-nightly
 | `--at N` | replay: the state after the run's first `N` events. A replay shows the fold alone: no durations, and no runner state, which describe the run now |
 | `--log FILE` | read a JSONL log instead of a desk item (give a name or `--log`, not both) |
 | `--event-key`, `--step-key`, `--time-key` | with `--log`: the JSON keys holding each line's event name (`event`), step (`step`) and time (`time`; RFC 3339 or epoch seconds) |
-| `--json` | print `{source, name, kind, live, exit, at, events_total, steps, edges, events, counts, partial, held, note}` |
+| `--lens LENS` | with `--log`: read the log through a lens, which gives it steps and an exit and may be plain text (see [`desk lens`](#forgectl-desk-lens)). Not with the key flags: a lens names its own keys |
+| `--live` | open the dashboard's run view on this run alone, full screen, and follow it as it grows: a line that says how the run is going (what failed and why, or what is running and for how long), the steps as a flow, the event timeline, replay. The keys are the run view's (`r` on the dashboard), plus `o` to show lines as the log wrote them when a lens rewrote them; only `q` (or `ctrl+c`) quits. It needs a terminal, and takes no `--json`, `--events` or `--at` |
+| `--json` | print `{source, name, kind, live, exit, at, events_total, steps, edges, events, counts, partial, held, note}`; `counts` is `{dropped, ignored, dropped_fields, unknown_steps, bad_exits}` |
 
-A log has no step model, so `show --log` lists its events and no steps. A line that is not one JSON object, or has no event name, is dropped and counted; a float, a nested value or `null` is dropped from its event and counted. The file is opened without following a symlink and only if it is a regular file, and reads stop at 32 MiB per file, 64 KiB per line and 50 000 events. A log whose last line has no newline yet holds that line back (`held` is true, and the text says so), since a writer may still be finishing it. An integer time past the year 9999 (epoch milliseconds, say) is read as no time. At most 256 fields are kept from one line.
+A log has no step model, so `show --log` lists its events and no steps; with `--lens` it has the lens's. Without a lens, a line that is not one JSON object, or has no event name, is dropped and counted; a float, a nested value or `null` is dropped from its event and counted. With a text lens, a line its pattern does not match becomes an event named by the whole line (see [`desk lens`](#forgectl-desk-lens)). The file is opened without following a symlink and only if it is a regular file, and reads stop at 32 MiB per file, 64 KiB per line and 50 000 events. A log whose last line has no newline yet holds that line back (`held` is true, and the text says so), since a writer may still be finishing it. An integer time past the year 9999 (epoch milliseconds, say) is read as no time. At most 256 fields are kept from one line.
 
 A waiting item has no run yet: `show` reads it as `waiting`, with no events.
 
 Exit codes: 0 shown; 1 no such run, or it was read only in part: a read error (shown as a `note`) or a log past the 32 MiB cap (`partial`); it is still shown; 2 a usage error.
+
+### `forgectl desk lens`
+
+A lens teaches forgectl to read one app's log as a run, so the log is read for you rather than by you: how a line splits into an event, a step and a time, which lines start, finish or fail a step or end the run, and how a cryptic line reads in plain words. `desk show --log FILE --lens NAME` draws the log as steps with an exit, and `--live` follows it as it grows. The design is [ADR-0014](../adr/0014-log-lenses.md).
+
+A lens is `NAME.toml` in the lenses directory (`desk lens list` prints where: `~/.config/forgectl/lenses` on Linux), or any `.toml` file `--lens` names by path.
+
+```toml
+about  = "nightly backup"
+format = "text"                       # or "json": one JSON object per line
+# time_layout = "2006-01-02 15:04:05" # top level: a Go layout; default RFC 3339 or epoch seconds
+
+[text]                                # format = "text": how a line splits
+pattern = '^(?P<time>\S+) (?P<level>\w+) (?P<event>.*)$'
+
+[[rule]]                              # rules run in order; the first match wins
+action = "ignore"
+match  = '^heartbeat'
+[[rule]]
+action = "start"
+match  = '^backing up (?P<step>\S+)'
+say    = "backing up {step}"
+[[rule]]
+action = "close"
+match  = '^backed up (?P<step>\S+)'
+[[rule]]
+action = "fail"
+field  = "level"                      # match a field instead of the event
+match  = '^ERROR$'
+step   = "upload"
+[[rule]]
+action = "note"
+match  = '^q=ord\.sel cid=(?P<cid>\d+)'
+say    = "querying orders for customer {cid}"
+[[rule]]
+action = "end"
+match  = '^done rc=(?P<exit>\d+)'
+[[rule]]
+action = "end"
+match  = '^shutting down'
+exit   = 0                            # a fixed exit for a line that carries none
+```
+
+| Key | Meaning |
+|---|---|
+| `about` | one line saying what the lens reads; `desk lens list` shows it |
+| `format` | `json` or `text`; required |
+| `[json]` `event`, `step`, `time` | the keys holding each line's event name, step and time (default `event`, `step`, `time`) |
+| `[json]` `action`, `exit` | keys a line may carry its own action and exit in; a valid action there decides before the rules |
+| `[text]` `pattern` | a regular expression whose named groups split a line: `event`, `step` and `time` fill those, any other becomes a field. A line it does not match (a stack trace's next line) is an event named by the whole line. With no pattern, each line is its event |
+| `time_layout` | a [Go time layout](https://pkg.go.dev/time#pkg-constants) for the time, at the top level (not in `[text]`); a layout with no zone reads local time |
+| `[[step]]` `id`, `note`, `after` | steps known up front and the steps each waits on, drawn as a flow. With none, a step appears the first time a rule starts, closes, fails or skips it, in that order, with no edges; with some, a step a rule names that is not listed is counted as unknown |
+| `[[rule]]` `action` | `start`, `close`, `fail` or `skip` a step; `end` the run; `note`, which changes no step and only rewrites the line; or `ignore`, which drops the line as noise |
+| `[[rule]]` `match` | a regular expression the event name must match, or `field`'s value when `field` is set. Its named groups fill the event: `step` the step, `exit` the run's exit (an integer 0–255), any other a field |
+| `[[rule]]` `step` | the step the rule acts on, when the line does not name it |
+| `[[rule]]` `say` | plain words to show in place of the line: `{name}` takes a group of `match`, or the event's step or a field (at most 32). The line as read is kept in the `@line` field |
+| `[[rule]]` `exit` | on an `end` rule, the exit to record when `match` has no `exit` group. An end with neither ends the run with its exit unknown |
+
+A lens needs no rules to be checked: write the format first, run `desk lens check`, and add rules once its `format:` line says every line splits.
+
+Patterns are Go's RE2, which matches in time linear in the line, so no line can stall a read. A rule that starts, closes, fails or skips a step must have a step to act on: `step`, a `step` group, or a step from the line format. An unknown key is an error, so a typo does not become a rule that never fires. Every error names the place to fix, as `[[rule]] 3: match: …`.
+
+The run ends when an `end` rule matches, and reads `live` until then (`desk runs` and `show --json` give `live` or `ended` for it). A start after an end opens the run again, as when the app restarted into the same log; the live view keeps following a log after it ends for that reason. A lens with no `end` rule (and no `[json]` `action` key) cannot know, so its run reads `log` (`unknown` in JSON), and its gist says what is running without counting the time, since the log may be old.
+
+A failed step's reason, on the gist line, is the first failing line since the step last started: usually the cause, where the lines after it are the fallout.
+
+The events a lens reads carry `@action` and `@rule` (which rule matched, from 1), and `@line` and `@exit` when set; `show --events` prints them, so the timeline says why each line did what it did. A line's own key starting with `@` is dropped, so a log cannot set its own action.
+
+**A translator, when a pattern is not enough.** A translator is a program in any language that reads an app's log and writes one JSON line per event in the event vocabulary, which the built-in lens `events` reads (a file named `events.toml` takes its place):
+
+```json
+{"event":"backing up photos","step":"photos","action":"start","time":"2026-10-07T01:00:01Z"}
+{"event":"done","action":"end","exit":0}
+```
+
+`action` is `start`, `close`, `fail`, `skip`, `end`, `note` or `ignore`, or absent (the event is shown and changes no step). forgectl never runs a translator: pipe its output into a file (`my-translator < app.log > run.jsonl`) and point `--log` at that file. An app can also write the vocabulary itself and need no translator.
+
+#### `forgectl desk lens list`
+
+The lenses directory, then one line per lens: name, format, rule count and about line; the built-in `events` lens is listed too. A lens that does not parse is listed with its error. `--json` prints `{dir, lenses: [{name, path, format, rules, about, error}]}`.
+
+Exit codes: 0 listed (an empty or missing directory too); 1 a lens did not parse; 2 a usage error.
+
+#### `forgectl desk lens check <lens> --log FILE`
+
+What a lens makes of a real log, without drawing the run: how many lines became events, were ignored or dropped; how many lines the format split (the pattern matched, or parsed as JSON), with a warning when none did; how many lines each rule matched, marking a rule that matched none; the steps found; and the most common shapes of events no rule matched (digits folded to `#`, so `user 17` and `user 23` count as one), the lines a new rule could claim. It is the loop to write a lens by, or to have an agent write one: write a rule, check, repeat until the unmatched lines are the ones that do not matter.
+
+```text
+lens backup · text · 6 rules
+read: 8 events · 1 ignored
+format: 9 of 9 lines the pattern split
+rules (first match wins):
+   1  1      ignore '^heartbeat'
+   2  2      start  '^backing up (?P<step>\S+)'
+   …
+   6  0      skip   '^never' step=x  · never matched
+steps: photos, docs
+unmatched: 3 events no rule matched; the most common:
+       2×  slow upload
+       1×  starting
+```
+
+`--json` prints `{lens, format, lines, split, events, ignored, dropped, dropped_fields, rules: [{n, rule, hits}], steps, unmatched, unmatched_top: [{name, count}], partial, note}`.
+
+Exit codes: 0 checked; 1 the log could not be read in full; 2 a usage error, or the lens does not parse.
 
 ### `forgectl desk skip <name> --reason <text>`
 

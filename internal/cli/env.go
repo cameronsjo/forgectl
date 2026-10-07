@@ -679,7 +679,7 @@ func notFoundCheckError(cmd *cobra.Command, target envpkg.Target, wordingFmt str
 	// the RunE closures above — never derived from input. The human line
 	// quotes and caps the path, as every sibling not-found message does
 	// (#847); the --json path field above stays the raw value.
-	return WithExitCode(fmt.Errorf(wordingFmt, termsafe.QuotePath(rel)), 2)
+	return WithExitCode(fmt.Errorf(wordingFmt, termsafe.QuotePath(rel)), exitUsage)
 }
 
 // checkJSONFailure keeps env check's --json stderr free of fang's human error

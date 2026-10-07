@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/ghfail"
 	"github.com/cameronsjo/forgectl/internal/githubauth"
 	"github.com/cameronsjo/forgectl/internal/pr"
 )
@@ -102,7 +103,7 @@ func (g *GitHub) Items(ctx context.Context) ([]Item, []string, error) {
 	owners, err := githubauth.ResolveOwners(ctx, g.run, g.configured, g.host)
 	if err != nil {
 		slog.Warn("Failed to resolve GitHub review owners.", "configured", len(g.configured), "error", err)
-		return nil, nil, fmt.Errorf("%w: %w", ErrGitHubQueriesUnavailable, err)
+		return nil, []string{ownersNote(err, g.host)}, fmt.Errorf("%w: %w", ErrGitHubQueriesUnavailable, err)
 	}
 
 	type query struct {
@@ -148,8 +149,9 @@ func (g *GitHub) Items(ctx context.Context) ([]Item, []string, error) {
 	for _, res := range results {
 		if res.err != nil {
 			// The raw cause is logged, never rendered: it can carry gh stderr.
+			// The note carries only ghfail's fixed category and fix.
 			slog.Warn("Review query degraded.", "query", res.label, "error", res.err)
-			notes = append(notes, fmt.Sprintf("%s: query failed", res.label))
+			notes = append(notes, ghfail.Note(res.label, res.err, g.host))
 			failed++
 			sawDeadline = sawDeadline || errors.Is(res.err, context.DeadlineExceeded)
 			sawCanceled = sawCanceled || errors.Is(res.err, context.Canceled)
@@ -307,4 +309,14 @@ func parseSearchIssues(jsonOut, host string) (items []Item, rawCount int, err er
 		out = append(out, item)
 	}
 	return out, len(raw), nil
+}
+
+// ownersNote is the note for a failed owner resolution. Only a failed login
+// lookup ran gh; anything else is the configured owner list being refused
+// before any query, which config.toml fixes and doctor does not check.
+func ownersNote(err error, host string) string {
+	if errors.Is(err, githubauth.ErrLoginUnavailable) {
+		return ghfail.Note("github owners", err, host)
+	}
+	return "github owners: configured owners refused (fix the owners list in config.toml)"
 }
