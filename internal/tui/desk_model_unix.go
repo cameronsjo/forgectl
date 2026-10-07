@@ -173,6 +173,10 @@ type deskModel struct {
 	busy     bool   // an action is in flight
 
 	pager *deskPager
+	// tl is the open timeline (t). tlSeen is when the operator last closed
+	// it: entries after it read as new, on the timeline and in the footer.
+	tl     *deskTimelineView
+	tlSeen time.Time
 	// rv is the open run view (r), reading runs from runs.
 	rv   *deskRunView
 	runs runview.Source
@@ -221,6 +225,7 @@ func newDeskModel(ctx context.Context, d deskBackend, opts DeskOptions) deskMode
 		seen:        map[string]bool{},
 	}
 	m.started = m.now()
+	m.tlSeen = m.started
 	m.frame = DeskFrameOptions{
 		Host:    host,
 		Version: opts.Version,
@@ -333,6 +338,7 @@ func (m deskModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = t.Width, t.Height
 		m.markShown()
+		m.syncTimeline()
 		return m, nil
 	case tea.BackgroundColorMsg:
 		if m.theme.Mode() == theme.ModeAuto {
@@ -480,6 +486,7 @@ func (m deskModel) applyScan(t deskScanMsg) (tea.Model, tea.Cmd) {
 	}
 	m.watchSelection()
 	m.reportEnded()
+	m.syncTimeline()
 
 	waiting := map[string]bool{}
 	var arrived []desk.Item
@@ -580,6 +587,9 @@ func (m deskModel) updateKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.rv != nil {
 		return m.runViewKey(key)
 	}
+	if m.tl != nil {
+		return m.timelineKey(key)
+	}
 	if m.confirm != confirmNone {
 		return m.confirmKey(key)
 	}
@@ -614,6 +624,8 @@ func (m deskModel) updateKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.log()
 	case "r":
 		return m.openRunView()
+	case "t":
+		return m.openTimeline(), nil
 	case "?":
 		// The key list, from the table the footer is drawn from (#1108).
 		m.pager = &deskPager{title: "keys", lines: deskKeyLines()}
@@ -963,6 +975,11 @@ func (m deskModel) undo() (tea.Model, tea.Cmd) {
 // waiting item shows the bytes that were hashed, which are the bytes y runs.
 func (m deskModel) view() tea.Cmd {
 	r, ok := m.selected()
+	return m.viewOf(r, ok)
+}
+
+// viewOf opens r's script or manifest in the pager; ok false does nothing.
+func (m deskModel) viewOf(r queueRow, ok bool) tea.Cmd {
 	if !ok {
 		return nil
 	}
@@ -983,9 +1000,16 @@ func (m deskModel) view() tea.Cmd {
 // log opens the selected item's log, or the latest run's when nothing is
 // selected. A selected item that has not run says so.
 func (m deskModel) log() tea.Cmd {
+	r, ok := m.selected()
+	return m.logOf(r, ok)
+}
+
+// logOf opens r's log, or the latest run's when ok is false.
+func (m deskModel) logOf(r queueRow, ok bool) tea.Cmd {
 	name := ""
-	if r, ok := m.selected(); ok {
-		if r.kind == rowWaiting || r.kind == rowRefused || r.kind == rowChanged {
+	if ok {
+		if r.kind == rowWaiting || r.kind == rowRefused || r.kind == rowChanged ||
+			(r.kind == rowSkipped && r.item.Meta.SkipReason != desk.SkipLost) {
 			// No run, so no log: say so rather than open another item's log as
 			// this one's (#1106).
 			msg := itemLabel(r.item.Name) + " has not run, so it has no log"
@@ -1093,6 +1117,9 @@ func (m deskModel) View() tea.View {
 		content = m.pagerView(width, height)
 	} else if m.rv != nil {
 		content = asciiFrame(m.rv.render(m.styles(), width, height), m.opts.ASCII)
+	} else if m.tl != nil {
+		text, _ := m.timeline().render()
+		content = asciiFrame(text, m.opts.ASCII)
 	} else {
 		content = m.dashboard().render()
 	}
@@ -1117,6 +1144,7 @@ func (m deskModel) dashboard() deskFrame {
 	return deskFrame{
 		snap: m.snap, width: m.screenWidth(), height: m.screenHeight(), now: m.now(), opts: opts,
 		cursor: m.cursor, footer: m.footer(), confirming: m.confirm != confirmNone, canUndo: m.lastSkip != "",
+		tlNew: m.tlNewCount(),
 	}
 }
 
@@ -1413,4 +1441,143 @@ func (m *deskModel) reportEnded() {
 		m.runStarted, m.startedLine = "", ""
 		return
 	}
+}
+
+// timeline is the frame View draws while the timeline is open.
+func (m deskModel) timeline() tlFrame {
+	th := m.theme
+	footer := ""
+	if m.message != "" {
+		footer = " " + m.message
+	}
+	f := tlFrame{
+		snap: m.snap, steps: m.frame.Steps, width: m.screenWidth(), height: m.screenHeight(),
+		now: m.now(), seen: m.tlSeen, theme: &th, footer: footer,
+	}
+	if m.tl != nil {
+		f.cursor, f.offset = m.tl.cursor, m.tl.offset
+	}
+	return f
+}
+
+// tlNewCount is how many timeline entries are new since the operator last
+// closed it.
+func (m deskModel) tlNewCount() int {
+	n := 0
+	for _, e := range deskTimeline(m.snap) {
+		if tlNew(e, m.tlSeen) {
+			n++
+		}
+	}
+	return n
+}
+
+// openTimeline opens the timeline on its newest entry.
+func (m deskModel) openTimeline() deskModel {
+	m.tl = &deskTimelineView{}
+	m.syncTimeline()
+	return m
+}
+
+// closeTimeline goes back to the dashboard. What was on the timeline has
+// now been seen, so it is no longer new.
+func (m *deskModel) closeTimeline() {
+	m.tl = nil
+	m.tlSeen = m.now()
+}
+
+// syncTimeline keeps the selection on the same item across a rescan (by
+// name), and the scroll where the frame drew it.
+func (m *deskModel) syncTimeline() {
+	v := m.tl
+	if v == nil {
+		return
+	}
+	entries := deskTimeline(m.snap)
+	// A name can be on two entries (a run in done/ and a later item skipped
+	// as name-reused), so the selection is the name and the kind of row.
+	if v.name != "" {
+		if i := slices.IndexFunc(entries, func(e tlEntry) bool { return e.row.item.Name == v.name && e.row.kind == v.kind }); i >= 0 {
+			v.cursor = i
+		}
+	}
+	v.cursor = min(max(v.cursor, 0), max(len(entries)-1, 0))
+	v.name = ""
+	if len(entries) > 0 {
+		v.name, v.kind = entries[v.cursor].row.item.Name, entries[v.cursor].row.kind
+	}
+	_, v.offset = m.timeline().render()
+}
+
+// selectedEntry is the timeline's selected entry.
+func (m deskModel) selectedEntry() (tlEntry, bool) {
+	entries := deskTimeline(m.snap)
+	if m.tl == nil || len(entries) == 0 {
+		return tlEntry{}, false
+	}
+	return entries[min(max(m.tl.cursor, 0), len(entries)-1)], true
+}
+
+// timelineRunView opens the run view for an entry that ran. One that did
+// not says so: its name may belong to another item's run (a name-reused
+// skip), which must not be shown as its own (#1106).
+func (m deskModel) timelineRunView(e tlEntry) (tea.Model, tea.Cmd) {
+	if !e.hasRun() {
+		m.message = m.styles().Muted.Render(safeMessage(itemLabel(e.row.item.Name) + " did not run, so there is no run to show · v shows its script"))
+		return m, nil
+	}
+	return m.openRunViewOf(e.row, true)
+}
+
+// timelineKey handles a key while the timeline is open. Nothing here runs or
+// skips an item: enter on a waiting entry goes back to the dashboard with it
+// selected, where y acts only on the hash the focus panel shows (#1098).
+func (m deskModel) timelineKey(key string) (tea.Model, tea.Cmd) {
+	m.message = ""
+	v := m.tl
+	n := len(deskTimeline(m.snap))
+	switch key {
+	case "t", "esc", "q":
+		m.closeTimeline()
+		return m, nil
+	case "j", "down":
+		v.cursor = min(v.cursor+1, max(n-1, 0))
+	case "k", "up":
+		v.cursor = max(v.cursor-1, 0)
+	case "g", "home":
+		v.cursor = 0
+	case "G", "end":
+		v.cursor = max(n-1, 0)
+	case "enter":
+		e, ok := m.selectedEntry()
+		if !ok {
+			return m, nil
+		}
+		// What needs you is acted on from the dashboard: y on a waiting
+		// item's hash, s to clear a lost run.
+		if i := slices.IndexFunc(m.rows, func(r queueRow) bool { return r.item.Name == e.row.item.Name && r.kind == e.row.kind }); i >= 0 && e.needsYou() {
+			m.closeTimeline()
+			m.cursor = i
+			m.chooseSelection()
+			return m, nil
+		}
+		return m.timelineRunView(e)
+	case "r":
+		if e, ok := m.selectedEntry(); ok {
+			return m.timelineRunView(e)
+		}
+		return m, nil
+	case "l":
+		e, ok := m.selectedEntry()
+		if !ok {
+			return m, nil
+		}
+		return m, m.logOf(e.row, true)
+	case "v":
+		e, ok := m.selectedEntry()
+		return m, m.viewOf(e.row, ok)
+	}
+	v.name = ""
+	m.syncTimeline()
+	return m, nil
 }

@@ -1,0 +1,40 @@
+desk timeline  ◌ 3 need you · ● 2 running · • 3 new    19:07
+
+ Needs you · enter takes you to it ────────────────────── 3
+▸    5m  ◌ Refresh the sudo ticket
+         │ waiting for you · queued 5m ago · runs in the d…
+    12m  ◌ Merge the feature branch once checks pass
+         │ waiting for you · queued 12m ago
+    30h  ◌ Clear old caches
+           waiting for you · queued 30h ago · stale
+
+ Today · Mon 5 Oct ────────────────────────────────────── 6
+  19:06  ● Sync the package mirror  • new
+         │ running · 0:50 so far
+  19:04  ● Rebuild the nightly artifacts  • new
+         │ running · 4 of 7 steps · 3:00 so far
+  18:47  ✗ Probe the canary  • new
+         │ failed · exit 1 after 0:18
+  18:44  ✓ Merge 1169
+         │ ran ok in 0:41
+  17:07  ! Rotate the deploy keys
+         │ not run · its bytes changed after it was queued…
+  14:07  ✓ 09 sync-mirror
+           ran ok in 2:00
+
+ Yesterday · Sun 4 Oct ────────────────────────────────── 1
+  18:07  – Prune merged branches
+           skipped by you: superseded by 12
+
+ Sat 3 Oct ────────────────────────────────────────────── 1
+  18:07  – Deploy the docs site
+           cleared after it was lost mid-run
+
+
+
+
+
+
+
+
+ enter review to run · v script · j/k move · t back

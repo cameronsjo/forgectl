@@ -9,4 +9,4 @@ desk ● 2 waiting · forgectl 0.0.0-test · host-a · ~/.local/state/forgectl/d
 │ what  Print step 01-s1                                                                           │
 │ why   The approval check                                                                         │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
- y run · s skip · v view · a all · j/k move · ? help · q quit
+ y run · s skip · v view · a all · t timeline · j/k move · ? help · q quit
