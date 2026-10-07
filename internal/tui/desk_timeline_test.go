@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/cameronsjo/forgectl/internal/desk"
@@ -227,5 +228,60 @@ func TestDeskTimeline_EmptySaysHowItFills(t *testing.T) {
 	out := ansi.Strip(renderTimeline(snap, opts, 100, 12, 0))
 	if !strings.Contains(out, "forgectl desk add") || !strings.Contains(out, "all caught up") {
 		t.Errorf("empty timeline:\n%s", out)
+	}
+}
+
+// TestDeskTimeline_WeightFollowsNeedsYou pins the title weight: bold for
+// what needs the operator, regular for today's finished work, muted for
+// anything older, and a failure's glyph stays red whatever its age.
+func TestDeskTimeline_WeightFollowsNeedsYou(t *testing.T) {
+	forceTrueColor(t)
+	snap, _ := timelineSnapshot()
+	st := theme.Default().Styles()
+	byName := map[string]tlEntry{}
+	for _, e := range deskTimeline(snap) {
+		byName[e.row.item.Name] = e
+	}
+	today := func(e tlEntry) bool { return tlDay(deskNow, e.at) == "Today" }
+	var waiting, doneToday, old, oldFailed *tlEntry
+	for _, e := range byName {
+		switch {
+		case e.row.kind == rowWaiting && waiting == nil:
+			waiting = &e
+		case e.row.kind == rowDone && today(e) && doneToday == nil:
+			doneToday = &e
+		case !tlLive(e) && !today(e) && old == nil:
+			old = &e
+		}
+		if e.row.kind == rowFailed && !today(e) && oldFailed == nil {
+			oldFailed = &e
+		}
+	}
+	if waiting == nil || doneToday == nil || old == nil {
+		t.Fatalf("fixture lacks an entry: waiting=%v doneToday=%v old=%v", waiting != nil, doneToday != nil, old != nil)
+	}
+	bold := func(s lipgloss.Style) bool {
+		return strings.Contains(s.Render("x"), "\x1b[1;") || strings.Contains(s.Render("x"), "\x1b[1m")
+	}
+	if !bold(tlTitleStyle(st, deskNow, *waiting)) {
+		t.Error("a waiting entry's title is not bold")
+	}
+	if got := tlTitleStyle(st, deskNow, *doneToday); bold(got) || got.Render("x") != st.Fg.Render("x") {
+		t.Errorf("a finished-today title should be regular Fg, got %q", got.Render("x"))
+	}
+	if got := tlTitleStyle(st, deskNow, *old); got.Render("x") != st.Muted.Render("x") {
+		t.Errorf("an older title should be Muted, got %q", got.Render("x"))
+	}
+	if oldFailed != nil {
+		if tlTitleStyle(st, deskNow, *oldFailed).Render("x") != st.Muted.Render("x") {
+			t.Error("an older failed title should be Muted")
+		}
+		_, _, look := rowLook(st, rowFailed)
+		if !strings.Contains(look("✗"), st.Danger.Render("✗")) {
+			t.Error("a failed entry lost its red glyph")
+		}
+		if tlPreviewStyle(st, deskNow, *oldFailed).Render("x") == tlPreviewStyle(st, deskNow, tlEntry{row: oldFailed.row, at: deskNow}).Render("x") {
+			t.Error("an older failure's detail should be softer than today's")
+		}
 	}
 }
