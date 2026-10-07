@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -54,7 +53,7 @@ func newTmuxKillCmd(client *tmux.Client, th theme.Theme) *cobra.Command {
 						_, _ = fmt.Fprintf(out, "no other sessions besides %q\n", name)
 						return nil
 					}
-					prompt = killOthersPrompt(name, doomed)
+					prompt = termsafe.KillOthersPrompt(name, doomed)
 				}
 				ok, err := confirm(th, prompt)
 				if err != nil {
@@ -87,32 +86,4 @@ func newTmuxKillCmd(client *tmux.Client, th theme.Theme) *cobra.Command {
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt")
 	cmd.Flags().BoolVar(&others, "others", false, "kill all sessions EXCEPT the named one")
 	return cmd
-}
-
-// maxNamedKills caps how many session names the --others prompt spells out; the
-// rest are counted, so the prompt stays on one screen with dozens of sessions.
-const maxNamedKills = 6
-
-// killOthersPrompt names the sessions `tmux kill --others` is about to kill, so
-// the operator confirms the actual set rather than "ALL sessions". Names are
-// quoted through termsafe, which shows control characters as escapes instead
-// of sending them to the terminal.
-func killOthersPrompt(keep string, doomed []string) string {
-	shown := doomed
-	if len(shown) > maxNamedKills {
-		shown = shown[:maxNamedKills]
-	}
-	names := make([]string, len(shown))
-	for i, n := range shown {
-		names[i] = termsafe.QuoteTextMax(n, 40)
-	}
-	list := strings.Join(names, ", ")
-	if extra := len(doomed) - len(shown); extra > 0 {
-		list += fmt.Sprintf(", and %d more", extra)
-	}
-	noun := "sessions"
-	if len(doomed) == 1 {
-		noun = "session"
-	}
-	return fmt.Sprintf("Keep %q and kill the other %d %s (%s)?", keep, len(doomed), noun, list)
 }
