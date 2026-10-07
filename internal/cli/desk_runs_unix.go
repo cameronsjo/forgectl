@@ -274,9 +274,18 @@ func runDeskShow(cmd *cobra.Command, deps module.Deps, dirFlag, name string, log
 		}
 		ref = refs[0]
 	}
+	if name != "" {
+		// A name taken from a JSON path carries the file's extension.
+		ref.Name = resolveName(name, func(n string) bool {
+			probe := ref
+			probe.Name = n
+			_, err := loadRun(src, probe)
+			return !errors.Is(err, desk.ErrNotFound)
+		})
+	}
 	r, err := loadRun(src, ref)
 	if errors.Is(err, desk.ErrNotFound) {
-		return fmt.Errorf("desk show: no run named %s", name)
+		return deskNotFound("desk show", "run", name, "runs", knownRunNames(dirFlag))
 	}
 	if err != nil {
 		return err
@@ -527,4 +536,15 @@ func (r *loadedRun) readInPart() error {
 		return errPastCap
 	}
 	return nil
+}
+
+// knownRunNames lists the runs in the desk, to decorate a not-found error. A
+// desk that cannot be opened yields none: the error is already being reported.
+func knownRunNames(dirFlag string) []string {
+	d, err := openDeskDir(dirFlag)
+	if err != nil {
+		return nil
+	}
+	defer d.Close() //nolint:errcheck // read side
+	return runNames(d)
 }

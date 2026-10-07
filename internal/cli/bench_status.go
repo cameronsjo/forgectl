@@ -35,7 +35,7 @@ func newBenchStatusCmd(deps module.Deps) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"hearth":{...},"chronicle":{...}} to stdout; each holds "name", "state" (ok | degraded | unavailable | not-configured), "reason", "details"; the exit code is 0 whatever the states`)
 	return cmd
 }
 

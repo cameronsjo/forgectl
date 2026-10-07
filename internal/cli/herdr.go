@@ -129,7 +129,14 @@ func runHerdrOrganize(cmd *cobra.Command, deps module.Deps, opts organizeOpts) e
 		problems = append(problems, err)
 	}
 	if len(problems) > 0 {
-		return WithExitCode(termsafe.Error(errors.Join(problems...)), 2)
+		// Joined on "; ", not errors.Join's newline: termsafe.Error flattens a
+		// newline to a literal backslash-n, which a --json consumer then reads
+		// as two characters (forgectl#1087).
+		msgs := make([]string, len(problems))
+		for i, p := range problems {
+			msgs[i] = p.Error()
+		}
+		return WithExitCode(termsafe.Error(errors.New(strings.Join(msgs, "; "))), 2)
 	}
 
 	if !opts.apply {
@@ -242,11 +249,11 @@ func organizeConfigProblem(c config.Config) error {
 	if home, err := herdrUserHome(); err == nil {
 		legacy := filepath.Join(home, legacyOrganizeRulesFile)
 		if herdrFileExists(legacy) {
-			fmt.Fprintf(&b, "\nforgectl no longer reads ~/%s. Move its keys into config.toml: default and workspace_order go under [herdr.organize], and each [[rule]] becomes [[herdr.organize.rule]].", legacyOrganizeRulesFile)
+			fmt.Fprintf(&b, ". forgectl no longer reads ~/%s. Move its keys into config.toml: default and workspace_order go under [herdr.organize], and each [[rule]] becomes [[herdr.organize.rule]].", legacyOrganizeRulesFile)
 		}
 	}
 	if _, ok := lookupHerdrEnv(legacyOrganizeRulesEnv); ok {
-		fmt.Fprintf(&b, "\n%s is set, and forgectl ignores it.", legacyOrganizeRulesEnv)
+		fmt.Fprintf(&b, ". %s is set, and forgectl ignores it.", legacyOrganizeRulesEnv)
 	}
 	return errors.New(b.String())
 }

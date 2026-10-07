@@ -77,7 +77,7 @@ The dashboard rings the terminal bell when an item arrives, and again every 5 mi
 
 `--frame` prints one frame to stdout and exits, sized by `$COLUMNS` and `$LINES` (80x40 when unset). Colour follows `NO_COLOR` and is dropped on a pipe. It reads the queue the same way `status` does.
 
-### `forgectl desk add <file>`
+### `forgectl desk add <file|->`
 
 | Flag | Meaning |
 |---|---|
