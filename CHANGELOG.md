@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.32.0](https://github.com/cameronsjo/forgectl/compare/v0.31.0...v0.32.0) (2026-10-07)
+
+
+### Features
+
+* **desk:** focus panel shows what and why in full ([#1166](https://github.com/cameronsjo/forgectl/issues/1166)) ([98a84bb](https://github.com/cameronsjo/forgectl/commit/98a84bbcdf07c011e4d265b6510d52856200bc55))
+* **surface:** show the worker posture in the launch dry-run ([#1167](https://github.com/cameronsjo/forgectl/issues/1167)) ([b3f45ec](https://github.com/cameronsjo/forgectl/commit/b3f45ec6dd0d7f40c2fbe9e241f572e1994ec650))
+
+
+### Bug Fixes
+
+* **upgrade:** show brew's output instead of hiding it ([#1169](https://github.com/cameronsjo/forgectl/issues/1169)) ([5a47a77](https://github.com/cameronsjo/forgectl/commit/5a47a77eb431d6af5bbfc89fcb93ca0df884ed55))
+
 ## [0.31.0](https://github.com/cameronsjo/forgectl/compare/v0.30.0...v0.31.0) (2026-10-07)
 
 
