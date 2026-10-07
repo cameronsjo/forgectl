@@ -89,7 +89,8 @@ anything is written. --json prints {"added","name","repo","batch","state",
 "attempts","last_error","launch_id","session","brief_sha256","enqueued_at",
 "state_at","age_seconds"}.
 
-Exit 0: queued, or already queued with this brief. Exit 1: refused (the name
+Exit 0: queued, or the name already holds this brief, in any state (read
+"state": exit 0 does not mean the row is still queued). Exit 1: refused (the name
 holds another brief or repository, or the queue is full). Exit 2: a usage or
 setup error, such as an unusable brief or an unreadable queue file.
 
@@ -218,7 +219,7 @@ func newSurfaceQueueCmd(_ module.Deps) *cobra.Command {
 		Long: `queue lists every row in the machine's queue: its state, how long it has
 been in that state, its attempts, batch, repository, and last error. The
 brief text is never printed. States: queued, claimed, launched, needs-you,
-reported, failed, closed, expired, dequeued.
+reported, failed, closed, expired. A dequeued row is removed, not kept.
 
 --json prints {"rows":[{"name","repo","batch","state","attempts","last_error",
 "launch_id","session","brief_sha256","enqueued_at","state_at","age_seconds"}]}.

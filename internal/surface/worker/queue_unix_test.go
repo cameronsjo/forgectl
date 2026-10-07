@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 var queueNow = time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
@@ -141,6 +142,43 @@ func TestQueueSizeCapRefusedBeforeWrite(t *testing.T) {
 	rows, err := q.Rows()
 	if err != nil || len(rows) != i {
 		t.Fatalf("rows %d, err %v; want %d", len(rows), err, i)
+	}
+
+	// The drain's writes are not bound by the enqueue cap: on a queue the
+	// operator filled to within a few bytes of it, a claim (which grows the
+	// row) and a failure with a long error still go through, and the error is
+	// cut to maxLastError. Fill the gap: measure one row's overhead with a
+	// one-byte brief, remove it, then enqueue a brief that leaves 8 bytes.
+	size := func() int {
+		//nolint:gosec // G304: reading back a queue file this test wrote under its own temp dir
+		b, err := os.ReadFile(filepath.Join(dir, "queue.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(b)
+	}
+	base := size()
+	mustEnqueue(t, q, "probe", "x")
+	overhead := size() - base - 1
+	if _, err := q.Dequeue("probe"); err != nil {
+		t.Fatal(err)
+	}
+	mustEnqueue(t, q, "gap", strings.Repeat("g", MaxQueueBytes-size()-overhead-8))
+	if room := MaxQueueBytes - size(); room < 0 || room > 64 {
+		t.Fatalf("the fill left %d bytes under the cap, want a few", room)
+	}
+	if _, err := q.Claim("w0","launch-0123456789abcdef0123456789abcdef", queueNow); err != nil {
+		t.Fatalf("claim on a full queue: %v", err)
+	}
+	failed, err := q.UpdateIf("w0", SameLaunch("launch-0123456789abcdef0123456789abcdef"), queueNow, func(r *QueueRow) {
+		r.State = QueueFailed
+		r.LastError = strings.Repeat("é", maxLastError)
+	})
+	if err != nil {
+		t.Fatalf("record a failure on a full queue: %v", err)
+	}
+	if len(failed.LastError) > maxLastError || !utf8.ValidString(failed.LastError) {
+		t.Fatalf("last_error is %d bytes (valid UTF-8 %v), want at most %d", len(failed.LastError), utf8.ValidString(failed.LastError), maxLastError)
 	}
 }
 

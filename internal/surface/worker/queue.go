@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 )
@@ -40,8 +41,6 @@ const (
 	QueueClosed QueueState = "closed"
 	// QueueExpired: the row sat queued too long and was never launched.
 	QueueExpired QueueState = "expired"
-	// QueueDequeued: the operator removed the row before it launched.
-	QueueDequeued QueueState = "dequeued"
 )
 
 // Live reports whether a row in state s may have a worker running: the drain
@@ -54,7 +53,7 @@ func (s QueueState) Live() bool {
 // hash and drops its brief text.
 func (s QueueState) Terminal() bool {
 	switch s {
-	case QueueReported, QueueFailed, QueueClosed, QueueExpired, QueueDequeued:
+	case QueueReported, QueueFailed, QueueClosed, QueueExpired:
 		return true
 	}
 	return false
@@ -317,7 +316,7 @@ func (q *Queue) Enqueue(name, repo, brief, batch string, now time.Time) (row Que
 		Name: name, Repo: repo, Brief: brief, BriefSHA256: BriefSHA256(brief), Batch: batch,
 		State: QueueQueued, EnqueuedAt: now, StateAt: now,
 	}
-	err = q.mutate(func(rows []QueueRow) ([]QueueRow, error) {
+	err = q.mutate(MaxQueueBytes, func(rows []QueueRow) ([]QueueRow, error) {
 		out, existing, ok, err := enqueueRow(rows, candidate)
 		row, added = existing, ok
 		return out, err
@@ -332,7 +331,7 @@ func (q *Queue) Enqueue(name, repo, brief, batch string, now time.Time) (row Que
 // worker may be live (claimed, launched, needs-you) with ErrQueueRowLive.
 func (q *Queue) Dequeue(name string) (QueueRow, error) {
 	var removed QueueRow
-	err := q.mutate(func(rows []QueueRow) ([]QueueRow, error) {
+	err := q.mutate(maxLedgerBytes, func(rows []QueueRow) ([]QueueRow, error) {
 		out, r, err := dequeueRow(rows, name)
 		removed = r
 		return out, err
@@ -348,7 +347,7 @@ func (q *Queue) Claim(name, launchID string, now time.Time) (QueueRow, error) {
 		return QueueRow{}, errors.New("worker: a claim needs a launch id")
 	}
 	var claimed QueueRow
-	err := q.mutate(func(rows []QueueRow) ([]QueueRow, error) {
+	err := q.mutate(maxLedgerBytes, func(rows []QueueRow) ([]QueueRow, error) {
 		out, r, err := claimRow(rows, name, launchID, now.UTC())
 		claimed = r
 		return out, err
@@ -362,12 +361,29 @@ func SameLaunch(launchID string) func(QueueRow) bool {
 	return func(r QueueRow) bool { return launchID != "" && r.LaunchID == launchID }
 }
 
+// maxLastError caps a row's LastError, so a long error from a launch cannot
+// grow the queue toward its read cap.
+const maxLastError = 1024
+
+// capLastError cuts s to maxLastError bytes on a rune boundary.
+func capLastError(s string) string {
+	if len(s) <= maxLastError {
+		return s
+	}
+	cut := maxLastError
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
 // UpdateIf changes the row named name under the queue lock when match
 // accepts it, and returns the row as written. A change of State moves
-// StateAt to now. fn may not rename the row.
+// StateAt to now. fn may not rename the row. Which state changes are allowed
+// is the caller's rule: only Claim enforces one (queued to claimed).
 func (q *Queue) UpdateIf(name string, match func(QueueRow) bool, now time.Time, fn func(*QueueRow)) (QueueRow, error) {
 	var updated QueueRow
-	err := q.mutate(func(rows []QueueRow) ([]QueueRow, error) {
+	err := q.mutate(maxLedgerBytes, func(rows []QueueRow) ([]QueueRow, error) {
 		for i := range rows {
 			if rows[i].Name != name {
 				continue
@@ -386,6 +402,9 @@ func (q *Queue) UpdateIf(name string, match func(QueueRow) bool, now time.Time, 
 			if rows[i].State != before {
 				rows[i].StateAt = now.UTC()
 			}
+			rows[i].LastError = capLastError(rows[i].LastError)
+			// mutate trims every row before writing; trimming here too makes
+			// the returned row match what was written.
 			TrimTerminal(rows[i : i+1])
 			updated = rows[i]
 			return rows, nil
@@ -396,9 +415,13 @@ func (q *Queue) UpdateIf(name string, match func(QueueRow) bool, now time.Time, 
 }
 
 // mutate runs fn over the rows under the lock, trims terminal rows, and
-// refuses a document past MaxQueueBytes before writing anything. fn returns
-// errQueueUnchanged to write nothing and report success.
-func (q *Queue) mutate(fn func([]QueueRow) ([]QueueRow, error)) error {
+// refuses, before writing anything, a document that grows past limit. Only
+// Enqueue passes MaxQueueBytes: the drain's own writes (a claim, a failure)
+// must not be refused by a queue the operator filled, so they pass the read
+// cap, which leaves 256 KiB of headroom. A write that shrinks the document is
+// never refused. fn returns errQueueUnchanged to write nothing and report
+// success.
+func (q *Queue) mutate(limit int, fn func([]QueueRow) ([]QueueRow, error)) error {
 	err := q.store.update(func(data []byte) ([]byte, error) {
 		f, err := decodeQueue(data)
 		if err != nil {
@@ -414,9 +437,9 @@ func (q *Queue) mutate(fn func([]QueueRow) ([]QueueRow, error)) error {
 		if err != nil {
 			return nil, err
 		}
-		if len(next) > MaxQueueBytes {
+		if len(next) > limit && len(next) > len(data) {
 			return nil, fmt.Errorf("%w: the queue file is %d bytes and this change would make it %d, limit %d; dequeue finished rows first",
-				ErrQueueFull, len(data), len(next), MaxQueueBytes)
+				ErrQueueFull, len(data), len(next), limit)
 		}
 		return next, nil
 	})
