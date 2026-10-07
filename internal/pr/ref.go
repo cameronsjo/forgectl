@@ -328,7 +328,7 @@ var reSCPRemote = regexp.MustCompile(`^[A-Za-z0-9._-]+@([A-Za-z0-9.-]+):([^/]+)/
 // host's, and is ignored. Userinfo (an https credential) is dropped, never
 // returned: callers must not echo the raw URL either (#562).
 func ParseRemoteURL(raw string) (host, owner, repo string, ok bool) {
-	raw = strings.TrimSuffix(strings.TrimSpace(raw), ".git")
+	raw = strings.TrimSuffix(strings.TrimRight(strings.TrimSpace(raw), "/"), ".git")
 	var path string
 	switch {
 	case strings.HasPrefix(raw, "https://"), strings.HasPrefix(raw, "ssh://"):
