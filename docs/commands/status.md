@@ -7,6 +7,7 @@ forgectl status                          # one glyph-led line per section, a few
 forgectl status --json                   # every section and row, for scripts
 forgectl status --json --strict          # same, but exit 1 when any section degraded or failed
 forgectl status --json --limit 20        # each list cut to 20 rows; a top-level "bound" says what was cut
+forgectl status --limit 30               # the text view lists up to 30 rows per list instead of 10 and 5
 forgectl status --timeout 5s             # give each section five seconds (default 20s)
 forgectl status --tui                    # the cockpit: the same sections on one screen, refreshing in place
 ```
@@ -28,20 +29,22 @@ The sections run concurrently, and each has its own deadline, set with `--timeou
 
 `status` exits 0 whatever the sections report, like `bench status` and `pr dash`. With `--strict`, it writes the full report and then exits 1 when any section is not `ok`, like `projects list --strict`. Under `--json`, that exit adds nothing to stderr, because the report on stdout is the verdict ([json-contract.md](../json-contract.md)). A `--timeout` of zero or less is refused before any source runs (exit 1).
 
-## Bounding `--json`
+## Bounding the output with `--limit`
 
-`--json` carries every row by default: `git.projects` lists every local clone and the three `prs` lists every PR (65 KB on a 138-clone machine). `--limit N` keeps the first N rows of each of those four lists and adds one top-level key, present only under `--limit`:
+`--json` carries every row by default: `git.projects` lists every local clone and the three `prs` lists every PR (65 KB on a 138-clone machine). `--limit N` keeps the first N rows of each of those four lists and adds one top-level key, present only under `--limit` and written first, so a head-only read sees it:
 
 ```json
 "bound": {
   "limit": 20,
   "truncated": true,
   "cut": [{"list": "git.projects", "total": 138, "shown": 20}],
-  "hint": "lists cut to --limit rows; raise --limit or use 0 for every row"
+  "hint": "cut to --limit rows; raise --limit (0 = every row), or read one list at a time: projects list --json, pr dash --json"
 }
 ```
 
-`cut` names only the lists that had more than N rows, so `"truncated": false` and an empty `cut` mean nothing was dropped. The `git` totals (`total`, `clean`, `dirty`, ...) still count every project. `--limit 0` is every row and adds no `bound` key. `--limit` without `--json` is refused (exit 1): the text view already stops at a fixed row count per list. `--limit` does not shorten the run, since every section still runs under its `--timeout`.
+`cut` names only the lists that had more than N rows, so `"truncated": false` and an empty `cut` mean nothing was dropped. The `git` totals (`total`, `clean`, `dirty`, ...) still count every project. `--limit 0` is every row and adds no `bound` key.
+
+Without `--json`, `--limit N` replaces the text view's caps (10 projects, 5 PRs) with N for each list; `--limit 0` lists every row. `--limit` with `--tui` is refused (exit 1): the cockpit has its own layout. A negative `--limit` is a usage error (exit 1, code `usage_error` under `--json`). `--limit` does not shorten the run, since every section still runs under its `--timeout`.
 
 ## `--json` shape
 

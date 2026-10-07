@@ -22,10 +22,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/review"
 	"github.com/cameronsjo/forgectl/internal/theme"
@@ -54,7 +56,13 @@ func manyReviewItems(n int) []review.Item {
 // stderr and the RunE error.
 func runReview(t *testing.T, src fakeReviewSource, args ...string) (string, string, error) {
 	t.Helper()
-	cmd := newReviewCmdForSources([]review.Source{src}, "", review.GitHubHost, theme.Theme{})
+	return runReviewAt(t, filepath.Join(t.TempDir(), "review-reviewed.json"), src, args...)
+}
+
+// runReviewAt is runReview with an explicit reviewed-store path ("" = none).
+func runReviewAt(t *testing.T, reviewedPath string, src fakeReviewSource, args ...string) (string, string, error) {
+	t.Helper()
+	cmd := newReviewCmdForSources([]review.Source{src}, reviewedPath, review.GitHubHost, theme.Theme{})
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -143,9 +151,9 @@ func TestReviewJSON_FieldsKeepsNamedKeysInOrder(t *testing.T) {
 }
 
 func TestReviewJSON_UnknownFieldNamesTheValidOnes(t *testing.T) {
-	_, _, err := runReview(t, fakeReviewSource{items: manyReviewItems(1)}, "--json", "--fields", "nope")
-	if err == nil || !strings.Contains(err.Error(), "unknown --fields") || !strings.Contains(err.Error(), "isDraft") {
-		t.Errorf("err = %v; want 'unknown --fields' naming the valid fields", err)
+	_, errOut, err := runReview(t, fakeReviewSource{items: manyReviewItems(1)}, "--json", "--fields", "nope")
+	if err == nil || !strings.Contains(errOut, "unknown --fields") || !strings.Contains(errOut, "isDraft") {
+		t.Errorf("err = %v, stderr %q; want 'unknown --fields' naming the valid fields", err, errOut)
 	}
 	_, _, err = runReview(t, fakeReviewSource{}, "--fields", "repo")
 	if err == nil || !strings.Contains(err.Error(), "--json") {
@@ -327,10 +335,44 @@ func TestStatusJSON_DefaultHasNoBoundKeyAndEveryRow(t *testing.T) {
 	}
 }
 
-func TestStatusLimit_WithoutJSONNamesTheFix(t *testing.T) {
-	_, _, err := runStatus(t, okStatusSources(), "--limit", "3")
-	if err == nil || !strings.Contains(err.Error(), "add --json") {
-		t.Errorf("err = %v; want it to say add --json", err)
+// The notes test above counted one note; the reviewed-store path now
+// contributes none because runReview supplies a real one.
+
+func TestStatusLimit_TextViewTakesTheSameLimit(t *testing.T) {
+	// Eleven dirty projects: the default text view lists 10 and says "1 more".
+	src := okStatusSources()
+	src.Git = func(context.Context) (statusGitJSON, []string, error) {
+		found := make([]projects.Project, 0, 11)
+		for i := 0; i < 11; i++ {
+			found = append(found, projects.Project{Name: fmt.Sprintf("d%02d", i), Dir: "/p", Status: projects.GitStatus{State: projects.StatusOK, Modified: 1}})
+		}
+		return newStatusGit("/p", found), nil, nil
+	}
+	rows := func(out string) int { return strings.Count(out, "[1 modified]") }
+	def, _, err := runStatus(t, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	three, _, err := runStatus(t, src, "--limit", "3")
+	if err != nil {
+		t.Fatalf("status --limit 3 (text): %v", err)
+	}
+	all, _, err := runStatus(t, src, "--limit", "0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows(def) != 10 || rows(three) != 3 || rows(all) != 11 {
+		t.Errorf("text rows default/3/0 = %d/%d/%d, want 10/3/11", rows(def), rows(three), rows(all))
+	}
+	if !strings.Contains(three, "… 8 more (status --json lists every project)") {
+		t.Errorf("the hidden-rows line must count what --limit 3 hid: %q", three)
+	}
+}
+
+func TestStatusLimit_TUIRefusesIt(t *testing.T) {
+	_, _, err := runStatus(t, okStatusSources(), "--tui", "--limit", "3")
+	if err == nil || !strings.Contains(err.Error(), "drop --limit") {
+		t.Errorf("err = %v; want --tui --limit refused with a message saying to drop --limit", err)
 	}
 }
 
@@ -378,8 +420,276 @@ func TestMenuGroup_KeepsOnlyThatGroupAndUnknownListsTheValidOnes(t *testing.T) {
 
 	// Under --json the failure is one JSON object on stderr, not a returned error.
 	_, bad, _ := runJSONThroughFang(t, productionJSONRoot(runner), "menu", "--json", "nosuchgroup")
-	if !strings.Contains(bad, "unknown menu group") || !strings.Contains(bad, "valid:") ||
-		!strings.Contains(bad, "pr,") || !strings.Contains(bad, "review") {
-		t.Errorf("stderr = %q; want 'unknown menu group' listing pinned and grouped command names", bad)
+	if !strings.Contains(bad, "unknown menu group") || !strings.Contains(bad, "commands:") || !strings.Contains(bad, "areas:") ||
+		!strings.Contains(bad, "pr,") || !strings.Contains(bad, "review") || !strings.Contains(bad, "repos") {
+		t.Errorf("stderr = %q; want 'unknown menu group' listing the command names and the area names", bad)
+	}
+	if !strings.Contains(bad, `"code": "usage_error"`) {
+		t.Errorf("unknown menu group must carry the usage_error code like an unknown flag: %q", bad)
+	}
+}
+
+// ---- the unpinned edges (coordinator round) --------------------------------
+
+// failureCode decodes the one JSON failure object a --json verb writes to
+// stderr and returns its code.
+func failureCode(t *testing.T, stderr string) string {
+	t.Helper()
+	var o struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	// A standalone command (no silenced root) may add cobra's bare "Error:"
+	// line after the object; read the first JSON value only.
+	if err := json.NewDecoder(strings.NewReader(stderr)).Decode(&o); err != nil {
+		t.Fatalf("stderr is not a JSON failure object: %v\n%q", err, stderr)
+	}
+	return o.Code
+}
+
+func TestReviewJSON_LimitEqualToTotalAndOneBelow(t *testing.T) {
+	src := fakeReviewSource{items: manyReviewItems(4)}
+	for _, tc := range []struct {
+		limit     string
+		shown     int
+		truncated bool
+	}{{"4", 4, false}, {"3", 3, true}, {"0", 4, false}} {
+		out, _, err := runReview(t, src, "--json", "--limit", tc.limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc struct {
+			Shown     int  `json:"shown"`
+			Total     int  `json:"total"`
+			Truncated bool `json:"truncated"`
+		}
+		if err := json.Unmarshal([]byte(out), &doc); err != nil {
+			t.Fatalf("--limit %s is not an envelope: %v", tc.limit, err)
+		}
+		if doc.Shown != tc.shown || doc.Total != 4 || doc.Truncated != tc.truncated {
+			t.Errorf("--limit %s: shown %d total %d truncated %v; want %d/4/%v", tc.limit, doc.Shown, doc.Total, doc.Truncated, tc.shown, tc.truncated)
+		}
+	}
+}
+
+func TestReviewJSON_TruncatedComesBeforeItems(t *testing.T) {
+	out, _, err := runReview(t, fakeReviewSource{items: manyReviewItems(3)}, "--json", "--limit", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ti, ii := strings.Index(out, `"truncated"`), strings.Index(out, `"items"`); ti < 0 || ii < 0 || ti > ii {
+		t.Errorf("truncated at %d, items at %d: a head -c read must see the cut before the rows", ti, ii)
+	}
+}
+
+func TestReviewJSON_NoReviewedStorePathIsANote(t *testing.T) {
+	out, errOut, err := runReviewAt(t, "", fakeReviewSource{items: manyReviewItems(1)}, "--json", "--limit", "5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(errOut, "reviewed-store path unavailable") {
+		t.Errorf("stderr lacks the note: %q", errOut)
+	}
+	var doc struct {
+		Notes []string `json:"notes"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Notes) != 1 || !strings.Contains(doc.Notes[0], "reviewed-store path unavailable") {
+		t.Errorf("notes = %q; the stderr note must also ride in the JSON", doc.Notes)
+	}
+}
+
+func TestListBound_BadValuesAreUsageErrorsWithExitOne(t *testing.T) {
+	// review: a negative --limit and an unknown --fields name.
+	for _, args := range [][]string{
+		{"--json", "--limit", "-1"},
+		{"--json", "--fields", "nope"},
+	} {
+		cmd := newReviewCmdForSources([]review.Source{fakeReviewSource{}}, filepath.Join(t.TempDir(), "r.json"), review.GitHubHost, theme.Theme{})
+		var stdout, stderr bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs(args)
+		err := cmd.ExecuteContext(context.Background())
+		if err == nil || ExitCode(err) != 1 {
+			t.Errorf("review %v: err %v exit %d, want an error with exit 1 (unchanged by this PR)", args, err, ExitCode(err))
+		}
+		if got := failureCode(t, stderr.String()); got != "usage_error" {
+			t.Errorf("review %v: code %q, want usage_error", args, got)
+		}
+		_ = stdout // a standalone cobra command prints usage to stdout on error; the real root silences it
+	}
+	// projects list: the same two.
+	for _, args := range [][]string{
+		{"--json", "--limit", "-2"},
+		{"--json", "--fields", "nope"},
+	} {
+		client := listFixture(t, twoHostRunFunc(manyRepoJSON(2), "owner\tname\ttype\tssh\n"))
+		cmd := newProjectsListCmd(client)
+		var stdout, stderr bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs(args)
+		err := cmd.ExecuteContext(context.Background())
+		if err == nil || ExitCode(err) != 1 {
+			t.Errorf("projects list %v: err %v exit %d, want exit 1", args, err, ExitCode(err))
+		}
+		if got := failureCode(t, stderr.String()); got != "usage_error" {
+			t.Errorf("projects list %v: code %q, want usage_error", args, got)
+		}
+	}
+	// status: a negative --limit.
+	cmd := newStatusCmdForSources(okStatusSources(), theme.Theme{})
+	var stderr bytes.Buffer
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--json", "--limit", "-3"})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || ExitCode(err) != 1 {
+		t.Errorf("status --limit -3: err %v exit %d, want exit 1", err, ExitCode(err))
+	}
+	if got := failureCode(t, stderr.String()); got != "usage_error" {
+		t.Errorf("status --limit -3: code %q, want usage_error", got)
+	}
+}
+
+func TestProjectsListJSON_LimitEqualToTotalAndZero(t *testing.T) {
+	for _, tc := range []struct {
+		limit     string
+		truncated bool
+	}{{"6", false}, {"5", true}, {"0", false}} {
+		out, _, err := runProjectsList(t, 6, "--json", "--limit", tc.limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc struct {
+			Truncated bool `json:"truncated"`
+			Total     int  `json:"total"`
+		}
+		if err := json.Unmarshal([]byte(out), &doc); err != nil {
+			t.Fatalf("--limit %s is not an envelope: %v", tc.limit, err)
+		}
+		if doc.Truncated != tc.truncated || doc.Total != 6 {
+			t.Errorf("--limit %s: truncated %v total %d, want %v/6", tc.limit, doc.Truncated, doc.Total, tc.truncated)
+		}
+	}
+}
+
+func TestStatusJSON_LimitCutsPRListsAndEqualToLengthCutsNothing(t *testing.T) {
+	src := okStatusSources()
+	src.PRs = func(context.Context) (prDashJSON, []string, error) {
+		rows := func(n int) []prRowJSON {
+			out := make([]prRowJSON, n)
+			for i := range out {
+				out[i] = prRowJSON{Ref: fmt.Sprintf("o/r#%d", i+1), Title: "t"}
+			}
+			return out
+		}
+		return prDashJSON{ActiveReviews: []prDashReviewJSON{}, AwaitingYou: rows(5), YourOpen: rows(3)}, nil, nil
+	}
+	type bound struct {
+		Bound *struct {
+			Truncated bool `json:"truncated"`
+			Cut       []struct {
+				List  string `json:"list"`
+				Total int    `json:"total"`
+				Shown int    `json:"shown"`
+			} `json:"cut"`
+		} `json:"bound"`
+		PRs struct {
+			Data struct {
+				AwaitingYou []json.RawMessage `json:"awaiting_you"`
+				YourOpen    []json.RawMessage `json:"your_open"`
+			} `json:"data"`
+		} `json:"prs"`
+	}
+	out, _, err := runStatus(t, src, "--json", "--limit", "3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d bound
+	if err := json.Unmarshal([]byte(out), &d); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.PRs.Data.AwaitingYou) != 3 || len(d.PRs.Data.YourOpen) != 3 || d.Bound == nil || len(d.Bound.Cut) != 1 ||
+		d.Bound.Cut[0].List != "prs.awaiting_you" || d.Bound.Cut[0].Total != 5 || d.Bound.Cut[0].Shown != 3 {
+		t.Errorf("limit 3: awaiting %d, your_open %d, bound %+v; want awaiting cut 5 -> 3 and your_open (3) untouched", len(d.PRs.Data.AwaitingYou), len(d.PRs.Data.YourOpen), d.Bound)
+	}
+	// limit == the longest list: nothing is cut, and the report says so.
+	out, _, err = runStatus(t, src, "--json", "--limit", "5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d = bound{}
+	if err := json.Unmarshal([]byte(out), &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Bound == nil || d.Bound.Truncated || len(d.Bound.Cut) != 0 || len(d.PRs.Data.AwaitingYou) != 5 {
+		t.Errorf("limit 5: bound %+v, awaiting %d; want truncated false, empty cut, all 5 rows", d.Bound, len(d.PRs.Data.AwaitingYou))
+	}
+}
+
+func TestStatusJSON_LimitZeroIsEveryRowWithNoBoundKey(t *testing.T) {
+	out, _, err := runStatus(t, manyStatusSources(9), "--json", "--limit", "0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["bound"]; ok {
+		t.Error("--limit 0 must add no bound key")
+	}
+	if n := strings.Count(out, `"/p/p`); n != 9 {
+		t.Errorf("--limit 0 lists %d projects, want all 9", n)
+	}
+}
+
+func TestStatusJSON_BoundComesFirst(t *testing.T) {
+	out, _, err := runStatus(t, manyStatusSources(9), "--json", "--limit", "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bi, gi := strings.Index(out, `"bound"`), strings.Index(out, `"git"`); bi < 0 || bi > gi {
+		t.Errorf("bound at %d, git at %d: the cut must be readable before the lists", bi, gi)
+	}
+}
+
+func TestMenuGroup_AcceptsAnAreaName(t *testing.T) {
+	isolateJSONContractEnv(t)
+	runner := &exec.FakeRunner{}
+	out, stderr, err := runJSONThroughFang(t, productionJSONRoot(runner), "menu", "--json", "repos")
+	if err != nil {
+		t.Fatalf("menu --json repos: %v (stderr %q)", err, stderr)
+	}
+	var doc menuJSON
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Commands) == 0 {
+		t.Fatal("menu --json repos kept no command rows")
+	}
+	for _, r := range doc.Commands {
+		if r.Group != "repos" {
+			t.Errorf("row %q has group %q, want repos", r.Command, r.Group)
+		}
+	}
+	if len(doc.Pinned) != 0 {
+		t.Errorf("an area keeps no pinned rows, got %d", len(doc.Pinned))
+	}
+}
+
+func TestMenuHelp_PointsAtTheGroupArgumentAndNamesTheAreas(t *testing.T) {
+	cmd := newMenuCmd(module.Deps{})
+	for _, want := range []string{"33 KB", "menu --json desk", "agents", "repos", "other"} {
+		if !strings.Contains(cmd.Long, want) {
+			t.Errorf("menu --help lacks %q:\n%s", want, cmd.Long)
+		}
+	}
+	if f := cmd.Flags().Lookup("json"); f == nil || !strings.Contains(f.Usage, "33 KB") {
+		t.Error("the --json flag text must carry the size and the group pointer")
 	}
 }

@@ -6,7 +6,7 @@
 forgectl projects list [query]           # list all projects: local clones + your GitHub repos + your Gitea repos
 forgectl projects list --json            # machine-readable JSON (safe to pipe; degradation notes go to stderr)
 forgectl projects list --json --strict   # same, but exit 1 when any host degraded (output still written)
-forgectl projects list --json --limit 50 # first 50 rows in a {items,total,shown,limit,truncated,hint,notes} document
+forgectl projects list --json --limit 50 # first 50 rows in a {truncated,total,shown,limit,hint,notes,items} document
 forgectl projects list --json --fields host,owner,name  # only those row fields
 forgectl projects list --host github.com   # filter to one hostname (or "local")
 forgectl projects list --host git.example.com forge  # host filter + name substring
@@ -20,7 +20,7 @@ forgectl projects clone --wing mcp <target> # override the wing table for this o
 
 forgectl review                          # unified table (reviewed rows dimmed)
 forgectl review --kind issue             # issues only (or: pr)
-forgectl review --json --limit 50        # first 50 rows in a {items,total,shown,limit,truncated,hint,notes} document
+forgectl review --json --limit 50        # first 50 rows in a {truncated,total,shown,limit,hint,notes,items} document
 forgectl review --json --fields repo,number,title  # only those row fields
 forgectl review mark owner/repo#42       # mark an item reviewed
 ```
@@ -48,12 +48,15 @@ Both verbs list everything by default, and `review --json` was measured at 473 K
 **`--json` default is unchanged.** With no `--limit`, `--json` is still the bare array of every row, because ADR-0008 lets JSON shapes change only additively and a default cap would silently drop rows from scripts that read the array today. Once `--limit` is given, the output is one object instead:
 
 ```json
-{"items": [...], "total": 1070, "shown": 50, "limit": 50, "truncated": true,
+{"truncated": true, "total": 1070, "shown": 50, "limit": 50,
  "hint": "showing 50 of 1070; narrow with --kind, --repo, or raise --limit (0 = all)",
- "notes": ["cameronsjo: results may be truncated at 1000"]}
+ "notes": ["cameronsjo: results may be truncated at 1000"],
+ "items": [...]}
 ```
 
-`truncated` is true only when `shown` is less than `total`. `hint` appears only when truncated. `notes` carries the degradation notes the verb also writes to stderr, so a caller that reads only stdout still sees an upstream "results may be truncated at N" (the GitHub search cap): `truncated: false` with that note means the source, not `--limit`, cut the list. `--limit 0` gives the object with every row. `--fields` alone keeps the bare array.
+Key order is stable and `items` comes last, so a caller that reads only the first bytes of a large document still sees `truncated`. `truncated` is true only when `shown` is less than `total`. `hint` appears only when truncated. `notes` carries the notes the verb also writes to stderr (degradation notes, and for `review` the "reviewed-store path unavailable" note), so a caller that reads only stdout still sees an upstream "results may be truncated at N" (the GitHub search cap): `truncated: false` with that note means the source, not `--limit`, cut the list. `--limit 0` gives the object with every row. `--fields` alone keeps the bare array.
+
+**`projects list` has no `--dir` flag.** Its local scan reads the real projects root (`PROJECTS_DIR`, read-only), so a test or a review of this verb must point `PROJECTS_DIR` at a fixture directory.
 
 ## On-disk layout
 

@@ -21,11 +21,11 @@ import (
 // runReviewList is the bare `forgectl review` body: aggregate, filter, render.
 func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string, asJSON bool, kind, repo string, bound *listBound, th theme.Theme) error {
 	if err := bound.resolve(cmd); err != nil {
-		return err
+		return usageFailure(cmd, err, asJSON)
 	}
 	fields, err := bound.fieldList(reviewJSONKeys)
 	if err != nil {
-		return err
+		return usageFailure(cmd, err, asJSON)
 	}
 	if fields != nil && !asJSON {
 		return errors.New("--fields shapes the JSON rows; add --json")
@@ -51,7 +51,9 @@ func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string
 	// pattern), but for THIS view that silently renders every item as
 	// unreviewed — say so instead of misreporting.
 	if reviewedPath == "" {
-		fmt.Fprintln(cmd.ErrOrStderr(), "note: reviewed-store path unavailable; reviewed state not shown")
+		const noStore = "reviewed-store path unavailable; reviewed state not shown"
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "note: "+noStore)
+		notes = append(notes, noStore)
 	}
 	store := pr.LoadReviewed(reviewedPath)
 	if asJSON {

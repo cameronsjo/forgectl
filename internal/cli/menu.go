@@ -38,9 +38,12 @@ func newMenuCmd(deps module.Deps) *cobra.Command {
 pinned commands, the recent ones, and every other command with its subverbs.
 Nothing is run. --json emits the same content as one document.
 
-Name a command group (forgectl menu desk) to print only that group's rows
-and subverbs: the way to read one subtree without the whole hub. A name that
-is not a command lists the valid ones.`,
+The whole --json document is about 33 KB. To read less, name a group:
+  forgectl menu --json desk     one command and its subverbs
+  forgectl menu --json repos    one area: every command in it
+
+A group is a command name or an area name (` + menuAreaNames() + `).
+A name that is neither is a usage error that lists every valid one.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sec, header := gatherMenu(cmd.Context(), deps, cmd.Root())
@@ -48,7 +51,7 @@ is not a command lists the valid ones.`,
 			if len(args) == 1 {
 				scoped, err := menuScope(doc, args[0])
 				if err != nil {
-					return err
+					return usageFailure(cmd, err, asJSON)
 				}
 				doc = scoped
 			}
@@ -58,7 +61,7 @@ is not a command lists the valid ones.`,
 			return writeMenuText(cmd.OutOrStdout(), doc, header)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"header","first_run","pinned","recent","commands"} to stdout; with a group, each list holds only that group's rows (see docs/commands/menu.md)`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"header","first_run","pinned","recent","commands"} to stdout; about 33 KB whole, so name a command or area (menu --json desk) to get one subtree (see docs/commands/menu.md)`)
 	return cmd
 }
 
@@ -151,15 +154,26 @@ func menuDocument(root *cobra.Command, sec hubSections, header tui.HubHeader) me
 	return doc
 }
 
-// menuScope narrows doc to one command group: the pinned, recent, and commands
-// rows whose command path starts with group. The header and first_run stay, so
-// the document keeps its shape. An unknown group is an error that lists every
-// command a group can name.
+// menuAreaNames lists the hub's area names (the `group` key on commands rows)
+// for help text, in hub order, ending with the catch-all area.
+func menuAreaNames() string {
+	names := make([]string, 0, len(hubGroups)+1)
+	for _, g := range hubGroups {
+		names = append(names, g.title)
+	}
+	return strings.Join(append(names, hubOtherGroup), ", ")
+}
+
+// menuScope narrows doc to one group, which is either a command name (the
+// rows whose command path starts with it) or an area name (the commands rows
+// whose group key is it). The header and first_run stay, so the document keeps
+// its shape. An unknown group is an error that lists every command and area a
+// group can name.
 func menuScope(doc menuJSON, group string) (menuJSON, error) {
 	keep := func(rows []menuRowJSON) []menuRowJSON {
 		out := []menuRowJSON{}
 		for _, r := range rows {
-			if len(r.Argv) > 0 && r.Argv[0] == group {
+			if (len(r.Argv) > 0 && r.Argv[0] == group) || (r.Group != "" && r.Group == group) {
 				out = append(out, r)
 			}
 		}
@@ -171,16 +185,20 @@ func menuScope(doc menuJSON, group string) (menuJSON, error) {
 	scoped.Commands = keep(doc.Commands)
 	if len(scoped.Pinned)+len(scoped.Recent)+len(scoped.Commands) == 0 {
 		seen := map[string]bool{}
-		var names []string
+		var cmds, areas []string
 		for _, r := range append(append([]menuRowJSON{}, doc.Pinned...), doc.Commands...) {
 			if !seen[r.Command] {
 				seen[r.Command] = true
-				names = append(names, r.Command)
+				cmds = append(cmds, r.Command)
+			}
+			if r.Group != "" && !seen["area:"+r.Group] {
+				seen["area:"+r.Group] = true
+				areas = append(areas, r.Group)
 			}
 		}
-		slices.Sort(names)
-		return menuJSON{}, fmt.Errorf("unknown menu group %s; valid: %s",
-			termsafe.QuoteArgMax(group, termsafe.ArgEchoMaxRunes), safeText(strings.Join(names, ", ")))
+		slices.Sort(cmds)
+		return menuJSON{}, fmt.Errorf("unknown menu group %s; commands: %s; areas: %s",
+			termsafe.QuoteArgMax(group, termsafe.ArgEchoMaxRunes), safeText(strings.Join(cmds, ", ")), safeText(strings.Join(areas, ", ")))
 	}
 	return scoped, nil
 }

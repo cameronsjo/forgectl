@@ -19,6 +19,14 @@ import (
 // an explicit --limit.
 const humanListLimit = 100
 
+// usageFailure renders a flag-value error (a bad --limit, an unknown --fields
+// name) under the --json contract with the same usage_error code an unknown
+// flag gets. It changes no exit code: jsonFailure keeps the one err already
+// carries (1 for these plain errors).
+func usageFailure(cmd *cobra.Command, err error, asJSON bool) error {
+	return jsonFailure(cmd, err, asJSON, jsonCodeUsage)
+}
+
 // listBound is the --limit/--fields behaviour shared by the list verbs
 // (`review`, `projects list`). The zero value is "no flags given".
 type listBound struct {
@@ -31,7 +39,7 @@ type listBound struct {
 // --fields accepts, in wire order.
 func (b *listBound) addFlags(cmd *cobra.Command, jsonKeys []string) {
 	cmd.Flags().IntVar(&b.limit, "limit", 0, fmt.Sprintf(
-		"show at most N rows (0 = all). The table defaults to %d; --json defaults to every row and, once --limit is given, emits {items,total,shown,limit,truncated,hint,notes} instead of a bare array",
+		"show at most N rows (0 = all). The table defaults to %d; --json defaults to every row and, once --limit is given, emits {truncated,total,shown,limit,hint,notes,items} instead of a bare array",
 		humanListLimit))
 	cmd.Flags().StringVar(&b.fields, "fields", "", "with --json: comma-separated row fields to keep ("+strings.Join(jsonKeys, ", ")+")")
 }
@@ -119,14 +127,18 @@ func (w listWindow) narrowHint(narrow string) string {
 // Shown < Total; Notes carries the verb's stderr degradation notes (including
 // an upstream "results may be truncated at N") so a caller reading only stdout
 // still sees them.
+//
+// Field order is the wire order, and items comes last on purpose: a caller that
+// reads only the first bytes of a large document (head -c) still sees whether
+// it was cut.
 type boundedJSON struct {
-	Items     any      `json:"items"`
+	Truncated bool     `json:"truncated"`
 	Total     int      `json:"total"`
 	Shown     int      `json:"shown"`
 	Limit     int      `json:"limit"`
-	Truncated bool     `json:"truncated"`
 	Hint      string   `json:"hint,omitempty"`
 	Notes     []string `json:"notes"`
+	Items     any      `json:"items"`
 }
 
 func newBoundedJSON(items any, w listWindow, hint string, notes []string) boundedJSON {
