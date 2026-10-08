@@ -1193,3 +1193,22 @@ func TestDeskFrame_PanelPadding(t *testing.T) {
 		}
 	}
 }
+
+// y runs an item only when the focus panel's head, what and why are on
+// screen, so every window size from short to roomy must still report them
+// shown, and fill the window exactly.
+func TestDeskFrame_FocusStaysShownAcrossRoomyThreshold(t *testing.T) {
+	for _, w := range []int{72, 110} {
+		for h := 14; h <= 80; h++ {
+			snap, opts := busySnapshot()
+			f := deskFrame{snap: snap, width: w, height: h, now: deskNow, opts: opts}
+			lines, shown := f.layout()
+			if len(lines) != h {
+				t.Fatalf("%dx%d: %d lines", w, h, len(lines))
+			}
+			if !shown {
+				t.Errorf("%dx%d: the focus panel is not reported shown:\n%s", w, h, ansi.Strip(f.render()))
+			}
+		}
+	}
+}
