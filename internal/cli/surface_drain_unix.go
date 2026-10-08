@@ -87,7 +87,10 @@ func runDrainProcess(ctx context.Context, deps module.Deps, session, herdrPath s
 	pid := os.Getpid()
 	// 0 when unreadable; stop then refuses to signal, and the event says why.
 	start, startErr := procstart.Of(pid)
-	base := drain.Status{PID: pid, ProcessStart: start, HerdrSession: session, HerdrPath: herdrPath, StartedAt: time.Now().UTC()}
+	// claude-slots is resolved once, here, like herdr: the PATH a later
+	// launch sees cannot swap it.
+	slotsPath := lookClaudeSlots()
+	base := drain.Status{PID: pid, ProcessStart: start, HerdrSession: session, HerdrPath: herdrPath, ClaudeSlotsPath: slotsPath, StartedAt: time.Now().UTC()}
 	var seq int64
 	emit := func(e drain.Event) error {
 		seq++
@@ -128,11 +131,12 @@ func runDrainProcess(ctx context.Context, deps module.Deps, session, herdrPath s
 	if err := drainSessionPin(session, herdrPath); err != nil {
 		return WithExitCode(termsafe.Error(errors.Join(err, stopped(nil, err))), exitUsage)
 	}
-	dio, err := realDrainIO(deps, session, emit)
+	dio, err := realDrainIO(deps, session, slotsPath, emit)
 	if err != nil {
 		return WithExitCode(termsafe.Error(errors.Join(err, stopped(nil, err))), exitUsage)
 	}
 	d := newDrainer(dio, session, stop.Load)
+	d.announce()
 	d.loadSettings()
 	if err := writeStatus(d.status(base, nil)); err != nil {
 		return termsafe.Error(err)

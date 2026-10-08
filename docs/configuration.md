@@ -53,8 +53,23 @@ Several command groups own their own config section, documented alongside that c
 - [`theme`](commands/theme.md) — `[theme]`, `[theme.colors]`, the palette every styled surface draws from
 - [`herdr`](commands/herdr.md) — `[herdr.organize]`, the rules that group herdr tabs into workspaces
 - [`desk`](commands/desk.md#forgectl-desk-add-file) — `[desk]`, `notify_herdr` and `notify_macos`: whether `desk add` signals the operator through herdr and macOS (both default on)
-- [`surface`](herdr.md#drain) — `[surface.drain]`, how `surface drain` paces and caps workers: `interval`, `cap`, `per_repo`, `notify`, `idle_minutes`. An out-of-range value pauses the drain instead of falling back to a default
+- [`surface`](herdr.md#drain) — `[surface.drain]`, how `surface drain` paces and caps workers: `interval`, `cap`, `per_repo`, `notify`, `idle_minutes`. An out-of-range value pauses the drain instead of falling back to a default. `[surface.profiles]`, the named Claude config directories a worker can run under; see [Worker profiles](#worker-profiles)
 - `tasks` — `[tasks]`, `allowed_hosts`: the hosts, besides the built-in default, that a keychain credential may be sent to. The list applies to every keychain entry, the write entry included: a listed host can be sent whichever keychain token a command names. See [the `tasks done` contract](json-contract.md#tasks-done). An entry that is not a plain hostname makes the file invalid, and every command refuses it the way it refuses a file that does not parse
+
+## Worker profiles
+
+`[surface.profiles.<name>]` names a Claude config directory a coordinator worker can run under, so one machine can run workers on a second Claude account. `surface launch --worktree ... --profile <name>` and `surface enqueue ... --profile <name>` set the worker's `CLAUDE_CONFIG_DIR` to that entry's `config_dir`; the worker's transcript path follows it.
+
+```toml
+[surface.profiles.work]
+config_dir = "~/.claude-work"   # absolute, or starting with "~/"
+```
+
+- `main`, or no `--profile`, keeps today's behavior: the worker inherits the launcher's `CLAUDE_CONFIG_DIR` through the worker environment allowlist. `main` cannot be defined as an entry.
+- A name is 1 to 32 characters of `a-z`, `0-9`, `-` and `_`, starting with a letter or digit.
+- `config_dir` is checked when the file loads: a relative path, `~user/...`, or an empty value makes the file invalid, and the whole `[surface.profiles]` table is dropped, so no worker runs under a directory the loader refused. A leading `~` expands to the home directory at launch.
+- A queue row stores the profile's name, never its path. The drain resolves the name from the config file when it launches the row, so a changed `config_dir` applies to rows already queued. A name the config no longer defines fails that launch as a launch-config error, which pauses claiming until the next `drain start`.
+- A profile applies to claude workers only, and sets only `CLAUDE_CONFIG_DIR`; it adds nothing else to the worker's environment.
 
 ## Theme
 

@@ -378,3 +378,39 @@ func TestQueueFileChecks(t *testing.T) {
 		t.Fatalf("Rows through a symlink: %v", err)
 	}
 }
+
+// TestQueueEnqueueLaunchStoresTheProfileName pins that a row carries the
+// profile's name and model as given, "main" as no profile, and nothing more:
+// the drain resolves the name from the config file at launch.
+func TestQueueEnqueueLaunchStoresTheProfileName(t *testing.T) {
+	q, dir := testQueue(t)
+	row, added, err := q.EnqueueLaunch("w1", "/repo/one", "brief", "", QueueLaunch{Profile: "work", Model: "sonnet"}, queueNow)
+	if err != nil || !added || row.Profile != "work" || row.Model != "sonnet" {
+		t.Fatalf("EnqueueLaunch: %+v, added %v, err %v", row, added, err)
+	}
+	//nolint:gosec // G304: reading back the queue file this test wrote under its own temp dir
+	data, err := os.ReadFile(filepath.Join(dir, "queue.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"profile": "work"`)) || !bytes.Contains(data, []byte(`"model": "sonnet"`)) {
+		t.Fatalf("queue.json does not carry the profile name and model:\n%s", data)
+	}
+	if row, _, err := q.EnqueueLaunch("w2", "/repo/one", "brief", "", QueueLaunch{Profile: "main"}, queueNow); err != nil || row.Profile != "" {
+		t.Fatalf("profile main: %+v, %v; want stored as no profile", row, err)
+	}
+	if _, _, err := q.EnqueueLaunch("w1", "/repo/one", "brief", "", QueueLaunch{Profile: "work", Model: "opus"}, queueNow); !errors.Is(err, ErrQueueNameTaken) {
+		t.Fatalf("same name, another model: %v, want ErrQueueNameTaken", err)
+	}
+	if _, added, err := q.EnqueueLaunch("w1", "/repo/one", "brief", "", QueueLaunch{Profile: "work", Model: "sonnet"}, queueNow); err != nil || added {
+		t.Fatalf("same name, same launch: added %v, err %v; want a no-op", added, err)
+	}
+	for name, l := range map[string]QueueLaunch{
+		"model flag":   {Model: "-p"},
+		"profile path": {Profile: "/abs/dir"},
+	} {
+		if _, _, err := q.EnqueueLaunch("w9", "/repo/one", "brief", "", l, queueNow); err == nil {
+			t.Errorf("%s: %+v accepted", name, l)
+		}
+	}
+}

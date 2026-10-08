@@ -4,12 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/projects"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
@@ -31,6 +33,8 @@ type queueRowView struct {
 	LastError   string    `json:"last_error,omitempty"`
 	LaunchID    string    `json:"launch_id,omitempty"`
 	Session     string    `json:"session,omitempty"`
+	Profile     string    `json:"profile,omitempty"`
+	Model       string    `json:"model,omitempty"`
 	BriefSHA256 string    `json:"brief_sha256"`
 	EnqueuedAt  time.Time `json:"enqueued_at"`
 	StateAt     time.Time `json:"state_at"`
@@ -41,7 +45,7 @@ type queueRowView struct {
 func viewQueueRow(r worker.QueueRow, now time.Time) queueRowView {
 	return queueRowView{
 		Name: r.Name, Repo: r.Repo, Batch: r.Batch, State: string(r.State), Attempts: r.Attempts,
-		LastError: r.LastError, LaunchID: r.LaunchID, Session: r.Session, BriefSHA256: r.BriefSHA256,
+		LastError: r.LastError, LaunchID: r.LaunchID, Session: r.Session, Profile: r.Profile, Model: r.Model, BriefSHA256: r.BriefSHA256,
 		EnqueuedAt: r.EnqueuedAt, StateAt: r.StateAt, AgeSeconds: int64(max(now.Sub(r.StateAt), 0) / time.Second),
 	}
 }
@@ -59,11 +63,13 @@ type queueResult struct {
 }
 
 type enqueueOptions struct {
-	Repo  string
-	Name  string
-	Brief string
-	Batch string
-	JSON  bool
+	Repo    string
+	Name    string
+	Brief   string
+	Batch   string
+	Profile string
+	Model   string
+	JSON    bool
 }
 
 func newSurfaceEnqueueCmd(deps module.Deps) *cobra.Command {
@@ -79,15 +85,20 @@ holds claude workers only.
 --name is the worker name, unique across the whole queue (1-48 characters of
 a-z, 0-9 and '-'). --brief is a path to the brief file (no '@'), read once and
 stored as text: at most 64 KiB, checked as a launch brief, and it may not
-start with '@'. --batch tags the row for listing.
+start with '@'. --batch tags the row for listing. --profile names a
+[surface.profiles] entry whose config_dir the worker runs under as
+CLAUDE_CONFIG_DIR (main, or none, keeps the drain's own); the row stores the
+name, and the drain resolves it from the config file when it launches the
+row. --model replaces the launch profile's model for this worker (a plain
+token: letters, digits, '.', '-', '_', '[', ']', not starting with '-').
 
 enqueue is idempotent on the name: the same brief again changes nothing and
 prints the row's current state; a different brief, or another repository, is
-refused naming both brief hashes. To replace a row, dequeue it first. The
+refused naming both brief hashes, as is another --profile or --model. To replace a row, dequeue it first. The
 queue file stays under 768 KiB; an enqueue past that is refused before
 anything is written. --json prints {"added","name","repo","batch","state",
-"attempts","last_error","launch_id","session","brief_sha256","enqueued_at",
-"state_at","age_seconds"}.
+"attempts","last_error","launch_id","session","profile","model",
+"brief_sha256","enqueued_at","state_at","age_seconds"}.
 
 Exit 0: queued, or the name already holds this brief, in any state (read
 "state": exit 0 does not mean the row is still queued). Exit 1: refused (the name
@@ -95,7 +106,8 @@ holds another brief or repository, or the queue is full). Exit 2: a usage or
 setup error, such as an unusable brief or an unreadable queue file.
 
   forgectl surface enqueue --repo forgectl --name fix-login --brief brief.md
-  forgectl surface enqueue --repo . --name docs-pass --brief b.md --batch oct-07 --json`,
+  forgectl surface enqueue --repo . --name docs-pass --brief b.md --batch oct-07 --json
+  forgectl surface enqueue --repo forgectl --name tidy --brief b.md --profile work --model sonnet`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runSurfaceEnqueue(cmd, deps, opts)
@@ -105,7 +117,9 @@ setup error, such as an unusable brief or an unreadable queue file.
 	cmd.Flags().StringVar(&opts.Name, "name", "", "worker name, unique across the queue — required")
 	cmd.Flags().StringVar(&opts.Brief, "brief", "", "path to the brief file, at most 64 KiB — required")
 	cmd.Flags().StringVar(&opts.Batch, "batch", "", "batch id to tag the row with (a-z, 0-9 and '-')")
-	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"added","name","repo","batch","state","attempts","last_error","launch_id","session","brief_sha256","enqueued_at","state_at","age_seconds"} as JSON`)
+	cmd.Flags().StringVar(&opts.Profile, "profile", "", "[surface.profiles] name the worker runs under (main: the drain's own CLAUDE_CONFIG_DIR)")
+	cmd.Flags().StringVar(&opts.Model, "model", "", "model the worker runs on, instead of the launch profile's")
+	cmd.Flags().BoolVar(&opts.JSON, "json", false, `print {"added","name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","brief_sha256","enqueued_at","state_at","age_seconds"} as JSON`)
 	return cmd
 }
 
@@ -118,6 +132,16 @@ func runSurfaceEnqueue(cmd *cobra.Command, deps module.Deps, opts enqueueOptions
 	}
 	if strings.HasPrefix(opts.Brief, "@") {
 		return WithExitCode(errors.New("--brief takes a path to the brief file; drop the leading '@'"), exitUsage)
+	}
+	if opts.Model != "" {
+		if err := config.CheckModelName(opts.Model); err != nil {
+			return WithExitCode(fmt.Errorf("--model: %w", err), exitUsage)
+		}
+	}
+	// Only the name is stored; resolving it now refuses a name the config
+	// does not define, and the drain resolves it again at launch.
+	if _, err := deps.Cfg.Surface.ProfileConfigDir(opts.Profile, os.UserHomeDir); err != nil {
+		return WithExitCode(termsafe.Error(fmt.Errorf("--profile: %w", err)), exitUsage)
 	}
 	target, err := projects.New(deps.Runner).ResolveTarget(opts.Repo)
 	if err != nil {
@@ -139,7 +163,7 @@ func runSurfaceEnqueue(cmd *cobra.Command, deps module.Deps, opts enqueueOptions
 		return WithExitCode(err, exitUsage)
 	}
 	now := time.Now()
-	row, added, err := q.Enqueue(opts.Name, top, text, opts.Batch, now)
+	row, added, err := q.EnqueueLaunch(opts.Name, top, text, opts.Batch, worker.QueueLaunch{Profile: opts.Profile, Model: opts.Model}, now)
 	switch {
 	case errors.Is(err, worker.ErrQueueNameTaken), errors.Is(err, worker.ErrQueueFull):
 		return termsafe.Error(err)
@@ -171,8 +195,8 @@ func newSurfaceDequeueCmd(_ module.Deps) *cobra.Command {
 may be running (claimed, launched, needs-you): run surface close first. After
 dequeue the same name can be enqueued again, which is how a failed row is
 retried. --json prints the removed row as it was: {"name","repo","batch",
-"state","attempts","last_error","launch_id","session","brief_sha256",
-"enqueued_at","state_at","age_seconds"}.
+"state","attempts","last_error","launch_id","session","profile","model",
+"brief_sha256","enqueued_at","state_at","age_seconds"}.
 
 Exit 0: removed. Exit 1: refused, the worker is live. Exit 2: no such row,
 or a usage or setup error.
@@ -183,7 +207,7 @@ or a usage or setup error.
 			return runSurfaceDequeue(cmd, args[0], asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print the removed row as {"name","repo","batch","state","attempts","last_error","launch_id","session","brief_sha256","enqueued_at","state_at","age_seconds"} JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print the removed row as {"name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","brief_sha256","enqueued_at","state_at","age_seconds"} JSON`)
 	return cmd
 }
 
@@ -222,7 +246,8 @@ brief text is never printed. States: queued, claimed, launched, needs-you,
 reported, failed, closed, expired. A dequeued row is removed, not kept.
 
 --json prints {"rows":[{"name","repo","batch","state","attempts","last_error",
-"launch_id","session","brief_sha256","enqueued_at","state_at","age_seconds"}]}.
+"launch_id","session","profile","model","brief_sha256","enqueued_at",
+"state_at","age_seconds"}]}.
 
 Exit 0: listed. Exit 2: the queue file cannot be read.
 
@@ -241,7 +266,7 @@ Exit 0: listed. Exit 2: the queue file cannot be read.
 			return reportQueue(cmd.OutOrStdout(), rows, time.Now(), asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"rows":[{"name","repo","batch","state","attempts","last_error","launch_id","session","brief_sha256","enqueued_at","state_at","age_seconds"}]} as JSON`)
+	cmd.Flags().BoolVar(&asJSON, "json", false, `print {"rows":[{"name","repo","batch","state","attempts","last_error","launch_id","session","profile","model","brief_sha256","enqueued_at","state_at","age_seconds"}]} as JSON`)
 	return cmd
 }
 

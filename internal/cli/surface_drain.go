@@ -86,6 +86,11 @@ the row reported, a permission prompt or other blocking screen marks it
 needs-you, and a worker at its prompt with no report for idle_minutes is
 needs-you too. The drain never types into a pane or answers a prompt.
 
+Before each launch the drain runs claude-slots check 1 (found on PATH at
+start, 5 s cap): exit 1 puts the row back to queued and waits; a missing or
+failing claude-slots launches without the session cap. A row's --profile is
+resolved from the config file at launch; an unknown name pauses claiming.
+
   forgectl surface drain start
   forgectl surface drain status
   forgectl surface drain events --since 12
@@ -470,7 +475,8 @@ func newSurfaceDrainEventsCmd() *cobra.Command {
 		Short: "Print the drain's events: state changes, pauses and resumes",
 		Long: `events prints drain-events.jsonl (and the rotated drain-events.jsonl.1 before
 it), oldest first: one event per row state change, pause, resume, drain start
-and stop, and a row becoming unreadable. seq counts from 1 in each drain
+and stop, a row becoming unreadable, claude-slots holding launches
+(slots-held), and a note such as claude-slots missing. seq counts from 1 in each drain
 process, so --since <seq> prints only the latest run's events after that
 seq; a cursor resets when the drain restarts.
 

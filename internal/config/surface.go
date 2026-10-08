@@ -1,14 +1,134 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 )
 
-// SurfaceConfig is the [surface] section. Only [surface.drain] exists so far;
-// a surface launch still names its backend on every call.
+// SurfaceConfig is the [surface] section: [surface.drain] and
+// [surface.profiles]. A surface launch still names its backend on every call.
 type SurfaceConfig struct {
 	Drain SurfaceDrainConfig `toml:"drain"`
+	// Profiles are the named Claude config directories a worker can run
+	// under (`--profile <name>`), keyed by name.
+	Profiles map[string]SurfaceProfile `toml:"profiles"`
+}
+
+// SurfaceProfile is one [surface.profiles.<name>] table.
+type SurfaceProfile struct {
+	// ConfigDir is the worker's CLAUDE_CONFIG_DIR: an absolute path, or one
+	// starting with "~/", expanded to the home directory at use.
+	ConfigDir string `toml:"config_dir"`
+}
+
+// MainProfile is the profile name that means no profile: the worker keeps
+// the launcher's CLAUDE_CONFIG_DIR, as a launch with no --profile does. It
+// cannot be defined in [surface.profiles].
+const MainProfile = "main"
+
+// maxProfileNameLen bounds a profile name; it is stored on queue rows.
+const maxProfileNameLen = 32
+
+var (
+	// ErrUnknownProfile reports a profile name [surface.profiles] does not
+	// define.
+	ErrUnknownProfile = errors.New("no such [surface.profiles] entry")
+	// ErrInvalidProfileName reports a profile name outside the allowed shape.
+	ErrInvalidProfileName = errors.New("a profile name is 1-32 characters of a-z, 0-9, '-' and '_', starting with a letter or digit")
+	// ErrInvalidModel reports a --model value that is not a plain token.
+	ErrInvalidModel = errors.New("a model is 1-64 characters of letters, digits, '.', '-', '_', '[' and ']', not starting with '-'")
+)
+
+// CheckProfileName refuses a profile name outside the allowed shape.
+func CheckProfileName(name string) error {
+	if name == "" || len(name) > maxProfileNameLen {
+		return ErrInvalidProfileName
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case (r == '-' || r == '_') && i > 0:
+		default:
+			return ErrInvalidProfileName
+		}
+	}
+	return nil
+}
+
+// maxModelLen bounds a --model value.
+const maxModelLen = 64
+
+// CheckModelName refuses a model value that is not a plain token: it goes
+// into a harness argv as the value of --model, so it may not start with '-'
+// (where it would read as a flag) or carry anything but letters, digits, '.',
+// '-', '_', '[' and ']' (the "[1m]" context suffix).
+func CheckModelName(model string) error {
+	if model == "" || len(model) > maxModelLen || model[0] == '-' {
+		return ErrInvalidModel
+	}
+	for _, r := range model {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.', r == '-', r == '_', r == '[', r == ']':
+		default:
+			return ErrInvalidModel
+		}
+	}
+	return nil
+}
+
+// ValidateProfiles checks every [surface.profiles] entry: its name, and a
+// config_dir that is absolute or starts with "~/". A name of "main" is
+// refused, since it means no profile.
+func (c SurfaceConfig) ValidateProfiles() error {
+	names := make([]string, 0, len(c.Profiles))
+	for name := range c.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := CheckProfileName(name); err != nil {
+			return fmt.Errorf("[surface.profiles.%s]: %w", quoteConfigValue(name), err)
+		}
+		if name == MainProfile {
+			return fmt.Errorf("[surface.profiles.%s]: the name %q is reserved for the launcher's own CLAUDE_CONFIG_DIR and cannot be defined", name, MainProfile)
+		}
+		dir := c.Profiles[name].ConfigDir
+		if dir != "~" && !strings.HasPrefix(dir, "~/") && !filepath.IsAbs(dir) {
+			return fmt.Errorf("[surface.profiles.%s] config_dir: want an absolute path or one starting with \"~/\", got %s", name, quoteConfigValue(dir))
+		}
+	}
+	return nil
+}
+
+// ProfileConfigDir resolves a profile name to its config directory, with a
+// leading "~" expanded by home. An empty name and "main" resolve to "": the
+// worker keeps the launcher's CLAUDE_CONFIG_DIR. A name [surface.profiles]
+// does not define is ErrUnknownProfile.
+func (c SurfaceConfig) ProfileConfigDir(name string, home func() (string, error)) (string, error) {
+	if name == "" || name == MainProfile {
+		return "", nil
+	}
+	p, ok := c.Profiles[name]
+	if !ok {
+		return "", fmt.Errorf("%w: %s", ErrUnknownProfile, quoteConfigValue(name))
+	}
+	dir := p.ConfigDir
+	if dir == "~" || strings.HasPrefix(dir, "~/") {
+		h, err := home()
+		if err != nil {
+			return "", fmt.Errorf("[surface.profiles.%s] config_dir: home directory: %w", name, err)
+		}
+		dir = expandTilde(dir, h)
+	}
+	if !filepath.IsAbs(dir) {
+		return "", fmt.Errorf("[surface.profiles.%s] config_dir: want an absolute path after expanding \"~\", got %s", name, quoteConfigValue(dir))
+	}
+	return filepath.Clean(dir), nil
 }
 
 // SurfaceDrainConfig is [surface.drain]: how `forgectl surface drain` paces

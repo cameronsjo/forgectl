@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,5 +80,118 @@ func TestValidatePath_SurfaceDrain(t *testing.T) {
 	cfg := LoadPath(path)
 	if cfg.Surface.Drain.Cap == nil || *cfg.Surface.Drain.Cap != 11 {
 		t.Fatalf("LoadPath dropped [surface.drain] cap: %+v", cfg.Surface.Drain)
+	}
+}
+
+func TestSurfaceProfiles_Validate(t *testing.T) {
+	cases := map[string]struct {
+		profiles map[string]SurfaceProfile
+		wantErr  []string
+	}{
+		"none":              {},
+		"absolute":          {profiles: map[string]SurfaceProfile{"work": {ConfigDir: "/Users/x/.claude-work"}}},
+		"tilde":             {profiles: map[string]SurfaceProfile{"alt_2": {ConfigDir: "~/.claude-alt"}}},
+		"relative path":     {profiles: map[string]SurfaceProfile{"work": {ConfigDir: ".claude-work"}}, wantErr: []string{"[surface.profiles.work] config_dir", "absolute", ".claude-work"}},
+		"other user tilde":  {profiles: map[string]SurfaceProfile{"work": {ConfigDir: "~bob/.claude"}}, wantErr: []string{"config_dir", "~bob"}},
+		"empty config_dir":  {profiles: map[string]SurfaceProfile{"work": {}}, wantErr: []string{"config_dir"}},
+		"main is reserved":  {profiles: map[string]SurfaceProfile{"main": {ConfigDir: "/x"}}, wantErr: []string{"main", "reserved"}},
+		"upper-case name":   {profiles: map[string]SurfaceProfile{"Work": {ConfigDir: "/x"}}, wantErr: []string{"profile name"}},
+		"leading dash name": {profiles: map[string]SurfaceProfile{"-w": {ConfigDir: "/x"}}, wantErr: []string{"profile name"}},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := SurfaceConfig{Profiles: c.profiles}.ValidateProfiles()
+			if len(c.wantErr) == 0 {
+				if err != nil {
+					t.Fatalf("ValidateProfiles: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("ValidateProfiles accepted it")
+			}
+			for _, w := range c.wantErr {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("error %q does not name %q", err, w)
+				}
+			}
+		})
+	}
+}
+
+func TestSurfaceProfiles_ConfigDir(t *testing.T) {
+	sc := SurfaceConfig{Profiles: map[string]SurfaceProfile{
+		"work": {ConfigDir: "~/.claude-work"},
+		"abs":  {ConfigDir: "/opt/claude/../claude-abs"},
+	}}
+	home := func() (string, error) { return "/home/op", nil }
+	cases := map[string]struct {
+		name, want string
+		unknown    bool
+	}{
+		"no profile":        {name: "", want: ""},
+		"main":              {name: "main", want: ""},
+		"tilde expanded":    {name: "work", want: "/home/op/.claude-work"},
+		"absolute, cleaned": {name: "abs", want: "/opt/claude-abs"},
+		"unknown name":      {name: "nope", unknown: true},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			got, err := sc.ProfileConfigDir(c.name, home)
+			if c.unknown {
+				if !errors.Is(err, ErrUnknownProfile) || !strings.Contains(err.Error(), c.name) {
+					t.Fatalf("ProfileConfigDir(%q) = %q, %v; want ErrUnknownProfile naming it", c.name, got, err)
+				}
+				return
+			}
+			if err != nil || got != c.want {
+				t.Fatalf("ProfileConfigDir(%q) = %q, %v; want %q", c.name, got, err, c.want)
+			}
+		})
+	}
+	if _, err := sc.ProfileConfigDir("work", func() (string, error) { return "relative-home", nil }); err == nil {
+		t.Fatal("a config_dir that is not absolute after expanding ~ was accepted")
+	}
+}
+
+// TestSurfaceProfiles_RefusedAtLoad pins that a bad [surface.profiles] entry
+// is refused when the file loads, and the whole table is dropped, so no
+// worker runs under a directory the loader refused.
+func TestSurfaceProfiles_RefusedAtLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[surface.profiles.work]\nconfig_dir = \"~/.claude-work\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePath(path); err != nil {
+		t.Fatalf("valid profile: %v", err)
+	}
+	if cfg := LoadPath(path); cfg.DecodeError() != nil || cfg.Surface.Profiles["work"].ConfigDir != "~/.claude-work" {
+		t.Fatalf("LoadPath: %+v, %v", cfg.Surface, cfg.DecodeError())
+	}
+	if err := os.WriteFile(path, []byte("[surface.profiles.work]\nconfig_dir = \"rel/dir\"\n[surface.profiles.ok]\nconfig_dir = \"/abs\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePath(path); err == nil || !strings.Contains(err.Error(), "config_dir") {
+		t.Fatalf("relative config_dir: ValidatePath %v, want an error naming config_dir", err)
+	}
+	cfg := LoadPath(path)
+	if err := cfg.DecodeError(); err == nil || !strings.Contains(err.Error(), "is not valid") {
+		t.Fatalf("LoadPath decode error %v, want the file reported invalid", err)
+	}
+	if cfg.Surface.Profiles != nil {
+		t.Fatalf("an invalid [surface.profiles] kept entries: %+v", cfg.Surface.Profiles)
+	}
+}
+
+func TestCheckModelName(t *testing.T) {
+	for _, ok := range []string{"opus", "sonnet", "claude-opus-5-5", "opus[1m]", "gpt-5.1", "a_b"} {
+		if err := CheckModelName(ok); err != nil {
+			t.Errorf("CheckModelName(%q): %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "-p", "--dangerously-skip-permissions", "opus sonnet", "opus;rm", "a/b", "é", strings.Repeat("a", 65)} {
+		if err := CheckModelName(bad); !errors.Is(err, ErrInvalidModel) {
+			t.Errorf("CheckModelName(%q) = %v, want ErrInvalidModel", bad, err)
+		}
 	}
 }

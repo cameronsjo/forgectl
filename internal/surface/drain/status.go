@@ -77,6 +77,9 @@ type Status struct {
 	ProcessStart int64  `json:"process_start"`
 	HerdrSession string `json:"herdr_session"`
 	HerdrPath    string `json:"herdr_path,omitempty"`
+	// ClaudeSlotsPath is the claude-slots binary the drain resolved on PATH
+	// at start, or empty when it was not found.
+	ClaudeSlotsPath string `json:"claude_slots_path,omitempty"`
 	// StartedAt is when the drain process took the lock.
 	StartedAt       time.Time      `json:"started_at"`
 	LastTick        time.Time      `json:"last_tick"`
@@ -140,6 +143,12 @@ const (
 	EventResume     = "resume"
 	EventUnreadable = "unreadable"
 	EventError      = "error"
+	// EventSlotsHeld: claude-slots refused a launch (exit 1); recorded once
+	// per entry into that condition.
+	EventSlotsHeld = "slots-held"
+	// EventNote: a notice that is neither a state change nor an error, such
+	// as running without claude-slots.
+	EventNote = "note"
 )
 
 // EventVersion is the events file's line format version.

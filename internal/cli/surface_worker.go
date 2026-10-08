@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/launch"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/projects"
@@ -166,6 +168,19 @@ type workerSpec struct {
 	allowPATH bool
 	// launchID is the drain's queue claim; empty for the CLI.
 	launchID string
+	// configDir is the resolved [surface.profiles] config_dir, the worker's
+	// CLAUDE_CONFIG_DIR, or empty for the launcher's own.
+	configDir string
+	// model replaces the launch profile's model, or is empty.
+	model string
+}
+
+// request is the build request for this worker at cwd: the one a surface
+// launch builds, plus the worker's profile config dir and model.
+func (spec workerSpec) request(cfg config.LaunchConfig, cwd string, injected map[string]string, unset []string) launch.InvocationRequest {
+	req := surfaceInvocationRequest(cfg, cwd, injected, unset, spec.harness)
+	req.ConfigDir, req.Model = spec.configDir, spec.model
+	return req
 }
 
 // workerSetup is what a worker launch resolves before it writes anything.
@@ -232,7 +247,7 @@ func (s workerSetup) steps(deps module.Deps, spec workerSpec, prompt string, bri
 			})
 		},
 		build: func(cwd string) (launch.BuiltInvocation, error) {
-			return buildWorkerInvocation(surfaceInvocationRequest(deps.Cfg.Launch, cwd, s.injected, s.unset, spec.harness), prompt, worker.NewSessionID, warn)
+			return buildWorkerInvocation(spec.request(deps.Cfg.Launch, cwd, s.injected, s.unset), prompt, worker.NewSessionID, warn)
 		},
 		launch: func(ctx context.Context, inv launch.Invocation) (backend.Ref, error) {
 			inv.Env = markHerdrPane(inv.Env)
@@ -328,7 +343,22 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	if opts.Backend != "herdr" {
 		return WithExitCode(errors.New("--worktree needs --surface herdr; workers run in herdr only"), exitUsage)
 	}
-	spec := workerSpec{target: opts.Target, name: opts.DisplayName, branch: opts.Worktree, harness: opts.Harness, allowPATH: opts.AllowPATH}
+	if opts.Model != "" {
+		if err := config.CheckModelName(opts.Model); err != nil {
+			return WithExitCode(fmt.Errorf("--model: %w", err), exitUsage)
+		}
+	}
+	configDir, err := deps.Cfg.Surface.ProfileConfigDir(opts.Profile, os.UserHomeDir)
+	if err != nil {
+		return WithExitCode(termsafe.Error(fmt.Errorf("--profile: %w", err)), exitUsage)
+	}
+	if configDir != "" && opts.Harness == "codex" {
+		// Refused here rather than at the build step, which runs after the
+		// worktree exists.
+		return WithExitCode(errors.New("--profile sets CLAUDE_CONFIG_DIR and applies to claude workers only"), exitUsage)
+	}
+	spec := workerSpec{target: opts.Target, name: opts.DisplayName, branch: opts.Worktree, harness: opts.Harness, allowPATH: opts.AllowPATH,
+		configDir: configDir, model: opts.Model}
 	ctx, warn := cmd.Context(), cmd.ErrOrStderr()
 	setup, err := prepareWorker(ctx, warn, deps, spec)
 	if err != nil {
@@ -339,7 +369,7 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 		return WithExitCode(err, exitUsage)
 	}
 	if opts.DryRun {
-		return planWorkerLaunch(cmd, deps, opts, setup.top, setup.led, workerPlanInputs{injected: setup.injected, unset: setup.unset, prompt: prompt, hasBrief: brief != nil, self: setup.self})
+		return planWorkerLaunch(cmd, deps, opts, setup.top, setup.led, workerPlanInputs{spec: spec, injected: setup.injected, unset: setup.unset, prompt: prompt, hasBrief: brief != nil, self: setup.self})
 	}
 
 	attempt, err := attemptWorker(ctx, setup.led, spec.name, spec.branch, setup.steps(deps, spec, prompt, brief, warn))
@@ -413,6 +443,7 @@ func composeLaunchBrief(text string, now func() time.Time) (string, *worker.Brie
 // workerPlanInputs are the pieces runWorkerLaunch has already built when it
 // reaches a --dry-run.
 type workerPlanInputs struct {
+	spec     workerSpec
 	injected map[string]string
 	unset    []string
 	prompt   string
@@ -440,7 +471,7 @@ func planWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	if err != nil {
 		return err
 	}
-	built, err := buildWorkerInvocation(surfaceInvocationRequest(deps.Cfg.Launch, plan.Path, in.injected, in.unset, opts.Harness), in.prompt, worker.NewSessionID, cmd.ErrOrStderr())
+	built, err := buildWorkerInvocation(in.spec.request(deps.Cfg.Launch, plan.Path, in.injected, in.unset), in.prompt, worker.NewSessionID, cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}

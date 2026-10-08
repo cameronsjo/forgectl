@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	osexec "os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -70,6 +73,9 @@ type drainIO struct {
 	// load reads the config file with the normal loader.
 	load   func() (config.Config, error)
 	notify drainNotifier
+	// slots runs `claude-slots check 1` before a launch; nil when claude-slots
+	// was not on PATH at drain start, and the drain launches without the cap.
+	slots func(ctx context.Context) drain.SlotsCheck
 	// emit records one event.
 	emit     func(drain.Event) error
 	now      func() time.Time
@@ -93,11 +99,51 @@ type drainer struct {
 	stopping func() bool
 	// lastErr is the last I/O error a tick met, for drain.json.
 	lastErr string
+	// slotsCond is the condition the last claude-slots check left
+	// (drain.SlotsDecision.Cond), so each is recorded once on entry.
+	slotsCond string
 }
 
 func newDrainer(io drainIO, session string, stopping func() bool) *drainer {
 	return &drainer{io: io, session: session, pauses: drain.Pauses{}, memo: map[string]drain.Memo{},
 		settings: config.DefaultDrainSettings(), stopping: stopping}
+}
+
+// announce records what the drain starts without: one note when claude-slots
+// was not found, since every launch then goes ahead without the session cap.
+func (d *drainer) announce() {
+	if d.io.slots == nil {
+		d.event(drain.Event{Kind: drain.EventNote, Error: drain.NoSlotsNote})
+	}
+}
+
+// slotsHold runs the claude-slots check for the claimed row q and reports
+// whether to hold it, with the reason. An event is recorded once per entry
+// into a held or failed condition.
+func (d *drainer) slotsHold(ctx context.Context, q worker.QueueRow) (bool, string) {
+	if d.io.slots == nil {
+		return false, ""
+	}
+	dec := drain.DecideSlots(d.io.slots(ctx), d.slotsCond)
+	d.slotsCond = dec.Cond
+	if dec.Emit {
+		e := dec.Event
+		e.Name, e.Repo = q.Name, q.Repo
+		d.event(e)
+	}
+	return dec.Hold, dec.Reason
+}
+
+// unclaim puts a held row back to queued, quietly: the slots-held event
+// already said why, once, and a state event per tick would repeat it.
+func (d *drainer) unclaim(q worker.QueueRow, why string) {
+	_, err := d.io.queue.UpdateIf(q.Name, worker.SameRead(q), d.io.now(), drain.Unclaim(q, why).Apply)
+	if err != nil && !errors.Is(err, worker.ErrQueueRowChanged) && !errors.Is(err, worker.ErrQueueNoRow) {
+		// The row stays claimed; the next tick's reconcile requeues it.
+		d.lastErr = "queue: " + err.Error()
+		d.event(drain.Event{Kind: drain.EventError, Name: q.Name, Repo: q.Repo, State: string(q.State),
+			Error: "put the held row back to queued: " + err.Error()})
+	}
 }
 
 // event records e, keeping the first write failure for drain.json.
@@ -362,10 +408,19 @@ func (d *drainer) claimAndLaunch(ctx context.Context, rows []worker.QueueRow, le
 			}
 			continue
 		}
+		checkErr := drain.CheckClaimed(claimed)
+		if checkErr == nil {
+			// The machine's session cap, checked as late as possible: a held
+			// row goes back to queued, and nothing more is claimed this tick.
+			if hold, why := d.slotsHold(ctx, claimed); hold {
+				d.unclaim(claimed, why)
+				return
+			}
+		}
 		d.event(drain.Event{Kind: drain.EventState, Name: claimed.Name, Repo: claimed.Repo, State: string(claimed.State), Attempt: claimed.Attempts})
 		var a drain.Attempt
-		if err := drain.CheckClaimed(claimed); err != nil {
-			a = drain.Attempt{Class: drain.ErrRowInvalid, Err: err.Error(), CreatedNothing: true}
+		if checkErr != nil {
+			a = drain.Attempt{Class: drain.ErrRowInvalid, Err: checkErr.Error(), CreatedNothing: true}
 		} else {
 			a = d.io.launch(ctx, d.cfg, claimed)
 		}
@@ -446,15 +501,28 @@ func drainLaunchWith(runner exec.Runner, launchFn workerLauncher) func(context.C
 			return drain.Attempt{Class: drain.ErrRowInvalid, CreatedNothing: true,
 				Err: fmt.Sprintf("the repository top is now %s, expected the queued %s", top, row.Repo)}
 		}
-		attempt, err := launchFn(ctx, io.Discard, module.Deps{Runner: runner, Cfg: cfg}, drainSpec(row), row.Brief)
+		// The row names its profile only; it resolves against the config
+		// file as loaded now. An unknown name fails every row that names it
+		// the same way, so it is a launch-config failure, before anything is
+		// created.
+		configDir, err := cfg.Surface.ProfileConfigDir(row.Profile, os.UserHomeDir)
+		if err != nil {
+			return drain.Attempt{Class: drain.ErrLaunchConfig, Err: "profile: " + err.Error(), CreatedNothing: true}
+		}
+		spec := drainSpec(row)
+		spec.configDir = configDir
+		attempt, err := launchFn(ctx, io.Discard, module.Deps{Runner: runner, Cfg: cfg}, spec, row.Brief)
 		return attemptOf(attempt, err, row)
 	}
 }
 
 // drainSpec is the worker launch for a claimed row: harness claude, branch
-// worker/<name>, no $PATH binary, and the claim's launch id for the ledger.
+// worker/<name>, no $PATH binary, the row's model, and the claim's launch id
+// for the ledger. The row's profile is resolved by the caller, against the
+// config it launches with.
 func drainSpec(row worker.QueueRow) workerSpec {
-	return workerSpec{target: row.Repo, name: row.Name, branch: drain.Branch(row.Name), harness: "claude", allowPATH: false, launchID: row.LaunchID}
+	return workerSpec{target: row.Repo, name: row.Name, branch: drain.Branch(row.Name), harness: "claude", allowPATH: false,
+		launchID: row.LaunchID, model: row.Model}
 }
 
 // attemptOf turns a workerAttempt and its error into the drain's view.
@@ -616,14 +684,89 @@ func probeWorker(ctx context.Context, herdr screenReader, table *ready.Table, se
 // drainHerdrTimeout bounds the pre-claim herdr readiness check.
 const drainHerdrTimeout = 15 * time.Second
 
+// claudeSlotsTimeout caps one claude-slots check; a slower one launches
+// without the cap. Tests shorten it.
+var claudeSlotsTimeout = 5 * time.Second
+
+// maxClaudeSlotsOutput bounds what a check's output is read into.
+const maxClaudeSlotsOutput = 4 << 10
+
+// lookClaudeSlots is the absolute claude-slots path on PATH, or "" when it is
+// not there (or not usable): the drain then launches without the cap.
+func lookClaudeSlots() string {
+	path, err := osexec.LookPath("claude-slots")
+	if err != nil {
+		return ""
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	return abs
+}
+
+// cappedOutput keeps the first maxClaudeSlotsOutput bytes written to it and
+// drops the rest, so a noisy tool cannot grow the drain.
+type cappedOutput struct{ b []byte }
+
+func (c *cappedOutput) Write(p []byte) (int, error) {
+	if room := maxClaudeSlotsOutput - len(c.b); room > 0 {
+		c.b = append(c.b, p[:min(room, len(p))]...)
+	}
+	return len(p), nil
+}
+
+// runClaudeSlots runs `<path> check 1` with the drain's environment, stdin
+// from /dev/null, and a claudeSlotsTimeout cap, and reports how it ended with
+// the first non-empty line of its output as the reason.
+func runClaudeSlots(ctx context.Context, path string) drain.SlotsCheck {
+	ctx, cancel := context.WithTimeout(ctx, claudeSlotsTimeout)
+	defer cancel()
+	var out cappedOutput
+	cmd := osexec.CommandContext(ctx, path, "check", "1") //nolint:gosec // G204: the claude-slots path resolved at drain start, fixed arguments
+	cmd.Stdout, cmd.Stderr = &out, &out
+	// A child that keeps the pipes open after the kill must not hold the tick.
+	cmd.WaitDelay = time.Second
+	err := cmd.Run()
+	c := drain.SlotsCheck{Exit: -1, Reason: slotsReason(string(out.b))}
+	var exitErr *osexec.ExitError
+	switch {
+	case err == nil:
+		c.Exit = 0
+	case ctx.Err() != nil:
+		c.TimedOut = true
+	case errors.As(err, &exitErr):
+		c.Exit = exitErr.ExitCode()
+	default:
+		c.Err = termsafe.SafeLineMax(err.Error(), 200)
+	}
+	return c
+}
+
+// slotsReason is the first non-empty line of s, safe to print and capped.
+func slotsReason(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return termsafe.SafeLineMax(line, 200)
+		}
+	}
+	return ""
+}
+
 // realDrainIO wires the tick to the queue, the ledgers, herdr, the config
-// file and the launch path. emit records an event.
-func realDrainIO(deps module.Deps, session string, emit func(drain.Event) error) (drainIO, error) {
+// file, claude-slots (slotsPath, or "" when it was not found at start) and
+// the launch path. emit records an event.
+func realDrainIO(deps module.Deps, session, slotsPath string, emit func(drain.Event) error) (drainIO, error) {
 	q, err := worker.OpenQueue()
 	if err != nil {
 		return drainIO{}, err
 	}
+	var slots func(context.Context) drain.SlotsCheck
+	if slotsPath != "" {
+		slots = func(ctx context.Context) drain.SlotsCheck { return runClaudeSlots(ctx, slotsPath) }
+	}
 	return drainIO{
+		slots: slots,
 		queue: q,
 		ledgerRows: func(repo, s string) ([]worker.Row, error) {
 			led, err := worker.Open(repo, s)
