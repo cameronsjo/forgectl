@@ -144,6 +144,8 @@ func TestCheckClaimed(t *testing.T) {
 		"leading @":     {func(r *worker.QueueRow) { r.Brief = "@x"; r.BriefSHA256 = worker.BriefSHA256("@x") }, "queue check"},
 		"empty brief":   {func(r *worker.QueueRow) { r.Brief = ""; r.BriefSHA256 = worker.BriefSHA256("") }, "queue check"},
 		"hash mismatch": {func(r *worker.QueueRow) { r.Brief = "fix that" }, "expected the enqueued sha256 " + worker.BriefSHA256("fix it")},
+		"model flag":    {func(r *worker.QueueRow) { r.Model = "--print" }, "launch options"},
+		"profile path":  {func(r *worker.QueueRow) { r.Profile = "../x" }, "launch options"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

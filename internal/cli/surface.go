@@ -94,6 +94,8 @@ func newSurfaceLaunchCmd(deps module.Deps) *cobra.Command {
 		worktree    string
 		harness     string
 		brief       string
+		profile     string
+		model       string
 		here        bool
 		dryRun      bool
 		asJSON      bool
@@ -136,6 +138,14 @@ brief from a file of at most 64 KiB. The brief stays in the harness's
 process arguments, where any local process can list it, so it must not hold
 a secret; point the worker at a file in the worktree instead.
 
+--profile <name> runs a claude worker with CLAUDE_CONFIG_DIR set to the
+config_dir of [surface.profiles.<name>] (see docs/configuration.md), so it
+uses that Claude account and settings home; main, or no --profile, keeps the
+launcher's own CLAUDE_CONFIG_DIR. An unknown name is refused. --model <name>
+replaces the launch profile's model for this worker and derives its effort
+again; it is a plain token (letters, digits, '.', '-', '_', '[', ']', at most
+64 characters, not starting with '-').
+
 --dry-run runs every check the launch runs before it writes (the backend is
 on PATH, the target resolves, the harness profile builds, and for a worker the
 name, branch and worktree path are free) and prints what it would create, then
@@ -154,6 +164,7 @@ source is default, launch.worker, or repo-profile; the text preview prints
 
   forgectl surface launch . --surface herdr --worktree feat/x --name x --harness codex
   forgectl surface launch . --surface herdr --worktree fix/login --name fix-login --brief @brief.md
+  forgectl surface launch . --surface herdr --worktree fix/y --name y --profile work --model sonnet
   forgectl surface launch . --surface herdr --worktree feat/x --name x --dry-run --json`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -165,6 +176,8 @@ source is default, launch.worker, or repo-profile; the text preview prints
 				Worktree:    worktree,
 				Harness:     harness,
 				Brief:       brief,
+				Profile:     profile,
+				Model:       model,
 				Here:        here,
 				DryRun:      dryRun,
 				JSON:        asJSON,
@@ -192,6 +205,10 @@ source is default, launch.worker, or repo-profile; the text preview prints
 		"start claude in the target itself, not at its repository root when the .claude settings live there (claude only; no effect on workers or codex)")
 	cmd.Flags().StringVar(&brief, "brief", "",
 		"a worker's first brief, text or @file, passed as the harness's prompt argument (--worktree only)")
+	cmd.Flags().StringVar(&profile, "profile", "",
+		"run the worker under this [surface.profiles] entry's config_dir as CLAUDE_CONFIG_DIR; main is the launcher's own (--worktree only, claude)")
+	cmd.Flags().StringVar(&model, "model", "",
+		"run the worker on this model instead of the launch profile's (--worktree only)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"run the launch's checks and print what it would create, creating nothing")
 	cmd.Flags().BoolVar(&asJSON, "json", false,
@@ -210,6 +227,8 @@ type surfaceLaunchOptions struct {
 	Worktree    string
 	Harness     string
 	Brief       string
+	Profile     string
+	Model       string
 	Here        bool
 	DryRun      bool
 	JSON        bool
@@ -242,6 +261,9 @@ func runSurfaceLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOp
 	}
 	if opts.Brief != "" {
 		return WithExitCode(errors.New("--brief needs --worktree; only a worker launch takes a brief"), exitUsage)
+	}
+	if opts.Profile != "" || opts.Model != "" {
+		return WithExitCode(errors.New("--profile and --model need --worktree; only a worker launch takes them"), exitUsage)
 	}
 
 	adapter, err := surfaceAdapterForWithWarnings(opts.Backend, cmd.ErrOrStderr())

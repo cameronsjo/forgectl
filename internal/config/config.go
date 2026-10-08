@@ -1269,6 +1269,16 @@ func DecodeStrict(data []byte) (Config, error) {
 			invalid = err
 		}
 	}
+	// [surface.profiles] names the Claude config directory a worker runs
+	// under, so a bad entry is refused at load like the two above, and the
+	// whole table is dropped: a worker asking for any profile then fails as
+	// unknown rather than running under a guessed directory.
+	if err := cfg.Surface.ValidateProfiles(); err != nil {
+		cfg.Surface.Profiles = nil
+		if invalid == nil {
+			invalid = invalidValueError{message: err.Error()}
+		}
+	}
 	return cfg, invalid
 }
 

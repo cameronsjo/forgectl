@@ -279,6 +279,12 @@ func TestWorkerLaunchRefusesANonWorkerBuild(t *testing.T) {
 // launch. The claude binary resolves to an executable stub.
 func inProcessSteps(t *testing.T, led *worker.Ledger, launched *[]launch.Invocation) workerSteps {
 	t.Helper()
+	return inProcessStepsFor(t, led, launched, workerSpec{name: "w1", branch: "feat/w1", harness: "claude"})
+}
+
+// inProcessStepsFor is inProcessSteps for a given spec.
+func inProcessStepsFor(t *testing.T, led *worker.Ledger, launched *[]launch.Invocation, spec workerSpec) workerSteps {
+	t.Helper()
 	bin := filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil { //nolint:gosec // G306: the stub must be executable to resolve as the claude binary
 		t.Fatal(err)
@@ -290,7 +296,7 @@ func inProcessSteps(t *testing.T, led *worker.Ledger, launched *[]launch.Invocat
 	}
 	deps := module.Deps{Cfg: config.Config{Launch: config.LaunchConfig{Defaults: config.LaunchDefaults{PermissionMode: "acceptEdits"}}}}
 	setup := workerSetup{top: testRepoTop, led: led, self: "/nonexistent/forgectl"}
-	steps := setup.steps(deps, workerSpec{name: "w1", branch: "feat/w1", harness: "claude"}, "Fix it.", nil, io.Discard)
+	steps := setup.steps(deps, spec, "Fix it.", nil, io.Discard)
 	steps.addWorktree = func(context.Context) (worker.Worktree, error) {
 		return worker.Worktree{Path: cwd, Branch: "feat/w1", Base: "abc123"}, nil
 	}

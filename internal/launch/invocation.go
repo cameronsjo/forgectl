@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -134,6 +135,16 @@ type InvocationRequest struct {
 	// the coordinator knows which transcript the worker writes. Only a claude
 	// worker takes one; it must be a lowercase UUID.
 	SessionID string
+	// Model, when set, replaces the matched profile's model for a worker
+	// launch (`--model`), and effort is derived again from it, as a harness
+	// override does. It must pass config.CheckModelName. Only a worker takes
+	// one.
+	Model string
+	// ConfigDir, when set, is a claude worker's CLAUDE_CONFIG_DIR: the
+	// [surface.profiles] entry it runs under, already resolved to an absolute
+	// path. It is set last, over the inherited value and the profile's env.
+	// Only a claude worker takes one.
+	ConfigDir string
 	// StdoutTerminal reports whether the harness's stdout (forgectl's own,
 	// since launch execs it) is a terminal. It decides whether
 	// `--output-format` alone selects the print posture (IsClaudePrintMode,
@@ -434,6 +445,20 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 	if profile, err = applyHarnessOverride(profile, req.Harness); err != nil {
 		return BuiltInvocation{}, err
 	}
+	if req.Model != "" {
+		if !req.Worker {
+			return BuiltInvocation{}, errors.New("launch: only a worker launch takes a model override")
+		}
+		if err := config.CheckModelName(req.Model); err != nil {
+			return BuiltInvocation{}, fmt.Errorf("launch: model %s: %w", termsafe.QuoteArgMax(req.Model, 0), err)
+		}
+		profile.Model = req.Model
+		profile.Effort = EffortForModel(req.Model)
+	}
+	if req.ConfigDir != "" && (!req.Worker || profile.Harness != "claude" || !filepath.IsAbs(req.ConfigDir)) {
+		return BuiltInvocation{}, fmt.Errorf("launch: a config dir is for a claude worker only, as an absolute path (got %s for harness %s)",
+			termsafe.QuoteArgMax(req.ConfigDir, 0), profile.Harness)
+	}
 	if err := profile.Validate(); err != nil {
 		return BuiltInvocation{}, err
 	}
@@ -501,6 +526,11 @@ func BuildInvocation(req InvocationRequest) (BuiltInvocation, error) {
 	}
 
 	env := MergeEnv(base, extra)
+	if req.ConfigDir != "" {
+		// The worker's named profile is the operator's choice for this one
+		// launch, so it outranks the inherited value and the profile's env.
+		env = MergeEnv(env, map[string]string{"CLAUDE_CONFIG_DIR": req.ConfigDir})
+	}
 	dir := runDirectory(req, posture)
 	if dir != req.CWD {
 		// The harness inherits PWD; left alone it would still name the

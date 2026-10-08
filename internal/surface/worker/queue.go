@@ -86,7 +86,44 @@ type QueueRow struct {
 	// launched. With Repo and Name it names the ledger row (Open(Repo,
 	// Session), then the row called Name).
 	Session string `json:"session,omitempty"`
+	// Profile is the [surface.profiles] name the worker runs under, or empty
+	// for the launcher's own CLAUDE_CONFIG_DIR. Only the name is stored; the
+	// drain resolves it from the config file when it launches.
+	Profile string `json:"profile,omitempty"`
+	// Model replaces the launch profile's model for this worker, or is empty.
+	Model string `json:"model,omitempty"`
 }
+
+// QueueLaunch is what a queue row asks of its launch beyond the brief.
+type QueueLaunch struct {
+	// Profile is a [surface.profiles] name; "main" is stored as empty.
+	Profile string
+	// Model is a model name for the harness's --model.
+	Model string
+}
+
+// check refuses a profile name or model outside its shape. Whether the
+// profile exists is the config's question, asked at enqueue and at launch.
+func (l QueueLaunch) check() error {
+	if l.Profile != "" {
+		if err := config.CheckProfileName(l.Profile); err != nil {
+			return fmt.Errorf("worker: profile %q: %w", l.Profile, err)
+		}
+	}
+	if l.Model != "" {
+		if err := config.CheckModelName(l.Model); err != nil {
+			return fmt.Errorf("worker: model %q: %w", l.Model, err)
+		}
+	}
+	return nil
+}
+
+// Launch is the row's QueueLaunch.
+func (r QueueRow) Launch() QueueLaunch { return QueueLaunch{Profile: r.Profile, Model: r.Model} }
+
+// CheckLaunch re-checks a stored row's profile name and model shape, for the
+// drain, which reads rows the store checked only for version and state.
+func (r QueueRow) CheckLaunch() error { return r.Launch().check() }
 
 // queueVersion is the on-disk format version. A file with another version is
 // refused rather than rewritten, as the ledger does.
@@ -224,6 +261,10 @@ func enqueueRow(rows []QueueRow, row QueueRow) (out []QueueRow, existing QueueRo
 			return nil, r, false, fmt.Errorf("%w: %q holds brief sha256 %s, this brief is sha256 %s (state %s); dequeue it first to replace it",
 				ErrQueueNameTaken, r.Name, r.BriefSHA256, row.BriefSHA256, r.State)
 		}
+		if r.Launch() != row.Launch() {
+			return nil, r, false, fmt.Errorf("%w: %q is queued with profile %q and model %q, this enqueue asks for profile %q and model %q (state %s); dequeue it first to replace it",
+				ErrQueueNameTaken, r.Name, r.Profile, r.Model, row.Profile, row.Model, r.State)
+		}
 		return nil, r, false, errQueueUnchanged
 	}
 	return append(rows, row), row, true, nil
@@ -303,6 +344,19 @@ func (q *Queue) Rows() ([]QueueRow, error) {
 // ErrQueueNameTaken naming both. A row that would push the document past
 // MaxQueueBytes is ErrQueueFull, and nothing is written.
 func (q *Queue) Enqueue(name, repo, brief, batch string, now time.Time) (row QueueRow, added bool, err error) {
+	return q.EnqueueLaunch(name, repo, brief, batch, QueueLaunch{}, now)
+}
+
+// EnqueueLaunch is Enqueue for a row that names a profile or a model. The
+// profile is stored by name ("main" as empty), never as a path. A name
+// already queued with another profile or model is ErrQueueNameTaken.
+func (q *Queue) EnqueueLaunch(name, repo, brief, batch string, launch QueueLaunch, now time.Time) (row QueueRow, added bool, err error) {
+	if launch.Profile == config.MainProfile {
+		launch.Profile = ""
+	}
+	if err := launch.check(); err != nil {
+		return QueueRow{}, false, err
+	}
 	if err := ValidName(name); err != nil {
 		return QueueRow{}, false, err
 	}
@@ -318,7 +372,7 @@ func (q *Queue) Enqueue(name, repo, brief, batch string, now time.Time) (row Que
 	now = now.UTC()
 	candidate := QueueRow{
 		Name: name, Repo: repo, Brief: brief, BriefSHA256: BriefSHA256(brief), Batch: batch,
-		State: QueueQueued, EnqueuedAt: now, StateAt: now,
+		State: QueueQueued, EnqueuedAt: now, StateAt: now, Profile: launch.Profile, Model: launch.Model,
 	}
 	err = q.mutate(MaxQueueBytes, func(rows []QueueRow) ([]QueueRow, error) {
 		out, existing, ok, err := enqueueRow(rows, candidate)
