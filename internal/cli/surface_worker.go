@@ -352,7 +352,7 @@ func runWorkerLaunch(cmd *cobra.Command, deps module.Deps, opts surfaceLaunchOpt
 	if err != nil {
 		return WithExitCode(termsafe.Error(fmt.Errorf("--profile: %w", err)), exitUsage)
 	}
-	if configDir != "" && opts.Harness == "codex" {
+	if configDir != "" && opts.Harness != "" && opts.Harness != "claude" {
 		return WithExitCode(errProfileNotClaude, exitUsage)
 	}
 	spec := workerSpec{target: opts.Target, name: opts.DisplayName, branch: opts.Worktree, harness: opts.Harness, allowPATH: opts.AllowPATH,

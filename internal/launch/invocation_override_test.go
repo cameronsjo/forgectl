@@ -113,12 +113,11 @@ func TestBuildInvocation_HarnessOverrideSameHarnessKeepsModel(t *testing.T) {
 	}
 }
 
-// TestBuildInvocation_HarnessOverrideRefusesPi pins the v1 refusal: pi has no
-// posture flag forgectl can pass, so an override to it is refused before the
-// resolver runs — as is anything outside the closed set.
-func TestBuildInvocation_HarnessOverrideRefusesPi(t *testing.T) {
+// TestBuildInvocation_HarnessOverrideClosedSet: an override outside claude,
+// codex and pi is refused before the resolver runs.
+func TestBuildInvocation_HarnessOverrideClosedSet(t *testing.T) {
 	target := projectDir(t)
-	for _, harness := range []string{"pi", "bash", "Claude"} {
+	for _, harness := range []string{"bash", "Claude", "gemini"} {
 		resolved := false
 		_, err := BuildInvocation(InvocationRequest{
 			StdoutTerminal: true,
@@ -139,6 +138,32 @@ func TestBuildInvocation_HarnessOverrideRefusesPi(t *testing.T) {
 	}
 }
 
+// TestBuildInvocation_HarnessOverrideToPi: an override to pi resolves the pi
+// binary and drops the claude model, as a codex override does.
+func TestBuildInvocation_HarnessOverrideToPi(t *testing.T) {
+	target := projectDir(t)
+	var asked string
+	built, err := BuildInvocation(InvocationRequest{
+		StdoutTerminal: true,
+		Config:         strictRepoConfig(target, "claude", "sonnet"),
+		CWD:            target,
+		Harness:        "pi",
+		Resolve: func(h string, _ config.LaunchDefaults) (ResolvedBinary, error) {
+			asked = h
+			return ResolvedBinary{Path: "/stub/pi", Source: BinaryPATH}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildInvocation: %v", err)
+	}
+	if asked != "pi" || built.Invocation.Harness != "pi" || built.Posture != PosturePiSession {
+		t.Fatalf("resolved %q, harness %q, posture %q; want pi throughout", asked, built.Invocation.Harness, built.Posture)
+	}
+	if slices.Contains(built.Invocation.Args, "sonnet") {
+		t.Errorf("pi argv %q carries the claude profile's model", built.Invocation.Args)
+	}
+}
+
 func containsPair(args []string, flag, value string) bool {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == flag && args[i+1] == value {
@@ -148,9 +173,9 @@ func containsPair(args []string, flag, value string) bool {
 	return false
 }
 
-// TestBuildInvocation_WorkerFloor pins the T1 worker posture: pi refused from
-// the profile as well as the flag, the danger flag forced off on a default
-// config, and an explicit bypass or full-access sandbox refused.
+// TestBuildInvocation_WorkerFloor pins the T1 worker posture: the danger flag
+// forced off on a default config, and an explicit bypass or full-access
+// sandbox refused. Pi workers are allowed (operator request, 2026-10-08).
 func TestBuildInvocation_WorkerFloor(t *testing.T) {
 	target := projectDir(t)
 	bin := fixedResolver(ResolvedBinary{Path: "/stub/harness", Source: BinaryPATH})
@@ -185,12 +210,11 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 	})
 
 	for name, lc := range map[string]config.LaunchConfig{
-		"pi from the repo profile": {Projects: []config.LaunchProject{{Match: target, Harness: "pi"}}},
-		"bypassPermissions":        {Worker: config.LaunchWorker{PermissionMode: "bypassPermissions"}},
-		"danger-full-access":       {Defaults: config.LaunchDefaults{Harness: "codex"}, Worker: config.LaunchWorker{Sandbox: "danger-full-access"}},
-		"claude dontAsk":           {Worker: config.LaunchWorker{PermissionMode: "dontAsk"}},
-		"codex never asks":         {Defaults: config.LaunchDefaults{Harness: "codex"}, Worker: config.LaunchWorker{ApprovalPolicy: "never"}},
-		"unknown worker mode":      {Worker: config.LaunchWorker{PermissionMode: "acceptEdit"}},
+		"bypassPermissions":   {Worker: config.LaunchWorker{PermissionMode: "bypassPermissions"}},
+		"danger-full-access":  {Defaults: config.LaunchDefaults{Harness: "codex"}, Worker: config.LaunchWorker{Sandbox: "danger-full-access"}},
+		"claude dontAsk":      {Worker: config.LaunchWorker{PermissionMode: "dontAsk"}},
+		"codex never asks":    {Defaults: config.LaunchDefaults{Harness: "codex"}, Worker: config.LaunchWorker{ApprovalPolicy: "never"}},
+		"unknown worker mode": {Worker: config.LaunchWorker{PermissionMode: "acceptEdit"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := BuildInvocation(InvocationRequest{Config: lc, CWD: target, Worker: true, Resolve: bin, StdoutTerminal: true})
@@ -271,6 +295,70 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 		}
 		if slices.Contains(built.Invocation.Args, "--settings") {
 			t.Errorf("codex worker argv %q carries a claude flag", built.Invocation.Args)
+		}
+	})
+
+	piConfig := config.LaunchConfig{Projects: []config.LaunchProject{{Match: target, Harness: "pi"}}}
+	t.Run("pi worker from the repo profile", func(t *testing.T) {
+		built, err := BuildInvocation(InvocationRequest{
+			StdoutTerminal: true, Config: piConfig, CWD: target, Worker: true, Resolve: bin,
+			Model: "qwen-27b", Prompt: "fix the login bug",
+		})
+		if err != nil {
+			t.Fatalf("BuildInvocation: %v", err)
+		}
+		// Pi takes the model flag and the brief after `--`, and nothing else.
+		want := []string{"--model", "qwen-27b", "--", "fix the login bug"}
+		if !built.Worker || built.Invocation.Harness != "pi" || !slices.Equal(built.Invocation.Args, want) {
+			t.Errorf("pi worker: worker %v harness %q argv %q, want a pi worker with %q",
+				built.Worker, built.Invocation.Harness, built.Invocation.Args, want)
+		}
+	})
+
+	t.Run("pi worker by override", func(t *testing.T) {
+		built, err := BuildInvocation(InvocationRequest{StdoutTerminal: true, CWD: target, Worker: true, Resolve: bin, Harness: "pi"})
+		if err != nil {
+			t.Fatalf("BuildInvocation: %v", err)
+		}
+		if built.Invocation.Harness != "pi" || len(built.Invocation.Args) != 0 {
+			t.Errorf("pi override worker: harness %q argv %q, want pi with no args", built.Invocation.Harness, built.Invocation.Args)
+		}
+	})
+
+	t.Run("pi worker refuses user args", func(t *testing.T) {
+		_, err := BuildInvocation(InvocationRequest{StdoutTerminal: true, Config: piConfig, CWD: target, Worker: true, Resolve: bin,
+			Args: []string{"--tools", "bash"}})
+		if !errors.Is(err, ErrWorkerPosture) {
+			t.Fatalf("err = %v, want ErrWorkerPosture", err)
+		}
+	})
+
+	// Measured on Pi 1.0.4: an '@' argument is a file to attach, even after `--`.
+	for _, prompt := range []string{"@README.md say OK", "\n  @notes.md"} {
+		t.Run("pi worker refuses an @ brief", func(t *testing.T) {
+			_, err := BuildInvocation(InvocationRequest{StdoutTerminal: true, Config: piConfig, CWD: target, Worker: true, Resolve: bin,
+				Prompt: prompt})
+			if err == nil || !strings.Contains(err.Error(), "'@'") {
+				t.Fatalf("err = %v, want the '@' refusal", err)
+			}
+		})
+	}
+
+	t.Run("pi worker takes no session id or config dir", func(t *testing.T) {
+		for _, req := range []InvocationRequest{
+			{SessionID: "0b0e9a54-55a1-4c42-9b9e-6f3c3f6b8c11"},
+			{ConfigDir: "/profiles/work"},
+		} {
+			req.StdoutTerminal, req.Config, req.CWD, req.Worker, req.Resolve = true, piConfig, target, true, bin
+			if _, err := BuildInvocation(req); err == nil {
+				t.Errorf("pi worker accepted %+v", req)
+			}
+		}
+	})
+
+	t.Run("floor refuses a harness it does not name", func(t *testing.T) {
+		if _, err := applyWorkerFloor(Profile{Harness: "gemini"}); !errors.Is(err, ErrWorkerPosture) {
+			t.Fatalf("err = %v, want ErrWorkerPosture", err)
 		}
 	})
 

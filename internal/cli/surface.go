@@ -60,7 +60,7 @@ exists.
 The backend is always explicit. There is no default and no detection.
 
 enqueue, dequeue and queue manage the machine's queue of briefs, which
-surface drain launches as claude workers in herdr:
+surface drain launches as claude, codex, or pi workers in herdr:
 
   forgectl surface enqueue --repo forgectl --name fix-login --brief brief.md
   forgectl surface queue
@@ -200,7 +200,7 @@ source is default, launch.worker, or repo-profile; the text preview prints
 	cmd.Flags().StringVar(&worktree, "worktree", "",
 		"start a worker on this branch in its own git worktree under <repo>/.claude/worktrees/<name> (herdr only; --name required)")
 	cmd.Flags().StringVar(&harness, "harness", "",
-		"run this harness instead of the one the directory's launch profile names (claude or codex)")
+		"run this harness instead of the one the directory's launch profile names (claude, codex, or pi)")
 	cmd.Flags().BoolVar(&here, "here", false,
 		"start claude in the target itself, not at its repository root when the .claude settings live there (claude only; no effect on workers or codex)")
 	cmd.Flags().StringVar(&brief, "brief", "",
