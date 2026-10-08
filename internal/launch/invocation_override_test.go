@@ -218,19 +218,16 @@ func TestBuildInvocation_WorkerFloor(t *testing.T) {
 			// constant cannot pass by agreeing with itself. --mcp-config is
 			// variadic in Claude Code, so the flag after its one value is load-
 			// bearing: a bare token there would join the config list.
+			// A worker is a full harness (ADR-0010, 2026-10-08): no isolation
+			// flags, only the worker settings after the posture.
 			want := []string{"--permission-mode", mode,
-				"--setting-sources", "",
-				"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
-				"--no-chrome",
-				"--safe-mode",
-				"--settings", `{"useAutoModeDuringPlan":false,"permissions":{"deny":["SendMessage","RemoteTrigger"]}}`,
+				"--settings", `{"useAutoModeDuringPlan":false}`,
 			}
 			// Only acceptEdits carries the allow list; a plan worker that could
 			// commit and push unprompted would be looser than its mode.
 			if mode == "acceptEdits" {
 				want[len(want)-1] = `{"useAutoModeDuringPlan":false,"permissions":{` +
-					`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"],` +
-					`"deny":["SendMessage","RemoteTrigger"]}}`
+					`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"]}}`
 			}
 			if args := built.Invocation.Args; len(args) < len(want) || !slices.Equal(args[:len(want)], want) {
 				t.Errorf("worker argv %q, want it to start %q", args, want)
@@ -376,8 +373,8 @@ func TestBuildInvocation_WorkerSessionID(t *testing.T) {
 }
 
 // TestWorkerClaudeSettingsJSON pins the worker settings as data: both parse,
-// turn off auto mode during plan, and deny the two cross-session tools; only
-// the acceptEdits settings pre-approve commands, and exactly the agreed list.
+// turn off auto mode during plan, and deny nothing; only the acceptEdits
+// settings pre-approve commands, and exactly the agreed list.
 func TestWorkerClaudeSettingsJSON(t *testing.T) {
 	wantAllow := []string{
 		"Bash(go test *)", "Bash(go build *)", "Bash(make *)",
@@ -405,10 +402,8 @@ func TestWorkerClaudeSettingsJSON(t *testing.T) {
 			if s.UseAutoModeDuringPlan == nil || *s.UseAutoModeDuringPlan {
 				t.Error("useAutoModeDuringPlan is not false")
 			}
-			for _, tool := range []string{"SendMessage", "RemoteTrigger"} {
-				if !slices.Contains(s.Permissions.Deny, tool) {
-					t.Errorf("%s is not denied", tool)
-				}
+			if len(s.Permissions.Deny) != 0 {
+				t.Errorf("worker settings deny %q; a worker is a full harness (ADR-0010, 2026-10-08)", s.Permissions.Deny)
 			}
 			if !slices.Equal(s.Permissions.Allow, tc.allow) {
 				t.Errorf("allow list = %q, want exactly %q (widening it needs a security review)", s.Permissions.Allow, tc.allow)

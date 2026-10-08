@@ -1,6 +1,6 @@
 # 0010. Worker `auto` permission mode: per-machine opt-in behind a hardening floor
 
-**Status: Accepted** (Decisions 1 to 3 superseded by the second 2026-10-07 amendment: `auto` is allowed for workers without the floor.)
+**Status: Accepted** (Decisions 1 to 3 superseded by the second 2026-10-07 amendment: `auto` is allowed for workers without the floor. The 2026-10-08 amendment makes workers full harnesses: it supersedes the settings isolation, `--safe-mode`, the `SendMessage`/`RemoteTrigger` deny rules, and every earlier claim here that a merge, `gh api` or another outward command still prompts. The operator's own allow rules now decide that.)
 
 Date: 2026-10-05
 
@@ -96,3 +96,19 @@ Decision (chief-of-staff, 2026-10-07, after Cameron's work machine reported forg
 - **What still applies:** the settings and MCP isolation, `--safe-mode`, the environment allowlist, the `SendMessage` and `RemoteTrigger` deny rules, and `useAutoModeDuringPlan = false`. An `auto` worker gets no allow list: allow rules would skip the classifier.
 - **Measured** with `claude -p` on Claude Code 2.1.289 and the exact worker argv: the session started in `auto` (`permissionMode=auto` in its init event), and a Bash command ran through the classifier. So the isolation flags do not hide `auto`. The availability of `auto` itself depends on the account and model.
 - **Why not `acceptEdits` plus the allow list only:** under `acceptEdits` every command off the list waits for the operator, and the list does not bound a worker anyway. The classifier checks the calls the list would wave through. It can allow `ssh` and `git push` to the default branch; by default it blocks merging a PR no human approved.
+
+## Amendment 2026-10-08: workers are full harnesses
+
+Cameron's decision: a claude worker loads what an ordinary session he starts loads. forgectl drops the isolation flags (`--setting-sources ""`, `--strict-mcp-config` with an empty config, `--no-chrome`, `--safe-mode`) and the `SendMessage` and `RemoteTrigger` deny rules. This supersedes the floor items "Only forgectl's settings load" and "Branch config is not loaded unreviewed", the slice-1 deny rules, and the plan to scope `SendMessage` to the launching session (no longer needed: nothing is denied).
+
+What a worker now has, stated plainly:
+
+- The operator's user settings, including allow rules such as `Bash(gh:*)`, `Bash(git:*)` and `Bash(curl:*)`. A worker can run `gh pr merge` or `gh api` writes without a prompt; only repository rulesets and its brief stand in the way of a merge.
+- Every MCP server the operator has, plugin-provided ones included. herdr-bridge can type into any herdr pane, the coordinator's included; board can post.
+- `SendMessage` to any session on the machine, and `RemoteTrigger`.
+- The operator's `CLAUDE.md`, rules, skills, plugins and hooks, and project auto-memory, which the worker can also write.
+- The branch's own `.claude/settings.json` hooks and `.mcp.json`. Workers in one repository are already mutually trusting (2026-10-06 amendment).
+
+What forgectl still sets: the permission-mode ceiling (`auto`; `dontAsk` and `bypassPermissions` refused), the environment allowlist (so a worker started from a Claude session does not inherit that session's own variables), `useAutoModeDuringPlan = false`, and the `acceptEdits` allow list.
+
+The boundary is the one this ADR already records: accidents, not adversaries. The worker runs as the operator, and its instructions are the only thing asking it not to merge or reach other sessions.

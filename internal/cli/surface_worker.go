@@ -102,7 +102,7 @@ func runWorkerSteps(ctx context.Context, led workerLedger, name, branch string, 
 		return fail(launchConfigError{err})
 	}
 	// A worker must be built as one: that is what applies the posture floor,
-	// the isolation argv and the environment allowlist. A build step that
+	// the worker settings and the environment allowlist. A build step that
 	// skipped it would launch a worker with the launcher's posture and env.
 	if !built.Worker {
 		return fail(launchConfigError{errors.New("forgectl: the worker invocation was not built as a worker launch")})
@@ -412,7 +412,7 @@ func checkProfileHarness(lc config.LaunchConfig, worktree string, spec workerSpe
 }
 
 // buildWorkerInvocation marks req as a worker launch, which is what turns on
-// the worker floor, the claude isolation argv and the environment allowlist
+// the worker floor, the worker settings and the environment allowlist
 // (launch.BuildInvocation), and gives a claude worker its session id. The
 // harness is known only once the profile resolves, so a claude worker is
 // built a second time with the id.

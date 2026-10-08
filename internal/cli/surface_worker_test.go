@@ -217,7 +217,7 @@ func TestWorkerLaunchRecordsTheSession(t *testing.T) {
 
 // TestBuildWorkerInvocationIsolates pins the call site that turns the worker
 // floor on: from surfaceInvocationRequest, as runWorkerLaunch builds it, a
-// worker gets the isolation argv, a session id, and none of the launcher's
+// worker gets the worker settings, a session id, and none of the launcher's
 // handles. Dropping req.Worker, or the call through it, turns this red.
 func TestBuildWorkerInvocationIsolates(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_MESSAGING_TOKEN", "coordinator-token")
@@ -236,7 +236,7 @@ func TestBuildWorkerInvocationIsolates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildWorkerInvocation: %v", err)
 	}
-	if !slices.Contains(built.Invocation.Args, "--setting-sources") || !slices.Contains(built.Invocation.Args, "--safe-mode") || built.SessionID != id {
+	if !slices.Contains(built.Invocation.Args, "--settings") || built.SessionID != id {
 		t.Fatalf("argv %q, session %q: not a worker build", built.Invocation.Args, built.SessionID)
 	}
 	for _, e := range built.Invocation.Env {
@@ -248,7 +248,7 @@ func TestBuildWorkerInvocationIsolates(t *testing.T) {
 
 // TestWorkerLaunchRefusesANonWorkerBuild closes the bypass where the launch
 // path builds the invocation without marking it a worker: no posture floor,
-// no isolation argv, the launcher's whole environment. runWorkerSteps refuses
+// no worker settings, the launcher's whole environment. runWorkerSteps refuses
 // to start it, and records the failure.
 func TestWorkerLaunchRefusesANonWorkerBuild(t *testing.T) {
 	led := testWorkerLedger(t)
@@ -328,7 +328,7 @@ func TestInProcessLaunchKeepsTheWorkerFloor(t *testing.T) {
 				t.Fatalf("worker env kept the caller's %s", e)
 			}
 		}
-		if !slices.Contains(launched[0].Args, "--setting-sources") {
+		if !slices.Contains(launched[0].Args, "--settings") {
 			t.Fatalf("argv %q: not a worker build", launched[0].Args)
 		}
 		if attempt.row == nil || attempt.row.Stage != worker.StageLaunched || attempt.createdNothing() {
