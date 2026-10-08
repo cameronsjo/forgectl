@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.35.0](https://github.com/cameronsjo/forgectl/compare/v0.34.1...v0.35.0) (2026-10-08)
+
+
+### Features
+
+* **surface:** worker profiles, per-worker model, claude-slots gate ([#1195](https://github.com/cameronsjo/forgectl/issues/1195)) ([431142e](https://github.com/cameronsjo/forgectl/commit/431142e3733de8af5fe9e76d955d524319812add))
+
+
+### Bug Fixes
+
+* **surface:** drain workers closable from the CLI; pause on run-dir failures ([#1190](https://github.com/cameronsjo/forgectl/issues/1190)) ([8f02d82](https://github.com/cameronsjo/forgectl/commit/8f02d82f3c31da2f048fe7ecfd4a1ac08c71d010))
+
 ## [0.34.1](https://github.com/cameronsjo/forgectl/compare/v0.34.0...v0.34.1) (2026-10-08)
 
 
