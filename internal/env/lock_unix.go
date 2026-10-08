@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"syscall"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // withFileLock runs fn while holding an exclusive lock on the target's
@@ -55,7 +57,7 @@ func withFileLock(t Target, fn func() error) error {
 	lockName := t.base + ".lock"
 
 	if _, regular, exists, err := t.dir.lstat(lockName); err != nil {
-		return fmt.Errorf("stat the lock file for %s: %w", t.Rel(), err)
+		return fmt.Errorf("stat the lock file for %s: %w", termsafe.QuotePath(t.Rel()), termsafe.Error(err))
 	} else if exists && !regular {
 		// Names neither path: the offending entry is repo-controlled content,
 		// and the actionable fact is its role, not its name.
@@ -67,12 +69,12 @@ func withFileLock(t Target, fn func() error) error {
 		if errors.Is(err, errIsSymlink) {
 			return errors.New("refusing to lock: the lock file is a symlink")
 		}
-		return fmt.Errorf("open the lock file for %s: %w", t.Rel(), err)
+		return fmt.Errorf("open the lock file for %s: %w", termsafe.QuotePath(t.Rel()), termsafe.Error(err))
 	}
 	defer func() { _ = f.Close() }()
 
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("lock %s: %w", t.Rel(), err)
+		return fmt.Errorf("lock %s: %w", termsafe.QuotePath(t.Rel()), termsafe.Error(err))
 	}
 	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
 

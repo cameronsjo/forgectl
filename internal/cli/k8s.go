@@ -59,7 +59,8 @@ reading and switching the current context's namespace (ns).`,
 // plain cobra flag parsing, no forgectl-owned flags — because both kubectl
 // invocations it wraps take a single, unambiguous argument.
 func newK8sNsCmd(runner forgexec.Runner) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "ns [namespace]",
 		Short: "Get or set the current kubectl context's namespace",
 		Long: `ns reports the current context's namespace, or switches it when given one.
@@ -70,6 +71,9 @@ func newK8sNsCmd(runner forgexec.Runner) *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
+				if asJSON {
+					return errors.New("--json reports the current namespace; it cannot be combined with a namespace argument")
+				}
 				namespace := strings.TrimSpace(args[0])
 				if namespace == "" {
 					return errors.New("namespace must not be empty")
@@ -85,10 +89,20 @@ func newK8sNsCmd(runner forgexec.Runner) *cobra.Command {
 			if namespace == "" {
 				namespace = "default"
 			}
-			_, err = fmt.Fprintln(cmd.OutOrStdout(), termsafe.SafeLine(namespace))
+			if asJSON {
+				return termsafe.JSONEncoder(cmd.OutOrStdout()).Encode(k8sNsJSON{Namespace: namespace})
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), safeLabel(namespace))
 			return err
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"namespace":...} to stdout (read only; not valid with a namespace argument)`)
+	return cmd
+}
+
+// k8sNsJSON is the `k8s ns --json` shape (additive-only, ADR-0008).
+type k8sNsJSON struct {
+	Namespace string `json:"namespace"`
 }
 
 // wrapK8sCommandError opts every k8s subcommand into kubectl's real exit
@@ -127,7 +141,7 @@ var k8sWorkloadPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`)
 // token) to an attacker-chosen server. Rejecting a leading '-' outright, and
 // constraining both halves to kubectl's own charset, closes that off.
 func validateK8sWorkload(workload string) (name string, err error) {
-	invalid := fmt.Errorf("workload reference %s must be kind/name (e.g. deployment/api)", termsafe.QuoteText(workload))
+	invalid := fmt.Errorf("workload reference %s must be kind/name (e.g. deployment/api)", termsafe.QuoteArgMax(workload, termsafe.ArgEchoMaxRunes))
 	if strings.HasPrefix(workload, "-") {
 		return "", invalid
 	}
@@ -340,7 +354,7 @@ func parseK8sLogsArgs(args []string) (k8sLogsInvocation, error) {
 		}
 		if recognizeHelperFlags && (arg == "--log-level" || arg == "--color") {
 			if i+1 >= len(args) {
-				return invocation, fmt.Errorf("%s requires a value", termsafe.SafeLine(arg))
+				return invocation, fmt.Errorf("%s requires a value", safeLabel(arg))
 			}
 			i++
 			if err := setK8sLogsHelperFlag(&invocation, arg, args[i]); err != nil {
@@ -379,9 +393,9 @@ func setK8sLogsHelperFlag(invocation *k8sLogsInvocation, name, value string) err
 			invocation.color = value
 			return nil
 		default:
-			return fmt.Errorf("unknown color mode %s (want auto, always, or never)", termsafe.QuoteText(value))
+			return fmt.Errorf("unknown color mode %s (want auto, always, or never)", termsafe.QuoteArgMax(value, termsafe.ArgEchoMaxRunes))
 		}
 	default:
-		return fmt.Errorf("unknown forgectl k8s logs flag %s", termsafe.QuoteText(name))
+		return fmt.Errorf("unknown forgectl k8s logs flag %s", termsafe.QuoteArgMax(name, termsafe.ArgEchoMaxRunes))
 	}
 }

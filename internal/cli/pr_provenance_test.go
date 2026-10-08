@@ -16,6 +16,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 	netpkg "github.com/cameronsjo/forgectl/internal/net"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
@@ -38,6 +39,7 @@ func detachedPrLocalFakeRunner() *exec.FakeRunner {
 	fake := prLocalFakeRunner()
 	inner := fake.RunFunc
 	fake.RunFunc = func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		if name == "git" && len(args) >= 3 && args[2] == "rev-parse" {
 			for _, a := range args {
 				if a == "--abbrev-ref" {

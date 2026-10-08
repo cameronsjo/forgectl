@@ -54,7 +54,7 @@ to stdout and exits 1; each printed ref works with forgectl pr <ref>.`,
 				return fmt.Errorf("no open PRs to pick from")
 			}
 
-			store := pr.LoadReviewed(reviewedPath)
+			store := pr.LoadReviewed(reviewedPath, pr.WithDefaultHost(client.GitHubHost()))
 			selected, err := choosePRs(cmd, prs, store, th)
 			if err != nil {
 				return err
@@ -77,7 +77,7 @@ func choosePRs(cmd *cobra.Command, prs []pr.PR, store *pr.ReviewedStore, th them
 	if err := writePRCandidates(cmd.OutOrStdout(), prs, store); err != nil {
 		return nil, err
 	}
-	return nil, WithExitCode(fmt.Errorf("%d open PRs require a selection, and there is no interactive terminal — pass one printed owner/repo#N to `forgectl pr <ref>`, inspect the inventory with `forgectl pr prs --json`, or rerun `forgectl pr pick` interactively; candidates are on stdout", len(prs)), 1)
+	return nil, WithExitCode(fmt.Errorf("%d open PRs require a selection, and there is no interactive terminal — pass one printed owner/repo#N to `forgectl pr <ref>`, inspect the inventory with `forgectl pr prs --json`, or rerun `forgectl pr pick` interactively; candidates are on stdout", len(prs)), exitFailed)
 }
 
 func writePRCandidates(out io.Writer, prs []pr.PR, store *pr.ReviewedStore) error {
@@ -109,14 +109,14 @@ func pickPRs(prs []pr.PR, store *pr.ReviewedStore, th theme.Theme) ([]pr.PR, err
 	}
 
 	var chosen []string
-	err := huh.NewForm(
+	err := keymap.Suspendable(huh.NewForm(
 		huh.NewGroup(
 			huh.NewMultiSelect[string]().
 				Title("Open PRs — space to select, enter to launch, esc to cancel").
 				Options(opts...).
 				Value(&chosen),
 		),
-	).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh()).Run()
+	)).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh()).Run()
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +139,7 @@ func pickPRs(prs []pr.PR, store *pr.ReviewedStore, th theme.Theme) ([]pr.PR, err
 // the shared terminal boundary; SafeLine leaves ordinary text byte-identical
 // and visibly escapes controls rather than silently erasing evidence of them.
 func prPickerLabel(p pr.PR, store *pr.ReviewedStore, dimStyle lipgloss.Style) string {
-	label := fmt.Sprintf("%s  %s", safeTerm(p.Ref.String()), safeTerm(p.Title))
+	label := fmt.Sprintf("%s  %s", safeTitle(p.Ref.String()), safeTitle(p.Title))
 	if pr.Dimmed(p, store) {
 		label = dimStyle.Render(label + "  (reviewed)")
 	}

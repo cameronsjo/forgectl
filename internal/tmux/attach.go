@@ -40,6 +40,9 @@ func (c *Client) AttachSession(ctx context.Context, want SessionIdentity) error 
 // against a detached session perfectly well, so doing it first means the client
 // arrives already looking at the right window rather than flashing whatever was
 // current.
+//
+// The select-window runs inside generationGuarded (forgectl#785), so a server
+// replaced after the revalidation does not select its own @N.
 func (c *Client) AttachWindow(ctx context.Context, want WindowIdentity) error {
 	// Up front, for AttachSession's reason — and here it also spares a
 	// select-window against a session the client could never then attach to.
@@ -50,22 +53,35 @@ func (c *Client) AttachWindow(ctx context.Context, want WindowIdentity) error {
 	if err != nil {
 		return fmt.Errorf("attach window %q: %w", want.Name, err)
 	}
-	if _, err := c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("select-window", "-t", current.ID)...); err != nil {
-		return fmt.Errorf("select window %s: %w", current.ID, err)
+	if err := ValidateWindowID(current.ID); err != nil {
+		return fmt.Errorf("select window %q: %w", want.Name, err)
+	}
+	if err := c.runGuarded(ctx, "select window "+current.ID, current.Generation, current.ID,
+		"select-window -t "+current.ID); err != nil {
+		return err
 	}
 	return c.attachOrSwitch(ctx, current.SessionID, current.Name)
 }
 
 // SelectWindow makes a window current within its own session without attaching
 // or switching clients — the "I am already looking at this session, just change
-// the view" path. It goes through the interactive runner because tmux redraws
-// the attached client as a side effect.
+// the view" path.
+//
+// The select runs inside generationGuarded on the captured Run path, exactly
+// as AttachWindow's does (forgectl#805): a server replaced after the
+// revalidation answers with the mismatch marker instead of selecting its own
+// @N, and that answer can only be read back from captured output. tmux
+// redraws any attached client itself, so nothing here needs the tty.
 func (c *Client) SelectWindow(ctx context.Context, want WindowIdentity) error {
 	current, err := c.RevalidateWindow(ctx, want)
 	if err != nil {
 		return fmt.Errorf("select window %q: %w", want.Name, err)
 	}
-	return c.run.RunInteractive(ctx, c.tmuxBin, c.tmuxArgs("select-window", "-t", current.ID)...)
+	if err := ValidateWindowID(current.ID); err != nil {
+		return fmt.Errorf("select window %q: %w", want.Name, err)
+	}
+	return c.runGuarded(ctx, "select window "+current.ID, current.Generation, current.ID,
+		"select-window -t "+current.ID)
 }
 
 // attachOrSwitch is the single inside/outside branch, taking an already
@@ -78,9 +94,9 @@ func (c *Client) attachOrSwitch(ctx context.Context, sessionID, label string) er
 	slog.Debug("Preparing to attach.", "session_id", sessionID, "name", label, "inside_tmux", inside)
 	var err error
 	if inside {
-		_, err = c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("switch-client", "-t", sessionID)...)
+		_, err = c.run.Run(ctx, c.tmuxBin, c.interactiveArgs("switch-client", "-t", sessionID)...)
 	} else {
-		err = c.run.RunInteractive(ctx, c.tmuxBin, c.tmuxArgs("attach-session", "-t", sessionID)...)
+		err = c.run.RunInteractive(ctx, c.tmuxBin, c.interactiveArgs("attach-session", "-t", sessionID)...)
 	}
 	if err != nil {
 		slog.Error("Failed to attach.", "session_id", sessionID, "name", label, "error", err)
@@ -101,12 +117,19 @@ func (c *Client) LastSession(ctx context.Context) error {
 		return err
 	}
 	if c.InsideTmux() {
-		_, err := c.run.Run(ctx, c.tmuxBin, c.tmuxArgs("switch-client", "-l")...)
+		_, err := c.run.Run(ctx, c.tmuxBin, c.interactiveArgs("switch-client", "-l")...)
 		return err
 	}
-	identity, err := c.mostRecentSession(ctx)
+	identity, unreadable, err := c.mostRecentSession(ctx)
 	if err != nil {
 		return err
+	}
+	if unreadable > 0 {
+		// Not a refusal: the readable rows still name a real session, and the
+		// operator asked to go somewhere. But the most recent one may be among
+		// the rows that could not be read, so say so.
+		slog.Warn("The last session may not be the most recent one.",
+			"reason", UnreadableRows{Sessions: unreadable}.Note())
 	}
 	if identity.ID == "" {
 		return errors.New("no session to attach to")
@@ -117,9 +140,16 @@ func (c *Client) LastSession(ctx context.Context) error {
 // lastAttachedFormat carries the sort key plus a full identity, so the winner is
 // attached by native id rather than by the name it happened to have when the
 // list was taken.
-const lastAttachedFormat = "#{session_last_attached}" + FieldSep +
-	"#{pid}" + FieldSep +
+//
+// #{pid} comes first, like every other format here, because parsedRows reads
+// a decimal first field as the proof that the separator survived. The sort key
+// cannot lead: tmux renders #{session_last_attached} as "" for a session that
+// has never been attached (measured on 3.4), so a server whose only session is
+// never-attached and unreadable would fail that proof and report the locale
+// error instead of an empty listing (forgectl#836).
+const lastAttachedFormat = "#{pid}" + FieldSep +
 	"#{start_time}" + FieldSep +
+	"#{session_last_attached}" + FieldSep +
 	"#{session_id}" + FieldSep +
 	"#{session_name}"
 
@@ -127,54 +157,59 @@ const lastAttachedFormat = "#{session_last_attached}" + FieldSep +
 const lastAttachedFieldCount = 5
 
 // mostRecentSession returns the identity of the session with the greatest
-// session_last_attached timestamp (a zero identity if no server / no sessions).
+// session_last_attached timestamp (a zero identity if no server / no sessions),
+// and how many rows it could not read (readableRows).
 //
 // The field check is EXACT for the same reason parseSessions' is: a session
 // name may carry FieldSep, and under a `len(f) < N` check a name of
 // `real<sep>decoy` shifted every later field one right — yielding a truncated
 // attach target, from the one function that hands its result straight to
 // attach.
-func (c *Client) mostRecentSession(ctx context.Context) (SessionIdentity, error) {
+func (c *Client) mostRecentSession(ctx context.Context) (SessionIdentity, int, error) {
 	args := c.tmuxArgs("list-sessions", "-F", lastAttachedFormat)
 	out, err := c.run.Run(ctx, c.tmuxBin, args...)
 	if err != nil {
 		if c.absentServer(ctx, args, err) {
-			return SessionIdentity{}, nil
+			return SessionIdentity{}, 0, nil
 		}
-		return SessionIdentity{}, c.serverStateError(ctx, args, err)
+		// An exited server's leftover socket also means no session to jump
+		// to (forgectl#786). The zero identity is only ever reported, never
+		// acted on.
+		stateErr := c.serverStateError(ctx, args, err)
+		if errors.Is(stateErr, ErrServerExited) {
+			return SessionIdentity{}, 0, nil
+		}
+		return SessionIdentity{}, 0, stateErr
 	}
 	lines := splitLines(out)
-	// parsed holds the rows that split cleanly. Only its emptiness is read
-	// below; the winner is tracked separately because it is the best row, not
-	// the last one.
-	parsed := make([]struct{}, 0, len(lines))
+	// The counting parser every listing shares (forgectl#815): the rows it
+	// drops are counted, so LastSession can say the session it picked may not
+	// be the most recent one.
+	rows, unreadable := readableRows(lines, lastAttachedFieldCount, func(f []string) bool {
+		return ValidateSessionID(f[3]) == nil
+	})
 	selector := c.currentSelector()
-	// -1 (not 0) so a session that has never been attached (last_attached=0)
-	// still beats the sentinel and gets picked when it's the only candidate.
+	// -1 (not 0) so a session that has never been attached still beats the
+	// sentinel and gets picked when it's the only candidate. tmux renders its
+	// #{session_last_attached} as "" (measured on 3.4), which atoi reads as 0.
 	best, bestTS := SessionIdentity{}, -1
-	for _, line := range lines {
-		f := splitFields(line)
-		if len(f) != lastAttachedFieldCount {
-			continue
-		}
-		if err := ValidateSessionID(f[3]); err != nil {
-			continue
-		}
-		parsed = append(parsed, struct{}{})
-		if ts := atoi(f[0]); ts > bestTS {
+	for _, f := range rows {
+		if ts := atoi(f[2]); ts > bestTS {
 			bestTS = ts
 			best = SessionIdentity{
-				Generation: ServerGeneration{Selector: selector, PID: f[1], StartTime: f[2]},
+				Generation: ServerGeneration{Selector: selector, PID: f[0], StartTime: f[1]},
 				ID:         f[3],
 				Name:       f[4],
 			}
 		}
 	}
-	// Non-empty output that yielded no parsed row at all means the separator did
-	// not survive — refuse rather than report "no session to attach to", which
-	// reads as an empty server.
-	if _, err := parsedRows(parsed, lines, "list-sessions", lastAttachedFieldCount); err != nil {
-		return SessionIdentity{}, err
+	// Non-empty output that yielded no parsed row goes through parsedRows: if
+	// no line proves the separator survived, that is the locale error, refused
+	// rather than reported as "no session to attach to", which reads as an
+	// empty server. If a line does prove it, every session is unreadable
+	// (forgectl#826), and the empty result carries the unreadable count.
+	if _, err := parsedRows(rows, lines, "list-sessions", lastAttachedFieldCount); err != nil {
+		return SessionIdentity{}, 0, err
 	}
-	return best, nil
+	return best, unreadable, nil
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/launch"
@@ -20,6 +21,10 @@ import (
 // behavior (legacyShadowWarning). Not a CLI flag — an operator who wants to
 // keep hand-managing the legacy file sets this once in their shell profile.
 const skipLegacyMigrateEnv = "FORGECTL_SKIP_LEGACY_MIGRATE"
+
+// launchStdoutIsTerminal reports whether forgectl's stdout, which the exec'd
+// harness inherits, is a terminal.
+var launchStdoutIsTerminal = func() bool { return term.IsTerminal(int(os.Stdout.Fd())) }
 
 // launchAliases maps each canonical launch subcommand to its accepted
 // aliases — migrated here from forgive.LaunchAliases at conversion. The `cl`
@@ -77,8 +82,9 @@ func isOwnLaunchVerb(tok string) bool {
 
 // newLaunchCmd builds the `launch` parent command (alias `cl`). Own-verbs are
 // attached as subcommands for styled help; the bare/builder/agents passthrough
-// is intercepted in Execute before Cobra ever parses, so
-// `forgectl launch --model sonnet -p hi` stays byte-clean.
+// is intercepted in Execute before Cobra ever parses, so Cobra never rewrites
+// `forgectl launch --model sonnet -p hi`: it reaches claude verbatim after the
+// print posture's `--permission-mode`.
 func newLaunchCmd(deps module.Deps) *cobra.Command {
 	cfg := deps.Cfg
 	boundary := deps.LegacyBoundary
@@ -93,6 +99,20 @@ then execs the configured harness with that posture — no prompts.
   forgectl launch                 drop straight into the resolved profile
   forgectl launch <args…>          apply the profile and pass args through
   forgectl launch agents …         Claude-only agent-management passthrough
+  forgectl launch mcp …            Claude subcommands run with no posture
+  forgectl launch -p …             print mode: only the permission mode
+  forgectl launch -- <args…>       skip launch's own verbs; "--" is dropped
+  forgectl launch --here [args…]   stay in this directory (see below)
+
+Started in a subfolder of a git repository whose root has
+.claude/settings.json or .claude/settings.local.json, and with no settings of
+its own, a claude session runs at the repository root, because Claude Code
+reads those settings only from the directory it starts in. The profile is still
+the one for the directory you ran launch from. A launch that continues or
+resumes a session (-c, --continue, -r, --resume, --from-pr, --teleport) never
+moves, since Claude Code keeps sessions per directory. After a move, relative paths in arguments
+and prompts resolve against the root; --here, as the first argument, keeps the
+session (and those paths) where it was started.
 
 To resume or fork an earlier session, use "forgectl resume" — it discovers
 sessions across repos, flags the live ones, and restores their tasks.
@@ -141,6 +161,16 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	// migration path forgets.
 	usageEnabled := cfg.Launch.UsageStats
 
+	// Verb dispatch has already happened (runLaunch), so a leading `--` has
+	// done its job: it kept a prompt such as "doctor" or "which" from reaching
+	// a forgectl verb. The harness never sees it. Everything below, usage
+	// classification included, reads the consumed args.
+	//
+	// `--here` is launch's one flag of its own, and it is read only as the
+	// first token: anything after it, `--` included, is still the harness's.
+	args, here := consumeHereFlag(args)
+	args = launch.ConsumeLeadingSeparator(args)
+
 	// Before the automatic legacy migration below, which renames claunch.conf
 	// and rewrites config.toml: this refusal is a pure function of the config,
 	// so it must not arrive after a launch has already written to disk. The
@@ -148,19 +178,19 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	// wins over an injected default. Contents and rationale: injectedLaunchEnv.
 	injected, unset, err := injectedLaunchEnv(cfg)
 	if err != nil {
-		return WithExitCode(termsafe.Error(err), 2)
+		return WithExitCode(termsafe.Error(err), exitUsage)
 	}
 
 	effLaunch, notice, effFrom := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
 	if notice != "" {
-		fmt.Fprintln(os.Stderr, "forgectl: "+termsafe.SafeLine(notice))
+		fmt.Fprintln(os.Stderr, "forgectl: "+safeText(notice))
 	}
 	cfg.Launch = effLaunch
 	lc, _ := resolveLaunchConfig(boundary, cfg, effFrom)
 
-	cwd, err := os.Getwd()
+	cwd, err := launchWorkingDirectory()
 	if err != nil {
-		return termsafe.Error(fmt.Errorf("determine working directory: %w", err))
+		return err
 	}
 	built, err := launch.BuildInvocation(launch.InvocationRequest{
 		Config:      lc,
@@ -170,11 +200,25 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 		InjectedEnv: injected,
 		UnsetEnv:    unset,
 		Resolve:     launch.ResolveBinary,
+		// The harness inherits this stdout through the exec, so whether it
+		// is a terminal is what claude itself will see (forgectl#795).
+		StdoutTerminal: launchStdoutIsTerminal(),
+		StayInCWD:      here,
 	})
 	if err != nil {
 		return err
 	}
 	profile := built.Profile
+
+	// The profile was resolved for cwd; a claude session may still run at the
+	// repository root, where its .claude settings live (cadence-ecosystem#608).
+	// The exec seam does the chdir, as the last step before the exec; "" keeps
+	// the process where it is.
+	runIn := ""
+	if dir := built.Invocation.CWD; dir != cwd {
+		runIn = dir
+		fmt.Fprintln(os.Stderr, settingsRootNotice(cwd, dir))
+	}
 
 	// Banner the resolved posture to stderr — the builder path and the agents
 	// scripting passthrough stay silent, which EmitBanner owns. This is the only
@@ -183,7 +227,7 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	// the cheapest way to eyeball the resolved effort.
 	launch.EmitBanner(os.Stderr, built)
 
-	slog.Debug("Preparing to exec harness.", "harness", termsafe.SafeLine(profile.Harness), "path", termsafe.QuotePath(built.Invocation.Binary.Path), "argc", len(built.Invocation.Args), "match", termsafe.SafeLine(profile.Match))
+	slog.Debug("Preparing to exec harness.", "harness", safeLabel(profile.Harness), "path", termsafe.QuotePath(built.Invocation.Binary.Path), "argc", len(built.Invocation.Args), "match", safeText(profile.Match))
 
 	// One event, immediately before the exec that would replace this process.
 	// Everything that can refuse the launch — profile validation, the Codex
@@ -192,7 +236,32 @@ func launchExec(boundary *config.LegacyMigrationBoundary, cfg config.Config, arg
 	// mean the harness started: nothing after syscall.Exec is observable.
 	sessionMode, posture := launchUsageClassification(args)
 	recordUsageSilently(usageEnabled, newLaunchUsageEvent(profile.Harness, profile.Model, sessionMode, posture))
-	return execHarness(built.Invocation.Binary.Path, built.Invocation.Args, built.Invocation.Env)
+	return execHarness(runIn, built.Invocation.Binary.Path, built.Invocation.Args, built.Invocation.Env)
+}
+
+// hereFlag keeps a claude launch in the directory it was started from. See
+// launch.SettingsRoot for where it would otherwise run.
+const hereFlag = "--here"
+
+// consumeHereFlag drops a leading --here from args and reports whether it was
+// there. Only the first token counts: launch passes everything else through to
+// the harness, so a --here anywhere later belongs to the harness, and
+// `forgectl launch -- --here` is how to hand it one.
+func consumeHereFlag(args []string) ([]string, bool) {
+	if len(args) > 0 && args[0] == hereFlag {
+		return args[1:], true
+	}
+	return args, false
+}
+
+// settingsRootNotice is the one stderr line a launch prints when it starts a
+// claude session at the repository root rather than in the subfolder it was
+// run from. A move nobody mentioned would be the same silent surprise as the
+// settings it exists to apply.
+func settingsRootNotice(from, to string) string {
+	return "forgectl: starting claude in " + termsafe.QuotePath(to) +
+		", the repository root, so its .claude settings apply (from " +
+		termsafe.QuotePath(from) + "; pass " + hereFlag + " to stay)"
 }
 
 // legacyShadowWarning reports the one-line #114 fallback-cliff warning when
@@ -261,7 +330,7 @@ func resolveLaunchConfig(boundary *config.LegacyMigrationBoundary, cfg config.Co
 	case !errors.Is(err, config.ErrNoLegacyLaunch):
 		// A malformed or unreadable legacy file shouldn't block normal launch —
 		// warn and fall through to config.toml (an absent file is silent).
-		slog.Warn("Ignoring unreadable legacy claunch config.", "path", termsafe.QuotePath(legacyPath), "error", termsafe.SafeLine(err.Error()))
+		slog.Warn("Ignoring unreadable legacy claunch config.", "path", termsafe.QuotePath(legacyPath), "error", safeText(err.Error()))
 	}
 	switch _, err := os.Stat(path); {
 	case err == nil:
@@ -334,7 +403,7 @@ func autoMigrateOrWarnLegacyLaunch(boundary *config.LegacyMigrationBoundary, cfg
 					return ""
 				}
 				return termsafe.QuotePath(boundary.LegacyPath)
-			}(), "error", termsafe.SafeLine(result.Err.Error()))
+			}(), "error", safeText(result.Err.Error()))
 	case result.Err != nil:
 		slog.Warn("Automatic claunch.conf migration did not fully retire the source.",
 			"path", func() string {
@@ -342,7 +411,7 @@ func autoMigrateOrWarnLegacyLaunch(boundary *config.LegacyMigrationBoundary, cfg
 					return ""
 				}
 				return termsafe.QuotePath(boundary.LegacyPath)
-			}(), "error", termsafe.SafeLine(result.Err.Error()), "commit", result.Commit, "backup", result.Backup, "retirement", result.Retirement)
+			}(), "error", safeText(result.Err.Error()), "commit", result.Commit, "backup", result.Backup, "retirement", result.Retirement)
 	}
 	return result.Effective, result.Notice, result.EffectiveFrom
 }

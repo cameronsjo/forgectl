@@ -20,10 +20,13 @@ const maxStderrTail = 64 << 10
 // `tea repo ls --limit 1000`, `git for-each-ref`, `kubectl describe`) write
 // well under 1 MiB, so the ceiling sits orders of magnitude above them. It
 // exists to bound the heap against a runaway child, not to shape any real
-// output. The one caller that can meet it legitimately is a workflow `run`
-// step, whose command is user-chosen; it discards stdout, but Runner still
-// captures it, so a step that prints more than this fails.
+// output. A caller that wants only the exit status, such as a workflow `run`
+// step whose command is user-chosen, uses RunDiscardingStdout, which captures
+// no stdout and so has no ceiling to meet.
 const maxStdoutBytes = 64 << 20
+
+// discardStdout is the ceiling runAndWrap takes to keep no stdout at all.
+const discardStdout = -1
 
 // ErrOutputTooLarge reports that a child's stdout passed maxStdoutBytes. The
 // child was killed and none of its stdout is returned, so a parser can never
@@ -32,7 +35,8 @@ var ErrOutputTooLarge = errors.New("command stdout exceeded the capture ceiling"
 
 // tailBuffer is an io.Writer that keeps only the last limit bytes written to
 // it and counts the rest. It never returns an error, so the child's stderr is
-// drained to EOF however much it writes.
+// drained to EOF however much it writes. buf is the raw, unmasked tail, so a
+// tailBuffer never leaves runAndWrap (TestRawCaptureStaysInRunAndWrap).
 type tailBuffer struct {
 	limit   int
 	buf     []byte
@@ -93,14 +97,22 @@ func maskedTail(t *tailBuffer, mask argMask) (string, int64) {
 // the limit kills the child and fails, and so does every later one; os/exec
 // then closes its read end of the pipe, so the child cannot block on it
 // either.
+//
+// With discard set it keeps nothing and never fails, so the child's stdout is
+// drained to EOF however much it writes. buf is the raw, unmasked stdout, so a
+// ceilingWriter never leaves runAndWrap (TestRawCaptureStaysInRunAndWrap).
 type ceilingWriter struct {
-	limit int
-	buf   []byte
-	over  bool
-	proc  func() *os.Process
+	limit   int
+	discard bool
+	buf     []byte
+	over    bool
+	proc    func() *os.Process
 }
 
 func (w *ceilingWriter) Write(p []byte) (int, error) {
+	if w.discard {
+		return len(p), nil
+	}
 	if w.over {
 		return 0, ErrOutputTooLarge
 	}

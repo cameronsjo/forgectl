@@ -10,7 +10,7 @@ package cli
 //   [x] Happy: --json key sets are frozen at the top, finding, summary, and
 //       root levels (ADR-0008 rule 2: additive only)
 //   [x] Unhappy: a missing root exits 2
-//   [x] Unhappy: only vault roots exits 2, with a skip note on stderr
+//   [x] Happy: a vault-only run is checked (exit 1 on a broken wikilink, 0 clean), no stderr skip note
 //   [x] Unhappy: an unknown flag exits 2
 //   [x] Unhappy: control characters in a path never reach stdout raw
 //   [x] Unhappy: a passed stale_after exits 1 with one stale line carrying the
@@ -141,7 +141,7 @@ func TestDocsCheckCmd_JSONSchemaFrozen(t *testing.T) {
 	}
 	assertKeys(t, "summary", got["summary"].(map[string]any),
 		"broken_links", "ambiguous_links", "broken_anchors", "orphans", "ignored_orphans", "outside_root_links",
-		"deprecated", "stale")
+		"deprecated", "stale", "unchecked_anchors")
 
 	byKind := map[string]map[string]any{}
 	for _, raw := range got["findings"].([]any) {
@@ -166,7 +166,10 @@ func TestDocsCheckCmd_JSONSchemaFrozen(t *testing.T) {
 	for _, raw := range roots {
 		r := raw.(map[string]any)
 		if r["kind"] == "vault" {
-			assertKeys(t, "vault root", r, "label", "kind", "checked", "skipped", "docs")
+			assertKeys(t, "vault root", r, "label", "kind", "checked", "docs")
+			if r["checked"] != true {
+				t.Errorf("vault root = %v, want checked", r)
+			}
 		} else {
 			assertKeys(t, "docs root", r, "label", "kind", "checked", "docs")
 		}
@@ -180,22 +183,36 @@ func TestDocsCheckCmd_MissingRootExits2(t *testing.T) {
 	}
 }
 
-func TestDocsCheckCmd_OnlyVaultRootExits2(t *testing.T) {
+func TestDocsCheckCmd_OnlyVaultRootIsChecked(t *testing.T) {
 	vault := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	docsCheckWrite(t, filepath.Join(vault, "n.md"), "# N\n")
+	docsCheckWrite(t, filepath.Join(vault, "n.md"), "# N\n\n[[missing]]\n[[m#^blk]]\n")
+	docsCheckWrite(t, filepath.Join(vault, "m.md"), "# M\n")
 
 	stdout, stderr, code := runDocsCheck(t, vault)
-	if code != 2 {
-		t.Errorf("exit = %d, want 2", code)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1 (broken wikilink)", code)
 	}
-	if stdout != "" {
-		t.Errorf("stdout = %q, want empty when nothing could be checked", stdout)
+	for _, w := range []string{"n.md:3: broken_link missing", "n.md:4: broken_anchor m#^blk"} {
+		if !strings.Contains(stdout, w) {
+			t.Errorf("stdout = %q, want %q", stdout, w)
+		}
 	}
-	if !strings.Contains(stderr, "skipping vault root") {
-		t.Errorf("stderr = %q, want a skipping-vault note", stderr)
+	if strings.Contains(stdout, "orphan") || strings.Contains(stderr, "skipping vault root") {
+		t.Errorf("stdout %q / stderr %q: a vault reports no orphans and no skip note", stdout, stderr)
+	}
+
+	// A clean vault exits 0.
+	clean := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(clean, ".obsidian"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	docsCheckWrite(t, filepath.Join(clean, "a.md"), "# A\n\n[[b]]\n")
+	docsCheckWrite(t, filepath.Join(clean, "b.md"), "# B\n")
+	if _, _, code := runDocsCheck(t, clean); code != 0 {
+		t.Errorf("clean vault exit = %d, want 0", code)
 	}
 }
 
@@ -245,6 +262,27 @@ func TestDocsCheckCmd_StaleAfterExits1(t *testing.T) {
 	}
 }
 
+// TestDocsCheckCmd_TimeoutFlagBoundsTheWalk: as the docs list test of the
+// same name, a negative --timeout under a deadline-free parent must end the
+// walk with context.DeadlineExceeded, with no timer to race.
+func TestDocsCheckCmd_TimeoutFlagBoundsTheWalk(t *testing.T) {
+	dir := t.TempDir()
+	docsCheckWrite(t, filepath.Join(dir, "README.md"), "# R\n")
+
+	cmd := newDocsCheckCmd(module.Deps{})
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--timeout=-1s", dir})
+
+	err := cmd.ExecuteContext(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded from --timeout", err)
+	}
+	if got := ExitCode(err); got != 2 {
+		t.Errorf("ExitCode(err) = %d, want 2", got)
+	}
+}
+
 // A deadline whose JSON error object cannot be written names docs check, not
 // docs list, whose helper it shares.
 func TestDocsCheckCmd_DeadlineEncodeFailureNamesCheck(t *testing.T) {
@@ -256,7 +294,7 @@ func TestDocsCheckCmd_DeadlineEncodeFailureNamesCheck(t *testing.T) {
 	cmd.SetErr(failingWriter{err: errWriteFailed})
 	cmd.SetArgs([]string{"--json", "--timeout", "1ns", dir})
 
-	err := cmd.ExecuteContext(context.Background())
+	err := cmd.ExecuteContext(expiredContext(t))
 	if err == nil {
 		t.Fatal("expected a deadline error, got nil")
 	}
@@ -479,8 +517,51 @@ func TestDocsCheckCmd_DeprecatedOnlyExitsZero(t *testing.T) {
 	if len(got.Findings) != 1 || got.Findings[0].Kind != "deprecated" || got.Findings[0].Severity != "info" {
 		t.Errorf("findings = %+v, want one deprecated with severity info", got.Findings)
 	}
-	if !strings.Contains(stderr, "1 informational finding(s), no errors") {
-		t.Errorf("stderr = %q, want the informational summary", stderr)
+	// Under --json stderr is reserved for the one error object (#649); an
+	// exit-0 run writes nothing to it (#672).
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty under --json", stderr)
+	}
+	// Human mode keeps the one-line summary.
+	_, humanStderr, humanCode := runDocsCheck(t, dir)
+	if humanCode != 0 || !strings.Contains(humanStderr, "1 informational finding(s), no errors") {
+		t.Errorf("human: exit %d, stderr %q, want the informational summary", humanCode, humanStderr)
+	}
+}
+
+// Under --json a vault-only run emits the report on stdout, roots[] marks the
+// vault checked, and stderr stays empty.
+func TestDocsCheckCmd_OnlyVaultRoot_JSON(t *testing.T) {
+	vault := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	docsCheckWrite(t, filepath.Join(vault, "n.md"), "# N\n\n[[missing]]\n")
+
+	stdout, stderr, code := runDocsCheck(t, "--json", vault)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1", code)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty under --json", stderr)
+	}
+	var rep struct {
+		Roots []struct {
+			Kind    string `json:"kind"`
+			Checked bool   `json:"checked"`
+		} `json:"roots"`
+		Findings []struct {
+			Kind string `json:"kind"`
+		} `json:"findings"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &rep); err != nil {
+		t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout)
+	}
+	if len(rep.Roots) != 1 || rep.Roots[0].Kind != "vault" || !rep.Roots[0].Checked {
+		t.Errorf("roots = %+v, want one checked vault", rep.Roots)
+	}
+	if len(rep.Findings) != 1 || rep.Findings[0].Kind != "broken_link" {
+		t.Errorf("findings = %+v, want one broken_link", rep.Findings)
 	}
 }
 

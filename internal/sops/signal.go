@@ -4,8 +4,11 @@ import (
 	"errors"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
+
+	"github.com/cameronsjo/forgectl/internal/env"
 )
 
 // # Why a scoped handler, and not a cancelled context
@@ -49,6 +52,17 @@ import (
 // itself does not. Outside that span the target is untouched, or is proven,
 // so keeping a backup would only cause a false refusal.
 //
+// Something may already sit at that name. The leftover scan refuses on one
+// under the lock, so it was put there during this run, outside the lock. The
+// guard never moves the backup over it and never deletes it. It keeps the
+// work directory instead, with the backup and its .gitignore as the only
+// entries, rather than deleting the one copy of the pre-run ciphertext
+// (cameronsjo/forgectl#692). The cost is a directory that a sops child
+// outliving forgectl can still write into: a read-back still running can
+// leave the decrypted value there. The directory is gitignored, and the next
+// write's leftover scan refuses on it, names the backup inside, and warns
+// that it may hold plaintext.
+//
 // # What it cannot cover
 //
 // SIGKILL and SIGSTOP cannot be caught, a power loss runs no code, and a
@@ -78,12 +92,19 @@ type plaintextGuard struct {
 	mu    sync.Mutex
 	work  *workDir
 	fired bool
+	// scratch holds the scratch directories a restore's atomic write created
+	// beside the target (trackScratch). finish removes whatever of them is
+	// still there.
+	scratch []string
 	// mutating is true while the target may differ from the backup: from just
 	// before the sops edit is launched until settle. A signal inside that span
 	// keeps the ciphertext backup.
 	mutating bool
 
 	once sync.Once
+	// kept is where the ciphertext backup ended up when finish kept it, or
+	// "" when it did not. Written inside once, read after it.
+	kept string
 
 	done   chan struct{}
 	exited chan struct{}
@@ -156,6 +177,28 @@ func (g *plaintextGuard) track(create func() (*workDir, error)) (*workDir, error
 	return w, nil
 }
 
+// trackScratch creates a restore's scratch directory under the guard's lock
+// and records it, so there is no instant at which the directory exists and
+// the handler does not know about it: a signal that arrives during the mkdir
+// waits for it, and then removes the directory. A signal that already fired
+// refuses the directory before it is made, and the write abandons itself. It
+// is the env.ScratchTracker the restore passes to env.WriteTargetTracked, and
+// the lock is held across the mkdir only, as track holds it across the work
+// directory's creation.
+func (g *plaintextGuard) trackScratch(mkdir func() (string, error)) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.fired {
+		return errInterrupted
+	}
+	dir, err := mkdir()
+	if err != nil {
+		return err
+	}
+	g.scratch = append(g.scratch, dir)
+	return nil
+}
+
 // beginMutation opens the span in which the target may differ from the
 // backup. Call it immediately before launching anything that can write the
 // target. It takes the lock, so a signal is handled wholly before it or wholly
@@ -180,29 +223,89 @@ func (g *plaintextGuard) settle() {
 // cannot terminate the process while a deferred removal is half done.
 //
 // It retries until the directory is confirmed gone. On the signal path the
-// main goroutine (or the sops child) is still running, and os.RemoveAll lists
-// the entries, unlinks them, then removes the directory: a file created after
-// the last listing fails that final rmdir with ENOTEMPTY and the directory
-// survives. Once the directory itself is gone, every later write into it fails
-// with ENOENT — nothing but track creates it — so a bounded retry converges.
+// main goroutine (or the sops child) is still running. workDir.cleanup lists
+// the entries, removes all but the .gitignore, then removes the .gitignore and
+// the directory only if nothing else is left (env.RemoveScratchDir): a file
+// created after that listing fails the final rmdir with ENOTEMPTY, the
+// .gitignore is put back, and the directory survives, still ignored by git.
+// Once the directory itself is gone, every later write into it fails with
+// ENOENT — nothing but track creates it — so a bounded retry converges. An
+// entry that cannot be removed at all never converges: the retries run out
+// and the directory stays under its .gitignore.
 //
-// This is the path a normal return takes, and it keeps nothing. The signal
-// path goes through finish directly and may keep the backup.
-func (g *plaintextGuard) cleanup() { g.finish(false) }
+// This is the path a normal return takes. It keeps the ciphertext backup when
+// the return came from inside the mutation span, meaning the target was never
+// verified and no restore was proven: a failed restore, or a panic. Before
+// cameronsjo/forgectl#652 it kept nothing, so a restore that failed returned
+// "could NOT be restored" and then deleted the one copy that could.
+func (g *plaintextGuard) cleanup() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.mutating {
+		g.finish(keepCiphertext)
+		return
+	}
+	g.finish(discardAll)
+}
+
+// keepBackup is for a failure path that returns while the target is
+// unproven. It keeps the ciphertext backup, removes every plaintext file, and
+// reports where the backup now is so the error can name it, or "" if it could
+// not be kept. The deferred cleanup that follows finds the work already done.
+func (g *plaintextGuard) keepBackup() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.finish(keepCiphertext)
+}
+
+// finishMode is what finish does with the ciphertext backup.
+type finishMode int
+
+const (
+	// discardAll removes the whole work directory: the target is untouched,
+	// or it is proven.
+	discardAll finishMode = iota
+	// keepCiphertext removes the plaintext, then moves the backup out beside the
+	// target and removes the directory. When the backup cannot be moved out,
+	// because something already sits at that name, the directory stays with
+	// the backup and its .gitignore as its only entries, on a signal or on a
+	// normal return. Two edge cases still lose it, because a kept directory
+	// must never also keep plaintext: a directory that will not prune down to
+	// the backup is removed whole, and one holding an entry that cannot be
+	// deleted loses everything else, the backup included, and stays behind
+	// under its .gitignore (docs/commands/env.md).
+	//
+	// On a normal return the runner has waited for every sops child, so
+	// nothing writes into a kept directory afterwards; a panic inside the
+	// runner is the exception. On a signal a sops child may still be running,
+	// and a read-back that outlives forgectl can write the decrypted value
+	// into it. Either way the directory is gitignored and the next run's
+	// leftover scan refuses on it, naming the backup inside and warning that
+	// it may hold plaintext (cameronsjo/forgectl#692).
+	keepCiphertext
+)
 
 // finish is cleanup, with the choice of keeping the ciphertext backup. The
 // plaintext goes first, the backup is moved out second, and the directory is
 // removed last. Once the plaintext files are gone, nothing that follows can
-// expose them.
-func (g *plaintextGuard) finish(keepBackup bool) {
+// expose them. It returns where the backup was kept, or "".
+func (g *plaintextGuard) finish(mode finishMode) string {
 	g.once.Do(func() {
+		// Last, on every path out of this function: the restore's scratch
+		// holds ciphertext at most, so it waits behind the plaintext.
+		defer g.removeRestoreScratch()
 		if g.work == nil {
 			return
 		}
-		if keepBackup {
+		if mode == keepCiphertext {
 			g.work.discardStagedValue()
 			g.work.discardLandedValue()
-			g.work.preserveBackup()
+			if g.work.preserveBackup() {
+				g.kept = g.work.keep
+			} else if g.pruneToBackup() {
+				g.kept = g.work.backup
+				return
+			}
 		}
 		for range cleanupAttempts {
 			g.work.cleanup()
@@ -211,7 +314,55 @@ func (g *plaintextGuard) finish(keepBackup bool) {
 			}
 		}
 	})
+	return g.kept
 }
+
+// removeRestoreScratch removes every tracked restore scratch directory still
+// on disk: its entries, then the .gitignore and the directory by the scratch
+// teardown rule (env.RemoveScratchDir). On the signal path the restore's write
+// is still running, so it retries on the same bound as the work directory's
+// removal. Once the directory is gone, the write, which works through the
+// directory's descriptor, can no longer create anything in it. A normal
+// return finds the directory already removed by the write itself.
+func (g *plaintextGuard) removeRestoreScratch() {
+	for _, dir := range g.scratch {
+		for range cleanupAttempts {
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				break
+			}
+			for _, e := range entries {
+				if e.Name() == env.ScratchIgnoreName && e.Type().IsRegular() {
+					continue
+				}
+				_ = os.RemoveAll(filepath.Join(dir, e.Name()))
+			}
+			_ = env.RemoveScratchDir(dir)
+			if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+				break
+			}
+		}
+	}
+}
+
+// pruneToBackup prunes the work directory down to its backup, retrying on the
+// same bound as the removal: on the signal path a sops child may create an
+// entry between the prune's removal and its check. A directory that will not
+// come down to the backup is removed whole, backup included, because a kept
+// directory must never also keep plaintext.
+func (g *plaintextGuard) pruneToBackup() bool {
+	for range cleanupAttempts {
+		if pruneWorkDir(g.work) {
+			return true
+		}
+	}
+	return false
+}
+
+// pruneWorkDir is one prune attempt. It is a variable only so a test can make
+// the first attempts lose the race a sops child would cause, which nothing
+// else can do deterministically, and so prove the retry above is there.
+var pruneWorkDir = (*workDir).pruneToBackup
 
 // cleanupAttempts bounds the retry in cleanup. Each attempt that fails lost a
 // race with a single concurrent create, so a handful is ample; the bound only
@@ -225,7 +376,11 @@ func (g *plaintextGuard) fire(sig os.Signal) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.fired = true
-	g.finish(g.mutating)
+	mode := discardAll
+	if g.mutating {
+		mode = keepCiphertext
+	}
+	g.finish(mode)
 	g.die(sig)
 }
 

@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/cameronsjo/forgectl/internal/config"
+	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // unmigratableSiblingHarness builds a claunch directory holding a config.toml
@@ -222,6 +225,11 @@ func TestIntegration_LaunchDoctor_JSON(t *testing.T) {
 	if strings.Contains(stdout+stderr, secret) {
 		t.Fatalf("output leaked the endpoint secret:\nstdout=%s\nstderr=%s", stdout, stderr)
 	}
+	// The checks on stdout are the verdict: no error frame on top of them
+	// (forgectl#862).
+	if strings.Contains(stderr, "doctor found problems") {
+		t.Errorf("stderr = %q, want no error frame under --json", stderr)
+	}
 
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(stdout), &fields); err != nil {
@@ -275,5 +283,31 @@ func TestWriteLaunchDoctorJSON_EmptyChecksIsArray(t *testing.T) {
 	}
 	if string(got["checks"]) != "[]" {
 		t.Errorf("checks = %s, want []", got["checks"])
+	}
+}
+
+// An unresolvable home fails the profile check once, with the cause. It must
+// not also report the harness as unsupported: the defaults still resolve, and a
+// zero Profile would add a second, misleading failure.
+func TestLaunchDoctor_UnresolvedHomeReportsOnlyTheCause(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	if _, err := os.UserHomeDir(); err == nil {
+		t.Skip("this platform resolves a home without HOME")
+	}
+	cfg := config.Config{Launch: config.LaunchConfig{
+		Projects: []config.LaunchProject{{Match: "~/work"}},
+	}}
+	var out bytes.Buffer
+	cmd := newLaunchDoctorCmd(nil, cfg, theme.Theme{})
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	_ = cmd.Execute()
+	got := out.String()
+	if !strings.Contains(got, "launch profile cannot be resolved") {
+		t.Errorf("doctor output missing the home failure:\n%s", got)
+	}
+	if strings.Contains(got, "unsupported launch harness") {
+		t.Errorf("doctor added a misleading harness failure:\n%s", got)
 	}
 }

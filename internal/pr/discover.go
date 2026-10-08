@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/ghfail"
 )
 
 // PR is one open pull request surfaced by the discovery layer — the rich type
@@ -69,8 +71,8 @@ type ghSearchPR struct {
 	} `json:"repository"`
 }
 
-// prQueryResult carries one gh-search query's outcome across the fan-out
-// channel in PRs and Dash: its label (for a degradation note), the parsed rows,
+// prQueryResult carries one gh-search query's outcome out of the fan-out in
+// PRs and Dash: its label (for a degradation note), the parsed rows,
 // whether the query hit its --limit (a truncation note, not a failure), and
 // any error.
 type prQueryResult struct {
@@ -82,7 +84,8 @@ type prQueryResult struct {
 
 // PRs returns the union of open PRs you authored, are assigned, or have been
 // asked to review — three `gh search prs` queries fanned out concurrently on
-// the Inventory model (buffered channel, degrade-to-note, fixed receive loop).
+// the Inventory model (one result slot per query, degrade-to-note, results
+// read in query order).
 // A degraded query contributes a note, not a failure. The result is deduped by
 // Ref.String() and sorted deterministically by (slug, number).
 func (c *Client) PRs(ctx context.Context) ([]PR, []string, error) {
@@ -95,19 +98,22 @@ func (c *Client) PRs(ctx context.Context) ([]PR, []string, error) {
 		{"review-requested", "--review-requested"},
 	}
 
-	ch := make(chan prQueryResult, len(queries))
-	for _, q := range queries {
-		q := q
-		go func() {
+	// Each query writes only its own slot, and the results are read in
+	// query order once all have returned, so the notes come out in the same
+	// order on every run whichever query finishes first.
+	results := make([]prQueryResult, len(queries))
+	var wg sync.WaitGroup
+	for i, q := range queries {
+		wg.Go(func() {
 			prs, truncated, err := c.searchPRs(ctx, q.flag)
-			ch <- prQueryResult{q.label, prs, truncated, err}
-		}()
+			results[i] = prQueryResult{q.label, prs, truncated, err}
+		})
 	}
+	wg.Wait()
 
 	var notes []string
 	byRef := make(map[string]PR)
-	for range queries {
-		res := <-ch
+	for _, res := range results {
 		if res.err != nil {
 			// Categorical note, raw cause to the log only. res.err comes off
 			// `gh` as an *exec.CommandError whose Error() is that subprocess's
@@ -116,7 +122,7 @@ func (c *Client) PRs(ctx context.Context) ([]PR, []string, error) {
 			// extension in between chooses. These notes are printed to a terminal, so interpolating
 			// %v would hand that writer the operator's screen.
 			slog.Warn("PR query degraded.", "query", res.label, "error", res.err)
-			notes = append(notes, fmt.Sprintf("%s: query failed", res.label))
+			notes = append(notes, ghfail.Note(res.label, res.err, c.githubHost))
 			continue
 		}
 		if res.truncated {
@@ -155,25 +161,29 @@ func (c *Client) Dash(ctx context.Context) (Dashboard, []string, error) {
 		notes = append(notes, fmt.Sprintf("active-reviews: %d record(s) could not be read", unreadable))
 	}
 
-	const sections = 2
-	ch := make(chan prQueryResult, sections)
-	go func() {
-		prs, truncated, err := c.searchPRs(ctx, "--review-requested")
-		ch <- prQueryResult{"awaiting-you", prs, truncated, err}
-	}()
-	go func() {
-		prs, truncated, err := c.searchPRs(ctx, "--author")
-		ch <- prQueryResult{"your-open", prs, truncated, err}
-	}()
+	// Same fixed-order fan-out as PRs: awaiting-you's notes always come
+	// before your-open's.
+	sections := [...]struct{ label, flag string }{
+		{"awaiting-you", "--review-requested"},
+		{"your-open", "--author"},
+	}
+	results := make([]prQueryResult, len(sections))
+	var wg sync.WaitGroup
+	for i, sec := range sections {
+		wg.Go(func() {
+			prs, truncated, err := c.searchPRs(ctx, sec.flag)
+			results[i] = prQueryResult{sec.label, prs, truncated, err}
+		})
+	}
+	wg.Wait()
 
 	dash := Dashboard{ActiveReviews: active}
-	for i := 0; i < sections; i++ {
-		res := <-ch
+	for _, res := range results {
 		if res.err != nil {
 			// Categorical note, raw cause to the log only — same
 			// subprocess-stderr reasoning as PRs above.
 			slog.Warn("Dashboard section degraded.", "section", res.label, "error", res.err)
-			notes = append(notes, fmt.Sprintf("%s: query failed", res.label))
+			notes = append(notes, ghfail.Note(res.label, res.err, c.githubHost))
 			continue
 		}
 		if res.truncated {

@@ -2,6 +2,7 @@ package launch
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -484,10 +485,11 @@ func TestBuildInvocation_TargetCWDSelectsProfile(t *testing.T) {
 // exist, because most inputs launder it away by accident and would make this
 // test pass over an aliasing builder:
 //
-//   - argv: every posture but one rebuilds the slice inside its argv builder.
-//     The agents scripting passthrough is the single path that returns the
-//     caller's args as the harness argv, so it is the only one where the clone
-//     is load-bearing.
+//   - argv: every posture but the two passthroughs rebuilds the slice inside
+//     its argv builder. The agents scripting passthrough and the Claude
+//     passthrough return the caller's args as the harness argv, so they are
+//     where the clone is load-bearing; both share the one clone at the top of
+//     BuildInvocation, and the agents case exercises it.
 //   - env: MergeEnv rebuilds whenever it has an overlay to apply, so a profile
 //     with any env at all hides the alias. The exposed case is an empty
 //     overlay, where MergeEnv returns its base untouched.
@@ -624,6 +626,17 @@ func countKey(env []string, key string) int {
 	return n
 }
 
+// piped withholds allow_danger, as selectPosture does for every Claude posture
+// it injects into when stdout is not a terminal (forgectl#812, #899).
+// TestBuildInvocation_PipedRunWithholdsOnlyAllowDanger pins the literal argv;
+// these helpers only keep the routing table readable.
+func piped(p Profile) Profile {
+	p.AllowDanger = false
+	return p
+}
+
+func pipedBuilderArgs(p Profile, args []string) []string { return BuilderArgs(piped(p), args) }
+
 // TestBuildInvocation_Postures pins the argv shape and posture label for every
 // branch launchExec used to switch on inline. The argv is compared against the
 // package's own builders rather than a literal, so this stays a test of
@@ -652,6 +665,7 @@ func TestBuildInvocation_Postures(t *testing.T) {
 		name        string
 		cfg         config.LaunchConfig
 		args        []string
+		tty         bool // InvocationRequest.StdoutTerminal
 		wantPosture Posture
 		wantArgs    func(Profile) []string
 	}{
@@ -659,21 +673,133 @@ func TestBuildInvocation_Postures(t *testing.T) {
 			name:        "bare claude launch",
 			cfg:         claudeCfg,
 			wantPosture: PostureClaudeSession,
-			wantArgs:    func(p Profile) []string { return SessionArgs(p) },
+			wantArgs:    func(p Profile) []string { return SessionArgs(piped(p)) },
 		},
 		{
 			name:        "claude with passthrough args",
 			cfg:         claudeCfg,
-			args:        []string{"-p", "hello"},
+			args:        []string{"hello"},
 			wantPosture: PostureClaudeBuilder,
-			wantArgs:    func(p Profile) []string { return BuilderArgs(p, []string{"-p", "hello"}) },
+			wantArgs:    func(p Profile) []string { return pipedBuilderArgs(p, []string{"hello"}) },
+		},
+		{
+			name:        "claude print mode keeps only the permission mode",
+			cfg:         claudeCfg,
+			args:        []string{"-p", "hello"},
+			wantPosture: PostureClaudePrint,
+			wantArgs:    func(p Profile) []string { return PrintArgs(p, []string{"-p", "hello"}) },
+		},
+		// --output-format is print mode only off a terminal: claude 2.1.285
+		// opens its TUI for it on one (forgectl#795). Mutation that turns
+		// these red: ignore stdoutTerminal in isPrintFlag (the tty row takes
+		// the print posture), or drop --output-format outright (the piped
+		// row takes the builder posture), or drop -p/--print on a terminal
+		// (the "-p on a terminal" row flips).
+		{
+			name:        "output-format off a terminal gets the print posture",
+			cfg:         claudeCfg,
+			args:        []string{"--output-format", "json", "hi"},
+			wantPosture: PostureClaudePrint,
+			wantArgs:    func(p Profile) []string { return PrintArgs(p, []string{"--output-format", "json", "hi"}) },
+		},
+		{
+			name:        "output-format on a terminal is interactive and gets the builder posture",
+			cfg:         claudeCfg,
+			args:        []string{"--output-format=json", "hi"},
+			tty:         true,
+			wantPosture: PostureClaudeBuilder,
+			wantArgs:    func(p Profile) []string { return BuilderArgs(p, []string{"--output-format=json", "hi"}) },
+		},
+		{
+			name:        "-p on a terminal still gets the print posture",
+			cfg:         claudeCfg,
+			args:        []string{"--output-format", "json", "-p", "hi"},
+			tty:         true,
+			wantPosture: PostureClaudePrint,
+			wantArgs:    func(p Profile) []string { return PrintArgs(p, []string{"--output-format", "json", "-p", "hi"}) },
+		},
+		{
+			name:        "help in a value slot cannot take print mode out of its permission mode",
+			cfg:         claudeCfg,
+			args:        []string{"-p", "--append-system-prompt", "--help", "hi"},
+			wantPosture: PostureClaudePrint,
+			wantArgs: func(p Profile) []string {
+				return PrintArgs(p, []string{"-p", "--append-system-prompt", "--help", "hi"})
+			},
+		},
+		{
+			name:        "a later help flag cannot take print mode out of its permission mode",
+			cfg:         claudeCfg,
+			args:        []string{"-p", "x", "--help"},
+			wantPosture: PostureClaudePrint,
+			wantArgs:    func(p Profile) []string { return PrintArgs(p, []string{"-p", "x", "--help"}) },
+		},
+		{
+			name:        "version with print mode gets the print posture",
+			cfg:         claudeCfg,
+			args:        []string{"-v", "-p", "hi"},
+			wantPosture: PostureClaudePrint,
+			wantArgs:    func(p Profile) []string { return PrintArgs(p, []string{"-v", "-p", "hi"}) },
+		},
+		{
+			name:        "print flag in a value slot keeps the builder posture",
+			cfg:         claudeCfg,
+			args:        []string{"--append-system-prompt", "-p", "task"},
+			wantPosture: PostureClaudeBuilder,
+			wantArgs: func(p Profile) []string {
+				return pipedBuilderArgs(p, []string{"--append-system-prompt", "-p", "task"})
+			},
+		},
+		{
+			name:        "agents args after claude's own separator keep the posture",
+			cfg:         claudeCfg,
+			args:        []string{"agents", "--", "x", "--json"},
+			wantPosture: PostureClaudeAgents,
+			wantArgs:    func(p Profile) []string { return AgentsArgs(piped(p), []string{"agents", "--", "x", "--json"}) },
+		},
+		{
+			name:        "help in a value slot keeps the builder posture",
+			cfg:         claudeCfg,
+			args:        []string{"--append-system-prompt", "--help", "hi"},
+			wantPosture: PostureClaudeBuilder,
+			wantArgs: func(p Profile) []string {
+				return pipedBuilderArgs(p, []string{"--append-system-prompt", "--help", "hi"})
+			},
+		},
+		{
+			name:        "leading help passes through byte-clean",
+			cfg:         claudeCfg,
+			args:        []string{"--help"},
+			wantPosture: PostureClaudePassthrough,
+			wantArgs:    func(Profile) []string { return []string{"--help"} },
+		},
+		{
+			name:        "claude subcommand after claude's own separator passes through",
+			cfg:         claudeCfg,
+			args:        []string{"--", "mcp", "list"},
+			wantPosture: PostureClaudePassthrough,
+			wantArgs:    func(Profile) []string { return []string{"--", "mcp", "list"} },
+		},
+		{
+			name:        "claude subcommand passes through byte-clean",
+			cfg:         claudeCfg,
+			args:        []string{"mcp", "list"},
+			wantPosture: PostureClaudePassthrough,
+			wantArgs:    func(Profile) []string { return []string{"mcp", "list"} },
+		},
+		{
+			name:        "print flag after claude's own separator is prompt text",
+			cfg:         claudeCfg,
+			args:        []string{"--", "-p"},
+			wantPosture: PostureClaudeBuilder,
+			wantArgs:    func(p Profile) []string { return pipedBuilderArgs(p, []string{"--", "-p"}) },
 		},
 		{
 			name:        "claude agents with posture injection",
 			cfg:         claudeCfg,
 			args:        []string{"agents", "list"},
 			wantPosture: PostureClaudeAgents,
-			wantArgs:    func(p Profile) []string { return AgentsArgs(p, []string{"agents", "list"}) },
+			wantArgs:    func(p Profile) []string { return AgentsArgs(piped(p), []string{"agents", "list"}) },
 		},
 		{
 			name:        "claude agents scripting passthrough",
@@ -713,10 +839,11 @@ func TestBuildInvocation_Postures(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			built, err := BuildInvocation(InvocationRequest{
-				Config:  tc.cfg,
-				CWD:     target,
-				Args:    tc.args,
-				Resolve: fixedResolver(ResolvedBinary{Path: "/stub/harness", Source: BinaryPATH}),
+				Config:         tc.cfg,
+				CWD:            target,
+				Args:           tc.args,
+				Resolve:        fixedResolver(ResolvedBinary{Path: "/stub/harness", Source: BinaryPATH}),
+				StdoutTerminal: tc.tty,
 			})
 			if err != nil {
 				t.Fatalf("BuildInvocation: %v", err)
@@ -724,9 +851,124 @@ func TestBuildInvocation_Postures(t *testing.T) {
 			if built.Posture != tc.wantPosture {
 				t.Errorf("Posture = %q, want %q", built.Posture, tc.wantPosture)
 			}
+			// Every Claude prompt run keeps its permission mode, whichever
+			// posture it lands in (forgectl#795's invariant).
+			if (built.Posture == PostureClaudePrint || built.Posture == PostureClaudeBuilder) &&
+				(len(built.Invocation.Args) < 2 || built.Invocation.Args[0] != "--permission-mode") {
+				t.Errorf("%s run lost --permission-mode: %q", built.Posture, built.Invocation.Args)
+			}
 			want := tc.wantArgs(built.Profile)
 			if strings.Join(built.Invocation.Args, "\x00") != strings.Join(want, "\x00") {
 				t.Errorf("Args = %q, want %q", built.Invocation.Args, want)
+			}
+		})
+	}
+}
+
+// TestBuildInvocation_PipedRunWithholdsOnlyAllowDanger pins forgectl#812 (owner
+// option b) and its extension in #899 as literal argv. Off a terminal claude
+// does not run an interactive session, so every Claude posture forgectl
+// injects into (builder, bare session, agents) drops
+// --allow-dangerously-skip-permissions and keeps everything else the profile
+// gives it. On a terminal the same profile still gets the flag. A flag the
+// user types into the args still passes, and BuiltInvocation.Profile keeps
+// reporting the resolved allow_danger either way.
+//
+// Mutations that turn it red: drop the `!stdoutTerminal` clear in
+// selectPosture (every piped row regains the flag), clear AllowDanger
+// unconditionally (every terminal row loses it), move the clear back into the
+// builder branch only (the piped session and agents rows regain it), or route
+// the piped builder run to PrintArgs (model, effort, and add-dir disappear).
+func TestBuildInvocation_PipedRunWithholdsOnlyAllowDanger(t *testing.T) {
+	target := projectDir(t)
+	allow := true
+	cfg := config.LaunchConfig{Defaults: config.LaunchDefaults{
+		Model:          "opus",
+		Effort:         "low",
+		PermissionMode: "plan",
+		AllowDanger:    &allow,
+		AddDir:         []string{"/shared"},
+	}}
+	const danger = "--allow-dangerously-skip-permissions"
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		tty     bool
+		posture Posture
+		want    []string
+	}{
+		{"builder piped", []string{"task"}, false, PostureClaudeBuilder, []string{
+			"--permission-mode", "plan",
+			"--add-dir", "/shared",
+			"--model", "opus",
+			"--effort", "low",
+			"task",
+		}},
+		{"builder terminal", []string{"task"}, true, PostureClaudeBuilder, []string{
+			"--permission-mode", "plan",
+			danger,
+			"--add-dir", "/shared",
+			"--model", "opus",
+			"--effort", "low",
+			"task",
+		}},
+		{"builder piped, flag typed by the user", []string{danger, "task"}, false, PostureClaudeBuilder, []string{
+			"--permission-mode", "plan",
+			"--add-dir", "/shared",
+			"--model", "opus",
+			"--effort", "low",
+			danger, "task",
+		}},
+		{"session piped", nil, false, PostureClaudeSession, []string{
+			"--permission-mode", "plan",
+			"--ide", "--exclude-dynamic-system-prompt-sections",
+			"--model", "opus",
+			"--effort", "low",
+			"--add-dir", "/shared",
+		}},
+		{"session terminal", nil, true, PostureClaudeSession, []string{
+			"--permission-mode", "plan",
+			danger,
+			"--ide", "--exclude-dynamic-system-prompt-sections",
+			"--model", "opus",
+			"--effort", "low",
+			"--add-dir", "/shared",
+		}},
+		{"agents piped", []string{"agents", "list"}, false, PostureClaudeAgents, []string{
+			"agents",
+			"--permission-mode", "plan",
+			"--model", "opus",
+			"--effort", "low",
+			"list",
+		}},
+		{"agents terminal", []string{"agents", "list"}, true, PostureClaudeAgents, []string{
+			"agents",
+			"--permission-mode", "plan",
+			danger,
+			"--model", "opus",
+			"--effort", "low",
+			"list",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			built, err := BuildInvocation(InvocationRequest{
+				Config:         cfg,
+				CWD:            target,
+				Args:           tc.args,
+				Resolve:        fixedResolver(ResolvedBinary{Path: "/stub/claude", Source: BinaryPATH}),
+				StdoutTerminal: tc.tty,
+			})
+			if err != nil {
+				t.Fatalf("BuildInvocation: %v", err)
+			}
+			if built.Posture != tc.posture {
+				t.Errorf("Posture = %q, want %q", built.Posture, tc.posture)
+			}
+			if strings.Join(built.Invocation.Args, "\x00") != strings.Join(tc.want, "\x00") {
+				t.Errorf("Args = %q, want %q", built.Invocation.Args, tc.want)
+			}
+			if !built.Profile.AllowDanger {
+				t.Error("Profile.AllowDanger = false, want the resolved true: only the argv withholds it")
 			}
 		})
 	}
@@ -820,7 +1062,7 @@ func TestEmitBanner_ClassifiesEveryPosture(t *testing.T) {
 		t.Fatal("allPostures is empty; the loop below would pass vacuously")
 	}
 
-	silent := map[Posture]bool{PostureClaudeBuilder: true, PostureAgentsPassthrough: true}
+	silent := map[Posture]bool{PostureClaudeBuilder: true, PostureAgentsPassthrough: true, PostureClaudePassthrough: true, PostureClaudePrint: true}
 	seen := map[Posture]bool{}
 
 	for _, p := range allPostures {
@@ -842,7 +1084,7 @@ func TestEmitBanner_ClassifiesEveryPosture(t *testing.T) {
 	// The other direction: selectPosture must not be able to return a posture
 	// absent from allPostures, or the loop above would skip it entirely.
 	target := projectDir(t)
-	for _, args := range [][]string{nil, {"-p", "x"}, {"agents", "list"}, {"agents", "--json"}} {
+	for _, args := range [][]string{nil, {"x"}, {"-p", "x"}, {"mcp", "list"}, {"agents", "list"}, {"agents", "--json"}} {
 		built, err := BuildInvocation(InvocationRequest{
 			Config:  parityConfig(target),
 			CWD:     target,
@@ -877,6 +1119,8 @@ func TestEmitBanner_ByPosture(t *testing.T) {
 		{PosturePiArgs, "→ pi --model sonnet\n"},
 		{PostureClaudeBuilder, ""},
 		{PostureAgentsPassthrough, ""},
+		{PostureClaudePassthrough, ""},
+		{PostureClaudePrint, ""},
 	}
 
 	for _, tc := range tests {
@@ -896,5 +1140,23 @@ func TestEmitBanner_ByPosture(t *testing.T) {
 				t.Errorf("EmitBanner wrote %q, want %q", buf.String(), tc.want)
 			}
 		})
+	}
+}
+
+// An unresolvable home is a refusal for a config that needs it, not a launch
+// under the wrong profile.
+func TestBuildInvocation_RefusesWhenTheConfigNeedsAnUnresolvableHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	if _, err := os.UserHomeDir(); err == nil {
+		t.Skip("this platform resolves a home without HOME")
+	}
+	_, err := BuildInvocation(InvocationRequest{
+		Config:  config.LaunchConfig{Projects: []config.LaunchProject{{Match: "~/work", AllowDanger: new(false)}}},
+		CWD:     t.TempDir(),
+		Resolve: func(string, config.LaunchDefaults) (ResolvedBinary, error) { return ResolvedBinary{}, nil },
+	})
+	if !errors.Is(err, ErrHomeUnresolved) {
+		t.Errorf("BuildInvocation err = %v, want ErrHomeUnresolved", err)
 	}
 }

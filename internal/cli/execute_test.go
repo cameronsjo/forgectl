@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 	"github.com/cameronsjo/forgectl/internal/tmux"
 	"github.com/cameronsjo/forgectl/internal/tui"
@@ -321,9 +323,9 @@ func TestRunAction_ActionShowInvocationPrintsAndDoesNotRun(t *testing.T) {
 	}
 }
 
-// --- leadsWithPath / path-preserving error rendering (forgectl#481) ---
+// --- leadsWithLiteral / literal-preserving error rendering (forgectl#481, #858) ---
 
-func TestLeadsWithPath(t *testing.T) {
+func TestLeadsWithLiteral(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		msg  string
@@ -332,13 +334,23 @@ func TestLeadsWithPath(t *testing.T) {
 		{name: "leading dotfile", msg: ".env not found", want: true},
 		{name: "leading absolute path", msg: "/etc/passwd is unreadable", want: true},
 		{name: "leading relative path", msg: "config/local.toml not found", want: true},
+		{name: "leading long flag", msg: "--limit must be at least 1, not 0", want: true},
+		{name: "leading short flag", msg: "-n must be positive", want: true},
+		{name: "leading quoted dotfile", msg: `".sops.yaml" not found`, want: true},
+		{name: "leading quoted bare name", msg: `"envrc" not found`, want: true},
+		{name: "leading quoted capped path", msg: `"/home/a"…"/b.env" not found`, want: true},
+		{name: "leading bare file name", msg: "secrets.yaml not found", want: true},
+		{name: "leading bare file name with a colon", msg: "secrets.yaml: unreadable", want: true},
+		{name: "dotted non-path word (version)", msg: "v1.2 is required", want: true},
+		{name: "dotted non-path word (abbreviation)", msg: "e.g. a key", want: true},
+		{name: "sentence ending in a dot", msg: "Failed.", want: false},
 		{name: "prose with a path later", msg: "example file .env.example not found", want: false},
 		{name: "ordinary prose", msg: "plain failure", want: false},
 		{name: "empty", msg: "", want: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := leadsWithPath(tt.msg); got != tt.want {
-				t.Errorf("leadsWithPath(%q) = %t, want %t", tt.msg, got, tt.want)
+			if got := leadsWithLiteral(tt.msg); got != tt.want {
+				t.Errorf("leadsWithLiteral(%q) = %t, want %t", tt.msg, got, tt.want)
 			}
 		})
 	}
@@ -372,6 +384,42 @@ func TestFangErrorSinkKeepsPathCaseForLeadingPathErrors(t *testing.T) {
 	}
 	if strings.Contains(out, ".Env") {
 		t.Errorf("path-leading error was title-cased: %q", out)
+	}
+}
+
+// TestFangErrorSinkKeepsFlagCaseForLeadingFlagErrors is the flag-token twin
+// (forgectl#670): "--limit must be ..." must not become "--Limit", and an
+// ordinary message must still be capitalised.
+func TestFangErrorSinkKeepsFlagCaseForLeadingFlagErrors(t *testing.T) {
+	for _, tt := range []struct {
+		msg, want, notWant string
+	}{
+		{"--limit must be at least 1, not 0", "--limit must be at least 1, not 0.", "--Limit"},
+		{`".sops.yaml" not found`, `".sops.yaml" not found.`, ".Sops"},
+		{`"envrc" not found`, `"envrc" not found.`, `"Envrc"`},
+		{"secrets.yaml not found", "secrets.yaml not found.", "Secrets"},
+		{"plain failure", "Plain failure.", ""},
+	} {
+		root := &cobra.Command{
+			Use:          "forgectl",
+			SilenceUsage: true,
+			RunE:         func(*cobra.Command, []string) error { return errors.New(tt.msg) },
+		}
+		var stderr bytes.Buffer
+		root.SetOut(new(bytes.Buffer))
+		root.SetErr(&stderr)
+		root.SetArgs(nil)
+
+		if err := fang.Execute(context.Background(), root, fangOptions("0.0.0", "deadbeef", theme.Default())...); err == nil {
+			t.Fatal("expected the command to fail")
+		}
+		out := stderr.String()
+		if !strings.Contains(out, tt.want) {
+			t.Errorf("message %q rendered as %q, want it to contain %q", tt.msg, out, tt.want)
+		}
+		if tt.notWant != "" && strings.Contains(out, tt.notWant) {
+			t.Errorf("message %q was title-cased: %q", tt.msg, out)
+		}
 	}
 }
 
@@ -422,7 +470,9 @@ func TestUnknownCommandTailPointsToTheMenu(t *testing.T) {
 func TestRootLongNamesTheMenu(t *testing.T) {
 	root := newRoot(module.Deps{Runner: &exec.FakeRunner{}})
 	want := `Two ways in: type a command — forgectl tmux ls — or run forgectl with no
-arguments for a menu over every command group.`
+arguments for a menu over every command group.
+
+Exit codes: 0 ok, 1 failed, 2 usage, 3 unauthorized, 4 refused; see docs/exit-codes.md.`
 	if root.Long != want {
 		t.Errorf("root.Long = %q, want %q", root.Long, want)
 	}
@@ -441,5 +491,31 @@ func TestTermsafeErrorHandler_SilentCodedError_RendersNothing(t *testing.T) {
 	}
 	if got := ExitCode(err); got != 2 {
 		t.Errorf("ExitCode(silentCodedError) = %d, want 2", got)
+	}
+}
+
+// TestTermsafeErrorHandler_CapsAWrappedPathError is #837's backstop: a
+// *PathError wrapped by fmt.Errorf before it reached the root handler was
+// escaped but echoed at any length. The handler caps it now, and running it
+// over an error it already made safe renders the same text.
+//
+// Mutation: make termsafe.Error's fallback branch SafeLine(errorText(err))
+// again and the whole path reaches the output.
+func TestTermsafeErrorHandler_CapsAWrappedPathError(t *testing.T) {
+	long := "/" + strings.Repeat("a", 4*termsafe.PathEchoMaxRunes) + "TAIL"
+	wrapped := fmt.Errorf("resolve cwd: %w", &os.PathError{Op: "stat", Path: long, Err: errors.New("denied")})
+	var buf bytes.Buffer
+	termsafeErrorHandler(&buf, fang.Styles{}, wrapped)
+	got := buf.String()
+	if n := strings.Count(got, "a"); n > 2*termsafe.PathEchoMaxRunes {
+		t.Fatalf("root handler echoed %d path runes; want the path capped: %q", n, got)
+	}
+	if !strings.Contains(got, `TAIL"`) {
+		t.Errorf("root handler output %q lost the path's tail", got)
+	}
+	var again bytes.Buffer
+	termsafeErrorHandler(&again, fang.Styles{}, termsafe.Error(wrapped))
+	if again.String() != got {
+		t.Errorf("root handler is not idempotent:\n%q\nthen\n%q", got, again.String())
 	}
 }

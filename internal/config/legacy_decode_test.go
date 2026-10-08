@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -162,5 +164,80 @@ func TestNativeMigrationFS_LoadReadOnly_MalformedIsAnError(t *testing.T) {
 	_, err := fs.loadReadOnly(path)
 	if !errors.Is(err, ErrLegacyMalformed) {
 		t.Fatalf("error = %v, want it to wrap ErrLegacyMalformed", err)
+	}
+}
+
+// TestLoadLegacyLaunch_QuotesPath pins #761: the legacy claunch.conf path is
+// rendered through QuotePath on the absent, malformed, and unreadable arms
+// (EISDIR, ELOOP: an *os.PathError that Scrub passes through), so a directory
+// name carrying a terminal control cannot reach the terminal raw.
+func TestLoadLegacyLaunch_QuotesPath(t *testing.T) {
+	xdg := filepath.Join(t.TempDir(), "x\x1b[2Jy")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	_, _, err := LoadLegacyLaunch()
+	if !errors.Is(err, ErrNoLegacyLaunch) {
+		t.Fatalf("absent: error = %v, want ErrNoLegacyLaunch", err)
+	}
+	if strings.Contains(err.Error(), "\x1b") || !strings.Contains(err.Error(), `x\x1b[2Jy`) {
+		t.Errorf("absent: error = %q, want the path quoted", err)
+	}
+
+	dir := filepath.Join(xdg, "claunch")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "claunch.conf"), []byte("not = [valid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = LoadLegacyLaunch()
+	if err == nil {
+		t.Fatal("malformed: want a decode error")
+	}
+	if strings.Contains(err.Error(), "\x1b") || !strings.Contains(err.Error(), `x\x1b[2Jy`) {
+		t.Errorf("malformed: error = %q, want the path quoted", err)
+	}
+
+	conf := filepath.Join(dir, "claunch.conf")
+	for _, tc := range []struct {
+		name  string
+		plant func() error
+	}{
+		{"EISDIR", func() error { return os.Mkdir(conf, 0o700) }},
+		{"ELOOP", func() error { return os.Symlink(conf, conf) }},
+	} {
+		if err := os.RemoveAll(conf); err != nil {
+			t.Fatal(err)
+		}
+		if err := tc.plant(); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = LoadLegacyLaunch()
+		if err == nil {
+			t.Fatalf("%s: want a read error", tc.name)
+		}
+		if strings.Contains(err.Error(), "\x1b") || !strings.Contains(err.Error(), `x\x1b[2Jy`) {
+			t.Errorf("%s: error = %q, want every path quoted", tc.name, err)
+		}
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) {
+			t.Errorf("%s: error = %v, lost the *os.PathError", tc.name, err)
+		}
+	}
+}
+
+// TestDecodeLegacyLaunchRefusesWorker: a legacy file's [worker] table is
+// reported unsupported, so migration refuses it, and is never applied: a
+// legacy claunch.conf does not set worker posture.
+func TestDecodeLegacyLaunchRefusesWorker(t *testing.T) {
+	lc, keys, err := decodeLegacyLaunch([]byte("[defaults]\nharness = \"claude\"\n\n[worker]\npermission_mode = \"plan\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(keys, "worker") {
+		t.Fatalf("undecoded keys %q do not report [worker]", keys)
+	}
+	if lc.Worker != (LaunchWorker{}) {
+		t.Fatalf("a legacy [worker] table was applied: %+v", lc.Worker)
 	}
 }

@@ -1,12 +1,17 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
+	"github.com/cameronsjo/forgectl/internal/redact/redacttest"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 )
 
@@ -53,6 +58,7 @@ func TestExecutor_TrivialWorkflow_ComposedArgv(t *testing.T) {
 		t.Fatalf("expected 1 Runner call (git worktree add), got %d: %+v", len(fake.Calls), fake.Calls)
 	}
 	call := fake.Calls[0]
+	call.Args = gitenvtest.Strip(call.Args)
 	if call.Name != "git" {
 		t.Errorf("call.Name = %q, want git", call.Name)
 	}
@@ -105,6 +111,119 @@ func TestExecutor_RunOnlyWorkflow_ComposedArgv(t *testing.T) {
 	want := []string{"hello", "world"}
 	if len(call.Args) != len(want) || call.Args[0] != want[0] || call.Args[1] != want[1] {
 		t.Errorf("call.Args = %v, want %v", call.Args, want)
+	}
+}
+
+// discardingFake is a FakeRunner that also offers exec.DiscardingRunner and
+// records which of the two paths a step took.
+type discardingFake struct {
+	*exec.FakeRunner
+	discarded []exec.Call
+}
+
+func (d *discardingFake) RunDiscardingStdout(_ context.Context, name string, args ...string) error {
+	d.discarded = append(d.discarded, exec.Call{Name: name, Args: args})
+	return nil
+}
+
+// TestExecutor_RunStep_DiscardsStdoutWhenTheRunnerCan pins #661: a `run`
+// step throws its stdout away, so it must not go through Run, whose stdout
+// ceiling fails a step that prints more than 64 MiB. When the Runner offers
+// exec.DiscardingRunner the step uses it; the plain-FakeRunner tests above
+// cover the fallback to Run.
+//
+// Mutation: drop the DiscardingRunner type assertion in runStep and the step
+// goes through Run (one Calls entry, no discarded entry).
+func TestExecutor_RunStep_DiscardsStdoutWhenTheRunnerCan(t *testing.T) {
+	fake := &discardingFake{FakeRunner: &exec.FakeRunner{}}
+	wf := Workflow{
+		DSLVersion: 1,
+		Name:       "run-discard",
+		Steps:      []Step{{Uses: "run", Cmd: "echo", Args: []string{"hi"}}},
+	}
+	plan, err := BuildPlan(wf, nil, testRegistry(t))
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if err := NewExecutor(fake, testRegistry(t)).Run(context.Background(), plan, NewContext(nil)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(fake.Calls) != 0 || len(fake.discarded) != 1 || fake.discarded[0].Name != "echo" {
+		t.Fatalf("Run calls %+v, discarding calls %+v; want only one discarding call to echo", fake.Calls, fake.discarded)
+	}
+}
+
+// TestExecutor_RunStep_DebugLogWithholdsArgvCredentials pins #749 item 3: a
+// run step's argv is logged at Debug before the Runner runs it, so it must be
+// rendered through redact as the Runner renders it. The step still receives
+// the real argv.
+//
+// Mutation: log step.Args raw in runStep and both tokens reach the log.
+func TestExecutor_RunStep_DebugLogWithholdsArgvCredentials(t *testing.T) {
+	const secret = "Rk3Vt8Nq1Zb6" //nolint:gosec // G101: a fake credential the log must not carry
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	fake := &exec.FakeRunner{}
+	args := []string{"clone", "https://x-access-token:" + secret + "@github.com/o/r", "--token", secret}
+	wf := Workflow{
+		DSLVersion: 1,
+		Name:       "run-redact",
+		Steps:      []Step{{Uses: "run", Cmd: "git", Args: args}},
+	}
+	plan, err := BuildPlan(wf, nil, testRegistry(t))
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if err := NewExecutor(fake, testRegistry(t)).Run(context.Background(), plan, NewContext(nil)); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(logs.String(), "Running command.") {
+		t.Fatalf("the run step logged nothing, so the test proves nothing:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), secret) {
+		t.Errorf("credential in the debug log:\n%s", logs.String())
+	}
+	if len(fake.Calls) != 1 || strings.Join(fake.Calls[0].Args, " ") != strings.Join(args, " ") {
+		t.Errorf("the step must receive the real argv, got %+v", fake.Calls)
+	}
+}
+
+// TestExecutor_RunStep_CorpusNeverRendered runs every row of the #749 review
+// corpus as a run step's args on the real exec Runner, failing, and checks
+// the debug log, the failure log and the returned error: no row's secret
+// renders, whatever the tool's flag grammar.
+//
+// Mutation: drop the exec.WithOpaqueArgs line from runStep and rows leak
+// through the Runner's debug log and CommandError.Error().
+func TestExecutor_RunStep_CorpusNeverRendered(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	for _, argv := range redacttest.Corpus {
+		logs.Reset()
+		wf := Workflow{
+			DSLVersion: 1,
+			Name:       "run-corpus",
+			Steps:      []Step{{Uses: "run", Cmd: "sh", Args: append([]string{"-c", "exit 3", "sh"}, argv...)}},
+		}
+		plan, err := BuildPlan(wf, nil, testRegistry(t))
+		if err != nil {
+			t.Fatalf("BuildPlan: %v", err)
+		}
+		err = NewExecutor(exec.OSRunner{}, testRegistry(t)).Run(context.Background(), plan, NewContext(nil))
+		if err == nil {
+			t.Fatalf("%q: expected the step to fail", argv)
+		}
+		if !strings.Contains(logs.String(), "Preparing to run command") {
+			t.Fatalf("%q: the Runner logged no argv, so the case proves nothing:\n%s", argv, logs.String())
+		}
+		if strings.Contains(logs.String(), redacttest.Secret) || strings.Contains(err.Error(), redacttest.Secret) {
+			t.Errorf("%q: credential rendered:\nerror: %v\nlog:\n%s", argv, err, logs.String())
+		}
 	}
 }
 
@@ -249,11 +368,13 @@ func TestExecutor_CloneVerb_ClonesAndExportsWorkspace(t *testing.T) {
 		t.Fatalf("expected 1 Runner call (git clone), got %d: %+v", len(fake.Calls), fake.Calls)
 	}
 	call := fake.Calls[0]
+	call.Args = gitenvtest.Strip(call.Args)
 	if call.Name != "git" {
 		t.Errorf("call.Name = %q, want git", call.Name)
 	}
-	if len(call.Args) == 0 || call.Args[0] != "clone" {
-		t.Errorf("expected a git clone invocation, got args %v", call.Args)
+	// The sandbox clone refuses ext:: and fd:: ahead of the subcommand (#978).
+	if !gitenvtest.Refuses(fake.Calls[0].Args, "ext", "fd") || len(call.Args) == 0 || call.Args[0] != "clone" {
+		t.Errorf("expected a git clone invocation refusing ext and fd, got args %v", fake.Calls[0].Args)
 	}
 
 	workspace, ok := wctx.Get("workspace")
@@ -287,6 +408,7 @@ func TestExecutor_CloneVerb_ClonesLocalRepo(t *testing.T) {
 		t.Fatalf("expected 1 Runner call (git clone), got %d: %+v", len(fake.Calls), fake.Calls)
 	}
 	call := fake.Calls[0]
+	call.Args = gitenvtest.Strip(call.Args)
 	if call.Name != "git" || len(call.Args) == 0 || call.Args[0] != "clone" {
 		t.Errorf("explicit clone on a local repo must git-clone, got %s %v", call.Name, call.Args)
 	}

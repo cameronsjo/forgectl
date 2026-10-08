@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	osexec "os/exec"
 	"path/filepath"
@@ -88,10 +89,20 @@ func TestCheckConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// No file at all: valid (built-in defaults).
+	// No file at all: valid (built-in defaults), but reported as not
+	// created rather than ok, with init as the hint.
 	check := checkConfig(Deps{})
-	if check.State != StateOK {
-		t.Errorf("no config file: state = %q, want ok", check.State)
+	if check.State != StateSkip || !strings.Contains(check.Hint, "forgectl init") {
+		t.Errorf("no config file: state = %q, hint = %q; want skip pointing at forgectl init", check.State, check.Hint)
+	}
+
+	// A valid file: ok, naming the path.
+	if err := os.WriteFile(dir, []byte("log_level = \"off\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check = checkConfig(Deps{})
+	if check.State != StateOK || check.Detail != dir {
+		t.Errorf("valid config: state = %q, detail = %q; want ok with the path", check.State, check.Detail)
 	}
 
 	// Malformed TOML: fail, with a hint.
@@ -159,6 +170,16 @@ func TestCheckGh(t *testing.T) {
 	d = Deps{LookPath: fakeLookPath("gh"), Runner: fr}
 	if check := checkGh(context.Background(), d); check.State != StateFail || check.Hint == "" {
 		t.Errorf("gh unauthenticated: state = %q, hint = %q; want fail with a hint", check.State, check.Hint)
+	}
+
+	// gh's stderr is host-chosen text: the Detail says gh failed without
+	// repeating it (#658).
+	fr = &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
+		return "", &exec.CommandError{Name: "gh", Stderr: "STDERRMARKER\x1b[2J", Err: errors.New("exit status 1")}
+	}}
+	d = Deps{LookPath: fakeLookPath("gh"), Runner: fr}
+	if check := checkGh(context.Background(), d); strings.Contains(check.Detail, "STDERRMARKER") || !strings.Contains(check.Detail, "gh auth status failed") {
+		t.Errorf("gh failure detail = %q, want the categorical failure without gh's stderr", check.Detail)
 	}
 
 	// gh present and authenticated.
@@ -361,6 +382,48 @@ func TestCheckTrustStore_InvalidOrTamperedStoreFails(t *testing.T) {
 			}
 			if check.Hint == "" {
 				t.Error("Fail check has no remediation hint")
+			}
+		})
+	}
+}
+
+// TestCheckTrustStore_NoAnchorNoStoreSkips covers forgectl#635: a machine that
+// never set up blessed workflows has neither anchor nor store, and doctor must
+// not exit 1 for it. Every other anchor failure stays a fail.
+func TestCheckTrustStore_NoAnchorNoStoreSkips(t *testing.T) {
+	dir := t.TempDir()
+	absentStore := func() (string, error) { return filepath.Join(dir, "trust.toml"), nil }
+	presentPath := filepath.Join(dir, "present.toml")
+	if err := os.WriteFile(presentPath, []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notInstalled := fmt.Errorf("%w: %w", bless.ErrNoAnchor, &fs.PathError{Op: "lstat", Path: "/etc/forgectl/anchor", Err: fs.ErrNotExist})
+	unsafe := fmt.Errorf("%w: anchor is owned by uid 501, want 0 (root)", bless.ErrNoAnchor)
+
+	cases := []struct {
+		name      string
+		err       error
+		storePath func() (string, error)
+		want      State
+	}{
+		{"no anchor, no store: never set up", notInstalled, absentStore, StateSkip},
+		{"no anchor, store exists: broken", notInstalled, func() (string, error) { return presentPath, nil }, StateFail},
+		{"anchor present but unsafe", unsafe, absentStore, StateFail},
+		{"no anchor, store path unresolvable", notInstalled, func() (string, error) { return "", errors.New("no HOME") }, StateFail},
+		{"no anchor, store seam absent", notInstalled, nil, StateFail},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := Deps{
+				TrustedStore:   func() (bless.Store, error) { return bless.Store{}, c.err },
+				TrustStorePath: c.storePath,
+			}
+			check := checkTrustStore(d)
+			if check.State != c.want {
+				t.Errorf("state = %q, want %q (detail %q)", check.State, c.want, check.Detail)
+			}
+			if check.Hint == "" {
+				t.Error("check has no hint")
 			}
 		})
 	}
@@ -571,5 +634,167 @@ func writeLiveRegistry(t *testing.T, p resume.Paths, pid int) {
 	path := filepath.Join(p.ClaudeHome, "sessions", fmt.Sprintf("%d.json", pid))
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write registry: %v", err)
+	}
+}
+
+// TestDetailsNeverRenderToolOrDiskText is the #716 sweep: every Detail built
+// from a subprocess, a server or a file on disk is a fixed categorical string
+// (plus, for the two version lines, a version-shaped token parsed out of the
+// output), never the raw text. MARKER stands for anything the tool, the tap's
+// server or a planted file could choose.
+func TestDetailsNeverRenderToolOrDiskText(t *testing.T) {
+	const marker = "MARKER\x1b[2J"
+	failing := func(name string) *exec.FakeRunner {
+		return &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) {
+			return "", &exec.CommandError{Name: name, Args: []string{"https://tok@evil.test/" + marker}, Stderr: marker, Err: errors.New("exit status 1")}
+		}}
+	}
+	printing := func(out string) *exec.FakeRunner {
+		return &exec.FakeRunner{RunFunc: func(_ string, _ []string) (string, error) { return out, nil }}
+	}
+	orig := meta.Version
+	t.Cleanup(func() { meta.Version = orig })
+	meta.Version = "1.0.0"
+
+	cases := []struct {
+		name  string
+		check func() Check
+		want  string
+	}{
+		{"sops unrunnable", func() Check {
+			return checkSops(context.Background(), Deps{LookPath: fakeLookPath("sops"), Runner: failing("sops")})
+		}, "sops --version failed"},
+		{"sops version line with trailing tool text", func() Check {
+			return checkSops(context.Background(), Deps{LookPath: fakeLookPath("sops"), Runner: printing("sops 3.13.3 (latest) " + marker)})
+		}, "sops 3.13.3"},
+		{"sops output with no version", func() Check {
+			return checkSops(context.Background(), Deps{LookPath: fakeLookPath("sops"), Runner: printing(marker)})
+		}, "sops present; version not recognized"},
+		{"brew outdated failed", func() Check {
+			return checkForgectlVersion(context.Background(), Deps{LookPath: fakeLookPath("brew"), Runner: failing("brew")})
+		}, "brew outdated failed"},
+		{"brew outdated verbose line", func() Check {
+			return checkForgectlVersion(context.Background(), Deps{LookPath: fakeLookPath("brew"), Runner: printing("cameronsjo/tap/forgectl (0.9.0) != 0.10.0 " + marker)})
+		}, "forgectl 0.9.0 installed, 0.10.0 available"},
+		{"brew outdated terse line", func() Check {
+			return checkForgectlVersion(context.Background(), Deps{LookPath: fakeLookPath("brew"), Runner: printing("forgectl" + marker)})
+		}, "a newer forgectl is available"},
+		{"trust store fails to verify", func() Check {
+			err := fmt.Errorf("%w: trust store signed by %s, not the anchor", bless.ErrTrustStoreInvalid, marker)
+			return checkTrustStore(Deps{TrustedStore: func() (bless.Store, error) { return bless.Store{}, err }})
+		}, "trust store failed to verify under the anchor"},
+		{"trust anchor unsafe", func() Check {
+			err := fmt.Errorf("%w: parse anchor /etc/%s: bad", bless.ErrNoAnchor, marker)
+			return checkTrustStore(Deps{TrustedStore: func() (bless.Store, error) { return bless.Store{}, err }})
+		}, "trust anchor is missing or not root-owned"},
+		{"trust store unreadable", func() Check {
+			err := errors.New("read " + marker)
+			return checkTrustStore(Deps{TrustedStore: func() (bless.Store, error) { return bless.Store{}, err }})
+		}, "trust store could not be read or verified"},
+		{"trust store missing", func() Check {
+			err := fmt.Errorf("%w: /home/%s/trust.toml", bless.ErrTrustStoreMissing, marker)
+			return checkTrustStore(Deps{TrustedStore: func() (bless.Store, error) { return bless.Store{}, err }})
+		}, "trust store not found"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := c.check()
+			if got.Detail != c.want {
+				t.Errorf("detail = %q, want %q", got.Detail, c.want)
+			}
+			if strings.Contains(got.Detail+got.Hint, "MARKER") || strings.Contains(got.Detail+got.Hint, "tok@") {
+				t.Errorf("check renders tool or disk text: %+v", got)
+			}
+		})
+	}
+}
+
+// TestCheckClaude_DetailOmitsConfiguredPath: the resolution error renders the
+// configured path and a wrapped filesystem error; the Detail says only that
+// claude is not usable (#716).
+func TestCheckClaude_DetailOmitsConfiguredPath(t *testing.T) {
+	redirectConfigDir(t)
+	t.Setenv("FORGECTL_CLAUDE_BIN", "")
+	d := Deps{Cfg: config.Config{Launch: config.LaunchConfig{Defaults: config.LaunchDefaults{BinaryPath: t.TempDir() + "/MARKER-claude"}}}}
+	check := checkClaude(d)
+	if check.State != StateFail {
+		t.Fatalf("state = %q, want fail", check.State)
+	}
+	if check.Detail != "claude binary not found or not usable" {
+		t.Errorf("detail = %q, want the categorical message", check.Detail)
+	}
+}
+
+// TestCheckResumeTasks_DirNameIsBounded: the drifted task directory name is
+// disk text; it is quoted and capped, never rendered whole (#716).
+func TestCheckResumeTasks_DirNameIsBounded(t *testing.T) {
+	home := t.TempDir()
+	long := "team-" + strings.Repeat("x", 200)
+	if err := os.MkdirAll(filepath.Join(home, "tasks", long), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	d := Deps{ResumePaths: func() (resume.Paths, error) {
+		return resume.Paths{ClaudeHome: home, StoreDir: filepath.Join(home, "store")}, nil
+	}}
+	check := checkResumeTasks(d)
+	if check.State != StateWarn {
+		t.Fatalf("state = %q (detail %q), want warn for a drifted dialect", check.State, check.Detail)
+	}
+	if strings.Contains(check.Detail, strings.Repeat("x", 81)) {
+		t.Errorf("detail renders the whole %d-rune directory name: %q", len(long), check.Detail)
+	}
+	if !strings.Contains(check.Detail, "…") {
+		t.Errorf("detail = %q, want the capped name's ellipsis", check.Detail)
+	}
+}
+
+// TestCheckGitleaks pins the gitleaks row's states, which share
+// gitleaks.Resolve with `audit secrets`: absent and relative-PATH are
+// skipped (gitleaks is optional), too old and inside the projects root warn,
+// and a usable one is OK with its version.
+//
+// Mutations that turn it red: report absent as warn; report too old as OK;
+// drop the ProjectsRoot wiring (the under-root row then reads OK).
+func TestCheckGitleaks(t *testing.T) {
+	root := t.TempDir()
+	inside := filepath.Join(root, "bin", "gitleaks")
+	outside := filepath.Join(t.TempDir(), "gitleaks")
+	for _, p := range []string{inside, outside} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at := func(p string, err error) func(string) (string, error) {
+		return func(string) (string, error) { return p, err }
+	}
+	version := func(v string) *exec.FakeRunner {
+		return &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return v, nil }}
+	}
+	cases := []struct {
+		name   string
+		look   func(string) (string, error)
+		run    *exec.FakeRunner
+		state  State
+		detail string
+	}{
+		{"absent", at("", errors.New("not found")), version(""), StateSkip, "not found on PATH"},
+		{"relative", at("", osexec.ErrDot), version(""), StateSkip, "relative PATH entry"},
+		{"under root", at(inside, nil), version("8.30.1"), StateWarn, "inside the projects root"},
+		{"too old", at(outside, nil), version("8.18.4"), StateWarn, "gitleaks 8.18.4 is older than 8.19.0"},
+		{"unreadable version", at(outside, nil), version("dev"), StateWarn, "no recognizable version"},
+		{"ok", at(outside, nil), version("8.30.1"), StateOK, "gitleaks 8.30.1"},
+	}
+	for _, c := range cases {
+		d := Deps{LookPath: c.look, Runner: c.run, ProjectsRoot: func() (string, error) { return root, nil }}
+		check := checkGitleaks(context.Background(), d)
+		if check.Name != "gitleaks" || check.State != c.state || !strings.Contains(check.Detail, c.detail) {
+			t.Errorf("%s: %+v, want state %s with detail containing %q", c.name, check, c.state, c.detail)
+		}
+		if check.State == StateWarn && check.Hint == "" {
+			t.Errorf("%s: a warn row must carry a hint: %+v", c.name, check)
+		}
 	}
 }

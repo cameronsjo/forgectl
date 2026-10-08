@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
 // argvOf renders a FakeRunner Call's name+args as a single string for
@@ -243,5 +244,131 @@ func assertArgv(t *testing.T, got, want []string) {
 		if got[i] != want[i] {
 			t.Fatalf("argv = %v, want %v", got, want)
 		}
+	}
+}
+
+// SequenceError.Command renders the failed argv through redact.Args (#782).
+// Every argv here is built by this package today; this pins the path a
+// future user-supplied argument would take into the error text.
+//
+// Mutation that turns it red: build Command from a raw strings.Join(argv, " ").
+func TestRunSequence_CommandRedactsArgv(t *testing.T) {
+	const secret = "SEKRIT-update-782" //nolint:gosec // G101: a fake credential the test plants
+	fr := &exec.FakeRunner{RunFunc: func(string, []string) (string, error) { return "", errors.New("boom") }}
+	_, err := runSequence(context.Background(), fr, nil, []string{"tool", "--token", secret})
+	var seqErr *SequenceError
+	if !errors.As(err, &seqErr) {
+		t.Fatalf("err = %v, want a *SequenceError", err)
+	}
+	if strings.Contains(seqErr.Command, secret) || strings.Contains(err.Error(), secret) {
+		t.Errorf("Command %q / Error %q carries the credential", seqErr.Command, err)
+	}
+	if !strings.HasPrefix(seqErr.Command, "tool --token ") {
+		t.Errorf("Command = %q, want the command and flag name kept", seqErr.Command)
+	}
+}
+
+// #941: runSequence put the failing command's stdout (CommandError.Output)
+// into the step's output raw, and every renderer of Result.Output shows it.
+// A line holding a credential shape now reads as redact.Marker, and a line
+// without one survives.
+//
+// Mutation that turns it red: append cmdErr.Output unredacted in runSequence.
+func TestRunSequence_FailedOutputIsRedacted(t *testing.T) {
+	const secret = "SEKRIT-update-941" //nolint:gosec // G101: a fake credential the test plants
+	fr := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "", &exec.CommandError{Name: name, Args: args, ExitCode: 1, Output: "kept line\nhttps://u:" + secret + "@example.test/x"}
+	}}
+	out, err := runSequence(context.Background(), fr, nil, []string{"tool", "run"})
+	if err == nil {
+		t.Fatal("runSequence succeeded; want the planted failure")
+	}
+	if strings.Contains(out, secret) || !strings.Contains(out, "kept line") || !strings.Contains(out, redact.Marker) {
+		t.Errorf("output = %q; want the credential line withheld as %s and the other kept", out, redact.Marker)
+	}
+}
+
+// stdoutShapes952 are credential shapes planted in a step's stdout, each
+// carrying "SEKRIT" (#952), and stdoutKept952 is real npm outdated -g and brew
+// outdated output that must survive beside them.
+var (
+	stdoutShapes952 = []string{
+		"remote: https://x-access-token:SEKRITA@github.com/o/r",
+		"Authorization: Bearer SEKRITB12345",
+		"token ghp_SEKRITC" + strings.Repeat("a", 29),
+		"NPM_TOKEN=SEKRITD",
+		"-----BEGIN PRIVATE KEY-----\nMIIESEKRITE\n-----END PRIVATE KEY-----",
+		"sk-ant-api03-SEKRITF" + strings.Repeat("b", 20),
+		// #974: a JSON credential key, a header Text already caught, a JWT.
+		`  "token": "SEKRITG",`,
+		"X-Auth-Token: SEKRITH",
+		"eyJhbGciOiJIUzI1NiJ9.eyJTRUtSSVRJIjoxfQ.SEKRITI",
+	}
+	stdoutKept952 = []string{
+		"@anthropic-ai/claude-code   2.1.42  2.1.286  2.1.286  node_modules/@anthropic-ai/claude-code  global",
+		"python@3.12 (3.12.1) < 3.12.2",
+	}
+)
+
+// TestRun_EveryStepRedactsItsStdout plants every credential shape in the
+// stdout of every command each DefaultSteps step runs, in both phases, and
+// on the failure paths whose stdout still reaches Result.Output (a failed
+// brew sequence, npm outdated's exit 1). Result.Output is stored through
+// redact.Stdout (#952), so no shape survives, and the npm @scope row and brew
+// python@3.12 row, which redact.Text would withhold, do.
+//
+// Mutation that turns it red: drop the redact.Stdout call from runPhase
+// (every step's rows show SEKRIT); run Text there instead (the kept rows
+// read [redacted]).
+func TestRun_EveryStepRedactsItsStdout(t *testing.T) {
+	planted := strings.Join(stdoutKept952, "\n") + "\n" + strings.Join(stdoutShapes952, "\n") + "\n"
+	for _, fail := range []bool{false, true} {
+		for _, checkOnly := range []bool{true, false} {
+			fr := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				if !fail {
+					return planted, nil
+				}
+				return "", &exec.CommandError{Name: name, Args: args, ExitCode: 1, Output: planted, Err: errors.New("exit status 1")}
+			}}
+			report := New(fr).Run(context.Background(), Options{CheckOnly: checkOnly, Yes: true})
+			if len(report.Results) != len(DefaultSteps()) {
+				t.Fatalf("ran %d steps, want the whole roster of %d", len(report.Results), len(DefaultSteps()))
+			}
+			for _, res := range report.Results {
+				if strings.Contains(res.Output, "SEKRIT") {
+					t.Errorf("fail=%t check=%t step %s: Output = %q, carries a planted credential", fail, checkOnly, res.Name, res.Output)
+				}
+				if res.Output == "" {
+					// A failed single command keeps its stdout only in the
+					// CommandError, which the CLI renders through redact.Text.
+					continue
+				}
+				if !fail || res.Name == StepNpm {
+					for _, kept := range stdoutKept952 {
+						if !strings.Contains(res.Output, kept) {
+							t.Errorf("fail=%t check=%t step %s: Output = %q, lost the kept row %q", fail, checkOnly, res.Name, res.Output, kept)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestNpmStep_CheckRedactsTheFinding: npm outdated's exit-1 finding is
+// wrapped in redact.Stdout where Check returns it (#952), not only by
+// runPhase, so a caller of the Step itself never holds it raw.
+//
+// Mutation that turns it red: return cmdErr.Output unwrapped.
+func TestNpmStep_CheckRedactsTheFinding(t *testing.T) {
+	fr := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "", &exec.CommandError{Name: name, Args: args, ExitCode: 1, Output: stdoutKept952[0] + "\n" + stdoutShapes952[0], Err: errors.New("exit status 1")}
+	}}
+	out, err := npmStep().Check(context.Background(), fr)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if want := stdoutKept952[0] + "\n" + redact.Marker; out != want {
+		t.Errorf("Check output = %q, want %q", out, want)
 	}
 }

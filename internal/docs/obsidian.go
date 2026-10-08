@@ -3,7 +3,9 @@ package docs
 import (
 	"bytes"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"unicode"
 	"unicode/utf8"
 
@@ -52,6 +54,9 @@ func (obsidianFlavor) Extend(m goldmark.Markdown) {
 			util.Prioritized(tagParser{}, 500),
 		),
 		parser.WithASTTransformers(
+			// First, so every later transformer and the renderer see the
+			// text runs a docs root would have (see textRejoinTransformer).
+			util.Prioritized(textRejoinTransformer{}, 400),
 			util.Prioritized(commentTransformer{}, 500),
 			// After commentTransformer, so a comment-only paragraph is
 			// already gone and a marker inside a comment is never a Text
@@ -289,6 +294,11 @@ func onlyComments(p ast.Node, source []byte) bool {
 	return found
 }
 
+// visibleSourceVisits counts the nodes visibleSource has walked, process-wide.
+// It exists so a test can bound the scan's work by count rather than by wall
+// clock; nothing reads it in production.
+var visibleSourceVisits atomic.Int64
+
 // visibleSource returns the bytes of seg with the source range of every
 // comment under n cut out. It is how a heading's id and a vault note's title
 // leave comment text behind, with everything else exactly as written.
@@ -296,6 +306,7 @@ func visibleSource(n ast.Node, seg text.Segment, source []byte) []byte {
 	var cuts [][2]int
 	_ = ast.Walk(n, func(c ast.Node, entering bool) (ast.WalkStatus, error) {
 		if entering {
+			visibleSourceVisits.Add(1)
 			if cs, ok := c.(*commentSpanNode); ok {
 				cuts = append(cuts, [2]int{cs.Start, cs.Stop})
 				return ast.WalkSkipChildren, nil
@@ -443,6 +454,45 @@ func (commentBlockParser) Close(ast.Node, text.Reader, parser.Context) {}
 func (commentBlockParser) CanInterruptParagraph() bool { return false }
 
 func (commentBlockParser) CanAcceptIndentedLine() bool { return false }
+
+// ── text rejoin ────────────────────────────────────────────────────────────
+
+// textRejoinTransformer merges each pair of sibling Text nodes that are
+// adjacent in the source back into one node.
+//
+// goldmark flushes the text before every trigger byte into its own node, and
+// the vault flavour adds '#' as a trigger (tagParser). Mid-line, the next
+// flush merges that node back (ast.MergeOrAppendTextSegment), but the text
+// that ends a line is appended unmerged. So in "x&#62;" at the end of a line
+// the tag parser's '#' split the character reference into "x&" and "#62;",
+// the renderer resolves references per node, and neither half is one: the
+// page showed "x&amp;#62;" where a docs root, with no '#' trigger, showed
+// "x&gt;" (forgectl#665). Callout titles, read from the rendered paragraph,
+// inherited it.
+//
+// ast.Text.Merge refuses anything but a source-contiguous pair of the same
+// rawness, and a node that ends its line is never merged into the next, so
+// the rejoin only undoes splits that no markdown construct made.
+type textRejoinTransformer struct{}
+
+func (textRejoinTransformer) Transform(doc *ast.Document, reader text.Reader, _ parser.Context) {
+	source := reader.Source()
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		for c := n.FirstChild(); c != nil; {
+			t, ok := c.(*ast.Text)
+			next := c.NextSibling()
+			if ok && next != nil && !t.SoftLineBreak() && !t.HardLineBreak() && t.Merge(next, source) {
+				n.RemoveChild(n, next)
+				continue // t may merge with its new next sibling too
+			}
+			c = next
+		}
+		return ast.WalkContinue, nil
+	})
+}
 
 // ── ^block-id ──────────────────────────────────────────────────────────────
 
@@ -713,6 +763,16 @@ const (
 	titleUnresolved   = "Broken link (unresolved)"
 )
 
+// titleAttachment is the title a wikilink to an attachment carries
+// (MissAttachment). The file exists, but no route serves it yet
+// (forgectl#709), so it renders as marked text, never as a link. Fixed and
+// colon-free for the same reasons as the miss titles above.
+const titleAttachment = "Attachment, not viewable in the reader yet"
+
+// attachmentSpanOpen opens the span a wikilink to an attachment renders in.
+// Every byte of it is fixed.
+const attachmentSpanOpen = `<span class="wikilink wikilink-attachment" title="` + titleAttachment + `">`
+
 // missTitle is the title for a wikilink that missed. docResolved is whether
 // the note itself resolved, in which case only its heading or block id did
 // not.
@@ -737,17 +797,23 @@ func isDocHref(href string) bool {
 
 // resolvedWikilinkNode is a wikilink after resolution. Href is set only from
 // the resolver and only when it is a reader page path; Title is set only for
-// a miss, from missTitle. The children are the wikilink's label.
+// a miss, from missTitle. Attachment is set only for a MissAttachment
+// verdict with no href. The children are the wikilink's label.
 type resolvedWikilinkNode struct {
 	ast.BaseInline
-	Href  string
-	Title string
+	Href       string
+	Title      string
+	Attachment bool
 }
 
 func (n *resolvedWikilinkNode) Kind() ast.NodeKind { return kindWikilink }
 
 func (n *resolvedWikilinkNode) Dump(source []byte, level int) {
-	ast.DumpHelper(n, source, level, map[string]string{"Href": n.Href, "Title": n.Title}, nil)
+	ast.DumpHelper(n, source, level, map[string]string{
+		"Href":       n.Href,
+		"Title":      n.Title,
+		"Attachment": strconv.FormatBool(n.Attachment),
+	}, nil)
 }
 
 // wikilinkTransformer resolves each wikilink on the page through the
@@ -805,7 +871,10 @@ func (wikilinkTransformer) Transform(doc *ast.Document, reader text.Reader, pc p
 		if isDocHref(href) {
 			node.Href = href
 		}
-		if miss != MissNone || node.Href == "" {
+		switch {
+		case miss == MissAttachment && node.Href == "":
+			node.Attachment = true
+		case miss != MissNone || node.Href == "":
 			node.Title = missTitle(miss, node.Href != "")
 		}
 		for c := wl.FirstChild(); c != nil; {
@@ -915,21 +984,16 @@ func wikilinkSourceRange(n ast.Node, source []byte) (start, stop int, ok bool) {
 
 // hasLinkAncestor reports whether n sits inside a markdown link or image.
 func hasLinkAncestor(n ast.Node) bool {
-	for p := n.Parent(); p != nil; p = p.Parent() {
-		if k := p.Kind(); k == ast.KindLink || k == ast.KindImage {
-			return true
-		}
-	}
-	return false
+	return hasAncestorOfKind(n, ast.KindLink, ast.KindImage)
 }
 
 // renderResolvedWikilink renders a wikilink wikilinkTransformer resolved. An
 // href, which only ever comes from an indexed doc, makes an anchor: a plain
 // one for a hit, a marked one for a doc whose heading or block id is missing.
-// Anything else is a miss span with no href. The href is checked for the
-// /doc/ prefix again here, so an href that did not come from docHref can
-// never reach the page. The label renders as the node's children, which
-// goldmark escapes as text.
+// An attachment is an attachment span with no href. Anything else is a miss
+// span with no href. The href is checked for the /doc/ prefix again here, so
+// an href that did not come from docHref can never reach the page. The label
+// renders as the node's children, which goldmark escapes as text.
 func renderResolvedWikilink(w util.BufWriter, _ []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
 	rw, ok := n.(*resolvedWikilinkNode)
 	if !ok {
@@ -945,6 +1009,10 @@ func renderResolvedWikilink(w util.BufWriter, _ []byte, n ast.Node, entering boo
 		return ast.WalkContinue, nil
 	}
 	if !anchor {
+		if rw.Attachment {
+			_, _ = w.WriteString(attachmentSpanOpen)
+			return ast.WalkContinue, nil
+		}
 		title := rw.Title
 		if title == "" {
 			title = titleNoTarget

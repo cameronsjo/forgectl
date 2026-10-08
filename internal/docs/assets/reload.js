@@ -31,8 +31,23 @@
 
   var STORAGE_KEY = "forgectl-docs-scroll";
 
+  // Chrome is found by data-fc, never by class or tag (forgectl#643). A doc
+  // keeps some of these tags (a raw <aside> survives the sanitizer), and a
+  // planted copy that comes first in document order would be the one a tag
+  // lookup returns. Its chrome class names are stripped since forgectl#700
+  // (chromeclass.go), but every other class survives, so a class lookup is
+  // no safer. A data-fc cannot be planted: the sanitizer strips every data-*
+  // attribute from the doc, and mermaid-init.js scrubs data-fc from rendered
+  // diagrams, whose own sanitizer keeps data-*.
+  var MAIN = '[data-fc="doc-main"]';
+  var SIDENAV = '[data-fc="sidenav"]';
+  var DOC_BODY = '[data-fc="doc-body"]';
+  var OUTLINE = '[data-fc="outline"]';
+  var OUTLINE_INLINE = '[data-fc="outline-inline"]';
+  var STATUSBAR = '[data-fc="statusbar"]';
+
   function scroller() {
-    return document.querySelector("main");
+    return document.querySelector(MAIN);
   }
 
   // The last heading at or above the top of the doc pane, and how far past it
@@ -55,8 +70,10 @@
   function applyAnchor(anchor) {
     var main = scroller();
     if (!main || !anchor) { return; }
-    var target = document.getElementById(anchor.id);
-    if (!target || !main.contains(target)) { return; }
+    // Looked up inside <main>: a heading can slug to a chrome id, and
+    // document.getElementById would return the chrome element first.
+    var target = main.querySelector("#" + CSS.escape(anchor.id));
+    if (!target) { return; }
     var offset = target.getBoundingClientRect().top - main.getBoundingClientRect().top;
     main.scrollTop += offset + (anchor.delta || 0);
   }
@@ -100,34 +117,69 @@
     });
   }
 
+  // hook returns the named function of a global set by mermaid-init.js or
+  // math-init.js, or null. A doc element with that id is the global when the
+  // init script never ran (forgectl#759), so only a function is called.
+  function hook(global, name) {
+    var obj = window[global];
+    var fn = obj ? obj[name] : null;
+    return typeof fn === "function" ? fn.bind(obj) : null;
+  }
+
   // The swap replaces the nodes that hold keyboard focus, which would drop it
   // to <body>. Remember the focused control by something the fresh page
   // shares (an href, an id, a folder's label) and put focus back on it.
+  //
+  // The key also records the data-fc region the control sat in, and the
+  // match is looked up only inside that region of the fresh page. A doc can
+  // carry any id, href or class, so a page-wide lookup could move focus from
+  // a doc link onto a sidenav link that shares its href and class, or onto
+  // whichever element comes first with a colliding id (forgectl#643).
   function focusKey() {
     var el = document.activeElement;
     if (!el || el === document.body) { return null; }
-    if (el.id) { return { id: el.id }; }
+    // Focus inside a diagram is mermaid-init.js's to key and restore: the
+    // diagram is re-rendered after the swap (forgectl#718).
+    var diagramKey = hook("ForgectlMermaid", "focusKey");
+    var diagram = diagramKey ? diagramKey(el) : null;
+    if (diagram) { return diagram; }
+    var region = el.closest("[data-fc]");
+    var key = { region: region ? region.getAttribute("data-fc") : null };
+    if (el.id) { key.id = el.id; return key; }
     var href = el.getAttribute && el.getAttribute("href");
-    if (href) { return { href: href, cls: el.className }; }
+    if (href) { key.href = href; key.cls = el.className; return key; }
     if (el.tagName === "SUMMARY") {
       var label = el.querySelector(".label");
-      if (label) { return { summary: label.textContent }; }
+      if (label) { key.summary = label.textContent; return key; }
     }
     return null;
   }
 
+  // Every element matching sel in root's subtree, root itself first when it
+  // matches (a focused control can be its own region, like the filter box).
+  function within(root, sel) {
+    var found = Array.prototype.slice.call(root.querySelectorAll(sel));
+    if (root.matches(sel)) { found.unshift(root); }
+    return found;
+  }
+
   function restoreFocus(key) {
-    if (!key) { return; }
+    if (!key || key.diagram !== undefined) { return; }
+    // Outside every region (only the skip link) the page is the region.
+    var root = key.region === null
+      ? document.documentElement
+      : document.querySelector('[data-fc="' + CSS.escape(key.region) + '"]');
+    if (!root) { return; }
     var el = null;
     if (key.id) {
-      el = document.getElementById(key.id);
+      el = within(root, "#" + CSS.escape(key.id))[0] || null;
     } else if (key.href) {
-      Array.prototype.some.call(document.querySelectorAll("a[href]"), function (a) {
+      within(root, "a[href]").some(function (a) {
         if (a.getAttribute("href") === key.href && a.className === key.cls) { el = a; return true; }
         return false;
       });
     } else if (key.summary) {
-      Array.prototype.some.call(document.querySelectorAll("summary"), function (s) {
+      within(root, "summary").some(function (s) {
         var label = s.querySelector(".label");
         if (label && label.textContent === key.summary) { el = s; return true; }
         return false;
@@ -145,17 +197,17 @@
   // swap moves the fresh page's changing regions into the live one. Returns
   // false when the page changed shape and only a full reload renders it right.
   function swap(fresh) {
-    var hadOutline = !!document.querySelector("aside.outline");
-    if (hadOutline !== !!fresh.querySelector("aside.outline")) { return false; }
-    if (!fresh.querySelector("main") || !fresh.querySelector("nav.sidenav")) { return false; }
+    var hadOutline = !!document.querySelector(OUTLINE);
+    if (hadOutline !== !!fresh.querySelector(OUTLINE)) { return false; }
+    if (!fresh.querySelector(MAIN) || !fresh.querySelector(SIDENAV)) { return false; }
 
     var main = scroller();
-    var nav = document.querySelector("nav.sidenav");
+    var nav = document.querySelector(SIDENAV);
     var anchor = captureAnchor();
     var navScroll = nav ? nav.scrollTop : 0;
     var navOpen = openDetails(nav);
-    var bodyOpen = openDetails(document.querySelector(".doc-body"));
-    var inlineOutline = document.querySelector("details.outline-inline");
+    var bodyOpen = openDetails(document.querySelector(DOC_BODY));
+    var inlineOutline = document.querySelector(OUTLINE_INLINE);
     var inlineOpen = inlineOutline ? inlineOutline.open : false;
     var focus = focusKey();
 
@@ -163,26 +215,32 @@
     // <main> itself stays: it is the scroll container, and svg-panzoom.js
     // observes it. Only its contents change.
     main.replaceChildren.apply(main, Array.prototype.map.call(
-      fresh.querySelector("main").childNodes, function (n) { return document.importNode(n, true); }));
-    replace("nav.sidenav", fresh);
-    replace("aside.outline", fresh);
-    replace("footer.statusbar", fresh);
+      fresh.querySelector(MAIN).childNodes, function (n) { return document.importNode(n, true); }));
+    replace(SIDENAV, fresh);
+    replace(OUTLINE, fresh);
+    replace(STATUSBAR, fresh);
 
-    nav = document.querySelector("nav.sidenav");
+    nav = document.querySelector(SIDENAV);
     restoreDetails(nav, navOpen, true);
     if (nav) { nav.scrollTop = navScroll; }
-    restoreDetails(document.querySelector(".doc-body"), bodyOpen, false);
-    inlineOutline = document.querySelector("details.outline-inline");
+    restoreDetails(document.querySelector(DOC_BODY), bodyOpen, false);
+    inlineOutline = document.querySelector(OUTLINE_INLINE);
     if (inlineOutline) { inlineOutline.open = inlineOpen; }
 
     var filter = document.querySelector('[data-fc="doc-filter"]');
     if (filter && filter.value.trim() !== "") {
       filter.dispatchEvent(new Event("input"));
     }
-    if (window.ForgectlMermaid) { window.ForgectlMermaid.refresh(); }
-    if (window.ForgectlMath) { window.ForgectlMath.refresh(); }
+    var mermaidRefresh = hook("ForgectlMermaid", "refresh");
+    var rendered = mermaidRefresh ? mermaidRefresh() : null;
+    var mathRefresh = hook("ForgectlMath", "refresh");
+    if (mathRefresh) { mathRefresh(); }
     applyAnchor(anchor);
     restoreFocus(focus);
+    var diagramRestore = hook("ForgectlMermaid", "restoreFocus");
+    if (focus && focus.diagram !== undefined && diagramRestore) {
+      Promise.resolve(rendered).then(function () { diagramRestore(focus); });
+    }
     return true;
   }
 
@@ -222,7 +280,7 @@
   // the swap that restores the doc replaces it.
   function showMissing() {
     if (document.querySelector('[data-fc="doc-missing"]')) { return; }
-    var body = document.querySelector(".doc-body");
+    var body = document.querySelector(DOC_BODY);
     if (!body) { return; }
     var banner = document.createElement("div");
     banner.setAttribute("data-fc", "doc-missing");

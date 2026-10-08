@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,12 +15,21 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/pr"
 	"github.com/cameronsjo/forgectl/internal/review"
-	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
 // runReviewList is the bare `forgectl review` body: aggregate, filter, render.
-func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string, asJSON bool, kind, repo string, th theme.Theme) error {
+func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string, asJSON bool, kind, repo string, bound *listBound, th theme.Theme) error {
+	if err := bound.resolve(cmd); err != nil {
+		return usageFailure(cmd, err, asJSON)
+	}
+	fields, err := bound.fieldList(reviewJSONKeys)
+	if err != nil {
+		return usageFailure(cmd, err, asJSON)
+	}
+	if fields != nil && !asJSON {
+		return errors.New("--fields shapes the JSON rows; add --json")
+	}
 	switch kind {
 	case "", string(review.KindIssue), string(review.KindPR):
 	default:
@@ -41,15 +51,34 @@ func runReviewList(cmd *cobra.Command, srcs []review.Source, reviewedPath string
 	// pattern), but for THIS view that silently renders every item as
 	// unreviewed — say so instead of misreporting.
 	if reviewedPath == "" {
-		fmt.Fprintln(cmd.ErrOrStderr(), "note: reviewed-store path unavailable; reviewed state not shown")
+		const noStore = "reviewed-store path unavailable; reviewed state not shown"
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "note: "+noStore)
+		notes = append(notes, noStore)
 	}
 	store := pr.LoadReviewed(reviewedPath)
 	if asJSON {
-		return emitReviewJSON(cmd.OutOrStdout(), items, store)
+		w := window(len(items), bound.limit)
+		if !bound.set {
+			w = window(len(items), 0)
+		}
+		return emitReviewJSON(cmd.OutOrStdout(), items[:w.Shown], store, bound, w, fields, notes)
 	}
+	w := window(len(items), bound.tableCap())
 	out := th.Writer(cmd.OutOrStdout(), os.Environ())
-	return renderReviewTable(out, cmd.ErrOrStderr(), items, store, th.Styles().Muted)
+	if err := renderReviewTable(out, cmd.ErrOrStderr(), items[:w.Shown], store, th.Styles().Muted); err != nil {
+		return err
+	}
+	if w.Truncated {
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "note: "+w.narrowHint(reviewNarrowFlags))
+	}
+	return nil
 }
+
+// reviewNarrowFlags names the filters a truncation hint points at.
+const reviewNarrowFlags = "--kind, --repo"
+
+// reviewJSONKeys are the row fields --fields accepts, in wire order.
+var reviewJSONKeys = []string{"key", "kind", "repo", "number", "title", "state", "isDraft", "labels", "updatedAt", "url", "reviewed"}
 
 // filterItems applies the --kind/--repo filters. An empty filter passes all.
 func filterItems(items []review.Item, kind, repo string) []review.Item {
@@ -88,7 +117,7 @@ type reviewRowJSON struct {
 // emitReviewJSON writes the rows as an indented JSON array to out. An empty
 // result emits [] (never null), and each row's labels field is [] never null —
 // matching the projects/prs --json contract.
-func emitReviewJSON(out io.Writer, items []review.Item, store *pr.ReviewedStore) error {
+func emitReviewJSON(out io.Writer, items []review.Item, store *pr.ReviewedStore, bound *listBound, w listWindow, fields, notes []string) error {
 	rows := make([]reviewRowJSON, 0, len(items))
 	for _, it := range items {
 		labels := it.Labels
@@ -109,9 +138,14 @@ func emitReviewJSON(out io.Writer, items []review.Item, store *pr.ReviewedStore)
 			Reviewed:  store.IsReviewedKey(it.Key(), it.UpdatedAt),
 		})
 	}
-	enc := termsafe.JSONEncoder(out)
-	enc.SetIndent("", "  ")
-	return enc.Encode(rows)
+	if fields != nil {
+		projected, err := projectRows(rows, fields)
+		if err != nil {
+			return err
+		}
+		return emitListJSON(out, projected, bound, w, reviewNarrowFlags, notes)
+	}
+	return emitListJSON(out, rows, bound, w, reviewNarrowFlags, notes)
 }
 
 // renderReviewTable writes the KIND/REPO/#/TITLE/LABELS/STATE table to out and
@@ -127,9 +161,9 @@ func renderReviewTable(out, errOut io.Writer, items []review.Item, store *pr.Rev
 	for _, it := range items {
 		if _, err := fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n",
 			it.Kind, it.Slug(), it.Number,
-			safeTerm(it.Title),
-			safeTerm(strings.Join(it.Labels, ",")),
-			safeTerm(reviewStateLabel(it))); err != nil {
+			safeTitle(it.Title),
+			safeText(strings.Join(it.Labels, ",")),
+			safeLabel(reviewStateLabel(it))); err != nil {
 			return err
 		}
 	}

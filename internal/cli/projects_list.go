@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -24,6 +25,7 @@ import (
 func newProjectsListCmd(client *projects.Client) *cobra.Command {
 	var asJSON, strict bool
 	var host string
+	var bound listBound
 	cmd := &cobra.Command{
 		Use:   "list [query]",
 		Short: "List projects across local, GitHub, and Gitea (cloned + uncloned)",
@@ -40,6 +42,8 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 			"  forgectl projects list                         # human table, all hosts\n" +
 			"  forgectl projects list --json                  # machine-readable, for scripts\n" +
 			"  forgectl projects list --json --strict         # same, but exit 1 if any host degraded\n" +
+			"  forgectl projects list --json --limit 50       # first 50 rows plus total and truncated\n" +
+			"  forgectl projects list --json --fields host,owner,name   # only those row fields\n" +
 			"  forgectl projects list --host git.example.com  # only that host's repos\n" +
 			"  forgectl projects find homeclaw                # 'find' alias + a name filter",
 		Args: cobra.MaximumNArgs(1),
@@ -49,6 +53,16 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+			if err := bound.resolve(cmd); err != nil {
+				return usageFailure(cmd, err, asJSON)
+			}
+			fields, err := bound.fieldList(projectsJSONKeys)
+			if err != nil {
+				return usageFailure(cmd, err, asJSON)
+			}
+			if fields != nil && !asJSON {
+				return errors.New("--fields shapes the JSON rows; add --json")
+			}
 
 			// One stderr line names a non-default GitHub host, so a surprising
 			// inventory is never silently attributable to the wrong forge. The
@@ -56,7 +70,7 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 			// the render anyway. Stderr only — a --json pipe stays clean.
 			if gh := client.GitHubHost(); gh != githubauth.DefaultHost {
 				// Best-effort diagnostic write, same as every stderr note here.
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "github host: %s\n", termsafe.SafeLine(gh))
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "github host: %s\n", safeTitle(gh))
 			}
 
 			repos, notes, err := client.Inventory(ctx)
@@ -89,7 +103,7 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 					// is the whole diagnostic; the suggestion list is derived
 					// from server-supplied hostnames, so it goes through termsafe.
 					return fmt.Errorf("unknown --host %s; this inventory has: %s",
-						termsafe.QuoteArgMax(host, termsafe.ArgEchoMaxRunes), termsafe.SafeLine(strings.Join(slices.Sorted(maps.Keys(known)), ", ")))
+						termsafe.QuoteArgMax(host, termsafe.ArgEchoMaxRunes), safeText(strings.Join(slices.Sorted(maps.Keys(known)), ", ")))
 				}
 			}
 
@@ -103,13 +117,30 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 				if repos == nil {
 					repos = []projects.Repo{}
 				}
-				enc := termsafe.JSONEncoder(cmd.OutOrStdout())
-				enc.SetIndent("", "  ")
-				if err := enc.Encode(repos); err != nil {
+				w := window(len(repos), 0)
+				if bound.set {
+					w = window(len(repos), bound.limit)
+				}
+				kept := repos[:w.Shown]
+				var rows any = kept
+				if fields != nil {
+					projected, err := projectRows(kept, fields)
+					if err != nil {
+						return err
+					}
+					rows = projected
+				}
+				if err := emitListJSON(cmd.OutOrStdout(), rows, &bound, w, projectsNarrowFlags, notes); err != nil {
 					return err
 				}
-			} else if err := renderRepoTable(cmd.OutOrStdout(), cmd.ErrOrStderr(), repos); err != nil {
-				return err
+			} else {
+				w := window(len(repos), bound.tableCap())
+				if err := renderRepoTable(cmd.OutOrStdout(), cmd.ErrOrStderr(), repos[:w.Shown]); err != nil {
+					return err
+				}
+				if w.Truncated {
+					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "note: "+w.narrowHint(projectsNarrowFlags))
+				}
 			}
 
 			// --strict turns a partial inventory into a non-zero exit, so a
@@ -121,16 +152,26 @@ func newProjectsListCmd(client *projects.Client) *cobra.Command {
 			// the default stays exit 0 on a partial result, matching `review`;
 			// ADR-0008 rule 3 argues for flipping both defaults together.
 			if strict && len(notes) > 0 {
-				return WithExitCode(fmt.Errorf("inventory is partial: %d degradation note(s) on stderr (--strict)", len(notes)), 1)
+				// Under --json the rows on stdout are the verdict and the
+				// notes already explain it (forgectl#862).
+				return jsonVerdict(WithExitCode(fmt.Errorf("inventory is partial: %d degradation note(s) on stderr (--strict)", len(notes)), 1), asJSON)
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"host","owner","name","sshUrl","mirror","private","cloned","localPath","status"}] to stdout (an empty list is []); with --limit, {"truncated","total","shown","limit","hint","notes","items"} instead`)
 	cmd.Flags().BoolVar(&strict, "strict", false, "exit 1 when any host produced a degradation note (output is still written)")
 	cmd.Flags().StringVar(&host, "host", "", "filter by hostname (e.g. github.com, git.example.com) or \"local\"")
+	bound.addFlags(cmd, projectsJSONKeys)
 	return cmd
 }
+
+// projectsNarrowFlags names what a truncation hint points at: the name query
+// and --host.
+const projectsNarrowFlags = "a name query, --host"
+
+// projectsJSONKeys are the row fields --fields accepts, in wire order.
+var projectsJSONKeys = []string{"host", "owner", "name", "sshUrl", "mirror", "private", "cloned", "localPath", "status"}
 
 // filterRepos narrows the inventory by host and/or a case-insensitive name
 // substring. Either filter empty means "don't filter on it".
@@ -210,7 +251,7 @@ func renderRepoTable(out, errOut io.Writer, repos []projects.Repo) error {
 		// hostname, gh's JSON, tea's TSV columns — and this writes them to a
 		// terminal. Host reaches here for EVERY row now that it is a hostname
 		// rather than one of two fixed tokens, but owner and name always did.
-		host := termsafe.SafeLine(r.Host)
+		host := safeTitle(r.Host)
 		if host == "" {
 			host = "local"
 		}
@@ -225,9 +266,9 @@ func renderRepoTable(out, errOut io.Writer, repos []projects.Repo) error {
 				}
 			}
 		}
-		name := termsafe.SafeLine(r.Name)
+		name := safeTitle(r.Name)
 		if r.Owner != "" {
-			name = termsafe.SafeLine(r.Owner) + "/" + name
+			name = safeTitle(r.Owner) + "/" + name
 		}
 		if r.Mirror {
 			name += " (mirror)"

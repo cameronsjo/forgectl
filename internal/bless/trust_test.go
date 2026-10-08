@@ -3,6 +3,7 @@ package bless
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -95,6 +96,27 @@ func TestCheckAnchorOwnership(t *testing.T) {
 		// checks, fails the uid-0 requirement.
 		if err := checkAnchorOwnership(p); err == nil {
 			t.Fatal("expected an error for an anchor not owned by root")
+		}
+	}) // #803: the anchor path is quoted where the error is built, not only by
+	// verify.go's termsafe.Error, so no caller can print it raw.
+	t.Run("the path is quoted", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "an\x1b]0;pwned\x07chor dir")
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		p := filepath.Join(dir, "anchor")
+		writeFile(t, p, []byte("x"))
+		if err := os.Chmod(p, 0o666); err != nil { //nolint:gosec // G302: the refusal under test needs a world-writable anchor
+			t.Fatalf("chmod: %v", err)
+		}
+		for _, target := range []string{dir, p} {
+			err := checkAnchorOwnership(target)
+			if err == nil {
+				t.Fatalf("checkAnchorOwnership(%q) = nil, want a refusal", target)
+			}
+			if strings.ContainsAny(err.Error(), "\x1b\x07") || !strings.Contains(err.Error(), `an\x1b]0;pwned\achor dir`) {
+				t.Errorf("err = %q, want the anchor path quoted and escaped", err)
+			}
 		}
 	})
 }

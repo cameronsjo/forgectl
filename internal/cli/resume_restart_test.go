@@ -1,0 +1,294 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/resume"
+)
+
+const (
+	restartSID       = "aaaa1111"
+	restartPane      = "w9Z:p1"
+	restartProcStart = "Wed Sep 30 01:41:04 2026"
+)
+
+// cliRestartEnv is a RestartEnv whose reads describe one ready session and
+// whose actions are counted.
+type cliRestartEnv struct {
+	pid         int
+	pane        string
+	ancestors   map[int]bool
+	relaunchErr error
+	stopped     bool
+	// status overrides the registry status ReadEntry reports; "" is idle.
+	status string
+	// herdrPanes is what herdr's pane list reports; nil names no session, so
+	// the environment's pane (pane) is used.
+	herdrPanes []resume.HerdrPane
+	// relaunchPane is the pane the last Relaunch typed into; panesChecked is
+	// every pane Pane was asked about.
+	relaunchPane string
+	panesChecked []string
+	// panesErr is what herdr's pane list fails with; gone lists pane ids
+	// herdr answers pane_not_found for.
+	panesErr                         error
+	gone                             map[string]bool
+	terminated, relaunched, prepared int
+}
+
+func (f *cliRestartEnv) ReadEntry(int) (resume.RegistryEntry, bool) {
+	if f.stopped {
+		return resume.RegistryEntry{}, false
+	}
+	status := f.status
+	if status == "" {
+		status = "idle"
+	}
+	return resume.RegistryEntry{Pid: f.pid, SessionID: restartSID, Status: status, ProcStart: restartProcStart}, true
+}
+func (f *cliRestartEnv) Alive(int) bool { return !f.stopped }
+func (f *cliRestartEnv) Identity(int) (resume.ProcIdentity, error) {
+	start, err := resume.ParseProcStart(restartProcStart)
+	return resume.ProcIdentity{ExecPath: "/u/.local/bin/claude", Start: start}, err
+}
+func (f *cliRestartEnv) Pane(_ context.Context, pane string) (resume.PaneState, error) {
+	f.panesChecked = append(f.panesChecked, pane)
+	if f.gone[pane] {
+		return resume.PaneState{}, fmt.Errorf("pane %s: %w", pane, resume.ErrPaneGone)
+	}
+	st := resume.PaneState{Agent: "claude", AgentSession: restartSID, ForegroundPGID: f.pid, ShellPID: 7, ForegroundPIDs: []int{f.pid}}
+	if f.stopped {
+		st.ForegroundPGID = st.ShellPID
+	}
+	return st, nil
+}
+func (f *cliRestartEnv) Screen(_ context.Context, pane string) (string, error) {
+	f.panesChecked = append(f.panesChecked, pane)
+	rule := strings.Repeat("─", 40)
+	return "out\n" + rule + "\n❯\n" + rule + "\nstatus", nil
+}
+func (f *cliRestartEnv) Prepare(string) error { f.prepared++; return nil }
+func (f *cliRestartEnv) ClearInput(_ context.Context, pane string) error {
+	f.panesChecked = append(f.panesChecked, pane)
+	return nil
+}
+func (f *cliRestartEnv) Terminate(int) error { f.terminated++; f.stopped = true; return nil }
+func (f *cliRestartEnv) Relaunch(_ context.Context, pane, _ string) error {
+	f.relaunched++
+	f.relaunchPane = pane
+	return f.relaunchErr
+}
+func (f *cliRestartEnv) LiveSession(string) (resume.RegistryEntry, bool) {
+	if f.relaunched == 0 || f.relaunchErr != nil {
+		return resume.RegistryEntry{}, false
+	}
+	return resume.RegistryEntry{Pid: 999, SessionID: restartSID, Version: "2.1.100", Live: true}, true
+}
+
+// restartFixture writes one idle outdated session (our own pid, so it is live)
+// and stubs every seam the verb reaches.
+func restartFixture(t *testing.T, env *cliRestartEnv) (storeDir string) {
+	t.Helper()
+	root := t.TempDir()
+	sessions := filepath.Join(root, ".claude", "sessions")
+	if err := os.MkdirAll(sessions, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	self := os.Getpid()
+	env.pid = self
+	if env.pane == "" {
+		env.pane = restartPane
+	}
+	body := `{"pid":` + itoaCLI(self) + `,"sessionId":"` + restartSID + `","cwd":"/w/a","version":"2.1.99","status":"idle","procStart":"` + restartProcStart + `"}`
+	if err := os.WriteFile(filepath.Join(sessions, itoaCLI(self)+".json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prevPaths, prevInstalled, prevOverride := resumePaths, installedVersionFn, restartOverride
+	storeDir = filepath.Join(root, "store")
+	resumePaths = func() (resume.Paths, error) {
+		return resume.Paths{ClaudeHome: filepath.Join(root, ".claude"), StoreDir: storeDir}, nil
+	}
+	installedVersionFn = func(context.Context, module.Deps) (string, error) { return "2.1.100", nil }
+	restartOverride = func(r *resume.RestartRequest) {
+		r.Env = func(string) (resume.RestartEnv, error) { return env, nil }
+		r.Binary = func() (string, error) { return "/x/forgectl", nil }
+		r.Lookup = func() resume.PaneLookup { return func(int) string { return env.pane } }
+		r.Panes = func(context.Context) ([]resume.HerdrPane, error) { return env.herdrPanes, env.panesErr }
+		r.Ancestors = func() map[int]bool { return env.ancestors }
+		// The fixture pid is this test process; the real signal handling
+		// would install process-wide handlers under `go test`.
+		r.HandleSignals = false
+	}
+	t.Cleanup(func() {
+		resumePaths, installedVersionFn, restartOverride = prevPaths, prevInstalled, prevOverride
+	})
+	return storeDir
+}
+
+func runRestartCmd(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	cmd := newResumeRestartCmd(module.Deps{Runner: &exec.FakeRunner{}})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+	return out.String(), err
+}
+
+func TestResumeRestart_UsageErrors(t *testing.T) {
+	env := &cliRestartEnv{}
+	restartFixture(t, env)
+	for name, args := range map[string][]string{
+		"no selector":         {},
+		"flag-shaped session": {"--outdated", "--session", "-rf"},
+		"non-hex session":     {"--outdated", "--session", "zzzz"},
+		"zero timeout":        {"--outdated", "--timeout", "0s"},
+	} {
+		if _, err := runRestartCmd(t, args...); ExitCode(err) != 2 {
+			t.Errorf("%s: exit %d (%v), want 2", name, ExitCode(err), err)
+		}
+	}
+	if env.terminated+env.relaunched+env.prepared != 0 {
+		t.Fatal("a usage error acted")
+	}
+}
+
+func TestResumeRestart_DryRunTouchesNothing(t *testing.T) {
+	env := &cliRestartEnv{}
+	restartFixture(t, env)
+	out, err := runRestartCmd(t, "--outdated", "--dry-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out, "restart ") || !strings.Contains(out, restartSID) || !strings.Contains(out, "pane "+restartPane) {
+		t.Errorf("dry-run output = %q", out)
+	}
+	if env.terminated+env.relaunched+env.prepared != 0 {
+		t.Fatalf("dry-run acted: terminated=%d relaunched=%d prepared=%d", env.terminated, env.relaunched, env.prepared)
+	}
+}
+
+func TestResumeRestart_RestartsAndExitsZero(t *testing.T) {
+	env := &cliRestartEnv{}
+	restartFixture(t, env)
+	out, err := runRestartCmd(t, "--outdated", "--session", restartSID)
+	if err != nil {
+		t.Fatalf("err = %v\n%s", err, out)
+	}
+	if env.terminated != 1 || env.relaunched != 1 || !strings.Contains(out, "resumed") {
+		t.Fatalf("terminated=%d relaunched=%d out=%q", env.terminated, env.relaunched, out)
+	}
+}
+
+func TestResumeRestart_FailedRelaunchExitsOne(t *testing.T) {
+	env := &cliRestartEnv{relaunchErr: errors.New("herdr down")}
+	restartFixture(t, env)
+	out, err := runRestartCmd(t, "--outdated")
+	if ExitCode(err) != 1 {
+		t.Fatalf("exit %d (%v), want 1", ExitCode(err), err)
+	}
+	if !strings.Contains(out, "failed") || !strings.Contains(out, "by hand: forgectl resume "+restartSID) {
+		t.Errorf("out = %q; a failure names the by-hand command", out)
+	}
+}
+
+func TestResumeRestart_SkipsAreNotErrors(t *testing.T) {
+	env := &cliRestartEnv{}
+	restartFixture(t, env)
+	env.pane = ""
+	out, err := runRestartCmd(t, "--outdated", "--timeout", time.Minute.String())
+	if err != nil {
+		t.Fatalf("a pane-less session is a skip, not a failure: %v", err)
+	}
+	if !strings.Contains(out, "skipped") || env.terminated != 0 {
+		t.Errorf("out = %q, terminated = %d", out, env.terminated)
+	}
+}
+
+// I-3: a run inside the session it would restart skips it — in the plan and
+// in a real run.
+func TestResumeRestart_NeverStopsItsOwnAncestor(t *testing.T) {
+	env := &cliRestartEnv{}
+	restartFixture(t, env)
+	env.ancestors = map[int]bool{env.pid: true}
+	out, err := runRestartCmd(t, "--outdated", "--dry-run")
+	if err != nil || !strings.HasPrefix(out, "skip ") || !strings.Contains(out, "this run is inside it") {
+		t.Fatalf("dry-run: err=%v out=%q", err, out)
+	}
+	out, err = runRestartCmd(t, "--outdated")
+	if err != nil || env.terminated != 0 || !strings.Contains(out, "this run is inside it") {
+		t.Fatalf("run: err=%v terminated=%d out=%q", err, env.terminated, out)
+	}
+}
+
+// A herdr server restart renumbers every pane, so the HERDR_PANE_ID a
+// long-running session carries goes stale. The run finds the pane by session
+// through herdr's pane list, checks and relaunches there, and says what the
+// environment claimed.
+func TestResumeRestart_FindsThePaneBySession(t *testing.T) {
+	env := &cliRestartEnv{pane: "w0:p999"}
+	restartFixture(t, env)
+	env.herdrPanes = []resume.HerdrPane{{ID: "w1:p1"}, {ID: "w9Z:p7", Agent: "claude", Session: restartSID}}
+	out, err := runRestartCmd(t, "--outdated", "--dry-run")
+	if err != nil || !strings.HasPrefix(out, "restart ") || !strings.Contains(out, "pane w9Z:p7 (found by session; env said w0:p999)") {
+		t.Fatalf("dry-run: err=%v out=%q", err, out)
+	}
+	out, err = runRestartCmd(t, "--outdated", "--session", restartSID)
+	if err != nil || env.relaunchPane != "w9Z:p7" || !strings.Contains(out, "env said w0:p999") {
+		t.Fatalf("run: err=%v relaunched in %q out=%q", err, env.relaunchPane, out)
+	}
+	for _, p := range env.panesChecked {
+		if p != "w9Z:p7" {
+			t.Fatalf("checked pane %q; every check must run against the resolved pane (%v)", p, env.panesChecked)
+		}
+	}
+}
+
+// Two panes claiming one session (a nested session relabelling its parent's
+// pane looks like this) is refused, never guessed at.
+func TestResumeRestart_RefusesASessionInTwoPanes(t *testing.T) {
+	env := &cliRestartEnv{}
+	restartFixture(t, env)
+	env.herdrPanes = []resume.HerdrPane{
+		{ID: "w9Z:p1", Agent: "claude", Session: restartSID},
+		{ID: "w9Z:p2", Agent: "claude", Session: restartSID},
+	}
+	out, err := runRestartCmd(t, "--outdated")
+	if err != nil || env.terminated != 0 || !strings.Contains(out, "2 panes (w9Z:p1, w9Z:p2)") || !strings.Contains(out, "forgectl resume "+restartSID) {
+		t.Fatalf("err=%v terminated=%d out=%q", err, env.terminated, out)
+	}
+}
+
+// When herdr's pane list fails, a run-level line says so, and a session whose
+// environment pane is gone ends pane-gone (exit 1) naming the failure.
+func TestResumeRestart_ListFailureIsNamed(t *testing.T) {
+	env := &cliRestartEnv{pane: "w0:p999", gone: map[string]bool{"w0:p999": true}, panesErr: errors.New("herdr down")}
+	restartFixture(t, env)
+	out, err := runRestartCmd(t, "--outdated", "--dry-run")
+	if err != nil || !strings.Contains(out, "note       herdr pane list failed (herdr down); each session's pane comes from its environment") {
+		t.Fatalf("dry-run: err=%v out=%q", err, out)
+	}
+	out, err = runRestartCmd(t, "--outdated")
+	if ExitCode(err) != 1 || env.terminated != 0 {
+		t.Fatalf("exit %d (%v), terminated %d; want 1 and untouched\n%s", ExitCode(err), err, env.terminated, out)
+	}
+	for _, want := range []string{
+		"note       herdr pane list failed (herdr down)",
+		"pane-gone  " + restartSID + "  pane w0:p999 no longer exists; re-reading the pane list: herdr pane list failed (herdr down); by hand: forgectl resume " + restartSID,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("out lacks %q:\n%s", want, out)
+		}
+	}
+}

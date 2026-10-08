@@ -7,7 +7,11 @@ Optional. forgectl runs with sensible defaults and no config file. To persist pr
 - macOS: `~/Library/Application Support/forgectl/config.toml`
 - Linux: `~/.config/forgectl/config.toml`
 
+A `config.toml` that exists but does not parse is an error, not a fallback to defaults: every command exits `2` and names the file, line and column. So is one that exists but can't be read, such as a file you lack permission to read, a directory, or a FIFO: the error names the file and the reason. Only an absent file selects the defaults. `forgectl config` (alias `cfg`), `doctor`, `launch edit` and `launch doctor`, plus help, version and completion, still run so you can find and fix the file. So does `resume snapshot`, which runs from a Stop hook and always exits 0. `init` does not: it refuses to rewrite a file it cannot parse.
+
 User workflow files share the same base: `<config dir>/workflows/<name>.workflow.toml`.
+
+`forgectl surface ready` can take its readiness predicates from `<config dir>/surface-ready.toml`. Without that file it uses the table built into the binary (`internal/herdr/ready/predicates.toml`). A file that exists replaces the built-in table whole, so start from a copy of it. It must be a regular file (not a symlink), not writable by group or others, and at most 64 KiB; anything else, or a file that does not parse, is an error rather than a fallback. Predicates are never read from a repo or worktree.
 
 ```toml
 no_icons  = false   # use ASCII markers instead of Nerd Font glyphs
@@ -38,7 +42,7 @@ With `log_file = ""` (the default target once a level is set), forgectl writes t
 Several command groups own their own config section, documented alongside that command:
 
 - [`env`](commands/env.md) — safe `.env` management
-- [`resume`](commands/resume.md) — session resume across repos
+- [`resume`](commands/resume.md) — session resume across repos; `[[resume.on_update]]`, the hooks fired when claude updates
 - [`launch`](commands/launch.md) — `[launch]`, per-project Claude Code / Codex / Pi profiles
 - [`pr`](commands/pr.md) — `[pr]`, the clean-room reviewer's own posture
 - [`proxy`](commands/proxy.md) — `[proxy.profiles]`, named profiles; `launch_profile` applies one to every launch
@@ -47,6 +51,10 @@ Several command groups own their own config section, documented alongside that c
 - [`k8s`](commands/k8s.md) — bounded, terminal-safe log streaming
 - [`docs`](commands/docs.md) — `[docs]`, local markdown reader
 - [`theme`](commands/theme.md) — `[theme]`, `[theme.colors]`, the palette every styled surface draws from
+- [`herdr`](commands/herdr.md) — `[herdr.organize]`, the rules that group herdr tabs into workspaces
+- [`desk`](commands/desk.md#forgectl-desk-add-file) — `[desk]`, `notify_herdr` and `notify_macos`: whether `desk add` signals the operator through herdr and macOS (both default on)
+- [`surface`](herdr.md#drain) — `[surface.drain]`, how `surface drain` paces and caps workers: `interval`, `cap`, `per_repo`, `notify`, `idle_minutes`. An out-of-range value pauses the drain instead of falling back to a default
+- `tasks` — `[tasks]`, `allowed_hosts`: the hosts, besides the built-in default, that a keychain credential may be sent to. The list applies to every keychain entry, the write entry included: a listed host can be sent whichever keychain token a command names. See [the `tasks done` contract](json-contract.md#tasks-done). An entry that is not a plain hostname makes the file invalid, and every command refuses it the way it refuses a file that does not parse
 
 ## Theme
 
@@ -79,8 +87,11 @@ TTY. It does this even where forgectl's policy refuses to probe: inside
 tmux/screen, with `NO_COLOR` set, or with a forced `[theme] mode`. forgectl
 ignores the answer in those cases (it resolves the palette from `mode` or the
 dark default instead), so the colours are right; only the query itself is sent.
-Measured cost is under 50 ms and no hang has been reproduced. Piped output never
-queries. There is no fang option to turn the query off, so this is accepted
+On a terminal that answers, the cost is under 50 ms. On one that never answers
+(some multiplexer, ssh, and mosh setups, and agent harnesses that run a bare pty),
+each help or error render waits about 4.5 s for the reply. A cancelled prompt
+(Esc or Ctrl+C) skips the renderer, so it does not pay that wait (#1099). Piped
+output never queries. There is no fang option to turn the query off, so this is accepted
 until upstream adds one (tracked in #546).
 
 A bad `[theme]` never stops the binary starting: it is reported by `doctor` and

@@ -59,9 +59,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
+	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/herdr/wire"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 )
 
@@ -108,6 +109,8 @@ type Adapter struct {
 	// directory check cannot perturb socket fingerprinting or launch outcomes.
 	statSocketDir func(string) (os.FileInfo, error)
 	warnings      io.Writer
+	// idleInterval is the wait between root-pane inspections.
+	idleInterval time.Duration
 }
 
 // Option configures an Adapter at construction.
@@ -181,6 +184,7 @@ func New(run exec.SensitiveRunner, herdrPath string, getenv func(string) string,
 		selfUID:       os.Geteuid,
 		statSocketDir: os.Stat,
 		warnings:      io.Discard,
+		idleInterval:  defaultIdleInterval,
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -204,18 +208,13 @@ func resolveSession(getenv func(string) string) (string, backend.ServerSource, e
 	return defaultSession, backend.HerdrDefaultSessionServer(), nil
 }
 
-// maxSessionNameLen bounds a session name. herdr's own names are short; the cap
-// exists so an operator's environment cannot put an unbounded string on a
-// command line.
-const maxSessionNameLen = 64
-
-// validSessionName keeps the pin to a shape that is unambiguously one operand.
+// validSessionName keeps the pin to a shape that is unambiguously one operand:
+// the floor every herdr operand meets (wire.CheckOperand, shared with
+// internal/herdr, #722), then a session name's own narrower charset. The error
+// never echoes the name, which comes from the environment.
 func validSessionName(name string) error {
-	if len(name) > maxSessionNameLen {
-		return fmt.Errorf("%w: session name exceeds %d bytes", ErrResolveSession, maxSessionNameLen)
-	}
-	if strings.HasPrefix(name, "-") {
-		return fmt.Errorf("%w: session name may not begin with a dash", ErrResolveSession)
+	if err := wire.CheckOperand(name); err != nil {
+		return fmt.Errorf("%w: session name %w", ErrResolveSession, err)
 	}
 	for _, r := range name {
 		switch {
@@ -246,6 +245,10 @@ func checkSocketPath(socket string) error {
 
 // Kind reports the backend this adapter drives.
 func (a *Adapter) Kind() backend.Kind { return backend.KindHerdr }
+
+// Session is the herdr session this adapter is pinned to. The worker ledger keys
+// on it, so workers in two sessions of one repo do not share rows.
+func (a *Adapter) Session() string { return a.session }
 
 // pinned prefixes an argv with this adapter's session pin. Every command goes
 // through it, so there is one spelling of `--session` and no call site can issue

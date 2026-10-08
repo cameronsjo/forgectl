@@ -14,10 +14,35 @@ import (
 // by reading an argument back out as a string. That is deliberate: a reveal
 // accessor on the fake would be a reveal accessor in the production API
 // surface, reachable from any package that imports exec.
+//
+// No production file but this one may name it, one of its fields or one of
+// its methods (TestNoProductionFileUsesTheFakeRunner, forgectl#941): it
+// starts no process, so production code wired to it would do nothing.
 type FakeSensitiveRunner struct {
 	// RunFunc produces the result for a call. If nil, every call returns an
 	// empty successful result. It receives the command so a test can branch on
 	// Kind or argument count; it cannot read an argument's payload.
+	//
+	// An exported func field that receives a SensitiveCommand is intended and
+	// widens nothing (forgectl#851), for three reasons:
+	//
+	//   - It is handed the very value the caller of RunSensitive already
+	//     held, so it learns nothing that caller could not.
+	//   - Every payload inside stays sealed. Path is a SecretArg, each Args
+	//     entry an Arg, and each Env entry an EnvMutation whose key and
+	//     SecretArg value are unexported. All three expose only redacting
+	//     formatters, and Arg adds Secret; none has a method that returns a
+	//     payload. The payload itself sits in internal/exec/internal/sealed,
+	//     whose one reveal, sealed.Start, puts a payload only into a child
+	//     process and is called only by OSSensitiveRunner (forgectl#854).
+	//     The fake never calls it, and no code outside internal/exec can
+	//     import sealed to try. The exported-API golden pins both surfaces.
+	//   - Equal on each of the three types is a comparison oracle: holding a
+	//     sealed value, a RunFunc can test a guess by building a candidate
+	//     with the same constructor and comparing. That is no wider than the
+	//     caller's own reach, since the caller holds the same value and the
+	//     same constructors. It stays safe only while no exported constructor
+	//     accepts a payload the caller has not already chosen.
 	RunFunc func(cmd SensitiveCommand) (SensitiveResult, error)
 
 	mu    sync.Mutex
@@ -107,7 +132,7 @@ const (
 // constructor for the type outside the runner, and it copies its input.
 func BoundedOutputForTest(data []byte, cause OutputCause) BoundedOutput {
 	return BoundedOutput{
-		buf:      &outputBuf{data: slices.Clone(data)},
+		buf:      newOutputBuf(slices.Clone(data)),
 		overflow: cause == OutputOverflowed,
 		forced:   cause == OutputRetired,
 	}

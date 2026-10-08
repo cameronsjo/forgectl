@@ -1,0 +1,354 @@
+//go:build unix
+
+package desk
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path"
+	"strconv"
+	"syscall"
+	"time"
+
+	"golang.org/x/sys/unix"
+)
+
+// supervisorArgv is the command line that runs `forgectl desk _supervise`.
+// Tests replace it to re-execute the test binary.
+var supervisorArgv = func(dir, name, sha string, kind Kind) ([]string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("desk: locate the forgectl binary: %w", err)
+	}
+	return []string{exe, "desk", "_supervise", "--dir", dir, "--sha", sha, "--kind", string(kind), name}, nil
+}
+
+// Launch starts the detached supervisor that runs a claimed item, and
+// returns its pid. TTY items are refused: they run in the desk's own
+// foreground (see [Desk.BeginRun]). When the supervisor cannot be started
+// the item is released to skipped/ (SkipLaunchFailed).
+//
+// The supervisor is handed the approved hash and kind, c.SHA256 and c.Kind,
+// and runs the item only if running/ still holds exactly those bytes, as that
+// kind. It starts in the home directory with [ChildEnv].
+//
+// The supervisor must outlive the desk, so it is started with no parent
+// context and in a session of its own (Setsid): closing the desk's pane
+// signals the desk's process group and session, and neither reaches it. It
+// deliberately does not use internal/exec's process-group runner, which kills
+// the group when its context ends — the opposite of what is wanted here.
+func (d *Desk) Launch(c *Claimed) (int, error) {
+	if c == nil {
+		return 0, errors.New("desk: launch: no claimed item")
+	}
+	name := c.Name
+	kind, err := d.findKind(DirRunning, name)
+	if err != nil {
+		return 0, fmt.Errorf("desk: launch %s: claim it first: %w", describe(name), err)
+	}
+	if kind != c.Kind || !ValidSHA256(c.SHA256) {
+		return 0, errors.Join(fmt.Errorf("%w: launch %s: running/ holds a %s, the claim is for a %s with hash %q",
+			ErrRefused, describe(name), kind, describe(string(c.Kind)), describe(c.SHA256)), d.Release(name, SkipLaunchFailed))
+	}
+	if kind == KindScript && c.TTY {
+		// A caller that should have run it in its own foreground: end the
+		// claim rather than leave it ownerless until the grace runs out.
+		return 0, errors.Join(fmt.Errorf("desk: %s is a TTY item; it runs in the desk's foreground, not detached", describe(name)), d.Release(name, SkipLaunchFailed))
+	}
+	home, err := HomeDir()
+	if err != nil {
+		return 0, errors.Join(err, d.Release(name, SkipLaunchFailed))
+	}
+	argv, err := supervisorArgv(d.path, name, c.SHA256, c.Kind)
+	if err != nil {
+		return 0, errors.Join(err, d.Release(name, SkipLaunchFailed))
+	}
+	// context.Background on purpose: no caller's lifetime may end this run.
+	cmd := exec.CommandContext(context.Background(), argv[0], argv[1:]...) //nolint:gosec // G204: re-executing this binary's own hidden subcommand
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil // /dev/null
+	cmd.Dir, cmd.Env = home, ChildEnv()
+	if err := cmd.Start(); err != nil {
+		// Nothing owns the claim now: end it where the operator sees it.
+		return 0, errors.Join(fmt.Errorf("desk: start supervisor for %s: %w", describe(name), err), d.Release(name, SkipLaunchFailed))
+	}
+	pid := cmd.Process.Pid
+	// Reap it whenever it ends, so a long-lived desk never holds a zombie
+	// that a liveness check would read as alive.
+	go func() { _ = cmd.Wait() }()
+	return pid, nil
+}
+
+// RunSupervisor is `forgectl desk _supervise`: it runs one claimed item in
+// running/ to completion and returns the process exit code (the item's rc, or
+// 2 when the supervisor itself could not run it). sha and kind are the hash
+// and kind the operator approved; the item runs only if its bytes still hash
+// to sha and it is still that kind ("script" or "batch").
+func RunSupervisor(dir, name, sha, kind string) int {
+	// Caught and discarded, not ignored: an ignored signal stays ignored
+	// across exec, so every script would start deaf to SIGHUP, while a caught
+	// one is reset to the default there. Notify never blocks on a full
+	// channel, so nothing needs to read it.
+	signal.Notify(make(chan os.Signal, 1), syscall.SIGHUP)
+	d, err := Open(dir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "desk _supervise:", err)
+		return 2
+	}
+	defer d.Close() //nolint:errcheck // exiting
+	rc, err := d.supervise(name, sha, Kind(kind))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "desk _supervise:", err)
+		if rc == 0 {
+			rc = 2
+		}
+	}
+	return rc
+}
+
+func (d *Desk) supervise(name, sha string, want Kind) (int, error) {
+	// An approval always carries a full hash. Checked before anything is
+	// read, so a malformed one refuses without touching the item.
+	if !ValidSHA256(sha) {
+		return 2, fmt.Errorf("%w: %s: this supervisor's approval carries no valid sha256", ErrRefused, describe(name))
+	}
+	kind, err := d.findKind(DirRunning, name)
+	if err != nil {
+		return 2, err
+	}
+	meta, ok, err := d.readMeta(DirRunning, name)
+	if err != nil {
+		return 2, err
+	}
+	// Claim moves the item before its meta, so a missing meta is a claim
+	// still in flight, not a match: refuse rather than compare against an
+	// empty record.
+	if !ok {
+		return 2, fmt.Errorf("%w: %s: no queue record in running/ yet", ErrRefused, describe(name))
+	}
+	// The approval names this claim only if its hash is the one recorded at
+	// queue time and its kind is the one queued and found. Otherwise this
+	// supervisor was not started for this claim: it refuses without touching
+	// the item, which reads as lost once the claim grace passes. The hash
+	// binds the bytes, not how they run, and findKind prefers .sh, so the
+	// bytes of an approved manifest must not run as bash, nor the reverse.
+	if sha != meta.SHA256 || kind != want || (meta.Kind != "" && meta.Kind != want) {
+		return 2, fmt.Errorf("%w: %s: this supervisor's approval (%s) does not name the item in running/ (%s)",
+			ErrRefused, describe(name), want, kind)
+	}
+	home, err := HomeDir()
+	if err != nil {
+		return 2, err
+	}
+	data, _, err := d.readItem(DirRunning, name+kind.Ext())
+	if err != nil {
+		return 2, err
+	}
+	// sha is the queue-time hash (checked above), so a mismatch here means
+	// the bytes changed after the claim.
+	if found := SHA256Hex(data); found != sha {
+		if err := d.skipChanged(DirRunning, name, kind, meta, found); err != nil {
+			return 2, err
+		}
+		return 2, fmt.Errorf("%w: %s", ErrChanged, describe(name))
+	}
+	if kind == KindScript && ParseHeaders(data).TTY {
+		return 2, fmt.Errorf("desk: %s is a TTY item; it runs in the desk's foreground", describe(name))
+	}
+	if d.doneTaken(name) {
+		meta.SkipReason = SkipReused
+		_ = d.writeMeta(DirRunning, name, meta)
+		_ = d.move(name, kind, DirRunning, DirSkipped)
+		return 2, fmt.Errorf("desk: done/ already holds %s; skipped", describe(name))
+	}
+	sigs := make(chan os.Signal, 2)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigs)
+	if kind == KindBatch {
+		return d.superviseBatch(name, data, home, sigs)
+	}
+	return d.superviseScript(name, data, home, sigs)
+}
+
+// doneTaken reports a name whose done/ entries already exist (a reused
+// number); running it would append to another run's log.
+func (d *Desk) doneTaken(name string) bool {
+	for _, ext := range [...]string{extLog, extEvents, extBatchDir, extScript, extManifest} {
+		if d.exists(path.Join(DirDone, name+ext)) {
+			return true
+		}
+	}
+	return false
+}
+
+// CreateLog creates done/<name>.log through the pinned root, exclusively:
+// it fails when the log already exists, so a second run, or a symlink planted
+// at the name, never has its target truncated. The caller writes the run's
+// output to it (a TTY run hands it to script(1) as /dev/fd/4).
+func (d *Desk) CreateLog(name string) (*os.File, error) {
+	if !ValidName(name) {
+		return nil, fmt.Errorf("desk: %q is not an item name (NN-name)", describe(name))
+	}
+	return d.createLog(name)
+}
+
+func (d *Desk) createLog(name string) (*os.File, error) {
+	f, err := d.root.OpenFile(path.Join(DirDone, name+extLog), os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_APPEND, fileMode)
+	if err != nil {
+		return nil, fmt.Errorf("desk: create log for %s: %w", describe(name), err)
+	}
+	return f, nil
+}
+
+func (d *Desk) superviseScript(name string, data []byte, home string, sigs <-chan os.Signal) (int, error) {
+	run, err := d.BeginRun(name, os.Getpid())
+	if err != nil {
+		return 2, err
+	}
+	logF, err := d.createLog(name)
+	if errors.Is(err, fs.ErrExist) {
+		// Another run's log took the name after BeginRun's check: end this
+		// one in skipped/ and leave that record alone.
+		return 2, errors.Join(err, run.Abandon(SkipReused))
+	}
+	if err != nil {
+		return 2, errors.Join(err, run.Finish(2, "internal"))
+	}
+	// bash reads the verified bytes from a pipe on fd 3, never from
+	// running/<name>.sh: that file is the record of what ran, and a write to
+	// it (or a rename over it) after the hash check cannot reach the run.
+	// Its own process group, so a forwarded signal reaches everything the
+	// script started. stdin is /dev/null: a detached item never prompts.
+	cmd := exec.CommandContext(context.Background(), "/bin/bash", ScriptFDPath) //nolint:gosec // G204: constant argv; the script arrives on fd 3
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, logF, logF
+	cmd.Dir, cmd.Env = home, ChildEnv()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	release, err := AttachScript(cmd, data)
+	if err != nil {
+		_ = logF.Close()
+		return 2, errors.Join(err, run.Finish(2, "internal"))
+	}
+	startErr := cmd.Start()
+	release() // the child holds its own copy of the read end
+	if startErr != nil {
+		_, _ = fmt.Fprintf(logF, "desk: could not start: %v\n", startErr)
+		_ = logF.Close()
+		return 127, run.Finish(127, stepFailed)
+	}
+	pgid := cmd.Process.Pid
+	waited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait() // the status is read from cmd.ProcessState below
+		close(waited)
+	}()
+	interrupted := false
+	var kill <-chan time.Time
+	for running := true; running; {
+		select {
+		case <-sigs:
+			if interrupted {
+				// A second signal does not re-arm the grace period; it ends it.
+				signalGroup(pgid, unix.SIGKILL)
+				continue
+			}
+			interrupted = true
+			signalGroup(pgid, unix.SIGTERM)
+			kill = time.After(DefaultGrace)
+		case <-kill:
+			signalGroup(pgid, unix.SIGKILL)
+		case <-waited:
+			running = false
+		}
+	}
+	// Nothing the script started may outlive its run: a leftover writing to
+	// the log after EXIT would muddle the record.
+	d.endGroup(pgid)
+	_ = logF.Close()
+	rc := exitCode(cmd.ProcessState)
+	reason := stepOK
+	switch {
+	case interrupted:
+		reason = "interrupted"
+	case rc != 0:
+		reason = stepFailed
+	}
+	return rc, run.Finish(rc, reason)
+}
+
+// endGroup sends SIGTERM to a finished script's process group if anything
+// is left in it, and SIGKILL to whatever survives the grace period.
+//
+// Every signal that matters is preceded by a signal-0 probe, and the moment a
+// probe finds the group empty it is never signalled again: its pgid may then
+// belong to a new group.
+func (d *Desk) endGroup(pgid int) {
+	if !signalGroup(pgid, 0) || !signalGroup(pgid, unix.SIGTERM) {
+		return
+	}
+	deadline := time.Now().Add(d.grace)
+	for time.Now().Before(deadline) {
+		time.Sleep(batchTick)
+		if !signalGroup(pgid, 0) {
+			return
+		}
+	}
+	signalGroup(pgid, unix.SIGKILL) // the last probe, just above, found it alive
+}
+
+func (d *Desk) superviseBatch(name string, data []byte, home string, sigs <-chan os.Signal) (int, error) {
+	m, perr := LoadManifest(data, name+extManifest)
+	var fields []string
+	if perr == nil {
+		fields = []string{"steps=" + strconv.Itoa(len(m.Steps)), "jobs=" + strconv.Itoa(DefaultJobs)}
+	}
+	run, err := d.BeginRun(name, os.Getpid(), fields...)
+	if err != nil {
+		return 2, err
+	}
+	nothing := BatchResult{RC: 2}.Fields()
+	logF, err := d.createLog(name)
+	if errors.Is(err, fs.ErrExist) {
+		return 2, errors.Join(err, run.Abandon(SkipReused))
+	}
+	if err != nil {
+		return 2, errors.Join(err, run.Finish(2, "internal", nothing...))
+	}
+	defer logF.Close() //nolint:errcheck // every write below reports through the batch
+	if perr != nil {
+		_, _ = fmt.Fprintf(logF, "run-batch: error: %v\n", perr)
+		return 2, run.Finish(2, "manifest", nothing...)
+	}
+	dir := path.Join(DirDone, name+extBatchDir)
+	if err := d.root.Mkdir(dir, dirMode); err != nil {
+		_, _ = fmt.Fprintf(logF, "run-batch: error: %v\n", err)
+		return 2, run.Finish(2, "id-reused", nothing...)
+	}
+	b := NewBatch(m, BatchOptions{
+		ID:      name,
+		Dir:     d.abs(dir),
+		WorkDir: home,
+		Log:     logF,
+		Event: func(line string) {
+			_ = run.Events.Emit(line) // the combined log carries the same line
+		},
+	})
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-sigs:
+				b.Interrupt()
+			case <-stop:
+				return
+			}
+		}
+	}()
+	res := b.Run()
+	return res.RC, run.Finish(res.RC, res.Reason, res.Fields()...)
+}

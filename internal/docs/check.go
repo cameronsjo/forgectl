@@ -27,6 +27,12 @@ const (
 	// FindingStale is a doc whose frontmatter stale_after instant has passed
 	// (OKF v0.2 §5.5). Date-only and offset-less values are ignored.
 	FindingStale FindingKind = "stale"
+	// FindingUncheckedAnchor is a vault link to a real doc whose #heading
+	// fragment matched by neither slug nor text as written, and which the
+	// source doc's fragment budget (fragmentBudget) left unparsed, so its
+	// rendered-text match was never tried. It is neither a pass nor a
+	// broken anchor.
+	FindingUncheckedAnchor FindingKind = "anchor_unchecked"
 )
 
 // Severity is the wire enum for how a Finding weighs on the check's exit code.
@@ -43,9 +49,9 @@ const (
 )
 
 // severityFor is the one place a kind gets its severity. Every kind is an
-// error except deprecated.
+// error except deprecated and anchor_unchecked.
 func severityFor(k FindingKind) Severity {
-	if k == FindingDeprecated {
+	if k == FindingDeprecated || k == FindingUncheckedAnchor {
 		return SeverityInfo
 	}
 	return SeverityError
@@ -93,6 +99,9 @@ type CheckSummary struct {
 	OutsideRootLinks int `json:"outside_root_links"`
 	Deprecated       int `json:"deprecated"`
 	Stale            int `json:"stale"`
+	// UncheckedAnchors counts anchor_unchecked findings. Additive (ADR-0008
+	// rule 2).
+	UncheckedAnchors int `json:"unchecked_anchors"`
 }
 
 // CheckReport is the wire shape of `forgectl docs check --json`.
@@ -109,15 +118,17 @@ type CheckReport struct {
 	Skipped []SkippedPath `json:"skipped"`
 }
 
-const vaultSkipReason = "vault roots are not checked yet"
-
-// Check reports broken links, ambiguous links, broken anchors, orphan pages,
-// and deprecated or stale docs across every docs-kind root. Vault roots are
-// skipped. Links that leave their root are counted, not reported: they work
-// on GitHub.
+// Check reports broken links, ambiguous links and broken anchors across every
+// root, plus orphan pages and deprecated or stale docs across docs-kind roots.
+// A vault root gets the link findings only, resolved by the reader's own
+// vault rules (wikilinks by name, path or alias): daily and inbox notes are
+// orphans by nature, so orphans are never reported there, and the OKF trust
+// signals are a docs-tree convention. Links that leave their root are counted,
+// not reported: they work on GitHub.
 //
-// It resolves through resolveParts, never ResolveLink, so a path containing a
-// literal '#' (authored "%23") is not re-split — the same reason
+// It resolves through resolveWikilink, the reader's own wikilink resolution
+// (attachments included, forgectl#709), never ResolveLink, so a path
+// containing a literal '#' (authored "%23") is not re-split — the same reason
 // buildBacklinks calls resolveParts.
 func (idx *Index) Check() CheckReport {
 	return idx.CheckAt(trustNow())
@@ -145,33 +156,28 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 		cr := CheckedRoot{Label: r.Label, Kind: "docs", Checked: true, Docs: docCounts[r.Label]}
 		if r.Kind == RootVault {
 			cr.Kind = "vault"
-			cr.Checked = false
-			cr.Skipped = vaultSkipReason
 		}
 		report.Roots = append(report.Roots, cr)
 	}
 
-	// Only checked (docs-kind) roots count: a skip under a vault root does not
-	// make a verdict that was never going to be given any less complete.
-	for _, sp := range idx.skipped {
-		if rootByLabel[sp.Root].Kind != RootVault {
-			report.Skipped = append(report.Skipped, sp)
-		}
-	}
+	report.Skipped = append(report.Skipped, idx.skipped...)
 
 	dirInbound := idx.dirLinkInbound(rootByLabel)
 
 	for i := range idx.docs {
 		from := &idx.docs[i]
 		root := rootByLabel[from.RootLabel]
-		if root.Kind == RootVault {
-			continue
-		}
+		vault := root.Kind == RootVault
+		// One fragment budget per source doc, as a render has one per page,
+		// so a doc of many markup-laden heading links cannot make the check
+		// parse without bound (#710).
+		budget := newFragmentBudget()
 		for _, l := range from.Links {
-			target, miss := idx.resolveParts(from, l.Path, l.Fragment, nil)
+			refusedBefore := budget.refused
+			target, _, miss := idx.resolveWikilink(from, l, budget)
 			var kind FindingKind
 			switch miss {
-			case MissNone:
+			case MissNone, MissAttachment:
 				continue
 			case MissOutsideRoot:
 				report.Summary.OutsideRootLinks++
@@ -180,9 +186,17 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 				kind = FindingAmbiguousLink
 			case MissNoTarget:
 				switch {
+				case target != nil && budget.refused > refusedBefore:
+					kind = FindingUncheckedAnchor
 				case target != nil:
 					kind = FindingBrokenAnchor
-				case existsInRoot(root, from, l.Path):
+				// A vault wikilink has no existence fallback: resolveWikilink
+				// already tried the attachments, and the reader has no
+				// directory resolution, so a wikilink to a folder or to
+				// anything the walk did not list shows as a miss there and is
+				// broken here. A plain markdown link in a vault keeps the
+				// fallback, as the reader renders it as an ordinary link.
+				case (!vault || l.Form == FormRelPath) && existsInRoot(root, from, l.Path):
 					// A directory or non-markdown file: real, just not a doc.
 					continue
 				default:
@@ -194,6 +208,9 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 			report.Findings = append(report.Findings, Finding{
 				Kind: kind, Root: from.RootLabel, Path: from.RelPath, Target: l.Raw, Line: l.Line,
 			})
+		}
+		if vault {
+			continue
 		}
 		if root.OnlyFile == "" && len(idx.Backlinks(from)) == 0 && !dirInbound[i] && !isRootIndex(from.RelPath) {
 			if from.OrphanOK {
@@ -259,6 +276,8 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 			report.Summary.Deprecated++
 		case FindingStale:
 			report.Summary.Stale++
+		case FindingUncheckedAnchor:
+			report.Summary.UncheckedAnchors++
 		}
 	}
 	return report
@@ -267,17 +286,24 @@ func (idx *Index) CheckAt(now time.Time) CheckReport {
 // isLinkFinding reports whether k is a link kind, the findings that carry a
 // Target and Line.
 func isLinkFinding(k FindingKind) bool {
-	return k == FindingBrokenLink || k == FindingAmbiguousLink || k == FindingBrokenAnchor
+	return k == FindingBrokenLink || k == FindingAmbiguousLink || k == FindingBrokenAnchor || k == FindingUncheckedAnchor
 }
 
 // existsInRoot reports whether the link path names something on disk inside
 // root, for targets that resolve to no indexed doc (a directory, a LICENSE, an
 // image). The clean path is built the way resolveDocsDoc builds it. It reads
-// nothing; ResolveInRoot refuses a symlink that escapes the root.
+// nothing; ResolveInRoot refuses a symlink that escapes the root. A link
+// written as a directory ("guide.md/", "sub/.") must name a directory:
+// path.Clean drops that trailing "/", so it is put back for ResolveInRoot,
+// which answers ErrNotFound for a regular file, and the link is broken
+// rather than passing on the strength of a file of the same name.
 func existsInRoot(root Root, from *Doc, linkPath string) bool {
 	clean, ok := linkTargetPath(from, linkPath)
 	if !ok {
 		return false
+	}
+	if namesDirectory(linkPath) {
+		clean += "/"
 	}
 	_, err := ResolveInRoot(root.Path, clean)
 	return err == nil
@@ -310,7 +336,7 @@ func linkTargetPath(from *Doc, linkPath string) (string, bool) {
 // It lives here, not in buildBacklinks, because Backlinks promises to agree
 // with ResolveLink, and ResolveLink resolves a directory link to no doc: the
 // reader does not open sub/README.md for it. Only orphan detection counts it.
-// Vault roots are skipped, as Check skips them.
+// Vault roots are skipped: orphans are never reported there.
 func (idx *Index) dirLinkInbound(rootByLabel map[string]Root) map[int]bool {
 	type dirKey struct{ root, dir string }
 	pages := map[dirKey][]int{}
@@ -344,8 +370,10 @@ func (idx *Index) dirLinkInbound(rootByLabel map[string]Root) map[int]bool {
 				continue
 			}
 			// A path that resolves to a doc is a link to that doc, not to
-			// the directory.
-			if target, miss := idx.resolveParts(from, l.Path, l.Fragment, nil); target != nil || miss != MissNoTarget {
+			// the directory. The fragment is not passed: a doc resolves
+			// whether or not its anchor does, so matching the anchor here
+			// would only spend parse work on an answer that cannot change.
+			if target, miss := idx.resolveParts(from, l.Path, "", nil); target != nil || miss != MissNoTarget {
 				continue
 			}
 			for _, j := range hits {

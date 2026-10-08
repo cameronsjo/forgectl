@@ -51,6 +51,14 @@ func TestFindingsRemove_LockBusyRefusesAndKeepsDir(t *testing.T) {
 	}
 }
 
+// TestFindingsRemove_CtxCancelledWhileLockBusy: a cancelled ctx ends the
+// wait for a busy lock. context.Canceled is the evidence: a wait that ignored
+// the ctx would run out its 30 s and report the busy lock instead. The
+// elapsed check is only a hang bound, well under that wait and far above any
+// working run, so host load cannot fail it (forgectl#919; it was 5 s).
+//
+// Mutation: drop the ctx.Done arm from withLifecycleLock's wait, and the
+// call waits 30 s and reports the busy lock.
 func TestFindingsRemove_CtxCancelledWhileLockBusy(t *testing.T) {
 	sessions := t.TempDir()
 	dir := t.TempDir()
@@ -84,8 +92,8 @@ func TestFindingsRemove_CtxCancelledWhileLockBusy(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
-	if elapsed > 5*time.Second {
-		t.Errorf("FindingsRemove took %s under a cancelled ctx, want a prompt return", elapsed)
+	if elapsed > 20*time.Second {
+		t.Errorf("FindingsRemove took %s under a cancelled ctx, want a return well inside the 30s lock wait", elapsed)
 	}
 	if len(removed) != 0 {
 		t.Errorf("removed = %v, want nothing under a cancelled ctx", removed)

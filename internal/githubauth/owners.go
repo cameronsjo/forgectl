@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/ghfail"
 	"github.com/cameronsjo/forgectl/internal/pr"
 )
 
@@ -70,7 +71,9 @@ func discoverLogin(ctx context.Context, run exec.Runner, host string) (string, e
 		if SafeContextSentinel(err) {
 			return "", errors.Join(ErrLoginUnavailable, err)
 		}
-		return "", fmt.Errorf("%w: gh could not report the authenticated login", ErrLoginUnavailable)
+		// ghfail.Categorize keeps only the cause's category, so a note can
+		// still say why (forgectl#1148) without carrying gh's text.
+		return "", fmt.Errorf("%w: gh could not report the authenticated login: %w", ErrLoginUnavailable, ghfail.Categorize(err))
 	}
 	login, ok := parseLogin(out)
 	if !ok {

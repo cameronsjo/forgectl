@@ -17,12 +17,12 @@ import (
 
 // newDocsCheckCmd builds `forgectl docs check [dir|file ...]` — reports broken
 // links, broken anchors, ambiguous links, orphan pages, and deprecated or
-// stale docs (OKF status / stale_after frontmatter) across the docs-kind
-// roots, without binding a server.
+// stale docs (OKF status / stale_after frontmatter) across every
+// root (vault roots by the reader's vault rules, links only), without binding a server.
 //
 // Exit contract: 0 clean, or only info findings; 1 error-severity findings (the
 // report is complete on stdout); 2 the check could not run (bad root, deadline,
-// no docs-kind root, bad flag) under the shared docsFail contract, or could not
+// bad flag) under the shared docsFail contract, or could not
 // vouch for the tree: the index walk skipped an unreadable path, so docs inside
 // it went unchecked and links into it read as broken. The skipped paths are
 // listed (human output) or in report.skipped (--json).
@@ -32,7 +32,7 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "check [dir|file ...]",
-		Short: "Report broken links, orphan pages, and deprecated or stale docs in docs roots",
+		Short: "Report broken links, orphan pages, and deprecated or stale docs",
 		Args:  cobra.ArbitraryArgs,
 		// Silenced for the same reason docs list is: a failure under --json
 		// has already written its one JSON object to stderr.
@@ -68,19 +68,6 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 
 			report := idx.Check()
 
-			checked := 0
-			for _, r := range report.Roots {
-				if r.Checked {
-					checked++
-					continue
-				}
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "skipping vault root %s: %s\n",
-					termsafe.SafeLine(r.Label), termsafe.SafeLine(r.Skipped))
-			}
-			if checked == 0 {
-				return fail("", errors.New("docs check: no docs-kind root to check (vault roots are skipped)"))
-			}
-
 			if asJSON {
 				enc := termsafe.JSONEncoder(cmd.OutOrStdout())
 				if err := enc.Encode(report); err != nil {
@@ -89,22 +76,22 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 			} else {
 				out := cmd.OutOrStdout()
 				for _, f := range report.Findings {
-					line := termsafe.SafeLine(f.Root) + "/" + termsafe.SafeLine(f.Path)
+					line := safeLabel(f.Root) + "/" + safeColumnPath(f.Path)
 					if f.Line > 0 {
 						line += ":" + strconv.Itoa(f.Line)
 					}
 					line += ": " + string(f.Kind)
 					if f.Target != "" {
-						line += " " + termsafe.SafeLine(f.Target)
+						line += " " + safeText(f.Target)
 					}
 					if f.StaleAfter != "" {
-						line += " " + termsafe.SafeLine(f.StaleAfter)
+						line += " " + safeLabel(f.StaleAfter)
 					}
 					_, _ = fmt.Fprintln(out, line)
 				}
 				for _, sp := range report.Skipped {
 					_, _ = fmt.Fprintf(out, "%s/%s: skipped (%s)\n",
-						termsafe.SafeLine(sp.Root), termsafe.SafeLine(sp.Rel), termsafe.SafeLine(sp.Reason))
+						safeLabel(sp.Root), safeColumnPath(sp.Rel), safeText(sp.Reason))
 				}
 			}
 
@@ -134,15 +121,17 @@ func newDocsCheckCmd(deps module.Deps) *cobra.Command {
 				if info > 0 {
 					msg += fmt.Sprintf(", %d informational", info)
 				}
-				return WithExitCode(errors.New(msg), 1)
+				// Under --json the report on stdout is the verdict: no
+				// second object on stderr (forgectl#862).
+				return jsonVerdict(WithExitCode(errors.New(msg), 1), asJSON)
 			}
-			if info > 0 {
+			if info > 0 && !asJSON {
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "docs check: %d informational finding(s), no errors\n", info)
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"schema_version","roots","findings","summary","skipped"} to stdout; a finding is {"kind","severity","root","path","target","line","stale_after"}`)
 	cmd.Flags().DurationVar(&timeout, "timeout", 15*time.Second, "walk deadline, e.g. 15s or 2m")
 	cmd.SetFlagErrorFunc(docsFlagError("docs check"))
 	return cmd
@@ -164,6 +153,6 @@ func noteSkippedPaths(w io.Writer, idx *docspkg.Index) {
 	}
 	for _, root := range order {
 		_, _ = fmt.Fprintf(w, "skipped %d unreadable path(s) under %s (see docs check)\n",
-			counts[root], termsafe.SafeLine(root))
+			counts[root], safeLabel(root))
 	}
 }

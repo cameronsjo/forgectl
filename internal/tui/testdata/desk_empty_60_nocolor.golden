@@ -1,0 +1,30 @@
+desk ○ idle · forgectl 0.0.0-test · host-…  up 4h37m · 19:07
+◌ 0 waiting · 0 started today · ✓ 0 ✗ 0
+╭ queue ─┤ ● 0 running  ◌ 0 waiting ├──────────────────────╮
+│ nothing waiting                                          │
+│ Claude queues scripts with forgectl desk add; they appe… │
+╰──────────────────────────────────────────────────────────╯
+╭ focus ───────────────────────────────────────────────────╮
+│ the selected item's sha256, what and why show here       │
+╰──────────────────────────────────────────────────────────╯
+╭ timeline ────────────────────────────────────────────────╮
+│ nothing on the desk yet                                  │
+╰──────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ? help · q quit

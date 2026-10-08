@@ -3,6 +3,7 @@ package pr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,8 +11,10 @@ import (
 
 	"charm.land/huh/v2"
 
+	"github.com/cameronsjo/forgectl/internal/keymap"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // Repair modes. Exactly one applies per `--apply`; the CLI refuses zero or
@@ -213,7 +216,7 @@ func (c *Client) repairInspectLocked(ctx context.Context) (RepairReport, error) 
 			RecordPath: u.path,
 			FromPhase:  repairPhaseUnreadable,
 			Outcome:    repairOutcomeUnreadable,
-			Error:      termsafe.SafeLine(u.err.Error()),
+			Error:      recordText(u.err.Error()),
 		})
 	}
 	if len(candidates) == 0 {
@@ -309,7 +312,7 @@ func (c *Client) repairUndecodableLocked(ctx context.Context, opts RepairOpts, m
 		RecordPath: member.path,
 		FromPhase:  repairPhaseUnreadable,
 		Outcome:    repairOutcomeRefused,
-		Error:      termsafe.SafeLine(decodeErr.Error()),
+		Error:      recordText(decodeErr.Error()),
 	}
 	if !opts.ForgetIfAbsent {
 		return item, fmt.Errorf("this build cannot read session record %s, so it cannot adopt or roll it back: %w — "+
@@ -335,11 +338,9 @@ func (c *Client) repairUndecodableLocked(ctx context.Context, opts RepairOpts, m
 	}
 	if refKnown {
 		item.Ref = ref.String()
-		live, tmuxOK := c.WindowLive(ctx, ref)
-		if !tmuxOK {
-			return item, fmt.Errorf("refusing to set %s aside: the tmux window list could not be read, "+
-				"and an unreadable list is not an absent window — check `tmux list-windows -a`, then retry",
-				member.displayPath)
+		live, err := c.windowLiveErr(ctx, ref)
+		if err != nil {
+			return item, fmt.Errorf("refusing to set %s aside: %s", member.displayPath, windowListUnreadable(err))
 		}
 		item.WindowLive = &live
 		if live {
@@ -359,7 +360,7 @@ func (c *Client) repairUndecodableLocked(ctx context.Context, opts RepairOpts, m
 		if !c.isTTY() {
 			return item, fmt.Errorf("refusing to set %s aside without confirmation: this build cannot read the record, "+
 				"so it cannot say what the record described, and there is no terminal to confirm on — pass --yes to proceed",
-				member.displayPath)
+				termsafe.QuoteText(member.path))
 		}
 		approved, err := c.confirmRemoval(setAsidePrompt(member, decodeErr, refKnown))
 		if err != nil {
@@ -389,7 +390,7 @@ func (c *Client) repairUndecodableLocked(ctx context.Context, opts RepairOpts, m
 	aside, err := c.setAsideUndecodableRecord(member)
 	if err != nil {
 		item.Outcome = repairOutcomeFailed
-		item.Error = err.Error()
+		item.Error = recordText(safeErrString(err))
 		c.completeRepairRow(rowID, row, err)
 		return item, err
 	}
@@ -477,12 +478,15 @@ func refFromRawRecord(data []byte) (Ref, bool) {
 // refKnown is what changes the prompt. When false, the one guard that reads the
 // record could not run at all, and the human approving the move deserves that
 // sentence rather than a prompt that reads identically to the checked case.
+//
+// The record path is quoted whole (QuoteText), not through the capped
+// displayPath: a path the operator approves acting on is never cut.
 func setAsidePrompt(member breadcrumbMember, decodeErr error, refKnown bool) string {
 	prompt := fmt.Sprintf("Set aside a session record this build cannot read?\n"+
 		"  record: %s\n"+
 		"  reason: %s\n"+
 		"  the file is renamed, not deleted — but whether it named a clean room cannot be checked",
-		member.displayPath, termsafe.SafeLine(decodeErr.Error()))
+		termsafe.QuoteText(member.path), recordText(decodeErr.Error()))
 	if !refKnown {
 		prompt += "\n  no ref could be read, so whether its review window is live was not checked"
 	}
@@ -511,9 +515,31 @@ func (c *Client) repairAdoptLocked(ctx context.Context, member breadcrumbMember,
 			"use 'forgectl pr repair %s --apply %s' instead",
 			ref.String(), termsafe.QuotePath(bc.Workspace), member.displayPath, RepairModeRollback)
 	}
-	window, err := c.resolveReviewWindow(ctx, ref)
+	// Under the lifecycle lock, so the resolve is bounded (forgectl#656). The
+	// bound's state is read BEFORE done(): done cancels the context, after
+	// which Err() is non-nil whether or not tmux ever timed out.
+	tctx, done := boundedTmux(ctx)
+	window, err := c.resolveReviewWindow(tctx, ref)
+	timedOut := err != nil && (tctx.Err() != nil || errors.Is(err, context.DeadlineExceeded))
+	done()
+	if timedOut {
+		item.Outcome = repairOutcomeRefused
+		return item, fmt.Errorf("refusing to adopt %s: tmux did not answer within %s, so whether its review window "+
+			"exists is unknown — retry once tmux responds: %w", ref.String(), lockedTmuxBudget, err)
+	}
+	if errors.Is(err, tmux.ErrAmbiguousWindow) {
+		item.Outcome = repairOutcomeRefused
+		return item, fmt.Errorf("refusing to adopt %s: %w — close the window that is not this review, then retry",
+			ref.String(), err)
+	}
+	if err != nil && !windowConfirmedAbsent(err) {
+		item.Outcome = repairOutcomeRefused
+		return item, fmt.Errorf("refusing to adopt %s: tmux could not say whether its review window exists "+
+			"(an unreadable window list is not an absent window) — check `tmux list-windows -a`, then retry: %w",
+			ref.String(), err)
+	}
 	if err != nil {
-		item.Outcome = "refused"
+		item.Outcome = repairOutcomeRefused
 		name, nameErr := ReviewWindowName(ref)
 		if nameErr != nil {
 			return item, nameErr
@@ -542,7 +568,7 @@ func (c *Client) repairAdoptLocked(ctx context.Context, member breadcrumbMember,
 	}
 	if err := c.writeAdoptedRecord(member.path, bc, adopted.WindowID); err != nil {
 		item.Outcome = repairOutcomeFailed
-		item.Error = err.Error()
+		item.Error = recordText(safeErrString(err))
 		c.completeRepairRow(rowID, row, err)
 		return item, err
 	}
@@ -555,8 +581,8 @@ func (c *Client) repairAdoptLocked(ctx context.Context, member breadcrumbMember,
 
 // writeAdoptedRecord lands the `active` record. A v2 record goes through the
 // ordinary compare-and-write transition; a LEGACY record has no revision to
-// compare, so it is written with the legacy expectation — the one conversion
-// that exists, and the only transition a legacy record accepts.
+// compare, so it is converted with the legacy expectation (see
+// convertLegacyRecordLocked).
 func (c *Client) writeAdoptedRecord(path string, bc Breadcrumb, windowID string) error {
 	if bc.Version == breadcrumbVersion {
 		return c.transitionLocked(path, anyPhase, PhaseActive, func(rec *Breadcrumb) error {
@@ -565,18 +591,31 @@ func (c *Client) writeAdoptedRecord(path string, bc Breadcrumb, windowID string)
 			return nil
 		})
 	}
-	// The legacy branch bypasses transitionOnce, so it does not inherit that
-	// function's read-and-write-name-the-same-file guard. Its one caller passes
-	// an already-resolved member path; this is the backstop a second caller
-	// would otherwise be missing.
+	return c.convertLegacyRecordLocked(path, bc, PhaseActive, func(rec *Breadcrumb) {
+		rec.WindowID = windowID
+	})
+}
+
+// convertLegacyRecordLocked rewrites the legacy (versionless) record bc, read
+// from path, as a v2 record at revision 1 in phase to, with mut applied. It is
+// written with the legacy expectation, so a record that changed underneath —
+// already converted, or gone — refuses instead of being overwritten. This is
+// the one conversion that exists and the only transition a legacy record
+// accepts; its two uses are adopting a live window (`active`) and parking a
+// teardown that could not settle the window (`needs-repair`, forgectl#696).
+func (c *Client) convertLegacyRecordLocked(path string, bc Breadcrumb, to Phase, mut func(*Breadcrumb)) error {
+	// The conversion bypasses transitionOnce, so it does not inherit that
+	// function's read-and-write-name-the-same-file guard. Its callers pass an
+	// already-resolved member path; this is the backstop a new caller would
+	// otherwise be missing.
 	if err := c.assertDirectSessionsDirEntry(path); err != nil {
 		return err
 	}
 	next := bc
 	next.Version = breadcrumbVersion
-	next.Phase = PhaseActive
+	next.Phase = to
 	next.Revision = 1
-	next.WindowID = windowID
+	mut(&next)
 	if err := validateBreadcrumbRecord(next); err != nil {
 		return fmt.Errorf("refusing to write the converted record: %w", err)
 	}
@@ -602,11 +641,10 @@ func (c *Client) writeAdoptedRecord(path string, bc Breadcrumb, windowID string)
 // record is gone, the log line is the only pointer left to the clean room.
 func (c *Client) repairRollbackLocked(ctx context.Context, opts RepairOpts, member breadcrumbMember, ref Ref, item RepairItem, avail workspaceAvailability) (RepairItem, error) {
 	bc := member.breadcrumb
-	live, ok := c.WindowLive(ctx, ref)
-	if !ok {
+	live, err := c.windowLiveErr(ctx, ref)
+	if err != nil {
 		item.Outcome = repairOutcomeRefused
-		return item, fmt.Errorf("refusing to roll back %s: the tmux window list could not be read, "+
-			"and an unreadable list is not an absent window — check `tmux list-windows -a`, then retry", ref.String())
+		return item, fmt.Errorf("refusing to roll back %s: %s", ref.String(), windowListUnreadable(err))
 	}
 	item.WindowLive = &live
 	if live {
@@ -622,7 +660,7 @@ func (c *Client) repairRollbackLocked(ctx context.Context, opts RepairOpts, memb
 		item.Outcome = repairOutcomeRefused
 		return item, fmt.Errorf("refusing to roll back %s: its recorded workspace %s is neither a live clean room "+
 			"nor cleanly absent, so teardown cannot act on it — inspect that path by hand before settling this record",
-			ref.String(), termsafe.QuotePath(bc.Workspace))
+			ref.String(), termsafe.QuoteText(bc.Workspace))
 	}
 	item.ToPhase = "removed"
 	// The preview comes BEFORE the confirmation gate: --dry-run mutates nothing,
@@ -637,7 +675,7 @@ func (c *Client) repairRollbackLocked(ctx context.Context, opts RepairOpts, memb
 			item.Outcome = repairOutcomeRefused
 			return item, fmt.Errorf("refusing to roll back %s without confirmation: this removes its clean room %s "+
 				"and its record, and there is no terminal to confirm on — pass --yes to proceed",
-				ref.String(), termsafe.QuotePath(bc.Workspace))
+				ref.String(), termsafe.QuoteText(bc.Workspace))
 		}
 		approved, err := c.confirmRemoval(rollbackPrompt(ref, bc))
 		if err != nil {
@@ -660,7 +698,7 @@ func (c *Client) repairRollbackLocked(ctx context.Context, opts RepairOpts, memb
 	// inside it.
 	if err := c.teardownLocked(ctx, member.path); err != nil {
 		item.Outcome = repairOutcomeFailed
-		item.Error = err.Error()
+		item.Error = recordText(safeErrString(err))
 		c.completeRepairRow(rowID, row, err)
 		slog.Error("A repair rollback failed partway; the clean room is recoverable from the repair audit log.",
 			"ref", ref.String(), "workspace", bc.Workspace, "log", c.repairLogPath(), "error", err)
@@ -681,10 +719,13 @@ func (c *Client) repairRollbackLocked(ctx context.Context, opts RepairOpts, memb
 // absolute path to validate, so it can carry control or bidi bytes — and this
 // is the single surface where a human is asked to approve a deletion, which is
 // the exact place those bytes must not be able to hide what is being removed.
+// For the same reason the workspace is quoted whole (QuoteText), never through
+// the capped QuotePath: a path the operator approves deleting cannot have its
+// middle cut out.
 func rollbackPrompt(ref Ref, bc Breadcrumb) string {
 	workspace := "(no clean room was ever created)"
 	if bc.Workspace != "" {
-		workspace = termsafe.QuotePath(bc.Workspace)
+		workspace = termsafe.QuoteText(bc.Workspace)
 	}
 	return fmt.Sprintf("Roll back the unfinished review of %s?\n  clean room: %s\n  record:     %s",
 		termsafe.SafeLine(ref.String()), workspace, termsafe.SafeLine(bc.Ref))
@@ -697,7 +738,14 @@ func rollbackPrompt(ref Ref, bc Breadcrumb) string {
 // stood in for this, and its yes deleted a clean room.
 func confirmRemoval(prompt string, th theme.Theme) (bool, error) {
 	ok := false
-	err := huh.NewForm(
+	err := confirmRemovalForm(prompt, th, &ok).Run()
+	return ok, err
+}
+
+// confirmRemovalForm builds the form, split out so a test can feed it keys. It takes
+// keymap.Cancel so Esc cancels it as Ctrl+C does.
+func confirmRemovalForm(prompt string, th theme.Theme, ok *bool) *huh.Form {
+	return keymap.Suspendable(huh.NewForm(
 		huh.NewGroup(
 			huh.NewNote().
 				Title("Remove this clean room? — this cannot be undone").
@@ -706,10 +754,9 @@ func confirmRemoval(prompt string, th theme.Theme) (bool, error) {
 				Title("Remove the clean room and its session record?").
 				Affirmative("Remove").
 				Negative("Cancel").
-				Value(&ok),
+				Value(ok),
 		),
-	).WithTheme(th.Huh()).Run()
-	return ok, err
+	)).WithKeyMap(keymap.Cancel()).WithTheme(th.Huh())
 }
 
 // repairForgetLocked removes ONLY the record, after proving that neither a
@@ -717,11 +764,10 @@ func confirmRemoval(prompt string, th theme.Theme) (bool, error) {
 // subject is already gone. Like rollback, every refusal precedes the intent row.
 func (c *Client) repairForgetLocked(ctx context.Context, opts RepairOpts, member breadcrumbMember, ref Ref, item RepairItem, avail workspaceAvailability) (RepairItem, error) {
 	bc := member.breadcrumb
-	live, ok := c.WindowLive(ctx, ref)
-	if !ok {
+	live, err := c.windowLiveErr(ctx, ref)
+	if err != nil {
 		item.Outcome = repairOutcomeRefused
-		return item, fmt.Errorf("refusing to forget %s: the tmux window list could not be read, "+
-			"and an unreadable list is not an absent window — check `tmux list-windows -a`, then retry", ref.String())
+		return item, fmt.Errorf("refusing to forget %s: %s", ref.String(), windowListUnreadable(err))
 	}
 	item.WindowLive = &live
 	if live {
@@ -753,7 +799,7 @@ func (c *Client) repairForgetLocked(ctx context.Context, opts RepairOpts, member
 	// gives: the pair opened just above is this mutation's only row.
 	if err := c.teardownLocked(ctx, member.path); err != nil {
 		item.Outcome = repairOutcomeFailed
-		item.Error = err.Error()
+		item.Error = recordText(safeErrString(err))
 		c.completeRepairRow(rowID, row, err)
 		return item, fmt.Errorf("forget %s: %w", ref.String(), err)
 	}
@@ -798,7 +844,7 @@ func (c *Client) completeRepairRow(id string, row RepairRow, cause error) {
 	row.Error = ""
 	if cause != nil {
 		row.Outcome = repairOutcomeFailed
-		row.Error = termsafe.SafeLine(cause.Error())
+		row.Error = recordText(safeErrString(cause))
 	}
 	if err := c.appendRepairRowLocked(row); err != nil {
 		slog.Error("Failed to complete a repair audit row; the intent row is left dangling, which is the honest record.",
@@ -830,4 +876,20 @@ func baseName(path string) string {
 		}
 	}
 	return path
+}
+
+// windowListUnreadable is the refusal reason repair gives when the strict
+// window read failed. An exited server's leftover socket
+// (tmux.ErrServerExited) gets its own remedy (forgectl#805): the generic
+// "check tmux list-windows" only prints "no server running", which is no next
+// step at all. It stays a refusal either way — a refused connect proves no
+// server listens now, not that a crashed server's panes died with it (#746,
+// #765), which is why the remedy is conditioned on the agent being gone.
+func windowListUnreadable(err error) string {
+	if errors.Is(err, tmux.ErrServerExited) {
+		return "the tmux server has exited and left its socket behind, and a refused connect is not an absent window — " +
+			"once no review agent is still running, start any tmux session to clear the socket, then retry"
+	}
+	return "the tmux window list could not be read, and an unreadable list is not an absent window — " +
+		"check `tmux list-windows -a`, then retry"
 }

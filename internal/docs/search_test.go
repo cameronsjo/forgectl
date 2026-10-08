@@ -114,6 +114,21 @@ func searchRoot(t *testing.T, files ...string) (*Index, string) {
 	return idx, idx.Roots()[0].Path
 }
 
+// searchRootWith builds a one-root index holding the given files and
+// contents.
+func searchRootWith(t *testing.T, files map[string]string) *Index {
+	t.Helper()
+	dir := t.TempDir()
+	for f, body := range files {
+		writeFile(t, filepath.Join(dir, filepath.FromSlash(f)), body)
+	}
+	idx, err := NewIndex([]string{dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return idx
+}
+
 // matchRecord renders one rg --json match record for path.
 func matchRecord(t *testing.T, path, line string, start int) string {
 	t.Helper()
@@ -248,10 +263,12 @@ func TestSearchDropsOversizedRecord(t *testing.T) {
 }
 
 func TestSearchSnippetBoundedAndRuneSafe(t *testing.T) {
-	idx, root := searchRoot(t, "a.md")
 	// A three-byte rune repeated: every cut lands next to a multibyte rune,
-	// and the match offset (5001) points into the middle of one.
+	// and the match offset (5001) points into the middle of one. The line is
+	// the doc's own line 2, which the snippet is re-read from.
 	line := strings.Repeat("€", 3400) + "\n"
+	idx := searchRootWith(t, map[string]string{"a.md": "# a\n" + line})
+	root := idx.Roots()[0].Path
 	rg := &fakeRg{write: writeAll(matchRecord(t, filepath.Join(root, "a.md"), line, 5001))}
 	resp, err := (Searcher{Runner: rg, LookPath: fakeLookPath}).Search(t.Context(), idx, "x", 10)
 	if err != nil {
@@ -324,6 +341,9 @@ func TestSearchSilentFailureReportsReason(t *testing.T) {
 		{"start failure", &forgexec.CommandError{Name: "rg", ExitCode: -1, Err: errors.New("exec format error")}, "rg failed: exec format error"},
 		{"real exit with empty stderr", &forgexec.CommandError{Name: "rg", ExitCode: 2, Err: errors.New("exit status 2")}, "rg failed: exit status 2"},
 		{"nil Err", &forgexec.CommandError{Name: "rg", ExitCode: 2}, "rg failed: exit 2"},
+		// #926: Err's text is redacted as CommandError.Error() redacts it.
+		// Mutation: drop redact.Text around cmdErr.Err.Error() in rootFailures.
+		{"credential in Err", &forgexec.CommandError{Name: "rg", ExitCode: -1, Err: errors.New(`exec: "https://u:tok@example.invalid/rg": permission denied`)}, "rg failed: [redacted]"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			idx, _ := searchRoot(t, "a.md")
@@ -336,6 +356,29 @@ func TestSearchSilentFailureReportsReason(t *testing.T) {
 				t.Errorf("Errors = %+v, want one entry %q", resp.Errors, tc.want)
 			}
 		})
+	}
+}
+
+// #941: rg's stderr reached SearchError.Message through termsafe only, while
+// the Err arm beside it was redacted (#926). A line holding a credential
+// shape reads as the marker; the line breaks redact.Text works on are still
+// there when it runs, so the line without one survives.
+//
+// Mutation that turns it red: drop redact.Text around stderr in rootFailures
+// (the token shows), or apply it after searchError's escaping (the whole
+// message is one withheld line, and "kept line" disappears).
+func TestSearchRootFailureStderrIsRedacted(t *testing.T) {
+	idx, _ := searchRoot(t, "a.md")
+	rg := &fakeRg{write: rgFails("rg: kept line\nrg: https://u:rgtok941@example.invalid/x: permission denied\n")}
+	resp, err := (Searcher{Runner: rg, LookPath: fakeLookPath}).Search(t.Context(), idx, "x", 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(resp.Errors) != 1 {
+		t.Fatalf("Errors = %+v, want one entry", resp.Errors)
+	}
+	if msg := resp.Errors[0].Message; strings.Contains(msg, "rgtok941") || !strings.Contains(msg, "kept line") || !strings.Contains(msg, "[redacted]") {
+		t.Errorf("Message = %q; want the credential line withheld and the other kept", msg)
 	}
 }
 

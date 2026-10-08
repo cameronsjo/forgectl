@@ -12,6 +12,8 @@ import (
 	"unicode"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/cameronsjo/forgectl/internal/tomlerr"
 )
 
 // EnvSnapshot is the process environment used to resolve one legacy
@@ -119,12 +121,18 @@ func decodeLegacyLaunch(data []byte) (LaunchConfig, []string, error) {
 	var lc LaunchConfig
 	md, err := toml.Decode(string(data), &lc)
 	if err != nil {
-		return LaunchConfig{}, nil, fmt.Errorf("%w: %v", ErrLegacyMalformed, err)
+		return LaunchConfig{}, nil, fmt.Errorf("%w: %v", ErrLegacyMalformed, tomlerr.Scrub(err))
 	}
 	undecoded := md.Undecoded()
-	keys := make([]string, 0, len(undecoded))
+	keys := make([]string, 0, len(undecoded)+1)
 	for _, k := range undecoded {
 		keys = append(keys, k.String())
+	}
+	// [worker] is a native [launch.worker] table, which no legacy file had.
+	// Reported as unsupported, so migration refuses it rather than dropping
+	// it, and never applied: a legacy file does not set worker posture.
+	if md.IsDefined("worker") {
+		keys = append(keys, "worker")
 	}
 	sort.Strings(keys)
 	return stripLegacyUsageOptIn(lc), keys, nil

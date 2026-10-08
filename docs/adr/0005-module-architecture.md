@@ -183,3 +183,13 @@ declined still holds:
   reachable exactly as before via `forgectl tmux` (which now opens it directly, `StartInTmux`
   in the hub's `RunOptions`) or via the hub's `tmux` row. The hub is the new outer level; esc
   from the tmux screen returns to the hub rather than quitting.
+
+## Addendum (2026-10-06): hub areas
+
+The hub's unpinned modules are sorted into four areas (`agents`, `repos`, `shell`, `setup`),
+one row each on the top screen, so the first screen fits an 80x24 terminal (forgectl#1074).
+Area membership is a name table, `hubGroups` in `internal/cli/hub.go`, beside the existing
+`hubPinned` list. It is still not the manifest-contributed menu this ADR declined: no module
+declares its own area, and no manifest field or `Menu` hook was added. A module missing from
+every area lands in an `other` area rather than vanishing, and `TestHubGroups_CoverEveryModule`
+fails until the new module is placed.

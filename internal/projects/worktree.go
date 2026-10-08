@@ -8,6 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/cameronsjo/forgectl/internal/gitenv"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // Worktree initializes a bare-repo worktree layout for r under the canonical
@@ -42,13 +45,13 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 	// multi-user-writable). This is the git-mutating analog of Clone's origin-match
 	// guard: Worktree creates, so it refuses if the leaf already exists.
 	if err := os.MkdirAll(filepath.Dir(base), 0o755); err != nil {
-		return "", fmt.Errorf("creating worktree parent dirs for %s: %w", base, err)
+		return "", fmt.Errorf("creating worktree parent dirs for %s: %w", termsafe.QuotePath(base), termsafe.Error(err))
 	}
 	if err := os.Mkdir(base, 0o755); err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return "", fmt.Errorf("%s already exists; refusing to initialize a worktree layout over it", base)
+			return "", fmt.Errorf("%s already exists; refusing to initialize a worktree layout over it", termsafe.QuotePath(base))
 		}
-		return "", fmt.Errorf("creating worktree base dir %s: %w", base, err)
+		return "", fmt.Errorf("creating worktree base dir %s: %w", termsafe.QuotePath(base), termsafe.Error(err))
 	}
 
 	// Every failure from here on must remove base. The Mkdir above is an
@@ -95,32 +98,43 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 	// rename: base was created by our own os.Mkdir (never a followed symlink),
 	// so this write lands inside a dir we exclusively created.
 	if err := os.WriteFile(filepath.Join(base, ".git"), []byte("gitdir: ./.bare\n"), 0o644); err != nil {
-		return "", fmt.Errorf("writing .git pointer for %s: %w", base, err)
+		return "", fmt.Errorf("writing .git pointer for %s: %w", termsafe.QuotePath(base), termsafe.Error(err))
 	}
 
 	// A bare clone's default refspec fetches only the cloned branch; widen it so
 	// `fetch origin` populates every remote-tracking branch that worktree add needs.
-	if _, err := c.run.Run(ctx, "git", "-C", bareDir, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
-		return "", fmt.Errorf("configuring fetch refspec for %s: %w", bareDir, err)
+	if _, err := gitenv.Run(ctx, c.run, gitenv.Local, "-C", bareDir, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+		return "", fmt.Errorf("configuring fetch refspec for %s: %w", termsafe.QuotePath(bareDir), termsafe.Error(err))
 	}
-	if _, err := c.run.Run(ctx, "git", "-C", bareDir, "fetch", "origin"); err != nil {
-		return "", fmt.Errorf("fetching origin for %s: %w", bareDir, err)
+	// ext:: and fd:: stay refused, as at the clone: origin is the URL the
+	// repo list served (#987).
+	if _, err := gitenv.RunRefusing(ctx, c.run, gitenv.Transport, []string{"ext", "fd"}, "-C", bareDir, "fetch", "origin"); err != nil {
+		// Categorical (#658): git relays the remote's sideband ("remote: …")
+		// on stderr, which is server-chosen text.
+		slog.Error("Failed to fetch origin.", "dest", bareDir, "error", err)
+		// bareDir is composed by forgectl from validated segments, so it is
+		// named; only git's text is withheld.
+		return "", fmt.Errorf("fetching origin for %s: %w", termsafe.QuotePath(bareDir), termsafe.Categorical("git fetch origin failed", err))
 	}
 
 	if branch == "" {
 		branch = defaultBranch(ctx, c.run, bareDir)
 	}
 	if !validBranch(branch) {
-		return "", fmt.Errorf("refusing to create worktree for branch %q: unsafe branch name", branch)
+		// Categorical (#658): branch may be the remote's default branch, read
+		// from `git remote show origin`, rather than anything typed.
+		return "", errors.New("refusing to create worktree: unsafe branch name")
 	}
 
 	worktreeDir := filepath.Join(base, branch)
-	if _, err := c.run.Run(ctx, "git", "-C", bareDir, "worktree", "add", worktreeDir, branch); err != nil {
+	if _, err := gitenv.Run(ctx, c.run, gitenv.Local, "-C", bareDir, "worktree", "add", worktreeDir, branch); err != nil {
 		// The branch may exist only on the remote — create a local branch tracking
 		// origin/<branch> instead.
-		if _, ferr := c.run.Run(ctx, "git", "-C", bareDir, "worktree", "add", worktreeDir, "origin/"+branch, "-b", branch); ferr != nil {
+		if _, ferr := gitenv.Run(ctx, c.run, gitenv.Local, "-C", bareDir, "worktree", "add", worktreeDir, "origin/"+branch, "-b", branch); ferr != nil {
 			slog.Error("Failed to add worktree.", "dest", worktreeDir, "branch", branch, "error", ferr)
-			return "", fmt.Errorf("adding worktree for branch %q: %w", branch, ferr)
+			// Categorical (#658): branch may be remote-derived (see above).
+			// bareDir is forgectl-composed and named, as for the fetch.
+			return "", fmt.Errorf("adding worktree in %s: %w", termsafe.QuotePath(bareDir), termsafe.Categorical("git worktree add failed", ferr))
 		}
 	}
 
@@ -133,10 +147,9 @@ func (c *Client) Worktree(ctx context.Context, r Repo, branch string) (string, e
 // `HEAD branch:` line of `git remote show origin`, falling back to "main" when
 // the command fails, the line is absent, or the remote HEAD is "(unknown)" (a
 // bare repo just cloned from a non-standard or headless remote).
-func defaultBranch(ctx context.Context, run interface {
-	Run(context.Context, string, ...string) (string, error)
-}, bareDir string) string {
-	out, err := run.Run(ctx, "git", "-C", bareDir, "remote", "show", "origin")
+func defaultBranch(ctx context.Context, run gitenv.Runner, bareDir string) string {
+	// ext:: and fd:: stay refused, as at the clone and the fetch (#987).
+	out, err := gitenv.RunRefusing(ctx, run, gitenv.Transport, []string{"ext", "fd"}, "-C", bareDir, "remote", "show", "origin")
 	if err == nil {
 		for _, line := range strings.Split(out, "\n") {
 			line = strings.TrimSpace(line)

@@ -5,6 +5,9 @@
 //   - Sandbox alwaysClone/remote issues `git clone --branch <ref> -- <repo> <dir>`;
 //     clone-without-ref omits --branch.
 //   - RejectOptionLike rejects a leading-'-' repo and ref before any Runner call.
+//   - A failed clone or worktree add removes its temp dir (#707).
+//   - No log line carries a repo credential, and the worktree leg's error is
+//     categorical (#711).
 //   - Teardown is idempotent: an empty workspace and an already-removed dir
 //     are both no-ops, and neither issues a Runner call.
 //   - Teardown refuses anything whose RESOLVED base name lacks
@@ -28,12 +31,15 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv"
+	"github.com/cameronsjo/forgectl/internal/redact"
 )
 
 // TestSandbox_LocalRepo_WorktreeAdd covers the cheap-path default: a local
@@ -58,7 +64,9 @@ func TestSandbox_LocalRepo_WorktreeAdd(t *testing.T) {
 	if call.Name != "git" {
 		t.Errorf("call.Name = %q, want git", call.Name)
 	}
-	want := []string{"-C", repoDir, "worktree", "add", "--", dir, "main"}
+	// ext:: and fd:: are refused, as at the clone: the checkout may
+	// lazy-fetch from a partial clone's promisor remote (#987).
+	want := append(gitenv.Args(gitenv.Transport), "-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never", "-C", repoDir, "worktree", "add", "--", dir, "main")
 	if len(call.Args) != len(want) {
 		t.Fatalf("args = %v, want %v", call.Args, want)
 	}
@@ -106,7 +114,7 @@ func TestSandbox_AlwaysClone_RemoteRepo(t *testing.T) {
 		t.Fatalf("expected 1 Runner call, got %d: %+v", len(fake.Calls), fake.Calls)
 	}
 	call := fake.Calls[0]
-	want := []string{"clone", "--branch", "main", "--", "cameronsjo/forgectl", dir}
+	want := append(gitenv.Args(gitenv.Transport), "-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never", "clone", "--branch", "main", "--", "cameronsjo/forgectl", dir)
 	if len(call.Args) != len(want) {
 		t.Fatalf("args = %v, want %v", call.Args, want)
 	}
@@ -132,7 +140,7 @@ func TestSandbox_Clone_NoRef_OmitsBranchFlag(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	call := fake.Last()
-	want := []string{"clone", "--", "cameronsjo/forgectl", dir}
+	want := append(gitenv.Args(gitenv.Transport), "-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never", "clone", "--", "cameronsjo/forgectl", dir)
 	if len(call.Args) != len(want) {
 		t.Fatalf("args = %v, want %v (branch flag should be omitted)", call.Args, want)
 	}
@@ -168,10 +176,22 @@ func TestSandbox_RejectsOptionLikeRepoRef(t *testing.T) {
 	}
 }
 
-// TestRejectOptionLike covers the guard directly.
+// TestRejectOptionLike covers the guard directly. The rejection names the
+// field but never echoes the value, which can carry a secret the caller then
+// logs (forgectl#787).
 func TestRejectOptionLike(t *testing.T) {
-	if err := RejectOptionLike("repo", "-x"); err == nil {
-		t.Error("expected rejection of a leading '-' value")
+	const value = "-pSEKRIT"
+	err := RejectOptionLike("shell", value)
+	if err == nil {
+		t.Fatal("expected rejection of a leading '-' value")
+	}
+	if strings.Contains(err.Error(), "SEKRIT") {
+		t.Errorf("rejection %q echoes the rejected value", err.Error())
+	}
+	for _, want := range []string{"shell", "starts with '-'"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("rejection %q does not say %q", err.Error(), want)
+		}
 	}
 	if err := RejectOptionLike("repo", "cameronsjo/forgectl"); err != nil {
 		t.Errorf("expected no error for a normal value, got %v", err)
@@ -557,5 +577,149 @@ func TestWithinWorkspace_RejectsSymlinkEscape(t *testing.T) {
 	}
 	if !WithinWorkspace(workspace, kept) {
 		t.Error("expected WithinWorkspace to accept a target actually inside the workspace")
+	}
+}
+
+// TestSandbox_CloneFailure_DoesNotEchoURLOrStderr: the repo can be an https
+// URL carrying a token, and the CommandError renders it in its argv; git's
+// stderr relays the remote's sideband (#658).
+func TestSandbox_CloneFailure_DoesNotEchoURLOrStderr(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "", &exec.CommandError{Name: name, Args: args, Stderr: "remote: STDERRMARKER\x1b[2J", ExitCode: 128, Err: errors.New("exit status 128")}
+	}}
+	_, err := Sandbox(context.Background(), fake, "https://SECRETTOK@git.example.test/o/r.git", "", true)
+	if err == nil {
+		t.Fatal("want the clone failure")
+	}
+	for _, s := range []string{"SECRETTOK", "STDERRMARKER", "\x1b"} {
+		if strings.Contains(err.Error(), s) {
+			t.Fatalf("error %q echoes %q", err, s)
+		}
+	}
+	var cmdErr *exec.CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error %v lost the CommandError from its chain", err)
+	}
+}
+
+// TestSandbox_FailedCheckout_RemovesItsTempDir is #707: a failed clone or
+// worktree add must not leave its os.MkdirTemp directory behind. TMPDIR is a
+// fresh dir per case, so any leftover entry is the leak.
+func TestSandbox_FailedCheckout_RemovesItsTempDir(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		repo        string
+		alwaysClone bool
+	}{
+		{"clone", "https://git.example.test/o/r.git", true},
+		{"worktree add", "/nonexistent/local/repo", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("TMPDIR", tmp)
+			fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				return "", &exec.CommandError{Name: name, Args: args, ExitCode: 128, Err: errors.New("exit status 128")}
+			}}
+			if _, err := Sandbox(context.Background(), fake, tc.repo, "main", tc.alwaysClone); err == nil {
+				t.Fatal("want the checkout failure")
+			}
+			entries, err := os.ReadDir(tmp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
+				t.Errorf("failed checkout left %s behind", e.Name())
+			}
+		})
+	}
+}
+
+// captureLog routes the default slog logger into a buffer at Debug for the
+// test's duration.
+func captureLog(t *testing.T) *strings.Builder {
+	t.Helper()
+	var buf strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// TestSandbox_LogLinesCarryNoRepoCredential is #711: every sandbox log line,
+// success and failure, names the repo without its token, and a failure line
+// does not render the CommandError (whose text is the argv, token included).
+func TestSandbox_LogLinesCarryNoRepoCredential(t *testing.T) {
+	const repo = "https://x-access-token:SECRETTOK@git.example.test/o/r.git" //nolint:gosec // G101: a fake credential the test asserts never reaches a log line
+	for _, tc := range []struct {
+		name string
+		fail bool
+	}{{"clone succeeds", false}, {"clone fails", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TMPDIR", t.TempDir())
+			buf := captureLog(t)
+			fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+				if tc.fail {
+					return "", &exec.CommandError{Name: name, Args: args, ExitCode: 128, Err: errors.New("exit status 128")}
+				}
+				return "", nil
+			}}
+			dir, _ := Sandbox(context.Background(), fake, repo, "main", true)
+			if dir != "" {
+				t.Cleanup(func() { _ = os.RemoveAll(dir) })
+			}
+			out := buf.String()
+			if strings.Contains(out, "SECRETTOK") {
+				t.Fatalf("log carries the repo credential:\n%s", out)
+			}
+			if !strings.Contains(out, redact.RemoteRepoPlaceholder) {
+				t.Fatalf("log does not name the repo by its placeholder (vacuity guard):\n%s", out)
+			}
+		})
+	}
+}
+
+// TestSandbox_WorktreeAddFailure_IsCategorical is #711 item 2: the worktree
+// leg reports categorically, as the clone leg does, keeping the
+// CommandError on the unwrap chain.
+func TestSandbox_WorktreeAddFailure_IsCategorical(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		return "", &exec.CommandError{Name: name, Args: args, Stderr: "fatal: STDERRMARKER\x1b[2J", ExitCode: 128, Err: errors.New("exit status 128")}
+	}}
+	_, err := Sandbox(context.Background(), fake, "/nonexistent/local/repo", "main", false)
+	if err == nil {
+		t.Fatal("want the worktree add failure")
+	}
+	if msg := err.Error(); msg != "git worktree add failed" {
+		t.Fatalf("error %q, want the categorical message", msg)
+	}
+	var cmdErr *exec.CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error %v lost the CommandError from its chain", err)
+	}
+}
+
+// teardownError quotes the workspace and renders the cause through
+// termsafe.Error (forgectl#794): a path carrying an escape byte must not
+// reach the terminal raw, from the workspace or from the *PathError's own
+// path, and the cause must stay reachable.
+//
+// Mutation that turns it red: format the workspace with a bare %s (the ESC
+// shows in the text), or wrap err itself rather than termsafe.Error(err) (the
+// entry path's ESC shows).
+func TestTeardownError_QuotesWorkspaceAndCause(t *testing.T) {
+	ws := "/tmp/forgectl-workflow-\x1b[2Jx"
+	cause := &os.PathError{Op: "unlinkat", Path: ws + "/sub\x1b]0;t\x07", Err: os.ErrPermission}
+	err := teardownError(ws, cause)
+	if strings.ContainsAny(err.Error(), "\x1b\x07") {
+		t.Errorf("teardown error carries a raw control byte: %q", err.Error())
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		t.Errorf("errors.Is lost the cause: %v", err)
+	}
+	var pe *os.PathError
+	if !errors.As(err, &pe) || pe != cause {
+		t.Errorf("errors.As lost the *PathError: %v", err)
 	}
 }

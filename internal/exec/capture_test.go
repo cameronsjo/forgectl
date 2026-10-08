@@ -18,6 +18,8 @@ package exec
 //       (short values inside it expand to [redacted]) is still removed
 //   [x] Security: overlapping values, where removing one fragment exposes
 //       the end of another, leave neither
+//   [x] Security: a withheld argv value longer than every masked entry,
+//       split by the cut, neither panics nor leaves a fragment (#925)
 //   [x] Unhappy: stdout past the ceiling kills the child and fails with
 //       ErrOutputTooLarge and no partial output
 //   [x] Happy: a large legitimate stdout (2 MiB) comes back whole
@@ -27,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -245,5 +248,99 @@ func TestOSRunner_Run_LargeLegitimateStdoutPassesWhole(t *testing.T) {
 	}
 	if len(out) != size || strings.Trim(out, "z") != "" {
 		t.Fatalf("stdout = %d bytes, want %d bytes of z", len(out), size)
+	}
+}
+
+// TestOSRunner_RunDiscardingStdout_PastTheCeilingSucceeds pins #661: a caller
+// that throws stdout away (a workflow `run` step) must not fail because the
+// command printed more than maxStdoutBytes. It writes 1 MiB past the real,
+// production ceiling.
+//
+// Mutation: pass r.ceiling() instead of discardStdout in RunDiscardingStdout
+// (or drop the discard branch in ceilingWriter.Write) and this fails with
+// ErrOutputTooLarge.
+func TestOSRunner_RunDiscardingStdout_PastTheCeilingSucceeds(t *testing.T) {
+	size := maxStdoutBytes + 1<<20
+	err := OSRunner{}.RunDiscardingStdout(t.Context(), "sh", "-c", fmt.Sprintf(`head -c %d /dev/zero`, size))
+	if err != nil {
+		t.Fatalf("RunDiscardingStdout: %v", err)
+	}
+}
+
+// TestOSRunner_RunDiscardingStdout_FailureKeepsMaskedStderr: discarding stdout
+// changes nothing else about the failure path. The error is a *CommandError
+// with the exit code and the masked stderr, and Output is empty because no
+// stdout was kept, even though the child printed the value there too.
+//
+// Mutation: pass argMask{} instead of maskFrom(ctx) in RunDiscardingStdout and
+// the value reaches Stderr and the error text.
+func TestOSRunner_RunDiscardingStdout_FailureKeepsMaskedStderr(t *testing.T) {
+	const value = "discard-secret-661" //nolint:gosec // G101: a fake value the mask must hide
+	entry := "K=" + value
+	ctx := WithMaskedAssignments(t.Context(), []string{entry})
+	err := OSRunner{}.RunDiscardingStdout(ctx, "sh", "-c", `echo "$1"; echo "bad $1" >&2; exit 4`, "sh", entry)
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error = %T (%v), want *CommandError", err, err)
+	}
+	if cmdErr.ExitCode != 4 {
+		t.Errorf("ExitCode = %d, want 4", cmdErr.ExitCode)
+	}
+	if cmdErr.Output != "" {
+		t.Errorf("Output = %q, want empty: stdout was discarded", cmdErr.Output)
+	}
+	if cmdErr.Stderr != "bad K="+Redacted {
+		t.Errorf("Stderr = %q, want %q", cmdErr.Stderr, "bad K="+Redacted)
+	}
+	if strings.Contains(err.Error(), value) {
+		t.Errorf("error text carries the masked value: %s", err)
+	}
+}
+
+// TestOSRunner_Run_LongWithheldArgSplitByCutLeavesNoFragment pins #925 end
+// to end. A user span withholds a positional argument longer than every
+// masked entry (here there are none), maskFor adds it as a bare value, and
+// the child echoes it into stderr past the 64 KiB tail cap with the cut
+// landing inside the first echo. straddleLen used to index past its failure
+// table on this path and panic the whole process.
+//
+// Mutation: size straddleLen's longest from m.entries only and the Run
+// panics; make straddleLen return 0 and the fragment survives into every
+// surface.
+func TestOSRunner_Run_LongWithheldArgSplitByCutLeavesNoFragment(t *testing.T) {
+	const secret = "Wv3Ht8Np1Qc6Lr0Js5Dk9Mf2Bg7Zt4Pw" //nolint:gosec // G101: a fake value the span must withhold
+	const fragment = 20
+	const reason = "fatal: done\n"
+	pad := maxStderrTail - fragment - len(secret) - 1 - len(reason)
+	script := fmt.Sprintf(`head -c 100000 /dev/zero | tr '\0' x >&2
+printf '%%s%%s\n' "$1" "$1" >&2
+head -c %d /dev/zero | tr '\0' y >&2
+printf 'fatal: done\n' >&2
+exit 1`, pad)
+	args := []string{"-c", script, "sh", secret}
+	ctx := WithOpaqueArgs(t.Context(), 3, 1)
+	if v := maskFor(ctx, args).data().values; !slices.Contains(v, secret) {
+		t.Fatalf("maskFor does not withhold the argument (%d values); the fixture is broken", len(v))
+	}
+	logs := captureLogs(t)
+
+	_, err := OSRunner{}.Run(ctx, "sh", args...)
+	var cmdErr *CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("error = %T %v, want *CommandError", err, err)
+	}
+	if !strings.HasSuffix(cmdErr.Stderr, "fatal: done") {
+		t.Fatalf("Stderr lost its tail")
+	}
+	if cmdErr.StderrDropped == 0 {
+		t.Fatal("StderrDropped = 0; the layout did not cross the cap, so the test proves nothing")
+	}
+	surfaces := map[string]string{"Error()": err.Error(), "Stderr": cmdErr.Stderr, "log": logs.String()}
+	for name, text := range surfaces {
+		for i := 0; i+6 <= len(secret); i++ {
+			if w := secret[i : i+6]; strings.Contains(text, w) {
+				t.Fatalf("%s carries secret fragment %q (offset %d)", name, w, i)
+			}
+		}
 	}
 }

@@ -393,7 +393,7 @@ func (e stubEntry) Type() fs.FileMode {
 }
 func (e stubEntry) Info() (fs.FileInfo, error) { return nil, e.infoErr }
 
-func withWalk(t *testing.T, w func(root string, fn fs.WalkDirFunc) error) {
+func withWalk(t *testing.T, w func(rt *os.Root, root string, fn walkFunc) error) {
 	t.Helper()
 	prev := walkDir
 	walkDir = w
@@ -403,14 +403,15 @@ func withWalk(t *testing.T, w func(root string, fn fs.WalkDirFunc) error) {
 func TestNewIndex_InjectedWalkErrors_RecordedAndSiblingsIndexed(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "ok.md"), "# Ok\n")
-	withWalk(t, func(root string, fn fs.WalkDirFunc) error {
-		if err := filepath.WalkDir(root, fn); err != nil {
+	withWalk(t, func(rt *os.Root, root string, fn walkFunc) error {
+		if err := walkHeld(rt, root, fn); err != nil {
 			return err
 		}
 		locked := filepath.Join(root, "locked")
-		_ = fn(locked, stubEntry{name: "locked", dir: true}, &fs.PathError{Op: "open", Path: locked, Err: fs.ErrPermission})
-		// A file the walk listed that is gone by the time EvalSymlinks runs.
-		_ = fn(filepath.Join(root, "gone.md"), stubEntry{name: "gone.md"}, nil)
+		_ = fn(locked, rt, stubEntry{name: "locked", dir: true}, &fs.PathError{Op: "open", Path: locked, Err: fs.ErrPermission})
+		// A file the walk listed that is gone by the time it is opened.
+		gone := filepath.Join(root, "gone.md")
+		_ = fn(gone, rt, stubEntry{name: "gone.md", infoErr: &fs.PathError{Op: "lstat", Path: gone, Err: fs.ErrNotExist}}, nil)
 		return nil
 	})
 
@@ -429,7 +430,7 @@ func TestNewIndex_InjectedWalkErrors_RecordedAndSiblingsIndexed(t *testing.T) {
 		t.Errorf("skipped entry lacks root label or reason: %+v", got[0])
 	}
 	// Reasons are the bare cause: the absolute path in the *fs.PathError
-	// (and in EvalSymlinks' lstat error for gone.md) must not leak into them.
+	// (and in the lstat error for gone.md) must not leak into them.
 	if got[0].Reason != fs.ErrPermission.Error() {
 		t.Errorf("locked reason = %q, want %q", got[0].Reason, fs.ErrPermission.Error())
 	}
@@ -440,8 +441,8 @@ func TestNewIndex_InjectedWalkErrors_RecordedAndSiblingsIndexed(t *testing.T) {
 
 func TestNewIndex_InjectedRootError_StillFatal(t *testing.T) {
 	dir := t.TempDir()
-	withWalk(t, func(root string, fn fs.WalkDirFunc) error {
-		return fn(root, nil, fs.ErrPermission)
+	withWalk(t, func(rt *os.Root, root string, fn walkFunc) error {
+		return fn(root, nil, nil, fs.ErrPermission)
 	})
 	if _, err := NewIndex([]string{dir}); err == nil {
 		t.Fatal("an error on the root itself must fail the build")
@@ -451,8 +452,8 @@ func TestNewIndex_InjectedRootError_StillFatal(t *testing.T) {
 func TestNewIndex_InfoFailure_RecordedNotFatal(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "real.md"), "# Real\n")
-	withWalk(t, func(root string, fn fs.WalkDirFunc) error {
-		return fn(filepath.Join(root, "real.md"), stubEntry{name: "real.md", infoErr: fs.ErrNotExist}, nil)
+	withWalk(t, func(rt *os.Root, root string, fn walkFunc) error {
+		return fn(filepath.Join(root, "real.md"), rt, stubEntry{name: "real.md", infoErr: fs.ErrNotExist}, nil)
 	})
 	idx, err := NewIndex([]string{dir})
 	if err != nil {
@@ -478,11 +479,11 @@ func TestNewIndex_CleanWalk_RecordsNothing(t *testing.T) {
 func TestCheck_ReportsSkippedPaths(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "ok.md"), "# Ok\n")
-	withWalk(t, func(root string, fn fs.WalkDirFunc) error {
-		if err := filepath.WalkDir(root, fn); err != nil {
+	withWalk(t, func(rt *os.Root, root string, fn walkFunc) error {
+		if err := walkHeld(rt, root, fn); err != nil {
 			return err
 		}
-		_ = fn(filepath.Join(root, "locked"), stubEntry{name: "locked", dir: true}, fs.ErrPermission)
+		_ = fn(filepath.Join(root, "locked"), rt, stubEntry{name: "locked", dir: true}, fs.ErrPermission)
 		return nil
 	})
 	idx, err := NewIndex([]string{dir})
@@ -495,17 +496,17 @@ func TestCheck_ReportsSkippedPaths(t *testing.T) {
 	}
 }
 
-func TestCheck_SkipUnderVaultRootIsNotReported(t *testing.T) {
+func TestCheck_SkipUnderVaultRootIsReported(t *testing.T) {
 	vault := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(vault, "n.md"), "# N\n")
-	withWalk(t, func(root string, fn fs.WalkDirFunc) error {
-		if err := filepath.WalkDir(root, fn); err != nil {
+	withWalk(t, func(rt *os.Root, root string, fn walkFunc) error {
+		if err := walkHeld(rt, root, fn); err != nil {
 			return err
 		}
-		_ = fn(filepath.Join(root, "locked"), stubEntry{name: "locked", dir: true}, fs.ErrPermission)
+		_ = fn(filepath.Join(root, "locked"), rt, stubEntry{name: "locked", dir: true}, fs.ErrPermission)
 		return nil
 	})
 	idx, err := NewIndex([]string{vault})
@@ -515,7 +516,7 @@ func TestCheck_SkipUnderVaultRootIsNotReported(t *testing.T) {
 	if len(idx.Skipped()) != 1 {
 		t.Fatalf("index should still record the skip: %+v", idx.Skipped())
 	}
-	if rep := idx.Check(); len(rep.Skipped) != 0 {
-		t.Errorf("a vault root is never checked, so its skips must not fail the check: %+v", rep.Skipped)
+	if rep := idx.Check(); len(rep.Skipped) != 1 || rep.Skipped[0].Rel != "locked" {
+		t.Errorf("a vault root is checked, so its skip must reach the report: %+v", rep.Skipped)
 	}
 }

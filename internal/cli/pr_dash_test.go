@@ -233,7 +233,7 @@ func TestRenderSessions_MarksUnclassifiedWorkspace(t *testing.T) {
 // silently rendering it as live.
 func TestSessionStatus_UnclassifiedMatchesTheDash(t *testing.T) {
 	var zero pr.SessionSummary
-	if got := sessionStatus(nil, zero, true); got != workspaceUnclassifiedStatus {
+	if got := sessionStatus(nil, zero, tmuxReadable); got != workspaceUnclassifiedStatus {
 		t.Errorf("sessionStatus(unclassified) = %q, want %q", got, workspaceUnclassifiedStatus)
 	}
 }
@@ -329,7 +329,7 @@ func TestSessionSinks_AgreeAcrossWorkspaceAndPhase(t *testing.T) {
 				}
 			}
 
-			st := sessionStatus(map[pr.Ref]bool{s.Ref(): true}, s, true)
+			st := sessionStatus(map[pr.Ref]bool{s.Ref(): true}, s, tmuxReadable)
 			pl := phaseLabel(s)
 			ws := workspaceState(s)
 			var buf bytes.Buffer

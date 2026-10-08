@@ -347,14 +347,20 @@ func TestRender_Math_OneLineBlockDoesNotInterruptParagraph(t *testing.T) {
 	}
 }
 
+// "$$x$$ and more" is not a block in either dialect. A vault root keeps it
+// as inline display math; a docs root, where $$ must be block-shaped
+// (forgectl#650), keeps it as text.
 func TestRender_Math_DisplayFollowedByTextStaysInline(t *testing.T) {
-	out := renderOrFail(t, "$$x$$ and more")
+	out := renderVaultOrFail(t, "$$x$$ and more")
 
 	if strings.Contains(out, mathDivOpen) {
 		t.Errorf("$$x$$ with trailing text became a block: %s", out)
 	}
 	if want := `<p><span class="math math-display">$$x$$</span> and more</p>`; !strings.Contains(out, want) {
 		t.Errorf("output missing %q: %s", want, out)
+	}
+	if got, want := renderOrFail(t, "$$x$$ and more"), "<p>$$x$$ and more</p>\n"; got != want {
+		t.Errorf("docs root = %q, want %q", got, want)
 	}
 }
 
@@ -576,6 +582,17 @@ func TestRender_Math_BlockMarkupEscaped(t *testing.T) {
 	if !strings.Contains(out, mathDivOpen+"$$\n&lt;/div&gt;") {
 		t.Errorf("markup was not escaped inside the display block: %s", out)
 	}
+	// TeX lines that start with "<" are math, not HTML: a bra-ket, an
+	// inner product, a comparison (forgectl#767 review).
+	for _, tc := range []struct{ src, want string }{
+		{"$$\n<a|b> = 1\n$$\n", "$$\n&lt;a|b&gt; = 1"},
+		{"$$\n<x, y> = 0\n$$\n", "$$\n&lt;x, y&gt; = 0"},
+		{"$$\na\n<b\n$$\n", "$$\na\n&lt;b"},
+	} {
+		if out := renderOrFail(t, tc.src); !strings.Contains(out, mathDivOpen+tc.want) {
+			t.Errorf("%q is not a display block: %s", tc.src, out)
+		}
+	}
 }
 
 func TestRender_Math_HeadingIDUnchanged(t *testing.T) {
@@ -633,10 +650,10 @@ func TestRender_Math_SingleDollarIsVaultOnly(t *testing.T) {
 	}
 }
 
-// The docs-root dialect keeps every other math form.
+// The docs-root dialect keeps every block-shaped math form.
 func TestRender_Math_DocsRootKeepsDoubleDollarAndFence(t *testing.T) {
-	if out := renderOrFail(t, "so $$x^2$$ here"); !strings.Contains(out, mathDisplayOpenSpan) {
-		t.Errorf("docs root lost inline $$…$$: %s", out)
+	if out := renderVaultOrFail(t, "so $$x^2$$ here"); !strings.Contains(out, mathDisplayOpenSpan) {
+		t.Errorf("vault root lost inline $$…$$: %s", out)
 	}
 	if out := renderOrFail(t, "$$\nx^2\n$$\n"); !strings.Contains(out, mathDivOpen) {
 		t.Errorf("docs root lost a $$ block: %s", out)
@@ -670,6 +687,54 @@ func TestRender_Math_DocsRootByteIdenticalWithoutInlineMath(t *testing.T) {
 		}
 		if got.String() != want.String() {
 			t.Errorf("docs root output for %q differs from a no-inline-math pipeline:\n got %q\nwant %q", src, got.String(), want.String())
+		}
+	}
+}
+
+// In a docs root, $$ is math only when it is block-shaped: the opener starts
+// its line and the closer ends its line, whitespace aside (forgectl#650).
+// Shell's PID, currency and any other mid-line $$ stay text; a vault root
+// keeps Obsidian's inline $$…$$.
+func TestRender_Math_DocsRootDoubleDollarMustBeBlockShaped(t *testing.T) {
+	literal := map[string]string{
+		"tmp=/tmp/x.$$; rm /tmp/y.$$": "<p>tmp=/tmp/x.$$; rm /tmp/y.$$</p>\n",
+		"cost $$5 and $$10":           "<p>cost $$5 and $$10</p>\n",
+		"PID $$ of the shell":         "<p>PID $$ of the shell</p>\n",
+		"echo $$":                     "<p>echo $$</p>\n",
+		"so $$x^2$$ here":             "<p>so $$x^2$$ here</p>\n",
+		"$$x$$ and $$y$$":             "<p>$$x$$ and $$y$$</p>\n",
+		"kill $$\n$$ is the PID":      "<p>kill $$\n$$ is the PID</p>\n",
+		"$$x\nthen $$y$$":             "<p>$$x\nthen $$y$$</p>\n",
+		"- run echo $$ and $$x$$\n":   "<ul>\n<li>run echo $$ and $$x$$</li>\n</ul>\n",
+		"> tmp=x.$$; rm y.$$\n":       "<blockquote>\n<p>tmp=x.$$; rm y.$$</p>\n</blockquote>\n",
+		"# PID $$ and $$x$$\n":        `<h1 id="pid--and-x">PID $$ and $$x$$</h1>` + "\n",
+	}
+	for src, want := range literal {
+		if got := renderOrFail(t, src); got != want {
+			t.Errorf("docs render of %q = %q, want %q", src, got, want)
+		}
+	}
+	// Block-shaped display math still renders in a docs root, including the
+	// forms that reach the inline parser rather than the block parser.
+	for _, src := range []string{
+		"$$x$$\n",              // one-line block
+		"$$\nx\n$$\n",          // multi-line block
+		"para\n$$x$$\n",        // straight after paragraph text
+		"para\n$$\nx\n$$\n",    // multi-line, straight after text
+		"para\n  $$x$$  \nb\n", // indented, trailing spaces
+		"- $$\n  x\n  $$\n",    // in a list item
+		"> $$\n> x\n> $$\n",    // in a blockquote
+		"> $$x$$\n",            // one-line, in a blockquote
+		"para\n$$x\ny$$\n",     // opener and closer on their own lines' ends
+	} {
+		if out := renderOrFail(t, src); !strings.Contains(out, `class="math math-display"`) {
+			t.Errorf("docs root lost block-shaped display math %q: %s", src, out)
+		}
+	}
+	// The vault root keeps inline $$…$$ anywhere in a line.
+	for _, src := range []string{"so $$x^2$$ here", "$$x$$ and $$y$$", "a $$x\ny$$ b"} {
+		if out := renderVaultOrFail(t, src); !strings.Contains(out, mathDisplayOpenSpan) {
+			t.Errorf("vault root lost inline $$…$$ %q: %s", src, out)
 		}
 	}
 }

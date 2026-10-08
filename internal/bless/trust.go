@@ -6,6 +6,9 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/tomlerr"
 )
 
 // Store is the parsed trust store: the set of enrolled machine public keys plus
@@ -59,10 +62,10 @@ func DecodeStore(data []byte) (Store, error) {
 	var s Store
 	md, err := toml.Decode(string(data), &s)
 	if err != nil {
-		return Store{}, fmt.Errorf("decode trust store: %w", err)
+		return Store{}, fmt.Errorf("decode trust store: %w", tomlerr.Scrub(err))
 	}
 	if undecoded := md.Undecoded(); len(undecoded) > 0 {
-		return Store{}, fmt.Errorf("decode trust store: unknown key(s) %s", joinKeys(undecoded))
+		return Store{}, fmt.Errorf("decode trust store: unknown key(s) %s", tomlerr.Keys(undecoded))
 	}
 	if s.Schema != StoreSchema {
 		return Store{}, fmt.Errorf("decode trust store: unsupported schema %d (want %d)", s.Schema, StoreSchema)
@@ -100,17 +103,17 @@ func checkAnchorOwnership(path string) error {
 		return err
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("anchor %s is not a regular file", path)
+		return fmt.Errorf("anchor %s is not a regular file", termsafe.QuotePath(path))
 	}
 	if perm := info.Mode().Perm(); perm&0o022 != 0 {
-		return fmt.Errorf("anchor %s is group- or world-writable (mode %#o)", path, perm)
+		return fmt.Errorf("anchor %s is group- or world-writable (mode %#o)", termsafe.QuotePath(path), perm)
 	}
 	uid, err := statOwnerUID(info)
 	if err != nil {
 		return err
 	}
 	if uid != 0 {
-		return fmt.Errorf("anchor %s is owned by uid %d, want 0 (root)", path, uid)
+		return fmt.Errorf("anchor %s is owned by uid %d, want 0 (root)", termsafe.QuotePath(path), uid)
 	}
 	return nil
 }

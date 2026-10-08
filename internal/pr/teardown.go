@@ -15,6 +15,7 @@ import (
 	"github.com/cameronsjo/forgectl/internal/quarantine"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
+	"github.com/cameronsjo/forgectl/internal/tmux"
 )
 
 // sandboxTeardown is the workspace-removal seam. Production wires the real
@@ -30,6 +31,45 @@ var sandboxTeardown = sandbox.Teardown
 // the real pinned-root Lstat and SameFile checks have passed, so coverage does
 // not depend on whether the host filesystem recycles an inode into a symlink.
 var staleMemberIsRegular = func(info fs.FileInfo) bool { return info.Mode().IsRegular() }
+
+// beforeTeardownReread runs between a pinned-handle protocol's root.Lstat of
+// the member and its re-read open (discardStale, discardRecordOnly,
+// setAsideUndecodableRecord). It is a no-op in production; a test sets it to
+// swap the entry in exactly the window the Lstat cannot cover (forgectl#776).
+// Tests must restore it and must not run in parallel while overriding it.
+var beforeTeardownReread = func(string) {}
+
+// rereadPinnedMember re-reads member's bytes through root, the pinned
+// sessions-dir handle, for the byte comparison each pinned-handle protocol
+// makes before it acts. name is the member's base name in root.
+//
+// The caller's root.Lstat checked the NAME; this proves what the open
+// reached. openRegularInRoot refuses a symlink (even one inside the root) and a
+// FIFO without blocking, and the descriptor must be the very file the member
+// was resolved from (os.SameFile against member.info). So a same-bytes copy,
+// or the original reached through a link, is refused before its bytes are
+// compared (forgectl#776).
+func rereadPinnedMember(root *os.Root, name string, member breadcrumbMember) ([]byte, error) {
+	beforeTeardownReread(member.path)
+	file, info, err := openRegularInRoot(root, name)
+	if err != nil {
+		return nil, fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, safeTermError(err))
+	}
+	if !os.SameFile(info, member.info) {
+		_ = file.Close()
+		return nil, fmt.Errorf("breadcrumb %s changed identity before its re-read; refusing to act on it",
+			member.displayPath)
+	}
+	data, readErr := readBreadcrumbBytes(file)
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, safeTermError(readErr))
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close breadcrumb %s after re-read: %w", member.displayPath, safeTermError(closeErr))
+	}
+	return data, nil
+}
 
 // Teardown discards the review session recorded at path.
 //
@@ -60,7 +100,7 @@ func (c *Client) Teardown(ctx context.Context, path string) error {
 	// non-reentrant: Cleanup takes it ONCE and calls auditedTeardownLocked per
 	// candidate rather than re-entering here.
 	return c.withLifecycleLock(ctx, "teardown", func() error {
-		return c.auditedTeardownLocked(ctx, auditVerbTeardown, path)
+		return c.auditedTeardownLocked(ctx, auditVerbTeardown, path, newTmuxBudget())
 	})
 }
 
@@ -121,14 +161,17 @@ func (c *Client) planTeardownLocked(path string) (teardownPlan, error) {
 // executeTeardownLocked performs the arm the plan chose. The discard functions
 // re-prove every fact they act on, so a drift observed here is a refusal after
 // the plan rather than a check the plan skipped.
-func (c *Client) executeTeardownLocked(ctx context.Context, plan teardownPlan) error {
+//
+// budget is the tmux time the live arm's window kill may draw on; a sweep
+// passes the one it shares across every candidate.
+func (c *Client) executeTeardownLocked(ctx context.Context, plan teardownPlan, budget *tmuxBudget) error {
 	switch plan.kind {
 	case teardownKindRecordOnly:
 		return c.discardRecordOnly(plan.member)
 	case teardownKindStale:
 		return c.discardStale(plan.member)
 	case teardownKindLive:
-		return c.discard(ctx, plan.sess)
+		return c.discard(ctx, plan.sess, budget)
 	default:
 		return fmt.Errorf("cannot tear down breadcrumb %s: unknown teardown arm", plan.member.displayPath)
 	}
@@ -148,7 +191,7 @@ func (c *Client) teardownLocked(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	return c.executeTeardownLocked(ctx, plan)
+	return c.executeTeardownLocked(ctx, plan, newTmuxBudget())
 }
 
 // auditedTeardownLocked is the teardown core plus the write-ahead pair, for the
@@ -165,10 +208,19 @@ func (c *Client) teardownLocked(ctx context.Context, path string) error {
 // A failure to write the intent row REFUSES the mutation, matching the repair
 // arms: the row is the only pointer left to a clean room once the record is
 // gone.
-func (c *Client) auditedTeardownLocked(ctx context.Context, verb, path string) error {
+//
+// A live teardown whose tmux budget is exhausted — a tmux call already timed
+// out earlier in the same sweep — is SKIPPED here, with the other refusals and
+// before the intent row: asking again would only spend the lock hold on a call
+// that will not return, and the record, window and workspace are all left
+// exactly as they were.
+func (c *Client) auditedTeardownLocked(ctx context.Context, verb, path string, budget *tmuxBudget) error {
 	plan, err := c.planTeardownLocked(path)
 	if err != nil {
 		return err
+	}
+	if plan.kind == teardownKindLive && budget.exhausted() {
+		return ErrTmuxBudgetSpent
 	}
 	row := teardownRowFor(verb, plan.member)
 	if plan.kind == teardownKindLive {
@@ -182,7 +234,7 @@ func (c *Client) auditedTeardownLocked(ctx context.Context, verb, path string) e
 	if err != nil {
 		return err
 	}
-	execErr := c.executeTeardownLocked(ctx, plan)
+	execErr := c.executeTeardownLocked(ctx, plan, budget)
 	c.completeRepairRow(rowID, row, execErr)
 	return execErr
 }
@@ -226,7 +278,7 @@ func resolvePath(path string) string {
 // against the filesystem again, and every step runs through ONE pinned
 // directory handle opened at the top:
 //
-//	os.OpenRoot(sessionsDir)             -> pin the directory for every step below
+//	openDirRoot(sessionsDir)             -> pin the directory for every step below
 //	Lstat "." through the handle         -> SameFile as at check time
 //	Lstat the member's base name         -> SameFile as at check time
 //	re-read that name through the handle -> byte-identical
@@ -247,7 +299,7 @@ func resolvePath(path string) string {
 // spelled out on validateWorkspace. That warning is about following a symlink
 // to its target; os.Root REFUSES an escaping symlink rather than following it,
 // so acting through the handle can never widen into a deletion elsewhere.
-// OpenRoot resolves c.sessionsDir itself in the ordinary way, so a symlinked
+// openDirRoot resolves c.sessionsDir itself in the ordinary way, so a symlinked
 // session directory remains supported.
 //
 // Any drift refuses: an identity mismatch, a symlink swapped in, a byte or
@@ -292,7 +344,7 @@ func (c *Client) discardStale(member breadcrumbMember) error {
 	slog.Debug("Preparing to discard a stale review breadcrumb.",
 		"ref", member.breadcrumb.Ref, "path", member.path)
 
-	root, err := os.OpenRoot(c.sessionsDir)
+	root, err := openDirRoot(c.sessionsDir)
 	if err != nil {
 		return fmt.Errorf("pin pr sessions dir %s: %w", c.sessionsDir, err)
 	}
@@ -322,7 +374,7 @@ func (c *Client) discardStale(member breadcrumbMember) error {
 	// replacement race.
 	info, err := root.Lstat(name)
 	if err != nil {
-		return fmt.Errorf("re-stat breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+		return fmt.Errorf("re-stat breadcrumb %s: %w", member.displayPath, safeTermError(err))
 	}
 	if !os.SameFile(info, member.info) {
 		return fmt.Errorf("breadcrumb %s changed identity during teardown; refusing to remove it", member.displayPath)
@@ -331,17 +383,9 @@ func (c *Client) discardStale(member breadcrumbMember) error {
 		return fmt.Errorf("breadcrumb %s is no longer a regular file; refusing to remove it", member.displayPath)
 	}
 
-	file, err := root.Open(name)
+	data, err := rereadPinnedMember(root, name, member)
 	if err != nil {
-		return fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
-	}
-	data, readErr := readBreadcrumbBytes(file)
-	closeErr := file.Close()
-	if readErr != nil {
-		return fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(readErr))
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close breadcrumb %s after re-read: %w", member.displayPath, termsafe.Error(closeErr))
+		return err
 	}
 	if !bytes.Equal(data, member.bytes) {
 		return fmt.Errorf("breadcrumb %s changed on disk during teardown; refusing to remove it", member.displayPath)
@@ -373,7 +417,7 @@ func (c *Client) discardStale(member breadcrumbMember) error {
 	}
 
 	if err := root.Remove(name); err != nil {
-		return fmt.Errorf("remove breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+		return fmt.Errorf("remove breadcrumb %s: %w", member.displayPath, safeTermError(err))
 	}
 	slog.Info("Successfully discarded a stale review breadcrumb.", "ref", bc.Ref)
 	return nil
@@ -395,7 +439,7 @@ func (c *Client) discardRecordOnly(member breadcrumbMember) error {
 	slog.Debug("Preparing to discard a session record with no workspace.",
 		"ref", member.breadcrumb.Ref, "path", member.path, "phase", string(member.breadcrumb.Phase))
 
-	root, err := os.OpenRoot(c.sessionsDir)
+	root, err := openDirRoot(c.sessionsDir)
 	if err != nil {
 		return fmt.Errorf("pin pr sessions dir %s: %w", c.sessionsDir, err)
 	}
@@ -417,7 +461,7 @@ func (c *Client) discardRecordOnly(member breadcrumbMember) error {
 	name := filepath.Base(member.path)
 	info, err := root.Lstat(name)
 	if err != nil {
-		return fmt.Errorf("re-stat breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+		return fmt.Errorf("re-stat breadcrumb %s: %w", member.displayPath, safeTermError(err))
 	}
 	if !os.SameFile(info, member.info) {
 		return fmt.Errorf("breadcrumb %s changed identity during teardown; refusing to remove it", member.displayPath)
@@ -426,17 +470,9 @@ func (c *Client) discardRecordOnly(member breadcrumbMember) error {
 		return fmt.Errorf("breadcrumb %s is no longer a regular file; refusing to remove it", member.displayPath)
 	}
 
-	file, err := root.Open(name)
+	data, err := rereadPinnedMember(root, name, member)
 	if err != nil {
-		return fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
-	}
-	data, readErr := readBreadcrumbBytes(file)
-	closeErr := file.Close()
-	if readErr != nil {
-		return fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(readErr))
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close breadcrumb %s after re-read: %w", member.displayPath, termsafe.Error(closeErr))
+		return err
 	}
 	if !bytes.Equal(data, member.bytes) {
 		return fmt.Errorf("breadcrumb %s changed on disk during teardown; refusing to remove it", member.displayPath)
@@ -454,7 +490,7 @@ func (c *Client) discardRecordOnly(member breadcrumbMember) error {
 	}
 
 	if err := root.Remove(name); err != nil {
-		return fmt.Errorf("remove breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+		return fmt.Errorf("remove breadcrumb %s: %w", member.displayPath, safeTermError(err))
 	}
 	slog.Info("Successfully discarded a session record that had no workspace.", "ref", bc.Ref)
 	return nil
@@ -490,7 +526,7 @@ const unreadableSuffix = ".unreadable-"
 func (c *Client) setAsideUndecodableRecord(member breadcrumbMember) (string, error) {
 	slog.Debug("Preparing to set aside a session record this build cannot read.", "path", member.path)
 
-	root, err := os.OpenRoot(c.sessionsDir)
+	root, err := openDirRoot(c.sessionsDir)
 	if err != nil {
 		return "", fmt.Errorf("pin pr sessions dir %s: %w", c.sessionsDir, err)
 	}
@@ -512,7 +548,7 @@ func (c *Client) setAsideUndecodableRecord(member breadcrumbMember) (string, err
 	name := filepath.Base(member.path)
 	info, err := root.Lstat(name)
 	if err != nil {
-		return "", fmt.Errorf("re-stat breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
+		return "", fmt.Errorf("re-stat breadcrumb %s: %w", member.displayPath, safeTermError(err))
 	}
 	if !os.SameFile(info, member.info) {
 		return "", fmt.Errorf("breadcrumb %s changed identity during repair; refusing to move it", member.displayPath)
@@ -521,17 +557,9 @@ func (c *Client) setAsideUndecodableRecord(member breadcrumbMember) (string, err
 		return "", fmt.Errorf("breadcrumb %s is no longer a regular file; refusing to move it", member.displayPath)
 	}
 
-	file, err := root.Open(name)
+	data, err := rereadPinnedMember(root, name, member)
 	if err != nil {
-		return "", fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(err))
-	}
-	data, readErr := readBreadcrumbBytes(file)
-	closeErr := file.Close()
-	if readErr != nil {
-		return "", fmt.Errorf("re-read breadcrumb %s: %w", member.displayPath, termsafe.Error(readErr))
-	}
-	if closeErr != nil {
-		return "", fmt.Errorf("close breadcrumb %s after re-read: %w", member.displayPath, termsafe.Error(closeErr))
+		return "", err
 	}
 	if !bytes.Equal(data, member.bytes) {
 		return "", fmt.Errorf("breadcrumb %s changed on disk during repair; refusing to move it", member.displayPath)
@@ -549,7 +577,7 @@ func (c *Client) setAsideUndecodableRecord(member breadcrumbMember) (string, err
 		return "", err
 	}
 	if err := root.Rename(name, aside); err != nil {
-		return "", fmt.Errorf("set breadcrumb %s aside: %w", member.displayPath, termsafe.Error(err))
+		return "", fmt.Errorf("set breadcrumb %s aside: %w", member.displayPath, safeTermError(err))
 	}
 	slog.Info("Successfully set an unreadable session record aside; its bytes are preserved under a new name.",
 		"was", member.path, "now", filepath.Join(c.sessionsDir, aside))
@@ -597,111 +625,245 @@ func sameBreadcrumbRecord(a, b Breadcrumb) bool {
 }
 
 // ErrWindowKillTimedOut is what a live teardown returns when tmux did not
-// answer within teardownTmuxBudget, so it cannot say whether the review window
+// answer within lockedTmuxBudget, so it cannot say whether the review window
 // still exists. The record has been parked in needs-repair and the workspace
 // left in place; nothing was discarded.
 var ErrWindowKillTimedOut = errors.New("review window kill timed out (tmux unresponsive)")
 
 // ErrRecordNotParked is wrapped alongside ErrWindowKillTimedOut when the
 // timeout left the record exactly as it was because it could not be parked in
-// needs-repair (a legacy record with no version, or a failed write). Callers
+// needs-repair (no record on disk, or a failed write; a legacy record is
+// converted and parked, forgectl#696). Callers
 // must not tell the operator the record was parked when this is present.
 var ErrRecordNotParked = errors.New("the record could not be parked in needs-repair")
 
-// windowKillTimeoutReason is the needs-repair reason such a record carries.
+// ErrTmuxBudgetSpent is what a sweep returns for a live session it did not
+// attempt: an earlier tmux call in the same sweep already timed out, so the
+// session was left exactly as it was — record, window and workspace.
+var ErrTmuxBudgetSpent = errors.New("skipped: tmux stopped answering earlier in this sweep")
+
+// windowKillTimeoutReason is the needs-repair reason such a record carries,
+// followed by the window it could not account for (see unknownWindow).
 const windowKillTimeoutReason = "window kill timed out (tmux unresponsive)"
 
-// teardownTmuxBudget bounds ALL the tmux work one teardown does under the
-// lifecycle lock — resolve the review session, resolve the window, revalidate
-// it, kill it — as a single deadline, not per call (forgectl#556).
-//
-// The kill stays under the lock on purpose. The window is found by the review's
-// NAME under the shared review session, so once the lock is released a new
-// admission for the same ref can create a same-named window, and an unlocked
-// kill would then take out the live review that replaced this one. Keeping it
-// under the lock costs a bound instead: a hung tmux server would otherwise hold
-// the lock until the operator killed the process, and every other pr verb would
-// fail with a busy error after its own wait.
-//
-// 3 s: a healthy tmux answers each of the four calls in single-digit
-// milliseconds, so this is three orders of magnitude of headroom for a loaded
-// machine, while staying well under defaultLockWait (10 s) — a verb queued
-// behind one hung teardown still acquires the lock once the budget lapses,
-// instead of timing out with it. A single shared budget, not one per call, so
-// the deadline is 3 s rather than 4 x that.
-//
-// The deadline only bounds the tmux CLIENT process's lifetime if the runner
-// also stops waiting on pipes a grandchild inherited: exec's pipeWaitDelay adds
-// up to 500 ms on top for that. It is a var only so a test can shrink it.
-var teardownTmuxBudget = 3 * time.Second
+// ErrWindowStateUnreadable is wrapped into a live teardown's error when tmux
+// answered the review-window resolve with something other than a clean
+// listing, so whether the window still exists is unknown (forgectl#702). The
+// record is parked in needs-repair (unless ErrRecordNotParked is also present)
+// and nothing is removed.
+var ErrWindowStateUnreadable = errors.New("the review window's state could not be read from tmux")
 
-// killReviewWindow kills the review window if it is still open, within
-// teardownTmuxBudget, and reports whether the budget ran out before tmux could
-// say what state the window is in. Resolution is exact — the window must carry
-// this review's name AND sit under the review session's native id — and the
-// kill revalidates that before issuing. A failure to resolve means there is
-// nothing of ours to kill, which is the ordinary case after the reviewer exits;
-// it must never widen into killing whatever tmux would have matched. Other
-// kill failures stay best-effort, as before.
+// windowUnreadableReason is the needs-repair reason such a record carries,
+// followed by the window it could not account for (see unknownWindow).
+const windowUnreadableReason = "review window state could not be read from tmux"
+
+// windowAmbiguousReason is the needs-repair reason a teardown parks with when
+// more than one window in the review session carries the review's name.
+const windowAmbiguousReason = "more than one review window carries this review's name; close the one that is not this review, then tear it down again"
+
+// killReviewWindow kills the review window if it is still open, within one
+// lockedTmuxBudget, and reports whether the window's state is still UNKNOWN
+// afterwards. Resolution is exact — the window must carry this review's name
+// AND sit under the review session's native id — and the kill revalidates
+// that before issuing. Only a CONFIRMED absence means there is nothing of ours
+// to kill: the pinned server answered cleanly and the review session or the
+// window was not in its listing (windowConfirmedAbsent). That is the ordinary
+// case after the reviewer exits; it must never widen into killing whatever
+// tmux would have matched. The kill step is held to the same standard: its
+// revalidation re-reads the window list, and a failure there or in
+// kill-window itself is gone only when it is a confirmed absence, tmux's
+// exact "can't find window" for the revalidated id, or a server generation
+// change (windowGoneAtKill); every other kill failure is unsettled too.
 //
-// A timeout (or the caller's cancellation, which leaves the window just as
-// unknown) is NOT treated as "nothing to kill": the window may be live, and
-// window names depend only on owner/repo/number, so discarding the record
-// would leave an orphan that a later same-ref review, teardown or repair could
-// collide with. The caller fails closed on true.
+// Three outcomes are NOT "nothing to kill", and the caller fails closed on
+// each (forgectl#702):
+//
+//   - timedOut: tmux did not answer within the budget (or the caller
+//     cancelled), so the window may be live.
+//   - unsettled wrapping tmux.ErrAmbiguousWindow: more than one window in the
+//     review session carries this review's name (tmux allows that), so
+//     resolution refused to pick one and at least one of them is live.
+//   - unsettled wrapping ErrWindowStateUnreadable: tmux answered, but not with
+//     a listing that settles the question — an unreadable server, a pin
+//     mismatch, a parse failure, a reparented window, or a kill-window that
+//     failed. An unreadable server is not an absent window.
+//
+// Window names depend only on owner/repo/number, so discarding the record in
+// any of these cases would leave an orphan that a later same-ref review,
+// teardown or repair could collide with.
+//
+// A ref whose window name cannot be derived at all is the one non-tmux
+// failure, and it still reads as nothing to kill: launch derives the same
+// name, so no window of ours can carry it.
+//
+// The kill stays under the lock on purpose. The window is found by the
+// review's NAME under the shared review session, so once the lock is released
+// a new admission for the same ref can create a same-named window, and an
+// unlocked kill would then take out the live review that replaced this one.
+// The budget, not a release, is what keeps a hung tmux from holding the lock.
+//
+// window names what the caller must record when the state is unknown: the
+// derived window name always, plus the window's native id when resolution got
+// that far before tmux stopped answering (see unknownWindow).
 //
 // The bounded context is used ONLY here; the caller's own ctx continues on.
-func (c *Client) killReviewWindow(ctx context.Context, ref Ref) (timedOut bool) {
-	tctx, cancel := context.WithTimeout(ctx, teardownTmuxBudget)
-	defer cancel()
-	window, err := c.resolveReviewWindow(tctx, ref)
+func (c *Client) killReviewWindow(ctx context.Context, ref Ref, budget *tmuxBudget) (timedOut bool, window string, unsettled error) {
+	name, err := ReviewWindowName(ref)
 	if err != nil {
-		if tctx.Err() != nil {
-			slog.Warn("Timed out resolving the review window under the lifecycle lock.", "budget", teardownTmuxBudget)
-			return true
-		}
-		// The name is diagnostic only here; a ref that cannot even be keyed logs
-		// as such rather than shadowing the resolve failure being reported.
-		name, nameErr := ReviewWindowName(ref)
-		if nameErr != nil {
-			name = "<no derivable identity>"
-		}
-		slog.Debug("No review window to kill (already gone).", "window", name, "error", err)
-		return false
+		slog.Debug("No review window to kill (no derivable window name).", "ref", ref.String(), "error", err)
+		return false, "", nil
 	}
-	if err := c.tmuxClient.KillWindow(tctx, window); err != nil {
-		if tctx.Err() != nil {
+	tctx, done := budget.bound(ctx)
+	defer done()
+	resolved, err := c.resolveReviewWindow(tctx, ref)
+	if err != nil {
+		if tctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+			slog.Warn("Timed out resolving the review window under the lifecycle lock.", "budget", lockedTmuxBudget)
+			return true, unknownWindow(ref, ""), nil
+		}
+		if errors.Is(err, tmux.ErrAmbiguousWindow) {
+			slog.Warn("More than one review window carries this review's name; refusing to pick one.",
+				"ref", ref.String(), "error", err)
+			return false, "", err
+		}
+		if windowConfirmedAbsent(err) {
+			slog.Debug("No review window to kill (already gone).", "window", name, "error", err)
+			return false, "", nil
+		}
+		slog.Warn("Could not read the review window's state from tmux; refusing to treat it as gone.",
+			"window", name, "error", err)
+		return false, unknownWindow(ref, ""), fmt.Errorf("%w: %w", ErrWindowStateUnreadable, err)
+	}
+	if err := c.tmuxClient.KillWindow(tctx, resolved); err != nil {
+		if tctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
 			slog.Warn("Timed out killing the review window under the lifecycle lock.",
-				"window_id", window.ID, "budget", teardownTmuxBudget)
-			return true
+				"window_id", resolved.ID, "budget", lockedTmuxBudget)
+			return true, unknownWindow(ref, resolved.ID), nil
 		}
-		slog.Debug("Review window could not be killed.", "window_id", window.ID, "error", err)
+		if windowGoneAtKill(err) {
+			slog.Debug("Review window was already gone at kill time.", "window_id", resolved.ID, "error", err)
+			return false, "", nil
+		}
+		slog.Warn("Could not kill the review window; refusing to treat it as gone.",
+			"window_id", resolved.ID, "error", err)
+		return false, unknownWindow(ref, resolved.ID), fmt.Errorf("%w: %w", ErrWindowStateUnreadable, err)
 	}
-	return false
+	return false, "", nil
+}
+
+// windowGoneAtKill reports whether a KillWindow failure means the resolved
+// window is gone: a clean listing without it (windowConfirmedAbsent), tmux's
+// exact "can't find window" answer to the kill of the id just revalidated,
+// confirmed by a re-read showing the same server generation (ErrObjectGone,
+// forgectl#746), or a generation change — the socket now
+// answers from a different server, and the old one's windows are gone or
+// unreachable. "Unreachable" is the blind spot: an old server whose socket was
+// unlinked and replaced keeps its windows running where no command can reach
+// them, which the resolve step's ErrSessionNotFound shares. Anything else — an
+// unreadable list, a pin mismatch (ErrSelectorChanged), a reparented window
+// (ErrWrongParent), kill-window itself failing for another reason — leaves the
+// window possibly live (forgectl#702).
+func windowGoneAtKill(err error) bool {
+	return windowConfirmedAbsent(err) || errors.Is(err, tmux.ErrGenerationChanged)
+}
+
+// windowConfirmedAbsent reports whether a resolve failure is a clean answer
+// that the review window does not exist, as opposed to a failure to find out.
+// Only two verdicts qualify, and both come from a listing the selected server
+// returned without error (an absent server lists as empty, which surfaces as
+// ErrSessionNotFound): no session carries the review session's exact name, or
+// that session holds no window with the review's exact name. Everything else —
+// ErrServerUnreadable, ErrUnpinnedCommand, ErrNoServer, a parse failure, a
+// malformed id — is not an answer, so it must never read as "already gone".
+func windowConfirmedAbsent(err error) bool {
+	return errors.Is(err, tmux.ErrSessionNotFound) || errors.Is(err, tmux.ErrObjectGone)
+}
+
+// unknownWindow names a review window whose state a teardown could not settle,
+// for the needs-repair reason and the error (forgectl#648). The record schema
+// allows a windowId only on an active record, so the park carries the window
+// in its reason — the pointer completeLaunch leaves for the same situation.
+// The derived name is always known; nativeID is the "@N" when resolution got
+// that far, and is omitted otherwise rather than guessed.
+func unknownWindow(ref Ref, nativeID string) string {
+	name, err := ReviewWindowName(ref)
+	if err != nil {
+		name = "<no derivable identity>"
+	}
+	if nativeID == "" {
+		return fmt.Sprintf("review window %s", name)
+	}
+	return fmt.Sprintf("review window %s (%s)", name, nativeID)
+}
+
+// parkForUnknownWindow fails a live teardown closed: it parks the record in
+// needs-repair with reason and returns cause, or — when the record cannot be
+// parked (none on disk, a failed write) — cause wrapped with
+// ErrRecordNotParked so no caller claims a park that never happened. Nothing is
+// removed either way. The lock is held, so the *Locked park is the right form.
+//
+// A legacy (versionless) record accepts no phase transition, so it is
+// converted in place to a v2 needs-repair record instead (forgectl#696):
+// without that, a legacy record whose window could not be settled had no
+// repair path at all — only an error naming the window.
+func (c *Client) parkForUnknownWindow(sess Session, reason string, cause error) error {
+	if sess.Path == "" {
+		return fmt.Errorf("%w; %w", cause, ErrRecordNotParked)
+	}
+	err := c.markNeedsRepairLocked(sess.Path, reason)
+	if errors.Is(err, errLegacyRecordNoTransition) {
+		err = c.parkLegacyRecordLocked(sess.Path, reason)
+	}
+	if err != nil {
+		return fmt.Errorf("%w; %w: %w", cause, ErrRecordNotParked, err)
+	}
+	return cause
+}
+
+// parkLegacyRecordLocked re-reads the legacy record at path under the lock and
+// converts it to a v2 needs-repair record carrying reason. The re-read is what
+// the conversion builds on, and the legacy write expectation refuses it if the
+// record stopped being legacy in between.
+func (c *Client) parkLegacyRecordLocked(path, reason string) error {
+	bc, _, err := loadBreadcrumbRecord(path, c.sessionsDir)
+	if err != nil {
+		return err
+	}
+	if bc.Version != 0 {
+		return fmt.Errorf("session record %s is no longer a legacy record; nothing was changed", termsafe.QuotePath(path))
+	}
+	return c.convertLegacyRecordLocked(path, bc, PhaseNeedsRepair, func(rec *Breadcrumb) {
+		rec.RepairReason = breadcrumbText(reason)
+	})
 }
 
 // discard performs the actual teardown for an already-validated session: undo
 // the quarantine (recomputed precisely from the sandbox's canonical
 // scheme+targets), remove the workspace, kill the window, delete the
 // breadcrumb.
-func (c *Client) discard(ctx context.Context, sess Session) error {
+func (c *Client) discard(ctx context.Context, sess Session, budget *tmuxBudget) error {
 	slog.Debug("Preparing to tear down review session.", "ref", sess.Ref.String(), "workspace", sess.Workspace)
 
-	// The window goes first, so a tmux that cannot answer stops the teardown
-	// BEFORE anything is removed. Failing closed here means parking the record
-	// in needs-repair with the workspace intact: the record and the clean room
-	// are what let the operator find and finish this later, and window names
-	// depend only on owner/repo/number, so discarding them on an unknown window
-	// state could leave a live orphan that a re-review collides with. The lock
-	// is held, so the *Locked park is the right form.
-	if c.killReviewWindow(ctx, sess.Ref) {
-		if sess.Path == "" {
-			return fmt.Errorf("%w; %w", ErrWindowKillTimedOut, ErrRecordNotParked)
-		}
-		if err := c.markNeedsRepairLocked(sess.Path, windowKillTimeoutReason); err != nil {
-			return fmt.Errorf("%w; %w: %w", ErrWindowKillTimedOut, ErrRecordNotParked, err)
-		}
-		return ErrWindowKillTimedOut
+	// The window goes first, so a tmux that cannot answer, a window list that
+	// cannot be read, or a window name that resolves to more than one window
+	// stops the teardown BEFORE anything is removed. Failing closed here means parking the record in
+	// needs-repair with the workspace intact: the record and the clean room are
+	// what let the operator find and finish this later.
+	timedOut, window, unsettled := c.killReviewWindow(ctx, sess.Ref, budget)
+	if timedOut {
+		// The window is named in both the parked reason and the error, so it is
+		// recorded even when the park itself fails (a failed write): the
+		// operator reads it on stderr instead.
+		return c.parkForUnknownWindow(sess, windowKillTimeoutReason+"; "+window+" may still be running",
+			fmt.Errorf("%w: %s may still be running", ErrWindowKillTimedOut, window))
+	}
+	if errors.Is(unsettled, tmux.ErrAmbiguousWindow) {
+		return c.parkForUnknownWindow(sess, windowAmbiguousReason,
+			fmt.Errorf("refusing to tear down %s, nothing was removed: %w", sess.Ref.String(), unsettled))
+	}
+	if unsettled != nil {
+		return c.parkForUnknownWindow(sess, windowUnreadableReason+"; "+window+" may still be running",
+			fmt.Errorf("refusing to tear down %s, nothing was removed: %w", sess.Ref.String(), unsettled))
 	}
 
 	// Restore quarantined files, while the workspace still exists.
@@ -728,7 +890,7 @@ func (c *Client) discard(ctx context.Context, sess Session) error {
 
 	if sess.Path != "" {
 		if err := os.Remove(sess.Path); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove breadcrumb %s: %w", termsafe.QuotePath(sess.Path), termsafe.Error(err))
+			return fmt.Errorf("remove breadcrumb %s: %w", termsafe.QuotePath(sess.Path), safeTermError(err))
 		}
 	}
 	slog.Info("Successfully tore down review session.", "ref", sess.Ref.String())
@@ -745,12 +907,23 @@ func (c *Client) discard(ctx context.Context, sess Session) error {
 // workspace from scratch — so a record that changed between the listing and
 // the teardown is judged on what it is NOW, not on what List saw.
 //
-// One failure is retained as the first error while later candidates continue,
-// matching the existing cleanup contract.
-func (c *Client) Cleanup(ctx context.Context, date string) error {
+// Later candidates continue past a failure. The returned error is the FIRST
+// failure, matching the existing cleanup contract; the report carries every
+// session's outcome, so a caller can describe each failure rather than only
+// the first (forgectl#666).
+//
+// Every live teardown in the sweep gets its own full lockedTmuxBudget, but the
+// sweep shares ONE tmuxBudget to notice an unresponsive tmux (forgectl#648):
+// once any teardown's tmux work actually times out, the remaining LIVE
+// sessions are skipped with ErrTmuxBudgetSpent and left untouched, so a hung
+// tmux holds the lock for one budget rather than one per session. A slow but
+// answering tmux never trips it. Stale and record-only sessions never call
+// tmux, so the sweep still settles them.
+func (c *Client) Cleanup(ctx context.Context, date string) (CleanupReport, error) {
+	var report CleanupReport
 	// One lock hold for the whole sweep: the lock is non-reentrant, so the
 	// listing and every teardown go through the *Locked cores.
-	return c.withLifecycleLock(ctx, "cleanup", func() error {
+	err := c.withLifecycleLock(ctx, "cleanup", func() error {
 		summaries, unreadable, err := c.listLocked()
 		if err != nil {
 			return err
@@ -759,22 +932,52 @@ func (c *Client) Cleanup(ctx context.Context, date string) error {
 			slog.Warn("Cleanup is sweeping past records it could not read.",
 				"unreadable", len(unreadable), "first", unreadable[0].path)
 		}
-		var discarded int
 		var firstErr error
+		budget := newTmuxBudget()
+		warnedSkip := false
 		for _, sum := range summaries {
 			if sum.CreatedAt().UTC().Format("2006-01-02") != date {
 				continue
 			}
-			if err := c.auditedTeardownLocked(ctx, auditVerbCleanup, sum.Path()); err != nil {
-				slog.Error("Failed to tear down session during cleanup.", "path", sum.Path(), "error", err)
+			if err := c.auditedTeardownLocked(ctx, auditVerbCleanup, sum.Path(), budget); err != nil {
+				if errors.Is(err, ErrTmuxBudgetSpent) {
+					if !warnedSkip {
+						slog.Warn("tmux stopped answering during cleanup; skipping the remaining live sessions.",
+							"budget", lockedTmuxBudget)
+						warnedSkip = true
+					}
+				} else {
+					slog.Error("Failed to tear down session during cleanup.", "path", sum.Path(), "error", err)
+				}
+				report.Failed = append(report.Failed, CleanupFailure{Path: sum.Path(), Ref: sum.Ref().String(), Err: err})
 				if firstErr == nil {
 					firstErr = err
 				}
 				continue
 			}
-			discarded++
+			report.Discarded++
 		}
-		slog.Info("Cleanup complete.", "date", date, "discarded", discarded)
+		slog.Info("Cleanup complete.", "date", date, "discarded", report.Discarded, "failed", len(report.Failed))
 		return firstErr
 	})
+	return report, err
+}
+
+// CleanupReport is what one cleanup sweep did: how many sessions it discarded,
+// and each session it did not, in sweep order. Failed is empty when the sweep
+// never started (the lock was busy, the listing failed); the error says why.
+type CleanupReport struct {
+	Discarded int
+	Failed    []CleanupFailure
+}
+
+// CleanupFailure is one session a sweep did not discard. Err is that session's
+// own error: ErrWindowKillTimedOut (with or without ErrRecordNotParked) for a
+// kill tmux never answered, ErrWindowStateUnreadable (likewise) for a window
+// tmux could not say was gone, ErrTmuxBudgetSpent for a live session skipped
+// after a timeout, or whatever refused or failed the teardown.
+type CleanupFailure struct {
+	Path string
+	Ref  string
+	Err  error
 }

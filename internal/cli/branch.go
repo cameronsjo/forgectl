@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -8,6 +9,7 @@ import (
 
 	branchpkg "github.com/cameronsjo/forgectl/internal/branch"
 	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -38,8 +40,8 @@ func newBranchCmd(deps module.Deps) *cobra.Command {
 // newNetCmdForClient/newDockerCmdForClient) without going through newBranchCmd.
 func newBranchCmdForClient(client *branchpkg.Client, th theme.Theme) *cobra.Command {
 	var (
-		local, remote, includeGone, apply bool
-		remoteName                        string
+		local, remote, includeGone, apply, asJSON bool
+		remoteName                                string
 	)
 
 	cmd := &cobra.Command{
@@ -59,11 +61,16 @@ gated by a confirmation prompt.
                                       no server-confirmed merge (needs-attention)
   forgectl branch --apply            delete everything classified safe-to-delete,
                                       after a confirmation prompt
+  forgectl branch --json             the dry-run report as JSON; refused with
+                                      --apply (the delete arm is interactive)
 
 A stacked/dependent branch's own retargeting is a manual step this command
 never attempts — it only ever reports and deletes.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if asJSON && apply {
+				return errors.New("--json reports the dry-run classification; it cannot be combined with --apply (the delete arm is interactive and reports separately)")
+			}
 			useLocal, useRemote := local, remote
 			if !useLocal && !useRemote {
 				useLocal, useRemote = true, true
@@ -74,6 +81,7 @@ never attempts — it only ever reports and deletes.`,
 				remoteName:  remoteName,
 				includeGone: includeGone,
 				apply:       apply,
+				asJSON:      asJSON,
 			}, th)
 		},
 	}
@@ -82,6 +90,7 @@ never attempts — it only ever reports and deletes.`,
 	cmd.Flags().StringVar(&remoteName, "remote-name", "origin", "remote to query/prune against")
 	cmd.Flags().BoolVar(&includeGone, "include-gone", false, "also surface upstream-gone branches with no server-confirmed merge")
 	cmd.Flags().BoolVar(&apply, "apply", false, "delete safe-to-delete branches, after a confirmation prompt")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"safe_to_delete":[...],"blocked":[...],"needs_attention":[...]} of {"name","reason","local","remote","upstream_gone"} to stdout; not valid with --apply`)
 	return cmd
 }
 
@@ -91,6 +100,7 @@ type branchRunOptions struct {
 	remoteName    string
 	includeGone   bool
 	apply         bool
+	asJSON        bool
 }
 
 // runBranch enumerates, prints the grouped report, and — only with --apply,
@@ -107,6 +117,10 @@ func runBranch(cmd *cobra.Command, client *branchpkg.Client, opts branchRunOptio
 	})
 	if err != nil {
 		return err
+	}
+
+	if opts.asJSON {
+		return writeJSON(out, newBranchReportJSON(report))
 	}
 
 	printBranchGroup(out, "safe-to-delete", report.SafeToDelete)
@@ -130,8 +144,7 @@ func runBranch(cmd *cobra.Command, client *branchpkg.Client, opts branchRunOptio
 		return err
 	}
 	if !ok {
-		fmt.Fprintln(out, "cancelled")
-		return nil
+		return noteCancelled(out)
 	}
 
 	results := client.Prune(ctx, report.SafeToDelete, branchpkg.PruneOptions{
@@ -141,17 +154,63 @@ func runBranch(cmd *cobra.Command, client *branchpkg.Client, opts branchRunOptio
 	})
 
 	fmt.Fprintln(out)
+	printPruneResults(out, results)
+	return nil
+}
+
+// printPruneResults writes one line per prune outcome. r.Name can be a
+// remote-derived refname, which git allows to carry bidi overrides and C1
+// controls, and r.Err can carry a path or a subprocess cause, so every
+// value goes through termsafe (#658).
+func printPruneResults(out io.Writer, results []branchpkg.PruneResult) {
 	for _, r := range results {
+		name := safeTitle(r.Name)
 		switch {
 		case r.Err != nil:
-			fmt.Fprintf(out, "FAILED  %s: %v\n", r.Name, r.Err)
+			_, _ = fmt.Fprintf(out, "FAILED  %s: %s\n", name, safeText(termsafe.Error(r.Err).Error()))
 		case r.Skipped:
-			fmt.Fprintf(out, "skipped %s: %s\n", r.Name, r.Reason)
+			_, _ = fmt.Fprintf(out, "skipped %s: %s\n", name, safeText(r.Reason))
 		case r.Deleted:
-			fmt.Fprintf(out, "deleted %s\n", r.Name)
+			_, _ = fmt.Fprintf(out, "deleted %s\n", name)
 		}
 	}
-	return nil
+}
+
+// branchJSON is one classified branch in `branch --json` (additive-only,
+// ADR-0008).
+type branchJSON struct {
+	Name         string `json:"name"`
+	Reason       string `json:"reason"`
+	Local        bool   `json:"local"`
+	Remote       bool   `json:"remote"`
+	UpstreamGone bool   `json:"upstream_gone"`
+}
+
+// branchReportJSON is the `branch --json` shape; every group is an array,
+// never null.
+type branchReportJSON struct {
+	SafeToDelete   []branchJSON `json:"safe_to_delete"`
+	Blocked        []branchJSON `json:"blocked"`
+	NeedsAttention []branchJSON `json:"needs_attention"`
+}
+
+func newBranchReportJSON(r branchpkg.Report) branchReportJSON {
+	conv := func(items []branchpkg.Classification) []branchJSON {
+		out := make([]branchJSON, 0, len(items))
+		for _, c := range items {
+			out = append(out, branchJSON{
+				Name: c.Info.Name, Reason: c.Reason,
+				Local: c.Info.LocalExists, Remote: c.Info.RemoteExists,
+				UpstreamGone: c.Info.UpstreamGone,
+			})
+		}
+		return out
+	}
+	return branchReportJSON{
+		SafeToDelete:   conv(r.SafeToDelete),
+		Blocked:        conv(r.Blocked),
+		NeedsAttention: conv(r.NeedsAttention),
+	}
 }
 
 // printBranchGroup prints one report section, or nothing at all when empty —
@@ -162,6 +221,7 @@ func printBranchGroup(out io.Writer, label string, items []branchpkg.Classificat
 	}
 	fmt.Fprintf(out, "%s (%d):\n", label, len(items))
 	for _, item := range items {
-		fmt.Fprintf(out, "  %s — %s\n", item.Info.Name, item.Reason)
+		// Same rule as printPruneResults: the name can be remote-derived.
+		_, _ = fmt.Fprintf(out, "  %s — %s\n", safeTitle(item.Info.Name), safeText(item.Reason))
 	}
 }

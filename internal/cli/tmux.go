@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"errors"
+
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/module"
@@ -40,9 +42,22 @@ var tmuxModule = module.Manifest{
 	},
 }
 
+// errTmuxMenuNeedsTerminal is what bare `forgectl tmux` says off a terminal:
+// the menu is a full-screen TUI, and its plain forms are the verbs below it.
+// Without this check Bubble Tea writes alt-screen sequences into a pipe, or
+// fails with a raw /dev/tty error when there is no terminal at all
+// (forgectl#1100).
+var errTmuxMenuNeedsTerminal = errors.New("the tmux menu needs a terminal on stdin and stdout; use forgectl tmux ls or forgectl tmux tree for plain output")
+
 // newTmuxCmd builds the `tmux` parent command. Verbs are attached in their own
 // files (tmux_ls.go, …) so each milestone adds a slice without churn here.
 func newTmuxCmd(deps module.Deps, client *tmux.Client) *cobra.Command {
+	return newTmuxCmdWith(deps, client, tui.Run)
+}
+
+// newTmuxCmdWith is newTmuxCmd with the hub runner supplied, so the hand-off
+// of a verb chosen in the hub can be tested without a terminal.
+func newTmuxCmdWith(deps module.Deps, client *tmux.Client, run hubRunner) *cobra.Command {
 	th := deps.Theme
 	cmd := &cobra.Command{
 		Use:     "tmux",
@@ -55,19 +70,26 @@ func newTmuxCmd(deps module.Deps, client *tmux.Client) *cobra.Command {
 		// every group parent).
 		Args: cobra.NoArgs,
 		// `forgectl tmux` with no verb opens the tmux jumper directly (the
-		// hub row's behavior for tmux) — StartInTmux skips the hub screen,
-		// but the hub is still one esc away, so it's built from cmd.Root()
-		// (resolved at run time, once the whole tree exists) rather than
-		// threaded through construction.
+		// hub row's behavior for tmux) — StartInTmux skips the hub screen and
+		// makes the menu the quit level. The hub rows still feed a verb chosen
+		// from the menu, so they are built from cmd.Root() (resolved at run
+		// time, once the whole tree exists) rather than threaded through
+		// construction.
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			noIcons, _ := cmd.Flags().GetBool("no-icons")
-			opts := tui.RunOptions{
-				Hub:         buildHub(cmd.Root(), configFilePresent()),
-				StartInTmux: true,
-				NoIcons:     noIcons,
-				Theme:       th,
+			if !isInteractiveTTY() {
+				return errTmuxMenuNeedsTerminal
 			}
-			return runAction(cmd.Context(), deps, cmd.Root(), client, opts)
+			noIcons, _ := cmd.Flags().GetBool("no-icons")
+			opts := hubRunOptions(cmd.Context(), deps, cmd.Root(), client)
+			opts.StartInTmux = true
+			opts.NoIcons = noIcons
+			opts.Theme = th
+			// A verb chosen in the hub is deferred, not run here: this RunE
+			// is inside fang, and the verb's own dispatch is a second fang
+			// frame (forgectl#1000).
+			return runActionWith(cmd.Context(), client, opts, run, func(argv []string) error {
+				return deferHubVerb(cmd, th, argv)
+			})
 		},
 	}
 	cmd.AddCommand(

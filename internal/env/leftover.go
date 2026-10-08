@@ -4,11 +4,21 @@
 // # Why the names carry the target
 //
 // Two things are created beside a target and can outlive their run: the
-// writeAtomic temp file (the whole new document, secrets included) and the
-// `env set --sops` work directory (a plaintext value, a decrypted read-back,
-// the ciphertext backup). A signal handler covers the catchable signals.
-// SIGKILL, SIGSTOP, a fault and a power loss run no code, so whatever they
-// interrupt stays behind, where `git add -A` will commit it.
+// writeAtomic scratch directory (its temp file holds the whole new document,
+// secrets included) and the `env set --sops` work directory (a plaintext
+// value, a decrypted read-back, the ciphertext backup). A signal handler
+// covers the catchable signals under --sops. SIGKILL, SIGSTOP, a fault and a
+// power loss run no code, so whatever they interrupt stays behind. Both
+// directories carry a `*` .gitignore from creation (scratch.go,
+// cameronsjo/forgectl#698 and #737), so git neither stages nor lists them,
+// and this scan, which lists the directory itself, is what notices them. It
+// also reads the untracked tree of every stash entry, because `git stash
+// --all` moves them out of the directory and into the object store
+// (stash.go, cameronsjo/forgectl#751).
+//
+// Before #737 the writeAtomic temp file sat directly beside the target, where
+// `git add -A` would commit it. A forgectl that old can still have left one,
+// so the scan keeps refusing on that name too.
 //
 // The lock is per target (`<base>.lock`), and the scratch names used to carry
 // no target. So a scan for them could not tell a dead run's leftover from a
@@ -68,10 +78,18 @@ func scopeTag(base string) string {
 	return hex.EncodeToString(sum[:])[:scopeTagLen]
 }
 
-// envTempPrefix is writeAtomic's temp-file prefix for t: `.env-<tag>.`, then a
-// random part and `.tmp`. It still must not match IsEnvFileName, so a leftover
-// cannot be reached through --file without --any-file.
+// envTempPrefix is the prefix of the temp file writeAtomic created directly
+// beside t before cameronsjo/forgectl#737: `.env-<tag>.`, then a random part
+// and `.tmp`. Nothing creates it now; the scan still refuses on it. It must
+// not match IsEnvFileName, so a leftover cannot be reached through --file
+// without --any-file.
 func (t Target) envTempPrefix() string { return tempPrefix + scopeTag(t.base) + "." }
+
+// envScratchDirPrefix is writeAtomic's scratch-directory prefix for t:
+// `.forgectl-env-<tag>-`, then a random part.
+func (t Target) envScratchDirPrefix() string {
+	return envScratchPrefix + scopeTag(t.base) + "-"
+}
 
 // SopsWorkDirPattern is the os.MkdirTemp pattern for t's `--sops` work
 // directory: `.forgectl-sops-<tag>-` plus MkdirTemp's random suffix.
@@ -119,23 +137,26 @@ const maxNamedLeftovers = 8
 func scanLeftovers(t Target) error {
 	names, err := t.dir.names()
 	if err != nil {
-		return fmt.Errorf("refusing to write %s: its directory could not be listed to check for leftovers from an interrupted run: %w", t.Rel(), err)
+		return fmt.Errorf("refusing to write %s: its directory could not be listed to check for leftovers from an interrupted run: %w", termsafe.QuotePath(t.Rel()), termsafe.Error(err))
 	}
 	sort.Strings(names)
 
 	envPrefix := t.envTempPrefix()
+	envDirPrefix := t.envScratchDirPrefix()
 	workPrefix := t.SopsWorkDirPattern()
 	backupName := t.sopsBackupName()
 	relDir := filepath.Dir(t.Rel())
 	rel := func(name string) string { return termsafe.QuotePath(filepath.Join(relDir, name)) }
 
-	var backups, workDirs, temps, legacy []string
+	var backups, workDirs, envDirs, temps, legacy []string
 	for _, name := range names {
 		switch {
 		case name == backupName:
 			backups = append(backups, name)
 		case strings.HasPrefix(name, workPrefix):
 			workDirs = append(workDirs, name)
+		case strings.HasPrefix(name, envDirPrefix):
+			envDirs = append(envDirs, name)
 		case strings.HasPrefix(name, envPrefix) && strings.HasSuffix(name, ".tmp"):
 			temps = append(temps, name)
 		case legacyEnvTemp.MatchString(name), legacySopsWorkDir.MatchString(name):
@@ -149,7 +170,18 @@ func scanLeftovers(t Target) error {
 			rel(name))
 	}
 
-	if len(backups)+len(workDirs)+len(temps) == 0 {
+	scoped := func(name string) bool {
+		return name == backupName ||
+			strings.HasPrefix(name, workPrefix) ||
+			strings.HasPrefix(name, envDirPrefix) ||
+			(strings.HasPrefix(name, envPrefix) && strings.HasSuffix(name, ".tmp"))
+	}
+	stashed, err := stashedLeftovers(t, scoped)
+	if err != nil {
+		return fmt.Errorf("refusing to write %s: %w", termsafe.QuotePath(t.Rel()), err)
+	}
+
+	if len(backups)+len(workDirs)+len(envDirs)+len(temps)+len(stashed) == 0 {
 		return nil
 	}
 
@@ -161,12 +193,17 @@ func scanLeftovers(t Target) error {
 	}
 	for _, name := range workDirs {
 		line := fmt.Sprintf(
-			"%s: the work directory of an interrupted `env set --sops`; it may hold a plaintext value, and a sops process that outlived forgectl may still be using it. Make sure no sops process is running, then delete it",
+			"%s: the work directory of an interrupted `env set --sops`; it may hold a plaintext value or sops' decrypted copy of the whole file, and a sops process that outlived forgectl may still be using it. Make sure no sops process is running, then delete it",
 			rel(name))
 		if _, _, exists, err := t.dir.lstat(name + "/backup"); err == nil && exists {
 			line += fmt.Sprintf(". Its ciphertext backup of %s from before that run is %s", termsafe.QuotePath(t.Rel()), rel(name+"/backup"))
 		}
 		lines = append(lines, line)
+	}
+	for _, name := range envDirs {
+		lines = append(lines, fmt.Sprintf(
+			"%s: the scratch directory of an interrupted write to %s; it may hold the whole new file, secrets included. git does not list it, because it carries a .gitignore. Inspect it, then delete it",
+			rel(name), termsafe.QuotePath(t.Rel())))
 	}
 	for _, name := range temps {
 		lines = append(lines, fmt.Sprintf(
@@ -174,10 +211,49 @@ func scanLeftovers(t Target) error {
 			rel(name), termsafe.QuotePath(t.Rel())))
 	}
 
+	for _, s := range stashed {
+		lines = append(lines, stashedLeftoverLine(t, s))
+	}
+
 	if extra := len(lines) - maxNamedLeftovers; extra > 0 {
 		lines = append(lines[:maxNamedLeftovers], fmt.Sprintf("and %d more", extra))
 	}
-	return errors.New("refusing to write " + termsafe.QuotePath(t.Rel()) +
+	msg := "refusing to write " + termsafe.QuotePath(t.Rel()) +
 		": a previous forgectl run on it was interrupted and left scratch behind. Nothing was removed:\n  - " +
-		strings.Join(lines, "\n  - "))
+		strings.Join(lines, "\n  - ")
+	if twin := caseTwin(t, names); twin != "" {
+		// The scope tag lowercases the base, so on a case-sensitive volume
+		// this target and its case twin share every scratch name, and the
+		// entries above may be the twin's (cameronsjo/forgectl#652).
+		msg += fmt.Sprintf("\n%s shares these scratch names because its name differs only in letter case, so they may belong to a run on it instead", rel(twin))
+	}
+	return errors.New(msg)
+}
+
+// caseTwin returns an entry of names that equals t's base in every letter but
+// case and is a DIFFERENT file, or "" when there is none. It lowercases exactly
+// as scopeTag does, so a twin it finds really shares the tag. On a
+// case-insensitive volume the listing can spell the target itself in another
+// case (the file is stored as `.ENV`, the target was named `.env`), so a
+// candidate that is the same file as the target is not a twin. A candidate
+// that cannot be compared is not claimed either: the note is advice, and a
+// false one would send the operator to the wrong file.
+func caseTwin(t Target, names []string) string {
+	lower := strings.ToLower(t.base)
+	for _, name := range names {
+		if name == t.base || strings.ToLower(name) != lower {
+			continue
+		}
+		// A target that does not exist yet cannot be the candidate: on a
+		// case-insensitive volume the candidate's existence would mean the
+		// target's.
+		if _, _, exists, err := t.dir.lstat(t.base); err == nil && !exists {
+			return name
+		}
+		if same, err := t.dir.sameFile(name, t.base); err != nil || same {
+			continue
+		}
+		return name
+	}
+	return ""
 }

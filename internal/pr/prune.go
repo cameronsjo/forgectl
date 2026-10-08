@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -284,7 +285,15 @@ type repairLogPlan struct {
 	groups map[string]*repairGroup
 	// size is the bytes pass one read. Pass two refuses unless it reads the
 	// same number, which catches an append between the passes.
-	size    int64
+	size int64
+	// sum is the SHA-256 of those bytes. Size and counts alone miss a
+	// same-length edit that keeps every count — a completion's timestamp moved
+	// from old to in-window at the same width, say — so pass two also refuses
+	// unless the bytes it read hash the same (forgectl#621). It covers the two
+	// passes only: an edit after pass two has read, before the temp copy is
+	// renamed over the log, is not seen. The lifecycle lock is what rules that
+	// window out for every forgectl writer, as it does for the passes.
+	sum     [sha256.Size]byte
 	kept    int
 	dropped int
 }
@@ -365,7 +374,8 @@ func walkRepairLog(r io.Reader, line func([]byte) error, long func(chunk []byte,
 func scanRepairLog(r io.Reader, cutoff time.Time) (*repairLogPlan, error) {
 	p := &repairLogPlan{groups: make(map[string]*repairGroup)}
 	lines := 0
-	size, err := walkRepairLog(r, func(line []byte) error {
+	h := sha256.New()
+	size, err := walkRepairLog(io.TeeReader(r, h), func(line []byte) error {
 		lines++
 		row, ok := decodeRepairLine(line)
 		if !ok {
@@ -403,6 +413,7 @@ func scanRepairLog(r io.Reader, cutoff time.Time) (*repairLogPlan, error) {
 		return nil, err
 	}
 	p.size = size
+	h.Sum(p.sum[:0])
 	for _, g := range p.groups {
 		if g.settled() {
 			p.dropped += g.rows
@@ -418,8 +429,8 @@ func scanRepairLog(r io.Reader, cutoff time.Time) (*repairLogPlan, error) {
 // lines are written byte for byte, an over-long one included.
 //
 // It refuses with errRepairLogChanged when r is not the log the plan was made
-// over, measured by bytes read and by the kept and dropped counts; w then
-// holds a partial copy the caller must discard.
+// over, measured by bytes read, by their SHA-256, and by the kept and dropped
+// counts; w then holds a partial copy the caller must discard.
 func (p *repairLogPlan) copyKept(r io.Reader, w io.Writer) error {
 	bw := bufio.NewWriterSize(w, maxRepairLogLineBytes)
 	kept, dropped := 0, 0
@@ -430,7 +441,8 @@ func (p *repairLogPlan) copyKept(r io.Reader, w io.Writer) error {
 		return nil
 	}
 	nl := []byte("\n")
-	size, err := walkRepairLog(r, func(line []byte) error {
+	h := sha256.New()
+	size, err := walkRepairLog(io.TeeReader(r, h), func(line []byte) error {
 		if p.drops(line) {
 			dropped++
 			return nil
@@ -453,9 +465,14 @@ func (p *repairLogPlan) copyKept(r io.Reader, w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	var sum [sha256.Size]byte
+	h.Sum(sum[:0])
 	if size != p.size || kept != p.kept || dropped != p.dropped {
 		return fmt.Errorf("%w (planned %d bytes, %d kept, %d dropped; read %d bytes, %d kept, %d dropped)",
 			errRepairLogChanged, p.size, p.kept, p.dropped, size, kept, dropped)
+	}
+	if sum != p.sum {
+		return fmt.Errorf("%w (the same %d bytes and counts, but different content)", errRepairLogChanged, size)
 	}
 	if err := bw.Flush(); err != nil {
 		return fmt.Errorf("write temp audit log: %w", err)
@@ -540,7 +557,7 @@ func (c *Client) pruneLocked(ctx context.Context, opts PruneOpts) (PruneReport, 
 		// append to it fine, and refusing the whole sweep over a line nobody can
 		// parse would make one hand edit permanent.
 		report.Log.Outcome = pruneOutcomeRefused
-		report.Log.Error = termsafe.SafeLine(readErr.Error())
+		report.Log.Error = recordText(safeErrString(readErr))
 		slog.Warn("Refusing to compact the repair audit log: it could not be read back.",
 			"path", c.repairLogPath(), "error", readErr)
 	} else {
@@ -573,7 +590,7 @@ func (c *Client) pruneLocked(ctx context.Context, opts PruneOpts) (PruneReport, 
 			return report, fmt.Errorf("refusing to prune without confirmation: this UNLINKS %d set-aside record(s) "+
 				"and rewrites %s, and there is no terminal to confirm on — pass --yes to proceed, "+
 				"or --dry-run to see what it would do",
-				len(removable), termsafe.QuotePath(c.repairLogPath()))
+				len(removable), termsafe.QuoteText(c.repairLogPath()))
 		}
 		approved, cerr := c.confirmRemoval(prunePrompt(len(removable), dropped, c.repairLogPath()))
 		if cerr != nil {
@@ -622,7 +639,7 @@ func (c *Client) enumerateAsideFiles(now time.Time, olderThan time.Duration) (fs
 	// through. Opening by path would follow a symlink swapped in between the
 	// Lstat and the open, putting another file's bytes into the audit row —
 	// and then the pinned re-read would be comparing against those.
-	root, err := os.OpenRoot(c.sessionsDir)
+	root, err := openDirRoot(c.sessionsDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("pin pr sessions dir %s: %w", termsafe.QuotePath(c.sessionsDir), err)
 	}
@@ -663,7 +680,7 @@ func (c *Client) enumerateAsideFiles(now time.Time, olderThan time.Duration) (fs
 		}
 		if err := pinAsideCandidate(root, cand); err != nil {
 			cand.item.Outcome = pruneOutcomeRefused
-			cand.item.Error = termsafe.SafeLine(err.Error())
+			cand.item.Error = recordText(safeErrString(err))
 			continue
 		}
 		cand.ref, cand.hasRef = refFromRawRecord(cand.bytes)
@@ -684,15 +701,20 @@ func (c *Client) enumerateAsideFiles(now time.Time, olderThan time.Duration) (fs
 func pinAsideCandidate(root *os.Root, cand *asideCandidate) error {
 	info, err := root.Lstat(cand.name)
 	if err != nil {
-		return fmt.Errorf("stat set-aside record %s: %w", termsafe.QuotePath(cand.path), termsafe.Error(err))
+		return fmt.Errorf("stat set-aside record %s: %w", termsafe.QuotePath(cand.path), safeTermError(err))
 	}
 	if !staleMemberIsRegular(info) {
 		return fmt.Errorf("set-aside record %s is not a regular file; refusing to remove it",
 			termsafe.QuotePath(cand.path))
 	}
-	data, err := readFileInRoot(root, cand.name)
+	beforeAsideRead(cand.name)
+	data, readInfo, err := readFileInRoot(root, cand.name)
 	if err != nil {
 		return err
+	}
+	if !os.SameFile(readInfo, info) {
+		return fmt.Errorf("set-aside record %s changed identity before it could be read; refusing to remove it",
+			termsafe.QuotePath(cand.path))
 	}
 	cand.info = info
 	cand.bytes = data
@@ -723,16 +745,17 @@ func (c *Client) screenLiveWindows(ctx context.Context, candidates []*asideCandi
 	if len(refs) == 0 {
 		return eligible
 	}
-	live, tmuxOK := c.WindowsLive(ctx, refs)
+	// The same strict read as WindowsLive, with the error kept so the refusal
+	// can name its remedy (forgectl#805).
+	live, listErr := c.windowsLive(ctx, refs, c.tmuxClient.ListWindows)
 	var out []*asideCandidate
 	for _, cand := range eligible {
 		switch {
 		case !cand.hasRef:
 			out = append(out, cand)
-		case !tmuxOK:
+		case listErr != nil:
 			cand.item.Outcome = pruneOutcomeRefused
-			cand.item.Reason = "the tmux window list could not be read, and an unreadable list is not an absent window — " +
-				"check `tmux list-windows -a`, then retry"
+			cand.item.Reason = windowListUnreadable(listErr)
 		case live[cand.ref]:
 			cand.item.Outcome = pruneOutcomeRefused
 			cand.item.Reason = fmt.Sprintf("it names %s, whose review window is still live — "+
@@ -763,14 +786,14 @@ func (c *Client) pruneOne(cand *asideCandidate, dirInfo fs.FileInfo) {
 	rowID, err := c.beginRepairRow(row)
 	if err != nil {
 		cand.item.Outcome = pruneOutcomeRefused
-		cand.item.Error = termsafe.SafeLine(err.Error())
+		cand.item.Error = recordText(safeErrString(err))
 		slog.Warn("Refusing to remove a set-aside session record: its audit row could not be written first.",
 			"path", cand.path, "error", err)
 		return
 	}
 	if rerr := c.removeAsideFile(cand, dirInfo); rerr != nil {
 		cand.item.Outcome = pruneOutcomeFailed
-		cand.item.Error = termsafe.SafeLine(rerr.Error())
+		cand.item.Error = recordText(safeErrString(rerr))
 		c.completeRepairRow(rowID, row, rerr)
 		slog.Error("Failed to remove a set-aside session record; it is still on disk.",
 			"path", cand.path, "error", rerr)
@@ -788,7 +811,7 @@ func (c *Client) pruneOne(cand *asideCandidate, dirInfo fs.FileInfo) {
 // decodable — which is the point, since a set-aside file is by definition one
 // nothing here can read.
 func (c *Client) removeAsideFile(cand *asideCandidate, dirInfo fs.FileInfo) error {
-	root, err := os.OpenRoot(c.sessionsDir)
+	root, err := openDirRoot(c.sessionsDir)
 	if err != nil {
 		return fmt.Errorf("pin pr sessions dir %s: %w", termsafe.QuotePath(c.sessionsDir), err)
 	}
@@ -808,7 +831,7 @@ func (c *Client) removeAsideFile(cand *asideCandidate, dirInfo fs.FileInfo) erro
 	}
 	info, err := root.Lstat(cand.name)
 	if err != nil {
-		return fmt.Errorf("re-stat set-aside record %s: %w", termsafe.QuotePath(cand.path), termsafe.Error(err))
+		return fmt.Errorf("re-stat set-aside record %s: %w", termsafe.QuotePath(cand.path), safeTermError(err))
 	}
 	if !os.SameFile(info, cand.info) {
 		return fmt.Errorf("set-aside record %s changed identity during prune; refusing to remove it",
@@ -818,9 +841,14 @@ func (c *Client) removeAsideFile(cand *asideCandidate, dirInfo fs.FileInfo) erro
 		return fmt.Errorf("set-aside record %s is no longer a regular file; refusing to remove it",
 			termsafe.QuotePath(cand.path))
 	}
-	data, err := readAsideBytes(root, cand.name)
+	beforeAsideRead(cand.name)
+	data, readInfo, err := readAsideBytes(root, cand.name)
 	if err != nil {
 		return err
+	}
+	if !os.SameFile(readInfo, cand.info) {
+		return fmt.Errorf("set-aside record %s changed identity before its re-read; refusing to remove it",
+			termsafe.QuotePath(cand.path))
 	}
 	if !bytes.Equal(data, cand.bytes) {
 		return fmt.Errorf("set-aside record %s changed on disk during prune; refusing to remove it — "+
@@ -828,7 +856,7 @@ func (c *Client) removeAsideFile(cand *asideCandidate, dirInfo fs.FileInfo) erro
 			termsafe.QuotePath(cand.path))
 	}
 	if err := root.Remove(cand.name); err != nil {
-		return fmt.Errorf("remove set-aside record %s: %w", termsafe.QuotePath(cand.path), termsafe.Error(err))
+		return fmt.Errorf("remove set-aside record %s: %w", termsafe.QuotePath(cand.path), safeTermError(err))
 	}
 	return nil
 }
@@ -841,24 +869,35 @@ func (c *Client) removeAsideFile(cand *asideCandidate, dirInfo fs.FileInfo) erro
 // read, so staging a real writer there would be a race a test cannot win.
 var readAsideBytes = readFileInRoot
 
+// beforeAsideRead runs between a set-aside file's root.Lstat and its read,
+// in both pinAsideCandidate and removeAsideFile. It is a no-op in production;
+// a test sets it to swap the entry in exactly the window the Lstat cannot
+// cover (forgectl#791). Tests must restore it and must not run in parallel
+// while overriding it.
+var beforeAsideRead = func(string) {}
+
 // readFileInRoot reads one bounded file through a pinned directory handle. It
 // is the shared body behind the pin read and the re-read, so the two cannot
 // drift into reading the file differently — which would make their byte
 // comparison meaningless.
-func readFileInRoot(root *os.Root, name string) ([]byte, error) {
-	file, err := root.Open(name)
+//
+// It returns the descriptor's own Fstat alongside the bytes, so each caller
+// can prove the file it read is the one its Lstat checked (os.SameFile), as
+// the teardown re-reads do (forgectl#791).
+func readFileInRoot(root *os.Root, name string) ([]byte, fs.FileInfo, error) {
+	file, info, err := openRegularInRoot(root, name)
 	if err != nil {
-		return nil, fmt.Errorf("read set-aside record %s: %w", termsafe.QuotePath(name), termsafe.Error(err))
+		return nil, nil, fmt.Errorf("read set-aside record %s: %w", termsafe.QuotePath(name), safeTermError(err))
 	}
 	data, readErr := readBreadcrumbBytes(file)
 	closeErr := file.Close()
 	if readErr != nil {
-		return nil, fmt.Errorf("read set-aside record %s: %w", termsafe.QuotePath(name), termsafe.Error(readErr))
+		return nil, nil, fmt.Errorf("read set-aside record %s: %w", termsafe.QuotePath(name), safeTermError(readErr))
 	}
 	if closeErr != nil {
-		return nil, fmt.Errorf("close set-aside record %s after reading: %w", termsafe.QuotePath(name), termsafe.Error(closeErr))
+		return nil, nil, fmt.Errorf("close set-aside record %s after reading: %w", termsafe.QuotePath(name), safeTermError(closeErr))
 	}
-	return data, nil
+	return data, info, nil
 }
 
 // compactRepairLog rewrites the audit log without its settled, expired rows.
@@ -879,7 +918,7 @@ func (c *Client) compactRepairLog(cutoff time.Time, out *PruneLog) {
 	plan, err := c.scanRepairLogFile(cutoff)
 	if err != nil {
 		out.Outcome = pruneOutcomeRefused
-		out.Error = termsafe.SafeLine(err.Error())
+		out.Error = recordText(safeErrString(err))
 		return
 	}
 	if plan.dropped == 0 {
@@ -898,13 +937,13 @@ func (c *Client) compactRepairLog(cutoff time.Time, out *PruneLog) {
 	rowID, err := c.beginRepairRow(row)
 	if err != nil {
 		out.Outcome = pruneOutcomeRefused
-		out.Error = termsafe.SafeLine(err.Error())
+		out.Error = recordText(safeErrString(err))
 		return
 	}
 	plan, err = c.rewriteRepairLog(cutoff)
 	if err != nil {
 		out.Outcome = pruneOutcomeFailed
-		out.Error = termsafe.SafeLine(err.Error())
+		out.Error = recordText(safeErrString(err))
 		c.completeRepairRow(rowID, row, err)
 		slog.Error("Failed to compact the repair audit log; the previous log is intact and nothing was dropped.",
 			"path", c.repairLogPath(), "error", err)
@@ -926,7 +965,7 @@ func (c *Client) openRepairLog() (*os.File, error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read repair audit log: %w", termsafe.Error(err))
+		return nil, fmt.Errorf("read repair audit log: %w", safeTermError(err))
 	}
 	return f, nil
 }
@@ -997,7 +1036,7 @@ func (c *Client) writeRepairLogAtomic(plan *repairLogPlan, src io.Reader) error 
 	tmp := filepath.Join(c.sessionsDir, "."+repairLogName+".tmp-"+suffix)
 	f, err := c.fs.OpenExclusive(tmp)
 	if err != nil {
-		return fmt.Errorf("open temp audit log: %w", termsafe.Error(err))
+		return fmt.Errorf("open temp audit log: %w", safeTermError(err))
 	}
 	discard := func() {
 		if rerr := c.fs.Remove(tmp); rerr != nil {
@@ -1022,7 +1061,7 @@ func (c *Client) writeRepairLogAtomic(plan *repairLogPlan, src io.Reader) error 
 	}
 	if err := c.fs.Rename(tmp, c.repairLogPath()); err != nil {
 		discard()
-		return fmt.Errorf("rename the compacted audit log into place: %w", termsafe.Error(err))
+		return fmt.Errorf("rename the compacted audit log into place: %w", safeTermError(err))
 	}
 	if err := c.fs.SyncDir(c.sessionsDir); err != nil {
 		return fmt.Errorf("sync pr sessions dir after compacting the audit log "+
@@ -1033,12 +1072,13 @@ func (c *Client) writeRepairLogAtomic(plan *repairLogPlan, src io.Reader) error 
 
 // prunePrompt is what the confirmation gate shows. It names the UNLINK
 // explicitly, because this is the one repair arm that does not rename, and a
-// confirmation that does not say what is destroyed is not one.
+// confirmation that does not say what is destroyed is not one. The log path
+// is quoted whole (QuoteText), never cut by the capped QuotePath.
 func prunePrompt(files, dropped int, logPath string) string {
 	return fmt.Sprintf("Remove set-aside session records and compact the repair audit log?\n"+
 		"  records: %d file(s) past the retention window — these are UNLINKED, and the audit row is the only trace left\n"+
 		"  log:     %s, dropping %d settled row(s)",
-		files, termsafe.QuotePath(logPath), dropped)
+		files, termsafe.QuoteText(logPath), dropped)
 }
 
 // pruneItems flattens the candidate set into the report, in enumeration order.

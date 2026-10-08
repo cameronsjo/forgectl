@@ -1,0 +1,218 @@
+package organize
+
+import (
+	"fmt"
+	"slices"
+
+	"github.com/cameronsjo/forgectl/internal/herdr"
+)
+
+// OrderStep is one index move that brings a tab to its place: move the tab
+// identified by TerminalID to Position (0-based) in its workspace.
+type OrderStep struct {
+	TerminalID string
+	TabID      string // valid at plan time only
+	Title      string
+	Position   int
+}
+
+// OrderSteps lists the index moves that turn current into target, both
+// ordered terminal ids of the same tabs. It walks the target from the front;
+// where the tab in place is not the wanted one, it moves the wanted tab there.
+// A workspace already in order yields no steps. It reports false when the two
+// lists do not hold the same tabs, because their order cannot be compared.
+func OrderSteps(current, target []string) ([]OrderStep, bool) {
+	if len(current) != len(target) {
+		return nil, false
+	}
+	cur := slices.Clone(current)
+	var steps []OrderStep
+	for i, want := range target {
+		if cur[i] == want {
+			continue
+		}
+		j := slices.Index(cur[i:], want)
+		if j < 0 {
+			return nil, false
+		}
+		j += i
+		cur = slices.Delete(cur, j, j+1)
+		cur = slices.Insert(cur, i, want)
+		steps = append(steps, OrderStep{TerminalID: want, Position: i})
+	}
+	return steps, true
+}
+
+// Reorder is the tab-order work for one workspace.
+type Reorder struct {
+	Workspace string // label
+	Steps     []OrderStep
+}
+
+// Reorders computes, from the snapshot as it is now, the tab-order steps each
+// workspace needs to match plan.Layout. It is exact only when no move will
+// change a workspace's members, so a workspace whose tabs differ from the
+// layout's (a move is pending into or out of it) is left out; the order of
+// such a workspace is only knowable after the moves run.
+func Reorders(snap Snapshot, plan Plan) []Reorder {
+	_, canonical, _ := indexWorkspaces(snap.Workspaces)
+	terminalOf := make(map[string]string, len(plan.Assignments))
+	tabOf := make(map[string]string, len(plan.Assignments))
+	for _, a := range plan.Assignments {
+		terminalOf[a.TabID] = a.TerminalID
+		tabOf[a.TerminalID] = a.TabID
+	}
+	// A blocked tab is laid out under the label it has now, so when it sits in
+	// a non-canonical duplicate it is in that label's layout without being in
+	// the canonical workspace, and never will be. Only the layout tabs that are
+	// or will be in the workspace count toward its members, as ArrangeTarget
+	// counts them at apply time.
+	stays := make(map[string]bool)
+	for _, m := range plan.Moves {
+		if m.Blocked {
+			stays[m.TerminalID] = true
+		}
+	}
+	var out []Reorder
+	for _, lw := range plan.Layout.Workspaces {
+		id, ok := canonical[lw.Label]
+		if !ok {
+			continue
+		}
+		// A tab with no panes has no terminal id and is not in the layout, but
+		// it holds a position, so it gets a stand-in exactly as apply gives it.
+		var current, withPanes []string
+		for _, tab := range snap.Tabs[id] {
+			term, ok := terminalOf[tab.TabID]
+			if !ok {
+				term = StandInID(tab.TabID)
+				tabOf[term] = tab.TabID
+			} else {
+				withPanes = append(withPanes, term)
+			}
+			current = append(current, term)
+		}
+		layoutTerms := make([]string, 0, len(lw.Tabs))
+		titles := make(map[string]string, len(lw.Tabs))
+		for _, t := range lw.Tabs {
+			if stays[t.TerminalID] && !slices.Contains(withPanes, t.TerminalID) {
+				continue
+			}
+			layoutTerms = append(layoutTerms, t.TerminalID)
+			titles[t.TerminalID] = t.Title
+		}
+		if !sameMembers(withPanes, layoutTerms) {
+			continue
+		}
+		steps, ok := OrderSteps(current, ArrangeTarget(layoutTerms, current))
+		if !ok || len(steps) == 0 {
+			continue
+		}
+		for i := range steps {
+			steps[i].Title = titles[steps[i].TerminalID]
+			steps[i].TabID = tabOf[steps[i].TerminalID]
+		}
+		out = append(out, Reorder{Workspace: lw.Label, Steps: steps})
+	}
+	return out
+}
+
+// WorkspaceOrderTarget returns the workspace ids in their current left-to-right
+// order and in the order plan.Layout wants: each layout label's canonical
+// workspace (lowest Number, as the plan picks it) in layout order, then every
+// other workspace in the order it has now. A workspace that repeats a label is
+// not canonical, so it lands behind the layout's workspaces. The dry run and
+// --apply both order workspaces from this, so they agree on what is pending.
+func WorkspaceOrderTarget(wss []herdr.Workspace, layout Layout) (current, target []string) {
+	_, canonical, _ := indexWorkspaces(wss)
+	current = make([]string, 0, len(wss))
+	for _, w := range wss {
+		current = append(current, w.WorkspaceID)
+	}
+	target = make([]string, 0, len(wss))
+	placed := make(map[string]bool, len(wss))
+	for _, lw := range layout.Workspaces {
+		if id, ok := canonical[lw.Label]; ok && !placed[id] {
+			placed[id] = true
+			target = append(target, id)
+		}
+	}
+	for _, id := range current {
+		if !placed[id] {
+			target = append(target, id)
+		}
+	}
+	return current, target
+}
+
+// WorkspaceOrderChange compares the workspaces' current left-to-right order
+// with the order plan.Layout wants, as labels, using [WorkspaceOrderTarget]. A
+// workspace the plan creates is not counted: its position is only known once
+// it exists. A repeated label appears once per workspace that carries it,
+// followed by that workspace's current number ("forge #3"), so the lists say
+// which of them moves.
+func WorkspaceOrderChange(snap Snapshot, plan Plan) (from, to []string, changed bool) {
+	current, target := WorkspaceOrderTarget(snap.Workspaces, plan.Layout)
+	uses := make(map[string]int, len(snap.Workspaces))
+	for _, w := range snap.Workspaces {
+		uses[w.Label]++
+	}
+	labelOf := make(map[string]string, len(snap.Workspaces))
+	for _, w := range snap.Workspaces {
+		labelOf[w.WorkspaceID] = w.Label
+		if uses[w.Label] > 1 {
+			labelOf[w.WorkspaceID] = fmt.Sprintf("%s #%d", w.Label, w.Number)
+		}
+	}
+	for _, id := range current {
+		from = append(from, labelOf[id])
+	}
+	for _, id := range target {
+		to = append(to, labelOf[id])
+	}
+	return from, to, !slices.Equal(current, target)
+}
+
+// StandInID names a tab that has no pane, so it can take a position in an
+// ordered list of terminal ids.
+func StandInID(tabID string) string { return "tab:" + tabID }
+
+// ArrangeTarget is the order a workspace should reach: the layout tabs that
+// are in it now, in layout order, then every other tab in the order it already
+// has.
+func ArrangeTarget(layout, current []string) []string {
+	present := make(map[string]bool, len(current))
+	for _, t := range current {
+		present[t] = true
+	}
+	out := make([]string, 0, len(current))
+	listed := make(map[string]bool, len(layout))
+	for _, t := range layout {
+		if present[t] {
+			out = append(out, t)
+			listed[t] = true
+		}
+	}
+	for _, t := range current {
+		if !listed[t] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func sameMembers(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]bool, len(a))
+	for _, x := range a {
+		set[x] = true
+	}
+	for _, x := range b {
+		if !set[x] {
+			return false
+		}
+	}
+	return true
+}

@@ -23,10 +23,23 @@ import (
 // needed, since every write below goes through a descriptor-relative call.
 const dirOpenFlags = unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_RDONLY
 
-// unsafe wraps a refusal reason under ErrUnsafe, terminal-safe because callers
-// print it.
+// reasonMaxRunes caps a refusal reason's rendered text. An error argument is
+// rendered through termsafe.Error first, which already cuts an over-long path
+// in the middle and keeps the errno after it; this cap is the backstop for
+// whatever else an OS error carries. It holds a capped path whose every rune
+// escapes to a six-rune \uXXXX, with room for the text around it.
+const reasonMaxRunes = 4096
+
+// unsafe wraps a refusal reason under ErrUnsafe, terminal-safe and bounded
+// because callers print it (forgectl#864). An error argument can carry a
+// path, such as a base directory whose name is too long to create.
 func unsafe(format string, args ...any) error {
-	return fmt.Errorf("%w: %s", ErrUnsafe, termsafe.SafeLine(fmt.Sprintf(format, args...)))
+	for i, arg := range args {
+		if err, ok := arg.(error); ok {
+			args[i] = termsafe.Error(err)
+		}
+	}
+	return fmt.Errorf("%w: %s", ErrUnsafe, termsafe.SafeLineMax(fmt.Sprintf(format, args...), reasonMaxRunes))
 }
 
 // Pin returns a descriptor on the spec's leaf directory.
@@ -81,10 +94,61 @@ func Pin(s Spec) (int, error) {
 		return -1, unsafe("open leaf: %s", err)
 	}
 
-	if err := s.verify(baseFD, leafFD); err != nil {
+	if err := s.verify(baseFD, leafFD, true); err != nil {
 		//nolint:errcheck,gosec // G104: refusing, and nothing was written; a
 		// close failure here cannot change the refusal we are about to return.
 		unix.Close(leafFD)
+		return -1, err
+	}
+	return leafFD, nil
+}
+
+// Check runs Pin's refusals without Pin's writes: it creates nothing, narrows
+// nothing, and returns no descriptor. A leaf that Pin would refuse (a symlink,
+// not a directory, owned by another user, a name that does not match what was
+// opened) is refused here with the same error; a leaf that is only too broad,
+// which Pin repairs with a chmod, passes. An absent directory is ErrAbsent.
+// Callers that must not write, such as a dry run, use it to agree with Pin on
+// refusal. s.Create is ignored.
+func Check(s Spec) error {
+	fd, err := OpenChecked(s)
+	if err != nil {
+		return err
+	}
+	return unix.Close(fd)
+}
+
+// OpenChecked is Check that keeps the descriptor: it returns a descriptor on
+// the leaf after Pin's refusals, with none of Pin's writes. The caller closes
+// it and does its later work against it, as with Pin. A caller that reads the
+// directory (a dry run) uses it to bind what it reads to what was checked.
+func OpenChecked(s Spec) (int, error) {
+	s.Create = false
+	if err := s.validate(); err != nil {
+		return -1, err
+	}
+	baseFD, err := unix.Open(s.Base, dirOpenFlags, 0)
+	switch {
+	case errors.Is(err, unix.ENOENT):
+		return -1, ErrAbsent
+	case errors.Is(err, unix.ELOOP), errors.Is(err, unix.ENOTDIR):
+		return -1, unsafe("base is a symlink or not a directory")
+	case err != nil:
+		return -1, unsafe("open base: %s", err)
+	}
+	defer unix.Close(baseFD) //nolint:errcheck // read-only descriptor
+
+	leafFD, err := unix.Openat(baseFD, s.Leaf, dirOpenFlags, 0)
+	switch {
+	case errors.Is(err, unix.ENOENT):
+		return -1, ErrAbsent
+	case errors.Is(err, unix.ELOOP), errors.Is(err, unix.ENOTDIR):
+		return -1, unsafe("leaf is a symlink or not a directory")
+	case err != nil:
+		return -1, unsafe("open leaf: %s", err)
+	}
+	if err := s.verify(baseFD, leafFD, false); err != nil {
+		_ = unix.Close(leafFD)
 		return -1, err
 	}
 	return leafFD, nil
@@ -156,7 +220,7 @@ func (s Spec) createBase() error {
 // Note the third clause is "the caller's mode", not "private": validate
 // accepts any permission bits, so how private the result is remains the
 // caller's choice. Both of forgectl's callers ask for 0o700.
-func (s Spec) verify(baseFD, leafFD int) error {
+func (s Spec) verify(baseFD, leafFD int, narrow bool) error {
 	want := uint32(s.Mode.Perm())
 
 	var pinned unix.Stat_t
@@ -192,7 +256,7 @@ func (s Spec) verify(baseFD, leafFD int) error {
 	// Stat_t.Mode is uint16 on Darwin and uint32 on Linux, so every comparison
 	// against the wanted bits widens explicitly rather than relying on an
 	// untyped constant to paper over the difference.
-	if uint32(pinned.Mode)&0o7777 != want {
+	if narrow && uint32(pinned.Mode)&0o7777 != want {
 		if err := unix.Fchmod(leafFD, want); err != nil {
 			return unsafe("restrict leaf mode: %s", err)
 		}

@@ -88,7 +88,7 @@ network. Set an internal-only net.probe_host for an internal-network answer.
 		},
 	}
 	cmd.Flags().BoolVar(&refresh, "refresh", false, "force a fresh probe, bypassing the cache")
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"reachable","checkedAt","ageSeconds"} to stdout`)
 	return cmd
 }
 

@@ -1,0 +1,474 @@
+# desk
+
+An operator queue for scripts an agent stages but will not run itself. The agent queues an item with `forgectl desk add`; a person reads it on the dashboard and checks the short sha256 in the focus panel and presses `y` to run it, or `s` to skip it. Each item's sha256 is fixed when it is queued, and an item whose bytes change afterwards is skipped as `changed` instead of run.
+
+What the desk protects against, and what it does not, is [ADR-0012](../adr/0012-desk-threat-model.md) (defend against accidents, not against a same-uid process).
+
+```bash
+forgectl desk                                   # the dashboard (needs a terminal)
+forgectl desk --frame                           # one frame to stdout, sized by $COLUMNS/$LINES
+forgectl desk add ./fix.sh --what "..." --why "..."   # queue an item; prints name= and sha256=
+forgectl desk plan nightly.manifest             # check a batch: waves, warnings, sha256
+forgectl desk status                            # the queue, one line per item
+forgectl desk status 17-fix --json              # one item in detail, as JSON
+forgectl desk watch 17-fix --deadline 540       # stream its events; exit with the run's outcome
+forgectl desk runs                              # every run and how far it got
+forgectl desk show 17-fix --events              # one run as a flow, with its event timeline
+forgectl desk show 17-fix --at 4                # replay: the run after its first 4 events
+forgectl desk show --log ./events.jsonl         # a JSONL log from another tool, as a timeline
+forgectl desk show --log app.log --lens myapp --live   # an app's log, taught by a lens, followed live
+forgectl desk skip 17-fix --reason "superseded" # skip a waiting item, or clear a lost run
+forgectl desk layout --progress 'CMD'           # herdr split: this pane left, the desk right, CMD below
+forgectl desk layout --below                    # herdr: the desk in a full-width row under every pane in the tab
+forgectl desk layout --dry-run                  # print the planned splits and commands; change nothing
+forgectl desk prune --days 30                   # delete done/ and skipped/ items older than 30 days
+```
+
+## Requirements
+
+- **A Unix system.** The desk is built on `openat`, `O_NOFOLLOW`, and process sessions. On other systems every verb exits 2 with `forgectl desk is not supported on this OS`.
+- **A terminal, for the dashboard.** `forgectl desk` with no terminal on stdin and stdout exits 2 and names `--frame` and `desk status` instead. No other verb reads the terminal.
+- **A herdr pane, for `layout`.** It needs `HERDR_ENV=1`, a `HERDR_SOCKET_PATH` naming a live socket, and `HERDR_PANE_ID`, which herdr sets in every pane it hosts.
+
+## Upgrading
+
+Quit and restart every open dashboard after you upgrade forgectl. A dashboard started by the old binary starts the new binary's supervisor without the approved hash and kind it now requires. The dashboard still shows `started <item>`, but the supervisor refuses and exits at once, and nothing runs. The item stays in `running/` and reads `lost` once the 60-second claim grace passes; clear it with `forgectl desk skip <name> --reason "restart after upgrade"` and queue it again.
+
+## The agent workflow
+
+1. Write the script to a file and queue it, with one line on what it does and one on why it needs a person:
+
+   ```bash
+   forgectl desk add ./merge-1201.sh --what "Merge PR 1201 once checks are green" --why "You own merges"
+   ```
+
+   It prints `name=`, `kind=` and `sha256=` lines.
+
+2. Report the name and the full sha256 to the person. The dashboard's focus panel shows the selected item's first 12 hex characters (`17 merge-1201 · sha256 3f1a9c0d2b7e · unchanged since queued 12m ago`), so they can confirm that what they approve is what you described before pressing `y`. `a`, which runs several items, asks first and lists each with its full hash.
+
+3. Watch the run under a monitor. `watch` waits while the item is pending, prints each event line, and exits with the run's outcome:
+
+   ```bash
+   forgectl desk watch 17-merge-1201 --deadline 540
+   ```
+
+   On exit 75 the last line is `resume=forgectl desk watch 17-merge-1201 --skip N --deadline 540`. Run that line to pick up after the `N` event lines already printed.
+
+4. Read the result with `forgectl desk status 17-merge-1201` (or `--json`): the exit code, the times, the log path, and for a batch each step's outcome.
+
+## Commands
+
+### `forgectl desk`
+
+The dashboard: three stat tiles (waiting, started today, outcomes), the queue with a bar per item, a focus panel showing the selected item's short sha256, WHAT and WHY (wrapped, up to four lines each; `desk status NAME` shows them whole) and, under a "script" label, its first script lines, and the timeline: what needs you first, then the desk by day, newest first, in plain words. A timeline too long for the window ends on `… N more · t to open`. `h` shows the history of finished runs in its place (bars are each run's length against the longest shown), and `h` again brings the timeline back. An empty queue says that Claude fills it with `forgectl desk add`, and the footer offers only the keys that can act. A lost run's panel says it may have partly run and that `s` clears it and `l` shows what it printed; a changed item's panel shows the hash it was queued at and the hash it has now (a short window leaves the note out; `y`, `s` and `u` say the same in the footer). A short window gives up the tiles, then the summary line, the script preview and the timeline (down to one summary line) before the queue rows and the focus panel's hash, WHAT and WHY; below that minimum (about 40x10) the dashboard says how many rows or columns it needs.
+
+| Key | Action |
+|---|---|
+| `y` | run the selected item at once (a TTY item runs in this pane; anything else runs detached); check its short sha256 in the focus panel first. `y` runs nothing while the window is too small to show that hash, WHAT and WHY, and refuses once when a rescan, not a key, put a different waiting item under the cursor (the one being read left the queue) |
+| `s` | skip the selected item; asks first |
+| `u` | undo the last skip |
+| `v` | view the selected item's script |
+| `l` | view the latest log |
+| `r` | open the run view on the selected item's run (an item that has not run yet says so instead; with nothing selected, the newest run): its steps as a flow, the event timeline, and replay. `←`/`→` step through events, `[`/`]` move 10, `g`/`G` jump to the start or to the end (back to live for a running item); a finished run's replay keeps its outcome in the header, `space` plays, `n`/`p` switch runs, `q` closes |
+| `t` | open the timeline full screen (below); the footer's hint counts what is new since you last closed it |
+| `h` | show the finished runs in place of the timeline panel; `h` again goes back. Offered once something has finished |
+| `a` | run every waiting item on screen, except TTY and changed items; asks first, listing each item with its full sha256, and runs exactly those names and hashes. A list longer than half the window pages (`space` next, `b` back, `esc` cancels), and `y` runs it only once every page has been on screen; a window too small for one full hash refuses |
+| `j` / `k` | move |
+| `?` | show every key and what it does (a narrow footer drops the least important hints first; `q` always stays, and `?` until the window is very narrow) |
+| `q` | quit; detached runs keep running |
+
+#### The timeline
+
+`t` shows everything on the desk in one list, so you can see what happened while you were away without reading logs or hashes:
+
+```text
+desk timeline  ◌ 3 need you · ● 2 running · • 3 new                   19:07
+
+ Needs you · enter takes you to it ──────────────────────────────────── 3
+▸    5m  ◌ Refresh the sudo ticket             18 refresh-credentials · tty
+         │ waiting for you · queued 5m ago · runs in the desk's pane
+    30h  ◌ Clear old caches                                 19 old-cleanup
+           waiting for you · queued 30h ago · stale
+
+ Today · Mon 5 Oct ──────────────────────────────────────────────────── 6
+  19:06  ● Sync the package mirror  • new                   14 sync-mirror
+         │ running · 0:50 so far
+  18:47  ✗ Probe the canary  • new                         12 canary-probe
+         │ failed · exit 1 after 0:18
+  18:44  ✓ Merge 1169                                        15 merge-1169
+           ran ok in 0:41
+```
+
+- **Needs you** comes first: waiting items and lost runs, whatever their day, each with how long it has waited.
+- Everything else follows newest first, grouped under Today, Yesterday and then the date. Each entry is placed at its latest moment: when it ended, started, was skipped or was queued.
+- An entry shows its WHAT, or its name when it has none. The line under it says what happened in plain words, such as `ran ok in 0:41`, `failed · exit 1 after 0:18`, `skipped by you: superseded` or `not run · its bytes changed after it was queued`.
+- A `new` badge marks entries that happened after you last closed the timeline. Until you close it once, that means after the dashboard started.
+- Nothing runs from the timeline. `enter` on an item that needs you returns to the dashboard with it selected, where `y` still acts only on the hash in the focus panel and `s` clears a lost run. On any other run, `enter` (or `r`) opens the run view.
+
+| Key | Action |
+|---|---|
+| `enter` | an item that needs you: back to the dashboard with it selected. A run: the run view |
+| `r` | the run view for the selected entry |
+| `l` | the selected run's log |
+| `v` | the selected item's script |
+| `j` / `k`, `g` / `G` | move, or jump to the first or last entry |
+| `t`, `esc`, `q` | back to the dashboard; what was new counts as seen |
+
+The dashboard rings the terminal bell when an item arrives, and again every 5 minutes while anything waits; inside a herdr pane it also sends a herdr notification. The window title reads `desk ● N waiting`.
+
+`--frame` prints one frame to stdout and exits, sized by `$COLUMNS` and `$LINES` (80x40 when unset). Colour follows `NO_COLOR` and is dropped on a pipe. It reads the queue the same way `status` does.
+
+`--no-icons`, or `no_icons = true` in the config (on the dashboard and `--frame`), draws every mark, border and bar in ASCII, one character for one, so the layout does not move; punctuation such as `·` stays, and the run view uses the legend `desk runs --no-icons` prints. Every state also carries a word, so neither mode depends on a glyph or on colour. `v` always shows a script's bytes unchanged.
+
+### `forgectl desk add <file|->`
+
+| Flag | Meaning |
+|---|---|
+| `--what TEXT` | what the script does, one line of plain text; required and non-empty |
+| `--why TEXT` | why it needs a person, one line of plain text; required and non-empty |
+| `--tty` | the script needs a terminal (a password prompt, `sudo`); it runs in the dashboard's own pane |
+| `--name FILE` | the file name for an item read from stdin (`<file>` is `-`), such as `deploy.sh` |
+| `--allow-duplicate` | queue the item even when an identical one is already waiting |
+| `--json` | print `{name, kind, sha256, path, warnings, duplicate, signal}` |
+
+The kind comes from the extension: `.sh` is a script, `.manifest` is a batch. The name is the next free `NN-` plus the file's base name. `# WHAT:`, `# WHY:` and (with `--tty`) `# TTY: yes` lines are inserted after a shebang before the hash is taken. `--what` and `--why` are required, so the file must not already carry a `# WHAT:` or `# WHY:` line: `add` refuses the duplicate. Neither may hold a control character (a newline, CR, ESC, or a C1 code) or a bidi control; they are written into the script, where `cat` and editors would show them raw.
+
+A `.manifest` is planned before it is queued: one that cannot run is refused, and its warnings are printed as `warning:` lines on stderr. A batch cannot be a TTY item.
+
+When `<file>` is `-`, stdin is read (at most 1 MiB) and must not be a terminal.
+
+Adding is safe to retry. When an item of the same kind with the same sha256 (taken after the `# WHAT:` and `# WHY:` lines are inserted, so the same file with the same `--what` and `--why`) is already waiting in `pending/`, `add` queues nothing. It signals only if the first attempt never finished signalling (it died after queueing, or a signal failed): the item records `signalled_at` once a signal went out and none failed, and a retry that finds it unrecorded sends them, so the item does not wait with nobody told. With no signal able to go out (both turned off, or the macOS notification on a platform that cannot post it and no herdr session), nothing is recorded, so a retry after you turn one on sends it. `--json` carries `signal`: `sent`, `already-sent`, `failed` (see `warnings`) or `none-enabled`. Otherwise it signals nothing. A file a person dropped into `pending/` is stamped as signalled when the desk first sees it, so a retry never pings for it. A failed signal on the retry is the one `warning:` line; the `note:` says only that the signal was not sent. It prints that item, with `duplicate=true` (text, where a queued item prints `duplicate=false`) or `"duplicate": true` (`--json`), and exits 0. In text mode a `note:` on stderr says what happened; with `--json` there is no note, and `duplicate` and `warnings` carry it. A retry after a timeout therefore finds the first attempt instead of queueing a second approval. Only a waiting item counts: one that is running, done or skipped does not, so the same file queues again. A different `--what` or `--why`, or a different body, is a different item. `--allow-duplicate` queues another. The check and the queueing are not one atomic step: two adds of the same file at the same instant can both queue.
+
+`<file>` must be a regular file (a symlink to one is followed); a FIFO or device is refused at once, never read.
+
+When an item is queued, `add` tells the operator it is waiting, so a waiting item is never silent while the desk is off screen:
+
+- **herdr** (inside a herdr pane): a herdr notification, and the queuing session's pane in herdr's needs-you (`blocked`) state, reported under the source `forgectl-desk`. The state clears when the item is run, skipped, or skipped as changed, and comes back when `u` re-arms a skipped item. While other items queued from that pane still wait, it stays with the count refreshed. Clearing works even after `notify_herdr` is turned off. Outside herdr nothing is sent to it.
+- **macOS**: a desktop notification (`osascript`); a no-op elsewhere.
+
+A signal that fails is a `warning: operator signal failed:` line (in `warnings` with `--json`) and never fails the add; it names the setting that turns it off. Turn each off in `config.toml`:
+
+```toml
+[desk]
+notify_herdr = false   # herdr notification and pane state (default true)
+notify_macos = false   # macOS notification (default true)
+```
+
+Exit codes: 0 queued, or already waiting (`duplicate`); 1 refused (an unreadable or non-regular file, a manifest that cannot run, no free number); 2 a usage error (a missing or empty `--what` or `--why`, a control or bidi character in either, `--name` misused).
+
+### `forgectl desk plan <name|file>`
+
+Checks a batch manifest without running it. The argument is a file when it ends in `.manifest` or contains a `/`, and an item name otherwise (looked up in `pending/`, then `running/`, `done/` and `skipped/`).
+
+```text
+name=nightly.manifest
+sha256=<64 hex digits>
+steps=4
+order=alpha,beta -> gamma -> delta
+warning: gamma uses OUT_beta_key but beta is not an ancestor
+```
+
+`--json` prints `{name, sha256, steps: [{id, after, timeout, private}], waves, order, warnings}`.
+
+A file must be a regular file, as for `add`.
+
+Exit codes: 0 the manifest can run, with or without warnings; 1 it cannot, it is a script, it is not a regular file, or the item was not found; 2 a usage error.
+
+### `forgectl desk status [name]`
+
+Without a name, one line per item: waiting and running items first, then the 20 most recent done items, then skipped items. `--json` lists every item under `pending`, `running`, `done` and `skipped`, plus `dir` and `taken`.
+
+```text
+desk /home/me/.local/state/forgectl/desk: 1 waiting, 0 running, 2 done, 1 skipped
+waiting  17-merge-1201  age=12m  sha256=3f1a9c0d2b7e  what="Merge PR 1201 once checks are green"
+done     16-cleanup  age=1h  exit=0  took=41s
+done     12-probe  age=3h  exit=1  took=18s
+skipped  14-merge-1199  sha256=9be04d1c77a2  reason=operator  by=cli  note="superseded by 17"
+```
+
+A waiting item older than 24 hours is flagged `stale`. A running item whose owner is gone with no `RUN-END`, or a claimed item that recorded no owner within 60 seconds, shows as `lost`. A legacy done item whose log has no `EXIT=` line shows `no-exit-recorded`. An old `done/` log whose name has no `NN-` number (`07b-cleanup`, `operator-grow`) still shows, marked `legacy`; `prune` deletes it, and no verb acts on it (`watch`, `skip` and `status NAME` refuse the name). A pending item whose meta file's `sha256` is not 64 lowercase hex characters is `refused`, and that value is never printed. Every text field goes through the terminal-safe filter.
+
+With a name, the item in detail as `key=value` lines: `name`, `state`, `kind`, `what`, `why`, `tty`, the full `sha256`, `added`, `started`, `ended`, `exit`, `skipped_at`, `skip_reason`, `skipped_by` and `skip_note`, the `log` and `events` paths, and for a batch a `summary` line and one `step` line per step. `--json` prints `{item, log, events, record, steps, summary}`; `summary` is the run's `summary.json` once a batch has finished, and `null` before.
+
+Each item in the JSON has `name`, `number` (`null` for a legacy name with no number), `legacy`, `kind`, `state`, `what`, `why`, `tty`, `sha256`, `added_at`, `started_at`, `ended_at`, `age_seconds`, `duration_seconds`, `stale`, `exit_code`, `skip_reason`, `skip_note`, `skipped_by`, `skipped_at`, `signal_pane` (the herdr pane that queued the item, kept to clear its signal), `refusal` and `pid`. Times are UTC. `age_seconds` counts from when the item was added (waiting), started (running) or ended (done).
+
+Like the dashboard, `status` fixes the hash of a hand-dropped item the first time it sees it, and moves a pending item whose bytes changed to `skipped/`.
+
+Exit codes: 0 shown; 1 no such item, or the desk could not be read; 2 a usage error.
+
+### `forgectl desk watch <name>`
+
+Prints the item's event lines as they arrive and exits when the run does. It reads no input.
+
+| Flag | Meaning |
+|---|---|
+| `--deadline S` | stop after `S` seconds; `0` (the default) waits for the run |
+| `--skip N` | leave out the first `N` event lines, the resume point an earlier watch printed |
+
+| Code | Meaning |
+|---|---|
+| 0 | `RUN-END` with `rc=0` |
+| 1 | `RUN-END` with another rc; `RUN-LOST`; the item was skipped; or no such item |
+| 2 | a usage error |
+| 75 | the deadline passed first; the last line is `resume=forgectl desk watch NAME --skip N` (plus `--deadline` and `--dir` when they were given) |
+| 130 | interrupted; the last line is the same `resume=` line |
+| 141 | stdout closed (a write failed, as when the monitor reading it went away); the watch stops at once, and the error on stderr names the `resume` command |
+
+### `forgectl desk runs`
+
+Every run with its progress, one line each: live runs first, then the most recent. A run is a running, done or skipped item; a pending item is not a run yet. `desk runs` is the progress view; `desk status` is the queue view (waiting items, hashes, WHAT, skip reasons). How runs are read is [ADR-0013](../adr/0013-desk-run-sources-and-visualizer.md).
+
+```text
+✗ exit 1   17-nightly     2/4 steps, 1 failed  3m
+✓ ok       16-cleanup     1/1 steps  1h
+```
+
+| Flag | Meaning |
+|---|---|
+| `--json` | print `[{source, name, kind, live, exit, steps, done, failed, events, updated, partial}]` |
+| `--log FILE` | add a JSONL log as one more run (see `desk show`) |
+
+`live` is `running`, `ended`, `lost`, `skipped` or `changed` (skipped because its bytes changed after it was queued; it never ran) for a desk run; `live` or `ended` for a log read through a lens that can end it; and `unknown` for any other log. Like `status`, reading the desk scans it.
+
+Exit codes: 0 listed; 1 a source or a run could not be read in full (the rest are still listed, and stderr names each one, with `--json` too: the array has no field for it); 2 a usage error.
+
+### `forgectl desk show <name>`
+
+One run as the visualizer draws it: each step with its state, its duration, and the steps it waits on when that is not simply the step before it, then a count line. The last line points to `desk status NAME`, which holds the item's record; `show` does not repeat it.
+
+```text
+desk/17-nightly · exit 1
+  ✓ fetch  done · 500ms
+  ✗ build  failed · 1s
+  – stage  skipped
+  ✓ check  done · 200ms · after fetch
+9 events
+record: forgectl desk status 17-nightly
+```
+
+| Flag | Meaning |
+|---|---|
+| `--events` | also print the event timeline, one `#N NAME step=… key="value"` line per event |
+| `--at N` | replay: the state after the run's first `N` events. A replay shows the fold alone: no durations, and no runner state, which describe the run now |
+| `--log FILE` | read a JSONL log instead of a desk item (give a name or `--log`, not both) |
+| `--event-key`, `--step-key`, `--time-key` | with `--log`: the JSON keys holding each line's event name (`event`), step (`step`) and time (`time`; RFC 3339 or epoch seconds) |
+| `--lens LENS` | with `--log`: read the log through a lens, which gives it steps and an exit and may be plain text (see [`desk lens`](#forgectl-desk-lens)). Not with the key flags: a lens names its own keys |
+| `--live` | open the dashboard's run view on this run alone, full screen, and follow it as it grows: a line that says how the run is going (what failed and why, or what is running and for how long), the steps as a flow, the event timeline, replay. The keys are the run view's (`r` on the dashboard), plus `o` to show lines as the log wrote them when a lens rewrote them; only `q` (or `ctrl+c`) quits. It needs a terminal, and takes no `--json`, `--events` or `--at` |
+| `--json` | print `{source, name, kind, live, exit, at, events_total, steps, edges, events, counts, partial, held, note}`; `counts` is `{dropped, ignored, dropped_fields, unknown_steps, bad_exits}` |
+
+A log has no step model, so `show --log` lists its events and no steps; with `--lens` it has the lens's. Without a lens, a line that is not one JSON object, or has no event name, is dropped and counted; a float, a nested value or `null` is dropped from its event and counted. With a text lens, a line its pattern does not match becomes an event named by the whole line (see [`desk lens`](#forgectl-desk-lens)). The file is opened without following a symlink and only if it is a regular file, and reads stop at 32 MiB per file, 64 KiB per line and 50 000 events. A log whose last line has no newline yet holds that line back (`held` is true, and the text says so), since a writer may still be finishing it. An integer time past the year 9999 (epoch milliseconds, say) is read as no time. At most 256 fields are kept from one line.
+
+A waiting item has no run yet: `show` reads it as `waiting`, with no events.
+
+Exit codes: 0 shown; 1 no such run, or it was read only in part: a read error (shown as a `note`) or a log past the 32 MiB cap (`partial`); it is still shown; 2 a usage error.
+
+### `forgectl desk lens`
+
+A lens teaches forgectl to read one app's log as a run, so the log is read for you rather than by you: how a line splits into an event, a step and a time, which lines start, finish or fail a step or end the run, and how a cryptic line reads in plain words. `desk show --log FILE --lens NAME` draws the log as steps with an exit, and `--live` follows it as it grows. The design is [ADR-0014](../adr/0014-log-lenses.md).
+
+A lens is `NAME.toml` in the lenses directory (`desk lens list` prints where: `~/.config/forgectl/lenses` on Linux), or any `.toml` file `--lens` names by path.
+
+```toml
+about  = "nightly backup"
+format = "text"                       # or "json": one JSON object per line
+# time_layout = "2006-01-02 15:04:05" # top level: a Go layout; default RFC 3339 or epoch seconds
+
+[text]                                # format = "text": how a line splits
+pattern = '^(?P<time>\S+) (?P<level>\w+) (?P<event>.*)$'
+
+[[rule]]                              # rules run in order; the first match wins
+action = "ignore"
+match  = '^heartbeat'
+[[rule]]
+action = "start"
+match  = '^backing up (?P<step>\S+)'
+say    = "backing up {step}"
+[[rule]]
+action = "close"
+match  = '^backed up (?P<step>\S+)'
+[[rule]]
+action = "fail"
+field  = "level"                      # match a field instead of the event
+match  = '^ERROR$'
+step   = "upload"
+[[rule]]
+action = "note"
+match  = '^q=ord\.sel cid=(?P<cid>\d+)'
+say    = "querying orders for customer {cid}"
+[[rule]]
+action = "end"
+match  = '^done rc=(?P<exit>\d+)'
+[[rule]]
+action = "end"
+match  = '^shutting down'
+exit   = 0                            # a fixed exit for a line that carries none
+```
+
+| Key | Meaning |
+|---|---|
+| `about` | one line saying what the lens reads; `desk lens list` shows it |
+| `format` | `json` or `text`; required |
+| `[json]` `event`, `step`, `time` | the keys holding each line's event name, step and time (default `event`, `step`, `time`) |
+| `[json]` `action`, `exit` | keys a line may carry its own action and exit in; a valid action there decides before the rules |
+| `[text]` `pattern` | a regular expression whose named groups split a line: `event`, `step` and `time` fill those, any other becomes a field. A line it does not match (a stack trace's next line) is an event named by the whole line. With no pattern, each line is its event |
+| `time_layout` | a [Go time layout](https://pkg.go.dev/time#pkg-constants) for the time, at the top level (not in `[text]`); a layout with no zone reads local time |
+| `[[step]]` `id`, `note`, `after` | steps known up front and the steps each waits on, drawn as a flow. With none, a step appears the first time a rule starts, closes, fails or skips it, in that order, with no edges; with some, a step a rule names that is not listed is counted as unknown |
+| `[[rule]]` `action` | `start`, `close`, `fail` or `skip` a step; `end` the run; `note`, which changes no step and only rewrites the line; or `ignore`, which drops the line as noise |
+| `[[rule]]` `match` | a regular expression the event name must match, or `field`'s value when `field` is set. Its named groups fill the event: `step` the step, `exit` the run's exit (an integer 0–255), any other a field |
+| `[[rule]]` `step` | the step the rule acts on, when the line does not name it |
+| `[[rule]]` `say` | plain words to show in place of the line: `{name}` takes a group of `match`, or the event's step or a field (at most 32). The line as read is kept in the `@line` field |
+| `[[rule]]` `exit` | on an `end` rule, the exit to record when `match` has no `exit` group. An end with neither ends the run with its exit unknown |
+
+A lens needs no rules to be checked: write the format first, run `desk lens check`, and add rules once its `format:` line says every line splits.
+
+Patterns are Go's RE2, which matches in time linear in the line, so no line can stall a read. A rule that starts, closes, fails or skips a step must have a step to act on: `step`, a `step` group, or a step from the line format. An unknown key is an error, so a typo does not become a rule that never fires. Every error names the place to fix, as `[[rule]] 3: match: …`.
+
+The run ends when an `end` rule matches, and reads `live` until then (`desk runs` and `show --json` give `live` or `ended` for it). A start after an end opens the run again, as when the app restarted into the same log; the live view keeps following a log after it ends for that reason. A lens with no `end` rule (and no `[json]` `action` key) cannot know, so its run reads `log` (`unknown` in JSON), and its gist says what is running without counting the time, since the log may be old.
+
+A failed step's reason, on the gist line, is the first failing line since the step last started: usually the cause, where the lines after it are the fallout.
+
+The events a lens reads carry `@action` and `@rule` (which rule matched, from 1), and `@line` and `@exit` when set; `show --events` prints them, so the timeline says why each line did what it did. A line's own key starting with `@` is dropped, so a log cannot set its own action.
+
+**A translator, when a pattern is not enough.** A translator is a program in any language that reads an app's log and writes one JSON line per event in the event vocabulary, which the built-in lens `events` reads (a file named `events.toml` takes its place):
+
+```json
+{"event":"backing up photos","step":"photos","action":"start","time":"2026-10-07T01:00:01Z"}
+{"event":"done","action":"end","exit":0}
+```
+
+`action` is `start`, `close`, `fail`, `skip`, `end`, `note` or `ignore`, or absent (the event is shown and changes no step). forgectl never runs a translator: pipe its output into a file (`my-translator < app.log > run.jsonl`) and point `--log` at that file. An app can also write the vocabulary itself and need no translator.
+
+#### `forgectl desk lens list`
+
+The lenses directory, then one line per lens: name, format, rule count and about line; the built-in `events` lens is listed too. A lens that does not parse is listed with its error. `--json` prints `{dir, lenses: [{name, path, format, rules, about, error}]}`.
+
+Exit codes: 0 listed (an empty or missing directory too); 1 a lens did not parse; 2 a usage error.
+
+#### `forgectl desk lens check <lens> --log FILE`
+
+What a lens makes of a real log, without drawing the run: how many lines became events, were ignored or dropped; how many lines the format split (the pattern matched, or parsed as JSON), with a warning when none did; how many lines each rule matched, marking a rule that matched none; the steps found; and the most common shapes of events no rule matched (digits folded to `#`, so `user 17` and `user 23` count as one), the lines a new rule could claim. It is the loop to write a lens by, or to have an agent write one: write a rule, check, repeat until the unmatched lines are the ones that do not matter.
+
+```text
+lens backup · text · 6 rules
+read: 8 events · 1 ignored
+format: 9 of 9 lines the pattern split
+rules (first match wins):
+   1  1      ignore '^heartbeat'
+   2  2      start  '^backing up (?P<step>\S+)'
+   …
+   6  0      skip   '^never' step=x  · never matched
+steps: photos, docs
+unmatched: 3 events no rule matched; the most common:
+       2×  slow upload
+       1×  starting
+```
+
+`--json` prints `{lens, format, lines, split, events, ignored, dropped, dropped_fields, rules: [{n, rule, hits}], steps, unmatched, unmatched_top: [{name, count}], partial, note}`.
+
+Exit codes: 0 checked; 1 the log could not be read in full; 2 a usage error, or the lens does not parse.
+
+### `forgectl desk skip <name> --reason <text>`
+
+Moves a waiting item to `skipped/` (`reason=operator`; the dashboard's `u` can bring it back), or a lost run out of `running/` (`reason=lost`; it cannot be re-armed). This is the only way a lost run leaves `running/`. A live run is refused. The `--reason` text, one line of plain text (no control or bidi characters) of at most 200 characters, is kept as the item's `skip_note`, with `skipped_by: cli` and the time as `skipped_at`; `status` shows `by=cli`. A skip from the dashboard records `skipped_by: dashboard`.
+
+A skip prints `skipped=<name> reason=<operator|lost> note="<the --reason text>"`: `reason` is the category, `note` is the text, quoted. With `--json` it prints `{name, reason, note, already}`.
+
+Skip is safe to retry. An item already in `skipped/` prints the same line with the reason and note recorded when it was skipped (this call's `--reason` is not kept) and `already=true` (`"already": true`), with a `note:` on stderr, changes nothing (the first skip's note and time stand), and exits 0. A name that matches no item at all is the error: it lists the waiting names and any item with the same name under another number, so a caller can tell "already done" from "wrong name".
+
+Exit codes: 0 skipped, or already skipped; 1 no such item, the item is running, or another desk claimed it first; 2 a usage error.
+
+### `forgectl desk layout`
+
+Splits the current herdr tab around this pane: the desk on the right, about `--width` columns wide (default 66), and with `--progress CMD`, `CMD` in a pane below the desk. The new panes are named `desk` and `progress`, and this pane keeps the focus.
+
+- herdr's `--ratio` is the share the original pane keeps, so the ratio is `1 - width/tab width`, clamped to 0.45–0.8. The progress pane is split off the desk with the desk keeping 40%.
+- The desk pane runs this forgectl by its absolute path, `<path> desk --dir <the resolved desk directory>`, shell-quoted, so the pane's own `PATH` cannot pick another build. `CMD` is typed into the progress pane's shell as given, so quote it for a shell. Both must be one line.
+- herdr names a pane only by id, and ids renumber when a pane closes. So before each `rename` and `run` the pane is found again by its terminal id, and a read of that id confirms it still holds that terminal; on a mismatch the layout stops, naming both terminals. A pane closing in the moment between that read and the call can still renumber the id; a read after the call reports it, though by then the command has been typed.
+- It prints `desk=<pane id>`, `progress=<pane id>`, and `columns=<n> of <tab width>`.
+- `--dry-run` reads the tab's width and prints the plan without changing anything: one `split=`, `rename=` and `run.<pane>=` line per call it would make, then `columns=`. Run it first to see what the layout will do.
+- `--below` builds a full-width desk row instead. herdr splits panes, not the tab, so a down split of this pane would span only this pane's column. The other panes of the tab are moved into one temporary tab (`herdr pane move --new-tab`, then beside each other), the desk is split down from this pane, keeping 72% of the height for this pane's row, and the parked panes are moved back to the right of this pane in equal widths. With `--progress`, `CMD` goes to the right of the desk, which keeps 60%. A moved pane keeps its terminal, so its process keeps running; only its place changes. Stacked panes come back as one row, and panes that were left of this one come back on its right. If a step fails, or `SIGINT` or `SIGTERM` arrives, the parked panes are found again by terminal and moved back before the command exits; the error names any pane that could not be moved back. A signal after the restore leaves the desk pane unnamed and idle. Pane ids renumber after moves and splits, so a `HERDR_PANE_ID` that a process in this pane or a moved pane read at start may no longer name its pane afterwards. Whether herdr still resolves such an id was not measured; to find a pane reliably, look up its `terminal_id`, which a move keeps, in `herdr pane list`. It prints `desk=`, `progress=` and `moved=<n>`; `--dry-run` prints one `move.out=`, `move.back=`, `split=`, `rename=` and `run.<pane>=` line per call. `--width` is refused with it.
+
+Exit codes: 0 laid out, or planned with `--dry-run`; 1 a herdr call failed, and the panes made so far stay (with `--below`, the parked panes are moved back first); 2 a usage error, or not in a herdr pane.
+
+### `forgectl desk prune`
+
+Deletes the protocol files (`.sh`, `.manifest`, `.log`, `.events`, `.meta.json`, `.d/`) of items in `done/` and `skipped/` whose newest file is older than `--days` (default 30), legacy `done/` logs with no `NN-` number included. It never touches `pending/`, `running/`, unknown files, symlinks, or the desk root. No other command deletes an item's files; the desk itself removes only its own owner locks and temporary files. `prune` never creates a desk. A directory that is not a desk (it holds none of `pending/`, `running/`, `done/`, `skipped/`) is not opened or created: prune prints `note: desk not found at <path>` on stderr and the empty result (`found=false` in JSON), exit 0, so a typo in `--dir` does not become a new desk and a quiet `pruned=0`. `--json` prints `{removed, days, found}`.
+
+`--dry-run` lists what a prune would delete and deletes nothing. It runs the same selection, so the list is what a real prune would remove right now. It opens nothing for writing: it reads `done/`, `skipped/` and `running/` in place, with no `chmod` and no directories created, even in a directory that is not a desk. It refuses what a real prune refuses, with the same checks made read-only: a desk root that is a symlink, not a directory or owned by another user, and any of `pending/`, `running/`, `done/`, `skipped/` that is a symlink, a file or unreadable. An absent one reads as empty. Text prints `would_prune=<n> days=<d> found=<bool>` and one `<state>/<name> newest=<time>` line per item; `--json` prints `{dry_run, found, days, would_remove, items}`, each item `{state, name, newest}`. Prune selects every item before it deletes the first, so a directory that cannot be read stops it before anything is removed.
+
+`prune` refuses a desk it cannot safely open, with or without `--dry-run`: a desk directory that is a symlink, not a directory or owned by another user, or a `pending/`, `running/`, `done/` or `skipped/` that is a symlink, a file or unreadable. It names which and exits 1; nothing is deleted. Exit codes: 0 pruned (perhaps nothing), or listed with `--dry-run`; 1 a delete failed, or the desk was refused; 2 `--days` below 1.
+
+## The queue protocol
+
+### Directory
+
+The desk directory is `--dir`, else `$DESK_DIR`, else `$CLAUDE_DESK_DIR`, else `$XDG_STATE_HOME/forgectl/desk`, else `~/.local/state/forgectl/desk`. A relative `DESK_DIR` or `CLAUDE_DESK_DIR` is refused. The first open makes the directory and its four protocol subdirectories `0700` and their files `0600`. Anything else at the desk root is ignored and never touched.
+
+| Path | Holds |
+|---|---|
+| `pending/NN-name.sh` | a script waiting for approval |
+| `pending/NN-name.manifest` | a batch waiting for approval |
+| `running/NN-name.sh` or `.manifest` | the verified copy of what is running |
+| `running/NN-name.lock` | the owner lock, held by the process running the item |
+| `done/NN-name.sh` or `.manifest` | what ran |
+| `done/NN-name.log` | the run's output; the last line is `EXIT=<rc>` |
+| `done/NN-name.events` | the run's event lines |
+| `done/NN-name.d/` | a batch's `steps/<id>.log`, `steps/<id>.out`, `status.tsv` and `summary.json` |
+| `skipped/NN-name.sh` or `.manifest` | a skipped item |
+| `<dir>/NN-name.meta.json` | the item's metadata; it moves with the item |
+
+### Items
+
+A script carries its header lines anywhere in the file (the first of each wins):
+
+```bash
+#!/bin/bash
+# WHAT: Merge PR 1201 once checks are green
+# WHY: You own merges
+# TTY: yes
+gh pr merge 1201 --squash --auto
+```
+
+`# TTY: yes` makes it a TTY item, which runs in the dashboard's own pane through `script(1)` so prompts work. Everything else runs detached, under a supervisor, with stdin from `/dev/null`, and keeps running when the dashboard quits.
+
+Every item, a TTY item and each batch step included, starts in your home directory, never the directory the desk was started from. It gets your environment minus the known variables that make bash run other code or change how the script behaves: `BASH_ENV`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `GLOBIGNORE`, `PS4`, `POSIXLY_CORRECT`, `BASH_COMPAT`, `EXECIGNORE`, `TMOUT`, `BASH_XTRACEFD`, `FUNCNEST`, `GLOBSORT`, and every exported function (`BASH_FUNC_*`). Everything else, credentials included, passes through; this is not an environment sandbox. A script that needs another directory changes to it itself. On Linux, a TTY item also sees `SHELL=/bin/bash`: util-linux `script(1)` starts the item through `$SHELL -c`, and another shell could run its own startup files first.
+
+An agent may also drop a file into `pending/` by hand. Its hash is fixed the first time a desk sees it, and its file time stands in for when it was added.
+
+### Batch manifests
+
+One step per line; `#` comments and blank lines are ignored:
+
+```text
+<step> [after=a,b] [timeout=S] [private] -- <command>
+```
+
+- A step id is lowercase letters and digits, starting with a letter, at most 32 characters.
+- `after=` names the steps this one waits for. Steps run in waves, in manifest order, at most 4 at a time.
+- `timeout=S` sends SIGTERM to the step's process group after `S` seconds, then SIGKILL 5 seconds later; the step's rc is 124.
+- A failed step skips every step that depends on it.
+- A step writes `key=value` lines to `$STEP_OUT`; every step that depends on it sees them as `OUT_<step>_<key>`.
+- `private` keeps the step's output out of the combined log and replaces its `STEP_OUT` values of 6 or more characters in later output with `<redacted:OUT_<step>_<key>>`. Redaction reduces exposure; it is not a guarantee (see [ADR-0012](../adr/0012-desk-threat-model.md)).
+- Everything after the first ` -- ` goes to `/bin/bash -c` as it is.
+
+The batch ends with rc 0 (every step ok), 1 (a step failed), 2 (the batch could not run), or 130 (interrupted).
+
+### Metadata
+
+`NN-name.meta.json` holds `added_at`, `sha256` (64 lowercase hex characters, or the item is refused), `kind`, `skip_reason`, `skip_note`, `skipped_by`, `skipped_at`, `signal_pane` (the herdr pane that queued the item, kept to clear its signal), `claimed_at`, `started_at`, `ended_at`, `exit_code`, and the owning process's `pid` and `pid_start`. A legacy item with none falls back to its log's times and its log's `EXIT=` line.
+
+`skip_reason` is `operator` (skipped at the dashboard or with `desk skip`; `skipped_by` says which; can be undone), `changed` (its bytes changed after it was queued; `changed_sha256` records the hash of the bytes the desk found, beside `sha256`, the hash it was queued at), `lost` (its run's owner died), `launch-failed` (it was claimed but its run never began), `name-reused` (its number was already in `done/`), or `refused: …` (not a regular file with one link). Only `operator` can be undone.
+
+### Events
+
+`done/NN-name.events` holds one line per event. Only the desk writes it; step output never reaches it.
+
+| Line | When |
+|---|---|
+| `RUN-START id=<name> pid=<pid> [steps=<n> jobs=<n>]` | the run started |
+| `STEP-START id=<step> deps=<a,b>` | a batch step started |
+| `STEP-END id=<step> rc=<rc> dur=<s> reason=<r> outputs=<keys> log=<path>` | a batch step ended |
+| `STEP-SKIP id=<step> reason=<r>` | a batch step was skipped |
+| `STEP-WARN id=<step> msg=<text>` | a batch step's output could not be read cleanly |
+| `RUN-END rc=<rc> reason=<r> [ok=<n> failed=<n> skipped=<n>]` | the run ended; always the last line |
+| `RUN-LOST id=<name> pid=<pid>` | printed by `watch`, never written: the owner is gone with no `RUN-END` |

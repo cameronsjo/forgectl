@@ -7,6 +7,7 @@ forgectl k8s logs deployment/api -f                     # forward resource/follo
 forgectl k8s logs -n prod -l app=api -f --log-level warn # keep WARN+ JSON logs plus every unrecognized line
 forgectl k8s logs pod/api --color never                  # force color policy: auto | always | never
 forgectl k8s ns                                          # print the current context's namespace (default when unset)
+forgectl k8s ns --json                                   # {"namespace":"..."}; read only, not valid with a namespace argument
 forgectl k8s ns staging                                  # switch the current context to the staging namespace
 forgectl k8s exec -it pod/api -- sh                       # kubectl exec argv forwarded verbatim, real TTY wired through
 forgectl k8s inspect deployment/api                       # describe + get -o wide + events, in that fixed order

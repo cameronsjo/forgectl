@@ -19,13 +19,13 @@ func TestMenuItemRender(t *testing.T) {
 	}
 
 	t.Run("selected contains label", func(t *testing.T) {
-		got := item.render(0, true, false, testGlyphs, theme.Default().Styles())
+		got := item.render(0, true, false, 80, 12, testGlyphs, theme.Default().Styles())
 		if !strings.Contains(got, "Sessions") {
 			t.Errorf("selected render missing label: %q", got)
 		}
 	})
 	t.Run("unselected wide contains description", func(t *testing.T) {
-		got := item.render(0, false, false, testGlyphs, theme.Default().Styles())
+		got := item.render(0, false, false, 80, 12, testGlyphs, theme.Default().Styles())
 		if !strings.Contains(got, "Sessions") {
 			t.Errorf("wide render missing label: %q", got)
 		}
@@ -34,14 +34,14 @@ func TestMenuItemRender(t *testing.T) {
 		}
 	})
 	t.Run("narrow omits description", func(t *testing.T) {
-		got := item.render(0, false, true, testGlyphs, theme.Default().Styles())
+		got := item.render(0, false, true, 80, 12, testGlyphs, theme.Default().Styles())
 		if strings.Contains(got, "attach · rename · kill") {
 			t.Errorf("narrow render should omit description: %q", got)
 		}
 	})
 	t.Run("selected and unselected differ", func(t *testing.T) {
-		sel := item.render(0, true, false, testGlyphs, theme.Default().Styles())
-		unsel := item.render(0, false, false, testGlyphs, theme.Default().Styles())
+		sel := item.render(0, true, false, 80, 12, testGlyphs, theme.Default().Styles())
+		unsel := item.render(0, false, false, 80, 12, testGlyphs, theme.Default().Styles())
 		if sel == unsel {
 			t.Error("selected and unselected renders are identical")
 		}
@@ -52,14 +52,14 @@ func TestPickItemRender(t *testing.T) {
 	item := pickItem("myproject")
 
 	t.Run("contains item name", func(t *testing.T) {
-		got := item.render(0, false, false, testGlyphs, theme.Default().Styles())
+		got := item.render(0, false, false, 80, 12, testGlyphs, theme.Default().Styles())
 		if !strings.Contains(got, "myproject") {
 			t.Errorf("pick render missing name: %q", got)
 		}
 	})
 	t.Run("selected and unselected differ", func(t *testing.T) {
-		sel := item.render(0, true, false, testGlyphs, theme.Default().Styles())
-		unsel := item.render(0, false, false, testGlyphs, theme.Default().Styles())
+		sel := item.render(0, true, false, 80, 12, testGlyphs, theme.Default().Styles())
+		unsel := item.render(0, false, false, 80, 12, testGlyphs, theme.Default().Styles())
 		if sel == unsel {
 			t.Error("selected and unselected renders are identical")
 		}
@@ -77,7 +77,7 @@ func TestWindowItemRender(t *testing.T) {
 	}}
 
 	t.Run("contains session and window name", func(t *testing.T) {
-		got := item.render(0, false, false, testGlyphs, theme.Default().Styles())
+		got := item.render(0, false, false, 80, 12, testGlyphs, theme.Default().Styles())
 		if !strings.Contains(got, "main") {
 			t.Errorf("missing session name: %q", got)
 		}
@@ -86,13 +86,13 @@ func TestWindowItemRender(t *testing.T) {
 		}
 	})
 	t.Run("wide includes pane count", func(t *testing.T) {
-		got := item.render(0, false, false, testGlyphs, theme.Default().Styles())
+		got := item.render(0, false, false, 80, 12, testGlyphs, theme.Default().Styles())
 		if !strings.Contains(got, "2") {
 			t.Errorf("wide render missing pane count: %q", got)
 		}
 	})
 	t.Run("narrow omits pane count", func(t *testing.T) {
-		got := item.render(0, false, true, testGlyphs, theme.Default().Styles())
+		got := item.render(0, false, true, 80, 12, testGlyphs, theme.Default().Styles())
 		if strings.Contains(got, "panes") {
 			t.Errorf("narrow render should omit pane count label: %q", got)
 		}

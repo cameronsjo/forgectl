@@ -1,0 +1,467 @@
+// SPDX-License-Identifier: Apache-2.0 WITH Commons-Clause
+
+package cli
+
+import (
+	"bytes"
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/charmbracelet/colorprofile"
+	"github.com/spf13/cobra"
+
+	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/module"
+	"github.com/cameronsjo/forgectl/internal/theme"
+)
+
+// rootHelpMaxBytes is the size ceiling for `forgectl --help` off a terminal.
+// Stripping the padding takes root help from 5,809 to 5,575 bytes. It does not
+// reach the 4 KB the checklist suggests (forgectl#1086): the rest is the column
+// fang aligns to the widest command usage. The bound pins today's size so the
+// page does not grow back. The ceiling moved from 5,700 to 5,800 for the --skill
+// flag row, the one root flag an agent needs to find (hidden --install rides on it).
+const rootHelpMaxBytes = 5800
+
+func TestTrailingTrimWriter(t *testing.T) {
+	tests := []struct {
+		name   string
+		writes []string
+		want   string
+	}{
+		{"padding before a newline", []string{"a   \nb\t \n"}, "a\nb\n"},
+		{"inner spaces kept", []string{"a  b   c\n"}, "a  b   c\n"},
+		{"leading spaces kept", []string{"   a\n"}, "   a\n"},
+		{"padding split across writes", []string{"a  ", "  \nb"}, "a\nb"},
+		{"spaces split across writes then text", []string{"a ", " b\n"}, "a  b\n"},
+		{"crlf", []string{"a  \r\nb\n"}, "a\r\nb\n"},
+		{"blank padded line", []string{"   \n"}, "\n"},
+		{"padding then a color reset", []string{"a   \x1b[0m\n"}, "a\x1b[0m\n"},
+		{"color sequence split across writes", []string{"a  \x1b[3", "8;5;1m\nb"}, "a\x1b[38;5;1m\nb"},
+		{"padding inside colored text kept", []string{"\x1b[1ma  b\x1b[0m\n"}, "\x1b[1ma  b\x1b[0m\n"},
+		{"end of stream keeps held whitespace", []string{"a  "}, "a  "},
+		{"half-received color sequence at the end is kept", []string{"a  \x1b[3"}, "a  \x1b[3"},
+		{"lone escape is content", []string{"a \x1bX \n"}, "a \x1bX\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sink bytes.Buffer
+			w := &trailingTrimWriter{w: &sink}
+			for _, s := range tt.writes {
+				n, err := w.Write([]byte(s))
+				if err != nil || n != len(s) {
+					t.Fatalf("Write(%q) = (%d, %v), want (%d, nil)", s, n, err, len(s))
+				}
+			}
+			if err := w.flush(); err != nil {
+				t.Fatalf("flush() = %v", err)
+			}
+			if got := sink.String(); got != tt.want {
+				t.Errorf("sink = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTrimIfNotTerminal(t *testing.T) {
+	prev := isTerminalFd
+	t.Cleanup(func() { isTerminalFd = prev })
+
+	isTerminalFd = func(uintptr) bool { return true }
+	if got, tw := trimIfNotTerminal(os.Stdout); got != os.Stdout || tw != nil {
+		t.Errorf("terminal file wrapped: got (%T, %v), want the file untouched", got, tw)
+	}
+
+	isTerminalFd = func(uintptr) bool { return false }
+	if _, tw := trimIfNotTerminal(os.Stdout); tw == nil {
+		t.Error("non-terminal file: want a trimming writer")
+	}
+	if _, tw := trimIfNotTerminal(new(bytes.Buffer)); tw == nil {
+		t.Error("a non-file writer must count as not a terminal")
+	}
+}
+
+func TestTrimErrorFrame(t *testing.T) {
+	prev := isTerminalFd
+	t.Cleanup(func() { isTerminalFd = prev })
+
+	for _, tt := range []struct {
+		name     string
+		terminal bool
+		profile  colorprofile.Profile
+		want     string
+	}{
+		{"not a terminal", false, colorprofile.NoTTY, "a\nb\n"},
+		{"not a terminal with forced color", false, colorprofile.TrueColor, "a\nb\n"},
+		{"a terminal keeps the frame", true, colorprofile.TrueColor, "a   \nb  \n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			isTerminalFd = func(uintptr) bool { return tt.terminal }
+			f, err := os.CreateTemp(t.TempDir(), "err")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = f.Close() })
+			w := &colorprofile.Writer{Forward: f, Profile: tt.profile}
+			done := trimErrorFrame(w)
+			_, _ = w.Write([]byte("a   \nb  \n"))
+			done()
+			got, err := os.ReadFile(f.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tt.want {
+				t.Errorf("stream = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// runFramed runs args through execCommand with both streams captured, which is
+// the same path main takes through fang.
+func runFramed(t *testing.T, args ...string) (stdout, stderr string) {
+	t.Helper()
+	t.Setenv(skipLegacyMigrateEnv, "1")
+	deps := module.Deps{Runner: &exec.FakeRunner{}, Theme: theme.Default()}
+	root := newRoot(deps)
+	var out, errBuf bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&errBuf)
+	_ = execCommand(context.Background(), root, args, deps.Theme)
+	return out.String(), errBuf.String()
+}
+
+func assertNoTrailingSpace(t *testing.T, label, text string) {
+	t.Helper()
+	if text == "" {
+		t.Fatalf("%s: no output captured, the check could not fail", label)
+	}
+	for i, line := range strings.Split(text, "\n") {
+		if strings.TrimRight(line, " \t") != line {
+			t.Errorf("%s line %d ends in whitespace: %q", label, i+1, line)
+			return
+		}
+	}
+}
+
+// TestFrames_NoTrailingPaddingOffTerminal pins forgectl#1086: fang pads every
+// help and error line to 120 columns when the stream is not a terminal.
+func TestFrames_NoTrailingPaddingOffTerminal(t *testing.T) {
+	for _, args := range [][]string{
+		{"--help"},
+		{"desk", "--help"},
+		{"review", "--help"},
+		{"resume", "restart", "--help"},
+		{"tasks", "mcp", "--help"},
+	} {
+		stdout, _ := runFramed(t, args...)
+		assertNoTrailingSpace(t, "help "+strings.Join(args, " "), stdout)
+	}
+	for _, args := range [][]string{
+		{"desk", "bogus"},
+		{"nosuchverb"},
+		{"desk", "add"},
+	} {
+		_, stderr := runFramed(t, args...)
+		assertNoTrailingSpace(t, "error "+strings.Join(args, " "), stderr)
+	}
+}
+
+func TestRootHelp_SizeBound(t *testing.T) {
+	stdout, _ := runFramed(t, "--help")
+	if len(stdout) > rootHelpMaxBytes {
+		t.Errorf("forgectl --help is %d bytes off a terminal, want <= %d (forgectl#1086)", len(stdout), rootHelpMaxBytes)
+	}
+}
+
+// TestFrames_TerminalStreamKeepsItsFrame holds the other half of the contract:
+// a stream that is a terminal gets fang's frame as before. The test hands
+// execCommand an os.File that the seam reports as a terminal, so fang's width
+// padding must still be there.
+func TestFrames_TerminalStreamKeepsItsFrame(t *testing.T) {
+	t.Setenv(skipLegacyMigrateEnv, "1")
+	prev := isTerminalFd
+	t.Cleanup(func() { isTerminalFd = prev })
+	isTerminalFd = func(uintptr) bool { return true }
+
+	f, err := os.CreateTemp(t.TempDir(), "help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	deps := module.Deps{Runner: &exec.FakeRunner{}, Theme: theme.Default()}
+	root := newRoot(deps)
+	root.SetOut(f)
+	root.SetErr(new(bytes.Buffer))
+	_ = execCommand(context.Background(), root, []string{"review", "--help"}, deps.Theme)
+
+	raw, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte("  \n")) {
+		t.Error("a stream reported as a terminal lost fang's width padding; the trim must apply only off a terminal")
+	}
+}
+
+// dataVerbOutput is data whose trailing whitespace is content: a TSV row
+// ending in an empty column, a line of padding, and a last line with no
+// newline. dataVerbRoot adds a verb that prints it.
+const dataVerbOutput = "id\tname\t\nrow \t\n   \nlast "
+
+func dataVerbRoot(t *testing.T) (*cobra.Command, module.Deps) {
+	t.Helper()
+	t.Setenv(skipLegacyMigrateEnv, "1")
+	deps := module.Deps{Runner: &exec.FakeRunner{}, Theme: theme.Default()}
+	root := newRoot(deps)
+	root.AddCommand(&cobra.Command{
+		Use:   "dataprobe",
+		Short: "Test verb that prints data with trailing whitespace",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_, _ = cmd.OutOrStdout().Write([]byte(dataVerbOutput))
+			_, _ = cmd.ErrOrStderr().Write([]byte("warn \t\nend "))
+			return nil
+		},
+	})
+	return root, deps
+}
+
+// TestTrim_VerbDataIsByteIdentical pins the review finding on forgectl#1127:
+// the trim is for fang's frames only. A verb's data off a terminal must reach
+// the stream byte for byte, including whitespace that ends a line and the
+// stream's last bytes.
+func TestTrim_VerbDataIsByteIdentical(t *testing.T) {
+	root, deps := dataVerbRoot(t)
+	var out, errBuf bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&errBuf)
+	if err := execCommand(context.Background(), root, []string{"dataprobe"}, deps.Theme); err != nil {
+		t.Fatalf("execCommand() = %v", err)
+	}
+	if out.String() != dataVerbOutput {
+		t.Errorf("stdout = %q, want %q", out.String(), dataVerbOutput)
+	}
+	if errBuf.String() != "warn \t\nend " {
+		t.Errorf("stderr = %q, want it unchanged", errBuf.String())
+	}
+}
+
+// TestTrim_HelpOfDataVerbStillTrimmed holds the other side: the same verb's own
+// help page is trimmed, so scoping did not turn the trim off.
+func TestTrim_HelpOfDataVerbStillTrimmed(t *testing.T) {
+	root, deps := dataVerbRoot(t)
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(new(bytes.Buffer))
+	_ = execCommand(context.Background(), root, []string{"dataprobe", "--help"}, deps.Theme)
+	assertNoTrailingSpace(t, "dataprobe --help", out.String())
+}
+
+// TestTrim_HelpKeepsInnerAlignment guards the Long text's code blocks: only
+// whitespace that ends a line goes.
+func TestTrim_HelpKeepsInnerAlignment(t *testing.T) {
+	stdout, _ := runFramed(t, "review", "--help")
+	for _, want := range []string{
+		"forgectl review --json                machine-readable output",
+		"forgectl review mark owner/repo#42    mark an item reviewed",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("review --help lost inner spacing; want a line containing %q", want)
+		}
+	}
+}
+
+// TestWithTrimmedOut_FlushesAtTheEnd: a frame that stops without a newline
+// loses nothing, and the command's stream is restored afterwards.
+func TestWithTrimmedOut_FlushesAtTheEnd(t *testing.T) {
+	var sink bytes.Buffer
+	cmd := &cobra.Command{Use: "x"}
+	cmd.SetOut(&sink)
+	withTrimmedOut(cmd, func() {
+		_, _ = cmd.OutOrStdout().Write([]byte("head  \ntail  "))
+	})
+	if got := sink.String(); got != "head\ntail  " {
+		t.Errorf("sink = %q, want %q", got, "head\ntail  ")
+	}
+	if cmd.OutOrStdout() != &sink {
+		t.Error("withTrimmedOut did not restore the command's stdout")
+	}
+}
+
+// TestWithTrimmedOut_RestoresStdoutOnPanic: the stream swap is undone even when
+// the help function panics, so a recovered panic leaves no trimming writer on
+// the command.
+func TestWithTrimmedOut_RestoresStdoutOnPanic(t *testing.T) {
+	var sink bytes.Buffer
+	cmd := &cobra.Command{Use: "x"}
+	cmd.SetOut(&sink)
+	func() {
+		defer func() { _ = recover() }()
+		withTrimmedOut(cmd, func() { panic("help blew up") })
+	}()
+	if cmd.OutOrStdout() != &sink {
+		t.Errorf("stdout after a panic is %T, want the original writer", cmd.OutOrStdout())
+	}
+}
+
+// TestWithTrimmedOut_InheritedStreamStaysInherited: a subcommand that used its
+// parent's stream goes back to following the parent after a help call, rather
+// than staying pinned to the old writer.
+func TestWithTrimmedOut_InheritedStreamStaysInherited(t *testing.T) {
+	var first, second bytes.Buffer
+	root := &cobra.Command{Use: "root"}
+	sub := &cobra.Command{Use: "sub"}
+	root.AddCommand(sub)
+	root.SetOut(&first)
+	withTrimmedOut(sub, func() {})
+	root.SetOut(&second)
+	if sub.OutOrStdout() != &second {
+		t.Error("the subcommand stayed pinned to the parent's old writer")
+	}
+}
+
+// TestTrim_RunEHelpBetweenData: a verb that writes data, renders its own help,
+// then writes more data (internal/cli/k8s.go does this on --help). The data is
+// byte-identical and the help in the middle is trimmed.
+func TestTrim_RunEHelpBetweenData(t *testing.T) {
+	t.Setenv(skipLegacyMigrateEnv, "1")
+	const before, after = "before \t\n", "after  "
+	deps := module.Deps{Runner: &exec.FakeRunner{}, Theme: theme.Default()}
+	root := newRoot(deps)
+	root.AddCommand(&cobra.Command{
+		Use:   "helpmid",
+		Short: "Test verb that renders help between data",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			out := cmd.OutOrStdout()
+			_, _ = out.Write([]byte(before))
+			if err := cmd.Help(); err != nil {
+				return err
+			}
+			_, _ = out.Write([]byte(after))
+			return nil
+		},
+	})
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(new(bytes.Buffer))
+	if err := execCommand(context.Background(), root, []string{"helpmid"}, deps.Theme); err != nil {
+		t.Fatalf("execCommand() = %v", err)
+	}
+	got := out.String()
+	if !strings.HasPrefix(got, before) || !strings.HasSuffix(got, after) {
+		t.Fatalf("data around the help changed: %q", got)
+	}
+	assertNoTrailingSpace(t, "help between data", strings.TrimSuffix(strings.TrimPrefix(got, before), after))
+}
+
+// TestTrim_LazyBuiltinsKeepTheirData pins the second review round on
+// forgectl#1127: completion, man and __complete resolve to the root before
+// Execute registers them, but they print data, so their stream is not trimmed.
+// help does render a page, so it still is.
+func TestTrim_LazyBuiltinsKeepTheirData(t *testing.T) {
+	t.Setenv(skipLegacyMigrateEnv, "1")
+	deps := module.Deps{Runner: &exec.FakeRunner{}, Theme: theme.Default()}
+	build := func() *cobra.Command {
+		root := newRoot(deps)
+		root.AddCommand(&cobra.Command{
+			Use:   "dataprobe",
+			Short: "Test verb whose completion writes to the stream",
+			Args:  cobra.ArbitraryArgs,
+			// cobra trims its own candidate lines, so the probe writes a line that ends
+			// in whitespace straight to the stream __complete is printing to.
+			ValidArgsFunction: func(cmd *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+				_, _ = cmd.OutOrStdout().Write([]byte("raw \t\n"))
+				return []string{"cand"}, cobra.ShellCompDirectiveNoFileComp
+			},
+			RunE: func(*cobra.Command, []string) error { return nil },
+		})
+		return root
+	}
+	run := func(args ...string) string {
+		root := build()
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetErr(new(bytes.Buffer))
+		if err := execCommand(context.Background(), root, args, deps.Theme); err != nil {
+			t.Fatalf("execCommand(%v) = %v", args, err)
+		}
+		return out.String()
+	}
+
+	if got := run("__complete", "dataprobe", ""); !strings.Contains(got, "raw \t\n") {
+		t.Errorf("__complete lost the trailing whitespace of a line written to its stream: %q", got)
+	}
+
+	var want bytes.Buffer
+	if err := build().GenBashCompletionV2(&want, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := run("completion", "bash"); got != want.String() {
+		t.Errorf("completion bash differs from cobra's script (%d bytes, want %d)", len(got), want.Len())
+	}
+
+	assertNoTrailingSpace(t, "help", run("help"))
+}
+
+// TestNoCommandSetsItsOwnHelpFunc: trimHelpFrames replaces every subcommand's
+// help function, so a command that installs its own would silently lose it.
+// This fails first, so the choice (chain it, or exempt it) is made on purpose.
+func TestNoCommandSetsItsOwnHelpFunc(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if f == "trimwriter.go" || strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f) //nolint:gosec // f comes from Glob("*.go") in the package dir
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(src), ".SetHelpFunc(") {
+			t.Errorf("%s sets a help function; trimHelpFrames would replace it", f)
+		}
+	}
+}
+
+// TestTrim_CompletionHelpTrimmedScriptUntouched pins the third review round on
+// forgectl#1127: the lazy `completion` builtin resolves to the root before
+// Execute registers it, so its help frames need the root trim, while
+// `completion <shell>` prints a script that must pass through untouched.
+func TestTrim_CompletionHelpTrimmedScriptUntouched(t *testing.T) {
+	for _, args := range [][]string{
+		{"completion", "--help"},
+		{"completion", "bash", "--help"},
+		{"completion", "-h"},
+		{"completion", "nonesuch"},
+		{"--no-icons", "completion", "--help"},
+	} {
+		stdout, stderr := runFramed(t, args...)
+		assertNoTrailingSpace(t, "completion help "+strings.Join(args, " "), stdout+stderr)
+	}
+
+	for _, tt := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"completion", "bash"}, false},
+		{[]string{"completion", "zsh", "--no-descriptions"}, false},
+		{[]string{"completion", "bash", "--", "--help"}, false},
+		{[]string{"completion"}, true},
+		{[]string{"completion", "bash", "-h"}, true},
+		{[]string{"completion", "nonesuch"}, true},
+		{[]string{"help"}, true},
+		{[]string{"__complete", "x"}, false},
+		{[]string{"desk"}, true},
+	} {
+		if got := rootRunShowsHelp(tt.args); got != tt.want {
+			t.Errorf("rootRunShowsHelp(%v) = %v, want %v", tt.args, got, tt.want)
+		}
+	}
+}

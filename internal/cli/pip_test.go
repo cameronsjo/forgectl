@@ -153,3 +153,23 @@ func TestRedactPipValue_UnparseableUserinfoHiddenWhole(t *testing.T) {
 		}
 	}
 }
+
+func TestPipPath_JSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pip.conf")
+	client := pippkg.New(&exec.FakeRunner{}, pippkg.WithConfigPath(path))
+	cmd := newPipCmdForClient(client)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"path", "--json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("pip path --json: %v", err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if got["path"] != path {
+		t.Errorf("path = %q, want %q", got["path"], path)
+	}
+}

@@ -14,6 +14,9 @@ import (
 	"strings"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv"
+	"github.com/cameronsjo/forgectl/internal/redact"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // WorkspacePrefix is the os.MkdirTemp prefix every sandbox workspace carries.
@@ -47,7 +50,10 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 	if err := RejectOptionLike("ref", ref); err != nil {
 		return "", err
 	}
-	slog.Debug("Preparing to create workspace sandbox.", "repo", repo, "ref", ref, "alwaysClone", alwaysClone)
+	// repo can be an https URL carrying a token; every log line names it
+	// through redact.LogRepo, an allowlist (#711, #734).
+	shownRepo := redact.LogRepo(repo)
+	slog.Debug("Preparing to create workspace sandbox.", "repo", shownRepo, "ref", ref, "alwaysClone", alwaysClone)
 
 	dir, err := os.MkdirTemp("", WorkspacePrefix+"*")
 	if err != nil {
@@ -61,36 +67,75 @@ func Sandbox(ctx context.Context, run exec.Runner, repo, ref string, alwaysClone
 		if useRef == "" {
 			useRef = "HEAD"
 		}
-		slog.Debug("Sandboxing local repo via git worktree.", "repo", repo, "ref", useRef)
+		slog.Debug("Sandboxing local repo via git worktree.", "repo", shownRepo, "ref", useRef)
 		// -- ends option parsing so a crafted dir/ref can't inject a flag.
-		if _, err := run.Run(ctx, "git", "-C", repo, "worktree", "add", "--", dir, useRef); err != nil {
-			slog.Error("Failed to create git worktree.", "repo", repo, "sandbox", dir, "ref", useRef, "error", err)
-			return "", fmt.Errorf("git worktree add: %w", err)
+		// A partial clone's checkout may lazy-fetch from its promisor
+		// remote, so ext:: and fd:: are refused here as at the clone below.
+		if _, err := gitenv.RunRefusing(ctx, run, gitenv.Transport, []string{"ext", "fd"}, "-C", repo, "worktree", "add", "--", dir, useRef); err != nil {
+			slog.Error("Failed to create git worktree.", "repo", shownRepo, "sandbox", dir, "ref", useRef, "exit_code", exitCode(err))
+			discardSandbox(ctx, run, dir)
+			// Categorical (#711), as the clone leg: git's stderr is not echoed.
+			return "", termsafe.Categorical("git worktree add failed", err)
 		}
 	} else {
-		slog.Debug("Sandboxing repo via git clone.", "repo", repo, "ref", ref)
+		slog.Debug("Sandboxing repo via git clone.", "repo", shownRepo, "ref", ref)
 		// Clone the default branch when no ref was given; git clone --branch
 		// wants a real branch/tag name, so "HEAD" can't stand in for it. The --
 		// separator ends option parsing before the repo/dir positionals.
+		//
+		// repo comes from a shared workflow file, so the ext:: and fd::
+		// transports, which run a command or read a descriptor the URL names,
+		// are refused. git already refuses ext:: by default, but an
+		// operator's protocol.ext.allow (or protocol.allow) would admit it,
+		// and so would an inherited GIT_ALLOW_PROTOCOL naming it.
+		// RunRefusing outranks the first with -c and drops the two names from
+		// the second. Every other transport the operator allows stays, so an
+		// alwaysClone of a local path works.
 		args := []string{"clone", "--", repo, dir}
 		if ref != "" {
 			args = []string{"clone", "--branch", ref, "--", repo, dir}
 		}
-		if _, err := run.Run(ctx, "git", args...); err != nil {
-			slog.Error("Failed to clone repo.", "repo", repo, "sandbox", dir, "error", err)
-			return "", fmt.Errorf("git clone: %w", err)
+		if _, err := gitenv.RunRefusing(ctx, run, gitenv.Transport, []string{"ext", "fd"}, args...); err != nil {
+			slog.Error("Failed to clone repo.", "repo", shownRepo, "sandbox", dir, "exit_code", exitCode(err))
+			discardSandbox(ctx, run, dir)
+			// Categorical (#658): the CommandError renders git's argv, whose
+			// repo URL can carry an https token, and git's stderr, which relays
+			// the remote's sideband text.
+			return "", termsafe.Categorical("git clone failed", err)
 		}
 	}
 
-	slog.Debug("Successfully created workspace sandbox.", "repo", repo, "workspace", dir)
+	slog.Debug("Successfully created workspace sandbox.", "repo", shownRepo, "workspace", dir)
 	return dir, nil
+}
+
+// exitCode is what a checkout failure's log line keeps of err: the exit code
+// of a *exec.CommandError, else -1. err's own text is never logged here,
+// because a CommandError renders its whole argv, and the argv carries repo
+// with any token in it (#711).
+func exitCode(err error) int {
+	var cmdErr *exec.CommandError
+	if errors.As(err, &cmdErr) {
+		return cmdErr.ExitCode
+	}
+	return -1
+}
+
+// discardSandbox removes a workspace Sandbox created but could not populate,
+// so a failed clone or worktree add does not leak its temp dir (#707). It goes
+// through Teardown, the one guarded delete sink. A failure here is logged and
+// never replaces the checkout error the caller is about to return.
+func discardSandbox(ctx context.Context, run exec.Runner, dir string) {
+	if err := Teardown(ctx, run, dir); err != nil {
+		slog.Warn("Failed to remove the sandbox directory after a failed checkout.", "sandbox", dir, "error", err)
+	}
 }
 
 // isLocalRepo reports whether repo looks like a filesystem path (vs. an
 // owner/repo remote reference) — an absolute/relative path, or one that
 // exists on disk.
 func isLocalRepo(repo string) bool {
-	if strings.HasPrefix(repo, "/") || strings.HasPrefix(repo, "./") || strings.HasPrefix(repo, "../") || repo == "." {
+	if redact.HasLocalPathPrefix(repo) {
 		return true
 	}
 	if _, err := os.Stat(repo); err == nil {
@@ -158,10 +203,19 @@ func Teardown(_ context.Context, _ exec.Runner, workspace string) error {
 	// The UNRESOLVED string, per ACT UNRESOLVED above.
 	if err := os.RemoveAll(workspace); err != nil {
 		slog.Error("Failed to tear down workspace.", "workspace", workspace, "error", err)
-		return fmt.Errorf("teardown %s: %w", workspace, err)
+		return teardownError(workspace, err)
 	}
 	slog.Debug("Successfully tore down workspace.", "workspace", workspace)
 	return nil
+}
+
+// teardownError words a failed RemoveAll. The workspace is quoted
+// (termsafe.QuotePath) like the refusals beside it, and the cause goes
+// through termsafe.Error, whose *PathError form quotes the entry that
+// failed: a workspace path can hold a byte that would drive a terminal
+// (forgectl#794). errors.Is and errors.As still reach the cause.
+func teardownError(workspace string, err error) error {
+	return fmt.Errorf("teardown %s: %w", termsafe.QuotePath(workspace), termsafe.Error(err))
 }
 
 // errNothingToRemove is the "no work, no error" verdict — an empty workspace
@@ -245,9 +299,14 @@ func WithinWorkspace(workspace, target string) bool {
 // field is the caller's own label for the value and carries the whole error
 // message — the callers span git argv (workflow, docker, branch, pr refs) and
 // the clean-room reviewer's claude argv, so it names no subsystem itself.
+//
+// The error names the field and never echoes value (forgectl#787). The value
+// is caller input that can carry a secret (`docker shell --shell -pSEKRIT`),
+// and callers log the error through slog, so repeating it here would put it in
+// the log.
 func RejectOptionLike(field, value string) error {
 	if strings.HasPrefix(value, "-") {
-		return fmt.Errorf("%s %q must not begin with '-'", field, value)
+		return fmt.Errorf("%s starts with '-', which would be read as an option", field)
 	}
 	return nil
 }

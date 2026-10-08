@@ -7,7 +7,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cameronsjo/forgectl/internal/projects"
-	"github.com/cameronsjo/forgectl/internal/termsafe"
 	"github.com/cameronsjo/forgectl/internal/theme"
 )
 
@@ -45,11 +44,11 @@ from projects list --json, or rerun interactively when no sshUrl is available.`,
 				return worktreeOnly(ctx, client, cmd, r, branch)
 			}
 
-			all, notes, err := client.Inventory(ctx)
+			all, held, err := loadInventory(cmd, client)
 			if err != nil {
 				return err
 			}
-			renderDegradationNotes(cmd, notes)
+			defer held.flush()
 			if len(all) == 0 {
 				return fmt.Errorf("no projects found across local, GitHub, or Gitea")
 			}
@@ -60,14 +59,14 @@ from projects list --json, or rerun interactively when no sshUrl is available.`,
 				return fmt.Errorf("no project matching %q across local, GitHub, or Gitea", query)
 			}
 			if len(candidates) == 1 {
-				return worktreeOnly(ctx, client, cmd, candidates[0], branch)
+				return held.before(func() error { return worktreeOnly(ctx, client, cmd, candidates[0], branch) })
 			}
 
-			chosen, err := chooseRepo(cmd, candidates, projectSelectionWorktree, th)
+			chosen, err := chooseRepo(cmd, candidates, projectSelectionWorktree, th, held)
 			if err != nil {
 				return err
 			}
-			return worktreeOnly(ctx, client, cmd, chosen, branch)
+			return held.before(func() error { return worktreeOnly(ctx, client, cmd, chosen, branch) })
 		},
 	}
 	return cmd
@@ -78,7 +77,7 @@ from projects list --json, or rerun interactively when no sshUrl is available.`,
 // to stderr so a `$(forgectl proj worktree …)` capture stays clean.
 func worktreeOnly(ctx context.Context, client *projects.Client, cmd *cobra.Command, r projects.Repo, branch string) error {
 	// Best-effort diagnostic write, same as every stderr note here.
-	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Initializing worktree for %s/%s from %s…\n", termsafe.SafeLine(r.Owner), termsafe.SafeLine(r.Name), termsafe.SafeLine(r.Host))
+	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Initializing worktree for %s/%s from %s…\n", safeTitle(r.Owner), safeTitle(r.Name), safeTitle(r.Host))
 	dir, err := client.Worktree(ctx, r, branch)
 	if err != nil {
 		return err

@@ -24,7 +24,7 @@ func TestLedgerDir(t *testing.T) {
 	}
 	b, _ := LedgerDir(state, env(map[string]string{envClaudeSocket: "/tmp/cc-socks/1.sock"}))
 	c, _ := LedgerDir(state, env(map[string]string{envClaudeSocket: "/tmp/cc-socks/2.sock"}))
-	if a != b || a == c || !strings.HasPrefix(a, filepath.Join(state, "surface")+string(filepath.Separator)) {
+	if a != b || a == c || !strings.HasPrefix(a, filepath.Join(state, "mail")+string(filepath.Separator)) {
 		t.Fatalf("socket-keyed ledgers: %q %q %q", a, b, c)
 	}
 	if _, err := LedgerDir(state, env(nil)); !errors.Is(err, ErrNoLedger) {

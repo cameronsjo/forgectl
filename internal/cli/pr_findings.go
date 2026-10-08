@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -88,10 +89,25 @@ func writeFindingsListJSON(w io.Writer, entries []pr.FindingsEntry) error {
 	return enc.Encode(rows)
 }
 
+// findingsCleanupJSON is the `pr findings cleanup --json` shape (additive-only,
+// ADR-0008). Paths is always an array.
+type findingsCleanupJSON struct {
+	Paths []string `json:"paths"`
+	Count int      `json:"count"`
+}
+
+func writeFindingsCleanupJSON(w io.Writer, paths []string) error {
+	if paths == nil {
+		paths = []string{}
+	}
+	return writeJSON(w, findingsCleanupJSON{Paths: paths, Count: len(paths)})
+}
+
 func newPrFindingsCleanupCmd(client *pr.Client, th theme.Theme) *cobra.Command {
 	var (
 		olderThan time.Duration
 		apply     bool
+		asJSON    bool
 	)
 	cmd := &cobra.Command{
 		Use:   "cleanup",
@@ -103,20 +119,26 @@ confirmation prompt.
   forgectl pr findings cleanup                     dry-run over the 30-day default
   forgectl pr findings cleanup --older-than 168h    dry-run over 7 days
   forgectl pr findings cleanup --apply              reclaim, after confirming
+  forgectl pr findings cleanup --json               the dry-run report as JSON;
+                                                     refused with --apply
 
 This never touches the disposable review workspace or a live session — only
 findings dirs under the durable findings store. --apply records each removal
 in the audit log, which forgectl pr history reads back.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if asJSON && apply {
+				return errors.New("--json reports the dry-run set; it cannot be combined with --apply (the delete arm is interactive and reports separately)")
+			}
 			if err := validateFindingsOlderThan(olderThan); err != nil {
 				return err
 			}
-			return runPrFindingsCleanup(cmd, client, olderThan, apply, th)
+			return runPrFindingsCleanup(cmd, client, olderThan, apply, asJSON, th)
 		},
 	}
 	cmd.Flags().DurationVar(&olderThan, "older-than", defaultFindingsOlderThan, "only consider findings dirs older than this (>= 0; 0 reclaims everything)")
 	cmd.Flags().BoolVar(&apply, "apply", false, "delete matched findings dirs, after a confirmation prompt")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"paths":[...],"count":N} of the reclaimable findings dirs to stdout; not valid with --apply`)
 	return cmd
 }
 
@@ -146,12 +168,15 @@ func validateFindingsOlderThan(d time.Duration) error {
 // different set). Each removal takes the lifecycle lock and writes the
 // intent-then-completion audit pair `pr repair --history` shows, so a busy
 // lock or an unwritable audit log stops the run before that dir is touched.
-func runPrFindingsCleanup(cmd *cobra.Command, client *pr.Client, olderThan time.Duration, apply bool, th theme.Theme) error {
+func runPrFindingsCleanup(cmd *cobra.Command, client *pr.Client, olderThan time.Duration, apply, asJSON bool, th theme.Theme) error {
 	out := cmd.OutOrStdout()
 
 	preview, err := client.FindingsCleanup(cmd.Context(), olderThan, false)
 	if err != nil {
 		return err
+	}
+	if asJSON {
+		return writeFindingsCleanupJSON(out, preview)
 	}
 	if len(preview) == 0 {
 		fmt.Fprintln(out, "nothing to reclaim")
@@ -177,8 +202,7 @@ func runPrFindingsCleanup(cmd *cobra.Command, client *pr.Client, olderThan time.
 		return err
 	}
 	if !ok {
-		fmt.Fprintln(out, "cancelled")
-		return nil
+		return noteCancelled(out)
 	}
 
 	removed, err := client.FindingsRemove(cmd.Context(), preview)

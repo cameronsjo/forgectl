@@ -241,6 +241,71 @@ const themeScaffold = `
 # danger = { dark = "#e6a8a2", light = "#8a2418" } # table: per-mode override
 `
 
+// herdrScaffold is the [herdr.organize] section. The header is ACTIVE so the
+// section exists (an empty table decodes to no rules, which `forgectl herdr
+// organize` reports by pointing at this section instead of at init), and every
+// key stays commented: a rule names workspaces and paths that are one
+// machine's, so there is no default worth baking in.
+const herdrScaffold = `
+# ── herdr: group herdr tabs into workspaces (forgectl herdr organize) ───────
+[herdr.organize]
+# default = "misc"                     # workspace for tabs no rule matches; required once a rule exists
+# workspace_order = ["forge", "misc"]  # left-to-right order; a label with no workspace yet is skipped
+# [[herdr.organize.rule]]
+# glob      = "*/Projects/forge/* :: *"  # matched against "<cwd> :: <title>"; * also matches /
+# workspace = "forge"
+`
+
+// resumeScaffold is the [resume] section. The header is ACTIVE so the section
+// exists and `forgectl init` does not re-append it, and the one hook stays
+// commented: restart is the hook most operators want, but firing it is a
+// choice (it stops and relaunches sessions), so it is offered, not enabled.
+// It fires only once `forgectl resume hooks install` has loaded the watcher.
+const resumeScaffold = `
+# ── resume: hooks fired when a harness updates (forgectl resume hooks) ──────
+[resume]
+# [[resume.on_update]]
+# harness = "claude"   # only "claude" is supported so far
+# action  = "restart"  # built-in: forgectl resume restart --outdated; or instead:
+# command = ["/usr/bin/say", "claude updated"]  # argv, no shell; gets FORGECTL_HARNESS/_OLD_VERSION/_NEW_VERSION
+# timeout_seconds = 0  # 0 = default: command 300 (then its process group is killed); restart 1800 (bounds only the wait for idle)
+`
+
+// tasksScaffold is the [tasks] section. The header is ACTIVE so the section
+// exists and `forgectl init` does not re-append it, and the one key stays
+// commented with an empty list: the built-in host needs no entry, and a host
+// written here would be one more place every machine sends a keychain
+// credential.
+//
+// The second comment is there because the list is one list, not one per
+// keychain entry. A host added so a read token can reach it can be sent the
+// write token by the same rule, and the place to say so is where the host is
+// typed.
+const tasksScaffold = `
+# ── tasks: where a keychain credential may be sent (forgectl tasks) ─────────
+[tasks]
+# allowed_hosts = [] # hostnames allowed besides the built-in default; plain hostnames only (no port, user, path, or IP)
+# The list applies to EVERY keychain entry, the write entry included: a listed
+# host can be sent whichever keychain token a command names.
+`
+
+const deskScaffold = `
+# ── desk: how "forgectl desk add" signals the operator (forgectl desk) ──────
+[desk]
+# notify_herdr = true # herdr notification, and the queuing pane's needs-you state
+# notify_macos = true # macOS notification
+`
+
+const surfaceScaffold = `
+# ── surface: how "forgectl surface drain" paces and caps workers ────────────
+[surface.drain]
+# interval = "15s"   # time between ticks; at least 5s
+# cap = 3            # workers holding a slot at once, machine-wide (1-10)
+# per_repo = 1       # of those, how many in one repository
+# notify = true      # notify when a worker needs you
+# idle_minutes = 10  # at the prompt this long with no report: needs-you
+`
+
 // initSection is one scaffoldable block: a config.toml section (or, for the
 // empty name, the host-scalar preamble) plus its annotated template.
 type initSection struct {
@@ -279,6 +344,11 @@ var initSections = []initSection{
 	{"update", "update", updateScaffold},
 	{"pr", "pr", prScaffold},
 	{"theme", "theme", themeScaffold},
+	{"herdr", "herdr", herdrScaffold},
+	{"resume", "resume", resumeScaffold},
+	{"tasks", "tasks", tasksScaffold},
+	{"desk", "desk", deskScaffold},
+	{"surface", "surface", surfaceScaffold},
 }
 
 // initModule declares the full-scaffold convenience extension (ADR-0005). It

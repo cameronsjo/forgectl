@@ -6,17 +6,22 @@
 forgectl projects list [query]           # list all projects: local clones + your GitHub repos + your Gitea repos
 forgectl projects list --json            # machine-readable JSON (safe to pipe; degradation notes go to stderr)
 forgectl projects list --json --strict   # same, but exit 1 when any host degraded (output still written)
+forgectl projects list --json --limit 50 # first 50 rows in a {truncated,total,shown,limit,hint,notes,items} document
+forgectl projects list --json --fields host,owner,name  # only those row fields
 forgectl projects list --host github.com   # filter to one hostname (or "local")
 forgectl projects list --host git.example.com forge  # host filter + name substring
 forgectl projects pick [query]           # picker with both descriptors TTY; otherwise sanitized candidates on stdout + exit 1 (aliases: p, open)
 forgectl projects                        # shorthand for pick; same headless candidate/exit-1 contract
 forgectl projects clone [query]          # picker with both descriptors TTY; otherwise candidates + exit 1 (use sshUrl from list --json)
 forgectl projects worktree <query> [branch] # same ambiguity contract as clone; use sshUrl from list --json
+forgectl projects pull-all --json          # [{"name","status"}]; exits 1 when any pull failed, as without --json
 forgectl projects clone --dry-run <target>  # print where it would land and exit, touching nothing
 forgectl projects clone --wing mcp <target> # override the wing table for this one clone
 
 forgectl review                          # unified table (reviewed rows dimmed)
 forgectl review --kind issue             # issues only (or: pr)
+forgectl review --json --limit 50        # first 50 rows in a {truncated,total,shown,limit,hint,notes,items} document
+forgectl review --json --fields repo,number,title  # only those row fields
 forgectl review mark owner/repo#42       # mark an item reviewed
 ```
 
@@ -29,7 +34,29 @@ candidate's `sshUrl` from `projects list --json` for an exact target, or rerun
 interactively when it has none. Project display rows are not universal command
 arguments.
 
-`projects` builds a unified inventory across local clones, GitHub, and whichever Gitea instance `tea` is logged into. A project that isn't checked out locally shows as `[uncloned]`; picking it clones from the right host before opening the tmux session. `list --json` emits structured records to stdout — degradation notes (e.g. a host that's unreachable) go to stderr so the pipe stays clean. A degraded host still exits 0 by default, so a partial inventory reads the same as a small account to a script that only checks the exit code; pass `--strict` to exit 1 whenever any host produced a degradation note. The records that did load are written to stdout first either way. A machine with no `tea` binary has no Gitea source set up, which is not a degradation: it adds no note and does not trip `--strict`. A `tea` that runs and fails still does.
+`projects` builds a unified inventory across local clones, GitHub, and whichever Gitea instance `tea` is logged into. A project that isn't checked out locally shows as `[uncloned]`; picking it clones from the right host before opening the tmux session. `list --json` emits structured records to stdout — degradation notes (e.g. a host that's unreachable) go to stderr so the pipe stays clean. A degraded host still exits 0 by default, so a partial inventory reads the same as a small account to a script that only checks the exit code; pass `--strict` to exit 1 whenever any host produced a degradation note. The records that did load are written to stdout first either way. When no source can be read at all (the projects root is missing, GitHub fails, and Gitea is absent or fails), `list`, `pick`, `clone` and `worktree` exit 1 with `no project source could be read`, after printing the notes that say why; an empty list is never reported as an account with no projects. Each GitHub note names its cause and fix where gh's exit status or output shows one, for example `github(acme): query failed (gh is not signed in to github.com; run gh auth login)`; anything unrecognized says `run forgectl doctor for the cause`. gh's own text is never printed. A machine with no `tea` binary has no Gitea source set up, which is not a degradation: it adds no note and does not trip `--strict`. A `tea` that runs and fails still does.
+
+On a terminal, `pick`, `clone`, and `worktree` show `Querying local, GitHub, and Gitea…` while they ask. After 3 seconds it becomes `Still querying… (Ctrl+C cancels)`, and the line is erased before the picker draws or when you cancel. The picker carries any degradation notes in its description instead of printing them around it. With stderr redirected there is no status line, and the notes go to the redirect at once.
+
+## Bounding `projects list` and `review` output
+
+Both verbs list everything by default, and `review --json` was measured at 473 KB (1,070 items). Two flags bound it:
+
+- **`--limit N`** keeps the first N rows (`review` sorts by host, repo, number; `projects list` keeps inventory order). **The human table now stops at 100 rows by default** (a changed default for existing callers; stdout only) and says `showing N of M; narrow with <flags>, or use --limit 0 for every row` on stderr. `--limit 0` shows every row.
+- **`--fields a,b,c`** (with `--json`) keeps only those keys of each row, in the order you give. An unknown name is an error (exit 1) that lists the valid ones. Valid names are the row keys in `--help`.
+
+**`--json` default is unchanged.** With no `--limit`, `--json` is still the bare array of every row, because ADR-0008 lets JSON shapes change only additively and a default cap would silently drop rows from scripts that read the array today. Once `--limit` is given, the output is one object instead:
+
+```json
+{"truncated": true, "total": 1070, "shown": 50, "limit": 50,
+ "hint": "showing 50 of 1070; narrow with --kind, --repo, or raise --limit (0 = all)",
+ "notes": ["cameronsjo: results may be truncated at 1000"],
+ "items": [...]}
+```
+
+Key order is stable and `items` comes last, so a caller that reads only the first bytes of a large document still sees `truncated`. `truncated` is true only when `shown` is less than `total`. `hint` appears only when truncated. `notes` carries the notes the verb also writes to stderr (degradation notes, and for `review` the "reviewed-store path unavailable" note), so a caller that reads only stdout still sees an upstream "results may be truncated at N" (the GitHub search cap): `truncated: false` with that note means the source, not `--limit`, cut the list. **`--limit 0` is every row in the same shape as a bounded call**: the object with `truncated: false`. Any `--limit` (zero included) switches `--json` from the bare array to the object, so a caller that passes `--limit` always gets one shape; `status --json --limit 0` follows the same rule with its `bound` key. `--fields` alone keeps the bare array.
+
+**`projects list` has no `--dir` flag.** Its local scan reads the real projects root (`PROJECTS_DIR`, read-only), so a test or a review of this verb must point `PROJECTS_DIR` at a fixture directory.
 
 ## On-disk layout
 
@@ -162,3 +189,79 @@ otherwise be fetched from GitHub by the server's own owner/repo strings).
 If `forgectl init` already wrote an active `owners = ["…"]` into your
 config.toml, it stays exactly as written: init never rewrites a section that is
 already present. Delete or comment the line to move to the authenticated default.
+
+## Release radar: `forgectl review releases`
+
+`review releases` reads the release-rhythm registry (`docs/release-rhythm.yaml`
+in cadence-ecosystem, ADR-0044 there) and asks GitHub, read-only, where each
+`release-pr`, `testflight`, and `manual-cut` repo stands. `continuous` and
+`dormant` repos are listed in a one-line footer.
+
+```sh
+forgectl review releases                         # table
+forgectl review releases --json                  # machine-readable report
+forgectl review releases --json --fail-on-stall  # exit 1 on any stalled or unknown repo
+```
+
+| Column | Source |
+|---|---|
+| last release | newest non-draft, non-prerelease release whose tag has the registry's `tag_pattern`; for `testflight`, the newest `testflight-upload` record (or `tf-*` tag) |
+| unreleased | commits on the branch since that release (compare API) |
+| release PR | open same-repo PR whose title passes the ship gate's title check |
+| last ship | newest entrypoint run: age, conclusion, and the gate's `reason` from its `ship-gate <reason>:` annotation (testflight: `paused`, `uploaded`, `no-change`, `failed`) |
+| human gates | count, and for `manual-cut` how long a cut has been due: the oldest uncut commit or upstream commit, never earlier than the last cut. App Store release has no age visible from GitHub |
+| endpoints | the `version` in each tap formula or cask, or Scoop manifest, against the last release |
+| gate copy | sha256 of `.github/scripts/ship-gate.sh` on the branch against the canonical copy |
+
+A repo is **stalled** when:
+
+- its toggle (`SHIP_NIGHTLY` for `release-pr`, `TESTFLIGHT_NIGHTLY` for
+  `testflight`) is `on` and the entrypoint has not run in 26h;
+- its toggle is `on` and its last 2 scheduled runs report the same reason other
+  than `go`, `no-pr`, or `paused` (`uploaded` and `no-change` for testflight);
+- its last run reports `half-shipped`;
+- an endpoint still trails a release more than 24h old;
+- its gate copy is missing or its hash differs from the canonical one;
+- `no-release-pr` (`release-pr` repos, toggle on or off): the unreleased commits
+  include a releasable one, no release PR is open, and the oldest releasable
+  commit is more than 24h old; or
+- `release-workflow-stuck` (`release-pr` repos, toggle on or off): a run of the
+  release-PR workflow has been `waiting`, `queued`, or `pending` for more than 1h.
+
+Releasable means a commit whose subject type is `feat`, `fix`, or `perf`, whose
+type or scope carries a `!` (`feat!:`, `refactor(api)!:`), or whose body has a
+`BREAKING CHANGE:` footer. A set of only `chore`, `ci`, `docs`, `test`,
+`refactor`, `style`, or `build` commits never stalls. The release-PR workflow is
+the registry entry's optional `release_workflow` (a path under
+`.github/workflows/`), read-only; without it the radar reads `release-please.yml`,
+or `prepare-release.yml` for `cadence-hooks`. A default workflow the repo lacks
+is skipped; one the registry names must exist. When the compare read lists fewer
+commits than the branch is ahead by (100 per read) and none of them is
+releasable, the newer ones are unseen and the row is `unknown`.
+
+A repo whose toggle is not `on` is `paused`: shown, not judged on its beat. A
+repo with any failed read is `unknown`, and the failed read is named (for
+example `unknown forgectl: runs: HTTP 403`). Missing data counts as a failed
+read: no release matching the registry's `tag_pattern` (or, for `testflight`,
+no unexpired upload record or `tf-*` tag), or a finished ship run whose `Gate`
+job left no reason. `--fail-on-stall` exits 1 on any `stalled` or `unknown`
+row, so a read failure never passes as healthy.
+
+Inputs:
+
+- Registry: `--registry`, else `$FORGECTL_RELEASE_REGISTRY`, else
+  `~/Projects/cadence-ecosystem/docs/release-rhythm.yaml`. A registry over
+  256 KiB, with a repeated or merge (`<<`) key, or with a mapping of more
+  than 64 keys is refused.
+- Canonical gate hash: `--gate-sha256`, else `$FORGECTL_GATE_SHA256`, else the
+  sha256 of `../scripts/release/ship-gate.sh` beside the registry. With none of
+  those, every `release-pr` row reads `unknown`.
+- Auth: gh's own (`GH_TOKEN`, `GITHUB_TOKEN`, or its stored login), pinned to
+  `[github] host`. The token needs read access to contents, pull requests,
+  actions, and checks (the gate's annotations) on every tracked repo, and to
+  upstream repos. Actions variables read is optional: when the token cannot
+  list variables (a GitHub App token minted by `create-github-app-token`
+  cannot be granted it), the toggle is inferred from the newest scheduled
+  run, where the gate reports `paused` and a paused `testflight.yml` skips its
+  job; the JSON report's `toggle.source` says which (`variable` or `runs`).
+  With no scheduled run to read, the row is `unknown`.

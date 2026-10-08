@@ -124,7 +124,7 @@ exits 2.`,
 			return printDocsSearch(cmd, resp, asJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"backend","query","results","truncated","skipped","errors","skipped_paths"} to stdout; a result is {"root","path","title","line","snippet"}`)
 	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Second, "deadline for indexing plus search, e.g. 10s or 1m")
 	cmd.Flags().IntVar(&limit, "limit", 50, "return at most N results")
 	cmd.Flags().StringVar(&backend, "backend", "", `search backend, "ripgrep" or "qmd" (default: [docs] search_backend, else ripgrep)`)
@@ -145,7 +145,10 @@ type docsSearchPartialJSON = docsErrorJSON
 // one line per failed root.
 func printDocsSearch(cmd *cobra.Command, resp docspkg.SearchResponse, asJSON bool) error {
 	if err := printDocsSearchResults(cmd, resp, asJSON); err != nil {
-		return err
+		// stdout failed mid-response, so no verdict stands: under --json
+		// stderr gets the docs object, keeping the exit code 1 this has
+		// always had, not the generic contract's string-code shape.
+		return docsFail(cmd, "docs search", "", err, 1, asJSON)
 	}
 	if len(resp.Errors) == 0 {
 		return nil
@@ -154,14 +157,18 @@ func printDocsSearch(cmd *cobra.Command, resp docspkg.SearchResponse, asJSON boo
 		msg := fmt.Sprintf("docs search: %d root(s) could not be fully searched; see errors in the response", len(resp.Errors))
 		obj := docsSearchPartialJSON{Error: msg, Code: 1}
 		if encErr := termsafe.JSONEncoder(cmd.ErrOrStderr()).Encode(obj); encErr != nil {
-			return WithExitCode(fmt.Errorf("docs search: encode error: %w", encErr), 1)
+			// The response is already on stdout and stderr just refused a
+			// write, so there is nothing more to say: exit 1 silently rather
+			// than let the generic contract try stderr again in its own
+			// string-code shape.
+			return jsonVerdict(WithExitCode(fmt.Errorf("docs search: encode error: %w", encErr), 1), true)
 		}
 		return newSilentCodedError(1)
 	}
 	for _, e := range resp.Errors {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "docs search: root %s: %s\n",
 			termsafe.SafeLineMax(e.Root, docsSearchRootRunes),
-			termsafe.SafeLine(e.Message))
+			safeText(e.Message))
 	}
 	return newSilentCodedError(1)
 }

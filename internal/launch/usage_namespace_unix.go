@@ -16,10 +16,14 @@ import (
 // the first as an empty store and the second as a problem worth reporting.
 var errUsageAbsent = errors.New("launch usage namespace is absent")
 
+// usageReasonMaxRunes caps an unsafeStore reason (#934), as privdir caps its
+// own refusal reasons: a reason can carry a path.
+const usageReasonMaxRunes = 4096
+
 // unsafeStore wraps a refusal reason under ErrUsageUnsafeStore. The reason is
-// terminal-safe because doctor prints it.
+// terminal-safe and bounded because doctor prints it.
 func unsafeStore(format string, args ...any) error {
-	return fmt.Errorf("%w: %s", ErrUsageUnsafeStore, termsafe.SafeLine(fmt.Sprintf(format, args...)))
+	return fmt.Errorf("%w: %s", ErrUsageUnsafeStore, termsafe.SafeLineMax(fmt.Sprintf(format, args...), usageReasonMaxRunes))
 }
 
 // pinUsageLeaf returns a descriptor on the fixed `forgectl` state leaf, with

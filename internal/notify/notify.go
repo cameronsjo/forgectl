@@ -72,6 +72,11 @@ func New(run exec.Runner, opts ...Option) *Client {
 	return c
 }
 
+// Supported reports whether Notify posts anything on this platform: only
+// darwin does. Elsewhere Notify is a no-op that returns nil, so a caller that
+// wants to know whether anyone was told asks this first.
+func (c *Client) Supported() bool { return c.goos == "darwin" }
+
 // Notify posts one desktop notification. On any platform but darwin it
 // returns nil without spawning anything. Both strings are rendered inert and
 // capped with termsafe.SafeLineMax before they reach osascript, and the

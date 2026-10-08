@@ -1,4 +1,9 @@
+//go:build unix
+
 package herdradapter
+
+// The fake FileInfo carries a *syscall.Stat_t, the socket identity the
+// adapter proves on unix; the adapter has no such proof elsewhere (#810).
 
 import (
 	"bytes"
@@ -13,6 +18,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/herdr/wire"
 	"github.com/cameronsjo/forgectl/internal/surface/backend"
 )
 
@@ -131,7 +137,6 @@ type scriptedRunner struct {
 	fake     exec.FakeSensitiveRunner
 	reply    map[exec.CommandKind]func() (exec.SensitiveResult, error)
 	sessions func() (exec.SensitiveResult, error)
-	create   int
 }
 
 func newRunner() *scriptedRunner {
@@ -144,14 +149,6 @@ func newRunner() *scriptedRunner {
 			return stdout(defaultSessions()), nil
 		}
 		if fn, ok := r.reply[cmd.Kind]; ok {
-			// The create kind covers BOTH the workspace create and the pane run,
-			// so a scripted reply must not answer the run with a create body.
-			if cmd.Kind == exec.KindHerdrCreate {
-				r.create++
-				if r.create > 1 {
-					return exec.SensitiveResult{}, nil
-				}
-			}
 			return fn()
 		}
 		switch cmd.Kind {
@@ -160,11 +157,9 @@ func newRunner() *scriptedRunner {
 		case exec.KindHerdrSnapshot, exec.KindHerdrReconcile, exec.KindHerdrProbe:
 			return stdout(listJSON()), nil
 		case exec.KindHerdrCreate:
-			r.create++
-			if r.create > 1 {
-				return exec.SensitiveResult{}, nil // the pane run
-			}
 			return stdout(createJSON(wsA, tabA, paneA)), nil
+		case exec.KindHerdrPaneInspect:
+			return stdout(processInfoJSON(4242, 4242, "zsh")), nil
 		default:
 			return exec.SensitiveResult{}, nil
 		}
@@ -472,7 +467,7 @@ func TestTheBootstrapIsRunInTheCreatedPane(t *testing.T) {
 
 	var runCmd *exec.SensitiveCommand
 	for _, c := range run.calls() {
-		if c.Kind != exec.KindHerdrCreate {
+		if c.Kind != exec.KindHerdrBootstrap {
 			continue
 		}
 		for _, arg := range c.Args {
@@ -570,31 +565,9 @@ func TestAForeignRootPaneNeverReceivesTheBootstrap(t *testing.T) {
 // here is what to clean up.
 func TestACreateThatSucceedsAndAPaneRunThatFailsStillYieldsARef(t *testing.T) {
 	run := newRunner()
-	// Driven through RunFunc directly rather than through run.on, because the
-	// create KIND covers both the workspace create and the pane run and the
-	// scripted path suppresses the second. An earlier version installed a
-	// run.on closure here as well and then replaced RunFunc wholesale, so the
-	// closure never ran — dead setup that reads as live, and a reader tuning it
-	// would have been tuning nothing.
-	calls := 0
-	run.fake.RunFunc = func(cmd exec.SensitiveCommand) (exec.SensitiveResult, error) {
-		if cmd.Kind == exec.KindHerdrReadiness && isSessionList(cmd) {
-			return stdout(defaultSessions()), nil
-		}
-		switch cmd.Kind {
-		case exec.KindHerdrReadiness:
-			return stdout(goodStatus()), nil
-		case exec.KindHerdrSnapshot:
-			return stdout(listJSON()), nil
-		case exec.KindHerdrCreate:
-			calls++
-			if calls == 1 {
-				return stdout(createJSON(wsA, tabA, paneA)), nil
-			}
-			return exec.SensitiveResult{}, exec.SensitiveErrorForTest(exec.KindHerdrCreate, exec.OutcomeExit)
-		}
-		return exec.SensitiveResult{}, nil
-	}
+	run.on(exec.KindHerdrBootstrap, func() (exec.SensitiveResult, error) {
+		return exec.SensitiveResult{}, exec.SensitiveErrorForTest(exec.KindHerdrBootstrap, exec.OutcomeExit)
+	})
 	a := newTestAdapter(t, run, nil)
 	spec, _ := newSpec(t)
 
@@ -1333,7 +1306,7 @@ func TestResolveSessionRecordsTheChainThatChoseIt(t *testing.T) {
 func TestResolveSessionRefusesANameThatIsNotOneOperand(t *testing.T) {
 	bad := []string{
 		"-fleet", "--session", "fleet name", "fleet\tname", "fleet\nname",
-		"fleet;rm", "fleet/../other", strings.Repeat("f", maxSessionNameLen+1), "fleet\x1b[2J",
+		"fleet;rm", "fleet/../other", strings.Repeat("f", wire.MaxOperandLen+1), "fleet\x1b[2J",
 	}
 	for _, name := range bad {
 		t.Run(name, func(t *testing.T) {
@@ -1736,29 +1709,13 @@ func TestAFailedReconciliationChoosesByFailureClass(t *testing.T) {
 // herdr's code is most worth having. A permission problem became "check whether
 // herdr is up".
 func TestThePaneRunFailureCarriesHerdrsErrorCode(t *testing.T) {
-	calls := 0
 	run := newRunner()
-	run.fake.RunFunc = func(cmd exec.SensitiveCommand) (exec.SensitiveResult, error) {
-		if cmd.Kind == exec.KindHerdrReadiness && isSessionList(cmd) {
-			return stdout(defaultSessions()), nil
-		}
-		switch cmd.Kind {
-		case exec.KindHerdrReadiness:
-			return stdout(goodStatus()), nil
-		case exec.KindHerdrSnapshot:
-			return stdout(listJSON()), nil
-		case exec.KindHerdrCreate:
-			calls++
-			if calls == 1 {
-				return stdout(createJSON(wsA, tabA, paneA)), nil
-			}
-			return exec.SensitiveResult{
-					Stderr: exec.BoundedOutputForTest(errorJSON("permission_denied"), exec.OutputComplete),
-				},
-				exec.SensitiveErrorForTest(exec.KindHerdrCreate, exec.OutcomeExit)
-		}
-		return exec.SensitiveResult{}, nil
-	}
+	run.on(exec.KindHerdrBootstrap, func() (exec.SensitiveResult, error) {
+		return exec.SensitiveResult{
+				Stderr: exec.BoundedOutputForTest(errorJSON("permission_denied"), exec.OutputComplete),
+			},
+			exec.SensitiveErrorForTest(exec.KindHerdrBootstrap, exec.OutcomeExit)
+	})
 	a := newTestAdapter(t, run, nil)
 	spec, _ := newSpec(t)
 
@@ -1823,4 +1780,31 @@ func foreignRef(t *testing.T) backend.Ref {
 		t.Fatalf("NewTmuxRef: %v", err)
 	}
 	return ref
+}
+
+// TestCheckReadyRunsReadinessOnly pins the drain's pre-claim check: a stopped
+// session is FailureUnavailable, a running one passes, and neither creates.
+func TestCheckReadyRunsReadinessOnly(t *testing.T) {
+	stopped := sessionsJSON(map[string]any{
+		"default": true, "name": defaultSession, "running": false, "socket_path": testSocket,
+	})
+	run := newRunner()
+	run.sessions = func() (exec.SensitiveResult, error) { return stdout(stopped), nil }
+	a := newTestAdapter(t, run, nil)
+	err := a.CheckReady(context.Background())
+	var cause backend.StartCause
+	if !errors.As(err, &cause) || cause.Class() != backend.FailureUnavailable || !errors.Is(err, ErrSessionNotRunning) {
+		t.Fatalf("CheckReady on a stopped session: %v, want FailureUnavailable naming ErrSessionNotRunning", err)
+	}
+
+	running := newRunner()
+	b := newTestAdapter(t, running, nil)
+	if err := b.CheckReady(context.Background()); err != nil {
+		t.Fatalf("CheckReady on a running session: %v", err)
+	}
+	for _, r := range []*scriptedRunner{run, running} {
+		if _, created := commandOfKind(r.calls(), exec.KindHerdrCreate); created {
+			t.Error("CheckReady created a workspace")
+		}
+	}
 }

@@ -328,3 +328,17 @@ func TestLocalSentinel_OnlyNewLocalRefMarksLocal(t *testing.T) {
 func mustLocalRef(repo string, number int) Ref {
 	return Ref{Owner: localOwnerSentinel, Repo: repo, Number: number}.asLocal()
 }
+
+// TestParseRemoteURL_TrailingSlash pins forgectl#1129: a trailing slash (with
+// or without .git) parses like the same URL without one.
+func TestParseRemoteURL_TrailingSlash(t *testing.T) {
+	for _, raw := range []string{"https://github.com/o/r/", "https://github.com/o/r.git/", "ssh://git@github.com/o/r/"} {
+		host, owner, repo, ok := ParseRemoteURL(raw)
+		if !ok || host != "github.com" || owner != "o" || repo != "r" {
+			t.Errorf("ParseRemoteURL(%q) = %q %q %q %v, want github.com o r true", raw, host, owner, repo, ok)
+		}
+	}
+	if _, _, _, ok := ParseRemoteURL("https://github.com/o/r/pull/1/"); ok {
+		t.Error("a PR URL parsed as a remote")
+	}
+}

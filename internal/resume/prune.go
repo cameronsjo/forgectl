@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // The snapshot store had no deleter at all: every session ever observed left a
@@ -196,7 +198,7 @@ func sweepOrphans(dir string, store map[string]*Record, keep map[string]bool, no
 		if errors.Is(err, fs.ErrNotExist) {
 			return 0, nil
 		}
-		return 0, []error{err}
+		return 0, []error{termsafe.Error(err)}
 	}
 	var tmpDebris, jsonDebris []string
 	jsonTotal, jsonClassified := 0, 0
@@ -249,8 +251,8 @@ func sweepOrphans(dir string, store map[string]*Record, keep map[string]bool, no
 
 	swept := 0
 	for _, name := range append(tmpDebris, jsonDebris...) {
-		if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			errs = append(errs, err)
+		if err := sweepRemove(filepath.Join(dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, termsafe.Error(err))
 			continue
 		}
 		swept++
@@ -277,8 +279,13 @@ func prunedRecently(dir string, now time.Time) bool {
 // markPruned stamps the marker. The content is human-readable for debugging;
 // the throttle reads the mtime.
 func markPruned(dir string, now time.Time) error {
-	return os.WriteFile(filepath.Join(dir, pruneMarker), []byte(now.Format(time.RFC3339)+"\n"), 0o600)
+	return termsafe.Error(os.WriteFile(filepath.Join(dir, pruneMarker), []byte(now.Format(time.RFC3339)+"\n"), 0o600))
 }
+
+// sweepRemove is sweepOrphans' delete, seamed so a test can fail it: a
+// regular file's removal does not fail on demand as root, and the failure's
+// *PathError carries the store path sweepOrphans must escape.
+var sweepRemove = os.Remove
 
 // projectIndex holds one read of ~/.claude/projects for a whole batch of
 // transcript lookups.
@@ -317,6 +324,9 @@ func (i *projectIndex) list(p Paths) ([]string, error) {
 			dirs = append(dirs, e.Name())
 		}
 	}
+	// Escaped here, where the error is built, although today's callers only
+	// test it against nil: a future caller that prints it gets safe text.
+	err = termsafe.Error(err)
 	if i != nil {
 		i.loaded, i.dirs, i.err = true, dirs, err
 	}

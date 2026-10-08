@@ -5,8 +5,8 @@ import (
 	"math/rand"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/cameronsjo/forgectl/internal/perftest"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/parser"
 )
@@ -95,66 +95,31 @@ func TestHeadingIDs_LiteralSuffixCollision(t *testing.T) {
 }
 
 // TestRender_DuplicateHeadings_LinearTime bounds the render and the link
-// scan of 32k identical headings against the same work over 32k DISTINCT
-// headings, which never collide and so cost the same under either id
-// collection. goldmark's default id collection makes the duplicate case
-// quadratic (minutes); headingIDs keeps it within a small factor of the
-// baseline. The ratio, not a wall-clock number, is the assertion, so a slow
-// or loaded CI runner scales both sides together; the fixed floor absorbs
-// timer noise on a fast one.
+// scan of 8k identical headings against the same work over an eighth as
+// many. goldmark's default id collection probes every suffix already taken,
+// so the duplicate case is quadratic (minutes at 32k); headingIDs keeps it
+// linear. The check is a ratio (perftest.Linear, #919) in process CPU time;
+// it was a wall-clock budget for 32k over a baseline of distinct headings,
+// which host load broke.
 //
 // Mutation: in newParseContext, return parser.NewContext() (goldmark's
-// default ids) — the duplicate render then misses the budget and this goes
-// red on the deadline rather than after the minutes the full run would take.
+// default ids) — the duplicate render then goes red on the ratio, or on
+// perftest.Ceiling if the one large run is slower than that.
 func TestRender_DuplicateHeadings_LinearTime(t *testing.T) {
-	const n = 32000
-	var distinct strings.Builder
-	for i := range n {
-		_, _ = fmt.Fprintf(&distinct, "## a%d\n", i)
-	}
-	dup := []byte(strings.Repeat("## a\n", n))
-
-	// work reports rather than calling t: on a timeout the goroutine below
-	// outlives the test, and a t method called after the test returns panics.
-	work := func(src []byte) error {
-		if _, err := render(src, RootDocs); err != nil {
-			return fmt.Errorf("render: %w", err)
+	const n, k = 8000, 8
+	work := func(n int) func() {
+		src := []byte(strings.Repeat("## a\n", n))
+		return func() {
+			if _, err := render(src, RootDocs); err != nil {
+				t.Fatalf("render: %v", err)
+			}
+			if _, err := scanBodyFor(RootVault, src); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
 		}
-		if _, err := scanBodyFor(RootVault, src); err != nil {
-			return fmt.Errorf("scan: %w", err)
-		}
-		return nil
 	}
-
-	start := time.Now()
-	if err := work([]byte(distinct.String())); err != nil {
-		t.Fatal(err)
-	}
-	baseline := time.Since(start)
-
-	budget := 10*baseline + 2*time.Second
-	type result struct {
-		took time.Duration
-		err  error
-	}
-	done := make(chan result, 1)
-	go func() {
-		s := time.Now()
-		err := work(dup)
-		done <- result{time.Since(s), err}
-	}()
-	select {
-	case r := <-done:
-		if r.err != nil {
-			t.Fatal(r.err)
-		}
-		if r.took > budget {
-			t.Fatalf("%d duplicate headings took %v, over the %v budget (baseline %v)", n, r.took, budget, baseline)
-		}
-		t.Logf("%d duplicate headings: %v (baseline %v)", n, r.took, baseline)
-	case <-time.After(budget):
-		t.Fatalf("%d duplicate headings did not finish within %v (baseline %v)", n, budget, baseline)
-	}
+	small, large := perftest.Amortize(work(n/k), work(n))
+	perftest.Linear(t, fmt.Sprintf("%d duplicate headings", n), k, small, large)
 }
 
 // TestRender_DuplicateHeadings_IDsUnchanged pins, through the real render

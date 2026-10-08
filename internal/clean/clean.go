@@ -33,7 +33,9 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/config"
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv"
 	"github.com/cameronsjo/forgectl/internal/sandbox"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // defaultRootSubdir is appended to the user's home directory for New's
@@ -92,10 +94,17 @@ func WithCleanConfig(cc config.CleanConfig) Option {
 
 // New builds a Client over the given Runner. The default root is
 // <home>/Projects; if the home directory can't be resolved, root is left
-// empty and Clean requires an explicit CleanOptions.Root.
+// empty and Clean requires an explicit CleanOptions.Root. A root that itself
+// starts with ~ is refused in that case rather than read as a relative path
+// named "~" under the working directory (see ScanReport).
 func New(run exec.Runner, opts ...Option) *Client {
+	return newWithHome(run, os.UserHomeDir, opts...)
+}
+
+// newWithHome is New with the home lookup injected.
+func newWithHome(run exec.Runner, userHomeDir func() (string, error), opts ...Option) *Client {
 	c := &Client{run: run}
-	if home, err := os.UserHomeDir(); err == nil {
+	if home, err := userHomeDir(); err == nil && home != "" {
 		c.home = home
 		c.root = filepath.Join(home, defaultRootSubdir)
 	}
@@ -103,6 +112,12 @@ func New(run exec.Runner, opts ...Option) *Client {
 		opt(c)
 	}
 	return c
+}
+
+// usesTilde reports whether path is a bare ~ or starts with ~/ — the forms
+// expandTilde resolves against the home directory.
+func usesTilde(path string) bool {
+	return path == "~" || strings.HasPrefix(path, "~/")
 }
 
 // expandTilde expands a leading ~ or ~/ to home. Mirrors internal/config's
@@ -186,21 +201,25 @@ func (c *Client) ScanReport(opts CleanOptions) (resolvedRoot string, report Repo
 	if root == "" {
 		return "", Report{}, fmt.Errorf("no root to scan: pass --root, set [clean] default_root, or ensure the home directory is resolvable")
 	}
+	if c.home == "" && usesTilde(root) {
+		return "", Report{}, fmt.Errorf("root %s starts with ~ but the home directory is not resolvable: pass an absolute --root", termsafe.QuotePath(root))
+	}
 	root = expandTilde(root, c.home)
 
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
-		return "", Report{}, fmt.Errorf("resolve root %s: %w", root, err)
+		return "", Report{}, fmt.Errorf("resolve root %s: %w", termsafe.QuotePath(root), termsafe.Error(err))
 	}
 	// Resolve symlinks in root itself up front, once, so every containment
 	// check downstream (Scan's walk, delete's WithinWorkspace re-check)
 	// compares against the exact same real path.
 	resolvedRoot, err = filepath.EvalSymlinks(absRoot)
 	if err != nil {
-		// A root that doesn't exist yet (or a dangling symlink) isn't a
-		// reclaim-safety concern — Scan itself will fail below with a clear
-		// "no such file" error. Fall back to the unresolved absolute path
-		// rather than erroring here.
+		// A root that doesn't exist (or a dangling symlink) isn't a
+		// reclaim-safety concern here: Scan below fails on a root it cannot
+		// read or that is not a directory, so the caller still gets an
+		// error rather than an empty report. Fall back to the unresolved
+		// absolute path so that error names what the user asked for.
 		resolvedRoot = absRoot
 	}
 
@@ -219,7 +238,7 @@ func (c *Client) ScanReport(opts CleanOptions) (resolvedRoot string, report Repo
 	})
 	if err != nil {
 		slog.Error("Failed to scan for reclaimable directories.", "root", resolvedRoot, "error", err)
-		return "", Report{}, fmt.Errorf("scan %s: %w", resolvedRoot, err)
+		return "", Report{}, fmt.Errorf("scan %s: %w", termsafe.QuotePath(resolvedRoot), termsafe.Error(err))
 	}
 	return resolvedRoot, report, nil
 }
@@ -244,6 +263,24 @@ func (c *Client) Clean(ctx context.Context, opts CleanOptions) (Result, error) {
 	return c.ApplyReport(ctx, resolvedRoot, report, opts)
 }
 
+// Preview is the dry-run-only entry point: it scans the Client's configured
+// root and --type filter once and classifies every target, and it has no way
+// to request a delete. It takes no options on purpose, so a caller that must
+// never delete (`forgectl status`) cannot be switched to apply by editing a
+// literal at its call site; the one apply decision lives here, pinned by
+// TestPreview_NeverDeletes.
+func (c *Client) Preview(ctx context.Context) (resolvedRoot string, result Result, err error) {
+	resolvedRoot, report, err := c.ScanReport(CleanOptions{})
+	if err != nil {
+		return "", Result{}, err
+	}
+	result, err = c.ApplyReport(ctx, resolvedRoot, report, CleanOptions{Apply: false})
+	if err != nil {
+		return "", Result{}, err
+	}
+	return resolvedRoot, result, nil
+}
+
 // ApplyReport classifies and — only when opts.Apply — deletes every target
 // in an already-scanned report, against resolvedRoot (as returned by
 // ScanReport). Splitting this out of Clean is what lets the CLI scan once,
@@ -255,33 +292,37 @@ func (c *Client) ApplyReport(ctx context.Context, resolvedRoot string, report Re
 	result := Result{}
 	// Memoized per project root: a project with several matched targets
 	// (e.g. node_modules AND dist) only needs one `git status` call, not one
-	// per target.
-	dirtyCache := make(map[string]bool)
+	// per target. The value is the skip reason, "" for a clean tree.
+	skipCache := make(map[string]string)
 
 	for _, t := range report.Targets {
 		item := Item{Target: t}
 		result.TotalScanned += t.Size
 
 		if !opts.Force && t.ProjectRoot != "" {
-			dirty, cached := dirtyCache[t.ProjectRoot]
+			reason, cached := skipCache[t.ProjectRoot]
 			if !cached {
 				d, derr := gitDirty(ctx, c.run, t.ProjectRoot)
-				if derr != nil {
+				switch {
+				case derr != nil:
 					// Safety guarantee #3, fail-safe direction: unable to
 					// CONFIRM the tree is clean is treated as dirty, not as
 					// clean. A `git status` failure (missing git binary,
-					// corrupt repo, permissions) must never silently
-					// downgrade to "safe to delete".
+					// corrupt repo, permissions, a repository git blocks on
+					// past its deadline) must never silently downgrade to
+					// "safe to delete". The reason says the state is unknown
+					// rather than claiming it is dirty (#1005).
 					slog.Warn("Could not confirm git tree is clean; skipping conservatively.",
 						"project", t.ProjectRoot, "target", t.Path, "error", derr)
-					d = true
+					reason = unknownTreeSkipReason
+				case d:
+					reason = dirtyTreeSkipReason
 				}
-				dirtyCache[t.ProjectRoot] = d
-				dirty = d
+				skipCache[t.ProjectRoot] = reason
 			}
-			if dirty {
+			if reason != "" {
 				item.Skipped = true
-				item.SkipReason = "dirty/uncommitted git tree (pass --force to override)"
+				item.SkipReason = reason
 				result.Items = append(result.Items, item)
 				continue
 			}
@@ -321,7 +362,7 @@ func (c *Client) delete(root, target string) error {
 		// reaching the target-name match), but this is the last line of
 		// defense before a real deletion, so the invariant is asserted here
 		// too rather than trusted from upstream.
-		return fmt.Errorf("refusing to delete %s: .git is never a reclaim target", target)
+		return fmt.Errorf("refusing to delete %s: .git is never a reclaim target", termsafe.QuotePath(target))
 	}
 	// Scan never yields a symlink as a Target — it fs.SkipDirs every
 	// symlinked directory during the walk. So if target IS a symlink right
@@ -337,7 +378,7 @@ func (c *Client) delete(root, target string) error {
 	// contents). Refusing on Lstat here closes both directions without
 	// following anything.
 	if fi, err := os.Lstat(target); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refusing to delete %s: became a symlink after scanning (possible race)", target)
+		return fmt.Errorf("refusing to delete %s: became a symlink after scanning (possible race)", termsafe.QuotePath(target))
 	}
 	// Resolve once and use the SAME resolved path for both the containment
 	// check and the removal itself. WithinWorkspace resolves symlinks
@@ -352,12 +393,12 @@ func (c *Client) delete(root, target string) error {
 		resolved = r
 	}
 	if !sandbox.WithinWorkspace(root, resolved) {
-		return fmt.Errorf("refusing to delete %s: resolves outside root %s", target, root)
+		return fmt.Errorf("refusing to delete %s: resolves outside root %s", termsafe.QuotePath(target), termsafe.QuotePath(root))
 	}
 
 	slog.Debug("Preparing to reclaim directory.", "path", resolved)
 	if err := os.RemoveAll(resolved); err != nil {
-		return fmt.Errorf("remove %s: %w", resolved, err)
+		return fmt.Errorf("remove %s: %w", termsafe.QuotePath(resolved), termsafe.Error(err))
 	}
 	return nil
 }
@@ -376,6 +417,13 @@ func containsGitComponent(target string) bool {
 	return false
 }
 
+// dirtyTreeSkipReason and unknownTreeSkipReason are why ApplyReport skips a
+// target: its project's git status reported changes, or could not be read.
+const (
+	dirtyTreeSkipReason   = "dirty/uncommitted git tree (pass --force to override)"
+	unknownTreeSkipReason = "git tree state unknown: git status failed or timed out (pass --force to override)"
+)
+
 // gitDirty runs `git status --porcelain` in dir and reports whether the
 // working tree has any uncommitted changes (modified, staged, or untracked
 // files) — safety guarantee #3. Mirrors internal/projects' gitStatus shape
@@ -384,9 +432,12 @@ func containsGitComponent(target string) bool {
 // (Modified/Untracked/Ahead counts) this package doesn't need — clean only
 // ever needs a clean/dirty boolean.
 func gitDirty(ctx context.Context, run exec.Runner, dir string) (bool, error) {
-	out, err := run.Run(ctx, "git", "-C", dir, "status", "--porcelain")
+	// Unfiltered (#977): status would otherwise run the clean filter the
+	// repository names on a stat-dirty file. A listing failure is an error,
+	// which ApplyReport skips as unknown.
+	out, err := gitenv.RunUnfiltered(ctx, run, gitenv.Bin, dir, "status", "--porcelain")
 	if err != nil {
-		return false, fmt.Errorf("git status --porcelain in %s: %w", dir, err)
+		return false, fmt.Errorf("git status --porcelain in %s: %w", termsafe.QuotePath(dir), termsafe.Error(err))
 	}
 	return strings.TrimSpace(out) != "", nil
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -63,7 +64,10 @@ func newReviewCmd(deps module.Deps) *cobra.Command {
 	// err discarded: "" degrades to an empty store on read (LoadReviewed), and
 	// the write verbs fail loudly via persist()'s path=="" guard.
 	reviewedPath, _ := config.ReviewReviewedPath()
-	return newReviewCmdForSources(srcs, reviewedPath, effectiveHost, deps.Theme)
+	cmd := newReviewCmdForSources(srcs, reviewedPath, effectiveHost, deps.Theme)
+	// The radar reads through the same host pin as the inventory.
+	cmd.AddCommand(newReviewReleasesCmd(review.GhAPI{Run: githubauth.Runner(deps.Runner, effectiveHost)}, time.Now))
+	return cmd
 }
 
 // newReviewConfigErrorCmd builds a `review` command tree whose every leaf —
@@ -92,9 +96,10 @@ func newReviewConfigErrorCmd(err error) *cobra.Command {
 		RunE:               fail,
 	}
 	cmd.AddCommand(
-		&cobra.Command{Use: "mark <ref>", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
-		&cobra.Command{Use: "unmark <ref>", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
-		&cobra.Command{Use: "sync", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "mark <ref>", Short: "Mark a work item reviewed (dims it until it sees new activity)", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "unmark <ref>", Short: "Clear a work item's reviewed mark (un-dims it)", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "sync", Short: "Prune reviewed marks for work items that are no longer open", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
+		&cobra.Command{Use: "releases", Short: "Release radar: what each rhythm repo shipped, what waits, and what stalled", Args: cobra.ArbitraryArgs, DisableFlagParsing: true, RunE: fail},
 	)
 	return cmd
 }
@@ -165,6 +170,7 @@ func newReviewCmdForSources(srcs []review.Source, reviewedPath, effectiveHost st
 		asJSON bool
 		kind   string
 		repo   string
+		bound  listBound
 	)
 	cmd := &cobra.Command{
 		// The Use line's [--flag …] placeholders are load-bearing, not just help
@@ -194,7 +200,9 @@ issue/pull URL, alongside the plain "owner/repo#N" form, which always means
 the configured GitHub host.
 
   forgectl review                       unified table (reviewed rows dimmed)
-  forgectl review --json                machine-readable output
+  forgectl review --json                machine-readable output, every row
+  forgectl review --json --limit 50     the first 50 rows (host, repo, number order) plus total and truncated
+  forgectl review --json --fields repo,number,title   only those row fields
   forgectl review --kind issue          issues only (or: pr)
   forgectl review --repo owner/name     one repo only
   forgectl review mark owner/repo#42    mark an item reviewed
@@ -202,12 +210,13 @@ the configured GitHub host.
   forgectl review sync                  prune marks for closed items`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runReviewList(cmd, srcs, reviewedPath, asJSON, kind, repo, th)
+			return runReviewList(cmd, srcs, reviewedPath, asJSON, kind, repo, &bound, th)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"key","kind","repo","number","title","state","isDraft","labels","updatedAt","url","reviewed"}] to stdout (an empty list is []); with --limit, {"truncated","total","shown","limit","hint","notes","items"} instead`)
 	cmd.Flags().StringVar(&kind, "kind", "", "filter by kind: issue or pr")
 	cmd.Flags().StringVar(&repo, "repo", "", "filter to one owner/name repo")
+	bound.addFlags(cmd, reviewJSONKeys)
 
 	hosts := extraHosts(srcs)
 	cmd.AddCommand(

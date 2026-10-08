@@ -1,0 +1,30 @@
+desk ● 1 waiting · forgectl 0.0.0-test · host-a · ~/.local/state/forgectl/desk      up 4h37m · 19:07
+╭ waiting ──────────────────────╮╭ started today ────────────────╮╭ outcomes ──────────────────────╮
+│ 1                             ││ 0                             ││ ✓ 0  ✗ 0                       │
+│ oldest 4m                     ││ median -                      ││ 0 changed                      │
+│ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█      ││ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁      ││ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁       │
+╰───────────────────────────────╯╰───────────────────────────────╯╰────────────────────────────────╯
+╭ queue ─┤ ● 0 running  ◌ 1 waiting ├──────────────────────────────────────────────────────────────╮
+│ ▸ ◌ waiting  21 rebuild-mirror                      ░░░░░░░░░░░░░░░░  needs you                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ focus ───────────────────────────────────────────────────────────────────────────────────────────╮
+│ 21 rebuild-mirror · sha256 00154761637c · unchanged since queued 4m ago                          │
+│ what  Rebuild the package mirror index from the upstream release feed and prune every release    │
+│       older than the retention window                                                            │
+│ why   Upstream published a release this morning and the nightly mirror job is paused until the   │
+│       index matches it                                                                           │
+│ ┆ script · the first lines it runs                                                               │
+│ ┆ python3 - <<'PY'                                                                               │
+│ ┆ print("rebuild")                                                                               │
+│ ┆ PY                                                                                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ timeline ─┤ newest first ├───────────────────────────────────────────────────────────────────────╮
+│  Needs you · enter takes you to it ────────────────────────────────────────────────────────── 1  │
+│      4m  ◌ Rebuild the package mirror index from the upstream release feed an… 21 rebuild-mirror │
+│            waiting for you · queued 4m ago                                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+ y run · s skip · v view · a all · t timeline · j/k move · ? help · q quit

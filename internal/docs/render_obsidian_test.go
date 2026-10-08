@@ -7,9 +7,10 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/cameronsjo/forgectl/internal/perftest"
 	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
 	"go.abhg.dev/goldmark/wikilink"
 )
@@ -277,20 +278,39 @@ func TestRenderVault_CommentAroundBlockStaysVisible(t *testing.T) {
 	}
 }
 
-// TestRenderVault_LongEqualsRunIsLinear guards the highlight parser's cost
-// on a long '=' run: re-scanning the run from every '=' is quadratic, which
-// at this length takes seconds rather than milliseconds.
+// TestRenderVault_LongEqualsRunIsLinear guards the highlight and comment
+// parsers' cost on a long '=' or '%' run: re-scanning the run from every
+// character in it is quadratic. It was a 1 s wall-clock bound on rendering
+// an 80000-byte run, but that run is over the markup guard
+// (markupTooComplex), so it rendered as plain text and never reached either
+// parser. Now the vault parser itself is timed, with no guard in front of
+// it, as a ratio (perftest.Linear, #919) against a run an eighth the length,
+// in process CPU time; and a run the guard lets through is rendered once to
+// check it stays literal.
+//
+// Mutation: drop the "before == '='" early return from highlightParser.Parse,
+// or the '%' one from commentInlineParser.Parse — its row goes red on the
+// ratio.
 func TestRenderVault_LongEqualsRunIsLinear(t *testing.T) {
+	const n, k, rendered = 80000, 8, 11000
 	for _, c := range []string{"=", "%"} {
-		src := "x " + strings.Repeat(c, 80000)
-		start := time.Now()
-		out := renderKind(t, src, RootVault)
-		if d := time.Since(start); d > time.Second {
-			t.Errorf("rendering an 80000-byte %q run took %v", c, d)
-		}
-		if strings.Contains(out, "<mark>") || !strings.Contains(out, strings.Repeat(c, 100)) {
-			t.Errorf("a %q run did not stay literal", c)
-		}
+		t.Run(c, func(t *testing.T) {
+			short := "x " + strings.Repeat(c, rendered)
+			if refused([]byte(short), true) {
+				t.Fatalf("a %d-byte %q run is refused by the markup guard; shorten it", rendered, c)
+			}
+			if out := renderKind(t, short, RootVault); strings.Contains(out, "<mark>") || !strings.Contains(out, strings.Repeat(c, 100)) {
+				t.Errorf("a %d-byte %q run did not stay literal", rendered, c)
+			}
+			parse := func(n int) func() {
+				src := []byte("x " + strings.Repeat(c, n))
+				return func() {
+					_ = markdownVaultPlain.Parser().Parse(text.NewReader(src), parser.WithContext(newParseContext()))
+				}
+			}
+			small, large := perftest.Amortize(parse(n/k), parse(n))
+			perftest.Linear(t, "parsing a "+c+" run", k, small, large)
+		})
 	}
 }
 
@@ -902,31 +922,39 @@ func TestScanVault_TitleUnchanged(t *testing.T) {
 	}
 }
 
-// TestScan_LongSetextHeadingIsLinear: a 5000-line setext H1 must scan in
-// time proportional to its size, in both root kinds. The bound is relative
-// to a same-size document with no heading, best of several runs, so a slow
-// CI machine slows both sides alike; a per-line re-walk of the heading is
-// about a hundred times the baseline.
+// TestScan_LongSetextHeadingIsLinear: a long setext H1 must scan in work
+// proportional to its size, in both root kinds. The measure is a count, not a
+// clock: the nodes visibleSource walks while scanning. A wall-clock ratio
+// flaked under CPU load (#639); a count cannot. One walk over the first line
+// visits every node under the heading once, so the count tracks the line
+// count; a per-line re-walk of the heading squares it.
+//
+// Mutation: in scanBodyFor's KindHeading case, call visibleSource for every
+// line of the heading, not just the first. The count then grows with the
+// square of the line count and this goes red.
 func TestScan_LongSetextHeadingIsLinear(t *testing.T) {
-	heading := []byte(strings.Repeat("word line\n", 5000) + "===\n")
-	plain := []byte(strings.Repeat("word line\n", 5000))
-	best := func(kind RootKind, src []byte) time.Duration {
-		fastest := time.Duration(1<<63 - 1)
-		for range 5 {
-			start := time.Now()
-			if _, err := scanBodyFor(kind, src); err != nil {
-				t.Fatal(err)
-			}
-			if d := time.Since(start); d < fastest {
-				fastest = d
-			}
+	visits := func(kind RootKind, lines int) int64 {
+		src := []byte(strings.Repeat("word line\n", lines) + "===\n")
+		before := visibleSourceVisits.Load()
+		if _, err := scanBodyFor(kind, src); err != nil {
+			t.Fatal(err)
 		}
-		return fastest
+		return visibleSourceVisits.Load() - before
 	}
+	const small, large = 1000, 4000
 	for _, kind := range []RootKind{RootDocs, RootVault} {
-		base, got := best(kind, plain), best(kind, heading)
-		if got > 10*base+20*time.Millisecond {
-			t.Errorf("kind %v: setext heading scan %v against a %v baseline", kind, got, base)
+		s, l := visits(kind, small), visits(kind, large)
+		if s == 0 {
+			t.Fatalf("kind %v: no visibleSource walk counted; the test measures nothing", kind)
+		}
+		// Linear: l is about 4*s. Quadratic: about 16*s. 8 splits them.
+		if l > 8*s {
+			t.Errorf("kind %v: %d lines walked %d nodes, %d lines walked %d: more than linear", kind, small, s, large, l)
+		}
+		// Absolute cap, so a document whose baseline is already quadratic
+		// cannot pass on the ratio alone.
+		if l > 8*large {
+			t.Errorf("kind %v: %d lines walked %d nodes, want at most %d", kind, large, l, 8*large)
 		}
 	}
 }
@@ -1002,6 +1030,52 @@ func TestRenderCallout_CustomTitle(t *testing.T) {
 		out := renderKind(t, c.src, c.kind)
 		if !strings.Contains(out, "</svg> "+c.title+"</div>"+c.body) {
 			t.Errorf("%q: want title %q then %q, got %s", c.src, c.title, c.body, out)
+		}
+	}
+}
+
+// A character reference that ends a line renders the same in both root
+// kinds (forgectl#665). The vault flavour's '#' trigger (tagParser) split
+// "x&#62;" into two text nodes at a line end, so neither half was a
+// reference and the vault page showed "x&amp;#62;".
+func TestRenderVault_LineFinalCharRefMatchesDocs(t *testing.T) {
+	refs := []string{"&#62;", "&#x3e;", "&#X3E;", "&gt;"}
+	shapes := []string{
+		"x%s\n",           // paragraph, last line
+		"x%s",             // paragraph, no trailing newline
+		"a x%s\nb\n",      // paragraph, soft-broken line
+		"a x%s  \nb\n",    // paragraph, hard-broken line
+		"# x%s\n",         // heading
+		"- x%s\n- y\n",    // tight list item
+		"> x%s\n",         // blockquote
+		"x%s ^blk-1\n",    // before a block-id marker
+		"**b** x%s\n",     // after inline markup
+		"x%s\n\n#tag x\n", // with a real tag elsewhere
+	}
+	for _, ref := range refs {
+		for _, shape := range shapes {
+			src := strings.Replace(shape, "%s", ref, 1)
+			vault, docs := renderKind(t, src, RootVault), renderKind(t, src, RootDocs)
+			if !strings.Contains(vault, "x&gt;") || strings.Contains(vault, "&amp;") {
+				t.Errorf("vault %q = %q, want the reference resolved to x&gt;", src, vault)
+			}
+			if strings.Contains(src, "^blk-1") || strings.Contains(src, "#tag") {
+				continue // vault-only markup: the outputs differ by design
+			}
+			if vault != docs {
+				t.Errorf("%q: vault %q != docs %q", src, vault, docs)
+			}
+		}
+	}
+}
+
+// A callout title reads the rendered paragraph, so it inherited #665.
+func TestRenderVault_CalloutTitleCharRef(t *testing.T) {
+	for _, ref := range []string{"&#62;", "&#x3e;", "&gt;"} {
+		src := "> [!tip] x" + ref + "\n> body\n"
+		out := renderKind(t, src, RootVault)
+		if !strings.Contains(out, "</svg> x&gt;</div>") || strings.Contains(out, "&amp;") {
+			t.Errorf("callout %q = %q, want the title x&gt;", src, out)
 		}
 	}
 }

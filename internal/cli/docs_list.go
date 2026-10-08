@@ -18,7 +18,8 @@ import (
 // telling the operator which root it's still walking — long enough that a
 // normal, fast index never prints it, short enough that a hung or
 // cloud-backed root doesn't read as the command having stalled silently.
-const docsListProgressDelay = 2 * time.Second
+// A var so tests can shrink it to force the progress path.
+var docsListProgressDelay = 2 * time.Second
 
 // newDocsListCmd builds `forgectl docs list [dir|file ...]` — lists the
 // indexed doc set without binding a server.
@@ -77,7 +78,13 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 					return
 				}
 				printed = true
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "indexing %s …\n", termsafe.SafeLine(progressRoot))
+				// Under --json stderr is reserved for the one error object
+				// (#649, #672): a slow walk that then hits its deadline would
+				// otherwise put this text line ahead of it.
+				if asJSON {
+					return
+				}
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "indexing %s …\n", safeColumnPath(progressRoot))
 			})
 			defer timer.Stop()
 
@@ -103,10 +110,16 @@ func newDocsListCmd(deps module.Deps) *cobra.Command {
 			if limit > 0 && limit < len(docs) {
 				docs = docs[:limit]
 			}
-			return printDocsList(cmd, docs, asJSON)
+			if err := printDocsList(cmd, docs, asJSON); err != nil {
+				// stdout refused the list: under --json stderr gets the docs
+				// integer-code object, keeping the exit code 1 this has always
+				// had, not the generic contract's string-code shape.
+				return docsFail(cmd, "docs list", "", err, 1, asJSON)
+			}
+			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON to stdout")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit [{"root","path","title","modTime"}] to stdout (an empty list is [])`)
 	cmd.Flags().DurationVar(&timeout, "timeout", 15*time.Second, "walk deadline, e.g. 15s or 2m")
 	cmd.Flags().IntVar(&limit, "limit", 0, "print only the first N entries, after the full walk completes (0 or unset: no limit)")
 	cmd.SetFlagErrorFunc(docsFlagError("docs list"))
@@ -152,10 +165,13 @@ func printDocsList(cmd *cobra.Command, docs []docspkg.Doc, asJSON bool) error {
 		return nil
 	}
 	// Every field is escaped: RelPath is a filename and Title is the doc's own
-	// H1, so either can carry a terminal escape sequence (forgectl#598).
+	// H1, so either can carry a terminal escape sequence (forgectl#598). The
+	// title is also capped (forgectl#894), and so are the root label and the
+	// path (#913): the path unquoted and cut in the middle, so an ordinary row
+	// keeps the %-48s column. --json above carries every field whole.
 	for _, d := range docs {
 		_, _ = fmt.Fprintf(out, "%-16s %-48s %s\n",
-			termsafe.SafeLine(d.RootLabel), termsafe.SafeLine(d.RelPath), termsafe.SafeLine(d.Title))
+			safeLabel(d.RootLabel), safeColumnPath(d.RelPath), safeTitle(d.Title))
 	}
 	return nil
 }

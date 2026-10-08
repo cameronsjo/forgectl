@@ -26,7 +26,10 @@ package docs
 //   [x] Happy: a link finding carries the source line of the file as written,
 //       frontmatter lines included
 //   [x] Happy: an out-of-root link is counted, never reported
-//   [x] Happy: a vault root is skipped and reported as unchecked
+//   [x] Happy: a vault root is checked: broken/ambiguous wikilinks and broken
+//       heading and ^block anchors are findings, orphans are never
+//   [x] Parity: check's broken vault wikilinks equal the reader's wikilink-miss set
+//   [x] Happy: the checked-in vault fixture checks clean, its outside-root link counted
 //   [x] Happy: a single-file root has no orphans
 //   [x] Happy: findings sort by root, path, then link findings by line, target
 //       and kind, then lineless findings by kind — not walk order
@@ -215,6 +218,26 @@ func TestCheck_SymlinkEscapeIsBroken(t *testing.T) {
 	}
 }
 
+// forgectl#611 item 3: a link written as a directory must name one. A
+// trailing slash on a regular file, a doc or not, is a broken link; on a
+// real directory it passes as before.
+func TestCheck_TrailingSlashOnAFileIsBroken(t *testing.T) {
+	dir := t.TempDir()
+	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[g](guide.md/) [l](LICENSE/) [s](sub/) [ok](guide.md)\n")
+	checkWrite(t, filepath.Join(dir, "guide.md"), "# G\n")
+	checkWrite(t, filepath.Join(dir, "LICENSE"), "MIT\n")
+	checkWrite(t, filepath.Join(dir, "sub", "notes.txt"), "n\n")
+
+	r := checkIndex(t, dir).Check()
+	var targets []string
+	for _, f := range findingsOf(r, FindingBrokenLink) {
+		targets = append(targets, f.Target)
+	}
+	if len(targets) != 2 || targets[0] != "LICENSE/" || targets[1] != "guide.md/" {
+		t.Fatalf("broken_link targets = %q, want [LICENSE/ guide.md/]; findings %+v", targets, r.Findings)
+	}
+}
+
 func TestCheck_Orphan(t *testing.T) {
 	dir := t.TempDir()
 	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n\n[a](a.md)\n")
@@ -327,19 +350,20 @@ func TestCheck_OutsideRootCountedNotReported(t *testing.T) {
 	}
 }
 
-func TestCheck_VaultRootSkipped(t *testing.T) {
+func TestCheck_VaultRootChecked(t *testing.T) {
 	docsDir := t.TempDir()
 	checkWrite(t, filepath.Join(docsDir, "README.md"), "# R\n")
 	vault := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	checkWrite(t, filepath.Join(vault, "n.md"), "# N\n\n[[missing]]\n")
+	checkWrite(t, filepath.Join(vault, "n.md"), "# N\n\n[[missing]]\n[[t#^nope]]\n[[t#No Such]]\n[[t#^blk]]\n[[dup]]\n")
+	checkWrite(t, filepath.Join(vault, "t.md"), "# T\n\nPara. ^blk\n")
+	checkWrite(t, filepath.Join(vault, "a/dup.md"), "# A\n")
+	checkWrite(t, filepath.Join(vault, "b/dup.md"), "# B\n")
+	checkWrite(t, filepath.Join(vault, "daily.md"), "# Daily\n")
 
 	r := checkIndex(t, docsDir, vault).Check()
-	if len(r.Roots) != 2 {
-		t.Fatalf("roots = %+v, want 2", r.Roots)
-	}
 	var docsRoot, vaultRoot CheckedRoot
 	for _, cr := range r.Roots {
 		if cr.Kind == "vault" {
@@ -351,11 +375,101 @@ func TestCheck_VaultRootSkipped(t *testing.T) {
 	if !docsRoot.Checked || docsRoot.Skipped != "" {
 		t.Errorf("docs root = %+v, want checked", docsRoot)
 	}
-	if vaultRoot.Checked || vaultRoot.Skipped == "" || vaultRoot.Docs != 1 {
-		t.Errorf("vault root = %+v, want unchecked with a reason and 1 doc", vaultRoot)
+	if !vaultRoot.Checked || vaultRoot.Skipped != "" || vaultRoot.Docs != 5 {
+		t.Errorf("vault root = %+v, want checked, no skip reason, 5 docs", vaultRoot)
 	}
+	got := map[string]bool{}
+	for _, f := range r.Findings {
+		if f.Root != vaultRoot.Label {
+			t.Errorf("finding %+v outside the vault", f)
+		}
+		got[string(f.Kind)+" "+f.Target] = true
+	}
+	want := []string{
+		"broken_link missing", "broken_anchor t#^nope", "broken_anchor t#No Such", "ambiguous_link dup",
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("findings = %+v, missing %q", r.Findings, w)
+		}
+	}
+	if len(r.Findings) != len(want) {
+		t.Errorf("findings = %+v, want exactly %d (valid [[t#^blk]] silent, no orphans)", r.Findings, len(want))
+	}
+	if r.Summary.Orphans != 0 || r.Summary.IgnoredOrphans != 0 {
+		t.Errorf("summary = %+v, want no orphan accounting in a vault", r.Summary)
+	}
+}
+
+// The checker reports exactly the wikilinks the reader renders as a miss.
+func TestCheck_VaultParityWithReader(t *testing.T) {
+	vault := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	checkWrite(t, filepath.Join(vault, "t.md"), "---\naliases: [Tee]\n---\n# T\n\n## Some Heading\n\nPara. ^blk\n")
+	checkWrite(t, filepath.Join(vault, "assets/my pic.png"), "x")
+	checkWrite(t, filepath.Join(vault, "assets/doc.pdf"), "x")
+	checkWrite(t, filepath.Join(vault, "sub/inner.md"), "# Inner\n")
+
+	forms := []struct {
+		link string
+		want bool // broken
+	}{
+		{"[[t]]", false},
+		{"[[t|a]]", false},
+		{`[[t\|a]]`, false},
+		{"[[t#^blk]]", false},
+		{"[[t#^nope]]", true},
+		{"[[t#Some Heading]]", false},
+		{"[[t#some-heading]]", false},
+		{"[[t#No Such]]", true},
+		{"[[T]]", false},
+		{"[[t.md]]", false},
+		{"[[Tee]]", false},
+		{"[[assets/my pic.png]]", false},
+		{"[[assets/doc.pdf]]", false},
+		{"[[my pic.png]]", false},
+		{"[[nope.pdf]]", true},
+		{"[[sub]]", true},
+		{"[[missing]]", true},
+	}
+	var src strings.Builder
+	src.WriteString("# N\n\n")
+	for _, f := range forms {
+		src.WriteString("- " + f.link + "\n")
+	}
+	checkWrite(t, filepath.Join(vault, "n.md"), src.String())
+
+	idx := checkIndex(t, vault)
+	from := mustFindDoc(t, idx, idx.roots[0].Label, "n.md")
+	broken := map[int]bool{}
+	for _, f := range idx.Check().Findings {
+		if f.Path == "n.md" {
+			broken[f.Line] = true
+		}
+	}
+	for i, f := range forms {
+		line := i + 3
+		// Render the one link alone so its miss is attributable.
+		doc, err := RenderDocFor(RootVault, []byte("# N\n\n"+f.link+"\n"), idx, from)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader := strings.Contains(doc.HTML, "wikilink-miss")
+		if reader != f.want || broken[line] != reader {
+			t.Errorf("%s: reader miss=%v, check broken=%v, want %v", f.link, reader, broken[line], f.want)
+		}
+	}
+}
+
+func TestCheck_VaultFixtureClean(t *testing.T) {
+	r := checkIndex(t, filepath.Join(copyLinksFixture(t), "vault")).Check()
 	if len(r.Findings) != 0 {
-		t.Errorf("findings = %+v, want none from a skipped vault root", r.Findings)
+		t.Errorf("findings = %+v, want none from the fixture vault", r.Findings)
+	}
+	if r.Summary.OutsideRootLinks != 1 {
+		t.Errorf("outside_root_links = %d, want 1 ([[../repo/index]])", r.Summary.OutsideRootLinks)
 	}
 }
 
@@ -544,6 +658,21 @@ func TestCheckAt_Severity(t *testing.T) {
 	}
 }
 
+// A link inside image alt text is not a link on the page, so docs check does
+// not report it broken (forgectl#596). The control link beside it proves the
+// check ran. Mutation: drop the hasImageAncestor check on ast.KindLink in
+// scanBodyFor and this reports two broken links.
+func TestCheck_LinkInsideImageAltIsNotBroken(t *testing.T) {
+	dir := t.TempDir()
+	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n\n![see [gone](alt-missing.md)](pic.png) [x](missing.md)\n")
+	checkWrite(t, filepath.Join(dir, "pic.png"), "png\n")
+
+	got := findingsOf(checkIndex(t, dir).Check(), FindingBrokenLink)
+	if len(got) != 1 || got[0].Target != "missing.md" {
+		t.Fatalf("broken_link findings = %+v, want only missing.md", got)
+	}
+}
+
 func TestCheck_OrphanOKSuppressesOrphanAndIsCounted(t *testing.T) {
 	dir := t.TempDir()
 	checkWrite(t, filepath.Join(dir, "README.md"), "# R\n")
@@ -577,5 +706,70 @@ func TestCheck_OrphanOKDoesNotHideLinkFindings(t *testing.T) {
 	}
 	if len(findingsOf(r, FindingOrphan)) != 0 {
 		t.Errorf("findings = %+v, want no orphan", r.Findings)
+	}
+}
+
+// TestCheck_VaultFragmentBudgetPerDoc (#710): docs check spends at most one
+// fragment budget of rendered-text parsing per source doc. A doc of more
+// markup-laden heading links than the budget covers gets broken_anchor for
+// the links the budget parsed and an info anchor_unchecked for the rest, a
+// second doc gets a fresh budget, and a slug link past the budget still
+// resolves. The broken_anchor count is the parse count, so it bounds the
+// work: a nil (unlimited) budget in Check turns it red (every link parsed,
+// no anchor_unchecked), and so does one budget shared by every doc (the
+// second doc gets none). Returning "broken_anchor" for a refusal turns the
+// severity and summary checks red.
+func TestCheck_VaultFragmentBudgetPerDoc(t *testing.T) {
+	// A fragment that misses "## x" as written and by its rendered text
+	// ("q"), and costs one maxRenderedFragment-byte parse.
+	const head, tail = "[q](y)%%", "%%"
+	frag := head + strings.Repeat("c", maxRenderedFragment-len(head)-len(tail)) + tail
+	const budgetLinks = maxFragmentParseBytes / maxRenderedFragment
+	const extra = 7
+	note := func(title string) string {
+		var sb strings.Builder
+		sb.WriteString("# " + title + "\n\n## x\n\n")
+		for i := 0; i < budgetLinks+extra; i++ {
+			sb.WriteString("[[t#" + frag + "]]\n")
+		}
+		sb.WriteString("[[t#x]]\n")
+		return sb.String()
+	}
+	vault := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(vault, ".obsidian"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	checkWrite(t, filepath.Join(vault, "t.md"), "# T\n\n## x\n")
+	checkWrite(t, filepath.Join(vault, "a.md"), note("A"))
+	checkWrite(t, filepath.Join(vault, "b.md"), note("B"))
+
+	r := checkIndex(t, vault).Check()
+	for _, path := range []string{"a.md", "b.md"} {
+		broken, unchecked := 0, 0
+		for _, f := range r.Findings {
+			if f.Path != path {
+				continue
+			}
+			switch f.Kind {
+			case FindingBrokenAnchor:
+				broken++
+			case FindingUncheckedAnchor:
+				unchecked++
+				if f.Severity != SeverityInfo || f.Line == 0 || f.Target == "" {
+					t.Errorf("%s: anchor_unchecked finding %+v, want severity info with a line and target", path, f)
+				}
+			default:
+				t.Errorf("%s: unexpected finding %+v", path, f)
+			}
+		}
+		if broken != budgetLinks || unchecked != extra {
+			t.Errorf("%s: %d broken_anchor + %d anchor_unchecked, want %d + %d", path, broken, unchecked, budgetLinks, extra)
+		}
+	}
+	if r.Summary.UncheckedAnchors != 2*extra || r.Summary.BrokenAnchors != 2*budgetLinks {
+		t.Errorf("summary = %+v, want %d unchecked and %d broken anchors", r.Summary, 2*extra, 2*budgetLinks)
+	}
+	if got, want := r.Errors(), 2*budgetLinks; got != want {
+		t.Errorf("Errors() = %d, want %d: anchor_unchecked must not fail the check", got, want)
 	}
 }

@@ -219,6 +219,22 @@ func (d *dirPin) lstat(name string) (perm os.FileMode, regular, exists bool, err
 	return os.FileMode(st.Mode).Perm(), st.Mode&unix.S_IFMT == unix.S_IFREG, true, nil
 }
 
+// sameFile reports whether names a and b in the pinned directory are one
+// file, compared by device and inode without following a symlink. On a
+// case-insensitive volume `.ENV` and `.env` are the same file under two
+// spellings, which is what the leftover scan's case-twin note must not
+// mistake for two targets.
+func (d *dirPin) sameFile(a, b string) (bool, error) {
+	var sa, sb unix.Stat_t
+	if err := unix.Fstatat(d.fd, a, &sa, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return false, err
+	}
+	if err := unix.Fstatat(d.fd, b, &sb, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return false, err
+	}
+	return sa.Dev == sb.Dev && sa.Ino == sb.Ino, nil
+}
+
 // tempNameBytes is the random component of a temp file name. Ten bytes of
 // base32 is plenty to make a collision a non-event while keeping the name
 // short enough to stay readable if one is ever left behind.
@@ -250,13 +266,6 @@ func (d *dirPin) createTemp(prefix string) (*os.File, string, error) {
 	return nil, "", errors.New("could not create a uniquely named temp file")
 }
 
-// rename moves from to to, both inside the pinned directory. Renameat with the
-// same descriptor on both sides is what keeps the swap atomic AND anchored:
-// neither name is re-resolved from the process working directory.
-func (d *dirPin) rename(from, to string) error {
-	return unix.Renameat(d.fd, from, d.fd, to)
-}
-
 // names lists the pinned directory's entries.
 //
 // It opens "." relative to the descriptor rather than reading the descriptor
@@ -276,4 +285,145 @@ func (d *dirPin) names() ([]string, error) {
 // remove unlinks name inside the pinned directory.
 func (d *dirPin) remove(name string) error {
 	return unix.Unlinkat(d.fd, name, 0)
+}
+
+// mkScratchDir creates a uniquely named 0700 directory inside the pinned
+// directory, writes its `*` .gitignore exclusively, and returns a pin on the
+// new directory with its name. On a failure it removes only what it created.
+// See scratch.go for why the .gitignore comes first.
+//
+// Everything is relative to a descriptor, for the reason dirPin exists: the
+// directory is created with mkdirat against d, opened with openat against d
+// (O_NOFOLLOW, O_DIRECTORY, so a name swapped for a symlink or a file between
+// the two calls is refused), and the .gitignore is created with openat
+// against the new directory's own descriptor. MakeScratchDir, which takes
+// paths, is the --sops work directory's version of the same steps.
+//
+// Between mkdirat and openat the name could be replaced by another directory.
+// So the opened directory must be empty, or it is not safely the one just
+// made, and it is left alone. There is deliberately no owner check. Comparing
+// the owner to this process's uid refuses every write on filesystems that
+// report another owner for new entries (sshfs or FUSE without idmap, NFS with
+// root_squash or all_squash, vfat or exFAT mounted with uid=), and comparing
+// it to the parent directory's owner has the same failure on a squashing
+// NFS export. What either would add is small: only a process that can write
+// the target's directory can swap the entry, and it can already replace the
+// target itself. What matters is that nothing sits in the directory before
+// the .gitignore, which the empty check and the O_EXCL create establish.
+func (d *dirPin) mkScratchDir(prefix string) (*dirPin, string, error) {
+	buf := make([]byte, tempNameBytes)
+	name := ""
+	for attempt := 0; attempt < 10 && name == ""; attempt++ {
+		if _, err := rand.Read(buf); err != nil {
+			return nil, "", fmt.Errorf("generate a scratch directory name: %w", err)
+		}
+		candidate := prefix + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(buf)
+		err := unix.Mkdirat(d.fd, candidate, scratchDirMode)
+		if errors.Is(err, unix.EEXIST) {
+			continue
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		name = candidate
+	}
+	if name == "" {
+		return nil, "", errors.New("could not create a uniquely named scratch directory")
+	}
+	scratchDirMade(name)
+	fd, err := unix.Openat(d.fd, name, dirFlags, 0)
+	if err != nil {
+		// rmdir, which fails on anything that is not an empty directory, so
+		// it can only remove the one made above.
+		_ = unix.Unlinkat(d.fd, name, unix.AT_REMOVEDIR)
+		return nil, "", err
+	}
+	sub := &dirPin{fd: fd}
+	// Before the .gitignore exists, nothing in the directory is this
+	// process's, so a failure removes only the directory, and only if empty.
+	abandon := func(err error) (*dirPin, string, error) {
+		sub.close()
+		_ = unix.Unlinkat(d.fd, name, unix.AT_REMOVEDIR)
+		return nil, "", err
+	}
+	names, err := sub.names()
+	if err != nil {
+		return abandon(fmt.Errorf("list the new scratch directory: %w", err))
+	}
+	if len(names) != 0 {
+		return abandon(errors.New("the new scratch directory is not empty"))
+	}
+	// mkdirat's mode passes through umask, which can only narrow 0700, but an
+	// unusual umask can narrow it past what forgectl itself needs to write.
+	if err := unix.Fchmod(fd, scratchDirMode); err != nil {
+		return abandon(err)
+	}
+	// O_EXCL: an EEXIST here is a file this process did not create, and it is
+	// never unlinked.
+	scratchIgnoreCreating(name)
+	ignoreFd, err := openatCreate(fd, ScratchIgnoreName, unix.O_EXCL|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return abandon(err)
+	}
+	if err := writeAndClose(os.NewFile(uintptr(ignoreFd), ScratchIgnoreName), []byte(ScratchIgnore)); err != nil {
+		_ = d.removeScratchDir(sub, name)
+		return nil, "", err
+	}
+	return sub, name, nil
+}
+
+// unlinkScratchEntry unlinks one entry this process created in a scratch
+// directory. It is a variable only so tests can make one unlink fail, the way
+// EIO or a read-only remount would, and prove the .gitignore outlives it.
+var unlinkScratchEntry = func(sub *dirPin, name string) error { return sub.remove(name) }
+
+// removeScratchDir tears down the scratch directory name, which sub pins, and
+// releases sub. It unlinks each of own, the entries this process created
+// there, then applies the teardown rule (scratchIgnoreRemovable): the
+// .gitignore goes last, and only when nothing else is left. If anything is,
+// an own entry whose unlink failed or something this process never made, the
+// .gitignore and the directory stay, so a stranded plaintext stays ignored by
+// git and the next write's leftover scan refuses on it.
+func (d *dirPin) removeScratchDir(sub *dirPin, name string, own ...string) error {
+	defer sub.close()
+	for _, n := range own {
+		_ = unlinkScratchEntry(sub, n)
+	}
+	names, err := sub.names()
+	if err != nil {
+		return err
+	}
+	if !scratchIgnoreRemovable(names) {
+		return errScratchNotEmpty
+	}
+	// The rule above is the only gate: nothing below checks again.
+	if err := sub.remove(ScratchIgnoreName); err != nil && !errors.Is(err, unix.ENOENT) {
+		return err
+	}
+	scratchIgnoreGoneAt(sub)
+	return afterScratchRmdir(rmdirScratchAt(d, name), func() (*os.File, error) {
+		ifd, oerr := openatCreate(sub.fd, ScratchIgnoreName, unix.O_EXCL|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+		if oerr != nil {
+			return nil, oerr
+		}
+		return os.NewFile(uintptr(ifd), ScratchIgnoreName), nil
+	})
+}
+
+// rmdirScratchAt removes the emptied scratch directory name inside d. It is a
+// variable only so a test can make the rmdir fail; see rmdirScratch.
+var rmdirScratchAt = func(d *dirPin, name string) error {
+	return unix.Unlinkat(d.fd, name, unix.AT_REMOVEDIR)
+}
+
+// scratchIgnoreGoneAt is the descriptor teardown's scratchIgnoreGone seam
+// (scratch.go): the .gitignore inside sub is unlinked and the directory is
+// about to be removed. A no-op in production.
+var scratchIgnoreGoneAt = func(sub *dirPin) {}
+
+// renameFrom moves from, inside the scratch directory sub pins, to to, inside
+// d. Both are descriptors on directories of the same parent filesystem, so
+// renameat(2) is atomic here exactly as rename is.
+func (d *dirPin) renameFrom(sub *dirPin, from, to string) error {
+	return unix.Renameat(sub.fd, from, d.fd, to)
 }

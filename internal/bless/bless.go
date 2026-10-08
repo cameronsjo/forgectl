@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
 // EnsureKey returns the PKIX DER of the key labelled label, minting it if it
@@ -284,11 +285,11 @@ func CheckGuardedParamRefs(steps []StepCheck, params, reservedExports []string) 
 			for _, value := range s.Guarded[field] {
 				refs, err := extractRefs(value)
 				if err != nil {
-					return fmt.Errorf("step %d (%s) field %s: %w", i, s.Uses, field, err)
+					return fmt.Errorf("step %d (%s) field %s: %w", i, termsafe.QuoteArgMax(s.Uses, 0), field, err)
 				}
 				for _, ref := range refs {
 					if !allowed[ref] {
-						return fmt.Errorf("step %d (%s) field %s references ${%s}: params are forbidden in a blessed step's guarded fields; only exports from earlier steps are allowed", i, s.Uses, field, ref)
+						return fmt.Errorf("step %d (%s) field %s references %s: params are forbidden in a blessed step's guarded fields; only exports from earlier steps are allowed", i, termsafe.QuoteArgMax(s.Uses, 0), field, termsafe.QuoteArgMax("${"+ref+"}", 0))
 					}
 				}
 			}
@@ -301,6 +302,9 @@ func CheckGuardedParamRefs(steps []StepCheck, params, reservedExports []string) 
 	}
 	return nil
 }
+
+// errUnterminatedRef is extractRefs' refusal of a "${" with no closing "}".
+var errUnterminatedRef = errors.New("unterminated ${...}; the value is not shown")
 
 // extractRefs returns the ${name} references in s, mirroring
 // internal/step.Context.Interpolate's scan exactly (index of "${", first "}"
@@ -320,7 +324,10 @@ func extractRefs(s string) ([]string, error) {
 		start += i
 		end := strings.Index(s[start:], "}")
 		if end == -1 {
-			return nil, fmt.Errorf("unterminated ${...} in %q", s)
+			// Categorical (#761): the value is a whole guarded field (a run
+			// step's cmd, say), so the error names the field at the call
+			// site and never echoes the value.
+			return nil, errUnterminatedRef
 		}
 		end += start
 		refs = append(refs, s[start+2:end])

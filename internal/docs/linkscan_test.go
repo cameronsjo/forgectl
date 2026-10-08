@@ -159,7 +159,7 @@ func TestScanDoc_BlockIDs(t *testing.T) {
 }
 
 func TestScanDoc_WikilinkFormsInVaultIndex(t *testing.T) {
-	meta, err := scanDoc(fixtureAbs(t, "vault/index.md"), "index.md")
+	meta, err := scanDocFor(RootVault, fixtureAbs(t, "vault/index.md"), "index.md")
 	if err != nil {
 		t.Fatalf("scanDoc: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestScanDoc_LinkLineCountsFrontmatter(t *testing.T) {
 			if err := os.WriteFile(p, []byte(tc.src), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			meta, err := scanDoc(p, "p.md")
+			meta, err := scanDocFor(RootVault, p, "p.md")
 			if err != nil {
 				t.Fatalf("scanDoc: %v", err)
 			}
@@ -335,7 +335,7 @@ func TestScanDoc_AtCap_FullyScanned(t *testing.T) {
 	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	meta, err := scanDoc(p, "edge.md")
+	meta, err := scanDocFor(RootVault, p, "edge.md")
 	if err != nil {
 		t.Fatalf("scanDoc: %v", err)
 	}
@@ -373,5 +373,28 @@ func TestScanDoc_FrontmatterAliasesAndTrust(t *testing.T) {
 	}
 	if meta.Status != "deprecated" || meta.StaleAfter != "2026-09-23T00:00:00Z" {
 		t.Errorf("trust = (%q, %q), want (deprecated, 2026-09-23T00:00:00Z)", meta.Status, meta.StaleAfter)
+	}
+}
+
+// A link or wikilink written inside an image's alt text is shown only as alt
+// text, so it is not indexed (forgectl#596). A link beside the image, and a
+// link nested in ordinary link text, still are: they render as links.
+// Mutation: drop either hasImageAncestor check in scanBodyFor and both root
+// kinds go red (the docs-root scan indexes wikilinks too).
+func TestScanBody_LinksInsideImageAltAreNotIndexed(t *testing.T) {
+	src := "![alt [in](in.md) [[wiki]] end](pic.png) [out](out.md)\n\n[[l](l.md)](m.md)\n"
+	for _, kind := range []RootKind{RootDocs, RootVault} {
+		scan, err := scanBodyFor(kind, []byte(src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, l := range scan.links {
+			got = append(got, l.Raw)
+		}
+		want := []string{"out.md", "l.md"}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("kind %v: links = %q, want %q", kind, got, want)
+		}
 	}
 }

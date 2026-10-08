@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -427,14 +426,20 @@ func handleDoc(store *Store) http.HandlerFunc {
 		// another.
 		idx := store.Current()
 
-		absPath, err := idx.Resolve(root, rest)
+		// Open, not Resolve then open by path: resolution holds each
+		// directory on the path as its own verified os.Root, and the file is
+		// opened by its single name in the last one and must be the file
+		// the walk approved. So neither a symlink nor a directory swapped
+		// in after the check can redirect the read.
+		f, _, err := idx.Open(root, rest)
 		if err != nil {
-			slog.Debug("docs: request did not resolve to a servable file.", "root", root, "rest", rest, "error", err)
+			slog.Debug("docs: request did not resolve to a servable file.", "root", termsafe.SafePathMax(root, 0), "rest", termsafe.SafePathMax(rest, 0), "error", err)
 			http.NotFound(w, r)
 			return
 		}
 
-		source, tooLarge, err := readDocCapped(absPath)
+		source, tooLarge, err := readDocCapped(f)
+		_ = f.Close()
 		if err != nil {
 			slog.Warn("docs: resolved path could not be read.", "error", err)
 			http.NotFound(w, r)
@@ -449,7 +454,7 @@ func handleDoc(store *Store) http.HandlerFunc {
 			// render something misleading. The notice names the doc as
 			// root/rel only, never absPath, and links no raw file (the server
 			// has no raw-file route).
-			slog.Debug("docs: document exceeds render cap; served a notice.", "root", root, "rest", rest, "limit", renderCapBytes)
+			slog.Debug("docs: document exceeds render cap; served a notice.", "root", termsafe.SafePathMax(root, 0), "rest", termsafe.SafePathMax(rest, 0), "limit", renderCapBytes)
 			renderShell(w, idx, pageContext{
 				CurrentRoot: root,
 				CurrentRel:  rest,
@@ -473,13 +478,23 @@ func handleDoc(store *Store) http.HandlerFunc {
 		if found {
 			from = &doc
 		}
-		rendered, err := RenderDocFor(kind, source, idx, from)
+		rendered, err := RenderDocForContext(r.Context(), kind, source, idx, from)
+		if err != nil && r.Context().Err() != nil {
+			// The client went away before the page was ready: nothing to
+			// answer, and nothing went wrong.
+			slog.Debug("docs: request ended before its render.", "root", termsafe.SafePathMax(root, 0), "rest", termsafe.SafePathMax(rest, 0), "error", err)
+			return
+		}
 		if err != nil {
-			slog.Error("docs: markdown render failed.", "root", root, "rest", rest, "error", err)
+			slog.Error("docs: markdown render failed.", "root", termsafe.SafePathMax(root, 0), "rest", termsafe.SafePathMax(rest, 0), "error", err)
 			http.Error(w, "render failed", http.StatusInternalServerError)
 			return
 		}
 
+		switch rendered.Notice {
+		case noticeRenderSize, noticeRenderDeadline, noticeRenderBusy:
+			slog.Warn("docs: served the document as source text instead of rendering it.", "path", termsafe.SafePathMax(root+"/"+rest, 0), "reason", rendered.Notice, "bytes", len(source))
+		}
 		renderShell(w, idx, pageContext{
 			CurrentRoot: root,
 			CurrentRel:  rest,
@@ -488,7 +503,7 @@ func handleDoc(store *Store) http.HandlerFunc {
 			Outline:     rendered.Outline,
 			Words:       rendered.Words,
 			Minutes:     rendered.Minutes,
-			Content:     template.HTML(rendered.HTML), //nolint:gosec // body is bluemonday-sanitized in render (vault highlight/tag nodes included; wikilink anchors are built from indexed Docs only); the frontmatter/callout additions are built there from html.EscapeString'd fragments and fixed markup only
+			Content:     template.HTML(rendered.HTML), //nolint:gosec // body is bluemonday-sanitized in render (vault highlight/tag nodes included; wikilink anchors are built from indexed Docs only); the frontmatter/callout additions are built there from html.EscapeString'd fragments and fixed markup only; a document past the markup guard, the render cap or the render deadline is instead html.EscapeString'd source plus fixed markup (sourceTextDoc)
 		})
 	}
 }
@@ -497,17 +512,15 @@ func handleDoc(store *Store) http.HandlerFunc {
 // scan's cap on purpose: an over-cap document is indexed by title only, so
 // rendering it in full would show links and anchors the index knows nothing
 // about. The cap bounds memory and the per-request read; it does NOT bound
-// render CPU, since the superlinear parse cases sit far below it.
+// render CPU, since the superlinear parse cases sit far below it. The
+// markup guard (markupguard.go), the smaller render cap maxRenderBytes and
+// the render deadline (renderdeadline.go) bound that.
 const renderCapBytes = maxScanBytes
 
-// readDocCapped reads at most renderCapBytes of path. tooLarge reports that
-// the file holds more than that, in which case source is nil.
-func readDocCapped(path string) (source []byte, tooLarge bool, err error) {
-	f, err := os.Open(path) //nolint:gosec // G304: path came from Index.Resolve, which re-verifies containment
-	if err != nil {
-		return nil, false, err
-	}
-	defer func() { _ = f.Close() }()
+// readDocCapped reads at most renderCapBytes of f, a doc Index.Open opened.
+// tooLarge reports that the file holds more than that, in which case source
+// is nil.
+func readDocCapped(f io.Reader) (source []byte, tooLarge bool, err error) {
 	// One byte past the cap detects an over-cap file without reading the rest.
 	source, err = io.ReadAll(io.LimitReader(f, renderCapBytes+1))
 	if err != nil {

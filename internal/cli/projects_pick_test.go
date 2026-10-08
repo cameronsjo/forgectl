@@ -18,7 +18,7 @@ func TestChooseRepo_HeadlessWritesCandidatesThenReturnsModeSpecificExit(t *testi
 	prevTTY, prevPicker := isInteractiveTTY, pickRepoFn
 	isInteractiveTTY = func() bool { return interactiveTTY(false, true) }
 	pickerCalls := 0
-	pickRepoFn = func([]projects.Repo, theme.Theme) (projects.Repo, error) {
+	pickRepoFn = func([]projects.Repo, theme.Theme, []string) (projects.Repo, error) {
 		pickerCalls++
 		return projects.Repo{}, errors.New("picker reached")
 	}
@@ -31,7 +31,7 @@ func TestChooseRepo_HeadlessWritesCandidatesThenReturnsModeSpecificExit(t *testi
 		{Host: "github.com", Owner: "cameronsjo", Name: "forgectl", Cloned: false},
 		{Host: "", LocalPath: "/work/local", Cloned: true, Status: projects.GitStatus{State: projects.StatusOK}},
 	}
-	_, err := chooseRepo(cmd, repos, projectSelectionClone, theme.Theme{})
+	_, err := chooseRepo(cmd, repos, projectSelectionClone, theme.Theme{}, nil)
 	if got, want := stdout.String(), "github.com  cameronsjo/forgectl  uncloned\nlocal  path:/work/local  clean\n"; got != want {
 		t.Errorf("candidate stdout = %q, want %q", got, want)
 	}
@@ -50,13 +50,16 @@ func TestChooseRepo_HeadlessPreservesFirstWriterError(t *testing.T) {
 	prevTTY, prevPicker := isInteractiveTTY, pickRepoFn
 	isInteractiveTTY = func() bool { return interactiveTTY(true, false) }
 	pickerCalls := 0
-	pickRepoFn = func([]projects.Repo, theme.Theme) (projects.Repo, error) { pickerCalls++; return projects.Repo{}, nil }
+	pickRepoFn = func([]projects.Repo, theme.Theme, []string) (projects.Repo, error) {
+		pickerCalls++
+		return projects.Repo{}, nil
+	}
 	t.Cleanup(func() { isInteractiveTTY, pickRepoFn = prevTTY, prevPicker })
 
 	sentinel := errors.New("writer failed")
 	cmd := &cobra.Command{}
 	cmd.SetOut(failingWriter{err: sentinel})
-	_, err := chooseRepo(cmd, []projects.Repo{{Host: "github.com", Owner: "c", Name: "one"}}, projectSelectionWorktree, theme.Theme{})
+	_, err := chooseRepo(cmd, []projects.Repo{{Host: "github.com", Owner: "c", Name: "one"}}, projectSelectionWorktree, theme.Theme{}, nil)
 	if !errors.Is(err, sentinel) || err != sentinel {
 		t.Errorf("error = %v, want original sentinel", err)
 	}
@@ -70,13 +73,13 @@ func TestChooseRepo_InteractiveCallsPickerOnceWithoutCandidateOutput(t *testing.
 	isInteractiveTTY = func() bool { return interactiveTTY(true, true) }
 	want := projects.Repo{Host: "github.com", Owner: "c", Name: "selected"}
 	pickerCalls := 0
-	pickRepoFn = func([]projects.Repo, theme.Theme) (projects.Repo, error) { pickerCalls++; return want, nil }
+	pickRepoFn = func([]projects.Repo, theme.Theme, []string) (projects.Repo, error) { pickerCalls++; return want, nil }
 	t.Cleanup(func() { isInteractiveTTY, pickRepoFn = prevTTY, prevPicker })
 
 	cmd := &cobra.Command{}
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
-	got, err := chooseRepo(cmd, []projects.Repo{{Host: "github.com", Owner: "c", Name: "other"}}, projectSelectionPick, theme.Theme{})
+	got, err := chooseRepo(cmd, []projects.Repo{{Host: "github.com", Owner: "c", Name: "other"}}, projectSelectionPick, theme.Theme{}, nil)
 	if err != nil || got != want {
 		t.Errorf("chooseRepo = (%+v, %v), want (%+v, nil)", got, err, want)
 	}
@@ -119,7 +122,7 @@ func TestProjectsCommands_HeadlessAmbiguityUsesEachModeAndNoPicker(t *testing.T)
 	prevTTY, prevPicker := isInteractiveTTY, pickRepoFn
 	isInteractiveTTY = func() bool { return interactiveTTY(false, true) }
 	pickerCalls := 0
-	pickRepoFn = func([]projects.Repo, theme.Theme) (projects.Repo, error) {
+	pickRepoFn = func([]projects.Repo, theme.Theme, []string) (projects.Repo, error) {
 		pickerCalls++
 		return projects.Repo{}, errors.New("picker reached")
 	}
@@ -165,7 +168,10 @@ func TestProjectsCloneCommand_HeadlessWriterErrorStopsBeforePickerOrClone(t *tes
 	prevTTY, prevPicker := isInteractiveTTY, pickRepoFn
 	isInteractiveTTY = func() bool { return interactiveTTY(false, true) }
 	pickerCalls := 0
-	pickRepoFn = func([]projects.Repo, theme.Theme) (projects.Repo, error) { pickerCalls++; return projects.Repo{}, nil }
+	pickRepoFn = func([]projects.Repo, theme.Theme, []string) (projects.Repo, error) {
+		pickerCalls++
+		return projects.Repo{}, nil
+	}
 	t.Cleanup(func() { isInteractiveTTY, pickRepoFn = prevTTY, prevPicker })
 	sentinel := errors.New("candidate writer failed")
 	cmd := newProjectsCloneCmd(cloneFixture(t, twoHostRunFunc(`[{"name":"a","sshUrl":"git@github.com:c/a.git"},{"name":"b","sshUrl":"git@github.com:c/b.git"}]`, "owner\tname\ttype\tssh\n")), theme.Theme{})

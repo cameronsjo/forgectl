@@ -11,6 +11,7 @@ package pr
 // PRs (Classification: concurrent enumeration on the Inventory model)
 //   [x] Happy: three queries union + dedup by Ref.String(), sorted by (slug, number)
 //   [x] Unhappy: a degraded query becomes a note, not a failure
+//   [x] Invariant: notes follow query order, not completion order (PRs and Dash)
 //
 // PrepareMany (Classification: the load-bearing concurrency)
 //   [x] Invariant: two same-repo PRs never run their git checkout concurrently
@@ -30,6 +31,7 @@ import (
 	"time"
 
 	"github.com/cameronsjo/forgectl/internal/exec"
+	"github.com/cameronsjo/forgectl/internal/gitenv/gitenvtest"
 )
 
 // searchRow renders one gh-search-prs JSON object for the given slug/number.
@@ -392,8 +394,8 @@ func TestDash_ActiveReviewsNoteIsCategorical(t *testing.T) {
 func assertCategoricalPRNotes(t *testing.T, notes []string) {
 	t.Helper()
 	for _, n := range notes {
-		if !strings.HasSuffix(n, ": query failed") {
-			t.Errorf("note %q is not categorical; want a %q suffix", n, ": query failed")
+		if !strings.HasSuffix(n, ": query failed (run forgectl doctor for the cause)") {
+			t.Errorf("note %q is not categorical; want the fixed fallback reason", n)
 		}
 	}
 	assertNoPRNoteLeaks(t, notes)
@@ -435,6 +437,7 @@ func TestPrepareMany_SameRepoSerialized(t *testing.T) {
 	var maxSeen int
 
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		switch {
 		case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
 			// Return a valid head so Prepare proceeds to the clone step.
@@ -497,6 +500,7 @@ func cloneSlug(args []string) string {
 // staggered per-repo sleep scrambles completion order.
 func TestPrepareMany_InputOrder(t *testing.T) {
 	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		args = gitenvtest.Strip(args)
 		switch {
 		case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
 			return `{"headRefName":"feature","headRefOid":"abc123",` +
@@ -643,5 +647,102 @@ func TestCheckAgentForReview_ForgedLocalRefStillRefused(t *testing.T) {
 	if err := CheckAgentForReview("codex", effective); err == nil {
 		t.Error("CheckAgentForReview(codex) accepted a remote ref owned by \"local\"; " +
 			"the Codex reviewer must still be refused against a remote head")
+	}
+}
+
+// reversedFailures is a gh fake whose @me searches all fail, finishing in
+// the reverse of order: each flag waits until every flag after it in order
+// has started, then a little longer, so a fan-out that keeps notes in
+// completion order sees them backwards. The wait only shapes the red side;
+// the fixed order the tests assert does not depend on any timing.
+func reversedFailures(t *testing.T, order ...string) *exec.FakeRunner {
+	t.Helper()
+	started := make(map[string]chan struct{}, len(order))
+	for _, f := range order {
+		started[f] = make(chan struct{})
+	}
+	return &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name != "gh" {
+			return "[]", nil
+		}
+		flag := searchWhoFlag(args)
+		ch, ok := started[flag]
+		if !ok {
+			return "[]", nil
+		}
+		close(ch)
+		for i, f := range order {
+			if f != flag {
+				continue
+			}
+			for _, later := range order[i+1:] {
+				select {
+				case <-started[later]:
+				case <-time.After(5 * time.Second):
+					t.Errorf("query %s never started", later)
+				}
+			}
+			time.Sleep(time.Duration(len(order)-1-i) * 20 * time.Millisecond)
+		}
+		return "", errors.New("gh: not authenticated")
+	}}
+}
+
+// TestPRs_NotesFollowQueryOrder: notes come out in query order, whatever
+// order the queries finish in, so `pr ls` and --json read the same on every
+// run (forgectl#997 item 1).
+//
+// Mutation that turns it red: append each note as its result is received.
+func TestPRs_NotesFollowQueryOrder(t *testing.T) {
+	client := New(reversedFailures(t, "--author", "--assignee", "--review-requested"))
+	_, notes, err := client.PRs(context.Background())
+	if err != nil {
+		t.Fatalf("PRs: %v", err)
+	}
+	const f = ": query failed (run forgectl doctor for the cause)"
+	want := []string{"authored" + f, "assigned" + f, "review-requested" + f}
+	if strings.Join(notes, "|") != strings.Join(want, "|") {
+		t.Errorf("notes = %q, want %q", notes, want)
+	}
+}
+
+// TestDash_NotesFollowSectionOrder is the Dash twin: awaiting-you, then
+// your-open.
+//
+// Mutation that turns it red: append each note as its result is received.
+func TestDash_NotesFollowSectionOrder(t *testing.T) {
+	client := New(reversedFailures(t, "--review-requested", "--author"), WithSessionsDir(t.TempDir()))
+	_, notes, err := client.Dash(context.Background())
+	if err != nil {
+		t.Fatalf("Dash: %v", err)
+	}
+	const f = ": query failed (run forgectl doctor for the cause)"
+	want := []string{"awaiting-you" + f, "your-open" + f}
+	if strings.Join(notes, "|") != strings.Join(want, "|") {
+		t.Errorf("notes = %q, want %q", notes, want)
+	}
+}
+
+// TestDash_NotSignedInNoteNamesTheFix: when gh has no credential (it exits
+// 4), each section's note says so and names `gh auth login`, rather than a
+// bare "query failed" the operator must decode with doctor (forgectl#1148).
+func TestDash_NotSignedInNoteNamesTheFix(t *testing.T) {
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "gh" && len(args) >= 2 && args[0] == "search" && args[1] == "prs" {
+			return "", &exec.CommandError{Name: "gh", Stderr: "To get started with GitHub CLI, please run:  gh auth login", ExitCode: 4, Err: errors.New("exit status 4")}
+		}
+		return "", nil
+	}}
+	client := New(fake, WithSessionsDir(t.TempDir()))
+	_, notes, err := client.Dash(context.Background())
+	if err != nil {
+		t.Fatalf("Dash: %v", err)
+	}
+	want := []string{
+		"awaiting-you: query failed (gh is not signed in to github.com; run gh auth login)",
+		"your-open: query failed (gh is not signed in to github.com; run gh auth login)",
+	}
+	if strings.Join(notes, "|") != strings.Join(want, "|") {
+		t.Errorf("notes = %q, want %q", notes, want)
 	}
 }

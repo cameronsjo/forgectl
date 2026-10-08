@@ -20,17 +20,20 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 		Short: "Print the resolved launch profile for the current directory",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cwd, err := os.Getwd()
+			cwd, err := launchWorkingDirectory()
 			if err != nil {
-				return termsafe.Error(fmt.Errorf("determine working directory: %w", err))
+				return err
 			}
 			effLaunch, notice, effFrom := autoMigrateOrWarnLegacyLaunch(boundary, cfg)
 			if notice != "" && !asJSON {
-				fmt.Fprintln(cmd.ErrOrStderr(), "forgectl: "+termsafe.SafeLine(notice))
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "forgectl: "+safeText(notice))
 			}
 			cfg.Launch = effLaunch
 			lc, src := resolveLaunchConfig(boundary, cfg, effFrom)
-			profile := launch.Resolve(lc, cwd)
+			profile, err := launch.Resolve(lc, cwd)
+			if err != nil {
+				return WithExitCode(termsafe.Error(err), exitUsage)
+			}
 			// The injected block is not part of the profile, so without this
 			// `which` reports a posture that omits variables the launch will
 			// carry — and a bad [proxy] launch_profile printed as a clean
@@ -39,18 +42,25 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 			// whether this config can launch.
 			injected, err := injectedLaunchKeys(cfg)
 			if err != nil {
-				return WithExitCode(termsafe.Error(err), 2)
+				return WithExitCode(termsafe.Error(err), exitUsage)
+			}
+			// Where a bare `forgectl launch` would start the session: only a
+			// claude session moves to the repository's settings root, so
+			// every other harness reports none.
+			runDir := ""
+			if profile.Harness == "claude" {
+				runDir = launch.SettingsRoot(cwd)
 			}
 			if asJSON {
-				return writeLaunchWhichJSON(cmd.OutOrStdout(), profile, cwd, src, injected)
+				return writeLaunchWhichJSON(cmd.OutOrStdout(), profile, cwd, runDir, src, injected)
 			}
 			out := th.Writer(cmd.OutOrStdout(), os.Environ())
-			printLaunchProfile(out, th, profile, cwd, src, injected)
+			printLaunchProfile(out, th, profile, cwd, runDir, src, injected)
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false,
-		`emit {"directory":...,"config":...,"matched":...,"harness":...,"model":...,"effort":...,"permission_mode":...,"allow_danger":...,"env_keys":[...],"injected_env_keys":[...],"add_dir":[...]} to stdout`)
+		`emit {"directory":...,"run_directory":...,"config":...,"matched":...,"harness":...,"model":...,"effort":...,"permission_mode":...,"allow_danger":...,"env_keys":[...],"injected_env_keys":[...],"add_dir":[...]} to stdout`)
 	return cmd
 }
 
@@ -60,7 +70,12 @@ func newLaunchWhichCmd(boundary *config.LegacyMigrationBoundary, cfg config.Conf
 // machine) is the kind of thing pasted into an issue or an agent transcript,
 // and a configured env value is exactly where a secret lives.
 type launchWhichJSON struct {
-	Directory      string   `json:"directory"`
+	Directory string `json:"directory"`
+	// RunDirectory is where a bare `forgectl launch` starts the session: the
+	// repository's settings root for a claude launch from a subfolder,
+	// otherwise Directory. Present for the claude harness only, the one that
+	// can move (launch.SettingsRoot).
+	RunDirectory   string   `json:"run_directory,omitempty"`
 	Config         string   `json:"config"`
 	Matched        string   `json:"matched"`
 	Harness        string   `json:"harness"`
@@ -81,7 +96,7 @@ type launchWhichJSON struct {
 // buildLaunchWhichJSON converts a resolved profile into the --json wire
 // shape. Slice fields are never nil so the encoder emits [] rather than null
 // for a profile with no env or no add-dir entries.
-func buildLaunchWhichJSON(p launch.Profile, cwd, confPath string, injected []string) launchWhichJSON {
+func buildLaunchWhichJSON(p launch.Profile, cwd, runDir, confPath string, injected []string) launchWhichJSON {
 	envKeys := launch.SortedEnvKeys(p.Env)
 	if envKeys == nil {
 		envKeys = []string{}
@@ -95,6 +110,7 @@ func buildLaunchWhichJSON(p launch.Profile, cwd, confPath string, injected []str
 	}
 	return launchWhichJSON{
 		Directory:       cwd,
+		RunDirectory:    runDir,
 		Config:          confPath,
 		Matched:         p.Match,
 		Harness:         p.Harness,
@@ -111,13 +127,13 @@ func buildLaunchWhichJSON(p launch.Profile, cwd, confPath string, injected []str
 // writeLaunchWhichJSON encodes the profile through the sanctioned termsafe
 // seam. Nothing is written before a marshal error, so a failing writer or
 // encoder never leaves a partial document on stdout.
-func writeLaunchWhichJSON(w io.Writer, p launch.Profile, cwd, confPath string, injected []string) error {
+func writeLaunchWhichJSON(w io.Writer, p launch.Profile, cwd, runDir, confPath string, injected []string) error {
 	enc := termsafe.JSONEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(buildLaunchWhichJSON(p, cwd, confPath, injected))
+	return enc.Encode(buildLaunchWhichJSON(p, cwd, runDir, confPath, injected))
 }
 
-func printLaunchProfile(w io.Writer, th theme.Theme, p launch.Profile, cwd, confPath string, injected []string) {
+func printLaunchProfile(w io.Writer, th theme.Theme, p launch.Profile, cwd, runDir, confPath string, injected []string) {
 	styles := th.Styles()
 	labelStyle := styles.Muted.Width(14)
 	valueStyle := styles.Fg
@@ -133,6 +149,9 @@ func printLaunchProfile(w io.Writer, th theme.Theme, p launch.Profile, cwd, conf
 
 	_, _ = fmt.Fprintln(w, titleStyle.Render("launch profile")+renderSafe(dimStyle.Render, "  "+cwd))
 	row("config", confPath)
+	if runDir != "" && runDir != cwd {
+		row("runs in", runDir+"  (settings root; --here to stay)")
+	}
 
 	matched := p.Match
 	if matched == "" {
@@ -189,5 +208,21 @@ func printLaunchProfile(w io.Writer, th theme.Theme, p launch.Profile, cwd, conf
 // renderSafe establishes the ordering invariant for styled terminal output:
 // untrusted text is escaped first, then the trusted renderer may add ANSI.
 func renderSafe(render func(...string) string, untrusted string) string {
-	return render(termsafe.SafeLine(untrusted))
+	return render(safeText(untrusted))
+}
+
+// launchGetwd is os.Getwd, a variable only so a test can make it fail.
+var launchGetwd = os.Getwd
+
+// launchWorkingDirectory is the working directory `launch` and `launch which`
+// resolve a profile for. Its *PathError goes through termsafe.Error BEFORE the
+// wrap (#832): termsafe.Error reconstructs and caps the path only for a
+// *PathError that is the error itself, so wrapping first rendered the path
+// escaped but at full length.
+func launchWorkingDirectory() (string, error) {
+	cwd, err := launchGetwd()
+	if err != nil {
+		return "", fmt.Errorf("determine working directory: %w", termsafe.Error(err))
+	}
+	return cwd, nil
 }

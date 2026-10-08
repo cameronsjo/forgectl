@@ -94,6 +94,10 @@ func ValidateWingName(gitHubHost, wing string) (string, error) {
 // lands in, so an ambiguous entry must not resolve to a coin flip).
 func ResolveWings(gitHubHost string, wings []Wing) (WingTable, error) {
 	byRepo := make(map[string]string)
+	// claimedBy records which entry (1-based) first claimed a repo, so a
+	// collision names the entry rather than echoing the wing name read from
+	// config (#658).
+	claimedBy := make(map[string]int)
 	seenWing := make(map[string]bool, len(wings))
 	for i, w := range wings {
 		name, err := ValidateWingName(gitHubHost, w.Name)
@@ -112,8 +116,11 @@ func ResolveWings(gitHubHost string, wings []Wing) (WingTable, error) {
 			}
 			key := strings.ToLower(owner + "/" + repoName)
 			if prior, dup := byRepo[key]; dup && prior != name {
-				return WingTable{}, fmt.Errorf("[[projects.wings]] entry %d claims a repo already claimed by wing %q; "+
-					"a repo belongs to at most one wing", i+1, prior)
+				return WingTable{}, fmt.Errorf("[[projects.wings]] entry %d claims a repo already claimed by entry %d; "+
+					"a repo belongs to at most one wing", i+1, claimedBy[key])
+			}
+			if _, dup := byRepo[key]; !dup {
+				claimedBy[key] = i + 1
 			}
 			byRepo[key] = name
 		}

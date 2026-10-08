@@ -23,6 +23,8 @@ var ErrNoLedger = errors.New("no coordinator ledger here: run this from the coor
 // LedgerDir finds the coordinator ledger this process belongs to. A worker
 // carries FORGECTL_LEDGER from launch. The coordinator is a Claude session
 // forgectl did not start, so its ledger is keyed on its own inbox socket path.
+// The mail ledger lives under <state>/mail, apart from the worker ledger's
+// <state>/surface, which pins that directory and owns every entry in it.
 func LedgerDir(stateDir string, getenv func(string) string) (string, error) {
 	if d := getenv(EnvLedger); d != "" {
 		if !filepath.IsAbs(d) {
@@ -32,7 +34,7 @@ func LedgerDir(stateDir string, getenv func(string) string) (string, error) {
 	}
 	if sock := getenv(envClaudeSocket); sock != "" {
 		sum := sha256.Sum256([]byte(sock))
-		return filepath.Join(stateDir, "surface", hex.EncodeToString(sum[:6])), nil
+		return filepath.Join(stateDir, "mail", hex.EncodeToString(sum[:6])), nil
 	}
 	return "", ErrNoLedger
 }

@@ -233,7 +233,7 @@ func TestListAPIs_AbsentDefaultSoftEmpty(t *testing.T) {
 		{"sessions", func(ctx context.Context, c *Client) error { _, err := c.ListSessions(ctx); return err }},
 		{"windows", func(ctx context.Context, c *Client) error { _, err := c.ListWindows(ctx); return err }},
 		{"panes", func(ctx context.Context, c *Client) error { _, err := c.ListPanes(ctx); return err }},
-		{"most recent", func(ctx context.Context, c *Client) error { _, err := c.mostRecentSession(ctx); return err }},
+		{"most recent", func(ctx context.Context, c *Client) error { _, _, err := c.mostRecentSession(ctx); return err }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

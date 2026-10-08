@@ -165,3 +165,68 @@ func TestEcho_OriginCredentialNeverReachesTheRef(t *testing.T) {
 		t.Fatalf("ref %+v carries the origin credential", ref)
 	}
 }
+
+// TestEcho_BreadcrumbLifecycleFieldsAreCategorical: the workspace, phase, and
+// windowId refusals name the field, never the value read from disk (#658).
+func TestEcho_BreadcrumbLifecycleFieldsAreCategorical(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		edit  func(*Breadcrumb)
+		field string
+	}{
+		{"workspace", func(bc *Breadcrumb) { bc.Workspace = "relative/" + hostileEcho }, "workspace"},
+		{"phase", func(bc *Breadcrumb) {
+			bc.Version, bc.Revision, bc.Phase = breadcrumbVersion, 1, Phase(hostileEcho)
+		}, "phase"},
+		{"windowId", func(bc *Breadcrumb) {
+			bc.Version, bc.Revision, bc.Phase, bc.WindowID = breadcrumbVersion, 1, PhaseActive, hostileEcho
+		}, "windowId"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bc := validRecord()
+			tc.edit(&bc)
+			err := validateBreadcrumbRecord(bc)
+			assertNoEcho(t, err)
+			if !strings.Contains(err.Error(), tc.field) {
+				t.Fatalf("err = %v, want the %s refusal (did the test reach it?)", err, tc.field)
+			}
+		})
+	}
+}
+
+// TestEcho_GhPRViewStderrIsNotEchoed: gh's stderr is text the host chooses.
+func TestEcho_GhPRViewStderrIsNotEchoed(t *testing.T) {
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view" {
+			return "", &exec.CommandError{Name: name, Args: args, Stderr: hostileEcho, ExitCode: 1, Err: errors.New("exit status 1")}
+		}
+		return "", nil
+	}}
+	client := New(fake, WithSessionsDir(t.TempDir()))
+	_, err := client.Prepare(context.Background(), Ref{Owner: "cameronsjo", Repo: "forgectl", Number: 1}, PrepareOpts{})
+	assertNoEcho(t, err)
+	var cmdErr *exec.CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("err = %v lost the CommandError from its chain", err)
+	}
+}
+
+// TestEcho_PostReviewGhStderrIsNotEchoed: an approved post that gh refuses
+// reports categorically; gh's stderr is text the host chooses (#658).
+func TestEcho_PostReviewGhStderrIsNotEchoed(t *testing.T) {
+	fake := &exec.FakeRunner{RunFunc: func(name string, args []string) (string, error) {
+		if name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "review" {
+			return "", &exec.CommandError{Name: name, Args: args, Stderr: hostileEcho, ExitCode: 1, Err: errors.New("exit status 1")}
+		}
+		return "", nil
+	}}
+	c := postClient(fake, true, true)
+	posted, err := c.PostReview(context.Background(), testSess, "the review", false)
+	if posted {
+		t.Fatal("a refused post must not report posted")
+	}
+	assertNoEcho(t, err)
+	if !strings.Contains(err.Error(), "gh pr review failed") {
+		t.Fatalf("err = %v, want the categorical post failure (did the test reach it?)", err)
+	}
+}

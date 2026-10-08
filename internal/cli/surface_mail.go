@@ -183,14 +183,14 @@ func runSurfaceSend(cmd *cobra.Command, deps module.Deps, getenv func(string) st
 		if res.Detail != "" {
 			line += ": " + res.Detail
 		}
-		if _, err := fmt.Fprintln(cmd.OutOrStdout(), termsafe.SafeLine(line)); err != nil {
+		if _, err := fmt.Fprintln(cmd.OutOrStdout(), safeText(line)); err != nil {
 			return err
 		}
 	}
 
 	switch {
 	case res.Status == mail.StatusFailed:
-		return WithExitCode(fmt.Errorf("message %s to %s failed", res.ID, termsafe.SafeLine(to)), mailExitRefused)
+		return WithExitCode(fmt.Errorf("message %s to %s failed", res.ID, safeLabel(to)), mailExitRefused)
 	case watchErr != nil:
 		return refused(fmt.Errorf("message %s is %s, but --watch did not register: %w", res.ID, res.Status, watchErr))
 	case res.Status == mail.StatusQueued:
@@ -467,7 +467,7 @@ func runSurfaceEvent(cmd *cobra.Command, deps module.Deps, getenv func(string) s
 		}
 		st, parseErr = mail.ParseState(stateFlag)
 	default:
-		return fmt.Errorf("--harness %s: want claude, codex or pi", termsafe.QuoteText(harness))
+		return fmt.Errorf("--harness %q: want claude, codex or pi", safeLabel(harness))
 	}
 	if parseErr != nil {
 		// A hook fires for more than turn boundaries; those are not errors.

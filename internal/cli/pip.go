@@ -251,20 +251,30 @@ func newPipShowCmd(client *pippkg.Client) *cobra.Command {
 	return cmd
 }
 
+// pipPathJSON is the `pip path --json` shape (additive-only, ADR-0008).
+type pipPathJSON struct {
+	Path string `json:"path"`
+}
+
 // newPipPathCmd builds `pip path`.
 func newPipPathCmd(client *pippkg.Client) *cobra.Command {
 	var path string
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "path",
 		Short: "Print the resolved pip.conf path",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c := resolvePipClient(client, path)
-			fmt.Fprintln(cmd.OutOrStdout(), c.Path())
-			return nil
+			if asJSON {
+				return termsafe.JSONEncoder(cmd.OutOrStdout()).Encode(pipPathJSON{Path: c.Path()})
+			}
+			_, err := fmt.Fprintln(cmd.OutOrStdout(), c.Path())
+			return err
 		},
 	}
 	cmd.Flags().StringVar(&path, "path", "", "pip.conf path (default: OS-resolved location)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, `emit {"path":...} to stdout`)
 	return cmd
 }
 
