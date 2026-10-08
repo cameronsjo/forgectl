@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.1](https://github.com/cameronsjo/forgectl/compare/v0.34.0...v0.34.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **pr:** the Claude reviewer loads no settings file and gets its whole schema-validated profile on the command line, and its Bash runs under Claude Code's OS sandbox (workspace not writable, network limited to the PR host, fail closed); `forgectl pr` refuses to dispatch it where the sandbox can't run (Linux needs bubblewrap and socat), when the installed claude is older than 2.1.284, or when `claude doctor` rejects its settings, and `~/.claude/settings.json` no longer reaches the reviewer ([780da2f](https://github.com/cameronsjo/forgectl/commit/780da2f2b8618a42e3bb0d185f43c7387fe7f381))
+
 ## [0.34.0](https://github.com/cameronsjo/forgectl/compare/v0.33.0...v0.34.0) (2026-10-07)
 
 
