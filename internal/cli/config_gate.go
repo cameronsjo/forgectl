@@ -69,7 +69,10 @@ func resolveVerb(root *cobra.Command, first string) string {
 // never be refused over config: `resume snapshot` is documented to always
 // exit 0 and is wired to the Stop hook of every session. It does not read
 // the config file's settings, and the loader has already warned on stderr.
-var hookVerbs = map[string]string{"resume": "snapshot"}
+// `surface event` is wired to the Stop and UserPromptSubmit hooks of every
+// worker forgectl launches, where exit 2 blocks the stop or erases the
+// prompt; it reads no config settings either.
+var hookVerbs = map[string]string{"resume": "snapshot", "surface": "event"}
 
 // invokesHookVerb reports whether args name a hookVerbs pair by its literal
 // names. Execute asks this before the command tree exists (see its startup

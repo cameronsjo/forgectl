@@ -73,9 +73,8 @@ type claudeFrame struct {
 
 const claudeProbeTimeout = 250 * time.Millisecond
 
-// Deliver posts text as a user frame. The frame carries the session id read
-// from the registry just now, so a socket path reused by another session
-// drops it instead of misdelivering.
+// Deliver posts text as a user frame, stamped with the session id the
+// registry lists for the socket it resolved.
 func (a ClaudeAdapter) Deliver(ctx context.Context, w Worker, m Message, text string) (string, error) {
 	s, err := a.resolve(ctx, w)
 	if err != nil {
@@ -120,7 +119,10 @@ func (a ClaudeAdapter) State(ctx context.Context, w Worker) (WorkerState, error)
 }
 
 // resolve finds the live session for a worker: the socket the ledger already
-// knows, else the registry entry whose cwd is the worker's worktree.
+// knows, else the live registry entry whose cwd is the worker's worktree and
+// whose name is the worker's. The name is required even when only one
+// session is live there: an operator's own session opened in the worktree
+// before the worker registers must not take the worker's mail.
 func (a ClaudeAdapter) resolve(ctx context.Context, w Worker) (claudeSession, error) {
 	sessions, err := a.sessions()
 	if err != nil {
@@ -153,22 +155,22 @@ func (a ClaudeAdapter) resolve(ctx context.Context, w Worker) (claudeSession, er
 		}
 		live = append(live, s)
 	}
-	switch len(live) {
-	case 0:
-		return claudeSession{}, NotReady("no live claude session in %s yet", w.Worktree)
-	case 1:
-		return live[0], nil
-	}
 	var named []claudeSession
 	for _, s := range live {
 		if s.Name == w.Name {
 			named = append(named, s)
 		}
 	}
-	if len(named) == 1 {
+	switch len(named) {
+	case 0:
+		if len(live) > 0 {
+			return claudeSession{}, NotReady("%d live claude session(s) in %s, none named %s yet", len(live), w.Worktree, quoteTrunc(w.Name))
+		}
+		return claudeSession{}, NotReady("no live claude session in %s yet", w.Worktree)
+	case 1:
 		return named[0], nil
 	}
-	return claudeSession{}, fmt.Errorf("%d live claude sessions in %s and none uniquely named %s", len(live), w.Worktree, quoteTrunc(w.Name))
+	return claudeSession{}, fmt.Errorf("%d live claude sessions in %s are all named %s", len(named), w.Worktree, quoteTrunc(w.Name))
 }
 
 func (a ClaudeAdapter) sessions() ([]claudeSession, error) {

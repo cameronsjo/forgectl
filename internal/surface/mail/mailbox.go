@@ -170,11 +170,23 @@ func (t *Tx) append(recs ...record) error {
 			return err
 		}
 	}
-	f, err := os.OpenFile(t.box.logPath(), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(t.box.logPath(), os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(buf.Bytes()); err != nil {
+	// A write cut short (a full disk, a kill) leaves a last line with no
+	// newline. Appending straight after it would fuse the next record onto
+	// it and Load would skip both, so close the torn line off first.
+	torn, err := endsTorn(f)
+	if err != nil {
+		_ = f.Close()
+		return err
+	}
+	data := buf.Bytes()
+	if torn {
+		data = append([]byte{'\n'}, data...)
+	}
+	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -183,4 +195,20 @@ func (t *Tx) append(recs ...record) error {
 		return err
 	}
 	return f.Close()
+}
+
+// endsTorn reports whether f is non-empty and its last byte is not a newline.
+func endsTorn(f *os.File) (bool, error) {
+	info, err := f.Stat()
+	if err != nil {
+		return false, err
+	}
+	if info.Size() == 0 {
+		return false, nil
+	}
+	var last [1]byte
+	if _, err := f.ReadAt(last[:], info.Size()-1); err != nil {
+		return false, err
+	}
+	return last[0] != '\n', nil
 }

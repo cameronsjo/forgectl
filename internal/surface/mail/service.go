@@ -39,9 +39,6 @@ func (s *Service) now() time.Time {
 }
 
 func (s *Service) worker(name string) (Worker, error) {
-	if name == SystemSender {
-		return Worker{Name: SystemSender}, nil
-	}
 	if err := ValidateName(name); err != nil {
 		return Worker{}, err
 	}
@@ -51,9 +48,6 @@ func (s *Service) worker(name string) (Worker, error) {
 // Send checks policy, appends the message, and attempts delivery once. A
 // transient failure leaves it queued for the next flush.
 func (s *Service) Send(ctx context.Context, from, to, body string, pri Priority) (SendResult, error) {
-	if to == SystemSender {
-		return SendResult{}, errors.New("forgectl is not a recipient")
-	}
 	sender, err := s.worker(from)
 	if err != nil {
 		return SendResult{}, fmt.Errorf("sender: %w", err)
@@ -221,9 +215,14 @@ type Event struct {
 	ThreadID string
 }
 
-// ApplyEvent records a worker's new state (and a codex thread id), sends the
-// one-shot idle notices, and flushes, since an idle worker can unblock pane
-// deliveries. It returns the watchers it notified.
+// ApplyEvent records a worker's new state (and a codex thread id), queues
+// the one-shot idle notices, and flushes, since an idle worker can unblock
+// pane deliveries and the flush is what delivers the notices. It returns the
+// watchers it queued a notice for.
+//
+// A notice is forgectl's own message, so it skips the sender policy: a
+// burst of workers going idle, or one worker finishing two watched turns
+// inside the dedupe window, must not drop a notice someone asked for.
 func (s *Service) ApplyEvent(ctx context.Context, ev Event) ([]string, error) {
 	if err := ValidateName(ev.Worker); err != nil {
 		return nil, err
@@ -248,19 +247,31 @@ func (s *Service) ApplyEvent(ctx context.Context, ev Event) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var notified []string
-	for _, name := range watchers {
+	if len(watchers) > 0 {
 		body := fmt.Sprintf("%s finished its turn and is idle.", ev.Worker)
-		if _, err := s.Send(ctx, SystemSender, name, body, PriorityNext); err == nil {
-			notified = append(notified, name)
+		err := s.Box.Locked(func(tx *Tx) error {
+			for _, name := range watchers {
+				if err := s.noticeLocked(tx, name, body, now); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			// Give the subscriptions back, so the next idle tries again.
+			_ = s.Roster.Update(ev.Worker, func(w *Worker) error {
+				w.Watchers = append(w.Watchers, watchers...)
+				return nil
+			})
+			return nil, fmt.Errorf("queue idle notices: %w", err)
 		}
 	}
 	if ev.State == StateIdle {
 		if _, err := s.Flush(ctx); err != nil {
-			return notified, err
+			return watchers, err
 		}
 	}
-	return notified, nil
+	return watchers, nil
 }
 
 // Messages returns the folded mailbox, filtered by keep (nil keeps all).

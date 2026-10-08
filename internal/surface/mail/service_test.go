@@ -3,6 +3,7 @@ package mail
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -251,5 +252,58 @@ func TestFlushFailsMessageToRemovedWorker(t *testing.T) {
 	}
 	if rep.Failed != 1 {
 		t.Fatalf("report %+v, want the message to a removed worker failed", rep)
+	}
+}
+
+func TestSendRefusesTheSystemSender(t *testing.T) {
+	s, _ := newTestService(t, &fakeAdapter{})
+	for _, tc := range []struct{ from, to string }{{SystemSender, "pi-1"}, {"coord", SystemSender}} {
+		if _, err := s.Send(context.Background(), tc.from, tc.to, "hi", PriorityNext); !errors.Is(err, ErrBadName) {
+			t.Errorf("Send(%q, %q): err = %v, want ErrBadName", tc.from, tc.to, err)
+		}
+	}
+}
+
+// Idle notices are forgectl's own, so the sender policy cannot drop them: two
+// watched turns inside the dedupe window, and more watchers than the per-pair
+// rate limit, each still get theirs.
+func TestIdleNoticesSkipThePolicy(t *testing.T) {
+	ad := &fakeAdapter{}
+	s, _ := newTestService(t, ad)
+	ctx := context.Background()
+	for turn := 0; turn < 2; turn++ {
+		if err := s.Watch("pi-1", "coord"); err != nil {
+			t.Fatal(err)
+		}
+		notified, err := s.ApplyEvent(ctx, Event{Worker: "pi-1", State: StateIdle})
+		if err != nil || len(notified) != 1 {
+			t.Fatalf("turn %d: notified %v, %v", turn, notified, err)
+		}
+	}
+	for i := 0; i < s.Policy.PerPairPerMinute+2; i++ {
+		name := fmt.Sprintf("w%d", i)
+		if err := s.Roster.Put(Worker{Name: name, Harness: HarnessPi}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Watch(name, "coord"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ApplyEvent(ctx, Event{Worker: name, State: StateIdle}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := s.Messages(func(e Entry) bool { return e.Msg.From == SystemSender })
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 2 + s.Policy.PerPairPerMinute + 2
+	sent := 0
+	for _, e := range entries {
+		if e.Status == StatusSent {
+			sent++
+		}
+	}
+	if len(entries) != want || sent != want {
+		t.Fatalf("%d notices, %d sent; want %d of each", len(entries), sent, want)
 	}
 }

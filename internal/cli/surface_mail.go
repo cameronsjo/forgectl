@@ -17,16 +17,10 @@ import (
 	"github.com/cameronsjo/forgectl/internal/termsafe"
 )
 
-// Exit codes for the mail verbs. 0 is sent (or, for the other verbs, done), 1
-// is usage, and cobra's argument errors already exit 1.
-const (
-	// mailExitRefused covers a refusal (policy, an unknown name, no ledger
-	// here) and a delivery that failed for good.
-	mailExitRefused = 2
-	// mailExitQueued means the message is in the mailbox but has not reached
-	// the recipient's harness yet; a later flush retries it.
-	mailExitQueued = 3
-)
+// mailExitQueued is send's "in the mailbox, not delivered yet": a later flush
+// retries it. It is the repo's try-again-later code, outside the ADR-0015
+// table like desk watch's deadline.
+const mailExitQueued = deskExitTempFail
 
 // maxBodyInput bounds how much of a file or stdin send reads. The policy cap
 // (32 KiB) is what refuses an oversized body; this only stops a mistaken
@@ -82,10 +76,27 @@ func defaultMailSession(deps module.Deps, getenv func(string) string) (*mailSess
 	}, nil
 }
 
-// refused wraps err for exit 2, terminal-safe: mail errors quote names and
-// details that came from other agents.
-func refused(err error) error {
-	return WithExitCode(termsafe.Error(err), mailExitRefused)
+// mailError gives a mail error its ADR-0015 class, terminal-safe: mail errors
+// quote names and details that came from other agents. A malformed or unknown
+// name, a missing ledger or sender, and a body the policy will never take are
+// the caller's to fix; a peer-to-peer block is a safety rule. Anything else (a
+// rate limit, a duplicate, a lock or mailbox error) failed.
+func mailError(err error) error {
+	class := classFailed
+	switch {
+	case errors.Is(err, mail.ErrPeerBlocked):
+		class = classRefused
+	case errors.Is(err, mail.ErrBadName), errors.Is(err, mail.ErrUnknownWorker),
+		errors.Is(err, mail.ErrNoLedger), errors.Is(err, mail.ErrNoSelf),
+		errors.Is(err, mail.ErrEmptyBody), errors.Is(err, mail.ErrTooLarge):
+		class = classUsage
+	}
+	return WithExitCode(termsafe.Error(err), classExit(class))
+}
+
+// mailUsage tags err as a call the caller can fix.
+func mailUsage(err error) error {
+	return WithExitCode(termsafe.Error(err), classExit(classUsage))
 }
 
 func newSurfaceSendCmd(deps module.Deps) *cobra.Command {
@@ -112,8 +123,11 @@ the operator, so it can never approve anything.
 send first retries anything already queued. A message the recipient's
 harness cannot take yet stays queued and later verbs retry it.
 
-Exit codes: 0 sent, 3 queued (not delivered yet), 2 refused or failed,
-1 usage.`,
+Exit codes: 0 sent, 75 queued (not delivered yet; a later verb retries
+it), 1 failed (a delivery that failed for good, a rate limit, a duplicate),
+2 usage (a bad call, an unknown or malformed name, no ledger here, an
+empty or oversized body), 4 refused (worker-to-worker messages are off).
+A --watch that does not register is a warning on stderr, not a new code.`,
 		Example: `  forgectl surface send coordinator "tests pass on the branch"
   forgectl surface send pi-2 @notes.md --priority later
   git diff | forgectl surface send codex-1 - --watch`,
@@ -124,7 +138,7 @@ Exit codes: 0 sent, 3 queued (not delivered yet), 2 refused or failed,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pri, err := mail.ParsePriority(priority)
 			if err != nil {
-				return err
+				return mailUsage(err)
 			}
 			return runSurfaceSend(cmd, deps, os.Getenv, args[0], args[1], pri, watch, asJSON)
 		},
@@ -147,23 +161,23 @@ type sendResult struct {
 func runSurfaceSend(cmd *cobra.Command, deps module.Deps, getenv func(string) string, to, source string, pri mail.Priority, watch, asJSON bool) error {
 	body, err := readMailBody(source, cmd.InOrStdin())
 	if err != nil {
-		return refused(err)
+		return mailUsage(err)
 	}
 	sess, err := openMailSession(deps, getenv)
 	if err != nil {
-		return refused(err)
+		return mailError(err)
 	}
 	self, err := sess.self()
 	if err != nil {
-		return refused(err)
+		return mailError(err)
 	}
 	ctx := cmd.Context()
 	if _, err := sess.svc.Flush(ctx); err != nil {
-		return refused(fmt.Errorf("flush the queue first: %w", err))
+		return mailError(fmt.Errorf("flush the queue first: %w", err))
 	}
 	res, err := sess.svc.Send(ctx, self, to, body, pri)
 	if err != nil {
-		return refused(err)
+		return mailError(err)
 	}
 	out := sendResult{ID: res.ID, To: to, Status: string(res.Status), Detail: res.Detail}
 	var watchErr error
@@ -188,12 +202,17 @@ func runSurfaceSend(cmd *cobra.Command, deps module.Deps, getenv func(string) st
 		}
 	}
 
-	switch {
-	case res.Status == mail.StatusFailed:
-		return WithExitCode(fmt.Errorf("message %s to %s failed", res.ID, safeLabel(to)), mailExitRefused)
-	case watchErr != nil:
-		return refused(fmt.Errorf("message %s is %s, but --watch did not register: %w", res.ID, res.Status, watchErr))
-	case res.Status == mail.StatusQueued:
+	// The message's status decides the exit; a watch that did not register
+	// is only a warning, so a sent message never reads as a failed one.
+	if watchErr != nil {
+		if _, err := fmt.Fprintln(cmd.ErrOrStderr(), safeText(fmt.Sprintf("warning: message %s is %s, but --watch did not register: %v", res.ID, res.Status, watchErr))); err != nil {
+			return err
+		}
+	}
+	switch res.Status {
+	case mail.StatusFailed:
+		return WithExitCode(fmt.Errorf("message %s to %s failed", res.ID, safeLabel(to)), classExit(classFailed))
+	case mail.StatusQueued:
 		return newSilentCodedError(mailExitQueued)
 	}
 	return nil
@@ -247,7 +266,7 @@ It only reads. Run flush, or any send, to retry what is queued.`,
 				name = args[0]
 			}
 			if all && name != "" {
-				return errors.New("--all lists every message; drop the name or the flag")
+				return mailUsage(errors.New("--all lists every message; drop the name or the flag"))
 			}
 			return runSurfaceInbox(cmd, deps, os.Getenv, name, all, asJSON)
 		},
@@ -283,23 +302,23 @@ type inboxReport struct {
 func runSurfaceInbox(cmd *cobra.Command, deps module.Deps, getenv func(string) string, name string, all, asJSON bool) error {
 	sess, err := openMailSession(deps, getenv)
 	if err != nil {
-		return refused(err)
+		return mailError(err)
 	}
 	if !all && name == "" {
 		if name, err = sess.self(); err != nil {
-			return refused(err)
+			return mailError(err)
 		}
 	}
 	if name != "" {
 		if err := mail.ValidateName(name); err != nil {
-			return refused(err)
+			return mailError(err)
 		}
 	}
 	entries, err := sess.svc.Messages(func(e mail.Entry) bool {
 		return all || e.Msg.From == name || e.Msg.To == name
 	})
 	if err != nil {
-		return refused(err)
+		return mailError(err)
 	}
 
 	report := inboxReport{Ledger: sess.ledger, Name: name, Messages: make([]inboxMessage, 0, len(entries))}
@@ -366,11 +385,11 @@ type flushReport struct {
 func runSurfaceFlush(cmd *cobra.Command, deps module.Deps, getenv func(string) string, asJSON bool) error {
 	sess, err := openMailSession(deps, getenv)
 	if err != nil {
-		return refused(err)
+		return mailError(err)
 	}
 	rep, err := sess.svc.Flush(cmd.Context())
 	if err != nil {
-		return refused(err)
+		return mailError(err)
 	}
 	out := flushReport{Sent: rep.Sent, Requeued: rep.Requeued, Failed: rep.Failed, Expired: rep.Expired, Skipped: rep.Skipped}
 	if asJSON {

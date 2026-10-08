@@ -67,3 +67,29 @@ func TestMailboxFold(t *testing.T) {
 		t.Errorf("mailbox mode %o, want no group or world bits", perm)
 	}
 }
+
+// A record cut short without its newline must not swallow the next one.
+func TestMailboxAppendAfterTornLine(t *testing.T) {
+	box := Mailbox{Dir: t.TempDir()}
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	if err := os.WriteFile(box.logPath(), []byte(`{"op":"msg","at":"2026-09-28T12:00:00Z","msg":{"v":1,"id":"half`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var entries []Entry
+	var skipped int
+	err := box.Locked(func(tx *Tx) error {
+		if err := tx.Enqueue(Message{V: 1, ID: "m1", From: "coord", To: "pi-1", Body: "a", CreatedAt: now}, now); err != nil {
+			return err
+		}
+		var err error
+		entries, err = tx.Load()
+		skipped = tx.Skipped
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Msg.ID != "m1" || skipped != 1 {
+		t.Fatalf("entries %+v, skipped %d; want m1 kept and the torn line skipped", entries, skipped)
+	}
+}

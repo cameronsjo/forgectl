@@ -17,6 +17,9 @@ const (
 	envClaudeSocket = "CLAUDE_CODE_MESSAGING_SOCKET"
 )
 
+// ErrNoSelf is returned when the caller's own roster name cannot be settled.
+var ErrNoSelf = errors.New("cannot tell who is sending")
+
 // ErrNoLedger is returned outside a coordinator session or a launched worker.
 var ErrNoLedger = errors.New("no coordinator ledger here: run this from the coordinator's Claude session or from a worker forgectl launched")
 
@@ -41,12 +44,20 @@ func LedgerDir(stateDir string, getenv func(string) string) (string, error) {
 
 // SelfName is the caller's name in the roster: FORGECTL_WORKER for a worker,
 // else the roster's coordinator entry.
+//
+// A process with FORGECTL_LEDGER but no FORGECTL_WORKER is refused rather than
+// taken for the coordinator: the coordinator finds its ledger from its inbox
+// socket and never carries FORGECTL_LEDGER, so the only process that has one
+// is a launched worker, and unsetting its name must not make it the hub.
 func SelfName(r Roster, getenv func(string) string) (string, error) {
 	if name := getenv(EnvWorker); name != "" {
 		if err := ValidateName(name); err != nil {
 			return "", fmt.Errorf("%s: %w", EnvWorker, err)
 		}
 		return name, nil
+	}
+	if getenv(EnvLedger) != "" {
+		return "", fmt.Errorf("%w: %s is set but %s is not; a worker forgectl launched carries both", ErrNoSelf, EnvLedger, EnvWorker)
 	}
 	workers, err := r.List()
 	if err != nil {
@@ -57,7 +68,7 @@ func SelfName(r Roster, getenv func(string) string) (string, error) {
 			return w.Name, nil
 		}
 	}
-	return "", errors.New("the roster has no coordinator entry yet; surface launch writes it")
+	return "", fmt.Errorf("%w: the roster has no coordinator entry yet; surface launch writes it", ErrNoSelf)
 }
 
 // CoordinatorSelf is the roster entry `surface launch` writes for the calling

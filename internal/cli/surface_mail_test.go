@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/cameronsjo/forgectl/internal/exec"
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/surface/mail"
@@ -75,12 +77,16 @@ func useMailLedger(t *testing.T) (*mail.Service, *mailFakeAdapter) {
 }
 
 // runSurface runs `forgectl surface <args>` and returns its streams and the
-// exit code main would use.
+// exit code main would use. The group sits under a root with the usage-error
+// classifier installed, so a cobra argument or flag error exits as it would
+// in the real binary.
 func runSurface(t *testing.T, stdin string, args ...string) (string, string, int) {
 	t.Helper()
-	cmd := newSurfaceCmd(module.Deps{})
+	cmd := &cobra.Command{Use: "forgectl", SilenceErrors: true, SilenceUsage: true}
+	cmd.AddCommand(newSurfaceCmd(module.Deps{}))
+	classifyUsageErrors(cmd)
 	var out, errOut bytes.Buffer
-	cmd.SetArgs(args)
+	cmd.SetArgs(append([]string{"surface"}, args...))
 	cmd.SetIn(strings.NewReader(stdin))
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
@@ -116,11 +122,13 @@ func TestSurfaceSendExitCodes(t *testing.T) {
 		status string
 	}{
 		{"queued", "", []error{mail.NotReady("pi has not started")}, []string{"send", "pi-1", "hi", "--json"}, mailExitQueued, "queued"},
-		{"failed", "", []error{errors.New("thread id is malformed")}, []string{"send", "codex-1", "hi", "--json"}, mailExitRefused, "failed"},
-		{"worker to worker refused", "pi-1", nil, []string{"send", "pi-2", "hi"}, mailExitRefused, ""},
-		{"unknown recipient", "", nil, []string{"send", "nobody", "hi"}, mailExitRefused, ""},
-		{"bad priority is usage", "", nil, []string{"send", "pi-1", "hi", "--priority", "urgent"}, 1, ""},
-		{"missing body is usage", "", nil, []string{"send", "pi-1"}, 1, ""},
+		{"failed", "", []error{errors.New("thread id is malformed")}, []string{"send", "codex-1", "hi", "--json"}, exitFailed, "failed"},
+		{"worker to worker refused", "pi-1", nil, []string{"send", "pi-2", "hi"}, exitRefused, ""},
+		{"unknown recipient", "", nil, []string{"send", "nobody", "hi"}, exitUsage, ""},
+		{"malformed recipient", "", nil, []string{"send", "../x", "hi"}, exitUsage, ""},
+		{"empty body", "", nil, []string{"send", "pi-1", ""}, exitUsage, ""},
+		{"bad priority is usage", "", nil, []string{"send", "pi-1", "hi", "--priority", "urgent"}, exitUsage, ""},
+		{"missing body is usage", "", nil, []string{"send", "pi-1"}, exitUsage, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -160,8 +168,8 @@ func TestSurfaceSendBodySources(t *testing.T) {
 	if len(ad.texts) != 2 || !strings.HasSuffix(ad.texts[0], "from a file\n") || !strings.HasSuffix(ad.texts[1], "from stdin\n") {
 		t.Fatalf("delivered %q", ad.texts)
 	}
-	if _, _, code := runSurface(t, "", "send", "pi-1", "@"+filepath.Join(t.TempDir(), "absent")); code != mailExitRefused {
-		t.Fatalf("missing @file: exit %d, want %d", code, mailExitRefused)
+	if _, _, code := runSurface(t, "", "send", "pi-1", "@"+filepath.Join(t.TempDir(), "absent")); code != exitUsage {
+		t.Fatalf("missing @file: exit %d, want %d", code, exitUsage)
 	}
 }
 
@@ -191,6 +199,39 @@ func TestSurfaceSendFlushesFirst(t *testing.T) {
 	}
 	if len(ad.texts) != 3 || !strings.HasSuffix(ad.texts[1], "first") {
 		t.Fatalf("delivery order %q, want the retry before the new send", ad.texts)
+	}
+}
+
+// noWatchRoster fails every roster update, so --watch cannot register.
+type noWatchRoster struct{ mail.Roster }
+
+func (noWatchRoster) Update(string, func(*mail.Worker) error) error {
+	return errors.New("roster is read-only")
+}
+
+// A --watch that does not register must not turn a delivered message into a
+// failed exit: the caller would resend it.
+func TestSurfaceSendWatchFailureOnlyWarns(t *testing.T) {
+	svc, ad := useMailLedger(t)
+	svc.Roster = noWatchRoster{svc.Roster}
+	out, errOut, code := runSurface(t, "", "send", "pi-1", "review this", "--watch", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stderr %q", code, errOut)
+	}
+	if !strings.Contains(errOut, "--watch did not register") {
+		t.Fatalf("stderr %q, want the watch warning", errOut)
+	}
+	var res sendResult
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("stdout %q: %v", out, err)
+	}
+	if res.Status != "sent" || res.Watching || len(ad.texts) != 1 {
+		t.Fatalf("result %+v, deliveries %d", res, len(ad.texts))
+	}
+
+	ad.errs = []error{mail.NotReady("busy")}
+	if _, _, code := runSurface(t, "", "send", "pi-2", "later", "--watch"); code != mailExitQueued {
+		t.Fatalf("queued with a failed watch: exit %d, want %d", code, mailExitQueued)
 	}
 }
 
@@ -306,7 +347,7 @@ func TestSurfaceInbox(t *testing.T) {
 	if code != 0 || strings.Count(out, "\n") != 2 || !strings.Contains(out, "coord -> pi-2  two") {
 		t.Fatalf("inbox (caller is coord): exit %d, stdout %q", code, out)
 	}
-	if _, _, code := runSurface(t, "", "inbox", "pi-1", "--all"); code != 1 {
+	if _, _, code := runSurface(t, "", "inbox", "pi-1", "--all"); code != exitUsage {
 		t.Fatalf("a name with --all: exit %d, want usage", code)
 	}
 }

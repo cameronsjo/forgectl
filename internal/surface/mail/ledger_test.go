@@ -46,4 +46,12 @@ func TestSelfName(t *testing.T) {
 	if _, err := SelfName(r, env(map[string]string{EnvWorker: "--all"})); err == nil {
 		t.Fatal("accepted a flag-shaped FORGECTL_WORKER")
 	}
+	// A worker that unsets its own name does not become the coordinator.
+	if got, err := SelfName(r, env(map[string]string{EnvLedger: "/state/mail/x"})); !errors.Is(err, ErrNoSelf) {
+		t.Fatalf("ledger without a worker name = %q, %v; want ErrNoSelf", got, err)
+	}
+	// Nor can it send as forgectl's own notices.
+	if _, err := SelfName(r, env(map[string]string{EnvWorker: SystemSender})); !errors.Is(err, ErrBadName) {
+		t.Fatalf("FORGECTL_WORKER=forgectl: err = %v, want ErrBadName", err)
+	}
 }

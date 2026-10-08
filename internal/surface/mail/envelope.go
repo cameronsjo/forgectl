@@ -68,11 +68,20 @@ type Message struct {
 
 var namePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 
+// ErrBadName marks a worker name ValidateName refused. Its text is the start
+// of every such error ("worker name \"x\": ...").
+var ErrBadName = errors.New("worker name")
+
 // ValidateName checks a worker name. Names reach argv, file names and the
 // rendered header, so the charset is narrow and a name cannot start a flag.
+// SystemSender is reserved: no worker may hold it, so nothing but forgectl's
+// own notices can carry it as a sender.
 func ValidateName(name string) error {
 	if !namePattern.MatchString(name) {
-		return fmt.Errorf("worker name %s: want 1-64 of [A-Za-z0-9_.-], starting with a letter or digit", quoteTrunc(name))
+		return fmt.Errorf("%w %s: want 1-64 of [A-Za-z0-9_.-], starting with a letter or digit", ErrBadName, quoteTrunc(name))
+	}
+	if name == SystemSender {
+		return fmt.Errorf("%w %s is reserved for forgectl's own notices", ErrBadName, quoteTrunc(name))
 	}
 	return nil
 }

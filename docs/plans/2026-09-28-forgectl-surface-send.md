@@ -94,7 +94,7 @@ forgectl surface event --harness claude|codex|pi [--state idle|busy] [payload]
 - The sender is `$FORGECTL_WORKER` (set at launch), else the ledger's coordinator.
 - `--watch` subscribes the sender to one notice when `<to>` next goes idle.
 - `send`, `ready`, `wait` and `list` all run a flush first.
-- Exit codes: 0 sent, 3 queued (not delivered yet), 2 refused or failed, 1 usage.
+- Exit codes, fitted to ADR-0015 on 2026-10-08: 0 sent, 75 queued (not delivered yet; the repo's try-again-later code), 1 failed, 2 usage (including an unknown or malformed name and an empty or oversized body), 4 refused (peer messages off). A `--watch` that does not register warns on stderr and keeps the status exit. The handoff's 0/3/2/1 would have collided with the table's 3 (unauthorized) and 2 (usage).
 
 ### Ledger lookup
 

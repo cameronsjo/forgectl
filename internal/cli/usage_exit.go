@@ -60,6 +60,8 @@ func asUsageError(cmd *cobra.Command, err error) error {
 //   - env check: 2 is "file absent", part of its documented contract.
 //   - resume snapshot: wired as a Claude Code Stop hook, and a Stop hook that
 //     exits 2 is a blocking error.
+//   - surface event: wired as a Claude Code Stop and UserPromptSubmit hook;
+//     exit 2 blocks the stop or erases the prompt.
 //   - k8s: pass-through, kubectl's codes are not ours.
 func usageExitFor(cmd *cobra.Command) int {
 	if usageKeepsOne(cmd) {
@@ -81,6 +83,8 @@ func usageKeepsOne(cmd *cobra.Command) bool {
 	case len(path) >= 2 && path[0] == "env" && path[1] == "check":
 		return true
 	case len(path) >= 2 && path[0] == "resume" && path[1] == "snapshot":
+		return true
+	case len(path) >= 2 && path[0] == "surface" && path[1] == "event":
 		return true
 	}
 	return false

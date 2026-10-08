@@ -170,9 +170,42 @@ func TestClaudePrefersLaunchName(t *testing.T) {
 		t.Fatalf("frame %q", lines)
 	}
 
+	// Neither live session is w9's: it may not have registered yet, so the
+	// message waits rather than going to whichever session is there.
 	_, err := a.Deliver(context.Background(), Worker{Name: "w9", Worktree: work}, Message{ID: "m"}, "hi")
+	if !IsRetryable(err) {
+		t.Fatalf("two live sessions, neither named w9: err = %v, want retryable", err)
+	}
+
+	// Two live sessions sharing the worker's name cannot be told apart.
+	dup := startInbox(t, base, "d.sock")
+	writeSession(t, config, 3, map[string]any{"pid": 3, "sessionId": "s3", "cwd": work, "name": "w1", "messagingSocketPath": dup.path})
+	_, err = a.Deliver(context.Background(), Worker{Name: "w1", Worktree: work}, Message{ID: "m"}, "hi")
 	if err == nil || IsRetryable(err) {
-		t.Fatalf("two live sessions, neither named w9: err = %v, want a permanent error", err)
+		t.Fatalf("two live sessions named w1: err = %v, want a permanent error", err)
+	}
+}
+
+// An operator's own session open in the worker's worktree is the only live
+// one there; it must not receive the worker's mail.
+func TestClaudeIgnoresLoneUnnamedSession(t *testing.T) {
+	base := shortTempDir(t)
+	config := filepath.Join(base, "cfg")
+	work := filepath.Join(base, "wt")
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	operator := startInbox(t, base, "op.sock")
+	writeSession(t, config, 9, map[string]any{"pid": 9, "sessionId": "op", "cwd": work, "name": "cheerful-otter", "messagingSocketPath": operator.path})
+	a := ClaudeAdapter{ConfigDir: config, Timeout: time.Second}
+	_, err := a.Deliver(context.Background(), Worker{Name: "w1", Worktree: work}, Message{ID: "m"}, "hi")
+	if !IsRetryable(err) {
+		t.Fatalf("err = %v, want retryable until w1 registers", err)
+	}
+	select {
+	case lines := <-operator.frames:
+		t.Fatalf("the operator's session got %q", lines)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 

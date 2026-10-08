@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	fexec "github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -72,4 +73,23 @@ func TestCodexDeliverMasksBodyInFailure(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), body) {
 		t.Fatalf("err = %v, want a failure that does not quote the body", err)
 	}
+}
+
+// A hung codex queue must not hold the mailbox lock: the adapter bounds it.
+func TestCodexDeliverTimesOut(t *testing.T) {
+	r := blockingRunner{}
+	a := CodexAdapter{Runner: r, Timeout: 50 * time.Millisecond}
+	start := time.Now()
+	_, err := a.Deliver(context.Background(), Worker{Name: "codex-1", ThreadID: "th_1"}, Message{}, "hi")
+	if !IsRetryable(err) || time.Since(start) > 2*time.Second {
+		t.Fatalf("err = %v after %s, want a retryable timeout", err, time.Since(start))
+	}
+}
+
+// blockingRunner waits for its context, as a hung app-server would.
+type blockingRunner struct{}
+
+func (blockingRunner) Run(ctx context.Context, _ string, _ ...string) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
 }

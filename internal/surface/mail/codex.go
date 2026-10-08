@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"time"
 
 	fexec "github.com/cameronsjo/forgectl/internal/exec"
 )
@@ -24,6 +25,9 @@ type CodexAdapter struct {
 	Runner Runner
 	// Bin is the codex executable. Empty means "codex" on PATH.
 	Bin string
+	// Timeout bounds one `codex queue`. Zero is 15s. A delivery runs under
+	// the mailbox lock, so a hung app-server must not hold it for long.
+	Timeout time.Duration
 }
 
 var threadPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
@@ -50,6 +54,12 @@ func (a CodexAdapter) Deliver(ctx context.Context, w Worker, m Message, text str
 	// The runner writes argv into its debug log and into a failure's error
 	// text. The body belongs on argv, not in either, so it is masked there;
 	// the error then carries codex's stderr instead of the message.
+	timeout := a.Timeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	ctx = fexec.WithMaskedAssignments(ctx, []string{message})
 	if _, err := a.Runner.Run(ctx, bin, "queue", "--thread="+w.ThreadID, message); err != nil {
 		return "", NotReady("codex queue: %s", oneLine([]byte(err.Error()), 300))
