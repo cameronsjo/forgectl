@@ -46,6 +46,18 @@ func startPi(t *testing.T, dir string, respond func(piRequest) piResponse) (stri
 	return path, got
 }
 
+// A send pi rejects while between runs stays queued instead of failing.
+func TestPiDeliverRetryIsNotReady(t *testing.T) {
+	path, _ := startPi(t, shortTempDir(t), func(piRequest) piResponse {
+		return piResponse{OK: false, Retry: true, Error: "agent is not streaming"}
+	})
+	a := PiAdapter{Timeout: 2 * time.Second}
+	_, err := a.Deliver(context.Background(), Worker{Name: "pi-1", Harness: HarnessPi, Socket: path}, Message{ID: "m-1", Priority: PriorityNext}, "x")
+	if !IsRetryable(err) {
+		t.Fatalf("err %v, want retryable", err)
+	}
+}
+
 func TestPiDeliverAndState(t *testing.T) {
 	idle := false
 	path, got := startPi(t, shortTempDir(t), func(req piRequest) piResponse {

@@ -32,6 +32,9 @@ type piResponse struct {
 	As    string `json:"as,omitempty"`
 	Idle  *bool  `json:"idle,omitempty"`
 	Error string `json:"error,omitempty"`
+	// Retry marks a refusal pi may not repeat, such as a send that raced
+	// the start or end of a run; the message stays queued.
+	Retry bool `json:"retry,omitempty"`
 }
 
 // Deliver hands text to the extension, which prompts when pi is idle, steers
@@ -40,6 +43,9 @@ func (a PiAdapter) Deliver(ctx context.Context, w Worker, m Message, text string
 	resp, err := a.call(ctx, w.Socket, piRequest{V: 1, Type: "deliver", ID: m.ID, Text: text, Priority: string(m.Priority)})
 	if err != nil {
 		return "", err
+	}
+	if !resp.OK && resp.Retry {
+		return "", NotReady("pi could not take it yet: %s", oneLine([]byte(resp.Error), 200))
 	}
 	if !resp.OK {
 		return "", fmt.Errorf("pi extension refused it: %s", oneLine([]byte(resp.Error), 200))

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -259,8 +260,13 @@ func (s *Service) ApplyEvent(ctx context.Context, ev Event) ([]string, error) {
 		})
 		if err != nil {
 			// Give the subscriptions back, so the next idle tries again.
+			// A Watch that ran in between may have re-added one already.
 			_ = s.Roster.Update(ev.Worker, func(w *Worker) error {
-				w.Watchers = append(w.Watchers, watchers...)
+				for _, name := range watchers {
+					if !slices.Contains(w.Watchers, name) {
+						w.Watchers = append(w.Watchers, name)
+					}
+				}
 				return nil
 			})
 			return nil, fmt.Errorf("queue idle notices: %w", err)

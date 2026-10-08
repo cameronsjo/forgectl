@@ -130,7 +130,7 @@ Reply with: forgectl surface send coordinator "<text>"
 
 | Harness | Resolve | State | Deliver | Priority |
 |---|---|---|---|---|
-| claude | registry entry whose `cwd` is the worktree and whose socket answers; several live, prefer the launch name | registry `status` | NDJSON frame on the inbox socket, `session_id` stamped, auth token from the published key file | now / next / later pass through |
+| claude | registry entry whose `cwd` is the worktree and whose socket answers; named for the worker (one only) | registry `status` | NDJSON frame on the inbox socket, `session_id` stamped, no auth line (the worker sets `crossSessionInbound: "accept"`) | now / next / later pass through |
 | codex | `thread_id` in the roster, learned from notify | last event | `codex queue --thread=<id> --message=<text>` | all queue as follow-up in v1 |
 | pi | socket path set at launch | ask the extension | forgectl pi extension: idle prompts, busy steers (`later` is followUp) | as stated |
 | pane | pane id from the ledger | `surface ready` | paste only when ready | idle only |

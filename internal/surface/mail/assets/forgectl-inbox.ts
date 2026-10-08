@@ -62,7 +62,7 @@ export default function forgectlInbox(pi: ExtensionAPI) {
     report("idle");
   });
 
-  const deliver = (req: Request): { ok: boolean; as?: string; error?: string } => {
+  const deliver = (req: Request): { ok: boolean; as?: string; error?: string; retry?: boolean } => {
     const text = typeof req.text === "string" ? req.text : "";
     if (text.trim() === "") return { ok: false, error: "empty message" };
     const later = req.priority === "later";
@@ -76,7 +76,13 @@ export default function forgectlInbox(pi: ExtensionAPI) {
       }
     }
     const deliverAs = later ? "followUp" : "steer";
-    pi.sendUserMessage(text, { deliverAs });
+    try {
+      pi.sendUserMessage(text, { deliverAs });
+    } catch (err) {
+      // pi is between runs (agent_end raced a new start); forgectl keeps the
+      // message queued and retries it.
+      return { ok: false, retry: true, error: String(err).slice(0, 200) };
+    }
     return { ok: true, as: deliverAs };
   };
 
