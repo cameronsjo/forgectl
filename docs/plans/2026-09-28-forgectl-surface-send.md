@@ -1,7 +1,7 @@
 ---
 status: in-flight
 depends_on: "docs/plans/2026-09-28-forgectl-herdr-coordinator.md (#536): ledger, surface launch --worktree, worker profile"
-next: "spikes S1-S3 against live harnesses, then T5: launch writes the mail roster from the worker ledger, sets FORGECTL_LEDGER and FORGECTL_WORKER, and ready, wait and list start flushing"
+next: "T5: launch writes the mail roster from the worker ledger, sets FORGECTL_LEDGER and FORGECTL_WORKER, wires each harness's turn events (see Live spikes for what that needs), and ready, wait and list start flushing"
 ---
 
 # forgectl: surface send, messages between harnesses
@@ -70,8 +70,55 @@ Read from public sources only; nothing here was run against a live harness.
   `sendUserMessage(content, {deliverAs})` throws while streaming without a
   mode; `steer` skips the rest of the queued tool calls, `followUp` waits for
   them; `pi -e <file>` loads an extension for one run. The package is
-  `@earendil-works/pi-coding-agent` (formerly `@mariozechner/...`). Not yet
-  type-checked against the real package.
+  `@earendil-works/pi-coding-agent` (formerly `@mariozechner/...`). The live
+  spike corrected two of these; see Live spikes.
+
+## Live spikes (2026-10-08)
+
+Run on macOS against Claude Code 2.1.289, codex-cli 0.160.0 and pi 1.0.4, with
+forgectl built from d15c1be and a hand-written roster. Full report on PR #674.
+
+- **S1, Claude: pass.** The frame is accepted as built and recorded as
+  `origin: peer`, idle and mid-turn. `next` lands at the next tool boundary,
+  `later` after the turn, `now` at the next tool boundary as a new turn (the
+  running tool is not killed). A bypass-mode worker without `accept` holds the
+  message; acceptEdits does not. A frame stamped with a session id other than
+  the receiver's current one is dropped silently, so the adapter no longer
+  stamps one.
+- **S2, Codex: delivery passes; notify handling was wrong and is fixed.**
+  `codex queue` reaches idle and busy TUIs (busy ones take it after the turn).
+  Codex sends an extra `agent-turn-complete` for an internal title-generation
+  thread with the worker's cwd and client; it overwrote the thread id or called
+  a busy worker idle. The parser now ignores that notify, and once a worker's
+  thread is known a notify from any other thread is ignored.
+- **S3, pi: names, loading and delivery pass; the idle race is fixed.** A bare
+  `sendUserMessage` during a run does not throw to the extension on 1.0.4, and
+  pi stays in its run between `agent_end` and `agent_settled`, so a message sent
+  in that gap was lost after forgectl recorded it `sent`. The extension now
+  names a mode on every send and calls the worker idle at `agent_settled`.
+  Steer does not skip later tool calls on 1.0.4: it lands after the current
+  ones finish, and a steered message that does not say "stop" often gets no
+  reply. The mapping stays `now`/`next` steer, `later` followUp.
+
+Inputs for T5 and T6 the spikes found:
+
+- `--safe-mode` disables hooks, so a Claude worker under today's profile sends
+  no turn events: no `--watch` notices and no flush on idle. Delivery does not
+  need them.
+- Workers need an allow rule for `forgectl surface send`, or every reply waits
+  at a permission prompt. A Codex worker in the `read-only` sandbox cannot
+  reply at all (the mailbox lock is outside it).
+- The pi extension and the Codex notify should run forgectl by absolute path;
+  an older forgectl first on `PATH` failed silently.
+- `-c notify=` replaces an operator's own Codex notify program, and the notify
+  payload's `input-messages` puts every message body on `surface event`'s argv.
+- A queued reply exits 75, which pi's bash tool shows the worker as a failed
+  command. T6 should say so, and that on pi `now` equals `next` and a message
+  that needs its own answer should go `--priority later`.
+- `sent` means the harness took the message, not that the model read it. A
+  held Claude message and a Codex worker that has quit both read `sent`.
+- After `/new` in Codex the worker's thread changes and its notifies are then
+  ignored as another thread's. Not measured; T5 should check it.
 
 ## Design
 
@@ -132,7 +179,7 @@ Reply with: forgectl surface send coordinator "<text>"
 |---|---|---|---|---|
 | claude | registry entry whose `cwd` is the worktree and whose socket answers; named for the worker (one only) | registry `status` | NDJSON frame on the inbox socket, `session_id` stamped, no auth line (the worker sets `crossSessionInbound: "accept"`) | now / next / later pass through |
 | codex | `thread_id` in the roster, learned from notify | last event | `codex queue --thread=<id> --message=<text>` | all queue as follow-up in v1 |
-| pi | socket path set at launch | ask the extension | forgectl pi extension: idle prompts, busy steers (`later` is followUp) | as stated |
+| pi | socket path set at launch | ask the extension | forgectl pi extension: every send names a mode; idle steers (starts a turn), busy steers (`later` is followUp) | `now` is `next` |
 | pane | pane id from the ledger | `surface ready` | paste only when ready | idle only |
 
 A delivery error is either retryable (not started, socket refused, not ready) and the
@@ -186,9 +233,9 @@ pairs can still use native `notify_when_idle`.
 - [x] T1: `internal/surface/mail`: envelope, mailbox, policy, service, claude/codex/pi/pane adapters, events, ledger lookup, unit tests. Written without a Go toolchain; not yet compiled.
 - [x] T2: the pi extension, shipped embedded as `internal/surface/mail/assets/forgectl-inbox.ts` (`mail.PiExtension`).
 - [x] T3: `go build`, `go vet` (also `GOOS=windows`), `go test ./internal/surface/mail/...`; fix what the compiler finds. It compiled and passed as written; the fixes were gofmt and lint.
-- [ ] S1: Claude on 2.1.284: delivery by `cwd` to an idle and a busy worker; a bypass-mode worker with and without `accept`; registry `status` transitions; confirm the frame still matches.
-- [ ] S2: Codex on the installed CLI: `codex queue` to an idle and a busy TUI session; the notify payload's field names (`thread-id`?).
-- [ ] S3: pi on the installed version: `agent_start`/`agent_end` names, steer vs followUp, loading the extension for one run.
+- [x] S1: Claude on 2.1.289: passed; the frame no longer carries `session_id`. See Live spikes.
+- [x] S2: Codex 0.160.0: delivery passed; the title-generation and other-thread notifies are now ignored.
+- [x] S3: pi 1.0.4: passed after the idle-race fix (mode on every send, idle at `agent_settled`). Re-run the type-check and the gap repro against the fixed extension.
 - [x] Seams: `mail.Runner` is the `Run` method of `internal/exec.Runner`, so the production and fake runners plug in unchanged; the Codex adapter masks `--message=` so a body never reaches the runner's debug log or a failure's text. `FileRoster` stands in for the #536 T1 ledger until it lands.
 - [x] T4: `surface send`, `inbox`, `flush` and `event` in `internal/cli/surface_mail.go`. `send` flushes first. `ready`, `wait` and `list` landed with #536 but do not flush yet: until T5 writes the mail roster, a flush from them would only create an empty mail ledger in every Claude session that runs them. `event` exits 0 or 1, never 2, because exit 2 from a Claude Code hook blocks the stop or erases the prompt, and it prints nothing without `--json` because a `UserPromptSubmit` hook's stdout joins the prompt. No pane adapter is wired, and `[surface] peer_messages` is not read yet (the default policy applies); both belong with T5. The mail ledger lives under `<state>/forgectl/mail/<hash>`, beside the worker ledger's `<state>/forgectl/surface/`, which pins its directory and owns every entry in it.
 - [ ] T5: launch wiring in `surface launch` once #536 T1 lands.
@@ -204,7 +251,9 @@ pairs can still use native `notify_when_idle`.
   fold with a malformed line; backoff, TTL expiry and the expiry notice; `--watch`
   notice fires once.
 - Acceptance: T7. Every message is either `sent` or carries the specific reason it
-  is still queued. None is lost silently.
+  is still queued. `sent` means the harness took it: a held Claude message
+  (bypass mode without `accept`) or a Codex worker that has quit still reads
+  `sent`, so T5 must set `accept` for every Claude worker.
 - Negative controls: worker-to-worker refused by default; a body containing the
   marker renders one header; a bypass-mode Claude worker without `accept` holds the
   message (S1).

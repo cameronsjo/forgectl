@@ -509,6 +509,12 @@ func runSurfaceEvent(cmd *cobra.Command, deps module.Deps, getenv func(string) s
 		return termsafe.Error(err)
 	}
 	notified, err := sess.svc.ApplyEvent(cmd.Context(), mail.Event{Worker: self, State: st, ThreadID: threadID})
+	if errors.Is(err, mail.ErrNotTurnEvent) {
+		if asJSON {
+			return writeJSON(cmd.OutOrStdout(), eventResult{Ignored: err.Error()})
+		}
+		return nil
+	}
 	if err != nil {
 		return termsafe.Error(err)
 	}

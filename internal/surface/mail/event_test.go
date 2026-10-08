@@ -1,6 +1,9 @@
 package mail
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestParseClaudeHook(t *testing.T) {
 	cases := map[string]WorkerState{
@@ -37,6 +40,12 @@ func TestParseCodexNotify(t *testing.T) {
 	}
 	if _, _, err := ParseCodexNotify([]byte(`{"type":"approval-requested"}`)); err == nil {
 		t.Error("accepted a non-turn notify")
+	}
+	// Codex names a session in a thread of its own, which sends its own
+	// turn-complete notify with the worker's cwd and client.
+	title := `{"type":"agent-turn-complete","thread-id":"th_title","input-messages":["Generate a concise, single-line task title for: fix it"]}`
+	if _, _, err := ParseCodexNotify([]byte(title)); !errors.Is(err, ErrNotTurnEvent) {
+		t.Errorf("title-generation notify: err %v, want ErrNotTurnEvent", err)
 	}
 }
 

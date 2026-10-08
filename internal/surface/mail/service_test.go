@@ -340,3 +340,30 @@ func TestIdleNoticeFailureRestoresOnlyTheFailedWatcher(t *testing.T) {
 		t.Fatalf("notices %+v, want one to coord", entries)
 	}
 }
+
+// Once a Codex worker's thread is known, a notify from another thread leaves
+// the worker alone: no idle, no new thread id, no watcher notice.
+func TestCodexNotifyFromAnotherThreadIsIgnored(t *testing.T) {
+	s, _ := newTestService(t, &fakeAdapter{})
+	ctx := context.Background()
+	if _, err := s.ApplyEvent(ctx, Event{Worker: "codex-1", State: StateIdle, ThreadID: "th_worker"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Roster.Update("codex-1", func(w *Worker) error { w.State = StateBusy; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Watch("codex-1", "coord"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.ApplyEvent(ctx, Event{Worker: "codex-1", State: StateIdle, ThreadID: "th_other"})
+	if !errors.Is(err, ErrNotTurnEvent) {
+		t.Fatalf("err %v, want ErrNotTurnEvent", err)
+	}
+	w, err := s.Roster.Get("codex-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.ThreadID != "th_worker" || w.State != StateBusy || len(w.Watchers) != 1 {
+		t.Fatalf("worker %+v, want it untouched", w)
+	}
+}

@@ -237,6 +237,13 @@ func (s *Service) ApplyEvent(ctx context.Context, ev Event) ([]string, error) {
 	now := s.now()
 	var watchers []string
 	err := s.Roster.Update(ev.Worker, func(w *Worker) error {
+		// A Codex worker's thread is fixed by its first turn. A notify from
+		// another thread (an internal one Codex starts beside it) says
+		// nothing about the worker, and taking it would point sends at the
+		// wrong thread and call a busy worker idle.
+		if w.Harness == HarnessCodex && w.ThreadID != "" && ev.ThreadID != "" && ev.ThreadID != w.ThreadID {
+			return fmt.Errorf("codex notify for thread %s, not this worker's: %w", quoteTrunc(ev.ThreadID), ErrNotTurnEvent)
+		}
 		w.State = ev.State
 		w.StateAt = now
 		if ev.ThreadID != "" && w.Harness == HarnessCodex {

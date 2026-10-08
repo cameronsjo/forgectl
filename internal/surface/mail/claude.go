@@ -63,30 +63,34 @@ type claudeContent struct {
 }
 
 type claudeFrame struct {
-	MsgV      int           `json:"msgV"`
-	MsgID     string        `json:"msg_id"`
-	Type      string        `json:"type"`
-	Message   claudeContent `json:"message"`
-	Priority  string        `json:"priority,omitempty"`
-	SessionID string        `json:"session_id,omitempty"`
+	MsgV     int           `json:"msgV"`
+	MsgID    string        `json:"msg_id"`
+	Type     string        `json:"type"`
+	Message  claudeContent `json:"message"`
+	Priority string        `json:"priority,omitempty"`
 }
 
 const claudeProbeTimeout = 250 * time.Millisecond
 
-// Deliver posts text as a user frame, stamped with the session id the
-// registry lists for the socket it resolved.
+// Deliver posts text as a user frame. The frame carries no session_id: on
+// 2.1.289 a frame stamped with any id but the receiver's current one is
+// dropped without a word, and a /clear between the registry read and the post
+// changes that id, while an unstamped frame reaches whatever session owns the
+// socket (spike S1).
+//
+// Claude Code writes nothing back on the socket, so "posted" means the
+// harness took the frame, not that the model read it.
 func (a ClaudeAdapter) Deliver(ctx context.Context, w Worker, m Message, text string) (string, error) {
 	s, err := a.resolve(ctx, w)
 	if err != nil {
 		return "", err
 	}
 	frame := claudeFrame{
-		MsgV:      1,
-		MsgID:     m.ID,
-		Type:      "user",
-		Message:   claudeContent{Role: "user", Content: text},
-		Priority:  string(m.Priority),
-		SessionID: s.SessionID,
+		MsgV:     1,
+		MsgID:    m.ID,
+		Type:     "user",
+		Message:  claudeContent{Role: "user", Content: text},
+		Priority: string(m.Priority),
 	}
 	if err := a.post(ctx, s.Socket, frame); err != nil {
 		return "", err

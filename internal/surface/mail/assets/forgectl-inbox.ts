@@ -9,14 +9,14 @@
  *
  * Protocol: one request per connection, a JSON line in and a JSON line back.
  *   {"v":1,"type":"deliver","id":"...","text":"...","priority":"now|next|later"}
- *     -> {"ok":true,"as":"prompt|steer|followUp"} | {"ok":false,"error":"..."}
+ *     -> {"ok":true,"as":"prompt|steer|followUp"} | {"ok":false,"error":"...","retry"?:true}
  *   {"v":1,"type":"state"} -> {"ok":true,"idle":true|false}
  *
  * Turn boundaries go back to forgectl as `forgectl surface event --harness pi
  * --state busy|idle`, which records the state, sends --watch notices and flushes.
  *
- * Spike S3 pins the event names (agent_start / agent_end) and sendUserMessage
- * options against the installed pi before this ships.
+ * Spike S3 (pi 1.0.4) pinned the event names (agent_start, agent_settled)
+ * and the sendUserMessage options this file uses.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFile } from "node:child_process";
@@ -57,33 +57,32 @@ export default function forgectlInbox(pi: ExtensionAPI) {
     idle = false;
     report("busy");
   });
-  pi.on("agent_end", () => {
+  // pi stays in its run after agent_end (retries and auto-compaction live in
+  // that gap) until agent_settled, its "will not continue" signal. Calling
+  // the worker idle at agent_end lost a message delivered in that gap on pi
+  // 1.0.4 (spike S3), so idle starts at agent_settled.
+  pi.on("agent_settled", () => {
     idle = true;
     report("idle");
   });
 
-  const deliver = (req: Request): { ok: boolean; as?: string; error?: string; retry?: boolean } => {
+  // Every send names a mode. A bare sendUserMessage during a run does not
+  // throw to the extension on pi 1.0.4: pi rejects it later, as an extension
+  // error, after forgectl has recorded the message sent. A steer sent while
+  // idle starts a normal turn (spike S3), so idle and busy take the same call.
+  const deliver = async (req: Request): Promise<{ ok: boolean; as?: string; error?: string; retry?: boolean }> => {
     const text = typeof req.text === "string" ? req.text : "";
     if (text.trim() === "") return { ok: false, error: "empty message" };
-    const later = req.priority === "later";
-    if (idle) {
-      try {
-        pi.sendUserMessage(text);
-        return { ok: true, as: "prompt" };
-      } catch {
-        // pi started a run since the last agent_start we saw; queue instead.
-        idle = false;
-      }
-    }
-    const deliverAs = later ? "followUp" : "steer";
+    const wasIdle = idle;
+    const deliverAs = !wasIdle && req.priority === "later" ? "followUp" : "steer";
     try {
-      pi.sendUserMessage(text, { deliverAs });
+      await pi.sendUserMessage(text, { deliverAs });
     } catch (err) {
-      // pi is between runs (agent_end raced a new start); forgectl keeps the
-      // message queued and retries it.
+      // pi could not take it now; forgectl keeps the message queued and
+      // retries it.
       return { ok: false, retry: true, error: String(err).slice(0, 200) };
     }
-    return { ok: true, as: deliverAs };
+    return { ok: true, as: wasIdle ? "prompt" : deliverAs };
   };
 
   const server = createServer((sock: Socket) => {
@@ -120,8 +119,9 @@ export default function forgectlInbox(pi: ExtensionAPI) {
         return;
       }
       try {
-        if (req.type === "deliver") answer(deliver(req));
-        else if (req.type === "state") answer({ ok: true, idle });
+        if (req.type === "deliver") {
+          deliver(req).then(answer, (err) => answer({ ok: false, retry: true, error: String(err).slice(0, 200) }));
+        } else if (req.type === "state") answer({ ok: true, idle });
         else answer({ ok: false, error: "unknown request type" });
       } catch (err) {
         answer({ ok: false, error: String(err).slice(0, 200) });

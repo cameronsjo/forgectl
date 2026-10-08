@@ -114,7 +114,7 @@ func TestClaudeDeliverByWorktree(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &f); err != nil {
 		t.Fatal(err)
 	}
-	want := claudeFrame{MsgV: 1, MsgID: "m-1", Type: "user", Message: claudeContent{Role: "user", Content: "hi there"}, Priority: "now", SessionID: "sess-1"}
+	want := claudeFrame{MsgV: 1, MsgID: "m-1", Type: "user", Message: claudeContent{Role: "user", Content: "hi there"}, Priority: "now"}
 	if f != want {
 		t.Fatalf("frame %+v, want %+v", f, want)
 	}
@@ -166,8 +166,8 @@ func TestClaudePrefersLaunchName(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := mine.next(t)
-	if len(lines) != 1 || !strings.Contains(lines[0], `"session_id":"s2"`) {
-		t.Fatalf("frame %q", lines)
+	if len(lines) != 1 || strings.Contains(lines[0], "session_id") {
+		t.Fatalf("frame %q, want one with no session_id", lines)
 	}
 
 	// Neither live session is w9's: it may not have registered yet, so the
@@ -219,6 +219,6 @@ func TestClaudeKnownSocket(t *testing.T) {
 	}
 	lines := inbox.next(t)
 	if len(lines) != 1 || strings.Contains(lines[0], "session_id") {
-		t.Fatalf("frame without a registry entry should carry no session id: %q", lines)
+		t.Fatalf("frame should carry no session id: %q", lines)
 	}
 }
