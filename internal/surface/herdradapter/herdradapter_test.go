@@ -227,8 +227,14 @@ func newSpec(t *testing.T) (backend.StartSpec, backend.RecoveryTag) {
 
 func startClean(t *testing.T) (*Adapter, *scriptedRunner, backend.Ref) {
 	t.Helper()
-	run := newRunner()
-	a := newTestAdapter(t, run, nil)
+	return startOn(t, newRunner(), nil)
+}
+
+// startOn is startClean on a given runner and environment, for a reference
+// taken through a chain other than the default one.
+func startOn(t *testing.T, run *scriptedRunner, env map[string]string) (*Adapter, *scriptedRunner, backend.Ref) {
+	t.Helper()
+	a := newTestAdapter(t, run, env)
 	spec, _ := newSpec(t)
 	res := a.Start(context.Background(), spec)
 	ref, ok := res.Ref()
@@ -1477,36 +1483,105 @@ func TestHerdrErrorCodesGetTheirOwnClasses(t *testing.T) {
 	}
 }
 
-// TestAHerdrReferenceFromAnotherSelectionChainIsAMismatch drives the source
-// check on its own.
-//
-// It needs a reference that is genuinely herdr — so the kind check passes and
-// the identity accessor answers — but was taken through the OTHER session
-// chain. That is a real scenario: a reference taken while HERDR_SESSION named a
-// session must not be answered by an adapter that resolved the default one,
-// even though both are herdr.
-func TestAHerdrReferenceFromAnotherSelectionChainIsAMismatch(t *testing.T) {
-	_, _, ref := startClean(t) // taken through the default chain
-	id, err := ref.HerdrIdentity()
-	if err != nil {
-		t.Fatalf("HerdrIdentity: %v", err)
-	}
-	other, err := backend.NewHerdrRef(backend.HerdrNamedSessionServer(), ref.Server(), ref.Tag(), id)
-	if err != nil {
-		t.Fatalf("NewHerdrRef: %v", err)
-	}
+// otherSocket is the socket of a second session in twoSessions' roster.
+const otherSocket = "/tmp/herdrtest/other.sock"
 
+// twoSessions is a roster holding the default session and one named "other",
+// each on its own socket.
+func twoSessions() []byte {
+	return sessionsJSON(
+		map[string]any{
+			"default": true, "name": defaultSession, "running": true,
+			"session_dir": "/tmp/herdrtest", "socket_path": testSocket,
+		},
+		map[string]any{
+			"default": false, "name": "other", "running": true,
+			"session_dir": "/tmp/herdrtest", "socket_path": otherSocket,
+		},
+	)
+}
+
+func twoSessionRunner() *scriptedRunner {
 	run := newRunner()
-	a := newTestAdapter(t, run, nil) // still the default chain
+	run.sessions = func() (exec.SensitiveResult, error) { return stdout(twoSessions()), nil }
+	return run
+}
 
-	if closed := a.Close(context.Background(), other); closed.State() != backend.CloseIdentityMismatch {
+// TestTheDefaultSessionAndTheSessionNamedDefaultAreOneServer is forgectl#1187.
+// The drain pins HERDR_SESSION=default, so its references say named-session;
+// a plain CLI resolves the same server through the default chain. Each must
+// read and close what the other launched.
+func TestTheDefaultSessionAndTheSessionNamedDefaultAreOneServer(t *testing.T) {
+	named := map[string]string{sessionEnv: defaultSession}
+	cases := map[string]struct{ takenIn, answeredIn map[string]string }{
+		"named default answered by the default chain": {takenIn: named, answeredIn: nil},
+		"the default chain answered by named default": {takenIn: nil, answeredIn: named},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, _, ref := startOn(t, newRunner(), tc.takenIn)
+			run := newRunner().reply1(exec.KindHerdrProbe, listJSON([2]string{wsA, ref.OwnershipName()}))
+			a := newTestAdapter(t, run, tc.answeredIn)
+
+			if probe := a.Probe(context.Background(), ref); probe.State() != backend.ProbePresent {
+				t.Errorf("Probe state = %v, want present", probe.State())
+			}
+			if closed := a.Close(context.Background(), ref); closed.State() != backend.CloseClosed {
+				t.Errorf("Close state = %v, want closed", closed.State())
+			}
+		})
+	}
+}
+
+// TestAReferenceFromAnotherNamedSessionIsAMismatch: a named-session reference
+// does not record its name, so the label cannot refuse it, and the incarnation
+// check must. The ServerID digests the other session's socket, which is not
+// the one the default chain resolves.
+func TestAReferenceFromAnotherNamedSessionIsAMismatch(t *testing.T) {
+	_, _, ref := startOn(t, twoSessionRunner(), map[string]string{sessionEnv: "other"})
+	if ref.Source() != backend.HerdrNamedSessionServer() {
+		t.Fatalf("fixture source = %v, want a named-session reference", ref.Source())
+	}
+
+	for name, env := range map[string]map[string]string{
+		"the default chain": nil,
+		"named default":     {sessionEnv: defaultSession},
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := twoSessionRunner().reply1(exec.KindHerdrProbe, listJSON([2]string{wsA, ref.OwnershipName()}))
+			a := newTestAdapter(t, run, env)
+
+			if closed := a.Close(context.Background(), ref); closed.State() != backend.CloseIdentityMismatch {
+				t.Errorf("Close state = %v, want identity-mismatch", closed.State())
+			}
+			if probe := a.Probe(context.Background(), ref); probe.State() != backend.ProbeIdentityMismatch {
+				t.Errorf("Probe state = %v, want identity-mismatch", probe.State())
+			}
+			if _, cleaned := commandOfKind(run.calls(), exec.KindHerdrCleanup); cleaned {
+				t.Error("a close ran against a session the reference was not taken in")
+			}
+		})
+	}
+}
+
+// TestADefaultSessionReferenceIsRefusedByAnotherNamedSession drives the label
+// check on its own: a default-chain reference was taken in the session named
+// "default", so an adapter pinned to another name refuses it before any
+// command reaches herdr.
+func TestADefaultSessionReferenceIsRefusedByAnotherNamedSession(t *testing.T) {
+	_, _, ref := startOn(t, twoSessionRunner(), nil)
+
+	run := twoSessionRunner()
+	a := newTestAdapter(t, run, map[string]string{sessionEnv: "other"})
+
+	if closed := a.Close(context.Background(), ref); closed.State() != backend.CloseIdentityMismatch {
 		t.Errorf("Close state = %v, want identity-mismatch", closed.State())
 	}
-	if probe := a.Probe(context.Background(), other); probe.State() != backend.ProbeIdentityMismatch {
+	if probe := a.Probe(context.Background(), ref); probe.State() != backend.ProbeIdentityMismatch {
 		t.Errorf("Probe state = %v, want identity-mismatch", probe.State())
 	}
 	if len(run.calls()) != 0 {
-		t.Error("a command reached herdr for a reference from a different selection chain")
+		t.Error("a command reached herdr for a reference from a different session")
 	}
 }
 
