@@ -270,6 +270,9 @@ type tlFrame struct {
 	cursor        int
 	offset        int
 	footer        string
+	// loose spaces the timeline for a tall pane: a blank line under each day
+	// heading and between entries.
+	loose bool
 }
 
 func (f tlFrame) styles() theme.Styles {
@@ -309,9 +312,15 @@ func (f tlFrame) body(st theme.Styles, entries []tlEntry) []tlLine {
 			lines = append(lines, tlLine{"", -1})
 		}
 		lines = append(lines, tlLine{f.dayHeading(st, width, day, entries[i].at, j-i), -1})
+		if f.loose {
+			lines = append(lines, tlLine{"", -1})
+		}
 		for k := i; k < j; k++ {
 			title, preview := f.entryLines(st, width, entries[k], k == f.cursor, k == j-1)
 			lines = append(lines, tlLine{title, k}, tlLine{preview, k})
+			if f.loose && k < j-1 {
+				lines = append(lines, tlLine{"", -1})
+			}
 		}
 		i = j
 	}

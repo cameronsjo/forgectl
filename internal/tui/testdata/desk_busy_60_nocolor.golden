@@ -1,14 +1,14 @@
 desk ● 3 waiting · forgectl 0.0.0-test · …  up 4h37m · 19:07
 ◌ 3 waiting · oldest 30h · 5 started today · median 41s · ✓…
 ╭ queue ─┤ ● 2 running  ◌ 3 waiting  ⌨ 1 tty ├─────────────╮
-│ ▸ ◌ waiting  17 merge-feature-bra…   ░░░░░░░░  needs you │
-│   ◌ waiting  18 refresh-credentia… ⌨ ░░░░░░░░  tty       │
-│   ◌ waiting  19 old-cleanup          ░░░░░░░░  stale     │
-│   ● running  14 sync-mirror          ███░░░░░  0:50      │
+│ ▸ ◌ waiting  17 merge-feature-bra…   ────────  needs you │
+│   ◌ waiting  18 refresh-credentia… ⌨ ────────  tty       │
+│   ◌ waiting  19 old-cleanup          ────────  stale     │
+│   ● running  14 sync-mirror          ━━━─────  0:50      │
 │   ● running  16 nightly-batch        ████▓█░░  4/7 steps │
-│   ✗ failed   12 canary-probe         ████████  exit 1    │
-│   ✓ done     15 merge-1169           ████████  0:41      │
-│   ! changed  13 rotate-keys          ░░░░░░░░  changed   │
+│   ✗ failed   12 canary-probe         ━━━━━━━━  exit 1    │
+│   ✓ done     15 merge-1169           ━━━━━━━━  0:41      │
+│   ! changed  13 rotate-keys          ────────  changed   │
 ╰──────────────────────────────────────────────────────────╯
 ╭ focus ───────────────────────────────────────────────────╮
 │ 17 merge-feature-branch · sha256 283128acef14 · unchang… │
