@@ -1,39 +1,39 @@
 desk ● 3 waiting · forgectl 0.0.0-test · host-a · ~/.local/st…  up 4h37m · 19:07
 ╭ waiting ───────────────╮╭ started today ─────────╮╭ outcomes ────────────────╮
-│ 3                      ││ 5                      ││ ✓ 2  ✗ 1                 │
-│ oldest 30h             ││ median 41s             ││ 1 changed                │
-│ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▃▁█ ││ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▃▁▁▁▁█ ││ ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█ │
+│  3                     ││  5                     ││  ✓ 2  ✗ 1                │
+│  oldest 30h            ││  median 41s            ││  1 changed               │
+│  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▃▁█  ││  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▃▁▁▁▁█  ││  ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁█  │
 ╰────────────────────────╯╰────────────────────────╯╰──────────────────────────╯
 ╭ queue ─┤ ● 2 running  ◌ 3 waiting  ⌨ 1 tty ├─────────────────────────────────╮
-│ ▸ ◌ waiting  17 merge-feature-branch          ░░░░░░░░░░░░░░░░  needs you    │
-│   ◌ waiting  18 refresh-credentials         ⌨ ░░░░░░░░░░░░░░░░  tty          │
-│   ◌ waiting  19 old-cleanup                   ░░░░░░░░░░░░░░░░  stale        │
-│   ● running  14 sync-mirror                   ███████░░░░░░░░░  0:50         │
-│   ● running  16 nightly-batch                 ███████▓▓▓██░░░░  4/7 steps    │
-│   ✗ failed   12 canary-probe                  ████████████████  exit 1       │
-│   ✓ done     15 merge-1169                    ████████████████  0:41         │
-│   ! changed  13 rotate-keys                   ░░░░░░░░░░░░░░░░  changed      │
+│  ▸ ◌ waiting  17 merge-feature-branch        ────────────────  needs you     │
+│    ◌ waiting  18 refresh-credentials       ⌨ ────────────────  tty           │
+│    ◌ waiting  19 old-cleanup                 ────────────────  stale         │
+│    ● running  14 sync-mirror                 ━━━━━━━─────────  0:50          │
+│    ● running  16 nightly-batch               ███████▓▓▓██░░░░  4/7 steps     │
+│    ✗ failed   12 canary-probe                ━━━━━━━━━━━━━━━━  exit 1        │
+│    ✓ done     15 merge-1169                  ━━━━━━━━━━━━━━━━  0:41          │
+│    ! changed  13 rotate-keys                 ────────────────  changed       │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ focus ───────────────────────────────────────────────────────────────────────╮
-│ 17 merge-feature-branch · sha256 283128acef14 · unchanged since queued 12m … │
-│ what  Merge the feature branch once checks pass                              │
-│ why   The review is done; merges are yours                                   │
-│ ┆ script · the first lines it runs                                           │
-│ ┆ set -euo pipefail                                                          │
-│ ┆ gh pr merge 42 --repo example/project --squash --auto                      │
-│ ┆ gh pr view 42 --repo example/project --json state                          │
-│ ┆ echo merged                                                                │
-│ ┆     echo "an indented line"                                                │
+│  17 merge-feature-branch · sha256 283128acef14 · unchanged since queued 12…  │
+│  what  Merge the feature branch once checks pass                             │
+│  why   The review is done; merges are yours                                  │
+│  ┆ script · the first lines it runs                                          │
+│  ┆ set -euo pipefail                                                         │
+│  ┆ gh pr merge 42 --repo example/project --squash --auto                     │
+│  ┆ gh pr view 42 --repo example/project --json state                         │
+│  ┆ echo merged                                                               │
+│  ┆     echo "an indented line"                                               │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ timeline ─┤ newest first ├───────────────────────────────────────────────────╮
-│  Needs you · enter takes you to it ────────────────────────────────────── 3  │
-│      5m  ◌ Refresh the sudo ticket             18 refresh-credentials · tty  │
-│          │ waiting for you · queued 5m ago · runs in the desk's pane         │
-│     12m  ◌ Merge the feature branch once checks pass 17 merge-feature-branch │
-│          │ waiting for you · queued 12m ago                                  │
-│     30h  ◌ Clear old caches                                  19 old-cleanup  │
-│            waiting for you · queued 30h ago · stale                          │
-│ … 6 more · t to open                                                         │
+│   Needs you · enter takes you to it ──────────────────────────────────── 3   │
+│       5m  ◌ Refresh the sudo ticket           18 refresh-credentials · tty   │
+│           │ waiting for you · queued 5m ago · runs in the desk's pane        │
+│      12m  ◌ Merge the feature branch once checks p… 17 merge-feature-branch  │
+│           │ waiting for you · queued 12m ago                                 │
+│      30h  ◌ Clear old caches                                19 old-cleanup   │
+│             waiting for you · queued 30h ago · stale                         │
+│  … 6 more · t to open                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 
 
