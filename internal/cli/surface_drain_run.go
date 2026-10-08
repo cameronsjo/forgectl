@@ -561,11 +561,16 @@ func classifyLaunchError(err error) drain.ErrClass {
 }
 
 // launchConfigFailure reports a launch whose configuration cannot build a
-// worker: the build step, the worker posture or harness override, or the
-// binary policy (a claude found only on $PATH, unusable, or forgectl).
+// worker: the build step, the worker posture or harness override, the binary
+// policy (a claude found only on $PATH, unusable, or forgectl), or a private
+// run directory the environment cannot provide (a TMPDIR that is unset, a
+// symlink, too long, or shared without the sticky bit). Each fails every
+// launch the same way, so a retry only leaves another worktree behind
+// (forgectl#1188).
 func launchConfigFailure(err error) bool {
 	for _, target := range []error{errLaunchConfig, launch.ErrWorkerPosture, launch.ErrHarnessOverride,
-		surface.ErrBinaryProvenance, surface.ErrBinaryUnusable, surface.ErrBinarySelfLoop} {
+		surface.ErrBinaryProvenance, surface.ErrBinaryUnusable, surface.ErrBinarySelfLoop,
+		surface.ErrRunDir, surface.ErrSocketPathTooLong} {
 		if errors.Is(err, target) {
 			return true
 		}
