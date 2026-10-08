@@ -288,7 +288,7 @@ func closeWorker(ctx context.Context, row worker.Row, keepWorktree bool, now tim
 		case backend.CloseAlreadyGone:
 			res.Workspace = closeWorkspaceGone
 		case backend.CloseIdentityMismatch:
-			return refuse("herdr restarted, or the workspace id no longer carries forgectl's marker (" + causeText(cr) + ")")
+			return refuse("herdr restarted, the reference is from another herdr session, or the workspace id no longer carries forgectl's marker (" + causeText(cr) + ")")
 		case backend.CloseUnreadable:
 			return refuse("herdr could not be read (" + causeText(cr) + ")")
 		default:

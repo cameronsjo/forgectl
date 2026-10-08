@@ -116,7 +116,8 @@ anything starts.
 
 Exit 0: running. Exit 1: already running, or the child never reached
 running. Exit 2: a usage or setup error (herdr not found, invalid config,
-an unsupported platform).
+an unsupported platform, or a TMPDIR under which a launch cannot create its
+private run directory).
 
   forgectl surface drain start --json`,
 		Args: cobra.NoArgs,
@@ -148,6 +149,9 @@ func runSurfaceDrainStart(cmd *cobra.Command, deps module.Deps, asJSON bool) err
 	if err := lock.Close(); err != nil {
 		return err
 	}
+	if err := drainRunDirCheck(); err != nil {
+		return WithExitCode(termsafe.Error(runDirRefusal(err)), exitUsage)
+	}
 	adapter, err := newHerdrAdapter(cmd.ErrOrStderr())
 	if err != nil {
 		return WithExitCode(err, exitUsage)
@@ -174,6 +178,17 @@ func runSurfaceDrainStart(cmd *cobra.Command, deps module.Deps, asJSON bool) err
 	}
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "drain %s: pid %d, herdr session %s\n", res.Status, res.PID, termsafe.SafeLineMax(res.HerdrSession, 64))
 	return err
+}
+
+// runDirRefusal names TMPDIR in a run-directory failure, since TMPDIR is what
+// chose the base and what the operator changes.
+func runDirRefusal(err error) error {
+	tmpdir := "TMPDIR is unset"
+	if v, ok := os.LookupEnv("TMPDIR"); ok {
+		tmpdir = "TMPDIR is " + termsafe.QuotePath(v)
+	}
+	return fmt.Errorf("forgectl: the drain would fail every launch: %s, and a launch cannot create its private run directory under %s: %w; "+
+		"set TMPDIR to a private directory that is not a symlink, then run drain start again", tmpdir, termsafe.QuotePath(os.TempDir()), err)
 }
 
 // lookHerdr is the absolute herdr path, resolved as newHerdrAdapter does.

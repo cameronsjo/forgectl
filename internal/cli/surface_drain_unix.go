@@ -15,6 +15,7 @@ import (
 
 	"github.com/cameronsjo/forgectl/internal/module"
 	"github.com/cameronsjo/forgectl/internal/procstart"
+	"github.com/cameronsjo/forgectl/internal/surface"
 	"github.com/cameronsjo/forgectl/internal/surface/drain"
 	"github.com/cameronsjo/forgectl/internal/surface/worker"
 	"github.com/cameronsjo/forgectl/internal/termsafe"
@@ -46,6 +47,18 @@ var drainSpawn = func(args, env []string) (int, error) {
 	// zombie that reads as alive.
 	go func() { _ = cmd.Wait() }()
 	return pid, nil
+}
+
+// drainRunDirCheck creates and removes one private run directory where every
+// launch will make its own: surface.NewService's empty base, os.TempDir(). The
+// child inherits this command's environment, so a TMPDIR this refuses fails
+// every launch the drain would make (forgectl#1188).
+var drainRunDirCheck = func() error {
+	dir, err := surface.NewRunDir("")
+	if err != nil {
+		return err
+	}
+	return dir.Close()
 }
 
 // drainSignal sends SIGTERM. Tests replace it.

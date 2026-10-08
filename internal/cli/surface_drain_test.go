@@ -492,6 +492,8 @@ func TestClassifyLaunchError(t *testing.T) {
 		"gh 404 is other":            {fmt.Errorf("read: %w", ghOther), drain.ErrOther},
 		"401 text from git is other": {&exec.CommandError{Name: "git", Stderr: "HTTP 401"}, drain.ErrOther},
 		"surface launch error":       {&surface.LaunchError{}, drain.ErrOther},
+		"run directory":              {fmt.Errorf("launch: %w: base is not absolute", surface.ErrRunDir), drain.ErrLaunchConfig},
+		"socket path too long":       {fmt.Errorf("launch: %w: set TMPDIR shorter", surface.ErrSocketPathTooLong), drain.ErrLaunchConfig},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -999,6 +1001,99 @@ func TestDrainPausesOnLaunchConfig(t *testing.T) {
 	}
 }
 
+// symlinkedRunDir is a short base that is a symlink to a private directory:
+// the shape of /tmp on macOS, which every launch hit with TMPDIR unset in the
+// atelier P2 live run (forgectl#1188).
+func symlinkedRunDir(t *testing.T) string {
+	t.Helper()
+	target, err := os.MkdirTemp("", "rd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(target) })
+	link := filepath.Join(target, "l")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	return link
+}
+
+// symlinkedRunDirErr is the real error NewRunDir returns for that base.
+func symlinkedRunDirErr(t *testing.T) error {
+	t.Helper()
+	dir, err := surface.NewRunDir(symlinkedRunDir(t))
+	if err == nil {
+		_ = dir.Close()
+		t.Fatal("NewRunDir accepted a symlinked base; the fixture cannot fail")
+	}
+	if !errors.Is(err, surface.ErrRunDir) {
+		t.Fatalf("NewRunDir on a symlinked base = %v, want ErrRunDir", err)
+	}
+	return err
+}
+
+// TestDrainPausesOnARunDirectoryFailure is forgectl#1188: a run directory the
+// environment cannot provide fails every launch the same way, so the first
+// row fails naming its worktree and claiming pauses rather than burning the
+// queue one worktree at a time.
+func TestDrainPausesOnARunDirectoryFailure(t *testing.T) {
+	rdErr := fmt.Errorf("surface: launch failed in setup (not-mutated): %w", symlinkedRunDirErr(t))
+	f, d, q := newFakeDrain(t)
+	enqueueAt(t, q, "a", "/repo/a", drainT0)
+	enqueueAt(t, q, "b", "/repo/b", drainT0.Add(time.Minute))
+	enqueueAt(t, q, "c", "/repo/c", drainT0.Add(2*time.Minute))
+	f.launch = func(row worker.QueueRow) drain.Attempt {
+		wt := worker.WorktreePath(row.Repo, row.Name)
+		seedLedger(t, row.Repo, row.Name, row.LaunchID, worker.StageFailed, func(r *worker.Row) { r.Worktree = wt })
+		return drain.Attempt{Class: classifyLaunchError(rdErr), Err: rdErr.Error(), Worktree: wt, Row: &worker.Row{Stage: worker.StageFailed, Worktree: wt}}
+	}
+	d.tick(t.Context())
+	d.tick(t.Context())
+	if len(f.launched) != 1 {
+		t.Fatalf("launched %v; a run-directory failure must stop further claims", f.launched)
+	}
+	if r := rowNamed(t, q, "a"); r.State != worker.QueueFailed || !strings.Contains(r.LastError, "/repo/a/.claude/worktrees/a") {
+		t.Fatalf("row a %s %q", r.State, r.LastError)
+	}
+	reason := d.pauses.Reason()
+	if b := rowNamed(t, q, "b"); b.State != worker.QueueQueued || !strings.Contains(reason, "launch-config") || !strings.Contains(reason, "private run directory") {
+		t.Fatalf("row b %s, pause %q", b.State, reason)
+	}
+}
+
+// TestDrainStartRefusesARunDirectoryItCannotCreate: start makes the run
+// directory a launch would, and refuses with exit 2 naming TMPDIR before any
+// child starts.
+func TestDrainStartRefusesARunDirectoryItCannotCreate(t *testing.T) {
+	cases := map[string]func(t *testing.T){
+		"TMPDIR is a symlink": func(t *testing.T) { t.Setenv("TMPDIR", symlinkedRunDir(t)) },
+	}
+	if runtime.GOOS == "darwin" {
+		// The live run: no TMPDIR, so the base is /tmp, a symlink on macOS.
+		cases["TMPDIR is unset on macOS"] = func(t *testing.T) {
+			t.Setenv("TMPDIR", "")
+			if err := os.Unsetenv("TMPDIR"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for name, setTMPDIR := range cases {
+		t.Run(name, func(t *testing.T) {
+			drainCmdEnv(t)
+			spawned := false
+			stubSpawn(t, func([]string, []string) (int, error) { spawned = true; return 1, nil })
+			setTMPDIR(t)
+			_, err := runQueueCmd(t, newSurfaceDrainStartCmd(module.Deps{}))
+			if err == nil || ExitCode(err) != exitUsage || !strings.Contains(err.Error(), "TMPDIR") || !strings.Contains(err.Error(), "private run directory") {
+				t.Fatalf("start: err %v (exit %d), want exit 2 naming TMPDIR and the run directory", err, ExitCode(err))
+			}
+			if spawned {
+				t.Fatal("start spawned a drain whose every launch would fail")
+			}
+		})
+	}
+}
+
 // TestLaunchConfigErrorsClassify drives a real build-step failure through
 // runWorkerSteps and checks the drain reads it as a launch-config failure.
 func TestLaunchConfigErrorsClassify(t *testing.T) {
@@ -1021,6 +1116,13 @@ func TestLaunchConfigErrorsClassify(t *testing.T) {
 		"binary on PATH at launch": func(s workerSteps) workerSteps {
 			s.launch = func(context.Context, launch.Invocation) (backend.Ref, error) {
 				return backend.Ref{}, fmt.Errorf("launch: %w: /usr/bin/claude", surface.ErrBinaryProvenance)
+			}
+			return s
+		},
+		"run directory under a symlinked base": func(s workerSteps) workerSteps {
+			rdErr := symlinkedRunDirErr(t)
+			s.launch = func(context.Context, launch.Invocation) (backend.Ref, error) {
+				return backend.Ref{}, fmt.Errorf("surface: launch failed in setup: %w", rdErr)
 			}
 			return s
 		},

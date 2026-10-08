@@ -1,9 +1,9 @@
 ---
 status: in-flight
-next: "T8.4 notifier on feat/drain-notify. Next: Opus security review of the file set, then the live check on sjomba."
+next: "T8.5 (per-worker config profile and model), then the full-harness + scoped-SendMessage PR"
 branch: plan/atelier-p2-drain
 pr: cameronsjo/forgectl#1137
-updated: 2026-10-07
+updated: 2026-10-08
 approved_session_id: "— (approved on forgectl#1137 by chief-of-staff on Cameron's go-ahead, 2026-10-07)"
 date: 2026-10-06
 session_id: 30dd3ebb-3720-463f-aa15-9570c1ff88a9
@@ -171,7 +171,7 @@ No merge, PR status, or close after merge (P4). No intake from GitHub or the boa
 
 - [x] Split a generic notifier out of `deskSignal` (`internal/cli/desk_signal_unix.go`): macOS notification through `internal/notify`, and herdr pane state on the worker's pane from its ledger ref.
 - [x] Security review (an Opus-tier security reviewer) of the control's file set before the first `drain start`: the T8.1 diff, `internal/cli/surface_worker.go`, `internal/launch/invocation.go` (`applyWorkerFloor`, `workerBaseEnv`, `buildWorkerInvocation` callers), `internal/surface/worker/{ledger,ledger_unix,brief}.go`, `internal/herdr/ready/`, `internal/desk/proc_unix.go`, `internal/cli/desk_signal_unix.go`, `internal/notify/notify.go`, and the new queue and drain files.
-- [ ] Live check on sjomba with a real batch (open forgectl issues small enough for one worker): enqueue 3 tasks across 2 repos; the per-repo cap holds; a worker at a permission prompt shows `needs-you` and notifies; answering it returns the row to `launched`; a report marks it `reported`; `drain status` lists rows needing attention. Record how often workers stopped, for the autonomy question.
+- [x] Live check on sjomba with a real batch (open forgectl issues small enough for one worker): enqueue 3 tasks across 2 repos; the per-repo cap holds; a worker at a permission prompt shows `needs-you` and notifies; answering it returns the row to `launched`; a report marks it `reported`; `drain status` lists rows needing attention. Record how often workers stopped, for the autonomy question.
 
 ## Verification
 
@@ -232,8 +232,13 @@ Panel: plan-reviewer, security-posture-reviewer (Opus), operability-reviewer, ca
 - **T8.4 notify: the drain uses its own herdr source, `forgectl-drain`,** so a drain release never clears a desk signal on the same pane.
 - **T8.4 notify: an unverifiable pane is an `error` event too,** not a silent skip, in the same single event as any macOS failure (`needs-you notification: …`); a failed release is `clear the needs-you pane state: …`.
 - **T8.4 staged breaks** (working-tree edits restored by `cp`), each red: `Adapter.ReportBlocked` targeting `os.Getenv("HERDR_PANE_ID")` instead of the ref's pane → `TestPaneState/reports_blocked_on_the_owned_root_pane`; releasing on any write out of `needs-you`-or-not (dropping the `q.State == needs-you` check) → `TestDrainClearsOnlyOnLeavingNeedsYou`.
+- **T8.4 live check (sjomba, forgectl 0.34.0, herdr 0.9.3).** 3 tasks across forgectl and cadence-hooks. The per-repo cap held: the third task waited and launched in the same tick its repo's slot freed. A worker at a permission prompt read `needs-you` within about 15 s and went back to `launched` once answered. Reports checked against git: draft PRs forgectl#1185 and forgectl#1186; the cadence-hooks worker made no change, correctly, because cadence-hooks#1353 had already fixed cadence-hooks#1351, and it declined to unblock `gh pr create --web`. Stops per task: 1, 1, 0 (the allow list carried the third through test, commit, push and `gh pr create`). `surface close` moved each row to `closed`. Two bugs, fixed on `fix/drain-live-run`: drain workers read as `identity-mismatch` to a CLI without `HERDR_SESSION` (forgectl#1187), and a TMPDIR-less drain failed every row instead of pausing (forgectl#1188). Notifications were not delivered on this desktop for any channel (osascript exit 0, herdr `shown:true`); Cameron parked that as forgectl#1189.
 
 ## Learnings
+
+- A reference's server source records how the session was chosen, not which server it is. The drain pins `HERDR_SESSION=default`, so its references said `herdr-named-session` and a plain CLI (`herdr-default-session`) refused them as a different server. The adapter now compares the session each side resolved: a default-session reference needs an adapter on the session named `default`, and a named-session reference, which does not record its name, is decided by the ServerID (it digests the session's socket path).
+
+- An environment problem that fails every launch after `git worktree add` must pause, not fail row by row: three rows failed in about 30 s in the live run, each leaving a worktree and a `worker/<name>` branch. `surface.ErrRunDir` and `surface.ErrSocketPathTooLong` now classify as `ErrLaunchConfig`, and `drain start` makes one run directory before spawning the child and exits 2 naming `TMPDIR` when it cannot (an unset TMPDIR on macOS is `/tmp`, a symlink privdir refuses).
 
 - T8.4 file-set security review (Opus, at 3cdc3fa5 = main with the drain plus the notifier): 0 Critical, 0 Important; the first supervised `drain start` on sjomba may proceed. Start it from a plain terminal, not a Claude Code session, so the drain does not inherit that session's environment (its own `gh` and herdr calls still see it; workers do not). Past the boundary: a worker can enqueue rows the drain then launches unattended. Fixed from its nits: the notifier gets only the row's own ledger row, so a release is never aimed at another launch's pane.
 
