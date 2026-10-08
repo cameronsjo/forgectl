@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.36.0](https://github.com/cameronsjo/forgectl/compare/v0.35.0...v0.36.0) (2026-10-08)
+
+
+### Features
+
+* **desk:** give the dashboard breathing room ([#1197](https://github.com/cameronsjo/forgectl/issues/1197)) ([43fe744](https://github.com/cameronsjo/forgectl/commit/43fe7444dd1e7765e5de8b16ed1bbd91acc83765))
+* **launch:** claude workers are full harnesses ([#1198](https://github.com/cameronsjo/forgectl/issues/1198)) ([2e46910](https://github.com/cameronsjo/forgectl/commit/2e469107d375d1977085887813de99ce18bc91bf))
+* **surface:** pi and codex drain workers ([#1199](https://github.com/cameronsjo/forgectl/issues/1199)) ([a144ad5](https://github.com/cameronsjo/forgectl/commit/a144ad5366479243f0dd5bd320cdd79bfafe8736))
+
 ## [0.35.0](https://github.com/cameronsjo/forgectl/compare/v0.34.1...v0.35.0) (2026-10-08)
 
 
