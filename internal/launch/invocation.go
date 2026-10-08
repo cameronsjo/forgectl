@@ -273,8 +273,9 @@ func withWorkerSettings(args []string) ([]string, error) {
 // in the launcher's environment is dropped: when the launcher is a Claude Code
 // session, that environment carries its user settings' env block and its own
 // handles (the cross-session messaging socket and token, the herdr and cmux
-// sockets, a computer-use token file), which a worker's Bash could use to
-// act as the coordinator. The profile's own env and forgectl's injected
+// sockets, a computer-use token file). Dropping them keeps a nested `claude`
+// from inheriting the launcher's identity; it is hygiene, not containment,
+// since a full-harness worker has SendMessage and herdr-bridge directly. The profile's own env and forgectl's injected
 // values still apply on top, so a variable a worker needs goes in config.
 //
 // SSH_AUTH_SOCK is a deliberate grant: the operator's remotes push over SSH,
@@ -353,7 +354,7 @@ type BuiltInvocation struct {
 	// SessionID is the --session-id the argv carries, or "".
 	SessionID string
 	// Worker reports that the request was a worker launch, so the worker
-	// floor, the claude isolation argv and the environment allowlist applied.
+	// floor, the worker settings and the environment allowlist applied.
 	// Only BuildInvocation sets it.
 	Worker bool
 	// Notes are posture notices for the operator, one per line: today, an

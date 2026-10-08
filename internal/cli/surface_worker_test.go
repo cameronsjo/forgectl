@@ -217,7 +217,7 @@ func TestWorkerLaunchRecordsTheSession(t *testing.T) {
 
 // TestBuildWorkerInvocationIsolates pins the call site that turns the worker
 // floor on: from surfaceInvocationRequest, as runWorkerLaunch builds it, a
-// worker gets the isolation argv, a session id, and none of the launcher's
+// worker gets the worker settings, a session id, and none of the launcher's
 // handles. Dropping req.Worker, or the call through it, turns this red.
 func TestBuildWorkerInvocationIsolates(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_MESSAGING_TOKEN", "coordinator-token")
@@ -248,7 +248,7 @@ func TestBuildWorkerInvocationIsolates(t *testing.T) {
 
 // TestWorkerLaunchRefusesANonWorkerBuild closes the bypass where the launch
 // path builds the invocation without marking it a worker: no posture floor,
-// no isolation argv, the launcher's whole environment. runWorkerSteps refuses
+// no worker settings, the launcher's whole environment. runWorkerSteps refuses
 // to start it, and records the failure.
 func TestWorkerLaunchRefusesANonWorkerBuild(t *testing.T) {
 	led := testWorkerLedger(t)

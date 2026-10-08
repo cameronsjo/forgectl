@@ -1,6 +1,6 @@
 # 0010. Worker `auto` permission mode: per-machine opt-in behind a hardening floor
 
-**Status: Accepted** (Decisions 1 to 3 superseded by the second 2026-10-07 amendment: `auto` is allowed for workers without the floor. The settings isolation is superseded by the 2026-10-08 amendment: workers are full harnesses.)
+**Status: Accepted** (Decisions 1 to 3 superseded by the second 2026-10-07 amendment: `auto` is allowed for workers without the floor. The 2026-10-08 amendment makes workers full harnesses: it supersedes the settings isolation, `--safe-mode`, the `SendMessage`/`RemoteTrigger` deny rules, and every earlier claim here that a merge, `gh api` or another outward command still prompts. The operator's own allow rules now decide that.)
 
 Date: 2026-10-05
 
