@@ -223,78 +223,28 @@ func applyWorkerFloor(p Profile) (Profile, error) {
 
 // workerClaudeSettings is the inline settings JSON every claude worker gets.
 //
+// A worker is a full harness (ADR-0010, 2026-10-08 amendment): it loads the
+// operator's own settings, plugins, skills, hooks, MCP servers, CLAUDE.md and
+// project memory, as an ordinary session would. These settings only add to
+// that.
+//
 // useAutoModeDuringPlan defaults to true: when auto mode is available, a
 // plan-mode session sends shell commands to the auto-mode classifier instead
 // of prompting. A worker runs where nobody watches the prompt, so the
 // classifier would be the only check on its shell (forgectl#1060). Off, a
 // plan-mode worker's commands prompt, and the prompt is a blocking screen the
 // coordinator reports.
-//
-// SendMessage reaches every other Claude session on the machine, the
-// coordinator included, and RemoteTrigger starts cloud sessions. A worker
-// following planted instructions could ask a session with more authority to
-// act for it, so both are denied.
-//
-// This is the only --settings a worker gets. Claude Code's handling of a
-// repeated --settings flag is unverified, so a second source (the sandbox
-// slice's settings) must merge its keys into this one value, not add a flag.
-const workerClaudeSettings = `{"useAutoModeDuringPlan":false,"permissions":{"deny":["SendMessage","RemoteTrigger"]}}`
+const workerClaudeSettings = `{"useAutoModeDuringPlan":false}`
 
 // workerClaudeEditSettings is workerClaudeSettings plus an allow list, for an
 // acceptEdits worker only. The list pre-approves the commands a worker runs on
-// every task, so it stops at a prompt only for the rest (atelier P2 autonomy
-// decision, 2026-10-07; ADR-0010). A plan, default or manual worker keeps
-// prompting for everything: the list would let a plan worker commit and push.
-// A merge or `gh api` typed as its own command still prompts. Two limits: a
-// prefix rule cannot see a push's target, so `git push origin HEAD:main`
-// matches `git push *` and only a repository ruleset refuses it; and four
-// listed commands can run any other command with no prompt, through code the
-// worker can write itself or through a flag: `go test` (test code, `-exec`),
-// `go build -toolexec`, `make`, and `git push --receive-pack`/`--exec`. That
-// is accepted under ADR-0010's "accidents, not adversaries" boundary.
+// every task (atelier P2 autonomy decision, 2026-10-07). The operator's own
+// allow rules load too, and usually reach further (ADR-0010, 2026-10-08).
 const workerClaudeEditSettings = `{"useAutoModeDuringPlan":false,"permissions":{` +
-	`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"],` +
-	`"deny":["SendMessage","RemoteTrigger"]}}`
+	`"allow":["Bash(go test *)","Bash(go build *)","Bash(make *)","Bash(git add *)","Bash(git commit *)","Bash(git push *)","Bash(gh pr create *)","Bash(gh pr view *)"]}}`
 
-// workerClaudeIsolation returns the argv that keeps everything but forgectl's own
-// settings out of a claude worker (ADR-0010, forgectl#1050). Measured on
-// Claude Code 2.1.289 with `claude -p` in a repo whose branch carried a
-// SessionStart hook, a .mcp.json server and a skill:
-//
-//   - `--setting-sources ""` loads no user, project or local settings: the
-//     branch's hooks do not run, and the operator's plugins, hooks and
-//     skills do not load. Only Claude Code's built-in plugins, skills and
-//     agents remain, and --settings still applies.
-//   - `--strict-mcp-config` with an empty `--mcp-config` loads no MCP server:
-//     not the branch's .mcp.json, not the operator's, and not a plugin's
-//     (a herdr-driving one included).
-//   - `--no-chrome` turns off Claude in Chrome. It is enabled from
-//     ~/.claude.json, not a settings layer, so the flags above leave it on: a
-//     live worker still listed the claude-in-chrome MCP server, which drives
-//     the operator's browser.
-//   - `--safe-mode` also stops the operator's project auto-memory loading
-//     (MEMORY.md under ~/.claude/projects), which a live worker loaded
-//     without it. Every session writes that memory and the operator's own
-//     later sessions read it.
-//     It keeps the --settings deny rules (measured), and sets
-//     CLAUDE_CODE_DISABLE_CLAUDE_MDS, which covers CLAUDE.md files that
-//     load lazily from subdirectories (read from the binary, not measured).
-//
-// CLAUDE.md: a live interactive worker with these flags loaded no CLAUDE.md
-// or AGENTS.md at any level, a branch-committed one included. `claude -p`
-// did load the cwd's CLAUDE.md under the same flags, so the result holds for
-// the interactive sessions workers run, not for print mode.
-func workerClaudeIsolation() []string {
-	return []string{
-		"--setting-sources", "",
-		"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
-		"--no-chrome",
-		"--safe-mode",
-	}
-}
-
-// withWorkerSettings inserts workerClaudeIsolation() and the worker settings
-// right after the posture's leading --permission-mode pair:
+// withWorkerSettings inserts the worker settings right after the posture's
+// leading --permission-mode pair:
 // workerClaudeEditSettings for an acceptEdits worker, workerClaudeSettings for
 // any other mode.
 //
@@ -311,7 +261,6 @@ func withWorkerSettings(args []string) ([]string, error) {
 	}
 	out := make([]string, 0, len(args)+8)
 	out = append(out, args[:2]...)
-	out = append(out, workerClaudeIsolation()...)
 	settings := workerClaudeSettings
 	if args[1] == "acceptEdits" {
 		settings = workerClaudeEditSettings

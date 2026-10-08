@@ -197,6 +197,8 @@ Panel: plan-reviewer, security-posture-reviewer (Opus), operability-reviewer, ca
 
 ## Deviations from the parent plans
 
+- **Workers are full harnesses (Cameron, 2026-10-08).** Claude workers drop the settings isolation (`--setting-sources ""`, `--strict-mcp-config`, `--no-chrome`, `--safe-mode`) and the `SendMessage`/`RemoteTrigger` deny rules, and load what an ordinary session loads: user settings and allow rules, plugins, skills, hooks, MCP servers, `CLAUDE.md`, project memory. The planned launcher-scoped `SendMessage` hook is dropped (nothing is denied, and herdr-bridge reaches every pane anyway). Kept: the permission-mode ceiling, the environment allowlist, `useAutoModeDuringPlan = false`, the `acceptEdits` allow list. ADR-0010 2026-10-08 amendment. pi and codex workers are next.
+
 - **`queue.json`, not `queue.jsonl`;** no heartbeat file; no auto-close at 60 minutes (see Alternatives declined).
 - **`enqueue` drops `--base` and `--source`.** The base is always GitHub's default head (forgectl#1061); `source` arrives with P3 intake.
 - **No `--harness codex` in P2** until forgectl#1092 isolates codex workers.

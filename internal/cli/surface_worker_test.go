@@ -236,7 +236,7 @@ func TestBuildWorkerInvocationIsolates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildWorkerInvocation: %v", err)
 	}
-	if !slices.Contains(built.Invocation.Args, "--setting-sources") || !slices.Contains(built.Invocation.Args, "--safe-mode") || built.SessionID != id {
+	if !slices.Contains(built.Invocation.Args, "--settings") || built.SessionID != id {
 		t.Fatalf("argv %q, session %q: not a worker build", built.Invocation.Args, built.SessionID)
 	}
 	for _, e := range built.Invocation.Env {
@@ -328,7 +328,7 @@ func TestInProcessLaunchKeepsTheWorkerFloor(t *testing.T) {
 				t.Fatalf("worker env kept the caller's %s", e)
 			}
 		}
-		if !slices.Contains(launched[0].Args, "--setting-sources") {
+		if !slices.Contains(launched[0].Args, "--settings") {
 			t.Fatalf("argv %q: not a worker build", launched[0].Args)
 		}
 		if attempt.row == nil || attempt.row.Stage != worker.StageLaunched || attempt.createdNothing() {
