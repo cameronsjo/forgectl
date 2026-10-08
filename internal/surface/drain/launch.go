@@ -22,7 +22,8 @@ const (
 	// ErrHerdrDown: herdr is not running or cannot be reached.
 	ErrHerdrDown
 	// ErrLaunchConfig: the launch configuration cannot build a worker (the
-	// posture, the harness binary, the profile). It fails the same way for
+	// posture, the harness binary, the profile), or the environment cannot
+	// give it a private run directory (TMPDIR). It fails the same way for
 	// every row, and only after the worktree exists.
 	ErrLaunchConfig
 	// ErrOther: anything else.
@@ -55,7 +56,8 @@ const (
 	// next drain start.
 	PauseGitHubAuth PauseKind = "github-auth"
 	// PauseLaunchConfig: the launch configuration cannot build a worker.
-	// Cleared only by the next drain start, after the operator fixes [launch].
+	// Cleared only by the next drain start, after the operator fixes [launch]
+	// or TMPDIR.
 	PauseLaunchConfig PauseKind = "launch-config"
 )
 
