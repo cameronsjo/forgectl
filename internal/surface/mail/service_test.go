@@ -307,3 +307,36 @@ func TestIdleNoticesSkipThePolicy(t *testing.T) {
 		t.Fatalf("%d notices, %d sent; want %d of each", len(entries), sent, want)
 	}
 }
+
+// A notice that fails part way gives back only its own watcher, so the next
+// idle does not notify the others twice.
+func TestIdleNoticeFailureRestoresOnlyTheFailedWatcher(t *testing.T) {
+	ad := &fakeAdapter{}
+	s, _ := newTestService(t, ad)
+	ctx := context.Background()
+	if err := s.Roster.Update("pi-1", func(w *Worker) error {
+		w.Watchers = []string{"coord", "bad name"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for turn := 0; turn < 2; turn++ {
+		if _, err := s.ApplyEvent(ctx, Event{Worker: "pi-1", State: StateIdle}); err == nil {
+			t.Fatalf("turn %d: want the malformed watcher's error", turn)
+		}
+		w, err := s.Roster.Get("pi-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(w.Watchers) != 1 || w.Watchers[0] != "bad name" {
+			t.Fatalf("turn %d: watchers %q, want only the failed one back", turn, w.Watchers)
+		}
+	}
+	entries, err := s.Messages(func(e Entry) bool { return e.Msg.From == SystemSender })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Msg.To != "coord" {
+		t.Fatalf("notices %+v, want one to coord", entries)
+	}
+}

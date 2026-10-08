@@ -183,6 +183,9 @@ func (s *Service) noticeLocked(tx *Tx, to, body string, now time.Time) error {
 	if to == SystemSender {
 		return nil
 	}
+	if err := ValidateName(to); err != nil {
+		return fmt.Errorf("forgectl notice: %w", err)
+	}
 	clean, err := CleanBody(body)
 	if err != nil {
 		return fmt.Errorf("forgectl notice: %w", err)
@@ -250,26 +253,36 @@ func (s *Service) ApplyEvent(ctx context.Context, ev Event) ([]string, error) {
 	}
 	if len(watchers) > 0 {
 		body := fmt.Sprintf("%s finished its turn and is idle.", ev.Worker)
-		err := s.Box.Locked(func(tx *Tx) error {
+		// Each notice is appended on its own, so a failure part way leaves
+		// the earlier ones queued: give back only the watchers whose notice
+		// did not land, or the next idle would notify the others twice.
+		var failed []string
+		var firstErr error
+		lockErr := s.Box.Locked(func(tx *Tx) error {
 			for _, name := range watchers {
 				if err := s.noticeLocked(tx, name, body, now); err != nil {
-					return err
+					failed = append(failed, name)
+					if firstErr == nil {
+						firstErr = err
+					}
 				}
 			}
 			return nil
 		})
-		if err != nil {
-			// Give the subscriptions back, so the next idle tries again.
+		if lockErr != nil {
+			failed, firstErr = watchers, lockErr
+		}
+		if len(failed) > 0 {
 			// A Watch that ran in between may have re-added one already.
 			_ = s.Roster.Update(ev.Worker, func(w *Worker) error {
-				for _, name := range watchers {
+				for _, name := range failed {
 					if !slices.Contains(w.Watchers, name) {
 						w.Watchers = append(w.Watchers, name)
 					}
 				}
 				return nil
 			})
-			return nil, fmt.Errorf("queue idle notices: %w", err)
+			return nil, fmt.Errorf("queue idle notices: %w", firstErr)
 		}
 	}
 	if ev.State == StateIdle {
