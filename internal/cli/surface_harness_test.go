@@ -182,12 +182,15 @@ func TestDrainSlotsHoldDoesNotBlockLaterRows(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	enqueueAt(t, q, "claude-row-2", "/repo/c2", drainT0)
 	d.tick(t.Context())
 	if strings.Join(f.launched, ",") != "pi-row,codex-row" || *calls != 1 {
 		t.Fatalf("launched %v after %d checks; want pi-row and codex-row launched behind the held claude-row, one check", f.launched, *calls)
 	}
-	if r := rowNamed(t, q, "claude-row"); r.State != worker.QueueQueued || r.Attempts != 0 {
-		t.Fatalf("claude-row %+v; want held in queued with no attempt", r)
+	for _, n := range []string{"claude-row", "claude-row-2"} {
+		if r := rowNamed(t, q, n); r.State != worker.QueueQueued || r.Attempts != 0 || r.LaunchID != "" {
+			t.Fatalf("%s %+v; want queued, unclaimed, no attempt", n, r)
+		}
 	}
 }
 

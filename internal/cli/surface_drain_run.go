@@ -434,6 +434,9 @@ func (d *drainer) claimAndLaunch(ctx context.Context, rows []worker.QueueRow, le
 			// this tick.
 			if hold, why := d.slotsHold(ctx, claimed, started+1); hold {
 				d.unclaim(claimed, why)
+				if ctx.Err() != nil {
+					return // a stop cut the check short: launch nothing more
+				}
 				claudeHeld = true
 				continue
 			}
