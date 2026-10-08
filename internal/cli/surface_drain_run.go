@@ -402,9 +402,16 @@ func (d *drainer) claimAndLaunch(ctx context.Context, rows []worker.QueueRow, le
 	} else {
 		d.resume(drain.PauseHerdr)
 	}
+	// claudeHeld is set once claude-slots holds a claude row this tick: later
+	// claude rows are skipped unclaimed, and codex and pi rows, which are not
+	// claude sessions, still launch.
+	claudeHeld := false
 	for _, q := range plan {
 		if d.pauses.Paused() || d.stopping() {
 			return
+		}
+		if claudeHeld && q.Launch().Harness == "claude" {
+			continue
 		}
 		id, err := d.io.launchID()
 		if err != nil {
@@ -423,10 +430,12 @@ func (d *drainer) claimAndLaunch(ctx context.Context, rows []worker.QueueRow, le
 		// claude-slots caps claude sessions; a codex or pi worker is not one.
 		if checkErr == nil && claimed.Launch().Harness == "claude" {
 			// The machine's session cap, checked as late as possible: a held
-			// row goes back to queued, and nothing more is claimed this tick.
+			// row goes back to queued, and no more claude rows are claimed
+			// this tick.
 			if hold, why := d.slotsHold(ctx, claimed, started+1); hold {
 				d.unclaim(claimed, why)
-				return
+				claudeHeld = true
+				continue
 			}
 		}
 		d.event(drain.Event{Kind: drain.EventState, Name: claimed.Name, Repo: claimed.Repo, State: string(claimed.State), Attempt: claimed.Attempts})

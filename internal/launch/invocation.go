@@ -289,7 +289,7 @@ func withWorkerSettings(args []string) ([]string, error) {
 var workerEnvKeys = []string{
 	"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "COLORTERM",
 	"LANG", "TZ", "TMPDIR", "CLAUDE_CONFIG_DIR", "SSH_AUTH_SOCK",
-	"NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "CODEX_HOME", "XDG_CONFIG_HOME",
+	"NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "CODEX_HOME", "PI_CODING_AGENT_DIR", "XDG_CONFIG_HOME",
 }
 
 // workerBaseEnv keeps the entries of env named in workerEnvKeys, and the

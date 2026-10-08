@@ -171,6 +171,26 @@ func TestDrainSlotsSkipsNonClaudeRows(t *testing.T) {
 	}
 }
 
+// TestDrainSlotsHoldDoesNotBlockLaterRows: a held claude row ahead of a pi
+// and a codex row does not stop them; a second claude row behind the hold is
+// skipped unclaimed, without another check.
+func TestDrainSlotsHoldDoesNotBlockLaterRows(t *testing.T) {
+	f, d, q, calls := slotsDrain(t, drain.SlotsCheck{Exit: 1, Reason: "3 of 3 claude sessions live"})
+	enqueueAt(t, q, "claude-row", "/repo/c", drainT0.Add(-3*time.Minute))
+	for i, h := range []string{"pi", "codex"} {
+		if _, _, err := q.EnqueueLaunch(h+"-row", "/repo/"+h, "brief "+h, "", worker.QueueLaunch{Harness: h}, drainT0.Add(time.Duration(i-2)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d.tick(t.Context())
+	if strings.Join(f.launched, ",") != "pi-row,codex-row" || *calls != 1 {
+		t.Fatalf("launched %v after %d checks; want pi-row and codex-row launched behind the held claude-row, one check", f.launched, *calls)
+	}
+	if r := rowNamed(t, q, "claude-row"); r.State != worker.QueueQueued || r.Attempts != 0 {
+		t.Fatalf("claude-row %+v; want held in queued with no attempt", r)
+	}
+}
+
 // TestCheckClaimedRefusesABadHarness: the drain re-checks a stored row's
 // harness and refuses a profile on a row that is not claude.
 func TestCheckClaimedRefusesABadHarness(t *testing.T) {
