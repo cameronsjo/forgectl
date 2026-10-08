@@ -289,6 +289,13 @@ func TestLaunch_InlineDispatch(t *testing.T) {
 		t.Fatalf("write fake claude: %v", err)
 	}
 	t.Setenv("FORGECTL_CLAUDE_BIN", claudeBin)
+	// launchInline runs the symlink-resolved binary, and on macOS t.TempDir()
+	// sits under /var, a link to /private/var, so the argv carries the
+	// resolved spelling.
+	wantClaude, err := filepath.EvalSymlinks(claudeBin)
+	if err != nil {
+		t.Fatalf("resolve fake claude: %v", err)
+	}
 
 	fake := successfulLaunchRunner()
 	c := New(fake, WithSessionsDir(os.TempDir()), WithTmuxSession("forgectl"))
@@ -306,7 +313,7 @@ func TestLaunch_InlineDispatch(t *testing.T) {
 	if call.Name != "tmux" || call.Args[0] != "new-window" {
 		t.Fatalf("expected tmux new-window; got %+v", call)
 	}
-	if !contains(call.Args, mustWindowName(t, sess.Ref)) || !contains(call.Args, ws) || !contains(call.Args, claudeBin) {
+	if !contains(call.Args, mustWindowName(t, sess.Ref)) || !contains(call.Args, ws) || !contains(call.Args, wantClaude) {
 		t.Errorf("tmux argv missing window/workspace/claude: %v", call.Args)
 	}
 	if !contains(call.Args, "-p") || !contains(call.Args, remoteReviewPrompt("github.com", sess.Ref)) {
